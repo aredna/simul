@@ -2,7 +2,7 @@
   "name": "simul",
   "version": "0.1.0",
   "private": true,
-  "description": "A Chrome extension built with the BMAD Method.",
+  "description": "Compare a web page with an on-device Japanese or English translation in Chrome.",
   "type": "module",
   "packageManager": "npm@12.0.1",
   "engines": {
@@ -12,12 +12,14 @@
   "scripts": {
     "dev": "wxt",
     "build": "wxt build --browser chrome",
+    "artifact:sync": "node tools/extension-artifact.mjs sync",
+    "artifact:check": "node tools/extension-artifact.mjs check",
     "zip": "wxt zip --browser chrome",
     "postinstall": "wxt prepare",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "check": "npm run typecheck && npm test && npm run build"
+    "check": "npm run typecheck && npm test && npm run artifact:check"
   },
   "devDependencies": {
     "linkedom": "0.18.13",

@@ -6,6 +6,13 @@ coverage/
 *.crx
 *.zip
 
+# Track only the canonical, validated local-install release under dist.
+dist/
+!dist/
+dist/*
+!dist/chrome-unpacked/
+!dist/chrome-unpacked/**
+
 # Local environment and editor files
 .env
 .env.*

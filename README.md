@@ -1,98 +1,90 @@
 # Simul
 
-Simul is a Chrome Manifest V3 extension for comparing a web page with an
-on-device Japanese or English translation in Chrome's side panel. It is also a
-small project for learning the [BMAD Method](https://docs.bmad-method.org/)
-while shipping quickly.
+Simul is a Chrome extension that shows a safe, read-only translation of the
+current page beside the original. Translation runs on-device with Chrome's
+built-in Translator API, initially for Japanese and English.
 
-## Foundation
+## Install in Chrome
 
-- [WXT](https://wxt.dev/) 0.20.27 with vanilla TypeScript
-- Node.js 24 LTS and npm
-- Chrome Manifest V3 with narrowly scoped `activeTab`, `scripting`, and
-  `sidePanel` permissions and no host permissions
-- Vitest unit tests
-- BMAD Method 6.10.0 with 46 Codex skills in `.agents/skills/`
-- GitHub Actions checks for type safety, tests, and a production build
-- Weekly Dependabot checks for npm and GitHub Actions releases
+You need desktop Chrome 138 or newer. You do not need Node.js, npm, or a build
+tool to install Simul.
 
-## Get started
+1. Download or clone this repository and extract it if necessary.
+2. Open `chrome://extensions` in Chrome.
+3. Turn on **Developer mode** in the upper-right corner.
+4. Choose **Load unpacked**.
+5. Select the repository's `dist/chrome-unpacked` directory.
 
-```sh
-nvm use
-npm install
-npm run check
-```
+Chrome should display Simul in the extension list. Keep the downloaded
+directory in place while the extension is installed; Chrome loads the local
+files from that directory. This Developer mode installation does not update
+automatically.
 
-If you do not use `nvm`, install Node 24 and confirm `node --version` reports
-`v24.x` before installing dependencies.
+## Use Simul
 
-For WXT's live development runner:
+1. Open a regular HTTP or HTTPS page containing Japanese or English text.
+2. Select the Simul toolbar icon, then **Open translation panel**.
+3. Choose Japanese → English or English → Japanese.
+4. Select **Translate page**. Chrome may download an on-device language pack
+   the first time you use a language pair.
 
-```sh
-npm run dev
-```
+The original tab is not modified. Simul renders an inert snapshot in Chrome's
+side panel, where you can refresh the snapshot, cancel translation, or retry
+individual failures. Chrome controls whether side panels appear on the left or
+right.
 
-For a manual Chrome load:
+## Privacy and permissions
 
-```sh
-npm run build
-```
+Page text is translated on-device. Simul has no analytics, remote translation
+fallback, API key, persistent content script, or host permissions. It requests
+only:
 
-Then open `chrome://extensions`, enable Developer mode, choose **Load unpacked**,
-and select `.output/chrome-mv3`.
+- `activeTab` for temporary access after you select the toolbar action;
+- `scripting` to read a bounded snapshot from that active page; and
+- `sidePanel` to show the translated companion.
 
-On a regular HTTP or HTTPS page, select the Simul toolbar action and choose
-**Open translation panel**. Chrome 138 or newer is required. See
-[the translation companion guide](docs/translation-companion.md) for privacy,
-support, limitations, and manual verification.
+Original remote images displayed for context may reload from their existing
+source host. They are not sent to a translation service.
 
-## BMAD workflow
+## Current limitations
 
-Open a new Codex chat in this repository and invoke:
+- Chrome's Translator API and the required language pack must be available on
+  the device.
+- The companion is an ordered visual approximation, not a live page clone.
+- Image pixels are unchanged. Only available image labels and captions are
+  translated; OCR is not included.
+- Embedded cross-origin frames, canvas, video, forms, live mirroring, scroll
+  synchronization, and automatic form filling are not included.
 
-```text
-$bmad-help
-```
+See [the translation companion guide](docs/translation-companion.md) for the
+full privacy model, limitations, and troubleshooting context.
 
-For this short project, `$bmad-quick-dev` is the fastest path once the extension
-idea is clear. To learn the full BMAD process, use fresh chats for this sequence:
+## Troubleshooting
 
-1. `$bmad-product-brief`
-2. `$bmad-prd`
-3. `$bmad-ux`
-4. `$bmad-create-architecture`
-5. `$bmad-create-epics-and-stories`
-6. `$bmad-check-implementation-readiness`
-7. `$bmad-sprint-planning`
-8. `$bmad-create-story`
-9. `$bmad-dev-story`
-10. `$bmad-code-review`
+- If Chrome says the manifest is missing, select `dist/chrome-unpacked`
+  itself—not the repository root or its parent `dist` directory.
+- If translation is unavailable, update desktop Chrome and confirm it is at
+  least version 138. Availability can also depend on the device and language
+  pack state.
+- If you replace the repository with a newer download, return to
+  `chrome://extensions` and select Simul's **Reload** button.
+- Chrome blocks extensions from reading browser settings pages, the Chrome Web
+  Store, and other restricted URLs. Open Simul on a regular website instead.
 
-Generated planning and implementation artifacts belong in `_bmad-output/`.
-See [docs/BMAD.md](docs/BMAD.md) for installation and maintenance details.
+## Contributing
 
-## Commands
+Contributor tooling requires Node.js 24 LTS and npm 12. Install dependencies
+with `npm ci`, then use:
 
 | Command | Purpose |
 | --- | --- |
-| `npm run dev` | Start WXT's Chrome development runner |
-| `npm run typecheck` | Type-check the project |
-| `npm test` | Run unit tests once |
-| `npm run test:watch` | Run unit tests in watch mode |
-| `npm run build` | Build the unpacked Chrome extension |
-| `npm run zip` | Create a Chrome Web Store archive |
-| `npm run check` | Run type-checking, tests, and a production build |
+| `npm run dev` | Start the WXT development runner |
+| `npm run typecheck` | Type-check the source |
+| `npm test` | Run automated tests |
+| `npm run build` | Build transient output under `.output/` |
+| `npm run artifact:check` | Build temporarily and verify the committed release byte-for-byte |
+| `npm run artifact:sync` | Intentionally refresh `dist/chrome-unpacked/` from a validated build |
+| `npm run check` | Run all required quality and release-artifact checks |
 
-## Repository layout
-
-```text
-.agents/                    BMAD-generated Codex skills
-.github/workflows/          Continuous integration
-_bmad/                      BMAD framework and configuration
-_bmad-output/               BMAD planning and delivery artifacts
-docs/                       Long-lived project knowledge
-entrypoints/                WXT browser entrypoints
-lib/                        Browser-independent application logic
-tests/                      Unit tests
-```
+The canonical installable directory is generated. Change source files first,
+then run `npm run artifact:sync`; do not edit release files by hand.

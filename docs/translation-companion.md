@@ -12,6 +12,11 @@ available for scrolling and comparison.
 - Japanese → English or English → Japanese. Use **Swap languages** to reverse
   the direction.
 
+For a no-build installation, download and extract the repository, open
+`chrome://extensions`, enable **Developer mode**, choose **Load unpacked**, and
+select `dist/chrome-unpacked`. Node.js and npm are not required for product
+installation.
+
 Select the Simul toolbar icon, then **Open translation panel**. The panel reads
 a bounded snapshot and checks whether Chrome supports the selected language
 pair. Select **Translate page** to create the local translation session. On
@@ -90,8 +95,8 @@ only after explicit approval for remote image processing and credentials.
 
 ## Manual verification
 
-After `npm run build`, load `.output/chrome-mv3` as an unpacked extension and
-verify:
+Load the committed `dist/chrome-unpacked` directory as an unpacked extension
+and verify:
 
 1. Japanese → English and English → Japanese on regular text pages.
 2. First-use language download progress, cancel, partial failure, and retry.
@@ -99,5 +104,19 @@ verify:
 4. Restricted, stale, empty, image, and embedded-frame pages.
 5. The source DOM and form values remain unchanged.
 6. Left-side guidance (Chrome 140+) and normal operation on either side.
-7. `.output/chrome-mv3/manifest.json` has no `host_permissions` and contains
+7. `dist/chrome-unpacked/manifest.json` has no `host_permissions` and contains
    only `activeTab`, `scripting`, and `sidePanel` permissions.
+
+## Release artifact maintenance
+
+`dist/chrome-unpacked/` is the canonical, checked-in local-install release. It
+is generated from source and must not be edited directly. Contributors use
+`npm run artifact:sync` to build in a temporary directory, validate the output,
+and intentionally replace only that guarded directory. `npm run
+artifact:check` performs the same temporary build and security validation, then
+compares every path and byte without changing the committed release.
+
+Validation rejects symlinks, source maps, private configuration, credential or
+key material, remote executable references, missing assets, an invalid Chrome
+version, and any permission outside the approved manifest boundary. Transient
+WXT output remains under `.output/` and is not an installation artifact.

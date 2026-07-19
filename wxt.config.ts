@@ -1,6 +1,7 @@
 import { defineConfig } from 'wxt';
 
 export default defineConfig({
+  outDir: process.env.SIMUL_WXT_OUT_DIR || '.output',
   manifest: {
     name: 'Simul',
     description:

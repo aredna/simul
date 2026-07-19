@@ -33,18 +33,12 @@ jobs:
       - name: Install dependencies
         run: npm ci
 
-      - name: Type-check
-        run: npm run typecheck
+      - name: Verify source and committed Chrome release
+        run: npm run check
 
-      - name: Test
-        run: npm test
-
-      - name: Build Chrome extension
-        run: npm run build
-
-      - name: Upload unpacked extension
+      - name: Upload verified unpacked extension
         uses: actions/upload-artifact@v7
         with:
-          name: simul-chrome-mv3
-          path: .output/chrome-mv3
+          name: simul-chrome-unpacked
+          path: dist/chrome-unpacked
           if-no-files-found: error
