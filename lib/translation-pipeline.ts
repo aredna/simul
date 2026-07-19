@@ -190,11 +190,11 @@ async function runTranslation(
     acceptedCharacters += countCodePoints(group.source);
 
     try {
-      const translated = await translateInChunks(
-        group.source,
+      const translated = await translateWithSession(
         session,
-        maxInputCharacters,
+        group.source,
         options.signal,
+        maxInputCharacters,
       );
       if (!translated.trim()) {
         throw new Error('Chrome returned an empty translation.');
@@ -215,13 +215,24 @@ async function runTranslation(
   return finishResult(result);
 }
 
-async function translateInChunks(
-  source: string,
+/**
+ * Translate one logical value without sending a request over the session's
+ * advertised input quota. The configured character bound remains a first
+ * pass for sessions that do not expose quota measurement.
+ */
+export async function translateWithSession(
   session: TranslationSession,
-  maxInputCharacters: number,
+  source: string,
   signal?: AbortSignal,
+  maxInputCharacters = DEFAULT_MAX_INPUT_CHARACTERS,
 ): Promise<string> {
-  const configuredChunks = splitText(source, maxInputCharacters);
+  const configuredChunks = splitText(
+    source,
+    finitePositiveInteger(
+      maxInputCharacters,
+      DEFAULT_MAX_INPUT_CHARACTERS,
+    ),
+  );
   const chunks: string[] = [];
   for (const configuredChunk of configuredChunks) {
     chunks.push(

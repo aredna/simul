@@ -134,14 +134,32 @@ describe('ChromeTranslatorProvider', () => {
     });
   });
 
-  it('rejects same-language pairs before invoking Chrome', async () => {
+  it('treats same-language pairs as a local no-op', async () => {
     const api = createApi();
     const provider = new ChromeTranslatorProvider(api);
 
     await expect(
       provider.availability({ sourceLanguage: 'en', targetLanguage: 'en' }),
-    ).rejects.toBeInstanceOf(TranslationProviderError);
+    ).resolves.toBe('available');
+    const session = await provider.createSession({
+      sourceLanguage: 'en',
+      targetLanguage: 'en',
+    });
+    await expect(session.translate('unchanged')).resolves.toBe('unchanged');
     expect(api.availability).not.toHaveBeenCalled();
+    expect(api.create).not.toHaveBeenCalled();
+  });
+
+  it('uses Chrome\'s documented legacy Hebrew code at the API boundary', async () => {
+    const api = createApi();
+    const provider = new ChromeTranslatorProvider(api);
+
+    await provider.availability({ sourceLanguage: 'he', targetLanguage: 'en' });
+
+    expect(api.availability).toHaveBeenCalledWith({
+      sourceLanguage: 'iw',
+      targetLanguage: 'en',
+    });
   });
 });
 

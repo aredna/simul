@@ -4,117 +4,122 @@
     <meta charset="UTF-8" />
     <meta name="viewport" content="width=device-width, initial-scale=1.0" />
     <meta name="color-scheme" content="light dark" />
-    <title>Simul translation companion</title>
+    <title>Translation companion</title>
     <link rel="stylesheet" href="./style.css" />
   </head>
   <body>
-    <header class="app-header">
-      <div>
-        <p class="eyebrow">Translation companion</p>
-        <h1>Simul</h1>
+    <nav id="compact-toolbar" class="compact-toolbar" aria-label="Translation companion controls">
+      <button
+        id="toggle-settings"
+        class="toolbar-button"
+        type="button"
+        aria-label="Open translation options"
+        aria-expanded="false"
+        title="Translation options"
+      >
+        ⚙
+      </button>
+      <span id="status-dot" class="status-dot" title="Reading the source page"></span>
+      <button
+        id="open-popout"
+        class="toolbar-button"
+        type="button"
+        aria-label="Open detached companion window"
+        title="Open detached window"
+      >
+        ↗
+      </button>
+    </nav>
+
+    <section id="control-overlay" class="control-overlay" hidden aria-label="Translation options">
+      <div class="overlay-heading">
+        <strong>Options</strong>
+        <button id="close-settings" class="quiet-button" type="button" aria-label="Close options">×</button>
       </div>
-      <span class="local-badge" title="Page text is translated on this device">
-        On-device translation
-      </span>
-    </header>
+
+      <div class="language-row">
+        <label>
+          <span>From</span>
+          <select id="source-language"></select>
+        </label>
+        <button id="swap-languages" class="icon-button" type="button" aria-label="Swap languages" title="Swap languages">⇄</button>
+        <label>
+          <span>To</span>
+          <select id="target-language"></select>
+        </label>
+      </div>
+      <p id="detected-language" class="microcopy"></p>
+
+      <div class="settings-grid">
+        <label>
+          <span>Automatic translation</span>
+          <select id="auto-translate-mode">
+            <option value="off">Off</option>
+            <option value="site">This site</option>
+            <option value="all">All sites</option>
+          </select>
+        </label>
+        <label>
+          <span>Size</span>
+          <select id="mirror-display-mode">
+            <option value="fit">Fit width</option>
+            <option value="actual">1:1 size</option>
+            <option value="custom">Custom zoom</option>
+          </select>
+        </label>
+        <label>
+          <span>Translated text</span>
+          <select id="text-layout-mode">
+            <option value="adaptive">Let boxes grow</option>
+            <option value="faithful">Keep geometry</option>
+          </select>
+        </label>
+        <label class="check-label">
+          <input id="sync-scroll" type="checkbox" />
+          <span>Follow source scrolling</span>
+        </label>
+      </div>
+
+      <div class="zoom-row" aria-label="Mirror zoom">
+        <button id="zoom-out" type="button" aria-label="Zoom out">−</button>
+        <input id="zoom" type="range" min="25" max="300" step="5" value="100" />
+        <output id="zoom-value" for="zoom">100%</output>
+        <button id="zoom-in" type="button" aria-label="Zoom in">+</button>
+      </div>
+
+      <div class="action-row">
+        <button id="translate" class="primary" type="button" disabled>Translate page</button>
+        <button id="refresh" type="button">Rebuild mirror</button>
+        <button id="cancel" class="danger" type="button" hidden>Cancel</button>
+      </div>
+
+      <details class="composer">
+        <summary>Write a reply in the website language</summary>
+        <label for="composer-input">Text to translate back</label>
+        <textarea id="composer-input" rows="3" maxlength="5000" placeholder="Type here…"></textarea>
+        <div class="composer-actions">
+          <button id="translate-composer" type="button">Translate reply</button>
+          <button id="copy-composer" type="button" disabled>Copy result</button>
+        </div>
+        <textarea id="composer-output" rows="3" readonly aria-label="Translated reply"></textarea>
+      </details>
+
+      <div id="progress-region" class="progress-region" hidden>
+        <label id="progress-label" for="progress">Preparing translation…</label>
+        <progress id="progress" max="1" value="0"></progress>
+      </div>
+      <p id="status" class="status" role="status" aria-live="polite">Reading the source page…</p>
+      <p id="capture-notes" class="microcopy" hidden></p>
+      <p id="placement-guidance" class="microcopy" hidden>
+        Chrome places native side panels globally. Use the ↗ button for a detached companion window.
+      </p>
+    </section>
 
     <main>
-      <section class="translator-controls" aria-labelledby="language-heading">
-        <h2 id="language-heading" class="visually-hidden">Languages</h2>
-        <div class="language-row">
-          <label>
-            <span>From</span>
-            <select id="source-language">
-              <option value="ja" selected>Japanese</option>
-              <option value="en">English</option>
-            </select>
-          </label>
-
-          <button
-            id="swap-languages"
-            class="icon-button"
-            type="button"
-            aria-label="Swap source and target languages"
-            title="Swap languages"
-          >
-            ⇄
-          </button>
-
-          <label>
-            <span>To</span>
-            <select id="target-language">
-              <option value="en" selected>English</option>
-              <option value="ja">Japanese</option>
-            </select>
-          </label>
-        </div>
-
-        <div class="preference-row">
-          <label>
-            <span>Automatic translation</span>
-            <select id="auto-translate-mode">
-              <option value="off" selected>Off</option>
-              <option value="site">This site</option>
-              <option value="all">All sites</option>
-            </select>
-          </label>
-
-          <label>
-            <span>Companion size</span>
-            <select id="mirror-display-mode">
-              <option value="fit" selected>Fit width</option>
-              <option value="actual">1:1 size</option>
-            </select>
-          </label>
-        </div>
-
-        <div class="action-row">
-          <button id="translate" class="primary" type="button" disabled>
-            Translate page
-          </button>
-          <button id="refresh" class="secondary" type="button">
-            Refresh snapshot
-          </button>
-          <button id="cancel" class="danger" type="button" hidden>
-            Cancel
-          </button>
-        </div>
-
-        <div id="progress-region" class="progress-region" hidden>
-          <label id="progress-label" for="progress">Preparing translation…</label>
-          <progress id="progress" max="1" value="0"></progress>
-        </div>
-
-        <p id="status" class="status" role="status" aria-live="polite">
-          Reading the active page…
-        </p>
-      </section>
-
-      <aside id="placement-guidance" class="notice" hidden>
-        Chrome is showing side panels on the left. Simul works here; to put it
-        on the right, open Chrome Settings → Appearance → Side panel and select
-        “Show on right.”
-      </aside>
-
-      <section id="snapshot" class="snapshot" aria-label="Page translation">
-        <div class="empty-state">
-          <p>Preparing a safe, read-only visual snapshot…</p>
-        </div>
+      <section id="snapshot" class="snapshot" aria-label="Translated page mirror">
+        <div class="empty-state"><p>Preparing the live read-only mirror…</p></div>
       </section>
     </main>
-
-    <footer>
-      <p>
-        Read-only, high-fidelity approximation. The original page is never
-        modified. Image pixels are unchanged; available labels and captions
-        are translated. Original remote images and safe backgrounds may reload
-        from their existing source host.
-      </p>
-      <p class="placement-note">
-        Side-panel placement is controlled globally by Chrome. A separate
-        companion-window mode is planned for later.
-      </p>
-    </footer>
 
     <script type="module" src="./main.ts"></script>
   </body>

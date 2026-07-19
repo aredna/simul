@@ -1,6 +1,7 @@
 import { afterEach, describe, expect, it, vi } from 'vitest';
 import { parseHTML } from 'linkedom';
 
+import type { LivePageDelta } from '../lib/live-page-mirror';
 import {
   capturePageSnapshot,
   parsePageSnapshot,
@@ -10,9 +11,14 @@ import {
 } from '../lib/page-snapshot';
 import type { TranslatedSnapshot } from '../lib/translation-pipeline';
 import {
+  applyLivePageDelta,
+  applyMirrorTextLayout,
   computeMirrorExtent,
   computeMirrorScale,
+  countVisualMirrorTranslationFields,
   createVisualMirror,
+  resetVisualMirrorText,
+  translateVisualMirror,
 } from '../lib/visual-renderer';
 
 afterEach(() => {
@@ -106,13 +112,75 @@ describe('visual snapshot boundary', () => {
       'textarea',
       'select',
       'input',
-      'button',
-      'button',
+      'input',
+      'input',
       'input',
       'input',
     ]);
     expect(shells.every((node) => node.children.length === 0)).toBe(true);
     expect(shells.every((node) => node.attributes === undefined)).toBe(true);
+  });
+
+  it('retains public button labels in inert shells', () => {
+    installCapturePage(`
+      <main>
+        <button>Sign in</button>
+        <span role="button">Related articles</span>
+        <button aria-label="Open menu"><svg></svg></button>
+        <span role="button" title="Save article"><svg></svg></span>
+      </main>
+    `);
+
+    const snapshot = capturePageSnapshot();
+    const shells = collectElements(snapshot.visual?.root).filter(
+      (node) => node.controlShell === 'button',
+    );
+
+    expect(snapshot.items.some((item) => item.kind === 'text' && item.text.includes('Sign in'))).toBe(true);
+    expect(JSON.stringify(shells)).toContain('Sign in');
+    expect(JSON.stringify(shells)).toContain('Related articles');
+    expect(JSON.stringify(shells)).toContain('Open menu');
+    expect(JSON.stringify(shells)).toContain('Save article');
+  });
+
+  it('does not confuse accessibility-only state with visual hiding', () => {
+    installCapturePage(
+      '<main><aside aria-hidden="true">Visible decorative rail</aside><div inert>Visible inert backdrop</div></main>',
+    );
+
+    const snapshot = capturePageSnapshot();
+
+    expect(JSON.stringify(snapshot)).toContain('Visible decorative rail');
+    expect(JSON.stringify(snapshot)).toContain('Visible inert backdrop');
+  });
+
+  it('captures accessible content from an open shadow tree', () => {
+    const { document } = installCapturePage('<main><reader-rail></reader-rail></main>');
+    const host = document.querySelector('reader-rail');
+    if (!host || typeof host.attachShadow !== 'function') {
+      throw new Error('Expected open shadow-root support in the test DOM.');
+    }
+    host.attachShadow({ mode: 'open' }).innerHTML = '<aside><p>Late related rail</p></aside>';
+
+    const snapshot = capturePageSnapshot();
+
+    expect(JSON.stringify(snapshot)).toContain('Late related rail');
+  });
+
+  it('retains late side rails beyond the former shallow visual bound', () => {
+    const longCenter = Array.from(
+      { length: 1_700 },
+      (_value, index) => `<div>Center item ${index}</div>`,
+    ).join('');
+    installCapturePage(
+      `<main>${longCenter}</main><aside>Sign in rail</aside><aside>Related articles rail</aside>`,
+    );
+
+    const snapshot = capturePageSnapshot();
+    const visual = JSON.stringify(snapshot.visual);
+
+    expect(visual).toContain('Sign in rail');
+    expect(visual).toContain('Related articles rail');
   });
 
   it('enforces aggregate visual style and attribute budgets', () => {
@@ -211,15 +279,115 @@ describe('visual mirror renderer', () => {
     expect(image?.loading).toBe('lazy');
     expect(image?.referrerPolicy).toBe('no-referrer');
 
-    const input = mirror?.querySelector('input');
+    const input = mirror?.querySelector<HTMLElement>('[data-simul-control-shell="input"]');
     expect(input?.getAttribute('aria-disabled')).toBe('true');
     expect(input?.tabIndex).toBe(-1);
-    expect(input?.value).toBe('');
     expect(input?.textContent).toBe('');
+    expect(mirror?.querySelector('input')).toBeNull();
     expect(mirror?.querySelector('script')).toBeNull();
     expect(mirror?.querySelector('a')).toBeNull();
     expect(mirror?.outerHTML).not.toContain('typed parser secret');
     expect(mirror?.outerHTML).not.toContain('onclick');
+  });
+
+  it('translates and resets bound bootstrap text and safe image alt fields', async () => {
+    const snapshot = buildParsedVisualSnapshot();
+    const { document } = parseHTML('<html><body></body></html>');
+    const mirror = createVisualMirror(snapshot, undefined, document);
+    if (!mirror) throw new Error('Expected a visual mirror.');
+    expect(countVisualMirrorTranslationFields(mirror)).toBe(2);
+    document.body.append(mirror);
+    const sources: string[] = [];
+
+    const result = await translateVisualMirror(mirror, async (source) => {
+      sources.push(source);
+      return `[${source}]`;
+    });
+
+    expect(result).toEqual({ completed: 2, failed: 0, total: 2 });
+    expect(sources).toEqual(['こんにちは', '山']);
+    expect(mirror.textContent).toContain('[こんにちは]');
+    expect(mirror.querySelector('img')?.getAttribute('alt')).toBe('[山]');
+
+    resetVisualMirrorText(mirror);
+
+    expect(mirror.textContent).toContain('こんにちは');
+    expect(mirror.querySelector('img')?.getAttribute('alt')).toBe('山');
+  });
+
+  it('commits a translated live root atomically and preserves the old root on abort', async () => {
+    const { document, window } = parseHTML('<html><body></body></html>');
+    vi.stubGlobal('HTMLImageElement', window.HTMLImageElement);
+    const snapshot = buildLiveRootSnapshot();
+    const mirror = createVisualMirror(snapshot, undefined, document);
+    if (!mirror) throw new Error('Expected a visual mirror.');
+    document.body.append(mirror);
+    const delta: LivePageDelta = {
+      version: 1,
+      generation: 1,
+      sequence: 1,
+      url: 'https://example.com/',
+      documentWidth: 800,
+      documentHeight: 600,
+      desynchronized: false,
+      replacements: [
+        {
+          targetId: 'n1',
+          node: {
+            kind: 'element',
+            nodeId: 'n1',
+            tag: 'main',
+            style: { display: 'block' },
+            children: [
+              { kind: 'text', nodeId: 'n3', text: 'New live copy' },
+            ],
+          },
+        },
+      ],
+    };
+    const abortController = new AbortController();
+    let announceTranslation!: () => void;
+    let releaseTranslation!: (value: string) => void;
+    const translationStarted = new Promise<void>((resolve) => {
+      announceTranslation = resolve;
+    });
+    const blockedTranslation = new Promise<string>((resolve) => {
+      releaseTranslation = resolve;
+    });
+
+    const abortedUpdate = applyLivePageDelta(mirror, delta, {
+      textLayoutMode: 'adaptive',
+      signal: abortController.signal,
+      translate: async () => {
+        announceTranslation();
+        return blockedTranslation;
+      },
+    });
+    await translationStarted;
+
+    expect(document.body.firstElementChild).toBe(mirror);
+    expect(mirror.isConnected).toBe(true);
+    expect(mirror.textContent).toBe('Old live copy');
+
+    abortController.abort();
+    releaseTranslation('Aborted translation');
+    await expect(abortedUpdate).rejects.toMatchObject({ name: 'AbortError' });
+
+    expect(document.body.firstElementChild).toBe(mirror);
+    expect(mirror.isConnected).toBe(true);
+    expect(mirror.textContent).toBe('Old live copy');
+    expect(countVisualMirrorTranslationFields(mirror)).toBe(1);
+
+    const completedUpdate = await applyLivePageDelta(mirror, delta, {
+      textLayoutMode: 'adaptive',
+      translate: async (source) => `[${source}]`,
+    });
+
+    expect(completedUpdate.root).not.toBe(mirror);
+    expect(document.body.firstElementChild).toBe(completedUpdate.root);
+    expect(completedUpdate.root.textContent).toBe('[New live copy]');
+    expect(countVisualMirrorTranslationFields(mirror)).toBe(0);
+    expect(countVisualMirrorTranslationFields(completedUpdate.root)).toBe(1);
   });
 
   it('preserves layout whitespace around translated inline text', () => {
@@ -323,6 +491,9 @@ describe('visual mirror renderer', () => {
     expect(computeMirrorScale(600, 1_200, 'fit')).toBe(0.5);
     expect(computeMirrorScale(1_600, 1_200, 'fit')).toBe(1);
     expect(computeMirrorScale(600, 1_200, 'actual')).toBe(1);
+    expect(computeMirrorScale(600, 1_200, 'custom', 175)).toBe(1.75);
+    expect(computeMirrorScale(600, 1_200, 'custom', 999)).toBe(3);
+    expect(computeMirrorScale(600, 1_200, 'custom', 1)).toBe(0.25);
     expect(computeMirrorScale(0, 1_200, 'fit')).toBe(1);
     expect(computeMirrorScale(600, Number.NaN, 'fit')).toBe(1);
     expect(computeMirrorExtent(0.5, 1_200, 2_000, 1_200, 2_600)).toEqual({
@@ -330,7 +501,140 @@ describe('visual mirror renderer', () => {
       height: 1_300,
     });
   });
+
+  it('opens every clipping ancestor through the mirror root for translated text', async () => {
+    const snapshot = buildDeepClippingSnapshot(24);
+    const { document } = parseHTML('<html><body></body></html>');
+    const mirror = createVisualMirror(snapshot, undefined, document);
+    if (!mirror) throw new Error('Expected a visual mirror.');
+    document.body.append(mirror);
+    applyMirrorTextLayout(mirror, 'adaptive');
+
+    await translateVisualMirror(mirror, async () =>
+      'A much longer translated sentence that needs room to wrap.',
+    );
+
+    const closest = mirror.querySelector<HTMLElement>(
+      '[data-simul-node-id="n24"]',
+    );
+    const outermost = mirror;
+    expect(closest?.style.getPropertyValue('overflow-x')).toBe('visible');
+    expect(closest?.style.getPropertyValue('height')).toBe('auto');
+    expect(outermost.getAttribute('data-simul-node-id')).toBe('n1');
+    expect(outermost.style.getPropertyValue('overflow-x')).toBe('visible');
+    expect(outermost.style.getPropertyValue('height')).toBe('auto');
+
+    applyMirrorTextLayout(mirror, 'faithful');
+
+    expect(closest?.style.getPropertyValue('overflow-x')).toBe('visible');
+    expect(closest?.style.getPropertyValue('height')).toBe('10px');
+    expect(outermost.style.getPropertyValue('overflow-x')).toBe('visible');
+    expect(outermost.style.getPropertyValue('height')).toBe('10px');
+
+    resetVisualMirrorText(mirror);
+
+    expect(closest?.style.getPropertyValue('overflow-x')).toBe('hidden');
+    expect(closest?.style.getPropertyValue('height')).toBe('10px');
+    expect(outermost.style.getPropertyValue('overflow-x')).toBe('hidden');
+    expect(outermost.style.getPropertyValue('height')).toBe('10px');
+  });
 });
+
+function buildLiveRootSnapshot(): PageSnapshot {
+  return parsePageSnapshot({
+    version: 1,
+    title: 'Live root',
+    url: 'https://example.com/',
+    capturedAt: '2026-07-19T00:00:00.000Z',
+    items: [
+      {
+        id: 'live-root-text',
+        kind: 'text',
+        role: 'paragraph',
+        text: 'Old live copy',
+      },
+    ],
+    omissions: {},
+    visual: {
+      viewportWidth: 800,
+      viewportHeight: 600,
+      documentWidth: 800,
+      documentHeight: 600,
+      styles: [{ display: 'block' }],
+      root: {
+        kind: 'element',
+        tag: 'main',
+        styleId: 0,
+        nodeId: 'n1',
+        children: [
+          {
+            kind: 'text',
+            text: 'Old live copy',
+            itemId: 'live-root-text',
+            nodeId: 'n2',
+          },
+        ],
+      },
+    },
+  });
+}
+
+function buildDeepClippingSnapshot(depth: number): PageSnapshot {
+  let child: VisualElementNode = {
+    kind: 'element',
+    tag: 'p',
+    styleId: 1,
+    nodeId: `n${depth + 1}`,
+    children: [
+      {
+        kind: 'text',
+        text: 'Short source',
+        itemId: 'deep-text',
+        nodeId: `n${depth + 2}`,
+      },
+    ],
+  };
+  for (let index = depth - 1; index >= 0; index -= 1) {
+    child = {
+      kind: 'element',
+      tag: 'div',
+      styleId: 0,
+      nodeId: `n${index + 1}`,
+      children: [child],
+    };
+  }
+  return parsePageSnapshot({
+    version: 1,
+    title: 'Clipping layout',
+    url: 'https://example.com/',
+    capturedAt: '2026-07-19T00:00:00.000Z',
+    items: [
+      {
+        id: 'deep-text',
+        kind: 'text',
+        role: 'paragraph',
+        text: 'Short source',
+      },
+    ],
+    omissions: {},
+    visual: {
+      viewportWidth: 800,
+      viewportHeight: 600,
+      documentWidth: 800,
+      documentHeight: 600,
+      styles: [
+        {
+          'overflow-x': 'hidden',
+          'overflow-y': 'hidden',
+          height: '10px',
+          'max-height': '10px',
+        },
+        { display: 'block' },
+      ],
+      root: child,
+    },
+  });
+}
 
 function buildParsedVisualSnapshot(): PageSnapshot {
   return parsePageSnapshot({
@@ -553,5 +857,9 @@ function installCapturePage(body: string): { document: Document } {
   vi.stubGlobal('Element', window.Element);
   vi.stubGlobal('HTMLElement', window.HTMLElement);
   vi.stubGlobal('HTMLImageElement', window.HTMLImageElement);
+  vi.stubGlobal('ShadowRoot', window.ShadowRoot);
+  if (window.HTMLSlotElement) {
+    vi.stubGlobal('HTMLSlotElement', window.HTMLSlotElement);
+  }
   return { document: document as unknown as Document };
 }

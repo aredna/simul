@@ -1,8 +1,12 @@
 const openButton = requireElement<HTMLButtonElement>('#open-panel');
+const openWindowButton = requireElement<HTMLButtonElement>('#open-window');
 const statusElement = requireElement<HTMLElement>('#status');
 
 openButton.addEventListener('click', () => {
   void openTranslationPanel();
+});
+openWindowButton.addEventListener('click', () => {
+  void openDetachedWindow();
 });
 
 async function openTranslationPanel(): Promise<void> {
@@ -18,7 +22,7 @@ async function openTranslationPanel(): Promise<void> {
     });
     const tabPromise = browser.tabs.query({ active: true, currentWindow: true });
     const [[tab]] = await Promise.all([tabPromise, openPromise]);
-    if (!tab?.id || !isSupportedPage(tab.url)) {
+    if (tab?.id === undefined || !isSupportedPage(tab.url)) {
       throw new Error(
         'The panel is open, but this page cannot be read. Use a regular HTTP or HTTPS page.',
       );
@@ -44,6 +48,31 @@ async function openTranslationPanel(): Promise<void> {
   } catch (error) {
     setStatus(readableError(error), true);
     openButton.disabled = false;
+  }
+}
+
+async function openDetachedWindow(): Promise<void> {
+  openWindowButton.disabled = true;
+  setStatus('Opening the detached companion…', false);
+  try {
+    const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+    if (tab?.id === undefined || !isSupportedPage(tab.url)) {
+      throw new Error('Use a regular HTTP or HTTPS page before opening the companion.');
+    }
+    const url = new URL(browser.runtime.getURL('/sidepanel.html'));
+    url.searchParams.set('sourceTabId', String(tab.id));
+    url.searchParams.set('sourceWindowId', String(tab.windowId));
+    await browser.windows.create({
+      url: url.toString(),
+      type: 'popup',
+      width: 720,
+      height: Math.max(600, Math.min(960, screen.availHeight - 80)),
+      focused: true,
+    });
+    setStatus('Detached companion opened for this tab.', false);
+  } catch (error) {
+    setStatus(readableError(error), true);
+    openWindowButton.disabled = false;
   }
 }
 

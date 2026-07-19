@@ -4,6 +4,7 @@ import {
   ALL_SITES_PERMISSION_ORIGINS,
   DEFAULT_COMPANION_PREFERENCES,
   autoTranslationModeForPage,
+  clampZoomPercent,
   isAutoTranslationEnabled,
   pageOrigin,
   parseCompanionPreferences,
@@ -12,6 +13,8 @@ import {
   sitePermissionPattern,
   withAutoTranslationMode,
   withDisplayMode,
+  withViewSettings,
+  type CompanionPreferences,
 } from '../lib/preferences';
 
 describe('parseCompanionPreferences', () => {
@@ -20,6 +23,11 @@ describe('parseCompanionPreferences', () => {
       autoTranslateAllSites: false,
       autoTranslateOrigins: [],
       displayMode: 'fit',
+      sourceLanguage: 'auto',
+      targetLanguage: 'en',
+      zoomPercent: 100,
+      syncScroll: true,
+      textLayoutMode: 'adaptive',
     });
     expect(parseCompanionPreferences('all')).toEqual(
       DEFAULT_COMPANION_PREFERENCES,
@@ -31,6 +39,11 @@ describe('parseCompanionPreferences', () => {
       autoTranslateAllSites: false,
       autoTranslateOrigins: [],
       displayMode: 'fit',
+      sourceLanguage: 'auto',
+      targetLanguage: 'en',
+      zoomPercent: 100,
+      syncScroll: true,
+      textLayoutMode: 'adaptive',
     });
   });
 
@@ -54,6 +67,11 @@ describe('parseCompanionPreferences', () => {
       autoTranslateAllSites: true,
       autoTranslateOrigins: ['https://example.com'],
       displayMode: 'actual',
+      sourceLanguage: 'auto',
+      targetLanguage: 'en',
+      zoomPercent: 100,
+      syncScroll: true,
+      textLayoutMode: 'adaptive',
     });
   });
 
@@ -69,6 +87,28 @@ describe('parseCompanionPreferences', () => {
     expect(parseCompanionPreferences(undefined).autoTranslateOrigins).toEqual(
       [],
     );
+  });
+
+  it('migrates and bounds saved multilingual view settings', () => {
+    expect(
+      parseCompanionPreferences({
+        sourceLanguage: 'ja',
+        targetLanguage: 'zh-Hant',
+        displayMode: 'custom',
+        zoomPercent: 999,
+        syncScroll: false,
+        textLayoutMode: 'faithful',
+      }),
+    ).toMatchObject({
+      sourceLanguage: 'ja',
+      targetLanguage: 'zh-Hant',
+      displayMode: 'custom',
+      zoomPercent: 300,
+      syncScroll: false,
+      textLayoutMode: 'faithful',
+    });
+    expect(clampZoomPercent(-10)).toBe(25);
+    expect(clampZoomPercent(137.4)).toBe(137);
   });
 });
 
@@ -101,6 +141,7 @@ describe('permission scope helpers', () => {
   it('derives only the persisted preference scopes', () => {
     expect(
       permissionOriginsForPreferences({
+        ...parseCompanionPreferences(undefined),
         autoTranslateAllSites: false,
         autoTranslateOrigins: [
           'https://one.example',
@@ -112,6 +153,7 @@ describe('permission scope helpers', () => {
 
     expect(
       permissionOriginsForPreferences({
+        ...parseCompanionPreferences(undefined),
         autoTranslateAllSites: true,
         autoTranslateOrigins: ['https://one.example'],
         displayMode: 'fit',
@@ -121,7 +163,8 @@ describe('permission scope helpers', () => {
 });
 
 describe('preference updates', () => {
-  const initial = {
+  const initial: CompanionPreferences = {
+    ...parseCompanionPreferences(undefined),
     autoTranslateAllSites: false,
     autoTranslateOrigins: ['https://other.example'],
     displayMode: 'fit' as const,
@@ -178,8 +221,29 @@ describe('preference updates', () => {
     expect(initial.displayMode).toBe('fit');
   });
 
+  it('updates all saved view settings through the validated parser', () => {
+    expect(
+      withViewSettings(initial, {
+        sourceLanguage: 'auto',
+        targetLanguage: 'ja',
+        displayMode: 'custom',
+        zoomPercent: 175,
+        syncScroll: false,
+        textLayoutMode: 'faithful',
+      }),
+    ).toMatchObject({
+      sourceLanguage: 'auto',
+      targetLanguage: 'ja',
+      displayMode: 'custom',
+      zoomPercent: 175,
+      syncScroll: false,
+      textLayoutMode: 'faithful',
+    });
+  });
+
   it('refuses to add a site beyond the persisted-origin bound', () => {
     const full = {
+      ...parseCompanionPreferences(undefined),
       autoTranslateAllSites: false,
       autoTranslateOrigins: Array.from(
         { length: 256 },

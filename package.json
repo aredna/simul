@@ -2,7 +2,7 @@
   "name": "simul",
   "version": "0.1.0",
   "private": true,
-  "description": "Compare a web page with an on-device Japanese or English translation in Chrome.",
+  "description": "Follow a web page in a live read-only mirror with on-device translation in Chrome.",
   "type": "module",
   "packageManager": "npm@12.0.1",
   "engines": {

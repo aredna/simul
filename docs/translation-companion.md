@@ -1,157 +1,87 @@
-# Simul translation companion
+# Translation companion design
 
-Simul places a safe, read-only, high-fidelity approximation of the active page
-in Chrome's native side panel and translates its eligible Japanese or English
-text with Chrome's built-in Translator API. The source tab stays untouched and
-remains available for scrolling and comparison.
+## Live mirror lifecycle
 
-## Requirements and use
+The extension first executes a bounded capture in Chrome's isolated world. It
+copies an allowlisted visual model with computed styles and assigns opaque IDs
+through an extension-owned `WeakMap`; it does not add attributes to the source
+DOM. A `MutationObserver` then coalesces structural, text, image, and relevant
+attribute changes. The panel requests only those dirty subtrees, validates the
+typed delta again, replaces matching inert nodes, and translates only newly
+changed text.
 
-- Chrome 138 or newer on a desktop device that supports the Translator API.
-- A regular HTTP or HTTPS page in the active tab.
-- Japanese → English or English → Japanese. Use **Swap languages** to reverse
-  the direction.
+Source scroll messages are animation-frame throttled and one-way. The mirror
+uses exact scaled CSS-pixel offsets in faithful layout and proportional offsets
+when adaptive translations change page height. No mirror interaction is sent
+back to the website.
 
-For a no-build installation, download and extract the repository, open
-`chrome://extensions`, enable **Developer mode**, choose **Load unpacked**, and
-select `dist/chrome-unpacked`. Node.js and npm are not required for product
-installation.
+Full capture is not scheduled. It is used for the initial bootstrap,
+navigation, a manual rebuild, or recovery when an ID, generation, bound, or
+delta target cannot be reconciled. Generation and exact tab/window checks
+discard stale asynchronous results. The previous mirror stays visible while a
+replacement bootstrap is prepared.
 
-Select the Simul toolbar icon, then **Open translation panel**. The panel reads
-a bounded snapshot and checks whether Chrome supports the selected language
-pair. Select **Translate page** to create the local translation session. On
-first use, Chrome may download a language pack and Simul displays that
-progress. **Cancel** stops creation or translation; successful segments remain
-available when a partial run is retried.
+## Translation and saved settings
 
-Use **Fit width** to scale the captured source viewport into the panel or **1:1
-size** to retain its natural width with horizontal scrolling. **Refresh
-snapshot** rereads the followed page immediately. Simul clears stale content
-as navigation starts, coalesces rapid changes, then recaptures the newest
-completed load. Same-origin navigation retains Chrome's temporary access. On a
-new origin, select the toolbar icon once; the authorization message targets the
-exact active tab and refreshes an already-open panel without closing it.
+The source preference can be a language or Auto-detect. Auto-detect uses the
+document's HTML `lang` value first, normalizes its BCP-47 tag, then falls back
+to Chrome's local `i18n.detectLanguage` result only when it is reliable. An
+equal resolved pair is an explicit no-op.
 
-Automatic translation defaults to **Off**. **This site** requests access to
-only the current origin; **All sites** requests regular HTTP and HTTPS access.
-The selection is persisted and completed loads are captured and translated
-when the chosen language model is already available. Chrome requires a user
-action to prepare or download a model, so select **Translate page** once for an
-unprepared language pair. Simul never initiates that first download from a
-background navigation.
+Chrome 138 exposes Translator pair availability and session creation but does
+not expose language enumeration. Simul therefore shows Chrome's documented
+language list and probes the selected pair at runtime. Language changes reset
+the visible strings and immediately translate again when the pair is already
+available. Chrome still requires a user action before a model's first
+download.
 
-## Privacy and permissions
+`browser.storage.local` holds only settings: From/To languages, Fit/1:1/custom
+zoom, zoom percent, adaptive/faithful text layout, scroll following, and
+explicit automatic-translation scopes. Composer input, output, page text, and
+translation results are never stored.
 
-Translation runs on-device through Chrome. Simul has no remote translation
-fallback, analytics, API key, required host access, or persistent content
-script. It does not send page text to Simul, Google Cloud, OpenAI, or another
-server. Chrome itself manages any language-pack download.
+## Rendering and privacy
 
-The four required manifest permissions each have a narrow purpose:
+At 1:1, one captured source CSS pixel maps to one mirror pixel (`scale(1)`).
+The source viewport width remains the layout containing block; the captured
+document width drives horizontal overflow. Fit computes a scale no greater
+than one, while custom zoom is clamped to 25–300%.
 
-- `activeTab` grants temporary access only after the user selects the toolbar
-  action.
-- `scripting` injects one top-frame snapshot function into that temporarily
-  authorized tab.
-- `sidePanel` displays the read-only companion beside the page.
-- `storage` remembers only automatic-translation scopes and the Fit/1:1 view
-  preference.
+Private controls become empty inert `div`/`span` shells instead of disabled
+form controls, avoiding browser disabled-state wash while retaining geometry.
+Public button labels are retained inside inert shells. Adaptive layout removes
+height and clipping constraints from containers holding translated text;
+faithful layout retains geometry but never silently ellipsizes translated
+content.
 
-The manifest also declares optional `http://*/*` and `https://*/*` host
-patterns. They grant nothing during installation. Chrome prompts only after a
-user chooses **This site** or **All sites**, and Simul removes obsolete access
-when that scope is turned off. Required `host_permissions` remains empty.
-Chrome match patterns cannot isolate one non-default port, so Simul declines a
-**This site** grant there instead of silently broadening it to every port on the
-host. The one-time toolbar gesture and explicit **All sites** mode remain
-available.
+The extension copies no source HTML. Both bootstrap and delta boundaries
+allowlist tags, style properties, attributes, and image schemes. Scripts,
+handlers, navigation semantics, values, passwords, contenteditable text, and
+cross-origin frame content never enter the mirror. Open shadow trees and slot
+assignments are composed; closed roots remain inaccessible by web-platform
+design. The live bridge discovers roots present during capture, roots on newly
+inserted DOM, and roots created as previously undefined custom elements
+upgrade. The web platform exposes no general event when an already-defined,
+already-connected host attaches a root later; if that happens without a DOM,
+resize, focus, or load signal, a manual rebuild may be required.
 
-The snapshot contains a bounded typed visual tree, never page HTML. It retains
-safe structural tags, individually allowlisted computed-style properties,
-vetted image/background URLs, text translation keys, and empty control shells.
-It omits scripts, stylesheets, handlers, navigation semantics, entered form
-values, passwords, selections, contenteditable text, hidden nodes, and embedded
-frame contents. Canvas, video, and audio become inert placeholders. The panel
-rebuilds every node itself and assigns translated strings with `textContent`,
-so page markup, links, forms, and executable behavior cannot activate.
+## Detached window
 
-Original remote images and safe CSS backgrounds shown in the companion may be
-requested again from their existing source host. Simul uses no referrer for
-image elements and sends the resource to no translation service. Bounded
-raster data URLs are accepted; active blobs, SVG data URLs, arbitrary
-URL-bearing CSS, and non-web schemes are omitted.
+Chrome has no API to detach a native side panel. The ↗ control instead creates
+an extension popup with `windows.create`, passing only numeric source tab and
+window IDs in its extension URL. The popup follows that tab even though it is
+not the active tab in the popup's own window. This requires no new permission;
+the user must reauthorize after temporary page access expires.
 
-## Deliberate MVP limitations
+## Manual release checks
 
-- The companion is a high-fidelity approximation, not an exact, pixel-perfect,
-  or live page clone. Translation changes line breaks and page height. Closed
-  shadow roots, cross-origin frame contents, canvas/video pixels, all source
-  web fonts, pseudo-elements, and script-only state cannot be reproduced.
-- Chrome's native panel supports only left or right placement. The user owns
-  that global setting. On Chrome 140+, Simul can detect left placement and
-  explain how to choose the right under **Settings → Appearance → Side panel**.
-  It does not offer a placement control it cannot honor.
-- Images retain their original pixels. Simul translates available alt labels
-  and figure captions and marks pixels as untranslated. There is no OCR in this
-  increment.
-- Cross-origin frames, canvas/video pixels, scroll synchronization, live DOM
-  mutation mirroring, typed composition, and form filling are not included.
-- Translation availability varies by Chrome build, operating system, device,
-  and language-pack state. Failure produces a retryable local error; there is
-  no fabricated or network result.
+After loading `dist/chrome-unpacked`, verify dynamic expansion, late content,
+image/style changes, same-tab navigation, source scrolling, all size/zoom
+modes, language changes, settings persistence, detached-window binding, and
+composer cancellation/copy. Check the supplied Reddit article for late left
+and right rails, public labels, and open-shadow content. Also confirm form
+values remain absent and the source DOM is unchanged.
 
-## Architecture and future providers
-
-`lib/translation-provider.ts` is the provider seam. The Chrome adapter owns API
-feature detection, capability state, creation progress, cancellation, and
-session destruction. The browser-independent pipeline translates sequentially,
-deduplicates repeated strings, enforces page/input limits, retains successful
-work after partial failure, and retries only incomplete fields. A latest-work
-generation coordinator rejects stale capture and translation results during
-rapid navigation.
-
-A future OpenAI adapter must use a key-protecting backend and require explicit
-approval for remote processing; a secret must never ship in the extension.
-OpenAI does not provide an ongoing free translation API tier. A future detached
-companion would likewise be a distinct extension popup window—not a popped-out
-native side panel—and needs separate lifecycle, sizing, placement, and
-multi-display design.
-
-Image translation is deferred. The local-first experiment is to bundle
-Tesseract.js plus Japanese/English models, retain OCR bounding boxes, translate
-recognized lines, and draw inert positioned overlays. Backend-mediated Google
-Vision plus Cloud Translation or Azure Document Translation can be evaluated
-only after explicit approval for remote image processing and credentials.
-
-## Manual verification
-
-Load the committed `dist/chrome-unpacked` directory as an unpacked extension
-and verify:
-
-1. Japanese → English and English → Japanese on regular text pages.
-2. First-use language download progress, cancel, partial failure, and retry.
-3. Keyboard access for all buttons and selects and announced status updates.
-4. Restricted, stale, empty, image, and embedded-frame pages.
-5. Same-origin navigation, cross-origin toolbar reauthorization, and rapid
-   loading races without closing the panel.
-6. Off / This site / All sites grants, denials, revocation, persistence, and
-   first-use model preparation.
-7. Fit width and 1:1 rendering; the source DOM and form values remain unchanged.
-8. Left-side guidance (Chrome 140+) and normal operation on either side.
-9. `dist/chrome-unpacked/manifest.json` has no `host_permissions`, contains only
-   `activeTab`, `scripting`, `sidePanel`, and `storage`, and declares only the
-   approved optional HTTP(S) patterns.
-
-## Release artifact maintenance
-
-`dist/chrome-unpacked/` is the canonical, checked-in local-install release. It
-is generated from source and must not be edited directly. Contributors use
-`npm run artifact:sync` to build in a temporary directory, validate the output,
-and intentionally replace only that guarded directory. `npm run
-artifact:check` performs the same temporary build and security validation, then
-compares every path and byte without changing the committed release.
-
-Validation rejects symlinks, source maps, private configuration, credential or
-key material, remote executable references, missing assets, an invalid Chrome
-version, and any permission outside the approved manifest boundary. Transient
-WXT output remains under `.output/` and is not an installation artifact.
+The manifest must retain Chrome 138, required permissions `activeTab`,
+`scripting`, `sidePanel`, and `storage`, no required host permissions, and only
+the approved optional HTTP(S) patterns.

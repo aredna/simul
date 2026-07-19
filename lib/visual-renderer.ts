@@ -3,14 +3,53 @@ import type {
   VisualElementNode,
   VisualNode,
   VisualPage,
+  VisualStyle,
   VisualTextNode,
 } from './page-snapshot';
+import type {
+  LivePageDelta,
+  LiveVisualNode,
+} from './live-page-mirror';
 import {
   displayTranslation,
   type TranslatedSnapshot,
 } from './translation-pipeline';
 
-export type MirrorDisplayMode = 'fit' | 'actual';
+export type MirrorDisplayMode = 'fit' | 'actual' | 'custom';
+
+interface MirrorTextBinding {
+  kind: 'text';
+  node: Text;
+  source: string;
+  group: string;
+}
+
+interface MirrorAttributeBinding {
+  kind: 'attribute';
+  node: Element;
+  attribute: 'alt';
+  source: string;
+  group: string;
+}
+
+type MirrorTranslationBinding = MirrorTextBinding | MirrorAttributeBinding;
+
+type MirrorTextLayoutMode = 'adaptive' | 'faithful';
+
+interface SavedStyleValue {
+  value: string;
+  priority: string;
+}
+
+interface MirrorController {
+  bindings: MirrorTranslationBinding[];
+  groupSources: Map<string, string>;
+  nextGroup: number;
+  textLayoutMode: MirrorTextLayoutMode;
+  layoutOverrides: Map<HTMLElement, Map<string, SavedStyleValue>>;
+}
+
+const mirrorControllers = new WeakMap<HTMLElement, MirrorController>();
 
 const SVG_NAMESPACE = 'http://www.w3.org/2000/svg';
 const SVG_TAGS = new Set([
@@ -23,6 +62,13 @@ const SVG_TAGS = new Set([
   'polyline',
   'rect',
   'svg',
+]);
+
+const CLIPPING_OVERFLOW_VALUES = new Set([
+  'auto',
+  'clip',
+  'hidden',
+  'scroll',
 ]);
 
 interface TranslationDisplay {
@@ -41,6 +87,13 @@ export function createVisualMirror(
     page.visual.root,
     translations,
   );
+  const controller = createMirrorController(
+    new Map(
+      page.items.flatMap((item) =>
+        item.kind === 'text' ? [[item.id, item.text] as const] : [],
+      ),
+    ),
+  );
   const rendered = renderNode(
     page.visual.root,
     page.visual,
@@ -48,21 +101,44 @@ export function createVisualMirror(
     textReplacements,
     targetDocument,
     false,
+    controller,
   );
   if (rendered.nodeType !== 1) return undefined;
   const root = rendered as HTMLElement;
+  prepareMirrorRoot(root);
+  mirrorControllers.set(root, controller);
+  return root;
+}
+
+function createMirrorController(
+  groupSources: Map<string, string> = new Map(),
+): MirrorController {
+  return {
+    bindings: [],
+    groupSources,
+    nextGroup: 1,
+    textLayoutMode: 'adaptive',
+    layoutOverrides: new Map(),
+  };
+}
+
+function prepareMirrorRoot(root: HTMLElement): void {
   root.classList.add('visual-page-root');
   root.style.pointerEvents = 'none';
   root.setAttribute('data-simul-inert-mirror', '');
-  return root;
 }
 
 export function computeMirrorScale(
   availableWidth: number,
   sourceWidth: number,
   mode: MirrorDisplayMode,
+  zoomPercent = 100,
 ): number {
   if (mode === 'actual') return 1;
+  if (mode === 'custom') {
+    const zoom = Number.isFinite(zoomPercent) ? zoomPercent : 100;
+    return Math.min(3, Math.max(0.25, zoom / 100));
+  }
   if (
     !Number.isFinite(availableWidth) ||
     !Number.isFinite(sourceWidth) ||
@@ -107,20 +183,25 @@ function renderNode(
   textReplacements: WeakMap<VisualTextNode, string>,
   targetDocument: Document,
   insideSvg: boolean,
+  controller: MirrorController,
 ): Node {
   if (node.kind === 'text') {
     const groupedReplacement = textReplacements.get(node);
     if (groupedReplacement !== undefined) {
-      return targetDocument.createTextNode(groupedReplacement);
+      const textNode = targetDocument.createTextNode(groupedReplacement);
+      bindText(controller, textNode, node.text, node.itemId);
+      return textNode;
     }
     const translated = node.itemId
       ? translations.get(node.itemId)?.text
       : undefined;
-    return targetDocument.createTextNode(
+    const textNode = targetDocument.createTextNode(
       translated === undefined
         ? node.text
         : preserveBoundaryWhitespace(node.text, translated),
     );
+    bindText(controller, textNode, node.text, node.itemId);
+    return textNode;
   }
 
   if (node.kind === 'placeholder') {
@@ -129,6 +210,7 @@ function renderNode(
     placeholder.className = 'visual-placeholder';
     placeholder.textContent = node.label;
     placeholder.setAttribute('aria-label', node.label);
+    applyNodeId(placeholder, node.nodeId);
     return placeholder;
   }
 
@@ -139,6 +221,7 @@ function renderNode(
     textReplacements,
     targetDocument,
     insideSvg,
+    controller,
   );
 }
 
@@ -155,13 +238,21 @@ function renderElement(
   textReplacements: WeakMap<VisualTextNode, string>,
   targetDocument: Document,
   insideSvg: boolean,
+  controller: MirrorController,
 ): Element {
   const svg = insideSvg || node.tag === 'svg';
-  const element = svg && SVG_TAGS.has(node.tag)
-    ? targetDocument.createElementNS(SVG_NAMESPACE, node.tag)
-    : targetDocument.createElement(node.tag);
+  const sourceStyle = visual.styles[node.styleId];
+  const inertTag = node.controlShell
+    ? sourceStyle?.display?.startsWith('inline')
+      ? 'span'
+      : 'div'
+    : node.tag;
+  const element = svg && SVG_TAGS.has(inertTag)
+    ? targetDocument.createElementNS(SVG_NAMESPACE, inertTag)
+    : targetDocument.createElement(inertTag);
   applyStyle(element, visual, node.styleId);
-  applyAttributes(element, node, translations);
+  applyAttributes(element, node, translations, controller);
+  applyNodeId(element, node.nodeId);
   if (!svg && 'tabIndex' in element) {
     (element as HTMLElement).tabIndex = -1;
   }
@@ -170,15 +261,10 @@ function renderElement(
     const htmlElement = element as HTMLElement;
     htmlElement.tabIndex = -1;
     htmlElement.setAttribute('aria-disabled', 'true');
-    if ('disabled' in htmlElement) {
-      (htmlElement as HTMLButtonElement | HTMLInputElement | HTMLSelectElement | HTMLTextAreaElement).disabled = true;
+    htmlElement.dataset.simulControlShell = node.controlShell;
+    if (node.controlShell !== 'button') {
+      return element;
     }
-    if (node.controlShell === 'input' && node.tag === 'input') {
-      const input = element as HTMLInputElement;
-      input.type = 'text';
-      input.value = '';
-    }
-    return element;
   }
 
   for (const child of node.children) {
@@ -190,10 +276,601 @@ function renderElement(
         textReplacements,
         targetDocument,
         svg,
+        controller,
       ),
     );
   }
   return element;
+}
+
+function bindText(
+  controller: MirrorController,
+  node: Text,
+  source: string,
+  itemId?: string,
+): void {
+  const group = itemId ?? `live-${controller.nextGroup++}`;
+  controller.bindings.push({ kind: 'text', node, source, group });
+  if (!controller.groupSources.has(group)) {
+    controller.groupSources.set(group, source.replace(/\s+/gu, ' ').trim());
+  }
+}
+
+function bindImageAlt(
+  controller: MirrorController,
+  image: HTMLImageElement,
+  source: string,
+  group: string,
+): void {
+  const normalizedSource = source.replace(/\s+/gu, ' ').trim();
+  if (!normalizedSource) return;
+  controller.bindings.push({
+    kind: 'attribute',
+    node: image,
+    attribute: 'alt',
+    source: normalizedSource,
+    group,
+  });
+  controller.groupSources.set(group, normalizedSource);
+}
+
+function applyNodeId(element: Element, nodeId: string | undefined): void {
+  if (nodeId) element.setAttribute('data-simul-node-id', nodeId);
+}
+
+export interface MirrorTranslationOptions {
+  signal?: AbortSignal;
+  groups?: ReadonlySet<string>;
+  onProgress?: (completed: number, total: number) => void;
+}
+
+export interface MirrorTranslationResult {
+  completed: number;
+  failed: number;
+  total: number;
+}
+
+export function countVisualMirrorTranslationFields(root: HTMLElement): number {
+  const controller = mirrorControllers.get(root);
+  if (!controller) return 0;
+  pruneBindings(controller, root);
+  return translatableBindingGroups(controller).length;
+}
+
+export async function translateVisualMirror(
+  root: HTMLElement,
+  translate: (source: string, signal?: AbortSignal) => Promise<string>,
+  options: MirrorTranslationOptions = {},
+): Promise<MirrorTranslationResult> {
+  const controller = mirrorControllers.get(root);
+  if (!controller) return { completed: 0, failed: 0, total: 0 };
+  pruneBindings(controller, root);
+  const grouped = translatableBindingGroups(controller).filter(
+    ([group]) => !options.groups || options.groups.has(group),
+  );
+  let completed = 0;
+  let failed = 0;
+  let acceptedCharacters = 0;
+  for (const [group, bindings] of grouped) {
+    options.signal?.throwIfAborted();
+    const source = controller.groupSources.get(group) ?? bindings
+      .map((binding) => binding.source)
+      .join('')
+      .replace(/\s+/gu, ' ')
+      .trim();
+    if (!source) {
+      completed += 1;
+      options.onProgress?.(completed, grouped.length);
+      continue;
+    }
+    if (completed >= 1_500 || acceptedCharacters + [...source].length > 200_000) {
+      failed += 1;
+      completed += 1;
+      applyGroupSource(bindings);
+      options.onProgress?.(completed, grouped.length);
+      continue;
+    }
+    acceptedCharacters += [...source].length;
+    try {
+      const translated = await translate(source, options.signal);
+      if (!translated.trim()) throw new Error('Empty translation');
+      applyGroupTranslation(bindings, translated);
+    } catch (error) {
+      if (options.signal?.aborted || isAbortError(error)) throw error;
+      failed += 1;
+      applyGroupSource(bindings);
+    }
+    completed += 1;
+    options.onProgress?.(completed, grouped.length);
+  }
+  refreshTranslatedTextLayout(root, controller);
+  return { completed, failed, total: grouped.length };
+}
+
+export function resetVisualMirrorText(root: HTMLElement): void {
+  const controller = mirrorControllers.get(root);
+  if (!controller) return;
+  pruneBindings(controller, root);
+  for (const [, bindings] of groupBindings(controller)) {
+    applyGroupSource(bindings);
+  }
+  restoreLayoutOverrides(controller);
+}
+
+export function applyMirrorTextLayout(
+  root: HTMLElement,
+  mode: MirrorTextLayoutMode,
+): void {
+  root.classList.toggle('visual-page-root--adaptive', mode === 'adaptive');
+  root.classList.toggle('visual-page-root--faithful', mode === 'faithful');
+  const controller = mirrorControllers.get(root);
+  if (!controller) return;
+  controller.textLayoutMode = mode;
+  refreshTranslatedTextLayout(root, controller);
+}
+
+export interface ApplyLiveDeltaOptions {
+  textLayoutMode: MirrorTextLayoutMode;
+  translate?: (source: string, signal?: AbortSignal) => Promise<string>;
+  signal?: AbortSignal;
+}
+
+export interface ApplyLiveDeltaResult {
+  root: HTMLElement;
+  applied: number;
+  missingTarget: boolean;
+  translation: MirrorTranslationResult;
+}
+
+interface LocatedLiveReplacement {
+  targetId: string;
+  node: LiveVisualNode | null;
+  target: Element | undefined;
+}
+
+export async function applyLivePageDelta(
+  currentRoot: HTMLElement,
+  delta: LivePageDelta,
+  options: ApplyLiveDeltaOptions,
+): Promise<ApplyLiveDeltaResult> {
+  const controller = mirrorControllers.get(currentRoot);
+  if (!controller) {
+    return {
+      root: currentRoot,
+      applied: 0,
+      missingTarget: true,
+      translation: { completed: 0, failed: 0, total: 0 },
+    };
+  }
+  const replacements: LocatedLiveReplacement[] = delta.replacements
+    .map((replacement) => ({
+      ...replacement,
+      target: findMirrorNode(currentRoot, replacement.targetId),
+    }))
+    .sort((left, right) => nodeDepth(left.target) - nodeDepth(right.target));
+  const rootReplacement = replacements.find(
+    (replacement) => replacement.target === currentRoot,
+  );
+  const rootNode = rootReplacement?.node;
+  if (rootReplacement && rootNode) {
+    return replaceLiveRootAtomically(
+      currentRoot,
+      replacements,
+      rootReplacement,
+      rootNode,
+      options,
+    );
+  }
+  let root = currentRoot;
+  let applied = 0;
+  let missingTarget = false;
+  const newGroups = new Set<string>();
+  for (const replacement of replacements) {
+    options.signal?.throwIfAborted();
+    const target = findMirrorNode(root, replacement.targetId);
+    if (!target) {
+      missingTarget = true;
+      continue;
+    }
+    if (!replacement.node) {
+      if (target === root) {
+        missingTarget = true;
+        continue;
+      }
+      target.remove();
+      applied += 1;
+      continue;
+    }
+    const bindingStart = controller.bindings.length;
+    const rendered = renderLiveNode(
+      replacement.node,
+      target.ownerDocument,
+      controller,
+      false,
+    );
+    if (!(rendered instanceof Element)) {
+      missingTarget = true;
+      continue;
+    }
+    target.replaceWith(rendered);
+    for (const binding of controller.bindings.slice(bindingStart)) {
+      controller.groupSources.set(
+        binding.group,
+        binding.source.replace(/\s+/gu, ' ').trim(),
+      );
+      newGroups.add(binding.group);
+    }
+    applied += 1;
+  }
+  pruneBindings(controller, root);
+  applyMirrorTextLayout(root, options.textLayoutMode);
+  let translation: MirrorTranslationResult = {
+    completed: 0,
+    failed: 0,
+    total: 0,
+  };
+  if (options.translate && newGroups.size > 0) {
+    translation = await translateVisualMirror(root, options.translate, {
+      signal: options.signal,
+      groups: newGroups,
+    });
+  }
+  return { root, applied, missingTarget, translation };
+}
+
+async function replaceLiveRootAtomically(
+  currentRoot: HTMLElement,
+  replacements: LocatedLiveReplacement[],
+  rootReplacement: LocatedLiveReplacement,
+  rootNode: LiveVisualNode,
+  options: ApplyLiveDeltaOptions,
+): Promise<ApplyLiveDeltaResult> {
+  options.signal?.throwIfAborted();
+  const controller = createMirrorController();
+  const renderedRoot = renderLiveNode(
+    rootNode,
+    currentRoot.ownerDocument,
+    controller,
+    false,
+  );
+  if (renderedRoot.nodeType !== 1) {
+    return {
+      root: currentRoot,
+      applied: 0,
+      missingTarget: true,
+      translation: { completed: 0, failed: 0, total: 0 },
+    };
+  }
+
+  const stagedRoot = renderedRoot as HTMLElement;
+  prepareMirrorRoot(stagedRoot);
+  mirrorControllers.set(stagedRoot, controller);
+  let applied = 1;
+  let missingTarget = false;
+
+  try {
+    for (const replacement of replacements) {
+      if (replacement === rootReplacement) continue;
+      options.signal?.throwIfAborted();
+      const target = findMirrorNode(stagedRoot, replacement.targetId);
+      if (!target || target === stagedRoot) {
+        missingTarget = true;
+        continue;
+      }
+      if (!replacement.node) {
+        target.remove();
+        applied += 1;
+        continue;
+      }
+      const rendered = renderLiveNode(
+        replacement.node,
+        target.ownerDocument,
+        controller,
+        false,
+      );
+      if (rendered.nodeType !== 1) {
+        missingTarget = true;
+        continue;
+      }
+      target.replaceWith(rendered);
+      applied += 1;
+    }
+
+    pruneBindings(controller, stagedRoot);
+    applyMirrorTextLayout(stagedRoot, options.textLayoutMode);
+    const newGroups = new Set(
+      controller.bindings.map((binding) => binding.group),
+    );
+    let translation: MirrorTranslationResult = {
+      completed: 0,
+      failed: 0,
+      total: 0,
+    };
+    if (options.translate && newGroups.size > 0) {
+      translation = await translateVisualMirror(stagedRoot, options.translate, {
+        signal: options.signal,
+        groups: newGroups,
+      });
+    }
+
+    // A translator may resolve after ignoring an abort signal. Keep the old
+    // connected tree authoritative until this final synchronous commit.
+    options.signal?.throwIfAborted();
+    currentRoot.replaceWith(stagedRoot);
+    mirrorControllers.delete(currentRoot);
+    return { root: stagedRoot, applied, missingTarget, translation };
+  } catch (error) {
+    mirrorControllers.delete(stagedRoot);
+    throw error;
+  }
+}
+
+function renderLiveNode(
+  node: LiveVisualNode,
+  targetDocument: Document,
+  controller: MirrorController,
+  insideSvg: boolean,
+): Node {
+  if (node.kind === 'text') {
+    const textNode = targetDocument.createTextNode(node.text);
+    bindText(controller, textNode, node.text, `delta-${node.nodeId}`);
+    return textNode;
+  }
+  if (node.kind === 'placeholder') {
+    const placeholder = targetDocument.createElement('div');
+    applyInlineStyle(placeholder, node.style);
+    placeholder.className = 'visual-placeholder';
+    placeholder.textContent = node.label;
+    placeholder.setAttribute('aria-label', node.label);
+    applyNodeId(placeholder, node.nodeId);
+    return placeholder;
+  }
+  const svg = insideSvg || node.tag === 'svg';
+  const inertTag = node.controlShell
+    ? node.style.display?.startsWith('inline')
+      ? 'span'
+      : 'div'
+    : node.tag;
+  const element = svg && SVG_TAGS.has(inertTag)
+    ? targetDocument.createElementNS(SVG_NAMESPACE, inertTag)
+    : targetDocument.createElement(inertTag);
+  applyInlineStyle(element, node.style);
+  applyLiveAttributes(element, node.attributes);
+  if (node.tag === 'img') {
+    const sourceAlt = node.attributes?.alt;
+    if (sourceAlt) {
+      bindImageAlt(
+        controller,
+        element as HTMLImageElement,
+        sourceAlt,
+        `delta-alt-${node.nodeId}`,
+      );
+    }
+  }
+  applyNodeId(element, node.nodeId);
+  if (!svg && 'tabIndex' in element) (element as HTMLElement).tabIndex = -1;
+  if (node.controlShell) {
+    const htmlElement = element as HTMLElement;
+    htmlElement.tabIndex = -1;
+    htmlElement.setAttribute('aria-disabled', 'true');
+    htmlElement.dataset.simulControlShell = node.controlShell;
+    if (node.controlShell !== 'button') return element;
+  }
+  for (const child of node.children) {
+    element.append(renderLiveNode(child, targetDocument, controller, svg));
+  }
+  return element;
+}
+
+function applyInlineStyle(element: Element, style: VisualStyle): void {
+  if (!('style' in element)) return;
+  for (const [property, value] of Object.entries(style)) {
+    if (value) (element as HTMLElement | SVGElement).style.setProperty(property, value);
+  }
+}
+
+function applyLiveAttributes(
+  element: Element,
+  attributes: Record<string, string> | undefined,
+): void {
+  for (const [name, value] of Object.entries(attributes ?? {})) {
+    element.setAttribute(name, value);
+  }
+  if (element instanceof HTMLImageElement) {
+    element.loading = 'lazy';
+    element.decoding = 'async';
+    element.referrerPolicy = 'no-referrer';
+    element.tabIndex = -1;
+  }
+}
+
+function findMirrorNode(root: HTMLElement, nodeId: string): Element | undefined {
+  if (root.getAttribute('data-simul-node-id') === nodeId) return root;
+  return [...root.querySelectorAll('[data-simul-node-id]')].find(
+    (candidate) => candidate.getAttribute('data-simul-node-id') === nodeId,
+  );
+}
+
+function nodeDepth(node: Element | undefined): number {
+  let depth = 0;
+  let current = node?.parentElement;
+  while (current) {
+    depth += 1;
+    current = current.parentElement;
+  }
+  return depth;
+}
+
+function pruneBindings(
+  controller: MirrorController,
+  root: HTMLElement,
+): void {
+  controller.bindings = controller.bindings.filter(
+    (binding) => binding.node.isConnected || root.contains(binding.node),
+  );
+  const retained = new Set(controller.bindings.map((binding) => binding.group));
+  for (const group of controller.groupSources.keys()) {
+    if (!retained.has(group)) controller.groupSources.delete(group);
+  }
+}
+
+function groupBindings(
+  controller: MirrorController,
+): Array<[string, MirrorTranslationBinding[]]> {
+  const groups = new Map<string, MirrorTranslationBinding[]>();
+  for (const binding of controller.bindings) {
+    const existing = groups.get(binding.group);
+    if (existing) existing.push(binding);
+    else groups.set(binding.group, [binding]);
+  }
+  return [...groups];
+}
+
+function translatableBindingGroups(
+  controller: MirrorController,
+): Array<[string, MirrorTranslationBinding[]]> {
+  return groupBindings(controller).filter(([group, bindings]) => {
+    const source = controller.groupSources.get(group) ?? bindings
+      .map((binding) => binding.source)
+      .join('');
+    return source.trim().length > 0;
+  });
+}
+
+function applyGroupTranslation(
+  bindings: MirrorTranslationBinding[],
+  translated: string,
+): void {
+  const textBindings = bindings.filter(
+    (binding): binding is MirrorTextBinding => binding.kind === 'text',
+  );
+  const chunks = textBindings.length > 1
+    ? splitAcrossTextNodes(
+        translated,
+        textBindings.map((binding) => ({ kind: 'text', text: binding.source })),
+      )
+    : [translated];
+  textBindings.forEach((binding, index) => {
+    binding.node.data = preserveBoundaryWhitespace(
+      binding.source,
+      chunks[index] ?? '',
+    );
+    binding.node.parentElement?.classList.add('simul-translated-container');
+  });
+  for (const binding of bindings) {
+    if (binding.kind === 'attribute') {
+      binding.node.setAttribute(binding.attribute, translated.trim());
+    }
+  }
+}
+
+function applyGroupSource(bindings: MirrorTranslationBinding[]): void {
+  for (const binding of bindings) {
+    if (binding.kind === 'text') {
+      binding.node.data = binding.source;
+      binding.node.parentElement?.classList.remove('simul-translated-container');
+    } else {
+      binding.node.setAttribute(binding.attribute, binding.source);
+    }
+  }
+}
+
+function refreshTranslatedTextLayout(
+  root: HTMLElement,
+  controller: MirrorController,
+): void {
+  restoreLayoutOverrides(controller);
+  const containers = [
+    ...(root.classList.contains('simul-translated-container') ? [root] : []),
+    ...root.querySelectorAll<HTMLElement>('.simul-translated-container'),
+  ];
+  for (const container of containers) {
+    overrideTranslatedContainer(controller, container);
+    let ancestor = container.parentElement;
+    while (ancestor && root.contains(ancestor)) {
+      if (clipsOverflow(ancestor)) {
+        overrideClippingAncestor(controller, ancestor);
+      }
+      if (ancestor === root) break;
+      ancestor = ancestor.parentElement;
+    }
+  }
+}
+
+function overrideTranslatedContainer(
+  controller: MirrorController,
+  container: HTMLElement,
+): void {
+  setLayoutOverride(controller, container, 'overflow-x', 'visible');
+  setLayoutOverride(controller, container, 'overflow-y', 'visible');
+  setLayoutOverride(controller, container, 'text-overflow', 'clip');
+  if (controller.textLayoutMode !== 'adaptive') return;
+  setLayoutOverride(controller, container, 'height', 'auto');
+  setLayoutOverride(controller, container, 'max-height', 'none');
+  setLayoutOverride(controller, container, 'overflow-wrap', 'anywhere');
+  setLayoutOverride(controller, container, 'white-space', 'normal');
+}
+
+function overrideClippingAncestor(
+  controller: MirrorController,
+  ancestor: HTMLElement,
+): void {
+  setLayoutOverride(controller, ancestor, 'overflow-x', 'visible');
+  setLayoutOverride(controller, ancestor, 'overflow-y', 'visible');
+  setLayoutOverride(controller, ancestor, 'text-overflow', 'clip');
+  if (controller.textLayoutMode !== 'adaptive') return;
+  setLayoutOverride(controller, ancestor, 'height', 'auto');
+  setLayoutOverride(controller, ancestor, 'max-height', 'none');
+}
+
+function clipsOverflow(element: HTMLElement): boolean {
+  return ['overflow', 'overflow-x', 'overflow-y'].some((property) =>
+    CLIPPING_OVERFLOW_VALUES.has(
+      element.style.getPropertyValue(property).trim().toLowerCase(),
+    ),
+  );
+}
+
+function setLayoutOverride(
+  controller: MirrorController,
+  element: HTMLElement,
+  property: string,
+  value: string,
+): void {
+  let saved = controller.layoutOverrides.get(element);
+  if (!saved) {
+    saved = new Map();
+    controller.layoutOverrides.set(element, saved);
+  }
+  if (!saved.has(property)) {
+    saved.set(property, {
+      value: element.style.getPropertyValue(property),
+      priority: typeof element.style.getPropertyPriority === 'function'
+        ? element.style.getPropertyPriority(property)
+        : '',
+    });
+  }
+  element.style.setProperty(property, value, 'important');
+  if (element.style.getPropertyValue(property) !== value) {
+    element.style.setProperty(property, value);
+  }
+}
+
+function restoreLayoutOverrides(controller: MirrorController): void {
+  for (const [element, properties] of controller.layoutOverrides) {
+    for (const [property, saved] of properties) {
+      if (saved.value) {
+        element.style.setProperty(property, saved.value, saved.priority);
+      } else {
+        element.style.removeProperty(property);
+      }
+    }
+  }
+  controller.layoutOverrides.clear();
+}
+
+function isAbortError(error: unknown): boolean {
+  return error instanceof DOMException && error.name === 'AbortError';
 }
 
 function applyStyle(
@@ -213,16 +890,24 @@ function applyAttributes(
   element: Element,
   node: VisualElementNode,
   translations: ReadonlyMap<string, TranslationDisplay>,
+  controller: MirrorController,
 ): void {
   for (const [name, value] of Object.entries(node.attributes ?? {})) {
     element.setAttribute(name, value);
   }
   if (node.tag === 'img') {
     const image = element as HTMLImageElement;
+    const sourceAlt = node.attributes?.alt;
     const translatedAlt = node.itemId
       ? translations.get(node.itemId)?.alt
       : undefined;
     if (translatedAlt) image.alt = translatedAlt;
+    if (sourceAlt) {
+      const group = node.itemId
+        ? `image-alt-${node.itemId}`
+        : `image-alt-${node.nodeId ?? controller.nextGroup++}`;
+      bindImageAlt(controller, image, sourceAlt, group);
+    }
     image.loading = 'lazy';
     image.decoding = 'async';
     image.referrerPolicy = 'no-referrer';

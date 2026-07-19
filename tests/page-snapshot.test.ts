@@ -213,13 +213,27 @@ describe('parsePageSnapshot', () => {
 });
 
 describe('capturePageSnapshot', () => {
+  it('runs from its serialized source without module-scope runtime bindings', () => {
+    installTestPage('<main><p>Serialized capture</p></main>');
+    const injectedCapture = Function(
+      `return (${capturePageSnapshot.toString()});`,
+    )() as typeof capturePageSnapshot;
+
+    const snapshot = injectedCapture();
+
+    expect(snapshot.items).toContainEqual(
+      expect.objectContaining({ kind: 'text', text: 'Serialized capture' }),
+    );
+    expect(capturePageSnapshot.toString()).not.toContain('SNAPSHOT_LIMITS');
+  });
+
   it('captures a guarded figure caption once as visual page text', () => {
     installTestPage(`
       <figure>
         <figcaption>
           Visible caption
           <span hidden>hidden secret</span>
-          <span role="button">interactive secret</span>
+          <span role="button">Public button</span>
           <span contenteditable="true">typed secret</span>
         </figcaption>
         <img src="https://example.com/first.png" alt="first image">
@@ -231,7 +245,9 @@ describe('capturePageSnapshot', () => {
     const snapshot = capturePageSnapshot();
     const images = snapshot.items.filter((item) => item.kind === 'image');
     const captions = snapshot.items.filter(
-      (item) => item.kind === 'text' && item.text === 'Visible caption',
+      (item) =>
+        item.kind === 'text' &&
+        item.text === 'Visible caption Public button',
     );
 
     expect(images).toHaveLength(2);
@@ -242,8 +258,27 @@ describe('capturePageSnapshot', () => {
     expect(images[1]).not.toHaveProperty('caption');
     expect(captions).toHaveLength(1);
     expect(JSON.stringify(snapshot.items)).not.toContain('secret');
+    expect(JSON.stringify(snapshot.items)).toContain('Public button');
     expect(JSON.stringify(snapshot.items)).not.toContain('private control');
     expect(snapshot.omissions.controls).toBeGreaterThan(0);
+  });
+
+  it('renders form-derived content as private shells without its values', () => {
+    installTestPage(`
+      <p>Public content</p>
+      <output>calculated private value</output>
+      <option>selected private value</option>
+      <optgroup>group private value</optgroup>
+      <datalist>suggested private value</datalist>
+    `);
+
+    const snapshot = capturePageSnapshot();
+    const serialized = JSON.stringify(snapshot);
+
+    expect(serialized).toContain('Public content');
+    expect(serialized).not.toContain('private value');
+    expect(snapshot.omissions.controls).toBeGreaterThanOrEqual(4);
+    expect(serialized.match(/"controlShell":"input"/gu)?.length).toBeGreaterThanOrEqual(4);
   });
 
   it('bounds DOM traversal even when nodes produce no snapshot items', () => {

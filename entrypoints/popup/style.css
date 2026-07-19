@@ -13,7 +13,7 @@
 
 body {
   width: 340px;
-  min-height: 310px;
+  min-height: 275px;
   margin: 0;
   background:
     radial-gradient(circle at 90% 0%, rgb(69 147 111 / 22%), transparent 43%),
@@ -22,7 +22,7 @@ body {
 
 .shell {
   display: flex;
-  min-height: 310px;
+  min-height: 275px;
   flex-direction: column;
   padding: 28px;
 }
@@ -36,15 +36,8 @@ body {
   text-transform: uppercase;
 }
 
-h1 {
-  margin: 0;
-  font-size: 40px;
-  letter-spacing: -0.055em;
-  line-height: 1;
-}
-
 .intro {
-  margin: 16px 0 20px;
+  margin: 8px 0 20px;
   color: #3f5148;
   font-size: 14px;
   line-height: 1.55;
@@ -78,6 +71,13 @@ button:disabled {
 
 .primary:hover:not(:disabled) {
   background: #115a3d;
+}
+
+.secondary {
+  margin-top: 9px;
+  border: 1px solid rgb(23 34 29 / 14%);
+  color: inherit;
+  background: rgb(255 255 255 / 70%);
 }
 
 .status {

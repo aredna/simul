@@ -8,6 +8,7 @@ import {
 } from '../lib/preference-coordinator';
 import {
   ALL_SITES_PERMISSION_ORIGINS,
+  DEFAULT_COMPANION_PREFERENCES,
   parseCompanionPreferences,
   permissionOriginsForMode,
   type CompanionPreferences,
@@ -49,6 +50,7 @@ describe('preference coordinator', () => {
 
   it('reconciles every retained site after a denied all-sites narrowing', async () => {
     const adapter = new MemoryPreferenceAdapter({
+      ...parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES),
       autoTranslateAllSites: true,
       autoTranslateOrigins: [
         'https://kept.example',
@@ -78,6 +80,7 @@ describe('preference coordinator', () => {
 
   it('keeps exact grants while all-sites automation is enabled', async () => {
     const adapter = new MemoryPreferenceAdapter({
+      ...parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES),
       autoTranslateAllSites: false,
       autoTranslateOrigins: ['https://kept.example'],
       displayMode: 'fit',
@@ -97,6 +100,7 @@ describe('preference coordinator', () => {
 
   it('removes partial wildcard and untracked exact grants during reconciliation', async () => {
     const adapter = new MemoryPreferenceAdapter({
+      ...parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES),
       autoTranslateAllSites: true,
       autoTranslateOrigins: ['https://kept.example'],
       displayMode: 'fit',
@@ -139,9 +143,61 @@ describe('preference coordinator', () => {
     ]);
 
     expect(adapter.preferences).toEqual({
+      ...parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES),
       autoTranslateAllSites: false,
       autoTranslateOrigins: ['https://one.example'],
       displayMode: 'actual',
+    });
+  });
+
+  it('applies a validated companion-view patch without replacing other fields', async () => {
+    const adapter = new MemoryPreferenceAdapter();
+    const coordinator = new PreferenceCoordinator(adapter);
+
+    const result = await coordinator.run({
+      type: 'simul:preferences:patch-view',
+      patch: {
+        targetLanguage: 'ja',
+        displayMode: 'custom',
+        zoomPercent: 185,
+      },
+    });
+
+    expect(result.applied).toBe(true);
+    expect(adapter.preferences).toMatchObject({
+      sourceLanguage: 'auto',
+      targetLanguage: 'ja',
+      displayMode: 'custom',
+      zoomPercent: 185,
+      syncScroll: true,
+      textLayoutMode: 'adaptive',
+    });
+  });
+
+  it('serializes concurrent view patches without stale fields overwriting each other', async () => {
+    const adapter = new MemoryPreferenceAdapter();
+    const coordinator = new PreferenceCoordinator(adapter);
+
+    await Promise.all([
+      coordinator.run({
+        type: 'simul:preferences:patch-view',
+        patch: { displayMode: 'custom', zoomPercent: 165 },
+      }),
+      coordinator.run({
+        type: 'simul:preferences:patch-view',
+        patch: { syncScroll: false },
+      }),
+      coordinator.run({
+        type: 'simul:preferences:patch-view',
+        patch: { textLayoutMode: 'faithful' },
+      }),
+    ]);
+
+    expect(adapter.preferences).toMatchObject({
+      displayMode: 'custom',
+      zoomPercent: 165,
+      syncScroll: false,
+      textLayoutMode: 'faithful',
     });
   });
 });
@@ -163,6 +219,41 @@ describe('preference coordinator message boundary', () => {
       readPreferenceCommand({
         type: 'simul:preferences:commit-auto',
         mode: 'everything',
+      }),
+    ).toBeUndefined();
+    expect(
+      readPreferenceCommand({
+        type: 'simul:preferences:patch-view',
+        patch: {
+          targetLanguage: 'ja',
+          zoomPercent: 160,
+          syncScroll: false,
+        },
+      }),
+    ).toEqual({
+      type: 'simul:preferences:patch-view',
+      patch: {
+        targetLanguage: 'ja',
+        zoomPercent: 160,
+        syncScroll: false,
+      },
+    });
+    expect(
+      readPreferenceCommand({
+        type: 'simul:preferences:patch-view',
+        patch: { targetLanguage: 'not-supported' },
+      }),
+    ).toBeUndefined();
+    expect(
+      readPreferenceCommand({
+        type: 'simul:preferences:patch-view',
+        patch: {},
+      }),
+    ).toBeUndefined();
+    expect(
+      readPreferenceCommand({
+        type: 'simul:preferences:patch-view',
+        patch: { syncScroll: true, unexpected: 'field' },
       }),
     ).toBeUndefined();
     expect(

@@ -1,18 +1,18 @@
 export const SNAPSHOT_VERSION = 1 as const;
 
 export const SNAPSHOT_LIMITS = {
-  maxItems: 350,
-  maxCharacters: 60_000,
+  maxItems: 1_200,
+  maxCharacters: 150_000,
   maxTextLength: 3_500,
-  maxVisitedNodes: 20_000,
-  maxVisualNodes: 1_500,
+  maxVisitedNodes: 50_000,
+  maxVisualNodes: 10_000,
   maxVisualDepth: 80,
-  maxVisualStyles: 750,
+  maxVisualStyles: 2_000,
   maxVisualValueLength: 500,
   maxVisualAttributeLength: 2_048,
-  maxVisualTextCharacters: 100_000,
-  maxVisualStyleCharacters: 750_000,
-  maxVisualAttributeCharacters: 200_000,
+  maxVisualTextCharacters: 300_000,
+  maxVisualStyleCharacters: 2_000_000,
+  maxVisualAttributeCharacters: 500_000,
   maxImageUrlCharacters: 200_000,
   maxDocumentDimension: 100_000,
   maxTitleLength: 300,
@@ -152,6 +152,7 @@ export interface VisualTextNode {
   kind: 'text';
   text: string;
   itemId?: string;
+  nodeId?: string;
 }
 
 export interface VisualElementNode {
@@ -160,6 +161,7 @@ export interface VisualElementNode {
   styleId: number;
   itemId?: string;
   controlShell?: VisualControlShell;
+  nodeId?: string;
   attributes?: Record<string, string>;
   children: VisualNode[];
 }
@@ -168,6 +170,7 @@ export interface VisualPlaceholderNode {
   kind: 'placeholder';
   styleId: number;
   label: string;
+  nodeId?: string;
 }
 
 export type VisualNode =
@@ -518,10 +521,10 @@ export function parsePageSnapshot(input: unknown): PageSnapshot {
  */
 export function capturePageSnapshot(): PageSnapshot {
   const version = 1 as const;
-  const maxItems = 350;
-  const maxCharacters = 60_000;
+  const maxItems = 1_200;
+  const maxCharacters = 150_000;
   const maxTextLength = 3_500;
-  const maxVisitedNodes = 20_000;
+  const maxVisitedNodes = 50_000;
   const maxTitleLength = 300;
   const maxUrlLength = 100_000;
   const items: SnapshotItem[] = [];
@@ -554,7 +557,7 @@ export function capturePageSnapshot(): PageSnapshot {
     'TEXTAREA',
     'SELECT',
     'OPTION',
-    'BUTTON',
+    'OPTGROUP',
     'DATALIST',
     'OUTPUT',
   ]);
@@ -563,26 +566,28 @@ export function capturePageSnapshot(): PageSnapshot {
     'TEXTAREA',
     'SELECT',
     'OPTION',
-    'BUTTON',
+    'OPTGROUP',
     'DATALIST',
     'OUTPUT',
   ]);
-  const interactiveRoles = new Set([
-    'button',
+  const privateRoles = new Set([
     'checkbox',
     'combobox',
     'listbox',
-    'menuitem',
-    'menuitemcheckbox',
-    'menuitemradio',
     'option',
     'radio',
     'searchbox',
     'slider',
     'spinbutton',
     'switch',
-    'tab',
     'textbox',
+  ]);
+  const publicControlRoles = new Set([
+    'button',
+    'menuitem',
+    'menuitemcheckbox',
+    'menuitemradio',
+    'tab',
     'treeitem',
   ]);
   const blockTags = new Set([
@@ -637,15 +642,7 @@ export function capturePageSnapshot(): PageSnapshot {
   };
 
   const isHidden = (element: Element): boolean => {
-    if (
-      element.hasAttribute('hidden') ||
-      element.getAttribute('aria-hidden') === 'true'
-    ) {
-      return true;
-    }
-
-    const htmlElement = element as HTMLElement;
-    if (htmlElement.inert) return true;
+    if (element.hasAttribute('hidden')) return true;
 
     const style = window.getComputedStyle(element);
     if (
@@ -669,8 +666,30 @@ export function capturePageSnapshot(): PageSnapshot {
     return (
       excludedTags.has(element.tagName) ||
       element.hasAttribute('contenteditable') ||
-      roles.some((role) => interactiveRoles.has(role))
+      roles.some((role) => privateRoles.has(role))
     );
+  };
+
+  const composedParentElement = (node: Node): Element | null => {
+    if (node.parentElement) return node.parentElement;
+    const root = node.getRootNode();
+    return typeof ShadowRoot !== 'undefined' && root instanceof ShadowRoot
+      ? root.host
+      : null;
+  };
+
+  const composedChildren = (element: Element): Node[] => {
+    if (
+      element.tagName === 'SLOT' &&
+      'assignedNodes' in element &&
+      typeof element.assignedNodes === 'function'
+    ) {
+      const assigned = element.assignedNodes({ flatten: true });
+      return assigned.length > 0 ? assigned : [...element.childNodes];
+    }
+    return element.shadowRoot
+      ? [...element.shadowRoot.childNodes]
+      : [...element.childNodes];
   };
 
   const textRole = (container: Element): SnapshotTextRole => {
@@ -708,7 +727,7 @@ export function capturePageSnapshot(): PageSnapshot {
     let current: Element | null = element;
     while (current && current !== document.body) {
       if (blockTags.has(current.tagName)) return current;
-      current = current.parentElement;
+      current = composedParentElement(current);
     }
     return document.body;
   };
@@ -744,7 +763,7 @@ export function capturePageSnapshot(): PageSnapshot {
       ) {
         return;
       }
-      for (const child of element.childNodes) {
+      for (const child of composedChildren(element)) {
         if (auxiliaryNodesInspected >= maxVisitedNodes) {
           omissions.truncated = true;
           break;
@@ -834,7 +853,7 @@ export function capturePageSnapshot(): PageSnapshot {
     if (stopIfBounded()) return;
 
     if (node.nodeType === Node.TEXT_NODE) {
-      const parent = node.parentElement;
+      const parent = composedParentElement(node);
       if (parent) appendTextGroup(parent);
       return;
     }
@@ -867,7 +886,7 @@ export function capturePageSnapshot(): PageSnapshot {
       return;
     }
 
-    for (const child of element.childNodes) {
+    for (const child of composedChildren(element)) {
       if (visitedNodes >= maxVisitedNodes) {
         omissions.truncated = true;
         break;
@@ -877,6 +896,14 @@ export function capturePageSnapshot(): PageSnapshot {
   };
 
   visit(document.body);
+
+  const liveRegistry = (
+    globalThis as typeof globalThis & {
+      __simulLiveMirrorV1?: { idFor(node: Node): string };
+    }
+  ).__simulLiveMirrorV1;
+  const liveNodeId = (node: Node): string | undefined =>
+    liveRegistry?.idFor(node);
 
   const visualStyleProperties = [
     'align-content', 'align-items', 'align-self', 'aspect-ratio',
@@ -997,11 +1024,11 @@ export function capturePageSnapshot(): PageSnapshot {
       (total, [property, value]) => total + property.length + value.length,
       0,
     );
-    if (visualStyleCharacters + capturedCharacters > 750_000) {
+    if (visualStyleCharacters + capturedCharacters > 2_000_000) {
       omissions.truncated = true;
       return 0;
     }
-    if (styles.length >= 750) {
+    if (styles.length >= 2_000) {
       omissions.truncated = true;
       return 0;
     }
@@ -1024,6 +1051,7 @@ export function capturePageSnapshot(): PageSnapshot {
         return 'button';
       case 'DATALIST':
       case 'OPTION':
+      case 'OPTGROUP':
       case 'OUTPUT':
         return 'input';
       default:
@@ -1033,7 +1061,8 @@ export function capturePageSnapshot(): PageSnapshot {
           ?.trim()
           .toLowerCase()
           .split(/\s+/u) ?? [];
-        return roles.some((role) => interactiveRoles.has(role))
+        if (roles.some((role) => privateRoles.has(role))) return 'input';
+        return roles.some((role) => publicControlRoles.has(role))
           ? 'button'
           : undefined;
     }
@@ -1069,7 +1098,7 @@ export function capturePageSnapshot(): PageSnapshot {
     const attributes: Record<string, string> = {};
     const addAttribute = (name: string, value: string): void => {
       const characters = name.length + value.length;
-      if (visualAttributeCharacters + characters > 200_000) {
+      if (visualAttributeCharacters + characters > 500_000) {
         omissions.truncated = true;
         return;
       }
@@ -1095,10 +1124,23 @@ export function capturePageSnapshot(): PageSnapshot {
     return Object.keys(attributes).length > 0 ? attributes : undefined;
   };
 
+  const containsVisualText = (nodes: VisualNode[]): boolean =>
+    nodes.some((node) =>
+      node.kind === 'text'
+        ? node.text.trim().length > 0
+        : node.kind === 'element' && containsVisualText(node.children),
+    );
+
+  const publicControlLabel = (element: Element): string =>
+    (element.getAttribute('aria-label') || element.getAttribute('title') || '')
+      .replace(/\s+/gu, ' ')
+      .trim()
+      .slice(0, 2_048);
+
   const buildVisualNode = (node: Node, depth: number): VisualNode | undefined => {
     if (
-      visualInspectedNodes >= 20_000 ||
-      visualNodes >= 1_500 ||
+      visualInspectedNodes >= 50_000 ||
+      visualNodes >= 10_000 ||
       depth > 80
     ) {
       omissions.truncated = true;
@@ -1109,7 +1151,7 @@ export function capturePageSnapshot(): PageSnapshot {
     if (node.nodeType === Node.TEXT_NODE) {
       const rawText = node.textContent ?? '';
       if (!rawText) return undefined;
-      const remaining = Math.max(0, 100_000 - visualCharacters);
+      const remaining = Math.max(0, 300_000 - visualCharacters);
       if (remaining === 0) {
         omissions.truncated = true;
         return undefined;
@@ -1119,10 +1161,12 @@ export function capturePageSnapshot(): PageSnapshot {
       visualCharacters += text.length;
       visualNodes += 1;
       const itemId = textItemIds.get(node);
+      const nodeId = liveNodeId(node);
       return {
         kind: 'text',
         text,
         ...(itemId ? { itemId } : {}),
+        ...(nodeId ? { nodeId } : {}),
       };
     }
 
@@ -1149,23 +1193,48 @@ export function capturePageSnapshot(): PageSnapshot {
 
     const styleId = internStyle(element);
     const placeholder = placeholderLabel(element);
+    const nodeId = liveNodeId(element);
     visualNodes += 1;
     if (placeholder) {
-      return { kind: 'placeholder', styleId, label: placeholder };
+      return {
+        kind: 'placeholder',
+        styleId,
+        label: placeholder,
+        ...(nodeId ? { nodeId } : {}),
+      };
     }
 
     const tag = visualTag(element);
     const shell = controlShell(element);
     const itemId = imageItemIds.get(element);
     const children: VisualNode[] = [];
-    if (!shell) {
-      for (const child of element.childNodes) {
-        if (visualInspectedNodes >= 20_000 || visualNodes >= 1_500) {
+    if (!shell || shell === 'button') {
+      for (const child of composedChildren(element)) {
+        if (visualInspectedNodes >= 50_000 || visualNodes >= 10_000) {
           omissions.truncated = true;
           break;
         }
         const visualChild = buildVisualNode(child, depth + 1);
         if (visualChild) children.push(visualChild);
+      }
+      if (shell === 'button' && !containsVisualText(children)) {
+        const label = publicControlLabel(element);
+        if (label) {
+          if (
+            visualNodes >= 10_000 ||
+            visualCharacters + label.length > 300_000
+          ) {
+            omissions.truncated = true;
+          } else {
+            visualNodes += 1;
+            visualCharacters += label.length;
+            children.push({
+              kind: 'text',
+              text: label,
+              ...(nodeId ? { nodeId } : {}),
+            });
+          }
+        }
       }
     }
     return {
@@ -1173,6 +1242,7 @@ export function capturePageSnapshot(): PageSnapshot {
       tag,
       styleId,
       ...(itemId ? { itemId } : {}),
+      ...(nodeId ? { nodeId } : {}),
       ...(shell ? { controlShell: shell } : {}),
       ...(!shell ? { attributes: visualAttributes(element, tag) } : {}),
       children,
@@ -1289,10 +1359,12 @@ function parseVisualPage(
       const text = rawNode.text.slice(0, remaining);
       characterCount += text.length;
       const itemId = readVisualItemId(rawNode.itemId, itemIds);
+      const nodeId = readVisualNodeId(rawNode.nodeId);
       return {
         kind: 'text',
         text,
         ...(itemId ? { itemId } : {}),
+        ...(nodeId ? { nodeId } : {}),
       };
     }
 
@@ -1309,7 +1381,13 @@ function parseVisualPage(
         typeof rawNode.label === 'string' && labels.has(rawNode.label)
           ? rawNode.label
           : 'Unsupported content omitted';
-      return { kind: 'placeholder', styleId, label };
+      const nodeId = readVisualNodeId(rawNode.nodeId);
+      return {
+        kind: 'placeholder',
+        styleId,
+        label,
+        ...(nodeId ? { nodeId } : {}),
+      };
     }
 
     if (
@@ -1321,7 +1399,10 @@ function parseVisualPage(
     }
     const controlShell = readControlShell(rawNode.controlShell);
     const children: VisualNode[] = [];
-    if (!controlShell && Array.isArray(rawNode.children)) {
+    if (
+      (!controlShell || controlShell === 'button') &&
+      Array.isArray(rawNode.children)
+    ) {
       for (const rawChild of rawNode.children) {
         const child = parseNode(rawChild, depth + 1);
         if (child) children.push(child);
@@ -1336,11 +1417,13 @@ function parseVisualPage(
           attributeBudget,
         );
     const itemId = readVisualItemId(rawNode.itemId, itemIds);
+    const nodeId = readVisualNodeId(rawNode.nodeId);
     return {
       kind: 'element',
       tag: rawNode.tag,
       styleId,
       ...(itemId ? { itemId } : {}),
+      ...(nodeId ? { nodeId } : {}),
       ...(controlShell ? { controlShell } : {}),
       ...(attributes ? { attributes } : {}),
       children,
@@ -1495,6 +1578,12 @@ function readVisualItemId(
   itemIds: ReadonlyMap<string, string>,
 ): string | undefined {
   return typeof value === 'string' ? itemIds.get(value) : undefined;
+}
+
+function readVisualNodeId(value: unknown): string | undefined {
+  return typeof value === 'string' && /^n[1-9]\d{0,8}$/u.test(value)
+    ? value
+    : undefined;
 }
 
 function readVisualDimension(value: unknown): number {

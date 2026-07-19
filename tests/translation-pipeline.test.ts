@@ -7,6 +7,7 @@ import {
   retryIncompleteTranslations,
   splitText,
   translateSnapshot,
+  translateWithSession,
 } from '../lib/translation-pipeline';
 import type { TranslationSession } from '../lib/translation-provider';
 
@@ -228,6 +229,32 @@ describe('splitText', () => {
   it('uses a finite default when maxLength is not finite', () => {
     expect(splitText('short', Number.NaN)).toEqual(['short']);
     expect(splitText('short', Number.POSITIVE_INFINITY)).toEqual(['short']);
+  });
+});
+
+describe('translateWithSession', () => {
+  it('is reusable for single values and honors measured session quota', async () => {
+    const calls: string[] = [];
+    const session: TranslationSession = {
+      inputQuota: 2,
+      measureInputUsage: async (text) => [...text].length,
+      translate: async (text) => {
+        calls.push(text);
+        return `<${text}>`;
+      },
+      destroy: vi.fn(),
+    };
+
+    const translated = await translateWithSession(
+      session,
+      'abcdef',
+      undefined,
+      6,
+    );
+
+    expect(calls.length).toBeGreaterThan(1);
+    expect(calls.every((chunk) => [...chunk].length <= 2)).toBe(true);
+    expect(translated).toBe(calls.map((chunk) => `<${chunk}>`).join(' '));
   });
 });
 

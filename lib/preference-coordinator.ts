@@ -4,14 +4,18 @@ import {
   autoTranslationModeForPage,
   isAutoTranslationMode,
   isMirrorDisplayMode,
+  isTextLayoutMode,
   parseCompanionPreferences,
   permissionOriginsForMode,
   withAutoTranslationMode,
   withDisplayMode,
+  withViewSettings,
   type AutoTranslationMode,
   type CompanionPreferences,
+  type CompanionViewSettingsPatch,
   type MirrorDisplayMode,
 } from './preferences';
+import { isSupportedLanguage } from './translation-provider';
 
 export const PREFERENCE_LOCK_NAME = 'simul:companion-preferences';
 
@@ -19,6 +23,10 @@ export type PreferenceCommand =
   | {
       type: 'simul:preferences:set-display';
       displayMode: MirrorDisplayMode;
+    }
+  | {
+      type: 'simul:preferences:patch-view';
+      patch: CompanionViewSettingsPatch;
     }
   | {
       type: 'simul:preferences:commit-auto';
@@ -78,6 +86,12 @@ export class PreferenceCoordinator {
 
     if (command.type === 'simul:preferences:set-display') {
       const preferences = withDisplayMode(current, command.displayMode);
+      await this.adapter.save(preferences);
+      return result(preferences, true);
+    }
+
+    if (command.type === 'simul:preferences:patch-view') {
+      const preferences = withViewSettings(current, command.patch);
       await this.adapter.save(preferences);
       return result(preferences, true);
     }
@@ -212,6 +226,10 @@ export function readPreferenceCommand(
   ) {
     return { type: value.type, displayMode: value.displayMode };
   }
+  if (value.type === 'simul:preferences:patch-view') {
+    const patch = readViewSettingsPatch(value.patch);
+    if (patch) return { type: value.type, patch };
+  }
   if (
     value.type === 'simul:preferences:commit-auto' &&
     isAutoTranslationMode(value.mode) &&
@@ -318,4 +336,57 @@ function isManagedPermissionOrigin(value: string): boolean {
 
 function isRecord(value: unknown): value is Record<string, unknown> {
   return typeof value === 'object' && value !== null && !Array.isArray(value);
+}
+
+const VIEW_SETTING_KEYS = new Set([
+  'sourceLanguage',
+  'targetLanguage',
+  'displayMode',
+  'zoomPercent',
+  'syncScroll',
+  'textLayoutMode',
+]);
+
+function readViewSettingsPatch(
+  value: unknown,
+): CompanionViewSettingsPatch | undefined {
+  if (!isRecord(value)) return undefined;
+  const entries = Object.entries(value);
+  if (
+    entries.length === 0 ||
+    entries.some(([key]) => !VIEW_SETTING_KEYS.has(key))
+  ) return undefined;
+
+  const patch: CompanionViewSettingsPatch = {};
+  if ('sourceLanguage' in value) {
+    if (
+      value.sourceLanguage !== 'auto' &&
+      !isSupportedLanguage(value.sourceLanguage)
+    ) return undefined;
+    patch.sourceLanguage = value.sourceLanguage;
+  }
+  if ('targetLanguage' in value) {
+    if (!isSupportedLanguage(value.targetLanguage)) return undefined;
+    patch.targetLanguage = value.targetLanguage;
+  }
+  if ('displayMode' in value) {
+    if (!isMirrorDisplayMode(value.displayMode)) return undefined;
+    patch.displayMode = value.displayMode;
+  }
+  if ('zoomPercent' in value) {
+    if (
+      typeof value.zoomPercent !== 'number' ||
+      !Number.isFinite(value.zoomPercent)
+    ) return undefined;
+    patch.zoomPercent = value.zoomPercent;
+  }
+  if ('syncScroll' in value) {
+    if (typeof value.syncScroll !== 'boolean') return undefined;
+    patch.syncScroll = value.syncScroll;
+  }
+  if ('textLayoutMode' in value) {
+    if (!isTextLayoutMode(value.textLayoutMode)) return undefined;
+    patch.textLayoutMode = value.textLayoutMode;
+  }
+  return patch;
 }

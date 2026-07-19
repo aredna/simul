@@ -9,13 +9,14 @@ status: release-ready
 
 ## Current product state
 
-The repository contains the approved side-by-side translation MVP. A user can
-open a read-only active-page snapshot in Chrome's native side panel and
-translate eligible Japanese or English text locally with Chrome's Translator
-API. The approved quick-flow spec under `_bmad-output/implementation-artifacts/`
-is the source of truth for its behavior and boundaries. A validated production
-build is checked in at `dist/chrome-unpacked/` for direct Developer mode
-installation without contributor tooling.
+The repository contains a content-first live translation companion. A user can
+open a read-only active-page mirror in Chrome's native side panel or a detached
+extension window, translate Chrome-supported language pairs locally, follow
+bounded DOM/style/image/scroll deltas, zoom the mirror, and compose a reverse
+translation. An initial sanitized capture bootstraps stable isolated-world
+node IDs; normal synchronization replaces only coalesced dirty subtrees. A
+validated production build is checked in at `dist/chrome-unpacked/` for direct
+Developer mode installation without contributor tooling.
 
 ## Fixed engineering baseline
 
@@ -51,7 +52,8 @@ extension APIs or page integration.
 - `entrypoints/popup/`: active-page side-panel launcher
 - `entrypoints/sidepanel/`: translation companion UI and browser orchestration
 - `entrypoints/page-snapshot.ts`: unlisted top-frame snapshot entrypoint
-- `lib/`: safe snapshot, provider adapter, and translation pipeline logic
+- `lib/`: safe bootstrap/delta boundaries, inert renderer, preferences,
+  provider adapter, and translation pipeline logic
 - `tests/`: unit tests
 - `tools/extension-artifact.mjs`: guarded release build, validation, sync, and
   byte comparison

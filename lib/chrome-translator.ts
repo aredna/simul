@@ -5,6 +5,7 @@ import {
   type TranslationProvider,
   TranslationProviderError,
   type TranslationSession,
+  chromeTranslatorLanguageCode,
   isSupportedTranslationPair,
 } from './translation-provider';
 
@@ -49,10 +50,11 @@ export class ChromeTranslatorProvider implements TranslationProvider {
     pair: TranslationPair,
   ): Promise<TranslationAvailability> {
     this.assertPair(pair);
+    if (pair.sourceLanguage === pair.targetLanguage) return 'available';
     const api = this.requireApi();
 
     try {
-      const availability = await api.availability(pair);
+      const availability = await api.availability(toBrowserPair(pair));
       return normalizeAvailability(availability);
     } catch (error) {
       throw new TranslationProviderError(
@@ -68,12 +70,15 @@ export class ChromeTranslatorProvider implements TranslationProvider {
     options: CreateTranslationSessionOptions = {},
   ): Promise<TranslationSession> {
     this.assertPair(pair);
+    if (pair.sourceLanguage === pair.targetLanguage) {
+      return new NoopTranslationSession();
+    }
     const api = this.requireApi();
     options.signal?.throwIfAborted();
 
     try {
       const instance = await api.create({
-        ...pair,
+        ...toBrowserPair(pair),
         ...(options.signal ? { signal: options.signal } : {}),
         ...(options.onDownloadProgress
           ? {
@@ -101,7 +106,7 @@ export class ChromeTranslatorProvider implements TranslationProvider {
     if (!isSupportedTranslationPair(pair)) {
       throw new TranslationProviderError(
         'pair-unavailable',
-        'This version supports only Japanese and English in opposite directions.',
+        'Chrome does not support one of the selected languages.',
       );
     }
   }
@@ -115,6 +120,15 @@ export class ChromeTranslatorProvider implements TranslationProvider {
     }
     return this.api;
   }
+}
+
+class NoopTranslationSession implements TranslationSession {
+  async translate(text: string, signal?: AbortSignal): Promise<string> {
+    signal?.throwIfAborted();
+    return text;
+  }
+
+  destroy(): void {}
 }
 
 class ChromeTranslationSession implements TranslationSession {
@@ -194,6 +208,16 @@ export function readTranslatorApi(): BrowserTranslatorApi | undefined {
     return candidate as BrowserTranslatorApi;
   }
   return undefined;
+}
+
+function toBrowserPair(pair: TranslationPair): {
+  sourceLanguage: string;
+  targetLanguage: string;
+} {
+  return {
+    sourceLanguage: chromeTranslatorLanguageCode(pair.sourceLanguage),
+    targetLanguage: chromeTranslatorLanguageCode(pair.targetLanguage),
+  };
 }
 
 function countCodePoints(value: string): number {

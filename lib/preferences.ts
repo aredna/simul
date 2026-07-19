@@ -8,9 +8,23 @@ export const AUTO_TRANSLATION_MODES = ['off', 'site', 'all'] as const;
 
 export type AutoTranslationMode = (typeof AUTO_TRANSLATION_MODES)[number];
 
-export const MIRROR_DISPLAY_MODES = ['fit', 'actual'] as const;
+import {
+  isSupportedLanguage,
+  type SupportedLanguage,
+} from './translation-provider';
+
+export const MIRROR_DISPLAY_MODES = ['fit', 'actual', 'custom'] as const;
 
 export type MirrorDisplayMode = (typeof MIRROR_DISPLAY_MODES)[number];
+
+export const TEXT_LAYOUT_MODES = ['adaptive', 'faithful'] as const;
+
+export type TextLayoutMode = (typeof TEXT_LAYOUT_MODES)[number];
+
+export type SourceLanguagePreference = 'auto' | SupportedLanguage;
+
+export const MIN_ZOOM_PERCENT = 25;
+export const MAX_ZOOM_PERCENT = 300;
 
 export const ALL_SITES_PERMISSION_ORIGINS = [
   'http://*/*',
@@ -23,6 +37,11 @@ export interface CompanionPreferences {
   /** Canonical HTTP(S) origins individually opted in by the user. */
   autoTranslateOrigins: string[];
   displayMode: MirrorDisplayMode;
+  sourceLanguage: SourceLanguagePreference;
+  targetLanguage: SupportedLanguage;
+  zoomPercent: number;
+  syncScroll: boolean;
+  textLayoutMode: TextLayoutMode;
 }
 
 export const DEFAULT_COMPANION_PREFERENCES: Readonly<CompanionPreferences> =
@@ -30,6 +49,11 @@ export const DEFAULT_COMPANION_PREFERENCES: Readonly<CompanionPreferences> =
     autoTranslateAllSites: false,
     autoTranslateOrigins: Object.freeze([]) as unknown as string[],
     displayMode: 'fit',
+    sourceLanguage: 'auto',
+    targetLanguage: 'en',
+    zoomPercent: 100,
+    syncScroll: true,
+    textLayoutMode: 'adaptive',
   });
 
 const MAX_SAVED_ORIGINS = 256;
@@ -61,6 +85,21 @@ export function parseCompanionPreferences(
     displayMode: isMirrorDisplayMode(input.displayMode)
       ? input.displayMode
       : DEFAULT_COMPANION_PREFERENCES.displayMode,
+    sourceLanguage:
+      input.sourceLanguage === 'auto' || isSupportedLanguage(input.sourceLanguage)
+        ? input.sourceLanguage
+        : DEFAULT_COMPANION_PREFERENCES.sourceLanguage,
+    targetLanguage: isSupportedLanguage(input.targetLanguage)
+      ? input.targetLanguage
+      : DEFAULT_COMPANION_PREFERENCES.targetLanguage,
+    zoomPercent: parseZoomPercent(input.zoomPercent),
+    syncScroll:
+      typeof input.syncScroll === 'boolean'
+        ? input.syncScroll
+        : DEFAULT_COMPANION_PREFERENCES.syncScroll,
+    textLayoutMode: isTextLayoutMode(input.textLayoutMode)
+      ? input.textLayoutMode
+      : DEFAULT_COMPANION_PREFERENCES.textLayoutMode,
   };
 }
 
@@ -74,6 +113,10 @@ export function isMirrorDisplayMode(
   value: unknown,
 ): value is MirrorDisplayMode {
   return MIRROR_DISPLAY_MODES.includes(value as MirrorDisplayMode);
+}
+
+export function isTextLayoutMode(value: unknown): value is TextLayoutMode {
+  return TEXT_LAYOUT_MODES.includes(value as TextLayoutMode);
 }
 
 /** Return a canonical origin only for ordinary HTTP(S) page URLs. */
@@ -199,12 +242,49 @@ export function withDisplayMode(
   };
 }
 
+export interface CompanionViewSettings {
+  displayMode: MirrorDisplayMode;
+  sourceLanguage: SourceLanguagePreference;
+  targetLanguage: SupportedLanguage;
+  zoomPercent: number;
+  syncScroll: boolean;
+  textLayoutMode: TextLayoutMode;
+}
+
+export type CompanionViewSettingsPatch = Partial<CompanionViewSettings>;
+
+export function withViewSettings(
+  preferences: CompanionPreferences,
+  settings: CompanionViewSettingsPatch,
+): CompanionPreferences {
+  return parseCompanionPreferences({
+    ...parseCompanionPreferences(preferences),
+    ...settings,
+  });
+}
+
+export function clampZoomPercent(value: number): number {
+  if (!Number.isFinite(value)) return DEFAULT_COMPANION_PREFERENCES.zoomPercent;
+  return Math.min(MAX_ZOOM_PERCENT, Math.max(MIN_ZOOM_PERCENT, Math.round(value)));
+}
+
 function createDefaultPreferences(): CompanionPreferences {
   return {
     autoTranslateAllSites: false,
     autoTranslateOrigins: [],
     displayMode: 'fit',
+    sourceLanguage: 'auto',
+    targetLanguage: 'en',
+    zoomPercent: 100,
+    syncScroll: true,
+    textLayoutMode: 'adaptive',
   };
+}
+
+function parseZoomPercent(value: unknown): number {
+  return typeof value === 'number'
+    ? clampZoomPercent(value)
+    : DEFAULT_COMPANION_PREFERENCES.zoomPercent;
 }
 
 function parseStoredOrigin(value: unknown): string | undefined {
