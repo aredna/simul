@@ -1,0 +1,38 @@
+{
+  "name": "simul",
+  "version": "0.1.0",
+  "private": true,
+  "description": "A Chrome extension built with the BMAD Method.",
+  "type": "module",
+  "packageManager": "npm@12.0.1",
+  "engines": {
+    "node": ">=24 <25",
+    "npm": ">=12 <13"
+  },
+  "scripts": {
+    "dev": "wxt",
+    "build": "wxt build --browser chrome",
+    "zip": "wxt zip --browser chrome",
+    "postinstall": "wxt prepare",
+    "typecheck": "tsc --noEmit",
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "check": "npm run typecheck && npm test && npm run build"
+  },
+  "devDependencies": {
+    "typescript": "7.0.2",
+    "vitest": "4.1.10",
+    "wxt": "0.20.27"
+  },
+  "overrides": {
+    "adm-zip": "0.6.0",
+    "esbuild": "0.28.1",
+    "fx-runner": "1.5.0",
+    "tmp": "0.2.7",
+    "uuid": "11.1.1"
+  },
+  "allowScripts": {
+    "esbuild@0.28.1": true,
+    "fsevents@2.3.3": true
+  }
+}

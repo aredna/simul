@@ -1,0 +1,18 @@
+# Dependencies and generated extension output
+node_modules/
+.output/
+.wxt/
+coverage/
+*.crx
+*.zip
+
+# Local environment and editor files
+.env
+.env.*
+!.env.example
+.DS_Store
+*.log
+
+# BMAD personal configuration; team configuration and artifacts are tracked.
+_bmad/config.user.toml
+_bmad/custom/*.user.toml
