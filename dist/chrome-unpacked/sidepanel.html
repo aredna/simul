@@ -5,9 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="color-scheme" content="light dark">
     <title>Simul translation companion</title>
-    <script type="module" crossorigin src="/chunks/sidepanel-DB5Ekz0n.js"></script>
+    <script type="module" crossorigin src="/chunks/sidepanel-1g-bl3pP.js"></script>
     <link rel="modulepreload" crossorigin href="/chunks/browser-B79nNR8W.js">
-    <link rel="stylesheet" crossorigin href="/assets/sidepanel-CoDl1_Gp.css">
+    <link rel="stylesheet" crossorigin href="/assets/sidepanel-CR1g2DgU.css">
   </head>
   <body>
     <header class="app-header">
@@ -45,6 +45,25 @@
           </label>
         </div>
 
+        <div class="preference-row">
+          <label>
+            <span>Automatic translation</span>
+            <select id="auto-translate-mode">
+              <option value="off" selected>Off</option>
+              <option value="site">This site</option>
+              <option value="all">All sites</option>
+            </select>
+          </label>
+
+          <label>
+            <span>Companion size</span>
+            <select id="mirror-display-mode">
+              <option value="fit" selected>Fit width</option>
+              <option value="actual">1:1 size</option>
+            </select>
+          </label>
+        </div>
+
         <div class="action-row">
           <button id="translate" class="primary" type="button" disabled>
             Translate page
@@ -75,17 +94,17 @@
 
       <section id="snapshot" class="snapshot" aria-label="Page translation">
         <div class="empty-state">
-          <p>Preparing a safe, read-only page snapshot…</p>
+          <p>Preparing a safe, read-only visual snapshot…</p>
         </div>
       </section>
     </main>
 
     <footer>
       <p>
-        Read-only approximation. The original page is never modified. Image
-        pixels are shown unchanged; only available labels and captions are
-        translated in this version. Original remote images may reload from
-        their existing source host.
+        Read-only, high-fidelity approximation. The original page is never
+        modified. Image pixels are unchanged; available labels and captions
+        are translated. Original remote images and safe backgrounds may reload
+        from their existing source host.
       </p>
       <p class="placement-note">
         Side-panel placement is controlled globally by Chrome. A separate

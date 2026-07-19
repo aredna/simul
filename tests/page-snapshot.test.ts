@@ -174,10 +174,46 @@ describe('parsePageSnapshot', () => {
       text: 'x'.repeat(SNAPSHOT_LIMITS.maxTextLength),
     });
   });
+
+  it('does not bind a partial translation over a longer visual text node', () => {
+    const tooLong = 'x'.repeat(SNAPSHOT_LIMITS.maxTextLength + 1);
+    const snapshot = parsePageSnapshot({
+      version: 1,
+      title: 'Long visual field',
+      url: 'https://example.com/',
+      capturedAt: new Date().toISOString(),
+      items: [
+        { id: 'raw-long', kind: 'text', role: 'paragraph', text: tooLong },
+      ],
+      omissions: {},
+      visual: {
+        viewportWidth: 1_000,
+        viewportHeight: 800,
+        documentWidth: 1_000,
+        documentHeight: 800,
+        styles: [{}],
+        root: {
+          kind: 'element',
+          tag: 'p',
+          styleId: 0,
+          children: [
+            { kind: 'text', text: tooLong, itemId: 'raw-long' },
+          ],
+        },
+      },
+    });
+
+    expect(snapshot.items[0]).toMatchObject({
+      text: 'x'.repeat(SNAPSHOT_LIMITS.maxTextLength),
+    });
+    const visualText = snapshot.visual?.root.children[0];
+    expect(visualText?.kind).toBe('text');
+    expect(visualText).not.toHaveProperty('itemId');
+  });
 });
 
 describe('capturePageSnapshot', () => {
-  it('assigns a guarded caption once when it precedes multiple images', () => {
+  it('captures a guarded figure caption once as visual page text', () => {
     installTestPage(`
       <figure>
         <figcaption>
@@ -194,13 +230,17 @@ describe('capturePageSnapshot', () => {
 
     const snapshot = capturePageSnapshot();
     const images = snapshot.items.filter((item) => item.kind === 'image');
+    const captions = snapshot.items.filter(
+      (item) => item.kind === 'text' && item.text === 'Visible caption',
+    );
 
     expect(images).toHaveLength(2);
     expect(images[0]).toMatchObject({
       altText: 'first image',
-      caption: 'Visible caption',
     });
+    expect(images[0]).not.toHaveProperty('caption');
     expect(images[1]).not.toHaveProperty('caption');
+    expect(captions).toHaveLength(1);
     expect(JSON.stringify(snapshot.items)).not.toContain('secret');
     expect(JSON.stringify(snapshot.items)).not.toContain('private control');
     expect(snapshot.omissions.controls).toBeGreaterThan(0);
@@ -220,7 +260,7 @@ describe('capturePageSnapshot', () => {
     expect(snapshot.omissions.truncated).toBe(true);
   });
 
-  it('marks visible text, alt text, and captions truncated during capture', () => {
+  it('keeps oversized visual text intact while omitting its partial translation key', () => {
     const tooLong = '長'.repeat(SNAPSHOT_LIMITS.maxTextLength + 1);
     installTestPage(`
       <p>${tooLong}</p>
@@ -235,12 +275,11 @@ describe('capturePageSnapshot', () => {
     const image = snapshot.items.find((item) => item.kind === 'image');
 
     expect(snapshot.omissions.truncated).toBe(true);
-    expect(text?.kind === 'text' ? text.text.length : 0).toBe(
-      SNAPSHOT_LIMITS.maxTextLength,
-    );
+    expect(text).toBeUndefined();
+    expect(JSON.stringify(snapshot.visual)).toContain(tooLong);
     if (image?.kind === 'image') {
       expect(image.altText?.length).toBe(SNAPSHOT_LIMITS.maxTextLength);
-      expect(image.caption?.length).toBe(SNAPSHOT_LIMITS.maxTextLength);
+      expect(image.caption).toBeUndefined();
     } else {
       throw new Error('Expected captured image.');
     }

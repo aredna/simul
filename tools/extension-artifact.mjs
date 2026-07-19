@@ -21,6 +21,11 @@ export const APPROVED_PERMISSIONS = Object.freeze([
   'activeTab',
   'scripting',
   'sidePanel',
+  'storage',
+]);
+export const APPROVED_OPTIONAL_HOST_PERMISSIONS = Object.freeze([
+  'http://*/*',
+  'https://*/*',
 ]);
 export const MINIMUM_CHROME_VERSION = 138;
 
@@ -456,11 +461,25 @@ function validateManifest(manifest, filePaths) {
       `manifest.json permissions must be exactly: ${APPROVED_PERMISSIONS.join(', ')}.`,
     );
   }
-  for (const field of [
-    'host_permissions',
-    'optional_host_permissions',
-    'optional_permissions',
-  ]) {
+  const optionalHostPermissions = Array.isArray(
+    manifest.optional_host_permissions,
+  )
+    ? manifest.optional_host_permissions
+    : [];
+  if (
+    optionalHostPermissions.length !==
+      APPROVED_OPTIONAL_HOST_PERMISSIONS.length ||
+    new Set(optionalHostPermissions).size !==
+      APPROVED_OPTIONAL_HOST_PERMISSIONS.length ||
+    !APPROVED_OPTIONAL_HOST_PERMISSIONS.every((permission) =>
+      optionalHostPermissions.includes(permission),
+    )
+  ) {
+    throw new ArtifactError(
+      `manifest.json optional_host_permissions must be exactly: ${APPROVED_OPTIONAL_HOST_PERMISSIONS.join(', ')}.`,
+    );
+  }
+  for (const field of ['host_permissions', 'optional_permissions']) {
     if (field in manifest) {
       throw new ArtifactError(`manifest.json must not contain ${field}.`);
     }

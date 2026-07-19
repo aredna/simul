@@ -28,33 +28,64 @@ automatically.
 4. Select **Translate page**. Chrome may download an on-device language pack
    the first time you use a language pair.
 
-The original tab is not modified. Simul renders an inert snapshot in Chrome's
-side panel, where you can refresh the snapshot, cancel translation, or retry
-individual failures. Chrome controls whether side panels appear on the left or
-right.
+The original tab is not modified. Simul rebuilds a sanitized, inert visual
+mirror in Chrome's side panel, preserving ordinary page structure, layout,
+styling, images, and empty control locations. Choose **Fit width** for a scaled
+comparison or **1:1 size** for the source viewport's natural width.
+
+**Refresh snapshot** immediately rereads an authorized page. Simul also
+follows completed navigations in the same tab. Because Chrome intentionally
+expires temporary access when that tab moves to a different site, select the
+Simul toolbar icon once on the new site to authorize it; an already-open panel
+then refreshes without being closed.
+
+Automatic translation defaults to **Off**. Choose **This site** or **All
+sites** to grant the matching optional access and translate completed page
+loads automatically. If Chrome still needs to download a language pack,
+choose **Translate page** once from the panel; automatic loads begin only after
+that language pair is ready. Chrome controls whether side panels appear on the
+left or right.
 
 ## Privacy and permissions
 
 Page text is translated on-device. Simul has no analytics, remote translation
-fallback, API key, persistent content script, or host permissions. It requests
-only:
+fallback, API key, persistent content script, or required host access. Its
+installed permissions are:
 
 - `activeTab` for temporary access after you select the toolbar action;
-- `scripting` to read a bounded snapshot from that active page; and
-- `sidePanel` to show the translated companion.
+- `scripting` to read a bounded snapshot from that active page;
+- `sidePanel` to show the translated companion; and
+- `storage` to remember only automatic-translation scopes and the Fit/1:1
+  display choice.
 
-Original remote images displayed for context may reload from their existing
-source host. They are not sent to a translation service.
+The manifest declares optional access for regular HTTP and HTTPS pages, but
+Chrome grants none of it at installation. Selecting **This site** requests only
+that origin; selecting **All sites** requests all regular web origins. Turning
+a scope off removes its no-longer-needed access. Chrome shows the corresponding
+permission prompt.
+
+Chrome's per-site match patterns cannot represent one non-default port without
+broadening access to every port on that host. Simul therefore keeps **This
+site** unavailable for those URLs; use the toolbar gesture or explicitly choose
+**All sites** instead.
+
+Original remote images and safe CSS backgrounds displayed for context may
+reload from their existing source host. They are not sent to a translation
+service. Simul never copies page HTML, scripts, event handlers, links, form
+values, passwords, selections, or contenteditable text into the mirror.
 
 ## Current limitations
 
 - Chrome's Translator API and the required language pack must be available on
   the device.
-- The companion is an ordered visual approximation, not a live page clone.
+- The companion is a high-fidelity approximation, not a pixel-perfect or live
+  page clone. Translation changes text metrics and line wrapping.
 - Image pixels are unchanged. Only available image labels and captions are
   translated; OCR is not included.
-- Embedded cross-origin frames, canvas, video, forms, live mirroring, scroll
-  synchronization, and automatic form filling are not included.
+- Embedded-frame contents, canvas pixels, video, closed shadow roots, source
+  web-font files, live DOM mutation mirroring, scroll synchronization, and
+  automatic form filling are not included. Placeholders or safe shells retain
+  their approximate locations where possible.
 
 See [the translation companion guide](docs/translation-companion.md) for the
 full privacy model, limitations, and troubleshooting context.
@@ -70,6 +101,9 @@ full privacy model, limitations, and troubleshooting context.
   `chrome://extensions` and select Simul's **Reload** button.
 - Chrome blocks extensions from reading browser settings pages, the Chrome Web
   Store, and other restricted URLs. Open Simul on a regular website instead.
+- If a newly opened site says access expired, select the Simul toolbar icon on
+  that site. To avoid that gesture on later loads, opt that site into automatic
+  translation.
 
 ## Contributing
 

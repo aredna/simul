@@ -1,0 +1,240 @@
+export const COMPANION_PREFERENCES_STORAGE_KEY =
+  'simul.companionPreferences.v1';
+
+/** Kept short for browser.storage adapters that prefer a generic key import. */
+export const STORAGE_KEY = COMPANION_PREFERENCES_STORAGE_KEY;
+
+export const AUTO_TRANSLATION_MODES = ['off', 'site', 'all'] as const;
+
+export type AutoTranslationMode = (typeof AUTO_TRANSLATION_MODES)[number];
+
+export const MIRROR_DISPLAY_MODES = ['fit', 'actual'] as const;
+
+export type MirrorDisplayMode = (typeof MIRROR_DISPLAY_MODES)[number];
+
+export const ALL_SITES_PERMISSION_ORIGINS = [
+  'http://*/*',
+  'https://*/*',
+] as const;
+
+export interface CompanionPreferences {
+  /** Whether every HTTP(S) origin is opted in to automatic translation. */
+  autoTranslateAllSites: boolean;
+  /** Canonical HTTP(S) origins individually opted in by the user. */
+  autoTranslateOrigins: string[];
+  displayMode: MirrorDisplayMode;
+}
+
+export const DEFAULT_COMPANION_PREFERENCES: Readonly<CompanionPreferences> =
+  Object.freeze({
+    autoTranslateAllSites: false,
+    autoTranslateOrigins: Object.freeze([]) as unknown as string[],
+    displayMode: 'fit',
+  });
+
+const MAX_SAVED_ORIGINS = 256;
+
+/** Parse untrusted persisted data without allowing it to broaden site access. */
+export function parseCompanionPreferences(
+  input: unknown,
+): CompanionPreferences {
+  if (!isRecord(input)) return createDefaultPreferences();
+
+  const autoTranslateOrigins: string[] = [];
+  const seenOrigins = new Set<string>();
+  const rawOrigins = input.autoTranslateOrigins;
+
+  if (Array.isArray(rawOrigins)) {
+    for (const value of rawOrigins) {
+      const origin = parseStoredOrigin(value);
+      if (!origin || seenOrigins.has(origin)) continue;
+
+      seenOrigins.add(origin);
+      autoTranslateOrigins.push(origin);
+      if (autoTranslateOrigins.length >= MAX_SAVED_ORIGINS) break;
+    }
+  }
+
+  return {
+    autoTranslateAllSites: input.autoTranslateAllSites === true,
+    autoTranslateOrigins,
+    displayMode: isMirrorDisplayMode(input.displayMode)
+      ? input.displayMode
+      : DEFAULT_COMPANION_PREFERENCES.displayMode,
+  };
+}
+
+export function isAutoTranslationMode(
+  value: unknown,
+): value is AutoTranslationMode {
+  return AUTO_TRANSLATION_MODES.includes(value as AutoTranslationMode);
+}
+
+export function isMirrorDisplayMode(
+  value: unknown,
+): value is MirrorDisplayMode {
+  return MIRROR_DISPLAY_MODES.includes(value as MirrorDisplayMode);
+}
+
+/** Return a canonical origin only for ordinary HTTP(S) page URLs. */
+export function pageOrigin(url: string | undefined): string | undefined {
+  if (!url) return undefined;
+
+  try {
+    const parsed = new URL(url);
+    if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') {
+      return undefined;
+    }
+
+    return parsed.origin;
+  } catch {
+    return undefined;
+  }
+}
+
+/** Build the narrowest Chrome host match pattern for the page's origin. */
+export function sitePermissionPattern(
+  url: string | undefined,
+): string | undefined {
+  if (!url) return undefined;
+  try {
+    const parsed = new URL(url);
+    if (
+      (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') ||
+      parsed.port
+    ) {
+      return undefined;
+    }
+    return `${parsed.origin}/*`;
+  } catch {
+    return undefined;
+  }
+}
+
+export function permissionOriginsForMode(
+  mode: AutoTranslationMode,
+  url?: string,
+): string[] {
+  if (mode === 'all') return [...ALL_SITES_PERMISSION_ORIGINS];
+  if (mode === 'off') return [];
+
+  const pattern = sitePermissionPattern(url);
+  return pattern ? [pattern] : [];
+}
+
+export function permissionOriginsForPreferences(
+  preferences: CompanionPreferences,
+): string[] {
+  const normalized = parseCompanionPreferences(preferences);
+  if (normalized.autoTranslateAllSites) {
+    return [...ALL_SITES_PERMISSION_ORIGINS];
+  }
+
+  return normalized.autoTranslateOrigins.flatMap((origin) => {
+    const pattern = sitePermissionPattern(origin);
+    return pattern ? [pattern] : [];
+  });
+}
+
+export function autoTranslationModeForPage(
+  preferences: CompanionPreferences,
+  url: string | undefined,
+): AutoTranslationMode {
+  const normalized = parseCompanionPreferences(preferences);
+  if (normalized.autoTranslateAllSites) return 'all';
+
+  const origin = pageOrigin(url);
+  return origin && normalized.autoTranslateOrigins.includes(origin)
+    ? 'site'
+    : 'off';
+}
+
+export function isAutoTranslationEnabled(
+  preferences: CompanionPreferences,
+  url: string | undefined,
+): boolean {
+  return autoTranslationModeForPage(preferences, url) !== 'off';
+}
+
+/**
+ * Apply a scope choice for the current page. Other site-specific choices are
+ * retained, while choosing Off removes only the current site and disables a
+ * global opt-in.
+ */
+export function withAutoTranslationMode(
+  preferences: CompanionPreferences,
+  url: string | undefined,
+  mode: AutoTranslationMode,
+): CompanionPreferences {
+  const normalized = parseCompanionPreferences(preferences);
+  const origin = pageOrigin(url);
+
+  if (mode === 'all') {
+    return { ...normalized, autoTranslateAllSites: true };
+  }
+
+  const origins = origin
+    ? normalized.autoTranslateOrigins.filter((candidate) => candidate !== origin)
+    : [...normalized.autoTranslateOrigins];
+
+  if (mode === 'site' && origin) {
+    if (origins.length >= MAX_SAVED_ORIGINS) return normalized;
+    origins.push(origin);
+  }
+
+  return {
+    ...normalized,
+    autoTranslateAllSites: false,
+    autoTranslateOrigins: origins,
+  };
+}
+
+export function withDisplayMode(
+  preferences: CompanionPreferences,
+  displayMode: MirrorDisplayMode,
+): CompanionPreferences {
+  return {
+    ...parseCompanionPreferences(preferences),
+    displayMode,
+  };
+}
+
+function createDefaultPreferences(): CompanionPreferences {
+  return {
+    autoTranslateAllSites: false,
+    autoTranslateOrigins: [],
+    displayMode: 'fit',
+  };
+}
+
+function parseStoredOrigin(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+
+  try {
+    const parsed = new URL(value);
+    if (
+      (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') ||
+      parsed.port ||
+      parsed.username ||
+      parsed.password ||
+      parsed.pathname !== '/' ||
+      parsed.search ||
+      parsed.hash
+    ) {
+      return undefined;
+    }
+
+    // Stored values are origins, not URLs that may silently expand scope.
+    if (value !== parsed.origin && value !== `${parsed.origin}/`) {
+      return undefined;
+    }
+
+    return parsed.origin;
+  } catch {
+    return undefined;
+  }
+}
+
+function isRecord(value: unknown): value is Record<string, unknown> {
+  return typeof value === 'object' && value !== null && !Array.isArray(value);
+}

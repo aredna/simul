@@ -13,6 +13,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
+  APPROVED_OPTIONAL_HOST_PERMISSIONS,
   APPROVED_PERMISSIONS,
   assertCanonicalSyncTarget,
   canonicalArtifactDirectory,
@@ -42,12 +43,13 @@ describe('validateArtifact', () => {
       manifest_version: 3,
       minimum_chrome_version: '138',
       permissions: APPROVED_PERMISSIONS,
+      optional_host_permissions: APPROVED_OPTIONAL_HOST_PERMISSIONS,
     });
     expect(validation.files).toContain('manifest.json');
     expect(validation.files).toContain('assets/popup.css');
   });
 
-  it('rejects excess permissions and host permissions', async () => {
+  it('rejects excess required permissions and required host permissions', async () => {
     const excess = await createTemporaryArtifact({
       manifest: { permissions: [...APPROVED_PERMISSIONS, 'tabs'] },
     });
@@ -60,6 +62,40 @@ describe('validateArtifact', () => {
     });
     await expect(validateArtifact(hostAccess)).rejects.toThrow(
       'must not contain host_permissions',
+    );
+  });
+
+  it.each([
+    [undefined, 'missing'],
+    [['https://*/*'], 'missing HTTP access'],
+    [
+      [...APPROVED_OPTIONAL_HOST_PERMISSIONS, 'https://example.com/*'],
+      'excess site access',
+    ],
+    [
+      [
+        APPROVED_OPTIONAL_HOST_PERMISSIONS[0],
+        APPROVED_OPTIONAL_HOST_PERMISSIONS[0],
+      ],
+      'duplicate access',
+    ],
+  ])('rejects %s optional host permissions (%s)', async (permissions) => {
+    const artifact = await createTemporaryArtifact({
+      manifest: { optional_host_permissions: permissions },
+    });
+
+    await expect(validateArtifact(artifact)).rejects.toThrow(
+      'optional_host_permissions must be exactly',
+    );
+  });
+
+  it('rejects optional named permissions outside the approved boundary', async () => {
+    const artifact = await createTemporaryArtifact({
+      manifest: { optional_permissions: ['tabs'] },
+    });
+
+    await expect(validateArtifact(artifact)).rejects.toThrow(
+      'must not contain optional_permissions',
     );
   });
 
@@ -383,6 +419,7 @@ async function createValidArtifact(
     version: '0.1.0',
     minimum_chrome_version: '138',
     permissions: [...APPROVED_PERMISSIONS],
+    optional_host_permissions: [...APPROVED_OPTIONAL_HOST_PERMISSIONS],
     background: { service_worker: 'background.js' },
     action: { default_popup: 'popup.html' },
     side_panel: { default_path: 'sidepanel.html' },

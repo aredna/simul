@@ -7,6 +7,7 @@ export default defineConfig({
     description:
       'Compare a page with a local Japanese or English translation in Chrome\'s side panel.',
     minimum_chrome_version: '138',
-    permissions: ['activeTab', 'scripting', 'sidePanel'],
+    permissions: ['activeTab', 'scripting', 'sidePanel', 'storage'],
+    optional_host_permissions: ['http://*/*', 'https://*/*'],
   },
 });

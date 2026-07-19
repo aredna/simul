@@ -23,6 +23,23 @@ async function openTranslationPanel(): Promise<void> {
         'The panel is open, but this page cannot be read. Use a regular HTTP or HTTPS page.',
       );
     }
+    try {
+      await browser.runtime.sendMessage({
+        type: 'simul:authorized-tab',
+        tabId: tab.id,
+        windowId: tab.windowId,
+        url: tab.url,
+      });
+    } catch (error) {
+      // A newly created side panel may still be loading. Its own initializer
+      // will read this activeTab grant; an already-open panel receives the
+      // target-locked message and refreshes immediately.
+      if (!/receiving end does not exist|could not establish connection/iu.test(
+        readableError(error),
+      )) {
+        throw error;
+      }
+    }
     setStatus('Translation panel opened beside this page.', false);
   } catch (error) {
     setStatus(readableError(error), true);
