@@ -2,16 +2,18 @@
 project_name: Simul
 project_type: chrome-extension
 planning_track: quick-flow
-status: foundation
+status: mvp-implemented
 ---
 
 # Simul Project Context
 
 ## Current product state
 
-The repository is a working extension shell. The user-facing product problem,
-audience, and feature set have not been defined yet. BMAD discovery artifacts
-are the source of truth for future behavior and scope.
+The repository contains the approved side-by-side translation MVP. A user can
+open a read-only active-page snapshot in Chrome's native side panel and
+translate eligible Japanese or English text locally with Chrome's Translator
+API. The approved quick-flow spec under `_bmad-output/implementation-artifacts/`
+is the source of truth for its behavior and boundaries.
 
 ## Fixed engineering baseline
 
@@ -41,8 +43,10 @@ browser-level tests when behavior depends on extension APIs or page integration.
 ## Source layout
 
 - `entrypoints/background.ts`: Manifest V3 service worker entrypoint
-- `entrypoints/popup/`: toolbar popup shell
-- `lib/`: browser-independent logic
+- `entrypoints/popup/`: active-page side-panel launcher
+- `entrypoints/sidepanel/`: translation companion UI and browser orchestration
+- `entrypoints/page-snapshot.ts`: unlisted top-frame snapshot entrypoint
+- `lib/`: safe snapshot, provider adapter, and translation pipeline logic
 - `tests/`: unit tests
 - `docs/`: durable project knowledge
 - `_bmad-output/`: BMAD planning and implementation artifacts

@@ -1,15 +1,16 @@
 # Simul
 
-Simul is a Chrome Manifest V3 extension project bootstrapped for learning the
-[BMAD Method](https://docs.bmad-method.org/) while keeping implementation fast.
-The repository currently provides a verified extension shell; product behavior
-will be defined through the BMAD discovery workflow.
+Simul is a Chrome Manifest V3 extension for comparing a web page with an
+on-device Japanese or English translation in Chrome's side panel. It is also a
+small project for learning the [BMAD Method](https://docs.bmad-method.org/)
+while shipping quickly.
 
 ## Foundation
 
 - [WXT](https://wxt.dev/) 0.20.27 with vanilla TypeScript
 - Node.js 24 LTS and npm
-- Chrome Manifest V3 with no production permissions
+- Chrome Manifest V3 with narrowly scoped `activeTab`, `scripting`, and
+  `sidePanel` permissions and no host permissions
 - Vitest unit tests
 - BMAD Method 6.10.0 with 46 Codex skills in `.agents/skills/`
 - GitHub Actions checks for type safety, tests, and a production build
@@ -40,6 +41,11 @@ npm run build
 
 Then open `chrome://extensions`, enable Developer mode, choose **Load unpacked**,
 and select `.output/chrome-mv3`.
+
+On a regular HTTP or HTTPS page, select the Simul toolbar action and choose
+**Open translation panel**. Chrome 138 or newer is required. See
+[the translation companion guide](docs/translation-companion.md) for privacy,
+support, limitations, and manual verification.
 
 ## BMAD workflow
 

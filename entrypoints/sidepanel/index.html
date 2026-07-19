@@ -1,0 +1,102 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="UTF-8" />
+    <meta name="viewport" content="width=device-width, initial-scale=1.0" />
+    <meta name="color-scheme" content="light dark" />
+    <title>Simul translation companion</title>
+    <link rel="stylesheet" href="./style.css" />
+  </head>
+  <body>
+    <header class="app-header">
+      <div>
+        <p class="eyebrow">Translation companion</p>
+        <h1>Simul</h1>
+      </div>
+      <span class="local-badge" title="Page text is translated on this device">
+        On-device translation
+      </span>
+    </header>
+
+    <main>
+      <section class="translator-controls" aria-labelledby="language-heading">
+        <h2 id="language-heading" class="visually-hidden">Languages</h2>
+        <div class="language-row">
+          <label>
+            <span>From</span>
+            <select id="source-language">
+              <option value="ja" selected>Japanese</option>
+              <option value="en">English</option>
+            </select>
+          </label>
+
+          <button
+            id="swap-languages"
+            class="icon-button"
+            type="button"
+            aria-label="Swap source and target languages"
+            title="Swap languages"
+          >
+            ⇄
+          </button>
+
+          <label>
+            <span>To</span>
+            <select id="target-language">
+              <option value="en" selected>English</option>
+              <option value="ja">Japanese</option>
+            </select>
+          </label>
+        </div>
+
+        <div class="action-row">
+          <button id="translate" class="primary" type="button" disabled>
+            Translate page
+          </button>
+          <button id="refresh" class="secondary" type="button">
+            Refresh snapshot
+          </button>
+          <button id="cancel" class="danger" type="button" hidden>
+            Cancel
+          </button>
+        </div>
+
+        <div id="progress-region" class="progress-region" hidden>
+          <label id="progress-label" for="progress">Preparing translation…</label>
+          <progress id="progress" max="1" value="0"></progress>
+        </div>
+
+        <p id="status" class="status" role="status" aria-live="polite">
+          Reading the active page…
+        </p>
+      </section>
+
+      <aside id="placement-guidance" class="notice" hidden>
+        Chrome is showing side panels on the left. Simul works here; to put it
+        on the right, open Chrome Settings → Appearance → Side panel and select
+        “Show on right.”
+      </aside>
+
+      <section id="snapshot" class="snapshot" aria-label="Page translation">
+        <div class="empty-state">
+          <p>Preparing a safe, read-only page snapshot…</p>
+        </div>
+      </section>
+    </main>
+
+    <footer>
+      <p>
+        Read-only approximation. The original page is never modified. Image
+        pixels are shown unchanged; only available labels and captions are
+        translated in this version. Original remote images may reload from
+        their existing source host.
+      </p>
+      <p class="placement-note">
+        Side-panel placement is controlled globally by Chrome. A separate
+        companion-window mode is planned for later.
+      </p>
+    </footer>
+
+    <script type="module" src="./main.ts"></script>
+  </body>
+</html>
