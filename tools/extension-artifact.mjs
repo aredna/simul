@@ -15,6 +15,7 @@ import { tmpdir } from 'node:os';
 import path from 'node:path';
 import { fileURLToPath, pathToFileURL } from 'node:url';
 
+import { parse } from 'acorn';
 import { parseHTML } from 'linkedom';
 
 export const APPROVED_PERMISSIONS = Object.freeze([
@@ -28,6 +29,13 @@ export const APPROVED_OPTIONAL_HOST_PERMISSIONS = Object.freeze([
   'https://*/*',
 ]);
 export const MINIMUM_CHROME_VERSION = 138;
+export const REQUIRED_UNLISTED_BUNDLES = Object.freeze([
+  'page-recorder.js',
+]);
+export const REQUIRED_REPLICA_RUNTIME_MARKERS = Object.freeze([
+  'simul:replica-v2:capture-checkpoint',
+  'rrweb-shadow-v2',
+]);
 
 const TOOL_FILE = fileURLToPath(import.meta.url);
 export const PROJECT_ROOT = path.resolve(path.dirname(TOOL_FILE), '..');
@@ -44,6 +52,7 @@ const TEXT_EXTENSIONS = new Set([
   '.xml',
 ]);
 const EXECUTABLE_EXTENSIONS = new Set(['.htm', '.html', '.js', '.mjs']);
+const JAVASCRIPT_EXTENSIONS = new Set(['.js', '.mjs']);
 const SECRET_CONTENT_PATTERNS = [
   /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/u,
   /\bAKIA[0-9A-Z]{16}\b/u,
@@ -112,6 +121,15 @@ export async function validateArtifact(artifactDirectory) {
   if (!filePaths.has('manifest.json')) {
     throw new ArtifactError('Extension artifact is missing manifest.json at its root.');
   }
+  for (const requiredBundle of REQUIRED_UNLISTED_BUNDLES) {
+    if (!filePaths.has(requiredBundle)) {
+      throw new ArtifactError(
+        `Extension artifact is missing required local bundle: ${requiredBundle}`,
+      );
+    }
+  }
+
+  const executableTextByPath = new Map();
 
   for (const entry of files) {
     assertSafeArtifactFilename(entry.path);
@@ -122,17 +140,20 @@ export async function validateArtifact(artifactDirectory) {
 
     if (TEXT_EXTENSIONS.has(extension)) {
       const text = contents.toString('utf8');
-      if (/sourceMappingURL\s*=/iu.test(text)) {
+      if (hasSourceMapDirective(text, JAVASCRIPT_EXTENSIONS.has(extension))) {
         throw new ArtifactError(
           `Source map reference is forbidden in artifact file: ${entry.path}`,
         );
       }
       if (EXECUTABLE_EXTENSIONS.has(extension)) {
         assertNoRemoteExecutableReference(entry.path, text);
+        executableTextByPath.set(entry.path, text);
       }
       await validateTextReferences(root, entry.path, text, filePaths);
     }
   }
+
+  assertReplicaRuntimeMarkers(executableTextByPath, filePaths);
 
   const manifestPath = path.join(root, 'manifest.json');
   let manifest;
@@ -149,6 +170,38 @@ export async function validateArtifact(artifactDirectory) {
     files: [...filePaths].sort(),
     manifest,
   };
+}
+
+function assertReplicaRuntimeMarkers(executableTextByPath, filePaths) {
+  const [captureMarker, replayMarker] = REQUIRED_REPLICA_RUNTIME_MARKERS;
+  const recorderText = executableTextByPath.get(REQUIRED_UNLISTED_BUNDLES[0]);
+  if (!recorderText || !hasJavaScriptStringMarker(recorderText, captureMarker)) {
+    throw new ArtifactError(
+      `Extension artifact is missing required local replica runtime marker: ${captureMarker}`,
+    );
+  }
+
+  const sidepanelText = executableTextByPath.get('sidepanel.html');
+  const sidepanelScripts = sidepanelText
+    ? discoverHtmlResourceReferences('sidepanel.html', sidepanelText)
+        .map((reference) =>
+          assertReferenceExists('sidepanel.html', reference, filePaths),
+        )
+        .filter((reference) => /\.m?js$/iu.test(reference))
+    : [];
+  if (
+    sidepanelScripts.length === 0 ||
+    !sidepanelScripts.some((script) =>
+      hasJavaScriptStringMarker(
+        executableTextByPath.get(script),
+        replayMarker,
+      ),
+    )
+  ) {
+    throw new ArtifactError(
+      `Extension artifact is missing required local replica runtime marker: ${replayMarker}`,
+    );
+  }
 }
 
 export async function compareArtifactDirectories(expectedDirectory, actualDirectory) {
@@ -544,7 +597,7 @@ async function validateManifestSemanticResources(root, manifest, filePaths) {
       path.join(root, ...relativePath.split('/')),
       'utf8',
     );
-    if (/sourceMappingURL\s*=/iu.test(text)) {
+    if (hasSourceMapDirective(text, resource.type === 'javascript')) {
       throw new ArtifactError(
         `Source map reference is forbidden in artifact file: ${relativePath}`,
       );
@@ -791,15 +844,236 @@ function assertNoSecretContent(relativePath, contents) {
 
 function assertNoRemoteExecutableReference(relativePath, text) {
   const patterns = [
-    /<script\b[^>]*\bsrc\s*=\s*["']\s*(?:https?:)?\/\//iu,
-    /\bimport\s*["']\s*(?:https?:)?\/\//iu,
-    /\b(?:import|importScripts)\s*\(\s*["']\s*(?:https?:)?\/\//iu,
-    /\bfrom\s*["']\s*(?:https?:)?\/\//iu,
-    /\b(?:SharedWorker|Worker)\s*\(\s*["']\s*(?:https?:)?\/\//iu,
+    /<script\b[^>]*\bsrc\s*=\s*["'`]\s*(?:https?:)?\/\//iu,
+    /\bimport\s*["'`]\s*(?:https?:)?\/\//iu,
+    /\b(?:import|importScripts)\s*\(\s*["'`]\s*(?:https?:)?\/\//iu,
+    /\bfrom\s*["'`]\s*(?:https?:)?\/\//iu,
+    /\b(?:SharedWorker|Worker)\s*\(\s*["'`]\s*(?:https?:)?\/\//iu,
+    /\bnew\s+URL\s*\(\s*["'`]\s*(?:https?:)?\/\//iu,
+    /\b(?:eval|Function)\s*\(\s*["'`][^"'`]*(?:https?:)?\/\//iu,
+    /\bfetch\s*\(\s*["'`]\s*(?:https?:)?\/\//iu,
+    /\b(?:src|href)\s*=\s*["'`]\s*(?:https?:)?\/\//iu,
   ];
-  if (patterns.some((pattern) => pattern.test(text))) {
+  if (
+    patterns.some((pattern) => pattern.test(text)) ||
+    (/\.m?js$/iu.test(relativePath) && hasRemoteExecutableSyntax(text))
+  ) {
     throw new ArtifactError(`Remote executable code reference found in artifact: ${relativePath}`);
   }
+}
+
+function hasSourceMapDirective(text, parseAsJavaScript = false) {
+  const embeddedLineDirective =
+    /(?:^|\r?\n)[\t ]*\/\/[#@][\t ]*sourceMappingURL[\t ]*=/u.test(text);
+  if (parseAsJavaScript) {
+    const comments = [];
+    parseJavaScript(text, comments);
+    if (
+      comments.some((comment) =>
+        /^[\t ]*[#@][\t ]*sourceMappingURL[\t ]*=/u.test(comment.value),
+      )
+    ) return true;
+    // rrweb embeds canvas Worker source as a multiline JavaScript string. A
+    // line directive inside that string would become active if the Worker
+    // were ever enabled, so retain this deliberately narrow raw check.
+    return embeddedLineDirective;
+  }
+
+  // CSS directives are comments in their own grammar, not JavaScript comments.
+  return (
+    /\/\*[#@][\t ]*sourceMappingURL[\t ]*=/u.test(text) ||
+    embeddedLineDirective
+  );
+}
+
+function hasRemoteExecutableSyntax(text) {
+  const source = parseJavaScript(text);
+  const stack = [source];
+
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (!node || typeof node !== 'object') continue;
+    if (Array.isArray(node)) {
+      stack.push(...node);
+      continue;
+    }
+
+    if (isRemoteExecutableNode(node)) return true;
+    for (const value of Object.values(node)) {
+      if (value && typeof value === 'object') stack.push(value);
+    }
+  }
+  return false;
+}
+
+function isRemoteExecutableNode(node) {
+  if (
+    (node.type === 'ImportDeclaration' ||
+      node.type === 'ExportNamedDeclaration' ||
+      node.type === 'ExportAllDeclaration') &&
+    isRemoteReference(staticStringValue(node.source))
+  ) return true;
+
+  if (
+    node.type === 'ImportExpression' &&
+    isRemoteReference(staticUrlValue(node.source))
+  ) return true;
+
+  if (node.type === 'CallExpression') {
+    const callee = expressionName(node.callee);
+    const first = staticUrlValue(node.arguments[0]);
+    if (
+      (callee === 'fetch' || callee === 'importScripts') &&
+      isRemoteReference(first)
+    ) return true;
+    if (
+      (callee === 'eval' || callee === 'Function') &&
+      containsRemoteReference(staticStringValue(node.arguments[0]))
+    ) return true;
+    if (callee === 'URL' && isRemoteReference(staticUrlConstructorValue(node.arguments))) {
+      return true;
+    }
+    if (callee === 'setAttribute' || callee === 'setAttributeNS') {
+      const nameIndex = callee === 'setAttribute' ? 0 : 1;
+      const valueIndex = callee === 'setAttribute' ? 1 : 2;
+      const attribute = staticStringValue(node.arguments[nameIndex])?.toLowerCase();
+      if (
+        isExecutableUrlAttribute(attribute) &&
+        isRemoteReference(staticUrlValue(node.arguments[valueIndex]))
+      ) return true;
+    }
+  }
+
+  if (node.type === 'NewExpression') {
+    const constructor = expressionName(node.callee);
+    if (
+      constructor === 'Function' &&
+      node.arguments.some((argument) =>
+        containsRemoteReference(staticStringValue(argument)),
+      )
+    ) return true;
+    if (
+      (constructor === 'Worker' || constructor === 'SharedWorker') &&
+      isRemoteReference(staticUrlValue(node.arguments[0]))
+    ) return true;
+    if (
+      constructor === 'URL' &&
+      isRemoteReference(staticUrlConstructorValue(node.arguments))
+    ) return true;
+  }
+
+  if (
+    node.type === 'AssignmentExpression' &&
+    isExecutableUrlAttribute(memberPropertyName(node.left)?.toLowerCase()) &&
+    isRemoteReference(staticUrlValue(node.right))
+  ) return true;
+
+  return false;
+}
+
+function hasJavaScriptStringMarker(text, marker) {
+  if (typeof text !== 'string') return false;
+  const stack = [parseJavaScript(text)];
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (!node || typeof node !== 'object') continue;
+    if (Array.isArray(node)) {
+      stack.push(...node);
+      continue;
+    }
+    if (
+      node.type === 'Literal' &&
+      typeof node.value === 'string' &&
+      node.value.includes(marker)
+    ) return true;
+    if (
+      node.type === 'TemplateLiteral' &&
+      staticStringValue(node)?.includes(marker)
+    ) return true;
+    for (const value of Object.values(node)) {
+      if (value && typeof value === 'object') stack.push(value);
+    }
+  }
+  return false;
+}
+
+function parseJavaScript(text, comments) {
+  return parse(text, {
+    ecmaVersion: 'latest',
+    sourceType: 'module',
+    allowHashBang: true,
+    ...(comments ? { onComment: comments } : {}),
+  });
+}
+
+function staticUrlValue(node) {
+  if (
+    node &&
+    (node.type === 'NewExpression' || node.type === 'CallExpression') &&
+    expressionName(node.callee) === 'URL'
+  ) return staticUrlConstructorValue(node.arguments);
+  return staticStringValue(node);
+}
+
+function staticUrlConstructorValue(argumentsList = []) {
+  const reference = staticStringValue(argumentsList[0]);
+  const base = staticStringValue(argumentsList[1]);
+  if (reference === undefined || base === undefined) return reference;
+  try {
+    return new URL(reference, base).href;
+  } catch {
+    return reference;
+  }
+}
+
+function staticStringValue(node) {
+  if (!node) return undefined;
+  if (node.type === 'Literal' && typeof node.value === 'string') return node.value;
+  if (node.type === 'ParenthesizedExpression' || node.type === 'ChainExpression') {
+    return staticStringValue(node.expression);
+  }
+  if (node.type === 'BinaryExpression' && node.operator === '+') {
+    const left = staticStringValue(node.left);
+    const right = staticStringValue(node.right);
+    return left === undefined || right === undefined ? undefined : left + right;
+  }
+  if (node.type === 'TemplateLiteral') {
+    let value = '';
+    for (let index = 0; index < node.quasis.length; index += 1) {
+      value += node.quasis[index].value.cooked ?? node.quasis[index].value.raw;
+      if (index >= node.expressions.length) continue;
+      const expression = staticStringValue(node.expressions[index]);
+      if (expression === undefined) return undefined;
+      value += expression;
+    }
+    return value;
+  }
+  return undefined;
+}
+
+function expressionName(node) {
+  if (node?.type === 'Identifier') return node.name;
+  return memberPropertyName(node);
+}
+
+function memberPropertyName(node) {
+  if (node?.type !== 'MemberExpression') return undefined;
+  if (!node.computed && node.property.type === 'Identifier') {
+    return node.property.name;
+  }
+  return staticStringValue(node.property);
+}
+
+function isExecutableUrlAttribute(value) {
+  return value === 'src' || value === 'href' || value?.endsWith(':href');
+}
+
+function isRemoteReference(value) {
+  return typeof value === 'string' && /^(?:https?:)?\/\//iu.test(value.trim());
+}
+
+function containsRemoteReference(value) {
+  return typeof value === 'string' && /(?:https?:)?\/\//iu.test(value);
 }
 
 function formatDifferences(differences) {

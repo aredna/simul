@@ -54,6 +54,24 @@ import {
 } from '../../lib/preferences';
 import { translateWithSession } from '../../lib/translation-pipeline';
 import {
+  type ReplicaCaptureRequest,
+  type ReplicaCheckpointResponse,
+} from '../../lib/replica/contracts';
+import {
+  ReplicaEngineController,
+  selectReplicaEngineMode,
+} from '../../lib/replica/engine-selection';
+import { LegacyReplicaEngine } from '../../lib/replica/legacy-engine';
+import {
+  createCheckpointCommand,
+  createReplicaIdentity,
+  readCheckpointResponse,
+} from '../../lib/replica/protocol-v2';
+import {
+  ReplicaCaptureBoundaryError,
+  RrwebShadowReplicaEngine,
+} from '../../lib/replica/rrweb-shadow-engine';
+import {
   SUPPORTED_LANGUAGES,
   languageName,
   type SupportedLanguage,
@@ -137,6 +155,25 @@ const provider = new ChromeTranslatorProvider();
 const captureCoordinator = new LatestWorkCoordinator<CaptureRequest>();
 const detachedIdentityHint = parseDetachedPageIdentityHint(window.location.search);
 const liveSessionId = crypto.randomUUID();
+const replicaEngineMode = selectReplicaEngineMode({
+  DEV: import.meta.env.DEV,
+  WXT_SIMUL_RRWEB_SHADOW: import.meta.env.WXT_SIMUL_RRWEB_SHADOW,
+});
+const replicaEngineController = new ReplicaEngineController({
+  mode: replicaEngineMode,
+  legacy: new LegacyReplicaEngine(),
+  shadow: new RrwebShadowReplicaEngine({
+    hostDocument: document,
+    capture: captureReplicaCheckpoint,
+  }),
+  onDiagnostics: (diagnostics) => {
+    if (replicaEngineMode === 'rrweb-shadow') {
+      // This object is intentionally content-free: local size/timing/extent
+      // numbers and a bounded code only. It never includes page text or URLs.
+      console.debug('[Simul replica shadow]', diagnostics);
+    }
+  },
+});
 
 let preferences: CompanionPreferences = parseCompanionPreferences(
   DEFAULT_COMPANION_PREFERENCES,
@@ -158,6 +195,7 @@ let activeAbortController: AbortController | undefined;
 let activeTranslationKey: string | undefined;
 let composerAbortController: AbortController | undefined;
 let liveDeltaAbortController: AbortController | undefined;
+let replicaShadowAbortController: AbortController | undefined;
 let activeTranslationTask: Promise<void> | undefined;
 let navigationTimer: ReturnType<typeof setTimeout> | undefined;
 let mirrorResizeObserver: ResizeObserver | undefined;
@@ -256,7 +294,11 @@ document.addEventListener('keydown', (event) => {
     setOverlayOpen(false);
   }
 });
-window.addEventListener('pagehide', () => releaseLiveSession());
+window.addEventListener('pagehide', () => {
+  replicaShadowAbortController?.abort();
+  replicaEngineController.dispose();
+  releaseLiveSession();
+});
 
 browser.runtime.onMessage.addListener((message: unknown, sender) => {
   const authorizedTab = readAuthorizedTabMessage(message);
@@ -327,6 +369,7 @@ browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     availabilityRequestId += 1;
     activeAbortController?.abort();
     liveDeltaAbortController?.abort();
+    replicaShadowAbortController?.abort();
     invalidateComposerOutput();
     pendingLiveUpdate = undefined;
     followedPageIdentity = nextIdentity;
@@ -537,6 +580,7 @@ function queueCapture(request: CaptureRequest): void {
   }
   activeAbortController?.abort();
   liveDeltaAbortController?.abort();
+  replicaShadowAbortController?.abort();
   availabilityRequestId += 1;
   pendingLiveUpdate = undefined;
   latestLiveSequence = 0;
@@ -605,7 +649,8 @@ async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> 
         func: capturePageSnapshot,
       }),
     );
-    const nextSnapshot = parsePageSnapshot(results[0]?.result);
+    const snapshotInjection = results[0];
+    const nextSnapshot = parsePageSnapshot(snapshotInjection?.result);
     const currentTab = await browser.tabs.get(identity.tabId);
     assertSnapshotIsCurrent(currentTab, identity);
     if (!captureCoordinator.isCurrent(work.generation)) return;
@@ -617,6 +662,13 @@ async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> 
     clearTranslationCache();
     renderSnapshot(nextSnapshot);
     showCaptureNotes(nextSnapshot);
+    if (snapshotInjection?.documentId) {
+      void runReplicaEngineCheckpoint(
+        work,
+        identity,
+        snapshotInjection.documentId,
+      );
+    }
     await resolveSelectedSourceLanguage();
 
     if (countVisualMirrorTranslationFields(visualRoot as HTMLElement) === 0) {
@@ -657,6 +709,81 @@ async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> 
   } finally {
     updateControls();
   }
+}
+
+async function runReplicaEngineCheckpoint(
+  work: GenerationWork<CaptureRequest>,
+  identity: CapturedPageIdentity,
+  documentId: string,
+): Promise<void> {
+  replicaShadowAbortController?.abort();
+  const abortController = new AbortController();
+  replicaShadowAbortController = abortController;
+  const request: ReplicaCaptureRequest = {
+    sessionId: liveSessionId,
+    pageEpoch: work.generation,
+    generation: work.generation,
+    tabId: identity.tabId,
+    frameId: 0,
+    documentId,
+    isCurrent: () =>
+      captureCoordinator.isCurrent(work.generation) &&
+      capturedPageIdentity === identity &&
+      followedPageIdentity?.tabId === identity.tabId &&
+      normalizedPageUrl(followedPageIdentity.url) === normalizedPageUrl(identity.url),
+  };
+  try {
+    await replicaEngineController.run(request, abortController.signal);
+  } finally {
+    if (replicaShadowAbortController === abortController) {
+      replicaShadowAbortController = undefined;
+    }
+  }
+}
+
+async function captureReplicaCheckpoint(
+  request: ReplicaCaptureRequest,
+  signal?: AbortSignal,
+): Promise<ReplicaCheckpointResponse> {
+  signal?.throwIfAborted();
+  if (!request.isCurrent()) {
+    throw new ReplicaCaptureBoundaryError('stale_identity');
+  }
+  const injectionResults = await browser.scripting.executeScript({
+    target: { tabId: request.tabId, documentIds: [request.documentId] },
+    files: ['/page-recorder.js'],
+  });
+  signal?.throwIfAborted();
+  const injection = injectionResults.find(
+    (result) =>
+      result.frameId === request.frameId &&
+      result.documentId === request.documentId,
+  );
+  if (!injection || !request.isCurrent()) {
+    throw new ReplicaCaptureBoundaryError('stale_identity');
+  }
+  const expectedIdentity = createReplicaIdentity({
+    sessionId: request.sessionId,
+    pageEpoch: request.pageEpoch,
+    generation: request.generation,
+    documentId: request.documentId,
+    frameId: request.frameId,
+    sequence: 0,
+  });
+  const response: unknown = await browser.tabs.sendMessage(
+    request.tabId,
+    createCheckpointCommand(expectedIdentity),
+    { documentId: request.documentId },
+  );
+  signal?.throwIfAborted();
+  if (!request.isCurrent()) {
+    throw new ReplicaCaptureBoundaryError('stale_identity');
+  }
+  const checkpoint = readCheckpointResponse(response, expectedIdentity);
+  if (!checkpoint) {
+    throw new ReplicaCaptureBoundaryError('invalid_message');
+  }
+  return checkpoint;
 }
 
 interface LiveLanguageContext {
@@ -1725,6 +1852,7 @@ function invalidateCompanion(message: string): void {
   availabilityRequestId += 1;
   activeAbortController?.abort();
   liveDeltaAbortController?.abort();
+  replicaShadowAbortController?.abort();
   invalidateComposerOutput();
   followedPageIdentity = undefined;
   snapshot = undefined;

@@ -16,7 +16,10 @@ bounded DOM/style/image/scroll deltas, zoom the mirror, and compose a reverse
 translation. An initial sanitized capture bootstraps stable isolated-world
 node IDs; normal synchronization replaces only coalesced dirty subtrees. A
 validated production build is checked in at `dist/chrome-unpacked/` for direct
-Developer mode installation without contributor tooling.
+Developer mode installation without contributor tooling. A development-only
+rrweb shadow engine can validate one masked, document-scoped checkpoint in
+hidden inert staging with `WXT_SIMUL_RRWEB_SHADOW=1`; production and the visible
+companion remain on the legacy renderer until later promotion checkpoints pass.
 
 ## Fixed engineering baseline
 
@@ -52,8 +55,10 @@ extension APIs or page integration.
 - `entrypoints/popup/`: active-page side-panel launcher
 - `entrypoints/sidepanel/`: translation companion UI and browser orchestration
 - `entrypoints/page-snapshot.ts`: unlisted top-frame snapshot entrypoint
+- `entrypoints/page-recorder.ts`: development-only unlisted rrweb checkpoint
+  recorder
 - `lib/`: safe bootstrap/delta boundaries, inert renderer, preferences,
-  provider adapter, and translation pipeline logic
+  provider adapter, translation pipeline logic, and replica-engine adapters
 - `tests/`: unit tests
 - `tools/extension-artifact.mjs`: guarded release build, validation, sync, and
   byte comparison

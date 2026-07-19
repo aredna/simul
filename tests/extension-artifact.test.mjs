@@ -15,6 +15,8 @@ import { afterEach, describe, expect, it } from 'vitest';
 import {
   APPROVED_OPTIONAL_HOST_PERMISSIONS,
   APPROVED_PERMISSIONS,
+  REQUIRED_REPLICA_RUNTIME_MARKERS,
+  REQUIRED_UNLISTED_BUNDLES,
   assertCanonicalSyncTarget,
   canonicalArtifactDirectory,
   checkArtifact,
@@ -47,6 +49,7 @@ describe('validateArtifact', () => {
     });
     expect(validation.files).toContain('manifest.json');
     expect(validation.files).toContain('assets/popup.css');
+    expect(validation.files).toContain(REQUIRED_UNLISTED_BUNDLES[0]);
   });
 
   it('rejects excess required permissions and required host permissions', async () => {
@@ -159,6 +162,31 @@ describe('validateArtifact', () => {
       'Source map is forbidden',
     );
 
+    const mapReferenceArtifact = await createTemporaryArtifact();
+    await writeFile(
+      path.join(mapReferenceArtifact, 'side.js'),
+      `console.info(${JSON.stringify(REQUIRED_REPLICA_RUNTIME_MARKERS[1])});\n//# sourceMappingURL=side.js.map`,
+    );
+    await expect(validateArtifact(mapReferenceArtifact)).rejects.toThrow(
+      'Source map reference is forbidden',
+    );
+
+    const inlineMapReferenceArtifact = await createTemporaryArtifact();
+    await writeFile(
+      path.join(inlineMapReferenceArtifact, 'side.js'),
+      `console.info(${JSON.stringify(REQUIRED_REPLICA_RUNTIME_MARKERS[1])}); //# sourceMappingURL=side.js.map`,
+    );
+    await expect(validateArtifact(inlineMapReferenceArtifact)).rejects.toThrow(
+      'Source map reference is forbidden',
+    );
+
+    const inertMapSyntaxArtifact = await createTemporaryArtifact();
+    await writeFile(
+      path.join(inertMapSyntaxArtifact, 'popup.js'),
+      'const generatedCss = "/*# sourceMappingURL="; console.info(generatedCss);',
+    );
+    await expect(validateArtifact(inertMapSyntaxArtifact)).resolves.toBeDefined();
+
     const environmentArtifact = await createTemporaryArtifact();
     await writeFile(path.join(environmentArtifact, '.env.production'), 'TOKEN=x');
     await expect(validateArtifact(environmentArtifact)).rejects.toThrow(
@@ -180,6 +208,79 @@ describe('validateArtifact', () => {
       '<script src="https://example.com/app.js"></script>',
     );
     await expect(validateArtifact(remoteArtifact)).rejects.toThrow(
+      'Remote executable code reference',
+    );
+  });
+
+  it('requires the packaged recorder and local replica runtime markers', async () => {
+    const missingRecorder = await createTemporaryArtifact();
+    await rm(path.join(missingRecorder, REQUIRED_UNLISTED_BUNDLES[0]));
+    await expect(validateArtifact(missingRecorder)).rejects.toThrow(
+      'missing required local bundle',
+    );
+
+    const missingMarker = await createTemporaryArtifact();
+    await writeFile(path.join(missingMarker, 'side.js'), 'console.info("side");');
+    await expect(validateArtifact(missingMarker)).rejects.toThrow(
+      'missing required local replica runtime marker',
+    );
+
+    const misplacedRecorderMarker = await createTemporaryArtifact();
+    await writeFile(
+      path.join(misplacedRecorderMarker, REQUIRED_UNLISTED_BUNDLES[0]),
+      'console.info("recorder missing");',
+    );
+    await writeFile(
+      path.join(misplacedRecorderMarker, 'side.js'),
+      `console.info(${JSON.stringify(REQUIRED_REPLICA_RUNTIME_MARKERS)});`,
+    );
+    await expect(validateArtifact(misplacedRecorderMarker)).rejects.toThrow(
+      REQUIRED_REPLICA_RUNTIME_MARKERS[0],
+    );
+
+    const commentOnlyCaptureMarker = await createTemporaryArtifact();
+    await writeFile(
+      path.join(commentOnlyCaptureMarker, REQUIRED_UNLISTED_BUNDLES[0]),
+      `// ${REQUIRED_REPLICA_RUNTIME_MARKERS[0]}\nconsole.info("recorder");`,
+    );
+    await expect(validateArtifact(commentOnlyCaptureMarker)).rejects.toThrow(
+      REQUIRED_REPLICA_RUNTIME_MARKERS[0],
+    );
+
+    const commentOnlyReplayMarker = await createTemporaryArtifact();
+    await writeFile(
+      path.join(commentOnlyReplayMarker, 'side.js'),
+      `// ${REQUIRED_REPLICA_RUNTIME_MARKERS[1]}\nconsole.info("side");`,
+    );
+    await expect(validateArtifact(commentOnlyReplayMarker)).rejects.toThrow(
+      REQUIRED_REPLICA_RUNTIME_MARKERS[1],
+    );
+  });
+
+  it.each([
+    'fetch("https://cdn.example.test/runtime.wasm")',
+    'fetch(`https://cdn.example.test/runtime.wasm`)',
+    'fetch("https:" + "//cdn.example.test/runtime.wasm")',
+    'new URL("https://cdn.example.test/runtime.js", import.meta.url)',
+    'new Worker(`https://cdn.example.test/runtime.js`)',
+    'new SharedWorker("https:" + "//cdn.example.test/runtime.js")',
+    'new Worker(new URL("./runtime.js", "https://cdn.example.test/"))',
+    'importScripts("https:" + "//cdn.example.test/runtime.js")',
+    'import("https://cdn.example.test/runtime.js")',
+    'import runtime from "https://cdn.example.test/runtime.js"',
+    'export { runtime } from "https://cdn.example.test/runtime.js"',
+    'new Function(`return import("${"https:" + "//cdn.example.test/runtime.js"}")`)',
+    'script["src"]="https://cdn.example.test/runtime.js"',
+    'script.setAttribute("src", `https://cdn.example.test/runtime.js`)',
+    'script.setAttributeNS(null, "xlink:href", "https://cdn.example.test/runtime.js")',
+  ])('rejects a remote executable fallback: %s', async (source) => {
+    const artifact = await createTemporaryArtifact();
+    await writeFile(
+      path.join(artifact, 'side.js'),
+      `${source};console.info(${JSON.stringify(REQUIRED_REPLICA_RUNTIME_MARKERS)});`,
+    );
+
+    await expect(validateArtifact(artifact)).rejects.toThrow(
       'Remote executable code reference',
     );
   });
@@ -261,20 +362,24 @@ describe('artifact orchestration', () => {
   it('fails stale checks actionably without changing the release', async () => {
     const projectRoot = await createTemporaryDirectory('simul-stale-');
     const committed = canonicalArtifactDirectory(projectRoot);
-    await createValidArtifact(committed, { popupScript: 'committed' });
+    await createValidArtifact(committed, {
+      popupScript: 'console.info("committed");',
+    });
 
     await expect(
       checkArtifact({
         projectRoot,
         buildArtifact: async ({ temporaryRoot }) => {
           const built = path.join(temporaryRoot, 'built');
-          await createValidArtifact(built, { popupScript: 'fresh build' });
+          await createValidArtifact(built, {
+            popupScript: 'console.info("fresh build");',
+          });
           return built;
         },
       }),
     ).rejects.toThrow(/content changed: popup\.js[\s\S]*artifact:sync/u);
     expect(await readFile(path.join(committed, 'popup.js'), 'utf8')).toBe(
-      'committed',
+      'console.info("committed");',
     );
   });
 
@@ -307,7 +412,7 @@ describe('artifact orchestration', () => {
   it('synchronizes only the exact canonical directory and preserves unrelated paths', async () => {
     const projectRoot = await createTemporaryDirectory('simul-sync-');
     const committed = canonicalArtifactDirectory(projectRoot);
-    await createValidArtifact(committed, { popupScript: 'old' });
+    await createValidArtifact(committed, { popupScript: 'console.info("old");' });
     const unrelated = path.join(projectRoot, 'dist', 'keep.txt');
     await writeFile(unrelated, 'untouched');
 
@@ -315,12 +420,14 @@ describe('artifact orchestration', () => {
       projectRoot,
       buildArtifact: async ({ temporaryRoot }) => {
         const built = path.join(temporaryRoot, 'built');
-        await createValidArtifact(built, { popupScript: 'new' });
+        await createValidArtifact(built, { popupScript: 'console.info("new");' });
         return built;
       },
     });
 
-    expect(await readFile(path.join(committed, 'popup.js'), 'utf8')).toBe('new');
+    expect(await readFile(path.join(committed, 'popup.js'), 'utf8')).toBe(
+      'console.info("new");',
+    );
     expect(await readFile(unrelated, 'utf8')).toBe('untouched');
     await expect(
       assertCanonicalSyncTarget(path.join(projectRoot, 'dist', 'wrong'), projectRoot),
@@ -330,35 +437,43 @@ describe('artifact orchestration', () => {
   it('does not replace the existing release when the new build is unsafe', async () => {
     const projectRoot = await createTemporaryDirectory('simul-unsafe-sync-');
     const committed = canonicalArtifactDirectory(projectRoot);
-    await createValidArtifact(committed, { popupScript: 'known-good' });
+    await createValidArtifact(committed, {
+      popupScript: 'console.info("known-good");',
+    });
 
     await expect(
       syncArtifact({
         projectRoot,
         buildArtifact: async ({ temporaryRoot }) => {
           const built = path.join(temporaryRoot, 'built');
-          await createValidArtifact(built, { popupScript: 'unsafe replacement' });
+          await createValidArtifact(built, {
+            popupScript: 'console.info("unsafe replacement");',
+          });
           await writeFile(path.join(built, '.env'), 'SECRET=value');
           return built;
         },
       }),
     ).rejects.toThrow('Secret or key file is forbidden');
     expect(await readFile(path.join(committed, 'popup.js'), 'utf8')).toBe(
-      'known-good',
+      'console.info("known-good");',
     );
   });
 
   it('restores the previous release when post-promotion validation fails', async () => {
     const projectRoot = await createTemporaryDirectory('simul-restore-sync-');
     const committed = canonicalArtifactDirectory(projectRoot);
-    await createValidArtifact(committed, { popupScript: 'known-good' });
+    await createValidArtifact(committed, {
+      popupScript: 'console.info("known-good");',
+    });
 
     await expect(
       syncArtifact({
         projectRoot,
         buildArtifact: async ({ temporaryRoot }) => {
           const built = path.join(temporaryRoot, 'built');
-          await createValidArtifact(built, { popupScript: 'replacement' });
+          await createValidArtifact(built, {
+            popupScript: 'console.info("replacement");',
+          });
           return built;
         },
         validatePromotedArtifact: async () => {
@@ -367,14 +482,14 @@ describe('artifact orchestration', () => {
       }),
     ).rejects.toThrow('previous release was restored');
     expect(await readFile(path.join(committed, 'popup.js'), 'utf8')).toBe(
-      'known-good',
+      'console.info("known-good");',
     );
   });
 
   it('reports cleanup failure accurately while leaving the new release active', async () => {
     const projectRoot = await createTemporaryDirectory('simul-cleanup-sync-');
     const committed = canonicalArtifactDirectory(projectRoot);
-    await createValidArtifact(committed, { popupScript: 'old' });
+    await createValidArtifact(committed, { popupScript: 'console.info("old");' });
 
     let backupPath;
     await expect(
@@ -382,7 +497,7 @@ describe('artifact orchestration', () => {
         projectRoot,
         buildArtifact: async ({ temporaryRoot }) => {
           const built = path.join(temporaryRoot, 'built');
-          await createValidArtifact(built, { popupScript: 'new' });
+          await createValidArtifact(built, { popupScript: 'console.info("new");' });
           return built;
         },
         removeBackup: async (target) => {
@@ -391,7 +506,9 @@ describe('artifact orchestration', () => {
         },
       }),
     ).rejects.toThrow('new validated release is active');
-    expect(await readFile(path.join(committed, 'popup.js'), 'utf8')).toBe('new');
+    expect(await readFile(path.join(committed, 'popup.js'), 'utf8')).toBe(
+      'console.info("new");',
+    );
     await expect(access(backupPath)).resolves.toBeUndefined();
   });
 });
@@ -435,7 +552,14 @@ async function createValidArtifact(
     writeFile(path.join(directory, 'popup.js'), popupScript),
     writeFile(path.join(directory, 'assets', 'popup.css'), 'body { color: black; }'),
     writeFile(path.join(directory, 'sidepanel.html'), '<script src="/side.js"></script>'),
-    writeFile(path.join(directory, 'side.js'), 'console.info("side");'),
+    writeFile(
+      path.join(directory, 'side.js'),
+      `console.info("side", ${JSON.stringify(REQUIRED_REPLICA_RUNTIME_MARKERS[1])});`,
+    ),
+    writeFile(
+      path.join(directory, REQUIRED_UNLISTED_BUNDLES[0]),
+      `console.info(${JSON.stringify(REQUIRED_REPLICA_RUNTIME_MARKERS[0])});`,
+    ),
   ]);
   return directory;
 }
