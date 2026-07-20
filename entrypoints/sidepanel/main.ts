@@ -39,6 +39,17 @@ import {
 } from '../../lib/ocr/contracts';
 import type { ImageTextProviderId } from '../../lib/ocr/known-provider-ids';
 import {
+  ImageTranslationController,
+  type ImageTranslationDiagnostic,
+} from '../../lib/ocr/image-translation-controller';
+import { openChromeImageSource } from '../../lib/ocr/image-source-client';
+import {
+  PixelAcquisitionCoordinator,
+  createBrowserPixelAcquisitionEnvironment,
+} from '../../lib/ocr/pixel-acquisition';
+import { createBrowserImageRecognitionCoordinator } from '../../lib/ocr/image-analysis-coordinator';
+import { IndexedDbTransientImageStore } from '../../lib/ocr/transient-image-store';
+import {
   PREFERENCE_LOCK_NAME,
   readPreferenceCommandResult,
   type PreferenceCommand,
@@ -204,6 +215,7 @@ const visibleReplayHost = new VisibleReplayHost({
 });
 let replicaEngineController!: ReplicaEngineController;
 let replicaTranslationCoordinator!: ReplicaTranslationCoordinator;
+let imageTranslationController!: ImageTranslationController;
 const shadowReplicaEngine = new RrwebShadowReplicaEngine({
   presentationHost: visibleReplayHost,
   capture: captureReplicaCheckpoint,
@@ -212,7 +224,11 @@ const shadowReplicaEngine = new RrwebShadowReplicaEngine({
   onLiveApplied: () => {
     legacyTransitionGate.markDirty();
   },
+  onLayoutChanged: () => {
+    imageTranslationController?.refreshOverlays();
+  },
   onSourceCommit: (commit) => {
+    imageTranslationController?.notifyReplicaCommit(commit.replayLease);
     if (replicaTranslationMode === 'rrweb-projection') {
       replicaTranslationCoordinator.handleSourceCommit(commit);
       const action = replicaSourceCommitAction(
@@ -231,6 +247,7 @@ const shadowReplicaEngine = new RrwebShadowReplicaEngine({
     }
   },
   onLiveFailure: (code) => {
+    imageTranslationController?.releaseReplica();
     if (replicaTranslationMode === 'rrweb-projection') {
       replicaTranslationCoordinator.selectPair(undefined);
     }
@@ -252,6 +269,7 @@ replicaEngineController = new ReplicaEngineController({
     }
   },
   onFallback: () => {
+    imageTranslationController?.releaseReplica();
     if (replicaTranslationMode === 'rrweb-projection') {
       replicaTranslationCoordinator.selectPair(undefined);
     }
@@ -288,6 +306,28 @@ replicaTranslationCoordinator = new ReplicaTranslationCoordinator(
   },
 );
 
+imageTranslationController = new ImageTranslationController({
+  openSource: openChromeImageSource,
+  createPixelCoordinator: (source, sourceTabId, sourceWindowId) =>
+    new PixelAcquisitionCoordinator(
+      createBrowserPixelAcquisitionEnvironment(
+        source,
+        sourceTabId,
+        sourceWindowId,
+      ),
+    ),
+  createRecognitionCoordinator: () =>
+    createBrowserImageRecognitionCoordinator(
+      new IndexedDbTransientImageStore(),
+    ),
+  resolveAnchor: (sourceDocument, nodeId) =>
+    shadowReplicaEngine.resolveImageAnchor(sourceDocument, nodeId),
+  translationProvider: provider,
+  translationMemory,
+  onBusyChange: (busy) => setImageTranslationBusy(busy),
+  onDiagnostic: logImageTranslationDiagnostic,
+});
+
 let preferences: CompanionPreferences = parseCompanionPreferences(
   DEFAULT_COMPANION_PREFERENCES,
 );
@@ -303,6 +343,7 @@ let captureInFlight = false;
 let translationInFlight = false;
 let permissionInFlight = false;
 let composerInFlight = false;
+let imageTranslationInFlight = false;
 let translationDesired = false;
 let translationComplete = false;
 let activeAbortController: AbortController | undefined;
@@ -405,6 +446,7 @@ translateButton.addEventListener('click', () => {
 cancelButton.addEventListener('click', () => {
   activeAbortController?.abort();
   composerAbortController?.abort();
+  imageTranslationController.cancelCurrent();
   setStatus('Cancelling on-device translation…');
 });
 translateComposerButton.addEventListener('click', () => void translateComposer());
@@ -416,6 +458,7 @@ document.addEventListener('keydown', (event) => {
 });
 window.addEventListener('pagehide', () => {
   replicaShadowAbortController?.abort();
+  imageTranslationController.dispose();
   replicaTranslationCoordinator.dispose();
   replicaEngineController.dispose();
   releaseLiveSession();
@@ -491,6 +534,7 @@ browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     activeAbortController?.abort();
     liveDeltaAbortController?.abort();
     replicaShadowAbortController?.abort();
+    imageTranslationController.releaseReplica();
     invalidateComposerOutput();
     pendingLiveUpdate = undefined;
     followedPageIdentity = nextIdentity;
@@ -773,6 +817,7 @@ function queueCapture(request: CaptureRequest): void {
   activeAbortController?.abort();
   liveDeltaAbortController?.abort();
   replicaShadowAbortController?.abort();
+  imageTranslationController.releaseReplica();
   availabilityRequestId += 1;
   pendingLiveUpdate = undefined;
   latestLiveSequence = 0;
@@ -868,6 +913,7 @@ async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> 
       );
       if (!captureCoordinator.isCurrent(work.generation)) return;
     } else if (!snapshotInjection?.documentId) {
+      imageTranslationController.releaseReplica();
       replicaEngineController.releasePresentation(true);
     }
     await resolveSelectedSourceLanguage();
@@ -905,6 +951,7 @@ async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> 
   } catch (error) {
     if (!captureCoordinator.isCurrent(work.generation)) return;
     if (currentLegacyReady && capturedPageIdentity === identity) {
+      imageTranslationController.releaseReplica();
       replicaEngineController.releasePresentation(true);
     }
     const message = readPageError(error);
@@ -947,7 +994,10 @@ async function runReplicaEngineCheckpoint(
       result,
       visibleReplayHost.hasCommittedReplica,
     );
-    if (shadowCommitted) updateMirrorLayout();
+    if (shadowCommitted) {
+      imageTranslationController.commitReplica(request, identity.windowId);
+      updateMirrorLayout();
+    }
   } finally {
     if (shadowOwnershipStarted && !shadowCommitted) {
       const needsFreshCapture = legacyTransitionGate.release();
@@ -1020,6 +1070,7 @@ async function resolveSelectedSourceLanguage(
 ): Promise<boolean> {
   if (!snapshot) {
     resolvedSourceLanguage = undefined;
+    configureImageTranslation();
     return true;
   }
   if (liveContext) {
@@ -1059,6 +1110,7 @@ async function resolveSelectedSourceLanguage(
       : ''
     : 'The page language could not be detected. Choose a From language.';
   detectedLanguageElement.hidden = !detectedLanguageElement.textContent;
+  configureImageTranslation();
   return true;
 }
 
@@ -1323,6 +1375,7 @@ async function runTranslation(automatic: boolean, generation: number): Promise<v
   const abortController = new AbortController();
   activeAbortController = abortController;
   translationInFlight = true;
+  configureImageTranslation();
   translationDesired = true;
   translationComplete = false;
   showProgress('Preparing Chrome\'s on-device language model…', 0, 1);
@@ -1417,6 +1470,7 @@ async function runTranslation(automatic: boolean, generation: number): Promise<v
     session?.destroy();
     if (activeAbortController === abortController) activeAbortController = undefined;
     translationInFlight = false;
+    configureImageTranslation();
     hideProgress();
     updateControls();
   }
@@ -1753,6 +1807,7 @@ function updateMirrorLayout(): void {
     displayMode: preferences.displayMode,
     zoomPercent: preferences.zoomPercent,
   });
+  imageTranslationController.refreshOverlays();
   if (
     visibleReplayHost.previewVisible &&
     preferences.syncScroll &&
@@ -1897,6 +1952,26 @@ function syncPreferenceControls(): void {
   zoomOutput.value = `${preferences.zoomPercent}%`;
   zoomInput.disabled = preferences.displayMode !== 'custom';
   renderImageAnalysisControls();
+  configureImageTranslation();
+}
+
+function configureImageTranslation(): void {
+  imageTranslationController.configure({
+    enabled:
+      preferences.imageTranslationEnabled &&
+      hasCompiledImageAnalysisCapability(),
+    scanPolicy: preferences.imageScanPolicy,
+    skipSmallImages: preferences.skipSmallImages,
+    providerOrder: effectiveCompiledProviderOrder(
+      preferences.imageTextProviderOrder,
+    ),
+    sourceLanguage: preferences.sourceLanguage,
+    ...(resolvedSourceLanguage
+      ? { detectedSourceLanguage: resolvedSourceLanguage }
+      : {}),
+    targetLanguage: preferences.targetLanguage,
+    translationIdle: !translationInFlight,
+  });
 }
 
 function initializeImageAnalysisControls(): void {
@@ -1915,6 +1990,19 @@ function renderImageAnalysisControls(): void {
   const heading = document.createElement('h3');
   heading.textContent = 'Image text';
   root.append(heading);
+
+  root.append(createPromptToggle(
+    'Translate text inside images (local, experimental)',
+    preferences.imageTranslationEnabled,
+    (checked) => commitImageAnalysisPreferencePatch({
+      imageTranslationEnabled: checked,
+    }),
+  ));
+  const privacyNote = document.createElement('p');
+  privacyNote.className = 'microcopy';
+  privacyNote.textContent =
+    'Off by default. Visible image pixels stay on this device and are discarded after OCR.';
+  root.append(privacyNote);
 
   const compiledOrder = effectiveCompiledProviderOrder(
     preferences.imageTextProviderOrder,
@@ -2376,6 +2464,7 @@ function invalidateCompanion(message: string): void {
   activeAbortController?.abort();
   liveDeltaAbortController?.abort();
   replicaShadowAbortController?.abort();
+  imageTranslationController.releaseReplica();
   replicaEngineController.releasePresentation(false);
   invalidateComposerOutput();
   followedPageIdentity = undefined;
@@ -2418,6 +2507,7 @@ function releaseReplicaPresentationForLegacyWork(force = false): boolean {
   const needsFreshCapture = legacyTransitionGate.release();
   pendingLiveUpdate = undefined;
   replicaShadowAbortController?.abort();
+  imageTranslationController.releaseReplica();
   replicaEngineController.releasePresentation(true);
   return needsFreshCapture;
 }
@@ -2612,8 +2702,10 @@ function updateControls(): void {
   zoomOutButton.disabled = busy;
   refreshButton.disabled = captureInFlight;
   popoutButton.disabled = !capturedPageIdentity;
-  cancelButton.hidden = !translationInFlight && !composerInFlight;
-  cancelButton.disabled = !translationInFlight && !composerInFlight;
+  cancelButton.hidden =
+    !translationInFlight && !composerInFlight && !imageTranslationInFlight;
+  cancelButton.disabled =
+    !translationInFlight && !composerInFlight && !imageTranslationInFlight;
   translateComposerButton.disabled = busy || !composerInput.value.trim() || !selectedPair();
   translateButton.disabled =
     busy ||
@@ -2623,7 +2715,21 @@ function updateControls(): void {
     availability === 'unavailable' ||
     translationComplete;
   translateButton.textContent = translationComplete ? 'Translation current' : 'Translate page';
-  statusDot.dataset.busy = String(busy || liveDeltaInFlight);
+  statusDot.dataset.busy = String(
+    busy || liveDeltaInFlight || imageTranslationInFlight,
+  );
+}
+
+function setImageTranslationBusy(busy: boolean): void {
+  imageTranslationInFlight = busy;
+  if (busy && !translationInFlight && !composerInFlight) {
+    progressRegion.hidden = false;
+    progressLabel.textContent = 'Recognizing visible image text locally…';
+    progressElement.removeAttribute('value');
+  } else if (!busy && !translationInFlight && !composerInFlight) {
+    hideProgress();
+  }
+  updateControls();
 }
 
 composerInput.addEventListener('input', () => {
@@ -2639,7 +2745,18 @@ function showProgress(label: string, value: number, max: number): void {
 }
 
 function hideProgress(): void {
+  if (
+    imageTranslationInFlight &&
+    !translationInFlight &&
+    !composerInFlight
+  ) {
+    progressRegion.hidden = false;
+    progressLabel.textContent = 'Recognizing visible image text locally…';
+    progressElement.removeAttribute('value');
+    return;
+  }
   progressRegion.hidden = true;
+  progressElement.setAttribute('value', '0');
   progressElement.value = 0;
 }
 
@@ -2697,6 +2814,15 @@ function readableError(error: unknown): string {
   return error instanceof Error && error.message.trim()
     ? error.message
     : 'Something went wrong. Retry the current step.';
+}
+
+function logImageTranslationDiagnostic(
+  diagnostic: ImageTranslationDiagnostic,
+): void {
+  if (diagnostic === 'projected') return;
+  // Content-free local diagnostics only; image text, URLs, and pixels are
+  // deliberately absent from this channel.
+  console.debug('[Simul image translation]', diagnostic);
 }
 
 function isAbortError(error: unknown): boolean {

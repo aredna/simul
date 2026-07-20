@@ -2,7 +2,7 @@
 project_name: Simul
 project_type: chrome-extension
 planning_track: quick-flow
-status: release-ready
+status: checkpoint-f-implemented
 ---
 
 # Simul Project Context
@@ -10,43 +10,44 @@ status: release-ready
 ## Current product state
 
 The repository contains a content-first live translation companion. A user can
-open a read-only active-page mirror in Chrome's native side panel or a detached
+open a read-only active-page replica in Chrome's native side panel or a detached
 extension window, translate Chrome-supported language pairs locally, follow
-bounded DOM/style/image/scroll deltas, zoom the mirror, and compose a reverse
-translation. An initial sanitized capture bootstraps stable isolated-world
-node IDs; normal synchronization replaces only coalesced dirty subtrees. A
-validated production build is checked in at `dist/chrome-unpacked/` for direct
-Developer mode installation without contributor tooling. A development-only
-rrweb engine can retain one masked recorder per source document and atomically
-promote a live preview with `WXT_SIMUL_RRWEB_SHADOW=1`. A second development
-flag, `WXT_SIMUL_RRWEB_TRANSLATION=1`, keeps canonical text in an
-exact-document, revisioned source model and projects bounded pair-scoped Chrome
-translations through rrweb Mirror-owned text nodes. Capture ACKs never wait for
-translation; document, source revision, translation epoch, pair, replay lease,
-and node type must all match before a projection commits. Same-language and
-pair changes restore source text without recapture, and matching projections
-are reconciled before a same-document recovery swap. Production and unflagged
-builds remain on the legacy renderer. Exact-document Ports carry
-bounded, statefully sanitized DOM, CSS, and scroll batches. Applied-state and
-checkpoint ACKs advance only after rrweb casts the admitted events; gaps recover
-once through a hidden checkpoint and atomic swap while preserving the last-good
-replica. The flagged preview retains source viewport geometry, applies zoom
-outside the replay iframe, maps extension/source scrolling, and returns to a
-labeled legacy fallback after a bounded failure. Legacy dirty notices are coalesced
-while rrweb is authoritative so that transition performs at most one fresh v1
-capture.
+bounded DOM/style/image/scroll changes, zoom the replica, and compose a reverse
+translation. The canonical production engine is now rrweb replay with
+revision-safe text projection. It retains one masked recorder per exact source
+document, applies ordered sanitized batches only after rrweb cast completion,
+and recovers a gap through one hidden checkpoint plus atomic last-good swap.
+The legacy renderer remains an emergency fallback selected only when rrweb
+capture/replay fails or `WXT_SIMUL_RRWEB_SHADOW=0` explicitly disables it.
 
-A dormant OCR foundation reserves five stable provider IDs and persists a
-complete provider permutation, three scan policies, conservative small-image
-filtering, and two independent Prompt preferences. The default compile-generated
-provider registry is empty, so no OCR control, provider import, runtime, model,
-Worker, Wasm, permission, CSP change, pixel acquisition, recognition, or overlay
-ships yet. Browser-independent image records are exact-document and rrweb-node
-owned with separate content/observation revisions and tombstones. A shared,
-bounded source-frame `<img>` adapter keeps URL-like source tokens private and
-emits only opaque geometry/revision facts; a deterministic bounded scheduler
-orders manual, visible, near, and gated background work across the three saved
-policies. These are fixed inputs to Checkpoint F rather than provider behavior.
+Capture ACKs never wait for translation. Document, source revision,
+translation epoch, pair, replay lease, and node type must match before text
+projection commits. Same-language and pair changes restore source text without
+recapture, matching projections reconcile before same-document recovery, and
+source viewport geometry remains independent of fit/custom zoom. Mexico City
+and Reddit fidelity gaps are documented follow-ups; Checkpoint F's approved
+Choice C did not claim those sites were fixed.
+
+Image translation is implemented as an initially-off persisted option. The
+source frame observes ordinary top-level `<img>` elements by rrweb node ID while
+keeping URLs and text private. A capacity-one scheduler applies the saved
+visible/background policy and small-image filter. Stable visible pixels are
+captured through `captureVisibleTab()` at no more than twice per second, cropped
+below 4 MP after exact pre/post geometry checks, SHA-256 keyed, and handed to a
+restartable offscreen host through two-minute extension-origin transient
+storage. Tesseract.js/core 7.0.0, three embedded Wasm core loaders, its Worker,
+and 22 pinned `tessdata_fast` files are local. One routed language group is
+loaded at a time and disposed after a group change or 90 seconds idle.
+
+Recognition remains in a bounded memory-only cache separate from translated
+line memory. Nearest valid element `lang`, explicit From, then detected page
+language selects the OCR group. Inert line overlays commit only when document,
+content revision, pixel hash, replay lease, pair epoch, replica image, and
+geometry remain current; they follow replay scroll/zoom without wrapping or
+resizing the image. Disabled builds omit the host, OCR assets, permission, and
+CSP. The canonical build adds only `offscreen` and the exact local
+Wasm/Worker CSP, validates every runtime hash/notice offline, and remains under
+42 MiB unpacked.
 
 ## Fixed engineering baseline
 
@@ -54,8 +55,8 @@ policies. These are fixed inputs to Checkpoint F rather than provider behavior.
 - Node.js 24 LTS and npm with a committed lockfile.
 - Vanilla HTML, CSS, and TypeScript until a documented UX need justifies a UI
   framework.
-- No production permissions or host permissions by default. Every requested
-  permission must map to an explicit requirement and use the narrowest scope.
+- Production permissions stay at the documented minimum. `offscreen` is the
+  only OCR addition; every host match remains optional and user-scoped.
 - No remotely hosted executable code and no secrets in extension bundles.
 - Background and popup entrypoints stay thin; testable domain logic lives in
   `lib/`.
@@ -82,9 +83,10 @@ extension APIs or page integration.
 - `entrypoints/popup/`: active-page side-panel launcher
 - `entrypoints/sidepanel/`: translation companion UI and browser orchestration
 - `entrypoints/page-snapshot.ts`: unlisted top-frame snapshot entrypoint
-- `entrypoints/page-recorder.ts`: development-only unlisted rrweb checkpoint
-  and exact-document live recorder bridge
-- `lib/replica/visible-replay-host.ts`: development-only candidate/committed
+- `entrypoints/page-recorder.ts`: unlisted rrweb checkpoint, live recorder,
+  and exact-document image-source bridge
+- `entrypoints/offscreen/`: static local Tesseract compute host
+- `lib/replica/visible-replay-host.ts`: candidate/committed
   replay ownership, atomic presentation, protected iframe layout, zoom, and
   scroll projection
 - `lib/replica/live-protocol.ts`, `lib/replica/live-recorder-session.ts`, and
@@ -96,11 +98,12 @@ extension APIs or page integration.
   monotonic revisions/tombstones, and committed text-change records
 - `lib/translation/`: bounded exact-source memory and the single-session,
   revision/epoch/lease-safe rrweb translation coordinator
-- `lib/ocr/`: provider-neutral contracts and IDs, empty compiled-provider
-  registry, exact-document image ledger, injected `<img>` observation adapter,
-  small-image decisions, and dormant visibility scheduler
-- `tools/ocr-build-profile.ts`: strict compile-profile flags and virtual empty
-  registry generation; enabled-but-unimplemented providers fail the build
+- `lib/ocr/`: exact-document image observation, capture/currentness,
+  capacity-one scheduling, transient host coordination, Tesseract routing,
+  recognition cache, and inert overlay projection
+- `tools/ocr-build-profile.ts`: strict compile-profile flags; Tesseract is the
+  default implemented provider and every other enabled provider fails build
+- `vendor/ocr/`: immutable Tesseract runtime/model assets, hashes, and notices
 - `lib/`: safe bootstrap/delta boundaries, inert renderer, preferences,
   provider adapter, translation pipeline logic, and replica-engine adapters
 - `tests/`: unit tests
@@ -123,3 +126,5 @@ extension APIs or page integration.
 6. OCR providers must consume the stable E contracts and compile registry;
    adding a provider never weakens exact-document currency, descriptor privacy,
    bounded scheduling, saved-order preservation, or current-revision override.
+7. OCR runtime code, models, and notices must be local, exactly pinned, hash
+   validated, and absent from a compiled-out provider profile.

@@ -20,8 +20,7 @@ export function selectReplicaTranslationMode(
   engineMode = selectReplicaEngineMode(environment),
 ): ReplicaTranslationMode {
   return engineMode === 'rrweb-shadow' &&
-    environment.DEV === true &&
-    environment.WXT_SIMUL_RRWEB_TRANSLATION === '1'
+    environment.WXT_SIMUL_RRWEB_TRANSLATION !== '0'
     ? 'rrweb-projection'
     : 'legacy';
 }
@@ -29,10 +28,12 @@ export function selectReplicaTranslationMode(
 export function selectReplicaEngineMode(
   environment: ReplicaBuildEnvironment,
 ): ReplicaEngineMode {
-  return environment.DEV === true &&
-    environment.WXT_SIMUL_RRWEB_SHADOW === '1'
-    ? 'rrweb-shadow'
-    : 'legacy';
+  // Checkpoint F promotes rrweb to the canonical release path. An explicit
+  // zero remains a local emergency rollback, while runtime failures still
+  // atomically return to the already-prepared legacy surface.
+  return environment.WXT_SIMUL_RRWEB_SHADOW === '0'
+    ? 'legacy'
+    : 'rrweb-shadow';
 }
 
 interface ReplicaEngineControllerOptions {

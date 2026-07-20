@@ -10,12 +10,10 @@ import {
 } from '../lib/replica/visible-replay-host';
 
 describe('visible rrweb replay host', () => {
-  it('uses neutral development labels that stay truthful after projection', () => {
-    expect(STATIC_REPLAY_LABEL).toBe('Static rrweb preview');
-    expect(LIVE_REPLAY_LABEL).toBe('Live rrweb preview');
-    expect(`${STATIC_REPLAY_LABEL} ${LIVE_REPLAY_LABEL}`).not.toMatch(
-      /(?:un)?translated/iu,
-    );
+  it('uses canonical replica labels without claiming fallback bugs are fixed', () => {
+    expect(STATIC_REPLAY_LABEL).toBe('Replica reconnecting');
+    expect(LIVE_REPLAY_LABEL).toBe('Live translated replica');
+    expect(`${STATIC_REPLAY_LABEL} ${LIVE_REPLAY_LABEL}`).not.toMatch(/exact|perfect/iu);
   });
 
   it('keeps candidates hidden, commits atomically, and labels the static preview', () => {

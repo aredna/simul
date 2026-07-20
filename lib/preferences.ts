@@ -52,6 +52,7 @@ export interface CompanionPreferences {
   zoomPercent: number;
   syncScroll: boolean;
   textLayoutMode: TextLayoutMode;
+  imageTranslationEnabled: boolean;
   imageTextProviderOrder: ImageTextProviderId[];
   imageScanPolicy: ImageScanPolicy;
   skipSmallImages: boolean;
@@ -69,6 +70,7 @@ export const DEFAULT_COMPANION_PREFERENCES: Readonly<CompanionPreferences> =
     zoomPercent: 100,
     syncScroll: true,
     textLayoutMode: 'adaptive',
+    imageTranslationEnabled: false,
     imageTextProviderOrder: Object.freeze([
       ...IMAGE_TEXT_PROVIDER_IDS,
     ]) as unknown as ImageTextProviderId[],
@@ -122,6 +124,10 @@ export function parseCompanionPreferences(
     textLayoutMode: isTextLayoutMode(input.textLayoutMode)
       ? input.textLayoutMode
       : DEFAULT_COMPANION_PREFERENCES.textLayoutMode,
+    imageTranslationEnabled:
+      typeof input.imageTranslationEnabled === 'boolean'
+        ? input.imageTranslationEnabled
+        : DEFAULT_COMPANION_PREFERENCES.imageTranslationEnabled,
     imageTextProviderOrder: repairImageTextProviderOrder(
       input.imageTextProviderOrder,
     ),
@@ -294,6 +300,7 @@ export interface CompanionViewSettings {
 export type CompanionViewSettingsPatch = Partial<CompanionViewSettings>;
 
 export interface CompanionImageAnalysisSettings {
+  imageTranslationEnabled: boolean;
   imageTextProviderOrder: ImageTextProviderId[];
   imageScanPolicy: ImageScanPolicy;
   skipSmallImages: boolean;
@@ -339,6 +346,7 @@ function createDefaultPreferences(): CompanionPreferences {
     zoomPercent: 100,
     syncScroll: true,
     textLayoutMode: 'adaptive',
+    imageTranslationEnabled: false,
     imageTextProviderOrder: [...IMAGE_TEXT_PROVIDER_IDS],
     imageScanPolicy: 'visible-first-background-prescan',
     skipSmallImages: true,

@@ -1,5 +1,5 @@
 import { spawn } from 'node:child_process';
-import { randomUUID } from 'node:crypto';
+import { createHash, randomUUID } from 'node:crypto';
 import {
   access,
   cp,
@@ -24,6 +24,13 @@ export const APPROVED_PERMISSIONS = Object.freeze([
   'sidePanel',
   'storage',
 ]);
+export const APPROVED_OCR_PERMISSIONS = Object.freeze([
+  ...APPROVED_PERMISSIONS,
+  'offscreen',
+]);
+export const APPROVED_OCR_CSP =
+  "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; object-src 'self';";
+export const MAX_UNPACKED_ARTIFACT_BYTES = 42 * 1024 * 1024;
 export const APPROVED_OPTIONAL_HOST_PERMISSIONS = Object.freeze([
   'http://*/*',
   'https://*/*',
@@ -43,8 +50,79 @@ export const FORBIDDEN_OCR_FOUNDATION_DEPENDENCIES = Object.freeze([
   '@techstark/opencv-js',
   'onnxruntime-web',
   'opencv.js',
-  'tesseract.js',
-  'tesseract.js-core',
+]);
+export const APPROVED_OCR_PROVIDER_DEPENDENCIES = Object.freeze({
+  'tesseract.js': '7.0.0',
+  'tesseract.js-core': '7.0.0',
+});
+export const APPROVED_TESSDATA_FAST_COMMIT =
+  '87416418657359cb625c412a48b6e1d6d41c29bd';
+export const APPROVED_TESSERACT_LANGUAGE_CODES = Object.freeze([
+  'eng',
+  'spa',
+  'fra',
+  'deu',
+  'por',
+  'ita',
+  'vie',
+  'jpn',
+  'jpn_vert',
+  'kor',
+  'chi_sim',
+  'chi_tra',
+  'rus',
+  'ukr',
+  'ara',
+  'heb',
+  'hin',
+  'mar',
+  'ben',
+  'kan',
+  'tam',
+  'tel',
+]);
+export const APPROVED_TESSERACT_TRAINEDDATA_CODES = Object.freeze([
+  'ara',
+  'ben',
+  'chi_sim',
+  'chi_tra',
+  'deu',
+  'eng',
+  'fra',
+  'heb',
+  'hin',
+  'ita',
+  'jpn_vert',
+  'jpn',
+  'kan',
+  'kor',
+  'mar',
+  'por',
+  'rus',
+  'spa',
+  'tam',
+  'tel',
+  'ukr',
+  'vie',
+]);
+export const APPROVED_TESSERACT_CORE_PATHS = Object.freeze([
+  'core/tesseract-core-lstm.wasm.js',
+  'core/tesseract-core-relaxedsimd-lstm.wasm.js',
+  'core/tesseract-core-simd-lstm.wasm.js',
+]);
+export const APPROVED_TESSERACT_WORKER_PATH = 'worker/worker.min.js';
+export const APPROVED_TESSERACT_LICENSE_PATHS = Object.freeze([
+  'licenses/TESSDATA_FAST_APACHE-2.0.txt',
+  'licenses/TESSERACT_CORE_APACHE-2.0.txt',
+  'licenses/TESSERACT_JS_APACHE-2.0.txt',
+  'licenses/WORKER_THIRD_PARTY.txt',
+]);
+export const REQUIRED_OCR_RUNTIME_MARKERS = Object.freeze([
+  'simul:ocr-v1:run',
+  'tesseract.js-7.0.0',
+  '/ocr/tesseract/worker/worker.min.js',
+  '/ocr/tesseract/core',
+  '/ocr/tesseract/lang',
 ]);
 
 const TOOL_FILE = fileURLToPath(import.meta.url);
@@ -99,13 +177,14 @@ export function canonicalArtifactDirectory(projectRoot = PROJECT_ROOT) {
 export async function buildProductionArtifact({
   projectRoot = PROJECT_ROOT,
   temporaryRoot,
+  ocrEnabled = true,
 } = {}) {
   if (!temporaryRoot) {
     throw new ArtifactError('A temporary build root is required.');
   }
 
   const resolvedRoot = path.resolve(projectRoot);
-  await assertOcrFoundationDependenciesAbsent(resolvedRoot);
+  await assertOcrProviderDependenciesApproved(resolvedRoot);
   const outputBase = path.join(path.resolve(temporaryRoot), 'wxt-output');
   const wxtCli = path.join(resolvedRoot, 'node_modules', 'wxt', 'bin', 'wxt.mjs');
   await access(wxtCli);
@@ -122,7 +201,7 @@ export async function buildProductionArtifact({
         NODE_ENV: 'production',
         SIMUL_WXT_OUT_DIR: outputBase,
         SIMUL_OCR_TEXT_DETECTOR: '0',
-        SIMUL_OCR_TESSERACT: '0',
+        SIMUL_OCR_TESSERACT: ocrEnabled ? '1' : '0',
         SIMUL_OCR_TRANSFORMERS: '0',
         SIMUL_OCR_PADDLE: '0',
         SIMUL_OCR_SCREEN_AI: '0',
@@ -157,13 +236,14 @@ export async function validateArtifact(artifactDirectory) {
   }
 
   const executableTextByPath = new Map();
+  let unpackedBytes = 0;
 
   for (const entry of files) {
     assertSafeArtifactFilename(entry.path);
-    assertNoOcrRuntimeArtifact(entry.path);
     const absolutePath = path.join(root, ...entry.path.split('/'));
     const extension = path.posix.extname(entry.path).toLowerCase();
     const contents = await readFile(absolutePath);
+    unpackedBytes += contents.byteLength;
     assertNoSecretContent(entry.path, contents);
 
     if (TEXT_EXTENSIONS.has(extension)) {
@@ -190,13 +270,26 @@ export async function validateArtifact(artifactDirectory) {
   } catch (error) {
     throw new ArtifactError('manifest.json is not valid JSON.', { cause: error });
   }
-  validateManifest(manifest, filePaths);
+  const ocrEnabled = validateManifest(manifest, filePaths);
+  if (ocrEnabled) {
+    await validateTesseractRuntimeAssets({
+      root,
+      files,
+      filePaths,
+      executableTextByPath,
+      unpackedBytes,
+    });
+  } else {
+    for (const entry of files) assertNoOcrRuntimeArtifact(entry.path);
+  }
   await validateManifestSemanticResources(root, manifest, filePaths);
 
   return {
     directory: root,
     files: [...filePaths].sort(),
     manifest,
+    ocrEnabled,
+    unpackedBytes,
   };
 }
 
@@ -533,13 +626,17 @@ function validateManifest(manifest, filePaths) {
   const permissions = Array.isArray(manifest.permissions)
     ? manifest.permissions
     : [];
+  const ocrEnabled = permissions.includes('offscreen');
+  const approvedPermissions = ocrEnabled
+    ? APPROVED_OCR_PERMISSIONS
+    : APPROVED_PERMISSIONS;
   if (
-    permissions.length !== APPROVED_PERMISSIONS.length ||
-    new Set(permissions).size !== APPROVED_PERMISSIONS.length ||
-    !APPROVED_PERMISSIONS.every((permission) => permissions.includes(permission))
+    permissions.length !== approvedPermissions.length ||
+    new Set(permissions).size !== approvedPermissions.length ||
+    !approvedPermissions.every((permission) => permissions.includes(permission))
   ) {
     throw new ArtifactError(
-      `manifest.json permissions must be exactly: ${APPROVED_PERMISSIONS.join(', ')}.`,
+      `manifest.json permissions must be exactly one approved profile: ${APPROVED_PERMISSIONS.join(', ')} or ${APPROVED_OCR_PERMISSIONS.join(', ')}.`,
     );
   }
   const optionalHostPermissions = Array.isArray(
@@ -581,7 +678,22 @@ function validateManifest(manifest, filePaths) {
     assertReferenceExists('manifest.json', reference, filePaths);
   }
 
-  if ('content_security_policy' in manifest) {
+  if (ocrEnabled) {
+    if (!filePaths.has('offscreen.html')) {
+      throw new ArtifactError(
+        'The OCR profile requires the packaged offscreen.html compute host.',
+      );
+    }
+    if (
+      !isRecord(manifest.content_security_policy) ||
+      Object.keys(manifest.content_security_policy).length !== 1 ||
+      manifest.content_security_policy.extension_pages !== APPROVED_OCR_CSP
+    ) {
+      throw new ArtifactError(
+        `The OCR profile requires the exact extension page CSP: ${APPROVED_OCR_CSP}`,
+      );
+    }
+  } else if ('content_security_policy' in manifest) {
     throw new ArtifactError(
       'manifest.json must not relax or override extension page CSP in the OCR foundation build.',
     );
@@ -590,6 +702,7 @@ function validateManifest(manifest, filePaths) {
   for (const reference of collectManifestReferences(manifest)) {
     assertReferenceExists('manifest.json', reference, filePaths);
   }
+  return ocrEnabled;
 }
 
 async function validateManifestSemanticResources(root, manifest, filePaths) {
@@ -705,6 +818,22 @@ function discoverHtmlResourceReferences(sourcePath, text) {
   );
 }
 
+function discoverHtmlScriptReferences(sourcePath, text) {
+  let document;
+  try {
+    ({ document } = parseHTML(text));
+  } catch (error) {
+    throw new ArtifactError(`HTML resource cannot be parsed: ${sourcePath}`, {
+      cause: error,
+    });
+  }
+  return [...document.querySelectorAll('script[src]')]
+    .map((script) => script.getAttribute('src'))
+    .filter((reference) =>
+      typeof reference === 'string' && reference.length > 0,
+    );
+}
+
 function parseSrcset(value) {
   const references = [];
   let position = 0;
@@ -771,17 +900,7 @@ async function validateTextReferences(
       references.push(match[1]);
     }
   } else if (resourceType === 'javascript') {
-    const importPatterns = [
-      /\bfrom\s*["']([^"']+)["']/gu,
-      /\bimport\s*["']([^"']+)["']/gu,
-      /\bimport\s*\(\s*["']([^"']+)["']/gu,
-      /\bimportScripts\s*\(\s*["']([^"']+)["']/gu,
-      /\b(?:SharedWorker|Worker)\s*\(\s*["']([^"']+)["']/gu,
-      /\bnew\s+URL\s*\(\s*["']([^"']+)["']\s*,\s*import\.meta\.url/gu,
-    ];
-    for (const pattern of importPatterns) {
-      for (const match of text.matchAll(pattern)) references.push(match[1]);
-    }
+    references.push(...discoverJavaScriptResourceReferences(text));
   }
 
   for (const reference of references) {
@@ -796,6 +915,81 @@ async function validateTextReferences(
   if (!path.isAbsolute(root)) {
     throw new ArtifactError('Artifact reference validation requires an absolute root.');
   }
+}
+
+function discoverJavaScriptResourceReferences(text) {
+  const references = [];
+  const stack = [parseJavaScript(text)];
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (!node || typeof node !== 'object') continue;
+    if (Array.isArray(node)) {
+      stack.push(...node);
+      continue;
+    }
+    if (
+      node.type === 'ImportDeclaration' ||
+      node.type === 'ExportNamedDeclaration' ||
+      node.type === 'ExportAllDeclaration'
+    ) {
+      const reference = staticStringValue(node.source);
+      if (reference !== undefined) references.push(reference);
+    } else if (node.type === 'ImportExpression') {
+      const reference = staticStringValue(node.source);
+      if (reference !== undefined) references.push(reference);
+    } else if (
+      node.type === 'CallExpression' &&
+      expressionName(node.callee) === 'importScripts'
+    ) {
+      for (const argument of node.arguments) {
+        const reference = staticStringValue(argument);
+        if (reference !== undefined) references.push(reference);
+      }
+    } else if (node.type === 'NewExpression') {
+      const constructor = expressionName(node.callee);
+      if (constructor === 'Worker' || constructor === 'SharedWorker') {
+        const reference = staticUrlValue(node.arguments[0]);
+        if (reference !== undefined) references.push(reference);
+      } else if (constructor === 'URL') {
+        const reference = staticStringValue(node.arguments[0]);
+        if (reference !== undefined && reference !== '.' && reference !== './') {
+          references.push(reference);
+        }
+      }
+    }
+    for (const value of Object.values(node)) {
+      if (value && typeof value === 'object') stack.push(value);
+    }
+  }
+  return references;
+}
+
+function discoverJavaScriptModuleReferences(text) {
+  const references = [];
+  const stack = [parseJavaScript(text)];
+  while (stack.length > 0) {
+    const node = stack.pop();
+    if (!node || typeof node !== 'object') continue;
+    if (Array.isArray(node)) {
+      stack.push(...node);
+      continue;
+    }
+    if (
+      node.type === 'ImportDeclaration' ||
+      node.type === 'ExportNamedDeclaration' ||
+      node.type === 'ExportAllDeclaration'
+    ) {
+      const reference = staticStringValue(node.source);
+      if (reference !== undefined) references.push(reference);
+    } else if (node.type === 'ImportExpression') {
+      const reference = staticStringValue(node.source);
+      if (reference !== undefined) references.push(reference);
+    }
+    for (const value of Object.values(node)) {
+      if (value && typeof value === 'object') stack.push(value);
+    }
+  }
+  return references;
 }
 
 function assertReferenceExists(sourcePath, rawReference, filePaths) {
@@ -862,6 +1056,11 @@ function assertSafeArtifactFilename(relativePath) {
 function assertNoOcrRuntimeArtifact(relativePath) {
   const lowerPath = relativePath.toLowerCase();
   const extension = path.posix.extname(lowerPath);
+  if (lowerPath === 'ocr' || lowerPath.startsWith('ocr/')) {
+    throw new ArtifactError(
+      `OCR runtime asset is forbidden in the foundation artifact: ${relativePath}`,
+    );
+  }
   if (FORBIDDEN_MODEL_EXTENSIONS.has(extension)) {
     throw new ArtifactError(
       `OCR runtime or model asset is forbidden in the foundation artifact: ${relativePath}`,
@@ -883,7 +1082,267 @@ function assertNoOcrRuntimeArtifact(relativePath) {
   }
 }
 
-export async function assertOcrFoundationDependenciesAbsent(
+async function validateTesseractRuntimeAssets({
+  root,
+  files,
+  filePaths,
+  executableTextByPath,
+  unpackedBytes,
+}) {
+  if (unpackedBytes > MAX_UNPACKED_ARTIFACT_BYTES) {
+    throw new ArtifactError(
+      `OCR artifact is ${unpackedBytes} bytes; the approved maximum is ${MAX_UNPACKED_ARTIFACT_BYTES} bytes.`,
+    );
+  }
+
+  const manifestPath = 'ocr/tesseract/asset-manifest.json';
+  const noticesPath = 'ocr/THIRD_PARTY_NOTICES.md';
+  for (const requiredPath of [manifestPath, noticesPath]) {
+    if (!filePaths.has(requiredPath)) {
+      throw new ArtifactError(`OCR artifact is missing required local asset: ${requiredPath}`);
+    }
+  }
+
+  const artifactManifestBytes = await readFile(
+    path.join(root, ...manifestPath.split('/')),
+  );
+  const approvedManifestBytes = await readFile(
+    path.join(PROJECT_ROOT, 'vendor', 'ocr', 'tesseract', 'asset-manifest.json'),
+  );
+  if (!artifactManifestBytes.equals(approvedManifestBytes)) {
+    throw new ArtifactError(
+      'Packaged Tesseract asset manifest differs from the reviewed vendor manifest.',
+    );
+  }
+  const artifactNoticesBytes = await readFile(
+    path.join(root, ...noticesPath.split('/')),
+  );
+  const approvedNoticesBytes = await readFile(
+    path.join(PROJECT_ROOT, 'vendor', 'ocr', 'THIRD_PARTY_NOTICES.md'),
+  );
+  if (
+    artifactNoticesBytes.byteLength === 0 ||
+    !artifactNoticesBytes.equals(approvedNoticesBytes)
+  ) {
+    throw new ArtifactError(
+      'Packaged OCR third-party notices differ from the reviewed vendor notices.',
+    );
+  }
+
+  let assetManifest;
+  try {
+    assetManifest = JSON.parse(artifactManifestBytes.toString('utf8'));
+  } catch (error) {
+    throw new ArtifactError('Packaged Tesseract asset manifest is invalid JSON.', {
+      cause: error,
+    });
+  }
+  if (
+    assetManifest?.schemaVersion !== 1 ||
+    assetManifest?.tesseractVersion !== APPROVED_OCR_PROVIDER_DEPENDENCIES['tesseract.js'] ||
+    assetManifest?.tesseractCoreVersion !== APPROVED_OCR_PROVIDER_DEPENDENCIES['tesseract.js-core'] ||
+    assetManifest?.tessdataFastCommit !== APPROVED_TESSDATA_FAST_COMMIT ||
+    assetManifest?.preprocessingVersion !== 'visible-crop-v1' ||
+    !sameOrderedStrings(
+      assetManifest?.languageCodes,
+      APPROVED_TESSERACT_LANGUAGE_CODES,
+    ) ||
+    !Array.isArray(assetManifest.files)
+  ) {
+    throw new ArtifactError('Packaged Tesseract asset manifest has unapproved metadata.');
+  }
+  assertApprovedTesseractAssetLayout(assetManifest.files);
+
+  const approvedRuntimePaths = new Set([manifestPath, noticesPath]);
+  let declaredBytes = 0;
+  for (const asset of assetManifest.files) {
+    if (
+      !isRecord(asset) ||
+      typeof asset.path !== 'string' ||
+      !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/u.test(asset.path) ||
+      asset.path.split('/').includes('..') ||
+      !Number.isSafeInteger(asset.bytes) ||
+      asset.bytes < 0 ||
+      !/^[a-f0-9]{64}$/u.test(asset.sha256)
+    ) {
+      throw new ArtifactError('Packaged Tesseract asset manifest contains an invalid entry.');
+    }
+    const relativePath = `ocr/tesseract/${asset.path}`;
+    if (approvedRuntimePaths.has(relativePath)) {
+      throw new ArtifactError(`Packaged Tesseract asset manifest repeats: ${relativePath}`);
+    }
+    approvedRuntimePaths.add(relativePath);
+    if (!filePaths.has(relativePath)) {
+      throw new ArtifactError(`OCR artifact is missing declared asset: ${relativePath}`);
+    }
+    const contents = await readFile(path.join(root, ...relativePath.split('/')));
+    if (contents.byteLength !== asset.bytes) {
+      throw new ArtifactError(`OCR asset byte count changed: ${relativePath}`);
+    }
+    const digest = createHash('sha256').update(contents).digest('hex');
+    if (digest !== asset.sha256) {
+      throw new ArtifactError(`OCR asset hash changed: ${relativePath}`);
+    }
+    declaredBytes += contents.byteLength;
+  }
+  if (
+    declaredBytes !== assetManifest.totalBytes ||
+    declaredBytes > MAX_UNPACKED_ARTIFACT_BYTES
+  ) {
+    throw new ArtifactError(
+      `Tesseract asset budget mismatch: declared ${assetManifest.totalBytes}, measured ${declaredBytes}.`,
+    );
+  }
+
+  for (const relativePath of filePaths) {
+    if (relativePath.startsWith('ocr/') && !approvedRuntimePaths.has(relativePath)) {
+      throw new ArtifactError(`Unapproved OCR runtime asset: ${relativePath}`);
+    }
+  }
+
+  const offscreenResources = collectStaticJavaScriptModuleClosure(
+    'offscreen.html',
+    executableTextByPath,
+    filePaths,
+  );
+  assertOcrRuntimeMarkers(offscreenResources, executableTextByPath);
+  for (const entry of files) {
+    if (
+      entry.path === 'offscreen.html' ||
+      offscreenResources.has(entry.path) ||
+      approvedRuntimePaths.has(entry.path)
+    ) {
+      continue;
+    }
+    assertNoOcrRuntimeArtifact(entry.path);
+  }
+
+  const remoteRuntimePattern =
+    /(?:cdn\.jsdelivr\.net|unpkg\.com)\/(?:npm\/)?(?:@tesseract\.js-data|tesseract\.js(?:-core)?)(?:@|\/)|raw\.githubusercontent\.com\/tesseract-ocr\/tessdata/iu;
+  for (const [relativePath, text] of executableTextByPath) {
+    if (remoteRuntimePattern.test(text)) {
+      throw new ArtifactError(
+        `Remote OCR runtime fallback found in artifact: ${relativePath}`,
+      );
+    }
+  }
+}
+
+function assertApprovedTesseractAssetLayout(files) {
+  const expected = [
+    ...APPROVED_TESSERACT_CORE_PATHS.map((assetPath) => ({
+      path: assetPath,
+      role: 'wasm-core-loader',
+      source: `npm:tesseract.js-core@7.0.0/${path.posix.basename(assetPath)}`,
+    })),
+    ...APPROVED_TESSERACT_TRAINEDDATA_CODES.map((code) => ({
+      path: `lang/${code}.traineddata.gz`,
+      role: 'traineddata',
+      source: `https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/${APPROVED_TESSDATA_FAST_COMMIT}/${code}.traineddata`,
+    })),
+    {
+      path: APPROVED_TESSERACT_LICENSE_PATHS[0],
+      role: 'license',
+      source: `https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/${APPROVED_TESSDATA_FAST_COMMIT}/LICENSE`,
+    },
+    {
+      path: APPROVED_TESSERACT_LICENSE_PATHS[1],
+      role: 'license',
+      source: 'npm:tesseract.js-core@7.0.0/LICENSE',
+    },
+    {
+      path: APPROVED_TESSERACT_LICENSE_PATHS[2],
+      role: 'license',
+      source: 'npm:tesseract.js@7.0.0/LICENSE.md',
+    },
+    {
+      path: APPROVED_TESSERACT_LICENSE_PATHS[3],
+      role: 'license',
+      source: 'npm:tesseract.js@7.0.0/dist/worker.min.js.LICENSE.txt',
+    },
+    {
+      path: APPROVED_TESSERACT_WORKER_PATH,
+      role: 'worker',
+      source: 'npm:tesseract.js@7.0.0/dist/worker.min.js',
+    },
+  ];
+  if (
+    files.length !== expected.length ||
+    !expected.every((approved, index) => {
+      const candidate = files[index];
+      return isRecord(candidate) &&
+        candidate.path === approved.path &&
+        candidate.role === approved.role &&
+        candidate.source === approved.source;
+    })
+  ) {
+    throw new ArtifactError(
+      'Packaged Tesseract asset manifest has an unapproved path, role, source, or ordering.',
+    );
+  }
+}
+
+function collectStaticJavaScriptModuleClosure(
+  htmlPath,
+  executableTextByPath,
+  filePaths,
+) {
+  const htmlText = executableTextByPath.get(htmlPath);
+  if (typeof htmlText !== 'string') {
+    throw new ArtifactError(`OCR compute host is unreadable: ${htmlPath}`);
+  }
+  const pending = discoverHtmlScriptReferences(htmlPath, htmlText).map(
+    (reference) => assertReferenceExists(htmlPath, reference, filePaths),
+  ).filter((reference) => /\.m?js$/iu.test(reference));
+  if (pending.length === 0) {
+    throw new ArtifactError(
+      'OCR compute host must load at least one local JavaScript module.',
+    );
+  }
+
+  const closure = new Set();
+  while (pending.length > 0) {
+    const modulePath = pending.pop();
+    if (closure.has(modulePath)) continue;
+    const moduleText = executableTextByPath.get(modulePath);
+    if (typeof moduleText !== 'string') {
+      throw new ArtifactError(`OCR compute host module is unreadable: ${modulePath}`);
+    }
+    closure.add(modulePath);
+    for (const reference of discoverJavaScriptModuleReferences(moduleText)) {
+      const importedPath = assertReferenceExists(
+        modulePath,
+        reference,
+        filePaths,
+      );
+      if (/\.m?js$/iu.test(importedPath) && !closure.has(importedPath)) {
+        pending.push(importedPath);
+      }
+    }
+  }
+  return closure;
+}
+
+function assertOcrRuntimeMarkers(modulePaths, executableTextByPath) {
+  for (const marker of REQUIRED_OCR_RUNTIME_MARKERS) {
+    const present = [...modulePaths].some((modulePath) =>
+      hasJavaScriptStringMarker(executableTextByPath.get(modulePath), marker),
+    );
+    if (!present) {
+      throw new ArtifactError(
+        `OCR compute host is missing required immutable runtime marker: ${marker}`,
+      );
+    }
+  }
+}
+
+function sameOrderedStrings(candidate, approved) {
+  return Array.isArray(candidate) &&
+    candidate.length === approved.length &&
+    approved.every((value, index) => candidate[index] === value);
+}
+
+export async function assertOcrProviderDependenciesApproved(
   projectRoot = PROJECT_ROOT,
 ) {
   const root = path.resolve(projectRoot);
@@ -895,6 +1354,18 @@ export async function assertOcrFoundationDependenciesAbsent(
   } catch (error) {
     throw new ArtifactError('package.json is missing or invalid.', { cause: error });
   }
+  const directDependencies = isRecord(packageJson?.dependencies)
+    ? packageJson.dependencies
+    : {};
+  for (const [name, version] of Object.entries(
+    APPROVED_OCR_PROVIDER_DEPENDENCIES,
+  )) {
+    if (directDependencies[name] !== version) {
+      throw new ArtifactError(
+        `Approved OCR provider dependency must be pinned exactly: ${name}@${version}.`,
+      );
+    }
+  }
   for (const field of [
     'dependencies',
     'devDependencies',
@@ -903,6 +1374,15 @@ export async function assertOcrFoundationDependenciesAbsent(
   ]) {
     const dependencies = packageJson?.[field];
     if (!isRecord(dependencies)) continue;
+    if (field !== 'dependencies') {
+      for (const name of Object.keys(APPROVED_OCR_PROVIDER_DEPENDENCIES)) {
+        if (name in dependencies) {
+          throw new ArtifactError(
+            `Approved OCR provider dependency must be a production dependency: ${name}.`,
+          );
+        }
+      }
+    }
     assertDependencyRecordAbsent(
       dependencies,
       `package.json ${field}`,
@@ -917,6 +1397,21 @@ export async function assertOcrFoundationDependenciesAbsent(
     throw new ArtifactError('package-lock.json is missing or invalid.', { cause: error });
   }
   const packages = isRecord(lockJson?.packages) ? lockJson.packages : {};
+  const lockRootDependencies = isRecord(packages['']?.dependencies)
+    ? packages[''].dependencies
+    : {};
+  for (const [name, version] of Object.entries(
+    APPROVED_OCR_PROVIDER_DEPENDENCIES,
+  )) {
+    if (
+      lockRootDependencies[name] !== version ||
+      packages[`node_modules/${name}`]?.version !== version
+    ) {
+      throw new ArtifactError(
+        `package-lock.json must pin the approved OCR provider exactly: ${name}@${version}.`,
+      );
+    }
+  }
   for (const [packagePath, metadata] of Object.entries(packages)) {
     const pathDependency = forbiddenDependencyFromPackagePath(packagePath);
     if (pathDependency) throwLockDependencyError(pathDependency);
@@ -947,6 +1442,15 @@ function assertDependencyRecordAbsent(dependencies, context, prefix) {
       forbiddenDependencyFromAlias(specifier);
     if (forbidden) {
       throw new ArtifactError(`${prefix}: ${forbidden} (${context})`);
+    }
+    const approvedAlias = dependencyFromAlias(
+      specifier,
+      Object.keys(APPROVED_OCR_PROVIDER_DEPENDENCIES),
+    );
+    if (approvedAlias && name !== approvedAlias) {
+      throw new ArtifactError(
+        `Approved OCR provider dependency cannot be aliased: ${approvedAlias} (${context}).`,
+      );
     }
   }
 }
@@ -989,6 +1493,10 @@ function forbiddenDependencyFromPackagePath(packagePath) {
 }
 
 function forbiddenDependencyFromAlias(specifier) {
+  return dependencyFromAlias(specifier, FORBIDDEN_OCR_FOUNDATION_DEPENDENCIES);
+}
+
+function dependencyFromAlias(specifier, dependencies) {
   if (typeof specifier !== 'string' || !specifier.startsWith('npm:')) {
     return undefined;
   }
@@ -996,7 +1504,7 @@ function forbiddenDependencyFromAlias(specifier) {
   const name = alias.startsWith('@')
     ? alias.match(/^(@[^/]+\/[^@]+)(?:@|$)/u)?.[1]
     : alias.match(/^([^@]+)(?:@|$)/u)?.[1];
-  return forbiddenDependencyName(name);
+  return dependencies.includes(name) ? name : undefined;
 }
 
 function forbiddenDependencyName(name) {

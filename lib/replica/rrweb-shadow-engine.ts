@@ -21,6 +21,7 @@ import { RrwebStreamSanitizer } from './rrweb-stream-sanitizer';
 import {
   SourceValueModel,
   sameSourceDocument,
+  type ReplicaSourceDocumentIdentity,
   type ReplicaSourceTextChange,
 } from './source-value-model';
 import type {
@@ -67,6 +68,7 @@ interface RrwebShadowReplicaEngineOptions {
   readonly openStream?: ReplicaLiveStreamFactory;
   readonly onLiveFailure?: (code: ReplicaDiagnosticCode) => void;
   readonly onLiveApplied?: () => void;
+  readonly onLayoutChanged?: () => void;
   readonly onSourceCommit?: (commit: ReplicaSourceCommit) => void;
   readonly createReplayer?: ReplayerFactory;
   readonly createSanitizer?: () => RrwebStreamSanitizer;
@@ -105,6 +107,13 @@ interface ManagedLiveStream {
   appliedBatches: number;
   appliedBytes: number;
   disposed: boolean;
+}
+
+export interface ReplicaImageAnchor {
+  readonly document: ReplicaSourceDocumentIdentity;
+  readonly replayLease: number;
+  readonly image: HTMLImageElement;
+  readonly iframe: HTMLIFrameElement;
 }
 
 class ShadowReplicaError extends Error {
@@ -408,6 +417,33 @@ export class RrwebShadowReplicaEngine
     };
   }
 
+  resolveImageAnchor(
+    document: ReplicaSourceDocumentIdentity,
+    nodeId: number,
+  ): ReplicaImageAnchor | undefined {
+    const committed = this.#committed;
+    const currentDocument = this.#sourceValues.document;
+    if (
+      !committed?.replayer ||
+      committed.released ||
+      committed.replayLease === 0 ||
+      !currentDocument ||
+      !sameSourceDocument(currentDocument, document)
+    ) return undefined;
+    const image = mirrorImageNode(committed.replayer, nodeId);
+    if (
+      !image ||
+      !image.isConnected ||
+      image.ownerDocument !== committed.replayer.iframe.contentDocument
+    ) return undefined;
+    return Object.freeze({
+      document: currentDocument,
+      replayLease: committed.replayLease,
+      image,
+      iframe: committed.replayer.iframe,
+    });
+  }
+
   project(projection: ReplicaTextProjection): boolean {
     const committed = this.#committed;
     const document = this.#sourceValues.document;
@@ -543,6 +579,7 @@ export class RrwebShadowReplicaEngine
       ) return;
       const extent = measureReplayExtent(current.replayer.iframe);
       this.options.presentationHost.refreshExtent(current.replayer.iframe, extent);
+      this.options.onLayoutChanged?.();
     });
   }
 
@@ -1004,6 +1041,24 @@ function mirrorTextNode(
   try {
     const node = replayer.getMirror().getNode(nodeId);
     return node?.nodeType === 3 ? (node as Text) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function mirrorImageNode(
+  replayer: ReplayerLike,
+  nodeId: number,
+): HTMLImageElement | undefined {
+  if (!Number.isSafeInteger(nodeId) || nodeId < 1 || !replayer.getMirror) {
+    return undefined;
+  }
+  try {
+    const node = replayer.getMirror().getNode(nodeId);
+    return node?.nodeType === 1 &&
+      String((node as Element).tagName).toLowerCase() === 'img'
+      ? node as HTMLImageElement
+      : undefined;
   } catch {
     return undefined;
   }

@@ -181,7 +181,7 @@ describe('ImageScanScheduler', () => {
     expect(scheduler.takeNext()?.descriptor.nodeId).toBe(2);
   });
 
-  it('completes by content revision while observation and policy changes stay non-destructive', () => {
+  it('treats observation revisions as currentness boundaries', () => {
     const scheduler = new ImageScanScheduler(documentIdentity, {
       policy: 'eager-all',
     });
@@ -195,14 +195,16 @@ describe('ImageScanScheduler', () => {
     expect(scheduler.apply(upsert(descriptor(2, 'visible')))).toMatchObject({
       status: 'queued',
     });
-    expect(scheduler.active).toBe(1);
-    expect(scheduler.drainCancellations()).toEqual([]);
-    expect(scheduler.settle(active)).toBe(true);
+    expect(scheduler.active).toBe(0);
+    expect(scheduler.drainCancellations()).toMatchObject([
+      { reason: 'superseded', job: { descriptor: { observationRevision: 1 } } },
+    ]);
+    expect(scheduler.settle(active)).toBe(false);
 
     expect(scheduler.apply(upsert(descriptor(1, 'near', {
       observationRevision: 3,
-    })))).toEqual({ status: 'coalesced' });
-    expect(scheduler.queued).toBe(1);
+    })))).toMatchObject({ status: 'queued' });
+    expect(scheduler.queued).toBe(2);
     expect(scheduler.overrideCurrent(documentIdentity, 1, 1)).toBe(true);
     expect(scheduler.queueSnapshot().map((job) => [
       job.descriptor.nodeId,
@@ -228,6 +230,26 @@ describe('ImageScanScheduler', () => {
       { reason: 'superseded', job: { descriptor: { contentRevision: 1 } } },
     ]);
     expect(scheduler.settle(stale)).toBe(false);
+  });
+
+  it('defers unstable pixels until observation changes without a retry loop', () => {
+    const scheduler = new ImageScanScheduler(documentIdentity, {
+      policy: 'eager-all',
+    });
+    scheduler.apply(upsert(descriptor(6, 'visible')));
+    const active = scheduler.takeNext()!;
+
+    expect(scheduler.defer(active)).toBe(true);
+    expect(scheduler.active).toBe(0);
+    expect(scheduler.queued).toBe(0);
+    expect(scheduler.takeNext()).toBeUndefined();
+    expect(scheduler.decisionFor(6)).toBe('visibility-gate');
+
+    expect(scheduler.apply(upsert(descriptor(6, 'visible', {
+      observationRevision: 2,
+      renderedWidth: 201,
+    })))).toMatchObject({ status: 'queued' });
+    expect(scheduler.takeNext()?.descriptor.observationRevision).toBe(2);
   });
 });
 

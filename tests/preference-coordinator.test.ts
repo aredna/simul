@@ -132,6 +132,10 @@ describe('preference coordinator', () => {
 
     await Promise.all([
       coordinator.run({
+        type: 'simul:preferences:patch-image-analysis',
+        patch: { imageTranslationEnabled: true },
+      }),
+      coordinator.run({
         type: 'simul:preferences:set-display',
         displayMode: 'actual',
       }),
@@ -147,6 +151,7 @@ describe('preference coordinator', () => {
       autoTranslateAllSites: false,
       autoTranslateOrigins: ['https://one.example'],
       displayMode: 'actual',
+      imageTranslationEnabled: true,
     });
   });
 
@@ -165,6 +170,7 @@ describe('preference coordinator', () => {
 
     expect(result.applied).toBe(true);
     expect(adapter.preferences).toMatchObject({
+      imageTranslationEnabled: false,
       sourceLanguage: 'auto',
       targetLanguage: 'ja',
       displayMode: 'custom',
@@ -208,6 +214,10 @@ describe('preference coordinator', () => {
     await Promise.all([
       coordinator.run({
         type: 'simul:preferences:patch-image-analysis',
+        patch: { imageTranslationEnabled: true },
+      }),
+      coordinator.run({
+        type: 'simul:preferences:patch-image-analysis',
         patch: { imageScanPolicy: 'eager-all' },
       }),
       coordinator.run({
@@ -225,6 +235,7 @@ describe('preference coordinator', () => {
     ]);
 
     expect(adapter.preferences).toMatchObject({
+      imageTranslationEnabled: true,
       imageScanPolicy: 'eager-all',
       skipSmallImages: false,
       usePromptForImageLanguage: true,
@@ -259,6 +270,7 @@ describe('preference coordinator message boundary', () => {
             'chromium-screen-ai',
           ],
           imageScanPolicy: 'visible-only',
+          imageTranslationEnabled: true,
           skipSmallImages: false,
         },
       }),
@@ -273,6 +285,7 @@ describe('preference coordinator message boundary', () => {
           'chromium-screen-ai',
         ],
         imageScanPolicy: 'visible-only',
+        imageTranslationEnabled: true,
         skipSmallImages: false,
       },
     });

@@ -198,6 +198,7 @@ export class SourceImageObserver {
         'height',
         'class',
         'style',
+        'lang',
         'role',
         'contenteditable',
       ],
@@ -206,7 +207,7 @@ export class SourceImageObserver {
     });
     this.#loadListener = (event) => {
       if (!this.#isActiveGeneration(generation)) return;
-      if (isImageElement(event.target)) this.#refresh(event.target);
+      if (isImageElement(event.target)) this.#refresh(event.target, true);
     };
     this.#viewportListener = () => {
       if (!this.#isActiveGeneration(generation)) return;
@@ -291,7 +292,10 @@ export class SourceImageObserver {
     this.#emitUpsert(state, true, facts);
   }
 
-  #refresh(image: HTMLImageElement): void {
+  #refresh(
+    image: HTMLImageElement,
+    forceContentChange = false,
+  ): void {
     if (!this.#started) return;
     const state = this.#states.get(image);
     if (!state) {
@@ -320,7 +324,8 @@ export class SourceImageObserver {
       return;
     }
     const token = readPrivateSourceToken(image);
-    const contentChanged = privateSourceTokenChanged(state.sourceToken, token);
+    const contentChanged = forceContentChange ||
+      privateSourceTokenChanged(state.sourceToken, token);
     state.sourceToken = token;
     this.#emitUpsert(state, contentChanged, facts);
   }
@@ -419,16 +424,29 @@ export class SourceImageObserver {
       }
       if (record.type !== 'attributes' || !isElement(record.target)) continue;
       const attributeName = record.attributeName?.toLowerCase();
+      if (attributeName === 'lang') {
+        for (const image of collectImages(record.target)) {
+          // Routing metadata is part of OCR content identity even though the
+          // raw language attribute never leaves the source adapter.
+          this.#refresh(image, true);
+        }
+        continue;
+      }
       if (attributeName === 'role' || attributeName === 'contenteditable') {
         for (const image of collectImages(record.target)) this.#refresh(image);
         continue;
       }
       if (isImageElement(record.target)) {
-        this.#refresh(record.target);
+        this.#refresh(
+          record.target,
+          attributeName === 'src' ||
+            attributeName === 'srcset' ||
+            attributeName === 'sizes',
+        );
       } else if (record.target.tagName.toLowerCase() === 'source') {
         const picture = record.target.closest('picture');
         for (const image of picture?.querySelectorAll('img') ?? []) {
-          this.#refresh(image);
+          this.#refresh(image, true);
         }
       }
     }
@@ -520,9 +538,14 @@ function privateSourceTokenChanged(
   previous: PrivateSourceToken,
   current: PrivateSourceToken,
 ): boolean {
-  return previous.kind === 'oversized' ||
-    current.kind === 'oversized' ||
-    previous.value !== current.value;
+  if (previous.kind === 'oversized' || current.kind === 'oversized') {
+    // Oversized URL-like strings are never retained. Mutation/load callbacks
+    // explicitly force content invalidation; geometry/measurement refreshes
+    // must otherwise treat a stable oversized sentinel as stable to avoid a
+    // revision/capture hot loop.
+    return previous.kind !== current.kind;
+  }
+  return previous.value !== current.value;
 }
 
 function readImageFacts(image: HTMLImageElement): ImageFacts | undefined {

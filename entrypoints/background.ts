@@ -6,6 +6,9 @@ import {
   type PreferenceCommand,
   type PreferenceCommandResult,
 } from '../lib/preference-coordinator';
+import { compiledImageTextProviderIds } from '../lib/ocr/provider-registry';
+import { createBrowserOcrOffscreenManager } from '../lib/ocr/offscreen-document-manager';
+import { readEnsureOcrHostCommand } from '../lib/ocr/offscreen-protocol';
 
 export default defineBackground(() => {
   console.info('[Simul] Background service worker ready.');
@@ -13,9 +16,34 @@ export default defineBackground(() => {
   const coordinator = new PreferenceCoordinator(
     createBrowserPreferenceAdapter(),
   );
+  const offscreenManager = createBrowserOcrOffscreenManager();
 
   browser.runtime.onMessage.addListener(
     (message: unknown, _sender, sendResponse) => {
+      const ensureHost = readEnsureOcrHostCommand(message);
+      if (ensureHost) {
+        if (!compiledImageTextProviderIds.includes('tesseract')) {
+          sendResponse({
+            kind: 'simul:ocr-v1:host-ready',
+            version: 1,
+            ready: false,
+          });
+          return;
+        }
+        void offscreenManager.ensure().then(
+          (ready) => sendResponse({
+            kind: 'simul:ocr-v1:host-ready',
+            version: 1,
+            ready,
+          }),
+          () => sendResponse({
+            kind: 'simul:ocr-v1:host-ready',
+            version: 1,
+            ready: false,
+          }),
+        );
+        return true;
+      }
       const command = readPreferenceCommand(message);
       if (!command) return;
 

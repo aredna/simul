@@ -14,40 +14,46 @@ export type OcrBuildFlag = (typeof OCR_BUILD_FLAGS)[number];
 interface OcrProviderBuildDefinition {
   readonly flag: OcrBuildFlag;
   readonly id: string;
-  readonly implemented: false;
+  readonly implemented: boolean;
   readonly importPath: string;
+  readonly enabledByDefault?: boolean;
 }
 
-/** E reserves every profile switch but deliberately implements no provider. */
+/** Providers stay independently removable; F enables only local Tesseract. */
 export const OCR_PROVIDER_BUILD_DEFINITIONS = Object.freeze([
   {
     flag: 'SIMUL_OCR_TEXT_DETECTOR',
     id: 'chrome-text-detector',
     implemented: false,
+    enabledByDefault: false,
     importPath: '/lib/ocr/providers/chrome-text-detector/index.ts',
   },
   {
     flag: 'SIMUL_OCR_TESSERACT',
     id: 'tesseract',
-    implemented: false,
+    implemented: true,
+    enabledByDefault: true,
     importPath: '/lib/ocr/providers/tesseract/index.ts',
   },
   {
     flag: 'SIMUL_OCR_TRANSFORMERS',
     id: 'transformers',
     implemented: false,
+    enabledByDefault: false,
     importPath: '/lib/ocr/providers/transformers/index.ts',
   },
   {
     flag: 'SIMUL_OCR_PADDLE',
     id: 'paddleocr-wasm',
     implemented: false,
+    enabledByDefault: false,
     importPath: '/lib/ocr/providers/paddleocr-wasm/index.ts',
   },
   {
     flag: 'SIMUL_OCR_SCREEN_AI',
     id: 'chromium-screen-ai',
     implemented: false,
+    enabledByDefault: false,
     importPath: '/lib/ocr/providers/chromium-screen-ai/index.ts',
   },
 ] as const satisfies readonly OcrProviderBuildDefinition[]);
@@ -62,7 +68,13 @@ export function readOcrBuildProfile(
   const enabledProviderIds: string[] = [];
   for (const definition of OCR_PROVIDER_BUILD_DEFINITIONS) {
     const value = environment[definition.flag];
-    if (value === undefined || value === '0') continue;
+    if (value === '0' || (value === undefined && !definition.enabledByDefault)) {
+      continue;
+    }
+    if (value === undefined && definition.enabledByDefault) {
+      enabledProviderIds.push(definition.id);
+      continue;
+    }
     if (value !== '1') {
       throw new Error(
         `${definition.flag} must be exactly 0, 1, or unset; received ${JSON.stringify(value)}.`,
@@ -70,7 +82,7 @@ export function readOcrBuildProfile(
     }
     if (!definition.implemented) {
       throw new Error(
-        `${definition.flag}=1 requested ${definition.id}, but Checkpoint E contains contracts only. Implement and approve that provider in a later checkpoint before enabling it.`,
+        `${definition.flag}=1 requested ${definition.id}, but that provider is not implemented in this build.`,
       );
     }
     enabledProviderIds.push(definition.id);
@@ -83,11 +95,20 @@ export function readOcrBuildProfile(
 export function createOcrProviderRegistryModule(
   profile: OcrBuildProfile,
 ): string {
-  if (profile.enabledProviderIds.length > 0) {
-    throw new Error('Checkpoint E cannot generate an enabled OCR provider registry.');
+  const imports: string[] = [];
+  const bindings: string[] = [];
+  for (const id of profile.enabledProviderIds) {
+    const definition = OCR_PROVIDER_BUILD_DEFINITIONS.find(
+      (candidate) => candidate.id === id && candidate.implemented,
+    );
+    if (!definition) throw new Error(`Unknown enabled OCR provider: ${id}.`);
+    const binding = `provider${bindings.length}`;
+    imports.push(`import ${binding} from ${JSON.stringify(definition.importPath)};`);
+    bindings.push(binding);
   }
   return [
-    'export const compiledOcrProviderModules = Object.freeze([]);',
+    ...imports,
+    `export const compiledOcrProviderModules = Object.freeze([${bindings.join(', ')}]);`,
     'export const compiledOcrCapabilities = Object.freeze({',
     '  promptImageLanguage: false,',
     '  promptImageText: false,',

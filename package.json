@@ -41,6 +41,8 @@
   },
   "dependencies": {
     "@rrweb/record": "2.1.0",
-    "@rrweb/replay": "2.1.0"
+    "@rrweb/replay": "2.1.0",
+    "tesseract.js": "7.0.0",
+    "tesseract.js-core": "7.0.0"
   }
 }

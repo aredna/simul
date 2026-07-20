@@ -1,5 +1,9 @@
 import { record } from '@rrweb/record';
 
+import { ImageSourceSession } from '../ocr/image-source-session';
+import { readImageSourcePortSessionId } from '../ocr/image-source-protocol';
+import { SourceImageObserver } from '../ocr/source-image-observer';
+
 import {
   type ReplicaCheckpointErrorEnvelope,
   type ReplicaCheckpointResponse,
@@ -113,6 +117,21 @@ export function installPageRecorderBridge(
 
   let captureActive = false;
   let liveSession: LiveRecorderSession | undefined;
+  runtime.onConnect.addListener((port) => {
+    if (!readImageSourcePortSessionId(port.name)) return;
+    new ImageSourceSession({
+      port,
+      document: sourceDocument,
+      window: sourceWindow,
+      resolveNode: (nodeId) => record.mirror.getNode(nodeId),
+      getNodeId: (image) => {
+        const id = record.mirror.getId(image);
+        return Number.isSafeInteger(id) && id > 0 ? id : undefined;
+      },
+      createObserver: (observerEnvironment) =>
+        new SourceImageObserver(observerEnvironment),
+    });
+  });
   runtime.onConnect.addListener((port) => {
     const portSessionId = readReplicaLivePortSessionId(port.name);
     if (!portSessionId) return;

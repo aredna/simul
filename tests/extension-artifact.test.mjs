@@ -1,5 +1,6 @@
 import {
   access,
+  cp,
   mkdir,
   mkdtemp,
   readFile,
@@ -13,12 +14,16 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
+  APPROVED_OCR_CSP,
+  APPROVED_OCR_PERMISSIONS,
   APPROVED_OPTIONAL_HOST_PERMISSIONS,
   APPROVED_PERMISSIONS,
+  REQUIRED_OCR_RUNTIME_MARKERS,
   REQUIRED_REPLICA_RUNTIME_MARKERS,
   REQUIRED_UNLISTED_BUNDLES,
-  assertOcrFoundationDependenciesAbsent,
+  assertOcrProviderDependenciesApproved,
   assertCanonicalSyncTarget,
+  buildProductionArtifact,
   canonicalArtifactDirectory,
   checkArtifact,
   compareArtifactDirectories,
@@ -53,6 +58,53 @@ describe('validateArtifact', () => {
     expect(validation.files).toContain(REQUIRED_UNLISTED_BUNDLES[0]);
   });
 
+  it('accepts only the exact packaged Tesseract profile and detects asset drift', async () => {
+    const artifact = await createTemporaryOcrArtifact();
+
+    await expect(validateArtifact(artifact)).resolves.toMatchObject({
+      ocrEnabled: true,
+    });
+
+    await writeFile(
+      path.join(artifact, 'ocr/tesseract/licenses/WORKER_THIRD_PARTY.txt'),
+      'changed',
+    );
+    await expect(validateArtifact(artifact)).rejects.toThrow(
+      /byte count changed|hash changed/u,
+    );
+  });
+
+  it('requires the offscreen entry module graph to contain the OCR runtime', async () => {
+    const artifact = await createTemporaryOcrArtifact();
+    await writeFile(
+      path.join(artifact, 'offscreen.html'),
+      [
+        '<script type="module" src="/offscreen.js"></script>',
+        '<link rel="modulepreload" href="/host.js">',
+      ].join(''),
+    );
+    await writeFile(
+      path.join(artifact, 'offscreen.js'),
+      'console.info("no-op offscreen entry");',
+    );
+
+    await expect(validateArtifact(artifact)).rejects.toThrow(
+      /OCR compute host is missing required immutable runtime marker/u,
+    );
+  });
+
+  it.each([
+    ['drifted', 'changed notices'],
+    ['empty', ''],
+  ])('rejects %s packaged third-party notices', async (_label, contents) => {
+    const artifact = await createTemporaryOcrArtifact();
+    await writeFile(path.join(artifact, 'ocr/THIRD_PARTY_NOTICES.md'), contents);
+
+    await expect(validateArtifact(artifact)).rejects.toThrow(
+      'third-party notices differ from the reviewed vendor notices',
+    );
+  });
+
   it('rejects excess required permissions and required host permissions', async () => {
     const excess = await createTemporaryArtifact({
       manifest: { permissions: [...APPROVED_PERMISSIONS, 'tabs'] },
@@ -69,24 +121,27 @@ describe('validateArtifact', () => {
     );
   });
 
-  it('rejects OCR permission, CSP, compute-host, Worker, Wasm, and model drift', async () => {
+  it('requires the complete OCR profile and rejects OCR runtime drift when disabled', async () => {
     const offscreenPermission = await createTemporaryArtifact({
       manifest: { permissions: [...APPROVED_PERMISSIONS, 'offscreen'] },
     });
     await expect(validateArtifact(offscreenPermission)).rejects.toThrow(
-      'permissions must be exactly',
+      'requires the packaged offscreen.html',
     );
 
     const relaxedCsp = await createTemporaryArtifact({
       manifest: {
+        permissions: [...APPROVED_OCR_PERMISSIONS],
         content_security_policy: {
           extension_pages:
-            "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; object-src 'self'",
+            `${APPROVED_OCR_CSP} connect-src https://example.com`,
         },
       },
     });
+    await writeFile(path.join(relaxedCsp, 'offscreen.html'), '<script src="/offscreen.js"></script>');
+    await writeFile(path.join(relaxedCsp, 'offscreen.js'), 'console.info("offscreen");');
     await expect(validateArtifact(relaxedCsp)).rejects.toThrow(
-      'must not relax or override extension page CSP',
+      'requires the exact extension page CSP',
     );
 
     for (const filename of [
@@ -101,11 +156,18 @@ describe('validateArtifact', () => {
       'runtime/latin.tflite',
       'tessdata/jpn.traineddata',
       'runtime/core.wasm',
+      'ocr/readme.md',
+      'ocr/NOTICE',
     ]) {
       const artifact = await createTemporaryArtifact();
       const absolutePath = path.join(artifact, filename);
       await mkdir(path.dirname(absolutePath), { recursive: true });
-      await writeFile(absolutePath, 'not a real runtime');
+      await writeFile(
+        absolutePath,
+        /\.m?js$/u.test(filename)
+          ? 'console.info("not a real runtime");'
+          : 'not a real runtime',
+      );
       await expect(validateArtifact(artifact)).rejects.toThrow(
         /OCR runtime|OCR compute-host/u,
       );
@@ -362,70 +424,91 @@ describe('validateArtifact', () => {
   });
 });
 
-describe('OCR foundation package boundary', () => {
-  it('accepts the current dependency graph and rejects direct or locked OCR runtimes', async () => {
+describe('OCR provider package boundary', () => {
+  it('requires exact Tesseract pins and rejects every unapproved provider', async () => {
     await expect(
-      assertOcrFoundationDependenciesAbsent(),
+      assertOcrProviderDependenciesApproved(),
     ).resolves.toBeUndefined();
 
     const projectRoot = await createTemporaryDirectory('simul-ocr-deps-');
-    await writeFile(path.join(projectRoot, 'package.json'), JSON.stringify({
-      dependencies: { 'tesseract.js': '7.0.0' },
-    }));
-    await writeFile(path.join(projectRoot, 'package-lock.json'), JSON.stringify({
-      packages: {},
-    }));
-    await expect(
-      assertOcrFoundationDependenciesAbsent(projectRoot),
-    ).rejects.toThrow('OCR provider dependency is forbidden');
-
-    await writeFile(path.join(projectRoot, 'package.json'), JSON.stringify({
-      dependencies: {},
-    }));
-    await writeFile(path.join(projectRoot, 'package-lock.json'), JSON.stringify({
-      packages: { 'node_modules/onnxruntime-web': { version: '1.0.0' } },
-    }));
-    await expect(
-      assertOcrFoundationDependenciesAbsent(projectRoot),
-    ).rejects.toThrow('leaked into package-lock.json');
-
-    await writeFile(path.join(projectRoot, 'package.json'), JSON.stringify({
-      dependencies: { localOcr: 'npm:tesseract.js@7.0.0' },
-    }));
-    await writeFile(path.join(projectRoot, 'package-lock.json'), JSON.stringify({
-      packages: {},
-    }));
-    await expect(
-      assertOcrFoundationDependenciesAbsent(projectRoot),
-    ).rejects.toThrow('tesseract.js');
-
-    await writeFile(path.join(projectRoot, 'package.json'), JSON.stringify({
-      dependencies: {},
-    }));
-    await writeFile(path.join(projectRoot, 'package-lock.json'), JSON.stringify({
-      packages: {
-        'node_modules/wrapper/node_modules/@xenova/transformers': {
-          version: '2.0.0',
-        },
+    const packageJson = {
+      dependencies: {
+        'tesseract.js': '7.0.0',
+        'tesseract.js-core': '7.0.0',
       },
-    }));
+    };
+    const packageLock = {
+      packages: {
+        '': { dependencies: { ...packageJson.dependencies } },
+        'node_modules/tesseract.js': { version: '7.0.0' },
+        'node_modules/tesseract.js-core': { version: '7.0.0' },
+      },
+    };
+    await writeFile(
+      path.join(projectRoot, 'package.json'),
+      JSON.stringify(packageJson),
+    );
+    await writeFile(
+      path.join(projectRoot, 'package-lock.json'),
+      JSON.stringify(packageLock),
+    );
     await expect(
-      assertOcrFoundationDependenciesAbsent(projectRoot),
+      assertOcrProviderDependenciesApproved(projectRoot),
+    ).resolves.toBeUndefined();
+
+    packageJson.dependencies['tesseract.js'] = '^7.0.0';
+    await writeFile(
+      path.join(projectRoot, 'package.json'),
+      JSON.stringify(packageJson),
+    );
+    await expect(
+      assertOcrProviderDependenciesApproved(projectRoot),
+    ).rejects.toThrow('pinned exactly');
+
+    packageJson.dependencies['tesseract.js'] = '7.0.0';
+    packageJson.dependencies.localOcr = 'npm:tesseract.js@7.0.0';
+    await writeFile(
+      path.join(projectRoot, 'package.json'),
+      JSON.stringify(packageJson),
+    );
+    await expect(
+      assertOcrProviderDependenciesApproved(projectRoot),
+    ).rejects.toThrow('cannot be aliased');
+
+    delete packageJson.dependencies.localOcr;
+    packageLock.packages[
+      'node_modules/wrapper/node_modules/@xenova/transformers'
+    ] = { version: '2.0.0' };
+    await writeFile(
+      path.join(projectRoot, 'package.json'),
+      JSON.stringify(packageJson),
+    );
+    await writeFile(
+      path.join(projectRoot, 'package-lock.json'),
+      JSON.stringify(packageLock),
+    );
+    await expect(
+      assertOcrProviderDependenciesApproved(projectRoot),
     ).rejects.toThrow('@xenova/transformers');
-
-    await writeFile(path.join(projectRoot, 'package-lock.json'), JSON.stringify({
-      packages: {
-        'node_modules/wrapper': {
-          dependencies: {
-            localRuntime: 'npm:onnxruntime-web@1.0.0',
-          },
-        },
-      },
-    }));
-    await expect(
-      assertOcrFoundationDependenciesAbsent(projectRoot),
-    ).rejects.toThrow('onnxruntime-web');
   });
+});
+
+describe('disabled OCR production profile', () => {
+  it('omits the compute host, permission, CSP, and every OCR runtime asset', async () => {
+    const temporaryRoot = await createTemporaryDirectory('simul-disabled-build-');
+    const artifact = await buildProductionArtifact({
+      temporaryRoot,
+      ocrEnabled: false,
+    });
+
+    const validation = await validateArtifact(artifact);
+
+    expect(validation.ocrEnabled).toBe(false);
+    expect(validation.manifest.permissions).toEqual(APPROVED_PERMISSIONS);
+    expect(validation.manifest).not.toHaveProperty('content_security_policy');
+    expect(validation.files).not.toContain('offscreen.html');
+    expect(validation.files.some((file) => file.startsWith('ocr/'))).toBe(false);
+  }, 20_000);
 });
 
 describe('compareArtifactDirectories', () => {
@@ -627,6 +710,31 @@ async function createTemporaryArtifact(options) {
   const root = await createTemporaryDirectory('simul-artifact-');
   await createValidArtifact(root, options);
   return root;
+}
+
+async function createTemporaryOcrArtifact() {
+  const artifact = await createTemporaryArtifact({
+    manifest: {
+      permissions: [...APPROVED_OCR_PERMISSIONS],
+      content_security_policy: { extension_pages: APPROVED_OCR_CSP },
+    },
+  });
+  await cp(path.resolve('vendor/ocr'), path.join(artifact, 'ocr'), {
+    recursive: true,
+  });
+  await writeFile(
+    path.join(artifact, 'offscreen.html'),
+    '<script type="module" src="/offscreen.js"></script>',
+  );
+  await writeFile(
+    path.join(artifact, 'offscreen.js'),
+    'import "./host.js";',
+  );
+  await writeFile(
+    path.join(artifact, 'host.js'),
+    `globalThis.__simulOcrRuntime = Object.freeze(${JSON.stringify(REQUIRED_OCR_RUNTIME_MARKERS)});`,
+  );
+  return artifact;
 }
 
 async function createTemporaryDirectory(prefix) {

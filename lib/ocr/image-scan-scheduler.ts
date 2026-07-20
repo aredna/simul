@@ -50,6 +50,8 @@ export type ImageScanUpdateResult =
 interface SchedulerRecord {
   descriptor: SourceImageDescriptor;
   completedContentRevision?: number;
+  completedObservationRevision?: number;
+  deferredObservationRevision?: number;
 }
 
 interface QueuedJob extends ImageScanJob {
@@ -179,6 +181,7 @@ export class ImageScanScheduler {
     }
     this.#manualOverrides.set(nodeId, contentRevision);
     record.completedContentRevision = undefined;
+    record.completedObservationRevision = undefined;
     this.#reconcileNode(nodeId);
     this.#reconsiderOverflowed();
     return true;
@@ -205,11 +208,13 @@ export class ImageScanScheduler {
     const record = this.#records.get(job.descriptor.nodeId);
     if (!active || !sameJob(active, job)) return false;
     this.#active.delete(job.descriptor.nodeId);
-    if (!record || !sameContent(record.descriptor, job.descriptor)) {
+    if (!record || !sameDescriptor(record.descriptor, job.descriptor)) {
       this.#reconsiderOverflowed();
       return false;
     }
     record.completedContentRevision = record.descriptor.contentRevision;
+    record.completedObservationRevision =
+      record.descriptor.observationRevision;
     this.#pending.delete(job.descriptor.nodeId);
     this.#overflows.delete(job.descriptor.nodeId);
     if (
@@ -225,6 +230,27 @@ export class ImageScanScheduler {
     if (!active || !sameJob(active, job)) return false;
     this.#active.delete(job.descriptor.nodeId);
     this.#reconcileNode(job.descriptor.nodeId);
+    this.#reconsiderOverflowed();
+    return true;
+  }
+
+  /**
+   * Release an unstable/hidden active job without spinning it immediately.
+   * A later observation revision or explicit manual override makes it eligible
+   * again; it is intentionally not marked complete.
+   */
+  defer(job: ImageScanJob): boolean {
+    const active = this.#active.get(job.descriptor.nodeId);
+    const record = this.#records.get(job.descriptor.nodeId);
+    if (!active || !sameJob(active, job)) return false;
+    this.#active.delete(job.descriptor.nodeId);
+    if (!record || !sameDescriptor(record.descriptor, job.descriptor)) {
+      this.#reconsiderOverflowed();
+      return false;
+    }
+    record.deferredObservationRevision = record.descriptor.observationRevision;
+    this.#pending.delete(job.descriptor.nodeId);
+    this.#decisions.set(job.descriptor.nodeId, 'visibility-gate');
     this.#reconsiderOverflowed();
     return true;
   }
@@ -294,13 +320,10 @@ export class ImageScanScheduler {
         this.#cancelNode(descriptor.nodeId, 'superseded');
         this.#manualOverrides.delete(descriptor.nodeId);
       }
-      this.#records.set(descriptor.nodeId, {
-        descriptor,
-        ...(!contentChanged &&
-        previous.completedContentRevision !== undefined
-          ? { completedContentRevision: previous.completedContentRevision }
-          : {}),
-      });
+      // Observation revisions are geometry/currentness boundaries. A same-src
+      // resize or visibility transition must cancel stale work and be scanned
+      // again instead of inheriting completion from the prior crop.
+      this.#records.set(descriptor.nodeId, { descriptor });
     } else {
       this.#records.set(descriptor.nodeId, { descriptor });
     }
@@ -338,7 +361,7 @@ export class ImageScanScheduler {
 
     const active = this.#active.get(nodeId);
     if (active) {
-      if (sameContent(active.descriptor, record.descriptor)) return;
+      if (sameDescriptor(active.descriptor, record.descriptor)) return;
       this.#active.delete(nodeId);
       this.#recordCancellation(active, 'superseded');
     }
@@ -346,7 +369,17 @@ export class ImageScanScheduler {
     const manualOverride =
       this.#manualOverrides.get(nodeId) === record.descriptor.contentRevision;
     if (
+      !manualOverride &&
+      record.deferredObservationRevision === record.descriptor.observationRevision
+    ) {
+      this.#pending.delete(nodeId);
+      this.#decisions.set(nodeId, 'visibility-gate');
+      return;
+    }
+    if (
       record.completedContentRevision === record.descriptor.contentRevision &&
+      record.completedObservationRevision ===
+        record.descriptor.observationRevision &&
       !manualOverride
     ) {
       this.#pending.delete(nodeId);

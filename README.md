@@ -40,7 +40,8 @@ the last usable mirror visible.
 View options include Fit width, exact 1:1 CSS-pixel size, 25–300% custom zoom,
 horizontal and vertical overflow, source-scroll following, and adaptive or
 faithful translated-text layout. Language, zoom, layout, scroll, and automatic
-translation choices are saved. A reply composer translates from the language
+translation choices are saved. Image translation is also available as an
+experimental, initially-off option under **Image text**. A reply composer translates from the language
 you are reading back into the detected website language and provides a
 copyable result; draft and output text are never saved.
 
@@ -57,8 +58,10 @@ required host access. Its installed permissions are:
 
 - `activeTab` for temporary access after a toolbar gesture;
 - `scripting` to bootstrap and observe the authorized top-level page;
-- `sidePanel` to display the native companion; and
-- `storage` to remember settings and explicit automatic-translation scopes.
+- `sidePanel` to display the native companion;
+- `storage` to remember settings and explicit automatic-translation scopes;
+  and
+- `offscreen` to run the packaged local OCR worker away from the panel UI.
 
 Optional HTTP(S) access is granted only after choosing **This site** or **All
 sites** for automatic translation and is removed when no longer needed. A
@@ -68,8 +71,20 @@ tab; Chrome does not expose native side-panel detachment.
 The mirror never runs site scripts or copies event handlers, links, passwords,
 form values, selections, or contenteditable text. Public button labels remain
 visible in inert elements. Original remote images and allowlisted CSS
-backgrounds may reload from their existing hosts for visual context, but image
-pixels are not sent to a translation service.
+backgrounds may reload from their existing hosts for visual context. When
+image translation is explicitly enabled, Simul captures only stable visible
+top-frame image pixels, recognizes text with packaged Tesseract models,
+translates accepted lines through Chrome, and discards the transient crop.
+Pixels and recognized text are never sent to a remote service or saved as
+history.
+
+The installable directory includes local Tesseract.js 7.0.0 assets and models
+for English, Spanish, French, German, Portuguese, Italian, Vietnamese,
+Japanese (horizontal and vertical), Korean, Simplified and Traditional
+Chinese, Russian, Ukrainian, Arabic, Hebrew, Hindi, Marathi, Bengali, Kannada,
+Tamil, and Telugu. Only the routed language group is loaded into memory; the
+remaining models stay on disk. The complete unpacked extension remains below
+the project's 42 MiB release limit.
 
 ## Fidelity limits
 
@@ -86,8 +101,11 @@ Translations can be longer than the source. Adaptive layout lets affected
 containers grow; faithful layout keeps geometry and allows text overflow rather
 than silently ellipsizing it.
 
-Image OCR and translated image overlays are researched but not shipped. See
-[image translation research](docs/image-translation-research.md) and the
+Image OCR currently handles ordinary visible top-frame `<img>` elements only.
+Hidden images wait until visible; CSS backgrounds, canvas, video, frames, and
+images without a supported language hint are left unchanged. OCR overlays are
+inert sibling layers and do not resize or rewrite the source or replica image.
+See the [image translation notes](docs/image-translation-research.md) and the
 [translation companion guide](docs/translation-companion.md).
 
 ## Troubleshooting
@@ -95,6 +113,9 @@ Image OCR and translated image overlays are researched but not shipped. See
 - If Chrome reports a missing manifest, select `dist/chrome-unpacked` itself.
 - If a language pair is unavailable, update Chrome and check that the device
   can download Chrome's corresponding on-device language pack.
+- If image text stays unchanged, open options, enable **Translate text inside
+  images**, and make sure the image is visible and the From language is
+  supported. Small images are skipped by default.
 - Chrome blocks extensions from browser settings, the Chrome Web Store, and
   other restricted URLs.
 - A cross-origin navigation can expire temporary `activeTab` access. Select the

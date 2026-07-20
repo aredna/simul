@@ -2,24 +2,23 @@
 
 ## Live mirror lifecycle
 
-The extension first executes a bounded capture in Chrome's isolated world. It
-copies an allowlisted visual model with computed styles and assigns opaque IDs
-through an extension-owned `WeakMap`; it does not add attributes to the source
-DOM. A `MutationObserver` then coalesces structural, text, image, and relevant
-attribute changes. The panel requests only those dirty subtrees, validates the
-typed delta again, replaces matching inert nodes, and translates only newly
-changed text.
+The extension first executes a masked rrweb checkpoint in Chrome's isolated
+world. The replay iframe is same-origin only, inert, sandboxed, and protected
+from interaction. Ordered live batches are statefully sanitized before replay;
+ACKs advance only after rrweb casts an accepted batch. Gaps recover once through
+a hidden checkpoint and atomic swap while the last good replica stays visible.
+The older allowlisted visual renderer remains the bounded fallback when rrweb
+cannot capture or replay a page.
 
 Source scroll messages are animation-frame throttled and one-way. The mirror
 uses exact scaled CSS-pixel offsets in faithful layout and proportional offsets
 when adaptive translations change page height. No mirror interaction is sent
 back to the website.
 
-Full capture is not scheduled. It is used for the initial bootstrap,
-navigation, a manual rebuild, or recovery when an ID, generation, bound, or
-delta target cannot be reconciled. Generation and exact tab/window checks
-discard stale asynchronous results. The previous mirror stays visible while a
-replacement bootstrap is prepared.
+Full capture is not scheduled periodically. It is used for initial bootstrap,
+navigation, a manual rebuild, or bounded recovery. Exact document identity,
+sequence, source revision, translation epoch/pair, and replay lease checks
+discard stale asynchronous work.
 
 ## Translation and saved settings
 
@@ -36,9 +35,28 @@ available. Chrome still requires a user action before a model's first
 download.
 
 `browser.storage.local` holds only settings: From/To languages, Fit/1:1/custom
-zoom, zoom percent, adaptive/faithful text layout, scroll following, and
-explicit automatic-translation scopes. Composer input, output, page text, and
-translation results are never stored.
+zoom, zoom percent, adaptive/faithful text layout, scroll following, explicit
+automatic-translation scopes, and image-analysis options. Image translation is
+off by default. Composer input, output, page text, and translation results are
+never stored.
+
+## Local image text
+
+When explicitly enabled, an exact-document source Port observes ordinary
+top-frame `<img>` elements by rrweb node ID without emitting their URL or text.
+The saved scan policy orders visible/near/background work, and very small
+images are skipped by default. Only stable visible pixels are captured, at no
+more than two viewport captures per second, after matching pre/post document,
+scroll, bounds, and revision. Crops above 4 MP are rejected.
+
+The offscreen extension page reads a short-lived crop from extension-origin
+storage and runs packaged Tesseract.js 7.0.0 locally. The routed model group is
+chosen from nearest valid element `lang`, explicit From, then detected page
+language. Recognition results stay in a bounded memory cache; the crop is
+deleted after the job and expires after two minutes if cleanup is interrupted.
+Translated line boxes are inert siblings in the replay document. Document,
+content revision, SHA-256 pixel key, replay lease, pair epoch, replica image,
+and normalized geometry must still match at commit and on refresh.
 
 ## Rendering and privacy
 
@@ -82,6 +100,13 @@ composer cancellation/copy. Check the supplied Reddit article for late left
 and right rails, public labels, and open-shadow content. Also confirm form
 values remain absent and the source DOM is unchanged.
 
+Enable image translation and exercise English/Japanese plus Spanish, Chinese,
+Korean, Russian, and Arabic images. Scroll/zoom, change target language,
+navigate during OCR, and disable/re-enable the option. Confirm stale overlays
+disappear, same-language images stay unchanged, and page text translation stays
+responsive.
+
 The manifest must retain Chrome 138, required permissions `activeTab`,
-`scripting`, `sidePanel`, and `storage`, no required host permissions, and only
-the approved optional HTTP(S) patterns.
+`scripting`, `sidePanel`, `storage`, and `offscreen`, no required host
+permissions, only the approved optional HTTP(S) patterns, and the exact local
+Wasm/Worker extension-page CSP.

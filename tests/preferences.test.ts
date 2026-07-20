@@ -28,6 +28,7 @@ describe('parseCompanionPreferences', () => {
       zoomPercent: 100,
       syncScroll: true,
       textLayoutMode: 'adaptive',
+      imageTranslationEnabled: false,
       imageTextProviderOrder: [
         'chrome-text-detector',
         'tesseract',
@@ -55,6 +56,7 @@ describe('parseCompanionPreferences', () => {
       zoomPercent: 100,
       syncScroll: true,
       textLayoutMode: 'adaptive',
+      imageTranslationEnabled: false,
       imageTextProviderOrder: [
         'chrome-text-detector',
         'tesseract',
@@ -94,6 +96,7 @@ describe('parseCompanionPreferences', () => {
       zoomPercent: 100,
       syncScroll: true,
       textLayoutMode: 'adaptive',
+      imageTranslationEnabled: false,
       imageTextProviderOrder: [
         'chrome-text-detector',
         'tesseract',
@@ -147,6 +150,7 @@ describe('parseCompanionPreferences', () => {
   it('repairs old or damaged image-analysis settings without mutating saved order', () => {
     const rawOrder = ['paddleocr-wasm', 'unknown', 'paddleocr-wasm', 'tesseract'];
     const parsed = parseCompanionPreferences({
+      imageTranslationEnabled: true,
       imageTextProviderOrder: rawOrder,
       imageScanPolicy: 'visible-only',
       skipSmallImages: false,
@@ -155,6 +159,7 @@ describe('parseCompanionPreferences', () => {
     });
 
     expect(parsed).toMatchObject({
+      imageTranslationEnabled: true,
       imageTextProviderOrder: [
         'paddleocr-wasm',
         'tesseract',

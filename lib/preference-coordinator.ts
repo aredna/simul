@@ -414,6 +414,7 @@ function readViewSettingsPatch(
 }
 
 const IMAGE_ANALYSIS_SETTING_KEYS = new Set([
+  'imageTranslationEnabled',
   'imageTextProviderOrder',
   'imageScanPolicy',
   'skipSmallImages',
@@ -432,6 +433,10 @@ function readImageAnalysisSettingsPatch(
   ) return undefined;
 
   const patch: CompanionImageAnalysisSettingsPatch = {};
+  if ('imageTranslationEnabled' in value) {
+    if (typeof value.imageTranslationEnabled !== 'boolean') return undefined;
+    patch.imageTranslationEnabled = value.imageTranslationEnabled;
+  }
   if ('imageTextProviderOrder' in value) {
     const order = readExactImageTextProviderOrder(
       value.imageTextProviderOrder,

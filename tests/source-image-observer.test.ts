@@ -321,12 +321,19 @@ describe('SourceImageObserver', () => {
     stop();
   });
 
-  it('treats oversized private tokens as changed on every refresh', () => {
+  it('keeps oversized private tokens stable between explicit source mutations', () => {
     const fixture = createFixture();
     fixture.image.setAttribute('src', `https://example.test/${'x'.repeat(70_000)}`);
     const events: SourceImageObservationEvent[] = [];
     const stop = fixture.observer.subscribe((event) => events.push(event));
     fixture.resize.trigger(fixture.image);
+
+    expect(events).toHaveLength(1);
+    fixture.mutation.trigger([{
+      type: 'attributes',
+      target: fixture.image,
+      attributeName: 'src',
+    } as unknown as MutationRecord]);
 
     expect(events).toHaveLength(2);
     expect(events).toMatchObject([
@@ -334,6 +341,25 @@ describe('SourceImageObserver', () => {
       { kind: 'upsert', input: { contentChanged: true } },
     ]);
     expect(JSON.stringify(events)).not.toContain('x'.repeat(1_000));
+    stop();
+  });
+
+  it('invalidates image content routing when an ancestor lang changes', () => {
+    const fixture = createFixture();
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+
+    fixture.document.body.setAttribute('lang', 'ja');
+    fixture.mutation.trigger([{
+      type: 'attributes',
+      target: fixture.document.body,
+      attributeName: 'lang',
+    } as unknown as MutationRecord]);
+
+    expect(events.at(-1)).toMatchObject({
+      kind: 'upsert',
+      input: { nodeId: 7, contentChanged: true },
+    });
     stop();
   });
 

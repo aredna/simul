@@ -8,26 +8,36 @@ import {
 } from '../tools/ocr-build-profile';
 
 describe('OCR build profile', () => {
-  it('defaults every provider off and emits an import-free empty registry', () => {
+  it('enables only packaged Tesseract by default and emits its one import', () => {
     const profile = readOcrBuildProfile({});
     const source = createOcrProviderRegistryModule(profile);
 
-    expect(profile.enabledProviderIds).toEqual([]);
-    expect(source).toContain('compiledOcrProviderModules = Object.freeze([])');
+    expect(profile.enabledProviderIds).toEqual(['tesseract']);
+    expect(source).toContain('/lib/ocr/providers/tesseract/index.ts');
+    expect(source).toContain('compiledOcrProviderModules = Object.freeze([provider0])');
     for (const definition of OCR_PROVIDER_BUILD_DEFINITIONS) {
-      expect(source).not.toContain(definition.importPath);
+      if (definition.id !== 'tesseract') {
+        expect(source).not.toContain(definition.importPath);
+      }
     }
   });
 
-  it.each(OCR_BUILD_FLAGS)('fails clearly when unimplemented %s is enabled', (flag) => {
-    expect(() => readOcrBuildProfile({ [flag]: '1' })).toThrow(
-      /Checkpoint E contains contracts only/u,
-    );
-  });
+  it.each(OCR_BUILD_FLAGS.filter((flag) => flag !== 'SIMUL_OCR_TESSERACT'))(
+    'fails clearly when unimplemented %s is enabled',
+    (flag) => {
+      expect(() => readOcrBuildProfile({
+        SIMUL_OCR_TESSERACT: '0',
+        [flag]: '1',
+      })).toThrow(/not implemented in this build/u);
+    },
+  );
 
   it('accepts only exact zero, one, or an absent flag', () => {
     expect(readOcrBuildProfile({ SIMUL_OCR_TESSERACT: '0' })).toEqual({
       enabledProviderIds: [],
+    });
+    expect(readOcrBuildProfile({ SIMUL_OCR_TESSERACT: '1' })).toEqual({
+      enabledProviderIds: ['tesseract'],
     });
     expect(() => readOcrBuildProfile({
       SIMUL_OCR_TESSERACT: 'true',

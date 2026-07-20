@@ -1,6 +1,12 @@
 import { parse, type Comment } from 'acorn';
 import { defineConfig } from 'wxt';
-import { createOcrBuildProfilePlugin } from './tools/ocr-build-profile';
+import {
+  createOcrBuildProfilePlugin,
+  readOcrBuildProfile,
+} from './tools/ocr-build-profile';
+
+const ocrBuildProfile = readOcrBuildProfile(process.env);
+const tesseractEnabled = ocrBuildProfile.enabledProviderIds.includes('tesseract');
 
 function stripSourceMapDirectives(code: string): string {
   const comments: Comment[] = [];
@@ -26,8 +32,36 @@ function stripSourceMapDirectives(code: string): string {
   );
 }
 
+function removeRemoteTesseractFallbacks(code: string): string {
+  return code
+    .replaceAll(
+      'https://cdn.jsdelivr.net/npm/tesseract.js@v',
+      '__SIMUL_LOCAL_WORKER_REQUIRED__',
+    )
+    .replaceAll(
+      'https://cdn.jsdelivr.net/npm/tesseract.js-core@v',
+      '__SIMUL_LOCAL_CORE_REQUIRED__',
+    )
+    .replaceAll(
+      'https://cdn.jsdelivr.net/npm/@tesseract.js-data/',
+      '__SIMUL_LOCAL_LANG_REQUIRED__/',
+    );
+}
+
 export default defineConfig({
   outDir: process.env.SIMUL_WXT_OUT_DIR || '.output',
+  publicDir: tesseractEnabled ? 'vendor' : 'public',
+  ...(tesseractEnabled
+    ? {}
+    : {
+        filterEntrypoints: [
+          'background',
+          'page-recorder',
+          'page-snapshot',
+          'popup',
+          'sidepanel',
+        ],
+      }),
   vite: () => ({
     plugins: [
       createOcrBuildProfilePlugin(process.env),
@@ -39,7 +73,9 @@ export default defineConfig({
           // sourceMappingURL comment. Canvas recording is disabled, but the
           // installable artifact must not retain even an unreachable map
           // reference. WXT itself already builds without source maps.
-          const stripped = stripSourceMapDirectives(code);
+          const stripped = removeRemoteTesseractFallbacks(
+            stripSourceMapDirectives(code),
+          );
           return stripped === code ? null : { code: stripped, map: null };
         },
         generateBundle(_options, bundle) {
@@ -47,7 +83,9 @@ export default defineConfig({
           // renderChunk, so enforce the same release invariant on final chunks.
           for (const artifact of Object.values(bundle)) {
             if (artifact.type !== 'chunk') continue;
-            artifact.code = stripSourceMapDirectives(artifact.code);
+            artifact.code = removeRemoteTesseractFallbacks(
+              stripSourceMapDirectives(artifact.code),
+            );
           }
         },
       },
@@ -58,7 +96,21 @@ export default defineConfig({
     description:
       'Follow a page in a live read-only mirror and translate it on-device in Chrome.',
     minimum_chrome_version: '138',
-    permissions: ['activeTab', 'scripting', 'sidePanel', 'storage'],
+    permissions: [
+      'activeTab',
+      'scripting',
+      'sidePanel',
+      'storage',
+      ...(tesseractEnabled ? ['offscreen' as const] : []),
+    ],
     optional_host_permissions: ['http://*/*', 'https://*/*'],
+    ...(tesseractEnabled
+      ? {
+          content_security_policy: {
+            extension_pages:
+              "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; object-src 'self';",
+          },
+        }
+      : {}),
   },
 });

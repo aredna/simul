@@ -1,8 +1,8 @@
 import type { MirrorDisplayMode } from '../preferences';
 import { computeMirrorScale } from '../visual-renderer';
 
-export const STATIC_REPLAY_LABEL = 'Static rrweb preview';
-export const LIVE_REPLAY_LABEL = 'Live rrweb preview';
+export const STATIC_REPLAY_LABEL = 'Replica reconnecting';
+export const LIVE_REPLAY_LABEL = 'Live translated replica';
 export const LEGACY_FALLBACK_LABEL = 'Legacy mirror · fallback';
 
 const MAX_REPLAY_DIMENSION = 1_000_000;

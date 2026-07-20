@@ -1,8 +1,10 @@
 # Checkpoint D Promotion Gates
 
-Checkpoint D remains development-only. The checked production artifact and
-all unflagged builds still select `legacy-v1`; no default promotion is claimed
-until every blocking Chrome row below passes in an installed extension.
+Checkpoint D originally kept rrweb development-only. For Checkpoint F the user
+approved Choice C: promote the tested rrweb engine while recording the two
+site-specific fidelity rows as known follow-ups instead of passed gates. The
+legacy engine remains an atomic emergency fallback; this decision does not
+claim the Mexico City or Reddit gaps are fixed.
 
 | Gate | Evidence | Result |
 |---|---|---|
@@ -17,12 +19,11 @@ until every blocking Chrome row below passes in an installed extension.
 | Live result currentness | Coordinator tests notify once for a multi-commit drain, reject obsolete lease results, and give a user pass its own progress after waiting for background work. | Automated pass |
 | Language lifecycle | Pure scheduling tests prepare a late first-text upsert and refresh automatic detection for eligible upserts/removals or changed HTML language. The 20k sample builder stops consuming records when full. | Automated pass |
 | Projection layout | Engine tests restore actual mirror source text, reject every projection identity dimension, and coalesce projection/source extent refreshes. | Automated pass |
-| Production authority | Flagged production build succeeds and its manifest is byte-identical to the checked installable manifest. Runtime selection still requires `DEV` plus both rrweb flags. | Automated pass |
+| Production authority | Normal production selects rrweb replay and revision-safe translation. `WXT_SIMUL_RRWEB_SHADOW=0` / `WXT_SIMUL_RRWEB_TRANSLATION=0` retain explicit rollback paths, and the checked installable bytes are reproduced by the artifact guard. | Automated pass |
 | Mexico City fidelity/network | Exercise carousel/background changes, landmarks, requests, scroll, actions, source isolation, and fallback in installed Chrome. | **Pending manual Chrome** |
 | Reddit fidelity/network | Exercise left login rail, right related rail, shadow/custom elements, landmarks, requests, scroll, actions, source isolation, and fallback in installed Chrome. | **Pending manual Chrome** |
 
-Because the two target-site rows are pending, the promotion decision is
-**keep legacy as production default**. The rollback remains omission of either
-`WXT_SIMUL_RRWEB_SHADOW=1` or `WXT_SIMUL_RRWEB_TRANSLATION=1` in a development
-session; production ignores both because the rrweb path additionally requires
-`import.meta.env.DEV === true`.
+The current decision is **rrweb as production default with legacy fallback**.
+The two pending site rows remain non-blocking fidelity work under the explicit
+Checkpoint F Choice C approval. Rollback is an explicit value of `0` for the
+corresponding build flag; ordinary and omitted values retain rrweb authority.

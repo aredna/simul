@@ -1,16 +1,14 @@
 # Image text translation research
 
-Image OCR is not included in the current extension. Shipping it requires an
-explicit choice about bundle size, image access, accuracy, and whether pixels
-may leave the device. This memo records a viable Japanese/English path without
-silently changing those privacy boundaries.
+Checkpoint F now ships an opt-in local OCR path for stable visible top-frame
+`<img>` elements. This memo records the implemented boundary and the cloud or
+broader-source alternatives that remain deferred.
 
-## Recommended local experiment
+## Implemented local path
 
 [Tesseract.js](https://github.com/naptha/tesseract.js) runs Tesseract OCR in
-WebAssembly and exposes word/line/block geometry. A privacy-preserving Chrome
-extension experiment can bundle the JavaScript, worker, WASM core, and
-`eng`/`jpn` trained data inside the extension. Its default CDN paths cannot be
+WebAssembly and exposes word/line/block geometry. The extension bundles the
+JavaScript, Worker, Wasm core loaders, and trained data locally. Its default CDN paths cannot be
 used: Manifest V3 disallows remotely hosted executable code, offline behavior
 would be unreliable, and the project documents how to configure local worker,
 core, and language paths in its
@@ -19,25 +17,33 @@ The official Tesseract data repository includes a
 [Japanese trained model](https://github.com/tesseract-ocr/tessdata/blob/main/jpn.traineddata)
 and a separate vertical-Japanese model (`jpn_vert`).
 
-A future pipeline would:
+The current pipeline:
 
-1. Obtain pixels only after a user initiates image translation.
-2. OCR `jpn+jpn_vert+eng` and retain word/line bounding boxes and confidence.
-3. Merge boxes into reading-order regions, preserving vertical-writing hints.
-4. Translate recognized regions through the existing on-device provider.
-5. Map OCR coordinates through image natural size, `object-fit`, crop, and
-   mirror scale; draw inert absolutely positioned text overlays over a dimmed
-   copy of the original image.
-6. Offer original/overlay toggles and visibly mark low-confidence regions.
+1. Remains fully dormant until the saved image-translation option is enabled.
+2. Observes `<img>` revisions without disclosing image URLs or page text.
+3. Captures a stable visible viewport crop at no more than twice per second,
+   rejects crops over 4 MP, and hashes the encoded crop.
+4. Runs a restartable offscreen Tesseract.js/core 7.0.0 Worker with one routed
+   language group loaded at a time.
+5. Translates validated line regions through Chrome's on-device Translator and
+   keeps recognition and translation caches separate.
+6. Maps the visible-crop coordinates onto clipped inert sibling overlays that
+   follow replay scroll and zoom without changing the image or page layout.
+
+The pinned catalog includes English, Spanish, French, German, Portuguese,
+Italian, Vietnamese, Japanese plus vertical Japanese, Korean, Simplified and
+Traditional Chinese, Russian, Ukrainian, Arabic, Hebrew, Hindi, Marathi,
+Bengali, Kannada, Tamil, and Telugu. Models not routed for the current image
+remain stored locally and unloaded from memory.
 
 Cross-origin images can be displayed by the mirror but normally taint a canvas,
-so display permission alone does not provide OCR pixels. Two local options are
-possible. `tabs.captureVisibleTab` can capture only the visible viewport after
-a user gesture (Chrome documents both the sensitive-page behavior and a
+so display permission alone does not provide OCR pixels. The implemented path
+uses `tabs.captureVisibleTab` and can capture only the visible viewport (Chrome
+documents both the sensitive-page behavior and a
 [maximum of two calls per second](https://developer.chrome.com/docs/extensions/reference/api/tabs#method-captureVisibleTab)).
-Alternatively, the extension can request narrowly scoped optional access to
-the image host and fetch the resource. Either option needs clear consent,
-viewport/crop mapping, animation handling, and new tests before implementation.
+Requesting narrowly scoped optional access to an image host and fetching the
+resource remains deferred. That alternative needs separate consent,
+animation/crop handling, and new tests before implementation.
 
 Expected limitations include a multi-megabyte model payload, worker startup
 time, memory pressure, stylized or low-resolution lettering, furigana, text
@@ -61,11 +67,12 @@ requires explicit product approval, consent UI, retention/logging policy,
 regional review, rate limiting, and abuse controls. A browser-side “free API”
 key is not a safe design.
 
-## Decision for the next increment
+## Remaining increments
 
-Prototype local Tesseract first on a small, separately downloadable Japanese
-and English model bundle. Evaluate accuracy, extension size, startup latency,
-and coordinate mapping on screenshots and ordinary image elements. Compare a
-backend Vision prototype only with explicit remote-processing approval and
-representative non-sensitive test images. Do not add OCR permissions or cloud
-traffic as an incidental fidelity fix.
+Evaluate accuracy and overlay readability on representative non-sensitive
+images across the packaged scripts. Image-only language classification,
+low-confidence styling, CSS backgrounds, canvas/video, embedded frames, and
+direct image fetch each require a separate design and privacy decision. Compare
+a backend Vision prototype only with explicit remote-processing approval. Do
+not add credentials, host permissions, durable captures, or cloud traffic as an
+incidental fidelity fix.

@@ -42,24 +42,22 @@ const request: ReplicaCaptureRequest = {
 };
 
 describe('replica engine selection and fallback', () => {
-  it('keeps production and unrequested development builds on legacy', () => {
-    expect(selectReplicaEngineMode({ DEV: false, WXT_SIMUL_RRWEB_SHADOW: '1' })).toBe('legacy');
-    expect(selectReplicaEngineMode({ DEV: true })).toBe('legacy');
+  it('uses rrweb and source projections by default with an explicit rollback', () => {
+    expect(selectReplicaEngineMode({ DEV: false })).toBe('rrweb-shadow');
+    expect(selectReplicaEngineMode({ DEV: true })).toBe('rrweb-shadow');
     expect(selectReplicaEngineMode({ DEV: true, WXT_SIMUL_RRWEB_SHADOW: '1' })).toBe('rrweb-shadow');
+    expect(selectReplicaEngineMode({ DEV: false, WXT_SIMUL_RRWEB_SHADOW: '0' })).toBe('legacy');
     expect(selectReplicaTranslationMode({
       DEV: false,
-      WXT_SIMUL_RRWEB_SHADOW: '1',
-      WXT_SIMUL_RRWEB_TRANSLATION: '1',
-    })).toBe('legacy');
-    expect(selectReplicaTranslationMode({
-      DEV: true,
-      WXT_SIMUL_RRWEB_SHADOW: '1',
-    })).toBe('legacy');
-    expect(selectReplicaTranslationMode({
-      DEV: true,
-      WXT_SIMUL_RRWEB_SHADOW: '1',
-      WXT_SIMUL_RRWEB_TRANSLATION: '1',
     })).toBe('rrweb-projection');
+    expect(selectReplicaTranslationMode({
+      DEV: false,
+      WXT_SIMUL_RRWEB_TRANSLATION: '0',
+    })).toBe('legacy');
+    expect(selectReplicaTranslationMode(
+      { DEV: false, WXT_SIMUL_RRWEB_TRANSLATION: '0' },
+      'rrweb-shadow',
+    )).toBe('legacy');
   });
 
   it('disables a failed shadow and notifies fallback at most once', async () => {
@@ -341,11 +339,13 @@ describe('rrweb shadow engine', () => {
     const { document } = replicaDocument();
     const presentationHost = createPresentationHost(document);
     const refreshExtent = vi.spyOn(presentationHost, 'refreshExtent');
+    const onLayoutChanged = vi.fn();
     const controls: FakeLiveReplayerControl[] = [];
     const engine = new RrwebShadowReplicaEngine({
       presentationHost,
       capture: async () => checkpointAt(0),
       createReplayer: createFakeLiveReplayerFactory(document, controls, true),
+      onLayoutChanged,
     });
     await engine.run(request);
     const snapshot = engine.snapshot();
@@ -370,6 +370,7 @@ describe('rrweb shadow engine', () => {
 
     await flushAsyncWork();
     expect(refreshExtent).toHaveBeenCalledTimes(1);
+    expect(onLayoutChanged).toHaveBeenCalledTimes(1);
 
     engine.beginProjection({ translationEpoch: 2, pairKey: undefined });
     expect(controls[0]?.textNode.textContent).toBe('initial');
@@ -377,6 +378,7 @@ describe('rrweb shadow engine', () => {
 
     await flushAsyncWork();
     expect(refreshExtent).toHaveBeenCalledTimes(2);
+    expect(onLayoutChanged).toHaveBeenCalledTimes(2);
     engine.dispose();
   });
 
