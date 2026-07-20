@@ -18,10 +18,22 @@ import {
   ReplicaLiveProtocolError,
 } from './live-protocol';
 import { RrwebStreamSanitizer } from './rrweb-stream-sanitizer';
+import {
+  SourceValueModel,
+  sameSourceDocument,
+  type ReplicaSourceTextChange,
+} from './source-value-model';
 import type {
   ReplayPresentationHost,
   VisibleReplayCandidateLease,
 } from './visible-replay-host';
+import type {
+  ReplicaProjectionContext,
+  ReplicaSourceCommit,
+  ReplicaTextProjection,
+  ReplicaTranslationSnapshot,
+  ReplicaTranslationSurface,
+} from '../translation/replica-translation-coordinator';
 
 export const SHADOW_CAPTURE_DEADLINE_MS = 5_000;
 export const SHADOW_REPLAY_DEADLINE_MS = 5_000;
@@ -33,6 +45,9 @@ interface ReplayerLike {
   play(timeOffset?: number): void;
   startLive?(baselineTime?: number): void;
   addEvent?(event: unknown): void;
+  getMirror?(): {
+    getNode(id: number): Node | null;
+  };
   disableInteract(): void;
   destroy(): void;
 }
@@ -52,6 +67,7 @@ interface RrwebShadowReplicaEngineOptions {
   readonly openStream?: ReplicaLiveStreamFactory;
   readonly onLiveFailure?: (code: ReplicaDiagnosticCode) => void;
   readonly onLiveApplied?: () => void;
+  readonly onSourceCommit?: (commit: ReplicaSourceCommit) => void;
   readonly createReplayer?: ReplayerFactory;
   readonly createSanitizer?: () => RrwebStreamSanitizer;
   readonly now?: () => number;
@@ -67,8 +83,10 @@ interface ManagedReplay {
   readonly abortController: AbortController;
   replayer?: ReplayerLike;
   sanitizer?: RrwebStreamSanitizer;
+  readonly sourceModel: SourceValueModel;
   readonly checkpointSequence: number;
   sequence: number;
+  replayLease: number;
   released: boolean;
 }
 
@@ -103,7 +121,8 @@ export class ReplicaCaptureBoundaryError extends Error {
   }
 }
 
-export class RrwebShadowReplicaEngine implements ReplicaEngine {
+export class RrwebShadowReplicaEngine
+  implements ReplicaEngine, ReplicaTranslationSurface {
   readonly id = 'rrweb-shadow-v2' as const;
   readonly #createReplayer: ReplayerFactory;
   readonly #createSanitizer: () => RrwebStreamSanitizer;
@@ -113,6 +132,15 @@ export class RrwebShadowReplicaEngine implements ReplicaEngine {
   #candidate: ManagedReplay | undefined;
   #committed: ManagedReplay | undefined;
   #liveStream: ManagedLiveStream | undefined;
+  #sourceValues = new SourceValueModel();
+  #replayLease = 0;
+  #projectionContext: ReplicaProjectionContext = {
+    translationEpoch: 0,
+    pairKey: undefined,
+  };
+  #projections = new Map<number, ReplicaTextProjection>();
+  #extentRefreshPending = false;
+  #extentRefreshReplay: ManagedReplay | undefined;
 
   constructor(private readonly options: RrwebShadowReplicaEngineOptions) {
     this.#now = options.now ?? (() => performance.now());
@@ -219,8 +247,10 @@ export class RrwebShadowReplicaEngine implements ReplicaEngine {
           documentHeight: payload.documentHeight,
         }),
         abortController: new AbortController(),
+        sourceModel: this.#sourceValues.fork(),
         checkpointSequence: response.identity.sequence,
         sequence: response.identity.sequence,
+        replayLease: 0,
         released: false,
       };
       this.#candidate = candidate;
@@ -238,6 +268,14 @@ export class RrwebShadowReplicaEngine implements ReplicaEngine {
           ? AbortSignal.any([signal, candidate.abortController.signal])
           : candidate.abortController.signal,
       );
+      const sourceCheckpoint = candidate.sourceModel.prepareCheckpoint(
+        response.identity,
+        payload.events,
+      );
+      if (!sourceCheckpoint) {
+        throw new ShadowReplicaError('privacy_rejected');
+      }
+      sourceCheckpoint.commit();
       if (liveStream) {
         candidate.sanitizer = this.#createSanitizer();
         if (!candidate.sanitizer.reset(payload.events)) {
@@ -259,6 +297,13 @@ export class RrwebShadowReplicaEngine implements ReplicaEngine {
       ) {
         return this.skipped('stale_identity');
       }
+      const nextReplayLease = this.#replayLease + 1;
+      const nextProjections = this.#projectionsForCandidate(
+        candidate,
+        nextReplayLease,
+      );
+      // Candidate projections are applied as one hidden mutation set before
+      // the single extent read used for atomic presentation.
       const extent = measureReplayExtent(candidate.replayer.iframe);
       const diagnostics: ReplicaDiagnostics = {
         engine: this.id,
@@ -274,10 +319,14 @@ export class RrwebShadowReplicaEngine implements ReplicaEngine {
         replayDocumentWidth: extent.width,
         replayDocumentHeight: extent.height,
       };
+      candidate.replayLease = nextReplayLease;
       candidate.lease.commit(candidate.replayer.iframe, extent);
       const previous = this.#committed;
       this.#candidate = undefined;
       this.#committed = candidate;
+      this.#sourceValues = candidate.sourceModel;
+      this.#replayLease = nextReplayLease;
+      this.#projections = nextProjections;
       committed = true;
       releaseManagedReplay(previous);
       if (liveStream) {
@@ -285,6 +334,7 @@ export class RrwebShadowReplicaEngine implements ReplicaEngine {
         liveStream.initializing = false;
         liveStream.lease.acknowledgeCheckpoint(candidate.checkpointSequence);
         liveStream.lease.acknowledge(candidate.sequence);
+        this.#notifySourceCommit(candidate, 'checkpoint', undefined, sourceCheckpoint.documentLanguageChanged);
         if (candidate.sequence > candidate.checkpointSequence) {
           this.options.onLiveApplied?.();
         }
@@ -296,6 +346,8 @@ export class RrwebShadowReplicaEngine implements ReplicaEngine {
         } else {
           this.#kickLiveProcessing(liveStream);
         }
+      } else {
+        this.#notifySourceCommit(candidate, 'checkpoint', undefined, sourceCheckpoint.documentLanguageChanged);
       }
       return { status: 'complete', diagnostics };
     } catch (error) {
@@ -318,6 +370,73 @@ export class RrwebShadowReplicaEngine implements ReplicaEngine {
     }
   }
 
+  beginProjection(context: ReplicaProjectionContext): void {
+    if (
+      !Number.isSafeInteger(context.translationEpoch) ||
+      context.translationEpoch < 0 ||
+      (context.pairKey !== undefined &&
+        (typeof context.pairKey !== 'string' || context.pairKey.length > 128))
+    ) return;
+    this.#projectionContext = Object.freeze({ ...context });
+    this.#projections.clear();
+    const committed = this.#committed;
+    if (!committed?.replayer) return;
+    let restored = false;
+    for (const record of this.#sourceValues.records()) {
+      const node = mirrorTextNode(committed.replayer, record.nodeId);
+      if (node && node.textContent !== record.source) {
+        node.textContent = record.source;
+        restored = true;
+      }
+    }
+    if (restored) this.#scheduleExtentRefresh(committed);
+  }
+
+  snapshot(): ReplicaTranslationSnapshot | undefined {
+    const document = this.#sourceValues.document;
+    const committed = this.#committed;
+    if (!document || !committed || committed.released || committed.replayLease === 0) {
+      return undefined;
+    }
+    return {
+      document,
+      ...(this.#sourceValues.documentLanguage
+        ? { documentLanguage: this.#sourceValues.documentLanguage }
+        : {}),
+      replayLease: committed.replayLease,
+      records: this.#sourceValues.records(),
+    };
+  }
+
+  project(projection: ReplicaTextProjection): boolean {
+    const committed = this.#committed;
+    const document = this.#sourceValues.document;
+    if (
+      !committed?.replayer ||
+      committed.released ||
+      !document ||
+      projection.nodeType !== 3 ||
+      projection.replayLease !== committed.replayLease ||
+      projection.translationEpoch !== this.#projectionContext.translationEpoch ||
+      projection.pairKey !== this.#projectionContext.pairKey ||
+      !sameSourceDocument(document, projection.document) ||
+      projection.translated.length > 1_000_000
+    ) return false;
+    const record = this.#sourceValues.get(projection.nodeId);
+    if (
+      !record ||
+      record.revision !== projection.sourceRevision ||
+      record.source !== projection.source
+    ) return false;
+    const node = mirrorTextNode(committed.replayer, projection.nodeId);
+    if (!node) return false;
+    const textChanged = node.textContent !== projection.translated;
+    node.textContent = projection.translated;
+    this.#projections.set(projection.nodeId, Object.freeze({ ...projection }));
+    if (textChanged) this.#scheduleExtentRefresh(committed);
+    return true;
+  }
+
   releasePresentation(showFallbackLabel = true): void {
     this.#runVersion += 1;
     this.#releaseLiveStream();
@@ -325,6 +444,9 @@ export class RrwebShadowReplicaEngine implements ReplicaEngine {
     this.options.presentationHost.showLegacy(showFallbackLabel);
     releaseManagedReplay(this.#committed);
     this.#committed = undefined;
+    this.#sourceValues.clear();
+    this.#projections.clear();
+    this.#replayLease += 1;
   }
 
   dispose(): void {
@@ -337,6 +459,91 @@ export class RrwebShadowReplicaEngine implements ReplicaEngine {
   #releaseCandidate(): void {
     releaseManagedReplay(this.#candidate);
     this.#candidate = undefined;
+  }
+
+  #projectionsForCandidate(
+    candidate: ManagedReplay,
+    replayLease: number,
+  ): Map<number, ReplicaTextProjection> {
+    const next = new Map<number, ReplicaTextProjection>();
+    const candidateDocument = candidate.sourceModel.document;
+    const currentDocument = this.#sourceValues.document;
+    if (
+      !candidate.replayer ||
+      !candidateDocument ||
+      !currentDocument ||
+      !sameSourceDocument(candidateDocument, currentDocument)
+    ) return next;
+    for (const projection of this.#projections.values()) {
+      const record = candidate.sourceModel.get(projection.nodeId);
+      if (
+        !record ||
+        record.revision !== projection.sourceRevision ||
+        record.source !== projection.source ||
+        projection.translationEpoch !== this.#projectionContext.translationEpoch ||
+        projection.pairKey !== this.#projectionContext.pairKey
+      ) continue;
+      const node = mirrorTextNode(candidate.replayer, projection.nodeId);
+      if (!node) continue;
+      node.textContent = projection.translated;
+      next.set(
+        projection.nodeId,
+        Object.freeze({ ...projection, replayLease }),
+      );
+    }
+    return next;
+  }
+
+  #notifySourceCommit(
+    replay: ManagedReplay,
+    reason: ReplicaSourceCommit['reason'],
+    changes?: readonly ReplicaSourceTextChange[],
+    documentLanguageChanged = false,
+  ): void {
+    const document = replay.sourceModel.document;
+    if (!document || replay.replayLease === 0) return;
+    const records = replay.sourceModel.records();
+    const committedChanges = changes ?? records.map(
+      (record): ReplicaSourceTextChange => ({ kind: 'upsert', record }),
+    );
+    try {
+      this.options.onSourceCommit?.({
+        document,
+        ...(replay.sourceModel.documentLanguage
+          ? { documentLanguage: replay.sourceModel.documentLanguage }
+          : {}),
+        documentLanguageChanged,
+        replayLease: replay.replayLease,
+        records,
+        changes: Object.freeze([...committedChanges]),
+        reason,
+      });
+    } catch {
+      // Derived translation work cannot affect replay commit or source ACK.
+    }
+  }
+
+  #scheduleExtentRefresh(replay: ManagedReplay): void {
+    if (
+      replay.released ||
+      !replay.replayer ||
+      this.#committed !== replay
+    ) return;
+    this.#extentRefreshReplay = replay;
+    if (this.#extentRefreshPending) return;
+    this.#extentRefreshPending = true;
+    schedulePresentationRefresh(() => {
+      this.#extentRefreshPending = false;
+      const current = this.#extentRefreshReplay;
+      this.#extentRefreshReplay = undefined;
+      if (
+        !current?.replayer ||
+        current.released ||
+        this.#committed !== current
+      ) return;
+      const extent = measureReplayExtent(current.replayer.iframe);
+      this.options.presentationHost.refreshExtent(current.replayer.iframe, extent);
+    });
   }
 
   #isCurrentRun(
@@ -451,6 +658,13 @@ export class RrwebShadowReplicaEngine implements ReplicaEngine {
       if (!prepared || prepared.events.length !== batch.events.length) {
         throw new ShadowReplicaError('privacy_rejected');
       }
+      const sourceUpdate = replay.sourceModel.prepareBatch(
+        batch.identity,
+        prepared.events,
+      );
+      if (!sourceUpdate) {
+        throw new ShadowReplicaError('privacy_rejected');
+      }
       const replayEvents = this.options.shouldReplayScroll?.() === false
         ? prepared.events.filter((event) => !isScrollEvent(event))
         : prepared.events;
@@ -475,6 +689,7 @@ export class RrwebShadowReplicaEngine implements ReplicaEngine {
         throw new ShadowReplicaError('stale_identity');
       }
       prepared.commit();
+      sourceUpdate.commit();
       replay.sequence = batch.lastSequence;
       stream.pending.shift();
       if (acknowledge) {
@@ -482,9 +697,14 @@ export class RrwebShadowReplicaEngine implements ReplicaEngine {
           this.options.presentationHost.markLive(replay.replayer.iframe);
         }
         stream.lease.acknowledge(replay.sequence);
+        this.#notifySourceCommit(
+          replay,
+          'batch',
+          sourceUpdate.changes,
+          sourceUpdate.documentLanguageChanged,
+        );
         this.options.onLiveApplied?.();
-        const extent = measureReplayExtent(replay.replayer.iframe);
-        this.options.presentationHost.refreshExtent(replay.replayer.iframe, extent);
+        this.#scheduleExtentRefresh(replay);
         stream.appliedBatches += 1;
         stream.appliedBytes += batch.byteLength;
         if (
@@ -582,8 +802,10 @@ export class RrwebShadowReplicaEngine implements ReplicaEngine {
           documentHeight: payload.documentHeight,
         }),
         abortController: new AbortController(),
+        sourceModel: this.#sourceValues.fork(),
         checkpointSequence: checkpoint.identity.sequence,
         sequence: checkpoint.identity.sequence,
+        replayLease: 0,
         released: false,
       };
       this.#candidate = candidate;
@@ -599,6 +821,14 @@ export class RrwebShadowReplicaEngine implements ReplicaEngine {
         this.options.replayDeadlineMs ?? SHADOW_REPLAY_DEADLINE_MS,
         candidate.abortController.signal,
       );
+      const sourceCheckpoint = candidate.sourceModel.prepareCheckpoint(
+        checkpoint.identity,
+        payload.events,
+      );
+      if (!sourceCheckpoint) {
+        throw new ShadowReplicaError('privacy_rejected');
+      }
+      sourceCheckpoint.commit();
       candidate.sanitizer = this.#createSanitizer();
       if (!candidate.sanitizer.reset(payload.events)) {
         throw new ShadowReplicaError('privacy_rejected');
@@ -615,11 +845,22 @@ export class RrwebShadowReplicaEngine implements ReplicaEngine {
       if (!this.#isLiveStreamCurrent(stream) || this.#candidate !== candidate) {
         throw new ShadowReplicaError('stale_identity');
       }
+      const nextReplayLease = this.#replayLease + 1;
+      const nextProjections = this.#projectionsForCandidate(
+        candidate,
+        nextReplayLease,
+      );
+      // Recovery reapplies current projections while hidden, then measures
+      // once before the candidate becomes the committed presentation.
       const extent = measureReplayExtent(candidate.replayer.iframe);
+      candidate.replayLease = nextReplayLease;
       candidate.lease.commit(candidate.replayer.iframe, extent);
       const previous = this.#committed;
       this.#candidate = undefined;
       this.#committed = candidate;
+      this.#sourceValues = candidate.sourceModel;
+      this.#replayLease = nextReplayLease;
+      this.#projections = nextProjections;
       releaseManagedReplay(previous);
       stream.recovering = false;
       stream.recoveryAttempts = 0;
@@ -627,6 +868,12 @@ export class RrwebShadowReplicaEngine implements ReplicaEngine {
       stream.appliedBytes = 0;
       stream.lease.acknowledgeCheckpoint(candidate.checkpointSequence);
       stream.lease.acknowledge(candidate.sequence);
+      this.#notifySourceCommit(
+        candidate,
+        'recovery',
+        undefined,
+        sourceCheckpoint.documentLanguageChanged,
+      );
       if (candidate.sequence > (previous?.sequence ?? candidate.sequence)) {
         this.options.onLiveApplied?.();
       }
@@ -747,6 +994,21 @@ function createRrwebReplayer(
   );
 }
 
+function mirrorTextNode(
+  replayer: ReplayerLike,
+  nodeId: number,
+): Text | undefined {
+  if (!Number.isSafeInteger(nodeId) || nodeId < 1 || !replayer.getMirror) {
+    return undefined;
+  }
+  try {
+    const node = replayer.getMirror().getNode(nodeId);
+    return node?.nodeType === 3 ? (node as Text) : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
 function protectReplayIframe(iframe: HTMLIFrameElement): void {
   iframe.setAttribute('sandbox', 'allow-same-origin');
   iframe.setAttribute('aria-hidden', 'true');
@@ -843,6 +1105,14 @@ function waitForEventsCast(
       finish(new ShadowReplicaError('replay_failed'));
     }
   });
+}
+
+function schedulePresentationRefresh(callback: () => void): void {
+  if (typeof requestAnimationFrame === 'function') {
+    requestAnimationFrame(() => callback());
+    return;
+  }
+  setTimeout(callback, 0);
 }
 
 function measureReplayExtent(iframe: HTMLIFrameElement): {

@@ -13,7 +13,9 @@ import {
 import {
   ReplicaEngineController,
   selectReplicaEngineMode,
+  selectReplicaTranslationMode,
 } from '../lib/replica/engine-selection';
+import type { ReplicaTextProjection } from '../lib/translation/replica-translation-coordinator';
 import { FakeReplicaEngine } from '../lib/replica/fakes';
 import {
   createCheckpointEnvelope,
@@ -44,6 +46,20 @@ describe('replica engine selection and fallback', () => {
     expect(selectReplicaEngineMode({ DEV: false, WXT_SIMUL_RRWEB_SHADOW: '1' })).toBe('legacy');
     expect(selectReplicaEngineMode({ DEV: true })).toBe('legacy');
     expect(selectReplicaEngineMode({ DEV: true, WXT_SIMUL_RRWEB_SHADOW: '1' })).toBe('rrweb-shadow');
+    expect(selectReplicaTranslationMode({
+      DEV: false,
+      WXT_SIMUL_RRWEB_SHADOW: '1',
+      WXT_SIMUL_RRWEB_TRANSLATION: '1',
+    })).toBe('legacy');
+    expect(selectReplicaTranslationMode({
+      DEV: true,
+      WXT_SIMUL_RRWEB_SHADOW: '1',
+    })).toBe('legacy');
+    expect(selectReplicaTranslationMode({
+      DEV: true,
+      WXT_SIMUL_RRWEB_SHADOW: '1',
+      WXT_SIMUL_RRWEB_TRANSLATION: '1',
+    })).toBe('rrweb-projection');
   });
 
   it('disables a failed shadow and notifies fallback at most once', async () => {
@@ -232,6 +248,204 @@ describe('rrweb shadow engine', () => {
     });
     expect(captures).toBe(0);
     expect(document.querySelector('[data-simul-replica-candidate]')).toBeNull();
+  });
+
+  it('projects only exact current identities after ACK and reapplies them on recovery', async () => {
+    const { document } = replicaDocument();
+    const stream = new FakeLiveStream(checkpointAt(0));
+    const controls: FakeLiveReplayerControl[] = [];
+    const commits: Array<{
+      reason: string;
+      replayLease: number;
+      acknowledgements: number[];
+    }> = [];
+    const engine = new RrwebShadowReplicaEngine({
+      presentationHost: createPresentationHost(document),
+      capture: async () => checkpointAt(0),
+      openStream: async () => stream,
+      createReplayer: createFakeLiveReplayerFactory(document, controls, true),
+      onSourceCommit: (commit) => commits.push({
+        reason: commit.reason,
+        replayLease: commit.replayLease,
+        acknowledgements: [...stream.acknowledgements],
+      }),
+    });
+
+    await engine.run(request);
+    const initial = engine.snapshot();
+    const source = initial?.records.find(({ nodeId }) => nodeId === 5);
+    expect(source).toMatchObject({ revision: 1, source: 'initial' });
+    expect(commits[0]).toEqual({
+      reason: 'checkpoint',
+      replayLease: 1,
+      acknowledgements: [0],
+    });
+
+    engine.beginProjection({ translationEpoch: 1, pairKey: 'es>en' });
+    expect(engine.project({
+      document: source!.document,
+      replayLease: initial!.replayLease,
+      nodeId: 5,
+      nodeType: 3,
+      sourceRevision: source!.revision,
+      source: source!.source,
+      translationEpoch: 1,
+      pairKey: 'es>en',
+      translated: 'translated',
+    })).toBe(true);
+    expect(controls[0]?.textNode.textContent).toBe('translated');
+
+    stream.emitCheckpoint(checkpointAt(0));
+    await flushAsyncWork();
+
+    expect(controls).toHaveLength(2);
+    expect(controls[1]?.textNode.textContent).toBe('translated');
+    expect(engine.snapshot()?.replayLease).toBe(2);
+    expect(commits.at(-1)).toEqual({
+      reason: 'recovery',
+      replayLease: 2,
+      acknowledgements: [0, 0],
+    });
+
+    const current = engine.snapshot();
+    const currentSource = current?.records.find(({ nodeId }) => nodeId === 5);
+    const projection: ReplicaTextProjection = {
+      document: currentSource!.document,
+      replayLease: current!.replayLease,
+      nodeId: 5,
+      nodeType: 3,
+      sourceRevision: currentSource!.revision,
+      source: currentSource!.source,
+      translationEpoch: 1,
+      pairKey: 'es>en',
+      translated: 'stale',
+    };
+    const rejected = [
+      {
+        ...projection,
+        document: { ...projection.document, documentId: 'stale-document' },
+      },
+      { ...projection, pairKey: 'ja>en' },
+      { ...projection, translationEpoch: 2 },
+      { ...projection, replayLease: current!.replayLease - 1 },
+      { ...projection, nodeType: 1 } as unknown as ReplicaTextProjection,
+    ];
+    for (const staleProjection of rejected) {
+      expect(engine.project(staleProjection)).toBe(false);
+      expect(controls[1]?.textNode.textContent).toBe('translated');
+    }
+    engine.dispose();
+  });
+
+  it('coalesces extent refreshes and restores actual source text for an equal pair', async () => {
+    const { document } = replicaDocument();
+    const presentationHost = createPresentationHost(document);
+    const refreshExtent = vi.spyOn(presentationHost, 'refreshExtent');
+    const controls: FakeLiveReplayerControl[] = [];
+    const engine = new RrwebShadowReplicaEngine({
+      presentationHost,
+      capture: async () => checkpointAt(0),
+      createReplayer: createFakeLiveReplayerFactory(document, controls, true),
+    });
+    await engine.run(request);
+    const snapshot = engine.snapshot();
+    const source = snapshot?.records.find(({ nodeId }) => nodeId === 5);
+    const projection: ReplicaTextProjection = {
+      document: source!.document,
+      replayLease: snapshot!.replayLease,
+      nodeId: source!.nodeId,
+      nodeType: 3,
+      sourceRevision: source!.revision,
+      source: source!.source,
+      translationEpoch: 1,
+      pairKey: 'es>en',
+      translated: 'translated once',
+    };
+
+    engine.beginProjection({ translationEpoch: 1, pairKey: 'es>en' });
+    expect(engine.project(projection)).toBe(true);
+    expect(engine.project({ ...projection, translated: 'translated twice' })).toBe(true);
+    expect(controls[0]?.textNode.textContent).toBe('translated twice');
+    expect(refreshExtent).not.toHaveBeenCalled();
+
+    await flushAsyncWork();
+    expect(refreshExtent).toHaveBeenCalledTimes(1);
+
+    engine.beginProjection({ translationEpoch: 2, pairKey: undefined });
+    expect(controls[0]?.textNode.textContent).toBe('initial');
+    expect(refreshExtent).toHaveBeenCalledTimes(1);
+
+    await flushAsyncWork();
+    expect(refreshExtent).toHaveBeenCalledTimes(2);
+    engine.dispose();
+  });
+
+  it('commits text revisions after event-cast and rejects the superseded projection', async () => {
+    const { document } = replicaDocument();
+    const stream = new FakeLiveStream(checkpointAt(0));
+    const controls: FakeLiveReplayerControl[] = [];
+    const commits: string[] = [];
+    const engine = new RrwebShadowReplicaEngine({
+      presentationHost: createPresentationHost(document),
+      capture: async () => checkpointAt(0),
+      openStream: async () => stream,
+      createReplayer: createFakeLiveReplayerFactory(document, controls, false),
+      onSourceCommit: (commit) => commits.push(
+        `${commit.reason}:${stream.acknowledgements.join(',')}`,
+      ),
+    });
+    await engine.run(request);
+    const original = engine.snapshot()?.records.find(({ nodeId }) => nodeId === 5);
+    engine.beginProjection({ translationEpoch: 1, pairKey: 'es>en' });
+
+    stream.emitBatch(liveBatchFromEvents(1, [{
+      type: 3,
+      data: {
+        source: 0,
+        texts: [{ id: 5, value: 'changed' }],
+        attributes: [],
+        removes: [],
+        adds: [],
+      },
+      timestamp: 11,
+    }]));
+    expect(engine.snapshot()?.records.find(({ nodeId }) => nodeId === 5)).toMatchObject({
+      revision: 1,
+      source: 'initial',
+    });
+    expect(stream.acknowledgements).toEqual([0]);
+
+    controls[0]?.emit('event-cast', controls[0]?.addedEvents[0]);
+    await flushAsyncWork();
+
+    const changed = engine.snapshot()?.records.find(({ nodeId }) => nodeId === 5);
+    expect(changed).toMatchObject({ revision: 2, source: 'changed' });
+    expect(stream.acknowledgements).toEqual([0, 1]);
+    expect(commits.at(-1)).toBe('batch:0,1');
+    expect(engine.project({
+      document: original!.document,
+      replayLease: engine.snapshot()!.replayLease,
+      nodeId: 5,
+      nodeType: 3,
+      sourceRevision: original!.revision,
+      source: original!.source,
+      translationEpoch: 1,
+      pairKey: 'es>en',
+      translated: 'stale',
+    })).toBe(false);
+    expect(engine.project({
+      document: changed!.document,
+      replayLease: engine.snapshot()!.replayLease,
+      nodeId: 5,
+      nodeType: 3,
+      sourceRevision: changed!.revision,
+      source: changed!.source,
+      translationEpoch: 1,
+      pairKey: 'es>en',
+      translated: 'current',
+    })).toBe(true);
+    expect(controls[0]?.textNode.textContent).toBe('current');
+    engine.dispose();
   });
 
   it('treats overlapping recorder work as transient instead of poisoning fallback', async () => {
@@ -1266,6 +1480,7 @@ interface FakeLiveReplayerControl {
   readonly handlers: Map<string, Set<(event?: unknown) => void>>;
   rebuildOnPlay: boolean;
   destroyed: number;
+  readonly textNode: Text;
   emit(event: string, payload?: unknown): void;
 }
 
@@ -1284,14 +1499,22 @@ function createFakeLiveReplayerFactory(
   play(): void;
   startLive(): void;
   addEvent(event: unknown): void;
+  getMirror(): { getNode(id: number): Node | null };
   disableInteract(): void;
   destroy(): void;
 } {
   return (_events, root) => {
     const iframe = hostDocument.createElement('iframe');
+    const replayDocument = parseHTML(
+      '<html><body><p>initial</p></body></html>',
+    ).document;
+    const textNode = replayDocument.querySelector('p')?.firstChild;
+    if (!textNode || textNode.nodeType !== 3) {
+      throw new Error('Missing fake rrweb text node.');
+    }
     Object.defineProperty(iframe, 'contentDocument', {
       configurable: true,
-      value: parseHTML('<html><body><main>live</main></body></html>').document,
+      value: replayDocument,
     });
     root.append(iframe);
     const control: FakeLiveReplayerControl = {
@@ -1299,6 +1522,7 @@ function createFakeLiveReplayerFactory(
       handlers: new Map(),
       rebuildOnPlay: true,
       destroyed: 0,
+      textNode: textNode as Text,
       emit(event, payload) {
         for (const handler of this.handlers.get(event) ?? []) handler(payload);
       },
@@ -1320,14 +1544,44 @@ function createFakeLiveReplayerFactory(
       startLive: () => undefined,
       addEvent: (event) => {
         control.addedEvents.push(event);
+        applyFakeTextMutation(event, control.textNode);
         if (autoCast) queueMicrotask(() => control.emit('event-cast', event));
       },
+      getMirror: () => ({
+        getNode: (id) => id === 5 ? control.textNode : null,
+      }),
       disableInteract: () => undefined,
       destroy: () => {
         control.destroyed += 1;
       },
     };
   };
+}
+
+function applyFakeTextMutation(event: unknown, textNode: Text): void {
+  if (
+    typeof event !== 'object' ||
+    event === null ||
+    !('type' in event) ||
+    event.type !== 3 ||
+    !('data' in event) ||
+    typeof event.data !== 'object' ||
+    event.data === null ||
+    !('source' in event.data) ||
+    event.data.source !== 0 ||
+    !('texts' in event.data) ||
+    !Array.isArray(event.data.texts)
+  ) return;
+  for (const entry of event.data.texts) {
+    if (
+      typeof entry === 'object' &&
+      entry !== null &&
+      'id' in entry &&
+      entry.id === 5 &&
+      'value' in entry &&
+      typeof entry.value === 'string'
+    ) textNode.textContent = entry.value;
+  }
 }
 
 function checkpointAt(sequence: number): ReplicaCheckpointEnvelope {

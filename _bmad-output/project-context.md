@@ -18,14 +18,21 @@ node IDs; normal synchronization replaces only coalesced dirty subtrees. A
 validated production build is checked in at `dist/chrome-unpacked/` for direct
 Developer mode installation without contributor tooling. A development-only
 rrweb engine can retain one masked recorder per source document and atomically
-promote an untranslated live preview with `WXT_SIMUL_RRWEB_SHADOW=1`; production
-and unflagged builds remain on the legacy renderer. Exact-document Ports carry
+promote a live preview with `WXT_SIMUL_RRWEB_SHADOW=1`. A second development
+flag, `WXT_SIMUL_RRWEB_TRANSLATION=1`, keeps canonical text in an
+exact-document, revisioned source model and projects bounded pair-scoped Chrome
+translations through rrweb Mirror-owned text nodes. Capture ACKs never wait for
+translation; document, source revision, translation epoch, pair, replay lease,
+and node type must all match before a projection commits. Same-language and
+pair changes restore source text without recapture, and matching projections
+are reconciled before a same-document recovery swap. Production and unflagged
+builds remain on the legacy renderer. Exact-document Ports carry
 bounded, statefully sanitized DOM, CSS, and scroll batches. Applied-state and
 checkpoint ACKs advance only after rrweb casts the admitted events; gaps recover
 once through a hidden checkpoint and atomic swap while preserving the last-good
 replica. The flagged preview retains source viewport geometry, applies zoom
 outside the replay iframe, maps extension/source scrolling, and returns to a
-labeled legacy fallback before translation. Legacy dirty notices are coalesced
+labeled legacy fallback after a bounded failure. Legacy dirty notices are coalesced
 while rrweb is authoritative so that transition performs at most one fresh v1
 capture.
 
@@ -73,6 +80,10 @@ extension APIs or page integration.
   ownership, independent subscriber watermarks, and recovery requests
 - `lib/replica/rrweb-stream-sanitizer.ts`: transactional incremental privacy,
   identity, and resource validation
+- `lib/replica/source-value-model.ts`: transactional canonical rrweb text,
+  monotonic revisions/tombstones, and committed text-change records
+- `lib/translation/`: bounded exact-source memory and the single-session,
+  revision/epoch/lease-safe rrweb translation coordinator
 - `lib/`: safe bootstrap/delta boundaries, inert renderer, preferences,
   provider adapter, translation pipeline logic, and replica-engine adapters
 - `tests/`: unit tests

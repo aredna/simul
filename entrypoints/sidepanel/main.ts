@@ -60,6 +60,7 @@ import {
 import {
   ReplicaEngineController,
   selectReplicaEngineMode,
+  selectReplicaTranslationMode,
 } from '../../lib/replica/engine-selection';
 import {
   LegacyTransitionGate,
@@ -77,6 +78,15 @@ import {
   RrwebShadowReplicaEngine,
 } from '../../lib/replica/rrweb-shadow-engine';
 import { VisibleReplayHost } from '../../lib/replica/visible-replay-host';
+import { buildBoundedLanguageSample } from '../../lib/translation/language-sample';
+import { replicaSourceCommitAction } from '../../lib/translation/replica-translation-lifecycle';
+import {
+  ReplicaTranslationCoordinator,
+  isCompleteReplicaTranslationResult,
+  type ReplicaSourceCommit,
+  type ReplicaTranslationRunResult,
+} from '../../lib/translation/replica-translation-coordinator';
+import { TranslationMemory } from '../../lib/translation/translation-memory';
 import {
   SUPPORTED_LANGUAGES,
   languageName,
@@ -167,6 +177,11 @@ const replicaEngineMode = selectReplicaEngineMode({
   DEV: import.meta.env.DEV,
   WXT_SIMUL_RRWEB_SHADOW: import.meta.env.WXT_SIMUL_RRWEB_SHADOW,
 });
+const replicaTranslationMode = selectReplicaTranslationMode({
+  DEV: import.meta.env.DEV,
+  WXT_SIMUL_RRWEB_SHADOW: import.meta.env.WXT_SIMUL_RRWEB_SHADOW,
+  WXT_SIMUL_RRWEB_TRANSLATION: import.meta.env.WXT_SIMUL_RRWEB_TRANSLATION,
+}, replicaEngineMode);
 const visibleReplayHost = new VisibleReplayHost({
   hostDocument: document,
   legacySurface: snapshotContainer,
@@ -174,6 +189,7 @@ const visibleReplayHost = new VisibleReplayHost({
   badge: replicaModeBadge,
 });
 let replicaEngineController!: ReplicaEngineController;
+let replicaTranslationCoordinator!: ReplicaTranslationCoordinator;
 const shadowReplicaEngine = new RrwebShadowReplicaEngine({
   presentationHost: visibleReplayHost,
   capture: captureReplicaCheckpoint,
@@ -182,7 +198,28 @@ const shadowReplicaEngine = new RrwebShadowReplicaEngine({
   onLiveApplied: () => {
     legacyTransitionGate.markDirty();
   },
+  onSourceCommit: (commit) => {
+    if (replicaTranslationMode === 'rrweb-projection') {
+      replicaTranslationCoordinator.handleSourceCommit(commit);
+      const action = replicaSourceCommitAction(
+        commit,
+        preferences.sourceLanguage === 'auto',
+      );
+      if (action.prepareForNewText || action.refreshDetectedLanguage) {
+        const refreshVersion = ++replicaLanguageRefreshVersion;
+        void reconcileReplicaTranslationAfterCommit(
+          commit,
+          refreshVersion,
+          action.refreshDetectedLanguage,
+          action.prepareForNewText,
+        );
+      }
+    }
+  },
   onLiveFailure: (code) => {
+    if (replicaTranslationMode === 'rrweb-projection') {
+      replicaTranslationCoordinator.selectPair(undefined);
+    }
     legacyTransitionGate.release();
     replicaEngineController.disableShadow(code);
     const identity = followedPageIdentity ?? capturedPageIdentity;
@@ -200,7 +237,42 @@ replicaEngineController = new ReplicaEngineController({
       console.debug('[Simul replica shadow]', diagnostics);
     }
   },
+  onFallback: () => {
+    if (replicaTranslationMode === 'rrweb-projection') {
+      replicaTranslationCoordinator.selectPair(undefined);
+    }
+  },
 });
+
+const translationMemory = new TranslationMemory();
+replicaTranslationCoordinator = new ReplicaTranslationCoordinator(
+  provider,
+  shadowReplicaEngine,
+  {
+    memory: translationMemory,
+    onBackgroundResult: (result) => {
+      if (!replicaTranslationCoordinator.isResultCurrent(result)) return;
+      if (!isCompleteReplicaTranslationResult(result)) {
+        translationComplete = false;
+        setStatus(
+          describePartialReplicaTranslation(
+            result,
+            'Live page changes were only partially translated',
+          ),
+          'warning',
+        );
+      } else if (result.completed > 0) {
+        setStatus(
+          translationComplete
+            ? 'Live page changes were mirrored and translated.'
+            : 'Live page changes were translated, but earlier incomplete text still needs Translate page.',
+          translationComplete ? 'success' : 'warning',
+        );
+      }
+      updateControls();
+    },
+  },
+);
 
 let preferences: CompanionPreferences = parseCompanionPreferences(
   DEFAULT_COMPANION_PREFERENCES,
@@ -211,6 +283,7 @@ let capturedPageIdentity: CapturedPageIdentity | undefined;
 let resolvedSourceLanguage: SupportedLanguage | undefined;
 let availability: TranslationAvailability = 'unavailable';
 let availabilityRequestId = 0;
+let replicaLanguageRefreshVersion = 0;
 let identityRequestId = 0;
 let captureInFlight = false;
 let translationInFlight = false;
@@ -244,16 +317,11 @@ let liveSequenceBaselineReady = false;
 let liveObservationAvailable = true;
 let lastSourceScroll: ReturnType<typeof readLivePageScrollMessage>;
 let availabilityCheckedForPair: string | undefined;
-const translationCache = new Map<string, string>();
-let translationCacheCharacters = 0;
 let viewPreferenceRevision = 0;
 const pendingViewPreferences = new Map<
   keyof CompanionViewSettings,
   { revision: number; value: CompanionViewSettings[keyof CompanionViewSettings] }
 >();
-
-const MAX_TRANSLATION_CACHE_ENTRIES = 512;
-const MAX_TRANSLATION_CACHE_CHARACTERS = 500_000;
 
 populateLanguageOptions();
 
@@ -324,6 +392,7 @@ document.addEventListener('keydown', (event) => {
 });
 window.addEventListener('pagehide', () => {
   replicaShadowAbortController?.abort();
+  replicaTranslationCoordinator.dispose();
   replicaEngineController.dispose();
   releaseLiveSession();
 });
@@ -438,7 +507,6 @@ browser.storage.onChanged.addListener((changes, areaName) => {
     invalidateComposerOutput();
     translationDesired = true;
     translationComplete = false;
-    clearTranslationCache();
     availabilityCheckedForPair = undefined;
     resetVisualMirrorTextIfPresent();
     if (needsFreshCapture) {
@@ -608,9 +676,11 @@ function queueCapture(request: CaptureRequest): void {
       request.reason === 'desynchronized' ||
       request.reason === 'preference');
   if (!retainTranslationIntent) {
+    if (replicaTranslationMode === 'rrweb-projection') {
+      replicaTranslationCoordinator.selectPair(undefined);
+    }
     translationDesired = false;
     translationComplete = false;
-    clearTranslationCache();
     availabilityCheckedForPair = undefined;
     invalidateComposerOutput();
   }
@@ -687,7 +757,7 @@ async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> 
     // through this point are included by the fresh snapshot; later dirtiness
     // must enter the pending-delta path instead of being erased with the old
     // rrweb ownership gate.
-    releaseReplicaPresentationForLegacyWork();
+    releaseReplicaPresentationForLegacyWork(true);
     const results = await withCaptureTimeout(
       browser.scripting.executeScript({
         target: { tabId: identity.tabId, frameIds: [0] },
@@ -701,7 +771,6 @@ async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> 
     if (!captureCoordinator.isCurrent(work.generation)) return;
 
     translationComplete = false;
-    clearTranslationCache();
     renderSnapshot(nextSnapshot);
     snapshot = nextSnapshot;
     capturedPageIdentity = identity;
@@ -720,7 +789,7 @@ async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> 
     }
     await resolveSelectedSourceLanguage();
 
-    if (countVisualMirrorTranslationFields(visualRoot as HTMLElement) === 0) {
+    if (currentTranslationFieldCount(visualRoot as HTMLElement) === 0) {
       availability = 'unavailable';
       availabilityCheckedForPair = undefined;
       const accessWasRevoked = await reconcileAutomaticAccess(identity.url);
@@ -911,6 +980,11 @@ async function resolveSelectedSourceLanguage(
 }
 
 function mirrorLanguageSample(): string {
+  if (usesReplicaTranslationProjection()) {
+    return buildBoundedLanguageSample(
+      replicaRecordSources(shadowReplicaEngine.snapshot()?.records ?? []),
+    );
+  }
   if (!visualRoot) return '';
   const parts = [visualRoot.textContent ?? ''];
   for (const image of visualRoot.querySelectorAll('img[alt]')) {
@@ -918,6 +992,79 @@ function mirrorLanguageSample(): string {
     if (alt) parts.push(alt);
   }
   return parts.join(' ').replace(/\s+/gu, ' ').trim().slice(0, 20_000);
+}
+
+function currentTranslationFieldCount(root: HTMLElement): number {
+  return usesReplicaTranslationProjection()
+    ? shadowReplicaEngine.snapshot()?.records.filter(
+      ({ source }) => source.trim().length > 0,
+    ).length ?? 0
+    : countVisualMirrorTranslationFields(root);
+}
+
+async function reconcileReplicaTranslationAfterCommit(
+  commit: ReplicaSourceCommit,
+  refreshVersion: number,
+  refreshDetectedLanguage: boolean,
+  prepareForNewText: boolean,
+): Promise<void> {
+  const generation = commit.document.generation;
+  const identity = capturedPageIdentity;
+  if (
+    !identity ||
+    !snapshot ||
+    !captureCoordinator.isCurrent(generation)
+  ) return;
+  const previousPair = selectedPair();
+  if (refreshDetectedLanguage) {
+    const committed = await resolveSelectedSourceLanguage({
+      documentLanguage: commit.documentLanguage,
+      visibleText: buildBoundedLanguageSample(
+        replicaRecordSources(commit.records),
+      ),
+      preserveOnUnknown: true,
+    });
+    if (!committed) return;
+  }
+  if (
+    refreshVersion !== replicaLanguageRefreshVersion ||
+    !captureCoordinator.isCurrent(generation) ||
+    capturedPageIdentity !== identity ||
+    (preferences.sourceLanguage === 'auto') !== refreshDetectedLanguage
+  ) return;
+  const nextPair = selectedPair();
+  const pairChanged = !sameTranslationPair(previousPair, nextPair);
+  if (pairChanged) {
+    activeAbortController?.abort();
+    translationComplete = false;
+    availabilityCheckedForPair = undefined;
+    invalidateComposerOutput();
+    replicaTranslationCoordinator.selectPair(nextPair);
+  }
+  const expectedAvailabilityKey = nextPair
+    ? availabilityPairKey(nextPair, generation)
+    : undefined;
+  const needsPreparation =
+    prepareForNewText &&
+    currentTranslationFieldCount(visualRoot as HTMLElement) > 0 &&
+    (!expectedAvailabilityKey ||
+      availabilityCheckedForPair !== expectedAvailabilityKey);
+  if (!pairChanged && !needsPreparation) return;
+  await checkAvailability(generation);
+  if (
+    refreshVersion === replicaLanguageRefreshVersion &&
+    captureCoordinator.isCurrent(generation) &&
+    capturedPageIdentity === identity &&
+    sameTranslationPair(nextPair, selectedPair())
+  ) {
+    await maybeTranslateAutomatically(generation, identity.url);
+  }
+}
+
+function* replicaRecordSources(
+  records: readonly { readonly source: string }[],
+): Generator<string> {
+  for (const record of records) yield record.source;
 }
 
 async function languageSelectionChanged(): Promise<void> {
@@ -931,7 +1078,6 @@ async function languageSelectionChanged(): Promise<void> {
   invalidateComposerOutput();
   translationDesired = true;
   translationComplete = false;
-  clearTranslationCache();
   availabilityCheckedForPair = undefined;
   resetVisualMirrorTextIfPresent();
   await commitViewPreferencePatch({ sourceLanguage, targetLanguage });
@@ -948,6 +1094,9 @@ async function languageSelectionChanged(): Promise<void> {
 async function applyLanguagePreferences(fromUserAction: boolean): Promise<void> {
   if (!snapshot) return;
   await resolveSelectedSourceLanguage();
+  if (replicaTranslationMode === 'rrweb-projection') {
+    replicaTranslationCoordinator.selectPair(selectedPair());
+  }
   await checkAvailability(captureCoordinator.generation);
   if (availability === 'available') {
     await startTranslation(!fromUserAction, captureCoordinator.generation);
@@ -960,11 +1109,14 @@ async function checkAvailability(generation: number): Promise<void> {
   const requestId = ++availabilityRequestId;
   const requestedSnapshot = snapshot;
   const pair = selectedPair();
+  if (replicaTranslationMode === 'rrweb-projection') {
+    replicaTranslationCoordinator.selectPair(pair);
+  }
   if (
     !requestedSnapshot ||
     !visualRoot ||
     !pair ||
-    countVisualMirrorTranslationFields(visualRoot) === 0
+    currentTranslationFieldCount(visualRoot) === 0
   ) {
     availability = 'unavailable';
     availabilityCheckedForPair = undefined;
@@ -1076,6 +1228,9 @@ async function runTranslation(automatic: boolean, generation: number): Promise<v
     (automatic && availability !== 'available')
   ) return;
   if (pair.sourceLanguage === pair.targetLanguage) {
+    if (usesReplicaTranslationProjection()) {
+      replicaTranslationCoordinator.selectPair(pair);
+    }
     resetVisualMirrorText(root);
     translationComplete = true;
     updateControls();
@@ -1091,12 +1246,6 @@ async function runTranslation(automatic: boolean, generation: number): Promise<v
   updateControls();
   let session: TranslationSession | undefined;
   try {
-    session = await provider.createSession(pair, {
-      signal: abortController.signal,
-      onDownloadProgress: (progress) =>
-        showProgress(`Downloading language pack… ${Math.round(progress * 100)}%`, progress, 1),
-    });
-    abortController.signal.throwIfAborted();
     const tab = await browser.tabs.get(identity.tabId);
     assertSnapshotIsCurrent(tab, identity);
     if (
@@ -1106,29 +1255,69 @@ async function runTranslation(automatic: boolean, generation: number): Promise<v
     ) return;
     availability = 'available';
     availabilityCheckedForPair = availabilityPairKey(pair, generation);
-    const result = await translateVisualMirror(
-      root,
-      (source, signal) => translateCached(pair, session as TranslationSession, source, signal),
-      {
+    const result = usesReplicaTranslationProjection()
+      ? await replicaTranslationCoordinator.translateCurrent(pair, {
         signal: abortController.signal,
+        onDownloadProgress: (progress) =>
+          showProgress(`Downloading language pack… ${Math.round(progress * 100)}%`, progress, 1),
         onProgress: (completed, total) =>
           showProgress(`Translating ${completed} of ${total}…`, completed, Math.max(1, total)),
-      },
-    );
+      })
+      : await (async () => {
+        session = await provider.createSession(pair, {
+          signal: abortController.signal,
+          onDownloadProgress: (progress) =>
+            showProgress(`Downloading language pack… ${Math.round(progress * 100)}%`, progress, 1),
+        });
+        abortController.signal.throwIfAborted();
+        return translateVisualMirror(
+          root,
+          (source, signal) => translateCached(
+            pair,
+            session as TranslationSession,
+            source,
+            signal,
+          ),
+          {
+            signal: abortController.signal,
+            onProgress: (completed, total) =>
+              showProgress(`Translating ${completed} of ${total}…`, completed, Math.max(1, total)),
+          },
+        );
+      })();
     if (
       !captureCoordinator.isCurrent(generation) ||
       visualRoot !== root ||
       !isCurrentTranslationPair(pair)
     ) return;
-    translationComplete = result.failed === 0;
-    setStatus(
-      result.failed
-        ? `${result.failed} text segment(s) could not be translated; the original remains for those parts.`
-        : automatic
-          ? 'Automatic translation is complete and live updates will translate as they arrive.'
-          : 'Translation is complete and live updates will translate as they arrive.',
-      result.failed ? 'warning' : 'success',
-    );
+    if (usesReplicaTranslationProjection()) {
+      const replicaResult = result as ReplicaTranslationRunResult;
+      translationComplete =
+        replicaResult.total > 0 &&
+        replicaTranslationCoordinator.isResultCurrent(replicaResult) &&
+        isCompleteReplicaTranslationResult(replicaResult);
+      setStatus(
+        translationComplete
+          ? automatic
+            ? 'Automatic translation is complete and live updates will translate as they arrive.'
+            : 'Translation is complete and live updates will translate as they arrive.'
+          : describePartialReplicaTranslation(
+            replicaResult,
+            'Translation remains partial',
+          ),
+        translationComplete ? 'success' : 'warning',
+      );
+    } else {
+      translationComplete = result.failed === 0;
+      setStatus(
+        result.failed
+          ? `${result.failed} text segment(s) could not be translated; the original remains for those parts.`
+          : automatic
+            ? 'Automatic translation is complete and live updates will translate as they arrive.'
+            : 'Translation is complete and live updates will translate as they arrive.',
+        result.failed ? 'warning' : 'success',
+      );
+    }
   } catch (error) {
     if (isAbortError(error) || abortController.signal.aborted) {
       if (
@@ -1150,53 +1339,34 @@ async function runTranslation(automatic: boolean, generation: number): Promise<v
   }
 }
 
+function describePartialReplicaTranslation(
+  result: ReplicaTranslationRunResult,
+  prefix: string,
+): string {
+  const details: string[] = [];
+  if (result.failed > 0) details.push(`${result.failed} failed`);
+  if (result.stale > 0) details.push(`${result.stale} became stale`);
+  if (result.skipped > 0) details.push(`${result.skipped} were superseded`);
+  if (result.overflow > 0) {
+    details.push(`${result.overflow} exceeded the bounded local queue`);
+  }
+  if (result.completed < result.total && details.length === 0) {
+    details.push(`${result.total - result.completed} were not projected`);
+  }
+  return `${prefix}: ${details.join(', ') || 'no current text was projected'}. Original text remains for those segments; choose Translate page to retry.`;
+}
+
 async function translateCached(
   pair: TranslationPair,
   session: TranslationSession,
   source: string,
   signal?: AbortSignal,
 ): Promise<string> {
-  const key = `${pair.sourceLanguage}>${pair.targetLanguage}\u0000${source}`;
-  const cached = translationCache.get(key);
-  if (cached !== undefined) {
-    // Refresh insertion order so frequently reused segments survive eviction.
-    translationCache.delete(key);
-    translationCache.set(key, cached);
-    return cached;
-  }
-  const translated = await translateWithSession(session, source, signal);
-  cacheTranslation(key, translated);
-  return translated;
-}
-
-function cacheTranslation(key: string, translated: string): void {
-  const characters = key.length + translated.length;
-  if (characters > MAX_TRANSLATION_CACHE_CHARACTERS) return;
-
-  const replaced = translationCache.get(key);
-  if (replaced !== undefined) {
-    translationCacheCharacters -= key.length + replaced.length;
-    translationCache.delete(key);
-  }
-  translationCache.set(key, translated);
-  translationCacheCharacters += characters;
-
-  while (
-    translationCache.size > MAX_TRANSLATION_CACHE_ENTRIES ||
-    translationCacheCharacters > MAX_TRANSLATION_CACHE_CHARACTERS
-  ) {
-    const oldest = translationCache.entries().next().value as
-      | [string, string]
-      | undefined;
-    if (!oldest) break;
-    translationCache.delete(oldest[0]);
-    translationCacheCharacters -= oldest[0].length + oldest[1].length;
-  }
-}
-
-function clearTranslationCache(): void {
-  translationCache.clear();
-  translationCacheCharacters = 0;
+  return translationMemory.getOrCreate(
+    { provider: 'chrome-translator-v1', pair },
+    source,
+    () => translateWithSession(session, source, signal),
+  );
 }
 
 function initializeLiveSequenceBaseline(generation: number, sequence: number): void {
@@ -1317,7 +1487,6 @@ async function processPendingLiveUpdate(): Promise<void> {
       const refreshedPair = selectedPair();
       pairChanged = !sameTranslationPair(pairBeforeRefresh, refreshedPair);
       if (pairChanged) {
-        clearTranslationCache();
         availabilityCheckedForPair = undefined;
         translationComplete = false;
         invalidateComposerOutput();
@@ -1383,7 +1552,7 @@ async function processPendingLiveUpdate(): Promise<void> {
     if (shouldTranslate && applied.applied > 0) {
       setStatus('Live page changes were mirrored and translated.', 'success');
     }
-    if (countVisualMirrorTranslationFields(visualRoot) > 0) {
+    if (currentTranslationFieldCount(visualRoot) > 0) {
       const currentPair = selectedPair();
       const pairKey = currentPair
         ? availabilityPairKey(currentPair, update.generation)
@@ -1965,6 +2134,9 @@ function invalidateCompanion(message: string): void {
   availabilityCheckedForPair = undefined;
   translationDesired = false;
   translationComplete = false;
+  if (replicaTranslationMode === 'rrweb-projection') {
+    replicaTranslationCoordinator.selectPair(undefined);
+  }
   pendingLiveUpdate = undefined;
   latestLiveSequence = 0;
   highestReceivedLiveSequence = 0;
@@ -1977,7 +2149,16 @@ function invalidateCompanion(message: string): void {
   updateControls();
 }
 
-function releaseReplicaPresentationForLegacyWork(): boolean {
+function usesReplicaTranslationProjection(): boolean {
+  return (
+    replicaTranslationMode === 'rrweb-projection' &&
+    legacyTransitionGate.shadowOwnsPage &&
+    visibleReplayHost.hasCommittedReplica
+  );
+}
+
+function releaseReplicaPresentationForLegacyWork(force = false): boolean {
+  if (!force && usesReplicaTranslationProjection()) return false;
   if (
     replicaEngineMode !== 'rrweb-shadow' ||
     !legacyTransitionGate.shadowOwnsPage

@@ -5,8 +5,11 @@
   summary: Prototype opt-in Japanese/English image OCR and inert translated overlays.
   evidence: `../../docs/image-translation-research.md` documents the local Tesseract bundle, pixel-access choices, coordinate mapping, privacy boundaries, and cloud alternative; OCR and remote processing remain outside the approved implementation boundary.
 - source_spec: none
-  summary: Add the modular OCR foundation with a generated provider registry, three visibility scheduling policies, a restartable offscreen compute host, and the Tesseract spatial baseline.
-  evidence: This is independently shippable after stable live-replica node and image identity exists, and separating it avoids coupling the DOM replication migration to heavy OCR runtime work.
+  summary: Checkpoint E adds only modular OCR contracts, five stable provider IDs, compile-time registry seams, image revisions, three visibility scheduling policies, and conservative small-image eligibility.
+  evidence: Checkpoint D now supplies exact-document rrweb node identity, monotonic source revisions, tombstones, replay leases, and a committed change feed. E can reuse those seams without adding pixels, models, overlays, dependencies, permissions, or CSP changes.
+- source_spec: none
+  summary: Checkpoint F separately adds the restartable Chrome offscreen compute host, locally packaged Tesseract Worker and lazy language groups, pixel acquisition/hashing, recognition cache, validated geometry, and inert translated overlays.
+  evidence: F requires explicit approval for the offscreen permission, Worker/Wasm CSP, executable/runtime assets, trained-data catalog, artifact budget, and browser lifecycle gates; it must not be smuggled into E or Checkpoint D.
 - source_spec: none
   summary: Add Chrome TextDetector as an experimental capability-probed OCR provider that can pass boxes-only region hints to later providers.
   evidence: TextDetector has its own availability, normalization, fallback, diagnostics, and browser-version acceptance criteria and can be reviewed independently of the OCR foundation.
@@ -29,5 +32,5 @@
   summary: Stream ordered rrweb incremental events with per-document sequence and ACK state, gap recovery, bounded subscriber history, checkpoint resynchronization, and atomic last-good swaps.
   evidence: Incremental convergence and transport recovery are independently testable after full-checkpoint replay is safe and visibly faithful.
 - source_spec: `_bmad-output/implementation-artifacts/spec-live-incremental-replica-engine.md`
-  summary: Project translations from revisioned canonical source values onto only changed rrweb text nodes, add pair-scoped cache reuse, and promote rrweb to the default after browser privacy and fidelity gates pass.
-  evidence: Translation correctness depends on stable live node identity and should be promoted only after ordered replication converges without source mutation or stale commits.
+  summary: Complete the recorded Chrome privacy/fidelity gates and promote rrweb to the default only after every blocking result passes.
+  evidence: Checkpoint D implements revisioned translation projection and pair-scoped memory behind development flags. Mexico City and Reddit target-site acceptance remains pending, so production and unflagged builds intentionally retain legacy authority.

@@ -7,10 +7,23 @@ import {
 } from './contracts';
 
 export type ReplicaEngineMode = 'legacy' | 'rrweb-shadow';
+export type ReplicaTranslationMode = 'legacy' | 'rrweb-projection';
 
 export interface ReplicaBuildEnvironment {
   readonly DEV?: boolean;
   readonly WXT_SIMUL_RRWEB_SHADOW?: string;
+  readonly WXT_SIMUL_RRWEB_TRANSLATION?: string;
+}
+
+export function selectReplicaTranslationMode(
+  environment: ReplicaBuildEnvironment,
+  engineMode = selectReplicaEngineMode(environment),
+): ReplicaTranslationMode {
+  return engineMode === 'rrweb-shadow' &&
+    environment.DEV === true &&
+    environment.WXT_SIMUL_RRWEB_TRANSLATION === '1'
+    ? 'rrweb-projection'
+    : 'legacy';
 }
 
 export function selectReplicaEngineMode(
