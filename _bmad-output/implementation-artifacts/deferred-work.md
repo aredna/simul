@@ -4,12 +4,12 @@
 - source_spec: `spec-content-first-live-multilingual-companion.md`
   summary: Prototype opt-in Japanese/English image OCR and inert translated overlays.
   evidence: `../../docs/image-translation-research.md` documents the local Tesseract bundle, pixel-access choices, coordinate mapping, privacy boundaries, and cloud alternative; OCR and remote processing remain outside the approved implementation boundary.
-- source_spec: none
-  summary: Checkpoint E adds only modular OCR contracts, five stable provider IDs, compile-time registry seams, image revisions, three visibility scheduling policies, and conservative small-image eligibility.
-  evidence: Checkpoint D now supplies exact-document rrweb node identity, monotonic source revisions, tombstones, replay leases, and a committed change feed. E can reuse those seams without adding pixels, models, overlays, dependencies, permissions, or CSP changes.
-- source_spec: none
+- source_spec: `_bmad-output/implementation-artifacts/spec-checkpoint-e-ocr-foundation.md`
+  summary: Checkpoint E establishes modular OCR contracts, five stable provider IDs, an empty compile-time registry, exact-document image revisions, three visibility scheduling policies, and conservative small-image eligibility.
+  evidence: The dormant implementation emits no page URL, text, pixels, or hashes; compiles no provider; and adds no runtime asset, dependency, permission, CSP change, recognition, or overlay.
+- source_spec: `_bmad-output/implementation-artifacts/spec-checkpoint-e-ocr-foundation.md`
   summary: Checkpoint F separately adds the restartable Chrome offscreen compute host, locally packaged Tesseract Worker and lazy language groups, pixel acquisition/hashing, recognition cache, validated geometry, and inert translated overlays.
-  evidence: F requires explicit approval for the offscreen permission, Worker/Wasm CSP, executable/runtime assets, trained-data catalog, artifact budget, and browser lifecycle gates; it must not be smuggled into E or Checkpoint D.
+  evidence: F requires explicit approval for the offscreen permission, Worker/Wasm CSP, executable/runtime assets, trained-data catalog, artifact budget, and browser lifecycle gates. It must consume E's stable IDs/order repair, exact-document content and observation revisions, current-revision override, descriptor privacy, three-policy priority rules, small-image reason codes, bounds, and virtual registry without reopening those invariants.
 - source_spec: none
   summary: Add Chrome TextDetector as an experimental capability-probed OCR provider that can pass boxes-only region hints to later providers.
   evidence: TextDetector has its own availability, normalization, fallback, diagnostics, and browser-version acceptance criteria and can be reviewed independently of the OCR foundation.

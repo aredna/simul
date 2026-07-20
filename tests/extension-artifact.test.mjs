@@ -17,6 +17,7 @@ import {
   APPROVED_PERMISSIONS,
   REQUIRED_REPLICA_RUNTIME_MARKERS,
   REQUIRED_UNLISTED_BUNDLES,
+  assertOcrFoundationDependenciesAbsent,
   assertCanonicalSyncTarget,
   canonicalArtifactDirectory,
   checkArtifact,
@@ -66,6 +67,49 @@ describe('validateArtifact', () => {
     await expect(validateArtifact(hostAccess)).rejects.toThrow(
       'must not contain host_permissions',
     );
+  });
+
+  it('rejects OCR permission, CSP, compute-host, Worker, Wasm, and model drift', async () => {
+    const offscreenPermission = await createTemporaryArtifact({
+      manifest: { permissions: [...APPROVED_PERMISSIONS, 'offscreen'] },
+    });
+    await expect(validateArtifact(offscreenPermission)).rejects.toThrow(
+      'permissions must be exactly',
+    );
+
+    const relaxedCsp = await createTemporaryArtifact({
+      manifest: {
+        content_security_policy: {
+          extension_pages:
+            "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; object-src 'self'",
+        },
+      },
+    });
+    await expect(validateArtifact(relaxedCsp)).rejects.toThrow(
+      'must not relax or override extension page CSP',
+    );
+
+    for (const filename of [
+      'offscreen.html',
+      'ocr-worker.js',
+      'worker.js',
+      'models/latin.onnx',
+      'weights/latin.txt',
+      'runtime/latin.model',
+      'runtime/latin.bin',
+      'runtime/latin.ort',
+      'runtime/latin.tflite',
+      'tessdata/jpn.traineddata',
+      'runtime/core.wasm',
+    ]) {
+      const artifact = await createTemporaryArtifact();
+      const absolutePath = path.join(artifact, filename);
+      await mkdir(path.dirname(absolutePath), { recursive: true });
+      await writeFile(absolutePath, 'not a real runtime');
+      await expect(validateArtifact(artifact)).rejects.toThrow(
+        /OCR runtime|OCR compute-host/u,
+      );
+    }
   });
 
   it.each([
@@ -315,6 +359,72 @@ describe('validateArtifact', () => {
     await expect(validateArtifact(artifact)).rejects.toThrow(
       /Secret or key file|Possible credential material/u,
     );
+  });
+});
+
+describe('OCR foundation package boundary', () => {
+  it('accepts the current dependency graph and rejects direct or locked OCR runtimes', async () => {
+    await expect(
+      assertOcrFoundationDependenciesAbsent(),
+    ).resolves.toBeUndefined();
+
+    const projectRoot = await createTemporaryDirectory('simul-ocr-deps-');
+    await writeFile(path.join(projectRoot, 'package.json'), JSON.stringify({
+      dependencies: { 'tesseract.js': '7.0.0' },
+    }));
+    await writeFile(path.join(projectRoot, 'package-lock.json'), JSON.stringify({
+      packages: {},
+    }));
+    await expect(
+      assertOcrFoundationDependenciesAbsent(projectRoot),
+    ).rejects.toThrow('OCR provider dependency is forbidden');
+
+    await writeFile(path.join(projectRoot, 'package.json'), JSON.stringify({
+      dependencies: {},
+    }));
+    await writeFile(path.join(projectRoot, 'package-lock.json'), JSON.stringify({
+      packages: { 'node_modules/onnxruntime-web': { version: '1.0.0' } },
+    }));
+    await expect(
+      assertOcrFoundationDependenciesAbsent(projectRoot),
+    ).rejects.toThrow('leaked into package-lock.json');
+
+    await writeFile(path.join(projectRoot, 'package.json'), JSON.stringify({
+      dependencies: { localOcr: 'npm:tesseract.js@7.0.0' },
+    }));
+    await writeFile(path.join(projectRoot, 'package-lock.json'), JSON.stringify({
+      packages: {},
+    }));
+    await expect(
+      assertOcrFoundationDependenciesAbsent(projectRoot),
+    ).rejects.toThrow('tesseract.js');
+
+    await writeFile(path.join(projectRoot, 'package.json'), JSON.stringify({
+      dependencies: {},
+    }));
+    await writeFile(path.join(projectRoot, 'package-lock.json'), JSON.stringify({
+      packages: {
+        'node_modules/wrapper/node_modules/@xenova/transformers': {
+          version: '2.0.0',
+        },
+      },
+    }));
+    await expect(
+      assertOcrFoundationDependenciesAbsent(projectRoot),
+    ).rejects.toThrow('@xenova/transformers');
+
+    await writeFile(path.join(projectRoot, 'package-lock.json'), JSON.stringify({
+      packages: {
+        'node_modules/wrapper': {
+          dependencies: {
+            localRuntime: 'npm:onnxruntime-web@1.0.0',
+          },
+        },
+      },
+    }));
+    await expect(
+      assertOcrFoundationDependenciesAbsent(projectRoot),
+    ).rejects.toThrow('onnxruntime-web');
   });
 });
 

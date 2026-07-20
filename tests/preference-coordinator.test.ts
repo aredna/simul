@@ -200,6 +200,38 @@ describe('preference coordinator', () => {
       textLayoutMode: 'faithful',
     });
   });
+
+  it('serializes image-analysis patches and preserves concurrently changed sibling fields', async () => {
+    const adapter = new MemoryPreferenceAdapter();
+    const coordinator = new PreferenceCoordinator(adapter);
+
+    await Promise.all([
+      coordinator.run({
+        type: 'simul:preferences:patch-image-analysis',
+        patch: { imageScanPolicy: 'eager-all' },
+      }),
+      coordinator.run({
+        type: 'simul:preferences:patch-image-analysis',
+        patch: { skipSmallImages: false },
+      }),
+      coordinator.run({
+        type: 'simul:preferences:patch-image-analysis',
+        patch: { usePromptForImageLanguage: true },
+      }),
+      coordinator.run({
+        type: 'simul:preferences:patch-view',
+        patch: { syncScroll: false },
+      }),
+    ]);
+
+    expect(adapter.preferences).toMatchObject({
+      imageScanPolicy: 'eager-all',
+      skipSmallImages: false,
+      usePromptForImageLanguage: true,
+      usePromptForImageText: false,
+      syncScroll: false,
+    });
+  });
 });
 
 describe('preference coordinator message boundary', () => {
@@ -215,6 +247,62 @@ describe('preference coordinator message boundary', () => {
       mode: 'site',
       pageUrl: 'https://example.com/',
     });
+    expect(
+      readPreferenceCommand({
+        type: 'simul:preferences:patch-image-analysis',
+        patch: {
+          imageTextProviderOrder: [
+            'paddleocr-wasm',
+            'transformers',
+            'tesseract',
+            'chrome-text-detector',
+            'chromium-screen-ai',
+          ],
+          imageScanPolicy: 'visible-only',
+          skipSmallImages: false,
+        },
+      }),
+    ).toEqual({
+      type: 'simul:preferences:patch-image-analysis',
+      patch: {
+        imageTextProviderOrder: [
+          'paddleocr-wasm',
+          'transformers',
+          'tesseract',
+          'chrome-text-detector',
+          'chromium-screen-ai',
+        ],
+        imageScanPolicy: 'visible-only',
+        skipSmallImages: false,
+      },
+    });
+    expect(
+      readPreferenceCommand({
+        type: 'simul:preferences:patch-image-analysis',
+        patch: {
+          imageTextProviderOrder: [
+            'tesseract',
+            'tesseract',
+            'transformers',
+            'paddleocr-wasm',
+            'chromium-screen-ai',
+          ],
+        },
+      }),
+    ).toBeUndefined();
+    expect(
+      readPreferenceCommand({
+        type: 'simul:preferences:patch-image-analysis',
+        patch: { imageScanPolicy: 'later', skipSmallImages: 'yes' },
+      }),
+    ).toBeUndefined();
+    expect(
+      readPreferenceCommand({
+        type: 'simul:preferences:patch-image-analysis',
+        patch: { imageScanPolicy: 'visible-only' },
+        silentlyRepair: true,
+      }),
+    ).toBeUndefined();
     expect(
       readPreferenceCommand({
         type: 'simul:preferences:commit-auto',

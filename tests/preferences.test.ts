@@ -28,6 +28,17 @@ describe('parseCompanionPreferences', () => {
       zoomPercent: 100,
       syncScroll: true,
       textLayoutMode: 'adaptive',
+      imageTextProviderOrder: [
+        'chrome-text-detector',
+        'tesseract',
+        'transformers',
+        'paddleocr-wasm',
+        'chromium-screen-ai',
+      ],
+      imageScanPolicy: 'visible-first-background-prescan',
+      skipSmallImages: true,
+      usePromptForImageLanguage: false,
+      usePromptForImageText: false,
     });
     expect(parseCompanionPreferences('all')).toEqual(
       DEFAULT_COMPANION_PREFERENCES,
@@ -44,6 +55,17 @@ describe('parseCompanionPreferences', () => {
       zoomPercent: 100,
       syncScroll: true,
       textLayoutMode: 'adaptive',
+      imageTextProviderOrder: [
+        'chrome-text-detector',
+        'tesseract',
+        'transformers',
+        'paddleocr-wasm',
+        'chromium-screen-ai',
+      ],
+      imageScanPolicy: 'visible-first-background-prescan',
+      skipSmallImages: true,
+      usePromptForImageLanguage: false,
+      usePromptForImageText: false,
     });
   });
 
@@ -72,6 +94,17 @@ describe('parseCompanionPreferences', () => {
       zoomPercent: 100,
       syncScroll: true,
       textLayoutMode: 'adaptive',
+      imageTextProviderOrder: [
+        'chrome-text-detector',
+        'tesseract',
+        'transformers',
+        'paddleocr-wasm',
+        'chromium-screen-ai',
+      ],
+      imageScanPolicy: 'visible-first-background-prescan',
+      skipSmallImages: true,
+      usePromptForImageLanguage: false,
+      usePromptForImageText: false,
     });
   });
 
@@ -109,6 +142,45 @@ describe('parseCompanionPreferences', () => {
     });
     expect(clampZoomPercent(-10)).toBe(25);
     expect(clampZoomPercent(137.4)).toBe(137);
+  });
+
+  it('repairs old or damaged image-analysis settings without mutating saved order', () => {
+    const rawOrder = ['paddleocr-wasm', 'unknown', 'paddleocr-wasm', 'tesseract'];
+    const parsed = parseCompanionPreferences({
+      imageTextProviderOrder: rawOrder,
+      imageScanPolicy: 'visible-only',
+      skipSmallImages: false,
+      usePromptForImageLanguage: true,
+      usePromptForImageText: true,
+    });
+
+    expect(parsed).toMatchObject({
+      imageTextProviderOrder: [
+        'paddleocr-wasm',
+        'tesseract',
+        'chrome-text-detector',
+        'transformers',
+        'chromium-screen-ai',
+      ],
+      imageScanPolicy: 'visible-only',
+      skipSmallImages: false,
+      usePromptForImageLanguage: true,
+      usePromptForImageText: true,
+    });
+    parsed.imageTextProviderOrder.reverse();
+    expect(rawOrder).toEqual([
+      'paddleocr-wasm',
+      'unknown',
+      'paddleocr-wasm',
+      'tesseract',
+    ]);
+    expect(parseCompanionPreferences(undefined).imageTextProviderOrder).toEqual([
+      'chrome-text-detector',
+      'tesseract',
+      'transformers',
+      'paddleocr-wasm',
+      'chromium-screen-ai',
+    ]);
   });
 });
 

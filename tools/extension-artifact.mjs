@@ -36,6 +36,16 @@ export const REQUIRED_REPLICA_RUNTIME_MARKERS = Object.freeze([
   'simul:replica-v2:capture-checkpoint',
   'rrweb-shadow-v2',
 ]);
+export const FORBIDDEN_OCR_FOUNDATION_DEPENDENCIES = Object.freeze([
+  '@huggingface/transformers',
+  '@xenova/transformers',
+  '@paddleocr/paddleocr-js',
+  '@techstark/opencv-js',
+  'onnxruntime-web',
+  'opencv.js',
+  'tesseract.js',
+  'tesseract.js-core',
+]);
 
 const TOOL_FILE = fileURLToPath(import.meta.url);
 export const PROJECT_ROOT = path.resolve(path.dirname(TOOL_FILE), '..');
@@ -53,6 +63,17 @@ const TEXT_EXTENSIONS = new Set([
 ]);
 const EXECUTABLE_EXTENSIONS = new Set(['.htm', '.html', '.js', '.mjs']);
 const JAVASCRIPT_EXTENSIONS = new Set(['.js', '.mjs']);
+const FORBIDDEN_MODEL_EXTENSIONS = new Set([
+  '.bin',
+  '.model',
+  '.onnx',
+  '.ort',
+  '.pb',
+  '.tflite',
+  '.traineddata',
+  '.wasm',
+  '.weights',
+]);
 const SECRET_CONTENT_PATTERNS = [
   /-----BEGIN [A-Z0-9 ]*PRIVATE KEY-----/u,
   /\bAKIA[0-9A-Z]{16}\b/u,
@@ -84,6 +105,7 @@ export async function buildProductionArtifact({
   }
 
   const resolvedRoot = path.resolve(projectRoot);
+  await assertOcrFoundationDependenciesAbsent(resolvedRoot);
   const outputBase = path.join(path.resolve(temporaryRoot), 'wxt-output');
   const wxtCli = path.join(resolvedRoot, 'node_modules', 'wxt', 'bin', 'wxt.mjs');
   await access(wxtCli);
@@ -99,6 +121,11 @@ export async function buildProductionArtifact({
         NO_COLOR: '1',
         NODE_ENV: 'production',
         SIMUL_WXT_OUT_DIR: outputBase,
+        SIMUL_OCR_TEXT_DETECTOR: '0',
+        SIMUL_OCR_TESSERACT: '0',
+        SIMUL_OCR_TRANSFORMERS: '0',
+        SIMUL_OCR_PADDLE: '0',
+        SIMUL_OCR_SCREEN_AI: '0',
       },
     },
   );
@@ -133,6 +160,7 @@ export async function validateArtifact(artifactDirectory) {
 
   for (const entry of files) {
     assertSafeArtifactFilename(entry.path);
+    assertNoOcrRuntimeArtifact(entry.path);
     const absolutePath = path.join(root, ...entry.path.split('/'));
     const extension = path.posix.extname(entry.path).toLowerCase();
     const contents = await readFile(absolutePath);
@@ -553,12 +581,10 @@ function validateManifest(manifest, filePaths) {
     assertReferenceExists('manifest.json', reference, filePaths);
   }
 
-  const extensionCsp = manifest.content_security_policy?.extension_pages;
-  if (
-    typeof extensionCsp === 'string' &&
-    (/https?:/iu.test(extensionCsp) || /'unsafe-eval'/iu.test(extensionCsp))
-  ) {
-    throw new ArtifactError('manifest.json contains unsafe extension page CSP.');
+  if ('content_security_policy' in manifest) {
+    throw new ArtifactError(
+      'manifest.json must not relax or override extension page CSP in the OCR foundation build.',
+    );
   }
 
   for (const reference of collectManifestReferences(manifest)) {
@@ -831,6 +857,159 @@ function assertSafeArtifactFilename(relativePath) {
   ) {
     throw new ArtifactError(`Secret or key file is forbidden in artifact: ${relativePath}`);
   }
+}
+
+function assertNoOcrRuntimeArtifact(relativePath) {
+  const lowerPath = relativePath.toLowerCase();
+  const extension = path.posix.extname(lowerPath);
+  if (FORBIDDEN_MODEL_EXTENSIONS.has(extension)) {
+    throw new ArtifactError(
+      `OCR runtime or model asset is forbidden in the foundation artifact: ${relativePath}`,
+    );
+  }
+  if (
+    /(?:^|\/)offscreen(?:[._/-]|$)/u.test(lowerPath) ||
+    /(?:^|\/)(?:models?|weights?|tessdata|ocr-models?|onnx-models?)(?:\/|$)/u.test(lowerPath) ||
+    /^(?:worker|worker[-_.][a-z0-9_-]+|[a-z0-9_-]+[._-]worker(?:[-_.][a-z0-9_-]+)?)\.m?js$/u.test(
+      path.posix.basename(lowerPath),
+    ) ||
+    /(?:ocr|tesseract|transformers|paddle|onnx|opencv|text-detector|screen-ai)[-_.].*worker|worker.*(?:ocr|tesseract|transformers|paddle|onnx|opencv|text-detector|screen-ai)/u.test(
+      path.posix.basename(lowerPath),
+    )
+  ) {
+    throw new ArtifactError(
+      `OCR compute-host, Worker, or model artifact is forbidden in Checkpoint E: ${relativePath}`,
+    );
+  }
+}
+
+export async function assertOcrFoundationDependenciesAbsent(
+  projectRoot = PROJECT_ROOT,
+) {
+  const root = path.resolve(projectRoot);
+  const packagePath = path.join(root, 'package.json');
+  const lockPath = path.join(root, 'package-lock.json');
+  let packageJson;
+  try {
+    packageJson = JSON.parse(await readFile(packagePath, 'utf8'));
+  } catch (error) {
+    throw new ArtifactError('package.json is missing or invalid.', { cause: error });
+  }
+  for (const field of [
+    'dependencies',
+    'devDependencies',
+    'optionalDependencies',
+    'peerDependencies',
+  ]) {
+    const dependencies = packageJson?.[field];
+    if (!isRecord(dependencies)) continue;
+    assertDependencyRecordAbsent(
+      dependencies,
+      `package.json ${field}`,
+      'OCR provider dependency is forbidden before its approved provider checkpoint',
+    );
+  }
+
+  let lockJson;
+  try {
+    lockJson = JSON.parse(await readFile(lockPath, 'utf8'));
+  } catch (error) {
+    throw new ArtifactError('package-lock.json is missing or invalid.', { cause: error });
+  }
+  const packages = isRecord(lockJson?.packages) ? lockJson.packages : {};
+  for (const [packagePath, metadata] of Object.entries(packages)) {
+    const pathDependency = forbiddenDependencyFromPackagePath(packagePath);
+    if (pathDependency) throwLockDependencyError(pathDependency);
+    if (!isRecord(metadata)) continue;
+    const metadataDependency = forbiddenDependencyName(metadata.name);
+    if (metadataDependency) throwLockDependencyError(metadataDependency);
+    for (const field of [
+      'dependencies',
+      'devDependencies',
+      'optionalDependencies',
+      'peerDependencies',
+      'requires',
+    ]) {
+      if (!isRecord(metadata[field])) continue;
+      assertDependencyRecordAbsent(
+        metadata[field],
+        `package-lock.json packages.${packagePath}.${field}`,
+        'OCR provider dependency leaked into package-lock.json before approval',
+      );
+    }
+  }
+  inspectLegacyLockDependencies(lockJson?.dependencies);
+}
+
+function assertDependencyRecordAbsent(dependencies, context, prefix) {
+  for (const [name, specifier] of Object.entries(dependencies)) {
+    const forbidden = forbiddenDependencyName(name) ??
+      forbiddenDependencyFromAlias(specifier);
+    if (forbidden) {
+      throw new ArtifactError(`${prefix}: ${forbidden} (${context})`);
+    }
+  }
+}
+
+function inspectLegacyLockDependencies(dependencies) {
+  if (!isRecord(dependencies)) return;
+  for (const [name, metadata] of Object.entries(dependencies)) {
+    const forbidden = forbiddenDependencyName(name);
+    if (forbidden) throwLockDependencyError(forbidden);
+    if (!isRecord(metadata)) continue;
+    const aliased = forbiddenDependencyFromAlias(metadata.version) ??
+      forbiddenDependencyName(metadata.name);
+    if (aliased) throwLockDependencyError(aliased);
+    for (const field of [
+      'requires',
+      'optionalDependencies',
+      'peerDependencies',
+    ]) {
+      if (!isRecord(metadata[field])) continue;
+      assertDependencyRecordAbsent(
+        metadata[field],
+        `package-lock.json dependencies.${name}.${field}`,
+        'OCR provider dependency leaked into package-lock.json before approval',
+      );
+    }
+    inspectLegacyLockDependencies(metadata.dependencies);
+  }
+}
+
+function forbiddenDependencyFromPackagePath(packagePath) {
+  if (typeof packagePath !== 'string') return undefined;
+  const normalized = packagePath.replaceAll('\\', '/').replace(/^\.\//u, '');
+  for (const dependency of FORBIDDEN_OCR_FOUNDATION_DEPENDENCIES) {
+    const marker = `node_modules/${dependency}`;
+    if (normalized === marker || normalized.endsWith(`/${marker}`)) {
+      return dependency;
+    }
+  }
+  return undefined;
+}
+
+function forbiddenDependencyFromAlias(specifier) {
+  if (typeof specifier !== 'string' || !specifier.startsWith('npm:')) {
+    return undefined;
+  }
+  const alias = specifier.slice(4);
+  const name = alias.startsWith('@')
+    ? alias.match(/^(@[^/]+\/[^@]+)(?:@|$)/u)?.[1]
+    : alias.match(/^([^@]+)(?:@|$)/u)?.[1];
+  return forbiddenDependencyName(name);
+}
+
+function forbiddenDependencyName(name) {
+  return typeof name === 'string' &&
+    FORBIDDEN_OCR_FOUNDATION_DEPENDENCIES.includes(name)
+    ? name
+    : undefined;
+}
+
+function throwLockDependencyError(name) {
+  throw new ArtifactError(
+    `OCR provider dependency leaked into package-lock.json before approval: ${name}`,
+  );
 }
 
 function assertNoSecretContent(relativePath, contents) {

@@ -9,12 +9,16 @@ import {
   permissionOriginsForMode,
   withAutoTranslationMode,
   withDisplayMode,
+  withImageAnalysisSettings,
   withViewSettings,
   type AutoTranslationMode,
   type CompanionPreferences,
+  type CompanionImageAnalysisSettingsPatch,
   type CompanionViewSettingsPatch,
   type MirrorDisplayMode,
 } from './preferences';
+import { isImageScanPolicy } from './ocr/contracts';
+import { readExactImageTextProviderOrder } from './ocr/known-provider-ids';
 import { isSupportedLanguage } from './translation-provider';
 
 export const PREFERENCE_LOCK_NAME = 'simul:companion-preferences';
@@ -27,6 +31,10 @@ export type PreferenceCommand =
   | {
       type: 'simul:preferences:patch-view';
       patch: CompanionViewSettingsPatch;
+    }
+  | {
+      type: 'simul:preferences:patch-image-analysis';
+      patch: CompanionImageAnalysisSettingsPatch;
     }
   | {
       type: 'simul:preferences:commit-auto';
@@ -92,6 +100,12 @@ export class PreferenceCoordinator {
 
     if (command.type === 'simul:preferences:patch-view') {
       const preferences = withViewSettings(current, command.patch);
+      await this.adapter.save(preferences);
+      return result(preferences, true);
+    }
+
+    if (command.type === 'simul:preferences:patch-image-analysis') {
+      const preferences = withImageAnalysisSettings(current, command.patch);
       await this.adapter.save(preferences);
       return result(preferences, true);
     }
@@ -228,6 +242,14 @@ export function readPreferenceCommand(
   }
   if (value.type === 'simul:preferences:patch-view') {
     const patch = readViewSettingsPatch(value.patch);
+    if (patch) return { type: value.type, patch };
+  }
+  if (value.type === 'simul:preferences:patch-image-analysis') {
+    if (
+      Object.keys(value).length !== 2 ||
+      !('patch' in value)
+    ) return undefined;
+    const patch = readImageAnalysisSettingsPatch(value.patch);
     if (patch) return { type: value.type, patch };
   }
   if (
@@ -387,6 +409,49 @@ function readViewSettingsPatch(
   if ('textLayoutMode' in value) {
     if (!isTextLayoutMode(value.textLayoutMode)) return undefined;
     patch.textLayoutMode = value.textLayoutMode;
+  }
+  return patch;
+}
+
+const IMAGE_ANALYSIS_SETTING_KEYS = new Set([
+  'imageTextProviderOrder',
+  'imageScanPolicy',
+  'skipSmallImages',
+  'usePromptForImageLanguage',
+  'usePromptForImageText',
+]);
+
+function readImageAnalysisSettingsPatch(
+  value: unknown,
+): CompanionImageAnalysisSettingsPatch | undefined {
+  if (!isRecord(value)) return undefined;
+  const entries = Object.entries(value);
+  if (
+    entries.length === 0 ||
+    entries.some(([key]) => !IMAGE_ANALYSIS_SETTING_KEYS.has(key))
+  ) return undefined;
+
+  const patch: CompanionImageAnalysisSettingsPatch = {};
+  if ('imageTextProviderOrder' in value) {
+    const order = readExactImageTextProviderOrder(
+      value.imageTextProviderOrder,
+    );
+    if (!order) return undefined;
+    patch.imageTextProviderOrder = order;
+  }
+  if ('imageScanPolicy' in value) {
+    if (!isImageScanPolicy(value.imageScanPolicy)) return undefined;
+    patch.imageScanPolicy = value.imageScanPolicy;
+  }
+  for (const key of [
+    'skipSmallImages',
+    'usePromptForImageLanguage',
+    'usePromptForImageText',
+  ] as const) {
+    if (key in value) {
+      if (typeof value[key] !== 'boolean') return undefined;
+      patch[key] = value[key];
+    }
   }
   return patch;
 }

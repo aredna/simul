@@ -23,6 +23,16 @@ export type TextLayoutMode = (typeof TEXT_LAYOUT_MODES)[number];
 
 export type SourceLanguagePreference = 'auto' | SupportedLanguage;
 
+import {
+  isImageScanPolicy,
+  type ImageScanPolicy,
+} from './ocr/contracts';
+import {
+  IMAGE_TEXT_PROVIDER_IDS,
+  repairImageTextProviderOrder,
+  type ImageTextProviderId,
+} from './ocr/known-provider-ids';
+
 export const MIN_ZOOM_PERCENT = 25;
 export const MAX_ZOOM_PERCENT = 300;
 
@@ -42,6 +52,11 @@ export interface CompanionPreferences {
   zoomPercent: number;
   syncScroll: boolean;
   textLayoutMode: TextLayoutMode;
+  imageTextProviderOrder: ImageTextProviderId[];
+  imageScanPolicy: ImageScanPolicy;
+  skipSmallImages: boolean;
+  usePromptForImageLanguage: boolean;
+  usePromptForImageText: boolean;
 }
 
 export const DEFAULT_COMPANION_PREFERENCES: Readonly<CompanionPreferences> =
@@ -54,6 +69,13 @@ export const DEFAULT_COMPANION_PREFERENCES: Readonly<CompanionPreferences> =
     zoomPercent: 100,
     syncScroll: true,
     textLayoutMode: 'adaptive',
+    imageTextProviderOrder: Object.freeze([
+      ...IMAGE_TEXT_PROVIDER_IDS,
+    ]) as unknown as ImageTextProviderId[],
+    imageScanPolicy: 'visible-first-background-prescan',
+    skipSmallImages: true,
+    usePromptForImageLanguage: false,
+    usePromptForImageText: false,
   });
 
 const MAX_SAVED_ORIGINS = 256;
@@ -100,6 +122,24 @@ export function parseCompanionPreferences(
     textLayoutMode: isTextLayoutMode(input.textLayoutMode)
       ? input.textLayoutMode
       : DEFAULT_COMPANION_PREFERENCES.textLayoutMode,
+    imageTextProviderOrder: repairImageTextProviderOrder(
+      input.imageTextProviderOrder,
+    ),
+    imageScanPolicy: isImageScanPolicy(input.imageScanPolicy)
+      ? input.imageScanPolicy
+      : DEFAULT_COMPANION_PREFERENCES.imageScanPolicy,
+    skipSmallImages:
+      typeof input.skipSmallImages === 'boolean'
+        ? input.skipSmallImages
+        : DEFAULT_COMPANION_PREFERENCES.skipSmallImages,
+    usePromptForImageLanguage:
+      typeof input.usePromptForImageLanguage === 'boolean'
+        ? input.usePromptForImageLanguage
+        : DEFAULT_COMPANION_PREFERENCES.usePromptForImageLanguage,
+    usePromptForImageText:
+      typeof input.usePromptForImageText === 'boolean'
+        ? input.usePromptForImageText
+        : DEFAULT_COMPANION_PREFERENCES.usePromptForImageText,
   };
 }
 
@@ -253,9 +293,30 @@ export interface CompanionViewSettings {
 
 export type CompanionViewSettingsPatch = Partial<CompanionViewSettings>;
 
+export interface CompanionImageAnalysisSettings {
+  imageTextProviderOrder: ImageTextProviderId[];
+  imageScanPolicy: ImageScanPolicy;
+  skipSmallImages: boolean;
+  usePromptForImageLanguage: boolean;
+  usePromptForImageText: boolean;
+}
+
+export type CompanionImageAnalysisSettingsPatch =
+  Partial<CompanionImageAnalysisSettings>;
+
 export function withViewSettings(
   preferences: CompanionPreferences,
   settings: CompanionViewSettingsPatch,
+): CompanionPreferences {
+  return parseCompanionPreferences({
+    ...parseCompanionPreferences(preferences),
+    ...settings,
+  });
+}
+
+export function withImageAnalysisSettings(
+  preferences: CompanionPreferences,
+  settings: CompanionImageAnalysisSettingsPatch,
 ): CompanionPreferences {
   return parseCompanionPreferences({
     ...parseCompanionPreferences(preferences),
@@ -278,6 +339,11 @@ function createDefaultPreferences(): CompanionPreferences {
     zoomPercent: 100,
     syncScroll: true,
     textLayoutMode: 'adaptive',
+    imageTextProviderOrder: [...IMAGE_TEXT_PROVIDER_IDS],
+    imageScanPolicy: 'visible-first-background-prescan',
+    skipSmallImages: true,
+    usePromptForImageLanguage: false,
+    usePromptForImageText: false,
   };
 }
 

@@ -36,6 +36,18 @@ labeled legacy fallback after a bounded failure. Legacy dirty notices are coales
 while rrweb is authoritative so that transition performs at most one fresh v1
 capture.
 
+A dormant OCR foundation reserves five stable provider IDs and persists a
+complete provider permutation, three scan policies, conservative small-image
+filtering, and two independent Prompt preferences. The default compile-generated
+provider registry is empty, so no OCR control, provider import, runtime, model,
+Worker, Wasm, permission, CSP change, pixel acquisition, recognition, or overlay
+ships yet. Browser-independent image records are exact-document and rrweb-node
+owned with separate content/observation revisions and tombstones. A shared,
+bounded source-frame `<img>` adapter keeps URL-like source tokens private and
+emits only opaque geometry/revision facts; a deterministic bounded scheduler
+orders manual, visible, near, and gated background work across the three saved
+policies. These are fixed inputs to Checkpoint F rather than provider behavior.
+
 ## Fixed engineering baseline
 
 - Chrome Manifest V3 extension built with WXT and strict TypeScript.
@@ -84,6 +96,11 @@ extension APIs or page integration.
   monotonic revisions/tombstones, and committed text-change records
 - `lib/translation/`: bounded exact-source memory and the single-session,
   revision/epoch/lease-safe rrweb translation coordinator
+- `lib/ocr/`: provider-neutral contracts and IDs, empty compiled-provider
+  registry, exact-document image ledger, injected `<img>` observation adapter,
+  small-image decisions, and dormant visibility scheduler
+- `tools/ocr-build-profile.ts`: strict compile-profile flags and virtual empty
+  registry generation; enabled-but-unimplemented providers fail the build
 - `lib/`: safe bootstrap/delta boundaries, inert renderer, preferences,
   provider adapter, translation pipeline logic, and replica-engine adapters
 - `tests/`: unit tests
@@ -103,3 +120,6 @@ extension APIs or page integration.
 4. Update this file when architecture or engineering conventions change.
 5. Never edit `dist/chrome-unpacked/` by hand; refresh it only with `npm run
    artifact:sync` after the temporary build passes release validation.
+6. OCR providers must consume the stable E contracts and compile registry;
+   adding a provider never weakens exact-document currency, descriptor privacy,
+   bounded scheduling, saved-order preservation, or current-revision override.

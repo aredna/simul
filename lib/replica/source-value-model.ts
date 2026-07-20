@@ -1,4 +1,18 @@
 import type { ReplicaDocumentIdentity } from './contracts';
+import {
+  sameSourceDocument,
+  sourceDocumentIdentity,
+  type ReplicaSourceDocumentIdentity,
+} from './source-identity';
+import {
+  isSourcePrivateTagName,
+  sourceAttributesArePrivate,
+} from './source-privacy-policy';
+
+export {
+  sameSourceDocument,
+  type ReplicaSourceDocumentIdentity,
+} from './source-identity';
 
 const FULL_SNAPSHOT_EVENT = 2;
 const INCREMENTAL_EVENT = 3;
@@ -8,27 +22,6 @@ const CDATA_NODE = 4;
 const COMMENT_NODE = 5;
 export const MAX_SOURCE_REVISION_ENTRIES = 100_000;
 
-const PRIVATE_TAGS = new Set([
-  'button',
-  'input',
-  'option',
-  'output',
-  'select',
-  'textarea',
-]);
-const PRIVATE_ROLES = new Set([
-  'button',
-  'checkbox',
-  'combobox',
-  'listbox',
-  'option',
-  'radio',
-  'searchbox',
-  'slider',
-  'spinbutton',
-  'switch',
-  'textbox',
-]);
 const NON_CONTENT_TAGS = new Set([
   'head',
   'noscript',
@@ -36,14 +29,6 @@ const NON_CONTENT_TAGS = new Set([
   'style',
   'template',
 ]);
-
-export interface ReplicaSourceDocumentIdentity {
-  readonly sessionId: string;
-  readonly pageEpoch: number;
-  readonly generation: number;
-  readonly documentId: string;
-  readonly frameId: number;
-}
 
 export interface ReplicaSourceTextRecord {
   readonly document: ReplicaSourceDocumentIdentity;
@@ -274,31 +259,6 @@ function emptyState(): ModelState {
   };
 }
 
-function sourceDocumentIdentity(
-  identity: ReplicaDocumentIdentity,
-): ReplicaSourceDocumentIdentity {
-  return Object.freeze({
-    sessionId: identity.sessionId,
-    pageEpoch: identity.pageEpoch,
-    generation: identity.generation,
-    documentId: identity.documentId,
-    frameId: identity.frameId,
-  });
-}
-
-export function sameSourceDocument(
-  left: ReplicaSourceDocumentIdentity,
-  right: ReplicaSourceDocumentIdentity,
-): boolean {
-  return (
-    left.sessionId === right.sessionId &&
-    left.pageEpoch === right.pageEpoch &&
-    left.generation === right.generation &&
-    left.documentId === right.documentId &&
-    left.frameId === right.frameId
-  );
-}
-
 function buildRecords(
   document: ReplicaSourceDocumentIdentity,
   nodes: Map<number, SourceNodeState>,
@@ -518,8 +478,8 @@ function registerTree(
     : undefined;
   const privateRegion =
     parentPrivate ||
-    Boolean(tagName && PRIVATE_TAGS.has(tagName)) ||
-    Boolean(attributes && attributesArePrivate(attributes));
+    Boolean(tagName && isSourcePrivateTagName(tagName)) ||
+    Boolean(attributes && sourceAttributesArePrivate(attributes));
   const nonContentRegion =
     parentNonContent ||
     Boolean(tagName && NON_CONTENT_TAGS.has(tagName)) ||
@@ -616,30 +576,6 @@ function isEligibleText(node: SourceNodeState): boolean {
 
 function nextRevision(revisions: Map<number, number>, nodeId: number): number {
   return (revisions.get(nodeId) ?? 0) + 1;
-}
-
-function attributesArePrivate(attributes: Record<string, unknown>): boolean {
-  for (const [rawName, rawValue] of Object.entries(attributes)) {
-    const name = rawName.toLowerCase();
-    if (name === 'contenteditable') {
-      if (rawValue === false) continue;
-      if (
-        typeof rawValue === 'string' &&
-        rawValue.trim().toLowerCase() === 'false'
-      ) continue;
-      return true;
-    }
-    if (name === 'role' && typeof rawValue === 'string') {
-      if (
-        rawValue
-          .trim()
-          .toLowerCase()
-          .split(/\s+/u)
-          .some((role) => PRIVATE_ROLES.has(role))
-      ) return true;
-    }
-  }
-  return false;
 }
 
 function firstNode(nodes: Map<number, SourceNodeState>): SourceNodeState | undefined {

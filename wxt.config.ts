@@ -1,5 +1,6 @@
 import { parse, type Comment } from 'acorn';
 import { defineConfig } from 'wxt';
+import { createOcrBuildProfilePlugin } from './tools/ocr-build-profile';
 
 function stripSourceMapDirectives(code: string): string {
   const comments: Comment[] = [];
@@ -29,6 +30,7 @@ export default defineConfig({
   outDir: process.env.SIMUL_WXT_OUT_DIR || '.output',
   vite: () => ({
     plugins: [
+      createOcrBuildProfilePlugin(process.env),
       {
         name: 'simul-strip-vendored-worker-sourcemap-directives',
         enforce: 'post',

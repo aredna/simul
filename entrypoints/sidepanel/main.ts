@@ -29,6 +29,16 @@ import {
   type SnapshotTextRole,
 } from '../../lib/page-snapshot';
 import {
+  compiledImageAnalysisCapabilities,
+  effectiveCompiledProviderOrder,
+  hasCompiledImageAnalysisCapability,
+} from '../../lib/ocr/provider-registry';
+import {
+  IMAGE_SCAN_POLICIES,
+  isImageScanPolicy,
+} from '../../lib/ocr/contracts';
+import type { ImageTextProviderId } from '../../lib/ocr/known-provider-ids';
+import {
   PREFERENCE_LOCK_NAME,
   readPreferenceCommandResult,
   type PreferenceCommand,
@@ -46,9 +56,12 @@ import {
   parseCompanionPreferences,
   permissionOriginsForMode,
   withAutoTranslationMode,
+  withImageAnalysisSettings,
   withViewSettings,
   type AutoTranslationMode,
   type CompanionPreferences,
+  type CompanionImageAnalysisSettings,
+  type CompanionImageAnalysisSettingsPatch,
   type CompanionViewSettings,
   type CompanionViewSettingsPatch,
 } from '../../lib/preferences';
@@ -153,6 +166,7 @@ const closeSettingsButton = requireElement<HTMLButtonElement>('#close-settings')
 const popoutButton = requireElement<HTMLButtonElement>('#open-popout');
 const compactToolbar = requireElement<HTMLElement>('#compact-toolbar');
 const controlsOverlay = requireElement<HTMLElement>('#control-overlay');
+const settingsGrid = requireElement<HTMLElement>('#settings-grid');
 const statusElement = requireElement<HTMLElement>('#status');
 const statusDot = requireElement<HTMLElement>('#status-dot');
 const detectedLanguageElement = requireElement<HTMLElement>('#detected-language');
@@ -318,12 +332,22 @@ let liveObservationAvailable = true;
 let lastSourceScroll: ReturnType<typeof readLivePageScrollMessage>;
 let availabilityCheckedForPair: string | undefined;
 let viewPreferenceRevision = 0;
+let imageAnalysisPreferenceRevision = 0;
+let imageAnalysisControls: HTMLElement | undefined;
 const pendingViewPreferences = new Map<
   keyof CompanionViewSettings,
   { revision: number; value: CompanionViewSettings[keyof CompanionViewSettings] }
 >();
+const pendingImageAnalysisPreferences = new Map<
+  keyof CompanionImageAnalysisSettings,
+  {
+    revision: number;
+    value: CompanionImageAnalysisSettings[keyof CompanionImageAnalysisSettings];
+  }
+>();
 
 populateLanguageOptions();
+initializeImageAnalysisControls();
 
 toggleSettingsButton.addEventListener('click', () =>
   setOverlayOpen(controlsOverlay.hasAttribute('hidden')),
@@ -609,6 +633,43 @@ async function commitViewPreferencePatch(
   }
 }
 
+async function commitImageAnalysisPreferencePatch(
+  patch: CompanionImageAnalysisSettingsPatch,
+): Promise<void> {
+  preferences = withImageAnalysisSettings(preferences, patch);
+  syncPreferenceControls();
+  const revision = ++imageAnalysisPreferenceRevision;
+  for (const [key, value] of Object.entries(patch)) {
+    pendingImageAnalysisPreferences.set(
+      key as keyof CompanionImageAnalysisSettings,
+      {
+        revision,
+        value: value as CompanionImageAnalysisSettings[
+          keyof CompanionImageAnalysisSettings
+        ],
+      },
+    );
+  }
+  try {
+    const result = await sendPreferenceCommand({
+      type: 'simul:preferences:patch-image-analysis',
+      patch,
+    });
+    clearCommittedImageAnalysisPreferences(patch, revision);
+    preferences = mergePendingViewPreferences(result.preferences);
+    syncPreferenceControls();
+  } catch (error) {
+    clearCommittedImageAnalysisPreferences(patch, revision);
+    try {
+      preferences = mergePendingViewPreferences(await readStoredPreferences());
+      syncPreferenceControls();
+    } catch {
+      // A later storage event can reconcile optimistic controls.
+    }
+    setStatus(`Could not save image options: ${readableError(error)}`, 'error');
+  }
+}
+
 function clearCommittedViewPreferences(
   patch: CompanionViewSettingsPatch,
   revision: number,
@@ -620,13 +681,35 @@ function clearCommittedViewPreferences(
   }
 }
 
+function clearCommittedImageAnalysisPreferences(
+  patch: CompanionImageAnalysisSettingsPatch,
+  revision: number,
+): void {
+  for (const key of Object.keys(patch) as Array<
+    keyof CompanionImageAnalysisSettings
+  >) {
+    if (pendingImageAnalysisPreferences.get(key)?.revision === revision) {
+      pendingImageAnalysisPreferences.delete(key);
+    }
+  }
+}
+
 function mergePendingViewPreferences(
   stored: CompanionPreferences,
 ): CompanionPreferences {
   const pending = Object.fromEntries(
     [...pendingViewPreferences].map(([key, entry]) => [key, entry.value]),
   ) as CompanionViewSettingsPatch;
-  return withViewSettings(stored, pending);
+  const pendingImage = Object.fromEntries(
+    [...pendingImageAnalysisPreferences].map(([key, entry]) => [
+      key,
+      entry.value,
+    ]),
+  ) as CompanionImageAnalysisSettingsPatch;
+  return withImageAnalysisSettings(
+    withViewSettings(stored, pending),
+    pendingImage,
+  );
 }
 
 async function acceptAuthorizedTab(authorized: CapturedPageIdentity): Promise<void> {
@@ -1813,6 +1896,175 @@ function syncPreferenceControls(): void {
   zoomInput.value = String(preferences.zoomPercent);
   zoomOutput.value = `${preferences.zoomPercent}%`;
   zoomInput.disabled = preferences.displayMode !== 'custom';
+  renderImageAnalysisControls();
+}
+
+function initializeImageAnalysisControls(): void {
+  if (!hasCompiledImageAnalysisCapability()) return;
+  imageAnalysisControls = document.createElement('section');
+  imageAnalysisControls.className = 'image-analysis-settings';
+  imageAnalysisControls.setAttribute('aria-label', 'Image text options');
+  settingsGrid.insertAdjacentElement('afterend', imageAnalysisControls);
+  renderImageAnalysisControls();
+}
+
+function renderImageAnalysisControls(): void {
+  const root = imageAnalysisControls;
+  if (!root) return;
+  root.replaceChildren();
+  const heading = document.createElement('h3');
+  heading.textContent = 'Image text';
+  root.append(heading);
+
+  const compiledOrder = effectiveCompiledProviderOrder(
+    preferences.imageTextProviderOrder,
+  );
+  if (compiledOrder.length > 0) {
+    const orderLabel = document.createElement('p');
+    orderLabel.className = 'microcopy';
+    orderLabel.textContent = 'OCR priority';
+    root.append(orderLabel);
+    const list = document.createElement('ol');
+    list.className = 'ocr-provider-order';
+    compiledOrder.forEach((id, index) => {
+      const item = document.createElement('li');
+      const name = document.createElement('span');
+      name.textContent = imageProviderName(id);
+      item.append(name);
+      const buttons = document.createElement('span');
+      buttons.className = 'ocr-order-buttons';
+      const up = createOrderButton('↑', 'Move earlier', index === 0, () =>
+        moveCompiledProvider(compiledOrder, index, -1),
+      );
+      const down = createOrderButton(
+        '↓',
+        'Move later',
+        index === compiledOrder.length - 1,
+        () => moveCompiledProvider(compiledOrder, index, 1),
+      );
+      buttons.append(up, down);
+      item.append(buttons);
+      list.append(item);
+    });
+    root.append(list);
+
+    const grid = document.createElement('div');
+    grid.className = 'settings-grid';
+    const policyLabel = document.createElement('label');
+    const policyTitle = document.createElement('span');
+    policyTitle.textContent = 'Scan images';
+    const policy = document.createElement('select');
+    for (const value of IMAGE_SCAN_POLICIES) {
+      policy.append(createLanguageOption(value, imageScanPolicyName(value)));
+    }
+    policy.value = preferences.imageScanPolicy;
+    policy.addEventListener('change', () => {
+      if (isImageScanPolicy(policy.value)) {
+        void commitImageAnalysisPreferencePatch({ imageScanPolicy: policy.value });
+      }
+    });
+    policyLabel.append(policyTitle, policy);
+    const smallLabel = document.createElement('label');
+    smallLabel.className = 'check-label';
+    const small = document.createElement('input');
+    small.type = 'checkbox';
+    small.checked = preferences.skipSmallImages;
+    small.addEventListener('change', () => {
+      void commitImageAnalysisPreferencePatch({ skipSmallImages: small.checked });
+    });
+    const smallTitle = document.createElement('span');
+    smallTitle.textContent = 'Skip very small images';
+    smallLabel.append(small, smallTitle);
+    grid.append(policyLabel, smallLabel);
+    root.append(grid);
+  }
+
+  if (compiledImageAnalysisCapabilities.promptImageLanguage) {
+    root.append(createPromptToggle(
+      'Use local Prompt for image language',
+      preferences.usePromptForImageLanguage,
+      (checked) => commitImageAnalysisPreferencePatch({
+        usePromptForImageLanguage: checked,
+      }),
+    ));
+  }
+  if (compiledImageAnalysisCapabilities.promptImageText) {
+    root.append(createPromptToggle(
+      'Use local Prompt to interpret image text',
+      preferences.usePromptForImageText,
+      (checked) => commitImageAnalysisPreferencePatch({
+        usePromptForImageText: checked,
+      }),
+    ));
+  }
+}
+
+function createOrderButton(
+  text: string,
+  label: string,
+  disabled: boolean,
+  action: () => void,
+): HTMLButtonElement {
+  const button = document.createElement('button');
+  button.type = 'button';
+  button.textContent = text;
+  button.setAttribute('aria-label', label);
+  button.disabled = disabled;
+  button.addEventListener('click', action);
+  return button;
+}
+
+function moveCompiledProvider(
+  compiledOrder: readonly ImageTextProviderId[],
+  index: number,
+  direction: -1 | 1,
+): void {
+  const current = compiledOrder[index];
+  const adjacent = compiledOrder[index + direction];
+  if (!current || !adjacent) return;
+  const next = [...preferences.imageTextProviderOrder];
+  const currentIndex = next.indexOf(current);
+  const adjacentIndex = next.indexOf(adjacent);
+  if (currentIndex < 0 || adjacentIndex < 0) return;
+  [next[currentIndex], next[adjacentIndex]] = [
+    next[adjacentIndex]!,
+    next[currentIndex]!,
+  ];
+  void commitImageAnalysisPreferencePatch({ imageTextProviderOrder: next });
+}
+
+function createPromptToggle(
+  label: string,
+  checked: boolean,
+  save: (checked: boolean) => Promise<void>,
+): HTMLLabelElement {
+  const wrapper = document.createElement('label');
+  wrapper.className = 'check-label image-prompt-toggle';
+  const input = document.createElement('input');
+  input.type = 'checkbox';
+  input.checked = checked;
+  input.addEventListener('change', () => void save(input.checked));
+  const title = document.createElement('span');
+  title.textContent = label;
+  wrapper.append(input, title);
+  return wrapper;
+}
+
+function imageProviderName(id: ImageTextProviderId): string {
+  const names: Record<ImageTextProviderId, string> = {
+    'chrome-text-detector': 'Chrome Text Detector',
+    tesseract: 'Tesseract.js',
+    transformers: 'Transformers.js',
+    'paddleocr-wasm': 'PaddleOCR Wasm',
+    'chromium-screen-ai': 'Chromium Screen AI',
+  };
+  return names[id];
+}
+
+function imageScanPolicyName(value: (typeof IMAGE_SCAN_POLICIES)[number]): string {
+  if (value === 'visible-only') return 'Only when visible';
+  if (value === 'eager-all') return 'Everything immediately';
+  return 'Visible first, then background';
 }
 
 async function openDetachedWindow(): Promise<void> {
