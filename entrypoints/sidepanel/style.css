@@ -14,7 +14,8 @@
 html,
 body,
 main,
-.snapshot {
+.snapshot,
+.replica-preview {
   width: 100%;
   height: 100%;
   margin: 0;
@@ -152,6 +153,93 @@ select { width: 100%; min-height: 34px; padding: 5px 26px 5px 8px; font-size: 12
 progress { width: 100%; height: 7px; accent-color: var(--green); }
 
 .snapshot { padding: 0; overflow: hidden; background: #fff; }
+.snapshot[hidden],
+.replica-preview[hidden],
+.replica-mode-badge[hidden] { display: none; }
+
+.replica-mode-badge {
+  position: fixed;
+  z-index: 42;
+  top: 8px;
+  left: 8px;
+  max-width: calc(100vw - 96px);
+  margin: 0;
+  padding: 4px 7px;
+  overflow: hidden;
+  border: 1px solid var(--line);
+  border-radius: 7px;
+  color: var(--muted);
+  background: rgb(255 255 255 / 88%);
+  box-shadow: 0 2px 10px rgb(0 0 0 / 10%);
+  font-size: 9px;
+  font-weight: 750;
+  line-height: 1.2;
+  text-overflow: ellipsis;
+  white-space: nowrap;
+  backdrop-filter: blur(8px);
+}
+
+.replica-preview {
+  position: relative;
+  overflow: hidden;
+  background: #fff;
+  color-scheme: light;
+}
+
+.replica-replay-root,
+.replica-replay-scroll {
+  width: 100%;
+  height: 100%;
+}
+
+.replica-replay-root {
+  overflow: hidden;
+  background: #fff;
+  pointer-events: auto;
+}
+
+.replica-replay-root--committed .replica-replay-scroll {
+  overflow: auto;
+  overscroll-behavior: contain;
+  pointer-events: auto;
+}
+
+.replica-replay-stage {
+  position: relative;
+  overflow: visible;
+}
+
+.replica-replay-sticky-viewport {
+  position: sticky;
+  top: 0;
+  left: 0;
+  overflow: hidden;
+  pointer-events: none !important;
+}
+
+.replica-replay-scale-layer {
+  position: relative;
+  transform-origin: 0 0;
+  pointer-events: none !important;
+}
+
+.replica-replay-mount,
+.replica-replay-mount *,
+.replica-replay-mount iframe {
+  pointer-events: none !important;
+}
+
+.replica-replay-mount iframe {
+  display: block;
+  border: 0 !important;
+}
+
+.replica-replay-mount .rr-player,
+.replica-replay-mount .rr-player__frame {
+  width: 100% !important;
+  height: 100% !important;
+  margin: 0 !important;
+}
 .page-copy { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #fff; }
 .mirror-scroll { width: 100%; height: 100%; overflow: auto; overscroll-behavior: contain; background: #fff; color: #111; color-scheme: light; }
 .mirror-stage { position: relative; overflow: visible; }
@@ -190,6 +278,7 @@ progress { width: 100%; height: 7px; accent-color: var(--green); }
 @media (prefers-color-scheme: dark) {
   :root { color: #edf3ef; --line: rgb(255 255 255 / 14%); --muted: #a0afa7; --surface: rgb(17 24 20 / 97%); }
   .compact-toolbar { background: rgb(17 24 20 / 88%); }
+  .replica-mode-badge { background: rgb(17 24 20 / 88%); }
   button,
   select,
   textarea { color: #edf3ef; background: #18211c; }

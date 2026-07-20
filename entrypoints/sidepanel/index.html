@@ -116,9 +116,23 @@
     </section>
 
     <main>
+      <p
+        id="replica-mode-badge"
+        class="replica-mode-badge"
+        role="status"
+        aria-live="polite"
+        hidden
+      ></p>
       <section id="snapshot" class="snapshot" aria-label="Translated page mirror">
         <div class="empty-state"><p>Preparing the live read-only mirror…</p></div>
       </section>
+      <section
+        id="replica-preview"
+        class="replica-preview"
+        aria-label="Static untranslated page preview"
+        aria-hidden="true"
+        hidden
+      ></section>
     </main>
 
     <script type="module" src="./main.ts"></script>

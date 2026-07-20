@@ -71,6 +71,7 @@ import {
   ReplicaCaptureBoundaryError,
   RrwebShadowReplicaEngine,
 } from '../../lib/replica/rrweb-shadow-engine';
+import { VisibleReplayHost } from '../../lib/replica/visible-replay-host';
 import {
   SUPPORTED_LANGUAGES,
   languageName,
@@ -146,6 +147,8 @@ const progressLabel = requireElement<HTMLLabelElement>('#progress-label');
 const progressElement = requireElement<HTMLProgressElement>('#progress');
 const placementGuidance = requireElement<HTMLElement>('#placement-guidance');
 const snapshotContainer = requireElement<HTMLElement>('#snapshot');
+const replicaPreviewContainer = requireElement<HTMLElement>('#replica-preview');
+const replicaModeBadge = requireElement<HTMLElement>('#replica-mode-badge');
 const composerInput = requireElement<HTMLTextAreaElement>('#composer-input');
 const composerOutput = requireElement<HTMLTextAreaElement>('#composer-output');
 const translateComposerButton = requireElement<HTMLButtonElement>('#translate-composer');
@@ -159,11 +162,17 @@ const replicaEngineMode = selectReplicaEngineMode({
   DEV: import.meta.env.DEV,
   WXT_SIMUL_RRWEB_SHADOW: import.meta.env.WXT_SIMUL_RRWEB_SHADOW,
 });
+const visibleReplayHost = new VisibleReplayHost({
+  hostDocument: document,
+  legacySurface: snapshotContainer,
+  previewSurface: replicaPreviewContainer,
+  badge: replicaModeBadge,
+});
 const replicaEngineController = new ReplicaEngineController({
   mode: replicaEngineMode,
   legacy: new LegacyReplicaEngine(),
   shadow: new RrwebShadowReplicaEngine({
-    hostDocument: document,
+    presentationHost: visibleReplayHost,
     capture: captureReplicaCheckpoint,
   }),
   onDiagnostics: (diagnostics) => {
@@ -404,6 +413,7 @@ browser.storage.onChanged.addListener((changes, areaName) => {
     (previous.sourceLanguage !== preferences.sourceLanguage ||
       previous.targetLanguage !== preferences.targetLanguage)
   ) {
+    releaseReplicaPresentationForLegacyWork();
     activeAbortController?.abort();
     liveDeltaAbortController?.abort();
     invalidateComposerOutput();
@@ -563,6 +573,9 @@ function queueCapture(request: CaptureRequest): void {
       previousIdentity.windowId === request.identity.windowId &&
       normalizedPageUrl(previousIdentity.url) === normalizedPageUrl(request.identity.url),
   );
+  if (!samePage || request.reason === 'navigation') {
+    lastSourceScroll = undefined;
+  }
   const retainTranslationIntent =
     samePage &&
     (request.reason === 'manual' ||
@@ -619,6 +632,7 @@ async function runCaptureWork(work: GenerationWork<CaptureRequest>): Promise<voi
 
 async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> {
   const identity = work.value.identity;
+  let currentLegacyReady = false;
   try {
     const observerResults = await withCaptureTimeout(
       browser.scripting.executeScript({
@@ -655,19 +669,23 @@ async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> 
     assertSnapshotIsCurrent(currentTab, identity);
     if (!captureCoordinator.isCurrent(work.generation)) return;
 
-    snapshot = nextSnapshot;
-    capturedPageIdentity = identity;
-    followedPageIdentity = identity;
     translationComplete = false;
     clearTranslationCache();
     renderSnapshot(nextSnapshot);
+    snapshot = nextSnapshot;
+    capturedPageIdentity = identity;
+    followedPageIdentity = identity;
+    currentLegacyReady = true;
     showCaptureNotes(nextSnapshot);
-    if (snapshotInjection?.documentId) {
-      void runReplicaEngineCheckpoint(
+    if (snapshotInjection?.documentId && !pendingLiveUpdate) {
+      await runReplicaEngineCheckpoint(
         work,
         identity,
         snapshotInjection.documentId,
       );
+      if (!captureCoordinator.isCurrent(work.generation)) return;
+    } else if (!snapshotInjection?.documentId) {
+      replicaEngineController.releasePresentation(true);
     }
     await resolveSelectedSourceLanguage();
 
@@ -703,6 +721,9 @@ async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> 
     }
   } catch (error) {
     if (!captureCoordinator.isCurrent(work.generation)) return;
+    if (currentLegacyReady && capturedPageIdentity === identity) {
+      replicaEngineController.releasePresentation(true);
+    }
     const message = readPageError(error);
     if (!snapshot) renderErrorState(message);
     setStatus(message, 'error');
@@ -733,7 +754,8 @@ async function runReplicaEngineCheckpoint(
       normalizedPageUrl(followedPageIdentity.url) === normalizedPageUrl(identity.url),
   };
   try {
-    await replicaEngineController.run(request, abortController.signal);
+    const result = await replicaEngineController.run(request, abortController.signal);
+    if (result.status === 'complete') updateMirrorLayout();
   } finally {
     if (replicaShadowAbortController === abortController) {
       replicaShadowAbortController = undefined;
@@ -854,6 +876,7 @@ async function languageSelectionChanged(): Promise<void> {
     ? 'auto'
     : readLanguage(sourceSelect.value);
   const targetLanguage = readLanguage(targetSelect.value);
+  releaseReplicaPresentationForLegacyWork();
   activeAbortController?.abort();
   liveDeltaAbortController?.abort();
   invalidateComposerOutput();
@@ -945,6 +968,7 @@ async function maybeTranslateAutomatically(
 }
 
 function startTranslation(automatic: boolean, generation: number): Promise<void> {
+  releaseReplicaPresentationForLegacyWork();
   const requestedKey = currentTranslationTaskKey(generation);
   if (activeTranslationTask) {
     if (activeTranslationKey === requestedKey) return activeTranslationTask;
@@ -1139,6 +1163,7 @@ function queueLiveUpdate(message: LivePageDirtyMessage): void {
     highestReceivedLiveSequence > 0 &&
     message.sequence > highestReceivedLiveSequence + 1
   ) {
+    releaseReplicaPresentationForLegacyWork();
     const identity = followedPageIdentity ?? capturedPageIdentity;
     if (identity) {
       setStatus('A live update was missed. Rebuilding once while keeping the current mirror visible…', 'warning');
@@ -1147,6 +1172,7 @@ function queueLiveUpdate(message: LivePageDirtyMessage): void {
     return;
   }
   if (message.sequence <= highestReceivedLiveSequence) return;
+  releaseReplicaPresentationForLegacyWork();
   highestReceivedLiveSequence = message.sequence;
   if (!pendingLiveUpdate || pendingLiveUpdate.generation !== message.generation) {
     pendingLiveUpdate = {
@@ -1407,6 +1433,17 @@ function renderSnapshot(page: PageSnapshot): void {
 }
 
 function updateMirrorLayout(): void {
+  visibleReplayHost.updateLayout({
+    displayMode: preferences.displayMode,
+    zoomPercent: preferences.zoomPercent,
+  });
+  if (
+    visibleReplayHost.previewVisible &&
+    preferences.syncScroll &&
+    lastSourceScroll
+  ) {
+    visibleReplayHost.followSourceScroll(lastSourceScroll);
+  }
   if (!mirrorScroller || !mirrorStage || !mirrorScaleLayer || !visualRoot) return;
   const scale = computeMirrorScale(
     mirrorScroller.clientWidth,
@@ -1432,6 +1469,7 @@ function updateMirrorLayout(): void {
 }
 
 function followSourceScroll(scroll: NonNullable<typeof lastSourceScroll>): void {
+  visibleReplayHost.followSourceScroll(scroll);
   if (!mirrorScroller) return;
   const maxMirrorX = Math.max(0, mirrorScroller.scrollWidth - mirrorScroller.clientWidth);
   const maxMirrorY = Math.max(0, mirrorScroller.scrollHeight - mirrorScroller.clientHeight);
@@ -1853,6 +1891,7 @@ function invalidateCompanion(message: string): void {
   activeAbortController?.abort();
   liveDeltaAbortController?.abort();
   replicaShadowAbortController?.abort();
+  replicaEngineController.releasePresentation(false);
   invalidateComposerOutput();
   followedPageIdentity = undefined;
   snapshot = undefined;
@@ -1866,10 +1905,17 @@ function invalidateCompanion(message: string): void {
   latestLiveSequence = 0;
   highestReceivedLiveSequence = 0;
   liveSequenceBaselineReady = false;
+  lastSourceScroll = undefined;
   disconnectMirror();
   renderErrorState(message);
   setStatus(message, 'warning');
   updateControls();
+}
+
+function releaseReplicaPresentationForLegacyWork(): void {
+  if (replicaEngineMode !== 'rrweb-shadow') return;
+  replicaShadowAbortController?.abort();
+  replicaEngineController.releasePresentation(true);
 }
 
 function releaseLiveSession(

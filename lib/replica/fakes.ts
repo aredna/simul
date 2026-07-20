@@ -9,6 +9,8 @@ import {
 export class FakeReplicaEngine implements ReplicaEngine {
   readonly requests: ReplicaCaptureRequest[] = [];
   disposed = false;
+  presentationReleases = 0;
+  lastFallbackLabel = false;
 
   constructor(
     readonly id: ReplicaEngineId,
@@ -28,6 +30,11 @@ export class FakeReplicaEngine implements ReplicaEngine {
   ): Promise<ReplicaRunResult> {
     this.requests.push(request);
     return this.result;
+  }
+
+  releasePresentation(showFallbackLabel = true): void {
+    this.presentationReleases += 1;
+    this.lastFallbackLabel = showFallbackLabel;
   }
 
   dispose(): void {

@@ -73,6 +73,7 @@ export type ReplicaRunResult =
 export interface ReplicaEngine {
   readonly id: ReplicaEngineId;
   run(request: ReplicaCaptureRequest, signal?: AbortSignal): Promise<ReplicaRunResult>;
+  releasePresentation(showFallbackLabel?: boolean): void;
   dispose(): void;
 }
 

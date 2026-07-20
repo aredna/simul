@@ -59,6 +59,7 @@ export class ReplicaEngineController {
     if (result.status !== 'failed') return result;
 
     this.#shadowDisabled = true;
+    this.options.shadow.releasePresentation(true);
     if (!this.#fallbackNotified) {
       this.#fallbackNotified = true;
       this.options.onFallback?.(result.diagnostics.code);
@@ -67,6 +68,11 @@ export class ReplicaEngineController {
       await this.options.legacy.run(request, signal);
     }
     return result;
+  }
+
+  releasePresentation(showFallbackLabel = true): void {
+    if (this.options.mode !== 'rrweb-shadow') return;
+    this.options.shadow.releasePresentation(showFallbackLabel);
   }
 
   dispose(): void {

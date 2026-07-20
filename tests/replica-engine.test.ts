@@ -17,6 +17,11 @@ import {
   createReplicaIdentity,
 } from '../lib/replica/protocol-v2';
 import { RrwebShadowReplicaEngine } from '../lib/replica/rrweb-shadow-engine';
+import {
+  LEGACY_FALLBACK_LABEL,
+  STATIC_REPLAY_LABEL,
+  VisibleReplayHost,
+} from '../lib/replica/visible-replay-host';
 
 const request: ReplicaCaptureRequest = {
   sessionId: 'session-engine',
@@ -59,6 +64,8 @@ describe('replica engine selection and fallback', () => {
     expect(shadow.requests).toHaveLength(1);
     expect(fallbackCodes).toEqual(['replay_failed']);
     expect(controller.fallbackNotified).toBe(true);
+    expect(shadow.presentationReleases).toBe(1);
+    expect(shadow.lastFallbackLabel).toBe(true);
   });
 
   it('does not poison the shadow engine after expected stale cancellation', async () => {
@@ -82,12 +89,28 @@ describe('replica engine selection and fallback', () => {
     expect(fallbackCodes).toEqual([]);
     expect(controller.fallbackNotified).toBe(false);
   });
+
+  it('never touches presentation ownership in a legacy-only build', async () => {
+    const legacy = new FakeReplicaEngine('legacy-v1');
+    const shadow = new FakeReplicaEngine('rrweb-shadow-v2');
+    const controller = new ReplicaEngineController({
+      mode: 'legacy',
+      legacy,
+      shadow,
+    });
+
+    controller.releasePresentation();
+    await controller.run(request);
+
+    expect(shadow.presentationReleases).toBe(0);
+    expect(shadow.requests).toHaveLength(0);
+  });
 });
 
 describe('rrweb shadow engine', () => {
-  it('replays in hidden inert source-sized staging and returns content-free diagnostics', async () => {
-    const { document } = parseHTML('<html><body><main id="visible">legacy</main></body></html>');
-    const initialChildren = document.body.children.length;
+  it('atomically promotes a protected source-sized preview and retains it until release', async () => {
+    const { document } = replicaDocument();
+    const presentationHost = createPresentationHost(document);
     let iframe: HTMLIFrameElement | undefined;
     let disabled = false;
     let destroyed = false;
@@ -95,7 +118,7 @@ describe('rrweb shadow engine', () => {
     defineDimension(replayDocument.documentElement, 'scrollWidth', 1_250);
     defineDimension(replayDocument.documentElement, 'scrollHeight', 2_450);
     const engine = new RrwebShadowReplicaEngine({
-      hostDocument: document,
+      presentationHost,
       capture: async () => checkpoint(),
       now: sequenceClock([10, 25]),
       createReplayer: (_events, root) => {
@@ -142,17 +165,28 @@ describe('rrweb shadow engine', () => {
     expect(iframe?.getAttribute('sandbox')).toBe('allow-same-origin');
     expect(iframe?.getAttribute('sandbox')).not.toContain('allow-scripts');
     expect(iframe?.hasAttribute('inert')).toBe(true);
+    expect(iframe?.style.border).toMatch(/^0(?:px)?$/u);
     expect(disabled).toBe(true);
-    expect(destroyed).toBe(true);
-    expect(document.body.children.length).toBe(initialChildren);
+    expect(destroyed).toBe(false);
+    expect(document.querySelector('#legacy')?.hasAttribute('hidden')).toBe(true);
+    expect(document.querySelector('#preview')?.hasAttribute('hidden')).toBe(false);
+    expect(document.querySelector('#badge')?.textContent).toBe(STATIC_REPLAY_LABEL);
+    expect(document.querySelectorAll('[data-simul-replica-viewport]')).toHaveLength(1);
     expect(document.querySelector('#visible')?.textContent).toBe('legacy');
+
+    engine.releasePresentation();
+
+    expect(destroyed).toBe(true);
+    expect(document.querySelector('#legacy')?.hasAttribute('hidden')).toBe(false);
+    expect(document.querySelector('#preview')?.hasAttribute('hidden')).toBe(true);
+    expect(document.querySelector('#badge')?.textContent).toBe(LEGACY_FALLBACK_LABEL);
   });
 
   it('rejects stale work before capture or replay', async () => {
     let captures = 0;
-    const { document } = parseHTML('<html><body><p>legacy</p></body></html>');
+    const { document } = replicaDocument();
     const engine = new RrwebShadowReplicaEngine({
-      hostDocument: document,
+      presentationHost: createPresentationHost(document),
       capture: async () => {
         captures += 1;
         return checkpoint();
@@ -166,13 +200,13 @@ describe('rrweb shadow engine', () => {
       diagnostics: { code: 'stale_identity' },
     });
     expect(captures).toBe(0);
-    expect(document.querySelector('[data-simul-replica-shadow]')).toBeNull();
+    expect(document.querySelector('[data-simul-replica-candidate]')).toBeNull();
   });
 
   it('treats overlapping recorder work as transient instead of poisoning fallback', async () => {
-    const { document } = parseHTML('<html><body><p>legacy</p></body></html>');
+    const { document } = replicaDocument();
     const engine = new RrwebShadowReplicaEngine({
-      hostDocument: document,
+      presentationHost: createPresentationHost(document),
       capture: async () => createCheckpointError(
         createReplicaIdentity({
           sessionId: request.sessionId,
@@ -192,11 +226,60 @@ describe('rrweb shadow engine', () => {
     });
   });
 
+  it('drops an older committed preview on capture_busy and remains retryable', async () => {
+    const { document } = replicaDocument();
+    const responses = [checkpoint(), busyCheckpoint(), checkpoint()];
+    let captureIndex = 0;
+    const destroyed = [0, 0];
+    let replayerIndex = 0;
+    const engine = new RrwebShadowReplicaEngine({
+      presentationHost: createPresentationHost(document),
+      capture: async () => responses[captureIndex++] ?? checkpoint(),
+      createReplayer: (_events, root) => {
+        const index = replayerIndex++;
+        const iframe = document.createElement('iframe');
+        Object.defineProperty(iframe, 'contentDocument', {
+          configurable: true,
+          value: parseHTML('<html><body></body></html>').document,
+        });
+        root.append(iframe);
+        let rebuilt: (() => void) | undefined;
+        return {
+          iframe,
+          on: (_event, handler) => {
+            rebuilt = handler;
+          },
+          play: () => rebuilt?.(),
+          disableInteract: () => undefined,
+          destroy: () => {
+            destroyed[index] = (destroyed[index] ?? 0) + 1;
+          },
+        };
+      },
+    });
+
+    await expect(engine.run(request)).resolves.toMatchObject({ status: 'complete' });
+    await expect(engine.run(request)).resolves.toMatchObject({
+      status: 'skipped',
+      diagnostics: { code: 'capture_busy' },
+    });
+
+    expect(destroyed).toEqual([1, 0]);
+    expect(document.querySelector('#legacy')?.hasAttribute('hidden')).toBe(false);
+    expect(document.querySelector('#preview')?.hasAttribute('hidden')).toBe(true);
+    expect(document.querySelector('#badge')?.textContent).toBe(LEGACY_FALLBACK_LABEL);
+
+    await expect(engine.run(request)).resolves.toMatchObject({ status: 'complete' });
+    expect(document.querySelector('#preview')?.hasAttribute('hidden')).toBe(false);
+    engine.dispose();
+    expect(destroyed).toEqual([1, 1]);
+  });
+
   it('times out once, removes staging, and retains the legacy document', async () => {
-    const { document } = parseHTML('<html><body><p id="legacy">usable</p></body></html>');
+    const { document } = replicaDocument();
     let destroyed = false;
     const engine = new RrwebShadowReplicaEngine({
-      hostDocument: document,
+      presentationHost: createPresentationHost(document),
       capture: async () => checkpoint(),
       replayDeadlineMs: 1,
       createReplayer: (_events, root) => {
@@ -221,10 +304,181 @@ describe('rrweb shadow engine', () => {
       diagnostics: { code: 'replay_timeout' },
     });
     expect(destroyed).toBe(true);
-    expect(document.querySelector('[data-simul-replica-shadow]')).toBeNull();
-    expect(document.querySelector('#legacy')?.textContent).toBe('usable');
+    expect(document.querySelector('[data-simul-replica-candidate]')).toBeNull();
+    expect(document.querySelector('#legacy')?.textContent).toContain('legacy');
+  });
+
+  it('replaces and tears down retained Replayers exactly once', async () => {
+    const { document } = replicaDocument();
+    const destroyed = [0, 0];
+    let created = 0;
+    const engine = new RrwebShadowReplicaEngine({
+      presentationHost: createPresentationHost(document),
+      capture: async () => checkpoint(),
+      createReplayer: (_events, root) => {
+        const index = created++;
+        const iframe = document.createElement('iframe');
+        Object.defineProperty(iframe, 'contentDocument', {
+          configurable: true,
+          value: parseHTML('<html><body></body></html>').document,
+        });
+        root.append(iframe);
+        let rebuilt: (() => void) | undefined;
+        return {
+          iframe,
+          on: (_event, handler) => {
+            rebuilt = handler;
+          },
+          play: () => rebuilt?.(),
+          disableInteract: () => undefined,
+          destroy: () => {
+            destroyed[index] = (destroyed[index] ?? 0) + 1;
+          },
+        };
+      },
+    });
+
+    await engine.run(request);
+    await engine.run(request);
+
+    expect(destroyed).toEqual([1, 0]);
+    expect(document.querySelectorAll('[data-simul-replica-viewport]')).toHaveLength(1);
+
+    engine.dispose();
+    engine.dispose();
+
+    expect(destroyed).toEqual([1, 1]);
+    expect(document.querySelector('[data-simul-replica-viewport]')).toBeNull();
+  });
+
+  it('revokes a superseded in-flight candidate before replaying its replacement', async () => {
+    const { document } = replicaDocument();
+    const firstCapture = deferred<ReplicaCheckpointEnvelope>();
+    const secondCapture = deferred<ReplicaCheckpointEnvelope>();
+    const firstReplayerCreated = deferred<void>();
+    const captures = [firstCapture.promise, secondCapture.promise];
+    const destroyed = [0, 0];
+    let captureIndex = 0;
+    let replayerIndex = 0;
+    const engine = new RrwebShadowReplicaEngine({
+      presentationHost: createPresentationHost(document),
+      capture: async () => captures[captureIndex++] ?? checkpoint(),
+      createReplayer: (_events, root) => {
+        const index = replayerIndex++;
+        const iframe = document.createElement('iframe');
+        Object.defineProperty(iframe, 'contentDocument', {
+          configurable: true,
+          value: parseHTML('<html><body></body></html>').document,
+        });
+        root.append(iframe);
+        let rebuilt: (() => void) | undefined;
+        if (index === 0) firstReplayerCreated.resolve();
+        return {
+          iframe,
+          on: (_event, handler) => {
+            rebuilt = handler;
+          },
+          play: () => {
+            if (index > 0) rebuilt?.();
+          },
+          disableInteract: () => undefined,
+          destroy: () => {
+            destroyed[index] = (destroyed[index] ?? 0) + 1;
+          },
+        };
+      },
+    });
+    const firstRun = engine.run(request);
+    firstCapture.resolve(checkpoint());
+    await firstReplayerCreated.promise;
+    const secondRun = engine.run(request);
+    secondCapture.resolve(checkpoint());
+
+    await expect(secondRun).resolves.toMatchObject({ status: 'complete' });
+    expect(destroyed).toEqual([1, 0]);
+    expect(document.querySelectorAll('[data-simul-replica-viewport]')).toHaveLength(1);
+
+    await expect(firstRun).resolves.toMatchObject({
+      status: 'skipped',
+      diagnostics: { code: 'stale_identity' },
+    });
+    expect(destroyed).toEqual([1, 0]);
+
+    engine.dispose();
+    expect(destroyed).toEqual([1, 1]);
+  });
+
+  it('does not let an older delayed capture supersede a newer completed run', async () => {
+    const { document } = replicaDocument();
+    const firstCapture = deferred<ReplicaCheckpointEnvelope>();
+    const secondCapture = deferred<ReplicaCheckpointEnvelope>();
+    const captures = [firstCapture.promise, secondCapture.promise];
+    let captureIndex = 0;
+    let replayersCreated = 0;
+    const engine = new RrwebShadowReplicaEngine({
+      presentationHost: createPresentationHost(document),
+      capture: async () => captures[captureIndex++] ?? checkpoint(),
+      createReplayer: (_events, root) => {
+        replayersCreated += 1;
+        const iframe = document.createElement('iframe');
+        Object.defineProperty(iframe, 'contentDocument', {
+          configurable: true,
+          value: parseHTML('<html><body></body></html>').document,
+        });
+        root.append(iframe);
+        let rebuilt: (() => void) | undefined;
+        return {
+          iframe,
+          on: (_event, handler) => {
+            rebuilt = handler;
+          },
+          play: () => rebuilt?.(),
+          disableInteract: () => undefined,
+          destroy: () => undefined,
+        };
+      },
+    });
+
+    const firstRun = engine.run(request);
+    const secondRun = engine.run(request);
+    secondCapture.resolve(checkpoint());
+    await expect(secondRun).resolves.toMatchObject({ status: 'complete' });
+    const committedRoot = document.querySelector('[data-simul-replica-viewport]');
+
+    firstCapture.resolve(checkpoint());
+    await expect(firstRun).resolves.toMatchObject({
+      status: 'skipped',
+      diagnostics: { code: 'stale_identity' },
+    });
+
+    expect(replayersCreated).toBe(1);
+    expect(document.querySelector('[data-simul-replica-viewport]')).toBe(committedRoot);
+    engine.dispose();
   });
 });
+
+function replicaDocument(): ReturnType<typeof parseHTML> {
+  return parseHTML(
+    '<html><body><section id="legacy"><main id="visible">legacy</main></section>' +
+      '<section id="preview" hidden aria-hidden="true"></section>' +
+      '<p id="badge" hidden></p></body></html>',
+  );
+}
+
+function createPresentationHost(document: Document): VisibleReplayHost {
+  const legacySurface = document.querySelector<HTMLElement>('#legacy');
+  const previewSurface = document.querySelector<HTMLElement>('#preview');
+  const badge = document.querySelector<HTMLElement>('#badge');
+  if (!legacySurface || !previewSurface || !badge) {
+    throw new Error('Missing replica presentation fixture surface.');
+  }
+  return new VisibleReplayHost({
+    hostDocument: document,
+    legacySurface,
+    previewSurface,
+    badge,
+  });
+}
 
 function checkpoint(): ReplicaCheckpointEnvelope {
   const identity = createReplicaIdentity({
@@ -275,6 +529,20 @@ function checkpoint(): ReplicaCheckpointEnvelope {
   return response;
 }
 
+function busyCheckpoint(): ReturnType<typeof createCheckpointError> {
+  return createCheckpointError(
+    createReplicaIdentity({
+      sessionId: request.sessionId,
+      pageEpoch: request.pageEpoch,
+      generation: request.generation,
+      documentId: request.documentId,
+      frameId: request.frameId,
+      sequence: 0,
+    }),
+    'capture_busy',
+  );
+}
+
 function sequenceClock(values: number[]): () => number {
   let index = 0;
   return () => values[Math.min(index++, values.length - 1)] ?? 0;
@@ -282,4 +550,12 @@ function sequenceClock(values: number[]): () => number {
 
 function defineDimension(element: Element, key: string, value: number): void {
   Object.defineProperty(element, key, { configurable: true, value });
+}
+
+function deferred<T>(): { promise: Promise<T>; resolve(value: T): void } {
+  let resolve!: (value: T) => void;
+  const promise = new Promise<T>((resolvePromise) => {
+    resolve = resolvePromise;
+  });
+  return { promise, resolve };
 }

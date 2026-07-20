@@ -17,9 +17,12 @@ translation. An initial sanitized capture bootstraps stable isolated-world
 node IDs; normal synchronization replaces only coalesced dirty subtrees. A
 validated production build is checked in at `dist/chrome-unpacked/` for direct
 Developer mode installation without contributor tooling. A development-only
-rrweb shadow engine can validate one masked, document-scoped checkpoint in
-hidden inert staging with `WXT_SIMUL_RRWEB_SHADOW=1`; production and the visible
-companion remain on the legacy renderer until later promotion checkpoints pass.
+rrweb engine can validate one masked, document-scoped checkpoint and atomically
+promote it as a static, untranslated preview with
+`WXT_SIMUL_RRWEB_SHADOW=1`; production and unflagged builds remain on the legacy
+renderer. The flagged preview retains source viewport geometry, applies zoom
+outside the replay iframe, maps extension/source scrolling, and returns to a
+labeled legacy fallback before translation or the first v1 dirty event.
 
 ## Fixed engineering baseline
 
@@ -57,6 +60,9 @@ extension APIs or page integration.
 - `entrypoints/page-snapshot.ts`: unlisted top-frame snapshot entrypoint
 - `entrypoints/page-recorder.ts`: development-only unlisted rrweb checkpoint
   recorder
+- `lib/replica/visible-replay-host.ts`: development-only candidate/committed
+  replay ownership, atomic presentation, protected iframe layout, zoom, and
+  scroll projection
 - `lib/`: safe bootstrap/delta boundaries, inert renderer, preferences,
   provider adapter, translation pipeline logic, and replica-engine adapters
 - `tests/`: unit tests

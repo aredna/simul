@@ -23,6 +23,10 @@ export class LegacyReplicaEngine implements ReplicaEngine {
     };
   }
 
+  releasePresentation(_showFallbackLabel = true): void {
+    // The existing side-panel controller owns the visible legacy renderer.
+  }
+
   dispose(): void {
     // The existing side-panel controller owns the visible legacy renderer.
   }
