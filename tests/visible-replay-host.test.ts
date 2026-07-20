@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   LEGACY_FALLBACK_LABEL,
+  LIVE_REPLAY_LABEL,
   STATIC_REPLAY_LABEL,
   VisibleReplayHost,
   type VisibleReplayCandidateLease,
@@ -78,6 +79,35 @@ describe('visible rrweb replay host', () => {
     expect(iframe.style.width).toBe('1200px');
   });
 
+  it('labels a retained live replay and refreshes its bounded extent in place', () => {
+    const fixture = createFixture();
+    const candidate = commitCandidate(fixture);
+    const iframe = requireElement<HTMLIFrameElement>(candidate.mount, 'iframe');
+    const root = fixture.preview.firstElementChild;
+
+    fixture.host.markLive(iframe);
+    fixture.host.refreshExtent(iframe, { width: 1_900, height: 4_100 });
+
+    const stage = requireElement<HTMLElement>(fixture.preview, '.replica-replay-stage');
+    expect(fixture.badge.textContent).toBe(LIVE_REPLAY_LABEL);
+    expect(fixture.preview.firstElementChild).toBe(root);
+    expect(stage.style.width).toBe('1900px');
+    expect(stage.style.height).toBe('4100px');
+  });
+
+  it('lets a live document extent shrink below its initial capture size', () => {
+    const fixture = createFixture();
+    const candidate = commitCandidate(fixture);
+    const iframe = requireElement<HTMLIFrameElement>(candidate.mount, 'iframe');
+    const stage = requireElement<HTMLElement>(fixture.preview, '.replica-replay-stage');
+
+    fixture.host.markLive(iframe);
+    fixture.host.refreshExtent(iframe, { width: 900, height: 1_000 });
+
+    expect(stage.style.width).toBe('1200px');
+    expect(stage.style.height).toBe('1000px');
+  });
+
   it('extends the parent scroll track when the panel is taller than the scaled source viewport', () => {
     const fixture = createFixture();
     const candidate = fixture.host.createCandidate(dimensions());
@@ -128,6 +158,7 @@ describe('visible rrweb replay host', () => {
     const fixture = createFixture();
     const first = commitCandidate(fixture);
     const firstRoot = fixture.preview.firstElementChild;
+    expect(fixture.host.hasCommittedReplica).toBe(true);
 
     const second = fixture.host.createCandidate(dimensions());
     const secondIframe = createProtectedIframe(fixture.document);
@@ -147,12 +178,14 @@ describe('visible rrweb replay host', () => {
     expect(fixture.preview.hidden).toBe(false);
 
     fixture.host.showLegacy(true);
+    expect(fixture.host.hasCommittedReplica).toBe(true);
     second.release();
     second.release();
 
     expect(fixture.legacy.hidden).toBe(false);
     expect(fixture.preview.hidden).toBe(true);
     expect(fixture.badge.textContent).toBe(LEGACY_FALLBACK_LABEL);
+    expect(fixture.host.hasCommittedReplica).toBe(false);
   });
 
   it('bounds hostile source dimensions and scaled extension-owned overflow', () => {

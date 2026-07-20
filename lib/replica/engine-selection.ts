@@ -44,11 +44,16 @@ export class ReplicaEngineController {
     return this.#fallbackNotified;
   }
 
+  /** True only while a run would still be delegated to the shadow engine. */
+  get shadowAvailable(): boolean {
+    return this.options.mode === 'rrweb-shadow' && !this.#shadowDisabled;
+  }
+
   async run(
     request: ReplicaCaptureRequest,
     signal?: AbortSignal,
   ): Promise<ReplicaRunResult> {
-    if (this.options.mode === 'legacy' || this.#shadowDisabled) {
+    if (!this.shadowAvailable) {
       const result = await this.options.legacy.run(request, signal);
       this.options.onDiagnostics?.(result.diagnostics);
       return result;
@@ -73,6 +78,16 @@ export class ReplicaEngineController {
   releasePresentation(showFallbackLabel = true): void {
     if (this.options.mode !== 'rrweb-shadow') return;
     this.options.shadow.releasePresentation(showFallbackLabel);
+  }
+
+  disableShadow(code: ReplicaDiagnosticCode): void {
+    if (this.options.mode !== 'rrweb-shadow' || this.#shadowDisabled) return;
+    this.#shadowDisabled = true;
+    this.options.shadow.releasePresentation(true);
+    if (!this.#fallbackNotified) {
+      this.#fallbackNotified = true;
+      this.options.onFallback?.(code);
+    }
   }
 
   dispose(): void {

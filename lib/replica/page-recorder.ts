@@ -5,6 +5,13 @@ import {
   type ReplicaCheckpointResponse,
   type ReplicaDocumentIdentity,
 } from './contracts';
+import { LiveRecorderSession, createLiveRecorderOptions } from './live-recorder-session';
+import {
+  createLiveStreamError,
+  readLiveControllerMessage,
+  readReplicaLivePortSessionId,
+  sameReplicaDocument,
+} from './live-protocol';
 import {
   MAX_REPLICA_CHECKPOINT_BYTES,
   MAX_REPLICA_NODE_DEPTH,
@@ -17,8 +24,8 @@ import {
 
 export const RECORDER_CAPTURE_TIMEOUT_MS = 3_000;
 
-interface RecorderOptions {
-  readonly emit: (event: unknown) => void;
+export interface RecorderOptions {
+  readonly emit: (event: unknown, isCheckout?: boolean) => void;
   readonly maskAllInputs: true;
   readonly maskTextSelector: string;
   readonly maskInputFn: (value: string) => string;
@@ -38,9 +45,7 @@ interface RecorderOptions {
   readonly keepIframeSrcFn: () => false;
 }
 
-export type RecorderStart = (
-  options: RecorderOptions,
-) => (() => void) | undefined;
+export type RecorderStart = (options: RecorderOptions) => (() => void) | undefined;
 
 interface RecorderEnvironment {
   readonly document: Document;
@@ -49,6 +54,24 @@ interface RecorderEnvironment {
   readonly start: RecorderStart;
   readonly setTimer: typeof setTimeout;
   readonly clearTimer: typeof clearTimeout;
+}
+
+export interface PageRecorderBridgeEnvironment {
+  readonly global?: typeof globalThis & {
+    __simulReplicaRecorderV2Installed?: boolean;
+  };
+  readonly runtime?: Pick<typeof browser.runtime, 'onConnect' | 'onMessage'>;
+  readonly document?: Document;
+  readonly window?: Window;
+  readonly now?: () => number;
+  readonly start?: RecorderStart;
+  readonly takeFullSnapshot?: () => void;
+  readonly preflight?: () => 'checkpoint_too_large' | 'capture_failed' | undefined;
+  readonly scheduleFrame?: (callback: () => void) => unknown;
+  readonly cancelFrame?: (handle: unknown) => void;
+  readonly captureCheckpoint?: (
+    identity: ReplicaDocumentIdentity,
+  ) => Promise<ReplicaCheckpointResponse>;
 }
 
 class RecorderCaptureError extends Error {
@@ -64,24 +87,127 @@ class RecorderCaptureError extends Error {
  * Installs one idempotent, on-demand listener in Chrome's isolated world. The
  * recorder does no work until the document-targeted controller command arrives.
  */
-export function installPageRecorderBridge(): void {
-  const isolatedGlobal = globalThis as typeof globalThis & {
+export function installPageRecorderBridge(
+  environment: PageRecorderBridgeEnvironment = {},
+): void {
+  const isolatedGlobal = (environment.global ?? globalThis) as typeof globalThis & {
     __simulReplicaRecorderV2Installed?: boolean;
   };
   if (isolatedGlobal.__simulReplicaRecorderV2Installed) return;
   isolatedGlobal.__simulReplicaRecorderV2Installed = true;
+  const runtime = environment.runtime ?? browser.runtime;
+  const sourceDocument = environment.document ?? document;
+  const sourceWindow = environment.window ?? window;
+  const now = environment.now ?? (() => performance.now());
+  const start = environment.start ?? (record as RecorderStart);
+  const takeFullSnapshot = environment.takeFullSnapshot ??
+    (() => record.takeFullSnapshot(true));
+  const preflight = environment.preflight ??
+    (() => preflightSourceDocument(sourceDocument));
+  const scheduleFrame = environment.scheduleFrame ??
+    ((callback: () => void) => requestAnimationFrame(callback));
+  const cancelFrame = environment.cancelFrame ??
+    ((handle: unknown) => cancelAnimationFrame(Number(handle)));
+  const captureCheckpoint = environment.captureCheckpoint ??
+    ((identity: ReplicaDocumentIdentity) => captureMaskedCheckpoint(identity));
 
   let captureActive = false;
-  browser.runtime.onMessage.addListener((message: unknown) => {
+  let liveSession: LiveRecorderSession | undefined;
+  runtime.onConnect.addListener((port) => {
+    const portSessionId = readReplicaLivePortSessionId(port.name);
+    if (!portSessionId) return;
+    let boundIdentity: ReplicaDocumentIdentity | undefined;
+    let ownedSession: LiveRecorderSession | undefined;
+    let subscribed = false;
+    const onMessage = (message: unknown): void => {
+      const command = readLiveControllerMessage(message, portSessionId);
+      if (!command) {
+        port.disconnect();
+        return;
+      }
+      if (command.kind === 'simul:replica-v2:start-live') {
+        if (boundIdentity || command.identity.sequence !== 0 || captureActive) {
+          if (captureActive) {
+            port.postMessage(createLiveStreamError(command.identity, 'stream_failed'));
+          }
+          port.disconnect();
+          return;
+        }
+        const session = liveSession ??= new LiveRecorderSession({
+          document: sourceDocument,
+          window: sourceWindow,
+          now,
+          start,
+          takeFullSnapshot,
+          preflight,
+          scheduleFrame,
+          cancelFrame,
+          resolveNode: (id) => record.mirror.getNode(id),
+        });
+        const subscription = session.addSubscriber(command.identity, (outgoing) => {
+          try {
+            port.postMessage(outgoing);
+          } catch {
+            session.removeSubscriber(command.identity);
+            if (liveSession === session && session.subscriberCount === 0) {
+              liveSession = undefined;
+            }
+          }
+        });
+        if (subscription !== 'subscribed') {
+          if (liveSession === session && session.subscriberCount === 0) {
+            liveSession = undefined;
+          }
+          if (subscription === 'rejected') {
+            port.postMessage(createLiveStreamError(command.identity, 'stream_overflow'));
+          }
+          port.disconnect();
+          return;
+        }
+        boundIdentity = command.identity;
+        ownedSession = session;
+        subscribed = true;
+        return;
+      }
+      if (
+        !boundIdentity ||
+        !sameReplicaDocument(command.identity, boundIdentity)
+      ) {
+        port.disconnect();
+        return;
+      }
+      if (command.kind === 'simul:replica-v2:ack') {
+        ownedSession?.acknowledge(command.identity, command.identity.sequence);
+      } else if (command.kind === 'simul:replica-v2:checkpoint-ack') {
+        ownedSession?.acknowledgeCheckpoint(
+          command.identity,
+          command.identity.sequence,
+        );
+      } else {
+        ownedSession?.requestCheckpoint(command.identity);
+      }
+    };
+    port.onMessage.addListener(onMessage);
+    port.onDisconnect.addListener(() => {
+      port.onMessage.removeListener(onMessage);
+      if (boundIdentity && subscribed && ownedSession) {
+        ownedSession.removeSubscriber(boundIdentity);
+      }
+      if (liveSession === ownedSession && ownedSession?.subscriberCount === 0) {
+        liveSession = undefined;
+      }
+    });
+  });
+  runtime.onMessage.addListener((message: unknown) => {
     const command = readCheckpointCommand(message);
     if (!command) return undefined;
-    if (captureActive) {
+    if (captureActive || (liveSession?.subscriberCount ?? 0) > 0) {
       return Promise.resolve(
         createCheckpointError(command.identity, 'capture_busy'),
       );
     }
     captureActive = true;
-    return captureMaskedCheckpoint(command.identity).finally(() => {
+    return captureCheckpoint(command.identity).finally(() => {
       captureActive = false;
     });
   });
@@ -162,32 +288,14 @@ async function captureInitialCheckpointEvents(
     );
 
     try {
-      stop = environment.start({
-        emit: (event: unknown) => {
+      stop = environment.start(createLiveRecorderOptions(
+        (event: unknown) => {
           if (!isRecord(event)) return;
           if (event.type !== 4 && event.type !== 2) return;
           events.push(event);
           if (event.type === 2) queueMicrotask(() => finish());
         },
-        maskAllInputs: true,
-        maskTextSelector:
-          '[contenteditable]:not([contenteditable="false"])',
-        maskInputFn: (value: string) => '*'.repeat(Math.min(value.length, 256)),
-        maskTextFn: (value: string) => '*'.repeat(Math.min(value.length, 256)),
-        inlineStylesheet: true,
-        inlineImages: false,
-        recordCanvas: false,
-        recordCrossOriginIframes: false,
-        collectFonts: false,
-        userTriggeredOnInput: false,
-        recordAfter: 'DOMContentLoaded',
-        blockSelector: 'iframe,frame',
-        sampling: {
-          mousemove: false,
-          mouseInteraction: false,
-        },
-        keepIframeSrcFn: () => false,
-      });
+      ));
       if (!stop) finish(new RecorderCaptureError('capture_failed'));
     } catch {
       finish(new RecorderCaptureError('capture_failed'));
@@ -195,9 +303,9 @@ async function captureInitialCheckpointEvents(
   });
 }
 
-function preflightSourceDocument(
+export function preflightSourceDocument(
   sourceDocument: Document,
-): ReplicaCheckpointErrorEnvelope['payload']['code'] | undefined {
+): 'checkpoint_too_large' | 'capture_failed' | undefined {
   if (typeof sourceDocument.nodeType !== 'number') return undefined;
   const stack: Array<{ node: Node; depth: number }> = [
     { node: sourceDocument, depth: 0 },

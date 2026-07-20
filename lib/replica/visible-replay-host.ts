@@ -2,6 +2,7 @@ import type { MirrorDisplayMode } from '../preferences';
 import { computeMirrorScale } from '../visual-renderer';
 
 export const STATIC_REPLAY_LABEL = 'Static rrweb preview · untranslated';
+export const LIVE_REPLAY_LABEL = 'Live rrweb preview · untranslated';
 export const LEGACY_FALLBACK_LABEL = 'Legacy mirror · fallback';
 
 const MAX_REPLAY_DIMENSION = 1_000_000;
@@ -38,6 +39,8 @@ export interface VisibleReplayCandidateLease {
 
 export interface ReplayPresentationHost {
   createCandidate(dimensions: VisibleReplayDimensions): VisibleReplayCandidateLease;
+  markLive(iframe: HTMLIFrameElement): void;
+  refreshExtent(iframe: HTMLIFrameElement, extent: VisibleReplayExtent): void;
   showLegacy(showFallbackLabel: boolean): void;
   dispose(): void;
 }
@@ -76,6 +79,10 @@ export class VisibleReplayHost implements ReplayPresentationHost {
 
   get previewVisible(): boolean {
     return Boolean(this.#committed && !this.#previewSurface.hidden);
+  }
+
+  get hasCommittedReplica(): boolean {
+    return Boolean(this.#committed && !this.#committed.released);
   }
 
   createCandidate(
@@ -120,12 +127,12 @@ export class VisibleReplayHost implements ReplayPresentationHost {
     );
     committed.scale = scale;
     const contentWidth = Math.max(
-      committed.dimensions.documentWidth,
+      committed.live ? 0 : committed.dimensions.documentWidth,
       committed.replayExtent.width,
       committed.dimensions.viewportWidth,
     );
     const contentHeight = Math.max(
-      committed.dimensions.documentHeight,
+      committed.live ? 0 : committed.dimensions.documentHeight,
       committed.replayExtent.height,
       committed.dimensions.viewportHeight,
     );
@@ -177,6 +184,37 @@ export class VisibleReplayHost implements ReplayPresentationHost {
     );
     this.#setOuterScroll(committed);
     this.#projectScroll(committed);
+  }
+
+  markLive(iframe: HTMLIFrameElement): void {
+    const committed = this.#committed;
+    if (committed?.iframe !== iframe || committed.released) return;
+    const wasLive = committed.live;
+    committed.live = true;
+    this.#previewSurface.hidden = false;
+    this.#previewSurface.setAttribute('aria-hidden', 'true');
+    this.#legacySurface.hidden = true;
+    this.#legacySurface.setAttribute('aria-hidden', 'true');
+    this.#badge.textContent = LIVE_REPLAY_LABEL;
+    this.#badge.hidden = false;
+    if (!wasLive) this.#applyLayout(committed);
+  }
+
+  refreshExtent(iframe: HTMLIFrameElement, extent: VisibleReplayExtent): void {
+    const committed = this.#committed;
+    if (!committed || committed.iframe !== iframe || committed.released) return;
+    committed.replayExtent = normalizeExtent(extent);
+    this.#sourceScrollX = clamp(
+      this.#sourceScrollX,
+      0,
+      maximumSourceScrollX(committed),
+    );
+    this.#sourceScrollY = clamp(
+      this.#sourceScrollY,
+      0,
+      maximumSourceScrollY(committed),
+    );
+    this.#applyLayout(committed);
   }
 
   showLegacy(showFallbackLabel: boolean): void {
@@ -317,6 +355,7 @@ class CandidateLease implements VisibleReplayCandidateLease {
   replayExtent: VisibleReplayExtent = { width: 1, height: 1 };
   iframe!: HTMLIFrameElement;
   scale = 1;
+  live = false;
   released = false;
   #scrollListener: (() => void) | undefined;
 
@@ -421,7 +460,8 @@ function normalizeExtent(extent: VisibleReplayExtent): VisibleReplayExtent {
 function maximumSourceScrollX(candidate: CandidateLease): number {
   return Math.max(
     0,
-    candidate.dimensions.documentWidth - candidate.dimensions.viewportWidth,
+    (candidate.live ? 0 : candidate.dimensions.documentWidth) -
+      candidate.dimensions.viewportWidth,
     candidate.replayExtent.width - candidate.dimensions.viewportWidth,
   );
 }
@@ -429,7 +469,8 @@ function maximumSourceScrollX(candidate: CandidateLease): number {
 function maximumSourceScrollY(candidate: CandidateLease): number {
   return Math.max(
     0,
-    candidate.dimensions.documentHeight - candidate.dimensions.viewportHeight,
+    (candidate.live ? 0 : candidate.dimensions.documentHeight) -
+      candidate.dimensions.viewportHeight,
     candidate.replayExtent.height - candidate.dimensions.viewportHeight,
   );
 }

@@ -539,6 +539,49 @@ function sanitizeSerializedNode(
   }
 }
 
+/**
+ * Applies the checkpoint node policy to one rrweb mutation subtree. Existing
+ * IDs are seeded into the duplicate detector so a mutation cannot replace a
+ * live mirror node by smuggling the same ID in an added subtree.
+ */
+export function sanitizeRrwebIncrementalNode(
+  input: unknown,
+  privateRegion: boolean,
+  styleRegion: boolean,
+  existingIds: ReadonlySet<number>,
+): Record<string, unknown> | undefined {
+  const budget: NodeBudget = {
+    count: 0,
+    bytes: 0,
+    ids: new Set(existingIds),
+  };
+  return sanitizeSerializedNode(
+    input,
+    privateRegion,
+    styleRegion,
+    0,
+    budget,
+  );
+}
+
+export function sanitizeRrwebIncrementalAttributes(
+  input: unknown,
+  tagName: string,
+  privateRegion: boolean,
+): Record<string, unknown> | undefined {
+  if (!isRecord(input)) return undefined;
+  return sanitizeAttributes(
+    input,
+    tagName,
+    privateRegion,
+    { count: 0, bytes: 0, ids: new Set() },
+  );
+}
+
+export function maskRrwebPrivateText(value: string): string {
+  return maskPrivateText(value);
+}
+
 function sanitizeChildren(
   children: readonly unknown[],
   privateRegion: boolean,
@@ -578,8 +621,8 @@ function sanitizeAttributes(
   tagName: string,
   privateRegion: boolean,
   budget: NodeBudget,
-): Record<string, string | number | boolean | null> | undefined {
-  const sanitized: Record<string, string | number | boolean | null> = {};
+): Record<string, unknown> | undefined {
+  const sanitized: Record<string, unknown> = {};
   const entries = Object.entries(attributes);
   if (entries.length > 512) return undefined;
   for (const [rawName, rawValue] of entries) {
@@ -606,7 +649,14 @@ function sanitizeAttributes(
       sanitized[name] = typeof rawValue === 'string' ? maskPrivateText(rawValue) : '';
       continue;
     }
+    if (name === 'style' && isRecord(rawValue)) {
+      const styleDiff = sanitizeStyleOmDiff(rawValue, budget);
+      if (!styleDiff) return undefined;
+      sanitized[rawName] = styleDiff;
+      continue;
+    }
     if (name === 'style' || name === '_csstext') {
+      if (name === '_csstext' && rawName !== '_cssText') return undefined;
       if (
         typeof rawValue !== 'string' ||
         rawValue.length > MAX_REPLICA_STRING_LENGTH ||
@@ -632,6 +682,48 @@ function sanitizeAttributes(
     } else {
       sanitized[rawName] = rawValue;
     }
+  }
+  return sanitized;
+}
+
+function sanitizeStyleOmDiff(
+  input: Record<string, unknown>,
+  budget: NodeBudget,
+): Record<string, string | false | readonly [string, string]> | undefined {
+  const entries = Object.entries(input);
+  if (entries.length > 512) return undefined;
+  const sanitized: Record<string, string | false | readonly [string, string]> = {};
+  for (const [property, rawValue] of entries) {
+    if (
+      property.length < 1 ||
+      property.length > 256 ||
+      !/^(?:--[A-Za-z0-9_-]+|-?[A-Za-z][A-Za-z0-9-]*)$/u.test(property) ||
+      !consumeNodeBudget(budget, property.length * 2)
+    ) return undefined;
+    if (rawValue === false) {
+      sanitized[property] = false;
+      continue;
+    }
+    if (typeof rawValue === 'string') {
+      if (
+        rawValue.length > MAX_REPLICA_STRING_LENGTH ||
+        !consumeNodeBudget(budget, rawValue.length * 2)
+      ) return undefined;
+      sanitized[property] = sanitizeCssText(rawValue);
+      continue;
+    }
+    if (
+      Array.isArray(rawValue) &&
+      rawValue.length === 2 &&
+      typeof rawValue[0] === 'string' &&
+      rawValue[0].length <= MAX_REPLICA_STRING_LENGTH &&
+      (rawValue[1] === '' || rawValue[1] === 'important') &&
+      consumeNodeBudget(budget, (rawValue[0].length + rawValue[1].length) * 2)
+    ) {
+      sanitized[property] = [sanitizeCssText(rawValue[0]), rawValue[1]];
+      continue;
+    }
+    return undefined;
   }
   return sanitized;
 }
@@ -710,19 +802,465 @@ function consumeNodeBudget(budget: NodeBudget, bytes: number): boolean {
   return budget.bytes <= MAX_REPLICA_CHECKPOINT_BYTES;
 }
 
+const CSS_RESOURCE_FUNCTION_NAMES = new Set([
+  '-webkit-image-set',
+  'cross-fade',
+  'element',
+  'image',
+  'image-set',
+  'src',
+  'url',
+]);
+const INERT_CSS_RESOURCE = 'url("about:blank")';
+
+export interface SanitizedCssText {
+  text: string;
+  neutralizedImport: boolean;
+  neutralizedNamespace: boolean;
+}
+
+/**
+ * Token-aware CSS resource filtering. The scanner intentionally preserves
+ * identifiers and escapes verbatim: changing an escape can turn a grouping
+ * rule into a qualified rule and shift every later CSSOM index.
+ */
+export function sanitizeCssTextDetailed(value: string): SanitizedCssText {
+  const output: string[] = [];
+  let braceDepth = 0;
+  let bracketDepth = 0;
+  let parenthesisDepth = 0;
+  const ruleBlockStack: boolean[] = [];
+  let topLevelRuleStart = true;
+  let topLevelImportAllowed = true;
+  let index = 0;
+  let neutralizedImport = false;
+  let neutralizedNamespace = false;
+
+  while (index < value.length) {
+    if (isCssCommentStart(value, index)) {
+      // Comments are whitespace tokens. Keeping one space prevents tokens on
+      // either side of a comment from being joined accidentally.
+      output.push(' ');
+      index = consumeCssComment(value, index);
+      continue;
+    }
+
+    if (
+      braceDepth === 0 &&
+      parenthesisDepth === 0 &&
+      bracketDepth === 0 &&
+      topLevelRuleStart
+    ) {
+      const ignoredToken = readTopLevelIgnoredCssToken(value, index);
+      if (ignoredToken) {
+        output.push(ignoredToken);
+        index += ignoredToken.length;
+        continue;
+      }
+    }
+
+    const character = value[index] ?? '';
+    let preservesImportOrder = false;
+    if (character === '"' || character === "'") {
+      const end = consumeCssString(value, index);
+      output.push(sanitizeCssString(value.slice(index, end)));
+      if (braceDepth === 0 && topLevelRuleStart) {
+        topLevelRuleStart = false;
+        topLevelImportAllowed = false;
+      }
+      index = end;
+      continue;
+    }
+
+    if (character === '{') {
+      const startsTopLevelRuleBlock =
+        braceDepth === 0 && parenthesisDepth === 0 && bracketDepth === 0;
+      braceDepth += 1;
+      ruleBlockStack.push(startsTopLevelRuleBlock);
+      if (startsTopLevelRuleBlock) {
+        topLevelRuleStart = false;
+        topLevelImportAllowed = false;
+      }
+      output.push(character);
+      index += 1;
+      continue;
+    }
+    if (character === '}') {
+      const closesTopLevelRuleBlock = ruleBlockStack.pop() ?? false;
+      braceDepth = Math.max(0, braceDepth - 1);
+      if (closesTopLevelRuleBlock && braceDepth === 0) topLevelRuleStart = true;
+      output.push(character);
+      index += 1;
+      continue;
+    }
+
+    if (braceDepth === 0) {
+      if (character === '(') parenthesisDepth += 1;
+      else if (character === ')' && parenthesisDepth > 0) parenthesisDepth -= 1;
+      else if (character === '[') bracketDepth += 1;
+      else if (character === ']' && bracketDepth > 0) bracketDepth -= 1;
+      else if (
+        character === ';' &&
+        parenthesisDepth === 0 &&
+        bracketDepth === 0
+      ) {
+        topLevelRuleStart = true;
+      }
+    }
+
+    if (
+      character === '@' &&
+      braceDepth === 0 &&
+      parenthesisDepth === 0 &&
+      bracketDepth === 0 &&
+      topLevelRuleStart
+    ) {
+      const atKeyword = readCssIdentifier(value, index + 1);
+      if (atKeyword?.decoded === 'import' && topLevelImportAllowed) {
+        const end = consumeCssAtRule(value, atKeyword.end);
+        output.push('@media not all {}');
+        neutralizedImport = true;
+        index = end;
+        topLevelRuleStart = true;
+        continue;
+      }
+      if (atKeyword?.decoded === 'namespace') {
+        const end = consumeCssAtRule(value, atKeyword.end);
+        const prefix = readNamespacePrefix(value, atKeyword.end, end);
+        output.push(
+          `@namespace${prefix ? ` ${prefix}` : ''} "urn:simul:inert";`,
+        );
+        neutralizedNamespace = true;
+        topLevelImportAllowed = false;
+        index = end;
+        topLevelRuleStart = true;
+        continue;
+      }
+      preservesImportOrder = Boolean(
+        atKeyword && isImportOrderException(value, atKeyword),
+      );
+    }
+
+    const identifier = readCssIdentifier(value, index);
+    if (
+      identifier &&
+      value[identifier.end] === '(' &&
+      CSS_RESOURCE_FUNCTION_NAMES.has(identifier.decoded)
+    ) {
+      output.push(INERT_CSS_RESOURCE);
+      if (braceDepth === 0 && topLevelRuleStart) {
+        topLevelRuleStart = false;
+        topLevelImportAllowed = false;
+      }
+      index = consumeCssFunction(value, identifier.end);
+      continue;
+    }
+
+    if (identifier) {
+      output.push(value.slice(index, identifier.end));
+      if (braceDepth === 0 && topLevelRuleStart) {
+        topLevelRuleStart = false;
+        topLevelImportAllowed = false;
+      }
+      index = identifier.end;
+      continue;
+    }
+
+    output.push(character);
+    if (
+      braceDepth === 0 &&
+      topLevelRuleStart &&
+      !/\s/u.test(character) &&
+      character !== ';'
+    ) {
+      topLevelRuleStart = false;
+      if (!preservesImportOrder) topLevelImportAllowed = false;
+    }
+    index += 1;
+  }
+
+  return {
+    text: output.join(''),
+    neutralizedImport,
+    neutralizedNamespace,
+  };
+}
+
 export function sanitizeCssText(value: string): string {
-  const withoutComments = value.replace(/\/\*[\s\S]*?\*\//gu, '');
-  if (
-    withoutComments.includes('\\') ||
-    /@import\b|(?:-webkit-)?image(?:-set)?\s*\(|\bsrc\s*\(|cross-fade\s*\(|element\s*\(/iu.test(
-      withoutComments,
-    )
-  ) return '';
-  return withoutComments
-    .replace(/@import\s+(?:url\()?[^;]+;/giu, '')
-    .replace(/url\(\s*(?:[^)(]|\([^)]*\))*\s*\)/giu, 'none')
-    .replace(/(?:https?:)?\/\/[^\s'"),;]+/giu, 'about:blank')
-    .replace(/(['"])(?:https?:)?\/\/[^'"]+\1/giu, 'none');
+  return sanitizeCssTextDetailed(value).text;
+}
+
+interface CssIdentifier {
+  decoded: string;
+  end: number;
+}
+
+function isImportOrderException(
+  value: string,
+  atKeyword: CssIdentifier,
+): boolean {
+  if (atKeyword.decoded !== 'charset' && atKeyword.decoded !== 'layer') {
+    return false;
+  }
+  const end = consumeCssAtRule(value, atKeyword.end);
+  return value[end - 1] === ';';
+}
+
+function readCssIdentifier(value: string, start: number): CssIdentifier | undefined {
+  let decoded = '';
+  let index = start;
+
+  while (index < value.length) {
+    const character = value[index];
+    if (isCssNameCharacter(character)) {
+      decoded += character;
+      index += 1;
+      continue;
+    }
+    if (character !== '\\') break;
+    const escape = readCssEscape(value, index);
+    if (!escape) break;
+    decoded += escape.decoded;
+    index = escape.end;
+  }
+
+  return index === start
+    ? undefined
+    : { decoded: decoded.toLowerCase(), end: index };
+}
+
+function isCssNameCharacter(character: string | undefined): boolean {
+  if (!character) return false;
+  const code = character.charCodeAt(0);
+  return (
+    character === '-' ||
+    character === '_' ||
+    (code >= 48 && code <= 57) ||
+    (code >= 65 && code <= 90) ||
+    (code >= 97 && code <= 122) ||
+    code >= 0x80
+  );
+}
+
+function readCssEscape(
+  value: string,
+  start: number,
+): { decoded: string; end: number } | undefined {
+  if (value[start] !== '\\' || start + 1 >= value.length) return undefined;
+  const next = value[start + 1] ?? '';
+  if (next === '\n' || next === '\r' || next === '\f') return undefined;
+
+  let index = start + 1;
+  let hex = '';
+  while (
+    index < value.length &&
+    hex.length < 6 &&
+    /[0-9a-f]/iu.test(value[index] ?? '')
+  ) {
+    hex += value[index] ?? '';
+    index += 1;
+  }
+  if (hex.length > 0) {
+    if (value[index] === '\r' && value[index + 1] === '\n') {
+      index += 2;
+    } else if (/\s/u.test(value[index] ?? '')) {
+      index += 1;
+    }
+    const codePoint = Number.parseInt(hex, 16);
+    const decoded =
+      codePoint === 0 ||
+      codePoint > 0x10ffff ||
+      (codePoint >= 0xd800 && codePoint <= 0xdfff)
+        ? '\ufffd'
+        : String.fromCodePoint(codePoint);
+    return { decoded, end: index };
+  }
+
+  return { decoded: next, end: start + 2 };
+}
+
+function isCssCommentStart(value: string, index: number): boolean {
+  return value[index] === '/' && value[index + 1] === '*';
+}
+
+function readTopLevelIgnoredCssToken(
+  value: string,
+  index: number,
+): '<!--' | '-->' | undefined {
+  if (value.startsWith('<!--', index)) return '<!--';
+  if (value.startsWith('-->', index)) return '-->';
+  return undefined;
+}
+
+function consumeCssComment(value: string, start: number): number {
+  const end = value.indexOf('*/', start + 2);
+  return end < 0 ? value.length : end + 2;
+}
+
+function consumeCssString(value: string, start: number): number {
+  const quote = value[start];
+  let index = start + 1;
+  while (index < value.length) {
+    const character = value[index];
+    if (character === quote) return index + 1;
+    if (character === '\\') {
+      if (value[index + 1] === '\r' && value[index + 2] === '\n') {
+        index += 3;
+      } else {
+        index = Math.min(value.length, index + 2);
+      }
+      continue;
+    }
+    if (character === '\n' || character === '\r' || character === '\f') {
+      return index;
+    }
+    index += 1;
+  }
+  return value.length;
+}
+
+function sanitizeCssString(value: string): string {
+  if (value.length < 2) return value;
+  const quote = value[0];
+  const content = value.slice(1, -1).trim();
+  if (/^(?:https?:)?\/\//iu.test(content)) {
+    return `${quote}about:blank${quote}`;
+  }
+  return value;
+}
+
+function consumeCssAtRule(value: string, start: number): number {
+  let bracketDepth = 0;
+  let parenthesisDepth = 0;
+  let index = start;
+  while (index < value.length) {
+    if (isCssCommentStart(value, index)) {
+      index = consumeCssComment(value, index);
+      continue;
+    }
+    const character = value[index];
+    if (character === '"' || character === "'") {
+      index = consumeCssString(value, index);
+      continue;
+    }
+    if (character === '\\') {
+      const escape = readCssEscape(value, index);
+      if (escape) {
+        index = escape.end;
+        continue;
+      }
+    }
+    if (character === '(') parenthesisDepth += 1;
+    else if (character === ')' && parenthesisDepth > 0) parenthesisDepth -= 1;
+    else if (character === '[') bracketDepth += 1;
+    else if (character === ']' && bracketDepth > 0) bracketDepth -= 1;
+    else if (parenthesisDepth === 0 && bracketDepth === 0) {
+      if (character === ';') return index + 1;
+      if (character === '}') return index;
+      if (character === '{') return consumeCssBlock(value, index);
+    }
+    index += 1;
+  }
+  return value.length;
+}
+
+function consumeCssBlock(value: string, start: number): number {
+  let depth = 1;
+  let index = start + 1;
+  while (index < value.length) {
+    if (isCssCommentStart(value, index)) {
+      index = consumeCssComment(value, index);
+      continue;
+    }
+    const character = value[index];
+    if (character === '"' || character === "'") {
+      index = consumeCssString(value, index);
+      continue;
+    }
+    if (character === '\\') {
+      const escape = readCssEscape(value, index);
+      if (escape) {
+        index = escape.end;
+        continue;
+      }
+    }
+    if (character === '{') depth += 1;
+    else if (character === '}') {
+      depth -= 1;
+      if (depth === 0) return index + 1;
+    }
+    index += 1;
+  }
+  return value.length;
+}
+
+function consumeCssFunction(value: string, openParenthesis: number): number {
+  let depth = 1;
+  let index = openParenthesis + 1;
+  while (index < value.length) {
+    if (isCssCommentStart(value, index)) {
+      index = consumeCssComment(value, index);
+      continue;
+    }
+    const character = value[index];
+    if (character === '"' || character === "'") {
+      index = consumeCssString(value, index);
+      continue;
+    }
+    if (character === '\\') {
+      const escape = readCssEscape(value, index);
+      if (escape) {
+        index = escape.end;
+        continue;
+      }
+    }
+    // An unclosed resource function must not consume a following CSS rule.
+    if ((character === '{' || character === '}') && depth === 1) return index;
+    if (character === '(') depth += 1;
+    else if (character === ')') {
+      depth -= 1;
+      if (depth === 0) return index + 1;
+    }
+    index += 1;
+  }
+  return value.length;
+}
+
+function readNamespacePrefix(
+  value: string,
+  start: number,
+  end: number,
+): string | undefined {
+  let index = start;
+  while (index < end) {
+    if (/\s/u.test(value[index] ?? '')) {
+      index += 1;
+      continue;
+    }
+    if (isCssCommentStart(value, index)) {
+      index = consumeCssComment(value, index);
+      continue;
+    }
+    break;
+  }
+  if (value[index] === '"' || value[index] === "'") return undefined;
+  const identifier = readCssIdentifier(value, index);
+  if (!identifier || identifier.end > end) return undefined;
+
+  let next = identifier.end;
+  while (next < end) {
+    if (/\s/u.test(value[next] ?? '')) {
+      next += 1;
+      continue;
+    }
+    if (isCssCommentStart(value, next)) {
+      next = consumeCssComment(value, next);
+      continue;
+    }
+    break;
+  }
+  if (identifier.decoded === 'url' && value[next] === '(') return undefined;
+  return value.slice(index, identifier.end);
 }
 
 function sanitizePageUrl(value: unknown): string {

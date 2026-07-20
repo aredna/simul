@@ -17,12 +17,17 @@ translation. An initial sanitized capture bootstraps stable isolated-world
 node IDs; normal synchronization replaces only coalesced dirty subtrees. A
 validated production build is checked in at `dist/chrome-unpacked/` for direct
 Developer mode installation without contributor tooling. A development-only
-rrweb engine can validate one masked, document-scoped checkpoint and atomically
-promote it as a static, untranslated preview with
-`WXT_SIMUL_RRWEB_SHADOW=1`; production and unflagged builds remain on the legacy
-renderer. The flagged preview retains source viewport geometry, applies zoom
+rrweb engine can retain one masked recorder per source document and atomically
+promote an untranslated live preview with `WXT_SIMUL_RRWEB_SHADOW=1`; production
+and unflagged builds remain on the legacy renderer. Exact-document Ports carry
+bounded, statefully sanitized DOM, CSS, and scroll batches. Applied-state and
+checkpoint ACKs advance only after rrweb casts the admitted events; gaps recover
+once through a hidden checkpoint and atomic swap while preserving the last-good
+replica. The flagged preview retains source viewport geometry, applies zoom
 outside the replay iframe, maps extension/source scrolling, and returns to a
-labeled legacy fallback before translation or the first v1 dirty event.
+labeled legacy fallback before translation. Legacy dirty notices are coalesced
+while rrweb is authoritative so that transition performs at most one fresh v1
+capture.
 
 ## Fixed engineering baseline
 
@@ -59,10 +64,15 @@ extension APIs or page integration.
 - `entrypoints/sidepanel/`: translation companion UI and browser orchestration
 - `entrypoints/page-snapshot.ts`: unlisted top-frame snapshot entrypoint
 - `entrypoints/page-recorder.ts`: development-only unlisted rrweb checkpoint
-  recorder
+  and exact-document live recorder bridge
 - `lib/replica/visible-replay-host.ts`: development-only candidate/committed
   replay ownership, atomic presentation, protected iframe layout, zoom, and
   scroll projection
+- `lib/replica/live-protocol.ts`, `lib/replica/live-recorder-session.ts`, and
+  `lib/replica/live-stream-client.ts`: bounded ordered transport, shared recorder
+  ownership, independent subscriber watermarks, and recovery requests
+- `lib/replica/rrweb-stream-sanitizer.ts`: transactional incremental privacy,
+  identity, and resource validation
 - `lib/`: safe bootstrap/delta boundaries, inert renderer, preferences,
   provider adapter, translation pipeline logic, and replica-engine adapters
 - `tests/`: unit tests

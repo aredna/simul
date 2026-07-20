@@ -35,7 +35,10 @@ export type ReplicaDiagnosticCode =
   | 'checkpoint_too_large'
   | 'privacy_rejected'
   | 'replay_failed'
-  | 'replay_timeout';
+  | 'replay_timeout'
+  | 'stream_gap'
+  | 'stream_overflow'
+  | 'stream_failed';
 
 /**
  * Deliberately content-free local diagnostics. Never add URLs, source text,
@@ -76,6 +79,39 @@ export interface ReplicaEngine {
   releasePresentation(showFallbackLabel?: boolean): void;
   dispose(): void;
 }
+
+export interface ReplicaLiveBatch {
+  readonly identity: ReplicaDocumentIdentity;
+  readonly firstSequence: number;
+  readonly lastSequence: number;
+  readonly events: readonly unknown[];
+  readonly byteLength: number;
+}
+
+export interface ReplicaLiveStreamObserver {
+  onBatch(batch: ReplicaLiveBatch): void;
+  onCheckpoint(checkpoint: ReplicaCheckpointResponse): void;
+  onFailure(code: Extract<ReplicaDiagnosticCode, 'stream_gap' | 'stream_overflow' | 'stream_failed'>): void;
+}
+
+/**
+ * One exact-document Port owned by the visible companion. The recorder does
+ * not consider transport delivery an acknowledgement; only the replica engine
+ * may advance the applied watermark.
+ */
+export interface ReplicaLiveStreamLease {
+  readonly initialCheckpoint: Promise<ReplicaCheckpointResponse>;
+  setObserver(observer: ReplicaLiveStreamObserver): void;
+  acknowledgeCheckpoint(sequence: number): void;
+  acknowledge(sequence: number): void;
+  requestCheckpoint(): void;
+  dispose(): void;
+}
+
+export type ReplicaLiveStreamFactory = (
+  request: ReplicaCaptureRequest,
+  signal?: AbortSignal,
+) => Promise<ReplicaLiveStreamLease>;
 
 export interface ReplicaCheckpointPayload {
   readonly events: readonly unknown[];

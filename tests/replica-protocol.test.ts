@@ -12,6 +12,8 @@ import {
   readCheckpointCommand,
   readCheckpointResponse,
   sanitizeCssText,
+  sanitizeCssTextDetailed,
+  sanitizeRrwebIncrementalAttributes,
 } from '../lib/replica/protocol-v2';
 
 const identity: ReplicaDocumentIdentity = createReplicaIdentity({
@@ -202,15 +204,172 @@ describe('replica protocol v2', () => {
     );
     expect(sanitized).not.toContain('cdn.example.test');
     expect(sanitized).not.toContain('@import');
+    expect(sanitized).toContain('@media not all {}');
+    expect(sanitized).toContain('.a{');
+    expect(sanitized).toContain('.b{');
     expect(
       sanitizeCssText(String.raw`.a{background:\75rl(/escaped.png)}`),
-    ).toBe('');
-    expect(sanitizeCssText('.a{background-image:image-set("/a.png" 1x)}')).toBe('');
-    expect(sanitizeCssText('@import "relative.css"')).toBe('');
-    expect(sanitizeCssText('.a{background-image:image("relative.png")}')).toBe('');
+    ).not.toContain('\\');
+    expect(sanitizeCssText('.a{background-image:image-set("/a.png" 1x)}'))
+      .toBe('.a{background-image:url("about:blank")}');
+    expect(sanitizeCssText('@import "relative.css"')).toBe('@media not all {}');
+    expect(sanitizeCssText('.a{background-image:image("relative.png")}'))
+      .toBe('.a{background-image:url("about:blank")}');
     expect(sanitizeCssText('.a{background:url(/relative.png)}')).not.toContain(
       'relative.png',
     );
+    expect(sanitizeCssText('@media/**/screen {p{}} q{}'))
+      .toBe('@media screen {p{}} q{}');
+    expect(sanitizeCssText(
+      '@namespace svg url("https://www.w3.org/2000/svg");p{}',
+    )).toBe('@namespace svg "urn:simul:inert";p{}');
+  });
+
+  it('preserves escaped identifiers, strings, comments, and rule topology', () => {
+    const escapedMedia = String.raw`@\6d edia screen{.a{color:red}}.b{color:blue}`;
+    const splitUrlStrings = '.a{content:"url("}.b{content:")"}.c{color:red}';
+    const splitCommentStrings = '.a{content:"/*"}.b{content:"*/"}.c{color:red}';
+
+    expect(sanitizeCssText(escapedMedia)).toBe(escapedMedia);
+    expect(sanitizeCssText(splitUrlStrings)).toBe(splitUrlStrings);
+    expect(sanitizeCssText(splitCommentStrings)).toBe(splitCommentStrings);
+    expect(sanitizeCssText('@media/**/screen{.a{color:red}}.b{}'))
+      .toBe('@media screen{.a{color:red}}.b{}');
+  });
+
+  it('classifies only real top-level resource at-rules', () => {
+    const escapedImport = sanitizeCssTextDetailed(
+      String.raw`@\69mport/**/url("https://cdn.example.test/a.css");p{}`,
+    );
+    expect(escapedImport).toEqual({
+      text: '@media not all {}p{}',
+      neutralizedImport: true,
+      neutralizedNamespace: false,
+    });
+
+    const noWhitespaceImport = sanitizeCssTextDetailed(
+      '@import"relative.css";p{}',
+    );
+    expect(noWhitespaceImport).toEqual({
+      text: '@media not all {}p{}',
+      neutralizedImport: true,
+      neutralizedNamespace: false,
+    });
+
+    const namespace = sanitizeCssTextDetailed(
+      String.raw`@\6e amespace svg/**/url("https://www.w3.org/2000/svg");p{}`,
+    );
+    expect(namespace).toEqual({
+      text: '@namespace svg "urn:simul:inert";p{}',
+      neutralizedImport: false,
+      neutralizedNamespace: true,
+    });
+    expect(namespace.text).not.toContain('https://www.w3.org/2000/svg');
+
+    const declarationText =
+      '.a{--rule:@import "relative.css";' +
+      'content:"@namespace url(https://example.test/ns);/*"}';
+    expect(sanitizeCssTextDetailed(declarationText)).toEqual({
+      text: declarationText,
+      neutralizedImport: false,
+      neutralizedNamespace: false,
+    });
+
+    const rulePreludeText =
+      '@supports selector(@import"literal.css"){p{color:red}}' +
+      'q[data-rule=@namespace]{color:blue}';
+    expect(sanitizeCssTextDetailed(rulePreludeText)).toEqual({
+      text: rulePreludeText,
+      neutralizedImport: false,
+      neutralizedNamespace: false,
+    });
+
+    const htmlCommentImport = sanitizeCssTextDetailed(
+      '<!-- @import"data:text/css,p%7B%7D"; --> q{}',
+    );
+    expect(htmlCommentImport).toEqual({
+      text: '<!-- @media not all {} --> q{}',
+      neutralizedImport: true,
+      neutralizedNamespace: false,
+    });
+
+    const chainedHtmlTokens = sanitizeCssTextDetailed(
+      String.raw`--><!--@\69mport"relative.css";--><!--q{}`,
+    );
+    expect(chainedHtmlTokens).toEqual({
+      text: '--><!--@media not all {}--><!--q{}',
+      neutralizedImport: true,
+      neutralizedNamespace: false,
+    });
+
+    const lateImport = 'p{}@import"relative.css";q{}';
+    expect(sanitizeCssTextDetailed(lateImport)).toEqual({
+      text: lateImport,
+      neutralizedImport: false,
+      neutralizedNamespace: false,
+    });
+    expect(sanitizeCssTextDetailed('@layer base;@import"relative.css";p{}'))
+      .toEqual({
+        text: '@layer base;@media not all {}p{}',
+        neutralizedImport: true,
+        neutralizedNamespace: false,
+      });
+  });
+
+  it('neutralizes only resource-bearing function tokens', () => {
+    const sanitized = sanitizeCssText(
+      String.raw`.a{a:\75rl(/a);b:image("/b");c:image-set("/c" 1x);` +
+      'd:-webkit-image-set("/d" 1x);e:src("/e");' +
+      'f:cross-fade(url(/f),red);g:element(#g);' +
+      'h:url(foo\\)bar);' +
+      'content:"url(/literal) image(/* literal */)"}',
+    );
+
+    expect(sanitized).toBe(
+      '.a{a:url("about:blank");b:url("about:blank");' +
+      'c:url("about:blank");d:url("about:blank");' +
+      'e:url("about:blank");f:url("about:blank");' +
+      'g:url("about:blank");h:url("about:blank");' +
+      'content:"url(/literal) image(/* literal */)"}',
+    );
+    expect(sanitizeCssText('.a{background:url(unclosed}.b{}.c{}'))
+      .toBe('.a{background:url("about:blank")}.b{}.c{}');
+  });
+
+  it('requires rrweb exact-case _cssText attributes', () => {
+    expect(sanitizeRrwebIncrementalAttributes(
+      { _CSStext: 'p {}' },
+      'style',
+      false,
+    )).toBeUndefined();
+    expect(sanitizeRrwebIncrementalAttributes(
+      { _cssText: 'p {}' },
+      'style',
+      false,
+    )).toEqual({ _cssText: 'p {}' });
+
+    const malformedCheckpoint = createCheckpointEnvelope(identity, {
+      events: checkpointEventsForNode({
+        type: 0,
+        id: 1,
+        childNodes: [{
+          type: 2,
+          id: 2,
+          tagName: 'style',
+          attributes: { _CSSTEXT: 'p {}' },
+          childNodes: [],
+        }],
+      }),
+      captureMs: 1,
+      viewportWidth: 10,
+      viewportHeight: 10,
+      documentWidth: 10,
+      documentHeight: 10,
+    });
+    expect(malformedCheckpoint).toMatchObject({
+      kind: 'simul:replica-v2:checkpoint-error',
+      payload: { code: 'privacy_rejected' },
+    });
   });
 });
 
