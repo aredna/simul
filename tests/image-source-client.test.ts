@@ -10,6 +10,38 @@ import type { ReplicaCaptureRequest } from '../lib/replica/contracts';
 afterEach(() => vi.unstubAllGlobals());
 
 describe('Chrome image source client', () => {
+  it('opens an engine-owned isolated HTML image source Port', async () => {
+    const port = new FakePort();
+    const connect = installBrowser(port);
+
+    const lease = await openChromeImageSource(
+      request,
+      vi.fn(),
+      undefined,
+      'isolated-html',
+    );
+
+    expect(connect).toHaveBeenCalledWith(request.tabId, expect.objectContaining({
+      name: `simul:image-source-v1:isolated-html:${request.sessionId}`,
+    }));
+    port.emitMessage({
+      kind: 'simul:image-source-v1:ready',
+      document: {
+        sessionId: request.sessionId,
+        pageEpoch: request.pageEpoch,
+        generation: request.generation,
+        documentId: request.documentId,
+        frameId: request.frameId,
+      },
+      summary: { candidateImages: 5, observedImages: 2 },
+    });
+    await expect(lease.ready).resolves.toEqual({
+      candidateImages: 5,
+      observedImages: 2,
+    });
+    lease.dispose();
+  });
+
   it('exposes a start-post failure even when the lease is dead on arrival', async () => {
     const port = new FakePort();
     port.failPosts = true;
@@ -69,12 +101,14 @@ const descriptor: SourceImageDescriptor = {
   renderedHeight: 50,
 };
 
-function installBrowser(port: FakePort): void {
+function installBrowser(port: FakePort): ReturnType<typeof vi.fn> {
+  const connect = vi.fn(() => port);
   vi.stubGlobal('browser', {
     tabs: {
-      connect: vi.fn(() => port),
+      connect,
     },
   });
+  return connect;
 }
 
 class FakePort {
@@ -93,6 +127,10 @@ class FakePort {
 
   emitDisconnect(): void {
     this.onDisconnect.emit();
+  }
+
+  emitMessage(message: unknown): void {
+    this.onMessage.emit(message);
   }
 }
 

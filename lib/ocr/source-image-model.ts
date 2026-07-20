@@ -18,6 +18,7 @@ export interface SourceImageUpsert extends ImageDimensions {
   readonly document: ReplicaSourceDocumentIdentity;
   readonly nodeId: number;
   readonly contentChanged: boolean;
+  readonly observationChanged: boolean;
   readonly visibility: ImageVisibilityTier;
   readonly connected: true;
 }
@@ -91,6 +92,7 @@ export class SourceImageModel {
       parsed.contentChanged;
     const observationChanged =
       needsContentRevision ||
+      parsed.observationChanged ||
       !previous ||
       previous.visibility !== parsed.visibility ||
       previous.renderedWidth !== parsed.renderedWidth ||
@@ -233,6 +235,7 @@ function readSourceImageUpsert(input: unknown): SourceImageUpsert | undefined {
     'document',
     'nodeId',
     'contentChanged',
+    'observationChanged',
     'visibility',
     'connected',
     'renderedWidth',
@@ -256,6 +259,7 @@ function readSourceImageUpsert(input: unknown): SourceImageUpsert | undefined {
     !document ||
     !isNodeId(input.nodeId as number) ||
     typeof input.contentChanged !== 'boolean' ||
+    typeof input.observationChanged !== 'boolean' ||
     !isVisibility(input.visibility as string) ||
     input.connected !== true ||
     !isValidImageDimensions(dimensions)
@@ -264,6 +268,7 @@ function readSourceImageUpsert(input: unknown): SourceImageUpsert | undefined {
     document,
     nodeId: input.nodeId as number,
     contentChanged: input.contentChanged,
+    observationChanged: input.observationChanged,
     visibility: input.visibility as ImageVisibilityTier,
     connected: true,
     renderedWidth: dimensions.renderedWidth,

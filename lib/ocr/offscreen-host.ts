@@ -3,6 +3,12 @@ import {
   type ImageTextResult,
 } from './contracts';
 import {
+  receiverSafeTimeoutCanceller,
+  receiverSafeTimeoutScheduler,
+  type TimeoutCanceller,
+  type TimeoutScheduler,
+} from '../browser-scheduling';
+import {
   createOffscreenOcrError,
   type OffscreenOcrCommand,
   type OffscreenOcrJob,
@@ -10,6 +16,7 @@ import {
   type OcrHostErrorCode,
 } from './offscreen-protocol';
 import type { TransientImageInputStore } from './transient-image-store';
+import type { ImageTextProviderId } from './known-provider-ids';
 
 export interface OffscreenOcrProviderRunner {
   recognize(
@@ -21,6 +28,11 @@ export interface OffscreenOcrProviderRunner {
   dispose(): Promise<void>;
 }
 
+export interface OffscreenOcrProviderRunnerFactory {
+  readonly id: ImageTextProviderId;
+  create(): OffscreenOcrProviderRunner;
+}
+
 interface QueuedHostJob {
   readonly job: OffscreenOcrJob;
   readonly resolve: (response: OffscreenOcrResponse) => void;
@@ -30,15 +42,15 @@ interface QueuedHostJob {
 export const OFFSCREEN_TRANSIENT_CLEANUP_INTERVAL_MS = 30_000;
 
 export interface OffscreenComputeHostEnvironment {
-  readonly setTimer?: typeof setTimeout;
-  readonly clearTimer?: typeof clearTimeout;
+  readonly setTimer?: TimeoutScheduler;
+  readonly clearTimer?: TimeoutCanceller;
   readonly cleanupIntervalMs?: number;
 }
 
 /** One global active and one pending expensive OCR job. */
 export class OffscreenComputeHost {
-  readonly #setTimer: typeof setTimeout;
-  readonly #clearTimer: typeof clearTimeout;
+  readonly #setTimer: TimeoutScheduler;
+  readonly #clearTimer: TimeoutCanceller;
   readonly #cleanupIntervalMs: number;
   #active: QueuedHostJob | undefined;
   #activeAbortController: AbortController | undefined;
@@ -51,8 +63,8 @@ export class OffscreenComputeHost {
     private readonly runner: OffscreenOcrProviderRunner,
     environment: OffscreenComputeHostEnvironment = {},
   ) {
-    this.#setTimer = environment.setTimer ?? setTimeout;
-    this.#clearTimer = environment.clearTimer ?? clearTimeout;
+    this.#setTimer = receiverSafeTimeoutScheduler(environment.setTimer);
+    this.#clearTimer = receiverSafeTimeoutCanceller(environment.clearTimer);
     this.#cleanupIntervalMs = cleanupInterval(environment.cleanupIntervalMs);
     void this.#cleanupExpiredInputs();
   }
@@ -201,6 +213,7 @@ function createQueuedJob(job: OffscreenOcrJob): QueuedHostJob {
 
 function readRunnerError(error: unknown): OcrHostErrorCode {
   if (error instanceof Error) {
+    if (error.name === 'ProviderUnavailableError') return 'provider-unavailable';
     if (error.name === 'UnsupportedLanguageError') return 'unsupported-language';
     if (error.name === 'WorkerLostError') return 'worker-lost';
   }

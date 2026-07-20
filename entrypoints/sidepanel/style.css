@@ -113,6 +113,8 @@ input:focus-visible { outline: 3px solid rgb(23 108 74 / 28%); outline-offset: 2
 .control-overlay[hidden] { display: none; }
 
 .overlay-heading { display: flex; align-items: center; justify-content: space-between; margin-bottom: 11px; }
+.overlay-title { display: flex; align-items: baseline; gap: 8px; }
+.build-version { color: var(--muted); font-size: 9px; font-weight: 650; }
 .quiet-button { width: 32px; min-height: 30px; padding: 0; border: 0; background: transparent; font-size: 21px; }
 
 .language-row { display: grid; grid-template-columns: minmax(0, 1fr) 34px minmax(0, 1fr); gap: 7px; align-items: end; }
@@ -129,6 +131,10 @@ select { width: 100%; min-height: 34px; padding: 5px 26px 5px 8px; font-size: 12
 .ocr-order-buttons { display: flex; gap: 4px; }
 .ocr-order-buttons button { width: 28px; min-height: 28px; padding: 0; }
 .image-prompt-toggle { padding-top: 7px; }
+.image-diagnostics { margin-top: 9px; border-top: 1px solid var(--line); padding-top: 8px; }
+.image-diagnostics summary { color: var(--green-dark); font-size: 11px; font-weight: 750; cursor: pointer; }
+.image-diagnostics-output { display: block; max-height: 150px; margin-top: 7px; padding: 8px; overflow: auto; border-radius: 7px; color: var(--muted); background: rgb(120 130 124 / 9%); font: 10px/1.45 ui-monospace, SFMono-Regular, Consolas, monospace; white-space: pre-wrap; }
+.image-diagnostics-clear { min-height: 28px; margin-top: 7px; padding: 4px 8px; font-size: 10px; }
 .check-label { display: flex !important; align-items: center; gap: 7px !important; min-height: 34px; padding-top: 14px; }
 .check-label input { width: 16px; height: 16px; margin: 0; accent-color: var(--green); }
 

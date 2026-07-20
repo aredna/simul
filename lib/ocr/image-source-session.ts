@@ -164,6 +164,11 @@ export class ImageSourceSession {
       });
       this.#observer = observer;
       this.#unsubscribe = observer.subscribe(this.#onObservation);
+      this.#post({
+        kind: 'simul:image-source-v1:ready',
+        document: documentIdentity,
+        summary: observer.readySummary,
+      });
     } catch {
       this.dispose(true);
     }

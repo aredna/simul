@@ -17,6 +17,12 @@ import {
 export const IMAGE_SOURCE_PROTOCOL_VERSION = 1;
 export const IMAGE_SOURCE_PORT_PREFIX = 'simul:image-source-v1:';
 export const MAX_IMAGE_SOURCE_REQUEST_ID_LENGTH = 96;
+export type ImageSourceBridgeId = 'rrweb' | 'isolated-html';
+
+export interface ImageSourcePortIdentity {
+  readonly bridge: ImageSourceBridgeId;
+  readonly sessionId: string;
+}
 
 export interface ImageSourceStartMessage {
   readonly kind: 'simul:image-source-v1:start';
@@ -50,7 +56,18 @@ export interface SourceImageCaptureMetrics {
   readonly nearestElementLanguage?: SupportedLanguage;
 }
 
+/** Content-free inventory reported after the initial synchronous DOM scan. */
+export interface ImageSourceReadySummary {
+  readonly candidateImages: number;
+  readonly observedImages: number;
+}
+
 export type ImageSourceRecorderMessage =
+  | {
+      readonly kind: 'simul:image-source-v1:ready';
+      readonly document: ReplicaSourceDocumentIdentity;
+      readonly summary: ImageSourceReadySummary;
+    }
   | {
       readonly kind: 'simul:image-source-v1:change';
       readonly change: SourceImageChange;
@@ -67,17 +84,39 @@ export type ImageSourceRecorderMessage =
       readonly status: 'stale' | 'hidden';
     };
 
-export function createImageSourcePortName(sessionId: string): string {
+export function createImageSourcePortName(
+  sessionId: string,
+  bridge: ImageSourceBridgeId = 'rrweb',
+): string {
   if (!isSafeToken(sessionId)) throw new Error('Invalid image source session.');
-  return `${IMAGE_SOURCE_PORT_PREFIX}${sessionId}`;
+  return `${IMAGE_SOURCE_PORT_PREFIX}${bridge}:${sessionId}`;
 }
 
-export function readImageSourcePortSessionId(name: unknown): string | undefined {
+export function readImageSourcePortIdentity(
+  name: unknown,
+  expectedBridge?: ImageSourceBridgeId,
+): ImageSourcePortIdentity | undefined {
   if (typeof name !== 'string' || !name.startsWith(IMAGE_SOURCE_PORT_PREFIX)) {
     return undefined;
   }
-  const sessionId = name.slice(IMAGE_SOURCE_PORT_PREFIX.length);
-  return isSafeToken(sessionId) ? sessionId : undefined;
+  const suffix = name.slice(IMAGE_SOURCE_PORT_PREFIX.length);
+  const separator = suffix.indexOf(':');
+  if (separator < 1) return undefined;
+  const bridge = suffix.slice(0, separator);
+  const sessionId = suffix.slice(separator + 1);
+  if (
+    (bridge !== 'rrweb' && bridge !== 'isolated-html') ||
+    expectedBridge && bridge !== expectedBridge ||
+    !isSafeToken(sessionId)
+  ) return undefined;
+  return Object.freeze({ bridge, sessionId });
+}
+
+export function readImageSourcePortSessionId(
+  name: unknown,
+  expectedBridge?: ImageSourceBridgeId,
+): string | undefined {
+  return readImageSourcePortIdentity(name, expectedBridge)?.sessionId;
 }
 
 export function readImageSourceControllerMessage(
@@ -116,6 +155,16 @@ export function readImageSourceRecorderMessage(
   expectedDocument: ReplicaSourceDocumentIdentity,
 ): ImageSourceRecorderMessage | undefined {
   if (!isRecord(input) || typeof input.kind !== 'string') return undefined;
+  if (input.kind === 'simul:image-source-v1:ready') {
+    if (!hasExactKeys(input, ['kind', 'document', 'summary'])) return undefined;
+    const document = readSourceDocumentIdentity(input.document);
+    const summary = readImageSourceReadySummary(input.summary);
+    return document &&
+      sameSourceDocument(document, expectedDocument) &&
+      summary
+      ? Object.freeze({ kind: input.kind, document, summary })
+      : undefined;
+  }
   if (input.kind === 'simul:image-source-v1:change') {
     if (!hasExactKeys(input, ['kind', 'change'])) return undefined;
     const change = readSourceImageChange(input.change);
@@ -153,6 +202,22 @@ export function readImageSourceRecorderMessage(
     requestId: input.requestId,
     status: 'ready',
     metrics,
+  });
+}
+
+export function readImageSourceReadySummary(
+  input: unknown,
+): ImageSourceReadySummary | undefined {
+  if (
+    !isRecord(input) ||
+    !hasExactKeys(input, ['candidateImages', 'observedImages']) ||
+    !isBoundedNonNegativeSafeInteger(input.candidateImages, 10_000) ||
+    !isBoundedNonNegativeSafeInteger(input.observedImages, 10_000) ||
+    input.observedImages > input.candidateImages
+  ) return undefined;
+  return Object.freeze({
+    candidateImages: input.candidateImages,
+    observedImages: input.observedImages,
   });
 }
 
@@ -250,6 +315,15 @@ function isSafeToken(value: unknown): value is string {
 
 function isPositiveSafeInteger(value: unknown): value is number {
   return Number.isSafeInteger(value) && Number(value) > 0;
+}
+
+function isBoundedNonNegativeSafeInteger(
+  value: unknown,
+  maximum: number,
+): value is number {
+  return Number.isSafeInteger(value) &&
+    Number(value) >= 0 &&
+    Number(value) <= maximum;
 }
 
 function isFiniteBounded(

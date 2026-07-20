@@ -10,6 +10,7 @@ import {
   type ReplicaLiveBatch,
   type ReplicaLiveStreamFactory,
   type ReplicaLiveStreamLease,
+  type ReplicaImageAnchor,
   type ReplicaRunResult,
 } from './contracts';
 import {
@@ -35,6 +36,8 @@ import type {
   ReplicaTranslationSnapshot,
   ReplicaTranslationSurface,
 } from '../translation/replica-translation-coordinator';
+
+export type { ReplicaImageAnchor } from './contracts';
 
 export const SHADOW_CAPTURE_DEADLINE_MS = 5_000;
 export const SHADOW_REPLAY_DEADLINE_MS = 5_000;
@@ -107,13 +110,6 @@ interface ManagedLiveStream {
   appliedBatches: number;
   appliedBytes: number;
   disposed: boolean;
-}
-
-export interface ReplicaImageAnchor {
-  readonly document: ReplicaSourceDocumentIdentity;
-  readonly replayLease: number;
-  readonly image: HTMLImageElement;
-  readonly iframe: HTMLIFrameElement;
 }
 
 class ShadowReplicaError extends Error {

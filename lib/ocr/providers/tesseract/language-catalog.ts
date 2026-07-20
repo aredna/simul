@@ -54,6 +54,21 @@ export interface ResolvedTesseractLanguageRoute {
   readonly languageGroup: string;
 }
 
+/** Resolve the source language independently from any one OCR model catalog. */
+export function resolveImageSourceLanguage(
+  hints: TesseractLanguageHints,
+): SupportedLanguage | undefined {
+  return canonicalizeLanguageTag(hints.nearestElementLanguage) ??
+    hints.explicitSourceLanguage ??
+    hints.detectedPageLanguage;
+}
+
+export function tesseractLanguageGroupFor(
+  language: SupportedLanguage,
+): string | undefined {
+  return ROUTES[language];
+}
+
 /** Nearest valid lang, explicit From, then detected page language. */
 export function resolveTesseractLanguageRoute(
   hints: TesseractLanguageHints,

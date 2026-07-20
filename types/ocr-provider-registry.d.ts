@@ -7,3 +7,12 @@ declare module 'virtual:simul-ocr-provider-registry' {
     promptImageText: boolean;
   }>;
 }
+
+declare module 'virtual:simul-ocr-provider-runtime-registry' {
+  import type {
+    OffscreenOcrProviderRunnerFactory,
+  } from '../lib/ocr/offscreen-host';
+
+  export const compiledOcrProviderRunnerFactories:
+    readonly OffscreenOcrProviderRunnerFactory[];
+}

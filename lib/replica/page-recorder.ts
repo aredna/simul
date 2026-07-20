@@ -3,6 +3,12 @@ import { record } from '@rrweb/record';
 import { ImageSourceSession } from '../ocr/image-source-session';
 import { readImageSourcePortSessionId } from '../ocr/image-source-protocol';
 import { SourceImageObserver } from '../ocr/source-image-observer';
+import {
+  receiverSafeTimeoutCanceller,
+  receiverSafeTimeoutScheduler,
+  type TimeoutCanceller,
+  type TimeoutScheduler,
+} from '../browser-scheduling';
 
 import {
   type ReplicaCheckpointErrorEnvelope,
@@ -56,8 +62,8 @@ interface RecorderEnvironment {
   readonly window: Window;
   readonly now: () => number;
   readonly start: RecorderStart;
-  readonly setTimer: typeof setTimeout;
-  readonly clearTimer: typeof clearTimeout;
+  readonly setTimer: TimeoutScheduler;
+  readonly clearTimer: TimeoutCanceller;
 }
 
 export interface PageRecorderBridgeEnvironment {
@@ -118,7 +124,7 @@ export function installPageRecorderBridge(
   let captureActive = false;
   let liveSession: LiveRecorderSession | undefined;
   runtime.onConnect.addListener((port) => {
-    if (!readImageSourcePortSessionId(port.name)) return;
+    if (!readImageSourcePortSessionId(port.name, 'rrweb')) return;
     new ImageSourceSession({
       port,
       document: sourceDocument,
@@ -252,8 +258,8 @@ export async function captureMaskedCheckpoint(
       window: sourceWindow,
       now,
       start: environment.start ?? (record as RecorderStart),
-      setTimer: environment.setTimer ?? setTimeout,
-      clearTimer: environment.clearTimer ?? clearTimeout,
+      setTimer: receiverSafeTimeoutScheduler(environment.setTimer),
+      clearTimer: receiverSafeTimeoutCanceller(environment.clearTimer),
     });
     const documentElement = sourceDocument.documentElement;
     const body = sourceDocument.body;

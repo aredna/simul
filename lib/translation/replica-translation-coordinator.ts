@@ -378,7 +378,11 @@ export class ReplicaTranslationCoordinator {
           }
           const boundary = splitBoundaryWhitespace(job.record.source);
           const translated = await this.#memory.getOrCreate(
-            { provider: this.#providerId, pair },
+            {
+              provider: this.#providerId,
+              pair,
+              pageKey: sourceDocumentTranslationKey(job.record.document),
+            },
             job.record.source,
             () => {
               const combined = combineAbortSignals(
@@ -570,6 +574,16 @@ export class ReplicaTranslationCoordinator {
 
 export function translationPairKey(pair: TranslationPair): string {
   return `${pair.sourceLanguage}>${pair.targetLanguage}`;
+}
+
+function sourceDocumentTranslationKey(
+  document: ReplicaSourceDocumentIdentity,
+): string {
+  return JSON.stringify([
+    document.sessionId,
+    document.documentId,
+    document.frameId,
+  ]);
 }
 
 function isTranslatableRecord(record: ReplicaSourceTextRecord): boolean {

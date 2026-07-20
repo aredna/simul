@@ -41,6 +41,10 @@ export interface ReplayPresentationHost {
   createCandidate(dimensions: VisibleReplayDimensions): VisibleReplayCandidateLease;
   markLive(iframe: HTMLIFrameElement): void;
   refreshExtent(iframe: HTMLIFrameElement, extent: VisibleReplayExtent): void;
+  refreshDimensions?(
+    iframe: HTMLIFrameElement,
+    dimensions: VisibleReplayDimensions,
+  ): void;
   showLegacy(showFallbackLabel: boolean): void;
   dispose(): void;
 }
@@ -97,13 +101,10 @@ export class VisibleReplayHost implements ReplayPresentationHost {
       normalizeDimensions(dimensions),
     );
     this.#candidate = candidate;
-    const parent = this.#document.body ?? this.#document.documentElement;
-    if (!parent) {
-      this.#candidate = undefined;
-      candidate.release();
-      throw new Error('The replay presentation host has no staging parent.');
-    }
-    parent.append(candidate.root);
+    // An iframe's browsing context may be discarded and its srcdoc reloaded
+    // when a connected ancestor is moved between parents. Stage candidates in
+    // their final preview parent and reveal them in place at commit time.
+    this.#previewSurface.append(candidate.root);
     return candidate;
   }
 
@@ -217,6 +218,26 @@ export class VisibleReplayHost implements ReplayPresentationHost {
     this.#applyLayout(committed);
   }
 
+  refreshDimensions(
+    iframe: HTMLIFrameElement,
+    dimensions: VisibleReplayDimensions,
+  ): void {
+    const committed = this.#committed;
+    if (!committed || committed.iframe !== iframe || committed.released) return;
+    committed.dimensions = normalizeDimensions(dimensions);
+    this.#sourceScrollX = clamp(
+      this.#sourceScrollX,
+      0,
+      maximumSourceScrollX(committed),
+    );
+    this.#sourceScrollY = clamp(
+      this.#sourceScrollY,
+      0,
+      maximumSourceScrollY(committed),
+    );
+    this.#applyLayout(committed);
+  }
+
   showLegacy(showFallbackLabel: boolean): void {
     this.#legacySurface.hidden = false;
     this.#legacySurface.removeAttribute('aria-hidden');
@@ -250,6 +271,7 @@ export class VisibleReplayHost implements ReplayPresentationHost {
       this.#disposed ||
       this.#candidate !== candidate ||
       candidate.released ||
+      candidate.root.parentElement !== this.#previewSurface ||
       !candidate.mount.contains(iframe) ||
       !isProtectedReplayIframe(iframe)
     ) {
@@ -261,8 +283,6 @@ export class VisibleReplayHost implements ReplayPresentationHost {
     this.#sourceScrollX = boundedScroll(iframe.contentWindow?.scrollX);
     this.#sourceScrollY = boundedScroll(iframe.contentWindow?.scrollY);
 
-    candidate.root.classList.remove('replica-replay-root--candidate');
-    candidate.root.classList.add('replica-replay-root--committed');
     candidate.installScrollListener(() => {
       if (this.#committed !== candidate || candidate.released) return;
       this.#sourceScrollX = clamp(
@@ -279,13 +299,15 @@ export class VisibleReplayHost implements ReplayPresentationHost {
     });
     this.#applyLayout(candidate);
 
-    // Moving the prepared root is the only operation that can displace the
-    // previous visible DOM. Ownership changes only after that move succeeds.
-    this.#previewSurface.replaceChildren(candidate.root);
-    this.#candidate = undefined;
-    this.#committed = candidate;
+    // Reveal the already-connected candidate synchronously. Never move its
+    // iframe subtree: Chrome can reload srcdoc during a connected DOM move and
+    // erase the constructed replica back to Simul's empty shell.
+    candidate.root.classList.remove('replica-replay-root--candidate');
+    candidate.root.classList.add('replica-replay-root--committed');
     candidate.root.removeAttribute('inert');
     candidate.root.removeAttribute('style');
+    this.#candidate = undefined;
+    this.#committed = candidate;
     this.#previewSurface.hidden = false;
     this.#previewSurface.setAttribute('aria-hidden', 'true');
     this.#legacySurface.hidden = true;
@@ -294,8 +316,8 @@ export class VisibleReplayHost implements ReplayPresentationHost {
     this.#badge.hidden = false;
     this.#applyLayout(candidate);
 
-    // The new surface is committed before the old DOM lease is released, so a
-    // failed or slow replacement never blanks the companion between paints.
+    // The new surface is visible before the old lease is released. Both
+    // changes occur in one task, so replacement stays atomic between paints.
     previous?.release();
   }
 
@@ -351,7 +373,7 @@ class CandidateLease implements VisibleReplayCandidateLease {
   readonly stickyViewport: HTMLElement;
   readonly scaleLayer: HTMLElement;
   readonly mount: HTMLElement;
-  readonly dimensions: VisibleReplayDimensions;
+  dimensions: VisibleReplayDimensions;
   replayExtent: VisibleReplayExtent = { width: 1, height: 1 };
   iframe!: HTMLIFrameElement;
   scale = 1;

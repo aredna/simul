@@ -1,11 +1,15 @@
+import {
+  compiledOcrProviderRunnerFactories,
+} from 'virtual:simul-ocr-provider-runtime-registry';
+
 import { OffscreenComputeHost } from '../../lib/ocr/offscreen-host';
+import { OffscreenOcrProviderRouter } from '../../lib/ocr/offscreen-provider-router';
 import { readOffscreenOcrCommand } from '../../lib/ocr/offscreen-protocol';
-import { TesseractOffscreenRunner } from '../../lib/ocr/providers/tesseract/runtime';
 import { IndexedDbTransientImageStore } from '../../lib/ocr/transient-image-store';
 
 const host = new OffscreenComputeHost(
   new IndexedDbTransientImageStore(),
-  new TesseractOffscreenRunner(),
+  new OffscreenOcrProviderRouter(compiledOcrProviderRunnerFactories),
 );
 
 browser.runtime.onMessage.addListener((message, sender, sendResponse) => {

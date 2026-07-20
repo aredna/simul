@@ -1,5 +1,7 @@
 export const OCR_PROVIDER_VIRTUAL_MODULE_ID =
   'virtual:simul-ocr-provider-registry';
+export const OCR_PROVIDER_RUNTIME_VIRTUAL_MODULE_ID =
+  'virtual:simul-ocr-provider-runtime-registry';
 
 export const OCR_BUILD_FLAGS = Object.freeze([
   'SIMUL_OCR_TEXT_DETECTOR',
@@ -16,17 +18,20 @@ interface OcrProviderBuildDefinition {
   readonly id: string;
   readonly implemented: boolean;
   readonly importPath: string;
+  readonly runtimeImportPath?: string;
   readonly enabledByDefault?: boolean;
 }
 
-/** Providers stay independently removable; F enables only local Tesseract. */
+/** Providers stay independently removable from every extension entrypoint. */
 export const OCR_PROVIDER_BUILD_DEFINITIONS = Object.freeze([
   {
     flag: 'SIMUL_OCR_TEXT_DETECTOR',
     id: 'chrome-text-detector',
-    implemented: false,
-    enabledByDefault: false,
+    implemented: true,
+    enabledByDefault: true,
     importPath: '/lib/ocr/providers/chrome-text-detector/index.ts',
+    runtimeImportPath:
+      '/lib/ocr/providers/chrome-text-detector/offscreen.ts',
   },
   {
     flag: 'SIMUL_OCR_TESSERACT',
@@ -34,6 +39,7 @@ export const OCR_PROVIDER_BUILD_DEFINITIONS = Object.freeze([
     implemented: true,
     enabledByDefault: true,
     importPath: '/lib/ocr/providers/tesseract/index.ts',
+    runtimeImportPath: '/lib/ocr/providers/tesseract/offscreen.ts',
   },
   {
     flag: 'SIMUL_OCR_TRANSFORMERS',
@@ -116,21 +122,53 @@ export function createOcrProviderRegistryModule(
   ].join('\n');
 }
 
+export function createOcrProviderRuntimeRegistryModule(
+  profile: OcrBuildProfile,
+): string {
+  const imports: string[] = [];
+  const bindings: string[] = [];
+  for (const id of profile.enabledProviderIds) {
+    const definition = OCR_PROVIDER_BUILD_DEFINITIONS.find(
+      (candidate) => candidate.id === id && candidate.implemented,
+    );
+    if (!definition || !('runtimeImportPath' in definition) ||
+      !definition.runtimeImportPath) {
+      throw new Error(`Enabled OCR provider has no offscreen runtime: ${id}.`);
+    }
+    const binding = `providerRuntime${bindings.length}`;
+    imports.push(
+      `import ${binding} from ${JSON.stringify(definition.runtimeImportPath)};`,
+    );
+    bindings.push(binding);
+  }
+  return [
+    ...imports,
+    `export const compiledOcrProviderRunnerFactories = Object.freeze([${bindings.join(', ')}]);`,
+  ].join('\n');
+}
+
 export function createOcrBuildProfilePlugin(
   environment: Readonly<Record<string, string | undefined>>,
 ) {
   const resolvedId = `\0${OCR_PROVIDER_VIRTUAL_MODULE_ID}`;
-  const moduleSource = createOcrProviderRegistryModule(
-    readOcrBuildProfile(environment),
-  );
+  const runtimeResolvedId = `\0${OCR_PROVIDER_RUNTIME_VIRTUAL_MODULE_ID}`;
+  const profile = readOcrBuildProfile(environment);
+  const moduleSource = createOcrProviderRegistryModule(profile);
+  const runtimeModuleSource = createOcrProviderRuntimeRegistryModule(profile);
   return {
     name: 'simul-ocr-build-profile',
     enforce: 'pre' as const,
     resolveId(id: string) {
-      return id === OCR_PROVIDER_VIRTUAL_MODULE_ID ? resolvedId : null;
+      if (id === OCR_PROVIDER_VIRTUAL_MODULE_ID) return resolvedId;
+      if (id === OCR_PROVIDER_RUNTIME_VIRTUAL_MODULE_ID) {
+        return runtimeResolvedId;
+      }
+      return null;
     },
     load(id: string) {
-      return id === resolvedId ? moduleSource : null;
+      if (id === resolvedId) return moduleSource;
+      if (id === runtimeResolvedId) return runtimeModuleSource;
+      return null;
     },
   };
 }

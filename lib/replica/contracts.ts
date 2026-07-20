@@ -1,6 +1,11 @@
 export const REPLICA_PROTOCOL_VERSION = 2 as const;
 
-export type ReplicaEngineId = 'legacy-v1' | 'rrweb-shadow-v2';
+import type { ReplicaSourceDocumentIdentity } from './source-identity';
+
+export type ReplicaEngineId =
+  | 'legacy-v1'
+  | 'isolated-html-v1'
+  | 'rrweb-shadow-v2';
 
 export interface ReplicaDocumentIdentity {
   readonly protocolVersion: typeof REPLICA_PROTOCOL_VERSION;
@@ -26,6 +31,8 @@ export type ReplicaDiagnosticCode =
   | 'legacy_selected'
   | 'shadow_disabled'
   | 'shadow_complete'
+  | 'isolated_complete'
+  | 'isolated_connected'
   | 'stale_identity'
   | 'access_denied'
   | 'capture_busy'
@@ -39,6 +46,20 @@ export type ReplicaDiagnosticCode =
   | 'stream_gap'
   | 'stream_overflow'
   | 'stream_failed';
+
+export interface ReplicaImageAnchor {
+  readonly document: ReplicaSourceDocumentIdentity;
+  readonly replayLease: number;
+  readonly image: HTMLImageElement;
+  readonly iframe: HTMLIFrameElement;
+}
+
+export interface ReplicaImageSurface {
+  resolveImageAnchor(
+    document: ReplicaSourceDocumentIdentity,
+    nodeId: number,
+  ): ReplicaImageAnchor | undefined;
+}
 
 /**
  * Deliberately content-free local diagnostics. Never add URLs, source text,

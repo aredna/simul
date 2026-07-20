@@ -1,11 +1,19 @@
-import type { ReplicaCaptureRequest } from '../replica/contracts';
+import type {
+  ReplicaCaptureRequest,
+  ReplicaImageAnchor,
+} from '../replica/contracts';
+import {
+  receiverSafeTimeoutCanceller,
+  receiverSafeTimeoutScheduler,
+  type TimeoutCanceller,
+  type TimeoutScheduler,
+} from '../browser-scheduling';
 import { createReplicaIdentity } from '../replica/protocol-v2';
 import {
   sourceDocumentIdentity,
   sameSourceDocument,
   type ReplicaSourceDocumentIdentity,
 } from '../replica/source-identity';
-import type { ReplicaImageAnchor } from '../replica/rrweb-shadow-engine';
 import type { SourceLanguagePreference } from '../preferences';
 import { translateWithSession } from '../translation-pipeline';
 import { TranslationMemory } from '../translation/translation-memory';
@@ -33,6 +41,7 @@ import {
 import {
   ImageScanScheduler,
   type ImageScanJob,
+  type ImageScanUpdateResult,
 } from './image-scan-scheduler';
 import {
   isImageSourceUnavailableError,
@@ -42,9 +51,12 @@ import type { ImageTextProviderId } from './known-provider-ids';
 import {
   PixelAcquisitionCoordinator,
   type AcquiredImagePixels,
+  type PixelAcquisitionResult,
 } from './pixel-acquisition';
+import type { OcrHostErrorCode } from './offscreen-protocol';
 import {
-  resolveTesseractLanguageRoute,
+  resolveImageSourceLanguage,
+  tesseractLanguageGroupFor,
   TESSERACT_MODEL_VERSION,
 } from './providers/tesseract/language-catalog';
 
@@ -62,13 +74,77 @@ export interface ImageTranslationConfiguration {
   readonly translationIdle: boolean;
 }
 
-export type ImageTranslationDiagnostic =
+export type ImageTranslationDiagnosticStage =
+  | 'disabled'
+  | 'waiting-for-replica'
+  | 'replica-ready'
+  | 'source-connecting'
+  | 'source-connected'
+  | 'source-empty'
+  | 'image-discovered'
+  | 'image-queued'
+  | 'image-coalesced'
+  | 'image-skipped'
+  | 'anchor-deferred'
+  | 'capture-started'
   | 'source-unavailable'
   | 'capture-deferred'
   | 'unsupported-language'
+  | 'same-language'
+  | 'recognition-started'
   | 'recognition-failed'
+  | 'no-text-found'
+  | 'translation-started'
   | 'translation-failed'
+  | 'translation-empty'
+  | 'projection-deferred'
   | 'projected';
+
+type ImageCaptureDeferralReason = Extract<
+  PixelAcquisitionResult,
+  { readonly status: 'deferred' }
+>['reason'];
+
+/**
+ * Console-only, content-free details. These deliberately exclude URLs, text,
+ * pixels, hashes, source node IDs, and document identifiers.
+ */
+export type ImageTranslationDiagnostic =
+  | ImageTranslationDiagnosticStage
+  | Readonly<{
+      stage: 'configuration';
+      status: 'disabled' | 'waiting-for-replica';
+      reason?: 'feature-off' | 'provider-unavailable';
+    }>
+  | Readonly<{
+      stage: 'source-summary';
+      candidateImages: number;
+      observedImages: number;
+    }>
+  | Readonly<{
+      stage: 'image-scheduling';
+      status: ImageScanUpdateResult['status'];
+      reason?: string;
+      visibility: SourceImageDescriptor['visibility'];
+      renderedWidth: number;
+      renderedHeight: number;
+    }>
+  | Readonly<{
+      stage: 'capture-deferred';
+      reason: ImageCaptureDeferralReason;
+      renderedWidth: number;
+      renderedHeight: number;
+    }>
+  | Readonly<{
+      stage: 'recognition-failed';
+      code: OcrHostErrorCode;
+    }>
+  | Readonly<{
+      stage: 'recognition-complete';
+      provider: ImageTextProviderId;
+      regions: number;
+      cacheHit: boolean;
+    }>;
 
 export interface ImageTranslationControllerEnvironment {
   readonly openSource: (
@@ -90,8 +166,8 @@ export interface ImageTranslationControllerEnvironment {
   readonly translationMemory?: TranslationMemory;
   readonly onDiagnostic?: (diagnostic: ImageTranslationDiagnostic) => void;
   readonly onBusyChange?: (busy: boolean) => void;
-  readonly setTimer?: typeof setTimeout;
-  readonly clearTimer?: typeof clearTimeout;
+  readonly setTimer?: TimeoutScheduler;
+  readonly clearTimer?: TimeoutCanceller;
   readonly projector?: Partial<
     Pick<
       ImageOverlayProjectorEnvironment,
@@ -104,8 +180,8 @@ export interface ImageTranslationControllerEnvironment {
 export class ImageTranslationController {
   readonly #projector: ImageOverlayProjector;
   readonly #translationMemory: TranslationMemory;
-  readonly #setTimer: typeof setTimeout;
-  readonly #clearTimer: typeof clearTimeout;
+  readonly #setTimer: TimeoutScheduler;
+  readonly #clearTimer: TimeoutCanceller;
   readonly #descriptors = new Map<number, SourceImageDescriptor>();
   readonly #projectedHashes = new Map<number, string>();
   #configuration: ImageTranslationConfiguration;
@@ -129,11 +205,12 @@ export class ImageTranslationController {
   #replayLease = 0;
   #sourceRecoveryKey: string | undefined;
   #sourceReconnectUsed = false;
+  #configurationDiagnosticKey: string | undefined;
 
   constructor(private readonly environment: ImageTranslationControllerEnvironment) {
     this.#translationMemory = environment.translationMemory ?? new TranslationMemory();
-    this.#setTimer = environment.setTimer ?? setTimeout;
-    this.#clearTimer = environment.clearTimer ?? clearTimeout;
+    this.#setTimer = receiverSafeTimeoutScheduler(environment.setTimer);
+    this.#clearTimer = receiverSafeTimeoutCanceller(environment.clearTimer);
     this.#configuration = {
       enabled: false,
       scanPolicy: 'visible-first-background-prescan',
@@ -164,10 +241,11 @@ export class ImageTranslationController {
     });
     const enabled = this.#isEnabled();
     const wasEnabled = previous.enabled &&
-      previous.providerOrder.includes('tesseract');
+      hasRuntimeImageTextProvider(previous.providerOrder);
     const pairChanged = pairConfigurationKey(previous) !==
       pairConfigurationKey(this.#configuration);
     if (!enabled) {
+      this.#reportConfigurationState();
       if (wasEnabled || this.#source) this.#stopSource(false);
       this.#beginPair();
       return;
@@ -189,10 +267,62 @@ export class ImageTranslationController {
     } else {
       this.#kick();
     }
+    this.#reportConfigurationState();
   }
 
-  commitReplica(request: ReplicaCaptureRequest, sourceWindowId: number): void {
-    if (this.#disposed) return;
+  /**
+   * Atomically binds one exact source document to its committed replay lease.
+   * A source Port is never opened from a partial request/window/lease handoff.
+   */
+  activateReplica(
+    request: ReplicaCaptureRequest,
+    sourceWindowId: number,
+    replayLease: number,
+  ): boolean {
+    if (
+      this.#disposed ||
+      !Number.isSafeInteger(sourceWindowId) ||
+      sourceWindowId < 0 ||
+      !isReplayLease(replayLease) ||
+      !request.isCurrent()
+    ) return false;
+    let document: ReplicaSourceDocumentIdentity;
+    try {
+      document = sourceDocumentIdentity(createReplicaIdentity({
+        sessionId: request.sessionId,
+        pageEpoch: request.pageEpoch,
+        generation: request.generation,
+        documentId: request.documentId,
+        frameId: request.frameId,
+        sequence: 0,
+      }));
+    } catch {
+      return false;
+    }
+    const sameContext = Boolean(
+      this.#request &&
+      this.#document &&
+      this.#request.tabId === request.tabId &&
+      this.#sourceWindowId === sourceWindowId &&
+      sameSourceDocument(this.#document, document),
+    );
+    if (
+      sameContext &&
+      this.#replayLease === replayLease
+    ) {
+      // Refresh the currency closure without reopening the exact-document Port
+      // when the source-commit callback and post-run backstop report the same
+      // authoritative replica.
+      this.#request = request;
+      this.#projector.refresh();
+      this.#refreshGates();
+      this.#kick();
+      return true;
+    }
+    if (!sameContext) {
+      this.#stopSource(true);
+      this.#replayLease = 0;
+    }
     const recoveryKey = imageSourceRecoveryKey(request, sourceWindowId);
     if (recoveryKey !== this.#sourceRecoveryKey) {
       this.#sourceRecoveryKey = recoveryKey;
@@ -200,19 +330,36 @@ export class ImageTranslationController {
     }
     this.#request = request;
     this.#sourceWindowId = sourceWindowId;
-    this.#document = sourceDocumentIdentity(createReplicaIdentity({
-      sessionId: request.sessionId,
-      pageEpoch: request.pageEpoch,
-      generation: request.generation,
-      documentId: request.documentId,
-      frameId: request.frameId,
-      sequence: 0,
-    }));
-    if (this.#isEnabled()) void this.#startSource();
+    this.#document = document;
+    this.#adoptReplayLease(replayLease);
+    this.#reportConfigurationState();
+    this.environment.onDiagnostic?.('replica-ready');
+    if (this.#isEnabled() && !this.#source && !this.#sourceAbortController) {
+      void this.#startSource();
+    } else {
+      this.#kick();
+    }
+    return true;
   }
 
-  notifyReplicaCommit(replayLease: number): void {
-    if (!Number.isSafeInteger(replayLease) || replayLease < 1) return;
+  /** Adopt a live/recovery lease only for the already-active exact document. */
+  notifyReplicaCommit(
+    document: ReplicaSourceDocumentIdentity,
+    replayLease: number,
+  ): boolean {
+    if (
+      !this.#request?.isCurrent() ||
+      !this.#document ||
+      !sameSourceDocument(this.#document, document) ||
+      !isReplayLease(replayLease) ||
+      replayLease < this.#replayLease
+    ) return false;
+    if (replayLease === this.#replayLease) return true;
+    this.#adoptReplayLease(replayLease);
+    return true;
+  }
+
+  #adoptReplayLease(replayLease: number): void {
     if (this.#replayLease !== 0 && this.#replayLease !== replayLease) {
       this.#projectedHashes.clear();
       this.#projector.clear();
@@ -249,6 +396,7 @@ export class ImageTranslationController {
     this.#sourceRecoveryKey = undefined;
     this.#sourceReconnectUsed = false;
     this.#stopSource(false);
+    this.#reportConfigurationState();
   }
 
   dispose(): void {
@@ -277,6 +425,7 @@ export class ImageTranslationController {
     this.#sourceAbortController = abortController;
     this.#scheduler = this.#createScheduler(document);
     this.#setMutationQuiet(false);
+    this.environment.onDiagnostic?.('source-connecting');
     try {
       const source = await this.environment.openSource(
         request,
@@ -293,6 +442,29 @@ export class ImageTranslationController {
         return;
       }
       this.#source = source;
+      this.environment.onDiagnostic?.('source-connected');
+      if (source.ready) {
+        void source.ready.then(
+          (summary) => {
+            if (
+              !summary ||
+              version !== this.#sourceVersion ||
+              source !== this.#source ||
+              abortController.signal.aborted ||
+              !request.isCurrent()
+            ) return;
+            this.environment.onDiagnostic?.(Object.freeze({
+              stage: 'source-summary' as const,
+              candidateImages: summary.candidateImages,
+              observedImages: summary.observedImages,
+            }));
+            if (summary.observedImages === 0) {
+              this.environment.onDiagnostic?.('source-empty');
+            }
+          },
+          (error: unknown) => this.#handleSourceUnavailable(error, version),
+        );
+      }
       if (source.unavailable) {
         void source.unavailable.then((error) => {
           this.#handleSourceUnavailable(error, version);
@@ -384,7 +556,25 @@ export class ImageTranslationController {
       this.#projectedHashes.delete(change.nodeId);
       this.#projector.remove(change.document, change.nodeId);
     }
-    this.#scheduler.apply(change);
+    const scheduling = this.#scheduler.apply(change);
+    if (change.kind === 'upsert') {
+      this.environment.onDiagnostic?.('image-discovered');
+      const schedulingStage = scheduling.status === 'queued'
+        ? 'image-queued'
+        : scheduling.status === 'coalesced'
+          ? 'image-coalesced'
+          : 'image-skipped';
+      this.environment.onDiagnostic?.(schedulingStage);
+      const reason = imageSchedulingReason(scheduling);
+      this.environment.onDiagnostic?.(Object.freeze({
+        stage: 'image-scheduling' as const,
+        status: scheduling.status,
+        ...(reason ? { reason } : {}),
+        visibility: change.descriptor.visibility,
+        renderedWidth: change.descriptor.renderedWidth,
+        renderedHeight: change.descriptor.renderedHeight,
+      }));
+    }
     for (const cancellation of this.#scheduler.drainCancellations()) {
       if (
         cancellation.job.descriptor.nodeId ===
@@ -467,7 +657,12 @@ export class ImageTranslationController {
       }
     } finally {
       this.#setProcessing(false);
-      if (processingVersion === this.#processingVersion) this.#kick();
+      if (
+        processingVersion === this.#processingVersion ||
+        scheduler !== this.#scheduler
+      ) {
+        this.#kick();
+      }
     }
   }
 
@@ -486,20 +681,28 @@ export class ImageTranslationController {
     );
     if (!anchor || !pairKey) {
       scheduler.defer(job);
+      this.environment.onDiagnostic?.('anchor-deferred');
       return;
     }
     const replayLease = anchor.replayLease;
+    this.environment.onDiagnostic?.('capture-started');
     const acquisition = await pixelCoordinator.acquire(job.descriptor, signal);
     if (acquisition.status !== 'ready') {
       scheduler.defer(job);
       this.environment.onDiagnostic?.('capture-deferred');
+      this.environment.onDiagnostic?.(Object.freeze({
+        stage: 'capture-deferred' as const,
+        reason: acquisition.reason,
+        renderedWidth: job.descriptor.renderedWidth,
+        renderedHeight: job.descriptor.renderedHeight,
+      }));
       return;
     }
     const pixels = acquisition.pixels;
     if (!this.#isJobCurrent(job, processingVersion, pairEpoch, pairKey)) {
       throw new DOMException('Image job became stale.', 'AbortError');
     }
-    const languageRoute = resolveTesseractLanguageRoute({
+    const sourceLanguage = resolveImageSourceLanguage({
       nearestElementLanguage: pixels.nearestElementLanguage,
       ...(this.#configuration.sourceLanguage === 'auto'
         ? {}
@@ -508,32 +711,56 @@ export class ImageTranslationController {
         ? { detectedPageLanguage: this.#configuration.detectedSourceLanguage }
         : {}),
     });
-    if (!languageRoute) {
+    if (!sourceLanguage) {
       scheduler.settle(job);
       this.environment.onDiagnostic?.('unsupported-language');
       return;
     }
-    const { sourceLanguage, languageGroup } = languageRoute;
+    const languageGroup = tesseractLanguageGroupFor(sourceLanguage);
     if (sourceLanguage === this.#configuration.targetLanguage) {
       this.#projectedHashes.delete(job.descriptor.nodeId);
       this.#projector.remove(job.descriptor.document, job.descriptor.nodeId);
       scheduler.settle(job);
+      this.environment.onDiagnostic?.('same-language');
       return;
     }
     const route: ImageRecognitionRoute = {
-      languageGroup,
-      modelVersion: TESSERACT_MODEL_VERSION,
+      providerOrder: this.#configuration.providerOrder,
+      sourceLanguage,
+      ...(languageGroup
+        ? {
+            languageGroup,
+            modelVersion: TESSERACT_MODEL_VERSION,
+          }
+        : {}),
     };
+    this.environment.onDiagnostic?.('recognition-started');
     const recognition = await this.#recognizer().recognize(pixels, route, signal);
     if (recognition.status !== 'complete') {
       scheduler.settle(job);
       this.environment.onDiagnostic?.('recognition-failed');
+      this.environment.onDiagnostic?.(Object.freeze({
+        stage: 'recognition-failed' as const,
+        code: recognition.code,
+      }));
+      return;
+    }
+    this.environment.onDiagnostic?.(Object.freeze({
+      stage: 'recognition-complete' as const,
+      provider: recognition.result.providerId,
+      regions: recognition.result.regions.length,
+      cacheHit: recognition.cacheHit,
+    }));
+    if (recognition.result.regions.length === 0) {
+      scheduler.settle(job);
+      this.environment.onDiagnostic?.('no-text-found');
       return;
     }
     const pair: TranslationPair = {
       sourceLanguage,
       targetLanguage: this.#configuration.targetLanguage,
     };
+    this.environment.onDiagnostic?.('translation-started');
     const regions = await this.#translateRegions(
       recognition.result.regions,
       pair,
@@ -541,6 +768,11 @@ export class ImageTranslationController {
     );
     if (!this.#isJobCurrent(job, processingVersion, pairEpoch, pairKey)) {
       throw new DOMException('Image translation became stale.', 'AbortError');
+    }
+    if (regions.length === 0) {
+      scheduler.settle(job);
+      this.environment.onDiagnostic?.('translation-empty');
+      return;
     }
     const projection: ImageOverlayProjection = {
       document: job.descriptor.document,
@@ -565,6 +797,7 @@ export class ImageTranslationController {
     if (!this.#projector.project(projection)) {
       this.#projectedHashes.delete(job.descriptor.nodeId);
       scheduler.defer(job);
+      this.environment.onDiagnostic?.('projection-deferred');
       return;
     }
     scheduler.settle(job);
@@ -707,7 +940,40 @@ export class ImageTranslationController {
   #isEnabled(): boolean {
     return !this.#disposed &&
       this.#configuration.enabled &&
-      this.#configuration.providerOrder.includes('tesseract');
+      hasRuntimeImageTextProvider(this.#configuration.providerOrder);
+  }
+
+  #reportConfigurationState(): void {
+    if (this.#disposed) return;
+    if (!this.#isEnabled()) {
+      const reason = hasRuntimeImageTextProvider(
+        this.#configuration.providerOrder,
+      )
+        ? 'feature-off'
+        : 'provider-unavailable';
+      const key = `disabled:${reason}`;
+      if (key === this.#configurationDiagnosticKey) return;
+      this.#configurationDiagnosticKey = key;
+      this.environment.onDiagnostic?.('disabled');
+      this.environment.onDiagnostic?.(Object.freeze({
+        stage: 'configuration' as const,
+        status: 'disabled' as const,
+        reason,
+      }));
+      return;
+    }
+    if (!this.#request || this.#sourceWindowId === undefined) {
+      const key = 'waiting-for-replica';
+      if (key === this.#configurationDiagnosticKey) return;
+      this.#configurationDiagnosticKey = key;
+      this.environment.onDiagnostic?.('waiting-for-replica');
+      this.environment.onDiagnostic?.(Object.freeze({
+        stage: 'configuration' as const,
+        status: 'waiting-for-replica' as const,
+      }));
+      return;
+    }
+    this.#configurationDiagnosticKey = 'active';
   }
 
   #setProcessing(value: boolean): void {
@@ -715,6 +981,23 @@ export class ImageTranslationController {
     this.#processing = value;
     this.environment.onBusyChange?.(value);
   }
+}
+
+function hasRuntimeImageTextProvider(
+  order: readonly ImageTextProviderId[],
+): boolean {
+  return order.some((providerId) =>
+    providerId === 'chrome-text-detector' || providerId === 'tesseract',
+  );
+}
+
+function imageSchedulingReason(
+  result: ImageScanUpdateResult,
+): string | undefined {
+  if (result.status === 'skipped') return result.reason;
+  if (result.status === 'overflow') return 'queue-overflow';
+  if (result.status === 'rejected') return 'invalid-or-stale-change';
+  return undefined;
 }
 
 function pairConfigurationKey(
@@ -742,6 +1025,10 @@ function imageSourceRecoveryKey(
     request.documentId,
     request.frameId,
   ]);
+}
+
+function isReplayLease(value: number): boolean {
+  return Number.isSafeInteger(value) && value >= 1;
 }
 
 function isAbortError(error: unknown): boolean {

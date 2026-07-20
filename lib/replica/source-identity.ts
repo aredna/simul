@@ -1,4 +1,7 @@
-import type { ReplicaDocumentIdentity } from './contracts';
+import type {
+  ReplicaCaptureRequest,
+  ReplicaDocumentIdentity,
+} from './contracts';
 
 /** Identity shared by canonical text and derived image records. */
 export interface ReplicaSourceDocumentIdentity {
@@ -7,6 +10,11 @@ export interface ReplicaSourceDocumentIdentity {
   readonly generation: number;
   readonly documentId: string;
   readonly frameId: number;
+}
+
+export interface ReplicaSourceLeaseIdentity {
+  readonly document: ReplicaSourceDocumentIdentity;
+  readonly replayLease: number;
 }
 
 const SOURCE_IDENTITY_KEYS = Object.freeze([
@@ -93,5 +101,31 @@ export function sameSourceDocument(
     left.generation === right.generation &&
     left.documentId === right.documentId &&
     left.frameId === right.frameId
+  );
+}
+
+/** Require both the exact source document and its authoritative replay lease. */
+export function sameSourceReplicaLease(
+  left: ReplicaSourceLeaseIdentity,
+  right: ReplicaSourceLeaseIdentity,
+): boolean {
+  return left.replayLease === right.replayLease &&
+    sameSourceDocument(left.document, right.document);
+}
+
+/** Match a capture boundary without consulting its mutable currency closure. */
+export function captureRequestMatchesSourceDocument(
+  request: ReplicaCaptureRequest,
+  document: ReplicaSourceDocumentIdentity,
+): boolean {
+  const requestDocument = readSourceDocumentIdentity({
+    sessionId: request.sessionId,
+    pageEpoch: request.pageEpoch,
+    generation: request.generation,
+    documentId: request.documentId,
+    frameId: request.frameId,
+  });
+  return Boolean(
+    requestDocument && sameSourceDocument(requestDocument, document),
   );
 }

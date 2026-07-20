@@ -2,7 +2,7 @@
 project_name: Simul
 project_type: chrome-extension
 planning_track: quick-flow
-status: checkpoint-f-implemented
+status: isolated-html-engine-implemented
 ---
 
 # Simul Project Context
@@ -13,12 +13,17 @@ The repository contains a content-first live translation companion. A user can
 open a read-only active-page replica in Chrome's native side panel or a detached
 extension window, translate Chrome-supported language pairs locally, follow
 bounded DOM/style/image/scroll changes, zoom the replica, and compose a reverse
-translation. The canonical production engine is now rrweb replay with
-revision-safe text projection. It retains one masked recorder per exact source
-document, applies ordered sanitized batches only after rrweb cast completion,
-and recovers a gap through one hidden checkpoint plus atomic last-good swap.
-The legacy renderer remains an emergency fallback selected only when rrweb
-capture/replay fails or `WXT_SIMUL_RRWEB_SHADOW=0` explicitly disables it.
+translation. The canonical production engine is isolated HTML with
+revision-safe text projection. Its exact-document bridge assigns private
+WeakMap IDs, deep-clones changed DOM, converts clones into a bounded allowlisted
+graph, and sends a sanitized checkpoint plus contiguous targeted patches. The
+extension validates the graph again and creates real nodes with DOM APIs inside
+a `sandbox="allow-same-origin"` iframe whose CSP disables scripts, workers,
+connections, frames, objects, forms, and navigation. Gaps or overflow stage one
+fresh checkpoint and atomically replace the last-good view. rrweb remains a
+persisted experimental choice unless `WXT_SIMUL_RRWEB_SHADOW=0` hides it. The
+legacy renderer is the emergency fallback; neither engine silently falls back
+to the other.
 
 Capture ACKs never wait for translation. Document, source revision,
 translation epoch, pair, replay lease, and node type must match before text
@@ -29,8 +34,8 @@ and Reddit fidelity gaps are documented follow-ups; Checkpoint F's approved
 Choice C did not claim those sites were fixed.
 
 Image translation is implemented as an initially-off persisted option. The
-source frame observes ordinary top-level `<img>` elements by rrweb node ID while
-keeping URLs and text private. A capacity-one scheduler applies the saved
+source frame observes ordinary top-level `<img>` elements by the selected
+engine's node ID while keeping URLs and text private. A capacity-one scheduler applies the saved
 visible/background policy and small-image filter. Stable visible pixels are
 captured through `captureVisibleTab()` at no more than twice per second, cropped
 below 4 MP after exact pre/post geometry checks, SHA-256 keyed, and handed to a
@@ -48,6 +53,11 @@ resizing the image. Disabled builds omit the host, OCR assets, permission, and
 CSP. The canonical build adds only `offscreen` and the exact local
 Wasm/Worker CSP, validates every runtime hash/notice offline, and remains under
 42 MiB unpacked.
+
+Translation and OCR depend on an engine-neutral selected-surface router.
+Content-free `console.info` diagnostics report mirror connection/checkpoint/
+patch/recovery counts and every OCR discovery, skip, capture, recognition,
+translation, or projection stage without text, URLs, pixels, hashes, or IDs.
 
 ## Fixed engineering baseline
 
@@ -85,6 +95,15 @@ extension APIs or page integration.
 - `entrypoints/page-snapshot.ts`: unlisted top-frame snapshot entrypoint
 - `entrypoints/page-recorder.ts`: unlisted rrweb checkpoint, live recorder,
   and exact-document image-source bridge
+- `entrypoints/page-mirror.ts`: unlisted isolated-HTML observer and shared
+  WeakMap image-identity bridge
+- `lib/replica/html-mirror-protocol.ts`, `html-mirror-sanitizer.ts`, and
+  `html-mirror-source.ts`: typed bounded transport, dual validation, private
+  masking, passive visual-resource policy, ACKs, and recovery
+- `lib/replica/isolated-html-engine.ts`: no-script real-DOM construction,
+  incremental patches, translation/image anchors, and atomic last-good swaps
+- `lib/replica/replica-surface-router.ts`: selected-engine translation and OCR
+  routing
 - `entrypoints/offscreen/`: static local Tesseract compute host
 - `lib/replica/visible-replay-host.ts`: candidate/committed
   replay ownership, atomic presentation, protected iframe layout, zoom, and
@@ -97,7 +116,7 @@ extension APIs or page integration.
 - `lib/replica/source-value-model.ts`: transactional canonical rrweb text,
   monotonic revisions/tombstones, and committed text-change records
 - `lib/translation/`: bounded exact-source memory and the single-session,
-  revision/epoch/lease-safe rrweb translation coordinator
+  revision/epoch/lease-safe engine-neutral translation coordinator
 - `lib/ocr/`: exact-document image observation, capture/currentness,
   capacity-one scheduling, transient host coordination, Tesseract routing,
   recognition cache, and inert overlay projection

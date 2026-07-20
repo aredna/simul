@@ -1,5 +1,9 @@
 import { ChromeTranslatorProvider } from '../../lib/chrome-translator';
 import {
+  createExtensionBuildIdentity,
+  renderExtensionBuildIdentity,
+} from '../../lib/build-identity';
+import {
   LatestWorkCoordinator,
   automaticTranslationAction,
   type GenerationWork,
@@ -23,6 +27,14 @@ import {
   parseDetachedPageIdentityHint,
 } from '../../lib/page-identity';
 import {
+  createDetachedCompanionUrl,
+  createDetachedWindowData,
+  isNewerCompanionLaunchStamp,
+  sameCompanionSourcePage,
+  shouldFollowActivatedTab,
+  type CompanionLaunchStamp,
+} from '../../lib/companion-surface';
+import {
   capturePageSnapshot,
   parsePageSnapshot,
   type PageSnapshot,
@@ -38,6 +50,7 @@ import {
   isImageScanPolicy,
 } from '../../lib/ocr/contracts';
 import type { ImageTextProviderId } from '../../lib/ocr/known-provider-ids';
+import { ImageTranslationDiagnosticHistory } from '../../lib/ocr/diagnostic-history';
 import {
   ImageTranslationController,
   type ImageTranslationDiagnostic,
@@ -60,9 +73,12 @@ import {
   STORAGE_KEY,
   autoTranslationModeForPage,
   clampZoomPercent,
+  isCompanionLaunchBehavior,
   isAutoTranslationEnabled,
   isAutoTranslationMode,
   isMirrorDisplayMode,
+  isPopoutTabMode,
+  isReplicaEnginePreference,
   isTextLayoutMode,
   parseCompanionPreferences,
   permissionOriginsForMode,
@@ -70,25 +86,36 @@ import {
   withImageAnalysisSettings,
   withViewSettings,
   type AutoTranslationMode,
+  type CompanionLaunchBehavior,
   type CompanionPreferences,
+  type CompanionSurface,
   type CompanionImageAnalysisSettings,
   type CompanionImageAnalysisSettingsPatch,
   type CompanionViewSettings,
   type CompanionViewSettingsPatch,
+  type PopoutTabMode,
+  type ReplicaEnginePreference,
 } from '../../lib/preferences';
 import { translateWithSession } from '../../lib/translation-pipeline';
 import {
   type ReplicaCaptureRequest,
   type ReplicaCheckpointResponse,
+  type ReplicaDiagnosticCode,
 } from '../../lib/replica/contracts';
 import {
   ReplicaEngineController,
   selectReplicaEngineMode,
   selectReplicaTranslationMode,
+  type ReplicaEngineMode,
 } from '../../lib/replica/engine-selection';
+import { openChromeHtmlMirrorStream } from '../../lib/replica/html-mirror-client';
+import { IsolatedHtmlReplicaEngine } from '../../lib/replica/isolated-html-engine';
 import {
+  LiveReplicaFailureRecoveryGate,
   LegacyTransitionGate,
   isCommittedShadowReplica,
+  shouldPreserveCommittedReplicaForCapture,
+  shouldReleaseReplicaAfterCaptureFailure,
 } from '../../lib/replica/legacy-transition-gate';
 import { LegacyReplicaEngine } from '../../lib/replica/legacy-engine';
 import { openChromeReplicaLiveStream } from '../../lib/replica/live-stream-client';
@@ -102,6 +129,11 @@ import {
   RrwebShadowReplicaEngine,
 } from '../../lib/replica/rrweb-shadow-engine';
 import { VisibleReplayHost } from '../../lib/replica/visible-replay-host';
+import { ReplicaSurfaceRouter } from '../../lib/replica/replica-surface-router';
+import {
+  captureRequestMatchesSourceDocument,
+  sameSourceReplicaLease,
+} from '../../lib/replica/source-identity';
 import { buildBoundedLanguageSample } from '../../lib/translation/language-sample';
 import { replicaSourceCommitAction } from '../../lib/translation/replica-translation-lifecycle';
 import {
@@ -146,6 +178,13 @@ interface AuthorizedTabMessage {
   tabId: number;
   windowId: number;
   url: string;
+  launchEpoch?: string;
+  launchSequence?: number;
+}
+
+interface AuthorizedTabRequest {
+  identity: CapturedPageIdentity;
+  launchStamp?: CompanionLaunchStamp;
 }
 
 interface PendingLiveUpdate {
@@ -153,6 +192,14 @@ interface PendingLiveUpdate {
   firstSequence: number;
   sequence: number;
   nodeIds: Set<string>;
+}
+
+interface PendingImageReplicaActivation {
+  readonly request: ReplicaCaptureRequest;
+  readonly sourceWindowId: number;
+  readonly mode: ReplicaEngineMode;
+  readonly signal: AbortSignal;
+  activated: boolean;
 }
 
 const NAVIGATION_DEBOUNCE_MS = 350;
@@ -163,6 +210,9 @@ const targetSelect = requireElement<HTMLSelectElement>('#target-language');
 const autoTranslateSelect = requireElement<HTMLSelectElement>('#auto-translate-mode');
 const displayModeSelect = requireElement<HTMLSelectElement>('#mirror-display-mode');
 const textLayoutSelect = requireElement<HTMLSelectElement>('#text-layout-mode');
+const replicaEngineSelect = requireElement<HTMLSelectElement>('#replica-engine');
+const launchBehaviorSelect = requireElement<HTMLSelectElement>('#launch-behavior');
+const popoutTabModeSelect = requireElement<HTMLSelectElement>('#popout-tab-mode');
 const syncScrollInput = requireElement<HTMLInputElement>('#sync-scroll');
 const zoomInput = requireElement<HTMLInputElement>('#zoom');
 const zoomOutput = requireElement<HTMLOutputElement>('#zoom-value');
@@ -177,6 +227,7 @@ const closeSettingsButton = requireElement<HTMLButtonElement>('#close-settings')
 const popoutButton = requireElement<HTMLButtonElement>('#open-popout');
 const compactToolbar = requireElement<HTMLElement>('#compact-toolbar');
 const controlsOverlay = requireElement<HTMLElement>('#control-overlay');
+const buildVersionElement = requireElement<HTMLElement>('#build-version');
 const settingsGrid = requireElement<HTMLElement>('#settings-grid');
 const statusElement = requireElement<HTMLElement>('#status');
 const statusDot = requireElement<HTMLElement>('#status-dot');
@@ -197,11 +248,17 @@ const copyComposerButton = requireElement<HTMLButtonElement>('#copy-composer');
 const provider = new ChromeTranslatorProvider();
 const captureCoordinator = new LatestWorkCoordinator<CaptureRequest>();
 const detachedIdentityHint = parseDetachedPageIdentityHint(window.location.search);
+const isDetachedWindow = detachedIdentityHint !== undefined;
 const liveSessionId = crypto.randomUUID();
-const replicaEngineMode = selectReplicaEngineMode({
+const replicaBuildEnvironment = {
   DEV: import.meta.env.DEV,
   WXT_SIMUL_RRWEB_SHADOW: import.meta.env.WXT_SIMUL_RRWEB_SHADOW,
-});
+  WXT_SIMUL_RRWEB_TRANSLATION: import.meta.env.WXT_SIMUL_RRWEB_TRANSLATION,
+};
+if (replicaBuildEnvironment.WXT_SIMUL_RRWEB_SHADOW === '0') {
+  replicaEngineSelect.querySelector('option[value="rrweb"]')?.remove();
+}
+let replicaEngineMode = selectReplicaEngineMode(replicaBuildEnvironment);
 const replicaTranslationMode = selectReplicaTranslationMode({
   DEV: import.meta.env.DEV,
   WXT_SIMUL_RRWEB_SHADOW: import.meta.env.WXT_SIMUL_RRWEB_SHADOW,
@@ -216,6 +273,10 @@ const visibleReplayHost = new VisibleReplayHost({
 let replicaEngineController!: ReplicaEngineController;
 let replicaTranslationCoordinator!: ReplicaTranslationCoordinator;
 let imageTranslationController!: ImageTranslationController;
+const imageTranslationDiagnosticHistory =
+  new ImageTranslationDiagnosticHistory();
+let imageTranslationDiagnosticOutput: HTMLOutputElement | undefined;
+const replicaSurfaceRouter = new ReplicaSurfaceRouter();
 const shadowReplicaEngine = new RrwebShadowReplicaEngine({
   presentationHost: visibleReplayHost,
   capture: captureReplicaCheckpoint,
@@ -227,46 +288,30 @@ const shadowReplicaEngine = new RrwebShadowReplicaEngine({
   onLayoutChanged: () => {
     imageTranslationController?.refreshOverlays();
   },
-  onSourceCommit: (commit) => {
-    imageTranslationController?.notifyReplicaCommit(commit.replayLease);
-    if (replicaTranslationMode === 'rrweb-projection') {
-      replicaTranslationCoordinator.handleSourceCommit(commit);
-      const action = replicaSourceCommitAction(
-        commit,
-        preferences.sourceLanguage === 'auto',
-      );
-      if (action.prepareForNewText || action.refreshDetectedLanguage) {
-        const refreshVersion = ++replicaLanguageRefreshVersion;
-        void reconcileReplicaTranslationAfterCommit(
-          commit,
-          refreshVersion,
-          action.refreshDetectedLanguage,
-          action.prepareForNewText,
-        );
-      }
-    }
-  },
-  onLiveFailure: (code) => {
-    imageTranslationController?.releaseReplica();
-    if (replicaTranslationMode === 'rrweb-projection') {
-      replicaTranslationCoordinator.selectPair(undefined);
-    }
-    legacyTransitionGate.release();
-    replicaEngineController.disableShadow(code);
-    const identity = followedPageIdentity ?? capturedPageIdentity;
-    if (identity) queueCapture({ identity, reason: 'desynchronized' });
+  onSourceCommit: handleReplicaSourceCommit,
+  onLiveFailure: (code) => handleReplicaLiveFailure(code, 'rrweb-shadow'),
+});
+const isolatedHtmlReplicaEngine = new IsolatedHtmlReplicaEngine({
+  presentationHost: visibleReplayHost,
+  openStream: openChromeHtmlMirrorStream,
+  onLiveApplied: () => legacyTransitionGate.markDirty(),
+  onLayoutChanged: () => imageTranslationController?.refreshOverlays(),
+  onSourceCommit: handleReplicaSourceCommit,
+  onLiveFailure: (code) => handleReplicaLiveFailure(code, 'isolated-html'),
+  onInfo: (info) => {
+    // Counts and bounded stages only: never source text, URLs, pixels, IDs, or hashes.
+    console.info('[Simul isolated mirror]', info);
   },
 });
 replicaEngineController = new ReplicaEngineController({
   mode: replicaEngineMode,
   legacy: new LegacyReplicaEngine(),
   shadow: shadowReplicaEngine,
+  isolated: isolatedHtmlReplicaEngine,
   onDiagnostics: (diagnostics) => {
-    if (replicaEngineMode === 'rrweb-shadow') {
-      // This object is intentionally content-free: local size/timing/extent
-      // numbers and a bounded code only. It never includes page text or URLs.
-      console.debug('[Simul replica shadow]', diagnostics);
-    }
+    // This object is intentionally content-free: local size/timing/extent
+    // numbers and a bounded code only. It never includes page text or URLs.
+    console.info('[Simul replica]', diagnostics);
   },
   onFallback: () => {
     imageTranslationController?.releaseReplica();
@@ -275,11 +320,12 @@ replicaEngineController = new ReplicaEngineController({
     }
   },
 });
+replicaSurfaceRouter.select(isolatedHtmlReplicaEngine);
 
 const translationMemory = new TranslationMemory();
 replicaTranslationCoordinator = new ReplicaTranslationCoordinator(
   provider,
-  shadowReplicaEngine,
+  replicaSurfaceRouter,
   {
     memory: translationMemory,
     onBackgroundResult: (result) => {
@@ -307,7 +353,14 @@ replicaTranslationCoordinator = new ReplicaTranslationCoordinator(
 );
 
 imageTranslationController = new ImageTranslationController({
-  openSource: openChromeImageSource,
+  openSource: (request, onChange, signal) => openChromeImageSource(
+    request,
+    onChange,
+    signal,
+    replicaEngineController.mode === 'isolated-html'
+      ? 'isolated-html'
+      : 'rrweb',
+  ),
   createPixelCoordinator: (source, sourceTabId, sourceWindowId) =>
     new PixelAcquisitionCoordinator(
       createBrowserPixelAcquisitionEnvironment(
@@ -321,12 +374,96 @@ imageTranslationController = new ImageTranslationController({
       new IndexedDbTransientImageStore(),
     ),
   resolveAnchor: (sourceDocument, nodeId) =>
-    shadowReplicaEngine.resolveImageAnchor(sourceDocument, nodeId),
+    replicaSurfaceRouter.resolveImageAnchor(sourceDocument, nodeId),
   translationProvider: provider,
   translationMemory,
   onBusyChange: (busy) => setImageTranslationBusy(busy),
   onDiagnostic: logImageTranslationDiagnostic,
 });
+
+function handleReplicaSourceCommit(commit: ReplicaSourceCommit): void {
+  const pending = pendingImageReplicaActivation;
+  const selectedSnapshot = replicaSurfaceRouter.snapshot();
+  if (
+    pending &&
+    !pending.activated &&
+    !pending.signal.aborted &&
+    pending.mode === replicaEngineController.mode &&
+    pending.request.isCurrent() &&
+    captureRequestMatchesSourceDocument(pending.request, commit.document) &&
+    selectedSnapshot &&
+    captureRequestMatchesSourceDocument(
+      pending.request,
+      selectedSnapshot.document,
+    ) &&
+    sameSourceReplicaLease(selectedSnapshot, commit)
+  ) {
+    pending.activated = imageTranslationController?.activateReplica(
+      pending.request,
+      pending.sourceWindowId,
+      commit.replayLease,
+    ) ?? false;
+  } else if (
+    selectedSnapshot &&
+    sameSourceReplicaLease(selectedSnapshot, commit)
+  ) {
+    imageTranslationController?.notifyReplicaCommit(
+      commit.document,
+      commit.replayLease,
+    );
+  }
+  if (replicaTranslationMode !== 'rrweb-projection') return;
+  replicaTranslationCoordinator.handleSourceCommit(commit);
+  const action = replicaSourceCommitAction(
+    commit,
+    preferences.sourceLanguage === 'auto',
+  );
+  if (!action.prepareForNewText && !action.refreshDetectedLanguage) return;
+  const refreshVersion = ++replicaLanguageRefreshVersion;
+  void reconcileReplicaTranslationAfterCommit(
+    commit,
+    refreshVersion,
+    action.refreshDetectedLanguage,
+    action.prepareForNewText,
+  );
+}
+
+function handleReplicaLiveFailure(
+  code: ReplicaDiagnosticCode,
+  expectedMode: ReplicaEngineMode,
+): void {
+  if (replicaEngineController.mode !== expectedMode) return;
+  const identity = followedPageIdentity ?? capturedPageIdentity;
+  const action = identity
+    ? liveReplicaFailureRecoveryGate.decide(
+        visibleReplayHost.hasCommittedReplica,
+      )
+    : 'fallback';
+  // Content-free by construction: bounded enums only, with no page identity,
+  // source text, URL, DOM identifier, pixels, or resource metadata.
+  console.info('[Simul replica live failure]', {
+    engine: expectedMode,
+    code,
+    state: action,
+  });
+  if (action === 'rebuild-last-good' && identity) {
+    setStatus(
+      'The live mirror disconnected. Rebuilding once while keeping the last good replica visible…',
+      'warning',
+    );
+    queueCapture({ identity, reason: 'desynchronized' });
+    return;
+  }
+
+  liveReplicaFailureRecoveryGate.reset();
+  imageTranslationController?.releaseReplica();
+  if (replicaTranslationMode === 'rrweb-projection') {
+    replicaTranslationCoordinator.selectPair(undefined);
+  }
+  legacyTransitionGate.release();
+  replicaEngineController.disableSelected(code);
+  if (identity) queueCapture({ identity, reason: 'desynchronized' });
+}
 
 let preferences: CompanionPreferences = parseCompanionPreferences(
   DEFAULT_COMPANION_PREFERENCES,
@@ -355,6 +492,7 @@ let activeTranslationTask: Promise<void> | undefined;
 let navigationTimer: ReturnType<typeof setTimeout> | undefined;
 let mirrorResizeObserver: ResizeObserver | undefined;
 let panelWindowId: number | undefined;
+let detachedSourceWindowId = detachedIdentityHint?.windowId;
 let visualRoot: HTMLElement | undefined;
 let mirrorScroller: HTMLElement | undefined;
 let mirrorStage: HTMLElement | undefined;
@@ -366,6 +504,7 @@ let currentMirrorScale = 1;
 let liveDeltaInFlight = false;
 let pendingLiveUpdate: PendingLiveUpdate | undefined;
 const legacyTransitionGate = new LegacyTransitionGate();
+const liveReplicaFailureRecoveryGate = new LiveReplicaFailureRecoveryGate();
 let latestLiveSequence = 0;
 let highestReceivedLiveSequence = 0;
 let liveSequenceBaselineReady = false;
@@ -375,6 +514,9 @@ let availabilityCheckedForPair: string | undefined;
 let viewPreferenceRevision = 0;
 let imageAnalysisPreferenceRevision = 0;
 let imageAnalysisControls: HTMLElement | undefined;
+let surfaceTransitionInFlight = false;
+let latestToolbarLaunchStamp: CompanionLaunchStamp | undefined;
+let pendingImageReplicaActivation: PendingImageReplicaActivation | undefined;
 const pendingViewPreferences = new Map<
   keyof CompanionViewSettings,
   { revision: number; value: CompanionViewSettings[keyof CompanionViewSettings] }
@@ -387,14 +529,29 @@ const pendingImageAnalysisPreferences = new Map<
   }
 >();
 
+const companionBuildIdentity = createExtensionBuildIdentity(
+  browser.runtime.getManifest(),
+);
+renderExtensionBuildIdentity(buildVersionElement, companionBuildIdentity);
+console.info(companionBuildIdentity.companionReadyMessage);
+
 populateLanguageOptions();
 initializeImageAnalysisControls();
+configureSurfaceButton();
 
 toggleSettingsButton.addEventListener('click', () =>
   setOverlayOpen(controlsOverlay.hasAttribute('hidden')),
 );
 closeSettingsButton.addEventListener('click', () => setOverlayOpen(false));
-popoutButton.addEventListener('click', () => void openDetachedWindow());
+popoutButton.addEventListener('click', () => {
+  if (surfaceTransitionInFlight) return;
+  surfaceTransitionInFlight = true;
+  updateControls();
+  void (isDetachedWindow ? returnToSidePanel() : openDetachedWindow()).finally(() => {
+    surfaceTransitionInFlight = false;
+    updateControls();
+  });
+});
 
 sourceSelect.addEventListener('change', () => void languageSelectionChanged());
 targetSelect.addEventListener('change', () => void languageSelectionChanged());
@@ -428,6 +585,32 @@ textLayoutSelect.addEventListener('change', () => {
   void commitViewPreferencePatch({ textLayoutMode: mode });
   if (visualRoot) applyMirrorTextLayout(visualRoot, mode);
   updateMirrorLayout();
+});
+
+replicaEngineSelect.addEventListener('change', () => {
+  const replicaEngine: ReplicaEnginePreference =
+    isReplicaEnginePreference(replicaEngineSelect.value)
+      ? replicaEngineSelect.value
+      : 'isolated-html';
+  void changeReplicaEngine(replicaEngine);
+});
+
+launchBehaviorSelect.addEventListener('change', () => {
+  const launchBehavior: CompanionLaunchBehavior =
+    isCompanionLaunchBehavior(launchBehaviorSelect.value)
+      ? launchBehaviorSelect.value
+      : 'last-used';
+  void commitViewPreferencePatch({ launchBehavior });
+});
+
+popoutTabModeSelect.addEventListener('change', () => {
+  const popoutTabMode: PopoutTabMode = isPopoutTabMode(popoutTabModeSelect.value)
+    ? popoutTabModeSelect.value
+    : 'locked';
+  void commitViewPreferencePatch({ popoutTabMode });
+  if (isDetachedWindow && popoutTabMode === 'active') {
+    void followCurrentActiveSourceTab();
+  }
 });
 
 syncScrollInput.addEventListener('change', () => {
@@ -500,7 +683,18 @@ browser.runtime.onMessage.addListener((message: unknown, sender) => {
 
 browser.tabs.onActivated.addListener(({ tabId, windowId }) => {
   if (
-    !detachedIdentityHint &&
+    shouldFollowActivatedTab(
+      isDetachedWindow,
+      preferences.popoutTabMode,
+      panelWindowId,
+      windowId,
+    )
+  ) {
+    void followActivatedSourceTab(tabId, windowId);
+    return;
+  }
+  if (
+    !isDetachedWindow &&
     followedPageIdentity?.windowId === windowId &&
     followedPageIdentity.tabId !== tabId
   ) {
@@ -510,6 +704,34 @@ browser.tabs.onActivated.addListener(({ tabId, windowId }) => {
     invalidateCompanion(
       'The active tab changed. Select the extension on the page you want to follow.',
     );
+  }
+});
+
+browser.windows.onFocusChanged.addListener((windowId) => {
+  if (
+    !isDetachedWindow ||
+    preferences.popoutTabMode !== 'active' ||
+    windowId === browser.windows.WINDOW_ID_NONE ||
+    windowId === panelWindowId
+  ) return;
+  const requestId = ++identityRequestId;
+  clearNavigationTimer();
+  void followFocusedBrowserWindow(windowId, requestId);
+});
+
+browser.tabs.onAttached.addListener((tabId, { newWindowId }) => {
+  if (
+    isDetachedWindow &&
+    followedPageIdentity?.tabId === tabId &&
+    newWindowId !== panelWindowId
+  ) {
+    if (preferences.popoutTabMode === 'active') {
+      void followActivatedSourceTab(tabId, newWindowId);
+    } else {
+      const requestId = ++identityRequestId;
+      clearNavigationTimer();
+      void followMovedLockedSourceTab(tabId, newWindowId, requestId);
+    }
   }
 });
 
@@ -526,7 +748,7 @@ browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     }
     return;
   }
-  const nextIdentity = { tabId, windowId: followed.windowId, url: nextUrl };
+  const nextIdentity = { tabId, windowId: tab.windowId, url: nextUrl };
   if (changeInfo.status === 'loading' || typeof changeInfo.url === 'string') {
     identityRequestId += 1;
     captureCoordinator.invalidate();
@@ -561,6 +783,25 @@ browser.storage.onChanged.addListener((changes, areaName) => {
   preferences = mergePendingViewPreferences(
     parseCompanionPreferences(changes[STORAGE_KEY]?.newValue),
   );
+  if (
+    isDetachedWindow &&
+    previous.popoutTabMode !== preferences.popoutTabMode &&
+    preferences.popoutTabMode === 'active'
+  ) {
+    void followCurrentActiveSourceTab();
+  }
+  if (previous.replicaEngine !== preferences.replicaEngine) {
+    liveReplicaFailureRecoveryGate.reset();
+    replicaTranslationCoordinator.selectPair(undefined);
+    applyReplicaEnginePreference();
+    activeAbortController?.abort();
+    liveDeltaAbortController?.abort();
+    replicaShadowAbortController?.abort();
+    imageTranslationController.releaseReplica();
+    legacyTransitionGate.release();
+    const identity = followedPageIdentity ?? capturedPageIdentity;
+    if (identity) queueCapture({ identity, reason: 'preference' });
+  }
   syncPreferenceControls();
   updateMirrorLayout();
   if (visualRoot) applyMirrorTextLayout(visualRoot, preferences.textLayoutMode);
@@ -592,13 +833,28 @@ void initialize();
 
 async function initialize(): Promise<void> {
   await Promise.all([loadPreferences(), loadPanelWindowId()]);
-  await Promise.allSettled([checkPanelPlacement(), initializeSourcePage()]);
+  applyReplicaEnginePreference();
+  const [, sourceResult] = await Promise.allSettled([
+    checkPanelPlacement(),
+    initializeSourcePage(),
+  ]);
+  if (sourceResult.status === 'rejected') {
+    const message = readPageError(sourceResult.reason);
+    renderErrorState(message);
+    setStatus(message, 'error');
+    updateControls();
+  }
 }
 
 async function initializeSourcePage(): Promise<void> {
   if (detachedIdentityHint) {
-    const tab = await browser.tabs.get(detachedIdentityHint.tabId);
-    followedPageIdentity = identityFromTab(tab, undefined, false);
+    followedPageIdentity = preferences.popoutTabMode === 'active'
+      ? await readActivePageIdentity(detachedIdentityHint.windowId)
+      : identityFromTab(
+          await browser.tabs.get(detachedIdentityHint.tabId),
+          undefined,
+          false,
+        );
     queueCapture({ identity: followedPageIdentity, reason: 'initial' });
     return;
   }
@@ -756,16 +1012,63 @@ function mergePendingViewPreferences(
   );
 }
 
-async function acceptAuthorizedTab(authorized: CapturedPageIdentity): Promise<void> {
-  if (detachedIdentityHint && authorized.tabId !== detachedIdentityHint.tabId) return;
-  if (!detachedIdentityHint) {
-    if (panelWindowId === undefined) await loadPanelWindowId();
-    if (panelWindowId === undefined || authorized.windowId !== panelWindowId) return;
+async function acceptAuthorizedTab(request: AuthorizedTabRequest): Promise<void> {
+  const authorized = request.identity;
+  const lockedIdentity = followedPageIdentity ?? detachedIdentityHint;
+  if (
+    isDetachedWindow &&
+    lockedIdentity &&
+    preferences.popoutTabMode === 'locked' &&
+    (authorized.windowId !== lockedIdentity.windowId ||
+      authorized.tabId !== lockedIdentity.tabId)
+  ) return;
+  if (request.launchStamp) {
+    if (!isNewerCompanionLaunchStamp(
+      latestToolbarLaunchStamp,
+      request.launchStamp,
+    )) return;
+    latestToolbarLaunchStamp = request.launchStamp;
   }
-  identityRequestId += 1;
+  const requestId = ++identityRequestId;
+  if (!isDetachedWindow) {
+    if (panelWindowId === undefined) await loadPanelWindowId();
+    if (
+      requestId !== identityRequestId ||
+      panelWindowId === undefined ||
+      authorized.windowId !== panelWindowId
+    ) return;
+  }
+  if (requestId !== identityRequestId) return;
   clearNavigationTimer();
   followedPageIdentity = authorized;
   queueCapture({ identity: authorized, reason: 'authorized' });
+}
+
+async function followMovedLockedSourceTab(
+  tabId: number,
+  windowId: number,
+  requestId: number,
+): Promise<void> {
+  try {
+    const identity = identityFromTab(
+      await browser.tabs.get(tabId),
+      undefined,
+      false,
+    );
+    if (
+      requestId !== identityRequestId ||
+      preferences.popoutTabMode !== 'locked' ||
+      identity.tabId !== tabId ||
+      identity.windowId !== windowId
+    ) return;
+    detachedSourceWindowId = windowId;
+    queueCapture({ identity, reason: 'navigation' });
+  } catch (error) {
+    if (requestId !== identityRequestId) return;
+    invalidateCompanion(
+      `${readPageError(error)} The locked source tab could not be followed after it moved windows.`,
+    );
+  }
 }
 
 async function refreshFollowedPage(reason: CaptureRequest['reason']): Promise<void> {
@@ -786,14 +1089,125 @@ async function refreshFollowedPage(reason: CaptureRequest['reason']): Promise<vo
   }
 }
 
+async function followCurrentActiveSourceTab(): Promise<void> {
+  if (!detachedIdentityHint || preferences.popoutTabMode !== 'active') return;
+  const requestId = ++identityRequestId;
+  clearNavigationTimer();
+  try {
+    const lastFocused = await browser.windows.getLastFocused({
+      windowTypes: ['normal'],
+    });
+    if (
+      requestId !== identityRequestId ||
+      preferences.popoutTabMode !== 'active'
+    ) return;
+    const sourceWindowId =
+      lastFocused.id ??
+      followedPageIdentity?.windowId ??
+      detachedSourceWindowId ??
+      detachedIdentityHint.windowId;
+    const [tab] = await browser.tabs.query({
+      active: true,
+      windowId: sourceWindowId,
+    });
+    if (
+      requestId !== identityRequestId ||
+      preferences.popoutTabMode !== 'active'
+    ) return;
+    if (tab?.id === undefined) {
+      invalidateCompanion('The source browser window has no active readable tab.');
+      return;
+    }
+    await followActivatedSourceTab(tab.id, sourceWindowId, tab, requestId);
+  } catch (error) {
+    if (requestId !== identityRequestId) return;
+    invalidateCompanion(
+      `${readPageError(error)} Active-tab following needs page access for each newly selected site.`,
+    );
+  }
+}
+
+async function followFocusedBrowserWindow(
+  windowId: number,
+  requestId: number,
+): Promise<void> {
+  try {
+    const sourceWindow = await browser.windows.get(windowId);
+    if (
+      requestId !== identityRequestId ||
+      preferences.popoutTabMode !== 'active'
+    ) return;
+    if (sourceWindow.type !== undefined && sourceWindow.type !== 'normal') return;
+    const [tab] = await browser.tabs.query({ active: true, windowId });
+    if (
+      requestId !== identityRequestId ||
+      preferences.popoutTabMode !== 'active'
+    ) return;
+    detachedSourceWindowId = windowId;
+    if (tab?.id !== undefined) {
+      await followActivatedSourceTab(tab.id, windowId, tab, requestId);
+    }
+  } catch {
+    // A closing or restricted browser window is not a new source candidate.
+  }
+}
+
+async function followActivatedSourceTab(
+  tabId: number,
+  windowId: number,
+  knownTab?: Browser.tabs.Tab,
+  existingRequestId?: number,
+): Promise<void> {
+  if (
+    !shouldFollowActivatedTab(
+      isDetachedWindow,
+      preferences.popoutTabMode,
+      panelWindowId,
+      windowId,
+    )
+  ) return;
+
+  const requestId = existingRequestId ?? ++identityRequestId;
+  clearNavigationTimer();
+  try {
+    const sourceWindow = await browser.windows.get(windowId);
+    if (
+      requestId !== identityRequestId ||
+      preferences.popoutTabMode !== 'active'
+    ) return;
+    if (sourceWindow.type !== undefined && sourceWindow.type !== 'normal') return;
+    const identity = identityFromTab(
+      knownTab ?? await browser.tabs.get(tabId),
+      undefined,
+      true,
+    );
+    if (
+      requestId !== identityRequestId ||
+      preferences.popoutTabMode !== 'active'
+    ) return;
+    detachedSourceWindowId = windowId;
+    if (sameCompanionSourcePage(
+      followedPageIdentity,
+      identity,
+      normalizedPageUrl,
+    )) return;
+    queueCapture({ identity, reason: 'navigation' });
+  } catch (error) {
+    if (requestId !== identityRequestId) return;
+    invalidateCompanion(
+      `${readPageError(error)} Active-tab following needs page access for each newly selected site.`,
+    );
+  }
+}
+
 function queueCapture(request: CaptureRequest): void {
   const previousIdentity = capturedPageIdentity ?? followedPageIdentity;
-  const samePage = Boolean(
-    previousIdentity &&
-      previousIdentity.tabId === request.identity.tabId &&
-      previousIdentity.windowId === request.identity.windowId &&
-      normalizedPageUrl(previousIdentity.url) === normalizedPageUrl(request.identity.url),
+  const samePage = sameCompanionSourcePage(
+    previousIdentity,
+    request.identity,
+    normalizedPageUrl,
   );
+  if (!samePage) liveReplicaFailureRecoveryGate.reset();
   if (!samePage || request.reason === 'navigation') {
     lastSourceScroll = undefined;
   }
@@ -817,6 +1231,7 @@ function queueCapture(request: CaptureRequest): void {
   activeAbortController?.abort();
   liveDeltaAbortController?.abort();
   replicaShadowAbortController?.abort();
+  pendingImageReplicaActivation = undefined;
   imageTranslationController.releaseReplica();
   availabilityRequestId += 1;
   pendingLiveUpdate = undefined;
@@ -881,11 +1296,25 @@ async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> 
         observerInstallation.sequence,
       );
     }
-    // Hand authority back to v1 immediately before serialization. Changes
-    // through this point are included by the fresh snapshot; later dirtiness
-    // must enter the pending-delta path instead of being erased with the old
-    // rrweb ownership gate.
-    releaseReplicaPresentationForLegacyWork(true);
+    const sameCapturedPage = Boolean(
+      capturedPageIdentity &&
+        capturedPageIdentity.tabId === identity.tabId &&
+        capturedPageIdentity.windowId === identity.windowId &&
+        normalizedPageUrl(capturedPageIdentity.url) ===
+          normalizedPageUrl(identity.url),
+    );
+    const preserveLastGoodReplica =
+      shouldPreserveCommittedReplicaForCapture(
+        work.value.reason,
+        sameCapturedPage,
+        visibleReplayHost.hasCommittedReplica,
+      );
+    // New identities hand authority back to v1 before serialization. A
+    // same-page manual/recovery rebuild keeps last-good visible while the
+    // selected engine stages its replacement offscreen and swaps atomically.
+    if (!preserveLastGoodReplica) {
+      releaseReplicaPresentationForLegacyWork(true);
+    }
     const results = await withCaptureTimeout(
       browser.scripting.executeScript({
         target: { tabId: identity.tabId, frameIds: [0] },
@@ -905,7 +1334,7 @@ async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> 
     followedPageIdentity = identity;
     currentLegacyReady = true;
     showCaptureNotes(nextSnapshot);
-    if (snapshotInjection?.documentId && !pendingLiveUpdate) {
+    if (snapshotInjection?.documentId) {
       await runReplicaEngineCheckpoint(
         work,
         identity,
@@ -950,7 +1379,11 @@ async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> 
     }
   } catch (error) {
     if (!captureCoordinator.isCurrent(work.generation)) return;
-    if (currentLegacyReady && capturedPageIdentity === identity) {
+    if (shouldReleaseReplicaAfterCaptureFailure(
+      currentLegacyReady,
+      capturedPageIdentity === identity,
+      visibleReplayHost.hasCommittedReplica,
+    )) {
       imageTranslationController.releaseReplica();
       replicaEngineController.releasePresentation(true);
     }
@@ -984,6 +1417,14 @@ async function runReplicaEngineCheckpoint(
       normalizedPageUrl(followedPageIdentity.url) === normalizedPageUrl(identity.url),
   };
   let shadowCommitted = false;
+  const imageActivation: PendingImageReplicaActivation = {
+    request,
+    sourceWindowId: identity.windowId,
+    mode: replicaEngineController.mode,
+    signal: abortController.signal,
+    activated: false,
+  };
+  pendingImageReplicaActivation = imageActivation;
   const shadowOwnershipStarted = replicaEngineController.shadowAvailable;
   if (shadowOwnershipStarted) {
     legacyTransitionGate.beginShadowOwnership();
@@ -995,10 +1436,33 @@ async function runReplicaEngineCheckpoint(
       visibleReplayHost.hasCommittedReplica,
     );
     if (shadowCommitted) {
-      imageTranslationController.commitReplica(request, identity.windowId);
+      liveReplicaFailureRecoveryGate.markCommitted();
+      if (!imageActivation.activated) {
+        const selectedSnapshot = replicaSurfaceRouter.snapshot();
+        if (
+          pendingImageReplicaActivation === imageActivation &&
+          !imageActivation.signal.aborted &&
+          imageActivation.mode === replicaEngineController.mode &&
+          request.isCurrent() &&
+          selectedSnapshot &&
+          captureRequestMatchesSourceDocument(
+            request,
+            selectedSnapshot.document,
+          )
+        ) {
+          imageActivation.activated = imageTranslationController.activateReplica(
+            request,
+            identity.windowId,
+            selectedSnapshot.replayLease,
+          );
+        }
+      }
       updateMirrorLayout();
     }
   } finally {
+    if (pendingImageReplicaActivation === imageActivation) {
+      pendingImageReplicaActivation = undefined;
+    }
     if (shadowOwnershipStarted && !shadowCommitted) {
       const needsFreshCapture = legacyTransitionGate.release();
       if (needsFreshCapture && request.isCurrent()) {
@@ -1117,7 +1581,7 @@ async function resolveSelectedSourceLanguage(
 function mirrorLanguageSample(): string {
   if (usesReplicaTranslationProjection()) {
     return buildBoundedLanguageSample(
-      replicaRecordSources(shadowReplicaEngine.snapshot()?.records ?? []),
+      replicaRecordSources(replicaSurfaceRouter.snapshot()?.records ?? []),
     );
   }
   if (!visualRoot) return '';
@@ -1131,7 +1595,7 @@ function mirrorLanguageSample(): string {
 
 function currentTranslationFieldCount(root: HTMLElement): number {
   return usesReplicaTranslationProjection()
-    ? shadowReplicaEngine.snapshot()?.records.filter(
+    ? replicaSurfaceRouter.snapshot()?.records.filter(
       ({ source }) => source.trim().length > 0,
     ).length ?? 0
     : countVisualMirrorTranslationFields(root);
@@ -1940,6 +2404,38 @@ function setZoom(value: number): void {
   updateMirrorLayout();
 }
 
+async function changeReplicaEngine(
+  replicaEngine: ReplicaEnginePreference,
+): Promise<void> {
+  if (replicaEngine === preferences.replicaEngine) return;
+  liveReplicaFailureRecoveryGate.reset();
+  activeAbortController?.abort();
+  replicaShadowAbortController?.abort();
+  imageTranslationController.releaseReplica();
+  replicaTranslationCoordinator.selectPair(undefined);
+  legacyTransitionGate.release();
+  await commitViewPreferencePatch({ replicaEngine });
+  applyReplicaEnginePreference();
+  const identity = followedPageIdentity ?? capturedPageIdentity;
+  if (identity) queueCapture({ identity, reason: 'preference' });
+}
+
+function applyReplicaEnginePreference(): void {
+  const nextMode = selectReplicaEngineMode(
+    replicaBuildEnvironment,
+    preferences.replicaEngine,
+  );
+  replicaEngineMode = nextMode;
+  replicaEngineController.selectMode(nextMode);
+  replicaSurfaceRouter.select(
+    nextMode === 'rrweb-shadow'
+      ? shadowReplicaEngine
+      : nextMode === 'isolated-html'
+        ? isolatedHtmlReplicaEngine
+        : undefined,
+  );
+}
+
 function syncPreferenceControls(): void {
   const pageUrl = followedPageIdentity?.url ?? capturedPageIdentity?.url;
   sourceSelect.value = preferences.sourceLanguage;
@@ -1947,6 +2443,13 @@ function syncPreferenceControls(): void {
   autoTranslateSelect.value = autoTranslationModeForPage(preferences, pageUrl);
   displayModeSelect.value = preferences.displayMode;
   textLayoutSelect.value = preferences.textLayoutMode;
+  replicaEngineSelect.value =
+    preferences.replicaEngine === 'rrweb' &&
+    replicaBuildEnvironment.WXT_SIMUL_RRWEB_SHADOW === '0'
+      ? 'isolated-html'
+      : preferences.replicaEngine;
+  launchBehaviorSelect.value = preferences.launchBehavior;
+  popoutTabModeSelect.value = preferences.popoutTabMode;
   syncScrollInput.checked = preferences.syncScroll;
   zoomInput.value = String(preferences.zoomPercent);
   zoomOutput.value = `${preferences.zoomPercent}%`;
@@ -2085,6 +2588,30 @@ function renderImageAnalysisControls(): void {
       }),
     ));
   }
+
+  const diagnostics = document.createElement('details');
+  diagnostics.className = 'image-diagnostics';
+  const summary = document.createElement('summary');
+  summary.textContent = 'OCR diagnostics';
+  const note = document.createElement('p');
+  note.className = 'microcopy';
+  note.textContent =
+    'Memory-only stages and counts; page text, URLs, pixels, and identifiers are never included.';
+  const output = document.createElement('output');
+  output.className = 'image-diagnostics-output';
+  output.setAttribute('aria-live', 'polite');
+  imageTranslationDiagnosticOutput = output;
+  renderImageTranslationDiagnosticHistory();
+  const clear = document.createElement('button');
+  clear.type = 'button';
+  clear.className = 'image-diagnostics-clear';
+  clear.textContent = 'Clear diagnostics';
+  clear.addEventListener('click', () => {
+    imageTranslationDiagnosticHistory.clear();
+    renderImageTranslationDiagnosticHistory();
+  });
+  diagnostics.append(summary, note, output, clear);
+  root.append(diagnostics);
 }
 
 function createOrderButton(
@@ -2155,6 +2682,13 @@ function imageScanPolicyName(value: (typeof IMAGE_SCAN_POLICIES)[number]): strin
   return 'Visible first, then background';
 }
 
+function configureSurfaceButton(): void {
+  if (!isDetachedWindow) return;
+  popoutButton.textContent = '↙';
+  popoutButton.setAttribute('aria-label', 'Return companion to the side panel');
+  popoutButton.title = 'Return to side panel';
+}
+
 async function openDetachedWindow(): Promise<void> {
   const identity = capturedPageIdentity ?? followedPageIdentity;
   if (!identity) {
@@ -2162,19 +2696,97 @@ async function openDetachedWindow(): Promise<void> {
     return;
   }
   try {
-    const url = new URL(browser.runtime.getURL('/sidepanel.html'));
-    url.searchParams.set('sourceTabId', String(identity.tabId));
-    url.searchParams.set('sourceWindowId', String(identity.windowId));
-    await browser.windows.create({
-      url: url.toString(),
-      type: 'popup',
-      width: Math.max(480, Math.min(1_200, Math.round(window.outerWidth * 1.4))),
-      height: Math.max(560, Math.min(1_000, window.screen.availHeight - 80)),
-      focused: true,
-    });
-    setStatus('Detached companion window opened.', 'success');
+    const sourceWindow = await browser.windows.get(identity.windowId);
+    const url = createDetachedCompanionUrl(
+      browser.runtime.getURL('/sidepanel.html'),
+      identity,
+    );
+    await browser.windows.create(createDetachedWindowData(url, sourceWindow));
+    let preferenceSaveFailed = false;
+    try {
+      await rememberCompanionSurface('popout');
+    } catch {
+      preferenceSaveFailed = true;
+    }
+    const closed = await closeNativeSidePanel(identity.windowId);
+    if (!closed || preferenceSaveFailed) {
+      setStatus(
+        !closed
+          ? 'Detached window opened, but Chrome could not close the old side panel automatically. Close it manually.'
+          : 'Detached window opened, but Chrome could not remember it as the last-used surface.',
+        'warning',
+      );
+    }
   } catch (error) {
     setStatus(`Chrome could not open a detached window: ${readableError(error)}`, 'error');
+  }
+}
+
+async function returnToSidePanel(): Promise<void> {
+  const sourceWindowId =
+    followedPageIdentity?.windowId ??
+    detachedSourceWindowId ??
+    detachedIdentityHint?.windowId;
+  if (sourceWindowId === undefined) return;
+
+  // Keep this call before the first await. Chrome requires sidePanel.open() to
+  // remain directly associated with the user's button gesture.
+  const openPromise = browser.sidePanel.open({ windowId: sourceWindowId });
+  const activeTabPromise = browser.tabs.query({
+    active: true,
+    windowId: sourceWindowId,
+  });
+  try {
+    const [, [tab]] = await Promise.all([openPromise, activeTabPromise]);
+    try {
+      await rememberCompanionSurface('side-panel');
+    } catch {
+      // A successfully opened side panel remains authoritative even if the
+      // optional last-used preference could not be persisted.
+    }
+    if (tab?.id !== undefined && isSupportedPage(tab.url)) {
+      await browser.runtime.sendMessage({
+        type: 'simul:authorized-tab',
+        tabId: tab.id,
+        windowId: sourceWindowId,
+        url: tab.url,
+      }).catch((error: unknown) => {
+        if (!/receiving end does not exist|could not establish connection/iu.test(
+          readableError(error),
+        )) throw error;
+      });
+    }
+    if (panelWindowId !== undefined) {
+      await browser.windows.remove(panelWindowId);
+    } else {
+      window.close();
+    }
+  } catch (error) {
+    setStatus(`Chrome could not return to the side panel: ${readableError(error)}`, 'error');
+  }
+}
+
+async function rememberCompanionSurface(
+  surface: CompanionSurface,
+): Promise<void> {
+  await commitViewPreferencePatch({ lastLaunchSurface: surface });
+}
+
+async function closeNativeSidePanel(windowId: number): Promise<boolean> {
+  if (typeof browser.sidePanel.close === 'function') {
+    try {
+      await browser.sidePanel.close({ windowId });
+      return true;
+    } catch {
+      // Fall through to the pre-close API teardown below.
+    }
+  }
+  try {
+    await browser.sidePanel.setOptions({ enabled: false });
+    await browser.sidePanel.setOptions({ enabled: true });
+    return true;
+  } catch {
+    return false;
   }
 }
 
@@ -2483,6 +3095,7 @@ function invalidateCompanion(message: string): void {
   highestReceivedLiveSequence = 0;
   liveSequenceBaselineReady = false;
   legacyTransitionGate.reset();
+  liveReplicaFailureRecoveryGate.reset();
   lastSourceScroll = undefined;
   disconnectMirror();
   renderErrorState(message);
@@ -2501,7 +3114,7 @@ function usesReplicaTranslationProjection(): boolean {
 function releaseReplicaPresentationForLegacyWork(force = false): boolean {
   if (!force && usesReplicaTranslationProjection()) return false;
   if (
-    replicaEngineMode !== 'rrweb-shadow' ||
+    replicaEngineMode === 'legacy' ||
     !legacyTransitionGate.shadowOwnsPage
   ) return false;
   const needsFreshCapture = legacyTransitionGate.release();
@@ -2541,8 +3154,14 @@ function renderErrorState(message: string): void {
   snapshotContainer.replaceChildren(wrapper);
 }
 
-async function readActivePageIdentity(): Promise<CapturedPageIdentity> {
-  const [tab] = await browser.tabs.query({ active: true, currentWindow: true });
+async function readActivePageIdentity(
+  sourceWindowId?: number,
+): Promise<CapturedPageIdentity> {
+  const [tab] = await browser.tabs.query(
+    sourceWindowId === undefined
+      ? { active: true, currentWindow: true }
+      : { active: true, windowId: sourceWindowId },
+  );
   return identityFromTab(tab, undefined, true);
 }
 
@@ -2550,7 +3169,11 @@ async function readCurrentFollowedIdentity(
   followed: CapturedPageIdentity,
 ): Promise<CapturedPageIdentity> {
   const tab = await browser.tabs.get(followed.tabId);
-  return identityFromTab(tab, followed.url, !detachedIdentityHint);
+  return identityFromTab(
+    tab,
+    followed.url,
+    !isDetachedWindow || preferences.popoutTabMode === 'active',
+  );
 }
 
 function identityFromTab(
@@ -2575,14 +3198,15 @@ function assertSnapshotIsCurrent(
   identity: CapturedPageIdentity,
 ): void {
   if (
-    (!detachedIdentityHint && !tab?.active) ||
+    ((!isDetachedWindow || preferences.popoutTabMode === 'active') &&
+      !tab?.active) ||
     !isSamePageIdentity(identity, tab)
   ) {
     throw new PageAccessError('The source page changed or access expired. Select the extension on the source page to authorize it again.');
   }
 }
 
-function readAuthorizedTabMessage(message: unknown): CapturedPageIdentity | undefined {
+function readAuthorizedTabMessage(message: unknown): AuthorizedTabRequest | undefined {
   if (
     typeof message !== 'object' ||
     message === null ||
@@ -2599,10 +3223,30 @@ function readAuthorizedTabMessage(message: unknown): CapturedPageIdentity | unde
     !isSupportedPage(message.url)
   ) return undefined;
   const authorized = message as AuthorizedTabMessage;
+  const hasLaunchStamp = authorized.launchEpoch !== undefined ||
+    authorized.launchSequence !== undefined;
+  if (
+    hasLaunchStamp &&
+    (typeof authorized.launchEpoch !== 'string' ||
+      authorized.launchEpoch.length === 0 ||
+      authorized.launchEpoch.length > 128 ||
+      !Number.isSafeInteger(authorized.launchSequence) ||
+      Number(authorized.launchSequence) <= 0)
+  ) return undefined;
   return {
-    tabId: authorized.tabId,
-    windowId: authorized.windowId,
-    url: authorized.url,
+    identity: {
+      tabId: authorized.tabId,
+      windowId: authorized.windowId,
+      url: authorized.url,
+    },
+    ...(hasLaunchStamp
+      ? {
+          launchStamp: {
+            epoch: authorized.launchEpoch as string,
+            sequence: authorized.launchSequence as number,
+          },
+        }
+      : {}),
   };
 }
 
@@ -2697,11 +3341,14 @@ function updateControls(): void {
   autoTranslateSelect.disabled = busy;
   displayModeSelect.disabled = busy;
   textLayoutSelect.disabled = busy;
+  launchBehaviorSelect.disabled = busy;
+  popoutTabModeSelect.disabled = busy;
   syncScrollInput.disabled = busy || !liveObservationAvailable;
   zoomInButton.disabled = busy;
   zoomOutButton.disabled = busy;
   refreshButton.disabled = captureInFlight;
-  popoutButton.disabled = !capturedPageIdentity;
+  popoutButton.disabled = surfaceTransitionInFlight ||
+    (!isDetachedWindow && !capturedPageIdentity);
   cancelButton.hidden =
     !translationInFlight && !composerInFlight && !imageTranslationInFlight;
   cancelButton.disabled =
@@ -2819,10 +3466,20 @@ function readableError(error: unknown): string {
 function logImageTranslationDiagnostic(
   diagnostic: ImageTranslationDiagnostic,
 ): void {
-  if (diagnostic === 'projected') return;
   // Content-free local diagnostics only; image text, URLs, and pixels are
   // deliberately absent from this channel.
-  console.debug('[Simul image translation]', diagnostic);
+  console.info('[Simul image translation]', diagnostic);
+  imageTranslationDiagnosticHistory.append(diagnostic);
+  renderImageTranslationDiagnosticHistory();
+}
+
+function renderImageTranslationDiagnosticHistory(): void {
+  const output = imageTranslationDiagnosticOutput;
+  if (!output) return;
+  const entries = imageTranslationDiagnosticHistory.entries;
+  output.textContent = entries.length > 0
+    ? entries.join('\n')
+    : 'No OCR activity in this companion view yet.';
 }
 
 function isAbortError(error: unknown): boolean {

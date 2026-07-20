@@ -3,7 +3,11 @@ import {
   STORAGE_KEY,
   autoTranslationModeForPage,
   isAutoTranslationMode,
+  isCompanionLaunchBehavior,
+  isCompanionSurface,
   isMirrorDisplayMode,
+  isPopoutTabMode,
+  isReplicaEnginePreference,
   isTextLayoutMode,
   parseCompanionPreferences,
   permissionOriginsForMode,
@@ -367,6 +371,10 @@ const VIEW_SETTING_KEYS = new Set([
   'zoomPercent',
   'syncScroll',
   'textLayoutMode',
+  'replicaEngine',
+  'launchBehavior',
+  'lastLaunchSurface',
+  'popoutTabMode',
 ]);
 
 function readViewSettingsPatch(
@@ -409,6 +417,22 @@ function readViewSettingsPatch(
   if ('textLayoutMode' in value) {
     if (!isTextLayoutMode(value.textLayoutMode)) return undefined;
     patch.textLayoutMode = value.textLayoutMode;
+  }
+  if ('replicaEngine' in value) {
+    if (!isReplicaEnginePreference(value.replicaEngine)) return undefined;
+    patch.replicaEngine = value.replicaEngine;
+  }
+  if ('launchBehavior' in value) {
+    if (!isCompanionLaunchBehavior(value.launchBehavior)) return undefined;
+    patch.launchBehavior = value.launchBehavior;
+  }
+  if ('lastLaunchSurface' in value) {
+    if (!isCompanionSurface(value.lastLaunchSurface)) return undefined;
+    patch.lastLaunchSurface = value.lastLaunchSurface;
+  }
+  if ('popoutTabMode' in value) {
+    if (!isPopoutTabMode(value.popoutTabMode)) return undefined;
+    patch.popoutTabMode = value.popoutTabMode;
   }
   return patch;
 }

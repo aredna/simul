@@ -28,6 +28,10 @@ describe('parseCompanionPreferences', () => {
       zoomPercent: 100,
       syncScroll: true,
       textLayoutMode: 'adaptive',
+      replicaEngine: 'isolated-html',
+      launchBehavior: 'last-used',
+      lastLaunchSurface: 'side-panel',
+      popoutTabMode: 'locked',
       imageTranslationEnabled: false,
       imageTextProviderOrder: [
         'chrome-text-detector',
@@ -56,6 +60,10 @@ describe('parseCompanionPreferences', () => {
       zoomPercent: 100,
       syncScroll: true,
       textLayoutMode: 'adaptive',
+      replicaEngine: 'isolated-html',
+      launchBehavior: 'last-used',
+      lastLaunchSurface: 'side-panel',
+      popoutTabMode: 'locked',
       imageTranslationEnabled: false,
       imageTextProviderOrder: [
         'chrome-text-detector',
@@ -96,6 +104,10 @@ describe('parseCompanionPreferences', () => {
       zoomPercent: 100,
       syncScroll: true,
       textLayoutMode: 'adaptive',
+      replicaEngine: 'isolated-html',
+      launchBehavior: 'last-used',
+      lastLaunchSurface: 'side-panel',
+      popoutTabMode: 'locked',
       imageTranslationEnabled: false,
       imageTextProviderOrder: [
         'chrome-text-detector',
@@ -145,6 +157,27 @@ describe('parseCompanionPreferences', () => {
     });
     expect(clampZoomPercent(-10)).toBe(25);
     expect(clampZoomPercent(137.4)).toBe(137);
+  });
+
+  it('persists valid surface launch choices and repairs damaged values', () => {
+    expect(parseCompanionPreferences({
+      launchBehavior: 'popout',
+      lastLaunchSurface: 'popout',
+      popoutTabMode: 'active',
+    })).toMatchObject({
+      launchBehavior: 'popout',
+      lastLaunchSurface: 'popout',
+      popoutTabMode: 'active',
+    });
+    expect(parseCompanionPreferences({
+      launchBehavior: 'chooser',
+      lastLaunchSurface: 'panel',
+      popoutTabMode: 'all-windows',
+    })).toMatchObject({
+      launchBehavior: 'last-used',
+      lastLaunchSurface: 'side-panel',
+      popoutTabMode: 'locked',
+    });
   });
 
   it('repairs old or damaged image-analysis settings without mutating saved order', () => {

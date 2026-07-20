@@ -38,10 +38,19 @@ export const APPROVED_OPTIONAL_HOST_PERMISSIONS = Object.freeze([
 export const MINIMUM_CHROME_VERSION = 138;
 export const REQUIRED_UNLISTED_BUNDLES = Object.freeze([
   'page-recorder.js',
+  'page-mirror.js',
 ]);
 export const REQUIRED_REPLICA_RUNTIME_MARKERS = Object.freeze([
   'simul:replica-v2:capture-checkpoint',
   'rrweb-shadow-v2',
+  'simul:html-mirror-v1:',
+  'isolated-html-v1',
+]);
+export const REQUIRED_ISOLATED_SANDBOX_MARKERS = Object.freeze([
+  'simul-isolated-shell',
+  'allow-same-origin',
+  "script-src 'none'",
+  "connect-src 'none'",
 ]);
 export const FORBIDDEN_OCR_FOUNDATION_DEPENDENCIES = Object.freeze([
   '@huggingface/transformers',
@@ -117,12 +126,26 @@ export const APPROVED_TESSERACT_LICENSE_PATHS = Object.freeze([
   'licenses/TESSERACT_JS_APACHE-2.0.txt',
   'licenses/WORKER_THIRD_PARTY.txt',
 ]);
-export const REQUIRED_OCR_RUNTIME_MARKERS = Object.freeze([
+export const REQUIRED_OCR_HOST_RUNTIME_MARKERS = Object.freeze([
   'simul:ocr-v1:run',
+]);
+export const REQUIRED_TEXT_DETECTOR_RUNTIME_MARKERS = Object.freeze([
+  'simul-chrome-text-detector-offscreen-v1',
+]);
+export const REQUIRED_TESSERACT_RUNTIME_MARKERS = Object.freeze([
   'tesseract.js-7.0.0',
   '/ocr/tesseract/worker/worker.min.js',
   '/ocr/tesseract/core',
   '/ocr/tesseract/lang',
+]);
+export const REQUIRED_OCR_RUNTIME_MARKERS = Object.freeze([
+  ...REQUIRED_OCR_HOST_RUNTIME_MARKERS,
+  ...REQUIRED_TEXT_DETECTOR_RUNTIME_MARKERS,
+  ...REQUIRED_TESSERACT_RUNTIME_MARKERS,
+]);
+export const IMPLEMENTED_OCR_PROVIDER_IDS = Object.freeze([
+  'chrome-text-detector',
+  'tesseract',
 ]);
 
 const TOOL_FILE = fileURLToPath(import.meta.url);
@@ -178,12 +201,16 @@ export async function buildProductionArtifact({
   projectRoot = PROJECT_ROOT,
   temporaryRoot,
   ocrEnabled = true,
+  ocrProviderIds,
 } = {}) {
   if (!temporaryRoot) {
     throw new ArtifactError('A temporary build root is required.');
   }
 
   const resolvedRoot = path.resolve(projectRoot);
+  const enabledOcrProviderIds = normalizeBuildOcrProviderIds(
+    ocrProviderIds ?? (ocrEnabled ? IMPLEMENTED_OCR_PROVIDER_IDS : []),
+  );
   await assertOcrProviderDependenciesApproved(resolvedRoot);
   const outputBase = path.join(path.resolve(temporaryRoot), 'wxt-output');
   const wxtCli = path.join(resolvedRoot, 'node_modules', 'wxt', 'bin', 'wxt.mjs');
@@ -200,8 +227,10 @@ export async function buildProductionArtifact({
         NO_COLOR: '1',
         NODE_ENV: 'production',
         SIMUL_WXT_OUT_DIR: outputBase,
-        SIMUL_OCR_TEXT_DETECTOR: '0',
-        SIMUL_OCR_TESSERACT: ocrEnabled ? '1' : '0',
+        SIMUL_OCR_TEXT_DETECTOR:
+          enabledOcrProviderIds.includes('chrome-text-detector') ? '1' : '0',
+        SIMUL_OCR_TESSERACT:
+          enabledOcrProviderIds.includes('tesseract') ? '1' : '0',
         SIMUL_OCR_TRANSFORMERS: '0',
         SIMUL_OCR_PADDLE: '0',
         SIMUL_OCR_SCREEN_AI: '0',
@@ -270,14 +299,35 @@ export async function validateArtifact(artifactDirectory) {
   } catch (error) {
     throw new ArtifactError('manifest.json is not valid JSON.', { cause: error });
   }
-  const ocrEnabled = validateManifest(manifest, filePaths);
-  if (ocrEnabled) {
+  const offscreenOcrEnabled = validateManifest(manifest, filePaths);
+  const ocrProviderIds = offscreenOcrEnabled
+    ? detectOcrRuntimeProfile(executableTextByPath, filePaths)
+    : Object.freeze([]);
+  validateOcrProfileManifest(manifest, ocrProviderIds);
+  if (ocrProviderIds.includes('tesseract')) {
     await validateTesseractRuntimeAssets({
       root,
       files,
       filePaths,
       executableTextByPath,
       unpackedBytes,
+      requiredRuntimeMarkers: Object.freeze([
+        ...REQUIRED_OCR_HOST_RUNTIME_MARKERS,
+        ...(ocrProviderIds.includes('chrome-text-detector')
+          ? REQUIRED_TEXT_DETECTOR_RUNTIME_MARKERS
+          : []),
+        ...REQUIRED_TESSERACT_RUNTIME_MARKERS,
+      ]),
+    });
+  } else if (ocrProviderIds.includes('chrome-text-detector')) {
+    validateAssetFreeOcrRuntime({
+      files,
+      filePaths,
+      executableTextByPath,
+      requiredRuntimeMarkers: Object.freeze([
+        ...REQUIRED_OCR_HOST_RUNTIME_MARKERS,
+        ...REQUIRED_TEXT_DETECTOR_RUNTIME_MARKERS,
+      ]),
     });
   } else {
     for (const entry of files) assertNoOcrRuntimeArtifact(entry.path);
@@ -288,17 +338,25 @@ export async function validateArtifact(artifactDirectory) {
     directory: root,
     files: [...filePaths].sort(),
     manifest,
-    ocrEnabled,
+    ocrEnabled: ocrProviderIds.length > 0,
+    ocrProviderIds,
     unpackedBytes,
   };
 }
 
 function assertReplicaRuntimeMarkers(executableTextByPath, filePaths) {
-  const [captureMarker, replayMarker] = REQUIRED_REPLICA_RUNTIME_MARKERS;
+  const [captureMarker, replayMarker, htmlMirrorMarker, isolatedMarker] =
+    REQUIRED_REPLICA_RUNTIME_MARKERS;
   const recorderText = executableTextByPath.get(REQUIRED_UNLISTED_BUNDLES[0]);
   if (!recorderText || !hasJavaScriptStringMarker(recorderText, captureMarker)) {
     throw new ArtifactError(
       `Extension artifact is missing required local replica runtime marker: ${captureMarker}`,
+    );
+  }
+  const mirrorText = executableTextByPath.get(REQUIRED_UNLISTED_BUNDLES[1]);
+  if (!mirrorText || !hasJavaScriptStringMarker(mirrorText, htmlMirrorMarker)) {
+    throw new ArtifactError(
+      `Extension artifact is missing required local replica runtime marker: ${htmlMirrorMarker}`,
     );
   }
 
@@ -312,15 +370,25 @@ function assertReplicaRuntimeMarkers(executableTextByPath, filePaths) {
     : [];
   if (
     sidepanelScripts.length === 0 ||
-    !sidepanelScripts.some((script) =>
-      hasJavaScriptStringMarker(
-        executableTextByPath.get(script),
-        replayMarker,
-      ),
-    )
+    !sidepanelScripts.some((script) => {
+      const text = executableTextByPath.get(script);
+      return hasJavaScriptStringMarker(text, replayMarker) &&
+        hasJavaScriptStringMarker(text, isolatedMarker);
+    })
   ) {
     throw new ArtifactError(
-      `Extension artifact is missing required local replica runtime marker: ${replayMarker}`,
+      `Extension artifact is missing required local replica runtime markers: ${replayMarker}, ${isolatedMarker}`,
+    );
+  }
+  const isolatedRuntime = sidepanelScripts.find((script) => {
+    const text = executableTextByPath.get(script);
+    return REQUIRED_ISOLATED_SANDBOX_MARKERS.every(
+      (marker) => hasJavaScriptStringMarker(text, marker),
+    );
+  });
+  if (!isolatedRuntime) {
+    throw new ArtifactError(
+      `Extension artifact is missing isolated iframe sandbox/CSP markers: ${REQUIRED_ISOLATED_SANDBOX_MARKERS.join(', ')}`,
     );
   }
 }
@@ -665,10 +733,17 @@ function validateManifest(manifest, filePaths) {
   if ('content_scripts' in manifest) {
     throw new ArtifactError('Static content scripts are outside the approved release boundary.');
   }
+  if (!isRecord(manifest.action)) {
+    throw new ArtifactError('manifest.json is missing the direct toolbar action.');
+  }
+  if ('default_popup' in manifest.action) {
+    throw new ArtifactError(
+      'manifest.json toolbar action must launch the saved companion surface directly without a popup chooser.',
+    );
+  }
 
   const requiredReferences = [
     ['background.service_worker', manifest.background?.service_worker],
-    ['action.default_popup', manifest.action?.default_popup],
     ['side_panel.default_path', manifest.side_panel?.default_path],
   ];
   for (const [label, reference] of requiredReferences) {
@@ -684,19 +759,6 @@ function validateManifest(manifest, filePaths) {
         'The OCR profile requires the packaged offscreen.html compute host.',
       );
     }
-    if (
-      !isRecord(manifest.content_security_policy) ||
-      Object.keys(manifest.content_security_policy).length !== 1 ||
-      manifest.content_security_policy.extension_pages !== APPROVED_OCR_CSP
-    ) {
-      throw new ArtifactError(
-        `The OCR profile requires the exact extension page CSP: ${APPROVED_OCR_CSP}`,
-      );
-    }
-  } else if ('content_security_policy' in manifest) {
-    throw new ArtifactError(
-      'manifest.json must not relax or override extension page CSP in the OCR foundation build.',
-    );
   }
 
   for (const reference of collectManifestReferences(manifest)) {
@@ -705,15 +767,109 @@ function validateManifest(manifest, filePaths) {
   return ocrEnabled;
 }
 
+function normalizeBuildOcrProviderIds(providerIds) {
+  if (!Array.isArray(providerIds)) {
+    throw new ArtifactError('ocrProviderIds must be an array of implemented provider IDs.');
+  }
+  if (new Set(providerIds).size !== providerIds.length) {
+    throw new ArtifactError('ocrProviderIds must not contain duplicate provider IDs.');
+  }
+  for (const providerId of providerIds) {
+    if (
+      typeof providerId !== 'string' ||
+      !IMPLEMENTED_OCR_PROVIDER_IDS.includes(providerId)
+    ) {
+      throw new ArtifactError(
+        `Unknown or unimplemented OCR provider ID: ${String(providerId)}.`,
+      );
+    }
+  }
+  return Object.freeze(
+    IMPLEMENTED_OCR_PROVIDER_IDS.filter((providerId) =>
+      providerIds.includes(providerId),
+    ),
+  );
+}
+
+function detectOcrRuntimeProfile(executableTextByPath, filePaths) {
+  const offscreenResources = collectStaticJavaScriptModuleClosure(
+    'offscreen.html',
+    executableTextByPath,
+    filePaths,
+  );
+  assertOcrRuntimeMarkers(
+    offscreenResources,
+    executableTextByPath,
+    REQUIRED_OCR_HOST_RUNTIME_MARKERS,
+  );
+
+  const detected = [];
+  for (const [providerId, markers] of [
+    ['chrome-text-detector', REQUIRED_TEXT_DETECTOR_RUNTIME_MARKERS],
+    ['tesseract', REQUIRED_TESSERACT_RUNTIME_MARKERS],
+  ]) {
+    const markerPresence = markers.map((marker) =>
+      [...offscreenResources].some((modulePath) =>
+        hasJavaScriptStringMarker(executableTextByPath.get(modulePath), marker),
+      ),
+    );
+    // The protocol intentionally retains Tesseract's result-version literal in
+    // every build. Asset path markers are the provider-specific anchors.
+    const providerSpecificPresence = providerId === 'tesseract'
+      ? markerPresence.slice(1)
+      : markerPresence;
+    if (
+      providerSpecificPresence.some(Boolean) &&
+      !markerPresence.every(Boolean)
+    ) {
+      throw new ArtifactError(
+        `OCR compute host contains a partial ${providerId} runtime marker set.`,
+      );
+    }
+    if (
+      providerSpecificPresence.length > 0 &&
+      providerSpecificPresence.every(Boolean) &&
+      markerPresence.every(Boolean)
+    ) {
+      detected.push(providerId);
+    }
+  }
+  if (detected.length === 0) {
+    throw new ArtifactError(
+      'OCR compute host does not contain an implemented provider runtime.',
+    );
+  }
+  return Object.freeze(detected);
+}
+
+function validateOcrProfileManifest(manifest, providerIds) {
+  const tesseractEnabled = providerIds.includes('tesseract');
+  if (tesseractEnabled) {
+    if (
+      !isRecord(manifest.content_security_policy) ||
+      Object.keys(manifest.content_security_policy).length !== 1 ||
+      manifest.content_security_policy.extension_pages !== APPROVED_OCR_CSP
+    ) {
+      throw new ArtifactError(
+        `The Tesseract OCR profile requires the exact extension page CSP: ${APPROVED_OCR_CSP}`,
+      );
+    }
+    return;
+  }
+  if ('content_security_policy' in manifest) {
+    throw new ArtifactError(
+      providerIds.length > 0
+        ? 'The asset-free OCR profile must use Chrome\'s default extension page CSP.'
+        : 'manifest.json must not relax or override extension page CSP when OCR is disabled.',
+    );
+  }
+}
+
 async function validateManifestSemanticResources(root, manifest, filePaths) {
   const resources = [
     {
       path: manifest.background?.service_worker,
       type: 'javascript',
-    },
-    {
-      path: manifest.action?.default_popup,
-      type: 'html',
     },
     {
       path: manifest.side_panel?.default_path,
@@ -1088,6 +1244,7 @@ async function validateTesseractRuntimeAssets({
   filePaths,
   executableTextByPath,
   unpackedBytes,
+  requiredRuntimeMarkers,
 }) {
   if (unpackedBytes > MAX_UNPACKED_ARTIFACT_BYTES) {
     throw new ArtifactError(
@@ -1205,7 +1362,11 @@ async function validateTesseractRuntimeAssets({
     executableTextByPath,
     filePaths,
   );
-  assertOcrRuntimeMarkers(offscreenResources, executableTextByPath);
+  assertOcrRuntimeMarkers(
+    offscreenResources,
+    executableTextByPath,
+    requiredRuntimeMarkers,
+  );
   for (const entry of files) {
     if (
       entry.path === 'offscreen.html' ||
@@ -1225,6 +1386,30 @@ async function validateTesseractRuntimeAssets({
         `Remote OCR runtime fallback found in artifact: ${relativePath}`,
       );
     }
+  }
+}
+
+function validateAssetFreeOcrRuntime({
+  files,
+  filePaths,
+  executableTextByPath,
+  requiredRuntimeMarkers,
+}) {
+  const offscreenResources = collectStaticJavaScriptModuleClosure(
+    'offscreen.html',
+    executableTextByPath,
+    filePaths,
+  );
+  assertOcrRuntimeMarkers(
+    offscreenResources,
+    executableTextByPath,
+    requiredRuntimeMarkers,
+  );
+  for (const entry of files) {
+    if (entry.path === 'offscreen.html' || offscreenResources.has(entry.path)) {
+      continue;
+    }
+    assertNoOcrRuntimeArtifact(entry.path);
   }
 }
 
@@ -1323,8 +1508,12 @@ function collectStaticJavaScriptModuleClosure(
   return closure;
 }
 
-function assertOcrRuntimeMarkers(modulePaths, executableTextByPath) {
-  for (const marker of REQUIRED_OCR_RUNTIME_MARKERS) {
+function assertOcrRuntimeMarkers(
+  modulePaths,
+  executableTextByPath,
+  markers = REQUIRED_OCR_RUNTIME_MARKERS,
+) {
+  for (const marker of markers) {
     const present = [...modulePaths].some((modulePath) =>
       hasJavaScriptStringMarker(executableTextByPath.get(modulePath), marker),
     );

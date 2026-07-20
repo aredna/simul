@@ -5,6 +5,8 @@ import type { SourceImageChange, SourceImageDescriptor } from './contracts';
 import {
   createImageSourcePortName,
   readImageSourceRecorderMessage,
+  type ImageSourceBridgeId,
+  type ImageSourceReadySummary,
   type SourceImageCaptureMetrics,
 } from './image-source-protocol';
 
@@ -22,6 +24,8 @@ export function isImageSourceUnavailableError(
 }
 
 export interface ImageSourceLease {
+  /** Resolves after the source document's initial synchronous `<img>` scan. */
+  readonly ready?: Promise<ImageSourceReadySummary | undefined>;
   /** Resolves only when the exact-document messaging channel fails unexpectedly. */
   readonly unavailable?: Promise<ImageSourceUnavailableError>;
   measure(
@@ -35,6 +39,7 @@ export async function openChromeImageSource(
   request: ReplicaCaptureRequest,
   onChange: (change: SourceImageChange) => void,
   signal?: AbortSignal,
+  bridge: ImageSourceBridgeId = 'rrweb',
 ): Promise<ImageSourceLease> {
   signal?.throwIfAborted();
   if (!request.isCurrent()) throw new DOMException('Stale image source.', 'AbortError');
@@ -52,7 +57,7 @@ export async function openChromeImageSource(
     port = browser.tabs.connect(request.tabId, {
       documentId: request.documentId,
       frameId: request.frameId,
-      name: createImageSourcePortName(request.sessionId),
+      name: createImageSourcePortName(request.sessionId, bridge),
     });
   } catch (error) {
     throw new ImageSourceUnavailableError(readableError(error));
@@ -61,6 +66,7 @@ export async function openChromeImageSource(
 }
 
 class ChromeImageSourceLease implements ImageSourceLease {
+  readonly ready: Promise<ImageSourceReadySummary | undefined>;
   readonly unavailable: Promise<ImageSourceUnavailableError>;
   readonly #pending = new Map<
     string,
@@ -73,8 +79,12 @@ class ChromeImageSourceLease implements ImageSourceLease {
     }
   >();
   readonly #resolveUnavailable: (error: ImageSourceUnavailableError) => void;
+  readonly #resolveReady: (
+    summary: ImageSourceReadySummary | undefined,
+  ) => void;
   #disposed = false;
   #unavailableSignalled = false;
+  #readySignalled = false;
 
   constructor(
     private readonly port: Browser.runtime.Port,
@@ -83,6 +93,13 @@ class ChromeImageSourceLease implements ImageSourceLease {
     private readonly onChange: (change: SourceImageChange) => void,
     private readonly signal?: AbortSignal,
   ) {
+    let resolveReady!: (
+      summary: ImageSourceReadySummary | undefined,
+    ) => void;
+    this.ready = new Promise((resolve) => {
+      resolveReady = resolve;
+    });
+    this.#resolveReady = resolveReady;
     let resolveUnavailable!: (error: ImageSourceUnavailableError) => void;
     this.unavailable = new Promise((resolve) => {
       resolveUnavailable = resolve;
@@ -164,6 +181,17 @@ class ChromeImageSourceLease implements ImageSourceLease {
       }
       return;
     }
+    if (message.kind === 'simul:image-source-v1:ready') {
+      if (this.#readySignalled) {
+        this.disposeWithError(
+          new ImageSourceUnavailableError('Duplicate image source readiness.'),
+        );
+        return;
+      }
+      this.#readySignalled = true;
+      this.#resolveReady(message.summary);
+      return;
+    }
     this.#settlePending(
       message.requestId,
       message.status === 'ready' ? message.metrics : undefined,
@@ -199,6 +227,10 @@ class ChromeImageSourceLease implements ImageSourceLease {
     this.port.onMessage.removeListener(this.#onMessage);
     this.port.onDisconnect.removeListener(this.#onDisconnect);
     this.signal?.removeEventListener('abort', this.#onAbort);
+    if (!this.#readySignalled) {
+      this.#readySignalled = true;
+      this.#resolveReady(undefined);
+    }
     for (const requestId of [...this.#pending.keys()]) {
       this.#settlePending(requestId, undefined, error);
     }

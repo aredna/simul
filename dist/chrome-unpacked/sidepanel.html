@@ -5,10 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="color-scheme" content="light dark">
     <title>Translation companion</title>
-    <script type="module" crossorigin src="/chunks/sidepanel-D_bpItIl.js"></script>
-    <link rel="modulepreload" crossorigin href="/chunks/browser-B79nNR8W.js">
-    <link rel="modulepreload" crossorigin href="/chunks/transient-image-store-BBLxGpJe.js">
-    <link rel="stylesheet" crossorigin href="/assets/sidepanel-RCClZXVV.css">
+    <script type="module" crossorigin src="/chunks/sidepanel-CrhsMkck.js"></script>
+    <link rel="modulepreload" crossorigin href="/chunks/transient-image-store-BLoiMjct.js">
+    <link rel="stylesheet" crossorigin href="/assets/sidepanel-BycOk1BE.css">
   </head>
   <body>
     <nav id="compact-toolbar" class="compact-toolbar" aria-label="Translation companion controls">
@@ -23,7 +22,10 @@
 
     <section id="control-overlay" class="control-overlay" hidden aria-label="Translation options">
       <div class="overlay-heading">
-        <strong>Options</strong>
+        <div class="overlay-title">
+          <strong>Options</strong>
+          <span id="build-version" class="build-version"></span>
+        </div>
         <button id="close-settings" class="quiet-button" type="button" aria-label="Close options">×</button>
       </div>
 
@@ -62,6 +64,28 @@
           <select id="text-layout-mode">
             <option value="adaptive">Let boxes grow</option>
             <option value="faithful">Keep geometry</option>
+          </select>
+        </label>
+        <label>
+          <span>Replica engine</span>
+          <select id="replica-engine">
+            <option value="isolated-html">Isolated HTML (recommended)</option>
+            <option value="rrweb">rrweb (experimental)</option>
+          </select>
+        </label>
+        <label>
+          <span>Toolbar opens</span>
+          <select id="launch-behavior">
+            <option value="last-used">Last used view</option>
+            <option value="side-panel">Always side panel</option>
+            <option value="popout">Always detached window</option>
+          </select>
+        </label>
+        <label>
+          <span>Detached window follows</span>
+          <select id="popout-tab-mode">
+            <option value="locked">The opening tab</option>
+            <option value="active">Active browser tab</option>
           </select>
         </label>
         <label class="check-label">

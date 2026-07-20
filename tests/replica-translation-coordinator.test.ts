@@ -157,6 +157,66 @@ describe('ReplicaTranslationCoordinator', () => {
     expect(surface.projections[0]).toMatchObject({ replayLease: 2, translated: 'en:Hola' });
   });
 
+  it('does not reuse an obsolete page translation after navigation', async () => {
+    const surface = new FakeSurface([record(4, 1, 'Inicio')]);
+    const translate = vi.fn(async (source: string) =>
+      `${surface.document.documentId}:${source}`);
+    const { provider } = fakeProvider(translate);
+    const coordinator = new ReplicaTranslationCoordinator(provider, surface);
+
+    await coordinator.translateCurrent(pair);
+
+    const nextDocument = {
+      ...documentIdentity,
+      pageEpoch: documentIdentity.pageEpoch + 1,
+      generation: documentIdentity.generation + 1,
+      documentId: 'next-document',
+    };
+    surface.document = nextDocument;
+    surface.lease = 2;
+    surface.records = [record(4, 1, 'Inicio', nextDocument)];
+    surface.projections.length = 0;
+
+    await coordinator.translateCurrent(pair);
+
+    expect(translate).toHaveBeenCalledTimes(2);
+    expect(surface.projections).toEqual([
+      expect.objectContaining({
+        document: nextDocument,
+        translated: 'next-document:Inicio',
+      }),
+    ]);
+  });
+
+  it('reuses translation memory across a rebuild of the same source document', async () => {
+    const surface = new FakeSurface([record(4, 1, 'Inicio')]);
+    const translate = vi.fn(async (source: string) => `en:${source}`);
+    const { provider } = fakeProvider(translate);
+    const coordinator = new ReplicaTranslationCoordinator(provider, surface);
+
+    await coordinator.translateCurrent(pair);
+
+    const rebuiltIdentity = {
+      ...documentIdentity,
+      pageEpoch: documentIdentity.pageEpoch + 1,
+      generation: documentIdentity.generation + 1,
+    };
+    surface.document = rebuiltIdentity;
+    surface.lease = 2;
+    surface.records = [record(4, 1, 'Inicio', rebuiltIdentity)];
+    surface.projections.length = 0;
+
+    await coordinator.translateCurrent(pair);
+
+    expect(translate).toHaveBeenCalledOnce();
+    expect(surface.projections).toEqual([
+      expect.objectContaining({
+        document: rebuiltIdentity,
+        translated: 'en:Inicio',
+      }),
+    ]);
+  });
+
   it('never sends whitespace-only or removed values to the provider', async () => {
     const surface = new FakeSurface([
       record(4, 1, '   '),
@@ -561,9 +621,10 @@ function record(
   nodeId: number,
   revision: number,
   source: string,
+  document: ReplicaSourceDocumentIdentity = documentIdentity,
 ): ReplicaSourceTextRecord {
   return {
-    document: documentIdentity,
+    document,
     nodeId,
     nodeType: 3,
     revision,

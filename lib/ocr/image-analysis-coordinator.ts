@@ -1,4 +1,10 @@
-import type { ImageTextResult, SourceImageDescriptor } from './contracts';
+import {
+  readImageTextResult,
+  type ImageTextRegion,
+  type ImageTextResult,
+  type SourceImageDescriptor,
+} from './contracts';
+import type { ImageTextProviderId } from './known-provider-ids';
 import {
   readEnsureOcrHostResponse,
   readOffscreenOcrResponse,
@@ -12,8 +18,10 @@ import type { TransientImageInputStore } from './transient-image-store';
 export const MAX_RECOGNITION_CACHE_ENTRIES = 128;
 
 export interface ImageRecognitionRoute {
-  readonly languageGroup: string;
-  readonly modelVersion: string;
+  readonly providerOrder?: readonly ImageTextProviderId[];
+  readonly sourceLanguage?: string;
+  readonly languageGroup?: string;
+  readonly modelVersion?: string;
 }
 
 export type ImageRecognitionResult =
@@ -61,38 +69,74 @@ export class ImageRecognitionCoordinator {
       this.#cache.set(cacheKey, cached);
       return { status: 'complete', result: cached, cacheHit: true };
     }
+    const providers = effectiveRuntimeOrder(route);
+    if (providers.length === 0) {
+      return { status: 'failed', code: 'provider-unavailable' };
+    }
     const inputKey = await this.environment.store.put(pixels.encoded);
-    const jobId = crypto.randomUUID();
     try {
-      const first = createJob(
-        this.#clientId,
-        jobId,
-        0,
-        inputKey,
-        pixels,
-        route,
-      );
-      const firstResponse = await this.#run(first, signal);
-      const response = shouldRetry(firstResponse)
-        ? await this.#run(createJob(
+      let lastFailure: OcrHostErrorCode = 'provider-unavailable';
+      let lastEmptyResult: ImageTextResult | undefined;
+      let hints: readonly ImageTextRegion[] = Object.freeze([]);
+      for (const providerId of providers) {
+        signal?.throwIfAborted();
+        const jobId = crypto.randomUUID();
+        const first = createJob(
+          providerId,
+          this.#clientId,
+          jobId,
+          0,
+          inputKey,
+          pixels,
+          route,
+          hints,
+        );
+        if (!first) continue;
+        const firstResponse = await this.#run(first, signal);
+        let response = firstResponse;
+        if (shouldRetry(firstResponse)) {
+          const retry = createJob(
+            providerId,
             this.#clientId,
             jobId,
             1,
             inputKey,
             pixels,
             route,
-          ), signal)
-        : firstResponse;
-      if (response.kind === 'simul:ocr-v1:error') {
-        return { status: 'failed', code: response.code };
+            hints,
+          );
+          if (retry) response = await this.#run(retry, signal);
+        }
+        if (response.kind === 'simul:ocr-v1:error') {
+          lastFailure = response.code;
+          // A second host failure is shared infrastructure exhaustion, not a
+          // provider-specific signal. Trying the remaining route would merely
+          // repeat the same unavailable-host checks and exceed the one-retry
+          // recovery boundary.
+          if (response.code === 'host-unavailable' && response.attempt === 1) {
+            return { status: 'failed', code: response.code };
+          }
+          continue;
+        }
+        const acceptable = acceptableSpatialResult(response.result);
+        if (!acceptable) {
+          hints = appendGeometryHints(hints, response.result.regions);
+          lastEmptyResult = emptySpatialResult(response.result);
+          lastFailure = 'recognition-failed';
+          continue;
+        }
+        this.#remember(cacheKey, acceptable);
+        return { status: 'complete', result: acceptable, cacheHit: false };
       }
-      this.#cache.set(cacheKey, response.result);
-      while (this.#cache.size > this.#maxCacheEntries) {
-        const oldest = this.#cache.keys().next().value as string | undefined;
-        if (!oldest) break;
-        this.#cache.delete(oldest);
+      if (lastEmptyResult) {
+        this.#remember(cacheKey, lastEmptyResult);
+        return {
+          status: 'complete',
+          result: lastEmptyResult,
+          cacheHit: false,
+        };
       }
-      return { status: 'complete', result: response.result, cacheHit: false };
+      return { status: 'failed', code: lastFailure };
     } finally {
       await this.environment.store.remove(inputKey).catch(() => undefined);
     }
@@ -100,6 +144,16 @@ export class ImageRecognitionCoordinator {
 
   clear(): void {
     this.#cache.clear();
+  }
+
+  #remember(cacheKey: string, result: ImageTextResult): void {
+    this.#cache.delete(cacheKey);
+    this.#cache.set(cacheKey, result);
+    while (this.#cache.size > this.#maxCacheEntries) {
+      const oldest = this.#cache.keys().next().value as string | undefined;
+      if (!oldest) break;
+      this.#cache.delete(oldest);
+    }
   }
 
   async #run(
@@ -169,15 +223,17 @@ export function createBrowserImageRecognitionCoordinator(
 }
 
 function createJob(
+  providerId: Extract<ImageTextProviderId, 'chrome-text-detector' | 'tesseract'>,
   clientId: string,
   jobId: string,
   attempt: 0 | 1,
   inputKey: string,
   pixels: AcquiredImagePixels,
   route: ImageRecognitionRoute,
-): OffscreenOcrJob {
+  hints: readonly ImageTextRegion[],
+): OffscreenOcrJob | undefined {
   const descriptor: SourceImageDescriptor = pixels.descriptor;
-  return Object.freeze({
+  const base = {
     jobId,
     clientId,
     attempt,
@@ -189,12 +245,27 @@ function createJob(
     pixelHash: pixels.pixelHash,
     bitmapWidth: pixels.bitmapWidth,
     bitmapHeight: pixels.bitmapHeight,
-    providerId: 'tesseract',
+    ...(hints.length > 0 ? { hints } : {}),
+    preprocessingVersion: 'visible-crop-v1',
+    schemaVersion: 1,
+  } as const;
+  if (providerId === 'chrome-text-detector') {
+    if (!route.sourceLanguage) return undefined;
+    return Object.freeze({
+      ...base,
+      providerId,
+      languageGroup: route.sourceLanguage,
+      providerVersion: 'chrome-text-detector-v1',
+      modelVersion: 'platform',
+    });
+  }
+  if (!route.languageGroup || !route.modelVersion) return undefined;
+  return Object.freeze({
+    ...base,
+    providerId,
     languageGroup: route.languageGroup,
     providerVersion: 'tesseract.js-7.0.0',
     modelVersion: route.modelVersion,
-    preprocessingVersion: 'visible-crop-v1',
-    schemaVersion: 1,
   });
 }
 
@@ -204,14 +275,81 @@ function recognitionCacheKey(
 ): string {
   return [
     'image-text-v1',
-    'tesseract.js-7.0.0',
-    route.modelVersion,
-    route.languageGroup,
+    effectiveRuntimeOrder(route).join(','),
+    route.sourceLanguage ?? '',
+    route.modelVersion ?? '',
+    route.languageGroup ?? '',
     'visible-crop-v1',
     pixels.bitmapWidth,
     pixels.bitmapHeight,
     pixels.pixelHash,
   ].join(':');
+}
+
+function effectiveRuntimeOrder(
+  route: ImageRecognitionRoute,
+): readonly Extract<ImageTextProviderId, 'chrome-text-detector' | 'tesseract'>[] {
+  const saved = route.providerOrder ?? ['tesseract'];
+  const seen = new Set<string>();
+  const result: Array<
+    Extract<ImageTextProviderId, 'chrome-text-detector' | 'tesseract'>
+  > = [];
+  for (const providerId of saved) {
+    if (
+      (providerId === 'chrome-text-detector' || providerId === 'tesseract') &&
+      !seen.has(providerId)
+    ) {
+      seen.add(providerId);
+      result.push(providerId);
+    }
+  }
+  return Object.freeze(result);
+}
+
+function acceptableSpatialResult(
+  result: ImageTextResult,
+): ImageTextResult | undefined {
+  const regions = result.regions.filter((region) => region.text.trim().length > 0);
+  if (regions.length === 0) return undefined;
+  return readImageTextResult({
+    ...result,
+    regions,
+  });
+}
+
+function emptySpatialResult(result: ImageTextResult): ImageTextResult {
+  return readImageTextResult({
+    ...result,
+    transcript: '',
+    regions: [],
+  }) as ImageTextResult;
+}
+
+function appendGeometryHints(
+  existing: readonly ImageTextRegion[],
+  additions: readonly ImageTextRegion[],
+): readonly ImageTextRegion[] {
+  if (additions.length === 0 || existing.length >= 10_000) return existing;
+  const result = [...existing];
+  const seen = new Set(existing.map(regionGeometryKey));
+  for (const region of additions) {
+    const hint = Object.freeze({
+      text: '',
+      boundingBox: region.boundingBox,
+      ...(region.polygon ? { polygon: region.polygon } : {}),
+    });
+    const key = regionGeometryKey(hint);
+    if (seen.has(key)) continue;
+    seen.add(key);
+    result.push(hint);
+    if (result.length >= 10_000) break;
+  }
+  return Object.freeze(result);
+}
+
+function regionGeometryKey(region: ImageTextRegion): string {
+  const box = region.boundingBox;
+  return `${box.x},${box.y},${box.width},${box.height}`;
 }
 
 function shouldRetry(response: OffscreenOcrResponse): boolean {

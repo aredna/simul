@@ -17,13 +17,16 @@ needed to install the extension.
 
 Keep that directory in place while the extension is installed. A Developer
 mode installation does not update automatically; after replacing the files,
-use the extension card's **Reload** button.
+use the extension card's **Reload** button. Open Simul's ⚙ options afterward
+and confirm the displayed build number matches the version you intended to
+test.
 
 ## Use the companion
 
 1. Open a regular HTTP or HTTPS page.
-2. Select the extension icon and choose **Open translation panel** or **Open
-   detached window**.
+2. Select the extension icon. Simul opens the last-used companion view directly;
+   Options can instead make the toolbar always open the side panel or detached
+   window.
 3. The From language defaults to **Auto-detect**. Choose any listed target
    language and select **Translate page** if Chrome needs an initial user
    action to prepare that language pack.
@@ -39,8 +42,13 @@ the last usable mirror visible.
 
 View options include Fit width, exact 1:1 CSS-pixel size, 25–300% custom zoom,
 horizontal and vertical overflow, source-scroll following, and adaptive or
-faithful translated-text layout. Language, zoom, layout, scroll, and automatic
-translation choices are saved. Image translation is also available as an
+faithful translated-text layout. **Isolated HTML** is the default replica
+engine; it mirrors the browser-produced DOM into a script-disabled iframe.
+The previous **rrweb (experimental)** engine remains selectable under Options
+without rebuilding the extension. A detached window can stay locked to its
+opening tab or follow the active tab across ordinary browser windows. Language,
+engine, zoom, layout, scroll, launch, and automatic translation choices are
+saved. Image translation is also available as an
 experimental, initially-off option under **Image text**. A reply composer translates from the language
 you are reading back into the detected website language and provides a
 copyable result; draft and output text are never saved.
@@ -65,16 +73,22 @@ required host access. Its installed permissions are:
 
 Optional HTTP(S) access is granted only after choosing **This site** or **All
 sites** for automatic translation and is removed when no longer needed. A
-detached popup window uses the same permissions and remains tied to the source
-tab; Chrome does not expose native side-panel detachment.
+detached popup window uses the same permissions. Following newly active tabs
+works automatically on sites with optional access; otherwise the user must
+select Simul on the new site because `activeTab` access does not transfer to a
+different tab. Chrome 141 or newer uses the native panel-close API when
+popping out; older supported releases use a disable-and-reenable teardown for
+Simul's panel entry.
 
-The mirror never runs site scripts or copies event handlers, links, passwords,
-form values, selections, or contenteditable text. Public button labels remain
-visible in inert elements. Original remote images and allowlisted CSS
+The mirror never runs site scripts or copies event handlers, navigable links,
+passwords, form values, selections, or contenteditable text. Private controls
+and their descendant text are masked before transport. Original remote images and allowlisted CSS
 backgrounds may reload from their existing hosts for visual context. When
 image translation is explicitly enabled, Simul captures only stable visible
-top-frame image pixels, recognizes text with packaged Tesseract models,
-translates accepted lines through Chrome, and discards the transient crop.
+top-frame image pixels, tries Chrome's capability-probed TextDetector when the
+platform exposes it, falls back to packaged Tesseract models according to the
+saved OCR priority, translates accepted lines through Chrome, and discards the
+transient crop.
 Pixels and recognized text are never sent to a remote service or saved as
 history.
 
@@ -89,14 +103,11 @@ the project's 42 MiB release limit.
 ## Fidelity limits
 
 This is a high-fidelity safe reconstruction, not the website itself. Open
-shadow roots are traversed, but closed shadow roots, cross-origin frame
-contents, pseudo-elements, canvas pixels, current video frames, DRM content,
-and some script-only state cannot be copied across the extension boundary.
-Open roots present during capture, added with new DOM, or created by a newly
-upgraded custom element are followed automatically. A root attached later to
-an already-defined, already-connected host without any DOM, resize, focus, or
-load signal may require **Rebuild mirror** because the platform emits no
-general shadow-root-attached event.
+shadow roots are mirrored and dynamically reconciled; closed shadow roots,
+cross-origin frame contents, pseudo-elements, canvas pixels, current
+video frames, DRM content, CSSOM-only rule edits, and some browser-managed or
+script-only state cannot be copied across the isolated HTML boundary. Use
+**Rebuild mirror** when a site changes only one of those unobservable states.
 Translations can be longer than the source. Adaptive layout lets affected
 containers grow; faithful layout keeps geometry and allows text overflow rather
 than silently ellipsizing it.
@@ -115,7 +126,11 @@ See the [image translation notes](docs/image-translation-research.md) and the
   can download Chrome's corresponding on-device language pack.
 - If image text stays unchanged, open options, enable **Translate text inside
   images**, and make sure the image is visible and the From language is
-  supported. Small images are skipped by default.
+  supported. Small images are skipped by default. Expand **OCR diagnostics**
+  under Image text to see memory-only discovery counts, skips, capture,
+  recognition, translation, and projection stages. These entries never include
+  page text, URLs, pixels, hashes, or node IDs; the same details are also sent
+  to the companion window's `[Simul image translation]` console channel.
 - Chrome blocks extensions from browser settings, the Chrome Web Store, and
   other restricted URLs.
 - A cross-origin navigation can expire temporary `activeTab` access. Select the

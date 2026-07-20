@@ -171,7 +171,7 @@ describe('visible rrweb replay host', () => {
     second.mount.append(secondIframe);
 
     expect(fixture.preview.firstElementChild).toBe(firstRoot);
-    expect(fixture.preview.children).toHaveLength(1);
+    expect(fixture.preview.children).toHaveLength(2);
 
     second.commit(secondIframe, { width: 1_450, height: 2_550 });
 
@@ -239,28 +239,27 @@ describe('visible rrweb replay host', () => {
     expect(fixture.badge.hidden).toBe(true);
   });
 
-  it('keeps the last committed viewport when the atomic DOM move throws', () => {
+  it('reveals a connected candidate without moving its iframe subtree', () => {
     const fixture = createFixture();
     commitCandidate(fixture);
     const committedRoot = fixture.preview.firstElementChild;
     const candidate = fixture.host.createCandidate(dimensions());
     const iframe = createProtectedIframe(fixture.document);
     candidate.mount.append(iframe);
-    const replaceChildren = fixture.preview.replaceChildren.bind(fixture.preview);
+    const stagedRoot = candidate.mount.closest<HTMLElement>('.replica-replay-root');
+    expect(stagedRoot?.parentElement).toBe(fixture.preview);
     fixture.preview.replaceChildren = () => {
-      throw new Error('synthetic commit failure');
+      throw new Error('a connected candidate must never be moved');
     };
 
-    expect(() => candidate.commit(iframe, { width: 1_400, height: 2_500 })).toThrow(
-      'synthetic commit failure',
-    );
-    const stagedRoot = candidate.mount.closest<HTMLElement>('.replica-replay-root');
-    expect(stagedRoot?.style.visibility).toBe('hidden');
+    expect(() => candidate.commit(iframe, { width: 1_400, height: 2_500 }))
+      .not.toThrow();
 
-    fixture.preview.replaceChildren = replaceChildren;
-    candidate.release();
     expect(fixture.preview.hidden).toBe(false);
-    expect(fixture.preview.firstElementChild).toBe(committedRoot);
+    expect(fixture.preview.firstElementChild).toBe(stagedRoot);
+    expect(stagedRoot?.isConnected).toBe(true);
+    expect(iframe.isConnected).toBe(true);
+    expect(committedRoot?.isConnected).toBe(false);
     expect(fixture.badge.textContent).toBe(STATIC_REPLAY_LABEL);
   });
 });

@@ -7,6 +7,9 @@ import {
 
 const ocrBuildProfile = readOcrBuildProfile(process.env);
 const tesseractEnabled = ocrBuildProfile.enabledProviderIds.includes('tesseract');
+const offscreenOcrEnabled = ocrBuildProfile.enabledProviderIds.some((id) =>
+  id === 'tesseract' || id === 'chrome-text-detector',
+);
 
 function stripSourceMapDirectives(code: string): string {
   const comments: Comment[] = [];
@@ -51,14 +54,22 @@ function removeRemoteTesseractFallbacks(code: string): string {
 export default defineConfig({
   outDir: process.env.SIMUL_WXT_OUT_DIR || '.output',
   publicDir: tesseractEnabled ? 'vendor' : 'public',
-  ...(tesseractEnabled
+  hooks: {
+    'build:manifestGenerated': (_wxt, manifest) => {
+      // The toolbar action launches the saved surface directly. Retaining a
+      // default popup would suppress action.onClicked and reintroduce a
+      // two-button chooser before every detached-window launch.
+      if (manifest.action) delete manifest.action.default_popup;
+    },
+  },
+  ...(offscreenOcrEnabled
     ? {}
     : {
         filterEntrypoints: [
           'background',
           'page-recorder',
+          'page-mirror',
           'page-snapshot',
-          'popup',
           'sidepanel',
         ],
       }),
@@ -96,12 +107,15 @@ export default defineConfig({
     description:
       'Follow a page in a live read-only mirror and translate it on-device in Chrome.',
     minimum_chrome_version: '138',
+    action: {
+      default_title: 'Simul',
+    },
     permissions: [
       'activeTab',
       'scripting',
       'sidePanel',
       'storage',
-      ...(tesseractEnabled ? ['offscreen' as const] : []),
+      ...(offscreenOcrEnabled ? ['offscreen' as const] : []),
     ],
     optional_host_permissions: ['http://*/*', 'https://*/*'],
     ...(tesseractEnabled

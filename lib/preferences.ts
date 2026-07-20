@@ -21,6 +21,28 @@ export const TEXT_LAYOUT_MODES = ['adaptive', 'faithful'] as const;
 
 export type TextLayoutMode = (typeof TEXT_LAYOUT_MODES)[number];
 
+export const REPLICA_ENGINE_PREFERENCES = ['isolated-html', 'rrweb'] as const;
+
+export type ReplicaEnginePreference =
+  (typeof REPLICA_ENGINE_PREFERENCES)[number];
+
+export const COMPANION_LAUNCH_BEHAVIORS = [
+  'last-used',
+  'side-panel',
+  'popout',
+] as const;
+
+export type CompanionLaunchBehavior =
+  (typeof COMPANION_LAUNCH_BEHAVIORS)[number];
+
+export const COMPANION_SURFACES = ['side-panel', 'popout'] as const;
+
+export type CompanionSurface = (typeof COMPANION_SURFACES)[number];
+
+export const POPOUT_TAB_MODES = ['locked', 'active'] as const;
+
+export type PopoutTabMode = (typeof POPOUT_TAB_MODES)[number];
+
 export type SourceLanguagePreference = 'auto' | SupportedLanguage;
 
 import {
@@ -52,6 +74,10 @@ export interface CompanionPreferences {
   zoomPercent: number;
   syncScroll: boolean;
   textLayoutMode: TextLayoutMode;
+  replicaEngine: ReplicaEnginePreference;
+  launchBehavior: CompanionLaunchBehavior;
+  lastLaunchSurface: CompanionSurface;
+  popoutTabMode: PopoutTabMode;
   imageTranslationEnabled: boolean;
   imageTextProviderOrder: ImageTextProviderId[];
   imageScanPolicy: ImageScanPolicy;
@@ -70,6 +96,10 @@ export const DEFAULT_COMPANION_PREFERENCES: Readonly<CompanionPreferences> =
     zoomPercent: 100,
     syncScroll: true,
     textLayoutMode: 'adaptive',
+    replicaEngine: 'isolated-html',
+    launchBehavior: 'last-used',
+    lastLaunchSurface: 'side-panel',
+    popoutTabMode: 'locked',
     imageTranslationEnabled: false,
     imageTextProviderOrder: Object.freeze([
       ...IMAGE_TEXT_PROVIDER_IDS,
@@ -124,6 +154,18 @@ export function parseCompanionPreferences(
     textLayoutMode: isTextLayoutMode(input.textLayoutMode)
       ? input.textLayoutMode
       : DEFAULT_COMPANION_PREFERENCES.textLayoutMode,
+    replicaEngine: isReplicaEnginePreference(input.replicaEngine)
+      ? input.replicaEngine
+      : DEFAULT_COMPANION_PREFERENCES.replicaEngine,
+    launchBehavior: isCompanionLaunchBehavior(input.launchBehavior)
+      ? input.launchBehavior
+      : DEFAULT_COMPANION_PREFERENCES.launchBehavior,
+    lastLaunchSurface: isCompanionSurface(input.lastLaunchSurface)
+      ? input.lastLaunchSurface
+      : DEFAULT_COMPANION_PREFERENCES.lastLaunchSurface,
+    popoutTabMode: isPopoutTabMode(input.popoutTabMode)
+      ? input.popoutTabMode
+      : DEFAULT_COMPANION_PREFERENCES.popoutTabMode,
     imageTranslationEnabled:
       typeof input.imageTranslationEnabled === 'boolean'
         ? input.imageTranslationEnabled
@@ -163,6 +205,28 @@ export function isMirrorDisplayMode(
 
 export function isTextLayoutMode(value: unknown): value is TextLayoutMode {
   return TEXT_LAYOUT_MODES.includes(value as TextLayoutMode);
+}
+
+export function isReplicaEnginePreference(
+  value: unknown,
+): value is ReplicaEnginePreference {
+  return REPLICA_ENGINE_PREFERENCES.includes(value as ReplicaEnginePreference);
+}
+
+export function isCompanionLaunchBehavior(
+  value: unknown,
+): value is CompanionLaunchBehavior {
+  return COMPANION_LAUNCH_BEHAVIORS.includes(
+    value as CompanionLaunchBehavior,
+  );
+}
+
+export function isCompanionSurface(value: unknown): value is CompanionSurface {
+  return COMPANION_SURFACES.includes(value as CompanionSurface);
+}
+
+export function isPopoutTabMode(value: unknown): value is PopoutTabMode {
+  return POPOUT_TAB_MODES.includes(value as PopoutTabMode);
 }
 
 /** Return a canonical origin only for ordinary HTTP(S) page URLs. */
@@ -295,6 +359,10 @@ export interface CompanionViewSettings {
   zoomPercent: number;
   syncScroll: boolean;
   textLayoutMode: TextLayoutMode;
+  replicaEngine: ReplicaEnginePreference;
+  launchBehavior: CompanionLaunchBehavior;
+  lastLaunchSurface: CompanionSurface;
+  popoutTabMode: PopoutTabMode;
 }
 
 export type CompanionViewSettingsPatch = Partial<CompanionViewSettings>;
@@ -346,6 +414,10 @@ function createDefaultPreferences(): CompanionPreferences {
     zoomPercent: 100,
     syncScroll: true,
     textLayoutMode: 'adaptive',
+    replicaEngine: 'isolated-html',
+    launchBehavior: 'last-used',
+    lastLaunchSurface: 'side-panel',
+    popoutTabMode: 'locked',
     imageTranslationEnabled: false,
     imageTextProviderOrder: [...IMAGE_TEXT_PROVIDER_IDS],
     imageScanPolicy: 'visible-first-background-prescan',

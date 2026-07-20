@@ -329,6 +329,9 @@ describe('preference coordinator message boundary', () => {
           targetLanguage: 'ja',
           zoomPercent: 160,
           syncScroll: false,
+          launchBehavior: 'last-used',
+          lastLaunchSurface: 'popout',
+          popoutTabMode: 'active',
         },
       }),
     ).toEqual({
@@ -337,12 +340,21 @@ describe('preference coordinator message boundary', () => {
         targetLanguage: 'ja',
         zoomPercent: 160,
         syncScroll: false,
+        launchBehavior: 'last-used',
+        lastLaunchSurface: 'popout',
+        popoutTabMode: 'active',
       },
     });
     expect(
       readPreferenceCommand({
         type: 'simul:preferences:patch-view',
         patch: { targetLanguage: 'not-supported' },
+      }),
+    ).toBeUndefined();
+    expect(
+      readPreferenceCommand({
+        type: 'simul:preferences:patch-view',
+        patch: { launchBehavior: 'chooser' },
       }),
     ).toBeUndefined();
     expect(

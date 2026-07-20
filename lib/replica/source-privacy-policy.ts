@@ -59,7 +59,7 @@ export function sourceAttributesArePrivate(
 }
 
 export function hasSourcePrivateElementAncestor(element: Element): boolean {
-  for (let current: Element | null = element; current; current = current.parentElement) {
+  for (let current: Element | undefined = element; current;) {
     if (isSourcePrivateTagName(current.tagName)) return true;
     if (
       isSourcePrivateContentEditableValue(
@@ -69,6 +69,14 @@ export function hasSourcePrivateElementAncestor(element: Element): boolean {
       ) ||
       isSourcePrivateRoleValue(current.getAttribute('role'))
     ) return true;
+    if (current.parentElement) {
+      current = current.parentElement;
+      continue;
+    }
+    const root = current.getRootNode();
+    current = root.nodeType === 11 && 'host' in root
+      ? (root as ShadowRoot).host
+      : undefined;
   }
   return false;
 }

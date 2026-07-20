@@ -4,7 +4,15 @@ Checkpoint F now ships an opt-in local OCR path for stable visible top-frame
 `<img>` elements. This memo records the implemented boundary and the cloud or
 broader-source alternatives that remain deferred.
 
-## Implemented local path
+## Implemented local paths
+
+Simul now exposes two independently compiled local OCR providers in a saved
+priority order. Chrome's experimental `TextDetector` is capability-probed in
+the offscreen document and used only when the installed browser exposes it. A
+packaged Tesseract.js provider is the deterministic fallback and does not
+depend on that platform API. Empty detections are cached, while a
+TextDetector result that supplies boxes without useful text can pass those
+regions to Tesseract instead of ending the scan.
 
 [Tesseract.js](https://github.com/naptha/tesseract.js) runs Tesseract OCR in
 WebAssembly and exposes word/line/block geometry. The extension bundles the
@@ -23,8 +31,9 @@ The current pipeline:
 2. Observes `<img>` revisions without disclosing image URLs or page text.
 3. Captures a stable visible viewport crop at no more than twice per second,
    rejects crops over 4 MP, and hashes the encoded crop.
-4. Runs a restartable offscreen Tesseract.js/core 7.0.0 Worker with one routed
-   language group loaded at a time.
+4. Tries the saved provider order in an offscreen document: capability-probed
+   Chrome TextDetector and a restartable Tesseract.js/core 7.0.0 Worker with
+   one routed language group loaded at a time.
 5. Translates validated line regions through Chrome's on-device Translator and
    keeps recognition and translation caches separate.
 6. Maps the visible-crop coordinates onto clipped inert sibling overlays that

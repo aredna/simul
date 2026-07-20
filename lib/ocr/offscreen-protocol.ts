@@ -1,5 +1,7 @@
 import {
+  readImageTextRegionHints,
   readImageTextResult,
+  type ImageTextRegion,
   type ImageTextResult,
 } from './contracts';
 import {
@@ -14,6 +16,7 @@ export const OCR_HOST_ERROR_CODES = Object.freeze([
   'host-unavailable',
   'host-overflow',
   'input-missing',
+  'provider-unavailable',
   'unsupported-language',
   'recognition-failed',
   'worker-lost',
@@ -33,7 +36,7 @@ export interface EnsureOcrHostResponse {
   readonly ready: boolean;
 }
 
-export interface OffscreenOcrJob {
+interface BaseOffscreenOcrJob {
   readonly jobId: string;
   readonly clientId: string;
   readonly attempt: 0 | 1;
@@ -45,13 +48,28 @@ export interface OffscreenOcrJob {
   readonly pixelHash: string;
   readonly bitmapWidth: number;
   readonly bitmapHeight: number;
+  readonly hints?: readonly ImageTextRegion[];
+  readonly preprocessingVersion: 'visible-crop-v1';
+  readonly schemaVersion: 1;
+}
+
+export interface TesseractOffscreenOcrJob extends BaseOffscreenOcrJob {
   readonly providerId: 'tesseract';
   readonly languageGroup: string;
   readonly providerVersion: 'tesseract.js-7.0.0';
   readonly modelVersion: string;
-  readonly preprocessingVersion: 'visible-crop-v1';
-  readonly schemaVersion: 1;
 }
+
+export interface ChromeTextDetectorOffscreenOcrJob extends BaseOffscreenOcrJob {
+  readonly providerId: 'chrome-text-detector';
+  readonly languageGroup: string;
+  readonly providerVersion: 'chrome-text-detector-v1';
+  readonly modelVersion: 'platform';
+}
+
+export type OffscreenOcrJob =
+  | TesseractOffscreenOcrJob
+  | ChromeTextDetectorOffscreenOcrJob;
 
 export interface RunOffscreenOcrCommand {
   readonly kind: 'simul:ocr-v1:run';
@@ -130,7 +148,7 @@ export function readOffscreenOcrCommand(input: unknown): OffscreenOcrCommand | u
 }
 
 export function readOffscreenOcrJob(input: unknown): OffscreenOcrJob | undefined {
-  if (!isExactRecord(input, [
+  if (!isExactRecordWithOptionalKeys(input, [
     'jobId',
     'clientId',
     'attempt',
@@ -148,7 +166,7 @@ export function readOffscreenOcrJob(input: unknown): OffscreenOcrJob | undefined
     'modelVersion',
     'preprocessingVersion',
     'schemaVersion',
-  ])) return undefined;
+  ], ['hints'])) return undefined;
   const document = readSourceDocumentIdentity(input.document);
   if (
     !document ||
@@ -164,15 +182,18 @@ export function readOffscreenOcrJob(input: unknown): OffscreenOcrJob | undefined
     !isBitmapDimension(input.bitmapWidth) ||
     !isBitmapDimension(input.bitmapHeight) ||
     input.bitmapWidth * input.bitmapHeight > 4_000_000 ||
-    input.providerId !== 'tesseract' ||
-    !isLanguageGroup(input.languageGroup) ||
-    input.providerVersion !== 'tesseract.js-7.0.0' ||
-    typeof input.modelVersion !== 'string' ||
-    !/^[A-Za-z0-9._:+/-]{1,128}$/u.test(input.modelVersion) ||
     input.preprocessingVersion !== 'visible-crop-v1' ||
     input.schemaVersion !== 1
   ) return undefined;
-  return Object.freeze({
+  const hints = input.hints === undefined
+    ? undefined
+    : readImageTextRegionHints(
+        input.hints,
+        input.bitmapWidth,
+        input.bitmapHeight,
+      );
+  if (input.hints !== undefined && !hints) return undefined;
+  const base = {
     jobId: input.jobId,
     clientId: input.clientId,
     attempt: input.attempt,
@@ -184,13 +205,40 @@ export function readOffscreenOcrJob(input: unknown): OffscreenOcrJob | undefined
     pixelHash: input.pixelHash,
     bitmapWidth: input.bitmapWidth,
     bitmapHeight: input.bitmapHeight,
-    providerId: 'tesseract',
-    languageGroup: input.languageGroup,
-    providerVersion: 'tesseract.js-7.0.0',
-    modelVersion: input.modelVersion,
+    ...(hints ? { hints } : {}),
     preprocessingVersion: 'visible-crop-v1',
     schemaVersion: 1,
-  });
+  } as const;
+  if (
+    input.providerId === 'tesseract' &&
+    isLanguageGroup(input.languageGroup) &&
+    input.providerVersion === 'tesseract.js-7.0.0' &&
+    typeof input.modelVersion === 'string' &&
+    /^[A-Za-z0-9._:+/-]{1,128}$/u.test(input.modelVersion)
+  ) {
+    return Object.freeze({
+      ...base,
+      providerId: 'tesseract',
+      languageGroup: input.languageGroup,
+      providerVersion: 'tesseract.js-7.0.0',
+      modelVersion: input.modelVersion,
+    });
+  }
+  if (
+    input.providerId === 'chrome-text-detector' &&
+    isLanguageTag(input.languageGroup) &&
+    input.providerVersion === 'chrome-text-detector-v1' &&
+    input.modelVersion === 'platform'
+  ) {
+    return Object.freeze({
+      ...base,
+      providerId: 'chrome-text-detector',
+      languageGroup: input.languageGroup,
+      providerVersion: 'chrome-text-detector-v1',
+      modelVersion: 'platform',
+    });
+  }
+  return undefined;
 }
 
 export function readOffscreenOcrResponse(
@@ -293,6 +341,11 @@ function isLanguageGroup(value: unknown): value is string {
       .test(value);
 }
 
+function isLanguageTag(value: unknown): value is string {
+  return typeof value === 'string' && value.length >= 2 && value.length <= 64 &&
+    /^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{2,8})*$/u.test(value);
+}
+
 function isPositiveSafeInteger(value: unknown): value is number {
   return Number.isSafeInteger(value) && Number(value) > 0;
 }
@@ -312,4 +365,16 @@ function isExactRecord(
   if (!isRecord(value)) return false;
   const actual = Object.keys(value);
   return actual.length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+}
+
+function isExactRecordWithOptionalKeys(
+  value: unknown,
+  required: readonly string[],
+  optional: readonly string[],
+): value is Record<string, unknown> {
+  if (!isRecord(value)) return false;
+  const allowed = new Set([...required, ...optional]);
+  const actual = Object.keys(value);
+  return required.every((key) => Object.hasOwn(value, key)) &&
+    actual.every((key) => allowed.has(key));
 }

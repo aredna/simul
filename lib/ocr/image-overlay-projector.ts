@@ -1,5 +1,11 @@
 import type { ImageBoundingBox } from './contracts';
-import type { ReplicaImageAnchor } from '../replica/rrweb-shadow-engine';
+import type { ReplicaImageAnchor } from '../replica/contracts';
+import {
+  receiverSafeAnimationFrameCanceller,
+  receiverSafeAnimationFrameScheduler,
+  type AnimationFrameCanceller,
+  type AnimationFrameScheduler,
+} from '../browser-scheduling';
 import {
   sameSourceDocument,
   type ReplicaSourceDocumentIdentity,
@@ -39,8 +45,8 @@ export interface ImageOverlayProjectorEnvironment {
     nodeId: number,
   ) => ReplicaImageAnchor | undefined;
   readonly isCurrent: (projection: ImageOverlayProjection) => boolean;
-  readonly scheduleFrame?: (callback: () => void) => number;
-  readonly cancelFrame?: (handle: number) => void;
+  readonly scheduleFrame?: AnimationFrameScheduler;
+  readonly cancelFrame?: AnimationFrameCanceller;
   readonly createResizeObserver?: (
     callback: ResizeObserverCallback,
   ) => ResizeObserver | undefined;
@@ -67,15 +73,19 @@ interface DocumentLayer {
  * projection cannot influence page layout or source/replay ownership.
  */
 export class ImageOverlayProjector {
-  readonly #scheduleFrame: (callback: () => void) => number;
-  readonly #cancelFrame: (handle: number) => void;
+  readonly #scheduleFrame: AnimationFrameScheduler;
+  readonly #cancelFrame: AnimationFrameCanceller;
   readonly #layers = new Map<Document, DocumentLayer>();
   #pairEpoch = 0;
   #pairKey: string | undefined;
 
   constructor(private readonly environment: ImageOverlayProjectorEnvironment) {
-    this.#scheduleFrame = environment.scheduleFrame ?? requestAnimationFrame;
-    this.#cancelFrame = environment.cancelFrame ?? cancelAnimationFrame;
+    this.#scheduleFrame = receiverSafeAnimationFrameScheduler(
+      environment.scheduleFrame,
+    );
+    this.#cancelFrame = receiverSafeAnimationFrameCanceller(
+      environment.cancelFrame,
+    );
   }
 
   beginPair(pairEpoch: number, pairKey: string | undefined): boolean {

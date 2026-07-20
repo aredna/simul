@@ -45,6 +45,46 @@ function projection(
 }
 
 describe('ImageOverlayProjector', () => {
+  it('schedules and cancels overlay refreshes without adopting the projector receiver', () => {
+    const { document } = parseHTML('<html><body><img></body></html>');
+    const image = document.querySelector('img') as unknown as HTMLImageElement;
+    image.getBoundingClientRect = () => ({
+      left: 0, top: 0, width: 100, height: 60,
+      right: 100, bottom: 60, x: 0, y: 0, toJSON: () => ({}),
+    });
+    const anchor = {
+      document: sourceDocument,
+      replayLease: 9,
+      image,
+      iframe: { contentDocument: document } as HTMLIFrameElement,
+    };
+    const receivers: unknown[] = [];
+    const scheduleFrame = function (
+      this: unknown,
+      _callback: () => void,
+    ): number {
+      receivers.push(this);
+      return 43;
+    };
+    const cancelFrame = function (this: unknown, _handle: number): void {
+      receivers.push(this);
+    };
+    const projector = new ImageOverlayProjector({
+      resolveAnchor: () => anchor,
+      isCurrent: () => true,
+      scheduleFrame,
+      cancelFrame,
+      createResizeObserver: () => undefined,
+    });
+    projector.beginPair(1, 'en>ja');
+    expect(projector.project(projection())).toBe(true);
+
+    projector.refresh();
+    expect(receivers).toEqual([undefined]);
+    projector.dispose();
+    expect(receivers).toEqual([undefined, undefined]);
+  });
+
   it('maps a visible crop onto an inert sibling layer without changing image layout', () => {
     const { document, window } = parseHTML('<html><body><main><img></main></body></html>');
     const image = document.querySelector('img') as unknown as HTMLImageElement;

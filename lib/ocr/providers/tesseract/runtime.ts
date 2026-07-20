@@ -1,5 +1,11 @@
 import Tesseract from 'tesseract.js';
 
+import {
+  receiverSafeTimeoutCanceller,
+  receiverSafeTimeoutScheduler,
+  type TimeoutCanceller,
+  type TimeoutScheduler,
+} from '../../../browser-scheduling';
 import type { ImageTextResult } from '../../contracts';
 import type {
   OffscreenOcrProviderRunner,
@@ -24,8 +30,8 @@ interface AcquiredTesseractWorker {
 export interface TesseractRunnerEnvironment {
   readonly createWorker?: typeof Tesseract.createWorker;
   readonly getUrl?: (path: string) => string;
-  readonly setTimer?: typeof setTimeout;
-  readonly clearTimer?: typeof clearTimeout;
+  readonly setTimer?: TimeoutScheduler;
+  readonly clearTimer?: TimeoutCanceller;
   readonly jobTimeoutMs?: number;
   readonly idleTimeoutMs?: number;
 }
@@ -33,8 +39,8 @@ export interface TesseractRunnerEnvironment {
 export class TesseractOffscreenRunner implements OffscreenOcrProviderRunner {
   readonly #createWorker: typeof Tesseract.createWorker;
   readonly #getUrl: (path: string) => string;
-  readonly #setTimer: typeof setTimeout;
-  readonly #clearTimer: typeof clearTimeout;
+  readonly #setTimer: TimeoutScheduler;
+  readonly #clearTimer: TimeoutCanceller;
   readonly #jobTimeoutMs: number;
   readonly #idleTimeoutMs: number;
   #worker: TesseractWorker | undefined;
@@ -50,8 +56,8 @@ export class TesseractOffscreenRunner implements OffscreenOcrProviderRunner {
     this.#createWorker = environment.createWorker ?? Tesseract.createWorker;
     this.#getUrl = environment.getUrl ?? ((path) =>
       (browser.runtime.getURL as (value: string) => string)(path));
-    this.#setTimer = environment.setTimer ?? setTimeout;
-    this.#clearTimer = environment.clearTimer ?? clearTimeout;
+    this.#setTimer = receiverSafeTimeoutScheduler(environment.setTimer);
+    this.#clearTimer = receiverSafeTimeoutCanceller(environment.clearTimer);
     this.#jobTimeoutMs = positiveTimeout(
       environment.jobTimeoutMs,
       TESSERACT_JOB_TIMEOUT_MS,
@@ -277,8 +283,8 @@ function withDeadline<T>(
   promise: Promise<T>,
   milliseconds: number,
   signal: AbortSignal,
-  setTimer: typeof setTimeout,
-  clearTimer: typeof clearTimeout,
+  setTimer: TimeoutScheduler,
+  clearTimer: TimeoutCanceller,
 ): Promise<T> {
   signal.throwIfAborted();
   return new Promise<T>((resolve, reject) => {

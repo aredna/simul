@@ -42,11 +42,17 @@ const request: ReplicaCaptureRequest = {
 };
 
 describe('replica engine selection and fallback', () => {
-  it('uses rrweb and source projections by default with an explicit rollback', () => {
-    expect(selectReplicaEngineMode({ DEV: false })).toBe('rrweb-shadow');
-    expect(selectReplicaEngineMode({ DEV: true })).toBe('rrweb-shadow');
-    expect(selectReplicaEngineMode({ DEV: true, WXT_SIMUL_RRWEB_SHADOW: '1' })).toBe('rrweb-shadow');
-    expect(selectReplicaEngineMode({ DEV: false, WXT_SIMUL_RRWEB_SHADOW: '0' })).toBe('legacy');
+  it('uses isolated HTML by default and keeps rrweb as an explicit opt-in', () => {
+    expect(selectReplicaEngineMode({ DEV: false })).toBe('isolated-html');
+    expect(selectReplicaEngineMode({ DEV: true })).toBe('isolated-html');
+    expect(selectReplicaEngineMode(
+      { DEV: true, WXT_SIMUL_RRWEB_SHADOW: '1' },
+      'rrweb',
+    )).toBe('rrweb-shadow');
+    expect(selectReplicaEngineMode(
+      { DEV: false, WXT_SIMUL_RRWEB_SHADOW: '0' },
+      'rrweb',
+    )).toBe('isolated-html');
     expect(selectReplicaTranslationMode({
       DEV: false,
     })).toBe('rrweb-projection');
@@ -149,6 +155,86 @@ describe('replica engine selection and fallback', () => {
     expect(controller.shadowAvailable).toBe(false);
     expect(shadow.presentationReleases).toBe(0);
     expect(shadow.requests).toHaveLength(0);
+  });
+
+  it('switches explicitly between isolated HTML and rrweb without cross-fallback', async () => {
+    const legacy = new FakeReplicaEngine('legacy-v1');
+    const isolated = new FakeReplicaEngine('isolated-html-v1', {
+      status: 'complete',
+      diagnostics: emptyReplicaDiagnostics(
+        'isolated-html-v1',
+        'isolated_complete',
+      ),
+    });
+    const shadow = new FakeReplicaEngine('rrweb-shadow-v2', {
+      status: 'complete',
+      diagnostics: emptyReplicaDiagnostics('rrweb-shadow-v2', 'shadow_complete'),
+    });
+    const controller = new ReplicaEngineController({
+      mode: 'isolated-html',
+      legacy,
+      isolated,
+      shadow,
+    });
+
+    await controller.run(request);
+    controller.selectMode('rrweb-shadow');
+    await controller.run(request);
+
+    expect(isolated.requests).toHaveLength(1);
+    expect(isolated.presentationReleases).toBe(1);
+    expect(shadow.requests).toHaveLength(1);
+    expect(legacy.requests).toHaveLength(0);
+  });
+
+  it('does not let a late old-engine failure disable the newly selected engine', async () => {
+    const legacy = new FakeReplicaEngine('legacy-v1');
+    const isolated = new FakeReplicaEngine('isolated-html-v1');
+    const shadow = new FakeReplicaEngine('rrweb-shadow-v2');
+    let resolveOld!: (result: Awaited<ReturnType<typeof isolated.run>>) => void;
+    vi.spyOn(isolated, 'run').mockImplementation(() => new Promise((resolve) => {
+      resolveOld = resolve;
+    }));
+    const fallbackCodes: string[] = [];
+    const controller = new ReplicaEngineController({
+      mode: 'isolated-html',
+      legacy,
+      isolated,
+      shadow,
+      onFallback: (code) => fallbackCodes.push(code),
+    });
+
+    const oldRun = controller.run(request);
+    controller.selectMode('rrweb-shadow');
+    resolveOld({
+      status: 'failed',
+      diagnostics: emptyReplicaDiagnostics('isolated-html-v1', 'replay_failed'),
+    });
+    await oldRun;
+
+    expect(controller.mode).toBe('rrweb-shadow');
+    expect(controller.selectedAvailable).toBe(true);
+    expect(shadow.presentationReleases).toBe(0);
+    expect(fallbackCodes).toEqual([]);
+  });
+
+  it('treats explicit reselection as a retry after a transient failure', async () => {
+    const legacy = new FakeReplicaEngine('legacy-v1');
+    const shadow = new FakeReplicaEngine('rrweb-shadow-v2', {
+      status: 'failed',
+      diagnostics: emptyReplicaDiagnostics('rrweb-shadow-v2', 'stream_failed'),
+    });
+    const controller = new ReplicaEngineController({
+      mode: 'rrweb-shadow',
+      legacy,
+      shadow,
+    });
+    await controller.run(request);
+    expect(controller.selectedAvailable).toBe(false);
+
+    controller.selectMode('rrweb-shadow');
+
+    expect(controller.selectedAvailable).toBe(true);
   });
 });
 

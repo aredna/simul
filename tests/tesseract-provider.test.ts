@@ -98,6 +98,47 @@ describe('packaged Tesseract provider', () => {
     await runner.dispose();
   });
 
+  it('keeps offscreen deadline and idle timer callbacks receiver-free', async () => {
+    const receivers: unknown[] = [];
+    let timerSequence = 0;
+    const setTimer = function (
+      this: unknown,
+      _callback: () => void,
+      _milliseconds?: number,
+    ): ReturnType<typeof setTimeout> {
+      receivers.push(this);
+      timerSequence += 1;
+      return timerSequence as unknown as ReturnType<typeof setTimeout>;
+    };
+    const clearTimer = function (
+      this: unknown,
+      _handle: ReturnType<typeof setTimeout>,
+    ): void {
+      receivers.push(this);
+    };
+    const worker = fakeWorker('receiver-safe');
+    const runner = new TesseractOffscreenRunner({
+      createWorker: vi.fn(async () => worker.worker) as never,
+      getUrl: (path) => `chrome-extension://id${path}`,
+      setTimer,
+      clearTimer,
+    });
+
+    await expect(runner.recognize(
+      job('eng'),
+      new Blob([new Uint8Array([1])]),
+      new AbortController().signal,
+    )).resolves.toMatchObject({ transcript: 'receiver-safe' });
+    await runner.dispose();
+
+    expect(receivers).toEqual([
+      undefined,
+      undefined,
+      undefined,
+      undefined,
+    ]);
+  });
+
   it('applies one total deadline to worker creation and terminates a late worker', async () => {
     vi.useFakeTimers();
     try {

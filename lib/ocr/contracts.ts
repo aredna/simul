@@ -267,6 +267,22 @@ export function readImageTextResult(input: unknown): ImageTextResult | undefined
   });
 }
 
+/** Validate geometry hints crossing the offscreen structured-clone boundary. */
+export function readImageTextRegionHints(
+  input: unknown,
+  bitmapWidth: number,
+  bitmapHeight: number,
+): readonly ImageTextRegion[] | undefined {
+  if (!Array.isArray(input) || input.length > 10_000) return undefined;
+  const regions: ImageTextRegion[] = [];
+  for (const candidate of input) {
+    const region = readRegion(candidate, bitmapWidth, bitmapHeight);
+    if (!region) return undefined;
+    regions.push(region);
+  }
+  return Object.freeze(regions);
+}
+
 function readRegion(
   input: unknown,
   bitmapWidth: number,

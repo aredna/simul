@@ -18,7 +18,9 @@ import {
   APPROVED_OCR_PERMISSIONS,
   APPROVED_OPTIONAL_HOST_PERMISSIONS,
   APPROVED_PERMISSIONS,
+  IMPLEMENTED_OCR_PROVIDER_IDS,
   REQUIRED_OCR_RUNTIME_MARKERS,
+  REQUIRED_ISOLATED_SANDBOX_MARKERS,
   REQUIRED_REPLICA_RUNTIME_MARKERS,
   REQUIRED_UNLISTED_BUNDLES,
   assertOcrProviderDependenciesApproved,
@@ -56,6 +58,7 @@ describe('validateArtifact', () => {
     expect(validation.files).toContain('manifest.json');
     expect(validation.files).toContain('assets/popup.css');
     expect(validation.files).toContain(REQUIRED_UNLISTED_BUNDLES[0]);
+    expect(validation.files).toContain(REQUIRED_UNLISTED_BUNDLES[1]);
   });
 
   it('accepts only the exact packaged Tesseract profile and detects asset drift', async () => {
@@ -63,6 +66,7 @@ describe('validateArtifact', () => {
 
     await expect(validateArtifact(artifact)).resolves.toMatchObject({
       ocrEnabled: true,
+      ocrProviderIds: IMPLEMENTED_OCR_PROVIDER_IDS,
     });
 
     await writeFile(
@@ -121,6 +125,15 @@ describe('validateArtifact', () => {
     );
   });
 
+  it('rejects a toolbar popup that would reintroduce a surface chooser', async () => {
+    const artifact = await createTemporaryArtifact({
+      manifest: { action: { default_popup: 'popup.html' } },
+    });
+    await expect(validateArtifact(artifact)).rejects.toThrow(
+      'must launch the saved companion surface directly',
+    );
+  });
+
   it('requires the complete OCR profile and rejects OCR runtime drift when disabled', async () => {
     const offscreenPermission = await createTemporaryArtifact({
       manifest: { permissions: [...APPROVED_PERMISSIONS, 'offscreen'] },
@@ -129,17 +142,14 @@ describe('validateArtifact', () => {
       'requires the packaged offscreen.html',
     );
 
-    const relaxedCsp = await createTemporaryArtifact({
-      manifest: {
-        permissions: [...APPROVED_OCR_PERMISSIONS],
-        content_security_policy: {
-          extension_pages:
-            `${APPROVED_OCR_CSP} connect-src https://example.com`,
-        },
-      },
-    });
-    await writeFile(path.join(relaxedCsp, 'offscreen.html'), '<script src="/offscreen.js"></script>');
-    await writeFile(path.join(relaxedCsp, 'offscreen.js'), 'console.info("offscreen");');
+    const relaxedCsp = await createTemporaryOcrArtifact();
+    const relaxedManifestPath = path.join(relaxedCsp, 'manifest.json');
+    const relaxedManifest = JSON.parse(
+      await readFile(relaxedManifestPath, 'utf8'),
+    );
+    relaxedManifest.content_security_policy.extension_pages =
+      `${APPROVED_OCR_CSP} connect-src https://example.com`;
+    await writeFile(relaxedManifestPath, JSON.stringify(relaxedManifest));
     await expect(validateArtifact(relaxedCsp)).rejects.toThrow(
       'requires the exact extension page CSP',
     );
@@ -361,6 +371,18 @@ describe('validateArtifact', () => {
     await expect(validateArtifact(commentOnlyReplayMarker)).rejects.toThrow(
       REQUIRED_REPLICA_RUNTIME_MARKERS[1],
     );
+
+    const missingSandboxMarker = await createTemporaryArtifact();
+    await writeFile(
+      path.join(missingSandboxMarker, 'side.js'),
+      `console.info(${JSON.stringify([
+        REQUIRED_REPLICA_RUNTIME_MARKERS[1],
+        REQUIRED_REPLICA_RUNTIME_MARKERS[3],
+      ])});`,
+    );
+    await expect(validateArtifact(missingSandboxMarker)).rejects.toThrow(
+      'isolated iframe sandbox/CSP markers',
+    );
   });
 
   it.each([
@@ -504,11 +526,85 @@ describe('disabled OCR production profile', () => {
     const validation = await validateArtifact(artifact);
 
     expect(validation.ocrEnabled).toBe(false);
+    expect(validation.manifest.version).toBe('0.2.0');
     expect(validation.manifest.permissions).toEqual(APPROVED_PERMISSIONS);
     expect(validation.manifest).not.toHaveProperty('content_security_policy');
     expect(validation.files).not.toContain('offscreen.html');
     expect(validation.files.some((file) => file.startsWith('ocr/'))).toBe(false);
+    const sidepanelHtml = await readFile(
+      path.join(artifact, 'sidepanel.html'),
+      'utf8',
+    );
+    expect(sidepanelHtml).toContain('id="build-version"');
+    const javaScriptSources = await Promise.all(
+      validation.files
+        .filter((file) => /\.m?js$/u.test(file))
+        .map((file) => readFile(path.join(artifact, file), 'utf8')),
+    );
+    expect(
+      javaScriptSources.some((source) =>
+        source.includes('[Simul] Companion ready. '),
+      ),
+    ).toBe(true);
+    expect(
+      javaScriptSources.some((source) =>
+        source.includes('[Simul] Background service worker ready. '),
+      ),
+    ).toBe(true);
+    expect(javaScriptSources.some((source) => source.includes('Build ')))
+      .toBe(true);
   }, 20_000);
+});
+
+describe('independent OCR production profiles', () => {
+  it('builds and validates an asset-free Chrome TextDetector-only profile', async () => {
+    const temporaryRoot = await createTemporaryDirectory('simul-text-detector-build-');
+    const artifact = await buildProductionArtifact({
+      temporaryRoot,
+      ocrProviderIds: ['chrome-text-detector'],
+    });
+
+    const validation = await validateArtifact(artifact);
+
+    expect(validation.ocrProviderIds).toEqual(['chrome-text-detector']);
+    expect(validation.manifest.permissions).toEqual(APPROVED_OCR_PERMISSIONS);
+    expect(validation.manifest).not.toHaveProperty('content_security_policy');
+    expect(validation.files).toContain('offscreen.html');
+    expect(validation.files.some((file) => file.startsWith('ocr/'))).toBe(false);
+  }, 20_000);
+
+  it('builds and validates a packaged Tesseract-only profile', async () => {
+    const temporaryRoot = await createTemporaryDirectory('simul-tesseract-build-');
+    const artifact = await buildProductionArtifact({
+      temporaryRoot,
+      ocrProviderIds: ['tesseract'],
+    });
+
+    const validation = await validateArtifact(artifact);
+
+    expect(validation.ocrProviderIds).toEqual(['tesseract']);
+    expect(validation.manifest.permissions).toEqual(APPROVED_OCR_PERMISSIONS);
+    expect(validation.manifest.content_security_policy).toEqual({
+      extension_pages: APPROVED_OCR_CSP,
+    });
+    expect(validation.files).toContain('ocr/tesseract/asset-manifest.json');
+  }, 20_000);
+
+  it('rejects duplicate or unknown requested providers before building', async () => {
+    const temporaryRoot = await createTemporaryDirectory('simul-invalid-ocr-build-');
+    await expect(
+      buildProductionArtifact({
+        temporaryRoot,
+        ocrProviderIds: ['tesseract', 'tesseract'],
+      }),
+    ).rejects.toThrow('must not contain duplicate');
+    await expect(
+      buildProductionArtifact({
+        temporaryRoot,
+        ocrProviderIds: ['transformers'],
+      }),
+    ).rejects.toThrow('Unknown or unimplemented OCR provider ID');
+  });
 });
 
 describe('compareArtifactDirectories', () => {
@@ -756,7 +852,7 @@ async function createValidArtifact(
     permissions: [...APPROVED_PERMISSIONS],
     optional_host_permissions: [...APPROVED_OPTIONAL_HOST_PERMISSIONS],
     background: { service_worker: 'background.js' },
-    action: { default_popup: 'popup.html' },
+    action: { default_title: 'Simul' },
     side_panel: { default_path: 'sidepanel.html' },
     ...manifestOverrides,
   };
@@ -772,11 +868,19 @@ async function createValidArtifact(
     writeFile(path.join(directory, 'sidepanel.html'), '<script src="/side.js"></script>'),
     writeFile(
       path.join(directory, 'side.js'),
-      `console.info("side", ${JSON.stringify(REQUIRED_REPLICA_RUNTIME_MARKERS[1])});`,
+      `console.info("side", ${JSON.stringify([
+        REQUIRED_REPLICA_RUNTIME_MARKERS[1],
+        REQUIRED_REPLICA_RUNTIME_MARKERS[3],
+        ...REQUIRED_ISOLATED_SANDBOX_MARKERS,
+      ])});`,
     ),
     writeFile(
       path.join(directory, REQUIRED_UNLISTED_BUNDLES[0]),
       `console.info(${JSON.stringify(REQUIRED_REPLICA_RUNTIME_MARKERS[0])});`,
+    ),
+    writeFile(
+      path.join(directory, REQUIRED_UNLISTED_BUNDLES[1]),
+      `console.info(${JSON.stringify(REQUIRED_REPLICA_RUNTIME_MARKERS[2])});`,
     ),
   ]);
   return directory;

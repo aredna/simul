@@ -3,7 +3,14 @@ import {
   type ReplicaSourceDocumentIdentity,
 } from '../replica/source-identity';
 import { hasSourcePrivateElementAncestor } from '../replica/source-privacy-policy';
+import {
+  receiverSafeAnimationFrameCanceller,
+  receiverSafeAnimationFrameScheduler,
+  type AnimationFrameCanceller,
+  type AnimationFrameScheduler,
+} from '../browser-scheduling';
 import type { ImageVisibilityTier } from './contracts';
+import type { ImageSourceReadySummary } from './image-source-protocol';
 import type { SourceImageUpsert } from './source-image-model';
 
 export type SourceImageObservationEvent =
@@ -40,6 +47,8 @@ export interface SourceImageObserverEnvironment {
     callback: (records: readonly MutationRecord[]) => void,
   ) => MutationObserverPort;
   readonly isPrivateImage?: (image: HTMLImageElement) => boolean;
+  readonly scheduleFrame?: AnimationFrameScheduler;
+  readonly cancelFrame?: AnimationFrameCanceller;
   readonly maxImages?: number;
   readonly maxSubscribers?: number;
 }
@@ -58,12 +67,14 @@ interface ImageFacts {
   readonly renderedHeight: number;
   readonly intrinsicWidth: number;
   readonly intrinsicHeight: number;
+  readonly viewportToken: string;
 }
 
 interface ObservedImageState {
   readonly image: HTMLImageElement;
   readonly nodeId: number;
   sourceToken: PrivateSourceToken;
+  viewportToken: string;
   lastEvent?: Extract<SourceImageObservationEvent, { kind: 'upsert' }>;
 }
 
@@ -80,6 +91,8 @@ export class SourceImageObserver {
   readonly #documentIdentity: ReplicaSourceDocumentIdentity;
   readonly #maxImages: number;
   readonly #maxSubscribers: number;
+  readonly #scheduleFrame: AnimationFrameScheduler;
+  readonly #cancelFrame: AnimationFrameCanceller;
   readonly #listeners = new Set<(event: SourceImageObservationEvent) => void>();
   readonly #states = new Map<HTMLImageElement, ObservedImageState>();
   readonly #capacityCandidates = new Set<HTMLImageElement>();
@@ -91,6 +104,8 @@ export class SourceImageObserver {
   #mutationObserver: MutationObserverPort | undefined;
   #loadListener: ((event: Event) => void) | undefined;
   #viewportListener: (() => void) | undefined;
+  #scrollListener: (() => void) | undefined;
+  #scrollFrame: number | undefined;
   #started = false;
   #lifecycleGeneration = 0;
   #fillingCapacity = false;
@@ -114,10 +129,48 @@ export class SourceImageObserver {
       MAX_SOURCE_IMAGE_OBSERVER_SUBSCRIBERS,
       MAX_SOURCE_IMAGE_OBSERVER_SUBSCRIBERS,
     );
+    const view = environment.document.defaultView;
+    this.#scheduleFrame = environment.scheduleFrame
+      ? receiverSafeAnimationFrameScheduler(environment.scheduleFrame)
+      : (callback) => {
+          if (typeof view?.requestAnimationFrame === 'function') {
+            return view.requestAnimationFrame(() => callback());
+          }
+          queueMicrotask(callback);
+          return 0;
+        };
+    this.#cancelFrame = environment.cancelFrame
+      ? receiverSafeAnimationFrameCanceller(environment.cancelFrame)
+      : (handle) => {
+          if (
+            handle !== 0 &&
+            typeof view?.cancelAnimationFrame === 'function'
+          ) view.cancelAnimationFrame(handle);
+        };
   }
 
   get subscriberCount(): number {
     return this.#listeners.size;
+  }
+
+  /** Safe counts only: no source URLs, text, node identifiers, or pixels. */
+  get readySummary(): ImageSourceReadySummary {
+    let candidateImages = this.#states.size;
+    try {
+      candidateImages = Math.max(
+        candidateImages,
+        Math.min(
+          MAX_OBSERVED_SOURCE_IMAGES,
+          this.#environment.document.querySelectorAll('img').length,
+        ),
+      );
+    } catch {
+      // A hostile/synthetic DOM cannot suppress the already-observed count.
+    }
+    return Object.freeze({
+      candidateImages,
+      observedImages: this.#states.size,
+    });
   }
 
   subscribe(
@@ -213,6 +266,16 @@ export class SourceImageObserver {
       if (!this.#isActiveGeneration(generation)) return;
       this.refreshAll();
     };
+    this.#scrollListener = () => {
+      if (!this.#isActiveGeneration(generation) || this.#scrollFrame !== undefined) {
+        return;
+      }
+      this.#scrollFrame = this.#scheduleFrame(() => {
+        this.#scrollFrame = undefined;
+        if (!this.#isActiveGeneration(generation)) return;
+        for (const image of [...this.#visible]) this.#refresh(image);
+      });
+    };
     this.#environment.document.addEventListener(
       'load',
       this.#loadListener,
@@ -221,6 +284,11 @@ export class SourceImageObserver {
     this.#environment.document.defaultView?.addEventListener(
       'resize',
       this.#viewportListener,
+    );
+    this.#environment.document.addEventListener(
+      'scroll',
+      this.#scrollListener,
+      true,
     );
     for (const image of this.#environment.document.querySelectorAll('img')) {
       this.#discover(image);
@@ -244,6 +312,17 @@ export class SourceImageObserver {
         this.#viewportListener,
       );
     }
+    if (this.#scrollListener) {
+      this.#environment.document.removeEventListener(
+        'scroll',
+        this.#scrollListener,
+        true,
+      );
+    }
+    if (this.#scrollFrame !== undefined) {
+      this.#cancelFrame(this.#scrollFrame);
+      this.#scrollFrame = undefined;
+    }
     this.#visibleObserver?.disconnect();
     this.#nearObserver?.disconnect();
     this.#resizeObserver?.disconnect();
@@ -254,6 +333,7 @@ export class SourceImageObserver {
     this.#mutationObserver = undefined;
     this.#loadListener = undefined;
     this.#viewportListener = undefined;
+    this.#scrollListener = undefined;
     this.#states.clear();
     this.#capacityCandidates.clear();
     this.#visible.clear();
@@ -284,12 +364,13 @@ export class SourceImageObserver {
       image,
       nodeId,
       sourceToken: readPrivateSourceToken(image),
+      viewportToken: facts.viewportToken,
     };
     this.#states.set(image, state);
     this.#visibleObserver?.observe(image);
     this.#nearObserver?.observe(image);
     this.#resizeObserver?.observe(image);
-    this.#emitUpsert(state, true, facts);
+    this.#emitUpsert(state, true, true, facts);
   }
 
   #refresh(
@@ -326,19 +407,23 @@ export class SourceImageObserver {
     const token = readPrivateSourceToken(image);
     const contentChanged = forceContentChange ||
       privateSourceTokenChanged(state.sourceToken, token);
+    const observationChanged = state.viewportToken !== facts.viewportToken;
     state.sourceToken = token;
-    this.#emitUpsert(state, contentChanged, facts);
+    state.viewportToken = facts.viewportToken;
+    this.#emitUpsert(state, contentChanged, observationChanged, facts);
   }
 
   #emitUpsert(
     state: ObservedImageState,
     contentChanged: boolean,
+    observationChanged: boolean,
     facts: ImageFacts,
   ): void {
     const input: SourceImageUpsert = Object.freeze({
       document: this.#documentIdentity,
       nodeId: state.nodeId,
       contentChanged,
+      observationChanged,
       visibility: this.#visibility(state.image),
       connected: true,
       renderedWidth: facts.renderedWidth,
@@ -566,7 +651,33 @@ function readImageFacts(image: HTMLImageElement): ImageFacts | undefined {
     renderedHeight: bounds.height,
     intrinsicWidth: image.naturalWidth,
     intrinsicHeight: image.naturalHeight,
+    viewportToken: viewportObservationToken(image, bounds),
   });
+}
+
+function viewportObservationToken(
+  image: HTMLImageElement,
+  bounds: DOMRect,
+): string {
+  const left = finitePosition(bounds.left, bounds.x);
+  const top = finitePosition(bounds.top, bounds.y);
+  const view = image.ownerDocument.defaultView;
+  const viewportWidth = finitePosition(
+    view?.innerWidth,
+    image.ownerDocument.documentElement?.clientWidth,
+  );
+  const viewportHeight = finitePosition(
+    view?.innerHeight,
+    image.ownerDocument.documentElement?.clientHeight,
+  );
+  return [left, top, bounds.width, bounds.height, viewportWidth, viewportHeight]
+    .join(',');
+}
+
+function finitePosition(primary: unknown, fallback: unknown): number {
+  if (typeof primary === 'number' && Number.isFinite(primary)) return primary;
+  if (typeof fallback === 'number' && Number.isFinite(fallback)) return fallback;
+  return 0;
 }
 
 function sameObservation(
@@ -576,6 +687,7 @@ function sameObservation(
   return Boolean(
     left &&
     !right.contentChanged &&
+    !right.observationChanged &&
     left.nodeId === right.nodeId &&
     left.visibility === right.visibility &&
     left.renderedWidth === right.renderedWidth &&

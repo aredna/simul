@@ -32,6 +32,49 @@ const identity = createReplicaIdentity({
 });
 
 describe('page recorder checkpoint', () => {
+  it('keeps checkpoint timers receiver-free inside the recorder environment', async () => {
+    const receivers: unknown[] = [];
+    const setTimer = function (
+      this: unknown,
+      _callback: () => void,
+      _milliseconds?: number,
+    ): ReturnType<typeof setTimeout> {
+      receivers.push(this);
+      return 19 as unknown as ReturnType<typeof setTimeout>;
+    };
+    const clearTimer = function (
+      this: unknown,
+      _handle: ReturnType<typeof setTimeout>,
+    ): void {
+      receivers.push(this);
+    };
+
+    await expect(captureMaskedCheckpoint(identity, {
+      document: createDocument(),
+      window: createWindow(),
+      setTimer,
+      clearTimer,
+      start: (options) => {
+        options.emit({
+          type: 4,
+          data: { href: 'https://example.test/', width: 800, height: 600 },
+          timestamp: 1,
+        });
+        options.emit({
+          type: 2,
+          data: {
+            node: { type: 0, id: 1, childNodes: [] },
+            initialOffset: { top: 0, left: 0 },
+          },
+          timestamp: 2,
+        });
+        return () => undefined;
+      },
+    })).resolves.toMatchObject({ kind: 'simul:replica-v2:checkpoint' });
+
+    expect(receivers).toEqual([undefined, undefined]);
+  });
+
   it('configures one full masked snapshot with interaction and canvas tails disabled', async () => {
     let observedOptions: Record<string, unknown> | undefined;
     let stopped = false;

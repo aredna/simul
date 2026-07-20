@@ -31,6 +31,17 @@ describe('TranslationMemory', () => {
     ).toBeUndefined();
   });
 
+  it('keeps exact source values isolated between page namespaces', () => {
+    const memory = new TranslationMemory();
+    const firstPage = { ...esEn, pageKey: 'page-1' } as const;
+    const secondPage = { ...esEn, pageKey: 'page-2' } as const;
+    memory.set(firstPage, 'Inicio', 'Home');
+
+    expect(memory.get(firstPage, 'Inicio')).toBe('Home');
+    expect(memory.get(secondPage, 'Inicio')).toBeUndefined();
+    expect(memory.get(esEn, 'Inicio')).toBeUndefined();
+  });
+
   it('deduplicates in-flight exact translations', async () => {
     let resolve!: (value: string) => void;
     const load = vi.fn(

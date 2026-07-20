@@ -28,6 +28,11 @@ describe('SourceImageObserver', () => {
       else model.remove(event.document, event.nodeId);
     });
 
+    expect(fixture.observer.readySummary).toEqual({
+      candidateImages: 1,
+      observedImages: 1,
+    });
+
     expect(firstEvents).toMatchObject([
       {
         kind: 'upsert',
@@ -121,6 +126,10 @@ describe('SourceImageObserver', () => {
     const events: SourceImageObservationEvent[] = [];
     const stop = fixture.observer.subscribe((event) => events.push(event));
     expect(events.map(eventNodeId)).toEqual([7]);
+    expect(fixture.observer.readySummary).toEqual({
+      candidateImages: 2,
+      observedImages: 1,
+    });
 
     const late = fixture.document.createElement('img');
     late.setAttribute('src', 'late.png');
@@ -194,6 +203,77 @@ describe('SourceImageObserver', () => {
       event.input.renderedHeight === 240
     )).toBe(true);
     stop();
+  });
+
+  it('coalesces source scrolls and revises a still-visible image when its crop moves', () => {
+    const fixture = createFixture();
+    const model = new SourceImageModel();
+    model.beginDocument(documentIdentity);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => {
+      events.push(event);
+      if (event.kind === 'upsert') model.upsert(event.input);
+    });
+    fixture.intersections[0]!.trigger(fixture.image, true);
+    const revisionBeforeScroll = model.get(7)?.observationRevision;
+    events.length = 0;
+
+    fixture.bounds.top = -50;
+    const scroll = new fixture.document.defaultView!.Event('scroll');
+    fixture.document.dispatchEvent(scroll);
+    fixture.document.dispatchEvent(
+      new fixture.document.defaultView!.Event('scroll'),
+    );
+
+    expect(fixture.frames.pending).toBe(1);
+    expect(events).toEqual([]);
+    fixture.frames.flush();
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      kind: 'upsert',
+      input: {
+        nodeId: 7,
+        contentChanged: false,
+        observationChanged: true,
+        visibility: 'visible',
+      },
+    });
+    expect(model.get(7)?.contentRevision).toBe(1);
+    expect(model.get(7)?.observationRevision).toBe(
+      (revisionBeforeScroll ?? 0) + 1,
+    );
+    stop();
+  });
+
+  it('cancels a production animation frame when observation stops', () => {
+    const fixture = createFixture('', { useDefaultFrames: true });
+    const view = fixture.document.defaultView!;
+    const receivers: unknown[] = [];
+    Object.defineProperties(view, {
+      requestAnimationFrame: {
+        configurable: true,
+        value: function (this: unknown, callback: () => void): number {
+          receivers.push(this);
+          return fixture.frames.schedule(callback);
+        },
+      },
+      cancelAnimationFrame: {
+        configurable: true,
+        value: function (this: unknown, frame: number): void {
+          receivers.push(this);
+          fixture.frames.cancel(frame);
+        },
+      },
+    });
+    const stop = fixture.observer.subscribe(() => undefined);
+    fixture.intersections[0]!.trigger(fixture.image, true);
+
+    fixture.document.dispatchEvent(new view.Event('scroll'));
+    expect(fixture.frames.pending).toBe(1);
+
+    stop();
+    expect(fixture.frames.pending).toBe(0);
+    expect(receivers).toEqual([view, view]);
   });
 
   it('fails closed on invalid dimensions without replaying an undefined event', () => {
@@ -396,14 +476,17 @@ describe('SourceImageObserver', () => {
 
 function createFixture(
   extraHtml = '',
-  options: { readonly maxImages?: number } = {},
+  options: {
+    readonly maxImages?: number;
+    readonly useDefaultFrames?: boolean;
+  } = {},
 ) {
   const { document } = parseHTML(
     `<html><body><img id="main" src="https://private.example/original.png">${extraHtml}</body></html>`,
   );
   const image = document.querySelector<HTMLImageElement>('#main')!;
   const privateImage = document.querySelector<HTMLImageElement>('#private');
-  const bounds = { width: 200, height: 100 };
+  const bounds = { left: 0, top: 0, width: 200, height: 100 };
   setImageMetrics(image, bounds);
   if (privateImage) setImageMetrics(privateImage, bounds);
   const nodeIds = new Map<HTMLImageElement, number>([[image, 7]]);
@@ -411,6 +494,7 @@ function createFixture(
   const intersections: FakeIntersectionObserver[] = [];
   const resize = new FakeResizeObserver();
   const mutation = new FakeMutationObserver();
+  const frames = new FakeFrameScheduler();
   const observer = new SourceImageObserver({
     document: document as unknown as Document,
     documentIdentity,
@@ -428,7 +512,15 @@ function createFixture(
       mutation.callback = callback;
       return mutation;
     },
-    ...options,
+    ...(options.useDefaultFrames
+      ? {}
+      : {
+          scheduleFrame: (callback: () => void) => frames.schedule(callback),
+          cancelFrame: (frame: number) => frames.cancel(frame),
+        }),
+    ...(options.maxImages === undefined
+      ? {}
+      : { maxImages: options.maxImages }),
   });
   return {
     document,
@@ -439,12 +531,13 @@ function createFixture(
     intersections,
     resize,
     mutation,
+    frames,
   };
 }
 
 function setImageMetrics(
   image: HTMLImageElement,
-  bounds: { width: number; height: number },
+  bounds: { left: number; top: number; width: number; height: number },
 ): void {
   Object.defineProperties(image, {
     naturalWidth: { configurable: true, value: 800 },
@@ -452,12 +545,12 @@ function setImageMetrics(
     getBoundingClientRect: {
       configurable: true,
       value: () => ({
-        x: 0,
-        y: 0,
-        top: 0,
-        left: 0,
-        right: bounds.width,
-        bottom: bounds.height,
+        x: bounds.left,
+        y: bounds.top,
+        top: bounds.top,
+        left: bounds.left,
+        right: bounds.left + bounds.width,
+        bottom: bounds.top + bounds.height,
         width: bounds.width,
         height: bounds.height,
         toJSON: () => undefined,
@@ -527,6 +620,31 @@ class FakeMutationObserver {
 
   trigger(records: readonly MutationRecord[]): void {
     this.callback(records);
+  }
+}
+
+class FakeFrameScheduler {
+  readonly #callbacks = new Map<number, () => void>();
+  #sequence = 0;
+
+  get pending(): number {
+    return this.#callbacks.size;
+  }
+
+  schedule(callback: () => void): number {
+    const frame = ++this.#sequence;
+    this.#callbacks.set(frame, callback);
+    return frame;
+  }
+
+  cancel(frame: number): void {
+    this.#callbacks.delete(frame);
+  }
+
+  flush(): void {
+    const callbacks = [...this.#callbacks.values()];
+    this.#callbacks.clear();
+    for (const callback of callbacks) callback();
   }
 }
 

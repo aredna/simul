@@ -63,11 +63,21 @@ describe('SourceImageModel', () => {
     expect(model.isCurrent(firstDescriptor)).toBe(false);
 
     expect(model.upsert(upsert(7, {
+      contentChanged: false,
+      observationChanged: true,
+      visibility: 'visible',
+    }))).toMatchObject({
+      change: {
+        descriptor: { contentRevision: 1, observationRevision: 3 },
+      },
+    });
+
+    expect(model.upsert(upsert(7, {
       contentChanged: true,
       visibility: 'visible',
     }))).toMatchObject({
       change: {
-        descriptor: { contentRevision: 2, observationRevision: 3 },
+        descriptor: { contentRevision: 2, observationRevision: 4 },
       },
     });
   });
@@ -166,6 +176,7 @@ function upsert(
     document: documentIdentity,
     nodeId,
     contentChanged: true,
+    observationChanged: false,
     visibility: 'near',
     connected: true,
     renderedWidth: 200,

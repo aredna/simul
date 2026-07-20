@@ -1,0 +1,65 @@
+import type { ImageTranslationDiagnostic } from './image-translation-controller';
+
+export const MAX_IMAGE_TRANSLATION_DIAGNOSTICS = 48;
+
+/**
+ * Bounded, memory-only OCR history for the companion options. Formatting is
+ * deliberately allowlisted so future diagnostic payloads cannot accidentally
+ * expose page text, URLs, image data, hashes, or source identities.
+ */
+export class ImageTranslationDiagnosticHistory {
+  readonly #entries: string[] = [];
+  #sequence = 0;
+
+  append(diagnostic: ImageTranslationDiagnostic): readonly string[] {
+    this.#sequence += 1;
+    this.#entries.push(
+      `${this.#sequence}. ${formatImageTranslationDiagnostic(diagnostic)}`,
+    );
+    while (this.#entries.length > MAX_IMAGE_TRANSLATION_DIAGNOSTICS) {
+      this.#entries.shift();
+    }
+    return this.entries;
+  }
+
+  clear(): void {
+    this.#entries.length = 0;
+    this.#sequence = 0;
+  }
+
+  get entries(): readonly string[] {
+    return Object.freeze([...this.#entries]);
+  }
+}
+
+export function formatImageTranslationDiagnostic(
+  diagnostic: ImageTranslationDiagnostic,
+): string {
+  if (typeof diagnostic === 'string') {
+    return diagnostic.replaceAll('-', ' ');
+  }
+  if (diagnostic.stage === 'configuration') {
+    return [
+      `configuration: ${diagnostic.status}`,
+      diagnostic.reason ? `reason=${diagnostic.reason}` : undefined,
+    ].filter(Boolean).join('; ');
+  }
+  if (diagnostic.stage === 'source-summary') {
+    return `source scan: candidates=${diagnostic.candidateImages}; observed=${diagnostic.observedImages}`;
+  }
+  if (diagnostic.stage === 'image-scheduling') {
+    return [
+      `image scheduling: ${diagnostic.status}`,
+      diagnostic.reason ? `reason=${diagnostic.reason}` : undefined,
+      `visibility=${diagnostic.visibility}`,
+      `size=${diagnostic.renderedWidth}x${diagnostic.renderedHeight}`,
+    ].filter(Boolean).join('; ');
+  }
+  if (diagnostic.stage === 'capture-deferred') {
+    return `capture deferred: reason=${diagnostic.reason}; size=${diagnostic.renderedWidth}x${diagnostic.renderedHeight}`;
+  }
+  if (diagnostic.stage === 'recognition-complete') {
+    return `recognition complete: provider=${diagnostic.provider}; regions=${diagnostic.regions}; cache=${diagnostic.cacheHit ? 'hit' : 'miss'}`;
+  }
+  return `recognition failed: code=${diagnostic.code}`;
+}

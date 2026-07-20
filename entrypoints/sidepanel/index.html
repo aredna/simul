@@ -33,7 +33,10 @@
 
     <section id="control-overlay" class="control-overlay" hidden aria-label="Translation options">
       <div class="overlay-heading">
-        <strong>Options</strong>
+        <div class="overlay-title">
+          <strong>Options</strong>
+          <span id="build-version" class="build-version"></span>
+        </div>
         <button id="close-settings" class="quiet-button" type="button" aria-label="Close options">×</button>
       </div>
 
@@ -72,6 +75,28 @@
           <select id="text-layout-mode">
             <option value="adaptive">Let boxes grow</option>
             <option value="faithful">Keep geometry</option>
+          </select>
+        </label>
+        <label>
+          <span>Replica engine</span>
+          <select id="replica-engine">
+            <option value="isolated-html">Isolated HTML (recommended)</option>
+            <option value="rrweb">rrweb (experimental)</option>
+          </select>
+        </label>
+        <label>
+          <span>Toolbar opens</span>
+          <select id="launch-behavior">
+            <option value="last-used">Last used view</option>
+            <option value="side-panel">Always side panel</option>
+            <option value="popout">Always detached window</option>
+          </select>
+        </label>
+        <label>
+          <span>Detached window follows</span>
+          <select id="popout-tab-mode">
+            <option value="locked">The opening tab</option>
+            <option value="active">Active browser tab</option>
           </select>
         </label>
         <label class="check-label">
