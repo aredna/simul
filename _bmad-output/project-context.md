@@ -2,7 +2,7 @@
 project_name: Simul
 project_type: chrome-extension
 planning_track: quick-flow
-status: isolated-html-engine-implemented
+status: isolated-html-fidelity-baseline-implemented
 ---
 
 # Simul Project Context
@@ -24,6 +24,13 @@ fresh checkpoint and atomically replace the last-good view. rrweb remains a
 persisted experimental choice unless `WXT_SIMUL_RRWEB_SHADOW=0` hides it. The
 legacy renderer is the emergency fallback; neither engine silently falls back
 to the other.
+
+Native and ARIA activation labels remain translatable while editable and
+value-bearing controls stay masked. Passive image validation admits a narrow,
+shape-only URL-encoded SVG data-image profile (including the YC logo) with the
+same checks on capture and receipt. A persisted `Live source only` mode uses
+the identical isolated DOM/patch stream, restores source text in place, clears
+OCR overlays, and blocks stale text/image projections without recapture.
 
 Capture ACKs never wait for translation. Document, source revision,
 translation epoch, pair, replay lease, and node type must match before text

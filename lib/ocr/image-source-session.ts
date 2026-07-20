@@ -11,7 +11,9 @@ import {
   type SourceImageObservationEvent,
   type SourceImageObserverEnvironment,
 } from './source-image-observer';
-import { hasSourcePrivateElementAncestor } from '../replica/source-privacy-policy';
+import {
+  hasSourcePrivateOrActivationElementAncestor,
+} from '../replica/source-privacy-policy';
 import type { ReplicaSourceDocumentIdentity } from '../replica/source-identity';
 import { canonicalizeLanguageTag } from '../translation-provider';
 
@@ -187,7 +189,7 @@ export class ImageSourceSession {
   #measure(descriptor: SourceImageDescriptor): SourceImageCaptureMetrics | undefined {
     const node = this.environment.resolveNode(descriptor.nodeId);
     if (!isImageElement(node) || !node.isConnected) return undefined;
-    if (hasSourcePrivateElementAncestor(node)) return undefined;
+    if (hasSourcePrivateOrActivationElementAncestor(node)) return undefined;
     const rect = node.getBoundingClientRect();
     const viewportWidth = finitePositive(this.environment.window.innerWidth);
     const viewportHeight = finitePositive(this.environment.window.innerHeight);
@@ -292,7 +294,7 @@ export function hasSafeCaptureGeometry(
 
   for (const candidate of sourceDocument.querySelectorAll(PRIVATE_CAPTURE_SELECTOR)) {
     if (candidate === image || candidate.contains(image)) continue;
-    if (!hasSourcePrivateElementAncestor(candidate)) continue;
+    if (!hasSourcePrivateOrActivationElementAncestor(candidate)) continue;
     const style = safeComputedStyle(sourceWindow, candidate);
     if (!style || !styleAllowsCapture(style)) continue;
     let rect: DOMRect;

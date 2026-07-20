@@ -5,7 +5,7 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="color-scheme" content="light dark">
     <title>Translation companion</title>
-    <script type="module" crossorigin src="/chunks/sidepanel-CrhsMkck.js"></script>
+    <script type="module" crossorigin src="/chunks/sidepanel-BaAJBzVq.js"></script>
     <link rel="modulepreload" crossorigin href="/chunks/transient-image-store-BLoiMjct.js">
     <link rel="stylesheet" crossorigin href="/assets/sidepanel-BycOk1BE.css">
   </head>
@@ -74,6 +74,13 @@
           </select>
         </label>
         <label>
+          <span>Replica text</span>
+          <select id="replica-view-mode">
+            <option value="translated">Translated</option>
+            <option value="source-only">Live source only</option>
+          </select>
+        </label>
+        <label>
           <span>Toolbar opens</span>
           <select id="launch-behavior">
             <option value="last-used">Last used view</option>
@@ -131,10 +138,10 @@
 
     <main>
       <p id="replica-mode-badge" class="replica-mode-badge" role="status" aria-live="polite" hidden></p>
-      <section id="snapshot" class="snapshot" aria-label="Translated page mirror">
+      <section id="snapshot" class="snapshot" aria-label="Page mirror">
         <div class="empty-state"><p>Preparing the live read-only mirror…</p></div>
       </section>
-      <section id="replica-preview" class="replica-preview" aria-label="Live translated page replica" aria-hidden="true" hidden></section>
+      <section id="replica-preview" class="replica-preview" aria-label="Live page replica" aria-hidden="true" hidden></section>
     </main>
 
   </body>

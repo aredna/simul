@@ -2,7 +2,9 @@ import {
   readSourceDocumentIdentity,
   type ReplicaSourceDocumentIdentity,
 } from '../replica/source-identity';
-import { hasSourcePrivateElementAncestor } from '../replica/source-privacy-policy';
+import {
+  hasSourcePrivateOrActivationElementAncestor,
+} from '../replica/source-privacy-policy';
 import {
   receiverSafeAnimationFrameCanceller,
   receiverSafeAnimationFrameScheduler,
@@ -544,7 +546,7 @@ export class SourceImageObserver {
   }
 
   #isPrivate(image: HTMLImageElement): boolean {
-    if (hasSourcePrivateElementAncestor(image)) return true;
+    if (hasSourcePrivateOrActivationElementAncestor(image)) return true;
     if (!this.#environment.isPrivateImage) return false;
     try {
       return this.#environment.isPrivateImage(image);

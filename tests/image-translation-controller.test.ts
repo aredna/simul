@@ -465,7 +465,35 @@ describe('ImageTranslationController', () => {
       observationRevision: 2,
     });
     expect(document.querySelector('[data-simul-image-overlay="12"]')).toBeNull();
+    emit?.({
+      kind: 'upsert',
+      descriptor: {
+        ...descriptor,
+        contentRevision: 3,
+        observationRevision: 3,
+      },
+    });
+    await vi.waitFor(() => expect(
+      diagnostics.filter((diagnostic) => diagnostic === 'projected'),
+    ).toHaveLength(3));
+    expect(document.querySelector('[data-simul-image-overlay="12"]')?.textContent)
+      .toBe('hello-日本語');
+
+    controller.configure({
+      enabled: false,
+      scanPolicy: 'visible-only',
+      skipSmallImages: false,
+      providerOrder: ['tesseract'],
+      sourceLanguage: 'auto',
+      detectedSourceLanguage: 'en',
+      targetLanguage: 'ja',
+      translationIdle: true,
+    });
+
+    expect(document.querySelector('[data-simul-image-overlay="12"]')).toBeNull();
+    expect(source.dispose).toHaveBeenCalledOnce();
     controller.dispose();
+    expect(source.dispose).toHaveBeenCalledOnce();
   });
 
   it('does not create a recognition host when the source and target languages match', async () => {

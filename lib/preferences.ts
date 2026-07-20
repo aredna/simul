@@ -26,6 +26,10 @@ export const REPLICA_ENGINE_PREFERENCES = ['isolated-html', 'rrweb'] as const;
 export type ReplicaEnginePreference =
   (typeof REPLICA_ENGINE_PREFERENCES)[number];
 
+export const REPLICA_VIEW_MODES = ['translated', 'source-only'] as const;
+
+export type ReplicaViewMode = (typeof REPLICA_VIEW_MODES)[number];
+
 export const COMPANION_LAUNCH_BEHAVIORS = [
   'last-used',
   'side-panel',
@@ -75,6 +79,7 @@ export interface CompanionPreferences {
   syncScroll: boolean;
   textLayoutMode: TextLayoutMode;
   replicaEngine: ReplicaEnginePreference;
+  replicaViewMode: ReplicaViewMode;
   launchBehavior: CompanionLaunchBehavior;
   lastLaunchSurface: CompanionSurface;
   popoutTabMode: PopoutTabMode;
@@ -97,6 +102,7 @@ export const DEFAULT_COMPANION_PREFERENCES: Readonly<CompanionPreferences> =
     syncScroll: true,
     textLayoutMode: 'adaptive',
     replicaEngine: 'isolated-html',
+    replicaViewMode: 'translated',
     launchBehavior: 'last-used',
     lastLaunchSurface: 'side-panel',
     popoutTabMode: 'locked',
@@ -157,6 +163,9 @@ export function parseCompanionPreferences(
     replicaEngine: isReplicaEnginePreference(input.replicaEngine)
       ? input.replicaEngine
       : DEFAULT_COMPANION_PREFERENCES.replicaEngine,
+    replicaViewMode: isReplicaViewMode(input.replicaViewMode)
+      ? input.replicaViewMode
+      : DEFAULT_COMPANION_PREFERENCES.replicaViewMode,
     launchBehavior: isCompanionLaunchBehavior(input.launchBehavior)
       ? input.launchBehavior
       : DEFAULT_COMPANION_PREFERENCES.launchBehavior,
@@ -211,6 +220,10 @@ export function isReplicaEnginePreference(
   value: unknown,
 ): value is ReplicaEnginePreference {
   return REPLICA_ENGINE_PREFERENCES.includes(value as ReplicaEnginePreference);
+}
+
+export function isReplicaViewMode(value: unknown): value is ReplicaViewMode {
+  return REPLICA_VIEW_MODES.includes(value as ReplicaViewMode);
 }
 
 export function isCompanionLaunchBehavior(
@@ -360,6 +373,7 @@ export interface CompanionViewSettings {
   syncScroll: boolean;
   textLayoutMode: TextLayoutMode;
   replicaEngine: ReplicaEnginePreference;
+  replicaViewMode: ReplicaViewMode;
   launchBehavior: CompanionLaunchBehavior;
   lastLaunchSurface: CompanionSurface;
   popoutTabMode: PopoutTabMode;
@@ -415,6 +429,7 @@ function createDefaultPreferences(): CompanionPreferences {
     syncScroll: true,
     textLayoutMode: 'adaptive',
     replicaEngine: 'isolated-html',
+    replicaViewMode: 'translated',
     launchBehavior: 'last-used',
     lastLaunchSurface: 'side-panel',
     popoutTabMode: 'locked',

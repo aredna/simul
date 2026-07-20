@@ -29,6 +29,7 @@ describe('parseCompanionPreferences', () => {
       syncScroll: true,
       textLayoutMode: 'adaptive',
       replicaEngine: 'isolated-html',
+      replicaViewMode: 'translated',
       launchBehavior: 'last-used',
       lastLaunchSurface: 'side-panel',
       popoutTabMode: 'locked',
@@ -61,6 +62,7 @@ describe('parseCompanionPreferences', () => {
       syncScroll: true,
       textLayoutMode: 'adaptive',
       replicaEngine: 'isolated-html',
+      replicaViewMode: 'translated',
       launchBehavior: 'last-used',
       lastLaunchSurface: 'side-panel',
       popoutTabMode: 'locked',
@@ -105,6 +107,7 @@ describe('parseCompanionPreferences', () => {
       syncScroll: true,
       textLayoutMode: 'adaptive',
       replicaEngine: 'isolated-html',
+      replicaViewMode: 'translated',
       launchBehavior: 'last-used',
       lastLaunchSurface: 'side-panel',
       popoutTabMode: 'locked',
@@ -178,6 +181,17 @@ describe('parseCompanionPreferences', () => {
       lastLaunchSurface: 'side-panel',
       popoutTabMode: 'locked',
     });
+  });
+
+  it('persists source-only replica mode and repairs unknown values', () => {
+    expect(parseCompanionPreferences({ replicaViewMode: 'source-only' }))
+      .toMatchObject({ replicaViewMode: 'source-only' });
+    expect(parseCompanionPreferences({ replicaViewMode: 'raw-copy' }))
+      .toMatchObject({ replicaViewMode: 'translated' });
+
+    expect(withViewSettings(parseCompanionPreferences(undefined), {
+      replicaViewMode: 'source-only',
+    })).toMatchObject({ replicaViewMode: 'source-only' });
   });
 
   it('repairs old or damaged image-analysis settings without mutating saved order', () => {

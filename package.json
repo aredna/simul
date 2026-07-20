@@ -1,6 +1,6 @@
 {
   "name": "simul",
-  "version": "0.2.0",
+  "version": "0.2.1",
   "private": true,
   "description": "Follow a web page in a live read-only mirror with on-device translation in Chrome.",
   "type": "module",

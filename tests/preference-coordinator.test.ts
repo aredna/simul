@@ -165,6 +165,7 @@ describe('preference coordinator', () => {
         targetLanguage: 'ja',
         displayMode: 'custom',
         zoomPercent: 185,
+        replicaViewMode: 'source-only',
       },
     });
 
@@ -175,6 +176,7 @@ describe('preference coordinator', () => {
       targetLanguage: 'ja',
       displayMode: 'custom',
       zoomPercent: 185,
+      replicaViewMode: 'source-only',
       syncScroll: true,
       textLayoutMode: 'adaptive',
     });
@@ -195,7 +197,10 @@ describe('preference coordinator', () => {
       }),
       coordinator.run({
         type: 'simul:preferences:patch-view',
-        patch: { textLayoutMode: 'faithful' },
+        patch: {
+          textLayoutMode: 'faithful',
+          replicaViewMode: 'source-only',
+        },
       }),
     ]);
 
@@ -204,6 +209,7 @@ describe('preference coordinator', () => {
       zoomPercent: 165,
       syncScroll: false,
       textLayoutMode: 'faithful',
+      replicaViewMode: 'source-only',
     });
   });
 
@@ -332,6 +338,7 @@ describe('preference coordinator message boundary', () => {
           launchBehavior: 'last-used',
           lastLaunchSurface: 'popout',
           popoutTabMode: 'active',
+          replicaViewMode: 'source-only',
         },
       }),
     ).toEqual({
@@ -343,6 +350,7 @@ describe('preference coordinator message boundary', () => {
         launchBehavior: 'last-used',
         lastLaunchSurface: 'popout',
         popoutTabMode: 'active',
+        replicaViewMode: 'source-only',
       },
     });
     expect(
@@ -355,6 +363,12 @@ describe('preference coordinator message boundary', () => {
       readPreferenceCommand({
         type: 'simul:preferences:patch-view',
         patch: { launchBehavior: 'chooser' },
+      }),
+    ).toBeUndefined();
+    expect(
+      readPreferenceCommand({
+        type: 'simul:preferences:patch-view',
+        patch: { replicaViewMode: 'unsafe-copy' },
       }),
     ).toBeUndefined();
     expect(

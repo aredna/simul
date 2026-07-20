@@ -55,3 +55,21 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-fix-ocr-native-callback-binding-and-build-identity.md`
   summary: Make rapid toolbar launches across multiple windows clean up every losing preopened side panel without disturbing the winning surface.
   evidence: Chrome's user-gesture constraint requires synchronously preopening the panel before saved launch preferences hydrate; a superseded cross-window click can leave that preopened panel visible, while Chrome 138's global disable/re-enable fallback cannot safely close only the losing window.
+- source_spec: `_bmad-output/implementation-artifacts/spec-isolated-html-fidelity-baseline-mode.md`
+  summary: Mirror bounded ordinary stylesheet CSSOM mutations that do not change DOM attributes, text nodes, or constructable adopted stylesheets.
+  evidence: The isolated observer detects DOM and adopted-sheet changes, but `insertRule`, `deleteRule`, and mutable rule declarations on ordinary `<style>`/linked sheets can change the source presentation without producing an observable patch.
+- source_spec: `_bmad-output/implementation-artifacts/spec-isolated-html-fidelity-baseline-mode.md`
+  summary: Preserve inert link semantics needed by CSS and accessibility without restoring replica navigation.
+  evidence: The current boundary deliberately strips ordinary anchor `href`, targets, downloads, and other navigation sinks. Some sites style link state or depend on URL-shaped attributes for layout, so an inert non-navigable representation needs its own security review.
+- source_spec: `_bmad-output/implementation-artifacts/spec-isolated-html-fidelity-baseline-mode.md`
+  summary: Expand responsive image-source fidelity for `<picture>`, `<source>`, sizes/media selection, and browser-selected current-source changes.
+  evidence: The safe mirror carries bounded `<img>` sources and srcsets but does not claim parity for the browser's full responsive source-selection state or passive `<source>` resource attributes.
+- source_spec: `_bmad-output/implementation-artifacts/spec-isolated-html-fidelity-baseline-mode.md`
+  summary: Support a reviewed static subset of same-document SVG fragment references such as `<use href="#symbol">` and paint-server `url(#id)`.
+  evidence: This fix admits only self-contained shape-only SVG data images. Local SVG references remain rejected with all external/resource-bearing references because graph ordering, ID scoping, CSS parsing, and receiver validation need a separate design.
+- source_spec: `_bmad-output/implementation-artifacts/spec-isolated-html-fidelity-baseline-mode.md`
+  summary: Assess whether source doctype and standards/quirks mode can be represented safely in the fixed isolated shell.
+  evidence: Simul owns a constant standards-mode `srcdoc` shell and transports the document element, not the source doctype. Quirks-mode pages can therefore retain DOM content while producing different layout metrics.
+- source_spec: `_bmad-output/implementation-artifacts/spec-isolated-html-fidelity-baseline-mode.md`
+  summary: Audit custom-element fidelity that depends on inaccessible internal state, closed roots, lifecycle code, or browser-managed rendering.
+  evidence: Simul intentionally never defines or executes copied custom elements and captures only representable light DOM plus accessible open roots. Exact behavior for closed or script-owned state remains outside the safe mirror boundary.

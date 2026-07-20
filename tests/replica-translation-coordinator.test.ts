@@ -121,13 +121,13 @@ describe('ReplicaTranslationCoordinator', () => {
     })).toBe(false);
   });
 
-  it('restores source and destroys the retained session when the pair changes', async () => {
+  it('restores source and destroys the retained session when projection is disabled', async () => {
     const surface = new FakeSurface([record(4, 1, 'Hola')]);
     const { provider, destroy } = fakeProvider(async (source) => `en:${source}`);
     const coordinator = new ReplicaTranslationCoordinator(provider, surface);
     await coordinator.translateCurrent(pair);
 
-    coordinator.selectPair({ sourceLanguage: 'es', targetLanguage: 'es' });
+    coordinator.selectPair(undefined);
 
     expect(destroy).toHaveBeenCalledOnce();
     expect(surface.contexts.at(-1)).toMatchObject({ pairKey: undefined });
@@ -286,7 +286,7 @@ describe('ReplicaTranslationCoordinator', () => {
     expect(creationSignal?.aborted).toBe(true);
   });
 
-  it('aborts retained-session creation when the selected pair changes', async () => {
+  it('aborts retained-session creation when source-only clears the pair', async () => {
     let creationSignal: AbortSignal | undefined;
     const provider: TranslationProvider = {
       availability: async () => 'available',
@@ -308,7 +308,7 @@ describe('ReplicaTranslationCoordinator', () => {
     const translating = coordinator.translateCurrent(pair);
     await vi.waitFor(() => expect(creationSignal).toBeDefined());
 
-    coordinator.selectPair({ sourceLanguage: 'es', targetLanguage: 'ja' });
+    coordinator.selectPair(undefined);
 
     await expect(translating).rejects.toMatchObject({ name: 'AbortError' });
     expect(creationSignal?.aborted).toBe(true);

@@ -5,7 +5,9 @@ import {
 } from '../../lib/build-identity';
 import {
   LatestWorkCoordinator,
-  automaticTranslationAction,
+  isAvailabilityRequestCurrent,
+  mergeLiveUpdateBatches,
+  replicaViewTranslationAction,
   type GenerationWork,
 } from '../../lib/companion-lifecycle';
 import { resolveSourceLanguage } from '../../lib/language-detection';
@@ -79,6 +81,7 @@ import {
   isMirrorDisplayMode,
   isPopoutTabMode,
   isReplicaEnginePreference,
+  isReplicaViewMode,
   isTextLayoutMode,
   parseCompanionPreferences,
   permissionOriginsForMode,
@@ -95,6 +98,7 @@ import {
   type CompanionViewSettingsPatch,
   type PopoutTabMode,
   type ReplicaEnginePreference,
+  type ReplicaViewMode,
 } from '../../lib/preferences';
 import { translateWithSession } from '../../lib/translation-pipeline';
 import {
@@ -211,6 +215,7 @@ const autoTranslateSelect = requireElement<HTMLSelectElement>('#auto-translate-m
 const displayModeSelect = requireElement<HTMLSelectElement>('#mirror-display-mode');
 const textLayoutSelect = requireElement<HTMLSelectElement>('#text-layout-mode');
 const replicaEngineSelect = requireElement<HTMLSelectElement>('#replica-engine');
+const replicaViewModeSelect = requireElement<HTMLSelectElement>('#replica-view-mode');
 const launchBehaviorSelect = requireElement<HTMLSelectElement>('#launch-behavior');
 const popoutTabModeSelect = requireElement<HTMLSelectElement>('#popout-tab-mode');
 const syncScrollInput = requireElement<HTMLInputElement>('#sync-scroll');
@@ -413,6 +418,7 @@ function handleReplicaSourceCommit(commit: ReplicaSourceCommit): void {
     );
   }
   if (replicaTranslationMode !== 'rrweb-projection') return;
+  if (isLiveSourceOnlyMode()) return;
   replicaTranslationCoordinator.handleSourceCommit(commit);
   const action = replicaSourceCommitAction(
     commit,
@@ -503,6 +509,7 @@ let mirrorDocumentHeight = 1;
 let currentMirrorScale = 1;
 let liveDeltaInFlight = false;
 let pendingLiveUpdate: PendingLiveUpdate | undefined;
+let activeLiveUpdate: PendingLiveUpdate | undefined;
 const legacyTransitionGate = new LegacyTransitionGate();
 const liveReplicaFailureRecoveryGate = new LiveReplicaFailureRecoveryGate();
 let latestLiveSequence = 0;
@@ -595,6 +602,14 @@ replicaEngineSelect.addEventListener('change', () => {
   void changeReplicaEngine(replicaEngine);
 });
 
+replicaViewModeSelect.addEventListener('change', () => {
+  const replicaViewMode: ReplicaViewMode =
+    isReplicaViewMode(replicaViewModeSelect.value)
+      ? replicaViewModeSelect.value
+      : 'translated';
+  void changeReplicaViewMode(replicaViewMode);
+});
+
 launchBehaviorSelect.addEventListener('change', () => {
   const launchBehavior: CompanionLaunchBehavior =
     isCompanionLaunchBehavior(launchBehaviorSelect.value)
@@ -623,7 +638,7 @@ zoomInButton.addEventListener('click', () => setZoom(preferences.zoomPercent + 1
 zoomOutButton.addEventListener('click', () => setZoom(preferences.zoomPercent - 10));
 refreshButton.addEventListener('click', () => void refreshFollowedPage('manual'));
 translateButton.addEventListener('click', () => {
-  translationDesired = true;
+  if (!isLiveSourceOnlyMode()) translationDesired = true;
   void startTranslation(false, captureCoordinator.generation);
 });
 cancelButton.addEventListener('click', () => {
@@ -802,6 +817,9 @@ browser.storage.onChanged.addListener((changes, areaName) => {
     const identity = followedPageIdentity ?? capturedPageIdentity;
     if (identity) queueCapture({ identity, reason: 'preference' });
   }
+  if (previous.replicaViewMode !== preferences.replicaViewMode) {
+    applyReplicaViewMode(previous.replicaViewMode);
+  }
   syncPreferenceControls();
   updateMirrorLayout();
   if (visualRoot) applyMirrorTextLayout(visualRoot, preferences.textLayoutMode);
@@ -812,9 +830,9 @@ browser.storage.onChanged.addListener((changes, areaName) => {
   ) {
     const needsFreshCapture = releaseReplicaPresentationForLegacyWork();
     activeAbortController?.abort();
-    liveDeltaAbortController?.abort();
+    abortAndRequeueLiveDelta();
     invalidateComposerOutput();
-    translationDesired = true;
+    if (!isLiveSourceOnlyMode()) translationDesired = true;
     translationComplete = false;
     availabilityCheckedForPair = undefined;
     resetVisualMirrorTextIfPresent();
@@ -1347,6 +1365,16 @@ async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> 
     }
     await resolveSelectedSourceLanguage();
 
+    if (isLiveSourceOnlyMode()) {
+      availability = 'unavailable';
+      availabilityCheckedForPair = undefined;
+      setStatus(
+        'Live source only is active. The sanitized mirror keeps updating without text or image translation.',
+        'success',
+      );
+      return;
+    }
+
     if (currentTranslationFieldCount(visualRoot as HTMLElement) === 0) {
       availability = 'unavailable';
       availabilityCheckedForPair = undefined;
@@ -1607,6 +1635,7 @@ async function reconcileReplicaTranslationAfterCommit(
   refreshDetectedLanguage: boolean,
   prepareForNewText: boolean,
 ): Promise<void> {
+  if (isLiveSourceOnlyMode()) return;
   const generation = commit.document.generation;
   const identity = capturedPageIdentity;
   if (
@@ -1673,9 +1702,9 @@ async function languageSelectionChanged(): Promise<void> {
   const targetLanguage = readLanguage(targetSelect.value);
   const needsFreshCapture = releaseReplicaPresentationForLegacyWork();
   activeAbortController?.abort();
-  liveDeltaAbortController?.abort();
+  abortAndRequeueLiveDelta();
   invalidateComposerOutput();
-  translationDesired = true;
+  if (!isLiveSourceOnlyMode()) translationDesired = true;
   translationComplete = false;
   availabilityCheckedForPair = undefined;
   resetVisualMirrorTextIfPresent();
@@ -1693,6 +1722,17 @@ async function languageSelectionChanged(): Promise<void> {
 async function applyLanguagePreferences(fromUserAction: boolean): Promise<void> {
   if (!snapshot) return;
   await resolveSelectedSourceLanguage();
+  if (isLiveSourceOnlyMode()) {
+    replicaTranslationCoordinator.selectPair(undefined);
+    availability = 'unavailable';
+    availabilityCheckedForPair = undefined;
+    setStatus(
+      'Live source only is active. Language choices are saved for translated mode.',
+      'success',
+    );
+    updateControls();
+    return;
+  }
   if (replicaTranslationMode === 'rrweb-projection') {
     replicaTranslationCoordinator.selectPair(selectedPair());
   }
@@ -1708,6 +1748,13 @@ async function checkAvailability(generation: number): Promise<void> {
   const requestId = ++availabilityRequestId;
   const requestedSnapshot = snapshot;
   const pair = selectedPair();
+  if (isLiveSourceOnlyMode()) {
+    replicaTranslationCoordinator.selectPair(undefined);
+    availability = 'unavailable';
+    availabilityCheckedForPair = undefined;
+    updateControls();
+    return;
+  }
   if (replicaTranslationMode === 'rrweb-projection') {
     replicaTranslationCoordinator.selectPair(pair);
   }
@@ -1765,8 +1812,12 @@ async function maybeTranslateAutomatically(
   generation: number,
   pageUrl: string,
 ): Promise<void> {
-  const enabled = isAutoTranslationEnabled(preferences, pageUrl) || translationDesired;
-  const action = automaticTranslationAction(enabled, availability);
+  const action = replicaViewTranslationAction(
+    preferences.replicaViewMode,
+    isAutoTranslationEnabled(preferences, pageUrl),
+    translationDesired,
+    availability,
+  );
   if (action === 'translate') {
     await startTranslation(true, generation);
   } else if (action === 'needs-user-action') {
@@ -1775,6 +1826,7 @@ async function maybeTranslateAutomatically(
 }
 
 function startTranslation(automatic: boolean, generation: number): Promise<void> {
+  if (isLiveSourceOnlyMode()) return Promise.resolve();
   const needsFreshCapture = releaseReplicaPresentationForLegacyWork();
   if (needsFreshCapture) {
     translationDesired = true;
@@ -1822,6 +1874,7 @@ async function runTranslation(automatic: boolean, generation: number): Promise<v
     !pair ||
     !root ||
     !identity ||
+    isLiveSourceOnlyMode() ||
     translationInFlight ||
     availability === 'unavailable' ||
     (automatic && availability !== 'available')
@@ -1851,7 +1904,8 @@ async function runTranslation(automatic: boolean, generation: number): Promise<v
     if (
       !captureCoordinator.isCurrent(generation) ||
       visualRoot !== root ||
-      !isCurrentTranslationPair(pair)
+      !isCurrentTranslationPair(pair) ||
+      isLiveSourceOnlyMode()
     ) return;
     availability = 'available';
     availabilityCheckedForPair = availabilityPairKey(pair, generation);
@@ -1888,7 +1942,8 @@ async function runTranslation(automatic: boolean, generation: number): Promise<v
     if (
       !captureCoordinator.isCurrent(generation) ||
       visualRoot !== root ||
-      !isCurrentTranslationPair(pair)
+      !isCurrentTranslationPair(pair) ||
+      isLiveSourceOnlyMode()
     ) return;
     if (usesReplicaTranslationProjection()) {
       const replicaResult = result as ReplicaTranslationRunResult;
@@ -1921,13 +1976,14 @@ async function runTranslation(automatic: boolean, generation: number): Promise<v
   } catch (error) {
     if (isAbortError(error) || abortController.signal.aborted) {
       if (
+        !isLiveSourceOnlyMode() &&
         captureCoordinator.isCurrent(generation) &&
         visualRoot === root &&
         isCurrentTranslationPair(pair)
       ) {
         setStatus('Translation cancelled. Existing translated text was kept.', 'warning');
       }
-    } else {
+    } else if (!isLiveSourceOnlyMode()) {
       setStatus(readableError(error), 'error');
     }
   } finally {
@@ -2048,6 +2104,13 @@ async function processPendingLiveUpdate(): Promise<void> {
   const identity = capturedPageIdentity;
   const beforeRoot = visualRoot;
   const abortController = new AbortController();
+  const activeUpdate: PendingLiveUpdate = {
+    generation: update.generation,
+    firstSequence: update.firstSequence,
+    sequence: update.sequence,
+    nodeIds: new Set(nodeIds),
+  };
+  activeLiveUpdate = activeUpdate;
   liveDeltaAbortController = abortController;
   liveDeltaInFlight = true;
   statusDot.dataset.busy = 'true';
@@ -2104,7 +2167,8 @@ async function processPendingLiveUpdate(): Promise<void> {
 
     const pair = selectedPair();
     const wantsTranslation =
-      translationDesired || isAutoTranslationEnabled(preferences, identity.url);
+      !isLiveSourceOnlyMode() &&
+      (translationDesired || isAutoTranslationEnabled(preferences, identity.url));
     const shouldTranslate = Boolean(
       pair &&
       pair.sourceLanguage !== pair.targetLanguage &&
@@ -2135,6 +2199,7 @@ async function processPendingLiveUpdate(): Promise<void> {
     mirrorDocumentWidth = delta.documentWidth;
     mirrorDocumentHeight = delta.documentHeight;
     latestLiveSequence = delta.sequence;
+    if (activeLiveUpdate === activeUpdate) activeLiveUpdate = undefined;
     updateMirrorLayout();
     if (applied.missingTarget) {
       queueCapture({ identity, reason: 'desynchronized' });
@@ -2182,6 +2247,7 @@ async function processPendingLiveUpdate(): Promise<void> {
     if (liveDeltaAbortController === abortController) {
       liveDeltaAbortController = undefined;
     }
+    if (activeLiveUpdate === activeUpdate) activeLiveUpdate = undefined;
     liveDeltaInFlight = false;
     delete statusDot.dataset.busy;
     void processPendingLiveUpdate();
@@ -2420,6 +2486,119 @@ async function changeReplicaEngine(
   if (identity) queueCapture({ identity, reason: 'preference' });
 }
 
+async function changeReplicaViewMode(
+  replicaViewMode: ReplicaViewMode,
+): Promise<void> {
+  if (replicaViewMode === preferences.replicaViewMode) return;
+  const previousMode = preferences.replicaViewMode;
+  // commitViewPreferencePatch applies the validated preference optimistically
+  // before its first await, so projection gates close immediately.
+  const save = commitViewPreferencePatch({ replicaViewMode });
+  applyReplicaViewMode(previousMode, false);
+  await save;
+  if (preferences.replicaViewMode !== replicaViewMode) {
+    applyReplicaViewMode(replicaViewMode);
+    return;
+  }
+  if (replicaViewMode === 'translated' && !isLiveSourceOnlyMode()) {
+    await resumeTranslatedReplicaMode();
+  }
+}
+
+function applyReplicaViewMode(
+  previousMode: ReplicaViewMode,
+  resumeTranslated = true,
+): void {
+  if (previousMode === preferences.replicaViewMode) return;
+  availabilityRequestId += 1;
+  activeAbortController?.abort();
+  abortAndRequeueLiveDelta();
+  replicaTranslationCoordinator.selectPair(undefined);
+  resetVisualMirrorTextIfPresent();
+  translationComplete = false;
+  availabilityCheckedForPair = undefined;
+  configureImageTranslation();
+  if (isLiveSourceOnlyMode()) {
+    availability = 'unavailable';
+    setStatus(
+      'Live source only is active. The current mirror remains live and all translation overlays were removed.',
+      'success',
+    );
+  } else {
+    setStatus('Translated mode restored. Preparing the saved language settings…');
+    if (resumeTranslated) void resumeTranslatedReplicaMode();
+  }
+  updateControls();
+}
+
+async function resumeTranslatedReplicaMode(): Promise<void> {
+  const interrupted = activeTranslationTask;
+  if (interrupted) await interrupted.catch(() => undefined);
+  const identity = capturedPageIdentity;
+  const generation = captureCoordinator.generation;
+  if (isLiveSourceOnlyMode() || !snapshot || !identity) return;
+  const resolved = await resolveSelectedSourceLanguage(
+    currentReplicaLanguageContext(),
+  );
+  const requestedSnapshot = snapshot;
+  if (
+    !resolved ||
+    isLiveSourceOnlyMode() ||
+    !requestedSnapshot ||
+    snapshot !== requestedSnapshot ||
+    capturedPageIdentity !== identity ||
+    !captureCoordinator.isCurrent(generation)
+  ) return;
+  const pair = selectedPair();
+  if (replicaTranslationMode === 'rrweb-projection') {
+    replicaTranslationCoordinator.selectPair(pair);
+  }
+  await checkAvailability(generation);
+  if (
+    isLiveSourceOnlyMode() ||
+    !pair ||
+    !isCurrentTranslationPair(pair) ||
+    snapshot !== requestedSnapshot ||
+    capturedPageIdentity !== identity ||
+    !captureCoordinator.isCurrent(generation)
+  ) return;
+  await maybeTranslateAutomatically(generation, identity.url);
+}
+
+function currentReplicaLanguageContext(): LiveLanguageContext | undefined {
+  const current = replicaSurfaceRouter.snapshot();
+  if (!current) return undefined;
+  return {
+    ...(current.documentLanguage
+      ? { documentLanguage: current.documentLanguage }
+      : {}),
+    visibleText: buildBoundedLanguageSample(
+      replicaRecordSources(current.records),
+    ),
+    preserveOnUnknown: true,
+  };
+}
+
+function abortAndRequeueLiveDelta(): void {
+  const interrupted = activeLiveUpdate;
+  if (
+    interrupted &&
+    interrupted.sequence > latestLiveSequence &&
+    captureCoordinator.isCurrent(interrupted.generation)
+  ) {
+    const merged = mergeLiveUpdateBatches(pendingLiveUpdate, interrupted);
+    pendingLiveUpdate = {
+      ...merged,
+      nodeIds: new Set(merged.nodeIds),
+    };
+  }
+  liveDeltaAbortController?.abort();
+}
+
+function isLiveSourceOnlyMode(): boolean {
+  return preferences.replicaViewMode === 'source-only';
+}
+
 function applyReplicaEnginePreference(): void {
   const nextMode = selectReplicaEngineMode(
     replicaBuildEnvironment,
@@ -2448,6 +2627,7 @@ function syncPreferenceControls(): void {
     replicaBuildEnvironment.WXT_SIMUL_RRWEB_SHADOW === '0'
       ? 'isolated-html'
       : preferences.replicaEngine;
+  replicaViewModeSelect.value = preferences.replicaViewMode;
   launchBehaviorSelect.value = preferences.launchBehavior;
   popoutTabModeSelect.value = preferences.popoutTabMode;
   syncScrollInput.checked = preferences.syncScroll;
@@ -2462,6 +2642,7 @@ function configureImageTranslation(): void {
   imageTranslationController.configure({
     enabled:
       preferences.imageTranslationEnabled &&
+      !isLiveSourceOnlyMode() &&
       hasCompiledImageAnalysisCapability(),
     scanPolicy: preferences.imageScanPolicy,
     skipSmallImages: preferences.skipSmallImages,
@@ -2944,7 +3125,7 @@ async function changeAutoTranslationMode(mode: AutoTranslationMode): Promise<voi
           : 'Automatic translation is enabled for this site.',
       'success',
     );
-    if (mode !== 'off' && snapshot) {
+    if (mode !== 'off' && snapshot && !isLiveSourceOnlyMode()) {
       translationDesired = true;
       await maybeTranslateAutomatically(captureCoordinator.generation, pageUrl ?? '');
     }
@@ -3274,14 +3455,17 @@ function isCurrentAvailabilityRequest(
   generation: number,
 ): boolean {
   const currentPair = selectedPair();
-  return Boolean(
-    requestId === availabilityRequestId &&
-      captureCoordinator.isCurrent(generation) &&
-      snapshot === requestedSnapshot &&
+  return isAvailabilityRequestCurrent({
+    replicaViewMode: preferences.replicaViewMode,
+    requestMatches: requestId === availabilityRequestId,
+    generationMatches: captureCoordinator.isCurrent(generation),
+    snapshotMatches: snapshot === requestedSnapshot,
+    pairMatches: Boolean(
       currentPair &&
-      currentPair.sourceLanguage === pair.sourceLanguage &&
-      currentPair.targetLanguage === pair.targetLanguage,
-  );
+        currentPair.sourceLanguage === pair.sourceLanguage &&
+        currentPair.targetLanguage === pair.targetLanguage,
+    ),
+  });
 }
 
 function selectedPair(): TranslationPair | undefined {
@@ -3356,6 +3540,7 @@ function updateControls(): void {
   translateComposerButton.disabled = busy || !composerInput.value.trim() || !selectedPair();
   translateButton.disabled =
     busy ||
+    isLiveSourceOnlyMode() ||
     !snapshot ||
     !visualRoot ||
     !selectedPair() ||

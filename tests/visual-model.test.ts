@@ -315,6 +315,44 @@ describe('visual mirror renderer', () => {
     expect(mirror.querySelector('img')?.getAttribute('alt')).toBe('山');
   });
 
+  it('keeps restored source text when a provider resolves after cancellation', async () => {
+    const snapshot = buildParsedVisualSnapshot();
+    const { document } = parseHTML('<html><body></body></html>');
+    const mirror = createVisualMirror(snapshot, undefined, document);
+    if (!mirror) throw new Error('Expected a visual mirror.');
+    document.body.append(mirror);
+    await translateVisualMirror(mirror, async (source) => `[${source}]`);
+    expect(mirror.textContent).toContain('[こんにちは]');
+
+    const abortController = new AbortController();
+    let announceTranslation!: () => void;
+    let releaseTranslation!: (value: string) => void;
+    const translationStarted = new Promise<void>((resolve) => {
+      announceTranslation = resolve;
+    });
+    const blockedTranslation = new Promise<string>((resolve) => {
+      releaseTranslation = resolve;
+    });
+    const lateTranslation = translateVisualMirror(
+      mirror,
+      async () => {
+        announceTranslation();
+        return blockedTranslation;
+      },
+      { signal: abortController.signal },
+    );
+    await translationStarted;
+
+    abortController.abort();
+    resetVisualMirrorText(mirror);
+    releaseTranslation('Late translated text');
+
+    await expect(lateTranslation).rejects.toMatchObject({ name: 'AbortError' });
+    expect(mirror.textContent).toContain('こんにちは');
+    expect(mirror.textContent).not.toContain('Late translated text');
+    expect(mirror.querySelector('img')?.getAttribute('alt')).toBe('山');
+  });
+
   it('commits a translated live root atomically and preserves the old root on abort', async () => {
     const { document, window } = parseHTML('<html><body></body></html>');
     vi.stubGlobal('HTMLImageElement', window.HTMLImageElement);

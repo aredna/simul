@@ -1,5 +1,8 @@
 import {
   hasSourcePrivateElementAncestor,
+  hasSourcePrivateOrActivationElementAncestor,
+  isSourceActivationRoleValue,
+  isSourceActivationTagName,
   isSourcePrivateContentEditableValue,
   isSourcePrivateRoleValue,
   isSourcePrivateTagName,
@@ -87,6 +90,7 @@ interface SerializeContext {
   readonly budget: HtmlMirrorReadBudget;
   readonly styleWork: HtmlMirrorStyleWorkBudget;
   readonly privateRegion: boolean;
+  readonly privateAttributeRegion: boolean;
   readonly nonContentRegion: boolean;
   readonly styleRegion: boolean;
   readonly depth: number;
@@ -285,6 +289,9 @@ export function sanitizeSourceSubtree(
       privateRegion: inheritedElement
         ? hasSourcePrivateElementAncestor(inheritedElement)
         : false,
+      privateAttributeRegion: inheritedElement
+        ? hasSourcePrivateOrActivationElementAncestor(inheritedElement)
+        : false,
       nonContentRegion: inheritedElement
         ? hasNonContentAncestor(inheritedElement)
         : false,
@@ -309,6 +316,9 @@ export function sanitizeSourceChildren(
     const privateRegion = parentElement
       ? hasSourcePrivateElementAncestor(parentElement)
       : false;
+    const privateAttributeRegion = parentElement
+      ? hasSourcePrivateOrActivationElementAncestor(parentElement)
+      : false;
     const nonContentRegion = parentElement
       ? hasNonContentAncestor(parentElement)
       : false;
@@ -320,6 +330,7 @@ export function sanitizeSourceChildren(
         budget,
         styleWork,
         privateRegion,
+        privateAttributeRegion,
         nonContentRegion,
         styleRegion,
         depth: 0,
@@ -340,7 +351,7 @@ export function sanitizeSourceAttributes(
     return sanitizeAttributes(
       source,
       source.localName.toLowerCase(),
-      hasSourcePrivateElementAncestor(source),
+      hasSourcePrivateOrActivationElementAncestor(source),
       baseUrl,
     );
   } catch {
@@ -363,6 +374,7 @@ export function sanitizeSourceDocument(
     budget,
     styleWork,
     privateRegion: false,
+    privateAttributeRegion: false,
     nonContentRegion: false,
     styleRegion: false,
     depth: 0,
@@ -400,6 +412,7 @@ export function readHtmlMirrorNode(
   privateRegion = false,
   nonContentRegion = false,
   styleRegion = false,
+  privateAttributeRegion = false,
 ): HtmlMirrorNode | undefined {
   if (!isRecord(input) || depth > MAX_HTML_MIRROR_DEPTH) return undefined;
   budget.nodes += 1;
@@ -456,12 +469,20 @@ export function readHtmlMirrorNode(
   const children: HtmlMirrorNode[] = [];
   const transportedPrivateRegion = privateRegion ||
     isSourcePrivateTagName(input.tagName) ||
-    input.tagName === 'button' ||
     transportedAttributesArePrivate(attributes);
+  const transportedActivationElement =
+    isSourceActivationTagName(input.tagName) ||
+    isSourceActivationRoleValue(Object.fromEntries(attributes).role);
+  const transportedPrivateAttributeRegion = privateAttributeRegion ||
+    transportedPrivateRegion ||
+    transportedActivationElement;
   const transportedNonContentRegion = nonContentRegion ||
     NON_CONTENT_ELEMENTS.has(input.tagName);
   const transportedStyleRegion = styleRegion || input.tagName === 'style';
-  if (transportedPrivateRegion && hasPrivateHtmlMirrorAttribute(attributes)) {
+  if (
+    transportedPrivateAttributeRegion &&
+    hasPrivateHtmlMirrorAttribute(attributes)
+  ) {
     return undefined;
   }
   for (const child of input.children) {
@@ -473,6 +494,7 @@ export function readHtmlMirrorNode(
       transportedPrivateRegion,
       transportedNonContentRegion,
       transportedStyleRegion,
+      transportedPrivateAttributeRegion,
     );
     if (!parsed) return undefined;
     children.push(parsed);
@@ -508,6 +530,7 @@ export function readHtmlMirrorNode(
         transportedPrivateRegion,
         transportedNonContentRegion,
         transportedStyleRegion,
+        transportedPrivateAttributeRegion,
       );
       if (!parsed) return undefined;
       shadowChildren.push(parsed);
@@ -599,12 +622,15 @@ function serializeNode(
   const namespace = readNamespace(liveElement.namespaceURI);
   if (!namespace) return undefined;
   const privateRegion = context.privateRegion || elementStartsPrivateRegion(liveElement);
+  const privateAttributeRegion = context.privateAttributeRegion ||
+    privateRegion ||
+    elementStartsActivationRegion(liveElement);
   const nonContentRegion = context.nonContentRegion || NON_CONTENT_ELEMENTS.has(tagName);
   const styleRegion = context.styleRegion || tagName === 'style';
   const attributes = sanitizeAttributes(
     liveElement,
     tagName,
-    privateRegion,
+    privateAttributeRegion,
     context.baseUrl,
   );
   if (!attributes) return undefined;
@@ -622,6 +648,7 @@ function serializeNode(
       const child = serializeNode(liveChild, {
         ...context,
         privateRegion,
+        privateAttributeRegion,
         nonContentRegion,
         styleRegion,
         depth: context.depth + 1,
@@ -640,6 +667,7 @@ function serializeNode(
       const child = serializeNode(childNode, {
         ...context,
         privateRegion,
+        privateAttributeRegion,
         nonContentRegion,
         styleRegion,
         depth: context.depth + 1,
@@ -674,11 +702,14 @@ function serializeNode(
 function sanitizeAttributes(
   element: Element,
   tagName: string,
-  privateRegion: boolean,
+  privateAttributeRegion: boolean,
   baseUrl: string,
 ): readonly (readonly [string, string])[] | undefined {
   if (element.attributes.length > MAX_HTML_MIRROR_ATTRIBUTES) return undefined;
   const result: Array<readonly [string, string]> = [];
+  const privateAttributes = privateAttributeRegion ||
+    isSourceActivationTagName(tagName) ||
+    isSourceActivationRoleValue(element.getAttribute('role'));
   for (const attribute of element.attributes) {
     const name = attribute.name.toLowerCase();
     if (
@@ -686,7 +717,8 @@ function sanitizeAttributes(
       name.startsWith('on') ||
       name === 'nonce' ||
       ACTIVE_OR_NAVIGATIONAL_ATTRIBUTES.has(name) ||
-      (privateRegion && (PRIVATE_ATTRIBUTES.has(name) || name.startsWith('data-')))
+      (privateAttributes &&
+        (PRIVATE_ATTRIBUTES.has(name) || name.startsWith('data-')))
     ) continue;
     let value = attribute.value;
     if (value.length > MAX_HTML_MIRROR_STRING) return undefined;
@@ -1005,6 +1037,7 @@ function passiveUrl(
   if (allowDataImage && /^data:image\/(?:avif|gif|jpeg|png|webp);base64,/iu.test(raw)) {
     return raw.length <= MAX_HTML_MIRROR_STRING ? raw : undefined;
   }
+  if (allowDataImage && isSafeStaticSvgDataImage(raw)) return raw;
   try {
     const parsed = new URL(raw, baseUrl);
     if (parsed.protocol !== 'http:' && parsed.protocol !== 'https:') return undefined;
@@ -1031,7 +1064,7 @@ function isUnsafeTransportedAttribute(
   }
   if (name === 'src') {
     return !PASSIVE_IMAGE_ELEMENTS.has(tagName) ||
-      !/^(?:https?:\/\/|data:image\/)/u.test(value);
+      passiveUrl(value, 'about:blank', true) !== value;
   }
   if (name === 'srcset') {
     return tagName !== 'img' || sanitizeSrcset(value, 'about:blank') !== value;
@@ -1044,13 +1077,166 @@ function isUnsafeTransportedAttribute(
 
 function elementStartsPrivateRegion(element: Element): boolean {
   return isSourcePrivateTagName(element.localName) ||
-    element.localName.toLowerCase() === 'button' ||
     isSourcePrivateContentEditableValue(
       element.hasAttribute('contenteditable')
         ? element.getAttribute('contenteditable') ?? ''
         : undefined,
     ) ||
     isSourcePrivateRoleValue(element.getAttribute('role'));
+}
+
+function elementStartsActivationRegion(element: Element): boolean {
+  return isSourceActivationTagName(element.localName) ||
+    isSourceActivationRoleValue(element.getAttribute('role'));
+}
+
+const STATIC_SVG_ELEMENTS = new Set([
+  'circle',
+  'ellipse',
+  'g',
+  'line',
+  'path',
+  'polygon',
+  'polyline',
+  'rect',
+  'svg',
+]);
+
+const STATIC_SVG_ATTRIBUTES = new Set([
+  'aria-hidden',
+  'class',
+  'clip-rule',
+  'cx',
+  'cy',
+  'd',
+  'fill',
+  'fill-opacity',
+  'fill-rule',
+  'focusable',
+  'height',
+  'id',
+  'linecap',
+  'linejoin',
+  'opacity',
+  'points',
+  'preserveaspectratio',
+  'r',
+  'role',
+  'rx',
+  'ry',
+  'stroke',
+  'stroke-dasharray',
+  'stroke-dashoffset',
+  'stroke-linecap',
+  'stroke-linejoin',
+  'stroke-miterlimit',
+  'stroke-opacity',
+  'stroke-width',
+  'transform',
+  'vector-effect',
+  'viewbox',
+  'width',
+  'x',
+  'x1',
+  'x2',
+  'xmlns',
+  'y',
+  'y1',
+  'y2',
+]);
+
+/**
+ * Admit only a small, URL-encoded, shape-only SVG profile. It deliberately
+ * excludes CSS, links, references, animation, text, entities, and every
+ * resource-bearing element so an image cannot become a second active graph.
+ */
+function isSafeStaticSvgDataImage(value: string): boolean {
+  if (value.length > MAX_HTML_MIRROR_STRING) return false;
+  const match = /^data:image\/svg\+xml(?:;charset=(?:utf-8|us-ascii))?,([\s\S]*)$/iu.exec(
+    value,
+  );
+  if (!match) return false;
+  let xml: string;
+  try {
+    xml = decodeURIComponent(match[1]!);
+  } catch {
+    return false;
+  }
+  if (
+    xml.length === 0 ||
+    xml.length > MAX_HTML_MIRROR_STRING ||
+    /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(xml) ||
+    /(?:<!|<\?|&|\burl\s*\(|javascript\s*:|data\s*:)/iu.test(xml)
+  ) return false;
+
+  const stack: string[] = [];
+  let rootSeen = false;
+  let offset = 0;
+  const tokens = xml.matchAll(/<[^<>]*>/gu);
+  for (const token of tokens) {
+    const index = token.index;
+    if (index === undefined || xml.slice(offset, index).trim() !== '') return false;
+    const rawToken = token[0];
+    offset = index + rawToken.length;
+    const parsed = /^<\s*(\/?)\s*([a-z][a-z0-9-]*)\s*([\s\S]*?)\s*(\/?)>$/iu.exec(
+      rawToken,
+    );
+    if (!parsed) return false;
+    const closing = parsed[1] === '/';
+    const tagName = parsed[2]!.toLowerCase();
+    const attributeText = parsed[3] ?? '';
+    const selfClosing = parsed[4] === '/';
+    if (!STATIC_SVG_ELEMENTS.has(tagName)) return false;
+    if (closing) {
+      if (selfClosing || attributeText.trim() !== '' || stack.pop() !== tagName) {
+        return false;
+      }
+      continue;
+    }
+    if (!rootSeen) {
+      if (tagName !== 'svg' || stack.length !== 0) return false;
+      rootSeen = true;
+    } else if (stack.length === 0) {
+      return false;
+    }
+    if (!readSafeStaticSvgAttributes(attributeText, tagName === 'svg')) return false;
+    if (!selfClosing) stack.push(tagName);
+  }
+  return rootSeen && stack.length === 0 && xml.slice(offset).trim() === '';
+}
+
+function readSafeStaticSvgAttributes(
+  source: string,
+  root: boolean,
+): boolean {
+  const seen = new Set<string>();
+  let offset = 0;
+  while (offset < source.length) {
+    while (offset < source.length && /\s/u.test(source[offset]!)) offset += 1;
+    if (offset >= source.length) break;
+    const attribute = /^([a-z][a-z0-9-]*)\s*=\s*(["'])([\s\S]*?)\2/iu.exec(
+      source.slice(offset),
+    );
+    if (!attribute) return false;
+    const name = attribute[1]!.toLowerCase();
+    const value = attribute[3] ?? '';
+    const decodedValue = decodeCssEscapes(value);
+    if (
+      seen.has(name) ||
+      !STATIC_SVG_ATTRIBUTES.has(name) ||
+      value.length > 16_384 ||
+      /[<>\u0000-\u001f\u007f]/u.test(value) ||
+      /[<>\u0000-\u001f\u007f]/u.test(decodedValue) ||
+      (name === 'xmlns'
+        ? !root || value !== 'http://www.w3.org/2000/svg'
+        : /(?:\burl\s*\(|javascript\s*:|https?\s*:|data\s*:)/iu.test(
+          decodedValue,
+        ))
+    ) return false;
+    seen.add(name);
+    offset += attribute[0].length;
+  }
+  return true;
 }
 
 function transportedAttributesArePrivate(

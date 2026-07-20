@@ -12,7 +12,7 @@ import {
 describe('visible rrweb replay host', () => {
   it('uses canonical replica labels without claiming fallback bugs are fixed', () => {
     expect(STATIC_REPLAY_LABEL).toBe('Replica reconnecting');
-    expect(LIVE_REPLAY_LABEL).toBe('Live translated replica');
+    expect(LIVE_REPLAY_LABEL).toBe('Live page replica');
     expect(`${STATIC_REPLAY_LABEL} ${LIVE_REPLAY_LABEL}`).not.toMatch(/exact|perfect/iu);
   });
 

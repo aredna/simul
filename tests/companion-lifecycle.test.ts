@@ -3,6 +3,9 @@ import { describe, expect, it } from 'vitest';
 import {
   LatestWorkCoordinator,
   automaticTranslationAction,
+  isAvailabilityRequestCurrent,
+  mergeLiveUpdateBatches,
+  replicaViewTranslationAction,
 } from '../lib/companion-lifecycle';
 
 describe('automaticTranslationAction', () => {
@@ -20,6 +23,104 @@ describe('automaticTranslationAction', () => {
       'needs-user-action',
     );
     expect(automaticTranslationAction(true, 'unavailable')).toBe('unavailable');
+  });
+});
+
+describe('replicaViewTranslationAction', () => {
+  it('never translates a source-only replica', () => {
+    expect(
+      replicaViewTranslationAction('source-only', true, true, 'available'),
+    ).toBe('skip');
+  });
+
+  it('respects saved automation and retained manual intent in translated mode', () => {
+    expect(
+      replicaViewTranslationAction('translated', false, false, 'available'),
+    ).toBe('skip');
+    expect(
+      replicaViewTranslationAction('translated', true, false, 'available'),
+    ).toBe('translate');
+    expect(
+      replicaViewTranslationAction('translated', false, true, 'available'),
+    ).toBe('translate');
+  });
+});
+
+describe('isAvailabilityRequestCurrent', () => {
+  const current = {
+    replicaViewMode: 'translated' as const,
+    requestMatches: true,
+    generationMatches: true,
+    snapshotMatches: true,
+    pairMatches: true,
+  };
+
+  it('accepts a fully current translated-mode request', () => {
+    expect(isAvailabilityRequestCurrent(current)).toBe(true);
+  });
+
+  it('rejects a completed request after source-only mode takes over', () => {
+    expect(
+      isAvailabilityRequestCurrent({
+        ...current,
+        replicaViewMode: 'source-only',
+      }),
+    ).toBe(false);
+  });
+
+  it.each([
+    'requestMatches',
+    'generationMatches',
+    'snapshotMatches',
+    'pairMatches',
+  ] as const)('rejects stale %s state', (field) => {
+    expect(
+      isAvailabilityRequestCurrent({
+        ...current,
+        [field]: false,
+      }),
+    ).toBe(false);
+  });
+});
+
+describe('mergeLiveUpdateBatches', () => {
+  it('requeues an interrupted chunk alongside an already queued remainder', () => {
+    expect(mergeLiveUpdateBatches(
+      {
+        generation: 7,
+        firstSequence: 12,
+        sequence: 14,
+        nodeIds: new Set(['remainder']),
+      },
+      {
+        generation: 7,
+        firstSequence: 10,
+        sequence: 14,
+        nodeIds: new Set(['active', 'remainder']),
+      },
+    )).toEqual({
+      generation: 7,
+      firstSequence: 10,
+      sequence: 14,
+      nodeIds: new Set(['remainder', 'active']),
+    });
+  });
+
+  it('keeps the newest generation instead of reviving stale live work', () => {
+    expect(mergeLiveUpdateBatches(
+      {
+        generation: 9,
+        firstSequence: 1,
+        sequence: 1,
+        nodeIds: new Set(['new']),
+      },
+      {
+        generation: 8,
+        firstSequence: 30,
+        sequence: 30,
+        nodeIds: new Set(['stale']),
+      },
+    ).nodeIds).toEqual(new Set(['new']));
   });
 });
 

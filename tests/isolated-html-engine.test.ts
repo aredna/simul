@@ -103,6 +103,52 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(commits).toEqual(['checkpoint', 'batch']);
   });
 
+  it('restores source in place, rejects stale projections, and keeps live patches flowing', async () => {
+    const stream = new FakeHtmlStream(makeCheckpoint('source label', 0));
+    const host = new FakePresentationHost();
+    const engine = makeEngine(stream, host);
+    await engine.run(request);
+
+    const snapshot = engine.snapshot()!;
+    engine.beginProjection({ translationEpoch: 1, pairKey: 'en\0ja' });
+    const projection = {
+      document: snapshot.document,
+      replayLease: snapshot.replayLease,
+      nodeId: 4,
+      nodeType: 3 as const,
+      sourceRevision: 1,
+      source: 'source label',
+      translationEpoch: 1,
+      pairKey: 'en\0ja',
+      translated: '翻訳済み',
+    };
+    expect(engine.project(projection)).toBe(true);
+    expect(host.iframe?.contentDocument?.body.textContent).toBe('翻訳済み');
+
+    engine.beginProjection({ translationEpoch: 2, pairKey: undefined });
+    expect(host.iframe?.contentDocument?.body.textContent).toBe('source label');
+    expect(engine.project(projection)).toBe(false);
+
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [{
+        kind: 'text',
+        nodeId: 4,
+        node: {
+          kind: 'text', id: 4, text: 'live source update', translatable: true,
+        },
+      }],
+    )!);
+    expect(host.iframe?.contentDocument?.body.textContent).toBe('live source update');
+    expect(engine.snapshot()?.records[0]).toMatchObject({
+      source: 'live source update',
+      revision: 2,
+    });
+    expect(stream.acknowledged).toContain(1);
+  });
+
   it('retains translated projections across a same-document recovery checkpoint', async () => {
     const stream = new FakeHtmlStream(makeCheckpoint('hello', 0));
     const host = new FakePresentationHost();
@@ -326,6 +372,140 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(host.iframe?.contentDocument?.body.getAttribute('role')).toBe('textbox');
     expect(host.iframe?.contentDocument?.body.textContent).toBe('');
     expect(stream.acknowledged).toContain(1);
+  });
+
+  it('rejects an activation transition that does not re-sanitize descendants', async () => {
+    const stream = new FakeHtmlStream(makeCheckpoint('public value', 0));
+    const host = new FakePresentationHost();
+    const engine = makeEngine(stream, host);
+    await engine.run(request);
+
+    const patch = createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [{
+        kind: 'attributes',
+        nodeId: 3,
+        tagName: 'body',
+        attributes: [['role', 'button']],
+      }],
+    );
+    expect(patch).toBeDefined();
+    stream.observer?.onPatch(patch!);
+
+    expect(host.iframe?.contentDocument?.body.hasAttribute('role')).toBe(false);
+    expect(host.iframe?.contentDocument?.body.textContent).toBe('public value');
+    expect(stream.requested).toEqual([0]);
+  });
+
+  it('requires checkpoint recovery when a shadow host tightens privacy', async () => {
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: {
+          kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+          attributes: [], children: [
+            { kind: 'element', id: 2, namespace: 'html', tagName: 'head', attributes: [], children: [] },
+            { kind: 'element', id: 3, namespace: 'html', tagName: 'body', attributes: [], children: [{
+              kind: 'element', id: 4, namespace: 'html', tagName: 'div',
+              attributes: [], children: [], shadowRoot: {
+                id: 5,
+                mode: 'open',
+                adoptedStyleSheets: [],
+                children: [{
+                  kind: 'text', id: 6, text: 'public shadow text', translatable: true,
+                }],
+              },
+            }] },
+          ],
+        },
+        adoptedStyleSheets: [],
+        captureMs: 1,
+        viewportWidth: 800,
+        viewportHeight: 600,
+        documentWidth: 800,
+        documentHeight: 1000,
+      },
+    )!;
+    const stream = new FakeHtmlStream(checkpoint);
+    const host = new FakePresentationHost();
+    const engine = makeEngine(stream, host);
+    await engine.run(request);
+
+    const patch = createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [
+        {
+          kind: 'attributes', nodeId: 4, tagName: 'div',
+          attributes: [['role', 'textbox']],
+        },
+        { kind: 'children', nodeId: 4, children: [] },
+      ],
+    );
+    expect(patch).toBeDefined();
+    stream.observer?.onPatch(patch!);
+
+    const replicaHost = host.iframe?.contentDocument?.querySelector('div');
+    expect(replicaHost?.hasAttribute('role')).toBe(false);
+    expect(replicaHost?.shadowRoot?.firstChild?.nodeValue).toBe(
+      'public shadow text',
+    );
+    expect(stream.requested).toEqual([0]);
+  });
+
+  it('rejects private metadata patched onto an activation descendant', async () => {
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: {
+          kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+          attributes: [], children: [
+            { kind: 'element', id: 2, namespace: 'html', tagName: 'head', attributes: [], children: [] },
+            { kind: 'element', id: 3, namespace: 'html', tagName: 'body', attributes: [], children: [{
+              kind: 'element', id: 4, namespace: 'html', tagName: 'button',
+              attributes: [], children: [{
+                kind: 'element', id: 5, namespace: 'html', tagName: 'span',
+                attributes: [], children: [{
+                  kind: 'text', id: 6, text: 'public activation label', translatable: true,
+                }],
+              }],
+            }],
+          }],
+        },
+        adoptedStyleSheets: [],
+        captureMs: 1,
+        viewportWidth: 800,
+        viewportHeight: 600,
+        documentWidth: 800,
+        documentHeight: 1000,
+      },
+    )!;
+    const stream = new FakeHtmlStream(checkpoint);
+    const host = new FakePresentationHost();
+    const engine = makeEngine(stream, host);
+    await engine.run(request);
+
+    const patch = createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [{
+        kind: 'attributes',
+        nodeId: 5,
+        tagName: 'span',
+        attributes: [['title', 'transported descendant secret']],
+      }],
+    );
+    expect(patch).toBeDefined();
+    stream.observer?.onPatch(patch!);
+
+    const span = host.iframe?.contentDocument?.querySelector('button span');
+    expect(span?.textContent).toBe('public activation label');
+    expect(span?.hasAttribute('title')).toBe(false);
+    expect(stream.requested).toEqual([0]);
   });
 
   it('preserves the owned CSP shell while replacing mirrored head children', async () => {

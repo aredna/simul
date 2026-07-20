@@ -85,6 +85,13 @@
           </select>
         </label>
         <label>
+          <span>Replica text</span>
+          <select id="replica-view-mode">
+            <option value="translated">Translated</option>
+            <option value="source-only">Live source only</option>
+          </select>
+        </label>
+        <label>
           <span>Toolbar opens</span>
           <select id="launch-behavior">
             <option value="last-used">Last used view</option>
@@ -148,13 +155,13 @@
         aria-live="polite"
         hidden
       ></p>
-      <section id="snapshot" class="snapshot" aria-label="Translated page mirror">
+      <section id="snapshot" class="snapshot" aria-label="Page mirror">
         <div class="empty-state"><p>Preparing the live read-only mirror…</p></div>
       </section>
       <section
         id="replica-preview"
         class="replica-preview"
-        aria-label="Live translated page replica"
+        aria-label="Live page replica"
         aria-hidden="true"
         hidden
       ></section>

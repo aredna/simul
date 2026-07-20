@@ -438,7 +438,17 @@ export class HtmlMirrorSourceSession {
         if (
           record.attributeName === 'role' ||
           record.attributeName === 'contenteditable'
-        ) this.#queuePending(this.#pendingChildren, record.target);
+        ) {
+          // A children patch can re-sanitize a host's light DOM, but it cannot
+          // replace that host's already-mirrored ShadowRoot. Rebuild the whole
+          // graph whenever the host's privacy context can change.
+          if (record.target.shadowRoot?.mode === 'open') {
+            this.#shadowReconciliationPending = true;
+            this.#signalShadowReconciliation();
+            return;
+          }
+          this.#queuePending(this.#pendingChildren, record.target);
+        }
       } else if (record.type === 'characterData' && record.target instanceof Text) {
         this.#queuePending(this.#pendingText, record.target);
       }

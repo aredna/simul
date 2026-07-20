@@ -167,7 +167,7 @@ describe('SourceValueModel', () => {
     ]);
   });
 
-  it('treats role=button content as a private control boundary', () => {
+  it('keeps role=button labels public while retaining value-control privacy', () => {
     const model = new SourceValueModel();
     const prepared = model.prepareCheckpoint(
       identity,
@@ -182,8 +182,8 @@ describe('SourceValueModel', () => {
 
     expect(prepared?.records.map(({ nodeId, source }) => ({ nodeId, source }))).toEqual([
       { nodeId: 4, source: 'Hola' },
+      { nodeId: 10, source: 'role-button-canary' },
     ]);
-    expect(JSON.stringify(prepared)).not.toContain('role-button-canary');
   });
 
   it('recomputes HTML language after document-element replacement and removal', () => {

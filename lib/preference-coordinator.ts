@@ -8,6 +8,7 @@ import {
   isMirrorDisplayMode,
   isPopoutTabMode,
   isReplicaEnginePreference,
+  isReplicaViewMode,
   isTextLayoutMode,
   parseCompanionPreferences,
   permissionOriginsForMode,
@@ -372,6 +373,7 @@ const VIEW_SETTING_KEYS = new Set([
   'syncScroll',
   'textLayoutMode',
   'replicaEngine',
+  'replicaViewMode',
   'launchBehavior',
   'lastLaunchSurface',
   'popoutTabMode',
@@ -421,6 +423,10 @@ function readViewSettingsPatch(
   if ('replicaEngine' in value) {
     if (!isReplicaEnginePreference(value.replicaEngine)) return undefined;
     patch.replicaEngine = value.replicaEngine;
+  }
+  if ('replicaViewMode' in value) {
+    if (!isReplicaViewMode(value.replicaViewMode)) return undefined;
+    patch.replicaViewMode = value.replicaViewMode;
   }
   if ('launchBehavior' in value) {
     if (!isCompanionLaunchBehavior(value.launchBehavior)) return undefined;

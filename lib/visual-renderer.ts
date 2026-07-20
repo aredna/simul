@@ -373,6 +373,7 @@ export async function translateVisualMirror(
     acceptedCharacters += [...source].length;
     try {
       const translated = await translate(source, options.signal);
+      options.signal?.throwIfAborted();
       if (!translated.trim()) throw new Error('Empty translation');
       applyGroupTranslation(bindings, translated);
     } catch (error) {

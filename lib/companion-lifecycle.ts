@@ -1,3 +1,4 @@
+import type { ReplicaViewMode } from './preferences';
 import type { TranslationAvailability } from './translation-provider';
 
 export type AutomaticTranslationAction =
@@ -15,6 +16,76 @@ export function automaticTranslationAction(
   if (availability === 'available') return 'translate';
   if (availability === 'unavailable') return 'unavailable';
   return 'needs-user-action';
+}
+
+/**
+ * Source-only mode never resumes translation, even when saved automation or a
+ * prior manual request would otherwise make the translation eligible.
+ */
+export function replicaViewTranslationAction(
+  replicaViewMode: ReplicaViewMode,
+  autoTranslationEnabled: boolean,
+  translationDesired: boolean,
+  availability: TranslationAvailability,
+): AutomaticTranslationAction {
+  if (replicaViewMode === 'source-only') return 'skip';
+  return automaticTranslationAction(
+    autoTranslationEnabled || translationDesired,
+    availability,
+  );
+}
+
+export interface AvailabilityRequestCurrency {
+  readonly replicaViewMode: ReplicaViewMode;
+  readonly requestMatches: boolean;
+  readonly generationMatches: boolean;
+  readonly snapshotMatches: boolean;
+  readonly pairMatches: boolean;
+}
+
+/**
+ * An async availability result is actionable only while translated mode and
+ * every identity boundary from the initiating request are still current.
+ */
+export function isAvailabilityRequestCurrent(
+  currency: AvailabilityRequestCurrency,
+): boolean {
+  return Boolean(
+    currency.replicaViewMode === 'translated' &&
+      currency.requestMatches &&
+      currency.generationMatches &&
+      currency.snapshotMatches &&
+      currency.pairMatches,
+  );
+}
+
+export interface LiveUpdateBatch<NodeId> {
+  readonly generation: number;
+  readonly firstSequence: number;
+  readonly sequence: number;
+  readonly nodeIds: ReadonlySet<NodeId>;
+}
+
+/** Reinsert interrupted live work without losing a queued remainder. */
+export function mergeLiveUpdateBatches<NodeId>(
+  current: LiveUpdateBatch<NodeId> | undefined,
+  interrupted: LiveUpdateBatch<NodeId>,
+): LiveUpdateBatch<NodeId> {
+  if (!current || current.generation !== interrupted.generation) {
+    const selected = !current || interrupted.generation > current.generation
+      ? interrupted
+      : current;
+    return {
+      ...selected,
+      nodeIds: new Set(selected.nodeIds),
+    };
+  }
+  return {
+    generation: current.generation,
+    firstSequence: Math.min(current.firstSequence, interrupted.firstSequence),
+    sequence: Math.max(current.sequence, interrupted.sequence),
+    nodeIds: new Set([...current.nodeIds, ...interrupted.nodeIds]),
+  };
 }
 
 export interface GenerationWork<T> {

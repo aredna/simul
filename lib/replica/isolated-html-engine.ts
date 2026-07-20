@@ -27,6 +27,8 @@ import {
   type HtmlMirrorNode,
 } from './html-mirror-sanitizer';
 import {
+  isSourceActivationRoleValue,
+  isSourceActivationTagName,
   isSourcePrivateContentEditableValue,
   isSourcePrivateRoleValue,
   isSourcePrivateTagName,
@@ -911,9 +913,21 @@ function applyPatchBatch(
         target.nodeType !== Node.ELEMENT_NODE ||
         (target as Element).localName.toLowerCase() !== operation.tagName
       ) return undefined;
+      const currentContext = containerContext(target);
       const prospectiveContext = containerContext(target, operation.attributes);
       if (
-        prospectiveContext.privateRegion &&
+        privacyContextChanges(currentContext, prospectiveContext) &&
+        (
+          (target as Element).shadowRoot ||
+          !operations.some(
+            (candidate) =>
+              candidate.kind === 'children' &&
+              candidate.nodeId === operation.nodeId,
+          )
+        )
+      ) return undefined;
+      if (
+        prospectiveContext.privateAttributeRegion &&
         hasPrivateHtmlMirrorAttribute(operation.attributes)
       ) return undefined;
       try {
@@ -1130,12 +1144,14 @@ function collectTranslatableIds(node: HtmlMirrorNode, ids: Set<number>): void {
 
 interface DomContentContext {
   readonly privateRegion: boolean;
+  readonly privateAttributeRegion: boolean;
   readonly nonContentRegion: boolean;
   readonly styleRegion: boolean;
 }
 
 const PUBLIC_DOM_CONTEXT: DomContentContext = Object.freeze({
   privateRegion: false,
+  privateAttributeRegion: false,
   nonContentRegion: false,
   styleRegion: false,
 });
@@ -1187,11 +1203,16 @@ function containerContext(
       : PUBLIC_DOM_CONTEXT;
     const attributes = Object.fromEntries(pendingAttributes);
     const tagName = element.localName.toLowerCase();
+    const privateRegion = inherited.privateRegion ||
+      isSourcePrivateTagName(tagName) ||
+      isSourcePrivateContentEditableValue(attributes.contenteditable) ||
+      isSourcePrivateRoleValue(attributes.role);
     return {
-      privateRegion: inherited.privateRegion ||
-        isSourcePrivateTagName(tagName) || tagName === 'button' ||
-        isSourcePrivateContentEditableValue(attributes.contenteditable) ||
-        isSourcePrivateRoleValue(attributes.role),
+      privateRegion,
+      privateAttributeRegion: inherited.privateAttributeRegion ||
+        privateRegion ||
+        isSourceActivationTagName(tagName) ||
+        isSourceActivationRoleValue(attributes.role),
       nonContentRegion: inherited.nonContentRegion ||
         tagName === 'head' || tagName === 'style' || tagName === 'title',
       styleRegion: inherited.styleRegion || tagName === 'style',
@@ -1210,8 +1231,17 @@ function domTextContext(node: Node): DomContentContext {
     : PUBLIC_DOM_CONTEXT;
 }
 
+function privacyContextChanges(
+  current: DomContentContext,
+  prospective: DomContentContext,
+): boolean {
+  return current.privateRegion !== prospective.privateRegion ||
+    current.privateAttributeRegion !== prospective.privateAttributeRegion;
+}
+
 function domElementContext(element: Element): DomContentContext {
   let privateRegion = false;
+  let privateAttributeRegion = false;
   let nonContentRegion = false;
   let styleRegion = false;
   for (
@@ -1220,16 +1250,20 @@ function domElementContext(element: Element): DomContentContext {
     current = composedParentElement(current)
   ) {
     const tagName = current.localName.toLowerCase();
-    privateRegion ||= isSourcePrivateTagName(tagName) || tagName === 'button' ||
+    const currentPrivateRegion = isSourcePrivateTagName(tagName) ||
       isSourcePrivateContentEditableValue(
         current.hasAttribute('contenteditable')
           ? current.getAttribute('contenteditable') ?? ''
           : undefined,
       ) || isSourcePrivateRoleValue(current.getAttribute('role'));
+    privateRegion ||= currentPrivateRegion;
+    privateAttributeRegion ||= currentPrivateRegion ||
+      isSourceActivationTagName(tagName) ||
+      isSourceActivationRoleValue(current.getAttribute('role'));
     nonContentRegion ||= tagName === 'head' || tagName === 'style' || tagName === 'title';
     styleRegion ||= tagName === 'style';
   }
-  return { privateRegion, nonContentRegion, styleRegion };
+  return { privateRegion, privateAttributeRegion, nonContentRegion, styleRegion };
 }
 
 function validGraphForContext(
@@ -1239,18 +1273,24 @@ function validGraphForContext(
   if (node.kind === 'text') return validTextForContext(node, inherited);
   const attributes = Object.fromEntries(node.attributes);
   const privateRegion = inherited.privateRegion ||
-    isSourcePrivateTagName(node.tagName) || node.tagName === 'button' ||
+    isSourcePrivateTagName(node.tagName) ||
     isSourcePrivateContentEditableValue(attributes.contenteditable) ||
     isSourcePrivateRoleValue(attributes.role);
+  const privateAttributeRegion = inherited.privateAttributeRegion ||
+    privateRegion ||
+    isSourceActivationTagName(node.tagName) ||
+    isSourceActivationRoleValue(attributes.role);
   const nonContentRegion = inherited.nonContentRegion ||
     node.tagName === 'head' || node.tagName === 'style' || node.tagName === 'title';
   const styleRegion = inherited.styleRegion || node.tagName === 'style';
   const context = {
     privateRegion,
+    privateAttributeRegion,
     nonContentRegion,
     styleRegion,
   };
-  return node.children.every((child) => validGraphForContext(child, context)) &&
+  return (!privateAttributeRegion || !hasPrivateHtmlMirrorAttribute(node.attributes)) &&
+    node.children.every((child) => validGraphForContext(child, context)) &&
     (!node.shadowRoot || node.shadowRoot.children.every(
       (child) => validGraphForContext(child, context),
     ));
