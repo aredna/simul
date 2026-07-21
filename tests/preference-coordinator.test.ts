@@ -165,6 +165,7 @@ describe('preference coordinator', () => {
         targetLanguage: 'ja',
         displayMode: 'custom',
         zoomPercent: 185,
+        replicaFidelityPolicy: 'conservative',
         replicaViewMode: 'source-only',
       },
     });
@@ -176,6 +177,7 @@ describe('preference coordinator', () => {
       targetLanguage: 'ja',
       displayMode: 'custom',
       zoomPercent: 185,
+      replicaFidelityPolicy: 'conservative',
       replicaViewMode: 'source-only',
       syncScroll: true,
       textLayoutMode: 'adaptive',
@@ -193,7 +195,10 @@ describe('preference coordinator', () => {
       }),
       coordinator.run({
         type: 'simul:preferences:patch-view',
-        patch: { syncScroll: false },
+        patch: {
+          syncScroll: false,
+          replicaFidelityPolicy: 'conservative',
+        },
       }),
       coordinator.run({
         type: 'simul:preferences:patch-view',
@@ -208,6 +213,7 @@ describe('preference coordinator', () => {
       displayMode: 'custom',
       zoomPercent: 165,
       syncScroll: false,
+      replicaFidelityPolicy: 'conservative',
       textLayoutMode: 'faithful',
       replicaViewMode: 'source-only',
     });
@@ -455,6 +461,7 @@ describe('preference coordinator message boundary', () => {
           launchBehavior: 'last-used',
           lastLaunchSurface: 'popout',
           popoutTabMode: 'active',
+          replicaFidelityPolicy: 'conservative',
           replicaViewMode: 'source-only',
         },
       }),
@@ -467,9 +474,22 @@ describe('preference coordinator message boundary', () => {
         launchBehavior: 'last-used',
         lastLaunchSurface: 'popout',
         popoutTabMode: 'active',
+        replicaFidelityPolicy: 'conservative',
         replicaViewMode: 'source-only',
       },
     });
+    expect(
+      readPreferenceCommand({
+        type: 'simul:preferences:patch-view',
+        patch: { replicaFidelityPolicy: 'strict-local' },
+      }),
+    ).toBeUndefined();
+    expect(
+      readPreferenceCommand({
+        type: 'simul:preferences:patch-view',
+        patch: { replicaFidelityPolicy: 'maximum' },
+      }),
+    ).toBeUndefined();
     expect(
       readPreferenceCommand({
         type: 'simul:preferences:patch-view',

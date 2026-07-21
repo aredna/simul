@@ -71,6 +71,27 @@ describe('packaged Tesseract provider', () => {
       .toBeUndefined();
   });
 
+  it('leaves unavailable confidence absent instead of treating it as zero', () => {
+    const normalized = normalizeTesseractPage({
+      text: '日本語',
+      blocks: [{
+        paragraphs: [{
+          lines: [{
+            text: '日本語',
+            bbox: { x0: 10, y0: 20, x1: 80, y1: 40 },
+          }],
+        }],
+      }],
+    }, 200, 100);
+
+    expect(normalized?.regions).toEqual([{
+      text: '日本語',
+      boundingBox: { x: 10, y: 20, width: 70, height: 20 },
+    }]);
+    expect(normalized).not.toHaveProperty('transcriptConfidence');
+    expect(normalized).not.toHaveProperty('geometryConfidence');
+  });
+
   it('uses only local paths, reuses an exact group, and terminates on group change', async () => {
     const firstWorker = fakeWorker('one');
     const secondWorker = fakeWorker('two');

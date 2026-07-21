@@ -1,4 +1,9 @@
 import type { MirrorDisplayMode } from '../preferences';
+import {
+  findPrimaryNestedScroller,
+  readNestedScrollSnapshot,
+  type PrimaryScrollTarget,
+} from '../primary-scroll';
 import { computeMirrorScale } from '../visual-renderer';
 
 export const STATIC_REPLAY_LABEL = 'Replica reconnecting';
@@ -14,6 +19,7 @@ export interface VisibleReplayDimensions {
   readonly viewportHeight: number;
   readonly documentWidth: number;
   readonly documentHeight: number;
+  readonly canvasBackgroundColor?: string;
 }
 
 export interface VisibleReplayExtent {
@@ -29,6 +35,15 @@ export interface VisibleReplayLayout {
 export interface VisibleReplayScroll {
   readonly scrollX: number;
   readonly scrollY: number;
+  readonly maxScrollX?: number;
+  readonly maxScrollY?: number;
+  readonly nestedOwnerKey?: number;
+  readonly nestedOwnerOrdinal?: number;
+  readonly scrollTarget?: PrimaryScrollTarget;
+  readonly documentScrollX?: number;
+  readonly documentScrollY?: number;
+  readonly documentMaxScrollX?: number;
+  readonly documentMaxScrollY?: number;
 }
 
 export interface VisibleReplayCandidateLease {
@@ -71,6 +86,16 @@ export class VisibleReplayHost implements ReplayPresentationHost {
   #layout: VisibleReplayLayout = { displayMode: 'fit', zoomPercent: 100 };
   #sourceScrollX = 0;
   #sourceScrollY = 0;
+  #sourceMaxScrollX = 0;
+  #sourceMaxScrollY = 0;
+  #sourceDocumentScrollX = 0;
+  #sourceDocumentScrollY = 0;
+  #sourceDocumentMaxScrollX = 0;
+  #sourceDocumentMaxScrollY = 0;
+  #sourceScrollTarget: PrimaryScrollTarget = 'document';
+  #nestedOwnerKey: number | undefined;
+  #nestedOwnerOrdinal: number | undefined;
+  #hasSourceScroll = false;
   #disposed = false;
   #resizeObserver: ResizeObserver | undefined;
 
@@ -157,10 +182,14 @@ export class VisibleReplayHost implements ReplayPresentationHost {
     committed.stage.style.width = `${boundedExtent(Math.max(
       contentWidth * scale,
       maximumSourceScrollX(committed) * scale + availableWidth,
+      (this.#hasSourceScroll ? this.#sourceDocumentMaxScrollX : 0) * scale +
+        availableWidth,
     ))}px`;
     committed.stage.style.height = `${boundedExtent(Math.max(
       contentHeight * scale,
       maximumSourceScrollY(committed) * scale + availableHeight,
+      (this.#hasSourceScroll ? this.#sourceDocumentMaxScrollY : 0) * scale +
+        availableHeight,
     ))}px`;
     committed.iframe.style.width = `${committed.dimensions.viewportWidth}px`;
     committed.iframe.style.height = `${committed.dimensions.viewportHeight}px`;
@@ -171,20 +200,102 @@ export class VisibleReplayHost implements ReplayPresentationHost {
   }
 
   followSourceScroll(scroll: VisibleReplayScroll): void {
+    const previousTarget = this.#sourceScrollTarget;
+    const nextNestedOwnerKey = scroll.scrollTarget === 'nested' &&
+        Number.isSafeInteger(scroll.nestedOwnerKey) &&
+        Number(scroll.nestedOwnerKey) > 0
+      ? scroll.nestedOwnerKey
+      : undefined;
+    this.#sourceScrollTarget = scroll.scrollTarget === 'nested'
+      ? 'nested'
+      : 'document';
+    this.#hasSourceScroll = true;
     const committed = this.#committed;
-    if (!committed) return;
+    if (
+      previousTarget !== this.#sourceScrollTarget ||
+      (
+        this.#sourceScrollTarget === 'nested' &&
+        nextNestedOwnerKey !== undefined &&
+        nextNestedOwnerKey !== this.#nestedOwnerKey
+      )
+    ) {
+      if (committed) committed.nestedScroller = undefined;
+    }
+    this.#nestedOwnerKey = nextNestedOwnerKey;
+    this.#nestedOwnerOrdinal = scroll.scrollTarget === 'nested' &&
+        Number.isSafeInteger(scroll.nestedOwnerOrdinal) &&
+        Number(scroll.nestedOwnerOrdinal) >= 0
+      ? scroll.nestedOwnerOrdinal
+      : undefined;
+    this.#sourceMaxScrollX = Number.isFinite(scroll.maxScrollX)
+      ? boundedScroll(scroll.maxScrollX)
+      : committed ? maximumSourceScrollX(committed) : boundedScroll(scroll.scrollX);
+    this.#sourceMaxScrollY = Number.isFinite(scroll.maxScrollY)
+      ? boundedScroll(scroll.maxScrollY)
+      : committed ? maximumSourceScrollY(committed) : boundedScroll(scroll.scrollY);
+    if (this.#sourceScrollTarget === 'document') {
+      this.#sourceDocumentMaxScrollX = this.#sourceMaxScrollX;
+      this.#sourceDocumentMaxScrollY = this.#sourceMaxScrollY;
+      this.#sourceDocumentScrollX = clamp(
+        scroll.scrollX,
+        0,
+        this.#sourceDocumentMaxScrollX,
+      );
+      this.#sourceDocumentScrollY = clamp(
+        scroll.scrollY,
+        0,
+        this.#sourceDocumentMaxScrollY,
+      );
+    } else if (
+      [
+        scroll.documentScrollX,
+        scroll.documentScrollY,
+        scroll.documentMaxScrollX,
+        scroll.documentMaxScrollY,
+      ].every((value) => typeof value === 'number' && Number.isFinite(value))
+    ) {
+      this.#sourceDocumentMaxScrollX = boundedScroll(scroll.documentMaxScrollX);
+      this.#sourceDocumentMaxScrollY = boundedScroll(scroll.documentMaxScrollY);
+      this.#sourceDocumentScrollX = clamp(
+        scroll.documentScrollX as number,
+        0,
+        this.#sourceDocumentMaxScrollX,
+      );
+      this.#sourceDocumentScrollY = clamp(
+        scroll.documentScrollY as number,
+        0,
+        this.#sourceDocumentMaxScrollY,
+      );
+    }
     this.#sourceScrollX = clamp(
       scroll.scrollX,
       0,
-      maximumSourceScrollX(committed),
+      this.#sourceMaxScrollX,
     );
     this.#sourceScrollY = clamp(
       scroll.scrollY,
       0,
-      maximumSourceScrollY(committed),
+      this.#sourceMaxScrollY,
     );
+    if (!committed) return;
     this.#setOuterScroll(committed);
     this.#projectScroll(committed);
+  }
+
+  resetSourceScroll(): void {
+    this.#sourceScrollTarget = 'document';
+    this.#nestedOwnerKey = undefined;
+    this.#nestedOwnerOrdinal = undefined;
+    this.#sourceScrollX = 0;
+    this.#sourceScrollY = 0;
+    this.#sourceMaxScrollX = 0;
+    this.#sourceMaxScrollY = 0;
+    this.#sourceDocumentScrollX = 0;
+    this.#sourceDocumentScrollY = 0;
+    this.#sourceDocumentMaxScrollX = 0;
+    this.#sourceDocumentMaxScrollY = 0;
+    this.#hasSourceScroll = false;
+    if (this.#committed) this.#committed.nestedScroller = undefined;
   }
 
   markLive(iframe: HTMLIFrameElement): void {
@@ -205,16 +316,7 @@ export class VisibleReplayHost implements ReplayPresentationHost {
     const committed = this.#committed;
     if (!committed || committed.iframe !== iframe || committed.released) return;
     committed.replayExtent = normalizeExtent(extent);
-    this.#sourceScrollX = clamp(
-      this.#sourceScrollX,
-      0,
-      maximumSourceScrollX(committed),
-    );
-    this.#sourceScrollY = clamp(
-      this.#sourceScrollY,
-      0,
-      maximumSourceScrollY(committed),
-    );
+    this.#clampSourceScroll();
     this.#applyLayout(committed);
   }
 
@@ -225,16 +327,9 @@ export class VisibleReplayHost implements ReplayPresentationHost {
     const committed = this.#committed;
     if (!committed || committed.iframe !== iframe || committed.released) return;
     committed.dimensions = normalizeDimensions(dimensions);
-    this.#sourceScrollX = clamp(
-      this.#sourceScrollX,
-      0,
-      maximumSourceScrollX(committed),
-    );
-    this.#sourceScrollY = clamp(
-      this.#sourceScrollY,
-      0,
-      maximumSourceScrollY(committed),
-    );
+    committed.canvasBackgroundColor = committed.dimensions.canvasBackgroundColor;
+    committed.applyCanvasBackground();
+    this.#clampSourceScroll();
     this.#applyLayout(committed);
   }
 
@@ -280,11 +375,23 @@ export class VisibleReplayHost implements ReplayPresentationHost {
 
     candidate.markCommitted(iframe, normalizeExtent(extent));
     const previous = this.#committed;
-    this.#sourceScrollX = boundedScroll(iframe.contentWindow?.scrollX);
-    this.#sourceScrollY = boundedScroll(iframe.contentWindow?.scrollY);
+    if (!this.#hasSourceScroll) {
+      this.#sourceScrollTarget = 'document';
+      this.#sourceMaxScrollX = maximumSourceScrollX(candidate);
+      this.#sourceMaxScrollY = maximumSourceScrollY(candidate);
+      this.#sourceScrollX = boundedScroll(iframe.contentWindow?.scrollX);
+      this.#sourceScrollY = boundedScroll(iframe.contentWindow?.scrollY);
+      this.#sourceDocumentMaxScrollX = this.#sourceMaxScrollX;
+      this.#sourceDocumentMaxScrollY = this.#sourceMaxScrollY;
+      this.#sourceDocumentScrollX = this.#sourceScrollX;
+      this.#sourceDocumentScrollY = this.#sourceScrollY;
+    } else {
+      this.#clampSourceScroll();
+    }
 
     candidate.installScrollListener(() => {
       if (this.#committed !== candidate || candidate.released) return;
+      if (this.#sourceScrollTarget === 'nested') return;
       this.#sourceScrollX = clamp(
         candidate.scroller.scrollLeft / candidate.scale,
         0,
@@ -295,6 +402,12 @@ export class VisibleReplayHost implements ReplayPresentationHost {
         0,
         maximumSourceScrollY(candidate),
       );
+      this.#sourceMaxScrollX = maximumSourceScrollX(candidate);
+      this.#sourceMaxScrollY = maximumSourceScrollY(candidate);
+      this.#sourceDocumentScrollX = this.#sourceScrollX;
+      this.#sourceDocumentScrollY = this.#sourceScrollY;
+      this.#sourceDocumentMaxScrollX = this.#sourceMaxScrollX;
+      this.#sourceDocumentMaxScrollY = this.#sourceMaxScrollY;
       this.#projectScroll(candidate);
     });
     this.#applyLayout(candidate);
@@ -306,6 +419,7 @@ export class VisibleReplayHost implements ReplayPresentationHost {
     candidate.root.classList.add('replica-replay-root--committed');
     candidate.root.removeAttribute('inert');
     candidate.root.removeAttribute('style');
+    candidate.applyCanvasBackground();
     this.#candidate = undefined;
     this.#committed = candidate;
     this.#previewSurface.hidden = false;
@@ -332,31 +446,153 @@ export class VisibleReplayHost implements ReplayPresentationHost {
   }
 
   #setOuterScroll(candidate: CandidateLease): void {
+    const nested = this.#sourceScrollTarget === 'nested'
+      ? this.#primaryNestedScroller(candidate)
+      : undefined;
+    const nestedFallbackX = this.#sourceDocumentScrollX + projectProgress(
+      this.#sourceScrollX,
+      this.#sourceMaxScrollX,
+      maximumSourceScrollX(candidate),
+    );
+    const nestedFallbackY = this.#sourceDocumentScrollY + projectProgress(
+      this.#sourceScrollY,
+      this.#sourceMaxScrollY,
+      maximumSourceScrollY(candidate),
+    );
+    const fallbackX = this.#sourceScrollTarget === 'nested'
+      ? clamp(nestedFallbackX, 0, maximumSourceScrollX(candidate))
+      : this.#sourceScrollX;
+    const fallbackY = this.#sourceScrollTarget === 'nested'
+      ? clamp(nestedFallbackY, 0, maximumSourceScrollY(candidate))
+      : this.#sourceScrollY;
     candidate.scroller.scrollLeft = boundedScrollExtent(
-      this.#sourceScrollX * candidate.scale,
+      (nested ? this.#sourceDocumentScrollX : fallbackX) * candidate.scale,
     );
     candidate.scroller.scrollTop = boundedScrollExtent(
-      this.#sourceScrollY * candidate.scale,
+      (nested ? this.#sourceDocumentScrollY : fallbackY) * candidate.scale,
     );
   }
 
   #projectScroll(candidate: CandidateLease): void {
     const target = candidate.iframe.contentWindow;
     if (!target || typeof target.scrollTo !== 'function') return;
+    if (this.#sourceScrollTarget === 'nested') {
+      const nested = this.#primaryNestedScroller(candidate);
+      if (nested) {
+        const maxScrollX = Math.max(0, nested.scrollWidth - nested.clientWidth);
+        const maxScrollY = Math.max(0, nested.scrollHeight - nested.clientHeight);
+        nested.scrollLeft = projectProgress(
+          this.#sourceScrollX,
+          this.#sourceMaxScrollX,
+          maxScrollX,
+        );
+        nested.scrollTop = projectProgress(
+          this.#sourceScrollY,
+          this.#sourceMaxScrollY,
+          maxScrollY,
+        );
+        try {
+          target.scrollTo({
+            left: this.#sourceDocumentScrollX,
+            top: this.#sourceDocumentScrollY,
+            behavior: 'auto',
+          });
+        } catch {
+          // The nested projection is already authoritative.
+        }
+        return;
+      }
+    }
+    const left = this.#sourceScrollTarget === 'nested'
+      ? clamp(
+          this.#sourceDocumentScrollX + projectProgress(
+            this.#sourceScrollX,
+            this.#sourceMaxScrollX,
+            maximumSourceScrollX(candidate),
+          ),
+          0,
+          maximumSourceScrollX(candidate),
+        )
+      : this.#sourceScrollX;
+    const top = this.#sourceScrollTarget === 'nested'
+      ? clamp(
+          this.#sourceDocumentScrollY + projectProgress(
+            this.#sourceScrollY,
+            this.#sourceMaxScrollY,
+            maximumSourceScrollY(candidate),
+          ),
+          0,
+          maximumSourceScrollY(candidate),
+        )
+      : this.#sourceScrollY;
     try {
       target.scrollTo({
-        left: this.#sourceScrollX,
-        top: this.#sourceScrollY,
+        left,
+        top,
         behavior: 'auto',
       });
     } catch {
       try {
-        target.scrollTo(this.#sourceScrollX, this.#sourceScrollY);
+        target.scrollTo(left, top);
       } catch {
         // A replay viewport that rejects scroll projection remains a usable,
         // static preview; it must not unwind an otherwise atomic commit.
       }
     }
+  }
+
+  #primaryNestedScroller(candidate: CandidateLease): HTMLElement | undefined {
+    const targetDocument = candidate.iframe.contentDocument;
+    if (!targetDocument) return undefined;
+    const viewport = {
+      innerWidth: candidate.dimensions.viewportWidth,
+      innerHeight: candidate.dimensions.viewportHeight,
+      ...(targetDocument.defaultView?.getComputedStyle
+        ? {
+            getComputedStyle: targetDocument.defaultView.getComputedStyle.bind(
+              targetDocument.defaultView,
+            ),
+          }
+        : {}),
+    };
+    if (
+      candidate.nestedScroller &&
+      readNestedScrollSnapshot(
+        candidate.nestedScroller,
+        targetDocument,
+        viewport,
+      )
+    ) return candidate.nestedScroller;
+    const found = findPrimaryNestedScroller(
+      targetDocument,
+      viewport,
+      this.#nestedOwnerOrdinal,
+    );
+    candidate.nestedScroller = found as HTMLElement | undefined;
+    return candidate.nestedScroller;
+  }
+
+  #clampSourceScroll(): void {
+    this.#sourceScrollX = clamp(
+      this.#sourceScrollX,
+      0,
+      this.#sourceMaxScrollX,
+    );
+    this.#sourceScrollY = clamp(
+      this.#sourceScrollY,
+      0,
+      this.#sourceMaxScrollY,
+    );
+    this.#sourceDocumentScrollX = clamp(
+      this.#sourceDocumentScrollX,
+      0,
+      this.#sourceDocumentMaxScrollX,
+    );
+    this.#sourceDocumentScrollY = clamp(
+      this.#sourceDocumentScrollY,
+      0,
+      this.#sourceDocumentMaxScrollY,
+    );
   }
 
   #ensureResizeObserver(): void {
@@ -379,6 +615,8 @@ class CandidateLease implements VisibleReplayCandidateLease {
   scale = 1;
   live = false;
   released = false;
+  nestedScroller: HTMLElement | undefined;
+  canvasBackgroundColor: string | undefined;
   #scrollListener: (() => void) | undefined;
 
   constructor(
@@ -387,6 +625,7 @@ class CandidateLease implements VisibleReplayCandidateLease {
     dimensions: VisibleReplayDimensions,
   ) {
     this.dimensions = dimensions;
+    this.canvasBackgroundColor = dimensions.canvasBackgroundColor;
     this.root = targetDocument.createElement('div');
     this.root.className = 'replica-replay-root replica-replay-root--candidate';
     this.root.dataset.simulReplicaCandidate = 'v2';
@@ -420,6 +659,7 @@ class CandidateLease implements VisibleReplayCandidateLease {
     this.stage.append(this.stickyViewport);
     this.scroller.append(this.stage);
     this.root.append(this.scroller);
+    this.applyCanvasBackground();
   }
 
   commit(iframe: HTMLIFrameElement, extent: VisibleReplayExtent): void {
@@ -431,6 +671,25 @@ class CandidateLease implements VisibleReplayCandidateLease {
     this.replayExtent = extent;
     delete this.root.dataset.simulReplicaCandidate;
     this.root.dataset.simulReplicaViewport = 'v2';
+  }
+
+  applyCanvasBackground(): void {
+    const color = this.canvasBackgroundColor;
+    for (const element of [
+      this.root,
+      this.scroller,
+      this.stage,
+      this.stickyViewport,
+      this.scaleLayer,
+      this.mount,
+      this.iframe,
+    ]) {
+      if (color) {
+        element?.style.setProperty('background-color', color);
+      } else {
+        element?.style.removeProperty('background-color');
+      }
+    }
   }
 
   installScrollListener(listener: () => void): void {
@@ -464,12 +723,28 @@ function isProtectedReplayIframe(iframe: HTMLIFrameElement): boolean {
 function normalizeDimensions(
   dimensions: VisibleReplayDimensions,
 ): VisibleReplayDimensions {
+  const canvasBackgroundColor = normalizeCanvasBackgroundColor(
+    dimensions.canvasBackgroundColor,
+  );
   return {
     viewportWidth: boundedDimension(dimensions.viewportWidth),
     viewportHeight: boundedDimension(dimensions.viewportHeight),
     documentWidth: boundedDimension(dimensions.documentWidth),
     documentHeight: boundedDimension(dimensions.documentHeight),
+    ...(canvasBackgroundColor ? { canvasBackgroundColor } : {}),
   };
+}
+
+function normalizeCanvasBackgroundColor(value: unknown): string | undefined {
+  if (typeof value !== 'string') return undefined;
+  const normalized = value.trim();
+  if (
+    normalized.length < 1 ||
+    normalized.length > 128 ||
+    /[;{}@]/u.test(normalized) ||
+    /(?:url|image|var)\s*\(/iu.test(normalized)
+  ) return undefined;
+  return normalized;
 }
 
 function normalizeExtent(extent: VisibleReplayExtent): VisibleReplayExtent {
@@ -517,6 +792,15 @@ function boundedScrollExtent(value: number): number {
 
 function boundedScroll(value: number | undefined): number {
   return Number.isFinite(value) ? Math.max(0, Number(value)) : 0;
+}
+
+function projectProgress(
+  sourcePosition: number,
+  sourceMaximum: number,
+  targetMaximum: number,
+): number {
+  if (sourceMaximum <= 0 || targetMaximum <= 0) return 0;
+  return clamp(sourcePosition / sourceMaximum, 0, 1) * targetMaximum;
 }
 
 function clamp(value: number, minimum: number, maximum: number): number {

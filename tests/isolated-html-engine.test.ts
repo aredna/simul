@@ -14,6 +14,7 @@ import {
   type HtmlMirrorPatchOperation,
 } from '../lib/replica/html-mirror-protocol';
 import {
+  ISOLATED_HTML_QUIRKS_SHELL,
   ISOLATED_HTML_SHELL,
   IsolatedHtmlReplicaEngine,
   isTrustedIsolatedShellDocument,
@@ -24,6 +25,7 @@ import { createHtmlMirrorRepresentabilityCollector } from '../lib/replica/html-m
 import type {
   ReplayPresentationHost,
   VisibleReplayCandidateLease,
+  VisibleReplayDimensions,
 } from '../lib/replica/visible-replay-host';
 
 describe('IsolatedHtmlReplicaEngine', () => {
@@ -48,6 +50,42 @@ describe('IsolatedHtmlReplicaEngine', () => {
       value: { href: 'about:blank' },
     });
     expect(isTrustedIsolatedShellDocument(shell)).toBe(false);
+  });
+
+  it('stages a doctype-free shell for a bounded quirks-mode checkpoint', async () => {
+    const standard = makeCheckpoint('legacy page', 0);
+    const checkpoint = createHtmlMirrorCheckpoint(standard.identity, {
+      root: standard.payload.root,
+      adoptedStyleSheets: standard.payload.adoptedStyleSheets,
+      documentMode: 'quirks',
+      captureMs: standard.payload.captureMs,
+      viewportWidth: standard.payload.viewportWidth,
+      viewportHeight: standard.payload.viewportHeight,
+      documentWidth: standard.payload.documentWidth,
+      documentHeight: standard.payload.documentHeight,
+      representability: standard.payload.representability,
+    })!;
+    const stream = new FakeHtmlStream(checkpoint);
+    const host = new FakePresentationHost();
+    let stagedShell = '';
+    const engine = new IsolatedHtmlReplicaEngine({
+      presentationHost: host,
+      openStream: async () => stream,
+      initializeIframe: async (iframe, shell) => {
+        stagedShell = shell;
+        const { document } = parseHTML(shell);
+        Object.defineProperty(iframe, 'contentDocument', { value: document });
+        return document;
+      },
+    });
+
+    await expect(engine.run(request)).resolves.toMatchObject({ status: 'complete' });
+    expect(stagedShell).toBe(ISOLATED_HTML_QUIRKS_SHELL);
+    expect(stagedShell.trimStart().toLowerCase().startsWith('<!doctype'))
+      .toBe(false);
+    expect(isTrustedIsolatedShellDocument(
+      host.iframe!.contentDocument!,
+    )).toBe(true);
   });
 
   it('commits an inert real DOM, projects text, and applies a contiguous patch', async () => {
@@ -105,6 +143,262 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(host.iframe?.contentDocument?.body.textContent).toBe('world');
     expect(stream.acknowledged).toContain(1);
     expect(commits).toEqual(['checkpoint', 'batch']);
+  });
+
+  it('rebuilds the dark canvas and inline SVG logo with canonical SVG attributes', async () => {
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: {
+          kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+          attributes: [], canvasBackgroundColor: 'rgb(0, 0, 0)', children: [
+            {
+              kind: 'element', id: 2, namespace: 'html', tagName: 'head',
+              attributes: [], children: [],
+            },
+            {
+              kind: 'element', id: 3, namespace: 'html', tagName: 'body',
+              attributes: [], children: [{
+                kind: 'element', id: 4, namespace: 'svg', tagName: 'svg',
+                attributes: [
+                  ['width', '118'], ['height', '32'],
+                  ['viewbox', '0 0 118 32'],
+                  ['preserveaspectratio', 'xMinYMid meet'],
+                ],
+                children: [{
+                  kind: 'element', id: 5, namespace: 'svg', tagName: 'defs',
+                  attributes: [], children: [{
+                    kind: 'element', id: 6, namespace: 'svg', tagName: 'symbol',
+                    attributes: [['id', 'wordmark']], children: [{
+                    kind: 'element', id: 7, namespace: 'svg', tagName: 'path',
+                      attributes: [
+                        ['d', 'M0 0h118v32H0z'],
+                        ['style', 'animation:swap 1s infinite;transition:fill 1s'],
+                      ], children: [],
+                    }],
+                  }],
+                }, {
+                  kind: 'element', id: 8, namespace: 'svg', tagName: 'use',
+                  attributes: [['href', '#wordmark']], children: [],
+                }, {
+                  kind: 'element', id: 9, namespace: 'svg', tagName: 'use',
+                  attributes: [['xlink:href', '#wordmark']], children: [],
+                }],
+              }],
+            },
+          ],
+        },
+        adoptedStyleSheets: [], captureMs: 1,
+        viewportWidth: 1_200, viewportHeight: 800,
+        documentWidth: 1_200, documentHeight: 2_400,
+      },
+    )!;
+    const stream = new FakeHtmlStream(checkpoint);
+    const host = new FakePresentationHost();
+    const engine = makeEngine(stream, host);
+
+    await engine.run(request);
+
+    const replica = host.iframe!.contentDocument!;
+    const logo = replica.querySelector('svg')!;
+    const uses = replica.querySelectorAll('use');
+    expect(replica.documentElement.style.backgroundColor).toBe('rgb(0, 0, 0)');
+    expect(replica.documentElement.dataset.simulCanvasBackground).toBe('v1');
+    expect(host.dimensions?.canvasBackgroundColor).toBe('rgb(0, 0, 0)');
+    expect(logo.getAttribute('width')).toBe('118');
+    expect(logo.getAttribute('height')).toBe('32');
+    expect(logo.getAttribute('viewBox')).toBe('0 0 118 32');
+    expect(logo.getAttribute('preserveAspectRatio')).toBe('xMinYMid meet');
+    expect(uses[0]?.getAttribute('href')).toBe('#wordmark');
+    // Linkedom retains the qualified name but does not model attribute
+    // namespaces; the engine uses setAttributeNS in Chrome.
+    expect(uses[1]?.getAttribute('xlink:href')).toBe('#wordmark');
+    const path = replica.querySelector('path') as SVGElement;
+    expect(path.style.getPropertyValue('animation')).toBe('none');
+    expect(path.style.getPropertyValue('transition')).toBe('none');
+
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [{
+        kind: 'dimensions', viewportWidth: 1_200, viewportHeight: 800,
+        documentWidth: 1_200, documentHeight: 2_400,
+        canvasBackgroundColor: 'rgb(16, 16, 16)',
+      }],
+    )!);
+    expect(replica.documentElement.style.backgroundColor).toBe('rgb(16, 16, 16)');
+    expect(host.refreshDimensions).toHaveBeenLastCalledWith(
+      host.iframe,
+      expect.objectContaining({ canvasBackgroundColor: 'rgb(16, 16, 16)' }),
+    );
+
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 2 }),
+      2,
+      2,
+      [{
+        kind: 'dimensions', viewportWidth: 1_200, viewportHeight: 800,
+        documentWidth: 1_200, documentHeight: 2_400,
+      }],
+    )!);
+    expect(replica.documentElement.style.backgroundColor).toBe('');
+    expect(replica.documentElement.getAttribute('data-simul-canvas-background'))
+      .toBeNull();
+
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 3 }),
+      3,
+      3,
+      [{
+        kind: 'attributes', nodeId: 7, namespace: 'svg', tagName: 'path',
+        attributes: [
+          ['d', 'M0 0h118v32H0z'],
+          ['style', 'animation-name:swap!important;transition-property:fill!important'],
+        ],
+      }],
+    )!);
+    expect(path.style.getPropertyValue('animation')).toBe('none');
+    expect(path.style.getPropertyValue('transition')).toBe('none');
+
+    const forgedNamespace = createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 4 }),
+      4,
+      4,
+      [{
+        kind: 'attributes',
+        nodeId: 8,
+        namespace: 'html',
+        tagName: 'use',
+        attributes: [['class', 'forged-namespace']],
+      }],
+      undefined,
+      'passive',
+    );
+    expect(forgedNamespace).toBeDefined();
+    stream.observer?.onPatch(forgedNamespace!);
+    expect(uses[0]?.hasAttribute('class')).toBe(false);
+    expect(stream.acknowledged).not.toContain(4);
+    expect(stream.requested).toContain(3);
+  });
+
+  it('projects typed control text and clears it atomically on a password transition', async () => {
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: {
+          kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+          attributes: [], children: [
+            { kind: 'element', id: 2, namespace: 'html', tagName: 'head', attributes: [], children: [] },
+            { kind: 'element', id: 3, namespace: 'html', tagName: 'body', attributes: [], children: [{
+              kind: 'element', id: 4, namespace: 'html', tagName: 'input',
+              attributes: [['type', 'search']], children: [],
+              controlText: { kind: 'value', text: 'public query', translatable: true },
+            }] },
+          ],
+        },
+        adoptedStyleSheets: [], captureMs: 1,
+        viewportWidth: 800, viewportHeight: 600,
+        documentWidth: 800, documentHeight: 1000,
+      },
+    )!;
+    const stream = new FakeHtmlStream(checkpoint);
+    const host = new FakePresentationHost();
+    const engine = makeEngine(stream, host);
+    await engine.run(request);
+
+    const snapshot = engine.snapshot()!;
+    expect(snapshot.records).toEqual([
+      expect.objectContaining({
+        nodeId: 4, nodeType: 1, controlTarget: 'value', source: 'public query',
+      }),
+    ]);
+    const input = host.iframe!.contentDocument!.querySelector('input') as
+      HTMLInputElement;
+    expect(input.value).toBe('public query');
+    engine.beginProjection({ translationEpoch: 1, pairKey: 'en\0ja' });
+    expect(engine.project({
+      document: snapshot.document,
+      replayLease: snapshot.replayLease,
+      nodeId: 4,
+      nodeType: 1,
+      controlTarget: 'value',
+      sourceRevision: 1,
+      source: 'public query',
+      translationEpoch: 1,
+      pairKey: 'en\0ja',
+      translated: '公開検索',
+    })).toBe(true);
+    expect(input.value).toBe('公開検索');
+
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [{
+        kind: 'attributes', nodeId: 4, namespace: 'html', tagName: 'input',
+        attributes: [['type', 'password']],
+      }, {
+        kind: 'children', nodeId: 4, children: [],
+      }],
+    )!);
+
+    expect(input.value).toBe('');
+    expect(engine.snapshot()?.records).toEqual([]);
+    expect(stream.acknowledged).toContain(1);
+  });
+
+  it('rejects control text when an ancestor becomes private in the same batch', async () => {
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: {
+          kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+          attributes: [], children: [
+            { kind: 'element', id: 2, namespace: 'html', tagName: 'head', attributes: [], children: [] },
+            { kind: 'element', id: 3, namespace: 'html', tagName: 'body', attributes: [], children: [{
+              kind: 'element', id: 4, namespace: 'html', tagName: 'section',
+              attributes: [], children: [{
+                kind: 'element', id: 5, namespace: 'html', tagName: 'input',
+                attributes: [['type', 'text']], children: [],
+                controlText: { kind: 'value', text: 'public', translatable: true },
+              }],
+            }] },
+          ],
+        },
+        adoptedStyleSheets: [], captureMs: 1,
+        viewportWidth: 800, viewportHeight: 600,
+        documentWidth: 800, documentHeight: 1000,
+      },
+    )!;
+    const stream = new FakeHtmlStream(checkpoint);
+    const host = new FakePresentationHost();
+    const engine = makeEngine(stream, host);
+    await engine.run(request);
+    const input = host.iframe!.contentDocument!.querySelector('input') as
+      HTMLInputElement;
+
+    const malicious = createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [{
+        kind: 'attributes', nodeId: 5, namespace: 'html', tagName: 'input',
+        attributes: [['type', 'text']],
+        controlText: { kind: 'value', text: 'must not apply', translatable: true },
+      }, {
+        kind: 'attributes', nodeId: 4, namespace: 'html', tagName: 'section',
+        attributes: [['role', 'textbox']],
+      }],
+    );
+    expect(malicious).toBeDefined();
+    stream.observer?.onPatch(malicious!);
+
+    expect(input.value).toBe('public');
+    expect(host.iframe!.contentDocument!.querySelector('section')?.hasAttribute('role'))
+      .toBe(false);
+    expect(stream.acknowledged).not.toContain(1);
+    expect(stream.requested).toEqual([0]);
   });
 
   it('restores source in place, rejects stale projections, and keeps live patches flowing', async () => {
@@ -388,7 +682,10 @@ describe('IsolatedHtmlReplicaEngine', () => {
           nodeId: 4,
           node: { kind: 'text', id: 4, text: 'partial leak', translatable: true },
         },
-        { kind: 'attributes', nodeId: 999, tagName: 'div', attributes: [] },
+        {
+          kind: 'attributes', nodeId: 999, namespace: 'html',
+          tagName: 'div', attributes: [],
+        },
       ],
     )!);
 
@@ -745,7 +1042,7 @@ describe('IsolatedHtmlReplicaEngine', () => {
       1,
       1,
       [{
-        kind: 'attributes', nodeId: 7, tagName: 'section',
+        kind: 'attributes', nodeId: 7, namespace: 'html', tagName: 'section',
         attributes: [['class', 'changed']],
       }, {
         kind: 'text', nodeId: 9,
@@ -879,6 +1176,7 @@ describe('IsolatedHtmlReplicaEngine', () => {
       [
         {
           kind: 'attributes',
+          namespace: 'html',
           nodeId: 3,
           tagName: 'body',
           attributes: [['role', 'textbox']],
@@ -957,6 +1255,7 @@ describe('IsolatedHtmlReplicaEngine', () => {
 
     const event = createHtmlMirrorRepresentabilityCollector();
     event.unsafeElementOmissionCount = 3;
+    event.replicaRequestCapableResourceCount = 1;
     stream.observer?.onPatch(createHtmlMirrorPatch(
       createReplicaIdentity({ ...identityParts, sequence: 1 }),
       1,
@@ -968,8 +1267,13 @@ describe('IsolatedHtmlReplicaEngine', () => {
       event,
     )!);
     expect(infos.findLast(({ stage }) => stage === 'patch')).toMatchObject({
+      fidelityPolicy: 'conservative',
+      replicaRequestsMayOccur: true,
       unsafeElementOmissionCount: 2,
-      eventRepresentability: { unsafeElementOmissionCount: 3 },
+      eventRepresentability: {
+        unsafeElementOmissionCount: 3,
+        replicaRequestCapableResourceCount: 1,
+      },
     });
 
     stream.observer?.onPatch(createHtmlMirrorPatch(
@@ -982,8 +1286,13 @@ describe('IsolatedHtmlReplicaEngine', () => {
       }],
     )!);
     expect(infos.findLast(({ stage }) => stage === 'patch')).toMatchObject({
+      fidelityPolicy: 'conservative',
+      replicaRequestsMayOccur: true,
       unsafeElementOmissionCount: 2,
-      eventRepresentability: { unsafeElementOmissionCount: 0 },
+      eventRepresentability: {
+        unsafeElementOmissionCount: 0,
+        replicaRequestCapableResourceCount: 0,
+      },
     });
   });
 
@@ -999,6 +1308,7 @@ describe('IsolatedHtmlReplicaEngine', () => {
       1,
       [{
         kind: 'attributes',
+        namespace: 'html',
         nodeId: 3,
         tagName: 'body',
         attributes: [['role', 'button']],
@@ -1052,7 +1362,7 @@ describe('IsolatedHtmlReplicaEngine', () => {
       1,
       [
         {
-          kind: 'attributes', nodeId: 4, tagName: 'div',
+          kind: 'attributes', nodeId: 4, namespace: 'html', tagName: 'div',
           attributes: [['role', 'textbox']],
         },
         { kind: 'children', nodeId: 4, children: [] },
@@ -1107,6 +1417,7 @@ describe('IsolatedHtmlReplicaEngine', () => {
       1,
       [{
         kind: 'attributes',
+        namespace: 'html',
         nodeId: 5,
         tagName: 'span',
         attributes: [['title', 'transported descendant secret']],
@@ -1311,6 +1622,95 @@ describe('IsolatedHtmlReplicaEngine', () => {
       stylesheetErrorCount: 0,
       stylesheetTimedOutCount: 0,
     });
+  });
+
+  it('uses resolved passive CSSOM text instead of refetching the linked stylesheet', async () => {
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: {
+          kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+          attributes: [], children: [{
+            kind: 'element', id: 2, namespace: 'html', tagName: 'head',
+            attributes: [], children: [{
+              kind: 'element', id: 5, namespace: 'html', tagName: 'link',
+              attributes: [
+                ['disabled', ''],
+                ['rel', 'stylesheet'],
+                ['href', 'https://cdn.example.test/theme.css'],
+                ['integrity', 'sha384-source-response-hash'],
+              ],
+              resolvedStyleSheetText: '.page{display:grid;color:#fff}',
+              children: [],
+            }],
+          }, {
+            kind: 'element', id: 3, namespace: 'html', tagName: 'body',
+            attributes: [['class', 'page']], children: [{
+              kind: 'text', id: 4, text: 'styled content', translatable: true,
+            }],
+          }],
+        },
+        adoptedStyleSheets: [],
+        captureMs: 1,
+        viewportWidth: 800,
+        viewportHeight: 600,
+        documentWidth: 800,
+        documentHeight: 1000,
+      },
+      'passive',
+    );
+    if (!checkpoint) throw new Error('Passive stylesheet fixture rejected.');
+    const stream = new FakeHtmlStream(checkpoint);
+    const host = new FakePresentationHost();
+    const policies: string[] = [];
+    const engine = new IsolatedHtmlReplicaEngine({
+      presentationHost: host,
+      getReplicaFidelityPolicy: () => 'passive',
+      openStream: async (_request, policy) => {
+        policies.push(policy);
+        return stream;
+      },
+      initializeIframe: async (iframe, shell) => {
+        const { document } = parseHTML(shell);
+        const createElementNS = document.createElementNS.bind(document);
+        Object.defineProperty(document, 'createElementNS', {
+          configurable: true,
+          value: (namespace: string, tagName: string) => {
+            const element = createElementNS(namespace, tagName);
+            if (tagName === 'link') {
+              Object.defineProperty(element, 'disabled', {
+                configurable: true,
+                writable: true,
+                value: false,
+              });
+              Object.defineProperty(element, 'sheet', {
+                configurable: true,
+                value: {},
+              });
+            }
+            return element;
+          },
+        });
+        Object.defineProperty(iframe, 'contentDocument', { value: document });
+        return document;
+      },
+    });
+
+    await expect(engine.run(request)).resolves.toMatchObject({ status: 'complete' });
+
+    expect(policies).toEqual(['passive']);
+    const link = host.iframe?.contentDocument?.querySelector<HTMLLinkElement>(
+      'link[data-simul-resolved-stylesheet="v1"]',
+    );
+    expect(link?.getAttribute('href')).toBe(
+      `data:text/css;charset=utf-8,${encodeURIComponent(
+        '.page{display:grid;color:#fff}',
+      )}`,
+    );
+    expect(link?.getAttribute('href')).not.toContain('cdn.example.test');
+    expect(link?.hasAttribute('disabled')).toBe(true);
+    expect(link?.disabled).toBe(true);
+    expect(link?.hasAttribute('integrity')).toBe(false);
   });
 
   it('uses one absolute style deadline for both paint waits', async () => {
@@ -1850,8 +2250,10 @@ class FakePresentationHost implements ReplayPresentationHost {
   readonly document = parseHTML('<html><body></body></html>').document;
   readonly releases: Array<ReturnType<typeof vi.fn>> = [];
   iframe?: HTMLIFrameElement;
+  dimensions?: VisibleReplayDimensions;
 
-  createCandidate(): VisibleReplayCandidateLease {
+  createCandidate(dimensions: VisibleReplayDimensions): VisibleReplayCandidateLease {
+    this.dimensions = dimensions;
     const mount = this.document.createElement('div') as unknown as HTMLElement;
     const release = vi.fn();
     this.releases.push(release);

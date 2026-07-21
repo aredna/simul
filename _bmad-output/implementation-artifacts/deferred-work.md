@@ -25,9 +25,18 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-live-incremental-replica-engine.md`
   summary: Diagnose and improve the remaining Mexico City carousel/background and Reddit left-login/right-related-rail fidelity gaps without weakening rrweb privacy or fallback.
   evidence: Checkpoint F Choice C promoted rrweb with legacy fallback while explicitly retaining these two installed-Chrome rows as known, non-blocking follow-ups rather than passed gates.
-- source_spec: `_bmad-output/implementation-artifacts/spec-checkpoint-f-local-tesseract-image-translation.md`
-  summary: Run a future technical spike for an optional Strict Local Mirror mode that preserves rrweb DOM/layout and translated text while guaranteeing that the replica makes no additional requests to the original website.
-  evidence: The spike must neutralize every original resource reference (`src`, `srcset`, CSS `url()`/`@import`, remote fonts, posters, frames, and external SVG), lazily substitute already-rendered visible images/backgrounds with `captureVisibleTab()` crops exposed only through revocable temporary local blobs, revoke them on navigation/teardown, and add a restrictive extension-origin network CSP/backstop. Acceptance tests must prove zero replica-initiated network requests while the source page may network normally. `debugger`, `pageCapture`, new host permissions, and MHTML parsing remain prohibited without separate review and approval.
+- source_spec: `_bmad-output/implementation-artifacts/spec-passive-replica-fidelity.md`
+  summary: Run a future technical spike for a hidden-until-complete Strict Local Mirror mode that preserves the current inert DOM/layout and translated text while guaranteeing that the replica makes no additional requests to the original website.
+  evidence: Passive Fidelity is intentionally request-capable and Conservative still permits some allowlisted visual requests, so neither is a no-network mode. The spike must neutralize every original resource reference (`src`, `srcset`, CSS `url()`/`@import`, remote fonts, posters, frames, and external SVG), lazily substitute already-rendered visible images/backgrounds with `captureVisibleTab()` crops exposed only through revocable temporary local blobs, revoke them on navigation/teardown, and add a restrictive extension-origin network CSP/backstop. Acceptance tests must prove zero replica-initiated network requests while the source page may network normally. Strict Local must remain absent from Settings until those tests pass. `debugger`, `pageCapture`, new host permissions, and MHTML parsing remain prohibited without separate review and approval.
+- source_spec: `_bmad-output/implementation-artifacts/spec-passive-replica-fidelity.md`
+  summary: Add a bounded, privacy-reviewed localization path for usable source `blob:` visual resources.
+  evidence: A source `blob:` URL is scoped to the source environment and cannot be safely reused by the replica. The current boundary omits it and reports browser inaccessibility because the extension cannot always obtain its bytes. A future path may use already-rendered pixels or explicitly obtainable bytes to create Simul-owned revocable blobs, with lifecycle, capacity, and no-content diagnostics proved independently.
+- source_spec: `_bmad-output/implementation-artifacts/spec-passive-replica-fidelity.md`
+  summary: Evaluate a narrowly targeted computed-style fallback for custom-element hosts or elements whose presentation depends on browser-inaccessible CSS.
+  evidence: Indiscriminately serializing computed styles would create large privacy-sensitive payloads, force layout work, freeze responsive cascade behavior, and can still miss pseudo/content state. Any fallback must identify a small reviewed element/property set, impose payload and timing budgets, preserve live invalidation, and keep website code disabled.
+- source_spec: `_bmad-output/implementation-artifacts/spec-passive-replica-fidelity.md`
+  summary: Evaluate local current-pixel capture for canvas and static media frames without enabling playback or embedded active content.
+  evidence: Passive Fidelity can preserve a static poster but cannot transport current canvas/video pixels, protected media, or embedded-document rendering through the existing typed DOM boundary. A future pixel path needs explicit access, stability, privacy, lifetime, geometry, and memory limits and must not activate audio/video playback.
 - source_spec: `_bmad-output/implementation-artifacts/spec-isolated-html-mirror-engine.md`
   summary: Add real-Chrome render-readiness and no-blank acceptance coverage for isolated HTML, including delayed stylesheets and CSS states that normally depend on source-page JavaScript.
   evidence: DOM/linkedom tests can prove sanitization and text presence but cannot prove that Chrome paints meaningful content after late CSS loads. A browser fixture should keep last-good visible through two paints and bounded stylesheet settling, report content-free paint health, and reject an empty candidate without weakening the sandbox.
@@ -56,29 +65,17 @@
   summary: Make rapid toolbar launches across multiple windows clean up every losing preopened side panel without disturbing the winning surface.
   evidence: Chrome's user-gesture constraint requires synchronously preopening the panel before saved launch preferences hydrate; a superseded cross-window click can leave that preopened panel visible, while Chrome 138's global disable/re-enable fallback cannot safely close only the losing window.
 - source_spec: `_bmad-output/implementation-artifacts/spec-isolated-html-fidelity-baseline-mode.md`
-  summary: Mirror bounded ordinary stylesheet CSSOM mutations that do not change DOM attributes, text nodes, or constructable adopted stylesheets.
-  evidence: The isolated observer detects DOM and adopted-sheet changes, but `insertRule`, `deleteRule`, and mutable rule declarations on ordinary `<style>`/linked sheets can change the source presentation without producing an observable patch.
-- source_spec: `_bmad-output/implementation-artifacts/spec-isolated-html-fidelity-baseline-mode.md`
-  summary: Preserve inert link semantics needed by CSS and accessibility without restoring replica navigation.
-  evidence: The current boundary deliberately strips ordinary anchor `href`, targets, downloads, and other navigation sinks. Some sites style link state or depend on URL-shaped attributes for layout, so an inert non-navigable representation needs its own security review.
-- source_spec: `_bmad-output/implementation-artifacts/spec-isolated-html-fidelity-baseline-mode.md`
-  summary: Expand responsive image-source fidelity for `<picture>`, `<source>`, sizes/media selection, and browser-selected current-source changes.
-  evidence: The safe mirror carries bounded `<img>` sources and srcsets but does not claim parity for the browser's full responsive source-selection state or passive `<source>` resource attributes.
-- source_spec: `_bmad-output/implementation-artifacts/spec-isolated-html-fidelity-baseline-mode.md`
-  summary: Support a reviewed static subset of same-document SVG fragment references such as `<use href="#symbol">` and paint-server `url(#id)`.
-  evidence: This fix admits only self-contained shape-only SVG data images. Local SVG references remain rejected with all external/resource-bearing references because graph ordering, ID scoping, CSS parsing, and receiver validation need a separate design.
-- source_spec: `_bmad-output/implementation-artifacts/spec-isolated-html-fidelity-baseline-mode.md`
   summary: Assess whether source doctype and standards/quirks mode can be represented safely in the fixed isolated shell.
   evidence: Simul owns a constant standards-mode `srcdoc` shell and transports the document element, not the source doctype. Quirks-mode pages can therefore retain DOM content while producing different layout metrics.
 - source_spec: `_bmad-output/implementation-artifacts/spec-isolated-html-fidelity-baseline-mode.md`
   summary: Audit custom-element fidelity that depends on inaccessible internal state, closed roots, lifecycle code, or browser-managed rendering.
   evidence: Simul intentionally never defines or executes copied custom elements and captures only representable light DOM plus accessible open roots. Exact behavior for closed or script-owned state remains outside the safe mirror boundary.
 - source_spec: `_bmad-output/implementation-artifacts/spec-refresh-cache-duns-reddit-pass.md`
-  summary: Replace whole-parent Isolated HTML child patches with bounded insert/remove/move operations that retain unchanged replica nodes, images, and translations.
-  evidence: Modern Reddit uses server-rendered Lit custom elements plus async/partial loaders. Simul currently serializes every child of a mutated parent and reconstructs that full child set, so a one-item update can reload a large rail or comment tree and re-emit unchanged text. The future protocol must use stable node IDs and sibling anchors, apply atomically, preserve private-context recovery, and fall back to full replacement for ambiguous or privacy-changing batches.
-- source_spec: `_bmad-output/implementation-artifacts/spec-refresh-cache-duns-reddit-pass.md`
   summary: Spike a scriptless representation of source custom-element definition state for selectors such as `:defined` and `:not(:defined)`.
   evidence: Reddit's source custom elements are defined by its Lit runtime while the inert replica intentionally registers no website code. A reviewed experiment may carry only bounded definition-state metadata and use extension-owned inert behavior, but it must prove that no website constructor, lifecycle callback, request, or script executes.
 - source_spec: `_bmad-output/implementation-artifacts/spec-refresh-cache-duns-reddit-pass.md`
   summary: Add confidence-gated, bounded multi-pass OCR fallback for stylized logos and tiny text, including geometry-hint consumption and original-coordinate consensus.
   evidence: The generic 2x shallow-banner profile and single-line segmentation improve the D-U-N-S path-only logo, but real-crop experiments still produce imperfect Japanese. Native RAW_LINE, 2x SINGLE_LINE, and bounded high-contrast candidates need confidence/script/agreement selection, cache-profile versioning, and exact box remapping before they can safely replace a nonempty low-quality first pass.
+- source_spec: `_bmad-output/implementation-artifacts/spec-release-candidate-privacy-ux-hardening.md`
+  summary: Add a privacy-reviewed stable identity for mapping among multiple simultaneous viewport-scale nested scrollers.
+  evidence: The current generic observer switches to the nested surface that actually emits a qualifying source scroll, but a scriptless replica with multiple similarly sized candidates still selects its strongest local candidate independently; translated geometry can make that a different surface.

@@ -6,6 +6,22 @@ export const SOURCE_PRIVATE_TAGS = Object.freeze([
   'textarea',
 ] as const);
 
+export const SOURCE_TEXT_CONTROL_TYPES = Object.freeze([
+  '',
+  'text',
+  'search',
+  'email',
+  'url',
+  'tel',
+] as const);
+
+export type SourceControlTextKind = 'value' | 'placeholder';
+
+export interface SourceControlText {
+  readonly kind: SourceControlTextKind;
+  readonly text: string;
+}
+
 export const SOURCE_PRIVATE_ROLES = Object.freeze([
   'checkbox',
   'combobox',
@@ -34,6 +50,71 @@ const ACTIVATION_ROLE_SET = new Set<string>(SOURCE_ACTIVATION_ROLES);
 
 export function isSourcePrivateTagName(value: string): boolean {
   return PRIVATE_TAG_SET.has(value.trim().toLowerCase());
+}
+
+/** Native control text is readable only for the narrow release-approved set. */
+export function isEligibleSourceTextControl(
+  tagName: string,
+  attributes: Readonly<Record<string, unknown>>,
+): boolean {
+  const tag = tagName.trim().toLowerCase();
+  const autocomplete = stringAttribute(attributes.autocomplete).toLowerCase();
+  if (passwordAutocomplete(autocomplete)) return false;
+  // A native input with an ARIA widget/editor role is no longer part of the
+  // narrowly approved native-control surface. Fail closed here so capture,
+  // mutation fingerprinting, and receiver validation all make the same
+  // decision even when the role is placed on the control itself.
+  if (
+    sourceAttributesArePrivate(attributes) ||
+    isSourceActivationRoleValue(attributes.role)
+  ) return false;
+  if (tag === 'textarea') return true;
+  if (tag !== 'input') return false;
+  const type = stringAttribute(attributes.type).trim().toLowerCase();
+  return (SOURCE_TEXT_CONTROL_TYPES as readonly string[]).includes(type);
+}
+
+/** Attribute-only classification shared by capture and receiver validation. */
+export function sourceElementStartsPrivateRegion(
+  tagName: string,
+  attributes: Readonly<Record<string, unknown>>,
+): boolean {
+  const tag = tagName.trim().toLowerCase();
+  if (tag === 'input' || tag === 'textarea') {
+    return !isEligibleSourceTextControl(tag, attributes);
+  }
+  return isSourcePrivateTagName(tag) || sourceAttributesArePrivate(attributes);
+}
+
+/** Reads only current, user-visible native text-control state and fails closed. */
+export function readSourceControlText(
+  element: Element,
+): SourceControlText | undefined {
+  const tagName = element.localName.toLowerCase();
+  const attributes = sourceElementAttributes(element);
+  if (!isEligibleSourceTextControl(tagName, attributes)) return undefined;
+  try {
+    const control = element as Element & {
+      readonly value?: unknown;
+      readonly placeholder?: unknown;
+    };
+    if (typeof control.value !== 'string' ||
+      typeof control.placeholder !== 'string') return undefined;
+    if (control.value.length > 0) {
+      return Object.freeze({ kind: 'value', text: control.value });
+    }
+    if (control.placeholder.length > 0) {
+      return Object.freeze({ kind: 'placeholder', text: control.placeholder });
+    }
+  } catch {
+    return undefined;
+  }
+  return undefined;
+}
+
+export function isSourceNativeTextControlTagName(value: string): boolean {
+  const tag = value.trim().toLowerCase();
+  return tag === 'input' || tag === 'textarea';
 }
 
 export function isSourcePrivateRoleValue(value: unknown): boolean {
@@ -88,15 +169,10 @@ export function sourceAttributesArePrivate(
 
 export function hasSourcePrivateElementAncestor(element: Element): boolean {
   for (let current: Element | undefined = element; current;) {
-    if (isSourcePrivateTagName(current.tagName)) return true;
-    if (
-      isSourcePrivateContentEditableValue(
-        current.hasAttribute('contenteditable')
-          ? current.getAttribute('contenteditable') ?? ''
-          : undefined,
-      ) ||
-      isSourcePrivateRoleValue(current.getAttribute('role'))
-    ) return true;
+    if (sourceElementStartsPrivateRegion(
+      current.localName,
+      sourceElementAttributes(current),
+    )) return true;
     if (current.parentElement) {
       current = current.parentElement;
       continue;
@@ -115,14 +191,12 @@ export function hasSourcePrivateOrActivationElementAncestor(
 ): boolean {
   for (let current: Element | undefined = element; current;) {
     if (
-      isSourcePrivateTagName(current.tagName) ||
-      isSourceActivationTagName(current.tagName) ||
-      isSourcePrivateContentEditableValue(
-        current.hasAttribute('contenteditable')
-          ? current.getAttribute('contenteditable') ?? ''
-          : undefined,
+      sourceElementStartsPrivateRegion(
+        current.localName,
+        sourceElementAttributes(current),
       ) ||
-      isSourcePrivateRoleValue(current.getAttribute('role')) ||
+      isSourcePrivateTagName(current.localName) ||
+      isSourceActivationTagName(current.tagName) ||
       isSourceActivationRoleValue(current.getAttribute('role'))
     ) return true;
     if (current.parentElement) {
@@ -154,4 +228,27 @@ export function hasSourceActivationElementAncestor(element: Element): boolean {
       : undefined;
   }
   return false;
+}
+
+function sourceElementAttributes(element: Element): Record<string, string> {
+  const result: Record<string, string> = {};
+  try {
+    for (const attribute of element.attributes) {
+      result[attribute.name.toLowerCase()] = attribute.value;
+    }
+  } catch {
+    // Missing attributes leave native controls outside the approved set.
+    result.autocomplete = 'current-password';
+  }
+  return result;
+}
+
+function passwordAutocomplete(value: string): boolean {
+  return value.split(/\s+/u).some(
+    (token) => token === 'current-password' || token === 'new-password',
+  );
+}
+
+function stringAttribute(value: unknown): string {
+  return typeof value === 'string' ? value : '';
 }

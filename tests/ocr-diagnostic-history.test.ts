@@ -5,6 +5,7 @@ import {
   MAX_IMAGE_TRANSLATION_DIAGNOSTICS,
   formatImageTranslationDiagnostic,
 } from '../lib/ocr/diagnostic-history';
+import type { ImageTranslationDiagnostic } from '../lib/ocr/image-translation-controller';
 
 describe('ImageTranslationDiagnosticHistory', () => {
   it('formats only the allowlisted content-free diagnostic fields', () => {
@@ -31,6 +32,24 @@ describe('ImageTranslationDiagnosticHistory', () => {
       bitmapWidth: 1206,
       bitmapHeight: 761,
     })).toBe('job 2 recognition complete: provider=tesseract; regions=4; bitmap=1206x761; cache=hit');
+    expect(formatImageTranslationDiagnostic({
+      stage: 'recognition-cache',
+      access: 'join',
+      entries: 3,
+      weight: 99,
+      hits: 4,
+      misses: 5,
+      joins: 2,
+      loads: 3,
+    })).toBe('recognition cache: access=join; entries=3; weight=99; hits=4; misses=5; joins=2; loads=3');
+    expect(formatImageTranslationDiagnostic({
+      stage: 'recognition-quality',
+      candidateRegions: 8,
+      acceptedRegions: 5,
+      rejectedBlankRegions: 1,
+      rejectedPunctuationRegions: 1,
+      rejectedLowConfidenceRegions: 1,
+    })).toBe('recognition quality: candidates=8; accepted=5; rejected-blank=1; rejected-punctuation=1; rejected-low-confidence=1');
     expect(formatImageTranslationDiagnostic({
       stage: 'translation-started',
       ordinal: 2,
@@ -72,5 +91,29 @@ describe('ImageTranslationDiagnosticHistory', () => {
     history.clear();
     expect(history.entries).toEqual([]);
     expect(history.append('disabled')).toEqual(['1. disabled']);
+  });
+
+  it('never formats unallowlisted content from a diagnostic object', () => {
+    const diagnostic = {
+      stage: 'recognition-cache',
+      access: 'hit',
+      entries: 1,
+      weight: 42,
+      hits: 1,
+      misses: 0,
+      joins: 0,
+      loads: 1,
+      text: 'private page text',
+      url: 'https://private.example/',
+      pixelHash: 'secret-hash',
+      nodeId: 44,
+      documentId: 'private-document',
+    } as ImageTranslationDiagnostic;
+
+    const formatted = formatImageTranslationDiagnostic(diagnostic);
+    expect(formatted).toBe(
+      'recognition cache: access=hit; entries=1; weight=42; hits=1; misses=0; joins=0; loads=1',
+    );
+    expect(formatted).not.toMatch(/private|secret|44/u);
   });
 });

@@ -14,6 +14,7 @@ import {
   type HtmlMirrorPatchOperation,
 } from './html-mirror-protocol';
 import {
+  MAX_HTML_MIRROR_STRING,
   MAX_HTML_MIRROR_NODES,
   MAX_HTML_MIRROR_DIAGNOSTIC_COUNT,
   HtmlMirrorCapacityError,
@@ -29,9 +30,17 @@ import {
   sanitizeSourceSubtrees,
   snapshotHtmlMirrorRepresentability,
   type HtmlMirrorIdRegistry,
+  type HtmlMirrorNamespace,
   type HtmlMirrorRepresentabilityCollector,
+  type HtmlMirrorStyleWorkBudget,
 } from './html-mirror-sanitizer';
 import { createReplicaIdentity } from './protocol-v2';
+import {
+  isEligibleSourceTextControl,
+  isSourceNativeTextControlTagName,
+  readSourceControlText,
+} from './source-privacy-policy';
+import type { SelectableReplicaFidelityPolicy } from './fidelity-policy';
 
 export class WeakNodeIdRegistry implements HtmlMirrorIdRegistry {
   readonly #ids = new WeakMap<Node, number>();
@@ -183,6 +192,9 @@ const MAX_STYLE_SHEETS_PER_TICK = 512;
 const MAX_STYLE_RULES_PER_TICK = 25_000;
 const MAX_STYLE_CHARACTERS_PER_TICK = 1024 * 1024;
 const MAX_MIRRORED_IMAGE_CANDIDATES = 4_000;
+const MAX_MIRRORED_CONTROL_CANDIDATES = 4_000;
+const MAX_CONTROL_CANDIDATES_PER_TICK = 256;
+const MAX_CONTROL_CHARACTERS_PER_TICK = 1024 * 1024;
 const MAX_IMAGE_EVENT_ROOTS = 4_000;
 
 type ReconciliationDecision =
@@ -192,9 +204,23 @@ type ReconciliationDecision =
   | 'attributeContextFallbackCount'
   | 'crossParentFallbackCount';
 
+type StylePollResult = 'changed' | 'unchanged' | 'capacity';
+type StylePollChannel = 'ordinary' | 'adopted';
+
+function oppositeStylePollChannel(
+  channel: StylePollChannel,
+): StylePollChannel {
+  return channel === 'ordinary' ? 'adopted' : 'ordinary';
+}
+
+function stylePollChannelMask(channel: StylePollChannel): number {
+  return channel === 'ordinary' ? 1 : 2;
+}
+
 export class HtmlMirrorSourceSession {
   readonly #sessionId: string;
   #identity: ReplicaDocumentIdentity | undefined;
+  #fidelityPolicy: SelectableReplicaFidelityPolicy | undefined;
   #observer: Pick<MutationObserver, 'observe' | 'disconnect'> | undefined;
   #resizeObserver: Pick<ResizeObserver, 'observe' | 'disconnect'> | undefined;
   #pendingChildren = new Set<Node>();
@@ -209,12 +235,20 @@ export class HtmlMirrorSourceSession {
   #knownMirroredImageCandidates = new WeakSet<Element>();
   #selectedImageSources = new WeakMap<Element, string>();
   #imageRefreshRequested = false;
+  #mirroredControlCandidates: Element[] = [];
+  #knownMirroredControlCandidates = new WeakSet<Element>();
+  #controlFingerprints = new WeakMap<Element, string>();
+  #controlMaintenanceCursor = 0;
   readonly #imageEventRoots = new Set<Document | ShadowRoot>();
   readonly #observedShadowRoots = new WeakSet<ShadowRoot>();
   #shadowHostCandidates: Element[] = [];
   #knownShadowHostCandidates = new WeakSet<Element>();
   #shadowDiscoveryCursor = 0;
+  #stylePollingCursor = 0;
+  #stylePollingPhases = new WeakMap<object, StylePollChannel>();
+  #styleCapacityChannels = new WeakMap<object, number>();
   #adoptedStyleSignatures = new WeakMap<object, string>();
+  #ordinaryStyleSignatures = new WeakMap<object, string>();
   #shadowDiscoveryTimer: unknown;
   #frame: unknown;
   #sequence = 0;
@@ -245,6 +279,8 @@ export class HtmlMirrorSourceSession {
     for (const root of this.#imageEventRoots) {
       root.removeEventListener('load', this.#onCapturedResourceLoad, true);
       root.removeEventListener('error', this.#onCapturedResourceError, true);
+      root.removeEventListener('input', this.#onControlTextChange, true);
+      root.removeEventListener('change', this.#onControlTextChange, true);
     }
     this.#imageEventRoots.clear();
     this.environment.document.fonts?.removeEventListener?.(
@@ -260,11 +296,19 @@ export class HtmlMirrorSourceSession {
     this.#shadowHostCandidates = [];
     this.#knownShadowHostCandidates = new WeakSet<Element>();
     this.#shadowDiscoveryCursor = 0;
+    this.#stylePollingCursor = 0;
+    this.#stylePollingPhases = new WeakMap<object, StylePollChannel>();
+    this.#styleCapacityChannels = new WeakMap<object, number>();
     this.#mirroredImageCandidates = [];
     this.#knownMirroredImageCandidates = new WeakSet<Element>();
     this.#selectedImageSources = new WeakMap<Element, string>();
     this.#imageRefreshRequested = false;
+    this.#mirroredControlCandidates = [];
+    this.#knownMirroredControlCandidates = new WeakSet<Element>();
+    this.#controlFingerprints = new WeakMap<Element, string>();
+    this.#controlMaintenanceCursor = 0;
     this.#adoptedStyleSignatures = new WeakMap<object, string>();
+    this.#ordinaryStyleSignatures = new WeakMap<object, string>();
     this.#clearPending();
     if (disconnect) {
       try {
@@ -291,7 +335,7 @@ export class HtmlMirrorSourceSession {
         this.dispose(true);
         return;
       }
-      this.#start(message.identity);
+      this.#start(message.identity, message.fidelityPolicy);
       return;
     }
     if (!this.#identity) {
@@ -354,13 +398,17 @@ export class HtmlMirrorSourceSession {
 
   readonly #onDisconnect = (): void => this.dispose(false);
 
-  #start(identity: ReplicaDocumentIdentity): void {
+  #start(
+    identity: ReplicaDocumentIdentity,
+    fidelityPolicy: SelectableReplicaFidelityPolicy,
+  ): void {
     if (this.environment.window.top !== this.environment.window) {
       this.#post(createHtmlMirrorError(identity, 'stream_failed'));
       this.dispose(true);
       return;
     }
     this.#identity = identity;
+    this.#fidelityPolicy = fidelityPolicy;
     try {
       this.#observer = this.environment.createMutationObserver(
         (records) => this.#onMutations(records),
@@ -401,7 +449,8 @@ export class HtmlMirrorSourceSession {
 
   #postCheckpoint(): void {
     const identity = this.#identity;
-    if (!identity || this.#disposed) return;
+    const fidelityPolicy = this.#fidelityPolicy;
+    if (!identity || !fidelityPolicy || this.#disposed) return;
     const startedAt = this.environment.now();
     const representability = createHtmlMirrorRepresentabilityCollector();
     try {
@@ -410,12 +459,14 @@ export class HtmlMirrorSourceSession {
         this.environment.window,
         this.environment.registry,
         representability,
+        fidelityPolicy,
       );
       const checkpoint = graph && createHtmlMirrorCheckpoint(
         this.#identityAt(this.#sequence),
         {
           root: graph.root,
           adoptedStyleSheets: graph.adoptedStyleSheets,
+          documentMode: graph.documentMode,
           captureMs: Math.max(0, this.environment.now() - startedAt),
           viewportWidth: graph.viewportWidth,
           viewportHeight: graph.viewportHeight,
@@ -423,6 +474,7 @@ export class HtmlMirrorSourceSession {
           documentHeight: graph.documentHeight,
           representability: snapshotHtmlMirrorRepresentability(representability),
         },
+        fidelityPolicy,
       );
       if (!checkpoint) {
         if (graph && representability.capacityOmissionCount === 0) {
@@ -446,17 +498,24 @@ export class HtmlMirrorSourceSession {
       this.#shadowHostCandidates = [];
       this.#knownShadowHostCandidates = new WeakSet<Element>();
       this.#shadowDiscoveryCursor = 0;
+      this.#stylePollingCursor = 0;
       this.#mirroredImageCandidates = [];
       this.#knownMirroredImageCandidates = new WeakSet<Element>();
       this.#selectedImageSources = new WeakMap<Element, string>();
       this.#imageRefreshRequested = false;
+      this.#mirroredControlCandidates = [];
+      this.#knownMirroredControlCandidates = new WeakSet<Element>();
+      this.#controlFingerprints = new WeakMap<Element, string>();
+      this.#controlMaintenanceCursor = 0;
       this.#adoptedStyleSignatures = new WeakMap<object, string>();
       this.#adoptedStyleSignatures.set(
         this.environment.document,
         adoptedStyleSignature(checkpoint.payload.adoptedStyleSheets),
       );
+      this.#ordinaryStyleSignatures = new WeakMap<object, string>();
       this.#markMirroredGraph(checkpoint.payload.root);
       this.#observeOpenShadowRoots(this.environment.document.documentElement);
+      this.#primeOrdinaryStyleSignatures();
       this.#shadowReconciliationPending = false;
       this.#post(checkpoint);
       this.#scheduleShadowDiscovery();
@@ -498,9 +557,12 @@ export class HtmlMirrorSourceSession {
         for (const added of record.addedNodes) this.#observeOpenShadowRoots(added);
       } else if (record.type === 'attributes' && record.target instanceof Element) {
         this.#queuePending(this.#pendingAttributes, record.target);
+        this.#registerMirroredControlCandidate(record.target);
         if (
           record.attributeName === 'role' ||
-          record.attributeName === 'contenteditable'
+          record.attributeName === 'contenteditable' ||
+          record.attributeName === 'type' ||
+          record.attributeName === 'autocomplete'
         ) {
           // A children patch can re-sanitize a host's light DOM, but it cannot
           // replace that host's already-mirrored ShadowRoot. Rebuild the whole
@@ -522,7 +584,10 @@ export class HtmlMirrorSourceSession {
   }
 
   #flush(): void {
-    if (this.#disposed || !this.#identity || this.#paused) return;
+    const fidelityPolicy = this.#fidelityPolicy;
+    if (
+      this.#disposed || !this.#identity || !fidelityPolicy || this.#paused
+    ) return;
     if (
       this.#sequence - this.#acknowledged >=
       MAX_HTML_MIRROR_UNACKED_BATCHES
@@ -553,6 +618,8 @@ export class HtmlMirrorSourceSession {
       );
     const operations: HtmlMirrorPatchOperation[] = [];
     const representability = createHtmlMirrorRepresentabilityCollector();
+    const batchBudget = createHtmlMirrorReadBudget();
+    const styleWork = createHtmlMirrorStyleWorkBudget();
     try {
       const childCaptures: Array<{
         readonly target: Node;
@@ -590,6 +657,9 @@ export class HtmlMirrorSourceSession {
             this.environment.registry,
             this.environment.document.baseURI,
             representability,
+            fidelityPolicy,
+            batchBudget,
+            styleWork,
           );
           if (!children) throw new Error('Unsafe children patch.');
           const sources = children.map(
@@ -605,8 +675,6 @@ export class HtmlMirrorSourceSession {
           }));
         }
       } else {
-        const budget = createHtmlMirrorReadBudget();
-        const styleWork = createHtmlMirrorStyleWorkBudget();
         for (const capture of childCaptures) {
           const previous = new Set(capture.previous);
           const newSources = capture.sources.filter(
@@ -617,8 +685,9 @@ export class HtmlMirrorSourceSession {
             this.environment.registry,
             this.environment.document.baseURI,
             representability,
-            budget,
+            batchBudget,
             styleWork,
+            fidelityPolicy,
           );
           if (!serialized) throw new Error('Unsafe new children patch.');
           const newGraphs = new Map<Node, import(
@@ -663,12 +732,19 @@ export class HtmlMirrorSourceSession {
           target,
           this.environment.document.baseURI,
           representability,
+          fidelityPolicy,
         );
         if (!attributes) throw new Error('Unsafe attributes patch.');
         const hints = sanitizeSourceElementHints(
           target,
           this.environment.document.baseURI,
+          representability,
+          fidelityPolicy,
+          styleWork,
         );
+        if (isSourceNativeTextControlTagName(target.localName)) {
+          this.#rememberControlFingerprint(target);
+        }
         if (target.localName.toLowerCase() === 'img') {
           this.#selectedImageSources.set(
             target,
@@ -678,6 +754,7 @@ export class HtmlMirrorSourceSession {
         operations.push(Object.freeze({
           kind: 'attributes',
           nodeId: this.environment.registry.peekId(target) as number,
+          namespace: sourceElementNamespace(target),
           tagName: target.localName.toLowerCase(),
           attributes,
           ...hints,
@@ -693,6 +770,7 @@ export class HtmlMirrorSourceSession {
           this.environment.registry,
           this.environment.document.baseURI,
           representability,
+          fidelityPolicy,
         );
         if (!node || node.kind !== 'text') throw new Error('Unsafe text patch.');
         operations.push(Object.freeze({
@@ -718,6 +796,7 @@ export class HtmlMirrorSourceSession {
         sequence,
         operations,
         snapshotHtmlMirrorRepresentability(representability),
+        fidelityPolicy,
       );
       if (!batch) {
         incrementSourceRepresentability(
@@ -809,6 +888,23 @@ export class HtmlMirrorSourceSession {
     this.#queueCapturedImageAttributeRefresh(event);
   };
 
+  readonly #onControlTextChange = (event: Event): void => {
+    const target = event.target;
+    if (
+      !(target instanceof Element) ||
+      !isSourceNativeTextControlTagName(target.localName) ||
+      !isEligibleControlElement(target) ||
+      !belongsToSourceDocument(target, this.environment.document) ||
+      !target.isConnected ||
+      !this.#mirroredNodes.has(target)
+    ) return;
+    this.#queuePending(this.#pendingAttributes, target);
+    this.#registerMirroredControlCandidate(target);
+    this.#rememberControlFingerprint(target);
+    this.#pendingDimensions = true;
+    this.#scheduleFlush();
+  };
+
   #scheduleFlush(): void {
     if (this.#paused || this.#frame !== undefined || this.#disposed) return;
     if (
@@ -847,6 +943,7 @@ export class HtmlMirrorSourceSession {
       this.#mirroredNodes.add(source);
       if (source instanceof Element) {
         this.#registerShadowHostCandidate(source);
+        this.#registerMirroredControlCandidate(source);
         if (node.kind === 'element' && node.tagName === 'img') {
           this.#registerMirroredImageCandidate(
             source,
@@ -993,6 +1090,114 @@ export class HtmlMirrorSourceSession {
     this.#mirroredImageCandidates.push(element);
   }
 
+  #registerMirroredControlCandidate(element: Element): void {
+    const state = readControlFingerprint(element);
+    if (!state.eligible || this.#knownMirroredControlCandidates.has(element)) {
+      return;
+    }
+    if (
+      this.#mirroredControlCandidates.length >=
+      MAX_MIRRORED_CONTROL_CANDIDATES
+    ) this.#compactMirroredControlCandidates();
+    if (
+      this.#mirroredControlCandidates.length >=
+      MAX_MIRRORED_CONTROL_CANDIDATES
+    ) return;
+    this.#knownMirroredControlCandidates.add(element);
+    this.#mirroredControlCandidates.push(element);
+    this.#controlFingerprints.set(element, state.fingerprint);
+  }
+
+  #rememberControlFingerprint(element: Element): void {
+    const state = readControlFingerprint(element);
+    if (state.eligible) {
+      this.#controlFingerprints.set(element, state.fingerprint);
+    } else {
+      this.#controlFingerprints.delete(element);
+      const index = this.#mirroredControlCandidates.indexOf(element);
+      if (index >= 0) {
+        this.#mirroredControlCandidates.splice(index, 1);
+        this.#knownMirroredControlCandidates = new WeakSet(
+          this.#mirroredControlCandidates,
+        );
+        this.#controlMaintenanceCursor =
+          this.#mirroredControlCandidates.length === 0
+            ? 0
+            : this.#controlMaintenanceCursor %
+              this.#mirroredControlCandidates.length;
+      }
+    }
+  }
+
+  #compactMirroredControlCandidates(): void {
+    const retained = this.#mirroredControlCandidates.filter(
+      (element) => element.isConnected && this.#mirroredNodes.has(element),
+    );
+    this.#mirroredControlCandidates = retained;
+    this.#knownMirroredControlCandidates = new WeakSet(retained);
+    this.#controlMaintenanceCursor = retained.length === 0
+      ? 0
+      : this.#controlMaintenanceCursor % retained.length;
+  }
+
+  #refreshChangedControlText(): void {
+    this.#compactMirroredControlCandidates();
+    const candidateCount = this.#mirroredControlCandidates.length;
+    if (candidateCount === 0) return;
+    const retained: Element[] = [];
+    for (const element of this.#mirroredControlCandidates) {
+      if (isEligibleControlElement(element)) {
+        retained.push(element);
+        continue;
+      }
+      this.#controlFingerprints.delete(element);
+      this.#queuePending(this.#pendingAttributes, element);
+      if (this.#pendingOverflow) return;
+    }
+    if (retained.length !== candidateCount) {
+      this.#mirroredControlCandidates = retained;
+      this.#knownMirroredControlCandidates = new WeakSet(retained);
+      this.#controlMaintenanceCursor = retained.length === 0
+        ? 0
+        : this.#controlMaintenanceCursor % retained.length;
+    }
+    if (retained.length === 0) {
+      this.#pendingDimensions = this.#pendingAttributes.size > 0;
+      this.#scheduleFlush();
+      return;
+    }
+
+    const scanCount = Math.min(
+      retained.length,
+      MAX_CONTROL_CANDIDATES_PER_TICK,
+    );
+    let processed = 0;
+    let characters = 0;
+    for (let offset = 0; offset < scanCount; offset += 1) {
+      const index = (this.#controlMaintenanceCursor + offset) % retained.length;
+      const element = retained[index];
+      if (!element) continue;
+      const state = readControlFingerprint(element);
+      if (!state.eligible) continue;
+      if (
+        processed > 0 &&
+        characters + state.characters > MAX_CONTROL_CHARACTERS_PER_TICK
+      ) break;
+      processed += 1;
+      characters += state.characters;
+      if (this.#controlFingerprints.get(element) === state.fingerprint) continue;
+      this.#controlFingerprints.set(element, state.fingerprint);
+      this.#queuePending(this.#pendingAttributes, element);
+      if (this.#pendingOverflow) return;
+    }
+    this.#controlMaintenanceCursor =
+      (this.#controlMaintenanceCursor + processed) % retained.length;
+    if (this.#pendingAttributes.size > 0) {
+      this.#pendingDimensions = true;
+      this.#scheduleFlush();
+    }
+  }
+
   #compactMirroredImageCandidates(): void {
     const retained = this.#mirroredImageCandidates.filter(
       (element) => element.isConnected && this.#mirroredNodes.has(element),
@@ -1009,6 +1214,8 @@ export class HtmlMirrorSourceSession {
         selectedSource = sanitizeSourceElementHints(
           image,
           this.environment.document.baseURI,
+          undefined,
+          this.#fidelityPolicy ?? 'conservative',
         ).selectedImageSource ?? '';
       } catch {
         continue;
@@ -1042,6 +1249,8 @@ export class HtmlMirrorSourceSession {
     this.#imageEventRoots.add(root);
     root.addEventListener('load', this.#onCapturedResourceLoad, true);
     root.addEventListener('error', this.#onCapturedResourceError, true);
+    root.addEventListener('input', this.#onControlTextChange, true);
+    root.addEventListener('change', this.#onControlTextChange, true);
   }
 
   #compactImageEventRoots(): void {
@@ -1051,6 +1260,8 @@ export class HtmlMirrorSourceSession {
       }
       root.removeEventListener('load', this.#onCapturedResourceLoad, true);
       root.removeEventListener('error', this.#onCapturedResourceError, true);
+      root.removeEventListener('input', this.#onControlTextChange, true);
+      root.removeEventListener('change', this.#onControlTextChange, true);
       this.#imageEventRoots.delete(root);
     }
   }
@@ -1076,67 +1287,207 @@ export class HtmlMirrorSourceSession {
   }
 
   #discoverNewOpenShadowRoots(): void {
-    const candidateCount = this.#shadowHostCandidates.length;
+    this.#refreshChangedControlText();
+    if (this.#pendingOverflow || this.#paused) return;
     if (this.#shadowReconciliationPending) return;
-    const documentWork = createHtmlMirrorStyleWorkBudget({
-      maxSheets: MAX_STYLE_SHEETS_PER_TICK,
-      maxRules: MAX_STYLE_RULES_PER_TICK,
-      maxCharacters: MAX_STYLE_CHARACTERS_PER_TICK,
-    });
-    if (this.#adoptedStylesChanged(this.environment.document, documentWork)) {
-      this.#shadowReconciliationPending = true;
-      this.#signalShadowReconciliation();
-      return;
-    }
-    if (candidateCount === 0) return;
-    const styleWork = createHtmlMirrorStyleWorkBudget({
-      maxSheets: MAX_STYLE_SHEETS_PER_TICK,
-      maxRules: MAX_STYLE_RULES_PER_TICK,
-      maxCharacters: MAX_STYLE_CHARACTERS_PER_TICK,
-    });
-    const scanCount = Math.min(candidateCount, MAX_SHADOW_HOSTS_PER_TICK);
-    let processed = 0;
-    for (let offset = 0; offset < scanCount; offset += 1) {
-      const index = (this.#shadowDiscoveryCursor + offset) % candidateCount;
-      const element = this.#shadowHostCandidates[index];
-      if (!element?.isConnected || !this.#mirroredNodes.has(element)) {
+    const candidateCount = this.#shadowHostCandidates.length;
+    if (candidateCount > 0) {
+      const scanCount = Math.min(candidateCount, MAX_SHADOW_HOSTS_PER_TICK);
+      let processed = 0;
+      for (let offset = 0; offset < scanCount; offset += 1) {
+        const index = (this.#shadowDiscoveryCursor + offset) % candidateCount;
+        const element = this.#shadowHostCandidates[index];
         processed += 1;
-        continue;
-      }
-      const shadow = element.shadowRoot;
-      if (shadow?.mode === 'open') {
+        if (!element?.isConnected || !this.#mirroredNodes.has(element)) continue;
+        const shadow = element.shadowRoot;
+        if (shadow?.mode !== 'open') continue;
         this.#observeOpenShadowRoot(shadow);
         if (this.#shadowReconciliationPending) return;
-        if (this.#adoptedStylesChanged(shadow, styleWork)) {
-          this.#shadowReconciliationPending = true;
-          this.#signalShadowReconciliation();
-          return;
-        }
-        if (styleWork.exhausted) break;
       }
-      processed += 1;
+      this.#shadowDiscoveryCursor =
+        (this.#shadowDiscoveryCursor + processed) % candidateCount;
     }
-    this.#shadowDiscoveryCursor =
-      (this.#shadowDiscoveryCursor + processed) % candidateCount;
+    this.#pollStyleChanges();
   }
 
   #adoptedStylesChanged(
     owner: Document | ShadowRoot,
-    work: ReturnType<typeof createHtmlMirrorStyleWorkBudget>,
-  ): boolean {
+    work: HtmlMirrorStyleWorkBudget,
+  ): StylePollResult {
     const styles = sanitizeSourceAdoptedStyleSheets(
       owner,
       this.environment.document.baseURI,
       work,
+      undefined,
+      this.#fidelityPolicy ?? 'conservative',
     );
-    if (!styles) return false;
+    if (!styles) return work.exhausted ? 'capacity' : 'unchanged';
     const signature = adoptedStyleSignature(styles);
     const previous = this.#adoptedStyleSignatures.get(owner);
     if (previous === undefined) {
       this.#adoptedStyleSignatures.set(owner, signature);
-      return false;
+      return 'unchanged';
     }
-    return signature !== previous;
+    if (signature === previous) return 'unchanged';
+    this.#adoptedStyleSignatures.set(owner, signature);
+    return 'changed';
+  }
+
+  #ordinaryStylesChanged(
+    owner: Document | ShadowRoot,
+    work: HtmlMirrorStyleWorkBudget,
+  ): StylePollResult {
+    const read = ordinaryStyleSignature(owner, work);
+    if (read.kind === 'capacity') return 'capacity';
+    const signature = read.signature;
+    if (signature === undefined) return 'unchanged';
+    const previous = this.#ordinaryStyleSignatures.get(owner);
+    if (previous === undefined) {
+      this.#ordinaryStyleSignatures.set(owner, signature);
+      return 'unchanged';
+    }
+    if (signature === previous) return 'unchanged';
+    this.#ordinaryStyleSignatures.set(owner, signature);
+    return 'changed';
+  }
+
+  #primeOrdinaryStyleSignatures(): void {
+    const owners = this.#styleOwners();
+    if (owners.length === 0) return;
+    const work = this.#createStylePollingBudget();
+    const scanCount = Math.min(
+      owners.length,
+      MAX_SHADOW_HOSTS_PER_TICK + 1,
+    );
+    let processed = 0;
+    for (let offset = 0; offset < scanCount; offset += 1) {
+      const index = (this.#stylePollingCursor + offset) % owners.length;
+      const owner = owners[index]!;
+      processed += 1;
+      const read = ordinaryStyleSignature(owner, work);
+      if (read.kind === 'signature' && read.signature !== undefined) {
+        this.#ordinaryStyleSignatures.set(owner, read.signature);
+      }
+      if (read.kind === 'capacity') break;
+    }
+    this.#stylePollingCursor =
+      (this.#stylePollingCursor + processed) % owners.length;
+  }
+
+  #pollStyleChanges(): void {
+    const owners = this.#styleOwners();
+    if (owners.length === 0) return;
+    const work = this.#createStylePollingBudget();
+    const scanCount = Math.min(
+      owners.length,
+      MAX_SHADOW_HOSTS_PER_TICK + 1,
+    );
+    let processed = 0;
+    for (let offset = 0; offset < scanCount; offset += 1) {
+      const index = (this.#stylePollingCursor + offset) % owners.length;
+      const owner = owners[index]!;
+      processed += 1;
+      const firstChannel = this.#stylePollingPhases.get(owner) ?? 'ordinary';
+      const channels = [
+        firstChannel,
+        oppositeStylePollChannel(firstChannel),
+      ] as const;
+      for (const channel of channels) {
+        const channelStartedWithUnusedBudget = work.sheets === 0 &&
+          work.rules === 0 && work.characters === 0;
+        const result = channel === 'ordinary'
+          ? this.#ordinaryStylesChanged(owner, work)
+          : this.#adoptedStylesChanged(owner, work);
+        if (result === 'changed') {
+          this.#stylePollingPhases.set(
+            owner,
+            oppositeStylePollChannel(channel),
+          );
+          this.#advanceStylePollingCursor(processed, owners.length);
+          this.#shadowReconciliationPending = true;
+          this.#signalShadowReconciliation();
+          return;
+        }
+        if (result === 'capacity') {
+          // Retry the channel that could not fit first on the owner's next
+          // turn. This prevents a large ordinary sheet from permanently
+          // starving adopted sheets (and vice versa).
+          this.#stylePollingPhases.set(owner, channel);
+          this.#advanceStylePollingCursor(processed, owners.length);
+          if (channelStartedWithUnusedBudget) {
+            this.#signalStyleCapacityRecovery(owner, channel);
+          }
+          return;
+        }
+        this.#clearStyleCapacity(owner, channel);
+      }
+      this.#stylePollingPhases.set(
+        owner,
+        oppositeStylePollChannel(firstChannel),
+      );
+    }
+    this.#advanceStylePollingCursor(processed, owners.length);
+  }
+
+  #styleOwners(): readonly (Document | ShadowRoot)[] {
+    this.#compactImageEventRoots();
+    return [...this.#imageEventRoots].filter((root) =>
+      root === this.environment.document ||
+      ('host' in root && root.host.isConnected && this.#mirroredNodes.has(root))
+    );
+  }
+
+  #createStylePollingBudget(): HtmlMirrorStyleWorkBudget {
+    return createHtmlMirrorStyleWorkBudget({
+      maxSheets: MAX_STYLE_SHEETS_PER_TICK,
+      maxRules: MAX_STYLE_RULES_PER_TICK,
+      maxCharacters: MAX_STYLE_CHARACTERS_PER_TICK,
+    });
+  }
+
+  #advanceStylePollingCursor(processed: number, ownerCount: number): void {
+    this.#stylePollingCursor = ownerCount === 0
+      ? 0
+      : (this.#stylePollingCursor + processed) % ownerCount;
+  }
+
+  #clearStyleCapacity(
+    owner: Document | ShadowRoot,
+    channel: StylePollChannel,
+  ): void {
+    const next = (this.#styleCapacityChannels.get(owner) ?? 0) &
+      ~stylePollChannelMask(channel);
+    if (next === 0) {
+      this.#styleCapacityChannels.delete(owner);
+    } else {
+      this.#styleCapacityChannels.set(owner, next);
+    }
+  }
+
+  #signalStyleCapacityRecovery(
+    owner: Document | ShadowRoot,
+    channel: StylePollChannel,
+  ): void {
+    const mask = stylePollChannelMask(channel);
+    const reported = this.#styleCapacityChannels.get(owner) ?? 0;
+    if ((reported & mask) !== 0) return;
+    this.#styleCapacityChannels.set(owner, reported | mask);
+    if (this.#disposed || !this.#identity || this.#paused) return;
+    const representability = createHtmlMirrorRepresentabilityCollector();
+    incrementSourceRepresentability(
+      representability,
+      'capacityOmissionCount',
+    );
+    this.#shadowReconciliationPending = true;
+    this.#paused = true;
+    if (this.#frame !== undefined) this.environment.cancelFrame(this.#frame);
+    this.#frame = undefined;
+    this.#clearPending();
+    this.#post(createHtmlMirrorError(
+      this.#identityAt(this.#sequence),
+      'stream_overflow',
+      snapshotHtmlMirrorRepresentability(representability),
+    ));
   }
 
   #observeOpenShadowRoots(root: Node): void {
@@ -1191,6 +1542,14 @@ export class HtmlMirrorSourceSession {
   }
 }
 
+function sourceElementNamespace(element: Element): HtmlMirrorNamespace {
+  if (element.namespaceURI === 'http://www.w3.org/2000/svg') return 'svg';
+  if (element.namespaceURI === 'http://www.w3.org/1998/Math/MathML') {
+    return 'mathml';
+  }
+  return 'html';
+}
+
 function readOpenShadowRoot(node: Node): ShadowRoot | undefined {
   if (node.nodeType !== Node.DOCUMENT_FRAGMENT_NODE) return undefined;
   const candidate = node as ShadowRoot;
@@ -1215,6 +1574,117 @@ function adoptedStyleSignature(styles: readonly string[]): string {
     djb = (Math.imul(djb, 33) ^ (sheetIndex + 1)) >>> 0;
   }
   return `${styles.length}:${characters}:${fnv}:${djb}`;
+}
+
+type OrdinaryStyleSignatureRead = Readonly<{
+  kind: 'signature';
+  signature: string | undefined;
+}> | Readonly<{
+  kind: 'capacity';
+}>;
+
+function ordinaryStyleSignature(
+  owner: Document | ShadowRoot,
+  work: HtmlMirrorStyleWorkBudget,
+): OrdinaryStyleSignatureRead {
+  let sheets: ArrayLike<CSSStyleSheet>;
+  try {
+    sheets = (owner as Document & {
+      readonly styleSheets: ArrayLike<CSSStyleSheet>;
+    }).styleSheets;
+  } catch {
+    return Object.freeze({ kind: 'signature', signature: undefined });
+  }
+  if (!sheets) {
+    return Object.freeze({ kind: 'signature', signature: undefined });
+  }
+  const sheetCount = sheets.length;
+  if (
+    !Number.isSafeInteger(sheetCount) ||
+    sheetCount < 0
+  ) return Object.freeze({ kind: 'signature', signature: undefined });
+  if (work.sheets + sheetCount > work.maxSheets) {
+    work.exhausted = true;
+    return Object.freeze({ kind: 'capacity' });
+  }
+  const parts: string[] = [];
+  const visited = new Set<object>();
+  for (let index = 0; index < sheetCount; index += 1) {
+    const sheet = sheets[index];
+    if (!sheet) continue;
+    work.sheets += 1;
+    let disabled = false;
+    let media = '';
+    try {
+      disabled = sheet.disabled === true;
+      media = sheet.media?.mediaText ?? '';
+    } catch {
+      parts.push(`${index}:unreadable`);
+      continue;
+    }
+    const rules = cssomRuleSignature(sheet, work, visited, 0);
+    if (rules.kind === 'capacity') return rules;
+    parts.push(`${index}:${disabled ? 1 : 0}:${media}:${rules.signature}`);
+  }
+  return Object.freeze({
+    kind: 'signature',
+    signature: adoptedStyleSignature(parts),
+  });
+}
+
+function cssomRuleSignature(
+  sheet: CSSStyleSheet,
+  work: HtmlMirrorStyleWorkBudget,
+  visited: Set<object>,
+  depth: number,
+): OrdinaryStyleSignatureRead {
+  if (depth > 8 || visited.has(sheet)) {
+    return Object.freeze({ kind: 'signature', signature: 'cycle' });
+  }
+  visited.add(sheet);
+  try {
+    const rules = sheet.cssRules;
+    const ruleCount = rules.length;
+    if (
+      !Number.isSafeInteger(ruleCount) ||
+      ruleCount < 0
+    ) return Object.freeze({ kind: 'signature', signature: 'unreadable' });
+    if (work.rules + ruleCount > work.maxRules) {
+      work.exhausted = true;
+      return Object.freeze({ kind: 'capacity' });
+    }
+    const parts: string[] = [];
+    for (let index = 0; index < ruleCount; index += 1) {
+      const rule = rules[index] ?? rules.item(index);
+      if (!rule || typeof rule.cssText !== 'string') {
+        return Object.freeze({ kind: 'signature', signature: 'unreadable' });
+      }
+      if (work.characters + rule.cssText.length > work.maxCharacters) {
+        work.exhausted = true;
+        return Object.freeze({ kind: 'capacity' });
+      }
+      work.rules += 1;
+      work.characters += rule.cssText.length;
+      const imported = (rule as CSSRule & {
+        readonly styleSheet?: CSSStyleSheet | null;
+      }).styleSheet;
+      if (!imported) {
+        parts.push(rule.cssText);
+        continue;
+      }
+      const nested = cssomRuleSignature(imported, work, visited, depth + 1);
+      if (nested.kind === 'capacity') return nested;
+      parts.push(`${rule.cssText}:${nested.signature ?? 'unavailable'}`);
+    }
+    return Object.freeze({
+      kind: 'signature',
+      signature: adoptedStyleSignature(parts),
+    });
+  } catch {
+    return Object.freeze({ kind: 'signature', signature: 'unreadable' });
+  } finally {
+    visited.delete(sheet);
+  }
 }
 
 function minimizeTargets(targets: Set<Node>): Node[] {
@@ -1279,6 +1749,54 @@ function incrementSourceRepresentability(
   );
 }
 
+function isEligibleControlElement(element: Element): boolean {
+  if (!isSourceNativeTextControlTagName(element.localName)) return false;
+  try {
+    return isEligibleSourceTextControl(
+      element.localName,
+      Object.fromEntries(
+        [...element.attributes].map(({ name, value }) => [name, value]),
+      ),
+    );
+  } catch {
+    return false;
+  }
+}
+
+function readControlFingerprint(element: Element): Readonly<{
+  eligible: boolean;
+  fingerprint: string;
+  characters: number;
+}> {
+  if (!isEligibleControlElement(element)) {
+    return { eligible: false, fingerprint: 'private', characters: 0 };
+  }
+  const control = readSourceControlText(element);
+  if (!control) {
+    return { eligible: true, fingerprint: 'empty', characters: 0 };
+  }
+  const length = control.text.length;
+  if (length > MAX_HTML_MIRROR_STRING) {
+    return {
+      eligible: true,
+      fingerprint: `oversize:${control.kind}:${length}`,
+      characters: 0,
+    };
+  }
+  let fnv = 0x811c9dc5;
+  let djb = 5381;
+  for (let index = 0; index < length; index += 1) {
+    const code = control.text.charCodeAt(index);
+    fnv = Math.imul(fnv ^ code, 0x01000193) >>> 0;
+    djb = (Math.imul(djb, 33) ^ code) >>> 0;
+  }
+  return {
+    eligible: true,
+    fingerprint: `${control.kind}:${length}:${fnv}:${djb}`,
+    characters: length,
+  };
+}
+
 function belongsToSourceDocument(node: Node, sourceDocument: Document): boolean {
   return node === sourceDocument || node.ownerDocument === sourceDocument;
 }
@@ -1288,11 +1806,15 @@ function readSourceDimensions(document: Document, window: Window): {
   viewportHeight: number;
   documentWidth: number;
   documentHeight: number;
+  canvasBackgroundColor?: string;
 } {
   const html = document.documentElement;
   const body = document.body;
   const viewportWidth = Math.max(1, Math.round(window.innerWidth || html?.clientWidth || 1));
   const viewportHeight = Math.max(1, Math.round(window.innerHeight || html?.clientHeight || 1));
+  const canvasBackgroundColor = html
+    ? sanitizeSourceElementHints(html, document.baseURI).canvasBackgroundColor
+    : undefined;
   return {
     viewportWidth,
     viewportHeight,
@@ -1306,6 +1828,7 @@ function readSourceDimensions(document: Document, window: Window): {
       html?.scrollHeight ?? 0,
       body?.scrollHeight ?? 0,
     ),
+    ...(canvasBackgroundColor ? { canvasBackgroundColor } : {}),
   };
 }
 

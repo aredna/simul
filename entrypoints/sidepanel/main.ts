@@ -10,7 +10,26 @@ import {
   replicaViewTranslationAction,
   type GenerationWork,
 } from '../../lib/companion-lifecycle';
+import {
+  nextCompanionOverlay,
+  reverseTranslationPair,
+  toolbarActivityLabel,
+  toolbarProgressState,
+  type CompanionOverlay,
+  type ToolbarActivity,
+} from '../../lib/companion-ui-state';
+import {
+  resolveUiLabelTranslations,
+  toolbarAttentionTarget,
+  type CompanionStatusTone,
+  type ToolbarAttentionTarget,
+} from '../../lib/companion-ui-localization';
 import { resolveSourceLanguage } from '../../lib/language-detection';
+import {
+  LANGUAGE_OPTION_ORDER,
+  createSourceLanguageLabeler,
+  languageEndonym,
+} from '../../lib/language-options';
 import {
   captureLivePageDelta,
   installLivePageObserver,
@@ -114,6 +133,10 @@ import {
   type ReplicaEngineMode,
 } from '../../lib/replica/engine-selection';
 import { openChromeHtmlMirrorStream } from '../../lib/replica/html-mirror-client';
+import {
+  isSelectableReplicaFidelityPolicy,
+  type SelectableReplicaFidelityPolicy,
+} from '../../lib/replica/fidelity-policy';
 import { IsolatedHtmlReplicaEngine } from '../../lib/replica/isolated-html-engine';
 import {
   LiveReplicaFailureRecoveryGate,
@@ -133,7 +156,12 @@ import {
   ReplicaCaptureBoundaryError,
   RrwebShadowReplicaEngine,
 } from '../../lib/replica/rrweb-shadow-engine';
-import { VisibleReplayHost } from '../../lib/replica/visible-replay-host';
+import {
+  LEGACY_FALLBACK_LABEL,
+  LIVE_REPLAY_LABEL,
+  STATIC_REPLAY_LABEL,
+  VisibleReplayHost,
+} from '../../lib/replica/visible-replay-host';
 import { ReplicaSurfaceRouter } from '../../lib/replica/replica-surface-router';
 import {
   captureRequestMatchesSourceDocument,
@@ -210,12 +238,49 @@ interface PendingImageReplicaActivation {
 
 const NAVIGATION_DEBOUNCE_MS = 350;
 const CAPTURE_TIMEOUT_MS = 12_000;
+const DYNAMIC_UI_LABELS = [
+  'Fit',
+  '1:1',
+  'Current',
+  'Active',
+  'Translate',
+  'Translating…',
+  'Translate page',
+  'Translation current',
+  'Image text',
+  'Translate text inside images (local, experimental)',
+  'Image translation is saved but paused. Grant image access so Chrome can capture visible pixels for local OCR.',
+  'Checking Chrome image access…',
+  'Off by default. Visible image pixels stay on this device and are discarded after OCR.',
+  'Grant image access',
+  'OCR priority',
+  'Scan images',
+  'Skip very small images',
+  'Use local Prompt for image language',
+  'Use local Prompt to interpret image text',
+  'OCR diagnostics',
+  'Memory-only stages and counts; page text, URLs, pixels, and identifiers are never included.',
+  'Clear diagnostics',
+  'Only when visible',
+  'Everything immediately',
+  'Visible first, then background',
+  'Waiting for website language',
+  'Simul is still detecting the website language. If detection remains inconclusive, choose From in the toolbar.',
+  'The languages match, so Simul will copy the text unchanged.',
+  'Your draft stays only in this companion window and is not saved.',
+  STATIC_REPLAY_LABEL,
+  LIVE_REPLAY_LABEL,
+  LEGACY_FALLBACK_LABEL,
+] as const;
 
 const sourceSelect = requireElement<HTMLSelectElement>('#source-language');
 const targetSelect = requireElement<HTMLSelectElement>('#target-language');
 const autoTranslateSelect = requireElement<HTMLSelectElement>('#auto-translate-mode');
 const displayModeSelect = requireElement<HTMLSelectElement>('#mirror-display-mode');
 const textLayoutSelect = requireElement<HTMLSelectElement>('#text-layout-mode');
+const replicaFidelityPolicySelect = requireElement<HTMLSelectElement>(
+  '#replica-fidelity-policy',
+);
 const replicaEngineSelect = requireElement<HTMLSelectElement>('#replica-engine');
 const replicaViewModeSelect = requireElement<HTMLSelectElement>('#replica-view-mode');
 const launchBehaviorSelect = requireElement<HTMLSelectElement>('#launch-behavior');
@@ -229,16 +294,28 @@ const swapButton = requireElement<HTMLButtonElement>('#swap-languages');
 const translateButton = requireElement<HTMLButtonElement>('#translate');
 const refreshButton = requireElement<HTMLButtonElement>('#refresh');
 const compactRefreshButton = requireElement<HTMLButtonElement>('#compact-refresh');
+const refreshAttention = requireElement<HTMLElement>('#refresh-attention');
+const toolbarAutoDetectButton = requireElement<HTMLButtonElement>('#toolbar-auto-detect');
+const toolbarSizeToggleButton = requireElement<HTMLButtonElement>('#toolbar-size-toggle');
+const toolbarSizeLabel = requireElement<HTMLElement>('#toolbar-size-label');
+const toolbarOcrToggleButton = requireElement<HTMLButtonElement>('#toolbar-ocr-toggle');
+const toolbarTabFollowButton = requireElement<HTMLButtonElement>('#toolbar-tab-follow');
+const toolbarTabFollowLabel = requireElement<HTMLElement>('#toolbar-tab-follow-label');
 const cancelButton = requireElement<HTMLButtonElement>('#cancel');
 const toggleSettingsButton = requireElement<HTMLButtonElement>('#toggle-settings');
+const toggleQuickTranslateButton = requireElement<HTMLButtonElement>('#toggle-quick-translate');
 const closeSettingsButton = requireElement<HTMLButtonElement>('#close-settings');
+const closeQuickTranslateButton = requireElement<HTMLButtonElement>('#close-quick-translate');
 const popoutButton = requireElement<HTMLButtonElement>('#open-popout');
 const compactToolbar = requireElement<HTMLElement>('#compact-toolbar');
+const toolbarProgress = requireElement<HTMLElement>('#toolbar-progress');
+const toolbarProgressFill = requireElement<HTMLElement>('#toolbar-progress-fill');
 const controlsOverlay = requireElement<HTMLElement>('#control-overlay');
+const quickTranslatorOverlay = requireElement<HTMLElement>('#quick-translator');
 const buildVersionElement = requireElement<HTMLElement>('#build-version');
-const settingsGrid = requireElement<HTMLElement>('#settings-grid');
+const imageAnalysisHost = requireElement<HTMLElement>('#image-analysis-host');
 const statusElement = requireElement<HTMLElement>('#status');
-const statusDot = requireElement<HTMLElement>('#status-dot');
+const settingsAttention = requireElement<HTMLElement>('#settings-attention');
 const detectedLanguageElement = requireElement<HTMLElement>('#detected-language');
 const captureNotes = requireElement<HTMLElement>('#capture-notes');
 const progressRegion = requireElement<HTMLElement>('#progress-region');
@@ -252,7 +329,14 @@ const composerInput = requireElement<HTMLTextAreaElement>('#composer-input');
 const composerOutput = requireElement<HTMLTextAreaElement>('#composer-output');
 const translateComposerButton = requireElement<HTMLButtonElement>('#translate-composer');
 const copyComposerButton = requireElement<HTMLButtonElement>('#copy-composer');
+const composerFromLanguage = requireElement<HTMLElement>('#composer-from-language');
+const composerToLanguage = requireElement<HTMLElement>('#composer-to-language');
+const composerGuidance = requireElement<HTMLElement>('#composer-guidance');
+const composerStatus = requireElement<HTMLElement>('#composer-status');
 
+let preferences: CompanionPreferences = parseCompanionPreferences(
+  DEFAULT_COMPANION_PREFERENCES,
+);
 const provider = new ChromeTranslatorProvider();
 const captureCoordinator = new LatestWorkCoordinator<CaptureRequest>();
 const detachedIdentityHint = parseDetachedPageIdentityHint(window.location.search);
@@ -302,6 +386,7 @@ const shadowReplicaEngine = new RrwebShadowReplicaEngine({
 const isolatedHtmlReplicaEngine = new IsolatedHtmlReplicaEngine({
   presentationHost: visibleReplayHost,
   openStream: openChromeHtmlMirrorStream,
+  getReplicaFidelityPolicy: () => preferences.replicaFidelityPolicy,
   onLiveApplied: () => legacyTransitionGate.markDirty(),
   onLayoutChanged: () => imageTranslationController?.refreshOverlays(),
   onSourceCommit: handleReplicaSourceCommit,
@@ -311,6 +396,9 @@ const isolatedHtmlReplicaEngine = new IsolatedHtmlReplicaEngine({
     const event = info.eventRepresentability;
     console.info(
       `[Simul isolated mirror] stage=${info.stage}; code=${info.code ?? 'none'}; nodes=${info.nodeCount}; text=${info.textCount}; images=${info.imageCount}; shadow-roots=${info.openShadowRootCount}; adopted-styles=${info.adoptedStyleCount}; hidden-labels=${info.visuallyHiddenCount}; selected-image-sources=${info.selectedImageSourceCount}; stylesheet-links=${info.stylesheetLinkCount}; stylesheet-loaded=${info.stylesheetLoadedCount}; stylesheet-errors=${info.stylesheetErrorCount}; stylesheet-timeouts=${info.stylesheetTimedOutCount}; operations=${info.operationCount}; text-ops=${info.textOperationCount}; attribute-ops=${info.attributeOperationCount}; children-ops=${info.childrenOperationCount}; reconcile-children-ops=${info.reconcileChildrenOperationCount}; dimension-ops=${info.dimensionOperationCount}; replacement-nodes=${info.replacementNodeCount}; largest-replacement=${info.largestReplacementNodeCount}; retained-nodes=${info.retainedNodeCount}; inserted-nodes=${info.insertedNodeCount}; moved-nodes=${info.movedNodeCount}; removed-nodes=${info.removedNodeCount}; full-replacement-fallbacks=${info.fullReplacementFallbackCount}; rejected-reconciliations=${info.reconciliationRejectedCount}; baseline-unsafe-elements=${info.unsafeElementOmissionCount}; baseline-unsupported-nodes=${info.unsupportedNodeOmissionCount}; baseline-depth-omissions=${info.depthBoundaryOmissionCount}; baseline-private-redactions=${info.privateTextRedactionCount}; baseline-stripped-active=${info.strippedActiveAttributeCount}; baseline-stripped-resources=${info.strippedUnsafeResourceCount}; baseline-unreadable-styles=${info.unreadableStyleCount}; baseline-capacity=${info.capacityOmissionCount}; baseline-custom-hosts=${info.customElementHostCount}; baseline-custom-hosts-without-open-root=${info.customElementHostWithoutAccessibleOpenRootCount}; baseline-open-roots=${info.accessibleOpenShadowRootCount}; baseline-missing-proof-fallbacks=${info.missingReconciliationProofFallbackCount}; baseline-covered-dirty-fallbacks=${info.coveredDirtyBranchFallbackCount}; baseline-attribute-context-fallbacks=${info.attributeContextFallbackCount}; baseline-cross-parent-fallbacks=${info.crossParentFallbackCount}; event-unsafe-elements=${event.unsafeElementOmissionCount}; event-unsupported-nodes=${event.unsupportedNodeOmissionCount}; event-depth-omissions=${event.depthBoundaryOmissionCount}; event-private-redactions=${event.privateTextRedactionCount}; event-stripped-active=${event.strippedActiveAttributeCount}; event-stripped-resources=${event.strippedUnsafeResourceCount}; event-unreadable-styles=${event.unreadableStyleCount}; event-capacity=${event.capacityOmissionCount}; event-custom-hosts=${event.customElementHostCount}; event-custom-hosts-without-open-root=${event.customElementHostWithoutAccessibleOpenRootCount}; event-open-roots=${event.accessibleOpenShadowRootCount}; event-missing-proof-fallbacks=${event.missingReconciliationProofFallbackCount}; event-covered-dirty-fallbacks=${event.coveredDirtyBranchFallbackCount}; event-attribute-context-fallbacks=${event.attributeContextFallbackCount}; event-cross-parent-fallbacks=${event.crossParentFallbackCount}; sequence=${info.sequence}`,
+    );
+    console.info(
+      `[Simul fidelity resources] policy=${info.fidelityPolicy}; baseline-preserved-stylesheets=${info.preservedStyleSheetCount}; baseline-flattened-stylesheets=${info.flattenedStyleSheetCount}; baseline-omitted-stylesheets=${info.omittedStyleSheetCount}; baseline-preserved-svg=${info.preservedSvgResourceCount}; baseline-blocked-svg=${info.blockedSvgResourceCount}; baseline-request-capable=${info.replicaRequestCapableResourceCount}; baseline-execution-risk-blocks=${info.executionRiskBlockCount}; baseline-navigation-blocks=${info.navigationBlockCount}; baseline-unsupported-scheme-blocks=${info.unsupportedSchemeBlockCount}; baseline-browser-inaccessible=${info.browserInaccessibleResourceCount}; baseline-strict-policy-blocks=${info.strictResourcePolicyBlockCount}; event-preserved-stylesheets=${event.preservedStyleSheetCount}; event-flattened-stylesheets=${event.flattenedStyleSheetCount}; event-omitted-stylesheets=${event.omittedStyleSheetCount}; event-preserved-svg=${event.preservedSvgResourceCount}; event-blocked-svg=${event.blockedSvgResourceCount}; event-request-capable=${event.replicaRequestCapableResourceCount}; event-execution-risk-blocks=${event.executionRiskBlockCount}; event-navigation-blocks=${event.navigationBlockCount}; event-unsupported-scheme-blocks=${event.unsupportedSchemeBlockCount}; event-browser-inaccessible=${event.browserInaccessibleResourceCount}; event-strict-policy-blocks=${event.strictResourcePolicyBlockCount}; replica-requests-may-occur=${info.replicaRequestsMayOccur}; sequence=${info.sequence}`,
     );
   },
 });
@@ -485,9 +573,6 @@ function handleReplicaLiveFailure(
   if (identity) queueCapture({ identity, reason: 'desynchronized' });
 }
 
-let preferences: CompanionPreferences = parseCompanionPreferences(
-  DEFAULT_COMPANION_PREFERENCES,
-);
 let snapshot: PageSnapshot | undefined;
 let followedPageIdentity: CapturedPageIdentity | undefined;
 let capturedPageIdentity: CapturedPageIdentity | undefined;
@@ -506,6 +591,8 @@ let composerInFlight = false;
 let imageTranslationInFlight = false;
 let translationDesired = false;
 let translationComplete = false;
+let openCompanionOverlay: CompanionOverlay | undefined;
+let toolbarDeterminateRatio: number | undefined;
 let activeAbortController: AbortController | undefined;
 let activeTranslationKey: string | undefined;
 let composerAbortController: AbortController | undefined;
@@ -536,11 +623,21 @@ let liveObservationAvailable = true;
 let lastSourceScroll: ReturnType<typeof readLivePageScrollMessage>;
 let availabilityCheckedForPair: string | undefined;
 let viewPreferenceRevision = 0;
+let replicaFidelityCommitInFlight = false;
 let imageAnalysisPreferenceRevision = 0;
 let imageAnalysisControls: HTMLElement | undefined;
 let surfaceTransitionInFlight = false;
 let latestToolbarLaunchStamp: CompanionLaunchStamp | undefined;
 let pendingImageReplicaActivation: PendingImageReplicaActivation | undefined;
+let toolbarAttention: ToolbarAttentionTarget | undefined;
+let toolbarAttentionTone: Extract<CompanionStatusTone, 'warning' | 'error'> =
+  'warning';
+let uiLocalizationRequestId = 0;
+let uiLocalizationInputKey = '';
+let uiLocalizationScheduled = false;
+let uiLocalizationAbortController: AbortController | undefined;
+let uiLocalizedTarget: SupportedLanguage = 'en';
+let uiLabelTranslations: ReadonlyMap<string, string> = new Map();
 const pendingViewPreferences = new Map<
   keyof CompanionViewSettings,
   { revision: number; value: CompanionViewSettings[keyof CompanionViewSettings] }
@@ -562,11 +659,19 @@ console.info(companionBuildIdentity.companionReadyMessage);
 populateLanguageOptions();
 initializeImageAnalysisControls();
 configureSurfaceButton();
+observeReplicaStateLabel();
+scheduleUiLocalization();
 
-toggleSettingsButton.addEventListener('click', () =>
-  setOverlayOpen(controlsOverlay.hasAttribute('hidden')),
-);
-closeSettingsButton.addEventListener('click', () => setOverlayOpen(false));
+toggleSettingsButton.addEventListener('click', () => {
+  setCompanionOverlay(nextCompanionOverlay(openCompanionOverlay, 'settings'));
+});
+toggleQuickTranslateButton.addEventListener('click', () => {
+  setCompanionOverlay(
+    nextCompanionOverlay(openCompanionOverlay, 'quick-translate'),
+  );
+});
+closeSettingsButton.addEventListener('click', () => setCompanionOverlay());
+closeQuickTranslateButton.addEventListener('click', () => setCompanionOverlay());
 popoutButton.addEventListener('click', () => {
   if (surfaceTransitionInFlight) return;
   surfaceTransitionInFlight = true;
@@ -575,6 +680,26 @@ popoutButton.addEventListener('click', () => {
     surfaceTransitionInFlight = false;
     updateControls();
   });
+});
+toolbarAutoDetectButton.addEventListener('click', () => {
+  sourceSelect.value = 'auto';
+  void languageSelectionChanged();
+});
+toolbarSizeToggleButton.addEventListener('click', () => {
+  const displayMode = preferences.displayMode === 'fit' ? 'actual' : 'fit';
+  void commitViewPreferencePatch({ displayMode });
+  updateMirrorLayout();
+});
+toolbarOcrToggleButton.addEventListener('click', () => {
+  void changeImageTranslationEnabled(
+    !preferences.imageTranslationEnabled || imageCaptureAccess !== 'granted',
+  );
+});
+toolbarTabFollowButton.addEventListener('click', () => {
+  if (!isDetachedWindow) return;
+  void changePopoutTabMode(
+    preferences.popoutTabMode === 'active' ? 'locked' : 'active',
+  );
 });
 
 sourceSelect.addEventListener('change', () => void languageSelectionChanged());
@@ -611,6 +736,14 @@ textLayoutSelect.addEventListener('change', () => {
   updateMirrorLayout();
 });
 
+replicaFidelityPolicySelect.addEventListener('change', () => {
+  const replicaFidelityPolicy: SelectableReplicaFidelityPolicy =
+    isSelectableReplicaFidelityPolicy(replicaFidelityPolicySelect.value)
+      ? replicaFidelityPolicySelect.value
+      : 'passive';
+  void changeReplicaFidelityPolicy(replicaFidelityPolicy);
+});
+
 replicaEngineSelect.addEventListener('change', () => {
   const replicaEngine: ReplicaEnginePreference =
     isReplicaEnginePreference(replicaEngineSelect.value)
@@ -639,10 +772,7 @@ popoutTabModeSelect.addEventListener('change', () => {
   const popoutTabMode: PopoutTabMode = isPopoutTabMode(popoutTabModeSelect.value)
     ? popoutTabModeSelect.value
     : 'locked';
-  void commitViewPreferencePatch({ popoutTabMode });
-  if (isDetachedWindow && popoutTabMode === 'active') {
-    void followCurrentActiveSourceTab();
-  }
+  void changePopoutTabMode(popoutTabMode);
 });
 
 syncScrollInput.addEventListener('change', () => {
@@ -664,18 +794,29 @@ translateButton.addEventListener('click', () => {
 });
 cancelButton.addEventListener('click', () => {
   activeAbortController?.abort();
-  composerAbortController?.abort();
+  const composerCancelled = cancelComposerTranslation();
   imageTranslationController.cancelCurrent();
-  setStatus('Cancelling on-device translation…');
+  setStatus(
+    translationInFlight || imageTranslationInFlight
+      ? 'Cancelling on-device translation…'
+      : composerCancelled
+        ? 'Quick translation cancelled.'
+        : 'Nothing is currently being translated.',
+    composerCancelled && !translationInFlight && !imageTranslationInFlight
+      ? 'warning'
+      : 'normal',
+  );
 });
 translateComposerButton.addEventListener('click', () => void translateComposer());
 copyComposerButton.addEventListener('click', () => void copyComposerOutput());
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && !controlsOverlay.hasAttribute('hidden')) {
-    setOverlayOpen(false);
+  if (event.key === 'Escape' && openCompanionOverlay) {
+    event.preventDefault();
+    setCompanionOverlay();
   }
 });
 window.addEventListener('pagehide', () => {
+  uiLocalizationAbortController?.abort();
   replicaShadowAbortController?.abort();
   imageTranslationController.dispose();
   replicaTranslationCoordinator.dispose();
@@ -845,6 +986,13 @@ browser.storage.onChanged.addListener((changes, areaName) => {
     legacyTransitionGate.release();
     const identity = followedPageIdentity ?? capturedPageIdentity;
     if (identity) queueCapture({ identity, reason: 'preference' });
+  } else if (
+    previous.replicaFidelityPolicy !== preferences.replicaFidelityPolicy &&
+    replicaEngineController.mode === 'isolated-html'
+  ) {
+    liveReplicaFailureRecoveryGate.reset();
+    const identity = followedPageIdentity ?? capturedPageIdentity;
+    if (identity) queueCapture({ identity, reason: 'preference' });
   }
   if (previous.replicaViewMode !== preferences.replicaViewMode) {
     applyReplicaViewMode(previous.replicaViewMode);
@@ -942,7 +1090,7 @@ async function sendPreferenceCommand(
 
 async function commitViewPreferencePatch(
   patch: CompanionViewSettingsPatch,
-): Promise<void> {
+): Promise<boolean> {
   preferences = withViewSettings(preferences, patch);
   syncPreferenceControls();
   const revision = ++viewPreferenceRevision;
@@ -965,6 +1113,7 @@ async function commitViewPreferencePatch(
     if (visualRoot) {
       applyMirrorTextLayout(visualRoot, preferences.textLayoutMode);
     }
+    return true;
   } catch (error) {
     clearCommittedViewPreferences(patch, revision);
     try {
@@ -978,6 +1127,7 @@ async function commitViewPreferencePatch(
       // Keep the optimistic controls visible; a later storage event can repair them.
     }
     setStatus(`Could not save options: ${readableError(error)}`, 'error');
+    return false;
   }
 }
 
@@ -1440,6 +1590,7 @@ function queueCapture(request: CaptureRequest): void {
   if (!samePage) liveReplicaFailureRecoveryGate.reset();
   if (!samePage || request.reason === 'navigation') {
     lastSourceScroll = undefined;
+    visibleReplayHost.resetSourceScroll();
   }
   const retainTranslationIntent =
     samePage &&
@@ -1777,6 +1928,7 @@ async function resolveSelectedSourceLanguage(
 ): Promise<boolean> {
   if (!snapshot) {
     resolvedSourceLanguage = undefined;
+    syncQuickTranslationPanel();
     configureImageTranslation();
     return true;
   }
@@ -1817,6 +1969,7 @@ async function resolveSelectedSourceLanguage(
       : ''
     : 'The page language could not be detected. Choose a From language.';
   detectedLanguageElement.hidden = !detectedLanguageElement.textContent;
+  syncQuickTranslationPanel();
   configureImageTranslation();
   return true;
 }
@@ -2235,22 +2388,27 @@ async function translateCached(
   source: string,
   signal?: AbortSignal,
 ): Promise<string> {
+  return translateRemembered(
+    pair,
+    source,
+    (core) => translateWithSession(session, core, signal),
+  );
+}
+
+async function translateRemembered(
+  pair: TranslationPair,
+  source: string,
+  load: (core: string) => Promise<string>,
+): Promise<string> {
   const boundary = splitBoundaryWhitespace(source);
   if (!boundary.core) return source;
-  const pageKey = capturedPageIdentity
-    ? JSON.stringify([
-        capturedPageIdentity.tabId,
-        capturedPageDocumentId ?? `generation:${captureCoordinator.generation}`,
-      ])
-    : undefined;
   const translated = await translationMemory.getOrCreate(
     {
       provider: 'chrome-translator-v1',
       pair,
-      ...(pageKey ? { pageKey } : {}),
     },
     boundary.core,
-    () => translateWithSession(session, boundary.core, signal),
+    () => load(boundary.core),
   );
   return `${boundary.leading}${translated.trim()}${boundary.trailing}`;
 }
@@ -2342,7 +2500,7 @@ async function processPendingLiveUpdate(): Promise<void> {
   activeLiveUpdate = activeUpdate;
   liveDeltaAbortController = abortController;
   liveDeltaInFlight = true;
-  statusDot.dataset.busy = 'true';
+  updateControls();
   let session: TranslationSession | undefined;
   try {
     const results = await withCaptureTimeout(
@@ -2478,7 +2636,7 @@ async function processPendingLiveUpdate(): Promise<void> {
     }
     if (activeLiveUpdate === activeUpdate) activeLiveUpdate = undefined;
     liveDeltaInFlight = false;
-    delete statusDot.dataset.busy;
+    updateControls();
     void processPendingLiveUpdate();
   }
 }
@@ -2603,7 +2761,8 @@ function followSourceScroll(scroll: NonNullable<typeof lastSourceScroll>): void 
   if (!mirrorScroller) return;
   const maxMirrorX = Math.max(0, mirrorScroller.scrollWidth - mirrorScroller.clientWidth);
   const maxMirrorY = Math.max(0, mirrorScroller.scrollHeight - mirrorScroller.clientHeight);
-  const faithful = preferences.textLayoutMode === 'faithful';
+  const faithful = preferences.textLayoutMode === 'faithful' &&
+    scroll.scrollTarget !== 'nested';
   mirrorScroller.scrollLeft = faithful
     ? Math.min(maxMirrorX, scroll.scrollX * currentMirrorScale)
     : scroll.maxScrollX > 0
@@ -2666,20 +2825,48 @@ function renderText(role: SnapshotTextRole, text: string): HTMLElement {
   return element;
 }
 
-function setOverlayOpen(open: boolean): void {
-  controlsOverlay.hidden = !open;
-  compactToolbar.hidden = open;
-  toggleSettingsButton.setAttribute('aria-expanded', String(open));
-  if (open) closeSettingsButton.focus();
-  else toggleSettingsButton.focus();
+function setCompanionOverlay(next?: CompanionOverlay): void {
+  const previous = openCompanionOverlay;
+  openCompanionOverlay = next;
+  const settingsOpen = next === 'settings';
+  const quickTranslateOpen = next === 'quick-translate';
+  controlsOverlay.hidden = !settingsOpen;
+  quickTranslatorOverlay.hidden = !quickTranslateOpen;
+  toggleSettingsButton.setAttribute('aria-expanded', String(settingsOpen));
+  toggleQuickTranslateButton.setAttribute(
+    'aria-expanded',
+    String(quickTranslateOpen),
+  );
+  renderToolbarAttention();
+  if (settingsOpen) {
+    closeSettingsButton.focus();
+    return;
+  }
+  if (quickTranslateOpen) {
+    syncQuickTranslationPanel();
+    composerInput.focus();
+    return;
+  }
+  if (previous === 'settings') toggleSettingsButton.focus();
+  if (previous === 'quick-translate') toggleQuickTranslateButton.focus();
 }
 
 function populateLanguageOptions(): void {
-  sourceSelect.replaceChildren(createLanguageOption('auto', 'Auto-detect'));
+  const auto = createLanguageOption('auto', 'Auto-detect');
+  setUiText(auto, 'Auto-detect');
+  sourceSelect.replaceChildren(auto);
   targetSelect.replaceChildren();
-  for (const language of SUPPORTED_LANGUAGES) {
-    sourceSelect.append(createLanguageOption(language, languageName(language)));
-    targetSelect.append(createLanguageOption(language, languageName(language)));
+  for (const language of LANGUAGE_OPTION_ORDER) {
+    const source = createLanguageOption(language, languageName(language));
+    const target = createLanguageOption(language, languageEndonym(language));
+    source.dataset.languageCode = language;
+    target.dataset.languageCode = language;
+    source.lang = 'en';
+    source.dir = 'auto';
+    target.lang = language;
+    target.dir = 'auto';
+    sourceSelect.append(source);
+    targetSelect.append(target);
   }
 }
 
@@ -2690,6 +2877,151 @@ function createLanguageOption(value: string, label: string): HTMLOptionElement {
   return option;
 }
 
+function setUiText(element: HTMLElement, english: string): void {
+  element.dataset.uiLabel = english;
+  const translated = uiLocalizedTarget === preferences.targetLanguage
+    ? uiLabelTranslations.get(english)
+    : undefined;
+  const text = translated ?? english;
+  if (element.textContent !== text) element.textContent = text;
+  if (translated && translated !== english) element.lang = uiLocalizedTarget;
+  else element.removeAttribute('lang');
+  if (
+    preferences.targetLanguage !== 'en' &&
+    !uiLabelTranslations.has(english)
+  ) {
+    if (uiLabelTranslations.size > 0) {
+      prepareUiEnglishFallback(preferences.targetLanguage, true);
+    }
+    scheduleUiLocalization();
+  }
+}
+
+function scheduleUiLocalization(): void {
+  prepareUiEnglishFallback(preferences.targetLanguage);
+  if (uiLocalizationScheduled) return;
+  uiLocalizationScheduled = true;
+  queueMicrotask(() => {
+    uiLocalizationScheduled = false;
+    void localizeUiLabels();
+  });
+}
+
+function prepareUiEnglishFallback(
+  targetLanguage: SupportedLanguage,
+  force = false,
+): void {
+  if (uiLocalizedTarget === targetLanguage && !force) return;
+  uiLocalizationAbortController?.abort();
+  uiLocalizationInputKey = '';
+  uiLabelTranslations = new Map();
+  uiLocalizedTarget = targetLanguage;
+  applyUiLabelsToDom();
+}
+
+async function localizeUiLabels(): Promise<void> {
+  const targetLanguage = preferences.targetLanguage;
+  prepareUiEnglishFallback(targetLanguage);
+  const sources = [...new Set(
+    [
+      ...DYNAMIC_UI_LABELS,
+      ...[...document.querySelectorAll<HTMLElement>('[data-ui-label]')]
+        .map((element) => element.dataset.uiLabel ?? '')
+        .filter(Boolean),
+    ],
+  )];
+  const inputKey = JSON.stringify([targetLanguage, sources]);
+  if (uiLocalizationInputKey === inputKey) return;
+  uiLocalizationInputKey = inputKey;
+  const requestId = ++uiLocalizationRequestId;
+  uiLocalizationAbortController?.abort();
+  const abortController = new AbortController();
+  uiLocalizationAbortController = abortController;
+  const pair: TranslationPair = {
+    sourceLanguage: 'en',
+    targetLanguage,
+  };
+  let session: TranslationSession | undefined;
+  let sessionTask: Promise<TranslationSession> | undefined;
+  try {
+    const result = await resolveUiLabelTranslations(
+      sources,
+      targetLanguage,
+      (source) => translateRemembered(pair, source, async (core) => {
+        sessionTask ??= (async () => {
+          const uiAvailability = await provider.availability(pair);
+          abortController.signal.throwIfAborted();
+          if (uiAvailability === 'unavailable') {
+            throw new Error('The UI language pair is unavailable.');
+          }
+          return provider.createSession(pair, {
+            signal: abortController.signal,
+          });
+        })();
+        session = await sessionTask;
+        return translateWithSession(session, core, abortController.signal);
+      }),
+    );
+    if (
+      abortController.signal.aborted ||
+      uiLocalizationAbortController !== abortController ||
+      requestId !== uiLocalizationRequestId ||
+      preferences.targetLanguage !== targetLanguage ||
+      uiLocalizationInputKey !== inputKey
+    ) return;
+    uiLocalizedTarget = targetLanguage;
+    uiLabelTranslations = result.labels;
+    applyUiLabelsToDom();
+  } finally {
+    session?.destroy();
+    if (uiLocalizationAbortController === abortController) {
+      uiLocalizationAbortController = undefined;
+    }
+  }
+}
+
+function applyUiLabelsToDom(): void {
+  for (const element of document.querySelectorAll<HTMLElement>('[data-ui-label]')) {
+    const english = element.dataset.uiLabel;
+    if (!english) continue;
+    const translated = uiLabelTranslations.get(english) ?? english;
+    if (element.textContent !== translated) element.textContent = translated;
+    if (translated === english) element.removeAttribute('lang');
+    else element.lang = uiLocalizedTarget;
+  }
+  updateSourceLanguageOptionLabels(preferences.targetLanguage);
+}
+
+function updateSourceLanguageOptionLabels(locale: SupportedLanguage): void {
+  const labelLanguage = createSourceLanguageLabeler(locale);
+  for (const option of document.querySelectorAll<HTMLOptionElement>(
+    '#source-language [data-language-code]',
+  )) {
+    const language = option.dataset.languageCode as SupportedLanguage | undefined;
+    if (!language) continue;
+    option.textContent = labelLanguage(language);
+    option.lang = locale;
+    option.dir = 'auto';
+  }
+}
+
+function observeReplicaStateLabel(): void {
+  const knownLabels = new Set([
+    STATIC_REPLAY_LABEL,
+    LIVE_REPLAY_LABEL,
+    LEGACY_FALLBACK_LABEL,
+  ]);
+  new MutationObserver(() => {
+    const english = replicaModeBadge.textContent?.trim() ?? '';
+    if (!english) {
+      delete replicaModeBadge.dataset.uiLabel;
+      return;
+    }
+    if (!knownLabels.has(english)) return;
+    setUiText(replicaModeBadge, english);
+  }).observe(replicaModeBadge, { childList: true, characterData: true });
+}
+
 function setZoom(value: number): void {
   const zoomPercent = clampZoomPercent(value);
   void commitViewPreferencePatch({
@@ -2697,6 +3029,14 @@ function setZoom(value: number): void {
     zoomPercent,
   });
   updateMirrorLayout();
+}
+
+async function changePopoutTabMode(popoutTabMode: PopoutTabMode): Promise<void> {
+  const saved = await commitViewPreferencePatch({ popoutTabMode });
+  if (!saved || preferences.popoutTabMode !== popoutTabMode) return;
+  if (isDetachedWindow && popoutTabMode === 'active') {
+    await followCurrentActiveSourceTab();
+  }
 }
 
 async function changeReplicaEngine(
@@ -2713,6 +3053,31 @@ async function changeReplicaEngine(
   applyReplicaEnginePreference();
   const identity = followedPageIdentity ?? capturedPageIdentity;
   if (identity) queueCapture({ identity, reason: 'preference' });
+}
+
+async function changeReplicaFidelityPolicy(
+  replicaFidelityPolicy: SelectableReplicaFidelityPolicy,
+): Promise<void> {
+  if (
+    replicaFidelityCommitInFlight ||
+    replicaFidelityPolicy === preferences.replicaFidelityPolicy
+  ) return;
+  replicaFidelityCommitInFlight = true;
+  updateControls();
+  try {
+    const saved = await commitViewPreferencePatch({ replicaFidelityPolicy });
+    if (
+      !saved ||
+      preferences.replicaFidelityPolicy !== replicaFidelityPolicy ||
+      replicaEngineController.mode !== 'isolated-html'
+    ) return;
+    liveReplicaFailureRecoveryGate.reset();
+    const identity = followedPageIdentity ?? capturedPageIdentity;
+    if (identity) queueCapture({ identity, reason: 'preference' });
+  } finally {
+    replicaFidelityCommitInFlight = false;
+    updateControls();
+  }
 }
 
 async function changeReplicaViewMode(
@@ -2851,6 +3216,7 @@ function syncPreferenceControls(): void {
   autoTranslateSelect.value = autoTranslationModeForPage(preferences, pageUrl);
   displayModeSelect.value = preferences.displayMode;
   textLayoutSelect.value = preferences.textLayoutMode;
+  replicaFidelityPolicySelect.value = preferences.replicaFidelityPolicy;
   replicaEngineSelect.value =
     preferences.replicaEngine === 'rrweb' &&
     replicaBuildEnvironment.WXT_SIMUL_RRWEB_SHADOW === '0'
@@ -2863,8 +3229,70 @@ function syncPreferenceControls(): void {
   zoomInput.value = String(preferences.zoomPercent);
   zoomOutput.value = `${preferences.zoomPercent}%`;
   zoomInput.disabled = preferences.displayMode !== 'custom';
+  syncToolbarPreferenceControls();
+  syncQuickTranslationPanel();
   renderImageAnalysisControls();
   configureImageTranslation();
+  scheduleUiLocalization();
+}
+
+function syncToolbarPreferenceControls(): void {
+  const autoDetect = preferences.sourceLanguage === 'auto';
+  toolbarAutoDetectButton.setAttribute('aria-pressed', String(autoDetect));
+  toolbarAutoDetectButton.setAttribute(
+    'aria-label',
+    autoDetect
+      ? 'From language is using Auto-detect'
+      : 'Set From language to Auto-detect',
+  );
+  toolbarAutoDetectButton.title = autoDetect
+    ? 'From language is using Auto-detect.'
+    : 'Set From language to Auto-detect.';
+
+  const sizeLabel = preferences.displayMode === 'fit'
+    ? 'Fit'
+    : preferences.displayMode === 'actual'
+      ? '1:1'
+      : `${preferences.zoomPercent}%`;
+  if (preferences.displayMode === 'custom') {
+    delete toolbarSizeLabel.dataset.uiLabel;
+    toolbarSizeLabel.textContent = sizeLabel;
+  } else {
+    setUiText(toolbarSizeLabel, sizeLabel);
+  }
+  const nextSize = preferences.displayMode === 'fit' ? '1:1 size' : 'fit width';
+  toolbarSizeToggleButton.setAttribute(
+    'aria-label',
+    `Mirror size: ${sizeLabel}. Switch to ${nextSize}`,
+  );
+  toolbarSizeToggleButton.title = `Mirror size: ${sizeLabel}. Click for ${nextSize}.`;
+
+  toolbarOcrToggleButton.setAttribute(
+    'aria-pressed',
+    String(preferences.imageTranslationEnabled),
+  );
+  toolbarOcrToggleButton.title = preferences.imageTranslationEnabled
+    ? imageCaptureAccess === 'granted'
+      ? 'Image text translation is on. Click to turn it off.'
+      : 'Image text translation is saved but needs image access. Click to grant access.'
+    : 'Image text translation is off. Click to turn it on.';
+
+  const followsActive = isDetachedWindow && preferences.popoutTabMode === 'active';
+  setUiText(toolbarTabFollowLabel, followsActive ? 'Active' : 'Current');
+  toolbarTabFollowButton.setAttribute('aria-pressed', String(followsActive));
+  toolbarTabFollowButton.setAttribute(
+    'aria-label',
+    isDetachedWindow
+      ? followsActive
+        ? 'Follow the opening tab instead of the active browser tab'
+        : 'Follow the active browser tab instead of the opening tab'
+      : 'Tab following is fixed to the current side-panel tab',
+  );
+  toolbarTabFollowButton.title = isDetachedWindow
+    ? followsActive
+      ? 'Following the active browser tab. Click to stay on the opening tab.'
+      : 'Staying on the opening tab. Click to follow the active browser tab.'
+    : 'The side panel is attached to the current tab. Active-tab following is available in a detached window.';
 }
 
 function configureImageTranslation(): void {
@@ -2893,7 +3321,7 @@ function initializeImageAnalysisControls(): void {
   imageAnalysisControls = document.createElement('section');
   imageAnalysisControls.className = 'image-analysis-settings';
   imageAnalysisControls.setAttribute('aria-label', 'Image text options');
-  settingsGrid.insertAdjacentElement('afterend', imageAnalysisControls);
+  imageAnalysisHost.append(imageAnalysisControls);
   renderImageAnalysisControls();
 }
 
@@ -2902,7 +3330,7 @@ function renderImageAnalysisControls(): void {
   if (!root) return;
   root.replaceChildren();
   const heading = document.createElement('h3');
-  heading.textContent = 'Image text';
+  setUiText(heading, 'Image text');
   root.append(heading);
 
   root.append(createPromptToggle(
@@ -2914,20 +3342,24 @@ function renderImageAnalysisControls(): void {
   const privacyNote = document.createElement('p');
   privacyNote.className = 'microcopy';
   if (preferences.imageTranslationEnabled && imageCaptureAccess === 'missing') {
-    privacyNote.textContent =
-      'Image translation is saved but paused. Grant image access so Chrome can capture visible pixels for local OCR.';
+    setUiText(
+      privacyNote,
+      'Image translation is saved but paused. Grant image access so Chrome can capture visible pixels for local OCR.',
+    );
   } else if (imageCaptureAccess === 'checking') {
-    privacyNote.textContent = 'Checking Chrome image access…';
+    setUiText(privacyNote, 'Checking Chrome image access…');
   } else {
-    privacyNote.textContent =
-      'Off by default. Visible image pixels stay on this device and are discarded after OCR.';
+    setUiText(
+      privacyNote,
+      'Off by default. Visible image pixels stay on this device and are discarded after OCR.',
+    );
   }
   root.append(privacyNote);
   if (preferences.imageTranslationEnabled && imageCaptureAccess === 'missing') {
     const grant = document.createElement('button');
     grant.type = 'button';
     grant.className = 'image-access-grant';
-    grant.textContent = 'Grant image access';
+    setUiText(grant, 'Grant image access');
     grant.disabled = permissionInFlight;
     grant.addEventListener('click', () => {
       void changeImageTranslationEnabled(true);
@@ -2941,7 +3373,8 @@ function renderImageAnalysisControls(): void {
   if (compiledOrder.length > 0) {
     const orderLabel = document.createElement('p');
     orderLabel.className = 'microcopy';
-    orderLabel.textContent = 'OCR priority';
+    setUiText(orderLabel, 'OCR priority');
+    orderLabel.title = 'Simul tries locally available OCR providers from top to bottom.';
     root.append(orderLabel);
     const list = document.createElement('ol');
     list.className = 'ocr-provider-order';
@@ -2970,11 +3403,16 @@ function renderImageAnalysisControls(): void {
     const grid = document.createElement('div');
     grid.className = 'settings-grid';
     const policyLabel = document.createElement('label');
+    policyLabel.title =
+      'Choose whether images are recognized only when visible, after visible work, or immediately.';
     const policyTitle = document.createElement('span');
-    policyTitle.textContent = 'Scan images';
+    setUiText(policyTitle, 'Scan images');
     const policy = document.createElement('select');
     for (const value of IMAGE_SCAN_POLICIES) {
-      policy.append(createLanguageOption(value, imageScanPolicyName(value)));
+      const label = imageScanPolicyName(value);
+      const option = createLanguageOption(value, label);
+      setUiText(option, label);
+      policy.append(option);
     }
     policy.value = preferences.imageScanPolicy;
     policy.addEventListener('change', () => {
@@ -2985,6 +3423,8 @@ function renderImageAnalysisControls(): void {
     policyLabel.append(policyTitle, policy);
     const smallLabel = document.createElement('label');
     smallLabel.className = 'check-label';
+    smallLabel.title =
+      'Ignore tiny images that are unlikely to contain useful readable text.';
     const small = document.createElement('input');
     small.type = 'checkbox';
     small.checked = preferences.skipSmallImages;
@@ -2992,7 +3432,7 @@ function renderImageAnalysisControls(): void {
       void commitImageAnalysisPreferencePatch({ skipSmallImages: small.checked });
     });
     const smallTitle = document.createElement('span');
-    smallTitle.textContent = 'Skip very small images';
+    setUiText(smallTitle, 'Skip very small images');
     smallLabel.append(small, smallTitle);
     grid.append(policyLabel, smallLabel);
     root.append(grid);
@@ -3020,11 +3460,14 @@ function renderImageAnalysisControls(): void {
   const diagnostics = document.createElement('details');
   diagnostics.className = 'image-diagnostics';
   const summary = document.createElement('summary');
-  summary.textContent = 'OCR diagnostics';
+  setUiText(summary, 'OCR diagnostics');
+  summary.title = 'Inspect content-free OCR stages and counts for this session.';
   const note = document.createElement('p');
   note.className = 'microcopy';
-  note.textContent =
-    'Memory-only stages and counts; page text, URLs, pixels, and identifiers are never included.';
+  setUiText(
+    note,
+    'Memory-only stages and counts; page text, URLs, pixels, and identifiers are never included.',
+  );
   const output = document.createElement('output');
   output.className = 'image-diagnostics-output';
   output.setAttribute('aria-live', 'polite');
@@ -3033,7 +3476,7 @@ function renderImageAnalysisControls(): void {
   const clear = document.createElement('button');
   clear.type = 'button';
   clear.className = 'image-diagnostics-clear';
-  clear.textContent = 'Clear diagnostics';
+  setUiText(clear, 'Clear diagnostics');
   clear.addEventListener('click', () => {
     imageTranslationDiagnosticHistory.clear();
     renderImageTranslationDiagnosticHistory();
@@ -3052,6 +3495,7 @@ function createOrderButton(
   button.type = 'button';
   button.textContent = text;
   button.setAttribute('aria-label', label);
+  button.title = label;
   button.disabled = disabled;
   button.addEventListener('click', action);
   return button;
@@ -3090,7 +3534,7 @@ function createPromptToggle(
   input.disabled = disabled;
   input.addEventListener('change', () => void save(input.checked));
   const title = document.createElement('span');
-  title.textContent = label;
+  setUiText(title, label);
   wrapper.append(input, title);
   return wrapper;
 }
@@ -3220,20 +3664,67 @@ async function closeNativeSidePanel(windowId: number): Promise<boolean> {
   }
 }
 
+function syncQuickTranslationPanel(): void {
+  const pair = reverseTranslationPair(selectedPair());
+  composerFromLanguage.textContent = localizedLanguageName(
+    preferences.targetLanguage,
+    preferences.targetLanguage,
+  );
+  composerFromLanguage.lang = preferences.targetLanguage;
+  if (!pair) {
+    setUiText(composerToLanguage, 'Waiting for website language');
+    setUiText(
+      composerGuidance,
+      'Simul is still detecting the website language. If detection remains inconclusive, choose From in the toolbar.',
+    );
+    return;
+  }
+  delete composerToLanguage.dataset.uiLabel;
+  composerToLanguage.textContent = localizedLanguageName(
+    pair.targetLanguage,
+    preferences.targetLanguage,
+  );
+  composerToLanguage.lang = preferences.targetLanguage;
+  setUiText(
+    composerGuidance,
+    pair.sourceLanguage === pair.targetLanguage
+      ? 'The languages match, so Simul will copy the text unchanged.'
+      : 'Your draft stays only in this companion window and is not saved.',
+  );
+}
+
+function localizedLanguageName(
+  language: SupportedLanguage,
+  locale: SupportedLanguage,
+): string {
+  try {
+    return new Intl.DisplayNames([locale], { type: 'language' }).of(language) ??
+      languageName(language);
+  } catch {
+    return languageName(language);
+  }
+}
+
+function setComposerStatus(
+  message: string,
+  tone: 'normal' | 'success' | 'warning' | 'error' = 'normal',
+): void {
+  composerStatus.textContent = message;
+  composerStatus.dataset.tone = tone;
+}
+
 async function translateComposer(): Promise<void> {
-  const text = composerInput.value.trim();
+  const text = composerInput.value;
   const forwardPair = selectedPair();
-  if (!text || !forwardPair || composerInFlight) return;
-  const pair: TranslationPair = {
-    sourceLanguage: forwardPair.targetLanguage,
-    targetLanguage: forwardPair.sourceLanguage,
-  };
+  const pair = reverseTranslationPair(forwardPair);
+  if (!text.trim() || !forwardPair || !pair || composerInFlight) return;
   composerAbortController?.abort();
   const abortController = new AbortController();
   composerAbortController = abortController;
   composerInFlight = true;
   composerOutput.value = '';
   copyComposerButton.disabled = true;
+  setComposerStatus('Translating locally…');
   updateControls();
   let session: TranslationSession | undefined;
   try {
@@ -3241,42 +3732,66 @@ async function translateComposer(): Promise<void> {
     if (pair.sourceLanguage === pair.targetLanguage) {
       translated = text;
     } else {
-      const composerAvailability = await provider.availability(pair);
-      abortController.signal.throwIfAborted();
-      if (composerAvailability === 'unavailable') {
-        throw new Error('The reverse language pair is unavailable on this device.');
-      }
-      session = await provider.createSession(pair, { signal: abortController.signal });
-      translated = await translateWithSession(session, text, abortController.signal);
+      translated = await translateRemembered(pair, text, async (core) => {
+        const composerAvailability = await provider.availability(pair);
+        abortController.signal.throwIfAborted();
+        if (composerAvailability === 'unavailable') {
+          throw new Error('The reverse language pair is unavailable on this device.');
+        }
+        session = await provider.createSession(pair, {
+          signal: abortController.signal,
+        });
+        return translateWithSession(session, core, abortController.signal);
+      });
     }
     const currentForwardPair = selectedPair();
     if (
       abortController.signal.aborted ||
       composerAbortController !== abortController ||
-      composerInput.value.trim() !== text ||
+      composerInput.value !== text ||
       !currentForwardPair ||
       currentForwardPair.sourceLanguage !== forwardPair.sourceLanguage ||
       currentForwardPair.targetLanguage !== forwardPair.targetLanguage
     ) return;
     composerOutput.value = translated;
     copyComposerButton.disabled = composerOutput.value.length === 0;
+    setComposerStatus('Translation is ready to copy.', 'success');
     setStatus('Reply translation is ready to copy. It was not saved.', 'success');
+    logTranslationCache('quick', translationMemory);
   } catch (error) {
     if (!isAbortError(error) && !abortController.signal.aborted) {
-      setStatus(`Could not translate the reply: ${readableError(error)}`, 'error');
+      const message = `Could not translate the reply: ${readableError(error)}`;
+      setComposerStatus(message, 'error');
+      setStatus(message, 'error');
+    } else if (composerAbortController === abortController) {
+      setComposerStatus('');
     }
   } finally {
     session?.destroy();
-    if (composerAbortController === abortController) composerAbortController = undefined;
-    composerInFlight = false;
-    updateControls();
+    if (composerAbortController === abortController) {
+      composerAbortController = undefined;
+      composerInFlight = false;
+      updateControls();
+    }
   }
 }
 
+function cancelComposerTranslation(): boolean {
+  const abortController = composerAbortController;
+  const wasInFlight = composerInFlight || abortController !== undefined;
+  composerAbortController = undefined;
+  composerInFlight = false;
+  abortController?.abort();
+  if (wasInFlight) setComposerStatus('');
+  updateControls();
+  return wasInFlight;
+}
+
 function invalidateComposerOutput(): void {
-  composerAbortController?.abort();
+  cancelComposerTranslation();
   composerOutput.value = '';
   copyComposerButton.disabled = true;
+  setComposerStatus('');
   updateControls();
 }
 
@@ -3284,10 +3799,15 @@ async function copyComposerOutput(): Promise<void> {
   if (!composerOutput.value) return;
   try {
     await navigator.clipboard.writeText(composerOutput.value);
+    setComposerStatus('Translated text copied.', 'success');
     setStatus('Translated reply copied.', 'success');
   } catch {
     composerOutput.focus();
     composerOutput.select();
+    setComposerStatus(
+      'Chrome could not copy automatically. The output is selected.',
+      'warning',
+    );
     setStatus('Chrome could not copy automatically. The result is selected for copying.', 'warning');
   }
 }
@@ -3528,6 +4048,7 @@ function invalidateCompanion(message: string): void {
   legacyTransitionGate.reset();
   liveReplicaFailureRecoveryGate.reset();
   lastSourceScroll = undefined;
+  visibleReplayHost.resetSourceScroll();
   disconnectMirror();
   renderErrorState(message);
   setStatus(message, 'warning');
@@ -3768,6 +4289,8 @@ function showCaptureNotes(page: PageSnapshot): void {
 }
 
 function updateControls(): void {
+  syncToolbarPreferenceControls();
+  syncQuickTranslationPanel();
   const busy = captureInFlight || translationInFlight || permissionInFlight || composerInFlight;
   sourceSelect.disabled = busy;
   targetSelect.disabled = busy;
@@ -3775,6 +4298,7 @@ function updateControls(): void {
   autoTranslateSelect.disabled = busy;
   displayModeSelect.disabled = busy;
   textLayoutSelect.disabled = busy;
+  replicaFidelityPolicySelect.disabled = busy || replicaFidelityCommitInFlight;
   launchBehaviorSelect.disabled = busy;
   popoutTabModeSelect.disabled = busy;
   syncScrollInput.disabled = busy || !liveObservationAvailable;
@@ -3782,6 +4306,12 @@ function updateControls(): void {
   zoomOutButton.disabled = busy;
   refreshButton.disabled = captureInFlight;
   compactRefreshButton.disabled = captureInFlight;
+  toolbarAutoDetectButton.disabled = busy;
+  toolbarSizeToggleButton.disabled = busy;
+  toolbarOcrToggleButton.disabled = busy ||
+    imageCaptureAccess === 'checking' ||
+    !hasCompiledImageAnalysisCapability();
+  toolbarTabFollowButton.disabled = busy || !isDetachedWindow;
   popoutButton.disabled = surfaceTransitionInFlight ||
     (!isDetachedWindow && !capturedPageIdentity);
   cancelButton.hidden =
@@ -3789,6 +4319,10 @@ function updateControls(): void {
   cancelButton.disabled =
     !translationInFlight && !composerInFlight && !imageTranslationInFlight;
   translateComposerButton.disabled = busy || !composerInput.value.trim() || !selectedPair();
+  setUiText(
+    translateComposerButton,
+    composerInFlight ? 'Translating…' : 'Translate',
+  );
   translateButton.disabled =
     busy ||
     isLiveSourceOnlyMode() ||
@@ -3797,10 +4331,57 @@ function updateControls(): void {
     !selectedPair() ||
     availability === 'unavailable' ||
     translationComplete;
-  translateButton.textContent = translationComplete ? 'Translation current' : 'Translate page';
-  statusDot.dataset.busy = String(
-    busy || liveDeltaInFlight || imageTranslationInFlight,
+  setUiText(
+    translateButton,
+    translationComplete ? 'Translation current' : 'Translate page',
   );
+  renderToolbarAttention();
+  syncToolbarProgress();
+}
+
+function syncToolbarProgress(): void {
+  const activity: ToolbarActivity = {
+    ...(toolbarDeterminateRatio === undefined
+      ? {}
+      : { determinateRatio: toolbarDeterminateRatio }),
+    captureInFlight,
+    translationInFlight,
+    permissionInFlight,
+    composerInFlight,
+    liveDeltaInFlight,
+    imageTranslationInFlight,
+    surfaceTransitionInFlight,
+  };
+  const state = toolbarProgressState(activity);
+  const busy = state.kind !== 'idle';
+  toolbarProgress.hidden = !busy;
+  compactToolbar.setAttribute('aria-busy', String(busy));
+  if (state.kind === 'idle') {
+    delete toolbarProgress.dataset.mode;
+    toolbarProgressFill.style.removeProperty('--toolbar-progress-ratio');
+    toolbarProgress.setAttribute('aria-label', 'Companion idle');
+    toolbarProgress.removeAttribute('aria-valuenow');
+    toolbarProgress.removeAttribute('aria-valuetext');
+    return;
+  }
+  toolbarProgress.dataset.mode = state.kind;
+  if (state.kind === 'determinate') {
+    const percent = Math.round(state.ratio * 100);
+    const label = progressLabel.textContent?.trim() || 'Translating page';
+    toolbarProgressFill.style.setProperty(
+      '--toolbar-progress-ratio',
+      String(state.ratio),
+    );
+    toolbarProgress.setAttribute('aria-label', label);
+    toolbarProgress.setAttribute('aria-valuenow', String(percent));
+    toolbarProgress.setAttribute('aria-valuetext', `${label} ${percent}%`);
+  } else {
+    const label = toolbarActivityLabel(activity);
+    toolbarProgressFill.style.removeProperty('--toolbar-progress-ratio');
+    toolbarProgress.setAttribute('aria-label', label);
+    toolbarProgress.removeAttribute('aria-valuenow');
+    toolbarProgress.setAttribute('aria-valuetext', label);
+  }
 }
 
 function setImageTranslationBusy(busy: boolean): void {
@@ -3813,7 +4394,12 @@ function setImageTranslationBusy(busy: boolean): void {
   } else if (!busy && !translationInFlight && !composerInFlight) {
     hideProgress();
   }
-  if (completed) logTranslationCache('image-text', imageTranslationMemory);
+  if (completed) {
+    logTranslationCache('image-text', imageTranslationMemory);
+    if (statusElement.textContent === 'Cancelling on-device translation…') {
+      setStatus('Image text processing stopped.', 'warning');
+    }
+  }
   updateControls();
 }
 
@@ -3827,9 +4413,12 @@ function showProgress(label: string, value: number, max: number): void {
   progressLabel.textContent = label;
   progressElement.max = Math.max(1, max);
   progressElement.value = Math.min(progressElement.max, Math.max(0, value));
+  toolbarDeterminateRatio = progressElement.value / progressElement.max;
+  syncToolbarProgress();
 }
 
 function hideProgress(): void {
+  toolbarDeterminateRatio = undefined;
   if (
     imageTranslationInFlight &&
     !translationInFlight &&
@@ -3838,21 +4427,36 @@ function hideProgress(): void {
     progressRegion.hidden = false;
     progressLabel.textContent = 'Recognizing visible image text locally…';
     progressElement.removeAttribute('value');
+    syncToolbarProgress();
     return;
   }
   progressRegion.hidden = true;
   progressElement.setAttribute('value', '0');
   progressElement.value = 0;
+  syncToolbarProgress();
 }
 
 function setStatus(
   message: string,
-  tone: 'normal' | 'success' | 'warning' | 'error' = 'normal',
+  tone: CompanionStatusTone = 'normal',
 ): void {
   statusElement.textContent = message;
   statusElement.dataset.tone = tone;
-  statusDot.dataset.tone = tone;
-  statusDot.title = message;
+  toolbarAttention = toolbarAttentionTarget(message, tone);
+  if (tone === 'warning' || tone === 'error') toolbarAttentionTone = tone;
+  refreshAttention.title = toolbarAttention === 'refresh' ? message : '';
+  settingsAttention.title = toolbarAttention === 'settings' ? message : '';
+  renderToolbarAttention();
+}
+
+function renderToolbarAttention(): void {
+  const refreshVisible = toolbarAttention === 'refresh';
+  const settingsVisible =
+    toolbarAttention === 'settings' && openCompanionOverlay !== 'settings';
+  refreshAttention.hidden = !refreshVisible;
+  settingsAttention.hidden = !settingsVisible;
+  refreshAttention.dataset.tone = toolbarAttentionTone;
+  settingsAttention.dataset.tone = toolbarAttentionTone;
 }
 
 function normalizedPageUrl(value: string): string {
@@ -3912,7 +4516,7 @@ function logImageTranslationDiagnostic(
 }
 
 function logTranslationCache(
-  label: 'page' | 'image-text',
+  label: 'page' | 'image-text' | 'quick',
   memory: TranslationMemory,
 ): void {
   const stats = memory.snapshotStats();

@@ -16,6 +16,10 @@ import {
   withViewSettings,
   type CompanionPreferences,
 } from '../lib/preferences';
+import {
+  isReplicaFidelityPolicy,
+  isSelectableReplicaFidelityPolicy,
+} from '../lib/replica/fidelity-policy';
 
 describe('parseCompanionPreferences', () => {
   it('uses privacy-preserving defaults for absent or invalid data', () => {
@@ -29,6 +33,7 @@ describe('parseCompanionPreferences', () => {
       syncScroll: true,
       textLayoutMode: 'adaptive',
       replicaEngine: 'isolated-html',
+      replicaFidelityPolicy: 'passive',
       replicaViewMode: 'translated',
       launchBehavior: 'last-used',
       lastLaunchSurface: 'side-panel',
@@ -62,6 +67,7 @@ describe('parseCompanionPreferences', () => {
       syncScroll: true,
       textLayoutMode: 'adaptive',
       replicaEngine: 'isolated-html',
+      replicaFidelityPolicy: 'passive',
       replicaViewMode: 'translated',
       launchBehavior: 'last-used',
       lastLaunchSurface: 'side-panel',
@@ -107,6 +113,7 @@ describe('parseCompanionPreferences', () => {
       syncScroll: true,
       textLayoutMode: 'adaptive',
       replicaEngine: 'isolated-html',
+      replicaFidelityPolicy: 'passive',
       replicaViewMode: 'translated',
       launchBehavior: 'last-used',
       lastLaunchSurface: 'side-panel',
@@ -192,6 +199,25 @@ describe('parseCompanionPreferences', () => {
     expect(withViewSettings(parseCompanionPreferences(undefined), {
       replicaViewMode: 'source-only',
     })).toMatchObject({ replicaViewMode: 'source-only' });
+  });
+
+  it('defaults and migrates replica fidelity without enabling reserved strict local', () => {
+    expect(parseCompanionPreferences(undefined).replicaFidelityPolicy).toBe(
+      'passive',
+    );
+    expect(parseCompanionPreferences({}).replicaFidelityPolicy).toBe('passive');
+    expect(parseCompanionPreferences({
+      replicaFidelityPolicy: 'conservative',
+    }).replicaFidelityPolicy).toBe('conservative');
+    expect(parseCompanionPreferences({
+      replicaFidelityPolicy: 'strict-local',
+    }).replicaFidelityPolicy).toBe('passive');
+    expect(parseCompanionPreferences({
+      replicaFidelityPolicy: 'unbounded',
+    }).replicaFidelityPolicy).toBe('passive');
+
+    expect(isReplicaFidelityPolicy('strict-local')).toBe(true);
+    expect(isSelectableReplicaFidelityPolicy('strict-local')).toBe(false);
   });
 
   it('repairs old or damaged image-analysis settings without mutating saved order', () => {
@@ -355,6 +381,7 @@ describe('preference updates', () => {
         zoomPercent: 175,
         syncScroll: false,
         textLayoutMode: 'faithful',
+        replicaFidelityPolicy: 'conservative',
       }),
     ).toMatchObject({
       sourceLanguage: 'auto',
@@ -363,6 +390,7 @@ describe('preference updates', () => {
       zoomPercent: 175,
       syncScroll: false,
       textLayoutMode: 'faithful',
+      replicaFidelityPolicy: 'conservative',
     });
   });
 

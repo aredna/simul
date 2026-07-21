@@ -30,13 +30,26 @@ const NON_CONTENT_TAGS = new Set([
   'template',
 ]);
 
-export interface ReplicaSourceTextRecord {
+export interface ReplicaSourceDomTextRecord {
   readonly document: ReplicaSourceDocumentIdentity;
   readonly nodeId: number;
   readonly nodeType: 3;
   readonly revision: number;
   readonly source: string;
 }
+
+export interface ReplicaSourceControlTextRecord {
+  readonly document: ReplicaSourceDocumentIdentity;
+  readonly nodeId: number;
+  readonly nodeType: 1;
+  readonly controlTarget: 'value' | 'placeholder';
+  readonly revision: number;
+  readonly source: string;
+}
+
+export type ReplicaSourceTextRecord =
+  | ReplicaSourceDomTextRecord
+  | ReplicaSourceControlTextRecord;
 
 export type ReplicaSourceTextChange =
   | {

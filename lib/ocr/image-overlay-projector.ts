@@ -13,6 +13,10 @@ import {
 
 export const IMAGE_OVERLAY_LAYER_ATTRIBUTE = 'data-simul-image-overlay-layer';
 export const MAX_IMAGE_OVERLAY_REGIONS = 10_000;
+const MIN_IMAGE_OVERLAY_FONT_PX = 3;
+const MAX_IMAGE_OVERLAY_FONT_PX = 32;
+const IMAGE_OVERLAY_LINE_HEIGHT = 1.12;
+const IMAGE_OVERLAY_FIT_STEPS = 7;
 
 export interface TranslatedImageRegion {
   readonly text: string;
@@ -269,8 +273,7 @@ export class ImageOverlayProjector {
       element.style.top = `${box.y}px`;
       element.style.width = `${box.width}px`;
       element.style.height = `${box.height}px`;
-      element.style.fontSize = `${Math.max(8, Math.min(32, box.height * 0.68))}px`;
-      element.style.lineHeight = `${Math.max(9, box.height)}px`;
+      fitRegionText(element, region.text, box.width, box.height);
     });
   }
 
@@ -387,11 +390,14 @@ function applyImageRootStyle(element: HTMLElement): void {
 function applyRegionStyle(element: HTMLElement): void {
   Object.assign(element.style, {
     position: 'absolute',
-    display: 'block',
+    display: 'flex',
+    alignItems: 'center',
+    justifyContent: 'center',
     overflow: 'hidden',
     padding: '0',
     margin: '0',
     border: '0',
+    boxSizing: 'border-box',
     borderRadius: '2px',
     color: '#111',
     background: 'rgba(255, 255, 255, 0.94)',
@@ -399,9 +405,85 @@ function applyRegionStyle(element: HTMLElement): void {
     fontWeight: '600',
     textAlign: 'center',
     textOverflow: 'clip',
-    whiteSpace: 'nowrap',
+    whiteSpace: 'normal',
+    overflowWrap: 'anywhere',
+    wordBreak: 'break-word',
     pointerEvents: 'none',
   });
+}
+
+/**
+ * Fit translated text without changing OCR geometry. The first estimate is
+ * script-neutral and deterministic; a short bounded measurement refinement
+ * handles real browser font metrics without creating an unbounded layout loop.
+ */
+function fitRegionText(
+  element: HTMLElement,
+  text: string,
+  width: number,
+  height: number,
+): void {
+  const maximum = Math.max(
+    MIN_IMAGE_OVERLAY_FONT_PX,
+    Math.min(MAX_IMAGE_OVERLAY_FONT_PX, height / IMAGE_OVERLAY_LINE_HEIGHT),
+  );
+  const units = Math.max(1, estimatedTextUnits(text));
+  const areaFit = Math.sqrt(
+    Math.max(1, width * height) / (units * IMAGE_OVERLAY_LINE_HEIGHT),
+  );
+  let fitted = Math.max(
+    MIN_IMAGE_OVERLAY_FONT_PX,
+    Math.min(maximum, areaFit),
+  );
+  applyRegionFont(element, fitted);
+  if (!regionOverflows(element, width, height) || fitted <= MIN_IMAGE_OVERLAY_FONT_PX) {
+    return;
+  }
+
+  let lower = MIN_IMAGE_OVERLAY_FONT_PX;
+  let upper = fitted;
+  applyRegionFont(element, lower);
+  if (regionOverflows(element, width, height)) return;
+  for (let step = 0; step < IMAGE_OVERLAY_FIT_STEPS; step += 1) {
+    const candidate = (lower + upper) / 2;
+    applyRegionFont(element, candidate);
+    if (regionOverflows(element, width, height)) upper = candidate;
+    else lower = candidate;
+  }
+  fitted = lower;
+  applyRegionFont(element, fitted);
+}
+
+function applyRegionFont(element: HTMLElement, fontSize: number): void {
+  element.style.fontSize = `${Math.round(fontSize * 100) / 100}px`;
+  element.style.lineHeight = String(IMAGE_OVERLAY_LINE_HEIGHT);
+}
+
+function regionOverflows(
+  element: HTMLElement,
+  width: number,
+  height: number,
+): boolean {
+  const scrollWidth = Number(element.scrollWidth);
+  const scrollHeight = Number(element.scrollHeight);
+  return (
+    (Number.isFinite(scrollWidth) && scrollWidth > width + 0.5) ||
+    (Number.isFinite(scrollHeight) && scrollHeight > height + 0.5)
+  );
+}
+
+function estimatedTextUnits(text: string): number {
+  let units = 0;
+  for (const character of text) {
+    if (/\s/u.test(character)) units += 0.34;
+    else if (/\p{Mark}/u.test(character)) continue;
+    else if (/\p{Script=Han}|\p{Script=Hiragana}|\p{Script=Katakana}|\p{Script=Hangul}/u.test(character)) {
+      units += 1;
+    } else {
+      units += 0.58;
+    }
+  }
+  return units;
 }
 
 function validRect(rect: DOMRect): boolean {

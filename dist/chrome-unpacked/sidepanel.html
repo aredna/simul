@@ -5,102 +5,101 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="color-scheme" content="light dark">
     <title>Translation companion</title>
-    <script type="module" crossorigin src="/chunks/sidepanel-BdZgQSpS.js"></script>
+    <script type="module" crossorigin src="/chunks/sidepanel-DYrc7WGu.js"></script>
     <link rel="modulepreload" crossorigin href="/chunks/transient-image-store-DN8bYpXc.js">
-    <link rel="stylesheet" crossorigin href="/assets/sidepanel-BycOk1BE.css">
+    <link rel="stylesheet" crossorigin href="/assets/sidepanel-FiLzn_OB.css">
   </head>
   <body>
     <nav id="compact-toolbar" class="compact-toolbar" aria-label="Translation companion controls">
-      <button id="toggle-settings" class="toolbar-button" type="button" aria-label="Open translation options" aria-expanded="false" title="Translation options">
-        ⚙
-      </button>
+      <span id="toolbar-progress" class="toolbar-progress" role="progressbar" aria-label="Companion processing" aria-valuemin="0" aria-valuemax="100" hidden>
+        <span id="toolbar-progress-fill" class="toolbar-progress-fill"></span>
+      </span>
       <button id="compact-refresh" class="toolbar-button" type="button" aria-label="Rebuild mirror" title="Rebuild mirror">
         ↻
+        <span id="refresh-attention" class="toolbar-attention" aria-hidden="true" hidden></span>
       </button>
-      <span id="status-dot" class="status-dot" title="Reading the source page"></span>
+      <div class="toolbar-language-group" role="group" aria-label="Page translation languages">
+        <div class="toolbar-language-control" title="Language used by the source website">
+          <label for="source-language" data-ui-label="From">From</label>
+          <button id="toolbar-auto-detect" class="toolbar-button toolbar-auto-detect" type="button" aria-pressed="false" title="Set From language to Auto-detect">
+            <span aria-hidden="true">[A]</span>
+          </button>
+          <select id="source-language" aria-label="From language"></select>
+        </div>
+        <button id="swap-languages" class="toolbar-button toolbar-swap" type="button" aria-label="Swap languages" title="Swap languages">⇄</button>
+        <label class="toolbar-language-control" title="Language Simul translates the page into">
+          <span data-ui-label="To">To</span>
+          <select id="target-language" aria-label="To language"></select>
+        </label>
+      </div>
+      <button id="toolbar-size-toggle" class="toolbar-button toolbar-text-button" type="button" aria-label="Change mirror size" title="Change mirror size">
+        <span id="toolbar-size-label" data-ui-label="Fit">Fit</span>
+      </button>
+      <button id="toolbar-ocr-toggle" class="toolbar-button toolbar-text-button" type="button" aria-label="Toggle image text translation" aria-pressed="false" title="Image text translation is off">
+        OCR
+      </button>
+      <button id="toolbar-tab-follow" class="toolbar-button toolbar-text-button" type="button" aria-label="Follow the current browser tab" aria-pressed="false" title="Available in a detached companion window" disabled>
+        <span id="toolbar-tab-follow-label" data-ui-label="Current">Current</span>
+      </button>
+      <button id="toggle-quick-translate" class="toolbar-button toolbar-button--translate" type="button" aria-label="Open quick translation" aria-expanded="false" aria-controls="quick-translator" title="Quick translation">
+        <span aria-hidden="true">文</span>
+      </button>
+      <button id="toggle-settings" class="toolbar-button" type="button" aria-label="Open translation options" aria-expanded="false" aria-controls="control-overlay" title="Translation options">
+        ⚙
+        <span id="settings-attention" class="toolbar-attention" aria-hidden="true" hidden></span>
+      </button>
       <button id="open-popout" class="toolbar-button" type="button" aria-label="Open detached companion window" title="Open detached window">
         ↗
       </button>
+      <span id="replica-mode-badge" class="replica-state-label" role="status" aria-live="polite" hidden></span>
     </nav>
 
     <section id="control-overlay" class="control-overlay" hidden aria-label="Translation options">
       <div class="overlay-heading">
         <div class="overlay-title">
-          <strong>Options</strong>
+          <strong data-ui-label="Options">Options</strong>
           <span id="build-version" class="build-version"></span>
         </div>
         <button id="close-settings" class="quiet-button" type="button" aria-label="Close options">×</button>
       </div>
 
-      <div class="language-row">
-        <label>
-          <span>From</span>
-          <select id="source-language"></select>
-        </label>
-        <button id="swap-languages" class="icon-button" type="button" aria-label="Swap languages" title="Swap languages">⇄</button>
-        <label>
-          <span>To</span>
-          <select id="target-language"></select>
-        </label>
-      </div>
-      <p id="detected-language" class="microcopy"></p>
+      <p id="detected-language" class="microcopy" hidden></p>
 
-      <div id="settings-grid" class="settings-grid">
-        <label>
-          <span>Automatic translation</span>
+      <div id="settings-grid" class="settings-grid settings-grid--common">
+        <label title="Choose whether Simul translates automatically on this site or every authorized site.">
+          <span data-ui-label="Automatic translation">Automatic translation</span>
           <select id="auto-translate-mode">
-            <option value="off">Off</option>
-            <option value="site">This site</option>
-            <option value="all">All sites</option>
+            <option value="off" data-ui-label="Off">Off</option>
+            <option value="site" data-ui-label="This site">This site</option>
+            <option value="all" data-ui-label="All sites">All sites</option>
           </select>
         </label>
-        <label>
-          <span>Size</span>
+        <label title="Fit the source width, preserve its original size, or use a custom zoom.">
+          <span data-ui-label="Size">Size</span>
           <select id="mirror-display-mode">
-            <option value="fit">Fit width</option>
-            <option value="actual">1:1 size</option>
-            <option value="custom">Custom zoom</option>
+            <option value="fit" data-ui-label="Fit width">Fit width</option>
+            <option value="actual" data-ui-label="1:1 size">1:1 size</option>
+            <option value="custom" data-ui-label="Custom zoom">Custom zoom</option>
           </select>
         </label>
-        <label>
-          <span>Translated text</span>
+        <label title="Allow translated text to expand or preserve the source element geometry.">
+          <span data-ui-label="Translated text">Translated text</span>
           <select id="text-layout-mode">
-            <option value="adaptive">Let boxes grow</option>
-            <option value="faithful">Keep geometry</option>
+            <option value="adaptive" data-ui-label="Let boxes grow">Let boxes grow</option>
+            <option value="faithful" data-ui-label="Keep geometry">Keep geometry</option>
           </select>
         </label>
-        <label>
-          <span>Replica engine</span>
-          <select id="replica-engine">
-            <option value="isolated-html">Isolated HTML (recommended)</option>
-            <option value="rrweb">rrweb (experimental)</option>
+        <label title="Choose how many safely representable visual resources Isolated HTML preserves.">
+          <span data-ui-label="Replica fidelity">Replica fidelity</span>
+          <select id="replica-fidelity-policy" aria-describedby="replica-fidelity-disclosure">
+            <option value="passive" data-ui-label="Passive Fidelity (recommended)">Passive Fidelity (recommended)</option>
+            <option value="conservative" data-ui-label="Conservative (fewer requests)">Conservative (fewer requests)</option>
           </select>
+          <small id="replica-fidelity-disclosure" class="microcopy" data-ui-label="Passive Fidelity may make additional HTTP(S) requests for inert visual resources in the replica.">Passive Fidelity may make additional HTTP(S) requests for inert visual resources in the replica.</small>
         </label>
-        <label>
-          <span>Replica text</span>
-          <select id="replica-view-mode">
-            <option value="translated">Translated</option>
-            <option value="source-only">Live source only</option>
-          </select>
-        </label>
-        <label>
-          <span>Toolbar opens</span>
-          <select id="launch-behavior">
-            <option value="last-used">Last used view</option>
-            <option value="side-panel">Always side panel</option>
-            <option value="popout">Always detached window</option>
-          </select>
-        </label>
-        <label>
-          <span>Detached window follows</span>
-          <select id="popout-tab-mode">
-            <option value="locked">The opening tab</option>
-            <option value="active">Active browser tab</option>
-          </select>
-        </label>
-        <label class="check-label">
+        <label class="check-label" title="Keep the replica near the same reading position as the source page scrolls.">
           <input id="sync-scroll" type="checkbox">
-          <span>Follow source scrolling</span>
+          <span data-ui-label="Follow source scrolling">Follow source scrolling</span>
         </label>
       </div>
 
@@ -112,20 +111,51 @@
       </div>
 
       <div class="action-row">
-        <button id="translate" class="primary" type="button" disabled>Translate page</button>
-        <button id="refresh" type="button">Rebuild mirror</button>
-        <button id="cancel" class="danger" type="button" hidden>Cancel</button>
+        <button id="translate" class="primary" type="button" disabled data-ui-label="Translate page">Translate page</button>
+        <button id="refresh" type="button" data-ui-label="Rebuild mirror">Rebuild mirror</button>
+        <button id="cancel" class="danger" type="button" hidden data-ui-label="Cancel">Cancel</button>
       </div>
 
-      <details class="composer">
-        <summary>Write a reply in the website language</summary>
-        <label for="composer-input">Text to translate back</label>
-        <textarea id="composer-input" rows="3" maxlength="5000" placeholder="Type here…"></textarea>
-        <div class="composer-actions">
-          <button id="translate-composer" type="button">Translate reply</button>
-          <button id="copy-composer" type="button" disabled>Copy result</button>
+      <details class="options-group">
+        <summary title="Control where Simul opens and which tab a detached window follows." data-ui-label="Window behavior">Window behavior</summary>
+        <div class="settings-grid">
+          <label title="Use the last companion view or always open a particular view.">
+            <span data-ui-label="Toolbar opens">Toolbar opens</span>
+            <select id="launch-behavior">
+              <option value="last-used" data-ui-label="Last used view">Last used view</option>
+              <option value="side-panel" data-ui-label="Always side panel">Always side panel</option>
+              <option value="popout" data-ui-label="Always detached window">Always detached window</option>
+            </select>
+          </label>
+          <label title="Keep a detached window on its opening tab or follow the active browser tab.">
+            <span data-ui-label="Detached window follows">Detached window follows</span>
+            <select id="popout-tab-mode">
+              <option value="locked" data-ui-label="The opening tab">The opening tab</option>
+              <option value="active" data-ui-label="Active browser tab">Active browser tab</option>
+            </select>
+          </label>
         </div>
-        <textarea id="composer-output" rows="3" readonly aria-label="Translated reply"></textarea>
+      </details>
+
+      <details id="experimental-options" class="options-group options-group--experimental">
+        <summary title="Change replica engines, inspect untranslated source text, and configure experimental local image OCR." data-ui-label="Advanced & experimental">Advanced &amp; experimental</summary>
+        <div class="settings-grid">
+          <label title="Isolated HTML is the recommended inert replica; rrweb remains experimental.">
+            <span data-ui-label="Replica engine">Replica engine</span>
+            <select id="replica-engine">
+              <option value="isolated-html" data-ui-label="Isolated HTML (recommended)">Isolated HTML (recommended)</option>
+              <option value="rrweb" data-ui-label="rrweb (experimental)">rrweb (experimental)</option>
+            </select>
+          </label>
+          <label title="Show translated text or temporarily inspect the live source text without translation.">
+            <span data-ui-label="Replica text">Replica text</span>
+            <select id="replica-view-mode">
+              <option value="translated" data-ui-label="Translated">Translated</option>
+              <option value="source-only" data-ui-label="Live source only">Live source only</option>
+            </select>
+          </label>
+        </div>
+        <div id="image-analysis-host"></div>
       </details>
 
       <div id="progress-region" class="progress-region" hidden>
@@ -139,8 +169,35 @@
       </p>
     </section>
 
+    <section id="quick-translator" class="quick-translator" role="dialog" aria-labelledby="quick-translator-title" hidden>
+      <div class="overlay-heading">
+        <strong id="quick-translator-title" data-ui-label="Quick translation">Quick translation</strong>
+        <button id="close-quick-translate" class="quiet-button" type="button" aria-label="Close quick translation">×</button>
+      </div>
+      <div class="quick-language-row" aria-label="Quick translation direction">
+        <span>
+          <small data-ui-label="From">From</small>
+          <strong id="composer-from-language">Your language</strong>
+        </span>
+        <span class="quick-language-arrow" aria-hidden="true">→</span>
+        <span>
+          <small data-ui-label="To">To</small>
+          <strong id="composer-to-language">Website language</strong>
+        </span>
+      </div>
+      <p id="composer-guidance" class="microcopy"></p>
+      <label class="composer-label" for="composer-input" data-ui-label="Input">Input</label>
+      <textarea id="composer-input" rows="3" maxlength="5000" placeholder="Type here…"></textarea>
+      <div class="composer-actions">
+        <button id="translate-composer" class="primary" type="button" data-ui-label="Translate">Translate</button>
+        <button id="copy-composer" type="button" disabled data-ui-label="Copy result">Copy result</button>
+      </div>
+      <label class="composer-label" for="composer-output" data-ui-label="Output">Output</label>
+      <textarea id="composer-output" rows="3" readonly></textarea>
+      <p id="composer-status" class="status" role="status" aria-live="polite"></p>
+    </section>
+
     <main>
-      <p id="replica-mode-badge" class="replica-mode-badge" role="status" aria-live="polite" hidden></p>
       <section id="snapshot" class="snapshot" aria-label="Page mirror">
         <div class="empty-state"><p>Preparing the live read-only mirror…</p></div>
       </section>

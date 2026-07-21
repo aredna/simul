@@ -36,12 +36,23 @@ The current pipeline:
 4. Tries the saved provider order in an offscreen document: capability-probed
    Chrome TextDetector and a restartable Tesseract.js/core 7.0.0 Worker with
    one routed language group loaded at a time.
-5. Translates validated line regions through Chrome's on-device Translator and
-   keeps recognition and translation caches separate.
-6. Maps the visible-crop coordinates onto clipped inert sibling overlays that
+5. Filters blank, punctuation-only, and explicitly very-low-confidence regions,
+   then translates accepted lines through Chrome's on-device Translator.
+6. Keeps recognition and line translation caches separate. Recognition uses
+   provider/model order, language, preprocessing profile, processed dimensions,
+   and pixel hash; line translation uses the exact provider, language pair, and
+   recognized text. Neither cache uses a DOM node or document identity, and
+   matching in-flight requests join one provider load. Recognition retention is
+   bounded by both entry count and aggregate transcript/region weight.
+7. Maps the visible-crop coordinates onto clipped inert sibling overlays that
    follow replay scroll and zoom without changing the image or page layout.
+   Text wraps and uses bounded font downscaling inside each recognized box.
    A same-node, same-lease replica image replacement rebinds the existing
    overlay instead of discarding translated work.
+8. Stops explicit same-language configurations before image capture. With
+   Auto-detect, it resolves the nearest image/element or page language after
+   capture metadata is available and stops before recognition when it equals
+   the target, preserving the original image.
 
 The pinned catalog includes English, Spanish, French, German, Portuguese,
 Italian, Vietnamese, Japanese plus vertical Japanese, Korean, Simplified and
@@ -66,15 +77,19 @@ animation/crop handling, and new tests before implementation.
 
 Expected limitations include a multi-megabyte model payload, worker startup
 time, memory pressure, stylized or low-resolution lettering, furigana, text
-over complex backgrounds, vertical ordering, and translations that cannot fit
-the original polygon. Overlays should grow or reduce font size within a
-documented floor rather than silently truncate text.
+over complex backgrounds, vertical ordering, and translations that remain
+unreadable after bounded in-box wrapping and font reduction.
 
 OCR Diagnostics correlates one attempt with an ephemeral ordinal and reports
 only rendered/bitmap dimensions, bounded retry decisions, provider/cache
-outcomes, region counts, and projection/rebinding outcomes. A first transient
-capture failure receives at most one immediate retry. Changing blank pixels
-are deferred instead of being permanently cached as “no text.”
+hit/miss/join/load outcomes, accepted/rejected region counts, and
+projection/rebinding outcomes. It never reports URLs, pixel hashes, recognized
+text, or node/document identifiers. A first transient capture failure receives
+at most one immediate retry. Changing blank pixels are deferred instead of
+being permanently cached as “no text.” A repeated image URL is deliberately
+not sufficient for reuse: identical processed pixels and geometry inputs hit
+the cache, while a new responsive size, crop, or animation frame is recognized
+again so overlay coordinates remain valid.
 
 ## Cloud alternative
 

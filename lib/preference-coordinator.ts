@@ -25,6 +25,7 @@ import {
 } from './preferences';
 import { isImageScanPolicy } from './ocr/contracts';
 import { readExactImageTextProviderOrder } from './ocr/known-provider-ids';
+import { isSelectableReplicaFidelityPolicy } from './replica/fidelity-policy';
 import { isSupportedLanguage } from './translation-provider';
 
 export const PREFERENCE_LOCK_NAME = 'simul:companion-preferences';
@@ -418,6 +419,7 @@ const VIEW_SETTING_KEYS = new Set([
   'syncScroll',
   'textLayoutMode',
   'replicaEngine',
+  'replicaFidelityPolicy',
   'replicaViewMode',
   'launchBehavior',
   'lastLaunchSurface',
@@ -468,6 +470,12 @@ function readViewSettingsPatch(
   if ('replicaEngine' in value) {
     if (!isReplicaEnginePreference(value.replicaEngine)) return undefined;
     patch.replicaEngine = value.replicaEngine;
+  }
+  if ('replicaFidelityPolicy' in value) {
+    if (!isSelectableReplicaFidelityPolicy(value.replicaFidelityPolicy)) {
+      return undefined;
+    }
+    patch.replicaFidelityPolicy = value.replicaFidelityPolicy;
   }
   if ('replicaViewMode' in value) {
     if (!isReplicaViewMode(value.replicaViewMode)) return undefined;

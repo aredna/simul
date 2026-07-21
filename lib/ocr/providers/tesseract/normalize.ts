@@ -13,7 +13,7 @@ interface TesseractBbox {
 
 interface TesseractLine {
   readonly text: string;
-  readonly confidence: number;
+  readonly confidence?: unknown;
   readonly bbox: TesseractBbox;
 }
 
@@ -37,6 +37,7 @@ export function normalizeTesseractPage(
     : '';
   const regions: ImageTextRegion[] = [];
   let confidenceTotal = 0;
+  let confidenceCount = 0;
   for (const block of page.blocks ?? []) {
     for (const paragraph of block.paragraphs ?? []) {
       for (const line of paragraph.lines ?? []) {
@@ -46,22 +47,29 @@ export function normalizeTesseractPage(
           : '';
         const boundingBox = normalizeBbox(line.bbox, bitmapWidth, bitmapHeight);
         if (!text || !boundingBox) continue;
-        const confidence = normalizeConfidence(line.confidence);
-        confidenceTotal += confidence;
-        regions.push(Object.freeze({ text, confidence, boundingBox }));
+        const confidence = normalizeOptionalConfidence(line.confidence);
+        if (confidence !== undefined) {
+          confidenceTotal += confidence;
+          confidenceCount += 1;
+        }
+        regions.push(Object.freeze({
+          text,
+          ...(confidence !== undefined ? { confidence } : {}),
+          boundingBox,
+        }));
       }
     }
   }
-  const transcriptConfidence = normalizeConfidence(page.confidence);
+  const transcriptConfidence = normalizeOptionalConfidence(page.confidence);
   const candidate = {
     providerId: 'tesseract' as const,
     bitmapWidth,
     bitmapHeight,
     transcript,
-    transcriptConfidence,
-    geometryConfidence: regions.length > 0
-      ? confidenceTotal / regions.length
-      : transcript ? 0 : transcriptConfidence,
+    ...(transcriptConfidence !== undefined ? { transcriptConfidence } : {}),
+    ...(confidenceCount > 0
+      ? { geometryConfidence: confidenceTotal / confidenceCount }
+      : {}),
     regions,
   };
   return readImageTextResult(candidate);
@@ -83,10 +91,10 @@ function normalizeBbox(
   return Object.freeze({ x: x0, y: y0, width: x1 - x0, height: y1 - y0 });
 }
 
-function normalizeConfidence(value: unknown): number {
+function normalizeOptionalConfidence(value: unknown): number | undefined {
   return typeof value === 'number' && Number.isFinite(value)
     ? clamp(value / 100, 0, 1)
-    : 0;
+    : undefined;
 }
 
 function clamp(value: number, minimum: number, maximum: number): number {

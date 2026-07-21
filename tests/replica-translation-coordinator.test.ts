@@ -157,7 +157,7 @@ describe('ReplicaTranslationCoordinator', () => {
     expect(surface.projections[0]).toMatchObject({ replayLease: 2, translated: 'en:Hola' });
   });
 
-  it('does not reuse an obsolete page translation after navigation', async () => {
+  it('reuses exact content after navigation without weakening projection identity', async () => {
     const surface = new FakeSurface([record(4, 1, 'Inicio')]);
     const translate = vi.fn(async (source: string) =>
       `${surface.document.documentId}:${source}`);
@@ -179,11 +179,11 @@ describe('ReplicaTranslationCoordinator', () => {
 
     await coordinator.translateCurrent(pair);
 
-    expect(translate).toHaveBeenCalledTimes(2);
+    expect(translate).toHaveBeenCalledOnce();
     expect(surface.projections).toEqual([
       expect.objectContaining({
         document: nextDocument,
-        translated: 'next-document:Inicio',
+        translated: 'document-translation:Inicio',
       }),
     ]);
   });

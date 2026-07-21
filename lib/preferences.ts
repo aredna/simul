@@ -12,6 +12,10 @@ import {
   isSupportedLanguage,
   type SupportedLanguage,
 } from './translation-provider';
+import {
+  isSelectableReplicaFidelityPolicy,
+  type SelectableReplicaFidelityPolicy,
+} from './replica/fidelity-policy';
 
 export const MIRROR_DISPLAY_MODES = ['fit', 'actual', 'custom'] as const;
 
@@ -89,6 +93,7 @@ export interface CompanionPreferences {
   syncScroll: boolean;
   textLayoutMode: TextLayoutMode;
   replicaEngine: ReplicaEnginePreference;
+  replicaFidelityPolicy: SelectableReplicaFidelityPolicy;
   replicaViewMode: ReplicaViewMode;
   launchBehavior: CompanionLaunchBehavior;
   lastLaunchSurface: CompanionSurface;
@@ -112,6 +117,7 @@ export const DEFAULT_COMPANION_PREFERENCES: Readonly<CompanionPreferences> =
     syncScroll: true,
     textLayoutMode: 'adaptive',
     replicaEngine: 'isolated-html',
+    replicaFidelityPolicy: 'passive',
     replicaViewMode: 'translated',
     launchBehavior: 'last-used',
     lastLaunchSurface: 'side-panel',
@@ -173,6 +179,11 @@ export function parseCompanionPreferences(
     replicaEngine: isReplicaEnginePreference(input.replicaEngine)
       ? input.replicaEngine
       : DEFAULT_COMPANION_PREFERENCES.replicaEngine,
+    replicaFidelityPolicy: isSelectableReplicaFidelityPolicy(
+      input.replicaFidelityPolicy,
+    )
+      ? input.replicaFidelityPolicy
+      : DEFAULT_COMPANION_PREFERENCES.replicaFidelityPolicy,
     replicaViewMode: isReplicaViewMode(input.replicaViewMode)
       ? input.replicaViewMode
       : DEFAULT_COMPANION_PREFERENCES.replicaViewMode,
@@ -383,6 +394,7 @@ export interface CompanionViewSettings {
   syncScroll: boolean;
   textLayoutMode: TextLayoutMode;
   replicaEngine: ReplicaEnginePreference;
+  replicaFidelityPolicy: SelectableReplicaFidelityPolicy;
   replicaViewMode: ReplicaViewMode;
   launchBehavior: CompanionLaunchBehavior;
   lastLaunchSurface: CompanionSurface;
@@ -439,6 +451,7 @@ function createDefaultPreferences(): CompanionPreferences {
     syncScroll: true,
     textLayoutMode: 'adaptive',
     replicaEngine: 'isolated-html',
+    replicaFidelityPolicy: 'passive',
     replicaViewMode: 'translated',
     launchBehavior: 'last-used',
     lastLaunchSurface: 'side-panel',

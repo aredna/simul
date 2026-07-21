@@ -74,6 +74,110 @@ describe('HtmlMirrorSourceSession', () => {
     expect(JSON.stringify(patches[0])).toContain('changed while replica stages');
   });
 
+  it('streams the current computed canvas color with live layout patches', () => {
+    const fixture = sourceFixture('<main>theme-aware page</main>');
+    let canvasColor = 'rgb(0, 0, 0)';
+    Object.defineProperty(fixture.window, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => ({
+        backgroundColor: element === fixture.document.documentElement
+          ? canvasColor
+          : 'rgba(0, 0, 0, 0)',
+      }),
+    });
+
+    fixture.start();
+    expect(fixture.checkpoints()[0]?.payload.root.canvasBackgroundColor)
+      .toBe('rgb(0, 0, 0)');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+
+    canvasColor = 'rgb(16, 16, 16)';
+    const body = fixture.document.body;
+    body.className = 'dark-theme';
+    fixture.mutate(attributeRecord(body, 'class'));
+    fixture.flushFrame();
+    expect(fixture.patches().at(-1)?.operations).toContainEqual({
+      kind: 'dimensions',
+      viewportWidth: 1,
+      viewportHeight: 1,
+      documentWidth: 1,
+      documentHeight: 1,
+      canvasBackgroundColor: 'rgb(16, 16, 16)',
+    });
+
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
+    canvasColor = 'rgba(0, 0, 0, 0)';
+    body.className = 'light-theme';
+    fixture.mutate(attributeRecord(body, 'class'));
+    fixture.flushFrame();
+    const transparentDimensions = fixture.patches().at(-1)?.operations.find(
+      ({ kind }) => kind === 'dimensions',
+    );
+    expect(transparentDimensions).toEqual({
+      kind: 'dimensions',
+      viewportWidth: 1,
+      viewportHeight: 1,
+      documentWidth: 1,
+      documentHeight: 1,
+    });
+  });
+
+  it('polls silent control changes and clears a control that becomes sensitive', () => {
+    const fixture = sourceFixture(`
+      <form><input id="query" class="wide" type="search" value="initial" placeholder=""
+        name="private-name" data-account="private-data"></form>
+    `);
+    fixture.start();
+    const checkpointJson = JSON.stringify(fixture.checkpoints()[0]);
+    expect(checkpointJson).toContain('"text":"initial"');
+    expect(checkpointJson).toContain('["class","wide"]');
+    expect(checkpointJson).not.toContain('private-name');
+    expect(checkpointJson).not.toContain('private-data');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const control = fixture.document.querySelector<HTMLInputElement>('#query')!;
+
+    control.value = 'programmatic update';
+    fixture.runTimer();
+    fixture.flushFrame();
+    expect(fixture.patches().at(-1)?.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'attributes',
+        controlText: expect.objectContaining({ text: 'programmatic update' }),
+      }),
+    ]));
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
+    const patchesAfterProgrammaticUpdate = fixture.patches().length;
+    fixture.runTimer();
+    expect(fixture.frames).toHaveLength(0);
+    expect(fixture.patches()).toHaveLength(patchesAfterProgrammaticUpdate);
+
+    // This models the silent value change performed by the form-reset default
+    // action after its reset event has already fired.
+    control.value = 'initial';
+    fixture.runTimer();
+    fixture.flushFrame();
+    expect(fixture.patches().at(-1)?.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'attributes',
+        controlText: expect.objectContaining({ text: 'initial' }),
+      }),
+    ]));
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 2));
+
+    control.type = 'password';
+    fixture.runTimer();
+    fixture.flushFrame();
+    const sensitivePatch = fixture.patches().at(-1)!;
+    expect(sensitivePatch.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'attributes',
+        attributes: expect.arrayContaining([['type', 'password']]),
+      }),
+    ]));
+    expect(JSON.stringify(sensitivePatch)).not.toContain('controlText');
+    expect(JSON.stringify(sensitivePatch)).not.toContain('initial');
+  });
+
   it('emits bounded capacity diagnostics when checkpoint serialization overflows', () => {
     const descriptor = Object.getOwnPropertyDescriptor(
       WeakNodeIdRegistry,
@@ -745,6 +849,178 @@ describe('HtmlMirrorSourceSession', () => {
       '.page{display:flex}',
     ]);
   });
+
+  it('detects CSSOM-only ordinary stylesheet changes and recaptures resolved rules', () => {
+    const fixture = sourceFixture(
+      '<style id="dynamic">.page{display:grid}</style>' +
+      '<main class="page">styled content</main>',
+    );
+    const rule = { cssText: '.page{display:grid}' };
+    const sheet = fakeStyleSheet(rule);
+    const style = fixture.document.querySelector('#dynamic')!;
+    Object.defineProperty(style, 'sheet', {
+      configurable: true,
+      value: sheet,
+    });
+    Object.defineProperty(fixture.document, 'styleSheets', {
+      configurable: true,
+      value: {
+        0: sheet,
+        length: 1,
+        item: (index: number) => index === 0 ? sheet : null,
+      },
+    });
+
+    fixture.start('passive');
+    expect(JSON.stringify(fixture.checkpoints()[0])).toContain(
+      '"resolvedStyleSheetText":".page{display:grid}"',
+    );
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+
+    rule.cssText = '.page{display:flex}';
+    fixture.runTimer();
+    expect(fixture.port.posts.at(-1)).toMatchObject({
+      kind: 'simul:html-mirror-v1:error',
+      code: 'stream_gap',
+    });
+
+    fixture.port.emitMessage(createHtmlMirrorCheckpointRequest(identity, 0));
+    expect(JSON.stringify(fixture.checkpoints().at(-1))).toContain(
+      '"resolvedStyleSheetText":".page{display:flex}"',
+    );
+  });
+
+  it('reports an oversized ordinary CSSOM owner once instead of hashing capacity', () => {
+    const fixture = sourceFixture('<main class="page">styled content</main>');
+    const oversized = fakeStyleSheetWithRules(25_001, '.page{}');
+    Object.defineProperty(fixture.document, 'styleSheets', {
+      configurable: true,
+      value: styleSheetList(oversized),
+    });
+
+    fixture.start('passive');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    fixture.runTimer();
+
+    expect(fixture.port.posts.at(-1)).toMatchObject({
+      kind: 'simul:html-mirror-v1:error',
+      code: 'stream_overflow',
+      representability: {
+        capacityOmissionCount: 1,
+      },
+    });
+    const overflowCount = fixture.port.posts.filter(
+      (message) => (message as { code?: string }).code === 'stream_overflow',
+    ).length;
+
+    fixture.port.emitMessage(createHtmlMirrorCheckpointRequest(identity, 0));
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    fixture.runTimer();
+    expect(fixture.port.posts.filter(
+      (message) => (message as { code?: string }).code === 'stream_overflow',
+    )).toHaveLength(overflowCount);
+  });
+
+  it('advances the shared style cursor after adopted-style budget exhaustion', () => {
+    const fixture = sourceFixture(
+      '<main><div id="first"></div><div id="second"></div></main>',
+    );
+    const first = fixture.document.querySelector('#first')!;
+    const second = fixture.document.querySelector('#second')!;
+    const firstShadow = first.attachShadow({ mode: 'open' });
+    const secondShadow = second.attachShadow({ mode: 'open' });
+    Object.defineProperty(firstShadow, 'mode', { value: 'open' });
+    Object.defineProperty(secondShadow, 'mode', { value: 'open' });
+    Object.defineProperty(firstShadow, 'adoptedStyleSheets', {
+      configurable: true,
+      value: [fakeStyleSheetWithRules(2_000, '.first{}')],
+    });
+    const documentSheet = fakeStyleSheetWithRules(24_000, '.page{}');
+    Object.defineProperty(fixture.document, 'styleSheets', {
+      configurable: true,
+      value: styleSheetList(documentSheet),
+    });
+    let secondRootReads = 0;
+    Object.defineProperty(secondShadow, 'styleSheets', {
+      configurable: true,
+      get: () => {
+        secondRootReads += 1;
+        return styleSheetList();
+      },
+    });
+
+    fixture.start('passive');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    secondRootReads = 0;
+
+    fixture.runTimer();
+    expect(secondRootReads).toBe(0);
+    expect(fixture.port.posts.some(
+      (message) => (message as { code?: string }).code === 'stream_overflow',
+    )).toBe(false);
+
+    fixture.runTimer();
+    expect(secondRootReads).toBeGreaterThan(0);
+  });
+
+  it('rotates channels so saturated ordinary CSSOM cannot starve adopted changes', () => {
+    const fixture = sourceFixture('<main class="page">styled content</main>');
+    const ordinarySheet = fakeStyleSheetWithRules(24_000, '.page{}');
+    const adoptedSheet = fakeStyleSheetWithRules(2_000, '.theme{}');
+    const adoptedRule = adoptedSheet.cssRules[0] as unknown as {
+      cssText: string;
+    };
+    Object.defineProperty(fixture.document, 'styleSheets', {
+      configurable: true,
+      value: styleSheetList(ordinarySheet),
+    });
+    Object.defineProperty(fixture.document, 'adoptedStyleSheets', {
+      configurable: true,
+      value: [adoptedSheet],
+    });
+
+    fixture.start('passive');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    adoptedRule.cssText = '.theme{color:blue}';
+
+    fixture.runTimer();
+    expect(fixture.port.posts.some(
+      (message) => (message as { code?: string }).code === 'stream_gap',
+    )).toBe(false);
+    expect(fixture.port.posts.some(
+      (message) => (message as { code?: string }).code === 'stream_overflow',
+    )).toBe(false);
+
+    fixture.runTimer();
+    expect(fixture.port.posts.at(-1)).toMatchObject({
+      kind: 'simul:html-mirror-v1:error',
+      code: 'stream_gap',
+    });
+  });
+
+  it('preserves a programmatically disabled ordinary stylesheet', () => {
+    const fixture = sourceFixture(
+      '<link id="theme" rel="stylesheet" href="/theme.css">' +
+      '<main class="page">styled content</main>',
+    );
+    const sheet = fakeStyleSheet({ cssText: '.page{display:grid}' });
+    Object.defineProperty(sheet, 'disabled', {
+      configurable: true,
+      value: true,
+    });
+    const link = fixture.document.querySelector('#theme')!;
+    Object.defineProperty(link, 'sheet', {
+      configurable: true,
+      value: sheet,
+    });
+
+    fixture.start('passive');
+
+    const graph = fixture.checkpoints()[0]?.payload.root;
+    const serialized = JSON.stringify(graph);
+    expect(serialized).toContain('["disabled",""]');
+    expect(serialized).toContain('"resolvedStyleSheetText":');
+  });
 });
 
 const identity = createReplicaIdentity({
@@ -807,7 +1083,9 @@ function sourceFixture(markup: string) {
     port,
     registry,
     session,
-    start: () => port.emitMessage(createHtmlMirrorStart(identity)),
+    start: (
+      fidelityPolicy: 'passive' | 'conservative' = 'conservative',
+    ) => port.emitMessage(createHtmlMirrorStart(identity, fidelityPolicy)),
     mutate: (record: MutationRecord) => mutationCallback(
       [record],
       {} as MutationObserver,
@@ -869,6 +1147,27 @@ function fakeStyleSheet(rule: { cssText: string }): CSSStyleSheet {
       item: (index: number) => index === 0 ? rule : null,
     },
   } as unknown as CSSStyleSheet;
+}
+
+function fakeStyleSheetWithRules(
+  count: number,
+  cssText: string,
+): CSSStyleSheet {
+  const rules = Array.from({ length: count }, () => ({ cssText }));
+  return {
+    disabled: false,
+    cssRules: Object.assign(rules, {
+      item: (index: number) => rules[index] ?? null,
+    }),
+  } as unknown as CSSStyleSheet;
+}
+
+function styleSheetList(
+  ...sheets: readonly CSSStyleSheet[]
+): ArrayLike<CSSStyleSheet> & { item(index: number): CSSStyleSheet | null } {
+  return Object.assign([...sheets], {
+    item: (index: number) => sheets[index] ?? null,
+  });
 }
 
 class FakePort {

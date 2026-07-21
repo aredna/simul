@@ -14,6 +14,7 @@ import {
   type HtmlMirrorRepresentabilitySummary,
 } from './html-mirror-sanitizer';
 import { createReplicaIdentity } from './protocol-v2';
+import type { SelectableReplicaFidelityPolicy } from './fidelity-policy';
 
 export interface HtmlMirrorStreamObserver {
   onPatch(batch: HtmlMirrorPatchBatch): void;
@@ -49,11 +50,13 @@ type QueuedHtmlMirrorMessage =
 
 export type HtmlMirrorStreamFactory = (
   request: ReplicaCaptureRequest,
+  fidelityPolicy: SelectableReplicaFidelityPolicy,
   signal?: AbortSignal,
 ) => Promise<HtmlMirrorStreamLease>;
 
 export async function openChromeHtmlMirrorStream(
   request: ReplicaCaptureRequest,
+  fidelityPolicy: SelectableReplicaFidelityPolicy = 'conservative',
   signal?: AbortSignal,
 ): Promise<HtmlMirrorStreamLease> {
   signal?.throwIfAborted();
@@ -85,7 +88,13 @@ export async function openChromeHtmlMirrorStream(
     frameId: request.frameId,
     name: createHtmlMirrorPortName(request.sessionId),
   });
-  return new ChromeHtmlMirrorStreamLease(port, identity, request, signal);
+  return new ChromeHtmlMirrorStreamLease(
+    port,
+    identity,
+    request,
+    fidelityPolicy,
+    signal,
+  );
 }
 
 class ChromeHtmlMirrorStreamLease implements HtmlMirrorStreamLease {
@@ -103,6 +112,7 @@ class ChromeHtmlMirrorStreamLease implements HtmlMirrorStreamLease {
     private readonly port: Browser.runtime.Port,
     private readonly identity: ReturnType<typeof createReplicaIdentity>,
     private readonly request: ReplicaCaptureRequest,
+    private readonly fidelityPolicy: SelectableReplicaFidelityPolicy,
     private readonly signal?: AbortSignal,
   ) {
     let resolveInitial!: (checkpoint: HtmlMirrorCheckpoint) => void;
@@ -120,7 +130,7 @@ class ChromeHtmlMirrorStreamLease implements HtmlMirrorStreamLease {
       this.#fail(new Error('HTML mirror initial checkpoint timed out.'));
     }, HTML_MIRROR_INITIAL_CHECKPOINT_TIMEOUT_MS);
     try {
-      port.postMessage(createHtmlMirrorStart(identity));
+      port.postMessage(createHtmlMirrorStart(identity, fidelityPolicy));
     } catch (error) {
       this.#fail(error);
     }
@@ -184,7 +194,11 @@ class ChromeHtmlMirrorStreamLease implements HtmlMirrorStreamLease {
       this.dispose();
       return;
     }
-    const message = readHtmlMirrorSourceMessage(input, this.identity);
+    const message = readHtmlMirrorSourceMessage(
+      input,
+      this.identity,
+      this.fidelityPolicy,
+    );
     if (!message) {
       this.#fail(new Error('Invalid HTML mirror source message.'));
       return;

@@ -39,6 +39,43 @@ describe('visible rrweb replay host', () => {
     expect(iframe.hasAttribute('inert')).toBe(true);
   });
 
+  it('paints the complete presentation shell with the resolved source canvas', () => {
+    const fixture = createFixture();
+    const candidate = fixture.host.createCandidate({
+      ...dimensions(),
+      canvasBackgroundColor: 'rgb(0, 0, 0)',
+    });
+    const iframe = createProtectedIframe(fixture.document);
+    candidate.mount.append(iframe);
+    candidate.commit(iframe, { width: 1_400, height: 2_500 });
+
+    for (const selector of [
+      '.replica-replay-root',
+      '.replica-replay-scroll',
+      '.replica-replay-stage',
+      '.replica-replay-sticky-viewport',
+      '.replica-replay-scale-layer',
+      '.replica-replay-mount',
+    ]) {
+      expect(requireElement<HTMLElement>(fixture.preview, selector)
+        .style.backgroundColor).toBe('rgb(0, 0, 0)');
+    }
+    expect(iframe.style.backgroundColor).toBe('rgb(0, 0, 0)');
+
+    fixture.host.refreshDimensions(iframe, {
+      ...dimensions(),
+      canvasBackgroundColor: 'rgb(16, 16, 16)',
+    });
+    expect(iframe.style.backgroundColor).toBe('rgb(16, 16, 16)');
+    expect(requireElement<HTMLElement>(fixture.preview, '.replica-replay-root')
+      .style.backgroundColor).toBe('rgb(16, 16, 16)');
+
+    fixture.host.refreshDimensions(iframe, dimensions());
+    expect(iframe.style.backgroundColor).toBe('');
+    expect(requireElement<HTMLElement>(fixture.preview, '.replica-replay-root')
+      .style.backgroundColor).toBe('');
+  });
+
   it('scales outside the source-sized iframe and projects parent scrolling inside it', () => {
     const fixture = createFixture();
     const candidate = fixture.host.createCandidate(dimensions());
@@ -83,6 +120,360 @@ describe('visible rrweb replay host', () => {
     fixture.host.updateLayout({ displayMode: 'custom', zoomPercent: 175 });
     expect(scaleLayer.style.transform).toBe('scale(1.75)');
     expect(iframe.style.width).toBe('1200px');
+  });
+
+  it('retains source scroll received before a slow replica commits and resets it between pages', () => {
+    const fixture = createFixture();
+    fixture.host.followSourceScroll({
+      scrollTarget: 'document',
+      scrollX: 120,
+      scrollY: 800,
+      maxScrollX: 400,
+      maxScrollY: 1_800,
+    });
+    const first = fixture.host.createCandidate(dimensions());
+    const firstScrollTo = vi.fn();
+    const firstIframe = createProtectedIframe(fixture.document, firstScrollTo);
+    first.mount.append(firstIframe);
+    first.commit(firstIframe, { width: 1_400, height: 2_500 });
+
+    expect(firstScrollTo).toHaveBeenLastCalledWith({
+      left: 120,
+      top: 800,
+      behavior: 'auto',
+    });
+
+    fixture.host.resetSourceScroll();
+    const second = fixture.host.createCandidate(dimensions());
+    const secondScrollTo = vi.fn();
+    const secondIframe = createProtectedIframe(fixture.document, secondScrollTo);
+    second.mount.append(secondIframe);
+    second.commit(secondIframe, { width: 1_400, height: 2_500 });
+
+    expect(secondScrollTo).toHaveBeenLastCalledWith({
+      left: 0,
+      top: 0,
+      behavior: 'auto',
+    });
+  });
+
+  it('retains source coordinates while a delayed replica extent catches up', () => {
+    const fixture = createFixture();
+    fixture.host.followSourceScroll({
+      scrollTarget: 'document',
+      scrollX: 0,
+      scrollY: 3_800,
+      maxScrollX: 0,
+      maxScrollY: 5_000,
+    });
+    const candidate = fixture.host.createCandidate({
+      viewportWidth: 1_200,
+      viewportHeight: 700,
+      documentWidth: 1_200,
+      documentHeight: 1_000,
+    });
+    const scrollTo = vi.fn();
+    const iframe = createProtectedIframe(fixture.document, scrollTo);
+    candidate.mount.append(iframe);
+    candidate.commit(iframe, { width: 1_200, height: 1_000 });
+
+    expect(scrollTo).toHaveBeenLastCalledWith({
+      left: 0,
+      top: 3_800,
+      behavior: 'auto',
+    });
+    expect(requireElement<HTMLElement>(
+      fixture.preview,
+      '.replica-replay-stage',
+    ).style.height).toBe('5700px');
+
+    fixture.host.markLive(iframe);
+    fixture.host.refreshExtent(iframe, { width: 1_200, height: 5_700 });
+    expect(scrollTo).toHaveBeenLastCalledWith({
+      left: 0,
+      top: 3_800,
+      behavior: 'auto',
+    });
+  });
+
+  it('projects nested source progress into the replica primary viewport', () => {
+    const fixture = createFixture();
+    const candidate = fixture.host.createCandidate(dimensions());
+    const scrollTo = vi.fn();
+    const iframe = createProtectedIframe(fixture.document, scrollTo);
+    const replica = parseHTML(
+      '<html><body><main id="results"></main></body></html>',
+    ).document;
+    const results = replica.querySelector('#results') as HTMLElement;
+    Object.defineProperties(results, {
+      clientWidth: { configurable: true, value: 900 },
+      clientHeight: { configurable: true, value: 650 },
+      scrollWidth: { configurable: true, value: 900 },
+      scrollHeight: { configurable: true, value: 3_650 },
+      scrollLeft: { configurable: true, writable: true, value: 0 },
+      scrollTop: { configurable: true, writable: true, value: 0 },
+      getBoundingClientRect: {
+        configurable: true,
+        value: () => ({
+          x: 200, y: 25, left: 200, top: 25, right: 1_100, bottom: 675,
+          width: 900, height: 650, toJSON: () => ({}),
+        }),
+      },
+    });
+    Object.defineProperty(iframe, 'contentDocument', {
+      configurable: true,
+      value: replica,
+    });
+    candidate.mount.append(iframe);
+    candidate.commit(iframe, { width: 1_200, height: 700 });
+
+    fixture.host.followSourceScroll({
+      scrollTarget: 'nested',
+      scrollX: 0,
+      scrollY: 2_000,
+      maxScrollX: 0,
+      maxScrollY: 4_000,
+    });
+
+    expect(results.scrollTop).toBe(1_500);
+    expect(scrollTo).toHaveBeenLastCalledWith({
+      left: 0, top: 0, behavior: 'auto',
+    });
+    expect(requireElement<HTMLElement>(
+      fixture.preview,
+      '.replica-replay-scroll',
+    ).scrollTop).toBe(0);
+
+    fixture.host.markLive(iframe);
+    fixture.host.refreshExtent(iframe, { width: 1_200, height: 700 });
+    fixture.host.refreshDimensions(iframe, {
+      viewportWidth: 1_200,
+      viewportHeight: 700,
+      documentWidth: 1_200,
+      documentHeight: 700,
+    });
+
+    expect(results.scrollTop).toBe(1_500);
+    expect(requireElement<HTMLElement>(
+      fixture.preview,
+      '.replica-replay-scroll',
+    ).scrollTop).toBe(0);
+  });
+
+  it('preserves document position while projecting a nested reading viewport', () => {
+    const fixture = createFixture();
+    const candidate = fixture.host.createCandidate(dimensions());
+    const scrollTo = vi.fn();
+    const iframe = createProtectedIframe(fixture.document, scrollTo);
+    const replica = parseHTML(
+      '<html><body><main id="results" style="overflow-y:auto"></main></body></html>',
+    ).document;
+    const results = replica.querySelector('#results') as HTMLElement;
+    defineReplicaScrollBox(results, {
+      clientWidth: 900,
+      clientHeight: 650,
+      scrollHeight: 3_650,
+    });
+    Object.defineProperty(iframe, 'contentDocument', {
+      configurable: true,
+      value: replica,
+    });
+    candidate.mount.append(iframe);
+    candidate.commit(iframe, { width: 1_600, height: 2_600 });
+
+    fixture.host.followSourceScroll({
+      scrollTarget: 'nested',
+      scrollX: 0,
+      scrollY: 2_000,
+      maxScrollX: 0,
+      maxScrollY: 4_000,
+      documentScrollX: 0,
+      documentScrollY: 420,
+      documentMaxScrollX: 400,
+      documentMaxScrollY: 1_900,
+    });
+
+    expect(results.scrollTop).toBe(1_500);
+    expect(scrollTo).toHaveBeenLastCalledWith({
+      left: 0,
+      top: 420,
+      behavior: 'auto',
+    });
+    expect(requireElement<HTMLElement>(
+      fixture.preview,
+      '.replica-replay-scroll',
+    ).scrollTop).toBe(420);
+  });
+
+  it('switches away from removed or shrunken nested targets and restores document scrolling', () => {
+    const fixture = createFixture();
+    const candidate = fixture.host.createCandidate(dimensions());
+    const scrollTo = vi.fn();
+    const iframe = createProtectedIframe(fixture.document, scrollTo);
+    const replica = parseHTML(
+      '<html><body><main id="first" style="overflow-y:auto"></main>' +
+      '<main id="replacement" style="overflow-y:auto"></main></body></html>',
+    ).document;
+    const first = replica.querySelector('#first') as HTMLElement;
+    const replacement = replica.querySelector('#replacement') as HTMLElement;
+    defineReplicaScrollBox(first, {
+      clientWidth: 960, clientHeight: 680, scrollHeight: 4_680,
+    });
+    defineReplicaScrollBox(replacement, {
+      clientWidth: 900, clientHeight: 650, scrollHeight: 3_650,
+    });
+    Object.defineProperty(iframe, 'contentDocument', {
+      configurable: true,
+      value: replica,
+    });
+    candidate.mount.append(iframe);
+    candidate.commit(iframe, { width: 1_600, height: 2_600 });
+
+    fixture.host.followSourceScroll({
+      scrollTarget: 'nested',
+      scrollX: 0,
+      scrollY: 2_000,
+      maxScrollX: 0,
+      maxScrollY: 4_000,
+    });
+    expect(first.scrollTop).toBe(2_000);
+
+    first.remove();
+    fixture.host.followSourceScroll({
+      scrollTarget: 'nested',
+      scrollX: 0,
+      scrollY: 1_000,
+      maxScrollX: 0,
+      maxScrollY: 2_000,
+    });
+    expect(replacement.scrollTop).toBe(1_500);
+
+    // A responsive shrink can make the former reading pane incidental. The
+    // host must invalidate it and use bounded outer progress instead.
+    Object.defineProperty(replacement, 'scrollHeight', {
+      configurable: true,
+      value: 700,
+    });
+    fixture.host.followSourceScroll({
+      scrollTarget: 'nested',
+      scrollX: 0,
+      scrollY: 900,
+      maxScrollX: 0,
+      maxScrollY: 600,
+    });
+    expect(scrollTo).toHaveBeenLastCalledWith({
+      left: 0,
+      top: 1_900,
+      behavior: 'auto',
+    });
+
+    fixture.host.followSourceScroll({
+      scrollTarget: 'document',
+      scrollX: 0,
+      scrollY: 640,
+      maxScrollX: 400,
+      maxScrollY: 1_900,
+    });
+    expect(scrollTo).toHaveBeenLastCalledWith({
+      left: 0,
+      top: 640,
+      behavior: 'auto',
+    });
+    expect(requireElement<HTMLElement>(
+      fixture.preview,
+      '.replica-replay-scroll',
+    ).scrollTop).toBe(640);
+  });
+
+  it('reselects a qualified replica pane when the source nested owner changes', () => {
+    const fixture = createFixture();
+    const candidate = fixture.host.createCandidate(dimensions());
+    const iframe = createProtectedIframe(fixture.document);
+    const replica = parseHTML(
+      '<html><body><main id="first" style="overflow-y:auto"></main>' +
+      '<main id="second" style="overflow-y:auto"></main></body></html>',
+    ).document;
+    const first = replica.querySelector('#first') as HTMLElement;
+    const second = replica.querySelector('#second') as HTMLElement;
+    defineReplicaScrollBox(first, {
+      clientWidth: 960, clientHeight: 680, scrollHeight: 4_680,
+    });
+    defineReplicaScrollBox(second, {
+      clientWidth: 900, clientHeight: 650, scrollHeight: 3_650,
+    });
+    Object.defineProperty(iframe, 'contentDocument', {
+      configurable: true,
+      value: replica,
+    });
+    candidate.mount.append(iframe);
+    candidate.commit(iframe, { width: 1_600, height: 2_600 });
+
+    fixture.host.followSourceScroll({
+      scrollTarget: 'nested', nestedOwnerKey: 1, nestedOwnerOrdinal: 0,
+      scrollX: 0, scrollY: 2_000, maxScrollX: 0, maxScrollY: 4_000,
+    });
+    expect(first.scrollTop).toBe(2_000);
+    expect(second.scrollTop).toBe(0);
+
+    defineReplicaScrollBox(second, {
+      clientWidth: 1_100, clientHeight: 690, scrollHeight: 8_690,
+    });
+    fixture.host.followSourceScroll({
+      scrollTarget: 'nested', nestedOwnerKey: 2, nestedOwnerOrdinal: 1,
+      scrollX: 0, scrollY: 1_000, maxScrollX: 0, maxScrollY: 2_000,
+    });
+
+    expect(first.scrollTop).toBe(2_000);
+    expect(second.scrollTop).toBe(4_000);
+  });
+
+  it('projects nested source progress into an open-shadow reading viewport', () => {
+    const fixture = createFixture();
+    const candidate = fixture.host.createCandidate(dimensions());
+    const scrollTo = vi.fn();
+    const iframe = createProtectedIframe(fixture.document, scrollTo);
+    const replica = parseHTML(
+      '<html><body><x-reading-pane></x-reading-pane></body></html>',
+    ).document;
+    const host = replica.querySelector('x-reading-pane')!;
+    const shadow = host.attachShadow({ mode: 'open' });
+    const results = replica.createElement('main');
+    results.setAttribute('style', 'overflow-y:auto');
+    shadow.append(results);
+    Object.defineProperties(results, {
+      clientWidth: { configurable: true, value: 900 },
+      clientHeight: { configurable: true, value: 650 },
+      scrollWidth: { configurable: true, value: 900 },
+      scrollHeight: { configurable: true, value: 3_650 },
+      scrollLeft: { configurable: true, writable: true, value: 0 },
+      scrollTop: { configurable: true, writable: true, value: 0 },
+      getBoundingClientRect: {
+        configurable: true,
+        value: () => ({
+          x: 200, y: 25, left: 200, top: 25, right: 1_100, bottom: 675,
+          width: 900, height: 650, toJSON: () => ({}),
+        }),
+      },
+    });
+    Object.defineProperty(iframe, 'contentDocument', {
+      configurable: true,
+      value: replica,
+    });
+    candidate.mount.append(iframe);
+    candidate.commit(iframe, { width: 1_200, height: 700 });
+
+    fixture.host.followSourceScroll({
+      scrollTarget: 'nested',
+      scrollX: 0,
+      scrollY: 2_000,
+      maxScrollX: 0,
+      maxScrollY: 4_000,
+    });
+
+    expect(results.scrollTop).toBe(1_500);
+    expect(scrollTo).toHaveBeenLastCalledWith({
+      left: 0, top: 0, behavior: 'auto',
+    });
   });
 
   it('labels a retained live replay and refreshes its bounded extent in place', () => {
@@ -330,4 +721,36 @@ function requireElement<T extends Element>(
   const element = root.querySelector<T>(selector);
   if (!element) throw new Error(`Missing test element: ${selector}`);
   return element;
+}
+
+function defineReplicaScrollBox(
+  element: HTMLElement,
+  dimensions: Readonly<{
+    clientWidth: number;
+    clientHeight: number;
+    scrollHeight: number;
+  }>,
+): void {
+  Object.defineProperties(element, {
+    clientWidth: { configurable: true, value: dimensions.clientWidth },
+    clientHeight: { configurable: true, value: dimensions.clientHeight },
+    scrollWidth: { configurable: true, value: dimensions.clientWidth },
+    scrollHeight: { configurable: true, value: dimensions.scrollHeight },
+    scrollLeft: { configurable: true, writable: true, value: 0 },
+    scrollTop: { configurable: true, writable: true, value: 0 },
+    getBoundingClientRect: {
+      configurable: true,
+      value: () => ({
+        x: 120,
+        y: 10,
+        left: 120,
+        top: 10,
+        right: 120 + dimensions.clientWidth,
+        bottom: 10 + dimensions.clientHeight,
+        width: dimensions.clientWidth,
+        height: dimensions.clientHeight,
+        toJSON: () => ({}),
+      }),
+    },
+  });
 }

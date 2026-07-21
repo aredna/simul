@@ -3,12 +3,6 @@ import type { TranslationPair } from '../translation-provider';
 export interface TranslationMemoryScope {
   readonly provider: string;
   readonly pair: TranslationPair;
-  /**
-   * Optional exact-page namespace. Callers that mirror a live document use
-   * this to prevent a phrase translated on an obsolete navigation from
-   * satisfying work for the next page.
-   */
-  readonly pageKey?: string;
 }
 
 export interface TranslationMemoryOptions {
@@ -39,7 +33,7 @@ interface InFlightTranslation {
   readonly task: Promise<string>;
 }
 
-/** Bounded, exact-source, provider/pair/page-scoped in-memory translation LRU. */
+/** Bounded, exact-source, provider/pair-scoped in-memory translation LRU. */
 export class TranslationMemory {
   readonly #maxEntries: number;
   readonly #maxCharacters: number;
@@ -197,7 +191,6 @@ function memoryKey(scope: TranslationMemoryScope, source: string): string {
     scope.provider,
     scope.pair.sourceLanguage,
     scope.pair.targetLanguage,
-    scope.pageKey ?? null,
     source,
   ]);
 }

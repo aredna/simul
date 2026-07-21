@@ -19,6 +19,22 @@ afterEach(() => {
 });
 
 describe('Chrome HTML mirror client', () => {
+  it('sends the selected fidelity policy in the immutable start handshake', async () => {
+    const port = new FakePort();
+    installBrowser(port);
+
+    const lease = await openChromeHtmlMirrorStream(request, 'passive');
+
+    expect(port.posts[0]).toMatchObject({
+      kind: 'simul:html-mirror-v1:start',
+      identity,
+      fidelityPolicy: 'passive',
+    });
+    port.emitMessage(checkpoint());
+    await lease.initialCheckpoint;
+    lease.dispose();
+  });
+
   it('queues a disconnect that occurs after checkpoint but before observer setup', async () => {
     const port = new FakePort();
     installBrowser(port);

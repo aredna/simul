@@ -142,11 +142,67 @@ describe('ImageOverlayProjector', () => {
     expect(region.style.top).toBe('20px');
     expect(region.style.width).toBe('80px');
     expect(region.style.height).toBe('40px');
+    expect(region.style.whiteSpace).toBe('normal');
+    expect(region.style.overflowWrap).toBe('anywhere');
+    expect(region.style.wordBreak).toBe('break-word');
+    expect(region.style.lineHeight).toBe('1.12');
     expect(region.style.pointerEvents).toBe('none');
     expect(current).toHaveBeenCalled();
     projector.dispose();
     expect(document.querySelector(`[${IMAGE_OVERLAY_LAYER_ATTRIBUTE}]`)).toBeNull();
     expect(window).toBeDefined();
+  });
+
+  it('wraps and downscales long Latin and CJK translations inside fixed OCR boxes', () => {
+    const { document } = parseHTML('<html><body><img></body></html>');
+    const image = document.querySelector('img') as unknown as HTMLImageElement;
+    image.getBoundingClientRect = () => ({
+      left: 0, top: 0, width: 100, height: 60,
+      right: 100, bottom: 60, x: 0, y: 0, toJSON: () => ({}),
+    });
+    const projector = new ImageOverlayProjector({
+      resolveAnchor: () => ({
+        document: sourceDocument,
+        replayLease: 9,
+        image,
+        iframe: { contentDocument: document } as HTMLIFrameElement,
+      }),
+      isCurrent: () => true,
+      scheduleFrame: (callback) => { callback(); return 1; },
+      cancelFrame: () => undefined,
+      createResizeObserver: () => undefined,
+    });
+    projector.beginPair(1, 'en>ja');
+    expect(projector.project(projection({
+      bitmapWidth: 100,
+      bitmapHeight: 60,
+      cropOffsetXCss: 0,
+      cropOffsetYCss: 0,
+      cropWidthCss: 100,
+      cropHeightCss: 60,
+      renderedWidthCss: 100,
+      renderedHeightCss: 60,
+      regions: [
+        {
+          text: 'OK',
+          boundingBox: { x: 0, y: 0, width: 50, height: 30 },
+        },
+        {
+          text: '非常に長い翻訳テキストが小さな領域でも折り返されます',
+          boundingBox: { x: 50, y: 0, width: 50, height: 30 },
+        },
+      ],
+    }))).toBe(true);
+
+    const regions = [...document.querySelectorAll(
+      '[data-simul-image-overlay="7"] > span',
+    )] as HTMLElement[];
+    expect(regions).toHaveLength(2);
+    expect(Number.parseFloat(regions[1]!.style.fontSize)).toBeLessThan(
+      Number.parseFloat(regions[0]!.style.fontSize),
+    );
+    expect(regions[1]!.style.overflow).toBe('hidden');
+    expect(regions[1]!.style.whiteSpace).toBe('normal');
   });
 
   it('rejects stale leases/geometry and removes projections after pair currentness changes', () => {

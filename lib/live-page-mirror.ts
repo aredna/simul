@@ -4,6 +4,13 @@ import {
   type VisualControlShell,
   type VisualStyle,
 } from './page-snapshot';
+import {
+  isDocumentScrollTarget,
+  nestedScrollerOrdinal,
+  readDocumentScrollSnapshot,
+  readNestedScrollSnapshot,
+  type PrimaryScrollTarget,
+} from './primary-scroll';
 
 export const LIVE_MIRROR_VERSION = 1 as const;
 
@@ -23,10 +30,20 @@ export interface LivePageScrollMessage {
   generation: number;
   sessionId: string;
   url: string;
+  scrollTarget: PrimaryScrollTarget;
   scrollX: number;
   scrollY: number;
   maxScrollX: number;
   maxScrollY: number;
+  /** Opaque, content-free identity used only to retire stale replica panes. */
+  nestedOwnerKey?: number;
+  /** Ordinal among qualified panes; used when source/replica structure agrees. */
+  nestedOwnerOrdinal?: number;
+  /** Document-owner position retained when a nested viewport is active. */
+  documentScrollX: number;
+  documentScrollY: number;
+  documentMaxScrollX: number;
+  documentMaxScrollY: number;
 }
 
 export type LivePageObserverInstallation =
@@ -146,6 +163,15 @@ export function installLivePageObserver(
   let sequence = 0;
   let flushTimer: ReturnType<typeof setTimeout> | undefined;
   let scrollFrame = 0;
+  let activeNestedScroller: Element | undefined;
+  let pendingNestedScroller: Element | undefined;
+  const nestedOwnerKeys = new WeakMap<Element, number>();
+  let nestedOwnerOrdinals = new WeakMap<Element, number>();
+  let nextNestedOwnerKey = 1;
+  let pendingDocumentScroll = false;
+  let pendingScrollAnnouncement = false;
+  let lastDocumentScroll:
+    ReturnType<typeof readDocumentScrollSnapshot> | undefined;
   let stopped = false;
   let dimensionDirty = false;
   let resizeObserver: ResizeObserver | undefined;
@@ -308,6 +334,12 @@ export function installLivePageObserver(
   };
 
   const onMutations = (records: MutationRecord[]): void => {
+    if (records.length > 0) {
+      // Qualification order is DOM-order dependent. Any observed change can
+      // alter layout or insert a pane ahead of the active owner, so cached
+      // ordinals must not survive the mutation batch.
+      nestedOwnerOrdinals = new WeakMap<Element, number>();
+    }
     for (const record of records) {
       if (record.type === 'childList') {
         for (const removed of record.removedNodes) forgetTree(removed);
@@ -349,6 +381,7 @@ export function installLivePageObserver(
   const onSlotChange = (event: Event): void => {
     const target = event.target;
     if (!(target instanceof Element)) return;
+    nestedOwnerOrdinals = new WeakMap<Element, number>();
     const root = target.getRootNode();
     const candidate = typeof ShadowRoot !== 'undefined' && root instanceof ShadowRoot
       ? root.host
@@ -386,25 +419,119 @@ export function installLivePageObserver(
     root.addEventListener('load', onVisualStateEvent, true);
     root.addEventListener('transitionend', onVisualStateEvent, true);
     root.addEventListener('animationend', onVisualStateEvent, true);
+    root.addEventListener('scroll', onScroll, true);
     observeOpenRoots(root);
   };
 
-  const onScroll = (): void => {
+  const onScroll = (event?: Event): void => {
+    if (event) {
+      if (isDocumentScrollTarget(event.target, document, window)) {
+        pendingDocumentScroll = true;
+      } else if (
+        event.target instanceof Element &&
+        readNestedScrollSnapshot(event.target, document, window)
+      ) {
+        if (event.target !== activeNestedScroller) {
+          nestedOwnerOrdinals.delete(event.target);
+        }
+        pendingNestedScroller = event.target;
+      } else {
+        // Ignore incidental inputs, carousels, and clipped regions. Scheduling
+        // a frame for them would replay whichever primary target happened to
+        // be active before this unrelated scroll event.
+        return;
+      }
+    } else {
+      // Rebuild/status announcements must describe the current DOM order,
+      // not an ordinal retained from an earlier replica structure.
+      nestedOwnerOrdinals = new WeakMap<Element, number>();
+      pendingScrollAnnouncement = true;
+    }
     if (scrollFrame || stopped) return;
     scrollFrame = requestAnimationFrame(() => {
       scrollFrame = 0;
-      const root = document.documentElement;
+      const documentScroll = readDocumentScrollSnapshot(document, window);
+      const documentMoved = lastDocumentScroll !== undefined &&
+        !sameScrollPosition(documentScroll, lastDocumentScroll);
+      let scroll = documentScroll;
+      if (pendingDocumentScroll) {
+        activeNestedScroller = undefined;
+      } else if (pendingNestedScroller) {
+        const nestedScroll = readNestedScrollSnapshot(
+          pendingNestedScroller,
+          document,
+          window,
+        );
+        if (nestedScroll) {
+          activeNestedScroller = pendingNestedScroller;
+          scroll = nestedScroll;
+        } else if (pendingNestedScroller === activeNestedScroller) {
+          activeNestedScroller = undefined;
+        }
+      } else if (documentMoved) {
+        // Programmatic scrolling can occur without a usable event target. A
+        // changed document offset must retire a previously active nested pane
+        // instead of allowing that stale pane to suppress ordinary scrolling.
+        activeNestedScroller = undefined;
+      } else {
+        const nested = activeNestedScroller;
+        const nestedScroll = nested
+          ? readNestedScrollSnapshot(nested, document, window)
+          : undefined;
+        if (nestedScroll) {
+          scroll = nestedScroll;
+        } else if (nested) {
+          activeNestedScroller = undefined;
+        }
+      }
+      lastDocumentScroll = documentScroll;
+      pendingNestedScroller = undefined;
+      pendingDocumentScroll = false;
+      pendingScrollAnnouncement = false;
       for (const [targetSessionId, targetGeneration] of sessions) {
+        let nestedOwnerKey: number | undefined;
+        if (scroll.scrollTarget === 'nested' && activeNestedScroller) {
+          nestedOwnerKey = nestedOwnerKeys.get(activeNestedScroller);
+          if (nestedOwnerKey === undefined) {
+            nestedOwnerKey = nextNestedOwnerKey;
+            nextNestedOwnerKey = nextNestedOwnerKey >= 1_000_000_000
+              ? 1
+              : nextNestedOwnerKey + 1;
+            nestedOwnerKeys.set(activeNestedScroller, nestedOwnerKey);
+          }
+        }
+        let nestedOwnerOrdinalValue: number | undefined;
+        if (scroll.scrollTarget === 'nested' && activeNestedScroller) {
+          nestedOwnerOrdinalValue = nestedOwnerOrdinals.get(activeNestedScroller);
+          if (nestedOwnerOrdinalValue === undefined) {
+            nestedOwnerOrdinalValue = nestedScrollerOrdinal(
+              activeNestedScroller,
+              document,
+              window,
+            );
+            if (nestedOwnerOrdinalValue !== undefined) {
+              nestedOwnerOrdinals.set(
+                activeNestedScroller,
+                nestedOwnerOrdinalValue,
+              );
+            }
+          }
+        }
         send({
           type: 'simul:page-scroll',
           version: 1,
           sessionId: targetSessionId,
           generation: targetGeneration,
           url: pageUrl(),
-          scrollX: window.scrollX,
-          scrollY: window.scrollY,
-          maxScrollX: Math.max(0, root.scrollWidth - window.innerWidth),
-          maxScrollY: Math.max(0, root.scrollHeight - window.innerHeight),
+          ...scroll,
+          ...(nestedOwnerKey !== undefined ? { nestedOwnerKey } : {}),
+          ...(nestedOwnerOrdinalValue !== undefined
+            ? { nestedOwnerOrdinal: nestedOwnerOrdinalValue }
+            : {}),
+          documentScrollX: documentScroll.scrollX,
+          documentScrollY: documentScroll.scrollY,
+          documentMaxScrollX: documentScroll.maxScrollX,
+          documentMaxScrollY: documentScroll.maxScrollY,
         });
       }
     });
@@ -412,6 +539,7 @@ export function installLivePageObserver(
 
   const onViewportResize = (): void => {
     if (stopped) return;
+    nestedOwnerOrdinals = new WeakMap<Element, number>();
     dirtyIds.add(idFor(document.documentElement));
     dimensionDirty = true;
     scheduleFlush();
@@ -432,6 +560,7 @@ export function installLivePageObserver(
         root.removeEventListener('load', onVisualStateEvent, true);
         root.removeEventListener('transitionend', onVisualStateEvent, true);
         root.removeEventListener('animationend', onVisualStateEvent, true);
+        root.removeEventListener('scroll', onScroll, true);
       }
       if (flushTimer !== undefined) clearTimeout(flushTimer);
       if (scrollFrame) cancelAnimationFrame(scrollFrame);
@@ -464,6 +593,13 @@ export function installLivePageObserver(
   onScroll();
   initialScrollTimer = setTimeout(onScroll, 350);
   return { installed: true, generation, sequence };
+}
+
+function sameScrollPosition(
+  left: ReturnType<typeof readDocumentScrollSnapshot>,
+  right: ReturnType<typeof readDocumentScrollSnapshot>,
+): boolean {
+  return left.scrollX === right.scrollX && left.scrollY === right.scrollY;
 }
 
 /** Best-effort cleanup when a side panel or detached companion closes. */
@@ -894,22 +1030,81 @@ export function readLivePageScrollMessage(
     typeof input.sessionId !== 'string' ||
     !SESSION_ID_PATTERN.test(input.sessionId) ||
     typeof input.url !== 'string' ||
-    !isHttpUrl(input.url)
+    !isHttpUrl(input.url) ||
+    (
+      input.scrollTarget !== undefined &&
+      input.scrollTarget !== 'document' && input.scrollTarget !== 'nested'
+    )
+  ) return undefined;
+  if (
+    input.nestedOwnerKey !== undefined &&
+    (
+      input.scrollTarget !== 'nested' ||
+      !Number.isSafeInteger(input.nestedOwnerKey) ||
+      Number(input.nestedOwnerKey) < 1 ||
+      Number(input.nestedOwnerKey) > 1_000_000_000
+    )
+  ) return undefined;
+  if (
+    input.nestedOwnerOrdinal !== undefined &&
+    (
+      input.scrollTarget !== 'nested' ||
+      !Number.isSafeInteger(input.nestedOwnerOrdinal) ||
+      Number(input.nestedOwnerOrdinal) < 0 ||
+      Number(input.nestedOwnerOrdinal) >= 5_000
+    )
   ) return undefined;
   const values = [input.scrollX, input.scrollY, input.maxScrollX, input.maxScrollY];
   if (values.some((value) => typeof value !== 'number' || !Number.isFinite(value))) {
     return undefined;
   }
+  const documentValues = [
+    input.documentScrollX,
+    input.documentScrollY,
+    input.documentMaxScrollX,
+    input.documentMaxScrollY,
+  ];
+  const hasDocumentValues = documentValues.some((value) => value !== undefined);
+  if (
+    hasDocumentValues &&
+    documentValues.some(
+      (value) => typeof value !== 'number' || !Number.isFinite(value),
+    )
+  ) return undefined;
+  const nested = input.scrollTarget === 'nested';
+  const documentScrollX = hasDocumentValues
+    ? input.documentScrollX as number
+    : nested ? 0 : input.scrollX as number;
+  const documentScrollY = hasDocumentValues
+    ? input.documentScrollY as number
+    : nested ? 0 : input.scrollY as number;
+  const documentMaxScrollX = hasDocumentValues
+    ? input.documentMaxScrollX as number
+    : nested ? 0 : input.maxScrollX as number;
+  const documentMaxScrollY = hasDocumentValues
+    ? input.documentMaxScrollY as number
+    : nested ? 0 : input.maxScrollY as number;
   return {
     type: input.type,
     version: 1,
     generation: input.generation,
     sessionId: input.sessionId,
     url: normalizeHttpUrl(input.url),
+    scrollTarget: input.scrollTarget === 'nested' ? 'nested' : 'document',
     scrollX: clampDimension(input.scrollX as number),
     scrollY: clampDimension(input.scrollY as number),
     maxScrollX: clampDimension(input.maxScrollX as number),
     maxScrollY: clampDimension(input.maxScrollY as number),
+    ...(input.scrollTarget === 'nested' && input.nestedOwnerKey !== undefined
+      ? { nestedOwnerKey: input.nestedOwnerKey as number }
+      : {}),
+    ...(input.scrollTarget === 'nested' && input.nestedOwnerOrdinal !== undefined
+      ? { nestedOwnerOrdinal: input.nestedOwnerOrdinal as number }
+      : {}),
+    documentScrollX: clampDimension(documentScrollX),
+    documentScrollY: clampDimension(documentScrollY),
+    documentMaxScrollX: clampDimension(documentMaxScrollX),
+    documentMaxScrollY: clampDimension(documentMaxScrollY),
   };
 }
 

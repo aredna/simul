@@ -28,17 +28,24 @@ export interface ReplicaProjectionContext {
   readonly pairKey: string | undefined;
 }
 
-export interface ReplicaTextProjection {
+interface ReplicaProjectionBase {
   readonly document: ReplicaSourceDocumentIdentity;
   readonly replayLease: number;
   readonly nodeId: number;
-  readonly nodeType: 3;
   readonly sourceRevision: number;
   readonly source: string;
   readonly translationEpoch: number;
   readonly pairKey: string;
   readonly translated: string;
 }
+
+export type ReplicaTextProjection = ReplicaProjectionBase & (
+  | { readonly nodeType: 3 }
+  | {
+      readonly nodeType: 1;
+      readonly controlTarget: 'value' | 'placeholder';
+    }
+);
 
 export interface ReplicaTranslationSnapshot {
   readonly document: ReplicaSourceDocumentIdentity;
@@ -381,7 +388,6 @@ export class ReplicaTranslationCoordinator {
             {
               provider: this.#providerId,
               pair,
-              pageKey: sourceDocumentTranslationKey(job.record.document),
             },
             boundary.core,
             () => {
@@ -400,17 +406,24 @@ export class ReplicaTranslationCoordinator {
             stale += 1;
             continue;
           }
-          const projected = this.surface.project({
+          const projectionBase = {
             document: job.record.document,
             replayLease: job.replayLease,
             nodeId: job.record.nodeId,
-            nodeType: 3,
             sourceRevision: job.record.revision,
             source: job.record.source,
             translationEpoch: job.translationEpoch,
             pairKey: job.pairKey,
             translated: `${boundary.leading}${translated.trim()}${boundary.trailing}`,
-          });
+          };
+          const projection: ReplicaTextProjection = job.record.nodeType === 1
+            ? {
+                ...projectionBase,
+                nodeType: 1,
+                controlTarget: job.record.controlTarget,
+              }
+            : { ...projectionBase, nodeType: 3 };
+          const projected = this.surface.project(projection);
           if (projected) completed += 1;
           else stale += 1;
         } catch (error) {
@@ -565,7 +578,10 @@ export class ReplicaTranslationCoordinator {
     );
     return Boolean(
       current &&
-        current.nodeType === 3 &&
+        current.nodeType === job.record.nodeType &&
+        (current.nodeType !== 1 ||
+          (job.record.nodeType === 1 &&
+            current.controlTarget === job.record.controlTarget)) &&
         current.revision === job.record.revision &&
         current.source === job.record.source,
     );
@@ -574,16 +590,6 @@ export class ReplicaTranslationCoordinator {
 
 export function translationPairKey(pair: TranslationPair): string {
   return `${pair.sourceLanguage}>${pair.targetLanguage}`;
-}
-
-function sourceDocumentTranslationKey(
-  document: ReplicaSourceDocumentIdentity,
-): string {
-  return JSON.stringify([
-    document.sessionId,
-    document.documentId,
-    document.frameId,
-  ]);
 }
 
 function isTranslatableRecord(record: ReplicaSourceTextRecord): boolean {

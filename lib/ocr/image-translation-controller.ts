@@ -30,6 +30,8 @@ import type {
 } from './contracts';
 import {
   ImageRecognitionCoordinator,
+  type ImageRecognitionCacheAccess,
+  type ImageRecognitionCacheStats,
   type ImageRecognitionRoute,
 } from './image-analysis-coordinator';
 import {
@@ -59,6 +61,7 @@ import {
   tesseractLanguageGroupFor,
   TESSERACT_MODEL_VERSION,
 } from './providers/tesseract/language-catalog';
+import type { ImageTextQualitySummary } from './result-quality';
 
 const MUTATION_QUIET_MS = 1_000;
 const MAX_TRANSLATED_IMAGE_REGIONS = 512;
@@ -116,7 +119,7 @@ export type ImageTranslationDiagnostic =
   | Readonly<{
       stage: 'configuration';
       status: 'disabled' | 'waiting-for-replica';
-      reason?: 'feature-off' | 'provider-unavailable';
+      reason?: 'feature-off' | 'provider-unavailable' | 'same-language';
     }>
   | Readonly<{
       stage: 'source-summary';
@@ -155,6 +158,24 @@ export type ImageTranslationDiagnostic =
       ordinal: number;
       bitmapWidth: number;
       bitmapHeight: number;
+    }>
+  | Readonly<{
+      stage: 'recognition-cache';
+      access: ImageRecognitionCacheAccess;
+      entries: number;
+      weight: number;
+      hits: number;
+      misses: number;
+      joins: number;
+      loads: number;
+    }>
+  | Readonly<{
+      stage: 'recognition-quality';
+      candidateRegions: number;
+      acceptedRegions: number;
+      rejectedBlankRegions: number;
+      rejectedPunctuationRegions: number;
+      rejectedLowConfidenceRegions: number;
     }>
   | Readonly<{
       stage: 'translation-started' | 'translation-failed' | 'translation-empty';
@@ -300,8 +321,7 @@ export class ImageTranslationController {
       providerOrder: Object.freeze([...configuration.providerOrder]),
     });
     const enabled = this.#isEnabled();
-    const wasEnabled = previous.enabled &&
-      hasRuntimeImageTextProvider(previous.providerOrder);
+    const wasEnabled = imageTranslationConfigurationEnabled(previous);
     const pairChanged = pairConfigurationKey(previous) !==
       pairConfigurationKey(this.#configuration);
     if (!enabled) {
@@ -846,6 +866,12 @@ export class ImageTranslationController {
       pixels,
     );
     const recognition = await this.#recognizer().recognize(pixels, route, signal);
+    if (recognition.cacheAccess && recognition.cacheStats) {
+      this.#reportRecognitionCache(
+        recognition.cacheAccess,
+        recognition.cacheStats,
+      );
+    }
     if (recognition.status !== 'complete') {
       scheduler.settle(job);
       this.environment.onDiagnostic?.(Object.freeze({
@@ -858,6 +884,9 @@ export class ImageTranslationController {
         bitmapHeight: pixels.bitmapHeight,
       }));
       return;
+    }
+    if (recognition.quality) {
+      this.#reportRecognitionQuality(recognition.quality);
     }
     this.environment.onDiagnostic?.(Object.freeze({
       stage: 'recognition-complete' as const,
@@ -1146,6 +1175,33 @@ export class ImageTranslationController {
     return this.#recognition ??= this.environment.createRecognitionCoordinator();
   }
 
+  #reportRecognitionCache(
+    access: ImageRecognitionCacheAccess,
+    stats: ImageRecognitionCacheStats,
+  ): void {
+    this.environment.onDiagnostic?.(Object.freeze({
+      stage: 'recognition-cache' as const,
+      access,
+      entries: stats.entries,
+      weight: stats.weight,
+      hits: stats.hits,
+      misses: stats.misses,
+      joins: stats.inFlightJoins,
+      loads: stats.loads,
+    }));
+  }
+
+  #reportRecognitionQuality(quality: ImageTextQualitySummary): void {
+    this.environment.onDiagnostic?.(Object.freeze({
+      stage: 'recognition-quality' as const,
+      candidateRegions: quality.candidateRegions,
+      acceptedRegions: quality.acceptedRegions,
+      rejectedBlankRegions: quality.rejectedBlankRegions,
+      rejectedPunctuationRegions: quality.rejectedPunctuationRegions,
+      rejectedLowConfidenceRegions: quality.rejectedLowConfidenceRegions,
+    }));
+  }
+
   #isJobCurrent(
     job: ImageScanJob,
     processingVersion: number,
@@ -1245,18 +1301,17 @@ export class ImageTranslationController {
 
   #isEnabled(): boolean {
     return !this.#disposed &&
-      this.#configuration.enabled &&
-      hasRuntimeImageTextProvider(this.#configuration.providerOrder);
+      imageTranslationConfigurationEnabled(this.#configuration);
   }
 
   #reportConfigurationState(): void {
     if (this.#disposed) return;
     if (!this.#isEnabled()) {
-      const reason = hasRuntimeImageTextProvider(
-        this.#configuration.providerOrder,
-      )
-        ? 'feature-off'
-        : 'provider-unavailable';
+      const reason = !hasRuntimeImageTextProvider(this.#configuration.providerOrder)
+        ? 'provider-unavailable'
+        : explicitImageLanguagesMatch(this.#configuration)
+          ? 'same-language'
+          : 'feature-off';
       const key = `disabled:${reason}`;
       if (key === this.#configurationDiagnosticKey) return;
       this.#configurationDiagnosticKey = key;
@@ -1303,6 +1358,21 @@ function hasRuntimeImageTextProvider(
   return order.some((providerId) =>
     providerId === 'chrome-text-detector' || providerId === 'tesseract',
   );
+}
+
+function imageTranslationConfigurationEnabled(
+  configuration: ImageTranslationConfiguration,
+): boolean {
+  return configuration.enabled &&
+    hasRuntimeImageTextProvider(configuration.providerOrder) &&
+    !explicitImageLanguagesMatch(configuration);
+}
+
+function explicitImageLanguagesMatch(
+  configuration: ImageTranslationConfiguration,
+): boolean {
+  return configuration.sourceLanguage !== 'auto' &&
+    configuration.sourceLanguage === configuration.targetLanguage;
 }
 
 function imageSchedulingReason(

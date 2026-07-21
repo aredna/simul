@@ -695,6 +695,22 @@ describe('ImageTranslationController', () => {
     const recognize = vi.fn<() => Promise<ImageRecognitionResult>>(async () => ({
       status: 'complete' as const,
       cacheHit: false,
+      cacheAccess: 'miss',
+      cacheStats: {
+        entries: 1,
+        weight: 42,
+        hits: 0,
+        misses: 1,
+        inFlightJoins: 0,
+        loads: 1,
+      },
+      quality: {
+        candidateRegions: 1,
+        acceptedRegions: 1,
+        rejectedBlankRegions: 0,
+        rejectedPunctuationRegions: 0,
+        rejectedLowConfidenceRegions: 0,
+      },
       result: {
         providerId: 'tesseract' as const,
         bitmapWidth: 200,
@@ -784,6 +800,24 @@ describe('ImageTranslationController', () => {
         renderedHeight: 100,
       },
       'recognition-started',
+      {
+        stage: 'recognition-cache',
+        access: 'miss',
+        entries: 1,
+        weight: 42,
+        hits: 0,
+        misses: 1,
+        joins: 0,
+        loads: 1,
+      },
+      {
+        stage: 'recognition-quality',
+        candidateRegions: 1,
+        acceptedRegions: 1,
+        rejectedBlankRegions: 0,
+        rejectedPunctuationRegions: 0,
+        rejectedLowConfidenceRegions: 0,
+      },
       {
         stage: 'recognition-complete',
         provider: 'tesseract',
@@ -950,30 +984,19 @@ describe('ImageTranslationController', () => {
 
   it('does not create a recognition host when the source and target languages match', async () => {
     const createRecognitionCoordinator = vi.fn();
+    const openSource = vi.fn(async (_request, onChange: (change: {
+      kind: 'upsert';
+      descriptor: typeof descriptor;
+    }) => void) => {
+      queueMicrotask(() => onChange({ kind: 'upsert', descriptor }));
+      return { measure: vi.fn(), dispose: vi.fn() };
+    });
+    const createPixelCoordinator = vi.fn(() => ({
+      acquire: vi.fn(),
+    }) as unknown as PixelAcquisitionCoordinator);
     const controller = new ImageTranslationController({
-      openSource: async (_request, onChange) => {
-        queueMicrotask(() => onChange({ kind: 'upsert', descriptor }));
-        return { measure: vi.fn(), dispose: vi.fn() };
-      },
-      createPixelCoordinator: () => ({
-        acquire: async () => ({
-          status: 'ready',
-          pixels: {
-            descriptor,
-            pixelHash: 'ef'.repeat(32),
-            encoded: new Blob([new Uint8Array([1])]),
-            bitmapWidth: 200,
-            bitmapHeight: 100,
-            cropOffsetXCss: 0,
-            cropOffsetYCss: 0,
-            cropWidthCss: 200,
-            cropHeightCss: 100,
-            renderedWidthCss: 200,
-            renderedHeightCss: 100,
-            nearestElementLanguage: 'en',
-          },
-        }),
-      }) as unknown as PixelAcquisitionCoordinator,
+      openSource,
+      createPixelCoordinator,
       createRecognitionCoordinator,
       resolveAnchor: () => ({
         document: sourceDocument,
@@ -1003,6 +1026,8 @@ describe('ImageTranslationController', () => {
     controller.activateReplica(request, 3, 1);
     await new Promise((resolve) => setTimeout(resolve, 0));
 
+    expect(openSource).not.toHaveBeenCalled();
+    expect(createPixelCoordinator).not.toHaveBeenCalled();
     expect(createRecognitionCoordinator).not.toHaveBeenCalled();
     controller.dispose();
   });

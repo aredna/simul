@@ -14,7 +14,10 @@ import {
   type OffscreenOcrJob,
 } from '../lib/ocr/offscreen-protocol';
 import type { AcquiredImagePixels } from '../lib/ocr/pixel-acquisition';
-import { OCR_NATIVE_PREPROCESSING_VERSION } from '../lib/ocr/preprocessing-profile';
+import {
+  OCR_NATIVE_PREPROCESSING_VERSION,
+  OCR_SHALLOW_BANNER_NATIVE_PREPROCESSING_VERSION,
+} from '../lib/ocr/preprocessing-profile';
 import type { TransientImageInputStore } from '../lib/ocr/transient-image-store';
 
 const documentIdentity = {
@@ -206,6 +209,393 @@ describe('offscreen OCR protocol and lifecycle', () => {
     expect(calls).toHaveLength(2);
   });
 
+  it('joins exact in-flight pixels across nodes and reuses them across documents', async () => {
+    const store = memoryStore();
+    const put = vi.spyOn(store, 'put');
+    const runJobs: OffscreenOcrJob[] = [];
+    let resolveRun!: (value: unknown) => void;
+    const sendMessage = vi.fn((message: unknown) => {
+      const record = message as Record<string, unknown>;
+      if (record.kind === 'simul:ocr-v1:ensure-host') {
+        return Promise.resolve({
+          kind: 'simul:ocr-v1:host-ready',
+          version: 1,
+          ready: true,
+        });
+      }
+      const command = readOffscreenOcrCommand(message);
+      if (!command || command.kind !== 'simul:ocr-v1:run') {
+        return Promise.resolve(undefined);
+      }
+      runJobs.push(command.job);
+      return new Promise<unknown>((resolve) => {
+        resolveRun = resolve;
+      });
+    });
+    const coordinator = new ImageRecognitionCoordinator({
+      store,
+      sendMessage,
+      clientId: 'client-join',
+    });
+    const route = {
+      providerOrder: ['tesseract'] as const,
+      sourceLanguage: 'en',
+      languageGroup: 'eng',
+      modelVersion: 'tessdata-fast-87416418',
+    };
+    const refreshedPixels: AcquiredImagePixels = {
+      ...pixels,
+      descriptor: {
+        ...descriptor,
+        document: {
+          ...documentIdentity,
+          pageEpoch: 2,
+          generation: 2,
+          documentId: 'document-refreshed',
+        },
+        nodeId: 99,
+        contentRevision: 1,
+        observationRevision: 1,
+      },
+      encoded: new Blob([new Uint8Array([9])], { type: 'image/png' }),
+    };
+
+    const first = coordinator.recognize(pixels, route);
+    await vi.waitFor(() => expect(runJobs).toHaveLength(1));
+    const joined = coordinator.recognize(refreshedPixels, route);
+    await vi.waitFor(() => expect(coordinator.snapshotStats().inFlightJoins).toBe(1));
+    resolveRun(success(runJobs[0] as OffscreenOcrJob));
+
+    await expect(first).resolves.toMatchObject({
+      status: 'complete',
+      cacheAccess: 'miss',
+    });
+    await expect(joined).resolves.toMatchObject({
+      status: 'complete',
+      cacheAccess: 'join',
+    });
+    expect(runJobs).toHaveLength(1);
+    expect(put).toHaveBeenCalledOnce();
+    await expect(coordinator.recognize(refreshedPixels, route)).resolves
+      .toMatchObject({ status: 'complete', cacheAccess: 'hit' });
+    expect(coordinator.snapshotStats()).toEqual({
+      entries: 1,
+      weight: 42,
+      hits: 1,
+      misses: 2,
+      inFlightJoins: 1,
+      loads: 1,
+    });
+  });
+
+  it('bounds distinct recognition loads while still admitting exact joins', async () => {
+    const store = memoryStore();
+    const releases: Array<(value: unknown) => void> = [];
+    const runJobs: OffscreenOcrJob[] = [];
+    const sendMessage = vi.fn((message: unknown) => {
+      const record = message as Record<string, unknown>;
+      if (record.kind === 'simul:ocr-v1:ensure-host') {
+        return Promise.resolve({
+          kind: 'simul:ocr-v1:host-ready',
+          version: 1,
+          ready: true,
+        });
+      }
+      const command = readOffscreenOcrCommand(message);
+      if (!command || command.kind !== 'simul:ocr-v1:run') {
+        return Promise.resolve(undefined);
+      }
+      runJobs.push(command.job);
+      return new Promise<unknown>((resolve) => releases.push(resolve));
+    });
+    const coordinator = new ImageRecognitionCoordinator({
+      store,
+      sendMessage,
+      clientId: 'client-bounded-joins',
+      maxInFlight: 1,
+    });
+    const route = {
+      languageGroup: 'eng',
+      modelVersion: 'tessdata-fast-87416418',
+    };
+    const first = coordinator.recognize(pixels, route);
+    await vi.waitFor(() => expect(runJobs).toHaveLength(1));
+    const joined = coordinator.recognize(pixels, route);
+    const overflow = await coordinator.recognize({
+      ...pixels,
+      pixelHash: 'cd'.repeat(32),
+    }, route);
+
+    expect(overflow).toMatchObject({
+      status: 'failed',
+      code: 'host-overflow',
+      cacheAccess: 'miss',
+    });
+    releases[0]?.(success(runJobs[0] as OffscreenOcrJob));
+    await expect(Promise.all([first, joined])).resolves.toEqual([
+      expect.objectContaining({ cacheAccess: 'miss' }),
+      expect.objectContaining({ cacheAccess: 'join' }),
+    ]);
+    expect(runJobs).toHaveLength(1);
+    expect(coordinator.snapshotStats()).toMatchObject({
+      misses: 3,
+      inFlightJoins: 1,
+      loads: 1,
+    });
+  });
+
+  it('does not let a pre-clear recognition refill the next cache generation', async () => {
+    const store = memoryStore();
+    let pendingJob: OffscreenOcrJob | undefined;
+    let releaseFirst!: (value: unknown) => void;
+    let runCount = 0;
+    const sendMessage = vi.fn((message: unknown) => {
+      const record = message as Record<string, unknown>;
+      if (record.kind === 'simul:ocr-v1:ensure-host') {
+        return Promise.resolve({
+          kind: 'simul:ocr-v1:host-ready',
+          version: 1,
+          ready: true,
+        });
+      }
+      const command = readOffscreenOcrCommand(message);
+      if (!command || command.kind !== 'simul:ocr-v1:run') {
+        return Promise.resolve(undefined);
+      }
+      runCount += 1;
+      if (runCount === 1) {
+        pendingJob = command.job;
+        return new Promise<unknown>((resolve) => {
+          releaseFirst = resolve;
+        });
+      }
+      return Promise.resolve(success(command.job));
+    });
+    const coordinator = new ImageRecognitionCoordinator({
+      store,
+      sendMessage,
+      clientId: 'client-generation',
+    });
+    const route = {
+      languageGroup: 'eng',
+      modelVersion: 'tessdata-fast-87416418',
+    };
+    const obsolete = coordinator.recognize(pixels, route);
+    await vi.waitFor(() => expect(pendingJob).toBeDefined());
+
+    coordinator.clear();
+    releaseFirst(success(pendingJob as OffscreenOcrJob));
+    await expect(obsolete).resolves.toMatchObject({ status: 'complete' });
+    expect(coordinator.snapshotStats().entries).toBe(0);
+
+    await expect(coordinator.recognize(pixels, route)).resolves.toMatchObject({
+      status: 'complete',
+      cacheAccess: 'miss',
+    });
+    expect(runCount).toBe(2);
+    expect(coordinator.snapshotStats()).toMatchObject({
+      entries: 1,
+      misses: 1,
+      loads: 1,
+    });
+  });
+
+  it('separates provider, model, language, profile, dimensions, and pixel keys', async () => {
+    const store = memoryStore();
+    const runJobs: OffscreenOcrJob[] = [];
+    const sendMessage = vi.fn(async (message: unknown) => {
+      const record = message as Record<string, unknown>;
+      if (record.kind === 'simul:ocr-v1:ensure-host') {
+        return { kind: 'simul:ocr-v1:host-ready', version: 1, ready: true };
+      }
+      const command = readOffscreenOcrCommand(message);
+      if (!command || command.kind !== 'simul:ocr-v1:run') return undefined;
+      runJobs.push(command.job);
+      return success(command.job);
+    });
+    const coordinator = new ImageRecognitionCoordinator({
+      store,
+      sendMessage,
+      clientId: 'client-key-separation',
+    });
+    const baseRoute = {
+      providerOrder: ['tesseract'] as const,
+      sourceLanguage: 'en',
+      languageGroup: 'eng',
+      modelVersion: 'model-a',
+    };
+
+    await expect(coordinator.recognize(pixels, baseRoute)).resolves
+      .toMatchObject({ cacheAccess: 'miss' });
+    await expect(coordinator.recognize(pixels, baseRoute)).resolves
+      .toMatchObject({ cacheAccess: 'hit' });
+    await expect(coordinator.recognize({
+      ...pixels,
+      pixelHash: 'ef'.repeat(32),
+    }, baseRoute)).resolves.toMatchObject({ cacheAccess: 'miss' });
+    await expect(coordinator.recognize({
+      ...pixels,
+      bitmapWidth: pixels.bitmapWidth + 1,
+    }, baseRoute)).resolves.toMatchObject({ cacheAccess: 'miss' });
+    await expect(coordinator.recognize({
+      ...pixels,
+      preprocessingVersion: OCR_SHALLOW_BANNER_NATIVE_PREPROCESSING_VERSION,
+    }, baseRoute)).resolves.toMatchObject({ cacheAccess: 'miss' });
+    await expect(coordinator.recognize(pixels, {
+      ...baseRoute,
+      modelVersion: 'model-b',
+    })).resolves.toMatchObject({ cacheAccess: 'miss' });
+    await expect(coordinator.recognize(pixels, {
+      ...baseRoute,
+      sourceLanguage: 'es',
+      languageGroup: 'spa',
+    })).resolves.toMatchObject({ cacheAccess: 'miss' });
+    await expect(coordinator.recognize(pixels, {
+      ...baseRoute,
+      providerOrder: ['chrome-text-detector', 'tesseract'],
+    })).resolves.toMatchObject({ cacheAccess: 'miss' });
+
+    expect(runJobs).toHaveLength(7);
+  });
+
+  it('evicts least-recently-used recognition results to stay within weight', async () => {
+    const store = memoryStore();
+    const texts = new Map([
+      ['aa'.repeat(32), 'one'],
+      ['bb'.repeat(32), 'two'],
+      ['cc'.repeat(32), 'three'],
+    ]);
+    const runJobs: OffscreenOcrJob[] = [];
+    const sendMessage = vi.fn(async (message: unknown) => {
+      const record = message as Record<string, unknown>;
+      if (record.kind === 'simul:ocr-v1:ensure-host') {
+        return { kind: 'simul:ocr-v1:host-ready', version: 1, ready: true };
+      }
+      const command = readOffscreenOcrCommand(message);
+      if (!command || command.kind !== 'simul:ocr-v1:run') return undefined;
+      runJobs.push(command.job);
+      return success(
+        command.job,
+        imageResultWithText(command.job, texts.get(command.job.pixelHash) ?? 'x'),
+      );
+    });
+    const coordinator = new ImageRecognitionCoordinator({
+      store,
+      sendMessage,
+      clientId: 'client-weight-lru',
+      maxCacheWeight: 100,
+    });
+    const route = {
+      languageGroup: 'eng',
+      modelVersion: 'tessdata-fast-87416418',
+    };
+    const withHash = (value: string): AcquiredImagePixels => ({
+      ...pixels,
+      pixelHash: value.repeat(32),
+    });
+
+    await coordinator.recognize(withHash('aa'), route);
+    await coordinator.recognize(withHash('bb'), route);
+    await expect(coordinator.recognize(withHash('aa'), route)).resolves
+      .toMatchObject({ cacheAccess: 'hit' });
+    await coordinator.recognize(withHash('cc'), route);
+    await expect(coordinator.recognize(withHash('aa'), route)).resolves
+      .toMatchObject({ cacheAccess: 'hit' });
+    await expect(coordinator.recognize(withHash('bb'), route)).resolves
+      .toMatchObject({ cacheAccess: 'miss' });
+
+    expect(runJobs.map(({ pixelHash }) => pixelHash.slice(0, 2))).toEqual([
+      'aa',
+      'bb',
+      'cc',
+      'bb',
+    ]);
+    expect(coordinator.snapshotStats()).toEqual({
+      entries: 2,
+      weight: 76,
+      hits: 2,
+      misses: 4,
+      inFlightJoins: 0,
+      loads: 4,
+    });
+  });
+
+  it('does not cache a single recognition result larger than its weight budget', async () => {
+    const store = memoryStore();
+    let runCount = 0;
+    const sendMessage = vi.fn(async (message: unknown) => {
+      const record = message as Record<string, unknown>;
+      if (record.kind === 'simul:ocr-v1:ensure-host') {
+        return { kind: 'simul:ocr-v1:host-ready', version: 1, ready: true };
+      }
+      const command = readOffscreenOcrCommand(message);
+      if (!command || command.kind !== 'simul:ocr-v1:run') return undefined;
+      runCount += 1;
+      return success(command.job, imageResultWithText(command.job, 'large'));
+    });
+    const coordinator = new ImageRecognitionCoordinator({
+      store,
+      sendMessage,
+      clientId: 'client-weight-oversize',
+      maxCacheWeight: 40,
+    });
+    const route = {
+      languageGroup: 'eng',
+      modelVersion: 'tessdata-fast-87416418',
+    };
+
+    await expect(coordinator.recognize(pixels, route)).resolves
+      .toMatchObject({ cacheAccess: 'miss' });
+    await expect(coordinator.recognize(pixels, route)).resolves
+      .toMatchObject({ cacheAccess: 'miss' });
+
+    expect(runCount).toBe(2);
+    expect(coordinator.snapshotStats()).toEqual({
+      entries: 0,
+      weight: 0,
+      hits: 0,
+      misses: 2,
+      inFlightJoins: 0,
+      loads: 2,
+    });
+  });
+
+  it('resets recognition cache weight and counters when cleared', async () => {
+    const store = memoryStore();
+    const sendMessage = vi.fn(async (message: unknown) => {
+      const record = message as Record<string, unknown>;
+      if (record.kind === 'simul:ocr-v1:ensure-host') {
+        return { kind: 'simul:ocr-v1:host-ready', version: 1, ready: true };
+      }
+      const command = readOffscreenOcrCommand(message);
+      return command?.kind === 'simul:ocr-v1:run'
+        ? success(command.job)
+        : undefined;
+    });
+    const coordinator = new ImageRecognitionCoordinator({
+      store,
+      sendMessage,
+      clientId: 'client-weight-clear',
+    });
+
+    await coordinator.recognize(pixels, {
+      languageGroup: 'eng',
+      modelVersion: 'tessdata-fast-87416418',
+    });
+    expect(coordinator.snapshotStats().weight).toBe(42);
+
+    coordinator.clear();
+
+    expect(coordinator.snapshotStats()).toEqual({
+      entries: 0,
+      weight: 0,
+      hits: 0,
+      misses: 0,
+      inFlightJoins: 0,
+      loads: 0,
+    });
+  });
+
   it('falls through boxes-only TextDetector output and passes its geometry to Tesseract', async () => {
     const store = memoryStore();
     const calls: OffscreenOcrJob[] = [];
@@ -255,6 +645,84 @@ describe('offscreen OCR protocol and lifecycle', () => {
       text: '',
       boundingBox: { x: 12, y: 14, width: 90, height: 24 },
     }]);
+  });
+
+  it('filters punctuation and supplied low confidence before caching provider output', async () => {
+    const store = memoryStore();
+    const calls: OffscreenOcrJob[] = [];
+    const sendMessage = vi.fn(async (message: unknown) => {
+      const record = message as Record<string, unknown>;
+      if (record.kind === 'simul:ocr-v1:ensure-host') {
+        return { kind: 'simul:ocr-v1:host-ready', version: 1, ready: true };
+      }
+      const command = readOffscreenOcrCommand(message);
+      if (!command || command.kind !== 'simul:ocr-v1:run') return undefined;
+      calls.push(command.job);
+      if (command.job.providerId === 'chrome-text-detector') {
+        return success(command.job, {
+          providerId: 'chrome-text-detector',
+          bitmapWidth: command.job.bitmapWidth,
+          bitmapHeight: command.job.bitmapHeight,
+          transcript: '!?\nnoise',
+          regions: [
+            {
+              text: '!?',
+              boundingBox: { x: 5, y: 6, width: 20, height: 10 },
+            },
+            {
+              text: 'noise',
+              confidence: 0.1,
+              boundingBox: { x: 30, y: 6, width: 40, height: 10 },
+            },
+          ],
+        });
+      }
+      return success(command.job, {
+        ...imageResult(command.job),
+        transcript: '日本語',
+        regions: [{
+          text: '日本語',
+          boundingBox: { x: 10, y: 12, width: 80, height: 20 },
+        }],
+      });
+    });
+    const coordinator = new ImageRecognitionCoordinator({
+      store,
+      sendMessage,
+      clientId: 'client-quality-filter',
+    });
+    const route = {
+      providerOrder: ['chrome-text-detector', 'tesseract'] as const,
+      sourceLanguage: 'ja',
+      languageGroup: 'jpn',
+      modelVersion: 'tessdata-fast-87416418',
+    };
+
+    const first = await coordinator.recognize(pixels, route);
+    expect(first).toMatchObject({
+      status: 'complete',
+      cacheAccess: 'miss',
+      result: {
+        providerId: 'tesseract',
+        transcript: '日本語',
+        regions: [{ text: '日本語' }],
+      },
+      quality: {
+        candidateRegions: 3,
+        acceptedRegions: 1,
+        rejectedBlankRegions: 0,
+        rejectedPunctuationRegions: 1,
+        rejectedLowConfidenceRegions: 1,
+      },
+    });
+    await expect(coordinator.recognize(pixels, route)).resolves.toMatchObject({
+      cacheAccess: 'hit',
+      quality: first.status === 'complete' ? first.quality : undefined,
+    });
+    expect(calls.map(({ providerId }) => providerId)).toEqual([
+      'chrome-text-detector',
+      'tesseract',
+    ]);
   });
 
   it('returns and caches a valid no-text result after provider fallthrough', async () => {
@@ -339,7 +807,7 @@ describe('offscreen OCR protocol and lifecycle', () => {
       sourceLanguage: 'en',
       languageGroup: 'eng',
       modelVersion: 'tessdata-fast-87416418',
-    })).resolves.toEqual({ status: 'failed', code: 'host-unavailable' });
+    })).resolves.toMatchObject({ status: 'failed', code: 'host-unavailable' });
     expect(sendMessage).toHaveBeenCalledTimes(2);
     expect(calls).toHaveLength(0);
   });
@@ -565,15 +1033,22 @@ function createJob(jobId: string, attempt: 0 | 1): OffscreenOcrJob {
 }
 
 function imageResult(job: OffscreenOcrJob): ImageTextResult {
+  return imageResultWithText(job, 'hello');
+}
+
+function imageResultWithText(
+  job: OffscreenOcrJob,
+  text: string,
+): ImageTextResult {
   return {
     providerId: job.providerId,
     bitmapWidth: job.bitmapWidth,
     bitmapHeight: job.bitmapHeight,
-    transcript: 'hello',
+    transcript: text,
     transcriptConfidence: 0.9,
     geometryConfidence: 0.9,
     regions: [{
-      text: 'hello',
+      text,
       confidence: 0.9,
       boundingBox: { x: 10, y: 12, width: 80, height: 20 },
     }],

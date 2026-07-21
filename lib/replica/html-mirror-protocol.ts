@@ -1,14 +1,18 @@
 import type { ReplicaDiagnosticCode, ReplicaDocumentIdentity } from './contracts';
 import {
   MAX_HTML_MIRROR_BYTES,
+  MAX_HTML_MIRROR_DIAGNOSTIC_COUNT,
   MAX_HTML_MIRROR_NODES,
   createHtmlMirrorReadBudget,
   createHtmlMirrorRepresentabilityCollector,
   htmlMirrorJsonBytes,
   readHtmlMirrorDocumentContent,
+  readHtmlMirrorCanvasBackgroundColor,
   readHtmlMirrorNode,
   readHtmlMirrorRepresentability,
   type HtmlMirrorElementNode,
+  type HtmlMirrorNamespace,
+  type HtmlMirrorControlText,
   type HtmlMirrorNode,
   type HtmlMirrorRepresentabilitySummary,
 } from './html-mirror-sanitizer';
@@ -16,6 +20,10 @@ import {
   createReplicaIdentity,
   readReplicaIdentity,
 } from './protocol-v2';
+import {
+  isSelectableReplicaFidelityPolicy,
+  type SelectableReplicaFidelityPolicy,
+} from './fidelity-policy';
 
 export const HTML_MIRROR_PROTOCOL_VERSION = 1 as const;
 export const HTML_MIRROR_PORT_PREFIX = 'simul:html-mirror-v1:';
@@ -29,6 +37,7 @@ export interface HtmlMirrorCheckpoint {
   readonly payload: {
     readonly root: HtmlMirrorElementNode;
     readonly adoptedStyleSheets: readonly string[];
+    readonly documentMode: 'standards' | 'quirks';
     readonly byteLength: number;
     readonly captureMs: number;
     readonly viewportWidth: number;
@@ -58,10 +67,14 @@ export type HtmlMirrorPatchOperation =
   | {
       readonly kind: 'attributes';
       readonly nodeId: number;
+      readonly namespace: HtmlMirrorNamespace;
       readonly tagName: string;
       readonly attributes: readonly (readonly [string, string])[];
       readonly visuallyHidden?: true;
       readonly selectedImageSource?: string;
+      readonly controlText?: HtmlMirrorControlText;
+      readonly canvasBackgroundColor?: string;
+      readonly resolvedStyleSheetText?: string;
     }
   | {
       readonly kind: 'children';
@@ -79,6 +92,7 @@ export type HtmlMirrorPatchOperation =
       readonly viewportHeight: number;
       readonly documentWidth: number;
       readonly documentHeight: number;
+      readonly canvasBackgroundColor?: string;
     };
 
 export interface HtmlMirrorPatchBatch {
@@ -113,6 +127,7 @@ export type HtmlMirrorControllerMessage =
       readonly protocolVersion: typeof HTML_MIRROR_PROTOCOL_VERSION;
       readonly kind: 'simul:html-mirror-v1:start';
       readonly identity: ReplicaDocumentIdentity;
+      readonly fidelityPolicy: SelectableReplicaFidelityPolicy;
     }
   | {
       readonly protocolVersion: typeof HTML_MIRROR_PROTOCOL_VERSION;
@@ -140,11 +155,13 @@ export function readHtmlMirrorPortSessionId(value: unknown): string | undefined 
 
 export function createHtmlMirrorStart(
   identity: ReplicaDocumentIdentity,
+  fidelityPolicy: SelectableReplicaFidelityPolicy = 'conservative',
 ): HtmlMirrorControllerMessage {
   return Object.freeze({
     protocolVersion: HTML_MIRROR_PROTOCOL_VERSION,
     kind: 'simul:html-mirror-v1:start',
     identity,
+    fidelityPolicy,
   });
 }
 
@@ -177,7 +194,11 @@ export function readHtmlMirrorControllerMessage(
 ): HtmlMirrorControllerMessage | undefined {
   if (
     !isRecord(input) ||
-    !hasExactKeys(input, ['protocolVersion', 'kind', 'identity']) ||
+    !hasExactKeysWithOptional(
+      input,
+      ['protocolVersion', 'kind', 'identity'],
+      ['fidelityPolicy'],
+    ) ||
     input.protocolVersion !== HTML_MIRROR_PROTOCOL_VERSION ||
     (input.kind !== 'simul:html-mirror-v1:start' &&
       input.kind !== 'simul:html-mirror-v1:ack' &&
@@ -192,6 +213,27 @@ export function readHtmlMirrorControllerMessage(
   if (input.kind === 'simul:html-mirror-v1:start' && identity.sequence !== 0) {
     return undefined;
   }
+  if (
+    input.kind === 'simul:html-mirror-v1:start' &&
+    (
+      !hasExactKeys(input, [
+        'protocolVersion', 'kind', 'identity', 'fidelityPolicy',
+      ]) ||
+      !isSelectableReplicaFidelityPolicy(input.fidelityPolicy)
+    )
+  ) return undefined;
+  if (
+    input.kind !== 'simul:html-mirror-v1:start' &&
+    Object.hasOwn(input, 'fidelityPolicy')
+  ) return undefined;
+  if (input.kind === 'simul:html-mirror-v1:start') {
+    return Object.freeze({
+      protocolVersion: HTML_MIRROR_PROTOCOL_VERSION,
+      kind: input.kind,
+      identity,
+      fidelityPolicy: input.fidelityPolicy as SelectableReplicaFidelityPolicy,
+    });
+  }
   return Object.freeze({
     protocolVersion: HTML_MIRROR_PROTOCOL_VERSION,
     kind: input.kind,
@@ -203,25 +245,41 @@ export function createHtmlMirrorCheckpoint(
   identity: ReplicaDocumentIdentity,
   input: Omit<
     HtmlMirrorCheckpoint['payload'],
-    'byteLength' | 'representability'
-  > & { readonly representability?: HtmlMirrorRepresentabilitySummary },
+    'byteLength' | 'representability' | 'documentMode'
+  > & {
+    readonly documentMode?: 'standards' | 'quirks';
+    readonly representability?: HtmlMirrorRepresentabilitySummary;
+  },
+  fidelityPolicy: SelectableReplicaFidelityPolicy = 'conservative',
 ): HtmlMirrorCheckpoint | undefined {
   const content = readHtmlMirrorDocumentContent(
     input.root,
     input.adoptedStyleSheets,
+    fidelityPolicy,
   );
   if (!content) return undefined;
   const { root, adoptedStyleSheets } = content;
+  const documentMode = input.documentMode === 'quirks'
+    ? 'quirks'
+    : input.documentMode === undefined || input.documentMode === 'standards'
+      ? 'standards'
+      : undefined;
+  if (!documentMode) return undefined;
   const dimensions = readDimensions(input);
   if (!dimensions) return undefined;
   const representability = readHtmlMirrorRepresentability(
     input.representability ?? createHtmlMirrorRepresentabilityCollector(),
   );
   if (!representability) return undefined;
+  const receiverRepresentability = mergeReceiverResourceInventory(
+    representability,
+    inventoryDocumentResources(root, adoptedStyleSheets),
+  );
   const byteLength = htmlMirrorJsonBytes({
     root,
     adoptedStyleSheets,
-    representability,
+    documentMode,
+    representability: receiverRepresentability,
   });
   if (!Number.isSafeInteger(byteLength) || byteLength > MAX_HTML_MIRROR_BYTES) {
     return undefined;
@@ -233,10 +291,11 @@ export function createHtmlMirrorCheckpoint(
     payload: Object.freeze({
       root,
       adoptedStyleSheets,
+      documentMode,
       byteLength,
       captureMs: boundedDuration(input.captureMs),
       ...dimensions,
-      representability,
+      representability: receiverRepresentability,
     }),
   });
 }
@@ -248,8 +307,9 @@ export function createHtmlMirrorPatch(
   operations: readonly HtmlMirrorPatchOperation[],
   representabilityInput: HtmlMirrorRepresentabilitySummary =
     createHtmlMirrorRepresentabilityCollector(),
+  fidelityPolicy: SelectableReplicaFidelityPolicy = 'conservative',
 ): HtmlMirrorPatchBatch | undefined {
-  const parsed = readOperations(operations);
+  const parsed = readOperations(operations, fidelityPolicy);
   const representability = readHtmlMirrorRepresentability(
     representabilityInput,
   );
@@ -260,9 +320,13 @@ export function createHtmlMirrorPatch(
     firstSequence > lastSequence ||
     identity.sequence !== lastSequence
   ) return undefined;
+  const receiverRepresentability = mergeReceiverResourceInventory(
+    representability,
+    inventoryOperationResources(parsed),
+  );
   const byteLength = htmlMirrorJsonBytes({
     operations: parsed,
-    representability,
+    representability: receiverRepresentability,
   });
   if (!Number.isSafeInteger(byteLength) || byteLength > MAX_HTML_MIRROR_BYTES) {
     return undefined;
@@ -274,7 +338,7 @@ export function createHtmlMirrorPatch(
     firstSequence,
     lastSequence,
     operations: parsed,
-    representability,
+    representability: receiverRepresentability,
     byteLength,
   });
 }
@@ -304,6 +368,7 @@ export function createHtmlMirrorError(
 export function readHtmlMirrorSourceMessage(
   input: unknown,
   expectedIdentity: ReplicaDocumentIdentity,
+  fidelityPolicy: SelectableReplicaFidelityPolicy = 'conservative',
 ): HtmlMirrorSourceMessage | undefined {
   if (
     !isRecord(input) ||
@@ -333,7 +398,7 @@ export function readHtmlMirrorSourceMessage(
       !hasExactKeys(input, ['protocolVersion', 'kind', 'identity', 'payload']) ||
       !isRecord(input.payload) ||
       !hasExactKeys(input.payload, [
-        'root', 'adoptedStyleSheets', 'byteLength', 'captureMs',
+        'root', 'adoptedStyleSheets', 'documentMode', 'byteLength', 'captureMs',
         'viewportWidth', 'viewportHeight', 'documentWidth', 'documentHeight',
         'representability',
       ])
@@ -341,13 +406,14 @@ export function readHtmlMirrorSourceMessage(
     const checkpoint = createHtmlMirrorCheckpoint(identity, {
       root: input.payload.root as HtmlMirrorElementNode,
       adoptedStyleSheets: input.payload.adoptedStyleSheets as readonly string[],
+      documentMode: input.payload.documentMode as 'standards' | 'quirks',
       captureMs: input.payload.captureMs as number,
       viewportWidth: input.payload.viewportWidth as number,
       viewportHeight: input.payload.viewportHeight as number,
       documentWidth: input.payload.documentWidth as number,
       documentHeight: input.payload.documentHeight as number,
       representability: input.payload.representability as HtmlMirrorRepresentabilitySummary,
-    });
+    }, fidelityPolicy);
     return checkpoint && checkpoint.payload.byteLength === input.payload.byteLength
       ? checkpoint
       : undefined;
@@ -366,11 +432,15 @@ export function readHtmlMirrorSourceMessage(
     input.lastSequence as number,
     input.operations as HtmlMirrorPatchOperation[],
     input.representability as HtmlMirrorRepresentabilitySummary,
+    fidelityPolicy,
   );
   return batch && batch.byteLength === input.byteLength ? batch : undefined;
 }
 
-function readOperations(input: readonly unknown[]): readonly HtmlMirrorPatchOperation[] | undefined {
+function readOperations(
+  input: readonly unknown[],
+  fidelityPolicy: SelectableReplicaFidelityPolicy,
+): readonly HtmlMirrorPatchOperation[] | undefined {
   if (input.length < 1 || input.length > MAX_HTML_MIRROR_PATCH_OPERATIONS) {
     return undefined;
   }
@@ -385,10 +455,14 @@ function readOperations(input: readonly unknown[]): readonly HtmlMirrorPatchOper
     }
     if (
       raw.kind === 'dimensions' &&
-      hasExactKeys(raw, [
-        'kind', 'viewportWidth', 'viewportHeight', 'documentWidth',
-        'documentHeight',
-      ])
+      hasExactKeysWithOptional(
+        raw,
+        [
+          'kind', 'viewportWidth', 'viewportHeight', 'documentWidth',
+          'documentHeight',
+        ],
+        ['canvasBackgroundColor'],
+      )
     ) {
       if (hasDimensions) return undefined;
       const dimensions = readDimensions(raw as unknown as {
@@ -396,6 +470,7 @@ function readOperations(input: readonly unknown[]): readonly HtmlMirrorPatchOper
         viewportHeight: number;
         documentWidth: number;
         documentHeight: number;
+        canvasBackgroundColor?: unknown;
       });
       if (!dimensions) return undefined;
       hasDimensions = true;
@@ -414,7 +489,18 @@ function readOperations(input: readonly unknown[]): readonly HtmlMirrorPatchOper
     kinds.add(raw.kind);
     targetKinds.set(raw.nodeId, kinds);
     if (raw.kind === 'text' && hasExactKeys(raw, ['kind', 'nodeId', 'node'])) {
-      const node = readHtmlMirrorNode(raw.node, graphIds, 0, graphBudget);
+      const node = readHtmlMirrorNode(
+        raw.node,
+        graphIds,
+        0,
+        graphBudget,
+        false,
+        false,
+        false,
+        false,
+        false,
+        fidelityPolicy,
+      );
       if (!node || node.kind !== 'text' || node.id !== raw.nodeId) return undefined;
       operations.push(Object.freeze({ kind: 'text', nodeId: raw.nodeId, node }));
       continue;
@@ -423,9 +509,14 @@ function readOperations(input: readonly unknown[]): readonly HtmlMirrorPatchOper
       raw.kind === 'attributes' &&
       hasExactKeysWithOptional(
         raw,
-        ['kind', 'nodeId', 'tagName', 'attributes'],
-        ['visuallyHidden', 'selectedImageSource'],
+        ['kind', 'nodeId', 'namespace', 'tagName', 'attributes'],
+        [
+          'visuallyHidden', 'selectedImageSource', 'controlText',
+          'canvasBackgroundColor', 'resolvedStyleSheetText',
+        ],
       ) &&
+      (raw.namespace === 'html' || raw.namespace === 'svg' ||
+        raw.namespace === 'mathml') &&
       typeof raw.tagName === 'string' &&
       Array.isArray(raw.attributes)
     ) {
@@ -437,7 +528,7 @@ function readOperations(input: readonly unknown[]): readonly HtmlMirrorPatchOper
       const sentinel = readHtmlMirrorNode({
         kind: 'element',
         id: raw.nodeId,
-        namespace: 'html',
+        namespace: raw.namespace,
         tagName: raw.tagName,
         attributes: raw.attributes,
         children: [],
@@ -445,16 +536,35 @@ function readOperations(input: readonly unknown[]): readonly HtmlMirrorPatchOper
         ...(typeof raw.selectedImageSource === 'string'
           ? { selectedImageSource: raw.selectedImageSource }
           : {}),
-      }, graphIds, 0, graphBudget);
+        ...(raw.controlText !== undefined
+          ? { controlText: raw.controlText }
+          : {}),
+        ...(raw.canvasBackgroundColor !== undefined
+          ? { canvasBackgroundColor: raw.canvasBackgroundColor }
+          : {}),
+        ...(raw.resolvedStyleSheetText !== undefined
+          ? { resolvedStyleSheetText: raw.resolvedStyleSheetText }
+          : {}),
+      }, graphIds, 0, graphBudget, false, false, false, false, false, fidelityPolicy);
       if (!sentinel || sentinel.kind !== 'element') return undefined;
       operations.push(Object.freeze({
         kind: 'attributes',
         nodeId: raw.nodeId,
+        namespace: sentinel.namespace,
         tagName: sentinel.tagName,
         attributes: sentinel.attributes,
         ...(sentinel.visuallyHidden ? { visuallyHidden: true as const } : {}),
         ...(sentinel.selectedImageSource
           ? { selectedImageSource: sentinel.selectedImageSource }
+          : {}),
+        ...(sentinel.controlText
+          ? { controlText: sentinel.controlText }
+          : {}),
+        ...(sentinel.canvasBackgroundColor
+          ? { canvasBackgroundColor: sentinel.canvasBackgroundColor }
+          : {}),
+        ...(sentinel.resolvedStyleSheetText !== undefined
+          ? { resolvedStyleSheetText: sentinel.resolvedStyleSheetText }
           : {}),
       }));
       continue;
@@ -466,7 +576,18 @@ function readOperations(input: readonly unknown[]): readonly HtmlMirrorPatchOper
     ) {
       const children: HtmlMirrorNode[] = [];
       for (const child of raw.children) {
-        const node = readHtmlMirrorNode(child, graphIds, 0, graphBudget);
+        const node = readHtmlMirrorNode(
+          child,
+          graphIds,
+          0,
+          graphBudget,
+          false,
+          false,
+          false,
+          false,
+          false,
+          fidelityPolicy,
+        );
         if (!node) return undefined;
         children.push(node);
       }
@@ -505,7 +626,18 @@ function readOperations(input: readonly unknown[]): readonly HtmlMirrorPatchOper
           child.kind === 'graph' &&
           hasExactKeys(child, ['kind', 'node'])
         ) {
-          const node = readHtmlMirrorNode(child.node, graphIds, 0, graphBudget);
+          const node = readHtmlMirrorNode(
+            child.node,
+            graphIds,
+            0,
+            graphBudget,
+            false,
+            false,
+            false,
+            false,
+            false,
+            fidelityPolicy,
+          );
           if (!node) return undefined;
           children.push(Object.freeze({ kind: 'graph', node }));
           continue;
@@ -524,26 +656,221 @@ function readOperations(input: readonly unknown[]): readonly HtmlMirrorPatchOper
   return Object.freeze(operations);
 }
 
+interface ReceiverResourceInventory {
+  requestCapable: number;
+  preservedStyleSheets: number;
+  preservedSvgResources: number;
+}
+
+function inventoryDocumentResources(
+  root: HtmlMirrorElementNode,
+  adoptedStyleSheets: readonly string[],
+): ReceiverResourceInventory {
+  const inventory = emptyResourceInventory();
+  inventoryNodeResources(root, inventory);
+  for (const cssText of adoptedStyleSheets) {
+    incrementInventory(inventory, 'preservedStyleSheets');
+    addRequestUrls(inventory, cssText);
+  }
+  return inventory;
+}
+
+function inventoryOperationResources(
+  operations: readonly HtmlMirrorPatchOperation[],
+): ReceiverResourceInventory {
+  const inventory = emptyResourceInventory();
+  for (const operation of operations) {
+    if (operation.kind === 'attributes') {
+      inventoryElementResources({
+        namespace: operation.namespace,
+        tagName: operation.tagName,
+        attributes: operation.attributes,
+        selectedImageSource: operation.selectedImageSource,
+        resolvedStyleSheetText: operation.resolvedStyleSheetText,
+      }, inventory);
+    } else if (operation.kind === 'children') {
+      for (const child of operation.children) {
+        inventoryNodeResources(child, inventory);
+      }
+    } else if (operation.kind === 'reconcile-children') {
+      for (const child of operation.children) {
+        if (child.kind === 'graph') inventoryNodeResources(child.node, inventory);
+      }
+    }
+  }
+  return inventory;
+}
+
+function inventoryNodeResources(
+  node: HtmlMirrorNode,
+  inventory: ReceiverResourceInventory,
+): void {
+  if (node.kind === 'text') return;
+  inventoryElementResources(node, inventory);
+  const resolvedStyle = node.tagName === 'style' &&
+    node.resolvedStyleSheetText !== undefined;
+  for (const child of node.children) {
+    if (resolvedStyle && child.kind === 'text') continue;
+    inventoryNodeResources(child, inventory);
+  }
+  if (!node.shadowRoot) return;
+  for (const cssText of node.shadowRoot.adoptedStyleSheets) {
+    incrementInventory(inventory, 'preservedStyleSheets');
+    addRequestUrls(inventory, cssText);
+  }
+  for (const child of node.shadowRoot.children) {
+    inventoryNodeResources(child, inventory);
+  }
+}
+
+function inventoryElementResources(
+  node: Pick<
+    HtmlMirrorElementNode,
+    | 'namespace'
+    | 'tagName'
+    | 'attributes'
+    | 'selectedImageSource'
+    | 'resolvedStyleSheetText'
+  >,
+  inventory: ReceiverResourceInventory,
+): void {
+  const attributes = Object.fromEntries(node.attributes);
+  const resolvedStyle = node.resolvedStyleSheetText;
+  if (
+    node.tagName === 'style' ||
+    (node.tagName === 'link' && attributes.rel === 'stylesheet')
+  ) {
+    incrementInventory(inventory, 'preservedStyleSheets');
+  }
+  if (resolvedStyle !== undefined) addRequestUrls(inventory, resolvedStyle);
+  if (node.selectedImageSource) {
+    addRequestUrls(inventory, node.selectedImageSource);
+  }
+  for (const [name, value] of node.attributes) {
+    if (
+      resolvedStyle !== undefined && node.tagName === 'link' && name === 'href' ||
+      node.selectedImageSource !== undefined &&
+        (name === 'src' || name === 'srcset' || name === 'sizes')
+    ) continue;
+    if (attributeCanRequest(node.namespace, node.tagName, name)) {
+      addRequestUrls(inventory, value);
+    }
+    if (
+      node.namespace === 'svg' &&
+      (
+        (name === 'href' || name === 'xlink:href') ||
+        SVG_PRESENTATION_RESOURCE_ATTRIBUTES.has(name)
+      )
+    ) {
+      incrementInventory(inventory, 'preservedSvgResources');
+    } else if (
+      (name === 'src' || name === 'poster') &&
+      /^data:image\/svg\+xml/iu.test(value)
+    ) {
+      incrementInventory(inventory, 'preservedSvgResources');
+    }
+  }
+}
+
+const SVG_PRESENTATION_RESOURCE_ATTRIBUTES = new Set([
+  'clip-path', 'cursor', 'fill', 'filter', 'marker', 'marker-end',
+  'marker-mid', 'marker-start', 'mask', 'stroke',
+]);
+
+function attributeCanRequest(
+  namespace: HtmlMirrorNamespace,
+  tagName: string,
+  name: string,
+): boolean {
+  if (name === 'style' || name === 'background' || name === 'poster') return true;
+  if (name === 'src' || name === 'srcset') return tagName === 'img' ||
+    tagName === 'source' || tagName === 'image';
+  if (name === 'href' || name === 'xlink:href') {
+    return tagName === 'link' || namespace === 'svg' &&
+      (tagName === 'image' || tagName === 'feimage' || tagName === 'use');
+  }
+  return namespace === 'svg' && SVG_PRESENTATION_RESOURCE_ATTRIBUTES.has(name);
+}
+
+function addRequestUrls(
+  inventory: ReceiverResourceInventory,
+  value: string,
+): void {
+  const matches = value.match(/https?:\/\//giu)?.length ?? 0;
+  for (let index = 0; index < matches; index += 1) {
+    incrementInventory(inventory, 'requestCapable');
+  }
+}
+
+function emptyResourceInventory(): ReceiverResourceInventory {
+  return {
+    requestCapable: 0,
+    preservedStyleSheets: 0,
+    preservedSvgResources: 0,
+  };
+}
+
+function incrementInventory(
+  inventory: ReceiverResourceInventory,
+  key: keyof ReceiverResourceInventory,
+): void {
+  inventory[key] = Math.min(
+    MAX_HTML_MIRROR_DIAGNOSTIC_COUNT,
+    inventory[key] + 1,
+  );
+}
+
+function mergeReceiverResourceInventory(
+  reported: HtmlMirrorRepresentabilitySummary,
+  inventory: ReceiverResourceInventory,
+): HtmlMirrorRepresentabilitySummary {
+  return Object.freeze({
+    ...reported,
+    preservedStyleSheetCount: Math.max(
+      reported.preservedStyleSheetCount,
+      inventory.preservedStyleSheets,
+    ),
+    preservedSvgResourceCount: Math.max(
+      reported.preservedSvgResourceCount,
+      inventory.preservedSvgResources,
+    ),
+    replicaRequestCapableResourceCount: Math.max(
+      reported.replicaRequestCapableResourceCount,
+      inventory.requestCapable,
+    ),
+  });
+}
+
 function readDimensions(input: {
   viewportWidth: number;
   viewportHeight: number;
   documentWidth: number;
   documentHeight: number;
-}): Omit<
-  HtmlMirrorCheckpoint['payload'],
-  'root' | 'adoptedStyleSheets' | 'byteLength' | 'captureMs' | 'representability'
-> | undefined {
+  canvasBackgroundColor?: unknown;
+}): Readonly<{
+  viewportWidth: number;
+  viewportHeight: number;
+  documentWidth: number;
+  documentHeight: number;
+  canvasBackgroundColor?: string;
+}> | undefined {
   if (
     !isDimension(input.viewportWidth) ||
     !isDimension(input.viewportHeight) ||
     !isDimension(input.documentWidth) ||
     !isDimension(input.documentHeight)
   ) return undefined;
+  const hasCanvasBackground = Object.hasOwn(input, 'canvasBackgroundColor');
+  const canvasBackgroundColor = hasCanvasBackground
+    ? readHtmlMirrorCanvasBackgroundColor(input.canvasBackgroundColor)
+    : undefined;
+  if (hasCanvasBackground && !canvasBackgroundColor) return undefined;
   return {
     viewportWidth: input.viewportWidth,
     viewportHeight: input.viewportHeight,
     documentWidth: input.documentWidth,
     documentHeight: input.documentHeight,
+    ...(canvasBackgroundColor ? { canvasBackgroundColor } : {}),
   };
 }
 

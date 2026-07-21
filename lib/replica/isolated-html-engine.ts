@@ -23,6 +23,7 @@ import {
   readHtmlMirrorDocumentContent,
   readHtmlMirrorNode,
   sanitizeCss,
+  type HtmlMirrorControlText,
   type HtmlMirrorElementNode,
   type HtmlMirrorNode,
   type HtmlMirrorRepresentabilitySummary,
@@ -30,9 +31,7 @@ import {
 import {
   isSourceActivationRoleValue,
   isSourceActivationTagName,
-  isSourcePrivateContentEditableValue,
-  isSourcePrivateRoleValue,
-  isSourcePrivateTagName,
+  sourceElementStartsPrivateRegion,
 } from './source-privacy-policy';
 import {
   sameSourceDocument,
@@ -55,10 +54,13 @@ import type {
   ReplicaTranslationSnapshot,
   ReplicaTranslationSurface,
 } from '../translation/replica-translation-coordinator';
+import type { SelectableReplicaFidelityPolicy } from './fidelity-policy';
 
 export const ISOLATED_HTML_SHELL_MARKER = 'isolated-html-v1';
+const ISOLATED_HTML_SHELL_DOCUMENT = `<html><head><meta charset="utf-8" data-simul-owned-shell="charset"><meta name="simul-isolated-shell" content="${ISOLATED_HTML_SHELL_MARKER}" data-simul-owned-shell="marker"><meta http-equiv="Content-Security-Policy" data-simul-owned-shell="csp" content="default-src 'none'; script-src 'none'; worker-src 'none'; connect-src 'none'; object-src 'none'; frame-src 'none'; child-src 'none'; media-src 'none'; form-action 'none'; base-uri 'none'; img-src http: https: data: blob:; style-src 'unsafe-inline' http: https: data:; font-src http: https: data:"><style data-simul-owned-shell="inert">html,body{margin:0;min-width:100%;min-height:100%;pointer-events:none}*{pointer-events:none!important}</style></head><body></body></html>`;
 export const ISOLATED_HTML_SHELL = `<!doctype html>
-<html><head><meta charset="utf-8" data-simul-owned-shell="charset"><meta name="simul-isolated-shell" content="${ISOLATED_HTML_SHELL_MARKER}" data-simul-owned-shell="marker"><meta http-equiv="Content-Security-Policy" data-simul-owned-shell="csp" content="default-src 'none'; script-src 'none'; worker-src 'none'; connect-src 'none'; object-src 'none'; frame-src 'none'; child-src 'none'; media-src 'none'; form-action 'none'; base-uri 'none'; img-src http: https: data: blob:; style-src 'unsafe-inline' http: https:; font-src http: https: data:"><style data-simul-owned-shell="inert">html,body{margin:0;min-width:100%;min-height:100%;pointer-events:none}*{pointer-events:none!important}</style></head><body></body></html>`;
+${ISOLATED_HTML_SHELL_DOCUMENT}`;
+export const ISOLATED_HTML_QUIRKS_SHELL = ISOLATED_HTML_SHELL_DOCUMENT;
 
 export type IsolatedMirrorInfoStage =
   | 'connected'
@@ -70,6 +72,8 @@ export type IsolatedMirrorInfoStage =
 export interface IsolatedMirrorInfo {
   readonly stage: IsolatedMirrorInfoStage;
   readonly code?: ReplicaDiagnosticCode;
+  readonly fidelityPolicy: SelectableReplicaFidelityPolicy;
+  readonly replicaRequestsMayOccur: boolean;
   readonly nodeCount: number;
   readonly textCount: number;
   readonly imageCount: number;
@@ -102,6 +106,17 @@ export interface IsolatedMirrorInfo {
   readonly coveredDirtyBranchFallbackCount: number;
   readonly attributeContextFallbackCount: number;
   readonly crossParentFallbackCount: number;
+  readonly preservedStyleSheetCount: number;
+  readonly flattenedStyleSheetCount: number;
+  readonly omittedStyleSheetCount: number;
+  readonly preservedSvgResourceCount: number;
+  readonly blockedSvgResourceCount: number;
+  readonly replicaRequestCapableResourceCount: number;
+  readonly executionRiskBlockCount: number;
+  readonly navigationBlockCount: number;
+  readonly unsupportedSchemeBlockCount: number;
+  readonly browserInaccessibleResourceCount: number;
+  readonly strictResourcePolicyBlockCount: number;
   readonly eventRepresentability: HtmlMirrorRepresentabilitySummary;
   readonly openShadowRootCount: number;
   readonly adoptedStyleCount: number;
@@ -124,6 +139,7 @@ interface ReplicaStyleReadiness {
 interface IsolatedHtmlEngineOptions {
   readonly presentationHost: ReplayPresentationHost;
   readonly openStream: HtmlMirrorStreamFactory;
+  readonly getReplicaFidelityPolicy?: () => SelectableReplicaFidelityPolicy;
   readonly onLiveApplied?: () => void;
   readonly onLayoutChanged?: () => void;
   readonly onSourceCommit?: (commit: ReplicaSourceCommit) => void;
@@ -142,19 +158,26 @@ interface HtmlMirrorDomState {
   readonly lease: VisibleReplayCandidateLease;
   readonly iframe: HTMLIFrameElement;
   readonly document: ReplicaSourceDocumentIdentity;
+  readonly fidelityPolicy: SelectableReplicaFidelityPolicy;
   readonly nodes: Map<number, Node>;
   readonly textMetadata: Map<number, Extract<HtmlMirrorNode, { kind: 'text' }>>;
+  readonly controlMetadata: Map<number, HtmlMirrorControlText>;
   readonly ownedAdoptedStyles: Set<HTMLStyleElement>;
   readonly records: Map<number, ReplicaSourceTextRecord>;
   readonly revisions: Map<number, number>;
   sequence: number;
   readonly replayLease: number;
-  dimensions: HtmlMirrorCheckpoint['payload'];
+  dimensions: HtmlMirrorLiveDimensions;
   representability: HtmlMirrorRepresentabilitySummary;
+  replicaRequestsMayOccur: boolean;
   readonly styleReadiness: ReplicaStyleReadiness;
   readonly cleanup: Set<() => void>;
   released: boolean;
 }
+
+type HtmlMirrorLiveDimensions = HtmlMirrorCheckpoint['payload'] & Readonly<{
+  canvasBackgroundColor?: string;
+}>;
 
 const HTML_MIRROR_RECOVERY_TIMEOUT_MS = 5_000;
 const MAX_BUFFERED_RECOVERY_PATCHES = 4;
@@ -182,6 +205,7 @@ export class IsolatedHtmlReplicaEngine
   #recoveryToken = 0;
   #bufferedRecoveryPatches: HtmlMirrorPatchBatch[] = [];
   #replayLease = 0;
+  #activeFidelityPolicy: SelectableReplicaFidelityPolicy = 'conservative';
   #projectionContext: ReplicaProjectionContext = {
     translationEpoch: 0,
     pairKey: undefined,
@@ -202,19 +226,31 @@ export class IsolatedHtmlReplicaEngine
       return this.#skipped('stale_identity');
     }
     let stream: HtmlMirrorStreamLease | undefined;
+    const fidelityPolicy = this.options.getReplicaFidelityPolicy?.() ??
+      'conservative';
+    this.#activeFidelityPolicy = fidelityPolicy;
     try {
-      stream = await this.options.openStream(request, signal);
+      stream = await this.options.openStream(request, fidelityPolicy, signal);
       if (!this.#isCurrent(runVersion, request, signal)) {
         stream.dispose();
         return this.#skipped('stale_identity');
       }
-      this.options.onInfo?.(emptyInfo('connected'));
+      this.options.onInfo?.(emptyInfo(
+        'connected',
+        undefined,
+        EMPTY_REPRESENTABILITY,
+        fidelityPolicy,
+      ));
       const checkpoint = await stream.initialCheckpoint;
       if (!this.#isCurrent(runVersion, request, signal)) {
         stream.dispose();
         return this.#skipped('stale_identity');
       }
-      const state = await this.#stageCheckpoint(checkpoint, signal);
+      const state = await this.#stageCheckpoint(
+        checkpoint,
+        fidelityPolicy,
+        signal,
+      );
       if (!this.#isCurrent(runVersion, request, signal)) {
         if (this.#candidate === state) this.#candidate = undefined;
         releaseState(state);
@@ -266,6 +302,7 @@ export class IsolatedHtmlReplicaEngine
         error instanceof HtmlMirrorClientError
           ? error.representability
           : EMPTY_REPRESENTABILITY,
+        fidelityPolicy,
       ));
       return this.#failed(code);
     }
@@ -283,7 +320,15 @@ export class IsolatedHtmlReplicaEngine
     if (!state) return;
     for (const record of state.records.values()) {
       const node = state.nodes.get(record.nodeId);
-      if (node?.nodeType === Node.TEXT_NODE) node.nodeValue = record.source;
+      if (record.nodeType === 3 && node?.nodeType === Node.TEXT_NODE) {
+        node.nodeValue = record.source;
+      } else if (record.nodeType === 1 && node?.nodeType === Node.ELEMENT_NODE) {
+        applyControlText(node as Element, {
+          kind: record.controlTarget,
+          text: record.source,
+          translatable: true,
+        });
+      }
     }
     this.#refreshExtent(state);
   }
@@ -304,7 +349,6 @@ export class IsolatedHtmlReplicaEngine
     const state = this.#committed;
     if (
       !state || state.released ||
-      projection.nodeType !== 3 ||
       projection.replayLease !== state.replayLease ||
       projection.translationEpoch !== this.#projectionContext.translationEpoch ||
       projection.pairKey !== this.#projectionContext.pairKey ||
@@ -315,11 +359,25 @@ export class IsolatedHtmlReplicaEngine
     const node = state.nodes.get(projection.nodeId);
     if (
       !record ||
+      record.nodeType !== projection.nodeType ||
       record.revision !== projection.sourceRevision ||
-      record.source !== projection.source ||
-      node?.nodeType !== Node.TEXT_NODE
+      record.source !== projection.source
     ) return false;
-    node.nodeValue = projection.translated;
+    if (projection.nodeType === 3) {
+      if (node?.nodeType !== Node.TEXT_NODE) return false;
+      node.nodeValue = projection.translated;
+    } else {
+      if (
+        node?.nodeType !== Node.ELEMENT_NODE ||
+        record.nodeType !== 1 ||
+        record.controlTarget !== projection.controlTarget
+      ) return false;
+      applyControlText(node as Element, {
+        kind: projection.controlTarget,
+        text: projection.translated,
+        translatable: true,
+      });
+    }
     this.#projections.set(projection.nodeId, Object.freeze({ ...projection }));
     this.#refreshExtent(state);
     return true;
@@ -368,12 +426,14 @@ export class IsolatedHtmlReplicaEngine
 
   async #stageCheckpoint(
     checkpoint: HtmlMirrorCheckpoint,
+    fidelityPolicy: SelectableReplicaFidelityPolicy,
     signal?: AbortSignal,
   ): Promise<HtmlMirrorDomState> {
     signal?.throwIfAborted();
     const content = readHtmlMirrorDocumentContent(
       checkpoint.payload.root,
       checkpoint.payload.adoptedStyleSheets,
+      fidelityPolicy,
     );
     const graph = content?.root;
     if (!content || !graph || graph.tagName !== 'html') {
@@ -384,25 +444,31 @@ export class IsolatedHtmlReplicaEngine
       viewportHeight: checkpoint.payload.viewportHeight,
       documentWidth: checkpoint.payload.documentWidth,
       documentHeight: checkpoint.payload.documentHeight,
+      ...(graph.canvasBackgroundColor
+        ? { canvasBackgroundColor: graph.canvasBackgroundColor }
+        : {}),
     });
     this.#stagingLease = lease;
     const iframe = lease.mount.ownerDocument.createElement('iframe');
     protectIframe(iframe);
+    const iframeShell = checkpoint.payload.documentMode === 'quirks'
+      ? ISOLATED_HTML_QUIRKS_SHELL
+      : ISOLATED_HTML_SHELL;
     try {
       let iframeDocument: Document;
       if (this.options.initializeIframe) {
-        iframe.srcdoc = ISOLATED_HTML_SHELL;
+        iframe.srcdoc = iframeShell;
         lease.mount.append(iframe);
         iframeDocument = await this.options.initializeIframe(
           iframe,
-          ISOLATED_HTML_SHELL,
+          iframeShell,
           signal,
         );
       } else {
         iframeDocument = await initializeIframeDocument(
           iframe,
           lease.mount,
-          ISOLATED_HTML_SHELL,
+          iframeShell,
           this.options.iframeDeadlineMs ?? 5_000,
           signal,
         );
@@ -413,6 +479,7 @@ export class IsolatedHtmlReplicaEngine
       if (!iframeDocument) throw new Error('Isolated iframe document unavailable.');
       const nodes = new Map<number, Node>();
       const textMetadata = new Map<number, Extract<HtmlMirrorNode, { kind: 'text' }>>();
+      const controlMetadata = new Map<number, HtmlMirrorControlText>();
       const ownedAdoptedStyles = new Set<HTMLStyleElement>();
       applyDocumentGraph(
         iframeDocument,
@@ -420,6 +487,7 @@ export class IsolatedHtmlReplicaEngine
         content.adoptedStyleSheets,
         nodes,
         textMetadata,
+        controlMetadata,
         ownedAdoptedStyles,
       );
       const styleReadiness = await settleReplicaStyles(
@@ -431,11 +499,14 @@ export class IsolatedHtmlReplicaEngine
       const previous = this.#committed && sameSourceDocument(
         this.#committed.document,
         document,
-      ) ? this.#committed : undefined;
+      ) && this.#committed.fidelityPolicy === fidelityPolicy
+        ? this.#committed
+        : undefined;
       const revisions = new Map(previous?.revisions ?? []);
       const records = buildRecords(
         document,
         textMetadata,
+        controlMetadata,
         revisions,
         previous?.records,
       );
@@ -444,15 +515,25 @@ export class IsolatedHtmlReplicaEngine
         lease,
         iframe,
         document,
+        fidelityPolicy,
         nodes,
         textMetadata,
+        controlMetadata,
         ownedAdoptedStyles,
         records,
         revisions,
         sequence: checkpoint.identity.sequence,
         replayLease,
-        dimensions: checkpoint.payload,
+        dimensions: {
+          ...checkpoint.payload,
+          ...(graph.canvasBackgroundColor
+            ? { canvasBackgroundColor: graph.canvasBackgroundColor }
+            : {}),
+        },
         representability: checkpoint.payload.representability,
+        replicaRequestsMayOccur:
+          checkpoint.payload.representability
+            .replicaRequestCapableResourceCount > 0,
         styleReadiness,
         cleanup: new Set(),
         released: false,
@@ -555,6 +636,8 @@ export class IsolatedHtmlReplicaEngine
       removedNodeCount: applied.removedNodeCount,
     });
     state.sequence = batch.lastSequence;
+    state.replicaRequestsMayOccur ||=
+      batch.representability.replicaRequestCapableResourceCount > 0;
     stream.acknowledge(state.sequence);
     this.options.presentationHost.refreshDimensions?.(state.iframe, state.dimensions);
     this.options.presentationHost.markLive(state.iframe);
@@ -588,7 +671,13 @@ export class IsolatedHtmlReplicaEngine
     ) return;
     const token = this.#recoveryToken;
     const recoverySignal = this.#recoveryAbort?.signal;
-    this.#recoveryTask = this.#stageCheckpoint(checkpoint, recoverySignal)
+    const fidelityPolicy = this.#committed?.fidelityPolicy ??
+      this.options.getReplicaFidelityPolicy?.() ?? 'conservative';
+    this.#recoveryTask = this.#stageCheckpoint(
+      checkpoint,
+      fidelityPolicy,
+      recoverySignal,
+    )
       .then((state) => {
         if (
           !this.#isCurrent(runVersion, request) ||
@@ -689,7 +778,12 @@ export class IsolatedHtmlReplicaEngine
             EMPTY_PATCH_METRICS,
             eventRepresentability,
           )
-        : emptyInfo('failed', code, eventRepresentability),
+        : emptyInfo(
+            'failed',
+            code,
+            eventRepresentability,
+            this.#activeFidelityPolicy,
+          ),
     );
     this.#releaseStream();
     this.options.onLiveFailure?.(code);
@@ -723,14 +817,28 @@ export class IsolatedHtmlReplicaEngine
       const record = state.records.get(projection.nodeId);
       const node = state.nodes.get(projection.nodeId);
       if (
-        !record || node?.nodeType !== Node.TEXT_NODE ||
+        !record || record.nodeType !== projection.nodeType ||
         !sameSourceDocument(projection.document, state.document) ||
         record.source !== projection.source ||
         record.revision !== projection.sourceRevision ||
         projection.translationEpoch !== this.#projectionContext.translationEpoch ||
         projection.pairKey !== this.#projectionContext.pairKey
       ) continue;
-      node.nodeValue = projection.translated;
+      if (projection.nodeType === 3) {
+        if (node?.nodeType !== Node.TEXT_NODE) continue;
+        node.nodeValue = projection.translated;
+      } else {
+        if (
+          node?.nodeType !== Node.ELEMENT_NODE ||
+          record.nodeType !== 1 ||
+          record.controlTarget !== projection.controlTarget
+        ) continue;
+        applyControlText(node as Element, {
+          kind: projection.controlTarget,
+          text: projection.translated,
+          translatable: true,
+        });
+      }
       retained.set(projection.nodeId, Object.freeze({
         ...projection,
         document: state.document,
@@ -825,6 +933,7 @@ function applyDocumentGraph(
   adoptedStyleSheets: readonly string[],
   nodes: Map<number, Node>,
   textMetadata: Map<number, Extract<HtmlMirrorNode, { kind: 'text' }>>,
+  controlMetadata: Map<number, HtmlMirrorControlText>,
   ownedAdoptedStyles: Set<HTMLStyleElement>,
 ): void {
   const html = target.documentElement;
@@ -851,6 +960,7 @@ function applyDocumentGraph(
         child,
         nodes,
         textMetadata,
+        controlMetadata,
         ownedAdoptedStyles,
       );
       if (built) head.append(built);
@@ -867,6 +977,7 @@ function applyDocumentGraph(
         child,
         nodes,
         textMetadata,
+        controlMetadata,
         ownedAdoptedStyles,
       );
       if (built) body.append(built);
@@ -885,6 +996,7 @@ function buildNode(
   input: HtmlMirrorNode,
   nodes: Map<number, Node>,
   textMetadata: Map<number, Extract<HtmlMirrorNode, { kind: 'text' }>>,
+  controlMetadata: Map<number, HtmlMirrorControlText>,
   ownedAdoptedStyles: Set<HTMLStyleElement>,
 ): Node | undefined {
   if (nodes.has(input.id)) throw new Error('Duplicate isolated mirror node ID.');
@@ -901,16 +1013,19 @@ function buildNode(
   setAttributes(node, input.attributes);
   applyElementHints(node, input);
   nodes.set(input.id, node);
+  if (input.controlText) controlMetadata.set(input.id, input.controlText);
   for (const child of input.children) {
     const built = buildNode(
       target,
       child,
       nodes,
       textMetadata,
+      controlMetadata,
       ownedAdoptedStyles,
     );
     if (built) node.append(built);
   }
+  applyResolvedStyleSheetText(node, input.resolvedStyleSheetText);
   if (input.shadowRoot) {
     const shadow = (node as Element & {
       attachShadow?: (init: ShadowRootInit) => ShadowRoot;
@@ -926,6 +1041,7 @@ function buildNode(
         child,
         nodes,
         textMetadata,
+        controlMetadata,
         ownedAdoptedStyles,
       );
       if (built) shadow.append(built);
@@ -964,19 +1080,158 @@ function setAttributes(
   for (const attribute of [...element.attributes]) {
     element.removeAttribute(attribute.name);
   }
-  for (const [name, value] of attributes) element.setAttribute(name, value);
+  for (const [name, value] of attributes) {
+    if (
+      element.namespaceURI === 'http://www.w3.org/2000/svg' &&
+      name === 'xlink:href'
+    ) {
+      element.setAttributeNS(
+        'http://www.w3.org/1999/xlink',
+        'xlink:href',
+        value,
+      );
+    } else {
+      element.setAttribute(
+        element.namespaceURI === 'http://www.w3.org/2000/svg'
+          ? canonicalSvgAttributeName(name)
+          : name,
+        value,
+      );
+    }
+  }
+  const tagName = element.localName.toLowerCase();
+  if (
+    element.namespaceURI === 'http://www.w3.org/1999/xhtml' &&
+    (tagName === 'link' || tagName === 'style')
+  ) {
+    try {
+      (element as Element & { disabled: boolean }).disabled = attributes.some(
+        ([name]) => name === 'disabled',
+      );
+    } catch {
+      // The content attribute remains the browser-owned fallback.
+    }
+  }
 }
+
+function canonicalSvgAttributeName(name: string): string {
+  return SVG_CASE_SENSITIVE_ATTRIBUTES.get(name) ?? name;
+}
+
+const SVG_CASE_SENSITIVE_ATTRIBUTES = new Map<string, string>([
+  ['attributename', 'attributeName'],
+  ['attributetype', 'attributeType'],
+  ['basefrequency', 'baseFrequency'],
+  ['baseprofile', 'baseProfile'],
+  ['calcmode', 'calcMode'],
+  ['clippathunits', 'clipPathUnits'],
+  ['diffuseconstant', 'diffuseConstant'],
+  ['edgemode', 'edgeMode'],
+  ['filterunits', 'filterUnits'],
+  ['gradienttransform', 'gradientTransform'],
+  ['gradientunits', 'gradientUnits'],
+  ['kernelmatrix', 'kernelMatrix'],
+  ['kernelunitlength', 'kernelUnitLength'],
+  ['keypoints', 'keyPoints'],
+  ['keysplines', 'keySplines'],
+  ['keytimes', 'keyTimes'],
+  ['lengthadjust', 'lengthAdjust'],
+  ['limitingconeangle', 'limitingConeAngle'],
+  ['markerheight', 'markerHeight'],
+  ['markerunits', 'markerUnits'],
+  ['markerwidth', 'markerWidth'],
+  ['maskcontentunits', 'maskContentUnits'],
+  ['maskunits', 'maskUnits'],
+  ['numoctaves', 'numOctaves'],
+  ['pathlength', 'pathLength'],
+  ['patterncontentunits', 'patternContentUnits'],
+  ['patterntransform', 'patternTransform'],
+  ['patternunits', 'patternUnits'],
+  ['pointsatx', 'pointsAtX'],
+  ['pointsaty', 'pointsAtY'],
+  ['pointsatz', 'pointsAtZ'],
+  ['preservealpha', 'preserveAlpha'],
+  ['preserveaspectratio', 'preserveAspectRatio'],
+  ['primitiveunits', 'primitiveUnits'],
+  ['refx', 'refX'],
+  ['refy', 'refY'],
+  ['repeatcount', 'repeatCount'],
+  ['repeatdur', 'repeatDur'],
+  ['requiredextensions', 'requiredExtensions'],
+  ['requiredfeatures', 'requiredFeatures'],
+  ['specularconstant', 'specularConstant'],
+  ['specularexponent', 'specularExponent'],
+  ['spreadmethod', 'spreadMethod'],
+  ['startoffset', 'startOffset'],
+  ['stddeviation', 'stdDeviation'],
+  ['stitchtiles', 'stitchTiles'],
+  ['surfacescale', 'surfaceScale'],
+  ['systemlanguage', 'systemLanguage'],
+  ['tablevalues', 'tableValues'],
+  ['targetx', 'targetX'],
+  ['targety', 'targetY'],
+  ['textlength', 'textLength'],
+  ['viewbox', 'viewBox'],
+  ['viewtarget', 'viewTarget'],
+  ['xchannelselector', 'xChannelSelector'],
+  ['ychannelselector', 'yChannelSelector'],
+  ['zoomandpan', 'zoomAndPan'],
+]);
 
 function applyElementHints(
   element: Element,
-  hints: Pick<HtmlMirrorElementNode, 'visuallyHidden' | 'selectedImageSource'>,
+  hints: Pick<
+    HtmlMirrorElementNode,
+    | 'visuallyHidden'
+    | 'selectedImageSource'
+    | 'controlText'
+    | 'canvasBackgroundColor'
+    | 'resolvedStyleSheetText'
+  >,
 ): void {
+  applyControlText(element, hints.controlText);
+  if (
+    hints.canvasBackgroundColor &&
+    element.localName.toLowerCase() === 'html'
+  ) {
+    // This is the source browser's resolved canvas color (html first, then
+    // body), not an authored declaration. Keep it authoritative even when a
+    // transported stylesheet contains a light-theme `!important` fallback.
+    applyReplicaCanvasBackground(element, hints.canvasBackgroundColor);
+  }
   if (hints.selectedImageSource && element.localName.toLowerCase() === 'img') {
     element.setAttribute('src', hints.selectedImageSource);
     element.removeAttribute('srcset');
     element.setAttribute('data-simul-selected-image-source', 'v1');
   }
+  if (
+    hints.resolvedStyleSheetText !== undefined &&
+    element.localName.toLowerCase() === 'link'
+  ) {
+    // The source SRI hash covers the original response, not Simul's bounded,
+    // sanitized CSSOM serialization. Keeping it would make Chrome reject the
+    // local data stylesheet and silently erase otherwise readable styling.
+    element.removeAttribute('integrity');
+    element.setAttribute(
+      'href',
+      `data:text/css;charset=utf-8,${encodeURIComponent(
+        hints.resolvedStyleSheetText,
+      )}`,
+    );
+    element.setAttribute('data-simul-resolved-stylesheet', 'v1');
+  }
   const styled = element as Element & { readonly style?: CSSStyleDeclaration };
+  if (
+    element.namespaceURI === 'http://www.w3.org/2000/svg' &&
+    styled.style
+  ) {
+    // Static SVG is part of the current fidelity contract. Simul-owned inline
+    // declarations outrank retained author stylesheets (including unreadable
+    // cross-origin sheets), so CSS cannot turn the reconstructed SVG tree into
+    // an animation channel while the saved animation option is absent/off.
+    styled.style.setProperty('animation', 'none', 'important');
+    styled.style.setProperty('transition', 'none', 'important');
+  }
   if (!hints.visuallyHidden || !styled.style) return;
   element.setAttribute('data-simul-visually-hidden', 'v1');
   styled.style.setProperty('position', 'absolute', 'important');
@@ -990,9 +1245,66 @@ function applyElementHints(
   styled.style.setProperty('white-space', 'nowrap', 'important');
 }
 
+function applyResolvedStyleSheetText(
+  element: Element,
+  cssText: string | undefined,
+): void {
+  if (cssText === undefined || element.localName.toLowerCase() !== 'style') return;
+  const textNodes = [...element.childNodes].filter(
+    (node) => node.nodeType === Node.TEXT_NODE,
+  );
+  if (textNodes.length === 0) {
+    element.append(element.ownerDocument.createTextNode(cssText));
+  } else {
+    textNodes[0]!.nodeValue = cssText;
+    for (const extra of textNodes.slice(1)) extra.nodeValue = '';
+  }
+  element.setAttribute('data-simul-resolved-stylesheet', 'v1');
+}
+
+function applyReplicaCanvasBackground(
+  element: Element,
+  color: string | undefined,
+): void {
+  const styled = element as HTMLElement;
+  if (color) {
+    styled.style.setProperty('background-color', color, 'important');
+    element.setAttribute('data-simul-canvas-background', 'v1');
+    return;
+  }
+  if (element.getAttribute('data-simul-canvas-background') !== 'v1') return;
+  styled.style.removeProperty('background-color');
+  if (!element.getAttribute('style')?.trim()) element.removeAttribute('style');
+  element.removeAttribute('data-simul-canvas-background');
+}
+
+function applyControlText(
+  element: Element,
+  controlText: HtmlMirrorControlText | undefined,
+): void {
+  const tagName = element.localName.toLowerCase();
+  if (tagName !== 'input' && tagName !== 'textarea') return;
+  const control = element as Element & {
+    value: string;
+    placeholder: string;
+  };
+  control.value = controlText?.kind === 'value' ? controlText.text : '';
+  control.placeholder = controlText?.kind === 'placeholder'
+    ? controlText.text
+    : '';
+}
+
+function isNativeReplicaTextControl(
+  element: Element,
+): element is HTMLInputElement | HTMLTextAreaElement {
+  const tagName = element.localName.toLowerCase();
+  return tagName === 'input' || tagName === 'textarea';
+}
+
 function buildRecords(
   document: ReplicaSourceDocumentIdentity,
   metadata: Map<number, Extract<HtmlMirrorNode, { kind: 'text' }>>,
+  controlMetadata: Map<number, HtmlMirrorControlText>,
   revisions: Map<number, number>,
   previous?: Map<number, ReplicaSourceTextRecord>,
 ): Map<number, ReplicaSourceTextRecord> {
@@ -1012,7 +1324,37 @@ function buildRecords(
       source: node.text,
     }));
   }
+  for (const [nodeId, control] of controlMetadata) {
+    const old = previous?.get(nodeId);
+    const same = old?.nodeType === 1 &&
+      old.controlTarget === control.kind && old.source === control.text;
+    const revision = same
+      ? old.revision
+      : nextRevision(revisions, nodeId);
+    revisions.set(nodeId, revision);
+    records.set(nodeId, Object.freeze({
+      document,
+      nodeId,
+      nodeType: 1,
+      controlTarget: control.kind,
+      revision,
+      source: control.text,
+    }));
+  }
   return records;
+}
+
+function sameReplicaTextRecord(
+  left: ReplicaSourceTextRecord | undefined,
+  right: ReplicaSourceTextRecord,
+): boolean {
+  if (
+    !left || left.nodeType !== right.nodeType ||
+    left.source !== right.source
+  ) return false;
+  return left.nodeType === 3 || (
+    right.nodeType === 1 && left.controlTarget === right.controlTarget
+  );
 }
 
 interface AppliedPatchBatch {
@@ -1038,6 +1380,7 @@ function applyPatchBatch(
     readonly fragment: DocumentFragment;
     readonly nodes: Map<number, Node>;
     readonly textMetadata: Map<number, Extract<HtmlMirrorNode, { kind: 'text' }>>;
+    readonly controlMetadata: Map<number, HtmlMirrorControlText>;
     readonly ownedAdoptedStyles: Set<HTMLStyleElement>;
   }
   interface ReconcilePlan {
@@ -1049,6 +1392,7 @@ function applyPatchBatch(
     readonly stableRetainedChildren: ReadonlySet<Node>;
     readonly nodes: Map<number, Node>;
     readonly textMetadata: Map<number, Extract<HtmlMirrorNode, { kind: 'text' }>>;
+    readonly controlMetadata: Map<number, HtmlMirrorControlText>;
     readonly ownedAdoptedStyles: Set<HTMLStyleElement>;
     readonly insertedNodeCount: number;
   }
@@ -1062,6 +1406,11 @@ function applyPatchBatch(
     number,
     Extract<HtmlMirrorPatchOperation, { kind: 'attributes' }>
   >();
+  const prospectiveAttributeOperations = new Map(
+    operations.flatMap((operation) => operation.kind === 'attributes'
+      ? [[operation.nodeId, operation] as const]
+      : []),
+  );
 
   // Validate every target and payload before touching visible state.
   for (const operation of operations) {
@@ -1070,11 +1419,26 @@ function applyPatchBatch(
     if (!target) return undefined;
     targetOperations.push({ operation, target });
     if (operation.kind === 'text') {
-      const node = readHtmlMirrorNode(operation.node);
+      const node = readHtmlMirrorNode(
+        operation.node,
+        undefined,
+        0,
+        undefined,
+        false,
+        false,
+        false,
+        false,
+        false,
+        state.fidelityPolicy,
+      );
       if (
         target.nodeType !== Node.TEXT_NODE ||
         !node || node.kind !== 'text' || node.id !== operation.nodeId ||
-        !validTextForContext(node, domTextContext(target))
+        !validTextForContext(
+          node,
+          domTextContext(target),
+          state.fidelityPolicy,
+        )
       ) return undefined;
       parsedText.set(operation.nodeId, node);
       continue;
@@ -1082,10 +1446,24 @@ function applyPatchBatch(
     if (operation.kind === 'attributes') {
       if (
         target.nodeType !== Node.ELEMENT_NODE ||
+        (target as Element).namespaceURI !== NAMESPACE_URIS[operation.namespace] ||
         (target as Element).localName.toLowerCase() !== operation.tagName
       ) return undefined;
       const currentContext = containerContext(target);
-      const prospectiveContext = containerContext(target, operation.attributes);
+      const prospectiveContext = batchContainerContext(
+        state,
+        target,
+        prospectiveAttributeOperations,
+      );
+      if (
+        operation.controlText &&
+        (
+          currentContext.privateAttributeRegion ||
+          prospectiveContext.privateAttributeRegion ||
+          currentContext.nonContentRegion ||
+          prospectiveContext.nonContentRegion
+        )
+      ) return undefined;
       if (
         privacyContextChanges(currentContext, prospectiveContext) &&
         (
@@ -1103,7 +1481,7 @@ function applyPatchBatch(
       ) return undefined;
       try {
         const sentinel = target.ownerDocument?.createElementNS(
-          (target as Element).namespaceURI,
+          NAMESPACE_URIS[operation.namespace],
           operation.tagName,
         );
         if (!sentinel) return undefined;
@@ -1227,7 +1605,9 @@ function applyPatchBatch(
         target,
         attributeOperations.get(operation.nodeId)?.attributes,
       );
-      if (!operation.children.every((child) => validGraphForContext(child, context))) {
+      if (!operation.children.every(
+        (child) => validGraphForContext(child, context, state.fidelityPolicy),
+      )) {
         return undefined;
       }
       const ownerDocument = target.ownerDocument;
@@ -1238,6 +1618,7 @@ function applyPatchBatch(
         number,
         Extract<HtmlMirrorNode, { kind: 'text' }>
       >();
+      const controlMetadata = new Map<number, HtmlMirrorControlText>();
       const ownedAdoptedStyles = new Set<HTMLStyleElement>();
       for (const child of operation.children) {
         const built = buildNode(
@@ -1245,6 +1626,7 @@ function applyPatchBatch(
           child,
           nodes,
           textMetadata,
+          controlMetadata,
           ownedAdoptedStyles,
         );
         if (built) fragment.append(built);
@@ -1256,6 +1638,7 @@ function applyPatchBatch(
         fragment,
         nodes,
         textMetadata,
+        controlMetadata,
         ownedAdoptedStyles,
       });
     }
@@ -1269,6 +1652,7 @@ function applyPatchBatch(
         number,
         Extract<HtmlMirrorNode, { kind: 'text' }>
       >();
+      const controlMetadata = new Map<number, HtmlMirrorControlText>();
       const ownedAdoptedStyles = new Set<HTMLStyleElement>();
       const retainedChildren = new Set<Node>();
       const desiredChildren: Node[] = [];
@@ -1281,12 +1665,17 @@ function applyPatchBatch(
           desiredChildren.push(retained);
           continue;
         }
-        if (!validGraphForContext(entry.node, context)) return undefined;
+        if (!validGraphForContext(
+          entry.node,
+          context,
+          state.fidelityPolicy,
+        )) return undefined;
         const built = buildNode(
           ownerDocument,
           entry.node,
           nodes,
           textMetadata,
+          controlMetadata,
           ownedAdoptedStyles,
         );
         if (!built) return undefined;
@@ -1306,6 +1695,7 @@ function applyPatchBatch(
         ),
         nodes,
         textMetadata,
+        controlMetadata,
         ownedAdoptedStyles,
         insertedNodeCount,
       });
@@ -1345,7 +1735,14 @@ function applyPatchBatch(
           viewportHeight: operation.viewportHeight,
           documentWidth: operation.documentWidth,
           documentHeight: operation.documentHeight,
+          canvasBackgroundColor: operation.canvasBackgroundColor,
         };
+        const documentElement = state.iframe.contentDocument?.documentElement;
+        if (!documentElement) throw new Error('Replica canvas is unavailable.');
+        applyReplicaCanvasBackground(
+          documentElement,
+          operation.canvasBackgroundColor,
+        );
         continue;
       }
       const target = state.nodes.get(operation.nodeId) as Node;
@@ -1360,8 +1757,16 @@ function applyPatchBatch(
         continue;
       }
       if (operation.kind === 'attributes') {
+        const previousControl = state.controlMetadata.get(operation.nodeId);
         setAttributes(target as Element, operation.attributes);
         applyElementHints(target as Element, operation);
+        state.controlMetadata.delete(operation.nodeId);
+        if (operation.controlText) {
+          state.controlMetadata.set(operation.nodeId, operation.controlText);
+        }
+        if (previousControl || operation.controlText) {
+          forceUpserts.add(operation.nodeId);
+        }
         continue;
       }
       if (operation.kind === 'children') {
@@ -1383,6 +1788,9 @@ function applyPatchBatch(
         }
         for (const [id, node] of plan.nodes) state.nodes.set(id, node);
         for (const [id, node] of plan.textMetadata) state.textMetadata.set(id, node);
+        for (const [id, control] of plan.controlMetadata) {
+          state.controlMetadata.set(id, control);
+        }
         for (const child of operation.children) {
           insertedNodeCount += htmlMirrorGraphNodeCount(child);
           collectTranslatableIds(child, forceUpserts);
@@ -1403,6 +1811,9 @@ function applyPatchBatch(
       }
       for (const [id, node] of plan.nodes) state.nodes.set(id, node);
       for (const [id, node] of plan.textMetadata) state.textMetadata.set(id, node);
+      for (const [id, control] of plan.controlMetadata) {
+        state.controlMetadata.set(id, control);
+      }
       insertedNodeCount += plan.insertedNodeCount;
       let anchor: ChildNode | null = [...plan.target.childNodes].find(
         (child) => state.ownedAdoptedStyles.has(child as HTMLStyleElement),
@@ -1425,6 +1836,7 @@ function applyPatchBatch(
     const next = buildRecords(
       state.document,
       state.textMetadata,
+      state.controlMetadata,
       state.revisions,
       previous,
     );
@@ -1443,7 +1855,7 @@ function applyPatchBatch(
     }
     for (const record of next.values()) {
       const old = previous.get(record.nodeId);
-      if (!old || old.source !== record.source || forceUpserts.has(record.nodeId)) {
+      if (!sameReplicaTextRecord(old, record) || forceUpserts.has(record.nodeId)) {
         changes.push(Object.freeze({ kind: 'upsert', record }));
       }
     }
@@ -1461,15 +1873,23 @@ function applyPatchBatch(
 }
 
 interface PatchRollbackSnapshot {
-  readonly dimensions: HtmlMirrorCheckpoint['payload'];
+  readonly dimensions: HtmlMirrorLiveDimensions;
   readonly nodes: Map<number, Node>;
   readonly textMetadata: Map<number, Extract<HtmlMirrorNode, { kind: 'text' }>>;
+  readonly controlMetadata: Map<number, HtmlMirrorControlText>;
   readonly records: Map<number, ReplicaSourceTextRecord>;
   readonly revisions: Map<number, number>;
   readonly ownedAdoptedStyles: Set<HTMLStyleElement>;
   readonly childLists: ReadonlyMap<Node, readonly Node[]>;
   readonly attributes: ReadonlyMap<Element, readonly (readonly [string, string])[]>;
   readonly textValues: ReadonlyMap<Node, string | null>;
+  readonly controlValues: ReadonlyMap<
+    Element,
+    Readonly<{ value: string; placeholder: string }>
+  >;
+  readonly canvasElement?: Element;
+  readonly canvasStyle: string | null;
+  readonly canvasMarker: string | null;
 }
 
 function capturePatchRollback(
@@ -1482,16 +1902,28 @@ function capturePatchRollback(
   const childLists = new Map<Node, readonly Node[]>();
   const attributes = new Map<Element, readonly (readonly [string, string])[]>();
   const textValues = new Map<Node, string | null>();
+  const controlValues = new Map<
+    Element,
+    Readonly<{ value: string; placeholder: string }>
+  >();
+  const canvasElement = state.iframe.contentDocument?.documentElement;
   for (const { operation, target } of targets) {
     if (operation.kind === 'children' || operation.kind === 'reconcile-children') {
       childLists.set(target, Object.freeze([...target.childNodes]));
     } else if (operation.kind === 'attributes') {
+      const element = target as Element;
       attributes.set(
-        target as Element,
-        Object.freeze([...((target as Element).attributes)].map(
+        element,
+        Object.freeze([...element.attributes].map(
           ({ name, value }) => Object.freeze([name, value] as const),
         )),
       );
+      if (isNativeReplicaTextControl(element)) {
+        controlValues.set(element, Object.freeze({
+          value: element.value,
+          placeholder: element.placeholder,
+        }));
+      }
     } else if (operation.kind === 'text') {
       textValues.set(target, target.nodeValue);
     }
@@ -1500,12 +1932,17 @@ function capturePatchRollback(
     dimensions: state.dimensions,
     nodes: new Map(state.nodes),
     textMetadata: new Map(state.textMetadata),
+    controlMetadata: new Map(state.controlMetadata),
     records: new Map(state.records),
     revisions: new Map(state.revisions),
     ownedAdoptedStyles: new Set(state.ownedAdoptedStyles),
     childLists,
     attributes,
     textValues,
+    controlValues,
+    ...(canvasElement ? { canvasElement } : {}),
+    canvasStyle: canvasElement?.getAttribute('style') ?? null,
+    canvasMarker: canvasElement?.getAttribute('data-simul-canvas-background') ?? null,
   };
 }
 
@@ -1519,6 +1956,15 @@ function restorePatchRollback(
   for (const [target, attributes] of snapshot.attributes) {
     restoreAttributeList(target, attributes);
   }
+  for (const [target, values] of snapshot.controlValues) {
+    try {
+      const control = target as HTMLInputElement | HTMLTextAreaElement;
+      control.value = values.value;
+      control.placeholder = values.placeholder;
+    } catch {
+      // Continue restoring every independent target before recovery.
+    }
+  }
   for (const [target, value] of snapshot.textValues) {
     try {
       target.nodeValue = value;
@@ -1526,13 +1972,35 @@ function restorePatchRollback(
       // Continue restoring every independent target before recovery.
     }
   }
+  if (snapshot.canvasElement) {
+    restoreOptionalAttribute(snapshot.canvasElement, 'style', snapshot.canvasStyle);
+    restoreOptionalAttribute(
+      snapshot.canvasElement,
+      'data-simul-canvas-background',
+      snapshot.canvasMarker,
+    );
+  }
   state.dimensions = snapshot.dimensions;
   restoreMap(state.nodes, snapshot.nodes);
   restoreMap(state.textMetadata, snapshot.textMetadata);
+  restoreMap(state.controlMetadata, snapshot.controlMetadata);
   restoreMap(state.revisions, snapshot.revisions);
   restoreSet(state.ownedAdoptedStyles, snapshot.ownedAdoptedStyles);
   (state as { records: Map<number, ReplicaSourceTextRecord> }).records =
     new Map(snapshot.records);
+}
+
+function restoreOptionalAttribute(
+  element: Element,
+  name: string,
+  value: string | null,
+): void {
+  try {
+    if (value === null) element.removeAttribute(name);
+    else element.setAttribute(name, value);
+  } catch {
+    // Continue restoring independent state before requesting recovery.
+  }
 }
 
 function restoreChildList(target: ParentNode, children: readonly Node[]): void {
@@ -1604,6 +2072,7 @@ function removeDomTree(state: HtmlMirrorDomState, node: Node): void {
     if (candidate !== node) continue;
     state.nodes.delete(id);
     state.textMetadata.delete(id);
+    state.controlMetadata.delete(id);
     state.records.delete(id);
     break;
   }
@@ -1614,6 +2083,7 @@ function collectTranslatableIds(node: HtmlMirrorNode, ids: Set<number>): void {
     if (node.translatable) ids.add(node.id);
     return;
   }
+  if (node.controlText) ids.add(node.id);
   if (node.shadowRoot) {
     for (const child of node.shadowRoot.children) collectTranslatableIds(child, ids);
   }
@@ -1745,9 +2215,7 @@ function containerContext(
     const attributes = Object.fromEntries(pendingAttributes);
     const tagName = element.localName.toLowerCase();
     const privateRegion = inherited.privateRegion ||
-      isSourcePrivateTagName(tagName) ||
-      isSourcePrivateContentEditableValue(attributes.contenteditable) ||
-      isSourcePrivateRoleValue(attributes.role);
+      sourceElementStartsPrivateRegion(tagName, attributes);
     return {
       privateRegion,
       privateAttributeRegion: inherited.privateAttributeRegion ||
@@ -1763,6 +2231,59 @@ function containerContext(
     ? (target as ShadowRoot).host
     : undefined;
   return host ? domElementContext(host) : PUBLIC_DOM_CONTEXT;
+}
+
+function batchContainerContext(
+  state: HtmlMirrorDomState,
+  target: Node,
+  pending: ReadonlyMap<
+    number,
+    Extract<HtmlMirrorPatchOperation, { kind: 'attributes' }>
+  >,
+): DomContentContext {
+  let element = target.nodeType === Node.ELEMENT_NODE
+    ? target as Element
+    : target.nodeType === Node.DOCUMENT_FRAGMENT_NODE && 'host' in target
+      ? (target as ShadowRoot).host
+      : undefined;
+  if (!element) return PUBLIC_DOM_CONTEXT;
+  const chain: Element[] = [];
+  for (; element; element = composedParentElement(element)) chain.push(element);
+  let privateRegion = false;
+  let privateAttributeRegion = false;
+  let nonContentRegion = false;
+  let styleRegion = false;
+  for (const current of chain.reverse()) {
+    const nodeId = findDomNodeId(state, current);
+    const attributes = nodeId === undefined
+      ? undefined
+      : pending.get(nodeId)?.attributes;
+    const values = attributes
+      ? Object.fromEntries(attributes)
+      : Object.fromEntries(
+          [...current.attributes].map(({ name, value }) => [name, value]),
+        );
+    const tagName = current.localName.toLowerCase();
+    const currentPrivate = sourceElementStartsPrivateRegion(tagName, values);
+    privateRegion ||= currentPrivate;
+    privateAttributeRegion ||= currentPrivate ||
+      isSourceActivationTagName(tagName) ||
+      isSourceActivationRoleValue(values.role);
+    nonContentRegion ||= tagName === 'head' || tagName === 'style' ||
+      tagName === 'title';
+    styleRegion ||= tagName === 'style';
+  }
+  return { privateRegion, privateAttributeRegion, nonContentRegion, styleRegion };
+}
+
+function findDomNodeId(
+  state: HtmlMirrorDomState,
+  target: Node,
+): number | undefined {
+  for (const [nodeId, node] of state.nodes) {
+    if (node === target) return nodeId;
+  }
+  return undefined;
 }
 
 function domTextContext(node: Node): DomContentContext {
@@ -1791,12 +2312,13 @@ function domElementContext(element: Element): DomContentContext {
     current = composedParentElement(current)
   ) {
     const tagName = current.localName.toLowerCase();
-    const currentPrivateRegion = isSourcePrivateTagName(tagName) ||
-      isSourcePrivateContentEditableValue(
-        current.hasAttribute('contenteditable')
-          ? current.getAttribute('contenteditable') ?? ''
-          : undefined,
-      ) || isSourcePrivateRoleValue(current.getAttribute('role'));
+    const attributes = Object.fromEntries(
+      [...current.attributes].map(({ name, value }) => [name, value]),
+    );
+    const currentPrivateRegion = sourceElementStartsPrivateRegion(
+      tagName,
+      attributes,
+    );
     privateRegion ||= currentPrivateRegion;
     privateAttributeRegion ||= currentPrivateRegion ||
       isSourceActivationTagName(tagName) ||
@@ -1810,13 +2332,14 @@ function domElementContext(element: Element): DomContentContext {
 function validGraphForContext(
   node: HtmlMirrorNode,
   inherited: DomContentContext,
+  fidelityPolicy: SelectableReplicaFidelityPolicy,
 ): boolean {
-  if (node.kind === 'text') return validTextForContext(node, inherited);
+  if (node.kind === 'text') {
+    return validTextForContext(node, inherited, fidelityPolicy);
+  }
   const attributes = Object.fromEntries(node.attributes);
   const privateRegion = inherited.privateRegion ||
-    isSourcePrivateTagName(node.tagName) ||
-    isSourcePrivateContentEditableValue(attributes.contenteditable) ||
-    isSourcePrivateRoleValue(attributes.role);
+    sourceElementStartsPrivateRegion(node.tagName, attributes);
   const privateAttributeRegion = inherited.privateAttributeRegion ||
     privateRegion ||
     isSourceActivationTagName(node.tagName) ||
@@ -1831,19 +2354,29 @@ function validGraphForContext(
     styleRegion,
   };
   return (!privateAttributeRegion || !hasPrivateHtmlMirrorAttribute(node.attributes)) &&
-    node.children.every((child) => validGraphForContext(child, context)) &&
+    (!privateAttributeRegion || !node.controlText) &&
+    node.children.every(
+      (child) => validGraphForContext(child, context, fidelityPolicy),
+    ) &&
     (!node.shadowRoot || node.shadowRoot.children.every(
-      (child) => validGraphForContext(child, context),
+      (child) => validGraphForContext(child, context, fidelityPolicy),
     ));
 }
 
 function validTextForContext(
   node: Extract<HtmlMirrorNode, { kind: 'text' }>,
   context: DomContentContext,
+  fidelityPolicy: SelectableReplicaFidelityPolicy,
 ): boolean {
   return (!context.privateRegion || node.text === '') &&
     (!(context.privateRegion || context.nonContentRegion) || !node.translatable) &&
-    (!context.styleRegion || sanitizeCss(node.text, 'about:blank') === node.text);
+    (!context.styleRegion || sanitizeCss(
+      node.text,
+      'about:blank',
+      false,
+      undefined,
+      fidelityPolicy,
+    ) === node.text);
 }
 
 function collectDomIds(
@@ -2253,6 +2786,8 @@ function stateInfo(
   return Object.freeze({
     stage,
     ...(code ? { code } : {}),
+    fidelityPolicy: state.fidelityPolicy,
+    replicaRequestsMayOccur: state.replicaRequestsMayOccur,
     nodeCount: state.nodes.size,
     textCount: state.records.size,
     imageCount,
@@ -2274,10 +2809,13 @@ function emptyInfo(
   code?: ReplicaDiagnosticCode,
   eventRepresentability: HtmlMirrorRepresentabilitySummary =
     EMPTY_REPRESENTABILITY,
+  fidelityPolicy: SelectableReplicaFidelityPolicy = 'conservative',
 ): IsolatedMirrorInfo {
   return Object.freeze({
     stage,
     ...(code ? { code } : {}),
+    fidelityPolicy,
+    replicaRequestsMayOccur: false,
     nodeCount: 0,
     textCount: 0,
     imageCount: 0,
@@ -2317,6 +2855,17 @@ const EMPTY_REPRESENTABILITY: HtmlMirrorRepresentabilitySummary = Object.freeze(
   coveredDirtyBranchFallbackCount: 0,
   attributeContextFallbackCount: 0,
   crossParentFallbackCount: 0,
+  preservedStyleSheetCount: 0,
+  flattenedStyleSheetCount: 0,
+  omittedStyleSheetCount: 0,
+  preservedSvgResourceCount: 0,
+  blockedSvgResourceCount: 0,
+  replicaRequestCapableResourceCount: 0,
+  executionRiskBlockCount: 0,
+  navigationBlockCount: 0,
+  unsupportedSchemeBlockCount: 0,
+  browserInaccessibleResourceCount: 0,
+  strictResourcePolicyBlockCount: 0,
 });
 
 interface IsolatedMirrorPatchMetrics {

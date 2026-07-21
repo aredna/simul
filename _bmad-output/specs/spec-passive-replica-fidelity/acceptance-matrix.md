@@ -1,0 +1,18 @@
+# Acceptance Matrix
+
+| Area | Passive Fidelity proof | Conservative/security proof |
+| --- | --- | --- |
+| CSS channels | Inline/style/link/adopted rules, variables, media/support/container queries, layers, pseudo-elements, fonts, backgrounds, and local fragments preserve cascade order. | Active CSS syntax and unsupported schemes remain rejected. |
+| Imports | Readable imports flatten in place; unreadable HTTP(S) imports remain normalized with request-capable diagnostics. | Imports retain the current stricter omission behavior. |
+| CSSOM | `insertRule`, `deleteRule`, declaration, media, order, and disabled-state changes trigger a bounded automatic recovery checkpoint. | The last-good replica stays visible; over-budget/unreadable changes never weaken validation. |
+| Semantics | `a[href]` selectors work with normalized HTTP(S) values while clicks/navigation remain impossible. | JavaScript/data navigation and form submission remain blocked. |
+| Images | Picture/source/srcset/sizes/currentSrc reproduce without script. | Source blobs are not reused; opaque/inaccessible blobs are omitted and diagnosed pending a separately bounded localization path. |
+| Media/document | Static HTTP(S)/data posters preserve passive layout; validated source metadata selects a standards or quirks shell. | Playback and active embedded documents remain disabled; current media pixels and exact limited-quirks behavior are documented browser/shell boundaries. |
+| SVG | Gradients, patterns, symbols, clips, masks, markers, filters, local refs, and approved HTTP(S) image/feImage/use refs render. | Scripts, handlers, foreignObject active content, navigation, unsupported schemes, and reconstructed-tree animation remain rejected; opaque external SVG intrinsic animation is disclosed as a browser boundary. |
+| Computed fallback | Validated canvas color and canonical visually-hidden state cover the two existing bounded presentation facts. | Broad host/subtree computed-style serialization remains deferred pending property/node/byte and privacy limits. |
+| Diagnostics | Counts distinguish preserved, flattened, omitted, blocked, inaccessible, capacity, policy, and request-capable outcomes. | No page text, URL, selector, tag, attribute, pixel, hash, or node ID appears. |
+| Compatibility | Generic fixtures cover dark pages, nested scrolling, and custom-element hosts; OpenAI.com, Reddit, Y Combinator, and D-U-N-S are manual checks. | No hostname-specific code or claim of perfect fidelity. |
+| Language lists | From labels use the selected target language; To labels use reviewed native endonyms; every supported code follows the complete explicit canonical order. | Auto-detect is source-only; locale/runtime collation cannot reorder, omit, or duplicate languages, including both Chinese variants. |
+| Document scroll | Standards/body/window coordinates project directly through fit, 1:1, zoom, rebuild, and dimension changes with 0.2.3 behavior as the regression oracle. | Passive Fidelity cannot alter scroll ownership; values are finite, clamped, and stale pre-navigation state is discarded. |
+| Nested scroll | A real event from a connected viewport-scale reading pane takes ownership and progress maps to a qualified replica pane or bounded outer fallback. | Status polling alone cannot heuristically take over; controls, carousels, hidden/clipped panes, removed/shrunken owners, and unrelated shadow scrollers are ignored. |
+| Release | New version, Settings disclosure, README/docs, source, and `dist/chrome-unpacked` agree byte-for-byte. | Full prior suite plus fresh adversarial reviews pass. |

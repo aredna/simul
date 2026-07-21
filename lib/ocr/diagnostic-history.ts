@@ -61,6 +61,12 @@ export function formatImageTranslationDiagnostic(
   if (diagnostic.stage === 'recognition-complete') {
     return `job ${diagnostic.ordinal} recognition complete: provider=${diagnostic.provider}; regions=${diagnostic.regions}; bitmap=${diagnostic.bitmapWidth}x${diagnostic.bitmapHeight}; cache=${diagnostic.cacheHit ? 'hit' : 'miss'}`;
   }
+  if (diagnostic.stage === 'recognition-cache') {
+    return `recognition cache: access=${diagnostic.access}; entries=${diagnostic.entries}; weight=${diagnostic.weight}; hits=${diagnostic.hits}; misses=${diagnostic.misses}; joins=${diagnostic.joins}; loads=${diagnostic.loads}`;
+  }
+  if (diagnostic.stage === 'recognition-quality') {
+    return `recognition quality: candidates=${diagnostic.candidateRegions}; accepted=${diagnostic.acceptedRegions}; rejected-blank=${diagnostic.rejectedBlankRegions}; rejected-punctuation=${diagnostic.rejectedPunctuationRegions}; rejected-low-confidence=${diagnostic.rejectedLowConfidenceRegions}`;
+  }
   if (diagnostic.stage === 'recognition-failed') {
     return `job ${diagnostic.ordinal} recognition failed: code=${diagnostic.code}; rendered=${diagnostic.renderedWidth}x${diagnostic.renderedHeight}; bitmap=${diagnostic.bitmapWidth}x${diagnostic.bitmapHeight}`;
   }

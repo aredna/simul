@@ -1,5 +1,4 @@
 import {
-  readImageTextResult,
   type ImageTextRegion,
   type ImageTextResult,
   type SourceImageDescriptor,
@@ -13,9 +12,18 @@ import {
   type OcrHostErrorCode,
 } from './offscreen-protocol';
 import type { AcquiredImagePixels } from './pixel-acquisition';
+import {
+  emptyImageTextQualitySummary,
+  filterImageTextResult,
+  mergeImageTextQualitySummaries,
+  type ImageTextQualitySummary,
+} from './result-quality';
 import type { TransientImageInputStore } from './transient-image-store';
 
 export const MAX_RECOGNITION_CACHE_ENTRIES = 128;
+export const MAX_RECOGNITION_CACHE_WEIGHT = 1_000_000;
+export const MAX_RECOGNITION_IN_FLIGHT = 2;
+export const RECOGNITION_CACHE_REGION_OVERHEAD = 32;
 
 export interface ImageRecognitionRoute {
   readonly providerOrder?: readonly ImageTextProviderId[];
@@ -29,14 +37,57 @@ export type ImageRecognitionResult =
       readonly status: 'complete';
       readonly result: ImageTextResult;
       readonly cacheHit: boolean;
+      readonly cacheAccess?: ImageRecognitionCacheAccess;
+      readonly cacheStats?: ImageRecognitionCacheStats;
+      readonly quality?: ImageTextQualitySummary;
     }
-  | { readonly status: 'failed'; readonly code: OcrHostErrorCode };
+  | {
+      readonly status: 'failed';
+      readonly code: OcrHostErrorCode;
+      readonly cacheAccess?: ImageRecognitionCacheAccess;
+      readonly cacheStats?: ImageRecognitionCacheStats;
+    };
+
+export type ImageRecognitionCacheAccess = 'hit' | 'miss' | 'join';
+
+export interface ImageRecognitionCacheStats {
+  readonly entries: number;
+  readonly weight: number;
+  readonly hits: number;
+  readonly misses: number;
+  readonly inFlightJoins: number;
+  readonly loads: number;
+}
 
 export interface ImageRecognitionCoordinatorEnvironment {
   readonly store: TransientImageInputStore;
   readonly sendMessage: (message: unknown) => Promise<unknown>;
   readonly clientId?: string;
   readonly maxCacheEntries?: number;
+  readonly maxCacheWeight?: number;
+  readonly maxInFlight?: number;
+}
+
+type UncachedImageRecognitionResult =
+  | {
+      readonly status: 'complete';
+      readonly result: ImageTextResult;
+      readonly quality: ImageTextQualitySummary;
+    }
+  | { readonly status: 'failed'; readonly code: OcrHostErrorCode };
+
+interface CachedImageRecognitionResult {
+  readonly result: ImageTextResult;
+  readonly quality: ImageTextQualitySummary;
+}
+
+interface StoredImageRecognitionResult extends CachedImageRecognitionResult {
+  readonly weight: number;
+}
+
+interface InFlightImageRecognition {
+  readonly generation: number;
+  readonly task: Promise<UncachedImageRecognitionResult>;
 }
 
 /**
@@ -46,14 +97,32 @@ export interface ImageRecognitionCoordinatorEnvironment {
 export class ImageRecognitionCoordinator {
   readonly #clientId: string;
   readonly #maxCacheEntries: number;
-  readonly #cache = new Map<string, ImageTextResult>();
-  readonly #emptyConfirmations = new Map<string, ImageTextResult>();
+  readonly #maxCacheWeight: number;
+  readonly #maxInFlight: number;
+  readonly #cache = new Map<string, StoredImageRecognitionResult>();
+  readonly #emptyConfirmations = new Set<string>();
+  readonly #inFlight = new Map<string, InFlightImageRecognition>();
+  #generation = 0;
+  #cacheWeight = 0;
+  #hits = 0;
+  #misses = 0;
+  #inFlightJoins = 0;
+  #loads = 0;
 
   constructor(private readonly environment: ImageRecognitionCoordinatorEnvironment) {
     this.#clientId = environment.clientId ?? crypto.randomUUID();
     this.#maxCacheEntries = positiveInteger(
       environment.maxCacheEntries,
       MAX_RECOGNITION_CACHE_ENTRIES,
+    );
+    this.#maxCacheWeight = positiveInteger(
+      environment.maxCacheWeight,
+      MAX_RECOGNITION_CACHE_WEIGHT,
+      10_000_000,
+    );
+    this.#maxInFlight = positiveInteger(
+      environment.maxInFlight,
+      MAX_RECOGNITION_IN_FLIGHT,
     );
   }
 
@@ -66,10 +135,89 @@ export class ImageRecognitionCoordinator {
     const cacheKey = recognitionCacheKey(pixels, route);
     const cached = this.#cache.get(cacheKey);
     if (cached) {
+      this.#hits += 1;
       this.#cache.delete(cacheKey);
       this.#cache.set(cacheKey, cached);
-      return { status: 'complete', result: cached, cacheHit: true };
+      return this.#withMetadata({
+        status: 'complete',
+        result: cached.result,
+        quality: cached.quality,
+      }, 'hit');
     }
+    this.#misses += 1;
+    const generation = this.#generation;
+    const running = this.#inFlight.get(cacheKey);
+    if (running?.generation === generation) {
+      this.#inFlightJoins += 1;
+      try {
+        const result = await raceAbort(running.task, signal);
+        return this.#withMetadata(result, 'join');
+      } catch (error) {
+        if (
+          !signal?.aborted &&
+          generation === this.#generation &&
+          isAbortError(error)
+        ) {
+          return this.recognize(pixels, route, signal);
+        }
+        throw error;
+      }
+    }
+    if (generation !== this.#generation) {
+      throw new DOMException('Image recognition cache was cleared.', 'AbortError');
+    }
+    if (this.#inFlight.size >= this.#maxInFlight) {
+      return this.#withMetadata({
+        status: 'failed',
+        code: 'host-overflow',
+      }, 'miss');
+    }
+    this.#loads += 1;
+    const task = this.#recognizeUncached(
+      cacheKey,
+      pixels,
+      route,
+      generation,
+      signal,
+    ).finally(() => {
+      if (this.#inFlight.get(cacheKey)?.task === task) {
+        this.#inFlight.delete(cacheKey);
+      }
+    });
+    this.#inFlight.set(cacheKey, { generation, task });
+    return this.#withMetadata(await task, 'miss');
+  }
+
+  snapshotStats(): ImageRecognitionCacheStats {
+    return Object.freeze({
+      entries: this.#cache.size,
+      weight: this.#cacheWeight,
+      hits: this.#hits,
+      misses: this.#misses,
+      inFlightJoins: this.#inFlightJoins,
+      loads: this.#loads,
+    });
+  }
+
+  clear(): void {
+    this.#generation += 1;
+    this.#cache.clear();
+    this.#cacheWeight = 0;
+    this.#emptyConfirmations.clear();
+    this.#inFlight.clear();
+    this.#hits = 0;
+    this.#misses = 0;
+    this.#inFlightJoins = 0;
+    this.#loads = 0;
+  }
+
+  async #recognizeUncached(
+    cacheKey: string,
+    pixels: AcquiredImagePixels,
+    route: ImageRecognitionRoute,
+    generation: number,
+    signal?: AbortSignal,
+  ): Promise<UncachedImageRecognitionResult> {
     const providers = effectiveRuntimeOrder(route);
     if (providers.length === 0) {
       return { status: 'failed', code: 'provider-unavailable' };
@@ -77,8 +225,9 @@ export class ImageRecognitionCoordinator {
     const inputKey = await this.environment.store.put(pixels.encoded);
     try {
       let lastFailure: OcrHostErrorCode = 'provider-unavailable';
-      let lastEmptyResult: ImageTextResult | undefined;
+      let lastEmptyResult: CachedImageRecognitionResult | undefined;
       let hints: readonly ImageTextRegion[] = Object.freeze([]);
+      let quality = emptyImageTextQualitySummary();
       for (const providerId of providers) {
         signal?.throwIfAborted();
         const jobId = crypto.randomUUID();
@@ -119,33 +268,35 @@ export class ImageRecognitionCoordinator {
           }
           continue;
         }
-        const acceptable = acceptableSpatialResult(response.result);
-        if (!acceptable) {
+        const filtered = filterImageTextResult(response.result);
+        quality = mergeImageTextQualitySummaries(quality, filtered.quality);
+        if (!filtered.hasAcceptedText) {
           hints = appendGeometryHints(hints, response.result.regions);
-          lastEmptyResult = emptySpatialResult(response.result);
+          lastEmptyResult = {
+            result: filtered.result,
+            quality,
+          };
           lastFailure = 'recognition-failed';
           continue;
         }
-        this.#remember(cacheKey, acceptable);
-        return { status: 'complete', result: acceptable, cacheHit: false };
+        const accepted = {
+          result: filtered.result,
+          quality,
+        };
+        this.#remember(cacheKey, accepted, generation);
+        return { status: 'complete', ...accepted };
       }
       if (lastEmptyResult) {
         if (this.#emptyConfirmations.has(cacheKey)) {
           this.#emptyConfirmations.delete(cacheKey);
-          this.#remember(cacheKey, lastEmptyResult);
-        } else {
-          this.#emptyConfirmations.set(cacheKey, lastEmptyResult);
-          while (this.#emptyConfirmations.size > this.#maxCacheEntries) {
-            const oldest = this.#emptyConfirmations.keys().next().value as
-              string | undefined;
-            if (!oldest) break;
-            this.#emptyConfirmations.delete(oldest);
-          }
+          this.#remember(cacheKey, lastEmptyResult, generation);
+        } else if (generation === this.#generation) {
+          this.#emptyConfirmations.add(cacheKey);
+          this.#boundEmptyConfirmations();
         }
         return {
           status: 'complete',
-          result: lastEmptyResult,
-          cacheHit: false,
+          ...lastEmptyResult,
         };
       }
       return { status: 'failed', code: lastFailure };
@@ -154,19 +305,57 @@ export class ImageRecognitionCoordinator {
     }
   }
 
-  clear(): void {
-    this.#cache.clear();
-    this.#emptyConfirmations.clear();
+  #withMetadata(
+    result: UncachedImageRecognitionResult,
+    cacheAccess: ImageRecognitionCacheAccess,
+  ): ImageRecognitionResult {
+    const metadata = {
+      cacheAccess,
+      cacheStats: this.snapshotStats(),
+    } as const;
+    return result.status === 'complete'
+      ? {
+          ...result,
+          cacheHit: cacheAccess === 'hit',
+          ...metadata,
+        }
+      : { ...result, ...metadata };
   }
 
-  #remember(cacheKey: string, result: ImageTextResult): void {
+  #remember(
+    cacheKey: string,
+    result: CachedImageRecognitionResult,
+    generation: number,
+  ): void {
+    if (generation !== this.#generation) return;
     this.#emptyConfirmations.delete(cacheKey);
+    const weight = imageRecognitionCacheWeight(result.result);
+    if (weight > this.#maxCacheWeight) return;
+    const replaced = this.#cache.get(cacheKey);
+    if (replaced) this.#cacheWeight -= replaced.weight;
     this.#cache.delete(cacheKey);
-    this.#cache.set(cacheKey, result);
-    while (this.#cache.size > this.#maxCacheEntries) {
-      const oldest = this.#cache.keys().next().value as string | undefined;
+    this.#cache.set(cacheKey, { ...result, weight });
+    this.#cacheWeight += weight;
+    while (
+      this.#cache.size > this.#maxCacheEntries ||
+      this.#cacheWeight > this.#maxCacheWeight
+    ) {
+      const oldest = this.#cache.entries().next().value as
+        | [string, StoredImageRecognitionResult]
+        | undefined;
       if (!oldest) break;
-      this.#cache.delete(oldest);
+      this.#cache.delete(oldest[0]);
+      this.#cacheWeight -= oldest[1].weight;
+    }
+  }
+
+  #boundEmptyConfirmations(): void {
+    while (this.#emptyConfirmations.size > this.#maxCacheEntries) {
+      const oldest = this.#emptyConfirmations.values().next().value as
+        | string
+        | undefined;
+      if (!oldest) return;
+      this.#emptyConfirmations.delete(oldest);
     }
   }
 
@@ -287,17 +476,30 @@ function recognitionCacheKey(
   pixels: AcquiredImagePixels,
   route: ImageRecognitionRoute,
 ): string {
-  return [
-    'image-text-v1',
-    effectiveRuntimeOrder(route).join(','),
-    route.sourceLanguage ?? '',
-    route.modelVersion ?? '',
-    route.languageGroup ?? '',
+  const providers = effectiveRuntimeOrder(route).map((providerId) =>
+    providerId === 'chrome-text-detector'
+      ? [
+          providerId,
+          'chrome-text-detector-v1',
+          'platform',
+          route.sourceLanguage ?? '',
+        ]
+      : [
+          providerId,
+          'tesseract.js-7.0.0',
+          route.modelVersion ?? '',
+          route.sourceLanguage ?? '',
+          route.languageGroup ?? '',
+        ]
+  );
+  return JSON.stringify([
+    'image-text-v2',
+    providers,
     pixels.preprocessingVersion,
     pixels.bitmapWidth,
     pixels.bitmapHeight,
     pixels.pixelHash,
-  ].join(':');
+  ]);
 }
 
 function effectiveRuntimeOrder(
@@ -318,25 +520,6 @@ function effectiveRuntimeOrder(
     }
   }
   return Object.freeze(result);
-}
-
-function acceptableSpatialResult(
-  result: ImageTextResult,
-): ImageTextResult | undefined {
-  const regions = result.regions.filter((region) => region.text.trim().length > 0);
-  if (regions.length === 0) return undefined;
-  return readImageTextResult({
-    ...result,
-    regions,
-  });
-}
-
-function emptySpatialResult(result: ImageTextResult): ImageTextResult {
-  return readImageTextResult({
-    ...result,
-    transcript: '',
-    regions: [],
-  }) as ImageTextResult;
 }
 
 function appendGeometryHints(
@@ -385,10 +568,31 @@ function hostError(
   };
 }
 
-function positiveInteger(value: number | undefined, fallback: number): number {
+export function imageRecognitionCacheWeight(result: ImageTextResult): number {
+  let weight = result.transcript.length;
+  for (const region of result.regions) {
+    weight += region.text.length + RECOGNITION_CACHE_REGION_OVERHEAD;
+  }
+  return weight;
+}
+
+function positiveInteger(
+  value: number | undefined,
+  fallback: number,
+  maximum = 10_000,
+): number {
   return Number.isSafeInteger(value) && Number(value) > 0
-    ? Math.min(Number(value), 10_000)
+    ? Math.min(Number(value), maximum)
     : fallback;
+}
+
+function isAbortError(error: unknown): boolean {
+  return Boolean(
+    error &&
+      typeof error === 'object' &&
+      'name' in error &&
+      error.name === 'AbortError',
+  );
 }
 
 function raceAbort<T>(promise: Promise<T>, signal?: AbortSignal): Promise<T> {
