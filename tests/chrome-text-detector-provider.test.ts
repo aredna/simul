@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import type { OffscreenOcrJob } from '../lib/ocr/offscreen-protocol';
+import { OCR_NATIVE_PREPROCESSING_VERSION } from '../lib/ocr/preprocessing-profile';
 import { normalizeChromeTextDetection } from '../lib/ocr/providers/chrome-text-detector/normalize';
 import { probeChromeTextDetector } from '../lib/ocr/providers/chrome-text-detector/probe';
 import {
@@ -283,7 +284,7 @@ function textDetectorJob(language: string): OffscreenOcrJob {
     languageGroup: language,
     providerVersion: 'chrome-text-detector-v1',
     modelVersion: 'platform',
-    preprocessingVersion: 'visible-crop-v1',
+    preprocessingVersion: OCR_NATIVE_PREPROCESSING_VERSION,
     schemaVersion: 1,
   };
 }

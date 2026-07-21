@@ -526,7 +526,7 @@ describe('disabled OCR production profile', () => {
     const validation = await validateArtifact(artifact);
 
     expect(validation.ocrEnabled).toBe(false);
-    expect(validation.manifest.version).toBe('0.2.1');
+    expect(validation.manifest.version).toBe('0.2.2');
     expect(validation.manifest.permissions).toEqual(APPROVED_PERMISSIONS);
     expect(validation.manifest).not.toHaveProperty('content_security_policy');
     expect(validation.files).not.toContain('offscreen.html');
@@ -536,6 +536,7 @@ describe('disabled OCR production profile', () => {
       'utf8',
     );
     expect(sidepanelHtml).toContain('id="build-version"');
+    expect(sidepanelHtml).toContain('id="compact-refresh"');
     const javaScriptSources = await Promise.all(
       validation.files
         .filter((file) => /\.m?js$/u.test(file))

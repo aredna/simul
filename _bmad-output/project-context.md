@@ -2,7 +2,7 @@
 project_name: Simul
 project_type: chrome-extension
 planning_track: quick-flow
-status: isolated-html-fidelity-baseline-implemented
+status: refresh-cache-banner-ocr-diagnostics-implemented
 ---
 
 # Simul Project Context
@@ -51,20 +51,32 @@ storage. Tesseract.js/core 7.0.0, three embedded Wasm core loaders, its Worker,
 and 22 pinned `tessdata_fast` files are local. One routed language group is
 loaded at a time and disposed after a group change or 90 seconds idle.
 
-Recognition remains in a bounded memory-only cache separate from translated
-line memory. Nearest valid element `lang`, explicit From, then detected page
-language selects the OCR group. Inert line overlays commit only when document,
-content revision, pixel hash, replay lease, pair epoch, replica image, and
-geometry remain current; they follow replay scroll/zoom without wrapping or
-resizing the image. Disabled builds omit the host, OCR assets, permission, and
-CSP. The canonical build adds only `offscreen` and the exact local
-Wasm/Worker CSP, validates every runtime hash/notice offline, and remains under
-42 MiB unpacked.
+Recognition remains in a bounded 128-entry memory-only cache separate from the
+bounded page-text and image-line translation memories. Page-text keys include
+the exact source document while image recognition keys include provider route,
+language/model, preprocessing profile, dimensions, and the cropped-pixel hash.
+Raw screenshot blobs remain transient and are removed after offscreen handoff.
+Nearest valid element `lang`, explicit From, then detected page language selects
+the OCR group. Stable shallow banners are classified from CSS geometry so
+device pixel ratio cannot change OCR mode; low-resolution crops are
+conservatively upscaled 2x inside the existing 4 MP/per-axis limits. The
+versioned profile selects Tesseract's single-line segmentation and restores the
+normal block mode afterward. Overlay
+coordinates still map through the original CSS crop. Inert line overlays commit
+only when document, content revision, pixel hash, replay lease, pair epoch,
+replica image, and geometry remain current; they follow replay scroll/zoom
+without wrapping or resizing the image. Disabled builds omit the host, OCR
+assets, permission, and CSP. The canonical build adds only `offscreen` and the
+exact local Wasm/Worker CSP, validates every runtime hash/notice offline, and
+remains under 42 MiB unpacked.
 
 Translation and OCR depend on an engine-neutral selected-surface router.
 Content-free `console.info` diagnostics report mirror connection/checkpoint/
-patch/recovery counts and every OCR discovery, skip, capture, recognition,
-translation, or projection stage without text, URLs, pixels, hashes, or IDs.
+patch/recovery counts, aggregate isolated-patch kinds/replacement sizes,
+bounded translation-cache counters, and every OCR discovery, skip, capture,
+recognition, translation, or projection stage without text, URLs, pixels,
+hashes, or IDs. Both settings and the compact corner toolbar share one guarded
+manual rebuild action.
 
 ## Fixed engineering baseline
 
@@ -154,3 +166,8 @@ extension APIs or page integration.
    bounded scheduling, saved-order preservation, or current-revision override.
 7. OCR runtime code, models, and notices must be local, exactly pinned, hash
    validated, and absent from a compiled-out provider profile.
+8. Modern Reddit is evidence for generic web-component and high-churn mirror
+   behavior, never a hostname-specific implementation branch. Its server HTML
+   depends on Lit custom-element definitions and partial loaders; the current
+   whole-parent child replacement is intentionally diagnosed while a bounded
+   stable-ID insert/remove/move protocol remains separately reviewable work.

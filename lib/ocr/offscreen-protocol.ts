@@ -9,6 +9,10 @@ import {
   sameSourceDocument,
   type ReplicaSourceDocumentIdentity,
 } from '../replica/source-identity';
+import {
+  readOcrPreprocessingVersion,
+  type OcrPreprocessingVersion,
+} from './preprocessing-profile';
 
 export const OCR_OFFSCREEN_PROTOCOL_VERSION = 1;
 
@@ -49,7 +53,7 @@ interface BaseOffscreenOcrJob {
   readonly bitmapWidth: number;
   readonly bitmapHeight: number;
   readonly hints?: readonly ImageTextRegion[];
-  readonly preprocessingVersion: 'visible-crop-v1';
+  readonly preprocessingVersion: OcrPreprocessingVersion;
   readonly schemaVersion: 1;
 }
 
@@ -168,8 +172,12 @@ export function readOffscreenOcrJob(input: unknown): OffscreenOcrJob | undefined
     'schemaVersion',
   ], ['hints'])) return undefined;
   const document = readSourceDocumentIdentity(input.document);
+  const preprocessingVersion = readOcrPreprocessingVersion(
+    input.preprocessingVersion,
+  );
   if (
     !document ||
+    !preprocessingVersion ||
     !isSafeToken(input.jobId) ||
     !isSafeToken(input.clientId) ||
     (input.attempt !== 0 && input.attempt !== 1) ||
@@ -182,7 +190,6 @@ export function readOffscreenOcrJob(input: unknown): OffscreenOcrJob | undefined
     !isBitmapDimension(input.bitmapWidth) ||
     !isBitmapDimension(input.bitmapHeight) ||
     input.bitmapWidth * input.bitmapHeight > 4_000_000 ||
-    input.preprocessingVersion !== 'visible-crop-v1' ||
     input.schemaVersion !== 1
   ) return undefined;
   const hints = input.hints === undefined
@@ -206,7 +213,7 @@ export function readOffscreenOcrJob(input: unknown): OffscreenOcrJob | undefined
     bitmapWidth: input.bitmapWidth,
     bitmapHeight: input.bitmapHeight,
     ...(hints ? { hints } : {}),
-    preprocessingVersion: 'visible-crop-v1',
+    preprocessingVersion,
     schemaVersion: 1,
   } as const;
   if (

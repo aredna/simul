@@ -3,7 +3,7 @@
   "tesseractVersion": "7.0.0",
   "tesseractCoreVersion": "7.0.0",
   "tessdataFastCommit": "87416418657359cb625c412a48b6e1d6d41c29bd",
-  "preprocessingVersion": "visible-crop-v1",
+  "preprocessingVersion": "visible-crop-v2",
   "languageCodes": [
     "eng",
     "spa",

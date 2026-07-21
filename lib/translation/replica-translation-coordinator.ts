@@ -383,7 +383,7 @@ export class ReplicaTranslationCoordinator {
               pair,
               pageKey: sourceDocumentTranslationKey(job.record.document),
             },
-            job.record.source,
+            boundary.core,
             () => {
               const combined = combineAbortSignals(
                 job.pairSignal,

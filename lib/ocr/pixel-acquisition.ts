@@ -5,6 +5,10 @@ import {
   sameImageCaptureMetrics,
   type SourceImageCaptureMetrics,
 } from './image-source-protocol';
+import {
+  selectOcrPreprocessingPlan,
+  type OcrPreprocessingVersion,
+} from './preprocessing-profile';
 
 export const MAX_CAPTURE_RATE_PER_SECOND = 2;
 export const MIN_CAPTURE_INTERVAL_MS = 500;
@@ -18,6 +22,7 @@ export interface AcquiredImagePixels {
   readonly encoded: Blob;
   readonly bitmapWidth: number;
   readonly bitmapHeight: number;
+  readonly preprocessingVersion: OcrPreprocessingVersion;
   readonly cropOffsetXCss: number;
   readonly cropOffsetYCss: number;
   readonly cropWidthCss: number;
@@ -159,7 +164,15 @@ export class PixelAcquisitionCoordinator {
       if (!crop || crop.width * crop.height > MAX_OCR_INPUT_PIXELS) {
         return { status: 'deferred', reason: 'oversized' };
       }
-      const surface = this.environment.createSurface(crop.width, crop.height);
+      const output = selectOcrPreprocessingPlan(
+        crop.width,
+        crop.height,
+        MAX_OCR_INPUT_PIXELS,
+        visible.right - visible.left,
+        visible.bottom - visible.top,
+      );
+      if (!output) return { status: 'deferred', reason: 'oversized' };
+      const surface = this.environment.createSurface(output.width, output.height);
       const context = surface.getContext('2d');
       if (!context) return { status: 'deferred', reason: 'capture-failed' };
       context.drawImage(
@@ -170,8 +183,8 @@ export class PixelAcquisitionCoordinator {
         crop.height,
         0,
         0,
-        crop.width,
-        crop.height,
+        output.width,
+        output.height,
       );
       const encoded = await surface.convertToBlob({ type: 'image/png' });
       if (encoded.size < 1 || encoded.size > MAX_SCREENSHOT_BYTES) {
@@ -185,8 +198,9 @@ export class PixelAcquisitionCoordinator {
           descriptor,
           pixelHash,
           encoded,
-          bitmapWidth: crop.width,
-          bitmapHeight: crop.height,
+          bitmapWidth: output.width,
+          bitmapHeight: output.height,
+          preprocessingVersion: output.version,
           cropOffsetXCss: visible.left - metrics.left,
           cropOffsetYCss: visible.top - metrics.top,
           cropWidthCss: visible.right - visible.left,

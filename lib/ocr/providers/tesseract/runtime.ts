@@ -12,6 +12,9 @@ import type {
 } from '../../offscreen-host';
 import type { OffscreenOcrJob } from '../../offscreen-protocol';
 import {
+  isTesseractBannerPreprocessingVersion,
+} from '../../preprocessing-profile';
+import {
   isPackagedTesseractLanguageGroup,
 } from './language-catalog';
 import { normalizeTesseractPage } from './normalize';
@@ -118,15 +121,45 @@ export class TesseractOffscreenRunner implements OffscreenOcrProviderRunner {
     encoded: Blob,
   ): Promise<ImageTextResult> {
     const acquired = await this.#workerFor(job.languageGroup);
-    const recognition = await raceWorkerLoss(
-      Promise.resolve().then(() => acquired.worker.recognize(
-        encoded,
-        {},
-        { text: true, blocks: true },
-        job.jobId,
-      )),
-      acquired.loss,
+    const useSingleLine = isTesseractBannerPreprocessingVersion(
+      job.preprocessingVersion,
     );
+    if (useSingleLine) {
+      await this.#setPageSegmentation(
+        acquired,
+        Tesseract.PSM.SINGLE_LINE,
+        job.jobId,
+      );
+    }
+    let recognition: Awaited<ReturnType<TesseractWorker['recognize']>>;
+    try {
+      recognition = await raceWorkerLoss(
+        Promise.resolve().then(() => acquired.worker.recognize(
+          encoded,
+          {},
+          { text: true, blocks: true },
+          job.jobId,
+        )),
+        acquired.loss,
+      );
+    } finally {
+      if (
+        useSingleLine &&
+        this.#workerToken === acquired.token &&
+        !this.#disposed
+      ) {
+        try {
+          await this.#setPageSegmentation(
+            acquired,
+            Tesseract.PSM.SINGLE_BLOCK,
+            job.jobId,
+          );
+        } catch {
+          this.#terminateWorker(acquired.token);
+          throw new WorkerLostError();
+        }
+      }
+    }
     if (this.#workerToken !== acquired.token || this.#disposed) {
       throw new WorkerLostError();
     }
@@ -142,6 +175,19 @@ export class TesseractOffscreenRunner implements OffscreenOcrProviderRunner {
     }
     if (!normalized) throw new InvalidNormalizedOcrOutputError();
     return normalized;
+  }
+
+  #setPageSegmentation(
+    acquired: AcquiredTesseractWorker,
+    mode: (typeof Tesseract.PSM)[keyof typeof Tesseract.PSM],
+    jobId: string,
+  ): Promise<unknown> {
+    return raceWorkerLoss(
+      Promise.resolve().then(() => acquired.worker.setParameters({
+        tessedit_pageseg_mode: mode,
+      }, jobId)),
+      acquired.loss,
+    );
   }
 
   async #workerFor(group: string): Promise<AcquiredTesseractWorker> {

@@ -119,7 +119,14 @@ describe('ImageOverlayProjector', () => {
     });
     expect(projector.beginPair(1, 'en>ja')).toBe(true);
 
-    expect(projector.project(projection())).toBe(true);
+    expect(projector.project(projection({
+      bitmapWidth: 160,
+      bitmapHeight: 80,
+      regions: [{
+        text: '翻訳',
+        boundingBox: { x: 0, y: 0, width: 80, height: 40 },
+      }],
+    }))).toBe(true);
 
     const layer = document.querySelector(`[${IMAGE_OVERLAY_LAYER_ATTRIBUTE}]`);
     const root = layer?.querySelector('[data-simul-image-overlay="7"]') as HTMLElement;

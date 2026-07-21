@@ -1299,7 +1299,7 @@ async function validateTesseractRuntimeAssets({
     assetManifest?.tesseractVersion !== APPROVED_OCR_PROVIDER_DEPENDENCIES['tesseract.js'] ||
     assetManifest?.tesseractCoreVersion !== APPROVED_OCR_PROVIDER_DEPENDENCIES['tesseract.js-core'] ||
     assetManifest?.tessdataFastCommit !== APPROVED_TESSDATA_FAST_COMMIT ||
-    assetManifest?.preprocessingVersion !== 'visible-crop-v1' ||
+    assetManifest?.preprocessingVersion !== 'visible-crop-v2' ||
     !sameOrderedStrings(
       assetManifest?.languageCodes,
       APPROVED_TESSERACT_LANGUAGE_CODES,

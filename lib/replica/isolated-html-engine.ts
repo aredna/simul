@@ -73,6 +73,12 @@ export interface IsolatedMirrorInfo {
   readonly textCount: number;
   readonly imageCount: number;
   readonly operationCount: number;
+  readonly textOperationCount: number;
+  readonly attributeOperationCount: number;
+  readonly childrenOperationCount: number;
+  readonly dimensionOperationCount: number;
+  readonly replacementNodeCount: number;
+  readonly largestReplacementNodeCount: number;
   readonly sequence: number;
 }
 
@@ -465,6 +471,7 @@ export class IsolatedHtmlReplicaEngine
       this.#requestRecovery('stream_gap');
       return;
     }
+    const patchMetrics = readPatchMetrics(state, batch.operations);
     const changes = applyPatchBatch(state, batch.operations);
     if (!changes) {
       this.#requestRecovery('privacy_rejected');
@@ -477,7 +484,13 @@ export class IsolatedHtmlReplicaEngine
     this.#notifySourceCommit(state, 'batch', changes, changesDocumentLanguage(batch));
     this.options.onLiveApplied?.();
     this.#refreshExtent(state);
-    this.options.onInfo?.(stateInfo('patch', state, batch.operations.length));
+    this.options.onInfo?.(stateInfo(
+      'patch',
+      state,
+      batch.operations.length,
+      undefined,
+      patchMetrics,
+    ));
   }
 
   #onRecoveryCheckpoint(
@@ -1522,6 +1535,7 @@ function stateInfo(
   state: HtmlMirrorDomState,
   operationCount: number,
   code?: ReplicaDiagnosticCode,
+  metrics: IsolatedMirrorPatchMetrics = EMPTY_PATCH_METRICS,
 ): IsolatedMirrorInfo {
   let imageCount = 0;
   for (const node of state.nodes.values()) {
@@ -1537,6 +1551,7 @@ function stateInfo(
     textCount: state.records.size,
     imageCount,
     operationCount,
+    ...metrics,
     sequence: state.sequence,
   });
 }
@@ -1552,6 +1567,96 @@ function emptyInfo(
     textCount: 0,
     imageCount: 0,
     operationCount: 0,
+    ...EMPTY_PATCH_METRICS,
     sequence: 0,
   });
+}
+
+interface IsolatedMirrorPatchMetrics {
+  readonly textOperationCount: number;
+  readonly attributeOperationCount: number;
+  readonly childrenOperationCount: number;
+  readonly dimensionOperationCount: number;
+  readonly replacementNodeCount: number;
+  readonly largestReplacementNodeCount: number;
+}
+
+const EMPTY_PATCH_METRICS: IsolatedMirrorPatchMetrics = Object.freeze({
+  textOperationCount: 0,
+  attributeOperationCount: 0,
+  childrenOperationCount: 0,
+  dimensionOperationCount: 0,
+  replacementNodeCount: 0,
+  largestReplacementNodeCount: 0,
+});
+
+function readPatchMetrics(
+  state: HtmlMirrorDomState,
+  operations: readonly HtmlMirrorPatchOperation[],
+): IsolatedMirrorPatchMetrics {
+  let textOperationCount = 0;
+  let attributeOperationCount = 0;
+  let childrenOperationCount = 0;
+  let dimensionOperationCount = 0;
+  let replacementNodeCount = 0;
+  let largestReplacementNodeCount = 0;
+  const knownNodes = new Set(state.nodes.values());
+  for (const operation of operations) {
+    if (operation.kind === 'text') textOperationCount += 1;
+    else if (operation.kind === 'attributes') attributeOperationCount += 1;
+    else if (operation.kind === 'dimensions') dimensionOperationCount += 1;
+    else {
+      childrenOperationCount += 1;
+      const incomingCount = operation.children.reduce(
+        (total, child) => total + htmlMirrorGraphNodeCount(child),
+        0,
+      );
+      const target = state.nodes.get(operation.nodeId);
+      const outgoingCount = target
+        ? [...target.childNodes].reduce(
+            (total, child) => total + domMirrorNodeCount(child, knownNodes),
+            0,
+          )
+        : 0;
+      const count = Math.max(incomingCount, outgoingCount);
+      replacementNodeCount += count;
+      largestReplacementNodeCount = Math.max(
+        largestReplacementNodeCount,
+        count,
+      );
+    }
+  }
+  return Object.freeze({
+    textOperationCount,
+    attributeOperationCount,
+    childrenOperationCount,
+    dimensionOperationCount,
+    replacementNodeCount,
+    largestReplacementNodeCount,
+  });
+}
+
+function htmlMirrorGraphNodeCount(node: HtmlMirrorNode): number {
+  if (node.kind === 'text') return 1;
+  let count = 1;
+  for (const child of node.children) count += htmlMirrorGraphNodeCount(child);
+  if (node.shadowRoot) {
+    count += 1;
+    for (const child of node.shadowRoot.children) {
+      count += htmlMirrorGraphNodeCount(child);
+    }
+  }
+  return count;
+}
+
+function domMirrorNodeCount(node: Node, knownNodes: ReadonlySet<Node>): number {
+  let count = knownNodes.has(node) ? 1 : 0;
+  for (const child of [...node.childNodes]) {
+    count += domMirrorNodeCount(child, knownNodes);
+  }
+  if (node.nodeType === Node.ELEMENT_NODE) {
+    const shadowRoot = (node as Element).shadowRoot;
+    if (shadowRoot) count += domMirrorNodeCount(shadowRoot, knownNodes);
+  }
+  return count;
 }

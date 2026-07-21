@@ -9,6 +9,11 @@ import {
 } from '../lib/ocr/providers/tesseract/language-catalog';
 import { normalizeTesseractPage } from '../lib/ocr/providers/tesseract/normalize';
 import {
+  OCR_NATIVE_PREPROCESSING_VERSION,
+  OCR_SHALLOW_BANNER_NATIVE_PREPROCESSING_VERSION,
+  OCR_SHALLOW_BANNER_PREPROCESSING_VERSION,
+} from '../lib/ocr/preprocessing-profile';
+import {
   TesseractOffscreenRunner,
   WorkerLostError,
 } from '../lib/ocr/providers/tesseract/runtime';
@@ -66,7 +71,9 @@ describe('packaged Tesseract provider', () => {
   });
 
   it('uses only local paths, reuses an exact group, and terminates on group change', async () => {
-    const workers = [fakeWorker('one'), fakeWorker('two')];
+    const firstWorker = fakeWorker('one');
+    const secondWorker = fakeWorker('two');
+    const workers = [firstWorker, secondWorker];
     const createWorker = vi.fn(async (..._args: unknown[]) => workers.shift()!.worker);
     const runner = new TesseractOffscreenRunner({
       createWorker: createWorker as never,
@@ -94,7 +101,64 @@ describe('packaged Tesseract provider', () => {
     expect(createWorker.mock.calls[0]?.[2]).not.toEqual(
       expect.objectContaining({ workerPath: expect.stringMatching(/^https?:/u) }),
     );
+    expect(firstWorker.worker.setParameters).not.toHaveBeenCalled();
     expect(workers).toHaveLength(0);
+    await runner.dispose();
+  });
+
+  it('uses profile-selected banner segmentation and never infers it from dimensions', async () => {
+    const worker = fakeWorker('banner');
+    const runner = new TesseractOffscreenRunner({
+      createWorker: vi.fn(async () => worker.worker) as never,
+      getUrl: (path) => `chrome-extension://id${path}`,
+    });
+    const bannerJob: OffscreenOcrJob = {
+      ...job('jpn+jpn_vert'),
+      bitmapWidth: 550,
+      bitmapHeight: 60,
+      preprocessingVersion: OCR_SHALLOW_BANNER_PREPROCESSING_VERSION,
+    };
+    const highDpiBannerJob: OffscreenOcrJob = {
+      ...job('jpn+jpn_vert'),
+      bitmapWidth: 1_375,
+      bitmapHeight: 150,
+      preprocessingVersion: OCR_SHALLOW_BANNER_NATIVE_PREPROCESSING_VERSION,
+    };
+    const nativeMultiLineJob = {
+      ...job('jpn+jpn_vert'),
+      bitmapWidth: 500,
+      bitmapHeight: 100,
+    };
+
+    await runner.recognize(
+      bannerJob,
+      new Blob([new Uint8Array([1])]),
+      new AbortController().signal,
+    );
+    await runner.recognize(
+      highDpiBannerJob,
+      new Blob([new Uint8Array([2])]),
+      new AbortController().signal,
+    );
+    await runner.recognize(
+      nativeMultiLineJob,
+      new Blob([new Uint8Array([3])]),
+      new AbortController().signal,
+    );
+
+    expect(worker.worker.setParameters).toHaveBeenNthCalledWith(1, {
+      tessedit_pageseg_mode: '7',
+    }, bannerJob.jobId);
+    expect(worker.worker.setParameters).toHaveBeenNthCalledWith(2, {
+      tessedit_pageseg_mode: '6',
+    }, bannerJob.jobId);
+    expect(worker.worker.setParameters).toHaveBeenNthCalledWith(3, {
+      tessedit_pageseg_mode: '7',
+    }, highDpiBannerJob.jobId);
+    expect(worker.worker.setParameters).toHaveBeenNthCalledWith(4, {
+      tessedit_pageseg_mode: '6',
+    }, highDpiBannerJob.jobId);
+    expect(worker.worker.setParameters).toHaveBeenCalledTimes(4);
     await runner.dispose();
   });
 
@@ -180,7 +244,11 @@ describe('packaged Tesseract provider', () => {
       const terminate = vi.fn(async () => undefined);
       const recognize = vi.fn(() => new Promise<never>(() => undefined));
       const createWorker = vi.fn(() => new Promise<never>((resolve) => {
-        setTimeout(() => resolve({ recognize, terminate } as never), 20);
+        setTimeout(() => resolve({
+          setParameters: vi.fn(async () => ({ data: undefined })),
+          recognize,
+          terminate,
+        } as never), 20);
       }));
       const runner = new TesseractOffscreenRunner({
         createWorker: createWorker as never,
@@ -310,7 +378,11 @@ describe('packaged Tesseract provider', () => {
     const createWorker = vi.fn(async (...args: unknown[]) => {
       const options = args[2] as { errorHandler?: (error: unknown) => void };
       reportWorkerError = options.errorHandler!;
-      return { recognize, terminate } as never;
+      return {
+        setParameters: vi.fn(async () => ({ data: undefined })),
+        recognize,
+        terminate,
+      } as never;
     });
     const runner = new TesseractOffscreenRunner({
       createWorker: createWorker as never,
@@ -382,7 +454,7 @@ function job(languageGroup: string): OffscreenOcrJob {
     languageGroup,
     providerVersion: 'tesseract.js-7.0.0',
     modelVersion: TESSERACT_MODEL_VERSION,
-    preprocessingVersion: 'visible-crop-v1',
+    preprocessingVersion: OCR_NATIVE_PREPROCESSING_VERSION,
     schemaVersion: 1,
   };
 }
@@ -392,6 +464,7 @@ function fakeWorker(text: string) {
   return {
     terminate,
     worker: {
+      setParameters: vi.fn(async () => ({ data: undefined })),
       recognize: vi.fn(async (..._args: unknown[]) => ({
         data: {
           text,

@@ -143,6 +143,7 @@ import { replicaSourceCommitAction } from '../../lib/translation/replica-transla
 import {
   ReplicaTranslationCoordinator,
   isCompleteReplicaTranslationResult,
+  splitBoundaryWhitespace,
   type ReplicaSourceCommit,
   type ReplicaTranslationRunResult,
 } from '../../lib/translation/replica-translation-coordinator';
@@ -226,6 +227,7 @@ const zoomOutButton = requireElement<HTMLButtonElement>('#zoom-out');
 const swapButton = requireElement<HTMLButtonElement>('#swap-languages');
 const translateButton = requireElement<HTMLButtonElement>('#translate');
 const refreshButton = requireElement<HTMLButtonElement>('#refresh');
+const compactRefreshButton = requireElement<HTMLButtonElement>('#compact-refresh');
 const cancelButton = requireElement<HTMLButtonElement>('#cancel');
 const toggleSettingsButton = requireElement<HTMLButtonElement>('#toggle-settings');
 const closeSettingsButton = requireElement<HTMLButtonElement>('#close-settings');
@@ -305,7 +307,9 @@ const isolatedHtmlReplicaEngine = new IsolatedHtmlReplicaEngine({
   onLiveFailure: (code) => handleReplicaLiveFailure(code, 'isolated-html'),
   onInfo: (info) => {
     // Counts and bounded stages only: never source text, URLs, pixels, IDs, or hashes.
-    console.info('[Simul isolated mirror]', info);
+    console.info(
+      `[Simul isolated mirror] stage=${info.stage}; code=${info.code ?? 'none'}; nodes=${info.nodeCount}; text=${info.textCount}; images=${info.imageCount}; operations=${info.operationCount}; text-ops=${info.textOperationCount}; attribute-ops=${info.attributeOperationCount}; children-ops=${info.childrenOperationCount}; dimension-ops=${info.dimensionOperationCount}; replacement-nodes=${info.replacementNodeCount}; largest-replacement=${info.largestReplacementNodeCount}; sequence=${info.sequence}`,
+    );
   },
 });
 replicaEngineController = new ReplicaEngineController({
@@ -327,7 +331,14 @@ replicaEngineController = new ReplicaEngineController({
 });
 replicaSurfaceRouter.select(isolatedHtmlReplicaEngine);
 
-const translationMemory = new TranslationMemory();
+const translationMemory = new TranslationMemory({
+  maxEntries: 2_048,
+  maxCharacters: 500_000,
+});
+const imageTranslationMemory = new TranslationMemory({
+  maxEntries: 512,
+  maxCharacters: 250_000,
+});
 replicaTranslationCoordinator = new ReplicaTranslationCoordinator(
   provider,
   replicaSurfaceRouter,
@@ -335,6 +346,7 @@ replicaTranslationCoordinator = new ReplicaTranslationCoordinator(
     memory: translationMemory,
     onBackgroundResult: (result) => {
       if (!replicaTranslationCoordinator.isResultCurrent(result)) return;
+      logTranslationCache('page', translationMemory);
       if (!isCompleteReplicaTranslationResult(result)) {
         translationComplete = false;
         setStatus(
@@ -381,7 +393,7 @@ imageTranslationController = new ImageTranslationController({
   resolveAnchor: (sourceDocument, nodeId) =>
     replicaSurfaceRouter.resolveImageAnchor(sourceDocument, nodeId),
   translationProvider: provider,
-  translationMemory,
+  translationMemory: imageTranslationMemory,
   onBusyChange: (busy) => setImageTranslationBusy(busy),
   onDiagnostic: logImageTranslationDiagnostic,
 });
@@ -477,6 +489,7 @@ let preferences: CompanionPreferences = parseCompanionPreferences(
 let snapshot: PageSnapshot | undefined;
 let followedPageIdentity: CapturedPageIdentity | undefined;
 let capturedPageIdentity: CapturedPageIdentity | undefined;
+let capturedPageDocumentId: string | undefined;
 let resolvedSourceLanguage: SupportedLanguage | undefined;
 let availability: TranslationAvailability = 'unavailable';
 let availabilityRequestId = 0;
@@ -636,7 +649,11 @@ syncScrollInput.addEventListener('change', () => {
 zoomInput.addEventListener('input', () => setZoom(Number(zoomInput.value)));
 zoomInButton.addEventListener('click', () => setZoom(preferences.zoomPercent + 10));
 zoomOutButton.addEventListener('click', () => setZoom(preferences.zoomPercent - 10));
-refreshButton.addEventListener('click', () => void refreshFollowedPage('manual'));
+const requestManualRefresh = (): void => {
+  void refreshFollowedPage('manual');
+};
+refreshButton.addEventListener('click', requestManualRefresh);
+compactRefreshButton.addEventListener('click', requestManualRefresh);
 translateButton.addEventListener('click', () => {
   if (!isLiveSourceOnlyMode()) translationDesired = true;
   void startTranslation(false, captureCoordinator.generation);
@@ -1349,6 +1366,9 @@ async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> 
     renderSnapshot(nextSnapshot);
     snapshot = nextSnapshot;
     capturedPageIdentity = identity;
+    capturedPageDocumentId = typeof snapshotInjection?.documentId === 'string'
+      ? snapshotInjection.documentId
+      : undefined;
     followedPageIdentity = identity;
     currentLegacyReady = true;
     showCaptureNotes(nextSnapshot);
@@ -1988,6 +2008,7 @@ async function runTranslation(automatic: boolean, generation: number): Promise<v
     }
   } finally {
     session?.destroy();
+    logTranslationCache('page', translationMemory);
     if (activeAbortController === abortController) activeAbortController = undefined;
     translationInFlight = false;
     configureImageTranslation();
@@ -2019,11 +2040,24 @@ async function translateCached(
   source: string,
   signal?: AbortSignal,
 ): Promise<string> {
-  return translationMemory.getOrCreate(
-    { provider: 'chrome-translator-v1', pair },
-    source,
-    () => translateWithSession(session, source, signal),
+  const boundary = splitBoundaryWhitespace(source);
+  if (!boundary.core) return source;
+  const pageKey = capturedPageIdentity
+    ? JSON.stringify([
+        capturedPageIdentity.tabId,
+        capturedPageDocumentId ?? `generation:${captureCoordinator.generation}`,
+      ])
+    : undefined;
+  const translated = await translationMemory.getOrCreate(
+    {
+      provider: 'chrome-translator-v1',
+      pair,
+      ...(pageKey ? { pageKey } : {}),
+    },
+    boundary.core,
+    () => translateWithSession(session, boundary.core, signal),
   );
+  return `${boundary.leading}${translated.trim()}${boundary.trailing}`;
 }
 
 function initializeLiveSequenceBaseline(generation: number, sequence: number): void {
@@ -3263,6 +3297,7 @@ function invalidateCompanion(message: string): void {
   followedPageIdentity = undefined;
   snapshot = undefined;
   capturedPageIdentity = undefined;
+  capturedPageDocumentId = undefined;
   resolvedSourceLanguage = undefined;
   availability = 'unavailable';
   availabilityCheckedForPair = undefined;
@@ -3531,6 +3566,7 @@ function updateControls(): void {
   zoomInButton.disabled = busy;
   zoomOutButton.disabled = busy;
   refreshButton.disabled = captureInFlight;
+  compactRefreshButton.disabled = captureInFlight;
   popoutButton.disabled = surfaceTransitionInFlight ||
     (!isDetachedWindow && !capturedPageIdentity);
   cancelButton.hidden =
@@ -3553,6 +3589,7 @@ function updateControls(): void {
 }
 
 function setImageTranslationBusy(busy: boolean): void {
+  const completed = imageTranslationInFlight && !busy;
   imageTranslationInFlight = busy;
   if (busy && !translationInFlight && !composerInFlight) {
     progressRegion.hidden = false;
@@ -3561,6 +3598,7 @@ function setImageTranslationBusy(busy: boolean): void {
   } else if (!busy && !translationInFlight && !composerInFlight) {
     hideProgress();
   }
+  if (completed) logTranslationCache('image-text', imageTranslationMemory);
   updateControls();
 }
 
@@ -3656,6 +3694,16 @@ function logImageTranslationDiagnostic(
   console.info('[Simul image translation]', diagnostic);
   imageTranslationDiagnosticHistory.append(diagnostic);
   renderImageTranslationDiagnosticHistory();
+}
+
+function logTranslationCache(
+  label: 'page' | 'image-text',
+  memory: TranslationMemory,
+): void {
+  const stats = memory.snapshotStats();
+  console.info(
+    `[Simul translation cache] scope=${label}; entries=${stats.entries}; characters=${stats.characters}; hits=${stats.hits}; misses=${stats.misses}; joins=${stats.inFlightJoins}; provider-loads=${stats.providerLoads}`,
+  );
 }
 
 function renderImageTranslationDiagnosticHistory(): void {

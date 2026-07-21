@@ -113,7 +113,7 @@ const manifest = {
   tesseractVersion: TESSERACT_VERSION,
   tesseractCoreVersion: TESSERACT_VERSION,
   tessdataFastCommit: TESSDATA_FAST_COMMIT,
-  preprocessingVersion: 'visible-crop-v1',
+  preprocessingVersion: 'visible-crop-v2',
   languageCodes: TESSDATA_CODES,
   totalBytes: files.reduce((total, file) => total + file.bytes, 0),
   files,

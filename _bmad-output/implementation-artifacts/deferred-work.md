@@ -73,3 +73,12 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-isolated-html-fidelity-baseline-mode.md`
   summary: Audit custom-element fidelity that depends on inaccessible internal state, closed roots, lifecycle code, or browser-managed rendering.
   evidence: Simul intentionally never defines or executes copied custom elements and captures only representable light DOM plus accessible open roots. Exact behavior for closed or script-owned state remains outside the safe mirror boundary.
+- source_spec: `_bmad-output/implementation-artifacts/spec-refresh-cache-duns-reddit-pass.md`
+  summary: Replace whole-parent Isolated HTML child patches with bounded insert/remove/move operations that retain unchanged replica nodes, images, and translations.
+  evidence: Modern Reddit uses server-rendered Lit custom elements plus async/partial loaders. Simul currently serializes every child of a mutated parent and reconstructs that full child set, so a one-item update can reload a large rail or comment tree and re-emit unchanged text. The future protocol must use stable node IDs and sibling anchors, apply atomically, preserve private-context recovery, and fall back to full replacement for ambiguous or privacy-changing batches.
+- source_spec: `_bmad-output/implementation-artifacts/spec-refresh-cache-duns-reddit-pass.md`
+  summary: Spike a scriptless representation of source custom-element definition state for selectors such as `:defined` and `:not(:defined)`.
+  evidence: Reddit's source custom elements are defined by its Lit runtime while the inert replica intentionally registers no website code. A reviewed experiment may carry only bounded definition-state metadata and use extension-owned inert behavior, but it must prove that no website constructor, lifecycle callback, request, or script executes.
+- source_spec: `_bmad-output/implementation-artifacts/spec-refresh-cache-duns-reddit-pass.md`
+  summary: Add confidence-gated, bounded multi-pass OCR fallback for stylized logos and tiny text, including geometry-hint consumption and original-coordinate consensus.
+  evidence: The generic 2x shallow-banner profile and single-line segmentation improve the D-U-N-S path-only logo, but real-crop experiments still produce imperfect Japanese. Native RAW_LINE, 2x SINGLE_LINE, and bounded high-contrast candidates need confidence/script/agreement selection, cache-profile versioning, and exact box remapping before they can safely replace a nonempty low-quality first pass.

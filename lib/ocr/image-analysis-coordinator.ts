@@ -246,7 +246,7 @@ function createJob(
     bitmapWidth: pixels.bitmapWidth,
     bitmapHeight: pixels.bitmapHeight,
     ...(hints.length > 0 ? { hints } : {}),
-    preprocessingVersion: 'visible-crop-v1',
+    preprocessingVersion: pixels.preprocessingVersion,
     schemaVersion: 1,
   } as const;
   if (providerId === 'chrome-text-detector') {
@@ -279,7 +279,7 @@ function recognitionCacheKey(
     route.sourceLanguage ?? '',
     route.modelVersion ?? '',
     route.languageGroup ?? '',
-    'visible-crop-v1',
+    pixels.preprocessingVersion,
     pixels.bitmapWidth,
     pixels.bitmapHeight,
     pixels.pixelHash,

@@ -17,6 +17,15 @@ export interface TranslationMemoryOptions {
   readonly maxInFlight?: number;
 }
 
+export interface TranslationMemoryStats {
+  readonly entries: number;
+  readonly characters: number;
+  readonly hits: number;
+  readonly misses: number;
+  readonly inFlightJoins: number;
+  readonly providerLoads: number;
+}
+
 const DEFAULT_MAX_ENTRIES = 512;
 const DEFAULT_MAX_CHARACTERS = 500_000;
 const DEFAULT_MAX_IN_FLIGHT = 64;
@@ -39,6 +48,10 @@ export class TranslationMemory {
   readonly #inFlight = new Map<string, InFlightTranslation>();
   #characters = 0;
   #generation = 0;
+  #hits = 0;
+  #misses = 0;
+  #inFlightJoins = 0;
+  #providerLoads = 0;
 
   constructor(options: TranslationMemoryOptions = {}) {
     this.#maxEntries = positiveInteger(options.maxEntries, DEFAULT_MAX_ENTRIES);
@@ -58,6 +71,17 @@ export class TranslationMemory {
 
   get characters(): number {
     return this.#characters;
+  }
+
+  snapshotStats(): TranslationMemoryStats {
+    return Object.freeze({
+      entries: this.#values.size,
+      characters: this.#characters,
+      hits: this.#hits,
+      misses: this.#misses,
+      inFlightJoins: this.#inFlightJoins,
+      providerLoads: this.#providerLoads,
+    });
   }
 
   get(scope: TranslationMemoryScope, source: string): string | undefined {
@@ -100,6 +124,10 @@ export class TranslationMemory {
     this.#generation += 1;
     this.#values.clear();
     this.#characters = 0;
+    this.#hits = 0;
+    this.#misses = 0;
+    this.#inFlightJoins = 0;
+    this.#providerLoads = 0;
   }
 
   #getOrCreate(
@@ -109,11 +137,16 @@ export class TranslationMemory {
     generation: number,
   ): Promise<string> {
     const cached = this.get(scope, source);
-    if (cached !== undefined) return Promise.resolve(cached);
+    if (cached !== undefined) {
+      this.#hits += 1;
+      return Promise.resolve(cached);
+    }
+    this.#misses += 1;
     const cacheKey = memoryKey(scope, source);
     const key = inFlightKey(generation, cacheKey);
     const running = this.#inFlight.get(key);
     if (running?.generation === generation) {
+      this.#inFlightJoins += 1;
       return running.task.catch((error: unknown) => {
         if (!isAbortError(error) || generation !== this.#generation) {
           throw error;
@@ -129,6 +162,7 @@ export class TranslationMemory {
     if (this.#inFlight.size >= this.#maxInFlight) {
       return Promise.reject(new Error(IN_FLIGHT_LIMIT_ERROR));
     }
+    this.#providerLoads += 1;
     const task = (async () => {
       const translated = await load();
       if (!translated.trim()) throw new Error(EMPTY_TRANSLATION_ERROR);

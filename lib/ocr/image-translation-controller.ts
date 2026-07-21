@@ -760,7 +760,6 @@ export class ImageTranslationController {
       sourceLanguage,
       targetLanguage: this.#configuration.targetLanguage,
     };
-    this.environment.onDiagnostic?.('translation-started');
     const regions = await this.#translateRegions(
       recognition.result.regions,
       pair,
@@ -815,16 +814,23 @@ export class ImageTranslationController {
     if (regions.length === 0) return Object.freeze([]);
     let session: TranslationSession | undefined;
     try {
-      session = await this.environment.translationProvider.createSession(pair, {
-        signal,
-      });
       const translated: TranslatedImageRegion[] = [];
       for (const region of regions.slice(0, MAX_TRANSLATED_IMAGE_REGIONS)) {
         signal.throwIfAborted();
+        const source = region.text.trim();
+        if (!source) continue;
         const text = await this.#translationMemory.getOrCreate(
           { provider: 'chrome-translator-v1', pair },
-          region.text,
-          () => translateWithSession(session as TranslationSession, region.text, signal),
+          source,
+          async () => {
+            if (!session) {
+              this.environment.onDiagnostic?.('translation-started');
+              session = await this.environment.translationProvider.createSession(pair, {
+                signal,
+              });
+            }
+            return translateWithSession(session, source, signal);
+          },
         );
         if (text.trim()) {
           translated.push(Object.freeze({

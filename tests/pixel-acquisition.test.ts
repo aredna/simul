@@ -8,6 +8,12 @@ import {
   type PixelAcquisitionEnvironment,
   type SourceTabCaptureEnvironment,
 } from '../lib/ocr/pixel-acquisition';
+import {
+  OCR_NATIVE_PREPROCESSING_VERSION,
+  OCR_SHALLOW_BANNER_NATIVE_PREPROCESSING_VERSION,
+  OCR_SHALLOW_BANNER_PREPROCESSING_VERSION,
+  selectOcrPreprocessingPlan,
+} from '../lib/ocr/preprocessing-profile';
 import type { ImageSourceLease } from '../lib/ocr/image-source-client';
 import type { SourceImageCaptureMetrics } from '../lib/ocr/image-source-protocol';
 
@@ -79,6 +85,7 @@ describe('PixelAcquisitionCoordinator', () => {
     expect(result.pixels).toMatchObject({
       bitmapWidth: 380,
       bitmapHeight: 200,
+      preprocessingVersion: OCR_NATIVE_PREPROCESSING_VERSION,
       cropOffsetXCss: 10,
       cropOffsetYCss: 0,
       cropWidthCss: 190,
@@ -120,6 +127,119 @@ describe('PixelAcquisitionCoordinator', () => {
       status: 'deferred',
       reason: 'unstable',
     });
+  });
+
+  it('upscales a D-U-N-S-shaped shallow banner while retaining original CSS geometry', async () => {
+    const bannerMetrics = {
+      ...metrics,
+      left: 0,
+      top: 0,
+      width: 275,
+      height: 30,
+      viewportWidth: 1_000,
+      viewportHeight: 500,
+    };
+    const drawImage = vi.fn();
+    const createSurface = vi.fn((width: number, height: number) => ({
+      width,
+      height,
+      getContext: () => ({ drawImage }),
+      convertToBlob: async () => new Blob([new Uint8Array([9])], {
+        type: 'image/png',
+      }),
+    }));
+    const coordinator = new PixelAcquisitionCoordinator({
+      ...fakeEnvironment(fakeSource([bannerMetrics, bannerMetrics])),
+      decode: async () => ({ width: 1_000, height: 500, close: vi.fn() }),
+      createSurface,
+    });
+
+    const result = await coordinator.acquire(descriptor);
+
+    expect(selectOcrPreprocessingPlan(
+      275,
+      30,
+      MAX_OCR_INPUT_PIXELS,
+    )).toEqual({
+      width: 550,
+      height: 60,
+      scale: 2,
+      version: OCR_SHALLOW_BANNER_PREPROCESSING_VERSION,
+    });
+    expect(result).toMatchObject({
+      status: 'ready',
+      pixels: {
+        bitmapWidth: 550,
+        bitmapHeight: 60,
+        preprocessingVersion: OCR_SHALLOW_BANNER_PREPROCESSING_VERSION,
+        cropWidthCss: 275,
+        cropHeightCss: 30,
+        renderedWidthCss: 275,
+        renderedHeightCss: 30,
+      },
+    });
+    expect(createSurface).toHaveBeenCalledWith(550, 60);
+    expect(drawImage).toHaveBeenCalledWith(
+      expect.anything(),
+      0,
+      0,
+      275,
+      30,
+      0,
+      0,
+      550,
+      60,
+    );
+  });
+
+  it('keeps banner mode without scaling when 2x would exceed the OCR cap', () => {
+    expect(selectOcrPreprocessingPlan(
+      30_000,
+      40,
+      MAX_OCR_INPUT_PIXELS,
+    )).toEqual({
+      width: 30_000,
+      height: 40,
+      scale: 1,
+      version: OCR_SHALLOW_BANNER_NATIVE_PREPROCESSING_VERSION,
+    });
+  });
+
+  it('classifies banners from CSS geometry independently of device pixel ratio', () => {
+    expect(selectOcrPreprocessingPlan(
+      1_375,
+      150,
+      MAX_OCR_INPUT_PIXELS,
+      275,
+      30,
+    )).toEqual({
+      width: 1_375,
+      height: 150,
+      scale: 1,
+      version: OCR_SHALLOW_BANNER_NATIVE_PREPROCESSING_VERSION,
+    });
+    expect(selectOcrPreprocessingPlan(
+      500,
+      100,
+      MAX_OCR_INPUT_PIXELS,
+      500,
+      100,
+    )).toEqual({
+      width: 500,
+      height: 100,
+      scale: 1,
+      version: OCR_NATIVE_PREPROCESSING_VERSION,
+    });
+  });
+
+  it('rejects an area-compliant crop above the protocol axis bound', () => {
+    expect(selectOcrPreprocessingPlan(
+      40_000,
+      40,
+      MAX_OCR_INPUT_PIXELS,
+      1_000,
+      1,
+    )).toBeUndefined();
   });
 
   it('rejects a crop above the four-megapixel input guard', async () => {

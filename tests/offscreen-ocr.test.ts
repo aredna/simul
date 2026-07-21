@@ -14,6 +14,7 @@ import {
   type OffscreenOcrJob,
 } from '../lib/ocr/offscreen-protocol';
 import type { AcquiredImagePixels } from '../lib/ocr/pixel-acquisition';
+import { OCR_NATIVE_PREPROCESSING_VERSION } from '../lib/ocr/preprocessing-profile';
 import type { TransientImageInputStore } from '../lib/ocr/transient-image-store';
 
 const documentIdentity = {
@@ -40,6 +41,7 @@ const pixels: AcquiredImagePixels = {
   encoded: new Blob([new Uint8Array([1, 2, 3])], { type: 'image/png' }),
   bitmapWidth: 400,
   bitmapHeight: 200,
+  preprocessingVersion: OCR_NATIVE_PREPROCESSING_VERSION,
   cropOffsetXCss: 0,
   cropOffsetYCss: 0,
   cropWidthCss: 200,
@@ -550,7 +552,7 @@ function createJob(jobId: string, attempt: 0 | 1): OffscreenOcrJob {
     languageGroup: 'eng',
     providerVersion: 'tesseract.js-7.0.0',
     modelVersion: 'tessdata-fast-87416418',
-    preprocessingVersion: 'visible-crop-v1',
+    preprocessingVersion: OCR_NATIVE_PREPROCESSING_VERSION,
     schemaVersion: 1,
   };
 }

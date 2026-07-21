@@ -255,6 +255,24 @@ describe('ReplicaTranslationCoordinator', () => {
     expect(surface.projections[0]?.translated).toBe('\n\u00a0Hello \u00a0');
   });
 
+  it('reuses one core translation across records with different boundary whitespace', async () => {
+    const surface = new FakeSurface([
+      record(4, 1, '  Hola\n'),
+      record(5, 1, '\tHola\u00a0'),
+    ]);
+    const translate = vi.fn(async () => 'Hello');
+    const { provider } = fakeProvider(translate);
+    const coordinator = new ReplicaTranslationCoordinator(provider, surface);
+
+    await coordinator.translateCurrent(pair);
+
+    expect(translate).toHaveBeenCalledOnce();
+    expect(surface.projections.map(({ translated }) => translated)).toEqual([
+      '  Hello\n',
+      '\tHello\u00a0',
+    ]);
+  });
+
   it('combines pair and caller cancellation while creating the retained session', async () => {
     let creationSignal: AbortSignal | undefined;
     const provider: TranslationProvider = {

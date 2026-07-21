@@ -57,6 +57,15 @@ describe('TranslationMemory', () => {
 
     await expect(Promise.all([first, second])).resolves.toEqual(['Hello', 'Hello']);
     expect(load).toHaveBeenCalledOnce();
+    await expect(memory.getOrCreate(esEn, 'Hola', load)).resolves.toBe('Hello');
+    expect(memory.snapshotStats()).toEqual({
+      entries: 1,
+      characters: memory.characters,
+      hits: 1,
+      misses: 2,
+      inFlightJoins: 1,
+      providerLoads: 1,
+    });
   });
 
   it('retries a joined translation when the shared caller aborts', async () => {

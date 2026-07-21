@@ -15,6 +15,7 @@ import {
   ISOLATED_HTML_SHELL,
   IsolatedHtmlReplicaEngine,
   isTrustedIsolatedShellDocument,
+  type IsolatedMirrorInfo,
 } from '../lib/replica/isolated-html-engine';
 import { createReplicaIdentity } from '../lib/replica/protocol-v2';
 import type {
@@ -343,7 +344,8 @@ describe('IsolatedHtmlReplicaEngine', () => {
   it('allows privacy attributes and replacement children on one target atomically', async () => {
     const stream = new FakeHtmlStream(makeCheckpoint('public value', 0));
     const host = new FakePresentationHost();
-    const engine = makeEngine(stream, host);
+    const infos: IsolatedMirrorInfo[] = [];
+    const engine = makeEngine(stream, host, (info) => infos.push(info));
     await engine.run(request);
 
     const patch = createHtmlMirrorPatch(
@@ -372,6 +374,40 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(host.iframe?.contentDocument?.body.getAttribute('role')).toBe('textbox');
     expect(host.iframe?.contentDocument?.body.textContent).toBe('');
     expect(stream.acknowledged).toContain(1);
+    expect(infos.find(({ stage }) => stage === 'patch')).toMatchObject({
+      operationCount: 2,
+      attributeOperationCount: 1,
+      childrenOperationCount: 1,
+      textOperationCount: 0,
+      dimensionOperationCount: 0,
+      replacementNodeCount: 1,
+      largestReplacementNodeCount: 1,
+    });
+  });
+
+  it('reports outgoing replacement size when a children patch clears a subtree', async () => {
+    const stream = new FakeHtmlStream(makeCheckpoint('removed value', 0));
+    const host = new FakePresentationHost();
+    const infos: IsolatedMirrorInfo[] = [];
+    const engine = makeEngine(stream, host, (info) => infos.push(info));
+    await engine.run(request);
+
+    const patch = createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [{ kind: 'children', nodeId: 3, children: [] }],
+    );
+    expect(patch).toBeDefined();
+    stream.observer?.onPatch(patch!);
+
+    expect(host.iframe?.contentDocument?.body.textContent).toBe('');
+    expect(infos.find(({ stage }) => stage === 'patch')).toMatchObject({
+      operationCount: 1,
+      childrenOperationCount: 1,
+      replacementNodeCount: 1,
+      largestReplacementNodeCount: 1,
+    });
   });
 
   it('rejects an activation transition that does not re-sanitize descendants', async () => {

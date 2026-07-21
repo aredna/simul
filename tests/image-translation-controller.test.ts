@@ -356,6 +356,10 @@ describe('ImageTranslationController', () => {
         }],
       },
     }));
+    const createTranslationSession = vi.fn(async () => ({
+      translate: async (text: string) => `${text}-日本語`,
+      destroy: vi.fn(),
+    }));
     let projected!: () => void;
     const projectedPromise = new Promise<void>((resolve) => {
       projected = resolve;
@@ -371,10 +375,7 @@ describe('ImageTranslationController', () => {
       resolveAnchor: () => ({ ...anchor, replayLease: activeReplayLease }),
       translationProvider: {
         availability: async () => 'available',
-        createSession: async () => ({
-          translate: async (text) => `${text}-日本語`,
-          destroy: vi.fn(),
-        }),
+        createSession: createTranslationSession,
       },
       onDiagnostic: (diagnostic) => {
         diagnostics.push(diagnostic);
@@ -444,6 +445,7 @@ describe('ImageTranslationController', () => {
     ]));
     expect(document.querySelector('[data-simul-image-overlay="12"]')?.textContent)
       .toBe('hello-日本語');
+    expect(createTranslationSession).toHaveBeenCalledOnce();
     activeReplayLease = 8;
     expect(controller.notifyReplicaCommit(
       { ...sourceDocument, documentId: 'stale-document' },
@@ -457,6 +459,7 @@ describe('ImageTranslationController', () => {
     ).toHaveLength(2));
     expect(document.querySelector('[data-simul-image-overlay="12"]')?.textContent)
       .toBe('hello-日本語');
+    expect(createTranslationSession).toHaveBeenCalledOnce();
     emit?.({
       kind: 'remove',
       document: sourceDocument,
@@ -478,6 +481,7 @@ describe('ImageTranslationController', () => {
     ).toHaveLength(3));
     expect(document.querySelector('[data-simul-image-overlay="12"]')?.textContent)
       .toBe('hello-日本語');
+    expect(createTranslationSession).toHaveBeenCalledOnce();
 
     controller.configure({
       enabled: false,
