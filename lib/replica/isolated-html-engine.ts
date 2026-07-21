@@ -79,7 +79,22 @@ export interface IsolatedMirrorInfo {
   readonly dimensionOperationCount: number;
   readonly replacementNodeCount: number;
   readonly largestReplacementNodeCount: number;
+  readonly openShadowRootCount: number;
+  readonly adoptedStyleCount: number;
+  readonly visuallyHiddenCount: number;
+  readonly selectedImageSourceCount: number;
+  readonly stylesheetLinkCount: number;
+  readonly stylesheetLoadedCount: number;
+  readonly stylesheetErrorCount: number;
+  readonly stylesheetTimedOutCount: number;
   readonly sequence: number;
+}
+
+interface ReplicaStyleReadiness {
+  readonly stylesheetLinkCount: number;
+  readonly stylesheetLoadedCount: number;
+  readonly stylesheetErrorCount: number;
+  readonly stylesheetTimedOutCount: number;
 }
 
 interface IsolatedHtmlEngineOptions {
@@ -91,6 +106,7 @@ interface IsolatedHtmlEngineOptions {
   readonly onLiveFailure?: (code: ReplicaDiagnosticCode) => void;
   readonly onInfo?: (info: IsolatedMirrorInfo) => void;
   readonly iframeDeadlineMs?: number;
+  readonly styleSettleDeadlineMs?: number;
   readonly initializeIframe?: (
     iframe: HTMLIFrameElement,
     shell: string,
@@ -110,6 +126,7 @@ interface HtmlMirrorDomState {
   sequence: number;
   readonly replayLease: number;
   dimensions: HtmlMirrorCheckpoint['payload'];
+  readonly styleReadiness: ReplicaStyleReadiness;
   readonly cleanup: Set<() => void>;
   released: boolean;
 }
@@ -373,6 +390,11 @@ export class IsolatedHtmlReplicaEngine
         textMetadata,
         ownedAdoptedStyles,
       );
+      const styleReadiness = await settleReplicaStyles(
+        iframeDocument,
+        this.options.styleSettleDeadlineMs ?? 300,
+        signal,
+      );
       const document = sourceDocumentIdentity(checkpoint.identity);
       const previous = this.#committed && sameSourceDocument(
         this.#committed.document,
@@ -398,6 +420,7 @@ export class IsolatedHtmlReplicaEngine
         sequence: checkpoint.identity.sequence,
         replayLease,
         dimensions: checkpoint.payload,
+        styleReadiness,
         cleanup: new Set(),
         released: false,
       };
@@ -725,6 +748,7 @@ function applyDocumentGraph(
   const body = target.body;
   if (!html || !head || !body) throw new Error('Incomplete isolated iframe shell.');
   setAttributes(html, root.attributes);
+  applyElementHints(html, root);
   nodes.set(root.id, html);
   const sourceHead = root.children.find(
     (node): node is HtmlMirrorElementNode => node.kind === 'element' && node.tagName === 'head',
@@ -735,6 +759,7 @@ function applyDocumentGraph(
   // Retain the Simul-owned CSP and inert style; source nodes follow them.
   if (sourceHead) {
     setAttributes(head, sourceHead.attributes);
+    applyElementHints(head, sourceHead);
     nodes.set(sourceHead.id, head);
     for (const child of sourceHead.children) {
       const built = buildNode(
@@ -750,6 +775,7 @@ function applyDocumentGraph(
   body.replaceChildren();
   if (sourceBody) {
     setAttributes(body, sourceBody.attributes);
+    applyElementHints(body, sourceBody);
     nodes.set(sourceBody.id, body);
     for (const child of sourceBody.children) {
       const built = buildNode(
@@ -789,6 +815,7 @@ function buildNode(
   }
   const node = target.createElementNS(NAMESPACE_URIS[input.namespace], input.tagName);
   setAttributes(node, input.attributes);
+  applyElementHints(node, input);
   nodes.set(input.id, node);
   for (const child of input.children) {
     const built = buildNode(
@@ -854,6 +881,29 @@ function setAttributes(
     element.removeAttribute(attribute.name);
   }
   for (const [name, value] of attributes) element.setAttribute(name, value);
+}
+
+function applyElementHints(
+  element: Element,
+  hints: Pick<HtmlMirrorElementNode, 'visuallyHidden' | 'selectedImageSource'>,
+): void {
+  if (hints.selectedImageSource && element.localName.toLowerCase() === 'img') {
+    element.setAttribute('src', hints.selectedImageSource);
+    element.removeAttribute('srcset');
+    element.setAttribute('data-simul-selected-image-source', 'v1');
+  }
+  const styled = element as Element & { readonly style?: CSSStyleDeclaration };
+  if (!hints.visuallyHidden || !styled.style) return;
+  element.setAttribute('data-simul-visually-hidden', 'v1');
+  styled.style.setProperty('position', 'absolute', 'important');
+  styled.style.setProperty('width', '1px', 'important');
+  styled.style.setProperty('height', '1px', 'important');
+  styled.style.setProperty('padding', '0', 'important');
+  styled.style.setProperty('margin', '-1px', 'important');
+  styled.style.setProperty('overflow', 'hidden', 'important');
+  styled.style.setProperty('clip', 'rect(0, 0, 0, 0)', 'important');
+  styled.style.setProperty('clip-path', 'inset(50%)', 'important');
+  styled.style.setProperty('white-space', 'nowrap', 'important');
 }
 
 function buildRecords(
@@ -1074,6 +1124,7 @@ function applyPatchBatch(
       }
       if (operation.kind === 'attributes') {
         setAttributes(target as Element, operation.attributes);
+        applyElementHints(target as Element, operation);
         continue;
       }
       const plan = childrenPlans.find(
@@ -1489,6 +1540,167 @@ function measureExtent(iframe: HTMLIFrameElement): VisibleReplayExtent {
   };
 }
 
+async function settleReplicaStyles(
+  target: Document,
+  deadlineMs: number,
+  signal?: AbortSignal,
+): Promise<ReplicaStyleReadiness> {
+  signal?.throwIfAborted();
+  const boundedDeadline = Number.isFinite(deadlineMs)
+    ? Math.max(0, Math.min(2_000, deadlineMs))
+    : 300;
+  const deadlineAt = Date.now() + boundedDeadline;
+  const links = collectReplicaStylesheetLinks(target);
+  let loaded = 0;
+  let errors = 0;
+  const pending: Element[] = [];
+  for (const link of links) {
+    if (hasLoadedStylesheet(link)) loaded += 1;
+    else pending.push(link);
+  }
+
+  const unresolved = new Set(pending);
+  if (unresolved.size > 0 && deadlineAt > Date.now()) {
+    await new Promise<void>((resolve, reject) => {
+      let settled = false;
+      let timer: ReturnType<typeof setTimeout> | undefined;
+      const cleanup = (): void => {
+        for (const link of pending) {
+          link.removeEventListener('load', onLoad);
+          link.removeEventListener('error', onError);
+        }
+        signal?.removeEventListener('abort', onAbort);
+        if (timer !== undefined) clearTimeout(timer);
+      };
+      const finish = (error?: unknown): void => {
+        if (settled) return;
+        settled = true;
+        cleanup();
+        if (error) reject(error);
+        else resolve();
+      };
+      const settleLink = (event: Event, failed: boolean): void => {
+        const link = event.currentTarget as Element | null;
+        if (!link || !unresolved.delete(link)) return;
+        if (failed) errors += 1;
+        else loaded += 1;
+        if (unresolved.size === 0) finish();
+      };
+      const onLoad = (event: Event): void => settleLink(event, false);
+      const onError = (event: Event): void => settleLink(event, true);
+      const onAbort = (): void => finish(
+        signal?.reason ?? new DOMException('Style settling cancelled.', 'AbortError'),
+      );
+      for (const link of pending) {
+        link.addEventListener('load', onLoad, { once: true });
+        link.addEventListener('error', onError, { once: true });
+      }
+      signal?.addEventListener('abort', onAbort, { once: true });
+      if (signal?.aborted) {
+        finish(
+          signal.reason ??
+            new DOMException('Style settling cancelled.', 'AbortError'),
+        );
+        return;
+      }
+      // A stylesheet can become ready after the first sheet check but before
+      // its load listener is installed. Recheck only after every listener is
+      // active so that neither side of that race can strand the candidate.
+      for (const link of pending) {
+        if (!unresolved.has(link) || !hasLoadedStylesheet(link)) continue;
+        unresolved.delete(link);
+        loaded += 1;
+      }
+      if (unresolved.size === 0) {
+        finish();
+        return;
+      }
+      const remaining = Math.max(0, deadlineAt - Date.now());
+      if (remaining === 0) {
+        finish();
+        return;
+      }
+      timer = setTimeout(() => finish(), remaining);
+    });
+  }
+  signal?.throwIfAborted();
+  await waitForReplicaPaint(target, deadlineAt, signal);
+  await waitForReplicaPaint(target, deadlineAt, signal);
+  return Object.freeze({
+    stylesheetLinkCount: links.length,
+    stylesheetLoadedCount: loaded,
+    stylesheetErrorCount: errors,
+    stylesheetTimedOutCount: unresolved.size,
+  });
+}
+
+function collectReplicaStylesheetLinks(target: Document): Element[] {
+  const links = new Set<Element>();
+  const visited = new Set<Document | ShadowRoot>();
+  const visit = (root: Document | ShadowRoot): void => {
+    if (visited.has(root)) return;
+    visited.add(root);
+    for (const link of root.querySelectorAll('link[rel~="stylesheet"]')) {
+      links.add(link);
+    }
+    for (const element of root.querySelectorAll('*')) {
+      const shadow = element.shadowRoot;
+      if (shadow) visit(shadow);
+    }
+  };
+  visit(target);
+  return [...links];
+}
+
+function hasLoadedStylesheet(link: Element): boolean {
+  try {
+    return Boolean((link as HTMLLinkElement).sheet);
+  } catch {
+    return false;
+  }
+}
+
+async function waitForReplicaPaint(
+  target: Document,
+  deadlineAt: number,
+  signal?: AbortSignal,
+): Promise<void> {
+  signal?.throwIfAborted();
+  const remaining = Math.max(0, deadlineAt - Date.now());
+  if (remaining === 0) return;
+  const view = target.defaultView;
+  if (!view || typeof view.requestAnimationFrame !== 'function') {
+    await Promise.resolve();
+    return;
+  }
+  await new Promise<void>((resolve, reject) => {
+    let settled = false;
+    let frame: number | undefined;
+    const finish = (error?: unknown): void => {
+      if (settled) return;
+      settled = true;
+      clearTimeout(timer);
+      signal?.removeEventListener('abort', onAbort);
+      if (frame !== undefined && error) view.cancelAnimationFrame(frame);
+      if (error) reject(error);
+      else resolve();
+    };
+    const onAbort = (): void => finish(
+      signal?.reason ?? new DOMException('Style settling cancelled.', 'AbortError'),
+    );
+    const timer = setTimeout(() => finish(), Math.min(50, remaining));
+    signal?.addEventListener('abort', onAbort, { once: true });
+    if (signal?.aborted) {
+      finish(
+        signal.reason ??
+          new DOMException('Style settling cancelled.', 'AbortError'),
+      );
+      return;
+    }
+    frame = view.requestAnimationFrame(() => finish());
+  });
+}
+
 function installStateLayoutObservers(
   state: HtmlMirrorDomState,
   onLayout: () => void,
@@ -1538,11 +1750,26 @@ function stateInfo(
   metrics: IsolatedMirrorPatchMetrics = EMPTY_PATCH_METRICS,
 ): IsolatedMirrorInfo {
   let imageCount = 0;
+  let openShadowRootCount = 0;
+  let visuallyHiddenCount = 0;
+  let selectedImageSourceCount = 0;
   for (const node of state.nodes.values()) {
     if (
       node.nodeType === Node.ELEMENT_NODE &&
       (node as Element).localName.toLowerCase() === 'img'
     ) imageCount += 1;
+    if (node.nodeType === Node.DOCUMENT_FRAGMENT_NODE && 'host' in node) {
+      openShadowRootCount += 1;
+    }
+    if (node.nodeType === Node.ELEMENT_NODE) {
+      const element = node as Element;
+      if (element.getAttribute('data-simul-visually-hidden') === 'v1') {
+        visuallyHiddenCount += 1;
+      }
+      if (element.getAttribute('data-simul-selected-image-source') === 'v1') {
+        selectedImageSourceCount += 1;
+      }
+    }
   }
   return Object.freeze({
     stage,
@@ -1552,6 +1779,11 @@ function stateInfo(
     imageCount,
     operationCount,
     ...metrics,
+    openShadowRootCount,
+    adoptedStyleCount: state.ownedAdoptedStyles.size,
+    visuallyHiddenCount,
+    selectedImageSourceCount,
+    ...state.styleReadiness,
     sequence: state.sequence,
   });
 }
@@ -1568,9 +1800,21 @@ function emptyInfo(
     imageCount: 0,
     operationCount: 0,
     ...EMPTY_PATCH_METRICS,
+    openShadowRootCount: 0,
+    adoptedStyleCount: 0,
+    visuallyHiddenCount: 0,
+    selectedImageSourceCount: 0,
+    ...EMPTY_STYLE_READINESS,
     sequence: 0,
   });
 }
+
+const EMPTY_STYLE_READINESS: ReplicaStyleReadiness = Object.freeze({
+  stylesheetLinkCount: 0,
+  stylesheetLoadedCount: 0,
+  stylesheetErrorCount: 0,
+  stylesheetTimedOutCount: 0,
+});
 
 interface IsolatedMirrorPatchMetrics {
   readonly textOperationCount: number;

@@ -45,6 +45,8 @@ export type HtmlMirrorPatchOperation =
       readonly nodeId: number;
       readonly tagName: string;
       readonly attributes: readonly (readonly [string, string])[];
+      readonly visuallyHidden?: true;
+      readonly selectedImageSource?: string;
     }
   | {
       readonly kind: 'children';
@@ -355,10 +357,19 @@ function readOperations(input: readonly unknown[]): readonly HtmlMirrorPatchOper
     }
     if (
       raw.kind === 'attributes' &&
-      hasExactKeys(raw, ['kind', 'nodeId', 'tagName', 'attributes']) &&
+      hasExactKeysWithOptional(
+        raw,
+        ['kind', 'nodeId', 'tagName', 'attributes'],
+        ['visuallyHidden', 'selectedImageSource'],
+      ) &&
       typeof raw.tagName === 'string' &&
       Array.isArray(raw.attributes)
     ) {
+      if (
+        (raw.visuallyHidden !== undefined && raw.visuallyHidden !== true) ||
+        (raw.selectedImageSource !== undefined &&
+          typeof raw.selectedImageSource !== 'string')
+      ) return undefined;
       const sentinel = readHtmlMirrorNode({
         kind: 'element',
         id: raw.nodeId,
@@ -366,13 +377,21 @@ function readOperations(input: readonly unknown[]): readonly HtmlMirrorPatchOper
         tagName: raw.tagName,
         attributes: raw.attributes,
         children: [],
-      });
+        ...(raw.visuallyHidden === true ? { visuallyHidden: true } : {}),
+        ...(typeof raw.selectedImageSource === 'string'
+          ? { selectedImageSource: raw.selectedImageSource }
+          : {}),
+      }, graphIds, 0, graphBudget);
       if (!sentinel || sentinel.kind !== 'element') return undefined;
       operations.push(Object.freeze({
         kind: 'attributes',
         nodeId: raw.nodeId,
         tagName: sentinel.tagName,
         attributes: sentinel.attributes,
+        ...(sentinel.visuallyHidden ? { visuallyHidden: true as const } : {}),
+        ...(sentinel.selectedImageSource
+          ? { selectedImageSource: sentinel.selectedImageSource }
+          : {}),
       }));
       continue;
     }
@@ -477,4 +496,14 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
   const actual = Object.keys(value);
   return actual.length === keys.length && keys.every((key) => Object.hasOwn(value, key));
+}
+
+function hasExactKeysWithOptional(
+  value: Record<string, unknown>,
+  required: readonly string[],
+  optional: readonly string[],
+): boolean {
+  const allowed = new Set([...required, ...optional]);
+  return required.every((key) => Object.hasOwn(value, key)) &&
+    Object.keys(value).every((key) => allowed.has(key));
 }

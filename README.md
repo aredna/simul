@@ -111,6 +111,7 @@ the project's 42 MiB release limit.
 
 This is a high-fidelity safe reconstruction, not the website itself. Open
 shadow roots are mirrored and dynamically reconciled; closed shadow roots,
+custom-element state that exists only after page-script execution,
 cross-origin frame contents, pseudo-elements, canvas pixels, current
 video frames, DRM content, CSSOM-only rule edits, and some browser-managed or
 script-only state cannot be copied across the isolated HTML boundary. Use
@@ -124,6 +125,7 @@ including externally sourced SVG images displayed through `<img>`.
 Hidden images wait until visible; CSS backgrounds, canvas, video, frames, and
 images without a supported language hint are left unchanged. OCR overlays are
 inert sibling layers and do not resize or rewrite the source or replica image.
+High-DPI captures are proportionally downscaled to the fixed 4 MP OCR ceiling.
 See the [image translation notes](docs/image-translation-research.md) and the
 [translation companion guide](docs/translation-companion.md).
 
@@ -136,8 +138,9 @@ See the [image translation notes](docs/image-translation-research.md) and the
   images**, choose **Grant image access** if it appears, and make sure the
   image is visible and the From language is supported. Small images are
   skipped by default. Expand **OCR diagnostics**
-  under Image text to see memory-only discovery counts, skips, capture,
-  recognition, translation, and projection stages. Capture failures distinguish
+  under Image text to see memory-only discovery counts, skips, and correlated
+  job-numbered capture, recognition, translation, projection, retry, and
+  anchor-rebinding stages. Capture failures distinguish
   inactive-tab, permission, quota, API, data, decode, drawing-surface, encode,
   and digest stages. These entries never include
   page text, URLs, pixels, hashes, or node IDs; the same details are also sent

@@ -20,6 +20,7 @@ export interface TranslatedImageRegion {
 }
 
 export interface ImageOverlayProjection {
+  readonly jobOrdinal: number;
   readonly document: ReplicaSourceDocumentIdentity;
   readonly nodeId: number;
   readonly contentRevision: number;
@@ -50,11 +51,12 @@ export interface ImageOverlayProjectorEnvironment {
   readonly createResizeObserver?: (
     callback: ResizeObserverCallback,
   ) => ResizeObserver | undefined;
+  readonly onAnchorRebound?: (jobOrdinal: number) => void;
 }
 
 interface ProjectedEntry {
   readonly projection: ImageOverlayProjection;
-  readonly anchor: ReplicaImageAnchor;
+  anchor: ReplicaImageAnchor;
   readonly root: HTMLElement;
 }
 
@@ -221,7 +223,7 @@ export class ImageOverlayProjector {
   #refreshEntry(layer: DocumentLayer, nodeId: number): void {
     const entry = layer.entries.get(nodeId);
     if (!entry) return;
-    const { projection, anchor, root } = entry;
+    const { projection, root } = entry;
     const currentAnchor = this.environment.resolveAnchor(
       projection.document,
       projection.nodeId,
@@ -232,13 +234,20 @@ export class ImageOverlayProjector {
       !this.environment.isCurrent(projection) ||
       !currentAnchor ||
       currentAnchor.replayLease !== projection.replayLease ||
-      currentAnchor.image !== anchor.image ||
-      !anchor.image.isConnected ||
+      currentAnchor.image.ownerDocument !== layer.document ||
+      !currentAnchor.image.isConnected ||
       !root.isConnected
     ) {
       this.#removeEntry(layer, nodeId);
       return;
     }
+    if (currentAnchor.image !== entry.anchor.image) {
+      layer.resizeObserver?.unobserve(entry.anchor.image);
+      entry.anchor = currentAnchor;
+      layer.resizeObserver?.observe(currentAnchor.image);
+      this.environment.onAnchorRebound?.(projection.jobOrdinal);
+    }
+    const anchor = entry.anchor;
     const rect = anchor.image.getBoundingClientRect();
     if (!validRect(rect)) {
       root.hidden = true;
@@ -296,6 +305,7 @@ export class ImageOverlayProjector {
 function validProjection(value: ImageOverlayProjection): boolean {
   if (
     !Number.isSafeInteger(value.nodeId) || value.nodeId < 1 ||
+    !Number.isSafeInteger(value.jobOrdinal) || value.jobOrdinal < 1 ||
     !Number.isSafeInteger(value.contentRevision) || value.contentRevision < 1 ||
     !Number.isSafeInteger(value.observationRevision) || value.observationRevision < 1 ||
     !Number.isSafeInteger(value.replayLease) || value.replayLease < 1 ||

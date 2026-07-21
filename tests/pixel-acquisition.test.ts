@@ -10,7 +10,9 @@ import {
   type SourceTabCaptureEnvironment,
 } from '../lib/ocr/pixel-acquisition';
 import {
+  OCR_DOWNSCALED_PREPROCESSING_VERSION,
   OCR_NATIVE_PREPROCESSING_VERSION,
+  OCR_SHALLOW_BANNER_DOWNSCALED_PREPROCESSING_VERSION,
   OCR_SHALLOW_BANNER_NATIVE_PREPROCESSING_VERSION,
   OCR_SHALLOW_BANNER_PREPROCESSING_VERSION,
   selectOcrPreprocessingPlan,
@@ -233,17 +235,22 @@ describe('PixelAcquisitionCoordinator', () => {
     });
   });
 
-  it('rejects an area-compliant crop above the protocol axis bound', () => {
+  it('preserves shallow-banner segmentation when an over-axis crop is downscaled', () => {
     expect(selectOcrPreprocessingPlan(
       40_000,
       40,
       MAX_OCR_INPUT_PIXELS,
       1_000,
       1,
-    )).toBeUndefined();
+    )).toEqual({
+      width: 32_768,
+      height: 32,
+      scale: 0.8192,
+      version: OCR_SHALLOW_BANNER_DOWNSCALED_PREPROCESSING_VERSION,
+    });
   });
 
-  it('rejects a crop above the four-megapixel input guard', async () => {
+  it('downscales a high-DPI crop without raising the four-megapixel guard', async () => {
     const huge = {
       ...metrics,
       left: 0,
@@ -259,10 +266,50 @@ describe('PixelAcquisitionCoordinator', () => {
     });
     const coordinator = new PixelAcquisitionCoordinator(environment);
     expect(MAX_OCR_INPUT_PIXELS).toBe(4_000_000);
-    expect(await coordinator.acquire(descriptor)).toEqual({
-      status: 'deferred',
-      reason: 'oversized',
+    const result = await coordinator.acquire(descriptor);
+    expect(result).toMatchObject({
+      status: 'ready',
+      pixels: {
+        bitmapWidth: 2_828,
+        bitmapHeight: 1_414,
+        preprocessingVersion: OCR_DOWNSCALED_PREPROCESSING_VERSION,
+      },
     });
+    if (result.status === 'ready') {
+      expect(result.pixels.bitmapWidth * result.pixels.bitmapHeight)
+        .toBeLessThanOrEqual(MAX_OCR_INPUT_PIXELS);
+    }
+  });
+
+  it('admits the 1206x761 media geometry at 2.25x through a bounded crop', async () => {
+    const mediaMetrics = {
+      ...metrics,
+      left: 0,
+      top: 0,
+      width: 1_206,
+      height: 761,
+      viewportWidth: 1_206,
+      viewportHeight: 761,
+      devicePixelRatio: 2.25,
+    };
+    const environment = fakeEnvironment(fakeSource([mediaMetrics, mediaMetrics]));
+    environment.decode = async () => ({
+      width: 2_714,
+      height: 1_712,
+      close: vi.fn(),
+    });
+    const result = await new PixelAcquisitionCoordinator(environment)
+      .acquire(descriptor);
+
+    expect(result.status).toBe('ready');
+    if (result.status === 'ready') {
+      expect(result.pixels.preprocessingVersion)
+        .toBe(OCR_DOWNSCALED_PREPROCESSING_VERSION);
+      expect(result.pixels.bitmapWidth * result.pixels.bitmapHeight)
+        .toBeLessThanOrEqual(MAX_OCR_INPUT_PIXELS);
+      expect(result.pixels.cropWidthCss).toBe(1_206);
+      expect(result.pixels.cropHeightCss).toBe(761);
+    }
   });
 
   it.each([

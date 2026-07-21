@@ -20,6 +20,7 @@ function projection(
   overrides: Partial<ImageOverlayProjection> = {},
 ): ImageOverlayProjection {
   return {
+    jobOrdinal: 1,
     document: sourceDocument,
     nodeId: 7,
     contentRevision: 3,
@@ -185,5 +186,50 @@ describe('ImageOverlayProjector', () => {
     expect(document.querySelector(`[${IMAGE_OVERLAY_LAYER_ATTRIBUTE}]`)).toBeNull();
     expect(projector.project(projection())).toBe(false);
     expect(projector.beginPair(2, 'en>es')).toBe(true);
+  });
+
+  it('rebinds a same-lease replacement image without discarding its overlay', () => {
+    const { document } = parseHTML('<html><body><main><img></main></body></html>');
+    const first = document.querySelector('img') as unknown as HTMLImageElement;
+    const replacement = document.createElement('img') as unknown as HTMLImageElement;
+    first.getBoundingClientRect = () => ({
+      left: 10, top: 20, width: 100, height: 60,
+      right: 110, bottom: 80, x: 10, y: 20, toJSON: () => ({}),
+    });
+    replacement.getBoundingClientRect = () => ({
+      left: 30, top: 40, width: 120, height: 70,
+      right: 150, bottom: 110, x: 30, y: 40, toJSON: () => ({}),
+    });
+    const iframe = { contentDocument: document } as HTMLIFrameElement;
+    let image = first;
+    const rebound = vi.fn();
+    const projector = new ImageOverlayProjector({
+      resolveAnchor: () => ({
+        document: sourceDocument,
+        replayLease: 9,
+        image,
+        iframe,
+      }),
+      isCurrent: () => true,
+      scheduleFrame: (callback) => { callback(); return 1; },
+      cancelFrame: () => undefined,
+      createResizeObserver: () => undefined,
+      onAnchorRebound: rebound,
+    });
+    projector.beginPair(1, 'en>ja');
+    expect(projector.project(projection({ jobOrdinal: 17 }))).toBe(true);
+
+    first.replaceWith(replacement);
+    image = replacement;
+    projector.refresh();
+
+    const root = document.querySelector(
+      '[data-simul-image-overlay="7"]',
+    ) as HTMLElement | null;
+    expect(root?.style.left).toBe('30px');
+    expect(root?.style.top).toBe('40px');
+    expect(root?.textContent).toBe('翻訳');
+    expect(rebound).toHaveBeenCalledOnce();
+    expect(rebound).toHaveBeenCalledWith(17);
   });
 });

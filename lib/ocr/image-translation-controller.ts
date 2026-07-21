@@ -62,6 +62,8 @@ import {
 
 const MUTATION_QUIET_MS = 1_000;
 const MAX_TRANSLATED_IMAGE_REGIONS = 512;
+const MAX_TRANSIENT_CAPTURE_RETRIES = 1;
+const MAX_UNCHANGED_EMPTY_RETRIES = 2;
 
 export interface ImageTranslationConfiguration {
   readonly enabled: boolean;
@@ -131,6 +133,7 @@ export type ImageTranslationDiagnostic =
     }>
   | Readonly<{
       stage: 'capture-deferred';
+      ordinal: number;
       reason: ImageCaptureDeferralReason;
       renderedWidth: number;
       renderedHeight: number;
@@ -138,12 +141,47 @@ export type ImageTranslationDiagnostic =
   | Readonly<{
       stage: 'recognition-failed';
       code: OcrHostErrorCode;
+      ordinal: number;
+      renderedWidth: number;
+      renderedHeight: number;
+      bitmapWidth: number;
+      bitmapHeight: number;
     }>
   | Readonly<{
       stage: 'recognition-complete';
       provider: ImageTextProviderId;
       regions: number;
       cacheHit: boolean;
+      ordinal: number;
+      bitmapWidth: number;
+      bitmapHeight: number;
+    }>
+  | Readonly<{
+      stage: 'translation-started' | 'translation-failed' | 'translation-empty';
+      ordinal: number;
+      renderedWidth: number;
+      renderedHeight: number;
+      bitmapWidth: number;
+      bitmapHeight: number;
+    }>
+  | Readonly<{
+      stage: 'job-progress';
+      ordinal: number;
+      status:
+        | 'capture-started'
+        | 'capture-retry'
+        | 'capture-retry-exhausted'
+        | 'recognition-started'
+        | 'no-text-retry'
+        | 'no-text-changed'
+        | 'projection-deferred'
+        | 'projected'
+        | 'anchor-rebound';
+      renderedWidth: number;
+      renderedHeight: number;
+      bitmapWidth?: number;
+      bitmapHeight?: number;
+      attempt?: number;
     }>;
 
 export interface ImageTranslationControllerEnvironment {
@@ -184,6 +222,18 @@ export class ImageTranslationController {
   readonly #clearTimer: TimeoutCanceller;
   readonly #descriptors = new Map<number, SourceImageDescriptor>();
   readonly #projectedHashes = new Map<number, string>();
+  readonly #projectedOrdinals = new Map<number, number>();
+  readonly #captureRetries = new Map<number, {
+    readonly contentRevision: number;
+    readonly observationRevision: number;
+    attempts: number;
+  }>();
+  readonly #emptyRetries = new Map<number, {
+    readonly contentRevision: number;
+    readonly observationRevision: number;
+    pixelHash: string;
+    attempts: number;
+  }>();
   #configuration: ImageTranslationConfiguration;
   #request: ReplicaCaptureRequest | undefined;
   #sourceWindowId: number | undefined;
@@ -206,6 +256,7 @@ export class ImageTranslationController {
   #sourceRecoveryKey: string | undefined;
   #sourceReconnectUsed = false;
   #configurationDiagnosticKey: string | undefined;
+  #nextJobOrdinal = 0;
 
   constructor(private readonly environment: ImageTranslationControllerEnvironment) {
     this.#translationMemory = environment.translationMemory ?? new TranslationMemory();
@@ -223,6 +274,15 @@ export class ImageTranslationController {
     this.#projector = new ImageOverlayProjector({
       resolveAnchor: environment.resolveAnchor,
       isCurrent: (projection) => this.#isProjectionCurrent(projection),
+      onAnchorRebound: (ordinal) => {
+        const descriptor = this.#descriptorForProjectedOrdinal(ordinal);
+        if (!descriptor) return;
+        this.#reportJobProgress(
+          ordinal,
+          'anchor-rebound',
+          descriptor,
+        );
+      },
       ...environment.projector,
     });
     this.#beginPair();
@@ -362,6 +422,7 @@ export class ImageTranslationController {
   #adoptReplayLease(replayLease: number): void {
     if (this.#replayLease !== 0 && this.#replayLease !== replayLease) {
       this.#projectedHashes.clear();
+      this.#projectedOrdinals.clear();
       this.#projector.clear();
       this.#rebuildScheduler();
     } else {
@@ -515,6 +576,9 @@ export class ImageTranslationController {
     this.#scheduler = undefined;
     this.#descriptors.clear();
     this.#projectedHashes.clear();
+    this.#projectedOrdinals.clear();
+    this.#captureRetries.clear();
+    this.#emptyRetries.clear();
     this.#projector.clear();
     this.#setMutationQuiet(false, false);
     this.#setProcessing(false);
@@ -549,11 +613,17 @@ export class ImageTranslationController {
             change.descriptor.observationRevision)
       ) {
         this.#projectedHashes.delete(change.descriptor.nodeId);
+        this.#projectedOrdinals.delete(change.descriptor.nodeId);
+        this.#captureRetries.delete(change.descriptor.nodeId);
+        this.#emptyRetries.delete(change.descriptor.nodeId);
         this.#projector.remove(change.descriptor.document, change.descriptor.nodeId);
       }
     } else {
       this.#descriptors.delete(change.nodeId);
       this.#projectedHashes.delete(change.nodeId);
+      this.#projectedOrdinals.delete(change.nodeId);
+      this.#captureRetries.delete(change.nodeId);
+      this.#emptyRetries.delete(change.nodeId);
       this.#projector.remove(change.document, change.nodeId);
     }
     const scheduling = this.#scheduler.apply(change);
@@ -622,6 +692,7 @@ export class ImageTranslationController {
         ) return;
         const job = scheduler.takeNext();
         if (!job) return;
+        const jobOrdinal = this.#nextOrdinal();
         this.#activeJobValue = job;
         const abortController = new AbortController();
         this.#activeAbortController = abortController;
@@ -631,6 +702,7 @@ export class ImageTranslationController {
             scheduler,
             pixels,
             processingVersion,
+            jobOrdinal,
             abortController.signal,
           );
         } catch (error) {
@@ -640,7 +712,6 @@ export class ImageTranslationController {
             return;
           }
           if (!isAbortError(error) && !abortController.signal.aborted) {
-            this.environment.onDiagnostic?.('translation-failed');
             scheduler.settle(job);
           } else if (
             processingVersion === this.#processingVersion &&
@@ -671,6 +742,7 @@ export class ImageTranslationController {
     scheduler: ImageScanScheduler,
     pixelCoordinator: PixelAcquisitionCoordinator,
     processingVersion: number,
+    jobOrdinal: number,
     signal: AbortSignal,
   ): Promise<void> {
     const pairEpoch = this.#pairEpoch;
@@ -686,22 +758,51 @@ export class ImageTranslationController {
     }
     const replayLease = anchor.replayLease;
     this.environment.onDiagnostic?.('capture-started');
+    this.#reportJobProgress(jobOrdinal, 'capture-started', job.descriptor);
     const acquisition = await pixelCoordinator.acquire(job.descriptor, signal);
     if (acquisition.status !== 'ready') {
-      if (
+      const transient = isTransientCaptureReason(acquisition.reason);
+      const retryAttempt = transient
+        ? this.#takeCaptureRetry(job)
+        : undefined;
+      const retryExhausted = transient && retryAttempt === undefined;
+      if (retryAttempt !== undefined) scheduler.retry(job);
+      else if (
+        retryExhausted ||
         acquisition.reason === 'permission' ||
-        acquisition.reason === 'inactive'
+        acquisition.reason === 'inactive' ||
+        acquisition.reason === 'oversized'
       ) scheduler.settle(job);
       else scheduler.defer(job);
+      if (!transient) this.#captureRetries.delete(job.descriptor.nodeId);
       this.environment.onDiagnostic?.('capture-deferred');
       this.environment.onDiagnostic?.(Object.freeze({
         stage: 'capture-deferred' as const,
+        ordinal: jobOrdinal,
         reason: acquisition.reason,
         renderedWidth: job.descriptor.renderedWidth,
         renderedHeight: job.descriptor.renderedHeight,
       }));
+      if (retryAttempt !== undefined) {
+        this.#reportJobProgress(
+          jobOrdinal,
+          'capture-retry',
+          job.descriptor,
+          undefined,
+          retryAttempt,
+        );
+      } else if (retryExhausted) {
+        this.#reportJobProgress(
+          jobOrdinal,
+          'capture-retry-exhausted',
+          job.descriptor,
+          undefined,
+          MAX_TRANSIENT_CAPTURE_RETRIES,
+        );
+      }
       return;
     }
+    this.#captureRetries.delete(job.descriptor.nodeId);
     const pixels = acquisition.pixels;
     if (!this.#isJobCurrent(job, processingVersion, pairEpoch, pairKey)) {
       throw new DOMException('Image job became stale.', 'AbortError');
@@ -722,8 +823,7 @@ export class ImageTranslationController {
     }
     const languageGroup = tesseractLanguageGroupFor(sourceLanguage);
     if (sourceLanguage === this.#configuration.targetLanguage) {
-      this.#projectedHashes.delete(job.descriptor.nodeId);
-      this.#projector.remove(job.descriptor.document, job.descriptor.nodeId);
+      this.#clearProjection(job.descriptor);
       scheduler.settle(job);
       this.environment.onDiagnostic?.('same-language');
       return;
@@ -739,13 +839,23 @@ export class ImageTranslationController {
         : {}),
     };
     this.environment.onDiagnostic?.('recognition-started');
+    this.#reportJobProgress(
+      jobOrdinal,
+      'recognition-started',
+      job.descriptor,
+      pixels,
+    );
     const recognition = await this.#recognizer().recognize(pixels, route, signal);
     if (recognition.status !== 'complete') {
       scheduler.settle(job);
-      this.environment.onDiagnostic?.('recognition-failed');
       this.environment.onDiagnostic?.(Object.freeze({
         stage: 'recognition-failed' as const,
         code: recognition.code,
+        ordinal: jobOrdinal,
+        renderedWidth: job.descriptor.renderedWidth,
+        renderedHeight: job.descriptor.renderedHeight,
+        bitmapWidth: pixels.bitmapWidth,
+        bitmapHeight: pixels.bitmapHeight,
       }));
       return;
     }
@@ -754,30 +864,84 @@ export class ImageTranslationController {
       provider: recognition.result.providerId,
       regions: recognition.result.regions.length,
       cacheHit: recognition.cacheHit,
+      ordinal: jobOrdinal,
+      bitmapWidth: pixels.bitmapWidth,
+      bitmapHeight: pixels.bitmapHeight,
     }));
     if (recognition.result.regions.length === 0) {
-      scheduler.settle(job);
-      this.environment.onDiagnostic?.('no-text-found');
+      const emptyDecision = this.#emptyRetryDecision(job, pixels.pixelHash);
+      if (emptyDecision.status === 'retry') {
+        scheduler.retry(job);
+        this.#reportJobProgress(
+          jobOrdinal,
+          'no-text-retry',
+          job.descriptor,
+          pixels,
+          emptyDecision.attempt,
+        );
+      } else if (emptyDecision.status === 'changed') {
+        scheduler.defer(job);
+        this.#emptyRetries.delete(job.descriptor.nodeId);
+        this.#clearProjection(job.descriptor);
+        this.#reportJobProgress(
+          jobOrdinal,
+          'no-text-changed',
+          job.descriptor,
+          pixels,
+        );
+      } else {
+        scheduler.settle(job);
+        this.#emptyRetries.delete(job.descriptor.nodeId);
+        this.#clearProjection(job.descriptor);
+        this.environment.onDiagnostic?.('no-text-found');
+      }
       return;
     }
+    this.#emptyRetries.delete(job.descriptor.nodeId);
     const pair: TranslationPair = {
       sourceLanguage,
       targetLanguage: this.#configuration.targetLanguage,
     };
-    const regions = await this.#translateRegions(
-      recognition.result.regions,
-      pair,
-      signal,
-    );
+    let regions: readonly TranslatedImageRegion[];
+    try {
+      regions = await this.#translateRegions(
+        recognition.result.regions,
+        pair,
+        signal,
+        () => this.#reportTranslationStage(
+          'translation-started',
+          jobOrdinal,
+          job.descriptor,
+          pixels,
+        ),
+      );
+    } catch (error) {
+      if (!isAbortError(error) && !signal.aborted) {
+        this.#reportTranslationStage(
+          'translation-failed',
+          jobOrdinal,
+          job.descriptor,
+          pixels,
+        );
+      }
+      throw error;
+    }
     if (!this.#isJobCurrent(job, processingVersion, pairEpoch, pairKey)) {
       throw new DOMException('Image translation became stale.', 'AbortError');
     }
     if (regions.length === 0) {
       scheduler.settle(job);
-      this.environment.onDiagnostic?.('translation-empty');
+      this.#clearProjection(job.descriptor);
+      this.#reportTranslationStage(
+        'translation-empty',
+        jobOrdinal,
+        job.descriptor,
+        pixels,
+      );
       return;
     }
     const projection: ImageOverlayProjection = {
+      jobOrdinal,
       document: job.descriptor.document,
       nodeId: job.descriptor.nodeId,
       contentRevision: job.descriptor.contentRevision,
@@ -797,14 +961,23 @@ export class ImageTranslationController {
       regions,
     };
     this.#projectedHashes.set(job.descriptor.nodeId, pixels.pixelHash);
+    this.#projectedOrdinals.set(job.descriptor.nodeId, jobOrdinal);
     if (!this.#projector.project(projection)) {
       this.#projectedHashes.delete(job.descriptor.nodeId);
+      this.#projectedOrdinals.delete(job.descriptor.nodeId);
       scheduler.defer(job);
       this.environment.onDiagnostic?.('projection-deferred');
+      this.#reportJobProgress(
+        jobOrdinal,
+        'projection-deferred',
+        job.descriptor,
+        pixels,
+      );
       return;
     }
     scheduler.settle(job);
     this.environment.onDiagnostic?.('projected');
+    this.#reportJobProgress(jobOrdinal, 'projected', job.descriptor, pixels);
   }
 
   async #translateRegions(
@@ -814,6 +987,7 @@ export class ImageTranslationController {
     }[],
     pair: TranslationPair,
     signal: AbortSignal,
+    onTranslationStarted: () => void,
   ): Promise<readonly TranslatedImageRegion[]> {
     if (regions.length === 0) return Object.freeze([]);
     let session: TranslationSession | undefined;
@@ -828,7 +1002,7 @@ export class ImageTranslationController {
           source,
           async () => {
             if (!session) {
-              this.environment.onDiagnostic?.('translation-started');
+              onTranslationStarted();
               session = await this.environment.translationProvider.createSession(pair, {
                 signal,
               });
@@ -847,6 +1021,125 @@ export class ImageTranslationController {
     } finally {
       session?.destroy();
     }
+  }
+
+  #takeCaptureRetry(job: ImageScanJob): number | undefined {
+    const descriptor = job.descriptor;
+    const previous = this.#captureRetries.get(descriptor.nodeId);
+    const record = previous &&
+        previous.contentRevision === descriptor.contentRevision &&
+        previous.observationRevision === descriptor.observationRevision
+      ? previous
+      : {
+          contentRevision: descriptor.contentRevision,
+          observationRevision: descriptor.observationRevision,
+          attempts: 0,
+        };
+    if (record.attempts >= MAX_TRANSIENT_CAPTURE_RETRIES) return undefined;
+    record.attempts += 1;
+    this.#captureRetries.set(descriptor.nodeId, record);
+    return record.attempts;
+  }
+
+  #emptyRetryDecision(
+    job: ImageScanJob,
+    pixelHash: string,
+  ): { readonly status: 'retry'; readonly attempt: number } |
+      { readonly status: 'confirmed' | 'changed' } {
+    const descriptor = job.descriptor;
+    const previous = this.#emptyRetries.get(descriptor.nodeId);
+    if (
+      previous &&
+      previous.contentRevision === descriptor.contentRevision &&
+      previous.observationRevision === descriptor.observationRevision
+    ) {
+      if (
+        previous.pixelHash !== pixelHash &&
+        previous.attempts < MAX_UNCHANGED_EMPTY_RETRIES
+      ) {
+        previous.pixelHash = pixelHash;
+        previous.attempts += 1;
+        return Object.freeze({
+          status: 'retry' as const,
+          attempt: previous.attempts,
+        });
+      }
+      return Object.freeze({
+        status: previous.pixelHash === pixelHash ? 'confirmed' : 'changed',
+      });
+    }
+    const record = {
+      contentRevision: descriptor.contentRevision,
+      observationRevision: descriptor.observationRevision,
+      pixelHash,
+      attempts: 1,
+    };
+    this.#emptyRetries.set(descriptor.nodeId, record);
+    return Object.freeze({ status: 'retry', attempt: record.attempts });
+  }
+
+  #reportJobProgress(
+    ordinal: number,
+    status: Extract<
+      ImageTranslationDiagnostic,
+      { readonly stage: 'job-progress' }
+    >['status'],
+    descriptor: SourceImageDescriptor,
+    pixels?: AcquiredImagePixels,
+    attempt?: number,
+  ): void {
+    this.environment.onDiagnostic?.(Object.freeze({
+      stage: 'job-progress' as const,
+      ordinal,
+      status,
+      renderedWidth: descriptor.renderedWidth,
+      renderedHeight: descriptor.renderedHeight,
+      ...(pixels
+        ? {
+            bitmapWidth: pixels.bitmapWidth,
+            bitmapHeight: pixels.bitmapHeight,
+          }
+        : {}),
+      ...(attempt !== undefined ? { attempt } : {}),
+    }));
+  }
+
+  #reportTranslationStage(
+    stage: 'translation-started' | 'translation-failed' | 'translation-empty',
+    ordinal: number,
+    descriptor: SourceImageDescriptor,
+    pixels: AcquiredImagePixels,
+  ): void {
+    this.environment.onDiagnostic?.(Object.freeze({
+      stage,
+      ordinal,
+      renderedWidth: descriptor.renderedWidth,
+      renderedHeight: descriptor.renderedHeight,
+      bitmapWidth: pixels.bitmapWidth,
+      bitmapHeight: pixels.bitmapHeight,
+    }));
+  }
+
+  #clearProjection(descriptor: SourceImageDescriptor): void {
+    this.#projectedHashes.delete(descriptor.nodeId);
+    this.#projectedOrdinals.delete(descriptor.nodeId);
+    this.#projector.remove(descriptor.document, descriptor.nodeId);
+  }
+
+  #descriptorForProjectedOrdinal(
+    ordinal: number,
+  ): SourceImageDescriptor | undefined {
+    for (const [nodeId, projectedOrdinal] of this.#projectedOrdinals) {
+      if (projectedOrdinal === ordinal) return this.#descriptors.get(nodeId);
+    }
+    return undefined;
+  }
+
+  #nextOrdinal(): number {
+    this.#nextJobOrdinal = this.#nextJobOrdinal >= Number.MAX_SAFE_INTEGER
+      ? 1
+      : this.#nextJobOrdinal + 1;
+    return this.#nextJobOrdinal;
   }
 
   #recognizer(): ImageRecognitionCoordinator {
@@ -944,6 +1237,9 @@ export class ImageTranslationController {
           : this.#configuration.sourceLanguage}>${this.#configuration.targetLanguage}`
       : undefined;
     this.#projectedHashes.clear();
+    this.#projectedOrdinals.clear();
+    this.#captureRetries.clear();
+    this.#emptyRetries.clear();
     this.#projector.beginPair(this.#pairEpoch, this.#pairKey);
   }
 
@@ -991,6 +1287,14 @@ export class ImageTranslationController {
     this.#processing = value;
     this.environment.onBusyChange?.(value);
   }
+}
+
+function isTransientCaptureReason(
+  reason: ImageCaptureDeferralReason,
+): boolean {
+  return reason === 'unstable' || reason === 'quota' || reason === 'api' ||
+    reason === 'data' || reason === 'decode' || reason === 'surface' ||
+    reason === 'encode' || reason === 'digest';
 }
 
 function hasRuntimeImageTextProvider(

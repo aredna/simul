@@ -56,10 +56,30 @@ export function formatImageTranslationDiagnostic(
     ].filter(Boolean).join('; ');
   }
   if (diagnostic.stage === 'capture-deferred') {
-    return `capture deferred: reason=${diagnostic.reason}; size=${diagnostic.renderedWidth}x${diagnostic.renderedHeight}`;
+    return `job ${diagnostic.ordinal} capture deferred: reason=${diagnostic.reason}; size=${diagnostic.renderedWidth}x${diagnostic.renderedHeight}`;
   }
   if (diagnostic.stage === 'recognition-complete') {
-    return `recognition complete: provider=${diagnostic.provider}; regions=${diagnostic.regions}; cache=${diagnostic.cacheHit ? 'hit' : 'miss'}`;
+    return `job ${diagnostic.ordinal} recognition complete: provider=${diagnostic.provider}; regions=${diagnostic.regions}; bitmap=${diagnostic.bitmapWidth}x${diagnostic.bitmapHeight}; cache=${diagnostic.cacheHit ? 'hit' : 'miss'}`;
   }
-  return `recognition failed: code=${diagnostic.code}`;
+  if (diagnostic.stage === 'recognition-failed') {
+    return `job ${diagnostic.ordinal} recognition failed: code=${diagnostic.code}; rendered=${diagnostic.renderedWidth}x${diagnostic.renderedHeight}; bitmap=${diagnostic.bitmapWidth}x${diagnostic.bitmapHeight}`;
+  }
+  if (
+    diagnostic.stage === 'translation-started' ||
+    diagnostic.stage === 'translation-failed' ||
+    diagnostic.stage === 'translation-empty'
+  ) {
+    return `job ${diagnostic.ordinal} ${diagnostic.stage.replaceAll('-', ' ')}: rendered=${diagnostic.renderedWidth}x${diagnostic.renderedHeight}; bitmap=${diagnostic.bitmapWidth}x${diagnostic.bitmapHeight}`;
+  }
+  if (diagnostic.stage === 'job-progress') {
+    return [
+      `job ${diagnostic.ordinal}: ${diagnostic.status.replaceAll('-', ' ')}`,
+      `rendered=${diagnostic.renderedWidth}x${diagnostic.renderedHeight}`,
+      diagnostic.bitmapWidth !== undefined && diagnostic.bitmapHeight !== undefined
+        ? `bitmap=${diagnostic.bitmapWidth}x${diagnostic.bitmapHeight}`
+        : undefined,
+      diagnostic.attempt !== undefined ? `attempt=${diagnostic.attempt}` : undefined,
+    ].filter(Boolean).join('; ');
+  }
+  return diagnostic.stage;
 }

@@ -300,10 +300,17 @@ describe('offscreen OCR protocol and lifecycle', () => {
     });
     await expect(coordinator.recognize(pixels, route)).resolves.toMatchObject({
       status: 'complete',
+      cacheHit: false,
+      result: { regions: [] },
+    });
+    await expect(coordinator.recognize(pixels, route)).resolves.toMatchObject({
+      status: 'complete',
       cacheHit: true,
       result: { regions: [] },
     });
     expect(calls.map((job) => job.providerId)).toEqual([
+      'chrome-text-detector',
+      'tesseract',
       'chrome-text-detector',
       'tesseract',
     ]);

@@ -25,6 +25,14 @@ persisted experimental choice unless `WXT_SIMUL_RRWEB_SHADOW=0` hides it. The
 legacy renderer is the emergency fallback; neither engine silently falls back
 to the other.
 
+The isolated graph carries a boolean only for the canonical clipped 1px
+screen-reader pattern and a sanitized selected `currentSrc` for responsive
+images; it never transports arbitrary computed styles. A staged checkpoint
+waits for stylesheet load/error outcomes, two paints, or a 300 ms deadline
+before replacing the last-good view. Content-free mirror diagnostics expose
+aggregate shadow-root, adopted-style, hidden-label, selected-source, and
+stylesheet outcome counts.
+
 Native and ARIA activation labels remain translatable while editable and
 value-bearing controls stay masked. Passive image validation admits a narrow,
 shape-only URL-encoded SVG data-image profile (including the YC logo) with the
@@ -45,7 +53,8 @@ source frame observes ordinary top-level `<img>` elements by the selected
 engine's node ID while keeping URLs and text private. A capacity-one scheduler applies the saved
 visible/background policy and small-image filter. Stable visible pixels are
 captured through `captureVisibleTab()` at no more than twice per second, cropped
-below 4 MP after exact pre/post geometry checks, SHA-256 keyed, and handed to a
+and proportionally downscaled to no more than 4 MP after exact pre/post geometry
+checks, SHA-256 keyed, and handed to a
 restartable offscreen host through two-minute extension-origin transient
 storage. Tesseract.js/core 7.0.0, three embedded Wasm core loaders, its Worker,
 and 22 pinned `tessdata_fast` files are local. One routed language group is
@@ -61,6 +70,8 @@ Recognition remains in a bounded 128-entry memory-only cache separate from the
 bounded page-text and image-line translation memories. Page-text keys include
 the exact source document while image recognition keys include provider route,
 language/model, preprocessing profile, dimensions, and the cropped-pixel hash.
+An unchanged empty result requires two OCR passes before it is cached; changing
+blank pixels defer, and a transient capture failure receives one immediate retry.
 Raw screenshot blobs remain transient and are removed after offscreen handoff.
 Nearest valid element `lang`, explicit From, then detected page language selects
 the OCR group. Stable shallow banners are classified from CSS geometry so
@@ -71,7 +82,8 @@ normal block mode afterward. Overlay
 coordinates still map through the original CSS crop. Inert line overlays commit
 only when document, content revision, pixel hash, replay lease, pair epoch,
 replica image, and geometry remain current; they follow replay scroll/zoom
-without wrapping or resizing the image. Disabled builds omit the host, OCR
+without wrapping or resizing the image. A same-ID replica image replacement on
+the same replay lease rebinds the existing overlay. Disabled builds omit the host, OCR
 assets, permission, and CSP. The canonical build adds required `offscreen`, the
 optional user-granted all-sites capture match, and the exact local Wasm/Worker
 CSP, validates every runtime hash/notice offline, and remains under 42 MiB
@@ -81,8 +93,9 @@ Translation and OCR depend on an engine-neutral selected-surface router.
 Content-free `console.info` diagnostics report mirror connection/checkpoint/
 patch/recovery counts, aggregate isolated-patch kinds/replacement sizes,
 bounded translation-cache counters, and every OCR discovery, skip, capture,
-recognition, translation, or projection stage without text, URLs, pixels,
-hashes, or IDs. Both settings and the compact corner toolbar share one guarded
+recognition, translation, or projection stage through an ephemeral job ordinal
+and safe dimensions without text, URLs, pixels, hashes, or IDs. Both settings
+and the compact corner toolbar share one guarded
 manual rebuild action.
 
 ## Fixed engineering baseline

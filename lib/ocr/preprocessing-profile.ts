@@ -5,11 +5,17 @@ export const OCR_SHALLOW_BANNER_NATIVE_PREPROCESSING_VERSION =
   'visible-crop-v2-shallow-banner-native';
 export const OCR_SHALLOW_BANNER_PREPROCESSING_VERSION =
   'visible-crop-v2-shallow-banner-2x';
+export const OCR_DOWNSCALED_PREPROCESSING_VERSION =
+  'visible-crop-v2-downscaled-4mp';
+export const OCR_SHALLOW_BANNER_DOWNSCALED_PREPROCESSING_VERSION =
+  'visible-crop-v2-shallow-banner-downscaled-4mp';
 
 export const OCR_PREPROCESSING_VERSIONS = Object.freeze([
   OCR_NATIVE_PREPROCESSING_VERSION,
   OCR_SHALLOW_BANNER_NATIVE_PREPROCESSING_VERSION,
   OCR_SHALLOW_BANNER_PREPROCESSING_VERSION,
+  OCR_DOWNSCALED_PREPROCESSING_VERSION,
+  OCR_SHALLOW_BANNER_DOWNSCALED_PREPROCESSING_VERSION,
 ] as const);
 
 export type OcrPreprocessingVersion =
@@ -23,7 +29,7 @@ export const SHALLOW_BANNER_UPSCALE = 2;
 export interface OcrPreprocessingPlan {
   readonly width: number;
   readonly height: number;
-  readonly scale: 1 | 2;
+  readonly scale: number;
   readonly version: OcrPreprocessingVersion;
 }
 
@@ -42,12 +48,20 @@ export function selectOcrPreprocessingPlan(
   if (
     !isPositiveSafeInteger(width) ||
     !isPositiveSafeInteger(height) ||
-    !isPositiveSafeInteger(maxPixels) ||
-    width > MAX_OCR_BITMAP_DIMENSION ||
-    height > MAX_OCR_BITMAP_DIMENSION ||
-    width * height > maxPixels
+    !isPositiveSafeInteger(maxPixels)
   ) return undefined;
   const shallowBanner = isShallowBannerGeometry(cssWidth, cssHeight);
+  const bounded = fitWithinOcrLimits(width, height, maxPixels);
+  if (!bounded) return undefined;
+  if (bounded.width !== width || bounded.height !== height) {
+    return Object.freeze({
+      ...bounded,
+      scale: bounded.width / width,
+      version: shallowBanner
+        ? OCR_SHALLOW_BANNER_DOWNSCALED_PREPROCESSING_VERSION
+        : OCR_DOWNSCALED_PREPROCESSING_VERSION,
+    });
+  }
   const native = Object.freeze({
     width,
     height,
@@ -79,12 +93,39 @@ export function selectOcrPreprocessingPlan(
   });
 }
 
+function fitWithinOcrLimits(
+  width: number,
+  height: number,
+  maxPixels: number,
+): { readonly width: number; readonly height: number } | undefined {
+  const area = width * height;
+  if (!Number.isSafeInteger(area) || area < 1) return undefined;
+  const factor = Math.min(
+    1,
+    MAX_OCR_BITMAP_DIMENSION / width,
+    MAX_OCR_BITMAP_DIMENSION / height,
+    Math.sqrt(maxPixels / area),
+  );
+  if (!Number.isFinite(factor) || factor <= 0) return undefined;
+  let outputWidth = Math.max(1, Math.floor(width * factor));
+  let outputHeight = Math.max(1, Math.floor(height * factor));
+  while (outputWidth * outputHeight > maxPixels) {
+    if (outputWidth >= outputHeight) outputWidth -= 1;
+    else outputHeight -= 1;
+  }
+  return outputWidth <= MAX_OCR_BITMAP_DIMENSION &&
+      outputHeight <= MAX_OCR_BITMAP_DIMENSION
+    ? Object.freeze({ width: outputWidth, height: outputHeight })
+    : undefined;
+}
+
 /** Use banner segmentation only when the acquisition profile classified it. */
 export function isTesseractBannerPreprocessingVersion(
   value: OcrPreprocessingVersion,
 ): boolean {
   return value === OCR_SHALLOW_BANNER_NATIVE_PREPROCESSING_VERSION ||
-    value === OCR_SHALLOW_BANNER_PREPROCESSING_VERSION;
+    value === OCR_SHALLOW_BANNER_PREPROCESSING_VERSION ||
+    value === OCR_SHALLOW_BANNER_DOWNSCALED_PREPROCESSING_VERSION;
 }
 
 export function readOcrPreprocessingVersion(

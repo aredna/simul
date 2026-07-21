@@ -47,6 +47,7 @@ export class ImageRecognitionCoordinator {
   readonly #clientId: string;
   readonly #maxCacheEntries: number;
   readonly #cache = new Map<string, ImageTextResult>();
+  readonly #emptyConfirmations = new Map<string, ImageTextResult>();
 
   constructor(private readonly environment: ImageRecognitionCoordinatorEnvironment) {
     this.#clientId = environment.clientId ?? crypto.randomUUID();
@@ -129,7 +130,18 @@ export class ImageRecognitionCoordinator {
         return { status: 'complete', result: acceptable, cacheHit: false };
       }
       if (lastEmptyResult) {
-        this.#remember(cacheKey, lastEmptyResult);
+        if (this.#emptyConfirmations.has(cacheKey)) {
+          this.#emptyConfirmations.delete(cacheKey);
+          this.#remember(cacheKey, lastEmptyResult);
+        } else {
+          this.#emptyConfirmations.set(cacheKey, lastEmptyResult);
+          while (this.#emptyConfirmations.size > this.#maxCacheEntries) {
+            const oldest = this.#emptyConfirmations.keys().next().value as
+              string | undefined;
+            if (!oldest) break;
+            this.#emptyConfirmations.delete(oldest);
+          }
+        }
         return {
           status: 'complete',
           result: lastEmptyResult,
@@ -144,9 +156,11 @@ export class ImageRecognitionCoordinator {
 
   clear(): void {
     this.#cache.clear();
+    this.#emptyConfirmations.clear();
   }
 
   #remember(cacheKey: string, result: ImageTextResult): void {
+    this.#emptyConfirmations.delete(cacheKey);
     this.#cache.delete(cacheKey);
     this.#cache.set(cacheKey, result);
     while (this.#cache.size > this.#maxCacheEntries) {

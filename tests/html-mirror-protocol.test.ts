@@ -7,6 +7,8 @@ import {
   readHtmlMirrorSourceMessage,
 } from '../lib/replica/html-mirror-protocol';
 import {
+  MAX_HTML_MIRROR_BYTES,
+  createHtmlMirrorReadBudget,
   htmlMirrorJsonBytes,
   readHtmlMirrorNode,
   sanitizeCss,
@@ -93,6 +95,122 @@ describe('isolated HTML sanitizer and protocol', () => {
         }],
       }],
     })).toBeUndefined();
+  });
+
+  it('carries only canonical hidden/source hints and blanks a broken control icon alt', () => {
+    const { document, window } = parseHTML(`<!doctype html><html><body>
+      <button><img id="control" alt="Vote" width="24" height="24"><faceplate-screen-reader-content>Vote</faceplate-screen-reader-content></button>
+      <button><img id="large-control" alt="Card illustration" width="24" height="24"></button>
+      <article><img id="article" alt="Article illustration"><span>normal small text</span></article>
+      <img id="responsive" src="/fallback.jpg" srcset="/selected.jpg 2x">
+    </body></html>`);
+    Object.defineProperty(document, 'baseURI', {
+      value: 'https://example.test/feed/',
+    });
+    const control = document.querySelector('#control')!;
+    Object.defineProperties(control, {
+      complete: { value: true },
+      naturalWidth: { value: 0 },
+      naturalHeight: { value: 0 },
+    });
+    const largeControl = document.querySelector('#large-control')!;
+    Object.defineProperties(largeControl, {
+      complete: { value: true },
+      naturalWidth: { value: 0 },
+      naturalHeight: { value: 0 },
+      getBoundingClientRect: {
+        value: () => ({ width: 1200, height: 761 }),
+      },
+    });
+    const responsive = document.querySelector('#responsive')!;
+    Object.defineProperty(responsive, 'currentSrc', {
+      value: 'https://example.test/selected.jpg',
+    });
+    Object.defineProperty(window, 'getComputedStyle', {
+      value: (element: Element) => element.localName ===
+          'faceplate-screen-reader-content'
+        ? {
+            position: 'absolute', overflow: 'hidden', overflowX: 'hidden',
+            overflowY: 'hidden', clip: 'rect(1px, 1px, 1px, 1px)',
+            clipPath: 'inset(50%)', width: '1px', height: '1px',
+          }
+        : {
+            position: 'static', overflow: 'visible', overflowX: 'visible',
+            overflowY: 'visible', clip: 'auto', clipPath: 'none',
+            width: 'auto', height: 'auto',
+          },
+    });
+
+    const graph = sanitizeSourceDocument(
+      document,
+      window as unknown as Window,
+      new WeakNodeIdRegistry(),
+    );
+    const serialized = JSON.stringify(graph);
+
+    expect(serialized.match(/"visuallyHidden":true/gu)).toHaveLength(1);
+    expect(serialized).toContain('normal small text');
+    expect(serialized).toContain('["alt",""]');
+    expect(serialized).toContain('Card illustration');
+    expect(serialized).toContain('Article illustration');
+    expect(serialized).toContain(
+      '"selectedImageSource":"https://example.test/selected.jpg"',
+    );
+    expect(readHtmlMirrorNode(graph?.root)).toBeDefined();
+  });
+
+  it('rejects malformed live presentation hints instead of dropping them', () => {
+    const patchIdentity = createReplicaIdentity({
+      sessionId: 'hint-validation', pageEpoch: 1, generation: 1,
+      documentId: 'hint-document', frameId: 0, sequence: 1,
+    });
+    const base = {
+      kind: 'attributes', nodeId: 7, tagName: 'img', attributes: [],
+    } as const;
+
+    expect(createHtmlMirrorPatch(patchIdentity, 1, 1, [{
+      ...base,
+      visuallyHidden: false,
+    } as unknown as Parameters<typeof createHtmlMirrorPatch>[3][number]]))
+      .toBeUndefined();
+    expect(createHtmlMirrorPatch(patchIdentity, 1, 1, [{
+      ...base,
+      selectedImageSource: 7,
+    } as unknown as Parameters<typeof createHtmlMirrorPatch>[3][number]]))
+      .toBeUndefined();
+  });
+
+  it('charges selected image sources to source and receiver budgets', () => {
+    const longSource = `https://example.test/${'a'.repeat(180)}`;
+    const withoutHintBudget = createHtmlMirrorReadBudget();
+    withoutHintBudget.bytes = MAX_HTML_MIRROR_BYTES - 100;
+    expect(readHtmlMirrorNode({
+      kind: 'element', id: 1, namespace: 'html', tagName: 'img',
+      attributes: [], children: [],
+    }, new Set(), 0, withoutHintBudget)).toBeDefined();
+
+    const withHintBudget = createHtmlMirrorReadBudget();
+    withHintBudget.bytes = MAX_HTML_MIRROR_BYTES - 100;
+    expect(readHtmlMirrorNode({
+      kind: 'element', id: 1, namespace: 'html', tagName: 'img',
+      attributes: [], children: [], selectedImageSource: longSource,
+    }, new Set(), 0, withHintBudget)).toBeUndefined();
+
+    const { document, window } = parseHTML(
+      '<!doctype html><html><body>' +
+      Array.from({ length: 9 }, (_, index) => `<img id="image-${index}">`).join('') +
+      '</body></html>',
+    );
+    for (const image of document.querySelectorAll('img')) {
+      Object.defineProperty(image, 'currentSrc', {
+        value: `data:image/png;base64,${'A'.repeat(500_000)}`,
+      });
+    }
+    expect(() => sanitizeSourceDocument(
+      document,
+      window as unknown as Window,
+      new WeakNodeIdRegistry(),
+    )).toThrow('HTML mirror budget exceeded.');
   });
 
   it('uses the first recognized sensitive role token as the privacy fallback', () => {

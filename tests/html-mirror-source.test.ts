@@ -170,6 +170,65 @@ describe('HtmlMirrorSourceSession', () => {
     expect(patchJson).not.toContain('https://example.test/AAAA');
   });
 
+  it('refreshes image state on load/error and currentSrc changes without looping', () => {
+    const fixture = sourceFixture(
+      '<main><img id="light" src="/fallback.jpg"><x-card id="host"></x-card></main>',
+    );
+    const light = fixture.document.querySelector('#light')!;
+    const host = fixture.document.querySelector('#host')!;
+    const shadow = host.attachShadow({ mode: 'open' });
+    Object.defineProperty(shadow, 'mode', { value: 'open' });
+    const shadowImage = fixture.document.createElement('img');
+    shadowImage.setAttribute('src', '/shadow-fallback.jpg');
+    shadow.append(shadowImage);
+    Object.defineProperty(light, 'currentSrc', {
+      configurable: true,
+      value: 'https://example.test/fallback.jpg',
+    });
+    Object.defineProperty(shadowImage, 'currentSrc', {
+      configurable: true,
+      value: 'https://example.test/shadow-fallback.jpg',
+    });
+
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+
+    light.dispatchEvent(new fixture.window.Event('error', { bubbles: true }));
+    fixture.flushFrame();
+    expect(fixture.patches().at(-1)?.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'attributes' }),
+    ]));
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
+
+    Object.defineProperty(shadowImage, 'currentSrc', {
+      configurable: true,
+      value: 'https://example.test/shadow-selected.jpg',
+    });
+    shadowImage.dispatchEvent(new fixture.window.Event('load', { bubbles: true }));
+    fixture.flushFrame();
+    expect(JSON.stringify(fixture.patches().at(-1))).toContain(
+      'https://example.test/shadow-selected.jpg',
+    );
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 2));
+
+    Object.defineProperty(light, 'currentSrc', {
+      configurable: true,
+      value: 'https://example.test/light-selected.jpg',
+    });
+    fixture.window.dispatchEvent(new fixture.window.Event('resize'));
+    fixture.flushFrame();
+    expect(JSON.stringify(fixture.patches().at(-1))).toContain(
+      'https://example.test/light-selected.jpg',
+    );
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 3));
+
+    fixture.window.dispatchEvent(new fixture.window.Event('resize'));
+    fixture.flushFrame();
+    expect(fixture.patches().at(-1)?.operations.every(
+      ({ kind }) => kind === 'dimensions',
+    )).toBe(true);
+  });
+
   it('ignores mutations below an intentionally omitted mirror ancestor', () => {
     const fixture = sourceFixture('<main>shown</main><script>omitted secret</script>');
     fixture.start();
@@ -403,6 +462,7 @@ function sourceFixture(markup: string) {
   });
   return {
     document,
+    window,
     frames,
     observed,
     port,

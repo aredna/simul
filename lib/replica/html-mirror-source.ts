@@ -19,6 +19,7 @@ import {
   sanitizeSourceAttributes,
   sanitizeSourceChildren,
   sanitizeSourceDocument,
+  sanitizeSourceElementHints,
   sanitizeSourceSubtree,
   type HtmlMirrorIdRegistry,
 } from './html-mirror-sanitizer';
@@ -173,6 +174,8 @@ const MAX_SHADOW_HOSTS_PER_TICK = 1_000;
 const MAX_STYLE_SHEETS_PER_TICK = 512;
 const MAX_STYLE_RULES_PER_TICK = 25_000;
 const MAX_STYLE_CHARACTERS_PER_TICK = 1024 * 1024;
+const MAX_MIRRORED_IMAGE_CANDIDATES = 4_000;
+const MAX_IMAGE_EVENT_ROOTS = 4_000;
 
 export class HtmlMirrorSourceSession {
   readonly #sessionId: string;
@@ -185,6 +188,11 @@ export class HtmlMirrorSourceSession {
   #pendingDimensions = false;
   #pendingOverflow = false;
   #mirroredNodes = new WeakSet<Node>();
+  #mirroredImageCandidates: Element[] = [];
+  #knownMirroredImageCandidates = new WeakSet<Element>();
+  #selectedImageSources = new WeakMap<Element, string>();
+  #imageRefreshRequested = false;
+  readonly #imageEventRoots = new Set<Document | ShadowRoot>();
   readonly #observedShadowRoots = new WeakSet<ShadowRoot>();
   #shadowHostCandidates: Element[] = [];
   #knownShadowHostCandidates = new WeakSet<Element>();
@@ -217,7 +225,11 @@ export class HtmlMirrorSourceSession {
     this.#resizeObserver?.disconnect();
     this.#resizeObserver = undefined;
     this.environment.window.removeEventListener('resize', this.#onLayoutChange);
-    this.environment.document.removeEventListener('load', this.#onLayoutChange, true);
+    for (const root of this.#imageEventRoots) {
+      root.removeEventListener('load', this.#onCapturedResourceLoad, true);
+      root.removeEventListener('error', this.#onCapturedResourceError, true);
+    }
+    this.#imageEventRoots.clear();
     this.environment.document.fonts?.removeEventListener?.(
       'loadingdone',
       this.#onFontLoadingDone,
@@ -231,6 +243,10 @@ export class HtmlMirrorSourceSession {
     this.#shadowHostCandidates = [];
     this.#knownShadowHostCandidates = new WeakSet<Element>();
     this.#shadowDiscoveryCursor = 0;
+    this.#mirroredImageCandidates = [];
+    this.#knownMirroredImageCandidates = new WeakSet<Element>();
+    this.#selectedImageSources = new WeakMap<Element, string>();
+    this.#imageRefreshRequested = false;
     this.#adoptedStyleSignatures = new WeakMap<object, string>();
     this.#clearPending();
     if (disconnect) {
@@ -339,7 +355,7 @@ export class HtmlMirrorSourceSession {
         subtree: true,
       });
       this.environment.window.addEventListener('resize', this.#onLayoutChange);
-      this.environment.document.addEventListener('load', this.#onLayoutChange, true);
+      this.#observeImageEvents(this.environment.document);
       this.environment.document.fonts?.addEventListener?.(
         'loadingdone',
         this.#onFontLoadingDone,
@@ -399,6 +415,10 @@ export class HtmlMirrorSourceSession {
       this.#shadowHostCandidates = [];
       this.#knownShadowHostCandidates = new WeakSet<Element>();
       this.#shadowDiscoveryCursor = 0;
+      this.#mirroredImageCandidates = [];
+      this.#knownMirroredImageCandidates = new WeakSet<Element>();
+      this.#selectedImageSources = new WeakMap<Element, string>();
+      this.#imageRefreshRequested = false;
       this.#adoptedStyleSignatures = new WeakMap<object, string>();
       this.#adoptedStyleSignatures.set(
         this.environment.document,
@@ -471,6 +491,11 @@ export class HtmlMirrorSourceSession {
       ));
       return;
     }
+    if (this.#imageRefreshRequested) {
+      this.#imageRefreshRequested = false;
+      this.#refreshChangedImageSources();
+      if (this.#paused) return;
+    }
     const childrenTargets = minimizeTargets(this.#pendingChildren);
     const covered = (node: Node): boolean =>
       childrenTargets.some((target) => target !== node && target.contains(node));
@@ -500,11 +525,22 @@ export class HtmlMirrorSourceSession {
           this.environment.document.baseURI,
         );
         if (!attributes) throw new Error('Unsafe attributes patch.');
+        const hints = sanitizeSourceElementHints(
+          target,
+          this.environment.document.baseURI,
+        );
+        if (target.localName.toLowerCase() === 'img') {
+          this.#selectedImageSources.set(
+            target,
+            hints.selectedImageSource ?? '',
+          );
+        }
         operations.push(Object.freeze({
           kind: 'attributes',
           nodeId: this.environment.registry.peekId(target) as number,
           tagName: target.localName.toLowerCase(),
           attributes,
+          ...hints,
         }));
       }
       for (const target of this.#pendingText) {
@@ -592,11 +628,22 @@ export class HtmlMirrorSourceSession {
   readonly #onLayoutChange = (): void => {
     if (this.#disposed || !this.#identity) return;
     this.#observeOpenShadowRoots(this.environment.document.documentElement);
+    this.#imageRefreshRequested = true;
     this.#pendingDimensions = true;
     this.#scheduleFlush();
   };
 
   readonly #onFontLoadingDone = (): void => this.#onLayoutChange();
+
+  readonly #onCapturedResourceLoad = (event: Event): void => {
+    this.#onLayoutChange();
+    this.#queueCapturedImageAttributeRefresh(event);
+  };
+
+  readonly #onCapturedResourceError = (event: Event): void => {
+    this.#onLayoutChange();
+    this.#queueCapturedImageAttributeRefresh(event);
+  };
 
   #scheduleFlush(): void {
     if (this.#paused || this.#frame !== undefined || this.#disposed) return;
@@ -634,7 +681,15 @@ export class HtmlMirrorSourceSession {
     const source = this.environment.registry.getNode(node.id);
     if (source) {
       this.#mirroredNodes.add(source);
-      if (source instanceof Element) this.#registerShadowHostCandidate(source);
+      if (source instanceof Element) {
+        this.#registerShadowHostCandidate(source);
+        if (node.kind === 'element' && node.tagName === 'img') {
+          this.#registerMirroredImageCandidate(
+            source,
+            node.selectedImageSource ?? '',
+          );
+        }
+      }
     }
     if (node.kind === 'text') return;
     if (node.shadowRoot) {
@@ -659,6 +714,81 @@ export class HtmlMirrorSourceSession {
     if (this.#shadowHostCandidates.length >= MAX_HTML_MIRROR_NODES) return;
     this.#knownShadowHostCandidates.add(element);
     this.#shadowHostCandidates.push(element);
+  }
+
+  #registerMirroredImageCandidate(element: Element, selectedSource: string): void {
+    this.#selectedImageSources.set(element, selectedSource);
+    if (this.#knownMirroredImageCandidates.has(element)) return;
+    if (
+      this.#mirroredImageCandidates.length >= MAX_MIRRORED_IMAGE_CANDIDATES
+    ) this.#compactMirroredImageCandidates();
+    if (
+      this.#mirroredImageCandidates.length >= MAX_MIRRORED_IMAGE_CANDIDATES
+    ) return;
+    this.#knownMirroredImageCandidates.add(element);
+    this.#mirroredImageCandidates.push(element);
+  }
+
+  #compactMirroredImageCandidates(): void {
+    const retained = this.#mirroredImageCandidates.filter(
+      (element) => element.isConnected && this.#mirroredNodes.has(element),
+    );
+    this.#mirroredImageCandidates = retained;
+    this.#knownMirroredImageCandidates = new WeakSet(retained);
+  }
+
+  #refreshChangedImageSources(): void {
+    this.#compactMirroredImageCandidates();
+    for (const image of this.#mirroredImageCandidates) {
+      let selectedSource: string;
+      try {
+        selectedSource = sanitizeSourceElementHints(
+          image,
+          this.environment.document.baseURI,
+        ).selectedImageSource ?? '';
+      } catch {
+        continue;
+      }
+      if (selectedSource === this.#selectedImageSources.get(image)) continue;
+      this.#queuePending(this.#pendingAttributes, image);
+      if (this.#pendingOverflow) return;
+    }
+  }
+
+  #queueCapturedImageAttributeRefresh(event: Event): void {
+    const target = event.target;
+    if (
+      !(target instanceof Element) ||
+      target.localName.toLowerCase() !== 'img' ||
+      !belongsToSourceDocument(target, this.environment.document) ||
+      !target.isConnected ||
+      !this.#mirroredNodes.has(target)
+    ) return;
+    this.#queuePending(this.#pendingAttributes, target);
+    this.#pendingDimensions = true;
+    this.#scheduleFlush();
+  }
+
+  #observeImageEvents(root: Document | ShadowRoot): void {
+    if (this.#imageEventRoots.has(root)) return;
+    if (this.#imageEventRoots.size >= MAX_IMAGE_EVENT_ROOTS) {
+      this.#compactImageEventRoots();
+    }
+    if (this.#imageEventRoots.size >= MAX_IMAGE_EVENT_ROOTS) return;
+    this.#imageEventRoots.add(root);
+    root.addEventListener('load', this.#onCapturedResourceLoad, true);
+    root.addEventListener('error', this.#onCapturedResourceError, true);
+  }
+
+  #compactImageEventRoots(): void {
+    for (const root of this.#imageEventRoots) {
+      if (root === this.environment.document || ('host' in root && root.host.isConnected)) {
+        continue;
+      }
+      root.removeEventListener('load', this.#onCapturedResourceLoad, true);
+      root.removeEventListener('error', this.#onCapturedResourceError, true);
+      this.#imageEventRoots.delete(root);
+    }
   }
 
   #compactShadowHostCandidates(): void {
@@ -760,6 +890,7 @@ export class HtmlMirrorSourceSession {
   }
 
   #observeOpenShadowRoot(shadow: ShadowRoot): void {
+    this.#observeImageEvents(shadow);
     if (!this.#observedShadowRoots.has(shadow)) {
       this.#observedShadowRoots.add(shadow);
       this.#observer?.observe(shadow, {

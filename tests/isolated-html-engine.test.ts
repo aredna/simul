@@ -572,6 +572,218 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(head?.textContent).toContain('.hero{color:red}');
   });
 
+  it('settles a Reddit-shaped three-column candidate and keeps accessibility labels hidden', async () => {
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: {
+          kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+          attributes: [], children: [
+            { kind: 'element', id: 2, namespace: 'html', tagName: 'head', attributes: [], children: [
+              {
+                kind: 'element', id: 4, namespace: 'html', tagName: 'link',
+                attributes: [['rel', 'stylesheet'], ['href', 'https://static.example.test/shell.css']],
+                children: [],
+              },
+              {
+                kind: 'element', id: 14, namespace: 'html', tagName: 'link',
+                attributes: [['rel', 'stylesheet'], ['href', 'https://static.example.test/failing.css']],
+                children: [],
+              },
+            ] },
+            { kind: 'element', id: 3, namespace: 'html', tagName: 'body', attributes: [], children: [
+              { kind: 'element', id: 5, namespace: 'html', tagName: 'aside', attributes: [], children: [
+                { kind: 'text', id: 6, text: 'left rail', translatable: true },
+              ] },
+              { kind: 'element', id: 7, namespace: 'html', tagName: 'main', attributes: [], children: [
+                { kind: 'text', id: 8, text: 'center content', translatable: true },
+                { kind: 'element', id: 9, namespace: 'html', tagName: 'faceplate-screen-reader-content',
+                  attributes: [], visuallyHidden: true, children: [], shadowRoot: {
+                    id: 10, mode: 'open', children: [
+                      {
+                        kind: 'text', id: 11, text: 'Vote', translatable: true,
+                      },
+                      {
+                        kind: 'element', id: 16, namespace: 'html', tagName: 'link',
+                        attributes: [['rel', 'stylesheet'], ['href', 'https://static.example.test/shadow.css']],
+                        children: [],
+                      },
+                    ], adoptedStyleSheets: [':host{display:block}'],
+                  } },
+                { kind: 'element', id: 15, namespace: 'html', tagName: 'img',
+                  attributes: [['src', 'https://static.example.test/fallback.jpg'], ['srcset', 'https://static.example.test/fallback@2x.jpg 2x']],
+                  selectedImageSource: 'https://static.example.test/selected.jpg', children: [] },
+              ] },
+              { kind: 'element', id: 12, namespace: 'html', tagName: 'aside', attributes: [], children: [] },
+            ] },
+          ],
+        },
+        adoptedStyleSheets: [],
+        captureMs: 1,
+        viewportWidth: 1200,
+        viewportHeight: 800,
+        documentWidth: 1200,
+        documentHeight: 1600,
+      },
+    )!;
+    const stream = new FakeHtmlStream(checkpoint);
+    const host = new FakePresentationHost();
+    const infos: IsolatedMirrorInfo[] = [];
+    let replicaDocument: Document | undefined;
+    const engine = new IsolatedHtmlReplicaEngine({
+      presentationHost: host,
+      openStream: async () => stream,
+      styleSettleDeadlineMs: 1_000,
+      initializeIframe: async (iframe, shell) => {
+        const parsed = parseHTML(shell);
+        replicaDocument = parsed.document;
+        Object.defineProperty(iframe, 'contentDocument', { value: parsed.document });
+        return parsed.document;
+      },
+      onInfo: (info) => infos.push(info),
+    });
+
+    const running = engine.run(request);
+    await vi.waitFor(() => expect(
+      replicaDocument?.querySelector('link[rel="stylesheet"]'),
+    ).toBeTruthy());
+    const links = [...replicaDocument!.querySelectorAll('link')];
+    const loadEvent = replicaDocument!.createEvent('Event');
+    loadEvent.initEvent('load', false, false);
+    links[0]?.dispatchEvent(loadEvent);
+    const errorEvent = replicaDocument!.createEvent('Event');
+    errorEvent.initEvent('error', false, false);
+    links[1]?.dispatchEvent(errorEvent);
+    const shadowLink = replicaDocument!
+      .querySelector('faceplate-screen-reader-content')
+      ?.shadowRoot?.querySelector('link');
+    shadowLink?.dispatchEvent(loadEvent);
+    await expect(running).resolves.toMatchObject({ status: 'complete' });
+
+    const body = host.iframe?.contentDocument?.body;
+    expect(body?.textContent).toContain('left rail');
+    expect(body?.textContent).toContain('center content');
+    const hidden = body?.querySelector('faceplate-screen-reader-content') as
+      HTMLElement | null;
+    expect(hidden?.getAttribute('data-simul-visually-hidden')).toBe('v1');
+    expect(hidden?.style.width).toBe('1px');
+    expect(body?.querySelector('main')?.hasAttribute('data-simul-visually-hidden'))
+      .toBe(false);
+    const responsive = body?.querySelector('img');
+    expect(responsive?.getAttribute('src'))
+      .toBe('https://static.example.test/selected.jpg');
+    expect(responsive?.hasAttribute('srcset')).toBe(false);
+    expect(infos.find(({ stage }) => stage === 'checkpoint')).toMatchObject({
+      openShadowRootCount: 1,
+      adoptedStyleCount: 1,
+      visuallyHiddenCount: 1,
+      selectedImageSourceCount: 1,
+      stylesheetLinkCount: 3,
+      stylesheetLoadedCount: 2,
+      stylesheetErrorCount: 1,
+      stylesheetTimedOutCount: 0,
+    });
+
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [{ kind: 'children', nodeId: 12, children: [{
+        kind: 'text', id: 13, text: 'late right rail', translatable: true,
+      }] }],
+    )!);
+    expect(body?.textContent).toContain('late right rail');
+  });
+
+  it('rechecks stylesheet readiness after installing load listeners', async () => {
+    const stream = new FakeHtmlStream(makeStylesheetCheckpoint());
+    const host = new FakePresentationHost();
+    const infos: IsolatedMirrorInfo[] = [];
+    let sheetReads = 0;
+    const engine = new IsolatedHtmlReplicaEngine({
+      presentationHost: host,
+      openStream: async () => stream,
+      styleSettleDeadlineMs: 100,
+      initializeIframe: async (iframe, shell) => {
+        const { document } = parseHTML(shell);
+        const createElementNS = document.createElementNS.bind(document);
+        Object.defineProperty(document, 'createElementNS', {
+          configurable: true,
+          value: (namespace: string, tagName: string) => {
+            const element = createElementNS(namespace, tagName);
+            if (tagName === 'link') {
+              Object.defineProperty(element, 'sheet', {
+                configurable: true,
+                get: () => ++sheetReads >= 2 ? {} : null,
+              });
+            }
+            return element;
+          },
+        });
+        Object.defineProperty(iframe, 'contentDocument', { value: document });
+        return document;
+      },
+      onInfo: (info) => infos.push(info),
+    });
+
+    await expect(engine.run(request)).resolves.toMatchObject({ status: 'complete' });
+    expect(sheetReads).toBe(2);
+    expect(infos.find(({ stage }) => stage === 'checkpoint')).toMatchObject({
+      stylesheetLinkCount: 1,
+      stylesheetLoadedCount: 1,
+      stylesheetErrorCount: 0,
+      stylesheetTimedOutCount: 0,
+    });
+  });
+
+  it('uses one absolute style deadline for both paint waits', async () => {
+    vi.useFakeTimers();
+    try {
+      const stream = new FakeHtmlStream(makeStylesheetCheckpoint());
+      const host = new FakePresentationHost();
+      const infos: IsolatedMirrorInfo[] = [];
+      let paintRequests = 0;
+      const engine = new IsolatedHtmlReplicaEngine({
+        presentationHost: host,
+        openStream: async () => stream,
+        styleSettleDeadlineMs: 20,
+        initializeIframe: async (iframe, shell) => {
+          const { document, window } = parseHTML(shell);
+          Object.defineProperties(window, {
+            requestAnimationFrame: {
+              configurable: true,
+              value: () => {
+                paintRequests += 1;
+                return paintRequests;
+              },
+            },
+            cancelAnimationFrame: { configurable: true, value: () => undefined },
+          });
+          Object.defineProperty(iframe, 'contentDocument', { value: document });
+          return document;
+        },
+        onInfo: (info) => infos.push(info),
+      });
+      let settled = false;
+      const running = engine.run(request).then((result) => {
+        settled = true;
+        return result;
+      });
+
+      await vi.advanceTimersByTimeAsync(0);
+      await vi.advanceTimersByTimeAsync(20);
+      expect(settled).toBe(true);
+      expect(paintRequests).toBe(0);
+      await expect(running).resolves.toMatchObject({ status: 'complete' });
+      expect(infos.find(({ stage }) => stage === 'checkpoint')).toMatchObject({
+        stylesheetLinkCount: 1,
+        stylesheetTimedOutCount: 1,
+      });
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
   it('reconstructs accessible open shadow roots without definitions or scripts', async () => {
     const checkpoint = createHtmlMirrorCheckpoint(
       createReplicaIdentity({ ...identityParts, sequence: 0 }),
@@ -840,6 +1052,34 @@ function makeCheckpoint(
     },
   );
   if (!checkpoint) throw new Error('Fixture checkpoint rejected.');
+  return checkpoint;
+}
+
+function makeStylesheetCheckpoint(): HtmlMirrorCheckpoint {
+  const checkpoint = createHtmlMirrorCheckpoint(
+    createReplicaIdentity({ ...identityParts, sequence: 0 }),
+    {
+      root: {
+        kind: 'element', id: 1, namespace: 'html', tagName: 'html', attributes: [], children: [
+          { kind: 'element', id: 2, namespace: 'html', tagName: 'head', attributes: [], children: [{
+            kind: 'element', id: 5, namespace: 'html', tagName: 'link',
+            attributes: [['rel', 'stylesheet'], ['href', 'https://static.example.test/race.css']],
+            children: [],
+          }] },
+          { kind: 'element', id: 3, namespace: 'html', tagName: 'body', attributes: [], children: [
+            { kind: 'text', id: 4, text: 'styled content', translatable: true },
+          ] },
+        ],
+      },
+      adoptedStyleSheets: [],
+      captureMs: 1,
+      viewportWidth: 800,
+      viewportHeight: 600,
+      documentWidth: 800,
+      documentHeight: 1000,
+    },
+  );
+  if (!checkpoint) throw new Error('Stylesheet fixture checkpoint rejected.');
   return checkpoint;
 }
 

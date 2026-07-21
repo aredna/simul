@@ -9,6 +9,7 @@ import {
 } from '../lib/ocr/providers/tesseract/language-catalog';
 import { normalizeTesseractPage } from '../lib/ocr/providers/tesseract/normalize';
 import {
+  OCR_SHALLOW_BANNER_DOWNSCALED_PREPROCESSING_VERSION,
   OCR_NATIVE_PREPROCESSING_VERSION,
   OCR_SHALLOW_BANNER_NATIVE_PREPROCESSING_VERSION,
   OCR_SHALLOW_BANNER_PREPROCESSING_VERSION,
@@ -124,6 +125,12 @@ describe('packaged Tesseract provider', () => {
       bitmapHeight: 150,
       preprocessingVersion: OCR_SHALLOW_BANNER_NATIVE_PREPROCESSING_VERSION,
     };
+    const downscaledBannerJob: OffscreenOcrJob = {
+      ...job('jpn+jpn_vert'),
+      bitmapWidth: 32_768,
+      bitmapHeight: 32,
+      preprocessingVersion: OCR_SHALLOW_BANNER_DOWNSCALED_PREPROCESSING_VERSION,
+    };
     const nativeMultiLineJob = {
       ...job('jpn+jpn_vert'),
       bitmapWidth: 500,
@@ -141,8 +148,13 @@ describe('packaged Tesseract provider', () => {
       new AbortController().signal,
     );
     await runner.recognize(
-      nativeMultiLineJob,
+      downscaledBannerJob,
       new Blob([new Uint8Array([3])]),
+      new AbortController().signal,
+    );
+    await runner.recognize(
+      nativeMultiLineJob,
+      new Blob([new Uint8Array([4])]),
       new AbortController().signal,
     );
 
@@ -158,7 +170,13 @@ describe('packaged Tesseract provider', () => {
     expect(worker.worker.setParameters).toHaveBeenNthCalledWith(4, {
       tessedit_pageseg_mode: '6',
     }, highDpiBannerJob.jobId);
-    expect(worker.worker.setParameters).toHaveBeenCalledTimes(4);
+    expect(worker.worker.setParameters).toHaveBeenNthCalledWith(5, {
+      tessedit_pageseg_mode: '7',
+    }, downscaledBannerJob.jobId);
+    expect(worker.worker.setParameters).toHaveBeenNthCalledWith(6, {
+      tessedit_pageseg_mode: '6',
+    }, downscaledBannerJob.jobId);
+    expect(worker.worker.setParameters).toHaveBeenCalledTimes(6);
     await runner.dispose();
   });
 

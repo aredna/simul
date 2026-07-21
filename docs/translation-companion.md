@@ -2,13 +2,12 @@
 
 ## Live mirror lifecycle
 
-The extension first executes a masked rrweb checkpoint in Chrome's isolated
-world. The replay iframe is same-origin only, inert, sandboxed, and protected
-from interaction. Ordered live batches are statefully sanitized before replay;
-ACKs advance only after rrweb casts an accepted batch. Gaps recover once through
-a hidden checkpoint and atomic swap while the last good replica stays visible.
-The older allowlisted visual renderer remains the bounded fallback when rrweb
-cannot capture or replay a page.
+The canonical renderer converts the current page into a privacy-sanitized,
+typed DOM graph in Chrome's isolated world. It reconstructs that graph in a
+same-origin-only, inert, scriptless sandbox. Ordered patches are validated
+before application; gaps recover through a staged checkpoint and atomic swap
+while the last good replica stays visible. rrweb remains an explicitly
+selectable experimental renderer, never an automatic fallback.
 
 Source scroll messages are animation-frame throttled and one-way. The mirror
 uses exact scaled CSS-pixel offsets in faithful layout and proportional offsets
@@ -43,18 +42,23 @@ never stored.
 ## Local image text
 
 When explicitly enabled, an exact-document source Port observes ordinary
-top-frame `<img>` elements by rrweb node ID without emitting their URL or text.
+top-frame `<img>` elements by the selected engine's private node ID without
+emitting their URL or text.
 The saved scan policy orders visible/near/background work, and very small
 images are skipped by default. Only stable visible pixels are captured, at no
 more than two viewport captures per second, after matching pre/post document,
-scroll, bounds, and revision. Crops above 4 MP are rejected.
+scroll, bounds, and revision. High-DPI crops are proportionally downscaled
+before OCR so the processed bitmap never exceeds 4 MP; the CSS crop geometry
+is retained for overlay placement.
 
 The offscreen extension page reads a short-lived crop from extension-origin
 storage and runs packaged Tesseract.js 7.0.0 locally. The routed model group is
 chosen from nearest valid element `lang`, explicit From, then detected page
 language. Recognition results stay in a bounded memory cache; the crop is
 deleted after the job and expires after two minutes if cleanup is interrupted.
-Translated line boxes are inert siblings in the replay document. Document,
+An unchanged empty result must be observed twice before it enters the
+recognition cache, and transient capture failures receive only one immediate
+retry. Translated line boxes are inert siblings in the replay document. Document,
 content revision, SHA-256 pixel key, replay lease, pair epoch, replica image,
 and normalized geometry must still match at commit and on refresh.
 
@@ -83,6 +87,39 @@ upgrade. The web platform exposes no general event when an already-defined,
 already-connected host attaches a root later; if that happens without a DOM,
 resize, focus, or load signal, a manual rebuild may be required.
 
+The isolated renderer also carries two narrow source facts that are difficult
+to recover after scripts are disabled: a boolean for the canonical clipped
+1px screen-reader-only pattern and a sanitized selected `currentSrc` for
+responsive images. It does not transport arbitrary computed styles. Candidate
+stylesheets settle through load/error outcomes, two paints, or a short fixed
+deadline before the staged candidate replaces the last good view.
+
+## Reddit-class troubleshooting and submission limits
+
+OCR Diagnostics assigns each attempt an ephemeral job number. Use that number
+to follow capture, bounded retry, recognition, translation, projection, and
+same-lease anchor-rebinding stages. Logs contain only safe dimensions, counts,
+provider names, outcomes, and cache state—never page text, URLs, pixels,
+hashes, or DOM identifiers. Mirror logs similarly report aggregate shadow-root,
+adopted-style, hidden-label, selected-source, stylesheet outcome, and patch
+replacement counts.
+
+Modern component sites can still depend on page JavaScript to define custom
+elements, toggle `:defined`, populate closed shadow roots, expose
+`ElementInternals` state, or virtualize off-screen rails. Simul deliberately
+does not execute that code in the replica. Whole-parent source patches can
+also recreate many nodes even when the visible change is small; a stable-ID
+insert/remove/move protocol remains separate review work. These constraints
+mean the current release improves representable Reddit content but does not
+claim pixel parity.
+
+Useful content-free research for a missing rail or label is whether the source
+element exists, whether its shadow root is open, its adopted stylesheet count,
+whether it matches `:defined`, its computed `display`, `visibility`, `position`,
+`clip`, and `clip-path`, and its bounding rectangle. For a missing image overlay,
+record the OCR job stages and safe rendered/bitmap dimensions. Do not share
+account text, URLs containing private tokens, or page HTML.
+
 ## Detached window
 
 Chrome has no API to detach a native side panel. The ↗ control instead creates
@@ -99,6 +136,11 @@ modes, language changes, settings persistence, detached-window binding, and
 composer cancellation/copy. Check the supplied Reddit article for late left
 and right rails, public labels, and open-shadow content. Also confirm form
 values remain absent and the source DOM is unchanged.
+
+For image OCR, also test the supplied 1206x761 Reddit media image at high-DPI
+display scale. It should reach recognition through a bitmap at or below 4 MP,
+and its overlay should remain when a live mirror patch replaces the replica
+`img` under the same logical node and replay lease.
 
 Enable image translation and exercise English/Japanese plus Spanish, Chinese,
 Korean, Russian, and Arabic images. Scroll/zoom, change target language,

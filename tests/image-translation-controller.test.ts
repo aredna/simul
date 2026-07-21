@@ -1,7 +1,10 @@
 import { parseHTML } from 'linkedom';
 import { describe, expect, it, vi } from 'vitest';
 
-import type { ImageRecognitionCoordinator } from '../lib/ocr/image-analysis-coordinator';
+import type {
+  ImageRecognitionCoordinator,
+  ImageRecognitionResult,
+} from '../lib/ocr/image-analysis-coordinator';
 import type { SourceImageChange, SourceImageDescriptor } from '../lib/ocr/contracts';
 import {
   ImageTranslationController,
@@ -294,12 +297,354 @@ describe('ImageTranslationController', () => {
 
     await vi.waitFor(() => expect(diagnostics).toContainEqual({
       stage: 'capture-deferred',
+      ordinal: 1,
       reason: 'permission',
       renderedWidth: 200,
       renderedHeight: 100,
     }));
     await new Promise((resolve) => setTimeout(resolve, 5));
     expect(acquire).toHaveBeenCalledOnce();
+    controller.dispose();
+  });
+
+  it('bounds a transient capture retry and requires two unchanged empty OCR results', async () => {
+    const { document } = parseHTML('<html><body><img></body></html>');
+    const image = document.querySelector('img') as unknown as HTMLImageElement;
+    const pixels = {
+      descriptor,
+      pixelHash: 'ad'.repeat(32),
+      encoded: new Blob([new Uint8Array([1])], { type: 'image/png' }),
+      bitmapWidth: 200,
+      bitmapHeight: 100,
+      cropOffsetXCss: 0,
+      cropOffsetYCss: 0,
+      cropWidthCss: 200,
+      cropHeightCss: 100,
+      renderedWidthCss: 200,
+      renderedHeightCss: 100,
+      nearestElementLanguage: 'en' as const,
+    };
+    const acquire = vi.fn()
+      .mockResolvedValueOnce({ status: 'deferred', reason: 'unstable' })
+      .mockResolvedValue({ status: 'ready', pixels });
+    const recognize = vi.fn<() => Promise<ImageRecognitionResult>>(async () => ({
+      status: 'complete' as const,
+      cacheHit: false,
+      result: {
+        providerId: 'tesseract' as const,
+        bitmapWidth: 200,
+        bitmapHeight: 100,
+        transcript: '',
+        regions: [],
+      },
+    }));
+    const diagnostics: unknown[] = [];
+    const controller = new ImageTranslationController({
+      openSource: async (_request, onChange) => {
+        queueMicrotask(() => onChange({ kind: 'upsert', descriptor }));
+        return { measure: vi.fn(), dispose: vi.fn() };
+      },
+      createPixelCoordinator: () => ({ acquire }) as unknown as PixelAcquisitionCoordinator,
+      createRecognitionCoordinator: () => ({
+        recognize,
+        clear: vi.fn(),
+      }) as unknown as ImageRecognitionCoordinator,
+      resolveAnchor: () => ({
+        document: sourceDocument,
+        replayLease: 1,
+        image,
+        iframe: { contentDocument: document } as HTMLIFrameElement,
+      }),
+      translationProvider: {
+        availability: async () => 'available',
+        createSession: vi.fn(),
+      },
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      projector: testProjectorEnvironment(),
+    });
+    controller.configure({
+      enabled: true,
+      scanPolicy: 'visible-only',
+      skipSmallImages: false,
+      providerOrder: ['tesseract'],
+      sourceLanguage: 'en',
+      targetLanguage: 'ja',
+      translationIdle: true,
+    });
+    controller.activateReplica(request, 3, 1);
+
+    await vi.waitFor(() => expect(diagnostics).toContain('no-text-found'));
+    expect(acquire).toHaveBeenCalledTimes(3);
+    expect(recognize).toHaveBeenCalledTimes(2);
+    expect(diagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        stage: 'job-progress', status: 'capture-retry', attempt: 1,
+      }),
+      expect.objectContaining({
+        stage: 'job-progress', status: 'no-text-retry', attempt: 1,
+      }),
+    ]));
+    controller.dispose();
+  });
+
+  it('settles after one transient capture retry and resets it after a non-transient result', async () => {
+    const { document } = parseHTML('<html><body><img></body></html>');
+    const image = document.querySelector('img') as unknown as HTMLImageElement;
+    const acquire = vi.fn()
+      .mockResolvedValueOnce({ status: 'deferred', reason: 'unstable' })
+      .mockResolvedValueOnce({ status: 'deferred', reason: 'api' })
+      .mockResolvedValueOnce({ status: 'deferred', reason: 'permission' })
+      .mockResolvedValueOnce({ status: 'deferred', reason: 'unstable' })
+      .mockResolvedValueOnce({ status: 'deferred', reason: 'permission' });
+    const diagnostics: unknown[] = [];
+    const controller = new ImageTranslationController({
+      openSource: async (_request, onChange) => {
+        queueMicrotask(() => onChange({ kind: 'upsert', descriptor }));
+        return { measure: vi.fn(), dispose: vi.fn() };
+      },
+      createPixelCoordinator: () => ({ acquire }) as unknown as PixelAcquisitionCoordinator,
+      createRecognitionCoordinator: vi.fn(),
+      resolveAnchor: () => ({
+        document: sourceDocument,
+        replayLease: 1,
+        image,
+        iframe: { contentDocument: document } as HTMLIFrameElement,
+      }),
+      translationProvider: {
+        availability: async () => 'available',
+        createSession: vi.fn(),
+      },
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      projector: testProjectorEnvironment(),
+    });
+    controller.configure({
+      enabled: true,
+      scanPolicy: 'visible-only',
+      skipSmallImages: false,
+      providerOrder: ['tesseract'],
+      sourceLanguage: 'en',
+      targetLanguage: 'ja',
+      translationIdle: true,
+    });
+    controller.activateReplica(request, 3, 1);
+
+    await vi.waitFor(() => expect(diagnostics).toContainEqual(
+      expect.objectContaining({
+        stage: 'job-progress',
+        status: 'capture-retry-exhausted',
+        attempt: 1,
+      }),
+    ));
+    expect(acquire).toHaveBeenCalledTimes(2);
+
+    expect(controller.notifyReplicaCommit(sourceDocument, 2)).toBe(true);
+    await vi.waitFor(() => expect(acquire).toHaveBeenCalledTimes(3));
+    expect(controller.notifyReplicaCommit(sourceDocument, 3)).toBe(true);
+    await vi.waitFor(() => expect(acquire).toHaveBeenCalledTimes(5));
+    expect(diagnostics.filter((diagnostic) =>
+      typeof diagnostic === 'object' && diagnostic !== null &&
+      'stage' in diagnostic && diagnostic.stage === 'job-progress' &&
+      'status' in diagnostic && diagnostic.status === 'capture-retry'
+    )).toHaveLength(2);
+    controller.dispose();
+  });
+
+  it('gives changed blank pixels one final bounded confirmation pass', async () => {
+    const { document } = parseHTML('<html><body><img></body></html>');
+    const image = document.querySelector('img') as unknown as HTMLImageElement;
+    const acquired = (pixelHash: string) => ({
+      status: 'ready' as const,
+      pixels: {
+        descriptor,
+        pixelHash,
+        encoded: new Blob([new Uint8Array([1])], { type: 'image/png' }),
+        bitmapWidth: 200,
+        bitmapHeight: 100,
+        cropOffsetXCss: 0,
+        cropOffsetYCss: 0,
+        cropWidthCss: 200,
+        cropHeightCss: 100,
+        renderedWidthCss: 200,
+        renderedHeightCss: 100,
+        nearestElementLanguage: 'en' as const,
+      },
+    });
+    const acquire = vi.fn()
+      .mockResolvedValueOnce(acquired('aa'.repeat(32)))
+      .mockResolvedValueOnce(acquired('bb'.repeat(32)))
+      .mockResolvedValueOnce(acquired('bb'.repeat(32)));
+    const recognize = vi.fn(async () => ({
+      status: 'complete' as const,
+      cacheHit: false,
+      result: {
+        providerId: 'tesseract' as const,
+        bitmapWidth: 200,
+        bitmapHeight: 100,
+        transcript: '',
+        regions: [],
+      },
+    }));
+    const diagnostics: unknown[] = [];
+    const controller = new ImageTranslationController({
+      openSource: async (_request, onChange) => {
+        queueMicrotask(() => onChange({ kind: 'upsert', descriptor }));
+        return { measure: vi.fn(), dispose: vi.fn() };
+      },
+      createPixelCoordinator: () => ({ acquire }) as unknown as PixelAcquisitionCoordinator,
+      createRecognitionCoordinator: () => ({
+        recognize,
+        clear: vi.fn(),
+      }) as unknown as ImageRecognitionCoordinator,
+      resolveAnchor: () => ({
+        document: sourceDocument,
+        replayLease: 1,
+        image,
+        iframe: { contentDocument: document } as HTMLIFrameElement,
+      }),
+      translationProvider: {
+        availability: async () => 'available',
+        createSession: vi.fn(),
+      },
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      projector: testProjectorEnvironment(),
+    });
+    controller.configure({
+      enabled: true,
+      scanPolicy: 'visible-only',
+      skipSmallImages: false,
+      providerOrder: ['tesseract'],
+      sourceLanguage: 'en',
+      targetLanguage: 'ja',
+      translationIdle: true,
+    });
+    controller.activateReplica(request, 3, 1);
+
+    await vi.waitFor(() => expect(diagnostics).toContain('no-text-found'));
+    expect(acquire).toHaveBeenCalledTimes(3);
+    expect(recognize).toHaveBeenCalledTimes(3);
+    expect(diagnostics).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        stage: 'job-progress', status: 'no-text-retry', attempt: 1,
+      }),
+      expect.objectContaining({
+        stage: 'job-progress', status: 'no-text-retry', attempt: 2,
+      }),
+    ]));
+    expect(diagnostics).not.toContainEqual(expect.objectContaining({
+      stage: 'job-progress', status: 'no-text-changed',
+    }));
+    controller.dispose();
+  });
+
+  it('clears blank-confirmation state after nonempty recognition', async () => {
+    const { document } = parseHTML('<html><body><img></body></html>');
+    const image = document.querySelector('img') as unknown as HTMLImageElement;
+    image.getBoundingClientRect = () => ({
+      left: 0, top: 0, width: 200, height: 100,
+      right: 200, bottom: 100, x: 0, y: 0, toJSON: () => ({}),
+    });
+    const pixels = {
+      descriptor,
+      pixelHash: 'bc'.repeat(32),
+      encoded: new Blob([new Uint8Array([1])], { type: 'image/png' }),
+      bitmapWidth: 200,
+      bitmapHeight: 100,
+      cropOffsetXCss: 0,
+      cropOffsetYCss: 0,
+      cropWidthCss: 200,
+      cropHeightCss: 100,
+      renderedWidthCss: 200,
+      renderedHeightCss: 100,
+      nearestElementLanguage: 'en' as const,
+    };
+    const blank = {
+      status: 'complete' as const,
+      cacheHit: false,
+      result: {
+        providerId: 'tesseract' as const,
+        bitmapWidth: 200,
+        bitmapHeight: 100,
+        transcript: '',
+        regions: [],
+      },
+    };
+    const nonempty = {
+      status: 'complete' as const,
+      cacheHit: false,
+      result: {
+        providerId: 'tesseract' as const,
+        bitmapWidth: 200,
+        bitmapHeight: 100,
+        transcript: 'hello',
+        regions: [{
+          text: 'hello',
+          boundingBox: { x: 10, y: 10, width: 100, height: 20 },
+        }],
+      },
+    };
+    const recognize = vi.fn()
+      .mockResolvedValueOnce(blank)
+      .mockResolvedValueOnce(nonempty)
+      .mockResolvedValueOnce(blank)
+      .mockResolvedValueOnce(blank);
+    const diagnostics: unknown[] = [];
+    let activeReplayLease = 1;
+    const controller = new ImageTranslationController({
+      openSource: async (_request, onChange) => {
+        queueMicrotask(() => onChange({ kind: 'upsert', descriptor }));
+        return { measure: vi.fn(), dispose: vi.fn() };
+      },
+      createPixelCoordinator: () => ({
+        acquire: async () => ({ status: 'ready', pixels }),
+      }) as unknown as PixelAcquisitionCoordinator,
+      createRecognitionCoordinator: () => ({
+        recognize,
+        clear: vi.fn(),
+      }) as unknown as ImageRecognitionCoordinator,
+      resolveAnchor: () => ({
+        document: sourceDocument,
+        replayLease: activeReplayLease,
+        image,
+        iframe: { contentDocument: document } as HTMLIFrameElement,
+      }),
+      translationProvider: {
+        availability: async () => 'available',
+        createSession: async () => ({
+          translate: async (text) => `${text}-translated`,
+          destroy: vi.fn(),
+        }),
+      },
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      projector: {
+        scheduleFrame: (callback) => { callback(); return 1; },
+        cancelFrame: () => undefined,
+        createResizeObserver: () => undefined,
+      },
+    });
+    controller.configure({
+      enabled: true,
+      scanPolicy: 'visible-only',
+      skipSmallImages: false,
+      providerOrder: ['tesseract'],
+      sourceLanguage: 'en',
+      targetLanguage: 'ja',
+      translationIdle: true,
+    });
+    controller.activateReplica(request, 3, activeReplayLease);
+    await vi.waitFor(() => expect(diagnostics).toContain('projected'));
+
+    activeReplayLease = 2;
+    expect(controller.notifyReplicaCommit(sourceDocument, activeReplayLease))
+      .toBe(true);
+    await vi.waitFor(() => expect(diagnostics).toContain('no-text-found'));
+
+    expect(recognize).toHaveBeenCalledTimes(4);
+    expect(diagnostics.filter((diagnostic) =>
+      typeof diagnostic === 'object' && diagnostic !== null &&
+      'stage' in diagnostic && diagnostic.stage === 'job-progress' &&
+      'status' in diagnostic && diagnostic.status === 'no-text-retry'
+    )).toHaveLength(2);
+    expect(document.querySelector('[data-simul-image-overlay="12"]')).toBeNull();
     controller.dispose();
   });
 
@@ -347,7 +692,7 @@ describe('ImageTranslationController', () => {
         nearestElementLanguage: 'en' as const,
       },
     }));
-    const recognize = vi.fn(async () => ({
+    const recognize = vi.fn<() => Promise<ImageRecognitionResult>>(async () => ({
       status: 'complete' as const,
       cacheHit: false,
       result: {
@@ -444,8 +789,18 @@ describe('ImageTranslationController', () => {
         provider: 'tesseract',
         regions: 1,
         cacheHit: false,
+        ordinal: 1,
+        bitmapWidth: 200,
+        bitmapHeight: 100,
       },
-      'translation-started',
+      {
+        stage: 'translation-started',
+        ordinal: 1,
+        renderedWidth: 200,
+        renderedHeight: 100,
+        bitmapWidth: 200,
+        bitmapHeight: 100,
+      },
       'projected',
     ]));
     expect(document.querySelector('[data-simul-image-overlay="12"]')?.textContent)
@@ -487,6 +842,94 @@ describe('ImageTranslationController', () => {
     expect(document.querySelector('[data-simul-image-overlay="12"]')?.textContent)
       .toBe('hello-日本語');
     expect(createTranslationSession).toHaveBeenCalledOnce();
+
+    recognize.mockResolvedValueOnce({
+      status: 'complete',
+      cacheHit: false,
+      result: {
+        providerId: 'tesseract',
+        bitmapWidth: 200,
+        bitmapHeight: 100,
+        transcript: 'failure case',
+        regions: [{
+          text: 'failure case',
+          boundingBox: { x: 20, y: 20, width: 100, height: 30 },
+        }],
+      },
+    });
+    createTranslationSession.mockRejectedValueOnce(
+      new Error('content-free translation failure'),
+    );
+    emit?.({
+      kind: 'upsert',
+      descriptor: {
+        ...descriptor,
+        contentRevision: 4,
+        observationRevision: 4,
+      },
+    });
+    await vi.waitFor(() => expect(diagnostics).toContainEqual({
+      stage: 'translation-failed',
+      ordinal: 4,
+      renderedWidth: 200,
+      renderedHeight: 100,
+      bitmapWidth: 200,
+      bitmapHeight: 100,
+    }));
+
+    recognize.mockResolvedValueOnce({
+      status: 'complete',
+      cacheHit: false,
+      result: {
+        providerId: 'tesseract',
+        bitmapWidth: 200,
+        bitmapHeight: 100,
+        transcript: ' ',
+        regions: [{
+          text: ' ',
+          boundingBox: { x: 20, y: 20, width: 100, height: 30 },
+        }],
+      },
+    });
+    emit?.({
+      kind: 'upsert',
+      descriptor: {
+        ...descriptor,
+        contentRevision: 5,
+        observationRevision: 5,
+      },
+    });
+    await vi.waitFor(() => expect(diagnostics).toContainEqual({
+      stage: 'translation-empty',
+      ordinal: 5,
+      renderedWidth: 200,
+      renderedHeight: 100,
+      bitmapWidth: 200,
+      bitmapHeight: 100,
+    }));
+    expect(document.querySelector('[data-simul-image-overlay="12"]')).toBeNull();
+
+    recognize.mockResolvedValueOnce({
+      status: 'failed',
+      code: 'provider-unavailable',
+    });
+    emit?.({
+      kind: 'upsert',
+      descriptor: {
+        ...descriptor,
+        contentRevision: 6,
+        observationRevision: 6,
+      },
+    });
+    await vi.waitFor(() => expect(diagnostics).toContainEqual({
+      stage: 'recognition-failed',
+      code: 'provider-unavailable',
+      ordinal: 6,
+      renderedWidth: 200,
+      renderedHeight: 100,
+      bitmapWidth: 200,
+      bitmapHeight: 100,
+    }));
 
     controller.configure({
       enabled: false,

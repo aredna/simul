@@ -16,13 +16,45 @@ describe('ImageTranslationDiagnosticHistory', () => {
     expect(formatImageTranslationDiagnostic({
       stage: 'recognition-failed',
       code: 'provider-unavailable',
-    })).toBe('recognition failed: code=provider-unavailable');
+      ordinal: 7,
+      renderedWidth: 603,
+      renderedHeight: 381,
+      bitmapWidth: 1206,
+      bitmapHeight: 761,
+    })).toBe('job 7 recognition failed: code=provider-unavailable; rendered=603x381; bitmap=1206x761');
     expect(formatImageTranslationDiagnostic({
       stage: 'recognition-complete',
       provider: 'tesseract',
       regions: 4,
       cacheHit: true,
-    })).toBe('recognition complete: provider=tesseract; regions=4; cache=hit');
+      ordinal: 2,
+      bitmapWidth: 1206,
+      bitmapHeight: 761,
+    })).toBe('job 2 recognition complete: provider=tesseract; regions=4; bitmap=1206x761; cache=hit');
+    expect(formatImageTranslationDiagnostic({
+      stage: 'translation-started',
+      ordinal: 2,
+      renderedWidth: 603,
+      renderedHeight: 381,
+      bitmapWidth: 1206,
+      bitmapHeight: 761,
+    })).toBe('job 2 translation started: rendered=603x381; bitmap=1206x761');
+    expect(formatImageTranslationDiagnostic({
+      stage: 'translation-failed',
+      ordinal: 2,
+      renderedWidth: 603,
+      renderedHeight: 381,
+      bitmapWidth: 1206,
+      bitmapHeight: 761,
+    })).toBe('job 2 translation failed: rendered=603x381; bitmap=1206x761');
+    expect(formatImageTranslationDiagnostic({
+      stage: 'translation-empty',
+      ordinal: 2,
+      renderedWidth: 603,
+      renderedHeight: 381,
+      bitmapWidth: 1206,
+      bitmapHeight: 761,
+    })).toBe('job 2 translation empty: rendered=603x381; bitmap=1206x761');
   });
 
   it('keeps only the newest bounded in-memory entries', () => {

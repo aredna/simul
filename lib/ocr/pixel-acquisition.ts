@@ -200,9 +200,7 @@ export class PixelAcquisitionCoordinator {
       const visible = visibleImageRect(metrics);
       if (!visible) return { status: 'deferred', reason: 'hidden' };
       const crop = toPixelCrop(visible, scaleX, scaleY, bitmap.width, bitmap.height);
-      if (!crop || crop.width * crop.height > MAX_OCR_INPUT_PIXELS) {
-        return { status: 'deferred', reason: 'oversized' };
-      }
+      if (!crop) return { status: 'deferred', reason: 'oversized' };
       const output = selectOcrPreprocessingPlan(
         crop.width,
         crop.height,

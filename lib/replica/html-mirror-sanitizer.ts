@@ -1,4 +1,5 @@
 import {
+  hasSourceActivationElementAncestor,
   hasSourcePrivateElementAncestor,
   hasSourcePrivateOrActivationElementAncestor,
   isSourceActivationRoleValue,
@@ -18,6 +19,7 @@ export const MAX_HTML_MIRROR_ADOPTED_STYLE_RULES = 100_000;
 const MAX_ADOPTED_STYLE_SHEETS_PER_OWNER = 256;
 const MAX_ADOPTED_STYLE_RULES_PER_OWNER = 20_000;
 const MAX_ADOPTED_STYLE_CHARACTERS_PER_OWNER = MAX_HTML_MIRROR_STRING;
+const MAX_BROKEN_CONTROL_ICON_EDGE = 64;
 
 export type HtmlMirrorNamespace = 'html' | 'svg' | 'mathml';
 
@@ -28,7 +30,14 @@ export interface HtmlMirrorElementNode {
   readonly tagName: string;
   readonly attributes: readonly (readonly [string, string])[];
   readonly children: readonly HtmlMirrorNode[];
+  readonly visuallyHidden?: true;
+  readonly selectedImageSource?: string;
   readonly shadowRoot?: HtmlMirrorShadowRoot;
+}
+
+export interface HtmlMirrorElementHints {
+  readonly visuallyHidden?: true;
+  readonly selectedImageSource?: string;
 }
 
 export interface HtmlMirrorShadowRoot {
@@ -91,6 +100,7 @@ interface SerializeContext {
   readonly styleWork: HtmlMirrorStyleWorkBudget;
   readonly privateRegion: boolean;
   readonly privateAttributeRegion: boolean;
+  readonly activationRegion: boolean;
   readonly nonContentRegion: boolean;
   readonly styleRegion: boolean;
   readonly depth: number;
@@ -292,6 +302,9 @@ export function sanitizeSourceSubtree(
       privateAttributeRegion: inheritedElement
         ? hasSourcePrivateOrActivationElementAncestor(inheritedElement)
         : false,
+      activationRegion: inheritedElement
+        ? hasSourceActivationElementAncestor(inheritedElement)
+        : false,
       nonContentRegion: inheritedElement
         ? hasNonContentAncestor(inheritedElement)
         : false,
@@ -319,6 +332,9 @@ export function sanitizeSourceChildren(
     const privateAttributeRegion = parentElement
       ? hasSourcePrivateOrActivationElementAncestor(parentElement)
       : false;
+    const activationRegion = parentElement
+      ? hasSourceActivationElementAncestor(parentElement)
+      : false;
     const nonContentRegion = parentElement
       ? hasNonContentAncestor(parentElement)
       : false;
@@ -331,6 +347,7 @@ export function sanitizeSourceChildren(
         styleWork,
         privateRegion,
         privateAttributeRegion,
+        activationRegion,
         nonContentRegion,
         styleRegion,
         depth: 0,
@@ -351,12 +368,29 @@ export function sanitizeSourceAttributes(
     return sanitizeAttributes(
       source,
       source.localName.toLowerCase(),
-      hasSourcePrivateOrActivationElementAncestor(source),
+      hasSourcePrivateElementAncestor(source),
+      hasSourceActivationElementAncestor(source),
       baseUrl,
     );
   } catch {
     return undefined;
   }
+}
+
+/** Captures only bounded presentation facts that cannot reveal page content. */
+export function sanitizeSourceElementHints(
+  source: Element,
+  baseUrl = source.ownerDocument?.baseURI ?? 'about:blank',
+): HtmlMirrorElementHints {
+  const tagName = source.localName.toLowerCase();
+  const visuallyHidden = isCanonicalClippedSourceElement(source);
+  const selectedImageSource = tagName === 'img'
+    ? selectedSourceFor(source, baseUrl)
+    : undefined;
+  return Object.freeze({
+    ...(visuallyHidden ? { visuallyHidden: true as const } : {}),
+    ...(selectedImageSource ? { selectedImageSource } : {}),
+  });
 }
 
 export function sanitizeSourceDocument(
@@ -375,6 +409,7 @@ export function sanitizeSourceDocument(
     styleWork,
     privateRegion: false,
     privateAttributeRegion: false,
+    activationRegion: false,
     nonContentRegion: false,
     styleRegion: false,
     depth: 0,
@@ -413,6 +448,7 @@ export function readHtmlMirrorNode(
   nonContentRegion = false,
   styleRegion = false,
   privateAttributeRegion = false,
+  activationRegion = false,
 ): HtmlMirrorNode | undefined {
   if (!isRecord(input) || depth > MAX_HTML_MIRROR_DEPTH) return undefined;
   budget.nodes += 1;
@@ -442,7 +478,7 @@ export function readHtmlMirrorNode(
     input.kind !== 'element' ||
     !hasExactKeysWithOptional(input, [
       'kind', 'id', 'namespace', 'tagName', 'attributes', 'children',
-    ], ['shadowRoot']) ||
+    ], ['visuallyHidden', 'selectedImageSource', 'shadowRoot']) ||
     !isNamespace(input.namespace) ||
     !isSafeTagName(input.tagName) ||
     UNSAFE_ELEMENTS.has(input.tagName) ||
@@ -450,6 +486,20 @@ export function readHtmlMirrorNode(
     input.attributes.length > MAX_HTML_MIRROR_ATTRIBUTES ||
     !Array.isArray(input.children)
   ) return undefined;
+  if (
+    (input.visuallyHidden !== undefined && input.visuallyHidden !== true) ||
+    (input.selectedImageSource !== undefined &&
+      (
+        input.tagName !== 'img' ||
+        typeof input.selectedImageSource !== 'string' ||
+        passiveUrl(input.selectedImageSource, 'about:blank', true) !==
+          input.selectedImageSource
+      ))
+  ) return undefined;
+  if (typeof input.selectedImageSource === 'string') {
+    budget.bytes += input.selectedImageSource.length * 2;
+    if (budget.bytes > MAX_HTML_MIRROR_BYTES) return undefined;
+  }
   const attributes: Array<readonly [string, string]> = [];
   const seenAttributes = new Set<string>();
   for (const attribute of input.attributes) {
@@ -473,6 +523,8 @@ export function readHtmlMirrorNode(
   const transportedActivationElement =
     isSourceActivationTagName(input.tagName) ||
     isSourceActivationRoleValue(Object.fromEntries(attributes).role);
+  const transportedActivationRegion = activationRegion ||
+    transportedActivationElement;
   const transportedPrivateAttributeRegion = privateAttributeRegion ||
     transportedPrivateRegion ||
     transportedActivationElement;
@@ -495,6 +547,7 @@ export function readHtmlMirrorNode(
       transportedNonContentRegion,
       transportedStyleRegion,
       transportedPrivateAttributeRegion,
+      transportedActivationRegion,
     );
     if (!parsed) return undefined;
     children.push(parsed);
@@ -531,6 +584,7 @@ export function readHtmlMirrorNode(
         transportedNonContentRegion,
         transportedStyleRegion,
         transportedPrivateAttributeRegion,
+        transportedActivationRegion,
       );
       if (!parsed) return undefined;
       shadowChildren.push(parsed);
@@ -554,6 +608,10 @@ export function readHtmlMirrorNode(
     tagName: input.tagName,
     attributes: Object.freeze(attributes),
     children: Object.freeze(children),
+    ...(input.visuallyHidden === true ? { visuallyHidden: true as const } : {}),
+    ...(typeof input.selectedImageSource === 'string'
+      ? { selectedImageSource: input.selectedImageSource }
+      : {}),
     ...(shadowRoot ? { shadowRoot } : {}),
   });
 }
@@ -622,25 +680,29 @@ function serializeNode(
   const namespace = readNamespace(liveElement.namespaceURI);
   if (!namespace) return undefined;
   const privateRegion = context.privateRegion || elementStartsPrivateRegion(liveElement);
+  const activationRegion = context.activationRegion ||
+    elementStartsActivationRegion(liveElement);
   const privateAttributeRegion = context.privateAttributeRegion ||
     privateRegion ||
-    elementStartsActivationRegion(liveElement);
+    activationRegion;
   const nonContentRegion = context.nonContentRegion || NON_CONTENT_ELEMENTS.has(tagName);
   const styleRegion = context.styleRegion || tagName === 'style';
   const attributes = sanitizeAttributes(
     liveElement,
     tagName,
-    privateAttributeRegion,
+    privateRegion,
+    activationRegion,
     context.baseUrl,
   );
   if (!attributes) return undefined;
+  const hints = sanitizeSourceElementHints(liveElement, context.baseUrl);
   admitNode(
     context.budget,
     id,
     tagName.length * 2 + attributes.reduce(
       (total, [name, value]) => total + (name.length + value.length) * 2 + 8,
       64,
-    ),
+    ) + (hints.selectedImageSource?.length ?? 0) * 2,
   );
   const children: HtmlMirrorNode[] = [];
   if (!isVoidElement(tagName)) {
@@ -649,6 +711,7 @@ function serializeNode(
         ...context,
         privateRegion,
         privateAttributeRegion,
+        activationRegion,
         nonContentRegion,
         styleRegion,
         depth: context.depth + 1,
@@ -668,6 +731,7 @@ function serializeNode(
         ...context,
         privateRegion,
         privateAttributeRegion,
+        activationRegion,
         nonContentRegion,
         styleRegion,
         depth: context.depth + 1,
@@ -695,6 +759,7 @@ function serializeNode(
     tagName,
     attributes,
     children: Object.freeze(children),
+    ...hints,
     ...(shadowRoot ? { shadowRoot } : {}),
   });
 }
@@ -702,12 +767,13 @@ function serializeNode(
 function sanitizeAttributes(
   element: Element,
   tagName: string,
-  privateAttributeRegion: boolean,
+  privateRegion: boolean,
+  activationRegion: boolean,
   baseUrl: string,
 ): readonly (readonly [string, string])[] | undefined {
   if (element.attributes.length > MAX_HTML_MIRROR_ATTRIBUTES) return undefined;
   const result: Array<readonly [string, string]> = [];
-  const privateAttributes = privateAttributeRegion ||
+  const privateAttributes = privateRegion || activationRegion ||
     isSourceActivationTagName(tagName) ||
     isSourceActivationRoleValue(element.getAttribute('role'));
   for (const attribute of element.attributes) {
@@ -720,7 +786,13 @@ function sanitizeAttributes(
       (privateAttributes &&
         (PRIVATE_ATTRIBUTES.has(name) || name.startsWith('data-')))
     ) continue;
+    if (name === 'alt' && privateRegion) continue;
     let value = attribute.value;
+    if (
+      name === 'alt' &&
+      activationRegion &&
+      isSmallBrokenSourceControlIcon(element, tagName)
+    ) value = '';
     if (value.length > MAX_HTML_MIRROR_STRING) return undefined;
     if (name === 'href') {
       if (tagName !== 'link' || !isPassiveStylesheet(element)) continue;
@@ -1060,6 +1132,124 @@ function passiveUrl(
   } catch {
     return undefined;
   }
+}
+
+function selectedSourceFor(
+  element: Element,
+  baseUrl: string,
+): string | undefined {
+  const raw = (element as Element & { readonly currentSrc?: unknown }).currentSrc;
+  if (typeof raw !== 'string' || raw.length === 0) return undefined;
+  const selected = passiveUrl(raw, baseUrl, true);
+  if (!selected) return undefined;
+  const declaredRaw = element.getAttribute('src') ?? '';
+  const declared = declaredRaw ? passiveUrl(declaredRaw, baseUrl, true) : undefined;
+  return selected !== declared ? selected : undefined;
+}
+
+function isSmallBrokenSourceControlIcon(
+  element: Element,
+  tagName: string,
+): boolean {
+  if (tagName !== 'img') return false;
+  const image = element as Element & {
+    readonly complete?: unknown;
+    readonly naturalWidth?: unknown;
+    readonly naturalHeight?: unknown;
+  };
+  if (
+    image.complete !== true ||
+    (image.naturalWidth !== 0 && image.naturalHeight !== 0)
+  ) return false;
+  const dimensions = [
+    renderedImageDimensions(element),
+    declaredImageDimensions(element),
+  ].filter((value): value is { readonly width: number; readonly height: number } =>
+    value !== undefined,
+  );
+  return dimensions.length > 0 && dimensions.every(
+    ({ width, height }) =>
+      width <= MAX_BROKEN_CONTROL_ICON_EDGE &&
+      height <= MAX_BROKEN_CONTROL_ICON_EDGE,
+  );
+}
+
+function renderedImageDimensions(
+  element: Element,
+): { readonly width: number; readonly height: number } | undefined {
+  try {
+    const bounds = element.getBoundingClientRect();
+    const width = boundedPositiveGeometry(bounds.width);
+    const height = boundedPositiveGeometry(bounds.height);
+    return width !== undefined && height !== undefined
+      ? { width, height }
+      : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function declaredImageDimensions(
+  element: Element,
+): { readonly width: number; readonly height: number } | undefined {
+  const width = declaredImageDimension(element.getAttribute('width'));
+  const height = declaredImageDimension(element.getAttribute('height'));
+  return width !== undefined && height !== undefined
+    ? { width, height }
+    : undefined;
+}
+
+function declaredImageDimension(value: string | null): number | undefined {
+  if (!value || !/^\d+(?:\.\d+)?$/u.test(value.trim())) return undefined;
+  return boundedPositiveGeometry(Number(value));
+}
+
+function boundedPositiveGeometry(value: number): number | undefined {
+  return Number.isFinite(value) && value > 0 && value <= 1_000_000
+    ? value
+    : undefined;
+}
+
+/**
+ * Recognize only the canonical screen-reader-only recipe used by component
+ * libraries: a clipped 1px box taken out of normal flow. This is deliberately
+ * narrower than transporting arbitrary computed styles.
+ */
+function isCanonicalClippedSourceElement(element: Element): boolean {
+  const candidate = `${element.localName} ${element.getAttribute('class') ?? ''} ${
+    element.getAttribute('style') ?? ''
+  }`;
+  if (!/(?:screen-reader|sr-only|visually-hidden|a11y|clip(?:-path)?\s*:)/iu.test(
+    candidate,
+  )) return false;
+  const view = element.ownerDocument?.defaultView;
+  if (!view || typeof view.getComputedStyle !== 'function') return false;
+  try {
+    const style = view.getComputedStyle(element);
+    const position = style.position.trim().toLowerCase();
+    const overflow = `${style.overflow} ${style.overflowX} ${style.overflowY}`
+      .toLowerCase();
+    const clip = style.clip.replaceAll(' ', '').toLowerCase();
+    const clipPath = style.clipPath.replaceAll(' ', '').toLowerCase();
+    const width = cssPixelValue(style.width);
+    const height = cssPixelValue(style.height);
+    const clipped = /^rect\((?:0|1)px,(?:0|1)px,(?:0|1)px,(?:0|1)px\)$/u
+      .test(clip) || /^inset\((?:50%|1px)(?:round0)?\)$/u.test(clipPath);
+    return (position === 'absolute' || position === 'fixed') &&
+      overflow.includes('hidden') &&
+      clipped &&
+      width !== undefined && width <= 1 &&
+      height !== undefined && height <= 1;
+  } catch {
+    return false;
+  }
+}
+
+function cssPixelValue(value: string): number | undefined {
+  const match = /^(-?\d+(?:\.\d+)?)px$/u.exec(value.trim().toLowerCase());
+  if (!match) return undefined;
+  const parsed = Number(match[1]);
+  return Number.isFinite(parsed) && parsed >= 0 ? parsed : undefined;
 }
 
 function isUnsafeTransportedAttribute(

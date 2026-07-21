@@ -136,3 +136,22 @@ export function hasSourcePrivateOrActivationElementAncestor(
   }
   return false;
 }
+
+/** Public activation labels remain mirrorable even though control pixels do not. */
+export function hasSourceActivationElementAncestor(element: Element): boolean {
+  for (let current: Element | undefined = element; current;) {
+    if (
+      isSourceActivationTagName(current.tagName) ||
+      isSourceActivationRoleValue(current.getAttribute('role'))
+    ) return true;
+    if (current.parentElement) {
+      current = current.parentElement;
+      continue;
+    }
+    const root = current.getRootNode();
+    current = root.nodeType === 11 && 'host' in root
+      ? (root as ShadowRoot).host
+      : undefined;
+  }
+  return false;
+}
