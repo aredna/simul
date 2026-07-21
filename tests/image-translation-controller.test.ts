@@ -23,6 +23,8 @@ const sourceDocument = {
   frameId: 0,
 };
 const descriptor: SourceImageDescriptor = {
+  // Source URLs and file formats never cross the observation boundary. This
+  // same descriptor drives raster, external-SVG, and image-only media OCR.
   document: sourceDocument,
   nodeId: 12,
   sourceKind: 'img',
@@ -253,16 +255,17 @@ describe('ImageTranslationController', () => {
 
   it('reports the content-free reason when visible pixel capture is deferred', async () => {
     const diagnostics: unknown[] = [];
+    const acquire = vi.fn(async () => ({
+      status: 'deferred' as const,
+      reason: 'permission' as const,
+    }));
     const controller = new ImageTranslationController({
       openSource: async (_request, onChange) => {
         queueMicrotask(() => onChange({ kind: 'upsert', descriptor }));
         return { measure: vi.fn(), dispose: vi.fn() };
       },
       createPixelCoordinator: () => ({
-        acquire: async () => ({
-          status: 'deferred',
-          reason: 'capture-failed',
-        }),
+        acquire,
       }) as unknown as PixelAcquisitionCoordinator,
       createRecognitionCoordinator: vi.fn(),
       resolveAnchor: () => ({
@@ -291,14 +294,16 @@ describe('ImageTranslationController', () => {
 
     await vi.waitFor(() => expect(diagnostics).toContainEqual({
       stage: 'capture-deferred',
-      reason: 'capture-failed',
+      reason: 'permission',
       renderedWidth: 200,
       renderedHeight: 100,
     }));
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(acquire).toHaveBeenCalledOnce();
     controller.dispose();
   });
 
-  it('stays dormant while disabled, then runs the local visible-image path when opted in', async () => {
+  it('runs the format-opaque external-image path only after the user opts in', async () => {
     const { document } = parseHTML('<html><body><img lang="en"></body></html>');
     const image = document.querySelector('img') as unknown as HTMLImageElement;
     image.getBoundingClientRect = () => ({

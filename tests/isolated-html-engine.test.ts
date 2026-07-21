@@ -665,6 +665,81 @@ describe('IsolatedHtmlReplicaEngine', () => {
       .toBe('document');
   });
 
+  it('preserves passive image-only layout and resolves external SVG and JPEG anchors', async () => {
+    const mediaCss = [
+      '.viewer{display:flex;min-height:100vh;align-items:center;justify-content:center;',
+      'scroll-behavior:smooth;overscroll-behavior-y:contain}',
+      '.viewer img{display:block;max-width:100%;max-height:100vh;object-fit:contain}',
+    ].join('');
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: {
+          kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+          attributes: [], children: [
+            {
+              kind: 'element', id: 2, namespace: 'html', tagName: 'head',
+              attributes: [], children: [{
+                kind: 'element', id: 3, namespace: 'html', tagName: 'style',
+                attributes: [], children: [{
+                  kind: 'text', id: 4, text: mediaCss, translatable: false,
+                }],
+              }],
+            },
+            {
+              kind: 'element', id: 5, namespace: 'html', tagName: 'body',
+              attributes: [['class', 'viewer']], children: [
+                {
+                  kind: 'element', id: 6, namespace: 'html', tagName: 'img',
+                  attributes: [
+                    ['src', 'https://assets.example/header_logo.svg'],
+                    ['width', '275'],
+                    ['height', '30'],
+                  ], children: [],
+                },
+                {
+                  kind: 'element', id: 7, namespace: 'html', tagName: 'img',
+                  attributes: [
+                    ['src', 'https://images.example/media.jpeg'],
+                    ['width', '1206'],
+                    ['height', '761'],
+                  ], children: [],
+                },
+              ],
+            },
+          ],
+        },
+        adoptedStyleSheets: [],
+        captureMs: 1,
+        viewportWidth: 1206,
+        viewportHeight: 761,
+        documentWidth: 1206,
+        documentHeight: 761,
+      },
+    );
+    expect(checkpoint).toBeDefined();
+    const stream = new FakeHtmlStream(checkpoint!);
+    const host = new FakePresentationHost();
+    const engine = makeEngine(stream, host);
+
+    await expect(engine.run(request)).resolves.toMatchObject({
+      status: 'complete',
+    });
+    const snapshot = engine.snapshot()!;
+    const svgAnchor = engine.resolveImageAnchor(snapshot.document, 6);
+    const jpegAnchor = engine.resolveImageAnchor(snapshot.document, 7);
+    expect(svgAnchor?.image.getAttribute('src')).toBe(
+      'https://assets.example/header_logo.svg',
+    );
+    expect(jpegAnchor?.image.getAttribute('src')).toBe(
+      'https://images.example/media.jpeg',
+    );
+    expect(svgAnchor?.replayLease).toBe(snapshot.replayLease);
+    expect(jpegAnchor?.replayLease).toBe(snapshot.replayLease);
+    expect(host.iframe?.contentDocument?.head.textContent).toContain(mediaCss);
+    expect(host.iframe?.contentDocument?.body.className).toBe('viewer');
+  });
+
   it('buffers live patches until a recovery checkpoint commits and is acknowledged', async () => {
     const stream = new FakeHtmlStream(makeCheckpoint('last good', 0));
     const host = new FakePresentationHost();

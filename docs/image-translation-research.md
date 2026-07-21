@@ -29,7 +29,7 @@ The current pipeline:
 
 1. Remains fully dormant until the saved image-translation option is enabled.
 2. Observes `<img>` revisions without disclosing image URLs or page text.
-3. Captures a stable visible viewport crop at no more than twice per second,
+3. Captures a stable visible viewport crop below Chrome's two-per-second cap,
    rejects crops over 4 MP, and hashes the encoded crop.
 4. Tries the saved provider order in an offscreen document: capability-probed
    Chrome TextDetector and a restartable Tesseract.js/core 7.0.0 Worker with
@@ -50,6 +50,12 @@ so display permission alone does not provide OCR pixels. The implemented path
 uses `tabs.captureVisibleTab` and can capture only the visible viewport (Chrome
 documents both the sensitive-page behavior and a
 [maximum of two calls per second](https://developer.chrome.com/docs/extensions/reference/api/tabs#method-captureVisibleTab)).
+Chrome accepts that API after a toolbar gesture through `activeTab`, or across
+later origin changes through a literal `<all_urls>` host grant. Simul therefore
+keeps the grant optional, requests it only from an explicit image-translation
+or all-sites-automation gesture, shares it between those two owners, and keeps
+saved OCR intent paused when access is absent or revoked. The grant
+authorizes pixel capture; Simul still does not retrieve the source image URL.
 Requesting narrowly scoped optional access to an image host and fetching the
 resource remains deferred. That alternative needs separate consent,
 animation/crop handling, and new tests before implementation.

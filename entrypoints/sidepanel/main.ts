@@ -71,6 +71,7 @@ import {
   type PreferenceCommandResult,
 } from '../../lib/preference-coordinator';
 import {
+  ALL_SITES_PERMISSION_ORIGINS,
   DEFAULT_COMPANION_PREFERENCES,
   STORAGE_KEY,
   autoTranslationModeForPage,
@@ -498,6 +499,8 @@ let identityRequestId = 0;
 let captureInFlight = false;
 let translationInFlight = false;
 let permissionInFlight = false;
+let imageCaptureAccess: 'checking' | 'granted' | 'missing' = 'checking';
+let imageCaptureAccessRevision = 0;
 let composerInFlight = false;
 let imageTranslationInFlight = false;
 let translationDesired = false;
@@ -809,6 +812,14 @@ browser.tabs.onRemoved.addListener((tabId) => {
   }
 });
 
+browser.permissions.onAdded.addListener(() => {
+  void refreshImageCaptureAccess();
+});
+
+browser.permissions.onRemoved.addListener(() => {
+  void refreshImageCaptureAccess(true);
+});
+
 browser.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== 'local' || !(STORAGE_KEY in changes)) return;
   const previous = preferences;
@@ -868,6 +879,7 @@ void initialize();
 
 async function initialize(): Promise<void> {
   await Promise.all([loadPreferences(), loadPanelWindowId()]);
+  await refreshImageCaptureAccess();
   applyReplicaEnginePreference();
   const [, sourceResult] = await Promise.allSettled([
     checkPanelPlacement(),
@@ -1002,6 +1014,188 @@ async function commitImageAnalysisPreferencePatch(
       // A later storage event can reconcile optimistic controls.
     }
     setStatus(`Could not save image options: ${readableError(error)}`, 'error');
+  }
+}
+
+async function refreshImageCaptureAccess(
+  reportRevocation = false,
+): Promise<void> {
+  const revision = ++imageCaptureAccessRevision;
+  const previous = imageCaptureAccess;
+  let next: typeof imageCaptureAccess;
+  try {
+    next = await browser.permissions.contains({
+      origins: [...ALL_SITES_PERMISSION_ORIGINS],
+    }) ? 'granted' : 'missing';
+  } catch {
+    next = 'missing';
+  }
+  if (revision !== imageCaptureAccessRevision) return;
+  imageCaptureAccess = next;
+  renderImageAnalysisControls();
+  configureImageTranslation();
+  updateControls();
+  if (
+    reportRevocation &&
+    previous === 'granted' &&
+    imageCaptureAccess === 'missing' &&
+    preferences.imageTranslationEnabled
+  ) {
+    setStatus(
+      'Image access was removed. Your image-translation setting is saved but paused; open options and choose Grant image access to resume.',
+      'warning',
+    );
+  }
+}
+
+async function changeImageTranslationEnabled(enabled: boolean): Promise<void> {
+  if (permissionInFlight) {
+    syncPreferenceControls();
+    return;
+  }
+  permissionInFlight = true;
+  renderImageAnalysisControls();
+  updateControls();
+  try {
+    if (!navigator.locks) throw new Error('Chrome Web Locks are unavailable.');
+    const outcome = await navigator.locks.request(
+      PREFERENCE_LOCK_NAME,
+      { ifAvailable: true },
+      async (lock) => {
+        if (!lock) return { kind: 'busy' } as const;
+        const userActivationAvailable = navigator.userActivation.isActive;
+        let freshPreferences: CompanionPreferences | undefined;
+        let newlyGranted = false;
+        let removedImageCaptureGrant = false;
+        try {
+          const hadImageCaptureGrant = await browser.permissions.contains({
+            origins: [...ALL_SITES_PERMISSION_ORIGINS],
+          });
+          if (enabled && !hadImageCaptureGrant) {
+            if (!userActivationAvailable || !navigator.userActivation.isActive) {
+              return { kind: 'activation' } as const;
+            }
+            const granted = await browser.permissions.request({
+              origins: [...ALL_SITES_PERMISSION_ORIGINS],
+            });
+            if (!granted) return { kind: 'denied' } as const;
+            newlyGranted = true;
+          }
+
+          freshPreferences = await readStoredPreferences();
+          let narrowAccessRestored = true;
+          if (
+            !enabled &&
+            freshPreferences.imageTranslationEnabled &&
+            !freshPreferences.autoTranslateAllSites &&
+            hadImageCaptureGrant
+          ) {
+            const removed = await browser.permissions.remove({
+              origins: [...ALL_SITES_PERMISSION_ORIGINS],
+            });
+            const broadStillPresent = await browser.permissions.contains({
+              origins: [...ALL_SITES_PERMISSION_ORIGINS],
+            });
+            if (!removed && broadStillPresent) {
+              throw new Error('Chrome retained image capture access.');
+            }
+            removedImageCaptureGrant = !broadStillPresent;
+            const exactOrigins = freshPreferences.autoTranslateOrigins.flatMap(
+              (origin) => permissionOriginsForMode('site', origin),
+            );
+            if (exactOrigins.length > 0) {
+              narrowAccessRestored = userActivationAvailable &&
+                await browser.permissions.request({ origins: exactOrigins });
+              if (narrowAccessRestored) {
+                const actual = new Set(
+                  (await browser.permissions.getAll()).origins ?? [],
+                );
+                narrowAccessRestored = exactOrigins.every((origin) =>
+                  actual.has(origin)
+                );
+              }
+            }
+          }
+
+          const result = await sendPreferenceCommand({
+            type: 'simul:preferences:patch-image-analysis',
+            patch: { imageTranslationEnabled: enabled },
+          });
+          return { kind: 'complete', result, narrowAccessRestored } as const;
+        } catch (error) {
+          const prior = await readStoredPreferences().catch(
+            () => freshPreferences ?? preferences,
+          );
+          if (
+            newlyGranted &&
+            !prior.autoTranslateAllSites &&
+            !prior.imageTranslationEnabled
+          ) {
+            await browser.permissions.remove({
+              origins: [...ALL_SITES_PERMISSION_ORIGINS],
+            }).catch(() => false);
+          }
+          if (
+            removedImageCaptureGrant &&
+            prior.imageTranslationEnabled
+          ) {
+            await browser.permissions.request({
+              origins: [...ALL_SITES_PERMISSION_ORIGINS],
+            }).catch(() => false);
+          }
+          throw error;
+        }
+      },
+    );
+
+    if (outcome.kind === 'busy') {
+      await reloadPreferencesFromStorage();
+      setStatus(
+        'Another companion window is saving image access. Try again.',
+        'warning',
+      );
+      return;
+    }
+    if (outcome.kind === 'activation') {
+      await reloadPreferencesFromStorage();
+      setStatus(
+        'Choose the image setting again so Chrome can show its access prompt.',
+        'warning',
+      );
+      return;
+    }
+    if (outcome.kind === 'denied') {
+      await reloadPreferencesFromStorage();
+      setStatus(
+        preferences.imageTranslationEnabled
+          ? 'Image translation remains paused. Choose Grant image access when you are ready to retry.'
+          : 'Chrome did not grant image access, so image translation remains off. You can retry from options.',
+        'warning',
+      );
+      return;
+    }
+
+    preferences = mergePendingViewPreferences(outcome.result.preferences);
+    syncPreferenceControls();
+    setStatus(
+      enabled
+        ? 'Image translation is enabled for visible page images.'
+        : outcome.narrowAccessRestored
+          ? 'Image translation is off.'
+          : 'Image translation is off. Chrome did not retain some saved one-site automatic access.',
+      outcome.narrowAccessRestored ? 'success' : 'warning',
+    );
+  } catch {
+    await reloadPreferencesFromStorage();
+    setStatus(
+      'Chrome could not update image access. Your saved setting was left unchanged; try again from options.',
+      'error',
+    );
+  } finally {
+    permissionInFlight = false;
+    await refreshImageCaptureAccess();
+    syncPreferenceControls();
+    updateControls();
   }
 }
 
@@ -2676,6 +2870,7 @@ function configureImageTranslation(): void {
   imageTranslationController.configure({
     enabled:
       preferences.imageTranslationEnabled &&
+      imageCaptureAccess === 'granted' &&
       !isLiveSourceOnlyMode() &&
       hasCompiledImageAnalysisCapability(),
     scanPolicy: preferences.imageScanPolicy,
@@ -2712,15 +2907,32 @@ function renderImageAnalysisControls(): void {
   root.append(createPromptToggle(
     'Translate text inside images (local, experimental)',
     preferences.imageTranslationEnabled,
-    (checked) => commitImageAnalysisPreferencePatch({
-      imageTranslationEnabled: checked,
-    }),
+    changeImageTranslationEnabled,
+    permissionInFlight || imageCaptureAccess === 'checking',
   ));
   const privacyNote = document.createElement('p');
   privacyNote.className = 'microcopy';
-  privacyNote.textContent =
-    'Off by default. Visible image pixels stay on this device and are discarded after OCR.';
+  if (preferences.imageTranslationEnabled && imageCaptureAccess === 'missing') {
+    privacyNote.textContent =
+      'Image translation is saved but paused. Grant image access so Chrome can capture visible pixels for local OCR.';
+  } else if (imageCaptureAccess === 'checking') {
+    privacyNote.textContent = 'Checking Chrome image access…';
+  } else {
+    privacyNote.textContent =
+      'Off by default. Visible image pixels stay on this device and are discarded after OCR.';
+  }
   root.append(privacyNote);
+  if (preferences.imageTranslationEnabled && imageCaptureAccess === 'missing') {
+    const grant = document.createElement('button');
+    grant.type = 'button';
+    grant.className = 'image-access-grant';
+    grant.textContent = 'Grant image access';
+    grant.disabled = permissionInFlight;
+    grant.addEventListener('click', () => {
+      void changeImageTranslationEnabled(true);
+    });
+    root.append(grant);
+  }
 
   const compiledOrder = effectiveCompiledProviderOrder(
     preferences.imageTextProviderOrder,
@@ -2867,12 +3079,14 @@ function createPromptToggle(
   label: string,
   checked: boolean,
   save: (checked: boolean) => Promise<void>,
+  disabled = false,
 ): HTMLLabelElement {
   const wrapper = document.createElement('label');
   wrapper.className = 'check-label image-prompt-toggle';
   const input = document.createElement('input');
   input.type = 'checkbox';
   input.checked = checked;
+  input.disabled = disabled;
   input.addEventListener('change', () => void save(input.checked));
   const title = document.createElement('span');
   title.textContent = label;
@@ -3193,7 +3407,7 @@ async function performLockedAutoTranslationChange(
     if ((mode === 'site' || mode === 'all') && !navigator.userActivation.isActive) {
       return { kind: 'activation' } as const;
     }
-    if (mode === 'site') {
+    if (mode === 'site' && !freshPreferences.imageTranslationEnabled) {
       await browser.permissions.remove({ origins: permissionOriginsForMode('all') });
     }
     const granted =

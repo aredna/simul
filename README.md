@@ -71,8 +71,15 @@ required host access. Its installed permissions are:
   and
 - `offscreen` to run the packaged local OCR worker away from the panel UI.
 
-Optional HTTP(S) access is granted only after choosing **This site** or **All
-sites** for automatic translation and is removed when no longer needed. A
+Optional page access is granted only after choosing **This site** or **All
+sites** for automatic translation, or explicitly enabling image translation.
+Chrome requires a literal optional all-sites grant for reliable visible-tab
+pixel capture after temporary `activeTab` access expires. Simul requests that
+grant only from an explicit image toggle, **Grant image access**, or **All
+sites** automation gesture; it does not fetch the image resource, and it
+removes broad access after both image translation and all-sites automation are
+off. A saved-on setting without the grant remains paused and actionable instead
+of prompting at startup. A
 detached popup window uses the same permissions. Following newly active tabs
 works automatically on sites with optional access; otherwise the user must
 select Simul on the new site because `activeTab` access does not transfer to a
@@ -84,7 +91,7 @@ The mirror never runs site scripts or copies event handlers, navigable links,
 passwords, form values, selections, or contenteditable text. Private controls
 and their descendant text are masked before transport. Original remote images and allowlisted CSS
 backgrounds may reload from their existing hosts for visual context. When
-image translation is explicitly enabled, Simul captures only stable visible
+image translation is explicitly enabled and image access is granted, Simul captures only stable visible
 top-frame image pixels, tries Chrome's capability-probed TextDetector when the
 platform exposes it, falls back to packaged Tesseract models according to the
 saved OCR priority, translates accepted lines through Chrome, and discards the
@@ -112,7 +119,8 @@ Translations can be longer than the source. Adaptive layout lets affected
 containers grow; faithful layout keeps geometry and allows text overflow rather
 than silently ellipsizing it.
 
-Image OCR currently handles ordinary visible top-frame `<img>` elements only.
+Image OCR currently handles ordinary visible top-frame `<img>` elements,
+including externally sourced SVG images displayed through `<img>`.
 Hidden images wait until visible; CSS backgrounds, canvas, video, frames, and
 images without a supported language hint are left unchanged. OCR overlays are
 inert sibling layers and do not resize or rewrite the source or replica image.
@@ -125,10 +133,13 @@ See the [image translation notes](docs/image-translation-research.md) and the
 - If a language pair is unavailable, update Chrome and check that the device
   can download Chrome's corresponding on-device language pack.
 - If image text stays unchanged, open options, enable **Translate text inside
-  images**, and make sure the image is visible and the From language is
-  supported. Small images are skipped by default. Expand **OCR diagnostics**
+  images**, choose **Grant image access** if it appears, and make sure the
+  image is visible and the From language is supported. Small images are
+  skipped by default. Expand **OCR diagnostics**
   under Image text to see memory-only discovery counts, skips, capture,
-  recognition, translation, and projection stages. These entries never include
+  recognition, translation, and projection stages. Capture failures distinguish
+  inactive-tab, permission, quota, API, data, decode, drawing-surface, encode,
+  and digest stages. These entries never include
   page text, URLs, pixels, hashes, or node IDs; the same details are also sent
   to the companion window's `[Simul image translation]` console channel.
 - Chrome blocks extensions from browser settings, the Chrome Web Store, and

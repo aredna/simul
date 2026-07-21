@@ -738,7 +738,7 @@ function sanitizeAttributes(
       if (!sourceSet) continue;
       value = sourceSet;
     } else if (name === 'style') {
-      const style = sanitizeCss(value, baseUrl);
+      const style = sanitizeCss(value, baseUrl, true);
       if (!style) continue;
       value = style;
     } else if (name === 'rel' && tagName === 'link') {
@@ -894,12 +894,17 @@ function countCssRuleBlocks(cssText: string): number {
   return count;
 }
 
-export function sanitizeCss(css: string, baseUrl: string): string | undefined {
+export function sanitizeCss(
+  css: string,
+  baseUrl: string,
+  declarationList = false,
+): string | undefined {
   const commentless = css.replace(/\/\*[\s\S]*?\*\//gu, '');
   const decoded = decodeCssEscapes(commentless);
   if (
     css.length > MAX_HTML_MIRROR_STRING ||
-    /(?:expression\s*\(|-moz-binding\s*:|behavior\s*:|javascript\s*:)/iu.test(decoded)
+    /(?:expression\s*\(|-moz-binding\s*:|javascript\s*:)/iu.test(decoded) ||
+    containsLegacyBehaviorDeclaration(decoded, declarationList)
   ) return undefined;
   const withoutImports = stripCssImports(commentless);
   const decodedWithoutImports = decodeCssEscapes(withoutImports);
@@ -915,6 +920,14 @@ export function sanitizeCss(css: string, baseUrl: string): string | undefined {
       return url ? `url("${url.replaceAll('"', '%22')}")` : 'none';
     },
   );
+}
+
+function containsLegacyBehaviorDeclaration(
+  css: string,
+  declarationList: boolean,
+): boolean {
+  const boundary = declarationList ? '(?:^|;)' : '(?:[;{])';
+  return new RegExp(`${boundary}\\s*[*_]?\\s*behavior\\s*:`, 'iu').test(css);
 }
 
 /** Removes escaped/comment-obfuscated imports without discarding passive CSS. */
@@ -1070,7 +1083,7 @@ function isUnsafeTransportedAttribute(
     return tagName !== 'img' || sanitizeSrcset(value, 'about:blank') !== value;
   }
   if (name === 'style') {
-    return sanitizeCss(value, 'about:blank') !== value;
+    return sanitizeCss(value, 'about:blank', true) !== value;
   }
   return false;
 }

@@ -249,6 +249,123 @@ describe('preference coordinator', () => {
       syncScroll: false,
     });
   });
+
+  it('preserves saved image-translation intent when pixel access is missing', async () => {
+    const adapter = new MemoryPreferenceAdapter({
+      ...parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES),
+      imageTranslationEnabled: true,
+    });
+    const coordinator = new PreferenceCoordinator(adapter);
+
+    const result = await coordinator.run({
+      type: 'simul:preferences:reconcile',
+    });
+
+    expect(result.preferences.imageTranslationEnabled).toBe(true);
+    expect(adapter.hasGrant('<all_urls>')).toBe(false);
+  });
+
+  it('retains the literal capture grant for either broad-access owner', async () => {
+    const imageAdapter = new MemoryPreferenceAdapter({
+      ...parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES),
+      imageTranslationEnabled: true,
+    });
+    imageAdapter.grant('<all_urls>');
+    await new PreferenceCoordinator(imageAdapter).run({
+      type: 'simul:preferences:reconcile',
+    });
+    expect(imageAdapter.hasGrant('<all_urls>')).toBe(true);
+
+    const automaticAdapter = new MemoryPreferenceAdapter({
+      ...parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES),
+      autoTranslateAllSites: true,
+      imageTranslationEnabled: true,
+    });
+    automaticAdapter.grant('<all_urls>');
+    await new PreferenceCoordinator(automaticAdapter).run({
+      type: 'simul:preferences:patch-image-analysis',
+      patch: { imageTranslationEnabled: false },
+    });
+    expect(automaticAdapter.preferences.autoTranslateAllSites).toBe(true);
+    expect(automaticAdapter.hasGrant('<all_urls>')).toBe(true);
+  });
+
+  it('releases the literal capture grant after the last owner turns off', async () => {
+    const adapter = new MemoryPreferenceAdapter({
+      ...parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES),
+      imageTranslationEnabled: true,
+    });
+    adapter.grant('<all_urls>');
+
+    await new PreferenceCoordinator(adapter).run({
+      type: 'simul:preferences:patch-image-analysis',
+      patch: { imageTranslationEnabled: false },
+    });
+
+    expect(adapter.hasGrant('<all_urls>')).toBe(false);
+  });
+
+  it('retains image capture access when automatic translation narrows', async () => {
+    const adapter = new MemoryPreferenceAdapter({
+      ...parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES),
+      autoTranslateAllSites: true,
+      imageTranslationEnabled: true,
+    });
+    adapter.grant('<all_urls>');
+    const result = await new PreferenceCoordinator(adapter).run({
+      type: 'simul:preferences:commit-auto',
+      mode: 'site',
+      pageUrl: 'https://one.example/page',
+    });
+
+    expect(result.applied).toBe(true);
+    expect(adapter.hasGrant('<all_urls>')).toBe(true);
+  });
+
+  it('clears revoked automatic-all intent but keeps image intent paused', async () => {
+    const adapter = new MemoryPreferenceAdapter({
+      ...parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES),
+      autoTranslateAllSites: true,
+      imageTranslationEnabled: true,
+    });
+    const result = await new PreferenceCoordinator(adapter).run({
+      type: 'simul:preferences:reconcile',
+    });
+
+    expect(result.preferences).toMatchObject({
+      autoTranslateAllSites: false,
+      imageTranslationEnabled: true,
+    });
+  });
+
+  it('does not treat broad coverage as proof of an exact-site grant', async () => {
+    const adapter = new MemoryPreferenceAdapter({
+      ...parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES),
+      autoTranslateOrigins: ['https://one.example'],
+    });
+    adapter.grant('<all_urls>');
+    const result = await new PreferenceCoordinator(adapter).run({
+      type: 'simul:preferences:reconcile',
+    });
+
+    expect(result.preferences.autoTranslateOrigins).toEqual([]);
+  });
+
+  it('drops broad-dependent site intent after image access is revoked', async () => {
+    const adapter = new MemoryPreferenceAdapter({
+      ...parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES),
+      imageTranslationEnabled: true,
+      autoTranslateOrigins: ['https://one.example'],
+    });
+    const result = await new PreferenceCoordinator(adapter).run({
+      type: 'simul:preferences:reconcile',
+    });
+
+    expect(result.preferences).toMatchObject({
+      imageTranslationEnabled: true,
+      autoTranslateOrigins: [],
+    });
+  });
 });
 
 describe('preference coordinator message boundary', () => {
@@ -438,6 +555,7 @@ class MemoryPreferenceAdapter implements PreferenceCoordinatorAdapter {
 
   private isCovered(origin: string): boolean {
     if (this.grants.has(origin)) return true;
+    if (this.grants.has('<all_urls>')) return true;
     if (origin.startsWith('http://')) {
       return this.grants.has('http://*/*');
     }

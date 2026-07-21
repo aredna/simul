@@ -688,7 +688,11 @@ export class ImageTranslationController {
     this.environment.onDiagnostic?.('capture-started');
     const acquisition = await pixelCoordinator.acquire(job.descriptor, signal);
     if (acquisition.status !== 'ready') {
-      scheduler.defer(job);
+      if (
+        acquisition.reason === 'permission' ||
+        acquisition.reason === 'inactive'
+      ) scheduler.settle(job);
+      else scheduler.defer(job);
       this.environment.onDiagnostic?.('capture-deferred');
       this.environment.onDiagnostic?.(Object.freeze({
         stage: 'capture-deferred' as const,

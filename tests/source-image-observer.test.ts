@@ -17,6 +17,24 @@ const documentIdentity: ReplicaSourceDocumentIdentity = {
 };
 
 describe('SourceImageObserver', () => {
+  it('waits for both initial visibility tiers before scheduling an image', () => {
+    const fixture = createFixture('', { settleIntersectionsOnObserve: false });
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+
+    expect(events).toEqual([]);
+    fixture.intersections[1]!.trigger(fixture.image, true);
+    expect(events).toEqual([]);
+    fixture.intersections[0]!.trigger(fixture.image, true);
+    expect(events).toMatchObject([
+      { kind: 'upsert', input: { visibility: 'visible' } },
+    ]);
+    expect(events.some((event) =>
+      event.kind === 'upsert' && event.input.visibility === 'background'
+    )).toBe(false);
+    stop();
+  });
+
   it('shares one observer set, emits only safe facts, and feeds revisioned model changes', () => {
     const fixture = createFixture();
     const model = new SourceImageModel();
@@ -146,6 +164,33 @@ describe('SourceImageObserver', () => {
       kind: 'upsert',
       input: { nodeId: 19 },
     });
+    stop();
+  });
+
+  it('discovers an external SVG img without exposing its resource URL', () => {
+    const fixture = createFixture(
+      '<img id="external-svg" src="https://assets.example/header_logo.svg">',
+    );
+    const svg = fixture.document.querySelector<HTMLImageElement>(
+      '#external-svg',
+    )!;
+    setImageMetrics(svg, { left: 20, top: 30, width: 275, height: 30 });
+    fixture.nodeIds.set(svg, 23);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'upsert',
+        input: expect.objectContaining({
+          nodeId: 23,
+          renderedWidth: 275,
+          renderedHeight: 30,
+        }),
+      }),
+    ]));
+    expect(JSON.stringify(events)).not.toContain('header_logo.svg');
+    expect(JSON.stringify(events)).not.toContain('assets.example');
     stop();
   });
 
@@ -479,6 +524,7 @@ function createFixture(
   options: {
     readonly maxImages?: number;
     readonly useDefaultFrames?: boolean;
+    readonly settleIntersectionsOnObserve?: boolean;
   } = {},
 ) {
   const { document } = parseHTML(
@@ -500,7 +546,10 @@ function createFixture(
     documentIdentity,
     getNodeId: (candidate) => nodeIds.get(candidate),
     createIntersectionObserver: (callback) => {
-      const fake = new FakeIntersectionObserver(callback);
+      const fake = new FakeIntersectionObserver(
+        callback,
+        options.settleIntersectionsOnObserve !== false,
+      );
       intersections.push(fake);
       return fake;
     },
@@ -565,10 +614,12 @@ class FakeIntersectionObserver {
 
   constructor(
     readonly callback: (entries: readonly IntersectionObserverEntry[]) => void,
+    readonly settleOnObserve: boolean,
   ) {}
 
   observe(target: Element): void {
     this.targets.add(target);
+    if (this.settleOnObserve) this.trigger(target, false);
   }
 
   unobserve(target: Element): void {

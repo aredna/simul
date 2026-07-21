@@ -32,8 +32,7 @@ export const APPROVED_OCR_CSP =
   "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; object-src 'self';";
 export const MAX_UNPACKED_ARTIFACT_BYTES = 42 * 1024 * 1024;
 export const APPROVED_OPTIONAL_HOST_PERMISSIONS = Object.freeze([
-  'http://*/*',
-  'https://*/*',
+  '<all_urls>',
 ]);
 export const MINIMUM_CHROME_VERSION = 138;
 export const REQUIRED_UNLISTED_BUNDLES = Object.freeze([

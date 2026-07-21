@@ -477,6 +477,39 @@ describe('isolated HTML sanitizer and protocol', () => {
       '.sm\\:hidden{display:none}.bullet::before{content:"\\2022"}',
     );
   });
+
+  it('keeps behavior-suffixed layout properties but blocks legacy behavior declarations', () => {
+    const redditUtilityCss = [
+      'html{scroll-behavior:smooth}',
+      '.viewport{overscroll-behavior-y:contain;display:flex;min-height:100vh}',
+      '.media{max-width:100%;object-fit:contain}',
+    ].join('');
+
+    expect(sanitizeCss(redditUtilityCss, 'https://example.com/')).toBe(
+      redditUtilityCss,
+    );
+    expect(sanitizeCss(
+      'behavior:hover { color: red }',
+      'https://example.com/',
+    )).toBe('behavior:hover { color: red }');
+    expect(sanitizeCss(
+      'behavior:url("legacy.htc")',
+      'https://example.com/',
+      true,
+    )).toBeUndefined();
+    expect(sanitizeCss(
+      '.unsafe{behavior:url("legacy.htc")}',
+      'https://example.com/',
+    )).toBeUndefined();
+    expect(sanitizeCss(
+      String.raw`.unsafe{be\68 avior:url("legacy.htc")}`,
+      'https://example.com/',
+    )).toBeUndefined();
+    expect(sanitizeCss(
+      '.unsafe{/**/ *behavior:url("legacy.htc")}',
+      'https://example.com/',
+    )).toBeUndefined();
+  });
 });
 
 function fakeStyleSheet(

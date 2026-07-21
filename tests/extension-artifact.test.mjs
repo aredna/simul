@@ -186,7 +186,7 @@ describe('validateArtifact', () => {
 
   it.each([
     [undefined, 'missing'],
-    [['https://*/*'], 'missing HTTP access'],
+    [['http://*/*', 'https://*/*'], 'legacy wildcard pair'],
     [
       [...APPROVED_OPTIONAL_HOST_PERMISSIONS, 'https://example.com/*'],
       'excess site access',
@@ -526,7 +526,7 @@ describe('disabled OCR production profile', () => {
     const validation = await validateArtifact(artifact);
 
     expect(validation.ocrEnabled).toBe(false);
-    expect(validation.manifest.version).toBe('0.2.2');
+    expect(validation.manifest.version).toBe('0.2.3');
     expect(validation.manifest.permissions).toEqual(APPROVED_PERMISSIONS);
     expect(validation.manifest).not.toHaveProperty('content_security_policy');
     expect(validation.files).not.toContain('offscreen.html');

@@ -11,7 +11,8 @@ import {
 } from './preprocessing-profile';
 
 export const MAX_CAPTURE_RATE_PER_SECOND = 2;
-export const MIN_CAPTURE_INTERVAL_MS = 500;
+/** Stay below Chrome's documented two-captures-per-second ceiling. */
+export const MIN_CAPTURE_INTERVAL_MS = 550;
 export const MAX_OCR_INPUT_PIXELS = 4_000_000;
 export const MAX_SCREENSHOT_BYTES = 32 * 1024 * 1024;
 export const IMAGE_CAPTURE_LOCK_NAME = 'simul:ocr-visible-tab-capture-v1';
@@ -36,8 +37,36 @@ export type PixelAcquisitionResult =
   | { readonly status: 'ready'; readonly pixels: AcquiredImagePixels }
   | {
       readonly status: 'deferred';
-      readonly reason: 'hidden' | 'unstable' | 'oversized' | 'capture-failed';
+      readonly reason: PixelAcquisitionDeferralReason;
     };
+
+export type PixelAcquisitionDeferralReason =
+  | 'hidden'
+  | 'unstable'
+  | 'oversized'
+  | 'inactive'
+  | 'permission'
+  | 'quota'
+  | 'api'
+  | 'data'
+  | 'decode'
+  | 'surface'
+  | 'encode'
+  | 'digest';
+
+export type SourceTabCaptureFailureCode = Extract<
+  PixelAcquisitionDeferralReason,
+  'inactive' | 'permission' | 'quota' | 'api'
+>;
+
+/** Content-free error boundary between Chrome capture and OCR orchestration. */
+export class SourceTabCaptureError extends Error {
+  override readonly name = 'SourceTabCaptureError';
+
+  constructor(readonly code: SourceTabCaptureFailureCode) {
+    super('Visible tab capture was unavailable.');
+  }
+}
 
 interface DecodedBitmap {
   readonly width: number;
@@ -123,8 +152,12 @@ export class PixelAcquisitionCoordinator {
     try {
       this.#lastCaptureAt = this.#now();
       screenshotUrl = await this.environment.captureVisibleTab(signal);
-    } catch {
-      return { status: 'deferred', reason: 'capture-failed' };
+    } catch (error) {
+      if (signal?.aborted || isAbortError(error)) throw error;
+      return {
+        status: 'deferred',
+        reason: error instanceof SourceTabCaptureError ? error.code : 'api',
+      };
     }
     signal?.throwIfAborted();
     const after = await this.environment.source.measure(descriptor, signal);
@@ -143,8 +176,9 @@ export class PixelAcquisitionCoordinator {
     let screenshotBlob: Blob;
     try {
       screenshotBlob = await dataUrlToBlob(screenshotUrl);
-    } catch {
-      return { status: 'deferred', reason: 'capture-failed' };
+    } catch (error) {
+      if (signal?.aborted || isAbortError(error)) throw error;
+      return { status: 'deferred', reason: 'data' };
     }
     if (screenshotBlob.size < 1 || screenshotBlob.size > MAX_SCREENSHOT_BYTES) {
       return { status: 'deferred', reason: 'oversized' };
@@ -153,6 +187,11 @@ export class PixelAcquisitionCoordinator {
     let bitmap: DecodedBitmap | undefined;
     try {
       bitmap = await this.environment.decode(screenshotBlob);
+    } catch (error) {
+      if (signal?.aborted || isAbortError(error)) throw error;
+      return { status: 'deferred', reason: 'decode' };
+    }
+    try {
       const scaleX = bitmap.width / metrics.viewportWidth;
       const scaleY = bitmap.height / metrics.viewportHeight;
       if (!validScale(scaleX) || !validScale(scaleY)) {
@@ -172,26 +211,46 @@ export class PixelAcquisitionCoordinator {
         visible.bottom - visible.top,
       );
       if (!output) return { status: 'deferred', reason: 'oversized' };
-      const surface = this.environment.createSurface(output.width, output.height);
-      const context = surface.getContext('2d');
-      if (!context) return { status: 'deferred', reason: 'capture-failed' };
-      context.drawImage(
-        bitmap as unknown as CanvasImageSource,
-        crop.left,
-        crop.top,
-        crop.width,
-        crop.height,
-        0,
-        0,
-        output.width,
-        output.height,
-      );
-      const encoded = await surface.convertToBlob({ type: 'image/png' });
+      let surface: CropSurface;
+      try {
+        surface = this.environment.createSurface(output.width, output.height);
+        const context = surface.getContext('2d');
+        if (!context) return { status: 'deferred', reason: 'surface' };
+        context.drawImage(
+          bitmap as unknown as CanvasImageSource,
+          crop.left,
+          crop.top,
+          crop.width,
+          crop.height,
+          0,
+          0,
+          output.width,
+          output.height,
+        );
+      } catch (error) {
+        if (signal?.aborted || isAbortError(error)) throw error;
+        return { status: 'deferred', reason: 'surface' };
+      }
+      let encoded: Blob;
+      try {
+        encoded = await surface.convertToBlob({ type: 'image/png' });
+      } catch (error) {
+        if (signal?.aborted || isAbortError(error)) throw error;
+        return { status: 'deferred', reason: 'encode' };
+      }
       if (encoded.size < 1 || encoded.size > MAX_SCREENSHOT_BYTES) {
         return { status: 'deferred', reason: 'oversized' };
       }
       signal?.throwIfAborted();
-      const pixelHash = toHex(await this.environment.digest(await encoded.arrayBuffer()));
+      let pixelHash: string;
+      try {
+        pixelHash = toHex(
+          await this.environment.digest(await encoded.arrayBuffer()),
+        );
+      } catch (error) {
+        if (signal?.aborted || isAbortError(error)) throw error;
+        return { status: 'deferred', reason: 'digest' };
+      }
       return {
         status: 'ready',
         pixels: Object.freeze({
@@ -214,7 +273,7 @@ export class PixelAcquisitionCoordinator {
       };
     } catch (error) {
       if (signal?.aborted || isAbortError(error)) throw error;
-      return { status: 'deferred', reason: 'capture-failed' };
+      return { status: 'deferred', reason: 'surface' };
     } finally {
       bitmap?.close();
     }
@@ -254,29 +313,55 @@ export async function captureVisibleSourceTab(
     !Number.isSafeInteger(sourceTabId) || sourceTabId < 0 ||
     !Number.isSafeInteger(sourceWindowId) || sourceWindowId < 0
   ) throw new Error('Invalid source tab capture identity.');
-  return environment.withGlobalLock(async () => {
-    signal?.throwIfAborted();
-    const activeBefore = await environment.queryActiveTab(sourceWindowId);
-    signal?.throwIfAborted();
-    if (activeBefore !== sourceTabId) {
-      throw new Error('The source tab is not active for visible capture.');
-    }
-    const captureStartedAt = environment.now();
-    try {
-      const screenshot = await environment.captureVisibleTab(sourceWindowId);
-      const activeAfter = await environment.queryActiveTab(sourceWindowId);
-      if (activeAfter !== sourceTabId) {
-        throw new Error('The active tab changed during visible capture.');
+  try {
+    return await environment.withGlobalLock(async () => {
+      signal?.throwIfAborted();
+      let activeBefore: number | undefined;
+      try {
+        activeBefore = await environment.queryActiveTab(sourceWindowId);
+      } catch (error) {
+        if (signal?.aborted || isAbortError(error)) throw error;
+        throw new SourceTabCaptureError('api');
       }
-      return screenshot;
-    } finally {
-      // Hold the cross-context lane for the remainder of the quota interval,
-      // including failed API attempts that still count against Chrome's cap.
-      const remaining = MIN_CAPTURE_INTERVAL_MS -
-        (environment.now() - captureStartedAt);
-      if (remaining > 0) await environment.delay(remaining);
-    }
-  });
+      signal?.throwIfAborted();
+      if (activeBefore !== sourceTabId) {
+        throw new SourceTabCaptureError('inactive');
+      }
+      const captureStartedAt = environment.now();
+      try {
+        let screenshot: string;
+        try {
+          screenshot = await environment.captureVisibleTab(sourceWindowId);
+        } catch (error) {
+          if (signal?.aborted || isAbortError(error)) throw error;
+          throw new SourceTabCaptureError(classifyCaptureApiFailure(error));
+        }
+        signal?.throwIfAborted();
+        let activeAfter: number | undefined;
+        try {
+          activeAfter = await environment.queryActiveTab(sourceWindowId);
+        } catch (error) {
+          if (signal?.aborted || isAbortError(error)) throw error;
+          throw new SourceTabCaptureError('api');
+        }
+        signal?.throwIfAborted();
+        if (activeAfter !== sourceTabId) {
+          throw new SourceTabCaptureError('inactive');
+        }
+        return screenshot;
+      } finally {
+        // Hold the cross-context lane for the remainder of the quota interval,
+        // including failed API attempts that still count against Chrome's cap.
+        const remaining = MIN_CAPTURE_INTERVAL_MS -
+          (environment.now() - captureStartedAt);
+        if (remaining > 0) await environment.delay(remaining);
+      }
+    });
+  } catch (error) {
+    if (signal?.aborted || isAbortError(error)) throw error;
+    if (error instanceof SourceTabCaptureError) throw error;
+    throw new SourceTabCaptureError('api');
+  }
 }
 
 function browserSourceTabCaptureEnvironment(): SourceTabCaptureEnvironment {
@@ -356,5 +441,29 @@ function abortableDelay(milliseconds: number, signal?: AbortSignal): Promise<voi
 }
 
 function isAbortError(error: unknown): boolean {
-  return error instanceof DOMException && error.name === 'AbortError';
+  return Boolean(
+    error &&
+    typeof error === 'object' &&
+    'name' in error &&
+    error.name === 'AbortError',
+  );
+}
+
+function classifyCaptureApiFailure(
+  error: unknown,
+): Exclude<SourceTabCaptureFailureCode, 'inactive'> {
+  const message = error instanceof Error ? error.message.toLowerCase() : '';
+  if (
+    message.includes('<all_urls>') ||
+    message.includes('activetab') ||
+    message.includes('permission') ||
+    message.includes('not allowed')
+  ) return 'permission';
+  if (
+    message.includes('max_capture_visible_tab_calls_per_second') ||
+    message.includes('too many') ||
+    message.includes('quota') ||
+    message.includes('per second')
+  ) return 'quota';
+  return 'api';
 }

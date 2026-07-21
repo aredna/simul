@@ -4,6 +4,7 @@ import type { SourceImageDescriptor } from '../lib/ocr/contracts';
 import {
   MAX_OCR_INPUT_PIXELS,
   PixelAcquisitionCoordinator,
+  SourceTabCaptureError,
   captureVisibleSourceTab,
   type PixelAcquisitionEnvironment,
   type SourceTabCaptureEnvironment,
@@ -264,6 +265,83 @@ describe('PixelAcquisitionCoordinator', () => {
     });
   });
 
+  it.each([
+    ['permission', () => {
+      throw new SourceTabCaptureError('permission');
+    }],
+    ['quota', () => {
+      throw new SourceTabCaptureError('quota');
+    }],
+    ['api', () => {
+      throw new Error('unclassified browser failure');
+    }],
+  ] as const)('reports the bounded %s capture stage', async (reason, capture) => {
+    const coordinator = new PixelAcquisitionCoordinator(fakeEnvironment(
+      fakeSource([metrics]),
+      vi.fn(capture),
+    ));
+
+    await expect(coordinator.acquire(descriptor)).resolves.toEqual({
+      status: 'deferred',
+      reason,
+    });
+  });
+
+  it.each([
+    ['data', () => ({
+      captureVisibleTab: async () => 'not-image-data',
+    })],
+    ['decode', () => ({
+      decode: async () => {
+        throw new Error('decode failed');
+      },
+    })],
+    ['surface', () => ({
+      createSurface: () => {
+        throw new Error('surface failed');
+      },
+    })],
+    ['encode', () => ({
+      createSurface: (width: number, height: number) => ({
+        width,
+        height,
+        getContext: () => ({ drawImage: vi.fn() }),
+        convertToBlob: async () => {
+          throw new Error('encode failed');
+        },
+      }),
+    })],
+    ['digest', () => ({
+      digest: async () => {
+        throw new Error('digest failed');
+      },
+    })],
+  ] as const)('reports the bounded %s processing stage', async (reason, overrides) => {
+    const environment: PixelAcquisitionEnvironment = {
+      ...fakeEnvironment(fakeSource([metrics, metrics])),
+      ...overrides(),
+    };
+    const coordinator = new PixelAcquisitionCoordinator(environment);
+
+    await expect(coordinator.acquire(descriptor)).resolves.toEqual({
+      status: 'deferred',
+      reason,
+    });
+  });
+
+  it('propagates capture aborts instead of relabeling them as failures', async () => {
+    const coordinator = new PixelAcquisitionCoordinator(fakeEnvironment(
+      fakeSource([metrics]),
+      vi.fn(async () => {
+        throw new DOMException('superseded', 'AbortError');
+      }),
+    ));
+
+    await expect(coordinator.acquire(descriptor)).rejects.toMatchObject({
+      name: 'AbortError',
+    });
+  });
+
   it('binds viewport capture to the exact active source tab under a global lane', async () => {
     const activeIds = [4, 4];
     const events: string[] = [];
@@ -287,7 +365,7 @@ describe('PixelAcquisitionCoordinator', () => {
 
     await expect(captureVisibleSourceTab(4, 3, undefined, environment))
       .resolves.toBe('data:image/png;base64,AQID');
-    expect(events).toEqual(['lock', 'capture', 'delay:500']);
+    expect(events).toEqual(['lock', 'capture', 'delay:550']);
 
     const switched = {
       ...environment,
@@ -296,15 +374,43 @@ describe('PixelAcquisitionCoordinator', () => {
         .mockResolvedValueOnce(9),
     };
     await expect(captureVisibleSourceTab(4, 3, undefined, switched))
-      .rejects.toThrow('active tab changed');
+      .rejects.toMatchObject({ code: 'inactive' });
 
     const inactiveCapture = vi.fn(async () => 'data:image/png;base64,AQID');
     await expect(captureVisibleSourceTab(4, 3, undefined, {
       ...environment,
       queryActiveTab: async () => 9,
       captureVisibleTab: inactiveCapture,
-    })).rejects.toThrow('not active');
+    })).rejects.toMatchObject({ code: 'inactive' });
     expect(inactiveCapture).not.toHaveBeenCalled();
+  });
+
+  it.each([
+    [
+      "Either the '<all_urls>' or 'activeTab' permission is required.",
+      'permission',
+    ],
+    ['MAX_CAPTURE_VISIBLE_TAB_CALLS_PER_SECOND exceeded', 'quota'],
+    ['The tab could not be captured.', 'api'],
+  ] as const)('classifies Chrome capture rejection without exposing it', async (
+    message,
+    code,
+  ) => {
+    const environment: SourceTabCaptureEnvironment = {
+      queryActiveTab: async () => 4,
+      captureVisibleTab: async () => {
+        throw new Error(message);
+      },
+      withGlobalLock: (callback) => callback(),
+      now: () => 1_000,
+      delay: async () => undefined,
+    };
+
+    const failure = await captureVisibleSourceTab(4, 3, undefined, environment)
+      .catch((error: unknown) => error);
+    expect(failure).toBeInstanceOf(SourceTabCaptureError);
+    expect(failure).toMatchObject({ code });
+    expect((failure as Error).message).not.toContain(message);
   });
 });
 

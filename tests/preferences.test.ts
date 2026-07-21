@@ -260,6 +260,7 @@ describe('permission scope helpers', () => {
     expect(permissionOriginsForMode('all')).toEqual([
       ...ALL_SITES_PERMISSION_ORIGINS,
     ]);
+    expect(ALL_SITES_PERMISSION_ORIGINS).toEqual(['<all_urls>']);
   });
 
   it('derives only the persisted preference scopes', () => {

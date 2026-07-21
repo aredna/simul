@@ -63,6 +63,16 @@ export const MIN_ZOOM_PERCENT = 25;
 export const MAX_ZOOM_PERCENT = 300;
 
 export const ALL_SITES_PERMISSION_ORIGINS = [
+  '<all_urls>',
+] as const;
+
+/**
+ * Previous builds requested these patterns for automatic translation. They
+ * cannot authorize tabs.captureVisibleTab(), so new grants use the literal
+ * canonical pattern above. The coordinator only uses this pair to reconcile
+ * existing installs during the migration.
+ */
+export const LEGACY_ALL_SITES_PERMISSION_ORIGINS = [
   'http://*/*',
   'https://*/*',
 ] as const;

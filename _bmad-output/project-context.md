@@ -2,7 +2,7 @@
 project_name: Simul
 project_type: chrome-extension
 planning_track: quick-flow
-status: refresh-cache-banner-ocr-diagnostics-implemented
+status: isolated-visual-resource-capture-css-fixed
 ---
 
 # Simul Project Context
@@ -51,6 +51,12 @@ storage. Tesseract.js/core 7.0.0, three embedded Wasm core loaders, its Worker,
 and 22 pinned `tessdata_fast` files are local. One routed language group is
 loaded at a time and disposed after a group change or 90 seconds idle.
 
+Reliable image capture after the temporary `activeTab` grant expires uses a
+literal `<all_urls>` optional host grant shared with all-sites automatic
+translation. Chrome requests it only from an explicit user gesture. Saved OCR
+intent remains paused and actionable when the grant is absent or revoked; no
+startup prompt or capture retry loop is allowed.
+
 Recognition remains in a bounded 128-entry memory-only cache separate from the
 bounded page-text and image-line translation memories. Page-text keys include
 the exact source document while image recognition keys include provider route,
@@ -66,9 +72,10 @@ coordinates still map through the original CSS crop. Inert line overlays commit
 only when document, content revision, pixel hash, replay lease, pair epoch,
 replica image, and geometry remain current; they follow replay scroll/zoom
 without wrapping or resizing the image. Disabled builds omit the host, OCR
-assets, permission, and CSP. The canonical build adds only `offscreen` and the
-exact local Wasm/Worker CSP, validates every runtime hash/notice offline, and
-remains under 42 MiB unpacked.
+assets, permission, and CSP. The canonical build adds required `offscreen`, the
+optional user-granted all-sites capture match, and the exact local Wasm/Worker
+CSP, validates every runtime hash/notice offline, and remains under 42 MiB
+unpacked.
 
 Translation and OCR depend on an engine-neutral selected-surface router.
 Content-free `console.info` diagnostics report mirror connection/checkpoint/
@@ -85,7 +92,9 @@ manual rebuild action.
 - Vanilla HTML, CSS, and TypeScript until a documented UX need justifies a UI
   framework.
 - Production permissions stay at the documented minimum. `offscreen` is the
-  only OCR addition; every host match remains optional and user-scoped.
+  only required OCR permission addition. The all-sites capture match remains
+  optional, explicitly granted, shared by its two owners, and revoked after
+  both owners release it; every host match remains optional and user-scoped.
 - No remotely hosted executable code and no secrets in extension bundles.
 - Background and popup entrypoints stay thin; testable domain logic lives in
   `lib/`.

@@ -77,6 +77,8 @@ interface ObservedImageState {
   readonly nodeId: number;
   sourceToken: PrivateSourceToken;
   viewportToken: string;
+  visibleSettled: boolean;
+  nearSettled: boolean;
   lastEvent?: Extract<SourceImageObservationEvent, { kind: 'upsert' }>;
 }
 
@@ -367,12 +369,14 @@ export class SourceImageObserver {
       nodeId,
       sourceToken: readPrivateSourceToken(image),
       viewportToken: facts.viewportToken,
+      visibleSettled: false,
+      nearSettled: false,
     };
     this.#states.set(image, state);
     this.#visibleObserver?.observe(image);
     this.#nearObserver?.observe(image);
     this.#resizeObserver?.observe(image);
-    this.#emitUpsert(state, true, true, facts);
+    if (!state.lastEvent) this.#emitUpsert(state, true, true, facts);
   }
 
   #refresh(
@@ -421,11 +425,16 @@ export class SourceImageObserver {
     observationChanged: boolean,
     facts: ImageFacts,
   ): void {
+    // IntersectionObserver reports an initial state for every observed image.
+    // Wait for both tiers so an above-the-fold image is never first queued as
+    // background work and immediately superseded by its visible observation.
+    if (!state.visibleSettled || !state.nearSettled) return;
+    const initial = state.lastEvent === undefined;
     const input: SourceImageUpsert = Object.freeze({
       document: this.#documentIdentity,
       nodeId: state.nodeId,
-      contentChanged,
-      observationChanged,
+      contentChanged: initial || contentChanged,
+      observationChanged: initial || observationChanged,
       visibility: this.#visibility(state.image),
       connected: true,
       renderedWidth: facts.renderedWidth,
@@ -492,6 +501,10 @@ export class SourceImageObserver {
     const set = tier === 'visible' ? this.#visible : this.#near;
     for (const entry of entries) {
       if (!isImageElement(entry.target)) continue;
+      const state = this.#states.get(entry.target);
+      if (!state) continue;
+      if (tier === 'visible') state.visibleSettled = true;
+      else state.nearSettled = true;
       if (entry.isIntersecting) set.add(entry.target);
       else set.delete(entry.target);
       this.#refresh(entry.target);

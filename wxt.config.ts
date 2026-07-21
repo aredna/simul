@@ -117,7 +117,7 @@ export default defineConfig({
       'storage',
       ...(offscreenOcrEnabled ? ['offscreen' as const] : []),
     ],
-    optional_host_permissions: ['http://*/*', 'https://*/*'],
+    optional_host_permissions: ['<all_urls>'],
     ...(tesseractEnabled
       ? {
           content_security_policy: {

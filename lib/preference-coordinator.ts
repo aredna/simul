@@ -1,5 +1,6 @@
 import {
   ALL_SITES_PERMISSION_ORIGINS,
+  LEGACY_ALL_SITES_PERMISSION_ORIGINS,
   STORAGE_KEY,
   autoTranslationModeForPage,
   isAutoTranslationMode,
@@ -111,6 +112,15 @@ export class PreferenceCoordinator {
 
     if (command.type === 'simul:preferences:patch-image-analysis') {
       const preferences = withImageAnalysisSettings(current, command.patch);
+      if (
+        current.imageTranslationEnabled &&
+        !preferences.imageTranslationEnabled
+      ) {
+        await this.removeNoLongerNeededPermissions(current, preferences);
+        const reconciled = await this.reconcile(preferences);
+        await this.adapter.save(reconciled);
+        return result(reconciled, true);
+      }
       await this.adapter.save(preferences);
       return result(preferences, true);
     }
@@ -149,8 +159,8 @@ export class PreferenceCoordinator {
     // A global grant makes every exact-site contains() check return true. Drop
     // it before validating narrower choices so saved site scopes always have
     // their own grant and cannot become orphaned when All sites is disabled.
-    if (command.mode !== 'all') {
-      await this.removeIfPresent([...ALL_SITES_PERMISSION_ORIGINS]);
+    if (command.mode !== 'all' && !current.imageTranslationEnabled) {
+      await this.removeIfPresent(allBroadPermissionOrigins());
     }
 
     const preferences = await this.reconcile(candidate);
@@ -175,27 +185,46 @@ export class PreferenceCoordinator {
     candidate: CompanionPreferences,
   ): Promise<CompanionPreferences> {
     let preferences = parseCompanionPreferences(candidate);
+    const actualOrigins = new Set(await this.adapter.getAllOrigins());
+    const hasCanonicalGlobalGrant = ALL_SITES_PERMISSION_ORIGINS.every(
+      (origin) => actualOrigins.has(origin),
+    );
+    const hasLegacyGlobalGrant = LEGACY_ALL_SITES_PERMISSION_ORIGINS.every(
+      (origin) => actualOrigins.has(origin),
+    );
 
     if (preferences.autoTranslateAllSites) {
-      const hasGlobalGrant = await this.adapter.contains([
-        ...ALL_SITES_PERMISSION_ORIGINS,
-      ]);
-      if (hasGlobalGrant) {
-        await this.removeOrphanPermissions(preferences);
-        return preferences;
+      if (!hasCanonicalGlobalGrant && !hasLegacyGlobalGrant) {
+        preferences = { ...preferences, autoTranslateAllSites: false };
       }
-      preferences = { ...preferences, autoTranslateAllSites: false };
     }
-    // contains([http, https]) is false when only one wildcard remains, so
-    // remove both patterns unconditionally after global mode becomes invalid.
-    await this.removeIfPresent([...ALL_SITES_PERMISSION_ORIGINS]);
 
-    const grants = await Promise.all(
-      preferences.autoTranslateOrigins.map(async (origin) => {
-        const origins = permissionOriginsForMode('site', origin);
-        return origins.length > 0 && this.adapter.contains(origins);
-      }),
-    );
+    if (hasCanonicalGlobalGrant && hasLegacyGlobalGrant) {
+      await this.removeIfPresent([...LEGACY_ALL_SITES_PERMISSION_ORIGINS]);
+    } else if (!preferences.autoTranslateAllSites) {
+      await this.removeIfPresent([...LEGACY_ALL_SITES_PERMISSION_ORIGINS]);
+    }
+    if (
+      !preferences.autoTranslateAllSites &&
+      !preferences.imageTranslationEnabled
+    ) {
+      await this.removeIfPresent([...ALL_SITES_PERMISSION_ORIGINS]);
+    }
+
+    // A broad grant makes permissions.contains(exactSite) return true even
+    // when Chrome did not retain an independent exact-site permission. Keep
+    // that dependent intent only while image translation owns the canonical
+    // grant; its explicit disable flow materializes exact grants first. Once
+    // broad access is revoked, getAll() is the only proof a site grant remains.
+    const imageOwnedBroadCoverage =
+      preferences.imageTranslationEnabled && hasCanonicalGlobalGrant;
+    const grants = preferences.autoTranslateOrigins.map((origin) => {
+      const origins = permissionOriginsForMode('site', origin);
+      return origins.length > 0 && (
+        imageOwnedBroadCoverage ||
+        origins.every((value) => actualOrigins.has(value))
+      );
+    });
     const reconciled = {
       ...preferences,
       autoTranslateOrigins: preferences.autoTranslateOrigins.filter(
@@ -348,17 +377,33 @@ function retainedPermissionOrigins(
   const siteOrigins = preferences.autoTranslateOrigins.flatMap((origin) =>
     permissionOriginsForMode('site', origin),
   );
-  return preferences.autoTranslateAllSites
-    ? [...ALL_SITES_PERMISSION_ORIGINS, ...siteOrigins]
-    : siteOrigins;
+  const globalOrigins = preferences.autoTranslateAllSites
+    ? [
+        ...ALL_SITES_PERMISSION_ORIGINS,
+        ...LEGACY_ALL_SITES_PERMISSION_ORIGINS,
+      ]
+    : preferences.imageTranslationEnabled
+      ? [...ALL_SITES_PERMISSION_ORIGINS]
+      : [];
+  return [...globalOrigins, ...siteOrigins];
 }
 
 function isManagedPermissionOrigin(value: string): boolean {
-  if ((ALL_SITES_PERMISSION_ORIGINS as readonly string[]).includes(value)) {
+  if (
+    (ALL_SITES_PERMISSION_ORIGINS as readonly string[]).includes(value) ||
+    (LEGACY_ALL_SITES_PERMISSION_ORIGINS as readonly string[]).includes(value)
+  ) {
     return true;
   }
   if (!value.endsWith('/*')) return false;
   return permissionOriginsForMode('site', value.slice(0, -1))[0] === value;
+}
+
+function allBroadPermissionOrigins(): string[] {
+  return [
+    ...ALL_SITES_PERMISSION_ORIGINS,
+    ...LEGACY_ALL_SITES_PERMISSION_ORIGINS,
+  ];
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {
