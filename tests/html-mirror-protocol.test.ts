@@ -904,7 +904,7 @@ describe('isolated HTML sanitizer and protocol', () => {
     expect(JSON.stringify(graph)).not.toContain('javascript:');
   });
 
-  it('preserves an OpenAI-shaped dark canvas and same-document SVG logo only', () => {
+  it('preserves a synthetic dark canvas and same-document SVG logo only', () => {
     const { document, window } = parseHTML(`<!doctype html><html><body>
       <header>
         <svg id="brand" width="118" height="32" viewBox="0 0 118 32"
@@ -1051,13 +1051,13 @@ describe('isolated HTML sanitizer and protocol', () => {
   it('preserves native and ARIA activation labels while masking nested values', () => {
     const { document, window } = parseHTML(`<!doctype html><html><body>
       <button data-account="private-button-state">
-        <span title="private-descendant-title" data-user="private-descendant-data">D-U-N-S® Numberを検索・取得する</span>
-        <span>（当社サイト）</span>
-        <span>ここをクリック　＞</span>
+        <span title="private-descendant-title" data-user="private-descendant-data">公開資料を検索する</span>
+        <span>（このサイト）</span>
+        <span>詳細を見る　＞</span>
         <input value="nested-private-value">
       </button>
       <article role="button" aria-label="private-aria-label">
-        <span>Airbnb</span><span>Coinbase</span>
+        <span>Sample Studio</span><span>Example Workshop</span>
       </article>
     </body></html>`);
     const graph = sanitizeSourceDocument(
@@ -1067,11 +1067,11 @@ describe('isolated HTML sanitizer and protocol', () => {
     );
     const serialized = JSON.stringify(graph);
 
-    expect(serialized).toContain('D-U-N-S® Numberを検索・取得する');
-    expect(serialized).toContain('（当社サイト）');
-    expect(serialized).toContain('ここをクリック　＞');
-    expect(serialized).toContain('Airbnb');
-    expect(serialized).toContain('Coinbase');
+    expect(serialized).toContain('公開資料を検索する');
+    expect(serialized).toContain('（このサイト）');
+    expect(serialized).toContain('詳細を見る　＞');
+    expect(serialized).toContain('Sample Studio');
+    expect(serialized).toContain('Example Workshop');
     expect(serialized).not.toContain('nested-private-value');
     expect(serialized).not.toContain('private-button-state');
     expect(serialized).not.toContain('private-aria-label');
@@ -1351,8 +1351,8 @@ describe('isolated HTML sanitizer and protocol', () => {
     expect(readHtmlMirrorNode(graph?.root)).toBeDefined();
   });
 
-  it('admits YC static SVG data images symmetrically and rejects active SVG', () => {
-    const ycLogo = "data:image/svg+xml,%3csvg%20width='48'%20height='48'%20viewBox='0%200%2048%2048'%20fill='none'%20xmlns='http://www.w3.org/2000/svg'%3e%3cpath%20d='M47.9985%2047.9994H0V8.61853e-07H47.9985V47.9994Z'%20fill='%23FF6600'/%3e%3cpath%20d='M13.9012%2011.7843H17.6595L22.4961%2021.5325C23.203%2022.9836%2023.7984%2024.3976%2023.7984%2024.3976C23.7984%2024.3976%2024.4313%2023.021%2025.175%2021.5325L30.0868%2011.7843H33.5843L25.2865%2027.3746V37.309H22.1244V27.1884L13.9012%2011.7843Z'%20fill='white'/%3e%3c/svg%3e";
+  it('admits synthetic static SVG data images symmetrically and rejects active SVG', () => {
+    const syntheticLogo = "data:image/svg+xml,%3csvg%20width='48'%20height='48'%20viewBox='0%200%2048%2048'%20fill='none'%20xmlns='http://www.w3.org/2000/svg'%3e%3cpath%20d='M4.25%204.25H43.75V43.75H4.25Z'%20fill='%236C5CE7'/%3e%3cpath%20d='M12.5%2034C15.5%2024.25%2019.75%201.2e1%2024%2012C28.25%2012%2032.5%2024.25%2035.5%2034Z'%20fill='white'/%3e%3c/svg%3e";
     const hostile = [
       '<svg xmlns="http://www.w3.org/2000/svg"><script>alert(1)</script></svg>',
       '<svg xmlns="http://www.w3.org/2000/svg" onload="alert(1)"></svg>',
@@ -1367,7 +1367,7 @@ describe('isolated HTML sanitizer and protocol', () => {
       `<svg xmlns="http://www.w3.org/2000/svg"><filter>${'<feFlood/>'.repeat(65)}</filter></svg>`,
     ].map((svg) => `data:image/svg+xml,${encodeURIComponent(svg)}`);
     const { document, window } = parseHTML(`<!doctype html><html><body>
-      <img id="logo" src="${ycLogo}">
+      <img id="logo" src="${syntheticLogo}">
       ${hostile.map((src, index) => `<img id="bad-${index}" src="${src}">`).join('')}
     </body></html>`);
     const graph = sanitizeSourceDocument(
@@ -1377,7 +1377,7 @@ describe('isolated HTML sanitizer and protocol', () => {
     );
     const serialized = JSON.stringify(graph);
 
-    expect(serialized).toContain(ycLogo);
+    expect(serialized).toContain(syntheticLogo);
     for (const src of hostile) expect(serialized).not.toContain(src);
     expect(readHtmlMirrorNode(graph?.root)).toBeDefined();
     expect(readHtmlMirrorNode({
@@ -2191,14 +2191,14 @@ describe('isolated HTML sanitizer and protocol', () => {
   });
 
   it('keeps behavior-suffixed layout properties but blocks legacy behavior declarations', () => {
-    const redditUtilityCss = [
+    const layoutUtilityCss = [
       'html{scroll-behavior:smooth}',
       '.viewport{overscroll-behavior-y:contain;display:flex;min-height:100vh}',
       '.media{max-width:100%;object-fit:contain}',
     ].join('');
 
-    expect(sanitizeCss(redditUtilityCss, 'https://example.com/')).toBe(
-      redditUtilityCss,
+    expect(sanitizeCss(layoutUtilityCss, 'https://example.com/')).toBe(
+      layoutUtilityCss,
     );
     expect(sanitizeCss(
       'behavior:hover { color: red }',

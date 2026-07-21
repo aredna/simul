@@ -3,7 +3,7 @@
   "version": "0.3.2",
   "private": true,
   "description": "Follow a web page in a live read-only mirror with on-device translation in Chrome.",
-  "license": "SEE LICENSE IN LICENSE",
+  "license": "MIT",
   "type": "module",
   "packageManager": "npm@12.0.1",
   "engines": {

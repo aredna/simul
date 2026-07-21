@@ -76,7 +76,8 @@ as other visible text. A safe-to-sensitive transition clears its record and
 projection atomically. rrweb continues masking every editable/value-bearing
 control.
 Passive image validation admits a narrow, shape-only URL-encoded SVG data-image
-profile (including the YC logo) with the same checks on capture and receipt. A
+profile, covered by a synthetic static-logo fixture, with the same checks on
+capture and receipt. A
 persisted `Live source only` mode uses the identical isolated DOM/patch stream,
 restores source text in place, clears OCR overlays, and blocks stale text/image
 projections without recapture.

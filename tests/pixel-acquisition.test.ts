@@ -132,7 +132,7 @@ describe('PixelAcquisitionCoordinator', () => {
     });
   });
 
-  it('upscales a D-U-N-S-shaped shallow banner while retaining original CSS geometry', async () => {
+  it('upscales a shallow banner while retaining original CSS geometry', async () => {
     const bannerMetrics = {
       ...metrics,
       left: 0,

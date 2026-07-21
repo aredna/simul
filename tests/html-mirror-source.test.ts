@@ -15,7 +15,7 @@ import {
 } from '../lib/replica/html-mirror-source';
 import { createReplicaIdentity } from '../lib/replica/protocol-v2';
 
-const YC_LOGO = "data:image/svg+xml,%3csvg%20width='48'%20height='48'%20viewBox='0%200%2048%2048'%20fill='none'%20xmlns='http://www.w3.org/2000/svg'%3e%3cpath%20d='M47.9985%2047.9994H0V8.61853e-07H47.9985V47.9994Z'%20fill='%23FF6600'/%3e%3cpath%20d='M13.9012%2011.7843H17.6595L22.4961%2021.5325C23.203%2022.9836%2023.7984%2024.3976%2023.7984%2024.3976C23.7984%2024.3976%2024.4313%2023.021%2025.175%2021.5325L30.0868%2011.7843H33.5843L25.2865%2027.3746V37.309H22.1244V27.1884L13.9012%2011.7843Z'%20fill='white'/%3e%3c/svg%3e";
+const SYNTHETIC_STATIC_LOGO = "data:image/svg+xml,%3csvg%20width='48'%20height='48'%20viewBox='0%200%2048%2048'%20fill='none'%20xmlns='http://www.w3.org/2000/svg'%3e%3cpath%20d='M4.25%204.25H43.75V43.75H4.25Z'%20fill='%236C5CE7'/%3e%3cpath%20d='M12.5%2034C15.5%2024.25%2019.75%201.2e1%2024%2012C28.25%2012%2032.5%2024.25%2035.5%2034Z'%20fill='white'/%3e%3c/svg%3e";
 
 describe('HtmlMirrorSourceSession', () => {
   beforeEach(() => {
@@ -468,49 +468,49 @@ describe('HtmlMirrorSourceSession', () => {
 
   it('streams activation labels and static logos without leaking descendant metadata', () => {
     const fixture = sourceFixture(`
-      <button id="duns" data-account="checkpoint-button-secret">
-        <span id="duns-label" title="checkpoint-title-secret" data-user="checkpoint-data-secret">D-U-N-S® Numberを検索・取得する</span>
+      <button id="primary-action" data-account="checkpoint-button-secret">
+        <span id="action-label" title="checkpoint-title-secret" data-user="checkpoint-data-secret">公開資料を検索する</span>
       </button>
       <section id="companies" role="button">
-        <span id="company" title="checkpoint-company-secret">Airbnb</span>
+        <span id="company" title="checkpoint-company-secret">Sample Studio</span>
       </section>
-      <img id="yc-logo">
+      <img id="sample-logo">
     `);
     fixture.start();
 
     const checkpointJson = JSON.stringify(fixture.checkpoints()[0]);
-    expect(checkpointJson).toContain('D-U-N-S® Numberを検索・取得する');
-    expect(checkpointJson).toContain('Airbnb');
+    expect(checkpointJson).toContain('公開資料を検索する');
+    expect(checkpointJson).toContain('Sample Studio');
     expect(checkpointJson).not.toContain('checkpoint-button-secret');
     expect(checkpointJson).not.toContain('checkpoint-title-secret');
     expect(checkpointJson).not.toContain('checkpoint-data-secret');
     expect(checkpointJson).not.toContain('checkpoint-company-secret');
     fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
 
-    const dunsLabel = fixture.document.querySelector('#duns-label')!;
-    const dunsText = dunsLabel.firstChild as Text;
-    dunsText.nodeValue = 'ここをクリック　＞';
-    dunsLabel.setAttribute('title', 'patch-title-secret');
-    dunsLabel.setAttribute('data-user', 'patch-data-secret');
+    const actionLabel = fixture.document.querySelector('#action-label')!;
+    const actionText = actionLabel.firstChild as Text;
+    actionText.nodeValue = '詳細を見る　＞';
+    actionLabel.setAttribute('title', 'patch-title-secret');
+    actionLabel.setAttribute('data-user', 'patch-data-secret');
     const company = fixture.document.querySelector('#company')!;
     const companyText = company.firstChild as Text;
-    companyText.nodeValue = 'Coinbase';
+    companyText.nodeValue = 'Example Workshop';
     company.setAttribute('title', 'patch-company-secret');
-    const logo = fixture.document.querySelector('#yc-logo')!;
-    logo.setAttribute('src', YC_LOGO);
+    const logo = fixture.document.querySelector('#sample-logo')!;
+    logo.setAttribute('src', SYNTHETIC_STATIC_LOGO);
 
-    fixture.mutate(characterDataRecord(dunsText));
-    fixture.mutate(attributeRecord(dunsLabel, 'title'));
-    fixture.mutate(attributeRecord(dunsLabel, 'data-user'));
+    fixture.mutate(characterDataRecord(actionText));
+    fixture.mutate(attributeRecord(actionLabel, 'title'));
+    fixture.mutate(attributeRecord(actionLabel, 'data-user'));
     fixture.mutate(characterDataRecord(companyText));
     fixture.mutate(attributeRecord(company, 'title'));
     fixture.mutate(attributeRecord(logo, 'src'));
     fixture.flushFrame();
 
     const patchJson = JSON.stringify(fixture.patches().at(-1));
-    expect(patchJson).toContain('ここをクリック　＞');
-    expect(patchJson).toContain('Coinbase');
-    expect(patchJson).toContain(YC_LOGO);
+    expect(patchJson).toContain('詳細を見る　＞');
+    expect(patchJson).toContain('Example Workshop');
+    expect(patchJson).toContain(SYNTHETIC_STATIC_LOGO);
     expect(patchJson).not.toContain('patch-title-secret');
     expect(patchJson).not.toContain('patch-data-secret');
     expect(patchJson).not.toContain('patch-company-secret');

@@ -26,14 +26,47 @@ Simul takes a different approach:
 The goal is useful visual comparison, not a claim that every website can be
 reproduced pixel-for-pixel without executing it.
 
-## Build provenance
+## OpenAI Build Week disclosure
 
-Planning, architecture, research, implementation, debugging, testing, and
-documentation were produced with **100% Codex 5.6 Sol Ultra + BMAD Method**.
+Simul was newly created during the OpenAI Build Week Submission Period. The
+repository has one root commit: [`f1e8546`](https://github.com/aredna/simul/commit/f1e8546f65e70c2e4d270b39bd2f9b80dc2f7828),
+dated July 18, 2026 at 10:03 PM PDT. The entrant attests that no pre-existing
+Simul code was carried into the submission. The installable 0.3.2 release
+candidate was produced at
+[`90f8f4b`](https://github.com/aredna/simul/commit/90f8f4b3dfe789c8ea63083f625080bf46e18b80),
+and [`ee8398d`](https://github.com/aredna/simul/commit/ee8398d84f37e59b1a1229825ec61129b405afec)
+is the immutable functional baseline immediately before non-runtime compliance
+work. The completed submission tree is marked by the immutable
+[`openai-build-week-2026-submission`](https://github.com/aredna/simul/tree/openai-build-week-2026-submission)
+tag.
 
-The extension is built with Node.js 24 LTS, npm 12, WXT, TypeScript, and Chrome
-Manifest V3. It contains no cloud translation integration, bundled service
+The entrant and Codex collaborated throughout the project:
+
+| Contributor | Work and decisions |
+| --- | --- |
+| **Entrant** | Defined the problem and requirements; chose the read-only side-by-side product direction, privacy and fidelity tradeoffs, feature priorities, and acceptance criteria; repeatedly tested real websites in Chrome; and approved release decisions. |
+| **Codex powered by GPT-5.6 Sol Ultra** | Turned that direction into BMAD Method research and specifications; proposed architecture and security boundaries; implemented and debugged the extension; created tests and the ready-to-load artifact; and performed adversarial, privacy, dependency, licensing, and release reviews. |
+
+Codex accelerated the work by keeping requirements, research, implementation,
+tests, and documentation connected through the primary long-running build
+thread and checked-in BMAD Method artifacts. Representative decision records
+include the
+[initial product specification](_bmad-output/implementation-artifacts/spec-side-by-side-page-translation.md),
+[live-replica and OCR research](_bmad-output/planning-artifacts/research/technical-live-dom-replication-ocr-extension-access-research-2026-07-19.md),
+[isolated-mirror specification](_bmad-output/implementation-artifacts/spec-isolated-html-mirror-engine.md),
+and [passive-fidelity architecture](_bmad-output/specs/spec-passive-replica-fidelity/architecture.md).
+
+GPT-5.6 Sol Ultra was the development model powering Codex; it is **not** a
+runtime translation API in Simul. The shipped extension uses Chrome's on-device
+Translator and optional TextDetector APIs plus packaged Tesseract.js assets. It
+makes no OpenAI API call and contains no cloud translation integration, service
 credentials, analytics, or remotely hosted executable code.
+
+The BMAD Method supplied third-party workflow templates and generated project
+tooling; it is not part of the extension runtime. WXT, TypeScript, rrweb,
+Tesseract.js, and other third-party work retain their own licenses and notices.
+See the [complete Build Week disclosure](docs/openai-build-week-disclosure.md)
+and [third-party notices](THIRD_PARTY_NOTICES.md).
 
 ## Install the ready-to-load Chrome extension
 
@@ -313,11 +346,10 @@ implementation artifacts live in [_bmad-output](_bmad-output/).
 
 ## License and third-party notices
 
-The public repository is source-available but is **not currently released
-under an open-source license**. The project license permits downloading,
-copying, and using an unmodified build for personal, non-commercial use,
-evaluation, and testing; it does not permit modification, redistribution, or
-commercial use. See [LICENSE](LICENSE) for the controlling terms.
+Original Simul material is open source under the standard
+[MIT License](LICENSE). Anyone may use, copy, modify, merge, publish,
+distribute, sublicense, or sell copies subject to the license's notice and
+permission-text requirement.
 
 Bundled libraries, OCR runtime code, language models, and repository tooling
 retain their own terms. The complete production and source-distribution
