@@ -2,6 +2,9 @@ import {
   VISUAL_STYLE_PROPERTIES,
   isSafeImageSource,
   type VisualControlShell,
+  type VisualOptgroupState,
+  type VisualOptionState,
+  type VisualSelectState,
   type VisualStyle,
 } from './page-snapshot';
 import {
@@ -13,6 +16,99 @@ import {
 } from './primary-scroll';
 
 export const LIVE_MIRROR_VERSION = 1 as const;
+export const LIVE_PAGE_OBSERVER_IMPLEMENTATION_REVISION = 5 as const;
+export const LIVE_PAGE_OBSERVER_RUNTIME_MARKER = 'simul:live-observer-v5';
+
+type LivePageObserverBridge = Readonly<{
+  implementationRevision: typeof LIVE_PAGE_OBSERVER_IMPLEMENTATION_REVISION;
+  runtimeMarker: typeof LIVE_PAGE_OBSERVER_RUNTIME_MARKER;
+  install: typeof installLivePageObserver;
+  captureDelta: typeof captureLivePageDelta;
+  unregister: typeof unregisterLivePageObserver;
+}>;
+
+type LivePageObserverGlobal = typeof globalThis & {
+  __simulLivePageObserverBridgeV4?: LivePageObserverBridge;
+};
+
+/** Installs the locally bundled bridge used by Chrome's isolated page world. */
+export function installLivePageObserverBridge(): void {
+  const target = globalThis as LivePageObserverGlobal;
+  target.__simulLivePageObserverBridgeV4 = Object.freeze({
+    implementationRevision: LIVE_PAGE_OBSERVER_IMPLEMENTATION_REVISION,
+    runtimeMarker: LIVE_PAGE_OBSERVER_RUNTIME_MARKER,
+    install: installLivePageObserver,
+    captureDelta: captureLivePageDelta,
+    unregister: unregisterLivePageObserver,
+  });
+}
+
+/** Self-contained executeScript invoker; Chrome serializes only this body. */
+export function invokeLivePageObserverBridge(
+  sessionId: string,
+  generation: number,
+): LivePageObserverInstallation | undefined {
+  const bridge = (
+    globalThis as typeof globalThis & {
+      __simulLivePageObserverBridgeV4?: {
+        implementationRevision?: unknown;
+        install?: unknown;
+      };
+    }
+  ).__simulLivePageObserverBridgeV4;
+  if (
+    bridge?.implementationRevision !== 5 ||
+    typeof bridge.install !== 'function'
+  ) return undefined;
+  return (bridge.install as (
+    session: string,
+    nextGeneration: number,
+  ) => LivePageObserverInstallation)(sessionId, generation);
+}
+
+/** Self-contained best-effort teardown invoker for an installed page bridge. */
+export function invokeLivePageObserverUnregisterBridge(sessionId: string): boolean {
+  const bridge = (
+    globalThis as typeof globalThis & {
+      __simulLivePageObserverBridgeV4?: {
+        implementationRevision?: unknown;
+        unregister?: unknown;
+      };
+    }
+  ).__simulLivePageObserverBridgeV4;
+  if (
+    bridge?.implementationRevision !== 5 ||
+    typeof bridge.unregister !== 'function'
+  ) return false;
+  return (bridge.unregister as (session: string) => boolean)(sessionId);
+}
+
+/** Closure-free invoker for the bundled incremental DOM capture function. */
+export function invokeLivePageDeltaCaptureBridge(
+  sessionId: string,
+  generation: number,
+  sequence: number,
+  requestedNodeIds: string[],
+): LivePageDelta | undefined {
+  const bridge = (
+    globalThis as typeof globalThis & {
+      __simulLivePageObserverBridgeV4?: {
+        implementationRevision?: unknown;
+        captureDelta?: unknown;
+      };
+    }
+  ).__simulLivePageObserverBridgeV4;
+  if (
+    bridge?.implementationRevision !== 5 ||
+    typeof bridge.captureDelta !== 'function'
+  ) return undefined;
+  return (bridge.captureDelta as (
+    session: string,
+    nextGeneration: number,
+    nextSequence: number,
+    nodeIds: string[],
+  ) => LivePageDelta)(sessionId, generation, sequence, requestedNodeIds);
+}
 
 export interface LivePageDirtyMessage {
   type: 'simul:page-dirty';
@@ -71,6 +167,9 @@ export interface LiveVisualElementNode {
   tag: string;
   style: VisualStyle;
   controlShell?: VisualControlShell;
+  selectState?: VisualSelectState;
+  optionState?: VisualOptionState;
+  optgroupState?: VisualOptgroupState;
   attributes?: Record<string, string>;
   children: LiveVisualNode[];
 }
@@ -113,6 +212,11 @@ const MAX_DELTA_STYLE_CHARACTERS = 1_000_000;
 const MAX_DELTA_ATTRIBUTE_CHARACTERS = 300_000;
 const MAX_DELTA_IMAGE_URL_CHARACTERS = 200_000;
 const MAX_DOCUMENT_LANGUAGE_LENGTH = 35;
+const MAX_TRACKED_SELECTS = 10_000;
+const MAX_SELECT_POLL_WORK = 512;
+const MAX_SELECT_FINGERPRINT_OPTIONS = 10_000;
+const MAX_SELECT_POLL_OPTION_WORK = 20_000;
+const SELECT_POLL_INTERVAL_MS = 250;
 
 /**
  * Install one mutation/scroll bridge in the extension's isolated world. It
@@ -123,6 +227,7 @@ export function installLivePageObserver(
   generation: number,
 ): LivePageObserverInstallation {
   type Registry = {
+    implementationRevision?: number;
     sessions: Map<string, number>;
     nodeIds: WeakMap<Node, string>;
     nodes: Map<string, Node>;
@@ -134,6 +239,19 @@ export function installLivePageObserver(
   const isolatedGlobal = globalThis as typeof globalThis & {
     __simulLiveMirrorV1?: Registry;
   };
+  const staleRegistry = isolatedGlobal.__simulLiveMirrorV1;
+  if (
+    staleRegistry &&
+    staleRegistry.implementationRevision !==
+      LIVE_PAGE_OBSERVER_IMPLEMENTATION_REVISION
+  ) {
+    try {
+      staleRegistry.disconnect();
+    } catch {
+      // A prior extension version may already have partially failed.
+    }
+    delete isolatedGlobal.__simulLiveMirrorV1;
+  }
   const existingRegistry = isolatedGlobal.__simulLiveMirrorV1;
   if (existingRegistry) {
     if (
@@ -182,14 +300,160 @@ export function installLivePageObserver(
   const observedRootList: Array<Document | ShadowRoot> = [];
   const pendingCustomElements = new Map<string, Set<Element>>();
   const sessions = new Map([[sessionId, generation]]);
+  const selectCandidates: HTMLSelectElement[] = [];
+  const selectFingerprints = new WeakMap<HTMLSelectElement, string>();
+  let selectPollCursor = 0;
+  let selectPollTimer: ReturnType<typeof setTimeout> | undefined;
+  let selectTrackingOverflow = false;
+
+  const selectIsOpen = (select: HTMLSelectElement): boolean => {
+    try {
+      return select.matches(':open');
+    } catch {
+      return false;
+    }
+  };
+
+  const selectVisibilityFingerprint = (select: HTMLSelectElement): string => {
+    try {
+      const style = window.getComputedStyle(select);
+      const overflow = `${style.overflow}:${style.overflowX}:${style.overflowY}`;
+      const transform = style.transform || 'none';
+      const rect = transform !== 'none' ? select.getBoundingClientRect() : undefined;
+      return [
+        style.display,
+        style.visibility,
+        style.opacity,
+        style.getPropertyValue('content-visibility'),
+        style.position,
+        style.left,
+        style.top,
+        style.width,
+        style.height,
+        overflow,
+        transform,
+        rect?.width ?? '',
+        rect?.height ?? '',
+      ].join(':');
+    } catch {
+      return 'unreadable';
+    }
+  };
+
+  const selectFingerprint = (select: HTMLSelectElement): string | undefined => {
+    try {
+      const options = select.options;
+      const optionCount = options.length;
+      const inspected = select.multiple
+        ? Math.min(optionCount, MAX_SELECT_FINGERPRINT_OPTIONS)
+        : 0;
+      // FNV-1a keeps the retained state compact while observing every option
+      // that the bounded live-delta graph can represent.
+      let selectedHash = 0x811c9dc5;
+      let selectedHash2 = 5381;
+      let selectedCount = 0;
+      for (let index = 0; index < inspected; index += 1) {
+        const option = options.item(index);
+        const selectedCode = option?.selected ? index + 1 : 0;
+        if (selectedCode !== 0) selectedCount += 1;
+        selectedHash ^= selectedCode;
+        selectedHash = Math.imul(selectedHash, 0x01000193) >>> 0;
+        selectedHash2 = (Math.imul(selectedHash2, 33) ^ selectedCode) >>> 0;
+      }
+      return [
+        select.disabled ? 1 : 0,
+        select.multiple ? 1 : 0,
+        selectIsOpen(select) ? 1 : 0,
+        selectVisibilityFingerprint(select),
+        optionCount,
+        select.selectedIndex,
+        inspected,
+        selectedHash,
+        selectedHash2,
+        selectedCount,
+      ].join(':');
+    } catch {
+      return undefined;
+    }
+  };
+
+  const pollSelectState = (): void => {
+    selectPollTimer = undefined;
+    if (stopped || selectCandidates.length === 0) return;
+    let inspected = 0;
+    let inspectedOptions = 0;
+    while (inspected < MAX_SELECT_POLL_WORK && selectCandidates.length > 0) {
+      if (selectPollCursor >= selectCandidates.length) selectPollCursor = 0;
+      const select = selectCandidates[selectPollCursor];
+      if (!select?.isConnected) {
+        if (select) selectFingerprints.delete(select);
+        selectCandidates.splice(selectPollCursor, 1);
+        continue;
+      }
+      const optionWork = select.multiple
+        ? Math.min(select.options.length, MAX_SELECT_FINGERPRINT_OPTIONS)
+        : 0;
+      if (
+        inspected > 0 &&
+        inspectedOptions + optionWork > MAX_SELECT_POLL_OPTION_WORK
+      ) break;
+      selectPollCursor += 1;
+      inspected += 1;
+      inspectedOptions += optionWork;
+      const previous = selectFingerprints.get(select);
+      const current = selectFingerprint(select);
+      if (current === undefined) continue;
+      selectFingerprints.set(select, current);
+      if (previous === undefined || previous === current) continue;
+      const nodeId = nodeIds.get(select);
+      if (nodeId) dirtyIds.add(nodeId);
+    }
+    if (dirtyIds.size > 0) scheduleFlush();
+    if (!stopped && selectCandidates.length > 0) {
+      selectPollTimer = setTimeout(pollSelectState, SELECT_POLL_INTERVAL_MS);
+    }
+  };
+
+  const scheduleSelectPoll = (): void => {
+    if (stopped || selectPollTimer !== undefined || selectCandidates.length === 0) {
+      return;
+    }
+    selectPollTimer = setTimeout(pollSelectState, SELECT_POLL_INTERVAL_MS);
+  };
+
+  const trackSelect = (node: Node): void => {
+    if (!(node instanceof HTMLSelectElement) || selectFingerprints.has(node)) {
+      return;
+    }
+    if (selectCandidates.length >= MAX_TRACKED_SELECTS) {
+      // Never silently leave an untracked select stale. A root dirty signal
+      // makes the bounded delta path declare desynchronization and request a
+      // fresh snapshot when the page exceeds its representable envelope.
+      if (!selectTrackingOverflow) {
+        selectTrackingOverflow = true;
+        dirtyIds.add(idFor(document.documentElement));
+        scheduleFlush();
+      }
+      return;
+    }
+    const fingerprint = node.multiple ? 'pending' : selectFingerprint(node);
+    if (fingerprint === undefined) return;
+    selectCandidates.push(node);
+    selectFingerprints.set(node, fingerprint);
+    scheduleSelectPoll();
+  };
 
   const idFor = (node: Node): string => {
     const existing = nodeIds.get(node);
-    if (existing) return existing;
+    if (existing) {
+      trackSelect(node);
+      return existing;
+    }
     const id = `n${nextNodeId}`;
     nextNodeId += 1;
     nodeIds.set(node, id);
     nodes.set(id, node);
+    trackSelect(node);
     return id;
   };
 
@@ -268,12 +532,22 @@ export function installLivePageObserver(
     let current = node.nodeType === Node.ELEMENT_NODE
       ? (node as Element)
       : composedParent(node);
+    for (let owner = current; owner; owner = composedParent(owner)) {
+      const tagName = owner.localName.toLowerCase();
+      if (tagName === 'datalist') break;
+      if (tagName === 'select') {
+        current = owner;
+        break;
+      }
+    }
     if (
       current &&
       (current instanceof HTMLInputElement ||
         current instanceof HTMLTextAreaElement ||
-        current instanceof HTMLSelectElement ||
-        current.hasAttribute('contenteditable'))
+        (
+          current.hasAttribute('contenteditable') &&
+          current.getAttribute('contenteditable')?.trim().toLowerCase() !== 'false'
+        ))
     ) {
       current = composedParent(current);
     }
@@ -401,6 +675,24 @@ export function installLivePageObserver(
     scheduleFlush();
   };
 
+  const onSelectStateEvent = (event: Event): void => {
+    const target = event.target;
+    if (!(target instanceof Element)) return;
+    let select: Element | null = target;
+    while (select && select.localName.toLowerCase() !== 'select') {
+      select = composedParent(select);
+    }
+    if (!select) return;
+    // Selection is reflected through IDL state rather than a DOM mutation,
+    // and a customizable select's :open state is surfaced by toggle events.
+    // Prefer the select itself so a live replacement carries the typed option
+    // state without rebuilding an unrelated ancestor.
+    const known = nodeIds.has(select) ? select : nearestKnownElement(select);
+    if (!known) return;
+    dirtyIds.add(idFor(known));
+    scheduleFlush();
+  };
+
   const observeRoot = (root: Document | ShadowRoot): void => {
     if (observedRoots.has(root)) return;
     observedRoots.add(root);
@@ -419,6 +711,13 @@ export function installLivePageObserver(
     root.addEventListener('load', onVisualStateEvent, true);
     root.addEventListener('transitionend', onVisualStateEvent, true);
     root.addEventListener('animationend', onVisualStateEvent, true);
+    root.addEventListener('input', onSelectStateEvent, true);
+    root.addEventListener('change', onSelectStateEvent, true);
+    root.addEventListener('beforetoggle', onSelectStateEvent, true);
+    root.addEventListener('toggle', onSelectStateEvent, true);
+    root.addEventListener('click', onSelectStateEvent, true);
+    root.addEventListener('keydown', onSelectStateEvent, true);
+    root.addEventListener('pointerdown', onSelectStateEvent, true);
     root.addEventListener('scroll', onScroll, true);
     observeOpenRoots(root);
   };
@@ -546,6 +845,7 @@ export function installLivePageObserver(
   };
 
   const registry: Registry = {
+    implementationRevision: LIVE_PAGE_OBSERVER_IMPLEMENTATION_REVISION,
     sessions,
     nodeIds,
     nodes,
@@ -560,9 +860,17 @@ export function installLivePageObserver(
         root.removeEventListener('load', onVisualStateEvent, true);
         root.removeEventListener('transitionend', onVisualStateEvent, true);
         root.removeEventListener('animationend', onVisualStateEvent, true);
+        root.removeEventListener('input', onSelectStateEvent, true);
+        root.removeEventListener('change', onSelectStateEvent, true);
+        root.removeEventListener('beforetoggle', onSelectStateEvent, true);
+        root.removeEventListener('toggle', onSelectStateEvent, true);
+        root.removeEventListener('click', onSelectStateEvent, true);
+        root.removeEventListener('keydown', onSelectStateEvent, true);
+        root.removeEventListener('pointerdown', onSelectStateEvent, true);
         root.removeEventListener('scroll', onScroll, true);
       }
       if (flushTimer !== undefined) clearTimeout(flushTimer);
+      if (selectPollTimer !== undefined) clearTimeout(selectPollTimer);
       if (scrollFrame) cancelAnimationFrame(scrollFrame);
       if (initialScrollTimer !== undefined) clearTimeout(initialScrollTimer);
       resizeObserver?.disconnect();
@@ -688,8 +996,8 @@ export function captureLivePageDelta(
     'circle', 'code', 'col', 'colgroup', 'dd', 'details', 'div', 'dl', 'dt',
     'em', 'ellipse', 'figcaption', 'figure', 'footer', 'g', 'h1', 'h2', 'h3',
     'h4', 'h5', 'h6', 'header', 'hr', 'i', 'img', 'label', 'li', 'line',
-    'main', 'mark', 'nav', 'ol', 'p', 'path', 'picture', 'polygon',
-    'polyline', 'pre', 'rect', 'section', 'small', 'source', 'span', 'strong',
+    'main', 'mark', 'nav', 'ol', 'p', 'path', 'picture', 'polygon', 'polyline',
+    'pre', 'rect', 'section', 'select', 'small', 'source', 'span', 'strong',
     'sub', 'summary', 'sup', 'svg', 'table', 'tbody', 'td', 'tfoot', 'th',
     'thead', 'tr', 'u', 'ul',
   ]);
@@ -697,9 +1005,11 @@ export function captureLivePageDelta(
     'button', 'menuitem', 'menuitemcheckbox', 'menuitemradio', 'tab', 'treeitem',
   ]);
   const privateRoles = new Set([
-    'checkbox', 'combobox', 'listbox', 'option', 'radio', 'searchbox', 'slider',
-    'spinbutton', 'switch', 'textbox',
+    'checkbox', 'combobox', 'radio', 'searchbox', 'slider', 'spinbutton',
+    'switch', 'textbox',
   ]);
+  const publicMenuRoles = new Set(['listbox', 'menu', 'option']);
+  type SourceRoleKind = 'private' | 'activation' | 'public-menu';
 
   const pageUrl = (): string => {
     try {
@@ -751,20 +1061,69 @@ export function captureLivePageDelta(
   const hidden = (element: Element): boolean => {
     if (element.hasAttribute('hidden')) return true;
     const style = window.getComputedStyle(element);
-    return (
+    if (
       style.display === 'none' ||
       style.visibility === 'hidden' ||
       style.visibility === 'collapse' ||
       style.opacity === '0'
-    );
+    ) return true;
+    if (element.tagName !== 'SELECT') return false;
+    const value = (property: string): string => {
+      try {
+        return style.getPropertyValue(property).trim().toLowerCase();
+      } catch {
+        return '';
+      }
+    };
+    const pixels = (property: string): number | undefined => {
+      const match = /^(-?\d+(?:\.\d+)?)px$/u.exec(value(property));
+      if (!match) return undefined;
+      const parsed = Number(match[1]);
+      return Number.isFinite(parsed) ? parsed : undefined;
+    };
+    const overflow = `${value('overflow')} ${value('overflow-x')} ${
+      value('overflow-y')
+    }`;
+    const width = pixels('width');
+    const height = pixels('height');
+    const position = value('position');
+    const left = pixels('left');
+    const top = pixels('top');
+    const positionedOffscreen = (position === 'absolute' || position === 'fixed') &&
+      (
+        (left !== undefined && width !== undefined && left + width <= 0) ||
+        (top !== undefined && height !== undefined && top + height <= 0)
+      );
+    const transform = value('transform');
+    let collapsedTransform = false;
+    if (transform && transform !== 'none') {
+      try {
+        const rect = element.getBoundingClientRect();
+        collapsedTransform = rect.width <= 0 || rect.height <= 0;
+      } catch {
+        collapsedTransform = /(?:scale(?:3d|x|y)?\([^)]*\b0(?:[),]|\s))/u
+          .test(transform);
+      }
+    }
+    return value('content-visibility') === 'hidden' ||
+      positionedOffscreen ||
+      collapsedTransform ||
+      (/(?:^|\s)(?:hidden|clip)(?:\s|$)/u.test(overflow) &&
+        (width === 0 || height === 0));
   };
-  const readStyle = (element: Element): Record<string, string> => {
+  const readStyle = (
+    element: Element,
+    includePassiveImages = true,
+  ): Record<string, string> => {
     const computed = window.getComputedStyle(element);
     const style: Record<string, string> = {};
     for (const property of styleProperties) {
       const value = computed.getPropertyValue(property).trim();
       if (!value || value.length > 500) continue;
-      if (property === 'background-image' && !safeBackground(value)) continue;
+      if (
+        property === 'background-image' &&
+        (!includePassiveImages || !safeBackground(value))
+      ) continue;
       const characters = property.length + value.length;
       if (styleCharacters + characters > maxStyleCharacters) {
         desynchronized = true;
@@ -775,20 +1134,60 @@ export function captureLivePageDelta(
     }
     return style;
   };
+  const hasPrivateContentEditableState = (element: Element): boolean => {
+    const value = element.getAttribute('contenteditable');
+    return value !== null && value.trim().toLowerCase() !== 'false';
+  };
+  const roleTokens = (element: Element): string[] =>
+    element.getAttribute('role')?.trim().toLowerCase().split(/\s+/u) ?? [];
+  const roleKind = (element: Element): SourceRoleKind | undefined => {
+    for (const role of roleTokens(element)) {
+      if (privateRoles.has(role)) return 'private';
+      if (publicRoles.has(role)) return 'activation';
+      if (publicMenuRoles.has(role)) return 'public-menu';
+    }
+    return undefined;
+  };
+  const composedParent = (element: Element): Element | null => {
+    if (element.parentElement) return element.parentElement;
+    const root = element.getRootNode();
+    return typeof ShadowRoot !== 'undefined' && root instanceof ShadowRoot
+      ? root.host
+      : null;
+  };
+  const isActivationElement = (element: Element): boolean =>
+    element instanceof HTMLButtonElement ||
+    roleKind(element) === 'activation';
+  const hasPrivateOrActivationAncestor = (element: Element): boolean => {
+    let ancestor = composedParent(element);
+    for (let depth = 0; ancestor && depth < 128; depth += 1) {
+      if (
+        isActivationElement(ancestor) ||
+        hasPrivateContentEditableState(ancestor) ||
+        roleKind(ancestor) === 'private'
+      ) return true;
+      ancestor = composedParent(ancestor);
+    }
+    return ancestor !== null;
+  };
   const shellFor = (element: Element): VisualControlShell | undefined => {
     if (['DATALIST', 'OPTION', 'OPTGROUP', 'OUTPUT'].includes(element.tagName)) {
       return 'input';
     }
     if (
       element instanceof HTMLInputElement ||
-      element.hasAttribute('contenteditable')
+      hasPrivateContentEditableState(element)
     ) return 'input';
     if (element instanceof HTMLTextAreaElement) return 'textarea';
-    if (element instanceof HTMLSelectElement) return 'select';
+    if (element instanceof HTMLSelectElement) {
+      return ['private', 'activation'].includes(roleKind(element) ?? '') ||
+        hasPrivateOrActivationAncestor(element)
+        ? 'input'
+        : 'select';
+    }
     if (element instanceof HTMLButtonElement) return 'button';
-    const roles = element.getAttribute('role')?.trim().toLowerCase().split(/\s+/u) ?? [];
-    if (roles.some((role) => privateRoles.has(role))) return 'input';
-    return roles.some((role) => publicRoles.has(role)) ? 'button' : undefined;
+    if (roleKind(element) === 'private') return 'input';
+    return roleKind(element) === 'activation' ? 'button' : undefined;
   };
   const visualTag = (element: Element): string => {
     const candidate = element.tagName.toLowerCase();
@@ -800,6 +1199,7 @@ export function captureLivePageDelta(
   const attributesFor = (
     element: Element,
     tag: string,
+    omitResources = false,
   ): Record<string, string> | undefined => {
     const attributes: Record<string, string> = {};
     const addAttribute = (
@@ -819,7 +1219,7 @@ export function captureLivePageDelta(
       attributeCharacters += characters;
       if (imageUrl) imageUrlCharacters += value.length;
     };
-    if (tag === 'img' && element instanceof HTMLImageElement) {
+    if (!omitResources && tag === 'img' && element instanceof HTMLImageElement) {
       const src = element.currentSrc || element.src;
       if (safeImage(src)) addAttribute('src', src, true);
       else if (src.length > maxImageUrlLength) desynchronized = true;
@@ -837,7 +1237,12 @@ export function captureLivePageDelta(
     }
     for (const name of safeNames) {
       const value = element.getAttribute(name);
-      if (value && value.length <= 2_048 && !/(?:javascript:|data:|url\s*\()/iu.test(value)) {
+      if (
+        value &&
+        value.length <= 2_048 &&
+        !/(?:javascript:|data:|url\s*\()/iu.test(value) &&
+        (!omitResources || !/(?:https?:|blob:)/iu.test(value))
+      ) {
         addAttribute(name, value);
       }
     }
@@ -861,7 +1266,255 @@ export function captureLivePageDelta(
     if (element instanceof HTMLAudioElement) return 'Audio content omitted';
     return undefined;
   };
-  const build = (node: Node, depth: number): LiveVisualNode | undefined => {
+  const currentBooleanProperty = (
+    element: Element,
+    property: 'disabled' | 'multiple' | 'selected',
+  ): boolean => {
+    const value = (element as unknown as Record<string, unknown>)[property];
+    return typeof value === 'boolean' ? value : element.hasAttribute(property);
+  };
+  const selectPickerIsOpen = (element: Element): boolean => {
+    try {
+      return element.matches(':open');
+    } catch {
+      return false;
+    }
+  };
+  const selectElementIsHidden = (element: Element): boolean => {
+    if (element.hasAttribute('hidden')) return true;
+    try {
+      const style = window.getComputedStyle(element);
+      return style.display === 'none' ||
+        style.visibility === 'hidden' ||
+        style.visibility === 'collapse' ||
+        style.opacity === '0' ||
+        style.getPropertyValue('content-visibility').trim() === 'hidden';
+    } catch {
+      return true;
+    }
+  };
+  const directOptgroupLegend = (element: Element): Element | undefined => {
+    let inspected = 0;
+    for (let child = element.firstElementChild; child; child = child.nextElementSibling) {
+      inspected += 1;
+      if (inspected > 512) {
+        desynchronized = true;
+        return undefined;
+      }
+      if (child.tagName === 'LEGEND') return child;
+    }
+    return undefined;
+  };
+  const selectEntryLabel = (element: Element): string => {
+    const rawAttributeLabel = element.getAttribute('label');
+    const hasAuthoritativeAttributeLabel = rawAttributeLabel !== null &&
+      rawAttributeLabel !== '';
+    const attributeLabel = rawAttributeLabel?.trim() ?? '';
+    const legend = element.tagName === 'OPTGROUP'
+      ? directOptgroupLegend(element)
+      : undefined;
+    if (!legend && hasAuthoritativeAttributeLabel) {
+      return attributeLabel.slice(0, 3_500).replace(/\s+/gu, ' ').trim();
+    }
+    if (element.tagName === 'OPTGROUP' && !legend) return '';
+    const textRoot = legend ?? element;
+    let source = '';
+    let inspected = 0;
+    let current: Node | null = textRoot.firstChild;
+    while (current) {
+      inspected += 1;
+      if (inspected > 1_024) break;
+      if (
+        current.nodeType === Node.ELEMENT_NODE &&
+        selectElementIsHidden(current as Element)
+      ) {
+        while (current && current !== textRoot && !current.nextSibling) {
+          current = current.parentNode;
+        }
+        if (!current || current === textRoot) break;
+        current = current.nextSibling;
+        continue;
+      }
+      if (current.nodeType === Node.TEXT_NODE) {
+        const value = current.textContent ?? '';
+        const remaining = Math.max(0, 3_501 - source.length);
+        source += value.slice(0, remaining);
+        if (value.length > remaining || source.length > 3_500) break;
+      }
+      if (current.firstChild) {
+        current = current.firstChild;
+        continue;
+      }
+      while (current && current !== textRoot && !current.nextSibling) {
+        current = current.parentNode;
+      }
+      if (!current || current === textRoot) break;
+      current = current.nextSibling;
+    }
+    return source.slice(0, 3_500).replace(/\s+/gu, ' ').trim();
+  };
+  const selectElementHasPrivateState = (candidate: Element): boolean => {
+      return hasPrivateContentEditableState(candidate) ||
+        ['private', 'activation'].includes(roleKind(candidate) ?? '') ||
+        [
+          'INPUT', 'TEXTAREA', 'SELECT', 'DATALIST', 'OUTPUT', 'BUTTON', 'FORM',
+          'EMBED', 'FRAME', 'IFRAME', 'NOSCRIPT', 'OBJECT', 'PORTAL',
+          'SCRIPT', 'STYLE', 'TEMPLATE', 'WEBVIEW',
+        ]
+          .includes(candidate.tagName);
+  };
+
+  const selectEntryIsPrivate = (element: Element): boolean => {
+    if (selectElementIsHidden(element)) return true;
+    if (selectElementHasPrivateState(element)) return true;
+    const privacyRoot = element.tagName === 'OPTION'
+      ? element
+      : element.tagName === 'OPTGROUP'
+        ? directOptgroupLegend(element)
+        : undefined;
+    if (!privacyRoot) return false;
+    if (
+      privacyRoot !== element &&
+      (selectElementIsHidden(privacyRoot) ||
+        selectElementHasPrivateState(privacyRoot))
+    ) return true;
+    const pending: Element[] = [];
+    for (
+      let child = privacyRoot.firstElementChild;
+      child;
+      child = child.nextElementSibling
+    ) {
+      if (pending.length >= 512) return true;
+      pending.push(child);
+    }
+    let inspected = 0;
+    while (pending.length > 0) {
+      const candidate = pending.pop();
+      if (!candidate) continue;
+      inspected += 1;
+      // Customizable option content is expected to be shallow. Fail closed
+      // instead of performing an unbounded privacy walk on hostile markup.
+      if (inspected > 512) return true;
+      if (selectElementIsHidden(candidate)) continue;
+      if (selectElementHasPrivateState(candidate)) return true;
+      for (
+        let child = candidate.firstElementChild;
+        child;
+        child = child.nextElementSibling
+      ) {
+        if (inspected + pending.length >= 512) return true;
+        pending.push(child);
+      }
+    }
+    return false;
+  };
+  const buildSelectLabelNode = (
+    label: string,
+    owner: Element,
+  ): LiveVisualTextNode | undefined => {
+    if (!label) return undefined;
+    if (!registry || nodeCount >= 6_000) {
+      desynchronized = true;
+      return undefined;
+    }
+    const remaining = 150_000 - textCharacters;
+    if (remaining <= 0) {
+      desynchronized = true;
+      return undefined;
+    }
+    const text = label.slice(0, remaining);
+    if (text.length < label.length) desynchronized = true;
+    textCharacters += text.length;
+    nodeCount += 1;
+    return {
+      kind: 'text',
+      nodeId: registry.idFor(owner),
+      text,
+    };
+  };
+  const buildNativeSelectEntry = (
+    element: Element,
+    depth: number,
+  ): LiveVisualElementNode | undefined => {
+    if (
+      !registry ||
+      desynchronized ||
+      nodeCount >= 6_000 ||
+      depth > 80 ||
+      (element.tagName !== 'OPTION' && element.tagName !== 'OPTGROUP')
+    ) {
+      desynchronized = true;
+      return undefined;
+    }
+    if (selectElementIsHidden(element)) return undefined;
+    nodeCount += 1;
+    const nodeId = registry.idFor(element);
+    // Option labels/state are typed presentation data. Source resource URLs
+    // are not part of that release and must not hitchhike through CSS.
+    const style = readStyle(element, false);
+    const privateEntry = selectEntryIsPrivate(element);
+    const children: LiveVisualNode[] = [];
+    const label = privateEntry
+      ? undefined
+      : buildSelectLabelNode(selectEntryLabel(element), element);
+    if (label) children.push(label);
+
+    if (element.tagName === 'OPTGROUP') {
+      if (selectElementHasPrivateState(element)) {
+        return {
+          kind: 'element',
+          nodeId,
+          tag: 'optgroup',
+          style,
+          optgroupState: { disabled: true },
+          children,
+        };
+      }
+      let inspectedChildren = 0;
+      for (
+        let child = element.firstElementChild;
+        child;
+        child = child.nextElementSibling
+      ) {
+        inspectedChildren += 1;
+        if (inspectedChildren > 6_000) {
+          desynchronized = true;
+          break;
+        }
+        if (child.tagName !== 'OPTION') continue;
+        const option = buildNativeSelectEntry(child, depth + 1);
+        if (option) children.push(option);
+        if (desynchronized || nodeCount >= 6_000) break;
+      }
+      return {
+        kind: 'element',
+        nodeId,
+        tag: 'optgroup',
+        style,
+        optgroupState: {
+          disabled: currentBooleanProperty(element, 'disabled'),
+        },
+        children,
+      };
+    }
+
+    return {
+      kind: 'element',
+      nodeId,
+      tag: 'option',
+      style,
+      optionState: {
+        disabled: currentBooleanProperty(element, 'disabled'),
+        selected: !privateEntry && currentBooleanProperty(element, 'selected'),
+      },
+      children,
+    };
+  };
+  const build = (
+    node: Node,
+    depth: number,
+    publicMenuRegion = false,
+  ): LiveVisualNode | undefined => {
     if (!registry || desynchronized || nodeCount >= 6_000 || depth > 80) {
       desynchronized = true;
       return undefined;
@@ -882,21 +1535,53 @@ export function captureLivePageDelta(
     }
     if (node.nodeType !== Node.ELEMENT_NODE) return undefined;
     const element = node as Element;
+    const transportedPublicMenuRegion =
+      publicMenuRegion || roleKind(element) === 'public-menu';
     if (['BASE', 'HEAD', 'LINK', 'META', 'NOSCRIPT', 'OBJECT', 'SCRIPT', 'STYLE', 'TEMPLATE', 'TITLE'].includes(element.tagName)) {
       return undefined;
     }
     if (hidden(element)) return undefined;
+    if (
+      transportedPublicMenuRegion &&
+      ['AUDIO', 'CANVAS', 'IMG', 'PICTURE', 'SOURCE', 'VIDEO']
+        .includes(element.tagName)
+    ) return undefined;
     nodeCount += 1;
     const nodeId = registry.idFor(element);
-    const style = readStyle(element);
+    const shell = shellFor(element);
+    const style = readStyle(
+      element,
+      shell !== 'select' && !transportedPublicMenuRegion,
+    );
     const label = placeholder(element);
     if (label) return { kind: 'placeholder', nodeId, style, label };
-    const shell = shellFor(element);
-    const tag = visualTag(element);
+    const tag = ['SELECT', 'OPTION', 'OPTGROUP'].includes(element.tagName) &&
+      shell !== 'select'
+      ? window.getComputedStyle(element).display.startsWith('inline')
+        ? 'span'
+        : 'div'
+      : visualTag(element);
     const children: LiveVisualNode[] = [];
-    if (!shell || shell === 'button') {
+    if (shell === 'select') {
+      let inspectedChildren = 0;
+      for (
+        let child = element.firstElementChild;
+        child;
+        child = child.nextElementSibling
+      ) {
+        inspectedChildren += 1;
+        if (inspectedChildren > 6_000) {
+          desynchronized = true;
+          break;
+        }
+        if (!['OPTION', 'OPTGROUP'].includes(child.tagName)) continue;
+        const entry = buildNativeSelectEntry(child, depth + 1);
+        if (entry) children.push(entry);
+        if (desynchronized || nodeCount >= 6_000) break;
+      }
+    } else if (!shell || shell === 'button') {
       for (const child of composedChildren(element)) {
-        const built = build(child, depth + 1);
+        const built = build(child, depth + 1, transportedPublicMenuRegion);
         if (built) children.push(built);
         if (desynchronized) break;
       }
@@ -923,7 +1608,24 @@ export function captureLivePageDelta(
       tag,
       style,
       ...(shell ? { controlShell: shell } : {}),
-      ...(!shell ? { attributes: attributesFor(element, tag) } : {}),
+      ...(shell === 'select'
+        ? {
+            selectState: {
+              disabled: currentBooleanProperty(element, 'disabled'),
+              multiple: currentBooleanProperty(element, 'multiple'),
+              open: selectPickerIsOpen(element),
+            },
+          }
+        : {}),
+      ...(!shell
+        ? {
+            attributes: attributesFor(
+              element,
+              tag,
+              transportedPublicMenuRegion,
+            ),
+          }
+        : {}),
       children,
     };
   };
@@ -1130,12 +1832,17 @@ export function parseLivePageDelta(input: unknown): LivePageDelta {
     attributeCharacters: 0,
     imageUrlCharacters: 0,
   };
-  const parseNode = (raw: unknown, depth: number): LiveVisualNode | undefined => {
+  type ParseContext = 'normal' | 'select' | 'optgroup' | 'option';
+  const parseNode = (
+    raw: unknown,
+    depth: number,
+    context: ParseContext = 'normal',
+  ): LiveVisualNode | undefined => {
     if (!isRecord(raw) || depth > 80 || nodeCount >= MAX_DELTA_NODES) return undefined;
     if (typeof raw.nodeId !== 'string' || !NODE_ID_PATTERN.test(raw.nodeId)) return undefined;
     nodeCount += 1;
     if (raw.kind === 'text') {
-      if (typeof raw.text !== 'string') return undefined;
+      if (typeof raw.text !== 'string' || context === 'select') return undefined;
       const remaining = MAX_DELTA_TEXT - textCharacters;
       if (remaining <= 0 || raw.text.length > remaining) return undefined;
       textCharacters += raw.text.length;
@@ -1143,6 +1850,7 @@ export function parseLivePageDelta(input: unknown): LivePageDelta {
     }
     const style = parseLiveStyle(raw.style, payloadBudget);
     if (raw.kind === 'placeholder') {
+      if (context !== 'normal') return undefined;
       const labels = new Set([
         'Audio content omitted', 'Canvas content omitted',
         'Embedded frame omitted', 'Video content omitted',
@@ -1153,16 +1861,71 @@ export function parseLivePageDelta(input: unknown): LivePageDelta {
     if (raw.kind !== 'element' || typeof raw.tag !== 'string' || !isSafeLiveTag(raw.tag)) {
       return undefined;
     }
+    const isOption = raw.tag === 'option';
+    const isOptgroup = raw.tag === 'optgroup';
+    if (
+      (context === 'normal' && (isOption || isOptgroup)) ||
+      (context === 'select' && !isOption && !isOptgroup) ||
+      (context === 'optgroup' && !isOption) ||
+      context === 'option'
+    ) return undefined;
     const controlShell = readLiveControlShell(raw.controlShell);
+    if (
+      (raw.controlShell !== undefined && !controlShell) ||
+      ((isOption || isOptgroup) && controlShell !== undefined) ||
+      (controlShell === 'select' && raw.tag !== 'select') ||
+      (raw.tag === 'select' && controlShell !== 'select')
+    ) return undefined;
+    const selectState = controlShell === 'select'
+      ? readLiveSelectState(raw.selectState)
+      : undefined;
+    const optionState = isOption
+      ? readLiveOptionState(raw.optionState)
+      : undefined;
+    const optgroupState = isOptgroup
+      ? readLiveOptgroupState(raw.optgroupState)
+      : undefined;
+    if (
+      (controlShell === 'select' && !selectState) ||
+      (isOption && !optionState) ||
+      (isOptgroup && !optgroupState) ||
+      (!Array.isArray(raw.children) &&
+        (controlShell === 'select' || isOption || isOptgroup))
+    ) return undefined;
     const children: LiveVisualNode[] = [];
-    if ((!controlShell || controlShell === 'button') && Array.isArray(raw.children)) {
+    const childContext: ParseContext | undefined = controlShell === 'select'
+      ? 'select'
+      : isOptgroup
+        ? 'optgroup'
+        : isOption
+          ? 'option'
+          : !controlShell || controlShell === 'button'
+            ? 'normal'
+            : undefined;
+    if (childContext && Array.isArray(raw.children)) {
       for (const child of raw.children) {
-        const parsed = parseNode(child, depth + 1);
+        const parsed = parseNode(child, depth + 1, childContext);
         if (!parsed) return undefined;
         children.push(parsed);
       }
     }
-    const attributes = controlShell
+    if (
+      isOption && children.filter((child) => child.kind === 'text').length > 1
+    ) return undefined;
+    if (isOptgroup) {
+      const labelIndexes = children
+        .map((child, index) => child.kind === 'text' ? index : -1)
+        .filter((index) => index >= 0);
+      if (labelIndexes.length > 1 || labelIndexes.some((index) => index !== 0)) {
+        return undefined;
+      }
+    }
+    if (
+      selectState &&
+      !selectState.multiple &&
+      countSelectedLiveOptions(children) > 1
+    ) return undefined;
+    const attributes = controlShell || isOption || isOptgroup
       ? undefined
       : parseLiveAttributes(raw.attributes, raw.tag, payloadBudget);
     return {
@@ -1171,6 +1934,9 @@ export function parseLivePageDelta(input: unknown): LivePageDelta {
       tag: raw.tag,
       style,
       ...(controlShell ? { controlShell } : {}),
+      ...(selectState ? { selectState } : {}),
+      ...(optionState ? { optionState } : {}),
+      ...(optgroupState ? { optgroupState } : {}),
       ...(attributes ? { attributes } : {}),
       children,
     };
@@ -1204,6 +1970,20 @@ export function parseLivePageDelta(input: unknown): LivePageDelta {
     desynchronized: input.desynchronized,
     replacements,
   };
+}
+
+function countSelectedLiveOptions(nodes: readonly LiveVisualNode[]): number {
+  let selected = 0;
+  for (const node of nodes) {
+    if (node.kind !== 'element') continue;
+    if (node.tag === 'option') {
+      if (node.optionState?.selected) selected += 1;
+    } else if (node.tag === 'optgroup') {
+      selected += countSelectedLiveOptions(node.children);
+    }
+    if (selected > 1) return selected;
+  }
+  return selected;
 }
 
 interface LivePayloadBudget {
@@ -1301,9 +2081,10 @@ function isSafeLiveTag(value: string): boolean {
     'code', 'col', 'colgroup', 'dd', 'details', 'div', 'dl', 'dt', 'em',
     'ellipse', 'figcaption', 'figure', 'footer', 'g', 'h1', 'h2', 'h3', 'h4',
     'h5', 'h6', 'header', 'hr', 'i', 'img', 'label', 'li', 'line', 'main',
-    'mark', 'nav', 'ol', 'p', 'path', 'picture', 'polygon', 'polyline', 'pre',
-    'rect', 'section', 'small', 'source', 'span', 'strong', 'sub', 'summary',
-    'sup', 'svg', 'table', 'tbody', 'td', 'tfoot', 'th', 'thead', 'tr', 'u', 'ul',
+    'mark', 'nav', 'ol', 'optgroup', 'option', 'p', 'path', 'picture',
+    'polygon', 'polyline', 'pre', 'rect', 'section', 'select', 'small', 'source',
+    'span', 'strong', 'sub', 'summary', 'sup', 'svg', 'table', 'tbody', 'td',
+    'tfoot', 'th', 'thead', 'tr', 'u', 'ul',
   ]).has(value);
 }
 
@@ -1311,6 +2092,36 @@ function readLiveControlShell(value: unknown): VisualControlShell | undefined {
   return value === 'button' || value === 'input' || value === 'select' || value === 'textarea'
     ? value
     : undefined;
+}
+
+function readLiveSelectState(value: unknown): VisualSelectState | undefined {
+  if (
+    !isRecord(value) ||
+    typeof value.disabled !== 'boolean' ||
+    typeof value.multiple !== 'boolean' ||
+    typeof value.open !== 'boolean'
+  ) return undefined;
+  return {
+    disabled: value.disabled,
+    multiple: value.multiple,
+    open: value.open,
+  };
+}
+
+function readLiveOptionState(value: unknown): VisualOptionState | undefined {
+  if (
+    !isRecord(value) ||
+    typeof value.disabled !== 'boolean' ||
+    typeof value.selected !== 'boolean'
+  ) return undefined;
+  return { disabled: value.disabled, selected: value.selected };
+}
+
+function readLiveOptgroupState(
+  value: unknown,
+): VisualOptgroupState | undefined {
+  if (!isRecord(value) || typeof value.disabled !== 'boolean') return undefined;
+  return { disabled: value.disabled };
 }
 
 function isSafeBackgroundImage(value: string): boolean {

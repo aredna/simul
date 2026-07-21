@@ -17,8 +17,23 @@ dist/*
 .env
 .env.*
 !.env.example
+.envrc
+.direnv/
+.idea/
+.vscode/
+.cache/
+tmp/
 .DS_Store
 *.log
+
+# Local credentials and signing material
+*.pem
+*.key
+*.p12
+*.pfx
+*.jks
+*.keystore
+*.mobileprovision
 
 # BMAD personal configuration; team configuration and artifacts are tracked.
 _bmad/config.user.toml

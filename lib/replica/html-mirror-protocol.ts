@@ -8,6 +8,7 @@ import {
   htmlMirrorJsonBytes,
   readHtmlMirrorDocumentContent,
   readHtmlMirrorCanvasBackgroundColor,
+  readHtmlMirrorSelectedOptionIndexes,
   readHtmlMirrorNode,
   readHtmlMirrorRepresentability,
   type HtmlMirrorElementNode,
@@ -72,6 +73,9 @@ export type HtmlMirrorPatchOperation =
       readonly attributes: readonly (readonly [string, string])[];
       readonly visuallyHidden?: true;
       readonly selectedImageSource?: string;
+      readonly selectedOptionIndexes?: readonly number[];
+      readonly selectPickerOpen?: true;
+      readonly selectPresentationStyle?: string;
       readonly controlText?: HtmlMirrorControlText;
       readonly canvasBackgroundColor?: string;
       readonly resolvedStyleSheetText?: string;
@@ -511,7 +515,8 @@ function readOperations(
         raw,
         ['kind', 'nodeId', 'namespace', 'tagName', 'attributes'],
         [
-          'visuallyHidden', 'selectedImageSource', 'controlText',
+          'visuallyHidden', 'selectedImageSource', 'selectedOptionIndexes',
+          'selectPickerOpen', 'selectPresentationStyle', 'controlText',
           'canvasBackgroundColor', 'resolvedStyleSheetText',
         ],
       ) &&
@@ -523,8 +528,25 @@ function readOperations(
       if (
         (raw.visuallyHidden !== undefined && raw.visuallyHidden !== true) ||
         (raw.selectedImageSource !== undefined &&
-          typeof raw.selectedImageSource !== 'string')
+          typeof raw.selectedImageSource !== 'string') ||
+        (raw.selectedOptionIndexes !== undefined &&
+          !Array.isArray(raw.selectedOptionIndexes)) ||
+        (raw.selectPresentationStyle !== undefined &&
+          typeof raw.selectPresentationStyle !== 'string') ||
+        (raw.selectPickerOpen !== undefined && raw.selectPickerOpen !== true)
       ) return undefined;
+      const selectedOptionIndexes = readHtmlMirrorSelectedOptionIndexes(
+        raw.selectedOptionIndexes,
+        raw.tagName,
+      );
+      if (
+        raw.selectedOptionIndexes !== undefined &&
+        selectedOptionIndexes === undefined
+      ) return undefined;
+      if (selectedOptionIndexes) {
+        graphBudget.bytes += selectedOptionIndexes.length * 8 + 16;
+        if (graphBudget.bytes > MAX_HTML_MIRROR_BYTES) return undefined;
+      }
       const sentinel = readHtmlMirrorNode({
         kind: 'element',
         id: raw.nodeId,
@@ -539,13 +561,24 @@ function readOperations(
         ...(raw.controlText !== undefined
           ? { controlText: raw.controlText }
           : {}),
+        ...(raw.selectPickerOpen === true
+          ? { selectPickerOpen: true }
+          : {}),
+        ...(typeof raw.selectPresentationStyle === 'string'
+          ? { selectPresentationStyle: raw.selectPresentationStyle }
+          : {}),
         ...(raw.canvasBackgroundColor !== undefined
           ? { canvasBackgroundColor: raw.canvasBackgroundColor }
           : {}),
         ...(raw.resolvedStyleSheetText !== undefined
           ? { resolvedStyleSheetText: raw.resolvedStyleSheetText }
           : {}),
-      }, graphIds, 0, graphBudget, false, false, false, false, false, fidelityPolicy);
+      }, graphIds, 0, graphBudget, false, false, false, false, false,
+      fidelityPolicy,
+      raw.tagName === 'option' || raw.tagName === 'optgroup'
+        ? 'select'
+        : false,
+      true);
       if (!sentinel || sentinel.kind !== 'element') return undefined;
       operations.push(Object.freeze({
         kind: 'attributes',
@@ -556,6 +589,15 @@ function readOperations(
         ...(sentinel.visuallyHidden ? { visuallyHidden: true as const } : {}),
         ...(sentinel.selectedImageSource
           ? { selectedImageSource: sentinel.selectedImageSource }
+          : {}),
+        ...(selectedOptionIndexes !== undefined
+          ? { selectedOptionIndexes }
+          : {}),
+        ...(sentinel.selectPickerOpen
+          ? { selectPickerOpen: true as const }
+          : {}),
+        ...(sentinel.selectPresentationStyle
+          ? { selectPresentationStyle: sentinel.selectPresentationStyle }
           : {}),
         ...(sentinel.controlText
           ? { controlText: sentinel.controlText }
@@ -587,6 +629,7 @@ function readOperations(
           false,
           false,
           fidelityPolicy,
+          detachedNativeSelectParent(child),
         );
         if (!node) return undefined;
         children.push(node);
@@ -637,6 +680,7 @@ function readOperations(
             false,
             false,
             fidelityPolicy,
+            detachedNativeSelectParent(child.node),
           );
           if (!node) return undefined;
           children.push(Object.freeze({ kind: 'graph', node }));
@@ -654,6 +698,13 @@ function readOperations(
     return undefined;
   }
   return Object.freeze(operations);
+}
+
+function detachedNativeSelectParent(input: unknown): false | 'select' {
+  return isRecord(input) &&
+    (input.tagName === 'option' || input.tagName === 'optgroup')
+    ? 'select'
+    : false;
 }
 
 interface ReceiverResourceInventory {

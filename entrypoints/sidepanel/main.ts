@@ -31,13 +31,13 @@ import {
   languageEndonym,
 } from '../../lib/language-options';
 import {
-  captureLivePageDelta,
-  installLivePageObserver,
+  invokeLivePageDeltaCaptureBridge,
+  invokeLivePageObserverBridge,
+  invokeLivePageObserverUnregisterBridge,
   parseLivePageDelta,
   readLivePageDirtyMessage,
   readLivePageObserverInstallation,
   readLivePageScrollMessage,
-  unregisterLivePageObserver,
   type LivePageDirtyMessage,
   type LivePageDelta,
   type LiveVisualNode,
@@ -248,6 +248,8 @@ const DYNAMIC_UI_LABELS = [
   'Translate page',
   'Translation current',
   'Image text',
+  'OCR On',
+  'OCR Off',
   'Translate text inside images (local, experimental)',
   'Image translation is saved but paused. Grant image access so Chrome can capture visible pixels for local OCR.',
   'Checking Chrome image access…',
@@ -299,6 +301,7 @@ const toolbarAutoDetectButton = requireElement<HTMLButtonElement>('#toolbar-auto
 const toolbarSizeToggleButton = requireElement<HTMLButtonElement>('#toolbar-size-toggle');
 const toolbarSizeLabel = requireElement<HTMLElement>('#toolbar-size-label');
 const toolbarOcrToggleButton = requireElement<HTMLButtonElement>('#toolbar-ocr-toggle');
+const toolbarOcrLabel = requireElement<HTMLElement>('#toolbar-ocr-label');
 const toolbarTabFollowButton = requireElement<HTMLButtonElement>('#toolbar-tab-follow');
 const toolbarTabFollowLabel = requireElement<HTMLElement>('#toolbar-tab-follow-label');
 const cancelButton = requireElement<HTMLButtonElement>('#cancel');
@@ -621,6 +624,7 @@ let highestReceivedLiveSequence = 0;
 let liveSequenceBaselineReady = false;
 let liveObservationAvailable = true;
 let lastSourceScroll: ReturnType<typeof readLivePageScrollMessage>;
+let acceptedScrollMessageCount = 0;
 let availabilityCheckedForPair: string | undefined;
 let viewPreferenceRevision = 0;
 let replicaFidelityCommitInFlight = false;
@@ -854,7 +858,22 @@ browser.runtime.onMessage.addListener((message: unknown, sender) => {
     )
   ) {
     lastSourceScroll = scroll;
-    if (preferences.syncScroll) followSourceScroll(scroll);
+    acceptedScrollMessageCount += 1;
+    const logScroll = acceptedScrollMessageCount <= 3 ||
+      acceptedScrollMessageCount % 50 === 0;
+    if (logScroll) {
+      console.info(
+        `[Simul scroll] received; count=${acceptedScrollMessageCount}; target=${scroll.scrollTarget}`,
+      );
+    }
+    if (preferences.syncScroll) {
+      followSourceScroll(scroll);
+      if (logScroll) {
+        console.info(
+          `[Simul scroll] projected; count=${acceptedScrollMessageCount}; target=${scroll.scrollTarget}`,
+        );
+      }
+    }
   }
 });
 
@@ -1654,10 +1673,19 @@ async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> 
   const identity = work.value.identity;
   let currentLegacyReady = false;
   try {
+    const observerBundleResults = await withCaptureTimeout(
+      browser.scripting.executeScript({
+        target: { tabId: identity.tabId, frameIds: [0] },
+        files: ['/page-live-observer.js'],
+      }),
+    );
+    if (observerBundleResults.length === 0) {
+      throw new PageAccessError('The page could not load its live update bridge.');
+    }
     const observerResults = await withCaptureTimeout(
       browser.scripting.executeScript({
         target: { tabId: identity.tabId, frameIds: [0] },
-        func: installLivePageObserver,
+        func: invokeLivePageObserverBridge,
         args: [liveSessionId, work.generation],
       }),
     );
@@ -1671,6 +1699,9 @@ async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> 
       throw new PageAccessError('The page could not start its live update bridge.');
     }
     liveObservationAvailable = observerInstallation.installed;
+    console.info(
+      `[Simul scroll] observer-${observerInstallation.installed ? 'installed' : 'limited'}; generation=${work.generation}`,
+    );
     if (observerInstallation.installed) {
       initializeLiveSequenceBaseline(
         work.generation,
@@ -2506,7 +2537,7 @@ async function processPendingLiveUpdate(): Promise<void> {
     const results = await withCaptureTimeout(
       browser.scripting.executeScript({
         target: { tabId: identity.tabId, frameIds: [0] },
-        func: captureLivePageDelta,
+        func: invokeLivePageDeltaCaptureBridge,
         args: [liveSessionId, update.generation, update.sequence, nodeIds],
       }),
     );
@@ -3270,6 +3301,10 @@ function syncToolbarPreferenceControls(): void {
   toolbarOcrToggleButton.setAttribute(
     'aria-pressed',
     String(preferences.imageTranslationEnabled),
+  );
+  setUiText(
+    toolbarOcrLabel,
+    preferences.imageTranslationEnabled ? 'OCR On' : 'OCR Off',
   );
   toolbarOcrToggleButton.title = preferences.imageTranslationEnabled
     ? imageCaptureAccess === 'granted'
@@ -4083,7 +4118,7 @@ function releaseLiveSession(
   if (!identity) return;
   void browser.scripting.executeScript({
     target: { tabId: identity.tabId, frameIds: [0] },
-    func: unregisterLivePageObserver,
+    func: invokeLivePageObserverUnregisterBridge,
     args: [liveSessionId],
   }).catch(() => undefined);
 }

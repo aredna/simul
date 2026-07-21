@@ -148,6 +148,21 @@ export type VisualStyle = Partial<Record<VisualStyleProperty, string>>;
 
 export type VisualControlShell = 'button' | 'input' | 'select' | 'textarea';
 
+export interface VisualSelectState {
+  disabled: boolean;
+  multiple: boolean;
+  open: boolean;
+}
+
+export interface VisualOptionState {
+  disabled: boolean;
+  selected: boolean;
+}
+
+export interface VisualOptgroupState {
+  disabled: boolean;
+}
+
 export interface VisualTextNode {
   kind: 'text';
   text: string;
@@ -161,6 +176,9 @@ export interface VisualElementNode {
   styleId: number;
   itemId?: string;
   controlShell?: VisualControlShell;
+  selectState?: VisualSelectState;
+  optionState?: VisualOptionState;
+  optgroupState?: VisualOptgroupState;
   nodeId?: string;
   attributes?: Record<string, string>;
   children: VisualNode[];
@@ -293,6 +311,7 @@ const SAFE_VISUAL_TAGS = new Set([
   'mark',
   'nav',
   'ol',
+  'optgroup',
   'option',
   'p',
   'path',
@@ -573,8 +592,6 @@ export function capturePageSnapshot(): PageSnapshot {
   const privateRoles = new Set([
     'checkbox',
     'combobox',
-    'listbox',
-    'option',
     'radio',
     'searchbox',
     'slider',
@@ -590,6 +607,24 @@ export function capturePageSnapshot(): PageSnapshot {
     'tab',
     'treeitem',
   ]);
+  const publicMenuRoles = new Set(['listbox', 'menu', 'option']);
+  type SourceRoleKind = 'private' | 'activation' | 'public-menu';
+  const roleKind = (element: Element): SourceRoleKind | undefined => {
+    for (const role of (
+      element
+        .getAttribute('role')
+        ?.trim()
+        .toLowerCase()
+        .split(/\s+/u) ?? []
+    )) {
+      if (privateRoles.has(role)) return 'private';
+      if (publicControlRoles.has(role)) return 'activation';
+      if (publicMenuRoles.has(role)) return 'public-menu';
+    }
+    return undefined;
+  };
+  const hasPublicMenuRole = (element: Element): boolean =>
+    roleKind(element) === 'public-menu';
   const blockTags = new Set([
     'ADDRESS',
     'ARTICLE',
@@ -654,19 +689,71 @@ export function capturePageSnapshot(): PageSnapshot {
       return true;
     }
 
+    if (element.tagName === 'SELECT' && selectPresentationIsCollapsed(element, style)) {
+      return true;
+    }
+
     return style.display !== 'contents' && element.getClientRects().length === 0;
   };
 
+  const selectPresentationIsCollapsed = (
+    element: Element,
+    style: CSSStyleDeclaration,
+  ): boolean => {
+    const value = (property: string): string => {
+      try {
+        return style.getPropertyValue(property).trim().toLowerCase();
+      } catch {
+        return '';
+      }
+    };
+    const pixels = (property: string): number | undefined => {
+      const match = /^(-?\d+(?:\.\d+)?)px$/u.exec(value(property));
+      if (!match) return undefined;
+      const parsed = Number(match[1]);
+      return Number.isFinite(parsed) ? parsed : undefined;
+    };
+    const overflow = `${value('overflow')} ${value('overflow-x')} ${
+      value('overflow-y')
+    }`;
+    const width = pixels('width');
+    const height = pixels('height');
+    const position = value('position');
+    const left = pixels('left');
+    const top = pixels('top');
+    const positionedOffscreen = (position === 'absolute' || position === 'fixed') &&
+      (
+        (left !== undefined && width !== undefined && left + width <= 0) ||
+        (top !== undefined && height !== undefined && top + height <= 0)
+      );
+    const transform = value('transform');
+    let collapsedTransform = false;
+    if (transform && transform !== 'none') {
+      try {
+        const rect = element.getBoundingClientRect();
+        collapsedTransform = rect.width <= 0 || rect.height <= 0;
+      } catch {
+        collapsedTransform = /(?:scale(?:3d|x|y)?\([^)]*\b0(?:[),]|\s))/u
+          .test(transform);
+      }
+    }
+    return value('content-visibility') === 'hidden' ||
+      positionedOffscreen ||
+      collapsedTransform ||
+      (/(?:^|\s)(?:hidden|clip)(?:\s|$)/u.test(overflow) &&
+        (width === 0 || height === 0));
+  };
+
+  const hasPrivateContentEditableState = (element: Element): boolean => {
+    const value = element.getAttribute('contenteditable');
+    return value !== null && value.trim().toLowerCase() !== 'false';
+  };
+
   const isPrivateOrInteractive = (element: Element): boolean => {
-    const roles = element
-      .getAttribute('role')
-      ?.trim()
-      .toLowerCase()
-      .split(/\s+/u) ?? [];
     return (
       excludedTags.has(element.tagName) ||
-      element.hasAttribute('contenteditable') ||
-      roles.some((role) => privateRoles.has(role))
+      hasPrivateContentEditableState(element) ||
+      roleKind(element) === 'private'
     );
   };
 
@@ -844,7 +931,7 @@ export function capturePageSnapshot(): PageSnapshot {
     imageItemIds.set(image, id);
   };
 
-  const visit = (node: Node): void => {
+  const visit = (node: Node, publicMenuRegion = false): void => {
     if (visitedNodes >= maxVisitedNodes) {
       omissions.truncated = true;
       return;
@@ -860,6 +947,8 @@ export function capturePageSnapshot(): PageSnapshot {
 
     if (node.nodeType !== Node.ELEMENT_NODE) return;
     const element = node as Element;
+    const transportedPublicMenuRegion =
+      publicMenuRegion || hasPublicMenuRole(element);
 
     if (element.tagName === 'IFRAME' || element.tagName === 'FRAME') {
       omissions.frames += 1;
@@ -882,7 +971,7 @@ export function capturePageSnapshot(): PageSnapshot {
     }
 
     if (element instanceof HTMLImageElement) {
-      addImage(element);
+      if (!transportedPublicMenuRegion) addImage(element);
       return;
     }
 
@@ -891,7 +980,7 @@ export function capturePageSnapshot(): PageSnapshot {
         omissions.truncated = true;
         break;
       }
-      visit(child);
+      visit(child, transportedPublicMenuRegion);
     }
   };
 
@@ -947,7 +1036,7 @@ export function capturePageSnapshot(): PageSnapshot {
     'h1', 'h2', 'h3',
     'h4', 'h5', 'h6', 'header', 'hr', 'i', 'img', 'input', 'label', 'li',
     'line', 'main', 'mark', 'nav', 'ol', 'option', 'p', 'path', 'picture',
-    'polygon', 'polyline', 'pre', 'rect', 'section', 'select', 'small',
+    'optgroup', 'polygon', 'polyline', 'pre', 'rect', 'section', 'select', 'small',
     'source', 'span', 'strong', 'sub',
     'summary', 'sup', 'svg', 'table', 'tbody', 'td', 'textarea', 'tfoot',
     'th', 'thead', 'tr', 'u', 'ul',
@@ -1005,10 +1094,19 @@ export function capturePageSnapshot(): PageSnapshot {
     return typeof value === 'string' ? value.trim() : '';
   };
 
-  const internStyle = (element: Element): number => {
+  const internStyle = (
+    element: Element,
+    options: { omitBackgroundImage?: boolean } = {},
+  ): number => {
     const computed = window.getComputedStyle(element);
     const captured: Record<string, string> = {};
     for (const property of visualStyleProperties) {
+      // Select-entry transport is intentionally limited to inert presentation
+      // and typed labels/state. Do not let an option/optgroup smuggle a
+      // resource-bearing URL into that narrow channel.
+      if (options.omitBackgroundImage && property === 'background-image') {
+        continue;
+      }
       const value = readStyleValue(computed, property);
       if (!value || value.length > 500) continue;
       if (property === 'background-image' && !safeBackgroundImage(value)) {
@@ -1039,6 +1137,33 @@ export function capturePageSnapshot(): PageSnapshot {
     return id;
   };
 
+  const hasActivationSemantics = (element: Element): boolean =>
+    element.tagName === 'BUTTON' ||
+    roleKind(element) === 'activation';
+
+  const selectMustStayPrivate = (element: Element): boolean => {
+    if (
+      hasPrivateContentEditableState(element) ||
+      roleKind(element) === 'private' ||
+      hasActivationSemantics(element)
+    ) {
+      return true;
+    }
+
+    // A select nested in an activation surface contributes to that control's
+    // private interaction state. Keep its labels out of the visual protocol.
+    let current = composedParentElement(element);
+    for (let depth = 0; current; depth += 1) {
+      if (depth >= 80) {
+        omissions.truncated = true;
+        return true;
+      }
+      if (hasActivationSemantics(current)) return true;
+      current = composedParentElement(current);
+    }
+    return false;
+  };
+
   const controlShell = (element: Element): VisualControlShell | undefined => {
     switch (element.tagName) {
       case 'INPUT':
@@ -1046,7 +1171,7 @@ export function capturePageSnapshot(): PageSnapshot {
       case 'TEXTAREA':
         return 'textarea';
       case 'SELECT':
-        return 'select';
+        return selectMustStayPrivate(element) ? 'input' : 'select';
       case 'BUTTON':
         return 'button';
       case 'DATALIST':
@@ -1055,14 +1180,9 @@ export function capturePageSnapshot(): PageSnapshot {
       case 'OUTPUT':
         return 'input';
       default:
-        if (element.hasAttribute('contenteditable')) return 'input';
-        const roles = element
-          .getAttribute('role')
-          ?.trim()
-          .toLowerCase()
-          .split(/\s+/u) ?? [];
-        if (roles.some((role) => privateRoles.has(role))) return 'input';
-        return roles.some((role) => publicControlRoles.has(role))
+        if (hasPrivateContentEditableState(element)) return 'input';
+        if (roleKind(element) === 'private') return 'input';
+        return roleKind(element) === 'activation'
           ? 'button'
           : undefined;
     }
@@ -1094,6 +1214,7 @@ export function capturePageSnapshot(): PageSnapshot {
   const visualAttributes = (
     element: Element,
     tag: string,
+    omitResources = false,
   ): Record<string, string> | undefined => {
     const attributes: Record<string, string> = {};
     const addAttribute = (name: string, value: string): void => {
@@ -1105,7 +1226,7 @@ export function capturePageSnapshot(): PageSnapshot {
       attributes[name] = value;
       visualAttributeCharacters += characters;
     };
-    if (tag === 'img' && element instanceof HTMLImageElement) {
+    if (!omitResources && tag === 'img' && element instanceof HTMLImageElement) {
       const source = element.currentSrc || element.src;
       if (safeImageSource(source)) addAttribute('src', source);
       const alt = normalize(element.getAttribute('alt') ?? '', 500);
@@ -1119,7 +1240,14 @@ export function capturePageSnapshot(): PageSnapshot {
         continue;
       }
       const value = element.getAttribute(name);
-      if (value && value.length <= 2_048) addAttribute(name, value);
+      if (
+        value &&
+        value.length <= 2_048 &&
+        (
+          !omitResources ||
+          !/(?:url\s*\(|https?:|data:|blob:)/iu.test(value)
+        )
+      ) addAttribute(name, value);
     }
     return Object.keys(attributes).length > 0 ? attributes : undefined;
   };
@@ -1137,7 +1265,295 @@ export function capturePageSnapshot(): PageSnapshot {
       .trim()
       .slice(0, 2_048);
 
-  const buildVisualNode = (node: Node, depth: number): VisualNode | undefined => {
+  const currentBooleanProperty = (
+    element: Element,
+    property: 'disabled' | 'multiple' | 'selected',
+  ): boolean => {
+    const value = (element as unknown as Record<string, unknown>)[property];
+    return typeof value === 'boolean'
+      ? value
+      : element.hasAttribute(property);
+  };
+
+  const normalizeSelectEntryLabel = (source: string): string => {
+    const bounded = source.slice(0, maxTextLength + 1);
+    const normalized = bounded.replace(/\s+/gu, ' ').trim();
+    if (source.length > maxTextLength || normalized.length > maxTextLength) {
+      omissions.truncated = true;
+    }
+    return normalized.slice(0, maxTextLength);
+  };
+
+  const selectElementIsHidden = (element: Element): boolean => {
+    if (element.hasAttribute('hidden')) return true;
+    try {
+      const style = window.getComputedStyle(element);
+      return style.display === 'none' ||
+        style.visibility === 'hidden' ||
+        style.visibility === 'collapse' ||
+        style.opacity === '0' ||
+        style.getPropertyValue('content-visibility').trim() === 'hidden';
+    } catch {
+      return true;
+    }
+  };
+
+  const directOptgroupLegend = (element: Element): Element | undefined => {
+    let inspected = 0;
+    for (let child = element.firstElementChild; child; child = child.nextElementSibling) {
+      inspected += 1;
+      if (inspected > 512) {
+        omissions.truncated = true;
+        return undefined;
+      }
+      if (child.tagName === 'LEGEND') return child;
+    }
+    return undefined;
+  };
+
+  const selectEntryLabel = (element: Element): string => {
+    const rawAttributeLabel = element.getAttribute('label');
+    const hasAuthoritativeAttributeLabel = rawAttributeLabel !== null &&
+      rawAttributeLabel !== '';
+    const attributeLabel = rawAttributeLabel?.trim() ?? '';
+    const legend = element.tagName === 'OPTGROUP'
+      ? directOptgroupLegend(element)
+      : undefined;
+    if (!legend && hasAuthoritativeAttributeLabel) {
+      return normalizeSelectEntryLabel(attributeLabel);
+    }
+    if (element.tagName === 'OPTGROUP' && !legend) return '';
+    const textRoot = legend ?? element;
+
+    // Avoid an unbounded textContent read for rich customizable options. The
+    // preceding privacy walk has already failed closed on excessive element
+    // descendants; this walk independently bounds text-node fanout and bytes.
+    let source = '';
+    let inspected = 0;
+    let current: Node | null = textRoot.firstChild;
+    while (current) {
+      inspected += 1;
+      if (inspected > 1_024) {
+        omissions.truncated = true;
+        break;
+      }
+      if (
+        current.nodeType === Node.ELEMENT_NODE &&
+        selectElementIsHidden(current as Element)
+      ) {
+        while (current && current !== textRoot && !current.nextSibling) {
+          current = current.parentNode;
+        }
+        if (!current || current === textRoot) break;
+        current = current.nextSibling;
+        continue;
+      }
+      if (current.nodeType === Node.TEXT_NODE) {
+        const value = current.textContent ?? '';
+        const remaining = Math.max(0, maxTextLength + 1 - source.length);
+        source += value.slice(0, remaining);
+        if (value.length > remaining || source.length > maxTextLength) {
+          omissions.truncated = true;
+          break;
+        }
+      }
+      if (current.firstChild) {
+        current = current.firstChild;
+        continue;
+      }
+      while (current && current !== textRoot && !current.nextSibling) {
+        current = current.parentNode;
+      }
+      if (!current || current === textRoot) break;
+      current = current.nextSibling;
+    }
+    return normalizeSelectEntryLabel(source);
+  };
+
+  const selectElementHasPrivateState = (candidate: Element): boolean => {
+      return hasPrivateContentEditableState(candidate) ||
+        ['private', 'activation'].includes(roleKind(candidate) ?? '') ||
+        [
+          'BUTTON',
+          'DATALIST',
+          'EMBED',
+          'FORM',
+          'FRAME',
+          'IFRAME',
+          'INPUT',
+          'NOSCRIPT',
+          'OBJECT',
+          'OUTPUT',
+          'PORTAL',
+          'SCRIPT',
+          'SELECT',
+          'STYLE',
+          'TEMPLATE',
+          'TEXTAREA',
+          'WEBVIEW',
+        ]
+          .includes(candidate.tagName);
+  };
+
+  const selectEntryIsPrivate = (element: Element): boolean => {
+    if (selectElementIsHidden(element)) return true;
+    if (selectElementHasPrivateState(element)) return true;
+    const privacyRoot = element.tagName === 'OPTION'
+      ? element
+      : element.tagName === 'OPTGROUP'
+        ? directOptgroupLegend(element)
+        : undefined;
+    if (!privacyRoot) return false;
+    if (
+      privacyRoot !== element &&
+      (selectElementIsHidden(privacyRoot) ||
+        selectElementHasPrivateState(privacyRoot))
+    ) return true;
+
+    // Customizable selects may contain rich option descendants. Inspect a
+    // fixed amount without materializing an attacker-sized NodeList; overflow
+    // fails closed so an uninspected editor cannot leak through textContent.
+    let inspected = 0;
+    let current: Element | null = privacyRoot.firstElementChild;
+    while (current) {
+      inspected += 1;
+      if (inspected > 512) {
+        omissions.truncated = true;
+        return true;
+      }
+      if (selectElementIsHidden(current)) {
+        while (
+          current && current !== privacyRoot && !current.nextElementSibling
+        ) current = current.parentElement;
+        if (!current || current === privacyRoot) break;
+        current = current.nextElementSibling;
+        continue;
+      }
+      if (selectElementHasPrivateState(current)) return true;
+      if (current.firstElementChild) {
+        current = current.firstElementChild;
+        continue;
+      }
+      while (
+        current && current !== privacyRoot && !current.nextElementSibling
+      ) {
+        current = current.parentElement;
+      }
+      if (!current || current === privacyRoot) break;
+      current = current.nextElementSibling;
+    }
+    return false;
+  };
+
+  const selectPickerIsOpen = (element: Element): boolean => {
+    try {
+      return element.matches(':open');
+    } catch {
+      return false;
+    }
+  };
+
+  const buildSelectLabelNode = (label: string): VisualTextNode | undefined => {
+    if (!label) return undefined;
+    if (visualNodes >= 10_000) {
+      omissions.truncated = true;
+      return undefined;
+    }
+    const remaining = Math.max(0, 300_000 - visualCharacters);
+    if (remaining === 0) {
+      omissions.truncated = true;
+      return undefined;
+    }
+    const text = label.slice(0, remaining);
+    if (text.length < label.length) omissions.truncated = true;
+    visualCharacters += text.length;
+    visualNodes += 1;
+    return { kind: 'text', text };
+  };
+
+  const buildNativeSelectEntry = (
+    element: Element,
+    depth: number,
+  ): VisualElementNode | undefined => {
+    if (
+      visualInspectedNodes >= 50_000 ||
+      visualNodes >= 10_000 ||
+      depth > 80 ||
+      (element.tagName !== 'OPTION' && element.tagName !== 'OPTGROUP')
+    ) {
+      omissions.truncated = true;
+      return undefined;
+    }
+    if (selectElementIsHidden(element)) return undefined;
+    visualInspectedNodes += 1;
+    visualNodes += 1;
+    const nodeId = liveNodeId(element);
+    const children: VisualNode[] = [];
+    const privateEntry = selectEntryIsPrivate(element);
+    const label = privateEntry
+      ? undefined
+      : buildSelectLabelNode(selectEntryLabel(element));
+    if (label) children.push(label);
+
+    if (element.tagName === 'OPTGROUP') {
+      if (selectElementHasPrivateState(element)) {
+        return {
+          kind: 'element',
+          tag: 'optgroup',
+          styleId: internStyle(element, { omitBackgroundImage: true }),
+          optgroupState: { disabled: true },
+          ...(nodeId ? { nodeId } : {}),
+          children,
+        };
+      }
+      for (
+        let child = element.firstElementChild;
+        child;
+        child = child.nextElementSibling
+      ) {
+        if (visualInspectedNodes >= 50_000) {
+          omissions.truncated = true;
+          break;
+        }
+        visualInspectedNodes += 1;
+        if (child.tagName !== 'OPTION') continue;
+        const option = buildNativeSelectEntry(child, depth + 1);
+        if (option) children.push(option);
+        if (visualInspectedNodes >= 50_000 || visualNodes >= 10_000) {
+          omissions.truncated = true;
+          break;
+        }
+      }
+      return {
+        kind: 'element',
+        tag: 'optgroup',
+        styleId: internStyle(element, { omitBackgroundImage: true }),
+        optgroupState: {
+          disabled: currentBooleanProperty(element, 'disabled'),
+        },
+        ...(nodeId ? { nodeId } : {}),
+        children,
+      };
+    }
+
+    return {
+      kind: 'element',
+      tag: 'option',
+      styleId: internStyle(element, { omitBackgroundImage: true }),
+      optionState: {
+        disabled: currentBooleanProperty(element, 'disabled'),
+        selected: !privateEntry && currentBooleanProperty(element, 'selected'),
+      },
+      ...(nodeId ? { nodeId } : {}),
+      children,
+    };
+  };
+
+  const buildVisualNode = (
+    node: Node,
+    depth: number,
+    publicMenuRegion = false,
+  ): VisualNode | undefined => {
     if (
       visualInspectedNodes >= 50_000 ||
       visualNodes >= 10_000 ||
@@ -1172,6 +1588,8 @@ export function capturePageSnapshot(): PageSnapshot {
 
     if (node.nodeType !== Node.ELEMENT_NODE) return undefined;
     const element = node as Element;
+    const transportedPublicMenuRegion =
+      publicMenuRegion || hasPublicMenuRole(element);
     if (
       [
         'BASE',
@@ -1189,9 +1607,21 @@ export function capturePageSnapshot(): PageSnapshot {
     ) {
       return undefined;
     }
+    if (
+      transportedPublicMenuRegion &&
+      ['AUDIO', 'CANVAS', 'IMG', 'PICTURE', 'SOURCE', 'VIDEO']
+        .includes(element.tagName)
+    ) {
+      return undefined;
+    }
     if (isHidden(element)) return undefined;
 
-    const styleId = internStyle(element);
+    const shell = controlShell(element);
+    const styleId = internStyle(element, {
+      // Native-select transport is labels plus presentation state only. A
+      // computed resource URL must not hitchhike on the companion facsimile.
+      omitBackgroundImage: shell === 'select' || transportedPublicMenuRegion,
+    });
     const placeholder = placeholderLabel(element);
     const nodeId = liveNodeId(element);
     visualNodes += 1;
@@ -1204,17 +1634,50 @@ export function capturePageSnapshot(): PageSnapshot {
       };
     }
 
-    const tag = visualTag(element);
-    const shell = controlShell(element);
-    const itemId = imageItemIds.get(element);
+    // The untrusted parser requires a raw select tag and select shell to imply
+    // each other. A private native select therefore travels as a generic inert
+    // shell, never as a native select with a different control classification.
+    const tag = ['SELECT', 'OPTION', 'OPTGROUP'].includes(element.tagName) &&
+      shell !== 'select'
+      ? readStyleValue(window.getComputedStyle(element), 'display')
+          .startsWith('inline')
+        ? 'span'
+        : 'div'
+      : visualTag(element);
+    const itemId = transportedPublicMenuRegion
+      ? undefined
+      : imageItemIds.get(element);
     const children: VisualNode[] = [];
-    if (!shell || shell === 'button') {
+    if (shell === 'select') {
+      for (
+        let child = element.firstElementChild;
+        child;
+        child = child.nextElementSibling
+      ) {
+        if (visualInspectedNodes >= 50_000) {
+          omissions.truncated = true;
+          break;
+        }
+        visualInspectedNodes += 1;
+        if (!['OPTION', 'OPTGROUP'].includes(child.tagName)) continue;
+        const selectEntry = buildNativeSelectEntry(child, depth + 1);
+        if (selectEntry) children.push(selectEntry);
+        if (visualInspectedNodes >= 50_000 || visualNodes >= 10_000) {
+          omissions.truncated = true;
+          break;
+        }
+      }
+    } else if (!shell || shell === 'button') {
       for (const child of composedChildren(element)) {
         if (visualInspectedNodes >= 50_000 || visualNodes >= 10_000) {
           omissions.truncated = true;
           break;
         }
-        const visualChild = buildVisualNode(child, depth + 1);
+        const visualChild = buildVisualNode(
+          child,
+          depth + 1,
+          transportedPublicMenuRegion,
+        );
         if (visualChild) children.push(visualChild);
       }
       if (shell === 'button' && !containsVisualText(children)) {
@@ -1244,7 +1707,24 @@ export function capturePageSnapshot(): PageSnapshot {
       ...(itemId ? { itemId } : {}),
       ...(nodeId ? { nodeId } : {}),
       ...(shell ? { controlShell: shell } : {}),
-      ...(!shell ? { attributes: visualAttributes(element, tag) } : {}),
+      ...(shell === 'select'
+        ? {
+            selectState: {
+              disabled: currentBooleanProperty(element, 'disabled'),
+              multiple: currentBooleanProperty(element, 'multiple'),
+              open: selectPickerIsOpen(element),
+            },
+          }
+        : {}),
+      ...(!shell
+        ? {
+            attributes: visualAttributes(
+              element,
+              tag,
+              transportedPublicMenuRegion,
+            ),
+          }
+        : {}),
       children,
     };
   };
@@ -1338,8 +1818,13 @@ function parseVisualPage(
   );
   let nodeCount = 0;
   let characterCount = 0;
+  type ParseContext = 'normal' | 'select' | 'optgroup' | 'option';
 
-  const parseNode = (rawNode: unknown, depth: number): VisualNode | undefined => {
+  const parseNode = (
+    rawNode: unknown,
+    depth: number,
+    context: ParseContext = 'normal',
+  ): VisualNode | undefined => {
     if (
       !isRecord(rawNode) ||
       depth > SNAPSHOT_LIMITS.maxVisualDepth ||
@@ -1350,7 +1835,9 @@ function parseVisualPage(
     nodeCount += 1;
 
     if (rawNode.kind === 'text') {
-      if (typeof rawNode.text !== 'string') return undefined;
+      if (typeof rawNode.text !== 'string' || context === 'select') {
+        return undefined;
+      }
       const remaining = Math.max(
         0,
         SNAPSHOT_LIMITS.maxVisualTextCharacters - characterCount,
@@ -1371,6 +1858,7 @@ function parseVisualPage(
     const styleId = readStyleId(rawNode.styleId, styles.length);
     if (styleId === undefined) return undefined;
     if (rawNode.kind === 'placeholder') {
+      if (context !== 'normal') return undefined;
       const labels = new Set([
         'Audio content omitted',
         'Canvas content omitted',
@@ -1397,25 +1885,89 @@ function parseVisualPage(
     ) {
       return undefined;
     }
-    const controlShell = readControlShell(rawNode.controlShell);
-    const children: VisualNode[] = [];
+    const isOption = rawNode.tag === 'option';
+    const isOptgroup = rawNode.tag === 'optgroup';
     if (
-      (!controlShell || controlShell === 'button') &&
-      Array.isArray(rawNode.children)
+      (context === 'normal' && (isOption || isOptgroup)) ||
+      (context === 'select' && !isOption && !isOptgroup) ||
+      (context === 'optgroup' && !isOption) ||
+      context === 'option'
     ) {
+      return undefined;
+    }
+    const controlShell = readControlShell(rawNode.controlShell);
+    if (
+      (rawNode.controlShell !== undefined && !controlShell) ||
+      ((isOption || isOptgroup) && controlShell !== undefined) ||
+      (controlShell === 'select' && rawNode.tag !== 'select') ||
+      (rawNode.tag === 'select' && controlShell !== 'select')
+    ) {
+      return undefined;
+    }
+    const children: VisualNode[] = [];
+    const childContext: ParseContext | undefined = controlShell === 'select'
+      ? 'select'
+      : isOptgroup
+        ? 'optgroup'
+        : isOption
+          ? 'option'
+          : !controlShell || controlShell === 'button'
+            ? 'normal'
+            : undefined;
+    if (childContext && Array.isArray(rawNode.children)) {
       for (const rawChild of rawNode.children) {
-        const child = parseNode(rawChild, depth + 1);
-        if (child) children.push(child);
+        const child = parseNode(rawChild, depth + 1, childContext);
+        if (!child) {
+          if (controlShell === 'select' || isOption || isOptgroup) {
+            return undefined;
+          }
+        } else {
+          children.push(child);
+        }
         if (nodeCount >= SNAPSHOT_LIMITS.maxVisualNodes) break;
       }
     }
-    const attributes = controlShell
+    const attributes = controlShell || isOption || isOptgroup
       ? undefined
       : parseVisualAttributes(
           rawNode.attributes,
           rawNode.tag,
           attributeBudget,
         );
+    const selectState = controlShell === 'select'
+      ? readVisualSelectState(rawNode.selectState)
+      : undefined;
+    const optionState = isOption
+      ? readVisualOptionState(rawNode.optionState)
+      : undefined;
+    const optgroupState = isOptgroup
+      ? readVisualOptgroupState(rawNode.optgroupState)
+      : undefined;
+    if (
+      (controlShell === 'select' && !selectState) ||
+      (isOption && !optionState) ||
+      (isOptgroup && !optgroupState) ||
+      (!Array.isArray(rawNode.children) &&
+        (controlShell === 'select' || isOption || isOptgroup))
+    ) return undefined;
+    if (
+      isOption && children.filter((child) => child.kind === 'text').length > 1
+    ) return undefined;
+    if (isOptgroup) {
+      const labelIndexes = children
+        .map((child, index) => child.kind === 'text' ? index : -1)
+        .filter((index) => index >= 0);
+      if (labelIndexes.length > 1 || labelIndexes.some((index) => index !== 0)) {
+        return undefined;
+      }
+    }
+    if (
+      selectState &&
+      !selectState.multiple &&
+      countSelectedVisualOptions(children) > 1
+    ) {
+      return undefined;
+    }
     const itemId = readVisualItemId(rawNode.itemId, itemIds);
     const nodeId = readVisualNodeId(rawNode.nodeId);
     return {
@@ -1425,6 +1977,9 @@ function parseVisualPage(
       ...(itemId ? { itemId } : {}),
       ...(nodeId ? { nodeId } : {}),
       ...(controlShell ? { controlShell } : {}),
+      ...(selectState ? { selectState } : {}),
+      ...(optionState ? { optionState } : {}),
+      ...(optgroupState ? { optgroupState } : {}),
       ...(attributes ? { attributes } : {}),
       children,
     };
@@ -1442,6 +1997,20 @@ function parseVisualPage(
     styles,
     root,
   };
+}
+
+function countSelectedVisualOptions(nodes: readonly VisualNode[]): number {
+  let selected = 0;
+  for (const node of nodes) {
+    if (node.kind !== 'element') continue;
+    if (node.tag === 'option') {
+      if (node.optionState?.selected) selected += 1;
+    } else if (node.tag === 'optgroup') {
+      selected += countSelectedVisualOptions(node.children);
+    }
+    if (selected > 1) return selected;
+  }
+  return selected;
 }
 
 function parseVisualStyle(
@@ -1571,6 +2140,34 @@ function readControlShell(value: unknown): VisualControlShell | undefined {
     value === 'textarea'
     ? value
     : undefined;
+}
+
+function readVisualSelectState(value: unknown): VisualSelectState | undefined {
+  if (
+    !isRecord(value) ||
+    typeof value.disabled !== 'boolean' ||
+    typeof value.multiple !== 'boolean' ||
+    typeof value.open !== 'boolean'
+  ) return undefined;
+  return {
+    disabled: value.disabled,
+    multiple: value.multiple,
+    open: value.open,
+  };
+}
+
+function readVisualOptionState(value: unknown): VisualOptionState | undefined {
+  if (
+    !isRecord(value) ||
+    typeof value.disabled !== 'boolean' ||
+    typeof value.selected !== 'boolean'
+  ) return undefined;
+  return { disabled: value.disabled, selected: value.selected };
+}
+
+function readVisualOptgroupState(value: unknown): VisualOptgroupState | undefined {
+  if (!isRecord(value) || typeof value.disabled !== 'boolean') return undefined;
+  return { disabled: value.disabled };
 }
 
 function readVisualItemId(

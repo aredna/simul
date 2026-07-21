@@ -1,13 +1,22 @@
 import {
+  MAX_SOURCE_SELECTED_OPTION_INDEXES,
   hasSourceActivationElementAncestor,
   hasSourcePrivateElementAncestor,
   hasSourcePrivateOrActivationElementAncestor,
   isSourceActivationRoleValue,
   isSourceActivationTagName,
+  isSourcePrivateRoleValue,
   isEligibleSourceTextControl,
   isSourceNativeTextControlTagName,
+  isSourceOptionInsideNativeSelect,
+  isSourcePublicMenuRoleValue,
+  isSourceSelectEntryVisuallyHidden,
   readSourceControlText,
-  sourceElementStartsPrivateRegion,
+  readSourceSelectLabel,
+  readSourceSelectPickerOpen,
+  readSourceSelectedOptionIndexes,
+  sourceAttributesArePrivate,
+  sourceElementStartsPrivateRegionInContext,
   type SourceControlText,
 } from './source-privacy-policy';
 import type { SelectableReplicaFidelityPolicy } from './fidelity-policy';
@@ -43,6 +52,9 @@ export interface HtmlMirrorElementNode {
   readonly children: readonly HtmlMirrorNode[];
   readonly visuallyHidden?: true;
   readonly selectedImageSource?: string;
+  readonly selectedOptionIndexes?: readonly number[];
+  readonly selectPickerOpen?: true;
+  readonly selectPresentationStyle?: string;
   readonly controlText?: HtmlMirrorControlText;
   readonly canvasBackgroundColor?: string;
   readonly resolvedStyleSheetText?: string;
@@ -52,6 +64,9 @@ export interface HtmlMirrorElementNode {
 export interface HtmlMirrorElementHints {
   readonly visuallyHidden?: true;
   readonly selectedImageSource?: string;
+  readonly selectedOptionIndexes?: readonly number[];
+  readonly selectPickerOpen?: true;
+  readonly selectPresentationStyle?: string;
   readonly controlText?: HtmlMirrorControlText;
   readonly canvasBackgroundColor?: string;
   readonly resolvedStyleSheetText?: string;
@@ -242,6 +257,7 @@ export interface HtmlMirrorIdRegistry {
 
 export interface HtmlMirrorReadBudget {
   nodes: number;
+  inspectedNodes: number;
   bytes: number;
   styleSheets: number;
   styleRules: number;
@@ -276,6 +292,7 @@ interface SerializeContext {
   readonly styleWork: HtmlMirrorStyleWorkBudget;
   readonly privateRegion: boolean;
   readonly privateAttributeRegion: boolean;
+  readonly publicMenuRegion: boolean;
   readonly activationRegion: boolean;
   readonly nonContentRegion: boolean;
   readonly styleRegion: boolean;
@@ -283,6 +300,8 @@ interface SerializeContext {
   readonly representability: HtmlMirrorRepresentabilityCollector;
   readonly fidelityPolicy: SelectableReplicaFidelityPolicy;
 }
+
+type NativeSelectParentContext = false | 'select' | 'optgroup' | 'option';
 
 const UNSAFE_ELEMENTS = new Set([
   'animate',
@@ -359,8 +378,57 @@ const PRIVATE_ATTRIBUTES = new Set([
   'title',
   'value',
 ]);
+const PUBLIC_MENU_RESOURCE_ATTRIBUTES = new Set([
+  'alt',
+  'background',
+  'href',
+  'imagesizes',
+  'imagesrcset',
+  'poster',
+  'src',
+  'srcset',
+  'style',
+  'xlink:href',
+]);
+const PUBLIC_MENU_RICH_RESOURCE_ELEMENTS = new Set([
+  'audio',
+  'canvas',
+  'img',
+  'picture',
+  'source',
+  'video',
+]);
 
 const RAW_CONTROL_TEXT_ATTRIBUTES = new Set(['placeholder', 'value']);
+const NATIVE_SELECT_PRESENTATION_ATTRIBUTES = Object.freeze({
+  select: new Set(['disabled', 'multiple', 'role']),
+  option: new Set(['disabled', 'role']),
+  optgroup: new Set(['disabled', 'role']),
+});
+const NATIVE_SELECT_SAFE_STYLE_PROPERTIES = new Set([
+  'align-self', 'appearance', 'background-color', 'bottom', 'box-sizing',
+  'clear', 'color', 'direction', 'display', 'float', 'font-family', 'font-size',
+  'font-stretch', 'font-style', 'font-variant', 'font-weight', 'height', 'left',
+  'letter-spacing', 'line-height', 'max-height', 'max-width', 'min-height',
+  'min-width', 'opacity', 'order', 'position', 'right', 'text-align',
+  'text-indent', 'text-transform', 'top', 'transform', 'transform-origin',
+  'unicode-bidi', 'vertical-align', 'visibility', 'white-space', 'width',
+  'word-spacing', 'writing-mode', 'z-index',
+]);
+const NATIVE_SELECT_COMPUTED_STYLE_PROPERTIES = Object.freeze([
+  ...NATIVE_SELECT_SAFE_STYLE_PROPERTIES,
+  'border-bottom-color', 'border-bottom-left-radius',
+  'border-bottom-right-radius', 'border-bottom-style', 'border-bottom-width',
+  'border-left-color', 'border-left-style', 'border-left-width',
+  'border-right-color', 'border-right-style', 'border-right-width',
+  'border-top-color', 'border-top-left-radius', 'border-top-right-radius',
+  'border-top-style', 'border-top-width', 'margin-block', 'margin-block-end',
+  'margin-block-start', 'margin-bottom', 'margin-inline', 'margin-inline-end',
+  'margin-inline-start', 'margin-left', 'margin-right', 'margin-top',
+  'padding-block', 'padding-block-end', 'padding-block-start', 'padding-bottom',
+  'padding-inline', 'padding-inline-end', 'padding-inline-start', 'padding-left',
+  'padding-right', 'padding-top',
+] as const);
 const LOCAL_SVG_FRAGMENT_PATTERN = /^#[A-Za-z0-9_.:-]{1,256}$/u;
 const SVG_URL_PRESENTATION_ATTRIBUTES = new Set([
   'clip-path',
@@ -569,7 +637,10 @@ export function sanitizeSourceSubtrees(
           ? hasSourcePrivateElementAncestor(inheritedElement)
           : false,
         privateAttributeRegion: inheritedElement
-          ? hasSourcePrivateOrActivationElementAncestor(inheritedElement)
+          ? hasSourcePrivateAttributeElementAncestor(inheritedElement)
+          : false,
+        publicMenuRegion: inheritedElement
+          ? hasSourcePublicMenuElementAncestor(inheritedElement)
           : false,
         activationRegion: inheritedElement
           ? hasSourceActivationElementAncestor(inheritedElement)
@@ -609,7 +680,10 @@ export function sanitizeSourceChildren(
       ? hasSourcePrivateElementAncestor(parentElement)
       : false;
     const privateAttributeRegion = parentElement
-      ? hasSourcePrivateOrActivationElementAncestor(parentElement)
+      ? hasSourcePrivateAttributeElementAncestor(parentElement)
+      : false;
+    const publicMenuRegion = parentElement
+      ? hasSourcePublicMenuElementAncestor(parentElement)
       : false;
     const activationRegion = parentElement
       ? hasSourceActivationElementAncestor(parentElement)
@@ -626,6 +700,7 @@ export function sanitizeSourceChildren(
         styleWork,
         privateRegion,
         privateAttributeRegion,
+        publicMenuRegion,
         activationRegion,
         nonContentRegion,
         styleRegion,
@@ -651,11 +726,14 @@ export function sanitizeSourceAttributes(
   fidelityPolicy: SelectableReplicaFidelityPolicy = 'conservative',
 ): readonly (readonly [string, string])[] | undefined {
   try {
+    if (isUnsafeSourceElement(source, fidelityPolicy, baseUrl)) return undefined;
     return sanitizeAttributes(
       source,
       source.localName.toLowerCase(),
       hasSourcePrivateElementAncestor(source),
       hasSourceActivationElementAncestor(source),
+      hasSourcePrivateAttributeElementAncestor(source),
+      hasSourcePublicMenuElementAncestor(source),
       baseUrl,
       representability,
       fidelityPolicy,
@@ -674,14 +752,20 @@ export function sanitizeSourceElementHints(
   styleWork?: HtmlMirrorStyleWorkBudget,
 ): HtmlMirrorElementHints {
   const tagName = source.localName.toLowerCase();
-  const visuallyHidden = isCanonicalClippedSourceElement(source);
+  const visuallyHidden = tagName === 'select'
+    ? isSourceSelectVisuallyHidden(source)
+    : (tagName === 'option' || tagName === 'optgroup')
+      ? isSourceSelectEntryVisuallyHidden(source)
+      : isCanonicalClippedSourceElement(source);
   const selectedImageSource = tagName === 'img'
+    && !hasSourcePublicMenuElementAncestor(source)
     ? selectedSourceFor(source, baseUrl)
     : undefined;
   const canvasBackgroundColor = tagName === 'html'
     ? readSourceCanvasBackgroundColor(source)
     : undefined;
   const resolvedStyleSheetText = fidelityPolicy === 'passive'
+      && !hasSourcePublicMenuElementAncestor(source)
     ? readResolvedElementStyleSheet(
         source,
         baseUrl,
@@ -691,10 +775,21 @@ export function sanitizeSourceElementHints(
       )
     : undefined;
   const controlParent = composedParentElement(source);
+  const selectedOptionIndexes = tagName === 'select' &&
+      (!controlParent || !hasSourcePrivateOrActivationElementAncestor(controlParent))
+    ? readSourceSelectedOptionIndexes(source)
+    : undefined;
+  const selectPickerOpen = tagName === 'select' &&
+      (!controlParent || !hasSourcePrivateOrActivationElementAncestor(controlParent))
+    ? readSourceSelectPickerOpen(source)
+    : undefined;
+  const selectPresentationStyle = tagName === 'select'
+    ? readSourceSelectPresentationStyle(source, fidelityPolicy)
+    : undefined;
   const sourceControlText = controlParent &&
       hasSourcePrivateOrActivationElementAncestor(controlParent)
     ? undefined
-    : readSourceControlText(source);
+    : readSourceControlText(source) ?? readSourceSelectLabel(source);
   let controlText: HtmlMirrorControlText | undefined;
   if (
     sourceControlText &&
@@ -712,6 +807,9 @@ export function sanitizeSourceElementHints(
   return Object.freeze({
     ...(visuallyHidden ? { visuallyHidden: true as const } : {}),
     ...(selectedImageSource ? { selectedImageSource } : {}),
+    ...(selectedOptionIndexes !== undefined ? { selectedOptionIndexes } : {}),
+    ...(selectPickerOpen ? { selectPickerOpen: true as const } : {}),
+    ...(selectPresentationStyle ? { selectPresentationStyle } : {}),
     ...(controlText ? { controlText } : {}),
     ...(canvasBackgroundColor ? { canvasBackgroundColor } : {}),
     ...(resolvedStyleSheetText !== undefined
@@ -738,6 +836,7 @@ export function sanitizeSourceDocument(
     styleWork,
     privateRegion: false,
     privateAttributeRegion: false,
+    publicMenuRegion: false,
     activationRegion: false,
     nonContentRegion: false,
     styleRegion: false,
@@ -786,6 +885,9 @@ export function readHtmlMirrorNode(
   privateAttributeRegion = false,
   activationRegion = false,
   fidelityPolicy: SelectableReplicaFidelityPolicy = 'conservative',
+  nativeSelectParent: NativeSelectParentContext = false,
+  attributeSentinel = false,
+  publicMenuRegion = false,
 ): HtmlMirrorNode | undefined {
   if (!isRecord(input) || depth > MAX_HTML_MIRROR_DEPTH) return undefined;
   budget.nodes += 1;
@@ -798,6 +900,7 @@ export function readHtmlMirrorNode(
       typeof input.text !== 'string' ||
       input.text.length > MAX_HTML_MIRROR_STRING ||
       typeof input.translatable !== 'boolean' ||
+      nativeSelectParent !== false ||
       (privateRegion && input.text !== '') ||
       ((privateRegion || nonContentRegion) && input.translatable) ||
       (styleRegion && sanitizeCss(
@@ -822,7 +925,8 @@ export function readHtmlMirrorNode(
     !hasExactKeysWithOptional(input, [
       'kind', 'id', 'namespace', 'tagName', 'attributes', 'children',
     ], [
-      'visuallyHidden', 'selectedImageSource', 'controlText',
+      'visuallyHidden', 'selectedImageSource', 'selectedOptionIndexes',
+      'selectPickerOpen', 'selectPresentationStyle', 'controlText',
       'canvasBackgroundColor', 'resolvedStyleSheetText', 'shadowRoot',
     ]) ||
     !isNamespace(input.namespace) ||
@@ -833,7 +937,18 @@ export function readHtmlMirrorNode(
     !Array.isArray(input.children)
   ) return undefined;
   if (
+    !isValidTransportedNativeSelectPlacement(
+      input.namespace,
+      input.tagName,
+      nativeSelectParent,
+    ) ||
+    (isNativeSelectSemanticTag(input.tagName) && input.shadowRoot !== undefined) ||
+    (input.tagName === 'option' && input.children.length !== 0)
+  ) return undefined;
+  if (
     (input.visuallyHidden !== undefined && input.visuallyHidden !== true) ||
+    (input.selectPickerOpen !== undefined &&
+      (input.selectPickerOpen !== true || input.tagName !== 'select')) ||
     (input.selectedImageSource !== undefined &&
       (
         input.tagName !== 'img' ||
@@ -846,6 +961,28 @@ export function readHtmlMirrorNode(
     budget.bytes += input.selectedImageSource.length * 2;
     if (budget.bytes > MAX_HTML_MIRROR_BYTES) return undefined;
   }
+  const selectedOptionIndexes = readHtmlMirrorSelectedOptionIndexes(
+    input.selectedOptionIndexes,
+    input.tagName,
+  );
+  if (
+    input.selectedOptionIndexes !== undefined &&
+    selectedOptionIndexes === undefined
+  ) return undefined;
+  if (selectedOptionIndexes) {
+    budget.bytes += selectedOptionIndexes.length * 8 + 16;
+    if (budget.bytes > MAX_HTML_MIRROR_BYTES) return undefined;
+  }
+  const selectPresentationStyle = readTransportedSelectPresentationStyle(
+    input.selectPresentationStyle,
+    input.tagName,
+    budget,
+    fidelityPolicy,
+  );
+  if (
+    input.selectPresentationStyle !== undefined &&
+    selectPresentationStyle === undefined
+  ) return undefined;
   const canvasBackgroundColor = input.tagName === 'html'
     ? readHtmlMirrorCanvasBackgroundColor(input.canvasBackgroundColor)
     : undefined;
@@ -879,11 +1016,62 @@ export function readHtmlMirrorNode(
     attributes.push(Object.freeze([attribute[0], attribute[1]] as const));
   }
   const attributeValues = Object.fromEntries(attributes);
+  if (
+    input.tagName === 'video' &&
+    fidelityPolicy === 'passive' &&
+    typeof attributeValues.poster !== 'string'
+  ) return undefined;
+  const currentPrivateRegion = sourceElementStartsPrivateRegionInContext(
+    input.tagName,
+    attributeValues,
+    nativeSelectParent === 'select' || nativeSelectParent === 'optgroup',
+  );
+  const transportedPrivateRegion = privateRegion || currentPrivateRegion;
+  const transportedActivationElement =
+    isSourceActivationTagName(input.tagName) ||
+    isSourceActivationRoleValue(attributeValues.role);
+  const transportedActivationRegion = activationRegion ||
+    transportedActivationElement;
+  const transportedPrivateAttributeRegion = privateAttributeRegion ||
+    transportedPrivateRegion || transportedActivationElement ||
+    (!isNativeSelectSemanticTag(input.tagName) &&
+      isSourcePublicMenuRoleValue(attributeValues.role));
+  const transportedPublicMenuRegion = publicMenuRegion ||
+    (!isNativeSelectSemanticTag(input.tagName) &&
+      isSourcePublicMenuRoleValue(attributeValues.role));
+  const transportedNonContentRegion = nonContentRegion ||
+    NON_CONTENT_ELEMENTS.has(input.tagName);
+  const transportedStyleRegion = styleRegion || input.tagName === 'style';
+  const transportedNativeSelectParent = nextNativeSelectParentContext(
+    input.tagName,
+    nativeSelectParent,
+  );
+  if (
+    transportedPublicMenuRegion &&
+    (
+      input.tagName === 'link' || input.tagName === 'style' ||
+      hasPublicMenuResourceAttribute(attributes) ||
+      input.selectedImageSource !== undefined ||
+      input.resolvedStyleSheetText !== undefined ||
+      input.canvasBackgroundColor !== undefined ||
+      (input.shadowRoot !== undefined &&
+        isRecord(input.shadowRoot) &&
+        Array.isArray(input.shadowRoot.adoptedStyleSheets) &&
+        input.shadowRoot.adoptedStyleSheets.length > 0)
+    )
+  ) return undefined;
+  if (
+    input.tagName === 'select' &&
+    !attributeSentinel &&
+    !transportedPrivateAttributeRegion &&
+    selectedOptionIndexes === undefined
+  ) return undefined;
   const controlText = readTransportedControlText(
     input.controlText,
     input.tagName,
     attributeValues,
-    privateAttributeRegion || nonContentRegion,
+    transportedPrivateAttributeRegion || transportedNonContentRegion,
+    nativeSelectParent,
   );
   if (input.controlText !== undefined && !controlText) return undefined;
   if (controlText) {
@@ -910,25 +1098,23 @@ export function readHtmlMirrorNode(
     attributeValues.rel !== 'stylesheet'
   ) return undefined;
   const children: HtmlMirrorNode[] = [];
-  const transportedPrivateRegion = privateRegion ||
-    sourceElementStartsPrivateRegion(input.tagName, attributeValues);
-  const transportedActivationElement =
-    isSourceActivationTagName(input.tagName) ||
-    isSourceActivationRoleValue(Object.fromEntries(attributes).role);
-  const transportedActivationRegion = activationRegion ||
-    transportedActivationElement;
-  const transportedPrivateAttributeRegion = privateAttributeRegion ||
-    transportedPrivateRegion ||
-    transportedActivationElement;
-  const transportedNonContentRegion = nonContentRegion ||
-    NON_CONTENT_ELEMENTS.has(input.tagName);
-  const transportedStyleRegion = styleRegion || input.tagName === 'style';
   if (
     transportedPrivateAttributeRegion &&
     hasPrivateHtmlMirrorAttribute(attributes)
   ) {
     return undefined;
   }
+  if (transportedPrivateAttributeRegion && selectedOptionIndexes !== undefined) {
+    return undefined;
+  }
+  if (transportedPrivateAttributeRegion && input.selectPickerOpen !== undefined) {
+    return undefined;
+  }
+  if (
+    transportedPrivateAttributeRegion &&
+    isNativeSelectSemanticTag(input.tagName) &&
+    attributeValues.label !== undefined
+  ) return undefined;
   for (const child of input.children) {
     const parsed = readHtmlMirrorNode(
       child,
@@ -941,10 +1127,24 @@ export function readHtmlMirrorNode(
       transportedPrivateAttributeRegion,
       transportedActivationRegion,
       fidelityPolicy,
+      transportedNativeSelectParent,
+      false,
+      transportedPublicMenuRegion,
     );
     if (!parsed) return undefined;
     children.push(parsed);
   }
+  if (
+    !attributeSentinel &&
+    selectedOptionIndexes !== undefined &&
+    (
+      selectedOptionIndexes.some(
+        (index) => index >= nativeSelectOptionCount(children),
+      ) ||
+      (attributeValues.multiple === undefined &&
+        selectedOptionIndexes.length > 1)
+    )
+  ) return undefined;
   budget.bytes += input.tagName.length * 2 + 64;
   if (budget.bytes > MAX_HTML_MIRROR_BYTES) return undefined;
   let shadowRoot: HtmlMirrorShadowRoot | undefined;
@@ -979,6 +1179,9 @@ export function readHtmlMirrorNode(
         transportedPrivateAttributeRegion,
         transportedActivationRegion,
         fidelityPolicy,
+        transportedNativeSelectParent,
+        false,
+        transportedPublicMenuRegion,
       );
       if (!parsed) return undefined;
       shadowChildren.push(parsed);
@@ -1007,6 +1210,9 @@ export function readHtmlMirrorNode(
     ...(typeof input.selectedImageSource === 'string'
       ? { selectedImageSource: input.selectedImageSource }
       : {}),
+    ...(selectedOptionIndexes !== undefined ? { selectedOptionIndexes } : {}),
+    ...(input.selectPickerOpen === true ? { selectPickerOpen: true as const } : {}),
+    ...(selectPresentationStyle ? { selectPresentationStyle } : {}),
     ...(controlText ? { controlText } : {}),
     ...(canvasBackgroundColor ? { canvasBackgroundColor } : {}),
     ...(resolvedStyleSheetText !== undefined
@@ -1065,10 +1271,22 @@ function serializeNode(
   live: Node,
   context: SerializeContext,
 ): HtmlMirrorNode | undefined {
+  context.budget.inspectedNodes += 1;
+  if (context.budget.inspectedNodes > MAX_HTML_MIRROR_NODES) {
+    incrementRepresentability(context.representability, 'capacityOmissionCount');
+    throw new HtmlMirrorCapacityError(true);
+  }
   if (context.depth > MAX_HTML_MIRROR_DEPTH) {
     incrementRepresentability(
       context.representability,
       'depthBoundaryOmissionCount',
+    );
+    return undefined;
+  }
+  if (!isRepresentableSourceNativeSelectChild(live)) {
+    incrementRepresentability(
+      context.representability,
+      'unsupportedNodeOmissionCount',
     );
     return undefined;
   }
@@ -1135,7 +1353,14 @@ function serializeNode(
   }
   const liveElement = live as Element;
   const tagName = liveElement.localName.toLowerCase();
-  if (!isSafeTagName(tagName) || isUnsafeElement(tagName, context.fidelityPolicy)) {
+  if (
+    !isSafeTagName(tagName) ||
+    isUnsafeSourceElement(
+      liveElement,
+      context.fidelityPolicy,
+      context.baseUrl,
+    )
+  ) {
     incrementRepresentability(
       context.representability,
       'unsafeElementOmissionCount',
@@ -1168,7 +1393,25 @@ function serializeNode(
     elementStartsActivationRegion(liveElement);
   const privateAttributeRegion = context.privateAttributeRegion ||
     privateRegion ||
-    activationRegion;
+    activationRegion ||
+    (!isNativeSelectSemanticTag(tagName) &&
+      isSourcePublicMenuRoleValue(liveElement.getAttribute('role')));
+  const publicMenuRegion = context.publicMenuRegion ||
+    (!isNativeSelectSemanticTag(tagName) &&
+      isSourcePublicMenuRoleValue(liveElement.getAttribute('role')));
+  if (
+    publicMenuRegion &&
+    (
+      tagName === 'link' || tagName === 'style' ||
+      PUBLIC_MENU_RICH_RESOURCE_ELEMENTS.has(tagName)
+    )
+  ) {
+    incrementRepresentability(
+      context.representability,
+      'strictResourcePolicyBlockCount',
+    );
+    return undefined;
+  }
   const nonContentRegion = context.nonContentRegion || NON_CONTENT_ELEMENTS.has(tagName);
   const styleRegion = context.styleRegion || tagName === 'style';
   const attributes = sanitizeAttributes(
@@ -1176,6 +1419,8 @@ function serializeNode(
     tagName,
     privateRegion,
     activationRegion,
+    privateAttributeRegion,
+    publicMenuRegion,
     context.baseUrl,
     context.representability,
     context.fidelityPolicy,
@@ -1188,6 +1433,14 @@ function serializeNode(
     context.fidelityPolicy,
     context.styleWork,
   );
+  if (
+    tagName === 'select' &&
+    !privateAttributeRegion &&
+    hints.selectedOptionIndexes === undefined
+  ) {
+    incrementRepresentability(context.representability, 'capacityOmissionCount');
+    return undefined;
+  }
   admitNode(
     context.budget,
     id,
@@ -1195,6 +1448,8 @@ function serializeNode(
       (total, [name, value]) => total + (name.length + value.length) * 2 + 8,
       64,
     ) + (hints.selectedImageSource?.length ?? 0) * 2 +
+      (hints.selectedOptionIndexes?.length ?? 0) * 8 +
+      (hints.selectPresentationStyle?.length ?? 0) * 2 +
       (hints.controlText?.text.length ?? 0) * 2 +
       (hints.canvasBackgroundColor?.length ?? 0) * 2 +
       (hints.resolvedStyleSheetText?.length ?? 0) * 2,
@@ -1216,6 +1471,7 @@ function serializeNode(
         fidelityPolicy: childFidelityPolicy,
         privateRegion,
         privateAttributeRegion,
+        publicMenuRegion,
         activationRegion,
         nonContentRegion,
         styleRegion,
@@ -1246,6 +1502,7 @@ function serializeNode(
         ...context,
         privateRegion,
         privateAttributeRegion,
+        publicMenuRegion,
         activationRegion,
         nonContentRegion,
         styleRegion,
@@ -1253,14 +1510,16 @@ function serializeNode(
       });
       if (child) shadowChildren.push(child);
     }
-    const adoptedStyleSheets = captureAdoptedStyleSheets(
-      sourceShadow,
-      context.baseUrl,
-      context.budget,
-      context.styleWork,
-      context.representability,
-      context.fidelityPolicy,
-    );
+    const adoptedStyleSheets = publicMenuRegion
+      ? Object.freeze([])
+      : captureAdoptedStyleSheets(
+          sourceShadow,
+          context.baseUrl,
+          context.budget,
+          context.styleWork,
+          context.representability,
+          context.fidelityPolicy,
+      );
     if (!adoptedStyleSheets) return undefined;
     shadowRoot = Object.freeze({
       id: shadowId,
@@ -1286,6 +1545,8 @@ function sanitizeAttributes(
   tagName: string,
   privateRegion: boolean,
   activationRegion: boolean,
+  inheritedPrivateAttributes: boolean,
+  publicMenuRegion: boolean,
   baseUrl: string,
   representability: HtmlMirrorRepresentabilityCollector,
   fidelityPolicy: SelectableReplicaFidelityPolicy,
@@ -1295,10 +1556,13 @@ function sanitizeAttributes(
     return undefined;
   }
   const result: Array<readonly [string, string]> = [];
-  const privateAttributes = privateRegion || activationRegion ||
+  const privateAttributes = inheritedPrivateAttributes ||
+    privateRegion || activationRegion ||
     isSourceNativeTextControlTagName(tagName) ||
     isSourceActivationTagName(tagName) ||
-    isSourceActivationRoleValue(element.getAttribute('role'));
+    isSourceActivationRoleValue(element.getAttribute('role')) ||
+    (!isNativeSelectSemanticTag(tagName) &&
+      isSourcePublicMenuRoleValue(element.getAttribute('role')));
   for (const attribute of element.attributes) {
     const name = attribute.name.toLowerCase();
     const localSvgReference = isLocalSvgReference(
@@ -1321,13 +1585,19 @@ function sanitizeAttributes(
     }
     if (
       name.startsWith('on') || name === 'nonce' ||
+      (isNativeSelectSemanticTag(tagName) &&
+        !isNativeSelectPresentationAttribute(tagName, name)) ||
+      ((tagName === 'option' || tagName === 'optgroup') && name === 'style') ||
+      (isNativeSelectSemanticTag(tagName) &&
+        (privateRegion || activationRegion) && name === 'label') ||
       (ACTIVE_OR_NAVIGATIONAL_ATTRIBUTES.has(name) &&
         !localSvgReference && !passiveSvgReference && !passivePoster) ||
       (tagName === 'video' && MEDIA_ACTIVE_ATTRIBUTES.has(name)) ||
       (isSourceNativeTextControlTagName(tagName) &&
         RAW_CONTROL_TEXT_ATTRIBUTES.has(name)) ||
       (privateAttributes &&
-        (PRIVATE_ATTRIBUTES.has(name) || name.startsWith('data-')))
+        (PRIVATE_ATTRIBUTES.has(name) || name.startsWith('data-'))) ||
+      (publicMenuRegion && publicMenuResourceAttribute(name, attribute.value))
     ) {
       incrementRepresentability(representability, 'strippedActiveAttributeCount');
       incrementRepresentability(
@@ -1353,6 +1623,21 @@ function sanitizeAttributes(
       continue;
     }
     let value = attribute.value;
+    if (
+      isNativeSelectSemanticTag(tagName) &&
+      (name === 'disabled' || name === 'multiple')
+    ) value = '';
+    if (isNativeSelectSemanticTag(tagName) && name === 'role') {
+      if (isSourcePrivateRoleValue(value)) value = 'combobox';
+      else if (isSourceActivationRoleValue(value)) value = 'button';
+      else {
+        incrementRepresentability(
+          representability,
+          'strippedActiveAttributeCount',
+        );
+        continue;
+      }
+    }
     if (
       name === 'alt' &&
       activationRegion &&
@@ -1505,13 +1790,20 @@ function sanitizeAttributes(
       }
     } else if (name === 'style') {
       const classifiedBefore = classifiedStyleOmissionCount(representability);
-      const style = sanitizeCss(
-        value,
-        baseUrl,
-        true,
-        representability,
-        fidelityPolicy,
-      );
+      const style = tagName === 'select'
+        ? sanitizeNativeSelectStyle(
+            value,
+            baseUrl,
+            representability,
+            fidelityPolicy,
+          )
+        : sanitizeCss(
+            value,
+            baseUrl,
+            true,
+            representability,
+            fidelityPolicy,
+          );
       if (style === undefined) {
         if (
           classifiedStyleOmissionCount(representability) === classifiedBefore
@@ -1520,6 +1812,7 @@ function sanitizeAttributes(
         }
         continue;
       }
+      if (!style) continue;
       value = style;
     } else if (
       element.namespaceURI === 'http://www.w3.org/2000/svg' &&
@@ -1571,6 +1864,13 @@ function sanitizeAttributes(
   return Object.freeze(result);
 }
 
+function publicMenuResourceAttribute(name: string, value: string): boolean {
+  return PUBLIC_MENU_RESOURCE_ATTRIBUTES.has(name) ||
+    /(?:https?|blob|data|file|javascript)\s*:|(?:url|image-set)\s*\(/iu.test(
+      decodeCssEscapes(value),
+    );
+}
+
 function sourceStyleSheetDisabled(element: Element): boolean {
   try {
     return (element as Element & {
@@ -1584,7 +1884,14 @@ function sourceStyleSheetDisabled(element: Element): boolean {
 export function createHtmlMirrorReadBudget(
   ids: Set<number> = new Set(),
 ): HtmlMirrorReadBudget {
-  return { nodes: 0, bytes: 0, styleSheets: 0, styleRules: 0, ids };
+  return {
+    nodes: 0,
+    inspectedNodes: 0,
+    bytes: 0,
+    styleSheets: 0,
+    styleRules: 0,
+    ids,
+  };
 }
 
 function captureAdoptedStyleSheets(
@@ -2120,6 +2427,123 @@ export function sanitizeCss(
     baseUrl,
     representability,
   );
+}
+
+/**
+ * Native-select styling is layout presentation, not a resource channel. Keep
+ * inert declarations such as width/position/typography, but remove an entire
+ * declaration when it can carry or disclose a URL.
+ */
+function sanitizeNativeSelectStyle(
+  css: string,
+  baseUrl: string,
+  representability: HtmlMirrorRepresentabilityCollector | undefined,
+  fidelityPolicy: SelectableReplicaFidelityPolicy,
+): string | undefined {
+  const declarations = splitCssTopLevel(css, ';');
+  if (!declarations) return undefined;
+  const retained: string[] = [];
+  for (const declaration of declarations) {
+    const normalized = declaration.trim();
+    if (!normalized) continue;
+    const colon = normalized.indexOf(':');
+    if (colon <= 0) return undefined;
+    const property = decodeCssEscapes(normalized.slice(0, colon))
+      .trim()
+      .toLowerCase();
+    const allowedProperty = NATIVE_SELECT_SAFE_STYLE_PROPERTIES.has(property) ||
+      /^(?:border-(?:bottom|left|right|top)-(?:color|style|width)|border-(?:bottom-left|bottom-right|top-left|top-right)-radius|margin-(?:block|block-end|block-start|bottom|inline|inline-end|inline-start|left|right|top)|padding-(?:block|block-end|block-start|bottom|inline|inline-end|inline-start|left|right|top))$/u
+        .test(property);
+    if (!allowedProperty) {
+      if (representability) {
+        incrementRepresentability(
+          representability,
+          'strippedActiveAttributeCount',
+        );
+      }
+      continue;
+    }
+    const executable = decodeCssEscapes(normalized);
+    if (
+      /(?:url|(?:-webkit-)?image-set)\s*\(|(?:https?|blob|data|file)\s*:/iu
+        .test(executable)
+    ) {
+      if (representability) {
+        incrementRepresentability(
+          representability,
+          'strippedUnsafeResourceCount',
+        );
+        incrementRepresentability(
+          representability,
+          'strictResourcePolicyBlockCount',
+        );
+      }
+      continue;
+    }
+    retained.push(normalized);
+  }
+  const candidate = retained.join(';');
+  if (!candidate) return '';
+  return sanitizeCss(
+    candidate,
+    baseUrl,
+    true,
+    representability,
+    fidelityPolicy,
+  );
+}
+
+export function readSourceSelectPresentationStyle(
+  element: Element,
+  fidelityPolicy: SelectableReplicaFidelityPolicy = 'conservative',
+): string | undefined {
+  const view = element.ownerDocument?.defaultView;
+  if (
+    element.localName.toLowerCase() !== 'select' ||
+    !view ||
+    typeof view.getComputedStyle !== 'function'
+  ) return undefined;
+  try {
+    const computed = view.getComputedStyle(element);
+    const declarations: string[] = [];
+    for (const property of NATIVE_SELECT_COMPUTED_STYLE_PROPERTIES) {
+      const value = computed.getPropertyValue(property).trim();
+      if (!value || value.length > 500) continue;
+      declarations.push(`${property}:${value}`);
+    }
+    const style = sanitizeNativeSelectStyle(
+      declarations.join(';'),
+      'about:blank',
+      undefined,
+      fidelityPolicy,
+    );
+    return style && style.length <= 32_768 ? style : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function readTransportedSelectPresentationStyle(
+  input: unknown,
+  tagName: string,
+  budget: HtmlMirrorReadBudget,
+  fidelityPolicy: SelectableReplicaFidelityPolicy,
+): string | undefined {
+  if (input === undefined) return undefined;
+  if (
+    tagName !== 'select' ||
+    typeof input !== 'string' ||
+    input.length === 0 ||
+    input.length > 32_768 ||
+    sanitizeNativeSelectStyle(
+      input,
+      'about:blank',
+      undefined,
+      fidelityPolicy,
+    ) !== input
+  ) return undefined;
+  budget.bytes += input.length * 2 + 24;
+  return budget.bytes <= MAX_HTML_MIRROR_BYTES ? input : undefined;
 }
 
 function stripCssCommentsOutsideStrings(css: string): string | undefined {
@@ -2927,6 +3351,58 @@ function isCanonicalClippedSourceElement(element: Element): boolean {
   }
 }
 
+export function isSourceSelectVisuallyHidden(element: Element): boolean {
+  return isSourceSelectEntryVisuallyHidden(element) ||
+    isCanonicalClippedSourceElement(element) ||
+    isComputedHiddenSourceSelect(element);
+}
+
+function isComputedHiddenSourceSelect(element: Element): boolean {
+  const view = element.ownerDocument?.defaultView;
+  if (!view || typeof view.getComputedStyle !== 'function') return false;
+  try {
+    const style = view.getComputedStyle(element);
+    const overflow = `${style.overflow} ${style.overflowX} ${style.overflowY}`
+      .trim()
+      .toLowerCase();
+    const width = cssPixelValue(style.width);
+    const height = cssPixelValue(style.height);
+    const signedPixels = (value: string): number | undefined => {
+      const match = /^(-?\d+(?:\.\d+)?)px$/u.exec(value.trim().toLowerCase());
+      if (!match) return undefined;
+      const parsed = Number(match[1]);
+      return Number.isFinite(parsed) ? parsed : undefined;
+    };
+    const position = style.position.trim().toLowerCase();
+    const left = signedPixels(style.left);
+    const top = signedPixels(style.top);
+    const positionedOffscreen = (position === 'absolute' || position === 'fixed') &&
+      (
+        (left !== undefined && width !== undefined && left + width <= 0) ||
+        (top !== undefined && height !== undefined && top + height <= 0)
+      );
+    const transform = style.transform.trim().toLowerCase();
+    const transformCollapses = transform !== '' && transform !== 'none' && (() => {
+      try {
+        const rect = element.getBoundingClientRect();
+        return rect.width <= 0 || rect.height <= 0;
+      } catch {
+        return /(?:scale(?:3d|x|y)?\([^)]*\b0(?:[),]|\s))/u.test(transform);
+      }
+    })();
+    return style.display.trim().toLowerCase() === 'none' ||
+      ['hidden', 'collapse'].includes(style.visibility.trim().toLowerCase()) ||
+      Number(style.opacity) === 0 ||
+      style.getPropertyValue('content-visibility').trim().toLowerCase() === 'hidden' ||
+      positionedOffscreen ||
+      transformCollapses ||
+      (overflow.split(/\s+/u).some((value) => value === 'hidden' || value === 'clip') &&
+        (width === 0 || height === 0));
+  } catch {
+    return false;
+  }
+}
+
 function cssPixelValue(value: string): number | undefined {
   const match = /^(-?\d+(?:\.\d+)?)px$/u.exec(value.trim().toLowerCase());
   if (!match) return undefined;
@@ -2981,6 +3457,28 @@ function isUnsafeTransportedAttribute(
   value: string,
   fidelityPolicy: SelectableReplicaFidelityPolicy,
 ): boolean {
+  if (
+    isNativeSelectSemanticTag(tagName) &&
+    !isNativeSelectPresentationAttribute(tagName, name)
+  ) return true;
+  if (
+    isNativeSelectSemanticTag(tagName) &&
+    (
+      ((name === 'disabled' || name === 'multiple') && value !== '') ||
+      (name === 'role' && value !== 'combobox' && value !== 'button')
+    )
+  ) return true;
+  if ((tagName === 'option' || tagName === 'optgroup') && name === 'style') {
+    return true;
+  }
+  if (tagName === 'select' && name === 'style') {
+    return sanitizeNativeSelectStyle(
+      value,
+      'about:blank',
+      undefined,
+      fidelityPolicy,
+    ) !== value;
+  }
   if (
     tagName === 'meta' && (name === 'http-equiv' || name === 'content')
   ) return true;
@@ -3103,13 +3601,98 @@ function isUnsafeElement(
     (tagName === 'video' && fidelityPolicy !== 'passive');
 }
 
+function isUnsafeSourceElement(
+  element: Element,
+  fidelityPolicy: SelectableReplicaFidelityPolicy,
+  baseUrl: string,
+): boolean {
+  const tagName = element.localName.toLowerCase();
+  if (isUnsafeElement(tagName, fidelityPolicy)) return true;
+  if (tagName !== 'video') return false;
+  const poster = element.getAttribute('poster');
+  return !poster || passiveUrl(poster, baseUrl, true) === undefined;
+}
+
 function elementStartsPrivateRegion(element: Element): boolean {
-  return sourceElementStartsPrivateRegion(
+  return sourceElementStartsPrivateRegionInContext(
     element.localName,
     Object.fromEntries([...element.attributes].map(
       ({ name, value }) => [name.toLowerCase(), value],
     )),
+    isSourceOptionInsideNativeSelect(element),
   );
+}
+
+function isNativeSelectSemanticTag(tagName: string): boolean {
+  return tagName === 'select' || tagName === 'option' || tagName === 'optgroup';
+}
+
+function isNativeSelectPresentationAttribute(
+  tagName: string,
+  name: string,
+): boolean {
+  if (tagName === 'select') {
+    return NATIVE_SELECT_PRESENTATION_ATTRIBUTES.select.has(name);
+  }
+  if (tagName === 'option') {
+    return NATIVE_SELECT_PRESENTATION_ATTRIBUTES.option.has(name);
+  }
+  return tagName === 'optgroup' &&
+    NATIVE_SELECT_PRESENTATION_ATTRIBUTES.optgroup.has(name);
+}
+
+function isValidTransportedNativeSelectPlacement(
+  namespace: HtmlMirrorNamespace,
+  tagName: string,
+  parent: NativeSelectParentContext,
+): boolean {
+  if (isNativeSelectSemanticTag(tagName) && namespace !== 'html') return false;
+  if (parent === 'select') return tagName === 'option' || tagName === 'optgroup';
+  if (parent === 'optgroup') return tagName === 'option';
+  if (parent === 'option') return false;
+  return true;
+}
+
+function nextNativeSelectParentContext(
+  tagName: string,
+  parent: NativeSelectParentContext,
+): NativeSelectParentContext {
+  if (tagName === 'select') return 'select';
+  if (tagName === 'optgroup' && parent === 'select') return 'optgroup';
+  if (
+    tagName === 'option' &&
+    (parent === 'select' || parent === 'optgroup')
+  ) return 'option';
+  return false;
+}
+
+function nativeSelectOptionCount(children: readonly HtmlMirrorNode[]): number {
+  let count = 0;
+  for (const child of children) {
+    if (child.kind !== 'element') continue;
+    if (child.tagName === 'option') {
+      count += 1;
+      continue;
+    }
+    if (child.tagName === 'optgroup') {
+      count += child.children.filter(
+        (nested) => nested.kind === 'element' && nested.tagName === 'option',
+      ).length;
+    }
+  }
+  return count;
+}
+
+function isRepresentableSourceNativeSelectChild(node: Node): boolean {
+  const parentTag = node.parentElement?.localName.toLowerCase();
+  if (!parentTag || !isNativeSelectSemanticTag(parentTag)) return true;
+  if (node.nodeType !== Node.ELEMENT_NODE) return false;
+  const tagName = (node as Element).localName.toLowerCase();
+  if (parentTag === 'select') {
+    return tagName === 'option' || tagName === 'optgroup';
+  }
+  if (parentTag === 'optgroup') return tagName === 'option';
+  return false;
 }
 
 function elementStartsActivationRegion(element: Element): boolean {
@@ -3427,24 +4010,60 @@ function readTransportedControlText(
   tagName: string,
   attributes: Readonly<Record<string, string>>,
   inheritedPrivate: boolean,
+  nativeSelectParent: NativeSelectParentContext,
 ): HtmlMirrorControlText | undefined {
   if (input === undefined) return undefined;
   if (
     inheritedPrivate ||
     !isRecord(input) ||
     !hasExactKeys(input, ['kind', 'text', 'translatable']) ||
-    (input.kind !== 'value' && input.kind !== 'placeholder') ||
+    (input.kind !== 'value' && input.kind !== 'placeholder' &&
+      input.kind !== 'label') ||
     typeof input.text !== 'string' ||
     input.text.length === 0 ||
     input.text.length > MAX_HTML_MIRROR_STRING ||
-    input.translatable !== true ||
-    !isEligibleSourceTextControl(tagName, attributes)
+    input.translatable !== true
   ) return undefined;
+  const validTarget = input.kind === 'label'
+    ? (
+      (tagName === 'option' &&
+        (nativeSelectParent === 'select' || nativeSelectParent === 'optgroup')) ||
+      (tagName === 'optgroup' && nativeSelectParent === 'select')
+    ) &&
+      !sourceAttributesArePrivate(attributes) &&
+      !isSourceActivationRoleValue(attributes.role)
+    : isEligibleSourceTextControl(tagName, attributes);
+  if (!validTarget) return undefined;
   return Object.freeze({
     kind: input.kind,
     text: input.text,
     translatable: true,
   });
+}
+
+export function readHtmlMirrorSelectedOptionIndexes(
+  input: unknown,
+  tagName: string,
+): readonly number[] | undefined {
+  if (input === undefined) return undefined;
+  if (
+    tagName !== 'select' ||
+    !Array.isArray(input) ||
+    input.length > MAX_SOURCE_SELECTED_OPTION_INDEXES
+  ) return undefined;
+  const result: number[] = [];
+  let previous = -1;
+  for (const value of input) {
+    if (
+      !Number.isSafeInteger(value) ||
+      Number(value) < 0 ||
+      Number(value) >= MAX_HTML_MIRROR_NODES ||
+      Number(value) <= previous
+    ) return undefined;
+    previous = Number(value);
+    result.push(previous);
+  }
+  return Object.freeze(result);
 }
 
 function hasNonContentAncestor(element: Element): boolean {
@@ -3453,6 +4072,36 @@ function hasNonContentAncestor(element: Element): boolean {
     current = composedParentElement(current);
   }
   return false;
+}
+
+function hasSourcePrivateAttributeElementAncestor(element: Element): boolean {
+  if (hasSourcePrivateOrActivationElementAncestor(element)) return true;
+  for (let current: Element | undefined = element; current;) {
+    if (
+      !isNativeSelectSemanticTag(current.localName.toLowerCase()) &&
+      isSourcePublicMenuRoleValue(current.getAttribute('role'))
+    ) return true;
+    current = composedParentElement(current);
+  }
+  return false;
+}
+
+function hasSourcePublicMenuElementAncestor(element: Element): boolean {
+  for (let current: Element | undefined = element; current;) {
+    if (
+      !isNativeSelectSemanticTag(current.localName.toLowerCase()) &&
+      isSourcePublicMenuRoleValue(current.getAttribute('role'))
+    ) return true;
+    current = composedParentElement(current);
+  }
+  return false;
+}
+
+export function hasPublicMenuResourceAttribute(
+  attributes: readonly (readonly [string, string])[],
+): boolean {
+  return attributes.some(([name, value]) =>
+    publicMenuResourceAttribute(name, value));
 }
 
 export function hasPrivateHtmlMirrorAttribute(

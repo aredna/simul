@@ -1,13 +1,15 @@
-import type {
-  PageSnapshot,
-  VisualElementNode,
-  VisualNode,
-  VisualPage,
-  VisualStyle,
-  VisualTextNode,
+import {
+  SNAPSHOT_LIMITS,
+  type PageSnapshot,
+  type VisualElementNode,
+  type VisualNode,
+  type VisualPage,
+  type VisualStyle,
+  type VisualTextNode,
 } from './page-snapshot';
 import type {
   LivePageDelta,
+  LiveVisualElementNode,
   LiveVisualNode,
 } from './live-page-mirror';
 import {
@@ -22,6 +24,7 @@ interface MirrorTextBinding {
   node: Text;
   source: string;
   group: string;
+  replica: boolean;
 }
 
 interface MirrorAttributeBinding {
@@ -242,15 +245,20 @@ function renderElement(
 ): Element {
   const svg = insideSvg || node.tag === 'svg';
   const sourceStyle = visual.styles[node.styleId];
-  const inertTag = node.controlShell
-    ? sourceStyle?.display?.startsWith('inline')
-      ? 'span'
-      : 'div'
-    : node.tag;
+  const inertTag =
+    node.controlShell === 'select'
+      ? 'details'
+      : node.controlShell
+        ? sourceStyle?.display?.startsWith('inline')
+          ? 'span'
+          : 'div'
+        : node.tag;
   const element = svg && SVG_TAGS.has(inertTag)
     ? targetDocument.createElementNS(SVG_NAMESPACE, inertTag)
     : targetDocument.createElement(inertTag);
-  applyStyle(element, visual, node.styleId);
+  applyStyle(element, visual, node.styleId, {
+    omitBackgroundImage: node.controlShell === 'select',
+  });
   applyAttributes(element, node, translations, controller);
   applyNodeId(element, node.nodeId);
   if (!svg && 'tabIndex' in element) {
@@ -262,6 +270,16 @@ function renderElement(
     htmlElement.tabIndex = -1;
     htmlElement.setAttribute('aria-disabled', 'true');
     htmlElement.dataset.simulControlShell = node.controlShell;
+    if (node.controlShell === 'select') {
+      renderSelectFacsimile(
+        htmlElement,
+        node,
+        visual,
+        targetDocument,
+        controller,
+      );
+      return element;
+    }
     if (node.controlShell !== 'button') {
       return element;
     }
@@ -283,14 +301,219 @@ function renderElement(
   return element;
 }
 
+interface RenderedSelectOption {
+  disabled: boolean;
+  group: string;
+  label: string;
+  selected: boolean;
+}
+
+function renderSelectFacsimile(
+  element: HTMLElement,
+  node: VisualElementNode,
+  visual: VisualPage,
+  targetDocument: Document,
+  controller: MirrorController,
+): void {
+  const summary = targetDocument.createElement('summary');
+  summary.dataset.simulSelectSummary = '';
+  summary.tabIndex = 0;
+  summary.setAttribute('aria-label', 'Show translated options');
+  summary.style.cursor = 'default';
+  summary.style.display = 'block';
+  summary.style.overflow = 'hidden';
+  summary.style.textOverflow = 'ellipsis';
+  summary.style.whiteSpace = 'nowrap';
+
+  const list = targetDocument.createElement('div');
+  list.dataset.simulSelectOptions = '';
+  list.setAttribute('role', 'listbox');
+  list.setAttribute('aria-disabled', 'true');
+  if (node.selectState?.multiple) {
+    list.setAttribute('aria-multiselectable', 'true');
+  }
+  list.style.background = selectPopupBackground(visual.styles[node.styleId]);
+  list.style.boxSizing = 'border-box';
+  list.style.color = 'inherit';
+  list.style.insetInlineStart = '0';
+  list.style.maxHeight = 'min(20rem, 50vh)';
+  list.style.minWidth = '100%';
+  list.style.overflowX = 'hidden';
+  list.style.overflowY = 'auto';
+  list.style.pointerEvents = 'auto';
+  list.style.position = 'absolute';
+  list.style.top = '100%';
+  list.style.width = 'max-content';
+  list.style.zIndex = '2147483646';
+
+  element.dataset.simulSelectFacsimile = '';
+  element.dataset.simulSelectMultiple = node.selectState?.multiple
+    ? 'true'
+    : 'false';
+  element.dataset.simulSelectDisabled = node.selectState?.disabled
+    ? 'true'
+    : 'false';
+  if (node.selectState?.open) element.setAttribute('open', '');
+  element.style.overflow = 'visible';
+  element.style.pointerEvents = 'auto';
+  if (!element.style.position || element.style.position === 'static') {
+    element.style.position = 'relative';
+  }
+
+  const options: RenderedSelectOption[] = [];
+  for (const child of node.children) {
+    if (child.kind !== 'element') continue;
+    if (child.tag === 'option') {
+      const option = renderSelectOption(
+        child,
+        list,
+        visual,
+        targetDocument,
+        controller,
+        false,
+      );
+      if (option) options.push(option);
+      continue;
+    }
+    if (child.tag !== 'optgroup') continue;
+    const group = targetDocument.createElement('div');
+    group.dataset.simulSelectOptgroup = '';
+    group.setAttribute('role', 'group');
+    applyStyle(group, visual, child.styleId, { omitBackgroundImage: true });
+    normalizeSelectRowStyle(group);
+    const groupDisabled = child.optgroupState?.disabled === true;
+    if (groupDisabled) {
+      group.setAttribute('aria-disabled', 'true');
+      group.style.opacity = '0.65';
+    }
+    const groupLabel = directVisualText(child.children);
+    if (groupLabel) {
+      const label = targetDocument.createElement('div');
+      label.dataset.simulSelectOptgroupLabel = '';
+      label.style.fontWeight = '600';
+      label.style.paddingInline = '0.5rem';
+      appendSelectBoundText(label, groupLabel, controller);
+      group.append(label);
+    }
+    for (const optionNode of child.children) {
+      if (optionNode.kind !== 'element' || optionNode.tag !== 'option') continue;
+      const option = renderSelectOption(
+        optionNode,
+        group,
+        visual,
+        targetDocument,
+        controller,
+        groupDisabled,
+      );
+      if (option) options.push(option);
+    }
+    list.append(group);
+  }
+
+  const selected = options.filter((option) => option.selected);
+  const summaries = selected;
+  if (summaries.length === 0) {
+    summary.append(targetDocument.createTextNode('\u2014'));
+  } else {
+    summaries.forEach((option, index) => {
+      if (index > 0) summary.append(targetDocument.createTextNode(', '));
+      const text = targetDocument.createTextNode(option.label);
+      bindText(controller, text, option.label, undefined, {
+        group: option.group,
+        replica: true,
+      });
+      summary.append(text);
+    });
+  }
+
+  element.append(summary, list);
+}
+
+function renderSelectOption(
+  node: VisualElementNode,
+  parent: HTMLElement,
+  visual: VisualPage,
+  targetDocument: Document,
+  controller: MirrorController,
+  groupDisabled: boolean,
+): RenderedSelectOption | undefined {
+  const label = directVisualText(node.children);
+  const row = targetDocument.createElement('div');
+  row.dataset.simulSelectOption = '';
+  row.setAttribute('role', 'option');
+  applyStyle(row, visual, node.styleId, { omitBackgroundImage: true });
+  normalizeSelectRowStyle(row);
+  const selected = node.optionState?.selected === true;
+  const disabled = groupDisabled || node.optionState?.disabled === true;
+  row.setAttribute('aria-selected', selected ? 'true' : 'false');
+  if (disabled) {
+    row.setAttribute('aria-disabled', 'true');
+    row.style.opacity = '0.65';
+  }
+  if (selected) row.dataset.simulSelectSelected = '';
+  const group = `select-${controller.nextGroup++}`;
+  if (label) appendSelectBoundText(row, label, controller, group);
+  else row.append(targetDocument.createTextNode('\u00a0'));
+  parent.append(row);
+  return { disabled, group, label, selected };
+}
+
+function appendSelectBoundText(
+  parent: HTMLElement,
+  source: string,
+  controller: MirrorController,
+  group = `select-${controller.nextGroup++}`,
+): void {
+  const text = parent.ownerDocument.createTextNode(source);
+  bindText(controller, text, source, undefined, { group });
+  parent.append(text);
+}
+
+function directVisualText(nodes: VisualNode[]): string {
+  return nodes
+    .filter((child): child is VisualTextNode => child.kind === 'text')
+    .map((child) => child.text)
+    .join('')
+    .replace(/\s+/gu, ' ')
+    .trim();
+}
+
+function normalizeSelectRowStyle(element: HTMLElement): void {
+  element.style.boxSizing = 'border-box';
+  element.style.height = 'auto';
+  element.style.maxHeight = 'none';
+  element.style.minHeight = '1.5em';
+  element.style.overflow = 'visible';
+  element.style.pointerEvents = 'none';
+  element.style.position = 'static';
+  element.style.whiteSpace = 'normal';
+  element.style.width = 'auto';
+}
+
+function selectPopupBackground(style: VisualStyle | undefined): string {
+  const background = style?.['background-color']?.trim();
+  return background &&
+    background !== 'transparent' &&
+    background !== 'rgba(0, 0, 0, 0)'
+    ? background
+    : 'Canvas';
+}
+
 function bindText(
   controller: MirrorController,
   node: Text,
   source: string,
   itemId?: string,
+  options: { group?: string; replica?: boolean } = {},
 ): void {
-  const group = itemId ?? `live-${controller.nextGroup++}`;
-  controller.bindings.push({ kind: 'text', node, source, group });
+  const group = options.group ?? itemId ?? `live-${controller.nextGroup++}`;
+  controller.bindings.push({
+    kind: 'text',
+    node,
+    source,
+    group,
+    replica: options.replica === true,
+  });
   if (!controller.groupSources.has(group)) {
     controller.groupSources.set(group, source.replace(/\s+/gu, ' ').trim());
   }
@@ -363,14 +586,18 @@ export async function translateVisualMirror(
       options.onProgress?.(completed, grouped.length);
       continue;
     }
-    if (completed >= 1_500 || acceptedCharacters + [...source].length > 200_000) {
+    if (
+      completed >= SNAPSHOT_LIMITS.maxVisualNodes ||
+      acceptedCharacters + source.length >
+        SNAPSHOT_LIMITS.maxVisualTextCharacters
+    ) {
       failed += 1;
       completed += 1;
       applyGroupSource(bindings);
       options.onProgress?.(completed, grouped.length);
       continue;
     }
-    acceptedCharacters += [...source].length;
+    acceptedCharacters += source.length;
     try {
       const translated = await translate(source, options.signal);
       options.signal?.throwIfAborted();
@@ -449,6 +676,14 @@ export async function applyLivePageDelta(
       target: findMirrorNode(currentRoot, replacement.targetId),
     }))
     .sort((left, right) => nodeDepth(left.target) - nodeDepth(right.target));
+  if (!liveDeltaFitsTranslationBudget(currentRoot, controller, replacements)) {
+    return {
+      root: currentRoot,
+      applied: 0,
+      missingTarget: true,
+      translation: { completed: 0, failed: 0, total: 0 },
+    };
+  }
   const rootReplacement = replacements.find(
     (replacement) => replacement.target === currentRoot,
   );
@@ -517,6 +752,95 @@ export async function applyLivePageDelta(
     });
   }
   return { root, applied, missingTarget, translation };
+}
+
+function liveDeltaFitsTranslationBudget(
+  root: HTMLElement,
+  controller: MirrorController,
+  replacements: readonly LocatedLiveReplacement[],
+): boolean {
+  pruneBindings(controller, root);
+  const removedTargets = replacements
+    .map((replacement) => replacement.target)
+    .filter((target): target is Element => Boolean(target));
+  let retainedVisualNodes = 0;
+  const retainedElements: Element[] = [root];
+  while (retainedElements.length > 0) {
+    const element = retainedElements.pop();
+    if (!element) continue;
+    if (removedTargets.some((target) => target === element)) continue;
+    if (element.hasAttribute('data-simul-node-id')) {
+      retainedVisualNodes += 1;
+      if (retainedVisualNodes > SNAPSHOT_LIMITS.maxVisualNodes) return false;
+    }
+    for (let index = element.children.length - 1; index >= 0; index -= 1) {
+      retainedElements.push(element.children[index]!);
+    }
+  }
+  let groups = 0;
+  let characters = 0;
+  for (const [group, bindings] of translatableBindingGroups(controller)) {
+    const retained = bindings.some((binding) =>
+      !removedTargets.some((target) =>
+        target === binding.node || target.contains(binding.node),
+      ),
+    );
+    if (!retained) continue;
+    retainedVisualNodes += bindings.filter(
+      (binding) => binding.kind === 'text' && !binding.replica &&
+        !removedTargets.some((target) => target.contains(binding.node)),
+    ).length;
+    const source = normalizedTranslationSource(
+      controller.groupSources.get(group) ?? bindings
+        .map((binding) => binding.source)
+        .join(''),
+    );
+    if (!source) continue;
+    groups += 1;
+    characters += source.length;
+    if (
+      groups > SNAPSHOT_LIMITS.maxVisualNodes ||
+      retainedVisualNodes > SNAPSHOT_LIMITS.maxVisualNodes ||
+      characters > SNAPSHOT_LIMITS.maxVisualTextCharacters
+    ) return false;
+  }
+
+  const pending: LiveVisualNode[] = replacements.flatMap((replacement) =>
+    replacement.node ? [replacement.node] : [],
+  );
+  while (pending.length > 0) {
+    const node = pending.pop();
+    if (!node) continue;
+    retainedVisualNodes += 1;
+    if (node.kind === 'text') {
+      const source = normalizedTranslationSource(node.text);
+      if (source) {
+        groups += 1;
+        characters += source.length;
+      }
+    } else if (node.kind === 'element') {
+      const alt = node.tag === 'img'
+        ? normalizedTranslationSource(node.attributes?.alt ?? '')
+        : '';
+      if (alt) {
+        groups += 1;
+        characters += alt.length;
+      }
+      for (let index = node.children.length - 1; index >= 0; index -= 1) {
+        pending.push(node.children[index]!);
+      }
+    }
+    if (
+      groups > SNAPSHOT_LIMITS.maxVisualNodes ||
+      retainedVisualNodes > SNAPSHOT_LIMITS.maxVisualNodes ||
+      characters > SNAPSHOT_LIMITS.maxVisualTextCharacters
+    ) return false;
+  }
+  return true;
+}
+
+function normalizedTranslationSource(source: string): string {
+  return source.replace(/\s+/gu, ' ').trim();
 }
 
 async function replaceLiveRootAtomically(
@@ -627,15 +951,19 @@ function renderLiveNode(
     return placeholder;
   }
   const svg = insideSvg || node.tag === 'svg';
-  const inertTag = node.controlShell
-    ? node.style.display?.startsWith('inline')
-      ? 'span'
-      : 'div'
-    : node.tag;
+  const inertTag = node.controlShell === 'select'
+    ? 'details'
+    : node.controlShell
+      ? node.style.display?.startsWith('inline')
+        ? 'span'
+        : 'div'
+      : node.tag;
   const element = svg && SVG_TAGS.has(inertTag)
     ? targetDocument.createElementNS(SVG_NAMESPACE, inertTag)
     : targetDocument.createElement(inertTag);
-  applyInlineStyle(element, node.style);
+  applyInlineStyle(element, node.style, {
+    omitBackgroundImage: node.controlShell === 'select',
+  });
   applyLiveAttributes(element, node.attributes);
   if (node.tag === 'img') {
     const sourceAlt = node.attributes?.alt;
@@ -655,6 +983,15 @@ function renderLiveNode(
     htmlElement.tabIndex = -1;
     htmlElement.setAttribute('aria-disabled', 'true');
     htmlElement.dataset.simulControlShell = node.controlShell;
+    if (node.controlShell === 'select') {
+      renderLiveSelectFacsimile(
+        htmlElement,
+        node,
+        targetDocument,
+        controller,
+      );
+      return element;
+    }
     if (node.controlShell !== 'button') return element;
   }
   for (const child of node.children) {
@@ -663,9 +1000,171 @@ function renderLiveNode(
   return element;
 }
 
-function applyInlineStyle(element: Element, style: VisualStyle): void {
+function renderLiveSelectFacsimile(
+  element: HTMLElement,
+  node: LiveVisualElementNode,
+  targetDocument: Document,
+  controller: MirrorController,
+): void {
+  const summary = targetDocument.createElement('summary');
+  summary.dataset.simulSelectSummary = '';
+  summary.tabIndex = 0;
+  summary.setAttribute('aria-label', 'Show translated options');
+  summary.style.cursor = 'default';
+  summary.style.display = 'block';
+  summary.style.overflow = 'hidden';
+  summary.style.textOverflow = 'ellipsis';
+  summary.style.whiteSpace = 'nowrap';
+
+  const list = targetDocument.createElement('div');
+  list.dataset.simulSelectOptions = '';
+  list.setAttribute('role', 'listbox');
+  list.setAttribute('aria-disabled', 'true');
+  if (node.selectState?.multiple) {
+    list.setAttribute('aria-multiselectable', 'true');
+  }
+  list.style.background = selectPopupBackground(node.style);
+  list.style.boxSizing = 'border-box';
+  list.style.color = 'inherit';
+  list.style.insetInlineStart = '0';
+  list.style.maxHeight = 'min(20rem, 50vh)';
+  list.style.minWidth = '100%';
+  list.style.overflowX = 'hidden';
+  list.style.overflowY = 'auto';
+  list.style.pointerEvents = 'auto';
+  list.style.position = 'absolute';
+  list.style.top = '100%';
+  list.style.width = 'max-content';
+  list.style.zIndex = '2147483646';
+
+  element.dataset.simulSelectFacsimile = '';
+  element.dataset.simulSelectMultiple = node.selectState?.multiple
+    ? 'true'
+    : 'false';
+  element.dataset.simulSelectDisabled = node.selectState?.disabled
+    ? 'true'
+    : 'false';
+  if (node.selectState?.open) element.setAttribute('open', '');
+  element.style.overflow = 'visible';
+  element.style.pointerEvents = 'auto';
+  if (!element.style.position || element.style.position === 'static') {
+    element.style.position = 'relative';
+  }
+
+  const options: RenderedSelectOption[] = [];
+  for (const child of node.children) {
+    if (child.kind !== 'element') continue;
+    if (child.tag === 'option') {
+      const option = renderLiveSelectOption(
+        child,
+        list,
+        targetDocument,
+        controller,
+        false,
+      );
+      if (option) options.push(option);
+      continue;
+    }
+    if (child.tag !== 'optgroup') continue;
+    const group = targetDocument.createElement('div');
+    group.dataset.simulSelectOptgroup = '';
+    group.setAttribute('role', 'group');
+    applyInlineStyle(group, child.style, { omitBackgroundImage: true });
+    applyNodeId(group, child.nodeId);
+    normalizeSelectRowStyle(group);
+    const groupDisabled = child.optgroupState?.disabled === true;
+    if (groupDisabled) {
+      group.setAttribute('aria-disabled', 'true');
+      group.style.opacity = '0.65';
+    }
+    const groupLabel = directLiveText(child.children);
+    if (groupLabel) {
+      const label = targetDocument.createElement('div');
+      label.dataset.simulSelectOptgroupLabel = '';
+      label.style.fontWeight = '600';
+      label.style.paddingInline = '0.5rem';
+      appendSelectBoundText(label, groupLabel, controller);
+      group.append(label);
+    }
+    for (const optionNode of child.children) {
+      if (optionNode.kind !== 'element' || optionNode.tag !== 'option') continue;
+      const option = renderLiveSelectOption(
+        optionNode,
+        group,
+        targetDocument,
+        controller,
+        groupDisabled,
+      );
+      if (option) options.push(option);
+    }
+    list.append(group);
+  }
+
+  const selected = options.filter((option) => option.selected);
+  const summaries = selected;
+  if (summaries.length === 0) {
+    summary.append(targetDocument.createTextNode('\u2014'));
+  } else {
+    summaries.forEach((option, index) => {
+      if (index > 0) summary.append(targetDocument.createTextNode(', '));
+      const text = targetDocument.createTextNode(option.label);
+      bindText(controller, text, option.label, undefined, {
+        group: option.group,
+        replica: true,
+      });
+      summary.append(text);
+    });
+  }
+
+  element.append(summary, list);
+}
+
+function renderLiveSelectOption(
+  node: LiveVisualElementNode,
+  parent: HTMLElement,
+  targetDocument: Document,
+  controller: MirrorController,
+  groupDisabled: boolean,
+): RenderedSelectOption | undefined {
+  const label = directLiveText(node.children);
+  const row = targetDocument.createElement('div');
+  row.dataset.simulSelectOption = '';
+  row.setAttribute('role', 'option');
+  applyInlineStyle(row, node.style, { omitBackgroundImage: true });
+  applyNodeId(row, node.nodeId);
+  normalizeSelectRowStyle(row);
+  const selected = node.optionState?.selected === true;
+  const disabled = groupDisabled || node.optionState?.disabled === true;
+  row.setAttribute('aria-selected', selected ? 'true' : 'false');
+  if (disabled) {
+    row.setAttribute('aria-disabled', 'true');
+    row.style.opacity = '0.65';
+  }
+  if (selected) row.dataset.simulSelectSelected = '';
+  const group = `select-${controller.nextGroup++}`;
+  if (label) appendSelectBoundText(row, label, controller, group);
+  else row.append(targetDocument.createTextNode('\u00a0'));
+  parent.append(row);
+  return { disabled, group, label, selected };
+}
+
+function directLiveText(nodes: LiveVisualNode[]): string {
+  return nodes
+    .filter((child) => child.kind === 'text')
+    .map((child) => child.text)
+    .join('')
+    .replace(/\s+/gu, ' ')
+    .trim();
+}
+
+function applyInlineStyle(
+  element: Element,
+  style: VisualStyle,
+  options: { omitBackgroundImage?: boolean } = {},
+): void {
   if (!('style' in element)) return;
   for (const [property, value] of Object.entries(style)) {
+    if (options.omitBackgroundImage && property === 'background-image') continue;
     if (value) (element as HTMLElement | SVGElement).style.setProperty(property, value);
   }
 }
@@ -745,19 +1244,27 @@ function applyGroupTranslation(
   const textBindings = bindings.filter(
     (binding): binding is MirrorTextBinding => binding.kind === 'text',
   );
-  const chunks = textBindings.length > 1
+  const primaryTextBindings = textBindings.filter((binding) => !binding.replica);
+  const chunks = primaryTextBindings.length > 1
     ? splitAcrossTextNodes(
         translated,
-        textBindings.map((binding) => ({ kind: 'text', text: binding.source })),
+        primaryTextBindings.map((binding) => ({
+          kind: 'text',
+          text: binding.source,
+        })),
       )
     : [translated];
-  textBindings.forEach((binding, index) => {
+  primaryTextBindings.forEach((binding, index) => {
     binding.node.data = preserveBoundaryWhitespace(
       binding.source,
       chunks[index] ?? '',
     );
     binding.node.parentElement?.classList.add('simul-translated-container');
   });
+  for (const binding of textBindings.filter((candidate) => candidate.replica)) {
+    binding.node.data = preserveBoundaryWhitespace(binding.source, translated);
+    binding.node.parentElement?.classList.add('simul-translated-container');
+  }
   for (const binding of bindings) {
     if (binding.kind === 'attribute') {
       binding.node.setAttribute(binding.attribute, translated.trim());
@@ -789,7 +1296,9 @@ function refreshTranslatedTextLayout(
     overrideTranslatedContainer(controller, container);
     let ancestor = container.parentElement;
     while (ancestor && root.contains(ancestor)) {
-      if (clipsOverflow(ancestor)) {
+      const isCompanionSelectScroller =
+        ancestor.dataset.simulSelectOptions !== undefined;
+      if (!isCompanionSelectScroller && clipsOverflow(ancestor)) {
         overrideClippingAncestor(controller, ancestor);
       }
       if (ancestor === root) break;
@@ -878,11 +1387,15 @@ function applyStyle(
   element: Element,
   visual: VisualPage,
   styleId: number,
+  options: { omitBackgroundImage?: boolean } = {},
 ): void {
   const style = visual.styles[styleId];
   if (!style || !('style' in element)) return;
   const styled = element as HTMLElement | SVGElement;
   for (const [property, value] of Object.entries(style)) {
+    if (options.omitBackgroundImage && property === 'background-image') {
+      continue;
+    }
     if (value) styled.style.setProperty(property, value);
   }
 }

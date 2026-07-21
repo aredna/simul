@@ -54,11 +54,28 @@ still disables pointer events, strips targets/download behavior, and prevents
 navigation from escaping or replacing the replica.
 
 Responsive `<picture>`, `<source>`, `srcset`, `sizes`, and the browser-selected
-image source are retained where they can be represented safely. A video can
-carry a static poster, but media source attributes, controls, autoplay,
-preloading, and playback are disabled. Frames, objects, embeds, portals, and
-webviews remain absent. Forms are inert and cannot submit or mutate the source
-page.
+image source are retained where they can be represented safely. A video is
+retained only when it can carry a sanitized static poster; a posterless shell
+is omitted rather than displayed as an empty player. Media source attributes,
+controls, autoplay, preloading, and playback are disabled. Frames, objects,
+embeds, portals, and webviews remain absent. Forms are inert and cannot submit
+or mutate the source page.
+
+Native dropdown popups are browser/OS presentation rather than observable DOM,
+so Simul does not attempt to copy their ephemeral geometry. Instead, every
+public native select receives a companion-owned, scriptless facsimile: the
+selected label remains visible and a bounded disclosure reveals every
+translated option and optgroup label. Long lists scroll locally. Disabled,
+selected, and multiple state are presentation-only and cannot mutate or submit
+the source control. For Chrome customizable selects, `:open` state and
+toggle-driven refresh are mirrored progressively; rich website picker
+descendants remain reduced to typed public labels at the privacy boundary.
+
+Public, non-editable ARIA listbox/menu/option text remains visible and
+translatable. Editable comboboxes, searchboxes, textboxes, contenteditable
+regions, native inputs, and any menu branch containing private controls remain
+masked. This distinction admits public navigation labels without transporting
+user-entered data.
 
 ### Static SVG
 
@@ -87,7 +104,10 @@ Both selectable policies continue to block:
 - frames, objects, embeds, portals, webviews, and media playback;
 - request modifiers that add attribution, Topics, or Shared Storage side
   effects, plus base-URL overrides that could externalize local SVG fragments;
-- password/private-field transport and unsupported editable values; and
+- password/private-field transport and unsupported editable values;
+- native-select submission values, names, data attributes, datalist content,
+  rich picker descendants, and private dropdown ancestry (only bounded visible
+  labels and presentation state are eligible); and
 - any sandbox weakening, new permission, or remotely hosted executable code.
 
 The iframe remains `sandbox="allow-same-origin"` without `allow-scripts`.
@@ -140,7 +160,7 @@ Some gaps cannot be fixed by admitting more sanitizer syntax:
   fetch rules. The sanitizer cannot override those browser decisions or inspect
   and pause intrinsic animation inside an opaque, non-executable external SVG
   image; the inline reconstructed SVG tree remains static.
-- **Browser-managed pixels.** Static posters can be represented; the current
+- **Browser-managed pixels.** Usable static posters can be represented; the current
   pixels of canvas, video, audio visualization, DRM/protected media, and active
   embedded documents cannot cross the current isolated boundary.
 - **Script-owned state.** Closed shadow roots, generated runtime state,

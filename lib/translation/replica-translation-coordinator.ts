@@ -43,7 +43,7 @@ export type ReplicaTextProjection = ReplicaProjectionBase & (
   | { readonly nodeType: 3 }
   | {
       readonly nodeType: 1;
-      readonly controlTarget: 'value' | 'placeholder';
+      readonly controlTarget: 'value' | 'placeholder' | 'label';
     }
 );
 
@@ -88,8 +88,11 @@ interface PendingJob {
   readonly signal?: AbortSignal;
 }
 
-export const MAX_PENDING_JOBS = 2_048;
-export const MAX_PENDING_CHARACTERS = 500_000;
+// Match the validated Isolated HTML graph envelope so a fully admitted public
+// option list cannot outrun the downstream translation lane. The lane remains
+// sequential and the memory cache keeps its own tighter eviction budget.
+export const MAX_PENDING_JOBS = 50_000;
+export const MAX_PENDING_CHARACTERS = 8 * 1024 * 1024;
 
 export interface ReplicaTranslationCoordinatorOptions {
   readonly memory?: TranslationMemory;

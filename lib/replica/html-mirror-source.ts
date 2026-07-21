@@ -21,6 +21,8 @@ import {
   createHtmlMirrorReadBudget,
   createHtmlMirrorRepresentabilityCollector,
   createHtmlMirrorStyleWorkBudget,
+  isSourceSelectVisuallyHidden,
+  readSourceSelectPresentationStyle,
   sanitizeSourceAdoptedStyleSheets,
   sanitizeSourceAttributes,
   sanitizeSourceChildren,
@@ -36,9 +38,14 @@ import {
 } from './html-mirror-sanitizer';
 import { createReplicaIdentity } from './protocol-v2';
 import {
+  hasSourcePrivateOrActivationElementAncestor,
+  isEligibleSourceSelect,
   isEligibleSourceTextControl,
+  isSourceNativeSelectTagName,
   isSourceNativeTextControlTagName,
   readSourceControlText,
+  readSourceSelectPickerOpen,
+  readSourceSelectedOptionIndexes,
 } from './source-privacy-policy';
 import type { SelectableReplicaFidelityPolicy } from './fidelity-policy';
 
@@ -192,8 +199,8 @@ const MAX_STYLE_SHEETS_PER_TICK = 512;
 const MAX_STYLE_RULES_PER_TICK = 25_000;
 const MAX_STYLE_CHARACTERS_PER_TICK = 1024 * 1024;
 const MAX_MIRRORED_IMAGE_CANDIDATES = 4_000;
-const MAX_MIRRORED_CONTROL_CANDIDATES = 4_000;
-const MAX_CONTROL_CANDIDATES_PER_TICK = 256;
+const MAX_MIRRORED_CONTROL_CANDIDATES = 50_000;
+const MAX_CONTROL_CANDIDATES_PER_TICK = 1_024;
 const MAX_CONTROL_CHARACTERS_PER_TICK = 1024 * 1024;
 const MAX_IMAGE_EVENT_ROOTS = 4_000;
 
@@ -281,6 +288,11 @@ export class HtmlMirrorSourceSession {
       root.removeEventListener('error', this.#onCapturedResourceError, true);
       root.removeEventListener('input', this.#onControlTextChange, true);
       root.removeEventListener('change', this.#onControlTextChange, true);
+      root.removeEventListener('beforetoggle', this.#onSelectToggle, true);
+      root.removeEventListener('toggle', this.#onSelectToggle, true);
+      root.removeEventListener('click', this.#onSelectToggle, true);
+      root.removeEventListener('keydown', this.#onSelectToggle, true);
+      root.removeEventListener('pointerdown', this.#onSelectToggle, true);
     }
     this.#imageEventRoots.clear();
     this.environment.document.fonts?.removeEventListener?.(
@@ -552,18 +564,49 @@ export class HtmlMirrorSourceSession {
       }
       accepted = true;
       this.#observeOpenShadowRoots(record.target);
+      const optionOwner = sourceNativeSelectLabelOwner(record.target);
+      const selectOwner = sourceNativeSelectOwner(record.target);
+      const structuralSelectOwner = sourceNativeSelectStructuralOwner(record.target);
       if (record.type === 'childList') {
-        this.#queuePending(this.#pendingChildren, record.target);
+        if (optionOwner) {
+          this.#queuePending(this.#pendingAttributes, optionOwner);
+        } else if (selectOwner && record.target !== selectOwner) {
+          // Re-serialize the bounded select shell so option insertions/removals
+          // and selected-index metadata are committed atomically.
+          this.#queuePending(this.#pendingChildren, selectOwner);
+        } else {
+          this.#queuePending(this.#pendingChildren, record.target);
+        }
+        if (selectOwner) {
+          this.#queuePending(this.#pendingAttributes, selectOwner);
+        }
         for (const added of record.addedNodes) this.#observeOpenShadowRoots(added);
       } else if (record.type === 'attributes' && record.target instanceof Element) {
-        this.#queuePending(this.#pendingAttributes, record.target);
-        this.#registerMirroredControlCandidate(record.target);
-        if (
+        const changesPrivacyContext =
           record.attributeName === 'role' ||
           record.attributeName === 'contenteditable' ||
           record.attributeName === 'type' ||
-          record.attributeName === 'autocomplete'
-        ) {
+          record.attributeName === 'autocomplete';
+        if (changesPrivacyContext && structuralSelectOwner) {
+          // Public/private transitions replace select grammar and state in one
+          // root-level batch so an old public label cannot survive recovery.
+          this.#queuePending(this.#pendingChildren, structuralSelectOwner);
+          this.#queuePending(this.#pendingAttributes, structuralSelectOwner);
+        } else {
+          this.#queuePending(
+            this.#pendingAttributes,
+            optionOwner ?? record.target,
+          );
+          if (
+            selectOwner &&
+            selectOwner !== optionOwner &&
+            selectOwner !== record.target
+          ) {
+            this.#queuePending(this.#pendingAttributes, selectOwner);
+          }
+        }
+        this.#registerMirroredControlCandidate(record.target);
+        if (changesPrivacyContext) {
           // A children patch can re-sanitize a host's light DOM, but it cannot
           // replace that host's already-mirrored ShadowRoot. Rebuild the whole
           // graph whenever the host's privacy context can change.
@@ -572,10 +615,16 @@ export class HtmlMirrorSourceSession {
             this.#signalShadowReconciliation();
             return;
           }
-          this.#queuePending(this.#pendingChildren, record.target);
+          if (!structuralSelectOwner) {
+            this.#queuePending(this.#pendingChildren, record.target);
+          }
         }
       } else if (record.type === 'characterData' && record.target instanceof Text) {
-        this.#queuePending(this.#pendingText, record.target);
+        if (optionOwner) {
+          this.#queuePending(this.#pendingAttributes, optionOwner);
+        } else {
+          this.#queuePending(this.#pendingText, record.target);
+        }
       }
     }
     if (!accepted) return;
@@ -742,7 +791,10 @@ export class HtmlMirrorSourceSession {
           fidelityPolicy,
           styleWork,
         );
-        if (isSourceNativeTextControlTagName(target.localName)) {
+        if (
+          isSourceNativeTextControlTagName(target.localName) ||
+          isSourceNativeSelectTagName(target.localName)
+        ) {
           this.#rememberControlFingerprint(target);
         }
         if (target.localName.toLowerCase() === 'img') {
@@ -892,7 +944,8 @@ export class HtmlMirrorSourceSession {
     const target = event.target;
     if (
       !(target instanceof Element) ||
-      !isSourceNativeTextControlTagName(target.localName) ||
+      (!isSourceNativeTextControlTagName(target.localName) &&
+        !isSourceNativeSelectTagName(target.localName)) ||
       !isEligibleControlElement(target) ||
       !belongsToSourceDocument(target, this.environment.document) ||
       !target.isConnected ||
@@ -901,6 +954,25 @@ export class HtmlMirrorSourceSession {
     this.#queuePending(this.#pendingAttributes, target);
     this.#registerMirroredControlCandidate(target);
     this.#rememberControlFingerprint(target);
+    this.#pendingDimensions = true;
+    this.#scheduleFlush();
+  };
+
+  readonly #onSelectToggle = (event: Event): void => {
+    const target = event.target;
+    const select = target instanceof Element
+      ? isSourceNativeSelectTagName(target.localName)
+        ? target
+        : sourceNativeSelectOwner(target)
+      : undefined;
+    if (
+      !select ||
+      !isEligibleControlElement(select) ||
+      !belongsToSourceDocument(select, this.environment.document) ||
+      !select.isConnected ||
+      !this.#mirroredNodes.has(select)
+    ) return;
+    this.#queuePending(this.#pendingAttributes, select);
     this.#pendingDimensions = true;
     this.#scheduleFlush();
   };
@@ -1111,6 +1183,10 @@ export class HtmlMirrorSourceSession {
   #rememberControlFingerprint(element: Element): void {
     const state = readControlFingerprint(element);
     if (state.eligible) {
+      if (!this.#knownMirroredControlCandidates.has(element)) {
+        this.#registerMirroredControlCandidate(element);
+        return;
+      }
       this.#controlFingerprints.set(element, state.fingerprint);
     } else {
       this.#controlFingerprints.delete(element);
@@ -1177,6 +1253,11 @@ export class HtmlMirrorSourceSession {
       const index = (this.#controlMaintenanceCursor + offset) % retained.length;
       const element = retained[index];
       if (!element) continue;
+      const estimatedWork = estimateControlFingerprintWork(element);
+      if (
+        processed > 0 &&
+        characters + estimatedWork > MAX_CONTROL_CHARACTERS_PER_TICK
+      ) break;
       const state = readControlFingerprint(element);
       if (!state.eligible) continue;
       if (
@@ -1187,6 +1268,9 @@ export class HtmlMirrorSourceSession {
       characters += state.characters;
       if (this.#controlFingerprints.get(element) === state.fingerprint) continue;
       this.#controlFingerprints.set(element, state.fingerprint);
+      if (isSourceNativeSelectTagName(element.localName)) {
+        this.#queuePending(this.#pendingChildren, element);
+      }
       this.#queuePending(this.#pendingAttributes, element);
       if (this.#pendingOverflow) return;
     }
@@ -1251,6 +1335,11 @@ export class HtmlMirrorSourceSession {
     root.addEventListener('error', this.#onCapturedResourceError, true);
     root.addEventListener('input', this.#onControlTextChange, true);
     root.addEventListener('change', this.#onControlTextChange, true);
+    root.addEventListener('beforetoggle', this.#onSelectToggle, true);
+    root.addEventListener('toggle', this.#onSelectToggle, true);
+    root.addEventListener('click', this.#onSelectToggle, true);
+    root.addEventListener('keydown', this.#onSelectToggle, true);
+    root.addEventListener('pointerdown', this.#onSelectToggle, true);
   }
 
   #compactImageEventRoots(): void {
@@ -1262,6 +1351,11 @@ export class HtmlMirrorSourceSession {
       root.removeEventListener('error', this.#onCapturedResourceError, true);
       root.removeEventListener('input', this.#onControlTextChange, true);
       root.removeEventListener('change', this.#onControlTextChange, true);
+      root.removeEventListener('beforetoggle', this.#onSelectToggle, true);
+      root.removeEventListener('toggle', this.#onSelectToggle, true);
+      root.removeEventListener('click', this.#onSelectToggle, true);
+      root.removeEventListener('keydown', this.#onSelectToggle, true);
+      root.removeEventListener('pointerdown', this.#onSelectToggle, true);
       this.#imageEventRoots.delete(root);
     }
   }
@@ -1749,18 +1843,86 @@ function incrementSourceRepresentability(
   );
 }
 
+function sourceNativeSelectOwner(node: Node): Element | undefined {
+  const select = sourceNativeSelectStructuralOwner(node);
+  return select && isEligibleControlElement(select) ? select : undefined;
+}
+
+/** Finds the DOM owner even while its privacy role is changing. */
+function sourceNativeSelectStructuralOwner(node: Node): Element | undefined {
+  let current = node.nodeType === Node.ELEMENT_NODE
+    ? node as Element
+    : node.parentElement ?? undefined;
+  for (; current; current = composedSourceParentElement(current)) {
+    const tagName = current.localName.toLowerCase();
+    if (tagName === 'datalist') return undefined;
+    if (tagName === 'select') return current;
+  }
+  return undefined;
+}
+
+function sourceNativeSelectOptionOwner(node: Node): Element | undefined {
+  let current = node.nodeType === Node.ELEMENT_NODE
+    ? node as Element
+    : node.parentElement ?? undefined;
+  for (; current; current = composedSourceParentElement(current)) {
+    const tagName = current.localName.toLowerCase();
+    if (tagName === 'option') {
+      return sourceNativeSelectOwner(current) ? current : undefined;
+    }
+    if (tagName === 'select' || tagName === 'datalist') return undefined;
+  }
+  return undefined;
+}
+
+/**
+ * Returns the mirrored select entry whose public label contains `node`.
+ * Option descendants and descendants of a direct optgroup legend are omitted
+ * from the replica graph, so their mutations must refresh the owning entry.
+ */
+function sourceNativeSelectLabelOwner(node: Node): Element | undefined {
+  const option = sourceNativeSelectOptionOwner(node);
+  if (option) return option;
+  let current = node.nodeType === Node.ELEMENT_NODE
+    ? node as Element
+    : node.parentElement ?? undefined;
+  for (; current; current = composedSourceParentElement(current)) {
+    const tagName = current.localName.toLowerCase();
+    if (tagName === 'legend') {
+      const optgroup = current.parentElement;
+      if (
+        optgroup?.localName.toLowerCase() === 'optgroup' &&
+        sourceNativeSelectOwner(optgroup)
+      ) return optgroup;
+      return undefined;
+    }
+    if (tagName === 'select' || tagName === 'datalist') return undefined;
+  }
+  return undefined;
+}
+
 function isEligibleControlElement(element: Element): boolean {
-  if (!isSourceNativeTextControlTagName(element.localName)) return false;
   try {
-    return isEligibleSourceTextControl(
-      element.localName,
-      Object.fromEntries(
-        [...element.attributes].map(({ name, value }) => [name, value]),
-      ),
+    const attributes = Object.fromEntries(
+      [...element.attributes].map(({ name, value }) => [name, value]),
     );
+    const eligible = isSourceNativeTextControlTagName(element.localName)
+      ? isEligibleSourceTextControl(element.localName, attributes)
+      : isEligibleSourceSelect(element.localName, attributes);
+    const parent = composedSourceParentElement(element);
+    return eligible &&
+      (!parent || !hasSourcePrivateOrActivationElementAncestor(parent));
   } catch {
     return false;
   }
+}
+
+function composedSourceParentElement(element: Element): Element | undefined {
+  if (element.parentElement) return element.parentElement;
+  const root = element.getRootNode();
+  return root.nodeType === 11 && 'host' in root
+    ? (root as ShadowRoot).host
+    : undefined;
 }
 
 function readControlFingerprint(element: Element): Readonly<{
@@ -1770,6 +1932,40 @@ function readControlFingerprint(element: Element): Readonly<{
 }> {
   if (!isEligibleControlElement(element)) {
     return { eligible: false, fingerprint: 'private', characters: 0 };
+  }
+  if (isSourceNativeSelectTagName(element.localName)) {
+    const selected = readSourceSelectedOptionIndexes(element);
+    if (!selected) {
+      return { eligible: false, fingerprint: 'private', characters: 0 };
+    }
+    const presentationStyle = readSourceSelectPresentationStyle(element) ?? '';
+    let fnv = 0x811c9dc5;
+    let djb = 5381;
+    let characters = presentationStyle.length + selected.length;
+    const addCode = (code: number): void => {
+      fnv = Math.imul(fnv ^ code, 0x01000193) >>> 0;
+      djb = (Math.imul(djb, 33) ^ code) >>> 0;
+    };
+    const addText = (text: string): void => {
+      for (let index = 0; index < text.length; index += 1) {
+        addCode(text.charCodeAt(index));
+      }
+    };
+    addText(presentationStyle);
+    for (const index of selected) addCode(index + 1);
+    return {
+      eligible: true,
+      fingerprint: [
+        'select',
+        readSourceSelectPickerOpen(element) ? 1 : 0,
+        isSourceSelectVisuallyHidden(element) ? 1 : 0,
+        selected.length,
+        presentationStyle.length,
+        fnv,
+        djb,
+      ].join(':'),
+      characters,
+    };
   }
   const control = readSourceControlText(element);
   if (!control) {
@@ -1795,6 +1991,22 @@ function readControlFingerprint(element: Element): Readonly<{
     fingerprint: `${control.kind}:${length}:${fnv}:${djb}`,
     characters: length,
   };
+}
+
+function estimateControlFingerprintWork(element: Element): number {
+  if (!isSourceNativeSelectTagName(element.localName)) return 0;
+  try {
+    const select = element as HTMLSelectElement;
+    const selectionWork = select.multiple || element.hasAttribute('multiple')
+      ? select.selectedOptions?.length ?? select.options?.length ?? 0
+      : 1;
+    return Math.min(
+      32_768 + selectionWork,
+      MAX_CONTROL_CHARACTERS_PER_TICK,
+    );
+  } catch {
+    return MAX_CONTROL_CHARACTERS_PER_TICK;
+  }
 }
 
 function belongsToSourceDocument(node: Node, sourceDocument: Document): boolean {

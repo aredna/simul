@@ -22,6 +22,13 @@ replica extent refresh rather than the document range. A changed document
 offset immediately returns ownership to the document; removal, loss of
 scrollability, and range shrink clear or clamp a stale nested owner.
 
+The scroll observer is a locally bundled unlisted extension script, not a
+serialized callback with missing imported dependencies. A tiny closure-free
+invoker starts that bundle, and its implementation revision disconnects and
+replaces an incompatible registry left in an already-open tab. Content-free
+`[Simul scroll]` entries distinguish observer installation, accepted source
+messages, and projection without logging coordinates, URLs, or page content.
+
 The most recent source position is retained even when it arrives before a
 staged replica commits, then applied as soon as that replica becomes visible.
 Navigation and an explicit rebuild reset the retained position and ownership so
@@ -74,7 +81,7 @@ does not weaken stale-result protection.
 
 The slim full-width toolbar exposes Refresh; the From label, `[A]` (set From to
 Auto-detect), and a wider From selector; swap and a wider To selector; Fit/1:1
-size; OCR; Current/Active tab following; quick reverse translation; Settings;
+size; OCR On/Off; Current/Active tab following; quick reverse translation; Settings;
 Side/Popout; and the replica-state label at the far right. It scrolls
 horizontally only at unusually narrow widths. A healthy toolbar has no detached
 status dot. Warning and error markers attach to Refresh or Settings according
@@ -149,8 +156,17 @@ In Isolated HTML, native `input` elements whose type is missing, `text`,
 current nonempty text or otherwise their placeholder as bounded typed control
 metadata. The replica reconstructs that visible text and can translate it, but
 never receives raw `value` or `placeholder` attributes. Password and
-password-autocomplete fields, unsupported native controls, selects/options,
-contenteditable regions, and ARIA textbox fallbacks stay blank. A field that
+password-autocomplete fields, unsupported native controls, contenteditable
+regions, and ARIA textbox fallbacks stay blank. A public native select may
+expose only bounded option/optgroup labels and selected/disabled/multiple/open
+presentation state. Both engines render those labels in a companion-owned,
+scriptless disclosure: the selected value stays visible, all translated labels
+can be revealed, and long lists scroll without changing the source selection.
+Customizable-select `:open` state is progressive; native OS popup geometry is
+not observable. Public non-editable ARIA listbox/menu/option labels translate,
+while editable combobox/searchbox/textbox/contenteditable branches stay blank.
+Raw option values, names, data attributes, datalist/standalone-option content,
+rich picker descendants, and private select ancestry stay blank. A field that
 becomes sensitive clears its prior source record and projection atomically.
 rrweb keeps all editable/value-bearing controls masked.
 
@@ -203,8 +219,9 @@ pass and trigger last-good checkpoint recovery rather than prototype patching.
 Passive HTML retains normalized HTTP(S) anchor identity for selectors such as
 `a[href]`, while pointer events and navigation remain disabled. It preserves
 responsive `<picture>`/`<source>` candidates and selected image state. A video
-may retain only a static poster; media sources, controls, autoplay, and playback
-remain disabled. Passive inline SVG supports bounded static definitions,
+is retained only when a sanitized static poster survives validation; posterless
+video shells are omitted. Media sources, controls, autoplay, and playback remain
+disabled. Passive inline SVG supports bounded static definitions,
 gradients, patterns, symbols, clips, masks, markers, filters, and same-document
 references. Normalized HTTP(S) `<image>`, `<feImage>`, and external `<use>`
 references are admitted only in Passive Fidelity and remain subject to Chrome's
@@ -289,10 +306,18 @@ source scrolling, all size/zoom modes, language changes, settings persistence,
 detached-window binding, toolbar progress, and quick-translation
 cancellation/copy. Check OpenAI.com for its dark canvas, upper-left SVG logo
 geometry, and primary reading scroll. Check the supplied Reddit article for
-late left and right rails, public labels, and open-shadow content. Confirm eligible native text
-controls translate, password/password-autocomplete and unsupported controls
-stay blank, a safe-to-sensitive transition clears immediately, and the source
-DOM is unchanged.
+late left and right rails, public labels, and open-shadow content. Confirm
+eligible native text controls translate, password/password-autocomplete and
+unsupported controls stay blank, public native dropdown labels/current
+selection update without raw values, a safe-to-sensitive transition clears
+immediately, and the source DOM is unchanged.
+
+For dropdown coverage, test a native single select, a multiple select with
+disabled options and optgroups, a public read-only ARIA listbox/menu, and an
+editable combobox. The replica must reveal a bounded, scrolling translated
+list without changing the source. On a Chrome customizable-select fixture,
+verify that source `:open` state propagates while arbitrary rich option markup
+and form values remain absent.
 
 For image OCR, also test the supplied 1206x761 Reddit media image at high-DPI
 display scale. It should reach recognition through a bitmap at or below 4 MP,

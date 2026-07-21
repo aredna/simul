@@ -70,13 +70,13 @@ describe('visual snapshot boundary', () => {
     expect(serialized).not.toContain('link parser secret');
   });
 
-  it('captures controls as empty shells without reading form or contenteditable data', () => {
+  it('captures public native-select labels while keeping editable controls private', () => {
     const { document } = installCapturePage(`
       <main style="display: grid; color: rgb(1, 2, 3)">
         <p>Public copy</p>
         <input value="input capture secret">
         <textarea>textarea capture secret</textarea>
-        <select><option>select capture secret</option></select>
+        <select name="private-select-name"><option value="private-option-value">Public option label</option></select>
         <div contenteditable="true">contenteditable capture secret</div>
         <span role="textbox">role capture secret</span>
         <span role="note textbox">fallback role capture secret</span>
@@ -93,7 +93,9 @@ describe('visual snapshot boundary', () => {
     expect(serialized).toContain('Public copy');
     expect(serialized).not.toContain('input capture secret');
     expect(serialized).not.toContain('textarea capture secret');
-    expect(serialized).not.toContain('select capture secret');
+    expect(serialized).toContain('Public option label');
+    expect(serialized).not.toContain('private-select-name');
+    expect(serialized).not.toContain('private-option-value');
     expect(serialized).not.toContain('contenteditable capture secret');
     expect(serialized).not.toContain('role capture secret');
     expect(serialized).not.toContain('fallback role capture secret');
@@ -117,8 +119,275 @@ describe('visual snapshot boundary', () => {
       'input',
       'input',
     ]);
-    expect(shells.every((node) => node.children.length === 0)).toBe(true);
+    expect(
+      shells
+        .filter((node) => node.controlShell !== 'select')
+        .every((node) => node.children.length === 0),
+    ).toBe(true);
+    expect(
+      shells.find((node) => node.controlShell === 'select')?.children,
+    ).toHaveLength(1);
     expect(shells.every((node) => node.attributes === undefined)).toBe(true);
+  });
+
+  it('captures bounded native select structure and current presentation state', () => {
+    installCapturePage(`
+      <select multiple disabled name="private-name">
+        <optgroup label="Regions" disabled data-private="group-secret">
+          <option selected value="private-tokyo">Tokyo</option>
+          <option disabled value="private-osaka">Osaka</option>
+        </optgroup>
+        <option selected value="private-seoul">Seoul</option>
+        <option role="textbox" selected label="private role label">private role text</option>
+        <option><span contenteditable="true">private editor label</span></option>
+      </select>
+    `);
+
+    const snapshot = capturePageSnapshot();
+    const select = collectElements(snapshot.visual?.root).find(
+      (node) => node.controlShell === 'select',
+    );
+    const serialized = JSON.stringify(select);
+
+    expect(select?.selectState).toEqual({
+      disabled: true, multiple: true, open: false,
+    });
+    expect(select?.children).toHaveLength(4);
+    expect(serialized).toContain('Regions');
+    expect(serialized).toContain('Tokyo');
+    expect(serialized).toContain('Osaka');
+    expect(serialized).toContain('Seoul');
+    expect(serialized).toContain('"selected":true');
+    expect(serialized).toContain('"disabled":true');
+    expect(serialized).not.toContain('private-name');
+    expect(serialized).not.toContain('private-tokyo');
+    expect(serialized).not.toContain('private-osaka');
+    expect(serialized).not.toContain('private-seoul');
+    expect(serialized).not.toContain('private role label');
+    expect(serialized).not.toContain('private role text');
+    expect(serialized).not.toContain('private editor label');
+    expect(serialized).not.toContain('group-secret');
+  });
+
+  it('fails native selects closed for private roles and activation ancestry', () => {
+    installCapturePage(`
+      <main>
+        <select role="combobox"><option>private role option</option></select>
+        <select role="button"><option>private activation option</option></select>
+        <div role="button">
+          <select><option>private nested activation option</option></select>
+        </div>
+      </main>
+    `);
+
+    const snapshot = capturePageSnapshot();
+    const serialized = JSON.stringify(snapshot.visual);
+    const elements = collectElements(snapshot.visual?.root);
+
+    expect(serialized).not.toContain('private role option');
+    expect(serialized).not.toContain('private activation option');
+    expect(serialized).not.toContain('private nested activation option');
+    expect(elements.some((node) => node.tag === 'select')).toBe(false);
+    expect(
+      elements.filter((node) => node.controlShell === 'input').length,
+    ).toBeGreaterThanOrEqual(3);
+  });
+
+  it('bounds rich option privacy scans and omits entry resource URLs', () => {
+    const { document } = installCapturePage(`
+      <select>
+        <optgroup label="Public group" style="background-image: url('https://private.example/group.png'); color: red">
+          <option style="background-image: url('https://private.example/option.png'); color: blue">Public option</option>
+        </optgroup>
+      </select>
+    `);
+    const select = document.querySelector('select');
+    const oversized = document.createElement('option');
+    for (let index = 0; index < 513; index += 1) {
+      oversized.append(document.createElement('span'));
+    }
+    const privateEditor = document.createElement('span');
+    privateEditor.setAttribute('contenteditable', 'true');
+    privateEditor.textContent = 'private late editor';
+    oversized.append(privateEditor);
+    select?.append(oversized);
+
+    const snapshot = capturePageSnapshot();
+    const serialized = JSON.stringify(snapshot.visual);
+    const visualSelect = collectElements(snapshot.visual?.root).find(
+      (node) => node.controlShell === 'select',
+    );
+    const oversizedOption = visualSelect?.children.at(-1);
+
+    expect(serialized).toContain('Public group');
+    expect(serialized).toContain('Public option');
+    expect(serialized).not.toContain('private.example');
+    expect(serialized).not.toContain('private late editor');
+    expect(oversizedOption).toMatchObject({
+      kind: 'element',
+      tag: 'option',
+      children: [],
+    });
+    expect(snapshot.omissions.truncated).toBe(true);
+  });
+
+  it('omits hidden and offscreen backing entries without exposing fallback text', () => {
+    installCapturePage(`
+      <select style="position:absolute;left:-10000px;width:100px">
+        <option>offscreen backing secret</option>
+      </select>
+      <select>
+        <option label="   ">whitespace fallback secret</option>
+        <option hidden>hidden option secret</option>
+        <optgroup label="Public group">
+          <legend hidden>hidden legend secret</legend>
+          <option>Public child</option>
+        </optgroup>
+      </select>
+    `);
+
+    const snapshot = capturePageSnapshot();
+    const serialized = JSON.stringify(snapshot.visual);
+    const visibleSelect = collectElements(snapshot.visual?.root).find(
+      (node) => node.controlShell === 'select',
+    );
+
+    expect(serialized).toContain('Public child');
+    expect(serialized).not.toContain('offscreen backing secret');
+    expect(serialized).not.toContain('whitespace fallback secret');
+    expect(serialized).not.toContain('hidden option secret');
+    expect(serialized).not.toContain('hidden legend secret');
+    expect(visibleSelect?.children.filter(
+      (child) => child.kind === 'element' && child.tag === 'option',
+    )).toHaveLength(1);
+  });
+
+  it('accepts only typed public labels and state in untrusted select visual data', () => {
+    const snapshot = parsePageSnapshot({
+      version: 1,
+      title: 'Select boundary',
+      url: 'https://example.com/',
+      capturedAt: '2026-07-21T00:00:00.000Z',
+      items: [],
+      omissions: {},
+      visual: {
+        viewportWidth: 800,
+        viewportHeight: 600,
+        documentWidth: 800,
+        documentHeight: 600,
+        styles: [
+          {},
+          {
+            'background-image': 'url("https://private.example/option.png")',
+            color: 'red',
+          },
+        ],
+        root: {
+          kind: 'element',
+          tag: 'select',
+          styleId: 0,
+          controlShell: 'select',
+          selectState: { disabled: false, multiple: true, open: false },
+          attributes: { name: 'private-name', value: 'private-value' },
+          children: [
+            {
+              kind: 'element',
+              tag: 'option',
+              styleId: 1,
+              optionState: { disabled: false, selected: true },
+              attributes: { value: 'private-option', onclick: 'attack()' },
+              children: [{ kind: 'text', text: 'Public option' }],
+            },
+          ],
+        },
+      },
+    });
+    const select = snapshot.visual?.root;
+
+    expect(select?.selectState).toEqual({
+      disabled: false, multiple: true, open: false,
+    });
+    expect(select?.attributes).toBeUndefined();
+    expect(select?.children).toHaveLength(1);
+    expect(select?.children[0]).toMatchObject({
+      kind: 'element',
+      tag: 'option',
+      optionState: { disabled: false, selected: true },
+    });
+    expect(select?.children[0]).not.toHaveProperty('attributes');
+    expect(JSON.stringify(select)).toContain('Public option');
+    expect(JSON.stringify(select)).not.toContain('private-option');
+    expect(JSON.stringify(select)).not.toContain('arbitrary private child');
+
+    const { document } = parseHTML('<html><body></body></html>');
+    const mirror = createVisualMirror(snapshot, undefined, document);
+    const option = mirror?.querySelector<HTMLElement>(
+      '[data-simul-select-option]',
+    );
+    expect(option?.style.backgroundImage).toBe('');
+    expect(option?.style.color).toBe('red');
+  });
+
+  it('requires raw select tags and select control shells to imply each other', () => {
+    const rawSnapshot = (controlShell?: string) => ({
+      version: 1,
+      title: 'Forged select boundary',
+      url: 'https://example.com/',
+      capturedAt: '2026-07-21T00:00:00.000Z',
+      items: [],
+      omissions: {},
+      visual: {
+        viewportWidth: 800,
+        viewportHeight: 600,
+        documentWidth: 800,
+        documentHeight: 600,
+        styles: [{}],
+        root: {
+          kind: 'element',
+          tag: 'select',
+          styleId: 0,
+          ...(controlShell ? { controlShell } : {}),
+          ...(controlShell === 'select'
+            ? {
+                selectState: {
+                  disabled: false,
+                  multiple: false,
+                  open: false,
+                },
+              }
+            : {}),
+          children: [],
+        },
+      },
+    });
+
+    expect(() => parsePageSnapshot(rawSnapshot())).toThrow();
+    expect(() => parsePageSnapshot(rawSnapshot('input'))).toThrow();
+    expect(() => parsePageSnapshot(rawSnapshot('select'))).not.toThrow();
+    const malformed = rawSnapshot('select');
+    (malformed.visual.root.selectState as { disabled: unknown }).disabled = 'yes';
+    expect(() => parsePageSnapshot(malformed)).toThrow();
+    const malformedChild = rawSnapshot('select');
+    (malformedChild.visual.root.children as unknown[]).push({
+      kind: 'element', tag: 'div', styleId: 0, children: [],
+    });
+    expect(() => parsePageSnapshot(malformedChild)).toThrow();
+    const placeholderChild = rawSnapshot('select');
+    (placeholderChild.visual.root.children as unknown[]).push({
+      kind: 'placeholder', styleId: 0, label: 'Canvas content omitted',
+    });
+    expect(() => parsePageSnapshot(placeholderChild)).toThrow();
+    const optgroupPlaceholder = rawSnapshot('select');
+    (optgroupPlaceholder.visual.root.children as unknown[]).push({
+      kind: 'element',
+      tag: 'optgroup',
+      styleId: 0,
+      optgroupState: { disabled: false },
+      children: [{
+        kind: 'placeholder', styleId: 0, label: 'Canvas content omitted',
+      }],
+    });
+    expect(() => parsePageSnapshot(optgroupPlaceholder)).toThrow();
   });
 
   it('retains public button labels in inert shells', () => {
@@ -258,6 +527,132 @@ describe('visual snapshot boundary', () => {
 });
 
 describe('visual mirror renderer', () => {
+  it('renders and translates an inert expandable native-select facsimile', async () => {
+    const { document: sourceDocument } = installCapturePage(`
+      <select multiple>
+        <optgroup label="Regions" disabled>
+          <option selected value="private-tokyo">Tokyo</option>
+          <option disabled value="private-osaka">Osaka</option>
+        </optgroup>
+        <option selected value="private-seoul">Seoul</option>
+      </select>
+    `);
+    const sourceSelect = sourceDocument.querySelector('select')!;
+    Object.defineProperty(sourceSelect, 'matches', {
+      configurable: true,
+      value: (selector: string) => selector === ':open',
+    });
+    const snapshot = capturePageSnapshot();
+    const { document } = parseHTML('<html><body></body></html>');
+    const mirror = createVisualMirror(snapshot, undefined, document);
+    if (!mirror) throw new Error('Expected a visual mirror.');
+    document.body.append(mirror);
+
+    const disclosure = mirror.querySelector<HTMLElement>(
+      '[data-simul-select-facsimile]',
+    );
+    const summary = disclosure?.querySelector<HTMLElement>(
+      '[data-simul-select-summary]',
+    );
+    const list = disclosure?.querySelector<HTMLElement>(
+      '[data-simul-select-options]',
+    );
+    const options = [
+      ...(disclosure?.querySelectorAll<HTMLElement>('[data-simul-select-option]') ?? []),
+    ];
+
+    expect(disclosure?.tagName).toBe('DETAILS');
+    expect(disclosure?.dataset.simulSelectMultiple).toBe('true');
+    expect(disclosure?.getAttribute('aria-disabled')).toBe('true');
+    expect(disclosure?.style.pointerEvents).toBe('auto');
+    expect(disclosure?.hasAttribute('open')).toBe(true);
+    expect(summary?.getAttribute('aria-label')).toBe('Show translated options');
+    expect(summary?.textContent).toBe('Tokyo, Seoul');
+    expect(list?.style.maxHeight).toBe('min(20rem, 50vh)');
+    expect(list?.style.overflowY).toBe('auto');
+    expect(options).toHaveLength(3);
+    expect(options.map((option) => option.textContent)).toEqual([
+      'Tokyo',
+      'Osaka',
+      'Seoul',
+    ]);
+    expect(options[0]?.getAttribute('aria-selected')).toBe('true');
+    expect(options[1]?.getAttribute('aria-disabled')).toBe('true');
+    expect(mirror.querySelector('select')).toBeNull();
+    expect(mirror.querySelector('script')).toBeNull();
+    expect(mirror.outerHTML).not.toContain('private-tokyo');
+
+    const sources: string[] = [];
+    await translateVisualMirror(mirror, async (source) => {
+      sources.push(source);
+      return `[${source}]`;
+    });
+
+    expect(sources).toEqual(['Regions', 'Tokyo', 'Osaka', 'Seoul']);
+    expect(summary?.textContent).toBe('[Tokyo], [Seoul]');
+    expect(options.map((option) => option.textContent)).toEqual([
+      '[Tokyo]',
+      '[Osaka]',
+      '[Seoul]',
+    ]);
+    expect(list?.style.overflowY).toBe('auto');
+
+    resetVisualMirrorText(mirror);
+    expect(summary?.textContent).toBe('Tokyo, Seoul');
+  });
+
+  it('does not invent a selected value when the source select has none', () => {
+    installCapturePage(`
+      <select multiple>
+        <option>Tokyo</option>
+        <option>Osaka</option>
+      </select>
+    `);
+    const snapshot = capturePageSnapshot();
+    const { document } = parseHTML('<html><body></body></html>');
+    const mirror = createVisualMirror(snapshot, undefined, document);
+
+    expect(
+      mirror?.querySelector('[data-simul-select-summary]')?.textContent,
+    ).toBe('\u2014');
+    expect([
+      ...(mirror?.querySelectorAll<HTMLElement>('[data-simul-select-option]') ?? []),
+    ].map((option) => option.textContent)).toEqual(['Tokyo', 'Osaka']);
+  });
+
+  it('translates every select label admitted by the visual capture budget', async () => {
+    const optionCount = 1_501;
+    installCapturePage(`
+      <select multiple>
+        ${Array.from(
+          { length: optionCount },
+          (_, index) => `<option>Option ${index}</option>`,
+        ).join('')}
+      </select>
+    `);
+    const snapshot = capturePageSnapshot();
+    const { document } = parseHTML('<html><body></body></html>');
+    const mirror = createVisualMirror(snapshot, undefined, document);
+    if (!mirror) throw new Error('Expected a visual mirror.');
+    document.body.append(mirror);
+
+    expect(countVisualMirrorTranslationFields(mirror)).toBe(optionCount);
+    const result = await translateVisualMirror(
+      mirror,
+      async (source) => `[${source}]`,
+    );
+    const options = [
+      ...mirror.querySelectorAll<HTMLElement>('[data-simul-select-option]'),
+    ];
+
+    expect(result).toEqual({
+      completed: optionCount,
+      failed: 0,
+      total: optionCount,
+    });
+    expect(options.at(-1)?.textContent).toBe(`[Option ${optionCount - 1}]`);
+  });
+
   it('renders translated text and image alt text into an inert mirror', () => {
     const snapshot = buildParsedVisualSnapshot();
     const translated = buildTranslatedSnapshot(snapshot);

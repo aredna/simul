@@ -186,6 +186,59 @@ describe('SourceValueModel', () => {
     ]);
   });
 
+  it('keeps public ARIA menu labels while masking editable role descendants', () => {
+    const model = new SourceValueModel();
+    const prepared = model.prepareCheckpoint(
+      identity,
+      checkpointEvents('Hola', undefined, [
+        {
+          id: 9,
+          type: 2,
+          tagName: 'div',
+          attributes: { role: 'listbox' },
+          childNodes: [
+            {
+              id: 10,
+              type: 2,
+              tagName: 'div',
+              attributes: { role: 'option' },
+              childNodes: [{ id: 11, type: 3, textContent: 'Public choice' }],
+            },
+            {
+              id: 12,
+              type: 2,
+              tagName: 'input',
+              attributes: { role: 'combobox', type: 'text' },
+              childNodes: [{ id: 13, type: 3, textContent: 'private input value' }],
+            },
+          ],
+        },
+        {
+          id: 14,
+          type: 2,
+          tagName: 'div',
+          attributes: { role: 'menu' },
+          childNodes: [{ id: 15, type: 3, textContent: 'Public menu item' }],
+        },
+        {
+          id: 16,
+          type: 2,
+          tagName: 'div',
+          attributes: { role: 'textbox' },
+          childNodes: [{ id: 17, type: 3, textContent: 'private editor value' }],
+        },
+      ]),
+    );
+
+    expect(prepared?.records.map(({ nodeId, source }) => ({ nodeId, source }))).toEqual([
+      { nodeId: 4, source: 'Hola' },
+      { nodeId: 11, source: 'Public choice' },
+      { nodeId: 15, source: 'Public menu item' },
+    ]);
+    expect(JSON.stringify(prepared)).not.toContain('private input value');
+    expect(JSON.stringify(prepared)).not.toContain('private editor value');
+  });
+
   it('recomputes HTML language after document-element replacement and removal', () => {
     const model = new SourceValueModel();
     model.prepareCheckpoint(identity, checkpointEvents('Hola', 'es'))?.commit();

@@ -148,9 +148,18 @@ select { cursor: pointer; }
   width: 28px;
   min-height: 28px;
   padding: 0;
-  border: 0;
-  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: 6px;
+  background: var(--control-background);
+  box-shadow: 0 1px 2px rgb(0 0 0 / 8%);
   font-size: 16px;
+}
+
+.toolbar-button:active:not(:disabled),
+.toolbar-button[aria-pressed="true"] {
+  border-color: rgb(23 108 74 / 58%);
+  background: var(--hover);
+  box-shadow: inset 0 1px 2px rgb(0 0 0 / 14%);
 }
 
 .toolbar-button--translate { font-size: 14px; font-weight: 800; }
@@ -290,8 +299,7 @@ progress { width: 100%; height: 7px; accent-color: var(--green); }
   position: relative;
   overflow: hidden;
   color: #111;
-  background: #fff;
-  color-scheme: light;
+  background: transparent;
 }
 
 .replica-replay-root,
@@ -302,7 +310,7 @@ progress { width: 100%; height: 7px; accent-color: var(--green); }
 
 .replica-replay-root {
   overflow: hidden;
-  background: #fff;
+  background: transparent;
   pointer-events: auto;
 }
 
@@ -340,6 +348,25 @@ progress { width: 100%; height: 7px; accent-color: var(--green); }
 .replica-replay-mount iframe {
   display: block;
   border: 0 !important;
+}
+
+.replica-replay-mount iframe[data-simul-interaction-boundary="css-disclosure-v1"] {
+  pointer-events: auto !important;
+}
+
+.replica-replay-mount details[data-simul-select-facsimile],
+.replica-replay-mount details[data-simul-select-facsimile] > summary,
+.replica-replay-mount details[data-simul-select-facsimile] [data-simul-select-options] {
+  pointer-events: auto !important;
+}
+
+.replica-replay-mount:has(details[data-simul-select-facsimile][open]),
+.replica-replay-mount *:has(details[data-simul-select-facsimile][open]),
+.visual-page-root:has(details[data-simul-select-facsimile][open]),
+.visual-page-root *:has(details[data-simul-select-facsimile][open]) {
+  overflow: visible !important;
+  clip-path: none !important;
+  contain: none !important;
 }
 
 .replica-replay-mount .rr-player,

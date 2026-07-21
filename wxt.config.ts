@@ -1,4 +1,5 @@
 import { parse, type Comment } from 'acorn';
+import { readFileSync } from 'node:fs';
 import { defineConfig } from 'wxt';
 import {
   createOcrBuildProfilePlugin,
@@ -10,6 +11,13 @@ const tesseractEnabled = ocrBuildProfile.enabledProviderIds.includes('tesseract'
 const offscreenOcrEnabled = ocrBuildProfile.enabledProviderIds.some((id) =>
   id === 'tesseract' || id === 'chrome-text-detector',
 );
+const releaseLegalFiles = Object.freeze([
+  { source: new URL('./LICENSE', import.meta.url), fileName: 'LICENSE' },
+  {
+    source: new URL('./THIRD_PARTY_NOTICES.md', import.meta.url),
+    fileName: 'THIRD_PARTY_NOTICES.md',
+  },
+]);
 
 function stripSourceMapDirectives(code: string): string {
   const comments: Comment[] = [];
@@ -67,6 +75,7 @@ export default defineConfig({
     : {
         filterEntrypoints: [
           'background',
+          'page-live-observer',
           'page-recorder',
           'page-mirror',
           'page-snapshot',
@@ -76,6 +85,18 @@ export default defineConfig({
   vite: () => ({
     plugins: [
       createOcrBuildProfilePlugin(process.env),
+      {
+        name: 'simul-release-legal-files',
+        generateBundle() {
+          for (const legalFile of releaseLegalFiles) {
+            this.emitFile({
+              type: 'asset',
+              fileName: legalFile.fileName,
+              source: readFileSync(legalFile.source),
+            });
+          }
+        },
+      },
       {
         name: 'simul-strip-vendored-worker-sourcemap-directives',
         enforce: 'post',

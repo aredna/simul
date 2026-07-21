@@ -108,6 +108,10 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(result.status).toBe('complete');
     expect(host.iframe?.getAttribute('sandbox')).toBe('allow-same-origin');
     expect(host.iframe?.getAttribute('sandbox')).not.toContain('allow-scripts');
+    expect(host.iframe?.hasAttribute('inert')).toBe(false);
+    expect(host.iframe?.style.pointerEvents).toBe('auto');
+    expect(host.iframe?.getAttribute('data-simul-interaction-boundary'))
+      .toBe('css-disclosure-v1');
     expect(host.iframe?.contentDocument?.querySelector('script')).toBeNull();
     expect(host.iframe?.contentDocument?.body.textContent).toBe('hello');
     const snapshot = engine.snapshot();
@@ -346,6 +350,457 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(input.value).toBe('');
     expect(engine.snapshot()?.records).toEqual([]);
     expect(stream.acknowledged).toContain(1);
+  });
+
+  it('renders and updates native select labels without transporting option values', async () => {
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: {
+          kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+          attributes: [], children: [
+            { kind: 'element', id: 2, namespace: 'html', tagName: 'head', attributes: [], children: [] },
+            { kind: 'element', id: 3, namespace: 'html', tagName: 'body', attributes: [], children: [{
+              kind: 'element', id: 10, namespace: 'html', tagName: 'div',
+              attributes: [[
+                'style',
+                'overflow:hidden!important;clip-path:inset(0)!important;contain:paint!important',
+              ]], children: [{
+                kind: 'element', id: 4, namespace: 'html', tagName: 'select',
+                attributes: [], selectedOptionIndexes: [1],
+                selectPickerOpen: true, children: [{
+                kind: 'element', id: 5, namespace: 'html', tagName: 'option',
+                attributes: [], children: [],
+                controlText: { kind: 'label', text: 'Choose', translatable: true },
+              }, {
+                kind: 'element', id: 9, namespace: 'html', tagName: 'optgroup',
+                attributes: [['disabled', '']], children: [{
+                  kind: 'element', id: 7, namespace: 'html', tagName: 'option',
+                  attributes: [], children: [],
+                  controlText: {
+                    kind: 'label', text: 'Community center', translatable: true,
+                  },
+                }],
+                controlText: { kind: 'label', text: 'District', translatable: true },
+              }, ...Array.from({ length: 7 }, (_, index) => ({
+                kind: 'element' as const,
+                id: 20 + index,
+                namespace: 'html' as const,
+                tagName: 'option',
+                attributes: [] as const,
+                children: [] as const,
+                controlText: {
+                  kind: 'label' as const,
+                  text: `Choice ${index + 3}`,
+                  translatable: true as const,
+                },
+                }))],
+              }],
+            }] },
+          ],
+        },
+        adoptedStyleSheets: [], captureMs: 1,
+        viewportWidth: 800, viewportHeight: 600,
+        documentWidth: 800, documentHeight: 1000,
+      },
+      'passive',
+    )!;
+    const stream = new FakeHtmlStream(checkpoint);
+    const host = new FakePresentationHost();
+    const engine = makeEngine(stream, host);
+    await engine.run(request);
+
+    const replica = host.iframe!.contentDocument!;
+    const clippingAncestor = replica.body.firstElementChild as HTMLElement;
+    const selectHost = clippingAncestor.firstElementChild as HTMLElement;
+    const select = selectHost.shadowRoot!.querySelector('select')!;
+    expect(select.selectedIndex).toBe(1);
+    expect([...select.options].map((option) => option.getAttribute('label')))
+      .toEqual(expect.arrayContaining(['Choose', 'Community center', 'Choice 9']));
+    expect(select.getAttribute('data-simul-select-facsimile')).toBe('v1');
+    expect(select.getAttribute('data-simul-source-picker-open')).toBe('v1');
+    expect(select.hasAttribute('inert')).toBe(false);
+    expect(select.getAttribute('aria-disabled')).toBe('true');
+    expect(select.getAttribute('size')).toBe('8');
+    expect(selectHost.getAttribute('style')).toContain('pointer-events:auto');
+    expect(selectHost.shadowRoot!.querySelector('style')?.textContent)
+      .toContain('max-height:min(18rem,70vh)!important');
+    expect(selectHost.shadowRoot!.querySelector('style')?.textContent)
+      .toContain('width:100%!important');
+    expect(selectHost.shadowRoot!.querySelector('style')?.textContent)
+      .toContain('box-sizing:border-box!important');
+    expect(clippingAncestor.getAttribute('style')).toContain(
+      'overflow:visible!important',
+    );
+    expect(clippingAncestor.getAttribute('style')).toContain(
+      'clip-path:none!important',
+    );
+    expect(clippingAncestor.getAttribute('style')).toContain(
+      'contain:none!important',
+    );
+    const activation = new select.ownerDocument.defaultView!.Event('pointerdown', {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+    });
+    expect(select.dispatchEvent(activation)).toBe(false);
+    expect(activation.defaultPrevented).toBe(true);
+    const crossRealmActivation = new select.ownerDocument.defaultView!.Event(
+      'click',
+      { bubbles: true, cancelable: true, composed: true },
+    );
+    Object.defineProperty(crossRealmActivation, 'composedPath', {
+      value: () => [{
+        nodeType: 1,
+        getAttribute: (name: string) =>
+          name === 'data-simul-select-facsimile' ? 'v1' : null,
+      }],
+    });
+    expect(select.ownerDocument.dispatchEvent(crossRealmActivation)).toBe(false);
+    expect(crossRealmActivation.defaultPrevented).toBe(true);
+    expect(engine.snapshot()?.records.map(({ source }) => source)).toEqual(
+      expect.arrayContaining(['Choose', 'District', 'Community center', 'Choice 9']),
+    );
+    expect(select.querySelector('optgroup')?.hasAttribute('disabled')).toBe(true);
+    const snapshot = engine.snapshot()!;
+    const labelRecord = snapshot.records.find(({ source }) => source === 'District')!;
+    expect(labelRecord.nodeType).toBe(1);
+    engine.beginProjection({ translationEpoch: 1, pairKey: 'en\0ja' });
+    expect(engine.project({
+      document: snapshot.document,
+      replayLease: snapshot.replayLease,
+      nodeId: labelRecord.nodeId,
+      nodeType: 1,
+      controlTarget: 'label',
+      sourceRevision: labelRecord.revision,
+      source: labelRecord.source,
+      translationEpoch: 1,
+      pairKey: 'en\0ja',
+      translated: '地区',
+    })).toBe(true);
+    expect(select.querySelector('optgroup')?.getAttribute('label')).toBe('地区');
+
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [{
+        kind: 'attributes', nodeId: 10, namespace: 'html', tagName: 'div',
+        attributes: [[
+          'style',
+          'overflow:clip!important;clip-path:circle(50%)!important;contain:content!important',
+        ]],
+      }, {
+        kind: 'attributes', nodeId: 4, namespace: 'html', tagName: 'select',
+        attributes: [], selectedOptionIndexes: [0],
+      }],
+      undefined,
+      'passive',
+    )!);
+    expect(select.selectedIndex).toBe(0);
+    expect(select.hasAttribute('data-simul-source-picker-open')).toBe(false);
+    expect(select.getAttribute('data-simul-select-facsimile')).toBe('v1');
+    expect(clippingAncestor.getAttribute('style')).toContain(
+      'overflow:clip!important',
+    );
+    expect(clippingAncestor.getAttribute('style')).toContain(
+      'clip-path:circle(50%)!important',
+    );
+    expect(clippingAncestor.getAttribute('style')).toContain(
+      'contain:content!important',
+    );
+
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 2 }),
+      2,
+      2,
+      [{
+        kind: 'attributes', nodeId: 4, namespace: 'html', tagName: 'select',
+        attributes: [],
+      }],
+      undefined,
+      'passive',
+    )!);
+    expect(select.selectedIndex).toBe(-1);
+    expect(select.getAttribute('data-simul-select-facsimile')).toBe('v1');
+    expect(select.getAttribute('aria-disabled')).toBe('true');
+
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 3 }),
+      3,
+      3,
+      [{
+        kind: 'reconcile-children', nodeId: 10, children: [
+          { kind: 'retain', nodeId: 4 },
+          {
+            kind: 'graph',
+            node: {
+              kind: 'element', id: 100, namespace: 'html', tagName: 'p',
+              attributes: [], children: [{
+                kind: 'text', id: 101, text: 'After select', translatable: true,
+              }],
+            },
+          },
+        ],
+      }],
+      undefined,
+      'passive',
+    )!);
+    expect(selectHost.isConnected).toBe(true);
+    expect(selectHost.shadowRoot!.querySelector('select')).toBe(select);
+    expect(host.iframe!.contentDocument!.body.textContent).toContain('After select');
+    expect(stream.acknowledged).toContain(3);
+
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 4 }),
+      4,
+      4,
+      [{
+        kind: 'children', nodeId: 4, children: [{
+          kind: 'element', id: 109, namespace: 'html', tagName: 'option',
+          attributes: [], children: [],
+        }],
+      }, {
+        kind: 'attributes', nodeId: 4, namespace: 'html', tagName: 'select',
+        attributes: [['role', 'combobox']],
+      }],
+      undefined,
+      'passive',
+    )!);
+    expect(select.selectedIndex).toBe(-1);
+    expect([...select.options].map((option) => option.label))
+      .not.toContain('Choose');
+    expect(engine.snapshot()?.records.map(({ source }) => source))
+      .not.toContain('Choose');
+    expect(stream.acknowledged).toContain(4);
+    expect(stream.requested).not.toContain(3);
+
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 5 }),
+      5,
+      5,
+      [{
+        kind: 'attributes', nodeId: 4, namespace: 'html', tagName: 'select',
+        attributes: [], selectedOptionIndexes: [0],
+      }, {
+        kind: 'children', nodeId: 4, children: [{
+          kind: 'element', id: 110, namespace: 'html', tagName: 'option',
+          attributes: [], children: [],
+          controlText: {
+            kind: 'label', text: 'Out-of-order option', translatable: true,
+          },
+        }],
+      }],
+      undefined,
+      'passive',
+    )!);
+    expect([...select.options].some(
+      (option) => option.label === 'Out-of-order option',
+    )).toBe(false);
+    expect(stream.acknowledged).not.toContain(5);
+    expect(stream.requested).toContain(4);
+  });
+
+  it('isolates a public ARIA menu from source CSS resources while translating its text', async () => {
+    const canaryUrl = 'https://canary.invalid/public-menu-background.png';
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: {
+          kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+          attributes: [], children: [{
+            kind: 'element', id: 2, namespace: 'html', tagName: 'head',
+            attributes: [], children: [{
+              kind: 'element', id: 7, namespace: 'html', tagName: 'style',
+              attributes: [], children: [{
+                kind: 'text', id: 8,
+                text: `[role="option"]{background-image:url("${canaryUrl}")}`,
+                translatable: false,
+              }],
+            }],
+          }, {
+            kind: 'element', id: 3, namespace: 'html', tagName: 'body',
+            attributes: [], children: [{
+              kind: 'element', id: 4, namespace: 'html', tagName: 'div',
+              attributes: [['role', 'listbox'], ['class', 'source-menu']],
+              children: [{
+                kind: 'element', id: 5, namespace: 'html', tagName: 'div',
+                attributes: [['role', 'option']], children: [{
+                  kind: 'text', id: 6, text: 'Public destination',
+                  translatable: true,
+                }],
+              }],
+            }],
+          }],
+        },
+        adoptedStyleSheets: [], captureMs: 1,
+        viewportWidth: 800, viewportHeight: 600,
+        documentWidth: 800, documentHeight: 1000,
+      },
+      'passive',
+    );
+    if (!checkpoint) throw new Error('Public ARIA menu fixture rejected.');
+    const stream = new FakeHtmlStream(checkpoint);
+    const host = new FakePresentationHost();
+    const engine = makeEngine(stream, host);
+    await engine.run(request);
+
+    const replica = host.iframe!.contentDocument!;
+    const menuHost = [...replica.body.children].find((element) =>
+      element.shadowRoot?.querySelector('[role="listbox"]'),
+    )!;
+    const shadow = menuHost.shadowRoot!;
+    const menu = shadow.querySelector('[role="listbox"]')!;
+    const option = shadow.querySelector('[role="option"]')!;
+    expect(replica.head.textContent).toContain(canaryUrl);
+    expect(replica.body.querySelector('[role="option"]')).toBeNull();
+    expect(menuHost.localName).toMatch(/^simul-owned-menu-/u);
+    expect(menuHost.hasAttribute('role')).toBe(false);
+    expect(menuHost.hasAttribute('class')).toBe(false);
+    expect([...shadow.querySelectorAll('style')]
+      .map(({ textContent }) => textContent ?? '')
+      .join('')).not.toContain(canaryUrl);
+    expect(shadow.querySelector('[data-simul-owned-menu-style="v1"]')?.textContent)
+      .toContain('background:none!important');
+    expect(menu.textContent).toBe('Public destination');
+    expect(option.textContent).toBe('Public destination');
+
+    const snapshot = engine.snapshot()!;
+    const labelRecord = snapshot.records.find(
+      ({ source }) => source === 'Public destination',
+    )!;
+    expect(labelRecord).toMatchObject({ nodeId: 6, nodeType: 3 });
+    if (labelRecord.nodeType !== 3) {
+      throw new Error('Public menu label was not registered as a text node.');
+    }
+    engine.beginProjection({ translationEpoch: 1, pairKey: 'en\0ja' });
+    expect(engine.project({
+      document: snapshot.document,
+      replayLease: snapshot.replayLease,
+      nodeId: labelRecord.nodeId,
+      nodeType: labelRecord.nodeType,
+      sourceRevision: labelRecord.revision,
+      source: labelRecord.source,
+      translationEpoch: 1,
+      pairKey: 'en\0ja',
+      translated: '公開の行き先',
+    })).toBe(true);
+    expect(option.textContent).toBe('公開の行き先');
+  });
+
+  it('leases clipping overrides across reconstructed shadows and preserves live style patches', async () => {
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: {
+          kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+          attributes: [], children: [
+            { kind: 'element', id: 2, namespace: 'html', tagName: 'head', attributes: [], children: [] },
+            { kind: 'element', id: 3, namespace: 'html', tagName: 'body', attributes: [], children: [{
+              kind: 'element', id: 4, namespace: 'html', tagName: 'section',
+              attributes: [['style', 'overflow:hidden!important']], children: [{
+                kind: 'element', id: 5, namespace: 'html', tagName: 'x-menu',
+                attributes: [], children: [], shadowRoot: {
+                  id: 6, mode: 'open', adoptedStyleSheets: [], children: [{
+                    kind: 'element', id: 7, namespace: 'html', tagName: 'div',
+                    attributes: [['style', 'contain:paint!important']], children: [{
+                      kind: 'element', id: 8, namespace: 'html', tagName: 'select',
+                      attributes: [], selectedOptionIndexes: [0],
+                      selectPickerOpen: true, children: [{
+                        kind: 'element', id: 9, namespace: 'html', tagName: 'option',
+                        attributes: [], children: [], controlText: {
+                          kind: 'label', text: 'Shadow choice', translatable: true,
+                        },
+                      }],
+                    }],
+                  }],
+                },
+              }],
+            }] },
+          ],
+        },
+        adoptedStyleSheets: [], captureMs: 1,
+        viewportWidth: 800, viewportHeight: 600,
+        documentWidth: 800, documentHeight: 1000,
+      },
+      'passive',
+    )!;
+    const stream = new FakeHtmlStream(checkpoint);
+    const host = new FakePresentationHost();
+    const engine = makeEngine(stream, host);
+    await engine.run(request);
+
+    const replica = host.iframe!.contentDocument!;
+    const outerClip = replica.querySelector('section') as HTMLElement;
+    const shadow = replica.querySelector('x-menu')!.shadowRoot!;
+    const innerClip = shadow.querySelector('div') as HTMLElement;
+    const selectHost = innerClip.firstElementChild as HTMLElement;
+    expect(selectHost.shadowRoot?.querySelector('select')).toBeTruthy();
+    expect(outerClip.getAttribute('style')).toContain('overflow:visible!important');
+    expect(innerClip.getAttribute('style')).toContain('contain:none!important');
+
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [{
+        kind: 'attributes', nodeId: 7, namespace: 'html', tagName: 'div',
+        attributes: [['style', 'contain:content!important']],
+      }, {
+        kind: 'attributes', nodeId: 8, namespace: 'html', tagName: 'select',
+        attributes: [], selectedOptionIndexes: [0],
+      }],
+      undefined,
+      'passive',
+    )!);
+    expect(outerClip.getAttribute('style')).toContain('overflow:hidden!important');
+    expect(innerClip.getAttribute('style')).toContain('contain:content!important');
+    expect(stream.acknowledged).toContain(1);
+  });
+
+  it('rejects a forged select label outside a native select', async () => {
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: {
+          kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+          attributes: [], children: [
+            { kind: 'element', id: 2, namespace: 'html', tagName: 'head', attributes: [], children: [] },
+            { kind: 'element', id: 3, namespace: 'html', tagName: 'body', attributes: [], children: [{
+              kind: 'element', id: 4, namespace: 'html', tagName: 'optgroup',
+              attributes: [], children: [],
+            }] },
+          ],
+        },
+        adoptedStyleSheets: [], captureMs: 1,
+        viewportWidth: 800, viewportHeight: 600,
+        documentWidth: 800, documentHeight: 1000,
+      },
+      'passive',
+    )!;
+    const stream = new FakeHtmlStream(checkpoint);
+    const host = new FakePresentationHost();
+    const engine = makeEngine(stream, host);
+    await engine.run(request);
+
+    const forged = createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [{
+        kind: 'attributes', nodeId: 4, namespace: 'html', tagName: 'optgroup',
+        attributes: [['label', 'Forged']],
+        controlText: { kind: 'label', text: 'Forged', translatable: true },
+      }],
+      undefined,
+      'passive',
+    );
+    expect(forged).toBeUndefined();
+
+    expect(host.iframe!.contentDocument!.querySelector('optgroup')?.getAttribute('label'))
+      .toBeNull();
+    expect(stream.acknowledged).not.toContain(1);
+    expect(stream.requested).toEqual([]);
   });
 
   it('rejects control text when an ancestor becomes private in the same batch', async () => {

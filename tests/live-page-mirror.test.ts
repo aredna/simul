@@ -3,11 +3,17 @@ import { parseHTML } from 'linkedom';
 
 import {
   captureLivePageDelta,
+  installLivePageObserverBridge,
   installLivePageObserver,
+  invokeLivePageDeltaCaptureBridge,
+  invokeLivePageObserverBridge,
+  invokeLivePageObserverUnregisterBridge,
   parseLivePageDelta,
   readLivePageDirtyMessage,
   readLivePageObserverInstallation,
   readLivePageScrollMessage,
+  type LiveVisualElementNode,
+  type LiveVisualNode,
   unregisterLivePageObserver,
 } from '../lib/live-page-mirror';
 import {
@@ -28,6 +34,9 @@ afterEach(() => {
   delete (
     globalThis as typeof globalThis & { __simulLiveMirrorV1?: unknown }
   ).__simulLiveMirrorV1;
+  delete (
+    globalThis as typeof globalThis & { __simulLivePageObserverBridgeV4?: unknown }
+  ).__simulLivePageObserverBridgeV4;
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
@@ -96,6 +105,60 @@ describe('live mirror boundary', () => {
     });
   });
 
+  it('invokes the locally bundled observer through closure-free functions', () => {
+    installLivePageObserverBridge();
+    const bridge = (
+      globalThis as typeof globalThis & {
+        __simulLivePageObserverBridgeV4?: {
+          implementationRevision: number;
+          install: (sessionId: string, generation: number) => unknown;
+          captureDelta: (
+            sessionId: string,
+            generation: number,
+            sequence: number,
+            nodeIds: string[],
+          ) => unknown;
+          unregister: (sessionId: string) => boolean;
+        };
+      }
+    ).__simulLivePageObserverBridgeV4!;
+    const install = vi.fn(() => ({ installed: true, generation: 7, sequence: 3 }));
+    const captureDelta = vi.fn(() => ({ version: 1, sequence: 4 }));
+    const unregister = vi.fn(() => true);
+    expect(bridge.implementationRevision).toBe(5);
+    (
+      globalThis as typeof globalThis & {
+        __simulLivePageObserverBridgeV4?: unknown;
+      }
+    ).__simulLivePageObserverBridgeV4 = {
+      implementationRevision: 5,
+      install,
+      captureDelta,
+      unregister,
+    };
+
+    const detachedInstall = Function(
+      `return (${invokeLivePageObserverBridge.toString()})`,
+    )() as typeof invokeLivePageObserverBridge;
+    const detachedUnregister = Function(
+      `return (${invokeLivePageObserverUnregisterBridge.toString()})`,
+    )() as typeof invokeLivePageObserverUnregisterBridge;
+    const detachedCapture = Function(
+      `return (${invokeLivePageDeltaCaptureBridge.toString()})`,
+    )() as typeof invokeLivePageDeltaCaptureBridge;
+
+    expect(detachedInstall('session_1234', 7)).toEqual({
+      installed: true, generation: 7, sequence: 3,
+    });
+    expect(detachedUnregister('session_1234')).toBe(true);
+    expect(detachedCapture('session_1234', 7, 4, ['n1'])).toEqual({
+      version: 1, sequence: 4,
+    });
+    expect(install).toHaveBeenCalledWith('session_1234', 7);
+    expect(captureDelta).toHaveBeenCalledWith('session_1234', 7, 4, ['n1']);
+    expect(unregister).toHaveBeenCalledWith('session_1234');
+  });
+
   it('rejects a seventeenth observer session without evicting an active one', () => {
     const sessions = new Map(
       Array.from({ length: 16 }, (_, index) => [`existing_${index}`, index]),
@@ -104,9 +167,11 @@ describe('live mirror boundary', () => {
     (
       globalThis as typeof globalThis & { __simulLiveMirrorV1?: unknown }
     ).__simulLiveMirrorV1 = {
+      implementationRevision: 5,
       sessions,
       currentSequence: () => 12,
       announceScroll,
+      disconnect: vi.fn(),
     };
 
     expect(installLivePageObserver('session_1234', 17)).toEqual({
@@ -142,10 +207,23 @@ describe('live mirror boundary', () => {
     vi.stubGlobal('chrome', {
       runtime: { sendMessage: vi.fn(async () => undefined) },
     });
+    const staleDisconnect = vi.fn();
+    (
+      globalThis as typeof globalThis & { __simulLiveMirrorV1?: unknown }
+    ).__simulLiveMirrorV1 = {
+      sessions: new Map([['stale_session', 1]]),
+      disconnect: staleDisconnect,
+    };
 
     expect(installLivePageObserver('session_1234', 1)).toMatchObject({
       installed: true,
     });
+    expect(staleDisconnect).toHaveBeenCalledOnce();
+    expect((
+      globalThis as typeof globalThis & {
+        __simulLiveMirrorV1?: { implementationRevision?: number };
+      }
+    ).__simulLiveMirrorV1?.implementationRevision).toBe(5);
     expect(observerOptions).toMatchObject({
       attributes: true,
       childList: true,
@@ -178,6 +256,136 @@ describe('live mirror boundary', () => {
       }],
     });
     expect(sanitized.replacements[0]?.node).not.toHaveProperty('attributes');
+  });
+
+  it('coalesces native selection and customizable-picker events on the select', () => {
+    vi.useFakeTimers();
+    const { document, window } = parseHTML(
+      '<html><body><select><option>Tokyo</option></select></body></html>',
+    );
+    installLiveDomGlobals(document, window);
+    let mutationListener: MutationCallback | undefined;
+    class TestMutationObserver {
+      constructor(listener: MutationCallback) { mutationListener = listener; }
+      observe(): void {}
+      disconnect(): void {}
+    }
+    class TestResizeObserver { observe(): void {} disconnect(): void {} }
+    vi.stubGlobal('MutationObserver', TestMutationObserver);
+    vi.stubGlobal('ResizeObserver', TestResizeObserver);
+    vi.stubGlobal('requestAnimationFrame', () => 1);
+    vi.stubGlobal('cancelAnimationFrame', () => undefined);
+    const sendMessage = vi.fn(async () => undefined);
+    vi.stubGlobal('chrome', { runtime: { sendMessage } });
+    const listeners = new Map<string, (event: Event) => void>();
+    Object.defineProperty(document, 'addEventListener', {
+      configurable: true,
+      value: (
+        type: string,
+        listener: EventListenerOrEventListenerObject,
+      ) => {
+        if (typeof listener === 'function') listeners.set(type, listener);
+      },
+    });
+
+    installLivePageObserver('session_1234', 1);
+    const select = document.querySelector('select')!;
+    const registry = (
+      globalThis as typeof globalThis & {
+        __simulLiveMirrorV1?: { idFor(node: Node): string };
+      }
+    ).__simulLiveMirrorV1!;
+    const selectId = registry.idFor(select);
+    expect([...listeners.keys()]).toEqual(expect.arrayContaining([
+      'input',
+      'change',
+      'beforetoggle',
+      'toggle',
+      'click',
+      'keydown',
+      'pointerdown',
+    ]));
+
+    mutationListener?.([{
+      type: 'characterData',
+      target: select.querySelector('option')!.firstChild!,
+    } as unknown as MutationRecord], {} as MutationObserver);
+    vi.advanceTimersByTime(141);
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'simul:page-dirty',
+      nodeIds: [selectId],
+    }));
+    sendMessage.mockClear();
+
+    for (const type of [
+      'input', 'change', 'beforetoggle', 'toggle', 'click', 'keydown',
+      'pointerdown',
+    ]) {
+      listeners.get(type)?.({
+        target: type === 'toggle' ? select.querySelector('option')! : select,
+      } as unknown as Event);
+    }
+    vi.advanceTimersByTime(141);
+
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'simul:page-dirty',
+      nodeIds: [selectId],
+    }));
+
+    select.remove();
+    vi.advanceTimersByTime(251);
+    sendMessage.mockClear();
+    (select as HTMLSelectElement).selectedIndex = 0;
+    vi.advanceTimersByTime(1_000);
+    const messages = sendMessage.mock.calls as unknown as Array<
+      [Record<string, unknown>]
+    >;
+    expect(messages.some(
+      ([message]) => message.type === 'simul:page-dirty',
+    )).toBe(false);
+  });
+
+  it('polls bounded native-select IDL state when scripts change selection without events', () => {
+    vi.useFakeTimers();
+    const { document, window } = parseHTML(`
+      <html><body><select>
+        <option selected>Tokyo</option>
+        <option>Osaka</option>
+      </select></body></html>
+    `);
+    installLiveDomGlobals(document, window);
+    class TestMutationObserver { observe(): void {} disconnect(): void {} }
+    class TestResizeObserver { observe(): void {} disconnect(): void {} }
+    vi.stubGlobal('MutationObserver', TestMutationObserver);
+    vi.stubGlobal('ResizeObserver', TestResizeObserver);
+    vi.stubGlobal('requestAnimationFrame', () => 1);
+    vi.stubGlobal('cancelAnimationFrame', () => undefined);
+    const sendMessage = vi.fn(async () => undefined);
+    vi.stubGlobal('chrome', { runtime: { sendMessage } });
+
+    installLivePageObserver('session_1234', 1);
+    const select = document.querySelector('select')!;
+    const registry = (
+      globalThis as typeof globalThis & {
+        __simulLiveMirrorV1?: { idFor(node: Node): string };
+      }
+    ).__simulLiveMirrorV1!;
+    const selectId = registry.idFor(select);
+    (select as HTMLSelectElement).selectedIndex = 1;
+
+    vi.advanceTimersByTime(391);
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'simul:page-dirty',
+      nodeIds: [selectId],
+    }));
+
+    sendMessage.mockClear();
+    (select as HTMLSelectElement).selectedIndex = 0;
+    vi.advanceTimersByTime(391);
+    expect(sendMessage).toHaveBeenCalledWith(expect.objectContaining({
+      type: 'simul:page-dirty',
+      nodeIds: [selectId],
+    }));
   });
 
   it('clamps scroll messages and rejects executable delta data', () => {
@@ -779,6 +987,378 @@ describe('live mirror boundary', () => {
     expect(serialized.match(/"controlShell":"input"/gu)?.length).toBeGreaterThanOrEqual(4);
   });
 
+  it('captures and validates only typed native-select presentation data', () => {
+    const { document, window } = parseHTML(`
+      <html><body>
+        <select name="private-name" multiple disabled>
+          <optgroup label="Regions" disabled data-private="group-secret">
+            <option selected value="private-tokyo">Tokyo</option>
+            <option disabled value="private-osaka">Osaka</option>
+          </optgroup>
+          <option selected value="private-seoul">Seoul</option>
+          <option selected value="private-rich">
+            <span role="textbox">private editable option</span>
+          </option>
+        </select>
+      </body></html>
+    `);
+    installLiveDomGlobals(document, window, (property) =>
+      property === 'display'
+        ? 'block'
+        : property === 'background-image'
+          ? 'url("https://private.example/option-texture.png")'
+          : '',
+    );
+    installLiveRegistry(document.body);
+    const select = document.querySelector('select')!;
+    Object.defineProperty(select, 'matches', {
+      configurable: true,
+      value: (selector: string) => selector === ':open',
+    });
+
+    const captured = captureLivePageDelta('session_1234', 1, 1, ['n1']);
+    const delta = parseLivePageDelta(captured);
+    const serialized = JSON.stringify(delta);
+    const selectNode = findLiveElement(delta.replacements[0]?.node, 'select');
+    const optionNode = findLiveElement(delta.replacements[0]?.node, 'option');
+    const optgroupNode = findLiveElement(delta.replacements[0]?.node, 'optgroup');
+
+    expect(selectNode?.controlShell).toBe('select');
+    expect(selectNode?.selectState).toEqual({
+      disabled: true,
+      multiple: true,
+      open: true,
+    });
+    expect(selectNode?.children).toHaveLength(3);
+    expect(serialized).toContain('Regions');
+    expect(serialized).toContain('Tokyo');
+    expect(serialized).toContain('Osaka');
+    expect(serialized).toContain('Seoul');
+    expect(serialized).toContain('"selected":true');
+    expect(serialized).not.toContain('private-name');
+    expect(serialized).not.toContain('private-tokyo');
+    expect(serialized).not.toContain('private-osaka');
+    expect(serialized).not.toContain('private-seoul');
+    expect(serialized).not.toContain('group-secret');
+    expect(serialized).not.toContain('private editable option');
+    expect(optionNode?.style).not.toHaveProperty('background-image');
+    expect(optgroupNode?.style).not.toHaveProperty('background-image');
+    expect(
+      selectNode?.children.every((child) =>
+        child.kind === 'element' && child.attributes === undefined,
+      ),
+    ).toBe(true);
+  });
+
+  it('masks native-select labels for explicit private roles and activation ancestors', () => {
+    const { document, window } = parseHTML(`
+      <html><body>
+        <select role="combobox"><option>private role option</option></select>
+        <div role="button">
+          <select><option>private nested option</option></select>
+        </div>
+      </body></html>
+    `);
+    installLiveDomGlobals(document, window);
+    installLiveRegistry(document.body);
+
+    const delta = parseLivePageDelta(
+      captureLivePageDelta('session_1234', 1, 1, ['n1']),
+    );
+    const serialized = JSON.stringify(delta);
+
+    expect(serialized).not.toContain('private role option');
+    expect(serialized).not.toContain('private nested option');
+    expect(findLiveElement(delta.replacements[0]?.node, 'select')).toBeUndefined();
+    expect(serialized.match(/"controlShell":"input"/gu)).toHaveLength(2);
+  });
+
+  it('omits positioned-offscreen native backing selects from live deltas', () => {
+    const { document, window } = parseHTML(`
+      <html><body><select><option>offscreen backing secret</option></select></body></html>
+    `);
+    installLiveDomGlobals(document, window, (property) => ({
+      display: 'block',
+      position: 'absolute',
+      left: '-10000px',
+      top: '0px',
+      width: '100px',
+      height: '24px',
+    })[property] ?? '');
+    installLiveRegistry(document.body);
+
+    const delta = captureLivePageDelta('session_1234', 1, 1, ['n1']);
+    const serialized = JSON.stringify(delta);
+
+    expect(serialized).not.toContain('offscreen backing secret');
+    expect(findLiveElement(delta.replacements[0]?.node, 'select')).toBeUndefined();
+  });
+
+  it('allows public ARIA menus in live deltas while masking editable controls', () => {
+    const { document, window } = parseHTML(`
+      <html><body>
+        <section role="listbox"
+          style="background-image:url('https://leak.invalid/menu-background.png')">
+          <div role="option">Public Tokyo choice</div>
+          <div role="option" contenteditable="false">
+            <img src="https://leak.invalid/menu-icon.png" alt="menu icon">
+            Public Osaka choice
+          </div>
+          <input role="combobox" value="private native combo value">
+        </section>
+        <nav role="menu"><div role="menuitem">Public account menu</div></nav>
+        <div role="option textbox">Public ordered fallback option</div>
+        <div role="textbox option">private ordered fallback textbox</div>
+        <div role="combobox">private editable combo label</div>
+        <div role="searchbox">private search value</div>
+        <div role="textbox">private textbox value</div>
+        <div contenteditable="true">private contenteditable value</div>
+      </body></html>
+    `);
+    installLiveDomGlobals(document, window);
+    installLiveRegistry(document.body);
+
+    const delta = captureLivePageDelta('session_1234', 1, 1, ['n1']);
+    const serialized = JSON.stringify(delta);
+
+    expect(serialized).toContain('Public Tokyo choice');
+    expect(serialized).toContain('Public Osaka choice');
+    expect(serialized).toContain('Public account menu');
+    expect(serialized).toContain('Public ordered fallback option');
+    expect(serialized).not.toContain('leak.invalid');
+    expect(serialized).not.toContain('private ordered fallback textbox');
+    expect(serialized).not.toContain('private native combo value');
+    expect(serialized).not.toContain('private editable combo label');
+    expect(serialized).not.toContain('private search value');
+    expect(serialized).not.toContain('private textbox value');
+    expect(serialized).not.toContain('private contenteditable value');
+  });
+
+  it('rejects malformed live-select trees and strips all select attributes', () => {
+    const base = {
+      version: 1,
+      generation: 1,
+      sequence: 1,
+      url: 'https://example.com/',
+      documentWidth: 800,
+      documentHeight: 600,
+      desynchronized: false,
+    };
+    const valid = parseLivePageDelta({
+      ...base,
+      replacements: [{
+        targetId: 'n1',
+        node: {
+          kind: 'element',
+          nodeId: 'n1',
+          tag: 'select',
+          style: {},
+          controlShell: 'select',
+          selectState: { disabled: false, multiple: false, open: false },
+          attributes: { name: 'private-name', value: 'private-value' },
+          children: [{
+            kind: 'element',
+            nodeId: 'n2',
+            tag: 'option',
+            style: {},
+            optionState: { disabled: false, selected: true },
+            attributes: { value: 'private-option', onclick: 'attack()' },
+            children: [{ kind: 'text', nodeId: 'n2', text: 'Public option' }],
+          }],
+        },
+      }],
+    });
+    expect(JSON.stringify(valid)).toContain('Public option');
+    expect(JSON.stringify(valid)).not.toContain('private-name');
+    expect(JSON.stringify(valid)).not.toContain('private-option');
+
+    expect(() => parseLivePageDelta({
+      ...base,
+      replacements: [{
+        targetId: 'n1',
+        node: {
+          kind: 'element',
+          nodeId: 'n1',
+          tag: 'select',
+          style: {},
+          controlShell: 'select',
+          selectState: { disabled: false, multiple: false, open: false },
+          children: [{
+            kind: 'element',
+            nodeId: 'n2',
+            tag: 'div',
+            style: {},
+            children: [{ kind: 'text', nodeId: 'n3', text: 'not an option' }],
+          }],
+        },
+      }],
+    })).toThrow(/invalid live mirror update/iu);
+
+    for (const child of [
+      {
+        kind: 'placeholder',
+        nodeId: 'n2',
+        style: {},
+        label: 'Canvas content omitted',
+      },
+      {
+        kind: 'element',
+        nodeId: 'n2',
+        tag: 'optgroup',
+        style: {},
+        optgroupState: { disabled: false },
+        children: [{
+          kind: 'placeholder',
+          nodeId: 'n3',
+          style: {},
+          label: 'Canvas content omitted',
+        }],
+      },
+    ]) {
+      expect(() => parseLivePageDelta({
+        ...base,
+        replacements: [{
+          targetId: 'n1',
+          node: {
+            kind: 'element',
+            nodeId: 'n1',
+            tag: 'select',
+            style: {},
+            controlShell: 'select',
+            selectState: { disabled: false, multiple: false, open: false },
+            children: [child],
+          },
+        }],
+      })).toThrow(/invalid live mirror update/iu);
+    }
+  });
+
+  it('renders and translates a live select replacement through the disclosure facsimile', async () => {
+    const { document, window } = parseHTML('<html><body></body></html>');
+    vi.stubGlobal('Element', window.Element);
+    vi.stubGlobal('HTMLElement', window.HTMLElement);
+    vi.stubGlobal('HTMLImageElement', window.HTMLImageElement);
+    const snapshot = parsePageSnapshot({
+      version: 1,
+      title: 'Select update',
+      url: 'https://example.com/',
+      capturedAt: '2026-07-21T00:00:00.000Z',
+      items: [],
+      omissions: {},
+      visual: {
+        viewportWidth: 800,
+        viewportHeight: 600,
+        documentWidth: 800,
+        documentHeight: 900,
+        styles: [{ display: 'block' }],
+        root: {
+          kind: 'element',
+          nodeId: 'n1',
+          tag: 'main',
+          styleId: 0,
+          children: [{
+            kind: 'element',
+            nodeId: 'n2',
+            tag: 'select',
+            styleId: 0,
+            controlShell: 'select',
+            selectState: { disabled: false, multiple: false, open: false },
+            children: [{
+              kind: 'element',
+              nodeId: 'n3',
+              tag: 'option',
+              styleId: 0,
+              optionState: { disabled: false, selected: true },
+              children: [{ kind: 'text', nodeId: 'n3', text: 'Old choice' }],
+            }],
+          }],
+        },
+      },
+    });
+    const mirror = createVisualMirror(snapshot, undefined, document);
+    if (!mirror) throw new Error('Expected mirror');
+    document.body.append(mirror);
+    const delta = parseLivePageDelta({
+      version: 1,
+      generation: 1,
+      sequence: 1,
+      url: 'https://example.com/',
+      documentWidth: 800,
+      documentHeight: 900,
+      desynchronized: false,
+      replacements: [{
+        targetId: 'n2',
+        node: {
+          kind: 'element',
+          nodeId: 'n2',
+          tag: 'select',
+          style: { display: 'inline-block', 'background-color': 'rgb(1, 2, 3)' },
+          controlShell: 'select',
+          selectState: { disabled: false, multiple: true, open: true },
+          children: [{
+            kind: 'element',
+            nodeId: 'n4',
+            tag: 'optgroup',
+            style: {},
+            optgroupState: { disabled: false },
+            children: [
+              { kind: 'text', nodeId: 'n4', text: 'Regions' },
+              {
+                kind: 'element',
+                nodeId: 'n5',
+                tag: 'option',
+                style: {},
+                optionState: { disabled: false, selected: true },
+                children: [{ kind: 'text', nodeId: 'n5', text: 'Tokyo' }],
+              },
+              {
+                kind: 'element',
+                nodeId: 'n6',
+                tag: 'option',
+                style: {},
+                optionState: { disabled: true, selected: false },
+                children: [{ kind: 'text', nodeId: 'n6', text: 'Osaka' }],
+              },
+            ],
+          }],
+        },
+      }],
+    });
+    const translated: string[] = [];
+
+    const result = await applyLivePageDelta(mirror, delta, {
+      textLayoutMode: 'adaptive',
+      translate: async (source) => {
+        translated.push(source);
+        return `[${source}]`;
+      },
+    });
+
+    const disclosure = result.root.querySelector<HTMLElement>(
+      '[data-simul-node-id="n2"]',
+    );
+    const list = disclosure?.querySelector<HTMLElement>(
+      '[data-simul-select-options]',
+    );
+    const options = [
+      ...(disclosure?.querySelectorAll<HTMLElement>('[data-simul-select-option]') ?? []),
+    ];
+    expect(disclosure?.tagName).toBe('DETAILS');
+    expect(disclosure?.hasAttribute('open')).toBe(true);
+    expect(disclosure?.dataset.simulSelectMultiple).toBe('true');
+    expect(list?.style.overflowY).toBe('auto');
+    expect(options.map((option) => option.textContent)).toEqual([
+      '[Tokyo]',
+      '[Osaka]',
+    ]);
+    expect(options[0]?.getAttribute('aria-selected')).toBe('true');
+    expect(options[1]?.getAttribute('aria-disabled')).toBe('true');
+    expect(translated).toEqual(['Regions', 'Tokyo', 'Osaka']);
+    expect(disclosure?.querySelector('summary')?.textContent).toBe('[Tokyo]');
+    expect(result.root.querySelector('select')).toBeNull();
+    expect(result.root.querySelector('script')).toBeNull();
+  });
+
   it('bounds aggregate styles, attributes, and image URLs while capturing', () => {
     const { document, window } = parseHTML(
       `<html><body>${'<div></div>'.repeat(2_100)}</body></html>`,
@@ -1190,4 +1770,17 @@ function countLiveImageUrlCharacters(
     (total, child) => total + countLiveImageUrlCharacters(child),
     0,
   );
+}
+
+function findLiveElement(
+  node: LiveVisualNode | null | undefined,
+  tag: string,
+): LiveVisualElementNode | undefined {
+  if (!node || node.kind !== 'element') return undefined;
+  if (node.tag === tag) return node;
+  for (const child of node.children) {
+    const match = findLiveElement(child, tag);
+    if (match) return match;
+  }
+  return undefined;
 }

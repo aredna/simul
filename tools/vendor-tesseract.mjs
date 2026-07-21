@@ -79,6 +79,12 @@ for (const code of TESSDATA_CODES) {
 }
 
 await emit(
+  'licenses/CORE_THIRD_PARTY_NOTICES.txt',
+  await readFile(resolve(root, 'legal/tesseract-core-v7-third-party-notices.txt')),
+  'license',
+  'repo:legal/tesseract-core-v7-third-party-notices.txt',
+);
+await emit(
   'licenses/TESSERACT_JS_APACHE-2.0.txt',
   await readFile(resolve(sourceRoot, 'tesseract.js/LICENSE.md')),
   'license',

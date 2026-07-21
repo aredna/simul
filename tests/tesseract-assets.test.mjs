@@ -53,20 +53,25 @@ describe('vendored Tesseract artifact catalog', () => {
       {
         path: APPROVED_TESSERACT_LICENSE_PATHS[0],
         role: 'license',
-        source: `https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/${APPROVED_TESSDATA_FAST_COMMIT}/LICENSE`,
+        source: 'repo:legal/tesseract-core-v7-third-party-notices.txt',
       },
       {
         path: APPROVED_TESSERACT_LICENSE_PATHS[1],
         role: 'license',
-        source: 'npm:tesseract.js-core@7.0.0/LICENSE',
+        source: `https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/${APPROVED_TESSDATA_FAST_COMMIT}/LICENSE`,
       },
       {
         path: APPROVED_TESSERACT_LICENSE_PATHS[2],
         role: 'license',
-        source: 'npm:tesseract.js@7.0.0/LICENSE.md',
+        source: 'npm:tesseract.js-core@7.0.0/LICENSE',
       },
       {
         path: APPROVED_TESSERACT_LICENSE_PATHS[3],
+        role: 'license',
+        source: 'npm:tesseract.js@7.0.0/LICENSE.md',
+      },
+      {
+        path: APPROVED_TESSERACT_LICENSE_PATHS[4],
         role: 'license',
         source: 'npm:tesseract.js@7.0.0/dist/worker.min.js.LICENSE.txt',
       },

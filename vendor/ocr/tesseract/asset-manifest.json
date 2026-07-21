@@ -28,7 +28,7 @@
     "tam",
     "tel"
   ],
-  "totalBytes": 38466078,
+  "totalBytes": 38509898,
   "files": [
     {
       "path": "core/tesseract-core-lstm.wasm.js",
@@ -204,6 +204,13 @@
       "source": "https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/87416418657359cb625c412a48b6e1d6d41c29bd/vie.traineddata",
       "bytes": 421978,
       "sha256": "4a7b7751989b07ee1082f8ff9cbdbf9ab3b54e3b20fa6b9867ead0e02b2f003c"
+    },
+    {
+      "path": "licenses/CORE_THIRD_PARTY_NOTICES.txt",
+      "role": "license",
+      "source": "repo:legal/tesseract-core-v7-third-party-notices.txt",
+      "bytes": 43820,
+      "sha256": "fafcd3d016e92a113ef2f87b5535df259923a99dcffb2109728ad10d738c943c"
     },
     {
       "path": "licenses/TESSDATA_FAST_APACHE-2.0.txt",

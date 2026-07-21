@@ -178,6 +178,190 @@ describe('HtmlMirrorSourceSession', () => {
     expect(JSON.stringify(sensitivePatch)).not.toContain('initial');
   });
 
+  it('streams native select state without values, names, or data attributes', () => {
+    const fixture = sourceFixture(`
+      <select id="facility" name="private-name" data-account="private-data">
+        <option value="private-a">Choose</option>
+        <optgroup id="area" label="District">
+          <option value="private-b" selected>Community center</option>
+        </optgroup>
+      </select>
+    `);
+    fixture.start('passive');
+    const initial = fixture.checkpoints()[0]!;
+    expect(JSON.stringify(initial)).toContain('"selectedOptionIndexes":[1]');
+    expect(JSON.stringify(initial)).toContain(
+      '"controlText":{"kind":"label","text":"District","translatable":true}',
+    );
+    expect(JSON.stringify(initial)).not.toContain('private-name');
+    expect(JSON.stringify(initial)).not.toContain('private-data');
+    expect(JSON.stringify(initial)).not.toContain('private-a');
+    expect(JSON.stringify(initial)).not.toContain('private-b');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+
+    const select = fixture.document.querySelector<HTMLSelectElement>('#facility')!;
+    // linkedom models selectedness through the content attribute; the browser
+    // path is driven by this same change event without transporting it.
+    select.options[0]!.setAttribute('selected', '');
+    select.options[1]!.removeAttribute('selected');
+    select.dispatchEvent(new fixture.window.Event('change', { bubbles: true }));
+    fixture.flushFrame();
+
+    const operation = fixture.patches().at(-1)?.operations.find(
+      ({ kind }) => kind === 'attributes',
+    );
+    expect(operation).toMatchObject({
+      kind: 'attributes',
+      selectedOptionIndexes: [0],
+    });
+    expect(JSON.stringify(operation)).not.toContain('private-');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
+
+    const area = fixture.document.querySelector('#area')!;
+    area.setAttribute('label', 'Neighborhood');
+    fixture.mutate(attributeRecord(area, 'label'));
+    fixture.flushFrame();
+    expect(fixture.patches().at(-1)?.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'attributes',
+        controlText: {
+          kind: 'label', text: 'Neighborhood', translatable: true,
+        },
+      }),
+    ]));
+  });
+
+  it('atomically clears public labels when a select becomes private', () => {
+    const fixture = sourceFixture(
+      '<select id="picker"><option selected>Public choice</option></select>',
+    );
+    fixture.start('passive');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const select = fixture.document.querySelector('#picker')!;
+
+    select.setAttribute('role', 'combobox');
+    fixture.mutate(attributeRecord(select, 'role'));
+    fixture.flushFrame();
+    const patch = fixture.patches().at(-1)!;
+    const structural = patch.operations[0];
+    const attributes = patch.operations[1];
+
+    expect(structural).toMatchObject({
+      kind: 'children',
+      children: [expect.objectContaining({
+        kind: 'element',
+        tagName: 'option',
+        children: [],
+      })],
+    });
+    expect(attributes).toMatchObject({
+      kind: 'attributes',
+      tagName: 'select',
+      attributes: expect.arrayContaining([['role', 'combobox']]),
+    });
+    expect(attributes).not.toHaveProperty('selectedOptionIndexes');
+    expect(JSON.stringify(patch)).not.toContain('Public choice');
+  });
+
+  it('polls silent select-label visibility changes as atomic replacements', () => {
+    const fixture = sourceFixture(
+      '<select><option selected>Visible choice</option></select>',
+    );
+    fixture.start('passive');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    fixture.document.querySelector('option')!.setAttribute('hidden', '');
+
+    fixture.runTimer();
+    fixture.flushFrame();
+    const patch = fixture.patches().at(-1)!;
+
+    expect(patch.operations.slice(0, 2).map(({ kind }) => kind)).toEqual([
+      'children',
+      'attributes',
+    ]);
+    expect(JSON.stringify(patch)).not.toContain('Visible choice');
+  });
+
+  it('streams inserted options, visible label changes, and customizable picker state', () => {
+    const fixture = sourceFixture(`
+      <select id="picker"><option selected>First choice</option></select>
+    `);
+    const select = fixture.document.querySelector<HTMLSelectElement>('#picker')!;
+    let open = false;
+    Object.defineProperty(select, 'matches', {
+      configurable: true,
+      value: (selector: string) => selector === ':open' && open,
+    });
+    fixture.start('passive');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+
+    const inserted = fixture.document.createElement('option');
+    inserted.textContent = 'Second choice';
+    select.append(inserted);
+    fixture.mutate(childListRecord(select, [inserted]));
+    fixture.flushFrame();
+    const insertion = fixture.patches().at(-1)!;
+    expect(insertion.operations.map(({ kind }) => kind)).toEqual(
+      expect.arrayContaining(['children', 'attributes']),
+    );
+    expect(JSON.stringify(insertion)).toContain('Second choice');
+    expect(JSON.stringify(insertion)).not.toContain('stream_overflow');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
+
+    const insertedText = inserted.firstChild as Text;
+    insertedText.nodeValue = 'Updated choice';
+    fixture.mutate(characterDataRecord(insertedText));
+    fixture.flushFrame();
+    expect(fixture.patches().at(-1)?.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'attributes',
+        controlText: {
+          kind: 'label', text: 'Updated choice', translatable: true,
+        },
+      }),
+    ]));
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 2));
+
+    open = true;
+    select.dispatchEvent(new fixture.window.Event('toggle', { bubbles: true }));
+    fixture.flushFrame();
+    expect(fixture.patches().at(-1)?.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'attributes', selectPickerOpen: true }),
+    ]));
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 3));
+
+    open = false;
+    select.dispatchEvent(new fixture.window.Event('toggle', { bubbles: true }));
+    fixture.flushFrame();
+    const closed = fixture.patches().at(-1)?.operations.find(
+      (operation) => operation.kind === 'attributes' && operation.nodeId > 0,
+    );
+    expect(closed).not.toHaveProperty('selectPickerOpen');
+  });
+
+  it('routes direct optgroup legend mutations to the typed group label', () => {
+    const fixture = sourceFixture(`
+      <select><optgroup><legend>Original group</legend>
+        <option>Public choice</option>
+      </optgroup></select>
+    `);
+    fixture.start('passive');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const legendText = fixture.document.querySelector('legend')!.firstChild as Text;
+    legendText.nodeValue = 'Updated group';
+    fixture.mutate(characterDataRecord(legendText));
+    fixture.flushFrame();
+
+    expect(fixture.patches().at(-1)?.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'attributes',
+        controlText: {
+          kind: 'label', text: 'Updated group', translatable: true,
+        },
+      }),
+    ]));
+  });
+
   it('emits bounded capacity diagnostics when checkpoint serialization overflows', () => {
     const descriptor = Object.getOwnPropertyDescriptor(
       WeakNodeIdRegistry,

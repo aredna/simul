@@ -710,14 +710,19 @@ class CandidateLease implements VisibleReplayCandidateLease {
 }
 
 function isProtectedReplayIframe(iframe: HTMLIFrameElement): boolean {
-  return (
+  const commonProtection =
     iframe.getAttribute('sandbox') === 'allow-same-origin' &&
     iframe.getAttribute('aria-hidden') === 'true' &&
-    iframe.hasAttribute('inert') &&
     iframe.getAttribute('tabindex') === '-1' &&
-    iframe.getAttribute('referrerpolicy') === 'no-referrer' &&
-    iframe.style.pointerEvents === 'none'
-  );
+    iframe.getAttribute('referrerpolicy') === 'no-referrer';
+  if (!commonProtection) return false;
+  const strictlyInert = iframe.hasAttribute('inert') &&
+    iframe.style.pointerEvents === 'none';
+  const disclosureOnly = !iframe.hasAttribute('inert') &&
+    iframe.style.pointerEvents === 'auto' &&
+    iframe.getAttribute('data-simul-interaction-boundary') ===
+      'css-disclosure-v1';
+  return strictlyInert || disclosureOnly;
 }
 
 function normalizeDimensions(

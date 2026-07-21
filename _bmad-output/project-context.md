@@ -62,9 +62,19 @@ only a nonempty current value or otherwise the placeholder from native
 That text crosses the bounded protocol only as discriminated control metadata,
 never as raw `value`/`placeholder` attributes, and stays memory-only and
 content-free in logs. Password/password-autocomplete fields, unsupported
-controls, selects/options, contenteditable regions, and ARIA textbox fallbacks
-remain blank; a safe-to-sensitive transition clears its record and projection
-atomically. rrweb continues masking every editable/value-bearing control.
+controls, contenteditable regions, and ARIA textbox fallbacks remain blank.
+Public native selects carry only bounded option/optgroup labels and
+selected/disabled/multiple/open presentation state, including live changes;
+raw values, names, data attributes, datalist content, rich picker descendants,
+and private ancestry remain absent. Both visual engines expose those typed
+labels through a companion-owned scriptless disclosure with a bounded scrolling
+list. Customizable-select `:open` state is progressive; native popup geometry is
+not observable. Public non-editable ARIA listbox/menu/option labels translate,
+while editable combobox/searchbox/textbox/contenteditable branches remain
+private. Attribute-backed labels use the same memory-only translation records
+as other visible text. A safe-to-sensitive transition clears its record and
+projection atomically. rrweb continues masking every editable/value-bearing
+control.
 Passive image validation admits a narrow, shape-only URL-encoded SVG data-image
 profile (including the YC logo) with the same checks on capture and receipt. A
 persisted `Live source only` mode uses the identical isolated DOM/patch stream,
@@ -83,7 +93,10 @@ projection boundary. Mexico City and Reddit fidelity gaps are documented
 follow-ups; Checkpoint F's approved Choice C did not claim those sites were
 fixed.
 
-Source scroll transport coalesces at most once per animation frame. It reads
+Source scroll transport is installed from a locally bundled unlisted script so
+its imported helpers execute in Chrome's isolated world. A closure-free invoker
+starts it, and implementation revision 2 disconnects/replaces stale registries
+left by 0.3.0. Transport coalesces at most once per animation frame. It reads
 the standards/body document fallbacks first and may adopt a visible,
 viewport-scale nested element with meaningful, user-scrollable vertical
 overflow, including inside an observed open shadow root. Textareas, inputs,
@@ -165,7 +178,7 @@ projection stage through an ephemeral job ordinal and safe dimensions without
 text, URLs, pixels, hashes, or IDs. Settings and the slim full-width toolbar
 share one guarded manual rebuild action. The toolbar keeps Refresh, the From
 label, `[A]` Auto-detect immediately before its wider selector, swap, the wider
-To selector, size, OCR, Current/Active following, quick translation, Settings,
+To selector, size, OCR On/Off, Current/Active following, quick translation, Settings,
 Side/Popout, and the replica state in one ordered row. Healthy state shows no
 detached dot; warning/error markers attach to Refresh or Settings, whichever
 can resolve the condition. Visible toolbar and Settings labels are translated
@@ -222,6 +235,8 @@ extension APIs or page integration.
 - `lib/companion-ui-localization.ts`: atomic target-language label sets and
   action-specific toolbar attention routing
 - `entrypoints/page-snapshot.ts`: unlisted top-frame snapshot entrypoint
+- `entrypoints/page-live-observer.ts`: locally bundled legacy/live scroll and
+  mutation observer with revision-safe installation
 - `entrypoints/page-recorder.ts`: unlisted rrweb checkpoint, live recorder,
   and exact-document image-source bridge
 - `entrypoints/page-mirror.ts`: unlisted isolated-HTML observer and shared

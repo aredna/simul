@@ -79,6 +79,25 @@ describe('sidepanel UI structure', () => {
     expect(style).not.toContain('.status-dot[data-tone="success"]');
   });
 
+  it('shows explicit OCR state and preserves compact button affordance', () => {
+    const { document } = parseHTML(markup);
+    expect(document.querySelector('#toolbar-ocr-label')?.textContent).toBe('OCR Off');
+    expect(script).toContain("preferences.imageTranslationEnabled ? 'OCR On' : 'OCR Off'");
+    expect(style).toContain('.toolbar-button {');
+    expect(style).toContain('border: 1px solid var(--line)');
+    expect(style).toContain('.toolbar-button[aria-pressed="true"]');
+    expect(style).toContain('background: var(--control-background)');
+  });
+
+  it('keeps only the owned dropdown disclosure pointer-reachable in replay', () => {
+    expect(style).toContain('.replica-replay-mount *');
+    expect(style).toContain('pointer-events: none !important');
+    expect(style).toContain(
+      'iframe[data-simul-interaction-boundary="css-disclosure-v1"]',
+    );
+    expect(style).toContain('pointer-events: auto !important');
+  });
+
   it('marks toolbar and settings copy for atomic target-language localization', () => {
     const { document } = parseHTML(markup);
     const settingsLabels = document.querySelectorAll(
@@ -167,5 +186,12 @@ describe('sidepanel UI structure', () => {
     expect(script).toContain("toolbarProgress.setAttribute('aria-valuenow'");
     expect(script).toContain('translateRemembered(pair, text');
     expect(script).toContain('composerAbortController === abortController');
+    const replicaStyle = style.slice(
+      style.lastIndexOf('.replica-preview {'),
+      style.indexOf('.page-copy {'),
+    );
+    expect(replicaStyle).toContain('background: transparent');
+    expect(replicaStyle).not.toContain('color-scheme: light');
+    expect(replicaStyle).not.toContain('background: #fff');
   });
 });

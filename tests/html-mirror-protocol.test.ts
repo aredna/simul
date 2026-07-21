@@ -123,6 +123,213 @@ describe('isolated HTML sanitizer and protocol', () => {
     expect(checkpointFor(identity, passive, 'conservative')).toBeUndefined();
   });
 
+  it('omits posterless video shells while preserving a passive fallback image', () => {
+    const graph = sanitizeMarkup(`<!doctype html><html><body>
+      <section>
+        <video id="blank-video" src="../movie.mp4">Video fallback text</video>
+        <img id="static-fallback" src="../fallback.jpg" alt="Static fallback">
+      </section>
+    </body></html>`, 'passive');
+
+    expect(graphElementBySourceId(graph, 'blank-video')).toBeUndefined();
+    expect(attributesOf(graph, 'static-fallback')).toMatchObject({
+      src: 'https://example.test/fallback.jpg',
+      alt: 'Static fallback',
+    });
+    expect(JSON.stringify(graph)).not.toContain('movie.mp4');
+  });
+
+  it('carries native select labels and selected indices without submission data', () => {
+    const graph = sanitizeMarkup(`<!doctype html><html><body>
+      <select id="facility" name="private-name" data-account="private-data">
+        <option value="private-1">選択してください。</option>
+        <optgroup id="area" label="麻布地区">
+          <option value="private-2" data-code="private-code" title="private-title" selected>麻布区民センター</option>
+          <option role="textbox" label="private role label">private role choice</option>
+          <option id="rich"><img src="https://leak.invalid/option.png"><span name="private-rich-name" data-secret="private-rich-data">Visible rich choice</span></option>
+        </optgroup>
+      </select>
+      <select id="private-selection"><option role="textbox" selected label="selected secret">selected secret text</option></select>
+      <datalist id="private-suggestions"><option value="secret" label="secret datalist label">secret suggestion</option></datalist>
+    </body></html>`, 'passive');
+    const selects = graphElementsByTag(graph, 'select');
+    const select = selects[0];
+    const area = graphElementsByTag(graph, 'optgroup')[0];
+    const privateSelection = selects[1];
+    const serialized = JSON.stringify(graph);
+
+    expect(select?.selectedOptionIndexes).toEqual([1]);
+    expect(area?.controlText).toEqual({
+      kind: 'label', text: '麻布地区', translatable: true,
+    });
+    expect(privateSelection?.selectedOptionIndexes).toEqual([]);
+    expect(Object.fromEntries(select?.attributes ?? [])).not.toHaveProperty('name');
+    expect(serialized).toContain('選択してください。');
+    expect(serialized).toContain('麻布区民センター');
+    expect(serialized).toContain('麻布地区');
+    expect(serialized).not.toContain('private-name');
+    expect(serialized).not.toContain('private-data');
+    expect(serialized).not.toContain('private-1');
+    expect(serialized).not.toContain('private-2');
+    expect(serialized).not.toContain('private-code');
+    expect(serialized).not.toContain('private-title');
+    expect(serialized).not.toContain('private role choice');
+    expect(serialized).not.toContain('private role label');
+    expect(serialized).toContain('Visible rich choice');
+    expect(serialized).not.toContain('leak.invalid');
+    expect(serialized).not.toContain('private-rich-name');
+    expect(serialized).not.toContain('private-rich-data');
+    expect(serialized).not.toContain('secret suggestion');
+    expect(serialized).not.toContain('secret datalist label');
+    expect(serialized).not.toContain('selected secret');
+    expect(readHtmlMirrorNode(graph.root, new Set(), 0, undefined, false,
+      false, false, false, false, 'passive')).toBeDefined();
+    expect(readHtmlMirrorNode({
+      kind: 'element', id: 900, namespace: 'html', tagName: 'div',
+      attributes: [], children: [], selectedOptionIndexes: [0],
+    }, new Set(), 0, undefined, false, false, false, false, false, 'passive'))
+      .toBeUndefined();
+    expect(readHtmlMirrorNode({
+      kind: 'element', id: 901, namespace: 'html', tagName: 'select',
+      attributes: [], selectedOptionIndexes: [50_000], children: [{
+        kind: 'element', id: 902, namespace: 'html', tagName: 'option',
+        attributes: [], children: [{
+          kind: 'text', id: 903, text: 'Only choice', translatable: true,
+        }],
+      }],
+    }, new Set(), 0, undefined, false, false, false, false, false, 'passive'))
+      .toBeUndefined();
+    expect(readHtmlMirrorNode({
+      kind: 'element', id: 904, namespace: 'html', tagName: 'select',
+      attributes: [], selectedOptionIndexes: [1], children: [{
+        kind: 'element', id: 905, namespace: 'html', tagName: 'option',
+        attributes: [], children: [],
+        controlText: { kind: 'label', text: 'Only choice', translatable: true },
+      }],
+    }, new Set(), 0, undefined, false, false, false, false, false, 'passive'))
+      .toBeUndefined();
+    expect(readHtmlMirrorNode({
+      kind: 'element', id: 906, namespace: 'html', tagName: 'select',
+      attributes: [], children: [{
+        kind: 'element', id: 907, namespace: 'html', tagName: 'img',
+        attributes: [['src', 'https://leak.invalid/forged.png']], children: [],
+      }],
+    }, new Set(), 0, undefined, false, false, false, false, false, 'passive'))
+      .toBeUndefined();
+    expect(readHtmlMirrorNode({
+      kind: 'element', id: 908, namespace: 'html', tagName: 'select',
+      attributes: [['role', 'combobox']], children: [{
+        kind: 'element', id: 909, namespace: 'html', tagName: 'img',
+        attributes: [['src', 'https://leak.invalid/private-select.png']],
+        children: [],
+      }],
+    }, new Set(), 0, undefined, false, false, false, false, false, 'passive'))
+      .toBeUndefined();
+  });
+
+  it('keeps public menu labels while removing request-capable descendants', () => {
+    const graph = sanitizeMarkup(`<!doctype html><html><body>
+      <section role="listbox">
+        <div role="option">
+          <img src="https://leak.invalid/menu.png"
+            style="background-image:url('https://leak.invalid/background.png')">
+          <video poster="https://leak.invalid/menu-poster.png"></video>
+          <span>Public menu choice</span>
+        </div>
+      </section>
+    </body></html>`, 'passive');
+    const serialized = JSON.stringify(graph);
+
+    expect(serialized).toContain('Public menu choice');
+    expect(serialized).not.toContain('leak.invalid');
+    expect(graphElementsByTag(graph, 'video')).toEqual([]);
+    expect(readHtmlMirrorNode(graph.root, new Set(), 0, undefined, false,
+      false, false, false, false, 'passive')).toBeDefined();
+    expect(readHtmlMirrorNode({
+      kind: 'element', id: 920, namespace: 'html', tagName: 'div',
+      attributes: [['role', 'menu']], children: [{
+        kind: 'element', id: 921, namespace: 'html', tagName: 'img',
+        attributes: [['src', 'https://leak.invalid/forged-menu.png']],
+        children: [],
+      }],
+    }, new Set(), 0, undefined, false, false, false, false, false, 'passive'))
+      .toBeUndefined();
+  });
+
+  it('preserves bounded multiple-selection state beyond the former 512 entry cap', () => {
+    const options = Array.from(
+      { length: 513 },
+      (_, index) => `<option selected>Choice ${index}</option>`,
+    ).join('');
+    const graph = sanitizeMarkup(
+      `<!doctype html><html><body><select id="many" multiple>${options}</select></body></html>`,
+      'passive',
+    );
+    const select = graphElementsByTag(graph, 'select')[0];
+
+    expect(select?.selectedOptionIndexes).toHaveLength(513);
+    expect(select?.selectedOptionIndexes?.at(-1)).toBe(512);
+  });
+
+  it('keeps blank, hidden, and private select-entry labels out of transport', () => {
+    const graph = sanitizeMarkup(`<!doctype html><html><body>
+      <select>
+        <option label="   ">whitespace fallback secret</option>
+        <optgroup hidden label="hidden group secret">
+          <option selected>hidden selected secret</option>
+        </optgroup>
+        <optgroup role="combobox" label="private group secret">
+          <option selected>private selected secret</option>
+        </optgroup>
+        <optgroup label="Public group">
+          <legend hidden>hidden legend secret</legend>
+          <option>Public child</option>
+        </optgroup>
+      </select>
+      <section hidden>
+        <select id="hidden-owner">
+          <option selected>ancestor-hidden selected secret</option>
+        </select>
+      </section>
+    </body></html>`, 'passive');
+    const select = graphElementsByTag(graph, 'select')[0];
+    const hiddenSelect = graphElementBySourceId(graph, 'hidden-owner');
+    const serialized = JSON.stringify(graph);
+
+    expect(select?.selectedOptionIndexes).toEqual([]);
+    expect(serialized).toContain('Public child');
+    expect(serialized).not.toContain('whitespace fallback secret');
+    expect(serialized).not.toContain('hidden group secret');
+    expect(serialized).not.toContain('hidden selected secret');
+    expect(serialized).not.toContain('private group secret');
+    expect(serialized).not.toContain('private selected secret');
+    expect(serialized).not.toContain('hidden legend secret');
+    expect(serialized).not.toContain('ancestor-hidden selected secret');
+    expect(hiddenSelect).toBeUndefined();
+  });
+
+  it('rejects noncanonical native-select presentation attributes', () => {
+    const node = {
+      kind: 'element', id: 900, namespace: 'html', tagName: 'select',
+      attributes: [['disabled', 'private-token']],
+      selectedOptionIndexes: [], children: [],
+    };
+    expect(readHtmlMirrorNode(node)).toBeUndefined();
+    expect(readHtmlMirrorNode({
+      ...node,
+      attributes: [['role', 'private-token']],
+    })).toBeUndefined();
+    expect(readHtmlMirrorNode({
+      ...node,
+      attributes: [['disabled', '']],
+    })).toBeDefined();
+    const { selectedOptionIndexes: _selected, ...privateNode } = node;
+    expect(readHtmlMirrorNode({
+      ...privateNode,
+      attributes: [['role', 'combobox']],
+    })).toBeDefined();
+  });
+
   it('canonicalizes an already-inert form for source-to-receiver transport', () => {
     const graph = sanitizeMarkup(
       '<!doctype html><html><body><form id="account" inert><input></form></body></html>',
@@ -768,6 +975,7 @@ describe('isolated HTML sanitizer and protocol', () => {
       <input id="aria-searchbox" type="search" role="searchbox" value="private search value">
       <textarea id="aria-textbox" role="textbox">private aria native value</textarea>
       <input id="aria-button" type="text" role="button" value="private activation value">
+      <input id="aria-option-input" type="text" role="option" value="private menu input value">
       <textarea id="notes" placeholder="Write a note"></textarea>
       <select><option>private choice</option></select>
       <div contenteditable="true">private editor</div>
@@ -796,7 +1004,8 @@ describe('isolated HTML sanitizer and protocol', () => {
     expect(serialized).not.toContain('private search value');
     expect(serialized).not.toContain('private aria native value');
     expect(serialized).not.toContain('private activation value');
-    expect(serialized).not.toContain('private choice');
+    expect(serialized).not.toContain('private menu input value');
+    expect(serialized).toContain('private choice');
     expect(serialized).not.toContain('private editor');
     expect(serialized).not.toContain('private aria editor');
     expect(serialized).toContain('["id","missing"]');
@@ -1125,6 +1334,8 @@ describe('isolated HTML sanitizer and protocol', () => {
     const { document, window } = parseHTML(`<!doctype html><html><body>
       <section role="button textbox"><span>public activation fallback</span></section>
       <section role="textbox button"><span>private input fallback</span></section>
+      <section role="option textbox"><span>public menu fallback</span></section>
+      <section role="textbox option"><span>private menu fallback</span></section>
     </body></html>`);
     const graph = sanitizeSourceDocument(
       document,
@@ -1135,6 +1346,8 @@ describe('isolated HTML sanitizer and protocol', () => {
 
     expect(serialized).toContain('public activation fallback');
     expect(serialized).not.toContain('private input fallback');
+    expect(serialized).toContain('public menu fallback');
+    expect(serialized).not.toContain('private menu fallback');
     expect(readHtmlMirrorNode(graph?.root)).toBeDefined();
   });
 
@@ -1399,6 +1612,7 @@ describe('isolated HTML sanitizer and protocol', () => {
   it('masks private ancestors and rejects malicious private transport canaries', () => {
     const { document, window } = parseHTML(`<!doctype html><html><body>
       <section role="textbox"><span title="secret title" data-secret="secret data">secret text</span></section>
+      <section contenteditable="true"><select><option label="secret label">secret choice</option></select></section>
     </body></html>`);
     const graph = sanitizeSourceDocument(
       document,
@@ -2081,6 +2295,25 @@ function graphElementBySourceId(
     }
   }
   return undefined;
+}
+
+function graphElementsByTag(
+  graph: HtmlMirrorDocumentGraph,
+  tagName: string,
+): HtmlMirrorElementNode[] {
+  const matches: HtmlMirrorElementNode[] = [];
+  const pending: HtmlMirrorElementNode[] = [graph.root];
+  while (pending.length > 0) {
+    const current = pending.shift()!;
+    if (current.tagName === tagName) matches.push(current);
+    for (const child of current.children) {
+      if (child.kind === 'element') pending.push(child);
+    }
+    for (const child of current.shadowRoot?.children ?? []) {
+      if (child.kind === 'element') pending.push(child);
+    }
+  }
+  return matches;
 }
 
 function attributesOf(

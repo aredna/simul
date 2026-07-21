@@ -281,6 +281,45 @@ describe('capturePageSnapshot', () => {
     expect(serialized.match(/"controlShell":"input"/gu)?.length).toBeGreaterThanOrEqual(4);
   });
 
+  it('captures public ARIA menu items while masking editable controls', () => {
+    installTestPage(`
+      <section role="listbox" aria-label="Destinations"
+        style="background-image:url('https://leak.invalid/menu-background.png')">
+        <div role="option">Public Tokyo choice</div>
+        <div role="option" aria-disabled="true">
+          <img src="https://leak.invalid/menu-icon.png" alt="menu icon">
+          Public Osaka choice
+        </div>
+        <input role="combobox" type="text" value="private native combo value">
+      </section>
+      <nav role="menu"><div role="menuitem">Public account menu</div></nav>
+      <div role="option textbox">Public ordered fallback option</div>
+      <div role="textbox option">private ordered fallback textbox</div>
+      <div role="combobox"><span>private editable combo label</span></div>
+      <div role="searchbox">private search value</div>
+      <div role="textbox">private textbox value</div>
+      <div contenteditable="true">private contenteditable value</div>
+      <div contenteditable="false">Public noneditable content</div>
+    `);
+
+    const snapshot = capturePageSnapshot();
+    const serialized = JSON.stringify(snapshot);
+
+    expect(serialized).toContain('Public Tokyo choice');
+    expect(serialized).toContain('Public Osaka choice');
+    expect(serialized).toContain('Public account menu');
+    expect(serialized).toContain('Public noneditable content');
+    expect(serialized).toContain('Public ordered fallback option');
+    expect(serialized).not.toContain('leak.invalid');
+    expect(serialized).not.toContain('private ordered fallback textbox');
+    expect(serialized).not.toContain('private native combo value');
+    expect(serialized).not.toContain('private editable combo label');
+    expect(serialized).not.toContain('private search value');
+    expect(serialized).not.toContain('private textbox value');
+    expect(serialized).not.toContain('private contenteditable value');
+    expect(snapshot.omissions.controls).toBeGreaterThanOrEqual(5);
+  });
+
   it('bounds DOM traversal even when nodes produce no snapshot items', () => {
     installTestPage(
       Array.from(

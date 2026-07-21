@@ -8,5 +8,6 @@ are included beside the runtime assets.
 
 The compiled Tesseract core includes work from Tesseract OCR, Leptonica,
 giflib, libjpeg, libpng, libtiff, libwebp, openlibm, and zlib. Their notices
-and source provenance are retained by the upstream tesseract.js-core package.
+and exact source provenance are retained in
+`tesseract/licenses/CORE_THIRD_PARTY_NOTICES.txt`.
 No OCR JavaScript, Worker, Wasm core, or language model is loaded remotely.

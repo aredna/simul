@@ -42,7 +42,7 @@ export interface ReplicaSourceControlTextRecord {
   readonly document: ReplicaSourceDocumentIdentity;
   readonly nodeId: number;
   readonly nodeType: 1;
-  readonly controlTarget: 'value' | 'placeholder';
+  readonly controlTarget: 'value' | 'placeholder' | 'label';
   readonly revision: number;
   readonly source: string;
 }

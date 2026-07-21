@@ -38,12 +38,21 @@ export const MINIMUM_CHROME_VERSION = 138;
 export const REQUIRED_UNLISTED_BUNDLES = Object.freeze([
   'page-recorder.js',
   'page-mirror.js',
+  'page-live-observer.js',
+]);
+export const REQUIRED_RELEASE_LEGAL_FILES = Object.freeze([
+  { artifactPath: 'LICENSE', sourcePath: 'LICENSE' },
+  {
+    artifactPath: 'THIRD_PARTY_NOTICES.md',
+    sourcePath: 'THIRD_PARTY_NOTICES.md',
+  },
 ]);
 export const REQUIRED_REPLICA_RUNTIME_MARKERS = Object.freeze([
   'simul:replica-v2:capture-checkpoint',
   'rrweb-shadow-v2',
   'simul:html-mirror-v1:',
   'isolated-html-v1',
+  'simul:live-observer-v5',
 ]);
 export const REQUIRED_ISOLATED_SANDBOX_MARKERS = Object.freeze([
   'simul-isolated-shell',
@@ -120,6 +129,7 @@ export const APPROVED_TESSERACT_CORE_PATHS = Object.freeze([
 ]);
 export const APPROVED_TESSERACT_WORKER_PATH = 'worker/worker.min.js';
 export const APPROVED_TESSERACT_LICENSE_PATHS = Object.freeze([
+  'licenses/CORE_THIRD_PARTY_NOTICES.txt',
   'licenses/TESSDATA_FAST_APACHE-2.0.txt',
   'licenses/TESSERACT_CORE_APACHE-2.0.txt',
   'licenses/TESSERACT_JS_APACHE-2.0.txt',
@@ -156,6 +166,7 @@ const TEXT_EXTENSIONS = new Set([
   '.html',
   '.js',
   '.json',
+  '.md',
   '.mjs',
   '.svg',
   '.txt',
@@ -262,6 +273,7 @@ export async function validateArtifact(artifactDirectory) {
       );
     }
   }
+  await assertReleaseLegalFiles(root, filePaths);
 
   const executableTextByPath = new Map();
   let unpackedBytes = 0;
@@ -343,8 +355,33 @@ export async function validateArtifact(artifactDirectory) {
   };
 }
 
+async function assertReleaseLegalFiles(root, filePaths) {
+  for (const legalFile of REQUIRED_RELEASE_LEGAL_FILES) {
+    if (!filePaths.has(legalFile.artifactPath)) {
+      throw new ArtifactError(
+        `Extension artifact is missing required legal file: ${legalFile.artifactPath}`,
+      );
+    }
+    const [artifactBytes, reviewedBytes] = await Promise.all([
+      readFile(path.join(root, legalFile.artifactPath)),
+      readFile(path.join(PROJECT_ROOT, legalFile.sourcePath)),
+    ]);
+    if (artifactBytes.byteLength === 0 || !artifactBytes.equals(reviewedBytes)) {
+      throw new ArtifactError(
+        `Packaged legal file differs from its reviewed source: ${legalFile.artifactPath}`,
+      );
+    }
+  }
+}
+
 function assertReplicaRuntimeMarkers(executableTextByPath, filePaths) {
-  const [captureMarker, replayMarker, htmlMirrorMarker, isolatedMarker] =
+  const [
+    captureMarker,
+    replayMarker,
+    htmlMirrorMarker,
+    isolatedMarker,
+    liveObserverMarker,
+  ] =
     REQUIRED_REPLICA_RUNTIME_MARKERS;
   const recorderText = executableTextByPath.get(REQUIRED_UNLISTED_BUNDLES[0]);
   if (!recorderText || !hasJavaScriptStringMarker(recorderText, captureMarker)) {
@@ -356,6 +393,17 @@ function assertReplicaRuntimeMarkers(executableTextByPath, filePaths) {
   if (!mirrorText || !hasJavaScriptStringMarker(mirrorText, htmlMirrorMarker)) {
     throw new ArtifactError(
       `Extension artifact is missing required local replica runtime marker: ${htmlMirrorMarker}`,
+    );
+  }
+  const liveObserverText = executableTextByPath.get(
+    REQUIRED_UNLISTED_BUNDLES[2],
+  );
+  if (
+    !liveObserverText ||
+    !hasJavaScriptStringMarker(liveObserverText, liveObserverMarker)
+  ) {
+    throw new ArtifactError(
+      `Extension artifact is missing required local replica runtime marker: ${liveObserverMarker}`,
     );
   }
 
@@ -1427,20 +1475,25 @@ function assertApprovedTesseractAssetLayout(files) {
     {
       path: APPROVED_TESSERACT_LICENSE_PATHS[0],
       role: 'license',
-      source: `https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/${APPROVED_TESSDATA_FAST_COMMIT}/LICENSE`,
+      source: 'repo:legal/tesseract-core-v7-third-party-notices.txt',
     },
     {
       path: APPROVED_TESSERACT_LICENSE_PATHS[1],
       role: 'license',
-      source: 'npm:tesseract.js-core@7.0.0/LICENSE',
+      source: `https://raw.githubusercontent.com/tesseract-ocr/tessdata_fast/${APPROVED_TESSDATA_FAST_COMMIT}/LICENSE`,
     },
     {
       path: APPROVED_TESSERACT_LICENSE_PATHS[2],
       role: 'license',
-      source: 'npm:tesseract.js@7.0.0/LICENSE.md',
+      source: 'npm:tesseract.js-core@7.0.0/LICENSE',
     },
     {
       path: APPROVED_TESSERACT_LICENSE_PATHS[3],
+      role: 'license',
+      source: 'npm:tesseract.js@7.0.0/LICENSE.md',
+    },
+    {
+      path: APPROVED_TESSERACT_LICENSE_PATHS[4],
       role: 'license',
       source: 'npm:tesseract.js@7.0.0/dist/worker.min.js.LICENSE.txt',
     },

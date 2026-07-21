@@ -20,6 +20,7 @@ import {
   APPROVED_PERMISSIONS,
   IMPLEMENTED_OCR_PROVIDER_IDS,
   REQUIRED_OCR_RUNTIME_MARKERS,
+  REQUIRED_RELEASE_LEGAL_FILES,
   REQUIRED_ISOLATED_SANDBOX_MARKERS,
   REQUIRED_REPLICA_RUNTIME_MARKERS,
   REQUIRED_UNLISTED_BUNDLES,
@@ -57,9 +58,33 @@ describe('validateArtifact', () => {
     });
     expect(validation.files).toContain('manifest.json');
     expect(validation.files).toContain('assets/popup.css');
-    expect(validation.files).toContain(REQUIRED_UNLISTED_BUNDLES[0]);
-    expect(validation.files).toContain(REQUIRED_UNLISTED_BUNDLES[1]);
+    for (const legalFile of REQUIRED_RELEASE_LEGAL_FILES) {
+      expect(validation.files).toContain(legalFile.artifactPath);
+    }
+    for (const bundle of REQUIRED_UNLISTED_BUNDLES) {
+      expect(validation.files).toContain(bundle);
+    }
   });
+
+  it.each(REQUIRED_RELEASE_LEGAL_FILES)(
+    'rejects a missing or changed $artifactPath',
+    async (legalFile) => {
+      const missingArtifact = await createTemporaryArtifact();
+      await rm(path.join(missingArtifact, legalFile.artifactPath));
+      await expect(validateArtifact(missingArtifact)).rejects.toThrow(
+        /missing required legal file/u,
+      );
+
+      const changedArtifact = await createTemporaryArtifact();
+      await writeFile(
+        path.join(changedArtifact, legalFile.artifactPath),
+        'changed legal text',
+      );
+      await expect(validateArtifact(changedArtifact)).rejects.toThrow(
+        /differs from its reviewed source/u,
+      );
+    },
+  );
 
   it('accepts only the exact packaged Tesseract profile and detects asset drift', async () => {
     const artifact = await createTemporaryOcrArtifact();
@@ -526,7 +551,7 @@ describe('disabled OCR production profile', () => {
     const validation = await validateArtifact(artifact);
 
     expect(validation.ocrEnabled).toBe(false);
-    expect(validation.manifest.version).toBe('0.3.0');
+    expect(validation.manifest.version).toBe('0.3.2');
     expect(validation.manifest.permissions).toEqual(APPROVED_PERMISSIONS);
     expect(validation.manifest).not.toHaveProperty('content_security_policy');
     expect(validation.files).not.toContain('offscreen.html');
@@ -865,6 +890,12 @@ async function createValidArtifact(
     ...manifestOverrides,
   };
   await Promise.all([
+    ...REQUIRED_RELEASE_LEGAL_FILES.map(async (legalFile) =>
+      writeFile(
+        path.join(directory, legalFile.artifactPath),
+        await readFile(legalFile.sourcePath),
+      ),
+    ),
     writeFile(path.join(directory, 'manifest.json'), JSON.stringify(manifest)),
     writeFile(path.join(directory, 'background.js'), 'console.info("background");'),
     writeFile(
@@ -889,6 +920,10 @@ async function createValidArtifact(
     writeFile(
       path.join(directory, REQUIRED_UNLISTED_BUNDLES[1]),
       `console.info(${JSON.stringify(REQUIRED_REPLICA_RUNTIME_MARKERS[2])});`,
+    ),
+    writeFile(
+      path.join(directory, REQUIRED_UNLISTED_BUNDLES[2]),
+      `console.info(${JSON.stringify(REQUIRED_REPLICA_RUNTIME_MARKERS[4])});`,
     ),
   ]);
   return directory;

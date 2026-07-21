@@ -2,7 +2,7 @@
 title: 'Release Candidate Privacy and UX Hardening'
 type: 'feature'
 created: '2026-07-21'
-status: 'in-review'
+status: 'complete'
 review_loop_iteration: 0
 baseline_commit: '28e030147c62f2110ee7aabeafba475bd9f1ae46'
 context:
@@ -56,7 +56,7 @@ context:
 - [x] Translation/OCR memories and tests -- remove exact-document text scoping; prove cross-node reuse, in-flight joins, geometry-safe OCR keys, survival across source refresh, and content-free hit/miss/load diagnostics.
 - [x] `lib/live-page-mirror.ts`, scroll tests -- coalesce standards/body or viewport-scale nested scroll without allowing small controls to drive the replica.
 - [x] `entrypoints/sidepanel/`, `lib/companion-ui-state.ts`, OCR quality/tests -- add mutually exclusive settings/quick panels, toolbar progress, common-first groups, experiments last, hover help, responsive high-contrast themes, and conservative noise rejection.
-- [x] README/docs/context/version/artifact/tests -- order README as problem, Codex 5.6 Sol Ultra plus BMAD skill, installation, challenges/solutions, then details; document source plus compiled artifact, bump version, synchronize, and run gates.
+- [x] README/docs/context/version/artifact/tests -- order README as problem, Codex 5.6 Sol Ultra plus BMAD Method, installation, challenges/solutions, then details; document source plus compiled artifact, bump version, synchronize, and run gates.
 - [x] Full-width toolbar/tests -- replace the floating compact cluster with the approved single-row action order, add direct Auto, language, size, OCR, tab-follow, quick input, settings, and side/popout actions, and preserve responsive/accessibility behavior.
 - [x] OCR overlay/tests -- make translated image text wrap and downscale inside its box; prove resolved same-language work stops before recognition and leaves original pixels unchanged.
 - [x] OpenAI.com fidelity/scroll tests -- diagnose logo sizing, dark background, and scrolling, then apply generic sanitizer/layout/scroll fixes without executing page scripts.
@@ -66,7 +66,7 @@ context:
 - [x] Dark-canvas regression/tests -- propagate and apply source canvas color through the full presentation shell so OpenAI.com does not reveal a white replica background.
 - [x] CSS fidelity audit/tests -- preserve every safely representable CSS channel and local visual reference in cascade order; fix generic losses and document intentional inertness/browser boundaries.
 - [x] Scroll regression/tests -- restore generic document and nested reading-position synchronization across ordinary DOM and open shadow roots without small controls taking ownership.
-- [ ] Re-expanded release integration -- finish the consolidated gate, synchronize and byte-check the ready-to-load artifact, and repeat fresh adversarial review after the human-approved expansion.
+- [x] Re-expanded release integration -- finish the consolidated gate, synchronize and byte-check the ready-to-load artifact, and repeat fresh adversarial review after the human-approved expansion.
 
 **Acceptance Criteria:**
 - Given eligible control text, when it changes, then only current safe text is translated in Isolated HTML and a sensitive transition blanks prior state before acknowledgment.
@@ -106,9 +106,8 @@ limits. Strict Local Mirror and its no-network acceptance suite remain deferred.
 - Focused implementation suites cover toolbar localization/status, exact-content
   caches, OCR safeguards, document/nested/open-shadow scrolling, live canvas
   color propagation, and sanitized same-document CSS fragments.
-- The final consolidated `npm run check`, artifact equality result, and exact
-  test count are intentionally pending the re-expanded release integration;
-  this spec does not reuse an earlier release result.
+- `npm run check` passes with 56 test files and 726 tests; the guarded release
+  build is byte-equal to `dist/chrome-unpacked` and reports version 0.3.2.
 - `git diff --check` is rerun after the final review and artifact synchronization.
 
 **Manual checks:**
