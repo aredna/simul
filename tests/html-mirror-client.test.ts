@@ -10,6 +10,7 @@ import {
   createHtmlMirrorError,
 } from '../lib/replica/html-mirror-protocol';
 import type { ReplicaCaptureRequest } from '../lib/replica/contracts';
+import { createHtmlMirrorRepresentabilityCollector } from '../lib/replica/html-mirror-sanitizer';
 import { createReplicaIdentity } from '../lib/replica/protocol-v2';
 
 afterEach(() => {
@@ -31,7 +32,10 @@ describe('Chrome HTML mirror client', () => {
 
     lease.setObserver(observer);
 
-    expect(observer.onFailure).toHaveBeenCalledWith('stream_failed');
+    expect(observer.onFailure).toHaveBeenCalledWith(
+      'stream_failed',
+      expect.objectContaining({ capacityOmissionCount: 0 }),
+    );
   });
 
   it('queues a recoverable early failure instead of silently dropping it', async () => {
@@ -40,15 +44,43 @@ describe('Chrome HTML mirror client', () => {
     const lease = await openChromeHtmlMirrorStream(request);
     port.emitMessage(checkpoint());
     await lease.initialCheckpoint;
-    port.emitMessage(createHtmlMirrorError(identity, 'stream_overflow'));
+    const representability = createHtmlMirrorRepresentabilityCollector();
+    representability.capacityOmissionCount = 1;
+    port.emitMessage(createHtmlMirrorError(
+      identity,
+      'stream_overflow',
+      representability,
+    ));
     const observer = fakeObserver();
 
     lease.setObserver(observer);
 
-    expect(observer.onFailure).toHaveBeenCalledWith('stream_overflow');
+    expect(observer.onFailure).toHaveBeenCalledWith(
+      'stream_overflow',
+      expect.objectContaining({ capacityOmissionCount: 1 }),
+    );
     lease.requestCheckpoint(0);
     expect(port.posts.at(-1)).toMatchObject({
       kind: 'simul:html-mirror-v1:checkpoint-request',
+    });
+  });
+
+  it('preserves capacity diagnostics when the initial checkpoint fails', async () => {
+    const port = new FakePort();
+    installBrowser(port);
+    const lease = await openChromeHtmlMirrorStream(request);
+    const representability = createHtmlMirrorRepresentabilityCollector();
+    representability.capacityOmissionCount = 2;
+
+    port.emitMessage(createHtmlMirrorError(
+      identity,
+      'stream_overflow',
+      representability,
+    ));
+
+    await expect(lease.initialCheckpoint).rejects.toMatchObject({
+      code: 'stream_overflow',
+      representability: expect.objectContaining({ capacityOmissionCount: 2 }),
     });
   });
 

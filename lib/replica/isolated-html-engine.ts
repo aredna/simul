@@ -25,6 +25,7 @@ import {
   sanitizeCss,
   type HtmlMirrorElementNode,
   type HtmlMirrorNode,
+  type HtmlMirrorRepresentabilitySummary,
 } from './html-mirror-sanitizer';
 import {
   isSourceActivationRoleValue,
@@ -76,9 +77,32 @@ export interface IsolatedMirrorInfo {
   readonly textOperationCount: number;
   readonly attributeOperationCount: number;
   readonly childrenOperationCount: number;
+  readonly reconcileChildrenOperationCount: number;
   readonly dimensionOperationCount: number;
   readonly replacementNodeCount: number;
   readonly largestReplacementNodeCount: number;
+  readonly retainedNodeCount: number;
+  readonly insertedNodeCount: number;
+  readonly movedNodeCount: number;
+  readonly removedNodeCount: number;
+  readonly fullReplacementFallbackCount: number;
+  readonly reconciliationRejectedCount: number;
+  readonly unsafeElementOmissionCount: number;
+  readonly unsupportedNodeOmissionCount: number;
+  readonly depthBoundaryOmissionCount: number;
+  readonly privateTextRedactionCount: number;
+  readonly strippedActiveAttributeCount: number;
+  readonly strippedUnsafeResourceCount: number;
+  readonly unreadableStyleCount: number;
+  readonly capacityOmissionCount: number;
+  readonly customElementHostCount: number;
+  readonly customElementHostWithoutAccessibleOpenRootCount: number;
+  readonly accessibleOpenShadowRootCount: number;
+  readonly missingReconciliationProofFallbackCount: number;
+  readonly coveredDirtyBranchFallbackCount: number;
+  readonly attributeContextFallbackCount: number;
+  readonly crossParentFallbackCount: number;
+  readonly eventRepresentability: HtmlMirrorRepresentabilitySummary;
   readonly openShadowRootCount: number;
   readonly adoptedStyleCount: number;
   readonly visuallyHiddenCount: number;
@@ -126,6 +150,7 @@ interface HtmlMirrorDomState {
   sequence: number;
   readonly replayLease: number;
   dimensions: HtmlMirrorCheckpoint['payload'];
+  representability: HtmlMirrorRepresentabilitySummary;
   readonly styleReadiness: ReplicaStyleReadiness;
   readonly cleanup: Set<() => void>;
   released: boolean;
@@ -205,10 +230,11 @@ export class IsolatedHtmlReplicaEngine
           request,
           runVersion,
         ),
-        onFailure: (code) => this.#onStreamFailure(
+        onFailure: (code, representability) => this.#onStreamFailure(
           code,
           request,
           runVersion,
+          representability ?? EMPTY_REPRESENTABILITY,
         ),
       });
       // setObserver() synchronously drains anything queued after the initial
@@ -234,7 +260,13 @@ export class IsolatedHtmlReplicaEngine
           ? 'stale_identity'
           : 'replay_failed';
       if (code === 'stale_identity') return this.#skipped(code);
-      this.options.onInfo?.(emptyInfo('failed', code));
+      this.options.onInfo?.(emptyInfo(
+        'failed',
+        code,
+        error instanceof HtmlMirrorClientError
+          ? error.representability
+          : EMPTY_REPRESENTABILITY,
+      ));
       return this.#failed(code);
     }
   }
@@ -420,6 +452,7 @@ export class IsolatedHtmlReplicaEngine
         sequence: checkpoint.identity.sequence,
         replayLease,
         dimensions: checkpoint.payload,
+        representability: checkpoint.payload.representability,
         styleReadiness,
         cleanup: new Set(),
         released: false,
@@ -491,20 +524,46 @@ export class IsolatedHtmlReplicaEngine
       batch.firstSequence !== state.sequence + 1 ||
       batch.lastSequence !== batch.firstSequence
     ) {
-      this.#requestRecovery('stream_gap');
+      this.#requestRecovery(
+        'stream_gap',
+        EMPTY_PATCH_METRICS,
+        batch.representability,
+      );
       return;
     }
-    const patchMetrics = readPatchMetrics(state, batch.operations);
-    const changes = applyPatchBatch(state, batch.operations);
-    if (!changes) {
-      this.#requestRecovery('privacy_rejected');
+    const replacementMetrics = readPatchMetrics(state, batch.operations);
+    const applied = applyPatchBatch(state, batch.operations);
+    if (!applied) {
+      const reconciliationRejected = batch.operations.some(
+        ({ kind }) => kind === 'reconcile-children',
+      );
+      this.#requestRecovery(
+        reconciliationRejected ? 'stream_gap' : 'privacy_rejected',
+        Object.freeze({
+          ...replacementMetrics,
+          reconciliationRejectedCount: reconciliationRejected ? 1 : 0,
+        }),
+        batch.representability,
+      );
       return;
     }
+    const patchMetrics = Object.freeze({
+      ...replacementMetrics,
+      retainedNodeCount: applied.retainedNodeCount,
+      insertedNodeCount: applied.insertedNodeCount,
+      movedNodeCount: applied.movedNodeCount,
+      removedNodeCount: applied.removedNodeCount,
+    });
     state.sequence = batch.lastSequence;
     stream.acknowledge(state.sequence);
     this.options.presentationHost.refreshDimensions?.(state.iframe, state.dimensions);
     this.options.presentationHost.markLive(state.iframe);
-    this.#notifySourceCommit(state, 'batch', changes, changesDocumentLanguage(batch));
+    this.#notifySourceCommit(
+      state,
+      'batch',
+      applied.changes,
+      changesDocumentLanguage(batch),
+    );
     this.options.onLiveApplied?.();
     this.#refreshExtent(state);
     this.options.onInfo?.(stateInfo(
@@ -513,6 +572,7 @@ export class IsolatedHtmlReplicaEngine
       batch.operations.length,
       undefined,
       patchMetrics,
+      batch.representability,
     ));
   }
 
@@ -567,16 +627,22 @@ export class IsolatedHtmlReplicaEngine
     code: Extract<ReplicaDiagnosticCode, 'stream_gap' | 'stream_overflow' | 'stream_failed' | 'privacy_rejected'>,
     request: ReplicaCaptureRequest,
     runVersion: number,
+    representability: HtmlMirrorRepresentabilitySummary,
   ): void {
     if (!this.#isCurrent(runVersion, request)) return;
     if (code === 'stream_failed') {
-      this.#failLive(code);
+      this.#failLive(code, representability);
     } else {
-      this.#requestRecovery(code);
+      this.#requestRecovery(code, EMPTY_PATCH_METRICS, representability);
     }
   }
 
-  #requestRecovery(code: ReplicaDiagnosticCode): void {
+  #requestRecovery(
+    code: ReplicaDiagnosticCode,
+    metrics: IsolatedMirrorPatchMetrics = EMPTY_PATCH_METRICS,
+    eventRepresentability: HtmlMirrorRepresentabilitySummary =
+      EMPTY_REPRESENTABILITY,
+  ): void {
     const state = this.#committed;
     if (this.#recoveryRequested) return;
     if (!state || !this.#stream) {
@@ -596,16 +662,34 @@ export class IsolatedHtmlReplicaEngine
       );
       this.#failLive('stream_failed');
     }, HTML_MIRROR_RECOVERY_TIMEOUT_MS);
-    this.options.onInfo?.(stateInfo('recovery', state, 0));
+    this.options.onInfo?.(stateInfo(
+      'recovery',
+      state,
+      0,
+      code,
+      metrics,
+      eventRepresentability,
+    ));
     this.#stream.requestCheckpoint(state.sequence);
   }
 
-  #failLive(code: ReplicaDiagnosticCode): void {
+  #failLive(
+    code: ReplicaDiagnosticCode,
+    eventRepresentability: HtmlMirrorRepresentabilitySummary =
+      EMPTY_REPRESENTABILITY,
+  ): void {
     const state = this.#committed;
     this.options.onInfo?.(
       state && !state.released
-        ? stateInfo('failed', state, 0, code)
-        : emptyInfo('failed', code),
+        ? stateInfo(
+            'failed',
+            state,
+            0,
+            code,
+            EMPTY_PATCH_METRICS,
+            eventRepresentability,
+          )
+        : emptyInfo('failed', code, eventRepresentability),
     );
     this.#releaseStream();
     this.options.onLiveFailure?.(code);
@@ -931,18 +1015,42 @@ function buildRecords(
   return records;
 }
 
+interface AppliedPatchBatch {
+  readonly changes: readonly ReplicaSourceTextChange[];
+  readonly retainedNodeCount: number;
+  readonly insertedNodeCount: number;
+  readonly movedNodeCount: number;
+  readonly removedNodeCount: number;
+}
+
 function applyPatchBatch(
   state: HtmlMirrorDomState,
   operations: readonly HtmlMirrorPatchOperation[],
-): readonly ReplicaSourceTextChange[] | undefined {
+): AppliedPatchBatch | undefined {
+  type StructuralOperation = Extract<
+    HtmlMirrorPatchOperation,
+    { kind: 'children' | 'reconcile-children' }
+  >;
   interface ChildrenPlan {
-    readonly operation: Extract<HtmlMirrorPatchOperation, { kind: 'children' }>;
+    readonly operation: Extract<StructuralOperation, { kind: 'children' }>;
     readonly target: Node;
     readonly oldChildren: readonly Node[];
     readonly fragment: DocumentFragment;
     readonly nodes: Map<number, Node>;
     readonly textMetadata: Map<number, Extract<HtmlMirrorNode, { kind: 'text' }>>;
     readonly ownedAdoptedStyles: Set<HTMLStyleElement>;
+  }
+  interface ReconcilePlan {
+    readonly operation: Extract<StructuralOperation, { kind: 'reconcile-children' }>;
+    readonly target: Node;
+    readonly oldChildren: readonly Node[];
+    readonly desiredChildren: readonly Node[];
+    readonly retainedChildren: ReadonlySet<Node>;
+    readonly stableRetainedChildren: ReadonlySet<Node>;
+    readonly nodes: Map<number, Node>;
+    readonly textMetadata: Map<number, Extract<HtmlMirrorNode, { kind: 'text' }>>;
+    readonly ownedAdoptedStyles: Set<HTMLStyleElement>;
+    readonly insertedNodeCount: number;
   }
 
   const targetOperations: Array<{
@@ -1006,10 +1114,15 @@ function applyPatchBatch(
       attributeOperations.set(operation.nodeId, operation);
       continue;
     }
-    if (
-      target.nodeType !== Node.ELEMENT_NODE &&
-      target.nodeType !== Node.DOCUMENT_FRAGMENT_NODE
-    ) return undefined;
+    if (operation.kind === 'children' || operation.kind === 'reconcile-children') {
+      if (
+        target.nodeType !== Node.ELEMENT_NODE &&
+        target.nodeType !== Node.DOCUMENT_FRAGMENT_NODE
+      ) return undefined;
+      if (!isConnectedReplicaNode(state, target)) return undefined;
+      continue;
+    }
+    return undefined;
   }
 
   // A parent replacement and a descendant operation cannot be made atomic:
@@ -1021,24 +1134,46 @@ function applyPatchBatch(
       const second = targetOperations[right]!;
       if (first.target === second.target) continue;
       if (
-        (first.operation.kind === 'children' || second.operation.kind === 'children') &&
+        (
+          first.operation.kind === 'children' ||
+          first.operation.kind === 'reconcile-children' ||
+          second.operation.kind === 'children' ||
+          second.operation.kind === 'reconcile-children'
+        ) &&
         (containsComposed(first.target, second.target) ||
           containsComposed(second.target, first.target))
       ) return undefined;
     }
   }
 
+  const structuralOperations = operations.filter(
+    (operation): operation is StructuralOperation =>
+      operation.kind === 'children' || operation.kind === 'reconcile-children',
+  );
+  if (
+    structuralOperations.some(({ kind }) => kind === 'children') &&
+    structuralOperations.some(({ kind }) => kind === 'reconcile-children')
+  ) return undefined;
+
   const removedIds = new Set<number>();
-  const childrenOperations = operations.filter(
-    (operation): operation is Extract<HtmlMirrorPatchOperation, { kind: 'children' }> =>
+  const childrenOperations = structuralOperations.filter(
+    (operation): operation is Extract<StructuralOperation, { kind: 'children' }> =>
       operation.kind === 'children',
   );
+  const reconcileOperations = structuralOperations.filter(
+    (operation): operation is Extract<
+      StructuralOperation,
+      { kind: 'reconcile-children' }
+    > => operation.kind === 'reconcile-children',
+  );
   const oldChildren = new Map<number, readonly Node[]>();
-  for (const operation of childrenOperations) {
+  for (const operation of structuralOperations) {
     const target = state.nodes.get(operation.nodeId) as Node;
     const mirrored = [...target.childNodes].filter((child) => hasDomId(state, child));
     oldChildren.set(operation.nodeId, mirrored);
-    for (const child of mirrored) collectDomIds(state, child, removedIds);
+    if (operation.kind === 'children') {
+      for (const child of mirrored) collectDomIds(state, child, removedIds);
+    }
   }
 
   const incomingIds = new Set<number>();
@@ -1053,7 +1188,38 @@ function applyPatchBatch(
     if (state.nodes.has(id) && !removedIds.has(id)) return undefined;
   }
 
+  const retainedIds = new Set<number>();
+  const reconcileGraphIds = new Set<number>();
+  for (const operation of reconcileOperations) {
+    const target = state.nodes.get(operation.nodeId) as Node;
+    const directChildren = new Set(oldChildren.get(operation.nodeId) ?? []);
+    for (const entry of operation.children) {
+      if (entry.kind === 'retain') {
+        const retained = state.nodes.get(entry.nodeId);
+        if (
+          !retained || retainedIds.has(entry.nodeId) ||
+          reconcileGraphIds.has(entry.nodeId) ||
+          retained.parentNode !== target || !directChildren.has(retained) ||
+          retained.ownerDocument !== target.ownerDocument ||
+          !isConnectedReplicaNode(state, retained)
+        ) return undefined;
+        retainedIds.add(entry.nodeId);
+        continue;
+      }
+      if (
+        !collectGraphIds(entry.node, reconcileGraphIds) ||
+        containsDocumentElement(entry.node)
+      ) {
+        return undefined;
+      }
+    }
+  }
+  for (const id of reconcileGraphIds) {
+    if (state.nodes.has(id) || retainedIds.has(id)) return undefined;
+  }
+
   const childrenPlans: ChildrenPlan[] = [];
+  const reconcilePlans: ReconcilePlan[] = [];
   try {
     for (const operation of childrenOperations) {
       const target = state.nodes.get(operation.nodeId) as Node;
@@ -1093,12 +1259,83 @@ function applyPatchBatch(
         ownedAdoptedStyles,
       });
     }
+    for (const operation of reconcileOperations) {
+      const target = state.nodes.get(operation.nodeId) as Node;
+      const context = containerContext(target);
+      const ownerDocument = target.ownerDocument;
+      if (!ownerDocument) return undefined;
+      const nodes = new Map<number, Node>();
+      const textMetadata = new Map<
+        number,
+        Extract<HtmlMirrorNode, { kind: 'text' }>
+      >();
+      const ownedAdoptedStyles = new Set<HTMLStyleElement>();
+      const retainedChildren = new Set<Node>();
+      const desiredChildren: Node[] = [];
+      let insertedNodeCount = 0;
+      for (const entry of operation.children) {
+        if (entry.kind === 'retain') {
+          const retained = state.nodes.get(entry.nodeId);
+          if (!retained) return undefined;
+          retainedChildren.add(retained);
+          desiredChildren.push(retained);
+          continue;
+        }
+        if (!validGraphForContext(entry.node, context)) return undefined;
+        const built = buildNode(
+          ownerDocument,
+          entry.node,
+          nodes,
+          textMetadata,
+          ownedAdoptedStyles,
+        );
+        if (!built) return undefined;
+        insertedNodeCount += htmlMirrorGraphNodeCount(entry.node);
+        desiredChildren.push(built);
+      }
+      reconcilePlans.push({
+        operation,
+        target,
+        oldChildren: oldChildren.get(operation.nodeId) ?? [],
+        desiredChildren: Object.freeze(desiredChildren),
+        retainedChildren,
+        stableRetainedChildren: stableRetainedChildSet(
+          oldChildren.get(operation.nodeId) ?? [],
+          desiredChildren,
+          retainedChildren,
+        ),
+        nodes,
+        textMetadata,
+        ownedAdoptedStyles,
+        insertedNodeCount,
+      });
+    }
   } catch {
     return undefined;
   }
 
   const previous = new Map(state.records);
   const forceUpserts = new Set<number>();
+  const rollback = capturePatchRollback(state, targetOperations);
+  const knownBeforeBatch = new Set(rollback.nodes.values());
+  let retainedNodeCount = 0;
+  let insertedNodeCount = 0;
+  let movedNodeCount = 0;
+  let removedNodeCount = 0;
+  for (const plan of childrenPlans) {
+    for (const child of plan.oldChildren) {
+      removedNodeCount += domMirrorNodeCount(child, knownBeforeBatch);
+    }
+  }
+  for (const plan of reconcilePlans) {
+    for (const child of plan.oldChildren) {
+      if (plan.retainedChildren.has(child)) {
+        retainedNodeCount += domMirrorNodeCount(child, knownBeforeBatch);
+      } else {
+        removedNodeCount += domMirrorNodeCount(child, knownBeforeBatch);
+      }
+    }
+  }
   try {
     for (const operation of operations) {
       if (operation.kind === 'dimensions') {
@@ -1127,54 +1364,231 @@ function applyPatchBatch(
         applyElementHints(target as Element, operation);
         continue;
       }
-      const plan = childrenPlans.find(
+      if (operation.kind === 'children') {
+        const plan = childrenPlans.find(
+          ({ operation: candidate }) => candidate === operation,
+        );
+        if (!plan) throw new Error('Missing children replacement plan.');
+        const retainedAdoptedStyles = [...state.ownedAdoptedStyles].filter(
+          (style) => style.parentNode === plan.target,
+        );
+        for (const child of plan.oldChildren) {
+          removeDomTree(state, child);
+          child.parentNode?.removeChild(child);
+        }
+        plan.target.appendChild(plan.fragment);
+        for (const style of retainedAdoptedStyles) plan.target.appendChild(style);
+        for (const style of plan.ownedAdoptedStyles) {
+          state.ownedAdoptedStyles.add(style);
+        }
+        for (const [id, node] of plan.nodes) state.nodes.set(id, node);
+        for (const [id, node] of plan.textMetadata) state.textMetadata.set(id, node);
+        for (const child of operation.children) {
+          insertedNodeCount += htmlMirrorGraphNodeCount(child);
+          collectTranslatableIds(child, forceUpserts);
+        }
+        continue;
+      }
+      const plan = reconcilePlans.find(
         ({ operation: candidate }) => candidate === operation,
       );
-      if (!plan) return undefined;
-      const retainedAdoptedStyles = [...state.ownedAdoptedStyles].filter(
-        (style) => style.parentNode === plan.target,
-      );
+      if (!plan) throw new Error('Missing children reconciliation plan.');
       for (const child of plan.oldChildren) {
+        if (plan.retainedChildren.has(child)) continue;
         removeDomTree(state, child);
         child.parentNode?.removeChild(child);
-      }
-      plan.target.appendChild(plan.fragment);
-      for (const style of retainedAdoptedStyles) {
-        plan.target.appendChild(style);
       }
       for (const style of plan.ownedAdoptedStyles) {
         state.ownedAdoptedStyles.add(style);
       }
       for (const [id, node] of plan.nodes) state.nodes.set(id, node);
-      for (const [id, node] of plan.textMetadata) {
-        state.textMetadata.set(id, node);
+      for (const [id, node] of plan.textMetadata) state.textMetadata.set(id, node);
+      insertedNodeCount += plan.insertedNodeCount;
+      let anchor: ChildNode | null = [...plan.target.childNodes].find(
+        (child) => state.ownedAdoptedStyles.has(child as HTMLStyleElement),
+      ) ?? null;
+      for (let index = plan.desiredChildren.length - 1; index >= 0; index -= 1) {
+        const child = plan.desiredChildren[index]!;
+        if (
+          !plan.stableRetainedChildren.has(child) &&
+          (child.parentNode !== plan.target || child.nextSibling !== anchor)
+        ) {
+          if (plan.retainedChildren.has(child)) movedNodeCount += 1;
+          plan.target.insertBefore(child, anchor);
+        }
+        anchor = child as ChildNode;
       }
-      for (const child of operation.children) collectTranslatableIds(child, forceUpserts);
+      for (const entry of operation.children) {
+        if (entry.kind === 'graph') collectTranslatableIds(entry.node, forceUpserts);
+      }
     }
+    const next = buildRecords(
+      state.document,
+      state.textMetadata,
+      state.revisions,
+      previous,
+    );
+    (state as { records: Map<number, ReplicaSourceTextRecord> }).records = next;
+    const changes: ReplicaSourceTextChange[] = [];
+    for (const old of previous.values()) {
+      if (next.has(old.nodeId)) continue;
+      const revision = nextRevision(state.revisions, old.nodeId);
+      state.revisions.set(old.nodeId, revision);
+      changes.push(Object.freeze({
+        kind: 'remove',
+        document: state.document,
+        nodeId: old.nodeId,
+        revision,
+      }));
+    }
+    for (const record of next.values()) {
+      const old = previous.get(record.nodeId);
+      if (!old || old.source !== record.source || forceUpserts.has(record.nodeId)) {
+        changes.push(Object.freeze({ kind: 'upsert', record }));
+      }
+    }
+    return Object.freeze({
+      changes: Object.freeze(changes),
+      retainedNodeCount,
+      insertedNodeCount,
+      movedNodeCount,
+      removedNodeCount,
+    });
   } catch {
+    restorePatchRollback(state, rollback);
     return undefined;
   }
-  const next = buildRecords(state.document, state.textMetadata, state.revisions, previous);
-  (state as { records: Map<number, ReplicaSourceTextRecord> }).records = next;
-  const changes: ReplicaSourceTextChange[] = [];
-  for (const old of previous.values()) {
-    if (next.has(old.nodeId)) continue;
-    const revision = nextRevision(state.revisions, old.nodeId);
-    state.revisions.set(old.nodeId, revision);
-    changes.push(Object.freeze({
-      kind: 'remove',
-      document: state.document,
-      nodeId: old.nodeId,
-      revision,
-    }));
-  }
-  for (const record of next.values()) {
-    const old = previous.get(record.nodeId);
-    if (!old || old.source !== record.source || forceUpserts.has(record.nodeId)) {
-      changes.push(Object.freeze({ kind: 'upsert', record }));
+}
+
+interface PatchRollbackSnapshot {
+  readonly dimensions: HtmlMirrorCheckpoint['payload'];
+  readonly nodes: Map<number, Node>;
+  readonly textMetadata: Map<number, Extract<HtmlMirrorNode, { kind: 'text' }>>;
+  readonly records: Map<number, ReplicaSourceTextRecord>;
+  readonly revisions: Map<number, number>;
+  readonly ownedAdoptedStyles: Set<HTMLStyleElement>;
+  readonly childLists: ReadonlyMap<Node, readonly Node[]>;
+  readonly attributes: ReadonlyMap<Element, readonly (readonly [string, string])[]>;
+  readonly textValues: ReadonlyMap<Node, string | null>;
+}
+
+function capturePatchRollback(
+  state: HtmlMirrorDomState,
+  targets: readonly {
+    readonly operation: Exclude<HtmlMirrorPatchOperation, { kind: 'dimensions' }>;
+    readonly target: Node;
+  }[],
+): PatchRollbackSnapshot {
+  const childLists = new Map<Node, readonly Node[]>();
+  const attributes = new Map<Element, readonly (readonly [string, string])[]>();
+  const textValues = new Map<Node, string | null>();
+  for (const { operation, target } of targets) {
+    if (operation.kind === 'children' || operation.kind === 'reconcile-children') {
+      childLists.set(target, Object.freeze([...target.childNodes]));
+    } else if (operation.kind === 'attributes') {
+      attributes.set(
+        target as Element,
+        Object.freeze([...((target as Element).attributes)].map(
+          ({ name, value }) => Object.freeze([name, value] as const),
+        )),
+      );
+    } else if (operation.kind === 'text') {
+      textValues.set(target, target.nodeValue);
     }
   }
-  return Object.freeze(changes);
+  return {
+    dimensions: state.dimensions,
+    nodes: new Map(state.nodes),
+    textMetadata: new Map(state.textMetadata),
+    records: new Map(state.records),
+    revisions: new Map(state.revisions),
+    ownedAdoptedStyles: new Set(state.ownedAdoptedStyles),
+    childLists,
+    attributes,
+    textValues,
+  };
+}
+
+function restorePatchRollback(
+  state: HtmlMirrorDomState,
+  snapshot: PatchRollbackSnapshot,
+): void {
+  for (const [target, children] of snapshot.childLists) {
+    restoreChildList(target as ParentNode, children);
+  }
+  for (const [target, attributes] of snapshot.attributes) {
+    restoreAttributeList(target, attributes);
+  }
+  for (const [target, value] of snapshot.textValues) {
+    try {
+      target.nodeValue = value;
+    } catch {
+      // Continue restoring every independent target before recovery.
+    }
+  }
+  state.dimensions = snapshot.dimensions;
+  restoreMap(state.nodes, snapshot.nodes);
+  restoreMap(state.textMetadata, snapshot.textMetadata);
+  restoreMap(state.revisions, snapshot.revisions);
+  restoreSet(state.ownedAdoptedStyles, snapshot.ownedAdoptedStyles);
+  (state as { records: Map<number, ReplicaSourceTextRecord> }).records =
+    new Map(snapshot.records);
+}
+
+function restoreChildList(target: ParentNode, children: readonly Node[]): void {
+  try {
+    target.replaceChildren(...children);
+    return;
+  } catch {
+    // Fall through to primitive operations so a host-level replaceChildren
+    // failure cannot prevent restoration of this or later independent targets.
+  }
+  try {
+    for (const child of [...target.childNodes]) target.removeChild(child);
+    for (const child of children) target.appendChild(child);
+  } catch {
+    // A recovery checkpoint remains authoritative if the host DOM refuses
+    // both restoration strategies.
+  }
+}
+
+function restoreAttributeList(
+  target: Element,
+  attributes: readonly (readonly [string, string])[],
+): void {
+  try {
+    setAttributes(target, attributes);
+    return;
+  } catch {
+    // Try every primitive independently before allowing checkpoint recovery.
+  }
+  for (const attribute of [...target.attributes]) {
+    try {
+      target.removeAttribute(attribute.name);
+    } catch {
+      // Continue with remaining attributes and targets.
+    }
+  }
+  for (const [name, value] of attributes) {
+    try {
+      target.setAttribute(name, value);
+    } catch {
+      // Continue with remaining attributes and targets.
+    }
+  }
+}
+
+function restoreMap<Key, Value>(
+  target: Map<Key, Value>,
+  source: ReadonlyMap<Key, Value>,
+): void {
+  target.clear();
+  for (const [key, value] of source) target.set(key, value);
+}
+
+function restoreSet<Value>(target: Set<Value>, source: ReadonlySet<Value>): void {
+  target.clear();
+  for (const value of source) target.add(value);
 }
 
 function removeDomTree(state: HtmlMirrorDomState, node: Node): void {
@@ -1225,6 +1639,69 @@ function hasDomId(state: HtmlMirrorDomState, node: Node): boolean {
     if (candidate === node) return true;
   }
   return false;
+}
+
+function isConnectedReplicaNode(state: HtmlMirrorDomState, node: Node): boolean {
+  if (node.ownerDocument !== state.iframe.contentDocument) return false;
+  let current = node;
+  for (let depth = 0; depth <= 64; depth += 1) {
+    if (current.isConnected) return true;
+    const root = current.nodeType === Node.DOCUMENT_FRAGMENT_NODE &&
+      'host' in current
+      ? current as ShadowRoot
+      : current.getRootNode();
+    if (root.nodeType !== Node.DOCUMENT_FRAGMENT_NODE || !('host' in root)) {
+      return false;
+    }
+    const shadow = root as ShadowRoot;
+    if (shadow.host.shadowRoot !== shadow) return false;
+    current = shadow.host;
+  }
+  return false;
+}
+
+function stableRetainedChildSet(
+  oldChildren: readonly Node[],
+  desiredChildren: readonly Node[],
+  retainedChildren: ReadonlySet<Node>,
+): ReadonlySet<Node> {
+  const oldIndices = new Map<Node, number>();
+  oldChildren.forEach((child, index) => oldIndices.set(child, index));
+  const desiredRetained: Node[] = [];
+  const oldOrder: number[] = [];
+  for (const child of desiredChildren) {
+    if (!retainedChildren.has(child)) continue;
+    const oldIndex = oldIndices.get(child);
+    if (oldIndex === undefined) continue;
+    desiredRetained.push(child);
+    oldOrder.push(oldIndex);
+  }
+  if (oldOrder.length === 0) return new Set();
+
+  const predecessors = new Array<number>(oldOrder.length).fill(-1);
+  const tailPositions: number[] = [];
+  for (let index = 0; index < oldOrder.length; index += 1) {
+    let low = 0;
+    let high = tailPositions.length;
+    while (low < high) {
+      const middle = (low + high) >>> 1;
+      if (oldOrder[tailPositions[middle]!]! < oldOrder[index]!) {
+        low = middle + 1;
+      } else {
+        high = middle;
+      }
+    }
+    if (low > 0) predecessors[index] = tailPositions[low - 1]!;
+    tailPositions[low] = index;
+  }
+
+  const stable = new Set<Node>();
+  let position = tailPositions.at(-1) ?? -1;
+  while (position >= 0) {
+    stable.add(desiredRetained[position]!);
+    position = predecessors[position]!;
+  }
+  return stable;
 }
 
 function composedParentElement(node: Node): Element | undefined {
@@ -1748,6 +2225,8 @@ function stateInfo(
   operationCount: number,
   code?: ReplicaDiagnosticCode,
   metrics: IsolatedMirrorPatchMetrics = EMPTY_PATCH_METRICS,
+  eventRepresentability: HtmlMirrorRepresentabilitySummary =
+    state.representability,
 ): IsolatedMirrorInfo {
   let imageCount = 0;
   let openShadowRootCount = 0;
@@ -1779,6 +2258,8 @@ function stateInfo(
     imageCount,
     operationCount,
     ...metrics,
+    ...state.representability,
+    eventRepresentability,
     openShadowRootCount,
     adoptedStyleCount: state.ownedAdoptedStyles.size,
     visuallyHiddenCount,
@@ -1791,6 +2272,8 @@ function stateInfo(
 function emptyInfo(
   stage: IsolatedMirrorInfoStage,
   code?: ReplicaDiagnosticCode,
+  eventRepresentability: HtmlMirrorRepresentabilitySummary =
+    EMPTY_REPRESENTABILITY,
 ): IsolatedMirrorInfo {
   return Object.freeze({
     stage,
@@ -1800,6 +2283,8 @@ function emptyInfo(
     imageCount: 0,
     operationCount: 0,
     ...EMPTY_PATCH_METRICS,
+    ...EMPTY_REPRESENTABILITY,
+    eventRepresentability,
     openShadowRootCount: 0,
     adoptedStyleCount: 0,
     visuallyHiddenCount: 0,
@@ -1816,22 +2301,54 @@ const EMPTY_STYLE_READINESS: ReplicaStyleReadiness = Object.freeze({
   stylesheetTimedOutCount: 0,
 });
 
+const EMPTY_REPRESENTABILITY: HtmlMirrorRepresentabilitySummary = Object.freeze({
+  unsafeElementOmissionCount: 0,
+  unsupportedNodeOmissionCount: 0,
+  depthBoundaryOmissionCount: 0,
+  privateTextRedactionCount: 0,
+  strippedActiveAttributeCount: 0,
+  strippedUnsafeResourceCount: 0,
+  unreadableStyleCount: 0,
+  capacityOmissionCount: 0,
+  customElementHostCount: 0,
+  customElementHostWithoutAccessibleOpenRootCount: 0,
+  accessibleOpenShadowRootCount: 0,
+  missingReconciliationProofFallbackCount: 0,
+  coveredDirtyBranchFallbackCount: 0,
+  attributeContextFallbackCount: 0,
+  crossParentFallbackCount: 0,
+});
+
 interface IsolatedMirrorPatchMetrics {
   readonly textOperationCount: number;
   readonly attributeOperationCount: number;
   readonly childrenOperationCount: number;
+  readonly reconcileChildrenOperationCount: number;
   readonly dimensionOperationCount: number;
   readonly replacementNodeCount: number;
   readonly largestReplacementNodeCount: number;
+  readonly retainedNodeCount: number;
+  readonly insertedNodeCount: number;
+  readonly movedNodeCount: number;
+  readonly removedNodeCount: number;
+  readonly fullReplacementFallbackCount: number;
+  readonly reconciliationRejectedCount: number;
 }
 
 const EMPTY_PATCH_METRICS: IsolatedMirrorPatchMetrics = Object.freeze({
   textOperationCount: 0,
   attributeOperationCount: 0,
   childrenOperationCount: 0,
+  reconcileChildrenOperationCount: 0,
   dimensionOperationCount: 0,
   replacementNodeCount: 0,
   largestReplacementNodeCount: 0,
+  retainedNodeCount: 0,
+  insertedNodeCount: 0,
+  movedNodeCount: 0,
+  removedNodeCount: 0,
+  fullReplacementFallbackCount: 0,
+  reconciliationRejectedCount: 0,
 });
 
 function readPatchMetrics(
@@ -1841,6 +2358,7 @@ function readPatchMetrics(
   let textOperationCount = 0;
   let attributeOperationCount = 0;
   let childrenOperationCount = 0;
+  let reconcileChildrenOperationCount = 0;
   let dimensionOperationCount = 0;
   let replacementNodeCount = 0;
   let largestReplacementNodeCount = 0;
@@ -1849,7 +2367,7 @@ function readPatchMetrics(
     if (operation.kind === 'text') textOperationCount += 1;
     else if (operation.kind === 'attributes') attributeOperationCount += 1;
     else if (operation.kind === 'dimensions') dimensionOperationCount += 1;
-    else {
+    else if (operation.kind === 'children') {
       childrenOperationCount += 1;
       const incomingCount = operation.children.reduce(
         (total, child) => total + htmlMirrorGraphNodeCount(child),
@@ -1868,15 +2386,24 @@ function readPatchMetrics(
         largestReplacementNodeCount,
         count,
       );
+    } else {
+      reconcileChildrenOperationCount += 1;
     }
   }
   return Object.freeze({
     textOperationCount,
     attributeOperationCount,
     childrenOperationCount,
+    reconcileChildrenOperationCount,
     dimensionOperationCount,
     replacementNodeCount,
     largestReplacementNodeCount,
+    retainedNodeCount: 0,
+    insertedNodeCount: 0,
+    movedNodeCount: 0,
+    removedNodeCount: 0,
+    fullReplacementFallbackCount: childrenOperationCount,
+    reconciliationRejectedCount: 0,
   });
 }
 

@@ -102,16 +102,19 @@ same-lease anchor-rebinding stages. Logs contain only safe dimensions, counts,
 provider names, outcomes, and cache state—never page text, URLs, pixels,
 hashes, or DOM identifiers. Mirror logs similarly report aggregate shadow-root,
 adopted-style, hidden-label, selected-source, stylesheet outcome, and patch
-replacement counts.
+replacement/reconciliation counts. The latter distinguish retained, inserted,
+moved, and removed nodes and report bounded representability counters without
+text, URLs, tag names, attributes, hashes, or node IDs.
 
 Modern component sites can still depend on page JavaScript to define custom
 elements, toggle `:defined`, populate closed shadow roots, expose
 `ElementInternals` state, or virtualize off-screen rails. Simul deliberately
-does not execute that code in the replica. Whole-parent source patches can
-also recreate many nodes even when the visible change is small; a stable-ID
-insert/remove/move protocol remains separate review work. These constraints
-mean the current release improves representable Reddit content but does not
-claim pixel parity.
+does not execute that code in the replica. Same-parent final-order patches now
+retain receiver-proven direct children and transport graphs only for new nodes.
+Covered descendant edits, privacy changes, cross-parent churn, and ambiguous
+references still take the conservative full-child or checkpoint path. These
+constraints mean the current release improves representable Reddit content but
+does not claim pixel parity.
 
 Useful content-free research for a missing rail or label is whether the source
 element exists, whether its shadow root is open, its adopted stylesheet count,

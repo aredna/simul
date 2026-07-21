@@ -16,10 +16,18 @@ export const MAX_HTML_MIRROR_STRING = 512 * 1024;
 export const MAX_HTML_MIRROR_ATTRIBUTES = 512;
 export const MAX_HTML_MIRROR_ADOPTED_STYLE_SHEETS = 4_096;
 export const MAX_HTML_MIRROR_ADOPTED_STYLE_RULES = 100_000;
+export const MAX_HTML_MIRROR_DIAGNOSTIC_COUNT = 1_000_000;
 const MAX_ADOPTED_STYLE_SHEETS_PER_OWNER = 256;
 const MAX_ADOPTED_STYLE_RULES_PER_OWNER = 20_000;
 const MAX_ADOPTED_STYLE_CHARACTERS_PER_OWNER = MAX_HTML_MIRROR_STRING;
 const MAX_BROKEN_CONTROL_ICON_EDGE = 64;
+
+export class HtmlMirrorCapacityError extends Error {
+  constructor(readonly diagnosticRecorded = false) {
+    super('HTML mirror budget exceeded.');
+    this.name = 'HtmlMirrorCapacityError';
+  }
+}
 
 export type HtmlMirrorNamespace = 'html' | 'svg' | 'mathml';
 
@@ -65,6 +73,108 @@ export interface HtmlMirrorDocumentGraph {
   readonly documentHeight: number;
 }
 
+export interface HtmlMirrorRepresentabilitySummary {
+  readonly unsafeElementOmissionCount: number;
+  readonly unsupportedNodeOmissionCount: number;
+  readonly depthBoundaryOmissionCount: number;
+  readonly privateTextRedactionCount: number;
+  readonly strippedActiveAttributeCount: number;
+  readonly strippedUnsafeResourceCount: number;
+  readonly unreadableStyleCount: number;
+  readonly capacityOmissionCount: number;
+  readonly customElementHostCount: number;
+  readonly customElementHostWithoutAccessibleOpenRootCount: number;
+  readonly accessibleOpenShadowRootCount: number;
+  readonly missingReconciliationProofFallbackCount: number;
+  readonly coveredDirtyBranchFallbackCount: number;
+  readonly attributeContextFallbackCount: number;
+  readonly crossParentFallbackCount: number;
+}
+
+export type HtmlMirrorRepresentabilityCollector = {
+  -readonly [Key in keyof HtmlMirrorRepresentabilitySummary]: number;
+};
+
+export function createHtmlMirrorRepresentabilityCollector():
+  HtmlMirrorRepresentabilityCollector {
+  return {
+    unsafeElementOmissionCount: 0,
+    unsupportedNodeOmissionCount: 0,
+    depthBoundaryOmissionCount: 0,
+    privateTextRedactionCount: 0,
+    strippedActiveAttributeCount: 0,
+    strippedUnsafeResourceCount: 0,
+    unreadableStyleCount: 0,
+    capacityOmissionCount: 0,
+    customElementHostCount: 0,
+    customElementHostWithoutAccessibleOpenRootCount: 0,
+    accessibleOpenShadowRootCount: 0,
+    missingReconciliationProofFallbackCount: 0,
+    coveredDirtyBranchFallbackCount: 0,
+    attributeContextFallbackCount: 0,
+    crossParentFallbackCount: 0,
+  };
+}
+
+export function snapshotHtmlMirrorRepresentability(
+  value: HtmlMirrorRepresentabilitySummary,
+): HtmlMirrorRepresentabilitySummary {
+  return Object.freeze({ ...value });
+}
+
+const HTML_MIRROR_REPRESENTABILITY_KEYS = Object.freeze([
+  'unsafeElementOmissionCount',
+  'unsupportedNodeOmissionCount',
+  'depthBoundaryOmissionCount',
+  'privateTextRedactionCount',
+  'strippedActiveAttributeCount',
+  'strippedUnsafeResourceCount',
+  'unreadableStyleCount',
+  'capacityOmissionCount',
+  'customElementHostCount',
+  'customElementHostWithoutAccessibleOpenRootCount',
+  'accessibleOpenShadowRootCount',
+  'missingReconciliationProofFallbackCount',
+  'coveredDirtyBranchFallbackCount',
+  'attributeContextFallbackCount',
+  'crossParentFallbackCount',
+] as const satisfies readonly (keyof HtmlMirrorRepresentabilitySummary)[]);
+
+export function readHtmlMirrorRepresentability(
+  input: unknown,
+): HtmlMirrorRepresentabilitySummary | undefined {
+  if (!isRecord(input) || !hasExactKeys(input, HTML_MIRROR_REPRESENTABILITY_KEYS)) {
+    return undefined;
+  }
+  for (const key of HTML_MIRROR_REPRESENTABILITY_KEYS) {
+    const value = input[key];
+    if (
+      !Number.isSafeInteger(value) || Number(value) < 0 ||
+      Number(value) > MAX_HTML_MIRROR_DIAGNOSTIC_COUNT
+    ) return undefined;
+  }
+  return Object.freeze({
+    unsafeElementOmissionCount: input.unsafeElementOmissionCount as number,
+    unsupportedNodeOmissionCount: input.unsupportedNodeOmissionCount as number,
+    depthBoundaryOmissionCount: input.depthBoundaryOmissionCount as number,
+    privateTextRedactionCount: input.privateTextRedactionCount as number,
+    strippedActiveAttributeCount: input.strippedActiveAttributeCount as number,
+    strippedUnsafeResourceCount: input.strippedUnsafeResourceCount as number,
+    unreadableStyleCount: input.unreadableStyleCount as number,
+    capacityOmissionCount: input.capacityOmissionCount as number,
+    customElementHostCount: input.customElementHostCount as number,
+    customElementHostWithoutAccessibleOpenRootCount:
+      input.customElementHostWithoutAccessibleOpenRootCount as number,
+    accessibleOpenShadowRootCount: input.accessibleOpenShadowRootCount as number,
+    missingReconciliationProofFallbackCount:
+      input.missingReconciliationProofFallbackCount as number,
+    coveredDirtyBranchFallbackCount:
+      input.coveredDirtyBranchFallbackCount as number,
+    attributeContextFallbackCount: input.attributeContextFallbackCount as number,
+    crossParentFallbackCount: input.crossParentFallbackCount as number,
+  });
+}
+
 export interface HtmlMirrorIdRegistry {
   getId(node: Node): number;
 }
@@ -104,6 +214,7 @@ interface SerializeContext {
   readonly nonContentRegion: boolean;
   readonly styleRegion: boolean;
   readonly depth: number;
+  readonly representability: HtmlMirrorRepresentabilityCollector;
 }
 
 const UNSAFE_ELEMENTS = new Set([
@@ -209,17 +320,20 @@ export function sanitizeSourceAdoptedStyleSheets(
   owner: Document | ShadowRoot,
   baseUrl: string,
   work: HtmlMirrorStyleWorkBudget,
+  representability = createHtmlMirrorRepresentabilityCollector(),
 ): readonly string[] | undefined {
   let sheets: ArrayLike<CSSStyleSheet>;
   try {
     sheets = owner.adoptedStyleSheets;
   } catch {
+    incrementRepresentability(representability, 'unreadableStyleCount');
     return Object.freeze([]);
   }
   let length: number;
   try {
     length = sheets.length;
   } catch {
+    incrementRepresentability(representability, 'unreadableStyleCount');
     return Object.freeze([]);
   }
   if (
@@ -229,6 +343,7 @@ export function sanitizeSourceAdoptedStyleSheets(
     work.sheets + length > work.maxSheets
   ) {
     work.exhausted = true;
+    incrementRepresentability(representability, 'capacityOmissionCount');
     return undefined;
   }
   const result: string[] = [];
@@ -240,9 +355,16 @@ export function sanitizeSourceAdoptedStyleSheets(
     try {
       sheet = sheets[index];
     } catch {
+      incrementRepresentability(representability, 'unreadableStyleCount');
       continue;
     }
     if ((typeof sheet !== 'object' && typeof sheet !== 'function') || !sheet) {
+      continue;
+    }
+    try {
+      if ((sheet as CSSStyleSheet).disabled === true) continue;
+    } catch {
+      incrementRepresentability(representability, 'unreadableStyleCount');
       continue;
     }
     let cached = work.cache.get(sheet);
@@ -251,11 +373,15 @@ export function sanitizeSourceAdoptedStyleSheets(
         sheet as CSSStyleSheet,
         baseUrl,
         work,
+        representability,
       );
       if (work.exhausted) return undefined;
       work.cache.set(sheet, cached ?? null);
     }
-    if (!cached) continue;
+    if (!cached) {
+      incrementRepresentability(representability, 'unreadableStyleCount');
+      continue;
+    }
     if (
       work.rules + cached.ruleCount > work.maxRules ||
       work.characters + cached.cssText.length > work.maxCharacters ||
@@ -265,6 +391,7 @@ export function sanitizeSourceAdoptedStyleSheets(
         MAX_ADOPTED_STYLE_CHARACTERS_PER_OWNER
     ) {
       work.exhausted = true;
+      incrementRepresentability(representability, 'capacityOmissionCount');
       return undefined;
     }
     work.rules += cached.ruleCount;
@@ -283,35 +410,57 @@ export function sanitizeSourceSubtree(
   source: Node,
   registry: HtmlMirrorIdRegistry,
   baseUrl = source.ownerDocument?.baseURI ?? 'about:blank',
+  representability = createHtmlMirrorRepresentabilityCollector(),
 ): HtmlMirrorNode | undefined {
+  return sanitizeSourceSubtrees(
+    [source],
+    registry,
+    baseUrl,
+    representability,
+  )?.[0];
+}
+
+/** Serializes only the supplied roots while sharing one global source budget. */
+export function sanitizeSourceSubtrees(
+  sources: readonly Node[],
+  registry: HtmlMirrorIdRegistry,
+  baseUrl = sources[0]?.ownerDocument?.baseURI ?? 'about:blank',
+  representability = createHtmlMirrorRepresentabilityCollector(),
+  budget = createHtmlMirrorReadBudget(),
+  styleWork = createHtmlMirrorStyleWorkBudget(),
+): readonly (HtmlMirrorNode | undefined)[] | undefined {
   try {
-    const budget = createHtmlMirrorReadBudget();
-    const styleWork = createHtmlMirrorStyleWorkBudget();
-    const sourceElement = nearestElement(source);
-    const inheritedElement = source.nodeType === Node.ELEMENT_NODE && sourceElement
-      ? composedParentElement(sourceElement)
-      : sourceElement;
-    return serializeNode(source, {
-      registry,
-      baseUrl,
-      budget,
-      styleWork,
-      privateRegion: inheritedElement
-        ? hasSourcePrivateElementAncestor(inheritedElement)
-        : false,
-      privateAttributeRegion: inheritedElement
-        ? hasSourcePrivateOrActivationElementAncestor(inheritedElement)
-        : false,
-      activationRegion: inheritedElement
-        ? hasSourceActivationElementAncestor(inheritedElement)
-        : false,
-      nonContentRegion: inheritedElement
-        ? hasNonContentAncestor(inheritedElement)
-        : false,
-      styleRegion: Boolean(sourceElement?.closest('style')),
-      depth: 0,
-    });
-  } catch {
+    return Object.freeze(sources.map((source) => {
+      const sourceElement = nearestElement(source);
+      const inheritedElement = source.nodeType === Node.ELEMENT_NODE && sourceElement
+        ? composedParentElement(sourceElement)
+        : sourceElement;
+      return serializeNode(source, {
+        registry,
+        baseUrl,
+        budget,
+        styleWork,
+        privateRegion: inheritedElement
+          ? hasSourcePrivateElementAncestor(inheritedElement)
+          : false,
+        privateAttributeRegion: inheritedElement
+          ? hasSourcePrivateOrActivationElementAncestor(inheritedElement)
+          : false,
+        activationRegion: inheritedElement
+          ? hasSourceActivationElementAncestor(inheritedElement)
+          : false,
+        nonContentRegion: inheritedElement
+          ? hasNonContentAncestor(inheritedElement)
+          : false,
+        styleRegion: Boolean(sourceElement?.closest('style')),
+        depth: 0,
+        representability,
+      });
+    }));
+  } catch (error) {
+    if (error instanceof HtmlMirrorCapacityError && !error.diagnosticRecorded) {
+      incrementRepresentability(representability, 'capacityOmissionCount');
+    }
     return undefined;
   }
 }
@@ -320,6 +469,7 @@ export function sanitizeSourceChildren(
   source: Node,
   registry: HtmlMirrorIdRegistry,
   baseUrl = source.ownerDocument?.baseURI ?? 'about:blank',
+  representability = createHtmlMirrorRepresentabilityCollector(),
 ): readonly HtmlMirrorNode[] | undefined {
   try {
     const budget = createHtmlMirrorReadBudget();
@@ -351,11 +501,15 @@ export function sanitizeSourceChildren(
         nonContentRegion,
         styleRegion,
         depth: 0,
+        representability,
       });
       if (serialized) result.push(serialized);
     }
     return Object.freeze(result);
-  } catch {
+  } catch (error) {
+    if (error instanceof HtmlMirrorCapacityError && !error.diagnosticRecorded) {
+      incrementRepresentability(representability, 'capacityOmissionCount');
+    }
     return undefined;
   }
 }
@@ -363,6 +517,7 @@ export function sanitizeSourceChildren(
 export function sanitizeSourceAttributes(
   source: Element,
   baseUrl = source.ownerDocument?.baseURI ?? 'about:blank',
+  representability = createHtmlMirrorRepresentabilityCollector(),
 ): readonly (readonly [string, string])[] | undefined {
   try {
     return sanitizeAttributes(
@@ -371,6 +526,7 @@ export function sanitizeSourceAttributes(
       hasSourcePrivateElementAncestor(source),
       hasSourceActivationElementAncestor(source),
       baseUrl,
+      representability,
     );
   } catch {
     return undefined;
@@ -397,6 +553,7 @@ export function sanitizeSourceDocument(
   sourceDocument: Document,
   sourceWindow: Window,
   registry: HtmlMirrorIdRegistry,
+  representability = createHtmlMirrorRepresentabilityCollector(),
 ): HtmlMirrorDocumentGraph | undefined {
   const documentElement = sourceDocument.documentElement;
   if (!documentElement) return undefined;
@@ -413,6 +570,7 @@ export function sanitizeSourceDocument(
     nonContentRegion: false,
     styleRegion: false,
     depth: 0,
+    representability,
   });
   if (!root || root.kind !== 'element' || root.tagName !== 'html') return undefined;
   const adoptedStyleSheets = captureAdoptedStyleSheets(
@@ -420,6 +578,7 @@ export function sanitizeSourceDocument(
     sourceDocument.baseURI,
     budget,
     styleWork,
+    representability,
   );
   if (!adoptedStyleSheets) return undefined;
   return Object.freeze({
@@ -652,17 +811,46 @@ function serializeNode(
   live: Node,
   context: SerializeContext,
 ): HtmlMirrorNode | undefined {
-  if (context.depth > MAX_HTML_MIRROR_DEPTH) return undefined;
+  if (context.depth > MAX_HTML_MIRROR_DEPTH) {
+    incrementRepresentability(
+      context.representability,
+      'depthBoundaryOmissionCount',
+    );
+    return undefined;
+  }
   const id = context.registry.getId(live);
   if (!isNodeId(id) || context.budget.ids.has(id)) return undefined;
   if (live.nodeType === Node.TEXT_NODE) {
     const rawText = live.nodeValue ?? '';
-    const styledText = context.styleRegion
-      ? sanitizeCss(rawText, context.baseUrl) ?? ''
+    const sanitizedStyleText = context.styleRegion
+      ? sanitizeCss(
+          rawText,
+          context.baseUrl,
+          false,
+          context.representability,
+        )
       : rawText;
+    if (context.styleRegion && sanitizedStyleText === undefined && rawText) {
+      incrementRepresentability(context.representability, 'unreadableStyleCount');
+    }
+    const styledText = sanitizedStyleText ?? '';
     const text = context.privateRegion ? '' : styledText;
-    if (text.length > MAX_HTML_MIRROR_STRING) return undefined;
-    admitNode(context.budget, id, text.length * 2 + 32);
+    if (context.privateRegion && rawText.length > 0) {
+      incrementRepresentability(
+        context.representability,
+        'privateTextRedactionCount',
+      );
+    }
+    if (text.length > MAX_HTML_MIRROR_STRING) {
+      incrementRepresentability(context.representability, 'capacityOmissionCount');
+      return undefined;
+    }
+    admitNode(
+      context.budget,
+      id,
+      text.length * 2 + 32,
+      context.representability,
+    );
     return Object.freeze({
       kind: 'text',
       id,
@@ -672,13 +860,36 @@ function serializeNode(
     });
   }
   if (live.nodeType !== Node.ELEMENT_NODE) {
+    incrementRepresentability(
+      context.representability,
+      'unsupportedNodeOmissionCount',
+    );
     return undefined;
   }
   const liveElement = live as Element;
   const tagName = liveElement.localName.toLowerCase();
-  if (!isSafeTagName(tagName) || UNSAFE_ELEMENTS.has(tagName)) return undefined;
+  if (!isSafeTagName(tagName) || UNSAFE_ELEMENTS.has(tagName)) {
+    incrementRepresentability(
+      context.representability,
+      'unsafeElementOmissionCount',
+    );
+    return undefined;
+  }
   const namespace = readNamespace(liveElement.namespaceURI);
-  if (!namespace) return undefined;
+  if (!namespace) {
+    incrementRepresentability(
+      context.representability,
+      'unsupportedNodeOmissionCount',
+    );
+    return undefined;
+  }
+  const customElementHost = namespace === 'html' && (
+    tagName.includes('-') ||
+    isCustomElementName(liveElement.getAttribute('is'))
+  );
+  if (customElementHost) {
+    incrementRepresentability(context.representability, 'customElementHostCount');
+  }
   const privateRegion = context.privateRegion || elementStartsPrivateRegion(liveElement);
   const activationRegion = context.activationRegion ||
     elementStartsActivationRegion(liveElement);
@@ -693,6 +904,7 @@ function serializeNode(
     privateRegion,
     activationRegion,
     context.baseUrl,
+    context.representability,
   );
   if (!attributes) return undefined;
   const hints = sanitizeSourceElementHints(liveElement, context.baseUrl);
@@ -703,6 +915,7 @@ function serializeNode(
       (total, [name, value]) => total + (name.length + value.length) * 2 + 8,
       64,
     ) + (hints.selectedImageSource?.length ?? 0) * 2,
+    context.representability,
   );
   const children: HtmlMirrorNode[] = [];
   if (!isVoidElement(tagName)) {
@@ -721,10 +934,20 @@ function serializeNode(
   }
   let shadowRoot: HtmlMirrorShadowRoot | undefined;
   const sourceShadow = liveElement.shadowRoot;
+  if (customElementHost && sourceShadow?.mode !== 'open') {
+    incrementRepresentability(
+      context.representability,
+      'customElementHostWithoutAccessibleOpenRootCount',
+    );
+  }
   if (sourceShadow?.mode === 'open') {
+    incrementRepresentability(
+      context.representability,
+      'accessibleOpenShadowRootCount',
+    );
     const shadowId = context.registry.getId(sourceShadow);
     if (!isNodeId(shadowId) || context.budget.ids.has(shadowId)) return undefined;
-    admitNode(context.budget, shadowId, 32);
+    admitNode(context.budget, shadowId, 32, context.representability);
     const shadowChildren: HtmlMirrorNode[] = [];
     for (const childNode of sourceShadow.childNodes) {
       const child = serializeNode(childNode, {
@@ -743,6 +966,7 @@ function serializeNode(
       context.baseUrl,
       context.budget,
       context.styleWork,
+      context.representability,
     );
     if (!adoptedStyleSheets) return undefined;
     shadowRoot = Object.freeze({
@@ -770,48 +994,84 @@ function sanitizeAttributes(
   privateRegion: boolean,
   activationRegion: boolean,
   baseUrl: string,
+  representability: HtmlMirrorRepresentabilityCollector,
 ): readonly (readonly [string, string])[] | undefined {
-  if (element.attributes.length > MAX_HTML_MIRROR_ATTRIBUTES) return undefined;
+  if (element.attributes.length > MAX_HTML_MIRROR_ATTRIBUTES) {
+    incrementRepresentability(representability, 'capacityOmissionCount');
+    return undefined;
+  }
   const result: Array<readonly [string, string]> = [];
   const privateAttributes = privateRegion || activationRegion ||
     isSourceActivationTagName(tagName) ||
     isSourceActivationRoleValue(element.getAttribute('role'));
   for (const attribute of element.attributes) {
     const name = attribute.name.toLowerCase();
+    if (!isSafeAttributeName(name)) {
+      incrementRepresentability(representability, 'strippedActiveAttributeCount');
+      continue;
+    }
     if (
-      !isSafeAttributeName(name) ||
-      name.startsWith('on') ||
-      name === 'nonce' ||
+      name.startsWith('on') || name === 'nonce' ||
       ACTIVE_OR_NAVIGATIONAL_ATTRIBUTES.has(name) ||
       (privateAttributes &&
         (PRIVATE_ATTRIBUTES.has(name) || name.startsWith('data-')))
-    ) continue;
-    if (name === 'alt' && privateRegion) continue;
+    ) {
+      incrementRepresentability(representability, 'strippedActiveAttributeCount');
+      continue;
+    }
+    if (name === 'alt' && privateRegion) {
+      incrementRepresentability(representability, 'strippedActiveAttributeCount');
+      continue;
+    }
     let value = attribute.value;
     if (
       name === 'alt' &&
       activationRegion &&
       isSmallBrokenSourceControlIcon(element, tagName)
     ) value = '';
-    if (value.length > MAX_HTML_MIRROR_STRING) return undefined;
+    if (value.length > MAX_HTML_MIRROR_STRING) {
+      incrementRepresentability(representability, 'capacityOmissionCount');
+      return undefined;
+    }
     if (name === 'href') {
-      if (tagName !== 'link' || !isPassiveStylesheet(element)) continue;
+      if (tagName !== 'link' || !isPassiveStylesheet(element)) {
+        incrementRepresentability(representability, 'strippedUnsafeResourceCount');
+        continue;
+      }
       const url = passiveUrl(value, baseUrl, false);
-      if (!url) continue;
+      if (!url) {
+        incrementRepresentability(representability, 'strippedUnsafeResourceCount');
+        continue;
+      }
       value = url;
     } else if (name === 'src') {
-      if (!PASSIVE_IMAGE_ELEMENTS.has(tagName)) continue;
+      if (!PASSIVE_IMAGE_ELEMENTS.has(tagName)) {
+        incrementRepresentability(representability, 'strippedUnsafeResourceCount');
+        continue;
+      }
       const url = passiveUrl(value, baseUrl, true);
-      if (!url) continue;
+      if (!url) {
+        incrementRepresentability(representability, 'strippedUnsafeResourceCount');
+        continue;
+      }
       value = url;
     } else if (name === 'srcset') {
-      if (tagName !== 'img') continue;
+      if (tagName !== 'img') {
+        incrementRepresentability(representability, 'strippedUnsafeResourceCount');
+        continue;
+      }
       const sourceSet = sanitizeSrcset(value, baseUrl);
-      if (!sourceSet) continue;
+      if (!sourceSet) {
+        incrementRepresentability(representability, 'strippedUnsafeResourceCount');
+        continue;
+      }
       value = sourceSet;
     } else if (name === 'style') {
-      const style = sanitizeCss(value, baseUrl, true);
-      if (!style) continue;
+      const style = sanitizeCss(value, baseUrl, true, representability);
+      if (style === undefined) {
+        incrementRepresentability(representability, 'unreadableStyleCount');
+        continue;
+      }
       value = style;
     } else if (name === 'rel' && tagName === 'link') {
       if (!isPassiveStylesheet(element)) continue;
@@ -836,21 +1096,32 @@ function captureAdoptedStyleSheets(
   baseUrl: string,
   budget: HtmlMirrorReadBudget,
   work: HtmlMirrorStyleWorkBudget,
+  representability: HtmlMirrorRepresentabilityCollector,
 ): readonly string[] | undefined {
-  const styles = sanitizeSourceAdoptedStyleSheets(owner, baseUrl, work);
+  const styles = sanitizeSourceAdoptedStyleSheets(
+    owner,
+    baseUrl,
+    work,
+    representability,
+  );
   if (!styles) return undefined;
   if (budget.styleSheets + styles.length > MAX_HTML_MIRROR_ADOPTED_STYLE_SHEETS) {
+    incrementRepresentability(representability, 'capacityOmissionCount');
     return undefined;
   }
   budget.styleSheets += styles.length;
   for (const cssText of styles) {
     const styleRules = countCssRuleBlocks(cssText);
     if (budget.styleRules + styleRules > MAX_HTML_MIRROR_ADOPTED_STYLE_RULES) {
+      incrementRepresentability(representability, 'capacityOmissionCount');
       return undefined;
     }
     budget.styleRules += styleRules;
     budget.bytes += cssText.length * 2 + 16;
-    if (budget.bytes > MAX_HTML_MIRROR_BYTES) return undefined;
+    if (budget.bytes > MAX_HTML_MIRROR_BYTES) {
+      incrementRepresentability(representability, 'capacityOmissionCount');
+      return undefined;
+    }
   }
   return styles;
 }
@@ -894,9 +1165,9 @@ function readAdoptedStyleSheet(
   sheet: CSSStyleSheet,
   baseUrl: string,
   work: HtmlMirrorStyleWorkBudget,
+  representability: HtmlMirrorRepresentabilityCollector,
 ): AdoptedStyleSheetRead | undefined {
   try {
-    if (sheet.disabled) return undefined;
     const mediaText = sheet.media?.mediaText?.trim() ?? '';
     if (mediaText.length > MAX_HTML_MIRROR_STRING) return undefined;
     const rules = sheet.cssRules;
@@ -925,6 +1196,8 @@ function readAdoptedStyleSheet(
     const cssText = sanitizeCss(
       mediaText ? `@media ${mediaText}{${rulesText}}` : rulesText,
       baseUrl,
+      false,
+      representability,
     );
     return cssText === undefined
       ? undefined
@@ -970,6 +1243,7 @@ export function sanitizeCss(
   css: string,
   baseUrl: string,
   declarationList = false,
+  representability?: HtmlMirrorRepresentabilityCollector,
 ): string | undefined {
   const commentless = css.replace(/\/\*[\s\S]*?\*\//gu, '');
   const decoded = decodeCssEscapes(commentless);
@@ -977,19 +1251,49 @@ export function sanitizeCss(
     css.length > MAX_HTML_MIRROR_STRING ||
     /(?:expression\s*\(|-moz-binding\s*:|javascript\s*:)/iu.test(decoded) ||
     containsLegacyBehaviorDeclaration(decoded, declarationList)
-  ) return undefined;
-  const withoutImports = stripCssImports(commentless);
+  ) {
+    if (/javascript\s*:/iu.test(decoded) && representability) {
+      incrementRepresentability(
+        representability,
+        'strippedUnsafeResourceCount',
+      );
+    }
+    return undefined;
+  }
+  const withoutImports = stripCssImports(commentless, () => {
+    if (representability) {
+      incrementRepresentability(
+        representability,
+        'strippedUnsafeResourceCount',
+      );
+    }
+  });
   const decodedWithoutImports = decodeCssEscapes(withoutImports);
   const decodedUrlCount = decodedWithoutImports.match(/\burl\s*\(/giu)?.length ?? 0;
   const literalUrlCount = withoutImports.match(/\burl\s*\(/giu)?.length ?? 0;
   // Preserve meaningful selector/string escapes, but reject an escaped URL
   // function name that the literal rewriter below cannot safely isolate.
-  if (decodedUrlCount !== literalUrlCount) return undefined;
+  if (decodedUrlCount !== literalUrlCount) {
+    if (representability) {
+      incrementRepresentability(
+        representability,
+        'strippedUnsafeResourceCount',
+      );
+    }
+    return undefined;
+  }
   return withoutImports.replace(
     /\burl\s*\(\s*(['"]?)(.*?)\1\s*\)/giu,
     (_match, _quote: string, raw: string) => {
       const url = passiveUrl(decodeCssEscapes(raw.trim()), baseUrl, true);
-      return url ? `url("${url.replaceAll('"', '%22')}")` : 'none';
+      if (url) return `url("${url.replaceAll('"', '%22')}")`;
+      if (representability) {
+        incrementRepresentability(
+          representability,
+          'strippedUnsafeResourceCount',
+        );
+      }
+      return 'none';
     },
   );
 }
@@ -1003,7 +1307,7 @@ function containsLegacyBehaviorDeclaration(
 }
 
 /** Removes escaped/comment-obfuscated imports without discarding passive CSS. */
-function stripCssImports(css: string): string {
+function stripCssImports(css: string, onStrip?: () => void): string {
   let output = '';
   let index = 0;
   let quote: '"' | "'" | undefined;
@@ -1029,6 +1333,7 @@ function stripCssImports(css: string): string {
     if (character === '@') {
       const decodedPrefix = decodeCssEscapes(css.slice(index, index + 128));
       if (/^@\s*import\b/iu.test(decodedPrefix)) {
+        onStrip?.();
         let depth = 0;
         let importQuote: '"' | "'" | undefined;
         while (index < css.length) {
@@ -1520,6 +1825,13 @@ function isSafeTagName(value: unknown): value is string {
     /^[a-z][a-z0-9._:-]*$/u.test(value);
 }
 
+function isCustomElementName(value: string | null): boolean {
+  return Boolean(
+    value && value.length <= 128 && value.includes('-') &&
+    /^[a-z][a-z0-9._-]*$/u.test(value),
+  );
+}
+
 function isSafeAttributeName(value: string): boolean {
   return value.length >= 1 && value.length <= 128 &&
     /^[a-z_][a-z0-9_.:-]*$/u.test(value);
@@ -1536,6 +1848,7 @@ function admitNode(
   budget: HtmlMirrorReadBudget,
   id: number,
   bytes: number,
+  representability: HtmlMirrorRepresentabilityCollector,
 ): void {
   budget.nodes += 1;
   budget.bytes += bytes;
@@ -1543,7 +1856,20 @@ function admitNode(
   if (
     budget.nodes > MAX_HTML_MIRROR_NODES ||
     budget.bytes > MAX_HTML_MIRROR_BYTES
-  ) throw new Error('HTML mirror budget exceeded.');
+  ) {
+    incrementRepresentability(representability, 'capacityOmissionCount');
+    throw new HtmlMirrorCapacityError(true);
+  }
+}
+
+function incrementRepresentability(
+  target: HtmlMirrorRepresentabilityCollector,
+  key: keyof HtmlMirrorRepresentabilitySummary,
+): void {
+  target[key] = Math.min(
+    MAX_HTML_MIRROR_DIAGNOSTIC_COUNT,
+    target[key] + 1,
+  );
 }
 
 function boundedDimension(value: number): number {

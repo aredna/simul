@@ -2,7 +2,7 @@
 project_name: Simul
 project_type: chrome-extension
 planning_track: quick-flow
-status: isolated-visual-resource-capture-css-fixed
+status: isolated-stable-child-reconciliation
 ---
 
 # Simul Project Context
@@ -15,8 +15,8 @@ extension window, translate Chrome-supported language pairs locally, follow
 bounded DOM/style/image/scroll changes, zoom the replica, and compose a reverse
 translation. The canonical production engine is isolated HTML with
 revision-safe text projection. Its exact-document bridge assigns private
-WeakMap IDs, deep-clones changed DOM, converts clones into a bounded allowlisted
-graph, and sends a sanitized checkpoint plus contiguous targeted patches. The
+WeakMap IDs, reads changed DOM directly into a bounded allowlisted graph, and
+sends a sanitized checkpoint plus contiguous targeted patches. The
 extension validates the graph again and creates real nodes with DOM APIs inside
 a `sandbox="allow-same-origin"` iframe whose CSP disables scripts, workers,
 connections, frames, objects, forms, and navigation. Gaps or overflow stage one
@@ -24,6 +24,15 @@ fresh checkpoint and atomically replace the last-good view. rrweb remains a
 persisted experimental choice unless `WXT_SIMUL_RRWEB_SHADOW=0` hides it. The
 legacy renderer is the emergency fallback; neither engine silently falls back
 to the other.
+
+Direct-child mutations use a final-order reconciliation payload. A receiver
+retains a referenced object only when it already owns that exact ID as a direct
+child of the same target; new content remains a sanitized graph. The source
+derives references from ordered emitted state, including unacknowledged
+batches. Covered dirty descendants, privacy transitions, cross-parent churn,
+or missing proof keep the existing full-child/checkpoint fallback. The receiver
+preflights and stages the whole batch, preserves Simul-owned style nodes, and
+rolls back DOM/maps/dimensions before requesting recovery on commit failure.
 
 The isolated graph carries a boolean only for the canonical clipped 1px
 screen-reader pattern and a sanitized selected `currentSrc` for responsive
@@ -92,6 +101,8 @@ unpacked.
 Translation and OCR depend on an engine-neutral selected-surface router.
 Content-free `console.info` diagnostics report mirror connection/checkpoint/
 patch/recovery counts, aggregate isolated-patch kinds/replacement sizes,
+retained/inserted/moved/removed counts, bounded representability omissions,
+and custom-host/open-root risk counts,
 bounded translation-cache counters, and every OCR discovery, skip, capture,
 recognition, translation, or projection stage through an ephemeral job ordinal
 and safe dimensions without text, URLs, pixels, hashes, or IDs. Both settings
@@ -190,6 +201,7 @@ extension APIs or page integration.
    validated, and absent from a compiled-out provider profile.
 8. Modern Reddit is evidence for generic web-component and high-churn mirror
    behavior, never a hostname-specific implementation branch. Its server HTML
-   depends on Lit custom-element definitions and partial loaders; the current
-   whole-parent child replacement is intentionally diagnosed while a bounded
-   stable-ID insert/remove/move protocol remains separately reviewable work.
+   depends on Lit custom-element definitions and partial loaders. Stable
+   same-parent children are reconciled by receiver-proven identity; custom
+   definitions, inaccessible roots, script-only state, and cross-parent
+   identity reuse remain separately reviewable work.

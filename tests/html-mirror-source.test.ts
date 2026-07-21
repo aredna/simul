@@ -74,6 +74,83 @@ describe('HtmlMirrorSourceSession', () => {
     expect(JSON.stringify(patches[0])).toContain('changed while replica stages');
   });
 
+  it('emits bounded capacity diagnostics when checkpoint serialization overflows', () => {
+    const descriptor = Object.getOwnPropertyDescriptor(
+      WeakNodeIdRegistry,
+      'MAX_TRACKED_NODES',
+    )!;
+    try {
+      Object.defineProperty(WeakNodeIdRegistry, 'MAX_TRACKED_NODES', {
+        ...descriptor,
+        value: 1,
+      });
+      const fixture = sourceFixture('<main>capacity source text</main>');
+
+      fixture.start();
+
+      expect(fixture.checkpoints()).toHaveLength(0);
+      expect(fixture.port.posts.at(-1)).toMatchObject({
+        kind: 'simul:html-mirror-v1:error',
+        code: 'stream_overflow',
+        representability: {
+          capacityOmissionCount: 1,
+        },
+      });
+      expect(JSON.stringify(
+        (fixture.port.posts.at(-1) as { representability: unknown })
+          .representability,
+      )).not.toContain('capacity source text');
+    } finally {
+      Object.defineProperty(
+        WeakNodeIdRegistry,
+        'MAX_TRACKED_NODES',
+        descriptor,
+      );
+    }
+  });
+
+  it('emits bounded capacity diagnostics when a new-child patch overflows', () => {
+    const fixture = sourceFixture('<main id="target"><span>retained</span></main>');
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const descriptor = Object.getOwnPropertyDescriptor(
+      WeakNodeIdRegistry,
+      'MAX_TRACKED_NODES',
+    )!;
+    try {
+      Object.defineProperty(WeakNodeIdRegistry, 'MAX_TRACKED_NODES', {
+        ...descriptor,
+        value: fixture.registry.trackedNodeCount,
+      });
+      const target = fixture.document.querySelector('#target')!;
+      const added = fixture.document.createElement('aside');
+      added.textContent = 'capacity patch text';
+      target.append(added);
+      fixture.mutate(childListRecord(target, [added]));
+
+      fixture.flushFrame();
+
+      expect(fixture.patches()).toHaveLength(0);
+      expect(fixture.port.posts.at(-1)).toMatchObject({
+        kind: 'simul:html-mirror-v1:error',
+        code: 'stream_overflow',
+        representability: {
+          capacityOmissionCount: 1,
+        },
+      });
+      expect(JSON.stringify(
+        (fixture.port.posts.at(-1) as { representability: unknown })
+          .representability,
+      )).not.toContain('capacity patch text');
+    } finally {
+      Object.defineProperty(
+        WeakNodeIdRegistry,
+        'MAX_TRACKED_NODES',
+        descriptor,
+      );
+    }
+  });
+
   it('resanitizes descendants in the same batch when privacy roles enter and leave', () => {
     const fixture = sourceFixture('<main id="target"><span>public value</span></main>');
     fixture.start();
@@ -87,6 +164,7 @@ describe('HtmlMirrorSourceSession', () => {
     expect(privatePatch.operations.map(({ kind }) => kind)).toEqual(
       expect.arrayContaining(['attributes', 'children']),
     );
+    expect(privatePatch.representability.attributeContextFallbackCount).toBe(1);
     expect(JSON.stringify(privatePatch)).not.toContain('public value');
 
     fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
@@ -265,6 +343,9 @@ describe('HtmlMirrorSourceSession', () => {
     expect(checkpointJson).not.toContain('frame.invalid');
     expect(checkpointJson).not.toContain('iframe secret');
     expect(checkpointJson).not.toContain('frame secret');
+    expect(fixture.checkpoints()[0]?.payload.representability).toMatchObject({
+      unsafeElementOmissionCount: 2,
+    });
     fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
 
     const added = fixture.document.createElement('iframe');
@@ -275,9 +356,17 @@ describe('HtmlMirrorSourceSession', () => {
     fixture.flushFrame();
 
     const patchJson = JSON.stringify(fixture.patches().at(-1));
-    expect(patchJson).toContain('top document');
+    expect(fixture.patches().at(-1)?.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'reconcile-children',
+        children: [expect.objectContaining({ kind: 'retain' })],
+      }),
+    ]));
     expect(patchJson).not.toContain('"tagName":"iframe"');
     expect(patchJson).not.toContain('dynamic frame secret');
+    expect(fixture.patches().at(-1)?.representability).toMatchObject({
+      unsafeElementOmissionCount: 3,
+    });
 
     const foreign = parseHTML('<html><body>foreign frame secret</body></html>');
     const foreignText = foreign.document.body.firstChild as Text;
@@ -286,6 +375,198 @@ describe('HtmlMirrorSourceSession', () => {
     fixture.mutate(characterDataRecord(foreignText));
     expect(fixture.frames).toHaveLength(scheduledBeforeForeignMutation);
     expect(fixture.port.posts).toHaveLength(postsBeforeForeignMutation);
+  });
+
+  it('derives final-order retain entries from emitted state across unacknowledged batches', () => {
+    const fixture = sourceFixture(`
+      <main id="target"><span id="first">first</span><span id="second">second</span></main>
+    `);
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const target = fixture.document.querySelector('#target')!;
+    const first = fixture.document.querySelector('#first')!;
+    const second = fixture.document.querySelector('#second')!;
+    const firstId = fixture.registry.peekId(first)!;
+    const secondId = fixture.registry.peekId(second)!;
+
+    const added = fixture.document.createElement('p');
+    added.textContent = 'added';
+    target.append(added);
+    fixture.mutate(childListRecord(target, [added]));
+    fixture.flushFrame();
+    const addedId = fixture.registry.peekId(added)!;
+    expect(fixture.patches().at(-1)?.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'reconcile-children',
+        children: [
+          { kind: 'retain', nodeId: firstId },
+          { kind: 'retain', nodeId: secondId },
+          expect.objectContaining({
+            kind: 'graph',
+            node: expect.objectContaining({ id: addedId }),
+          }),
+        ],
+      }),
+    ]));
+
+    target.insertBefore(second, first);
+    fixture.mutate(childListRecord(target, [second]));
+    fixture.flushFrame();
+    expect(fixture.patches().at(-1)?.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'reconcile-children',
+        children: [
+          { kind: 'retain', nodeId: secondId },
+          { kind: 'retain', nodeId: firstId },
+          { kind: 'retain', nodeId: addedId },
+        ],
+      }),
+    ]));
+
+    added.remove();
+    fixture.mutate(childListRecord(target, []));
+    fixture.flushFrame();
+    target.append(added);
+    fixture.mutate(childListRecord(target, [added]));
+    fixture.flushFrame();
+    expect(fixture.patches().at(-1)?.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'reconcile-children',
+        children: [
+          { kind: 'retain', nodeId: secondId },
+          { kind: 'retain', nodeId: firstId },
+          expect.objectContaining({
+            kind: 'graph',
+            node: expect.objectContaining({ id: addedId }),
+          }),
+        ],
+      }),
+    ]));
+  });
+
+  it('does not traverse retained direct-child subtrees during append or reorder', () => {
+    const fixture = sourceFixture(`
+      <main id="target"><section id="retained"><span>stable subtree</span></section></main>
+    `);
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const target = fixture.document.querySelector('#target')!;
+    const retained = fixture.document.querySelector('#retained')!;
+    const retainedId = fixture.registry.peekId(retained)!;
+    let retainedTraversalCount = 0;
+    Object.defineProperty(retained, 'attributes', {
+      configurable: true,
+      get: () => {
+        retainedTraversalCount += 1;
+        throw new Error('retained subtree must not be serialized');
+      },
+    });
+
+    const added = fixture.document.createElement('aside');
+    added.textContent = 'new child';
+    target.append(added);
+    fixture.mutate(childListRecord(target, [added]));
+    fixture.flushFrame();
+    const addedId = fixture.registry.peekId(added)!;
+    expect(fixture.patches().at(-1)?.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'reconcile-children',
+        children: [
+          { kind: 'retain', nodeId: retainedId },
+          expect.objectContaining({
+            kind: 'graph',
+            node: expect.objectContaining({ id: addedId }),
+          }),
+        ],
+      }),
+    ]));
+    expect(retainedTraversalCount).toBe(0);
+
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
+    target.append(retained);
+    fixture.mutate(childListRecord(target, [retained]));
+    fixture.flushFrame();
+    expect(fixture.patches().at(-1)?.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'reconcile-children',
+        children: [
+          { kind: 'retain', nodeId: addedId },
+          { kind: 'retain', nodeId: retainedId },
+        ],
+      }),
+    ]));
+    expect(retainedTraversalCount).toBe(0);
+  });
+
+  it('falls back to full children when a structural change covers dirty descendants', () => {
+    const fixture = sourceFixture(
+      '<main id="target"><span id="label">before</span></main>',
+    );
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const target = fixture.document.querySelector('#target')!;
+    const labelText = fixture.document.querySelector('#label')!.firstChild as Text;
+    const added = fixture.document.createElement('aside');
+    added.textContent = 'new sibling';
+    target.append(added);
+    labelText.nodeValue = 'after';
+    fixture.mutate(childListRecord(target, [added]));
+    fixture.mutate(characterDataRecord(labelText));
+    fixture.flushFrame();
+
+    expect(fixture.patches().at(-1)?.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'children' }),
+    ]));
+    expect(
+      fixture.patches().at(-1)?.representability.coveredDirtyBranchFallbackCount,
+    ).toBe(1);
+    expect(JSON.stringify(fixture.patches().at(-1))).toContain('after');
+  });
+
+  it('classifies cross-parent churn without retaining the moved identity', () => {
+    const fixture = sourceFixture(`
+      <section id="left"><span id="moved">move me</span></section>
+      <section id="right"></section>
+    `);
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const left = fixture.document.querySelector('#left')!;
+    const right = fixture.document.querySelector('#right')!;
+    const moved = fixture.document.querySelector('#moved')!;
+    right.append(moved);
+    fixture.mutate(childListRecord(left, []));
+    fixture.mutate(childListRecord(right, [moved]));
+    fixture.flushFrame();
+
+    const patch = fixture.patches().at(-1)!;
+    expect(patch.operations.filter(({ kind }) => kind === 'children')).toHaveLength(2);
+    expect(patch.operations.some(({ kind }) => kind === 'reconcile-children')).toBe(
+      false,
+    );
+    expect(patch.representability.crossParentFallbackCount).toBe(1);
+  });
+
+  it('uses full replacement when a new wrapper contains an emitted identity', () => {
+    const fixture = sourceFixture(
+      '<main id="target"><span id="moved">move me</span></main>',
+    );
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const target = fixture.document.querySelector('#target')!;
+    const moved = fixture.document.querySelector('#moved')!;
+    const wrapper = fixture.document.createElement('section');
+    target.append(wrapper);
+    wrapper.append(moved);
+    fixture.mutate(childListRecord(target, [wrapper]));
+    fixture.flushFrame();
+
+    const patch = fixture.patches().at(-1)!;
+    expect(patch.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'children' }),
+    ]));
+    expect(patch.operations.some(({ kind }) => kind === 'reconcile-children'))
+      .toBe(false);
+    expect(patch.representability.crossParentFallbackCount).toBe(1);
   });
 
   it('captures and live-observes accessible open shadow roots only', () => {
@@ -309,6 +590,64 @@ describe('HtmlMirrorSourceSession', () => {
     fixture.mutate(characterDataRecord(openText));
     fixture.flushFrame();
     expect(JSON.stringify(fixture.patches().at(-1))).toContain('updated shadow');
+  });
+
+  it('uses full replacement when a light-DOM change covers dirty open-shadow content', () => {
+    const fixture = sourceFixture('<main id="page"><x-card id="card"></x-card></main>');
+    const page = fixture.document.querySelector('#page')!;
+    const card = fixture.document.querySelector('#card')!;
+    const shadow = card.attachShadow({ mode: 'open' });
+    Object.defineProperty(shadow, 'mode', { value: 'open' });
+    const shadowText = fixture.document.createTextNode('before shadow');
+    shadow.append(shadowText);
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+
+    const added = fixture.document.createElement('aside');
+    added.textContent = 'new light child';
+    page.append(added);
+    shadowText.nodeValue = 'after shadow';
+    fixture.mutate(childListRecord(page, [added]));
+    fixture.mutate(characterDataRecord(shadowText));
+    fixture.flushFrame();
+
+    const patch = fixture.patches().at(-1)!;
+    expect(patch.operations).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'children' }),
+    ]));
+    expect(patch.operations.some(({ kind }) => kind === 'reconcile-children')).toBe(
+      false,
+    );
+    expect(JSON.stringify(patch)).toContain('after shadow');
+  });
+
+  it('requests a checkpoint when a host child patch cannot carry its own dirty shadow', () => {
+    const fixture = sourceFixture('<x-card id="card"><span>light</span></x-card>');
+    const card = fixture.document.querySelector('#card')!;
+    const shadow = card.attachShadow({ mode: 'open' });
+    Object.defineProperty(shadow, 'mode', { value: 'open' });
+    const nestedHost = fixture.document.createElement('x-nested');
+    shadow.append(nestedHost);
+    const nestedShadow = nestedHost.attachShadow({ mode: 'open' });
+    Object.defineProperty(nestedShadow, 'mode', { value: 'open' });
+    const shadowText = fixture.document.createTextNode('before nested shadow');
+    nestedShadow.append(shadowText);
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+
+    const added = fixture.document.createElement('span');
+    added.textContent = 'new light child';
+    card.append(added);
+    shadowText.nodeValue = 'after nested shadow';
+    fixture.mutate(childListRecord(card, [added]));
+    fixture.mutate(characterDataRecord(shadowText));
+    fixture.flushFrame();
+
+    expect(fixture.patches()).toHaveLength(0);
+    expect(fixture.port.posts.at(-1)).toMatchObject({
+      kind: 'simul:html-mirror-v1:error',
+      code: 'stream_gap',
+    });
   });
 
   it('rebuilds when an open-shadow host enters a private context', () => {

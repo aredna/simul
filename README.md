@@ -34,11 +34,14 @@ test.
    close it to return the page to nearly the full companion area.
 
 The initial capture bootstraps a sanitized visual tree. A bounded observer then
-streams changed subtrees, styles, images, dimensions, and source scroll
-position into the existing mirror. Expanding content and asynchronously loaded
-sections therefore update without periodic full-page snapshots. Navigation or
-a detected synchronization failure performs a fresh bootstrap while keeping
-the last usable mirror visible.
+streams changed text, attributes, children, styles, images, dimensions, and
+source scroll position into the existing mirror. Final-order child updates
+retain proven same-parent DOM objects and send graphs only for new content, so
+unchanged translations, image anchors, slots, and open shadow roots survive
+ordinary insertion, removal, and reordering. Expanding content and
+asynchronously loaded sections therefore update without periodic full-page
+snapshots. Navigation or a detected synchronization failure performs a fresh
+bootstrap while keeping the last usable mirror visible.
 
 View options include Fit width, exact 1:1 CSS-pixel size, 25–300% custom zoom,
 horizontal and vertical overflow, source-scroll following, and adaptive or
@@ -116,6 +119,9 @@ cross-origin frame contents, pseudo-elements, canvas pixels, current
 video frames, DRM content, CSSOM-only rule edits, and some browser-managed or
 script-only state cannot be copied across the isolated HTML boundary. Use
 **Rebuild mirror** when a site changes only one of those unobservable states.
+Covered descendant edits, privacy-context transitions, ambiguous identity, and
+cross-parent churn deliberately use a bounded full-child replacement or fresh
+checkpoint instead of retaining an identity that cannot be proven safe.
 Translations can be longer than the source. Adaptive layout lets affected
 containers grow; faithful layout keeps geometry and allows text overflow rather
 than silently ellipsizing it.
@@ -152,6 +158,11 @@ See the [image translation notes](docs/image-translation-research.md) and the
   that site.
 - If a mirror reports a bounded-content omission, use **Rebuild mirror** after
   reducing or expanding the relevant page section.
+- The companion console's `[Simul isolated mirror]` entries report only bounded
+  counts: retained/inserted/moved/removed nodes, conservative replacements,
+  stripped active state/resources, unreadable styles, capacity/depth omissions,
+  and custom hosts with or without accessible open roots. They never include
+  page text, URLs, tag names, attributes, hashes, or node IDs.
 
 ## Contributing
 

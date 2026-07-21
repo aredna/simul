@@ -2,14 +2,16 @@ import { parseHTML } from 'linkedom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import type { ReplicaCaptureRequest } from '../lib/replica/contracts';
-import type {
-  HtmlMirrorStreamLease,
-  HtmlMirrorStreamObserver,
+import {
+  HtmlMirrorClientError,
+  type HtmlMirrorStreamLease,
+  type HtmlMirrorStreamObserver,
 } from '../lib/replica/html-mirror-client';
 import {
   createHtmlMirrorCheckpoint,
   createHtmlMirrorPatch,
   type HtmlMirrorCheckpoint,
+  type HtmlMirrorPatchOperation,
 } from '../lib/replica/html-mirror-protocol';
 import {
   ISOLATED_HTML_SHELL,
@@ -18,6 +20,7 @@ import {
   type IsolatedMirrorInfo,
 } from '../lib/replica/isolated-html-engine';
 import { createReplicaIdentity } from '../lib/replica/protocol-v2';
+import { createHtmlMirrorRepresentabilityCollector } from '../lib/replica/html-mirror-sanitizer';
 import type {
   ReplayPresentationHost,
   VisibleReplayCandidateLease,
@@ -291,6 +294,58 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(infoCodes).toContain('stream_failed');
   });
 
+  it('reports capacity diagnostics when the initial source checkpoint fails', async () => {
+    const representability = createHtmlMirrorRepresentabilityCollector();
+    representability.capacityOmissionCount = 2;
+    const stream: HtmlMirrorStreamLease = {
+      initialCheckpoint: Promise.reject(new HtmlMirrorClientError(
+        'stream_overflow',
+        representability,
+      )),
+      setObserver: vi.fn(),
+      acknowledge: vi.fn(),
+      requestCheckpoint: vi.fn(),
+      dispose: vi.fn(),
+    };
+    const host = new FakePresentationHost();
+    const infos: IsolatedMirrorInfo[] = [];
+    const engine = new IsolatedHtmlReplicaEngine({
+      presentationHost: host,
+      openStream: async () => stream,
+      onInfo: (info) => infos.push(info),
+    });
+
+    await expect(engine.run(request)).resolves.toMatchObject({
+      status: 'failed',
+      diagnostics: { code: 'stream_overflow' },
+    });
+    expect(infos.at(-1)).toMatchObject({
+      stage: 'failed',
+      code: 'stream_overflow',
+      capacityOmissionCount: 0,
+      eventRepresentability: { capacityOmissionCount: 2 },
+    });
+  });
+
+  it('reports capacity diagnostics from a live source failure before recovery', async () => {
+    const stream = new FakeHtmlStream(makeCheckpoint('last good', 0));
+    const host = new FakePresentationHost();
+    const infos: IsolatedMirrorInfo[] = [];
+    const engine = makeEngine(stream, host, (info) => infos.push(info));
+    await engine.run(request);
+    const representability = createHtmlMirrorRepresentabilityCollector();
+    representability.capacityOmissionCount = 3;
+
+    stream.observer?.onFailure('stream_overflow', representability);
+
+    expect(stream.requested).toEqual([0]);
+    expect(infos.findLast(({ stage }) => stage === 'recovery')).toMatchObject({
+      code: 'stream_overflow',
+      capacityOmissionCount: 0,
+      eventRepresentability: { capacityOmissionCount: 3 },
+    });
+  });
+
   it('releases an iframe lease immediately when presentation ends during staging', async () => {
     const stream = new FakeHtmlStream(makeCheckpoint('never committed', 0));
     const host = new FakePresentationHost();
@@ -341,6 +396,475 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(stream.requested).toEqual([0]);
   });
 
+  it('retains text image and open-shadow identity while reconciling final child order', async () => {
+    const stream = new FakeHtmlStream(makeReconciliationCheckpoint());
+    const host = new FakePresentationHost();
+    const infos: IsolatedMirrorInfo[] = [];
+    const commits: Array<Parameters<NonNullable<
+      ConstructorParameters<typeof IsolatedHtmlReplicaEngine>[0]['onSourceCommit']
+    >>[0]> = [];
+    const engine = new IsolatedHtmlReplicaEngine({
+      presentationHost: host,
+      openStream: async () => stream,
+      initializeIframe: async (iframe, shell) => {
+        const { document } = parseHTML(shell);
+        Object.defineProperty(iframe, 'contentDocument', { value: document });
+        return document;
+      },
+      onInfo: (info) => infos.push(info),
+      onSourceCommit: (commit) => commits.push(commit),
+    });
+    await engine.run(request);
+
+    const replica = host.iframe!.contentDocument!;
+    const body = replica.body;
+    const card = replica.querySelector('x-card')!;
+    const paragraph = replica.querySelector('p')!;
+    const translatedText = paragraph.firstChild!;
+    const image = replica.querySelector('img')! as HTMLImageElement;
+    const shadow = card.shadowRoot!;
+    const slot = shadow.querySelector('slot')!;
+    expect(slot.assignedNodes()).toEqual([image]);
+    const shadowStyle = shadow.querySelector('[data-simul-adopted-style="shadow"]');
+    const imageAnchor = engine.resolveImageAnchor(engine.snapshot()!.document, 5)!;
+    const snapshot = engine.snapshot()!;
+    const paragraphRecord = snapshot.records.find(({ nodeId }) => nodeId === 7)!;
+    engine.beginProjection({ translationEpoch: 1, pairKey: 'en\0ja' });
+    expect(engine.project({
+      document: snapshot.document,
+      replayLease: snapshot.replayLease,
+      nodeId: 7,
+      nodeType: 3,
+      sourceRevision: paragraphRecord.revision,
+      source: paragraphRecord.source,
+      translationEpoch: 1,
+      pairKey: 'en\0ja',
+      translated: '翻訳を保持',
+    })).toBe(true);
+
+    const patch = createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [{
+        kind: 'reconcile-children',
+        nodeId: 3,
+        children: [
+          { kind: 'retain', nodeId: 6 },
+          { kind: 'retain', nodeId: 4 },
+          {
+            kind: 'graph',
+            node: {
+              kind: 'element', id: 10, namespace: 'html', tagName: 'aside',
+              attributes: [], children: [{
+                kind: 'text', id: 11, text: 'new content', translatable: true,
+              }],
+            },
+          },
+        ],
+      }],
+    );
+    expect(patch).toBeDefined();
+    stream.observer?.onPatch(patch!);
+
+    expect(body.querySelector('p')).toBe(paragraph);
+    expect(paragraph.firstChild).toBe(translatedText);
+    expect(translatedText.nodeValue).toBe('翻訳を保持');
+    expect(body.querySelector('x-card')).toBe(card);
+    expect(card.shadowRoot).toBe(shadow);
+    expect(shadow.querySelector('slot')).toBe(slot);
+    expect(slot.assignedNodes()).toEqual([image]);
+    expect(shadow.querySelector('[data-simul-adopted-style="shadow"]')).toBe(
+      shadowStyle,
+    );
+    expect(body.querySelector('img')).toBe(image);
+    expect(engine.resolveImageAnchor(engine.snapshot()!.document, 5)?.image).toBe(
+      imageAnchor.image,
+    );
+    expect([...body.children].map(({ localName }) => localName)).toEqual([
+      'p', 'x-card', 'aside', 'style',
+    ]);
+    expect(commits.at(-1)?.changes).toEqual([
+      expect.objectContaining({
+        kind: 'upsert',
+        record: expect.objectContaining({ nodeId: 11 }),
+      }),
+    ]);
+    expect(infos.findLast(({ stage }) => stage === 'patch')).toMatchObject({
+      reconcileChildrenOperationCount: 1,
+      childrenOperationCount: 0,
+      retainedNodeCount: 6,
+      insertedNodeCount: 2,
+      movedNodeCount: 1,
+      removedNodeCount: 0,
+      replacementNodeCount: 0,
+    });
+  });
+
+  it('rejects cross-parent retain references before changing the last-good DOM', async () => {
+    const stream = new FakeHtmlStream(makeCrossParentCheckpoint());
+    const host = new FakePresentationHost();
+    const infos: IsolatedMirrorInfo[] = [];
+    const engine = makeEngine(stream, host, (info) => infos.push(info));
+    await engine.run(request);
+    const body = host.iframe!.contentDocument!.body;
+    const first = body.firstChild!;
+    const secondParagraph = body.lastChild!.firstChild!;
+    const eventRepresentability = createHtmlMirrorRepresentabilityCollector();
+    eventRepresentability.capacityOmissionCount = 1;
+
+    const patch = createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [{
+        kind: 'reconcile-children',
+        nodeId: 4,
+        children: [{ kind: 'retain', nodeId: 8 }],
+      }],
+      eventRepresentability,
+    );
+    expect(patch).toBeDefined();
+    stream.observer?.onPatch(patch!);
+
+    expect(body.firstChild).toBe(first);
+    expect(body.lastChild!.firstChild).toBe(secondParagraph);
+    expect(body.textContent).toBe('firstsecond');
+    expect(stream.acknowledged).not.toContain(1);
+    expect(stream.requested).toEqual([0]);
+    expect(infos.findLast(({ stage }) => stage === 'recovery')).toMatchObject({
+      code: 'stream_gap',
+      reconciliationRejectedCount: 1,
+      capacityOmissionCount: 0,
+      eventRepresentability: { capacityOmissionCount: 1 },
+    });
+  });
+
+  it.each(['reconcile-children', 'children'] as const)(
+    'rejects a disconnected %s target before mutating its detached tree',
+    async (kind) => {
+      const stream = new FakeHtmlStream(makeCrossParentCheckpoint());
+      const host = new FakePresentationHost();
+      const infos: IsolatedMirrorInfo[] = [];
+      const engine = makeEngine(stream, host, (info) => infos.push(info));
+      await engine.run(request);
+      const body = host.iframe!.contentDocument!.body;
+      const detached = body.firstChild! as Element;
+      const retained = detached.firstChild!;
+      detached.remove();
+
+      const operation: HtmlMirrorPatchOperation = kind === 'reconcile-children'
+        ? {
+            kind,
+            nodeId: 4,
+            children: [{ kind: 'retain', nodeId: 5 }],
+          }
+        : { kind, nodeId: 4, children: [] };
+      const patch = createHtmlMirrorPatch(
+        createReplicaIdentity({ ...identityParts, sequence: 1 }),
+        1,
+        1,
+        [operation],
+      );
+      expect(patch).toBeDefined();
+      stream.observer?.onPatch(patch!);
+
+      expect(detached.firstChild).toBe(retained);
+      expect(detached.textContent).toBe('first');
+      expect(body.textContent).toBe('second');
+      expect(stream.acknowledged).not.toContain(1);
+      expect(stream.requested).toEqual([0]);
+      expect(infos.findLast(({ stage }) => stage === 'recovery')).toMatchObject({
+        reconciliationRejectedCount: kind === 'reconcile-children' ? 1 : 0,
+      });
+    },
+  );
+
+  it.each(['source-first', 'destination-first'] as const)(
+    'applies cross-parent full replacements safely in %s order',
+    async (operationOrder) => {
+      const stream = new FakeHtmlStream(makeCrossParentCheckpoint());
+      const host = new FakePresentationHost();
+      const infos: IsolatedMirrorInfo[] = [];
+      const commits: Array<Parameters<NonNullable<
+        ConstructorParameters<typeof IsolatedHtmlReplicaEngine>[0]['onSourceCommit']
+      >>[0]> = [];
+      const engine = new IsolatedHtmlReplicaEngine({
+        presentationHost: host,
+        openStream: async () => stream,
+        initializeIframe: async (iframe, shell) => {
+          const { document } = parseHTML(shell);
+          Object.defineProperty(iframe, 'contentDocument', { value: document });
+          return document;
+        },
+        onSourceCommit: (commit) => commits.push(commit),
+        onInfo: (info) => infos.push(info),
+      });
+      await engine.run(request);
+      const originalImage = engine.resolveImageAnchor(
+        engine.snapshot()!.document,
+        10,
+      )!.image;
+
+      const sourceReplacement: HtmlMirrorPatchOperation = {
+        kind: 'children',
+        nodeId: 4,
+        children: [],
+      };
+      const destinationReplacement: HtmlMirrorPatchOperation = {
+        kind: 'children',
+        nodeId: 7,
+        children: [
+          {
+            kind: 'element',
+            id: 8,
+            namespace: 'html',
+            tagName: 'p',
+            attributes: [],
+            children: [{
+              kind: 'text',
+              id: 9,
+              text: 'second',
+              translatable: true,
+            }],
+          },
+          {
+            kind: 'element',
+            id: 5,
+            namespace: 'html',
+            tagName: 'p',
+            attributes: [],
+            children: [{
+              kind: 'text',
+              id: 6,
+              text: 'first',
+              translatable: true,
+            }, {
+              kind: 'element',
+              id: 10,
+              namespace: 'html',
+              tagName: 'img',
+              attributes: [['src', 'https://images.example.test/moved.jpg']],
+              children: [],
+            }],
+          },
+        ],
+      };
+      const operations = operationOrder === 'source-first'
+        ? [sourceReplacement, destinationReplacement]
+        : [destinationReplacement, sourceReplacement];
+      const patch = createHtmlMirrorPatch(
+        createReplicaIdentity({ ...identityParts, sequence: 1 }),
+        1,
+        1,
+        operations,
+      );
+      expect(patch).toBeDefined();
+      stream.observer?.onPatch(patch!);
+
+      const sections = host.iframe!.contentDocument!.body.querySelectorAll('section');
+      expect(sections[0]!.childNodes).toHaveLength(0);
+      expect([...sections[1]!.children].map(({ textContent }) => textContent))
+        .toEqual(['second', 'first']);
+      const movedImage = engine.resolveImageAnchor(
+        engine.snapshot()!.document,
+        10,
+      );
+      expect(movedImage?.image).not.toBe(originalImage);
+      expect(movedImage?.image.parentElement).toBe(sections[1]!.children[1]);
+      expect(movedImage?.image.getAttribute('src')).toBe(
+        'https://images.example.test/moved.jpg',
+      );
+      expect(stream.acknowledged).toContain(1);
+      expect(stream.requested).toEqual([]);
+      expect(infos.findLast(({ stage }) => stage === 'patch')).toMatchObject({
+        childrenOperationCount: 2,
+        removedNodeCount: 5,
+      });
+      expect(engine.snapshot()?.records).toHaveLength(2);
+      expect(engine.snapshot()?.records).toEqual(expect.arrayContaining([
+        expect.objectContaining({ nodeId: 9, source: 'second' }),
+        expect.objectContaining({ nodeId: 6, source: 'first' }),
+      ]));
+      expect(commits.at(-1)?.changes).toHaveLength(2);
+      expect(commits.at(-1)?.changes).toEqual(expect.arrayContaining([
+        expect.objectContaining({
+          kind: 'upsert',
+          record: expect.objectContaining({ nodeId: 9, source: 'second' }),
+        }),
+        expect.objectContaining({
+          kind: 'upsert',
+          record: expect.objectContaining({ nodeId: 6, source: 'first' }),
+        }),
+      ]));
+
+      const snapshot = engine.snapshot()!;
+      engine.beginProjection({ translationEpoch: 1, pairKey: 'en\0ja' });
+      for (const record of snapshot.records) {
+        expect(engine.project({
+          document: snapshot.document,
+          replayLease: snapshot.replayLease,
+          nodeId: record.nodeId,
+          nodeType: 3,
+          sourceRevision: record.revision,
+          source: record.source,
+          translationEpoch: 1,
+          pairKey: 'en\0ja',
+          translated: record.nodeId === 9 ? '二番' : '一番',
+        })).toBe(true);
+      }
+      expect([...sections[1]!.children].map(({ textContent }) => textContent))
+        .toEqual(['二番', '一番']);
+    },
+  );
+
+  it('restores every independent rollback target after one restore operation throws', async () => {
+    const stream = new FakeHtmlStream(makeCrossParentCheckpoint());
+    const host = new FakePresentationHost();
+    const engine = makeEngine(stream, host);
+    await engine.run(request);
+    const body = host.iframe!.contentDocument!.body;
+    const firstSection = body.children[0]!;
+    const secondSection = body.children[1]!;
+    const firstParagraph = firstSection.firstChild!;
+    const secondText = secondSection.firstChild!.firstChild!;
+    const originalInsertBefore = firstSection.insertBefore.bind(firstSection);
+    const insert = vi.spyOn(firstSection, 'insertBefore').mockImplementationOnce(
+      () => {
+        throw new Error('synthetic commit failure');
+      },
+    );
+    const replace = vi.spyOn(firstSection, 'replaceChildren').mockImplementationOnce(
+      () => {
+        throw new Error('synthetic rollback failure');
+      },
+    );
+
+    const patch = createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [{
+        kind: 'attributes', nodeId: 7, tagName: 'section',
+        attributes: [['class', 'changed']],
+      }, {
+        kind: 'text', nodeId: 9,
+        node: { kind: 'text', id: 9, text: 'changed second', translatable: true },
+      }, {
+        kind: 'reconcile-children', nodeId: 4,
+        children: [{
+          kind: 'graph',
+          node: {
+            kind: 'element', id: 11, namespace: 'html', tagName: 'aside',
+            attributes: [], children: [],
+          },
+        }, { kind: 'retain', nodeId: 5 }],
+      }],
+    );
+    expect(patch).toBeDefined();
+    stream.observer?.onPatch(patch!);
+    insert.mockRestore();
+    replace.mockRestore();
+    firstSection.insertBefore = originalInsertBefore;
+
+    expect(firstSection.firstChild).toBe(firstParagraph);
+    expect(firstSection.textContent).toBe('first');
+    expect(secondSection.hasAttribute('class')).toBe(false);
+    expect(secondText.nodeValue).toBe('second');
+    expect(engine.snapshot()?.records).toEqual(expect.arrayContaining([
+      expect.objectContaining({ nodeId: 6, source: 'first' }),
+      expect.objectContaining({ nodeId: 9, source: 'second' }),
+    ]));
+    expect(stream.acknowledged).not.toContain(1);
+    expect(stream.requested).toEqual([0]);
+  });
+
+  it('moves only the non-LIS retained child while preserving final order and styles', async () => {
+    const stream = new FakeHtmlStream(makeThreeChildCheckpoint());
+    const host = new FakePresentationHost();
+    const infos: IsolatedMirrorInfo[] = [];
+    const engine = makeEngine(stream, host, (info) => infos.push(info));
+    await engine.run(request);
+    const body = host.iframe!.contentDocument!.body;
+    const [first, second, third] = [...body.children];
+    const adoptedStyle = body.lastElementChild!;
+
+    const patch = createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [{
+        kind: 'reconcile-children', nodeId: 3,
+        children: [
+          { kind: 'retain', nodeId: 8 },
+          { kind: 'retain', nodeId: 4 },
+          { kind: 'retain', nodeId: 6 },
+        ],
+      }],
+    );
+    expect(patch).toBeDefined();
+    stream.observer?.onPatch(patch!);
+
+    expect([...body.children]).toEqual([third, first, second, adoptedStyle]);
+    expect(body.lastElementChild).toBe(adoptedStyle);
+    expect(infos.findLast(({ stage }) => stage === 'patch')).toMatchObject({
+      retainedNodeCount: 6,
+      insertedNodeCount: 0,
+      movedNodeCount: 1,
+      removedNodeCount: 0,
+    });
+  });
+
+  it('rolls back DOM maps and dimensions when reconciliation throws during commit', async () => {
+    const stream = new FakeHtmlStream(makeCheckpoint('last good', 0));
+    const host = new FakePresentationHost();
+    const engine = makeEngine(stream, host);
+    await engine.run(request);
+    const body = host.iframe!.contentDocument!.body;
+    const originalText = body.firstChild!;
+    const originalInsertBefore = body.insertBefore.bind(body);
+    const insert = vi.spyOn(body, 'insertBefore').mockImplementationOnce(() => {
+      throw new Error('synthetic apply failure');
+    });
+
+    const patch = createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [{
+        kind: 'reconcile-children',
+        nodeId: 3,
+        children: [{
+          kind: 'graph',
+          node: {
+            kind: 'element', id: 5, namespace: 'html', tagName: 'p',
+            attributes: [], children: [{
+              kind: 'text', id: 6, text: 'partial', translatable: true,
+            }],
+          },
+        }],
+      }, {
+        kind: 'dimensions',
+        viewportWidth: 300,
+        viewportHeight: 200,
+        documentWidth: 400,
+        documentHeight: 500,
+      }],
+    );
+    expect(patch).toBeDefined();
+    stream.observer?.onPatch(patch!);
+    insert.mockRestore();
+    body.insertBefore = originalInsertBefore;
+
+    expect(body.firstChild).toBe(originalText);
+    expect(body.textContent).toBe('last good');
+    expect(engine.snapshot()?.records).toEqual([
+      expect.objectContaining({ nodeId: 4, source: 'last good', revision: 1 }),
+    ]);
+    expect(stream.acknowledged).not.toContain(1);
+    expect(stream.requested).toEqual([0]);
+  });
+
   it('allows privacy attributes and replacement children on one target atomically', async () => {
     const stream = new FakeHtmlStream(makeCheckpoint('public value', 0));
     const host = new FakePresentationHost();
@@ -382,6 +906,7 @@ describe('IsolatedHtmlReplicaEngine', () => {
       dimensionOperationCount: 0,
       replacementNodeCount: 1,
       largestReplacementNodeCount: 1,
+      fullReplacementFallbackCount: 1,
     });
   });
 
@@ -407,6 +932,58 @@ describe('IsolatedHtmlReplicaEngine', () => {
       childrenOperationCount: 1,
       replacementNodeCount: 1,
       largestReplacementNodeCount: 1,
+    });
+  });
+
+  it('keeps checkpoint representability separate from patch-event counters', async () => {
+    const base = makeCheckpoint('source', 0);
+    const baseline = createHtmlMirrorRepresentabilityCollector();
+    baseline.unsafeElementOmissionCount = 2;
+    const checkpoint = createHtmlMirrorCheckpoint(base.identity, {
+      root: base.payload.root,
+      adoptedStyleSheets: base.payload.adoptedStyleSheets,
+      captureMs: base.payload.captureMs,
+      viewportWidth: base.payload.viewportWidth,
+      viewportHeight: base.payload.viewportHeight,
+      documentWidth: base.payload.documentWidth,
+      documentHeight: base.payload.documentHeight,
+      representability: baseline,
+    })!;
+    const stream = new FakeHtmlStream(checkpoint);
+    const host = new FakePresentationHost();
+    const infos: IsolatedMirrorInfo[] = [];
+    const engine = makeEngine(stream, host, (info) => infos.push(info));
+    await engine.run(request);
+
+    const event = createHtmlMirrorRepresentabilityCollector();
+    event.unsafeElementOmissionCount = 3;
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [{
+        kind: 'dimensions', viewportWidth: 800, viewportHeight: 600,
+        documentWidth: 800, documentHeight: 1000,
+      }],
+      event,
+    )!);
+    expect(infos.findLast(({ stage }) => stage === 'patch')).toMatchObject({
+      unsafeElementOmissionCount: 2,
+      eventRepresentability: { unsafeElementOmissionCount: 3 },
+    });
+
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 2 }),
+      2,
+      2,
+      [{
+        kind: 'dimensions', viewportWidth: 801, viewportHeight: 600,
+        documentWidth: 801, documentHeight: 1000,
+      }],
+    )!);
+    expect(infos.findLast(({ stage }) => stage === 'patch')).toMatchObject({
+      unsafeElementOmissionCount: 2,
+      eventRepresentability: { unsafeElementOmissionCount: 0 },
     });
   });
 
@@ -1052,6 +1629,163 @@ function makeCheckpoint(
     },
   );
   if (!checkpoint) throw new Error('Fixture checkpoint rejected.');
+  return checkpoint;
+}
+
+function makeReconciliationCheckpoint(): HtmlMirrorCheckpoint {
+  const checkpoint = createHtmlMirrorCheckpoint(
+    createReplicaIdentity({ ...identityParts, sequence: 0 }),
+    {
+      root: {
+        kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+        attributes: [['lang', 'en']], children: [
+          {
+            kind: 'element', id: 2, namespace: 'html', tagName: 'head',
+            attributes: [], children: [],
+          },
+          {
+            kind: 'element', id: 3, namespace: 'html', tagName: 'body',
+            attributes: [], children: [
+              {
+                kind: 'element', id: 4, namespace: 'html', tagName: 'x-card',
+                attributes: [], children: [{
+                  kind: 'element', id: 5, namespace: 'html', tagName: 'img',
+                  attributes: [
+                    ['src', 'https://images.example.test/card.jpg'],
+                    ['slot', 'media'],
+                  ],
+                  children: [],
+                }],
+                shadowRoot: {
+                  id: 8, mode: 'open', adoptedStyleSheets: [
+                    ':host{display:block}',
+                  ],
+                  children: [{
+                    kind: 'element', id: 9, namespace: 'html', tagName: 'slot',
+                    attributes: [['name', 'media']], children: [],
+                  }],
+                },
+              },
+              {
+                kind: 'element', id: 6, namespace: 'html', tagName: 'p',
+                attributes: [], children: [{
+                  kind: 'text', id: 7, text: 'translated source',
+                  translatable: true,
+                }],
+              },
+            ],
+          },
+        ],
+      },
+      adoptedStyleSheets: ['body{display:block}'],
+      captureMs: 1,
+      viewportWidth: 800,
+      viewportHeight: 600,
+      documentWidth: 800,
+      documentHeight: 1000,
+    },
+  );
+  if (!checkpoint) throw new Error('Reconciliation fixture checkpoint rejected.');
+  return checkpoint;
+}
+
+function makeCrossParentCheckpoint(): HtmlMirrorCheckpoint {
+  const checkpoint = createHtmlMirrorCheckpoint(
+    createReplicaIdentity({ ...identityParts, sequence: 0 }),
+    {
+      root: {
+        kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+        attributes: [], children: [
+          {
+            kind: 'element', id: 2, namespace: 'html', tagName: 'head',
+            attributes: [], children: [],
+          },
+          {
+            kind: 'element', id: 3, namespace: 'html', tagName: 'body',
+            attributes: [], children: [
+              {
+                kind: 'element', id: 4, namespace: 'html', tagName: 'section',
+                attributes: [], children: [{
+                  kind: 'element', id: 5, namespace: 'html', tagName: 'p',
+                  attributes: [], children: [{
+                    kind: 'text', id: 6, text: 'first', translatable: true,
+                  }, {
+                    kind: 'element', id: 10, namespace: 'html', tagName: 'img',
+                    attributes: [['src', 'https://images.example.test/moved.jpg']],
+                    children: [],
+                  }],
+                }],
+              },
+              {
+                kind: 'element', id: 7, namespace: 'html', tagName: 'section',
+                attributes: [], children: [{
+                  kind: 'element', id: 8, namespace: 'html', tagName: 'p',
+                  attributes: [], children: [{
+                    kind: 'text', id: 9, text: 'second', translatable: true,
+                  }],
+                }],
+              },
+            ],
+          },
+        ],
+      },
+      adoptedStyleSheets: [],
+      captureMs: 1,
+      viewportWidth: 800,
+      viewportHeight: 600,
+      documentWidth: 800,
+      documentHeight: 1000,
+    },
+  );
+  if (!checkpoint) throw new Error('Cross-parent fixture checkpoint rejected.');
+  return checkpoint;
+}
+
+function makeThreeChildCheckpoint(): HtmlMirrorCheckpoint {
+  const checkpoint = createHtmlMirrorCheckpoint(
+    createReplicaIdentity({ ...identityParts, sequence: 0 }),
+    {
+      root: {
+        kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+        attributes: [], children: [
+          {
+            kind: 'element', id: 2, namespace: 'html', tagName: 'head',
+            attributes: [], children: [],
+          },
+          {
+            kind: 'element', id: 3, namespace: 'html', tagName: 'body',
+            attributes: [], children: [
+              {
+                kind: 'element', id: 4, namespace: 'html', tagName: 'p',
+                attributes: [], children: [{
+                  kind: 'text', id: 5, text: 'first', translatable: true,
+                }],
+              },
+              {
+                kind: 'element', id: 6, namespace: 'html', tagName: 'p',
+                attributes: [], children: [{
+                  kind: 'text', id: 7, text: 'second', translatable: true,
+                }],
+              },
+              {
+                kind: 'element', id: 8, namespace: 'html', tagName: 'p',
+                attributes: [], children: [{
+                  kind: 'text', id: 9, text: 'third', translatable: true,
+                }],
+              },
+            ],
+          },
+        ],
+      },
+      adoptedStyleSheets: ['body{display:block}'],
+      captureMs: 1,
+      viewportWidth: 800,
+      viewportHeight: 600,
+      documentWidth: 800,
+      documentHeight: 1000,
+    },
+  );
+  if (!checkpoint) throw new Error('Three-child fixture checkpoint rejected.');
   return checkpoint;
 }
 

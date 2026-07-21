@@ -3,16 +3,19 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   createHtmlMirrorCheckpoint,
+  createHtmlMirrorError,
   createHtmlMirrorPatch,
   readHtmlMirrorSourceMessage,
 } from '../lib/replica/html-mirror-protocol';
 import {
   MAX_HTML_MIRROR_BYTES,
   createHtmlMirrorReadBudget,
+  createHtmlMirrorRepresentabilityCollector,
   htmlMirrorJsonBytes,
   readHtmlMirrorNode,
   sanitizeCss,
   sanitizeSourceDocument,
+  snapshotHtmlMirrorRepresentability,
 } from '../lib/replica/html-mirror-sanitizer';
 import { WeakNodeIdRegistry } from '../lib/replica/html-mirror-source';
 import { createReplicaIdentity } from '../lib/replica/protocol-v2';
@@ -467,6 +470,7 @@ describe('isolated HTML sanitizer and protocol', () => {
     expect(checkpoint?.payload.byteLength).toBe(htmlMirrorJsonBytes({
       root: checkpoint?.payload.root,
       adoptedStyleSheets: checkpoint?.payload.adoptedStyleSheets,
+      representability: checkpoint?.payload.representability,
     }));
     expect(readHtmlMirrorSourceMessage(checkpoint, identity)).toEqual(checkpoint);
     expect(createHtmlMirrorCheckpoint(identity, {
@@ -567,6 +571,211 @@ describe('isolated HTML sanitizer and protocol', () => {
       1,
       [{ kind: 'children', nodeId: 2, children }],
     )).toBeUndefined();
+  });
+
+  it('validates bounded final-order child reconciliation entries exactly', () => {
+    const identity = createReplicaIdentity({
+      sessionId: 'reconcile-session',
+      pageEpoch: 1,
+      generation: 1,
+      documentId: 'reconcile-document',
+      frameId: 0,
+      sequence: 1,
+    });
+    const patch = createHtmlMirrorPatch(identity, 1, 1, [{
+      kind: 'reconcile-children',
+      nodeId: 3,
+      children: [
+        { kind: 'retain', nodeId: 4 },
+        {
+          kind: 'graph',
+          node: {
+            kind: 'element', id: 5, namespace: 'html', tagName: 'p',
+            attributes: [], children: [{
+              kind: 'text', id: 6, text: 'new child', translatable: true,
+            }],
+          },
+        },
+      ],
+    }]);
+
+    expect(patch).toBeDefined();
+    expect(readHtmlMirrorSourceMessage(patch, identity)).toEqual(patch);
+    expect(createHtmlMirrorPatch(identity, 1, 1, [{
+      kind: 'reconcile-children',
+      nodeId: 3,
+      children: [
+        { kind: 'retain', nodeId: 4 },
+        { kind: 'retain', nodeId: 4 },
+      ],
+    }])).toBeUndefined();
+    expect(readHtmlMirrorSourceMessage({
+      ...patch,
+      operations: [{
+        kind: 'reconcile-children',
+        nodeId: 3,
+        children: [{ kind: 'retain', nodeId: 4, sourceText: 'private' }],
+      }],
+    }, identity)).toBeUndefined();
+  });
+
+  it('applies one global node budget across reconciliation operations', () => {
+    const identity = createReplicaIdentity({
+      sessionId: 'reconcile-budget-session', pageEpoch: 1, generation: 1,
+      documentId: 'reconcile-budget-document', frameId: 0, sequence: 1,
+    });
+    const operations = [0, 1].map((group) => ({
+      kind: 'reconcile-children' as const,
+      nodeId: group + 1,
+      children: Array.from({ length: 25_001 }, (_, index) => ({
+        kind: 'retain' as const,
+        nodeId: group * 25_001 + index + 10,
+      })),
+    }));
+
+    expect(createHtmlMirrorPatch(identity, 1, 1, operations)).toBeUndefined();
+  });
+
+  it('transports only bounded aggregate representability diagnostics', () => {
+    const { document, window } = parseHTML(`<!doctype html><html><body>
+      <script>private script text</script>
+      <button onclick="private-handler()" data-account="private-state">label</button>
+      <a href="javascript:private-url()">link</a>
+      <div role="textbox">private editable text</div>
+      <x-open></x-open><x-opaque></x-opaque>
+    </body></html>`);
+    const openHost = document.querySelector('x-open')!;
+    const shadow = openHost.attachShadow({ mode: 'open' });
+    Object.defineProperty(shadow, 'mode', { value: 'open' });
+    shadow.append(document.createElement('slot'));
+    const diagnostics = createHtmlMirrorRepresentabilityCollector();
+    const graph = sanitizeSourceDocument(
+      document,
+      window as unknown as Window,
+      new WeakNodeIdRegistry(),
+      diagnostics,
+    );
+    const summary = snapshotHtmlMirrorRepresentability(diagnostics);
+
+    expect(graph).toBeDefined();
+    expect(summary).toMatchObject({
+      unsafeElementOmissionCount: 1,
+      privateTextRedactionCount: 1,
+      accessibleOpenShadowRootCount: 1,
+      customElementHostCount: 2,
+      customElementHostWithoutAccessibleOpenRootCount: 1,
+    });
+    expect(summary.strippedActiveAttributeCount).toBeGreaterThanOrEqual(2);
+    expect(summary.strippedUnsafeResourceCount).toBeGreaterThanOrEqual(1);
+    const identity = createReplicaIdentity({
+      sessionId: 'diagnostic-session', pageEpoch: 1, generation: 1,
+      documentId: 'diagnostic-document', frameId: 0, sequence: 0,
+    });
+    const checkpoint = graph && createHtmlMirrorCheckpoint(identity, {
+      root: graph.root,
+      adoptedStyleSheets: graph.adoptedStyleSheets,
+      captureMs: 1,
+      viewportWidth: graph.viewportWidth,
+      viewportHeight: graph.viewportHeight,
+      documentWidth: graph.documentWidth,
+      documentHeight: graph.documentHeight,
+      representability: summary,
+    });
+    expect(checkpoint?.payload.representability).toEqual(summary);
+    const diagnosticJson = JSON.stringify(checkpoint?.payload.representability);
+    expect(diagnosticJson).not.toContain('private script text');
+    expect(diagnosticJson).not.toContain('private-handler');
+    expect(diagnosticJson).not.toContain('private-url');
+    expect(readHtmlMirrorSourceMessage({
+      ...checkpoint,
+      payload: {
+        ...checkpoint?.payload,
+        representability: {
+          ...checkpoint?.payload.representability,
+          unsafeElementOmissionCount: -1,
+        },
+      },
+    }, identity)).toBeUndefined();
+    expect(readHtmlMirrorSourceMessage({
+      ...checkpoint,
+      payload: {
+        ...checkpoint?.payload,
+        representability: {
+          ...checkpoint?.payload.representability,
+          sourceNodeId: 4,
+        },
+      },
+    }, identity)).toBeUndefined();
+
+    const deep = parseHTML(
+      `<html><body>${'<div>'.repeat(66)}deep${'</div>'.repeat(66)}</body></html>`,
+    );
+    const depthDiagnostics = createHtmlMirrorRepresentabilityCollector();
+    expect(sanitizeSourceDocument(
+      deep.document,
+      deep.window as unknown as Window,
+      new WeakNodeIdRegistry(),
+      depthDiagnostics,
+    )).toBeDefined();
+    expect(depthDiagnostics.depthBoundaryOmissionCount).toBeGreaterThan(0);
+
+    const capacity = createHtmlMirrorRepresentabilityCollector();
+    capacity.capacityOmissionCount = 1;
+    const error = createHtmlMirrorError(
+      identity,
+      'stream_overflow',
+      capacity,
+    );
+    expect(readHtmlMirrorSourceMessage(error, identity)).toEqual(error);
+    expect(readHtmlMirrorSourceMessage({
+      ...error,
+      representability: {
+        ...error.representability,
+        sourceNodeId: 99,
+      },
+    }, identity)).toBeUndefined();
+    expect(readHtmlMirrorSourceMessage({
+      ...error,
+      representability: {
+        ...error.representability,
+        capacityOmissionCount: -1,
+      },
+    }, identity)).toBeUndefined();
+  });
+
+  it('counts removed CSS resources and custom built-ins without false style risks', () => {
+    const { document, window } = parseHTML(`<!doctype html><html><head><style>
+      @import "https://tracker.invalid/theme.css";
+      .hero{background-image:url("data:text/plain,unsafe")}
+    </style></head><body>
+      <button is="x-action" style="">label</button>
+    </body></html>`);
+    Object.defineProperty(document, 'baseURI', {
+      configurable: true,
+      value: 'https://example.test/',
+    });
+    Object.defineProperty(document, 'adoptedStyleSheets', {
+      configurable: true,
+      value: [fakeStyleSheet('.disabled{background:url("/ignored.png")}', true)],
+    });
+    const diagnostics = createHtmlMirrorRepresentabilityCollector();
+    const graph = sanitizeSourceDocument(
+      document,
+      window as unknown as Window,
+      new WeakNodeIdRegistry(),
+      diagnostics,
+    );
+
+    expect(graph).toBeDefined();
+    expect(JSON.stringify(graph)).not.toContain('tracker.invalid');
+    expect(JSON.stringify(graph)).not.toContain('data:text/plain');
+    expect(diagnostics).toMatchObject({
+      strippedUnsafeResourceCount: 2,
+      unreadableStyleCount: 0,
+      customElementHostCount: 1,
+      customElementHostWithoutAccessibleOpenRootCount: 1,
+    });
+    expect(graph?.adoptedStyleSheets).toEqual([]);
   });
 
   it('removes comment/escape-obfuscated CSS imports but preserves passive rules', () => {

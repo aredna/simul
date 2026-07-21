@@ -10,10 +10,15 @@ import {
   createHtmlMirrorPatch,
   readHtmlMirrorControllerMessage,
   readHtmlMirrorPortSessionId,
+  type HtmlMirrorReconcileChild,
   type HtmlMirrorPatchOperation,
 } from './html-mirror-protocol';
 import {
   MAX_HTML_MIRROR_NODES,
+  MAX_HTML_MIRROR_DIAGNOSTIC_COUNT,
+  HtmlMirrorCapacityError,
+  createHtmlMirrorReadBudget,
+  createHtmlMirrorRepresentabilityCollector,
   createHtmlMirrorStyleWorkBudget,
   sanitizeSourceAdoptedStyleSheets,
   sanitizeSourceAttributes,
@@ -21,7 +26,10 @@ import {
   sanitizeSourceDocument,
   sanitizeSourceElementHints,
   sanitizeSourceSubtree,
+  sanitizeSourceSubtrees,
+  snapshotHtmlMirrorRepresentability,
   type HtmlMirrorIdRegistry,
+  type HtmlMirrorRepresentabilityCollector,
 } from './html-mirror-sanitizer';
 import { createReplicaIdentity } from './protocol-v2';
 
@@ -40,11 +48,11 @@ export class WeakNodeIdRegistry implements HtmlMirrorIdRegistry {
     if (this.#nodes.size >= WeakNodeIdRegistry.MAX_TRACKED_NODES) {
       this.prune();
       if (this.#nodes.size >= WeakNodeIdRegistry.MAX_TRACKED_NODES) {
-        throw new Error('HTML mirror node registry capacity exceeded.');
+        throw new HtmlMirrorCapacityError();
       }
     }
     const id = this.#nextId++;
-    if (!Number.isSafeInteger(id)) throw new Error('HTML mirror node ID exhausted.');
+    if (!Number.isSafeInteger(id)) throw new HtmlMirrorCapacityError();
     this.#ids.set(node, id);
     this.#nodes.set(id, new WeakRef(node));
     this.#allocationsSincePrune += 1;
@@ -177,6 +185,13 @@ const MAX_STYLE_CHARACTERS_PER_TICK = 1024 * 1024;
 const MAX_MIRRORED_IMAGE_CANDIDATES = 4_000;
 const MAX_IMAGE_EVENT_ROOTS = 4_000;
 
+type ReconciliationDecision =
+  | 'reconcile'
+  | 'missingReconciliationProofFallbackCount'
+  | 'coveredDirtyBranchFallbackCount'
+  | 'attributeContextFallbackCount'
+  | 'crossParentFallbackCount';
+
 export class HtmlMirrorSourceSession {
   readonly #sessionId: string;
   #identity: ReplicaDocumentIdentity | undefined;
@@ -188,6 +203,8 @@ export class HtmlMirrorSourceSession {
   #pendingDimensions = false;
   #pendingOverflow = false;
   #mirroredNodes = new WeakSet<Node>();
+  #emittedChildren = new WeakMap<Node, readonly Node[]>();
+  #emittedParent = new WeakMap<Node, Node>();
   #mirroredImageCandidates: Element[] = [];
   #knownMirroredImageCandidates = new WeakSet<Element>();
   #selectedImageSources = new WeakMap<Element, string>();
@@ -386,11 +403,13 @@ export class HtmlMirrorSourceSession {
     const identity = this.#identity;
     if (!identity || this.#disposed) return;
     const startedAt = this.environment.now();
+    const representability = createHtmlMirrorRepresentabilityCollector();
     try {
       const graph = sanitizeSourceDocument(
         this.environment.document,
         this.environment.window,
         this.environment.registry,
+        representability,
       );
       const checkpoint = graph && createHtmlMirrorCheckpoint(
         this.#identityAt(this.#sequence),
@@ -402,16 +421,28 @@ export class HtmlMirrorSourceSession {
           viewportHeight: graph.viewportHeight,
           documentWidth: graph.documentWidth,
           documentHeight: graph.documentHeight,
+          representability: snapshotHtmlMirrorRepresentability(representability),
         },
       );
       if (!checkpoint) {
+        if (graph && representability.capacityOmissionCount === 0) {
+          incrementSourceRepresentability(
+            representability,
+            'capacityOmissionCount',
+          );
+        }
         this.#post(createHtmlMirrorError(
           this.#identityAt(this.#sequence),
-          'privacy_rejected',
+          representability.capacityOmissionCount > 0
+            ? 'stream_overflow'
+            : 'privacy_rejected',
+          snapshotHtmlMirrorRepresentability(representability),
         ));
         return;
       }
       this.#mirroredNodes = new WeakSet<Node>();
+      this.#emittedChildren = new WeakMap<Node, readonly Node[]>();
+      this.#emittedParent = new WeakMap<Node, Node>();
       this.#shadowHostCandidates = [];
       this.#knownShadowHostCandidates = new WeakSet<Element>();
       this.#shadowDiscoveryCursor = 0;
@@ -429,10 +460,22 @@ export class HtmlMirrorSourceSession {
       this.#shadowReconciliationPending = false;
       this.#post(checkpoint);
       this.#scheduleShadowDiscovery();
-    } catch {
+    } catch (error) {
+      if (
+        error instanceof HtmlMirrorCapacityError &&
+        !error.diagnosticRecorded
+      ) {
+        incrementSourceRepresentability(
+          representability,
+          'capacityOmissionCount',
+        );
+      }
       this.#post(createHtmlMirrorError(
         this.#identityAt(this.#sequence),
-        'privacy_rejected',
+        representability.capacityOmissionCount > 0
+          ? 'stream_overflow'
+          : 'privacy_rejected',
+        snapshotHtmlMirrorRepresentability(representability),
       ));
     }
   }
@@ -496,24 +539,120 @@ export class HtmlMirrorSourceSession {
       this.#refreshChangedImageSources();
       if (this.#paused) return;
     }
+    if ([...this.#pendingChildren].some(
+      (target) => this.#coversOwnOpenShadowWork(target),
+    )) {
+      this.#shadowReconciliationPending = true;
+      this.#signalShadowReconciliation();
+      return;
+    }
     const childrenTargets = minimizeTargets(this.#pendingChildren);
     const covered = (node: Node): boolean =>
-      childrenTargets.some((target) => target !== node && target.contains(node));
+      childrenTargets.some(
+        (target) => target !== node && containsComposedSource(target, node),
+      );
     const operations: HtmlMirrorPatchOperation[] = [];
+    const representability = createHtmlMirrorRepresentabilityCollector();
     try {
+      const childCaptures: Array<{
+        readonly target: Node;
+        readonly nodeId: number;
+        readonly sources: readonly Node[];
+        readonly previous: readonly Node[];
+        readonly reconciliation: ReconciliationDecision;
+      }> = [];
       for (const target of childrenTargets) {
         if (!target.isConnected || !this.#mirroredNodes.has(target)) continue;
-        const children = sanitizeSourceChildren(
+        const sources = Object.freeze([...target.childNodes]);
+        childCaptures.push({
           target,
-          this.environment.registry,
-          this.environment.document.baseURI,
-        );
-        if (!children) throw new Error('Unsafe children patch.');
-        operations.push(Object.freeze({
-          kind: 'children',
           nodeId: this.environment.registry.peekId(target) as number,
-          children,
-        }));
+          sources,
+          previous: this.#emittedChildren.get(target) ?? [],
+          reconciliation: this.#reconciliationDecision(target, sources),
+        });
+      }
+      // Cross-parent churn and covered descendant changes are intentionally
+      // kept on the conservative replacement path for the whole structural
+      // batch. This prevents a mixed batch from accidentally treating a move
+      // as same-parent identity retention.
+      for (const { reconciliation } of childCaptures) {
+        if (reconciliation === 'reconcile') continue;
+        incrementSourceRepresentability(representability, reconciliation);
+      }
+      const useReconciliation = childCaptures.every(
+        ({ reconciliation }) => reconciliation === 'reconcile',
+      );
+      if (!useReconciliation) {
+        for (const capture of childCaptures) {
+          const children = sanitizeSourceChildren(
+            capture.target,
+            this.environment.registry,
+            this.environment.document.baseURI,
+            representability,
+          );
+          if (!children) throw new Error('Unsafe children patch.');
+          const sources = children.map(
+            (child) => this.environment.registry.getNode(child.id),
+          );
+          if (sources.some(
+            (source) => !source || source.parentNode !== capture.target,
+          )) throw new Error('Unstable children patch.');
+          operations.push(Object.freeze({
+            kind: 'children',
+            nodeId: capture.nodeId,
+            children,
+          }));
+        }
+      } else {
+        const budget = createHtmlMirrorReadBudget();
+        const styleWork = createHtmlMirrorStyleWorkBudget();
+        for (const capture of childCaptures) {
+          const previous = new Set(capture.previous);
+          const newSources = capture.sources.filter(
+            (source) => !previous.has(source),
+          );
+          const serialized = sanitizeSourceSubtrees(
+            newSources,
+            this.environment.registry,
+            this.environment.document.baseURI,
+            representability,
+            budget,
+            styleWork,
+          );
+          if (!serialized) throw new Error('Unsafe new children patch.');
+          const newGraphs = new Map<Node, import(
+            './html-mirror-sanitizer'
+          ).HtmlMirrorNode>();
+          serialized.forEach((graph, index) => {
+            if (!graph) return;
+            const source = newSources[index]!;
+            if (
+              this.environment.registry.getNode(graph.id) !== source ||
+              source.parentNode !== capture.target
+            ) throw new Error('Unstable new children patch.');
+            newGraphs.set(source, graph);
+          });
+          const entries: HtmlMirrorReconcileChild[] = [];
+          for (const source of capture.sources) {
+            if (previous.has(source)) {
+              const nodeId = this.environment.registry.peekId(source);
+              if (
+                !nodeId || source.parentNode !== capture.target ||
+                this.#emittedParent.get(source) !== capture.target
+              ) throw new Error('Unstable retained child.');
+              entries.push(Object.freeze({ kind: 'retain', nodeId }));
+              continue;
+            }
+            const graph = newGraphs.get(source);
+            if (graph) entries.push(Object.freeze({ kind: 'graph', node: graph }));
+          }
+          operations.push(Object.freeze({
+            kind: 'reconcile-children',
+            nodeId: capture.nodeId,
+            children: Object.freeze(entries),
+          }));
+        }
       }
       for (const target of this.#pendingAttributes) {
         if (
@@ -523,6 +662,7 @@ export class HtmlMirrorSourceSession {
         const attributes = sanitizeSourceAttributes(
           target,
           this.environment.document.baseURI,
+          representability,
         );
         if (!attributes) throw new Error('Unsafe attributes patch.');
         const hints = sanitizeSourceElementHints(
@@ -552,6 +692,7 @@ export class HtmlMirrorSourceSession {
           target,
           this.environment.registry,
           this.environment.document.baseURI,
+          representability,
         );
         if (!node || node.kind !== 'text') throw new Error('Unsafe text patch.');
         operations.push(Object.freeze({
@@ -576,22 +717,45 @@ export class HtmlMirrorSourceSession {
         sequence,
         sequence,
         operations,
+        snapshotHtmlMirrorRepresentability(representability),
       );
-      if (!batch) throw new Error('Invalid HTML mirror batch.');
+      if (!batch) {
+        incrementSourceRepresentability(
+          representability,
+          'capacityOmissionCount',
+        );
+        throw new HtmlMirrorCapacityError(true);
+      }
       for (const operation of batch.operations) {
         if (operation.kind === 'children') {
-          for (const child of operation.children) this.#markMirroredGraph(child);
+          const target = this.environment.registry.getNode(operation.nodeId);
+          if (target) this.#recordEmittedChildren(target, operation.children);
+        } else if (operation.kind === 'reconcile-children') {
+          const target = this.environment.registry.getNode(operation.nodeId);
+          if (target) this.#recordReconciledChildren(target, operation.children);
         }
       }
       this.#clearPending();
       this.#sequence = sequence;
       this.#post(batch);
-    } catch {
+    } catch (error) {
+      if (
+        error instanceof HtmlMirrorCapacityError &&
+        !error.diagnosticRecorded
+      ) {
+        incrementSourceRepresentability(
+          representability,
+          'capacityOmissionCount',
+        );
+      }
       this.#clearPending();
       this.#paused = true;
       this.#post(createHtmlMirrorError(
         this.#identityAt(this.#sequence),
-        'privacy_rejected',
+        representability.capacityOmissionCount > 0
+          ? 'stream_overflow'
+          : 'privacy_rejected',
+        snapshotHtmlMirrorRepresentability(representability),
       ));
     }
   }
@@ -702,8 +866,108 @@ export class HtmlMirrorSourceSession {
         );
       }
       for (const child of node.shadowRoot.children) this.#markMirroredGraph(child);
+      if (shadow) this.#setEmittedChildren(shadow, node.shadowRoot.children);
     }
     for (const child of node.children) this.#markMirroredGraph(child);
+    if (source) this.#setEmittedChildren(source, node.children);
+  }
+
+  #recordEmittedChildren(
+    target: Node,
+    children: readonly import('./html-mirror-sanitizer').HtmlMirrorNode[],
+  ): void {
+    for (const child of children) this.#markMirroredGraph(child);
+    this.#setEmittedChildren(target, children);
+  }
+
+  #recordReconciledChildren(
+    target: Node,
+    children: readonly HtmlMirrorReconcileChild[],
+  ): void {
+    for (const child of children) {
+      if (child.kind === 'graph') this.#markMirroredGraph(child.node);
+    }
+    const sources = children.map((child) => this.environment.registry.getNode(
+      child.kind === 'retain' ? child.nodeId : child.node.id,
+    ));
+    if (sources.some((source) => !source)) {
+      throw new Error('Reconciled source node is unavailable.');
+    }
+    this.#setEmittedSourceChildren(target, sources as Node[]);
+  }
+
+  #setEmittedChildren(
+    target: Node,
+    children: readonly import('./html-mirror-sanitizer').HtmlMirrorNode[],
+  ): void {
+    const sources = children.map(
+      (child) => this.environment.registry.getNode(child.id),
+    ).filter((node): node is Node => Boolean(node));
+    this.#setEmittedSourceChildren(target, sources);
+  }
+
+  #setEmittedSourceChildren(target: Node, sources: readonly Node[]): void {
+    const previous = this.#emittedChildren.get(target) ?? [];
+    const next = new Set(sources);
+    for (const child of previous) {
+      if (!next.has(child) && this.#emittedParent.get(child) === target) {
+        this.#emittedParent.delete(child);
+      }
+    }
+    for (const child of sources) this.#emittedParent.set(child, target);
+    this.#emittedChildren.set(target, Object.freeze(sources));
+  }
+
+  #reconciliationDecision(
+    target: Node,
+    children: readonly Node[],
+  ): ReconciliationDecision {
+    const previous = this.#emittedChildren.get(target);
+    if (!previous) return 'missingReconciliationProofFallbackCount';
+    if (this.#pendingAttributes.has(target as Element)) {
+      return 'attributeContextFallbackCount';
+    }
+    const covers = (candidate: Node): boolean =>
+      candidate !== target && containsComposedSource(target, candidate);
+    if (
+      [...this.#pendingChildren].some(covers) ||
+      [...this.#pendingAttributes].some(covers) ||
+      [...this.#pendingText].some(covers)
+    ) return 'coveredDirtyBranchFallbackCount';
+
+    const previousSet = new Set(previous);
+    for (const child of children) {
+      if (!previousSet.has(child)) continue;
+      if (
+        this.environment.registry.peekId(child) === undefined ||
+        this.#emittedParent.get(child) !== target
+      ) return 'missingReconciliationProofFallbackCount';
+    }
+    const newRoots = children.filter((child) => !previousSet.has(child));
+    const incomingSources = collectLiveSubtreeNodes(newRoots);
+    if (!incomingSources) return 'missingReconciliationProofFallbackCount';
+    for (const current of incomingSources) {
+      const oldParent = this.#emittedParent.get(current);
+      // A currently-emitted node whose prior parent is outside this new graph
+      // would collide with receiver state. Internal parents are allowed for a
+      // whole subtree that was removed in an earlier emitted batch and is now
+      // being reinserted as a graph.
+      if (oldParent && !incomingSources.has(oldParent)) {
+        return 'crossParentFallbackCount';
+      }
+    }
+    return 'reconcile';
+  }
+
+  #coversOwnOpenShadowWork(target: Node): boolean {
+    if (target.nodeType !== Node.ELEMENT_NODE) return false;
+    const shadow = (target as Element).shadowRoot;
+    if (!shadow || shadow.mode !== 'open') return false;
+    const belongsToOwnShadow = (candidate: Node): boolean =>
+      containsComposedSource(shadow, candidate);
+    return [...this.#pendingChildren].some(belongsToOwnShadow) ||
+      [...this.#pendingAttributes].some(belongsToOwnShadow) ||
+      [...this.#pendingText].some(belongsToOwnShadow);
   }
 
   #registerShadowHostCandidate(element: Element): void {
@@ -957,8 +1221,61 @@ function minimizeTargets(targets: Set<Node>): Node[] {
   const connected = [...targets].filter((node) => node.isConnected);
   return connected.filter(
     (candidate) => !connected.some(
-      (other) => other !== candidate && other.contains(candidate),
+      (other) => other !== candidate && containsComposedSource(other, candidate),
     ),
+  );
+}
+
+function collectLiveSubtreeNodes(
+  roots: readonly Node[],
+): ReadonlySet<Node> | undefined {
+  try {
+    const sources = new Set<Node>();
+    const stack = [...roots];
+    while (stack.length > 0) {
+      const current = stack.pop()!;
+      if (sources.has(current)) continue;
+      if (sources.size >= MAX_HTML_MIRROR_NODES) return undefined;
+      sources.add(current);
+      if (current.nodeType === Node.ELEMENT_NODE) {
+        const shadow = (current as Element).shadowRoot;
+        if (shadow?.mode === 'open') stack.push(shadow);
+      }
+      stack.push(...current.childNodes);
+    }
+    return sources;
+  } catch {
+    return undefined;
+  }
+}
+
+function containsComposedSource(ancestor: Node, descendant: Node): boolean {
+  for (let current: Node | undefined = descendant; current;) {
+    if (current === ancestor) return true;
+    if (current.parentNode) {
+      current = current.parentNode;
+      continue;
+    }
+    if (current.nodeType === Node.DOCUMENT_FRAGMENT_NODE && 'host' in current) {
+      current = (current as ShadowRoot).host;
+      continue;
+    }
+    const root = current.getRootNode();
+    current = root !== current && root.nodeType === Node.DOCUMENT_FRAGMENT_NODE &&
+      'host' in root
+      ? (root as ShadowRoot).host
+      : undefined;
+  }
+  return false;
+}
+
+function incrementSourceRepresentability(
+  target: HtmlMirrorRepresentabilityCollector,
+  key: keyof HtmlMirrorRepresentabilityCollector,
+): void {
+  target[key] = Math.min(
+    MAX_HTML_MIRROR_DIAGNOSTIC_COUNT,
+    target[key] + 1,
   );
 }
 

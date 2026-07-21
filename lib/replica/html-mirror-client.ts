@@ -8,6 +8,11 @@ import {
   type HtmlMirrorCheckpoint,
   type HtmlMirrorPatchBatch,
 } from './html-mirror-protocol';
+import {
+  createHtmlMirrorRepresentabilityCollector,
+  snapshotHtmlMirrorRepresentability,
+  type HtmlMirrorRepresentabilitySummary,
+} from './html-mirror-sanitizer';
 import { createReplicaIdentity } from './protocol-v2';
 
 export interface HtmlMirrorStreamObserver {
@@ -16,7 +21,7 @@ export interface HtmlMirrorStreamObserver {
   onFailure(code: Extract<
     ReplicaDiagnosticCode,
     'stream_gap' | 'stream_overflow' | 'stream_failed' | 'privacy_rejected'
-  >): void;
+  >, representability?: HtmlMirrorRepresentabilitySummary): void;
 }
 
 export interface HtmlMirrorStreamLease {
@@ -39,6 +44,7 @@ type QueuedHtmlMirrorMessage =
         ReplicaDiagnosticCode,
         'stream_gap' | 'stream_overflow' | 'stream_failed' | 'privacy_rejected'
       >;
+      readonly representability: HtmlMirrorRepresentabilitySummary;
     };
 
 export type HtmlMirrorStreamFactory = (
@@ -125,7 +131,7 @@ class ChromeHtmlMirrorStreamLease implements HtmlMirrorStreamLease {
     this.#observer = observer;
     for (const message of this.#queue.splice(0)) {
       if (message.kind === 'failure') {
-        observer.onFailure(message.code);
+        observer.onFailure(message.code, message.representability);
       } else if (message.kind === 'simul:html-mirror-v1:checkpoint') {
         observer.onCheckpoint(message);
       } else {
@@ -187,10 +193,13 @@ class ChromeHtmlMirrorStreamLease implements HtmlMirrorStreamLease {
       if (!this.#initialSettled) {
         this.#initialSettled = true;
         this.#clearInitialTimer();
-        this.#rejectInitial(new HtmlMirrorClientError(message.code));
+        this.#rejectInitial(new HtmlMirrorClientError(
+          message.code,
+          message.representability,
+        ));
         this.#closeTransport(true);
       } else {
-        this.#deliverOrQueueFailure(message.code);
+        this.#deliverOrQueueFailure(message.code, message.representability);
       }
       return;
     }
@@ -212,7 +221,11 @@ class ChromeHtmlMirrorStreamLease implements HtmlMirrorStreamLease {
       }
     } else {
       if (this.#queue.length >= MAX_HTML_MIRROR_PREOBSERVER_MESSAGES) {
-        this.#deliverOrQueueFailure('stream_failed', true);
+        this.#deliverOrQueueFailure(
+          'stream_failed',
+          emptyRepresentability(),
+          true,
+        );
       } else {
         this.#queue.push(message);
       }
@@ -232,7 +245,11 @@ class ChromeHtmlMirrorStreamLease implements HtmlMirrorStreamLease {
       this.#clearInitialTimer();
       this.#rejectInitial(error);
     } else {
-      this.#deliverOrQueueFailure('stream_failed', true);
+      this.#deliverOrQueueFailure(
+        'stream_failed',
+        emptyRepresentability(),
+        true,
+      );
       return;
     }
     this.#closeTransport(disconnect);
@@ -243,17 +260,22 @@ class ChromeHtmlMirrorStreamLease implements HtmlMirrorStreamLease {
       ReplicaDiagnosticCode,
       'stream_gap' | 'stream_overflow' | 'stream_failed' | 'privacy_rejected'
     >,
+    representability: HtmlMirrorRepresentabilitySummary = emptyRepresentability(),
     terminal = code === 'stream_failed',
   ): void {
     if (this.#observer) {
-      this.#observer.onFailure(code);
+      this.#observer.onFailure(code, representability);
     } else {
       if (this.#queue.length >= MAX_HTML_MIRROR_PREOBSERVER_MESSAGES) {
         this.#queue.splice(0);
-        this.#queue.push({ kind: 'failure', code: 'stream_failed' });
+        this.#queue.push({
+          kind: 'failure',
+          code: 'stream_failed',
+          representability: emptyRepresentability(),
+        });
         terminal = true;
       } else {
-        this.#queue.push({ kind: 'failure', code });
+        this.#queue.push({ kind: 'failure', code, representability });
       }
     }
     if (terminal) this.#closeTransport(true);
@@ -283,8 +305,18 @@ class ChromeHtmlMirrorStreamLease implements HtmlMirrorStreamLease {
 }
 
 export class HtmlMirrorClientError extends Error {
-  constructor(readonly code: ReplicaDiagnosticCode) {
+  constructor(
+    readonly code: ReplicaDiagnosticCode,
+    readonly representability: HtmlMirrorRepresentabilitySummary =
+      emptyRepresentability(),
+  ) {
     super(code);
     this.name = 'HtmlMirrorClientError';
   }
+}
+
+function emptyRepresentability(): HtmlMirrorRepresentabilitySummary {
+  return snapshotHtmlMirrorRepresentability(
+    createHtmlMirrorRepresentabilityCollector(),
+  );
 }

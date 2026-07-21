@@ -1,12 +1,16 @@
 import type { ReplicaDiagnosticCode, ReplicaDocumentIdentity } from './contracts';
 import {
   MAX_HTML_MIRROR_BYTES,
+  MAX_HTML_MIRROR_NODES,
   createHtmlMirrorReadBudget,
+  createHtmlMirrorRepresentabilityCollector,
   htmlMirrorJsonBytes,
   readHtmlMirrorDocumentContent,
   readHtmlMirrorNode,
+  readHtmlMirrorRepresentability,
   type HtmlMirrorElementNode,
   type HtmlMirrorNode,
+  type HtmlMirrorRepresentabilitySummary,
 } from './html-mirror-sanitizer';
 import {
   createReplicaIdentity,
@@ -31,8 +35,19 @@ export interface HtmlMirrorCheckpoint {
     readonly viewportHeight: number;
     readonly documentWidth: number;
     readonly documentHeight: number;
+    readonly representability: HtmlMirrorRepresentabilitySummary;
   };
 }
+
+export type HtmlMirrorReconcileChild =
+  | {
+      readonly kind: 'retain';
+      readonly nodeId: number;
+    }
+  | {
+      readonly kind: 'graph';
+      readonly node: HtmlMirrorNode;
+    };
 
 export type HtmlMirrorPatchOperation =
   | {
@@ -54,6 +69,11 @@ export type HtmlMirrorPatchOperation =
       readonly children: readonly HtmlMirrorNode[];
     }
   | {
+      readonly kind: 'reconcile-children';
+      readonly nodeId: number;
+      readonly children: readonly HtmlMirrorReconcileChild[];
+    }
+  | {
       readonly kind: 'dimensions';
       readonly viewportWidth: number;
       readonly viewportHeight: number;
@@ -68,6 +88,7 @@ export interface HtmlMirrorPatchBatch {
   readonly firstSequence: number;
   readonly lastSequence: number;
   readonly operations: readonly HtmlMirrorPatchOperation[];
+  readonly representability: HtmlMirrorRepresentabilitySummary;
   readonly byteLength: number;
 }
 
@@ -79,6 +100,7 @@ export interface HtmlMirrorStreamError {
     ReplicaDiagnosticCode,
     'stream_gap' | 'stream_overflow' | 'stream_failed' | 'privacy_rejected'
   >;
+  readonly representability: HtmlMirrorRepresentabilitySummary;
 }
 
 export type HtmlMirrorSourceMessage =
@@ -179,7 +201,10 @@ export function readHtmlMirrorControllerMessage(
 
 export function createHtmlMirrorCheckpoint(
   identity: ReplicaDocumentIdentity,
-  input: Omit<HtmlMirrorCheckpoint['payload'], 'byteLength'>,
+  input: Omit<
+    HtmlMirrorCheckpoint['payload'],
+    'byteLength' | 'representability'
+  > & { readonly representability?: HtmlMirrorRepresentabilitySummary },
 ): HtmlMirrorCheckpoint | undefined {
   const content = readHtmlMirrorDocumentContent(
     input.root,
@@ -189,7 +214,15 @@ export function createHtmlMirrorCheckpoint(
   const { root, adoptedStyleSheets } = content;
   const dimensions = readDimensions(input);
   if (!dimensions) return undefined;
-  const byteLength = htmlMirrorJsonBytes({ root, adoptedStyleSheets });
+  const representability = readHtmlMirrorRepresentability(
+    input.representability ?? createHtmlMirrorRepresentabilityCollector(),
+  );
+  if (!representability) return undefined;
+  const byteLength = htmlMirrorJsonBytes({
+    root,
+    adoptedStyleSheets,
+    representability,
+  });
   if (!Number.isSafeInteger(byteLength) || byteLength > MAX_HTML_MIRROR_BYTES) {
     return undefined;
   }
@@ -203,6 +236,7 @@ export function createHtmlMirrorCheckpoint(
       byteLength,
       captureMs: boundedDuration(input.captureMs),
       ...dimensions,
+      representability,
     }),
   });
 }
@@ -212,16 +246,24 @@ export function createHtmlMirrorPatch(
   firstSequence: number,
   lastSequence: number,
   operations: readonly HtmlMirrorPatchOperation[],
+  representabilityInput: HtmlMirrorRepresentabilitySummary =
+    createHtmlMirrorRepresentabilityCollector(),
 ): HtmlMirrorPatchBatch | undefined {
   const parsed = readOperations(operations);
+  const representability = readHtmlMirrorRepresentability(
+    representabilityInput,
+  );
   if (
-    !parsed ||
+    !parsed || !representability ||
     !isSequence(firstSequence) ||
     !isSequence(lastSequence) ||
     firstSequence > lastSequence ||
     identity.sequence !== lastSequence
   ) return undefined;
-  const byteLength = htmlMirrorJsonBytes(parsed);
+  const byteLength = htmlMirrorJsonBytes({
+    operations: parsed,
+    representability,
+  });
   if (!Number.isSafeInteger(byteLength) || byteLength > MAX_HTML_MIRROR_BYTES) {
     return undefined;
   }
@@ -232,6 +274,7 @@ export function createHtmlMirrorPatch(
     firstSequence,
     lastSequence,
     operations: parsed,
+    representability,
     byteLength,
   });
 }
@@ -239,12 +282,21 @@ export function createHtmlMirrorPatch(
 export function createHtmlMirrorError(
   identity: ReplicaDocumentIdentity,
   code: HtmlMirrorStreamError['code'],
+  representabilityInput: HtmlMirrorRepresentabilitySummary =
+    createHtmlMirrorRepresentabilityCollector(),
 ): HtmlMirrorStreamError {
+  const representability = readHtmlMirrorRepresentability(
+    representabilityInput,
+  );
+  if (!representability) {
+    throw new Error('Invalid HTML mirror error diagnostics.');
+  }
   return Object.freeze({
     protocolVersion: HTML_MIRROR_PROTOCOL_VERSION,
     kind: 'simul:html-mirror-v1:error',
     identity,
     code,
+    representability,
   });
 }
 
@@ -263,11 +315,18 @@ export function readHtmlMirrorSourceMessage(
   if (!identity || !sameDocument(identity, expectedIdentity)) return undefined;
   if (input.kind === 'simul:html-mirror-v1:error') {
     if (
-      !hasExactKeys(input, ['protocolVersion', 'kind', 'identity', 'code']) ||
+      !hasExactKeys(input, [
+        'protocolVersion', 'kind', 'identity', 'code', 'representability',
+      ]) ||
       (input.code !== 'stream_gap' && input.code !== 'stream_overflow' &&
         input.code !== 'stream_failed' && input.code !== 'privacy_rejected')
     ) return undefined;
-    return createHtmlMirrorError(identity, input.code);
+    const representability = readHtmlMirrorRepresentability(
+      input.representability,
+    );
+    return representability
+      ? createHtmlMirrorError(identity, input.code, representability)
+      : undefined;
   }
   if (input.kind === 'simul:html-mirror-v1:checkpoint') {
     if (
@@ -276,6 +335,7 @@ export function readHtmlMirrorSourceMessage(
       !hasExactKeys(input.payload, [
         'root', 'adoptedStyleSheets', 'byteLength', 'captureMs',
         'viewportWidth', 'viewportHeight', 'documentWidth', 'documentHeight',
+        'representability',
       ])
     ) return undefined;
     const checkpoint = createHtmlMirrorCheckpoint(identity, {
@@ -286,6 +346,7 @@ export function readHtmlMirrorSourceMessage(
       viewportHeight: input.payload.viewportHeight as number,
       documentWidth: input.payload.documentWidth as number,
       documentHeight: input.payload.documentHeight as number,
+      representability: input.payload.representability as HtmlMirrorRepresentabilitySummary,
     });
     return checkpoint && checkpoint.payload.byteLength === input.payload.byteLength
       ? checkpoint
@@ -295,7 +356,7 @@ export function readHtmlMirrorSourceMessage(
     input.kind !== 'simul:html-mirror-v1:patch' ||
     !hasExactKeys(input, [
       'protocolVersion', 'kind', 'identity', 'firstSequence', 'lastSequence',
-      'operations', 'byteLength',
+      'operations', 'representability', 'byteLength',
     ]) ||
     !Array.isArray(input.operations)
   ) return undefined;
@@ -304,6 +365,7 @@ export function readHtmlMirrorSourceMessage(
     input.firstSequence as number,
     input.lastSequence as number,
     input.operations as HtmlMirrorPatchOperation[],
+    input.representability as HtmlMirrorRepresentabilitySummary,
   );
   return batch && batch.byteLength === input.byteLength ? batch : undefined;
 }
@@ -342,8 +404,10 @@ function readOperations(input: readonly unknown[]): readonly HtmlMirrorPatchOper
     }
     if (!isNodeId(raw.nodeId) || typeof raw.kind !== 'string') return undefined;
     const kinds = targetKinds.get(raw.nodeId) ?? new Set<string>();
+    const structural = raw.kind === 'children' || raw.kind === 'reconcile-children';
     if (
       kinds.has(raw.kind) ||
+      structural && (kinds.has('children') || kinds.has('reconcile-children')) ||
       raw.kind === 'text' && kinds.size > 0 ||
       raw.kind !== 'text' && kinds.has('text')
     ) return undefined;
@@ -413,6 +477,48 @@ function readOperations(input: readonly unknown[]): readonly HtmlMirrorPatchOper
       }));
       continue;
     }
+    if (
+      raw.kind === 'reconcile-children' &&
+      hasExactKeys(raw, ['kind', 'nodeId', 'children']) &&
+      Array.isArray(raw.children) &&
+      raw.children.length <= MAX_HTML_MIRROR_NODES
+    ) {
+      const children: HtmlMirrorReconcileChild[] = [];
+      for (const child of raw.children) {
+        if (!isRecord(child) || typeof child.kind !== 'string') return undefined;
+        if (
+          child.kind === 'retain' &&
+          hasExactKeys(child, ['kind', 'nodeId']) &&
+          isNodeId(child.nodeId) &&
+          !graphIds.has(child.nodeId)
+        ) {
+          graphBudget.nodes += 1;
+          if (graphBudget.nodes > MAX_HTML_MIRROR_NODES) return undefined;
+          graphIds.add(child.nodeId);
+          children.push(Object.freeze({
+            kind: 'retain',
+            nodeId: child.nodeId,
+          }));
+          continue;
+        }
+        if (
+          child.kind === 'graph' &&
+          hasExactKeys(child, ['kind', 'node'])
+        ) {
+          const node = readHtmlMirrorNode(child.node, graphIds, 0, graphBudget);
+          if (!node) return undefined;
+          children.push(Object.freeze({ kind: 'graph', node }));
+          continue;
+        }
+        return undefined;
+      }
+      operations.push(Object.freeze({
+        kind: 'reconcile-children',
+        nodeId: raw.nodeId,
+        children: Object.freeze(children),
+      }));
+      continue;
+    }
     return undefined;
   }
   return Object.freeze(operations);
@@ -425,7 +531,7 @@ function readDimensions(input: {
   documentHeight: number;
 }): Omit<
   HtmlMirrorCheckpoint['payload'],
-  'root' | 'adoptedStyleSheets' | 'byteLength' | 'captureMs'
+  'root' | 'adoptedStyleSheets' | 'byteLength' | 'captureMs' | 'representability'
 > | undefined {
   if (
     !isDimension(input.viewportWidth) ||
