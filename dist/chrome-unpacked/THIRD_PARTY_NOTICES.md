@@ -98,6 +98,25 @@ The published `wasm-feature-detect` package contains no separate NOTICE file.
 The Tesseract packages and models contain no separate NOTICE file beyond the
 files retained in the vendored license directory.
 
+## Optional PaddleOCR.js local trial
+
+The default-off `SIMUL_OCR_PADDLE=1` artifact additionally contains
+`@paddleocr/paddleocr-js` 0.4.2 at npm git head
+`e5046169b225bcdfbe25d45b4e809ff0f1a69c2c` (Apache-2.0), the official
+PP-OCRv6 tiny model archives (Apache-2.0),
+`onnxruntime-web`/`onnxruntime-common` 1.24.3 (MIT),
+`@techstark/opencv-js` 4.10.0-release.1 (Apache-2.0), `clipper-lib` 6.4.2
+(Boost-1.0), and `js-yaml` 4.3.0 (MIT). These components are retained in the
+locked production dependency graph but are excluded from the canonical
+Paddle-free extension artifact.
+
+The reviewed trial notice and complete packaged license set are retained at
+`legal/paddleocr-js-v0.4.2-third-party-notices.md` and
+`vendor/ocr/paddle/licenses/`. In the optional trial artifact they appear
+under `ocr/paddle/`. The vendored Worker's unused remote defaults are replaced
+with fail-closed local sentinels; models, Wasm, configuration, and executable
+code are loaded only from the extension package.
+
 ## ISC-licensed material
 
 `picocolors` is Copyright (c) 2021-2024 Oleksii Raspopov, Kostiantyn

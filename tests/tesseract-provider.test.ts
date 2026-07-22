@@ -494,6 +494,8 @@ function job(languageGroup: string): OffscreenOcrJob {
     providerVersion: 'tesseract.js-7.0.0',
     modelVersion: TESSERACT_MODEL_VERSION,
     preprocessingVersion: OCR_NATIVE_PREPROCESSING_VERSION,
+    qualityPolicyVersion: 'precision-v1',
+    minimumConfidence: 0.65,
     schemaVersion: 1,
   };
 }

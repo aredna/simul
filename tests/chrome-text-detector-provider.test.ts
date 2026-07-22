@@ -285,6 +285,8 @@ function textDetectorJob(language: string): OffscreenOcrJob {
     providerVersion: 'chrome-text-detector-v1',
     modelVersion: 'platform',
     preprocessingVersion: OCR_NATIVE_PREPROCESSING_VERSION,
+    qualityPolicyVersion: 'precision-v1',
+    minimumConfidence: 0.65,
     schemaVersion: 1,
   };
 }

@@ -682,6 +682,7 @@ describe('offscreen OCR protocol and lifecycle', () => {
         transcript: '日本語',
         regions: [{
           text: '日本語',
+          confidence: 0.9,
           boundingBox: { x: 10, y: 12, width: 80, height: 20 },
         }],
       });
@@ -781,6 +782,104 @@ describe('offscreen OCR protocol and lifecycle', () => {
       'tesseract',
       'chrome-text-detector',
       'tesseract',
+    ]);
+  });
+
+  it('treats a clean Paddle empty result as terminal and never invokes Tesseract', async () => {
+    const store = memoryStore();
+    const calls: OffscreenOcrJob[] = [];
+    const sendMessage = vi.fn(async (message: unknown) => {
+      if (isEnsureMessage(message)) {
+        return { kind: 'simul:ocr-v1:host-ready', version: 1, ready: true };
+      }
+      const command = readOffscreenOcrCommand(message);
+      if (command?.kind !== 'simul:ocr-v1:run') return undefined;
+      calls.push(command.job);
+      if (command.job.providerId === 'paddleocr-wasm') {
+        return success(command.job, {
+          providerId: 'paddleocr-wasm',
+          bitmapWidth: command.job.bitmapWidth,
+          bitmapHeight: command.job.bitmapHeight,
+          transcript: '',
+          regions: [],
+        });
+      }
+      return success(command.job, imageResultWithText(command.job, 'fallback'));
+    });
+    const coordinator = new ImageRecognitionCoordinator({
+      store,
+      sendMessage,
+      clientId: 'client-paddle-terminal-empty',
+    });
+
+    await expect(coordinator.recognize(pixels, {
+      providerOrder: ['paddleocr-wasm', 'tesseract'],
+      sourceLanguage: 'en',
+      languageGroup: 'eng',
+      modelVersion: 'tessdata-fast-87416418',
+    })).resolves.toMatchObject({
+      status: 'complete',
+      result: {
+        providerId: 'paddleocr-wasm',
+        transcript: '',
+        regions: [],
+      },
+    });
+    expect(calls.map(({ providerId }) => providerId)).toEqual([
+      'paddleocr-wasm',
+    ]);
+  });
+
+  it('keeps confidence thresholds in the recognition cache identity', async () => {
+    const store = memoryStore();
+    const calls: OffscreenOcrJob[] = [];
+    const sendMessage = vi.fn(async (message: unknown) => {
+      if (isEnsureMessage(message)) {
+        return { kind: 'simul:ocr-v1:host-ready', version: 1, ready: true };
+      }
+      const command = readOffscreenOcrCommand(message);
+      if (command?.kind !== 'simul:ocr-v1:run') return undefined;
+      calls.push(command.job);
+      return success(command.job, {
+        ...imageResultWithText(command.job, 'threshold text'),
+        transcriptConfidence: 0.7,
+        regions: [{
+          text: 'threshold text',
+          confidence: 0.7,
+          boundingBox: { x: 10, y: 12, width: 80, height: 20 },
+        }],
+      });
+    });
+    const coordinator = new ImageRecognitionCoordinator({
+      store,
+      sendMessage,
+      clientId: 'client-confidence-cache',
+    });
+    const route = {
+      providerOrder: ['tesseract'] as const,
+      sourceLanguage: 'en',
+      languageGroup: 'eng',
+      modelVersion: 'tessdata-fast-87416418',
+    };
+
+    await expect(coordinator.recognize(pixels, {
+      ...route,
+      minimumConfidence: 0.65,
+    })).resolves.toMatchObject({
+      status: 'complete',
+      result: { transcript: 'threshold text' },
+    });
+    await expect(coordinator.recognize(pixels, {
+      ...route,
+      minimumConfidence: 0.8,
+    })).resolves.toMatchObject({
+      status: 'complete',
+      result: { transcript: '' },
+    });
+    expect(calls).toHaveLength(2);
+    expect(calls.map(({ minimumConfidence }) => minimumConfidence)).toEqual([
+      0.65,
+      0.8,
     ]);
   });
 
@@ -1028,6 +1127,8 @@ function createJob(jobId: string, attempt: 0 | 1): OffscreenOcrJob {
     providerVersion: 'tesseract.js-7.0.0',
     modelVersion: 'tessdata-fast-87416418',
     preprocessingVersion: OCR_NATIVE_PREPROCESSING_VERSION,
+    qualityPolicyVersion: 'precision-v1',
+    minimumConfidence: 0.65,
     schemaVersion: 1,
   };
 }
@@ -1069,6 +1170,11 @@ function success(job: OffscreenOcrJob, result = imageResult(job)) {
     pixelHash: job.pixelHash,
     result,
   };
+}
+
+function isEnsureMessage(message: unknown): boolean {
+  return typeof message === 'object' && message !== null &&
+    'kind' in message && message.kind === 'simul:ocr-v1:ensure-host';
 }
 
 function memoryStore(): TransientImageInputStore {

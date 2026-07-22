@@ -15,6 +15,23 @@ import {
 } from '../lib/preferences';
 
 describe('preference coordinator', () => {
+  it('persists the repaired OCR confidence during reconciliation', async () => {
+    const adapter = new MemoryPreferenceAdapter();
+    adapter.loadValue = {
+      ...adapter.preferences,
+      ocrMinimumConfidence: 0.66,
+    };
+    const coordinator = new PreferenceCoordinator(adapter);
+
+    const result = await coordinator.run({
+      type: 'simul:preferences:reconcile',
+    });
+
+    expect(result.preferences.ocrMinimumConfidence).toBe(0.65);
+    expect(adapter.preferences.ocrMinimumConfidence).toBe(0.65);
+    expect(adapter.saveCalls).toBe(1);
+  });
+
   it('loads the current stored value for each serialized side-panel commit', async () => {
     const adapter = new MemoryPreferenceAdapter();
     adapter.grant(...permissionOriginsForMode('site', 'https://one.example/'));
@@ -241,6 +258,10 @@ describe('preference coordinator', () => {
         patch: { usePromptForImageLanguage: true },
       }),
       coordinator.run({
+        type: 'simul:preferences:patch-image-analysis',
+        patch: { ocrMinimumConfidence: 0.8 },
+      }),
+      coordinator.run({
         type: 'simul:preferences:patch-view',
         patch: { syncScroll: false },
       }),
@@ -248,6 +269,7 @@ describe('preference coordinator', () => {
 
     expect(adapter.preferences).toMatchObject({
       imageTranslationEnabled: true,
+      ocrMinimumConfidence: 0.8,
       imageScanPolicy: 'eager-all',
       skipSmallImages: false,
       usePromptForImageLanguage: true,
@@ -400,6 +422,7 @@ describe('preference coordinator message boundary', () => {
           ],
           imageScanPolicy: 'visible-only',
           imageTranslationEnabled: true,
+          ocrMinimumConfidence: 0.8,
           skipSmallImages: false,
         },
       }),
@@ -415,6 +438,7 @@ describe('preference coordinator message boundary', () => {
         ],
         imageScanPolicy: 'visible-only',
         imageTranslationEnabled: true,
+        ocrMinimumConfidence: 0.8,
         skipSmallImages: false,
       },
     });
@@ -436,6 +460,18 @@ describe('preference coordinator message boundary', () => {
       readPreferenceCommand({
         type: 'simul:preferences:patch-image-analysis',
         patch: { imageScanPolicy: 'later', skipSmallImages: 'yes' },
+      }),
+    ).toBeUndefined();
+    expect(
+      readPreferenceCommand({
+        type: 'simul:preferences:patch-image-analysis',
+        patch: { ocrMinimumConfidence: 0.66 },
+      }),
+    ).toBeUndefined();
+    expect(
+      readPreferenceCommand({
+        type: 'simul:preferences:patch-image-analysis',
+        patch: { ocrMinimumConfidence: '0.80' },
       }),
     ).toBeUndefined();
     expect(
@@ -535,6 +571,8 @@ describe('preference coordinator message boundary', () => {
 
 class MemoryPreferenceAdapter implements PreferenceCoordinatorAdapter {
   preferences: CompanionPreferences;
+  loadValue: unknown | undefined;
+  saveCalls = 0;
   private readonly grants = new Set<string>();
 
   constructor(initial?: CompanionPreferences) {
@@ -542,11 +580,13 @@ class MemoryPreferenceAdapter implements PreferenceCoordinatorAdapter {
   }
 
   async load(): Promise<unknown> {
-    return structuredClone(this.preferences);
+    return structuredClone(this.loadValue ?? this.preferences);
   }
 
   async save(preferences: CompanionPreferences): Promise<void> {
+    this.saveCalls += 1;
     this.preferences = structuredClone(preferences);
+    this.loadValue = undefined;
   }
 
   async contains(origins: string[]): Promise<boolean> {

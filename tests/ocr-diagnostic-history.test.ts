@@ -46,10 +46,13 @@ describe('ImageTranslationDiagnosticHistory', () => {
       stage: 'recognition-quality',
       candidateRegions: 8,
       acceptedRegions: 5,
+      corroboratedRegions: 2,
+      uncertainRegions: 3,
       rejectedBlankRegions: 1,
       rejectedPunctuationRegions: 1,
       rejectedLowConfidenceRegions: 1,
-    })).toBe('recognition quality: candidates=8; accepted=5; rejected-blank=1; rejected-punctuation=1; rejected-low-confidence=1');
+      rejectedUncorroboratedRegions: 1,
+    })).toBe('recognition quality: candidates=8; accepted=5; corroborated=2; uncertain=3; rejected-blank=1; rejected-punctuation=1; rejected-low-confidence=1; rejected-uncorroborated=1');
     expect(formatImageTranslationDiagnostic({
       stage: 'translation-started',
       ordinal: 2,

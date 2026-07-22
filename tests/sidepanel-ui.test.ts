@@ -132,6 +132,23 @@ describe('sidepanel UI structure', () => {
       .toBeLessThan(markup.indexOf('id="experimental-options"'));
   });
 
+  it('renders an accessible persisted OCR confidence control in exact five-percent steps', () => {
+    expect(script).toContain("confidenceInput.id = 'ocr-minimum-confidence'");
+    expect(script).toContain("confidenceInput.type = 'range'");
+    expect(script).toContain("confidenceInput.min = '25'");
+    expect(script).toContain("confidenceInput.max = '95'");
+    expect(script).toContain("confidenceInput.step = '5'");
+    expect(script).toContain(
+      "confidenceInput.value = String(preferences.ocrMinimumConfidence * 100)",
+    );
+    expect(script).toContain("'ocr-minimum-confidence-help'");
+    expect(script).toContain('OCR_MINIMUM_CONFIDENCE_OPTIONS.includes(selected)');
+    expect(script).toContain('commitImageAnalysisPreferencePatch({');
+    expect(script).toContain('ocrMinimumConfidence: selected');
+    expect(style).toContain('.ocr-confidence-control');
+    expect(style).toContain('.ocr-confidence-row input');
+  });
+
   it('offers only selectable fidelity policies with a visible request disclosure', () => {
     const { document } = parseHTML(markup);
     const select = document.querySelector<HTMLSelectElement>(

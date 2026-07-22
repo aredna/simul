@@ -249,6 +249,10 @@ select { width: 100%; min-height: 34px; padding: 5px 26px 5px 8px; font-size: 12
 .image-analysis-settings { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
 .image-analysis-settings h3 { margin: 0; font-size: 12px; }
 .ocr-provider-order { display: grid; gap: 4px; margin: 5px 0 0; padding: 0; list-style: none; }
+.ocr-confidence-control { display: grid; gap: 4px; margin-top: 9px; color: var(--muted); font-size: 10px; font-weight: 750; }
+.ocr-confidence-row { display: grid; grid-template-columns: minmax(100px, 1fr) 42px; gap: 8px; align-items: center; }
+.ocr-confidence-row input { width: 100%; accent-color: var(--green); }
+.ocr-confidence-row output { color: var(--muted); font-size: 11px; text-align: right; }
 .ocr-provider-order li { display: flex; min-height: 30px; align-items: center; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 11px; }
 .ocr-order-buttons { display: flex; gap: 4px; }
 .ocr-order-buttons button { width: 28px; min-height: 28px; padding: 0; }

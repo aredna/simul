@@ -63,15 +63,83 @@ export const REQUIRED_ISOLATED_SANDBOX_MARKERS = Object.freeze([
 export const FORBIDDEN_OCR_FOUNDATION_DEPENDENCIES = Object.freeze([
   '@huggingface/transformers',
   '@xenova/transformers',
-  '@paddleocr/paddleocr-js',
-  '@techstark/opencv-js',
-  'onnxruntime-web',
   'opencv.js',
 ]);
-export const APPROVED_OCR_PROVIDER_DEPENDENCIES = Object.freeze({
-  'tesseract.js': '7.0.0',
-  'tesseract.js-core': '7.0.0',
+export const APPROVED_OCR_PACKAGE_LOCK_METADATA = Object.freeze({
+  '@paddleocr/paddleocr-js': Object.freeze({
+    version: '0.4.2',
+    resolved:
+      'https://registry.npmjs.org/@paddleocr/paddleocr-js/-/paddleocr-js-0.4.2.tgz',
+    integrity:
+      'sha512-vpwSaFVKcpTaRaNXIXL7R76lyvGjqQ8K17d7L/gsugQZYkNfwMR+yesAkLwzZtXmQVdMhVGtQmqBAQNkjvQ3EQ==',
+  }),
+  '@techstark/opencv-js': Object.freeze({
+    version: '4.10.0-release.1',
+    resolved:
+      'https://registry.npmjs.org/@techstark/opencv-js/-/opencv-js-4.10.0-release.1.tgz',
+    integrity:
+      'sha512-S4XELidRiQeA0q1s9VQLo540wCxUo24r1O4C+LqZ6llX+sPCXvZCPv3Ice8dEIr0uavyZ8YZeKXSBdDgMXSXjw==',
+  }),
+  'clipper-lib': Object.freeze({
+    version: '6.4.2',
+    resolved: 'https://registry.npmjs.org/clipper-lib/-/clipper-lib-6.4.2.tgz',
+    integrity:
+      'sha512-knglhjQX5ihNj/XCIs6zCHrTemdvHY3LPZP9XB2nq2/3igyYMFueFXtfp84baJvEE+f8pO1ZS4UVeEgmLnAprQ==',
+  }),
+  'js-yaml': Object.freeze({
+    version: '4.3.0',
+    resolved: 'https://registry.npmjs.org/js-yaml/-/js-yaml-4.3.0.tgz',
+    integrity:
+      'sha512-1td788aAnnZ5qs7V2QIRl1owjtYpbKt749Y3xauqQgwIIGF/xXWz1wMTEBx5O3LK3lXLVuqXPdPxj2BoFHaW9Q==',
+  }),
+  'onnxruntime-common': Object.freeze({
+    version: '1.24.3',
+    resolved:
+      'https://registry.npmjs.org/onnxruntime-common/-/onnxruntime-common-1.24.3.tgz',
+    integrity:
+      'sha512-GeuPZO6U/LBJXvwdaqHbuUmoXiEdeCjWi/EG7Y1HNnDwJYuk6WUbNXpF6luSUY8yASul3cmUlLGrCCL1ZgVXqA==',
+  }),
+  'onnxruntime-web': Object.freeze({
+    version: '1.24.3',
+    resolved:
+      'https://registry.npmjs.org/onnxruntime-web/-/onnxruntime-web-1.24.3.tgz',
+    integrity:
+      'sha512-41dDq7fxtTm0XzGE7N0d6m8FcOY8EWtUA65GkOixJPB/G7DGzBmiDAnVVXHznRw9bgUZpb+4/1lQK/PNxGpbrQ==',
+  }),
+  'tesseract.js': Object.freeze({
+    version: '7.0.0',
+    resolved:
+      'https://registry.npmjs.org/tesseract.js/-/tesseract.js-7.0.0.tgz',
+    integrity:
+      'sha512-exPBkd+z+wM1BuMkx/Bjv43OeLBxhL5kKWsz/9JY+DXcXdiBjiAch0V49QR3oAJqCaL5qURE0vx9Eo+G5YE7mA==',
+  }),
+  'tesseract.js-core': Object.freeze({
+    version: '7.0.0',
+    resolved:
+      'https://registry.npmjs.org/tesseract.js-core/-/tesseract.js-core-7.0.0.tgz',
+    integrity:
+      'sha512-WnNH518NzmbSq9zgTPeoF8c+xmilS8rFIl1YKbk/ptuuc7p6cLNELNuPAzcmsYw450ca6bLa8j3t0VAtq435Vw==',
+  }),
 });
+export const APPROVED_OCR_PROVIDER_DEPENDENCIES = Object.freeze({
+  '@paddleocr/paddleocr-js':
+    APPROVED_OCR_PACKAGE_LOCK_METADATA['@paddleocr/paddleocr-js'].version,
+  'onnxruntime-web':
+    APPROVED_OCR_PACKAGE_LOCK_METADATA['onnxruntime-web'].version,
+  'tesseract.js': APPROVED_OCR_PACKAGE_LOCK_METADATA['tesseract.js'].version,
+  'tesseract.js-core':
+    APPROVED_OCR_PACKAGE_LOCK_METADATA['tesseract.js-core'].version,
+});
+export const APPROVED_PADDLE_TRANSITIVE_DEPENDENCIES = Object.freeze({
+  '@techstark/opencv-js':
+    APPROVED_OCR_PACKAGE_LOCK_METADATA['@techstark/opencv-js'].version,
+  'clipper-lib': APPROVED_OCR_PACKAGE_LOCK_METADATA['clipper-lib'].version,
+  'js-yaml': APPROVED_OCR_PACKAGE_LOCK_METADATA['js-yaml'].version,
+  'onnxruntime-common':
+    APPROVED_OCR_PACKAGE_LOCK_METADATA['onnxruntime-common'].version,
+});
+export const APPROVED_PADDLE_OCR_JS_GIT_HEAD =
+  'e5046169b225bcdfbe25d45b4e809ff0f1a69c2c';
 export const APPROVED_TESSDATA_FAST_COMMIT =
   '87416418657359cb625c412a48b6e1d6d41c29bd';
 export const APPROVED_TESSERACT_LANGUAGE_CODES = Object.freeze([
@@ -147,12 +215,33 @@ export const REQUIRED_TESSERACT_RUNTIME_MARKERS = Object.freeze([
   '/ocr/tesseract/core',
   '/ocr/tesseract/lang',
 ]);
+export const REQUIRED_PADDLE_RUNTIME_MARKERS = Object.freeze([
+  'simul-paddleocr-js-0.4.2-offscreen-v1',
+  '/ocr/paddle/worker/worker-entry.js',
+  '/ocr/paddle/models/PP-OCRv6_tiny_det_onnx_infer.tar',
+  '/ocr/paddle/models/PP-OCRv6_tiny_rec_onnx_infer.tar',
+  '/ocr/paddle/runtime/',
+]);
+export const FORBIDDEN_DISABLED_PADDLE_RUNTIME_MARKERS = Object.freeze([
+  'paddleocr-js-0.4.2',
+  'PP-OCRv6_tiny_det+PP-OCRv6_tiny_rec',
+  'simul-paddleocr-js-0.4.2-offscreen-v1',
+  '/ocr/paddle/worker/worker-entry.js',
+  '/ocr/paddle/models/PP-OCRv6_tiny_det_onnx_infer.tar',
+  '/ocr/paddle/models/PP-OCRv6_tiny_rec_onnx_infer.tar',
+  '/ocr/paddle/runtime/ort-wasm-simd-threaded.wasm',
+]);
 export const REQUIRED_OCR_RUNTIME_MARKERS = Object.freeze([
   ...REQUIRED_OCR_HOST_RUNTIME_MARKERS,
   ...REQUIRED_TEXT_DETECTOR_RUNTIME_MARKERS,
   ...REQUIRED_TESSERACT_RUNTIME_MARKERS,
 ]);
 export const IMPLEMENTED_OCR_PROVIDER_IDS = Object.freeze([
+  'chrome-text-detector',
+  'tesseract',
+  'paddleocr-wasm',
+]);
+export const DEFAULT_OCR_PROVIDER_IDS = Object.freeze([
   'chrome-text-detector',
   'tesseract',
 ]);
@@ -219,7 +308,7 @@ export async function buildProductionArtifact({
 
   const resolvedRoot = path.resolve(projectRoot);
   const enabledOcrProviderIds = normalizeBuildOcrProviderIds(
-    ocrProviderIds ?? (ocrEnabled ? IMPLEMENTED_OCR_PROVIDER_IDS : []),
+    ocrProviderIds ?? (ocrEnabled ? DEFAULT_OCR_PROVIDER_IDS : []),
   );
   await assertOcrProviderDependenciesApproved(resolvedRoot);
   const outputBase = path.join(path.resolve(temporaryRoot), 'wxt-output');
@@ -242,7 +331,8 @@ export async function buildProductionArtifact({
         SIMUL_OCR_TESSERACT:
           enabledOcrProviderIds.includes('tesseract') ? '1' : '0',
         SIMUL_OCR_TRANSFORMERS: '0',
-        SIMUL_OCR_PADDLE: '0',
+        SIMUL_OCR_PADDLE:
+          enabledOcrProviderIds.includes('paddleocr-wasm') ? '1' : '0',
         SIMUL_OCR_SCREEN_AI: '0',
       },
     },
@@ -315,20 +405,20 @@ export async function validateArtifact(artifactDirectory) {
     ? detectOcrRuntimeProfile(executableTextByPath, filePaths)
     : Object.freeze([]);
   validateOcrProfileManifest(manifest, ocrProviderIds);
-  if (ocrProviderIds.includes('tesseract')) {
-    await validateTesseractRuntimeAssets({
+  if (!ocrProviderIds.includes('paddleocr-wasm')) {
+    assertNoDisabledPaddleRuntime(executableTextByPath);
+  }
+  if (
+    ocrProviderIds.includes('tesseract') ||
+    ocrProviderIds.includes('paddleocr-wasm')
+  ) {
+    await validatePackagedOcrRuntimeAssets({
       root,
       files,
       filePaths,
       executableTextByPath,
       unpackedBytes,
-      requiredRuntimeMarkers: Object.freeze([
-        ...REQUIRED_OCR_HOST_RUNTIME_MARKERS,
-        ...(ocrProviderIds.includes('chrome-text-detector')
-          ? REQUIRED_TEXT_DETECTOR_RUNTIME_MARKERS
-          : []),
-        ...REQUIRED_TESSERACT_RUNTIME_MARKERS,
-      ]),
+      providerIds: ocrProviderIds,
     });
   } else if (ocrProviderIds.includes('chrome-text-detector')) {
     validateAssetFreeOcrRuntime({
@@ -535,6 +625,38 @@ export async function checkArtifact({
     }
 
     return { committedDirectory };
+  });
+}
+
+export async function checkOcrPaddleTrial({
+  projectRoot = PROJECT_ROOT,
+  buildArtifact = buildProductionArtifact,
+} = {}) {
+  const resolvedRoot = path.resolve(projectRoot);
+  return withTemporaryDirectory(async (temporaryRoot) => {
+    const builtDirectory = await buildArtifact({
+      projectRoot: resolvedRoot,
+      temporaryRoot,
+      ocrProviderIds: ['paddleocr-wasm'],
+    });
+    const validation = await validateArtifact(builtDirectory);
+    if (
+      validation.ocrProviderIds.length !== 1 ||
+      validation.ocrProviderIds[0] !== 'paddleocr-wasm'
+    ) {
+      throw new ArtifactError(
+        `Paddle trial must contain only paddleocr-wasm; detected ${validation.ocrProviderIds.join(', ') || 'none'}.`,
+      );
+    }
+    if (validation.files.some((file) => file.startsWith('ocr/tesseract/'))) {
+      throw new ArtifactError(
+        'Paddle-only trial artifact unexpectedly contains Tesseract assets.',
+      );
+    }
+    return Object.freeze({
+      files: validation.files,
+      unpackedBytes: validation.unpackedBytes,
+    });
   });
 }
 
@@ -854,6 +976,7 @@ function detectOcrRuntimeProfile(executableTextByPath, filePaths) {
   for (const [providerId, markers] of [
     ['chrome-text-detector', REQUIRED_TEXT_DETECTOR_RUNTIME_MARKERS],
     ['tesseract', REQUIRED_TESSERACT_RUNTIME_MARKERS],
+    ['paddleocr-wasm', REQUIRED_PADDLE_RUNTIME_MARKERS],
   ]) {
     const markerPresence = markers.map((marker) =>
       [...offscreenResources].some((modulePath) =>
@@ -891,14 +1014,15 @@ function detectOcrRuntimeProfile(executableTextByPath, filePaths) {
 
 function validateOcrProfileManifest(manifest, providerIds) {
   const tesseractEnabled = providerIds.includes('tesseract');
-  if (tesseractEnabled) {
+  const paddleEnabled = providerIds.includes('paddleocr-wasm');
+  if (tesseractEnabled || paddleEnabled) {
     if (
       !isRecord(manifest.content_security_policy) ||
       Object.keys(manifest.content_security_policy).length !== 1 ||
       manifest.content_security_policy.extension_pages !== APPROVED_OCR_CSP
     ) {
       throw new ArtifactError(
-        `The Tesseract OCR profile requires the exact extension page CSP: ${APPROVED_OCR_CSP}`,
+        `The packaged OCR profile requires the exact extension page CSP: ${APPROVED_OCR_CSP}`,
       );
     }
     return;
@@ -909,6 +1033,19 @@ function validateOcrProfileManifest(manifest, providerIds) {
         ? 'The asset-free OCR profile must use Chrome\'s default extension page CSP.'
         : 'manifest.json must not relax or override extension page CSP when OCR is disabled.',
     );
+  }
+}
+
+function assertNoDisabledPaddleRuntime(executableTextByPath) {
+  for (const [relativePath, text] of executableTextByPath) {
+    const marker = FORBIDDEN_DISABLED_PADDLE_RUNTIME_MARKERS.find(
+      (candidate) => text.includes(candidate),
+    );
+    if (marker) {
+      throw new ArtifactError(
+        `Paddle runtime marker leaked into a Paddle-free artifact: ${relativePath} (${marker}).`,
+      );
+    }
   }
 }
 
@@ -1285,19 +1422,91 @@ function assertNoOcrRuntimeArtifact(relativePath) {
   }
 }
 
-async function validateTesseractRuntimeAssets({
+async function validatePackagedOcrRuntimeAssets({
   root,
   files,
   filePaths,
   executableTextByPath,
   unpackedBytes,
-  requiredRuntimeMarkers,
+  providerIds,
 }) {
   if (unpackedBytes > MAX_UNPACKED_ARTIFACT_BYTES) {
     throw new ArtifactError(
       `OCR artifact is ${unpackedBytes} bytes; the approved maximum is ${MAX_UNPACKED_ARTIFACT_BYTES} bytes.`,
     );
   }
+
+  const approvedRuntimePaths = new Set();
+  if (providerIds.includes('tesseract')) {
+    for (const assetPath of await validateTesseractRuntimeAssets({
+      root,
+      filePaths,
+      unpackedBytes,
+    })) approvedRuntimePaths.add(assetPath);
+  }
+  if (providerIds.includes('paddleocr-wasm')) {
+    for (const assetPath of await validatePaddleRuntimeAssets({
+      root,
+      filePaths,
+      unpackedBytes,
+    })) approvedRuntimePaths.add(assetPath);
+  }
+
+  for (const relativePath of filePaths) {
+    if (relativePath.startsWith('ocr/') && !approvedRuntimePaths.has(relativePath)) {
+      throw new ArtifactError(`Unapproved OCR runtime asset: ${relativePath}`);
+    }
+  }
+
+  const offscreenResources = collectStaticJavaScriptModuleClosure(
+    'offscreen.html',
+    executableTextByPath,
+    filePaths,
+  );
+  const requiredRuntimeMarkers = Object.freeze([
+    ...REQUIRED_OCR_HOST_RUNTIME_MARKERS,
+    ...(providerIds.includes('chrome-text-detector')
+      ? REQUIRED_TEXT_DETECTOR_RUNTIME_MARKERS
+      : []),
+    ...(providerIds.includes('tesseract')
+      ? REQUIRED_TESSERACT_RUNTIME_MARKERS
+      : []),
+    ...(providerIds.includes('paddleocr-wasm')
+      ? REQUIRED_PADDLE_RUNTIME_MARKERS
+      : []),
+  ]);
+  assertOcrRuntimeMarkers(
+    offscreenResources,
+    executableTextByPath,
+    requiredRuntimeMarkers,
+  );
+  for (const entry of files) {
+    if (
+      entry.path === 'offscreen.html' ||
+      offscreenResources.has(entry.path) ||
+      approvedRuntimePaths.has(entry.path)
+    ) {
+      continue;
+    }
+    assertNoOcrRuntimeArtifact(entry.path);
+  }
+
+  const remoteRuntimePattern =
+    /(?:cdn\.jsdelivr\.net|unpkg\.com)\/(?:npm\/)?(?:@tesseract\.js-data|tesseract\.js(?:-core)?|onnxruntime-web|@paddleocr\/paddleocr-js)(?:@|\/)|raw\.githubusercontent\.com\/tesseract-ocr\/tessdata|paddle-model-ecology\.bj\.bcebos\.com/iu;
+  for (const [relativePath, text] of executableTextByPath) {
+    if (remoteRuntimePattern.test(text)) {
+      throw new ArtifactError(
+        `Remote OCR runtime fallback found in artifact: ${relativePath}`,
+      );
+    }
+  }
+}
+
+async function validateTesseractRuntimeAssets({
+  root,
+  filePaths,
+  unpackedBytes,
+}) {
 
   const manifestPath = 'ocr/tesseract/asset-manifest.json';
   const noticesPath = 'ocr/THIRD_PARTY_NOTICES.md';
@@ -1398,41 +1607,171 @@ async function validateTesseractRuntimeAssets({
     );
   }
 
-  for (const relativePath of filePaths) {
-    if (relativePath.startsWith('ocr/') && !approvedRuntimePaths.has(relativePath)) {
-      throw new ArtifactError(`Unapproved OCR runtime asset: ${relativePath}`);
-    }
+  return approvedRuntimePaths;
+}
+
+async function validatePaddleRuntimeAssets({
+  root,
+  filePaths,
+  unpackedBytes,
+}) {
+  if (unpackedBytes > MAX_UNPACKED_ARTIFACT_BYTES) {
+    throw new ArtifactError(
+      `Paddle OCR artifact is ${unpackedBytes} bytes; the approved maximum is ${MAX_UNPACKED_ARTIFACT_BYTES} bytes.`,
+    );
   }
 
-  const offscreenResources = collectStaticJavaScriptModuleClosure(
-    'offscreen.html',
-    executableTextByPath,
-    filePaths,
+  const manifestPath = 'ocr/paddle/asset-manifest.json';
+  if (!filePaths.has(manifestPath)) {
+    throw new ArtifactError(
+      `Paddle OCR artifact is missing required local asset: ${manifestPath}`,
+    );
+  }
+  const artifactManifestBytes = await readFile(
+    path.join(root, ...manifestPath.split('/')),
   );
-  assertOcrRuntimeMarkers(
-    offscreenResources,
-    executableTextByPath,
-    requiredRuntimeMarkers,
+  const approvedManifestBytes = await readFile(
+    path.join(PROJECT_ROOT, 'vendor', 'ocr', 'paddle', 'asset-manifest.json'),
   );
-  for (const entry of files) {
+  if (!artifactManifestBytes.equals(approvedManifestBytes)) {
+    throw new ArtifactError(
+      'Packaged Paddle OCR asset manifest differs from the reviewed vendor manifest.',
+    );
+  }
+
+  let assetManifest;
+  try {
+    assetManifest = JSON.parse(artifactManifestBytes.toString('utf8'));
+  } catch (error) {
+    throw new ArtifactError('Packaged Paddle OCR asset manifest is invalid JSON.', {
+      cause: error,
+    });
+  }
+  if (
+    assetManifest?.schemaVersion !== 1 ||
+    assetManifest?.paddleOcrJsVersion !==
+      APPROVED_OCR_PROVIDER_DEPENDENCIES['@paddleocr/paddleocr-js'] ||
+    assetManifest?.paddleOcrJsGitHead !== APPROVED_PADDLE_OCR_JS_GIT_HEAD ||
+    assetManifest?.onnxruntimeWebVersion !==
+      APPROVED_OCR_PROVIDER_DEPENDENCIES['onnxruntime-web'] ||
+    !sameOrderedStrings(assetManifest?.modelNames, [
+      'PP-OCRv6_tiny_det',
+      'PP-OCRv6_tiny_rec',
+    ]) ||
+    assetManifest?.workerMode !== true ||
+    !isRecord(assetManifest?.runtime) ||
+    Object.keys(assetManifest.runtime).length !== 4 ||
+    assetManifest.runtime.backend !== 'wasm' ||
+    assetManifest.runtime.numThreads !== 1 ||
+    assetManifest.runtime.simd !== true ||
+    assetManifest.runtime.proxy !== false ||
+    assetManifest?.detectorThreshold !== 0.45 ||
+    assetManifest?.detectorBoxThreshold !== 0.75 ||
+    assetManifest?.recognitionScoreThreshold !== 0 ||
+    !Array.isArray(assetManifest?.files)
+  ) {
+    throw new ArtifactError(
+      'Packaged Paddle OCR asset manifest has unapproved metadata.',
+    );
+  }
+  assertApprovedPaddleAssetLayout(assetManifest.files);
+
+  const approvedRuntimePaths = new Set([manifestPath]);
+  let declaredBytes = 0;
+  for (const asset of assetManifest.files) {
     if (
-      entry.path === 'offscreen.html' ||
-      offscreenResources.has(entry.path) ||
-      approvedRuntimePaths.has(entry.path)
+      !isRecord(asset) ||
+      typeof asset.path !== 'string' ||
+      !/^[A-Za-z0-9][A-Za-z0-9._/-]*$/u.test(asset.path) ||
+      asset.path.split('/').includes('..') ||
+      !Number.isSafeInteger(asset.bytes) ||
+      asset.bytes < 0 ||
+      !/^[a-f0-9]{64}$/u.test(asset.sha256)
     ) {
-      continue;
-    }
-    assertNoOcrRuntimeArtifact(entry.path);
-  }
-
-  const remoteRuntimePattern =
-    /(?:cdn\.jsdelivr\.net|unpkg\.com)\/(?:npm\/)?(?:@tesseract\.js-data|tesseract\.js(?:-core)?)(?:@|\/)|raw\.githubusercontent\.com\/tesseract-ocr\/tessdata/iu;
-  for (const [relativePath, text] of executableTextByPath) {
-    if (remoteRuntimePattern.test(text)) {
       throw new ArtifactError(
-        `Remote OCR runtime fallback found in artifact: ${relativePath}`,
+        'Packaged Paddle OCR asset manifest contains an invalid entry.',
       );
     }
+    const relativePath = `ocr/paddle/${asset.path}`;
+    if (approvedRuntimePaths.has(relativePath)) {
+      throw new ArtifactError(
+        `Packaged Paddle OCR asset manifest repeats: ${relativePath}`,
+      );
+    }
+    approvedRuntimePaths.add(relativePath);
+    if (!filePaths.has(relativePath)) {
+      throw new ArtifactError(
+        `Paddle OCR artifact is missing declared asset: ${relativePath}`,
+      );
+    }
+    const contents = await readFile(path.join(root, ...relativePath.split('/')));
+    if (contents.byteLength !== asset.bytes) {
+      throw new ArtifactError(`Paddle OCR asset byte count changed: ${relativePath}`);
+    }
+    const digest = createHash('sha256').update(contents).digest('hex');
+    if (digest !== asset.sha256) {
+      throw new ArtifactError(`Paddle OCR asset hash changed: ${relativePath}`);
+    }
+    declaredBytes += contents.byteLength;
+  }
+  if (
+    declaredBytes !== assetManifest.totalBytes ||
+    declaredBytes > MAX_UNPACKED_ARTIFACT_BYTES
+  ) {
+    throw new ArtifactError(
+      `Paddle OCR asset budget mismatch: declared ${assetManifest.totalBytes}, measured ${declaredBytes}.`,
+    );
+  }
+
+  const workerPath = 'ocr/paddle/worker/worker-entry.js';
+  const worker = await readFile(path.join(root, ...workerPath.split('/')), 'utf8');
+  for (const marker of [
+    'worker-transport-request',
+    'worker-transport-response',
+    '__SIMUL_EXPLICIT_LOCAL_PADDLE_MODEL_REQUIRED__',
+  ]) {
+    if (!worker.includes(marker)) {
+      throw new ArtifactError(
+        `Packaged Paddle OCR Worker is missing local transport marker: ${marker}`,
+      );
+    }
+  }
+  if (
+    /paddle-model-ecology\.bj\.bcebos\.com|cdn\.jsdelivr\.net|unpkg\.com/iu.test(worker)
+  ) {
+    throw new ArtifactError(
+      'Packaged Paddle OCR Worker contains a remote runtime fallback.',
+    );
+  }
+  return approvedRuntimePaths;
+}
+
+function assertApprovedPaddleAssetLayout(files) {
+  const expected = [
+    ['licenses/CLIPPER_BOOST-1.0.txt', 'license', 'https://www.boost.org/LICENSE_1_0.txt'],
+    ['licenses/JS-YAML_MIT.txt', 'license', 'npm:js-yaml@4.3.0/LICENSE'],
+    ['licenses/ONNXRUNTIME_MIT.txt', 'license', 'https://raw.githubusercontent.com/microsoft/onnxruntime/v1.24.3/LICENSE'],
+    ['licenses/OPENCV_APACHE-2.0.txt', 'license', 'npm:@techstark/opencv-js@4.10.0-release.1/LICENSE'],
+    ['licenses/PADDLEOCR_APACHE-2.0.txt', 'license', `https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/${APPROVED_PADDLE_OCR_JS_GIT_HEAD}/LICENSE`],
+    ['models/PP-OCRv6_tiny_det_onnx_infer.tar', 'detection-model-archive', 'https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_tiny_det_onnx_infer.tar'],
+    ['models/PP-OCRv6_tiny_rec_onnx_infer.tar', 'recognition-model-archive', 'https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_tiny_rec_onnx_infer.tar'],
+    ['runtime/ort-wasm-simd-threaded.wasm', 'wasm-runtime', 'npm:onnxruntime-web@1.24.3/dist/ort-wasm-simd-threaded.wasm'],
+    ['THIRD_PARTY_NOTICES.md', 'notice', 'repo:legal/paddleocr-js-v0.4.2-third-party-notices.md'],
+    ['worker/worker-entry.js', 'module-worker', 'npm:@paddleocr/paddleocr-js@0.4.2/dist/assets/worker-entry-C9UNuyOJ.js'],
+  ];
+  if (
+    files.length !== expected.length ||
+    !expected.every(([approvedPath, approvedRole, approvedSource], index) => {
+      const asset = files[index];
+      return isRecord(asset) &&
+        asset.path === approvedPath &&
+        asset.role === approvedRole &&
+        asset.source === approvedSource;
+    })
+  ) {
+    throw new ArtifactError(
+      'Packaged Paddle OCR asset manifest has an unapproved path, role, source, or ordering.',
+    );
   }
 }
 
@@ -1607,6 +1946,13 @@ export async function assertOcrProviderDependenciesApproved(
       );
     }
   }
+  for (const name of Object.keys(APPROVED_PADDLE_TRANSITIVE_DEPENDENCIES)) {
+    if (name in directDependencies) {
+      throw new ArtifactError(
+        `Paddle OCR transitive dependency must not become a direct dependency: ${name}.`,
+      );
+    }
+  }
   for (const field of [
     'dependencies',
     'devDependencies',
@@ -1645,13 +1991,18 @@ export async function assertOcrProviderDependenciesApproved(
     APPROVED_OCR_PROVIDER_DEPENDENCIES,
   )) {
     if (
-      lockRootDependencies[name] !== version ||
-      packages[`node_modules/${name}`]?.version !== version
+      lockRootDependencies[name] !== version
     ) {
       throw new ArtifactError(
         `package-lock.json must pin the approved OCR provider exactly: ${name}@${version}.`,
       );
     }
+    assertApprovedOcrLockMetadata(packages, name);
+  }
+  for (const [name] of Object.entries(
+    APPROVED_PADDLE_TRANSITIVE_DEPENDENCIES,
+  )) {
+    assertApprovedOcrLockMetadata(packages, name);
   }
   for (const [packagePath, metadata] of Object.entries(packages)) {
     const pathDependency = forbiddenDependencyFromPackagePath(packagePath);
@@ -1675,6 +2026,22 @@ export async function assertOcrProviderDependenciesApproved(
     }
   }
   inspectLegacyLockDependencies(lockJson?.dependencies);
+}
+
+function assertApprovedOcrLockMetadata(packages, name) {
+  const expected = APPROVED_OCR_PACKAGE_LOCK_METADATA[name];
+  const actual = packages[`node_modules/${name}`];
+  if (
+    !isRecord(expected) ||
+    !isRecord(actual) ||
+    actual.version !== expected.version ||
+    actual.resolved !== expected.resolved ||
+    actual.integrity !== expected.integrity
+  ) {
+    throw new ArtifactError(
+      `package-lock.json must pin exact approved OCR registry metadata: ${name}@${expected?.version ?? 'unknown'}.`,
+    );
+  }
 }
 
 function assertDependencyRecordAbsent(dependencies, context, prefix) {
@@ -2093,8 +2460,15 @@ async function main() {
     console.log(`Synchronized validated Chrome artifact: ${target}`);
     return;
   }
+  if (command === 'check-ocr-paddle-trial') {
+    const trial = await checkOcrPaddleTrial();
+    console.log(
+      `Verified local Paddle-only OCR trial (${trial.unpackedBytes} bytes).`,
+    );
+    return;
+  }
   throw new ArtifactError(
-    'Usage: node tools/extension-artifact.mjs <check|sync>',
+    'Usage: node tools/extension-artifact.mjs <check|sync|check-ocr-paddle-trial>',
   );
 }
 

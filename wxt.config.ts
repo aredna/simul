@@ -1,5 +1,7 @@
 import { parse, type Comment } from 'acorn';
-import { readFileSync } from 'node:fs';
+import { readFileSync, readdirSync } from 'node:fs';
+import { relative, resolve } from 'node:path';
+import { fileURLToPath, pathToFileURL } from 'node:url';
 import { defineConfig } from 'wxt';
 import {
   createOcrBuildProfilePlugin,
@@ -8,8 +10,10 @@ import {
 
 const ocrBuildProfile = readOcrBuildProfile(process.env);
 const tesseractEnabled = ocrBuildProfile.enabledProviderIds.includes('tesseract');
+const paddleEnabled = ocrBuildProfile.enabledProviderIds.includes('paddleocr-wasm');
 const offscreenOcrEnabled = ocrBuildProfile.enabledProviderIds.some((id) =>
-  id === 'tesseract' || id === 'chrome-text-detector',
+  id === 'tesseract' || id === 'chrome-text-detector' ||
+  id === 'paddleocr-wasm',
 );
 const releaseLegalFiles = Object.freeze([
   { source: new URL('./LICENSE', import.meta.url), fileName: 'LICENSE' },
@@ -18,6 +22,42 @@ const releaseLegalFiles = Object.freeze([
     fileName: 'THIRD_PARTY_NOTICES.md',
   },
 ]);
+const selectedOcrAssets = Object.freeze([
+  ...(tesseractEnabled
+    ? [
+        ...collectFiles(
+          new URL('./vendor/ocr/tesseract/', import.meta.url),
+          'ocr/tesseract',
+        ),
+        {
+          source: new URL('./vendor/ocr/THIRD_PARTY_NOTICES.md', import.meta.url),
+          fileName: 'ocr/THIRD_PARTY_NOTICES.md',
+        },
+      ]
+    : []),
+  ...(paddleEnabled
+    ? collectFiles(
+        new URL('./vendor/ocr/paddle/', import.meta.url),
+        'ocr/paddle',
+      )
+    : []),
+]);
+
+function collectFiles(
+  directory: URL,
+  outputPrefix: string,
+): Array<{ readonly source: URL; readonly fileName: string }> {
+  const root = resolve(fileURLToPath(directory));
+  return readdirSync(directory, { recursive: true, withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) => {
+      const sourcePath = resolve(entry.parentPath, entry.name);
+      return {
+        source: pathToFileURL(sourcePath),
+        fileName: `${outputPrefix}/${relative(root, sourcePath).replaceAll('\\', '/')}`,
+      };
+    });
+}
 
 function stripSourceMapDirectives(code: string): string {
   const comments: Comment[] = [];
@@ -61,7 +101,7 @@ function removeRemoteTesseractFallbacks(code: string): string {
 
 export default defineConfig({
   outDir: process.env.SIMUL_WXT_OUT_DIR || '.output',
-  publicDir: tesseractEnabled ? 'vendor' : 'public',
+  publicDir: 'public',
   hooks: {
     'build:manifestGenerated': (_wxt, manifest) => {
       // The toolbar action launches the saved surface directly. Retaining a
@@ -83,12 +123,18 @@ export default defineConfig({
         ],
       }),
   vite: () => ({
+    define: {
+      __SIMUL_OCR_PADDLE_COMPILED__: JSON.stringify(paddleEnabled),
+    },
     plugins: [
       createOcrBuildProfilePlugin(process.env),
       {
         name: 'simul-release-legal-files',
         generateBundle() {
-          for (const legalFile of releaseLegalFiles) {
+          for (const legalFile of [
+            ...releaseLegalFiles,
+            ...selectedOcrAssets,
+          ]) {
             this.emitFile({
               type: 'asset',
               fileName: legalFile.fileName,
@@ -139,7 +185,7 @@ export default defineConfig({
       ...(offscreenOcrEnabled ? ['offscreen' as const] : []),
     ],
     optional_host_permissions: ['<all_urls>'],
-    ...(tesseractEnabled
+    ...(tesseractEnabled || paddleEnabled
       ? {
           content_security_policy: {
             extension_pages:

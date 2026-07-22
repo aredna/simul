@@ -707,9 +707,12 @@ describe('ImageTranslationController', () => {
       quality: {
         candidateRegions: 1,
         acceptedRegions: 1,
+        corroboratedRegions: 0,
+        uncertainRegions: 0,
         rejectedBlankRegions: 0,
         rejectedPunctuationRegions: 0,
         rejectedLowConfidenceRegions: 0,
+        rejectedUncorroboratedRegions: 0,
       },
       result: {
         providerId: 'tesseract' as const,
@@ -814,9 +817,12 @@ describe('ImageTranslationController', () => {
         stage: 'recognition-quality',
         candidateRegions: 1,
         acceptedRegions: 1,
+        corroboratedRegions: 0,
+        uncertainRegions: 0,
         rejectedBlankRegions: 0,
         rejectedPunctuationRegions: 0,
         rejectedLowConfidenceRegions: 0,
+        rejectedUncorroboratedRegions: 0,
       },
       {
         stage: 'recognition-complete',
@@ -1132,6 +1138,7 @@ describe('ImageTranslationController', () => {
       scanPolicy: 'visible-only' as const,
       skipSmallImages: false,
       providerOrder: ['tesseract'] as const,
+      ocrMinimumConfidence: 0.65 as const,
       sourceLanguage: 'en' as const,
       targetLanguage: 'ja' as const,
       translationIdle: true,
@@ -1145,6 +1152,18 @@ describe('ImageTranslationController', () => {
 
     await vi.waitFor(() => expect(recognize).toHaveBeenCalledTimes(2));
     await vi.waitFor(() => expect(diagnostics).toContain('projected'));
+    controller.configure({
+      ...initial,
+      targetLanguage: 'fr',
+      ocrMinimumConfidence: 0.8,
+    });
+    await vi.waitFor(() => expect(recognize).toHaveBeenCalledTimes(3));
+    expect(recognize.mock.calls[0]?.[1]).toMatchObject({
+      minimumConfidence: 0.65,
+    });
+    expect(recognize.mock.calls[2]?.[1]).toMatchObject({
+      minimumConfidence: 0.8,
+    });
     expect(controller.busy).toBe(false);
     controller.dispose();
   });

@@ -39,6 +39,7 @@ describe('parseCompanionPreferences', () => {
       lastLaunchSurface: 'side-panel',
       popoutTabMode: 'locked',
       imageTranslationEnabled: false,
+      ocrMinimumConfidence: 0.65,
       imageTextProviderOrder: [
         'chrome-text-detector',
         'tesseract',
@@ -73,6 +74,7 @@ describe('parseCompanionPreferences', () => {
       lastLaunchSurface: 'side-panel',
       popoutTabMode: 'locked',
       imageTranslationEnabled: false,
+      ocrMinimumConfidence: 0.65,
       imageTextProviderOrder: [
         'chrome-text-detector',
         'tesseract',
@@ -119,6 +121,7 @@ describe('parseCompanionPreferences', () => {
       lastLaunchSurface: 'side-panel',
       popoutTabMode: 'locked',
       imageTranslationEnabled: false,
+      ocrMinimumConfidence: 0.65,
       imageTextProviderOrder: [
         'chrome-text-detector',
         'tesseract',
@@ -224,6 +227,7 @@ describe('parseCompanionPreferences', () => {
     const rawOrder = ['paddleocr-wasm', 'unknown', 'paddleocr-wasm', 'tesseract'];
     const parsed = parseCompanionPreferences({
       imageTranslationEnabled: true,
+      ocrMinimumConfidence: 0.8,
       imageTextProviderOrder: rawOrder,
       imageScanPolicy: 'visible-only',
       skipSmallImages: false,
@@ -233,6 +237,7 @@ describe('parseCompanionPreferences', () => {
 
     expect(parsed).toMatchObject({
       imageTranslationEnabled: true,
+      ocrMinimumConfidence: 0.8,
       imageTextProviderOrder: [
         'paddleocr-wasm',
         'tesseract',
@@ -259,6 +264,9 @@ describe('parseCompanionPreferences', () => {
       'paddleocr-wasm',
       'chromium-screen-ai',
     ]);
+    expect(parseCompanionPreferences({
+      ocrMinimumConfidence: 0.66,
+    }).ocrMinimumConfidence).toBe(0.65);
   });
 });
 

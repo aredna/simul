@@ -25,6 +25,7 @@ import {
 } from './preferences';
 import { isImageScanPolicy } from './ocr/contracts';
 import { readExactImageTextProviderOrder } from './ocr/known-provider-ids';
+import { isOcrMinimumConfidence } from './ocr/result-quality';
 import { isSelectableReplicaFidelityPolicy } from './replica/fidelity-policy';
 import { isSupportedLanguage } from './translation-provider';
 
@@ -97,7 +98,11 @@ export class PreferenceCoordinator {
   private async apply(
     command: PreferenceCommand,
   ): Promise<PreferenceCommandResult> {
-    const current = parseCompanionPreferences(await this.adapter.load());
+    const stored = await this.adapter.load();
+    const current = parseCompanionPreferences(stored);
+    const repairStoredOcrMinimumConfidence =
+      !isRecord(stored) ||
+      !isOcrMinimumConfidence(stored.ocrMinimumConfidence);
 
     if (command.type === 'simul:preferences:set-display') {
       const preferences = withDisplayMode(current, command.displayMode);
@@ -128,7 +133,10 @@ export class PreferenceCoordinator {
 
     if (command.type === 'simul:preferences:reconcile') {
       const preferences = await this.reconcile(current);
-      if (!samePreferences(current, preferences)) {
+      if (
+        repairStoredOcrMinimumConfidence ||
+        !samePreferences(current, preferences)
+      ) {
         await this.adapter.save(preferences);
       }
       return result(preferences, true);
@@ -142,7 +150,10 @@ export class PreferenceCoordinator {
         command.pageUrl,
       ).filter((origin) => !retained.has(origin));
       await this.removeIfPresent(cleanup);
-      if (!samePreferences(current, preferences)) {
+      if (
+        repairStoredOcrMinimumConfidence ||
+        !samePreferences(current, preferences)
+      ) {
         await this.adapter.save(preferences);
       }
       return result(preferences, false);
@@ -498,6 +509,7 @@ function readViewSettingsPatch(
 
 const IMAGE_ANALYSIS_SETTING_KEYS = new Set([
   'imageTranslationEnabled',
+  'ocrMinimumConfidence',
   'imageTextProviderOrder',
   'imageScanPolicy',
   'skipSmallImages',
@@ -519,6 +531,10 @@ function readImageAnalysisSettingsPatch(
   if ('imageTranslationEnabled' in value) {
     if (typeof value.imageTranslationEnabled !== 'boolean') return undefined;
     patch.imageTranslationEnabled = value.imageTranslationEnabled;
+  }
+  if ('ocrMinimumConfidence' in value) {
+    if (!isOcrMinimumConfidence(value.ocrMinimumConfidence)) return undefined;
+    patch.ocrMinimumConfidence = value.ocrMinimumConfidence;
   }
   if ('imageTextProviderOrder' in value) {
     const order = readExactImageTextProviderOrder(
