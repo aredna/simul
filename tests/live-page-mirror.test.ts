@@ -1028,6 +1028,7 @@ describe('live mirror boundary', () => {
       disabled: true,
       multiple: true,
       open: true,
+      size: 0,
     });
     expect(selectNode?.children).toHaveLength(3);
     expect(serialized).toContain('Regions');
@@ -1343,9 +1344,10 @@ describe('live mirror boundary', () => {
     const options = [
       ...(disclosure?.querySelectorAll<HTMLElement>('[data-simul-select-option]') ?? []),
     ];
-    expect(disclosure?.tagName).toBe('DETAILS');
-    expect(disclosure?.hasAttribute('open')).toBe(true);
+    expect(disclosure?.tagName).toBe('DIV');
+    expect(disclosure?.hasAttribute('open')).toBe(false);
     expect(disclosure?.dataset.simulSelectMultiple).toBe('true');
+    expect(disclosure?.dataset.simulSelectPresentation).toBe('list');
     expect(list?.style.overflowY).toBe('auto');
     expect(options.map((option) => option.textContent)).toEqual([
       '[Tokyo]',
@@ -1354,7 +1356,7 @@ describe('live mirror boundary', () => {
     expect(options[0]?.getAttribute('aria-selected')).toBe('true');
     expect(options[1]?.getAttribute('aria-disabled')).toBe('true');
     expect(translated).toEqual(['Regions', 'Tokyo', 'Osaka']);
-    expect(disclosure?.querySelector('summary')?.textContent).toBe('[Tokyo]');
+    expect(disclosure?.querySelector('[data-simul-select-summary]')).toBeNull();
     expect(result.root.querySelector('select')).toBeNull();
     expect(result.root.querySelector('script')).toBeNull();
   });

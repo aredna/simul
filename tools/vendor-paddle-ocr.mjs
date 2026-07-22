@@ -16,8 +16,11 @@ export const PADDLE_OCR_JS_VERSION = '0.4.2';
 export const PADDLE_OCR_JS_GIT_HEAD =
   'e5046169b225bcdfbe25d45b4e809ff0f1a69c2c';
 export const ONNXRUNTIME_WEB_VERSION = '1.24.3';
+export const PADDLE_BUNDLED_JS_YAML_VERSION = '4.1.1';
 export const APPROVED_PADDLE_OCR_WORKER_SHA256 =
   '477db3f009c118823a5f9ebe15f1e96c1c464165715ba28a9884290f61addf52';
+export const APPROVED_JS_YAML_LICENSE_SHA256 =
+  'a07bc24468b9654ce76a547d47a2db282d07733b715db4c73a98bd63961f9550';
 export const APPROVED_ONNXRUNTIME_WASM_SHA256 =
   'be0e129949062ad50290ef94683fac8be5bb6156f709e030b7a5f1661a2f6c17';
 export const APPROVED_ONNXRUNTIME_LOADER_SHA256 =
@@ -178,6 +181,7 @@ export async function vendorPaddleOcr({ fetchImpl = fetch } = {}) {
       APPROVED_PADDLE_OCR_WORKER_SHA256,
       'Pinned PaddleOCR.js module Worker',
     );
+    assertPaddleWorkerAttributions(rawWorker.toString('utf8'));
     await emitCatalogFile(
       stagedDirectory,
       files,
@@ -194,13 +198,22 @@ export async function vendorPaddleOcr({ fetchImpl = fetch } = {}) {
       'license',
       'npm:@techstark/opencv-js@4.10.0-release.1/LICENSE',
     );
+    const jsYamlLicense = await readFile(path.resolve(
+      nodeModules,
+      'js-yaml/LICENSE',
+    ));
+    assertApprovedSourceHash(
+      jsYamlLicense,
+      APPROVED_JS_YAML_LICENSE_SHA256,
+      `js-yaml ${PADDLE_BUNDLED_JS_YAML_VERSION} license`,
+    );
     await emitCatalogFile(
       stagedDirectory,
       files,
       'licenses/JS-YAML_MIT.txt',
-      await readFile(path.resolve(nodeModules, 'js-yaml/LICENSE')),
+      jsYamlLicense,
       'license',
-      'npm:js-yaml@4.3.0/LICENSE',
+      `npm:js-yaml@${PADDLE_BUNDLED_JS_YAML_VERSION}/LICENSE`,
     );
     await emitCatalogFile(
       stagedDirectory,
@@ -675,6 +688,20 @@ export function patchPaddleDirectModule(source) {
     throw new Error('The Paddle direct module patch did not close its runtime boundary.');
   }
   return patched;
+}
+
+export function assertPaddleWorkerAttributions(source) {
+  const jsYamlVersions = [...source.matchAll(
+    /\/\*!\s+js-yaml\s+([^\s]+)\s+/gu,
+  )].map((match) => match[1]);
+  if (
+    jsYamlVersions.length !== 1 ||
+    jsYamlVersions[0] !== PADDLE_BUNDLED_JS_YAML_VERSION
+  ) {
+    throw new Error(
+      `The pinned Paddle bundle must contain exactly one js-yaml ${PADDLE_BUNDLED_JS_YAML_VERSION} attribution.`,
+    );
+  }
 }
 
 async function main() {

@@ -12,6 +12,7 @@ import {
   type SourceImageObserverEnvironment,
 } from './source-image-observer';
 import {
+  hasSourceImageCaptureBlockingAncestor,
   hasSourcePrivateOrActivationElementAncestor,
 } from '../replica/source-privacy-policy';
 import type { ReplicaSourceDocumentIdentity } from '../replica/source-identity';
@@ -201,7 +202,7 @@ export class ImageSourceSession {
   #measure(descriptor: SourceImageDescriptor): SourceImageCaptureMetrics | undefined {
     const node = this.environment.resolveNode(descriptor.nodeId);
     if (!isImageElement(node) || !node.isConnected) return undefined;
-    if (hasSourcePrivateOrActivationElementAncestor(node)) return undefined;
+    if (hasSourceImageCaptureBlockingAncestor(node)) return undefined;
     const rect = node.getBoundingClientRect();
     const viewportWidth = finitePositive(this.environment.window.innerWidth);
     const viewportHeight = finitePositive(this.environment.window.innerHeight);

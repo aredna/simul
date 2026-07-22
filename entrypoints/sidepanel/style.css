@@ -365,19 +365,11 @@ progress { width: 100%; height: 7px; accent-color: var(--green); }
   pointer-events: auto !important;
 }
 
-.replica-replay-mount details[data-simul-select-facsimile],
-.replica-replay-mount details[data-simul-select-facsimile] > summary,
-.replica-replay-mount details[data-simul-select-facsimile] [data-simul-select-options] {
+.replica-replay-mount [data-simul-select-facsimile],
+.replica-replay-mount [data-simul-select-summary],
+.replica-replay-mount [data-simul-select-options],
+[data-simul-replica-disclosure-overlay="v1"] {
   pointer-events: auto !important;
-}
-
-.replica-replay-mount:has(details[data-simul-select-facsimile][open]),
-.replica-replay-mount *:has(details[data-simul-select-facsimile][open]),
-.visual-page-root:has(details[data-simul-select-facsimile][open]),
-.visual-page-root *:has(details[data-simul-select-facsimile][open]) {
-  overflow: visible !important;
-  clip-path: none !important;
-  contain: none !important;
 }
 
 .replica-replay-mount .rr-player,

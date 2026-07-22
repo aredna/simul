@@ -496,15 +496,16 @@ function createJob(
     });
   }
   if (providerId === 'tesseract-wasm-direct') {
+    const languageGroup = tesseractLanguageGroupForProvider(providerId, route);
     if (
       !TESSERACT_WASM_DIRECT_COMPILED ||
-      !route.languageGroup ||
+      !languageGroup ||
       !route.modelVersion
     ) return undefined;
     return Object.freeze({
       ...base,
       providerId,
-      languageGroup: route.languageGroup,
+      languageGroup,
       providerVersion: 'tesseract-wasm-0.11.0',
       modelVersion: route.modelVersion,
     });
@@ -545,15 +546,15 @@ function recognitionCacheKey(
               'tesseract-wasm-0.11.0',
               route.modelVersion ?? '',
               route.sourceLanguage ?? '',
+              tesseractLanguageGroupForProvider(providerId, route) ?? '',
+            ]
+          : [
+              providerId,
+              'tesseract.js-7.0.0',
+              route.modelVersion ?? '',
+              route.sourceLanguage ?? '',
               route.languageGroup ?? '',
             ]
-        : [
-          providerId,
-          'tesseract.js-7.0.0',
-          route.modelVersion ?? '',
-          route.sourceLanguage ?? '',
-          route.languageGroup ?? '',
-        ]
   );
   return JSON.stringify([
     'image-text-v3',
@@ -564,6 +565,17 @@ function recognitionCacheKey(
     pixels.bitmapHeight,
     pixels.pixelHash,
   ]);
+}
+
+/** The direct runtime loads one model; the wrapper can combine horizontal/vertical Japanese. */
+function tesseractLanguageGroupForProvider(
+  providerId: RuntimeImageTextProviderId,
+  route: ImageRecognitionRoute,
+): string | undefined {
+  return providerId === 'tesseract-wasm-direct' &&
+      route.languageGroup === 'jpn+jpn_vert'
+    ? 'jpn'
+    : route.languageGroup;
 }
 
 function effectiveRuntimeOrder(

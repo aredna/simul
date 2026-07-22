@@ -3,7 +3,7 @@ import {
   type ReplicaSourceDocumentIdentity,
 } from '../replica/source-identity';
 import {
-  hasSourcePrivateOrActivationElementAncestor,
+  hasSourceImageCaptureBlockingAncestor,
 } from '../replica/source-privacy-policy';
 import {
   receiverSafeAnimationFrameCanceller,
@@ -60,6 +60,15 @@ export const MAX_SOURCE_IMAGE_OBSERVER_SUBSCRIBERS = 16;
 export const MAX_SOURCE_IMAGE_IDENTITY_RETRY_FRAMES = 4;
 const MAX_IMAGE_DIMENSION = 1_000_000;
 const MAX_PRIVATE_TOKEN_INPUT = 64 * 1024;
+const IMAGE_CAPTURE_ROUTING_ATTRIBUTES = new Set([
+  'aria-controls',
+  'aria-expanded',
+  'aria-haspopup',
+  'aria-pressed',
+  'contenteditable',
+  'href',
+  'role',
+]);
 
 type PrivateSourceToken =
   | { readonly kind: 'exact'; readonly value: string }
@@ -260,6 +269,11 @@ export class SourceImageObserver {
         'style',
         'lang',
         'role',
+        'href',
+        'aria-controls',
+        'aria-expanded',
+        'aria-haspopup',
+        'aria-pressed',
         'contenteditable',
       ],
       childList: true,
@@ -530,27 +544,42 @@ export class SourceImageObserver {
 
   #onMutations(records: readonly MutationRecord[]): void {
     if (!this.#started) return;
+    const observedAtMutationStart = new Set(this.#states.keys());
+    const routingCandidates = new Set<HTMLImageElement>();
+    let refreshAllRouting = false;
     for (const record of records) {
       if (record.type === 'childList') {
         for (const node of record.removedNodes) {
           for (const image of collectImages(node)) this.#remove(image);
+          if (containsHtmlBaseElement(node)) refreshAllRouting = true;
         }
         for (const node of record.addedNodes) {
           for (const image of collectImages(node)) this.#discover(image);
+          if (containsHtmlBaseElement(node)) refreshAllRouting = true;
         }
       }
       if (record.type !== 'attributes' || !isElement(record.target)) continue;
       const attributeName = record.attributeName?.toLowerCase();
+      if (
+        attributeName === 'href' &&
+        record.target.namespaceURI === 'http://www.w3.org/1999/xhtml' &&
+        record.target.localName.toLowerCase() === 'base'
+      ) {
+        refreshAllRouting = true;
+        continue;
+      }
       if (attributeName === 'lang') {
         for (const image of collectImages(record.target)) {
           // Routing metadata is part of OCR content identity even though the
           // raw language attribute never leaves the source adapter.
-          this.#refresh(image, true);
+          routingCandidates.add(image);
         }
         continue;
       }
-      if (attributeName === 'role' || attributeName === 'contenteditable') {
-        for (const image of collectImages(record.target)) this.#refresh(image);
+      if (attributeName && IMAGE_CAPTURE_ROUTING_ATTRIBUTES.has(attributeName)) {
+        for (const image of collectImages(record.target)) {
+          routingCandidates.add(image);
+        }
         continue;
       }
       if (isImageElement(record.target)) {
@@ -567,6 +596,18 @@ export class SourceImageObserver {
         }
       }
     }
+    if (refreshAllRouting) {
+      // A base URL can change link eligibility for any relative anchor, but it
+      // does not change the image pixels by itself. Re-evaluate globally while
+      // allowing unchanged public images to remain coalesced.
+      this.refreshAll();
+    }
+    for (const image of routingCandidates) {
+      // A global refresh already discovers newly eligible images with a fresh
+      // revision. Force invalidation only for work that predated this batch.
+      if (refreshAllRouting && !observedAtMutationStart.has(image)) continue;
+      this.#refresh(image, true);
+    }
   }
 
   #visibility(image: HTMLImageElement): ImageVisibilityTier {
@@ -576,7 +617,7 @@ export class SourceImageObserver {
   }
 
   #isPrivate(image: HTMLImageElement): boolean {
-    if (hasSourcePrivateOrActivationElementAncestor(image)) return true;
+    if (hasSourceImageCaptureBlockingAncestor(image)) return true;
     if (!this.#environment.isPrivateImage) return false;
     try {
       return this.#environment.isPrivateImage(image);
@@ -673,6 +714,17 @@ function collectImages(node: Node): HTMLImageElement[] {
   if (isImageElement(node)) images.push(node);
   for (const image of node.querySelectorAll('img')) images.push(image);
   return images;
+}
+
+function containsHtmlBaseElement(node: Node): boolean {
+  if (!isElement(node)) return false;
+  if (
+    node.namespaceURI === 'http://www.w3.org/1999/xhtml' &&
+    node.localName.toLowerCase() === 'base'
+  ) return true;
+  return [...node.querySelectorAll('base')].some((candidate) =>
+    candidate.namespaceURI === 'http://www.w3.org/1999/xhtml'
+  );
 }
 
 function readPrivateSourceToken(image: HTMLImageElement): PrivateSourceToken {

@@ -23,6 +23,18 @@ import type {
   TranslationProvider,
   TranslationSession,
 } from '../translation-provider';
+import { canonicalizeLanguageTag } from '../translation-provider';
+import {
+  AUTO_LANGUAGE_PROBE_MINIMUM_CONFIDENCE,
+  AutoImageLanguageProbe,
+  createAutoLanguageProbeSampleIdentity,
+  MAX_AUTO_LANGUAGE_PROBE_ATTEMPTS,
+  MAX_AUTO_LANGUAGE_PROBE_IMAGES,
+  strongAutoLanguageScriptEvidence,
+  type AutoLanguageProbeEvidence,
+  type AutoLanguageProbeInconclusiveReason,
+  type AutoLanguageProbeSampleIdentity,
+} from './auto-language-probe';
 import type {
   ImageScanPolicy,
   SourceImageChange,
@@ -82,6 +94,7 @@ export interface ImageTranslationConfiguration {
   readonly ocrMinimumConfidence?: OcrMinimumConfidence;
   readonly sourceLanguage: SourceLanguagePreference;
   readonly detectedSourceLanguage?: SupportedLanguage;
+  readonly pageLanguageResolutionPending?: boolean;
   readonly targetLanguage: SupportedLanguage;
   readonly translationIdle: boolean;
 }
@@ -217,6 +230,30 @@ export type ImageTranslationDiagnostic =
       bitmapWidth?: number;
       bitmapHeight?: number;
       attempt?: number;
+    }>
+  | Readonly<{
+      stage: 'auto-language-probe-started';
+      maxImages: number;
+      maxAttempts: number;
+    }>
+  | Readonly<{
+      stage: 'auto-language-probe-attempt';
+      attempt: number;
+      sample: number;
+      candidateLanguage: SupportedLanguage;
+    }>
+  | Readonly<{
+      stage: 'auto-language-probe-resolved';
+      language: SupportedLanguage;
+      evidence: AutoLanguageProbeEvidence;
+      attempts: number;
+      samples: number;
+    }>
+  | Readonly<{
+      stage: 'auto-language-probe-inconclusive';
+      reason: AutoLanguageProbeInconclusiveReason;
+      attempts: number;
+      samples: number;
     }>;
 
 export interface ImageTranslationControllerEnvironment {
@@ -239,6 +276,18 @@ export interface ImageTranslationControllerEnvironment {
   readonly translationMemory?: TranslationMemory;
   readonly onDiagnostic?: (diagnostic: ImageTranslationDiagnostic) => void;
   readonly onBusyChange?: (busy: boolean) => void;
+  readonly detectLanguage?: (
+    text: string,
+  ) => Promise<{
+    isReliable: boolean;
+    languages: readonly { language: string; percentage: number }[];
+  }>;
+  readonly onAutoLanguageDetected?: (
+    language: SupportedLanguage,
+    evidence: AutoLanguageProbeEvidence,
+    document: ReplicaSourceDocumentIdentity,
+  ) => void;
+  readonly now?: () => number;
   readonly setTimer?: TimeoutScheduler;
   readonly clearTimer?: TimeoutCanceller;
   readonly projector?: Partial<
@@ -269,6 +318,10 @@ export class ImageTranslationController {
     pixelHash: string;
     attempts: number;
   }>();
+  readonly #probeSampleIdentities = new Map<
+    number,
+    AutoLanguageProbeSampleIdentity
+  >();
   #configuration: ImageTranslationConfiguration;
   #request: ReplicaCaptureRequest | undefined;
   #sourceWindowId: number | undefined;
@@ -292,11 +345,20 @@ export class ImageTranslationController {
   #sourceReconnectUsed = false;
   #configurationDiagnosticKey: string | undefined;
   #nextJobOrdinal = 0;
+  #autoLanguageProbe: AutoImageLanguageProbe | undefined;
+  #probeDetectedSourceLanguage: SupportedLanguage | undefined;
+  #probeSchedulerRebuildRequested = false;
+  #probeInconclusiveReported = false;
+  #probeStartedReported = false;
+  #probeDeadlineTimer: ReturnType<typeof setTimeout> | undefined;
+  #probeLifetimeAbortController: AbortController | undefined;
+  readonly #now: () => number;
 
   constructor(private readonly environment: ImageTranslationControllerEnvironment) {
     this.#translationMemory = environment.translationMemory ?? new TranslationMemory();
     this.#setTimer = receiverSafeTimeoutScheduler(environment.setTimer);
     this.#clearTimer = receiverSafeTimeoutCanceller(environment.clearTimer);
+    this.#now = environment.now ?? (() => Date.now());
     this.#configuration = {
       enabled: false,
       scanPolicy: 'visible-first-background-prescan',
@@ -304,6 +366,7 @@ export class ImageTranslationController {
       providerOrder: [],
       ocrMinimumConfidence: repairOcrMinimumConfidence(undefined),
       sourceLanguage: 'auto',
+      pageLanguageResolutionPending: false,
       targetLanguage: 'en',
       translationIdle: true,
     };
@@ -331,24 +394,30 @@ export class ImageTranslationController {
   configure(configuration: ImageTranslationConfiguration): void {
     if (this.#disposed) return;
     const previous = this.#configuration;
+    const probeConfigurationChanged = autoLanguageProbeConfigurationKey(previous) !==
+      autoLanguageProbeConfigurationKey(configuration);
     this.#configuration = Object.freeze({
       ...configuration,
       providerOrder: Object.freeze([...configuration.providerOrder]),
     });
+    if (probeConfigurationChanged) this.#resetAutoLanguageProbe();
     const enabled = this.#isEnabled();
     const wasEnabled = imageTranslationConfigurationEnabled(previous);
     const pairChanged = pairConfigurationKey(previous) !==
       pairConfigurationKey(this.#configuration);
+    const pageResolutionGateChanged =
+      Boolean(previous.pageLanguageResolutionPending) !==
+      Boolean(this.#configuration.pageLanguageResolutionPending);
     if (!enabled) {
       this.#reportConfigurationState();
       if (wasEnabled || this.#source) this.#stopSource(false);
       this.#beginPair();
       return;
     }
-    if (pairChanged) {
+    if (pairChanged || pageResolutionGateChanged) {
       this.#processingVersion += 1;
       this.#activeAbortController?.abort();
-      this.#beginPair();
+      if (pairChanged) this.#beginPair();
       this.#rebuildScheduler();
     } else {
       this.#scheduler?.configure({
@@ -504,7 +573,7 @@ export class ImageTranslationController {
     this.#projector.dispose();
   }
 
-  async #startSource(): Promise<void> {
+  async #startSource(preserveAutoLanguageProbe = false): Promise<void> {
     const request = this.#request;
     const sourceWindowId = this.#sourceWindowId;
     const document = this.#document;
@@ -515,7 +584,7 @@ export class ImageTranslationController {
       !request.isCurrent() ||
       !this.#isEnabled()
     ) return;
-    this.#stopSource(true);
+    this.#stopSource(true, preserveAutoLanguageProbe);
     const version = ++this.#sourceVersion;
     const abortController = new AbortController();
     this.#sourceAbortController = abortController;
@@ -590,14 +659,17 @@ export class ImageTranslationController {
     ) return;
     this.environment.onDiagnostic?.('source-unavailable');
     if (this.#sourceReconnectUsed) {
-      this.#stopSource(true);
+      this.#stopSource(true, true);
       return;
     }
     this.#sourceReconnectUsed = true;
-    void this.#startSource();
+    void this.#startSource(true);
   }
 
-  #stopSource(retainRequest: boolean): void {
+  #stopSource(
+    retainRequest: boolean,
+    preserveAutoLanguageProbe = false,
+  ): void {
     this.#sourceVersion += 1;
     this.#processingVersion += 1;
     this.#sourceAbortController?.abort();
@@ -615,6 +687,7 @@ export class ImageTranslationController {
     this.#captureRetries.clear();
     this.#emptyRetries.clear();
     this.#projector.clear();
+    if (!preserveAutoLanguageProbe) this.#resetAutoLanguageProbe();
     this.#setMutationQuiet(false, false);
     this.#setProcessing(false);
     if (!retainRequest) {
@@ -704,7 +777,8 @@ export class ImageTranslationController {
       !this.#pixels ||
       !this.#scheduler ||
       this.#scheduler.queued === 0 ||
-      !this.#request?.isCurrent()
+      !this.#request?.isCurrent() ||
+      this.#pageLanguageResolutionBlocksWork()
     ) return;
     void this.#process();
   }
@@ -723,7 +797,8 @@ export class ImageTranslationController {
           processingVersion !== this.#processingVersion ||
           scheduler !== this.#scheduler ||
           !request.isCurrent() ||
-          !this.#isEnabled()
+          !this.#isEnabled() ||
+          this.#pageLanguageResolutionBlocksWork()
         ) return;
         const job = scheduler.takeNext();
         if (!job) return;
@@ -740,6 +815,11 @@ export class ImageTranslationController {
             jobOrdinal,
             abortController.signal,
           );
+          if (this.#probeSchedulerRebuildRequested) {
+            this.#probeSchedulerRebuildRequested = false;
+            this.#rebuildScheduler();
+            return;
+          }
         } catch (error) {
           if (isImageSourceUnavailableError(error)) {
             scheduler.defer(job);
@@ -842,18 +922,29 @@ export class ImageTranslationController {
     if (!this.#isJobCurrent(job, processingVersion, pairEpoch, pairKey)) {
       throw new DOMException('Image job became stale.', 'AbortError');
     }
-    const sourceLanguage = resolveImageSourceLanguage({
+    let sourceLanguage = resolveImageSourceLanguage({
       nearestElementLanguage: pixels.nearestElementLanguage,
       ...(this.#configuration.sourceLanguage === 'auto'
         ? {}
         : { explicitSourceLanguage: this.#configuration.sourceLanguage }),
-      ...(this.#configuration.detectedSourceLanguage
-        ? { detectedPageLanguage: this.#configuration.detectedSourceLanguage }
+      ...(this.#effectiveDetectedSourceLanguage()
+        ? { detectedPageLanguage: this.#effectiveDetectedSourceLanguage() }
         : {}),
     });
     if (!sourceLanguage) {
-      scheduler.settle(job);
-      this.environment.onDiagnostic?.('unsupported-language');
+      sourceLanguage = await this.#probeImageLanguage(
+        pixels,
+        job.descriptor,
+        jobOrdinal,
+        signal,
+      );
+      if (!sourceLanguage) {
+        scheduler.settle(job);
+        this.environment.onDiagnostic?.('unsupported-language');
+        return;
+      }
+      // Promotion changes the pair epoch and rebuilds every descriptor after
+      // this job unwinds, including earlier unresolved samples.
       return;
     }
     const languageGroup = tesseractLanguageGroupFor(sourceLanguage);
@@ -1193,6 +1284,298 @@ export class ImageTranslationController {
     return this.#recognition ??= this.environment.createRecognitionCoordinator();
   }
 
+  async #probeImageLanguage(
+    pixels: AcquiredImagePixels,
+    descriptor: SourceImageDescriptor,
+    jobOrdinal: number,
+    signal: AbortSignal,
+  ): Promise<SupportedLanguage | undefined> {
+    if (
+      this.#configuration.sourceLanguage !== 'auto' ||
+      this.#configuration.detectedSourceLanguage ||
+      this.#probeDetectedSourceLanguage ||
+      this.#probeInconclusiveReported ||
+      this.#configuration.pageLanguageResolutionPending
+    ) return undefined;
+    const configuredConfidence = repairOcrMinimumConfidence(
+      this.#configuration.ocrMinimumConfidence,
+    );
+    const minimumConfidence = configuredConfidence <
+        AUTO_LANGUAGE_PROBE_MINIMUM_CONFIDENCE
+      ? AUTO_LANGUAGE_PROBE_MINIMUM_CONFIDENCE
+      : configuredConfidence;
+    let probe = this.#autoLanguageProbe;
+    if (!probe) {
+      probe = new AutoImageLanguageProbe(this.#now(), minimumConfidence);
+      this.#autoLanguageProbe = probe;
+      const probeAtDeadline = probe;
+      this.#probeLifetimeAbortController = new AbortController();
+      this.#probeDeadlineTimer = this.#setTimer(() => {
+        if (
+          this.#autoLanguageProbe !== probeAtDeadline ||
+          probeAtDeadline.resolvedLanguage ||
+          this.#probeInconclusiveReported
+        ) return;
+        this.#reportProbeInconclusive(probeAtDeadline, 'deadline');
+      }, probe.remainingMs(this.#now()));
+    }
+    if (!this.#probeStartedReported) {
+      this.#probeStartedReported = true;
+      this.environment.onDiagnostic?.(Object.freeze({
+        stage: 'auto-language-probe-started' as const,
+        maxImages: MAX_AUTO_LANGUAGE_PROBE_IMAGES,
+        maxAttempts: MAX_AUTO_LANGUAGE_PROBE_ATTEMPTS,
+      }));
+    }
+    const deadlineReason = probe.inconclusiveReason(this.#now());
+    if (deadlineReason) {
+      this.#reportProbeInconclusive(probe, deadlineReason);
+      return undefined;
+    }
+    const sampleIdentity = this.#probeSampleIdentity(descriptor);
+    const wasKnownImage = probe.hasSample(sampleIdentity);
+    const candidates = probe.candidateLanguages(
+      sampleIdentity,
+      pixels.pixelHash,
+    );
+    if (candidates.length === 0 && !wasKnownImage &&
+        probe.images >= MAX_AUTO_LANGUAGE_PROBE_IMAGES) {
+      this.#reportProbeInconclusive(probe, probe.finalReason());
+      return undefined;
+    }
+    const lifetimeSignal = this.#probeLifetimeAbortController?.signal;
+    if (!lifetimeSignal) return undefined;
+    const probeAbortController = new AbortController();
+    const relayJobAbort = (): void => probeAbortController.abort(signal.reason);
+    const relayLifetimeAbort = (): void =>
+      probeAbortController.abort(lifetimeSignal.reason);
+    if (signal.aborted) relayJobAbort();
+    else signal.addEventListener('abort', relayJobAbort, { once: true });
+    if (lifetimeSignal.aborted) relayLifetimeAbort();
+    else lifetimeSignal.addEventListener('abort', relayLifetimeAbort, { once: true });
+    let activeCandidate: SupportedLanguage | undefined;
+    try {
+      for (const candidateLanguage of candidates) {
+        probeAbortController.signal.throwIfAborted();
+        if (!probe.beginAttempt(
+          sampleIdentity,
+          pixels.pixelHash,
+          candidateLanguage,
+          this.#now(),
+        )) {
+          break;
+        }
+        this.environment.onDiagnostic?.(Object.freeze({
+          stage: 'auto-language-probe-attempt' as const,
+          attempt: probe.attempts,
+          sample: probe.images,
+          candidateLanguage,
+        }));
+        activeCandidate = candidateLanguage;
+        const languageGroup = tesseractLanguageGroupFor(candidateLanguage);
+        const recognition = await raceAbortPromise(
+          this.#recognizer().recognize(pixels, {
+            providerOrder: this.#configuration.providerOrder,
+            sourceLanguage: candidateLanguage,
+            minimumConfidence,
+            ...(languageGroup
+              ? {
+                  languageGroup,
+                  modelVersion: TESSERACT_MODEL_VERSION,
+                }
+              : {}),
+          }, probeAbortController.signal),
+          probeAbortController.signal,
+        );
+        if (recognition.cacheAccess && recognition.cacheStats) {
+          this.#reportRecognitionCache(
+            recognition.cacheAccess,
+            recognition.cacheStats,
+          );
+        }
+        if (recognition.status !== 'complete') {
+          probe.completeAttempt(
+            sampleIdentity,
+            pixels.pixelHash,
+            candidateLanguage,
+          );
+          this.environment.onDiagnostic?.(Object.freeze({
+            stage: 'recognition-failed' as const,
+            code: recognition.code,
+            ordinal: jobOrdinal,
+            renderedWidth: descriptor.renderedWidth,
+            renderedHeight: descriptor.renderedHeight,
+            bitmapWidth: pixels.bitmapWidth,
+            bitmapHeight: pixels.bitmapHeight,
+          }));
+          activeCandidate = undefined;
+          continue;
+        }
+        if (recognition.result.regions.length === 0) {
+          probe.completeAttempt(
+            sampleIdentity,
+            pixels.pixelHash,
+            candidateLanguage,
+          );
+          activeCandidate = undefined;
+          continue;
+        }
+        const detectedLanguage = strongAutoLanguageScriptEvidence(
+          recognition.result.transcript,
+        )
+          ? undefined
+          : await this.#detectTranscriptLanguage(
+              recognition.result.transcript,
+              probeAbortController.signal,
+            );
+        probeAbortController.signal.throwIfAborted();
+        const observed = probe.observe({
+          sampleIdentity,
+          pixelHash: pixels.pixelHash,
+          routeLanguage: candidateLanguage,
+          transcript: recognition.result.transcript,
+          confidence: recognition.result.transcriptConfidence,
+          ...(detectedLanguage ? { detectedLanguage } : {}),
+        });
+        activeCandidate = undefined;
+        if (observed.status !== 'resolved') continue;
+        this.#probeDetectedSourceLanguage = observed.language;
+        this.#probeInconclusiveReported = false;
+        this.#beginPair();
+        this.#clearAutoLanguageProbeDeadline();
+        this.environment.onDiagnostic?.(Object.freeze({
+          stage: 'auto-language-probe-resolved' as const,
+          language: observed.language,
+          evidence: observed.evidence,
+          attempts: observed.attempts,
+          samples: observed.images,
+        }));
+        try {
+          this.environment.onAutoLanguageDetected?.(
+            observed.language,
+            observed.evidence,
+            descriptor.document,
+          );
+        } catch {
+          // A UI observer cannot prevent the controller's pair transition.
+        } finally {
+          if (
+            this.#isEnabled() &&
+            this.#configuration.sourceLanguage === 'auto' &&
+            this.#effectiveDetectedSourceLanguage() === observed.language
+          ) this.#probeSchedulerRebuildRequested = true;
+        }
+        return observed.language;
+      }
+    } catch (error) {
+      if (activeCandidate) {
+        probe.rollbackAttempt(
+          sampleIdentity,
+          pixels.pixelHash,
+          activeCandidate,
+        );
+        activeCandidate = undefined;
+      }
+      if (this.#probeInconclusiveReported) return undefined;
+      throw error;
+    } finally {
+      signal.removeEventListener('abort', relayJobAbort);
+      lifetimeSignal.removeEventListener('abort', relayLifetimeAbort);
+    }
+    const reason = probe.inconclusiveReason(this.#now());
+    if (reason) this.#reportProbeInconclusive(probe, reason);
+    else if (probe.images >= MAX_AUTO_LANGUAGE_PROBE_IMAGES) {
+      this.#reportProbeInconclusive(probe, probe.finalReason());
+    }
+    return undefined;
+  }
+
+  async #detectTranscriptLanguage(
+    transcript: string,
+    signal: AbortSignal,
+  ): Promise<SupportedLanguage | undefined> {
+    const detectLanguage = this.environment.detectLanguage;
+    const sample = transcript.replace(/\s+/gu, ' ').trim().slice(0, 4_000);
+    if (!detectLanguage || sample.length < 3) return undefined;
+    try {
+      const detected = await raceAbortPromise(detectLanguage(sample), signal);
+      if (!detected.isReliable) return undefined;
+      const candidate = [...detected.languages]
+        .sort((left, right) => right.percentage - left.percentage)
+        .find((entry) => entry.percentage >= 70 &&
+          canonicalizeLanguageTag(entry.language));
+      return candidate
+        ? canonicalizeLanguageTag(candidate.language)
+        : undefined;
+    } catch {
+      signal.throwIfAborted();
+      return undefined;
+    }
+  }
+
+  #reportProbeInconclusive(
+    probe: AutoImageLanguageProbe,
+    reason: AutoLanguageProbeInconclusiveReason,
+  ): void {
+    if (
+      this.#probeInconclusiveReported ||
+      this.#autoLanguageProbe !== probe
+    ) return;
+    this.#probeInconclusiveReported = true;
+    this.environment.onDiagnostic?.(Object.freeze({
+      stage: 'auto-language-probe-inconclusive' as const,
+      reason,
+      attempts: probe.attempts,
+      samples: probe.images,
+    }));
+    this.#clearAutoLanguageProbeDeadline();
+    this.#probeLifetimeAbortController?.abort(
+      new DOMException('Auto language probe finished.', 'AbortError'),
+    );
+  }
+
+  #effectiveDetectedSourceLanguage(): SupportedLanguage | undefined {
+    return this.#configuration.detectedSourceLanguage ??
+      this.#probeDetectedSourceLanguage;
+  }
+
+  #pageLanguageResolutionBlocksWork(): boolean {
+    return this.#configuration.sourceLanguage === 'auto' &&
+      !this.#effectiveDetectedSourceLanguage() &&
+      Boolean(this.#configuration.pageLanguageResolutionPending);
+  }
+
+  #resetAutoLanguageProbe(): void {
+    this.#clearAutoLanguageProbeDeadline();
+    this.#probeLifetimeAbortController?.abort(
+      new DOMException('Auto language probe reset.', 'AbortError'),
+    );
+    this.#probeLifetimeAbortController = undefined;
+    this.#autoLanguageProbe = undefined;
+    this.#probeDetectedSourceLanguage = undefined;
+    this.#probeSchedulerRebuildRequested = false;
+    this.#probeInconclusiveReported = false;
+    this.#probeStartedReported = false;
+    this.#probeSampleIdentities.clear();
+  }
+
+  #probeSampleIdentity(
+    descriptor: SourceImageDescriptor,
+  ): AutoLanguageProbeSampleIdentity {
+    let identity = this.#probeSampleIdentities.get(descriptor.nodeId);
+    if (!identity) {
+      identity = createAutoLanguageProbeSampleIdentity();
+      this.#probeSampleIdentities.set(descriptor.nodeId, identity);
+    }
+    return identity;
+  }
+
+  #clearAutoLanguageProbeDeadline(): void {
+    if (this.#probeDeadlineTimer === undefined) return;
+    this.#clearTimer(this.#probeDeadlineTimer);
+    this.#probeDeadlineTimer = undefined;
+  }
+
   #reportRecognitionCache(
     access: ImageRecognitionCacheAccess,
     stats: ImageRecognitionCacheStats,
@@ -1311,7 +1694,7 @@ export class ImageTranslationController {
     this.#pairEpoch += 1;
     this.#pairKey = this.#isEnabled()
       ? `${this.#configuration.sourceLanguage === 'auto'
-          ? this.#configuration.detectedSourceLanguage ?? 'auto'
+          ? this.#effectiveDetectedSourceLanguage() ?? 'auto'
           : this.#configuration.sourceLanguage}>${this.#configuration.targetLanguage}` +
           `|${ocrQualityPolicyKey(repairOcrMinimumConfidence(
             this.#configuration.ocrMinimumConfidence,
@@ -1427,6 +1810,20 @@ function pairConfigurationKey(
   ].join(':');
 }
 
+function autoLanguageProbeConfigurationKey(
+  configuration: ImageTranslationConfiguration,
+): string {
+  return [
+    configuration.enabled ? '1' : '0',
+    configuration.sourceLanguage,
+    configuration.detectedSourceLanguage ?? '',
+    configuration.providerOrder.join(','),
+    ocrQualityPolicyKey(repairOcrMinimumConfidence(
+      configuration.ocrMinimumConfidence,
+    )),
+  ].join(':');
+}
+
 function imageSourceRecoveryKey(
   request: ReplicaCaptureRequest,
   sourceWindowId: number,
@@ -1448,4 +1845,22 @@ function isReplayLease(value: number): boolean {
 
 function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === 'AbortError';
+}
+
+function raceAbortPromise<T>(task: Promise<T>, signal: AbortSignal): Promise<T> {
+  if (signal.aborted) return Promise.reject(signal.reason);
+  return new Promise<T>((resolve, reject) => {
+    const onAbort = (): void => reject(signal.reason);
+    signal.addEventListener('abort', onAbort, { once: true });
+    task.then(
+      (value) => {
+        signal.removeEventListener('abort', onAbort);
+        resolve(value);
+      },
+      (error: unknown) => {
+        signal.removeEventListener('abort', onAbort);
+        reject(error);
+      },
+    );
+  });
 }

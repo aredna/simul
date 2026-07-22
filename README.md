@@ -112,11 +112,12 @@ on Simul's extension card and reopen the companion.
   without rebuilding the underlying live replica.
 
 Public native dropdowns are represented as companion-owned, scriptless
-disclosures: the selected label remains visible and translated option/optgroup
-labels can be revealed in a bounded scrolling list. The disclosure cannot
-change or submit the website's selection. Public non-editable ARIA
-menu/listbox/option labels can also be translated; editable or private control
-branches remain masked.
+disclosures: single-row selects keep a popup-shaped trigger, while `multiple`
+and `size>1` controls stay bounded inline lists. Popup panels escape source
+clipping, clamp to the replica viewport, and scroll locally. They cannot change
+or submit the website's selection. In Isolated HTML, a uniquely mapped public
+ARIA menu/listbox can also open as a local preview; ambiguous, editable, or
+private relations remain inert. rrweb keeps all disclosure interaction inert.
 
 ## Replica engines
 
@@ -222,6 +223,14 @@ explicit gesture and granted the needed access, Simul:
 5. rejects blank, punctuation-only, and explicitly very-low-confidence regions;
 6. translates accepted lines with Chrome's on-device Translator; and
 7. projects clipped, inert text overlays that follow replica scroll and zoom.
+
+With **From: Auto-detect**, reliable page language still wins. On a text-light
+page, OCR can instead test a bounded set of representative local language
+routes across at most three eligible images, 18 attempts, and 20 seconds.
+Conservative script/confidence or evidence corroborated by distinct source
+images can establish the memory-only page language and requeue the remaining
+images. Repeated frames or pixel revisions of one source image remain one
+probe sample and never count as independent corroboration.
 
 The ready-to-load build includes the Tesseract Worker, three local Wasm core
 loaders, notices/hashes, and 22 pinned `tessdata_fast` files covering English,

@@ -147,6 +147,34 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(host.iframe?.contentDocument?.body.textContent).toBe('world');
     expect(stream.acknowledged).toContain(1);
     expect(commits).toEqual(['checkpoint', 'batch']);
+
+    const replica = host.iframe!.contentDocument!;
+    const forgedSurface = replica.createElement('div');
+    forgedSurface.setAttribute(
+      'data-simul-replica-disclosure-trigger',
+      'v1',
+    );
+    const forgedControl = replica.createElement('input');
+    forgedControl.type = 'checkbox';
+    forgedControl.checked = false;
+    forgedSurface.append(forgedControl);
+    replica.body.append(forgedSurface);
+    const forgedClick = new replica.defaultView!.Event('click', {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+    });
+    const forgedKey = new replica.defaultView!.Event('keydown', {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+    });
+    expect(forgedControl.dispatchEvent(forgedClick)).toBe(false);
+    expect(forgedClick.defaultPrevented).toBe(true);
+    expect(forgedControl.checked).toBe(false);
+    expect(forgedControl.dispatchEvent(forgedKey)).toBe(false);
+    expect(forgedKey.defaultPrevented).toBe(true);
+    expect(forgedControl.checked).toBe(false);
   });
 
   it('rebuilds the dark canvas and inline SVG logo with canonical SVG attributes', async () => {
@@ -414,14 +442,21 @@ describe('IsolatedHtmlReplicaEngine', () => {
     const clippingAncestor = replica.body.firstElementChild as HTMLElement;
     const selectHost = clippingAncestor.firstElementChild as HTMLElement;
     const select = selectHost.shadowRoot!.querySelector('select')!;
+    const trigger = selectHost.shadowRoot!.querySelector<HTMLButtonElement>(
+      '[data-simul-owned-select-trigger="v1"]',
+    )!;
+    const panel = replica.querySelector<HTMLElement>(
+      '[data-simul-owned-select-options="v1"]',
+    )!;
     expect(select.selectedIndex).toBe(1);
     expect([...select.options].map((option) => option.getAttribute('label')))
       .toEqual(expect.arrayContaining(['Choose', 'Community center', 'Choice 9']));
     expect(select.getAttribute('data-simul-select-facsimile')).toBe('v1');
     expect(select.getAttribute('data-simul-source-picker-open')).toBe('v1');
-    expect(select.hasAttribute('inert')).toBe(false);
+    expect(select.hasAttribute('inert')).toBe(true);
     expect(select.getAttribute('aria-disabled')).toBe('true');
-    expect(select.getAttribute('size')).toBe('8');
+    expect(select.getAttribute('size')).toBeNull();
+    expect(selectHost.dataset.simulSelectPresentation).toBe('popup');
     expect(selectHost.getAttribute('style')).toContain('pointer-events:auto');
     expect(selectHost.shadowRoot!.querySelector('style')?.textContent)
       .toContain('max-height:min(18rem,70vh)!important');
@@ -430,14 +465,32 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(selectHost.shadowRoot!.querySelector('style')?.textContent)
       .toContain('box-sizing:border-box!important');
     expect(clippingAncestor.getAttribute('style')).toContain(
-      'overflow:visible!important',
+      'overflow:hidden!important',
     );
     expect(clippingAncestor.getAttribute('style')).toContain(
-      'clip-path:none!important',
+      'clip-path:inset(0)!important',
     );
     expect(clippingAncestor.getAttribute('style')).toContain(
-      'contain:none!important',
+      'contain:paint!important',
     );
+    expect(trigger.getAttribute('aria-expanded')).toBe('true');
+    expect(panel.parentElement).toBe(replica.body);
+    expect(select.selectedIndex).toBe(1);
+    expect(panel.style.position).toBe('fixed');
+    trigger.dispatchEvent(new select.ownerDocument.defaultView!.Event('click', {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+    }));
+    expect(trigger.getAttribute('aria-expanded')).toBe('false');
+    expect(panel.hasAttribute('hidden')).toBe(true);
+    trigger.dispatchEvent(new select.ownerDocument.defaultView!.Event('click', {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+    }));
+    expect(trigger.getAttribute('aria-expanded')).toBe('true');
+    expect(panel.parentElement).toBe(replica.body);
     const activation = new select.ownerDocument.defaultView!.Event('pointerdown', {
       bubbles: true,
       cancelable: true,
@@ -479,6 +532,12 @@ describe('IsolatedHtmlReplicaEngine', () => {
       translated: '地区',
     })).toBe(true);
     expect(select.querySelector('optgroup')?.getAttribute('label')).toBe('地区');
+    expect(panel.querySelector(
+      '[data-simul-owned-select-optgroup-label="v1"]',
+    )?.textContent).toBe('地区');
+    replica.dispatchEvent(new select.ownerDocument.defaultView!.Event('scroll'));
+    expect(trigger.getAttribute('aria-expanded')).toBe('false');
+    expect(panel.hasAttribute('hidden')).toBe(true);
 
     stream.observer?.onPatch(createHtmlMirrorPatch(
       createReplicaIdentity({ ...identityParts, sequence: 1 }),
@@ -621,8 +680,22 @@ describe('IsolatedHtmlReplicaEngine', () => {
           }, {
             kind: 'element', id: 3, namespace: 'html', tagName: 'body',
             attributes: [], children: [{
+              kind: 'element', id: 9, namespace: 'html', tagName: 'button',
+              attributes: [
+                ['role', 'button'],
+                ['aria-controls', 'public-destinations'],
+                ['aria-haspopup', 'listbox'],
+                ['aria-expanded', 'false'],
+              ], children: [{
+                kind: 'text', id: 10, text: 'Destinations', translatable: true,
+              }],
+            }, {
               kind: 'element', id: 4, namespace: 'html', tagName: 'div',
-              attributes: [['role', 'listbox'], ['class', 'source-menu']],
+              attributes: [
+                ['id', 'public-destinations'],
+                ['role', 'listbox'],
+                ['class', 'source-menu'],
+              ],
               children: [{
                 kind: 'element', id: 5, namespace: 'html', tagName: 'div',
                 attributes: [['role', 'option']], children: [{
@@ -630,7 +703,63 @@ describe('IsolatedHtmlReplicaEngine', () => {
                   translatable: true,
                 }],
               }],
-            }],
+            }, {
+              kind: 'element', id: 11, namespace: 'html', tagName: 'button',
+              attributes: [
+                ['role', 'button'],
+                ['aria-controls', 'regional-destinations'],
+                ['aria-haspopup', 'menu'],
+              ], children: [{
+                kind: 'text', id: 12, text: 'Regional destinations',
+                translatable: true,
+              }],
+            }, {
+              kind: 'element', id: 13, namespace: 'html', tagName: 'section',
+              attributes: [['id', 'regional-destinations'], ['role', 'region']],
+              children: [{
+                kind: 'element', id: 14, namespace: 'html', tagName: 'div',
+                attributes: [['role', 'menu']], children: [{
+                  kind: 'element', id: 15, namespace: 'html', tagName: 'div',
+                  attributes: [['role', 'option']], children: [{
+                    kind: 'text', id: 16, text: 'Regional destination',
+                    translatable: true,
+                  }],
+                }],
+              }],
+            }, {
+              kind: 'element', id: 17, namespace: 'html', tagName: 'button',
+              attributes: [
+                ['role', 'button'],
+                ['aria-controls', 'duplicate-target'],
+                ['aria-haspopup', 'listbox'],
+              ], children: [{
+                kind: 'text', id: 18, text: 'Ambiguous destinations',
+                translatable: true,
+              }],
+            }, ...[19, 20].map((id, index) => ({
+              kind: 'element' as const,
+              id,
+              namespace: 'html' as const,
+              tagName: 'div',
+              attributes: [
+                ['id', 'duplicate-target'],
+                ['role', 'listbox'],
+              ] as const,
+              children: [{
+                kind: 'element' as const,
+                id: 21 + index * 2,
+                namespace: 'html' as const,
+                tagName: 'div',
+                attributes: [['role', 'option']] as const,
+                children: [{
+                  kind: 'text' as const,
+                  id: 22 + index * 2,
+                  text: `Duplicate ${index + 1}`,
+                  translatable: true as const,
+                }],
+              }],
+            })),
+            ],
           }],
         },
         adoptedStyleSheets: [], captureMs: 1,
@@ -646,9 +775,21 @@ describe('IsolatedHtmlReplicaEngine', () => {
     await engine.run(request);
 
     const replica = host.iframe!.contentDocument!;
+    const trigger = replica.querySelector<HTMLButtonElement>(
+      '[aria-controls="public-destinations"]',
+    )!;
     const menuHost = [...replica.body.children].find((element) =>
       element.shadowRoot?.querySelector('[role="listbox"]'),
+    ) as HTMLElement;
+    const regionalTrigger = replica.querySelector<HTMLButtonElement>(
+      '[aria-controls="regional-destinations"]',
     )!;
+    const region = replica.querySelector<HTMLElement>(
+      '#regional-destinations',
+    )!;
+    const regionalMenuHost = [...region.children].find((element) =>
+      element.shadowRoot?.querySelector('[role="menu"]'),
+    ) as HTMLElement;
     const shadow = menuHost.shadowRoot!;
     const menu = shadow.querySelector('[role="listbox"]')!;
     const option = shadow.querySelector('[role="option"]')!;
@@ -657,6 +798,12 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(menuHost.localName).toMatch(/^simul-owned-menu-/u);
     expect(menuHost.hasAttribute('role')).toBe(false);
     expect(menuHost.hasAttribute('class')).toBe(false);
+    expect(menu.getAttribute('role')).toBe('listbox');
+    expect(trigger.getAttribute('role')).toBe('button');
+    expect(trigger.getAttribute('data-simul-replica-disclosure-trigger'))
+      .toBe('v1');
+    expect(trigger.getAttribute('aria-expanded')).toBe('false');
+    expect(menuHost.hasAttribute('hidden')).toBe(true);
     expect([...shadow.querySelectorAll('style')]
       .map(({ textContent }) => textContent ?? '')
       .join('')).not.toContain(canaryUrl);
@@ -664,6 +811,74 @@ describe('IsolatedHtmlReplicaEngine', () => {
       .toContain('background:none!important');
     expect(menu.textContent).toBe('Public destination');
     expect(option.textContent).toBe('Public destination');
+
+    trigger.dispatchEvent(new replica.defaultView!.Event('click', {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+    }));
+    expect(trigger.getAttribute('aria-expanded')).toBe('false');
+    expect(trigger.getAttribute('data-simul-replica-disclosure-open'))
+      .toBe('v1');
+    expect(menuHost.parentElement).toBe(replica.body);
+    expect(menuHost.style.position).toBe('fixed');
+    expect(menuHost.style.getPropertyValue(
+      '--simul-replica-disclosure-visibility',
+    )).toBe('visible');
+    expect(menuHost.style.getPropertyValue(
+      '--simul-replica-disclosure-max-height',
+    )).toMatch(/px$/u);
+    expect(menuHost.getAttribute('data-simul-replica-disclosure-overlay'))
+      .toBe('v1');
+    for (const type of ['change', 'submit']) {
+      const sourceEvent = new replica.defaultView!.Event(type, {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+      });
+      expect(menuHost.dispatchEvent(sourceEvent)).toBe(false);
+      expect(sourceEvent.defaultPrevented).toBe(true);
+    }
+    replica.dispatchEvent(new replica.defaultView!.Event('scroll'));
+    expect(trigger.getAttribute('aria-expanded')).toBe('false');
+    expect(menuHost.hasAttribute('hidden')).toBe(true);
+    expect(regionalTrigger.getAttribute(
+      'data-simul-replica-disclosure-trigger',
+    )).toBe('v1');
+    expect(regionalMenuHost.hasAttribute('hidden')).toBe(true);
+    regionalTrigger.dispatchEvent(new replica.defaultView!.Event('click', {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+    }));
+    expect(regionalTrigger.hasAttribute('aria-expanded')).toBe(false);
+    expect(regionalTrigger.getAttribute('data-simul-replica-disclosure-open'))
+      .toBe('v1');
+    expect(regionalMenuHost.parentElement).toBe(replica.body);
+    expect(regionalMenuHost.shadowRoot?.querySelector('[role="menu"]')
+      ?.textContent).toBe('Regional destination');
+    expect(menuHost.hasAttribute('hidden')).toBe(true);
+    replica.dispatchEvent(new replica.defaultView!.Event('scroll'));
+
+    const ambiguousTrigger = replica.querySelector<HTMLButtonElement>(
+      '[aria-controls="duplicate-target"]',
+    )!;
+    const duplicateMenus = [...replica.body.children].filter((element) =>
+      element.shadowRoot?.querySelector('#duplicate-target'),
+    );
+    expect(duplicateMenus).toHaveLength(2);
+    expect(duplicateMenus.every((element) => !element.hasAttribute('hidden')))
+      .toBe(true);
+    expect(ambiguousTrigger.hasAttribute(
+      'data-simul-replica-disclosure-trigger',
+    )).toBe(false);
+    const ambiguousClick = new replica.defaultView!.Event('click', {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+    });
+    expect(ambiguousTrigger.dispatchEvent(ambiguousClick)).toBe(false);
+    expect(ambiguousClick.defaultPrevented).toBe(true);
 
     const snapshot = engine.snapshot()!;
     const labelRecord = snapshot.records.find(
@@ -686,9 +901,50 @@ describe('IsolatedHtmlReplicaEngine', () => {
       translated: '公開の行き先',
     })).toBe(true);
     expect(option.textContent).toBe('公開の行き先');
+
+    trigger.dispatchEvent(new replica.defaultView!.Event('click', {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+    }));
+    expect(trigger.getAttribute('data-simul-replica-disclosure-open'))
+      .toBe('v1');
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [{
+        kind: 'attributes', nodeId: 9, namespace: 'html', tagName: 'button',
+        attributes: [
+          ['role', 'button'],
+          ['aria-controls', 'missing-destinations'],
+          ['aria-haspopup', 'listbox'],
+          ['aria-expanded', 'true'],
+        ],
+      }],
+      undefined,
+      'passive',
+    )!);
+    expect(stream.acknowledged).toContain(1);
+    expect(trigger.getAttribute('aria-expanded')).toBe('true');
+    expect(trigger.hasAttribute('data-simul-replica-disclosure-trigger'))
+      .toBe(false);
+    expect(trigger.hasAttribute('data-simul-replica-disclosure-open'))
+      .toBe(false);
+    expect(menuHost.hasAttribute('hidden')).toBe(false);
+    expect(menuHost.hasAttribute('popover')).toBe(false);
+    expect(menuHost.style.position).toBe('');
+    expect(menuHost.style.pointerEvents).toBe('none');
+    const invalidatedClick = new replica.defaultView!.Event('click', {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+    });
+    expect(trigger.dispatchEvent(invalidatedClick)).toBe(false);
+    expect(invalidatedClick.defaultPrevented).toBe(true);
   });
 
-  it('leases clipping overrides across reconstructed shadows and preserves live style patches', async () => {
+  it('keeps sized and multiple lists bounded without rewriting shadow clipping ancestors', async () => {
     const checkpoint = createHtmlMirrorCheckpoint(
       createReplicaIdentity({ ...identityParts, sequence: 0 }),
       {
@@ -705,8 +961,8 @@ describe('IsolatedHtmlReplicaEngine', () => {
                     kind: 'element', id: 7, namespace: 'html', tagName: 'div',
                     attributes: [['style', 'contain:paint!important']], children: [{
                       kind: 'element', id: 8, namespace: 'html', tagName: 'select',
-                      attributes: [], selectedOptionIndexes: [0],
-                      selectPickerOpen: true, children: [{
+                      attributes: [['size', '4']], selectedOptionIndexes: [0],
+                      children: [{
                         kind: 'element', id: 9, namespace: 'html', tagName: 'option',
                         attributes: [], children: [], controlText: {
                           kind: 'label', text: 'Shadow choice', translatable: true,
@@ -735,9 +991,20 @@ describe('IsolatedHtmlReplicaEngine', () => {
     const shadow = replica.querySelector('x-menu')!.shadowRoot!;
     const innerClip = shadow.querySelector('div') as HTMLElement;
     const selectHost = innerClip.firstElementChild as HTMLElement;
-    expect(selectHost.shadowRoot?.querySelector('select')).toBeTruthy();
-    expect(outerClip.getAttribute('style')).toContain('overflow:visible!important');
-    expect(innerClip.getAttribute('style')).toContain('contain:none!important');
+    const select = selectHost.shadowRoot?.querySelector('select')!;
+    const panel = selectHost.shadowRoot?.querySelector<HTMLElement>(
+      '[data-simul-owned-select-options="v1"]',
+    )!;
+    const trigger = selectHost.shadowRoot?.querySelector<HTMLElement>(
+      '[data-simul-owned-select-trigger="v1"]',
+    )!;
+    expect(select.getAttribute('size')).toBe('4');
+    expect(selectHost.dataset.simulSelectPresentation).toBe('list');
+    expect(panel.style.position).toBe('static');
+    expect(panel.style.maxHeight).toBe('min(7em, 18rem, 70vh)');
+    expect(trigger.hasAttribute('hidden')).toBe(true);
+    expect(outerClip.getAttribute('style')).toContain('overflow:hidden!important');
+    expect(innerClip.getAttribute('style')).toContain('contain:paint!important');
 
     stream.observer?.onPatch(createHtmlMirrorPatch(
       createReplicaIdentity({ ...identityParts, sequence: 1 }),
@@ -748,13 +1015,15 @@ describe('IsolatedHtmlReplicaEngine', () => {
         attributes: [['style', 'contain:content!important']],
       }, {
         kind: 'attributes', nodeId: 8, namespace: 'html', tagName: 'select',
-        attributes: [], selectedOptionIndexes: [0],
+        attributes: [['multiple', '']], selectedOptionIndexes: [0],
       }],
       undefined,
       'passive',
     )!);
     expect(outerClip.getAttribute('style')).toContain('overflow:hidden!important');
     expect(innerClip.getAttribute('style')).toContain('contain:content!important');
+    expect(select.hasAttribute('multiple')).toBe(true);
+    expect(selectHost.dataset.simulSelectPresentation).toBe('list');
     expect(stream.acknowledged).toContain(1);
   });
 

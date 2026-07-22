@@ -12,7 +12,10 @@ model/CDN defaults to fail-closed local sentinels.
 | `onnxruntime-web` and its packaged Wasm runtime | 1.24.3 | MIT |
 | `@techstark/opencv-js` | 4.10.0-release.1 | Apache-2.0 |
 | `clipper-lib` | 6.4.2, git head `97a4d5e79671973b457c13432d8e8c4107f8a51d` | Boost-1.0 |
-| `js-yaml` | 4.3.0 | MIT |
+| `js-yaml` | 4.1.1 | MIT |
+
+The `js-yaml` version above is the code embedded in the published Paddle SDK
+Worker. The repository's separately locked npm resolution is 4.3.0.
 
 The complete upstream license texts are packaged beside this notice under
 `ocr/paddle/licenses/`. The Paddle model archives are the official unmodified

@@ -296,6 +296,7 @@ describe('rrweb shadow engine', () => {
     expect(iframe?.getAttribute('sandbox')).toBe('allow-same-origin');
     expect(iframe?.getAttribute('sandbox')).not.toContain('allow-scripts');
     expect(iframe?.hasAttribute('inert')).toBe(true);
+    expect(iframe?.getAttribute('data-simul-disclosure-policy')).toBe('inert');
     expect(iframe?.style.border).toMatch(/^0(?:px)?$/u);
     expect(disabled).toBe(true);
     expect(destroyed).toBe(false);

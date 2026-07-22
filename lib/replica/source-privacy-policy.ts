@@ -13,6 +13,13 @@ const MAX_SOURCE_SELECT_DESCENDANTS = 50_000;
 const MAX_SOURCE_SELECT_LABEL_DESCENDANTS = 512;
 const MAX_SOURCE_SELECT_LABEL_NODES = 1_024;
 const MAX_SOURCE_SELECT_LABEL_TEXT = 3_500;
+const MAX_SOURCE_NAVIGATION_URL_LENGTH = 16 * 1024;
+const SOURCE_STATEFUL_NAVIGATION_ATTRIBUTES = Object.freeze([
+  'aria-controls',
+  'aria-expanded',
+  'aria-haspopup',
+  'aria-pressed',
+] as const);
 
 const SOURCE_NON_CONTENT_TAGS = new Set([
   'datalist', 'embed', 'form', 'frame', 'iframe', 'noscript', 'object',
@@ -609,6 +616,84 @@ export function hasSourcePrivateOrActivationElementAncestor(
       : undefined;
   }
   return false;
+}
+
+/**
+ * OCR may read a public navigation image even when a site's accessibility
+ * script gives its native HTTP(S) anchor button semantics. The exception is
+ * deliberately local to that anchor: every private, native-control, or outer
+ * activation ancestor still blocks pixel capture.
+ */
+export function hasSourceImageCaptureBlockingAncestor(
+  element: Element,
+): boolean {
+  for (let current: Element | undefined = element; current;) {
+    const attributes = sourceElementAttributes(current);
+    const role = current.getAttribute('role');
+    if (
+      sourceElementStartsPrivateRegionInContext(
+        current.localName,
+        attributes,
+        isSourceOptionInsideNativeSelect(current),
+      ) ||
+      isSourcePrivateTagName(current.localName) ||
+      isSourceActivationTagName(current.tagName) ||
+      (
+        isSourceActivationRoleValue(role) &&
+        !(
+          isSourcePublicNavigationButtonRoleValue(role) &&
+          isSourceHttpNavigationAnchor(current)
+        )
+      )
+    ) return true;
+    if (current.parentElement) {
+      current = current.parentElement;
+      continue;
+    }
+    const root = current.getRootNode();
+    current = root.nodeType === 11 && 'host' in root
+      ? (root as ShadowRoot).host
+      : undefined;
+  }
+  return false;
+}
+
+/** Waive only the normalized, single-token role used by a plain button link. */
+function isSourcePublicNavigationButtonRoleValue(value: unknown): boolean {
+  return typeof value === 'string' && value.trim().toLowerCase() === 'button';
+}
+
+function isSourceHttpNavigationAnchor(element: Element): boolean {
+  try {
+    if (
+      element.namespaceURI !== 'http://www.w3.org/1999/xhtml' ||
+      element.localName.toLowerCase() !== 'a'
+    ) return false;
+    if (
+      SOURCE_STATEFUL_NAVIGATION_ATTRIBUTES.some((attribute) =>
+        element.hasAttribute(attribute)
+      )
+    ) return false;
+    const rawHref = element.getAttribute('href')?.trim();
+    if (
+      !rawHref ||
+      rawHref.length > MAX_SOURCE_NAVIGATION_URL_LENGTH ||
+      rawHref.startsWith('#')
+    ) return false;
+    const rawBase = element.baseURI;
+    if (rawBase && rawBase.length > MAX_SOURCE_NAVIGATION_URL_LENGTH) return false;
+    const base = rawBase ? new URL(rawBase) : undefined;
+    const target = base ? new URL(rawHref, base) : new URL(rawHref);
+    if (target.protocol !== 'http:' && target.protocol !== 'https:') return false;
+    if (!base || !rawHref.includes('#')) return true;
+    const baseWithoutFragment = new URL(base);
+    const targetWithoutFragment = new URL(target);
+    baseWithoutFragment.hash = '';
+    targetWithoutFragment.hash = '';
+    return baseWithoutFragment.href !== targetWithoutFragment.href;
+  } catch {
+    return false;
+  }
 }
 
 function isSourceElementInsideNativeSelect(element: Element): boolean {

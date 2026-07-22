@@ -50,8 +50,19 @@ discard stale asynchronous work.
 
 The source preference can be a language or Auto-detect. Auto-detect uses the
 document's HTML `lang` value first, normalizes its BCP-47 tag, then falls back
-to Chrome's local `i18n.detectLanguage` result only when it is reliable. An
-equal resolved pair is an explicit no-op.
+to at least four unambiguous script characters occupying 60% of the visible
+sample, or Chrome's local `i18n.detectLanguage` result only when it is reliable. If page
+text still cannot establish a source language and OCR is enabled, Simul may
+probe up to three privacy-approved source images, six representative packaged
+language routes per image, 18 routes total, and 20 seconds from the first probe.
+Japanese is attempted on every crop. A single crop can resolve the page only
+with at least three dominant-script characters and at least 90% supplied OCR
+confidence; confidence-free evidence must agree across distinct source images.
+Changing pixels or animation frames on one source image does not create a new
+corroborating sample. The
+result is memory-only page evidence, never a saved From choice, and explicit or
+nearest-element language remains authoritative. An equal resolved pair is an
+explicit no-op.
 
 Chrome 138 exposes Translator pair availability and session creation but does
 not expose language enumeration. Simul therefore shows Chrome's documented
@@ -108,7 +119,12 @@ preferences disable decorative progress animation.
 
 When explicitly enabled, an exact-document source Port observes ordinary
 top-frame `<img>` elements by the selected engine's private node ID without
-emitting their URL or text.
+emitting their URL or text. Pixel capture normally excludes activation-control
+ancestry. A narrow exception admits an image inside a stateless HTML
+HTTP(S) navigation anchor whose sole normalized role is `button`; native
+buttons, pseudo-links, fragment-only links, stateful ARIA controls, editable
+ancestry, and overlapping protected controls remain blocked and are checked
+again immediately before capture.
 The saved scan policy orders visible/near/background work, and very small
 images are skipped by default. Only stable visible pixels are captured, at no
 more than two viewport captures per second, after matching pre/post document,
@@ -117,12 +133,16 @@ before OCR so the processed bitmap never exceeds 4 MP; the CSS crop geometry
 is retained for overlay placement.
 
 The offscreen extension page reads a short-lived crop from extension-origin
-storage and runs packaged Tesseract.js 7.0.0 locally. A default-off,
-independently compiled PaddleOCR.js 0.4.2 trial can instead package its module
-Worker, ONNX Runtime Web 1.24.3 Wasm, and PP-OCRv6 tiny models locally. The
-routed language is chosen from nearest valid element `lang`, explicit From,
-then detected page language. Recognition uses a bounded memory-only content
-cache keyed by the ordered provider/runtime/model route, source language,
+storage and runs packaged Tesseract.js 7.0.0 locally. The four-provider test
+profile also packages direct `tesseract-wasm` 0.11.0 and a default-off,
+independently compiled PaddleOCR.js 0.4.2 trial with its module Worker, ONNX
+Runtime Web 1.24.3 Wasm, and PP-OCRv6 tiny models; Chrome TextDetector remains
+a platform-dependent browser provider. The routed language is chosen from
+nearest valid element `lang`, explicit From, then detected page or bounded
+image-probe evidence. Wrapper Tesseract loads `jpn+jpn_vert` for Japanese,
+while the direct runtime loads its supported `jpn` model. Recognition uses a
+bounded memory-only content cache keyed by the ordered provider/runtime/model
+route, source language,
 quality-policy version, selected confidence threshold, preprocessing profile,
 processed dimensions, and SHA-256 pixel hash—not by node, source document, or
 image URL. Exact concurrent requests join one recognition load, and completed
@@ -165,13 +185,21 @@ metadata. The replica reconstructs that visible text and can translate it, but
 never receives raw `value` or `placeholder` attributes. Password and
 password-autocomplete fields, unsupported native controls, contenteditable
 regions, and ARIA textbox fallbacks stay blank. A public native select may
-expose only bounded option/optgroup labels and selected/disabled/multiple/open
-presentation state. Both engines render those labels in a companion-owned,
-scriptless disclosure: the selected value stays visible, all translated labels
-can be revealed, and long lists scroll without changing the source selection.
+expose only bounded option/optgroup labels and selected/disabled/multiple/open/
+size presentation state. A single-row select remains popup-shaped: its local
+trigger opens a body-level, viewport-clamped, internally scrolling panel that
+escapes source clipping. `multiple` and authored `size>1` selects remain
+bounded inline lists. Neither form changes selection or sends source events.
 Customizable-select `:open` state is progressive; native OS popup geometry is
-not observable. Public non-editable ARIA listbox/menu/option labels translate,
-while editable combobox/searchbox/textbox/contenteditable branches stay blank.
+not observable. Isolated HTML also admits a custom public menu/listbox only
+when one activation trigger has one unique same-document `aria-controls`
+target with matching semantics (directly or through a region containing one
+matching public menu). Missing, duplicate, stale, private, or editable mappings
+remain static and inert. rrweb keeps custom disclosures explicitly inert
+because its event stream cannot prove the same relation; all rrweb disclosure
+interaction remains inert. Public non-editable
+ARIA listbox/menu/option labels still translate, while editable
+combobox/searchbox/textbox/contenteditable branches stay blank.
 Raw option values, names, data attributes, datalist/standalone-option content,
 rich picker descendants, and private select ancestry stay blank. A field that
 becomes sensitive clears its prior source record and projection atomically.

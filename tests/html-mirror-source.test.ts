@@ -180,7 +180,7 @@ describe('HtmlMirrorSourceSession', () => {
 
   it('streams native select state without values, names, or data attributes', () => {
     const fixture = sourceFixture(`
-      <select id="facility" name="private-name" data-account="private-data">
+      <select id="facility" size="4" name="private-name" data-account="private-data">
         <option value="private-a">Choose</option>
         <optgroup id="area" label="District">
           <option value="private-b" selected>Community center</option>
@@ -190,6 +190,7 @@ describe('HtmlMirrorSourceSession', () => {
     fixture.start('passive');
     const initial = fixture.checkpoints()[0]!;
     expect(JSON.stringify(initial)).toContain('"selectedOptionIndexes":[1]');
+    expect(JSON.stringify(initial)).toContain('["size","4"]');
     expect(JSON.stringify(initial)).toContain(
       '"controlText":{"kind":"label","text":"District","translatable":true}',
     );
