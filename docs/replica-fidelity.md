@@ -63,19 +63,29 @@ or mutate the source page.
 
 Native dropdown popups are browser/OS presentation rather than observable DOM,
 so Simul does not attempt to copy their ephemeral geometry. Instead, every
-public native select receives a companion-owned, scriptless facsimile: the
-selected label remains visible and a bounded disclosure reveals every
-translated option and optgroup label. Long lists scroll locally. Disabled,
-selected, and multiple state are presentation-only and cannot mutate or submit
-the source control. For Chrome customizable selects, `:open` state and
-toggle-driven refresh are mirrored progressively; rich website picker
-descendants remain reduced to typed public labels at the privacy boundary.
+public native select receives a companion-owned, scriptless facsimile. A
+single-row select keeps a compact selected-label trigger whose body-level panel
+flips and clamps inside the replica viewport, scrolls internally, and closes on
+outer scroll, resize, patch, or navigation. `multiple` and authored `size>1`
+selects retain bounded inline-list presentation. Disabled, selected, multiple,
+and size state are presentation-only and cannot mutate or submit the source
+control. No source clipping ancestor is rewritten. For Chrome customizable
+selects, `:open` state and toggle-driven refresh are mirrored progressively;
+rich website picker descendants remain reduced to typed public labels at the
+privacy boundary.
 
 Public, non-editable ARIA listbox/menu/option text remains visible and
-translatable. Editable comboboxes, searchboxes, textboxes, contenteditable
-regions, native inputs, and any menu branch containing private controls remain
-masked. This distinction admits public navigation labels without transporting
-user-entered data.
+translatable. Isolated HTML enables a local preview only when a public
+activation trigger maps through one unique same-document `aria-controls`
+relation to a matching menu/listbox, or to a region containing exactly one
+matching public menu. The preview state is extension-owned and does not rewrite
+authored `aria-expanded`. Missing, duplicate, stale, mismatched, editable, or
+private relations remain pointer-inert. All rrweb disclosure interaction
+remains explicitly inert because the sanitized replay stream cannot prove that
+mapping. Editable
+comboboxes, searchboxes, textboxes, contenteditable regions, native inputs, and
+any menu branch containing private controls remain masked. This distinction
+admits public navigation labels without transporting user-entered data.
 
 ### Static SVG
 

@@ -150,7 +150,7 @@ describe('visual snapshot boundary', () => {
     const serialized = JSON.stringify(select);
 
     expect(select?.selectState).toEqual({
-      disabled: true, multiple: true, open: false,
+      disabled: true, multiple: true, open: false, size: 0,
     });
     expect(select?.children).toHaveLength(4);
     expect(serialized).toContain('Regions');
@@ -305,7 +305,7 @@ describe('visual snapshot boundary', () => {
     const select = snapshot.visual?.root;
 
     expect(select?.selectState).toEqual({
-      disabled: false, multiple: true, open: false,
+      disabled: false, multiple: true, open: false, size: 0,
     });
     expect(select?.attributes).toBeUndefined();
     expect(select?.children).toHaveLength(1);
@@ -561,14 +561,14 @@ describe('visual mirror renderer', () => {
       ...(disclosure?.querySelectorAll<HTMLElement>('[data-simul-select-option]') ?? []),
     ];
 
-    expect(disclosure?.tagName).toBe('DETAILS');
+    expect(disclosure?.tagName).toBe('DIV');
     expect(disclosure?.dataset.simulSelectMultiple).toBe('true');
+    expect(disclosure?.dataset.simulSelectPresentation).toBe('list');
     expect(disclosure?.getAttribute('aria-disabled')).toBe('true');
     expect(disclosure?.style.pointerEvents).toBe('auto');
-    expect(disclosure?.hasAttribute('open')).toBe(true);
-    expect(summary?.getAttribute('aria-label')).toBe('Show translated options');
-    expect(summary?.textContent).toBe('Tokyo, Seoul');
-    expect(list?.style.maxHeight).toBe('min(20rem, 50vh)');
+    expect(disclosure?.hasAttribute('open')).toBe(false);
+    expect(summary).toBeNull();
+    expect(list?.style.maxHeight).toBe('min(14em, 18rem, 70vh)');
     expect(list?.style.overflowY).toBe('auto');
     expect(options).toHaveLength(3);
     expect(options.map((option) => option.textContent)).toEqual([
@@ -589,7 +589,6 @@ describe('visual mirror renderer', () => {
     });
 
     expect(sources).toEqual(['Regions', 'Tokyo', 'Osaka', 'Seoul']);
-    expect(summary?.textContent).toBe('[Tokyo], [Seoul]');
     expect(options.map((option) => option.textContent)).toEqual([
       '[Tokyo]',
       '[Osaka]',
@@ -598,7 +597,11 @@ describe('visual mirror renderer', () => {
     expect(list?.style.overflowY).toBe('auto');
 
     resetVisualMirrorText(mirror);
-    expect(summary?.textContent).toBe('Tokyo, Seoul');
+    expect(options.map((option) => option.textContent)).toEqual([
+      'Tokyo',
+      'Osaka',
+      'Seoul',
+    ]);
   });
 
   it('does not invent a selected value when the source select has none', () => {
@@ -612,12 +615,94 @@ describe('visual mirror renderer', () => {
     const { document } = parseHTML('<html><body></body></html>');
     const mirror = createVisualMirror(snapshot, undefined, document);
 
-    expect(
-      mirror?.querySelector('[data-simul-select-summary]')?.textContent,
-    ).toBe('\u2014');
-    expect([
+    const options = [
       ...(mirror?.querySelectorAll<HTMLElement>('[data-simul-select-option]') ?? []),
-    ].map((option) => option.textContent)).toEqual(['Tokyo', 'Osaka']);
+    ];
+    expect(mirror?.querySelector('[data-simul-select-summary]')).toBeNull();
+    expect(options.map((option) => option.textContent)).toEqual(['Tokyo', 'Osaka']);
+    expect(options.map((option) => option.getAttribute('aria-selected')))
+      .toEqual(['false', 'false']);
+  });
+
+  it('keeps popup-shaped selects compact and opens only a local viewport overlay', () => {
+    installCapturePage(`
+      <div style="overflow:hidden">
+        <select>
+          <option selected>Tokyo</option>
+          <option disabled>Osaka</option>
+        </select>
+      </div>
+    `);
+    const snapshot = capturePageSnapshot();
+    const { document } = parseHTML('<html><body></body></html>');
+    const mirror = createVisualMirror(snapshot, undefined, document);
+    if (!mirror) throw new Error('Expected a visual mirror.');
+    document.body.append(mirror);
+
+    const disclosure = mirror.querySelector<HTMLElement>(
+      '[data-simul-select-facsimile]',
+    )!;
+    const trigger = disclosure.querySelector<HTMLButtonElement>(
+      '[data-simul-select-summary]',
+    )!;
+    const panel = disclosure.querySelector<HTMLElement>(
+      '[data-simul-select-options]',
+    )!;
+    const sourceAncestor = disclosure.parentElement as HTMLElement;
+    const sourceOverflow = sourceAncestor.style.overflow;
+
+    expect(disclosure.dataset.simulSelectPresentation).toBe('popup');
+    expect(trigger.textContent).toBe('Tokyo');
+    expect(trigger.getAttribute('aria-expanded')).toBe('false');
+    expect(panel.hasAttribute('hidden')).toBe(true);
+
+    trigger.dispatchEvent(new document.defaultView!.Event('click', {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+    }));
+
+    expect(trigger.getAttribute('aria-expanded')).toBe('true');
+    expect(panel.parentElement).toBe(document.body);
+    expect(panel.getAttribute('data-simul-replica-disclosure-overlay'))
+      .toBe('v1');
+    expect(panel.style.position).toBe('fixed');
+    expect(panel.style.overflowY).toBe('auto');
+    expect(sourceAncestor.style.overflow).toBe(sourceOverflow);
+    expect(panel.querySelector('[aria-selected="true"]')?.textContent)
+      .toBe('Tokyo');
+
+    document.dispatchEvent(new document.defaultView!.Event('scroll'));
+    expect(trigger.getAttribute('aria-expanded')).toBe('false');
+    expect(panel.hasAttribute('hidden')).toBe(true);
+    expect(panel.parentElement).toBe(disclosure);
+  });
+
+  it('preserves authored size above one as a bounded inline list', () => {
+    installCapturePage(`
+      <select size="4">
+        <option selected>Tokyo</option>
+        <option>Osaka</option>
+      </select>
+    `);
+    const snapshot = capturePageSnapshot();
+    const selectNode = collectElements(snapshot.visual?.root).find(
+      (node) => node.controlShell === 'select',
+    );
+    expect(selectNode?.selectState?.size).toBe(4);
+
+    const { document } = parseHTML('<html><body></body></html>');
+    const mirror = createVisualMirror(snapshot, undefined, document)!;
+    const disclosure = mirror.querySelector<HTMLElement>(
+      '[data-simul-select-facsimile]',
+    )!;
+    const panel = disclosure.querySelector<HTMLElement>(
+      '[data-simul-select-options]',
+    )!;
+    expect(disclosure.dataset.simulSelectPresentation).toBe('list');
+    expect(disclosure.querySelector('[data-simul-select-summary]')).toBeNull();
+    expect(panel.style.position).toBe('static');
+    expect(panel.style.maxHeight).toBe('min(7em, 18rem, 70vh)');
   });
 
   it('translates every select label admitted by the visual capture budget', async () => {
@@ -821,6 +906,128 @@ describe('visual mirror renderer', () => {
     expect(completedUpdate.root.textContent).toBe('[New live copy]');
     expect(countVisualMirrorTranslationFields(mirror)).toBe(0);
     expect(countVisualMirrorTranslationFields(completedUpdate.root)).toBe(1);
+  });
+
+  it('disposes disclosures pruned from a detached atomic root', async () => {
+    const { document, window } = parseHTML('<html><body></body></html>');
+    vi.stubGlobal('Element', window.Element);
+    vi.stubGlobal('HTMLElement', window.HTMLElement);
+    vi.stubGlobal('HTMLImageElement', window.HTMLImageElement);
+    const snapshot = parsePageSnapshot({
+      version: 1,
+      title: 'Detached disclosure pruning',
+      url: 'https://example.com/',
+      capturedAt: '2026-07-22T00:00:00.000Z',
+      items: [],
+      omissions: {},
+      visual: {
+        viewportWidth: 800,
+        viewportHeight: 600,
+        documentWidth: 800,
+        documentHeight: 600,
+        styles: [{ display: 'block' }],
+        root: {
+          kind: 'element',
+          tag: 'main',
+          styleId: 0,
+          nodeId: 'n1',
+          children: [{
+            kind: 'element',
+            tag: 'select',
+            styleId: 0,
+            nodeId: 'n2',
+            controlShell: 'select',
+            selectState: {
+              disabled: false,
+              multiple: false,
+              open: false,
+              size: 0,
+            },
+            children: [{
+              kind: 'element',
+              tag: 'option',
+              styleId: 0,
+              nodeId: 'n3',
+              optionState: { disabled: false, selected: true },
+              children: [{ kind: 'text', text: 'Old choice', nodeId: 'n3' }],
+            }],
+          }],
+        },
+      },
+    });
+    const mirror = createVisualMirror(snapshot, undefined, document)!;
+    document.body.append(mirror);
+    const createElement = vi.spyOn(document, 'createElement');
+    const delta: LivePageDelta = {
+      version: 1,
+      generation: 1,
+      sequence: 1,
+      url: 'https://example.com/',
+      documentWidth: 800,
+      documentHeight: 600,
+      desynchronized: false,
+      replacements: [{
+        targetId: 'n1',
+        node: {
+          kind: 'element',
+          nodeId: 'n1',
+          tag: 'main',
+          style: { display: 'block' },
+          children: [{
+            kind: 'element',
+            nodeId: 'n2',
+            tag: 'select',
+            style: { display: 'inline-block' },
+            controlShell: 'select',
+            selectState: {
+              disabled: false,
+              multiple: false,
+              open: false,
+              size: 0,
+            },
+            children: [{
+              kind: 'element',
+              nodeId: 'n3',
+              tag: 'option',
+              style: {},
+              optionState: { disabled: false, selected: true },
+              children: [{ kind: 'text', nodeId: 'n3', text: 'Staged choice' }],
+            }],
+          }],
+        },
+      }, {
+        targetId: 'n2',
+        node: {
+          kind: 'element',
+          nodeId: 'n2',
+          tag: 'p',
+          style: { display: 'block' },
+          children: [{ kind: 'text', nodeId: 'n4', text: 'Replacement copy' }],
+        },
+      }],
+    };
+
+    const result = await applyLivePageDelta(mirror, delta, {
+      textLayoutMode: 'adaptive',
+    });
+    const removedDisclosure = createElement.mock.results
+      .map(({ value }) => value)
+      .find((element): element is HTMLElement =>
+        element instanceof window.HTMLElement &&
+        element.hasAttribute('data-simul-select-facsimile') &&
+        !result.root.contains(element),
+      );
+    expect(removedDisclosure).toBeDefined();
+    expect(removedDisclosure?.hasAttribute(
+      'data-simul-replica-disclosure-anchor',
+    )).toBe(false);
+    expect(removedDisclosure?.querySelector(
+      '[data-simul-replica-disclosure-trigger]',
+    )).toBeNull();
+    expect(removedDisclosure?.querySelector(
+      '[data-simul-replica-disclosure-panel]',
+    )).toBeNull();
+    expect(result.root.textContent).toBe('Replacement copy');
   });
 
   it('preserves layout whitespace around translated inline text', () => {

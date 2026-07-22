@@ -123,6 +123,28 @@ describe('isolated HTML sanitizer and protocol', () => {
     expect(checkpointFor(identity, passive, 'conservative')).toBeUndefined();
   });
 
+  it('reserves extension-owned attributes at both mirror boundaries', () => {
+    const graph = sanitizeMarkup(`<!doctype html><html><body>
+      <div id="public"
+        data-simul-replica-disclosure-trigger="v1"
+        data-simul-replica-disclosure-panel="v1"
+        data-simul-arbitrary="source">Public</div>
+    </body></html>`, 'passive');
+    const publicNode = graphElementBySourceId(graph, 'public');
+    expect(publicNode).toBeDefined();
+    expect(publicNode?.attributes.some(
+      ([name]) => name.startsWith('data-simul-'),
+    )).toBe(false);
+
+    expect(readHtmlMirrorNode({
+      ...publicNode!,
+      attributes: [
+        ...publicNode!.attributes,
+        ['data-simul-replica-disclosure-trigger', 'v1'],
+      ],
+    })).toBeUndefined();
+  });
+
   it('omits posterless video shells while preserving a passive fallback image', () => {
     const graph = sanitizeMarkup(`<!doctype html><html><body>
       <section>
@@ -323,6 +345,18 @@ describe('isolated HTML sanitizer and protocol', () => {
       ...node,
       attributes: [['disabled', '']],
     })).toBeDefined();
+    expect(readHtmlMirrorNode({
+      ...node,
+      attributes: [['size', '4']],
+    })).toBeDefined();
+    expect(readHtmlMirrorNode({
+      ...node,
+      attributes: [['size', '04']],
+    })).toBeUndefined();
+    expect(readHtmlMirrorNode({
+      ...node,
+      attributes: [['size', '1001']],
+    })).toBeUndefined();
     const { selectedOptionIndexes: _selected, ...privateNode } = node;
     expect(readHtmlMirrorNode({
       ...privateNode,

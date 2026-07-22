@@ -18,7 +18,7 @@
   "detectorThreshold": 0.45,
   "detectorBoxThreshold": 0.75,
   "recognitionScoreThreshold": 0,
-  "totalBytes": 30073097,
+  "totalBytes": 30073243,
   "files": [
     {
       "path": "licenses/CLIPPER_BOOST-1.0.txt",
@@ -30,7 +30,7 @@
     {
       "path": "licenses/JS-YAML_MIT.txt",
       "role": "license",
-      "source": "npm:js-yaml@4.3.0/LICENSE",
+      "source": "npm:js-yaml@4.1.1/LICENSE",
       "bytes": 1084,
       "sha256": "a07bc24468b9654ce76a547d47a2db282d07733b715db4c73a98bd63961f9550"
     },
@@ -87,8 +87,8 @@
       "path": "THIRD_PARTY_NOTICES.md",
       "role": "notice",
       "source": "repo:legal/paddleocr-js-v0.4.2-third-party-notices.md",
-      "bytes": 1509,
-      "sha256": "44cb979cadead5acbd4da94ad2de13da82f98e755d8762d7de406cbe78937c04"
+      "bytes": 1655,
+      "sha256": "56846c50c025fd191b6b124b47db9ca946bb888ffb91229a142fa38708c56ed0"
     },
     {
       "path": "worker/worker-entry.js",

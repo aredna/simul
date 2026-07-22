@@ -14,15 +14,19 @@ import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
 import {
+  APPROVED_PADDLE_BUNDLED_JS_YAML_VERSION,
   APPROVED_OCR_PROVIDER_DEPENDENCIES,
   APPROVED_PADDLE_OCR_JS_GIT_HEAD,
   APPROVED_PADDLE_TRANSITIVE_DEPENDENCIES,
   MAX_UNPACKED_ARTIFACT_BYTES,
 } from '../tools/extension-artifact.mjs';
 import {
+  APPROVED_JS_YAML_LICENSE_SHA256,
   APPROVED_ONNXRUNTIME_WASM_SHA256,
   APPROVED_ONNXRUNTIME_LOADER_SHA256,
   APPROVED_PADDLE_OCR_WORKER_SHA256,
+  PADDLE_BUNDLED_JS_YAML_VERSION,
+  assertPaddleWorkerAttributions,
   downloadPinned,
   patchPaddleDirectModule,
   replaceGeneratedCatalog,
@@ -71,6 +75,14 @@ describe('vendored PaddleOCR.js trial catalog', () => {
       recognitionScoreThreshold: 0,
     });
     expect(manifest.totalBytes).toBeLessThan(MAX_UNPACKED_ARTIFACT_BYTES);
+    expect(PADDLE_BUNDLED_JS_YAML_VERSION).toBe(
+      APPROVED_PADDLE_BUNDLED_JS_YAML_VERSION,
+    );
+    expect(manifest.files.find(({ path }) =>
+      path === 'licenses/JS-YAML_MIT.txt',
+    )?.source).toBe(
+      `npm:js-yaml@${PADDLE_BUNDLED_JS_YAML_VERSION}/LICENSE`,
+    );
   });
 
   it('matches every reviewed byte/hash and retains all legal files', async () => {
@@ -120,6 +132,18 @@ describe('vendored PaddleOCR.js trial catalog', () => {
     ]);
     expect(createHash('sha256').update(worker).digest('hex')).toBe(
       APPROVED_PADDLE_OCR_WORKER_SHA256,
+    );
+    expect(() => assertPaddleWorkerAttributions(worker.toString('utf8')))
+      .not.toThrow();
+    expect(() => assertPaddleWorkerAttributions(worker.toString('utf8').replace(
+      `js-yaml ${PADDLE_BUNDLED_JS_YAML_VERSION}`,
+      'js-yaml 4.3.0',
+    ))).toThrow(`js-yaml ${PADDLE_BUNDLED_JS_YAML_VERSION} attribution`);
+    const jsYamlLicense = await readFile(
+      resolve(vendorRoot, 'licenses/JS-YAML_MIT.txt'),
+    );
+    expect(createHash('sha256').update(jsYamlLicense).digest('hex')).toBe(
+      APPROVED_JS_YAML_LICENSE_SHA256,
     );
     expect(createHash('sha256').update(loader).digest('hex')).toBe(
       APPROVED_ONNXRUNTIME_LOADER_SHA256,

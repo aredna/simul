@@ -24,7 +24,13 @@ import {
   type CompanionStatusTone,
   type ToolbarAttentionTarget,
 } from '../../lib/companion-ui-localization';
-import { resolveSourceLanguage } from '../../lib/language-detection';
+import {
+  AutoLanguageEvidencePrecedence,
+  autoImageLanguageConfigurationKey,
+  resolveSourceLanguage,
+  shouldClearAutoImageLanguageForDocument,
+  shouldClearAutoImageLanguageResolution,
+} from '../../lib/language-detection';
 import {
   LANGUAGE_OPTION_ORDER,
   createSourceLanguageLabeler,
@@ -72,6 +78,7 @@ import {
   isImageScanPolicy,
 } from '../../lib/ocr/contracts';
 import type { ImageTextProviderId } from '../../lib/ocr/known-provider-ids';
+import type { AutoLanguageProbeEvidence } from '../../lib/ocr/auto-language-probe';
 import { ImageTranslationDiagnosticHistory } from '../../lib/ocr/diagnostic-history';
 import {
   ImageTranslationController,
@@ -184,7 +191,9 @@ import {
 import { ReplicaSurfaceRouter } from '../../lib/replica/replica-surface-router';
 import {
   captureRequestMatchesSourceDocument,
+  sameSourceDocument,
   sameSourceReplicaLease,
+  type ReplicaSourceDocumentIdentity,
 } from '../../lib/replica/source-identity';
 import { buildBoundedLanguageSample } from '../../lib/translation/language-sample';
 import { replicaSourceCommitAction } from '../../lib/translation/replica-translation-lifecycle';
@@ -502,11 +511,26 @@ imageTranslationController = new ImageTranslationController({
   translationMemory: imageTranslationMemory,
   onBusyChange: (busy) => setImageTranslationBusy(busy),
   onDiagnostic: logImageTranslationDiagnostic,
+  detectLanguage: async (text) => browser.i18n.detectLanguage(text),
+  onAutoLanguageDetected: (language, evidence, document) => {
+    if (preferences.sourceLanguage !== 'auto' || resolvedSourceLanguage) return;
+    const ready = autoLanguageEvidencePrecedence.offerImageEvidence({
+      language,
+      evidence,
+      document,
+      snapshot,
+      identity: capturedPageIdentity,
+      generation: captureCoordinator.generation,
+      configurationKey: currentAutoImageLanguageConfigurationKey(),
+    });
+    if (ready) commitAutoDetectedImageLanguage(ready);
+  },
 });
 
 function handleReplicaSourceCommit(commit: ReplicaSourceCommit): void {
   const selectedSnapshot = replicaSurfaceRouter.snapshot();
   if (selectedSnapshot && sameSourceReplicaLease(selectedSnapshot, commit)) {
+    clearAutoImageLanguageForDifferentDocument(commit.document);
     // Initial activation is deliberately deferred until the engine run has
     // settled. Checkpoint/live callbacks can only advance an existing lease.
     imageTranslationController?.notifyReplicaCommit(
@@ -573,9 +597,16 @@ let followedPageIdentity: CapturedPageIdentity | undefined;
 let capturedPageIdentity: CapturedPageIdentity | undefined;
 let capturedPageDocumentId: string | undefined;
 let resolvedSourceLanguage: SupportedLanguage | undefined;
+let resolvedSourceLanguageOrigin: 'page' | 'image' | undefined;
+let resolvedImageLanguageConfigurationKey: string | undefined;
+let resolvedImageLanguageDocument: ReplicaSourceDocumentIdentity | undefined;
 let availability: TranslationAvailability = 'unavailable';
 let availabilityRequestId = 0;
 let replicaLanguageRefreshVersion = 0;
+let sourceLanguageResolutionRevision = 0;
+const autoLanguageEvidencePrecedence =
+  new AutoLanguageEvidencePrecedence<PendingAutoImageLanguageEvidence>();
+let pageLanguageResolutionPending = false;
 let identityRequestId = 0;
 let captureInFlight = false;
 let translationInFlight = false;
@@ -946,6 +977,12 @@ browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   const nextIdentity = { tabId, windowId: tab.windowId, url: nextUrl };
   if (changeInfo.status === 'loading' || typeof changeInfo.url === 'string') {
     identityRequestId += 1;
+    sourceLanguageResolutionRevision += 1;
+    autoLanguageEvidencePrecedence.invalidate();
+    pageLanguageResolutionPending = false;
+    if (resolvedSourceLanguageOrigin === 'image') {
+      clearAutoImageLanguageResolution();
+    }
     captureCoordinator.invalidate();
     availabilityRequestId += 1;
     activeAbortController?.abort();
@@ -1977,11 +2014,34 @@ interface LiveLanguageContext {
   preserveOnUnknown: boolean;
 }
 
+interface PendingAutoImageLanguageEvidence {
+  readonly language: SupportedLanguage;
+  readonly evidence: AutoLanguageProbeEvidence;
+  readonly document: ReplicaSourceDocumentIdentity;
+  readonly snapshot: PageSnapshot | undefined;
+  readonly identity: CapturedPageIdentity | undefined;
+  readonly generation: number;
+  readonly configurationKey: string;
+}
+
 async function resolveSelectedSourceLanguage(
   liveContext?: LiveLanguageContext,
 ): Promise<boolean> {
+  if (shouldClearAutoImageLanguageForDocument(
+    resolvedSourceLanguageOrigin,
+    resolvedImageLanguageDocument !== undefined &&
+      currentReplicaDocumentMatches(resolvedImageLanguageDocument),
+  )) {
+    clearAutoImageLanguageResolution();
+  }
+  const resolutionRevision = ++sourceLanguageResolutionRevision;
   if (!snapshot) {
+    autoLanguageEvidencePrecedence.invalidate();
+    pageLanguageResolutionPending = false;
     resolvedSourceLanguage = undefined;
+    resolvedSourceLanguageOrigin = undefined;
+    resolvedImageLanguageConfigurationKey = undefined;
+    resolvedImageLanguageDocument = undefined;
     syncQuickTranslationPanel();
     configureImageTranslation();
     return true;
@@ -1999,6 +2059,17 @@ async function resolveSelectedSourceLanguage(
   const requestedSnapshot = snapshot;
   const requestedPreference = preferences.sourceLanguage;
   const previousLanguage = resolvedSourceLanguage;
+  const previousOrigin = resolvedSourceLanguageOrigin;
+  const previousImageConfigurationKey = resolvedImageLanguageConfigurationKey;
+  const previousImageDocument = resolvedImageLanguageDocument;
+  if (requestedPreference !== 'auto') autoLanguageEvidencePrecedence.invalidate();
+  autoLanguageEvidencePrecedence.beginPageResolution(resolutionRevision);
+  pageLanguageResolutionPending =
+    autoLanguageEvidencePrecedence.pageResolutionPending;
+  // This controller gate is raised before page detection yields. It prevents
+  // image probing from adopting a language while stronger page evidence is
+  // unresolved, instead of trying to undo a projection afterward.
+  configureImageTranslation();
   const detectionSnapshot = liveContext
     ? { ...requestedSnapshot, items: [] }
     : requestedSnapshot;
@@ -2009,12 +2080,54 @@ async function resolveSelectedSourceLanguage(
     liveContext?.visibleText ?? mirrorLanguageSample(),
   );
   if (
+    resolutionRevision !== sourceLanguageResolutionRevision ||
     snapshot !== requestedSnapshot ||
     preferences.sourceLanguage !== requestedPreference
-  ) return false;
+  ) {
+    autoLanguageEvidencePrecedence.cancelPageResolution(resolutionRevision);
+    pageLanguageResolutionPending =
+      autoLanguageEvidencePrecedence.pageResolutionPending;
+    configureImageTranslation();
+    return false;
+  }
+  const previousImageDocumentIsCurrent = previousOrigin === 'image' &&
+    previousImageDocument !== undefined &&
+    currentReplicaDocumentMatches(previousImageDocument);
+  const preservePreviousLanguage = previousOrigin === 'image'
+    ? previousImageDocumentIsCurrent
+    : Boolean(liveContext?.preserveOnUnknown);
   resolvedSourceLanguage =
     detected.language ??
-    (liveContext?.preserveOnUnknown ? previousLanguage : undefined);
+    (preservePreviousLanguage
+      ? previousLanguage
+      : undefined);
+  if (detected.language) {
+    resolvedSourceLanguageOrigin = 'page';
+    resolvedImageLanguageConfigurationKey = undefined;
+    resolvedImageLanguageDocument = undefined;
+  } else if (resolvedSourceLanguage) {
+    resolvedSourceLanguageOrigin = previousOrigin;
+    resolvedImageLanguageConfigurationKey = previousImageConfigurationKey;
+    resolvedImageLanguageDocument = previousOrigin === 'image'
+      ? previousImageDocument
+      : undefined;
+  } else {
+    resolvedSourceLanguageOrigin = undefined;
+    resolvedImageLanguageConfigurationKey = undefined;
+    resolvedImageLanguageDocument = undefined;
+  }
+  const pendingImageEvidence =
+    autoLanguageEvidencePrecedence.settlePageResolution(
+      resolutionRevision,
+      Boolean(resolvedSourceLanguage),
+    );
+  pageLanguageResolutionPending =
+    autoLanguageEvidencePrecedence.pageResolutionPending;
+  if (pendingImageEvidence &&
+      pendingAutoImageLanguageEvidenceIsCurrent(pendingImageEvidence)) {
+    commitAutoDetectedImageLanguage(pendingImageEvidence);
+    return true;
+  }
   detectedLanguageElement.textContent = resolvedSourceLanguage
     ? requestedPreference === 'auto'
       ? detected.language
@@ -2026,6 +2139,92 @@ async function resolveSelectedSourceLanguage(
   syncQuickTranslationPanel();
   configureImageTranslation();
   return true;
+}
+
+function commitAutoDetectedImageLanguage(
+  proposal: PendingAutoImageLanguageEvidence,
+): void {
+  if (
+    preferences.sourceLanguage !== 'auto' ||
+    resolvedSourceLanguage ||
+    !pendingAutoImageLanguageEvidenceIsCurrent(proposal)
+  ) return;
+  const resolutionRevision = ++sourceLanguageResolutionRevision;
+  resolvedSourceLanguage = proposal.language;
+  resolvedSourceLanguageOrigin = 'image';
+  resolvedImageLanguageConfigurationKey = proposal.configurationKey;
+  resolvedImageLanguageDocument = proposal.document;
+  availabilityRequestId += 1;
+  availabilityCheckedForPair = undefined;
+  translationComplete = false;
+  invalidateComposerOutput();
+  detectedLanguageElement.textContent =
+    `Detected ${languageName(proposal.language)} from bounded image OCR (${proposal.evidence.replaceAll('-', ' ')}).`;
+  detectedLanguageElement.hidden = false;
+  syncQuickTranslationPanel();
+  updateControls();
+  queueMicrotask(() => {
+    void reconcileAutoDetectedImageLanguage(
+      proposal.language,
+      resolutionRevision,
+    );
+  });
+}
+
+function pendingAutoImageLanguageEvidenceIsCurrent(
+  proposal: PendingAutoImageLanguageEvidence,
+): boolean {
+  return (
+    proposal.configurationKey === currentAutoImageLanguageConfigurationKey() &&
+    currentReplicaDocumentMatches(proposal.document) &&
+    proposal.snapshot === snapshot &&
+    proposal.identity === capturedPageIdentity &&
+    captureCoordinator.isCurrent(proposal.generation)
+  );
+}
+
+async function reconcileAutoDetectedImageLanguage(
+  language: SupportedLanguage,
+  resolutionRevision: number,
+): Promise<void> {
+  if (
+    resolutionRevision !== sourceLanguageResolutionRevision ||
+    preferences.sourceLanguage !== 'auto' ||
+    resolvedSourceLanguage !== language ||
+    !resolvedImageLanguageDocument ||
+    !currentReplicaDocumentMatches(resolvedImageLanguageDocument)
+  ) return;
+  const generation = captureCoordinator.generation;
+  const identity = capturedPageIdentity;
+  const requestedSnapshot = snapshot;
+  const pair = selectedPair();
+  if (replicaTranslationMode === 'rrweb-projection' && !isLiveSourceOnlyMode()) {
+    replicaTranslationCoordinator.selectPair(pair);
+  }
+  configureImageTranslation();
+  if (
+    resolutionRevision !== sourceLanguageResolutionRevision ||
+    !requestedSnapshot ||
+    !identity ||
+    !pair ||
+    !captureCoordinator.isCurrent(generation)
+  ) {
+    updateControls();
+    return;
+  }
+  await checkAvailability(generation);
+  if (
+    resolutionRevision !== sourceLanguageResolutionRevision ||
+    preferences.sourceLanguage !== 'auto' ||
+    resolvedSourceLanguage !== language ||
+    !resolvedImageLanguageDocument ||
+    !currentReplicaDocumentMatches(resolvedImageLanguageDocument) ||
+    snapshot !== requestedSnapshot ||
+    capturedPageIdentity !== identity ||
+    !captureCoordinator.isCurrent(generation) ||
+    !isCurrentTranslationPair(pair)
+  ) return;
+  await maybeTranslateAutomatically(generation, identity.url);
 }
 
 function mirrorLanguageSample(): string {
@@ -3362,6 +3561,24 @@ function configureImageTranslation(): void {
     enabledProviderOrder,
     ocrProviderRuntimeStatuses,
   );
+  const nextAutoLanguageConfigurationKey = autoImageLanguageConfigurationKey(
+    usableProviderOrder,
+    preferences.ocrMinimumConfidence,
+  );
+  if (shouldClearAutoImageLanguageForDocument(
+    resolvedSourceLanguageOrigin,
+    resolvedImageLanguageDocument !== undefined &&
+      currentReplicaDocumentMatches(resolvedImageLanguageDocument),
+  )) {
+    clearAutoImageLanguageResolution();
+  }
+  if (shouldClearAutoImageLanguageResolution(
+    resolvedSourceLanguageOrigin,
+    resolvedImageLanguageConfigurationKey,
+    nextAutoLanguageConfigurationKey,
+  )) {
+    clearAutoImageLanguageResolution();
+  }
   imageTranslationController.configure({
     enabled:
       preferences.imageTranslationEnabled &&
@@ -3376,9 +3593,68 @@ function configureImageTranslation(): void {
     ...(resolvedSourceLanguage
       ? { detectedSourceLanguage: resolvedSourceLanguage }
       : {}),
+    pageLanguageResolutionPending,
     targetLanguage: preferences.targetLanguage,
     translationIdle: !translationInFlight,
   });
+}
+
+function currentAutoImageLanguageConfigurationKey(): string {
+  const enabledProviderOrder = effectiveCompiledProviderOrder(
+    preferences.imageTextProviderOrder,
+    preferences.disabledImageTextProviderIds,
+  );
+  return autoImageLanguageConfigurationKey(
+    runtimeReadyOcrProviderOrder(
+      enabledProviderOrder,
+      ocrProviderRuntimeStatuses,
+    ),
+    preferences.ocrMinimumConfidence,
+  );
+}
+
+function clearAutoImageLanguageResolution(): void {
+  sourceLanguageResolutionRevision += 1;
+  autoLanguageEvidencePrecedence.invalidate();
+  pageLanguageResolutionPending = false;
+  resolvedSourceLanguage = undefined;
+  resolvedSourceLanguageOrigin = undefined;
+  resolvedImageLanguageConfigurationKey = undefined;
+  resolvedImageLanguageDocument = undefined;
+  availabilityRequestId += 1;
+  availability = 'unavailable';
+  availabilityCheckedForPair = undefined;
+  translationComplete = false;
+  activeAbortController?.abort();
+  invalidateComposerOutput();
+  if (replicaTranslationMode === 'rrweb-projection') {
+    replicaTranslationCoordinator.selectPair(undefined);
+  }
+  detectedLanguageElement.textContent =
+    'Image-derived language evidence was cleared. OCR is checking again with the updated settings.';
+  detectedLanguageElement.hidden = false;
+  syncQuickTranslationPanel();
+}
+
+function currentReplicaDocumentMatches(
+  document: ReplicaSourceDocumentIdentity,
+): boolean {
+  const current = replicaSurfaceRouter.snapshot()?.document;
+  return Boolean(current && sameSourceDocument(current, document));
+}
+
+function clearAutoImageLanguageForDifferentDocument(
+  document: ReplicaSourceDocumentIdentity,
+): void {
+  if (!shouldClearAutoImageLanguageForDocument(
+    resolvedSourceLanguageOrigin,
+    Boolean(
+      resolvedImageLanguageDocument &&
+      sameSourceDocument(resolvedImageLanguageDocument, document),
+    ),
+  )) return;
+  clearAutoImageLanguageResolution();
+  configureImageTranslation();
 }
 
 async function refreshOcrProviderRuntimeStatuses(): Promise<void> {
@@ -4255,6 +4531,9 @@ function withCaptureTimeout<T>(operation: Promise<T>): Promise<T> {
 
 function invalidateCompanion(message: string): void {
   identityRequestId += 1;
+  sourceLanguageResolutionRevision += 1;
+  autoLanguageEvidencePrecedence.invalidate();
+  pageLanguageResolutionPending = false;
   releaseLiveSession(capturedPageIdentity ?? followedPageIdentity);
   captureCoordinator.invalidate();
   availabilityRequestId += 1;
@@ -4269,6 +4548,9 @@ function invalidateCompanion(message: string): void {
   capturedPageIdentity = undefined;
   capturedPageDocumentId = undefined;
   resolvedSourceLanguage = undefined;
+  resolvedSourceLanguageOrigin = undefined;
+  resolvedImageLanguageConfigurationKey = undefined;
+  resolvedImageLanguageDocument = undefined;
   availability = 'unavailable';
   availabilityCheckedForPair = undefined;
   translationDesired = false;

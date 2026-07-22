@@ -935,7 +935,7 @@ describe('offscreen OCR protocol and lifecycle', () => {
     ]);
   });
 
-  it('routes the separately versioned direct Tesseract-Wasm A/B job', async () => {
+  it('routes Japanese per Tesseract runtime and keys cache by the loaded model', async () => {
     const store = memoryStore();
     const calls: OffscreenOcrJob[] = [];
     const sendMessage = vi.fn(async (message: unknown) => {
@@ -958,17 +958,42 @@ describe('offscreen OCR protocol and lifecycle', () => {
 
     await expect(coordinator.recognize(pixels, {
       providerOrder: ['tesseract-wasm-direct'],
-      sourceLanguage: 'en',
-      languageGroup: 'eng',
+      sourceLanguage: 'ja',
+      languageGroup: 'jpn+jpn_vert',
       modelVersion: 'tessdata-fast-87416418',
     })).resolves.toMatchObject({
       status: 'complete',
       result: { providerId: 'tesseract-wasm-direct' },
     });
+    await expect(coordinator.recognize(pixels, {
+      providerOrder: ['tesseract-wasm-direct'],
+      sourceLanguage: 'ja',
+      languageGroup: 'jpn',
+      modelVersion: 'tessdata-fast-87416418',
+    })).resolves.toMatchObject({
+      status: 'complete',
+      cacheAccess: 'hit',
+      result: { providerId: 'tesseract-wasm-direct' },
+    });
+    await expect(coordinator.recognize(pixels, {
+      providerOrder: ['tesseract'],
+      sourceLanguage: 'ja',
+      languageGroup: 'jpn+jpn_vert',
+      modelVersion: 'tessdata-fast-87416418',
+    })).resolves.toMatchObject({
+      status: 'complete',
+      result: { providerId: 'tesseract' },
+    });
     expect(calls).toEqual([
       expect.objectContaining({
         providerId: 'tesseract-wasm-direct',
         providerVersion: 'tesseract-wasm-0.11.0',
+        languageGroup: 'jpn',
+      }),
+      expect.objectContaining({
+        providerId: 'tesseract',
+        providerVersion: 'tesseract.js-7.0.0',
+        languageGroup: 'jpn+jpn_vert',
       }),
     ]);
   });

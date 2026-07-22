@@ -400,8 +400,9 @@ const PUBLIC_MENU_RICH_RESOURCE_ELEMENTS = new Set([
 ]);
 
 const RAW_CONTROL_TEXT_ATTRIBUTES = new Set(['placeholder', 'value']);
+const SIMUL_OWNED_ATTRIBUTE_PREFIX = 'data-simul-';
 const NATIVE_SELECT_PRESENTATION_ATTRIBUTES = Object.freeze({
-  select: new Set(['disabled', 'multiple', 'role']),
+  select: new Set(['disabled', 'multiple', 'role', 'size']),
   option: new Set(['disabled', 'role']),
   optgroup: new Set(['disabled', 'role']),
 });
@@ -1585,6 +1586,7 @@ function sanitizeAttributes(
     }
     if (
       name.startsWith('on') || name === 'nonce' ||
+      name.startsWith(SIMUL_OWNED_ATTRIBUTE_PREFIX) ||
       (isNativeSelectSemanticTag(tagName) &&
         !isNativeSelectPresentationAttribute(tagName, name)) ||
       ((tagName === 'option' || tagName === 'optgroup') && name === 'style') ||
@@ -1627,6 +1629,17 @@ function sanitizeAttributes(
       isNativeSelectSemanticTag(tagName) &&
       (name === 'disabled' || name === 'multiple')
     ) value = '';
+    if (tagName === 'select' && name === 'size') {
+      const size = canonicalNativeSelectSize(value);
+      if (!size) {
+        incrementRepresentability(
+          representability,
+          'strippedActiveAttributeCount',
+        );
+        continue;
+      }
+      value = size;
+    }
     if (isNativeSelectSemanticTag(tagName) && name === 'role') {
       if (isSourcePrivateRoleValue(value)) value = 'combobox';
       else if (isSourceActivationRoleValue(value)) value = 'button';
@@ -3457,6 +3470,9 @@ function isUnsafeTransportedAttribute(
   value: string,
   fidelityPolicy: SelectableReplicaFidelityPolicy,
 ): boolean {
+  // These attributes are capabilities and receiver bookkeeping written only
+  // after graph validation. A source page must never be able to mint them.
+  if (name.startsWith(SIMUL_OWNED_ATTRIBUTE_PREFIX)) return true;
   if (
     isNativeSelectSemanticTag(tagName) &&
     !isNativeSelectPresentationAttribute(tagName, name)
@@ -3465,6 +3481,7 @@ function isUnsafeTransportedAttribute(
     isNativeSelectSemanticTag(tagName) &&
     (
       ((name === 'disabled' || name === 'multiple') && value !== '') ||
+      (name === 'size' && canonicalNativeSelectSize(value) !== value) ||
       (name === 'role' && value !== 'combobox' && value !== 'button')
     )
   ) return true;
@@ -3639,6 +3656,15 @@ function isNativeSelectPresentationAttribute(
   }
   return tagName === 'optgroup' &&
     NATIVE_SELECT_PRESENTATION_ATTRIBUTES.optgroup.has(name);
+}
+
+function canonicalNativeSelectSize(value: string): string | undefined {
+  const normalized = value.trim();
+  if (!/^\d{1,10}$/u.test(normalized)) return undefined;
+  const size = Number(normalized);
+  return Number.isSafeInteger(size) && size >= 1 && size <= 1_000
+    ? String(size)
+    : undefined;
 }
 
 function isValidTransportedNativeSelectPlacement(

@@ -64,17 +64,21 @@ never as raw `value`/`placeholder` attributes, and stays memory-only and
 content-free in logs. Password/password-autocomplete fields, unsupported
 controls, contenteditable regions, and ARIA textbox fallbacks remain blank.
 Public native selects carry only bounded option/optgroup labels and
-selected/disabled/multiple/open presentation state, including live changes;
+selected/disabled/multiple/open/size presentation state, including live changes;
 raw values, names, data attributes, datalist content, rich picker descendants,
-and private ancestry remain absent. Both visual engines expose those typed
-labels through a companion-owned scriptless disclosure with a bounded scrolling
-list. Customizable-select `:open` state is progressive; native popup geometry is
-not observable. Public non-editable ARIA listbox/menu/option labels translate,
-while editable combobox/searchbox/textbox/contenteditable branches remain
-private. Attribute-backed labels use the same memory-only translation records
-as other visible text. A safe-to-sensitive transition clears its record and
-projection atomically. rrweb continues masking every editable/value-bearing
-control.
+and private ancestry remain absent. A companion-owned single-select trigger
+opens a viewport-clamped, body-level, internally scrolling panel; `multiple`
+and `size>1` controls retain bounded inline-list presentation. No clipping
+ancestor is rewritten and no source selection/event is reached. Isolated HTML
+admits custom public menu/listbox preview only through one unique, matching,
+same-document `aria-controls` relation; ambiguous or stale relations remain
+inert. Customizable-select `:open` state is progressive; native popup geometry
+is not observable. Public non-editable ARIA listbox/menu/option labels
+translate, while editable combobox/searchbox/textbox/contenteditable branches
+remain private. Attribute-backed labels use the same memory-only translation
+records as other visible text. A safe-to-sensitive transition clears its
+record and projection atomically. rrweb continues masking every editable/
+value-bearing control and keeps all disclosure interaction explicitly inert.
 Passive image validation admits a narrow, shape-only URL-encoded SVG data-image
 profile, covered by a synthetic static-logo fixture, with the same checks on
 capture and receipt. A
@@ -122,6 +126,11 @@ restartable offscreen host through two-minute extension-origin transient
 storage. Tesseract.js/core 7.0.0, three embedded Wasm core loaders, its Worker,
 and 22 pinned `tessdata_fast` files are local. One routed language group is
 loaded at a time and disposed after a group change or 90 seconds idle.
+Pixel capture normally blocks activation ancestry. OCR alone admits an image
+inside a stateless HTTP(S) HTML anchor whose sole normalized role is `button`;
+native buttons, pseudo-links, fragment-only links, stateful ARIA controls,
+private/editable ancestry, and overlapping protected controls remain blocked,
+with live ancestry revalidated immediately before capture.
 
 Reliable image capture after the temporary `activeTab` grant expires uses a
 literal `<all_urls>` optional host grant shared with all-sites automatic
@@ -148,8 +157,15 @@ changing blank pixels defer, and a transient capture failure receives one
 immediate retry.
 Raw screenshot blobs remain transient and are removed after offscreen handoff.
 Nearest valid element `lang`, explicit From, then detected page language selects
-the OCR group. An explicit same-language pair stops before capture; an
-auto-detected same-language image stops before recognition. Stable shallow
+the OCR group. On an otherwise unresolved Auto page, a memory-only probe may
+try at most three eligible source images, six representative routes per image, 18 routes
+total, and 20 seconds. Japanese is attempted on every crop; promotion requires
+one >=90%-confidence transcript with at least three dominant-script characters
+or matching language evidence from distinct source images. Pixel revisions of
+one source image remain one sample. Explicit/nearest language
+remains authoritative, and target changes do not discard source-language
+evidence. An explicit same-language pair stops before capture; an auto-detected
+same-language image stops before recognition. Stable shallow
 banners are classified from CSS geometry so
 device pixel ratio cannot change OCR mode; low-resolution crops are
 conservatively upscaled 2x inside the existing 4 MP/per-axis limits. The

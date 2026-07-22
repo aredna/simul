@@ -1273,6 +1273,20 @@ export function captureLivePageDelta(
     const value = (element as unknown as Record<string, unknown>)[property];
     return typeof value === 'boolean' ? value : element.hasAttribute(property);
   };
+  const currentSelectSize = (element: Element): number => {
+    try {
+      const value = (element as HTMLSelectElement).size;
+      if (Number.isSafeInteger(value) && value >= 0 && value <= 1_000) {
+        return value;
+      }
+    } catch {
+      // Fall through to the canonical content attribute for DOM test doubles.
+    }
+    const raw = element.getAttribute('size');
+    if (!raw || !/^[1-9]\d{0,3}$/u.test(raw)) return 0;
+    const value = Number(raw);
+    return Number.isSafeInteger(value) && value <= 1_000 ? value : 0;
+  };
   const selectPickerIsOpen = (element: Element): boolean => {
     try {
       return element.matches(':open');
@@ -1614,6 +1628,7 @@ export function captureLivePageDelta(
               disabled: currentBooleanProperty(element, 'disabled'),
               multiple: currentBooleanProperty(element, 'multiple'),
               open: selectPickerIsOpen(element),
+              size: currentSelectSize(element),
             },
           }
         : {}),
@@ -2099,12 +2114,18 @@ function readLiveSelectState(value: unknown): VisualSelectState | undefined {
     !isRecord(value) ||
     typeof value.disabled !== 'boolean' ||
     typeof value.multiple !== 'boolean' ||
-    typeof value.open !== 'boolean'
+    typeof value.open !== 'boolean' ||
+    (value.size !== undefined && (
+      !Number.isSafeInteger(value.size) ||
+      Number(value.size) < 0 ||
+      Number(value.size) > 1_000
+    ))
   ) return undefined;
   return {
     disabled: value.disabled,
     multiple: value.multiple,
     open: value.open,
+    size: value.size === undefined ? 0 : Number(value.size),
   };
 }
 

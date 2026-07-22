@@ -1156,8 +1156,10 @@ describe('ImageTranslationController', () => {
         }),
       },
       onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
-      setTimer: ((callback: TimerHandler) => {
-        if (typeof callback === 'function') queueMicrotask(() => callback());
+      setTimer: ((callback: TimerHandler, milliseconds?: number) => {
+        if (typeof callback === 'function' && milliseconds === 1_000) {
+          queueMicrotask(() => callback());
+        }
         return 1;
       }) as unknown as typeof setTimeout,
       clearTimer: vi.fn() as unknown as typeof clearTimeout,
@@ -1284,6 +1286,669 @@ describe('ImageTranslationController', () => {
     controller.dispose();
   });
 
+  it('promotes high-confidence Kana OCR for Auto and requeues all images', async () => {
+    const { document } = parseHTML('<html><body><img></body></html>');
+    const image = document.querySelector('img') as unknown as HTMLImageElement;
+    image.getBoundingClientRect = () => ({
+      left: 0, top: 0, width: 200, height: 100,
+      right: 200, bottom: 100, x: 0, y: 0, toJSON: () => ({}),
+    });
+    const pixels = {
+      descriptor,
+      pixelHash: '73'.repeat(32),
+      encoded: new Blob([new Uint8Array([1])], { type: 'image/png' }),
+      bitmapWidth: 200,
+      bitmapHeight: 100,
+      cropOffsetXCss: 0,
+      cropOffsetYCss: 0,
+      cropWidthCss: 200,
+      cropHeightCss: 100,
+      renderedWidthCss: 200,
+      renderedHeightCss: 100,
+    };
+    const recognition = {
+      status: 'complete' as const,
+      cacheHit: false,
+      result: {
+        providerId: 'tesseract' as const,
+        bitmapWidth: 200,
+        bitmapHeight: 100,
+        transcript: 'お知らせ',
+        transcriptConfidence: 0.94,
+        regions: [{
+          text: 'お知らせ',
+          confidence: 0.94,
+          boundingBox: { x: 20, y: 25, width: 100, height: 30 },
+        }],
+      },
+    };
+    const recognize = vi.fn(async (_pixels: unknown, _route: unknown) => recognition);
+    const detected: Array<readonly [string, string]> = [];
+    const diagnostics: unknown[] = [];
+    const controller = new ImageTranslationController({
+      openSource: async (_request, onChange) => {
+        queueMicrotask(() => onChange({ kind: 'upsert', descriptor }));
+        return { measure: vi.fn(), dispose: vi.fn() };
+      },
+      createPixelCoordinator: () => ({
+        acquire: async () => ({ status: 'ready', pixels }),
+      }) as unknown as PixelAcquisitionCoordinator,
+      createRecognitionCoordinator: () => ({
+        recognize,
+        clear: vi.fn(),
+      }) as unknown as ImageRecognitionCoordinator,
+      resolveAnchor: () => ({
+        document: sourceDocument,
+        replayLease: 1,
+        image,
+        iframe: { contentDocument: document } as HTMLIFrameElement,
+      }),
+      translationProvider: {
+        availability: async () => 'available',
+        createSession: async () => ({
+          translate: async () => 'News',
+          destroy: vi.fn(),
+        }),
+      },
+      onAutoLanguageDetected: (language, evidence) => {
+        detected.push([language, evidence]);
+      },
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      setTimer: ((callback: TimerHandler, milliseconds?: number) => {
+        if (typeof callback === 'function' && milliseconds === 1_000) {
+          queueMicrotask(() => callback());
+        }
+        return 1;
+      }) as unknown as typeof setTimeout,
+      clearTimer: vi.fn() as unknown as typeof clearTimeout,
+      projector: {
+        scheduleFrame: (callback) => { callback(); return 1; },
+        cancelFrame: () => undefined,
+        createResizeObserver: () => undefined,
+      },
+    });
+    controller.configure({
+      enabled: true,
+      scanPolicy: 'visible-only',
+      skipSmallImages: false,
+      providerOrder: ['tesseract'],
+      ocrMinimumConfidence: 0.65,
+      sourceLanguage: 'auto',
+      targetLanguage: 'en',
+      translationIdle: true,
+    });
+    controller.activateReplica(request, 3, 1);
+
+    await vi.waitFor(() => expect(diagnostics).toContain('projected'));
+    expect(detected).toEqual([['ja', 'single-strong-script']]);
+    expect(recognize).toHaveBeenCalledTimes(2);
+    expect(recognize.mock.calls[0]?.[1]).toMatchObject({
+      sourceLanguage: 'ja',
+      languageGroup: 'jpn+jpn_vert',
+      minimumConfidence: 0.8,
+    });
+    expect(recognize.mock.calls[1]?.[1]).toMatchObject({
+      sourceLanguage: 'ja',
+      languageGroup: 'jpn+jpn_vert',
+      minimumConfidence: 0.65,
+    });
+    expect(diagnostics).toContainEqual(expect.objectContaining({
+      stage: 'auto-language-probe-resolved',
+      language: 'ja',
+      evidence: 'single-strong-script',
+    }));
+    controller.dispose();
+  });
+
+  it('retries the Japanese route when a no-text logo precedes a Japanese image', async () => {
+    const secondDescriptor = { ...descriptor, nodeId: 13 };
+    const logoPixels = autoProbePixels(descriptor, '81'.repeat(32));
+    const japanesePixels = autoProbePixels(secondDescriptor, '82'.repeat(32));
+    let emitChange: ((change: SourceImageChange) => void) | undefined;
+    const detected: Array<readonly [string, string]> = [];
+    const diagnostics: unknown[] = [];
+    const timers = controlledProbeTimers();
+    const recognize = vi.fn(async (
+      pixels: typeof logoPixels,
+      route: { sourceLanguage: string },
+    ) => pixels.pixelHash === logoPixels.pixelHash
+      ? autoProbeRecognition()
+      : route.sourceLanguage === 'ja'
+        ? autoProbeRecognition('お知らせ', 0.94)
+        : autoProbeRecognition());
+    const controller = new ImageTranslationController({
+      openSource: async (_request, onChange) => {
+        emitChange = onChange;
+        return { measure: vi.fn(), dispose: vi.fn() };
+      },
+      createPixelCoordinator: () => ({
+        acquire: async (current: SourceImageDescriptor) => ({
+          status: 'ready',
+          pixels: current.nodeId === descriptor.nodeId
+            ? logoPixels
+            : japanesePixels,
+        }),
+      }) as unknown as PixelAcquisitionCoordinator,
+      createRecognitionCoordinator: () => ({
+        recognize,
+        clear: vi.fn(),
+      }) as unknown as ImageRecognitionCoordinator,
+      resolveAnchor: () => ({
+        document: sourceDocument,
+        replayLease: 1,
+        image: { isConnected: true } as HTMLImageElement,
+        iframe: {} as HTMLIFrameElement,
+      }),
+      translationProvider: {
+        availability: async () => 'available',
+        createSession: vi.fn(),
+      },
+      onAutoLanguageDetected: (language, evidence) => {
+        detected.push([language, evidence]);
+      },
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      setTimer: timers.setTimer,
+      clearTimer: timers.clearTimer,
+      projector: testProjectorEnvironment(),
+    });
+    controller.configure({
+      enabled: true,
+      scanPolicy: 'visible-only',
+      skipSmallImages: false,
+      providerOrder: ['tesseract'],
+      sourceLanguage: 'auto',
+      targetLanguage: 'en',
+      translationIdle: true,
+    });
+    controller.activateReplica(request, 3, 1);
+    await vi.waitFor(() => expect(emitChange).toBeTypeOf('function'));
+
+    emitChange?.({ kind: 'upsert', descriptor });
+    await vi.waitFor(() => expect(diagnostics).toContain('unsupported-language'));
+    expect(recognize.mock.calls.slice(0, 6).map((call) =>
+      (call[1] as { sourceLanguage: string }).sourceLanguage
+    )).toEqual(['ja', 'en', 'zh', 'zh-Hant', 'ko', 'ru']);
+
+    emitChange?.({ kind: 'upsert', descriptor: secondDescriptor });
+    await vi.waitFor(() => expect(detected).toEqual([
+      ['ja', 'single-strong-script'],
+    ]));
+    const japaneseRouteCall = recognize.mock.calls.find((call) =>
+      (call[0] as typeof japanesePixels).pixelHash === japanesePixels.pixelHash
+    );
+    expect((japaneseRouteCall?.[1] as { sourceLanguage: string }).sourceLanguage)
+      .toBe('ja');
+    controller.dispose();
+  });
+
+  it('holds controller OCR behind page resolution, then gives page evidence precedence or resumes probing', async () => {
+    const run = async (pageLanguage?: 'en') => {
+      let emitChange: ((change: SourceImageChange) => void) | undefined;
+      const acquire = vi.fn(async () => ({
+        status: 'ready' as const,
+        pixels: autoProbePixels(descriptor, '93'.repeat(32)),
+      }));
+      const recognize = vi.fn(async (
+        _pixels: unknown,
+        route: { sourceLanguage: string },
+      ) => route.sourceLanguage === 'ja'
+        ? autoProbeRecognition('お知らせ', 0.94)
+        : autoProbeRecognition());
+      const detected: Array<{
+        language: string;
+        document: typeof sourceDocument;
+      }> = [];
+      const timers = controlledProbeTimers();
+      const controller = new ImageTranslationController({
+        openSource: async (_request, onChange) => {
+          emitChange = onChange;
+          return { measure: vi.fn(), dispose: vi.fn() };
+        },
+        createPixelCoordinator: () => ({ acquire }) as unknown as
+          PixelAcquisitionCoordinator,
+        createRecognitionCoordinator: () => ({
+          recognize,
+          clear: vi.fn(),
+        }) as unknown as ImageRecognitionCoordinator,
+        resolveAnchor: () => ({
+          document: sourceDocument,
+          replayLease: 1,
+          image: { isConnected: true } as HTMLImageElement,
+          iframe: {} as HTMLIFrameElement,
+        }),
+        translationProvider: {
+          availability: async () => 'available',
+          createSession: vi.fn(),
+        },
+        onAutoLanguageDetected: (language, _evidence, document) => {
+          detected.push({ language, document });
+        },
+        setTimer: timers.setTimer,
+        clearTimer: timers.clearTimer,
+        projector: testProjectorEnvironment(),
+      });
+      const pendingConfiguration = {
+        enabled: true,
+        scanPolicy: 'visible-only' as const,
+        skipSmallImages: false,
+        providerOrder: ['tesseract'] as const,
+        sourceLanguage: 'auto' as const,
+        pageLanguageResolutionPending: true,
+        targetLanguage: 'fr' as const,
+        translationIdle: true,
+      };
+      controller.configure(pendingConfiguration);
+      controller.activateReplica(request, 3, 1);
+      await vi.waitFor(() => expect(emitChange).toBeTypeOf('function'));
+      emitChange?.({ kind: 'upsert', descriptor });
+      await new Promise((resolve) => setTimeout(resolve, 10));
+      expect(acquire).not.toHaveBeenCalled();
+      expect(recognize).not.toHaveBeenCalled();
+      expect(detected).toEqual([]);
+
+      controller.configure({
+        ...pendingConfiguration,
+        pageLanguageResolutionPending: false,
+        ...(pageLanguage ? { detectedSourceLanguage: pageLanguage } : {}),
+      });
+      if (pageLanguage) {
+        await vi.waitFor(() => expect(recognize).toHaveBeenCalled());
+        await vi.waitFor(() => expect(controller.busy).toBe(false));
+        expect(recognize.mock.calls.every((call) =>
+          (call[1] as { sourceLanguage: string }).sourceLanguage ===
+            pageLanguage
+        )).toBe(true);
+        expect(detected).toEqual([]);
+      } else {
+        await vi.waitFor(() => expect(detected).toHaveLength(1));
+        expect(detected[0]).toEqual({
+          language: 'ja',
+          document: sourceDocument,
+        });
+      }
+      controller.dispose();
+    };
+
+    await run('en');
+    await run();
+  });
+
+  it('retries the same image and route after an in-flight probe cancellation', async () => {
+    let emitChange: ((change: SourceImageChange) => void) | undefined;
+    const detected: Array<readonly [string, string]> = [];
+    const timers = controlledProbeTimers();
+    const pixels = autoProbePixels(descriptor, '87'.repeat(32));
+    const recognize = vi.fn()
+      .mockImplementationOnce(() =>
+        new Promise<ImageRecognitionResult>(() => undefined),
+      )
+      .mockResolvedValue(autoProbeRecognition('お知らせ', 0.94));
+    const controller = new ImageTranslationController({
+      openSource: async (_request, onChange) => {
+        emitChange = onChange;
+        return { measure: vi.fn(), dispose: vi.fn() };
+      },
+      createPixelCoordinator: () => ({
+        acquire: async () => ({ status: 'ready', pixels }),
+      }) as unknown as PixelAcquisitionCoordinator,
+      createRecognitionCoordinator: () => ({
+        recognize,
+        clear: vi.fn(),
+      }) as unknown as ImageRecognitionCoordinator,
+      resolveAnchor: () => ({
+        document: sourceDocument,
+        replayLease: 1,
+        image: { isConnected: true } as HTMLImageElement,
+        iframe: {} as HTMLIFrameElement,
+      }),
+      translationProvider: {
+        availability: async () => 'available',
+        createSession: vi.fn(),
+      },
+      onAutoLanguageDetected: (language, evidence) => {
+        detected.push([language, evidence]);
+      },
+      setTimer: timers.setTimer,
+      clearTimer: timers.clearTimer,
+      projector: testProjectorEnvironment(),
+    });
+    controller.configure({
+      enabled: true,
+      scanPolicy: 'visible-only',
+      skipSmallImages: false,
+      providerOrder: ['tesseract'],
+      sourceLanguage: 'auto',
+      targetLanguage: 'en',
+      translationIdle: true,
+    });
+    controller.activateReplica(request, 3, 1);
+    await vi.waitFor(() => expect(emitChange).toBeTypeOf('function'));
+    emitChange?.({ kind: 'upsert', descriptor });
+    await vi.waitFor(() => expect(recognize).toHaveBeenCalledOnce());
+    expect(controller.cancelCurrent()).toBe(true);
+    await vi.waitFor(() => expect(controller.busy).toBe(false));
+    emitChange?.({
+      kind: 'upsert',
+      descriptor: { ...descriptor, observationRevision: 2 },
+    });
+
+    await vi.waitFor(() => expect(detected).toEqual([
+      ['ja', 'single-strong-script'],
+    ]));
+    expect(recognize).toHaveBeenCalledTimes(3);
+    expect(recognize.mock.calls.slice(0, 2).map((call) =>
+      (call[1] as { sourceLanguage: string }).sourceLanguage
+    )).toEqual(['ja', 'ja']);
+    controller.dispose();
+  });
+
+  it('stops a hung probe at its one hard deadline and ignores a stale timer after disposal', async () => {
+    let emitChange: ((change: SourceImageChange) => void) | undefined;
+    const diagnostics: unknown[] = [];
+    const timers = controlledProbeTimers();
+    const recognize = vi.fn(() => new Promise<ImageRecognitionResult>(() => undefined));
+    const pixels = autoProbePixels(descriptor, '83'.repeat(32));
+    const controller = new ImageTranslationController({
+      openSource: async (_request, onChange) => {
+        emitChange = onChange;
+        return { measure: vi.fn(), dispose: vi.fn() };
+      },
+      createPixelCoordinator: () => ({
+        acquire: async () => ({ status: 'ready', pixels }),
+      }) as unknown as PixelAcquisitionCoordinator,
+      createRecognitionCoordinator: () => ({
+        recognize,
+        clear: vi.fn(),
+      }) as unknown as ImageRecognitionCoordinator,
+      resolveAnchor: () => ({
+        document: sourceDocument,
+        replayLease: 1,
+        image: { isConnected: true } as HTMLImageElement,
+        iframe: {} as HTMLIFrameElement,
+      }),
+      translationProvider: {
+        availability: async () => 'available',
+        createSession: vi.fn(),
+      },
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      setTimer: timers.setTimer,
+      clearTimer: timers.clearTimer,
+      projector: testProjectorEnvironment(),
+    });
+    controller.configure({
+      enabled: true,
+      scanPolicy: 'visible-only',
+      skipSmallImages: false,
+      providerOrder: ['tesseract'],
+      sourceLanguage: 'auto',
+      targetLanguage: 'en',
+      translationIdle: true,
+    });
+    controller.activateReplica(request, 3, 1);
+    await vi.waitFor(() => expect(emitChange).toBeTypeOf('function'));
+    emitChange?.({ kind: 'upsert', descriptor });
+    await vi.waitFor(() => expect(recognize).toHaveBeenCalledOnce());
+    expect(timers.deadlineCallbacks).toHaveLength(1);
+
+    timers.deadlineCallbacks[0]?.();
+    await vi.waitFor(() => expect(diagnostics).toContainEqual(
+      expect.objectContaining({
+        stage: 'auto-language-probe-inconclusive',
+        reason: 'deadline',
+      }),
+    ));
+    await vi.waitFor(() => expect(controller.busy).toBe(false));
+    const beforeDispose = diagnostics.length;
+    controller.dispose();
+    timers.deadlineCallbacks[0]?.();
+    await Promise.resolve();
+    expect(diagnostics).toHaveLength(beforeDispose);
+    expect(timers.clearTimer).toHaveBeenCalled();
+  });
+
+  it('reports content-free provider and route failures before an inconclusive probe', async () => {
+    let emitChange: ((change: SourceImageChange) => void) | undefined;
+    const diagnostics: unknown[] = [];
+    const timers = controlledProbeTimers();
+    const pixels = autoProbePixels(descriptor, '84'.repeat(32));
+    const recognize = vi.fn(async (_pixels: unknown, route: {
+      sourceLanguage: string;
+    }): Promise<ImageRecognitionResult> => route.sourceLanguage === 'ja'
+      ? { status: 'failed', code: 'provider-unavailable' }
+      : route.sourceLanguage === 'en'
+        ? { status: 'failed', code: 'unsupported-language' }
+        : autoProbeRecognition());
+    const controller = new ImageTranslationController({
+      openSource: async (_request, onChange) => {
+        emitChange = onChange;
+        return { measure: vi.fn(), dispose: vi.fn() };
+      },
+      createPixelCoordinator: () => ({
+        acquire: async () => ({ status: 'ready', pixels }),
+      }) as unknown as PixelAcquisitionCoordinator,
+      createRecognitionCoordinator: () => ({
+        recognize,
+        clear: vi.fn(),
+      }) as unknown as ImageRecognitionCoordinator,
+      resolveAnchor: () => ({
+        document: sourceDocument,
+        replayLease: 1,
+        image: { isConnected: true } as HTMLImageElement,
+        iframe: {} as HTMLIFrameElement,
+      }),
+      translationProvider: {
+        availability: async () => 'available',
+        createSession: vi.fn(),
+      },
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      setTimer: timers.setTimer,
+      clearTimer: timers.clearTimer,
+      projector: testProjectorEnvironment(),
+    });
+    controller.configure({
+      enabled: true,
+      scanPolicy: 'visible-only',
+      skipSmallImages: false,
+      providerOrder: ['tesseract'],
+      sourceLanguage: 'auto',
+      targetLanguage: 'en',
+      translationIdle: true,
+    });
+    controller.activateReplica(request, 3, 1);
+    await vi.waitFor(() => expect(emitChange).toBeTypeOf('function'));
+    emitChange?.({ kind: 'upsert', descriptor });
+    await vi.waitFor(() => expect(recognize).toHaveBeenCalledTimes(6));
+    const failures = diagnostics.filter((diagnostic) =>
+      typeof diagnostic === 'object' && diagnostic !== null &&
+      'stage' in diagnostic && diagnostic.stage === 'recognition-failed'
+    );
+    expect(failures).toEqual(expect.arrayContaining([
+      expect.objectContaining({ code: 'provider-unavailable' }),
+      expect.objectContaining({ code: 'unsupported-language' }),
+    ]));
+    timers.deadlineCallbacks[0]?.();
+    await vi.waitFor(() => expect(diagnostics).toContainEqual(
+      expect.objectContaining({
+        stage: 'auto-language-probe-inconclusive',
+        reason: 'deadline',
+      }),
+    ));
+    expect(JSON.stringify([...failures, diagnostics.at(-1)])).not.toMatch(
+      /(?:transcript|pixelHash|nodeId|documentId|https?:)/iu,
+    );
+    controller.dispose();
+  });
+
+  it('preserves probe votes and its single deadline across the same-document reconnect', async () => {
+    const secondDescriptor = { ...descriptor, nodeId: 14 };
+    const revisedFirstDescriptor = {
+      ...descriptor,
+      contentRevision: 2,
+      observationRevision: 2,
+    };
+    const firstPixels = autoProbePixels(descriptor, '85'.repeat(32));
+    const revisedFirstPixels = autoProbePixels(
+      revisedFirstDescriptor,
+      '84'.repeat(32),
+    );
+    const secondPixels = autoProbePixels(secondDescriptor, '86'.repeat(32));
+    const sourceChanges: Array<(change: SourceImageChange) => void> = [];
+    const unavailable: Array<(error: ImageSourceUnavailableError) => void> = [];
+    const detected: Array<readonly [string, string]> = [];
+    const timers = controlledProbeTimers();
+    const openSource = vi.fn(async (_request, onChange) => {
+      sourceChanges.push(onChange);
+      return {
+        unavailable: new Promise<ImageSourceUnavailableError>((resolve) => {
+          unavailable.push(resolve);
+        }),
+        measure: vi.fn(),
+        dispose: vi.fn(),
+      };
+    });
+    const recognize = vi.fn(async (
+      _pixels: typeof firstPixels,
+      route: { sourceLanguage: string },
+    ) => route.sourceLanguage === 'ja'
+      ? autoProbeRecognition('お知らせ', 0.89)
+      : autoProbeRecognition());
+    const controller = new ImageTranslationController({
+      openSource,
+      createPixelCoordinator: () => ({
+        acquire: async (current: SourceImageDescriptor) => ({
+          status: 'ready',
+          pixels: current.nodeId === descriptor.nodeId
+            ? current.contentRevision === descriptor.contentRevision
+              ? firstPixels
+              : revisedFirstPixels
+            : secondPixels,
+        }),
+      }) as unknown as PixelAcquisitionCoordinator,
+      createRecognitionCoordinator: () => ({
+        recognize,
+        clear: vi.fn(),
+      }) as unknown as ImageRecognitionCoordinator,
+      resolveAnchor: () => ({
+        document: sourceDocument,
+        replayLease: 1,
+        image: { isConnected: true } as HTMLImageElement,
+        iframe: {} as HTMLIFrameElement,
+      }),
+      translationProvider: {
+        availability: async () => 'available',
+        createSession: vi.fn(),
+      },
+      onAutoLanguageDetected: (language, evidence) => {
+        detected.push([language, evidence]);
+      },
+      setTimer: timers.setTimer,
+      clearTimer: timers.clearTimer,
+      projector: testProjectorEnvironment(),
+    });
+    controller.configure({
+      enabled: true,
+      scanPolicy: 'visible-only',
+      skipSmallImages: false,
+      providerOrder: ['tesseract'],
+      sourceLanguage: 'auto',
+      targetLanguage: 'en',
+      translationIdle: true,
+    });
+    controller.activateReplica(request, 3, 1);
+    await vi.waitFor(() => expect(sourceChanges).toHaveLength(1));
+    sourceChanges[0]?.({ kind: 'upsert', descriptor });
+    await vi.waitFor(() => expect(recognize).toHaveBeenCalledTimes(6));
+    expect(timers.deadlineCallbacks).toHaveLength(1);
+
+    unavailable[0]?.(new ImageSourceUnavailableError('same document reconnect'));
+    await vi.waitFor(() => expect(openSource).toHaveBeenCalledTimes(2));
+    sourceChanges[1]?.({ kind: 'upsert', descriptor: revisedFirstDescriptor });
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    // New pixels from the same source node remain the original sample. Its
+    // six persisted routes neither create a second vote nor a seventh route.
+    expect(recognize).toHaveBeenCalledTimes(6);
+    expect(detected).toEqual([]);
+
+    sourceChanges[1]?.({ kind: 'upsert', descriptor: secondDescriptor });
+    await vi.waitFor(() => expect(detected).toEqual([
+      ['ja', 'distinct-images'],
+    ]));
+    expect(timers.deadlineCallbacks).toHaveLength(1);
+    controller.dispose();
+  });
+
+  it('keeps source-language probe evidence when only the target language changes', async () => {
+    const secondDescriptor = { ...descriptor, nodeId: 15 };
+    const firstPixels = autoProbePixels(descriptor, '88'.repeat(32));
+    const secondPixels = autoProbePixels(secondDescriptor, '89'.repeat(32));
+    let emitChange: ((change: SourceImageChange) => void) | undefined;
+    const detected: Array<readonly [string, string]> = [];
+    const timers = controlledProbeTimers();
+    const recognize = vi.fn(async (
+      _pixels: typeof firstPixels,
+      route: { sourceLanguage: string },
+    ) => route.sourceLanguage === 'ja'
+      ? autoProbeRecognition('お知らせ', 0.89)
+      : autoProbeRecognition());
+    const controller = new ImageTranslationController({
+      openSource: async (_request, onChange) => {
+        emitChange = onChange;
+        return { measure: vi.fn(), dispose: vi.fn() };
+      },
+      createPixelCoordinator: () => ({
+        acquire: async (current: SourceImageDescriptor) => ({
+          status: 'ready',
+          pixels: current.nodeId === descriptor.nodeId
+            ? firstPixels
+            : secondPixels,
+        }),
+      }) as unknown as PixelAcquisitionCoordinator,
+      createRecognitionCoordinator: () => ({
+        recognize,
+        clear: vi.fn(),
+      }) as unknown as ImageRecognitionCoordinator,
+      resolveAnchor: () => ({
+        document: sourceDocument,
+        replayLease: 1,
+        image: { isConnected: true } as HTMLImageElement,
+        iframe: {} as HTMLIFrameElement,
+      }),
+      translationProvider: {
+        availability: async () => 'available',
+        createSession: vi.fn(),
+      },
+      onAutoLanguageDetected: (language, evidence) => {
+        detected.push([language, evidence]);
+      },
+      setTimer: timers.setTimer,
+      clearTimer: timers.clearTimer,
+      projector: testProjectorEnvironment(),
+    });
+    const configuration = {
+      enabled: true,
+      scanPolicy: 'visible-only' as const,
+      skipSmallImages: false,
+      providerOrder: ['tesseract'] as const,
+      sourceLanguage: 'auto' as const,
+      targetLanguage: 'en' as const,
+      translationIdle: true,
+    };
+    controller.configure(configuration);
+    controller.activateReplica(request, 3, 1);
+    await vi.waitFor(() => expect(emitChange).toBeTypeOf('function'));
+    emitChange?.({ kind: 'upsert', descriptor });
+    await vi.waitFor(() => expect(recognize).toHaveBeenCalledTimes(6));
+    expect(timers.deadlineCallbacks).toHaveLength(1);
+
+    controller.configure({ ...configuration, targetLanguage: 'fr' });
+    emitChange?.({ kind: 'upsert', descriptor: secondDescriptor });
+    await vi.waitFor(() => expect(detected).toEqual([
+      ['ja', 'distinct-images'],
+    ]));
+    expect(timers.deadlineCallbacks).toHaveLength(1);
+    controller.dispose();
+  });
+
   it('uses its one reconnect after an initial open failure', async () => {
     const dispose = vi.fn();
     const openSource = vi.fn()
@@ -1359,4 +2024,63 @@ function testProjectorEnvironment() {
     cancelFrame: () => undefined,
     createResizeObserver: () => undefined,
   } as const;
+}
+
+function autoProbePixels(
+  sourceDescriptor: SourceImageDescriptor,
+  pixelHash: string,
+) {
+  return {
+    descriptor: sourceDescriptor,
+    pixelHash,
+    encoded: new Blob([new Uint8Array([1])], { type: 'image/png' }),
+    bitmapWidth: sourceDescriptor.renderedWidth,
+    bitmapHeight: sourceDescriptor.renderedHeight,
+    cropOffsetXCss: 0,
+    cropOffsetYCss: 0,
+    cropWidthCss: sourceDescriptor.renderedWidth,
+    cropHeightCss: sourceDescriptor.renderedHeight,
+    renderedWidthCss: sourceDescriptor.renderedWidth,
+    renderedHeightCss: sourceDescriptor.renderedHeight,
+  };
+}
+
+function autoProbeRecognition(
+  transcript = '',
+  confidence?: number,
+): ImageRecognitionResult {
+  return {
+    status: 'complete',
+    cacheHit: false,
+    result: {
+      providerId: 'tesseract',
+      bitmapWidth: 200,
+      bitmapHeight: 100,
+      transcript,
+      ...(confidence === undefined ? {} : { transcriptConfidence: confidence }),
+      regions: transcript
+        ? [{
+            text: transcript,
+            ...(confidence === undefined ? {} : { confidence }),
+            boundingBox: { x: 20, y: 25, width: 100, height: 30 },
+          }]
+        : [],
+    },
+  };
+}
+
+function controlledProbeTimers() {
+  const deadlineCallbacks: (() => void)[] = [];
+  const clearTimer = vi.fn();
+  let nextHandle = 0;
+  const setTimer = (
+    callback: () => void,
+    milliseconds?: number,
+  ): ReturnType<typeof setTimeout> => {
+    nextHandle += 1;
+    if (milliseconds === 1_000) queueMicrotask(callback);
+    else deadlineCallbacks.push(callback);
+    return nextHandle as unknown as ReturnType<typeof setTimeout>;
+  };
+  return { setTimer, clearTimer, deadlineCallbacks };
 }

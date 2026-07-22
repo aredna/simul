@@ -499,6 +499,172 @@ describe('SourceImageObserver', () => {
     stop();
   });
 
+  it('admits only stateless HTTP(S) navigation images with a plain button role', () => {
+    const fixture = createFixture(`
+      <a href="/news" role="button"><img data-node="19"></a>
+      <a href="https://other.example/news" role="presentation button"><img data-node="20"></a>
+      <a href="#news" role="button"><img data-node="21"></a>
+      <a href="https://page.example/root/#news" role="button"><img data-node="22"></a>
+      <a href="javascript:void(0)" role="button"><img data-node="23"></a>
+      <a href="data:text/plain,button" role="button"><img data-node="24"></a>
+      <a href="/tab" role="tab"><img data-node="25"></a>
+      <div role="button"><a href="/nested" role="button"><img data-node="26"></a></div>
+      <button><a href="/native" role="button"><img data-node="27"></a></button>
+      <a href="/private" role="textbox button"><img data-node="28"></a>
+      <div contenteditable><a href="/editable" role="button"><img data-node="29"></a></div>
+      <a href="/expanded" role="button" aria-expanded="false"><img data-node="30"></a>
+      <a href="/popup" role="button" aria-haspopup="menu"><img data-node="31"></a>
+      <a href="/controlled" role="button" aria-controls="menu"><img data-node="32"></a>
+      <a href="/pressed" role="button" aria-pressed="false"><img data-node="33"></a>
+    `);
+    for (const image of fixture.document.querySelectorAll<HTMLImageElement>(
+      'img[data-node]',
+    )) {
+      setImageMetrics(image, fixture.bounds);
+      fixture.nodeIds.set(image, Number(image.getAttribute('data-node')));
+    }
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+
+    expect(events.map(eventNodeId)).toEqual([7, 19]);
+    expect(JSON.stringify(events)).not.toContain('/news');
+    expect(JSON.stringify(events)).not.toContain('other.example');
+    expect(fixture.mutation.options?.attributeFilter).toEqual(
+      expect.arrayContaining([
+        'href',
+        'role',
+        'aria-expanded',
+        'aria-haspopup',
+        'aria-controls',
+        'aria-pressed',
+      ]),
+    );
+    stop();
+  });
+
+  it('coalesces role and href mutations and re-evaluates dynamic base URLs', () => {
+    const fixture = createFixture(
+      '<a id="navigation" role="button"><img id="dynamic" src="dynamic.png"></a>',
+    );
+    const link = fixture.document.querySelector('#navigation')!;
+    const dynamic = fixture.document.querySelector<HTMLImageElement>('#dynamic')!;
+    const base = fixture.document.querySelector('base')!;
+    setImageMetrics(dynamic, fixture.bounds);
+    fixture.nodeIds.set(dynamic, 19);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    expect(events.map(eventNodeId)).toEqual([7]);
+
+    link.setAttribute('href', '/news');
+    fixture.mutation.trigger([attributeRecord(link, 'href')]);
+    expect(events.at(-1)).toMatchObject({
+      kind: 'upsert',
+      input: { nodeId: 19, contentChanged: true },
+    });
+
+    const beforeCoalescedChange = events.length;
+    link.setAttribute('role', 'presentation button');
+    link.setAttribute('href', '/other-news');
+    fixture.mutation.trigger([
+      attributeRecord(link, 'role'),
+      attributeRecord(link, 'href'),
+    ]);
+    expect(events).toHaveLength(beforeCoalescedChange + 1);
+    expect(events.at(-1)).toMatchObject({ kind: 'remove', nodeId: 19 });
+
+    link.setAttribute('role', 'button');
+    fixture.mutation.trigger([attributeRecord(link, 'role')]);
+    expect(events.at(-1)).toMatchObject({
+      kind: 'upsert', input: { nodeId: 19, contentChanged: true },
+    });
+
+    link.removeAttribute('href');
+    fixture.mutation.trigger([attributeRecord(link, 'href')]);
+    expect(events.at(-1)).toMatchObject({ kind: 'remove', nodeId: 19 });
+    const afterRemoval = events.length;
+    for (const href of ['#menu', 'javascript:void(0)', 'data:text/plain,no']) {
+      link.setAttribute('href', href);
+      fixture.mutation.trigger([attributeRecord(link, 'href')]);
+    }
+    expect(events).toHaveLength(afterRemoval);
+
+    link.setAttribute('href', 'restored');
+    fixture.mutation.trigger([attributeRecord(link, 'href')]);
+    expect(events.at(-1)).toMatchObject({
+      kind: 'upsert',
+      input: { nodeId: 19, contentChanged: true },
+    });
+
+    base.setAttribute('href', 'about:blank');
+    fixture.mutation.trigger([attributeRecord(base, 'href')]);
+    expect(events.at(-1)).toMatchObject({ kind: 'remove', nodeId: 19 });
+    base.setAttribute('href', 'https://page.example/root/');
+    fixture.mutation.trigger([attributeRecord(base, 'href')]);
+    expect(events.at(-1)).toMatchObject({
+      kind: 'upsert', input: { nodeId: 19, contentChanged: true },
+    });
+
+    base.remove();
+    fixture.mutation.trigger([{
+      type: 'childList',
+      target: fixture.document.head,
+      addedNodes: [],
+      removedNodes: [base],
+    } as unknown as MutationRecord]);
+    expect(events.at(-1)).toMatchObject({ kind: 'remove', nodeId: 19 });
+    fixture.document.head.append(base);
+    fixture.mutation.trigger([{
+      type: 'childList',
+      target: fixture.document.head,
+      addedNodes: [base],
+      removedNodes: [],
+    } as unknown as MutationRecord]);
+    expect(events.at(-1)).toMatchObject({
+      kind: 'upsert', input: { nodeId: 19, contentChanged: true },
+    });
+    stop();
+  });
+
+  it('coalesces stateful navigation mutations into removal and re-admission', () => {
+    const fixture = createFixture(
+      '<a id="navigation" href="/news" role="button"><img id="dynamic"></a>',
+    );
+    const link = fixture.document.querySelector('#navigation')!;
+    const dynamic = fixture.document.querySelector<HTMLImageElement>('#dynamic')!;
+    setImageMetrics(dynamic, fixture.bounds);
+    fixture.nodeIds.set(dynamic, 19);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    expect(events.map(eventNodeId)).toEqual([7, 19]);
+
+    const statefulAttributes = [
+      ['aria-expanded', 'false'],
+      ['aria-haspopup', 'menu'],
+      ['aria-controls', 'menu'],
+      ['aria-pressed', 'false'],
+    ] as const;
+    const beforeRemoval = events.length;
+    for (const [attribute, value] of statefulAttributes) {
+      link.setAttribute(attribute, value);
+    }
+    fixture.mutation.trigger(
+      statefulAttributes.map(([attribute]) => attributeRecord(link, attribute)),
+    );
+    expect(events).toHaveLength(beforeRemoval + 1);
+    expect(events.at(-1)).toMatchObject({ kind: 'remove', nodeId: 19 });
+
+    const beforeReadmission = events.length;
+    for (const [attribute] of statefulAttributes) link.removeAttribute(attribute);
+    fixture.mutation.trigger(
+      statefulAttributes.map(([attribute]) => attributeRecord(link, attribute)),
+    );
+    expect(events).toHaveLength(beforeReadmission + 1);
+    expect(events.at(-1)).toMatchObject({
+      kind: 'upsert', input: { nodeId: 19, contentChanged: true },
+    });
+    stop();
+  });
+
   it('admits capacity-skipped images deterministically when a slot opens', () => {
     const fixture = createFixture(
       '<img id="second" src="second.png">',
@@ -608,7 +774,7 @@ function createFixture(
   } = {},
 ) {
   const { document } = parseHTML(
-    `<html><body><img id="main" src="https://private.example/original.png">${extraHtml}</body></html>`,
+    `<html><head><base href="https://page.example/root/"></head><body><img id="main" src="https://private.example/original.png">${extraHtml}</body></html>`,
   );
   const image = document.querySelector<HTMLImageElement>('#main')!;
   const privateImage = document.querySelector<HTMLImageElement>('#private');
@@ -742,8 +908,11 @@ class FakeResizeObserver {
 class FakeMutationObserver {
   callback: (records: readonly MutationRecord[]) => void = () => undefined;
   disconnected = false;
+  options: MutationObserverInit | undefined;
 
-  observe(): void {}
+  observe(_target: Node, options?: MutationObserverInit): void {
+    this.options = options;
+  }
 
   disconnect(): void {
     this.disconnected = true;
@@ -781,4 +950,12 @@ class FakeFrameScheduler {
 
 function eventNodeId(event: SourceImageObservationEvent): number {
   return event.kind === 'upsert' ? event.input.nodeId : event.nodeId;
+}
+
+function attributeRecord(target: Element, attributeName: string): MutationRecord {
+  return {
+    type: 'attributes',
+    target,
+    attributeName,
+  } as unknown as MutationRecord;
 }

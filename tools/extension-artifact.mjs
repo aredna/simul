@@ -161,6 +161,7 @@ export const APPROVED_TESSERACT_WASM_TRANSITIVE_DEPENDENCIES = Object.freeze({
 });
 export const APPROVED_PADDLE_OCR_JS_GIT_HEAD =
   'e5046169b225bcdfbe25d45b4e809ff0f1a69c2c';
+export const APPROVED_PADDLE_BUNDLED_JS_YAML_VERSION = '4.1.1';
 export const APPROVED_TESSDATA_FAST_COMMIT =
   '87416418657359cb625c412a48b6e1d6d41c29bd';
 export const APPROVED_TESSERACT_WASM_GIT_COMMIT =
@@ -2025,6 +2026,7 @@ async function validatePaddleRuntimeAssets({
     'createPaddleOCRDirectHandler',
     'export { createPaddleOCRDirectHandler };',
     '__SIMUL_EXPLICIT_LOCAL_PADDLE_MODEL_REQUIRED__',
+    `/*! js-yaml ${APPROVED_PADDLE_BUNDLED_JS_YAML_VERSION} `,
   ]) {
     if (!directModule.includes(marker)) {
       throw new ArtifactError(
@@ -2052,7 +2054,7 @@ async function validatePaddleRuntimeAssets({
 function assertApprovedPaddleAssetLayout(files) {
   const expected = [
     ['licenses/CLIPPER_BOOST-1.0.txt', 'license', 'https://www.boost.org/LICENSE_1_0.txt'],
-    ['licenses/JS-YAML_MIT.txt', 'license', 'npm:js-yaml@4.3.0/LICENSE'],
+    ['licenses/JS-YAML_MIT.txt', 'license', `npm:js-yaml@${APPROVED_PADDLE_BUNDLED_JS_YAML_VERSION}/LICENSE`],
     ['licenses/ONNXRUNTIME_MIT.txt', 'license', 'https://raw.githubusercontent.com/microsoft/onnxruntime/v1.24.3/LICENSE'],
     ['licenses/OPENCV_APACHE-2.0.txt', 'license', 'npm:@techstark/opencv-js@4.10.0-release.1/LICENSE'],
     ['licenses/PADDLEOCR_APACHE-2.0.txt', 'license', `https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/${APPROVED_PADDLE_OCR_JS_GIT_HEAD}/LICENSE`],

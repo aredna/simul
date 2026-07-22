@@ -54,6 +54,19 @@ describe('ImageTranslationDiagnosticHistory', () => {
       rejectedUncorroboratedRegions: 1,
     })).toBe('recognition quality: candidates=8; accepted=5; corroborated=2; uncertain=3; rejected-blank=1; rejected-punctuation=1; rejected-low-confidence=1; rejected-uncorroborated=1');
     expect(formatImageTranslationDiagnostic({
+      stage: 'auto-language-probe-resolved',
+      language: 'ja',
+      evidence: 'single-strong-script',
+      attempts: 1,
+      samples: 1,
+    })).toBe('Auto language resolved: language=ja; evidence=single-strong-script; attempts=1; samples=1');
+    expect(formatImageTranslationDiagnostic({
+      stage: 'auto-language-probe-inconclusive',
+      reason: 'route-budget',
+      attempts: 18,
+      samples: 3,
+    })).toBe('Auto language inconclusive: reason=route-budget; attempts=18; samples=3; choose From to retry');
+    expect(formatImageTranslationDiagnostic({
       stage: 'translation-started',
       ordinal: 2,
       renderedWidth: 603,

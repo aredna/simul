@@ -1064,6 +1064,10 @@ function protectReplayIframe(iframe: HTMLIFrameElement): void {
   iframe.setAttribute('sandbox', 'allow-same-origin');
   iframe.setAttribute('aria-hidden', 'true');
   iframe.setAttribute('inert', '');
+  // rrweb's privacy-filtered event stream does not retain enough trusted ARIA
+  // identity to prove a trigger/target disclosure relation. Keep this engine
+  // explicitly inert instead of guessing from replayed IDs or roles.
+  iframe.setAttribute('data-simul-disclosure-policy', 'inert');
   iframe.setAttribute('tabindex', '-1');
   iframe.setAttribute('referrerpolicy', 'no-referrer');
   // The extension uses border-box globally. Removing the user-agent iframe

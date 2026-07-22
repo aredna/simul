@@ -59,11 +59,18 @@ import type {
   ReplicaTranslationSurface,
 } from '../translation/replica-translation-coordinator';
 import type { SelectableReplicaFidelityPolicy } from './fidelity-policy';
+import {
+  closeReadOnlyReplicaDisclosures,
+  disposeReadOnlyReplicaDisclosures,
+  installReadOnlyReplicaDisclosure,
+  isReadOnlyReplicaDisclosureEvent,
+  type ReadOnlyReplicaDisclosure,
+} from './read-only-disclosure';
 
 export const ISOLATED_HTML_SHELL_MARKER = 'isolated-html-v1';
-const ISOLATED_HTML_SHELL_DOCUMENT = `<html><head><meta charset="utf-8" data-simul-owned-shell="charset"><meta name="simul-isolated-shell" content="${ISOLATED_HTML_SHELL_MARKER}" data-simul-owned-shell="marker"><meta http-equiv="Content-Security-Policy" data-simul-owned-shell="csp" content="default-src 'none'; script-src 'none'; worker-src 'none'; connect-src 'none'; object-src 'none'; frame-src 'none'; child-src 'none'; media-src 'none'; form-action 'none'; base-uri 'none'; img-src http: https: data: blob:; style-src 'unsafe-inline' http: https: data:; font-src http: https: data:"><style data-simul-owned-shell="inert">html,body{margin:0;min-width:100%;min-height:100%;pointer-events:none}*{pointer-events:none!important}*:has([data-simul-owned-select-host="v1"]:hover),*:has([data-simul-owned-select-host="v1"]:focus-within),*:has([data-simul-owned-select-host="v1"][data-simul-source-picker-open="v1"]){overflow:visible!important;clip-path:none!important;contain:none!important}</style></head><body></body></html>`;
-const ISOLATED_SELECT_SHADOW_CSS = `:host{pointer-events:auto!important;overflow:visible!important;background-image:none!important;border-image-source:none!important;clip-path:none!important;cursor:default!important;filter:none!important;list-style-image:none!important;mask-image:none!important;-webkit-mask-image:none!important}:host([data-simul-select-hidden="v1"]){display:none!important}:host::before,:host::after{content:none!important;display:none!important;background-image:none!important}select[data-simul-select-facsimile="v1"]{pointer-events:auto!important;display:inline-block!important;width:100%!important;box-sizing:border-box!important;height:2.25em!important;max-height:2.25em!important;overflow:auto!important;overscroll-behavior:contain!important;transition:none!important;background-image:none!important;border-image-source:none!important;clip-path:none!important;cursor:default!important;filter:none!important;list-style-image:none!important;mask-image:none!important;-webkit-mask-image:none!important}select[data-simul-select-facsimile="v1"]:hover,select[data-simul-select-facsimile="v1"]:focus-within,select[data-simul-source-picker-open="v1"]{height:auto!important;max-height:min(18rem,70vh)!important;position:relative!important;z-index:2147483646!important}`;
-const ISOLATED_PUBLIC_MENU_SHADOW_CSS = `:host{all:initial!important;display:block!important;box-sizing:border-box!important;max-width:100%!important;color:inherit!important;font:inherit!important;background:none!important;border:0!important;filter:none!important;list-style:none!important;mask:none!important;pointer-events:none!important}:host::before,:host::after{content:none!important;display:none!important;background:none!important}:host *{box-sizing:border-box!important;max-width:100%!important;background:none!important;border-image:none!important;filter:none!important;list-style-image:none!important;mask:none!important;pointer-events:none!important}:host *::before,:host *::after{content:none!important;display:none!important;background:none!important}`;
+const ISOLATED_HTML_SHELL_DOCUMENT = `<html><head><meta charset="utf-8" data-simul-owned-shell="charset"><meta name="simul-isolated-shell" content="${ISOLATED_HTML_SHELL_MARKER}" data-simul-owned-shell="marker"><meta http-equiv="Content-Security-Policy" data-simul-owned-shell="csp" content="default-src 'none'; script-src 'none'; worker-src 'none'; connect-src 'none'; object-src 'none'; frame-src 'none'; child-src 'none'; media-src 'none'; form-action 'none'; base-uri 'none'; img-src http: https: data: blob:; style-src 'unsafe-inline' http: https: data:; font-src http: https: data:"><style data-simul-owned-shell="inert">html,body{margin:0;min-width:100%;min-height:100%;pointer-events:none}*{pointer-events:none!important}[data-simul-replica-disclosure-trigger="v1"],[data-simul-replica-disclosure-panel="v1"],[data-simul-replica-disclosure-overlay="v1"]{pointer-events:auto!important}</style></head><body></body></html>`;
+const ISOLATED_SELECT_SHADOW_CSS = `:host{pointer-events:auto!important;background-image:none!important;border-image-source:none!important;cursor:default!important;filter:none!important;list-style-image:none!important;mask-image:none!important;-webkit-mask-image:none!important}:host([data-simul-select-hidden="v1"]){display:none!important}:host::before,:host::after{content:none!important;display:none!important;background-image:none!important}[data-simul-owned-select-trigger="v1"]{all:unset!important;box-sizing:border-box!important;color:inherit!important;cursor:default!important;display:block!important;font:inherit!important;overflow:hidden!important;text-align:inherit!important;text-overflow:ellipsis!important;white-space:nowrap!important;width:100%!important}[data-simul-owned-select-options="v1"]{background:Canvas!important;box-sizing:border-box!important;color:CanvasText!important;max-height:min(18rem,70vh)!important;min-width:100%!important;overflow:auto!important;overscroll-behavior:contain!important;pointer-events:auto!important;width:max-content!important;z-index:2147483647!important}[data-simul-owned-select-option="v1"],[data-simul-owned-select-optgroup-label="v1"]{box-sizing:border-box!important;display:block!important;min-height:1.5em!important;padding-inline:.5rem!important;pointer-events:none!important;white-space:normal!important}[data-simul-owned-select-optgroup-label="v1"]{font-weight:600!important}select[data-simul-select-facsimile="v1"]{display:none!important;pointer-events:none!important}`;
+export const ISOLATED_PUBLIC_MENU_SHADOW_CSS = `:host{all:initial!important;display:block!important;box-sizing:border-box!important;max-width:100%!important;color:inherit!important;font:inherit!important;background:none!important;border:0!important;filter:none!important;list-style:none!important;mask:none!important;pointer-events:none!important}:host([data-simul-replica-disclosure-panel="v1"][hidden]){display:none!important}:host([data-simul-replica-disclosure-overlay="v1"]){box-sizing:border-box!important;display:block!important;inset:auto!important;left:var(--simul-replica-disclosure-left,0px)!important;margin:0!important;max-height:var(--simul-replica-disclosure-max-height,70vh)!important;max-width:var(--simul-replica-disclosure-max-width,calc(100vw - 16px))!important;min-width:var(--simul-replica-disclosure-min-width,0px)!important;overflow-x:hidden!important;overflow-y:auto!important;overscroll-behavior:contain!important;pointer-events:auto!important;position:fixed!important;top:var(--simul-replica-disclosure-top,0px)!important;visibility:var(--simul-replica-disclosure-visibility,hidden)!important;z-index:2147483647!important}:host::before,:host::after{content:none!important;display:none!important;background:none!important}:host *{box-sizing:border-box!important;max-width:100%!important;background:none!important;border-image:none!important;filter:none!important;list-style-image:none!important;mask:none!important;pointer-events:none!important}:host([data-simul-replica-disclosure-overlay="v1"])>*:not(style){display:block!important;visibility:visible!important;opacity:1!important}:host *::before,:host *::after{content:none!important;display:none!important;background:none!important}`;
 const ISOLATED_DISCLOSURE_IFRAME_MARKER = 'css-disclosure-v1';
 const ISOLATED_DISCLOSURE_BLOCKED_EVENTS = Object.freeze([
   'auxclick', 'beforeinput', 'change', 'click', 'contextmenu', 'dblclick',
@@ -73,21 +80,20 @@ const ISOLATED_DISCLOSURE_BLOCKED_EVENTS = Object.freeze([
 ]);
 const ISOLATED_SELECT_HOSTS = new WeakSet<Element>();
 const ISOLATED_PUBLIC_MENU_HOSTS = new WeakSet<Element>();
-type IsolatedSelectDisclosureReason = 'focus' | 'hover' | 'source-open';
-interface IsolatedInlinePropertySnapshot {
-  readonly value: string;
-  readonly priority: string;
+interface IsolatedSelectFacsimile {
+  readonly panel: HTMLElement;
+  readonly select: HTMLSelectElement;
+  readonly trigger: HTMLButtonElement;
+  controller?: ReadOnlyReplicaDisclosure;
 }
-interface IsolatedClipOverride {
-  count: number;
-  readonly properties: ReadonlyMap<string, IsolatedInlinePropertySnapshot>;
+interface IsolatedPublicMenuFacsimile {
+  readonly role: 'listbox' | 'menu';
 }
-const ISOLATED_SELECT_DISCLOSURE_REASONS = new WeakMap<
+const ISOLATED_SELECT_FACSIMILES = new WeakMap<HTMLElement, IsolatedSelectFacsimile>();
+const ISOLATED_PUBLIC_MENU_FACSIMILES = new WeakMap<
   HTMLElement,
-  Set<IsolatedSelectDisclosureReason>
+  IsolatedPublicMenuFacsimile
 >();
-const ISOLATED_SELECT_CLIP_ANCESTORS = new WeakMap<HTMLElement, Element[]>();
-const ISOLATED_CLIP_OVERRIDES = new WeakMap<Element, IsolatedClipOverride>();
 let isolatedSelectHostSequence = 0;
 export const ISOLATED_HTML_SHELL = `<!doctype html>
 ${ISOLATED_HTML_SHELL_DOCUMENT}`;
@@ -362,6 +368,7 @@ export class IsolatedHtmlReplicaEngine
         });
       }
     }
+    refreshIsolatedNativeSelectFacsimiles(state.iframe.contentDocument);
     this.#refreshExtent(state);
   }
 
@@ -409,6 +416,7 @@ export class IsolatedHtmlReplicaEngine
         text: projection.translated,
         translatable: true,
       });
+      syncContainingIsolatedSelectFacsimile(node as Element);
     }
     this.#projections.set(projection.nodeId, Object.freeze({ ...projection }));
     this.#refreshExtent(state);
@@ -528,6 +536,7 @@ export class IsolatedHtmlReplicaEngine
         controlMetadata,
         ownedAdoptedStyles,
       );
+      refreshIsolatedReplicaDisclosures(iframeDocument);
       const styleReadiness = await settleReplicaStyles(
         iframeDocument,
         this.options.styleSettleDeadlineMs ?? 300,
@@ -581,6 +590,7 @@ export class IsolatedHtmlReplicaEngine
         released: false,
       };
       state.cleanup.add(disposeDisclosureGuards);
+      state.cleanup.add(() => disposeReadOnlyReplicaDisclosures(iframeDocument));
       disposeStagedDisclosureGuards = undefined;
       installStateLayoutObservers(state, () => this.#refreshExtent(state));
       this.#applyRetainedProjections(state);
@@ -658,14 +668,13 @@ export class IsolatedHtmlReplicaEngine
       return;
     }
     const replacementMetrics = readPatchMetrics(state, batch.operations);
-    const disclosureHosts = suspendIsolatedSelectClipOverrides(
-      state.iframe.contentDocument,
-    );
+    const replicaDocument = state.iframe.contentDocument;
+    if (replicaDocument) disposeReadOnlyReplicaDisclosures(replicaDocument);
     let applied: AppliedPatchBatch | undefined;
     try {
       applied = applyPatchBatch(state, batch.operations);
     } finally {
-      resumeIsolatedSelectClipOverrides(disclosureHosts);
+      if (replicaDocument) refreshIsolatedReplicaDisclosures(replicaDocument);
     }
     if (!applied) {
       const reconciliationRejected = batch.operations.some(
@@ -899,6 +908,7 @@ export class IsolatedHtmlReplicaEngine
       }));
     }
     this.#projections = retained;
+    refreshIsolatedNativeSelectFacsimiles(state.iframe.contentDocument);
   }
 
   #refreshExtent(state: HtmlMirrorDomState): void {
@@ -1350,57 +1360,30 @@ function applySelectedOptionIndexes(
   const select = element as HTMLSelectElement;
   if (selectedOptionIndexes === undefined) {
     select.selectedIndex = -1;
-    alignNativeSelectFacsimileSelection(select);
+    syncContainingIsolatedSelectFacsimile(select);
     return;
   }
   const selected = new Set(selectedOptionIndexes);
   const options = select.options;
-  if (select.multiple) {
+  if (select.multiple || select.hasAttribute('multiple')) {
     for (let index = 0; index < options.length; index += 1) {
       options.item(index)!.selected = selected.has(index);
     }
-    alignNativeSelectFacsimileSelection(select);
+    syncContainingIsolatedSelectFacsimile(select);
     return;
   }
   select.selectedIndex = selectedOptionIndexes[0] ?? -1;
-  alignNativeSelectFacsimileSelection(select);
+  syncContainingIsolatedSelectFacsimile(select);
 }
 
 function configureNativeSelectFacsimile(element: Element): void {
   if (element.localName.toLowerCase() !== 'select') return;
-  const select = element as HTMLSelectElement;
-  const optionCount = select.options.length;
   element.setAttribute('data-simul-select-facsimile', 'v1');
-  element.removeAttribute('inert');
+  element.setAttribute('inert', '');
+  element.setAttribute('aria-hidden', 'true');
   element.setAttribute('aria-disabled', 'true');
   element.setAttribute('tabindex', '-1');
-  element.setAttribute('size', String(Math.max(2, Math.min(8, optionCount || 2))));
   syncNativeSelectFacsimileHost(element);
-  alignNativeSelectFacsimileSelection(select);
-}
-
-function alignNativeSelectFacsimileSelection(select: HTMLSelectElement): void {
-  const align = (): void => {
-    const selected = [...select.options].find((option) => option.selected);
-    let top = 0;
-    if (selected) {
-      try {
-        const selectRect = select.getBoundingClientRect();
-        const optionRect = selected.getBoundingClientRect();
-        top = select.scrollTop + optionRect.top - selectRect.top - select.clientTop;
-      } catch {
-        top = selected.offsetTop - select.offsetTop;
-      }
-    }
-    if (Number.isFinite(top)) select.scrollTop = Math.max(0, top);
-  };
-  align();
-  const view = select.ownerDocument.defaultView;
-  if (view?.requestAnimationFrame) {
-    view.requestAnimationFrame(() => {
-      if (select.isConnected) align();
-    });
-  }
 }
 
 /**
@@ -1427,10 +1410,26 @@ function wrapNativeSelectFacsimile(node: Node): Node {
   const style = document.createElement('style');
   style.setAttribute('data-simul-owned-select-style', 'v1');
   style.textContent = ISOLATED_SELECT_SHADOW_CSS;
-  shadow.append(style, select);
+  const trigger = document.createElement('button');
+  trigger.type = 'button';
+  trigger.setAttribute('data-simul-owned-select-trigger', 'v1');
+  trigger.setAttribute('aria-label', 'Show translated options');
+  trigger.setAttribute('aria-haspopup', 'listbox');
+  trigger.setAttribute('aria-readonly', 'true');
+  const panel = document.createElement('div');
+  panel.setAttribute('data-simul-owned-select-options', 'v1');
+  panel.setAttribute('role', 'listbox');
+  panel.setAttribute('aria-disabled', 'true');
+  panel.style.setProperty('background', 'Canvas', 'important');
+  panel.style.setProperty('color', 'CanvasText', 'important');
+  panel.style.setProperty('min-width', '100%', 'important');
+  panel.style.setProperty('width', 'max-content', 'important');
+  panel.style.setProperty('z-index', '2147483647', 'important');
+  shadow.append(style, trigger, panel, select);
   for (const type of ISOLATED_DISCLOSURE_BLOCKED_EVENTS) {
     shadow.addEventListener(type, blockIsolatedDisclosureActivation, true);
   }
+  ISOLATED_SELECT_FACSIMILES.set(host, { panel, select, trigger });
   syncNativeSelectFacsimileHost(select);
   queueMicrotask(() => {
     if (isIsolatedOwnedHostConnected(host)) {
@@ -1467,26 +1466,30 @@ function wrapPublicMenuFacsimile(node: Node): Node {
   style.setAttribute('data-simul-owned-menu-style', 'v1');
   style.textContent = ISOLATED_PUBLIC_MENU_SHADOW_CSS;
   shadow.append(style, element);
+  const role = isolatedPublicMenuRole(element);
+  if (role) ISOLATED_PUBLIC_MENU_FACSIMILES.set(host, { role });
   return host;
 }
 
 function syncNativeSelectFacsimileHost(element: Element): void {
   const host = isolatedSelectFacsimileHost(element);
   if (!host) return;
-  for (const attribute of [...host.attributes]) host.removeAttribute(attribute.name);
+  for (const attribute of [...host.attributes]) {
+    if (!attribute.name.startsWith('data-simul-')) {
+      host.removeAttribute(attribute.name);
+    }
+  }
   host.setAttribute('data-simul-owned-select-host', 'v1');
   if (element.getAttribute('data-simul-source-picker-open') === 'v1') {
     host.setAttribute('data-simul-source-picker-open', 'v1');
+  } else {
+    host.removeAttribute('data-simul-source-picker-open');
   }
-  setIsolatedSelectDisclosureReason(
-    host,
-    'source-open',
-    element.getAttribute('data-simul-source-picker-open') === 'v1',
-  );
   for (const { name, value } of [...element.attributes]) {
     if (
       name.startsWith('data-simul-') || name === 'inert' || name === 'size' ||
-      name === 'style' || name === 'tabindex' || name === 'aria-disabled'
+      name === 'style' || name === 'tabindex' || name === 'aria-disabled' ||
+      name === 'aria-hidden'
     ) continue;
     try {
       host.setAttribute(name, value);
@@ -1523,7 +1526,7 @@ function syncNativeSelectFacsimileHost(element: Element): void {
   host.style.setProperty('mask-image', 'none', 'important');
   host.style.setProperty('-webkit-mask-image', 'none', 'important');
   if (element.getAttribute('data-simul-visually-hidden') === 'v1') {
-    setIsolatedSelectDisclosureReason(host, 'source-open', false);
+    ISOLATED_SELECT_FACSIMILES.get(host)?.controller?.close();
     host.setAttribute('data-simul-select-hidden', 'v1');
     host.style.setProperty('display', 'none', 'important');
     return;
@@ -1532,161 +1535,7 @@ function syncNativeSelectFacsimileHost(element: Element): void {
   if (!hasPresentationDisplay) {
     host.style.setProperty('display', 'inline-block', 'important');
   }
-  host.style.setProperty('overflow', 'visible', 'important');
-}
-
-function setIsolatedSelectDisclosureReason(
-  host: HTMLElement,
-  reason: IsolatedSelectDisclosureReason,
-  active: boolean,
-): void {
-  let reasons = ISOLATED_SELECT_DISCLOSURE_REASONS.get(host);
-  if (!reasons && active) {
-    reasons = new Set<IsolatedSelectDisclosureReason>();
-    ISOLATED_SELECT_DISCLOSURE_REASONS.set(host, reasons);
-  }
-  if (!reasons) return;
-  if (active) reasons.add(reason);
-  else reasons.delete(reason);
-  if (reasons.size > 0) {
-    activateIsolatedSelectClipOverrides(host);
-    return;
-  }
-  ISOLATED_SELECT_DISCLOSURE_REASONS.delete(host);
-  releaseIsolatedSelectClipOverrides(host);
-}
-
-function activateIsolatedSelectClipOverrides(host: HTMLElement): void {
-  if (
-    !isIsolatedOwnedHostConnected(host) ||
-    ISOLATED_SELECT_CLIP_ANCESTORS.has(host)
-  ) return;
-  const view = host.ownerDocument.defaultView;
-  const overridden: Element[] = [];
-  for (
-    let ancestor: Element | undefined = composedParentElement(host);
-    ancestor;
-    ancestor = composedParentElement(ancestor)
-  ) {
-    const style = (ancestor as Element & { style?: CSSStyleDeclaration }).style;
-    if (!style) continue;
-    let computed: CSSStyleDeclaration | undefined;
-    if (typeof view?.getComputedStyle === 'function') {
-      try {
-        computed = view.getComputedStyle(ancestor);
-      } catch {
-        // Inline declarations remain a deterministic fallback in test DOMs
-        // and when a browser refuses a computed-style read.
-      }
-    }
-    const inlineOverflow = isolatedInlineProperty(style, 'overflow').value;
-    const overflowX = normalizeIsolatedCssValue(
-      computed?.overflowX ||
-      computed?.getPropertyValue('overflow-x') ||
-      isolatedInlineProperty(style, 'overflow-x').value ||
-      inlineOverflow ||
-      'visible',
-    );
-    const overflowY = normalizeIsolatedCssValue(
-      computed?.overflowY ||
-      computed?.getPropertyValue('overflow-y') ||
-      isolatedInlineProperty(style, 'overflow-y').value ||
-      inlineOverflow ||
-      'visible',
-    );
-    const overflowClips = overflowX !== 'visible' || overflowY !== 'visible';
-    const clip = normalizeIsolatedCssValue(
-      computed?.clip || isolatedInlineProperty(style, 'clip').value,
-    );
-    const clipsByLegacyClip = Boolean(clip && clip !== 'auto');
-    const clipPath = normalizeIsolatedCssValue(
-      computed?.clipPath ||
-      computed?.getPropertyValue('clip-path') ||
-      isolatedInlineProperty(style, 'clip-path').value,
-    );
-    const clipsByPath = Boolean(clipPath && clipPath !== 'none');
-    const contain = normalizeIsolatedCssValue(
-      computed?.contain || isolatedInlineProperty(style, 'contain').value,
-    );
-    const clipsByContainment = contain === 'content' || contain === 'strict' ||
-      contain.split(/\s+/u).includes('paint');
-    if (
-      !overflowClips && !clipsByLegacyClip && !clipsByPath &&
-      !clipsByContainment
-    ) continue;
-    const existing = ISOLATED_CLIP_OVERRIDES.get(ancestor);
-    if (existing) {
-      existing.count += 1;
-      overridden.push(ancestor);
-      continue;
-    }
-    const properties = new Map<string, IsolatedInlinePropertySnapshot>();
-    const override = (property: string, value: string): void => {
-      properties.set(property, isolatedInlineProperty(style, property));
-      setIsolatedInlineProperty(style, property, value, 'important');
-    };
-    if (overflowClips) {
-      override('overflow', 'visible');
-      override('overflow-x', 'visible');
-      override('overflow-y', 'visible');
-    }
-    if (clipsByLegacyClip) override('clip', 'auto');
-    if (clipsByPath) override('clip-path', 'none');
-    if (clipsByContainment) override('contain', 'none');
-    ISOLATED_CLIP_OVERRIDES.set(ancestor, { count: 1, properties });
-    overridden.push(ancestor);
-  }
-  ISOLATED_SELECT_CLIP_ANCESTORS.set(host, overridden);
-}
-
-function releaseIsolatedSelectClipOverrides(host: HTMLElement): void {
-  const ancestors = ISOLATED_SELECT_CLIP_ANCESTORS.get(host);
-  if (!ancestors) return;
-  ISOLATED_SELECT_CLIP_ANCESTORS.delete(host);
-  for (const ancestor of ancestors) {
-    const override = ISOLATED_CLIP_OVERRIDES.get(ancestor);
-    if (!override) continue;
-    override.count -= 1;
-    if (override.count > 0) continue;
-    ISOLATED_CLIP_OVERRIDES.delete(ancestor);
-    const style = (ancestor as Element & { style?: CSSStyleDeclaration }).style;
-    if (!style) continue;
-    for (const [property, snapshot] of override.properties) {
-      if (snapshot.value) {
-        setIsolatedInlineProperty(
-          style,
-          property,
-          snapshot.value,
-          snapshot.priority,
-        );
-      } else {
-        style.removeProperty(property);
-      }
-    }
-  }
-}
-
-function suspendIsolatedSelectClipOverrides(
-  document: Document | null,
-): HTMLElement[] {
-  const root = document?.documentElement;
-  if (!root) return [];
-  const hosts = collectIsolatedSelectHosts(root).filter((candidate) =>
-    (ISOLATED_SELECT_DISCLOSURE_REASONS.get(candidate)?.size ?? 0) > 0,
-  );
-  for (const host of hosts) releaseIsolatedSelectClipOverrides(host);
-  return hosts;
-}
-
-function resumeIsolatedSelectClipOverrides(hosts: readonly HTMLElement[]): void {
-  for (const host of hosts) {
-    if (
-      isIsolatedOwnedHostConnected(host) &&
-      (ISOLATED_SELECT_DISCLOSURE_REASONS.get(host)?.size ?? 0) > 0
-    ) {
-      activateIsolatedSelectClipOverrides(host);
-    }
-  }
+  syncIsolatedNativeSelectFacsimile(host);
 }
 
 function isIsolatedOwnedHostConnected(host: HTMLElement): boolean {
@@ -1708,82 +1557,6 @@ function isIsolatedOwnedHostConnected(host: HTMLElement): boolean {
   return false;
 }
 
-function normalizeIsolatedCssValue(value: string | undefined): string {
-  return (value ?? '')
-    .replace(/\s*!important\s*$/iu, '')
-    .trim()
-    .toLowerCase();
-}
-
-function isolatedInlineProperty(
-  style: CSSStyleDeclaration,
-  property: string,
-): IsolatedInlinePropertySnapshot {
-  const rawValue = style.getPropertyValue(property);
-  const getPriority = (
-    style as CSSStyleDeclaration & {
-      getPropertyPriority?: (name: string) => string;
-    }
-  ).getPropertyPriority;
-  if (typeof getPriority === 'function') {
-    return {
-      value: rawValue,
-      priority: getPriority.call(style, property),
-    };
-  }
-  const important = /\s*!important\s*$/iu.test(rawValue);
-  return {
-    value: important ? rawValue.replace(/\s*!important\s*$/iu, '') : rawValue,
-    priority: important ? 'important' : '',
-  };
-}
-
-function setIsolatedInlineProperty(
-  style: CSSStyleDeclaration,
-  property: string,
-  value: string,
-  priority: string,
-): void {
-  const hasPriorityApi = typeof (
-    style as CSSStyleDeclaration & {
-      getPropertyPriority?: (name: string) => string;
-    }
-  ).getPropertyPriority === 'function';
-  style.setProperty(
-    property,
-    !hasPriorityApi && priority === 'important' ? `${value}!important` : value,
-    hasPriorityApi ? priority : undefined,
-  );
-}
-
-function isolatedSelectHostFromEvent(event: Event): HTMLElement | undefined {
-  const path = typeof event.composedPath === 'function'
-    ? event.composedPath()
-    : [event.target];
-  return path.find((candidate): candidate is HTMLElement => Boolean(
-    candidate &&
-    typeof candidate === 'object' &&
-    'nodeType' in candidate &&
-    candidate.nodeType === Node.ELEMENT_NODE &&
-    ISOLATED_SELECT_HOSTS.has(candidate as Element),
-  ));
-}
-
-function isolatedSelectHostMatches(host: HTMLElement, selector: string): boolean {
-  try {
-    return host.matches(selector);
-  } catch {
-    return false;
-  }
-}
-
-function releaseRemovedIsolatedSelectHosts(node: Node): void {
-  for (const host of collectIsolatedSelectHosts(node)) {
-    ISOLATED_SELECT_DISCLOSURE_REASONS.delete(host);
-    releaseIsolatedSelectClipOverrides(host);
-  }
-}
-
 function collectIsolatedSelectHosts(root: Node): HTMLElement[] {
   const hosts: HTMLElement[] = [];
   const pending: Node[] = [root];
@@ -1800,6 +1573,22 @@ function collectIsolatedSelectHosts(root: Node): HTMLElement[] {
   return hosts;
 }
 
+function collectIsolatedElements(root: Node): HTMLElement[] {
+  const elements: HTMLElement[] = [];
+  const pending: Node[] = [root];
+  while (pending.length > 0) {
+    const node = pending.pop();
+    if (!node) continue;
+    if (node.nodeType === Node.ELEMENT_NODE) {
+      const element = node as HTMLElement;
+      elements.push(element);
+      if (element.shadowRoot) pending.push(element.shadowRoot);
+    }
+    for (const child of node.childNodes) pending.push(child);
+  }
+  return elements;
+}
+
 function isolatedSelectFacsimileHost(element: Element): HTMLElement | undefined {
   const root = element.getRootNode();
   if (
@@ -1808,6 +1597,261 @@ function isolatedSelectFacsimileHost(element: Element): HTMLElement | undefined 
   ) return undefined;
   const host = (root as ShadowRoot).host as HTMLElement;
   return ISOLATED_SELECT_HOSTS.has(host) ? host : undefined;
+}
+
+function isolatedPublicMenuFacsimileHost(
+  element: Element,
+): HTMLElement | undefined {
+  const root = element.getRootNode();
+  if (
+    root.nodeType !== Node.DOCUMENT_FRAGMENT_NODE ||
+    !(root as ShadowRoot).host
+  ) return undefined;
+  const host = (root as ShadowRoot).host as HTMLElement;
+  return ISOLATED_PUBLIC_MENU_HOSTS.has(host) ? host : undefined;
+}
+
+function isolatedPublicMenuRole(
+  element: Element,
+): 'listbox' | 'menu' | undefined {
+  for (const token of element.getAttribute('role')?.trim().toLowerCase()
+    .split(/\s+/u) ?? []) {
+    if (token === 'listbox' || token === 'menu') return token;
+  }
+  return undefined;
+}
+
+function isolatedSelectPresentation(
+  select: HTMLSelectElement,
+): 'list' | 'popup' {
+  const rawSize = select.getAttribute('size');
+  const size = rawSize && /^[1-9]\d{0,3}$/u.test(rawSize)
+    ? Number(rawSize)
+    : 0;
+  return select.multiple || select.hasAttribute('multiple') || size > 1
+    ? 'list'
+    : 'popup';
+}
+
+function syncIsolatedNativeSelectFacsimile(host: HTMLElement): void {
+  const facsimile = ISOLATED_SELECT_FACSIMILES.get(host);
+  if (!facsimile) return;
+  const { panel, select, trigger } = facsimile;
+  const presentation = isolatedSelectPresentation(select);
+  host.setAttribute('data-simul-select-presentation', presentation);
+  if (presentation === 'list') {
+    trigger.setAttribute('hidden', '');
+    trigger.style.setProperty('display', 'none', 'important');
+  } else {
+    trigger.removeAttribute('hidden');
+    trigger.style.removeProperty('display');
+  }
+  panel.replaceChildren();
+  panel.setAttribute('role', 'listbox');
+  panel.setAttribute('aria-disabled', 'true');
+  if (select.multiple || select.hasAttribute('multiple')) {
+    panel.setAttribute('aria-multiselectable', 'true');
+  } else {
+    panel.removeAttribute('aria-multiselectable');
+  }
+
+  const selectedLabels: string[] = [];
+  const appendOption = (
+    option: HTMLOptionElement,
+    parent: HTMLElement,
+    groupDisabled: boolean,
+  ): void => {
+    const row = select.ownerDocument.createElement('div');
+    row.setAttribute('data-simul-owned-select-option', 'v1');
+    row.setAttribute('role', 'option');
+    row.style.setProperty('box-sizing', 'border-box', 'important');
+    row.style.setProperty('display', 'block', 'important');
+    row.style.setProperty('min-height', '1.5em', 'important');
+    row.style.setProperty('padding-inline', '.5rem', 'important');
+    row.style.setProperty('pointer-events', 'none', 'important');
+    row.style.setProperty('white-space', 'normal', 'important');
+    const selected = option.selected === true;
+    const disabled = groupDisabled || option.disabled === true ||
+      option.hasAttribute('disabled');
+    row.setAttribute('aria-selected', selected ? 'true' : 'false');
+    if (disabled) {
+      row.setAttribute('aria-disabled', 'true');
+      row.style.setProperty('opacity', '0.65', 'important');
+    }
+    const label = (option.getAttribute('label') ?? option.textContent ?? '')
+      .replace(/\s+/gu, ' ')
+      .trim();
+    row.textContent = label || '\u00a0';
+    if (selected && label) selectedLabels.push(label);
+    parent.append(row);
+  };
+
+  for (const child of [...select.children]) {
+    if (child.localName.toLowerCase() === 'option') {
+      appendOption(child as HTMLOptionElement, panel, false);
+      continue;
+    }
+    if (child.localName.toLowerCase() !== 'optgroup') continue;
+    const groupElement = child as HTMLOptGroupElement;
+    const group = select.ownerDocument.createElement('div');
+    group.setAttribute('data-simul-owned-select-optgroup', 'v1');
+    group.setAttribute('role', 'group');
+    const groupDisabled = groupElement.disabled === true ||
+      groupElement.hasAttribute('disabled');
+    if (groupDisabled) group.setAttribute('aria-disabled', 'true');
+    const labelText = (groupElement.getAttribute('label') ?? '')
+      .replace(/\s+/gu, ' ')
+      .trim();
+    if (labelText) {
+      const label = select.ownerDocument.createElement('div');
+      label.setAttribute('data-simul-owned-select-optgroup-label', 'v1');
+      label.style.setProperty('font-weight', '600', 'important');
+      label.style.setProperty('padding-inline', '.5rem', 'important');
+      label.style.setProperty('pointer-events', 'none', 'important');
+      label.textContent = labelText;
+      group.append(label);
+    }
+    for (const option of [...groupElement.children]) {
+      if (option.localName.toLowerCase() === 'option') {
+        appendOption(option as HTMLOptionElement, group, groupDisabled);
+      }
+    }
+    panel.append(group);
+  }
+  trigger.textContent = selectedLabels.join(', ') || '\u2014';
+}
+
+function syncContainingIsolatedSelectFacsimile(element: Element): void {
+  const select = element.localName.toLowerCase() === 'select'
+    ? element as HTMLSelectElement
+    : element.closest('select');
+  const host = select ? isolatedSelectFacsimileHost(select) : undefined;
+  if (host) syncIsolatedNativeSelectFacsimile(host);
+}
+
+function refreshIsolatedNativeSelectFacsimiles(
+  document: Document | null,
+): void {
+  if (!document?.documentElement) return;
+  for (const host of collectIsolatedSelectHosts(document.documentElement)) {
+    syncIsolatedNativeSelectFacsimile(host);
+  }
+}
+
+function refreshIsolatedReplicaDisclosures(document: Document): void {
+  disposeReadOnlyReplicaDisclosures(document);
+  if (!document.documentElement) return;
+  const elements = collectIsolatedElements(document.documentElement);
+  for (const host of elements.filter((element) => ISOLATED_SELECT_HOSTS.has(element))) {
+    const facsimile = ISOLATED_SELECT_FACSIMILES.get(host);
+    if (!facsimile) continue;
+    facsimile.controller = undefined;
+    syncIsolatedNativeSelectFacsimile(host);
+    const presentation = isolatedSelectPresentation(facsimile.select);
+    const rawSize = facsimile.select.getAttribute('size');
+    const size = rawSize && /^[1-9]\d{0,3}$/u.test(rawSize)
+      ? Number(rawSize)
+      : 8;
+    facsimile.controller = installReadOnlyReplicaDisclosure({
+      anchor: host,
+      panel: facsimile.panel,
+      presentation,
+      ...(presentation === 'popup' ? { trigger: facsimile.trigger } : {}),
+      manageTriggerExpanded: presentation === 'popup',
+      initiallyOpen: presentation === 'popup' &&
+        facsimile.select.getAttribute('data-simul-source-picker-open') === 'v1',
+      visibleRows: size,
+    });
+  }
+  installValidatedIsolatedAriaDisclosures(document, elements);
+}
+
+/**
+ * Custom ARIA disclosure is admitted only for a unique, same-document target
+ * with matching menu/listbox semantics. Ambiguous and unsupported mappings
+ * remain static and pointer-inert.
+ */
+function installValidatedIsolatedAriaDisclosures(
+  document: Document,
+  elements: readonly HTMLElement[],
+): void {
+  const ids = new Map<string, HTMLElement[]>();
+  for (const element of elements) {
+    const id = element.getAttribute('id')?.trim();
+    if (!id) continue;
+    const existing = ids.get(id);
+    if (existing) existing.push(element);
+    else ids.set(id, [element]);
+  }
+  const usedPanels = new Set<HTMLElement>();
+  for (const trigger of elements) {
+    if (
+      ISOLATED_SELECT_HOSTS.has(trigger) ||
+      ISOLATED_PUBLIC_MENU_HOSTS.has(trigger)
+    ) continue;
+    const controls = trigger.getAttribute('aria-controls')?.trim() ?? '';
+    if (!controls || /\s/u.test(controls) || controls.length > 256) continue;
+    const targets = ids.get(controls);
+    if (targets?.length !== 1) continue;
+    const target = targets[0]!;
+    if (target.ownerDocument !== document || target === trigger) continue;
+    const hasPopup = trigger.getAttribute('aria-haspopup')?.trim().toLowerCase();
+    const expectedRole = hasPopup === 'true' ? 'menu' : hasPopup;
+    if (expectedRole !== 'menu' && expectedRole !== 'listbox') continue;
+    if (
+      !isSourceActivationTagName(trigger.localName) &&
+      !isSourceActivationRoleValue(trigger.getAttribute('role'))
+    ) continue;
+
+    let panel = isolatedPublicMenuFacsimileHost(target);
+    const targetRole = isolatedPublicMenuRole(target);
+    if (!panel || targetRole !== expectedRole) {
+      if (!roleHasToken(target, 'region')) continue;
+      const candidates = elements.filter((candidate) => {
+        const host = isolatedPublicMenuFacsimileHost(candidate);
+        return Boolean(
+          host && isolatedPublicMenuRole(candidate) === expectedRole &&
+          composedElementContains(target, host),
+        );
+      });
+      if (candidates.length !== 1) continue;
+      panel = isolatedPublicMenuFacsimileHost(candidates[0]!);
+    }
+    if (!panel || usedPanels.has(panel)) continue;
+    const metadata = ISOLATED_PUBLIC_MENU_FACSIMILES.get(panel);
+    if (!metadata || metadata.role !== expectedRole) continue;
+    usedPanels.add(panel);
+    installReadOnlyReplicaDisclosure({
+      anchor: trigger,
+      trigger,
+      panel,
+      presentation: 'popup',
+      manageTriggerExpanded: false,
+      initiallyOpen: trigger.getAttribute('aria-expanded') === 'true',
+    });
+  }
+}
+
+function roleHasToken(element: Element, token: string): boolean {
+  return element.getAttribute('role')?.trim().toLowerCase()
+    .split(/\s+/u).includes(token) ?? false;
+}
+
+function composedElementContains(container: Element, candidate: Element): boolean {
+  let current: Node | null = candidate;
+  for (let depth = 0; current && depth <= 128; depth += 1) {
+    if (current === container) return true;
+    if (current.parentNode) {
+      current = current.parentNode;
+      continue;
+    }
+    const root = current.getRootNode();
+    current = root.nodeType === Node.DOCUMENT_FRAGMENT_NODE &&
+        'host' in root
+      ? (root as ShadowRoot).host
+      : null;
+  }
+  return false;
 }
 
 function applyResolvedStyleSheetText(
@@ -3447,8 +3491,8 @@ function protectIframe(iframe: HTMLIFrameElement): void {
 
 /**
  * The iframe contains no website code. These parent-installed guards make the
- * sole pointer-enabled surface disclosure-only: hover and wheel scrolling are
- * retained, while focus, selection, activation, and value changes are denied.
+ * sole pointer-enabled surface disclosure-only. Only Simul-marked local
+ * triggers/panels bypass activation blocking; website nodes remain inert.
  */
 function installIsolatedDisclosureGuards(
   document: Document,
@@ -3458,7 +3502,7 @@ function installIsolatedDisclosureGuards(
     document.addEventListener(type, blockIsolatedDisclosureActivation, true);
   }
   const onWheel = (event: WheelEvent): void => {
-    if (isolatedDisclosureWheelTargetsOwnedSelect(event)) return;
+    if (isReadOnlyReplicaDisclosureEvent(event)) return;
     const scroller = iframe.parentElement?.closest('.replica-replay-scroll');
     if (!(scroller instanceof HTMLElement)) return;
     const factor = event.deltaMode === 1
@@ -3471,172 +3515,28 @@ function installIsolatedDisclosureGuards(
     if (event.cancelable) event.preventDefault();
     event.stopImmediatePropagation();
   };
-  const onPointerOver = (event: Event): void => {
-    const host = isolatedSelectHostFromEvent(event);
-    if (host) setIsolatedSelectDisclosureReason(host, 'hover', true);
-  };
-  const onPointerOut = (event: Event): void => {
-    const host = isolatedSelectHostFromEvent(event);
-    if (!host) return;
-    queueMicrotask(() => setIsolatedSelectDisclosureReason(
-      host,
-      'hover',
-      isolatedSelectHostMatches(host, ':hover'),
-    ));
-  };
-  const onFocusIn = (event: Event): void => {
-    const host = isolatedSelectHostFromEvent(event);
-    if (host) setIsolatedSelectDisclosureReason(host, 'focus', true);
-  };
-  const onFocusOut = (event: Event): void => {
-    const host = isolatedSelectHostFromEvent(event);
-    if (!host) return;
-    queueMicrotask(() => setIsolatedSelectDisclosureReason(
-      host,
-      'focus',
-      Boolean(host.shadowRoot?.activeElement) ||
-        isolatedSelectHostMatches(host, ':focus-within'),
-    ));
-  };
-  const MutationObserverConstructor = document.defaultView?.MutationObserver;
-  const removedHostObserver = MutationObserverConstructor
-    ? new MutationObserverConstructor((records) => {
-      for (const record of records) {
-        for (const removed of record.removedNodes) {
-          releaseRemovedIsolatedSelectHosts(removed);
-        }
-      }
-    })
-    : undefined;
-  if (removedHostObserver && document.documentElement) {
-    removedHostObserver.observe(document.documentElement, {
-      childList: true,
-      subtree: true,
-    });
-  }
-  document.addEventListener('pointerover', onPointerOver, true);
-  document.addEventListener('pointerout', onPointerOut, true);
-  document.addEventListener('focusin', onFocusIn, true);
-  document.addEventListener('focusout', onFocusOut, true);
   document.addEventListener('wheel', onWheel, { capture: true, passive: false });
   return () => {
     for (const type of ISOLATED_DISCLOSURE_BLOCKED_EVENTS) {
       document.removeEventListener(type, blockIsolatedDisclosureActivation, true);
     }
-    removedHostObserver?.disconnect();
-    document.removeEventListener('pointerover', onPointerOver, true);
-    document.removeEventListener('pointerout', onPointerOut, true);
-    document.removeEventListener('focusin', onFocusIn, true);
-    document.removeEventListener('focusout', onFocusOut, true);
     document.removeEventListener('wheel', onWheel, true);
-    for (const host of collectIsolatedSelectHosts(document.documentElement)) {
-      ISOLATED_SELECT_DISCLOSURE_REASONS.delete(host);
-      releaseIsolatedSelectClipOverrides(host);
-    }
   };
-}
-
-function isolatedDisclosureWheelTargetsOwnedSelect(event: Event): boolean {
-  const path = typeof event.composedPath === 'function'
-    ? event.composedPath()
-    : [event.target];
-  return path.some((candidate) => {
-    if (
-      !candidate ||
-      typeof candidate !== 'object' ||
-      !('nodeType' in candidate) ||
-      candidate.nodeType !== 1 ||
-      !('getAttribute' in candidate) ||
-      typeof candidate.getAttribute !== 'function' ||
-      candidate.getAttribute('data-simul-select-facsimile') !== 'v1'
-    ) return false;
-    return isolatedSelectFacsimileHost(candidate as Element) !== undefined;
-  });
 }
 
 function blockIsolatedDisclosureActivation(event: Event): void {
   // This guard is deliberately document-wide. Passive source CSS is allowed
   // for fidelity and can beat a pointer-events cascade, but it must never turn
   // an anchor, form, control, or arbitrary source node into an active surface.
-  // Hover and wheel are omitted so the owned select list can reveal and scroll.
-  if (isolatedDisclosureEventTargetsOwnedScrollbar(event)) return;
+  // The bypass marker is written only after receiver validation.
+  if (isReadOnlyReplicaDisclosureEvent(event)) return;
+  const currentTarget = event.currentTarget;
+  if (
+    currentTarget && 'nodeType' in currentTarget &&
+    currentTarget.nodeType === Node.DOCUMENT_NODE
+  ) closeReadOnlyReplicaDisclosures(currentTarget as Document);
   if (event.cancelable) event.preventDefault();
   event.stopImmediatePropagation();
-}
-
-function isolatedDisclosureEventTargetsOwnedScrollbar(event: Event): boolean {
-  if (
-    !('clientX' in event) ||
-    typeof event.clientX !== 'number' ||
-    !('clientY' in event) ||
-    typeof event.clientY !== 'number'
-  ) return false;
-  const path = typeof event.composedPath === 'function'
-    ? event.composedPath()
-    : [event.target];
-  const select = path.find((candidate): candidate is HTMLSelectElement =>
-    Boolean(
-      candidate &&
-      typeof candidate === 'object' &&
-      'nodeType' in candidate &&
-      candidate.nodeType === 1 &&
-      'getAttribute' in candidate &&
-      typeof candidate.getAttribute === 'function' &&
-      candidate.getAttribute('data-simul-select-facsimile') === 'v1' &&
-      isolatedSelectFacsimileHost(candidate as Element) !== undefined,
-    ),
-  );
-  if (!select || path[0] !== select) return false;
-  const computed = select.ownerDocument.defaultView?.getComputedStyle(select);
-  if (!computed || !isAxisAlignedSelectTransform(computed.transform)) return false;
-  const finitePixels = (value: string): number => {
-    const parsed = Number.parseFloat(value);
-    return Number.isFinite(parsed) ? Math.max(0, parsed) : 0;
-  };
-  const borderLeft = finitePixels(computed.borderLeftWidth);
-  const borderRight = finitePixels(computed.borderRightWidth);
-  const borderWidth = borderLeft + borderRight;
-  const verticalGutter = select.offsetWidth - select.clientWidth -
-    borderWidth;
-  const rect = select.getBoundingClientRect();
-  if (
-    !Number.isFinite(rect.width) ||
-    !Number.isFinite(rect.height) ||
-    select.offsetWidth <= 0 ||
-    select.offsetHeight <= 0
-  ) return false;
-  const scaleX = rect.width / select.offsetWidth;
-  const scaleY = rect.height / select.offsetHeight;
-  const direction = computed?.direction;
-  const inVerticalGutter = verticalGutter > 0 &&
-    select.scrollHeight > select.clientHeight &&
-    (direction === 'rtl'
-      ? event.clientX <= rect.left + (borderLeft + verticalGutter) * scaleX
-      : event.clientX >= rect.right - (borderRight + verticalGutter) * scaleX);
-  const borderBottom = finitePixels(computed.borderBottomWidth);
-  const borderHeight = finitePixels(computed.borderTopWidth) + borderBottom;
-  const horizontalGutter = select.offsetHeight - select.clientHeight -
-    borderHeight;
-  const inHorizontalGutter = horizontalGutter > 0 &&
-    select.scrollWidth > select.clientWidth &&
-    event.clientY >=
-      rect.bottom - (borderBottom + horizontalGutter) * scaleY;
-  return inVerticalGutter || inHorizontalGutter;
-}
-
-function isAxisAlignedSelectTransform(value: string): boolean {
-  const transform = value.trim().toLowerCase();
-  if (transform === '' || transform === 'none') return true;
-  const matrix = /^matrix\(([^)]+)\)$/u.exec(transform);
-  if (matrix) {
-    const parts = matrix[1]?.split(',').map(Number);
-    return parts?.length === 6 &&
-      parts.every(Number.isFinite) &&
-      Math.abs(parts[1] ?? 1) < 1e-6 &&
-      Math.abs(parts[2] ?? 1) < 1e-6;
-  }
-  return /^scale(?:x|y)?\(\s*-?\d+(?:\.\d+)?(?:\s*,\s*-?\d+(?:\.\d+)?)?\s*\)$/u
-    .test(transform);
 }
 
 export function isTrustedIsolatedShellDocument(

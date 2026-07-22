@@ -16,6 +16,10 @@ import {
   displayTranslation,
   type TranslatedSnapshot,
 } from './translation-pipeline';
+import {
+  installReadOnlyReplicaDisclosure,
+  type ReadOnlyReplicaDisclosure,
+} from './replica/read-only-disclosure';
 
 export type MirrorDisplayMode = 'fit' | 'actual' | 'custom';
 
@@ -46,6 +50,7 @@ interface SavedStyleValue {
 
 interface MirrorController {
   bindings: MirrorTranslationBinding[];
+  disclosures: ReadOnlyReplicaDisclosure[];
   groupSources: Map<string, string>;
   nextGroup: number;
   textLayoutMode: MirrorTextLayoutMode;
@@ -118,6 +123,7 @@ function createMirrorController(
 ): MirrorController {
   return {
     bindings: [],
+    disclosures: [],
     groupSources,
     nextGroup: 1,
     textLayoutMode: 'adaptive',
@@ -247,7 +253,7 @@ function renderElement(
   const sourceStyle = visual.styles[node.styleId];
   const inertTag =
     node.controlShell === 'select'
-      ? 'details'
+      ? 'div'
       : node.controlShell
         ? sourceStyle?.display?.startsWith('inline')
           ? 'span'
@@ -315,15 +321,30 @@ function renderSelectFacsimile(
   targetDocument: Document,
   controller: MirrorController,
 ): void {
-  const summary = targetDocument.createElement('summary');
+  const presentation = node.selectState?.multiple ||
+      (node.selectState?.size ?? 0) > 1
+    ? 'list'
+    : 'popup';
+  const summary = targetDocument.createElement('button');
+  summary.type = 'button';
   summary.dataset.simulSelectSummary = '';
   summary.tabIndex = 0;
   summary.setAttribute('aria-label', 'Show translated options');
+  summary.setAttribute('aria-haspopup', 'listbox');
+  summary.setAttribute('aria-readonly', 'true');
+  summary.style.background = 'none';
+  summary.style.border = '0';
+  summary.style.boxSizing = 'border-box';
+  summary.style.color = 'inherit';
   summary.style.cursor = 'default';
   summary.style.display = 'block';
+  summary.style.font = 'inherit';
   summary.style.overflow = 'hidden';
+  summary.style.padding = '0';
+  summary.style.textAlign = 'inherit';
   summary.style.textOverflow = 'ellipsis';
   summary.style.whiteSpace = 'nowrap';
+  summary.style.width = '100%';
 
   const list = targetDocument.createElement('div');
   list.dataset.simulSelectOptions = '';
@@ -335,14 +356,12 @@ function renderSelectFacsimile(
   list.style.background = selectPopupBackground(visual.styles[node.styleId]);
   list.style.boxSizing = 'border-box';
   list.style.color = 'inherit';
-  list.style.insetInlineStart = '0';
   list.style.maxHeight = 'min(20rem, 50vh)';
   list.style.minWidth = '100%';
   list.style.overflowX = 'hidden';
   list.style.overflowY = 'auto';
   list.style.pointerEvents = 'auto';
-  list.style.position = 'absolute';
-  list.style.top = '100%';
+  list.style.position = presentation === 'popup' ? 'fixed' : 'static';
   list.style.width = 'max-content';
   list.style.zIndex = '2147483646';
 
@@ -353,7 +372,7 @@ function renderSelectFacsimile(
   element.dataset.simulSelectDisabled = node.selectState?.disabled
     ? 'true'
     : 'false';
-  if (node.selectState?.open) element.setAttribute('open', '');
+  element.dataset.simulSelectPresentation = presentation;
   element.style.overflow = 'visible';
   element.style.pointerEvents = 'auto';
   if (!element.style.position || element.style.position === 'static') {
@@ -410,23 +429,34 @@ function renderSelectFacsimile(
     list.append(group);
   }
 
-  const selected = options.filter((option) => option.selected);
-  const summaries = selected;
-  if (summaries.length === 0) {
-    summary.append(targetDocument.createTextNode('\u2014'));
-  } else {
-    summaries.forEach((option, index) => {
-      if (index > 0) summary.append(targetDocument.createTextNode(', '));
-      const text = targetDocument.createTextNode(option.label);
-      bindText(controller, text, option.label, undefined, {
-        group: option.group,
-        replica: true,
+  if (presentation === 'popup') {
+    const selected = options.filter((option) => option.selected);
+    if (selected.length === 0) {
+      summary.append(targetDocument.createTextNode('\u2014'));
+    } else {
+      selected.forEach((option, index) => {
+        if (index > 0) summary.append(targetDocument.createTextNode(', '));
+        const text = targetDocument.createTextNode(option.label);
+        bindText(controller, text, option.label, undefined, {
+          group: option.group,
+          replica: true,
+        });
+        summary.append(text);
       });
-      summary.append(text);
-    });
+    }
+    element.append(summary, list);
+  } else {
+    element.append(list);
   }
-
-  element.append(summary, list);
+  controller.disclosures.push(installReadOnlyReplicaDisclosure({
+    anchor: element,
+    panel: list,
+    presentation,
+    ...(presentation === 'popup' ? { trigger: summary } : {}),
+    manageTriggerExpanded: presentation === 'popup',
+    initiallyOpen: presentation === 'popup' && node.selectState?.open === true,
+    visibleRows: node.selectState?.size || 8,
+  }));
 }
 
 function renderSelectOption(
@@ -921,10 +951,15 @@ async function replaceLiveRootAtomically(
     // A translator may resolve after ignoring an abort signal. Keep the old
     // connected tree authoritative until this final synchronous commit.
     options.signal?.throwIfAborted();
+    const previousController = mirrorControllers.get(currentRoot);
     currentRoot.replaceWith(stagedRoot);
+    for (const disclosure of previousController?.disclosures ?? []) {
+      disclosure.dispose();
+    }
     mirrorControllers.delete(currentRoot);
     return { root: stagedRoot, applied, missingTarget, translation };
   } catch (error) {
+    for (const disclosure of controller.disclosures) disclosure.dispose();
     mirrorControllers.delete(stagedRoot);
     throw error;
   }
@@ -952,7 +987,7 @@ function renderLiveNode(
   }
   const svg = insideSvg || node.tag === 'svg';
   const inertTag = node.controlShell === 'select'
-    ? 'details'
+    ? 'div'
     : node.controlShell
       ? node.style.display?.startsWith('inline')
         ? 'span'
@@ -1006,15 +1041,30 @@ function renderLiveSelectFacsimile(
   targetDocument: Document,
   controller: MirrorController,
 ): void {
-  const summary = targetDocument.createElement('summary');
+  const presentation = node.selectState?.multiple ||
+      (node.selectState?.size ?? 0) > 1
+    ? 'list'
+    : 'popup';
+  const summary = targetDocument.createElement('button');
+  summary.type = 'button';
   summary.dataset.simulSelectSummary = '';
   summary.tabIndex = 0;
   summary.setAttribute('aria-label', 'Show translated options');
+  summary.setAttribute('aria-haspopup', 'listbox');
+  summary.setAttribute('aria-readonly', 'true');
+  summary.style.background = 'none';
+  summary.style.border = '0';
+  summary.style.boxSizing = 'border-box';
+  summary.style.color = 'inherit';
   summary.style.cursor = 'default';
   summary.style.display = 'block';
+  summary.style.font = 'inherit';
   summary.style.overflow = 'hidden';
+  summary.style.padding = '0';
+  summary.style.textAlign = 'inherit';
   summary.style.textOverflow = 'ellipsis';
   summary.style.whiteSpace = 'nowrap';
+  summary.style.width = '100%';
 
   const list = targetDocument.createElement('div');
   list.dataset.simulSelectOptions = '';
@@ -1026,14 +1076,12 @@ function renderLiveSelectFacsimile(
   list.style.background = selectPopupBackground(node.style);
   list.style.boxSizing = 'border-box';
   list.style.color = 'inherit';
-  list.style.insetInlineStart = '0';
   list.style.maxHeight = 'min(20rem, 50vh)';
   list.style.minWidth = '100%';
   list.style.overflowX = 'hidden';
   list.style.overflowY = 'auto';
   list.style.pointerEvents = 'auto';
-  list.style.position = 'absolute';
-  list.style.top = '100%';
+  list.style.position = presentation === 'popup' ? 'fixed' : 'static';
   list.style.width = 'max-content';
   list.style.zIndex = '2147483646';
 
@@ -1044,7 +1092,7 @@ function renderLiveSelectFacsimile(
   element.dataset.simulSelectDisabled = node.selectState?.disabled
     ? 'true'
     : 'false';
-  if (node.selectState?.open) element.setAttribute('open', '');
+  element.dataset.simulSelectPresentation = presentation;
   element.style.overflow = 'visible';
   element.style.pointerEvents = 'auto';
   if (!element.style.position || element.style.position === 'static') {
@@ -1100,23 +1148,34 @@ function renderLiveSelectFacsimile(
     list.append(group);
   }
 
-  const selected = options.filter((option) => option.selected);
-  const summaries = selected;
-  if (summaries.length === 0) {
-    summary.append(targetDocument.createTextNode('\u2014'));
-  } else {
-    summaries.forEach((option, index) => {
-      if (index > 0) summary.append(targetDocument.createTextNode(', '));
-      const text = targetDocument.createTextNode(option.label);
-      bindText(controller, text, option.label, undefined, {
-        group: option.group,
-        replica: true,
+  if (presentation === 'popup') {
+    const selected = options.filter((option) => option.selected);
+    if (selected.length === 0) {
+      summary.append(targetDocument.createTextNode('\u2014'));
+    } else {
+      selected.forEach((option, index) => {
+        if (index > 0) summary.append(targetDocument.createTextNode(', '));
+        const text = targetDocument.createTextNode(option.label);
+        bindText(controller, text, option.label, undefined, {
+          group: option.group,
+          replica: true,
+        });
+        summary.append(text);
       });
-      summary.append(text);
-    });
+    }
+    element.append(summary, list);
+  } else {
+    element.append(list);
   }
-
-  element.append(summary, list);
+  controller.disclosures.push(installReadOnlyReplicaDisclosure({
+    anchor: element,
+    panel: list,
+    presentation,
+    ...(presentation === 'popup' ? { trigger: summary } : {}),
+    manageTriggerExpanded: presentation === 'popup',
+    initiallyOpen: presentation === 'popup' && node.selectState?.open === true,
+    visibleRows: node.selectState?.size || 8,
+  }));
 }
 
 function renderLiveSelectOption(
@@ -1205,6 +1264,14 @@ function pruneBindings(
   controller: MirrorController,
   root: HTMLElement,
 ): void {
+  controller.disclosures = controller.disclosures.filter((disclosure) => {
+    if (!disclosure.isAnchoredWithin(root)) {
+      disclosure.dispose();
+      return false;
+    }
+    disclosure.sync();
+    return true;
+  });
   controller.bindings = controller.bindings.filter(
     (binding) => binding.node.isConnected || root.contains(binding.node),
   );

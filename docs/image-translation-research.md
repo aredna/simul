@@ -74,7 +74,15 @@ The current pipeline:
 8. Stops explicit same-language configurations before image capture. With
    Auto-detect, it resolves the nearest image/element or page language after
    capture metadata is available and stops before recognition when it equals
-   the target, preserving the original image.
+   the target, preserving the original image. If the page remains unresolved,
+   a memory-only probe covers at most three eligible source images, six
+   representative language routes per image, 18 routes total, and 20 seconds.
+   Japanese is in every image window; every other packaged representative route is covered
+   within the total budget. A single high-confidence dominant script or
+   corroboration across distinct source images can establish page evidence and requeue
+   the current eligible image set. Explicit and nearest-element language still
+   win. Pixel revisions of one source image remain one sample, and no
+   transcript, URL, pixel hash, or node identifier enters logs.
 
 The pinned catalog includes English, Spanish, French, German, Portuguese,
 Italian, Vietnamese, Japanese plus vertical Japanese, Korean, Simplified and

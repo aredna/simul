@@ -152,6 +152,8 @@ export interface VisualSelectState {
   disabled: boolean;
   multiple: boolean;
   open: boolean;
+  /** Zero/missing is the native popup shape; values above one are lists. */
+  size?: number;
 }
 
 export interface VisualOptionState {
@@ -1275,6 +1277,21 @@ export function capturePageSnapshot(): PageSnapshot {
       : element.hasAttribute(property);
   };
 
+  const currentSelectSize = (element: Element): number => {
+    try {
+      const value = (element as HTMLSelectElement).size;
+      if (Number.isSafeInteger(value) && value >= 0 && value <= 1_000) {
+        return value;
+      }
+    } catch {
+      // Fall through to the canonical content attribute for DOM test doubles.
+    }
+    const raw = element.getAttribute('size');
+    if (!raw || !/^[1-9]\d{0,3}$/u.test(raw)) return 0;
+    const value = Number(raw);
+    return Number.isSafeInteger(value) && value <= 1_000 ? value : 0;
+  };
+
   const normalizeSelectEntryLabel = (source: string): string => {
     const bounded = source.slice(0, maxTextLength + 1);
     const normalized = bounded.replace(/\s+/gu, ' ').trim();
@@ -1713,6 +1730,7 @@ export function capturePageSnapshot(): PageSnapshot {
               disabled: currentBooleanProperty(element, 'disabled'),
               multiple: currentBooleanProperty(element, 'multiple'),
               open: selectPickerIsOpen(element),
+              size: currentSelectSize(element),
             },
           }
         : {}),
@@ -2147,12 +2165,18 @@ function readVisualSelectState(value: unknown): VisualSelectState | undefined {
     !isRecord(value) ||
     typeof value.disabled !== 'boolean' ||
     typeof value.multiple !== 'boolean' ||
-    typeof value.open !== 'boolean'
+    typeof value.open !== 'boolean' ||
+    (value.size !== undefined && (
+      !Number.isSafeInteger(value.size) ||
+      Number(value.size) < 0 ||
+      Number(value.size) > 1_000
+    ))
   ) return undefined;
   return {
     disabled: value.disabled,
     multiple: value.multiple,
     open: value.open,
+    size: value.size === undefined ? 0 : Number(value.size),
   };
 }
 

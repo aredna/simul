@@ -108,9 +108,9 @@ The default-off `SIMUL_OCR_PADDLE=1` artifact additionally contains
 PP-OCRv6 tiny model archives (Apache-2.0),
 `onnxruntime-web`/`onnxruntime-common` 1.24.3 (MIT),
 `@techstark/opencv-js` 4.10.0-release.1 (Apache-2.0), `clipper-lib` 6.4.2
-(Boost-1.0), and `js-yaml` 4.3.0 (MIT). These components are retained in the
-locked production dependency graph but are excluded from the canonical
-Paddle-free extension artifact.
+(Boost-1.0), and the SDK Worker's embedded `js-yaml` 4.1.1 (MIT). The
+repository lock separately resolves `js-yaml` to 4.3.0. These components are
+excluded from the canonical Paddle-free extension artifact.
 
 The reviewed trial notice and complete packaged license set are retained at
 `legal/paddleocr-js-v0.4.2-third-party-notices.md` and
