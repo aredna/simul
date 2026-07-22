@@ -46,6 +46,7 @@ describe('OCR build profile', () => {
 
   it.each(OCR_BUILD_FLAGS.filter((flag) =>
     flag !== 'SIMUL_OCR_TESSERACT' &&
+    flag !== 'SIMUL_OCR_TESSERACT_WASM_DIRECT' &&
     flag !== 'SIMUL_OCR_TEXT_DETECTOR' &&
     flag !== 'SIMUL_OCR_PADDLE',
   ))(
@@ -111,6 +112,21 @@ describe('OCR build profile', () => {
     );
     expect(createOcrProviderRuntimeRegistryModule(profile)).not.toContain(
       'tesseract/offscreen.ts',
+    );
+  });
+
+  it('can compile the direct Tesseract-Wasm A/B runtime independently', () => {
+    const profile = readOcrBuildProfile({
+      SIMUL_OCR_TEXT_DETECTOR: '0',
+      SIMUL_OCR_TESSERACT: '0',
+      SIMUL_OCR_TESSERACT_WASM_DIRECT: '1',
+    });
+    expect(profile.enabledProviderIds).toEqual(['tesseract-wasm-direct']);
+    expect(createOcrProviderRegistryModule(profile)).toContain(
+      'tesseract-wasm-direct/index.ts',
+    );
+    expect(createOcrProviderRuntimeRegistryModule(profile)).toContain(
+      'tesseract-wasm-direct/offscreen.ts',
     );
   });
 

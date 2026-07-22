@@ -418,8 +418,10 @@ describe('preference coordinator message boundary', () => {
             'transformers',
             'tesseract',
             'chrome-text-detector',
+            'tesseract-wasm-direct',
             'chromium-screen-ai',
           ],
+          disabledImageTextProviderIds: ['chrome-text-detector'],
           imageScanPolicy: 'visible-only',
           imageTranslationEnabled: true,
           ocrMinimumConfidence: 0.8,
@@ -434,8 +436,10 @@ describe('preference coordinator message boundary', () => {
           'transformers',
           'tesseract',
           'chrome-text-detector',
+          'tesseract-wasm-direct',
           'chromium-screen-ai',
         ],
+        disabledImageTextProviderIds: ['chrome-text-detector'],
         imageScanPolicy: 'visible-only',
         imageTranslationEnabled: true,
         ocrMinimumConfidence: 0.8,
@@ -451,8 +455,17 @@ describe('preference coordinator message boundary', () => {
             'tesseract',
             'transformers',
             'paddleocr-wasm',
+            'tesseract-wasm-direct',
             'chromium-screen-ai',
           ],
+        },
+      }),
+    ).toBeUndefined();
+    expect(
+      readPreferenceCommand({
+        type: 'simul:preferences:patch-image-analysis',
+        patch: {
+          disabledImageTextProviderIds: ['tesseract', 'tesseract'],
         },
       }),
     ).toBeUndefined();

@@ -79,3 +79,6 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-release-candidate-privacy-ux-hardening.md`
   summary: Add a privacy-reviewed stable identity for mapping among multiple simultaneous viewport-scale nested scrollers.
   evidence: The current generic observer switches to the nested surface that actually emits a qualifying source scroll, but a scriptless replica with multiple similarly sized candidates still selects its strongest local candidate independently; translated geometry can make that a different surface.
+- source_spec: `_bmad-output/implementation-artifacts/spec-multi-provider-ocr-testing.md`
+  summary: Make exported artifact validation resolve reviewed vendor manifests from the caller's explicit project root instead of the module-owning checkout.
+  evidence: Existing Tesseract/Paddle validation and the new direct-Wasm validator read reviewed assets through module-global `PROJECT_ROOT`; a caller using `check` or `sync` APIs for another checkout can therefore compare against unrelated source state.

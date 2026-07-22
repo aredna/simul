@@ -1,0 +1,68 @@
+{
+  "schemaVersion": 1,
+  "tesseractWasmVersion": "0.11.0",
+  "tesseractWasmGitCommit": "9aab28490d27a424019187e8169a62a64a50a028",
+  "tesseractCommit": "080da83cc51c4ef8b324a7e03146fe0bd7e0944b",
+  "leptonicaCommit": "b667978e86c4bf74f7fdd75f833127d2de327550",
+  "comlinkVersion": "4.4.2",
+  "reusesTessdataCatalog": "../tesseract/asset-manifest.json",
+  "totalBytes": 3766939,
+  "files": [
+    {
+      "path": "core/tesseract-core-fallback.wasm",
+      "role": "wasm-core-fallback",
+      "source": "npm:tesseract-wasm@0.11.0/dist/tesseract-core-fallback.wasm",
+      "bytes": 1808229,
+      "sha256": "94d9ce820d31a75814d0b4e5d099405b8738b11633bcef8c0d078a53b2b1ded2"
+    },
+    {
+      "path": "core/tesseract-core.wasm",
+      "role": "wasm-core",
+      "source": "npm:tesseract-wasm@0.11.0/dist/tesseract-core.wasm",
+      "bytes": 1839004,
+      "sha256": "3822dc6ee83d507f2bd2f83b97a3dd5dabf3ea71a9836d951602c9054615137e"
+    },
+    {
+      "path": "licenses/COMLINK_APACHE-2.0.txt",
+      "role": "license",
+      "source": "npm:comlink@4.4.2/LICENSE",
+      "bytes": 11341,
+      "sha256": "bcf29b4fd3ec2cb5f9d40a0866da446f6da62170d2ccedf4aeca9cf9406dd20c"
+    },
+    {
+      "path": "licenses/LEPTONICA_BSD-2-CLAUSE.txt",
+      "role": "license",
+      "source": "https://raw.githubusercontent.com/DanBloomberg/leptonica/b667978e86c4bf74f7fdd75f833127d2de327550/leptonica-license.txt",
+      "bytes": 1520,
+      "sha256": "4d3065116f182e29760af0c901d5dbb2e1e16c42765dfc24e69b26805e2acb1e"
+    },
+    {
+      "path": "licenses/TESSERACT_CORE_APACHE-2.0.txt",
+      "role": "license",
+      "source": "https://raw.githubusercontent.com/tesseract-ocr/tesseract/080da83cc51c4ef8b324a7e03146fe0bd7e0944b/LICENSE",
+      "bytes": 11358,
+      "sha256": "cfc7749b96f63bd31c3c42b5c471bf756814053e847c10f3eb003417bc523d30"
+    },
+    {
+      "path": "licenses/TESSERACT_WASM_BSD-2-CLAUSE.md",
+      "role": "license",
+      "source": "npm:tesseract-wasm@0.11.0/LICENSE.md",
+      "bytes": 1334,
+      "sha256": "4b2021f2e93e321ff8bece6f84c221109dd0f72475eaeed37c5929cc5c0a11aa"
+    },
+    {
+      "path": "PROVENANCE.txt",
+      "role": "notice",
+      "source": "repo:tools/vendor-tesseract-wasm.mjs@9aab28490d27a424019187e8169a62a64a50a028",
+      "bytes": 897,
+      "sha256": "4d322ef9b74a7e306887a55c08a3d3c3b3de185475d58376c24af14f06c1a5c2"
+    },
+    {
+      "path": "worker/tesseract-worker.js",
+      "role": "worker",
+      "source": "npm:tesseract-wasm@0.11.0/dist/tesseract-worker.js#simul-local-paths",
+      "bytes": 93256,
+      "sha256": "f0215c40f3c3f2f991be53640db93a30123e3ba77f3677a787b5b9a698ebb8e0"
+    }
+  ]
+}

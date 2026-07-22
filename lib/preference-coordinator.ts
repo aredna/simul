@@ -24,7 +24,10 @@ import {
   type MirrorDisplayMode,
 } from './preferences';
 import { isImageScanPolicy } from './ocr/contracts';
-import { readExactImageTextProviderOrder } from './ocr/known-provider-ids';
+import {
+  readExactDisabledImageTextProviderIds,
+  readExactImageTextProviderOrder,
+} from './ocr/known-provider-ids';
 import { isOcrMinimumConfidence } from './ocr/result-quality';
 import { isSelectableReplicaFidelityPolicy } from './replica/fidelity-policy';
 import { isSupportedLanguage } from './translation-provider';
@@ -103,6 +106,18 @@ export class PreferenceCoordinator {
     const repairStoredOcrMinimumConfidence =
       !isRecord(stored) ||
       !isOcrMinimumConfidence(stored.ocrMinimumConfidence);
+    const repairStoredImageTextProviderOrder =
+      !isRecord(stored) ||
+      !readExactImageTextProviderOrder(stored.imageTextProviderOrder);
+    const repairStoredDisabledImageTextProviders =
+      !isRecord(stored) ||
+      !readExactDisabledImageTextProviderIds(
+        stored.disabledImageTextProviderIds,
+      );
+    const repairStoredImageAnalysis =
+      repairStoredOcrMinimumConfidence ||
+      repairStoredImageTextProviderOrder ||
+      repairStoredDisabledImageTextProviders;
 
     if (command.type === 'simul:preferences:set-display') {
       const preferences = withDisplayMode(current, command.displayMode);
@@ -134,7 +149,7 @@ export class PreferenceCoordinator {
     if (command.type === 'simul:preferences:reconcile') {
       const preferences = await this.reconcile(current);
       if (
-        repairStoredOcrMinimumConfidence ||
+        repairStoredImageAnalysis ||
         !samePreferences(current, preferences)
       ) {
         await this.adapter.save(preferences);
@@ -151,7 +166,7 @@ export class PreferenceCoordinator {
       ).filter((origin) => !retained.has(origin));
       await this.removeIfPresent(cleanup);
       if (
-        repairStoredOcrMinimumConfidence ||
+        repairStoredImageAnalysis ||
         !samePreferences(current, preferences)
       ) {
         await this.adapter.save(preferences);
@@ -511,6 +526,7 @@ const IMAGE_ANALYSIS_SETTING_KEYS = new Set([
   'imageTranslationEnabled',
   'ocrMinimumConfidence',
   'imageTextProviderOrder',
+  'disabledImageTextProviderIds',
   'imageScanPolicy',
   'skipSmallImages',
   'usePromptForImageLanguage',
@@ -542,6 +558,13 @@ function readImageAnalysisSettingsPatch(
     );
     if (!order) return undefined;
     patch.imageTextProviderOrder = order;
+  }
+  if ('disabledImageTextProviderIds' in value) {
+    const disabled = readExactDisabledImageTextProviderIds(
+      value.disabledImageTextProviderIds,
+    );
+    if (!disabled) return undefined;
+    patch.disabledImageTextProviderIds = disabled;
   }
   if ('imageScanPolicy' in value) {
     if (!isImageScanPolicy(value.imageScanPolicy)) return undefined;

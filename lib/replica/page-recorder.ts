@@ -82,6 +82,13 @@ export interface PageRecorderBridgeEnvironment {
   readonly captureCheckpoint?: (
     identity: ReplicaDocumentIdentity,
   ) => Promise<ReplicaCheckpointResponse>;
+  readonly recorderMirror?: {
+    getNode(nodeId: number): Node | null;
+    getId(node: Node): number;
+  };
+  readonly createImageSourceObserver?: (
+    environment: ConstructorParameters<typeof SourceImageObserver>[0],
+  ) => SourceImageObserver;
 }
 
 class RecorderCaptureError extends Error {
@@ -120,23 +127,33 @@ export function installPageRecorderBridge(
     ((handle: unknown) => cancelAnimationFrame(Number(handle)));
   const captureCheckpoint = environment.captureCheckpoint ??
     ((identity: ReplicaDocumentIdentity) => captureMaskedCheckpoint(identity));
+  const recorderMirror = environment.recorderMirror ?? record.mirror;
+  const createImageSourceObserver = environment.createImageSourceObserver ??
+    ((observerEnvironment: ConstructorParameters<typeof SourceImageObserver>[0]) =>
+      new SourceImageObserver(observerEnvironment));
 
   let captureActive = false;
   let liveSession: LiveRecorderSession | undefined;
+  const imageSourceSessions = new Set<ImageSourceSession>();
+  const refreshImageSourceSessions = (): void => {
+    for (const session of [...imageSourceSessions]) session.refresh();
+  };
   runtime.onConnect.addListener((port) => {
     if (!readImageSourcePortSessionId(port.name, 'rrweb')) return;
-    new ImageSourceSession({
+    let imageSourceSession: ImageSourceSession;
+    imageSourceSession = new ImageSourceSession({
       port,
       document: sourceDocument,
       window: sourceWindow,
-      resolveNode: (nodeId) => record.mirror.getNode(nodeId),
+      resolveNode: (nodeId) => recorderMirror.getNode(nodeId),
       getNodeId: (image) => {
-        const id = record.mirror.getId(image);
+        const id = recorderMirror.getId(image);
         return Number.isSafeInteger(id) && id > 0 ? id : undefined;
       },
-      createObserver: (observerEnvironment) =>
-        new SourceImageObserver(observerEnvironment),
+      createObserver: createImageSourceObserver,
+      onDispose: () => imageSourceSessions.delete(imageSourceSession),
     });
+    imageSourceSessions.add(imageSourceSession);
   });
   runtime.onConnect.addListener((port) => {
     const portSessionId = readReplicaLivePortSessionId(port.name);
@@ -162,12 +179,18 @@ export function installPageRecorderBridge(
           document: sourceDocument,
           window: sourceWindow,
           now,
-          start,
+          start: (options) => start({
+            ...options,
+            emit: (event, isCheckout) => {
+              options.emit(event, isCheckout);
+              if (isRrwebFullSnapshot(event)) refreshImageSourceSessions();
+            },
+          }),
           takeFullSnapshot,
           preflight,
           scheduleFrame,
           cancelFrame,
-          resolveNode: (id) => record.mirror.getNode(id),
+          resolveNode: (id) => recorderMirror.getNode(id),
         });
         const subscription = session.addSubscriber(command.identity, (outgoing) => {
           try {
@@ -236,6 +259,15 @@ export function installPageRecorderBridge(
       captureActive = false;
     });
   });
+}
+
+function isRrwebFullSnapshot(event: unknown): boolean {
+  return Boolean(
+    event &&
+    typeof event === 'object' &&
+    'type' in event &&
+    (event as { readonly type?: unknown }).type === 2,
+  );
 }
 
 export async function captureMaskedCheckpoint(

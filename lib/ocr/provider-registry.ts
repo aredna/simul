@@ -43,9 +43,13 @@ export const compiledImageAnalysisCapabilities = Object.freeze({
 /** Preserve saved positions while omitting providers absent from this build. */
 export function effectiveCompiledProviderOrder(
   savedOrder: readonly ImageTextProviderId[],
+  disabledProviderIds: readonly ImageTextProviderId[] = [],
 ): readonly ImageTextProviderId[] {
   const available = new Set(compiledImageTextProviderIds);
-  return Object.freeze(savedOrder.filter((id) => available.has(id)));
+  const disabled = new Set(disabledProviderIds);
+  return Object.freeze(
+    savedOrder.filter((id) => available.has(id) && !disabled.has(id)),
+  );
 }
 
 export function hasCompiledImageAnalysisCapability(): boolean {
@@ -54,4 +58,9 @@ export function hasCompiledImageAnalysisCapability(): boolean {
     compiledImageAnalysisCapabilities.promptImageLanguage ||
     compiledImageAnalysisCapabilities.promptImageText
   );
+}
+
+/** Every compiled provider module in the generated registry has a local runner. */
+export function hasCompiledOcrRuntimeProvider(): boolean {
+  return compiledImageTextProviderIds.length > 0;
 }

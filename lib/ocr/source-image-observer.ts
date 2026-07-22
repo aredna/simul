@@ -57,6 +57,7 @@ export interface SourceImageObserverEnvironment {
 
 export const MAX_OBSERVED_SOURCE_IMAGES = 10_000;
 export const MAX_SOURCE_IMAGE_OBSERVER_SUBSCRIBERS = 16;
+export const MAX_SOURCE_IMAGE_IDENTITY_RETRY_FRAMES = 4;
 const MAX_IMAGE_DIMENSION = 1_000_000;
 const MAX_PRIVATE_TOKEN_INPUT = 64 * 1024;
 
@@ -100,6 +101,7 @@ export class SourceImageObserver {
   readonly #listeners = new Set<(event: SourceImageObservationEvent) => void>();
   readonly #states = new Map<HTMLImageElement, ObservedImageState>();
   readonly #capacityCandidates = new Set<HTMLImageElement>();
+  readonly #identityCandidates = new Map<HTMLImageElement, number>();
   readonly #visible = new Set<HTMLImageElement>();
   readonly #near = new Set<HTMLImageElement>();
   #visibleObserver: ElementObserver<Element> | undefined;
@@ -110,6 +112,7 @@ export class SourceImageObserver {
   #viewportListener: (() => void) | undefined;
   #scrollListener: (() => void) | undefined;
   #scrollFrame: number | undefined;
+  #identityRetryFrame: number | undefined;
   #started = false;
   #lifecycleGeneration = 0;
   #fillingCapacity = false;
@@ -327,6 +330,10 @@ export class SourceImageObserver {
       this.#cancelFrame(this.#scrollFrame);
       this.#scrollFrame = undefined;
     }
+    if (this.#identityRetryFrame !== undefined) {
+      this.#cancelFrame(this.#identityRetryFrame);
+      this.#identityRetryFrame = undefined;
+    }
     this.#visibleObserver?.disconnect();
     this.#nearObserver?.disconnect();
     this.#resizeObserver?.disconnect();
@@ -340,16 +347,25 @@ export class SourceImageObserver {
     this.#scrollListener = undefined;
     this.#states.clear();
     this.#capacityCandidates.clear();
+    this.#identityCandidates.clear();
     this.#visible.clear();
     this.#near.clear();
     this.#fillingCapacity = false;
   }
 
   #discover(image: HTMLImageElement): void {
-    if (!this.#started || !image.isConnected || this.#isPrivate(image)) return;
+    if (!this.#started || !image.isConnected || this.#isPrivate(image)) {
+      this.#forgetIdentityCandidate(image);
+      return;
+    }
     const nodeId = this.#readNodeId(image);
-    if (!isNodeId(nodeId)) return;
     const existing = this.#states.get(image);
+    if (!isNodeId(nodeId)) {
+      if (existing) this.#remove(image, existing, false);
+      this.#queueIdentityRetry(image);
+      return;
+    }
+    this.#forgetIdentityCandidate(image);
     if (existing?.nodeId === nodeId) {
       this.#refresh(image);
       return;
@@ -454,6 +470,7 @@ export class SourceImageObserver {
     refill = true,
   ): void {
     this.#capacityCandidates.delete(image);
+    this.#forgetIdentityCandidate(image);
     const current = state ?? this.#states.get(image);
     if (!current) return;
     this.#states.delete(image);
@@ -574,6 +591,53 @@ export class SourceImageObserver {
     } catch {
       return undefined;
     }
+  }
+
+  #queueIdentityRetry(image: HTMLImageElement): void {
+    if (!this.#identityCandidates.has(image)) {
+      if (this.#identityCandidates.size >= this.#maxImages) return;
+      this.#identityCandidates.set(image, 0);
+    }
+    this.#scheduleIdentityRetry();
+  }
+
+  #forgetIdentityCandidate(image: HTMLImageElement): void {
+    if (!this.#identityCandidates.delete(image)) return;
+    if (
+      this.#identityCandidates.size === 0 &&
+      this.#identityRetryFrame !== undefined
+    ) {
+      this.#cancelFrame(this.#identityRetryFrame);
+      this.#identityRetryFrame = undefined;
+    }
+  }
+
+  #scheduleIdentityRetry(): void {
+    if (
+      !this.#started ||
+      this.#identityRetryFrame !== undefined ||
+      ![...this.#identityCandidates.values()].some(
+        (attempts) => attempts < MAX_SOURCE_IMAGE_IDENTITY_RETRY_FRAMES,
+      )
+    ) return;
+    const generation = this.#lifecycleGeneration;
+    this.#identityRetryFrame = this.#scheduleFrame(() => {
+      this.#identityRetryFrame = undefined;
+      if (!this.#isActiveGeneration(generation)) return;
+      for (const [image, attempts] of [...this.#identityCandidates]) {
+        if (attempts >= MAX_SOURCE_IMAGE_IDENTITY_RETRY_FRAMES) continue;
+        const nextAttempt = attempts + 1;
+        this.#identityCandidates.set(image, nextAttempt);
+        this.#discover(image);
+        if (
+          nextAttempt >= MAX_SOURCE_IMAGE_IDENTITY_RETRY_FRAMES &&
+          this.#identityCandidates.get(image) === nextAttempt
+        ) {
+          this.#identityCandidates.delete(image);
+        }
+      }
+      this.#scheduleIdentityRetry();
+    });
   }
 
   #emit(event: SourceImageObservationEvent): void {

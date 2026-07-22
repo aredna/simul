@@ -59,6 +59,7 @@ import {
 } from './ocr/contracts';
 import {
   IMAGE_TEXT_PROVIDER_IDS,
+  repairDisabledImageTextProviderIds,
   repairImageTextProviderOrder,
   type ImageTextProviderId,
 } from './ocr/known-provider-ids';
@@ -106,6 +107,7 @@ export interface CompanionPreferences {
   imageTranslationEnabled: boolean;
   ocrMinimumConfidence: OcrMinimumConfidence;
   imageTextProviderOrder: ImageTextProviderId[];
+  disabledImageTextProviderIds: ImageTextProviderId[];
   imageScanPolicy: ImageScanPolicy;
   skipSmallImages: boolean;
   usePromptForImageLanguage: boolean;
@@ -133,6 +135,9 @@ export const DEFAULT_COMPANION_PREFERENCES: Readonly<CompanionPreferences> =
     imageTextProviderOrder: Object.freeze([
       ...IMAGE_TEXT_PROVIDER_IDS,
     ]) as unknown as ImageTextProviderId[],
+    disabledImageTextProviderIds: Object.freeze(
+      [],
+    ) as unknown as ImageTextProviderId[],
     imageScanPolicy: 'visible-first-background-prescan',
     skipSmallImages: true,
     usePromptForImageLanguage: false,
@@ -212,6 +217,9 @@ export function parseCompanionPreferences(
     ),
     imageTextProviderOrder: repairImageTextProviderOrder(
       input.imageTextProviderOrder,
+    ),
+    disabledImageTextProviderIds: repairDisabledImageTextProviderIds(
+      input.disabledImageTextProviderIds,
     ),
     imageScanPolicy: isImageScanPolicy(input.imageScanPolicy)
       ? input.imageScanPolicy
@@ -417,6 +425,7 @@ export interface CompanionImageAnalysisSettings {
   imageTranslationEnabled: boolean;
   ocrMinimumConfidence: OcrMinimumConfidence;
   imageTextProviderOrder: ImageTextProviderId[];
+  disabledImageTextProviderIds: ImageTextProviderId[];
   imageScanPolicy: ImageScanPolicy;
   skipSmallImages: boolean;
   usePromptForImageLanguage: boolean;
@@ -470,6 +479,7 @@ function createDefaultPreferences(): CompanionPreferences {
     imageTranslationEnabled: false,
     ocrMinimumConfidence: DEFAULT_OCR_MINIMUM_CONFIDENCE,
     imageTextProviderOrder: [...IMAGE_TEXT_PROVIDER_IDS],
+    disabledImageTextProviderIds: [],
     imageScanPolicy: 'visible-first-background-prescan',
     skipSmallImages: true,
     usePromptForImageLanguage: false,

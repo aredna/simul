@@ -13,6 +13,7 @@ import {
   resolveCompanionLaunchSurface,
 } from '../lib/companion-surface';
 import { compiledImageTextProviderIds } from '../lib/ocr/provider-registry';
+import { hasOcrRuntimeProvider } from '../lib/ocr/runtime-provider-readiness';
 import { createBrowserOcrOffscreenManager } from '../lib/ocr/offscreen-document-manager';
 import { readEnsureOcrHostCommand } from '../lib/ocr/offscreen-protocol';
 import {
@@ -192,9 +193,7 @@ export default defineBackground(() => {
     (message: unknown, _sender, sendResponse) => {
       const ensureHost = readEnsureOcrHostCommand(message);
       if (ensureHost) {
-        if (!compiledImageTextProviderIds.some(
-          (id) => id === 'tesseract' || id === 'chrome-text-detector',
-        )) {
+        if (!hasOcrRuntimeProvider(compiledImageTextProviderIds)) {
           sendResponse({
             kind: 'simul:ocr-v1:host-ready',
             version: 1,

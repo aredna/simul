@@ -10,10 +10,13 @@ import {
 
 const ocrBuildProfile = readOcrBuildProfile(process.env);
 const tesseractEnabled = ocrBuildProfile.enabledProviderIds.includes('tesseract');
+const tesseractWasmDirectEnabled = ocrBuildProfile.enabledProviderIds.includes(
+  'tesseract-wasm-direct',
+);
 const paddleEnabled = ocrBuildProfile.enabledProviderIds.includes('paddleocr-wasm');
 const offscreenOcrEnabled = ocrBuildProfile.enabledProviderIds.some((id) =>
   id === 'tesseract' || id === 'chrome-text-detector' ||
-  id === 'paddleocr-wasm',
+  id === 'paddleocr-wasm' || id === 'tesseract-wasm-direct',
 );
 const releaseLegalFiles = Object.freeze([
   { source: new URL('./LICENSE', import.meta.url), fileName: 'LICENSE' },
@@ -23,7 +26,7 @@ const releaseLegalFiles = Object.freeze([
   },
 ]);
 const selectedOcrAssets = Object.freeze([
-  ...(tesseractEnabled
+  ...(tesseractEnabled || tesseractWasmDirectEnabled
     ? [
         ...collectFiles(
           new URL('./vendor/ocr/tesseract/', import.meta.url),
@@ -34,6 +37,12 @@ const selectedOcrAssets = Object.freeze([
           fileName: 'ocr/THIRD_PARTY_NOTICES.md',
         },
       ]
+    : []),
+  ...(tesseractWasmDirectEnabled
+    ? collectFiles(
+        new URL('./vendor/ocr/tesseract-wasm/', import.meta.url),
+        'ocr/tesseract-wasm',
+      )
     : []),
   ...(paddleEnabled
     ? collectFiles(
@@ -99,6 +108,26 @@ function removeRemoteTesseractFallbacks(code: string): string {
     );
 }
 
+function requireExplicitTesseractWasmAssets(code: string): string {
+  const workerFallback =
+    'new URL("./tesseract-worker.js", import.meta.url).href';
+  const wasmFallback = 'new URL("tesseract-core.wasm",import.meta.url).href';
+  if (!code.includes(workerFallback) || !code.includes(wasmFallback)) {
+    throw new Error(
+      'The pinned tesseract-wasm local-asset guards no longer match every fallback.',
+    );
+  }
+  return code
+    .replaceAll(
+      workerFallback,
+      '"__SIMUL_EXPLICIT_TESSERACT_WASM_WORKER_URL_REQUIRED__"',
+    )
+    .replaceAll(
+      wasmFallback,
+      '"__SIMUL_EXPLICIT_TESSERACT_WASM_BINARY_REQUIRED__"',
+    );
+}
+
 export default defineConfig({
   outDir: process.env.SIMUL_WXT_OUT_DIR || '.output',
   publicDir: 'public',
@@ -125,9 +154,23 @@ export default defineConfig({
   vite: () => ({
     define: {
       __SIMUL_OCR_PADDLE_COMPILED__: JSON.stringify(paddleEnabled),
+      __SIMUL_OCR_TESSERACT_WASM_DIRECT_COMPILED__: JSON.stringify(
+        tesseractWasmDirectEnabled,
+      ),
     },
     plugins: [
       createOcrBuildProfilePlugin(process.env),
+      {
+        name: 'simul-require-explicit-local-tesseract-wasm-assets',
+        enforce: 'pre',
+        transform(code, id) {
+          if (!id.replaceAll('\\', '/').endsWith(
+            '/node_modules/tesseract-wasm/dist/lib.js',
+          )) return null;
+          const transformed = requireExplicitTesseractWasmAssets(code);
+          return { code: transformed, map: null };
+        },
+      },
       {
         name: 'simul-release-legal-files',
         generateBundle() {
@@ -185,7 +228,7 @@ export default defineConfig({
       ...(offscreenOcrEnabled ? ['offscreen' as const] : []),
     ],
     optional_host_permissions: ['<all_urls>'],
-    ...(tesseractEnabled || paddleEnabled
+    ...(tesseractEnabled || tesseractWasmDirectEnabled || paddleEnabled
       ? {
           content_security_policy: {
             extension_pages:

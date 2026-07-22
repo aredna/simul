@@ -313,6 +313,59 @@ describe('rrweb shadow engine', () => {
     expect(document.querySelector('#badge')?.textContent).toBe(LEGACY_FALLBACK_LABEL);
   });
 
+  it('resolves a discovered rrweb source image ID through the replay mirror', async () => {
+    const { document } = replicaDocument();
+    const replayDocument = parseHTML(
+      '<html><body><img id="replayed-image"></body></html>',
+    ).document;
+    const replayImage = replayDocument.querySelector<HTMLImageElement>(
+      '#replayed-image',
+    )!;
+    const engine = new RrwebShadowReplicaEngine({
+      presentationHost: createPresentationHost(document),
+      capture: async () => checkpointWithImage(37),
+      createReplayer: (_events, root) => {
+        const iframe = document.createElement('iframe');
+        Object.defineProperty(iframe, 'contentDocument', {
+          configurable: true,
+          value: replayDocument,
+        });
+        root.append(iframe);
+        let rebuilt: (() => void) | undefined;
+        return {
+          iframe,
+          on: (event, handler) => {
+            if (event === 'fullsnapshot-rebuilded') rebuilt = handler;
+          },
+          off: (event, handler) => {
+            if (event === 'fullsnapshot-rebuilded' && rebuilt === handler) {
+              rebuilt = undefined;
+            }
+          },
+          play: () => rebuilt?.(),
+          getMirror: () => ({
+            getNode: (nodeId) => nodeId === 37 ? replayImage : null,
+          }),
+          disableInteract: () => undefined,
+          destroy: () => undefined,
+        };
+      },
+    });
+
+    await expect(engine.run(request)).resolves.toMatchObject({ status: 'complete' });
+    const snapshot = engine.snapshot()!;
+    const anchor = engine.resolveImageAnchor(snapshot.document, 37);
+
+    expect(anchor).toMatchObject({
+      document: snapshot.document,
+      replayLease: snapshot.replayLease,
+      image: replayImage,
+    });
+    expect(anchor?.iframe.contentDocument).toBe(replayDocument);
+    expect(engine.resolveImageAnchor(snapshot.document, 38)).toBeUndefined();
+    engine.dispose();
+  });
+
   it('rejects stale work before capture or replay', async () => {
     let captures = 0;
     const { document } = replicaDocument();
@@ -1486,6 +1539,51 @@ function checkpoint(): ReplicaCheckpointEnvelope {
     throw new Error('Fixture checkpoint was unexpectedly rejected.');
   }
   return response;
+}
+
+function checkpointWithImage(nodeId: number): ReplicaCheckpointEnvelope {
+  const base = checkpoint();
+  const events = structuredClone(base.payload.events) as Array<Record<string, unknown>>;
+  const snapshot = events.find((event) => event.type === 2);
+  const root = snapshot?.data && typeof snapshot.data === 'object'
+    ? (snapshot.data as { node?: unknown }).node
+    : undefined;
+  const html = readSerializedChild(root, 0);
+  const body = readSerializedChild(html, 0);
+  if (!body?.childNodes || !Array.isArray(body.childNodes)) {
+    throw new Error('Missing checkpoint body fixture.');
+  }
+  body.childNodes.push({
+    type: 2,
+    id: nodeId,
+    tagName: 'img',
+    attributes: {},
+    childNodes: [],
+  });
+  const response = createCheckpointEnvelope(base.identity, {
+    events,
+    captureMs: base.payload.captureMs,
+    viewportWidth: base.payload.viewportWidth,
+    viewportHeight: base.payload.viewportHeight,
+    documentWidth: base.payload.documentWidth,
+    documentHeight: base.payload.documentHeight,
+  });
+  if (response.kind !== 'simul:replica-v2:checkpoint') {
+    throw new Error('Image checkpoint fixture was unexpectedly rejected.');
+  }
+  return response;
+}
+
+function readSerializedChild(
+  input: unknown,
+  index: number,
+): { childNodes?: unknown[] } | undefined {
+  if (!input || typeof input !== 'object') return undefined;
+  const children = (input as { childNodes?: unknown }).childNodes;
+  const child = Array.isArray(children) ? children[index] : undefined;
+  return child && typeof child === 'object'
+    ? child as { childNodes?: unknown[] }
+    : undefined;
 }
 
 function busyCheckpoint(): ReturnType<typeof createCheckpointError> {

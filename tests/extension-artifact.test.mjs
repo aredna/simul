@@ -20,6 +20,9 @@ import {
   APPROVED_OPTIONAL_HOST_PERMISSIONS,
   APPROVED_PERMISSIONS,
   DEFAULT_OCR_PROVIDER_IDS,
+  MAX_OCR_ALL_TRIAL_ARTIFACT_BYTES,
+  MAX_UNPACKED_ARTIFACT_BYTES,
+  OCR_ALL_TRIAL_PROVIDER_IDS,
   REQUIRED_OCR_RUNTIME_MARKERS,
   REQUIRED_RELEASE_LEGAL_FILES,
   REQUIRED_ISOLATED_SANDBOX_MARKERS,
@@ -30,9 +33,11 @@ import {
   buildProductionArtifact,
   canonicalArtifactDirectory,
   checkArtifact,
+  checkOcrAllTrial,
   checkOcrPaddleTrial,
   compareArtifactDirectories,
   syncArtifact,
+  syncOcrAllTrial,
   validateArtifact,
 } from '../tools/extension-artifact.mjs';
 
@@ -486,6 +491,7 @@ describe('OCR provider package boundary', () => {
         'onnxruntime-web': '1.24.3',
         'tesseract.js': '7.0.0',
         'tesseract.js-core': '7.0.0',
+        'tesseract-wasm': '0.11.0',
       },
     };
     const packageLock = {
@@ -571,6 +577,7 @@ describe('OCR provider package boundary', () => {
       'onnxruntime-web': '1.24.3',
       'tesseract.js': '7.0.0',
       'tesseract.js-core': '7.0.0',
+      'tesseract-wasm': '0.11.0',
     };
     const packages = Object.fromEntries(
       Object.entries(APPROVED_OCR_PACKAGE_LOCK_METADATA).map(
@@ -654,6 +661,25 @@ describe('disabled OCR production profile', () => {
 });
 
 describe('independent OCR production profiles', () => {
+  it('keeps the elevated budget closed to the exact ordered four-provider trial', async () => {
+    expect(MAX_UNPACKED_ARTIFACT_BYTES).toBe(42 * 1024 * 1024);
+    expect(MAX_OCR_ALL_TRIAL_ARTIFACT_BYTES).toBe(72 * 1024 * 1024);
+    expect(OCR_ALL_TRIAL_PROVIDER_IDS).toEqual([
+      'paddleocr-wasm',
+      'chrome-text-detector',
+      'tesseract',
+      'tesseract-wasm-direct',
+    ]);
+
+    const packageManifest = JSON.parse(await readFile('package.json', 'utf8'));
+    expect(packageManifest.scripts).toMatchObject({
+      'check:ocr-all-trial':
+        'node tools/extension-artifact.mjs check-ocr-all-trial',
+      'artifact:sync:ocr-trials':
+        'node tools/extension-artifact.mjs sync-ocr-all-trial',
+    });
+  });
+
   it('builds and validates an asset-free Chrome TextDetector-only profile', async () => {
     const temporaryRoot = await createTemporaryDirectory('simul-text-detector-build-');
     const artifact = await buildProductionArtifact({
@@ -713,6 +739,78 @@ describe('independent OCR production profiles', () => {
     expect(trial.files).toContain('ocr/paddle/asset-manifest.json');
     expect(trial.unpackedBytes).toBeGreaterThan(0);
   }, 20_000);
+
+  it('does not grant the elevated trial budget to an arbitrary provider set', async () => {
+    const artifact = await createTemporaryOcrArtifact();
+
+    await expect(
+      validateArtifact(artifact, { allowExactOcrAllTrial: true }),
+    ).rejects.toThrow(
+      'The elevated OCR trial profile requires exactly: paddleocr-wasm, chrome-text-detector, tesseract, tesseract-wasm-direct.',
+    );
+  });
+
+  it('checks and atomically syncs only the exact four-provider artifact above the normal cap', async () => {
+    const retainedRoot = await createTemporaryDirectory(
+      'simul-all-ocr-retained-',
+    );
+    const retainedArtifact = path.join(retainedRoot, 'chrome-mv3');
+    let checkedProviderIds;
+    const trial = await checkOcrAllTrial({
+      buildArtifact: async (options) => {
+        checkedProviderIds = options.ocrProviderIds;
+        const built = await buildProductionArtifact(options);
+        await cp(built, retainedArtifact, { recursive: true });
+        return built;
+      },
+    });
+
+    expect(checkedProviderIds).toEqual(OCR_ALL_TRIAL_PROVIDER_IDS);
+    expect(trial.ocrProviderIds).toEqual(OCR_ALL_TRIAL_PROVIDER_IDS);
+    expect(trial.unpackedBytes).toBeGreaterThan(
+      MAX_UNPACKED_ARTIFACT_BYTES,
+    );
+    expect(trial.unpackedBytes).toBeLessThanOrEqual(
+      MAX_OCR_ALL_TRIAL_ARTIFACT_BYTES,
+    );
+    await expect(validateArtifact(retainedArtifact)).rejects.toThrow(
+      `the approved maximum is ${MAX_UNPACKED_ARTIFACT_BYTES} bytes`,
+    );
+    await expect(
+      validateArtifact(retainedArtifact, { allowExactOcrAllTrial: true }),
+    ).resolves.toMatchObject({
+      ocrProviderIds: OCR_ALL_TRIAL_PROVIDER_IDS,
+      unpackedBytes: trial.unpackedBytes,
+    });
+
+    const projectRoot = await createTemporaryDirectory('simul-all-ocr-sync-');
+    const committed = canonicalArtifactDirectory(projectRoot);
+    await createValidArtifact(committed, {
+      popupScript: 'console.info("known-good");',
+    });
+    const unrelated = path.join(projectRoot, 'dist', 'keep.txt');
+    await writeFile(unrelated, 'untouched');
+    let syncedProviderIds;
+
+    await syncOcrAllTrial({
+      projectRoot,
+      buildArtifact: async ({ temporaryRoot, ocrProviderIds }) => {
+        syncedProviderIds = ocrProviderIds;
+        const built = path.join(temporaryRoot, 'built');
+        await cp(retainedArtifact, built, { recursive: true });
+        return built;
+      },
+    });
+
+    expect(syncedProviderIds).toEqual(OCR_ALL_TRIAL_PROVIDER_IDS);
+    await expect(
+      validateArtifact(committed, { allowExactOcrAllTrial: true }),
+    ).resolves.toMatchObject({
+      ocrProviderIds: OCR_ALL_TRIAL_PROVIDER_IDS,
+      unpackedBytes: trial.unpackedBytes,
+    });
+    expect(await readFile(unrelated, 'utf8')).toBe('untouched');
+  }, 60_000);
 
   it('rejects duplicate or unknown requested providers before building', async () => {
     const temporaryRoot = await createTemporaryDirectory('simul-invalid-ocr-build-');

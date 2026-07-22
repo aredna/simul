@@ -12,7 +12,10 @@ import {
   type OcrHostErrorCode,
 } from './offscreen-protocol';
 import type { AcquiredImagePixels } from './pixel-acquisition';
-import { PADDLE_OCR_COMPILED } from './compiled-provider-flags';
+import {
+  PADDLE_OCR_COMPILED,
+  TESSERACT_WASM_DIRECT_COMPILED,
+} from './compiled-provider-flags';
 import {
   emptyImageTextQualitySummary,
   filterImageTextResult,
@@ -290,7 +293,11 @@ export class ImageRecognitionCoordinator {
             quality,
           };
           lastFailure = 'recognition-failed';
-          if (PADDLE_OCR_COMPILED && providerId === 'paddleocr-wasm') break;
+          if (
+            PADDLE_OCR_COMPILED &&
+            providerId === 'paddleocr-wasm' &&
+            response.result.regions.length === 0
+          ) break;
           continue;
         }
         const accepted = {
@@ -488,6 +495,20 @@ function createJob(
       modelVersion: 'PP-OCRv6_tiny_det+PP-OCRv6_tiny_rec',
     });
   }
+  if (providerId === 'tesseract-wasm-direct') {
+    if (
+      !TESSERACT_WASM_DIRECT_COMPILED ||
+      !route.languageGroup ||
+      !route.modelVersion
+    ) return undefined;
+    return Object.freeze({
+      ...base,
+      providerId,
+      languageGroup: route.languageGroup,
+      providerVersion: 'tesseract-wasm-0.11.0',
+      modelVersion: route.modelVersion,
+    });
+  }
   if (!route.languageGroup || !route.modelVersion) return undefined;
   return Object.freeze({
     ...base,
@@ -517,6 +538,15 @@ function recognitionCacheKey(
             'PP-OCRv6_tiny_det+PP-OCRv6_tiny_rec',
             route.sourceLanguage ?? '',
           ]
+        : TESSERACT_WASM_DIRECT_COMPILED &&
+            providerId === 'tesseract-wasm-direct'
+          ? [
+              providerId,
+              'tesseract-wasm-0.11.0',
+              route.modelVersion ?? '',
+              route.sourceLanguage ?? '',
+              route.languageGroup ?? '',
+            ]
         : [
           providerId,
           'tesseract.js-7.0.0',
@@ -547,7 +577,11 @@ function effectiveRuntimeOrder(
       (
         providerId === 'chrome-text-detector' ||
         providerId === 'tesseract' ||
-        (PADDLE_OCR_COMPILED && providerId === 'paddleocr-wasm')
+        (PADDLE_OCR_COMPILED && providerId === 'paddleocr-wasm') ||
+        (
+          TESSERACT_WASM_DIRECT_COMPILED &&
+          providerId === 'tesseract-wasm-direct'
+        )
       ) &&
       !seen.has(providerId)
     ) {
@@ -560,7 +594,10 @@ function effectiveRuntimeOrder(
 
 type RuntimeImageTextProviderId = Extract<
   ImageTextProviderId,
-  'chrome-text-detector' | 'tesseract' | 'paddleocr-wasm'
+  | 'chrome-text-detector'
+  | 'tesseract'
+  | 'paddleocr-wasm'
+  | 'tesseract-wasm-direct'
 >;
 
 function appendGeometryHints(

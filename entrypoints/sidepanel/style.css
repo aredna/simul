@@ -254,6 +254,10 @@ select { width: 100%; min-height: 34px; padding: 5px 26px 5px 8px; font-size: 12
 .ocr-confidence-row input { width: 100%; accent-color: var(--green); }
 .ocr-confidence-row output { color: var(--muted); font-size: 11px; text-align: right; }
 .ocr-provider-order li { display: flex; min-height: 30px; align-items: center; justify-content: space-between; gap: 8px; color: var(--muted); font-size: 11px; }
+.ocr-provider-toggle { display: inline-flex; min-width: 0; align-items: center; gap: 7px; cursor: pointer; }
+.ocr-provider-toggle input { flex: 0 0 auto; margin: 0; accent-color: var(--green); }
+.ocr-provider-toggle span { overflow-wrap: anywhere; }
+.ocr-provider-paused { color: var(--warning-text); }
 .ocr-order-buttons { display: flex; gap: 4px; }
 .ocr-order-buttons button { width: 28px; min-height: 28px; padding: 0; }
 .image-prompt-toggle { padding-top: 7px; }
