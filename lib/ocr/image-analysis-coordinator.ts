@@ -12,11 +12,16 @@ import {
   type OcrHostErrorCode,
 } from './offscreen-protocol';
 import type { AcquiredImagePixels } from './pixel-acquisition';
+import { PADDLE_OCR_COMPILED } from './compiled-provider-flags';
 import {
   emptyImageTextQualitySummary,
   filterImageTextResult,
   mergeImageTextQualitySummaries,
+  OCR_QUALITY_POLICY_VERSION,
+  ocrQualityPolicyKey,
+  repairOcrMinimumConfidence,
   type ImageTextQualitySummary,
+  type OcrMinimumConfidence,
 } from './result-quality';
 import type { TransientImageInputStore } from './transient-image-store';
 
@@ -30,6 +35,7 @@ export interface ImageRecognitionRoute {
   readonly sourceLanguage?: string;
   readonly languageGroup?: string;
   readonly modelVersion?: string;
+  readonly minimumConfidence?: OcrMinimumConfidence;
 }
 
 export type ImageRecognitionResult =
@@ -227,6 +233,7 @@ export class ImageRecognitionCoordinator {
       let lastFailure: OcrHostErrorCode = 'provider-unavailable';
       let lastEmptyResult: CachedImageRecognitionResult | undefined;
       let hints: readonly ImageTextRegion[] = Object.freeze([]);
+      const corroboratingResults: ImageTextResult[] = [];
       let quality = emptyImageTextQualitySummary();
       for (const providerId of providers) {
         signal?.throwIfAborted();
@@ -268,15 +275,22 @@ export class ImageRecognitionCoordinator {
           }
           continue;
         }
-        const filtered = filterImageTextResult(response.result);
+        const filtered = filterImageTextResult(response.result, {
+          minimumConfidence: repairOcrMinimumConfidence(
+            route.minimumConfidence,
+          ),
+          corroboratingResults,
+        });
         quality = mergeImageTextQualitySummaries(quality, filtered.quality);
         if (!filtered.hasAcceptedText) {
           hints = appendGeometryHints(hints, response.result.regions);
+          corroboratingResults.push(response.result);
           lastEmptyResult = {
             result: filtered.result,
             quality,
           };
           lastFailure = 'recognition-failed';
+          if (PADDLE_OCR_COMPILED && providerId === 'paddleocr-wasm') break;
           continue;
         }
         const accepted = {
@@ -426,7 +440,7 @@ export function createBrowserImageRecognitionCoordinator(
 }
 
 function createJob(
-  providerId: Extract<ImageTextProviderId, 'chrome-text-detector' | 'tesseract'>,
+  providerId: RuntimeImageTextProviderId,
   clientId: string,
   jobId: string,
   attempt: 0 | 1,
@@ -450,6 +464,8 @@ function createJob(
     bitmapHeight: pixels.bitmapHeight,
     ...(hints.length > 0 ? { hints } : {}),
     preprocessingVersion: pixels.preprocessingVersion,
+    qualityPolicyVersion: OCR_QUALITY_POLICY_VERSION,
+    minimumConfidence: repairOcrMinimumConfidence(route.minimumConfidence),
     schemaVersion: 1,
   } as const;
   if (providerId === 'chrome-text-detector') {
@@ -460,6 +476,16 @@ function createJob(
       languageGroup: route.sourceLanguage,
       providerVersion: 'chrome-text-detector-v1',
       modelVersion: 'platform',
+    });
+  }
+  if (providerId === 'paddleocr-wasm') {
+    if (!PADDLE_OCR_COMPILED || !route.sourceLanguage) return undefined;
+    return Object.freeze({
+      ...base,
+      providerId,
+      languageGroup: route.sourceLanguage,
+      providerVersion: 'paddleocr-js-0.4.2',
+      modelVersion: 'PP-OCRv6_tiny_det+PP-OCRv6_tiny_rec',
     });
   }
   if (!route.languageGroup || !route.modelVersion) return undefined;
@@ -484,7 +510,14 @@ function recognitionCacheKey(
           'platform',
           route.sourceLanguage ?? '',
         ]
-      : [
+      : PADDLE_OCR_COMPILED && providerId === 'paddleocr-wasm'
+        ? [
+            providerId,
+            'paddleocr-js-0.4.2',
+            'PP-OCRv6_tiny_det+PP-OCRv6_tiny_rec',
+            route.sourceLanguage ?? '',
+          ]
+        : [
           providerId,
           'tesseract.js-7.0.0',
           route.modelVersion ?? '',
@@ -493,8 +526,9 @@ function recognitionCacheKey(
         ]
   );
   return JSON.stringify([
-    'image-text-v2',
+    'image-text-v3',
     providers,
+    ocrQualityPolicyKey(repairOcrMinimumConfidence(route.minimumConfidence)),
     pixels.preprocessingVersion,
     pixels.bitmapWidth,
     pixels.bitmapHeight,
@@ -504,15 +538,17 @@ function recognitionCacheKey(
 
 function effectiveRuntimeOrder(
   route: ImageRecognitionRoute,
-): readonly Extract<ImageTextProviderId, 'chrome-text-detector' | 'tesseract'>[] {
+): readonly RuntimeImageTextProviderId[] {
   const saved = route.providerOrder ?? ['tesseract'];
   const seen = new Set<string>();
-  const result: Array<
-    Extract<ImageTextProviderId, 'chrome-text-detector' | 'tesseract'>
-  > = [];
+  const result: RuntimeImageTextProviderId[] = [];
   for (const providerId of saved) {
     if (
-      (providerId === 'chrome-text-detector' || providerId === 'tesseract') &&
+      (
+        providerId === 'chrome-text-detector' ||
+        providerId === 'tesseract' ||
+        (PADDLE_OCR_COMPILED && providerId === 'paddleocr-wasm')
+      ) &&
       !seen.has(providerId)
     ) {
       seen.add(providerId);
@@ -521,6 +557,11 @@ function effectiveRuntimeOrder(
   }
   return Object.freeze(result);
 }
+
+type RuntimeImageTextProviderId = Extract<
+  ImageTextProviderId,
+  'chrome-text-detector' | 'tesseract' | 'paddleocr-wasm'
+>;
 
 function appendGeometryHints(
   existing: readonly ImageTextRegion[],

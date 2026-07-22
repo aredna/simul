@@ -62,6 +62,11 @@ import {
   TESSERACT_MODEL_VERSION,
 } from './providers/tesseract/language-catalog';
 import type { ImageTextQualitySummary } from './result-quality';
+import {
+  ocrQualityPolicyKey,
+  repairOcrMinimumConfidence,
+  type OcrMinimumConfidence,
+} from './result-quality';
 
 const MUTATION_QUIET_MS = 1_000;
 const MAX_TRANSLATED_IMAGE_REGIONS = 512;
@@ -73,6 +78,7 @@ export interface ImageTranslationConfiguration {
   readonly scanPolicy: ImageScanPolicy;
   readonly skipSmallImages: boolean;
   readonly providerOrder: readonly ImageTextProviderId[];
+  readonly ocrMinimumConfidence?: OcrMinimumConfidence;
   readonly sourceLanguage: SourceLanguagePreference;
   readonly detectedSourceLanguage?: SupportedLanguage;
   readonly targetLanguage: SupportedLanguage;
@@ -176,6 +182,9 @@ export type ImageTranslationDiagnostic =
       rejectedBlankRegions: number;
       rejectedPunctuationRegions: number;
       rejectedLowConfidenceRegions: number;
+      rejectedUncorroboratedRegions: number;
+      uncertainRegions: number;
+      corroboratedRegions: number;
     }>
   | Readonly<{
       stage: 'translation-started' | 'translation-failed' | 'translation-empty';
@@ -288,6 +297,7 @@ export class ImageTranslationController {
       scanPolicy: 'visible-first-background-prescan',
       skipSmallImages: true,
       providerOrder: [],
+      ocrMinimumConfidence: repairOcrMinimumConfidence(undefined),
       sourceLanguage: 'auto',
       targetLanguage: 'en',
       translationIdle: true,
@@ -851,6 +861,9 @@ export class ImageTranslationController {
     const route: ImageRecognitionRoute = {
       providerOrder: this.#configuration.providerOrder,
       sourceLanguage,
+      minimumConfidence: repairOcrMinimumConfidence(
+        this.#configuration.ocrMinimumConfidence,
+      ),
       ...(languageGroup
         ? {
             languageGroup,
@@ -1199,6 +1212,10 @@ export class ImageTranslationController {
       rejectedBlankRegions: quality.rejectedBlankRegions,
       rejectedPunctuationRegions: quality.rejectedPunctuationRegions,
       rejectedLowConfidenceRegions: quality.rejectedLowConfidenceRegions,
+      rejectedUncorroboratedRegions:
+        quality.rejectedUncorroboratedRegions,
+      uncertainRegions: quality.uncertainRegions,
+      corroboratedRegions: quality.corroboratedRegions,
     }));
   }
 
@@ -1290,7 +1307,10 @@ export class ImageTranslationController {
     this.#pairKey = this.#isEnabled()
       ? `${this.#configuration.sourceLanguage === 'auto'
           ? this.#configuration.detectedSourceLanguage ?? 'auto'
-          : this.#configuration.sourceLanguage}>${this.#configuration.targetLanguage}`
+          : this.#configuration.sourceLanguage}>${this.#configuration.targetLanguage}` +
+          `|${ocrQualityPolicyKey(repairOcrMinimumConfidence(
+            this.#configuration.ocrMinimumConfidence,
+          ))}`
       : undefined;
     this.#projectedHashes.clear();
     this.#projectedOrdinals.clear();
@@ -1356,7 +1376,9 @@ function hasRuntimeImageTextProvider(
   order: readonly ImageTextProviderId[],
 ): boolean {
   return order.some((providerId) =>
-    providerId === 'chrome-text-detector' || providerId === 'tesseract',
+    providerId === 'chrome-text-detector' ||
+    providerId === 'tesseract' ||
+    providerId === 'paddleocr-wasm',
   );
 }
 
@@ -1393,6 +1415,9 @@ function pairConfigurationKey(
     configuration.detectedSourceLanguage ?? '',
     configuration.targetLanguage,
     configuration.providerOrder.join(','),
+    ocrQualityPolicyKey(repairOcrMinimumConfidence(
+      configuration.ocrMinimumConfidence,
+    )),
   ].join(':');
 }
 

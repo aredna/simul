@@ -51,9 +51,10 @@ export const OCR_PROVIDER_BUILD_DEFINITIONS = Object.freeze([
   {
     flag: 'SIMUL_OCR_PADDLE',
     id: 'paddleocr-wasm',
-    implemented: false,
+    implemented: true,
     enabledByDefault: false,
     importPath: '/lib/ocr/providers/paddleocr-wasm/index.ts',
+    runtimeImportPath: '/lib/ocr/providers/paddleocr-wasm/offscreen.ts',
   },
   {
     flag: 'SIMUL_OCR_SCREEN_AI',

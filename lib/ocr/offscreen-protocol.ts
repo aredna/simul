@@ -13,6 +13,12 @@ import {
   readOcrPreprocessingVersion,
   type OcrPreprocessingVersion,
 } from './preprocessing-profile';
+import { PADDLE_OCR_COMPILED } from './compiled-provider-flags';
+import {
+  isOcrMinimumConfidence,
+  OCR_QUALITY_POLICY_VERSION,
+  type OcrMinimumConfidence,
+} from './result-quality';
 
 export const OCR_OFFSCREEN_PROTOCOL_VERSION = 1;
 
@@ -54,6 +60,8 @@ interface BaseOffscreenOcrJob {
   readonly bitmapHeight: number;
   readonly hints?: readonly ImageTextRegion[];
   readonly preprocessingVersion: OcrPreprocessingVersion;
+  readonly qualityPolicyVersion: typeof OCR_QUALITY_POLICY_VERSION;
+  readonly minimumConfidence: OcrMinimumConfidence;
   readonly schemaVersion: 1;
 }
 
@@ -71,9 +79,17 @@ export interface ChromeTextDetectorOffscreenOcrJob extends BaseOffscreenOcrJob {
   readonly modelVersion: 'platform';
 }
 
+export interface PaddleOffscreenOcrJob extends BaseOffscreenOcrJob {
+  readonly providerId: 'paddleocr-wasm';
+  readonly languageGroup: string;
+  readonly providerVersion: 'paddleocr-js-0.4.2';
+  readonly modelVersion: 'PP-OCRv6_tiny_det+PP-OCRv6_tiny_rec';
+}
+
 export type OffscreenOcrJob =
   | TesseractOffscreenOcrJob
-  | ChromeTextDetectorOffscreenOcrJob;
+  | ChromeTextDetectorOffscreenOcrJob
+  | PaddleOffscreenOcrJob;
 
 export interface RunOffscreenOcrCommand {
   readonly kind: 'simul:ocr-v1:run';
@@ -169,6 +185,8 @@ export function readOffscreenOcrJob(input: unknown): OffscreenOcrJob | undefined
     'providerVersion',
     'modelVersion',
     'preprocessingVersion',
+    'qualityPolicyVersion',
+    'minimumConfidence',
     'schemaVersion',
   ], ['hints'])) return undefined;
   const document = readSourceDocumentIdentity(input.document);
@@ -190,6 +208,8 @@ export function readOffscreenOcrJob(input: unknown): OffscreenOcrJob | undefined
     !isBitmapDimension(input.bitmapWidth) ||
     !isBitmapDimension(input.bitmapHeight) ||
     input.bitmapWidth * input.bitmapHeight > 4_000_000 ||
+    input.qualityPolicyVersion !== OCR_QUALITY_POLICY_VERSION ||
+    !isOcrMinimumConfidence(input.minimumConfidence) ||
     input.schemaVersion !== 1
   ) return undefined;
   const hints = input.hints === undefined
@@ -214,6 +234,8 @@ export function readOffscreenOcrJob(input: unknown): OffscreenOcrJob | undefined
     bitmapHeight: input.bitmapHeight,
     ...(hints ? { hints } : {}),
     preprocessingVersion,
+    qualityPolicyVersion: OCR_QUALITY_POLICY_VERSION,
+    minimumConfidence: input.minimumConfidence,
     schemaVersion: 1,
   } as const;
   if (
@@ -243,6 +265,21 @@ export function readOffscreenOcrJob(input: unknown): OffscreenOcrJob | undefined
       languageGroup: input.languageGroup,
       providerVersion: 'chrome-text-detector-v1',
       modelVersion: 'platform',
+    });
+  }
+  if (
+    PADDLE_OCR_COMPILED &&
+    input.providerId === 'paddleocr-wasm' &&
+    isLanguageTag(input.languageGroup) &&
+    input.providerVersion === 'paddleocr-js-0.4.2' &&
+    input.modelVersion === 'PP-OCRv6_tiny_det+PP-OCRv6_tiny_rec'
+  ) {
+    return Object.freeze({
+      ...base,
+      providerId: 'paddleocr-wasm',
+      languageGroup: input.languageGroup,
+      providerVersion: 'paddleocr-js-0.4.2',
+      modelVersion: 'PP-OCRv6_tiny_det+PP-OCRv6_tiny_rec',
     });
   }
   return undefined;

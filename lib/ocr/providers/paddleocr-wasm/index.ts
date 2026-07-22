@@ -1,6 +1,6 @@
 import type { ImageTextProviderModule } from '../../contracts';
 
-/** Compile-time seam for the future locally packaged PaddleOCR-Wasm engine. */
+/** Descriptor-only registry entry; the local SDK/runtime stays offscreen-owned. */
 const paddleOcrProviderModule: ImageTextProviderModule = Object.freeze({
   descriptor: Object.freeze({
     id: 'paddleocr-wasm',
@@ -8,15 +8,10 @@ const paddleOcrProviderModule: ImageTextProviderModule = Object.freeze({
     canRecognizeText: true,
     canReturnGeometry: true,
   }),
-  probe: async () => ({
-    status: 'unsupported' as const,
-    reason: 'PaddleOCR-Wasm is not compiled into this build.',
-  }),
-  prepare: async () => {
-    throw new Error('PaddleOCR-Wasm is not compiled into this build.');
-  },
+  probe: async () => ({ status: 'available' as const }),
+  prepare: async () => undefined,
   recognize: async () => {
-    throw new Error('PaddleOCR-Wasm is not compiled into this build.');
+    throw new Error('PaddleOCR.js recognition is available only through the offscreen host.');
   },
   dispose: async () => undefined,
 });

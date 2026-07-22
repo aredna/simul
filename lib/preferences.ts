@@ -62,6 +62,11 @@ import {
   repairImageTextProviderOrder,
   type ImageTextProviderId,
 } from './ocr/known-provider-ids';
+import {
+  DEFAULT_OCR_MINIMUM_CONFIDENCE,
+  repairOcrMinimumConfidence,
+  type OcrMinimumConfidence,
+} from './ocr/result-quality';
 
 export const MIN_ZOOM_PERCENT = 25;
 export const MAX_ZOOM_PERCENT = 300;
@@ -99,6 +104,7 @@ export interface CompanionPreferences {
   lastLaunchSurface: CompanionSurface;
   popoutTabMode: PopoutTabMode;
   imageTranslationEnabled: boolean;
+  ocrMinimumConfidence: OcrMinimumConfidence;
   imageTextProviderOrder: ImageTextProviderId[];
   imageScanPolicy: ImageScanPolicy;
   skipSmallImages: boolean;
@@ -123,6 +129,7 @@ export const DEFAULT_COMPANION_PREFERENCES: Readonly<CompanionPreferences> =
     lastLaunchSurface: 'side-panel',
     popoutTabMode: 'locked',
     imageTranslationEnabled: false,
+    ocrMinimumConfidence: DEFAULT_OCR_MINIMUM_CONFIDENCE,
     imageTextProviderOrder: Object.freeze([
       ...IMAGE_TEXT_PROVIDER_IDS,
     ]) as unknown as ImageTextProviderId[],
@@ -200,6 +207,9 @@ export function parseCompanionPreferences(
       typeof input.imageTranslationEnabled === 'boolean'
         ? input.imageTranslationEnabled
         : DEFAULT_COMPANION_PREFERENCES.imageTranslationEnabled,
+    ocrMinimumConfidence: repairOcrMinimumConfidence(
+      input.ocrMinimumConfidence,
+    ),
     imageTextProviderOrder: repairImageTextProviderOrder(
       input.imageTextProviderOrder,
     ),
@@ -405,6 +415,7 @@ export type CompanionViewSettingsPatch = Partial<CompanionViewSettings>;
 
 export interface CompanionImageAnalysisSettings {
   imageTranslationEnabled: boolean;
+  ocrMinimumConfidence: OcrMinimumConfidence;
   imageTextProviderOrder: ImageTextProviderId[];
   imageScanPolicy: ImageScanPolicy;
   skipSmallImages: boolean;
@@ -457,6 +468,7 @@ function createDefaultPreferences(): CompanionPreferences {
     lastLaunchSurface: 'side-panel',
     popoutTabMode: 'locked',
     imageTranslationEnabled: false,
+    ocrMinimumConfidence: DEFAULT_OCR_MINIMUM_CONFIDENCE,
     imageTextProviderOrder: [...IMAGE_TEXT_PROVIDER_IDS],
     imageScanPolicy: 'visible-first-background-prescan',
     skipSmallImages: true,

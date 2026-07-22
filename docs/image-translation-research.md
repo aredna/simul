@@ -6,14 +6,23 @@ broader-source alternatives that remain deferred.
 
 ## Implemented local paths
 
-Simul now exposes two independently compiled local OCR providers in a saved
-priority order. Chrome's experimental `TextDetector` is capability-probed in
-the offscreen document and used only when the installed browser exposes it. A
-packaged Tesseract.js provider is the deterministic fallback and does not
-depend on that platform API. An unchanged empty detection must be confirmed by
-a second OCR pass before it is cached. A TextDetector result that supplies
-boxes without useful text can pass those
-regions to Tesseract instead of ending the scan.
+The canonical artifact exposes two independently compiled local OCR providers
+in a saved priority order. Chrome's experimental `TextDetector` is
+capability-probed in the offscreen document and used only when the installed
+browser exposes it. A packaged Tesseract.js provider is the deterministic
+fallback and does not depend on that platform API. An unchanged empty
+detection must be confirmed by a second OCR pass before it is cached. A
+TextDetector result that supplies boxes without authoritative text can pass
+those regions to another provider instead of ending the scan.
+
+An additional default-off PaddleOCR.js trial is available behind
+`SIMUL_OCR_PADDLE=1`. It uses the official `@paddleocr/paddleocr-js` 0.4.2
+module Worker, ONNX Runtime Web 1.24.3, and the official
+`PP-OCRv6_tiny_det`/`PP-OCRv6_tiny_rec` model archives. The Worker, Wasm,
+models, configuration, licenses, and notices are all packaged locally. The
+trial runs with one Wasm thread and fixed detector thresholds of 0.45 and
+0.75. Cancellation or a 30-second job deadline terminates the Worker instead
+of leaving CPU-bound inference in the offscreen document.
 
 [Tesseract.js](https://github.com/naptha/tesseract.js) runs Tesseract OCR in
 WebAssembly and exposes word/line/block geometry. The extension bundles the
@@ -33,15 +42,20 @@ The current pipeline:
 3. Captures a stable visible viewport crop below Chrome's two-per-second cap,
    proportionally downscales high-DPI crops to at most 4 MP, and hashes the
    encoded crop.
-4. Tries the saved provider order in an offscreen document: capability-probed
-   Chrome TextDetector and a restartable Tesseract.js/core 7.0.0 Worker with
-   one routed language group loaded at a time.
-5. Filters blank, punctuation-only, and explicitly very-low-confidence regions,
-   then translates accepted lines through Chrome's on-device Translator.
+4. Tries the saved compiled provider order in an offscreen document:
+   capability-probed Chrome TextDetector, a restartable Tesseract.js/core
+   7.0.0 Worker with one routed language group loaded at a time, or the
+   separately compiled PaddleOCR.js trial.
+5. Filters blank, punctuation-only, and regions scored below 0.25. Scored
+   regions at or above the saved confidence threshold are authoritative.
+   Confidence-free or intermediate-score regions require exact NFKC/
+   whitespace-normalized text agreement and bounding-box IoU of at least 0.5
+   from a different provider before translation.
 6. Keeps recognition and line translation caches separate. Recognition uses
-   provider/model order, language, preprocessing profile, processed dimensions,
-   and pixel hash; line translation uses the exact provider, language pair, and
-   recognized text. Neither cache uses a DOM node or document identity, and
+   provider/model order, language, quality-policy version, selected confidence
+   threshold, preprocessing profile, processed dimensions, and pixel hash;
+   line translation uses the exact provider, language pair, and recognized
+   text. Neither cache uses a DOM node or document identity, and
    matching in-flight requests join one provider load. Recognition retention is
    bounded by both entry count and aggregate transcript/region weight.
 7. Maps the visible-crop coordinates onto clipped inert sibling overlays that
@@ -59,6 +73,27 @@ Italian, Vietnamese, Japanese plus vertical Japanese, Korean, Simplified and
 Traditional Chinese, Russian, Ukrainian, Arabic, Hebrew, Hindi, Marathi,
 Bengali, Kannada, Tamil, and Telugu. Models not routed for the current image
 remain stored locally and unloaded from memory.
+
+The options screen exposes the minimum confidence as 25–95% in five-point
+steps, defaulting to 65%. Raising it favors precision and suppresses more
+false-positive text; lowering it favors recall. Changing it clears current
+image projections and reprocesses the current image set under a distinct cache
+identity. The Paddle trial supports Latin-script and Chinese language routes;
+an unsupported route fails that provider cleanly. A valid Paddle result that
+filters to no accepted text is terminal and does not fall through to
+Tesseract, so the trial can be evaluated independently.
+
+Build and validate the isolated local trial with:
+
+```sh
+SIMUL_OCR_TEXT_DETECTOR=0 SIMUL_OCR_TESSERACT=0 SIMUL_OCR_PADDLE=1 npm run build
+npm run check:ocr-paddle-trial
+```
+
+The second command always creates a temporary Paddle-only production artifact,
+validates every reviewed byte/hash and the local-only runtime boundary, checks
+that no Tesseract assets leaked into it, and removes the temporary artifact.
+The canonical build remains Paddle-free unless the flag is explicitly set.
 
 Cross-origin images can be displayed by the mirror but normally taint a canvas,
 so display permission alone does not provide OCR pixels. The implemented path
@@ -82,7 +117,8 @@ unreadable after bounded in-box wrapping and font reduction.
 
 OCR Diagnostics correlates one attempt with an ephemeral ordinal and reports
 only rendered/bitmap dimensions, bounded retry decisions, provider/cache
-hit/miss/join/load outcomes, accepted/rejected region counts, and
+hit/miss/join/load outcomes, accepted/corroborated/uncertain/rejected region
+counts, and
 projection/rebinding outcomes. It never reports URLs, pixel hashes, recognized
 text, or node/document identifiers. A first transient capture failure receives
 at most one immediate retry. Changing blank pixels are deferred instead of

@@ -15,10 +15,11 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   APPROVED_OCR_CSP,
+  APPROVED_OCR_PACKAGE_LOCK_METADATA,
   APPROVED_OCR_PERMISSIONS,
   APPROVED_OPTIONAL_HOST_PERMISSIONS,
   APPROVED_PERMISSIONS,
-  IMPLEMENTED_OCR_PROVIDER_IDS,
+  DEFAULT_OCR_PROVIDER_IDS,
   REQUIRED_OCR_RUNTIME_MARKERS,
   REQUIRED_RELEASE_LEGAL_FILES,
   REQUIRED_ISOLATED_SANDBOX_MARKERS,
@@ -29,6 +30,7 @@ import {
   buildProductionArtifact,
   canonicalArtifactDirectory,
   checkArtifact,
+  checkOcrPaddleTrial,
   compareArtifactDirectories,
   syncArtifact,
   validateArtifact,
@@ -91,7 +93,7 @@ describe('validateArtifact', () => {
 
     await expect(validateArtifact(artifact)).resolves.toMatchObject({
       ocrEnabled: true,
-      ocrProviderIds: IMPLEMENTED_OCR_PROVIDER_IDS,
+      ocrProviderIds: DEFAULT_OCR_PROVIDER_IDS,
     });
 
     await writeFile(
@@ -472,7 +474,7 @@ describe('validateArtifact', () => {
 });
 
 describe('OCR provider package boundary', () => {
-  it('requires exact Tesseract pins and rejects every unapproved provider', async () => {
+  it('requires exact approved provider pins and rejects every unapproved provider', async () => {
     await expect(
       assertOcrProviderDependenciesApproved(),
     ).resolves.toBeUndefined();
@@ -480,6 +482,8 @@ describe('OCR provider package boundary', () => {
     const projectRoot = await createTemporaryDirectory('simul-ocr-deps-');
     const packageJson = {
       dependencies: {
+        '@paddleocr/paddleocr-js': '0.4.2',
+        'onnxruntime-web': '1.24.3',
         'tesseract.js': '7.0.0',
         'tesseract.js-core': '7.0.0',
       },
@@ -487,8 +491,14 @@ describe('OCR provider package boundary', () => {
     const packageLock = {
       packages: {
         '': { dependencies: { ...packageJson.dependencies } },
-        'node_modules/tesseract.js': { version: '7.0.0' },
-        'node_modules/tesseract.js-core': { version: '7.0.0' },
+        ...Object.fromEntries(
+          Object.entries(APPROVED_OCR_PACKAGE_LOCK_METADATA).map(
+            ([name, metadata]) => [
+              `node_modules/${name}`,
+              { ...metadata },
+            ],
+          ),
+        ),
       },
     };
     await writeFile(
@@ -537,6 +547,60 @@ describe('OCR provider package boundary', () => {
     await expect(
       assertOcrProviderDependenciesApproved(projectRoot),
     ).rejects.toThrow('@xenova/transformers');
+  });
+
+  it.each([
+    ['a missing resolved URL', 'tesseract.js', 'resolved', undefined],
+    [
+      'an alternate resolved URL',
+      'js-yaml',
+      'resolved',
+      'https://packages.example.test/js-yaml-4.3.0.tgz',
+    ],
+    ['a missing integrity', 'onnxruntime-common', 'integrity', undefined],
+    [
+      'a changed integrity',
+      '@paddleocr/paddleocr-js',
+      'integrity',
+      'sha512-not-the-reviewed-package',
+    ],
+  ])('rejects %s for an approved package', async (_label, name, field, value) => {
+    const projectRoot = await createTemporaryDirectory('simul-ocr-provenance-');
+    const dependencies = {
+      '@paddleocr/paddleocr-js': '0.4.2',
+      'onnxruntime-web': '1.24.3',
+      'tesseract.js': '7.0.0',
+      'tesseract.js-core': '7.0.0',
+    };
+    const packages = Object.fromEntries(
+      Object.entries(APPROVED_OCR_PACKAGE_LOCK_METADATA).map(
+        ([packageName, metadata]) => [
+          `node_modules/${packageName}`,
+          { ...metadata },
+        ],
+      ),
+    );
+    const metadata = packages[`node_modules/${name}`];
+    if (value === undefined) delete metadata[field];
+    else metadata[field] = value;
+
+    await writeFile(
+      path.join(projectRoot, 'package.json'),
+      JSON.stringify({ dependencies }),
+    );
+    await writeFile(
+      path.join(projectRoot, 'package-lock.json'),
+      JSON.stringify({
+        packages: {
+          '': { dependencies: { ...dependencies } },
+          ...packages,
+        },
+      }),
+    );
+
+    await expect(
+      assertOcrProviderDependenciesApproved(projectRoot),
+    ).rejects.toThrow(`exact approved OCR registry metadata: ${name}@`);
   });
 });
 
@@ -621,6 +685,33 @@ describe('independent OCR production profiles', () => {
       extension_pages: APPROVED_OCR_CSP,
     });
     expect(validation.files).toContain('ocr/tesseract/asset-manifest.json');
+  }, 20_000);
+
+  it('builds and validates a local Paddle-only profile without Tesseract assets', async () => {
+    const temporaryRoot = await createTemporaryDirectory('simul-paddle-build-');
+    const artifact = await buildProductionArtifact({
+      temporaryRoot,
+      ocrProviderIds: ['paddleocr-wasm'],
+    });
+
+    const validation = await validateArtifact(artifact);
+
+    expect(validation.ocrProviderIds).toEqual(['paddleocr-wasm']);
+    expect(validation.manifest.permissions).toEqual(APPROVED_OCR_PERMISSIONS);
+    expect(validation.manifest.content_security_policy).toEqual({
+      extension_pages: APPROVED_OCR_CSP,
+    });
+    expect(validation.files).toContain('ocr/paddle/asset-manifest.json');
+    expect(validation.files.some((file) => file.startsWith('ocr/tesseract/')))
+      .toBe(false);
+  }, 20_000);
+
+  it('returns only durable metrics for the temporary Paddle trial', async () => {
+    const trial = await checkOcrPaddleTrial();
+
+    expect(trial).not.toHaveProperty('directory');
+    expect(trial.files).toContain('ocr/paddle/asset-manifest.json');
+    expect(trial.unpackedBytes).toBeGreaterThan(0);
   }, 20_000);
 
   it('rejects duplicate or unknown requested providers before building', async () => {
@@ -848,9 +939,21 @@ async function createTemporaryOcrArtifact() {
       content_security_policy: { extension_pages: APPROVED_OCR_CSP },
     },
   });
-  await cp(path.resolve('vendor/ocr'), path.join(artifact, 'ocr'), {
-    recursive: true,
-  });
+  await mkdir(path.join(artifact, 'ocr'), { recursive: true });
+  await cp(
+    path.resolve('vendor/ocr/tesseract'),
+    path.join(artifact, 'ocr/tesseract'),
+    {
+      recursive: true,
+    },
+  );
+  await cp(
+    path.resolve('vendor/ocr/THIRD_PARTY_NOTICES.md'),
+    path.join(artifact, 'ocr/THIRD_PARTY_NOTICES.md'),
+    {
+      recursive: false,
+    },
+  );
   await writeFile(
     path.join(artifact, 'offscreen.html'),
     '<script type="module" src="/offscreen.js"></script>',

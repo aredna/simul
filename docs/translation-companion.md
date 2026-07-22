@@ -117,10 +117,13 @@ before OCR so the processed bitmap never exceeds 4 MP; the CSS crop geometry
 is retained for overlay placement.
 
 The offscreen extension page reads a short-lived crop from extension-origin
-storage and runs packaged Tesseract.js 7.0.0 locally. The routed model group is
-chosen from nearest valid element `lang`, explicit From, then detected page
-language. Recognition uses a bounded memory-only content cache keyed by the
-ordered provider/runtime/model route, source language, preprocessing profile,
+storage and runs packaged Tesseract.js 7.0.0 locally. A default-off,
+independently compiled PaddleOCR.js 0.4.2 trial can instead package its module
+Worker, ONNX Runtime Web 1.24.3 Wasm, and PP-OCRv6 tiny models locally. The
+routed language is chosen from nearest valid element `lang`, explicit From,
+then detected page language. Recognition uses a bounded memory-only content
+cache keyed by the ordered provider/runtime/model route, source language,
+quality-policy version, selected confidence threshold, preprocessing profile,
 processed dimensions, and SHA-256 pixel hash—not by node, source document, or
 image URL. Exact concurrent requests join one recognition load, and completed
 results remain reusable across live source refreshes while the companion stays
@@ -134,8 +137,12 @@ The transient crop is deleted after the job and expires after two minutes if
 cleanup is interrupted. An unchanged empty result must be observed twice
 before it enters the recognition cache, and transient capture failures receive
 only one immediate retry. Provider-neutral quality filtering drops blank,
-punctuation-only, and explicitly very-low-confidence regions while accepting
-providers that do not report confidence. Explicit same-language pairs stop
+punctuation-only, and regions scored below 25%. A saved 25–95% minimum,
+defaulting to 65%, controls authoritative scored text. Confidence-free and
+intermediate-score text is accepted only when another provider returns the
+same NFKC/whitespace-normalized text at bounding-box IoU 0.5 or greater.
+Changing the threshold clears overlays and reprocesses current images under a
+new cache identity. Explicit same-language pairs stop
 before source capture. Auto-detected work uses the nearest valid image/element
 language and stops before recognition when that resolved language equals To.
 Translated line boxes are inert siblings in the replay document; text wraps
@@ -326,9 +333,14 @@ and its overlay should remain when a live mirror patch replaces the replica
 
 Enable image translation and exercise English/Japanese plus Spanish, Chinese,
 Korean, Russian, and Arabic images. Scroll/zoom, change target language,
-navigate during OCR, and disable/re-enable the option. Confirm stale overlays
+navigate during OCR, change the OCR confidence threshold, and disable/re-enable
+the option. Confirm stale overlays
 disappear, same-language images stay unchanged, and page text translation stays
 responsive.
+
+For the isolated Paddle trial, run `npm run check:ocr-paddle-trial`. Confirm
+the temporary artifact contains `ocr/paddle/` but no `ocr/tesseract/`, remains
+under the 42 MiB unpacked limit, and makes no network request during OCR.
 
 The manifest must retain Chrome 138, required permissions `activeTab`,
 `scripting`, `sidePanel`, `storage`, and `offscreen`, no required host

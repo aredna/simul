@@ -1,0 +1,93 @@
+{
+  "schemaVersion": 1,
+  "paddleOcrJsVersion": "0.4.2",
+  "paddleOcrJsGitHead": "e5046169b225bcdfbe25d45b4e809ff0f1a69c2c",
+  "onnxruntimeWebVersion": "1.24.3",
+  "modelNames": [
+    "PP-OCRv6_tiny_det",
+    "PP-OCRv6_tiny_rec"
+  ],
+  "workerMode": true,
+  "runtime": {
+    "backend": "wasm",
+    "numThreads": 1,
+    "simd": true,
+    "proxy": false
+  },
+  "detectorThreshold": 0.45,
+  "detectorBoxThreshold": 0.75,
+  "recognitionScoreThreshold": 0,
+  "totalBytes": 30048757,
+  "files": [
+    {
+      "path": "licenses/CLIPPER_BOOST-1.0.txt",
+      "role": "license",
+      "source": "https://www.boost.org/LICENSE_1_0.txt",
+      "bytes": 1338,
+      "sha256": "c9bff75738922193e67fa726fa225535870d2aa1059f91452c411736284ad566"
+    },
+    {
+      "path": "licenses/JS-YAML_MIT.txt",
+      "role": "license",
+      "source": "npm:js-yaml@4.3.0/LICENSE",
+      "bytes": 1084,
+      "sha256": "a07bc24468b9654ce76a547d47a2db282d07733b715db4c73a98bd63961f9550"
+    },
+    {
+      "path": "licenses/ONNXRUNTIME_MIT.txt",
+      "role": "license",
+      "source": "https://raw.githubusercontent.com/microsoft/onnxruntime/v1.24.3/LICENSE",
+      "bytes": 1073,
+      "sha256": "2f07c72751aed99790b8a4869cf2311df85a860b22ded05fa22803587a48922c"
+    },
+    {
+      "path": "licenses/OPENCV_APACHE-2.0.txt",
+      "role": "license",
+      "source": "npm:@techstark/opencv-js@4.10.0-release.1/LICENSE",
+      "bytes": 11357,
+      "sha256": "c71d239df91726fc519c6eb72d318ec65820627232b2f796219e87dcf35d0ab4"
+    },
+    {
+      "path": "licenses/PADDLEOCR_APACHE-2.0.txt",
+      "role": "license",
+      "source": "https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/e5046169b225bcdfbe25d45b4e809ff0f1a69c2c/LICENSE",
+      "bytes": 11376,
+      "sha256": "3840c5c0c61c294264d2dd77b8777be6ddd90121ef4e0e64abcd22edea581d6e"
+    },
+    {
+      "path": "models/PP-OCRv6_tiny_det_onnx_infer.tar",
+      "role": "detection-model-archive",
+      "source": "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_tiny_det_onnx_infer.tar",
+      "bytes": 1792000,
+      "sha256": "ff6ab415b0a6e0c488550f2fb5d5046f1719848df220b2dc21b56402a65bc05d"
+    },
+    {
+      "path": "models/PP-OCRv6_tiny_rec_onnx_infer.tar",
+      "role": "recognition-model-archive",
+      "source": "https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_tiny_rec_onnx_infer.tar",
+      "bytes": 4526080,
+      "sha256": "1e13b22717b1edd89d4cde4fda272b6c17d5b505c97c2baea99da1a3a2d54b29"
+    },
+    {
+      "path": "runtime/ort-wasm-simd-threaded.wasm",
+      "role": "wasm-runtime",
+      "source": "npm:onnxruntime-web@1.24.3/dist/ort-wasm-simd-threaded.wasm",
+      "bytes": 12361745,
+      "sha256": "be0e129949062ad50290ef94683fac8be5bb6156f709e030b7a5f1661a2f6c17"
+    },
+    {
+      "path": "THIRD_PARTY_NOTICES.md",
+      "role": "notice",
+      "source": "repo:legal/paddleocr-js-v0.4.2-third-party-notices.md",
+      "bytes": 1509,
+      "sha256": "44cb979cadead5acbd4da94ad2de13da82f98e755d8762d7de406cbe78937c04"
+    },
+    {
+      "path": "worker/worker-entry.js",
+      "role": "module-worker",
+      "source": "npm:@paddleocr/paddleocr-js@0.4.2/dist/assets/worker-entry-C9UNuyOJ.js",
+      "bytes": 11341195,
+      "sha256": "e67be9ac885842df177fa50c921e7f25ac57455e61cbaed61441bbce71b733ac"
+    }
+  ]
+}

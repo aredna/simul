@@ -84,6 +84,10 @@ import {
 import { createBrowserImageRecognitionCoordinator } from '../../lib/ocr/image-analysis-coordinator';
 import { IndexedDbTransientImageStore } from '../../lib/ocr/transient-image-store';
 import {
+  OCR_MINIMUM_CONFIDENCE_OPTIONS,
+  isOcrMinimumConfidence,
+} from '../../lib/ocr/result-quality';
+import {
   PREFERENCE_LOCK_NAME,
   readPreferenceCommandResult,
   type PreferenceCommand,
@@ -256,6 +260,8 @@ const DYNAMIC_UI_LABELS = [
   'Off by default. Visible image pixels stay on this device and are discarded after OCR.',
   'Grant image access',
   'OCR priority',
+  'Minimum OCR confidence',
+  'Higher values reduce false text detections but may miss faint or stylized text.',
   'Scan images',
   'Skip very small images',
   'Use local Prompt for image language',
@@ -3342,6 +3348,7 @@ function configureImageTranslation(): void {
     providerOrder: effectiveCompiledProviderOrder(
       preferences.imageTextProviderOrder,
     ),
+    ocrMinimumConfidence: preferences.ocrMinimumConfidence,
     sourceLanguage: preferences.sourceLanguage,
     ...(resolvedSourceLanguage
       ? { detectedSourceLanguage: resolvedSourceLanguage }
@@ -3406,6 +3413,54 @@ function renderImageAnalysisControls(): void {
     preferences.imageTextProviderOrder,
   );
   if (compiledOrder.length > 0) {
+    const confidence = document.createElement('label');
+    confidence.className = 'ocr-confidence-control';
+    confidence.title =
+      'Require this provider confidence before OCR text can be used without independent corroboration.';
+    const confidenceTitle = document.createElement('span');
+    setUiText(confidenceTitle, 'Minimum OCR confidence');
+    const confidenceRow = document.createElement('span');
+    confidenceRow.className = 'ocr-confidence-row';
+    const confidenceInput = document.createElement('input');
+    confidenceInput.id = 'ocr-minimum-confidence';
+    confidenceInput.type = 'range';
+    confidenceInput.min = '25';
+    confidenceInput.max = '95';
+    confidenceInput.step = '5';
+    confidenceInput.value = String(preferences.ocrMinimumConfidence * 100);
+    confidenceInput.setAttribute(
+      'aria-describedby',
+      'ocr-minimum-confidence-help',
+    );
+    const confidenceOutput = document.createElement('output');
+    confidenceOutput.setAttribute('for', confidenceInput.id);
+    const renderConfidence = (): void => {
+      confidenceOutput.value = `${confidenceInput.value}%`;
+    };
+    renderConfidence();
+    confidenceInput.addEventListener('input', renderConfidence);
+    confidenceInput.addEventListener('change', () => {
+      const selected = Number(confidenceInput.value) / 100;
+      if (
+        isOcrMinimumConfidence(selected) &&
+        OCR_MINIMUM_CONFIDENCE_OPTIONS.includes(selected)
+      ) {
+        void commitImageAnalysisPreferencePatch({
+          ocrMinimumConfidence: selected,
+        });
+      }
+    });
+    confidenceRow.append(confidenceInput, confidenceOutput);
+    const confidenceHelp = document.createElement('small');
+    confidenceHelp.id = 'ocr-minimum-confidence-help';
+    confidenceHelp.className = 'microcopy';
+    setUiText(
+      confidenceHelp,
+      'Higher values reduce false text detections but may miss faint or stylized text.',
+    );
+    confidence.append(confidenceTitle, confidenceRow, confidenceHelp);
+    root.append(confidence);
+
     const orderLabel = document.createElement('p');
     orderLabel.className = 'microcopy';
     setUiText(orderLabel, 'OCR priority');

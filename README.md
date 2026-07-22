@@ -346,10 +346,11 @@ implementation artifacts live in [_bmad-output](_bmad-output/).
 
 ## License and third-party notices
 
-Original Simul material is open source under the standard
-[MIT License](LICENSE). Anyone may use, copy, modify, merge, publish,
-distribute, sublicense, or sell copies subject to the license's notice and
-permission-text requirement.
+Original Simul material is licensed under the
+[MIT License with the Commons Clause](LICENSE). Anyone may use, copy,
+modify, merge, publish, distribute, or sublicense it subject to the license's
+notice and permission-text requirement; the Commons Clause withholds the
+right to sell it.
 
 Bundled libraries, OCR runtime code, language models, and repository tooling
 retain their own terms. The complete production and source-distribution
