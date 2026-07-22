@@ -18,6 +18,20 @@ const offscreenOcrEnabled = ocrBuildProfile.enabledProviderIds.some((id) =>
   id === 'tesseract' || id === 'chrome-text-detector' ||
   id === 'paddleocr-wasm' || id === 'tesseract-wasm-direct',
 );
+const privilegedOcrCsp =
+  "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; object-src 'self';";
+const paddleSandboxCsp =
+  "sandbox allow-scripts; script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval'; worker-src 'self'; connect-src 'self'; img-src 'self' blob: data:; object-src 'none'; base-uri 'none'; form-action 'none';";
+const selectedEntrypoints = Object.freeze([
+  'background',
+  ...(offscreenOcrEnabled ? ['offscreen'] : []),
+  ...(paddleEnabled ? ['paddle-ocr'] : []),
+  'page-live-observer',
+  'page-recorder',
+  'page-mirror',
+  'page-snapshot',
+  'sidepanel',
+]);
 const releaseLegalFiles = Object.freeze([
   { source: new URL('./LICENSE', import.meta.url), fileName: 'LICENSE' },
   {
@@ -139,18 +153,7 @@ export default defineConfig({
       if (manifest.action) delete manifest.action.default_popup;
     },
   },
-  ...(offscreenOcrEnabled
-    ? {}
-    : {
-        filterEntrypoints: [
-          'background',
-          'page-live-observer',
-          'page-recorder',
-          'page-mirror',
-          'page-snapshot',
-          'sidepanel',
-        ],
-      }),
+  filterEntrypoints: [...selectedEntrypoints],
   vite: () => ({
     define: {
       __SIMUL_OCR_PADDLE_COMPILED__: JSON.stringify(paddleEnabled),
@@ -231,8 +234,8 @@ export default defineConfig({
     ...(tesseractEnabled || tesseractWasmDirectEnabled || paddleEnabled
       ? {
           content_security_policy: {
-            extension_pages:
-              "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; object-src 'self';",
+            extension_pages: privilegedOcrCsp,
+            ...(paddleEnabled ? { sandbox: paddleSandboxCsp } : {}),
           },
         }
       : {}),

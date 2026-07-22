@@ -17,6 +17,7 @@ import {
 } from './offscreen-protocol';
 import type { TransientImageInputStore } from './transient-image-store';
 import type { ImageTextProviderId } from './known-provider-ids';
+import type { OcrProviderRuntimeStatus } from './provider-status-protocol';
 
 export interface OffscreenOcrProviderRunner {
   recognize(
@@ -31,6 +32,7 @@ export interface OffscreenOcrProviderRunner {
 export interface OffscreenOcrProviderRunnerFactory {
   readonly id: ImageTextProviderId;
   create(): OffscreenOcrProviderRunner;
+  probe?(): Promise<OcrProviderRuntimeStatus>;
 }
 
 interface QueuedHostJob {
@@ -216,6 +218,15 @@ function readRunnerError(error: unknown): OcrHostErrorCode {
     if (error.name === 'ProviderUnavailableError') return 'provider-unavailable';
     if (error.name === 'UnsupportedLanguageError') return 'unsupported-language';
     if (error.name === 'WorkerLostError') return 'worker-lost';
+    if (error.name === 'PaddleSandboxUnavailableError') {
+      return 'paddle-sandbox-unavailable';
+    }
+    if (error.name === 'PaddleRuntimeLoaderError') {
+      return 'paddle-runtime-loader-failed';
+    }
+    if (error.name === 'PaddleRuntimeStartupError') {
+      return 'paddle-runtime-startup-failed';
+    }
     if (error.name === 'InvalidNormalizedOcrOutputError') return 'invalid-result';
   }
   return 'recognition-failed';

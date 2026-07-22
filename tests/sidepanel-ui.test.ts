@@ -153,8 +153,11 @@ describe('sidepanel UI structure', () => {
     expect(script).toContain("enabled.type = 'checkbox'");
     expect(script).toContain('preferences.disabledImageTextProviderIds');
     expect(script).toContain('disabledImageTextProviderIds: preferences.imageTextProviderOrder');
-    expect(script).toContain("'tesseract-wasm-direct': 'Tesseract WASM (direct A/B)' ".trim());
-    expect(script).toContain('may return boxes without text on macOS');
+    expect(script).toContain("tesseract: 'Tesseract.js (wrapper A/B)'");
+    expect(script).toContain("'tesseract-wasm-direct': 'Tesseract Wasm (direct A/B)'");
+    expect(script).toContain('Chrome TextDetector is experimental and platform-dependent');
+    expect(script).toContain('same Tesseract OCR family and local language models');
+    expect(script).toContain('do not independently corroborate each other');
     expect(script).toContain('OCR is paused because every compiled provider is off.');
     expect(style).toContain('.ocr-provider-toggle');
   });

@@ -44,6 +44,9 @@ export function formatImageTranslationDiagnostic(
       diagnostic.reason ? `reason=${diagnostic.reason}` : undefined,
     ].filter(Boolean).join('; ');
   }
+  if (diagnostic.stage === 'replica-not-activated') {
+    return `replica not activated: reason=${diagnostic.reason}`;
+  }
   if (diagnostic.stage === 'source-summary') {
     return `source scan: candidates=${diagnostic.candidateImages}; observed=${diagnostic.observedImages}`;
   }

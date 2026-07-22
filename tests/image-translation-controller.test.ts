@@ -184,7 +184,11 @@ describe('ImageTranslationController', () => {
       isCurrent: () => requestIsCurrent,
     };
     expect(controller.activateReplica(currentRequest, 3, 4)).toBe(true);
-    await vi.waitFor(() => expect(diagnostics).toContain('source-connected'));
+    await vi.waitFor(() => expect(diagnostics).toContainEqual({
+      stage: 'source-summary',
+      candidateImages: 0,
+      observedImages: 0,
+    }));
     expect(openSource).toHaveBeenCalledOnce();
     expect(openSource).toHaveBeenCalledWith(
       currentRequest,
@@ -196,6 +200,16 @@ describe('ImageTranslationController', () => {
     );
     expect(diagnostics.indexOf('replica-ready')).toBeLessThan(
       diagnostics.indexOf('source-connecting'),
+    );
+    expect(diagnostics.indexOf('source-connecting')).toBeLessThan(
+      diagnostics.indexOf('source-connected'),
+    );
+    expect(diagnostics.indexOf('source-connected')).toBeLessThan(
+      diagnostics.findIndex((diagnostic) =>
+        typeof diagnostic === 'object' &&
+        diagnostic !== null &&
+        'stage' in diagnostic &&
+        diagnostic.stage === 'source-summary'),
     );
 
     // A callback handoff followed by the post-run snapshot backstop must not

@@ -21,8 +21,10 @@ import {
 } from '../tools/extension-artifact.mjs';
 import {
   APPROVED_ONNXRUNTIME_WASM_SHA256,
+  APPROVED_ONNXRUNTIME_LOADER_SHA256,
   APPROVED_PADDLE_OCR_WORKER_SHA256,
   downloadPinned,
+  patchPaddleDirectModule,
   replaceGeneratedCatalog,
   validatePaddleCatalog,
 } from '../tools/vendor-paddle-ocr.mjs';
@@ -30,7 +32,7 @@ import {
 const vendorRoot = resolve('vendor/ocr/paddle');
 
 describe('vendored PaddleOCR.js trial catalog', () => {
-  it('pins the exact SDK, ORT runtime, git source, models, and single-thread Worker mode', async () => {
+  it('pins the exact SDK, ORT runtime, git source, models, and direct sandbox mode', async () => {
     const packageManifest = JSON.parse(await readFile('package.json', 'utf8'));
     const lock = JSON.parse(await readFile('package-lock.json', 'utf8'));
     const manifest = JSON.parse(
@@ -56,7 +58,8 @@ describe('vendored PaddleOCR.js trial catalog', () => {
       paddleOcrJsGitHead: APPROVED_PADDLE_OCR_JS_GIT_HEAD,
       onnxruntimeWebVersion: '1.24.3',
       modelNames: ['PP-OCRv6_tiny_det', 'PP-OCRv6_tiny_rec'],
-      workerMode: true,
+      workerMode: false,
+      sandboxDirectMode: true,
       runtime: {
         backend: 'wasm',
         numThreads: 1,
@@ -85,8 +88,12 @@ describe('vendored PaddleOCR.js trial catalog', () => {
     expect(totalBytes).toBe(manifest.totalBytes);
     expect(manifest.files.filter(({ role }) => role === 'license')).toHaveLength(5);
     expect(manifest.files.some(({ role }) => role === 'notice')).toBe(true);
-    expect(manifest.files.some(({ role }) => role === 'module-worker')).toBe(true);
+    expect(manifest.files.some(({ role }) =>
+      role === 'sandbox-direct-module',
+    )).toBe(true);
     expect(manifest.files.some(({ role }) => role === 'wasm-runtime')).toBe(true);
+    expect(manifest.files.some(({ role }) => role === 'wasm-module-loader'))
+      .toBe(true);
     expect(manifest.files.filter(({ role }) => role.endsWith('model-archive')))
       .toHaveLength(2);
     await expect(validatePaddleCatalog(vendorRoot)).resolves.toMatchObject({
@@ -94,7 +101,7 @@ describe('vendored PaddleOCR.js trial catalog', () => {
     });
   });
 
-  it('independently pins the raw npm Worker and ORT Wasm before vendoring', async () => {
+  it('independently pins the raw npm Worker and paired ORT loader/Wasm before vendoring', async () => {
     const workerDirectory = resolve(
       'node_modules/@paddleocr/paddleocr-js/dist/assets',
     );
@@ -102,14 +109,20 @@ describe('vendored PaddleOCR.js trial catalog', () => {
       .filter((name) => /^worker-entry-[A-Za-z0-9_-]+\.js$/u.test(name));
     expect(workerCandidates).toHaveLength(1);
 
-    const [worker, wasm] = await Promise.all([
+    const [worker, loader, wasm] = await Promise.all([
       readFile(resolve(workerDirectory, workerCandidates[0])),
+      readFile(resolve(
+        'node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.mjs',
+      )),
       readFile(resolve(
         'node_modules/onnxruntime-web/dist/ort-wasm-simd-threaded.wasm',
       )),
     ]);
     expect(createHash('sha256').update(worker).digest('hex')).toBe(
       APPROVED_PADDLE_OCR_WORKER_SHA256,
+    );
+    expect(createHash('sha256').update(loader).digest('hex')).toBe(
+      APPROVED_ONNXRUNTIME_LOADER_SHA256,
     );
     expect(createHash('sha256').update(wasm).digest('hex')).toBe(
       APPROVED_ONNXRUNTIME_WASM_SHA256,
@@ -191,17 +204,37 @@ describe('vendored PaddleOCR.js trial catalog', () => {
     }
   });
 
-  it('removes every model/CDN fallback from the local module Worker', async () => {
-    const worker = await readFile(
+  it('reproducibly converts the pinned Worker bundle into a direct module', async () => {
+    const directModule = await readFile(
       resolve(vendorRoot, 'worker/worker-entry.js'),
       'utf8',
     );
-    expect(worker).toContain('worker-transport-request');
-    expect(worker).toContain('worker-transport-response');
-    expect(worker).toContain('__SIMUL_EXPLICIT_LOCAL_PADDLE_MODEL_REQUIRED__');
-    expect(worker).not.toMatch(
+    expect(directModule).toContain('createPaddleOCRDirectHandler');
+    expect(directModule).toContain(
+      'export { createPaddleOCRDirectHandler };',
+    );
+    expect(directModule).not.toContain(
+      'attachWorkerMessageHandler(createPaddleOCRWorkerMessageHandler());',
+    );
+    expect(directModule).toContain(
+      '__SIMUL_EXPLICIT_LOCAL_PADDLE_MODEL_REQUIRED__',
+    );
+    expect(directModule).not.toMatch(
       /paddle-model-ecology\.bj\.bcebos\.com|cdn\.jsdelivr\.net|unpkg\.com/iu,
     );
-    expect(worker).not.toMatch(/sourceMappingURL/iu);
+    expect(directModule).not.toMatch(/sourceMappingURL/iu);
+
+    const workerDirectory = resolve(
+      'node_modules/@paddleocr/paddleocr-js/dist/assets',
+    );
+    const workerName = (await readdir(workerDirectory)).find((name) =>
+      /^worker-entry-[A-Za-z0-9_-]+\.js$/u.test(name),
+    );
+    const raw = await readFile(resolve(workerDirectory, workerName), 'utf8');
+    expect(patchPaddleDirectModule(raw)).toBe(directModule);
+    expect(() => patchPaddleDirectModule(raw.replace(
+      'attachWorkerMessageHandler(createPaddleOCRWorkerMessageHandler());',
+      'attachWorkerMessageHandler(changedHandler());',
+    ))).toThrow('exactly one reviewed Worker attach call');
   });
 });
