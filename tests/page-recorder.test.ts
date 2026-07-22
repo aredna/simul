@@ -282,6 +282,100 @@ describe('page recorder bridge ownership', () => {
     imagePort.disconnect();
   });
 
+  it('discovers images when the production-order live recorder commits before the image Port opens', () => {
+    const { document, window } = parseHTML(
+      '<html><body><img id="committed-first" src="https://private.example/image.png"></body></html>',
+    );
+    Object.defineProperty(window, 'top', { configurable: true, value: window });
+    const image = document.querySelector<HTMLImageElement>('#committed-first')!;
+    setRecorderImageFacts(image);
+    const mirrorIds = new Map<Node, number>();
+    const mirrorNodes = new Map<number, Node>();
+    const onConnect = new FakeEvent<(port: Browser.runtime.Port) => void>();
+    const onMessage = new FakeEvent<(message: unknown) => unknown>();
+    installPageRecorderBridge({
+      global: {} as typeof globalThis,
+      runtime: {
+        onConnect: eventAdapter(onConnect),
+        onMessage: eventAdapter(onMessage),
+      } as unknown as PageRecorderBridgeEnvironment['runtime'],
+      document,
+      window,
+      now: () => 10,
+      preflight: () => undefined,
+      recorderMirror: {
+        getId: (node) => mirrorIds.get(node) ?? -1,
+        getNode: (nodeId) => mirrorNodes.get(nodeId) ?? null,
+      },
+      createImageSourceObserver: (environment) => new SourceImageObserver({
+        ...environment,
+        createIntersectionObserver: (callback) =>
+          new SettledElementObserver(callback),
+        createResizeObserver: () => new NoopElementObserver(),
+        createMutationObserver: () => new NoopMutationObserver(),
+        scheduleFrame: () => 1,
+        cancelFrame: () => undefined,
+      }),
+      start: (options) => {
+        options.emit(bridgeCheckpointEvents()[0]);
+        mirrorIds.set(image, 43);
+        mirrorNodes.set(43, image);
+        options.emit({
+          type: 2,
+          data: {
+            node: {
+              type: 0,
+              id: 1,
+              childNodes: [{
+                type: 2,
+                id: 43,
+                tagName: 'img',
+                attributes: {},
+                childNodes: [],
+              }],
+            },
+            initialOffset: { top: 0, left: 0 },
+          },
+          timestamp: 2,
+        });
+        return () => undefined;
+      },
+      takeFullSnapshot: () => undefined,
+      scheduleFrame: () => 1,
+      cancelFrame: () => undefined,
+    });
+
+    const livePort = new FakePort(createReplicaLivePortName(identity.sessionId));
+    onConnect.emit(livePort as unknown as Browser.runtime.Port);
+    livePort.emitMessage(createStartLiveMessage(identity));
+
+    const imagePort = new FakePort(
+      createImageSourcePortName(identity.sessionId, 'rrweb'),
+    );
+    onConnect.emit(imagePort as unknown as Browser.runtime.Port);
+    imagePort.emitMessage({
+      kind: 'simul:image-source-v1:start',
+      document: sourceDocumentIdentity(identity),
+    });
+
+    expect(imagePort.posted.find((message) =>
+      isRecord(message) && message.kind === 'simul:image-source-v1:ready',
+    )).toMatchObject({
+      kind: 'simul:image-source-v1:ready',
+      summary: { candidateImages: 1, observedImages: 1 },
+    });
+    expect(imagePort.posted).toContainEqual(expect.objectContaining({
+      kind: 'simul:image-source-v1:change',
+      change: expect.objectContaining({
+        kind: 'upsert',
+        descriptor: expect.objectContaining({ nodeId: 43 }),
+      }),
+    }));
+    expect(JSON.stringify(imagePort.posted)).not.toContain('private.example');
+    imagePort.disconnect();
+    livePort.disconnect();
+  });
+
   it('keeps the live recorder exclusive and reports capture_busy to one-off capture', async () => {
     const harness = createBridgeHarness();
     const port = new FakePort(createReplicaLivePortName(identity.sessionId));

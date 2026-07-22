@@ -15,6 +15,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   APPROVED_OCR_CSP,
+  APPROVED_PADDLE_SANDBOX_CSP,
   APPROVED_OCR_PACKAGE_LOCK_METADATA,
   APPROVED_OCR_PERMISSIONS,
   APPROVED_OPTIONAL_HOST_PERMISSIONS,
@@ -694,6 +695,14 @@ describe('independent OCR production profiles', () => {
     expect(validation.manifest).not.toHaveProperty('content_security_policy');
     expect(validation.files).toContain('offscreen.html');
     expect(validation.files.some((file) => file.startsWith('ocr/'))).toBe(false);
+
+    const manifestPath = path.join(artifact, 'manifest.json');
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+    manifest.sandbox = { pages: ['sidepanel.html'] };
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    await expect(validateArtifact(artifact)).rejects.toThrow(
+      'must not package a sandbox page',
+    );
   }, 20_000);
 
   it('builds and validates a packaged Tesseract-only profile', async () => {
@@ -726,10 +735,48 @@ describe('independent OCR production profiles', () => {
     expect(validation.manifest.permissions).toEqual(APPROVED_OCR_PERMISSIONS);
     expect(validation.manifest.content_security_policy).toEqual({
       extension_pages: APPROVED_OCR_CSP,
+      sandbox: APPROVED_PADDLE_SANDBOX_CSP,
     });
+    expect(validation.manifest.sandbox).toEqual({
+      pages: ['paddle-ocr.html'],
+    });
+    expect(validation.files).toContain('paddle-ocr.html');
     expect(validation.files).toContain('ocr/paddle/asset-manifest.json');
+    expect(validation.files).toContain(
+      'ocr/paddle/runtime/ort-wasm-simd-threaded.mjs',
+    );
     expect(validation.files.some((file) => file.startsWith('ocr/tesseract/')))
       .toBe(false);
+  }, 20_000);
+
+  it('keeps dynamic Paddle code confined to the exact sandbox CSP', async () => {
+    const temporaryRoot = await createTemporaryDirectory('simul-paddle-csp-');
+    const artifact = await buildProductionArtifact({
+      temporaryRoot,
+      ocrProviderIds: ['paddleocr-wasm'],
+    });
+    const manifestPath = path.join(artifact, 'manifest.json');
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+
+    expect(manifest.content_security_policy.extension_pages).not.toContain(
+      "'unsafe-eval'",
+    );
+    expect(manifest.content_security_policy.extension_pages).toBe(
+      APPROVED_OCR_CSP,
+    );
+    expect(manifest.content_security_policy.sandbox).toBe(
+      APPROVED_PADDLE_SANDBOX_CSP,
+    );
+    expect(manifest.content_security_policy.sandbox).not.toContain(
+      "worker-src 'self' blob:",
+    );
+
+    manifest.content_security_policy.sandbox =
+      "sandbox allow-scripts; script-src 'self' 'wasm-unsafe-eval';";
+    await writeFile(manifestPath, JSON.stringify(manifest));
+    await expect(validateArtifact(artifact)).rejects.toThrow(
+      'requires exact privileged and sandbox CSPs',
+    );
   }, 20_000);
 
   it('returns only durable metrics for the temporary Paddle trial', async () => {

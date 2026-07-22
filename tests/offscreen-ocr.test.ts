@@ -13,6 +13,12 @@ import {
   readOffscreenOcrResponse,
   type OffscreenOcrJob,
 } from '../lib/ocr/offscreen-protocol';
+import {
+  createProbeOcrProviderCommand,
+  createProbeOcrProviderResponse,
+  readProbeOcrProviderCommand,
+  readProbeOcrProviderResponse,
+} from '../lib/ocr/provider-status-protocol';
 import type { AcquiredImagePixels } from '../lib/ocr/pixel-acquisition';
 import {
   OCR_NATIVE_PREPROCESSING_VERSION,
@@ -54,6 +60,57 @@ const pixels: AcquiredImagePixels = {
 };
 
 describe('offscreen OCR protocol and lifecycle', () => {
+  it('strictly bounds provider preflight commands and statuses', () => {
+    const command = createProbeOcrProviderCommand('chrome-text-detector');
+    expect(readProbeOcrProviderCommand(command)).toEqual(command);
+    expect(readProbeOcrProviderCommand({ ...command, page: 'secret' }))
+      .toBeUndefined();
+
+    const response = createProbeOcrProviderResponse({
+      status: 'unavailable',
+      providerId: 'chrome-text-detector',
+      reason: 'api-missing',
+    });
+    expect(readProbeOcrProviderResponse(
+      response,
+      'chrome-text-detector',
+    )).toEqual(response);
+    expect(readProbeOcrProviderResponse(response, 'tesseract')).toBeUndefined();
+    expect(readProbeOcrProviderResponse({
+      ...response,
+      provider: { ...response.provider, reason: 'private-error-message' },
+    })).toBeUndefined();
+  });
+
+  it('preflights a provider without constructing its OCR runner', async () => {
+    const create = vi.fn(() => ({
+      recognize: async (job: OffscreenOcrJob) => imageResult(job),
+      dispose: async () => undefined,
+    }));
+    const probe = vi.fn(async () => ({
+      status: 'unavailable' as const,
+      providerId: 'chrome-text-detector' as const,
+      reason: 'api-missing' as const,
+    }));
+    const router = new OffscreenOcrProviderRouter([
+      { id: 'chrome-text-detector', create, probe },
+    ]);
+
+    await expect(router.probe('chrome-text-detector')).resolves.toEqual({
+      status: 'unavailable',
+      providerId: 'chrome-text-detector',
+      reason: 'api-missing',
+    });
+    await expect(router.probe('tesseract')).resolves.toEqual({
+      status: 'unavailable',
+      providerId: 'tesseract',
+      reason: 'not-compiled',
+    });
+    expect(probe).toHaveBeenCalledOnce();
+    expect(create).not.toHaveBeenCalled();
+    await router.dispose();
+  });
+
   it('strictly validates jobs and revision-current normalized responses', () => {
     const job = createJob('job-1', 0);
     expect(readOffscreenOcrJob(job)).toEqual(job);

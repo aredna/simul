@@ -56,6 +56,7 @@ import {
   type PixelAcquisitionResult,
 } from './pixel-acquisition';
 import type { OcrHostErrorCode } from './offscreen-protocol';
+import type { ImageReplicaNotActivatedReason } from './replica-activation';
 import {
   resolveImageSourceLanguage,
   tesseractLanguageGroupFor,
@@ -126,6 +127,10 @@ export type ImageTranslationDiagnostic =
       stage: 'configuration';
       status: 'disabled' | 'waiting-for-replica';
       reason?: 'feature-off' | 'provider-unavailable' | 'same-language';
+    }>
+  | Readonly<{
+      stage: 'replica-not-activated';
+      reason: ImageReplicaNotActivatedReason;
     }>
   | Readonly<{
       stage: 'source-summary';

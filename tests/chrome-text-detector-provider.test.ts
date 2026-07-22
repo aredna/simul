@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type { OffscreenOcrJob } from '../lib/ocr/offscreen-protocol';
 import { OCR_NATIVE_PREPROCESSING_VERSION } from '../lib/ocr/preprocessing-profile';
 import { normalizeChromeTextDetection } from '../lib/ocr/providers/chrome-text-detector/normalize';
+import chromeTextDetectorOffscreenFactory from '../lib/ocr/providers/chrome-text-detector/offscreen';
 import { probeChromeTextDetector } from '../lib/ocr/providers/chrome-text-detector/probe';
 import {
   ChromeTextDetectorOffscreenRunner,
@@ -63,6 +64,20 @@ describe('Chrome TextDetector provider', () => {
     await expect(probeChromeTextDetector({
       getApi: () => undefined,
     })).resolves.toMatchObject({ status: 'unavailable' });
+  });
+
+  it('reports a missing experimental API before constructing a runner', async () => {
+    const prior = Reflect.get(globalThis, 'TextDetector');
+    Reflect.deleteProperty(globalThis, 'TextDetector');
+    try {
+      await expect(chromeTextDetectorOffscreenFactory.probe?.()).resolves.toEqual({
+        status: 'unavailable',
+        providerId: 'chrome-text-detector',
+        reason: 'api-missing',
+      });
+    } finally {
+      if (prior !== undefined) Reflect.set(globalThis, 'TextDetector', prior);
+    }
   });
 
   it('keeps probe and offscreen deadline callbacks receiver-free', async () => {

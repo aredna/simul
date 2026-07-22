@@ -30,6 +30,8 @@ export const APPROVED_OCR_PERMISSIONS = Object.freeze([
 ]);
 export const APPROVED_OCR_CSP =
   "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; object-src 'self';";
+export const APPROVED_PADDLE_SANDBOX_CSP =
+  "sandbox allow-scripts; script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval'; worker-src 'self'; connect-src 'self'; img-src 'self' blob: data:; object-src 'none'; base-uri 'none'; form-action 'none';";
 export const MAX_UNPACKED_ARTIFACT_BYTES = 42 * 1024 * 1024;
 export const MAX_OCR_ALL_TRIAL_ARTIFACT_BYTES = 72 * 1024 * 1024;
 export const APPROVED_OPTIONAL_HOST_PERMISSIONS = Object.freeze([
@@ -241,11 +243,13 @@ export const REQUIRED_TESSERACT_RUNTIME_MARKERS = Object.freeze([
   '/ocr/tesseract/lang',
 ]);
 export const REQUIRED_PADDLE_RUNTIME_MARKERS = Object.freeze([
-  'simul-paddleocr-js-0.4.2-offscreen-v1',
+  'simul-paddleocr-js-0.4.2-offscreen-v2-sandbox',
+  '/paddle-ocr.html',
   '/ocr/paddle/worker/worker-entry.js',
   '/ocr/paddle/models/PP-OCRv6_tiny_det_onnx_infer.tar',
   '/ocr/paddle/models/PP-OCRv6_tiny_rec_onnx_infer.tar',
-  '/ocr/paddle/runtime/',
+  '/ocr/paddle/runtime/ort-wasm-simd-threaded.mjs',
+  '/ocr/paddle/runtime/ort-wasm-simd-threaded.wasm',
 ]);
 export const REQUIRED_TESSERACT_WASM_DIRECT_RUNTIME_MARKERS = Object.freeze([
   'tesseract-wasm-0.11.0',
@@ -254,10 +258,12 @@ export const REQUIRED_TESSERACT_WASM_DIRECT_RUNTIME_MARKERS = Object.freeze([
 export const FORBIDDEN_DISABLED_PADDLE_RUNTIME_MARKERS = Object.freeze([
   'paddleocr-js-0.4.2',
   'PP-OCRv6_tiny_det+PP-OCRv6_tiny_rec',
-  'simul-paddleocr-js-0.4.2-offscreen-v1',
+  'simul-paddleocr-js-0.4.2-offscreen-v2-sandbox',
+  '/paddle-ocr.html',
   '/ocr/paddle/worker/worker-entry.js',
   '/ocr/paddle/models/PP-OCRv6_tiny_det_onnx_infer.tar',
   '/ocr/paddle/models/PP-OCRv6_tiny_rec_onnx_infer.tar',
+  '/ocr/paddle/runtime/ort-wasm-simd-threaded.mjs',
   '/ocr/paddle/runtime/ort-wasm-simd-threaded.wasm',
 ]);
 export const REQUIRED_OCR_RUNTIME_MARKERS = Object.freeze([
@@ -1128,13 +1134,37 @@ function validateOcrProfileManifest(manifest, providerIds) {
   );
   const paddleEnabled = providerIds.includes('paddleocr-wasm');
   if (tesseractEnabled || tesseractWasmDirectEnabled || paddleEnabled) {
+    const expectedCspKeys = paddleEnabled
+      ? ['extension_pages', 'sandbox']
+      : ['extension_pages'];
     if (
       !isRecord(manifest.content_security_policy) ||
-      Object.keys(manifest.content_security_policy).length !== 1 ||
-      manifest.content_security_policy.extension_pages !== APPROVED_OCR_CSP
+      !sameOrderedStrings(
+        Object.keys(manifest.content_security_policy).sort(),
+        [...expectedCspKeys].sort(),
+      ) ||
+      manifest.content_security_policy.extension_pages !== APPROVED_OCR_CSP ||
+      (paddleEnabled &&
+        manifest.content_security_policy.sandbox !== APPROVED_PADDLE_SANDBOX_CSP)
     ) {
       throw new ArtifactError(
-        `The packaged OCR profile requires the exact extension page CSP: ${APPROVED_OCR_CSP}`,
+        paddleEnabled
+          ? `The Paddle profile requires exact privileged and sandbox CSPs: ${APPROVED_OCR_CSP} | ${APPROVED_PADDLE_SANDBOX_CSP}`
+          : `The packaged OCR profile requires the exact extension page CSP: ${APPROVED_OCR_CSP}`,
+      );
+    }
+    if (paddleEnabled) {
+      if (
+        !isRecord(manifest.sandbox) ||
+        !sameOrderedStrings(manifest.sandbox.pages, ['paddle-ocr.html'])
+      ) {
+        throw new ArtifactError(
+          'The Paddle profile must declare only paddle-ocr.html as a sandbox page.',
+        );
+      }
+    } else if ('sandbox' in manifest) {
+      throw new ArtifactError(
+        'A Paddle-free OCR profile must not package a sandbox page.',
       );
     }
     return;
@@ -1144,6 +1174,11 @@ function validateOcrProfileManifest(manifest, providerIds) {
       providerIds.length > 0
         ? 'The asset-free OCR profile must use Chrome\'s default extension page CSP.'
         : 'manifest.json must not relax or override extension page CSP when OCR is disabled.',
+    );
+  }
+  if ('sandbox' in manifest) {
+    throw new ArtifactError(
+      'An asset-free OCR profile must not package a sandbox page.',
     );
   }
 }
@@ -1359,6 +1394,9 @@ async function validateTextReferences(
     if (!reference || reference.startsWith('#') || reference.startsWith('data:')) {
       continue;
     }
+    if (isApprovedBrowserInertPaddleNodeImport(sourcePath, reference)) {
+      continue;
+    }
     assertReferenceExists(sourcePath, reference, filePaths);
   }
 
@@ -1367,6 +1405,13 @@ async function validateTextReferences(
   if (!path.isAbsolute(root)) {
     throw new ArtifactError('Artifact reference validation requires an absolute root.');
   }
+}
+
+function isApprovedBrowserInertPaddleNodeImport(sourcePath, reference) {
+  return (
+    sourcePath === 'ocr/paddle/runtime/ort-wasm-simd-threaded.mjs' &&
+    (reference === 'module' || reference === 'worker_threads')
+  );
 }
 
 function discoverJavaScriptResourceReferences(text) {
@@ -1567,6 +1612,10 @@ async function validatePackagedOcrRuntimeAssets({
       unpackedBytes,
       maximumUnpackedBytes,
     })) approvedRuntimePaths.add(assetPath);
+    validatePaddleSandboxRuntime({
+      filePaths,
+      executableTextByPath,
+    });
   }
   if (providerIds.includes('tesseract-wasm-direct')) {
     for (const assetPath of await validateTesseractWasmRuntimeAssets({
@@ -1901,7 +1950,8 @@ async function validatePaddleRuntimeAssets({
       'PP-OCRv6_tiny_det',
       'PP-OCRv6_tiny_rec',
     ]) ||
-    assetManifest?.workerMode !== true ||
+    assetManifest?.workerMode !== false ||
+    assetManifest?.sandboxDirectMode !== true ||
     !isRecord(assetManifest?.runtime) ||
     Object.keys(assetManifest.runtime).length !== 4 ||
     assetManifest.runtime.backend !== 'wasm' ||
@@ -1966,24 +2016,34 @@ async function validatePaddleRuntimeAssets({
     );
   }
 
-  const workerPath = 'ocr/paddle/worker/worker-entry.js';
-  const worker = await readFile(path.join(root, ...workerPath.split('/')), 'utf8');
+  const directModulePath = 'ocr/paddle/worker/worker-entry.js';
+  const directModule = await readFile(
+    path.join(root, ...directModulePath.split('/')),
+    'utf8',
+  );
   for (const marker of [
-    'worker-transport-request',
-    'worker-transport-response',
+    'createPaddleOCRDirectHandler',
+    'export { createPaddleOCRDirectHandler };',
     '__SIMUL_EXPLICIT_LOCAL_PADDLE_MODEL_REQUIRED__',
   ]) {
-    if (!worker.includes(marker)) {
+    if (!directModule.includes(marker)) {
       throw new ArtifactError(
-        `Packaged Paddle OCR Worker is missing local transport marker: ${marker}`,
+        `Packaged Paddle direct module is missing its reviewed marker: ${marker}`,
       );
     }
   }
+  if (directModule.includes(
+    'attachWorkerMessageHandler(createPaddleOCRWorkerMessageHandler());',
+  )) {
+    throw new ArtifactError(
+      'Packaged Paddle direct module still attaches a Worker message handler.',
+    );
+  }
   if (
-    /paddle-model-ecology\.bj\.bcebos\.com|cdn\.jsdelivr\.net|unpkg\.com/iu.test(worker)
+    /paddle-model-ecology\.bj\.bcebos\.com|cdn\.jsdelivr\.net|unpkg\.com/iu.test(directModule)
   ) {
     throw new ArtifactError(
-      'Packaged Paddle OCR Worker contains a remote runtime fallback.',
+      'Packaged Paddle direct module contains a remote runtime fallback.',
     );
   }
   return approvedRuntimePaths;
@@ -1998,9 +2058,10 @@ function assertApprovedPaddleAssetLayout(files) {
     ['licenses/PADDLEOCR_APACHE-2.0.txt', 'license', `https://raw.githubusercontent.com/PaddlePaddle/PaddleOCR/${APPROVED_PADDLE_OCR_JS_GIT_HEAD}/LICENSE`],
     ['models/PP-OCRv6_tiny_det_onnx_infer.tar', 'detection-model-archive', 'https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_tiny_det_onnx_infer.tar'],
     ['models/PP-OCRv6_tiny_rec_onnx_infer.tar', 'recognition-model-archive', 'https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/PP-OCRv6_tiny_rec_onnx_infer.tar'],
+    ['runtime/ort-wasm-simd-threaded.mjs', 'wasm-module-loader', 'npm:onnxruntime-web@1.24.3/dist/ort-wasm-simd-threaded.mjs'],
     ['runtime/ort-wasm-simd-threaded.wasm', 'wasm-runtime', 'npm:onnxruntime-web@1.24.3/dist/ort-wasm-simd-threaded.wasm'],
     ['THIRD_PARTY_NOTICES.md', 'notice', 'repo:legal/paddleocr-js-v0.4.2-third-party-notices.md'],
-    ['worker/worker-entry.js', 'module-worker', 'npm:@paddleocr/paddleocr-js@0.4.2/dist/assets/worker-entry-C9UNuyOJ.js'],
+    ['worker/worker-entry.js', 'sandbox-direct-module', 'npm:@paddleocr/paddleocr-js@0.4.2/dist/assets/worker-entry-C9UNuyOJ.js'],
   ];
   if (
     files.length !== expected.length ||
@@ -2014,6 +2075,46 @@ function assertApprovedPaddleAssetLayout(files) {
   ) {
     throw new ArtifactError(
       'Packaged Paddle OCR asset manifest has an unapproved path, role, source, or ordering.',
+    );
+  }
+}
+
+function validatePaddleSandboxRuntime({ filePaths, executableTextByPath }) {
+  if (!filePaths.has('paddle-ocr.html')) {
+    throw new ArtifactError('The Paddle profile is missing paddle-ocr.html.');
+  }
+  const sandboxResources = collectStaticJavaScriptModuleClosure(
+    'paddle-ocr.html',
+    executableTextByPath,
+    filePaths,
+  );
+  for (const marker of [
+    'simul:paddle-sandbox-v1:ready',
+    'createPaddleOCRDirectHandler',
+    'runtime-loader-failed',
+    'runtime-startup-failed',
+  ]) {
+    if (![...sandboxResources].some((resource) =>
+      hasJavaScriptStringMarker(executableTextByPath.get(resource), marker),
+    )) {
+      throw new ArtifactError(
+        `The Paddle sandbox runtime is missing its bounded marker: ${marker}`,
+      );
+    }
+  }
+  const offscreenResources = collectStaticJavaScriptModuleClosure(
+    'offscreen.html',
+    executableTextByPath,
+    filePaths,
+  );
+  if ([...offscreenResources].some((resource) =>
+    hasJavaScriptStringMarker(
+      executableTextByPath.get(resource),
+      'worker-transport-request',
+    ),
+  )) {
+    throw new ArtifactError(
+      'The privileged offscreen module closure must not contain Paddle Worker execution.',
     );
   }
 }

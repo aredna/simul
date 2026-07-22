@@ -20,6 +20,8 @@ export const APPROVED_PADDLE_OCR_WORKER_SHA256 =
   '477db3f009c118823a5f9ebe15f1e96c1c464165715ba28a9884290f61addf52';
 export const APPROVED_ONNXRUNTIME_WASM_SHA256 =
   'be0e129949062ad50290ef94683fac8be5bb6156f709e030b7a5f1661a2f6c17';
+export const APPROVED_ONNXRUNTIME_LOADER_SHA256 =
+  '5687566b1bc1c8cf628d76c2ddb16b2a3b81a7997273d4666564880495088e57';
 export const PADDLE_MODEL_NAMES = Object.freeze([
   'PP-OCRv6_tiny_det',
   'PP-OCRv6_tiny_rec',
@@ -89,6 +91,7 @@ export const EXPECTED_PADDLE_CATALOG_PATHS = Object.freeze([
   'licenses/PADDLEOCR_APACHE-2.0.txt',
   'models/PP-OCRv6_tiny_det_onnx_infer.tar',
   'models/PP-OCRv6_tiny_rec_onnx_infer.tar',
+  'runtime/ort-wasm-simd-threaded.mjs',
   'runtime/ort-wasm-simd-threaded.wasm',
   'THIRD_PARTY_NOTICES.md',
   'worker/worker-entry.js',
@@ -120,14 +123,33 @@ export async function vendorPaddleOcr({ fetchImpl = fetch } = {}) {
       );
     }
 
-    const ortWasm = await readFile(path.resolve(
-      nodeModules,
-      'onnxruntime-web/dist/ort-wasm-simd-threaded.wasm',
-    ));
+    const [ortLoader, ortWasm] = await Promise.all([
+      readFile(path.resolve(
+        nodeModules,
+        'onnxruntime-web/dist/ort-wasm-simd-threaded.mjs',
+      )),
+      readFile(path.resolve(
+        nodeModules,
+        'onnxruntime-web/dist/ort-wasm-simd-threaded.wasm',
+      )),
+    ]);
+    assertApprovedSourceHash(
+      ortLoader,
+      APPROVED_ONNXRUNTIME_LOADER_SHA256,
+      'Pinned ONNX Runtime module loader',
+    );
     assertApprovedSourceHash(
       ortWasm,
       APPROVED_ONNXRUNTIME_WASM_SHA256,
       'Pinned ONNX Runtime Wasm',
+    );
+    await emitCatalogFile(
+      stagedDirectory,
+      files,
+      'runtime/ort-wasm-simd-threaded.mjs',
+      ortLoader,
+      'wasm-module-loader',
+      `npm:onnxruntime-web@${ONNXRUNTIME_WEB_VERSION}/dist/ort-wasm-simd-threaded.mjs`,
     );
     await emitCatalogFile(
       stagedDirectory,
@@ -160,8 +182,8 @@ export async function vendorPaddleOcr({ fetchImpl = fetch } = {}) {
       stagedDirectory,
       files,
       'worker/worker-entry.js',
-      Buffer.from(patchWorkerRemoteFallbacks(rawWorker.toString('utf8'))),
-      'module-worker',
+      Buffer.from(patchPaddleDirectModule(rawWorker.toString('utf8'))),
+      'sandbox-direct-module',
       `npm:@paddleocr/paddleocr-js@${PADDLE_OCR_JS_VERSION}/dist/assets/${workerName}`,
     );
     await emitCatalogFile(
@@ -199,7 +221,8 @@ export async function vendorPaddleOcr({ fetchImpl = fetch } = {}) {
       paddleOcrJsGitHead: PADDLE_OCR_JS_GIT_HEAD,
       onnxruntimeWebVersion: ONNXRUNTIME_WEB_VERSION,
       modelNames: PADDLE_MODEL_NAMES,
-      workerMode: true,
+      workerMode: false,
+      sandboxDirectMode: true,
       runtime: {
         backend: 'wasm',
         numThreads: 1,
@@ -617,20 +640,39 @@ async function removeDirectory(target) {
   await rm(target, { recursive: true, force: true });
 }
 
-function patchWorkerRemoteFallbacks(source) {
+export function patchPaddleDirectModule(source) {
   const modelBase =
     'https://paddle-model-ecology.bj.bcebos.com/paddlex/official_inference_model/paddle3.0.0/';
   const ortCdn =
     `https://cdn.jsdelivr.net/npm/onnxruntime-web@${ONNXRUNTIME_WEB_VERSION}/dist/`;
+  const workerAttach =
+    'attachWorkerMessageHandler(createPaddleOCRWorkerMessageHandler());';
+  const directExport = [
+    'function createPaddleOCRDirectHandler() {',
+    '  return createPaddleOCRWorkerMessageHandler();',
+    '}',
+    'export { createPaddleOCRDirectHandler };',
+  ].join('\n');
+  if (source.split(workerAttach).length !== 2) {
+    throw new Error(
+      'The pinned Paddle bundle no longer has exactly one reviewed Worker attach call.',
+    );
+  }
   const patched = source
     .replaceAll(modelBase, '/__SIMUL_EXPLICIT_LOCAL_PADDLE_MODEL_REQUIRED__/')
     .replaceAll(ortCdn, '/__SIMUL_EXPLICIT_LOCAL_ORT_REQUIRED__/')
+    .replace(workerAttach, directExport)
     .replace(
       /(?:^|\r?\n)\s*\/\/[#@]\s*sourceMappingURL\s*=\s*[^\r\n]*\s*$/u,
       '',
     );
-  if (patched.includes(modelBase) || patched.includes(ortCdn)) {
-    throw new Error('The Paddle module Worker retains a remote runtime fallback.');
+  if (
+    patched.includes(modelBase) ||
+    patched.includes(ortCdn) ||
+    patched.includes(workerAttach) ||
+    !patched.includes('export { createPaddleOCRDirectHandler };')
+  ) {
+    throw new Error('The Paddle direct module patch did not close its runtime boundary.');
   }
   return patched;
 }

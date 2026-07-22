@@ -8,74 +8,66 @@ import type { ImageTextResult } from '../../contracts';
 import type { OffscreenOcrProviderRunner } from '../../offscreen-host';
 import type { OffscreenOcrJob } from '../../offscreen-protocol';
 import {
-  PADDLE_OCR_DETECTION_MODEL_NAME,
-  PADDLE_OCR_DETECTOR_BOX_THRESHOLD,
-  PADDLE_OCR_DETECTOR_THRESHOLD,
-  PADDLE_OCR_RECOGNITION_MODEL_NAME,
-  PADDLE_OCR_RECOGNITION_SCORE_THRESHOLD,
-} from './constants';
-import { normalizePaddleOcrResult } from './normalize';
+  readPaddleSandboxReadyMessage,
+  readPaddleSandboxResponse,
+  type PaddleSandboxAssetUrls,
+  type PaddleSandboxErrorCode,
+} from './sandbox-protocol';
 
 export const PADDLE_OCR_IDLE_TIMEOUT_MS = 90_000;
 export const PADDLE_OCR_JOB_TIMEOUT_MS = 30_000;
+export const PADDLE_OCR_SANDBOX_STARTUP_TIMEOUT_MS = 8_000;
 export const PADDLE_OCR_RUNTIME_MARKER =
-  'simul-paddleocr-js-0.4.2-offscreen-v1';
+  'simul-paddleocr-js-0.4.2-offscreen-v2-sandbox';
 
-interface PaddlePipeline {
-  predict(input: Blob, params: Readonly<Record<string, number>>): Promise<unknown>;
+export interface PaddleSandboxClient {
+  recognize(
+    input: Blob,
+    bitmapWidth: number,
+    bitmapHeight: number,
+  ): Promise<ImageTextResult>;
   terminate(): void;
   dispose(): Promise<void>;
 }
 
-interface PaddlePipelineCreateOptions {
-  readonly workerUrl: string;
-  readonly detectionModelUrl: string;
-  readonly recognitionModelUrl: string;
-  readonly runtimeWasmUrl: string;
-  readonly createWorker: () => Worker;
-  readonly decode: (encoded: Blob) => Promise<ImageBitmap>;
-  readonly onPipelineCreated: (pipeline: PaddlePipeline) => void;
+export interface PaddleSandboxClientCreateOptions {
+  readonly sandboxUrl: string;
+  readonly assets: PaddleSandboxAssetUrls;
+  readonly startupTimeoutMs: number;
+  readonly setTimer: TimeoutScheduler;
+  readonly clearTimer: TimeoutCanceller;
 }
 
 export interface PaddleOcrRunnerEnvironment {
-  readonly createPipeline?: (
-    options: PaddlePipelineCreateOptions,
-  ) => Promise<PaddlePipeline>;
-  readonly createWorker?: (url: string) => Worker;
-  readonly decode?: (encoded: Blob) => Promise<ImageBitmap>;
+  readonly createClient?: (
+    options: PaddleSandboxClientCreateOptions,
+  ) => Promise<PaddleSandboxClient>;
   readonly getUrl?: (path: string) => string;
   readonly setTimer?: TimeoutScheduler;
   readonly clearTimer?: TimeoutCanceller;
   readonly jobTimeoutMs?: number;
   readonly idleTimeoutMs?: number;
+  readonly startupTimeoutMs?: number;
 }
 
+/** Privileged offscreen adapter; Paddle execution stays inside the sandbox. */
 export class PaddleOcrOffscreenRunner implements OffscreenOcrProviderRunner {
-  readonly #createPipeline: NonNullable<
-    PaddleOcrRunnerEnvironment['createPipeline']
-  >;
-  readonly #createWorker: (url: string) => Worker;
-  readonly #decode: (encoded: Blob) => Promise<ImageBitmap>;
+  readonly #createClient: NonNullable<PaddleOcrRunnerEnvironment['createClient']>;
   readonly #getUrl: (path: string) => string;
   readonly #setTimer: TimeoutScheduler;
   readonly #clearTimer: TimeoutCanceller;
   readonly #jobTimeoutMs: number;
   readonly #idleTimeoutMs: number;
-  #pipeline: PaddlePipeline | undefined;
-  #initializingPipeline: PaddlePipeline | undefined;
-  #creating: Promise<PaddlePipeline> | undefined;
-  #worker: Worker | undefined;
+  readonly #startupTimeoutMs: number;
+  #client: PaddleSandboxClient | undefined;
+  #creating: Promise<PaddleSandboxClient> | undefined;
   #token: symbol | undefined;
+  #terminalFailureName: TerminalPaddleFailureName | undefined;
   #idleTimer: ReturnType<typeof setTimeout> | undefined;
   #disposed = false;
 
   constructor(environment: PaddleOcrRunnerEnvironment = {}) {
-    this.#createPipeline = environment.createPipeline ?? createPaddleWorkerPipeline;
-    this.#createWorker = environment.createWorker ?? ((url) => new Worker(url, {
-      type: 'module',
-      name: 'simul-paddleocr',
-    }));
-    this.#decode = environment.decode ?? ((encoded) => createImageBitmap(encoded));
+    this.#createClient = environment.createClient ?? createPaddleSandboxClient;
     this.#getUrl = environment.getUrl ?? ((path) =>
       (browser.runtime.getURL as (value: string) => string)(path));
     this.#setTimer = receiverSafeTimeoutScheduler(environment.setTimer);
@@ -87,6 +79,10 @@ export class PaddleOcrOffscreenRunner implements OffscreenOcrProviderRunner {
     this.#idleTimeoutMs = positiveTimeout(
       environment.idleTimeoutMs,
       PADDLE_OCR_IDLE_TIMEOUT_MS,
+    );
+    this.#startupTimeoutMs = positiveTimeout(
+      environment.startupTimeoutMs,
+      PADDLE_OCR_SANDBOX_STARTUP_TIMEOUT_MS,
     );
   }
 
@@ -101,106 +97,95 @@ export class PaddleOcrOffscreenRunner implements OffscreenOcrProviderRunner {
     if (!PADDLE_SUPPORTED_LANGUAGES.has(job.languageGroup)) {
       throw new UnsupportedLanguageError();
     }
+    if (this.#terminalFailureName) {
+      throw terminalFailure(this.#terminalFailureName);
+    }
     signal.throwIfAborted();
     this.#cancelIdleTimer();
     try {
-      const result = await withDeadline(
-        this.#recognize(job, encoded),
+      const completed = await withDeadline(
+        (async () => {
+          const client = await this.#clientFor();
+          const result = await client.recognize(
+            encoded,
+            job.bitmapWidth,
+            job.bitmapHeight,
+          );
+          return { client, result };
+        })(),
         this.#jobTimeoutMs,
         signal,
         this.#setTimer,
         this.#clearTimer,
       );
-      if (!this.#disposed && this.#pipeline) this.#scheduleIdleDisposal();
+      const { client, result } = completed;
+      if (
+        result.providerId !== 'paddleocr-wasm' ||
+        result.bitmapWidth !== job.bitmapWidth ||
+        result.bitmapHeight !== job.bitmapHeight
+      ) throw new InvalidNormalizedOcrOutputError();
+      if (!this.#disposed && this.#client === client) this.#scheduleIdleDisposal();
       return result;
     } catch (error) {
-      this.#terminatePipeline();
+      this.#terminateClient();
       if (signal.aborted) throw error;
+      if (isTerminalFailure(error)) {
+        if (!(error instanceof PaddleSandboxUnavailableError)) {
+          this.#terminalFailureName = error.name;
+        }
+        throw error;
+      }
       if (
         error instanceof ProviderUnavailableError ||
         error instanceof UnsupportedLanguageError ||
-        error instanceof InvalidNormalizedOcrOutputError
+        error instanceof InvalidNormalizedOcrOutputError ||
+        error instanceof WorkerLostError ||
+        error instanceof PaddleRecognitionError
       ) throw error;
-      throw new WorkerLostError();
+      throw new PaddleRecognitionError();
     }
   }
 
   cancelActive(): Promise<void> {
-    this.#terminatePipeline();
+    this.#terminateClient();
     return Promise.resolve();
   }
 
   dispose(): Promise<void> {
     if (this.#disposed) return Promise.resolve();
     this.#disposed = true;
-    this.#terminatePipeline();
+    this.#terminateClient();
     return Promise.resolve();
   }
 
-  async #recognize(
-    job: Extract<OffscreenOcrJob, { providerId: 'paddleocr-wasm' }>,
-    encoded: Blob,
-  ): Promise<ImageTextResult> {
-    const acquired = await this.#pipelineFor();
-    const raw = await acquired.pipeline.predict(encoded, {
-      textDetThresh: PADDLE_OCR_DETECTOR_THRESHOLD,
-      textDetBoxThresh: PADDLE_OCR_DETECTOR_BOX_THRESHOLD,
-      textRecScoreThresh: PADDLE_OCR_RECOGNITION_SCORE_THRESHOLD,
-    });
-    if (this.#token !== acquired.token || this.#disposed) {
-      throw new WorkerLostError();
-    }
-    const normalized = normalizePaddleOcrResult(
-      raw,
-      job.bitmapWidth,
-      job.bitmapHeight,
-    );
-    if (!normalized) throw new InvalidNormalizedOcrOutputError();
-    return normalized;
-  }
-
-  async #pipelineFor(): Promise<{
-    readonly pipeline: PaddlePipeline;
-    readonly token: symbol;
-  }> {
-    if (this.#pipeline && this.#token) {
-      return { pipeline: this.#pipeline, token: this.#token };
-    }
+  async #clientFor(): Promise<PaddleSandboxClient> {
+    if (this.#client) return this.#client;
     if (!this.#creating) {
-      const token = Symbol('paddleocr');
+      const token = Symbol('paddle-sandbox');
       this.#token = token;
-      const options: PaddlePipelineCreateOptions = {
-        workerUrl: this.#getUrl('/ocr/paddle/worker/worker-entry.js'),
-        detectionModelUrl: this.#getUrl(
-          '/ocr/paddle/models/PP-OCRv6_tiny_det_onnx_infer.tar',
-        ),
-        recognitionModelUrl: this.#getUrl(
-          '/ocr/paddle/models/PP-OCRv6_tiny_rec_onnx_infer.tar',
-        ),
-        runtimeWasmUrl: this.#getUrl(
-          '/ocr/paddle/runtime/ort-wasm-simd-threaded.wasm',
-        ),
-        createWorker: () => {
-          const worker = this.#createWorker(
-            this.#getUrl('/ocr/paddle/worker/worker-entry.js'),
-          );
-          if (!this.#disposed && this.#token === token) {
-            this.#worker = worker;
-          }
-          return worker;
-        },
-        decode: this.#decode,
-        onPipelineCreated: (pipeline) => {
-          if (this.#disposed || this.#token !== token) {
-            pipeline.terminate();
-            disposePipelineDetached(pipeline);
-            return;
-          }
-          this.#initializingPipeline = pipeline;
-        },
-      };
-      const creation = Promise.resolve().then(() =>
-        this.#createPipeline(options));
+      const creation = this.#createClient({
+        sandboxUrl: this.#getUrl('/paddle-ocr.html'),
+        assets: Object.freeze({
+          runtimeModule: this.#getUrl(
+            '/ocr/paddle/worker/worker-entry.js',
+          ),
+          detectionModel: this.#getUrl(
+            '/ocr/paddle/models/PP-OCRv6_tiny_det_onnx_infer.tar',
+          ),
+          recognitionModel: this.#getUrl(
+            '/ocr/paddle/models/PP-OCRv6_tiny_rec_onnx_infer.tar',
+          ),
+          runtimeLoader: this.#getUrl(
+            '/ocr/paddle/runtime/ort-wasm-simd-threaded.mjs',
+          ),
+          runtimeWasm: this.#getUrl(
+            '/ocr/paddle/runtime/ort-wasm-simd-threaded.wasm',
+          ),
+        }),
+        startupTimeoutMs: this.#startupTimeoutMs,
+        setTimer: this.#setTimer,
+        clearTimer: this.#clearTimer,
+      });
       this.#creating = creation;
       void creation.finally(() => {
         if (this.#creating === creation) this.#creating = undefined;
@@ -209,51 +194,31 @@ export class PaddleOcrOffscreenRunner implements OffscreenOcrProviderRunner {
     const creation = this.#creating;
     const token = this.#token;
     if (!creation || !token) throw new WorkerLostError();
-    const pipeline = await creation;
+    const client = await creation;
     if (this.#disposed || this.#token !== token) {
-      pipeline.terminate();
-      disposePipelineDetached(pipeline);
+      client.terminate();
+      void client.dispose().catch(() => undefined);
       throw new WorkerLostError();
     }
-    if (this.#initializingPipeline === pipeline) {
-      this.#initializingPipeline = undefined;
-    }
-    this.#pipeline = pipeline;
-    return { pipeline, token };
+    this.#client = client;
+    return client;
   }
 
-  #terminatePipeline(): void {
+  #terminateClient(): void {
     this.#cancelIdleTimer();
-    const pipeline = this.#pipeline;
-    const initializingPipeline = this.#initializingPipeline;
-    const creating = this.#creating;
-    const worker = this.#worker;
-    this.#pipeline = undefined;
-    this.#initializingPipeline = undefined;
+    const client = this.#client;
+    this.#client = undefined;
     this.#creating = undefined;
-    this.#worker = undefined;
     this.#token = undefined;
-    pipeline?.terminate();
-    disposePipelineDetached(pipeline);
-    if (initializingPipeline !== pipeline) {
-      initializingPipeline?.terminate();
-      disposePipelineDetached(initializingPipeline);
-    }
-    if (!pipeline && !initializingPipeline) worker?.terminate();
-    if (creating) {
-      void creating.then((late) => {
-        if (late === pipeline || late === initializingPipeline) return;
-        late.terminate();
-        disposePipelineDetached(late);
-      }, () => undefined);
-    }
+    client?.terminate();
+    if (client) void client.dispose().catch(() => undefined);
   }
 
   #scheduleIdleDisposal(): void {
     this.#cancelIdleTimer();
     this.#idleTimer = this.#setTimer(() => {
       this.#idleTimer = undefined;
-      this.#terminatePipeline();
+      this.#terminateClient();
     }, this.#idleTimeoutMs);
   }
 
@@ -263,81 +228,77 @@ export class PaddleOcrOffscreenRunner implements OffscreenOcrProviderRunner {
   }
 }
 
-class PaddleWorkerPipeline implements PaddlePipeline {
+class PaddleSandboxFrameClient implements PaddleSandboxClient {
   readonly #pending = new Map<number, {
-    readonly resolve: (value: unknown) => void;
+    readonly resolve: (result: ImageTextResult) => void;
     readonly reject: (error: unknown) => void;
   }>();
   #nextRequestId = 1;
   #disposed = false;
 
-  constructor(
-    private readonly worker: Worker,
-    private readonly decode: (encoded: Blob) => Promise<ImageBitmap>,
+  private constructor(
+    private readonly frame: HTMLIFrameElement,
+    private readonly assets: PaddleSandboxAssetUrls,
+    private readonly hostWindow: Window,
   ) {
-    worker.onmessage = (event: MessageEvent<unknown>) => {
-      const response = readWorkerResponse(event.data);
-      if (!response) return;
-      const pending = this.#pending.get(response.requestId);
-      if (!pending) return;
-      this.#pending.delete(response.requestId);
-      if (response.status === 'success') pending.resolve(response.payload);
-      else pending.reject(workerResponseError(response.error));
-    };
-    worker.onerror = () => this.#fail(new WorkerLostError());
+    hostWindow.addEventListener('message', this.#onMessage);
   }
 
-  initialize(options: unknown): Promise<void> {
-    return this.#request('init', { options }).then(() => undefined);
+  static create(
+    options: PaddleSandboxClientCreateOptions,
+  ): Promise<PaddleSandboxFrameClient> {
+    if (typeof document === 'undefined' || typeof window === 'undefined') {
+      return Promise.reject(new PaddleSandboxUnavailableError());
+    }
+    const parent = document.body;
+    if (!parent) return Promise.reject(new PaddleSandboxUnavailableError());
+    const frame = document.createElement('iframe');
+    frame.hidden = true;
+    frame.setAttribute('aria-hidden', 'true');
+    frame.setAttribute('tabindex', '-1');
+    frame.setAttribute('sandbox', 'allow-scripts');
+    frame.setAttribute('referrerpolicy', 'no-referrer');
+    frame.src = options.sandboxUrl;
+    const client = new PaddleSandboxFrameClient(frame, options.assets, window);
+    return new Promise<PaddleSandboxFrameClient>((resolve, reject) => {
+      let settled = false;
+      const finish = (callback: () => void): void => {
+        if (settled) return;
+        settled = true;
+        options.clearTimer(timer);
+        frame.removeEventListener('error', onError);
+        window.removeEventListener('message', onReady);
+        callback();
+      };
+      const onError = (): void => finish(() => {
+        client.terminate();
+        reject(new PaddleSandboxUnavailableError());
+      });
+      const onReady = (event: MessageEvent<unknown>): void => {
+        if (
+          event.source !== frame.contentWindow ||
+          !readPaddleSandboxReadyMessage(event.data)
+        ) return;
+        finish(() => resolve(client));
+      };
+      const timer = options.setTimer(() => finish(() => {
+        client.terminate();
+        reject(new PaddleSandboxUnavailableError());
+      }), options.startupTimeoutMs);
+      frame.addEventListener('error', onError, { once: true });
+      window.addEventListener('message', onReady);
+      parent.append(frame);
+    });
   }
 
-  async predict(
+  recognize(
     input: Blob,
-    params: Readonly<Record<string, number>>,
-  ): Promise<unknown> {
-    if (this.#disposed) throw new WorkerLostError();
-    const bitmap = await this.decode(input);
-    if (this.#disposed) {
-      bitmap.close();
-      throw new WorkerLostError();
-    }
-    try {
-      return await this.#request('predict', {
-        sources: [{ kind: 'imageBitmap', imageBitmap: bitmap }],
-        params,
-      }, [bitmap]);
-    } catch (error) {
-      try {
-        bitmap.close();
-      } catch {
-        // Ownership may already have transferred to the terminated Worker.
-      }
-      throw error;
-    }
-  }
-
-  terminate(): void {
-    if (this.#disposed) return;
-    this.#disposed = true;
-    this.worker.terminate();
-    this.#fail(new WorkerLostError());
-  }
-
-  async dispose(): Promise<void> {
-    if (this.#disposed) return;
-    try {
-      await this.#request('dispose', {});
-    } finally {
-      this.terminate();
-    }
-  }
-
-  #request(
-    type: 'init' | 'predict' | 'dispose',
-    payload: unknown,
-    transfer: Transferable[] = [],
-  ): Promise<unknown> {
+    bitmapWidth: number,
+    bitmapHeight: number,
+  ): Promise<ImageTextResult> {
     if (this.#disposed) return Promise.reject(new WorkerLostError());
+    const target = this.frame.contentWindow;
+    if (!target) return Promise.reject(new PaddleSandboxUnavailableError());
     const requestId = this.#nextRequestId;
     this.#nextRequestId = requestId >= Number.MAX_SAFE_INTEGER
       ? 1
@@ -345,18 +306,56 @@ class PaddleWorkerPipeline implements PaddlePipeline {
     return new Promise((resolve, reject) => {
       this.#pending.set(requestId, { resolve, reject });
       try {
-        this.worker.postMessage({
-          kind: 'worker-transport-request',
-          type,
-          payload,
+        target.postMessage({
+          kind: 'simul:paddle-sandbox-v1:run',
+          version: 1,
           requestId,
-        }, transfer);
+          input,
+          bitmapWidth,
+          bitmapHeight,
+          assets: this.assets,
+        }, '*');
       } catch (error) {
         this.#pending.delete(requestId);
-        reject(error);
+        reject(new PaddleSandboxUnavailableError({ cause: error }));
       }
     });
   }
+
+  terminate(): void {
+    if (this.#disposed) return;
+    this.#disposed = true;
+    try {
+      this.frame.contentWindow?.postMessage({
+        kind: 'simul:paddle-sandbox-v1:dispose',
+        version: 1,
+      }, '*');
+    } catch {
+      // Removing the frame below remains authoritative.
+    }
+    this.hostWindow.removeEventListener('message', this.#onMessage);
+    this.frame.remove();
+    this.#fail(new WorkerLostError());
+  }
+
+  dispose(): Promise<void> {
+    this.terminate();
+    return Promise.resolve();
+  }
+
+  readonly #onMessage = (event: MessageEvent<unknown>): void => {
+    if (event.source !== this.frame.contentWindow) return;
+    const response = readPaddleSandboxResponse(event.data);
+    if (!response) return;
+    const pending = this.#pending.get(response.requestId);
+    if (!pending) return;
+    this.#pending.delete(response.requestId);
+    if (response.kind === 'simul:paddle-sandbox-v1:result') {
+      pending.resolve(response.result);
+    } else {
+      pending.reject(sandboxFailure(response.code));
+    }
+  };
 
   #fail(error: unknown): void {
     for (const pending of this.#pending.values()) pending.reject(error);
@@ -364,113 +363,18 @@ class PaddleWorkerPipeline implements PaddlePipeline {
   }
 }
 
-async function createPaddleWorkerPipeline(
-  options: PaddlePipelineCreateOptions,
-): Promise<PaddlePipeline> {
-  const worker = options.createWorker();
-  const pipeline = new PaddleWorkerPipeline(worker, options.decode);
-  try {
-    options.onPipelineCreated(pipeline);
-    await pipeline.initialize({
-      pipelineConfig: {
-        pipelineName: 'OCR',
-        raw: {},
-        warnings: [],
-        unsupportedFeatures: [],
-        modelSelection: {
-          textDetectionModelName: PADDLE_OCR_DETECTION_MODEL_NAME,
-          textRecognitionModelName: PADDLE_OCR_RECOGNITION_MODEL_NAME,
-        },
-        assets: {
-          det: { url: options.detectionModelUrl },
-          rec: { url: options.recognitionModelUrl },
-        },
-        runtimeDefaults: {
-          text_det_limit_side_len: 960,
-          text_det_limit_type: 'max',
-          text_det_max_side_limit: 4000,
-          text_det_thresh: PADDLE_OCR_DETECTOR_THRESHOLD,
-          text_det_box_thresh: PADDLE_OCR_DETECTOR_BOX_THRESHOLD,
-          text_det_unclip_ratio: 2,
-          text_rec_score_thresh: PADDLE_OCR_RECOGNITION_SCORE_THRESHOLD,
-        },
-        pipelineBatchSize: 1,
-        textDetectionBatchSize: 1,
-        textRecognitionBatchSize: 1,
-      },
-      ortOptions: {
-        backend: 'wasm',
-        // ORT 1.24 interprets a string as a directory containing both its
-        // dynamic JS loader and Wasm. Supplying the exact Wasm URL keeps the
-        // SDK's bundled loader in use and prevents an unbundled `.jsep.mjs`
-        // request.
-        wasmPaths: { wasm: options.runtimeWasmUrl },
-        numThreads: 1,
-        simd: true,
-        proxy: false,
-        disableWasmProxy: true,
-      },
-    });
-    return pipeline;
-  } catch (error) {
-    pipeline.terminate();
-    throw error;
-  }
+export function createPaddleSandboxClient(
+  options: PaddleSandboxClientCreateOptions,
+): Promise<PaddleSandboxClient> {
+  return PaddleSandboxFrameClient.create(options);
 }
 
-type PaddleWorkerResponse =
-  | {
-      readonly status: 'success';
-      readonly requestId: number;
-      readonly payload: unknown;
-    }
-  | {
-      readonly status: 'error';
-      readonly requestId: number;
-      readonly error: unknown;
-    };
-
-function readWorkerResponse(input: unknown): PaddleWorkerResponse | undefined {
-  if (!isRecord(input) || input.kind !== 'worker-transport-response' ||
-    !Number.isSafeInteger(input.requestId) || Number(input.requestId) < 1) {
-    return undefined;
-  }
-  if (input.status === 'success' && Object.hasOwn(input, 'payload')) {
-    return {
-      status: 'success',
-      requestId: input.requestId as number,
-      payload: input.payload,
-    };
-  }
-  if (input.status === 'error' && Object.hasOwn(input, 'error')) {
-    return {
-      status: 'error',
-      requestId: input.requestId as number,
-      error: input.error,
-    };
-  }
-  return undefined;
-}
-
-function workerResponseError(value: unknown): Error {
-  const error = new Error('Paddle OCR Worker failed.');
-  if (isRecord(value) && typeof value.name === 'string') error.name = value.name;
-  return error;
-}
-
-const PADDLE_SUPPORTED_LANGUAGES = new Set([
-  'cs', 'da', 'de', 'en', 'es', 'fi', 'fr', 'hr', 'hu', 'id', 'it', 'lt',
-  'nl', 'no', 'pl', 'pt', 'ro', 'sk', 'sl', 'sv', 'tr', 'vi', 'zh',
-  'zh-Hant',
-]);
-
-function disposePipelineDetached(pipeline: PaddlePipeline | undefined): void {
-  if (!pipeline) return;
-  try {
-    void Promise.resolve(pipeline.dispose()).catch(() => undefined);
-  } catch {
-    // Best-effort release cannot retain the host slot.
-  }
+function sandboxFailure(code: PaddleSandboxErrorCode): Error {
+  if (code === 'runtime-loader-failed') return new PaddleRuntimeLoaderError();
+  if (code === 'runtime-startup-failed') return new PaddleRuntimeStartupError();
+  if (code === 'worker-lost') return new WorkerLostError();
+  if (code === 'invalid-result') return new InvalidNormalizedOcrOutputError();
+  return new PaddleRecognitionError();
 }
 
 function withDeadline<T>(
@@ -494,7 +398,7 @@ function withDeadline<T>(
       new DOMException('PaddleOCR.js recognition cancelled.', 'AbortError'),
     ));
     const timer = setTimer(
-      () => finish(() => reject(new RecognitionTimeoutError())),
+      () => finish(() => reject(new PaddleRecognitionError())),
       milliseconds,
     );
     signal.addEventListener('abort', onAbort, { once: true });
@@ -511,9 +415,32 @@ function positiveTimeout(value: number | undefined, fallback: number): number {
     : fallback;
 }
 
-function isRecord(value: unknown): value is Record<string, unknown> {
-  return typeof value === 'object' && value !== null && !Array.isArray(value);
+type TerminalPaddleFailureName =
+  | 'PaddleSandboxUnavailableError'
+  | 'PaddleRuntimeLoaderError'
+  | 'PaddleRuntimeStartupError';
+
+function isTerminalFailure(error: unknown): error is Error & {
+  readonly name: TerminalPaddleFailureName;
+} {
+  return error instanceof PaddleSandboxUnavailableError ||
+    error instanceof PaddleRuntimeLoaderError ||
+    error instanceof PaddleRuntimeStartupError;
 }
+
+function terminalFailure(name: TerminalPaddleFailureName): Error {
+  if (name === 'PaddleSandboxUnavailableError') {
+    return new PaddleSandboxUnavailableError();
+  }
+  if (name === 'PaddleRuntimeLoaderError') return new PaddleRuntimeLoaderError();
+  return new PaddleRuntimeStartupError();
+}
+
+const PADDLE_SUPPORTED_LANGUAGES = new Set([
+  'cs', 'da', 'de', 'en', 'es', 'fi', 'fr', 'hr', 'hu', 'id', 'it', 'lt',
+  'nl', 'no', 'pl', 'pt', 'ro', 'sk', 'sl', 'sv', 'tr', 'vi', 'zh',
+  'zh-Hant',
+]);
 
 export class ProviderUnavailableError extends Error {
   override readonly name = 'ProviderUnavailableError';
@@ -527,14 +454,38 @@ export class UnsupportedLanguageError extends Error {
   override readonly name = 'UnsupportedLanguageError';
 }
 
+export class PaddleSandboxUnavailableError extends Error {
+  override readonly name = 'PaddleSandboxUnavailableError';
+
+  constructor(options?: ErrorOptions) {
+    super('The local Paddle sandbox could not start.', options);
+  }
+}
+
+export class PaddleRuntimeLoaderError extends Error {
+  override readonly name = 'PaddleRuntimeLoaderError';
+
+  constructor() {
+    super('The pinned Paddle runtime loader could not start.');
+  }
+}
+
+export class PaddleRuntimeStartupError extends Error {
+  override readonly name = 'PaddleRuntimeStartupError';
+
+  constructor() {
+    super('The Paddle runtime could not initialize.');
+  }
+}
+
+export class PaddleRecognitionError extends Error {
+  override readonly name = 'PaddleRecognitionError';
+}
+
 export class WorkerLostError extends Error {
   override readonly name = 'WorkerLostError';
 }
 
-class RecognitionTimeoutError extends Error {
-  override readonly name = 'RecognitionTimeoutError';
-}
-
-class InvalidNormalizedOcrOutputError extends Error {
+export class InvalidNormalizedOcrOutputError extends Error {
   override readonly name = 'InvalidNormalizedOcrOutputError';
 }

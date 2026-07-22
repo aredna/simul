@@ -33,6 +33,9 @@ export const OCR_HOST_ERROR_CODES = Object.freeze([
   'unsupported-language',
   'recognition-failed',
   'worker-lost',
+  'paddle-sandbox-unavailable',
+  'paddle-runtime-loader-failed',
+  'paddle-runtime-startup-failed',
   'cancelled',
   'invalid-result',
 ] as const);

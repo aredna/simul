@@ -63,6 +63,7 @@ import {
 } from '../../lib/page-snapshot';
 import {
   compiledImageAnalysisCapabilities,
+  compiledImageTextProviderIds,
   effectiveCompiledProviderOrder,
   hasCompiledImageAnalysisCapability,
 } from '../../lib/ocr/provider-registry';
@@ -83,10 +84,24 @@ import {
 } from '../../lib/ocr/pixel-acquisition';
 import { createBrowserImageRecognitionCoordinator } from '../../lib/ocr/image-analysis-coordinator';
 import { IndexedDbTransientImageStore } from '../../lib/ocr/transient-image-store';
+import { readEnsureOcrHostResponse } from '../../lib/ocr/offscreen-protocol';
+import {
+  createProbeOcrProviderCommand,
+  readProbeOcrProviderResponse,
+  type OcrProviderRuntimeStatus,
+} from '../../lib/ocr/provider-status-protocol';
+import {
+  runtimeReadyOcrProviderOrder,
+  shouldRetryOcrProviderProbe,
+} from '../../lib/ocr/runtime-provider-readiness';
 import {
   OCR_MINIMUM_CONFIDENCE_OPTIONS,
   isOcrMinimumConfidence,
 } from '../../lib/ocr/result-quality';
+import {
+  activateImageReplicaAfterRun,
+  imageReplicaActivationFailureReason,
+} from '../../lib/ocr/replica-activation';
 import {
   PREFERENCE_LOCK_NAME,
   readPreferenceCommandResult,
@@ -230,14 +245,6 @@ interface PendingLiveUpdate {
   firstSequence: number;
   sequence: number;
   nodeIds: Set<string>;
-}
-
-interface PendingImageReplicaActivation {
-  readonly request: ReplicaCaptureRequest;
-  readonly sourceWindowId: number;
-  readonly mode: ReplicaEngineMode;
-  readonly signal: AbortSignal;
-  activated: boolean;
 }
 
 const NAVIGATION_DEBOUNCE_MS = 350;
@@ -498,31 +505,10 @@ imageTranslationController = new ImageTranslationController({
 });
 
 function handleReplicaSourceCommit(commit: ReplicaSourceCommit): void {
-  const pending = pendingImageReplicaActivation;
   const selectedSnapshot = replicaSurfaceRouter.snapshot();
-  if (
-    pending &&
-    !pending.activated &&
-    !pending.signal.aborted &&
-    pending.mode === replicaEngineController.mode &&
-    pending.request.isCurrent() &&
-    captureRequestMatchesSourceDocument(pending.request, commit.document) &&
-    selectedSnapshot &&
-    captureRequestMatchesSourceDocument(
-      pending.request,
-      selectedSnapshot.document,
-    ) &&
-    sameSourceReplicaLease(selectedSnapshot, commit)
-  ) {
-    pending.activated = imageTranslationController?.activateReplica(
-      pending.request,
-      pending.sourceWindowId,
-      commit.replayLease,
-    ) ?? false;
-  } else if (
-    selectedSnapshot &&
-    sameSourceReplicaLease(selectedSnapshot, commit)
-  ) {
+  if (selectedSnapshot && sameSourceReplicaLease(selectedSnapshot, commit)) {
+    // Initial activation is deliberately deferred until the engine run has
+    // settled. Checkpoint/live callbacks can only advance an existing lease.
     imageTranslationController?.notifyReplicaCommit(
       commit.document,
       commit.replayLease,
@@ -638,7 +624,14 @@ let imageAnalysisPreferenceRevision = 0;
 let imageAnalysisControls: HTMLElement | undefined;
 let surfaceTransitionInFlight = false;
 let latestToolbarLaunchStamp: CompanionLaunchStamp | undefined;
-let pendingImageReplicaActivation: PendingImageReplicaActivation | undefined;
+const ocrProviderRuntimeStatuses = new Map<
+  ImageTextProviderId,
+  OcrProviderRuntimeStatus | 'checking'
+>();
+let textDetectorProbeRetryUsed = false;
+if (compiledImageTextProviderIds.includes('chrome-text-detector')) {
+  ocrProviderRuntimeStatuses.set('chrome-text-detector', 'checking');
+}
 let toolbarAttention: ToolbarAttentionTarget | undefined;
 let toolbarAttentionTone: Extract<CompanionStatusTone, 'warning' | 'error'> =
   'warning';
@@ -1053,7 +1046,10 @@ void initialize();
 
 async function initialize(): Promise<void> {
   await Promise.all([loadPreferences(), loadPanelWindowId()]);
-  await refreshImageCaptureAccess();
+  await Promise.all([
+    refreshImageCaptureAccess(),
+    refreshOcrProviderRuntimeStatuses(),
+  ]);
   applyReplicaEnginePreference();
   const [, sourceResult] = await Promise.allSettled([
     checkPanelPlacement(),
@@ -1637,7 +1633,6 @@ function queueCapture(request: CaptureRequest): void {
   activeAbortController?.abort();
   liveDeltaAbortController?.abort();
   replicaShadowAbortController?.abort();
-  pendingImageReplicaActivation = undefined;
   imageTranslationController.releaseReplica();
   availabilityRequestId += 1;
   pendingLiveUpdate = undefined;
@@ -1763,6 +1758,10 @@ async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> 
       );
       if (!captureCoordinator.isCurrent(work.generation)) return;
     } else if (!snapshotInjection?.documentId) {
+      logImageTranslationDiagnostic(Object.freeze({
+        stage: 'replica-not-activated' as const,
+        reason: 'document-unavailable' as const,
+      }));
       imageTranslationController.releaseReplica();
       replicaEngineController.releasePresentation(true);
     }
@@ -1848,52 +1847,70 @@ async function runReplicaEngineCheckpoint(
       normalizedPageUrl(followedPageIdentity.url) === normalizedPageUrl(identity.url),
   };
   let shadowCommitted = false;
-  const imageActivation: PendingImageReplicaActivation = {
-    request,
-    sourceWindowId: identity.windowId,
-    mode: replicaEngineController.mode,
-    signal: abortController.signal,
-    activated: false,
-  };
-  pendingImageReplicaActivation = imageActivation;
+  const activationMode = replicaEngineController.mode;
+  let engineRunSettled = false;
+  let activationDecisionSettled = false;
   const shadowOwnershipStarted = replicaEngineController.shadowAvailable;
   if (shadowOwnershipStarted) {
     legacyTransitionGate.beginShadowOwnership();
   }
   try {
     const result = await replicaEngineController.run(request, abortController.signal);
+    engineRunSettled = true;
     shadowCommitted = isCommittedShadowReplica(
       result,
       visibleReplayHost.hasCommittedReplica,
     );
+    const selectedSnapshot = replicaSurfaceRouter.snapshot();
+    const activation = activateImageReplicaAfterRun({
+      runStatus: result.status,
+      hasCommittedReplica: shadowCommitted,
+      aborted: abortController.signal.aborted,
+      modeMatches: activationMode === replicaEngineController.mode,
+      requestCurrent: request.isCurrent(),
+      snapshotAvailable: selectedSnapshot !== undefined,
+      snapshotMatches: Boolean(
+        selectedSnapshot &&
+        captureRequestMatchesSourceDocument(
+          request,
+          selectedSnapshot.document,
+        ),
+      ),
+      activate: () => Boolean(
+        selectedSnapshot &&
+        imageTranslationController.activateReplica(
+          request,
+          identity.windowId,
+          selectedSnapshot.replayLease,
+        ),
+      ),
+    });
+    if (activation.status === 'not-activated') {
+      logImageTranslationDiagnostic(Object.freeze({
+        stage: 'replica-not-activated' as const,
+        reason: activation.reason,
+      }));
+    }
+    activationDecisionSettled = true;
     if (shadowCommitted) {
       liveReplicaFailureRecoveryGate.markCommitted();
-      if (!imageActivation.activated) {
-        const selectedSnapshot = replicaSurfaceRouter.snapshot();
-        if (
-          pendingImageReplicaActivation === imageActivation &&
-          !imageActivation.signal.aborted &&
-          imageActivation.mode === replicaEngineController.mode &&
-          request.isCurrent() &&
-          selectedSnapshot &&
-          captureRequestMatchesSourceDocument(
-            request,
-            selectedSnapshot.document,
-          )
-        ) {
-          imageActivation.activated = imageTranslationController.activateReplica(
-            request,
-            identity.windowId,
-            selectedSnapshot.replayLease,
-          );
-        }
-      }
       updateMirrorLayout();
     }
-  } finally {
-    if (pendingImageReplicaActivation === imageActivation) {
-      pendingImageReplicaActivation = undefined;
+  } catch (error) {
+    if (!activationDecisionSettled) {
+      const reason = imageReplicaActivationFailureReason({
+        aborted: abortController.signal.aborted,
+        requestCurrent: request.isCurrent(),
+        modeMatches: activationMode === replicaEngineController.mode,
+        engineRunSettled,
+      });
+      logImageTranslationDiagnostic(Object.freeze({
+        stage: 'replica-not-activated' as const,
+        reason,
+      }));
     }
+    throw error;
+  } finally {
     if (shadowOwnershipStarted && !shadowCommitted) {
       const needsFreshCapture = legacyTransitionGate.release();
       if (needsFreshCapture && request.isCurrent()) {
@@ -3341,15 +3358,19 @@ function configureImageTranslation(): void {
     preferences.imageTextProviderOrder,
     preferences.disabledImageTextProviderIds,
   );
+  const usableProviderOrder = runtimeReadyOcrProviderOrder(
+    enabledProviderOrder,
+    ocrProviderRuntimeStatuses,
+  );
   imageTranslationController.configure({
     enabled:
       preferences.imageTranslationEnabled &&
       imageCaptureAccess === 'granted' &&
       !isLiveSourceOnlyMode() &&
-      enabledProviderOrder.length > 0,
+      usableProviderOrder.length > 0,
     scanPolicy: preferences.imageScanPolicy,
     skipSmallImages: preferences.skipSmallImages,
-    providerOrder: enabledProviderOrder,
+    providerOrder: usableProviderOrder,
     ocrMinimumConfidence: preferences.ocrMinimumConfidence,
     sourceLanguage: preferences.sourceLanguage,
     ...(resolvedSourceLanguage
@@ -3358,6 +3379,46 @@ function configureImageTranslation(): void {
     targetLanguage: preferences.targetLanguage,
     translationIdle: !translationInFlight,
   });
+}
+
+async function refreshOcrProviderRuntimeStatuses(): Promise<void> {
+  if (!compiledImageTextProviderIds.includes('chrome-text-detector')) return;
+  ocrProviderRuntimeStatuses.set('chrome-text-detector', 'checking');
+  renderImageAnalysisControls();
+  configureImageTranslation();
+  let status: OcrProviderRuntimeStatus;
+  try {
+    const ensureRaw: unknown = await browser.runtime.sendMessage({
+      kind: 'simul:ocr-v1:ensure-host',
+      version: 1,
+    });
+    const ready = readEnsureOcrHostResponse(ensureRaw);
+    if (!ready?.ready) throw new Error('OCR host unavailable.');
+    const raw: unknown = await browser.runtime.sendMessage(
+      createProbeOcrProviderCommand('chrome-text-detector'),
+    );
+    const response = readProbeOcrProviderResponse(
+      raw,
+      'chrome-text-detector',
+    );
+    if (!response) throw new Error('Invalid OCR provider probe response.');
+    status = response.provider;
+  } catch {
+    status = Object.freeze({
+      status: 'unavailable',
+      providerId: 'chrome-text-detector',
+      reason: 'probe-failed',
+    });
+  }
+  ocrProviderRuntimeStatuses.set('chrome-text-detector', status);
+  renderImageAnalysisControls();
+  configureImageTranslation();
+  if (shouldRetryOcrProviderProbe(status, textDetectorProbeRetryUsed)) {
+    textDetectorProbeRetryUsed = true;
+    window.setTimeout(() => {
+      void refreshOcrProviderRuntimeStatuses();
+    }, 1_000);
+  }
 }
 
 function initializeImageAnalysisControls(): void {
@@ -3501,6 +3562,26 @@ function renderImageAnalysisControls(): void {
       name.textContent = imageProviderName(id);
       providerToggle.append(enabled, name);
       item.append(providerToggle);
+      const runtimeStatus = ocrProviderRuntimeStatuses.get(id);
+      if (runtimeStatus) {
+        const status = document.createElement('span');
+        status.className = runtimeStatus === 'checking'
+          ? 'ocr-provider-status'
+          : `ocr-provider-status ocr-provider-status-${runtimeStatus.status}`;
+        status.textContent = runtimeStatus === 'checking'
+          ? 'Checking…'
+          : runtimeStatus.status === 'available'
+            ? 'Available'
+            : 'Unavailable';
+        status.title = runtimeStatus === 'checking'
+          ? 'Checking whether this Chrome runtime can complete a local detect call.'
+          : runtimeStatus.status === 'available'
+            ? 'This Chrome runtime completed the local capability probe.'
+            : runtimeStatus.reason === 'api-missing'
+              ? 'This Chrome runtime does not expose the experimental TextDetector API.'
+              : 'This Chrome runtime could not complete the TextDetector capability probe.';
+        item.append(status);
+      }
       const buttons = document.createElement('span');
       buttons.className = 'ocr-order-buttons';
       const up = createOrderButton('↑', 'Move earlier', index === 0, () =>
@@ -3522,9 +3603,21 @@ function renderImageAnalysisControls(): void {
       platformNote.className = 'microcopy';
       setUiText(
         platformNote,
-        'Chrome TextDetector is platform-dependent and may return boxes without text on macOS; Simul falls through to the next enabled provider.',
+        'Chrome TextDetector is experimental and platform-dependent. When its local detect probe is unavailable, Simul skips capture work for it and falls through to the next enabled provider.',
       );
       root.append(platformNote);
+    }
+    if (
+      compiledOrder.includes('tesseract') ||
+      compiledOrder.includes('tesseract-wasm-direct')
+    ) {
+      const tesseractNote = document.createElement('p');
+      tesseractNote.className = 'microcopy';
+      setUiText(
+        tesseractNote,
+        'The Tesseract.js wrapper and direct Wasm adapter use the same Tesseract OCR family and local language models, so similar text is expected. This A/B compares startup, memory, lifecycle, geometry, and language handling; the two do not independently corroborate each other.',
+      );
+      root.append(tesseractNote);
     }
     if (
       effectiveCompiledProviderOrder(
@@ -3683,8 +3776,8 @@ function createPromptToggle(
 function imageProviderName(id: ImageTextProviderId): string {
   const names: Record<ImageTextProviderId, string> = {
     'chrome-text-detector': 'Chrome TextDetector (platform)',
-    tesseract: 'Tesseract.js',
-    'tesseract-wasm-direct': 'Tesseract WASM (direct A/B)',
+    tesseract: 'Tesseract.js (wrapper A/B)',
+    'tesseract-wasm-direct': 'Tesseract Wasm (direct A/B)',
     transformers: 'Transformers.js',
     'paddleocr-wasm': 'PaddleOCR Wasm',
     'chromium-screen-ai': 'Chromium Screen AI',

@@ -4,6 +4,8 @@ import type {
   OffscreenOcrProviderRunnerFactory,
 } from './offscreen-host';
 import type { OffscreenOcrJob } from './offscreen-protocol';
+import type { ImageTextProviderId } from './known-provider-ids';
+import type { OcrProviderRuntimeStatus } from './provider-status-protocol';
 
 /** Lazily constructs only the provider selected by the current ordered job. */
 export class OffscreenOcrProviderRouter implements OffscreenOcrProviderRunner {
@@ -50,6 +52,36 @@ export class OffscreenOcrProviderRouter implements OffscreenOcrProviderRunner {
     this.#runners.clear();
     this.#active = undefined;
     await Promise.allSettled(runners.map((runner) => runner.dispose()));
+  }
+
+  async probe(providerId: ImageTextProviderId): Promise<OcrProviderRuntimeStatus> {
+    const factory = this.#factories.get(providerId);
+    if (!factory) {
+      return Object.freeze({
+        status: 'unavailable',
+        providerId,
+        reason: 'not-compiled',
+      });
+    }
+    if (!factory.probe) {
+      return Object.freeze({ status: 'available', providerId });
+    }
+    try {
+      const status = await factory.probe();
+      return status.providerId === providerId
+        ? status
+        : Object.freeze({
+            status: 'unavailable' as const,
+            providerId,
+            reason: 'probe-failed' as const,
+          });
+    } catch {
+      return Object.freeze({
+        status: 'unavailable',
+        providerId,
+        reason: 'probe-failed',
+      });
+    }
   }
 
   #runner(providerId: string): OffscreenOcrProviderRunner | undefined {

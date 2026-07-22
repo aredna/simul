@@ -257,6 +257,9 @@ select { width: 100%; min-height: 34px; padding: 5px 26px 5px 8px; font-size: 12
 .ocr-provider-toggle { display: inline-flex; min-width: 0; align-items: center; gap: 7px; cursor: pointer; }
 .ocr-provider-toggle input { flex: 0 0 auto; margin: 0; accent-color: var(--green); }
 .ocr-provider-toggle span { overflow-wrap: anywhere; }
+.ocr-provider-status { margin-left: auto; color: var(--muted); font-size: 9px; white-space: nowrap; }
+.ocr-provider-status-available { color: var(--success-text); }
+.ocr-provider-status-unavailable { color: var(--warning-text); }
 .ocr-provider-paused { color: var(--warning-text); }
 .ocr-order-buttons { display: flex; gap: 4px; }
 .ocr-order-buttons button { width: 28px; min-height: 28px; padding: 0; }

@@ -96,6 +96,18 @@ describe('ImageTranslationDiagnosticHistory', () => {
     expect(history.append('disabled')).toEqual(['1. disabled']);
   });
 
+  it('reports a bounded reason when OCR never activates for a replica run', () => {
+    const history = new ImageTranslationDiagnosticHistory();
+    history.append({
+      stage: 'replica-not-activated',
+      reason: 'snapshot-mismatch',
+    });
+
+    expect(history.entries).toEqual([
+      '1. replica not activated: reason=snapshot-mismatch',
+    ]);
+  });
+
   it('never formats unallowlisted content from a diagnostic object', () => {
     const diagnostic = {
       stage: 'recognition-cache',
