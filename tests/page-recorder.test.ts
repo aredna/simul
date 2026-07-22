@@ -1,6 +1,8 @@
 import { parseHTML } from 'linkedom';
 import { describe, expect, it } from 'vitest';
 
+import { createImageSourcePortName } from '../lib/ocr/image-source-protocol';
+import { SourceImageObserver } from '../lib/ocr/source-image-observer';
 import type { ReplicaCheckpointResponse } from '../lib/replica/contracts';
 import {
   createLiveAckMessage,
@@ -21,6 +23,7 @@ import {
   createCheckpointError,
   createReplicaIdentity,
 } from '../lib/replica/protocol-v2';
+import { sourceDocumentIdentity } from '../lib/replica/source-identity';
 
 const identity = createReplicaIdentity({
   sessionId: 'session-recorder',
@@ -188,6 +191,97 @@ describe('page recorder checkpoint', () => {
 });
 
 describe('page recorder bridge ownership', () => {
+  it('refreshes image discovery from the same mirror after a full snapshot', () => {
+    const { document, window } = parseHTML(
+      '<html><body><img id="late-mirror" src="https://private.example/image.png"></body></html>',
+    );
+    Object.defineProperty(window, 'top', { configurable: true, value: window });
+    const image = document.querySelector<HTMLImageElement>('#late-mirror')!;
+    setRecorderImageFacts(image);
+    const mirrorIds = new Map<Node, number>();
+    const mirrorNodes = new Map<number, Node>();
+    const onConnect = new FakeEvent<(port: Browser.runtime.Port) => void>();
+    const onMessage = new FakeEvent<(message: unknown) => unknown>();
+    const runtime = {
+      onConnect: eventAdapter(onConnect),
+      onMessage: eventAdapter(onMessage),
+    } as unknown as PageRecorderBridgeEnvironment['runtime'];
+    installPageRecorderBridge({
+      global: {} as typeof globalThis,
+      runtime,
+      document,
+      window,
+      now: () => 10,
+      preflight: () => undefined,
+      recorderMirror: {
+        getId: (node) => mirrorIds.get(node) ?? -1,
+        getNode: (nodeId) => mirrorNodes.get(nodeId) ?? null,
+      },
+      createImageSourceObserver: (environment) => new SourceImageObserver({
+        ...environment,
+        createIntersectionObserver: (callback) =>
+          new SettledElementObserver(callback),
+        createResizeObserver: () => new NoopElementObserver(),
+        createMutationObserver: () => new NoopMutationObserver(),
+        scheduleFrame: () => 1,
+        cancelFrame: () => undefined,
+      }),
+      start: (options) => {
+        options.emit(bridgeCheckpointEvents()[0]);
+        mirrorIds.set(image, 37);
+        mirrorNodes.set(37, image);
+        options.emit({
+          type: 2,
+          data: {
+            node: {
+              type: 0,
+              id: 1,
+              childNodes: [{
+                type: 2,
+                id: 37,
+                tagName: 'img',
+                attributes: {},
+                childNodes: [],
+              }],
+            },
+            initialOffset: { top: 0, left: 0 },
+          },
+          timestamp: 2,
+        });
+        return () => undefined;
+      },
+      takeFullSnapshot: () => undefined,
+      scheduleFrame: () => 1,
+      cancelFrame: () => undefined,
+    });
+
+    const imagePort = new FakePort(
+      createImageSourcePortName(identity.sessionId, 'rrweb'),
+    );
+    onConnect.emit(imagePort as unknown as Browser.runtime.Port);
+    imagePort.emitMessage({
+      kind: 'simul:image-source-v1:start',
+      document: sourceDocumentIdentity(identity),
+    });
+    expect(imagePort.posted).toMatchObject([{
+      kind: 'simul:image-source-v1:ready',
+      summary: { candidateImages: 1, observedImages: 0 },
+    }]);
+
+    const livePort = new FakePort(createReplicaLivePortName(identity.sessionId));
+    onConnect.emit(livePort as unknown as Browser.runtime.Port);
+    livePort.emitMessage(createStartLiveMessage(identity));
+
+    expect(imagePort.posted.at(-1)).toMatchObject({
+      kind: 'simul:image-source-v1:change',
+      change: { kind: 'upsert', descriptor: { nodeId: 37 } },
+    });
+    expect(JSON.stringify(imagePort.posted)).not.toContain('private.example');
+    expect(JSON.stringify(livePort.posted)).toContain('"id":37');
+    livePort.disconnect();
+    imagePort.disconnect();
+  });
+
   it('keeps the live recorder exclusive and reports capture_busy to one-off capture', async () => {
     const harness = createBridgeHarness();
     const port = new FakePort(createReplicaLivePortName(identity.sessionId));
@@ -503,6 +597,53 @@ class FakePort {
   emitMessage(message: unknown): void {
     this.onMessage.emit(message);
   }
+}
+
+function setRecorderImageFacts(image: HTMLImageElement): void {
+  Object.defineProperties(image, {
+    naturalWidth: { configurable: true, value: 800 },
+    naturalHeight: { configurable: true, value: 400 },
+    getBoundingClientRect: {
+      configurable: true,
+      value: () => ({
+        x: 0,
+        y: 0,
+        top: 0,
+        left: 0,
+        right: 200,
+        bottom: 100,
+        width: 200,
+        height: 100,
+        toJSON: () => undefined,
+      }),
+    },
+  });
+}
+
+class SettledElementObserver {
+  constructor(
+    private readonly callback: (
+      entries: readonly IntersectionObserverEntry[],
+    ) => void,
+  ) {}
+
+  observe(target: Element): void {
+    this.callback([{ target, isIntersecting: false } as IntersectionObserverEntry]);
+  }
+
+  unobserve(): void {}
+  disconnect(): void {}
+}
+
+class NoopElementObserver {
+  observe(): void {}
+  unobserve(): void {}
+  disconnect(): void {}
+}
+
+class NoopMutationObserver {
+  observe(): void {}
+  disconnect(): void {}
 }
 
 class FakeEvent<T extends (...args: never[]) => unknown> {

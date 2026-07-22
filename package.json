@@ -16,7 +16,10 @@
     "artifact:sync": "node tools/extension-artifact.mjs sync",
     "artifact:check": "node tools/extension-artifact.mjs check",
     "check:ocr-paddle-trial": "node tools/extension-artifact.mjs check-ocr-paddle-trial",
+    "check:ocr-all-trial": "node tools/extension-artifact.mjs check-ocr-all-trial",
+    "artifact:sync:ocr-trials": "node tools/extension-artifact.mjs sync-ocr-all-trial",
     "vendor:ocr-paddle": "node tools/vendor-paddle-ocr.mjs",
+    "vendor:ocr-tesseract-wasm": "node tools/vendor-tesseract-wasm.mjs",
     "zip": "wxt zip --browser chrome",
     "postinstall": "wxt prepare",
     "typecheck": "tsc --noEmit",
@@ -48,6 +51,7 @@
     "@rrweb/record": "2.1.0",
     "@rrweb/replay": "2.1.0",
     "onnxruntime-web": "1.24.3",
+    "tesseract-wasm": "0.11.0",
     "tesseract.js": "7.0.0",
     "tesseract.js-core": "7.0.0"
   }

@@ -41,12 +41,14 @@ describe('parseCompanionPreferences', () => {
       imageTranslationEnabled: false,
       ocrMinimumConfidence: 0.65,
       imageTextProviderOrder: [
+        'paddleocr-wasm',
         'chrome-text-detector',
         'tesseract',
+        'tesseract-wasm-direct',
         'transformers',
-        'paddleocr-wasm',
         'chromium-screen-ai',
       ],
+      disabledImageTextProviderIds: [],
       imageScanPolicy: 'visible-first-background-prescan',
       skipSmallImages: true,
       usePromptForImageLanguage: false,
@@ -76,12 +78,14 @@ describe('parseCompanionPreferences', () => {
       imageTranslationEnabled: false,
       ocrMinimumConfidence: 0.65,
       imageTextProviderOrder: [
+        'paddleocr-wasm',
         'chrome-text-detector',
         'tesseract',
+        'tesseract-wasm-direct',
         'transformers',
-        'paddleocr-wasm',
         'chromium-screen-ai',
       ],
+      disabledImageTextProviderIds: [],
       imageScanPolicy: 'visible-first-background-prescan',
       skipSmallImages: true,
       usePromptForImageLanguage: false,
@@ -123,12 +127,14 @@ describe('parseCompanionPreferences', () => {
       imageTranslationEnabled: false,
       ocrMinimumConfidence: 0.65,
       imageTextProviderOrder: [
+        'paddleocr-wasm',
         'chrome-text-detector',
         'tesseract',
+        'tesseract-wasm-direct',
         'transformers',
-        'paddleocr-wasm',
         'chromium-screen-ai',
       ],
+      disabledImageTextProviderIds: [],
       imageScanPolicy: 'visible-first-background-prescan',
       skipSmallImages: true,
       usePromptForImageLanguage: false,
@@ -242,9 +248,11 @@ describe('parseCompanionPreferences', () => {
         'paddleocr-wasm',
         'tesseract',
         'chrome-text-detector',
+        'tesseract-wasm-direct',
         'transformers',
         'chromium-screen-ai',
       ],
+      disabledImageTextProviderIds: [],
       imageScanPolicy: 'visible-only',
       skipSmallImages: false,
       usePromptForImageLanguage: true,
@@ -258,15 +266,44 @@ describe('parseCompanionPreferences', () => {
       'tesseract',
     ]);
     expect(parseCompanionPreferences(undefined).imageTextProviderOrder).toEqual([
+      'paddleocr-wasm',
       'chrome-text-detector',
       'tesseract',
+      'tesseract-wasm-direct',
       'transformers',
-      'paddleocr-wasm',
       'chromium-screen-ai',
     ]);
     expect(parseCompanionPreferences({
       ocrMinimumConfidence: 0.66,
     }).ocrMinimumConfidence).toBe(0.65);
+  });
+
+  it('repairs provider toggles and migrates the exact legacy default priority', () => {
+    expect(parseCompanionPreferences({
+      imageTextProviderOrder: [
+        'chrome-text-detector',
+        'tesseract',
+        'transformers',
+        'paddleocr-wasm',
+        'chromium-screen-ai',
+      ],
+      disabledImageTextProviderIds: [
+        'tesseract',
+        'unknown',
+        'tesseract',
+        'paddleocr-wasm',
+      ],
+    })).toMatchObject({
+      imageTextProviderOrder: [
+        'paddleocr-wasm',
+        'chrome-text-detector',
+        'tesseract',
+        'tesseract-wasm-direct',
+        'transformers',
+        'chromium-screen-ai',
+      ],
+      disabledImageTextProviderIds: ['tesseract', 'paddleocr-wasm'],
+    });
   });
 });
 

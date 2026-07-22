@@ -830,6 +830,92 @@ describe('offscreen OCR protocol and lifecycle', () => {
     ]);
   });
 
+  it('continues after uncertain Paddle candidates for independent corroboration', async () => {
+    const store = memoryStore();
+    const calls: OffscreenOcrJob[] = [];
+    const sendMessage = vi.fn(async (message: unknown) => {
+      if (isEnsureMessage(message)) {
+        return { kind: 'simul:ocr-v1:host-ready', version: 1, ready: true };
+      }
+      const command = readOffscreenOcrCommand(message);
+      if (command?.kind !== 'simul:ocr-v1:run') return undefined;
+      calls.push(command.job);
+      return success(command.job, {
+        providerId: command.job.providerId,
+        bitmapWidth: command.job.bitmapWidth,
+        bitmapHeight: command.job.bitmapHeight,
+        transcript: 'trial text',
+        regions: [{
+          text: 'trial text',
+          confidence: 0.5,
+          boundingBox: { x: 10, y: 12, width: 80, height: 20 },
+        }],
+      });
+    });
+    const coordinator = new ImageRecognitionCoordinator({
+      store,
+      sendMessage,
+      clientId: 'client-paddle-uncertain',
+    });
+
+    await expect(coordinator.recognize(pixels, {
+      providerOrder: ['paddleocr-wasm', 'tesseract'],
+      sourceLanguage: 'en',
+      languageGroup: 'eng',
+      modelVersion: 'tessdata-fast-87416418',
+      minimumConfidence: 0.65,
+    })).resolves.toMatchObject({
+      status: 'complete',
+      result: {
+        providerId: 'tesseract',
+        transcript: 'trial text',
+      },
+      quality: { corroboratedRegions: 1 },
+    });
+    expect(calls.map(({ providerId }) => providerId)).toEqual([
+      'paddleocr-wasm',
+      'tesseract',
+    ]);
+  });
+
+  it('routes the separately versioned direct Tesseract-Wasm A/B job', async () => {
+    const store = memoryStore();
+    const calls: OffscreenOcrJob[] = [];
+    const sendMessage = vi.fn(async (message: unknown) => {
+      if (isEnsureMessage(message)) {
+        return { kind: 'simul:ocr-v1:host-ready', version: 1, ready: true };
+      }
+      const command = readOffscreenOcrCommand(message);
+      if (command?.kind !== 'simul:ocr-v1:run') return undefined;
+      calls.push(command.job);
+      return success(
+        command.job,
+        imageResultWithText(command.job, 'direct runtime'),
+      );
+    });
+    const coordinator = new ImageRecognitionCoordinator({
+      store,
+      sendMessage,
+      clientId: 'client-tesseract-wasm-direct',
+    });
+
+    await expect(coordinator.recognize(pixels, {
+      providerOrder: ['tesseract-wasm-direct'],
+      sourceLanguage: 'en',
+      languageGroup: 'eng',
+      modelVersion: 'tessdata-fast-87416418',
+    })).resolves.toMatchObject({
+      status: 'complete',
+      result: { providerId: 'tesseract-wasm-direct' },
+    });
+    expect(calls).toEqual([
+      expect.objectContaining({
+        providerId: 'tesseract-wasm-direct',
+        providerVersion: 'tesseract-wasm-0.11.0',
+      }),
+    ]);
+  });
+
   it('keeps confidence thresholds in the recognition cache identity', async () => {
     const store = memoryStore();
     const calls: OffscreenOcrJob[] = [];

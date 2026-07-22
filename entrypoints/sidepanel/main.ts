@@ -3337,17 +3337,19 @@ function syncToolbarPreferenceControls(): void {
 }
 
 function configureImageTranslation(): void {
+  const enabledProviderOrder = effectiveCompiledProviderOrder(
+    preferences.imageTextProviderOrder,
+    preferences.disabledImageTextProviderIds,
+  );
   imageTranslationController.configure({
     enabled:
       preferences.imageTranslationEnabled &&
       imageCaptureAccess === 'granted' &&
       !isLiveSourceOnlyMode() &&
-      hasCompiledImageAnalysisCapability(),
+      enabledProviderOrder.length > 0,
     scanPolicy: preferences.imageScanPolicy,
     skipSmallImages: preferences.skipSmallImages,
-    providerOrder: effectiveCompiledProviderOrder(
-      preferences.imageTextProviderOrder,
-    ),
+    providerOrder: enabledProviderOrder,
     ocrMinimumConfidence: preferences.ocrMinimumConfidence,
     sourceLanguage: preferences.sourceLanguage,
     ...(resolvedSourceLanguage
@@ -3468,11 +3470,37 @@ function renderImageAnalysisControls(): void {
     root.append(orderLabel);
     const list = document.createElement('ol');
     list.className = 'ocr-provider-order';
+    const disabledProviders = new Set(
+      preferences.disabledImageTextProviderIds,
+    );
     compiledOrder.forEach((id, index) => {
       const item = document.createElement('li');
+      const providerToggle = document.createElement('label');
+      providerToggle.className = 'ocr-provider-toggle';
+      providerToggle.title =
+        'Turn this local OCR provider on or off without changing its priority.';
+      const enabled = document.createElement('input');
+      enabled.type = 'checkbox';
+      enabled.checked = !disabledProviders.has(id);
+      enabled.setAttribute(
+        'aria-label',
+        `${enabled.checked ? 'Disable' : 'Enable'} ${imageProviderName(id)}`,
+      );
+      enabled.addEventListener('change', () => {
+        const nextDisabled = new Set(
+          preferences.disabledImageTextProviderIds,
+        );
+        if (enabled.checked) nextDisabled.delete(id);
+        else nextDisabled.add(id);
+        void commitImageAnalysisPreferencePatch({
+          disabledImageTextProviderIds: preferences.imageTextProviderOrder
+            .filter((providerId) => nextDisabled.has(providerId)),
+        });
+      });
       const name = document.createElement('span');
       name.textContent = imageProviderName(id);
-      item.append(name);
+      providerToggle.append(enabled, name);
+      item.append(providerToggle);
       const buttons = document.createElement('span');
       buttons.className = 'ocr-order-buttons';
       const up = createOrderButton('↑', 'Move earlier', index === 0, () =>
@@ -3489,6 +3517,29 @@ function renderImageAnalysisControls(): void {
       list.append(item);
     });
     root.append(list);
+    if (compiledOrder.includes('chrome-text-detector')) {
+      const platformNote = document.createElement('p');
+      platformNote.className = 'microcopy';
+      setUiText(
+        platformNote,
+        'Chrome TextDetector is platform-dependent and may return boxes without text on macOS; Simul falls through to the next enabled provider.',
+      );
+      root.append(platformNote);
+    }
+    if (
+      effectiveCompiledProviderOrder(
+        preferences.imageTextProviderOrder,
+        preferences.disabledImageTextProviderIds,
+      ).length === 0
+    ) {
+      const paused = document.createElement('p');
+      paused.className = 'microcopy ocr-provider-paused';
+      setUiText(
+        paused,
+        'OCR is paused because every compiled provider is off.',
+      );
+      root.append(paused);
+    }
 
     const grid = document.createElement('div');
     grid.className = 'settings-grid';
@@ -3631,8 +3682,9 @@ function createPromptToggle(
 
 function imageProviderName(id: ImageTextProviderId): string {
   const names: Record<ImageTextProviderId, string> = {
-    'chrome-text-detector': 'Chrome Text Detector',
+    'chrome-text-detector': 'Chrome TextDetector (platform)',
     tesseract: 'Tesseract.js',
+    'tesseract-wasm-direct': 'Tesseract WASM (direct A/B)',
     transformers: 'Transformers.js',
     'paddleocr-wasm': 'PaddleOCR Wasm',
     'chromium-screen-ai': 'Chromium Screen AI',

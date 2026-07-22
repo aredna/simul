@@ -157,6 +157,27 @@ describe('OCR result quality', () => {
     );
   });
 
+  it('never treats two Tesseract bindings as independent corroborators', () => {
+    const primary = result([
+      region('same engine', 0.5),
+    ], 'tesseract-wasm-direct');
+    const sameFamily = result([
+      region('same engine', 0.9),
+    ], 'tesseract');
+    const independent = result([
+      region('same engine', 0.9),
+    ], 'paddleocr-wasm');
+
+    expect(filterImageTextResult(primary, {
+      minimumConfidence: 0.65,
+      corroboratingResults: [sameFamily],
+    }).hasAcceptedText).toBe(false);
+    expect(filterImageTextResult(primary, {
+      minimumConfidence: 0.65,
+      corroboratingResults: [independent],
+    }).hasAcceptedText).toBe(true);
+  });
+
   it('exposes only the persisted 0.25–0.95 threshold steps', () => {
     expect(OCR_MINIMUM_CONFIDENCE_OPTIONS).toHaveLength(15);
     expect(OCR_MINIMUM_CONFIDENCE_OPTIONS.at(0)).toBe(0.25);

@@ -1038,6 +1038,26 @@ describe('ImageTranslationController', () => {
     controller.dispose();
   });
 
+  it('admits a direct Tesseract-Wasm-only runtime route', async () => {
+    const source = { measure: vi.fn(), dispose: vi.fn() };
+    const openSource = vi.fn(async () => source);
+    const controller = createDormantController(openSource);
+    controller.configure({
+      enabled: true,
+      scanPolicy: 'visible-only',
+      skipSmallImages: false,
+      providerOrder: ['tesseract-wasm-direct'],
+      sourceLanguage: 'en',
+      targetLanguage: 'ja',
+      translationIdle: true,
+    });
+    controller.activateReplica(request, 3, 1);
+
+    await vi.waitFor(() => expect(openSource).toHaveBeenCalledOnce());
+    controller.dispose();
+    expect(source.dispose).toHaveBeenCalledOnce();
+  });
+
   it('starts the replacement OCR queue after a pair change cancels an active job', async () => {
     const { document } = parseHTML('<html><body><img lang="en"></body></html>');
     const image = document.querySelector('img') as unknown as HTMLImageElement;

@@ -30,6 +30,8 @@ their own packages. Generated BMAD Method files are covered separately below.
 | `regenerator-runtime` | 0.13.11 | MIT |
 | `source-map-js` | 1.2.1 | BSD-3-Clause |
 | `tesseract.js`, `tesseract.js-core` | 7.0.0 | Apache-2.0 |
+| `tesseract-wasm` | 0.11.0 | BSD-2-Clause |
+| `comlink` | 4.4.2 | Apache-2.0 |
 | `tr46` | 0.0.3 | MIT |
 | `wasm-feature-detect` | 1.8.0 | Apache-2.0 |
 | `webidl-conversions` | 3.0.1 | BSD-2-Clause |
@@ -116,6 +118,20 @@ The reviewed trial notice and complete packaged license set are retained at
 under `ocr/paddle/`. The vendored Worker's unused remote defaults are replaced
 with fail-closed local sentinels; models, Wasm, configuration, and executable
 code are loaded only from the extension package.
+
+## Optional direct Tesseract-Wasm A/B trial
+
+The exact four-provider local trial additionally packages `tesseract-wasm`
+0.11.0 (BSD-2-Clause) and its Comlink 4.4.2 transport (Apache-2.0). The binding
+uses a Tesseract OCR core (Apache-2.0) and Leptonica (BSD-2-Clause), and reuses
+the reviewed Apache-2.0 `tessdata_fast` catalog already listed above. Exact
+commit provenance, hashes, and complete license texts are retained under
+`vendor/ocr/tesseract-wasm/` in source and `ocr/tesseract-wasm/` in the local
+trial artifact. JavaScript, Worker, Wasm, and models are all packaged locally.
+
+Direct Tesseract-Wasm is labeled as a runtime A/B comparison. It belongs to
+the same recognition family as Tesseract.js and cannot independently
+corroborate Tesseract.js output.
 
 ## ISC-licensed material
 

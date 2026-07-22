@@ -24,6 +24,13 @@ trial runs with one Wasm thread and fixed detector thresholds of 0.45 and
 0.75. Cancellation or a 30-second job deadline terminates the Worker instead
 of leaving CPU-bound inference in the offscreen document.
 
+For local comparison, an exact four-provider artifact also includes
+`tesseract-wasm` 0.11.0 as **Tesseract WASM (direct A/B)**. Its BSD-2-Clause
+browser binding and packaged Wasm runtime reuse the same Apache-2.0
+`tessdata_fast` models as Tesseract.js. This is a runtime comparison, not an
+independent OCR signal: Simul assigns both bindings to the same corroboration
+family, so agreement between them can never promote uncertain text.
+
 [Tesseract.js](https://github.com/naptha/tesseract.js) runs Tesseract OCR in
 WebAssembly and exposes word/line/block geometry. The extension bundles the
 JavaScript, Worker, Wasm core loaders, and trained data locally. Its default CDN paths cannot be
@@ -42,10 +49,11 @@ The current pipeline:
 3. Captures a stable visible viewport crop below Chrome's two-per-second cap,
    proportionally downscales high-DPI crops to at most 4 MP, and hashes the
    encoded crop.
-4. Tries the saved compiled provider order in an offscreen document:
-   capability-probed Chrome TextDetector, a restartable Tesseract.js/core
-   7.0.0 Worker with one routed language group loaded at a time, or the
-   separately compiled PaddleOCR.js trial.
+4. Tries the saved enabled provider order in an offscreen document. The trial
+   defaults to PaddleOCR.js, Chrome TextDetector, Tesseract.js, then direct
+   Tesseract Wasm. Every compiled provider remains visible in Options with an
+   independent on/off control and reorder buttons. Turning all providers off
+   pauses OCR without starting capture or a retry loop.
 5. Filters blank, punctuation-only, and regions scored below 0.25. Scored
    regions at or above the saved confidence threshold are authoritative.
    Confidence-free or intermediate-score regions require exact NFKC/
@@ -80,20 +88,32 @@ false-positive text; lowering it favors recall. Changing it clears current
 image projections and reprocesses the current image set under a distinct cache
 identity. The Paddle trial supports Latin-script and Chinese language routes;
 an unsupported route fails that provider cleanly. A valid Paddle result that
-filters to no accepted text is terminal and does not fall through to
-Tesseract, so the trial can be evaluated independently.
+returns no candidate regions is terminal. A nonempty Paddle result whose
+candidates remain uncertain continues to later enabled providers so a truly
+independent family can corroborate it.
+
+Chrome TextDetector remains platform-dependent. Chromium's macOS adapter may
+return geometry without decoded text, so Simul labels it as a platform
+provider and falls through instead of treating that outcome as authoritative.
 
 Build and validate the isolated local trial with:
 
 ```sh
 SIMUL_OCR_TEXT_DETECTOR=0 SIMUL_OCR_TESSERACT=0 SIMUL_OCR_PADDLE=1 npm run build
 npm run check:ocr-paddle-trial
+npm run check:ocr-all-trial
 ```
 
 The second command always creates a temporary Paddle-only production artifact,
 validates every reviewed byte/hash and the local-only runtime boundary, checks
 that no Tesseract assets leaked into it, and removes the temporary artifact.
 The canonical build remains Paddle-free unless the flag is explicitly set.
+`check:ocr-all-trial` builds the closed four-provider profile in a temporary
+directory and permits its accepted 72 MiB ceiling only when the detected
+provider set is exactly PaddleOCR, TextDetector, Tesseract.js, and direct
+Tesseract Wasm. `npm run artifact:sync:ocr-trials` applies the same validation
+before atomically replacing only `dist/chrome-unpacked` for local Chrome
+testing. The ordinary sync/check path retains the production 42 MiB ceiling.
 
 Cross-origin images can be displayed by the mirror but normally taint a canvas,
 so display permission alone does not provide OCR pixels. The implemented path
@@ -144,6 +164,15 @@ regional review, rate limiting, and abuse controls. A browser-side â€œfree APIâ€
 key is not a safe design.
 
 ## Remaining increments
+
+Provider screening excluded OCRAD/OCRAD.js and Scribe.js because their GPL or
+AGPL terms do not fit this extension's publishing boundary. `ocrs` has a
+permissive runtime but its reviewed pretrained models are CC-BY-SA, so it is
+not packaged. Browser Transformer OCR candidates were also deferred: the
+reviewed models were either very large, lacked an explicit redistributable
+model license, or returned generative text without calibrated region
+confidence and reliable blank rejection. No candidate may add remotely hosted
+JavaScript, Worker, or Wasm code under Manifest V3.
 
 Evaluate accuracy and overlay readability on representative non-sensitive
 images across the packaged scripts. Image-only language classification,

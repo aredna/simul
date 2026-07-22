@@ -149,6 +149,16 @@ describe('sidepanel UI structure', () => {
     expect(style).toContain('.ocr-confidence-row input');
   });
 
+  it('keeps every compiled OCR provider visible, toggleable, and ordered', () => {
+    expect(script).toContain("enabled.type = 'checkbox'");
+    expect(script).toContain('preferences.disabledImageTextProviderIds');
+    expect(script).toContain('disabledImageTextProviderIds: preferences.imageTextProviderOrder');
+    expect(script).toContain("'tesseract-wasm-direct': 'Tesseract WASM (direct A/B)' ".trim());
+    expect(script).toContain('may return boxes without text on macOS');
+    expect(script).toContain('OCR is paused because every compiled provider is off.');
+    expect(style).toContain('.ocr-provider-toggle');
+  });
+
   it('offers only selectable fidelity policies with a visible request disclosure', () => {
     const { document } = parseHTML(markup);
     const select = document.querySelector<HTMLSelectElement>(

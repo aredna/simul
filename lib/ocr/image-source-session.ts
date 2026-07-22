@@ -44,6 +44,7 @@ export interface ImageSourceSessionEnvironment {
     environment: SourceImageObserverEnvironment,
   ) => SourceImageObserver;
   readonly getNodeId: (image: HTMLImageElement) => number | undefined;
+  readonly onDispose?: () => void;
 }
 
 /**
@@ -78,6 +79,11 @@ export class ImageSourceSession {
     this.#model?.clear();
     this.#model = undefined;
     this.#documentIdentity = undefined;
+    try {
+      this.environment.onDispose?.();
+    } catch {
+      // Disposal remains final even when an owner cleanup callback fails.
+    }
     if (disconnect) {
       try {
         this.environment.port.disconnect();
@@ -85,6 +91,12 @@ export class ImageSourceSession {
         // The source document may already have destroyed the Port.
       }
     }
+  }
+
+  /** Re-scan the same document after its owning identity source advances. */
+  refresh(): void {
+    if (this.#disposed) return;
+    this.#observer?.refreshAll();
   }
 
   readonly #onMessage = (input: unknown): void => {
@@ -110,7 +122,7 @@ export class ImageSourceSession {
       this.dispose(true);
       return;
     }
-    this.#observer.refreshAll();
+    this.refresh();
     const descriptor = this.#model.get(message.descriptor.nodeId);
     if (!descriptor || !this.#model.isCurrent(message.descriptor)) {
       this.#post({

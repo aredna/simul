@@ -1378,7 +1378,8 @@ function hasRuntimeImageTextProvider(
   return order.some((providerId) =>
     providerId === 'chrome-text-detector' ||
     providerId === 'tesseract' ||
-    providerId === 'paddleocr-wasm',
+    providerId === 'paddleocr-wasm' ||
+    providerId === 'tesseract-wasm-direct',
   );
 }
 

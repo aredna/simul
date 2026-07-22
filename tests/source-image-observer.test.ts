@@ -2,6 +2,7 @@ import { parseHTML } from 'linkedom';
 import { describe, expect, it } from 'vitest';
 
 import {
+  MAX_SOURCE_IMAGE_IDENTITY_RETRY_FRAMES,
   SourceImageObserver,
   type SourceImageObservationEvent,
 } from '../lib/ocr/source-image-observer';
@@ -337,6 +338,85 @@ describe('SourceImageObserver', () => {
     expect(second).toHaveLength(1);
     stopFirst();
     stopSecond();
+  });
+
+  it('recovers a late rrweb mirror identity without inventing a node ID', () => {
+    const fixture = createFixture();
+    fixture.nodeIds.delete(fixture.image);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+
+    expect(fixture.observer.readySummary).toEqual({
+      candidateImages: 1,
+      observedImages: 0,
+    });
+    expect(events).toEqual([]);
+    expect(fixture.frames.pending).toBe(1);
+
+    fixture.frames.flush();
+    expect(events).toEqual([]);
+    fixture.nodeIds.set(fixture.image, 37);
+    fixture.frames.flush();
+
+    expect(events).toMatchObject([
+      { kind: 'upsert', input: { nodeId: 37, contentChanged: true } },
+    ]);
+    expect(JSON.stringify(events)).not.toContain('private.example');
+    expect(fixture.frames.pending).toBe(0);
+    stop();
+  });
+
+  it('bounds retries for an image rrweb never assigned to its mirror', () => {
+    const fixture = createFixture();
+    fixture.nodeIds.delete(fixture.image);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+
+    for (let attempt = 0; attempt < MAX_SOURCE_IMAGE_IDENTITY_RETRY_FRAMES; attempt += 1) {
+      expect(fixture.frames.pending).toBe(1);
+      fixture.frames.flush();
+    }
+    expect(fixture.frames.pending).toBe(0);
+    expect(events).toEqual([]);
+
+    // A recorder full-snapshot synchronization may still explicitly recover
+    // the same document after the autonomous retry budget is exhausted.
+    fixture.nodeIds.set(fixture.image, 41);
+    fixture.observer.refreshAll();
+    expect(events).toMatchObject([
+      { kind: 'upsert', input: { nodeId: 41 } },
+    ]);
+    expect(fixture.frames.pending).toBe(0);
+    stop();
+  });
+
+  it('releases an exhausted identity slot for a later image', () => {
+    const fixture = createFixture('', { maxImages: 1 });
+    fixture.nodeIds.delete(fixture.image);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+
+    for (let attempt = 0; attempt < MAX_SOURCE_IMAGE_IDENTITY_RETRY_FRAMES; attempt += 1) {
+      fixture.frames.flush();
+    }
+    const late = fixture.document.createElement('img');
+    setImageMetrics(late, fixture.bounds);
+    fixture.document.body.append(late);
+    fixture.mutation.trigger([{
+      type: 'childList',
+      target: fixture.document.body,
+      addedNodes: [late],
+      removedNodes: [],
+    } as unknown as MutationRecord]);
+    expect(fixture.frames.pending).toBe(1);
+
+    fixture.nodeIds.set(late, 43);
+    fixture.frames.flush();
+    expect(events.at(-1)).toMatchObject({
+      kind: 'upsert',
+      input: { nodeId: 43 },
+    });
+    stop();
   });
 
   it('guards stale callbacks across stop and restart generations', () => {
