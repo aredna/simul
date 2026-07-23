@@ -6,10 +6,11 @@ export interface ExtensionBuildIdentity {
 }
 
 export function createExtensionBuildIdentity(
-  manifest: Readonly<{ version: string }>,
+  manifest: Readonly<{ version: string; version_name?: string }>,
 ): ExtensionBuildIdentity {
   const version = manifest.version;
-  const label = `Build ${version}`;
+  const versionName = manifest.version_name?.trim();
+  const label = `Build ${versionName || version}`;
   return Object.freeze({
     version,
     label,

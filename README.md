@@ -85,6 +85,11 @@ Keep the directory in place while Simul is installed. Developer Mode extensions
 do not update automatically: after updating the repository, select **Reload**
 on Simul's extension card and reopen the companion.
 
+For this OCR trial, confirm the extension card shows
+`0.3.2 beta v.20260723.1` and Simul Options shows
+`Build 0.3.2 beta v.20260723.1`. If either identity differs, reload Simul from
+`chrome://extensions` before evaluating websites.
+
 ## What ships in 0.3.2
 
 - A live translated companion in Chrome's side panel or a detached window.

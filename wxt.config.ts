@@ -9,6 +9,7 @@ import {
 } from './tools/ocr-build-profile';
 
 const ocrBuildProfile = readOcrBuildProfile(process.env);
+const betaBuildSuffix = 'beta v.20260723.1';
 const tesseractEnabled = ocrBuildProfile.enabledProviderIds.includes('tesseract');
 const tesseractWasmDirectEnabled = ocrBuildProfile.enabledProviderIds.includes(
   'tesseract-wasm-direct',
@@ -147,6 +148,7 @@ export default defineConfig({
   publicDir: 'public',
   hooks: {
     'build:manifestGenerated': (_wxt, manifest) => {
+      manifest.version_name = `${manifest.version} ${betaBuildSuffix}`;
       // The toolbar action launches the saved surface directly. Retaining a
       // default popup would suppress action.onClicked and reintroduce a
       // two-button chooser before every detached-window launch.
