@@ -54,6 +54,11 @@ describe('ImageTranslationDiagnosticHistory', () => {
       rejectedUncorroboratedRegions: 1,
     })).toBe('recognition quality: candidates=8; accepted=5; corroborated=2; uncertain=3; rejected-blank=1; rejected-punctuation=1; rejected-low-confidence=1; rejected-uncorroborated=1');
     expect(formatImageTranslationDiagnostic({
+      stage: 'evidence-selection',
+      selected: 'ocr',
+      reason: 'ocr-decisive',
+    })).toBe('evidence selection: selected=ocr; reason=ocr-decisive');
+    expect(formatImageTranslationDiagnostic({
       stage: 'auto-language-probe-resolved',
       language: 'ja',
       evidence: 'single-strong-script',
@@ -143,5 +148,21 @@ describe('ImageTranslationDiagnosticHistory', () => {
       'recognition cache: access=hit; entries=1; weight=42; hits=1; misses=0; joins=0; loads=1',
     );
     expect(formatted).not.toMatch(/private|secret|44/u);
+
+    const evidenceDiagnostic = {
+      stage: 'evidence-selection',
+      selected: 'semantic',
+      reason: 'priority-tie',
+      text: 'private page text',
+      sourceUrl: 'https://private.example/',
+      nodeId: 44,
+    } as ImageTranslationDiagnostic;
+    const formattedEvidence = formatImageTranslationDiagnostic(
+      evidenceDiagnostic,
+    );
+    expect(formattedEvidence).toBe(
+      'evidence selection: selected=semantic; reason=priority-tie',
+    );
+    expect(formattedEvidence).not.toMatch(/private|44/u);
   });
 });

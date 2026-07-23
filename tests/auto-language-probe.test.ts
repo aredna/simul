@@ -189,6 +189,53 @@ describe('AutoImageLanguageProbe', () => {
     expect(probe.completeAttempt(identity, pixelHash, 'en')).toBe(true);
   });
 
+  it('inspects an OCR candidate without consuming its route or vote', () => {
+    const identity = sample();
+    const pixelHash = hash('34');
+    const probe = new AutoImageLanguageProbe(0);
+    const observation = {
+      sampleIdentity: identity,
+      pixelHash,
+      routeLanguage: 'ja' as const,
+      transcript: 'お知らせ',
+      confidence: 0.94,
+    };
+    expect(probe.beginAttempt(identity, pixelHash, 'ja', 1)).toBe(true);
+
+    expect(probe.inspectOcrObservation(observation)).toEqual({
+      status: 'candidate',
+      language: 'ja',
+    });
+    expect(probe.inspectOcrObservation(observation)).toEqual({
+      status: 'candidate',
+      language: 'ja',
+    });
+    expect(probe.resolvedLanguage).toBeUndefined();
+    expect(probe.observe(observation)).toMatchObject({
+      status: 'resolved',
+      language: 'ja',
+    });
+    expect(probe.inspectOcrObservation(observation)).toEqual({
+      status: 'ignored',
+    });
+  });
+
+  it('leaves an inspected rejected observation available for explicit completion', () => {
+    const identity = sample();
+    const pixelHash = hash('35');
+    const probe = new AutoImageLanguageProbe(0);
+    expect(probe.beginAttempt(identity, pixelHash, 'en', 1)).toBe(true);
+    expect(probe.inspectOcrObservation({
+      sampleIdentity: identity,
+      pixelHash,
+      routeLanguage: 'en',
+      transcript: 'x',
+      confidence: 0.99,
+      detectedLanguage: 'en',
+    })).toEqual({ status: 'ignored' });
+    expect(probe.completeAttempt(identity, pixelHash, 'en')).toBe(true);
+  });
+
   it('requires two distinct semantic image labels before resolving the page', () => {
     const first = sample();
     const second = sample();
@@ -220,6 +267,183 @@ describe('AutoImageLanguageProbe', () => {
       attempts: 0,
       images: 2,
     });
+  });
+
+  it('does not count duplicate normalized labels as distinct semantic votes', () => {
+    const first = sample();
+    const duplicate = sample();
+    const distinct = sample();
+    const probe = new AutoImageLanguageProbe(0);
+
+    expect(probe.observeSemantic({
+      sampleIdentity: first,
+      text: 'Ｐｕｂｌｉｃ   notice',
+      detectedLanguage: 'en',
+      now: 1,
+    })).toEqual({ status: 'continue' });
+    expect(probe.observeSemantic({
+      sampleIdentity: duplicate,
+      text: 'public notice!',
+      detectedLanguage: 'en',
+      now: 2,
+    })).toEqual({ status: 'continue' });
+    expect(probe.resolvedLanguage).toBeUndefined();
+
+    expect(probe.observeSemantic({
+      sampleIdentity: distinct,
+      text: 'Latest news',
+      detectedLanguage: 'en',
+      now: 3,
+    })).toMatchObject({
+      status: 'resolved',
+      language: 'en',
+      evidence: 'distinct-images',
+    });
+  });
+
+  it('does not combine one OCR vote with one semantic label for promotion', () => {
+    const semanticIdentity = sample();
+    const ocrIdentity = sample();
+    const probe = new AutoImageLanguageProbe(0);
+    expect(probe.observeSemantic({
+      sampleIdentity: semanticIdentity,
+      text: '公共公告',
+      detectedLanguage: 'ja',
+      now: 1,
+    })).toEqual({ status: 'continue' });
+    const pixelHash = hash('67');
+    expect(probe.beginAttempt(ocrIdentity, pixelHash, 'ja', 2)).toBe(true);
+    expect(probe.observe({
+      sampleIdentity: ocrIdentity,
+      pixelHash,
+      routeLanguage: 'ja',
+      transcript: 'お知らせ',
+      confidence: 0.89,
+    })).toEqual({ status: 'continue' });
+    expect(probe.resolvedLanguage).toBeUndefined();
+  });
+
+  it('allows distinct selected one-character semantic labels to promote', () => {
+    const probe = new AutoImageLanguageProbe(0);
+    expect(probe.observeSemantic({
+      sampleIdentity: sample(),
+      text: '一',
+      detectedLanguage: 'ja',
+      now: 1,
+    })).toEqual({ status: 'continue' });
+    expect(probe.observeSemantic({
+      sampleIdentity: sample(),
+      text: '二',
+      detectedLanguage: 'ja',
+      now: 2,
+    })).toMatchObject({ status: 'resolved', language: 'ja' });
+  });
+
+  it('retains every owner of a duplicate semantic label when one is removed', () => {
+    const removed = sample();
+    const survivingDuplicate = sample();
+    const distinct = sample();
+    const probe = new AutoImageLanguageProbe(0);
+
+    expect(probe.observeSemantic({
+      sampleIdentity: removed,
+      text: 'Ｐｕｂｌｉｃ   notice',
+      detectedLanguage: 'en',
+      now: 1,
+    })).toEqual({ status: 'continue' });
+    expect(probe.observeSemantic({
+      sampleIdentity: survivingDuplicate,
+      text: 'public notice!',
+      detectedLanguage: 'en',
+      now: 2,
+    })).toEqual({ status: 'continue' });
+    expect(probe.forgetSample(removed)).toBe(true);
+
+    expect(probe.observeSemantic({
+      sampleIdentity: distinct,
+      text: 'Latest news',
+      detectedLanguage: 'en',
+      now: 3,
+    })).toMatchObject({
+      status: 'resolved',
+      language: 'en',
+      evidence: 'distinct-images',
+    });
+  });
+
+  it('invalidates a resolved language when a contributing image changes', () => {
+    const first = sample();
+    const second = sample();
+    const probe = new AutoImageLanguageProbe(0);
+    expect(probe.observeSemantic({
+      sampleIdentity: first,
+      text: 'Public notice',
+      detectedLanguage: 'en',
+      now: 1,
+    })).toEqual({ status: 'continue' });
+    expect(probe.observeSemantic({
+      sampleIdentity: second,
+      text: 'Latest news',
+      detectedLanguage: 'en',
+      now: 2,
+    })).toMatchObject({ status: 'resolved', language: 'en' });
+
+    expect(probe.forgetSample(first)).toBe(true);
+    expect(probe.resolvedLanguage).toBeUndefined();
+    expect(probe.hasSample(first)).toBe(false);
+    expect(probe.hasSample(second)).toBe(true);
+  });
+
+  it('invalidates a single-image OCR resolution when its contributor changes', () => {
+    const identity = sample();
+    const pixelHash = hash('65');
+    const probe = new AutoImageLanguageProbe(0);
+    expect(probe.beginAttempt(identity, pixelHash, 'ja', 1)).toBe(true);
+    expect(probe.observe({
+      sampleIdentity: identity,
+      pixelHash,
+      routeLanguage: 'ja',
+      transcript: 'お知らせ',
+      confidence: 0.94,
+    })).toMatchObject({ status: 'resolved', language: 'ja' });
+
+    expect(probe.forgetSample(identity)).toBe(true);
+    expect(probe.resolvedLanguage).toBeUndefined();
+    expect(probe.images).toBe(0);
+    expect(probe.attempts).toBe(0);
+  });
+
+  it('forgets an unresolved sample and releases its semantic label vote', () => {
+    const removed = sample();
+    const replacement = sample();
+    const corroborator = sample();
+    const probe = new AutoImageLanguageProbe(0);
+
+    expect(probe.observeSemantic({
+      sampleIdentity: removed,
+      text: 'Public notice',
+      detectedLanguage: 'en',
+      now: 1,
+    })).toEqual({ status: 'continue' });
+    expect(probe.hasSample(removed)).toBe(true);
+    expect(probe.images).toBe(1);
+
+    expect(probe.forgetSample(removed)).toBe(true);
+    expect(probe.forgetSample(removed)).toBe(false);
+    expect(probe.hasSample(removed)).toBe(false);
+    expect(probe.images).toBe(0);
+    expect(probe.observeSemantic({
+      sampleIdentity: replacement,
+      text: 'Ｐｕｂｌｉｃ   notice',
+      detectedLanguage: 'en',
+      now: 2,
+    })).toEqual({ status: 'continue' });
+    expect(probe.observeSemantic({
+      sampleIdentity: corroborator,
+      text: 'Latest news',
+      detectedLanguage: 'en',
+      now: 3,
+    })).toMatchObject({ status: 'resolved', language: 'en' });
   });
 
   it('releases cancelled attempts without permanently consuming a sample', () => {

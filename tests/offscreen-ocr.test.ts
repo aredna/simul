@@ -992,10 +992,18 @@ describe('offscreen OCR protocol and lifecycle', () => {
         rejectedPunctuationRegions: 1,
         rejectedLowConfidenceRegions: 1,
       },
+      selectedQuality: {
+        candidateRegions: 1,
+        acceptedRegions: 1,
+        corroboratedRegions: 0,
+      },
     });
     await expect(coordinator.recognize(pixels, route)).resolves.toMatchObject({
       cacheAccess: 'hit',
       quality: first.status === 'complete' ? first.quality : undefined,
+      selectedQuality: first.status === 'complete'
+        ? first.selectedQuality
+        : undefined,
     });
     expect(calls.map(({ providerId }) => providerId)).toEqual([
       'chrome-text-detector',
@@ -1442,6 +1450,11 @@ describe('offscreen OCR protocol and lifecycle', () => {
       status: 'complete',
       result: { providerId: 'tesseract', transcript: 'News' },
       quality: { corroboratedRegions: 1 },
+      selectedQuality: {
+        candidateRegions: 1,
+        acceptedRegions: 1,
+        corroboratedRegions: 1,
+      },
     });
     expect(calls.map(({ providerId }) => providerId)).toEqual([
       'chrome-text-detector',
@@ -1463,6 +1476,7 @@ describe('offscreen OCR protocol and lifecycle', () => {
       status: 'complete',
       cacheAccess: 'hit',
       result: { providerId: 'tesseract' },
+      selectedQuality: { corroboratedRegions: 1 },
     });
     expect(calls).toHaveLength(2);
   });

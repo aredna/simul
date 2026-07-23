@@ -94,8 +94,19 @@ export type AutoLanguageProbeObservationResult =
     }>
   | Readonly<{ status: 'continue' | 'ignored' }>;
 
+export type AutoLanguageProbeObservationInspection =
+  | Readonly<{
+      status: 'candidate';
+      language: SupportedLanguage;
+    }>
+  | Readonly<{ status: 'ignored' }>;
+
 interface LanguageVotes {
-  readonly samples: Set<AutoLanguageProbeSampleIdentity>;
+  readonly ocrSamples: Set<AutoLanguageProbeSampleIdentity>;
+  readonly semanticLabels: Map<
+    string,
+    Set<AutoLanguageProbeSampleIdentity>
+  >;
 }
 
 interface ProbeSampleState {
@@ -114,6 +125,7 @@ export class AutoImageLanguageProbe {
     ProbeSampleState
   >();
   readonly #votes = new Map<SupportedLanguage, LanguageVotes>();
+  readonly #resolvedSamples = new Set<AutoLanguageProbeSampleIdentity>();
   #attempts = 0;
   #resolved: SupportedLanguage | undefined;
 
@@ -149,6 +161,32 @@ export class AutoImageLanguageProbe {
 
   hasSample(sampleIdentity: AutoLanguageProbeSampleIdentity): boolean {
     return this.#samples.has(sampleIdentity);
+  }
+
+  /** Remove every vote owned by one changed or removed exact image. */
+  forgetSample(sampleIdentity: AutoLanguageProbeSampleIdentity): boolean {
+    if (!isSampleIdentity(sampleIdentity)) return false;
+    if (this.#resolvedSamples.has(sampleIdentity)) {
+      this.#resolved = undefined;
+      this.#resolvedSamples.clear();
+    }
+    const sample = this.#samples.get(sampleIdentity);
+    const removed = this.#samples.delete(sampleIdentity);
+    if (sample) {
+      this.#attempts = Math.max(
+        0,
+        this.#attempts - sample.attemptedRoutes.size,
+      );
+    }
+    for (const [language, votes] of this.#votes) {
+      votes.ocrSamples.delete(sampleIdentity);
+      for (const [label, owners] of votes.semanticLabels) {
+        owners.delete(sampleIdentity);
+        if (owners.size === 0) votes.semanticLabels.delete(label);
+      }
+      if (voteSampleCount(votes) === 0) this.#votes.delete(language);
+    }
+    return removed;
   }
 
   candidateLanguages(
@@ -269,7 +307,7 @@ export class AutoImageLanguageProbe {
     sample.attemptedRoutes.delete(routeLanguage);
     this.#attempts = Math.max(0, this.#attempts - 1);
     const hasVote = [...this.#votes.values()].some((votes) =>
-      votes.samples.has(sampleIdentity),
+      voteHasSample(votes, sampleIdentity)
     );
     if (sample.attemptedRoutes.size === 0 && !hasVote) {
       this.#samples.delete(sampleIdentity);
@@ -288,50 +326,65 @@ export class AutoImageLanguageProbe {
       sample?.activePixels.get(observation.routeLanguage) !== hash
     ) return Object.freeze({ status: 'ignored' as const });
     sample.activePixels.delete(observation.routeLanguage);
-    const transcript = observation.transcript
-      .normalize('NFKC')
-      .replace(/\s+/gu, ' ')
-      .trim()
-      .slice(0, 4_000);
-    const meaningfulCharacters = [...transcript].filter((character) =>
-      /[\p{L}\p{N}]/u.test(character)
-    ).length;
-    const confidence = Number.isFinite(observation.confidence)
-      ? Math.max(0, Math.min(1, Number(observation.confidence)))
-      : undefined;
-    if (
-      meaningfulCharacters < 3 ||
-      (confidence !== undefined && confidence < this.#minimumConfidence)
-    ) return Object.freeze({ status: 'ignored' as const });
-
-    const script = strongAutoLanguageScriptEvidence(transcript);
-    const language = script?.language ?? observation.detectedLanguage;
-    // A representative model may cover a bounded related-script family. A
-    // result outside that family is cross-route gibberish, not evidence.
-    if (
-      !language ||
-      !routeSupportsDetectedLanguage(observation.routeLanguage, language)
-    ) {
+    const inspected = this.#inspectOcrCandidate(observation);
+    if (!inspected) {
       return Object.freeze({ status: 'ignored' as const });
     }
-    if (
-      script &&
-      confidence !== undefined &&
-      confidence >= AUTO_LANGUAGE_PROBE_SINGLE_IMAGE_CONFIDENCE
-    ) {
-      return this.#resolve(language, 'single-strong-script');
+    const { language, singleStrong } = inspected;
+    if (singleStrong) {
+      return this.#resolve(
+        language,
+        'single-strong-script',
+        [observation.sampleIdentity],
+      );
     }
 
     let votes = this.#votes.get(language);
     if (!votes) {
-      votes = { samples: new Set() };
+      votes = { ocrSamples: new Set(), semanticLabels: new Map() };
       this.#votes.set(language, votes);
     }
-    votes.samples.add(observation.sampleIdentity);
-    if (votes.samples.size >= 2) {
-      return this.#resolve(language, 'distinct-images');
+    votes.ocrSamples.add(observation.sampleIdentity);
+    const contributors = new Set(votes.ocrSamples);
+    if (contributors.size >= 2) {
+      return this.#resolve(language, 'distinct-images', contributors);
     }
     return Object.freeze({ status: 'continue' as const });
+  }
+
+  /**
+   * Validate an active OCR observation without consuming its route or adding
+   * a language vote. The caller can rank the returned source language against
+   * other image-text evidence, then either call observe() or completeAttempt().
+   */
+  inspectOcrObservation(
+    observation: AutoLanguageProbeObservation,
+  ): AutoLanguageProbeObservationInspection {
+    if (this.#resolved) return Object.freeze({ status: 'ignored' as const });
+    const hash = boundedPixelKey(observation.pixelHash);
+    const sample = this.#samples.get(observation.sampleIdentity);
+    if (
+      !hash ||
+      sample?.activePixels.get(observation.routeLanguage) !== hash
+    ) return Object.freeze({ status: 'ignored' as const });
+    return this.classifyOcrObservation(observation);
+  }
+
+  /** Validate transcript/language quality without reading or mutating vote state. */
+  classifyOcrObservation(
+    observation: AutoLanguageProbeObservation,
+  ): AutoLanguageProbeObservationInspection {
+    if (
+      !isSampleIdentity(observation.sampleIdentity) ||
+      !boundedPixelKey(observation.pixelHash)
+    ) return Object.freeze({ status: 'ignored' as const });
+    const inspected = this.#inspectOcrCandidate(observation);
+    return inspected
+      ? Object.freeze({
+          status: 'candidate' as const,
+          language: inspected.language,
+        })
+      : Object.freeze({ status: 'ignored' as const });
   }
 
   /**
@@ -356,9 +409,10 @@ export class AutoImageLanguageProbe {
     const meaningfulCharacters = [...text].filter((character) =>
       /[\p{L}\p{N}]/u.test(character)
     ).length;
-    if (meaningfulCharacters < 3) {
+    if (meaningfulCharacters < 1) {
       return Object.freeze({ status: 'ignored' as const });
     }
+    const normalizedLabel = text.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
     let sample = this.#samples.get(observation.sampleIdentity);
     if (!sample) {
       const slot = this.#firstAvailableImageSlot();
@@ -375,12 +429,22 @@ export class AutoImageLanguageProbe {
     }
     let votes = this.#votes.get(observation.detectedLanguage);
     if (!votes) {
-      votes = { samples: new Set() };
+      votes = { ocrSamples: new Set(), semanticLabels: new Map() };
       this.#votes.set(observation.detectedLanguage, votes);
     }
-    votes.samples.add(observation.sampleIdentity);
-    if (votes.samples.size >= 2) {
-      return this.#resolve(observation.detectedLanguage, 'distinct-images');
+    let labelOwners = votes.semanticLabels.get(normalizedLabel);
+    if (!labelOwners) {
+      labelOwners = new Set();
+      votes.semanticLabels.set(normalizedLabel, labelOwners);
+    }
+    labelOwners.add(observation.sampleIdentity);
+    const contributors = semanticVoteSampleIdentities(votes);
+    if (contributors.size >= 2) {
+      return this.#resolve(
+        observation.detectedLanguage,
+        'distinct-images',
+        contributors,
+      );
     }
     return Object.freeze({ status: 'continue' as const });
   }
@@ -407,8 +471,11 @@ export class AutoImageLanguageProbe {
   #resolve(
     language: SupportedLanguage,
     evidence: AutoLanguageProbeEvidence,
+    contributors: Iterable<AutoLanguageProbeSampleIdentity>,
   ): Extract<AutoLanguageProbeObservationResult, { status: 'resolved' }> {
     this.#resolved = language;
+    this.#resolvedSamples.clear();
+    for (const identity of contributors) this.#resolvedSamples.add(identity);
     return Object.freeze({
       status: 'resolved' as const,
       language,
@@ -431,7 +498,7 @@ export class AutoImageLanguageProbe {
     sampleIdentity: AutoLanguageProbeSampleIdentity,
   ): readonly SupportedLanguage[] {
     const pendingRoute = [...this.#votes.entries()]
-      .find(([, votes]) => !votes.samples.has(sampleIdentity));
+      .find(([, votes]) => !voteHasSample(votes, sampleIdentity));
     const primary: SupportedLanguage[] = [
       ...AUTO_LANGUAGE_PROBE_ROUTE_WINDOWS[slot]!,
     ];
@@ -449,6 +516,72 @@ export class AutoImageLanguageProbe {
       ...primary,
     ])].slice(0, MAX_AUTO_LANGUAGE_PROBE_ROUTES_PER_IMAGE));
   }
+
+  #inspectOcrCandidate(
+    observation: AutoLanguageProbeObservation,
+  ): Readonly<{
+    language: SupportedLanguage;
+    singleStrong: boolean;
+  }> | undefined {
+    const transcript = observation.transcript
+      .normalize('NFKC')
+      .replace(/\s+/gu, ' ')
+      .trim()
+      .slice(0, 4_000);
+    const meaningfulCharacters = [...transcript].filter((character) =>
+      /[\p{L}\p{N}]/u.test(character)
+    ).length;
+    const confidence = Number.isFinite(observation.confidence)
+      ? Math.max(0, Math.min(1, Number(observation.confidence)))
+      : undefined;
+    if (
+      meaningfulCharacters < 3 ||
+      (confidence !== undefined && confidence < this.#minimumConfidence)
+    ) return undefined;
+
+    const script = strongAutoLanguageScriptEvidence(transcript);
+    const language = script?.language ?? observation.detectedLanguage;
+    // A representative model may cover a bounded related-script family. A
+    // result outside that family is cross-route gibberish, not evidence.
+    if (
+      !language ||
+      !routeSupportsDetectedLanguage(observation.routeLanguage, language)
+    ) return undefined;
+    return Object.freeze({
+      language,
+      singleStrong: Boolean(
+        script &&
+        confidence !== undefined &&
+        confidence >= AUTO_LANGUAGE_PROBE_SINGLE_IMAGE_CONFIDENCE
+      ),
+    });
+  }
+}
+
+function voteSampleCount(votes: LanguageVotes): number {
+  return votes.ocrSamples.size + votes.semanticLabels.size;
+}
+
+function semanticVoteSampleIdentities(
+  votes: LanguageVotes,
+): Set<AutoLanguageProbeSampleIdentity> {
+  const identities = new Set<AutoLanguageProbeSampleIdentity>();
+  for (const owners of votes.semanticLabels.values()) {
+    const owner = [...owners].find((identity) => !identities.has(identity)) ??
+      owners.values().next().value;
+    if (owner) identities.add(owner);
+  }
+  return identities;
+}
+
+function voteHasSample(
+  votes: LanguageVotes,
+  sampleIdentity: AutoLanguageProbeSampleIdentity,
+): boolean {
+  return votes.ocrSamples.has(sampleIdentity) ||
+    [...votes.semanticLabels.values()].some((owners) =>
+      owners.has(sampleIdentity)
+    );
 }
 
 export function strongScriptEvidence(

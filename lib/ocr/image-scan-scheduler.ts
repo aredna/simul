@@ -1,6 +1,7 @@
 import {
   isImageScanPolicy,
   readSourceImageChange,
+  readSourceImageDescriptor,
   type ImageScanPolicy,
   type SourceImageChange,
   type SourceImageDescriptor,
@@ -185,6 +186,29 @@ export class ImageScanScheduler {
     this.#reconcileNode(nodeId);
     this.#reconsiderOverflowed();
     return true;
+  }
+
+  /** Requeue exact-current work, cancelling an active peer when necessary. */
+  requeueCurrent(descriptor: SourceImageDescriptor): boolean {
+    const parsed = readSourceImageDescriptor(descriptor);
+    if (
+      !parsed ||
+      !sameSourceDocument(parsed.document, this.#document)
+    ) return false;
+    const record = this.#records.get(parsed.nodeId);
+    if (!record || !sameDescriptor(record.descriptor, parsed)) return false;
+    const active = this.#active.get(parsed.nodeId);
+    if (active) {
+      if (!sameDescriptor(active.descriptor, parsed)) return false;
+      this.#active.delete(parsed.nodeId);
+      this.#recordCancellation(active, 'superseded');
+    }
+    record.completedContentRevision = undefined;
+    record.completedObservationRevision = undefined;
+    record.deferredObservationRevision = undefined;
+    this.#reconcileNode(parsed.nodeId);
+    this.#reconsiderOverflowed();
+    return this.#pending.has(parsed.nodeId);
   }
 
   takeNext(): ImageScanJob | undefined {

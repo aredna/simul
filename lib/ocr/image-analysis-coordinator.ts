@@ -55,6 +55,8 @@ export type ImageRecognitionResult =
       readonly cacheAccess?: ImageRecognitionCacheAccess;
       readonly cacheStats?: ImageRecognitionCacheStats;
       readonly quality?: ImageTextQualitySummary;
+      /** Quality for the provider result selected in this response only. */
+      readonly selectedQuality?: ImageTextQualitySummary;
     }
   | {
       readonly status: 'failed';
@@ -89,6 +91,7 @@ type UncachedImageRecognitionResult =
       readonly status: 'complete';
       readonly result: ImageTextResult;
       readonly quality: ImageTextQualitySummary;
+      readonly selectedQuality: ImageTextQualitySummary;
       readonly continuation?: ImageRecognitionContinuation;
     }
   | { readonly status: 'failed'; readonly code: OcrHostErrorCode };
@@ -96,6 +99,7 @@ type UncachedImageRecognitionResult =
 interface CachedImageRecognitionResult {
   readonly result: ImageTextResult;
   readonly quality: ImageTextQualitySummary;
+  readonly selectedQuality: ImageTextQualitySummary;
   readonly continuation?: ImageRecognitionContinuation;
 }
 
@@ -216,6 +220,7 @@ export class ImageRecognitionCoordinator {
         status: 'complete',
         result: cached.result,
         quality: cached.quality,
+        selectedQuality: cached.selectedQuality,
         ...(cached.continuation
           ? { continuation: cached.continuation }
           : {}),
@@ -390,6 +395,7 @@ export class ImageRecognitionCoordinator {
           lastEmptyResult = {
             result: filtered.result,
             quality,
+            selectedQuality: filtered.quality,
           };
           lastFailure = 'recognition-failed';
           continue;
@@ -397,6 +403,7 @@ export class ImageRecognitionCoordinator {
         const accepted = {
           result: filtered.result,
           quality,
+          selectedQuality: filtered.quality,
           ...(providerIndex + 1 < providers.length
             ? {
                 continuation: this.#createContinuation({
