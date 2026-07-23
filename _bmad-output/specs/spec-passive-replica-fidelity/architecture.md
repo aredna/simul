@@ -17,6 +17,13 @@ policy. A receiver never trusts the source's claim that a resource is passive.
 Policy changes restart the Isolated HTML stream and atomically replace the
 last-good replica after validation.
 
+The successor architecture at
+`_bmad-output/planning-artifacts/architecture/architecture-simul-2026-07-23/ARCHITECTURE-SPINE.md`
+supersedes only this design's blanket private/value-field exclusion. It keeps
+the inert replica shell and credential-secret floor, and moves any explicitly
+selected visible non-secret control/editor content into an independently
+validated semantic supplement channel shared by both replica engines.
+
 ## Typed presentation transport
 
 The mirror graph retains DOM order and carries bounded presentation metadata:

@@ -56,29 +56,23 @@ references remain sanitized. The bounded computed source canvas color travels
 with checkpoints and live dimension patches and is applied across every
 presentation-shell layer; transparent updates clear the override.
 
-Native and ARIA activation labels remain translatable. Isolated HTML also reads
-only a nonempty current value or otherwise the placeholder from native
-`input` types missing/`text`/`search`/`email`/`url`/`tel` and `textarea`.
-That text crosses the bounded protocol only as discriminated control metadata,
-never as raw `value`/`placeholder` attributes, and stays memory-only and
-content-free in logs. Password/password-autocomplete fields, unsupported
-controls, contenteditable regions, and ARIA textbox fallbacks remain blank.
-Public native selects carry only bounded option/optgroup labels and
-selected/disabled/multiple/open/size presentation state, including live changes;
-raw values, names, data attributes, datalist content, rich picker descendants,
-and private ancestry remain absent. A companion-owned single-select trigger
-opens a viewport-clamped, body-level, internally scrolling panel; `multiple`
-and `size>1` controls retain bounded inline-list presentation. No clipping
-ancestor is rewritten and no source selection/event is reached. Isolated HTML
-admits custom public menu/listbox preview only through one unique, matching,
-same-document `aria-controls` relation; ambiguous or stale relations remain
-inert. Customizable-select `:open` state is progressive; native popup geometry
-is not observable. Public non-editable ARIA listbox/menu/option labels
-translate, while editable combobox/searchbox/textbox/contenteditable branches
-remain private. Attribute-backed labels use the same memory-only translation
-records as other visible text. A safe-to-sensitive transition clears its
-record and projection atomically. rrweb continues masking every editable/
-value-bearing control and keeps all disclosure interaction explicitly inert.
+Native and ARIA control labels remain translatable through a runtime-selectable
+read scope whose independent controls cover public control semantics, control
+images, validated disclosure content, ordinary current form values,
+non-secret personal/autofill values, and editable content. Page-only, Standard,
+Full-visible, and derived Custom profiles are conveniences over those booleans;
+missing, malformed, or outdated setup stays Page-only until the user commits a
+choice. Passwords, password/authentication autocomplete, one-time codes, every
+`cc-*` autocomplete class, hidden/file inputs, file paths, and CSS
+text-security fields remain unreadable under every profile, with classification
+performed before value/text/image access and kept sticky for the document
+lifetime. Optional values, selected/checked state, editable text, and
+disclosure payloads travel only through one bounded exact-document semantic
+supplement shared by both engines; base rrweb input/contenteditable masking
+never relaxes. Replica action capability is never configurable: scripts,
+handlers, source events, navigation, forms, and website-owned interaction
+remain absent. Extension-owned select/disclosure facsimiles share a
+viewport-safe, body-level presenter and may change only replica presentation.
 Passive image validation admits a narrow, shape-only URL-encoded SVG data-image
 profile, covered by a synthetic static-logo fixture, with the same checks on
 capture and receipt. A
@@ -117,7 +111,8 @@ fallback and allows only same-document fragment references for inline SVG
 
 Image translation is implemented as an initially-off persisted option. The
 source frame observes ordinary top-level `<img>` elements by the selected
-engine's node ID while keeping URLs and text private. A capacity-one scheduler applies the saved
+engine's node ID while keeping scheduling descriptors free of URLs, text,
+pixels, and hashes. A capacity-one scheduler applies the saved
 visible/background policy and small-image filter. Stable visible pixels are
 captured through `captureVisibleTab()` at no more than twice per second, cropped
 and proportionally downscaled to no more than 4 MP after exact pre/post geometry
@@ -126,11 +121,14 @@ restartable offscreen host through two-minute extension-origin transient
 storage. Tesseract.js/core 7.0.0, three embedded Wasm core loaders, its Worker,
 and 22 pinned `tessdata_fast` files are local. One routed language group is
 loaded at a time and disposed after a group change or 90 seconds idle.
-Pixel capture normally blocks activation ancestry. OCR alone admits an image
-inside a stateless HTTP(S) HTML anchor whose sole normalized role is `button`;
-native buttons, pseudo-links, fragment-only links, stateful ARIA controls,
-private/editable ancestry, and overlapping protected controls remain blocked,
-with live ancestry revalidated immediately before capture.
+Image reading uses one ordered list containing local accessibility text and the
+compiled OCR providers. Accessibility text lazily reads only direct image
+`aria-label` or `alt` after policy and credential admission, requires no pixel
+permission, carries semantic rather than OCR confidence, and projects as a
+whole-image label. Pixel capture remains blocked for credential overlap, while
+non-secret images inside controls are admitted only by the control-images
+switch and revalidated immediately before and after capture. Small-image
+skipping applies to OCR pixels, not positive-area accessibility labels.
 
 Reliable image capture after the temporary `activeTab` grant expires uses a
 literal `<all_urls>` optional host grant shared with all-sites automatic
@@ -317,3 +315,9 @@ extension APIs or page integration.
    same-parent children are reconciled by receiver-proven identity; custom
    definitions, inaccessible roots, script-only state, and cross-parent
    identity reuse remain separately reviewable work.
+9. Runtime read scope and immutable action isolation are separate contracts.
+   Broader reading never weakens sandbox, CSP, sanitization, navigation/form
+   blocking, source-event suppression, or credential-secret exclusion.
+10. Base replica streams remain conservatively sanitized. Policy-authorized
+    value/editor/control supplements use the shared typed semantic channel;
+    image accessibility evidence uses the shared exact-document image channel.

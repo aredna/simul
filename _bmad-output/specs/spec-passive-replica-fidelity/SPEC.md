@@ -54,7 +54,7 @@ HTTP(S) requests from the replica.
 ## Constraints
 
 - The replica remains `sandbox="allow-same-origin"` without scripts, pointer interaction, forms, navigation, workers, connections, active frames, objects, embeds, portals, webviews, or website custom-element execution.
-- Scripts, inline handlers, `javascript:`, CSS `expression()`, `behavior`, `-moz-binding`, form actions, active embedded documents, and password/private-field transport remain blocked under every policy.
+- Scripts, inline handlers, `javascript:`, CSS `expression()`, `behavior`, `-moz-binding`, form actions, active embedded documents, and credential-secret transport remain blocked under every policy. The successor read-scope architecture may admit explicitly selected, visible non-secret control/editor content through a separate bounded semantic channel; this narrows only the former blanket private-field exclusion and does not weaken replica inertness or credential blocking.
 - Passive Fidelity may issue normalized HTTP(S) requests only for inert visual resources; Settings and diagnostics must disclose that consequence.
 - Conservative must preserve the current stricter behavior and remain saved/selectable.
 - No new permissions, weaker sandbox, remotely hosted executable code, site-specific branch, or source-page mutation is allowed.
