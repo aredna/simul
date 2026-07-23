@@ -6,13 +6,41 @@ import {
 } from '../lib/build-identity';
 
 describe('extension build identity', () => {
-  it('renders and logs the exact runtime manifest version', () => {
-    const identity = createExtensionBuildIdentity({ version: '0.2.1' });
+  it('renders and logs the trimmed runtime manifest version name', () => {
+    const identity = createExtensionBuildIdentity({
+      version: '0.3.2',
+      version_name: ' 0.3.2 beta v.20260723.1 ',
+    });
     const target: Pick<HTMLElement, 'textContent'> = { textContent: '' };
 
     renderExtensionBuildIdentity(target, identity);
 
     expect(identity).toEqual({
+      version: '0.3.2',
+      label: 'Build 0.3.2 beta v.20260723.1',
+      companionReadyMessage:
+        '[Simul] Companion ready. Build 0.3.2 beta v.20260723.1.',
+      backgroundReadyMessage:
+        '[Simul] Background service worker ready. Build 0.3.2 beta v.20260723.1.',
+    });
+    expect(target.textContent).toBe('Build 0.3.2 beta v.20260723.1');
+  });
+
+  it.each([
+    ['missing', undefined],
+    ['empty', ''],
+    ['whitespace-only', '   '],
+  ])('falls back to the numeric version for a %s version name', (_case, versionName) => {
+    const identity = createExtensionBuildIdentity({ version: '0.2.1' });
+    const identityWithVersionName = createExtensionBuildIdentity({
+      version: '0.2.1',
+      version_name: versionName,
+    });
+    const target: Pick<HTMLElement, 'textContent'> = { textContent: '' };
+
+    renderExtensionBuildIdentity(target, identityWithVersionName);
+
+    expect(identityWithVersionName).toEqual({
       version: '0.2.1',
       label: 'Build 0.2.1',
       companionReadyMessage: '[Simul] Companion ready. Build 0.2.1.',
@@ -20,5 +48,6 @@ describe('extension build identity', () => {
         '[Simul] Background service worker ready. Build 0.2.1.',
     });
     expect(target.textContent).toBe('Build 0.2.1');
+    expect(identityWithVersionName).toEqual(identity);
   });
 });
