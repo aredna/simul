@@ -3,6 +3,8 @@ import { readFileSync } from 'node:fs';
 import { parseHTML } from 'linkedom';
 import { describe, expect, it } from 'vitest';
 
+import { DEFAULT_COMPANION_PREFERENCES } from '../lib/preferences';
+
 const markup = readFileSync(
   new URL('../entrypoints/sidepanel/index.html', import.meta.url),
   'utf8',
@@ -13,6 +15,10 @@ const style = readFileSync(
 );
 const script = readFileSync(
   new URL('../entrypoints/sidepanel/main.ts', import.meta.url),
+  'utf8',
+);
+const providerRegistry = readFileSync(
+  new URL('../lib/ocr/provider-registry.ts', import.meta.url),
   'utf8',
 );
 
@@ -89,6 +95,39 @@ describe('sidepanel UI structure', () => {
     expect(style).toContain('background: var(--control-background)');
   });
 
+  it('binds OCR provider availability probes to the current reset epoch', () => {
+    const probeStart = script.indexOf(
+      'async function refreshOcrProviderRuntimeStatuses',
+    );
+    const probeEnd = script.indexOf('\nfunction ', probeStart + 1);
+    const probeSource = script.slice(
+      probeStart,
+      probeEnd === -1 ? undefined : probeEnd,
+    );
+
+    expect(probeStart).toBeGreaterThanOrEqual(0);
+    expect(probeSource).toContain("kind: 'simul:ocr-v1:ensure-host'");
+    expect(probeSource).toContain('resetEpoch: preferences.resetRevision');
+  });
+
+  it('binds ordinary image-option writes to the current settings revision', () => {
+    const commitStart = script.indexOf(
+      'async function commitImageAnalysisPreferencePatch',
+    );
+    const commitEnd = script.indexOf('\nasync function ', commitStart + 1);
+    const commitSource = script.slice(
+      commitStart,
+      commitEnd === -1 ? undefined : commitEnd,
+    );
+
+    expect(commitStart).toBeGreaterThanOrEqual(0);
+    expect(commitSource).toContain(
+      'const expectedSettingsRevision = preferences.settingsRevision;',
+    );
+    expect(commitSource).toContain('expectedSettingsRevision,');
+    expect(commitSource).toContain("result.code === 'stale-settings-revision'");
+  });
+
   it('keeps only the owned dropdown disclosure pointer-reachable in replay', () => {
     expect(style).toContain('.replica-replay-mount *');
     expect(style).toContain('pointer-events: none !important');
@@ -149,17 +188,170 @@ describe('sidepanel UI structure', () => {
     expect(style).toContain('.ocr-confidence-row input');
   });
 
-  it('keeps every compiled OCR provider visible, toggleable, and ordered', () => {
+  it('keeps every image-reading method visible, toggleable, and ordered', () => {
     expect(script).toContain("enabled.type = 'checkbox'");
-    expect(script).toContain('preferences.disabledImageTextProviderIds');
-    expect(script).toContain('disabledImageTextProviderIds: preferences.imageTextProviderOrder');
+    expect(script).toContain('preferences.disabledImageReadingMethodIds');
+    expect(script).toContain('disabledImageReadingMethodIds: preferences.imageReadingMethodOrder');
+    expect(script).toContain("return 'Accessibility text (aria-label / alt)'");
+    expect(script).toContain("status.textContent = 'No pixels'");
+    expect(script).toContain("'paddleocr-wasm': 'PaddleOCR Wasm'");
+    expect(script).toContain(
+      "'chrome-text-detector': 'Chrome TextDetector (platform)'",
+    );
     expect(script).toContain("tesseract: 'Tesseract.js (wrapper A/B)'");
     expect(script).toContain("'tesseract-wasm-direct': 'Tesseract Wasm (direct A/B)'");
+    expect(DEFAULT_COMPANION_PREFERENCES.imageReadingMethodOrder.slice(0, 5))
+      .toEqual([
+        'accessibility-text',
+        'paddleocr-wasm',
+        'chrome-text-detector',
+        'tesseract',
+        'tesseract-wasm-direct',
+      ]);
+    expect(providerRegistry).toContain(
+      'ACCESSIBILITY_IMAGE_TEXT_COMPILED ||',
+    );
+    expect(script).toContain('visibleImageReadingMethodOrder(');
     expect(script).toContain('Chrome TextDetector is experimental and platform-dependent');
     expect(script).toContain('same Tesseract OCR family and local language models');
     expect(script).toContain('do not independently corroborate each other');
     expect(script).toContain('OCR is paused because every compiled provider is off.');
     expect(style).toContain('.ocr-provider-toggle');
+  });
+
+  it('offers first-run read-scope setup, live independent controls, and reset', () => {
+    const { document } = parseHTML(markup);
+    const setup = document.querySelector('#read-scope-setup');
+    const controls = document.querySelector('#read-scope-controls');
+
+    expect(setup?.localName).toBe('dialog');
+    expect(setup?.getAttribute('aria-modal')).toBe('true');
+    expect(setup?.getAttribute('aria-describedby')).toBe(
+      'read-scope-setup-description',
+    );
+    expect(setup?.querySelector('#setup-read-profile')?.hasAttribute('autofocus')).toBe(true);
+    expect(setup?.querySelector('#setup-read-profile')).not.toBeNull();
+    expect(setup?.querySelector('#complete-read-scope-setup')).not.toBeNull();
+    expect(
+      setup
+        ?.querySelector<HTMLOptionElement>('option[value="custom"]')
+        ?.hasAttribute('disabled'),
+    ).toBe(true);
+    expect(
+      document
+        .querySelector<HTMLOptionElement>(
+          '#read-scope-profile option[value="custom"]',
+        )
+        ?.hasAttribute('disabled'),
+    ).toBe(true);
+    const setupCleanup = setup?.querySelector('#setup-reset-cleanup');
+    const setupCleanupRetry = setupCleanup?.querySelector(
+      '#retry-setup-reset-cleanup',
+    );
+    expect(setupCleanup).not.toBeNull();
+    expect(setupCleanupRetry?.getAttribute('aria-describedby')).toBe(
+      'setup-reset-cleanup-status',
+    );
+    expect(setupCleanup?.querySelector('[role="status"]')).not.toBeNull();
+    expect(document.querySelector('#read-scope-profile')).not.toBeNull();
+    expect(controls).not.toBeNull();
+    expect(script).toContain('for (const key of REPLICA_READ_SCOPE_KEYS)');
+    expect(script).toContain('READ_SCOPE_COPY[key].label');
+    expect(document.querySelector('#reset-all-settings')).not.toBeNull();
+    const resetDialog = document.querySelector('#reset-settings-dialog');
+    expect(resetDialog?.localName).toBe('dialog');
+    expect(resetDialog?.getAttribute('aria-modal')).toBe('true');
+    expect(resetDialog?.getAttribute('aria-labelledby')).toBe(
+      'reset-settings-dialog-title',
+    );
+    expect(resetDialog?.getAttribute('aria-describedby')).toBe(
+      'reset-settings-dialog-description',
+    );
+    expect(resetDialog?.querySelector('button[value="cancel"]')).not.toBeNull();
+    expect(resetDialog?.querySelector('button[value="reset"]')).not.toBeNull();
+    expect(script).not.toContain('window.confirm(');
+    expect(script).toContain('installResetConfirmationController({');
+    expect(script).toContain('readScopeSetup.showModal()');
+    expect(script).toContain("readScopeSetup.addEventListener('cancel'");
+    expect(script).toContain("resetSettingsDialog.close('cancel')");
+    expect(script).toContain('preferences.resetCleanupPendingRevision > 0');
+    expect(script).toContain("type: 'simul:preferences:patch-read-scope'");
+    expect(script).toContain("type: 'simul:preferences:complete-read-scope-setup'");
+    expect(script).toContain(
+      'expectedSetupVersion: preferences.readScopeSetupVersion',
+    );
+    expect(script).toContain("type: 'simul:preferences:reset-all'");
+    expect(script).toContain('purgeSourceDerivedRuntime(');
+    expect(script).toContain(
+      'localReadScopeNarrowingGates.set(sequence',
+    );
+    expect(script).toContain(
+      'remoteReadScopeNarrowingGates.prepare(',
+    );
+    expect(script).toContain(
+      'remoteReadScopeNarrowingGates.authorizeCommittedRelease(',
+    );
+    expect(script).toContain('new PreferenceSafetyClient({');
+    expect(script).toContain(
+      'const enabledPixelProviders = enabledUsablePixelOcrProviderOrder()',
+    );
+    expect(script).toContain(
+      "imageCaptureAccess !== 'granted' &&\n    enabledUsablePixelOcrProviderOrder().length > 0",
+    );
+    expect(script).toContain(
+      'const shouldRequestPixelAccess = requestPixelAccess &&',
+    );
+    expect(script).toContain(
+      'Accessibility image text remains active; only pixel OCR is paused.',
+    );
+    expect(script).toContain('handlePreferenceSafetyMessage(message, reply)');
+    expect(script).toContain('preferenceSafetyConnectionReady = false');
+    expect(script).toContain('await purge;');
+    expect(script).toContain('requireConfirmedLegacyTeardown');
+    expect(script).toContain('isConfirmedLivePageObserverRelease(results)');
+    expect(script).toContain(
+      'scope = intersectReplicaReadScopes(scope, PAGE_ONLY_REPLICA_READ_SCOPE)',
+    );
+    expect(script).toContain('livePreferenceStorageFailClosed');
+    expect(script).toContain('selectLiveCompanionPreferenceChange(');
+    expect(script).toContain('retrySetupResetCleanupButton.focus()');
+    expect(script).toContain(
+      "retrySetupResetCleanupButton.addEventListener('click'",
+    );
+    expect(script).toContain('expectedReadScopeFingerprint:');
+    const purgeStart = script.indexOf(
+      'function purgeSourceDerivedRuntime(message: string)',
+    );
+    const purgeEnd = script.indexOf(
+      'function clearResetOnlyRuntimeState()',
+      purgeStart,
+    );
+    const purgeFunction = script.slice(purgeStart, purgeEnd);
+    expect(purgeFunction).toContain('translationMemory.clear()');
+    expect(purgeFunction).toContain('imageTranslationMemory.clear()');
+    expect(script).toContain('resetEpoch: preferences.resetRevision');
+    expect(script).toContain(
+      'preferences.readScopeSetupVersion === REPLICA_READ_SCOPE_SETUP_VERSION',
+    );
+
+    const resetStart = script.indexOf(
+      'async function resetAllExtensionSettings()',
+    );
+    const resetEnd = script.indexOf(
+      'function purgeSourceDerivedRuntime',
+      resetStart,
+    );
+    const resetFunction = script.slice(resetStart, resetEnd);
+    expect(resetFunction.indexOf("result.code === 'stale-reset-revision'"))
+      .toBeLessThan(resetFunction.indexOf('purgeSourceDerivedRuntime('));
+  });
+
+  it('never waits for the background while holding the background preference lock', () => {
+    expect(script).not.toContain('navigator.locks.request(');
+    expect(script).not.toContain('PREFERENCE_LOCK_NAME');
+    expect(script).toContain(
+      'expectedSettingsRevision: freshPreferences.settingsRevision',
+    );
   });
 
   it('offers only selectable fidelity policies with a visible request disclosure', () => {

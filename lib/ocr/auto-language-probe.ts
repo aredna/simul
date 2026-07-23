@@ -77,6 +77,13 @@ export interface AutoLanguageProbeObservation {
   readonly detectedLanguage?: SupportedLanguage;
 }
 
+export interface AutoLanguageProbeSemanticObservation {
+  readonly sampleIdentity: AutoLanguageProbeSampleIdentity;
+  readonly text: string;
+  readonly detectedLanguage: SupportedLanguage;
+  readonly now: number;
+}
+
 export type AutoLanguageProbeObservationResult =
   | Readonly<{
       status: 'resolved';
@@ -211,6 +218,31 @@ export class AutoImageLanguageProbe {
     return true;
   }
 
+  /**
+   * Reopens one already-budgeted language route for a later OCR provider group
+   * without consuming another image or route slot.
+   */
+  resumeAttempt(
+    sampleIdentity: AutoLanguageProbeSampleIdentity,
+    pixelHash: string,
+    routeLanguage: SupportedLanguage,
+    now: number,
+  ): boolean {
+    if (this.#resolved || this.remainingMs(now) <= 0) return false;
+    const hash = boundedPixelKey(pixelHash);
+    const sample = this.#samples.get(sampleIdentity);
+    if (
+      !hash ||
+      !sample ||
+      !sample.routePlan.includes(routeLanguage) ||
+      !sample.attemptedRoutes.has(routeLanguage)
+    ) return false;
+    const activePixelHash = sample.activePixels.get(routeLanguage);
+    if (activePixelHash !== undefined) return activePixelHash === hash;
+    sample.activePixels.set(routeLanguage, hash);
+    return true;
+  }
+
   /** Mark a completed route that yielded no usable observation. */
   completeAttempt(
     sampleIdentity: AutoLanguageProbeSampleIdentity,
@@ -298,6 +330,57 @@ export class AutoImageLanguageProbe {
     votes.samples.add(observation.sampleIdentity);
     if (votes.samples.size >= 2) {
       return this.#resolve(language, 'distinct-images');
+    }
+    return Object.freeze({ status: 'continue' as const });
+  }
+
+  /**
+   * Accessibility text is useful language evidence, but one authored label is
+   * not authoritative for the page. It can only resolve after the same
+   * language is observed on two distinct source images inside this probe's
+   * existing image and lifetime bounds.
+   */
+  observeSemantic(
+    observation: AutoLanguageProbeSemanticObservation,
+  ): AutoLanguageProbeObservationResult {
+    if (
+      this.#resolved ||
+      this.remainingMs(observation.now) <= 0 ||
+      !isSampleIdentity(observation.sampleIdentity)
+    ) return Object.freeze({ status: 'ignored' as const });
+    const text = observation.text
+      .normalize('NFKC')
+      .replace(/\s+/gu, ' ')
+      .trim()
+      .slice(0, 4_000);
+    const meaningfulCharacters = [...text].filter((character) =>
+      /[\p{L}\p{N}]/u.test(character)
+    ).length;
+    if (meaningfulCharacters < 3) {
+      return Object.freeze({ status: 'ignored' as const });
+    }
+    let sample = this.#samples.get(observation.sampleIdentity);
+    if (!sample) {
+      const slot = this.#firstAvailableImageSlot();
+      if (slot === undefined) {
+        return Object.freeze({ status: 'ignored' as const });
+      }
+      sample = {
+        slot,
+        routePlan: this.#routePlan(slot, observation.sampleIdentity),
+        attemptedRoutes: new Set(),
+        activePixels: new Map(),
+      };
+      this.#samples.set(observation.sampleIdentity, sample);
+    }
+    let votes = this.#votes.get(observation.detectedLanguage);
+    if (!votes) {
+      votes = { samples: new Set() };
+      this.#votes.set(observation.detectedLanguage, votes);
+    }
+    votes.samples.add(observation.sampleIdentity);
+    if (votes.samples.size >= 2) {
+      return this.#resolve(observation.detectedLanguage, 'distinct-images');
     }
     return Object.freeze({ status: 'continue' as const });
   }

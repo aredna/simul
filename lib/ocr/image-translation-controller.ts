@@ -33,6 +33,7 @@ import {
   strongAutoLanguageScriptEvidence,
   type AutoLanguageProbeEvidence,
   type AutoLanguageProbeInconclusiveReason,
+  type AutoLanguageProbeObservationResult,
   type AutoLanguageProbeSampleIdentity,
 } from './auto-language-probe';
 import type {
@@ -57,11 +58,18 @@ import {
   type ImageScanJob,
   type ImageScanUpdateResult,
 } from './image-scan-scheduler';
+import { decideSmallImageEligibility } from './small-image-policy';
 import {
   isImageSourceUnavailableError,
   type ImageSourceLease,
 } from './image-source-client';
 import type { ImageTextProviderId } from './known-provider-ids';
+import {
+  ACCESSIBILITY_TEXT_METHOD_ID,
+  imageReadingExecutionPlan,
+  type ImageReadingMethodId,
+} from './image-reading-methods';
+import type { ImageSourceReadPolicy } from './image-source-client';
 import {
   PixelAcquisitionCoordinator,
   type AcquiredImagePixels,
@@ -91,13 +99,22 @@ export interface ImageTranslationConfiguration {
   readonly scanPolicy: ImageScanPolicy;
   readonly skipSmallImages: boolean;
   readonly providerOrder: readonly ImageTextProviderId[];
+  readonly methodOrder?: readonly ImageReadingMethodId[];
+  readonly disabledMethodIds?: readonly ImageReadingMethodId[];
+  readonly policyFingerprint?: string;
+  readonly controlImages?: boolean;
   readonly ocrMinimumConfidence?: OcrMinimumConfidence;
   readonly sourceLanguage: SourceLanguagePreference;
   readonly detectedSourceLanguage?: SupportedLanguage;
   readonly pageLanguageResolutionPending?: boolean;
   readonly targetLanguage: SupportedLanguage;
   readonly translationIdle: boolean;
+  readonly resetEpoch: number;
 }
+
+export type AutoImageLanguageEvidenceOrigin =
+  | 'accessibility-text'
+  | 'ocr';
 
 export type ImageTranslationDiagnosticStage =
   | 'disabled'
@@ -123,6 +140,10 @@ export type ImageTranslationDiagnosticStage =
   | 'translation-failed'
   | 'translation-empty'
   | 'projection-deferred'
+  | 'accessibility-text-started'
+  | 'accessibility-text-empty'
+  | 'accessibility-text-blocked'
+  | 'accessibility-text-complete'
   | 'projected';
 
 type ImageCaptureDeferralReason = Extract<
@@ -261,13 +282,16 @@ export interface ImageTranslationControllerEnvironment {
     request: ReplicaCaptureRequest,
     onChange: (change: SourceImageChange) => void,
     signal?: AbortSignal,
+    policy?: ImageSourceReadPolicy,
   ) => Promise<ImageSourceLease>;
   readonly createPixelCoordinator: (
     source: ImageSourceLease,
     sourceTabId: number,
     sourceWindowId: number,
   ) => PixelAcquisitionCoordinator;
-  readonly createRecognitionCoordinator: () => ImageRecognitionCoordinator;
+  readonly createRecognitionCoordinator: (
+    resetEpoch: number,
+  ) => ImageRecognitionCoordinator;
   readonly resolveAnchor: (
     document: ReplicaSourceDocumentIdentity,
     nodeId: number,
@@ -286,6 +310,7 @@ export interface ImageTranslationControllerEnvironment {
     language: SupportedLanguage,
     evidence: AutoLanguageProbeEvidence,
     document: ReplicaSourceDocumentIdentity,
+    origin: AutoImageLanguageEvidenceOrigin,
   ) => void;
   readonly now?: () => number;
   readonly setTimer?: TimeoutScheduler;
@@ -296,6 +321,11 @@ export interface ImageTranslationControllerEnvironment {
       'scheduleFrame' | 'cancelFrame' | 'createResizeObserver'
     >
   >;
+}
+
+interface AutoLanguageProbeOcrProgress {
+  readonly routes: readonly SupportedLanguage[];
+  readonly completedOcrGroups: Set<number>;
 }
 
 /** Capacity-one, opt-in orchestration from source image facts to replay overlays. */
@@ -321,6 +351,10 @@ export class ImageTranslationController {
   readonly #probeSampleIdentities = new Map<
     number,
     AutoLanguageProbeSampleIdentity
+  >();
+  readonly #probeOcrProgress = new Map<
+    AutoLanguageProbeSampleIdentity,
+    AutoLanguageProbeOcrProgress
   >();
   #configuration: ImageTranslationConfiguration;
   #request: ReplicaCaptureRequest | undefined;
@@ -364,11 +398,16 @@ export class ImageTranslationController {
       scanPolicy: 'visible-first-background-prescan',
       skipSmallImages: true,
       providerOrder: [],
+      methodOrder: [],
+      disabledMethodIds: [],
+      policyFingerprint: 'read-v1-000000',
+      controlImages: false,
       ocrMinimumConfidence: repairOcrMinimumConfidence(undefined),
       sourceLanguage: 'auto',
       pageLanguageResolutionPending: false,
       targetLanguage: 'en',
       translationIdle: true,
+      resetEpoch: 0,
     };
     this.#projector = new ImageOverlayProjector({
       resolveAnchor: environment.resolveAnchor,
@@ -394,17 +433,39 @@ export class ImageTranslationController {
   configure(configuration: ImageTranslationConfiguration): void {
     if (this.#disposed) return;
     const previous = this.#configuration;
+    const requestedResetEpoch = normalizeResetEpoch(configuration.resetEpoch);
+    const resetEpoch = Math.max(previous.resetEpoch, requestedResetEpoch);
+    const resetEpochAdvanced = resetEpoch > previous.resetEpoch;
     const probeConfigurationChanged = autoLanguageProbeConfigurationKey(previous) !==
       autoLanguageProbeConfigurationKey(configuration);
     this.#configuration = Object.freeze({
       ...configuration,
+      resetEpoch,
       providerOrder: Object.freeze([...configuration.providerOrder]),
+      methodOrder: Object.freeze([...(configuration.methodOrder ??
+        configuration.providerOrder)]),
+      disabledMethodIds: Object.freeze([
+        ...(configuration.disabledMethodIds ?? []),
+      ]),
     });
-    if (probeConfigurationChanged) this.#resetAutoLanguageProbe();
     const enabled = this.#isEnabled();
     const wasEnabled = imageTranslationConfigurationEnabled(previous);
     const pairChanged = pairConfigurationKey(previous) !==
       pairConfigurationKey(this.#configuration);
+    const imageSourcePolicyChanged = imageSourcePolicyConfigurationKey(previous) !==
+      imageSourcePolicyConfigurationKey(this.#configuration);
+    const imageContentRetentionBoundary = wasEnabled &&
+      (!enabled || imageSourcePolicyChanged);
+    if (resetEpochAdvanced) {
+      this.#recognition?.advanceResetEpoch(resetEpoch);
+    }
+    if (resetEpochAdvanced || imageContentRetentionBoundary) {
+      this.#translationMemory.clear();
+    }
+    if (imageContentRetentionBoundary) this.#recognition?.clear();
+    if (probeConfigurationChanged || resetEpochAdvanced) {
+      this.#resetAutoLanguageProbe();
+    }
     const pageResolutionGateChanged =
       Boolean(previous.pageLanguageResolutionPending) !==
       Boolean(this.#configuration.pageLanguageResolutionPending);
@@ -414,10 +475,23 @@ export class ImageTranslationController {
       this.#beginPair();
       return;
     }
-    if (pairChanged || pageResolutionGateChanged) {
+    if (
+      wasEnabled &&
+      imageSourcePolicyChanged &&
+      this.#request &&
+      this.#sourceWindowId !== undefined
+    ) {
       this.#processingVersion += 1;
       this.#activeAbortController?.abort();
-      if (pairChanged) this.#beginPair();
+      if (pairChanged || resetEpochAdvanced) this.#beginPair();
+      void this.#startSource();
+      this.#reportConfigurationState();
+      return;
+    }
+    if (pairChanged || pageResolutionGateChanged || resetEpochAdvanced) {
+      this.#processingVersion += 1;
+      this.#activeAbortController?.abort();
+      if (pairChanged || resetEpochAdvanced) this.#beginPair();
       this.#rebuildScheduler();
     } else {
       this.#scheduler?.configure({
@@ -561,6 +635,8 @@ export class ImageTranslationController {
     this.#sourceRecoveryKey = undefined;
     this.#sourceReconnectUsed = false;
     this.#stopSource(false);
+    this.#recognition?.clear();
+    this.#translationMemory.clear();
     this.#reportConfigurationState();
   }
 
@@ -596,6 +672,14 @@ export class ImageTranslationController {
         request,
         (change) => this.#onSourceChange(change, version),
         abortController.signal,
+        {
+          policyFingerprint:
+            this.#configuration.policyFingerprint ?? 'read-v1-000000',
+          controlImages: this.#configuration.controlImages === true,
+          accessibilityTextEnabled: accessibilityMethodEnabled(
+            this.#configuration,
+          ),
+        },
       );
       if (
         version !== this.#sourceVersion ||
@@ -872,11 +956,295 @@ export class ImageTranslationController {
       return;
     }
     const replayLease = anchor.replayLease;
-    this.environment.onDiagnostic?.('capture-started');
-    this.#reportJobProgress(jobOrdinal, 'capture-started', job.descriptor);
-    const acquisition = await pixelCoordinator.acquire(job.descriptor, signal);
-    if (acquisition.status !== 'ready') {
-      const transient = isTransientCaptureReason(acquisition.reason);
+    const steps = imageReadingExecutionPlan(
+      this.#configuration.methodOrder ?? this.#configuration.providerOrder,
+      this.#configuration.disabledMethodIds ?? [],
+      this.#configuration.providerOrder,
+    );
+    const ocrStepCount = steps.filter(({ kind }) => kind === 'ocr').length;
+    const ocrEligibility = decideSmallImageEligibility(job.descriptor, {
+      skipSmallImages: this.#configuration.skipSmallImages,
+      manualOverride: job.manualOverride,
+    });
+    let pixels: AcquiredImagePixels | undefined;
+    let captureDeferral: Extract<PixelAcquisitionResult, {
+      readonly status: 'deferred';
+    }> | undefined;
+    let sourceLanguage: SupportedLanguage | undefined;
+    let sawOcrStep = false;
+    let sawEmptyRecognition = false;
+    let unsupportedLanguage = false;
+    let ocrStepIndex = 0;
+
+    for (const step of steps) {
+      signal.throwIfAborted();
+      if (!this.#isJobCurrent(job, processingVersion, pairEpoch, pairKey)) {
+        throw new DOMException('Image job became stale.', 'AbortError');
+      }
+      try {
+      if (step.kind === 'accessibility-text') {
+        if (await this.#tryAccessibilityText(
+          job,
+          scheduler,
+          processingVersion,
+          jobOrdinal,
+          replayLease,
+          pairEpoch,
+          pairKey,
+          signal,
+        )) return;
+        continue;
+      }
+
+      const currentOcrStepIndex = ocrStepIndex;
+      ocrStepIndex += 1;
+      sawOcrStep = true;
+      if (!ocrEligibility.eligible || captureDeferral) continue;
+      if (!pixels) {
+        this.environment.onDiagnostic?.('capture-started');
+        this.#reportJobProgress(jobOrdinal, 'capture-started', job.descriptor);
+        const acquisition = await pixelCoordinator.acquire(job.descriptor, signal);
+        if (acquisition.status !== 'ready') {
+          captureDeferral = acquisition;
+          this.environment.onDiagnostic?.('capture-deferred');
+          this.environment.onDiagnostic?.(Object.freeze({
+            stage: 'capture-deferred' as const,
+            ordinal: jobOrdinal,
+            reason: acquisition.reason,
+            renderedWidth: job.descriptor.renderedWidth,
+            renderedHeight: job.descriptor.renderedHeight,
+          }));
+          // A pixel failure applies only to OCR. Continue through the exact
+          // method plan so a later accessibility-text step still runs.
+          continue;
+        }
+        this.#captureRetries.delete(job.descriptor.nodeId);
+        pixels = acquisition.pixels;
+        if (!this.#isJobCurrent(job, processingVersion, pairEpoch, pairKey)) {
+          throw new DOMException('Image job became stale.', 'AbortError');
+        }
+      }
+
+      if (!sourceLanguage) {
+        sourceLanguage = resolveImageSourceLanguage({
+          nearestElementLanguage: pixels.nearestElementLanguage,
+          ...(this.#configuration.sourceLanguage === 'auto'
+            ? {}
+            : { explicitSourceLanguage: this.#configuration.sourceLanguage }),
+          ...(this.#effectiveDetectedSourceLanguage()
+            ? { detectedPageLanguage: this.#effectiveDetectedSourceLanguage() }
+            : {}),
+        });
+        if (!sourceLanguage) {
+          sourceLanguage = await this.#probeImageLanguage(
+            pixels,
+            job.descriptor,
+            jobOrdinal,
+            step.providerOrder,
+            currentOcrStepIndex,
+            ocrStepCount,
+            signal,
+          );
+          if (this.#pairEpoch !== pairEpoch) return;
+          if (!sourceLanguage) {
+            unsupportedLanguage = true;
+            continue;
+          }
+        }
+      }
+      const languageGroup = tesseractLanguageGroupFor(sourceLanguage);
+      if (sourceLanguage === this.#configuration.targetLanguage) {
+        this.#clearProjection(job.descriptor);
+        scheduler.settle(job);
+        this.environment.onDiagnostic?.('same-language');
+        return;
+      }
+      const route: ImageRecognitionRoute = {
+        providerOrder: step.providerOrder,
+        sourceLanguage,
+        minimumConfidence: repairOcrMinimumConfidence(
+          this.#configuration.ocrMinimumConfidence,
+        ),
+        ...(languageGroup
+          ? {
+              languageGroup,
+              modelVersion: TESSERACT_MODEL_VERSION,
+            }
+          : {}),
+      };
+      this.environment.onDiagnostic?.('recognition-started');
+      this.#reportJobProgress(
+        jobOrdinal,
+        'recognition-started',
+        job.descriptor,
+        pixels,
+      );
+      const recognizer = this.#recognizer();
+      let recognition = await recognizer.recognize(
+        pixels,
+        route,
+        signal,
+      );
+      while (true) {
+        if (recognition.cacheAccess && recognition.cacheStats) {
+          this.#reportRecognitionCache(
+            recognition.cacheAccess,
+            recognition.cacheStats,
+          );
+        }
+        if (recognition.status !== 'complete') {
+          this.environment.onDiagnostic?.(Object.freeze({
+            stage: 'recognition-failed' as const,
+            code: recognition.code,
+            ordinal: jobOrdinal,
+            renderedWidth: job.descriptor.renderedWidth,
+            renderedHeight: job.descriptor.renderedHeight,
+            bitmapWidth: pixels.bitmapWidth,
+            bitmapHeight: pixels.bitmapHeight,
+          }));
+          break;
+        }
+        if (recognition.quality) {
+          this.#reportRecognitionQuality(recognition.quality);
+        }
+        this.environment.onDiagnostic?.(Object.freeze({
+          stage: 'recognition-complete' as const,
+          provider: recognition.result.providerId,
+          regions: recognition.result.regions.length,
+          cacheHit: recognition.cacheHit,
+          ordinal: jobOrdinal,
+          bitmapWidth: pixels.bitmapWidth,
+          bitmapHeight: pixels.bitmapHeight,
+        }));
+        if (recognition.result.regions.length === 0) {
+          sawEmptyRecognition = true;
+          if (!recognition.continuation) break;
+          recognition = await recognizer.continueRecognition(
+            pixels,
+            recognition.continuation,
+            signal,
+          );
+          continue;
+        }
+
+        this.#emptyRetries.delete(job.descriptor.nodeId);
+        const pair: TranslationPair = {
+          sourceLanguage,
+          targetLanguage: this.#configuration.targetLanguage,
+        };
+        let regions: readonly TranslatedImageRegion[] = Object.freeze([]);
+        let translationFailed = false;
+        try {
+          regions = await this.#translateRegions(
+            recognition.result.regions,
+            pair,
+            signal,
+            () => this.#reportTranslationStage(
+              'translation-started',
+              jobOrdinal,
+              job.descriptor,
+              pixels!,
+            ),
+          );
+        } catch (error) {
+          if (
+            isAbortError(error) ||
+            signal.aborted ||
+            isImageSourceUnavailableError(error)
+          ) throw error;
+          this.#reportTranslationStage(
+            'translation-failed',
+            jobOrdinal,
+            job.descriptor,
+            pixels,
+          );
+          translationFailed = true;
+        }
+        if (!this.#isJobCurrent(job, processingVersion, pairEpoch, pairKey)) {
+          throw new DOMException(
+            'Image translation became stale.',
+            'AbortError',
+          );
+        }
+        if (translationFailed || regions.length === 0) {
+          if (!translationFailed) {
+            this.#reportTranslationStage(
+              'translation-empty',
+              jobOrdinal,
+              job.descriptor,
+              pixels,
+            );
+          }
+          if (!recognition.continuation) break;
+          recognition = await recognizer.continueRecognition(
+            pixels,
+            recognition.continuation,
+            signal,
+          );
+          continue;
+        }
+        const projection: ImageOverlayProjection = {
+          jobOrdinal,
+          document: job.descriptor.document,
+          nodeId: job.descriptor.nodeId,
+          contentRevision: job.descriptor.contentRevision,
+          observationRevision: job.descriptor.observationRevision,
+          replayLease,
+          pairEpoch,
+          pairKey,
+          pixelHash: pixels.pixelHash,
+          bitmapWidth: pixels.bitmapWidth,
+          bitmapHeight: pixels.bitmapHeight,
+          cropOffsetXCss: pixels.cropOffsetXCss,
+          cropOffsetYCss: pixels.cropOffsetYCss,
+          cropWidthCss: pixels.cropWidthCss,
+          cropHeightCss: pixels.cropHeightCss,
+          renderedWidthCss: pixels.renderedWidthCss,
+          renderedHeightCss: pixels.renderedHeightCss,
+          methodId: recognition.result.providerId,
+          evidenceKind: 'ocr',
+          regions,
+        };
+        this.#projectedHashes.set(job.descriptor.nodeId, pixels.pixelHash);
+        this.#projectedOrdinals.set(job.descriptor.nodeId, jobOrdinal);
+        if (!this.#projector.project(projection)) {
+          this.#projectedHashes.delete(job.descriptor.nodeId);
+          this.#projectedOrdinals.delete(job.descriptor.nodeId);
+          scheduler.defer(job);
+          this.environment.onDiagnostic?.('projection-deferred');
+          this.#reportJobProgress(
+            jobOrdinal,
+            'projection-deferred',
+            job.descriptor,
+            pixels,
+          );
+          return;
+        }
+        scheduler.settle(job);
+        this.environment.onDiagnostic?.('projected');
+        this.#reportJobProgress(jobOrdinal, 'projected', job.descriptor, pixels);
+        return;
+      }
+      continue;
+      } catch (error) {
+        if (
+          isAbortError(error) ||
+          signal.aborted ||
+          isImageSourceUnavailableError(error)
+        ) throw error;
+        this.#projectedHashes.delete(job.descriptor.nodeId);
+        this.#projectedOrdinals.delete(job.descriptor.nodeId);
+        this.environment.onDiagnostic?.(
+          step.kind === 'accessibility-text'
+            ? 'accessibility-text-blocked'
+            : 'recognition-failed',
+        );
+        continue;
+      }
+    }
+
+    if (captureDeferral) {
+      const transient = isTransientCaptureReason(captureDeferral.reason);
       const retryAttempt = transient
         ? this.#takeCaptureRetry(job)
         : undefined;
@@ -884,20 +1252,12 @@ export class ImageTranslationController {
       if (retryAttempt !== undefined) scheduler.retry(job);
       else if (
         retryExhausted ||
-        acquisition.reason === 'permission' ||
-        acquisition.reason === 'inactive' ||
-        acquisition.reason === 'oversized'
+        captureDeferral.reason === 'permission' ||
+        captureDeferral.reason === 'inactive' ||
+        captureDeferral.reason === 'oversized'
       ) scheduler.settle(job);
       else scheduler.defer(job);
       if (!transient) this.#captureRetries.delete(job.descriptor.nodeId);
-      this.environment.onDiagnostic?.('capture-deferred');
-      this.environment.onDiagnostic?.(Object.freeze({
-        stage: 'capture-deferred' as const,
-        ordinal: jobOrdinal,
-        reason: acquisition.reason,
-        renderedWidth: job.descriptor.renderedWidth,
-        renderedHeight: job.descriptor.renderedHeight,
-      }));
       if (retryAttempt !== undefined) {
         this.#reportJobProgress(
           jobOrdinal,
@@ -917,96 +1277,8 @@ export class ImageTranslationController {
       }
       return;
     }
-    this.#captureRetries.delete(job.descriptor.nodeId);
-    const pixels = acquisition.pixels;
-    if (!this.#isJobCurrent(job, processingVersion, pairEpoch, pairKey)) {
-      throw new DOMException('Image job became stale.', 'AbortError');
-    }
-    let sourceLanguage = resolveImageSourceLanguage({
-      nearestElementLanguage: pixels.nearestElementLanguage,
-      ...(this.#configuration.sourceLanguage === 'auto'
-        ? {}
-        : { explicitSourceLanguage: this.#configuration.sourceLanguage }),
-      ...(this.#effectiveDetectedSourceLanguage()
-        ? { detectedPageLanguage: this.#effectiveDetectedSourceLanguage() }
-        : {}),
-    });
-    if (!sourceLanguage) {
-      sourceLanguage = await this.#probeImageLanguage(
-        pixels,
-        job.descriptor,
-        jobOrdinal,
-        signal,
-      );
-      if (!sourceLanguage) {
-        scheduler.settle(job);
-        this.environment.onDiagnostic?.('unsupported-language');
-        return;
-      }
-      // Promotion changes the pair epoch and rebuilds every descriptor after
-      // this job unwinds, including earlier unresolved samples.
-      return;
-    }
-    const languageGroup = tesseractLanguageGroupFor(sourceLanguage);
-    if (sourceLanguage === this.#configuration.targetLanguage) {
-      this.#clearProjection(job.descriptor);
-      scheduler.settle(job);
-      this.environment.onDiagnostic?.('same-language');
-      return;
-    }
-    const route: ImageRecognitionRoute = {
-      providerOrder: this.#configuration.providerOrder,
-      sourceLanguage,
-      minimumConfidence: repairOcrMinimumConfidence(
-        this.#configuration.ocrMinimumConfidence,
-      ),
-      ...(languageGroup
-        ? {
-            languageGroup,
-            modelVersion: TESSERACT_MODEL_VERSION,
-          }
-        : {}),
-    };
-    this.environment.onDiagnostic?.('recognition-started');
-    this.#reportJobProgress(
-      jobOrdinal,
-      'recognition-started',
-      job.descriptor,
-      pixels,
-    );
-    const recognition = await this.#recognizer().recognize(pixels, route, signal);
-    if (recognition.cacheAccess && recognition.cacheStats) {
-      this.#reportRecognitionCache(
-        recognition.cacheAccess,
-        recognition.cacheStats,
-      );
-    }
-    if (recognition.status !== 'complete') {
-      scheduler.settle(job);
-      this.environment.onDiagnostic?.(Object.freeze({
-        stage: 'recognition-failed' as const,
-        code: recognition.code,
-        ordinal: jobOrdinal,
-        renderedWidth: job.descriptor.renderedWidth,
-        renderedHeight: job.descriptor.renderedHeight,
-        bitmapWidth: pixels.bitmapWidth,
-        bitmapHeight: pixels.bitmapHeight,
-      }));
-      return;
-    }
-    if (recognition.quality) {
-      this.#reportRecognitionQuality(recognition.quality);
-    }
-    this.environment.onDiagnostic?.(Object.freeze({
-      stage: 'recognition-complete' as const,
-      provider: recognition.result.providerId,
-      regions: recognition.result.regions.length,
-      cacheHit: recognition.cacheHit,
-      ordinal: jobOrdinal,
-      bitmapWidth: pixels.bitmapWidth,
-      bitmapHeight: pixels.bitmapHeight,
-    }));
-    if (recognition.result.regions.length === 0) {
+
+    if (sawEmptyRecognition && pixels) {
       const emptyDecision = this.#emptyRetryDecision(job, pixels.pixelHash);
       if (emptyDecision.status === 'retry') {
         scheduler.retry(job);
@@ -1035,49 +1307,99 @@ export class ImageTranslationController {
       }
       return;
     }
-    this.#emptyRetries.delete(job.descriptor.nodeId);
-    const pair: TranslationPair = {
+
+    scheduler.settle(job);
+    if (sawOcrStep && !ocrEligibility.eligible) {
+      this.environment.onDiagnostic?.('image-skipped');
+      this.environment.onDiagnostic?.(Object.freeze({
+        stage: 'image-scheduling' as const,
+        status: 'skipped' as const,
+        reason: ocrEligibility.reason,
+        visibility: job.descriptor.visibility,
+        renderedWidth: job.descriptor.renderedWidth,
+        renderedHeight: job.descriptor.renderedHeight,
+      }));
+    } else if (unsupportedLanguage) {
+      this.environment.onDiagnostic?.('unsupported-language');
+    }
+  }
+
+  async #tryAccessibilityText(
+    job: ImageScanJob,
+    scheduler: ImageScanScheduler,
+    processingVersion: number,
+    jobOrdinal: number,
+    replayLease: number,
+    pairEpoch: number,
+    pairKey: string,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    const read = this.#source?.readAccessibilityText;
+    if (!read || !accessibilityMethodEnabled(this.#configuration)) return false;
+    this.environment.onDiagnostic?.('accessibility-text-started');
+    const evidence = await read.call(
+      this.#source,
+      job.descriptor,
+      this.#configuration.policyFingerprint ?? 'read-v1-000000',
+      this.#configuration.controlImages === true,
+      signal,
+    );
+    if (!evidence) {
+      this.environment.onDiagnostic?.('accessibility-text-empty');
+      return false;
+    }
+    if (
+      evidence.nodeId !== job.descriptor.nodeId ||
+      evidence.contentRevision !== job.descriptor.contentRevision ||
+      evidence.observationRevision !== job.descriptor.observationRevision ||
+      !sameSourceDocument(evidence.document, job.descriptor.document)
+    ) throw new DOMException('Accessibility evidence became stale.', 'AbortError');
+    const sourceLanguage = await this.#resolveAccessibilitySourceLanguage(
+      evidence.text,
+      evidence.nearestElementLanguage,
+      signal,
+    );
+    if (!sourceLanguage) {
+      this.environment.onDiagnostic?.('accessibility-text-empty');
+      return false;
+    }
+    if (this.#observeSemanticImageLanguage(
+      evidence.text,
+      sourceLanguage,
+      job.descriptor,
+    )) return true;
+    if (sourceLanguage === this.#configuration.targetLanguage) {
+      this.#clearProjection(job.descriptor);
+      scheduler.settle(job);
+      this.environment.onDiagnostic?.('same-language');
+      return true;
+    }
+    const width = Math.max(1, job.descriptor.renderedWidth);
+    const height = Math.max(1, job.descriptor.renderedHeight);
+    const regions = await this.#translateRegions([
+      {
+        text: evidence.text,
+        boundingBox: { x: 0, y: 0, width, height },
+        placement: 'whole-image',
+      },
+    ], {
       sourceLanguage,
       targetLanguage: this.#configuration.targetLanguage,
-    };
-    let regions: readonly TranslatedImageRegion[];
-    try {
-      regions = await this.#translateRegions(
-        recognition.result.regions,
-        pair,
-        signal,
-        () => this.#reportTranslationStage(
-          'translation-started',
-          jobOrdinal,
-          job.descriptor,
-          pixels,
-        ),
-      );
-    } catch (error) {
-      if (!isAbortError(error) && !signal.aborted) {
-        this.#reportTranslationStage(
-          'translation-failed',
-          jobOrdinal,
-          job.descriptor,
-          pixels,
-        );
-      }
-      throw error;
-    }
+    }, signal, () => this.environment.onDiagnostic?.('translation-started'));
     if (!this.#isJobCurrent(job, processingVersion, pairEpoch, pairKey)) {
-      throw new DOMException('Image translation became stale.', 'AbortError');
+      throw new DOMException('Accessibility translation became stale.', 'AbortError');
     }
     if (regions.length === 0) {
-      scheduler.settle(job);
-      this.#clearProjection(job.descriptor);
-      this.#reportTranslationStage(
-        'translation-empty',
-        jobOrdinal,
-        job.descriptor,
-        pixels,
-      );
-      return;
+      this.environment.onDiagnostic?.('translation-empty');
+      return false;
     }
+    const evidenceIdentity = await sha256Hex([
+      'accessibility-text',
+      evidence.source,
+      evidence.text,
+      String(evidence.contentRevision),
+    ].join('\u0000'));
+    signal.throwIfAborted();
     const projection: ImageOverlayProjection = {
       jobOrdinal,
       document: job.descriptor.document,
@@ -1087,42 +1409,54 @@ export class ImageTranslationController {
       replayLease,
       pairEpoch,
       pairKey,
-      pixelHash: pixels.pixelHash,
-      bitmapWidth: pixels.bitmapWidth,
-      bitmapHeight: pixels.bitmapHeight,
-      cropOffsetXCss: pixels.cropOffsetXCss,
-      cropOffsetYCss: pixels.cropOffsetYCss,
-      cropWidthCss: pixels.cropWidthCss,
-      cropHeightCss: pixels.cropHeightCss,
-      renderedWidthCss: pixels.renderedWidthCss,
-      renderedHeightCss: pixels.renderedHeightCss,
+      pixelHash: evidenceIdentity,
+      bitmapWidth: width,
+      bitmapHeight: height,
+      cropOffsetXCss: 0,
+      cropOffsetYCss: 0,
+      cropWidthCss: width,
+      cropHeightCss: height,
+      renderedWidthCss: width,
+      renderedHeightCss: height,
+      methodId: ACCESSIBILITY_TEXT_METHOD_ID,
+      evidenceKind: 'semantic',
       regions,
     };
-    this.#projectedHashes.set(job.descriptor.nodeId, pixels.pixelHash);
+    this.#projectedHashes.set(job.descriptor.nodeId, evidenceIdentity);
     this.#projectedOrdinals.set(job.descriptor.nodeId, jobOrdinal);
     if (!this.#projector.project(projection)) {
       this.#projectedHashes.delete(job.descriptor.nodeId);
       this.#projectedOrdinals.delete(job.descriptor.nodeId);
       scheduler.defer(job);
       this.environment.onDiagnostic?.('projection-deferred');
-      this.#reportJobProgress(
-        jobOrdinal,
-        'projection-deferred',
-        job.descriptor,
-        pixels,
-      );
-      return;
+      return true;
     }
     scheduler.settle(job);
+    this.environment.onDiagnostic?.('accessibility-text-complete');
     this.environment.onDiagnostic?.('projected');
-    this.#reportJobProgress(jobOrdinal, 'projected', job.descriptor, pixels);
+    return true;
+  }
+
+  async #resolveAccessibilitySourceLanguage(
+    text: string,
+    nearestElementLanguage: SupportedLanguage | undefined,
+    signal: AbortSignal,
+  ): Promise<SupportedLanguage | undefined> {
+    const resolved = resolveImageSourceLanguage({
+      ...(nearestElementLanguage ? { nearestElementLanguage } : {}),
+      ...(this.#configuration.sourceLanguage === 'auto'
+        ? {}
+        : { explicitSourceLanguage: this.#configuration.sourceLanguage }),
+      ...(this.#effectiveDetectedSourceLanguage()
+        ? { detectedPageLanguage: this.#effectiveDetectedSourceLanguage() }
+        : {}),
+    });
+    if (resolved) return resolved;
+    return this.#detectTranscriptLanguage(text, signal);
   }
 
   async #translateRegions(
-    regions: readonly {
-      readonly text: string;
-      readonly boundingBox: TranslatedImageRegion['boundingBox'];
-    }[],
+    regions: readonly TranslatedImageRegion[],
     pair: TranslationPair,
     signal: AbortSignal,
     onTranslationStarted: () => void,
@@ -1152,6 +1486,7 @@ export class ImageTranslationController {
           translated.push(Object.freeze({
             text: text.trim(),
             boundingBox: region.boundingBox,
+            ...(region.placement ? { placement: region.placement } : {}),
           }));
         }
       }
@@ -1281,15 +1616,16 @@ export class ImageTranslationController {
   }
 
   #recognizer(): ImageRecognitionCoordinator {
-    return this.#recognition ??= this.environment.createRecognitionCoordinator();
+    if (!this.#recognition) {
+      this.#recognition = this.environment.createRecognitionCoordinator(
+        this.#configuration.resetEpoch,
+      );
+    }
+    this.#recognition.advanceResetEpoch(this.#configuration.resetEpoch);
+    return this.#recognition;
   }
 
-  async #probeImageLanguage(
-    pixels: AcquiredImagePixels,
-    descriptor: SourceImageDescriptor,
-    jobOrdinal: number,
-    signal: AbortSignal,
-  ): Promise<SupportedLanguage | undefined> {
+  #ensureAutoLanguageProbe(): AutoImageLanguageProbe | undefined {
     if (
       this.#configuration.sourceLanguage !== 'auto' ||
       this.#configuration.detectedSourceLanguage ||
@@ -1297,15 +1633,12 @@ export class ImageTranslationController {
       this.#probeInconclusiveReported ||
       this.#configuration.pageLanguageResolutionPending
     ) return undefined;
-    const configuredConfidence = repairOcrMinimumConfidence(
-      this.#configuration.ocrMinimumConfidence,
-    );
-    const minimumConfidence = configuredConfidence <
-        AUTO_LANGUAGE_PROBE_MINIMUM_CONFIDENCE
-      ? AUTO_LANGUAGE_PROBE_MINIMUM_CONFIDENCE
-      : configuredConfidence;
     let probe = this.#autoLanguageProbe;
     if (!probe) {
+      const minimumConfidence = Math.max(
+        AUTO_LANGUAGE_PROBE_MINIMUM_CONFIDENCE,
+        repairOcrMinimumConfidence(this.#configuration.ocrMinimumConfidence),
+      );
       probe = new AutoImageLanguageProbe(this.#now(), minimumConfidence);
       this.#autoLanguageProbe = probe;
       const probeAtDeadline = probe;
@@ -1327,22 +1660,117 @@ export class ImageTranslationController {
         maxAttempts: MAX_AUTO_LANGUAGE_PROBE_ATTEMPTS,
       }));
     }
-    const deadlineReason = probe.inconclusiveReason(this.#now());
-    if (deadlineReason) {
-      this.#reportProbeInconclusive(probe, deadlineReason);
+    if (probe.remainingMs(this.#now()) <= 0) {
+      this.#reportProbeInconclusive(probe, 'deadline');
+      return undefined;
+    }
+    return probe;
+  }
+
+  #observeSemanticImageLanguage(
+    text: string,
+    detectedLanguage: SupportedLanguage,
+    descriptor: SourceImageDescriptor,
+  ): SupportedLanguage | undefined {
+    const probe = this.#ensureAutoLanguageProbe();
+    if (!probe) return undefined;
+    const observed = probe.observeSemantic({
+      sampleIdentity: this.#probeSampleIdentity(descriptor),
+      text,
+      detectedLanguage,
+      now: this.#now(),
+    });
+    return observed.status === 'resolved'
+      ? this.#acceptAutoLanguageResolution(
+          observed,
+          descriptor.document,
+          'accessibility-text',
+        )
+      : undefined;
+  }
+
+  #acceptAutoLanguageResolution(
+    observed: Extract<AutoLanguageProbeObservationResult, {
+      readonly status: 'resolved';
+    }>,
+    document: ReplicaSourceDocumentIdentity,
+    origin: AutoImageLanguageEvidenceOrigin,
+  ): SupportedLanguage {
+    this.#probeDetectedSourceLanguage = observed.language;
+    this.#probeInconclusiveReported = false;
+    this.#beginPair();
+    this.#clearAutoLanguageProbeDeadline();
+    this.environment.onDiagnostic?.(Object.freeze({
+      stage: 'auto-language-probe-resolved' as const,
+      language: observed.language,
+      evidence: observed.evidence,
+      attempts: observed.attempts,
+      samples: observed.images,
+    }));
+    try {
+      this.environment.onAutoLanguageDetected?.(
+        observed.language,
+        observed.evidence,
+        document,
+        origin,
+      );
+    } catch {
+      // A UI observer cannot prevent the controller's pair transition.
+    } finally {
+      if (
+        this.#isEnabled() &&
+        this.#configuration.sourceLanguage === 'auto' &&
+        this.#effectiveDetectedSourceLanguage() === observed.language
+      ) this.#probeSchedulerRebuildRequested = true;
+    }
+    return observed.language;
+  }
+
+  async #probeImageLanguage(
+    pixels: AcquiredImagePixels,
+    descriptor: SourceImageDescriptor,
+    jobOrdinal: number,
+    providerOrder: readonly ImageTextProviderId[],
+    ocrGroupIndex: number,
+    ocrGroupCount: number,
+    signal: AbortSignal,
+  ): Promise<SupportedLanguage | undefined> {
+    const probe = this.#ensureAutoLanguageProbe();
+    if (!probe) return undefined;
+    const configuredConfidence = repairOcrMinimumConfidence(
+      this.#configuration.ocrMinimumConfidence,
+    );
+    const minimumConfidence = configuredConfidence <
+        AUTO_LANGUAGE_PROBE_MINIMUM_CONFIDENCE
+      ? AUTO_LANGUAGE_PROBE_MINIMUM_CONFIDENCE
+      : configuredConfidence;
+    const now = this.#now();
+    if (probe.remainingMs(now) <= 0) {
+      this.#reportProbeInconclusive(probe, 'deadline');
       return undefined;
     }
     const sampleIdentity = this.#probeSampleIdentity(descriptor);
-    const wasKnownImage = probe.hasSample(sampleIdentity);
-    const candidates = probe.candidateLanguages(
-      sampleIdentity,
-      pixels.pixelHash,
-    );
-    if (candidates.length === 0 && !wasKnownImage &&
-        probe.images >= MAX_AUTO_LANGUAGE_PROBE_IMAGES) {
-      this.#reportProbeInconclusive(probe, probe.finalReason());
-      return undefined;
+    let progress = this.#probeOcrProgress.get(sampleIdentity);
+    if (!progress) {
+      const wasKnownImage = probe.hasSample(sampleIdentity);
+      const candidates = probe.candidateLanguages(
+        sampleIdentity,
+        pixels.pixelHash,
+      );
+      if (candidates.length === 0 && !wasKnownImage &&
+          probe.images >= MAX_AUTO_LANGUAGE_PROBE_IMAGES) {
+        this.#reportProbeInconclusive(probe, probe.finalReason());
+        return undefined;
+      }
+      if (candidates.length === 0) return undefined;
+      progress = {
+        routes: candidates,
+        completedOcrGroups: new Set(),
+      };
+      this.#probeOcrProgress.set(sampleIdentity, progress);
     }
+    if (progress.completedOcrGroups.has(ocrGroupIndex)) return undefined;
+    const candidates = progress.routes;
     const lifetimeSignal = this.#probeLifetimeAbortController?.signal;
     if (!lifetimeSignal) return undefined;
     const probeAbortController = new AbortController();
@@ -1354,28 +1782,37 @@ export class ImageTranslationController {
     if (lifetimeSignal.aborted) relayLifetimeAbort();
     else lifetimeSignal.addEventListener('abort', relayLifetimeAbort, { once: true });
     let activeCandidate: SupportedLanguage | undefined;
+    let activeCandidateWasNew = false;
     try {
       for (const candidateLanguage of candidates) {
         probeAbortController.signal.throwIfAborted();
-        if (!probe.beginAttempt(
+        const attemptCountBefore = probe.attempts;
+        const resumed = probe.resumeAttempt(
           sampleIdentity,
           pixels.pixelHash,
           candidateLanguage,
           this.#now(),
-        )) {
-          break;
-        }
-        this.environment.onDiagnostic?.(Object.freeze({
-          stage: 'auto-language-probe-attempt' as const,
-          attempt: probe.attempts,
-          sample: probe.images,
+        );
+        if (!resumed && !probe.beginAttempt(
+          sampleIdentity,
+          pixels.pixelHash,
           candidateLanguage,
-        }));
+          this.#now(),
+        )) continue;
+        activeCandidateWasNew = probe.attempts > attemptCountBefore;
+        if (activeCandidateWasNew) {
+          this.environment.onDiagnostic?.(Object.freeze({
+            stage: 'auto-language-probe-attempt' as const,
+            attempt: probe.attempts,
+            sample: probe.images,
+            candidateLanguage,
+          }));
+        }
         activeCandidate = candidateLanguage;
         const languageGroup = tesseractLanguageGroupFor(candidateLanguage);
-        const recognition = await raceAbortPromise(
+        let recognition = await raceAbortPromise(
           this.#recognizer().recognize(pixels, {
-            providerOrder: this.#configuration.providerOrder,
+            providerOrder,
             sourceLanguage: candidateLanguage,
             minimumConfidence,
             ...(languageGroup
@@ -1387,93 +1824,92 @@ export class ImageTranslationController {
           }, probeAbortController.signal),
           probeAbortController.signal,
         );
-        if (recognition.cacheAccess && recognition.cacheStats) {
-          this.#reportRecognitionCache(
-            recognition.cacheAccess,
-            recognition.cacheStats,
-          );
-        }
-        if (recognition.status !== 'complete') {
-          probe.completeAttempt(
-            sampleIdentity,
-            pixels.pixelHash,
-            candidateLanguage,
-          );
-          this.environment.onDiagnostic?.(Object.freeze({
-            stage: 'recognition-failed' as const,
-            code: recognition.code,
-            ordinal: jobOrdinal,
-            renderedWidth: descriptor.renderedWidth,
-            renderedHeight: descriptor.renderedHeight,
-            bitmapWidth: pixels.bitmapWidth,
-            bitmapHeight: pixels.bitmapHeight,
-          }));
-          activeCandidate = undefined;
-          continue;
-        }
-        if (recognition.result.regions.length === 0) {
-          probe.completeAttempt(
-            sampleIdentity,
-            pixels.pixelHash,
-            candidateLanguage,
-          );
-          activeCandidate = undefined;
-          continue;
-        }
-        const detectedLanguage = strongAutoLanguageScriptEvidence(
-          recognition.result.transcript,
-        )
-          ? undefined
-          : await this.#detectTranscriptLanguage(
-              recognition.result.transcript,
-              probeAbortController.signal,
+        while (true) {
+          if (recognition.cacheAccess && recognition.cacheStats) {
+            this.#reportRecognitionCache(
+              recognition.cacheAccess,
+              recognition.cacheStats,
             );
-        probeAbortController.signal.throwIfAborted();
-        const observed = probe.observe({
-          sampleIdentity,
-          pixelHash: pixels.pixelHash,
-          routeLanguage: candidateLanguage,
-          transcript: recognition.result.transcript,
-          confidence: recognition.result.transcriptConfidence,
-          ...(detectedLanguage ? { detectedLanguage } : {}),
-        });
-        activeCandidate = undefined;
-        if (observed.status !== 'resolved') continue;
-        this.#probeDetectedSourceLanguage = observed.language;
-        this.#probeInconclusiveReported = false;
-        this.#beginPair();
-        this.#clearAutoLanguageProbeDeadline();
-        this.environment.onDiagnostic?.(Object.freeze({
-          stage: 'auto-language-probe-resolved' as const,
-          language: observed.language,
-          evidence: observed.evidence,
-          attempts: observed.attempts,
-          samples: observed.images,
-        }));
-        try {
-          this.environment.onAutoLanguageDetected?.(
-            observed.language,
-            observed.evidence,
-            descriptor.document,
+          }
+          if (recognition.status !== 'complete') {
+            this.environment.onDiagnostic?.(Object.freeze({
+              stage: 'recognition-failed' as const,
+              code: recognition.code,
+              ordinal: jobOrdinal,
+              renderedWidth: descriptor.renderedWidth,
+              renderedHeight: descriptor.renderedHeight,
+              bitmapWidth: pixels.bitmapWidth,
+              bitmapHeight: pixels.bitmapHeight,
+            }));
+            break;
+          }
+          if (recognition.result.regions.length > 0) {
+            const detectedLanguage = strongAutoLanguageScriptEvidence(
+              recognition.result.transcript,
+            )
+              ? undefined
+              : await this.#detectTranscriptLanguage(
+                  recognition.result.transcript,
+                  probeAbortController.signal,
+                );
+            probeAbortController.signal.throwIfAborted();
+            const observed = probe.observe({
+              sampleIdentity,
+              pixelHash: pixels.pixelHash,
+              routeLanguage: candidateLanguage,
+              transcript: recognition.result.transcript,
+              confidence: recognition.result.transcriptConfidence,
+              ...(detectedLanguage ? { detectedLanguage } : {}),
+            });
+            if (observed.status === 'resolved') {
+              activeCandidate = undefined;
+              return this.#acceptAutoLanguageResolution(
+                observed,
+                descriptor.document,
+                'ocr',
+              );
+            }
+          }
+          if (!recognition.continuation) break;
+          if (!probe.resumeAttempt(
+            sampleIdentity,
+            pixels.pixelHash,
+            candidateLanguage,
+            this.#now(),
+          )) break;
+          recognition = await raceAbortPromise(
+            this.#recognizer().continueRecognition(
+              pixels,
+              recognition.continuation,
+              probeAbortController.signal,
+            ),
+            probeAbortController.signal,
           );
-        } catch {
-          // A UI observer cannot prevent the controller's pair transition.
-        } finally {
-          if (
-            this.#isEnabled() &&
-            this.#configuration.sourceLanguage === 'auto' &&
-            this.#effectiveDetectedSourceLanguage() === observed.language
-          ) this.#probeSchedulerRebuildRequested = true;
         }
-        return observed.language;
-      }
-    } catch (error) {
-      if (activeCandidate) {
-        probe.rollbackAttempt(
+        probe.completeAttempt(
           sampleIdentity,
           pixels.pixelHash,
-          activeCandidate,
+          candidateLanguage,
         );
+        activeCandidate = undefined;
+        activeCandidateWasNew = false;
+      }
+      progress.completedOcrGroups.add(ocrGroupIndex);
+    } catch (error) {
+      if (activeCandidate) {
+        if (activeCandidateWasNew) {
+          probe.rollbackAttempt(
+            sampleIdentity,
+            pixels.pixelHash,
+            activeCandidate,
+          );
+        } else {
+          probe.completeAttempt(
+            sampleIdentity,
+            pixels.pixelHash,
+            activeCandidate,
+          );
+        }
         activeCandidate = undefined;
       }
       if (this.#probeInconclusiveReported) return undefined;
@@ -1483,8 +1919,12 @@ export class ImageTranslationController {
       lifetimeSignal.removeEventListener('abort', relayLifetimeAbort);
     }
     const reason = probe.inconclusiveReason(this.#now());
-    if (reason) this.#reportProbeInconclusive(probe, reason);
-    else if (probe.images >= MAX_AUTO_LANGUAGE_PROBE_IMAGES) {
+    if (reason === 'deadline' || (reason && ocrGroupIndex + 1 >= ocrGroupCount)) {
+      this.#reportProbeInconclusive(probe, reason);
+    } else if (
+      ocrGroupIndex + 1 >= ocrGroupCount &&
+      probe.images >= MAX_AUTO_LANGUAGE_PROBE_IMAGES
+    ) {
       this.#reportProbeInconclusive(probe, probe.finalReason());
     }
     return undefined;
@@ -1557,6 +1997,7 @@ export class ImageTranslationController {
     this.#probeInconclusiveReported = false;
     this.#probeStartedReported = false;
     this.#probeSampleIdentities.clear();
+    this.#probeOcrProgress.clear();
   }
 
   #probeSampleIdentity(
@@ -1646,7 +2087,12 @@ export class ImageTranslationController {
   ): ImageScanScheduler {
     const scheduler = new ImageScanScheduler(document, {
       policy: this.#configuration.scanPolicy,
-      skipSmallImages: this.#configuration.skipSmallImages,
+      // Positive-area accessibility labels are admitted before pixel OCR's
+      // size filter. Tracking/zero-area images remain rejected by the
+      // scheduler even when the size filter is disabled here.
+      skipSmallImages: accessibilityMethodEnabled(this.#configuration)
+        ? false
+        : this.#configuration.skipSmallImages,
     });
     scheduler.setGates(this.#gates());
     return scheduler;
@@ -1715,7 +2161,7 @@ export class ImageTranslationController {
   #reportConfigurationState(): void {
     if (this.#disposed) return;
     if (!this.#isEnabled()) {
-      const reason = !hasRuntimeImageTextProvider(this.#configuration.providerOrder)
+      const reason = !hasEnabledImageReadingMethod(this.#configuration)
         ? 'provider-unavailable'
         : explicitImageLanguagesMatch(this.#configuration)
           ? 'same-language'
@@ -1760,23 +2206,37 @@ function isTransientCaptureReason(
     reason === 'encode' || reason === 'digest';
 }
 
-function hasRuntimeImageTextProvider(
-  order: readonly ImageTextProviderId[],
-): boolean {
-  return order.some((providerId) =>
-    providerId === 'chrome-text-detector' ||
-    providerId === 'tesseract' ||
-    providerId === 'paddleocr-wasm' ||
-    providerId === 'tesseract-wasm-direct',
-  );
+function normalizeResetEpoch(value: unknown): number {
+  return Number.isSafeInteger(value) && Number(value) >= 0
+    ? Number(value)
+    : Number.MAX_SAFE_INTEGER;
 }
 
 function imageTranslationConfigurationEnabled(
   configuration: ImageTranslationConfiguration,
 ): boolean {
   return configuration.enabled &&
-    hasRuntimeImageTextProvider(configuration.providerOrder) &&
+    hasEnabledImageReadingMethod(configuration) &&
     !explicitImageLanguagesMatch(configuration);
+}
+
+function hasEnabledImageReadingMethod(
+  configuration: ImageTranslationConfiguration,
+): boolean {
+  return imageReadingExecutionPlan(
+    configuration.methodOrder ?? configuration.providerOrder,
+    configuration.disabledMethodIds ?? [],
+    configuration.providerOrder,
+  ).length > 0;
+}
+
+function accessibilityMethodEnabled(
+  configuration: ImageTranslationConfiguration,
+): boolean {
+  const order = configuration.methodOrder ?? configuration.providerOrder;
+  const disabled = new Set(configuration.disabledMethodIds ?? []);
+  return order.includes(ACCESSIBILITY_TEXT_METHOD_ID) &&
+    !disabled.has(ACCESSIBILITY_TEXT_METHOD_ID);
 }
 
 function explicitImageLanguagesMatch(
@@ -1804,10 +2264,35 @@ function pairConfigurationKey(
     configuration.detectedSourceLanguage ?? '',
     configuration.targetLanguage,
     configuration.providerOrder.join(','),
+    (configuration.methodOrder ?? []).join(','),
+    (configuration.disabledMethodIds ?? []).join(','),
+    configuration.policyFingerprint ?? '',
+    configuration.controlImages ? '1' : '0',
     ocrQualityPolicyKey(repairOcrMinimumConfidence(
       configuration.ocrMinimumConfidence,
     )),
   ].join(':');
+}
+
+function imageSourcePolicyConfigurationKey(
+  configuration: ImageTranslationConfiguration,
+): string {
+  return [
+    configuration.providerOrder.join(','),
+    (configuration.methodOrder ?? configuration.providerOrder).join(','),
+    (configuration.disabledMethodIds ?? []).join(','),
+    configuration.policyFingerprint ?? '',
+    configuration.controlImages ? '1' : '0',
+    accessibilityMethodEnabled(configuration) ? '1' : '0',
+  ].join(':');
+}
+
+async function sha256Hex(value: string): Promise<string> {
+  const bytes = new TextEncoder().encode(value);
+  const digest = await crypto.subtle.digest('SHA-256', bytes);
+  return [...new Uint8Array(digest)]
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
 }
 
 function autoLanguageProbeConfigurationKey(
@@ -1818,6 +2303,11 @@ function autoLanguageProbeConfigurationKey(
     configuration.sourceLanguage,
     configuration.detectedSourceLanguage ?? '',
     configuration.providerOrder.join(','),
+    (configuration.methodOrder ?? configuration.providerOrder).join(','),
+    (configuration.disabledMethodIds ?? []).join(','),
+    configuration.policyFingerprint ?? '',
+    configuration.controlImages ? '1' : '0',
+    accessibilityMethodEnabled(configuration) ? '1' : '0',
     ocrQualityPolicyKey(repairOcrMinimumConfidence(
       configuration.ocrMinimumConfidence,
     )),

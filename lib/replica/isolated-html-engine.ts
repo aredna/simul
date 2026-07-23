@@ -66,8 +66,24 @@ import {
   isReadOnlyReplicaDisclosureEvent,
   type ReadOnlyReplicaDisclosure,
 } from './read-only-disclosure';
+import {
+  PAGE_ONLY_REPLICA_READ_SCOPE,
+  type ReplicaReadScope,
+} from './read-scope-policy';
+import type {
+  SemanticSourceStreamFactory,
+  SemanticSourceStreamLease,
+} from './semantic-source-client';
+import {
+  SemanticSourceReceiver,
+  semanticSelectionTextFor,
+} from './semantic-source-receiver';
+import { SemanticProofPresenter } from './semantic-proof-presenter';
+import { isSourceSecretPlaceholderTagName } from './source-secret-classifier';
 
 export const ISOLATED_HTML_SHELL_MARKER = 'isolated-html-v1';
+const ISOLATED_SECRET_PLACEHOLDER_CSS =
+  ':host,:host::before,:host::after{all:initial!important;display:none!important;content:none!important;background:none!important;background-image:none!important;border:0!important;border-image-source:none!important;cursor:default!important;filter:none!important;list-style:none!important;list-style-image:none!important;mask:none!important;mask-image:none!important;-webkit-mask-image:none!important;pointer-events:none!important}';
 const ISOLATED_HTML_SHELL_DOCUMENT = `<html><head><meta charset="utf-8" data-simul-owned-shell="charset"><meta name="simul-isolated-shell" content="${ISOLATED_HTML_SHELL_MARKER}" data-simul-owned-shell="marker"><meta http-equiv="Content-Security-Policy" data-simul-owned-shell="csp" content="default-src 'none'; script-src 'none'; worker-src 'none'; connect-src 'none'; object-src 'none'; frame-src 'none'; child-src 'none'; media-src 'none'; form-action 'none'; base-uri 'none'; img-src http: https: data: blob:; style-src 'unsafe-inline' http: https: data:; font-src http: https: data:"><style data-simul-owned-shell="inert">html,body{margin:0;min-width:100%;min-height:100%;pointer-events:none}*{pointer-events:none!important}[data-simul-replica-disclosure-trigger="v1"],[data-simul-replica-disclosure-panel="v1"],[data-simul-replica-disclosure-overlay="v1"]{pointer-events:auto!important}</style></head><body></body></html>`;
 const ISOLATED_SELECT_SHADOW_CSS = `:host{pointer-events:auto!important;background-image:none!important;border-image-source:none!important;cursor:default!important;filter:none!important;list-style-image:none!important;mask-image:none!important;-webkit-mask-image:none!important}:host([data-simul-select-hidden="v1"]){display:none!important}:host::before,:host::after{content:none!important;display:none!important;background-image:none!important}[data-simul-owned-select-trigger="v1"]{all:unset!important;box-sizing:border-box!important;color:inherit!important;cursor:default!important;display:block!important;font:inherit!important;overflow:hidden!important;text-align:inherit!important;text-overflow:ellipsis!important;white-space:nowrap!important;width:100%!important}[data-simul-owned-select-options="v1"]{background:Canvas!important;box-sizing:border-box!important;color:CanvasText!important;max-height:min(18rem,70vh)!important;min-width:100%!important;overflow:auto!important;overscroll-behavior:contain!important;pointer-events:auto!important;width:max-content!important;z-index:2147483647!important}[data-simul-owned-select-option="v1"],[data-simul-owned-select-optgroup-label="v1"]{box-sizing:border-box!important;display:block!important;min-height:1.5em!important;padding-inline:.5rem!important;pointer-events:none!important;white-space:normal!important}[data-simul-owned-select-optgroup-label="v1"]{font-weight:600!important}select[data-simul-select-facsimile="v1"]{display:none!important;pointer-events:none!important}`;
 export const ISOLATED_PUBLIC_MENU_SHADOW_CSS = `:host{all:initial!important;display:block!important;box-sizing:border-box!important;max-width:100%!important;color:inherit!important;font:inherit!important;background:none!important;border:0!important;filter:none!important;list-style:none!important;mask:none!important;pointer-events:none!important}:host([data-simul-replica-disclosure-panel="v1"][hidden]){display:none!important}:host([data-simul-replica-disclosure-overlay="v1"]){box-sizing:border-box!important;display:block!important;inset:auto!important;left:var(--simul-replica-disclosure-left,0px)!important;margin:0!important;max-height:var(--simul-replica-disclosure-max-height,70vh)!important;max-width:var(--simul-replica-disclosure-max-width,calc(100vw - 16px))!important;min-width:var(--simul-replica-disclosure-min-width,0px)!important;overflow-x:hidden!important;overflow-y:auto!important;overscroll-behavior:contain!important;pointer-events:auto!important;position:fixed!important;top:var(--simul-replica-disclosure-top,0px)!important;visibility:var(--simul-replica-disclosure-visibility,hidden)!important;z-index:2147483647!important}:host::before,:host::after{content:none!important;display:none!important;background:none!important}:host *{box-sizing:border-box!important;max-width:100%!important;background:none!important;border-image:none!important;filter:none!important;list-style-image:none!important;mask:none!important;pointer-events:none!important}:host([data-simul-replica-disclosure-overlay="v1"])>*:not(style){display:block!important;visibility:visible!important;opacity:1!important}:host *::before,:host *::after{content:none!important;display:none!important;background:none!important}`;
@@ -177,6 +193,8 @@ interface IsolatedHtmlEngineOptions {
   readonly presentationHost: ReplayPresentationHost;
   readonly openStream: HtmlMirrorStreamFactory;
   readonly getReplicaFidelityPolicy?: () => SelectableReplicaFidelityPolicy;
+  readonly getReplicaReadScope?: () => ReplicaReadScope;
+  readonly openSemanticStream?: SemanticSourceStreamFactory;
   readonly onLiveApplied?: () => void;
   readonly onLayoutChanged?: () => void;
   readonly onSourceCommit?: (commit: ReplicaSourceCommit) => void;
@@ -233,6 +251,8 @@ export class IsolatedHtmlReplicaEngine
   #disposed = false;
   #runVersion = 0;
   #stream: HtmlMirrorStreamLease | undefined;
+  #semanticStream: SemanticSourceStreamLease | undefined;
+  #semanticReceiver: SemanticSourceReceiver | undefined;
   #stagingLease: VisibleReplayCandidateLease | undefined;
   #candidate: HtmlMirrorDomState | undefined;
   #committed: HtmlMirrorDomState | undefined;
@@ -258,6 +278,7 @@ export class IsolatedHtmlReplicaEngine
   ): Promise<ReplicaRunResult> {
     if (this.#disposed) return this.#failed('stream_failed');
     const runVersion = ++this.#runVersion;
+    this.#purgeSemantic(true);
     this.#releaseStream();
     this.#releaseCandidate();
     if (!request.isCurrent() || signal?.aborted) {
@@ -295,7 +316,7 @@ export class IsolatedHtmlReplicaEngine
         stream.dispose();
         return this.#skipped('stale_identity');
       }
-      this.#commitState(state, 'checkpoint');
+      this.#commitState(state, 'checkpoint', request, runVersion, signal);
       this.#stream = stream;
       stream.setObserver({
         onPatch: (batch) => this.#onPatch(batch, request, runVersion),
@@ -368,6 +389,7 @@ export class IsolatedHtmlReplicaEngine
         });
       }
     }
+    this.#semanticReceiver?.restoreSources();
     refreshIsolatedNativeSelectFacsimiles(state.iframe.contentDocument);
     this.#refreshExtent(state);
   }
@@ -380,7 +402,7 @@ export class IsolatedHtmlReplicaEngine
       document: state.document,
       ...(documentLanguage ? { documentLanguage } : {}),
       replayLease: state.replayLease,
-      records: Object.freeze([...state.records.values()]),
+      records: this.#combinedRecords(state),
     });
   }
 
@@ -394,6 +416,19 @@ export class IsolatedHtmlReplicaEngine
       !sameSourceDocument(projection.document, state.document) ||
       projection.translated.length > 1_000_000
     ) return false;
+    if (projection.nodeId < 0) {
+      const record = this.#semanticReceiver?.get(projection.nodeId);
+      if (
+        !record || record.nodeType !== projection.nodeType ||
+        record.revision !== projection.sourceRevision ||
+        record.source !== projection.source ||
+        !this.#semanticReceiver?.project(projection)
+      ) return false;
+      this.#projections.set(projection.nodeId, Object.freeze({ ...projection }));
+      refreshIsolatedNativeSelectFacsimiles(state.iframe.contentDocument);
+      this.#refreshExtent(state);
+      return true;
+    }
     const record = state.records.get(projection.nodeId);
     const node = state.nodes.get(projection.nodeId);
     if (
@@ -449,6 +484,7 @@ export class IsolatedHtmlReplicaEngine
 
   releasePresentation(showFallbackLabel = true): void {
     this.#runVersion += 1;
+    this.#purgeSemantic(false);
     this.#releaseStream();
     this.#releaseCandidate();
     releaseState(this.#committed);
@@ -608,6 +644,9 @@ export class IsolatedHtmlReplicaEngine
   #commitState(
     state: HtmlMirrorDomState,
     reason: ReplicaSourceCommit['reason'],
+    request: ReplicaCaptureRequest,
+    runVersion: number,
+    signal?: AbortSignal,
   ): void {
     const extent = measureExtent(state.iframe);
     state.lease.commit(state.iframe, extent);
@@ -615,7 +654,11 @@ export class IsolatedHtmlReplicaEngine
     const previousLanguage = previous && !previous.released
       ? readDocumentLanguage(previous)
       : undefined;
-    const changes = checkpointChanges(state, previous);
+    const semanticRemovals = this.#purgeSemantic(false);
+    const changes = Object.freeze([
+      ...checkpointChanges(state, previous),
+      ...semanticRemovals,
+    ]);
     const documentLanguageChanged = readDocumentLanguage(state) !== previousLanguage;
     this.#candidate = undefined;
     this.#committed = state;
@@ -629,6 +672,7 @@ export class IsolatedHtmlReplicaEngine
       changes,
       documentLanguageChanged,
     );
+    this.#openSemanticSource(state, request, runVersion, signal);
     this.options.onLayoutChanged?.();
   }
 
@@ -703,10 +747,14 @@ export class IsolatedHtmlReplicaEngine
     stream.acknowledge(state.sequence);
     this.options.presentationHost.refreshDimensions?.(state.iframe, state.dimensions);
     this.options.presentationHost.markLive(state.iframe);
+    const semanticChanges = this.#semanticReceiver?.refreshBindings() ?? [];
+    for (const change of semanticChanges) {
+      this.#projections.delete(sourceChangeNodeId(change));
+    }
     this.#notifySourceCommit(
       state,
       'batch',
-      applied.changes,
+      Object.freeze([...applied.changes, ...semanticChanges]),
       changesDocumentLanguage(batch),
     );
     this.options.onLiveApplied?.();
@@ -751,7 +799,13 @@ export class IsolatedHtmlReplicaEngine
           return;
         }
         const buffered = this.#bufferedRecoveryPatches.splice(0);
-        this.#commitState(state, 'recovery');
+        this.#commitState(
+          state,
+          'recovery',
+          request,
+          runVersion,
+          recoverySignal,
+        );
         this.#stream?.acknowledge(checkpoint.identity.sequence);
         this.#finishRecoveryWatch(token);
         this.#recoveryTask = undefined;
@@ -864,7 +918,7 @@ export class IsolatedHtmlReplicaEngine
         ...(documentLanguage ? { documentLanguage } : {}),
         documentLanguageChanged,
         replayLease: state.replayLease,
-        records: Object.freeze([...state.records.values()]),
+        records: this.#combinedRecords(state),
         changes,
         reason,
       });
@@ -909,6 +963,97 @@ export class IsolatedHtmlReplicaEngine
     }
     this.#projections = retained;
     refreshIsolatedNativeSelectFacsimiles(state.iframe.contentDocument);
+  }
+
+  #combinedRecords(state: HtmlMirrorDomState): readonly ReplicaSourceTextRecord[] {
+    return Object.freeze([
+      ...state.records.values(),
+      ...(this.#semanticReceiver?.records() ?? []),
+    ]);
+  }
+
+  #openSemanticSource(
+    state: HtmlMirrorDomState,
+    request: ReplicaCaptureRequest,
+    runVersion: number,
+    signal?: AbortSignal,
+  ): void {
+    const open = this.options.openSemanticStream;
+    const scope = this.options.getReplicaReadScope?.() ??
+      PAGE_ONLY_REPLICA_READ_SCOPE;
+    if (!open || !hasSemanticReadScope(scope)) return;
+    const replicaDocument = state.iframe.contentDocument;
+    if (!replicaDocument) return;
+    const presenter = new SemanticProofPresenter({
+      document: replicaDocument,
+      iframe: state.iframe,
+      mode: 'isolated-html',
+      setAncestorAccessibility: (accessible) =>
+        this.options.presentationHost.setInteractiveAccessibility?.(
+          state.iframe,
+          accessible,
+        ) ?? true,
+      afterApply: () => {
+        refreshIsolatedNativeSelectFacsimiles(replicaDocument);
+        refreshIsolatedReplicaDisclosures(replicaDocument);
+      },
+    });
+    const receiver = new SemanticSourceReceiver({
+      document: state.document,
+      replicaDocument,
+      resolveNode: (nodeId) => state.nodes.get(nodeId),
+      applyProofs: (proofs) => presenter.apply(proofs),
+    });
+    this.#semanticReceiver = receiver;
+    void open(request, 'isolated-html', scope, signal).then((lease) => {
+      if (
+        !this.#isCurrent(runVersion, request, signal) ||
+        this.#committed !== state || this.#semanticReceiver !== receiver
+      ) {
+        lease.dispose();
+        return;
+      }
+      this.#semanticStream = lease;
+      lease.setObserver({
+        onBatch: (batch) => {
+          if (
+            this.#committed !== state || this.#semanticReceiver !== receiver ||
+            !this.#isCurrent(runVersion, request, signal)
+          ) return false;
+          const changes = receiver.applyBatch(batch);
+          if (!changes) return false;
+          for (const change of changes) {
+            this.#projections.delete(sourceChangeNodeId(change));
+          }
+          refreshIsolatedNativeSelectFacsimiles(replicaDocument);
+          this.#notifySourceCommit(state, 'batch', changes, false);
+          this.#refreshExtent(state);
+          return true;
+        },
+        onFailure: () => {
+          if (this.#semanticReceiver === receiver) this.#purgeSemantic(true);
+        },
+      });
+    }).catch(() => {
+      if (this.#semanticReceiver === receiver) this.#purgeSemantic(true);
+    });
+  }
+
+  #purgeSemantic(notify: boolean): readonly ReplicaSourceTextChange[] {
+    this.#semanticStream?.dispose();
+    this.#semanticStream = undefined;
+    const receiver = this.#semanticReceiver;
+    this.#semanticReceiver = undefined;
+    const changes = receiver?.clear() ?? Object.freeze([]);
+    for (const change of changes) {
+      this.#projections.delete(sourceChangeNodeId(change));
+    }
+    const state = this.#committed;
+    if (notify && state && !state.released && changes.length > 0) {
+      this.#notifySourceCommit(state, 'batch', changes, false);
+      this.#refreshExtent(state);
+    }
+    return changes;
   }
 
   #refreshExtent(state: HtmlMirrorDomState): void {
@@ -1074,6 +1219,18 @@ function buildNode(
     throw new Error('Nested document element rejected.');
   }
   const node = target.createElementNS(NAMESPACE_URIS[input.namespace], input.tagName);
+  if (input.opaquePlaceholder) {
+    if (
+      input.namespace !== 'html' ||
+      !isSourceSecretPlaceholderTagName(input.tagName, input.id) ||
+      input.attributes.length !== 0 ||
+      input.children.length !== 0 ||
+      input.shadowRoot
+    ) throw new Error('Non-canonical secret placeholder rejected.');
+    protectIsolatedOpaquePlaceholder(node);
+    nodes.set(input.id, node);
+    return node;
+  }
   setAttributes(node, input.attributes);
   applyElementHints(node, input);
   nodes.set(input.id, node);
@@ -1131,6 +1288,26 @@ function buildNode(
   return startsPublicMenuRegion && !inheritedPublicMenuRegion
     ? wrapPublicMenuFacsimile(presentation)
     : presentation;
+}
+
+/**
+ * A closed extension-owned shadow scope prevents captured author selectors,
+ * including pseudo-element rules, from regenerating content on the identity
+ * shell. Important shadow declarations outrank outer author declarations at
+ * the encapsulation boundary.
+ */
+export function protectIsolatedOpaquePlaceholder(node: Element): void {
+  const host = node as Element & {
+    attachShadow?: (init: ShadowRootInit) => ShadowRoot;
+  };
+  const shadow = host.attachShadow?.({ mode: 'closed' });
+  if (!shadow) throw new Error('Secret placeholder isolation unavailable.');
+  const style = node.ownerDocument.createElement('style');
+  style.textContent = ISOLATED_SECRET_PLACEHOLDER_CSS;
+  shadow.append(style);
+  node.setAttribute('aria-hidden', 'true');
+  node.setAttribute('inert', '');
+  node.setAttribute('tabindex', '-1');
 }
 
 function appendOwnedAdoptedStyles(
@@ -1637,6 +1814,9 @@ function syncIsolatedNativeSelectFacsimile(host: HTMLElement): void {
   const facsimile = ISOLATED_SELECT_FACSIMILES.get(host);
   if (!facsimile) return;
   const { panel, select, trigger } = facsimile;
+  const exposesSelection = select.getAttribute(
+    'data-simul-source-selection-state',
+  ) === 'v1';
   const presentation = isolatedSelectPresentation(select);
   host.setAttribute('data-simul-select-presentation', presentation);
   if (presentation === 'list') {
@@ -1670,10 +1850,13 @@ function syncIsolatedNativeSelectFacsimile(host: HTMLElement): void {
     row.style.setProperty('padding-inline', '.5rem', 'important');
     row.style.setProperty('pointer-events', 'none', 'important');
     row.style.setProperty('white-space', 'normal', 'important');
-    const selected = option.selected === true;
+    const selected = exposesSelection &&
+      option.getAttribute('data-simul-source-option-selected') === 'v1';
     const disabled = groupDisabled || option.disabled === true ||
       option.hasAttribute('disabled');
-    row.setAttribute('aria-selected', selected ? 'true' : 'false');
+    if (exposesSelection) {
+      row.setAttribute('aria-selected', selected ? 'true' : 'false');
+    }
     if (disabled) {
       row.setAttribute('aria-disabled', 'true');
       row.style.setProperty('opacity', '0.65', 'important');
@@ -1718,7 +1901,12 @@ function syncIsolatedNativeSelectFacsimile(host: HTMLElement): void {
     }
     panel.append(group);
   }
-  trigger.textContent = selectedLabels.join(', ') || '\u2014';
+  const semanticSelection = exposesSelection
+    ? semanticSelectionTextFor(select)?.trim()
+    : undefined;
+  trigger.textContent = exposesSelection
+    ? semanticSelection || selectedLabels.join(', ') || '\u2014'
+    : 'Options';
 }
 
 function syncContainingIsolatedSelectFacsimile(element: Element): void {
@@ -2031,6 +2219,15 @@ function applyPatchBatch(
     if (operation.kind === 'dimensions') continue;
     const target = state.nodes.get(operation.nodeId);
     if (!target) return undefined;
+    if (
+      target.nodeType === Node.ELEMENT_NODE &&
+      isSourceSecretPlaceholderTagName((target as Element).localName)
+    ) {
+      // The placeholder is immutable for its document lifetime. Any source
+      // mutation at that ID requires a fresh graph so no descendant/resource
+      // patch can repopulate the erased hard-secret region.
+      return undefined;
+    }
     targetOperations.push({ operation, target });
     if (
       (operation.kind === 'children' ||
@@ -3412,6 +3609,15 @@ function changesDocumentLanguage(batch: HtmlMirrorPatchBatch): boolean {
   return batch.operations.some(
     (operation) => operation.kind === 'attributes' && operation.tagName === 'html',
   );
+}
+
+function hasSemanticReadScope(scope: ReplicaReadScope): boolean {
+  return scope.controlSemantics || scope.disclosureContent ||
+    scope.formValues || scope.personalDataValues || scope.editableContent;
+}
+
+function sourceChangeNodeId(change: ReplicaSourceTextChange): number {
+  return change.kind === 'remove' ? change.nodeId : change.record.nodeId;
 }
 
 function readDocumentLanguage(state: HtmlMirrorDomState): string | undefined {

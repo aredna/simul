@@ -16,6 +16,12 @@ import {
   isSelectableReplicaFidelityPolicy,
   type SelectableReplicaFidelityPolicy,
 } from './replica/fidelity-policy';
+import {
+  PAGE_ONLY_REPLICA_READ_SCOPE,
+  REPLICA_READ_SCOPE_SETUP_VERSION,
+  repairReplicaReadScope,
+  type ReplicaReadScope,
+} from './replica/read-scope-policy';
 
 export const MIRROR_DISPLAY_MODES = ['fit', 'actual', 'custom'] as const;
 
@@ -68,6 +74,14 @@ import {
   repairOcrMinimumConfidence,
   type OcrMinimumConfidence,
 } from './ocr/result-quality';
+import {
+  ACCESSIBILITY_TEXT_METHOD_ID,
+  IMAGE_READING_METHOD_IDS,
+  isOcrImageReadingMethod,
+  repairDisabledImageReadingMethodIds,
+  repairImageReadingMethodOrder,
+  type ImageReadingMethodId,
+} from './ocr/image-reading-methods';
 
 export const MIN_ZOOM_PERCENT = 25;
 export const MAX_ZOOM_PERCENT = 300;
@@ -104,8 +118,22 @@ export interface CompanionPreferences {
   launchBehavior: CompanionLaunchBehavior;
   lastLaunchSurface: CompanionSurface;
   popoutTabMode: PopoutTabMode;
+  /** Six independent, runtime-selectable source evidence gates. */
+  replicaReadScope: ReplicaReadScope;
+  /** Zero means first-load setup is required and Page-only is effective. */
+  readScopeSetupVersion: number;
+  /** Monotonic revision for ordering committed preference snapshots. */
+  settingsRevision: number;
+  /** Monotonic generation guarding all durable settings writes. */
+  resetRevision: number;
+  /** Non-zero while post-reset permission/transient cleanup is retryable. */
+  resetCleanupPendingRevision: number;
   imageTranslationEnabled: boolean;
   ocrMinimumConfidence: OcrMinimumConfidence;
+  /** Canonical priority list spanning semantic and OCR image methods. */
+  imageReadingMethodOrder: ImageReadingMethodId[];
+  disabledImageReadingMethodIds: ImageReadingMethodId[];
+  /** Compatibility mirrors consumed by OCR-only runtime components. */
   imageTextProviderOrder: ImageTextProviderId[];
   disabledImageTextProviderIds: ImageTextProviderId[];
   imageScanPolicy: ImageScanPolicy;
@@ -130,8 +158,19 @@ export const DEFAULT_COMPANION_PREFERENCES: Readonly<CompanionPreferences> =
     launchBehavior: 'last-used',
     lastLaunchSurface: 'side-panel',
     popoutTabMode: 'locked',
+    replicaReadScope: PAGE_ONLY_REPLICA_READ_SCOPE,
+    readScopeSetupVersion: 0,
+    settingsRevision: 0,
+    resetRevision: 0,
+    resetCleanupPendingRevision: 0,
     imageTranslationEnabled: false,
     ocrMinimumConfidence: DEFAULT_OCR_MINIMUM_CONFIDENCE,
+    imageReadingMethodOrder: Object.freeze([
+      ...IMAGE_READING_METHOD_IDS,
+    ]) as unknown as ImageReadingMethodId[],
+    disabledImageReadingMethodIds: Object.freeze([
+      ACCESSIBILITY_TEXT_METHOD_ID,
+    ]) as unknown as ImageReadingMethodId[],
     imageTextProviderOrder: Object.freeze([
       ...IMAGE_TEXT_PROVIDER_IDS,
     ]) as unknown as ImageTextProviderId[],
@@ -166,6 +205,46 @@ export function parseCompanionPreferences(
       if (autoTranslateOrigins.length >= MAX_SAVED_ORIGINS) break;
     }
   }
+
+  let imageTextProviderOrder = repairImageTextProviderOrder(
+    input.imageTextProviderOrder,
+  );
+  const imageReadingMethodOrder = repairImageReadingMethodOrder(
+    input.imageReadingMethodOrder,
+    imageTextProviderOrder,
+  );
+  if (Array.isArray(input.imageReadingMethodOrder)) {
+    imageTextProviderOrder = imageReadingMethodOrder.filter(
+      isOcrImageReadingMethod,
+    );
+  }
+  const setupVersion = parseNonNegativeRevision(input.readScopeSetupVersion);
+  const legacyDisabledImageTextProviderIds =
+    repairDisabledImageTextProviderIds(input.disabledImageTextProviderIds);
+  let disabledImageReadingMethodIds =
+    input.disabledImageReadingMethodIds === undefined
+      ? [
+          ...(setupVersion === REPLICA_READ_SCOPE_SETUP_VERSION
+            ? []
+            : [ACCESSIBILITY_TEXT_METHOD_ID]),
+          ...legacyDisabledImageTextProviderIds,
+        ]
+      : repairDisabledImageReadingMethodIds(
+          input.disabledImageReadingMethodIds,
+        );
+  if (
+    setupVersion !== REPLICA_READ_SCOPE_SETUP_VERSION &&
+    !disabledImageReadingMethodIds.includes(ACCESSIBILITY_TEXT_METHOD_ID)
+  ) {
+    disabledImageReadingMethodIds = [
+      ACCESSIBILITY_TEXT_METHOD_ID,
+      ...disabledImageReadingMethodIds,
+    ];
+  }
+  const disabledImageTextProviderIds =
+    imageTextProviderOrder.filter((id) =>
+      disabledImageReadingMethodIds.includes(id),
+    );
 
   return {
     autoTranslateAllSites: input.autoTranslateAllSites === true,
@@ -208,6 +287,13 @@ export function parseCompanionPreferences(
     popoutTabMode: isPopoutTabMode(input.popoutTabMode)
       ? input.popoutTabMode
       : DEFAULT_COMPANION_PREFERENCES.popoutTabMode,
+    replicaReadScope: repairReplicaReadScope(input.replicaReadScope),
+    readScopeSetupVersion: setupVersion,
+    settingsRevision: parseNonNegativeRevision(input.settingsRevision),
+    resetRevision: parseNonNegativeRevision(input.resetRevision),
+    resetCleanupPendingRevision: parseNonNegativeRevision(
+      input.resetCleanupPendingRevision,
+    ),
     imageTranslationEnabled:
       typeof input.imageTranslationEnabled === 'boolean'
         ? input.imageTranslationEnabled
@@ -215,12 +301,10 @@ export function parseCompanionPreferences(
     ocrMinimumConfidence: repairOcrMinimumConfidence(
       input.ocrMinimumConfidence,
     ),
-    imageTextProviderOrder: repairImageTextProviderOrder(
-      input.imageTextProviderOrder,
-    ),
-    disabledImageTextProviderIds: repairDisabledImageTextProviderIds(
-      input.disabledImageTextProviderIds,
-    ),
+    imageReadingMethodOrder,
+    disabledImageReadingMethodIds,
+    imageTextProviderOrder,
+    disabledImageTextProviderIds,
     imageScanPolicy: isImageScanPolicy(input.imageScanPolicy)
       ? input.imageScanPolicy
       : DEFAULT_COMPANION_PREFERENCES.imageScanPolicy,
@@ -421,9 +505,18 @@ export interface CompanionViewSettings {
 
 export type CompanionViewSettingsPatch = Partial<CompanionViewSettings>;
 
+export interface CompanionReadSettings {
+  replicaReadScope: ReplicaReadScope;
+  readScopeSetupVersion: number;
+}
+
+export type CompanionReadSettingsPatch = Partial<CompanionReadSettings>;
+
 export interface CompanionImageAnalysisSettings {
   imageTranslationEnabled: boolean;
   ocrMinimumConfidence: OcrMinimumConfidence;
+  imageReadingMethodOrder: ImageReadingMethodId[];
+  disabledImageReadingMethodIds: ImageReadingMethodId[];
   imageTextProviderOrder: ImageTextProviderId[];
   disabledImageTextProviderIds: ImageTextProviderId[];
   imageScanPolicy: ImageScanPolicy;
@@ -449,10 +542,152 @@ export function withImageAnalysisSettings(
   preferences: CompanionPreferences,
   settings: CompanionImageAnalysisSettingsPatch,
 ): CompanionPreferences {
+  const current = parseCompanionPreferences(preferences);
+  const merged: Record<string, unknown> = { ...current, ...settings };
+  if (
+    settings.imageTextProviderOrder &&
+    settings.imageReadingMethodOrder === undefined
+  ) {
+    const semanticIndex = current.imageReadingMethodOrder.indexOf(
+      ACCESSIBILITY_TEXT_METHOD_ID,
+    );
+    const next: ImageReadingMethodId[] = [...settings.imageTextProviderOrder];
+    next.splice(
+      Math.max(0, semanticIndex),
+      0,
+      ACCESSIBILITY_TEXT_METHOD_ID,
+    );
+    merged.imageReadingMethodOrder = next;
+  }
+  if (
+    settings.disabledImageTextProviderIds &&
+    settings.disabledImageReadingMethodIds === undefined
+  ) {
+    merged.disabledImageReadingMethodIds = [
+      ...(current.disabledImageReadingMethodIds.includes(
+        ACCESSIBILITY_TEXT_METHOD_ID,
+      ) ? [ACCESSIBILITY_TEXT_METHOD_ID] : []),
+      ...settings.disabledImageTextProviderIds,
+    ];
+  }
+  return parseCompanionPreferences(merged);
+}
+
+export function withReadSettings(
+  preferences: CompanionPreferences,
+  settings: CompanionReadSettingsPatch,
+): CompanionPreferences {
   return parseCompanionPreferences({
     ...parseCompanionPreferences(preferences),
     ...settings,
   });
+}
+
+/** Canonical safe state committed before reset cleanup begins. */
+export function resetCompanionPreferences(
+  preferences: CompanionPreferences,
+): CompanionPreferences {
+  const current = parseCompanionPreferences(preferences);
+  const resetRevision = nextRevision(current.resetRevision);
+  return {
+    ...createDefaultPreferences(),
+    settingsRevision: nextRevision(current.settingsRevision),
+    resetRevision,
+    resetCleanupPendingRevision: resetRevision,
+  };
+}
+
+/** Advance the persisted snapshot revision exactly once before a durable save. */
+export function advanceCompanionSettingsRevision(
+  preferences: CompanionPreferences,
+): CompanionPreferences {
+  const current = parseCompanionPreferences(preferences);
+  return {
+    ...current,
+    settingsRevision: nextRevision(current.settingsRevision),
+  };
+}
+
+/**
+ * Select the newest committed snapshot. Reset generations take precedence so
+ * even a legacy reset snapshot without a settings revision stays fail-closed.
+ */
+export function selectLatestCompanionPreferences(
+  current: CompanionPreferences,
+  candidate: CompanionPreferences,
+): CompanionPreferences {
+  const existing = parseCompanionPreferences(current);
+  const next = parseCompanionPreferences(candidate);
+  if (next.resetRevision !== existing.resetRevision) {
+    return next.resetRevision > existing.resetRevision ? next : existing;
+  }
+  return next.settingsRevision >= existing.settingsRevision ? next : existing;
+}
+
+export type LiveCompanionPreferenceChangeStatus =
+  | 'accepted'
+  | 'invalid'
+  | 'stale';
+
+export interface LiveCompanionPreferenceChange {
+  readonly preferences: CompanionPreferences;
+  readonly failClosed: boolean;
+  readonly status: LiveCompanionPreferenceChangeStatus;
+}
+
+/**
+ * Accept only the complete canonical snapshot written by the coordinator.
+ * The ordinary parser intentionally repairs legacy/startup data; a live
+ * storage mutation is a different trust boundary because repairing a partial
+ * object could preserve or synthesize a broader scope without a valid commit.
+ */
+export function readValidStoredCompanionPreferences(
+  value: unknown,
+): CompanionPreferences | undefined {
+  const parsed = parseCompanionPreferences(value);
+  return matchesCanonicalStoredValue(value, parsed) ? parsed : undefined;
+}
+
+/**
+ * Resolve one live storage mutation without letting an invalidation epoch be
+ * cleared by a delayed older snapshot. Equal revisions may recover only when
+ * the exact last accepted snapshot is restored; revision equivocation fails
+ * closed as malformed state.
+ */
+export function selectLiveCompanionPreferenceChange(
+  current: CompanionPreferences,
+  failClosed: boolean,
+  value: unknown,
+): LiveCompanionPreferenceChange {
+  const existing = parseCompanionPreferences(current);
+  const candidate = readValidStoredCompanionPreferences(value);
+  if (!candidate) {
+    return { preferences: existing, failClosed: true, status: 'invalid' };
+  }
+
+  if (
+    candidate.resetRevision < existing.resetRevision ||
+    (
+      candidate.resetRevision === existing.resetRevision &&
+      candidate.settingsRevision < existing.settingsRevision
+    )
+  ) {
+    return { preferences: existing, failClosed, status: 'stale' };
+  }
+
+  if (
+    candidate.resetRevision === existing.resetRevision &&
+    candidate.settingsRevision === existing.settingsRevision &&
+    !matchesCanonicalStoredValue(candidate, existing)
+  ) {
+    return { preferences: existing, failClosed: true, status: 'invalid' };
+  }
+
+  return {
+    preferences: selectLatestCompanionPreferences(existing, candidate),
+    failClosed: false,
+    status: 'accepted',
+  };
 }
 
 export function clampZoomPercent(value: number): number {
@@ -476,8 +711,15 @@ function createDefaultPreferences(): CompanionPreferences {
     launchBehavior: 'last-used',
     lastLaunchSurface: 'side-panel',
     popoutTabMode: 'locked',
+    replicaReadScope: { ...PAGE_ONLY_REPLICA_READ_SCOPE },
+    readScopeSetupVersion: 0,
+    settingsRevision: 0,
+    resetRevision: 0,
+    resetCleanupPendingRevision: 0,
     imageTranslationEnabled: false,
     ocrMinimumConfidence: DEFAULT_OCR_MINIMUM_CONFIDENCE,
+    imageReadingMethodOrder: [...IMAGE_READING_METHOD_IDS],
+    disabledImageReadingMethodIds: [ACCESSIBILITY_TEXT_METHOD_ID],
     imageTextProviderOrder: [...IMAGE_TEXT_PROVIDER_IDS],
     disabledImageTextProviderIds: [],
     imageScanPolicy: 'visible-first-background-prescan',
@@ -491,6 +733,43 @@ function parseZoomPercent(value: unknown): number {
   return typeof value === 'number'
     ? clampZoomPercent(value)
     : DEFAULT_COMPANION_PREFERENCES.zoomPercent;
+}
+
+function parseNonNegativeRevision(value: unknown): number {
+  return Number.isSafeInteger(value) && Number(value) >= 0
+    ? Number(value)
+    : 0;
+}
+
+function matchesCanonicalStoredValue(
+  value: unknown,
+  canonical: unknown,
+): boolean {
+  if (Array.isArray(canonical)) {
+    return Array.isArray(value) &&
+      value.length === canonical.length &&
+      canonical.every((entry, index) =>
+        matchesCanonicalStoredValue(value[index], entry),
+      );
+  }
+  if (isRecord(canonical)) {
+    if (!isRecord(value)) return false;
+    const canonicalKeys = Object.keys(canonical);
+    const valueKeys = Object.keys(value);
+    return valueKeys.length === canonicalKeys.length &&
+      canonicalKeys.every((key) =>
+        Object.prototype.hasOwnProperty.call(value, key) &&
+        matchesCanonicalStoredValue(value[key], canonical[key]),
+      );
+  }
+  return Object.is(value, canonical);
+}
+
+function nextRevision(value: number): number {
+  if (value >= Number.MAX_SAFE_INTEGER) {
+    throw new Error('Preference revision exhausted.');
+  }
+  return value + 1;
 }
 
 function parseStoredOrigin(value: unknown): string | undefined {

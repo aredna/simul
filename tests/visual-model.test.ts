@@ -11,6 +11,10 @@ import {
 } from '../lib/page-snapshot';
 import type { TranslatedSnapshot } from '../lib/translation-pipeline';
 import {
+  FULL_VISIBLE_REPLICA_READ_SCOPE,
+  STANDARD_REPLICA_READ_SCOPE,
+} from '../lib/replica/read-scope-policy';
+import {
   applyLivePageDelta,
   applyMirrorTextLayout,
   computeMirrorExtent,
@@ -26,6 +30,112 @@ afterEach(() => {
 });
 
 describe('visual snapshot boundary', () => {
+  it('defaults missing setup to Page-only without reading optional source accessors', () => {
+    const { document } = installCapturePage(`
+      <button aria-label="Private attribute label"><svg></svg></button>
+      <img src="https://cdn.example.com/image.png" alt="Private image label">
+      <details open><summary>Visible summary</summary><p>Visible body</p></details>
+      <select multiple><option selected>Private selection</option></select>
+    `);
+    const button = document.querySelector('button')!;
+    const image = document.querySelector('img')!;
+    const details = document.querySelector('details')!;
+    const select = document.querySelector('select')!;
+    const option = document.querySelector('option')!;
+    const buttonGetAttribute = button.getAttribute.bind(button);
+    const imageGetAttribute = image.getAttribute.bind(image);
+    const detailsHasAttribute = details.hasAttribute.bind(details);
+    Object.defineProperty(button, 'getAttribute', {
+      configurable: true,
+      value: (name: string) => {
+        if (name === 'aria-label' || name === 'title') {
+          throw new Error('Page-only read an attribute-backed control label.');
+        }
+        return buttonGetAttribute(name);
+      },
+    });
+    Object.defineProperty(image, 'getAttribute', {
+      configurable: true,
+      value: (name: string) => {
+        if (name === 'alt' || name === 'aria-label' || name === 'title') {
+          throw new Error('Legacy capture read image accessibility text.');
+        }
+        return imageGetAttribute(name);
+      },
+    });
+    Object.defineProperty(details, 'hasAttribute', {
+      configurable: true,
+      value: (name: string) => {
+        if (name === 'open') {
+          throw new Error('Page-only read disclosure state.');
+        }
+        return detailsHasAttribute(name);
+      },
+    });
+    Object.defineProperties(select, {
+      multiple: {
+        configurable: true,
+        get: () => { throw new Error('Page-only read select shape.'); },
+      },
+      size: {
+        configurable: true,
+        get: () => { throw new Error('Page-only read select size.'); },
+      },
+      matches: {
+        configurable: true,
+        value: (selector: string) => {
+          if (selector === ':open') throw new Error('Page-only read picker state.');
+          return false;
+        },
+      },
+    });
+    Object.defineProperty(option, 'selected', {
+      configurable: true,
+      get: () => { throw new Error('Page-only read current selection.'); },
+    });
+
+    const snapshot = capturePageSnapshot();
+    const serialized = JSON.stringify(snapshot);
+
+    expect(serialized).not.toContain('Private attribute label');
+    expect(serialized).not.toContain('Private image label');
+    expect(serialized).not.toContain('Private selection');
+    expect(serialized).not.toContain('"open":""');
+    expect(collectElements(snapshot.visual?.root).some(
+      (node) => node.controlShell === 'select',
+    )).toBe(false);
+  });
+
+  it('does not read current select state in Standard scope', () => {
+    const { document } = installCapturePage(`
+      <select multiple><option selected>Tokyo</option><option>Osaka</option></select>
+    `);
+    const select = document.querySelector('select')!;
+    const selected = document.querySelector('option')!;
+    Object.defineProperty(select, 'matches', {
+      configurable: true,
+      value: (selector: string) => {
+        if (selector === ':open') throw new Error('Standard read picker state.');
+        return false;
+      },
+    });
+    Object.defineProperty(selected, 'selected', {
+      configurable: true,
+      get: () => { throw new Error('Standard read current selection.'); },
+    });
+
+    const snapshot = capturePageSnapshot(STANDARD_REPLICA_READ_SCOPE);
+    const selectNode = collectElements(snapshot.visual?.root).find(
+      (node) => node.controlShell === 'select',
+    );
+
+    expect(JSON.stringify(selectNode)).toContain('Tokyo');
+    expect(selectNode?.selectState?.open).toBe(false);
+    expect(selectNode?.children.flatMap((child) =>
+      child.kind === 'element' ? [child.optionState?.selected] : [],
+    )).toEqual([false, false]);
+  });
+
   it('keeps safe presentation data while rejecting executable and private fields', () => {
     const snapshot = buildParsedVisualSnapshot();
     const visual = snapshot.visual;
@@ -48,7 +158,6 @@ describe('visual snapshot boundary', () => {
     expect(image).toMatchObject({
       itemId: 'image-2',
       attributes: {
-        alt: '山',
         src: 'https://cdn.example.com/image.png',
       },
     });
@@ -87,7 +196,7 @@ describe('visual snapshot boundary', () => {
     const input = document.querySelector('input');
     const editable = document.querySelector('[contenteditable]');
 
-    const snapshot = capturePageSnapshot();
+    const snapshot = capturePageSnapshot(STANDARD_REPLICA_READ_SCOPE);
     const serialized = JSON.stringify(snapshot);
 
     expect(serialized).toContain('Public copy');
@@ -143,7 +252,7 @@ describe('visual snapshot boundary', () => {
       </select>
     `);
 
-    const snapshot = capturePageSnapshot();
+    const snapshot = capturePageSnapshot(FULL_VISIBLE_REPLICA_READ_SCOPE);
     const select = collectElements(snapshot.visual?.root).find(
       (node) => node.controlShell === 'select',
     );
@@ -180,7 +289,7 @@ describe('visual snapshot boundary', () => {
       </main>
     `);
 
-    const snapshot = capturePageSnapshot();
+    const snapshot = capturePageSnapshot(STANDARD_REPLICA_READ_SCOPE);
     const serialized = JSON.stringify(snapshot.visual);
     const elements = collectElements(snapshot.visual?.root);
 
@@ -212,7 +321,7 @@ describe('visual snapshot boundary', () => {
     oversized.append(privateEditor);
     select?.append(oversized);
 
-    const snapshot = capturePageSnapshot();
+    const snapshot = capturePageSnapshot(STANDARD_REPLICA_READ_SCOPE);
     const serialized = JSON.stringify(snapshot.visual);
     const visualSelect = collectElements(snapshot.visual?.root).find(
       (node) => node.controlShell === 'select',
@@ -246,7 +355,7 @@ describe('visual snapshot boundary', () => {
       </select>
     `);
 
-    const snapshot = capturePageSnapshot();
+    const snapshot = capturePageSnapshot(STANDARD_REPLICA_READ_SCOPE);
     const serialized = JSON.stringify(snapshot.visual);
     const visibleSelect = collectElements(snapshot.visual?.root).find(
       (node) => node.controlShell === 'select',
@@ -400,7 +509,7 @@ describe('visual snapshot boundary', () => {
       </main>
     `);
 
-    const snapshot = capturePageSnapshot();
+    const snapshot = capturePageSnapshot(STANDARD_REPLICA_READ_SCOPE);
     const shells = collectElements(snapshot.visual?.root).filter(
       (node) => node.controlShell === 'button',
     );
@@ -417,7 +526,7 @@ describe('visual snapshot boundary', () => {
       '<main><aside aria-hidden="true">Visible decorative rail</aside><div inert>Visible inert backdrop</div></main>',
     );
 
-    const snapshot = capturePageSnapshot();
+    const snapshot = capturePageSnapshot(FULL_VISIBLE_REPLICA_READ_SCOPE);
 
     expect(JSON.stringify(snapshot)).toContain('Visible decorative rail');
     expect(JSON.stringify(snapshot)).toContain('Visible inert backdrop');
@@ -431,7 +540,7 @@ describe('visual snapshot boundary', () => {
     }
     host.attachShadow({ mode: 'open' }).innerHTML = '<aside><p>Late related rail</p></aside>';
 
-    const snapshot = capturePageSnapshot();
+    const snapshot = capturePageSnapshot(FULL_VISIBLE_REPLICA_READ_SCOPE);
 
     expect(JSON.stringify(snapshot)).toContain('Late related rail');
   });
@@ -445,7 +554,7 @@ describe('visual snapshot boundary', () => {
       `<main>${longCenter}</main><aside>Sign in rail</aside><aside>Related articles rail</aside>`,
     );
 
-    const snapshot = capturePageSnapshot();
+    const snapshot = capturePageSnapshot(FULL_VISIBLE_REPLICA_READ_SCOPE);
     const visual = JSON.stringify(snapshot.visual);
 
     expect(visual).toContain('Sign in rail');
@@ -542,7 +651,7 @@ describe('visual mirror renderer', () => {
       configurable: true,
       value: (selector: string) => selector === ':open',
     });
-    const snapshot = capturePageSnapshot();
+    const snapshot = capturePageSnapshot(FULL_VISIBLE_REPLICA_READ_SCOPE);
     const { document } = parseHTML('<html><body></body></html>');
     const mirror = createVisualMirror(snapshot, undefined, document);
     if (!mirror) throw new Error('Expected a visual mirror.');
@@ -611,7 +720,7 @@ describe('visual mirror renderer', () => {
         <option>Osaka</option>
       </select>
     `);
-    const snapshot = capturePageSnapshot();
+    const snapshot = capturePageSnapshot(FULL_VISIBLE_REPLICA_READ_SCOPE);
     const { document } = parseHTML('<html><body></body></html>');
     const mirror = createVisualMirror(snapshot, undefined, document);
 
@@ -633,7 +742,7 @@ describe('visual mirror renderer', () => {
         </select>
       </div>
     `);
-    const snapshot = capturePageSnapshot();
+    const snapshot = capturePageSnapshot(FULL_VISIBLE_REPLICA_READ_SCOPE);
     const { document } = parseHTML('<html><body></body></html>');
     const mirror = createVisualMirror(snapshot, undefined, document);
     if (!mirror) throw new Error('Expected a visual mirror.');
@@ -673,9 +782,9 @@ describe('visual mirror renderer', () => {
       .toBe('Tokyo');
 
     document.dispatchEvent(new document.defaultView!.Event('scroll'));
-    expect(trigger.getAttribute('aria-expanded')).toBe('false');
-    expect(panel.hasAttribute('hidden')).toBe(true);
-    expect(panel.parentElement).toBe(disclosure);
+    expect(trigger.getAttribute('aria-expanded')).toBe('true');
+    expect(panel.hasAttribute('hidden')).toBe(false);
+    expect(panel.parentElement).toBe(document.body);
   });
 
   it('preserves authored size above one as a bounded inline list', () => {
@@ -685,7 +794,7 @@ describe('visual mirror renderer', () => {
         <option>Osaka</option>
       </select>
     `);
-    const snapshot = capturePageSnapshot();
+    const snapshot = capturePageSnapshot(FULL_VISIBLE_REPLICA_READ_SCOPE);
     const selectNode = collectElements(snapshot.visual?.root).find(
       (node) => node.controlShell === 'select',
     );
@@ -715,7 +824,7 @@ describe('visual mirror renderer', () => {
         ).join('')}
       </select>
     `);
-    const snapshot = capturePageSnapshot();
+    const snapshot = capturePageSnapshot(FULL_VISIBLE_REPLICA_READ_SCOPE);
     const { document } = parseHTML('<html><body></body></html>');
     const mirror = createVisualMirror(snapshot, undefined, document);
     if (!mirror) throw new Error('Expected a visual mirror.');
@@ -738,7 +847,7 @@ describe('visual mirror renderer', () => {
     expect(options.at(-1)?.textContent).toBe(`[Option ${optionCount - 1}]`);
   });
 
-  it('renders translated text and image alt text into an inert mirror', () => {
+  it('renders translated visible text without importing image alt text', () => {
     const snapshot = buildParsedVisualSnapshot();
     const translated = buildTranslatedSnapshot(snapshot);
     const { document } = parseHTML('<html><body></body></html>');
@@ -755,7 +864,7 @@ describe('visual mirror renderer', () => {
     expect(image?.getAttribute('src')).toBe(
       'https://cdn.example.com/image.png',
     );
-    expect(image?.getAttribute('alt')).toBe('Mountain');
+    expect(image?.getAttribute('alt')).toBeNull();
     expect(image?.loading).toBe('lazy');
     expect(image?.referrerPolicy).toBe('no-referrer');
 
@@ -770,12 +879,12 @@ describe('visual mirror renderer', () => {
     expect(mirror?.outerHTML).not.toContain('onclick');
   });
 
-  it('translates and resets bound bootstrap text and safe image alt fields', async () => {
+  it('translates and resets visible bootstrap text without binding image alt', async () => {
     const snapshot = buildParsedVisualSnapshot();
     const { document } = parseHTML('<html><body></body></html>');
     const mirror = createVisualMirror(snapshot, undefined, document);
     if (!mirror) throw new Error('Expected a visual mirror.');
-    expect(countVisualMirrorTranslationFields(mirror)).toBe(2);
+    expect(countVisualMirrorTranslationFields(mirror)).toBe(1);
     document.body.append(mirror);
     const sources: string[] = [];
 
@@ -784,15 +893,15 @@ describe('visual mirror renderer', () => {
       return `[${source}]`;
     });
 
-    expect(result).toEqual({ completed: 2, failed: 0, total: 2 });
-    expect(sources).toEqual(['こんにちは', '山']);
+    expect(result).toEqual({ completed: 1, failed: 0, total: 1 });
+    expect(sources).toEqual(['こんにちは']);
     expect(mirror.textContent).toContain('[こんにちは]');
-    expect(mirror.querySelector('img')?.getAttribute('alt')).toBe('[山]');
+    expect(mirror.querySelector('img')?.getAttribute('alt')).toBeNull();
 
     resetVisualMirrorText(mirror);
 
     expect(mirror.textContent).toContain('こんにちは');
-    expect(mirror.querySelector('img')?.getAttribute('alt')).toBe('山');
+    expect(mirror.querySelector('img')?.getAttribute('alt')).toBeNull();
   });
 
   it('keeps restored source text when a provider resolves after cancellation', async () => {
@@ -830,7 +939,7 @@ describe('visual mirror renderer', () => {
     await expect(lateTranslation).rejects.toMatchObject({ name: 'AbortError' });
     expect(mirror.textContent).toContain('こんにちは');
     expect(mirror.textContent).not.toContain('Late translated text');
-    expect(mirror.querySelector('img')?.getAttribute('alt')).toBe('山');
+    expect(mirror.querySelector('img')?.getAttribute('alt')).toBeNull();
   });
 
   it('commits a translated live root atomically and preserves the old root on abort', async () => {
@@ -1393,18 +1502,11 @@ function buildTranslatedSnapshot(snapshot: PageSnapshot): TranslatedSnapshot {
           state: 'translated',
         },
       },
-      {
-        ...image,
-        altTranslation: {
-          source: image.altText ?? '',
-          translated: 'Mountain',
-          state: 'translated',
-        },
-      },
+      image,
     ],
     state: 'complete',
-    completed: 2,
-    total: 2,
+    completed: 1,
+    total: 1,
     failed: 0,
   };
 }

@@ -79,8 +79,10 @@ first download.
 `browser.storage.local` holds only settings: From/To languages, Fit/1:1/custom
 zoom, zoom percent, adaptive/faithful text layout, scroll following, explicit
 automatic-translation scopes, the selected replica-fidelity policy, and
-image-analysis options. Image translation is off by default. Composer input,
-output, page text, and translation results are never stored.
+image-analysis options, plus the selected readable-content scope and its
+setup/reset revisions. Image translation is off by default. Composer input,
+output, page text, accessibility labels, OCR text, and translation results are
+never stored.
 
 Page translation uses a bounded, memory-only exact-content LRU. A cache key is
 the translation provider, normalized source/target pair, and complete source
@@ -115,27 +117,59 @@ capture, live-update, permission, quick-translation, image-analysis, and
 surface-transition activity without intercepting pointer input. Reduced-motion
 preferences disable decorative progress animation.
 
+## Runtime readable-content scope
+
+Reading and acting are separate contracts. The replica remains scriptless,
+pointer-inert, unable to navigate or submit, and unable to forward source
+events under every setting. Before first-load setup is committed, the effective
+scope is Page-only; Standard is only the suggested choice shown in the setup
+dialog. Page-only, Standard, and Full visible are presets over six independent
+switches, and any other combination is shown as Custom:
+
+- public control labels and semantics;
+- non-secret images inside controls;
+- validated same-document disclosure content;
+- ordinary visible text/search/URL/textarea values and selection state;
+- personal/autofill values such as names, addresses, usernames, email, and
+  telephone; and
+- visible non-secret contenteditable or ARIA editor text.
+
+Password fields, CSS text-security fields, hidden/file inputs, file paths,
+password/authentication/one-time-code/WebAuthn autocomplete, and every `cc-*`
+autocomplete token are a non-configurable floor. Classification occurs before
+reading; once a node is classified as a secret it remains secret for the
+document lifetime. A narrower live setting clears source-derived replica,
+translation, and image state before the new preference is saved. Reset commits
+setup-zero safe defaults first, then clears transient work and reconciles
+Simul-managed optional origins; interrupted permission cleanup is retryable.
+
 ## Local image text
 
-When explicitly enabled, an exact-document source Port observes ordinary
-top-frame `<img>` elements by the selected engine's private node ID without
-emitting their URL or text. Pixel capture normally excludes activation-control
-ancestry. A narrow exception admits an image inside a stateless HTML
-HTTP(S) navigation anchor whose sole normalized role is `button`; native
-buttons, pseudo-links, fragment-only links, stateful ARIA controls, editable
-ancestry, and overlapping protected controls remain blocked and are checked
-again immediately before capture.
-The saved scan policy orders visible/near/background work, and very small
-images are skipped by default. Only stable visible pixels are captured, at no
+When explicitly enabled, an exact-document source Port observes top-frame
+`<img>` elements by the selected engine's private node ID without emitting
+their URL or text. One saved priority list contains direct accessibility text
+and every compiled OCR provider. The accessibility method lazily reads only a
+direct image `aria-label` or `alt`, after policy and credential checks, and can
+translate/project it as one inert whole-image label without screenshot access.
+Decorative, hidden, zero-area, filename/URL-like, or secret-overlapping evidence
+is rejected. Positive-area accessibility labels are not blocked by the OCR
+small-image setting.
+
+Pixel capture remains blocked for credential overlap. Images inside native or
+ARIA controls are admitted only when the independent control-images switch is
+on and are checked again immediately before and after capture. The saved scan
+policy orders visible/near/background work, and very small pixel-OCR images are
+skipped by default. Only stable visible pixels are captured, at no
 more than two viewport captures per second, after matching pre/post document,
 scroll, bounds, and revision. High-DPI crops are proportionally downscaled
 before OCR so the processed bitmap never exceeds 4 MP; the CSS crop geometry
 is retained for overlay placement.
 
 The offscreen extension page reads a short-lived crop from extension-origin
-storage and runs packaged Tesseract.js 7.0.0 locally. The four-provider test
-profile also packages direct `tesseract-wasm` 0.11.0 and a default-off,
-independently compiled PaddleOCR.js 0.4.2 trial with its module Worker, ONNX
+storage and runs packaged Tesseract.js 7.0.0 locally. The ready-to-load
+four-provider test profile also packages direct `tesseract-wasm` 0.11.0 and a
+source-build-optional, independently compiled PaddleOCR.js 0.4.2 trial with
+its module Worker, ONNX
 Runtime Web 1.24.3 Wasm, and PP-OCRv6 tiny models; Chrome TextDetector remains
 a platform-dependent browser provider. The routed language is chosen from
 nearest valid element `lang`, explicit From, then detected page or bounded
@@ -178,32 +212,31 @@ The source viewport width remains the layout containing block; the captured
 document width drives horizontal overflow. Fit computes a scale no greater
 than one, while custom zoom is clamped to 25–300%.
 
-In Isolated HTML, native `input` elements whose type is missing, `text`,
-`search`, `email`, `url`, or `tel`, plus `textarea`, may expose only their
-current nonempty text or otherwise their placeholder as bounded typed control
-metadata. The replica reconstructs that visible text and can translate it, but
-never receives raw `value` or `placeholder` attributes. Password and
-password-autocomplete fields, unsupported native controls, contenteditable
-regions, and ARIA textbox fallbacks stay blank. A public native select may
-expose only bounded option/optgroup labels and selected/disabled/multiple/open/
-size presentation state. A single-row select remains popup-shaped: its local
-trigger opens a body-level, viewport-clamped, internally scrolling panel that
-escapes source clipping. `multiple` and authored `size>1` selects remain
-bounded inline lists. Neither form changes selection or sends source events.
-Customizable-select `:open` state is progressive; native OS popup geometry is
-not observable. Isolated HTML also admits a custom public menu/listbox only
-when one activation trigger has one unique same-document `aria-controls`
-target with matching semantics (directly or through a region containing one
-matching public menu). Missing, duplicate, stale, private, or editable mappings
-remain static and inert. rrweb keeps custom disclosures explicitly inert
-because its event stream cannot prove the same relation; all rrweb disclosure
-interaction remains inert. Public non-editable
-ARIA listbox/menu/option labels still translate, while editable
-combobox/searchbox/textbox/contenteditable branches stay blank.
+Both engines keep optional labels, accessibility attributes, values, checked or
+selected state, and disclosure relationships out of their base streams. A
+separate exact-document semantic channel admits only the capabilities selected
+in the live readable-content scope. Standard can add translated public control
+and option labels, disabled semantics, native select shape, and validated
+disclosure content; ordinary/personal values, selected or checked state, and
+editable text require their respective broader switches. rrweb keeps
+`maskAllInputs` and contenteditable masking enabled underneath this supplement.
+
+A public single-row select becomes a companion-owned trigger whose top-layer,
+internally scrolling list escapes source clipping, stays within the replica
+viewport, and repositions on scroll or resize. `multiple` and authored
+`size>1` controls remain bounded inline lists. The same presenter is used by
+both rrweb and Isolated HTML, and may also preview a custom public menu/listbox
+only when a typed proof names one unique same-document `aria-controls` target
+with matching semantics. Missing, duplicate, stale, private, editable, or
+forged mappings remain static and inert. Local preview events change only
+replica-owned presentation: they never select, submit, navigate, or send an
+event to the source page.
+
 Raw option values, names, data attributes, datalist/standalone-option content,
-rich picker descendants, and private select ancestry stay blank. A field that
-becomes sensitive clears its prior source record and projection atomically.
-rrweb keeps all editable/value-bearing controls masked.
+rich picker descendants, and private select ancestry stay blank. Password,
+authentication, payment-autofill, hidden/file, and CSS-masked secrets stay
+outside every scope and disclose neither their text nor length. A field that
+becomes sensitive clears its prior semantic record and projection atomically.
 
 Other private controls become empty inert shells rather than disabled form
 controls, avoiding browser disabled-state wash while retaining geometry.
@@ -214,9 +247,10 @@ content.
 
 The extension transports no raw source HTML. Both bootstrap and delta
 boundaries allowlist tags, style properties, attributes, image schemes, and the
-narrow typed control record above. Scripts, handlers, navigation semantics,
-raw value attributes, passwords, contenteditable text, and cross-origin frame
-content never enter the mirror. Open shadow trees and slot assignments are
+narrow typed semantic records above. Scripts, handlers, navigation semantics,
+raw `value` attributes, credential secrets, and cross-origin frame content
+never enter the mirror; approved visible values travel only through the scoped
+typed channel. Open shadow trees and slot assignments are
 composed; closed roots remain inaccessible by web-platform design. The live
 bridge discovers roots present during capture, roots on newly inserted DOM,
 and roots created as previously undefined custom elements upgrade. The web

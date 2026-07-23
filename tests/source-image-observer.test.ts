@@ -496,10 +496,63 @@ describe('SourceImageObserver', () => {
       kind: 'upsert',
       input: { nodeId: 19, contentChanged: true },
     });
+
+    wrapper.setAttribute('autocomplete', 'one-time-code');
+    fixture.mutation.trigger([attributeRecord(wrapper, 'autocomplete')]);
+    expect(events.at(-1)).toMatchObject({ kind: 'remove', nodeId: 19 });
+    const afterSecret = events.length;
+    wrapper.removeAttribute('autocomplete');
+    fixture.mutation.trigger([attributeRecord(wrapper, 'autocomplete')]);
+    expect(events).toHaveLength(afterSecret);
     stop();
   });
 
-  it('admits only stateless HTTP(S) navigation images with a plain button role', () => {
+  it('invalidates descendants for computed-security class and stylesheet changes', () => {
+    let stylesheetSecret = false;
+    const fixture = createFixture(
+      '<style id="rules"></style><div id="privacy"><img id="styled"></div>',
+      {
+        isPrivateImage: (image) =>
+          stylesheetSecret || Boolean(image.closest('.text-security')),
+      },
+    );
+    const wrapper = fixture.document.querySelector('#privacy')!;
+    const styled = fixture.document.querySelector<HTMLImageElement>('#styled')!;
+    const rules = fixture.document.querySelector('#rules')!;
+    setImageMetrics(styled, fixture.bounds);
+    fixture.nodeIds.set(styled, 19);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    expect(events.map(eventNodeId)).toEqual([7, 19]);
+
+    wrapper.classList.add('text-security');
+    fixture.mutation.trigger([attributeRecord(wrapper, 'class')]);
+    expect(events.at(-1)).toMatchObject({ kind: 'remove', nodeId: 19 });
+
+    wrapper.classList.remove('text-security');
+    fixture.mutation.trigger([attributeRecord(wrapper, 'class')]);
+    expect(events.at(-1)).toMatchObject({
+      kind: 'upsert',
+      input: { nodeId: 19, contentChanged: true },
+    });
+
+    stylesheetSecret = true;
+    const ruleText = fixture.document.createTextNode(
+      '.secret {-webkit-text-security: disc}',
+    );
+    rules.append(ruleText);
+    fixture.mutation.trigger([{
+      type: 'characterData',
+      target: ruleText,
+    } as unknown as MutationRecord]);
+    expect(events.slice(-2)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'remove', nodeId: 7 }),
+      expect.objectContaining({ kind: 'remove', nodeId: 19 }),
+    ]));
+    stop();
+  });
+
+  it('admits HTTP(S) navigation images with passive disclosure metadata', () => {
     const fixture = createFixture(`
       <a href="/news" role="button"><img data-node="19"></a>
       <a href="https://other.example/news" role="presentation button"><img data-node="20"></a>
@@ -526,11 +579,17 @@ describe('SourceImageObserver', () => {
     const events: SourceImageObservationEvent[] = [];
     const stop = fixture.observer.subscribe((event) => events.push(event));
 
-    expect(events.map(eventNodeId)).toEqual([7, 19]);
+    expect(events.map(eventNodeId)).toEqual([7, 19, 30, 31, 32]);
     expect(JSON.stringify(events)).not.toContain('/news');
     expect(JSON.stringify(events)).not.toContain('other.example');
     expect(fixture.mutation.options?.attributeFilter).toEqual(
       expect.arrayContaining([
+        'type',
+        'autocomplete',
+        'class',
+        'style',
+        'hidden',
+        'id',
         'href',
         'role',
         'aria-expanded',
@@ -734,6 +793,36 @@ describe('SourceImageObserver', () => {
     stop();
   });
 
+  it('invalidates image content when alt or aria-label changes', () => {
+    const fixture = createFixture();
+    const model = new SourceImageModel();
+    model.beginDocument(documentIdentity);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => {
+      events.push(event);
+      if (event.kind === 'upsert') model.upsert(event.input);
+      else model.remove(event.document, event.nodeId);
+    });
+    expect(model.get(7)?.contentRevision).toBe(1);
+
+    fixture.image.setAttribute('alt', 'お知らせ');
+    fixture.mutation.trigger([attributeRecord(fixture.image, 'alt')]);
+    expect(events.at(-1)).toMatchObject({
+      kind: 'upsert',
+      input: { nodeId: 7, contentChanged: true },
+    });
+    expect(model.get(7)?.contentRevision).toBe(2);
+
+    fixture.image.setAttribute('aria-label', 'Updated announcement');
+    fixture.mutation.trigger([attributeRecord(fixture.image, 'aria-label')]);
+    expect(events.at(-1)).toMatchObject({
+      kind: 'upsert',
+      input: { nodeId: 7, contentChanged: true },
+    });
+    expect(model.get(7)?.contentRevision).toBe(3);
+    stop();
+  });
+
   it('uses duplicate-subscription errors and subscriber snapshots deterministically', () => {
     const fixture = createFixture();
     const deliveries: string[] = [];
@@ -771,6 +860,7 @@ function createFixture(
     readonly maxImages?: number;
     readonly useDefaultFrames?: boolean;
     readonly settleIntersectionsOnObserve?: boolean;
+    readonly isPrivateImage?: (image: HTMLImageElement) => boolean;
   } = {},
 ) {
   const { document } = parseHTML(
@@ -807,6 +897,9 @@ function createFixture(
       mutation.callback = callback;
       return mutation;
     },
+    ...(options.isPrivateImage
+      ? { isPrivateImage: options.isPrivateImage }
+      : {}),
     ...(options.useDefaultFrames
       ? {}
       : {

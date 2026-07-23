@@ -1,9 +1,10 @@
 # PaddleOCR.js local trial notices
 
-This reviewed notice applies only to the optional `SIMUL_OCR_PADDLE=1`
-artifact. The canonical Simul artifact does not contain these components. The
-trial packages the SDK's module Worker locally and patches its unused remote
-model/CDN defaults to fail-closed local sentinels.
+This reviewed notice applies to the checked-in ready-to-load four-provider
+profile and any source build made with `SIMUL_OCR_PADDLE=1`. The ordinary
+unflagged Paddle-free `.output` build does not contain these components. A
+Paddle-enabled artifact packages the SDK's module Worker locally and patches
+its unused remote model/CDN defaults to fail-closed local sentinels.
 
 | Component | Exact version / revision | License |
 | --- | --- | --- |

@@ -39,6 +39,27 @@ describe('visible rrweb replay host', () => {
     expect(iframe.hasAttribute('inert')).toBe(true);
   });
 
+  it('keeps a proof-backed accessibility exposure across the first live mark', () => {
+    const fixture = createFixture();
+    const candidate = fixture.host.createCandidate(dimensions());
+    const iframe = createProtectedIframe(fixture.document);
+    candidate.mount.append(iframe);
+    candidate.commit(iframe, { width: 1_400, height: 2_500 });
+    const root = requireElement<HTMLElement>(
+      fixture.preview,
+      '[data-simul-replica-viewport]',
+    );
+
+    expect(fixture.host.setInteractiveAccessibility(iframe, true)).toBe(true);
+    fixture.host.markLive(iframe);
+    expect(fixture.preview.hasAttribute('aria-hidden')).toBe(false);
+    expect(root.hasAttribute('aria-hidden')).toBe(false);
+
+    expect(fixture.host.setInteractiveAccessibility(iframe, false)).toBe(true);
+    expect(fixture.preview.getAttribute('aria-hidden')).toBe('true');
+    expect(root.getAttribute('aria-hidden')).toBe('true');
+  });
+
   it('paints the complete presentation shell with the resolved source canvas', () => {
     const fixture = createFixture();
     const candidate = fixture.host.createCandidate({

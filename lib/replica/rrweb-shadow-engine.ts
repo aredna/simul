@@ -24,6 +24,7 @@ import {
   sameSourceDocument,
   type ReplicaSourceDocumentIdentity,
   type ReplicaSourceTextChange,
+  type ReplicaSourceTextRecord,
 } from './source-value-model';
 import type {
   ReplayPresentationHost,
@@ -36,11 +37,26 @@ import type {
   ReplicaTranslationSnapshot,
   ReplicaTranslationSurface,
 } from '../translation/replica-translation-coordinator';
+import {
+  PAGE_ONLY_REPLICA_READ_SCOPE,
+  type ReplicaReadScope,
+} from './read-scope-policy';
+import type {
+  SemanticSourceStreamFactory,
+  SemanticSourceStreamLease,
+} from './semantic-source-client';
+import { SemanticSourceReceiver } from './semantic-source-receiver';
+import { SemanticProofPresenter } from './semantic-proof-presenter';
+import { MAX_REPLICA_NODES } from './protocol-v2';
+import { isSourceSecretPlaceholderTagName } from './source-secret-classifier';
 
 export type { ReplicaImageAnchor } from './contracts';
 
 export const SHADOW_CAPTURE_DEADLINE_MS = 5_000;
 export const SHADOW_REPLAY_DEADLINE_MS = 5_000;
+const RRWEB_OPAQUE_PLACEHOLDER_CSS =
+  ':host,:host::before,:host::after{all:initial!important;display:none!important;content:none!important;background:none!important;background-image:none!important;border-image-source:none!important;cursor:default!important;filter:none!important;list-style:none!important;list-style-image:none!important;mask:none!important;mask-image:none!important;-webkit-mask-image:none!important;pointer-events:none!important}';
+const PROTECTED_RRWEB_OPAQUE_PLACEHOLDERS = new WeakSet<Element>();
 
 interface ReplayerLike {
   readonly iframe: HTMLIFrameElement;
@@ -69,6 +85,8 @@ interface RrwebShadowReplicaEngineOptions {
     signal?: AbortSignal,
   ) => Promise<ReplicaCheckpointResponse>;
   readonly openStream?: ReplicaLiveStreamFactory;
+  readonly openSemanticStream?: SemanticSourceStreamFactory;
+  readonly getReplicaReadScope?: () => ReplicaReadScope;
   readonly onLiveFailure?: (code: ReplicaDiagnosticCode) => void;
   readonly onLiveApplied?: () => void;
   readonly onLayoutChanged?: () => void;
@@ -137,6 +155,8 @@ export class RrwebShadowReplicaEngine
   #candidate: ManagedReplay | undefined;
   #committed: ManagedReplay | undefined;
   #liveStream: ManagedLiveStream | undefined;
+  #semanticStream: SemanticSourceStreamLease | undefined;
+  #semanticReceiver: SemanticSourceReceiver | undefined;
   #sourceValues = new SourceValueModel();
   #replayLease = 0;
   #projectionContext: ReplicaProjectionContext = {
@@ -161,6 +181,7 @@ export class RrwebShadowReplicaEngine
       return this.skipped('stale_identity');
     }
     const runVersion = ++this.#runVersion;
+    this.#purgeSemantic(true);
     this.#releaseCandidate();
     this.#releaseLiveStream();
 
@@ -273,6 +294,9 @@ export class RrwebShadowReplicaEngine
           ? AbortSignal.any([signal, candidate.abortController.signal])
           : candidate.abortController.signal,
       );
+      if (!protectRrwebOpaquePlaceholders(candidate.replayer.iframe)) {
+        throw new ShadowReplicaError('privacy_rejected');
+      }
       const sourceCheckpoint = candidate.sourceModel.prepareCheckpoint(
         response.identity,
         payload.events,
@@ -354,6 +378,7 @@ export class RrwebShadowReplicaEngine
       } else {
         this.#notifySourceCommit(candidate, 'checkpoint', undefined, sourceCheckpoint.documentLanguageChanged);
       }
+      this.#openSemanticSource(candidate, request, runVersion, signal);
       return { status: 'complete', diagnostics };
     } catch (error) {
       if (!this.#isCurrentRun(runVersion, request, signal)) {
@@ -394,6 +419,10 @@ export class RrwebShadowReplicaEngine
         restored = true;
       }
     }
+    if ((this.#semanticReceiver?.records().length ?? 0) > 0) {
+      this.#semanticReceiver?.restoreSources();
+      restored = true;
+    }
     if (restored) this.#scheduleExtentRefresh(committed);
   }
 
@@ -409,7 +438,7 @@ export class RrwebShadowReplicaEngine
         ? { documentLanguage: this.#sourceValues.documentLanguage }
         : {}),
       replayLease: committed.replayLease,
-      records: this.#sourceValues.records(),
+      records: this.#combinedRecords(),
     };
   }
 
@@ -447,13 +476,25 @@ export class RrwebShadowReplicaEngine
       !committed?.replayer ||
       committed.released ||
       !document ||
-      projection.nodeType !== 3 ||
       projection.replayLease !== committed.replayLease ||
       projection.translationEpoch !== this.#projectionContext.translationEpoch ||
       projection.pairKey !== this.#projectionContext.pairKey ||
       !sameSourceDocument(document, projection.document) ||
       projection.translated.length > 1_000_000
     ) return false;
+    if (projection.nodeId < 0) {
+      const record = this.#semanticReceiver?.get(projection.nodeId);
+      if (
+        !record || record.nodeType !== projection.nodeType ||
+        record.revision !== projection.sourceRevision ||
+        record.source !== projection.source ||
+        !this.#semanticReceiver?.project(projection)
+      ) return false;
+      this.#projections.set(projection.nodeId, Object.freeze({ ...projection }));
+      this.#scheduleExtentRefresh(committed);
+      return true;
+    }
+    if (projection.nodeType !== 3) return false;
     const record = this.#sourceValues.get(projection.nodeId);
     if (
       !record ||
@@ -471,6 +512,7 @@ export class RrwebShadowReplicaEngine
 
   releasePresentation(showFallbackLabel = true): void {
     this.#runVersion += 1;
+    this.#purgeSemantic(false);
     this.#releaseLiveStream();
     this.#releaseCandidate();
     this.options.presentationHost.showLegacy(showFallbackLabel);
@@ -534,8 +576,9 @@ export class RrwebShadowReplicaEngine
   ): void {
     const document = replay.sourceModel.document;
     if (!document || replay.replayLease === 0) return;
-    const records = replay.sourceModel.records();
-    const committedChanges = changes ?? records.map(
+    const baseRecords = replay.sourceModel.records();
+    const records = this.#combinedRecords();
+    const committedChanges = changes ?? baseRecords.map(
       (record): ReplicaSourceTextChange => ({ kind: 'upsert', record }),
     );
     try {
@@ -553,6 +596,100 @@ export class RrwebShadowReplicaEngine
     } catch {
       // Derived translation work cannot affect replay commit or source ACK.
     }
+  }
+
+  #combinedRecords(): readonly ReplicaSourceTextRecord[] {
+    return Object.freeze([
+      ...this.#sourceValues.records(),
+      ...(this.#semanticReceiver?.records() ?? []),
+    ]);
+  }
+
+  #openSemanticSource(
+    replay: ManagedReplay,
+    request: ReplicaCaptureRequest,
+    runVersion: number,
+    signal?: AbortSignal,
+  ): void {
+    const open = this.options.openSemanticStream;
+    const scope = this.options.getReplicaReadScope?.() ??
+      PAGE_ONLY_REPLICA_READ_SCOPE;
+    if (!open || !hasSemanticReadScope(scope) || !replay.replayer) return;
+    const replicaDocument = replay.replayer.iframe.contentDocument;
+    const sourceDocument = replay.sourceModel.document;
+    if (!replicaDocument || !sourceDocument) return;
+    const replayer = replay.replayer;
+    const presenter = new SemanticProofPresenter({
+      document: replicaDocument,
+      iframe: replayer.iframe,
+      mode: 'rrweb',
+      setAncestorAccessibility: (accessible) =>
+        this.options.presentationHost.setInteractiveAccessibility?.(
+          replayer.iframe,
+          accessible,
+        ) ?? true,
+    });
+    const receiver = new SemanticSourceReceiver({
+      document: sourceDocument,
+      replicaDocument,
+      resolveNode: (nodeId) => {
+        try {
+          return replayer.getMirror?.().getNode(nodeId);
+        } catch {
+          return undefined;
+        }
+      },
+      applyProofs: (proofs) => presenter.apply(proofs),
+    });
+    this.#semanticReceiver = receiver;
+    void open(request, 'rrweb', scope, signal).then((lease) => {
+      if (
+        !this.#isCurrentRun(runVersion, request, signal) ||
+        this.#committed !== replay || this.#semanticReceiver !== receiver
+      ) {
+        lease.dispose();
+        return;
+      }
+      this.#semanticStream = lease;
+      lease.setObserver({
+        onBatch: (batch) => {
+          if (
+            this.#committed !== replay || this.#semanticReceiver !== receiver ||
+            !this.#isCurrentRun(runVersion, request, signal)
+          ) return false;
+          const changes = receiver.applyBatch(batch);
+          if (!changes) return false;
+          for (const change of changes) {
+            this.#projections.delete(sourceChangeNodeId(change));
+          }
+          this.#notifySourceCommit(replay, 'batch', changes, false);
+          this.#scheduleExtentRefresh(replay);
+          return true;
+        },
+        onFailure: () => {
+          if (this.#semanticReceiver === receiver) this.#purgeSemantic(true);
+        },
+      });
+    }).catch(() => {
+      if (this.#semanticReceiver === receiver) this.#purgeSemantic(true);
+    });
+  }
+
+  #purgeSemantic(notify: boolean): readonly ReplicaSourceTextChange[] {
+    this.#semanticStream?.dispose();
+    this.#semanticStream = undefined;
+    const receiver = this.#semanticReceiver;
+    this.#semanticReceiver = undefined;
+    const changes = receiver?.clear() ?? Object.freeze([]);
+    for (const change of changes) {
+      this.#projections.delete(sourceChangeNodeId(change));
+    }
+    const replay = this.#committed;
+    if (notify && replay && !replay.released && changes.length > 0) {
+      this.#notifySourceCommit(replay, 'batch', changes, false);
+      this.#scheduleExtentRefresh(replay);
+    }
+    return changes;
   }
 
   #scheduleExtentRefresh(replay: ManagedReplay): void {
@@ -715,6 +852,12 @@ export class RrwebShadowReplicaEngine
         replay.abortController.signal,
       );
       if (
+        rrwebEventsContainOpaquePlaceholder(replayEvents) &&
+        !protectRrwebOpaquePlaceholders(replay.replayer.iframe)
+      ) {
+        throw new ShadowReplicaError('privacy_rejected');
+      }
+      if (
         (stream.recovering && !allowDuringRecovery) ||
         stream.pending[0] !== batch
       ) return;
@@ -730,10 +873,14 @@ export class RrwebShadowReplicaEngine
           this.options.presentationHost.markLive(replay.replayer.iframe);
         }
         stream.lease.acknowledge(replay.sequence);
+        const semanticChanges = this.#semanticReceiver?.refreshBindings() ?? [];
+        for (const change of semanticChanges) {
+          this.#projections.delete(sourceChangeNodeId(change));
+        }
         this.#notifySourceCommit(
           replay,
           'batch',
-          sourceUpdate.changes,
+          Object.freeze([...sourceUpdate.changes, ...semanticChanges]),
           sourceUpdate.documentLanguageChanged,
         );
         this.options.onLiveApplied?.();
@@ -854,6 +1001,9 @@ export class RrwebShadowReplicaEngine
         this.options.replayDeadlineMs ?? SHADOW_REPLAY_DEADLINE_MS,
         candidate.abortController.signal,
       );
+      if (!protectRrwebOpaquePlaceholders(candidate.replayer.iframe)) {
+        throw new ShadowReplicaError('privacy_rejected');
+      }
       const sourceCheckpoint = candidate.sourceModel.prepareCheckpoint(
         checkpoint.identity,
         payload.events,
@@ -889,6 +1039,7 @@ export class RrwebShadowReplicaEngine
       candidate.replayLease = nextReplayLease;
       candidate.lease.commit(candidate.replayer.iframe, extent);
       const previous = this.#committed;
+      const semanticRemovals = this.#purgeSemantic(false);
       this.#candidate = undefined;
       this.#committed = candidate;
       this.#sourceValues = candidate.sourceModel;
@@ -904,8 +1055,18 @@ export class RrwebShadowReplicaEngine
       this.#notifySourceCommit(
         candidate,
         'recovery',
-        undefined,
+        Object.freeze([
+          ...candidate.sourceModel.records().map(
+            (record): ReplicaSourceTextChange => ({ kind: 'upsert', record }),
+          ),
+          ...semanticRemovals,
+        ]),
         sourceCheckpoint.documentLanguageChanged,
+      );
+      this.#openSemanticSource(
+        candidate,
+        stream.request,
+        stream.runVersion,
       );
       if (candidate.sequence > (previous?.sequence ?? candidate.sequence)) {
         this.options.onLiveApplied?.();
@@ -1060,13 +1221,21 @@ function mirrorImageNode(
   }
 }
 
+function hasSemanticReadScope(scope: ReplicaReadScope): boolean {
+  return scope.controlSemantics || scope.disclosureContent ||
+    scope.formValues || scope.personalDataValues || scope.editableContent;
+}
+
+function sourceChangeNodeId(change: ReplicaSourceTextChange): number {
+  return change.kind === 'remove' ? change.nodeId : change.record.nodeId;
+}
+
 function protectReplayIframe(iframe: HTMLIFrameElement): void {
   iframe.setAttribute('sandbox', 'allow-same-origin');
   iframe.setAttribute('aria-hidden', 'true');
   iframe.setAttribute('inert', '');
-  // rrweb's privacy-filtered event stream does not retain enough trusted ARIA
-  // identity to prove a trigger/target disclosure relation. Keep this engine
-  // explicitly inert instead of guessing from replayed IDs or roles.
+  // Typed semantic proofs may temporarily expose extension-owned read-only
+  // facsimiles; their presenter removes and later restores these guards.
   iframe.setAttribute('data-simul-disclosure-policy', 'inert');
   iframe.setAttribute('tabindex', '-1');
   iframe.setAttribute('referrerpolicy', 'no-referrer');
@@ -1074,6 +1243,70 @@ function protectReplayIframe(iframe: HTMLIFrameElement): void {
   // border keeps the browsing context exactly at the captured viewport size.
   iframe.style.border = '0';
   iframe.style.pointerEvents = 'none';
+}
+
+/**
+ * rrweb must retain its mirror element identity for live removal/recovery, so
+ * replace its paint surface with a closed extension-owned shadow boundary.
+ * Shadow-important host/pseudo declarations outrank outer author-important
+ * rules and prevent universal selectors from regenerating text or resources.
+ */
+export function protectRrwebOpaquePlaceholders(
+  iframe: HTMLIFrameElement,
+): boolean {
+  try {
+    const replayDocument = iframe.contentDocument;
+    if (!replayDocument) return false;
+    const roots: Array<Document | ShadowRoot> = [replayDocument];
+    const seen = new Set<Element>();
+    while (roots.length > 0) {
+      const root = roots.pop()!;
+      for (const element of root.querySelectorAll('*')) {
+        if (seen.has(element)) continue;
+        if (seen.size >= MAX_REPLICA_NODES) return false;
+        seen.add(element);
+        const sourceShadow = element.shadowRoot;
+        if (sourceShadow?.mode === 'open') roots.push(sourceShadow);
+        if (!isSourceSecretPlaceholderTagName(element.localName)) continue;
+        if (PROTECTED_RRWEB_OPAQUE_PLACEHOLDERS.has(element)) continue;
+        const host = element as Element & {
+          attachShadow?: (init: ShadowRootInit) => ShadowRoot;
+        };
+        const shadow = host.attachShadow?.({ mode: 'closed' });
+        if (!shadow) return false;
+        const style = replayDocument.createElement('style');
+        style.textContent = RRWEB_OPAQUE_PLACEHOLDER_CSS;
+        shadow.append(style);
+        element.setAttribute('aria-hidden', 'true');
+        element.setAttribute('inert', '');
+        element.setAttribute('tabindex', '-1');
+        PROTECTED_RRWEB_OPAQUE_PLACEHOLDERS.add(element);
+      }
+    }
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+function rrwebEventsContainOpaquePlaceholder(
+  events: readonly unknown[],
+): boolean {
+  const pending = [...events];
+  let inspected = 0;
+  while (pending.length > 0) {
+    const value = pending.pop();
+    if (!value || typeof value !== 'object') continue;
+    if (++inspected > MAX_REPLICA_NODES * 8) return true;
+    if (Array.isArray(value)) {
+      pending.push(...value);
+      continue;
+    }
+    const record = value as Record<string, unknown>;
+    if (isSourceSecretPlaceholderTagName(record.tagName)) return true;
+    pending.push(...Object.values(record));
+  }
+  return false;
 }
 
 function releaseManagedReplay(replay: ManagedReplay | undefined): void {

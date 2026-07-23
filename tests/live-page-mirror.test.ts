@@ -8,6 +8,7 @@ import {
   invokeLivePageDeltaCaptureBridge,
   invokeLivePageObserverBridge,
   invokeLivePageObserverUnregisterBridge,
+  isConfirmedLivePageObserverRelease,
   parseLivePageDelta,
   readLivePageDirtyMessage,
   readLivePageObserverInstallation,
@@ -23,6 +24,11 @@ import {
   readNestedScrollSnapshot,
 } from '../lib/primary-scroll';
 import { parsePageSnapshot } from '../lib/page-snapshot';
+import {
+  FULL_VISIBLE_REPLICA_READ_SCOPE,
+  PAGE_ONLY_REPLICA_READ_SCOPE,
+  STANDARD_REPLICA_READ_SCOPE,
+} from '../lib/replica/read-scope-policy';
 import {
   applyLivePageDelta,
   createVisualMirror,
@@ -125,13 +131,13 @@ describe('live mirror boundary', () => {
     const install = vi.fn(() => ({ installed: true, generation: 7, sequence: 3 }));
     const captureDelta = vi.fn(() => ({ version: 1, sequence: 4 }));
     const unregister = vi.fn(() => true);
-    expect(bridge.implementationRevision).toBe(5);
+    expect(bridge.implementationRevision).toBe(6);
     (
       globalThis as typeof globalThis & {
         __simulLivePageObserverBridgeV4?: unknown;
       }
     ).__simulLivePageObserverBridgeV4 = {
-      implementationRevision: 5,
+      implementationRevision: 6,
       install,
       captureDelta,
       unregister,
@@ -147,16 +153,95 @@ describe('live mirror boundary', () => {
       `return (${invokeLivePageDeltaCaptureBridge.toString()})`,
     )() as typeof invokeLivePageDeltaCaptureBridge;
 
-    expect(detachedInstall('session_1234', 7)).toEqual({
+    expect(detachedInstall(
+      'session_1234',
+      7,
+      PAGE_ONLY_REPLICA_READ_SCOPE,
+    )).toEqual({
       installed: true, generation: 7, sequence: 3,
     });
-    expect(detachedUnregister('session_1234')).toBe(true);
-    expect(detachedCapture('session_1234', 7, 4, ['n1'])).toEqual({
+    expect(detachedUnregister('session_1234')).toEqual({
+      kind: 'simul:live-observer-v6:release-proof',
+      implementationRevision: 6,
+      invoked: true,
+      sessionRemoved: true,
+    });
+    expect(detachedCapture(
+      'session_1234',
+      7,
+      4,
+      ['n1'],
+      PAGE_ONLY_REPLICA_READ_SCOPE,
+    )).toEqual({
       version: 1, sequence: 4,
     });
-    expect(install).toHaveBeenCalledWith('session_1234', 7);
-    expect(captureDelta).toHaveBeenCalledWith('session_1234', 7, 4, ['n1']);
+    expect(install).toHaveBeenCalledWith(
+      'session_1234',
+      7,
+      PAGE_ONLY_REPLICA_READ_SCOPE,
+    );
+    expect(captureDelta).toHaveBeenCalledWith(
+      'session_1234',
+      7,
+      4,
+      ['n1'],
+      PAGE_ONLY_REPLICA_READ_SCOPE,
+    );
     expect(unregister).toHaveBeenCalledWith('session_1234');
+  });
+
+  it('requires one typed top-frame result to confirm observer teardown', () => {
+    const proof = {
+      kind: 'simul:live-observer-v6:release-proof',
+      implementationRevision: 6,
+      invoked: true,
+      sessionRemoved: true,
+    };
+    expect(isConfirmedLivePageObserverRelease([{ result: proof }])).toBe(true);
+    expect(isConfirmedLivePageObserverRelease([{
+      result: { ...proof, sessionRemoved: false },
+    }])).toBe(true);
+    expect(isConfirmedLivePageObserverRelease([{ result: true }])).toBe(false);
+    expect(isConfirmedLivePageObserverRelease([{ result: false }])).toBe(false);
+    expect(isConfirmedLivePageObserverRelease([])).toBe(false);
+    expect(isConfirmedLivePageObserverRelease([{}])).toBe(false);
+    expect(isConfirmedLivePageObserverRelease([{
+      result: { ...proof, implementationRevision: 5 },
+    }])).toBe(false);
+    expect(isConfirmedLivePageObserverRelease([{
+      result: { ...proof, extra: true },
+    }])).toBe(false);
+    expect(isConfirmedLivePageObserverRelease([
+      { result: proof },
+      { result: proof },
+    ])).toBe(false);
+  });
+
+  it('cannot manufacture a release proof without the current teardown bridge', () => {
+    const detachedUnregister = Function(
+      `return (${invokeLivePageObserverUnregisterBridge.toString()})`,
+    )() as typeof invokeLivePageObserverUnregisterBridge;
+    const staleUnregister = vi.fn(() => true);
+    (
+      globalThis as typeof globalThis & {
+        __simulLivePageObserverBridgeV4?: unknown;
+      }
+    ).__simulLivePageObserverBridgeV4 = {
+      implementationRevision: 5,
+      unregister: staleUnregister,
+    };
+    expect(detachedUnregister('session_1234')).toBeUndefined();
+    expect(staleUnregister).not.toHaveBeenCalled();
+
+    (
+      globalThis as typeof globalThis & {
+        __simulLivePageObserverBridgeV4?: unknown;
+      }
+    ).__simulLivePageObserverBridgeV4 = {
+      implementationRevision: 6,
+      unregister: () => 'not-a-boolean',
+    };
+    expect(detachedUnregister('session_1234')).toBeUndefined();
   });
 
   it('rejects a seventeenth observer session without evicting an active one', () => {
@@ -167,7 +252,7 @@ describe('live mirror boundary', () => {
     (
       globalThis as typeof globalThis & { __simulLiveMirrorV1?: unknown }
     ).__simulLiveMirrorV1 = {
-      implementationRevision: 5,
+      implementationRevision: 6,
       sessions,
       currentSequence: () => 12,
       announceScroll,
@@ -223,7 +308,7 @@ describe('live mirror boundary', () => {
       globalThis as typeof globalThis & {
         __simulLiveMirrorV1?: { implementationRevision?: number };
       }
-    ).__simulLiveMirrorV1?.implementationRevision).toBe(5);
+    ).__simulLiveMirrorV1?.implementationRevision).toBe(6);
     expect(observerOptions).toMatchObject({
       attributes: true,
       childList: true,
@@ -288,7 +373,11 @@ describe('live mirror boundary', () => {
       },
     });
 
-    installLivePageObserver('session_1234', 1);
+    installLivePageObserver(
+      'session_1234',
+      1,
+      FULL_VISIBLE_REPLICA_READ_SCOPE,
+    );
     const select = document.querySelector('select')!;
     const registry = (
       globalThis as typeof globalThis & {
@@ -363,7 +452,11 @@ describe('live mirror boundary', () => {
     const sendMessage = vi.fn(async () => undefined);
     vi.stubGlobal('chrome', { runtime: { sendMessage } });
 
-    installLivePageObserver('session_1234', 1);
+    installLivePageObserver(
+      'session_1234',
+      1,
+      FULL_VISIBLE_REPLICA_READ_SCOPE,
+    );
     const select = document.querySelector('select')!;
     const registry = (
       globalThis as typeof globalThis & {
@@ -386,6 +479,54 @@ describe('live mirror boundary', () => {
       type: 'simul:page-dirty',
       nodeIds: [selectId],
     }));
+  });
+
+  it('does not poll current select state when form values are disabled', () => {
+    vi.useFakeTimers();
+    const { document, window } = parseHTML(`
+      <html><body><select multiple><option selected>Tokyo</option></select></body></html>
+    `);
+    installLiveDomGlobals(document, window);
+    class TestMutationObserver { observe(): void {} disconnect(): void {} }
+    class TestResizeObserver { observe(): void {} disconnect(): void {} }
+    vi.stubGlobal('MutationObserver', TestMutationObserver);
+    vi.stubGlobal('ResizeObserver', TestResizeObserver);
+    vi.stubGlobal('requestAnimationFrame', () => 1);
+    vi.stubGlobal('cancelAnimationFrame', () => undefined);
+    const sendMessage = vi.fn(async () => undefined);
+    vi.stubGlobal('chrome', { runtime: { sendMessage } });
+    const select = document.querySelector('select')!;
+    const option = document.querySelector('option')!;
+    const selectedIndexRead = vi.fn(() => {
+      throw new Error('Standard observer read selectedIndex.');
+    });
+    const selectedRead = vi.fn(() => {
+      throw new Error('Standard observer read option.selected.');
+    });
+    Object.defineProperty(select, 'selectedIndex', {
+      configurable: true,
+      get: selectedIndexRead,
+    });
+    Object.defineProperty(option, 'selected', {
+      configurable: true,
+      get: selectedRead,
+    });
+
+    installLivePageObserver(
+      'session_1234',
+      1,
+      STANDARD_REPLICA_READ_SCOPE,
+    );
+    const registry = (
+      globalThis as typeof globalThis & {
+        __simulLiveMirrorV1?: { idFor(node: Node): string };
+      }
+    ).__simulLiveMirrorV1!;
+    registry.idFor(select);
+    vi.advanceTimersByTime(1_000);
+
+    expect(selectedIndexRead).not.toHaveBeenCalled();
+    expect(selectedRead).not.toHaveBeenCalled();
   });
 
   it('clamps scroll messages and rejects executable delta data', () => {
@@ -987,6 +1128,82 @@ describe('live mirror boundary', () => {
     expect(serialized.match(/"controlShell":"input"/gu)?.length).toBeGreaterThanOrEqual(4);
   });
 
+  it('defaults live deltas to Page-only without reading optional accessors', () => {
+    const { document, window } = parseHTML(`
+      <html><body>
+        <button aria-label="Private attribute label"><svg></svg></button>
+        <img src="https://example.com/image.png" alt="Private image label">
+        <details open><summary>Visible summary</summary></details>
+        <select multiple><option selected>Private selection</option></select>
+      </body></html>
+    `);
+    installLiveDomGlobals(document, window);
+    installLiveRegistry(document.body);
+    const button = document.querySelector('button')!;
+    const image = document.querySelector('img')!;
+    const details = document.querySelector('details')!;
+    const select = document.querySelector('select')!;
+    const option = document.querySelector('option')!;
+    const buttonGetAttribute = button.getAttribute.bind(button);
+    const imageGetAttribute = image.getAttribute.bind(image);
+    const detailsHasAttribute = details.hasAttribute.bind(details);
+    Object.defineProperty(button, 'getAttribute', {
+      configurable: true,
+      value: (name: string) => {
+        if (name === 'aria-label' || name === 'title') {
+          throw new Error('Page-only delta read an attribute-backed label.');
+        }
+        return buttonGetAttribute(name);
+      },
+    });
+    Object.defineProperty(image, 'getAttribute', {
+      configurable: true,
+      value: (name: string) => {
+        if (name === 'alt' || name === 'aria-label' || name === 'title') {
+          throw new Error('Legacy delta read image accessibility text.');
+        }
+        return imageGetAttribute(name);
+      },
+    });
+    Object.defineProperty(details, 'hasAttribute', {
+      configurable: true,
+      value: (name: string) => {
+        if (name === 'open') throw new Error('Page-only delta read open state.');
+        return detailsHasAttribute(name);
+      },
+    });
+    Object.defineProperties(select, {
+      multiple: {
+        configurable: true,
+        get: () => { throw new Error('Page-only delta read select shape.'); },
+      },
+      size: {
+        configurable: true,
+        get: () => { throw new Error('Page-only delta read select size.'); },
+      },
+      matches: {
+        configurable: true,
+        value: (selector: string) => {
+          if (selector === ':open') throw new Error('Page-only delta read picker state.');
+          return false;
+        },
+      },
+    });
+    Object.defineProperty(option, 'selected', {
+      configurable: true,
+      get: () => { throw new Error('Page-only delta read current selection.'); },
+    });
+
+    const delta = captureLivePageDelta('session_1234', 1, 1, ['n1']);
+    const serialized = JSON.stringify(delta);
+
+    expect(serialized).not.toContain('Private attribute label');
+    expect(serialized).not.toContain('Private image label');
+    expect(serialized).not.toContain('Private selection');
+    expect(serialized).not.toContain('"open":""');
+    expect(findLiveElement(delta.replacements[0]?.node, 'select')).toBeUndefined();
+  });
+
   it('captures and validates only typed native-select presentation data', () => {
     const { document, window } = parseHTML(`
       <html><body>
@@ -1016,7 +1233,13 @@ describe('live mirror boundary', () => {
       value: (selector: string) => selector === ':open',
     });
 
-    const captured = captureLivePageDelta('session_1234', 1, 1, ['n1']);
+    const captured = captureLivePageDelta(
+      'session_1234',
+      1,
+      1,
+      ['n1'],
+      FULL_VISIBLE_REPLICA_READ_SCOPE,
+    );
     const delta = parseLivePageDelta(captured);
     const serialized = JSON.stringify(delta);
     const selectNode = findLiveElement(delta.replacements[0]?.node, 'select');
@@ -1590,13 +1813,11 @@ describe('live mirror boundary', () => {
       translate: async (source) => (source === 'New diagram' ? '新しい図' : source),
     });
     expect(imageResult.translation).toEqual({
-      completed: 1,
+      completed: 0,
       failed: 0,
-      total: 1,
+      total: 0,
     });
-    expect(imageResult.root.querySelector('img')?.getAttribute('alt')).toBe(
-      '新しい図',
-    );
+    expect(imageResult.root.querySelector('img')?.getAttribute('alt')).toBeNull();
 
     const failedImageResult = await applyLivePageDelta(
       imageResult.root,
@@ -1609,13 +1830,13 @@ describe('live mirror boundary', () => {
       },
     );
     expect(failedImageResult.translation).toEqual({
-      completed: 1,
-      failed: 1,
-      total: 1,
+      completed: 0,
+      failed: 0,
+      total: 0,
     });
     expect(
       failedImageResult.root.querySelector('img')?.getAttribute('alt'),
-    ).toBe('New diagram');
+    ).toBeNull();
   });
 });
 

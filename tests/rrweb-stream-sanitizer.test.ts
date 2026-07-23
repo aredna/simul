@@ -9,6 +9,7 @@ import {
   MAX_REPLICA_STREAM_STYLE_IDS,
   RrwebStreamSanitizer,
 } from '../lib/replica/rrweb-stream-sanitizer';
+import { sourceSecretPlaceholderTagName } from '../lib/replica/source-secret-classifier';
 
 describe('rrweb live incremental sanitizer', () => {
   it('tracks private ancestry and strips live resource or handler attributes', () => {
@@ -41,11 +42,11 @@ describe('rrweb live incremental sanitizer', () => {
     expect(prepared?.events).toMatchObject([
       {
         data: {
-          texts: [{ id: 5, value: 'public update' }, { id: 7, value: '*******************' }],
+          texts: [{ id: 5, value: 'public update' }, { id: 7, value: '********' }],
           attributes: [
             {
               id: 8,
-              attributes: { src: null, onclick: null, alt: 'safe label' },
+              attributes: { src: null, onclick: null, alt: null },
             },
           ],
         },
@@ -147,6 +148,44 @@ describe('rrweb live incremental sanitizer', () => {
       status: 'accepted',
       event: { data: { adds: [{ previousId: null, nextId: null }] } },
     });
+  });
+
+  it('rejects resource-bearing opaque placeholders and keeps canonical shells immutable', () => {
+    const forged = readySanitizer();
+    const tagName = sourceSecretPlaceholderTagName(90);
+    expect(forged.prepareBatch([mutationEvent({
+      adds: [{
+        parentId: 4,
+        nextId: null,
+        node: {
+          type: 2,
+          id: 90,
+          tagName,
+          attributes: { src: 'https://tracker.example/credential-qr.png' },
+          childNodes: [],
+        },
+      }],
+    })])).toBeUndefined();
+
+    const canonical = readySanitizer();
+    const addition = canonical.prepareBatch([mutationEvent({
+      adds: [{
+        parentId: 4,
+        nextId: null,
+        node: {
+          type: 2,
+          id: 90,
+          tagName,
+          attributes: {},
+          childNodes: [],
+        },
+      }],
+    })]);
+    expect(addition).toBeDefined();
+    addition?.commit();
+    expect(canonical.prepareBatch([mutationEvent({
+      attributes: [{ id: 90, attributes: { title: 'credential metadata' } }],
+    })])).toBeUndefined();
   });
 
   it('projects an omitted mid-list anchor to the nearest surviving sibling', () => {

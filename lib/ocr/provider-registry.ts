@@ -40,6 +40,9 @@ export const compiledImageAnalysisCapabilities = Object.freeze({
   promptImageText: generatedCapabilities.promptImageText === true,
 });
 
+/** Direct aria-label/alt reading is local source code, not an OCR build module. */
+export const ACCESSIBILITY_IMAGE_TEXT_COMPILED = true;
+
 /** Preserve saved positions while omitting providers absent from this build. */
 export function effectiveCompiledProviderOrder(
   savedOrder: readonly ImageTextProviderId[],
@@ -52,11 +55,18 @@ export function effectiveCompiledProviderOrder(
   );
 }
 
-export function hasCompiledImageAnalysisCapability(): boolean {
+export function hasCompiledImageAnalysisCapability(
+  capabilities: Readonly<{
+    readonly providerIds: readonly ImageTextProviderId[];
+    readonly promptImageLanguage: boolean;
+    readonly promptImageText: boolean;
+  }> = compiledImageAnalysisCapabilities,
+): boolean {
   return (
-    compiledImageTextProviderIds.length > 0 ||
-    compiledImageAnalysisCapabilities.promptImageLanguage ||
-    compiledImageAnalysisCapabilities.promptImageText
+    ACCESSIBILITY_IMAGE_TEXT_COMPILED ||
+    capabilities.providerIds.length > 0 ||
+    capabilities.promptImageLanguage ||
+    capabilities.promptImageText
   );
 }
 

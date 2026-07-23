@@ -22,8 +22,21 @@ import {
   createCheckpointError,
   createReplicaIdentity,
 } from '../lib/replica/protocol-v2';
-import { RrwebShadowReplicaEngine } from '../lib/replica/rrweb-shadow-engine';
+import {
+  RrwebShadowReplicaEngine,
+  protectRrwebOpaquePlaceholders,
+} from '../lib/replica/rrweb-shadow-engine';
 import { RrwebStreamSanitizer } from '../lib/replica/rrweb-stream-sanitizer';
+import { FULL_VISIBLE_REPLICA_READ_SCOPE } from '../lib/replica/read-scope-policy';
+import { sourceSecretPlaceholderTagName } from '../lib/replica/source-secret-classifier';
+import type {
+  SemanticSourceStreamLease,
+  SemanticSourceStreamObserver,
+} from '../lib/replica/semantic-source-client';
+import {
+  createSemanticSourceBatch,
+  type SemanticSourceRecord,
+} from '../lib/replica/semantic-source-protocol';
 import {
   LEGACY_FALLBACK_LABEL,
   LIVE_REPLAY_LABEL,
@@ -239,6 +252,44 @@ describe('replica engine selection and fallback', () => {
 });
 
 describe('rrweb shadow engine', () => {
+  it('suppresses universal pseudo-content and resource paint on opaque shells', () => {
+    const hostDocument = parseHTML('<html><body></body></html>').document;
+    const replayDocument = parseHTML('<html><body></body></html>').document;
+    const placeholder = replayDocument.createElement(
+      sourceSecretPlaceholderTagName(52),
+    );
+    const sourceShadowHost = replayDocument.createElement('section');
+    const sourceShadow = sourceShadowHost.attachShadow({ mode: 'open' });
+    Object.defineProperty(sourceShadow, 'mode', { value: 'open' });
+    sourceShadow.append(placeholder);
+    replayDocument.body.append(sourceShadowHost);
+    const attachShadow = placeholder.attachShadow.bind(placeholder);
+    let protectedShadow: ShadowRoot | undefined;
+    Object.defineProperty(placeholder, 'attachShadow', {
+      configurable: true,
+      value: (init: ShadowRootInit) => {
+        protectedShadow = attachShadow(init);
+        return protectedShadow;
+      },
+    });
+    const iframe = hostDocument.createElement('iframe');
+    Object.defineProperty(iframe, 'contentDocument', {
+      configurable: true,
+      value: replayDocument,
+    });
+
+    expect(protectRrwebOpaquePlaceholders(iframe)).toBe(true);
+    expect(protectRrwebOpaquePlaceholders(iframe)).toBe(true);
+    expect(placeholder.getAttribute('aria-hidden')).toBe('true');
+    expect(placeholder.hasAttribute('inert')).toBe(true);
+    expect(placeholder.shadowRoot).toBeNull();
+    const blockerCss = protectedShadow?.firstChild?.textContent ?? '';
+    expect(blockerCss).toContain(':host::before');
+    expect(blockerCss).toContain('content:none!important');
+    expect(blockerCss).toContain('background-image:none!important');
+    expect(blockerCss).toContain('mask-image:none!important');
+  });
+
   it('atomically promotes a protected source-sized preview and retains it until release', async () => {
     const { document } = replicaDocument();
     const presentationHost = createPresentationHost(document);
@@ -365,6 +416,202 @@ describe('rrweb shadow engine', () => {
     expect(anchor?.iframe.contentDocument).toBe(replayDocument);
     expect(engine.resolveImageAnchor(snapshot.document, 38)).toBeUndefined();
     engine.dispose();
+  });
+
+  it('keeps rrweb base masking while applying the same semantic value channel', async () => {
+    const { document } = replicaDocument();
+    const replayDocument = parseHTML(
+      '<html><body><input id="draft" type="text" value="***"></body></html>',
+    ).document;
+    const input = replayDocument.querySelector<HTMLInputElement>('#draft')!;
+    const semantic = new FakeSemanticStream();
+    const engine = new RrwebShadowReplicaEngine({
+      presentationHost: createPresentationHost(document),
+      capture: async () => checkpointWithInput(37),
+      openSemanticStream: async () => semantic,
+      getReplicaReadScope: () => FULL_VISIBLE_REPLICA_READ_SCOPE,
+      createReplayer: (_events, root) => {
+        const iframe = document.createElement('iframe');
+        Object.defineProperty(iframe, 'contentDocument', {
+          configurable: true,
+          value: replayDocument,
+        });
+        root.append(iframe);
+        let rebuilt: (() => void) | undefined;
+        return {
+          iframe,
+          on: (event, handler) => {
+            if (event === 'fullsnapshot-rebuilded') rebuilt = handler;
+          },
+          play: () => rebuilt?.(),
+          getMirror: () => ({
+            getNode: (nodeId) => nodeId === 37 ? input : null,
+          }),
+          disableInteract: () => undefined,
+          destroy: () => undefined,
+        };
+      },
+    });
+    await engine.run(request);
+    await Promise.resolve();
+    expect(engine.snapshot()?.records.some(({ nodeId }) => nodeId === 37))
+      .toBe(false);
+    expect(input.value).toBe('***');
+    const snapshot = engine.snapshot()!;
+    const sourceRecord: SemanticSourceRecord = {
+      bridge: 'rrweb', recordId: 299, nodeId: 37, nodeRevision: 1,
+      category: 'ordinary-form', gate: 'formValues', tagName: 'input',
+      type: 'text', autocomplete: '', role: '', contentEditable: '',
+      text: 'visible draft', presentation: 'value', classifierVersion: 1,
+    };
+    expect(semantic.emit(createSemanticSourceBatch(
+      snapshot.document,
+      'read-v1-111111',
+      1,
+      [sourceRecord],
+    ))).toBe(true);
+    const record = engine.snapshot()!.records.find(({ nodeId }) => nodeId === -299)!;
+    expect(input.value).toBe('visible draft');
+    engine.beginProjection({ translationEpoch: 1, pairKey: 'en>ja' });
+    expect(engine.project({
+      document: snapshot.document,
+      replayLease: snapshot.replayLease,
+      nodeId: record.nodeId,
+      nodeType: 1,
+      controlTarget: 'value',
+      sourceRevision: record.revision,
+      source: record.source,
+      translationEpoch: 1,
+      pairKey: 'en>ja',
+      translated: '表示下書き',
+    })).toBe(true);
+    expect(input.value).toBe('表示下書き');
+    semantic.fail();
+    expect(input.value).toBe('***');
+    expect(engine.snapshot()?.records.some(({ nodeId }) => nodeId < 0)).toBe(false);
+  });
+
+  it('exposes only proof-backed rrweb select chrome behind an action firewall', async () => {
+    const { document } = replicaDocument();
+    const replayDocument = parseHTML(
+      '<html><body><select id="choice"><option>One</option><option>Two</option></select><a id="link" href="https://example.invalid/">Leave</a></body></html>',
+    ).document;
+    const select = replayDocument.querySelector<HTMLSelectElement>('#choice')!;
+    const options = [...select.options];
+    const link = replayDocument.querySelector<HTMLAnchorElement>('#link')!;
+    const semantic = new FakeSemanticStream();
+    let iframe: HTMLIFrameElement | undefined;
+    const engine = new RrwebShadowReplicaEngine({
+      presentationHost: createPresentationHost(document),
+      capture: async () => checkpoint(),
+      openSemanticStream: async () => semantic,
+      getReplicaReadScope: () => FULL_VISIBLE_REPLICA_READ_SCOPE,
+      createReplayer: (_events, root) => {
+        iframe = document.createElement('iframe');
+        Object.defineProperty(iframe, 'contentDocument', {
+          configurable: true,
+          value: replayDocument,
+        });
+        root.append(iframe);
+        let rebuilt: (() => void) | undefined;
+        return {
+          iframe,
+          on: (event, handler) => {
+            if (event === 'fullsnapshot-rebuilded') rebuilt = handler;
+          },
+          play: () => rebuilt?.(),
+          getMirror: () => ({
+            getNode: (nodeId) => new Map<number, Node>([
+              [37, select], [38, options[0]!], [39, options[1]!],
+            ]).get(nodeId) ?? null,
+          }),
+          disableInteract: () => undefined,
+          destroy: () => undefined,
+        };
+      },
+    });
+    await engine.run(request);
+    await Promise.resolve();
+    const snapshot = engine.snapshot()!;
+    expect(semantic.emit(createSemanticSourceBatch(
+      snapshot.document,
+      'read-v1-111111',
+      1,
+      [],
+      [{
+        kind: 'select-presentation', bridge: 'rrweb', nodeId: 37,
+        revision: 1, gate: 'controlSemantics', multiple: false, size: null,
+        classifierVersion: 1,
+      }],
+    ))).toBe(true);
+
+    let host = replayDocument.querySelector<HTMLElement>(
+      '[data-simul-semantic-select-host="v1"]',
+    )!;
+    let trigger = host.shadowRoot!.querySelector<HTMLElement>(
+      '[data-simul-semantic-select-trigger="v1"]',
+    )!;
+    expect(trigger.textContent).toBe('Options');
+    expect(host.shadowRoot!.querySelector('[aria-selected]')).toBeNull();
+    expect(iframe!.hasAttribute('inert')).toBe(false);
+    expect(iframe!.hasAttribute('aria-hidden')).toBe(false);
+    expect(iframe!.style.pointerEvents).toBe('auto');
+    expect(document.querySelector('#preview')?.hasAttribute('aria-hidden'))
+      .toBe(false);
+    expect(iframe!.closest('[data-simul-replica-viewport]')
+      ?.hasAttribute('aria-hidden')).toBe(false);
+
+    const sourceClick = new replayDocument.defaultView!.Event('click', {
+      bubbles: true, cancelable: true, composed: true,
+    });
+    const sourceStop = vi.spyOn(sourceClick, 'stopImmediatePropagation');
+    expect(select.dispatchEvent(sourceClick)).toBe(false);
+    const linkClick = new replayDocument.defaultView!.Event('click', {
+      bubbles: true, cancelable: true, composed: true,
+    });
+    const linkStop = vi.spyOn(linkClick, 'stopImmediatePropagation');
+    expect(link.dispatchEvent(linkClick)).toBe(false);
+    expect(sourceClick.defaultPrevented).toBe(true);
+    expect(linkClick.defaultPrevented).toBe(true);
+    expect(sourceStop).toHaveBeenCalled();
+    expect(linkStop).toHaveBeenCalled();
+
+    expect(semantic.emit(createSemanticSourceBatch(
+      snapshot.document,
+      'read-v1-111111',
+      2,
+      [],
+      [{
+        kind: 'select-presentation', bridge: 'rrweb', nodeId: 37,
+        revision: 1, gate: 'controlSemantics', multiple: false, size: null,
+        classifierVersion: 1,
+      }, {
+        kind: 'select-state', bridge: 'rrweb', nodeId: 37, revision: 1,
+        gate: 'formValues', selectedOptionNodeIds: [39], multiple: false,
+        pickerOpen: false, classifierVersion: 1,
+      }],
+    ))).toBe(true);
+    host = replayDocument.querySelector<HTMLElement>(
+      '[data-simul-semantic-select-host="v1"]',
+    )!;
+    trigger = host.shadowRoot!.querySelector<HTMLElement>(
+      '[data-simul-semantic-select-trigger="v1"]',
+    )!;
+    expect(trigger.textContent).toBe('Two');
+    expect(host.shadowRoot!.querySelectorAll('[aria-selected="true"]'))
+      .toHaveLength(1);
+
+    semantic.fail();
+    expect(replayDocument.querySelector(
+      '[data-simul-semantic-select-host="v1"]',
+    )).toBeNull();
+    expect(iframe!.hasAttribute('inert')).toBe(true);
+    expect(iframe!.getAttribute('aria-hidden')).toBe('true');
+    expect(iframe!.style.pointerEvents).toBe('none');
+    expect(document.querySelector('#preview')?.getAttribute('aria-hidden'))
+      .toBe('true');
+    expect(iframe!.closest('[data-simul-replica-viewport]')
+      ?.getAttribute('aria-hidden')).toBe('true');
   });
 
   it('rejects stale work before capture or replay', async () => {
@@ -1575,6 +1822,39 @@ function checkpointWithImage(nodeId: number): ReplicaCheckpointEnvelope {
   return response;
 }
 
+function checkpointWithInput(nodeId: number): ReplicaCheckpointEnvelope {
+  const base = checkpoint();
+  const events = structuredClone(base.payload.events) as Array<Record<string, unknown>>;
+  const snapshot = events.find((event) => event.type === 2);
+  const root = snapshot?.data && typeof snapshot.data === 'object'
+    ? (snapshot.data as { node?: unknown }).node
+    : undefined;
+  const html = readSerializedChild(root, 0);
+  const body = readSerializedChild(html, 0);
+  if (!body?.childNodes || !Array.isArray(body.childNodes)) {
+    throw new Error('Missing checkpoint body fixture.');
+  }
+  body.childNodes.push({
+    type: 2,
+    id: nodeId,
+    tagName: 'input',
+    attributes: { type: 'text', value: '***' },
+    childNodes: [],
+  });
+  const response = createCheckpointEnvelope(base.identity, {
+    events,
+    captureMs: base.payload.captureMs,
+    viewportWidth: base.payload.viewportWidth,
+    viewportHeight: base.payload.viewportHeight,
+    documentWidth: base.payload.documentWidth,
+    documentHeight: base.payload.documentHeight,
+  });
+  if (response.kind !== 'simul:replica-v2:checkpoint') {
+    throw new Error('Input checkpoint fixture was unexpectedly rejected.');
+  }
+  return response;
+}
+
 function readSerializedChild(
   input: unknown,
   index: number,
@@ -1659,6 +1939,26 @@ class FakeLiveStream implements ReplicaLiveStreamLease {
 
   emitCheckpoint(checkpointResponse: ReplicaCheckpointResponse): void {
     this.#observer?.onCheckpoint(checkpointResponse);
+  }
+}
+
+class FakeSemanticStream implements SemanticSourceStreamLease {
+  observer?: SemanticSourceStreamObserver;
+
+  setObserver(observer: SemanticSourceStreamObserver): void {
+    this.observer = observer;
+  }
+
+  dispose(): void {
+    this.observer = undefined;
+  }
+
+  emit(batch: Parameters<SemanticSourceStreamObserver['onBatch']>[0]): boolean {
+    return this.observer?.onBatch(batch) ?? false;
+  }
+
+  fail(): void {
+    this.observer?.onFailure();
   }
 }
 

@@ -15,7 +15,11 @@ import {
   type ReplicaCheckpointResponse,
   type ReplicaDocumentIdentity,
 } from './contracts';
-import { LiveRecorderSession, createLiveRecorderOptions } from './live-recorder-session';
+import {
+  LiveRecorderSession,
+  createLiveRecorderOptions,
+  disposeLiveRecorderOptions,
+} from './live-recorder-session';
 import {
   createLiveStreamError,
   readLiveControllerMessage,
@@ -31,6 +35,18 @@ import {
   createCheckpointError,
   readCheckpointCommand,
 } from './protocol-v2';
+import {
+  createSourceBaseReadPolicy,
+  sourceBaseTextIsPublic,
+} from './html-mirror-sanitizer';
+import { readSemanticSourcePortIdentity } from './semantic-source-protocol';
+import {
+  SemanticSourceSession,
+  eagerlyClassifySourceDocumentSecrets,
+  rememberSourceMutationSecrets,
+} from './semantic-source-session';
+import { sourceDocumentSecretClassifier } from './source-secret-classifier';
+import { projectRrwebSourceSecretsInCheckpoint } from './rrweb-secret-projection';
 
 export const RECORDER_CAPTURE_TIMEOUT_MS = 3_000;
 
@@ -38,8 +54,8 @@ export interface RecorderOptions {
   readonly emit: (event: unknown, isCheckout?: boolean) => void;
   readonly maskAllInputs: true;
   readonly maskTextSelector: string;
-  readonly maskInputFn: (value: string) => string;
-  readonly maskTextFn: (value: string) => string;
+  readonly maskInputFn: (value: string, element?: HTMLElement) => string;
+  readonly maskTextFn: (value: string, element?: HTMLElement) => string;
   readonly inlineStylesheet: true;
   readonly inlineImages: false;
   readonly recordCanvas: false;
@@ -64,6 +80,7 @@ interface RecorderEnvironment {
   readonly start: RecorderStart;
   readonly setTimer: TimeoutScheduler;
   readonly clearTimer: TimeoutCanceller;
+  readonly resolveNode: (nodeId: number) => Node | null;
 }
 
 export interface PageRecorderBridgeEnvironment {
@@ -125,9 +142,15 @@ export function installPageRecorderBridge(
     ((callback: () => void) => requestAnimationFrame(callback));
   const cancelFrame = environment.cancelFrame ??
     ((handle: unknown) => cancelAnimationFrame(Number(handle)));
-  const captureCheckpoint = environment.captureCheckpoint ??
-    ((identity: ReplicaDocumentIdentity) => captureMaskedCheckpoint(identity));
   const recorderMirror = environment.recorderMirror ?? record.mirror;
+  const captureCheckpoint = environment.captureCheckpoint ??
+    ((identity: ReplicaDocumentIdentity) => captureMaskedCheckpoint(identity, {
+      document: sourceDocument,
+      window: sourceWindow,
+      now,
+      start,
+      resolveNode: (nodeId) => recorderMirror.getNode(nodeId),
+    }));
   const createImageSourceObserver = environment.createImageSourceObserver ??
     ((observerEnvironment: ConstructorParameters<typeof SourceImageObserver>[0]) =>
       new SourceImageObserver(observerEnvironment));
@@ -135,25 +158,71 @@ export function installPageRecorderBridge(
   let captureActive = false;
   let liveSession: LiveRecorderSession | undefined;
   const imageSourceSessions = new Set<ImageSourceSession>();
+  const semanticSourceSessions = new Set<SemanticSourceSession>();
+  const documentSecretClassifier = sourceDocumentSecretClassifier(sourceDocument);
+  eagerlyClassifySourceDocumentSecrets(
+    sourceDocument,
+    sourceWindow,
+    documentSecretClassifier,
+  );
+  const SecretMutationObserver = (sourceWindow as Window & {
+    readonly MutationObserver?: typeof MutationObserver;
+  }).MutationObserver ??
+    globalThis.MutationObserver;
+  if (SecretMutationObserver && sourceDocument.documentElement) {
+    const observer = new SecretMutationObserver((records: MutationRecord[]) => {
+      rememberSourceMutationSecrets(
+        records,
+        sourceWindow,
+        documentSecretClassifier,
+      );
+    });
+    observer.observe(sourceDocument.documentElement, {
+      attributes: true,
+      attributeOldValue: true,
+      characterData: true,
+      characterDataOldValue: true,
+      childList: true,
+      subtree: true,
+    });
+  }
   const refreshImageSourceSessions = (): void => {
     for (const session of [...imageSourceSessions]) session.refresh();
   };
   runtime.onConnect.addListener((port) => {
-    if (!readImageSourcePortSessionId(port.name, 'rrweb')) return;
-    let imageSourceSession: ImageSourceSession;
-    imageSourceSession = new ImageSourceSession({
+    if (readImageSourcePortSessionId(port.name, 'rrweb')) {
+      let imageSourceSession: ImageSourceSession;
+      imageSourceSession = new ImageSourceSession({
+        port,
+        document: sourceDocument,
+        window: sourceWindow,
+        resolveNode: (nodeId) => recorderMirror.getNode(nodeId),
+        getNodeId: (image) => {
+          const id = recorderMirror.getId(image);
+          return Number.isSafeInteger(id) && id > 0 ? id : undefined;
+        },
+        createObserver: createImageSourceObserver,
+        secretClassifier: documentSecretClassifier,
+        onDispose: () => imageSourceSessions.delete(imageSourceSession),
+      });
+      imageSourceSessions.add(imageSourceSession);
+      return;
+    }
+    if (!readSemanticSourcePortIdentity(port.name, 'rrweb')) return;
+    let semanticSourceSession: SemanticSourceSession;
+    semanticSourceSession = new SemanticSourceSession({
       port,
       document: sourceDocument,
       window: sourceWindow,
-      resolveNode: (nodeId) => recorderMirror.getNode(nodeId),
-      getNodeId: (image) => {
-        const id = recorderMirror.getId(image);
+      bridge: 'rrweb',
+      secretClassifier: documentSecretClassifier,
+      getNodeId: (node) => {
+        const id = recorderMirror.getId(node);
         return Number.isSafeInteger(id) && id > 0 ? id : undefined;
       },
-      createObserver: createImageSourceObserver,
-      onDispose: () => imageSourceSessions.delete(imageSourceSession),
+      onDispose: () => semanticSourceSessions.delete(semanticSourceSession),
     });
-    imageSourceSessions.add(imageSourceSession);
+    semanticSourceSessions.add(semanticSourceSession);
   });
   runtime.onConnect.addListener((port) => {
     const portSessionId = readReplicaLivePortSessionId(port.name);
@@ -292,11 +361,29 @@ export async function captureMaskedCheckpoint(
       start: environment.start ?? (record as RecorderStart),
       setTimer: receiverSafeTimeoutScheduler(environment.setTimer),
       clearTimer: receiverSafeTimeoutCanceller(environment.clearTimer),
+      resolveNode: environment.resolveNode ?? ((nodeId) => {
+        try {
+          return record.mirror.getNode(nodeId);
+        } catch {
+          return null;
+        }
+      }),
     });
+    const projectedEvents = projectRrwebSourceSecretsInCheckpoint(
+      events,
+      environment.resolveNode ?? ((nodeId) => {
+        try {
+          return record.mirror.getNode(nodeId);
+        } catch {
+          return null;
+        }
+      }),
+    );
+    if (!projectedEvents) throw new RecorderCaptureError('capture_failed');
     const documentElement = sourceDocument.documentElement;
     const body = sourceDocument.body;
     return createCheckpointEnvelope(identity, {
-      events,
+      events: projectedEvents,
       captureMs: Math.max(0, now() - startedAt),
       viewportWidth: Math.max(1, sourceWindow.innerWidth),
       viewportHeight: Math.max(1, sourceWindow.innerHeight),
@@ -325,6 +412,7 @@ async function captureInitialCheckpointEvents(
   return new Promise<readonly unknown[]>((resolve, reject) => {
     const events: unknown[] = [];
     let stop: (() => void) | undefined;
+    let recorderOptions: RecorderOptions | undefined;
     let settled = false;
     const finish = (error?: RecorderCaptureError): void => {
       if (settled) return;
@@ -336,6 +424,7 @@ async function captureInitialCheckpointEvents(
         // Stopping after a frame navigates can fail; the bounded result still
         // wins and the isolated world will be destroyed with that document.
       }
+      if (recorderOptions) disposeLiveRecorderOptions(recorderOptions);
       if (error) reject(error);
       else resolve(Object.freeze(events));
     };
@@ -345,14 +434,16 @@ async function captureInitialCheckpointEvents(
     );
 
     try {
-      stop = environment.start(createLiveRecorderOptions(
+      recorderOptions = createLiveRecorderOptions(
         (event: unknown) => {
           if (!isRecord(event)) return;
           if (event.type !== 4 && event.type !== 2) return;
           events.push(event);
           if (event.type === 2) queueMicrotask(() => finish());
         },
-      ));
+        environment.document,
+      );
+      stop = environment.start(recorderOptions);
       if (!stop) finish(new RecorderCaptureError('capture_failed'));
     } catch {
       finish(new RecorderCaptureError('capture_failed'));
@@ -371,6 +462,7 @@ export function preflightSourceDocument(
   let estimatedBytes = 0;
 
   try {
+    const baseReadPolicy = createSourceBaseReadPolicy(sourceDocument);
     while (stack.length > 0) {
       const current = stack.pop();
       if (!current) break;
@@ -384,7 +476,11 @@ export function preflightSourceDocument(
 
       const node = current.node;
       if (node.nodeType === 3 || node.nodeType === 4) {
-        const length = node.nodeValue?.length ?? 0;
+        // Withheld content is represented by one fixed-size redaction.  Do
+        // not evaluate its nodeValue accessor during capacity estimation.
+        const length = sourceBaseTextIsPublic(node, baseReadPolicy)
+          ? (node.nodeValue?.length ?? 0)
+          : 8;
         if (length > MAX_REPLICA_STRING_LENGTH) return 'checkpoint_too_large';
         estimatedBytes += length * 2;
       }
@@ -393,11 +489,11 @@ export function preflightSourceDocument(
         const element = node as Element;
         if (element.attributes.length > 512) return 'checkpoint_too_large';
         for (const attribute of element.attributes) {
-          if (
-            attribute.name.length > 128 ||
-            attribute.value.length > MAX_REPLICA_STRING_LENGTH
-          ) return 'checkpoint_too_large';
-          estimatedBytes += (attribute.name.length + attribute.value.length) * 2;
+          if (attribute.name.length > 128) return 'checkpoint_too_large';
+          // Attribute values can be raw form/autofill evidence. The typed
+          // checkpoint sanitizer performs the bounded read only after the
+          // element's structural privacy boundary has been established.
+          estimatedBytes += attribute.name.length * 2;
         }
         const shadowRoot = element.shadowRoot;
         if (shadowRoot) {

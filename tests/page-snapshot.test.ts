@@ -74,7 +74,6 @@ describe('parsePageSnapshot', () => {
           id: 'image-2',
           kind: 'image',
           src: 'https://cdn.example.com/photo.png',
-          altText: '富士山',
           caption: '朝の景色',
         },
       ],
@@ -124,7 +123,11 @@ describe('parsePageSnapshot', () => {
     });
 
     expect(snapshot.items).toHaveLength(1);
-    expect(snapshot.items[0]).toMatchObject({ altText: 'safe raster' });
+    expect(snapshot.items[0]).toEqual({
+      id: 'image-1',
+      kind: 'image',
+      src: 'data:image/png;base64,iVBORw0KGgo=',
+    });
     expect(snapshot.capturedAt).toBe('1970-01-01T00:00:00.000Z');
   });
 
@@ -251,9 +254,7 @@ describe('capturePageSnapshot', () => {
     );
 
     expect(images).toHaveLength(2);
-    expect(images[0]).toMatchObject({
-      altText: 'first image',
-    });
+    expect(images[0]).not.toHaveProperty('altText');
     expect(images[0]).not.toHaveProperty('caption');
     expect(images[1]).not.toHaveProperty('caption');
     expect(captions).toHaveLength(1);
@@ -352,7 +353,7 @@ describe('capturePageSnapshot', () => {
     expect(text).toBeUndefined();
     expect(JSON.stringify(snapshot.visual)).toContain(tooLong);
     if (image?.kind === 'image') {
-      expect(image.altText?.length).toBe(SNAPSHOT_LIMITS.maxTextLength);
+      expect(image).not.toHaveProperty('altText');
       expect(image.caption).toBeUndefined();
     } else {
       throw new Error('Expected captured image.');

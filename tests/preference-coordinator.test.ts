@@ -5,6 +5,7 @@ import {
   readPreferenceCommand,
   readPreferenceCommandResult,
   type PreferenceCoordinatorAdapter,
+  type PreferenceResetRuntimeAdapter,
 } from '../lib/preference-coordinator';
 import {
   ALL_SITES_PERMISSION_ORIGINS,
@@ -15,6 +16,410 @@ import {
 } from '../lib/preferences';
 
 describe('preference coordinator', () => {
+  it('commits selectable read scope only at the current reset/setup revision', async () => {
+    const adapter = new MemoryPreferenceAdapter();
+    const coordinator = new PreferenceCoordinator(adapter);
+    const scope = {
+      controlSemantics: true,
+      controlImages: true,
+      disclosureContent: true,
+      formValues: false,
+      personalDataValues: false,
+      editableContent: false,
+    } as const;
+
+    const committed = await coordinator.run({
+      type: 'simul:preferences:complete-read-scope-setup',
+      expectedResetRevision: 0,
+      expectedSetupVersion: 0,
+      expectedReadScopeFingerprint: 'read-v1-000000',
+      patch: { replicaReadScope: scope },
+    });
+    expect(committed).toMatchObject({
+      applied: true,
+      preferences: { replicaReadScope: scope, readScopeSetupVersion: 1 },
+    });
+    const overwritten = await coordinator.run({
+      type: 'simul:preferences:complete-read-scope-setup',
+      expectedResetRevision: 0,
+      expectedSetupVersion: 0,
+      expectedReadScopeFingerprint: 'read-v1-111000',
+      patch: {
+        replicaReadScope: {
+          ...scope,
+          formValues: true,
+          personalDataValues: true,
+          editableContent: true,
+        },
+      },
+    });
+    expect(overwritten).toMatchObject({
+      applied: false,
+      code: 'stale-setup-version',
+      preferences: { replicaReadScope: scope, readScopeSetupVersion: 1 },
+    });
+    const stale = await coordinator.run({
+      type: 'simul:preferences:patch-read-scope',
+      expectedResetRevision: 9,
+      expectedReadScopeFingerprint: 'read-v1-111000',
+      patch: { replicaReadScope: scope },
+    });
+    expect(stale).toMatchObject({
+      applied: false,
+      code: 'stale-reset-revision',
+    });
+  });
+
+  it('lets an explicit setup replace any non-current persisted setup version', async () => {
+    const adapter = new MemoryPreferenceAdapter({
+      ...parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES),
+      replicaReadScope: {
+        controlSemantics: true,
+        controlImages: true,
+        disclosureContent: true,
+        formValues: true,
+        personalDataValues: true,
+        editableContent: true,
+      },
+      readScopeSetupVersion: 2,
+      settingsRevision: 7,
+    });
+    const coordinator = new PreferenceCoordinator(adapter);
+    const standard = {
+      controlSemantics: true,
+      controlImages: true,
+      disclosureContent: true,
+      formValues: false,
+      personalDataValues: false,
+      editableContent: false,
+    } as const;
+
+    const result = await coordinator.run({
+      type: 'simul:preferences:complete-read-scope-setup',
+      expectedResetRevision: 0,
+      expectedSetupVersion: 2,
+      expectedReadScopeFingerprint: 'read-v1-000000',
+      patch: { replicaReadScope: standard },
+    });
+
+    expect(result).toMatchObject({
+      applied: true,
+      preferences: {
+        replicaReadScope: standard,
+        readScopeSetupVersion: 1,
+        settingsRevision: 8,
+      },
+    });
+    expect(result.preferences.disabledImageReadingMethodIds).not.toContain(
+      'accessibility-text',
+    );
+  });
+
+  it('rejects a concurrent panel that writes from an obsolete read scope', async () => {
+    const adapter = new MemoryPreferenceAdapter({
+      ...parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES),
+      replicaReadScope: {
+        controlSemantics: true,
+        controlImages: true,
+        disclosureContent: true,
+        formValues: true,
+        personalDataValues: true,
+        editableContent: true,
+      },
+      readScopeSetupVersion: 1,
+      settingsRevision: 7,
+    });
+    const coordinator = new PreferenceCoordinator(adapter);
+    const pageOnly = {
+      controlSemantics: false,
+      controlImages: false,
+      disclosureContent: false,
+      formValues: false,
+      personalDataValues: false,
+      editableContent: false,
+    } as const;
+    const standard = {
+      ...pageOnly,
+      controlSemantics: true,
+      controlImages: true,
+      disclosureContent: true,
+    } as const;
+
+    const first = await coordinator.run({
+      type: 'simul:preferences:patch-read-scope',
+      expectedResetRevision: 0,
+      expectedReadScopeFingerprint: 'read-v1-111111',
+      patch: { replicaReadScope: pageOnly },
+    });
+    const delayedSecondPanel = await coordinator.run({
+      type: 'simul:preferences:patch-read-scope',
+      expectedResetRevision: 0,
+      expectedReadScopeFingerprint: 'read-v1-111111',
+      patch: { replicaReadScope: standard },
+    });
+
+    expect(first).toMatchObject({
+      applied: true,
+      preferences: { settingsRevision: 8, replicaReadScope: pageOnly },
+    });
+    expect(delayedSecondPanel).toMatchObject({
+      applied: false,
+      code: 'stale-read-scope',
+      preferences: { settingsRevision: 8, replicaReadScope: pageOnly },
+    });
+  });
+
+  it('commits safe defaults before revoking managed origins on reset', async () => {
+    const adapter = new MemoryPreferenceAdapter({
+      ...parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES),
+      imageTranslationEnabled: true,
+      autoTranslateAllSites: true,
+      readScopeSetupVersion: 1,
+    });
+    adapter.grant('<all_urls>', 'https://site.example/*');
+    const result = await new PreferenceCoordinator(adapter).run({
+      type: 'simul:preferences:reset-all',
+      expectedResetRevision: 0,
+    });
+
+    expect(result).toMatchObject({
+      applied: true,
+      cleanup: { status: 'complete', remainingManagedOrigins: 0 },
+      preferences: {
+        imageTranslationEnabled: false,
+        autoTranslateAllSites: false,
+        readScopeSetupVersion: 0,
+        resetRevision: 1,
+        resetCleanupPendingRevision: 0,
+      },
+    });
+    expect(adapter.hasGrant('<all_urls>')).toBe(false);
+    expect(adapter.hasGrant('https://site.example/*')).toBe(false);
+  });
+
+  it('keeps reset cleanup durable until permission, transient, and offscreen cleanup all succeed', async () => {
+    const adapter = new MemoryPreferenceAdapter({
+      ...parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES),
+      imageTranslationEnabled: true,
+    });
+    adapter.grant('<all_urls>', 'https://orphan.example/*');
+    const runtime = new MemoryResetRuntime();
+    runtime.failTransientStore = true;
+
+    const first = await new PreferenceCoordinator(adapter, runtime).run({
+      type: 'simul:preferences:reset-all',
+      expectedResetRevision: 0,
+    });
+
+    expect(first).toMatchObject({
+      applied: false,
+      code: 'cleanup-pending',
+      cleanup: { status: 'pending', remainingManagedOrigins: 0 },
+      preferences: {
+        resetRevision: 1,
+        resetCleanupPendingRevision: 1,
+      },
+    });
+    expect(runtime.clearTransientStoreCalls).toBe(1);
+    expect(runtime.closeOffscreenDocumentCalls).toBe(1);
+    expect(adapter.hasGrant('<all_urls>')).toBe(false);
+    expect(adapter.hasGrant('https://orphan.example/*')).toBe(false);
+
+    runtime.failTransientStore = false;
+    const resumed = await new PreferenceCoordinator(adapter, runtime).run({
+      type: 'simul:preferences:reconcile',
+    });
+
+    expect(resumed).toMatchObject({
+      applied: true,
+      cleanup: { status: 'complete', remainingManagedOrigins: 0 },
+      preferences: { resetCleanupPendingRevision: 0 },
+    });
+    expect(runtime.clearTransientStoreCalls).toBe(2);
+    expect(runtime.closeOffscreenDocumentCalls).toBe(2);
+  });
+
+  it('keeps reset cleanup pending when permission removal cannot be verified', async () => {
+    const adapter = new MemoryPreferenceAdapter({
+      ...parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES),
+      imageTranslationEnabled: true,
+    });
+    adapter.grant('<all_urls>');
+    adapter.failGetAllOriginsOnCall = 2;
+    const coordinator = new PreferenceCoordinator(adapter);
+
+    const first = await coordinator.run({
+      type: 'simul:preferences:reset-all',
+      expectedResetRevision: 0,
+    });
+    expect(first).toMatchObject({
+      applied: false,
+      code: 'cleanup-pending',
+      preferences: { resetCleanupPendingRevision: 1 },
+    });
+
+    adapter.failGetAllOriginsOnCall = undefined;
+    const retried = await coordinator.run({
+      type: 'simul:preferences:reconcile',
+    });
+    expect(retried).toMatchObject({
+      applied: true,
+      preferences: { resetCleanupPendingRevision: 0 },
+    });
+  });
+
+  it('does not run reset cleanup for a stale reset command', async () => {
+    const adapter = new MemoryPreferenceAdapter({
+      ...parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES),
+      resetRevision: 2,
+    });
+    adapter.grant('https://kept.example/*');
+    const runtime = new MemoryResetRuntime();
+
+    const stale = await new PreferenceCoordinator(adapter, runtime).run({
+      type: 'simul:preferences:reset-all',
+      expectedResetRevision: 1,
+    });
+
+    expect(stale).toMatchObject({
+      applied: false,
+      code: 'stale-reset-revision',
+    });
+    expect(runtime.clearTransientStoreCalls).toBe(0);
+    expect(runtime.closeOffscreenDocumentCalls).toBe(0);
+    expect(adapter.hasGrant('https://kept.example/*')).toBe(true);
+  });
+
+  it('preserves managed origins desired by the latest pending-reset preferences', async () => {
+    const adapter = new MemoryPreferenceAdapter({
+      ...parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES),
+      autoTranslateOrigins: ['https://kept.example'],
+      imageTranslationEnabled: true,
+      resetRevision: 4,
+      resetCleanupPendingRevision: 4,
+    });
+    adapter.grant(
+      '<all_urls>',
+      'https://kept.example/*',
+      'https://orphan.example/*',
+    );
+
+    const reconciled = await new PreferenceCoordinator(adapter).run({
+      type: 'simul:preferences:reconcile',
+    });
+
+    expect(reconciled.preferences.resetCleanupPendingRevision).toBe(0);
+    expect(adapter.hasGrant('<all_urls>')).toBe(true);
+    expect(adapter.hasGrant('https://kept.example/*')).toBe(true);
+    expect(adapter.hasGrant('https://orphan.example/*')).toBe(false);
+  });
+
+  it('rejects every stale settings writer after a reset revision advances', async () => {
+    const adapter = new MemoryPreferenceAdapter();
+    adapter.grant('https://site.example/*');
+    const coordinator = new PreferenceCoordinator(adapter);
+    const reset = await coordinator.run({
+      type: 'simul:preferences:reset-all',
+      expectedResetRevision: 0,
+    });
+    expect(reset.preferences.resetRevision).toBe(1);
+
+    const results = await Promise.all([
+      coordinator.run({
+        type: 'simul:preferences:patch-view',
+        expectedResetRevision: 0,
+        patch: { targetLanguage: 'ja' },
+      }),
+      coordinator.run({
+        type: 'simul:preferences:patch-image-analysis',
+        expectedResetRevision: 0,
+        patch: { imageTranslationEnabled: true },
+      }),
+      coordinator.run({
+        type: 'simul:preferences:commit-auto',
+        expectedResetRevision: 0,
+        mode: 'site',
+        pageUrl: 'https://site.example/page',
+      }),
+    ]);
+
+    expect(results).toEqual(results.map((result) => expect.objectContaining({
+      applied: false,
+      code: 'stale-reset-revision',
+    })));
+    expect(adapter.preferences).toMatchObject({
+      resetRevision: 1,
+      targetLanguage: 'en',
+      imageTranslationEnabled: false,
+      autoTranslateOrigins: [],
+    });
+  });
+
+  it('rejects a permission transaction based on an obsolete settings snapshot', async () => {
+    const adapter = new MemoryPreferenceAdapter({
+      ...parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES),
+      settingsRevision: 4,
+    });
+    const result = await new PreferenceCoordinator(adapter).run({
+      type: 'simul:preferences:patch-image-analysis',
+      expectedResetRevision: 0,
+      expectedSettingsRevision: 3,
+      patch: { imageTranslationEnabled: true },
+    });
+
+    expect(result).toMatchObject({
+      applied: false,
+      code: 'stale-settings-revision',
+      preferences: {
+        settingsRevision: 4,
+        imageTranslationEnabled: false,
+      },
+    });
+    expect(adapter.saveCalls).toBe(0);
+  });
+
+  it('does not resurrect an image method disabled by another panel', async () => {
+    const adapter = new MemoryPreferenceAdapter({
+      ...parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES),
+      settingsRevision: 4,
+      readScopeSetupVersion: 1,
+      disabledImageReadingMethodIds: [],
+    });
+    const coordinator = new PreferenceCoordinator(adapter);
+
+    const firstPanel = await coordinator.run({
+      type: 'simul:preferences:patch-image-analysis',
+      expectedResetRevision: 0,
+      expectedSettingsRevision: 4,
+      patch: { disabledImageReadingMethodIds: ['paddleocr-wasm'] },
+    });
+    const staleSecondPanel = await coordinator.run({
+      type: 'simul:preferences:patch-image-analysis',
+      expectedResetRevision: 0,
+      expectedSettingsRevision: 4,
+      patch: { disabledImageReadingMethodIds: ['tesseract'] },
+    });
+
+    expect(firstPanel).toMatchObject({
+      applied: true,
+      preferences: {
+        settingsRevision: 5,
+        disabledImageReadingMethodIds: ['paddleocr-wasm'],
+      },
+    });
+    expect(staleSecondPanel).toMatchObject({
+      applied: false,
+      code: 'stale-settings-revision',
+      preferences: {
+        settingsRevision: 5,
+        disabledImageReadingMethodIds: ['paddleocr-wasm'],
+      },
+    });
+    expect(adapter.preferences.disabledImageReadingMethodIds).toEqual([
+      'paddleocr-wasm',
+    ]);
+  });
+
   it('persists the repaired OCR confidence during reconciliation', async () => {
     const adapter = new MemoryPreferenceAdapter();
     adapter.loadValue = {
@@ -32,6 +437,30 @@ describe('preference coordinator', () => {
     expect(adapter.saveCalls).toBe(1);
   });
 
+  it('persists legacy disabled OCR providers in the canonical method list', async () => {
+    const adapter = new MemoryPreferenceAdapter();
+    const legacy = {
+      ...adapter.preferences,
+      readScopeSetupVersion: 1,
+      disabledImageTextProviderIds: ['tesseract'],
+    } as Record<string, unknown>;
+    delete legacy.imageReadingMethodOrder;
+    delete legacy.disabledImageReadingMethodIds;
+    adapter.loadValue = legacy;
+
+    const result = await new PreferenceCoordinator(adapter).run({
+      type: 'simul:preferences:reconcile',
+    });
+
+    expect(result.preferences.disabledImageReadingMethodIds).toEqual([
+      'tesseract',
+    ]);
+    expect(adapter.preferences.disabledImageReadingMethodIds).toEqual([
+      'tesseract',
+    ]);
+    expect(adapter.saveCalls).toBe(1);
+  });
+
   it('loads the current stored value for each serialized side-panel commit', async () => {
     const adapter = new MemoryPreferenceAdapter();
     adapter.grant(...permissionOriginsForMode('site', 'https://one.example/'));
@@ -39,12 +468,14 @@ describe('preference coordinator', () => {
 
     const first = await coordinator.run({
       type: 'simul:preferences:commit-auto',
+      expectedResetRevision: 0,
       mode: 'site',
       pageUrl: 'https://one.example/page',
     });
     adapter.grant(...permissionOriginsForMode('site', 'https://two.example/'));
     const second = await coordinator.run({
       type: 'simul:preferences:commit-auto',
+      expectedResetRevision: 0,
       mode: 'site',
       pageUrl: 'https://two.example/page',
     });
@@ -81,6 +512,7 @@ describe('preference coordinator', () => {
 
     const result = await coordinator.run({
       type: 'simul:preferences:abort-auto',
+      expectedResetRevision: 0,
       mode: 'site',
       pageUrl: 'https://denied.example/page',
     });
@@ -107,6 +539,7 @@ describe('preference coordinator', () => {
 
     const result = await coordinator.run({
       type: 'simul:preferences:commit-auto',
+      expectedResetRevision: 0,
       mode: 'all',
       pageUrl: 'https://current.example/page',
     });
@@ -150,14 +583,17 @@ describe('preference coordinator', () => {
     await Promise.all([
       coordinator.run({
         type: 'simul:preferences:patch-image-analysis',
+        expectedResetRevision: 0,
         patch: { imageTranslationEnabled: true },
       }),
       coordinator.run({
         type: 'simul:preferences:set-display',
+        expectedResetRevision: 0,
         displayMode: 'actual',
       }),
       coordinator.run({
         type: 'simul:preferences:commit-auto',
+        expectedResetRevision: 0,
         mode: 'site',
         pageUrl: 'https://one.example/page',
       }),
@@ -169,6 +605,7 @@ describe('preference coordinator', () => {
       autoTranslateOrigins: ['https://one.example'],
       displayMode: 'actual',
       imageTranslationEnabled: true,
+      settingsRevision: 3,
     });
   });
 
@@ -178,6 +615,7 @@ describe('preference coordinator', () => {
 
     const result = await coordinator.run({
       type: 'simul:preferences:patch-view',
+      expectedResetRevision: 0,
       patch: {
         targetLanguage: 'ja',
         displayMode: 'custom',
@@ -208,10 +646,12 @@ describe('preference coordinator', () => {
     await Promise.all([
       coordinator.run({
         type: 'simul:preferences:patch-view',
+        expectedResetRevision: 0,
         patch: { displayMode: 'custom', zoomPercent: 165 },
       }),
       coordinator.run({
         type: 'simul:preferences:patch-view',
+        expectedResetRevision: 0,
         patch: {
           syncScroll: false,
           replicaFidelityPolicy: 'conservative',
@@ -219,6 +659,7 @@ describe('preference coordinator', () => {
       }),
       coordinator.run({
         type: 'simul:preferences:patch-view',
+        expectedResetRevision: 0,
         patch: {
           textLayoutMode: 'faithful',
           replicaViewMode: 'source-only',
@@ -243,26 +684,32 @@ describe('preference coordinator', () => {
     await Promise.all([
       coordinator.run({
         type: 'simul:preferences:patch-image-analysis',
+        expectedResetRevision: 0,
         patch: { imageTranslationEnabled: true },
       }),
       coordinator.run({
         type: 'simul:preferences:patch-image-analysis',
+        expectedResetRevision: 0,
         patch: { imageScanPolicy: 'eager-all' },
       }),
       coordinator.run({
         type: 'simul:preferences:patch-image-analysis',
+        expectedResetRevision: 0,
         patch: { skipSmallImages: false },
       }),
       coordinator.run({
         type: 'simul:preferences:patch-image-analysis',
+        expectedResetRevision: 0,
         patch: { usePromptForImageLanguage: true },
       }),
       coordinator.run({
         type: 'simul:preferences:patch-image-analysis',
+        expectedResetRevision: 0,
         patch: { ocrMinimumConfidence: 0.8 },
       }),
       coordinator.run({
         type: 'simul:preferences:patch-view',
+        expectedResetRevision: 0,
         patch: { syncScroll: false },
       }),
     ]);
@@ -312,6 +759,7 @@ describe('preference coordinator', () => {
     automaticAdapter.grant('<all_urls>');
     await new PreferenceCoordinator(automaticAdapter).run({
       type: 'simul:preferences:patch-image-analysis',
+      expectedResetRevision: 0,
       patch: { imageTranslationEnabled: false },
     });
     expect(automaticAdapter.preferences.autoTranslateAllSites).toBe(true);
@@ -327,6 +775,7 @@ describe('preference coordinator', () => {
 
     await new PreferenceCoordinator(adapter).run({
       type: 'simul:preferences:patch-image-analysis',
+      expectedResetRevision: 0,
       patch: { imageTranslationEnabled: false },
     });
 
@@ -342,6 +791,7 @@ describe('preference coordinator', () => {
     adapter.grant('<all_urls>');
     const result = await new PreferenceCoordinator(adapter).run({
       type: 'simul:preferences:commit-auto',
+      expectedResetRevision: 0,
       mode: 'site',
       pageUrl: 'https://one.example/page',
     });
@@ -404,14 +854,24 @@ describe('preference coordinator message boundary', () => {
         mode: 'site',
         pageUrl: 'https://example.com/',
       }),
+    ).toBeUndefined();
+    expect(
+      readPreferenceCommand({
+        type: 'simul:preferences:commit-auto',
+        expectedResetRevision: 0,
+        mode: 'site',
+        pageUrl: 'https://example.com/',
+      }),
     ).toEqual({
       type: 'simul:preferences:commit-auto',
+      expectedResetRevision: 0,
       mode: 'site',
       pageUrl: 'https://example.com/',
     });
     expect(
       readPreferenceCommand({
         type: 'simul:preferences:patch-image-analysis',
+        expectedResetRevision: 0,
         patch: {
           imageTextProviderOrder: [
             'paddleocr-wasm',
@@ -430,6 +890,7 @@ describe('preference coordinator message boundary', () => {
       }),
     ).toEqual({
       type: 'simul:preferences:patch-image-analysis',
+      expectedResetRevision: 0,
       patch: {
         imageTextProviderOrder: [
           'paddleocr-wasm',
@@ -449,6 +910,7 @@ describe('preference coordinator message boundary', () => {
     expect(
       readPreferenceCommand({
         type: 'simul:preferences:patch-image-analysis',
+        expectedResetRevision: 0,
         patch: {
           imageTextProviderOrder: [
             'tesseract',
@@ -464,6 +926,7 @@ describe('preference coordinator message boundary', () => {
     expect(
       readPreferenceCommand({
         type: 'simul:preferences:patch-image-analysis',
+        expectedResetRevision: 0,
         patch: {
           disabledImageTextProviderIds: ['tesseract', 'tesseract'],
         },
@@ -472,24 +935,28 @@ describe('preference coordinator message boundary', () => {
     expect(
       readPreferenceCommand({
         type: 'simul:preferences:patch-image-analysis',
+        expectedResetRevision: 0,
         patch: { imageScanPolicy: 'later', skipSmallImages: 'yes' },
       }),
     ).toBeUndefined();
     expect(
       readPreferenceCommand({
         type: 'simul:preferences:patch-image-analysis',
+        expectedResetRevision: 0,
         patch: { ocrMinimumConfidence: 0.66 },
       }),
     ).toBeUndefined();
     expect(
       readPreferenceCommand({
         type: 'simul:preferences:patch-image-analysis',
+        expectedResetRevision: 0,
         patch: { ocrMinimumConfidence: '0.80' },
       }),
     ).toBeUndefined();
     expect(
       readPreferenceCommand({
         type: 'simul:preferences:patch-image-analysis',
+        expectedResetRevision: 0,
         patch: { imageScanPolicy: 'visible-only' },
         silentlyRepair: true,
       }),
@@ -497,12 +964,14 @@ describe('preference coordinator message boundary', () => {
     expect(
       readPreferenceCommand({
         type: 'simul:preferences:commit-auto',
+        expectedResetRevision: 0,
         mode: 'everything',
       }),
     ).toBeUndefined();
     expect(
       readPreferenceCommand({
         type: 'simul:preferences:patch-view',
+        expectedResetRevision: 0,
         patch: {
           targetLanguage: 'ja',
           zoomPercent: 160,
@@ -516,6 +985,7 @@ describe('preference coordinator message boundary', () => {
       }),
     ).toEqual({
       type: 'simul:preferences:patch-view',
+      expectedResetRevision: 0,
       patch: {
         targetLanguage: 'ja',
         zoomPercent: 160,
@@ -530,43 +1000,95 @@ describe('preference coordinator message boundary', () => {
     expect(
       readPreferenceCommand({
         type: 'simul:preferences:patch-view',
+        expectedResetRevision: 0,
         patch: { replicaFidelityPolicy: 'strict-local' },
       }),
     ).toBeUndefined();
     expect(
       readPreferenceCommand({
         type: 'simul:preferences:patch-view',
+        expectedResetRevision: 0,
         patch: { replicaFidelityPolicy: 'maximum' },
       }),
     ).toBeUndefined();
     expect(
       readPreferenceCommand({
         type: 'simul:preferences:patch-view',
+        expectedResetRevision: 0,
         patch: { targetLanguage: 'not-supported' },
       }),
     ).toBeUndefined();
     expect(
       readPreferenceCommand({
         type: 'simul:preferences:patch-view',
+        expectedResetRevision: 0,
         patch: { launchBehavior: 'chooser' },
       }),
     ).toBeUndefined();
     expect(
       readPreferenceCommand({
         type: 'simul:preferences:patch-view',
+        expectedResetRevision: 0,
         patch: { replicaViewMode: 'unsafe-copy' },
       }),
     ).toBeUndefined();
     expect(
       readPreferenceCommand({
         type: 'simul:preferences:patch-view',
+        expectedResetRevision: 0,
         patch: {},
       }),
     ).toBeUndefined();
     expect(
       readPreferenceCommand({
         type: 'simul:preferences:patch-view',
+        expectedResetRevision: 0,
         patch: { syncScroll: true, unexpected: 'field' },
+      }),
+    ).toBeUndefined();
+    expect(
+      readPreferenceCommand({
+        type: 'simul:preferences:patch-read-scope',
+        expectedResetRevision: 0,
+        expectedReadScopeFingerprint: 'read-v1-000000',
+        patch: {
+          replicaReadScope: {
+            controlSemantics: true,
+            controlImages: true,
+            disclosureContent: true,
+            formValues: false,
+            personalDataValues: false,
+            editableContent: false,
+          },
+        },
+      }),
+    ).toMatchObject({
+      type: 'simul:preferences:patch-read-scope',
+      expectedReadScopeFingerprint: 'read-v1-000000',
+    });
+    expect(
+      readPreferenceCommand({
+        type: 'simul:preferences:patch-read-scope',
+        expectedResetRevision: 0,
+        patch: { readScopeSetupVersion: 1 },
+      }),
+    ).toBeUndefined();
+    expect(
+      readPreferenceCommand({
+        type: 'simul:preferences:complete-read-scope-setup',
+        expectedResetRevision: 0,
+        expectedSetupVersion: 1,
+        patch: {
+          replicaReadScope: {
+            controlSemantics: true,
+            controlImages: true,
+            disclosureContent: true,
+            formValues: false,
+            personalDataValues: false,
+            editableContent: false,
+          },
+          readScopeSetupVersion: 99,
+        },
       }),
     ).toBeUndefined();
     expect(
@@ -586,6 +1108,8 @@ class MemoryPreferenceAdapter implements PreferenceCoordinatorAdapter {
   preferences: CompanionPreferences;
   loadValue: unknown | undefined;
   saveCalls = 0;
+  getAllOriginsCalls = 0;
+  failGetAllOriginsOnCall: number | undefined;
   private readonly grants = new Set<string>();
 
   constructor(initial?: CompanionPreferences) {
@@ -607,6 +1131,10 @@ class MemoryPreferenceAdapter implements PreferenceCoordinatorAdapter {
   }
 
   async getAllOrigins(): Promise<string[]> {
+    this.getAllOriginsCalls += 1;
+    if (this.getAllOriginsCalls === this.failGetAllOriginsOnCall) {
+      throw new Error('permission query failed');
+    }
     return [...this.grants];
   }
 
@@ -636,5 +1164,22 @@ class MemoryPreferenceAdapter implements PreferenceCoordinatorAdapter {
       return this.grants.has('https://*/*');
     }
     return false;
+  }
+}
+
+class MemoryResetRuntime implements PreferenceResetRuntimeAdapter {
+  clearTransientStoreCalls = 0;
+  closeOffscreenDocumentCalls = 0;
+  failTransientStore = false;
+  failOffscreenClose = false;
+
+  async clearTransientStore(): Promise<void> {
+    this.clearTransientStoreCalls += 1;
+    if (this.failTransientStore) throw new Error('transient cleanup failed');
+  }
+
+  async closeOffscreenDocument(): Promise<void> {
+    this.closeOffscreenDocumentCalls += 1;
+    if (this.failOffscreenClose) throw new Error('offscreen close failed');
   }
 }

@@ -60,6 +60,11 @@ export interface ReplayPresentationHost {
     iframe: HTMLIFrameElement,
     dimensions: VisibleReplayDimensions,
   ): void;
+  /** Reversibly exposes only a committed proof-backed interactive replica. */
+  setInteractiveAccessibility?(
+    iframe: HTMLIFrameElement,
+    accessible: boolean,
+  ): boolean;
   showLegacy(showFallbackLabel: boolean): void;
   dispose(): void;
 }
@@ -304,7 +309,13 @@ export class VisibleReplayHost implements ReplayPresentationHost {
     const wasLive = committed.live;
     committed.live = true;
     this.#previewSurface.hidden = false;
-    this.#previewSurface.setAttribute('aria-hidden', 'true');
+    if (committed.interactiveAccessible) {
+      committed.root.removeAttribute('aria-hidden');
+      this.#previewSurface.removeAttribute('aria-hidden');
+    } else {
+      committed.root.setAttribute('aria-hidden', 'true');
+      this.#previewSurface.setAttribute('aria-hidden', 'true');
+    }
     this.#legacySurface.hidden = true;
     this.#legacySurface.setAttribute('aria-hidden', 'true');
     this.#badge.textContent = LIVE_REPLAY_LABEL;
@@ -331,6 +342,26 @@ export class VisibleReplayHost implements ReplayPresentationHost {
     committed.applyCanvasBackground();
     this.#clampSourceScroll();
     this.#applyLayout(committed);
+  }
+
+  setInteractiveAccessibility(
+    iframe: HTMLIFrameElement,
+    accessible: boolean,
+  ): boolean {
+    const committed = this.#committed;
+    if (!committed || committed.released || committed.iframe !== iframe) {
+      return false;
+    }
+    if (accessible) {
+      if (this.#previewSurface.hidden) return false;
+      committed.root.removeAttribute('aria-hidden');
+      this.#previewSurface.removeAttribute('aria-hidden');
+    } else {
+      committed.root.setAttribute('aria-hidden', 'true');
+      this.#previewSurface.setAttribute('aria-hidden', 'true');
+    }
+    committed.interactiveAccessible = accessible;
+    return true;
   }
 
   showLegacy(showFallbackLabel: boolean): void {
@@ -614,6 +645,7 @@ class CandidateLease implements VisibleReplayCandidateLease {
   iframe!: HTMLIFrameElement;
   scale = 1;
   live = false;
+  interactiveAccessible = false;
   released = false;
   nestedScroller: HTMLElement | undefined;
   canvasBackgroundColor: string | undefined;

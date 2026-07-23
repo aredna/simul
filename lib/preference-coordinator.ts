@@ -2,6 +2,7 @@ import {
   ALL_SITES_PERMISSION_ORIGINS,
   LEGACY_ALL_SITES_PERMISSION_ORIGINS,
   STORAGE_KEY,
+  advanceCompanionSettingsRevision,
   autoTranslationModeForPage,
   isAutoTranslationMode,
   isCompanionLaunchBehavior,
@@ -13,13 +14,16 @@ import {
   isTextLayoutMode,
   parseCompanionPreferences,
   permissionOriginsForMode,
+  resetCompanionPreferences,
   withAutoTranslationMode,
   withDisplayMode,
   withImageAnalysisSettings,
+  withReadSettings,
   withViewSettings,
   type AutoTranslationMode,
   type CompanionPreferences,
   type CompanionImageAnalysisSettingsPatch,
+  type CompanionReadSettingsPatch,
   type CompanionViewSettingsPatch,
   type MirrorDisplayMode,
 } from './preferences';
@@ -31,24 +35,62 @@ import {
 import { isOcrMinimumConfidence } from './ocr/result-quality';
 import { isSelectableReplicaFidelityPolicy } from './replica/fidelity-policy';
 import { isSupportedLanguage } from './translation-provider';
+import {
+  REPLICA_READ_SCOPE_SETUP_VERSION,
+  effectiveReplicaReadScope,
+  readExactReplicaReadScope,
+  replicaReadScopeFingerprint,
+} from './replica/read-scope-policy';
+import {
+  ACCESSIBILITY_TEXT_METHOD_ID,
+  readExactDisabledImageReadingMethodIds,
+  readExactImageReadingMethodOrder,
+} from './ocr/image-reading-methods';
 
 export const PREFERENCE_LOCK_NAME = 'simul:companion-preferences';
 
 export type PreferenceCommand =
   | {
       type: 'simul:preferences:set-display';
+      expectedResetRevision: number;
       displayMode: MirrorDisplayMode;
     }
   | {
       type: 'simul:preferences:patch-view';
+      expectedResetRevision: number;
       patch: CompanionViewSettingsPatch;
     }
   | {
       type: 'simul:preferences:patch-image-analysis';
+      expectedResetRevision: number;
+      expectedSettingsRevision?: number;
       patch: CompanionImageAnalysisSettingsPatch;
     }
   | {
+      type: 'simul:preferences:patch-read-scope';
+      expectedResetRevision: number;
+      expectedReadScopeFingerprint: string;
+      patch: CompanionReadSettingsPatch;
+    }
+  | {
+      type: 'simul:preferences:complete-read-scope-setup';
+      expectedResetRevision: number;
+      expectedSetupVersion: number;
+      expectedReadScopeFingerprint: string;
+      patch: CompanionReadSettingsPatch;
+    }
+  | {
+      type: 'simul:preferences:reset-all';
+      expectedResetRevision: number;
+    }
+  | {
+      type: 'simul:preferences:retry-reset-cleanup';
+      expectedResetRevision: number;
+    }
+  | {
       type: 'simul:preferences:commit-auto';
+      expectedResetRevision: number;
+      expectedSettingsRevision?: number;
       mode: AutoTranslationMode;
       pageUrl?: string;
     }
@@ -57,6 +99,8 @@ export type PreferenceCommand =
     }
   | {
       type: 'simul:preferences:abort-auto';
+      expectedResetRevision: number;
+      expectedSettingsRevision?: number;
       mode: AutoTranslationMode;
       pageUrl?: string;
     };
@@ -65,6 +109,17 @@ export interface PreferenceCommandResult {
   type: 'simul:preferences:result';
   preferences: CompanionPreferences;
   applied: boolean;
+  code?:
+    | 'stale-reset-revision'
+    | 'stale-settings-revision'
+    | 'stale-setup-version'
+    | 'stale-read-scope'
+    | 'safety-ack-failed'
+    | 'cleanup-pending';
+  cleanup?: {
+    readonly status: 'complete' | 'pending';
+    readonly remainingManagedOrigins: number;
+  };
 }
 
 export interface PreferenceCoordinatorAdapter {
@@ -75,6 +130,17 @@ export interface PreferenceCoordinatorAdapter {
   remove(origins: string[]): Promise<boolean>;
 }
 
+/** Runtime state that must be cleared before a durable reset is complete. */
+export interface PreferenceResetRuntimeAdapter {
+  clearTransientStore(): Promise<void>;
+  closeOffscreenDocument(): Promise<void>;
+}
+
+const NOOP_RESET_RUNTIME_ADAPTER: PreferenceResetRuntimeAdapter = {
+  clearTransientStore: async () => undefined,
+  closeOffscreenDocument: async () => undefined,
+};
+
 /**
  * Serialize preference changes in the extension service worker. Side panels
  * can exist in several Chrome windows, so a renderer-local flag cannot prevent
@@ -83,7 +149,11 @@ export interface PreferenceCoordinatorAdapter {
 export class PreferenceCoordinator {
   private pending: Promise<void> = Promise.resolve();
 
-  constructor(private readonly adapter: PreferenceCoordinatorAdapter) {}
+  constructor(
+    private readonly adapter: PreferenceCoordinatorAdapter,
+    private readonly resetRuntime: PreferenceResetRuntimeAdapter =
+      NOOP_RESET_RUNTIME_ADAPTER,
+  ) {}
 
   run(command: PreferenceCommand): Promise<PreferenceCommandResult> {
     return this.enqueue(() => this.apply(command));
@@ -114,20 +184,99 @@ export class PreferenceCoordinator {
       !readExactDisabledImageTextProviderIds(
         stored.disabledImageTextProviderIds,
       );
+    const repairStoredImageReadingMethodOrder =
+      !isRecord(stored) ||
+      !readExactImageReadingMethodOrder(stored.imageReadingMethodOrder);
+    const repairStoredDisabledImageReadingMethods =
+      !isRecord(stored) ||
+      !readExactDisabledImageReadingMethodIds(
+        stored.disabledImageReadingMethodIds,
+      );
+    const repairStoredSettingsRevision =
+      !isRecord(stored) ||
+      !isNonNegativeSafeInteger(stored.settingsRevision);
     const repairStoredImageAnalysis =
       repairStoredOcrMinimumConfidence ||
       repairStoredImageTextProviderOrder ||
-      repairStoredDisabledImageTextProviders;
+      repairStoredDisabledImageTextProviders ||
+      repairStoredImageReadingMethodOrder ||
+      repairStoredDisabledImageReadingMethods;
+
+    if (
+      'expectedResetRevision' in command &&
+      command.expectedResetRevision !== current.resetRevision
+    ) {
+      return result(current, false, 'stale-reset-revision');
+    }
+    if (
+      'expectedSettingsRevision' in command &&
+      command.expectedSettingsRevision !== undefined &&
+      command.expectedSettingsRevision !== current.settingsRevision
+    ) {
+      return result(current, false, 'stale-settings-revision');
+    }
+
+    if (command.type === 'simul:preferences:patch-read-scope') {
+      if (!hasExpectedReadScope(current, command.expectedReadScopeFingerprint)) {
+        return result(current, false, 'stale-read-scope');
+      }
+      const preferences = await this.saveNext(
+        withReadSettings(current, command.patch),
+      );
+      return result(preferences, true);
+    }
+
+    if (command.type === 'simul:preferences:complete-read-scope-setup') {
+      if (
+        command.expectedSetupVersion !== current.readScopeSetupVersion ||
+        current.readScopeSetupVersion === REPLICA_READ_SCOPE_SETUP_VERSION
+      ) {
+        return result(current, false, 'stale-setup-version');
+      }
+      if (!hasExpectedReadScope(current, command.expectedReadScopeFingerprint)) {
+        return result(current, false, 'stale-read-scope');
+      }
+      const preferences = withReadSettings(current, {
+        ...command.patch,
+        readScopeSetupVersion: REPLICA_READ_SCOPE_SETUP_VERSION,
+      });
+      const withSemanticDefault = withImageAnalysisSettings(preferences, {
+        disabledImageReadingMethodIds:
+          preferences.disabledImageReadingMethodIds.filter(
+            (id) => id !== ACCESSIBILITY_TEXT_METHOD_ID,
+          ),
+      });
+      const committed = await this.saveNext(withSemanticDefault);
+      return result(committed, true);
+    }
+
+    if (command.type === 'simul:preferences:reset-all') {
+      const safe = resetCompanionPreferences(current);
+      await this.adapter.save(safe);
+      return this.finishResetCleanup(safe);
+    }
+
+    if (command.type === 'simul:preferences:retry-reset-cleanup') {
+      if (current.resetCleanupPendingRevision === 0) {
+        return result(current, true, undefined, {
+          status: 'complete',
+          remainingManagedOrigins: 0,
+        });
+      }
+      return this.finishResetCleanup(current);
+    }
 
     if (command.type === 'simul:preferences:set-display') {
-      const preferences = withDisplayMode(current, command.displayMode);
-      await this.adapter.save(preferences);
+      const preferences = await this.saveNext(
+        withDisplayMode(current, command.displayMode),
+      );
       return result(preferences, true);
     }
 
     if (command.type === 'simul:preferences:patch-view') {
-      const preferences = withViewSettings(current, command.patch);
-      await this.adapter.save(preferences);
+      const preferences = await this.saveNext(
+        withViewSettings(current, command.patch),
+      );
       return result(preferences, true);
     }
 
@@ -139,26 +288,30 @@ export class PreferenceCoordinator {
       ) {
         await this.removeNoLongerNeededPermissions(current, preferences);
         const reconciled = await this.reconcile(preferences);
-        await this.adapter.save(reconciled);
-        return result(reconciled, true);
+        const committed = await this.saveNext(reconciled);
+        return result(committed, true);
       }
-      await this.adapter.save(preferences);
-      return result(preferences, true);
+      const committed = await this.saveNext(preferences);
+      return result(committed, true);
     }
 
     if (command.type === 'simul:preferences:reconcile') {
-      const preferences = await this.reconcile(current);
+      if (current.resetCleanupPendingRevision > 0) {
+        return this.finishResetCleanup(current);
+      }
+      let preferences = await this.reconcile(current);
       if (
         repairStoredImageAnalysis ||
+        repairStoredSettingsRevision ||
         !samePreferences(current, preferences)
       ) {
-        await this.adapter.save(preferences);
+        preferences = await this.saveNext(preferences);
       }
       return result(preferences, true);
     }
 
     if (command.type === 'simul:preferences:abort-auto') {
-      const preferences = await this.reconcile(current);
+      let preferences = await this.reconcile(current);
       const retained = new Set(retainedPermissionOrigins(preferences));
       const cleanup = permissionOriginsForMode(
         command.mode,
@@ -167,9 +320,10 @@ export class PreferenceCoordinator {
       await this.removeIfPresent(cleanup);
       if (
         repairStoredImageAnalysis ||
+        repairStoredSettingsRevision ||
         !samePreferences(current, preferences)
       ) {
-        await this.adapter.save(preferences);
+        preferences = await this.saveNext(preferences);
       }
       return result(preferences, false);
     }
@@ -204,8 +358,98 @@ export class PreferenceCoordinator {
       ).filter((origin) => !retained.has(origin));
       await this.removeIfPresent(unusedRequest);
     }
-    await this.adapter.save(preferences);
-    return result(preferences, applied);
+    const committed = await this.saveNext(preferences);
+    return result(committed, applied);
+  }
+
+  private async finishResetCleanup(
+    preferences: CompanionPreferences,
+  ): Promise<PreferenceCommandResult> {
+    const pendingRevision = preferences.resetCleanupPendingRevision;
+    const latest = parseCompanionPreferences(await this.adapter.load());
+    if (latest.resetCleanupPendingRevision !== pendingRevision) {
+      return latest.resetCleanupPendingRevision === 0
+        ? result(latest, true, undefined, {
+            status: 'complete',
+            remainingManagedOrigins: 0,
+          })
+        : this.pendingResetResult(latest);
+    }
+
+    const cleanup = await Promise.allSettled([
+      this.removeResetManagedPermissions(latest),
+      this.resetRuntime.clearTransientStore(),
+      this.resetRuntime.closeOffscreenDocument(),
+    ]);
+    const permissionCleanup = cleanup[0];
+    const remaining = permissionCleanup.status === 'fulfilled'
+      ? permissionCleanup.value
+      : await this.countUndesiredManagedOriginsBestEffort(latest);
+    if (
+      cleanup.some((outcome) => outcome.status === 'rejected') ||
+      remaining > 0
+    ) {
+      return result(latest, false, 'cleanup-pending', {
+        status: 'pending',
+        remainingManagedOrigins: remaining,
+      });
+    }
+
+    const current = parseCompanionPreferences(await this.adapter.load());
+    if (current.resetCleanupPendingRevision !== pendingRevision) {
+      return current.resetCleanupPendingRevision === 0
+        ? result(current, true, undefined, {
+            status: 'complete',
+            remainingManagedOrigins: 0,
+          })
+        : this.pendingResetResult(current);
+    }
+    const completed = advanceCompanionSettingsRevision({
+      ...current,
+      resetCleanupPendingRevision: 0,
+    });
+    await this.adapter.save(completed);
+    return result(completed, true, undefined, {
+      status: 'complete',
+      remainingManagedOrigins: 0,
+    });
+  }
+
+  private async removeResetManagedPermissions(
+    preferences: CompanionPreferences,
+  ): Promise<number> {
+    const retained = new Set(retainedPermissionOrigins(preferences));
+    const actual = await this.adapter.getAllOrigins();
+    const removable = actual.filter(
+      (origin) => isManagedPermissionOrigin(origin) && !retained.has(origin),
+    );
+    if (removable.length > 0) await this.adapter.remove(removable);
+    return this.countUndesiredManagedOrigins(preferences);
+  }
+
+  private async countUndesiredManagedOrigins(
+    preferences: CompanionPreferences,
+  ): Promise<number> {
+    const retained = new Set(retainedPermissionOrigins(preferences));
+    return (await this.adapter.getAllOrigins()).filter(
+      (origin) => isManagedPermissionOrigin(origin) && !retained.has(origin),
+    ).length;
+  }
+
+  private async countUndesiredManagedOriginsBestEffort(
+    preferences: CompanionPreferences,
+  ): Promise<number> {
+    return this.countUndesiredManagedOrigins(preferences).catch(() => 0);
+  }
+
+  private async pendingResetResult(
+    preferences: CompanionPreferences,
+  ): Promise<PreferenceCommandResult> {
+    return result(preferences, false, 'cleanup-pending', {
+      status: 'pending',
+      remainingManagedOrigins:
+        await this.countUndesiredManagedOriginsBestEffort(preferences),
+    });
   }
 
   private async reconcile(
@@ -288,6 +532,14 @@ export class PreferenceCoordinator {
     if (origins.length === 0) return;
     await this.adapter.remove(origins);
   }
+
+  private async saveNext(
+    candidate: CompanionPreferences,
+  ): Promise<CompanionPreferences> {
+    const preferences = advanceCompanionSettingsRevision(candidate);
+    await this.adapter.save(preferences);
+    return preferences;
+  }
 }
 
 export function readPreferenceCommand(
@@ -297,43 +549,147 @@ export function readPreferenceCommand(
 
   if (
     value.type === 'simul:preferences:set-display' &&
+    hasExactSafeRevision(value, [
+      'type', 'expectedResetRevision', 'displayMode',
+    ]) &&
     isMirrorDisplayMode(value.displayMode)
   ) {
-    return { type: value.type, displayMode: value.displayMode };
+    return {
+      type: value.type,
+      expectedResetRevision: value.expectedResetRevision,
+      displayMode: value.displayMode,
+    };
   }
   if (value.type === 'simul:preferences:patch-view') {
+    if (!hasExactSafeRevision(value, [
+      'type', 'expectedResetRevision', 'patch',
+    ])) return undefined;
     const patch = readViewSettingsPatch(value.patch);
-    if (patch) return { type: value.type, patch };
+    if (patch) {
+      return {
+        type: value.type,
+        expectedResetRevision: value.expectedResetRevision,
+        patch,
+      };
+    }
   }
   if (value.type === 'simul:preferences:patch-image-analysis') {
+    const keys = value.expectedSettingsRevision === undefined
+      ? ['type', 'expectedResetRevision', 'patch']
+      : [
+          'type',
+          'expectedResetRevision',
+          'expectedSettingsRevision',
+          'patch',
+        ];
     if (
-      Object.keys(value).length !== 2 ||
-      !('patch' in value)
+      !hasExactSafeRevision(value, keys) ||
+      (value.expectedSettingsRevision !== undefined &&
+        !isNonNegativeSafeInteger(value.expectedSettingsRevision))
     ) return undefined;
     const patch = readImageAnalysisSettingsPatch(value.patch);
-    if (patch) return { type: value.type, patch };
+    if (patch) {
+      return {
+        type: value.type,
+        expectedResetRevision: value.expectedResetRevision,
+        ...(value.expectedSettingsRevision === undefined
+          ? {}
+          : { expectedSettingsRevision: value.expectedSettingsRevision }),
+        patch,
+      };
+    }
+  }
+  if (
+    value.type === 'simul:preferences:patch-read-scope' ||
+    value.type === 'simul:preferences:complete-read-scope-setup'
+  ) {
+    if (!hasExactSafeRevision(value, value.type ===
+      'simul:preferences:complete-read-scope-setup'
+      ? [
+          'type',
+          'expectedResetRevision',
+          'expectedSetupVersion',
+          'expectedReadScopeFingerprint',
+          'patch',
+        ]
+      : [
+          'type',
+          'expectedResetRevision',
+          'expectedReadScopeFingerprint',
+          'patch',
+        ])) return undefined;
+    if (typeof value.expectedReadScopeFingerprint !== 'string') {
+      return undefined;
+    }
+    const patch = readReadSettingsPatch(value.patch);
+    if (!patch) return undefined;
+    if (value.type === 'simul:preferences:complete-read-scope-setup') {
+      if (!isNonNegativeSafeInteger(value.expectedSetupVersion)) return undefined;
+      return {
+        type: value.type,
+        expectedResetRevision: value.expectedResetRevision,
+        expectedSetupVersion: value.expectedSetupVersion,
+        expectedReadScopeFingerprint: value.expectedReadScopeFingerprint,
+        patch,
+      };
+    }
+    return {
+      type: value.type,
+      expectedResetRevision: value.expectedResetRevision,
+      expectedReadScopeFingerprint: value.expectedReadScopeFingerprint,
+      patch,
+    };
+  }
+  if (
+    value.type === 'simul:preferences:reset-all' ||
+    value.type === 'simul:preferences:retry-reset-cleanup'
+  ) {
+    if (!hasExactSafeRevision(value, ['type', 'expectedResetRevision'])) {
+      return undefined;
+    }
+    return {
+      type: value.type,
+      expectedResetRevision: value.expectedResetRevision,
+    };
   }
   if (
     value.type === 'simul:preferences:commit-auto' &&
+    hasExactSafeRevision(value, autoCommandKeys(value)) &&
+    (value.expectedSettingsRevision === undefined ||
+      isNonNegativeSafeInteger(value.expectedSettingsRevision)) &&
     isAutoTranslationMode(value.mode) &&
     (value.pageUrl === undefined || typeof value.pageUrl === 'string')
   ) {
     return {
       type: value.type,
+      expectedResetRevision: value.expectedResetRevision,
+      ...(value.expectedSettingsRevision === undefined
+        ? {}
+        : { expectedSettingsRevision: value.expectedSettingsRevision }),
       mode: value.mode,
       ...(typeof value.pageUrl === 'string' ? { pageUrl: value.pageUrl } : {}),
     };
   }
-  if (value.type === 'simul:preferences:reconcile') {
+  if (
+    value.type === 'simul:preferences:reconcile' &&
+    Object.keys(value).length === 1
+  ) {
     return { type: value.type };
   }
   if (
     value.type === 'simul:preferences:abort-auto' &&
+    hasExactSafeRevision(value, autoCommandKeys(value)) &&
+    (value.expectedSettingsRevision === undefined ||
+      isNonNegativeSafeInteger(value.expectedSettingsRevision)) &&
     isAutoTranslationMode(value.mode) &&
     (value.pageUrl === undefined || typeof value.pageUrl === 'string')
   ) {
     return {
       type: value.type,
+      expectedResetRevision: value.expectedResetRevision,
+      ...(value.expectedSettingsRevision === undefined
+        ? {}
+        : { expectedSettingsRevision: value.expectedSettingsRevision }),
       mode: value.mode,
       ...(typeof value.pageUrl === 'string' ? { pageUrl: value.pageUrl } : {}),
     };
@@ -355,6 +711,17 @@ export function readPreferenceCommandResult(
     type: value.type,
     preferences: parseCompanionPreferences(value.preferences),
     applied: value.applied,
+    ...(value.code === 'stale-reset-revision' ||
+      value.code === 'stale-settings-revision' ||
+      value.code === 'stale-setup-version' ||
+      value.code === 'stale-read-scope' ||
+      value.code === 'safety-ack-failed' ||
+      value.code === 'cleanup-pending'
+      ? { code: value.code }
+      : {}),
+    ...(readCleanupStatus(value.cleanup)
+      ? { cleanup: readCleanupStatus(value.cleanup) }
+      : {}),
   };
 }
 
@@ -383,11 +750,15 @@ export function createBrowserPreferenceAdapter(): PreferenceCoordinatorAdapter {
 function result(
   preferences: CompanionPreferences,
   applied: boolean,
+  code?: PreferenceCommandResult['code'],
+  cleanup?: PreferenceCommandResult['cleanup'],
 ): PreferenceCommandResult {
   return {
     type: 'simul:preferences:result',
     preferences,
     applied,
+    ...(code ? { code } : {}),
+    ...(cleanup ? { cleanup } : {}),
   };
 }
 
@@ -396,6 +767,17 @@ function samePreferences(
   right: CompanionPreferences,
 ): boolean {
   return JSON.stringify(left) === JSON.stringify(right);
+}
+
+function hasExpectedReadScope(
+  preferences: CompanionPreferences,
+  expectedFingerprint: string,
+): boolean {
+  const effective = effectiveReplicaReadScope(
+    preferences.replicaReadScope,
+    preferences.readScopeSetupVersion,
+  );
+  return replicaReadScopeFingerprint(effective) === expectedFingerprint;
 }
 
 function retainedPermissionOrigins(
@@ -525,6 +907,8 @@ function readViewSettingsPatch(
 const IMAGE_ANALYSIS_SETTING_KEYS = new Set([
   'imageTranslationEnabled',
   'ocrMinimumConfidence',
+  'imageReadingMethodOrder',
+  'disabledImageReadingMethodIds',
   'imageTextProviderOrder',
   'disabledImageTextProviderIds',
   'imageScanPolicy',
@@ -551,6 +935,20 @@ function readImageAnalysisSettingsPatch(
   if ('ocrMinimumConfidence' in value) {
     if (!isOcrMinimumConfidence(value.ocrMinimumConfidence)) return undefined;
     patch.ocrMinimumConfidence = value.ocrMinimumConfidence;
+  }
+  if ('imageReadingMethodOrder' in value) {
+    const order = readExactImageReadingMethodOrder(
+      value.imageReadingMethodOrder,
+    );
+    if (!order) return undefined;
+    patch.imageReadingMethodOrder = order;
+  }
+  if ('disabledImageReadingMethodIds' in value) {
+    const disabled = readExactDisabledImageReadingMethodIds(
+      value.disabledImageReadingMethodIds,
+    );
+    if (!disabled) return undefined;
+    patch.disabledImageReadingMethodIds = disabled;
   }
   if ('imageTextProviderOrder' in value) {
     const order = readExactImageTextProviderOrder(
@@ -581,4 +979,58 @@ function readImageAnalysisSettingsPatch(
     }
   }
   return patch;
+}
+
+function readReadSettingsPatch(
+  value: unknown,
+): CompanionReadSettingsPatch | undefined {
+  if (!isRecord(value)) return undefined;
+  const keys = Object.keys(value);
+  if (
+    keys.length !== 1 ||
+    keys[0] !== 'replicaReadScope'
+  ) return undefined;
+  const scope = readExactReplicaReadScope(value.replicaReadScope);
+  return scope ? { replicaReadScope: scope } : undefined;
+}
+
+function hasExactSafeRevision(
+  value: Record<string, unknown>,
+  keys: readonly string[],
+): value is Record<string, unknown> & { expectedResetRevision: number } {
+  const actual = Object.keys(value);
+  return actual.length === keys.length &&
+    actual.every((key) => keys.includes(key)) &&
+    isNonNegativeSafeInteger(value.expectedResetRevision);
+}
+
+function autoCommandKeys(value: Record<string, unknown>): string[] {
+  return [
+    'type',
+    'expectedResetRevision',
+    ...(value.expectedSettingsRevision === undefined
+      ? []
+      : ['expectedSettingsRevision']),
+    'mode',
+    ...(value.pageUrl === undefined ? [] : ['pageUrl']),
+  ];
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && Number(value) >= 0;
+}
+
+function readCleanupStatus(
+  value: unknown,
+): PreferenceCommandResult['cleanup'] | undefined {
+  if (
+    !isRecord(value) ||
+    Object.keys(value).length !== 2 ||
+    (value.status !== 'complete' && value.status !== 'pending') ||
+    !isNonNegativeSafeInteger(value.remainingManagedOrigins)
+  ) return undefined;
+  return {
+    status: value.status,
+    remainingManagedOrigins: value.remainingManagedOrigins,
+  };
 }

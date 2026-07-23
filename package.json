@@ -17,6 +17,7 @@
     "artifact:check": "node tools/extension-artifact.mjs check",
     "check:ocr-paddle-trial": "node tools/extension-artifact.mjs check-ocr-paddle-trial",
     "check:ocr-all-trial": "node tools/extension-artifact.mjs check-ocr-all-trial",
+    "artifact:check:ocr-trials": "node tools/extension-artifact.mjs check-synced-ocr-all-trial",
     "artifact:sync:ocr-trials": "node tools/extension-artifact.mjs sync-ocr-all-trial",
     "vendor:ocr-paddle": "node tools/vendor-paddle-ocr.mjs",
     "vendor:ocr-tesseract-wasm": "node tools/vendor-tesseract-wasm.mjs",
@@ -25,7 +26,7 @@
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
     "test:watch": "vitest",
-    "check": "npm run typecheck && npm test && npm run artifact:check"
+    "check": "npm run typecheck && npm test && npm run artifact:check:ocr-trials"
   },
   "devDependencies": {
     "acorn": "8.17.0",

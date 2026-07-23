@@ -8,6 +8,10 @@ import {
   sanitizeRrwebIncrementalAttributes,
   sanitizeRrwebIncrementalNode,
 } from './protocol-v2';
+import {
+  SOURCE_SECRET_PLACEHOLDER_TAG_PREFIX,
+  isSourceSecretPlaceholderTagName,
+} from './source-secret-classifier';
 
 const RRWEB_INCREMENTAL_EVENT = 3;
 const MUTATION = 0;
@@ -32,6 +36,11 @@ const PRIVATE_ROLES = new Set([
   'spinbutton',
   'switch',
   'textbox',
+  'menu',
+  'menuitem',
+  'menuitemcheckbox',
+  'menuitemradio',
+  'treeitem',
 ]);
 
 interface StreamNodeState {
@@ -40,6 +49,7 @@ interface StreamNodeState {
   readonly tagName?: string;
   readonly parentId?: number;
   readonly privateRegion: boolean;
+  readonly opaquePlaceholder: boolean;
   readonly styleRegion: boolean;
   readonly children: Set<number>;
   readonly shadowHost: boolean;
@@ -350,6 +360,7 @@ function sanitizeMutation(
     if (state.omitted.has(id)) continue;
     const node = state.nodes.get(id);
     if (!node || !node.tagName) return undefined;
+    if (node.opaquePlaceholder) return undefined;
     if (changesPrivateBoundary(node, item.attributes)) return undefined;
     const nextAttributes = sanitizeRrwebIncrementalAttributes(
       item.attributes,
@@ -474,10 +485,22 @@ function sanitizeMutation(
     }
     const parent = state.nodes.get(parentId);
     if (!parent || (parent.nodeType !== 0 && parent.nodeType !== 2)) return undefined;
+    if (parent.opaquePlaceholder) {
+      if (!registerSourceTree(
+        item.node,
+        parentId,
+        item.previousId,
+        item.nextId,
+        state,
+      )) return undefined;
+      for (const id of rawIds) state.omitted.add(id);
+      continue;
+    }
     if (parent.tagName === 'style' && parent.styleTextOverride !== undefined) {
       return undefined;
     }
     const existingIds = new Set([...state.nodes.keys(), ...state.omitted]);
+    if (isInvalidRrwebOpaquePlaceholderNode(item.node)) return undefined;
     const sanitizedNode = sanitizeRrwebIncrementalNode(
       item.node,
       parent.privateRegion,
@@ -1364,8 +1387,19 @@ function registerSerializedTree(
   const attributes = input.type === 2 && isRecord(input.attributes)
     ? input.attributes
     : undefined;
+  const opaquePlaceholder = Boolean(
+    tagName && isSourceSecretPlaceholderTagName(tagName, id),
+  );
+  if (
+    tagName?.startsWith(SOURCE_SECRET_PLACEHOLDER_TAG_PREFIX) &&
+    (
+      !opaquePlaceholder ||
+      !isCanonicalRrwebOpaquePlaceholder(input, attributes)
+    )
+  ) return false;
   const privateRegion =
     parentPrivate ||
+    opaquePlaceholder ||
     Boolean(tagName && PRIVATE_TAGS.has(tagName)) ||
     Boolean(attributes && attributesArePrivate(attributes));
   const styleRegion = parentStyle || tagName === 'style' || input.isStyle === true;
@@ -1378,6 +1412,7 @@ function registerSerializedTree(
     ...(tagName ? { tagName } : {}),
     ...(parentId !== undefined ? { parentId } : {}),
     privateRegion,
+    opaquePlaceholder,
     styleRegion,
     children: new Set(),
     shadowHost: input.isShadowHost === true,
@@ -1418,6 +1453,29 @@ function registerSerializedTree(
     !initializeNodeStyleSheet(node, state)
   ) return false;
   return true;
+}
+
+function isInvalidRrwebOpaquePlaceholderNode(input: unknown): boolean {
+  if (!isRecord(input) || typeof input.tagName !== 'string') return false;
+  const tagName = input.tagName.trim().toLowerCase();
+  if (!tagName.startsWith(SOURCE_SECRET_PLACEHOLDER_TAG_PREFIX)) return false;
+  const attributes = isRecord(input.attributes) ? input.attributes : undefined;
+  return !isSourceSecretPlaceholderTagName(tagName, Number(input.id)) ||
+    !isCanonicalRrwebOpaquePlaceholder(input, attributes);
+}
+
+function isCanonicalRrwebOpaquePlaceholder(
+  input: Record<string, unknown>,
+  attributes: Record<string, unknown> | undefined,
+): boolean {
+  return input.type === 2 &&
+    hasOnlyKeys(input, [
+      'type', 'id', 'tagName', 'attributes', 'childNodes', 'rootId', 'isShadow',
+    ]) &&
+    Boolean(attributes) && Object.keys(attributes!).length === 0 &&
+    Array.isArray(input.childNodes) && input.childNodes.length === 0 &&
+    (input.rootId === undefined || isNodeId(input.rootId)) &&
+    (input.isShadow === undefined || input.isShadow === true);
 }
 
 function isContainerNode(node: StreamNodeState | undefined): boolean {
@@ -1542,15 +1600,28 @@ function changesPrivateBoundary(
   attributes: Record<string, unknown>,
 ): boolean {
   const relevant = Object.fromEntries(
-    Object.entries(attributes).filter(([name]) => {
+    Object.entries(attributes).filter(([name, value]) => {
       const lower = name.toLowerCase();
-      return lower === 'contenteditable' || lower === 'role';
+      if (lower === 'type') return node.tagName === 'input';
+      if (lower === 'style') return styleMutationTouchesTextSecurity(value);
+      return lower === 'contenteditable' || lower === 'role' ||
+        lower === 'autocomplete' || lower === 'class' || lower === 'id';
     }),
   );
   if (Object.keys(relevant).length === 0) return false;
   // Any privacy-boundary mutation requests an atomic checkpoint. Determining
   // the resulting inherited state requires the complete current attribute set.
   return !node.privateRegion || Object.keys(relevant).length > 0;
+}
+
+function styleMutationTouchesTextSecurity(value: unknown): boolean {
+  if (typeof value === 'string') {
+    return /(?:^|;)\s*-webkit-text-security\s*:/iu.test(value);
+  }
+  if (!isRecord(value)) return value !== null;
+  return Object.keys(value).some(
+    (property) => property.trim().toLowerCase() === '-webkit-text-security',
+  );
 }
 
 function removeTree(id: number, state: SanitizerState): void {

@@ -100,9 +100,10 @@ The published `wasm-feature-detect` package contains no separate NOTICE file.
 The Tesseract packages and models contain no separate NOTICE file beyond the
 files retained in the vendored license directory.
 
-## Optional PaddleOCR.js local trial
+## PaddleOCR.js local trial (ready-to-load four-provider profile)
 
-The default-off `SIMUL_OCR_PADDLE=1` artifact additionally contains
+The checked-in ready-to-load four-provider profile, and any source build made
+with `SIMUL_OCR_PADDLE=1`, contains
 `@paddleocr/paddleocr-js` 0.4.2 at npm git head
 `e5046169b225bcdfbe25d45b4e809ff0f1a69c2c` (Apache-2.0), the official
 PP-OCRv6 tiny model archives (Apache-2.0),
@@ -110,11 +111,12 @@ PP-OCRv6 tiny model archives (Apache-2.0),
 `@techstark/opencv-js` 4.10.0-release.1 (Apache-2.0), `clipper-lib` 6.4.2
 (Boost-1.0), and the SDK Worker's embedded `js-yaml` 4.1.1 (MIT). The
 repository lock separately resolves `js-yaml` to 4.3.0. These components are
-excluded from the canonical Paddle-free extension artifact.
+excluded only from the ordinary unflagged Paddle-free `.output` build; they are
+included in `dist/chrome-unpacked` for the reviewed OCR trial.
 
 The reviewed trial notice and complete packaged license set are retained at
 `legal/paddleocr-js-v0.4.2-third-party-notices.md` and
-`vendor/ocr/paddle/licenses/`. In the optional trial artifact they appear
+`vendor/ocr/paddle/licenses/`. In a Paddle-enabled artifact they appear
 under `ocr/paddle/`. The vendored Worker's unused remote defaults are replaced
 with fail-closed local sentinels; models, Wasm, configuration, and executable
 code are loaded only from the extension package.

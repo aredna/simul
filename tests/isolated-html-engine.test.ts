@@ -18,10 +18,21 @@ import {
   ISOLATED_HTML_SHELL,
   IsolatedHtmlReplicaEngine,
   isTrustedIsolatedShellDocument,
+  protectIsolatedOpaquePlaceholder,
   type IsolatedMirrorInfo,
 } from '../lib/replica/isolated-html-engine';
 import { createReplicaIdentity } from '../lib/replica/protocol-v2';
+import { FULL_VISIBLE_REPLICA_READ_SCOPE } from '../lib/replica/read-scope-policy';
+import type {
+  SemanticSourceStreamLease,
+  SemanticSourceStreamObserver,
+} from '../lib/replica/semantic-source-client';
+import {
+  createSemanticSourceBatch,
+  type SemanticSourceRecord,
+} from '../lib/replica/semantic-source-protocol';
 import { createHtmlMirrorRepresentabilityCollector } from '../lib/replica/html-mirror-sanitizer';
+import { sourceSecretPlaceholderTagName } from '../lib/replica/source-secret-classifier';
 import type {
   ReplayPresentationHost,
   VisibleReplayCandidateLease,
@@ -50,6 +61,34 @@ describe('IsolatedHtmlReplicaEngine', () => {
       value: { href: 'about:blank' },
     });
     expect(isTrustedIsolatedShellDocument(shell)).toBe(false);
+  });
+
+  it('suppresses universal pseudo-content and resource paint on opaque shells', () => {
+    const { document } = parseHTML('<html><body></body></html>');
+    const placeholder = document.createElementNS(
+      'http://www.w3.org/1999/xhtml',
+      sourceSecretPlaceholderTagName(41),
+    );
+    const attachShadow = placeholder.attachShadow.bind(placeholder);
+    let protectedShadow: ShadowRoot | undefined;
+    Object.defineProperty(placeholder, 'attachShadow', {
+      configurable: true,
+      value: (init: ShadowRootInit) => {
+        protectedShadow = attachShadow(init);
+        return protectedShadow;
+      },
+    });
+
+    protectIsolatedOpaquePlaceholder(placeholder);
+
+    expect(placeholder.getAttribute('aria-hidden')).toBe('true');
+    expect(placeholder.hasAttribute('inert')).toBe(true);
+    expect(placeholder.shadowRoot).toBeNull();
+    const blockerCss = protectedShadow?.firstChild?.textContent ?? '';
+    expect(blockerCss).toContain(':host::before');
+    expect(blockerCss).toContain('content:none!important');
+    expect(blockerCss).toContain('background-image:none!important');
+    expect(blockerCss).toContain('mask-image:none!important');
   });
 
   it('stages a doctype-free shell for a bounded quirks-mode checkpoint', async () => {
@@ -314,7 +353,7 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(stream.requested).toContain(3);
   });
 
-  it('projects typed control text and clears it atomically on a password transition', async () => {
+  it('rejects optional control text carried by the Integrated base graph', () => {
     const checkpoint = createHtmlMirrorCheckpoint(
       createReplicaIdentity({ ...identityParts, sequence: 0 }),
       {
@@ -333,51 +372,79 @@ describe('IsolatedHtmlReplicaEngine', () => {
         viewportWidth: 800, viewportHeight: 600,
         documentWidth: 800, documentHeight: 1000,
       },
+    );
+    expect(checkpoint).toBeUndefined();
+  });
+
+  it('applies, translates, and purges an exact-document semantic supplement', async () => {
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: {
+          kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+          attributes: [], children: [
+            { kind: 'element', id: 2, namespace: 'html', tagName: 'head', attributes: [], children: [] },
+            { kind: 'element', id: 3, namespace: 'html', tagName: 'body', attributes: [], children: [{
+              kind: 'element', id: 4, namespace: 'html', tagName: 'input',
+              attributes: [['type', 'text']], children: [],
+            }] },
+          ],
+        },
+        adoptedStyleSheets: [], captureMs: 1,
+        viewportWidth: 800, viewportHeight: 600,
+        documentWidth: 800, documentHeight: 1_000,
+      },
     )!;
     const stream = new FakeHtmlStream(checkpoint);
+    const semantic = new FakeSemanticStream();
     const host = new FakePresentationHost();
-    const engine = makeEngine(stream, host);
+    const engine = new IsolatedHtmlReplicaEngine({
+      presentationHost: host,
+      openStream: async () => stream,
+      openSemanticStream: async () => semantic,
+      getReplicaReadScope: () => FULL_VISIBLE_REPLICA_READ_SCOPE,
+      initializeIframe: async (iframe, shell) => {
+        const { document } = parseHTML(shell);
+        Object.defineProperty(iframe, 'contentDocument', { value: document });
+        return document;
+      },
+    });
     await engine.run(request);
-
+    await Promise.resolve();
     const snapshot = engine.snapshot()!;
-    expect(snapshot.records).toEqual([
-      expect.objectContaining({
-        nodeId: 4, nodeType: 1, controlTarget: 'value', source: 'public query',
-      }),
-    ]);
-    const input = host.iframe!.contentDocument!.querySelector('input') as
-      HTMLInputElement;
-    expect(input.value).toBe('public query');
-    engine.beginProjection({ translationEpoch: 1, pairKey: 'en\0ja' });
+    const sourceRecord: SemanticSourceRecord = {
+      bridge: 'isolated-html', recordId: 35, nodeId: 4, nodeRevision: 1,
+      category: 'ordinary-form', gate: 'formValues', tagName: 'input',
+      type: 'text', autocomplete: '', role: '', contentEditable: '',
+      text: 'visible draft', presentation: 'value', classifierVersion: 1,
+    };
+    expect(semantic.emit(createSemanticSourceBatch(
+      snapshot.document,
+      'read-v1-111111',
+      1,
+      [sourceRecord],
+    ))).toBe(true);
+    const supplemented = engine.snapshot()!;
+    const record = supplemented.records.find(({ nodeId }) => nodeId === -35)!;
+    const input = host.iframe!.contentDocument!.querySelector('input')!;
+    expect(input.value).toBe('visible draft');
+    engine.beginProjection({ translationEpoch: 1, pairKey: 'en>ja' });
     expect(engine.project({
-      document: snapshot.document,
-      replayLease: snapshot.replayLease,
-      nodeId: 4,
+      document: supplemented.document,
+      replayLease: supplemented.replayLease,
+      nodeId: record.nodeId,
       nodeType: 1,
       controlTarget: 'value',
-      sourceRevision: 1,
-      source: 'public query',
+      sourceRevision: record.revision,
+      source: record.source,
       translationEpoch: 1,
-      pairKey: 'en\0ja',
-      translated: '公開検索',
+      pairKey: 'en>ja',
+      translated: '表示下書き',
     })).toBe(true);
-    expect(input.value).toBe('公開検索');
-
-    stream.observer?.onPatch(createHtmlMirrorPatch(
-      createReplicaIdentity({ ...identityParts, sequence: 1 }),
-      1,
-      1,
-      [{
-        kind: 'attributes', nodeId: 4, namespace: 'html', tagName: 'input',
-        attributes: [['type', 'password']],
-      }, {
-        kind: 'children', nodeId: 4, children: [],
-      }],
-    )!);
-
+    expect(input.value).toBe('表示下書き');
+    semantic.fail();
+    expect(engine.snapshot()?.records.some(({ nodeId }) => nodeId < 0)).toBe(false);
     expect(input.value).toBe('');
-    expect(engine.snapshot()?.records).toEqual([]);
-    expect(stream.acknowledged).toContain(1);
   });
 
   it('renders and updates native select labels without transporting option values', async () => {
@@ -395,21 +462,15 @@ describe('IsolatedHtmlReplicaEngine', () => {
                 'overflow:hidden!important;clip-path:inset(0)!important;contain:paint!important',
               ]], children: [{
                 kind: 'element', id: 4, namespace: 'html', tagName: 'select',
-                attributes: [], selectedOptionIndexes: [1],
-                selectPickerOpen: true, children: [{
+                attributes: [], children: [{
                 kind: 'element', id: 5, namespace: 'html', tagName: 'option',
                 attributes: [], children: [],
-                controlText: { kind: 'label', text: 'Choose', translatable: true },
               }, {
                 kind: 'element', id: 9, namespace: 'html', tagName: 'optgroup',
-                attributes: [['disabled', '']], children: [{
+                attributes: [], children: [{
                   kind: 'element', id: 7, namespace: 'html', tagName: 'option',
                   attributes: [], children: [],
-                  controlText: {
-                    kind: 'label', text: 'Community center', translatable: true,
-                  },
                 }],
-                controlText: { kind: 'label', text: 'District', translatable: true },
               }, ...Array.from({ length: 7 }, (_, index) => ({
                 kind: 'element' as const,
                 id: 20 + index,
@@ -417,11 +478,6 @@ describe('IsolatedHtmlReplicaEngine', () => {
                 tagName: 'option',
                 attributes: [] as const,
                 children: [] as const,
-                controlText: {
-                  kind: 'label' as const,
-                  text: `Choice ${index + 3}`,
-                  translatable: true as const,
-                },
                 }))],
               }],
             }] },
@@ -434,9 +490,51 @@ describe('IsolatedHtmlReplicaEngine', () => {
       'passive',
     )!;
     const stream = new FakeHtmlStream(checkpoint);
+    const semantic = new FakeSemanticStream();
     const host = new FakePresentationHost();
-    const engine = makeEngine(stream, host);
+    const engine = makeEngine(stream, host, undefined, semantic);
     await engine.run(request);
+    await Promise.resolve();
+    const semanticRecords: SemanticSourceRecord[] = [
+      [5, 'option', 'Choose'],
+      [9, 'optgroup', 'District'],
+      [7, 'option', 'Community center'],
+      ...Array.from({ length: 7 }, (_, index) =>
+        [20 + index, 'option', `Choice ${index + 3}`] as const),
+    ].map(([nodeId, tagName, text]) => ({
+      bridge: 'isolated-html',
+      recordId: Number(nodeId) * 8 + 1,
+      nodeId: Number(nodeId),
+      nodeRevision: 1,
+      category: 'public-semantic',
+      gate: 'controlSemantics',
+      tagName: String(tagName),
+      type: '', autocomplete: '', role: '', contentEditable: '',
+      text: String(text),
+      presentation: 'label',
+      classifierVersion: 1,
+    }));
+    semanticRecords.push({
+      bridge: 'isolated-html', recordId: 37, nodeId: 4, nodeRevision: 1,
+      category: 'ordinary-form', gate: 'formValues', tagName: 'select',
+      type: '', autocomplete: '', role: '', contentEditable: '',
+      text: 'Community center', presentation: 'selection', classifierVersion: 1,
+    });
+    expect(semantic.emit(createSemanticSourceBatch(
+      engine.snapshot()!.document,
+      'read-v1-111111',
+      1,
+      semanticRecords,
+      [{
+        kind: 'select-presentation', bridge: 'isolated-html', nodeId: 4,
+        revision: 1, gate: 'controlSemantics', multiple: false, size: null,
+        classifierVersion: 1,
+      }, {
+        kind: 'select-state', bridge: 'isolated-html', nodeId: 4,
+        revision: 1, gate: 'formValues', selectedOptionNodeIds: [7],
+        multiple: false, pickerOpen: false, classifierVersion: 1,
+      }],
+    ))).toBe(true);
 
     const replica = host.iframe!.contentDocument!;
     const clippingAncestor = replica.body.firstElementChild as HTMLElement;
@@ -445,14 +543,15 @@ describe('IsolatedHtmlReplicaEngine', () => {
     const trigger = selectHost.shadowRoot!.querySelector<HTMLButtonElement>(
       '[data-simul-owned-select-trigger="v1"]',
     )!;
-    const panel = replica.querySelector<HTMLElement>(
+    const panel = selectHost.shadowRoot!.querySelector<HTMLElement>(
       '[data-simul-owned-select-options="v1"]',
     )!;
     expect(select.selectedIndex).toBe(1);
     expect([...select.options].map((option) => option.getAttribute('label')))
       .toEqual(expect.arrayContaining(['Choose', 'Community center', 'Choice 9']));
     expect(select.getAttribute('data-simul-select-facsimile')).toBe('v1');
-    expect(select.getAttribute('data-simul-source-picker-open')).toBe('v1');
+    expect(select.hasAttribute('data-simul-source-picker-open')).toBe(false);
+    expect(select.getAttribute('data-simul-source-selection-state')).toBe('v1');
     expect(select.hasAttribute('inert')).toBe(true);
     expect(select.getAttribute('aria-disabled')).toBe('true');
     expect(select.getAttribute('size')).toBeNull();
@@ -473,8 +572,12 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(clippingAncestor.getAttribute('style')).toContain(
       'contain:paint!important',
     );
-    expect(trigger.getAttribute('aria-expanded')).toBe('true');
-    expect(panel.parentElement).toBe(replica.body);
+    expect(trigger.getAttribute('aria-expanded')).toBe('false');
+    expect(trigger.textContent).toBe('Community center');
+    expect([...panel.querySelectorAll('[role="option"]')].find(
+      (option) => option.textContent === 'Community center',
+    )?.getAttribute('aria-selected')).toBe('true');
+    expect(panel.parentNode).toBe(selectHost.shadowRoot);
     expect(select.selectedIndex).toBe(1);
     expect(panel.style.position).toBe('fixed');
     trigger.dispatchEvent(new select.ownerDocument.defaultView!.Event('click', {
@@ -482,15 +585,16 @@ describe('IsolatedHtmlReplicaEngine', () => {
       cancelable: true,
       composed: true,
     }));
-    expect(trigger.getAttribute('aria-expanded')).toBe('false');
-    expect(panel.hasAttribute('hidden')).toBe(true);
+    expect(trigger.getAttribute('aria-expanded')).toBe('true');
+    expect(panel.hasAttribute('hidden')).toBe(false);
+    expect(panel.parentElement).toBe(replica.body);
     trigger.dispatchEvent(new select.ownerDocument.defaultView!.Event('click', {
       bubbles: true,
       cancelable: true,
       composed: true,
     }));
-    expect(trigger.getAttribute('aria-expanded')).toBe('true');
-    expect(panel.parentElement).toBe(replica.body);
+    expect(trigger.getAttribute('aria-expanded')).toBe('false');
+    expect(panel.parentNode).toBe(selectHost.shadowRoot);
     const activation = new select.ownerDocument.defaultView!.Event('pointerdown', {
       bubbles: true,
       cancelable: true,
@@ -514,7 +618,7 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(engine.snapshot()?.records.map(({ source }) => source)).toEqual(
       expect.arrayContaining(['Choose', 'District', 'Community center', 'Choice 9']),
     );
-    expect(select.querySelector('optgroup')?.hasAttribute('disabled')).toBe(true);
+    expect(select.querySelector('optgroup')?.hasAttribute('disabled')).toBe(false);
     const snapshot = engine.snapshot()!;
     const labelRecord = snapshot.records.find(({ source }) => source === 'District')!;
     expect(labelRecord.nodeType).toBe(1);
@@ -549,14 +653,11 @@ describe('IsolatedHtmlReplicaEngine', () => {
           'style',
           'overflow:clip!important;clip-path:circle(50%)!important;contain:content!important',
         ]],
-      }, {
-        kind: 'attributes', nodeId: 4, namespace: 'html', tagName: 'select',
-        attributes: [], selectedOptionIndexes: [0],
       }],
       undefined,
       'passive',
     )!);
-    expect(select.selectedIndex).toBe(0);
+    expect(select.selectedIndex).toBe(1);
     expect(select.hasAttribute('data-simul-source-picker-open')).toBe(false);
     expect(select.getAttribute('data-simul-select-facsimile')).toBe('v1');
     expect(clippingAncestor.getAttribute('style')).toContain(
@@ -580,7 +681,7 @@ describe('IsolatedHtmlReplicaEngine', () => {
       undefined,
       'passive',
     )!);
-    expect(select.selectedIndex).toBe(-1);
+    expect(select.selectedIndex).toBe(1);
     expect(select.getAttribute('data-simul-select-facsimile')).toBe('v1');
     expect(select.getAttribute('aria-disabled')).toBe('true');
 
@@ -634,7 +735,7 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(stream.acknowledged).toContain(4);
     expect(stream.requested).not.toContain(3);
 
-    stream.observer?.onPatch(createHtmlMirrorPatch(
+    const forgedBaseSelect = createHtmlMirrorPatch(
       createReplicaIdentity({ ...identityParts, sequence: 5 }),
       5,
       5,
@@ -652,15 +753,16 @@ describe('IsolatedHtmlReplicaEngine', () => {
       }],
       undefined,
       'passive',
-    )!);
+    );
+    expect(forgedBaseSelect).toBeUndefined();
     expect([...select.options].some(
       (option) => option.label === 'Out-of-order option',
     )).toBe(false);
     expect(stream.acknowledged).not.toContain(5);
-    expect(stream.requested).toContain(4);
+    expect(stream.requested).not.toContain(4);
   });
 
-  it('isolates a public ARIA menu from source CSS resources while translating its text', async () => {
+  it('rejects ARIA menu state, relationships, and labels carried by the base graph', async () => {
     const canaryUrl = 'https://canary.invalid/public-menu-background.png';
     const checkpoint = createHtmlMirrorCheckpoint(
       createReplicaIdentity({ ...identityParts, sequence: 0 }),
@@ -768,7 +870,8 @@ describe('IsolatedHtmlReplicaEngine', () => {
       },
       'passive',
     );
-    if (!checkpoint) throw new Error('Public ARIA menu fixture rejected.');
+    expect(checkpoint).toBeUndefined();
+    if (!checkpoint) return;
     const stream = new FakeHtmlStream(checkpoint);
     const host = new FakePresentationHost();
     const engine = makeEngine(stream, host);
@@ -961,12 +1064,10 @@ describe('IsolatedHtmlReplicaEngine', () => {
                     kind: 'element', id: 7, namespace: 'html', tagName: 'div',
                     attributes: [['style', 'contain:paint!important']], children: [{
                       kind: 'element', id: 8, namespace: 'html', tagName: 'select',
-                      attributes: [['size', '4']], selectedOptionIndexes: [0],
+                      attributes: [],
                       children: [{
                         kind: 'element', id: 9, namespace: 'html', tagName: 'option',
-                        attributes: [], children: [], controlText: {
-                          kind: 'label', text: 'Shadow choice', translatable: true,
-                        },
+                        attributes: [], children: [],
                       }],
                     }],
                   }],
@@ -982,9 +1083,23 @@ describe('IsolatedHtmlReplicaEngine', () => {
       'passive',
     )!;
     const stream = new FakeHtmlStream(checkpoint);
+    const semantic = new FakeSemanticStream();
     const host = new FakePresentationHost();
-    const engine = makeEngine(stream, host);
+    const engine = makeEngine(stream, host, undefined, semantic);
     await engine.run(request);
+    await Promise.resolve();
+    const snapshot = engine.snapshot()!;
+    expect(semantic.emit(createSemanticSourceBatch(
+      snapshot.document,
+      'read-v1-111111',
+      1,
+      [],
+      [{
+        kind: 'select-presentation', bridge: 'isolated-html', nodeId: 8,
+        revision: 1, gate: 'controlSemantics', multiple: false, size: 4,
+        classifierVersion: 1,
+      }],
+    ))).toBe(true);
 
     const replica = host.iframe!.contentDocument!;
     const outerClip = replica.querySelector('section') as HTMLElement;
@@ -1003,28 +1118,44 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(panel.style.position).toBe('static');
     expect(panel.style.maxHeight).toBe('min(7em, 18rem, 70vh)');
     expect(trigger.hasAttribute('hidden')).toBe(true);
+    expect(trigger.textContent).toBe('Options');
+    expect(panel.querySelector('[aria-selected]')).toBeNull();
+    expect(host.iframe!.hasAttribute('aria-hidden')).toBe(false);
     expect(outerClip.getAttribute('style')).toContain('overflow:hidden!important');
     expect(innerClip.getAttribute('style')).toContain('contain:paint!important');
 
-    stream.observer?.onPatch(createHtmlMirrorPatch(
+    const stylePatch = createHtmlMirrorPatch(
       createReplicaIdentity({ ...identityParts, sequence: 1 }),
       1,
       1,
       [{
         kind: 'attributes', nodeId: 7, namespace: 'html', tagName: 'div',
         attributes: [['style', 'contain:content!important']],
-      }, {
-        kind: 'attributes', nodeId: 8, namespace: 'html', tagName: 'select',
-        attributes: [['multiple', '']], selectedOptionIndexes: [0],
       }],
       undefined,
       'passive',
-    )!);
+    );
+    expect(stylePatch).toBeDefined();
+    stream.observer?.onPatch(stylePatch!);
+    const forgedMultiple = createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 2 }),
+      2,
+      2,
+      [{
+        kind: 'attributes', nodeId: 8, namespace: 'html', tagName: 'select',
+        attributes: [['multiple', '']],
+      }],
+      undefined,
+      'passive',
+    );
+    expect(forgedMultiple).toBeUndefined();
     expect(outerClip.getAttribute('style')).toContain('overflow:hidden!important');
     expect(innerClip.getAttribute('style')).toContain('contain:content!important');
-    expect(select.hasAttribute('multiple')).toBe(true);
+    expect(select.hasAttribute('multiple')).toBe(false);
     expect(selectHost.dataset.simulSelectPresentation).toBe('list');
     expect(stream.acknowledged).toContain(1);
+    semantic.fail();
+    expect(host.iframe!.getAttribute('aria-hidden')).toBe('true');
   });
 
   it('rejects a forged select label outside a native select', async () => {
@@ -1085,7 +1216,6 @@ describe('IsolatedHtmlReplicaEngine', () => {
               attributes: [], children: [{
                 kind: 'element', id: 5, namespace: 'html', tagName: 'input',
                 attributes: [['type', 'text']], children: [],
-                controlText: { kind: 'value', text: 'public', translatable: true },
               }],
             }] },
           ],
@@ -1115,14 +1245,13 @@ describe('IsolatedHtmlReplicaEngine', () => {
         attributes: [['role', 'textbox']],
       }],
     );
-    expect(malicious).toBeDefined();
-    stream.observer?.onPatch(malicious!);
+    expect(malicious).toBeUndefined();
 
-    expect(input.value).toBe('public');
+    expect(input.value).toBe('');
     expect(host.iframe!.contentDocument!.querySelector('section')?.hasAttribute('role'))
       .toBe(false);
     expect(stream.acknowledged).not.toContain(1);
-    expect(stream.requested).toEqual([0]);
+    expect(stream.requested).toEqual([]);
   });
 
   it('restores source in place, rejects stale projections, and keeps live patches flowing', async () => {
@@ -2103,7 +2232,7 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(stream.requested).toEqual([0]);
   });
 
-  it('rejects private metadata patched onto an activation descendant', async () => {
+  it('rejects private metadata before an activation-descendant patch is admitted', async () => {
     const checkpoint = createHtmlMirrorCheckpoint(
       createReplicaIdentity({ ...identityParts, sequence: 0 }),
       {
@@ -2147,13 +2276,12 @@ describe('IsolatedHtmlReplicaEngine', () => {
         attributes: [['title', 'transported descendant secret']],
       }],
     );
-    expect(patch).toBeDefined();
-    stream.observer?.onPatch(patch!);
+    expect(patch).toBeUndefined();
 
     const span = host.iframe?.contentDocument?.querySelector('button span');
     expect(span?.textContent).toBe('public activation label');
     expect(span?.hasAttribute('title')).toBe(false);
-    expect(stream.requested).toEqual([0]);
+    expect(stream.requested).toEqual([]);
   });
 
   it('preserves the owned CSP shell while replacing mirrored head children', async () => {
@@ -2970,6 +3098,27 @@ class FakeHtmlStream implements HtmlMirrorStreamLease {
   dispose = vi.fn();
 }
 
+class FakeSemanticStream implements SemanticSourceStreamLease {
+  observer?: SemanticSourceStreamObserver;
+  disposed = false;
+
+  setObserver(observer: SemanticSourceStreamObserver): void {
+    this.observer = observer;
+  }
+
+  dispose(): void {
+    this.disposed = true;
+  }
+
+  emit(batch: Parameters<SemanticSourceStreamObserver['onBatch']>[0]): boolean {
+    return this.observer?.onBatch(batch) ?? false;
+  }
+
+  fail(): void {
+    this.observer?.onFailure();
+  }
+}
+
 class FakePresentationHost implements ReplayPresentationHost {
   readonly document = parseHTML('<html><body></body></html>').document;
   readonly releases: Array<ReturnType<typeof vi.fn>> = [];
@@ -3001,10 +3150,15 @@ function makeEngine(
   stream: FakeHtmlStream,
   host: FakePresentationHost,
   onInfo?: ConstructorParameters<typeof IsolatedHtmlReplicaEngine>[0]['onInfo'],
+  semantic?: FakeSemanticStream,
 ): IsolatedHtmlReplicaEngine {
   return new IsolatedHtmlReplicaEngine({
     presentationHost: host,
     openStream: async () => stream,
+    ...(semantic ? {
+      openSemanticStream: async () => semantic,
+      getReplicaReadScope: () => FULL_VISIBLE_REPLICA_READ_SCOPE,
+    } : {}),
     initializeIframe: async (iframe, shell) => {
       const { document } = parseHTML(shell);
       Object.defineProperty(iframe, 'contentDocument', { value: document });

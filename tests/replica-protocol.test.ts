@@ -11,6 +11,7 @@ import {
   createReplicaIdentity,
   readCheckpointCommand,
   readCheckpointResponse,
+  sanitizeRrwebCheckpointEvents,
   sanitizeCssText,
   sanitizeCssTextDetailed,
   sanitizeRrwebIncrementalAttributes,
@@ -65,7 +66,90 @@ describe('replica protocol v2', () => {
     expect(serialized).not.toContain(canaries.uppercaseEditable);
     expect(serialized).not.toContain('checked');
     expect(serialized).not.toContain('PRIVATE-ATTRIBUTE-CANARY');
-    expect(serialized).toContain('*'.repeat(canaries.editable.length));
+    expect(serialized).toContain('********');
+  });
+
+  it('projects rrweb hard-secret roots to canonical resource-free shells', () => {
+    const qrCanary = 'data:image/png;base64,U0VDUkVUX1JSV0VCX1FS';
+    const events = [
+      {
+        type: 4,
+        data: { href: 'https://example.test/', width: 800, height: 600 },
+        timestamp: 1,
+      },
+      {
+        type: 2,
+        data: {
+          node: {
+            type: 0,
+            id: 1,
+            childNodes: [{
+              type: 2,
+              id: 2,
+              tagName: 'html',
+              attributes: {},
+              childNodes: [{
+                type: 2,
+                id: 3,
+                tagName: 'body',
+                attributes: {},
+                childNodes: [{
+                  type: 2,
+                  id: 4,
+                  tagName: 'section',
+                  attributes: {
+                    id: 'credential-shell',
+                    class: 'credential',
+                    autocomplete: 'current-password',
+                    style: 'background-image:url(https://paint.invalid/pixel.png)',
+                  },
+                  childNodes: [{
+                    type: 2,
+                    id: 5,
+                    tagName: 'img',
+                    attributes: { src: qrCanary },
+                    childNodes: [],
+                  }, {
+                    type: 3,
+                    id: 6,
+                    textContent: 'credential descendant',
+                  }],
+                }],
+              }],
+            }],
+          },
+          initialOffset: { top: 0, left: 0 },
+        },
+        timestamp: 2,
+      },
+    ];
+    const envelope = createCheckpointEnvelope(identity, {
+      events,
+      captureMs: 1,
+      viewportWidth: 800,
+      viewportHeight: 600,
+      documentWidth: 800,
+      documentHeight: 600,
+    });
+    expect(envelope.kind).toBe('simul:replica-v2:checkpoint');
+    if (envelope.kind !== 'simul:replica-v2:checkpoint') return;
+    const placeholder = serializedRrwebNodeById(envelope.payload.events, 4);
+    expect(placeholder).toEqual({
+      type: 2,
+      id: 4,
+      tagName: 'simul-opaque-region-4',
+      attributes: {},
+      childNodes: [],
+    });
+    const serialized = JSON.stringify(envelope.payload.events);
+    expect(serialized).not.toContain('credential-shell');
+    expect(serialized).not.toContain(qrCanary);
+    expect(serialized).not.toContain('credential descendant');
+
+    const forged = JSON.parse(serialized) as unknown[];
+    const forgedPlaceholder = serializedRrwebNodeById(forged, 4)!;
+    forgedPlaceholder.attributes = { src: qrCanary };
+    expect(sanitizeRrwebCheckpointEvents(forged)).toBeUndefined();
   });
 
   it('removes executable elements, interaction hooks, and passive resource requests', () => {
@@ -577,4 +661,26 @@ function checkpointEventsForNode(
       timestamp: 2,
     },
   ];
+}
+
+function serializedRrwebNodeById(
+  events: readonly unknown[],
+  nodeId: number,
+): Record<string, unknown> | undefined {
+  const pending: unknown[] = [];
+  for (const event of events) {
+    if (
+      event && typeof event === 'object' &&
+      'data' in event && event.data && typeof event.data === 'object' &&
+      'node' in event.data
+    ) pending.push(event.data.node);
+  }
+  while (pending.length > 0) {
+    const current = pending.pop();
+    if (!current || typeof current !== 'object' || Array.isArray(current)) continue;
+    const record = current as Record<string, unknown>;
+    if (record.id === nodeId) return record;
+    if (Array.isArray(record.childNodes)) pending.push(...record.childNodes);
+  }
+  return undefined;
 }

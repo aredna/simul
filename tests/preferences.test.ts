@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   ALL_SITES_PERMISSION_ORIGINS,
   DEFAULT_COMPANION_PREFERENCES,
+  advanceCompanionSettingsRevision,
   autoTranslationModeForPage,
   clampZoomPercent,
   isAutoTranslationEnabled,
@@ -10,6 +11,10 @@ import {
   parseCompanionPreferences,
   permissionOriginsForMode,
   permissionOriginsForPreferences,
+  readValidStoredCompanionPreferences,
+  resetCompanionPreferences,
+  selectLiveCompanionPreferenceChange,
+  selectLatestCompanionPreferences,
   sitePermissionPattern,
   withAutoTranslationMode,
   withDisplayMode,
@@ -20,6 +25,7 @@ import {
   isReplicaFidelityPolicy,
   isSelectableReplicaFidelityPolicy,
 } from '../lib/replica/fidelity-policy';
+import { replicaReadScopeForProfile } from '../lib/replica/read-scope-policy';
 
 describe('parseCompanionPreferences', () => {
   it('uses privacy-preserving defaults for absent or invalid data', () => {
@@ -38,8 +44,30 @@ describe('parseCompanionPreferences', () => {
       launchBehavior: 'last-used',
       lastLaunchSurface: 'side-panel',
       popoutTabMode: 'locked',
+      replicaReadScope: {
+        controlSemantics: false,
+        controlImages: false,
+        disclosureContent: false,
+        formValues: false,
+        personalDataValues: false,
+        editableContent: false,
+      },
+      readScopeSetupVersion: 0,
+      settingsRevision: 0,
+      resetRevision: 0,
+      resetCleanupPendingRevision: 0,
       imageTranslationEnabled: false,
       ocrMinimumConfidence: 0.65,
+      imageReadingMethodOrder: [
+        'accessibility-text',
+        'paddleocr-wasm',
+        'chrome-text-detector',
+        'tesseract',
+        'tesseract-wasm-direct',
+        'transformers',
+        'chromium-screen-ai',
+      ],
+      disabledImageReadingMethodIds: ['accessibility-text'],
       imageTextProviderOrder: [
         'paddleocr-wasm',
         'chrome-text-detector',
@@ -75,8 +103,30 @@ describe('parseCompanionPreferences', () => {
       launchBehavior: 'last-used',
       lastLaunchSurface: 'side-panel',
       popoutTabMode: 'locked',
+      replicaReadScope: {
+        controlSemantics: false,
+        controlImages: false,
+        disclosureContent: false,
+        formValues: false,
+        personalDataValues: false,
+        editableContent: false,
+      },
+      readScopeSetupVersion: 0,
+      settingsRevision: 0,
+      resetRevision: 0,
+      resetCleanupPendingRevision: 0,
       imageTranslationEnabled: false,
       ocrMinimumConfidence: 0.65,
+      imageReadingMethodOrder: [
+        'accessibility-text',
+        'paddleocr-wasm',
+        'chrome-text-detector',
+        'tesseract',
+        'tesseract-wasm-direct',
+        'transformers',
+        'chromium-screen-ai',
+      ],
+      disabledImageReadingMethodIds: ['accessibility-text'],
       imageTextProviderOrder: [
         'paddleocr-wasm',
         'chrome-text-detector',
@@ -124,8 +174,30 @@ describe('parseCompanionPreferences', () => {
       launchBehavior: 'last-used',
       lastLaunchSurface: 'side-panel',
       popoutTabMode: 'locked',
+      replicaReadScope: {
+        controlSemantics: false,
+        controlImages: false,
+        disclosureContent: false,
+        formValues: false,
+        personalDataValues: false,
+        editableContent: false,
+      },
+      readScopeSetupVersion: 0,
+      settingsRevision: 0,
+      resetRevision: 0,
+      resetCleanupPendingRevision: 0,
       imageTranslationEnabled: false,
       ocrMinimumConfidence: 0.65,
+      imageReadingMethodOrder: [
+        'accessibility-text',
+        'paddleocr-wasm',
+        'chrome-text-detector',
+        'tesseract',
+        'tesseract-wasm-direct',
+        'transformers',
+        'chromium-screen-ai',
+      ],
+      disabledImageReadingMethodIds: ['accessibility-text'],
       imageTextProviderOrder: [
         'paddleocr-wasm',
         'chrome-text-detector',
@@ -302,8 +374,176 @@ describe('parseCompanionPreferences', () => {
         'transformers',
         'chromium-screen-ai',
       ],
-      disabledImageTextProviderIds: ['tesseract', 'paddleocr-wasm'],
+      disabledImageReadingMethodIds: [
+        'accessibility-text',
+        'tesseract',
+        'paddleocr-wasm',
+      ],
+      disabledImageTextProviderIds: ['paddleocr-wasm', 'tesseract'],
     });
+
+    expect(parseCompanionPreferences({
+      readScopeSetupVersion: 1,
+      disabledImageTextProviderIds: ['chrome-text-detector'],
+    })).toMatchObject({
+      disabledImageReadingMethodIds: ['chrome-text-detector'],
+      disabledImageTextProviderIds: ['chrome-text-detector'],
+    });
+  });
+
+  it('keeps accessibility text disabled until the exact setup version', () => {
+    for (const readScopeSetupVersion of [0, 2, -1, '1']) {
+      expect(parseCompanionPreferences({
+        readScopeSetupVersion,
+        disabledImageReadingMethodIds: [],
+      }).disabledImageReadingMethodIds).toContain('accessibility-text');
+    }
+    expect(parseCompanionPreferences({
+      readScopeSetupVersion: 1,
+      disabledImageReadingMethodIds: [],
+    }).disabledImageReadingMethodIds).not.toContain('accessibility-text');
+  });
+
+  it('does not let delayed responses replace a newer commit or reset', () => {
+    const baseline = parseCompanionPreferences({
+      settingsRevision: 4,
+      targetLanguage: 'ja',
+    });
+    const newer = parseCompanionPreferences({
+      settingsRevision: 5,
+      targetLanguage: 'fr',
+    });
+    expect(selectLatestCompanionPreferences(newer, baseline).targetLanguage)
+      .toBe('fr');
+
+    const reset = resetCompanionPreferences(newer);
+    expect(reset).toMatchObject({ resetRevision: 1, settingsRevision: 6 });
+    expect(selectLatestCompanionPreferences(reset, newer)).toMatchObject({
+      resetRevision: 1,
+      targetLanguage: 'en',
+    });
+  });
+
+  it('distinguishes a complete canonical stored snapshot from repairable data', () => {
+    const canonical = parseCompanionPreferences({
+      ...DEFAULT_COMPANION_PREFERENCES,
+      replicaReadScope: replicaReadScopeForProfile('full-visible'),
+      readScopeSetupVersion: 1,
+      settingsRevision: 8,
+    });
+
+    expect(readValidStoredCompanionPreferences(canonical)).toEqual(canonical);
+    expect(readValidStoredCompanionPreferences(undefined)).toBeUndefined();
+    expect(readValidStoredCompanionPreferences({
+      replicaReadScope: canonical.replicaReadScope,
+      readScopeSetupVersion: 1,
+      settingsRevision: 9,
+    })).toBeUndefined();
+    expect(readValidStoredCompanionPreferences({
+      ...canonical,
+      replicaReadScope: { ...canonical.replicaReadScope, formValues: 'yes' },
+    })).toBeUndefined();
+    expect(readValidStoredCompanionPreferences({
+      ...canonical,
+      unexpected: true,
+    })).toBeUndefined();
+  });
+
+  it('keeps a live invalidation fail closed until a current valid snapshot arrives', () => {
+    const current = parseCompanionPreferences({
+      ...DEFAULT_COMPANION_PREFERENCES,
+      replicaReadScope: replicaReadScopeForProfile('full-visible'),
+      readScopeSetupVersion: 1,
+      settingsRevision: 8,
+    });
+    const invalid = selectLiveCompanionPreferenceChange(
+      current,
+      false,
+      undefined,
+    );
+    expect(invalid).toMatchObject({
+      preferences: current,
+      failClosed: true,
+      status: 'invalid',
+    });
+
+    const older = parseCompanionPreferences({
+      ...current,
+      settingsRevision: 7,
+      targetLanguage: 'fr',
+    });
+    expect(selectLiveCompanionPreferenceChange(
+      invalid.preferences,
+      invalid.failClosed,
+      older,
+    )).toMatchObject({
+      preferences: current,
+      failClosed: true,
+      status: 'stale',
+    });
+
+    expect(selectLiveCompanionPreferenceChange(
+      invalid.preferences,
+      invalid.failClosed,
+      current,
+    )).toMatchObject({
+      preferences: current,
+      failClosed: false,
+      status: 'accepted',
+    });
+  });
+
+  it('rejects same-revision live storage equivocation but accepts a newer commit', () => {
+    const current = parseCompanionPreferences({
+      ...DEFAULT_COMPANION_PREFERENCES,
+      replicaReadScope: replicaReadScopeForProfile('standard'),
+      readScopeSetupVersion: 1,
+      settingsRevision: 4,
+      targetLanguage: 'ja',
+    });
+    const equivocation = parseCompanionPreferences({
+      ...current,
+      targetLanguage: 'fr',
+    });
+    expect(selectLiveCompanionPreferenceChange(
+      current,
+      false,
+      equivocation,
+    )).toMatchObject({
+      preferences: current,
+      failClosed: true,
+      status: 'invalid',
+    });
+
+    const newer = parseCompanionPreferences({
+      ...equivocation,
+      settingsRevision: 5,
+    });
+    expect(selectLiveCompanionPreferenceChange(
+      current,
+      true,
+      newer,
+    )).toMatchObject({
+      preferences: newer,
+      failClosed: false,
+      status: 'accepted',
+    });
+  });
+
+  it('fails closed instead of reusing an exhausted revision', () => {
+    const settingsExhausted = parseCompanionPreferences({
+      settingsRevision: Number.MAX_SAFE_INTEGER,
+    });
+    const resetExhausted = parseCompanionPreferences({
+      resetRevision: Number.MAX_SAFE_INTEGER,
+    });
+
+    expect(() => advanceCompanionSettingsRevision(settingsExhausted)).toThrow(
+      'Preference revision exhausted.',
+    );
+    expect(() => resetCompanionPreferences(resetExhausted)).toThrow(
+      'Preference revision exhausted.',
+    );
   });
 });
 

@@ -36,6 +36,7 @@ import {
   checkArtifact,
   checkOcrAllTrial,
   checkOcrPaddleTrial,
+  checkSyncedOcrAllTrial,
   compareArtifactDirectories,
   syncArtifact,
   syncOcrAllTrial,
@@ -625,7 +626,7 @@ describe('disabled OCR production profile', () => {
     expect(validation.ocrEnabled).toBe(false);
     expect(validation.manifest.version).toBe('0.3.2');
     expect(validation.manifest.version_name).toBe(
-      '0.3.2 beta v.20260723.1',
+      '0.3.2 beta v.20260723.4',
     );
     expect(validation.manifest.permissions).toEqual(APPROVED_PERMISSIONS);
     expect(validation.manifest).not.toHaveProperty('content_security_policy');
@@ -860,6 +861,58 @@ describe('independent OCR production profiles', () => {
       unpackedBytes: trial.unpackedBytes,
     });
     expect(await readFile(unrelated, 'utf8')).toBe('untouched');
+  }, 60_000);
+
+  it('checks the committed artifact against a fresh exact four-provider trial without mutation', async () => {
+    const retainedRoot = await createTemporaryDirectory(
+      'simul-all-ocr-check-retained-',
+    );
+    const retainedArtifact = path.join(retainedRoot, 'chrome-mv3');
+    await checkOcrAllTrial({
+      buildArtifact: async (options) => {
+        const built = await buildProductionArtifact(options);
+        await cp(built, retainedArtifact, { recursive: true });
+        return built;
+      },
+    });
+
+    const projectRoot = await createTemporaryDirectory(
+      'simul-all-ocr-check-',
+    );
+    const committed = canonicalArtifactDirectory(projectRoot);
+    await cp(retainedArtifact, committed, { recursive: true });
+    const before = await readFile(path.join(committed, 'manifest.json'));
+    let checkedProviderIds;
+
+    await expect(
+      checkSyncedOcrAllTrial({
+        projectRoot,
+        buildArtifact: async ({ temporaryRoot, ocrProviderIds }) => {
+          checkedProviderIds = ocrProviderIds;
+          const built = path.join(temporaryRoot, 'built');
+          await cp(retainedArtifact, built, { recursive: true });
+          return built;
+        },
+      }),
+    ).resolves.toEqual({ committedDirectory: committed });
+
+    expect(checkedProviderIds).toEqual(OCR_ALL_TRIAL_PROVIDER_IDS);
+    expect(await readFile(path.join(committed, 'manifest.json'))).toEqual(before);
+
+    await writeFile(
+      path.join(committed, 'page-mirror.js'),
+      `${await readFile(path.join(committed, 'page-mirror.js'), 'utf8')}\n`,
+    );
+    await expect(
+      checkSyncedOcrAllTrial({
+        projectRoot,
+        buildArtifact: async ({ temporaryRoot }) => {
+          const built = path.join(temporaryRoot, 'built');
+          await cp(retainedArtifact, built, { recursive: true });
+          return built;
+        },
+      }),
+    ).rejects.toThrow(/content changed: page-mirror\.js[\s\S]*artifact:sync:ocr-trials/u);
   }, 60_000);
 
   it('rejects duplicate or unknown requested providers before building', async () => {

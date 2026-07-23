@@ -24,7 +24,6 @@ const snapshot: PageSnapshot = {
       id: 'image-4',
       kind: 'image',
       src: 'https://example.com/image.png',
-      altText: '山',
       caption: '失敗',
     },
   ],
@@ -56,10 +55,10 @@ describe('translateSnapshot', () => {
       onProgress: progress,
     });
 
-    expect(calls).toEqual(['こんにちは', '同じ文章', '山', '失敗']);
+    expect(calls).toEqual(['こんにちは', '同じ文章', '失敗']);
     expect(maxConcurrent).toBe(1);
     expect(result.state).toBe('complete');
-    expect(result).toMatchObject({ total: 4, completed: 4, failed: 0 });
+    expect(result).toMatchObject({ total: 3, completed: 3, failed: 0 });
     expect(result.items.map((item) => item.id)).toEqual(
       snapshot.items.map((item) => item.id),
     );
@@ -76,7 +75,7 @@ describe('translateSnapshot', () => {
         'translated:同じ文章',
       );
     }
-    expect(progress).toHaveBeenCalledTimes(4);
+    expect(progress).toHaveBeenCalledTimes(3);
   });
 
   it('preserves successful work and retries only failed fields', async () => {
@@ -205,7 +204,7 @@ describe('translateSnapshot', () => {
     });
 
     expect(result.state).toBe('complete');
-    expect(translate).toHaveBeenCalledTimes(4);
+    expect(translate).toHaveBeenCalledTimes(3);
   });
 });
 

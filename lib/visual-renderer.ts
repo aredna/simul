@@ -31,15 +31,7 @@ interface MirrorTextBinding {
   replica: boolean;
 }
 
-interface MirrorAttributeBinding {
-  kind: 'attribute';
-  node: Element;
-  attribute: 'alt';
-  source: string;
-  group: string;
-}
-
-type MirrorTranslationBinding = MirrorTextBinding | MirrorAttributeBinding;
+type MirrorTranslationBinding = MirrorTextBinding;
 
 type MirrorTextLayoutMode = 'adaptive' | 'faithful';
 
@@ -81,7 +73,6 @@ const CLIPPING_OVERFLOW_VALUES = new Set([
 
 interface TranslationDisplay {
   text?: string;
-  alt?: string;
 }
 
 export function createVisualMirror(
@@ -265,7 +256,7 @@ function renderElement(
   applyStyle(element, visual, node.styleId, {
     omitBackgroundImage: node.controlShell === 'select',
   });
-  applyAttributes(element, node, translations, controller);
+  applyAttributes(element, node);
   applyNodeId(element, node.nodeId);
   if (!svg && 'tabIndex' in element) {
     (element as HTMLElement).tabIndex = -1;
@@ -549,24 +540,6 @@ function bindText(
   }
 }
 
-function bindImageAlt(
-  controller: MirrorController,
-  image: HTMLImageElement,
-  source: string,
-  group: string,
-): void {
-  const normalizedSource = source.replace(/\s+/gu, ' ').trim();
-  if (!normalizedSource) return;
-  controller.bindings.push({
-    kind: 'attribute',
-    node: image,
-    attribute: 'alt',
-    source: normalizedSource,
-    group,
-  });
-  controller.groupSources.set(group, normalizedSource);
-}
-
 function applyNodeId(element: Element, nodeId: string | undefined): void {
   if (nodeId) element.setAttribute('data-simul-node-id', nodeId);
 }
@@ -811,13 +784,11 @@ function liveDeltaFitsTranslationBudget(
   let characters = 0;
   for (const [group, bindings] of translatableBindingGroups(controller)) {
     const retained = bindings.some((binding) =>
-      !removedTargets.some((target) =>
-        target === binding.node || target.contains(binding.node),
-      ),
+      !removedTargets.some((target) => target.contains(binding.node)),
     );
     if (!retained) continue;
     retainedVisualNodes += bindings.filter(
-      (binding) => binding.kind === 'text' && !binding.replica &&
+      (binding) => !binding.replica &&
         !removedTargets.some((target) => target.contains(binding.node)),
     ).length;
     const source = normalizedTranslationSource(
@@ -849,13 +820,6 @@ function liveDeltaFitsTranslationBudget(
         characters += source.length;
       }
     } else if (node.kind === 'element') {
-      const alt = node.tag === 'img'
-        ? normalizedTranslationSource(node.attributes?.alt ?? '')
-        : '';
-      if (alt) {
-        groups += 1;
-        characters += alt.length;
-      }
       for (let index = node.children.length - 1; index >= 0; index -= 1) {
         pending.push(node.children[index]!);
       }
@@ -1000,17 +964,6 @@ function renderLiveNode(
     omitBackgroundImage: node.controlShell === 'select',
   });
   applyLiveAttributes(element, node.attributes);
-  if (node.tag === 'img') {
-    const sourceAlt = node.attributes?.alt;
-    if (sourceAlt) {
-      bindImageAlt(
-        controller,
-        element as HTMLImageElement,
-        sourceAlt,
-        `delta-alt-${node.nodeId}`,
-      );
-    }
-  }
   applyNodeId(element, node.nodeId);
   if (!svg && 'tabIndex' in element) (element as HTMLElement).tabIndex = -1;
   if (node.controlShell) {
@@ -1332,21 +1285,12 @@ function applyGroupTranslation(
     binding.node.data = preserveBoundaryWhitespace(binding.source, translated);
     binding.node.parentElement?.classList.add('simul-translated-container');
   }
-  for (const binding of bindings) {
-    if (binding.kind === 'attribute') {
-      binding.node.setAttribute(binding.attribute, translated.trim());
-    }
-  }
 }
 
 function applyGroupSource(bindings: MirrorTranslationBinding[]): void {
   for (const binding of bindings) {
-    if (binding.kind === 'text') {
-      binding.node.data = binding.source;
-      binding.node.parentElement?.classList.remove('simul-translated-container');
-    } else {
-      binding.node.setAttribute(binding.attribute, binding.source);
-    }
+    binding.node.data = binding.source;
+    binding.node.parentElement?.classList.remove('simul-translated-container');
   }
 }
 
@@ -1470,25 +1414,12 @@ function applyStyle(
 function applyAttributes(
   element: Element,
   node: VisualElementNode,
-  translations: ReadonlyMap<string, TranslationDisplay>,
-  controller: MirrorController,
 ): void {
   for (const [name, value] of Object.entries(node.attributes ?? {})) {
     element.setAttribute(name, value);
   }
   if (node.tag === 'img') {
     const image = element as HTMLImageElement;
-    const sourceAlt = node.attributes?.alt;
-    const translatedAlt = node.itemId
-      ? translations.get(node.itemId)?.alt
-      : undefined;
-    if (translatedAlt) image.alt = translatedAlt;
-    if (sourceAlt) {
-      const group = node.itemId
-        ? `image-alt-${node.itemId}`
-        : `image-alt-${node.nodeId ?? controller.nextGroup++}`;
-      bindImageAlt(controller, image, sourceAlt, group);
-    }
     image.loading = 'lazy';
     image.decoding = 'async';
     image.referrerPolicy = 'no-referrer';
@@ -1496,7 +1427,7 @@ function applyAttributes(
     image.addEventListener('error', () => {
       image.classList.add('visual-image--failed');
       image.removeAttribute('src');
-      image.alt = translatedAlt || image.alt || 'Image unavailable';
+      image.alt = 'Image unavailable';
     });
   }
 }
@@ -1509,13 +1440,7 @@ function collectTranslationDisplays(
   for (const item of translated.items) {
     if (item.kind === 'text') {
       displays.set(item.id, { text: displayTranslation(item.translation) });
-      continue;
     }
-    displays.set(item.id, {
-      ...(item.altTranslation
-        ? { alt: displayTranslation(item.altTranslation) }
-        : {}),
-    });
   }
   return displays;
 }

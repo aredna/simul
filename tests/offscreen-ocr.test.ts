@@ -8,6 +8,7 @@ import { OcrOffscreenDocumentManager } from '../lib/ocr/offscreen-document-manag
 import { OffscreenComputeHost } from '../lib/ocr/offscreen-host';
 import { OffscreenOcrProviderRouter } from '../lib/ocr/offscreen-provider-router';
 import {
+  readEnsureOcrHostCommand,
   readOffscreenOcrCommand,
   readOffscreenOcrJob,
   readOffscreenOcrResponse,
@@ -60,6 +61,27 @@ const pixels: AcquiredImagePixels = {
 };
 
 describe('offscreen OCR protocol and lifecycle', () => {
+  it('requires a bounded reset epoch on host creation requests', () => {
+    expect(readEnsureOcrHostCommand({
+      kind: 'simul:ocr-v1:ensure-host',
+      version: 1,
+      resetEpoch: 4,
+    })).toEqual({
+      kind: 'simul:ocr-v1:ensure-host',
+      version: 1,
+      resetEpoch: 4,
+    });
+    expect(readEnsureOcrHostCommand({
+      kind: 'simul:ocr-v1:ensure-host',
+      version: 1,
+    })).toBeUndefined();
+    expect(readEnsureOcrHostCommand({
+      kind: 'simul:ocr-v1:ensure-host',
+      version: 1,
+      resetEpoch: -1,
+    })).toBeUndefined();
+  });
+
   it('strictly bounds provider preflight commands and statuses', () => {
     const command = createProbeOcrProviderCommand('chrome-text-detector');
     expect(readProbeOcrProviderCommand(command)).toEqual(command);
@@ -187,13 +209,119 @@ describe('offscreen OCR protocol and lifecycle', () => {
       createDocument,
       getUrl: (path) => `chrome-extension://id${path}`,
     });
-    const [first, second] = await Promise.all([manager.ensure(), manager.ensure()]);
+    const [first, second] = await Promise.all([
+      manager.ensure(0),
+      manager.ensure(0),
+    ]);
     expect(first).toBe(true);
     expect(second).toBe(true);
     expect(createDocument).toHaveBeenCalledOnce();
     expect(createDocument).toHaveBeenCalledWith(expect.objectContaining({
       reasons: ['WORKERS'],
     }));
+  });
+
+  it('invalidates and closes an in-flight ensure without allowing it to reopen', async () => {
+    let contexts: readonly unknown[] = [];
+    let releaseCreate!: () => void;
+    let reportCreateStarted!: () => void;
+    const createStarted = new Promise<void>((resolve) => {
+      reportCreateStarted = resolve;
+    });
+    const createGate = new Promise<void>((resolve) => {
+      releaseCreate = resolve;
+    });
+    const createDocument = vi.fn(async () => {
+      reportCreateStarted();
+      await createGate;
+      contexts = [{}];
+    });
+    const closeDocument = vi.fn(async () => {
+      contexts = [];
+    });
+    const manager = new OcrOffscreenDocumentManager({
+      getContexts: vi.fn(async () => contexts),
+      createDocument,
+      getUrl: (path) => `chrome-extension://id${path}`,
+      closeDocument,
+    });
+
+    const ensuring = manager.ensure(0);
+    await createStarted;
+    const closing = manager.close();
+    const ensureDuringClose = manager.ensure(0);
+    releaseCreate();
+
+    await expect(ensuring).resolves.toBe(false);
+    await expect(closing).resolves.toBeUndefined();
+    await expect(ensureDuringClose).resolves.toBe(false);
+    expect(contexts).toEqual([]);
+    expect(createDocument).toHaveBeenCalledOnce();
+    expect(closeDocument).toHaveBeenCalledOnce();
+
+    await expect(manager.ensure(0)).resolves.toBe(true);
+    expect(createDocument).toHaveBeenCalledTimes(2);
+  });
+
+  it('monotonically fences host creation by reset epoch', async () => {
+    let contexts: readonly unknown[] = [];
+    const createDocument = vi.fn(async () => {
+      contexts = [{}];
+    });
+    const closeDocument = vi.fn(async () => {
+      contexts = [];
+    });
+    const manager = new OcrOffscreenDocumentManager({
+      getContexts: vi.fn(async () => contexts),
+      createDocument,
+      getUrl: (path) => `chrome-extension://id${path}`,
+      closeDocument,
+    });
+
+    await expect(manager.ensure(0)).resolves.toBe(true);
+    await expect(manager.advanceResetEpoch(2)).resolves.toBe(true);
+    await expect(manager.ensure(0)).resolves.toBe(false);
+    await expect(manager.ensure(1)).resolves.toBe(false);
+    await expect(manager.ensure(3)).resolves.toBe(false);
+    await expect(manager.advanceResetEpoch(1)).resolves.toBe(false);
+    await expect(manager.ensure(2)).resolves.toBe(true);
+    expect(createDocument).toHaveBeenCalledTimes(2);
+    expect(closeDocument).toHaveBeenCalledOnce();
+  });
+
+  it('reports a real offscreen shutdown failure and permits a later retry', async () => {
+    let contexts: readonly unknown[] = [{}];
+    const closeDocument = vi.fn()
+      .mockRejectedValueOnce(new Error('close failed'))
+      .mockImplementationOnce(async () => {
+        contexts = [];
+      });
+    const manager = new OcrOffscreenDocumentManager({
+      getContexts: vi.fn(async () => contexts),
+      createDocument: vi.fn(async () => undefined),
+      getUrl: (path) => `chrome-extension://id${path}`,
+      closeDocument,
+    });
+
+    await expect(manager.close()).rejects.toThrow('close failed');
+    await expect(manager.close()).resolves.toBeUndefined();
+    expect(closeDocument).toHaveBeenCalledTimes(2);
+  });
+
+  it('accepts a close race only when the exact offscreen context is gone', async () => {
+    let contexts: readonly unknown[] = [{}];
+    const manager = new OcrOffscreenDocumentManager({
+      getContexts: vi.fn(async () => contexts),
+      createDocument: vi.fn(async () => undefined),
+      getUrl: (path) => `chrome-extension://id${path}`,
+      closeDocument: vi.fn(async () => {
+        contexts = [];
+        throw new Error('already closed');
+      }),
+    });
+
+    await expect(manager.close()).resolves.toBeUndefined();
+    expect(contexts).toEqual([]);
   });
 
   it('runs one active and one pending job and rejects further overflow', async () => {
@@ -246,6 +374,7 @@ describe('offscreen OCR protocol and lifecycle', () => {
     });
     const coordinator = new ImageRecognitionCoordinator({
       store,
+      resetEpoch: 0,
       sendMessage,
       clientId: 'client-ocr',
     });
@@ -258,7 +387,7 @@ describe('offscreen OCR protocol and lifecycle', () => {
       cacheHit: false,
     });
     expect(calls.map((job) => job.attempt)).toEqual([0, 1]);
-    expect(store.get('input-1')).resolves.toBeUndefined();
+    await expect(store.get('input-1')).resolves.toBeUndefined();
     await expect(coordinator.recognize(pixels, route)).resolves.toMatchObject({
       status: 'complete',
       cacheHit: true,
@@ -291,6 +420,7 @@ describe('offscreen OCR protocol and lifecycle', () => {
     });
     const coordinator = new ImageRecognitionCoordinator({
       store,
+      resetEpoch: 0,
       sendMessage,
       clientId: 'client-join',
     });
@@ -367,6 +497,7 @@ describe('offscreen OCR protocol and lifecycle', () => {
     });
     const coordinator = new ImageRecognitionCoordinator({
       store,
+      resetEpoch: 0,
       sendMessage,
       clientId: 'client-bounded-joins',
       maxInFlight: 1,
@@ -430,6 +561,7 @@ describe('offscreen OCR protocol and lifecycle', () => {
     });
     const coordinator = new ImageRecognitionCoordinator({
       store,
+      resetEpoch: 0,
       sendMessage,
       clientId: 'client-generation',
     });
@@ -442,7 +574,7 @@ describe('offscreen OCR protocol and lifecycle', () => {
 
     coordinator.clear();
     releaseFirst(success(pendingJob as OffscreenOcrJob));
-    await expect(obsolete).resolves.toMatchObject({ status: 'complete' });
+    await expect(obsolete).rejects.toMatchObject({ name: 'AbortError' });
     expect(coordinator.snapshotStats().entries).toBe(0);
 
     await expect(coordinator.recognize(pixels, route)).resolves.toMatchObject({
@@ -455,6 +587,87 @@ describe('offscreen OCR protocol and lifecycle', () => {
       misses: 1,
       loads: 1,
     });
+  });
+
+  it('removes a transient input whose put completes after reset advances', async () => {
+    const records = new Map<string, Blob>();
+    let releasePut!: () => void;
+    let reportPutStarted!: () => void;
+    const putStarted = new Promise<void>((resolve) => {
+      reportPutStarted = resolve;
+    });
+    const putGate = new Promise<void>((resolve) => {
+      releasePut = resolve;
+    });
+    const remove = vi.fn(async (id: string) => {
+      records.delete(id);
+    });
+    const store: TransientImageInputStore = {
+      put: async (blob) => {
+        reportPutStarted();
+        await putGate;
+        records.set('late-input', blob);
+        return 'late-input';
+      },
+      get: async (id) => records.get(id),
+      remove,
+      clearExpired: async () => undefined,
+    };
+    const sendMessage = vi.fn(async () => undefined);
+    const coordinator = new ImageRecognitionCoordinator({
+      store,
+      resetEpoch: 4,
+      sendMessage,
+      clientId: 'client-late-put',
+    });
+    const recognition = coordinator.recognize(pixels, {
+      languageGroup: 'eng',
+      modelVersion: 'tessdata-fast-87416418',
+    });
+    await putStarted;
+
+    expect(coordinator.advanceResetEpoch(5)).toBe(true);
+    releasePut();
+
+    await expect(recognition).rejects.toMatchObject({ name: 'AbortError' });
+    expect(remove).toHaveBeenCalledWith('late-input');
+    expect(records.size).toBe(0);
+    expect(sendMessage).not.toHaveBeenCalled();
+  });
+
+  it('stops between a stale ensure response and the OCR run command', async () => {
+    let releaseEnsure!: (value: unknown) => void;
+    const ensurePending = new Promise<unknown>((resolve) => {
+      releaseEnsure = resolve;
+    });
+    const sendMessage = vi.fn((message: unknown) => {
+      if (isEnsureMessage(message)) return ensurePending;
+      return Promise.resolve(undefined);
+    });
+    const coordinator = new ImageRecognitionCoordinator({
+      store: memoryStore(),
+      resetEpoch: 8,
+      sendMessage,
+      clientId: 'client-stale-ensure',
+    });
+    const recognition = coordinator.recognize(pixels, {
+      languageGroup: 'eng',
+      modelVersion: 'tessdata-fast-87416418',
+    });
+    await vi.waitFor(() => expect(sendMessage).toHaveBeenCalledWith({
+      kind: 'simul:ocr-v1:ensure-host',
+      version: 1,
+      resetEpoch: 8,
+    }));
+    coordinator.advanceResetEpoch(9);
+    releaseEnsure({
+      kind: 'simul:ocr-v1:host-ready',
+      version: 1,
+      ready: true,
+    });
+
+    await expect(recognition).rejects.toMatchObject({ name: 'AbortError' });
+    expect(sendMessage).toHaveBeenCalledOnce();
   });
 
   it('separates provider, model, language, profile, dimensions, and pixel keys', async () => {
@@ -472,6 +685,7 @@ describe('offscreen OCR protocol and lifecycle', () => {
     });
     const coordinator = new ImageRecognitionCoordinator({
       store,
+      resetEpoch: 0,
       sendMessage,
       clientId: 'client-key-separation',
     });
@@ -538,6 +752,7 @@ describe('offscreen OCR protocol and lifecycle', () => {
     });
     const coordinator = new ImageRecognitionCoordinator({
       store,
+      resetEpoch: 0,
       sendMessage,
       clientId: 'client-weight-lru',
       maxCacheWeight: 100,
@@ -592,6 +807,7 @@ describe('offscreen OCR protocol and lifecycle', () => {
     });
     const coordinator = new ImageRecognitionCoordinator({
       store,
+      resetEpoch: 0,
       sendMessage,
       clientId: 'client-weight-oversize',
       maxCacheWeight: 40,
@@ -617,7 +833,7 @@ describe('offscreen OCR protocol and lifecycle', () => {
     });
   });
 
-  it('resets recognition cache weight and counters when cleared', async () => {
+  it('resets recognition cache weight and counters when reset advances', async () => {
     const store = memoryStore();
     const sendMessage = vi.fn(async (message: unknown) => {
       const record = message as Record<string, unknown>;
@@ -631,6 +847,7 @@ describe('offscreen OCR protocol and lifecycle', () => {
     });
     const coordinator = new ImageRecognitionCoordinator({
       store,
+      resetEpoch: 0,
       sendMessage,
       clientId: 'client-weight-clear',
     });
@@ -641,7 +858,8 @@ describe('offscreen OCR protocol and lifecycle', () => {
     });
     expect(coordinator.snapshotStats().weight).toBe(42);
 
-    coordinator.clear();
+    expect(coordinator.advanceResetEpoch(1)).toBe(true);
+    expect(coordinator.advanceResetEpoch(0)).toBe(false);
 
     expect(coordinator.snapshotStats()).toEqual({
       entries: 0,
@@ -681,6 +899,7 @@ describe('offscreen OCR protocol and lifecycle', () => {
     });
     const coordinator = new ImageRecognitionCoordinator({
       store,
+      resetEpoch: 0,
       sendMessage,
       clientId: 'client-chain',
     });
@@ -746,6 +965,7 @@ describe('offscreen OCR protocol and lifecycle', () => {
     });
     const coordinator = new ImageRecognitionCoordinator({
       store,
+      resetEpoch: 0,
       sendMessage,
       clientId: 'client-quality-filter',
     });
@@ -809,6 +1029,7 @@ describe('offscreen OCR protocol and lifecycle', () => {
     });
     const coordinator = new ImageRecognitionCoordinator({
       store,
+      resetEpoch: 0,
       sendMessage,
       clientId: 'client-no-text-cache',
     });
@@ -842,7 +1063,7 @@ describe('offscreen OCR protocol and lifecycle', () => {
     ]);
   });
 
-  it('treats a clean Paddle empty result as terminal and never invokes Tesseract', async () => {
+  it('falls through a clean Paddle empty result to the next provider', async () => {
     const store = memoryStore();
     const calls: OffscreenOcrJob[] = [];
     const sendMessage = vi.fn(async (message: unknown) => {
@@ -865,6 +1086,7 @@ describe('offscreen OCR protocol and lifecycle', () => {
     });
     const coordinator = new ImageRecognitionCoordinator({
       store,
+      resetEpoch: 0,
       sendMessage,
       clientId: 'client-paddle-terminal-empty',
     });
@@ -877,13 +1099,13 @@ describe('offscreen OCR protocol and lifecycle', () => {
     })).resolves.toMatchObject({
       status: 'complete',
       result: {
-        providerId: 'paddleocr-wasm',
-        transcript: '',
-        regions: [],
+        providerId: 'tesseract',
+        transcript: 'fallback',
       },
     });
     expect(calls.map(({ providerId }) => providerId)).toEqual([
       'paddleocr-wasm',
+      'tesseract',
     ]);
   });
 
@@ -911,6 +1133,7 @@ describe('offscreen OCR protocol and lifecycle', () => {
     });
     const coordinator = new ImageRecognitionCoordinator({
       store,
+      resetEpoch: 0,
       sendMessage,
       clientId: 'client-paddle-uncertain',
     });
@@ -952,6 +1175,7 @@ describe('offscreen OCR protocol and lifecycle', () => {
     });
     const coordinator = new ImageRecognitionCoordinator({
       store,
+      resetEpoch: 0,
       sendMessage,
       clientId: 'client-tesseract-wasm-direct',
     });
@@ -1020,6 +1244,7 @@ describe('offscreen OCR protocol and lifecycle', () => {
     });
     const coordinator = new ImageRecognitionCoordinator({
       store,
+      resetEpoch: 0,
       sendMessage,
       clientId: 'client-confidence-cache',
     });
@@ -1051,7 +1276,7 @@ describe('offscreen OCR protocol and lifecycle', () => {
     ]);
   });
 
-  it('stops the ordered route after the one shared-host retry is exhausted', async () => {
+  it('does not skip later providers when a shared-host retry is exhausted', async () => {
     const store = memoryStore();
     const calls: OffscreenOcrJob[] = [];
     const sendMessage = vi.fn(async (message: unknown) => {
@@ -1065,6 +1290,7 @@ describe('offscreen OCR protocol and lifecycle', () => {
     });
     const coordinator = new ImageRecognitionCoordinator({
       store,
+      resetEpoch: 0,
       sendMessage,
       clientId: 'client-shared-host-bound',
     });
@@ -1075,7 +1301,7 @@ describe('offscreen OCR protocol and lifecycle', () => {
       languageGroup: 'eng',
       modelVersion: 'tessdata-fast-87416418',
     })).resolves.toMatchObject({ status: 'failed', code: 'host-unavailable' });
-    expect(sendMessage).toHaveBeenCalledTimes(2);
+    expect(sendMessage).toHaveBeenCalledTimes(4);
     expect(calls).toHaveLength(0);
   });
 
@@ -1103,6 +1329,7 @@ describe('offscreen OCR protocol and lifecycle', () => {
     });
     const coordinator = new ImageRecognitionCoordinator({
       store,
+      resetEpoch: 0,
       sendMessage,
       clientId: 'client-unavailable-fallback',
     });
@@ -1140,6 +1367,7 @@ describe('offscreen OCR protocol and lifecycle', () => {
     });
     const coordinator = new ImageRecognitionCoordinator({
       store,
+      resetEpoch: 0,
       sendMessage,
       clientId: 'client-first-result',
     });
@@ -1154,6 +1382,223 @@ describe('offscreen OCR protocol and lifecycle', () => {
       result: { providerId: 'chrome-text-detector' },
     });
     expect(calls).toHaveLength(1);
+  });
+
+  it('continues accepted candidates with prior geometry and corroboration', async () => {
+    const store = memoryStore();
+    const calls: OffscreenOcrJob[] = [];
+    const sendMessage = vi.fn(async (message: unknown) => {
+      if (isEnsureMessage(message)) {
+        return { kind: 'simul:ocr-v1:host-ready', version: 1, ready: true };
+      }
+      const command = readOffscreenOcrCommand(message);
+      if (command?.kind !== 'simul:ocr-v1:run') return undefined;
+      calls.push(command.job);
+      return success(command.job, {
+        providerId: command.job.providerId,
+        bitmapWidth: command.job.bitmapWidth,
+        bitmapHeight: command.job.bitmapHeight,
+        transcript: 'News',
+        regions: [{
+          text: 'News',
+          confidence: command.job.providerId === 'chrome-text-detector'
+            ? 0.9
+            : 0.4,
+          boundingBox: { x: 12, y: 14, width: 90, height: 24 },
+        }],
+      });
+    });
+    const coordinator = new ImageRecognitionCoordinator({
+      store,
+      resetEpoch: 0,
+      sendMessage,
+      clientId: 'client-accepted-continuation',
+    });
+    const route = {
+      providerOrder: ['chrome-text-detector', 'tesseract'] as const,
+      sourceLanguage: 'en',
+      languageGroup: 'eng',
+      modelVersion: 'tessdata-fast-87416418',
+      minimumConfidence: 0.65 as const,
+    };
+
+    const first = await coordinator.recognize(pixels, route);
+    expect(first).toMatchObject({
+      status: 'complete',
+      result: { providerId: 'chrome-text-detector' },
+      continuation: {
+        kind: 'simul:image-recognition-continuation',
+      },
+    });
+    if (first.status !== 'complete' || !first.continuation) {
+      throw new Error('Expected a later OCR candidate.');
+    }
+    const second = await coordinator.continueRecognition(
+      pixels,
+      first.continuation,
+    );
+
+    expect(second).toMatchObject({
+      status: 'complete',
+      result: { providerId: 'tesseract', transcript: 'News' },
+      quality: { corroboratedRegions: 1 },
+    });
+    expect(calls.map(({ providerId }) => providerId)).toEqual([
+      'chrome-text-detector',
+      'tesseract',
+    ]);
+    expect(calls[1]?.hints).toEqual([{
+      text: '',
+      boundingBox: { x: 12, y: 14, width: 90, height: 24 },
+    }]);
+
+    const cachedFirst = await coordinator.recognize(pixels, route);
+    if (cachedFirst.status !== 'complete' || !cachedFirst.continuation) {
+      throw new Error('Expected a cached later OCR candidate.');
+    }
+    await expect(coordinator.continueRecognition(
+      pixels,
+      cachedFirst.continuation,
+    )).resolves.toMatchObject({
+      status: 'complete',
+      cacheAccess: 'hit',
+      result: { providerId: 'tesseract' },
+    });
+    expect(calls).toHaveLength(2);
+  });
+
+  it('keeps continuation caches isolated by their exact evidence lineage', async () => {
+    const store = memoryStore();
+    const calls: OffscreenOcrJob[] = [];
+    let chromeResult = 0;
+    const sendMessage = vi.fn(async (message: unknown) => {
+      if (isEnsureMessage(message)) {
+        return { kind: 'simul:ocr-v1:host-ready', version: 1, ready: true };
+      }
+      const command = readOffscreenOcrCommand(message);
+      if (command?.kind !== 'simul:ocr-v1:run') return undefined;
+      calls.push(command.job);
+      if (command.job.providerId === 'chrome-text-detector') {
+        chromeResult += 1;
+        const x = chromeResult * 10;
+        return success(command.job, {
+          providerId: 'chrome-text-detector',
+          bitmapWidth: command.job.bitmapWidth,
+          bitmapHeight: command.job.bitmapHeight,
+          transcript: `News ${chromeResult}`,
+          regions: [{
+            text: `News ${chromeResult}`,
+            confidence: 0.9,
+            boundingBox: { x, y: 12, width: 80, height: 20 },
+          }],
+        });
+      }
+      return success(command.job, imageResultWithText(command.job, 'fallback'));
+    });
+    const coordinator = new ImageRecognitionCoordinator({
+      store,
+      resetEpoch: 0,
+      sendMessage,
+      clientId: 'client-continuation-lineage',
+      maxCacheEntries: 2,
+    });
+    const route = {
+      providerOrder: ['chrome-text-detector', 'tesseract'] as const,
+      sourceLanguage: 'en',
+      languageGroup: 'eng',
+      modelVersion: 'tessdata-fast-87416418',
+    };
+
+    const first = await coordinator.recognize(pixels, route);
+    if (first.status !== 'complete' || !first.continuation) {
+      throw new Error('Expected the first continuation.');
+    }
+    await coordinator.recognize({
+      ...pixels,
+      pixelHash: 'cd'.repeat(32),
+    }, {
+      providerOrder: ['tesseract'],
+      sourceLanguage: 'en',
+      languageGroup: 'eng',
+      modelVersion: 'tessdata-fast-87416418',
+    });
+    const second = await coordinator.recognize(pixels, route);
+    if (second.status !== 'complete' || !second.continuation) {
+      throw new Error('Expected the second continuation.');
+    }
+
+    await coordinator.continueRecognition(pixels, first.continuation);
+    await coordinator.continueRecognition(pixels, second.continuation);
+
+    const fallbackCalls = calls.filter(({ providerId, pixelHash }) =>
+      providerId === 'tesseract' && pixelHash === pixels.pixelHash
+    );
+    expect(fallbackCalls).toHaveLength(2);
+    expect(fallbackCalls.map(({ hints }) => hints?.[0]?.boundingBox.x))
+      .toEqual([10, 20]);
+    expect(coordinator.snapshotStats().entries).toBeLessThanOrEqual(2);
+  });
+
+  it('bounds retained continuation evidence while keeping provider fallthrough', async () => {
+    const store = memoryStore();
+    const calls: OffscreenOcrJob[] = [];
+    const largeText = 'x'.repeat(100);
+    const sendMessage = vi.fn(async (message: unknown) => {
+      if (isEnsureMessage(message)) {
+        return { kind: 'simul:ocr-v1:host-ready', version: 1, ready: true };
+      }
+      const command = readOffscreenOcrCommand(message);
+      if (command?.kind !== 'simul:ocr-v1:run') return undefined;
+      calls.push(command.job);
+      return success(command.job, {
+        providerId: command.job.providerId,
+        bitmapWidth: command.job.bitmapWidth,
+        bitmapHeight: command.job.bitmapHeight,
+        transcript: largeText,
+        regions: [{
+          text: largeText,
+          confidence: command.job.providerId === 'chrome-text-detector'
+            ? 0.9
+            : 0.4,
+          boundingBox: { x: 10, y: 12, width: 80, height: 20 },
+        }],
+      });
+    });
+    const coordinator = new ImageRecognitionCoordinator({
+      store,
+      resetEpoch: 0,
+      sendMessage,
+      clientId: 'client-bounded-continuation',
+      maxCacheWeight: 100,
+    });
+    const route = {
+      providerOrder: ['chrome-text-detector', 'tesseract'] as const,
+      sourceLanguage: 'en',
+      languageGroup: 'eng',
+      modelVersion: 'tessdata-fast-87416418',
+      minimumConfidence: 0.65 as const,
+    };
+
+    const first = await coordinator.recognize(pixels, route);
+    if (first.status !== 'complete' || !first.continuation) {
+      throw new Error('Expected a bounded continuation.');
+    }
+    expect(coordinator.snapshotStats().weight).toBeLessThanOrEqual(100);
+    const second = await coordinator.continueRecognition(
+      pixels,
+      first.continuation,
+    );
+
+    expect(second).toMatchObject({
+      status: 'complete',
+      result: { providerId: 'tesseract', regions: [] },
+    });
+    expect(calls.map(({ providerId }) => providerId)).toEqual([
+      'chrome-text-detector',
+      'tesseract',
+    ]);
+    expect(calls[1]?.hints).toHaveLength(1);
+    expect(coordinator.snapshotStats().weight).toBeLessThanOrEqual(100);
   });
 
   it('treats ensure-host rejection as retryable without sending the failed attempt', async () => {
@@ -1174,6 +1619,7 @@ describe('offscreen OCR protocol and lifecycle', () => {
     });
     const coordinator = new ImageRecognitionCoordinator({
       store,
+      resetEpoch: 0,
       sendMessage,
       clientId: 'client-ensure-retry',
     });
@@ -1200,6 +1646,7 @@ describe('offscreen OCR protocol and lifecycle', () => {
     });
     const coordinator = new ImageRecognitionCoordinator({
       store,
+      resetEpoch: 0,
       sendMessage,
       clientId: 'client-ensure-cancel',
     });

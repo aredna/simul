@@ -3,6 +3,7 @@ import {
   type ReplicaSourceDocumentIdentity,
 } from '../replica/source-identity';
 import {
+  hasSourceCredentialSecretAncestor,
   hasSourceImageCaptureBlockingAncestor,
 } from '../replica/source-privacy-policy';
 import {
@@ -61,13 +62,22 @@ export const MAX_SOURCE_IMAGE_IDENTITY_RETRY_FRAMES = 4;
 const MAX_IMAGE_DIMENSION = 1_000_000;
 const MAX_PRIVATE_TOKEN_INPUT = 64 * 1024;
 const IMAGE_CAPTURE_ROUTING_ATTRIBUTES = new Set([
+  'alt',
+  'autocomplete',
+  'aria-label',
+  'aria-hidden',
   'aria-controls',
   'aria-expanded',
   'aria-haspopup',
   'aria-pressed',
   'contenteditable',
+  'class',
+  'hidden',
   'href',
+  'id',
   'role',
+  'style',
+  'type',
 ]);
 
 type PrivateSourceToken =
@@ -259,6 +269,7 @@ export class SourceImageObserver {
     );
     this.#mutationObserver.observe(this.#environment.document, {
       attributes: true,
+      characterData: true,
       attributeFilter: [
         'src',
         'srcset',
@@ -268,6 +279,10 @@ export class SourceImageObserver {
         'class',
         'style',
         'lang',
+        'alt',
+        'aria-label',
+        'aria-hidden',
+        'hidden',
         'role',
         'href',
         'aria-controls',
@@ -275,6 +290,12 @@ export class SourceImageObserver {
         'aria-haspopup',
         'aria-pressed',
         'contenteditable',
+        'type',
+        'autocomplete',
+        'id',
+        'rel',
+        'media',
+        'disabled',
       ],
       childList: true,
       subtree: true,
@@ -548,15 +569,22 @@ export class SourceImageObserver {
     const routingCandidates = new Set<HTMLImageElement>();
     let refreshAllRouting = false;
     for (const record of records) {
+      if (record.type === 'characterData') {
+        if (isInsideStyleSource(record.target)) refreshAllRouting = true;
+        continue;
+      }
       if (record.type === 'childList') {
         for (const node of record.removedNodes) {
           for (const image of collectImages(node)) this.#remove(image);
           if (containsHtmlBaseElement(node)) refreshAllRouting = true;
+          if (containsStyleSourceElement(node)) refreshAllRouting = true;
         }
         for (const node of record.addedNodes) {
           for (const image of collectImages(node)) this.#discover(image);
           if (containsHtmlBaseElement(node)) refreshAllRouting = true;
+          if (containsStyleSourceElement(node)) refreshAllRouting = true;
         }
+        if (isInsideStyleSource(record.target)) refreshAllRouting = true;
       }
       if (record.type !== 'attributes' || !isElement(record.target)) continue;
       const attributeName = record.attributeName?.toLowerCase();
@@ -565,6 +593,16 @@ export class SourceImageObserver {
         record.target.namespaceURI === 'http://www.w3.org/1999/xhtml' &&
         record.target.localName.toLowerCase() === 'base'
       ) {
+        refreshAllRouting = true;
+        continue;
+      }
+      if (attributeAffectsExternalStyleSource(record.target, attributeName)) {
+        refreshAllRouting = true;
+        continue;
+      }
+      if (attributeName === 'aria-controls' || attributeName === 'id') {
+        // aria-controls can target a sibling subtree, so descendant-only
+        // invalidation cannot prove which image admission changed.
         refreshAllRouting = true;
         continue;
       }
@@ -617,13 +655,15 @@ export class SourceImageObserver {
   }
 
   #isPrivate(image: HTMLImageElement): boolean {
-    if (hasSourceImageCaptureBlockingAncestor(image)) return true;
-    if (!this.#environment.isPrivateImage) return false;
-    try {
-      return this.#environment.isPrivateImage(image);
-    } catch {
-      return true;
+    if (this.#environment.isPrivateImage) {
+      try {
+        return this.#environment.isPrivateImage(image);
+      } catch {
+        return true;
+      }
     }
+    return hasSourceCredentialSecretAncestor(image) ||
+      hasSourceImageCaptureBlockingAncestor(image);
   }
 
   #readNodeId(image: HTMLImageElement): number | undefined {
@@ -725,6 +765,43 @@ function containsHtmlBaseElement(node: Node): boolean {
   return [...node.querySelectorAll('base')].some((candidate) =>
     candidate.namespaceURI === 'http://www.w3.org/1999/xhtml'
   );
+}
+
+function containsStyleSourceElement(node: Node): boolean {
+  if (!isElement(node)) return false;
+  if (isStyleSourceElement(node)) return true;
+  return [...node.querySelectorAll('style,link')].some(isStyleSourceElement);
+}
+
+function isInsideStyleSource(node: Node): boolean {
+  const element = isElement(node) ? node : node.parentElement;
+  return Boolean(element?.closest('style'));
+}
+
+function attributeAffectsExternalStyleSource(
+  element: Element,
+  attributeName: string | undefined,
+): boolean {
+  if (
+    !attributeName ||
+    !['href', 'rel', 'media', 'disabled'].includes(attributeName) ||
+    element.namespaceURI !== 'http://www.w3.org/1999/xhtml'
+  ) return false;
+  const tagName = element.localName.toLowerCase();
+  return tagName === 'style' || tagName === 'link';
+}
+
+function isStyleSourceElement(element: Element): boolean {
+  if (element.namespaceURI !== 'http://www.w3.org/1999/xhtml') return false;
+  const tagName = element.localName.toLowerCase();
+  if (tagName === 'style') return true;
+  if (tagName !== 'link') return false;
+  try {
+    return element.getAttribute('rel')?.trim().toLowerCase()
+      .split(/\s+/u).includes('stylesheet') === true;
+  } catch {
+    return true;
+  }
 }
 
 function readPrivateSourceToken(image: HTMLImageElement): PrivateSourceToken {
