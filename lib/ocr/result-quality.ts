@@ -199,7 +199,8 @@ function isCorroborated(
   const normalized = normalizeCorroborationText(region.text);
   if (!normalized || !results) return false;
   return results.some((result) =>
-    providerFamily(result.providerId) !== providerFamily(providerId) &&
+    imageTextProviderFamily(result.providerId) !==
+      imageTextProviderFamily(providerId) &&
     result.regions.some((candidate) =>
       (
         candidate.confidence === undefined ||
@@ -212,7 +213,7 @@ function isCorroborated(
 }
 
 /** Different JS bindings around Tesseract remain one recognition family. */
-function providerFamily(
+export function imageTextProviderFamily(
   providerId: ImageTextResult['providerId'],
 ): ImageTextResult['providerId'] | 'tesseract-family' {
   return providerId === 'tesseract' || providerId === 'tesseract-wasm-direct'

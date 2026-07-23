@@ -232,6 +232,63 @@ describe('ImageScanScheduler', () => {
     expect(scheduler.settle(stale)).toBe(false);
   });
 
+  it('requeues only exact-current inactive work without granting a small-image override', () => {
+    const scheduler = new ImageScanScheduler(documentIdentity, {
+      policy: 'visible-only',
+      skipSmallImages: true,
+    });
+    const current = descriptor(10, 'visible');
+    expect(scheduler.apply(upsert(current))).toMatchObject({ status: 'queued' });
+    const completed = scheduler.takeNext()!;
+    expect(scheduler.settle(completed)).toBe(true);
+
+    expect(scheduler.requeueCurrent({
+      ...current,
+      document: { ...documentIdentity, documentId: 'foreign-document' },
+    })).toBe(false);
+    expect(scheduler.requeueCurrent({
+      ...current,
+      observationRevision: 2,
+    })).toBe(false);
+    expect(scheduler.requeueCurrent(current)).toBe(true);
+    expect(scheduler.queueSnapshot()).toMatchObject([{
+      descriptor: { nodeId: 10, contentRevision: 1, observationRevision: 1 },
+      priority: 'visible',
+      manualOverride: false,
+    }]);
+
+    const active = scheduler.takeNext()!;
+    expect(scheduler.requeueCurrent(current)).toBe(true);
+    expect(scheduler.drainCancellations()).toMatchObject([{
+      reason: 'superseded',
+      job: { descriptor: { nodeId: 10 } },
+    }]);
+    expect(scheduler.settle(active)).toBe(false);
+    const retried = scheduler.takeNext()!;
+    expect(scheduler.settle(retried)).toBe(true);
+
+    const small = descriptor(11, 'visible', {
+      renderedWidth: 10,
+      renderedHeight: 10,
+      intrinsicWidth: 24,
+      intrinsicHeight: 24,
+    });
+    expect(scheduler.apply(upsert(small))).toEqual({
+      status: 'skipped',
+      reason: 'small-rendered',
+    });
+    expect(scheduler.requeueCurrent(small)).toBe(false);
+    expect(scheduler.queueSnapshot()).toEqual([]);
+    expect(scheduler.decisionFor(11)).toBe('small-rendered');
+
+    expect(scheduler.overrideCurrent(documentIdentity, 11, 1)).toBe(true);
+    expect(scheduler.queueSnapshot()).toMatchObject([{
+      descriptor: { nodeId: 11 },
+      priority: 'manual',
+      manualOverride: true,
+    }]);
+  });
+
   it('defers unstable pixels until observation changes without a retry loop', () => {
     const scheduler = new ImageScanScheduler(documentIdentity, {
       policy: 'eager-all',

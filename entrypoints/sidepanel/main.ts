@@ -306,6 +306,7 @@ const DYNAMIC_UI_LABELS = [
   'Off by default. Visible image pixels stay on this device and are discarded after OCR.',
   'Grant image access',
   'Image reading priority',
+  'Methods are attempted from top to bottom. Uncertain accessibility text may be compared with later OCR; the saved order breaks close ties.',
   'Minimum OCR confidence',
   'Higher values reduce false text detections but may miss faint or stylized text.',
   'Scan images',
@@ -4488,8 +4489,16 @@ function renderImageAnalysisControls(): void {
     const orderLabel = document.createElement('p');
     orderLabel.className = 'microcopy';
     setUiText(orderLabel, 'Image reading priority');
-    orderLabel.title = 'Simul tries enabled local accessibility and OCR methods from top to bottom.';
+    orderLabel.title =
+      'This order controls which methods Simul attempts first and breaks close evidence ties.';
     root.append(orderLabel);
+    const orderHelp = document.createElement('p');
+    orderHelp.className = 'microcopy';
+    setUiText(
+      orderHelp,
+      'Methods are attempted from top to bottom. Uncertain accessibility text may be compared with later OCR; the saved order breaks close ties.',
+    );
+    root.append(orderHelp);
     const list = document.createElement('ol');
     list.className = 'ocr-provider-order';
     const disabledMethods = new Set(

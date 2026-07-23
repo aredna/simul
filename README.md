@@ -4,7 +4,7 @@ Simul is a Chrome translation companion that keeps the original website intact
 and places a live, inert, translated replica beside it in the side panel or a
 detached window.
 
-Current trial build: **0.3.2 beta v.20260723.4** · Desktop Chrome **138+** ·
+Current trial build: **0.3.2 beta v.20260723.5** · Desktop Chrome **138+** ·
 Chrome Manifest V3
 
 ## Why Simul exists
@@ -87,8 +87,8 @@ do not update automatically: after updating the repository, select **Reload**
 on Simul's extension card and reopen the companion.
 
 For this OCR trial, confirm the extension card shows
-`0.3.2 beta v.20260723.4` and Simul Options shows
-`Build 0.3.2 beta v.20260723.4`. If either identity differs, reload Simul from
+`0.3.2 beta v.20260723.5` and Simul Options shows
+`Build 0.3.2 beta v.20260723.5`. If either identity differs, reload Simul from
 `chrome://extensions` before evaluating websites.
 
 ## What ships in 0.3.2

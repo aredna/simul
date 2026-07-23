@@ -129,6 +129,16 @@ whole-image label. Pixel capture remains blocked for credential overlap, while
 non-secret images inside controls are admitted only by the control-images
 switch and revalidated immediately before and after capture. Small-image
 skipping applies to OCR pixels, not positive-area accessibility labels.
+Short or exact-document repeated accessibility labels are provisional rather
+than rejected. A bounded memory-only deterministic ranker compares one with
+later eligible OCR when needed, or with accepted OCR already held from an
+earlier saved-order step, using normalized agreement, admitted OCR confidence,
+independent-family corroboration, role-free text shape, and current-document
+repetition. It selects source evidence before translation, projection, or Auto
+language voting; close results retain the saved method order. The policy never
+uses phrase/site lists, longest-text-wins, remote inference, or persistent
+learning, and falls back to the semantic candidate when OCR cannot run or
+produce admissible text.
 
 Reliable image capture after the temporary `activeTab` grant expires uses a
 literal `<all_urls>` optional host grant shared with all-sites automatic

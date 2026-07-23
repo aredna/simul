@@ -9,7 +9,7 @@ import {
 } from './tools/ocr-build-profile';
 
 const ocrBuildProfile = readOcrBuildProfile(process.env);
-const betaBuildSuffix = 'beta v.20260723.4';
+const betaBuildSuffix = 'beta v.20260723.5';
 const tesseractEnabled = ocrBuildProfile.enabledProviderIds.includes('tesseract');
 const tesseractWasmDirectEnabled = ocrBuildProfile.enabledProviderIds.includes(
   'tesseract-wasm-direct',
