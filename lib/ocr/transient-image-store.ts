@@ -16,6 +16,7 @@ export interface TransientImageInputStore {
   get(id: string): Promise<Blob | undefined>;
   remove(id: string): Promise<void>;
   clearExpired(): Promise<void>;
+  clearAll?(): Promise<void>;
 }
 
 export class IndexedDbTransientImageStore implements TransientImageInputStore {
@@ -83,6 +84,11 @@ export class IndexedDbTransientImageStore implements TransientImageInputStore {
       transaction.onerror = () => reject(transaction.error ?? new Error('Transient image cleanup failed.'));
       transaction.onabort = () => reject(transaction.error ?? new Error('Transient image cleanup aborted.'));
     });
+  }
+
+  async clearAll(): Promise<void> {
+    const database = await this.#database();
+    await transactionDone(database, 'readwrite', (store) => store.clear());
   }
 
   #database(): Promise<IDBDatabase> {

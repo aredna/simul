@@ -18,6 +18,10 @@ import {
   type RecorderOptions,
 } from '../lib/replica/page-recorder';
 import {
+  createLiveRecorderOptions,
+  disposeLiveRecorderOptions,
+} from '../lib/replica/live-recorder-session';
+import {
   MAX_REPLICA_STRING_LENGTH,
   createCheckpointCommand,
   createCheckpointError,
@@ -187,6 +191,61 @@ describe('page recorder checkpoint', () => {
       payload: { code: 'checkpoint_too_large' },
     });
     expect(recorderStarted).toBe(false);
+  });
+
+  it('does not read withheld text while preflighting checkpoint capacity', async () => {
+    const { document, window } = parseHTML(
+      '<html><body><div role="textbox"><span>credential</span></div></body></html>',
+    );
+    Object.defineProperty(window, 'top', { configurable: true, value: window });
+    Object.assign(globalThis, {
+      Node: window.Node,
+      Element: window.Element,
+      Text: window.Text,
+    });
+    Object.defineProperty(document, 'styleSheets', {
+      configurable: true,
+      value: [],
+    });
+    const secretText = document.querySelector('span')!.firstChild!;
+    Object.defineProperty(secretText, 'nodeValue', {
+      configurable: true,
+      get: () => {
+        throw new Error('withheld nodeValue must not be read');
+      },
+    });
+
+    const response = await captureMaskedCheckpoint(identity, {
+      document,
+      window: window as unknown as Window,
+      start: (options) => {
+        options.emit(bridgeCheckpointEvents()[0]);
+        options.emit(bridgeCheckpointEvents()[1]);
+        return () => undefined;
+      },
+    });
+
+    expect(response).toMatchObject({ kind: 'simul:replica-v2:checkpoint' });
+  });
+
+  it('withholds a disclosure target added after recorder startup', async () => {
+    const { document } = parseHTML('<html><body><p>ordinary</p></body></html>');
+    const options = createLiveRecorderOptions(() => undefined, document);
+    const ordinary = document.querySelector('p')! as HTMLElement;
+    expect(options.maskTextFn('ordinary', ordinary)).toBe('ordinary');
+
+    const trigger = document.createElement('button');
+    trigger.setAttribute('aria-controls', 'late-panel');
+    const panel = document.createElement('section');
+    panel.id = 'late-panel';
+    const text = document.createElement('span');
+    text.textContent = 'late disclosure payload';
+    panel.append(text);
+    document.body.append(trigger, panel);
+    await Promise.resolve();
+
+    expect(options.maskTextFn('late disclosure payload', text)).toBe('********');
+    disposeLiveRecorderOptions(options);
   });
 });
 

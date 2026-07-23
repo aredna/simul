@@ -170,6 +170,58 @@ describe('AutoImageLanguageProbe', () => {
     });
   });
 
+  it('reuses one bounded route across provider continuations', () => {
+    const identity = sample();
+    const pixelHash = hash('33');
+    const probe = new AutoImageLanguageProbe(0);
+    expect(probe.beginAttempt(identity, pixelHash, 'en', 1)).toBe(true);
+    expect(probe.observe({
+      sampleIdentity: identity,
+      pixelHash,
+      routeLanguage: 'en',
+      transcript: 'Public notice',
+      confidence: 0.95,
+      detectedLanguage: 'en',
+    })).toEqual({ status: 'continue' });
+
+    expect(probe.resumeAttempt(identity, pixelHash, 'en', 2)).toBe(true);
+    expect(probe.attempts).toBe(1);
+    expect(probe.completeAttempt(identity, pixelHash, 'en')).toBe(true);
+  });
+
+  it('requires two distinct semantic image labels before resolving the page', () => {
+    const first = sample();
+    const second = sample();
+    const probe = new AutoImageLanguageProbe(0);
+    expect(probe.observeSemantic({
+      sampleIdentity: first,
+      text: 'お知らせ',
+      detectedLanguage: 'ja',
+      now: 1,
+    })).toEqual({ status: 'continue' });
+    expect(probe.observeSemantic({
+      sampleIdentity: first,
+      text: '最新情報',
+      detectedLanguage: 'ja',
+      now: 2,
+    })).toEqual({ status: 'continue' });
+    expect(probe.attempts).toBe(0);
+    expect(probe.images).toBe(1);
+
+    expect(probe.observeSemantic({
+      sampleIdentity: second,
+      text: '法人番号',
+      detectedLanguage: 'ja',
+      now: 3,
+    })).toEqual({
+      status: 'resolved',
+      language: 'ja',
+      evidence: 'distinct-images',
+      attempts: 0,
+      images: 2,
+    });
+  });
+
   it('releases cancelled attempts without permanently consuming a sample', () => {
     const pixelHash = hash('41');
     const identity = sample();

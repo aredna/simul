@@ -121,6 +121,64 @@
       ></span>
     </nav>
 
+    <dialog
+      id="read-scope-setup"
+      class="setup-dialog"
+      aria-modal="true"
+      aria-labelledby="read-scope-setup-title"
+      aria-describedby="read-scope-setup-description"
+    >
+      <div class="setup-dialog__card">
+        <h1 id="read-scope-setup-title">Choose what the replica may read</h1>
+        <p id="read-scope-setup-description">Website actions are always disabled. Passwords, authentication codes, card-autofill fields, hidden/file inputs, and CSS-masked secrets are never read. Other visible content may be personal, so choose the level you want.</p>
+        <label>
+          <span>Starting profile</span>
+          <select id="setup-read-profile" autofocus>
+            <option value="page-only">Page only</option>
+            <option value="standard" selected>Standard (recommended)</option>
+            <option value="full-visible">Full visible</option>
+            <option value="custom" disabled>Custom (set with the choices below)</option>
+          </select>
+        </label>
+        <div id="setup-read-scope-controls" class="read-scope-controls"></div>
+        <section
+          id="setup-reset-cleanup"
+          class="setup-reset-cleanup"
+          aria-labelledby="setup-reset-cleanup-title"
+          hidden
+        >
+          <h2 id="setup-reset-cleanup-title">Reset cleanup needs attention</h2>
+          <p id="setup-reset-cleanup-status" role="status" aria-live="polite">Core settings are already safe, but optional permission or runtime cleanup is still pending.</p>
+          <button
+            id="retry-setup-reset-cleanup"
+            type="button"
+            aria-describedby="setup-reset-cleanup-status"
+          >Retry cleanup</button>
+        </section>
+        <div class="action-row">
+          <button id="complete-read-scope-setup" class="primary" type="button">Use these settings</button>
+        </div>
+        <p id="setup-read-scope-status" class="status" role="status" aria-live="polite"></p>
+      </div>
+    </dialog>
+
+    <dialog
+      id="reset-settings-dialog"
+      class="reset-settings-dialog"
+      aria-modal="true"
+      aria-labelledby="reset-settings-dialog-title"
+      aria-describedby="reset-settings-dialog-description"
+    >
+      <form method="dialog">
+        <h2 id="reset-settings-dialog-title">Reset all extension settings?</h2>
+        <p id="reset-settings-dialog-description">This resets Simul settings and removes optional site and image permissions. Packaged OCR files and Chrome translation models are not removed.</p>
+        <div class="action-row">
+          <button value="cancel" type="submit">Cancel</button>
+          <button id="confirm-reset-all-settings" class="danger" value="reset" type="submit">Reset settings</button>
+        </div>
+      </form>
+    </dialog>
+
     <section id="control-overlay" class="control-overlay" hidden aria-label="Translation options">
       <div class="overlay-heading">
         <div class="overlay-title">
@@ -208,6 +266,25 @@
               <option value="active" data-ui-label="Active browser tab">Active browser tab</option>
             </select>
           </label>
+        </div>
+      </details>
+
+      <details id="readable-content-options" class="options-group" open>
+        <summary>Readable content &amp; security</summary>
+        <p class="microcopy">The mirror stays actionless under every choice. Credential secrets remain blocked. Changes apply while the companion is running.</p>
+        <label>
+          <span>Read profile</span>
+          <select id="read-scope-profile">
+            <option value="page-only">Page only</option>
+            <option value="standard">Standard</option>
+            <option value="full-visible">Full visible</option>
+            <option value="custom" disabled>Custom (set with the choices below)</option>
+          </select>
+        </label>
+        <div id="read-scope-controls" class="read-scope-controls"></div>
+        <div class="reset-settings">
+          <button id="reset-all-settings" class="danger" type="button">Reset all extension settings…</button>
+          <p id="reset-settings-status" class="microcopy" role="status" aria-live="polite"></p>
         </div>
       </details>
 

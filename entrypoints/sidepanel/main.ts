@@ -40,6 +40,7 @@ import {
   invokeLivePageDeltaCaptureBridge,
   invokeLivePageObserverBridge,
   invokeLivePageObserverUnregisterBridge,
+  isConfirmedLivePageObserverRelease,
   parseLivePageDelta,
   readLivePageDirtyMessage,
   readLivePageObserverInstallation,
@@ -78,10 +79,17 @@ import {
   isImageScanPolicy,
 } from '../../lib/ocr/contracts';
 import type { ImageTextProviderId } from '../../lib/ocr/known-provider-ids';
+import {
+  ACCESSIBILITY_TEXT_METHOD_ID,
+  enabledOcrProviderOrder,
+  visibleImageReadingMethodOrder,
+  type ImageReadingMethodId,
+} from '../../lib/ocr/image-reading-methods';
 import type { AutoLanguageProbeEvidence } from '../../lib/ocr/auto-language-probe';
 import { ImageTranslationDiagnosticHistory } from '../../lib/ocr/diagnostic-history';
 import {
   ImageTranslationController,
+  type AutoImageLanguageEvidenceOrigin,
   type ImageTranslationDiagnostic,
 } from '../../lib/ocr/image-translation-controller';
 import { openChromeImageSource } from '../../lib/ocr/image-source-client';
@@ -110,7 +118,6 @@ import {
   imageReplicaActivationFailureReason,
 } from '../../lib/ocr/replica-activation';
 import {
-  PREFERENCE_LOCK_NAME,
   readPreferenceCommandResult,
   type PreferenceCommand,
   type PreferenceCommandResult,
@@ -131,21 +138,27 @@ import {
   isTextLayoutMode,
   parseCompanionPreferences,
   permissionOriginsForMode,
+  selectLiveCompanionPreferenceChange,
+  selectLatestCompanionPreferences,
   withAutoTranslationMode,
-  withImageAnalysisSettings,
-  withViewSettings,
   type AutoTranslationMode,
   type CompanionLaunchBehavior,
   type CompanionPreferences,
   type CompanionSurface,
-  type CompanionImageAnalysisSettings,
   type CompanionImageAnalysisSettingsPatch,
-  type CompanionViewSettings,
   type CompanionViewSettingsPatch,
   type PopoutTabMode,
   type ReplicaEnginePreference,
   type ReplicaViewMode,
 } from '../../lib/preferences';
+import {
+  PREFERENCE_SAFETY_PORT_NAME,
+  PREFERENCE_SAFETY_PROTOCOL_VERSION,
+  readPreferenceSafetyPrepareMessage,
+  readPreferenceSafetyReleaseMessage,
+} from '../../lib/preference-safety-coordinator';
+import { PreferenceSafetyClient } from '../../lib/preference-safety-client';
+import { installResetConfirmationController } from '../../lib/reset-confirmation-controller';
 import { translateWithSession } from '../../lib/translation-pipeline';
 import {
   type ReplicaCaptureRequest,
@@ -165,6 +178,21 @@ import {
 } from '../../lib/replica/fidelity-policy';
 import { IsolatedHtmlReplicaEngine } from '../../lib/replica/isolated-html-engine';
 import {
+  PAGE_ONLY_REPLICA_READ_SCOPE,
+  effectiveReplicaReadScope,
+  REPLICA_READ_SCOPE_KEYS,
+  REPLICA_READ_SCOPE_SETUP_VERSION,
+  deriveReplicaReadScopeProfile,
+  intersectReplicaReadScopes,
+  replicaReadScopeForProfile,
+  replicaReadScopeFingerprint,
+  replicaReadScopeNarrows,
+  type ReplicaReadScope,
+  type ReplicaReadScopeKey,
+  type ReplicaReadScopeProfileId,
+} from '../../lib/replica/read-scope-policy';
+import { RemoteReadScopeSafetyGates } from '../../lib/replica/read-scope-safety-gates';
+import {
   LiveReplicaFailureRecoveryGate,
   LegacyTransitionGate,
   isCommittedShadowReplica,
@@ -173,6 +201,7 @@ import {
 } from '../../lib/replica/legacy-transition-gate';
 import { LegacyReplicaEngine } from '../../lib/replica/legacy-engine';
 import { openChromeReplicaLiveStream } from '../../lib/replica/live-stream-client';
+import { openChromeSemanticSource } from '../../lib/replica/semantic-source-client';
 import {
   createCheckpointCommand,
   createReplicaIdentity,
@@ -271,11 +300,12 @@ const DYNAMIC_UI_LABELS = [
   'OCR On',
   'OCR Off',
   'Translate text inside images (local, experimental)',
-  'Image translation is saved but paused. Grant image access so Chrome can capture visible pixels for local OCR.',
+  'Accessibility text can run without image access. Grant image access only to enable local pixel OCR fallbacks.',
+  'Image translation is saved but pixel OCR needs image access. Click to grant access.',
   'Checking Chrome image access…',
   'Off by default. Visible image pixels stay on this device and are discarded after OCR.',
   'Grant image access',
-  'OCR priority',
+  'Image reading priority',
   'Minimum OCR confidence',
   'Higher values reduce false text detections but may miss faint or stylized text.',
   'Scan images',
@@ -339,6 +369,33 @@ const controlsOverlay = requireElement<HTMLElement>('#control-overlay');
 const quickTranslatorOverlay = requireElement<HTMLElement>('#quick-translator');
 const buildVersionElement = requireElement<HTMLElement>('#build-version');
 const imageAnalysisHost = requireElement<HTMLElement>('#image-analysis-host');
+const readScopeSetup = requireElement<HTMLDialogElement>('#read-scope-setup');
+const setupReadProfile = requireElement<HTMLSelectElement>('#setup-read-profile');
+const setupReadScopeControls = requireElement<HTMLElement>(
+  '#setup-read-scope-controls',
+);
+const completeReadScopeSetupButton = requireElement<HTMLButtonElement>(
+  '#complete-read-scope-setup',
+);
+const setupReadScopeStatus = requireElement<HTMLElement>(
+  '#setup-read-scope-status',
+);
+const setupResetCleanup = requireElement<HTMLElement>('#setup-reset-cleanup');
+const setupResetCleanupStatus = requireElement<HTMLElement>(
+  '#setup-reset-cleanup-status',
+);
+const retrySetupResetCleanupButton = requireElement<HTMLButtonElement>(
+  '#retry-setup-reset-cleanup',
+);
+const readScopeProfile = requireElement<HTMLSelectElement>('#read-scope-profile');
+const readScopeControls = requireElement<HTMLElement>('#read-scope-controls');
+const resetAllSettingsButton = requireElement<HTMLButtonElement>(
+  '#reset-all-settings',
+);
+const resetSettingsDialog = requireElement<HTMLDialogElement>(
+  '#reset-settings-dialog',
+);
+const resetSettingsStatus = requireElement<HTMLElement>('#reset-settings-status');
 const statusElement = requireElement<HTMLElement>('#status');
 const settingsAttention = requireElement<HTMLElement>('#settings-attention');
 const detectedLanguageElement = requireElement<HTMLElement>('#detected-language');
@@ -362,6 +419,17 @@ const composerStatus = requireElement<HTMLElement>('#composer-status');
 let preferences: CompanionPreferences = parseCompanionPreferences(
   DEFAULT_COMPANION_PREFERENCES,
 );
+let readScopeCommitSequence = 0;
+const localReadScopeNarrowingGates = new Map<
+  number,
+  { readonly scope: ReplicaReadScope; failed: boolean }
+>();
+const remoteReadScopeNarrowingGates = new RemoteReadScopeSafetyGates();
+let setupReadScopeDraft = replicaReadScopeForProfile('standard');
+let preferenceSafetyConnectionReady = false;
+let livePreferenceStorageFailClosed = false;
+let setupCleanupWasPending = false;
+let resetInFlight = false;
 const provider = new ChromeTranslatorProvider();
 const captureCoordinator = new LatestWorkCoordinator<CaptureRequest>();
 const detachedIdentityHint = parseDetachedPageIdentityHint(window.location.search);
@@ -398,6 +466,8 @@ const shadowReplicaEngine = new RrwebShadowReplicaEngine({
   presentationHost: visibleReplayHost,
   capture: captureReplicaCheckpoint,
   openStream: openChromeReplicaLiveStream,
+  openSemanticStream: openChromeSemanticSource,
+  getReplicaReadScope: () => currentReplicaReadScope(),
   shouldReplayScroll: () => preferences.syncScroll,
   onLiveApplied: () => {
     legacyTransitionGate.markDirty();
@@ -412,6 +482,8 @@ const isolatedHtmlReplicaEngine = new IsolatedHtmlReplicaEngine({
   presentationHost: visibleReplayHost,
   openStream: openChromeHtmlMirrorStream,
   getReplicaFidelityPolicy: () => preferences.replicaFidelityPolicy,
+  openSemanticStream: openChromeSemanticSource,
+  getReplicaReadScope: () => currentReplicaReadScope(),
   onLiveApplied: () => legacyTransitionGate.markDirty(),
   onLayoutChanged: () => imageTranslationController?.refreshOverlays(),
   onSourceCommit: handleReplicaSourceCommit,
@@ -485,13 +557,14 @@ replicaTranslationCoordinator = new ReplicaTranslationCoordinator(
 );
 
 imageTranslationController = new ImageTranslationController({
-  openSource: (request, onChange, signal) => openChromeImageSource(
+  openSource: (request, onChange, signal, policy) => openChromeImageSource(
     request,
     onChange,
     signal,
     replicaEngineController.mode === 'isolated-html'
       ? 'isolated-html'
       : 'rrweb',
+    policy,
   ),
   createPixelCoordinator: (source, sourceTabId, sourceWindowId) =>
     new PixelAcquisitionCoordinator(
@@ -504,6 +577,7 @@ imageTranslationController = new ImageTranslationController({
   createRecognitionCoordinator: () =>
     createBrowserImageRecognitionCoordinator(
       new IndexedDbTransientImageStore(),
+      preferences.resetRevision,
     ),
   resolveAnchor: (sourceDocument, nodeId) =>
     replicaSurfaceRouter.resolveImageAnchor(sourceDocument, nodeId),
@@ -512,12 +586,13 @@ imageTranslationController = new ImageTranslationController({
   onBusyChange: (busy) => setImageTranslationBusy(busy),
   onDiagnostic: logImageTranslationDiagnostic,
   detectLanguage: async (text) => browser.i18n.detectLanguage(text),
-  onAutoLanguageDetected: (language, evidence, document) => {
+  onAutoLanguageDetected: (language, evidence, document, origin) => {
     if (preferences.sourceLanguage !== 'auto' || resolvedSourceLanguage) return;
     const ready = autoLanguageEvidencePrecedence.offerImageEvidence({
       language,
       evidence,
       document,
+      origin,
       snapshot,
       identity: capturedPageIdentity,
       generation: captureCoordinator.generation,
@@ -649,9 +724,7 @@ let liveObservationAvailable = true;
 let lastSourceScroll: ReturnType<typeof readLivePageScrollMessage>;
 let acceptedScrollMessageCount = 0;
 let availabilityCheckedForPair: string | undefined;
-let viewPreferenceRevision = 0;
 let replicaFidelityCommitInFlight = false;
-let imageAnalysisPreferenceRevision = 0;
 let imageAnalysisControls: HTMLElement | undefined;
 let surfaceTransitionInFlight = false;
 let latestToolbarLaunchStamp: CompanionLaunchStamp | undefined;
@@ -672,23 +745,42 @@ let uiLocalizationScheduled = false;
 let uiLocalizationAbortController: AbortController | undefined;
 let uiLocalizedTarget: SupportedLanguage = 'en';
 let uiLabelTranslations: ReadonlyMap<string, string> = new Map();
-const pendingViewPreferences = new Map<
-  keyof CompanionViewSettings,
-  { revision: number; value: CompanionViewSettings[keyof CompanionViewSettings] }
->();
-const pendingImageAnalysisPreferences = new Map<
-  keyof CompanionImageAnalysisSettings,
-  {
-    revision: number;
-    value: CompanionImageAnalysisSettings[keyof CompanionImageAnalysisSettings];
-  }
->();
 
 const companionBuildIdentity = createExtensionBuildIdentity(
   browser.runtime.getManifest(),
 );
 renderExtensionBuildIdentity(buildVersionElement, companionBuildIdentity);
 console.info(companionBuildIdentity.companionReadyMessage);
+
+const preferenceSafetyClient = new PreferenceSafetyClient({
+  connect: () => browser.runtime.connect({
+    name: PREFERENCE_SAFETY_PORT_NAME,
+  }),
+  refreshCommittedSnapshot: async () => {
+    if (!applyCommittedPreferences(await readStoredPreferences())) {
+      throw new Error('The committed settings snapshot was older than this panel.');
+    }
+  },
+  onSafetyMessage: (message, reply) => {
+    return handlePreferenceSafetyMessage(message, reply);
+  },
+  onFailClosed: () => {
+    preferenceSafetyConnectionReady = false;
+    purgeSourceDerivedRuntime(
+      'The settings safety connection was lost. Read access is Page-only while Simul reconnects…',
+    );
+    syncPreferenceControls();
+  },
+  onReady: () => {
+    preferenceSafetyConnectionReady = true;
+    syncPreferenceControls();
+    restartReplicaAfterReadPolicyChange();
+  },
+});
+preferenceSafetyClient.start();
+window.addEventListener('pagehide', () => preferenceSafetyClient.dispose(), {
+  once: true,
+});
 
 populateLanguageOptions();
 initializeImageAnalysisControls();
@@ -725,9 +817,16 @@ toolbarSizeToggleButton.addEventListener('click', () => {
   updateMirrorLayout();
 });
 toolbarOcrToggleButton.addEventListener('click', () => {
-  void changeImageTranslationEnabled(
-    !preferences.imageTranslationEnabled || imageCaptureAccess !== 'granted',
-  );
+  if (!preferences.imageTranslationEnabled) {
+    void changeImageTranslationEnabled(true);
+  } else if (
+    imageCaptureAccess !== 'granted' &&
+    enabledUsablePixelOcrProviderOrder().length > 0
+  ) {
+    void changeImageTranslationEnabled(true, true);
+  } else {
+    void changeImageTranslationEnabled(false);
+  }
 });
 toolbarTabFollowButton.addEventListener('click', () => {
   if (!isDetachedWindow) return;
@@ -812,6 +911,42 @@ popoutTabModeSelect.addEventListener('change', () => {
 syncScrollInput.addEventListener('change', () => {
   void commitViewPreferencePatch({ syncScroll: syncScrollInput.checked });
   if (preferences.syncScroll && lastSourceScroll) followSourceScroll(lastSourceScroll);
+});
+
+readScopeProfile.addEventListener('change', () => {
+  if (!isReplicaReadScopeProfileId(readScopeProfile.value)) return;
+  void commitReplicaReadScope(
+    replicaReadScopeForProfile(readScopeProfile.value),
+    false,
+  );
+});
+
+setupReadProfile.addEventListener('change', () => {
+  if (!isReplicaReadScopeProfileId(setupReadProfile.value)) return;
+  setupReadScopeDraft = replicaReadScopeForProfile(setupReadProfile.value);
+  renderReadScopeControls();
+});
+
+completeReadScopeSetupButton.addEventListener('click', () => {
+  void commitReplicaReadScope(setupReadScopeDraft, true);
+});
+
+retrySetupResetCleanupButton.addEventListener('click', () => {
+  void resetAllExtensionSettings();
+});
+
+readScopeSetup.addEventListener('cancel', (event) => {
+  // Choosing a read scope is mandatory. Keep the effective policy at Page-only
+  // until a setup choice has been committed successfully.
+  event.preventDefault();
+});
+
+installResetConfirmationController({
+  dialog: resetSettingsDialog,
+  trigger: resetAllSettingsButton,
+  shouldBypassConfirmation: () =>
+    preferences.resetCleanupPendingRevision > 0,
+  onConfirm: resetAllExtensionSettings,
 });
 
 zoomInput.addEventListener('input', () => setZoom(Number(zoomInput.value)));
@@ -1019,10 +1154,34 @@ browser.permissions.onRemoved.addListener(() => {
 
 browser.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== 'local' || !(STORAGE_KEY in changes)) return;
-  const previous = preferences;
-  preferences = mergePendingViewPreferences(
-    parseCompanionPreferences(changes[STORAGE_KEY]?.newValue),
+  const liveChange = selectLiveCompanionPreferenceChange(
+    preferences,
+    livePreferenceStorageFailClosed,
+    changes[STORAGE_KEY]?.newValue,
   );
+  if (liveChange.status === 'invalid') {
+    livePreferenceStorageFailClosed = true;
+    purgeSourceDerivedRuntime(
+      'Stored settings became unavailable or invalid. Read access is Page-only until a current valid snapshot is restored…',
+    );
+    syncPreferenceControls();
+    return;
+  }
+  if (liveChange.status === 'stale') return;
+  const previous = preferences;
+  const wasStorageFailClosed = livePreferenceStorageFailClosed;
+  if (!applyCommittedPreferences(liveChange.preferences)) return;
+  livePreferenceStorageFailClosed = false;
+  const previousReadScope = committedReplicaReadScope(previous);
+  const nextReadScope = committedReplicaReadScope(preferences);
+  const readPolicyChanged =
+    wasStorageFailClosed ||
+    replicaReadScopeFingerprint(previousReadScope) !==
+      replicaReadScopeFingerprint(nextReadScope) ||
+    previous.resetRevision !== preferences.resetRevision;
+  if (readPolicyChanged) {
+    purgeSourceDerivedRuntime('Readable-content policy changed; rebuilding safely…');
+  }
   if (
     isDetachedWindow &&
     previous.popoutTabMode !== preferences.popoutTabMode &&
@@ -1055,6 +1214,7 @@ browser.storage.onChanged.addListener((changes, areaName) => {
   syncPreferenceControls();
   updateMirrorLayout();
   if (visualRoot) applyMirrorTextLayout(visualRoot, preferences.textLayoutMode);
+  if (readPolicyChanged) restartReplicaAfterReadPolicyChange();
   if (
     snapshot &&
     (previous.sourceLanguage !== preferences.sourceLanguage ||
@@ -1125,13 +1285,16 @@ async function loadPanelWindowId(): Promise<void> {
 
 async function loadPreferences(): Promise<void> {
   try {
-    preferences = (await sendPreferenceCommand({ type: 'simul:preferences:reconcile' })).preferences;
+    applyCommittedPreferences(
+      (await sendPreferenceCommand({ type: 'simul:preferences:reconcile' }))
+        .preferences,
+    );
   } catch {
     try {
       const stored = await browser.storage.local.get(STORAGE_KEY);
-      preferences = parseCompanionPreferences(stored[STORAGE_KEY]);
+      applyCommittedPreferences(stored[STORAGE_KEY]);
     } catch {
-      preferences = parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES);
+      applyCommittedPreferences(DEFAULT_COMPANION_PREFERENCES);
     }
   }
   syncPreferenceControls();
@@ -1149,23 +1312,20 @@ async function sendPreferenceCommand(
 async function commitViewPreferencePatch(
   patch: CompanionViewSettingsPatch,
 ): Promise<boolean> {
-  preferences = withViewSettings(preferences, patch);
-  syncPreferenceControls();
-  const revision = ++viewPreferenceRevision;
-  for (const [key, value] of Object.entries(patch)) {
-    pendingViewPreferences.set(key as keyof CompanionViewSettings, {
-      revision,
-      value: value as CompanionViewSettings[keyof CompanionViewSettings],
-    });
-  }
+  const expectedResetRevision = preferences.resetRevision;
   try {
     const result =
       await sendPreferenceCommand({
         type: 'simul:preferences:patch-view',
+        expectedResetRevision,
         patch,
       });
-    clearCommittedViewPreferences(patch, revision);
-    preferences = mergePendingViewPreferences(result.preferences);
+    applyCommittedPreferences(result.preferences);
+    if (!result.applied) {
+      throw new Error(
+        'Settings were reset in another companion. Review the current choices and try again.',
+      );
+    }
     syncPreferenceControls();
     updateMirrorLayout();
     if (visualRoot) {
@@ -1173,9 +1333,8 @@ async function commitViewPreferencePatch(
     }
     return true;
   } catch (error) {
-    clearCommittedViewPreferences(patch, revision);
     try {
-      preferences = mergePendingViewPreferences(await readStoredPreferences());
+      applyCommittedPreferences(await readStoredPreferences());
       syncPreferenceControls();
       updateMirrorLayout();
       if (visualRoot) {
@@ -1192,38 +1351,338 @@ async function commitViewPreferencePatch(
 async function commitImageAnalysisPreferencePatch(
   patch: CompanionImageAnalysisSettingsPatch,
 ): Promise<void> {
-  preferences = withImageAnalysisSettings(preferences, patch);
-  syncPreferenceControls();
-  const revision = ++imageAnalysisPreferenceRevision;
-  for (const [key, value] of Object.entries(patch)) {
-    pendingImageAnalysisPreferences.set(
-      key as keyof CompanionImageAnalysisSettings,
-      {
-        revision,
-        value: value as CompanionImageAnalysisSettings[
-          keyof CompanionImageAnalysisSettings
-        ],
-      },
-    );
-  }
+  const expectedResetRevision = preferences.resetRevision;
+  const expectedSettingsRevision = preferences.settingsRevision;
   try {
     const result = await sendPreferenceCommand({
       type: 'simul:preferences:patch-image-analysis',
+      expectedResetRevision,
+      expectedSettingsRevision,
       patch,
     });
-    clearCommittedImageAnalysisPreferences(patch, revision);
-    preferences = mergePendingViewPreferences(result.preferences);
+    applyCommittedPreferences(result.preferences);
+    if (!result.applied) {
+      throw new Error(
+        result.code === 'stale-settings-revision'
+          ? 'Image options changed in another companion. Review the current choices and try again.'
+          : 'Settings were reset in another companion. Review the current choices and try again.',
+      );
+    }
     syncPreferenceControls();
   } catch (error) {
-    clearCommittedImageAnalysisPreferences(patch, revision);
     try {
-      preferences = mergePendingViewPreferences(await readStoredPreferences());
+      applyCommittedPreferences(await readStoredPreferences());
       syncPreferenceControls();
     } catch {
       // A later storage event can reconcile optimistic controls.
     }
     setStatus(`Could not save image options: ${readableError(error)}`, 'error');
   }
+}
+
+async function commitReplicaReadScope(
+  scope: ReplicaReadScope,
+  completeSetup: boolean,
+): Promise<void> {
+  const sequence = ++readScopeCommitSequence;
+  const committedAtDispatch = committedReplicaReadScope(preferences);
+  const current = currentReplicaReadScope();
+  const narrowing = replicaReadScopeNarrows(current, scope);
+  if (narrowing) {
+    localReadScopeNarrowingGates.set(sequence, {
+      scope: intersectReplicaReadScopes(current, scope),
+      failed: false,
+    });
+    purgeSourceDerivedRuntime('Applying narrower read settings…');
+  }
+  completeReadScopeSetupButton.disabled = completeSetup;
+  setupReadScopeStatus.textContent = completeSetup ? 'Saving…' : '';
+  try {
+    const result = await sendPreferenceCommand(completeSetup
+      ? {
+          type: 'simul:preferences:complete-read-scope-setup',
+          expectedResetRevision: preferences.resetRevision,
+          expectedSetupVersion: preferences.readScopeSetupVersion,
+          expectedReadScopeFingerprint:
+            replicaReadScopeFingerprint(committedAtDispatch),
+          patch: { replicaReadScope: scope },
+        }
+      : {
+          type: 'simul:preferences:patch-read-scope',
+          expectedResetRevision: preferences.resetRevision,
+          expectedReadScopeFingerprint:
+            replicaReadScopeFingerprint(committedAtDispatch),
+          patch: { replicaReadScope: scope },
+        });
+    applyCommittedPreferences(result.preferences);
+    if (!result.applied) {
+      const gate = localReadScopeNarrowingGates.get(sequence);
+      if (gate) gate.failed = true;
+      throw new Error(result.code === 'stale-reset-revision'
+        ? 'Settings changed in another companion. Review the current choices and try again.'
+        : result.code === 'stale-read-scope'
+          ? 'Readable-content settings changed in another companion. Review the current choices and try again.'
+          : result.code === 'safety-ack-failed'
+            ? 'Another companion could not confirm its safety purge. Close it or retry the change.'
+        : 'The read settings were not applied.');
+    }
+    for (const pendingSequence of [...localReadScopeNarrowingGates.keys()]) {
+      if (pendingSequence <= sequence) {
+        localReadScopeNarrowingGates.delete(pendingSequence);
+      }
+    }
+    setupReadScopeDraft = { ...preferences.replicaReadScope };
+    syncPreferenceControls();
+    restartReplicaAfterReadPolicyChange();
+    setupReadScopeStatus.textContent = '';
+    setStatus('Readable-content settings applied. The replica is rebuilding.', 'success');
+  } catch (error) {
+    const gate = localReadScopeNarrowingGates.get(sequence);
+    if (gate) gate.failed = true;
+    setupReadScopeStatus.textContent = readableError(error);
+    setupReadScopeStatus.dataset.tone = 'error';
+    syncPreferenceControls();
+    if (localReadScopeNarrowingGates.has(sequence)) {
+      restartReplicaAfterReadPolicyChange();
+    }
+    setStatus(`Could not save readable-content settings: ${readableError(error)}`, 'error');
+  } finally {
+    completeReadScopeSetupButton.disabled = false;
+  }
+}
+
+async function resetAllExtensionSettings(): Promise<void> {
+  if (resetInFlight) return;
+  resetInFlight = true;
+  resetAllSettingsButton.disabled = true;
+  retrySetupResetCleanupButton.disabled = true;
+  resetSettingsStatus.textContent = 'Resetting settings and optional permissions…';
+  if (preferences.resetCleanupPendingRevision > 0) {
+    setupResetCleanupStatus.textContent =
+      'Retrying optional permission and runtime cleanup…';
+  }
+  try {
+    const retry = preferences.resetCleanupPendingRevision > 0;
+    const result = await sendPreferenceCommand(retry
+      ? {
+          type: 'simul:preferences:retry-reset-cleanup',
+          expectedResetRevision: preferences.resetRevision,
+        }
+      : {
+          type: 'simul:preferences:reset-all',
+          expectedResetRevision: preferences.resetRevision,
+        });
+    applyCommittedPreferences(result.preferences);
+    if (!result.applied && result.code === 'stale-reset-revision') {
+      syncPreferenceControls();
+      resetSettingsStatus.textContent =
+        'Settings changed in another companion. Review the current state before resetting.';
+      if (preferences.resetCleanupPendingRevision > 0) {
+        setupResetCleanupStatus.textContent = resetSettingsStatus.textContent;
+      }
+      return;
+    }
+    if (!result.applied && result.code === 'safety-ack-failed') {
+      syncPreferenceControls();
+      resetSettingsStatus.textContent =
+        'Another companion could not confirm its safety purge. Close it or retry the reset.';
+      return;
+    }
+    purgeSourceDerivedRuntime('Resetting extension settings…');
+    clearResetOnlyRuntimeState();
+    setupReadScopeDraft = replicaReadScopeForProfile('standard');
+    syncPreferenceControls();
+    if (result.cleanup?.status === 'pending') {
+      const cleanupMessage =
+        result.cleanup.remainingManagedOrigins > 0
+          ? `Core settings are reset. ${result.cleanup.remainingManagedOrigins} optional permission entr${result.cleanup.remainingManagedOrigins === 1 ? 'y remains' : 'ies remain'} and cleanup is still pending; choose Retry cleanup.`
+          : 'Core settings are reset, but permission or runtime cleanup is still pending; choose Retry cleanup.';
+      resetSettingsStatus.textContent = cleanupMessage;
+      setupResetCleanupStatus.textContent = cleanupMessage;
+    } else {
+      resetSettingsStatus.textContent =
+        'Settings and optional permissions were reset. Choose a read profile to continue.';
+    }
+  } catch (error) {
+    resetSettingsStatus.textContent = `Reset could not finish: ${readableError(error)}`;
+    if (preferences.resetCleanupPendingRevision > 0) {
+      setupResetCleanupStatus.textContent = resetSettingsStatus.textContent;
+    }
+  } finally {
+    resetInFlight = false;
+    resetAllSettingsButton.disabled = false;
+    retrySetupResetCleanupButton.disabled = false;
+    renderReadScopeControls();
+  }
+}
+
+function purgeSourceDerivedRuntime(message: string): void {
+  void purgeSourceDerivedRuntimeInternal(message, false);
+}
+
+function purgeSourceDerivedRuntimeForSafety(message: string): Promise<void> {
+  return purgeSourceDerivedRuntimeInternal(message, true);
+}
+
+function purgeSourceDerivedRuntimeInternal(
+  message: string,
+  requireConfirmedLegacyTeardown: boolean,
+): Promise<void> {
+  if (resolvedSourceLanguageOrigin === 'image') {
+    clearAutoImageLanguageResolution();
+  }
+  const identity = followedPageIdentity ?? capturedPageIdentity;
+  const legacyTeardown = requestLiveSessionRelease(
+    identity,
+    requireConfirmedLegacyTeardown,
+  );
+  captureCoordinator.invalidate();
+  availabilityRequestId += 1;
+  activeAbortController?.abort();
+  liveDeltaAbortController?.abort();
+  replicaShadowAbortController?.abort();
+  imageTranslationController.releaseReplica();
+  replicaEngineController.releasePresentation(false);
+  replicaTranslationCoordinator.selectPair(undefined);
+  // Read-scope narrowing is a content-retention boundary, not only a visual
+  // rebuild. Semantic form/personal text and translated image labels may have
+  // populated these memories under the old, broader policy.
+  translationMemory.clear();
+  imageTranslationMemory.clear();
+  snapshot = undefined;
+  visualRoot = undefined;
+  pendingLiveUpdate = undefined;
+  translationComplete = false;
+  renderLoadingState();
+  setStatus(message, 'warning');
+  return legacyTeardown;
+}
+
+function clearResetOnlyRuntimeState(): void {
+  composerInput.value = '';
+  composerOutput.value = '';
+  invalidateComposerOutput();
+  imageTranslationDiagnosticHistory.clear();
+  renderImageTranslationDiagnosticHistory();
+  clearAutoImageLanguageResolution();
+}
+
+async function handlePreferenceSafetyMessage(
+  value: unknown,
+  reply: (message: unknown) => void,
+): Promise<void> {
+  const prepare = readPreferenceSafetyPrepareMessage(value);
+  if (prepare) {
+    remoteReadScopeNarrowingGates.prepare(
+      prepare.requestId,
+      prepare.targetReadScope,
+    );
+    if (prepare.operation === 'reset') {
+      localReadScopeNarrowingGates.clear();
+    }
+    const purge = purgeSourceDerivedRuntimeForSafety(
+      prepare.operation === 'reset'
+        ? 'Preparing a safe settings reset…'
+        : 'Preparing narrower read settings…',
+    );
+    if (prepare.operation === 'reset') clearResetOnlyRuntimeState();
+    await purge;
+    reply({
+      kind: 'simul:preference-safety-v1:ack',
+      version: PREFERENCE_SAFETY_PROTOCOL_VERSION,
+      requestId: prepare.requestId,
+    });
+    return;
+  }
+
+  const release = readPreferenceSafetyReleaseMessage(value);
+  if (!release) return;
+  if (
+    release.committed &&
+    remoteReadScopeNarrowingGates.authorizeCommittedRelease(release.requestId)
+  ) {
+    releaseAuthorizedRemoteReadScopeSafetyGates();
+    releaseSatisfiedLocalReadScopeSafetyGates();
+  }
+}
+
+function applyCommittedPreferences(value: unknown): boolean {
+  const candidate = parseCompanionPreferences(value);
+  const previous = preferences;
+  const selected = selectLatestCompanionPreferences(previous, candidate);
+  const candidateIsOlder =
+    candidate.resetRevision < previous.resetRevision ||
+    (
+      candidate.resetRevision === previous.resetRevision &&
+      candidate.settingsRevision < previous.settingsRevision
+    );
+  if (candidateIsOlder) return false;
+  preferences = selected;
+  if (
+    preferences.readScopeSetupVersion !== REPLICA_READ_SCOPE_SETUP_VERSION &&
+    (
+      previous.readScopeSetupVersion === REPLICA_READ_SCOPE_SETUP_VERSION ||
+      preferences.resetRevision > previous.resetRevision
+    )
+  ) {
+    setupReadScopeDraft = replicaReadScopeForProfile('standard');
+  }
+  releaseAuthorizedRemoteReadScopeSafetyGates();
+  releaseSatisfiedLocalReadScopeSafetyGates();
+  return true;
+}
+
+function releaseAuthorizedRemoteReadScopeSafetyGates(): void {
+  remoteReadScopeNarrowingGates.releaseSatisfied(
+    committedReplicaReadScope(preferences),
+  );
+}
+
+function releaseSatisfiedLocalReadScopeSafetyGates(): void {
+  const committed = committedReplicaReadScope(preferences);
+  for (const [sequence, gate] of localReadScopeNarrowingGates) {
+    if (gate.failed && readScopeIsNoBroaderThan(committed, gate.scope)) {
+      localReadScopeNarrowingGates.delete(sequence);
+    }
+  }
+}
+
+function readScopeIsNoBroaderThan(
+  candidate: ReplicaReadScope,
+  ceiling: ReplicaReadScope,
+): boolean {
+  return replicaReadScopeFingerprint(
+    intersectReplicaReadScopes(candidate, ceiling),
+  ) === replicaReadScopeFingerprint(candidate);
+}
+
+function restartReplicaAfterReadPolicyChange(): void {
+  const identity = followedPageIdentity ?? capturedPageIdentity;
+  if (identity) queueCapture({ identity, reason: 'preference' });
+  configureImageTranslation();
+}
+
+function currentReplicaReadScope(): ReplicaReadScope {
+  let scope = committedReplicaReadScope(preferences);
+  if (!preferenceSafetyConnectionReady || livePreferenceStorageFailClosed) {
+    scope = intersectReplicaReadScopes(scope, PAGE_ONLY_REPLICA_READ_SCOPE);
+  }
+  for (const gate of localReadScopeNarrowingGates.values()) {
+    scope = intersectReplicaReadScopes(scope, gate.scope);
+  }
+  for (const gate of remoteReadScopeNarrowingGates.scopes()) {
+    scope = intersectReplicaReadScopes(scope, gate);
+  }
+  return scope;
+}
+
+function committedReplicaReadScope(
+  candidate: CompanionPreferences,
+): ReplicaReadScope {
+  return effectiveReplicaReadScope(
+    candidate.replicaReadScope,
+    candidate.readScopeSetupVersion,
+  );
 }
 
 async function refreshImageCaptureAccess(
@@ -1251,13 +1710,20 @@ async function refreshImageCaptureAccess(
     preferences.imageTranslationEnabled
   ) {
     setStatus(
-      'Image access was removed. Your image-translation setting is saved but paused; open options and choose Grant image access to resume.',
+      preferences.disabledImageReadingMethodIds.includes(
+        ACCESSIBILITY_TEXT_METHOD_ID,
+      )
+        ? 'Image access was removed. Pixel OCR is paused; open options and choose Grant image access to resume.'
+        : 'Image access was removed. Accessibility image text remains active; only pixel OCR is paused.',
       'warning',
     );
   }
 }
 
-async function changeImageTranslationEnabled(enabled: boolean): Promise<void> {
+async function changeImageTranslationEnabled(
+  enabled: boolean,
+  requestPixelAccess = false,
+): Promise<void> {
   if (permissionInFlight) {
     syncPreferenceControls();
     return;
@@ -1266,12 +1732,9 @@ async function changeImageTranslationEnabled(enabled: boolean): Promise<void> {
   renderImageAnalysisControls();
   updateControls();
   try {
-    if (!navigator.locks) throw new Error('Chrome Web Locks are unavailable.');
-    const outcome = await navigator.locks.request(
-      PREFERENCE_LOCK_NAME,
-      { ifAvailable: true },
-      async (lock) => {
-        if (!lock) return { kind: 'busy' } as const;
+    const shouldRequestPixelAccess = requestPixelAccess &&
+      enabledUsablePixelOcrProviderOrder().length > 0;
+    const outcome = await (async () => {
         const userActivationAvailable = navigator.userActivation.isActive;
         let freshPreferences: CompanionPreferences | undefined;
         let newlyGranted = false;
@@ -1280,7 +1743,7 @@ async function changeImageTranslationEnabled(enabled: boolean): Promise<void> {
           const hadImageCaptureGrant = await browser.permissions.contains({
             origins: [...ALL_SITES_PERMISSION_ORIGINS],
           });
-          if (enabled && !hadImageCaptureGrant) {
+          if (enabled && shouldRequestPixelAccess && !hadImageCaptureGrant) {
             if (!userActivationAvailable || !navigator.userActivation.isActive) {
               return { kind: 'activation' } as const;
             }
@@ -1328,8 +1791,15 @@ async function changeImageTranslationEnabled(enabled: boolean): Promise<void> {
 
           const result = await sendPreferenceCommand({
             type: 'simul:preferences:patch-image-analysis',
+            expectedResetRevision: freshPreferences.resetRevision,
+            expectedSettingsRevision: freshPreferences.settingsRevision,
             patch: { imageTranslationEnabled: enabled },
           });
+          if (!result.applied) {
+            throw new Error(
+              'Settings were reset in another companion while image access was changing.',
+            );
+          }
           return { kind: 'complete', result, narrowAccessRestored } as const;
         } catch (error) {
           const prior = await readStoredPreferences().catch(
@@ -1354,17 +1824,7 @@ async function changeImageTranslationEnabled(enabled: boolean): Promise<void> {
           }
           throw error;
         }
-      },
-    );
-
-    if (outcome.kind === 'busy') {
-      await reloadPreferencesFromStorage();
-      setStatus(
-        'Another companion window is saving image access. Try again.',
-        'warning',
-      );
-      return;
-    }
+    })();
     if (outcome.kind === 'activation') {
       await reloadPreferencesFromStorage();
       setStatus(
@@ -1377,14 +1837,18 @@ async function changeImageTranslationEnabled(enabled: boolean): Promise<void> {
       await reloadPreferencesFromStorage();
       setStatus(
         preferences.imageTranslationEnabled
-          ? 'Image translation remains paused. Choose Grant image access when you are ready to retry.'
+          ? preferences.disabledImageReadingMethodIds.includes(
+              ACCESSIBILITY_TEXT_METHOD_ID,
+            )
+            ? 'Pixel OCR remains paused. Choose Grant image access when you are ready to retry.'
+            : 'Accessibility image text remains active without image access; pixel OCR was not enabled.'
           : 'Chrome did not grant image access, so image translation remains off. You can retry from options.',
         'warning',
       );
       return;
     }
 
-    preferences = mergePendingViewPreferences(outcome.result.preferences);
+    applyCommittedPreferences(outcome.result.preferences);
     syncPreferenceControls();
     setStatus(
       enabled
@@ -1406,48 +1870,6 @@ async function changeImageTranslationEnabled(enabled: boolean): Promise<void> {
     syncPreferenceControls();
     updateControls();
   }
-}
-
-function clearCommittedViewPreferences(
-  patch: CompanionViewSettingsPatch,
-  revision: number,
-): void {
-  for (const key of Object.keys(patch) as Array<keyof CompanionViewSettings>) {
-    if (pendingViewPreferences.get(key)?.revision === revision) {
-      pendingViewPreferences.delete(key);
-    }
-  }
-}
-
-function clearCommittedImageAnalysisPreferences(
-  patch: CompanionImageAnalysisSettingsPatch,
-  revision: number,
-): void {
-  for (const key of Object.keys(patch) as Array<
-    keyof CompanionImageAnalysisSettings
-  >) {
-    if (pendingImageAnalysisPreferences.get(key)?.revision === revision) {
-      pendingImageAnalysisPreferences.delete(key);
-    }
-  }
-}
-
-function mergePendingViewPreferences(
-  stored: CompanionPreferences,
-): CompanionPreferences {
-  const pending = Object.fromEntries(
-    [...pendingViewPreferences].map(([key, entry]) => [key, entry.value]),
-  ) as CompanionViewSettingsPatch;
-  const pendingImage = Object.fromEntries(
-    [...pendingImageAnalysisPreferences].map(([key, entry]) => [
-      key,
-      entry.value,
-    ]),
-  ) as CompanionImageAnalysisSettingsPatch;
-  return withImageAnalysisSettings(
-    withViewSettings(stored, pending),
-    pendingImage,
-  );
 }
 
 async function acceptAuthorizedTab(request: AuthorizedTabRequest): Promise<void> {
@@ -1724,9 +2146,13 @@ async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> 
       browser.scripting.executeScript({
         target: { tabId: identity.tabId, frameIds: [0] },
         func: invokeLivePageObserverBridge,
-        args: [liveSessionId, work.generation],
+        args: [liveSessionId, work.generation, currentReplicaReadScope()],
       }),
     );
+    if (!captureCoordinator.isCurrent(work.generation)) {
+      releaseLiveSession(identity);
+      return;
+    }
     const observerInstallation = readLivePageObserverInstallation(
       observerResults[0]?.result,
     );
@@ -1769,8 +2195,10 @@ async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> 
       browser.scripting.executeScript({
         target: { tabId: identity.tabId, frameIds: [0] },
         func: capturePageSnapshot,
+        args: [currentReplicaReadScope()],
       }),
     );
+    if (!captureCoordinator.isCurrent(work.generation)) return;
     const snapshotInjection = results[0];
     const nextSnapshot = parsePageSnapshot(snapshotInjection?.result);
     const currentTab = await browser.tabs.get(identity.tabId);
@@ -2017,6 +2445,7 @@ interface LiveLanguageContext {
 interface PendingAutoImageLanguageEvidence {
   readonly language: SupportedLanguage;
   readonly evidence: AutoLanguageProbeEvidence;
+  readonly origin: AutoImageLanguageEvidenceOrigin;
   readonly document: ReplicaSourceDocumentIdentity;
   readonly snapshot: PageSnapshot | undefined;
   readonly identity: CapturedPageIdentity | undefined;
@@ -2158,8 +2587,11 @@ function commitAutoDetectedImageLanguage(
   availabilityCheckedForPair = undefined;
   translationComplete = false;
   invalidateComposerOutput();
+  const evidenceSource = proposal.origin === 'accessibility-text'
+    ? 'accessibility image text'
+    : 'bounded image OCR';
   detectedLanguageElement.textContent =
-    `Detected ${languageName(proposal.language)} from bounded image OCR (${proposal.evidence.replaceAll('-', ' ')}).`;
+    `Detected ${languageName(proposal.language)} from ${evidenceSource} (${proposal.evidence.replaceAll('-', ' ')}).`;
   detectedLanguageElement.hidden = false;
   syncQuickTranslationPanel();
   updateControls();
@@ -2760,9 +3192,19 @@ async function processPendingLiveUpdate(): Promise<void> {
       browser.scripting.executeScript({
         target: { tabId: identity.tabId, frameIds: [0] },
         func: invokeLivePageDeltaCaptureBridge,
-        args: [liveSessionId, update.generation, update.sequence, nodeIds],
+        args: [
+          liveSessionId,
+          update.generation,
+          update.sequence,
+          nodeIds,
+          currentReplicaReadScope(),
+        ],
       }),
     );
+    if (
+      abortController.signal.aborted ||
+      !captureCoordinator.isCurrent(update.generation)
+    ) return;
     const delta = parseLivePageDelta(results[0]?.result);
     if (
       !captureCoordinator.isCurrent(delta.generation) ||
@@ -2912,7 +3354,6 @@ function liveDeltaLanguageSample(delta: LivePageDelta): string {
       return;
     }
     if (node.kind === 'placeholder') return;
-    append(node.attributes?.alt);
     for (const child of node.children) visit(child);
   };
   for (const replacement of delta.replacements) {
@@ -3050,7 +3491,7 @@ function renderFlatSnapshot(article: HTMLElement, page: PageSnapshot): void {
     const image = document.createElement('img');
     image.className = 'translated-image';
     image.src = item.src;
-    image.alt = item.altText ?? '';
+    image.alt = '';
     image.referrerPolicy = 'no-referrer';
     article.append(image);
   }
@@ -3484,9 +3925,149 @@ function syncPreferenceControls(): void {
   zoomInput.disabled = preferences.displayMode !== 'custom';
   syncToolbarPreferenceControls();
   syncQuickTranslationPanel();
+  renderReadScopeControls();
   renderImageAnalysisControls();
   configureImageTranslation();
   scheduleUiLocalization();
+}
+
+const READ_SCOPE_COPY: Readonly<Record<
+  ReplicaReadScopeKey,
+  { readonly label: string; readonly description: string }
+>> = Object.freeze({
+  controlSemantics: {
+    label: 'Control labels and semantics',
+    description: 'Read public button, menu, field-label, and disabled-state text.',
+  },
+  controlImages: {
+    label: 'Images inside controls',
+    description: 'Read non-secret navigation and control images; actions stay disabled.',
+  },
+  disclosureContent: {
+    label: 'Collapsed disclosure content',
+    description: 'Read validated same-page menus and disclosures even while collapsed.',
+  },
+  formValues: {
+    label: 'Ordinary visible form values',
+    description: 'Read visible text, search, URL, textarea, and selection state.',
+  },
+  personalDataValues: {
+    label: 'Personal and autofill values',
+    description: 'Read visible email, telephone, name, address, and username fields. Credential and card data stay blocked.',
+  },
+  editableContent: {
+    label: 'Editable page content',
+    description: 'Read visible non-secret contenteditable and ARIA text editor drafts.',
+  },
+});
+
+function renderReadScopeControls(): void {
+  const setupComplete =
+    preferences.readScopeSetupVersion === REPLICA_READ_SCOPE_SETUP_VERSION;
+  const cleanupPending = preferences.resetCleanupPendingRevision > 0;
+  const setupDialogWasOpen = readScopeSetup.open;
+  if (setupComplete) {
+    if (readScopeSetup.open) readScopeSetup.close();
+  } else if (!readScopeSetup.open) {
+    // A reset committed in another companion can arrive while this panel's
+    // reset confirmation is open. Do not leave a stale modal underneath the
+    // mandatory setup dialog.
+    if (resetSettingsDialog.open) resetSettingsDialog.close('cancel');
+    readScopeSetup.showModal();
+  }
+  const configuredScope = setupComplete
+    ? preferences.replicaReadScope
+    : replicaReadScopeForProfile('page-only');
+  readScopeProfile.value = deriveReplicaReadScopeProfile(configuredScope);
+  setupReadProfile.value = deriveReplicaReadScopeProfile(setupReadScopeDraft);
+  renderReadScopeToggleSet(
+    readScopeControls,
+    configuredScope,
+    (key, checked) => {
+      const next = normalizeReadScopeToggle(configuredScope, key, checked);
+      void commitReplicaReadScope(next, false);
+    },
+  );
+  renderReadScopeToggleSet(
+    setupReadScopeControls,
+    setupReadScopeDraft,
+    (key, checked) => {
+      setupReadScopeDraft = normalizeReadScopeToggle(
+        setupReadScopeDraft,
+        key,
+        checked,
+      );
+      renderReadScopeControls();
+    },
+  );
+  setupResetCleanup.hidden = !cleanupPending;
+  retrySetupResetCleanupButton.disabled = resetInFlight;
+  if (cleanupPending && !setupCleanupWasPending && !resetInFlight) {
+    setupResetCleanupStatus.textContent =
+      'Core settings are already safe, but optional permission or runtime cleanup is still pending.';
+  }
+  if (
+    cleanupPending &&
+    !setupComplete &&
+    (!setupDialogWasOpen || !setupCleanupWasPending)
+  ) {
+    retrySetupResetCleanupButton.focus();
+  } else if (
+    !cleanupPending &&
+    setupCleanupWasPending &&
+    readScopeSetup.open &&
+    document.activeElement === retrySetupResetCleanupButton
+  ) {
+    setupReadProfile.focus();
+  }
+  setupCleanupWasPending = cleanupPending;
+  resetAllSettingsButton.textContent = cleanupPending
+    ? 'Retry reset cleanup'
+    : 'Reset all extension settings…';
+}
+
+function renderReadScopeToggleSet(
+  host: HTMLElement,
+  scope: ReplicaReadScope,
+  onChange: (key: ReplicaReadScopeKey, checked: boolean) => void,
+): void {
+  const fragment = document.createDocumentFragment();
+  for (const key of REPLICA_READ_SCOPE_KEYS) {
+    const label = document.createElement('label');
+    label.className = 'read-scope-control';
+    const input = document.createElement('input');
+    input.type = 'checkbox';
+    input.checked = scope[key];
+    input.disabled = key === 'personalDataValues' && !scope.formValues;
+    input.dataset.readScopeKey = key;
+    const text = document.createElement('span');
+    text.textContent = READ_SCOPE_COPY[key].label;
+    const description = document.createElement('small');
+    description.textContent = READ_SCOPE_COPY[key].description;
+    text.append(description);
+    label.append(input, text);
+    input.addEventListener('change', () => onChange(key, input.checked));
+    fragment.append(label);
+  }
+  host.replaceChildren(fragment);
+}
+
+function normalizeReadScopeToggle(
+  scope: ReplicaReadScope,
+  key: ReplicaReadScopeKey,
+  checked: boolean,
+): ReplicaReadScope {
+  const next = { ...scope, [key]: checked };
+  if (key === 'formValues' && !checked) next.personalDataValues = false;
+  if (key === 'personalDataValues' && checked) next.formValues = true;
+  return next;
+}
+
+function isReplicaReadScopeProfileId(
+  value: string,
+): value is ReplicaReadScopeProfileId {
+  return value === 'page-only' || value === 'standard' ||
+    value === 'full-visible';
 }
 
 function syncToolbarPreferenceControls(): void {
@@ -3531,7 +4112,17 @@ function syncToolbarPreferenceControls(): void {
   toolbarOcrToggleButton.title = preferences.imageTranslationEnabled
     ? imageCaptureAccess === 'granted'
       ? 'Image text translation is on. Click to turn it off.'
-      : 'Image text translation is saved but needs image access. Click to grant access.'
+      : enabledUsablePixelOcrProviderOrder().length === 0
+        ? preferences.disabledImageReadingMethodIds.includes(
+            ACCESSIBILITY_TEXT_METHOD_ID,
+          )
+          ? 'Image translation has no enabled reading method. Click to turn it off.'
+          : 'Accessibility image text is on. Click to turn it off.'
+      : preferences.disabledImageReadingMethodIds.includes(
+          ACCESSIBILITY_TEXT_METHOD_ID,
+        )
+        ? 'Image translation is saved but pixel OCR needs image access. Click to grant access.'
+        : 'Accessibility image text is on; pixel OCR is paused. Click to grant image access.'
     : 'Image text translation is off. Click to turn it on.';
 
   const followsActive = isDetachedWindow && preferences.popoutTabMode === 'active';
@@ -3553,18 +4144,46 @@ function syncToolbarPreferenceControls(): void {
 }
 
 function configureImageTranslation(): void {
+  const readScope = currentReplicaReadScope();
+  const disabledMethodIds =
+    preferences.readScopeSetupVersion === REPLICA_READ_SCOPE_SETUP_VERSION ||
+    preferences.disabledImageReadingMethodIds.includes(
+      ACCESSIBILITY_TEXT_METHOD_ID,
+    )
+      ? preferences.disabledImageReadingMethodIds
+      : [
+          ACCESSIBILITY_TEXT_METHOD_ID,
+          ...preferences.disabledImageReadingMethodIds,
+        ];
+  const enabledMethodIds = new Set(
+    preferences.imageReadingMethodOrder.filter((method) =>
+      !disabledMethodIds.includes(method),
+    ),
+  );
   const enabledProviderOrder = effectiveCompiledProviderOrder(
-    preferences.imageTextProviderOrder,
+    enabledOcrProviderOrder(
+      preferences.imageReadingMethodOrder,
+      disabledMethodIds,
+    ),
     preferences.disabledImageTextProviderIds,
   );
   const usableProviderOrder = runtimeReadyOcrProviderOrder(
     enabledProviderOrder,
     ocrProviderRuntimeStatuses,
   );
-  const nextAutoLanguageConfigurationKey = autoImageLanguageConfigurationKey(
-    usableProviderOrder,
-    preferences.ocrMinimumConfidence,
-  );
+  const routedProviderOrder = imageCaptureAccess === 'granted'
+    ? usableProviderOrder
+    : [];
+  const nextAutoLanguageConfigurationKey = autoImageLanguageConfigurationKey({
+    providerOrder: routedProviderOrder,
+    enabledMethodOrder: enabledAutoImageLanguageMethodOrder(
+      disabledMethodIds,
+      routedProviderOrder,
+    ),
+    minimumConfidence: preferences.ocrMinimumConfidence,
+    policyFingerprint: replicaReadScopeFingerprint(readScope),
+    controlImages: readScope.controlImages,
+  });
   if (shouldClearAutoImageLanguageForDocument(
     resolvedSourceLanguageOrigin,
     resolvedImageLanguageDocument !== undefined &&
@@ -3582,12 +4201,19 @@ function configureImageTranslation(): void {
   imageTranslationController.configure({
     enabled:
       preferences.imageTranslationEnabled &&
-      imageCaptureAccess === 'granted' &&
       !isLiveSourceOnlyMode() &&
-      usableProviderOrder.length > 0,
+      (
+        enabledMethodIds.has(ACCESSIBILITY_TEXT_METHOD_ID) ||
+        (imageCaptureAccess === 'granted' && usableProviderOrder.length > 0)
+      ),
     scanPolicy: preferences.imageScanPolicy,
     skipSmallImages: preferences.skipSmallImages,
-    providerOrder: usableProviderOrder,
+    providerOrder: routedProviderOrder,
+    methodOrder: preferences.imageReadingMethodOrder,
+    disabledMethodIds,
+    resetEpoch: preferences.resetRevision,
+    policyFingerprint: replicaReadScopeFingerprint(readScope),
+    controlImages: readScope.controlImages,
     ocrMinimumConfidence: preferences.ocrMinimumConfidence,
     sourceLanguage: preferences.sourceLanguage,
     ...(resolvedSourceLanguage
@@ -3599,17 +4225,65 @@ function configureImageTranslation(): void {
   });
 }
 
+function enabledUsablePixelOcrProviderOrder(): readonly ImageTextProviderId[] {
+  return runtimeReadyOcrProviderOrder(
+    effectiveCompiledProviderOrder(
+      enabledOcrProviderOrder(
+        preferences.imageReadingMethodOrder,
+        preferences.disabledImageReadingMethodIds,
+      ),
+      preferences.disabledImageTextProviderIds,
+    ),
+    ocrProviderRuntimeStatuses,
+  );
+}
+
 function currentAutoImageLanguageConfigurationKey(): string {
+  const readScope = currentReplicaReadScope();
+  const disabledMethodIds =
+    preferences.readScopeSetupVersion === REPLICA_READ_SCOPE_SETUP_VERSION ||
+    preferences.disabledImageReadingMethodIds.includes(
+      ACCESSIBILITY_TEXT_METHOD_ID,
+    )
+      ? preferences.disabledImageReadingMethodIds
+      : [
+          ACCESSIBILITY_TEXT_METHOD_ID,
+          ...preferences.disabledImageReadingMethodIds,
+        ];
   const enabledProviderOrder = effectiveCompiledProviderOrder(
-    preferences.imageTextProviderOrder,
+    enabledOcrProviderOrder(
+      preferences.imageReadingMethodOrder,
+      disabledMethodIds,
+    ),
     preferences.disabledImageTextProviderIds,
   );
-  return autoImageLanguageConfigurationKey(
-    runtimeReadyOcrProviderOrder(
+  const usableProviderOrder = imageCaptureAccess === 'granted'
+    ? runtimeReadyOcrProviderOrder(
       enabledProviderOrder,
       ocrProviderRuntimeStatuses,
+    )
+    : [];
+  return autoImageLanguageConfigurationKey({
+    providerOrder: usableProviderOrder,
+    enabledMethodOrder: enabledAutoImageLanguageMethodOrder(
+      disabledMethodIds,
+      usableProviderOrder,
     ),
-    preferences.ocrMinimumConfidence,
+    minimumConfidence: preferences.ocrMinimumConfidence,
+    policyFingerprint: replicaReadScopeFingerprint(readScope),
+    controlImages: readScope.controlImages,
+  });
+}
+
+function enabledAutoImageLanguageMethodOrder(
+  disabledMethodIds: readonly ImageReadingMethodId[],
+  providerOrder: readonly ImageTextProviderId[],
+): ImageReadingMethodId[] {
+  const disabled = new Set(disabledMethodIds);
+  const providers = new Set<ImageReadingMethodId>(providerOrder);
+  return preferences.imageReadingMethodOrder.filter((method) =>
+    !disabled.has(method) &&
+    (method === ACCESSIBILITY_TEXT_METHOD_ID || providers.has(method)),
   );
 }
 
@@ -3667,6 +4341,7 @@ async function refreshOcrProviderRuntimeStatuses(): Promise<void> {
     const ensureRaw: unknown = await browser.runtime.sendMessage({
       kind: 'simul:ocr-v1:ensure-host',
       version: 1,
+      resetEpoch: preferences.resetRevision,
     });
     const ready = readEnsureOcrHostResponse(ensureRaw);
     if (!ready?.ready) throw new Error('OCR host unavailable.');
@@ -3722,10 +4397,15 @@ function renderImageAnalysisControls(): void {
   ));
   const privacyNote = document.createElement('p');
   privacyNote.className = 'microcopy';
-  if (preferences.imageTranslationEnabled && imageCaptureAccess === 'missing') {
+  const enabledPixelProviders = enabledUsablePixelOcrProviderOrder();
+  if (
+    preferences.imageTranslationEnabled &&
+    imageCaptureAccess === 'missing' &&
+    enabledPixelProviders.length > 0
+  ) {
     setUiText(
       privacyNote,
-      'Image translation is saved but paused. Grant image access so Chrome can capture visible pixels for local OCR.',
+      'Accessibility text can run without image access. Grant image access only to enable local pixel OCR fallbacks.',
     );
   } else if (imageCaptureAccess === 'checking') {
     setUiText(privacyNote, 'Checking Chrome image access…');
@@ -3736,14 +4416,18 @@ function renderImageAnalysisControls(): void {
     );
   }
   root.append(privacyNote);
-  if (preferences.imageTranslationEnabled && imageCaptureAccess === 'missing') {
+  if (
+    preferences.imageTranslationEnabled &&
+    imageCaptureAccess === 'missing' &&
+    enabledPixelProviders.length > 0
+  ) {
     const grant = document.createElement('button');
     grant.type = 'button';
     grant.className = 'image-access-grant';
     setUiText(grant, 'Grant image access');
     grant.disabled = permissionInFlight;
     grant.addEventListener('click', () => {
-      void changeImageTranslationEnabled(true);
+      void changeImageTranslationEnabled(true, true);
     });
     root.append(grant);
   }
@@ -3799,46 +4483,60 @@ function renderImageAnalysisControls(): void {
     );
     confidence.append(confidenceTitle, confidenceRow, confidenceHelp);
     root.append(confidence);
+  }
 
     const orderLabel = document.createElement('p');
     orderLabel.className = 'microcopy';
-    setUiText(orderLabel, 'OCR priority');
-    orderLabel.title = 'Simul tries locally available OCR providers from top to bottom.';
+    setUiText(orderLabel, 'Image reading priority');
+    orderLabel.title = 'Simul tries enabled local accessibility and OCR methods from top to bottom.';
     root.append(orderLabel);
     const list = document.createElement('ol');
     list.className = 'ocr-provider-order';
-    const disabledProviders = new Set(
-      preferences.disabledImageTextProviderIds,
+    const disabledMethods = new Set(
+      preferences.disabledImageReadingMethodIds,
     );
-    compiledOrder.forEach((id, index) => {
+    const readingOrder = visibleImageReadingMethodOrder(
+      preferences.imageReadingMethodOrder,
+      compiledOrder,
+    );
+    readingOrder.forEach((id, index) => {
       const item = document.createElement('li');
       const providerToggle = document.createElement('label');
       providerToggle.className = 'ocr-provider-toggle';
       providerToggle.title =
-        'Turn this local OCR provider on or off without changing its priority.';
+        'Turn this local image-reading method on or off without changing its priority.';
       const enabled = document.createElement('input');
       enabled.type = 'checkbox';
-      enabled.checked = !disabledProviders.has(id);
+      enabled.checked = !disabledMethods.has(id);
       enabled.setAttribute(
         'aria-label',
-        `${enabled.checked ? 'Disable' : 'Enable'} ${imageProviderName(id)}`,
+        `${enabled.checked ? 'Disable' : 'Enable'} ${imageReadingMethodName(id)}`,
       );
       enabled.addEventListener('change', () => {
         const nextDisabled = new Set(
-          preferences.disabledImageTextProviderIds,
+          preferences.disabledImageReadingMethodIds,
         );
         if (enabled.checked) nextDisabled.delete(id);
         else nextDisabled.add(id);
         void commitImageAnalysisPreferencePatch({
-          disabledImageTextProviderIds: preferences.imageTextProviderOrder
-            .filter((providerId) => nextDisabled.has(providerId)),
+          disabledImageReadingMethodIds: preferences.imageReadingMethodOrder
+            .filter((methodId) => nextDisabled.has(methodId)),
         });
       });
       const name = document.createElement('span');
-      name.textContent = imageProviderName(id);
+      name.textContent = imageReadingMethodName(id);
       providerToggle.append(enabled, name);
       item.append(providerToggle);
-      const runtimeStatus = ocrProviderRuntimeStatuses.get(id);
+      const runtimeStatus = id === ACCESSIBILITY_TEXT_METHOD_ID
+        ? undefined
+        : ocrProviderRuntimeStatuses.get(id);
+      if (id === ACCESSIBILITY_TEXT_METHOD_ID) {
+        const status = document.createElement('span');
+        status.className = 'ocr-provider-status ocr-provider-status-available';
+        status.textContent = 'No pixels';
+        status.title = 'Uses direct image aria-label or alt text and does not require screenshot permission.';
+        item.append(status);
+      }
       if (runtimeStatus) {
         const status = document.createElement('span');
         status.className = runtimeStatus === 'checking'
@@ -3861,13 +4559,13 @@ function renderImageAnalysisControls(): void {
       const buttons = document.createElement('span');
       buttons.className = 'ocr-order-buttons';
       const up = createOrderButton('↑', 'Move earlier', index === 0, () =>
-        moveCompiledProvider(compiledOrder, index, -1),
+        moveImageReadingMethod(readingOrder, index, -1),
       );
       const down = createOrderButton(
         '↓',
         'Move later',
-        index === compiledOrder.length - 1,
-        () => moveCompiledProvider(compiledOrder, index, 1),
+        index === readingOrder.length - 1,
+        () => moveImageReadingMethod(readingOrder, index, 1),
       );
       buttons.append(up, down);
       item.append(buttons);
@@ -3946,7 +4644,6 @@ function renderImageAnalysisControls(): void {
     smallLabel.append(small, smallTitle);
     grid.append(policyLabel, smallLabel);
     root.append(grid);
-  }
 
   if (compiledImageAnalysisCapabilities.promptImageLanguage) {
     root.append(createPromptToggle(
@@ -4011,15 +4708,15 @@ function createOrderButton(
   return button;
 }
 
-function moveCompiledProvider(
-  compiledOrder: readonly ImageTextProviderId[],
+function moveImageReadingMethod(
+  renderedOrder: readonly ImageReadingMethodId[],
   index: number,
   direction: -1 | 1,
 ): void {
-  const current = compiledOrder[index];
-  const adjacent = compiledOrder[index + direction];
+  const current = renderedOrder[index];
+  const adjacent = renderedOrder[index + direction];
   if (!current || !adjacent) return;
-  const next = [...preferences.imageTextProviderOrder];
+  const next = [...preferences.imageReadingMethodOrder];
   const currentIndex = next.indexOf(current);
   const adjacentIndex = next.indexOf(adjacent);
   if (currentIndex < 0 || adjacentIndex < 0) return;
@@ -4027,7 +4724,7 @@ function moveCompiledProvider(
     next[adjacentIndex]!,
     next[currentIndex]!,
   ];
-  void commitImageAnalysisPreferencePatch({ imageTextProviderOrder: next });
+  void commitImageAnalysisPreferencePatch({ imageReadingMethodOrder: next });
 }
 
 function createPromptToggle(
@@ -4049,7 +4746,10 @@ function createPromptToggle(
   return wrapper;
 }
 
-function imageProviderName(id: ImageTextProviderId): string {
+function imageReadingMethodName(id: ImageReadingMethodId): string {
+  if (id === ACCESSIBILITY_TEXT_METHOD_ID) {
+    return 'Accessibility text (aria-label / alt)';
+  }
   const names: Record<ImageTextProviderId, string> = {
     'chrome-text-detector': 'Chrome TextDetector (platform)',
     tesseract: 'Tesseract.js (wrapper A/B)',
@@ -4357,41 +5057,32 @@ async function changeAutoTranslationMode(mode: AutoTranslationMode): Promise<voi
   permissionInFlight = true;
   updateControls();
   try {
-    if (!navigator.locks) throw new Error('Chrome Web Locks are unavailable.');
-    const outcome = await navigator.locks.request(
-      PREFERENCE_LOCK_NAME,
-      { ifAvailable: true },
-      async (lock) => {
-        if (!lock) return { kind: 'busy' } as const;
-        return performLockedAutoTranslationChange(mode, pageUrl, requestedOrigins);
-      },
+    const outcome = await performAutoTranslationChange(
+      mode,
+      pageUrl,
+      requestedOrigins,
     );
-    if (outcome.kind === 'busy') {
-      await reloadPreferencesFromStorage();
-      setStatus('Another companion window is saving this setting. Try again.', 'warning');
-      return;
-    }
     if (outcome.kind === 'activation') {
       await reloadPreferencesFromStorage();
       setStatus('Choose the setting again so Chrome can show its access prompt.', 'warning');
       return;
     }
     if (outcome.kind === 'limit') {
-      preferences = mergePendingViewPreferences(outcome.preferences);
+      applyCommittedPreferences(outcome.preferences);
       syncPreferenceControls();
       setStatus('The saved-site limit has been reached.', 'warning');
       return;
     }
     if (outcome.kind === 'failed') {
       if (outcome.result) {
-        preferences = mergePendingViewPreferences(outcome.result.preferences);
+        applyCommittedPreferences(outcome.result.preferences);
       }
       else await reloadPreferencesFromStorage();
       syncPreferenceControls();
       setStatus(`Chrome could not update automatic access: ${readableError(outcome.error)}`, 'error');
       return;
     }
-    preferences = mergePendingViewPreferences(outcome.result.preferences);
+    applyCommittedPreferences(outcome.result.preferences);
     syncPreferenceControls();
     if (outcome.kind === 'denied' || outcome.kind === 'not-applied') {
       setStatus('Chrome did not retain the requested automatic-access scope.', 'warning');
@@ -4412,10 +5103,11 @@ async function changeAutoTranslationMode(mode: AutoTranslationMode): Promise<voi
   } catch (error) {
     const repaired = await sendPreferenceCommand({
       type: 'simul:preferences:abort-auto',
+      expectedResetRevision: preferences.resetRevision,
       mode,
       ...(pageUrl ? { pageUrl } : {}),
     }).catch(() => undefined);
-    if (repaired) preferences = mergePendingViewPreferences(repaired.preferences);
+    if (repaired) applyCommittedPreferences(repaired.preferences);
     else await reloadPreferencesFromStorage();
     syncPreferenceControls();
     setStatus(`Chrome could not update automatic access: ${readableError(error)}`, 'error');
@@ -4425,13 +5117,14 @@ async function changeAutoTranslationMode(mode: AutoTranslationMode): Promise<voi
   }
 }
 
-async function performLockedAutoTranslationChange(
+async function performAutoTranslationChange(
   mode: AutoTranslationMode,
   pageUrl: string | undefined,
   requestedOrigins: string[],
 ) {
+  let freshPreferences: CompanionPreferences | undefined;
   try {
-    const freshPreferences = await readStoredPreferences();
+    freshPreferences = await readStoredPreferences();
     const candidate = withAutoTranslationMode(freshPreferences, pageUrl, mode);
     if (mode === 'site' && autoTranslationModeForPage(candidate, pageUrl) !== 'site') {
       return { kind: 'limit', preferences: freshPreferences } as const;
@@ -4448,6 +5141,7 @@ async function performLockedAutoTranslationChange(
     if (!granted) {
       const result = await sendPreferenceCommand({
         type: 'simul:preferences:abort-auto',
+        expectedResetRevision: freshPreferences.resetRevision,
         mode,
         ...(pageUrl ? { pageUrl } : {}),
       });
@@ -4455,13 +5149,26 @@ async function performLockedAutoTranslationChange(
     }
     const result = await sendPreferenceCommand({
       type: 'simul:preferences:commit-auto',
+      expectedResetRevision: freshPreferences.resetRevision,
+      expectedSettingsRevision: freshPreferences.settingsRevision,
       mode,
       ...(pageUrl ? { pageUrl } : {}),
     });
-    return { kind: result.applied ? 'complete' : 'not-applied', result } as const;
+    if (result.applied) return { kind: 'complete', result } as const;
+    const repaired = await sendPreferenceCommand({
+      type: 'simul:preferences:abort-auto',
+      expectedResetRevision: result.preferences.resetRevision,
+      mode,
+      ...(pageUrl ? { pageUrl } : {}),
+    }).catch(() => result);
+    return { kind: 'not-applied', result: repaired } as const;
   } catch (error) {
+    const latest = await readStoredPreferences().catch(
+      () => freshPreferences ?? preferences,
+    );
     const result = await sendPreferenceCommand({
       type: 'simul:preferences:abort-auto',
+      expectedResetRevision: latest.resetRevision,
       mode,
       ...(pageUrl ? { pageUrl } : {}),
     }).catch(() => undefined);
@@ -4472,7 +5179,7 @@ async function performLockedAutoTranslationChange(
 async function reconcileAutomaticAccess(pageUrl: string | undefined): Promise<boolean> {
   const before = autoTranslationModeForPage(preferences, pageUrl);
   const result = await sendPreferenceCommand({ type: 'simul:preferences:reconcile' });
-  preferences = mergePendingViewPreferences(result.preferences);
+  applyCommittedPreferences(result.preferences);
   syncPreferenceControls();
   return before !== autoTranslationModeForPage(preferences, pageUrl);
 }
@@ -4484,11 +5191,9 @@ async function readStoredPreferences(): Promise<CompanionPreferences> {
 
 async function reloadPreferencesFromStorage(): Promise<void> {
   try {
-    preferences = mergePendingViewPreferences(await readStoredPreferences());
+    applyCommittedPreferences(await readStoredPreferences());
   } catch {
-    preferences = mergePendingViewPreferences(
-      parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES),
-    );
+    applyCommittedPreferences(DEFAULT_COMPANION_PREFERENCES);
   }
   syncPreferenceControls();
 }
@@ -4597,12 +5302,26 @@ function releaseReplicaPresentationForLegacyWork(force = false): boolean {
 function releaseLiveSession(
   identity: CapturedPageIdentity | undefined = capturedPageIdentity ?? followedPageIdentity,
 ): void {
+  void requestLiveSessionRelease(identity, false);
+}
+
+async function requestLiveSessionRelease(
+  identity: CapturedPageIdentity | undefined,
+  requireConfirmation: boolean,
+): Promise<void> {
   if (!identity) return;
-  void browser.scripting.executeScript({
-    target: { tabId: identity.tabId, frameIds: [0] },
-    func: invokeLivePageObserverUnregisterBridge,
-    args: [liveSessionId],
-  }).catch(() => undefined);
+  try {
+    const results = await browser.scripting.executeScript({
+      target: { tabId: identity.tabId, frameIds: [0] },
+      func: invokeLivePageObserverUnregisterBridge,
+      args: [liveSessionId],
+    });
+    if (requireConfirmation && !isConfirmedLivePageObserverRelease(results)) {
+      throw new Error('The legacy source observer teardown was not confirmed.');
+    }
+  } catch (error) {
+    if (requireConfirmation) throw error;
+  }
 }
 
 function renderLoadingState(): void {

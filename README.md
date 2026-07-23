@@ -4,8 +4,8 @@ Simul is a Chrome translation companion that keeps the original website intact
 and places a live, inert, translated replica beside it in the side panel or a
 detached window.
 
-Current release: **0.3.2 release candidate** · Desktop Chrome **138+** · Chrome
-Manifest V3
+Current trial build: **0.3.2 beta v.20260723.4** · Desktop Chrome **138+** ·
+Chrome Manifest V3
 
 ## Why Simul exists
 
@@ -58,9 +58,10 @@ and [passive-fidelity architecture](_bmad-output/specs/spec-passive-replica-fide
 
 GPT-5.6 Sol Ultra was the development model powering Codex; it is **not** a
 runtime translation API in Simul. The shipped extension uses Chrome's on-device
-Translator and optional TextDetector APIs plus packaged Tesseract.js assets. It
-makes no OpenAI API call and contains no cloud translation integration, service
-credentials, analytics, or remotely hosted executable code.
+Translator and optional TextDetector APIs plus packaged PaddleOCR and two local
+Tesseract adapters. It makes no OpenAI API call and contains no cloud
+translation integration, service credentials, analytics, or remotely hosted
+executable code.
 
 The BMAD Method supplied third-party workflow templates and generated project
 tooling; it is not part of the extension runtime. WXT, TypeScript, rrweb,
@@ -86,8 +87,8 @@ do not update automatically: after updating the repository, select **Reload**
 on Simul's extension card and reopen the companion.
 
 For this OCR trial, confirm the extension card shows
-`0.3.2 beta v.20260723.1` and Simul Options shows
-`Build 0.3.2 beta v.20260723.1`. If either identity differs, reload Simul from
+`0.3.2 beta v.20260723.4` and Simul Options shows
+`Build 0.3.2 beta v.20260723.4`. If either identity differs, reload Simul from
 `chrome://extensions` before evaluating websites.
 
 ## What ships in 0.3.2
@@ -119,10 +120,12 @@ For this OCR trial, confirm the extension card shows
 Public native dropdowns are represented as companion-owned, scriptless
 disclosures: single-row selects keep a popup-shaped trigger, while `multiple`
 and `size>1` controls stay bounded inline lists. Popup panels escape source
-clipping, clamp to the replica viewport, and scroll locally. They cannot change
-or submit the website's selection. In Isolated HTML, a uniquely mapped public
-ARIA menu/listbox can also open as a local preview; ambiguous, editable, or
-private relations remain inert. rrweb keeps all disclosure interaction inert.
+clipping, clamp to the replica viewport, reposition with scrolling/resizing,
+and scroll locally. They cannot change or submit the website's selection. Both
+replica engines use the same validated semantic proof channel and read-only
+presenter for native selects and uniquely mapped public ARIA menus/listboxes;
+ambiguous, editable, private, or unapproved relations remain static and inert.
+rrweb's underlying recording keeps all input and editable content masked.
 
 ## Replica engines
 
@@ -162,12 +165,23 @@ pointer-inert, while extension code can still inspect and translate the safe
 tree. Companion-owned dropdown disclosures are the narrow exception: they can
 reveal safe labels but cannot change or submit website state.
 
-Passwords, contenteditable text, unsupported controls, editable ARIA controls,
-private ancestry, raw native-select values, names, data attributes, datalist
-suggestions, and submission semantics do not cross the replica boundary.
-Eligible public native text-control content is held only in the active in-memory
-session and is cleared if the field becomes sensitive. Diagnostics never include
-page text, URLs, attribute values, pixels, hashes, or DOM IDs.
+Readable content is independent from replica actions. On first use, Simul stays
+in **Page-only** until the user commits Page-only, Standard, Full visible, or a
+custom combination. Six live controls cover public control semantics, images
+inside controls, validated disclosure content, ordinary visible form values,
+personal/autofill values, and editable content. Narrowing a scope clears the
+current replica, translations, and image overlays before rebuilding. **Reset
+all extension settings** restores Page-only/setup-zero defaults, clears local
+work, and reconciles Simul-owned optional site grants.
+
+Passwords, password/authentication autocomplete, one-time codes, WebAuthn,
+every `cc-*` autocomplete class, hidden/file inputs, file paths, and CSS
+text-security fields remain unreadable under every profile. Classification is
+performed before value, text, or image access and a source node that becomes a
+secret stays secret for that document lifetime. Native-select submission
+values, names, data attributes, datalist suggestions, and submission semantics
+also never cross the boundary. Diagnostics never include page text, URLs,
+attribute values, pixels, hashes, or DOM IDs.
 
 The installed permissions are:
 
@@ -219,15 +233,20 @@ For the complete matrix and diagnostic meanings, see
 Image translation is persisted but **off by default**. Once enabled from an
 explicit gesture and granted the needed access, Simul:
 
-1. observes ordinary visible top-frame `<img>` elements without using their URL
+1. observes policy-approved top-frame `<img>` elements without using their URL
    as an OCR cache key;
-2. captures a geometry-checked visible-tab crop no more than twice per second;
-3. proportionally reduces high-DPI crops to a maximum of 4 MP;
-4. tries the saved local-provider order—by default, Chrome TextDetector when
-   the installed browser exposes it, then packaged Tesseract.js 7.0.0;
-5. rejects blank, punctuation-only, and explicitly very-low-confidence regions;
-6. translates accepted lines with Chrome's on-device Translator; and
-7. projects clipped, inert text overlays that follow replica scroll and zoom.
+2. tries enabled image-reading methods in the saved priority order, beginning
+   with direct image `aria-label`/`alt` accessibility text by default;
+3. requests no screenshot permission and reads no pixels when accessibility
+   text succeeds, including for images below the OCR small-image threshold;
+4. when a pixel OCR fallback is reached, captures a geometry-checked visible-tab
+   crop no more than twice per second and reduces it to a maximum of 4 MP;
+5. tries the compiled local OCR providers in their displayed order: PaddleOCR
+   Wasm, Chrome TextDetector, Tesseract.js, and direct Tesseract Wasm;
+6. rejects blank, punctuation-only, and explicitly very-low-confidence OCR
+   regions, then translates accepted semantic text or OCR lines locally; and
+7. projects inert whole-image accessibility labels or bounded OCR line overlays
+   that follow replica scroll and zoom.
 
 With **From: Auto-detect**, reliable page language still wins. On a text-light
 page, OCR can instead test a bounded set of representative local language
@@ -261,11 +280,22 @@ for the implemented boundary and deferred alternatives.
    on-device language pack.
 5. Use **Fit**, **1:1**, custom zoom, layout, and scroll-following controls to
    compare the source and translation.
-6. Use **OCR On** only when local image text translation is wanted; grant image
-   access if Chrome asks.
+6. Use **OCR On** only when local image text translation is wanted.
+   Accessibility text needs no image grant; grant image access only to test
+   pixel OCR fallbacks.
 7. Select **文** for an unsaved reverse translation into the page language.
 8. Use **Rebuild mirror** after a browser-boundary change that cannot be
    observed incrementally.
+
+For the NTA navigation-image check, open
+`https://www.houjin-bangou.nta.go.jp/henkorireki-johoto.html?selHouzinNo=4010401195731`,
+choose **Standard**, turn **OCR On**, and leave **Accessibility text
+(aria-label / alt)** enabled ahead of the pixel providers. The
+`gnav-news2.gif` label should render as translated whole-image text without an
+image-access grant. Disable that method to compare the four pixel OCR runtimes;
+Chrome TextDetector may report **Unavailable** on platforms where Chrome does
+not expose the API. Use **Reset all extension settings…** under **Readable
+content & security** to repeat the first-load flow.
 
 Chrome does not expose an API that enumerates every Translator language at
 runtime. Simul presents Chrome's documented Chrome 138 language set, then asks
@@ -346,14 +376,18 @@ Then use the repository scripts:
 | `npm test` | Run the Vitest suite once. |
 | `npm run test:watch` | Run Vitest in watch mode. |
 | `npm run build` | Create a Chrome build under `.output/`. |
-| `npm run artifact:check` | Produce a guarded temporary release build and compare it with the committed artifact. |
-| `npm run artifact:sync` | Refresh `dist/chrome-unpacked/` from a validated release build. |
+| `npm run artifact:check` | Produce the ordinary Paddle-free profile and compare it with the committed artifact. |
+| `npm run artifact:sync` | Refresh `dist/chrome-unpacked/` from the ordinary Paddle-free profile. |
+| `npm run artifact:check:ocr-trials` | Verify the committed artifact is the exact four-provider OCR trial profile. |
+| `npm run artifact:sync:ocr-trials` | Build and refresh `dist/chrome-unpacked/` with the exact four-provider OCR trial profile. |
 | `npm run zip` | Create WXT's Chrome distribution archive. |
-| `npm run check` | Run typechecking, the full test suite, and the non-mutating artifact integrity check. |
+| `npm run check` | Run typechecking, the full test suite, and the exact four-provider OCR trial artifact check. |
 
-Do not edit `dist/chrome-unpacked` by hand. Change source, run `npm run check`,
-then use `npm run artifact:sync` only when the ready-to-load build must be
-refreshed.
+Do not edit `dist/chrome-unpacked` by hand. For this beta branch, change source,
+use `npm run artifact:sync:ocr-trials` to refresh the exact four-provider
+ready-to-load build, then run `npm run check`. The unqualified artifact commands
+remain available for the ordinary Paddle-free profile and are not the canonical
+artifact commands for this OCR trial.
 
 Long-lived technical detail lives in [docs](docs/); BMAD Method planning and
 implementation artifacts live in [_bmad-output](_bmad-output/).

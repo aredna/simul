@@ -1,4 +1,10 @@
 import type { ImageBoundingBox } from './contracts';
+import {
+  ACCESSIBILITY_TEXT_METHOD_ID,
+  isImageReadingMethodId,
+  isOcrImageReadingMethod,
+  type ImageReadingMethodId,
+} from './image-reading-methods';
 import type { ReplicaImageAnchor } from '../replica/contracts';
 import {
   receiverSafeAnimationFrameCanceller,
@@ -21,6 +27,7 @@ const IMAGE_OVERLAY_FIT_STEPS = 7;
 export interface TranslatedImageRegion {
   readonly text: string;
   readonly boundingBox: ImageBoundingBox;
+  readonly placement?: 'ocr-box' | 'whole-image';
 }
 
 export interface ImageOverlayProjection {
@@ -42,6 +49,8 @@ export interface ImageOverlayProjection {
   readonly renderedWidthCss: number;
   readonly renderedHeightCss: number;
   readonly regions: readonly TranslatedImageRegion[];
+  readonly methodId: ImageReadingMethodId;
+  readonly evidenceKind: 'ocr' | 'semantic';
 }
 
 export interface ImageOverlayProjectorEnvironment {
@@ -141,12 +150,13 @@ export class ImageOverlayProjector {
 
     const root = replayDocument.createElement('div');
     root.dataset.simulImageOverlay = String(projection.nodeId);
+    root.dataset.simulImageMethod = projection.methodId;
     applyImageRootStyle(root);
     for (const region of projection.regions) {
       const element = replayDocument.createElement('span');
       element.textContent = region.text;
       element.dir = 'auto';
-      applyRegionStyle(element);
+      applyRegionStyle(element, region.placement === 'whole-image');
       root.append(element);
     }
     layer.root.append(root);
@@ -325,6 +335,7 @@ function validProjection(value: ImageOverlayProjection): boolean {
     !positiveFinite(value.renderedHeightCss) ||
     value.cropOffsetXCss + value.cropWidthCss > value.renderedWidthCss + 1 ||
     value.cropOffsetYCss + value.cropHeightCss > value.renderedHeightCss + 1 ||
+    !validProjectionProvenance(value.methodId, value.evidenceKind) ||
     !Array.isArray(value.regions) ||
     value.regions.length > MAX_IMAGE_OVERLAY_REGIONS
   ) return false;
@@ -334,6 +345,18 @@ function validProjection(value: ImageOverlayProjection): boolean {
     region.text.length <= 100_000 &&
     validBox(region.boundingBox, value.bitmapWidth, value.bitmapHeight),
   );
+}
+
+function validProjectionProvenance(
+  methodId: unknown,
+  evidenceKind: unknown,
+): boolean {
+  if (!isImageReadingMethodId(methodId)) return false;
+  if (evidenceKind === 'semantic') {
+    return methodId === ACCESSIBILITY_TEXT_METHOD_ID;
+  }
+  if (evidenceKind === 'ocr') return isOcrImageReadingMethod(methodId);
+  return false;
 }
 
 function validBox(
@@ -387,20 +410,22 @@ function applyImageRootStyle(element: HTMLElement): void {
   });
 }
 
-function applyRegionStyle(element: HTMLElement): void {
+function applyRegionStyle(element: HTMLElement, wholeImage = false): void {
   Object.assign(element.style, {
     position: 'absolute',
     display: 'flex',
     alignItems: 'center',
     justifyContent: 'center',
     overflow: 'hidden',
-    padding: '0',
+    padding: wholeImage ? '4px 6px' : '0',
     margin: '0',
     border: '0',
     boxSizing: 'border-box',
     borderRadius: '2px',
     color: '#111',
-    background: 'rgba(255, 255, 255, 0.94)',
+    background: wholeImage
+      ? 'rgba(255, 255, 255, 0.86)'
+      : 'rgba(255, 255, 255, 0.94)',
     fontFamily: 'system-ui, sans-serif',
     fontWeight: '600',
     textAlign: 'center',

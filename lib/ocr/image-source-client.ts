@@ -1,5 +1,8 @@
 import type { ReplicaCaptureRequest } from '../replica/contracts';
-import { sourceDocumentIdentity } from '../replica/source-identity';
+import {
+  sameSourceDocument,
+  sourceDocumentIdentity,
+} from '../replica/source-identity';
 import { createReplicaIdentity } from '../replica/protocol-v2';
 import type { SourceImageChange, SourceImageDescriptor } from './contracts';
 import {
@@ -7,6 +10,7 @@ import {
   readImageSourceRecorderMessage,
   type ImageSourceBridgeId,
   type ImageSourceReadySummary,
+  type SourceImageAccessibilityTextEvidence,
   type SourceImageCaptureMetrics,
 } from './image-source-protocol';
 
@@ -32,7 +36,19 @@ export interface ImageSourceLease {
     descriptor: SourceImageDescriptor,
     signal?: AbortSignal,
   ): Promise<SourceImageCaptureMetrics | undefined>;
+  readonly readAccessibilityText?: (
+    descriptor: SourceImageDescriptor,
+    policyFingerprint: string,
+    controlImages: boolean,
+    signal?: AbortSignal,
+  ) => Promise<SourceImageAccessibilityTextEvidence | undefined>;
   dispose(): void;
+}
+
+export interface ImageSourceReadPolicy {
+  readonly policyFingerprint: string;
+  readonly controlImages: boolean;
+  readonly accessibilityTextEnabled: boolean;
 }
 
 export async function openChromeImageSource(
@@ -40,6 +56,7 @@ export async function openChromeImageSource(
   onChange: (change: SourceImageChange) => void,
   signal?: AbortSignal,
   bridge: ImageSourceBridgeId = 'rrweb',
+  policy?: ImageSourceReadPolicy,
 ): Promise<ImageSourceLease> {
   signal?.throwIfAborted();
   if (!request.isCurrent()) throw new DOMException('Stale image source.', 'AbortError');
@@ -62,7 +79,14 @@ export async function openChromeImageSource(
   } catch (error) {
     throw new ImageSourceUnavailableError(readableError(error));
   }
-  return new ChromeImageSourceLease(port, document, request, onChange, signal);
+  return new ChromeImageSourceLease(
+    port,
+    document,
+    request,
+    onChange,
+    signal,
+    policy,
+  );
 }
 
 class ChromeImageSourceLease implements ImageSourceLease {
@@ -76,6 +100,19 @@ class ChromeImageSourceLease implements ImageSourceLease {
       readonly timer: ReturnType<typeof setTimeout>;
       readonly signal?: AbortSignal;
       readonly onAbort: () => void;
+    }
+  >();
+  readonly #pendingAccessibility = new Map<
+    string,
+    {
+      readonly resolve: (
+        value: SourceImageAccessibilityTextEvidence | undefined,
+      ) => void;
+      readonly reject: (reason: unknown) => void;
+      readonly timer: ReturnType<typeof setTimeout>;
+      readonly signal?: AbortSignal;
+      readonly onAbort: () => void;
+      readonly descriptor: SourceImageDescriptor;
     }
   >();
   readonly #resolveUnavailable: (error: ImageSourceUnavailableError) => void;
@@ -92,6 +129,7 @@ class ChromeImageSourceLease implements ImageSourceLease {
     private readonly request: ReplicaCaptureRequest,
     private readonly onChange: (change: SourceImageChange) => void,
     private readonly signal?: AbortSignal,
+    private readonly policy?: ImageSourceReadPolicy,
   ) {
     let resolveReady!: (
       summary: ImageSourceReadySummary | undefined,
@@ -109,7 +147,17 @@ class ChromeImageSourceLease implements ImageSourceLease {
     port.onDisconnect.addListener(this.#onDisconnect);
     signal?.addEventListener('abort', this.#onAbort, { once: true });
     try {
-      port.postMessage({ kind: 'simul:image-source-v1:start', document });
+      port.postMessage({
+        kind: 'simul:image-source-v1:start',
+        document,
+        ...(policy
+          ? {
+              policyFingerprint: policy.policyFingerprint,
+              controlImages: policy.controlImages,
+              accessibilityTextEnabled: policy.accessibilityTextEnabled,
+            }
+          : {}),
+      });
     } catch (error) {
       this.disposeWithError(
         new ImageSourceUnavailableError(readableError(error)),
@@ -157,6 +205,67 @@ class ChromeImageSourceLease implements ImageSourceLease {
     });
   }
 
+  readAccessibilityText(
+    descriptor: SourceImageDescriptor,
+    policyFingerprint: string,
+    controlImages: boolean,
+    signal?: AbortSignal,
+  ): Promise<SourceImageAccessibilityTextEvidence | undefined> {
+    if (
+      this.#disposed ||
+      this.#pending.size + this.#pendingAccessibility.size >=
+        MAX_PENDING_MEASUREMENTS ||
+      !this.request.isCurrent()
+    ) return Promise.reject(new ImageSourceUnavailableError('Image source is unavailable.'));
+    if (
+      !this.policy?.accessibilityTextEnabled ||
+      policyFingerprint !== this.policy.policyFingerprint ||
+      controlImages !== this.policy.controlImages
+    ) {
+      return Promise.reject(new ImageSourceUnavailableError(
+        'Accessibility text is outside the image source policy.',
+      ));
+    }
+    signal?.throwIfAborted();
+    const requestId = crypto.randomUUID();
+    return new Promise((resolve, reject) => {
+      const onAbort = (): void => {
+        const pending = this.#pendingAccessibility.get(requestId);
+        if (!pending) return;
+        this.#pendingAccessibility.delete(requestId);
+        clearTimeout(pending.timer);
+        reject(new DOMException('Accessibility text read cancelled.', 'AbortError'));
+      };
+      const timer = setTimeout(() => {
+        this.#pendingAccessibility.delete(requestId);
+        signal?.removeEventListener('abort', onAbort);
+        resolve(undefined);
+      }, IMAGE_SOURCE_MEASURE_TIMEOUT_MS);
+      this.#pendingAccessibility.set(requestId, {
+        resolve,
+        reject,
+        timer,
+        signal,
+        onAbort,
+        descriptor,
+      });
+      signal?.addEventListener('abort', onAbort, { once: true });
+      try {
+        this.port.postMessage({
+          kind: 'simul:image-source-v1:accessibility-text',
+          requestId,
+          descriptor,
+          policyFingerprint,
+          controlImages,
+        });
+      } catch (error) {
+        this.disposeWithError(
+          new ImageSourceUnavailableError(readableError(error)),
+        );
+      }
+    });
+  }
+
   dispose(): void {
     this.disposeWithError(new DOMException('Image source closed.', 'AbortError'));
   }
@@ -192,6 +301,26 @@ class ChromeImageSourceLease implements ImageSourceLease {
       this.#resolveReady(message.summary);
       return;
     }
+    if (message.kind === 'simul:image-source-v1:accessibility-text') {
+      const pending = this.#pendingAccessibility.get(message.requestId);
+      if (
+        pending &&
+        !sameAccessibilityDescriptorIdentity(
+          message.descriptor,
+          pending.descriptor,
+        )
+      ) {
+        this.disposeWithError(new ImageSourceUnavailableError(
+          'Mismatched accessibility text response.',
+        ));
+        return;
+      }
+      this.#settlePendingAccessibility(
+        message.requestId,
+        message.status === 'ready' ? message.evidence : undefined,
+      );
+      return;
+    }
     this.#settlePending(
       message.requestId,
       message.status === 'ready' ? message.metrics : undefined,
@@ -221,6 +350,20 @@ class ChromeImageSourceLease implements ImageSourceLease {
     else pending.resolve(value);
   }
 
+  #settlePendingAccessibility(
+    requestId: string,
+    value: SourceImageAccessibilityTextEvidence | undefined,
+    error?: unknown,
+  ): void {
+    const pending = this.#pendingAccessibility.get(requestId);
+    if (!pending) return;
+    this.#pendingAccessibility.delete(requestId);
+    clearTimeout(pending.timer);
+    pending.signal?.removeEventListener('abort', pending.onAbort);
+    if (error) pending.reject(error);
+    else pending.resolve(value);
+  }
+
   private disposeWithError(error: unknown, disconnect = true): void {
     if (this.#disposed) return;
     this.#disposed = true;
@@ -233,6 +376,9 @@ class ChromeImageSourceLease implements ImageSourceLease {
     }
     for (const requestId of [...this.#pending.keys()]) {
       this.#settlePending(requestId, undefined, error);
+    }
+    for (const requestId of [...this.#pendingAccessibility.keys()]) {
+      this.#settlePendingAccessibility(requestId, undefined, error);
     }
     if (
       isImageSourceUnavailableError(error) &&
@@ -255,4 +401,14 @@ function readableError(error: unknown): string {
   return error instanceof Error && error.message
     ? error.message
     : 'Image source messaging failed.';
+}
+
+function sameAccessibilityDescriptorIdentity(
+  response: SourceImageDescriptor,
+  pending: SourceImageDescriptor,
+): boolean {
+  return sameSourceDocument(response.document, pending.document) &&
+    response.nodeId === pending.nodeId &&
+    response.contentRevision === pending.contentRevision &&
+    response.observationRevision === pending.observationRevision;
 }

@@ -37,16 +37,17 @@ import {
   type HtmlMirrorStyleWorkBudget,
 } from './html-mirror-sanitizer';
 import { createReplicaIdentity } from './protocol-v2';
+import { readSemanticSourcePortIdentity } from './semantic-source-protocol';
 import {
-  hasSourcePrivateOrActivationElementAncestor,
-  isEligibleSourceSelect,
-  isEligibleSourceTextControl,
-  isSourceNativeSelectTagName,
-  isSourceNativeTextControlTagName,
-  readSourceControlText,
-  readSourceSelectPickerOpen,
-  readSourceSelectedOptionIndexes,
-} from './source-privacy-policy';
+  SemanticSourceSession,
+  eagerlyClassifySourceDocumentSecrets,
+  rememberSourceMutationSecrets,
+} from './semantic-source-session';
+import {
+  sourceDocumentSecretClassifier,
+  type StickySourceSecretClassifier,
+} from './source-secret-classifier';
+import { hasSourceCredentialSecretAncestor } from './source-privacy-policy';
 import type { SelectableReplicaFidelityPolicy } from './fidelity-policy';
 
 export class WeakNodeIdRegistry implements HtmlMirrorIdRegistry {
@@ -104,6 +105,10 @@ export class WeakNodeIdRegistry implements HtmlMirrorIdRegistry {
 export interface HtmlMirrorSourceBridgeEnvironment {
   readonly global?: typeof globalThis & {
     __simulHtmlMirrorV1Installed?: boolean;
+    __simulHtmlMirrorV1SecretObserver?: Pick<
+      MutationObserver,
+      'disconnect'
+    >;
   };
   readonly runtime?: Pick<typeof browser.runtime, 'onConnect'>;
   readonly document?: Document;
@@ -128,6 +133,10 @@ export function installHtmlMirrorSourceBridge(
 ): void {
   const isolatedGlobal = (environment.global ?? globalThis) as typeof globalThis & {
     __simulHtmlMirrorV1Installed?: boolean;
+    __simulHtmlMirrorV1SecretObserver?: Pick<
+      MutationObserver,
+      'disconnect'
+    >;
   };
   if (isolatedGlobal.__simulHtmlMirrorV1Installed) return;
   isolatedGlobal.__simulHtmlMirrorV1Installed = true;
@@ -135,6 +144,43 @@ export function installHtmlMirrorSourceBridge(
   const sourceDocument = environment.document ?? document;
   const sourceWindow = environment.window ?? window;
   const registry = environment.registry ?? new WeakNodeIdRegistry();
+  const documentSecretClassifier = sourceDocumentSecretClassifier(sourceDocument);
+  eagerlyClassifySourceDocumentSecrets(
+    sourceDocument,
+    sourceWindow,
+    documentSecretClassifier,
+  );
+  try {
+    const createSecretObserver = environment.createMutationObserver ??
+      ((callback: MutationCallback) => new MutationObserver(callback));
+    const secretObserver = createSecretObserver((records) => {
+      rememberSourceMutationSecrets(
+        records,
+        sourceWindow,
+        documentSecretClassifier,
+      );
+    });
+    secretObserver.observe(sourceDocument, {
+      attributes: true,
+      attributeOldValue: true,
+      characterData: true,
+      characterDataOldValue: true,
+      childList: true,
+      subtree: true,
+    });
+    // Keep the observer alive for the isolated-world document lifetime so
+    // newly created credential nodes remain sticky before and between mirror
+    // Port connections.
+    isolatedGlobal.__simulHtmlMirrorV1SecretObserver = secretObserver;
+  } catch {
+    const root = sourceDocument.documentElement;
+    if (root) {
+      documentSecretClassifier.classify(root, {
+        tagName: root.localName,
+        secretAncestor: true,
+      });
+    }
+  }
 
   runtime.onConnect.addListener((port) => {
     if (readHtmlMirrorPortSessionId(port.name)) {
@@ -143,6 +189,7 @@ export function installHtmlMirrorSourceBridge(
         document: sourceDocument,
         window: sourceWindow,
         registry,
+        secretClassifier: documentSecretClassifier,
         now: environment.now ?? (() => performance.now()),
         createMutationObserver: environment.createMutationObserver ??
           ((callback) => new MutationObserver(callback)),
@@ -161,15 +208,29 @@ export function installHtmlMirrorSourceBridge(
       });
       return;
     }
-    if (!readImageSourcePortSessionId(port.name, 'isolated-html')) return;
-    new ImageSourceSession({
+    if (readImageSourcePortSessionId(port.name, 'isolated-html')) {
+      new ImageSourceSession({
+        port,
+        document: sourceDocument,
+        window: sourceWindow,
+        resolveNode: (nodeId) => registry.getNode(nodeId) ?? null,
+        getNodeId: (image) => registry.getId(image),
+        createObserver: (observerEnvironment) =>
+          new SourceImageObserver(observerEnvironment),
+        secretClassifier: documentSecretClassifier,
+      });
+      return;
+    }
+    if (!readSemanticSourcePortIdentity(port.name, 'isolated-html')) return;
+    new SemanticSourceSession({
       port,
       document: sourceDocument,
       window: sourceWindow,
-      resolveNode: (nodeId) => registry.getNode(nodeId) ?? null,
-      getNodeId: (image) => registry.getId(image),
-      createObserver: (observerEnvironment) =>
-        new SourceImageObserver(observerEnvironment),
+      bridge: 'isolated-html',
+      secretClassifier: documentSecretClassifier,
+      getNodeId: (node) => registry.getId(node),
+      createMutationObserver: environment.createMutationObserver,
+      schedule: (callback) => queueMicrotask(callback),
     });
   });
 }
@@ -179,6 +240,7 @@ interface HtmlMirrorSourceSessionEnvironment {
   readonly document: Document;
   readonly window: Window;
   readonly registry: WeakNodeIdRegistry;
+  readonly secretClassifier?: StickySourceSecretClassifier;
   readonly now: () => number;
   readonly createMutationObserver: (
     callback: MutationCallback,
@@ -199,9 +261,6 @@ const MAX_STYLE_SHEETS_PER_TICK = 512;
 const MAX_STYLE_RULES_PER_TICK = 25_000;
 const MAX_STYLE_CHARACTERS_PER_TICK = 1024 * 1024;
 const MAX_MIRRORED_IMAGE_CANDIDATES = 4_000;
-const MAX_MIRRORED_CONTROL_CANDIDATES = 50_000;
-const MAX_CONTROL_CANDIDATES_PER_TICK = 1_024;
-const MAX_CONTROL_CHARACTERS_PER_TICK = 1024 * 1024;
 const MAX_IMAGE_EVENT_ROOTS = 4_000;
 
 type ReconciliationDecision =
@@ -236,16 +295,13 @@ export class HtmlMirrorSourceSession {
   #pendingDimensions = false;
   #pendingOverflow = false;
   #mirroredNodes = new WeakSet<Node>();
+  #mirroredOpaqueSecrets = new WeakSet<Element>();
   #emittedChildren = new WeakMap<Node, readonly Node[]>();
   #emittedParent = new WeakMap<Node, Node>();
   #mirroredImageCandidates: Element[] = [];
   #knownMirroredImageCandidates = new WeakSet<Element>();
   #selectedImageSources = new WeakMap<Element, string>();
   #imageRefreshRequested = false;
-  #mirroredControlCandidates: Element[] = [];
-  #knownMirroredControlCandidates = new WeakSet<Element>();
-  #controlFingerprints = new WeakMap<Element, string>();
-  #controlMaintenanceCursor = 0;
   readonly #imageEventRoots = new Set<Document | ShadowRoot>();
   readonly #observedShadowRoots = new WeakSet<ShadowRoot>();
   #shadowHostCandidates: Element[] = [];
@@ -286,13 +342,6 @@ export class HtmlMirrorSourceSession {
     for (const root of this.#imageEventRoots) {
       root.removeEventListener('load', this.#onCapturedResourceLoad, true);
       root.removeEventListener('error', this.#onCapturedResourceError, true);
-      root.removeEventListener('input', this.#onControlTextChange, true);
-      root.removeEventListener('change', this.#onControlTextChange, true);
-      root.removeEventListener('beforetoggle', this.#onSelectToggle, true);
-      root.removeEventListener('toggle', this.#onSelectToggle, true);
-      root.removeEventListener('click', this.#onSelectToggle, true);
-      root.removeEventListener('keydown', this.#onSelectToggle, true);
-      root.removeEventListener('pointerdown', this.#onSelectToggle, true);
     }
     this.#imageEventRoots.clear();
     this.environment.document.fonts?.removeEventListener?.(
@@ -315,10 +364,6 @@ export class HtmlMirrorSourceSession {
     this.#knownMirroredImageCandidates = new WeakSet<Element>();
     this.#selectedImageSources = new WeakMap<Element, string>();
     this.#imageRefreshRequested = false;
-    this.#mirroredControlCandidates = [];
-    this.#knownMirroredControlCandidates = new WeakSet<Element>();
-    this.#controlFingerprints = new WeakMap<Element, string>();
-    this.#controlMaintenanceCursor = 0;
     this.#adoptedStyleSignatures = new WeakMap<object, string>();
     this.#ordinaryStyleSignatures = new WeakMap<object, string>();
     this.#clearPending();
@@ -427,7 +472,9 @@ export class HtmlMirrorSourceSession {
       );
       this.#observer.observe(this.environment.document.documentElement, {
         attributes: true,
+        attributeOldValue: true,
         characterData: true,
+        characterDataOldValue: true,
         childList: true,
         subtree: true,
       });
@@ -505,6 +552,7 @@ export class HtmlMirrorSourceSession {
         return;
       }
       this.#mirroredNodes = new WeakSet<Node>();
+      this.#mirroredOpaqueSecrets = new WeakSet<Element>();
       this.#emittedChildren = new WeakMap<Node, readonly Node[]>();
       this.#emittedParent = new WeakMap<Node, Node>();
       this.#shadowHostCandidates = [];
@@ -515,10 +563,6 @@ export class HtmlMirrorSourceSession {
       this.#knownMirroredImageCandidates = new WeakSet<Element>();
       this.#selectedImageSources = new WeakMap<Element, string>();
       this.#imageRefreshRequested = false;
-      this.#mirroredControlCandidates = [];
-      this.#knownMirroredControlCandidates = new WeakSet<Element>();
-      this.#controlFingerprints = new WeakMap<Element, string>();
-      this.#controlMaintenanceCursor = 0;
       this.#adoptedStyleSignatures = new WeakMap<object, string>();
       this.#adoptedStyleSignatures.set(
         this.environment.document,
@@ -553,6 +597,13 @@ export class HtmlMirrorSourceSession {
 
   #onMutations(records: MutationRecord[]): void {
     if (this.#disposed || !this.#identity) return;
+    rememberSourceMutationSecrets(
+      records,
+      this.environment.window,
+      this.environment.secretClassifier ?? sourceDocumentSecretClassifier(
+        this.environment.document,
+      ),
+    );
     let accepted = false;
     for (const record of records) {
       // The top-document observer must never turn a same-origin embedded
@@ -562,26 +613,41 @@ export class HtmlMirrorSourceSession {
       if (!belongsToSourceDocument(record.target, this.environment.document)) {
         continue;
       }
-      accepted = true;
-      this.#observeOpenShadowRoots(record.target);
-      const optionOwner = sourceNativeSelectLabelOwner(record.target);
-      const selectOwner = sourceNativeSelectOwner(record.target);
+      const mutationElement = sourceMutationOwnerElement(record.target);
+      if (
+        mutationElement &&
+        hasSourceCredentialSecretAncestor(
+          mutationElement,
+          this.environment.secretClassifier ?? sourceDocumentSecretClassifier(
+            this.environment.document,
+          ),
+          this.environment.window,
+        )
+      ) {
+        // A public graph node cannot be converted into the canonical opaque
+        // shell by a patch: the shell deliberately has a new extension-owned
+        // tag and no authored attributes, descendants, or presentation hints.
+        // Rebuild once, then ignore every later mutation under that shell for
+        // the rest of this document lifetime.
+        if (
+          this.#mirroredNodes.has(mutationElement) &&
+          !this.#mirroredOpaqueSecrets.has(mutationElement)
+        ) {
+          this.#shadowReconciliationPending = true;
+          this.#signalShadowReconciliation();
+          return;
+        }
+        continue;
+      }
       const structuralSelectOwner = sourceNativeSelectStructuralOwner(record.target);
       if (record.type === 'childList') {
-        if (optionOwner) {
-          this.#queuePending(this.#pendingAttributes, optionOwner);
-        } else if (selectOwner && record.target !== selectOwner) {
-          // Re-serialize the bounded select shell so option insertions/removals
-          // and selected-index metadata are committed atomically.
-          this.#queuePending(this.#pendingChildren, selectOwner);
-        } else {
-          this.#queuePending(this.#pendingChildren, record.target);
-        }
-        if (selectOwner) {
-          this.#queuePending(this.#pendingAttributes, selectOwner);
-        }
+        accepted = true;
+        this.#observeOpenShadowRoots(record.target);
+        this.#queuePending(this.#pendingChildren, record.target);
         for (const added of record.addedNodes) this.#observeOpenShadowRoots(added);
       } else if (record.type === 'attributes' && record.target instanceof Element) {
+        accepted = true;
+        this.#observeOpenShadowRoots(record.target);
         const changesPrivacyContext =
           record.attributeName === 'role' ||
           record.attributeName === 'contenteditable' ||
@@ -595,17 +661,9 @@ export class HtmlMirrorSourceSession {
         } else {
           this.#queuePending(
             this.#pendingAttributes,
-            optionOwner ?? record.target,
+            record.target,
           );
-          if (
-            selectOwner &&
-            selectOwner !== optionOwner &&
-            selectOwner !== record.target
-          ) {
-            this.#queuePending(this.#pendingAttributes, selectOwner);
-          }
         }
-        this.#registerMirroredControlCandidate(record.target);
         if (changesPrivacyContext) {
           // A children patch can re-sanitize a host's light DOM, but it cannot
           // replace that host's already-mirrored ShadowRoot. Rebuild the whole
@@ -620,11 +678,9 @@ export class HtmlMirrorSourceSession {
           }
         }
       } else if (record.type === 'characterData' && record.target instanceof Text) {
-        if (optionOwner) {
-          this.#queuePending(this.#pendingAttributes, optionOwner);
-        } else {
-          this.#queuePending(this.#pendingText, record.target);
-        }
+        accepted = true;
+        this.#observeOpenShadowRoots(record.target);
+        this.#queuePending(this.#pendingText, record.target);
       }
     }
     if (!accepted) return;
@@ -791,12 +847,6 @@ export class HtmlMirrorSourceSession {
           fidelityPolicy,
           styleWork,
         );
-        if (
-          isSourceNativeTextControlTagName(target.localName) ||
-          isSourceNativeSelectTagName(target.localName)
-        ) {
-          this.#rememberControlFingerprint(target);
-        }
         if (target.localName.toLowerCase() === 'img') {
           this.#selectedImageSources.set(
             target,
@@ -940,43 +990,6 @@ export class HtmlMirrorSourceSession {
     this.#queueCapturedImageAttributeRefresh(event);
   };
 
-  readonly #onControlTextChange = (event: Event): void => {
-    const target = event.target;
-    if (
-      !(target instanceof Element) ||
-      (!isSourceNativeTextControlTagName(target.localName) &&
-        !isSourceNativeSelectTagName(target.localName)) ||
-      !isEligibleControlElement(target) ||
-      !belongsToSourceDocument(target, this.environment.document) ||
-      !target.isConnected ||
-      !this.#mirroredNodes.has(target)
-    ) return;
-    this.#queuePending(this.#pendingAttributes, target);
-    this.#registerMirroredControlCandidate(target);
-    this.#rememberControlFingerprint(target);
-    this.#pendingDimensions = true;
-    this.#scheduleFlush();
-  };
-
-  readonly #onSelectToggle = (event: Event): void => {
-    const target = event.target;
-    const select = target instanceof Element
-      ? isSourceNativeSelectTagName(target.localName)
-        ? target
-        : sourceNativeSelectOwner(target)
-      : undefined;
-    if (
-      !select ||
-      !isEligibleControlElement(select) ||
-      !belongsToSourceDocument(select, this.environment.document) ||
-      !select.isConnected ||
-      !this.#mirroredNodes.has(select)
-    ) return;
-    this.#queuePending(this.#pendingAttributes, select);
-    this.#pendingDimensions = true;
-    this.#scheduleFlush();
-  };
-
   #scheduleFlush(): void {
     if (this.#paused || this.#frame !== undefined || this.#disposed) return;
     if (
@@ -1014,8 +1027,10 @@ export class HtmlMirrorSourceSession {
     if (source) {
       this.#mirroredNodes.add(source);
       if (source instanceof Element) {
+        if (node.kind === 'element' && node.opaquePlaceholder === true) {
+          this.#mirroredOpaqueSecrets.add(source);
+        }
         this.#registerShadowHostCandidate(source);
-        this.#registerMirroredControlCandidate(source);
         if (node.kind === 'element' && node.tagName === 'img') {
           this.#registerMirroredImageCandidate(
             source,
@@ -1162,126 +1177,6 @@ export class HtmlMirrorSourceSession {
     this.#mirroredImageCandidates.push(element);
   }
 
-  #registerMirroredControlCandidate(element: Element): void {
-    const state = readControlFingerprint(element);
-    if (!state.eligible || this.#knownMirroredControlCandidates.has(element)) {
-      return;
-    }
-    if (
-      this.#mirroredControlCandidates.length >=
-      MAX_MIRRORED_CONTROL_CANDIDATES
-    ) this.#compactMirroredControlCandidates();
-    if (
-      this.#mirroredControlCandidates.length >=
-      MAX_MIRRORED_CONTROL_CANDIDATES
-    ) return;
-    this.#knownMirroredControlCandidates.add(element);
-    this.#mirroredControlCandidates.push(element);
-    this.#controlFingerprints.set(element, state.fingerprint);
-  }
-
-  #rememberControlFingerprint(element: Element): void {
-    const state = readControlFingerprint(element);
-    if (state.eligible) {
-      if (!this.#knownMirroredControlCandidates.has(element)) {
-        this.#registerMirroredControlCandidate(element);
-        return;
-      }
-      this.#controlFingerprints.set(element, state.fingerprint);
-    } else {
-      this.#controlFingerprints.delete(element);
-      const index = this.#mirroredControlCandidates.indexOf(element);
-      if (index >= 0) {
-        this.#mirroredControlCandidates.splice(index, 1);
-        this.#knownMirroredControlCandidates = new WeakSet(
-          this.#mirroredControlCandidates,
-        );
-        this.#controlMaintenanceCursor =
-          this.#mirroredControlCandidates.length === 0
-            ? 0
-            : this.#controlMaintenanceCursor %
-              this.#mirroredControlCandidates.length;
-      }
-    }
-  }
-
-  #compactMirroredControlCandidates(): void {
-    const retained = this.#mirroredControlCandidates.filter(
-      (element) => element.isConnected && this.#mirroredNodes.has(element),
-    );
-    this.#mirroredControlCandidates = retained;
-    this.#knownMirroredControlCandidates = new WeakSet(retained);
-    this.#controlMaintenanceCursor = retained.length === 0
-      ? 0
-      : this.#controlMaintenanceCursor % retained.length;
-  }
-
-  #refreshChangedControlText(): void {
-    this.#compactMirroredControlCandidates();
-    const candidateCount = this.#mirroredControlCandidates.length;
-    if (candidateCount === 0) return;
-    const retained: Element[] = [];
-    for (const element of this.#mirroredControlCandidates) {
-      if (isEligibleControlElement(element)) {
-        retained.push(element);
-        continue;
-      }
-      this.#controlFingerprints.delete(element);
-      this.#queuePending(this.#pendingAttributes, element);
-      if (this.#pendingOverflow) return;
-    }
-    if (retained.length !== candidateCount) {
-      this.#mirroredControlCandidates = retained;
-      this.#knownMirroredControlCandidates = new WeakSet(retained);
-      this.#controlMaintenanceCursor = retained.length === 0
-        ? 0
-        : this.#controlMaintenanceCursor % retained.length;
-    }
-    if (retained.length === 0) {
-      this.#pendingDimensions = this.#pendingAttributes.size > 0;
-      this.#scheduleFlush();
-      return;
-    }
-
-    const scanCount = Math.min(
-      retained.length,
-      MAX_CONTROL_CANDIDATES_PER_TICK,
-    );
-    let processed = 0;
-    let characters = 0;
-    for (let offset = 0; offset < scanCount; offset += 1) {
-      const index = (this.#controlMaintenanceCursor + offset) % retained.length;
-      const element = retained[index];
-      if (!element) continue;
-      const estimatedWork = estimateControlFingerprintWork(element);
-      if (
-        processed > 0 &&
-        characters + estimatedWork > MAX_CONTROL_CHARACTERS_PER_TICK
-      ) break;
-      const state = readControlFingerprint(element);
-      if (!state.eligible) continue;
-      if (
-        processed > 0 &&
-        characters + state.characters > MAX_CONTROL_CHARACTERS_PER_TICK
-      ) break;
-      processed += 1;
-      characters += state.characters;
-      if (this.#controlFingerprints.get(element) === state.fingerprint) continue;
-      this.#controlFingerprints.set(element, state.fingerprint);
-      if (isSourceNativeSelectTagName(element.localName)) {
-        this.#queuePending(this.#pendingChildren, element);
-      }
-      this.#queuePending(this.#pendingAttributes, element);
-      if (this.#pendingOverflow) return;
-    }
-    this.#controlMaintenanceCursor =
-      (this.#controlMaintenanceCursor + processed) % retained.length;
-    if (this.#pendingAttributes.size > 0) {
-      this.#pendingDimensions = true;
-      this.#scheduleFlush();
-    }
-  }
-
   #compactMirroredImageCandidates(): void {
     const retained = this.#mirroredImageCandidates.filter(
       (element) => element.isConnected && this.#mirroredNodes.has(element),
@@ -1333,13 +1228,6 @@ export class HtmlMirrorSourceSession {
     this.#imageEventRoots.add(root);
     root.addEventListener('load', this.#onCapturedResourceLoad, true);
     root.addEventListener('error', this.#onCapturedResourceError, true);
-    root.addEventListener('input', this.#onControlTextChange, true);
-    root.addEventListener('change', this.#onControlTextChange, true);
-    root.addEventListener('beforetoggle', this.#onSelectToggle, true);
-    root.addEventListener('toggle', this.#onSelectToggle, true);
-    root.addEventListener('click', this.#onSelectToggle, true);
-    root.addEventListener('keydown', this.#onSelectToggle, true);
-    root.addEventListener('pointerdown', this.#onSelectToggle, true);
   }
 
   #compactImageEventRoots(): void {
@@ -1349,13 +1237,6 @@ export class HtmlMirrorSourceSession {
       }
       root.removeEventListener('load', this.#onCapturedResourceLoad, true);
       root.removeEventListener('error', this.#onCapturedResourceError, true);
-      root.removeEventListener('input', this.#onControlTextChange, true);
-      root.removeEventListener('change', this.#onControlTextChange, true);
-      root.removeEventListener('beforetoggle', this.#onSelectToggle, true);
-      root.removeEventListener('toggle', this.#onSelectToggle, true);
-      root.removeEventListener('click', this.#onSelectToggle, true);
-      root.removeEventListener('keydown', this.#onSelectToggle, true);
-      root.removeEventListener('pointerdown', this.#onSelectToggle, true);
       this.#imageEventRoots.delete(root);
     }
   }
@@ -1381,7 +1262,6 @@ export class HtmlMirrorSourceSession {
   }
 
   #discoverNewOpenShadowRoots(): void {
-    this.#refreshChangedControlText();
     if (this.#pendingOverflow || this.#paused) return;
     if (this.#shadowReconciliationPending) return;
     const candidateCount = this.#shadowHostCandidates.length;
@@ -1652,6 +1532,13 @@ function readOpenShadowRoot(node: Node): ShadowRoot | undefined {
     : undefined;
 }
 
+function sourceMutationOwnerElement(node: Node): Element | undefined {
+  if (node instanceof Element) return node;
+  const shadowRoot = readOpenShadowRoot(node);
+  if (shadowRoot) return shadowRoot.host;
+  return node.parentElement ?? undefined;
+}
+
 function adoptedStyleSignature(styles: readonly string[]): string {
   let fnv = 0x811c9dc5;
   let djb = 5381;
@@ -1843,11 +1730,6 @@ function incrementSourceRepresentability(
   );
 }
 
-function sourceNativeSelectOwner(node: Node): Element | undefined {
-  const select = sourceNativeSelectStructuralOwner(node);
-  return select && isEligibleControlElement(select) ? select : undefined;
-}
-
 /** Finds the DOM owner even while its privacy role is changing. */
 function sourceNativeSelectStructuralOwner(node: Node): Element | undefined {
   let current = node.nodeType === Node.ELEMENT_NODE
@@ -1861,152 +1743,12 @@ function sourceNativeSelectStructuralOwner(node: Node): Element | undefined {
   return undefined;
 }
 
-function sourceNativeSelectOptionOwner(node: Node): Element | undefined {
-  let current = node.nodeType === Node.ELEMENT_NODE
-    ? node as Element
-    : node.parentElement ?? undefined;
-  for (; current; current = composedSourceParentElement(current)) {
-    const tagName = current.localName.toLowerCase();
-    if (tagName === 'option') {
-      return sourceNativeSelectOwner(current) ? current : undefined;
-    }
-    if (tagName === 'select' || tagName === 'datalist') return undefined;
-  }
-  return undefined;
-}
-
-/**
- * Returns the mirrored select entry whose public label contains `node`.
- * Option descendants and descendants of a direct optgroup legend are omitted
- * from the replica graph, so their mutations must refresh the owning entry.
- */
-function sourceNativeSelectLabelOwner(node: Node): Element | undefined {
-  const option = sourceNativeSelectOptionOwner(node);
-  if (option) return option;
-  let current = node.nodeType === Node.ELEMENT_NODE
-    ? node as Element
-    : node.parentElement ?? undefined;
-  for (; current; current = composedSourceParentElement(current)) {
-    const tagName = current.localName.toLowerCase();
-    if (tagName === 'legend') {
-      const optgroup = current.parentElement;
-      if (
-        optgroup?.localName.toLowerCase() === 'optgroup' &&
-        sourceNativeSelectOwner(optgroup)
-      ) return optgroup;
-      return undefined;
-    }
-    if (tagName === 'select' || tagName === 'datalist') return undefined;
-  }
-  return undefined;
-}
-
-function isEligibleControlElement(element: Element): boolean {
-  try {
-    const attributes = Object.fromEntries(
-      [...element.attributes].map(({ name, value }) => [name, value]),
-    );
-    const eligible = isSourceNativeTextControlTagName(element.localName)
-      ? isEligibleSourceTextControl(element.localName, attributes)
-      : isEligibleSourceSelect(element.localName, attributes);
-    const parent = composedSourceParentElement(element);
-    return eligible &&
-      (!parent || !hasSourcePrivateOrActivationElementAncestor(parent));
-  } catch {
-    return false;
-  }
-}
-
 function composedSourceParentElement(element: Element): Element | undefined {
   if (element.parentElement) return element.parentElement;
   const root = element.getRootNode();
   return root.nodeType === 11 && 'host' in root
     ? (root as ShadowRoot).host
     : undefined;
-}
-
-function readControlFingerprint(element: Element): Readonly<{
-  eligible: boolean;
-  fingerprint: string;
-  characters: number;
-}> {
-  if (!isEligibleControlElement(element)) {
-    return { eligible: false, fingerprint: 'private', characters: 0 };
-  }
-  if (isSourceNativeSelectTagName(element.localName)) {
-    const selected = readSourceSelectedOptionIndexes(element);
-    if (!selected) {
-      return { eligible: false, fingerprint: 'private', characters: 0 };
-    }
-    const presentationStyle = readSourceSelectPresentationStyle(element) ?? '';
-    let fnv = 0x811c9dc5;
-    let djb = 5381;
-    let characters = presentationStyle.length + selected.length;
-    const addCode = (code: number): void => {
-      fnv = Math.imul(fnv ^ code, 0x01000193) >>> 0;
-      djb = (Math.imul(djb, 33) ^ code) >>> 0;
-    };
-    const addText = (text: string): void => {
-      for (let index = 0; index < text.length; index += 1) {
-        addCode(text.charCodeAt(index));
-      }
-    };
-    addText(presentationStyle);
-    for (const index of selected) addCode(index + 1);
-    return {
-      eligible: true,
-      fingerprint: [
-        'select',
-        readSourceSelectPickerOpen(element) ? 1 : 0,
-        isSourceSelectVisuallyHidden(element) ? 1 : 0,
-        selected.length,
-        presentationStyle.length,
-        fnv,
-        djb,
-      ].join(':'),
-      characters,
-    };
-  }
-  const control = readSourceControlText(element);
-  if (!control) {
-    return { eligible: true, fingerprint: 'empty', characters: 0 };
-  }
-  const length = control.text.length;
-  if (length > MAX_HTML_MIRROR_STRING) {
-    return {
-      eligible: true,
-      fingerprint: `oversize:${control.kind}:${length}`,
-      characters: 0,
-    };
-  }
-  let fnv = 0x811c9dc5;
-  let djb = 5381;
-  for (let index = 0; index < length; index += 1) {
-    const code = control.text.charCodeAt(index);
-    fnv = Math.imul(fnv ^ code, 0x01000193) >>> 0;
-    djb = (Math.imul(djb, 33) ^ code) >>> 0;
-  }
-  return {
-    eligible: true,
-    fingerprint: `${control.kind}:${length}:${fnv}:${djb}`,
-    characters: length,
-  };
-}
-
-function estimateControlFingerprintWork(element: Element): number {
-  if (!isSourceNativeSelectTagName(element.localName)) return 0;
-  try {
-    const select = element as HTMLSelectElement;
-    const selectionWork = select.multiple || element.hasAttribute('multiple')
-      ? select.selectedOptions?.length ?? select.options?.length ?? 0
-      : 1;
-    return Math.min(
-      32_768 + selectionWork,
-      MAX_CONTROL_CHARACTERS_PER_TICK,
-    );
-  } catch {
-    return MAX_CONTROL_CHARACTERS_PER_TICK;
-  }
 }
 
 function belongsToSourceDocument(node: Node, sourceDocument: Document): boolean {

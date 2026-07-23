@@ -13,6 +13,7 @@ import {
   isSupportedLanguage,
   type SupportedLanguage,
 } from '../translation-provider';
+import { normalizeAccessibilityImageText } from './accessibility-image-text';
 
 export const IMAGE_SOURCE_PROTOCOL_VERSION = 1;
 export const IMAGE_SOURCE_PORT_PREFIX = 'simul:image-source-v1:';
@@ -27,6 +28,9 @@ export interface ImageSourcePortIdentity {
 export interface ImageSourceStartMessage {
   readonly kind: 'simul:image-source-v1:start';
   readonly document: ReplicaSourceDocumentIdentity;
+  readonly policyFingerprint?: string;
+  readonly controlImages?: boolean;
+  readonly accessibilityTextEnabled?: boolean;
 }
 
 export interface ImageSourceMetricsRequest {
@@ -35,9 +39,28 @@ export interface ImageSourceMetricsRequest {
   readonly descriptor: SourceImageDescriptor;
 }
 
+export interface ImageSourceAccessibilityTextRequest {
+  readonly kind: 'simul:image-source-v1:accessibility-text';
+  readonly requestId: string;
+  readonly descriptor: SourceImageDescriptor;
+  readonly policyFingerprint: string;
+  readonly controlImages: boolean;
+}
+
 export type ImageSourceControllerMessage =
   | ImageSourceStartMessage
-  | ImageSourceMetricsRequest;
+  | ImageSourceMetricsRequest
+  | ImageSourceAccessibilityTextRequest;
+
+export interface SourceImageAccessibilityTextEvidence {
+  readonly document: ReplicaSourceDocumentIdentity;
+  readonly nodeId: number;
+  readonly contentRevision: number;
+  readonly observationRevision: number;
+  readonly text: string;
+  readonly source: 'aria-label' | 'alt';
+  readonly nearestElementLanguage?: SupportedLanguage;
+}
 
 export interface SourceImageCaptureMetrics {
   readonly document: ReplicaSourceDocumentIdentity;
@@ -82,6 +105,19 @@ export type ImageSourceRecorderMessage =
       readonly kind: 'simul:image-source-v1:metrics';
       readonly requestId: string;
       readonly status: 'stale' | 'hidden';
+    }
+  | {
+      readonly kind: 'simul:image-source-v1:accessibility-text';
+      readonly requestId: string;
+      readonly descriptor: SourceImageDescriptor;
+      readonly status: 'ready';
+      readonly evidence: SourceImageAccessibilityTextEvidence;
+    }
+  | {
+      readonly kind: 'simul:image-source-v1:accessibility-text';
+      readonly requestId: string;
+      readonly descriptor: SourceImageDescriptor;
+      readonly status: 'none' | 'blocked' | 'stale';
     };
 
 export function createImageSourcePortName(
@@ -126,10 +162,58 @@ export function readImageSourceControllerMessage(
 ): ImageSourceControllerMessage | undefined {
   if (!isRecord(input) || typeof input.kind !== 'string') return undefined;
   if (input.kind === 'simul:image-source-v1:start') {
-    if (!hasExactKeys(input, ['kind', 'document'])) return undefined;
+    if (!(
+      hasExactKeys(input, ['kind', 'document']) ||
+      (
+        hasExactKeys(input, [
+          'kind', 'document', 'policyFingerprint', 'controlImages',
+          'accessibilityTextEnabled',
+        ]) &&
+        isPolicyFingerprint(input.policyFingerprint) &&
+        typeof input.controlImages === 'boolean' &&
+        typeof input.accessibilityTextEnabled === 'boolean' &&
+        policyFingerprintControlImages(input.policyFingerprint) ===
+          input.controlImages
+      )
+    )) return undefined;
     const document = readSourceDocumentIdentity(input.document);
     if (!document || document.sessionId !== expectedSessionId) return undefined;
-    return Object.freeze({ kind: input.kind, document });
+    return Object.freeze({
+      kind: input.kind,
+      document,
+      ...(typeof input.policyFingerprint === 'string'
+        ? {
+            policyFingerprint: input.policyFingerprint,
+            controlImages: input.controlImages === true,
+            accessibilityTextEnabled: input.accessibilityTextEnabled === true,
+          }
+        : {}),
+    });
+  }
+  if (input.kind === 'simul:image-source-v1:accessibility-text') {
+    if (!hasExactKeys(input, [
+      'kind', 'requestId', 'descriptor', 'policyFingerprint', 'controlImages',
+    ]) ||
+      !isRequestId(input.requestId) ||
+      typeof input.controlImages !== 'boolean' ||
+      !isPolicyFingerprint(input.policyFingerprint) ||
+      policyFingerprintControlImages(input.policyFingerprint) !==
+        input.controlImages
+    ) return undefined;
+    const descriptor = readSourceImageDescriptor(input.descriptor);
+    if (
+      !descriptor ||
+      descriptor.document.sessionId !== expectedSessionId ||
+      (expectedDocument &&
+        !sameSourceDocument(descriptor.document, expectedDocument))
+    ) return undefined;
+    return Object.freeze({
+      kind: input.kind,
+      requestId: input.requestId,
+      descriptor,
+      policyFingerprint: input.policyFingerprint,
+      controlImages: input.controlImages,
+    });
   }
   if (
     input.kind !== 'simul:image-source-v1:measure' ||
@@ -176,6 +260,48 @@ export function readImageSourceRecorderMessage(
     }
     return Object.freeze({ kind: input.kind, change });
   }
+  if (input.kind === 'simul:image-source-v1:accessibility-text') {
+    if (
+      !isRequestId(input.requestId) ||
+      typeof input.status !== 'string'
+    ) return undefined;
+    const descriptor = readSourceImageDescriptor(input.descriptor);
+    if (!descriptor || !sameSourceDocument(
+      descriptor.document,
+      expectedDocument,
+    )) return undefined;
+    if (
+      input.status === 'none' ||
+      input.status === 'blocked' ||
+      input.status === 'stale'
+    ) {
+      return hasExactKeys(input, ['kind', 'requestId', 'descriptor', 'status'])
+        ? Object.freeze({
+            kind: input.kind,
+            requestId: input.requestId,
+            descriptor,
+            status: input.status,
+          })
+        : undefined;
+    }
+    if (
+      input.status !== 'ready' ||
+      !hasExactKeys(input, [
+        'kind', 'requestId', 'descriptor', 'status', 'evidence',
+      ])
+    ) return undefined;
+    const evidence = readSourceImageAccessibilityTextEvidence(input.evidence);
+    return evidence && sameSourceDocument(evidence.document, expectedDocument) &&
+      sameAccessibilityEvidenceDescriptor(evidence, descriptor)
+      ? Object.freeze({
+          kind: input.kind,
+          requestId: input.requestId,
+          descriptor,
+          status: 'ready' as const,
+          evidence,
+        })
+      : undefined;
+  }
   if (
     input.kind !== 'simul:image-source-v1:metrics' ||
     !isRequestId(input.requestId) ||
@@ -202,6 +328,38 @@ export function readImageSourceRecorderMessage(
     requestId: input.requestId,
     status: 'ready',
     metrics,
+  });
+}
+
+export function readSourceImageAccessibilityTextEvidence(
+  input: unknown,
+): SourceImageAccessibilityTextEvidence | undefined {
+  if (!isRecord(input) || !hasExactKeysWithOptional(input, [
+    'document', 'nodeId', 'contentRevision', 'observationRevision', 'text',
+    'source',
+  ], ['nearestElementLanguage'])) return undefined;
+  const document = readSourceDocumentIdentity(input.document);
+  const text = normalizeAccessibilityImageText(input.text);
+  if (
+    !document ||
+    !isPositiveSafeInteger(input.nodeId) ||
+    !isPositiveSafeInteger(input.contentRevision) ||
+    !isPositiveSafeInteger(input.observationRevision) ||
+    !text || text !== input.text ||
+    (input.source !== 'aria-label' && input.source !== 'alt') ||
+    (input.nearestElementLanguage !== undefined &&
+      !isSupportedLanguage(input.nearestElementLanguage))
+  ) return undefined;
+  return Object.freeze({
+    document,
+    nodeId: input.nodeId,
+    contentRevision: input.contentRevision,
+    observationRevision: input.observationRevision,
+    text,
+    source: input.source,
+    ...(isSupportedLanguage(input.nearestElementLanguage)
+      ? { nearestElementLanguage: input.nearestElementLanguage }
+      : {}),
   });
 }
 
@@ -306,11 +464,33 @@ function isRequestId(value: unknown): value is string {
     /^[A-Za-z0-9._:-]+$/u.test(value);
 }
 
+function sameAccessibilityEvidenceDescriptor(
+  evidence: SourceImageAccessibilityTextEvidence,
+  descriptor: SourceImageDescriptor,
+): boolean {
+  return sameSourceDocument(evidence.document, descriptor.document) &&
+    evidence.nodeId === descriptor.nodeId &&
+    evidence.contentRevision === descriptor.contentRevision &&
+    evidence.observationRevision === descriptor.observationRevision;
+}
+
 function isSafeToken(value: unknown): value is string {
   return typeof value === 'string' &&
     value.length >= 1 &&
     value.length <= 128 &&
     /^[A-Za-z0-9._:-]+$/u.test(value);
+}
+
+function isPolicyFingerprint(value: unknown): value is string {
+  return typeof value === 'string' &&
+    value.length >= 10 && value.length <= 64 &&
+    /^read-v\d+-[01]{6}$/u.test(value);
+}
+
+function policyFingerprintControlImages(value: string): boolean | undefined {
+  const match = /^read-v1-([01]{6})$/u.exec(value);
+  if (!match) return undefined;
+  return match[1]?.[1] === '1';
 }
 
 function isPositiveSafeInteger(value: unknown): value is number {

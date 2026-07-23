@@ -17,6 +17,7 @@ describe('sidepanel Auto image-language reconciliation', () => {
       'autoLanguageEvidencePrecedence.offerImageEvidence',
     );
     expect(callback).toContain('document,');
+    expect(callback).toContain('origin,');
     expect(callback).toContain(
       'if (ready) commitAutoDetectedImageLanguage(ready)',
     );
@@ -45,6 +46,21 @@ describe('sidepanel Auto image-language reconciliation', () => {
       .toBeGreaterThan(resolver.indexOf('await resolveSourceLanguage'));
   });
 
+  it('labels accessibility-derived and OCR-derived image evidence accurately', () => {
+    const proposal = script.slice(
+      script.indexOf('interface PendingAutoImageLanguageEvidence'),
+      script.indexOf('async function reconcileAutoDetectedImageLanguage'),
+    );
+    expect(proposal).toContain(
+      "readonly origin: AutoImageLanguageEvidenceOrigin",
+    );
+    expect(proposal).toContain(
+      "proposal.origin === 'accessibility-text'",
+    );
+    expect(proposal).toContain("'accessibility image text'");
+    expect(proposal).toContain("'bounded image OCR'");
+  });
+
   it('runs normal pair, OCR, availability, and automatic-translation reconciliation', () => {
     const reconciliation = script.slice(
       script.indexOf('async function reconcileAutoDetectedImageLanguage'),
@@ -63,14 +79,22 @@ describe('sidepanel Auto image-language reconciliation', () => {
     );
   });
 
-  it('clears only image-derived language when provider routes or confidence change', () => {
+  it('keys image-derived language to the exact enabled method and read policy', () => {
     const configuration = script.slice(
       script.indexOf('function configureImageTranslation'),
       script.indexOf('async function refreshOcrProviderRuntimeStatuses'),
     );
     expect(configuration).toContain(
-      'autoImageLanguageConfigurationKey(\n    usableProviderOrder,\n    preferences.ocrMinimumConfidence',
+      'autoImageLanguageConfigurationKey({',
     );
+    expect(configuration).toContain('providerOrder: routedProviderOrder,');
+    expect(configuration).toContain(
+      'enabledMethodOrder: enabledAutoImageLanguageMethodOrder(',
+    );
+    expect(configuration).toContain(
+      'policyFingerprint: replicaReadScopeFingerprint(readScope),',
+    );
+    expect(configuration).toContain('controlImages: readScope.controlImages,');
     expect(configuration).toContain(
       'shouldClearAutoImageLanguageResolution',
     );
@@ -84,6 +108,22 @@ describe('sidepanel Auto image-language reconciliation', () => {
     expect(configuration).not.toContain(
       'preferences.targetLanguage,\n  );\n  if (shouldClearAutoImageLanguageResolution',
     );
+  });
+
+  it('drops image-derived language inside the pre-persist narrowing purge', () => {
+    const commit = script.slice(
+      script.indexOf('async function commitReplicaReadScope'),
+      script.indexOf('async function resetAllExtensionSettings'),
+    );
+    expect(commit.indexOf('purgeSourceDerivedRuntime('))
+      .toBeLessThan(commit.indexOf('await sendPreferenceCommand'));
+
+    const purge = script.slice(
+      script.indexOf('function purgeSourceDerivedRuntime'),
+      script.indexOf('function clearResetOnlyRuntimeState'),
+    );
+    expect(purge).toContain("resolvedSourceLanguageOrigin === 'image'");
+    expect(purge).toContain('clearAutoImageLanguageResolution()');
   });
 
   it('binds accepted OCR language to the exact replica document and clears it on navigation', () => {

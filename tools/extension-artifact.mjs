@@ -55,7 +55,7 @@ export const REQUIRED_REPLICA_RUNTIME_MARKERS = Object.freeze([
   'rrweb-shadow-v2',
   'simul:html-mirror-v1:',
   'isolated-html-v1',
-  'simul:live-observer-v5',
+  'simul:live-observer-v6',
 ]);
 export const REQUIRED_ISOLATED_SANDBOX_MARKERS = Object.freeze([
   'simul-isolated-shell',
@@ -736,6 +736,67 @@ export async function checkOcrAllTrial({
       unpackedBytes: validation.unpackedBytes,
       ocrProviderIds: validation.ocrProviderIds,
     });
+  });
+}
+
+export async function checkSyncedOcrAllTrial({
+  projectRoot = PROJECT_ROOT,
+  buildArtifact = buildProductionArtifact,
+} = {}) {
+  const resolvedRoot = path.resolve(projectRoot);
+  const committedDirectory = canonicalArtifactDirectory(resolvedRoot);
+  const validateTrial = (directory) => validateArtifact(directory, {
+    allowExactOcrAllTrial: true,
+  });
+
+  return withTemporaryDirectory(async (temporaryRoot) => {
+    let builtDirectory;
+    try {
+      builtDirectory = await buildArtifact({
+        projectRoot: resolvedRoot,
+        temporaryRoot,
+        ocrProviderIds: OCR_ALL_TRIAL_PROVIDER_IDS,
+      });
+      await validateTrial(builtDirectory);
+    } catch (error) {
+      throw new ArtifactError(
+        [
+          `Fresh four-provider OCR trial build is unsafe or invalid: ${errorMessage(error)}`,
+          'Fix the source or build configuration. The committed trial was not changed, and trial sync will reject this build.',
+        ].join('\n'),
+        { cause: error },
+      );
+    }
+
+    try {
+      await validateTrial(committedDirectory);
+      const differences = await compareArtifactDirectories(
+        builtDirectory,
+        committedDirectory,
+      );
+      if (differences.length > 0) {
+        throw new ArtifactError(
+          [
+            'Committed Chrome artifact differs from the exact four-provider OCR trial build:',
+            ...formatDifferences(differences),
+            'Run `npm run artifact:sync:ocr-trials` to intentionally refresh it.',
+          ].join('\n'),
+        );
+      }
+    } catch (error) {
+      if (
+        error instanceof ArtifactError &&
+        error.message.includes('artifact:sync:ocr-trials')
+      ) {
+        throw error;
+      }
+      throw new ArtifactError(
+        `${errorMessage(error)}\nRun \`npm run artifact:sync:ocr-trials\` to intentionally refresh it.`,
+        { cause: error },
+      );
+    }
+
+    return { committedDirectory };
   });
 }
 
@@ -2828,13 +2889,20 @@ async function main() {
     );
     return;
   }
+  if (command === 'check-synced-ocr-all-trial') {
+    const { committedDirectory } = await checkSyncedOcrAllTrial();
+    console.log(
+      `Verified committed exact four-provider OCR trial: ${committedDirectory}`,
+    );
+    return;
+  }
   if (command === 'sync-ocr-all-trial') {
     const target = await syncOcrAllTrial();
     console.log(`Synchronized exact four-provider OCR trial: ${target}`);
     return;
   }
   throw new ArtifactError(
-    'Usage: node tools/extension-artifact.mjs <check|sync|check-ocr-paddle-trial|check-ocr-all-trial|sync-ocr-all-trial>',
+    'Usage: node tools/extension-artifact.mjs <check|sync|check-ocr-paddle-trial|check-ocr-all-trial|check-synced-ocr-all-trial|sync-ocr-all-trial>',
   );
 }
 

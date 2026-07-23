@@ -135,6 +135,7 @@ Dependencies point from entrypoints toward policy and protocol libraries. Source
 - **Binds:** LIVE-1, RESET-1
 - **Prevents:** Multi-window lost updates, pre-reset commands resurrecting settings, permission state disagreeing with preferences, and partial reset leaving active reading enabled.
 - **Rule:** The background `PreferenceCoordinator`, under the existing global lock, is the only durable settings writer. Persist `readScopeSetupVersion`, monotonically increasing `resetRevision`, and a resumable `resetCleanupPendingRevision`. Every mutating command carries the caller's expected reset revision; setup completion also carries expected setup version. Stale commands are rejected. Missing or outdated setup has an effective Page-only scope until a full setup commit succeeds. Storage change and command responses converge through one committed-preference application path in every panel.
+- **Runtime barrier:** Before broadcasting a narrowing/reset purge, the background journals a content-free unresolved read ceiling. A restarted MV3 worker hydrates and replays those ceilings before sending any panel-ready handshake, and removes them only after a satisfying preference commit is durable. Connected panels fail closed on Port loss, so a worker restart cannot resurrect the older broader scope.
 
 ### AD-15 — Reset becomes safe before cleanup becomes complete
 

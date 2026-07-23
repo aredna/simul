@@ -15,11 +15,26 @@ import {
 } from './live-protocol';
 import type { RecorderOptions, RecorderStart } from './page-recorder';
 import {
+  MAX_REPLICA_NODES,
   createCheckpointEnvelope,
   createReplicaIdentity,
   sanitizeCssText,
 } from './protocol-v2';
 import { RrwebStreamSanitizer } from './rrweb-stream-sanitizer';
+import {
+  hasSourceCredentialSecretAncestor,
+  isSourcePrivateContentEditableValue,
+  isSourcePrivateRoleValue,
+  isSourcePublicMenuRoleValue,
+  readSourceFlatTreeElementPath,
+  readSourceStructuralAttributes,
+} from './source-privacy-policy';
+import { sourceDocumentSecretClassifier } from './source-secret-classifier';
+import {
+  projectRrwebSourceSecretsInCheckpoint,
+  projectRrwebSourceSecretsInIncrementalEvent,
+  rrwebMutationTouchesSourceSecret,
+} from './rrweb-secret-projection';
 
 interface RecorderSessionSubscriber {
   readonly identity: ReplicaDocumentIdentity;
@@ -210,24 +225,33 @@ export class LiveRecorderSession {
     }
     this.#captureStartedAt = this.environment.now();
     try {
-      const stop = this.environment.start(
-        createLiveRecorderOptions((event, isCheckout) =>
+      const options = createLiveRecorderOptions(
+        (event, isCheckout) =>
           this.#handleRecorderEvent(event, isCheckout === true),
-        ),
+        this.environment.document,
       );
+      const stop = this.environment.start(options);
       if (!stop) {
+        disposeLiveRecorderOptions(options);
         this.#failAll();
         return;
       }
-      if (this.#disposed) {
+      const stopWithPrivacyIndex = (): void => {
         try {
           stop();
+        } finally {
+          disposeLiveRecorderOptions(options);
+        }
+      };
+      if (this.#disposed) {
+        try {
+          stopWithPrivacyIndex();
         } catch {
           // A synchronous recorder failure already disposed the session.
         }
         return;
       }
-      this.#stop = stop;
+      this.#stop = stopWithPrivacyIndex;
     } catch {
       this.#failAll();
     }
@@ -274,9 +298,25 @@ export class LiveRecorderSession {
       return;
     }
     if (event.type !== 3) return;
-    const projectedEvent = this.environment.resolveNode
-      ? rewriteLiveIncrementalStyleSheets(event, this.environment.resolveNode)
+    if (
+      this.environment.resolveNode &&
+      rrwebMutationTouchesSourceSecret(event, this.environment.resolveNode)
+    ) {
+      this.#checkpointAll();
+      return;
+    }
+    const secretProjectedEvent = this.environment.resolveNode
+      ? projectRrwebSourceSecretsInIncrementalEvent(
+          event,
+          this.environment.resolveNode,
+        )
       : event;
+    const projectedEvent = secretProjectedEvent && this.environment.resolveNode
+      ? rewriteLiveIncrementalStyleSheets(
+          secretProjectedEvent,
+          this.environment.resolveNode,
+        )
+      : secretProjectedEvent;
     if (!projectedEvent) {
       this.#checkpointAll();
       return;
@@ -458,12 +498,21 @@ export class LiveRecorderSession {
     rewriteSourceStyles = false,
   ): ReplicaCheckpointEnvelope | undefined {
     if (!identity) return undefined;
-    const checkpointEvents = rewriteSourceStyles && this.environment.resolveNode
-      ? rewriteLiveCheckpointStyleSheets(
-          events,
-          this.environment.resolveNode,
-        )
-      : events;
+    let checkpointEvents: readonly unknown[] | undefined = events;
+    if (this.environment.resolveNode) {
+      checkpointEvents = projectRrwebSourceSecretsInCheckpoint(
+        checkpointEvents,
+        this.environment.resolveNode,
+      );
+    }
+    if (
+      checkpointEvents && rewriteSourceStyles && this.environment.resolveNode
+    ) {
+      checkpointEvents = rewriteLiveCheckpointStyleSheets(
+        checkpointEvents,
+        this.environment.resolveNode,
+      );
+    }
     if (!checkpointEvents) return undefined;
     const documentElement = this.environment.document.documentElement;
     const body = this.environment.document.body;
@@ -873,13 +922,21 @@ function sourceStyleSheetContainsImport(
 
 export function createLiveRecorderOptions(
   emit: (event: unknown, isCheckout?: boolean) => void,
+  sourceDocument?: Document,
 ): RecorderOptions {
-  return {
+  const disclosureIndex = new RecorderDisclosureTargetIndex(sourceDocument);
+  const options: RecorderOptions = {
     emit,
     maskAllInputs: true,
-    maskTextSelector: '[contenteditable]:not([contenteditable="false"])',
-    maskInputFn: (value: string) => '*'.repeat(Math.min(value.length, 256)),
-    maskTextFn: (value: string) => '*'.repeat(Math.min(value.length, 256)),
+    // rrweb invokes maskTextFn only for selector matches. Match every text node
+    // so computed text-security and sticky source-document history are checked
+    // before anything is allowed into the emitted snapshot.
+    maskTextSelector: '*',
+    maskInputFn: () => '********',
+    maskTextFn: (value, element) => recorderTextIsPublic(
+      element,
+      disclosureIndex.current(),
+    ) ? value : '********',
     inlineStylesheet: true,
     inlineImages: false,
     recordCanvas: false,
@@ -894,6 +951,161 @@ export function createLiveRecorderOptions(
     },
     keepIframeSrcFn: () => false,
   };
+  RECORDER_OPTIONS_DISPOSERS.set(options, () => disclosureIndex.dispose());
+  return options;
+}
+
+const RECORDER_OPTIONS_DISPOSERS = new WeakMap<object, () => void>();
+
+export function disposeLiveRecorderOptions(options: RecorderOptions): void {
+  const dispose = RECORDER_OPTIONS_DISPOSERS.get(options);
+  RECORDER_OPTIONS_DISPOSERS.delete(options);
+  dispose?.();
+}
+
+interface RecorderDisclosureSnapshot {
+  readonly targets: ReadonlySet<Element>;
+  readonly overflow: boolean;
+}
+
+class RecorderDisclosureTargetIndex {
+  #snapshot: RecorderDisclosureSnapshot;
+  #dirty = false;
+  #observer: MutationObserver | undefined;
+
+  constructor(private readonly sourceDocument: Document | undefined) {
+    this.#snapshot = collectRecorderDisclosureTargets(sourceDocument);
+    const MutationObserverConstructor = sourceDocument?.defaultView
+      ?.MutationObserver;
+    if (
+      typeof MutationObserverConstructor !== 'function' ||
+      !sourceDocument?.documentElement
+    ) return;
+    try {
+      this.#observer = new MutationObserverConstructor(() => {
+        this.#dirty = true;
+      });
+      this.#observer.observe(sourceDocument.documentElement, {
+        attributes: true,
+        attributeFilter: ['aria-controls', 'id'],
+        childList: true,
+        subtree: true,
+      });
+    } catch {
+      this.#snapshot = Object.freeze({
+        targets: this.#snapshot.targets,
+        overflow: true,
+      });
+    }
+  }
+
+  current(): RecorderDisclosureSnapshot {
+    if (this.#dirty) {
+      this.#snapshot = collectRecorderDisclosureTargets(this.sourceDocument);
+      this.#dirty = false;
+    }
+    return this.#snapshot;
+  }
+
+  dispose(): void {
+    this.#observer?.disconnect();
+    this.#observer = undefined;
+  }
+}
+
+function recorderTextIsPublic(
+  element: HTMLElement | undefined,
+  disclosure: RecorderDisclosureSnapshot,
+): boolean {
+  if (!element || disclosure.overflow) return false;
+  const classifier = sourceDocumentSecretClassifier(element.ownerDocument);
+  if (hasSourceCredentialSecretAncestor(element, classifier)) return false;
+  const path = readSourceFlatTreeElementPath(element);
+  if (!path) return false;
+  for (const current of path) {
+    const tagName = current.localName.toLowerCase();
+    const attributes = readSourceStructuralAttributes(current);
+    if (
+      tagName === 'input' || tagName === 'option' || tagName === 'output' ||
+      tagName === 'select' || tagName === 'textarea' ||
+      isSourcePrivateContentEditableValue(attributes.contenteditable) ||
+      isSourcePrivateRoleValue(attributes.role) ||
+      isSourcePublicMenuRoleValue(attributes.role) ||
+      disclosure.targets.has(current) ||
+      current.hasAttribute('hidden') ||
+      current.getAttribute('aria-hidden')?.trim().toLowerCase() === 'true'
+    ) return false;
+    try {
+      const view = current.ownerDocument.defaultView;
+      const getComputedStyle = view?.getComputedStyle;
+      if (typeof getComputedStyle === 'function') {
+        const style = getComputedStyle.call(view, current);
+        const display = typeof style?.display === 'string'
+          ? style.display.trim().toLowerCase()
+          : '';
+        const visibility = typeof style?.visibility === 'string'
+          ? style.visibility.trim().toLowerCase()
+          : '';
+        if (
+          display === 'none' ||
+          visibility === 'hidden' || visibility === 'collapse'
+        ) return false;
+      }
+    } catch {
+      return false;
+    }
+  }
+  return true;
+}
+
+function collectRecorderDisclosureTargets(
+  sourceDocument: Document | undefined,
+): RecorderDisclosureSnapshot {
+  const targets = new Set<Element>();
+  if (!sourceDocument?.documentElement) {
+    return Object.freeze({ targets, overflow: false });
+  }
+  try {
+    const byRoot = new Map<Node, Map<string, Element | null>>();
+    const controllers: Element[] = [];
+    const pending: Node[] = [sourceDocument.documentElement];
+    let visited = 0;
+    while (pending.length > 0 && visited < MAX_REPLICA_NODES) {
+      const node = pending.pop();
+      if (!node) break;
+      visited += 1;
+      if (node.nodeType === 11) {
+        pending.push(...node.childNodes);
+        continue;
+      }
+      if (node.nodeType !== 1) continue;
+      const element = node as Element;
+      const root = element.getRootNode();
+      const id = element.getAttribute('id')?.trim();
+      if (id && !/\s/u.test(id) && id.length <= 256) {
+        let ids = byRoot.get(root);
+        if (!ids) byRoot.set(root, ids = new Map());
+        ids.set(id, ids.has(id) ? null : element);
+      }
+      if (element.hasAttribute('aria-controls')) controllers.push(element);
+      pending.push(...element.childNodes);
+      if (element.shadowRoot?.mode === 'open') pending.push(element.shadowRoot);
+    }
+    if (pending.length > 0 || controllers.length > 1_024) {
+      return Object.freeze({ targets, overflow: true });
+    }
+    for (const controller of controllers.slice(0, 1_024)) {
+      const ids = byRoot.get(controller.getRootNode());
+      for (const id of controller.getAttribute('aria-controls')?.trim()
+        .split(/\s+/u) ?? []) {
+        const target = ids?.get(id);
+        if (target) targets.add(target);
+      }
+    }
+  } catch {
+    return Object.freeze({ targets, overflow: true });
+  }
+  return Object.freeze({ targets, overflow: false });
 }
 
 function jsonByteLength(value: unknown): number {

@@ -1,6 +1,7 @@
 import { parseHTML } from 'linkedom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { createImageSourcePortName } from '../lib/ocr/image-source-protocol';
 import {
   createHtmlMirrorAck,
   createHtmlMirrorCheckpointRequest,
@@ -12,8 +13,11 @@ import {
 import {
   HtmlMirrorSourceSession,
   WeakNodeIdRegistry,
+  installHtmlMirrorSourceBridge,
+  type HtmlMirrorSourceBridgeEnvironment,
 } from '../lib/replica/html-mirror-source';
 import { createReplicaIdentity } from '../lib/replica/protocol-v2';
+import { sourceDocumentIdentity } from '../lib/replica/source-identity';
 
 const SYNTHETIC_STATIC_LOGO = "data:image/svg+xml,%3csvg%20width='48'%20height='48'%20viewBox='0%200%2048%2048'%20fill='none'%20xmlns='http://www.w3.org/2000/svg'%3e%3cpath%20d='M4.25%204.25H43.75V43.75H4.25Z'%20fill='%236C5CE7'/%3e%3cpath%20d='M12.5%2034C15.5%2024.25%2019.75%201.2e1%2024%2012C28.25%2012%2032.5%2024.25%2035.5%2034Z'%20fill='white'/%3e%3c/svg%3e";
 
@@ -25,6 +29,130 @@ describe('HtmlMirrorSourceSession', () => {
       Element: window.Element,
       Text: window.Text,
     });
+  });
+
+  it('connects the Integrated image source Port through the installed bridge', () => {
+    const { document, window } = parseHTML(
+      '<html><body><img id="announcement" src="news.gif" alt="お知らせ"></body></html>',
+    );
+    Object.defineProperty(window, 'top', { configurable: true, value: window });
+    Object.defineProperty(document, 'baseURI', {
+      configurable: true,
+      value: 'https://example.test/',
+    });
+    const image = document.querySelector<HTMLImageElement>('#announcement')!;
+    setBridgeImageFacts(image);
+    const registry = new WeakNodeIdRegistry();
+    const onConnect = new FakeEvent<(port: Browser.runtime.Port) => void>();
+    const runtime = {
+      onConnect,
+    } as unknown as HtmlMirrorSourceBridgeEnvironment['runtime'];
+    vi.stubGlobal('IntersectionObserver', ImmediateIntersectionObserver);
+    vi.stubGlobal('ResizeObserver', NoopResizeObserver);
+    vi.stubGlobal('MutationObserver', NoopBridgeMutationObserver);
+    try {
+      installHtmlMirrorSourceBridge({
+        global: {} as typeof globalThis,
+        runtime,
+        document,
+        window: window as unknown as Window,
+        registry,
+        now: () => 1,
+        createMutationObserver: () => new NoopBridgeMutationObserver(),
+        scheduleFrame: () => 1,
+        cancelFrame: () => undefined,
+        setTimer: () => 1,
+        clearTimer: () => undefined,
+        createResizeObserver: () => new NoopResizeObserver(),
+      });
+
+      const mirrorPort = new FakePort(createHtmlMirrorPortName(identity.sessionId));
+      onConnect.emit(mirrorPort as unknown as Browser.runtime.Port);
+      mirrorPort.emitMessage(createHtmlMirrorStart(identity, 'conservative'));
+      const nodeId = registry.peekId(image);
+      expect(nodeId).toBeTypeOf('number');
+
+      const imagePort = new FakePort(
+        createImageSourcePortName(identity.sessionId, 'isolated-html'),
+      );
+      onConnect.emit(imagePort as unknown as Browser.runtime.Port);
+      imagePort.emitMessage({
+        kind: 'simul:image-source-v1:start',
+        document: sourceDocumentIdentity(identity),
+      });
+
+      expect(imagePort.posts).toContainEqual(expect.objectContaining({
+        kind: 'simul:image-source-v1:ready',
+        document: sourceDocumentIdentity(identity),
+        summary: { candidateImages: 1, observedImages: 1 },
+      }));
+      expect(imagePort.posts).toContainEqual(expect.objectContaining({
+        kind: 'simul:image-source-v1:change',
+        change: expect.objectContaining({
+          kind: 'upsert',
+          descriptor: expect.objectContaining({ nodeId }),
+        }),
+      }));
+      expect(JSON.stringify(imagePort.posts)).not.toContain('news.gif');
+    } finally {
+      vi.unstubAllGlobals();
+    }
+  });
+
+  it('keeps credential history before and between Integrated Port connections', () => {
+    const canary = 'integrated-disconnected-otp-secret';
+    const { document, window } = parseHTML(
+      '<html><body><main id="public"></main></body></html>',
+    );
+    Object.defineProperty(window, 'top', { configurable: true, value: window });
+    const onConnect = new FakeEvent<(port: Browser.runtime.Port) => void>();
+    const observers: ControlledBridgeMutationObserver[] = [];
+    const bridgeGlobal = {} as typeof globalThis & {
+      __simulHtmlMirrorV1Installed?: boolean;
+    };
+    installHtmlMirrorSourceBridge({
+      global: bridgeGlobal,
+      runtime: { onConnect } as unknown as
+        HtmlMirrorSourceBridgeEnvironment['runtime'],
+      document,
+      window: window as unknown as Window,
+      now: () => 1,
+      createMutationObserver: (callback) => {
+        const observer = new ControlledBridgeMutationObserver(callback);
+        observers.push(observer);
+        return observer;
+      },
+      scheduleFrame: () => 1,
+      cancelFrame: () => undefined,
+      setTimer: () => 1,
+      clearTimer: () => undefined,
+    });
+    expect(observers).toHaveLength(1);
+
+    const secret = document.createElement('section');
+    secret.setAttribute('autocomplete', 'one-time-code');
+    const wrapper = document.createElement('span');
+    const text = document.createTextNode(canary);
+    wrapper.append(text);
+    secret.append(wrapper);
+    document.body.append(secret);
+    document.querySelector('#public')!.append(text);
+    observers[0]!.trigger([
+      childListRecord(document.body, [secret]),
+      childListRecord(wrapper, [], [text]),
+      childListRecord(document.querySelector('#public')!, [text]),
+    ]);
+
+    const firstPort = new FakePort(createHtmlMirrorPortName(identity.sessionId));
+    onConnect.emit(firstPort as unknown as Browser.runtime.Port);
+    firstPort.emitMessage(createHtmlMirrorStart(identity, 'conservative'));
+    expect(JSON.stringify(firstPort.posts)).not.toContain(canary);
+    firstPort.onDisconnect.emit();
+
+    const secondPort = new FakePort(createHtmlMirrorPortName(identity.sessionId));
+    onConnect.emit(secondPort as unknown as Browser.runtime.Port);
+    secondPort.emitMessage(createHtmlMirrorStart(identity, 'conservative'));
+    expect(JSON.stringify(secondPort.posts)).not.toContain(canary);
   });
 
   it('stays paused through recovery ACK and retains mutations after its checkpoint', () => {
@@ -83,6 +211,7 @@ describe('HtmlMirrorSourceSession', () => {
         backgroundColor: element === fixture.document.documentElement
           ? canvasColor
           : 'rgba(0, 0, 0, 0)',
+        getPropertyValue: () => '',
       }),
     });
 
@@ -122,14 +251,14 @@ describe('HtmlMirrorSourceSession', () => {
     });
   });
 
-  it('polls silent control changes and clears a control that becomes sensitive', () => {
+  it('never reads silent control values while still mirroring structural secret transitions', () => {
     const fixture = sourceFixture(`
       <form><input id="query" class="wide" type="search" value="initial" placeholder=""
         name="private-name" data-account="private-data"></form>
     `);
     fixture.start();
     const checkpointJson = JSON.stringify(fixture.checkpoints()[0]);
-    expect(checkpointJson).toContain('"text":"initial"');
+    expect(checkpointJson).not.toContain('"text":"initial"');
     expect(checkpointJson).toContain('["class","wide"]');
     expect(checkpointJson).not.toContain('private-name');
     expect(checkpointJson).not.toContain('private-data');
@@ -138,47 +267,123 @@ describe('HtmlMirrorSourceSession', () => {
 
     control.value = 'programmatic update';
     fixture.runTimer();
-    fixture.flushFrame();
-    expect(fixture.patches().at(-1)?.operations).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        kind: 'attributes',
-        controlText: expect.objectContaining({ text: 'programmatic update' }),
-      }),
-    ]));
-    fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
-    const patchesAfterProgrammaticUpdate = fixture.patches().length;
-    fixture.runTimer();
     expect(fixture.frames).toHaveLength(0);
-    expect(fixture.patches()).toHaveLength(patchesAfterProgrammaticUpdate);
+    expect(fixture.patches()).toHaveLength(0);
 
     // This models the silent value change performed by the form-reset default
     // action after its reset event has already fired.
     control.value = 'initial';
     fixture.runTimer();
-    fixture.flushFrame();
-    expect(fixture.patches().at(-1)?.operations).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        kind: 'attributes',
-        controlText: expect.objectContaining({ text: 'initial' }),
-      }),
-    ]));
-    fixture.port.emitMessage(createHtmlMirrorAck(identity, 2));
+    expect(fixture.frames).toHaveLength(0);
 
     control.type = 'password';
-    fixture.runTimer();
-    fixture.flushFrame();
-    const sensitivePatch = fixture.patches().at(-1)!;
-    expect(sensitivePatch.operations).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        kind: 'attributes',
-        attributes: expect.arrayContaining([['type', 'password']]),
-      }),
-    ]));
-    expect(JSON.stringify(sensitivePatch)).not.toContain('controlText');
-    expect(JSON.stringify(sensitivePatch)).not.toContain('initial');
+    fixture.mutate(attributeRecord(control, 'type'));
+    expect(fixture.frames).toHaveLength(0);
+    expect(fixture.patches()).toHaveLength(0);
+    expect(fixture.port.posts.at(-1)).toMatchObject({
+      kind: 'simul:html-mirror-v1:error',
+      code: 'stream_gap',
+    });
+
+    fixture.port.emitMessage(createHtmlMirrorCheckpointRequest(identity, 0));
+    const recoveryJson = JSON.stringify(fixture.checkpoints().at(-1));
+    expect(recoveryJson).toContain('opaquePlaceholder');
+    expect(recoveryJson).toContain('simul-opaque-region-');
+    expect(recoveryJson).not.toContain('controlText');
+    expect(recoveryJson).not.toContain('initial');
+    expect(recoveryJson).not.toContain('private-name');
+    expect(recoveryJson).not.toContain('private-data');
+
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const postCount = fixture.port.posts.length;
+    control.type = 'search';
+    fixture.mutate(attributeRecord(control, 'type'));
+    expect(fixture.port.posts).toHaveLength(postCount);
+    expect(fixture.frames).toHaveLength(0);
   });
 
-  it('streams native select state without values, names, or data attributes', () => {
+  it('rebuilds computed secret transitions and then ignores the opaque subtree', () => {
+    const fixture = sourceFixture(
+      '<main><section id="account"><span id="label">public before masking</span></section></main>',
+    );
+    const account = fixture.document.querySelector<HTMLElement>('#account')!;
+    const label = fixture.document.querySelector<HTMLElement>('#label')!;
+    let masked = false;
+    Object.defineProperty(fixture.window, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => ({
+        backgroundColor: 'rgba(0, 0, 0, 0)',
+        getPropertyValue: (name: string) =>
+          name === '-webkit-text-security' && masked && element === account
+            ? 'disc'
+            : '',
+      }),
+    });
+
+    fixture.start();
+    expect(JSON.stringify(fixture.checkpoints()[0])).toContain(
+      'public before masking',
+    );
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+
+    masked = true;
+    account.className = 'masked';
+    fixture.mutate(attributeRecord(account, 'class'));
+    expect(fixture.frames).toHaveLength(0);
+    expect(fixture.port.posts.at(-1)).toMatchObject({
+      kind: 'simul:html-mirror-v1:error',
+      code: 'stream_gap',
+    });
+
+    fixture.port.emitMessage(createHtmlMirrorCheckpointRequest(identity, 0));
+    const recoveryJson = JSON.stringify(fixture.checkpoints().at(-1));
+    expect(recoveryJson).toContain('opaquePlaceholder');
+    expect(recoveryJson).not.toContain('public before masking');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+
+    const postCount = fixture.port.posts.length;
+    label.textContent = 'private after masking';
+    fixture.mutate(childListRecord(label, [...label.childNodes]));
+    expect(fixture.port.posts).toHaveLength(postCount);
+    expect(fixture.frames).toHaveLength(0);
+  });
+
+  it('keeps content extracted from an opaque ancestor secret in public additions', () => {
+    const canary = 'opaque-ancestor-move-secret';
+    const fixture = sourceFixture(
+      `<section id="secret"><span id="payload">${canary}</span></section>` +
+      '<main id="public"></main>',
+    );
+    const secret = fixture.document.querySelector('#secret')!;
+    const payload = fixture.document.querySelector('#payload')!;
+    const publicTarget = fixture.document.querySelector('#public')!;
+
+    fixture.start();
+    expect(JSON.stringify(fixture.checkpoints()[0])).toContain(canary);
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+
+    secret.setAttribute('autocomplete', 'one-time-code');
+    fixture.mutate(attributeRecord(secret, 'autocomplete'));
+    expect(fixture.port.posts.at(-1)).toMatchObject({
+      kind: 'simul:html-mirror-v1:error',
+      code: 'stream_gap',
+    });
+    fixture.port.emitMessage(createHtmlMirrorCheckpointRequest(identity, 0));
+    expect(JSON.stringify(fixture.checkpoints().at(-1))).not.toContain(canary);
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+
+    publicTarget.append(payload);
+    fixture.mutate(childListRecord(secret, [], [payload]));
+    fixture.mutate(childListRecord(publicTarget, [payload]));
+    expect(fixture.frames).toHaveLength(1);
+    fixture.flushFrame();
+
+    const patchJson = JSON.stringify(fixture.patches().at(-1));
+    expect(patchJson).toContain('simul-opaque-region-');
+    expect(patchJson).not.toContain(canary);
+  });
+
+  it('streams native select structure without state, labels, or submission data', () => {
     const fixture = sourceFixture(`
       <select id="facility" size="4" name="private-name" data-account="private-data">
         <option value="private-a">Choose</option>
@@ -189,11 +394,10 @@ describe('HtmlMirrorSourceSession', () => {
     `);
     fixture.start('passive');
     const initial = fixture.checkpoints()[0]!;
-    expect(JSON.stringify(initial)).toContain('"selectedOptionIndexes":[1]');
-    expect(JSON.stringify(initial)).toContain('["size","4"]');
-    expect(JSON.stringify(initial)).toContain(
-      '"controlText":{"kind":"label","text":"District","translatable":true}',
-    );
+    expect(JSON.stringify(initial)).not.toContain('selectedOptionIndexes');
+    expect(JSON.stringify(initial)).not.toContain('["size","4"]');
+    expect(JSON.stringify(initial)).not.toContain('District');
+    expect(JSON.stringify(initial)).not.toContain('Community center');
     expect(JSON.stringify(initial)).not.toContain('private-name');
     expect(JSON.stringify(initial)).not.toContain('private-data');
     expect(JSON.stringify(initial)).not.toContain('private-a');
@@ -206,30 +410,15 @@ describe('HtmlMirrorSourceSession', () => {
     select.options[0]!.setAttribute('selected', '');
     select.options[1]!.removeAttribute('selected');
     select.dispatchEvent(new fixture.window.Event('change', { bubbles: true }));
-    fixture.flushFrame();
-
-    const operation = fixture.patches().at(-1)?.operations.find(
-      ({ kind }) => kind === 'attributes',
-    );
-    expect(operation).toMatchObject({
-      kind: 'attributes',
-      selectedOptionIndexes: [0],
-    });
-    expect(JSON.stringify(operation)).not.toContain('private-');
-    fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
+    expect(fixture.frames).toHaveLength(0);
+    expect(fixture.patches()).toHaveLength(0);
 
     const area = fixture.document.querySelector('#area')!;
     area.setAttribute('label', 'Neighborhood');
     fixture.mutate(attributeRecord(area, 'label'));
     fixture.flushFrame();
-    expect(fixture.patches().at(-1)?.operations).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        kind: 'attributes',
-        controlText: {
-          kind: 'label', text: 'Neighborhood', translatable: true,
-        },
-      }),
-    ]));
+    expect(JSON.stringify(fixture.patches().at(-1))).not.toContain('Neighborhood');
+    expect(JSON.stringify(fixture.patches().at(-1))).not.toContain('controlText');
   });
 
   it('atomically clears public labels when a select becomes private', () => {
@@ -264,7 +453,7 @@ describe('HtmlMirrorSourceSession', () => {
     expect(JSON.stringify(patch)).not.toContain('Public choice');
   });
 
-  it('polls silent select-label visibility changes as atomic replacements', () => {
+  it('leaves silent select-label changes to the semantic channel', () => {
     const fixture = sourceFixture(
       '<select><option selected>Visible choice</option></select>',
     );
@@ -273,26 +462,15 @@ describe('HtmlMirrorSourceSession', () => {
     fixture.document.querySelector('option')!.setAttribute('hidden', '');
 
     fixture.runTimer();
-    fixture.flushFrame();
-    const patch = fixture.patches().at(-1)!;
-
-    expect(patch.operations.slice(0, 2).map(({ kind }) => kind)).toEqual([
-      'children',
-      'attributes',
-    ]);
-    expect(JSON.stringify(patch)).not.toContain('Visible choice');
+    expect(fixture.frames).toHaveLength(0);
+    expect(fixture.patches()).toHaveLength(0);
   });
 
-  it('streams inserted options, visible label changes, and customizable picker state', () => {
+  it('streams inserted option structure while labels and picker state stay semantic-only', () => {
     const fixture = sourceFixture(`
       <select id="picker"><option selected>First choice</option></select>
     `);
     const select = fixture.document.querySelector<HTMLSelectElement>('#picker')!;
-    let open = false;
-    Object.defineProperty(select, 'matches', {
-      configurable: true,
-      value: (selector: string) => selector === ':open' && open,
-    });
     fixture.start('passive');
     fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
 
@@ -303,9 +481,9 @@ describe('HtmlMirrorSourceSession', () => {
     fixture.flushFrame();
     const insertion = fixture.patches().at(-1)!;
     expect(insertion.operations.map(({ kind }) => kind)).toEqual(
-      expect.arrayContaining(['children', 'attributes']),
+      expect.arrayContaining(['reconcile-children']),
     );
-    expect(JSON.stringify(insertion)).toContain('Second choice');
+    expect(JSON.stringify(insertion)).not.toContain('Second choice');
     expect(JSON.stringify(insertion)).not.toContain('stream_overflow');
     fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
 
@@ -313,34 +491,15 @@ describe('HtmlMirrorSourceSession', () => {
     insertedText.nodeValue = 'Updated choice';
     fixture.mutate(characterDataRecord(insertedText));
     fixture.flushFrame();
-    expect(fixture.patches().at(-1)?.operations).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        kind: 'attributes',
-        controlText: {
-          kind: 'label', text: 'Updated choice', translatable: true,
-        },
-      }),
-    ]));
+    expect(JSON.stringify(fixture.patches().at(-1))).not.toContain('Updated choice');
+    expect(JSON.stringify(fixture.patches().at(-1))).not.toContain('controlText');
     fixture.port.emitMessage(createHtmlMirrorAck(identity, 2));
 
-    open = true;
     select.dispatchEvent(new fixture.window.Event('toggle', { bubbles: true }));
-    fixture.flushFrame();
-    expect(fixture.patches().at(-1)?.operations).toEqual(expect.arrayContaining([
-      expect.objectContaining({ kind: 'attributes', selectPickerOpen: true }),
-    ]));
-    fixture.port.emitMessage(createHtmlMirrorAck(identity, 3));
-
-    open = false;
-    select.dispatchEvent(new fixture.window.Event('toggle', { bubbles: true }));
-    fixture.flushFrame();
-    const closed = fixture.patches().at(-1)?.operations.find(
-      (operation) => operation.kind === 'attributes' && operation.nodeId > 0,
-    );
-    expect(closed).not.toHaveProperty('selectPickerOpen');
+    expect(fixture.frames).toHaveLength(0);
   });
 
-  it('routes direct optgroup legend mutations to the typed group label', () => {
+  it('does not route optgroup legend text through the base graph', () => {
     const fixture = sourceFixture(`
       <select><optgroup><legend>Original group</legend>
         <option>Public choice</option>
@@ -353,14 +512,8 @@ describe('HtmlMirrorSourceSession', () => {
     fixture.mutate(characterDataRecord(legendText));
     fixture.flushFrame();
 
-    expect(fixture.patches().at(-1)?.operations).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        kind: 'attributes',
-        controlText: {
-          kind: 'label', text: 'Updated group', translatable: true,
-        },
-      }),
-    ]));
+    expect(JSON.stringify(fixture.patches().at(-1))).not.toContain('Updated group');
+    expect(JSON.stringify(fixture.patches().at(-1))).not.toContain('controlText');
   });
 
   it('emits bounded capacity diagnostics when checkpoint serialization overflows', () => {
@@ -1314,12 +1467,13 @@ function attributeRecord(target: Element, attributeName: string): MutationRecord
 function childListRecord(
   target: Node,
   addedNodes: readonly Node[],
+  removedNodes: readonly Node[] = [],
 ): MutationRecord {
   return {
     type: 'childList',
     target,
     addedNodes,
-    removedNodes: [],
+    removedNodes,
   } as unknown as MutationRecord;
 }
 
@@ -1385,5 +1539,71 @@ class FakeEvent<T extends (...arguments_: never[]) => void> {
 
   emit(...arguments_: Parameters<T>): void {
     for (const listener of this.#listeners) listener(...arguments_);
+  }
+}
+
+function setBridgeImageFacts(image: HTMLImageElement): void {
+  Object.defineProperties(image, {
+    naturalWidth: { configurable: true, value: 272 },
+    naturalHeight: { configurable: true, value: 140 },
+    getBoundingClientRect: {
+      configurable: true,
+      value: () => ({
+        x: 0,
+        y: 0,
+        top: 0,
+        left: 0,
+        right: 136,
+        bottom: 70,
+        width: 136,
+        height: 70,
+        toJSON: () => undefined,
+      }),
+    },
+  });
+}
+
+class ImmediateIntersectionObserver {
+  readonly #callback: IntersectionObserverCallback;
+
+  constructor(callback: IntersectionObserverCallback) {
+    this.#callback = callback;
+  }
+
+  observe(target: Element): void {
+    this.#callback([{
+      target,
+      isIntersecting: true,
+    } as IntersectionObserverEntry], this as unknown as IntersectionObserver);
+  }
+
+  unobserve(): void {}
+  disconnect(): void {}
+  takeRecords(): IntersectionObserverEntry[] { return []; }
+  readonly root = null;
+  readonly rootMargin = '0px';
+  readonly scrollMargin = '0px';
+  readonly thresholds = [0];
+}
+
+class NoopResizeObserver {
+  observe(): void {}
+  unobserve(): void {}
+  disconnect(): void {}
+}
+
+class NoopBridgeMutationObserver {
+  observe(): void {}
+  disconnect(): void {}
+  takeRecords(): MutationRecord[] { return []; }
+}
+
+class ControlledBridgeMutationObserver extends NoopBridgeMutationObserver {
+  constructor(private readonly callback: MutationCallback) {
+    super();
+  }
+
+  trigger(records: MutationRecord[]): void {
+    this.callback(records, this as unknown as MutationObserver);
   }
 }

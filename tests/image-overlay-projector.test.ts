@@ -37,6 +37,8 @@ function projection(
     cropHeightCss: 40,
     renderedWidthCss: 100,
     renderedHeightCss: 60,
+    methodId: 'tesseract',
+    evidenceKind: 'ocr',
     regions: [{
       text: '翻訳',
       boundingBox: { x: 0, y: 0, width: 40, height: 20 },
@@ -233,6 +235,17 @@ describe('ImageOverlayProjector', () => {
     projector.beginPair(1, 'en>ja');
     expect(projector.project(projection({ replayLease: 8 }))).toBe(false);
     expect(projector.project(projection({ cropWidthCss: 90 }))).toBe(false);
+    expect(projector.project(projection({
+      methodId: 'accessibility-text',
+      evidenceKind: 'ocr',
+    }))).toBe(false);
+    expect(projector.project(projection({
+      methodId: 'tesseract',
+      evidenceKind: 'semantic',
+    }))).toBe(false);
+    expect(projector.project(projection({
+      evidenceKind: 'forged' as 'ocr',
+    }))).toBe(false);
     expect(projector.project(projection())).toBe(true);
 
     current = false;

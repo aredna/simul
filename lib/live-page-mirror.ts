@@ -14,10 +14,11 @@ import {
   readNestedScrollSnapshot,
   type PrimaryScrollTarget,
 } from './primary-scroll';
+import type { ReplicaReadScope } from './replica/read-scope-policy';
 
 export const LIVE_MIRROR_VERSION = 1 as const;
-export const LIVE_PAGE_OBSERVER_IMPLEMENTATION_REVISION = 5 as const;
-export const LIVE_PAGE_OBSERVER_RUNTIME_MARKER = 'simul:live-observer-v5';
+export const LIVE_PAGE_OBSERVER_IMPLEMENTATION_REVISION = 6 as const;
+export const LIVE_PAGE_OBSERVER_RUNTIME_MARKER = 'simul:live-observer-v6';
 
 type LivePageObserverBridge = Readonly<{
   implementationRevision: typeof LIVE_PAGE_OBSERVER_IMPLEMENTATION_REVISION;
@@ -47,6 +48,7 @@ export function installLivePageObserverBridge(): void {
 export function invokeLivePageObserverBridge(
   sessionId: string,
   generation: number,
+  readScope?: ReplicaReadScope,
 ): LivePageObserverInstallation | undefined {
   const bridge = (
     globalThis as typeof globalThis & {
@@ -57,17 +59,27 @@ export function invokeLivePageObserverBridge(
     }
   ).__simulLivePageObserverBridgeV4;
   if (
-    bridge?.implementationRevision !== 5 ||
+    bridge?.implementationRevision !== 6 ||
     typeof bridge.install !== 'function'
   ) return undefined;
   return (bridge.install as (
     session: string,
     nextGeneration: number,
-  ) => LivePageObserverInstallation)(sessionId, generation);
+    scope?: ReplicaReadScope,
+  ) => LivePageObserverInstallation)(sessionId, generation, readScope);
+}
+
+export interface LivePageObserverReleaseProof {
+  readonly kind: 'simul:live-observer-v6:release-proof';
+  readonly implementationRevision: 6;
+  readonly invoked: true;
+  readonly sessionRemoved: boolean;
 }
 
 /** Self-contained best-effort teardown invoker for an installed page bridge. */
-export function invokeLivePageObserverUnregisterBridge(sessionId: string): boolean {
+export function invokeLivePageObserverUnregisterBridge(
+  sessionId: string,
+): LivePageObserverReleaseProof | undefined {
   const bridge = (
     globalThis as typeof globalThis & {
       __simulLivePageObserverBridgeV4?: {
@@ -77,10 +89,48 @@ export function invokeLivePageObserverUnregisterBridge(sessionId: string): boole
     }
   ).__simulLivePageObserverBridgeV4;
   if (
-    bridge?.implementationRevision !== 5 ||
+    bridge?.implementationRevision !== 6 ||
     typeof bridge.unregister !== 'function'
+  ) return undefined;
+  const sessionRemoved = (bridge.unregister as (
+    session: string,
+  ) => unknown)(sessionId);
+  if (typeof sessionRemoved !== 'boolean') return undefined;
+  return {
+    kind: 'simul:live-observer-v6:release-proof',
+    implementationRevision: 6,
+    invoked: true,
+    sessionRemoved,
+  };
+}
+
+/**
+ * Chrome confirms a top-frame teardown only when the isolated invocation
+ * completed through the current bundled bridge and returned its tagged proof.
+ * A tagged `sessionRemoved: false` proves the current unregister function ran
+ * and found no matching live session; a bare false can mean the bridge was
+ * absent and therefore never confirms a safety purge.
+ */
+export function isConfirmedLivePageObserverRelease(
+  value: unknown,
+): boolean {
+  if (!Array.isArray(value) || value.length !== 1) return false;
+  const injection = value[0];
+  if (
+    typeof injection !== 'object' ||
+    injection === null ||
+    Array.isArray(injection)
   ) return false;
-  return (bridge.unregister as (session: string) => boolean)(sessionId);
+  const proof = (injection as Record<string, unknown>).result;
+  return typeof proof === 'object' &&
+    proof !== null &&
+    !Array.isArray(proof) &&
+    Object.keys(proof).length === 4 &&
+    (proof as Record<string, unknown>).kind ===
+      'simul:live-observer-v6:release-proof' &&
+    (proof as Record<string, unknown>).implementationRevision === 6 &&
+    (proof as Record<string, unknown>).invoked === true &&
+    typeof (proof as Record<string, unknown>).sessionRemoved === 'boolean';
 }
 
 /** Closure-free invoker for the bundled incremental DOM capture function. */
@@ -89,6 +139,7 @@ export function invokeLivePageDeltaCaptureBridge(
   generation: number,
   sequence: number,
   requestedNodeIds: string[],
+  readScope?: ReplicaReadScope,
 ): LivePageDelta | undefined {
   const bridge = (
     globalThis as typeof globalThis & {
@@ -99,7 +150,7 @@ export function invokeLivePageDeltaCaptureBridge(
     }
   ).__simulLivePageObserverBridgeV4;
   if (
-    bridge?.implementationRevision !== 5 ||
+    bridge?.implementationRevision !== 6 ||
     typeof bridge.captureDelta !== 'function'
   ) return undefined;
   return (bridge.captureDelta as (
@@ -107,7 +158,14 @@ export function invokeLivePageDeltaCaptureBridge(
     nextGeneration: number,
     nextSequence: number,
     nodeIds: string[],
-  ) => LivePageDelta)(sessionId, generation, sequence, requestedNodeIds);
+    scope?: ReplicaReadScope,
+  ) => LivePageDelta)(
+    sessionId,
+    generation,
+    sequence,
+    requestedNodeIds,
+    readScope,
+  );
 }
 
 export interface LivePageDirtyMessage {
@@ -225,6 +283,7 @@ const SELECT_POLL_INTERVAL_MS = 250;
 export function installLivePageObserver(
   sessionId: string,
   generation: number,
+  readScope?: ReplicaReadScope,
 ): LivePageObserverInstallation {
   type Registry = {
     implementationRevision?: number;
@@ -235,7 +294,30 @@ export function installLivePageObserver(
     disconnect(): void;
     announceScroll(): void;
     currentSequence(): number;
+    configureFormValueReading?(sessionId: string, enabled: boolean): void;
   };
+  const readScopeKeys = [
+    'controlSemantics',
+    'controlImages',
+    'disclosureContent',
+    'formValues',
+    'personalDataValues',
+    'editableContent',
+  ] as const;
+  const exactReadScope = (() => {
+    if (!readScope || typeof readScope !== 'object' || Array.isArray(readScope)) {
+      return undefined;
+    }
+    const keys = Object.keys(readScope);
+    if (
+      keys.length !== readScopeKeys.length ||
+      keys.some((key) => !(readScopeKeys as readonly string[]).includes(key)) ||
+      readScopeKeys.some((key) => typeof readScope[key] !== 'boolean') ||
+      (readScope.personalDataValues && !readScope.formValues)
+    ) return undefined;
+    return readScope;
+  })();
+  const allowFormValues = exactReadScope?.formValues === true;
   const isolatedGlobal = globalThis as typeof globalThis & {
     __simulLiveMirrorV1?: Registry;
   };
@@ -266,6 +348,7 @@ export function installLivePageObserver(
       };
     }
     existingRegistry.sessions.set(sessionId, generation);
+    existingRegistry.configureFormValueReading?.(sessionId, allowFormValues);
     existingRegistry.announceScroll();
     setTimeout(() => existingRegistry.announceScroll(), 350);
     return {
@@ -301,7 +384,10 @@ export function installLivePageObserver(
   const pendingCustomElements = new Map<string, Set<Element>>();
   const sessions = new Map([[sessionId, generation]]);
   const selectCandidates: HTMLSelectElement[] = [];
-  const selectFingerprints = new WeakMap<HTMLSelectElement, string>();
+  let selectFingerprints = new WeakMap<HTMLSelectElement, string>();
+  const formValueSessions = new Set<string>(
+    allowFormValues ? [sessionId] : [],
+  );
   let selectPollCursor = 0;
   let selectPollTimer: ReturnType<typeof setTimeout> | undefined;
   let selectTrackingOverflow = false;
@@ -422,7 +508,11 @@ export function installLivePageObserver(
   };
 
   const trackSelect = (node: Node): void => {
-    if (!(node instanceof HTMLSelectElement) || selectFingerprints.has(node)) {
+    if (
+      formValueSessions.size === 0 ||
+      !(node instanceof HTMLSelectElement) ||
+      selectFingerprints.has(node)
+    ) {
       return;
     }
     if (selectCandidates.length >= MAX_TRACKED_SELECTS) {
@@ -879,6 +969,20 @@ export function installLivePageObserver(
     },
     announceScroll: onScroll,
     currentSequence: () => sequence,
+    configureFormValueReading(targetSessionId, enabled) {
+      if (enabled) {
+        formValueSessions.add(targetSessionId);
+        scheduleSelectPoll();
+        return;
+      }
+      formValueSessions.delete(targetSessionId);
+      if (formValueSessions.size > 0) return;
+      if (selectPollTimer !== undefined) clearTimeout(selectPollTimer);
+      selectPollTimer = undefined;
+      selectCandidates.length = 0;
+      selectPollCursor = 0;
+      selectFingerprints = new WeakMap<HTMLSelectElement, string>();
+    },
   };
   isolatedGlobal.__simulLiveMirrorV1 = registry;
   idFor(document.documentElement);
@@ -915,6 +1019,7 @@ export function unregisterLivePageObserver(sessionId: string): boolean {
   type Registry = {
     sessions: Map<string, number>;
     disconnect(): void;
+    configureFormValueReading?(sessionId: string, enabled: boolean): void;
   };
   const isolatedGlobal = globalThis as typeof globalThis & {
     __simulLiveMirrorV1?: Registry;
@@ -922,6 +1027,7 @@ export function unregisterLivePageObserver(sessionId: string): boolean {
   const registry = isolatedGlobal.__simulLiveMirrorV1;
   if (!registry || !/^[A-Za-z0-9_-]{8,64}$/u.test(sessionId)) return false;
   const removed = registry.sessions.delete(sessionId);
+  if (removed) registry.configureFormValueReading?.(sessionId, false);
   if (registry.sessions.size === 0) {
     registry.disconnect();
     delete isolatedGlobal.__simulLiveMirrorV1;
@@ -935,6 +1041,7 @@ export function captureLivePageDelta(
   generation: number,
   sequence: number,
   requestedNodeIds: string[],
+  readScope?: ReplicaReadScope,
 ): LivePageDelta {
   type Registry = {
     generation: number;
@@ -958,6 +1065,30 @@ export function captureLivePageDelta(
     !registry ||
     registry.sessions.get(sessionId) !== generation ||
     requestedNodeIds.length > 48;
+  const readScopeKeys = [
+    'controlSemantics',
+    'controlImages',
+    'disclosureContent',
+    'formValues',
+    'personalDataValues',
+    'editableContent',
+  ] as const;
+  const exactReadScope = (() => {
+    if (!readScope || typeof readScope !== 'object' || Array.isArray(readScope)) {
+      return undefined;
+    }
+    const keys = Object.keys(readScope);
+    if (
+      keys.length !== readScopeKeys.length ||
+      keys.some((key) => !(readScopeKeys as readonly string[]).includes(key)) ||
+      readScopeKeys.some((key) => typeof readScope[key] !== 'boolean') ||
+      (readScope.personalDataValues && !readScope.formValues)
+    ) return undefined;
+    return readScope;
+  })();
+  const allowControlSemantics = exactReadScope?.controlSemantics === true;
+  const allowDisclosureContent = exactReadScope?.disclosureContent === true;
+  const allowFormValues = exactReadScope?.formValues === true;
 
   const styleProperties = [
     'align-content', 'align-items', 'align-self', 'aspect-ratio',
@@ -1180,7 +1311,8 @@ export function captureLivePageDelta(
     ) return 'input';
     if (element instanceof HTMLTextAreaElement) return 'textarea';
     if (element instanceof HTMLSelectElement) {
-      return ['private', 'activation'].includes(roleKind(element) ?? '') ||
+      return !allowControlSemantics ||
+        ['private', 'activation'].includes(roleKind(element) ?? '') ||
         hasPrivateOrActivationAncestor(element)
         ? 'input'
         : 'select';
@@ -1223,8 +1355,6 @@ export function captureLivePageDelta(
       const src = element.currentSrc || element.src;
       if (safeImage(src)) addAttribute('src', src, true);
       else if (src.length > maxImageUrlLength) desynchronized = true;
-      const alt = element.getAttribute('alt')?.replace(/\s+/gu, ' ').trim();
-      if (alt) addAttribute('alt', alt.slice(0, 2_048));
     }
     const safeNames = [
       'colspan', 'cx', 'cy', 'd', 'fill', 'height', 'points', 'r', 'rowspan',
@@ -1232,7 +1362,11 @@ export function captureLivePageDelta(
       'stroke-width', 'transform', 'viewBox', 'width', 'x', 'x1', 'x2', 'y',
       'y1', 'y2',
     ];
-    if (tag === 'details' && element.hasAttribute('open')) {
+    if (
+      allowDisclosureContent &&
+      tag === 'details' &&
+      element.hasAttribute('open')
+    ) {
       addAttribute('open', '');
     }
     for (const name of safeNames) {
@@ -1519,7 +1653,10 @@ export function captureLivePageDelta(
       style,
       optionState: {
         disabled: currentBooleanProperty(element, 'disabled'),
-        selected: !privateEntry && currentBooleanProperty(element, 'selected'),
+        selected:
+          allowFormValues &&
+          !privateEntry &&
+          currentBooleanProperty(element, 'selected'),
       },
       children,
     };
@@ -1599,7 +1736,11 @@ export function captureLivePageDelta(
         if (built) children.push(built);
         if (desynchronized) break;
       }
-      if (shell === 'button' && !containsText(children)) {
+      if (
+        allowControlSemantics &&
+        shell === 'button' &&
+        !containsText(children)
+      ) {
         const label = publicControlLabel(element);
         if (label) {
           if (textCharacters + label.length > 150_000 || nodeCount >= 6_000) {
@@ -1627,7 +1768,7 @@ export function captureLivePageDelta(
             selectState: {
               disabled: currentBooleanProperty(element, 'disabled'),
               multiple: currentBooleanProperty(element, 'multiple'),
-              open: selectPickerIsOpen(element),
+              open: allowFormValues && selectPickerIsOpen(element),
               size: currentSelectSize(element),
             },
           }
@@ -2042,7 +2183,7 @@ function parseLiveAttributes(
 ): Record<string, string> | undefined {
   if (!isRecord(input)) return undefined;
   const allowed = new Set([
-    'alt', 'colspan', 'cx', 'cy', 'd', 'fill', 'height', 'open', 'points',
+    'colspan', 'cx', 'cy', 'd', 'fill', 'height', 'open', 'points',
     'preserveAspectRatio', 'r', 'rowspan', 'rx', 'ry', 'src', 'start', 'stroke',
     'stroke-linecap', 'stroke-linejoin', 'stroke-width', 'transform', 'viewBox',
     'width', 'x', 'x1', 'x2', 'y', 'y1', 'y2',
@@ -2055,7 +2196,6 @@ function parseLiveAttributes(
       value.length > (name === 'src' ? 100_000 : 2_048)
     ) continue;
     if (name === 'src' && (tag !== 'img' || !isSafeImageSource(value))) continue;
-    if (name === 'alt' && tag !== 'img') continue;
     if (/(?:javascript:|data:(?!image\/)|url\s*\()/iu.test(value)) continue;
     const characters = name.length + value.length;
     if (

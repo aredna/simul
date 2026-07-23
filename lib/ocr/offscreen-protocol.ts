@@ -44,6 +44,7 @@ export type OcrHostErrorCode = (typeof OCR_HOST_ERROR_CODES)[number];
 export interface EnsureOcrHostCommand {
   readonly kind: 'simul:ocr-v1:ensure-host';
   readonly version: 1;
+  readonly resetEpoch: number;
 }
 
 export interface EnsureOcrHostResponse {
@@ -147,9 +148,14 @@ export type OffscreenOcrResponse =
     };
 
 export function readEnsureOcrHostCommand(input: unknown): EnsureOcrHostCommand | undefined {
-  return isExactRecord(input, ['kind', 'version']) &&
-    input.kind === 'simul:ocr-v1:ensure-host' && input.version === 1
-    ? Object.freeze({ kind: input.kind, version: 1 })
+  return isExactRecord(input, ['kind', 'version', 'resetEpoch']) &&
+    input.kind === 'simul:ocr-v1:ensure-host' && input.version === 1 &&
+    isNonNegativeSafeInteger(input.resetEpoch)
+    ? Object.freeze({
+        kind: input.kind,
+        version: 1,
+        resetEpoch: input.resetEpoch,
+      })
     : undefined;
 }
 
@@ -423,6 +429,10 @@ function isLanguageTag(value: unknown): value is string {
 
 function isPositiveSafeInteger(value: unknown): value is number {
   return Number.isSafeInteger(value) && Number(value) > 0;
+}
+
+function isNonNegativeSafeInteger(value: unknown): value is number {
+  return Number.isSafeInteger(value) && Number(value) >= 0;
 }
 
 function isBitmapDimension(value: unknown): value is number {

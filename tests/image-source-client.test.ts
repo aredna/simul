@@ -71,6 +71,117 @@ describe('Chrome image source client', () => {
     });
     expect(port.disconnects).toBe(0);
   });
+
+  it('round-trips an explicit accessibility read without logging it', async () => {
+    const port = new FakePort();
+    installBrowser(port);
+    const lease = await openChromeImageSource(
+      request,
+      vi.fn(),
+      undefined,
+      'isolated-html',
+      {
+        policyFingerprint: 'read-v1-111000',
+        controlImages: true,
+        accessibilityTextEnabled: true,
+      },
+    );
+    const task = lease.readAccessibilityText!(
+      descriptor,
+      'read-v1-111000',
+      true,
+    );
+    const requestId = (port.messages.at(-1) as { requestId?: string })
+      ?.requestId;
+    expect(requestId).toBeDefined();
+    port.emitMessage({
+      kind: 'simul:image-source-v1:accessibility-text',
+      requestId,
+      descriptor,
+      status: 'ready',
+      evidence: {
+        document: descriptor.document,
+        nodeId: descriptor.nodeId,
+        contentRevision: descriptor.contentRevision,
+        observationRevision: descriptor.observationRevision,
+        text: 'お知らせ',
+        source: 'alt',
+        nearestElementLanguage: 'ja',
+      },
+    });
+    await expect(task).resolves.toMatchObject({ text: 'お知らせ' });
+    lease.dispose();
+  });
+
+  it('rejects accessibility evidence that does not match the pending descriptor', async () => {
+    const port = new FakePort();
+    installBrowser(port);
+    const lease = await openChromeImageSource(
+      request,
+      vi.fn(),
+      undefined,
+      'isolated-html',
+      {
+        policyFingerprint: 'read-v1-111000',
+        controlImages: true,
+        accessibilityTextEnabled: true,
+      },
+    );
+    const task = lease.readAccessibilityText!(
+      descriptor,
+      'read-v1-111000',
+      true,
+    );
+    const requestId = (port.messages.at(-1) as { requestId?: string })
+      ?.requestId;
+    port.emitMessage({
+      kind: 'simul:image-source-v1:accessibility-text',
+      requestId,
+      descriptor: { ...descriptor, nodeId: descriptor.nodeId + 1 },
+      status: 'ready',
+      evidence: {
+        document: descriptor.document,
+        nodeId: descriptor.nodeId + 1,
+        contentRevision: descriptor.contentRevision,
+        observationRevision: descriptor.observationRevision,
+        text: 'forged',
+        source: 'alt',
+      },
+    });
+
+    await expect(task).rejects.toMatchObject({
+      name: 'ImageSourceUnavailableError',
+      message: 'Mismatched accessibility text response.',
+    });
+    expect(port.disconnects).toBe(1);
+  });
+
+  it('rejects an accessibility read outside the lease start gates', async () => {
+    const port = new FakePort();
+    installBrowser(port);
+    const lease = await openChromeImageSource(
+      request,
+      vi.fn(),
+      undefined,
+      'isolated-html',
+      {
+        policyFingerprint: 'read-v1-100000',
+        controlImages: false,
+        accessibilityTextEnabled: false,
+      },
+    );
+
+    await expect(lease.readAccessibilityText!(
+      descriptor,
+      'read-v1-100000',
+      false,
+    )).rejects.toMatchObject({
+      name: 'ImageSourceUnavailableError',
+      message: 'Accessibility text is outside the image source policy.',
+    });
+    expect(port.messages).toHaveLength(1);
+    lease.dispose();
+  });
 });
 
 const request: ReplicaCaptureRequest = {
@@ -116,9 +227,11 @@ class FakePort {
   readonly onDisconnect = new FakeEvent<() => void>();
   failPosts = false;
   disconnects = 0;
+  readonly messages: unknown[] = [];
 
-  postMessage(): void {
+  postMessage(message: unknown): void {
     if (this.failPosts) throw new Error('no receiver');
+    this.messages.push(message);
   }
 
   disconnect(): void {
@@ -132,6 +245,7 @@ class FakePort {
   emitMessage(message: unknown): void {
     this.onMessage.emit(message);
   }
+
 }
 
 class FakeEvent<T extends (...args: never[]) => void> {

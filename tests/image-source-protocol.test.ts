@@ -91,6 +91,90 @@ describe('image source protocol', () => {
       .toBeUndefined();
   });
 
+  it('admits accessibility text only through an explicit policy-bound read', () => {
+    expect(readImageSourceControllerMessage({
+      kind: 'simul:image-source-v1:start',
+      document: documentIdentity,
+      policyFingerprint: 'read-v1-111000',
+      controlImages: true,
+      accessibilityTextEnabled: true,
+    }, documentIdentity.sessionId)).toMatchObject({
+      policyFingerprint: 'read-v1-111000',
+      controlImages: true,
+      accessibilityTextEnabled: true,
+    });
+    expect(readImageSourceControllerMessage({
+      kind: 'simul:image-source-v1:start',
+      document: documentIdentity,
+      policyFingerprint: 'read-v1-101000',
+      controlImages: true,
+      accessibilityTextEnabled: true,
+    }, documentIdentity.sessionId)).toBeUndefined();
+    expect(readImageSourceControllerMessage({
+      kind: 'simul:image-source-v1:accessibility-text',
+      requestId: 'alt-1',
+      descriptor,
+      policyFingerprint: 'read-v1-111000',
+      controlImages: true,
+    }, documentIdentity.sessionId, documentIdentity)).toBeDefined();
+    expect(readImageSourceRecorderMessage({
+      kind: 'simul:image-source-v1:accessibility-text',
+      requestId: 'alt-1',
+      descriptor,
+      status: 'ready',
+      evidence: {
+        document: documentIdentity,
+        nodeId: descriptor.nodeId,
+        contentRevision: descriptor.contentRevision,
+        observationRevision: descriptor.observationRevision,
+        text: 'お知らせ',
+        source: 'alt',
+        nearestElementLanguage: 'ja',
+      },
+    }, documentIdentity)).toMatchObject({
+      status: 'ready',
+      evidence: { source: 'alt', nearestElementLanguage: 'ja' },
+    });
+    expect(readImageSourceControllerMessage({
+      kind: 'simul:image-source-v1:accessibility-text',
+      requestId: 'alt-1',
+      descriptor,
+      policyFingerprint: 'forged',
+      controlImages: true,
+    }, documentIdentity.sessionId, documentIdentity)).toBeUndefined();
+  });
+
+  it('revalidates canonical accessibility text at the receiver boundary', () => {
+    const ready = (text: string) => readImageSourceRecorderMessage({
+      kind: 'simul:image-source-v1:accessibility-text',
+      requestId: 'alt-canonical',
+      descriptor,
+      status: 'ready',
+      evidence: {
+        document: documentIdentity,
+        nodeId: descriptor.nodeId,
+        contentRevision: descriptor.contentRevision,
+        observationRevision: descriptor.observationRevision,
+        text,
+        source: 'alt',
+      },
+    }, documentIdentity);
+
+    expect(ready('News and updates')).toMatchObject({
+      status: 'ready',
+      evidence: { text: 'News and updates' },
+    });
+    for (const text of [
+      '/assets/logo.svg?rev=1',
+      'assets/logo.svg?rev=1',
+      'www.example.com/logo.png',
+      'file:///tmp/a.png',
+      '//host/a.jpg',
+      'logo.gif#current',
+      ' News  and updates ',
+    ]) expect(ready(text)).toBeUndefined();
+  });
+
   it('rejects extra fields, wrong documents, URLs, and malformed geometry', () => {
     expect(readImageSourceControllerMessage({
       kind: 'simul:image-source-v1:measure',

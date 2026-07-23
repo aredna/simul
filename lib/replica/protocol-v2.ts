@@ -6,6 +6,11 @@ import {
   type ReplicaCheckpointResponse,
   type ReplicaDocumentIdentity,
 } from './contracts';
+import {
+  isSourceSecretPlaceholderTagName,
+  sourceFactsAreSecret,
+  sourceSecretPlaceholderTagName,
+} from './source-secret-classifier';
 
 export const MAX_REPLICA_CHECKPOINT_BYTES = 8 * 1024 * 1024;
 export const MAX_REPLICA_EVENTS = 4;
@@ -99,7 +104,52 @@ const PRIVATE_CONTROL_ROLES = new Set([
   'spinbutton',
   'switch',
   'textbox',
+  'menu',
+  'menuitem',
+  'menuitemcheckbox',
+  'menuitemradio',
+  'treeitem',
 ]);
+/**
+ * Optional semantic evidence never belongs to the rrweb base stream.  Labels,
+ * current state, and source-authored relationships are reintroduced only by
+ * the document-bound semantic channel after its read-scope checks.
+ */
+const OMITTED_SEMANTIC_ATTRIBUTE_NAMES = new Set([
+  'alt',
+  'aria-checked',
+  'aria-controls',
+  'aria-current',
+  'aria-describedby',
+  'aria-details',
+  'aria-expanded',
+  'aria-haspopup',
+  'aria-label',
+  'aria-labelledby',
+  'aria-owns',
+  'aria-pressed',
+  'aria-selected',
+  'aria-valuenow',
+  'aria-valuetext',
+  'checked',
+  'disabled',
+  'label',
+  'multiple',
+  'open',
+  'placeholder',
+  'selected',
+  'title',
+  'value',
+]);
+
+function isOmittedSemanticAttribute(tagName: string, name: string): boolean {
+  if (name === 'disabled' && (tagName === 'link' || tagName === 'style')) {
+    return false;
+  }
+  if (name === 'name' && tagName === 'slot') return false;
+  return OMITTED_SEMANTIC_ATTRIBUTE_NAMES.has(name);
+}
+const FIXED_PRIVATE_REDACTION = '********';
 const PRIVATE_INPUT_TYPES = new Set([
   'button',
   'checkbox',
@@ -482,7 +532,14 @@ function sanitizeSerializedNode(
       const tagName = input.tagName.toLowerCase();
       if (!/^[a-z][a-z0-9:_-]{0,63}$/u.test(tagName)) return undefined;
       if (!consumeNodeBudget(budget, tagName.length * 2)) return undefined;
+      if (isSourceSecretPlaceholderTagName(tagName)) {
+        if (!isCanonicalRrwebOpaquePlaceholder(input, tagName)) return undefined;
+        return createRrwebOpaquePlaceholderNode(input);
+      }
       if (UNSAFE_ELEMENT_NAMES.has(tagName)) return undefined;
+      if (serializedElementStartsHardSecretRegion(tagName, input.attributes)) {
+        return createRrwebOpaquePlaceholderNode(input);
+      }
       const nextPrivateRegion =
         privateRegion ||
         PRIVATE_ELEMENT_NAMES.has(tagName) ||
@@ -537,6 +594,101 @@ function sanitizeSerializedNode(
     default:
       return undefined;
   }
+}
+
+/**
+ * Produces the only rrweb element shape allowed to retain a hard-secret
+ * source node ID. It intentionally preserves only shadow/document placement
+ * identity and discards the source tag, selectors, attributes, resources,
+ * descendants, and rrweb presentation hints.
+ */
+export function createRrwebOpaquePlaceholderNode(
+  input: unknown,
+): Record<string, unknown> | undefined {
+  if (
+    !isRecord(input) ||
+    input.type !== RRWEB_ELEMENT_NODE ||
+    !isBoundedInteger(input.id, 1, Number.MAX_SAFE_INTEGER)
+  ) return undefined;
+  const result: Record<string, unknown> = {
+    type: RRWEB_ELEMENT_NODE,
+    id: input.id,
+    tagName: sourceSecretPlaceholderTagName(Number(input.id)),
+    attributes: {},
+    childNodes: [],
+  };
+  if (isBoundedInteger(input.rootId, 1, Number.MAX_SAFE_INTEGER)) {
+    result.rootId = input.rootId;
+  }
+  if (input.isShadow === true) result.isShadow = true;
+  return result;
+}
+
+function isCanonicalRrwebOpaquePlaceholder(
+  input: Record<string, unknown>,
+  tagName: string,
+): boolean {
+  return isSourceSecretPlaceholderTagName(tagName, Number(input.id)) &&
+    hasOnlyKeys(input, [
+      'type', 'id', 'tagName', 'attributes', 'childNodes', 'rootId', 'isShadow',
+    ]) &&
+    isRecord(input.attributes) &&
+    Object.keys(input.attributes).length === 0 &&
+    Array.isArray(input.childNodes) && input.childNodes.length === 0 &&
+    (input.rootId === undefined ||
+      isBoundedInteger(input.rootId, 1, Number.MAX_SAFE_INTEGER)) &&
+    (input.isShadow === undefined || input.isShadow === true);
+}
+
+function serializedElementStartsHardSecretRegion(
+  tagName: string,
+  attributes: Record<string, unknown>,
+): boolean {
+  const type = serializedAttribute(attributes, 'type');
+  const autocomplete = serializedAttribute(attributes, 'autocomplete');
+  if (type.present && typeof type.value !== 'string') return true;
+  if (autocomplete.present && typeof autocomplete.value !== 'string') return true;
+  return sourceFactsAreSecret({
+    tagName,
+    ...(typeof type.value === 'string' ? { type: type.value } : {}),
+    ...(typeof autocomplete.value === 'string'
+      ? { autocomplete: autocomplete.value }
+      : {}),
+    computedTextSecurity: serializedInlineTextSecurity(attributes),
+  });
+}
+
+function serializedAttribute(
+  attributes: Record<string, unknown>,
+  expectedName: string,
+): { readonly present: boolean; readonly value?: unknown } {
+  for (const [name, value] of Object.entries(attributes)) {
+    if (name.toLowerCase() === expectedName) return { present: true, value };
+  }
+  return { present: false };
+}
+
+function serializedInlineTextSecurity(
+  attributes: Record<string, unknown>,
+): string {
+  const style = serializedAttribute(attributes, 'style');
+  if (!style.present) return '';
+  if (typeof style.value === 'string') {
+    const match = /(?:^|;)\s*-webkit-text-security\s*:\s*([^;]*)/iu.exec(
+      style.value,
+    );
+    return match?.[1]?.trim() ?? '';
+  }
+  if (isRecord(style.value)) {
+    const declaration = serializedAttribute(
+      style.value,
+      '-webkit-text-security',
+    );
+    if (!declaration.present) return '';
+    if (typeof declaration.value === 'string') return declaration.value;
+  }
+  // A present-but-unreadable masking declaration is classified secret.
+  return 'simul-unreadable';
 }
 
 /**
@@ -631,6 +783,7 @@ function sanitizeAttributes(
     if (!consumeNodeBudget(budget, name.length * 2)) return undefined;
     if (
       NETWORK_ATTRIBUTE_NAMES.has(name) ||
+      isOmittedSemanticAttribute(tagName, name) ||
       name === 'target' ||
       name === 'download' ||
       name === 'integrity' ||
@@ -643,10 +796,6 @@ function sanitizeAttributes(
     if (privateRegion) {
       const privateValue = sanitizePrivateAttribute(name, rawValue);
       if (privateValue !== undefined) sanitized[name] = privateValue;
-      continue;
-    }
-    if (name === 'value') {
-      sanitized[name] = typeof rawValue === 'string' ? maskPrivateText(rawValue) : '';
       continue;
     }
     if (name === 'style' && isRecord(rawValue)) {
@@ -794,7 +943,8 @@ function hasPrivateControlRole(attributes: Record<string, unknown>): boolean {
 }
 
 function maskPrivateText(value: string): string {
-  return '*'.repeat(Math.min(value.length, 256));
+  void value;
+  return FIXED_PRIVATE_REDACTION;
 }
 
 function consumeNodeBudget(budget: NodeBudget, bytes: number): boolean {

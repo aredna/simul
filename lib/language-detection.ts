@@ -72,13 +72,25 @@ export class AutoLanguageEvidencePrecedence<T> {
 
 export type ResolvedSourceLanguageOrigin = 'page' | 'image' | undefined;
 
+export interface AutoImageLanguageConfigurationIdentity {
+  readonly providerOrder: readonly string[];
+  readonly enabledMethodOrder: readonly string[];
+  readonly minimumConfidence: number;
+  readonly policyFingerprint: string;
+  readonly controlImages: boolean;
+}
+
 export function autoImageLanguageConfigurationKey(
-  providerOrder: readonly string[],
-  minimumConfidence: number,
+  configuration: AutoImageLanguageConfigurationIdentity,
 ): string {
   return JSON.stringify([
-    [...providerOrder],
-    Number.isFinite(minimumConfidence) ? minimumConfidence : null,
+    [...configuration.providerOrder],
+    [...configuration.enabledMethodOrder],
+    Number.isFinite(configuration.minimumConfidence)
+      ? configuration.minimumConfidence
+      : null,
+    configuration.policyFingerprint,
+    configuration.controlImages,
   ]);
 }
 
@@ -116,7 +128,7 @@ export async function resolveSourceLanguage(
     .flatMap((item) =>
       item.kind === 'text'
         ? [item.text]
-        : [item.altText, item.caption].filter(
+        : [item.caption].filter(
             (value): value is string => Boolean(value),
           ),
     )

@@ -3,6 +3,7 @@ import {
   readImageSourceControllerMessage,
   readImageSourcePortSessionId,
   type ImageSourceRecorderMessage,
+  type SourceImageAccessibilityTextEvidence,
   type SourceImageCaptureMetrics,
 } from './image-source-protocol';
 import { SourceImageModel } from './source-image-model';
@@ -12,11 +13,18 @@ import {
   type SourceImageObserverEnvironment,
 } from './source-image-observer';
 import {
-  hasSourceImageCaptureBlockingAncestor,
+  hasSourceControlOrEditableElementAncestor,
+  hasSourceCredentialSecretAncestor,
   hasSourcePrivateOrActivationElementAncestor,
+  readSourceFlatTreeElementPath,
 } from '../replica/source-privacy-policy';
+import {
+  sourceDocumentSecretClassifier,
+  type StickySourceSecretClassifier,
+} from '../replica/source-secret-classifier';
 import type { ReplicaSourceDocumentIdentity } from '../replica/source-identity';
 import { canonicalizeLanguageTag } from '../translation-provider';
+import { normalizeAccessibilityImageText } from './accessibility-image-text';
 
 interface MessageEventPort {
   addListener(listener: (message: unknown) => void): void;
@@ -45,6 +53,8 @@ export interface ImageSourceSessionEnvironment {
     environment: SourceImageObserverEnvironment,
   ) => SourceImageObserver;
   readonly getNodeId: (image: HTMLImageElement) => number | undefined;
+  /** Share one sticky classifier for the lifetime of the source document. */
+  readonly secretClassifier?: StickySourceSecretClassifier;
   readonly onDispose?: () => void;
 }
 
@@ -57,6 +67,10 @@ export class ImageSourceSession {
   #documentIdentity: ReplicaSourceDocumentIdentity | undefined;
   #model: SourceImageModel | undefined;
   #observer: SourceImageObserver | undefined;
+  readonly #secretClassifier: StickySourceSecretClassifier;
+  #policyFingerprint: string | undefined;
+  #controlImages = false;
+  #accessibilityTextEnabled = false;
   #unsubscribe: (() => void) | undefined;
   #disposed = false;
 
@@ -64,6 +78,8 @@ export class ImageSourceSession {
     const sessionId = readImageSourcePortSessionId(environment.port.name);
     if (!sessionId) throw new Error('Invalid image source Port.');
     this.#sessionId = sessionId;
+    this.#secretClassifier = environment.secretClassifier ??
+      sourceDocumentSecretClassifier(environment.document);
     environment.port.onMessage.addListener(this.#onMessage);
     environment.port.onDisconnect.addListener(this.#onDisconnect);
   }
@@ -116,7 +132,12 @@ export class ImageSourceSession {
         this.dispose(true);
         return;
       }
-      this.#start(message.document);
+      this.#start(
+        message.document,
+        message.policyFingerprint,
+        message.controlImages === true,
+        message.accessibilityTextEnabled === true,
+      );
       return;
     }
     if (!this.#documentIdentity || !this.#model || !this.#observer) {
@@ -126,11 +147,52 @@ export class ImageSourceSession {
     this.refresh();
     const descriptor = this.#model.get(message.descriptor.nodeId);
     if (!descriptor || !this.#model.isCurrent(message.descriptor)) {
-      this.#post({
-        kind: 'simul:image-source-v1:metrics',
-        requestId: message.requestId,
-        status: 'stale',
-      });
+      this.#post(message.kind === 'simul:image-source-v1:accessibility-text'
+        ? {
+            kind: message.kind,
+            requestId: message.requestId,
+            descriptor: message.descriptor,
+            status: 'stale',
+          }
+        : {
+            kind: 'simul:image-source-v1:metrics',
+            requestId: message.requestId,
+            status: 'stale',
+          });
+      return;
+    }
+    if (message.kind === 'simul:image-source-v1:accessibility-text') {
+      if (
+        !this.#accessibilityTextEnabled ||
+        message.policyFingerprint !== this.#policyFingerprint ||
+        message.controlImages !== this.#controlImages
+      ) {
+        this.#post({
+          kind: message.kind,
+          requestId: message.requestId,
+          descriptor,
+          status: 'blocked',
+        });
+        return;
+      }
+      const result = this.#readAccessibilityText(
+        descriptor,
+        message.controlImages,
+      );
+      this.#post(result.status === 'ready'
+        ? {
+            kind: message.kind,
+            requestId: message.requestId,
+            descriptor,
+            status: 'ready',
+            evidence: result.evidence,
+          }
+        : {
+            kind: message.kind,
+            requestId: message.requestId,
+            descriptor,
+            status: result.status,
+          });
       return;
     }
     const metrics = this.#measure(descriptor);
@@ -150,13 +212,21 @@ export class ImageSourceSession {
 
   readonly #onDisconnect = (): void => this.dispose(false);
 
-  #start(documentIdentity: ReplicaSourceDocumentIdentity): void {
+  #start(
+    documentIdentity: ReplicaSourceDocumentIdentity,
+    policyFingerprint?: string,
+    controlImages = false,
+    accessibilityTextEnabled = false,
+  ): void {
     const model = new SourceImageModel();
     if (!model.beginDocument(documentIdentity)) {
       this.dispose(true);
       return;
     }
     this.#documentIdentity = documentIdentity;
+    this.#policyFingerprint = policyFingerprint;
+    this.#controlImages = controlImages;
+    this.#accessibilityTextEnabled = accessibilityTextEnabled;
     this.#model = model;
     try {
       const observer = this.environment.createObserver({
@@ -176,6 +246,13 @@ export class ImageSourceSession {
           new MutationObserver(
             callback as MutationCallback,
           ),
+        isPrivateImage: (image: HTMLImageElement) =>
+          this.#hasStickySecretAncestor(image) ||
+          (!this.#controlImages &&
+            (
+              hasSourceControlOrEditableElementAncestor(image) ||
+              hasSourceAriaControlledRegionAncestor(image)
+            )),
       });
       this.#observer = observer;
       this.#unsubscribe = observer.subscribe(this.#onObservation);
@@ -202,7 +279,14 @@ export class ImageSourceSession {
   #measure(descriptor: SourceImageDescriptor): SourceImageCaptureMetrics | undefined {
     const node = this.environment.resolveNode(descriptor.nodeId);
     if (!isImageElement(node) || !node.isConnected) return undefined;
-    if (hasSourceImageCaptureBlockingAncestor(node)) return undefined;
+    if (this.#hasStickySecretAncestor(node)) return undefined;
+    if (
+      !this.#controlImages &&
+      (
+        hasSourceControlOrEditableElementAncestor(node) ||
+        hasSourceAriaControlledRegionAncestor(node)
+      )
+    ) return undefined;
     const rect = node.getBoundingClientRect();
     const viewportWidth = finitePositive(this.environment.window.innerWidth);
     const viewportHeight = finitePositive(this.environment.window.innerHeight);
@@ -223,6 +307,10 @@ export class ImageSourceSession {
       rect,
       this.environment.document,
       this.environment.window,
+      {
+        allowControlImages: this.#controlImages,
+        isSecret: (candidate) => this.#hasStickySecretAncestor(candidate),
+      },
     )) return undefined;
     const nearestElementLanguage = nearestValidElementLanguage(node);
     return Object.freeze({
@@ -245,6 +333,58 @@ export class ImageSourceSession {
     });
   }
 
+  #readAccessibilityText(
+    descriptor: SourceImageDescriptor,
+    controlImages: boolean,
+  ):
+    | { readonly status: 'ready'; readonly evidence: SourceImageAccessibilityTextEvidence }
+    | { readonly status: 'none' | 'blocked' } {
+    const node = this.environment.resolveNode(descriptor.nodeId);
+    if (!isImageElement(node) || !node.isConnected) return { status: 'blocked' };
+    if (this.#hasStickySecretAncestor(node)) return { status: 'blocked' };
+    if (!controlImages && (
+      hasSourceControlOrEditableElementAncestor(node) ||
+      hasSourceAriaControlledRegionAncestor(node)
+    )) {
+      return { status: 'blocked' };
+    }
+    if (!imageAccessibilityTextIsVisible(node, this.environment.window)) {
+      return { status: 'blocked' };
+    }
+    let rect: DOMRect;
+    try {
+      rect = node.getBoundingClientRect();
+    } catch {
+      return { status: 'blocked' };
+    }
+    if (hasProtectedSiblingOverlap(
+      node,
+      rect,
+      this.environment.document,
+      this.environment.window,
+      (candidate) => this.#hasStickySecretAncestor(candidate),
+    )) return { status: 'blocked' };
+    const direct = readDirectImageAccessibilityText(node);
+    if (!direct) return { status: 'none' };
+    const nearestElementLanguage = nearestValidElementLanguage(node);
+    return {
+      status: 'ready',
+      evidence: Object.freeze({
+        document: descriptor.document,
+        nodeId: descriptor.nodeId,
+        contentRevision: descriptor.contentRevision,
+        observationRevision: descriptor.observationRevision,
+        text: direct.text,
+        source: direct.source,
+        ...(nearestElementLanguage ? { nearestElementLanguage } : {}),
+      }),
+    };
+  }
+
+  #hasStickySecretAncestor(element: Element): boolean {
+    return hasSourceCredentialSecretAncestor(element, this.#secretClassifier);
+  }
+
   #post(message: ImageSourceRecorderMessage): void {
     if (this.#disposed) return;
     try {
@@ -255,22 +395,125 @@ export class ImageSourceSession {
   }
 }
 
+export function readDirectImageAccessibilityText(
+  image: HTMLImageElement,
+): { readonly text: string; readonly source: 'aria-label' | 'alt' } | undefined {
+  if (imageIsAccessibilityDecorative(image)) return undefined;
+  for (const source of ['aria-label', 'alt'] as const) {
+    let raw: string | null;
+    try {
+      raw = image.getAttribute(source);
+    } catch {
+      return undefined;
+    }
+    const text = normalizeAccessibilityImageText(raw);
+    if (text) return Object.freeze({ text, source });
+  }
+  return undefined;
+}
+
+function imageAccessibilityTextIsVisible(
+  image: HTMLImageElement,
+  sourceWindow: Window,
+): boolean {
+  if (imageIsAccessibilityDecorative(image)) return false;
+  const path = readSourceFlatTreeElementPath(image);
+  if (!path) return false;
+  for (const current of path) {
+    if (current.hasAttribute('hidden') ||
+      current.getAttribute('aria-hidden')?.trim().toLowerCase() === 'true') {
+      return false;
+    }
+    const style = safeComputedStyle(sourceWindow, current);
+    if (!style || !styleAllowsCapture(style)) return false;
+  }
+  const rect = image.getBoundingClientRect();
+  return finitePositive(rect.width) !== undefined &&
+    finitePositive(rect.height) !== undefined;
+}
+
+function imageIsAccessibilityDecorative(image: HTMLImageElement): boolean {
+  try {
+    const path = readSourceFlatTreeElementPath(image);
+    if (!path) return true;
+    for (const current of path) {
+      if (current.getAttribute('aria-hidden')?.trim().toLowerCase() === 'true') {
+        return true;
+      }
+    }
+    const roles = image.getAttribute('role')?.trim().toLowerCase().split(/\s+/u) ?? [];
+    return roles.includes('none') || roles.includes('presentation');
+  } catch {
+    return true;
+  }
+}
+
+/** Images inside any region named by aria-controls obey controlImages too. */
+export function hasSourceAriaControlledRegionAncestor(
+  element: Element,
+): boolean {
+  const path = readSourceFlatTreeElementPath(element);
+  if (!path) return true;
+  for (const current of path) {
+    let id: string | null;
+    try {
+      id = current.getAttribute('id');
+    } catch {
+      return true;
+    }
+    const normalizedId = id?.trim();
+    if (normalizedId && !/\s/u.test(normalizedId)) {
+      const root = current.getRootNode();
+      if (!('querySelectorAll' in root)) return true;
+      let controllers: NodeListOf<Element>;
+      try {
+        controllers = (root as Document | ShadowRoot)
+          .querySelectorAll('[aria-controls]');
+      } catch {
+        return true;
+      }
+      for (const controller of controllers) {
+        if (controller === current || current.contains(controller)) continue;
+        let controlled: string | null;
+        try {
+          controlled = controller.getAttribute('aria-controls');
+        } catch {
+          return true;
+        }
+        if (controlled?.trim().split(/\s+/u).includes(normalizedId)) return true;
+      }
+    }
+  }
+  return false;
+}
+
 const PRIVATE_CAPTURE_SELECTOR = [
+  'a[href]',
+  'area[href]',
+  'audio[controls]',
   'button',
   'input',
+  'label',
+  'meter',
   'option',
   'output',
+  'progress',
   'select',
+  'summary',
   'textarea',
+  'video[controls]',
   '[contenteditable]',
   '[role]',
 ].join(',');
+export const MAX_CAPTURE_OVERLAP_ELEMENTS = 50_000;
 
 /** Skip invalid lang values and continue outward to the nearest valid hint. */
 export function nearestValidElementLanguage(
   element: Element,
 ): ReturnType<typeof canonicalizeLanguageTag> {
-  for (let current: Element | null = element; current; current = current.parentElement) {
+  const path = readSourceFlatTreeElementPath(element);
+  if (!path) return undefined;
+  for (const current of path) {
     if (!current.hasAttribute('lang')) continue;
     const language = canonicalizeLanguageTag(
       current.getAttribute('lang') ?? undefined,
@@ -290,9 +533,17 @@ export function hasSafeCaptureGeometry(
   imageRect: DOMRect,
   sourceDocument: Document,
   sourceWindow: Window,
+  options: {
+    readonly allowControlImages?: boolean;
+    readonly isSecret?: (element: Element) => boolean;
+  } = {},
 ): boolean {
   if (typeof sourceWindow.getComputedStyle !== 'function') return false;
-  for (let current: Element | null = image; current; current = current.parentElement) {
+  const path = readSourceFlatTreeElementPath(image);
+  if (!path) return false;
+  const classifySecret = options.isSecret ?? hasSourceCredentialSecretAncestor;
+  for (const current of path) {
+    if (safeSecretClassification(current, classifySecret)) return false;
     const style = safeComputedStyle(sourceWindow, current);
     if (!style || !styleAllowsCapture(style) || !axisAlignedTransform(style)) {
       return false;
@@ -305,20 +556,103 @@ export function hasSafeCaptureGeometry(
     ) return false;
   }
 
-  for (const candidate of sourceDocument.querySelectorAll(PRIVATE_CAPTURE_SELECTOR)) {
+  return !hasProtectedSiblingOverlap(
+    image,
+    imageRect,
+    sourceDocument,
+    sourceWindow,
+    classifySecret,
+  );
+}
+
+/**
+ * An image contained by a control is governed by controlImages. A different
+ * control painted over that image is never part of the image and must remain
+ * protected for both pixel capture and accessibility-label reads.
+ */
+export function hasProtectedSiblingOverlap(
+  image: HTMLImageElement,
+  imageRect: DOMRect,
+  sourceDocument: Document,
+  sourceWindow: Window,
+  isSecret: (element: Element) => boolean = hasSourceCredentialSecretAncestor,
+): boolean {
+  const candidates = collectCaptureOverlapElements(sourceDocument);
+  if (!candidates) return true;
+  for (const candidate of candidates) {
     if (candidate === image || candidate.contains(image)) continue;
-    if (!hasSourcePrivateOrActivationElementAncestor(candidate)) continue;
-    const style = safeComputedStyle(sourceWindow, candidate);
-    if (!style || !styleAllowsCapture(style)) continue;
     let rect: DOMRect;
     try {
       rect = candidate.getBoundingClientRect();
     } catch {
-      return false;
+      return true;
     }
-    if (rectanglesOverlap(imageRect, rect)) return false;
+    if (!rectanglesOverlap(imageRect, rect)) continue;
+    // Geometry and computed paint visibility are content-free prefilters. Run
+    // the ancestry/computed-security classifier only for elements that can
+    // actually contribute pixels to this crop.
+    const style = safeComputedStyle(sourceWindow, candidate);
+    if (!style) return true;
+    if (!styleAllowsCapture(style)) continue;
+    // Classify every painted overlap, not only controls and ARIA role nodes.
+    // Generic div/span overlays can carry sticky password, OTP, payment,
+    // WebAuthn, or computed text-security classification too.
+    const secret = safeSecretClassification(candidate, isSecret);
+    let controlCandidate: boolean;
+    try {
+      controlCandidate = candidate.matches(PRIVATE_CAPTURE_SELECTOR);
+    } catch {
+      return true;
+    }
+    const protectedOverlap = secret || (
+      controlCandidate && (
+        hasSourcePrivateOrActivationElementAncestor(candidate) ||
+        hasSourceControlOrEditableElementAncestor(candidate)
+      )
+    );
+    if (protectedOverlap) return true;
   }
-  return true;
+  return false;
+}
+
+/**
+ * Enumerates the document and every accessible open shadow tree once. Going
+ * over the mirror-size ceiling fails closed instead of leaving an overlapping
+ * painted element outside the OCR classifier.
+ */
+function collectCaptureOverlapElements(
+  sourceDocument: Document,
+): readonly Element[] | undefined {
+  const elements: Element[] = [];
+  const seen = new Set<Element>();
+  const roots: Array<Document | ShadowRoot> = [sourceDocument];
+  try {
+    while (roots.length > 0) {
+      const root = roots.pop()!;
+      for (const element of root.querySelectorAll('*')) {
+        if (seen.has(element)) continue;
+        if (elements.length >= MAX_CAPTURE_OVERLAP_ELEMENTS) return undefined;
+        seen.add(element);
+        elements.push(element);
+        const shadow = element.shadowRoot;
+        if (shadow?.mode === 'open') roots.push(shadow);
+      }
+    }
+  } catch {
+    return undefined;
+  }
+  return Object.freeze(elements);
+}
+
+function safeSecretClassification(
+  element: Element,
+  classify: (element: Element) => boolean,
+): boolean {
+  try {
+    return classify(element);
+  } catch {
+    return true;
+  }
 }
 
 function safeComputedStyle(

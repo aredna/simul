@@ -1,3 +1,9 @@
+import {
+  sourceDocumentSecretClassifier,
+  sourceFactsAreSecret,
+  type StickySourceSecretClassifier,
+} from './source-secret-classifier';
+
 export const SOURCE_PRIVATE_TAGS = Object.freeze([
   'input',
   'option',
@@ -13,11 +19,9 @@ const MAX_SOURCE_SELECT_DESCENDANTS = 50_000;
 const MAX_SOURCE_SELECT_LABEL_DESCENDANTS = 512;
 const MAX_SOURCE_SELECT_LABEL_NODES = 1_024;
 const MAX_SOURCE_SELECT_LABEL_TEXT = 3_500;
+const MAX_SOURCE_FLAT_TREE_ANCESTORS = 1_024;
 const MAX_SOURCE_NAVIGATION_URL_LENGTH = 16 * 1024;
 const SOURCE_STATEFUL_NAVIGATION_ATTRIBUTES = Object.freeze([
-  'aria-controls',
-  'aria-expanded',
-  'aria-haspopup',
   'aria-pressed',
 ] as const);
 
@@ -82,9 +86,67 @@ const PRIVATE_ROLE_SET = new Set<string>(SOURCE_PRIVATE_ROLES);
 const PUBLIC_MENU_ROLE_SET = new Set<string>(SOURCE_PUBLIC_MENU_ROLES);
 const ACTIVATION_TAG_SET = new Set<string>(SOURCE_ACTIVATION_TAGS);
 const ACTIVATION_ROLE_SET = new Set<string>(SOURCE_ACTIVATION_ROLES);
+const SOURCE_IMAGE_CONTROL_TAG_SET = new Set([
+  'button', 'input', 'label', 'meter', 'option', 'output', 'progress',
+  'select', 'summary', 'textarea',
+]);
 
 export function isSourcePrivateTagName(value: string): boolean {
   return PRIVATE_TAG_SET.has(value.trim().toLowerCase());
+}
+
+/**
+ * Returns the rendered flat-tree element path surrounding `node`. Elements
+ * start their own path; directly slotted Text nodes start at their assigned
+ * slot. Assigned slots take precedence over DOM parents, then open/closed
+ * shadow ancestry continues through the host. An unreadable, malformed,
+ * cyclic, or unreasonably deep path fails closed as `undefined`.
+ */
+export function readSourceFlatTreeElementPath(
+  node: Node,
+): readonly Element[] | undefined {
+  try {
+    const path: Element[] = [];
+    const seen = new Set<Element>();
+    let current = node.nodeType === 1
+      ? node as Element
+      : sourceFlatTreeParentElement(node);
+    while (current) {
+      if (
+        seen.has(current) ||
+        path.length >= MAX_SOURCE_FLAT_TREE_ANCESTORS
+      ) return undefined;
+      seen.add(current);
+      path.push(current);
+      current = sourceFlatTreeParentElement(current);
+    }
+    return Object.freeze(path);
+  } catch {
+    return undefined;
+  }
+}
+
+function sourceFlatTreeParentElement(node: Node): Element | undefined {
+  const assignedSlot = (node as Node & {
+    readonly assignedSlot?: Element | null;
+  }).assignedSlot;
+  if (assignedSlot !== undefined && assignedSlot !== null) {
+    if (
+      assignedSlot.nodeType !== 1 ||
+      assignedSlot.localName.toLowerCase() !== 'slot' ||
+      assignedSlot.ownerDocument !== node.ownerDocument
+    ) throw new Error('Invalid assigned-slot ancestry.');
+    return assignedSlot;
+  }
+  const parent = node.parentElement;
+  if (parent) return parent;
+  const root = node.getRootNode();
+  if (root.nodeType !== 11 || !('host' in root)) return undefined;
+  const host = (root as ShadowRoot).host;
+  if (host.nodeType !== 1 || host.ownerDocument !== node.ownerDocument) {
+    throw new Error('Invalid shadow-host ancestry.');
+  }
+  return host;
 }
 
 /** Native control text is readable only for the narrow release-approved set. */
@@ -93,8 +155,13 @@ export function isEligibleSourceTextControl(
   attributes: Readonly<Record<string, unknown>>,
 ): boolean {
   const tag = tagName.trim().toLowerCase();
-  const autocomplete = stringAttribute(attributes.autocomplete).toLowerCase();
-  if (passwordAutocomplete(autocomplete)) return false;
+  if (sourceFactsAreSecret({
+    tagName: tag,
+    type: stringAttribute(attributes.type),
+    autocomplete: stringAttribute(attributes.autocomplete),
+    role: stringAttribute(attributes.role),
+    contentEditable: stringAttribute(attributes.contenteditable),
+  })) return false;
   // A native input with an ARIA widget/editor role is no longer part of the
   // narrowly approved native-control surface. Fail closed here so capture,
   // mutation fingerprinting, and receiver validation all make the same
@@ -140,8 +207,11 @@ export function readSourceControlText(
   element: Element,
 ): SourceControlText | undefined {
   const tagName = element.localName.toLowerCase();
-  const attributes = sourceElementAttributes(element);
-  if (!isEligibleSourceTextControl(tagName, attributes)) return undefined;
+  const attributes = readSourceStructuralAttributes(element);
+  if (
+    !isEligibleSourceTextControl(tagName, attributes) ||
+    hasSourceCredentialSecretAncestor(element)
+  ) return undefined;
   try {
     const control = element as Element & {
       readonly value?: unknown;
@@ -186,7 +256,7 @@ export function readSourceSelectedOptionIndexes(
 ): readonly number[] | undefined {
   if (!isEligibleSourceSelect(
     element.localName,
-    sourceElementAttributes(element),
+    readSourceStructuralAttributes(element),
   )) return undefined;
   try {
     const select = element as HTMLSelectElement;
@@ -245,7 +315,7 @@ export function readSourceSelectedOptionIndexes(
 export function readSourceSelectPickerOpen(element: Element): true | undefined {
   if (!isEligibleSourceSelect(
     element.localName,
-    sourceElementAttributes(element),
+    readSourceStructuralAttributes(element),
   )) return undefined;
   try {
     return element.matches(':open') ? true : undefined;
@@ -283,10 +353,14 @@ export function readSourceSelectLabel(
       const legend = directOptgroupLegend(element);
       if (legend) {
         if (!sourceSelectLabelSubtreeIsPublic(legend)) return undefined;
-        label = readBoundedSourceSelectText(legend);
+        const text = readBoundedSourceSelectText(legend);
+        if (text === undefined) return undefined;
+        label = text;
       }
     } else if (!hasAuthoritativeAttributeLabel) {
-      label = readBoundedSourceSelectText(element);
+      const text = readBoundedSourceSelectText(element);
+      if (text === undefined) return undefined;
+      label = text;
     }
     return label ? Object.freeze({ kind: 'label', text: label }) : undefined;
   } catch {
@@ -296,7 +370,9 @@ export function readSourceSelectLabel(
 
 export function isSourceSelectEntryVisuallyHidden(element: Element): boolean {
   const view = element.ownerDocument?.defaultView;
-  for (let current: Element | null = element; current; current = current.parentElement) {
+  const path = readSourceFlatTreeElementPath(element);
+  if (!path) return true;
+  for (const current of path) {
     if (current.hasAttribute('hidden')) return true;
     if (view && typeof view.getComputedStyle === 'function') {
       try {
@@ -365,7 +441,7 @@ function sourceSelectOptionPathIsPublic(
   option: Element,
   expectedSelect?: Element,
 ): boolean {
-  const optionAttributes = sourceElementAttributes(option);
+  const optionAttributes = readSourceStructuralAttributes(option);
   if (
     option.localName.toLowerCase() !== 'option' ||
     sourceAttributesArePrivate(optionAttributes) ||
@@ -375,7 +451,7 @@ function sourceSelectOptionPathIsPublic(
   let current = option.parentElement;
   while (current && current.localName.toLowerCase() !== 'select') {
     if (current.localName.toLowerCase() !== 'optgroup') return false;
-    const attributes = sourceElementAttributes(current);
+    const attributes = readSourceStructuralAttributes(current);
     if (
       isSourceSelectEntryVisuallyHidden(current) ||
       sourceElementStartsPrivateRegionInContext(
@@ -390,14 +466,17 @@ function sourceSelectOptionPathIsPublic(
   return current !== null &&
     (!expectedSelect || current === expectedSelect) &&
     !isSourceSelectEntryVisuallyHidden(current) &&
-    isEligibleSourceSelect(current.localName, sourceElementAttributes(current)) &&
+    isEligibleSourceSelect(
+      current.localName,
+      readSourceStructuralAttributes(current),
+    ) &&
     sourceSelectLabelSubtreeIsPublic(option);
 }
 
 export function isSourceSelectLabelElementPublic(element: Element): boolean {
   const tagName = element.localName.toLowerCase();
   if (tagName !== 'option' && tagName !== 'optgroup') return false;
-  const attributes = sourceElementAttributes(element);
+  const attributes = readSourceStructuralAttributes(element);
   if (
     sourceAttributesArePrivate(attributes) ||
     isSourceActivationRoleValue(attributes.role) ||
@@ -424,9 +503,12 @@ function directOptgroupLegend(element: Element): Element | undefined {
 
 function sourceSelectLabelSubtreeIsPublic(element: Element): boolean {
   try {
-    if (isSourceSelectEntryVisuallyHidden(element)) return false;
+    if (
+      isSourceSelectEntryVisuallyHidden(element) ||
+      hasSourceCredentialSecretAncestor(element)
+    ) return false;
     const rootTag = element.localName.toLowerCase();
-    const rootAttributes = sourceElementAttributes(element);
+    const rootAttributes = readSourceStructuralAttributes(element);
     if (
       SOURCE_NON_CONTENT_TAGS.has(rootTag) ||
       sourceElementStartsPrivateRegionInContext(rootTag, rootAttributes, true) ||
@@ -445,8 +527,9 @@ function sourceSelectLabelSubtreeIsPublic(element: Element): boolean {
       if (inspected > MAX_SOURCE_SELECT_LABEL_DESCENDANTS) return false;
       if (isSourceSelectEntryVisuallyHidden(descendant)) continue;
       const descendantTag = descendant.localName.toLowerCase();
-      const descendantAttributes = sourceElementAttributes(descendant);
+      const descendantAttributes = readSourceStructuralAttributes(descendant);
       if (
+        hasSourceCredentialSecretAncestor(descendant) ||
         SOURCE_NON_CONTENT_TAGS.has(descendantTag) ||
         descendantTag === 'select' || descendantTag === 'option' ||
         descendantTag === 'optgroup' ||
@@ -475,7 +558,7 @@ function sourceSelectLabelSubtreeIsPublic(element: Element): boolean {
   }
 }
 
-function readBoundedSourceSelectText(element: Element): string {
+function readBoundedSourceSelectText(element: Element): string | undefined {
   let output = '';
   let inspected = 0;
   let current: Node | null = element.firstChild;
@@ -494,6 +577,10 @@ function readBoundedSourceSelectText(element: Element): string {
       continue;
     }
     if (current.nodeType === Node.TEXT_NODE) {
+      // A directly slotted Text node can render under a credential boundary
+      // that is absent from its DOM-parent chain. Classify its flat-tree
+      // ancestry before evaluating nodeValue.
+      if (hasSourceCredentialSecretAncestor(current)) return undefined;
       const value = current.nodeValue ?? '';
       const remaining = Math.max(
         0,
@@ -573,47 +660,144 @@ export function sourceAttributesArePrivate(
 }
 
 export function hasSourcePrivateElementAncestor(element: Element): boolean {
-  for (let current: Element | undefined = element; current;) {
+  if (hasSourceCredentialSecretAncestor(element)) return true;
+  const path = readSourceFlatTreeElementPath(element);
+  if (!path) return true;
+  for (const current of path) {
     if (sourceElementStartsPrivateRegionInContext(
       current.localName,
-      sourceElementAttributes(current),
+      readSourceStructuralAttributes(current),
       isSourceOptionInsideNativeSelect(current),
     )) return true;
-    if (current.parentElement) {
-      current = current.parentElement;
-      continue;
-    }
-    const root = current.getRootNode();
-    current = root.nodeType === 11 && 'host' in root
-      ? (root as ShadowRoot).host
-      : undefined;
   }
   return false;
+}
+
+/**
+ * Hard credential floor shared by semantic and image admission.  It examines
+ * only structural metadata/computed masking, never value, label or alt text.
+ */
+export function hasSourceCredentialSecretAncestor(
+  node: Node,
+  classifier: StickySourceSecretClassifier = sourceDocumentSecretClassifier(
+    node.ownerDocument ?? node,
+  ),
+  sourceWindow: Window | null | undefined = node.ownerDocument?.defaultView,
+): boolean {
+  if (classifier.isSecret(node)) return true;
+  const path = readSourceFlatTreeElementPath(node);
+  if (!path) {
+    classifier.classify(node, {
+      tagName: node.nodeType === 3 ? '#text' : '#node',
+      secretAncestor: true,
+    });
+    return true;
+  }
+  let secretAncestor = false;
+  for (const current of [...path].reverse()) {
+    let computedTextSecurity = '';
+    const view = sourceWindow;
+    let getComputedStyle:
+      ((element: Element) => CSSStyleDeclaration) | undefined;
+    let computedStyleUnreadable = false;
+    let computedStyleApiPresent = false;
+    try {
+      computedStyleApiPresent = Boolean(view && 'getComputedStyle' in view);
+      if (computedStyleApiPresent) getComputedStyle = view?.getComputedStyle;
+    } catch {
+      computedStyleUnreadable = true;
+    }
+    if (computedStyleApiPresent && typeof getComputedStyle !== 'function') {
+      computedStyleUnreadable = true;
+    }
+    if (typeof getComputedStyle === 'function') {
+      try {
+        const style = getComputedStyle.call(view, current);
+        if (typeof style?.getPropertyValue !== 'function') {
+          computedStyleUnreadable = true;
+        } else {
+          computedTextSecurity = style.getPropertyValue('-webkit-text-security');
+        }
+      } catch {
+        computedStyleUnreadable = true;
+      }
+    }
+    // A present-but-unreadable computed security boundary is secret. This
+    // sentinel is deliberately nonempty so the shared classifier withholds
+    // descendants, image evidence, and value-bearing access.
+    if (computedStyleUnreadable) computedTextSecurity = 'simul-unreadable';
+    const attributes = readSourceStructuralAttributes(current);
+    const category = classifier.classify(current, {
+      tagName: current.localName,
+      type: attributes.type,
+      autocomplete: attributes.autocomplete,
+      role: attributes.role,
+      contentEditable: attributes.contenteditable,
+      computedTextSecurity,
+      secretAncestor,
+    });
+    if (category === 'secret') secretAncestor = true;
+  }
+  // Elements are classified while walking `path`. A directly slotted Text
+  // node is not an element path member, so persist the same document-lifetime
+  // decision on its own identity before any caller may read its content.
+  if (secretAncestor && node.nodeType !== 1) {
+    classifier.classify(node, {
+      tagName: node.nodeType === 3 ? '#text' : '#node',
+      secretAncestor: true,
+    });
+  }
+  return secretAncestor;
 }
 
 /** Pixel capture keeps activation controls private even though their labels are public. */
 export function hasSourcePrivateOrActivationElementAncestor(
   element: Element,
 ): boolean {
-  for (let current: Element | undefined = element; current;) {
+  if (hasSourceCredentialSecretAncestor(element)) return true;
+  const path = readSourceFlatTreeElementPath(element);
+  if (!path) return true;
+  for (const current of path) {
     if (
       sourceElementStartsPrivateRegionInContext(
         current.localName,
-        sourceElementAttributes(current),
+        readSourceStructuralAttributes(current),
         isSourceOptionInsideNativeSelect(current),
       ) ||
       isSourcePrivateTagName(current.localName) ||
       isSourceActivationTagName(current.tagName) ||
       isSourceActivationRoleValue(current.getAttribute('role'))
     ) return true;
-    if (current.parentElement) {
-      current = current.parentElement;
-      continue;
-    }
-    const root = current.getRootNode();
-    current = root.nodeType === 11 && 'host' in root
-      ? (root as ShadowRoot).host
-      : undefined;
+  }
+  return false;
+}
+
+/**
+ * Images inside any native/ARIA control or editable region are one selectable
+ * read capability. This is intentionally broader than activation-only checks:
+ * non-secret textbox, select, status and contenteditable ancestry must obey the
+ * same control-images switch for both semantic labels and painted pixels.
+ */
+export function hasSourceControlOrEditableElementAncestor(
+  element: Element,
+): boolean {
+  const path = readSourceFlatTreeElementPath(element);
+  if (!path) return true;
+  for (const current of path) {
+    const tagName = current.localName.toLowerCase();
+    const attributes = readSourceStructuralAttributes(current);
+    const nativeNavigation = (tagName === 'a' || tagName === 'area') &&
+      safelyHasSourceAttribute(current, 'href');
+    const mediaControl = (tagName === 'audio' || tagName === 'video') &&
+      safelyHasSourceAttribute(current, 'controls');
+    if (
+      SOURCE_IMAGE_CONTROL_TAG_SET.has(tagName) ||
+      nativeNavigation ||
+      mediaControl ||
+      sourceAttributesArePrivate(attributes) ||
+      isSourcePublicMenuRoleValue(attributes.role) ||
+      isSourceActivationRoleValue(attributes.role)
+    ) return true;
   }
   return false;
 }
@@ -626,10 +810,13 @@ export function hasSourcePrivateOrActivationElementAncestor(
  */
 export function hasSourceImageCaptureBlockingAncestor(
   element: Element,
+  options: { readonly allowActivationControls?: boolean } = {},
 ): boolean {
-  for (let current: Element | undefined = element; current;) {
-    const attributes = sourceElementAttributes(current);
-    const role = current.getAttribute('role');
+  const path = readSourceFlatTreeElementPath(element);
+  if (!path) return true;
+  for (const current of path) {
+    const attributes = readSourceStructuralAttributes(current);
+    const role = attributes.role;
     if (
       sourceElementStartsPrivateRegionInContext(
         current.localName,
@@ -637,8 +824,12 @@ export function hasSourceImageCaptureBlockingAncestor(
         isSourceOptionInsideNativeSelect(current),
       ) ||
       isSourcePrivateTagName(current.localName) ||
-      isSourceActivationTagName(current.tagName) ||
       (
+        !options.allowActivationControls &&
+        isSourceActivationTagName(current.tagName)
+      ) ||
+      (
+        !options.allowActivationControls &&
         isSourceActivationRoleValue(role) &&
         !(
           isSourcePublicNavigationButtonRoleValue(role) &&
@@ -646,14 +837,6 @@ export function hasSourceImageCaptureBlockingAncestor(
         )
       )
     ) return true;
-    if (current.parentElement) {
-      current = current.parentElement;
-      continue;
-    }
-    const root = current.getRootNode();
-    current = root.nodeType === 11 && 'host' in root
-      ? (root as ShadowRoot).host
-      : undefined;
   }
   return false;
 }
@@ -700,10 +883,13 @@ function isSourceElementInsideNativeSelect(element: Element): boolean {
   for (let current = element.parentElement; current; current = current.parentElement) {
     const tagName = current.localName.toLowerCase();
     if (tagName === 'select') {
-      return isEligibleSourceSelect(tagName, sourceElementAttributes(current));
+      return isEligibleSourceSelect(
+        tagName,
+        readSourceStructuralAttributes(current),
+      );
     }
     if (tagName === 'datalist') return false;
-    const attributes = sourceElementAttributes(current);
+    const attributes = readSourceStructuralAttributes(current);
     if (
       tagName !== 'optgroup' ||
       sourceAttributesArePrivate(attributes) ||
@@ -715,40 +901,50 @@ function isSourceElementInsideNativeSelect(element: Element): boolean {
 
 /** Public activation labels remain mirrorable even though control pixels do not. */
 export function hasSourceActivationElementAncestor(element: Element): boolean {
-  for (let current: Element | undefined = element; current;) {
+  const path = readSourceFlatTreeElementPath(element);
+  if (!path) return true;
+  for (const current of path) {
     if (
       isSourceActivationTagName(current.tagName) ||
       isSourceActivationRoleValue(current.getAttribute('role'))
     ) return true;
-    if (current.parentElement) {
-      current = current.parentElement;
-      continue;
-    }
-    const root = current.getRootNode();
-    current = root.nodeType === 11 && 'host' in root
-      ? (root as ShadowRoot).host
-      : undefined;
   }
   return false;
 }
 
-function sourceElementAttributes(element: Element): Record<string, string> {
-  const result: Record<string, string> = {};
+/**
+ * Reads only the four structural fields needed to classify an element. In
+ * particular, this must never enumerate the source attribute collection:
+ * authors can place raw form values in attributes and classification has to
+ * happen before any content-bearing field is touched.
+ */
+export function readSourceStructuralAttributes(
+  element: Element,
+): Record<string, string> {
   try {
-    for (const attribute of element.attributes) {
-      result[attribute.name.toLowerCase()] = attribute.value;
+    const result: Record<string, string> = {};
+    for (const name of [
+      'type',
+      'autocomplete',
+      'role',
+      'contenteditable',
+    ] as const) {
+      const value = element.getAttribute(name);
+      if (value !== null) result[name] = value;
     }
+    return result;
   } catch {
-    // Missing attributes leave native controls outside the approved set.
-    result.autocomplete = 'current-password';
+    // Unreadable structural metadata is credential-secret, not public.
+    return { autocomplete: 'current-password' };
   }
-  return result;
 }
 
-function passwordAutocomplete(value: string): boolean {
-  return value.split(/\s+/u).some(
-    (token) => token === 'current-password' || token === 'new-password',
-  );
+function safelyHasSourceAttribute(element: Element, name: string): boolean {
+  try {
+    return element.hasAttribute(name);
+  } catch {
+    return false;
+  }
 }
 
 function stringAttribute(value: unknown): string {

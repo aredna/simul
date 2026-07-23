@@ -537,12 +537,11 @@ function installDocumentDisclosureState(
     if (isReadOnlyReplicaDisclosureEvent(event)) return;
     for (const controller of controllers) controller.close();
   };
-  const onScroll = (event: Event): void => {
-    if (isReadOnlyReplicaDisclosureEvent(event)) return;
-    for (const controller of controllers) controller.close();
+  const onScroll = (): void => {
+    for (const controller of controllers) controller.sync();
   };
   const onResize = (): void => {
-    for (const controller of controllers) controller.close();
+    for (const controller of controllers) controller.sync();
   };
   const MutationObserverConstructor = document.defaultView?.MutationObserver;
   const observer = MutationObserverConstructor

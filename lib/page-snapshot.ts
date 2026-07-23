@@ -1,3 +1,5 @@
+import type { ReplicaReadScope } from './replica/read-scope-policy';
+
 export const SNAPSHOT_VERSION = 1 as const;
 
 export const SNAPSHOT_LIMITS = {
@@ -231,7 +233,6 @@ export interface SnapshotImageItem {
   id: string;
   kind: 'image';
   src: string;
-  altText?: string;
   caption?: string;
 }
 
@@ -344,7 +345,6 @@ const SAFE_VISUAL_TAGS = new Set([
   'ul',
 ]);
 const SAFE_VISUAL_ATTRIBUTES = new Set([
-  'alt',
   'colspan',
   'cx',
   'cy',
@@ -472,14 +472,9 @@ export function parsePageSnapshot(input: unknown): PageSnapshot {
       imageUrlCharacters += rawItem.src.length;
 
       boundaryTruncated ||= isTextOverLimit(
-        rawItem.altText,
-        SNAPSHOT_LIMITS.maxTextLength,
-      );
-      boundaryTruncated ||= isTextOverLimit(
         rawItem.caption,
         SNAPSHOT_LIMITS.maxTextLength,
       );
-      const altText = readText(rawItem.altText, SNAPSHOT_LIMITS.maxTextLength);
       const caption = readText(rawItem.caption, SNAPSHOT_LIMITS.maxTextLength);
       const id = `image-${items.length + 1}`;
       const image: SnapshotImageItem = {
@@ -487,13 +482,6 @@ export function parsePageSnapshot(input: unknown): PageSnapshot {
         kind: 'image',
         src: rawItem.src,
       };
-
-      if (altText && characterCount + altText.length <= SNAPSHOT_LIMITS.maxCharacters) {
-        image.altText = altText;
-        characterCount += altText.length;
-      } else if (altText) {
-        boundaryTruncated = true;
-      }
 
       if (caption && characterCount + caption.length <= SNAPSHOT_LIMITS.maxCharacters) {
         image.caption = caption;
@@ -540,7 +528,9 @@ export function parsePageSnapshot(input: unknown): PageSnapshot {
  * runtime helpers nested: Chrome serializes this function rather than its
  * module closure.
  */
-export function capturePageSnapshot(): PageSnapshot {
+export function capturePageSnapshot(
+  readScope?: ReplicaReadScope,
+): PageSnapshot {
   const version = 1 as const;
   const maxItems = 1_200;
   const maxCharacters = 150_000;
@@ -563,6 +553,30 @@ export function capturePageSnapshot(): PageSnapshot {
   const textItemIds = new WeakMap<Node, string>();
   const imageItemIds = new WeakMap<Element, string>();
   const groupedTextContainers = new WeakSet<Element>();
+  const readScopeKeys = [
+    'controlSemantics',
+    'controlImages',
+    'disclosureContent',
+    'formValues',
+    'personalDataValues',
+    'editableContent',
+  ] as const;
+  const exactReadScope = (() => {
+    if (!readScope || typeof readScope !== 'object' || Array.isArray(readScope)) {
+      return undefined;
+    }
+    const keys = Object.keys(readScope);
+    if (
+      keys.length !== readScopeKeys.length ||
+      keys.some((key) => !(readScopeKeys as readonly string[]).includes(key)) ||
+      readScopeKeys.some((key) => typeof readScope[key] !== 'boolean') ||
+      (readScope.personalDataValues && !readScope.formValues)
+    ) return undefined;
+    return readScope;
+  })();
+  const allowControlSemantics = exactReadScope?.controlSemantics === true;
+  const allowDisclosureContent = exactReadScope?.disclosureContent === true;
+  const allowFormValues = exactReadScope?.formValues === true;
 
   const excludedTags = new Set([
     'SCRIPT',
@@ -659,12 +673,6 @@ export function capturePageSnapshot(): PageSnapshot {
 
   const normalize = (value: string, limit: number): string =>
     value.replace(/\s+/gu, ' ').trim().slice(0, Math.max(0, limit));
-
-  const normalizeContent = (value: string, limit: number): string => {
-    const normalized = value.replace(/\s+/gu, ' ').trim();
-    if (normalized.length > limit) omissions.truncated = true;
-    return normalized.slice(0, Math.max(0, limit));
-  };
 
   const safeImageSource = (value: string): boolean => {
     if (!value || value.length > maxUrlLength) return false;
@@ -909,13 +917,6 @@ export function capturePageSnapshot(): PageSnapshot {
     }
     imageUrlCharacters += rawSource.length;
 
-    const altText = normalizeContent(
-      image.getAttribute('alt') ||
-        image.getAttribute('aria-label') ||
-        image.getAttribute('title') ||
-        '',
-      maxTextLength,
-    );
     const id = `image-${items.length + 1}`;
     const item: SnapshotImageItem = {
       id,
@@ -923,12 +924,6 @@ export function capturePageSnapshot(): PageSnapshot {
       src: rawSource,
     };
 
-    if (altText && characterCount + altText.length <= maxCharacters) {
-      item.altText = altText;
-      characterCount += altText.length;
-    } else if (altText) {
-      omissions.truncated = true;
-    }
     items.push(item);
     imageItemIds.set(image, id);
   };
@@ -1173,7 +1168,9 @@ export function capturePageSnapshot(): PageSnapshot {
       case 'TEXTAREA':
         return 'textarea';
       case 'SELECT':
-        return selectMustStayPrivate(element) ? 'input' : 'select';
+        return !allowControlSemantics || selectMustStayPrivate(element)
+          ? 'input'
+          : 'select';
       case 'BUTTON':
         return 'button';
       case 'DATALIST':
@@ -1231,12 +1228,14 @@ export function capturePageSnapshot(): PageSnapshot {
     if (!omitResources && tag === 'img' && element instanceof HTMLImageElement) {
       const source = element.currentSrc || element.src;
       if (safeImageSource(source)) addAttribute('src', source);
-      const alt = normalize(element.getAttribute('alt') ?? '', 500);
-      if (alt) addAttribute('alt', alt);
     }
     for (const name of safeAttributeNames) {
       if (name === 'open') {
-        if (tag === 'details' && element.hasAttribute('open')) {
+        if (
+          allowDisclosureContent &&
+          tag === 'details' &&
+          element.hasAttribute('open')
+        ) {
           addAttribute('open', '');
         }
         continue;
@@ -1559,7 +1558,10 @@ export function capturePageSnapshot(): PageSnapshot {
       styleId: internStyle(element, { omitBackgroundImage: true }),
       optionState: {
         disabled: currentBooleanProperty(element, 'disabled'),
-        selected: !privateEntry && currentBooleanProperty(element, 'selected'),
+        selected:
+          allowFormValues &&
+          !privateEntry &&
+          currentBooleanProperty(element, 'selected'),
       },
       ...(nodeId ? { nodeId } : {}),
       children,
@@ -1697,7 +1699,11 @@ export function capturePageSnapshot(): PageSnapshot {
         );
         if (visualChild) children.push(visualChild);
       }
-      if (shell === 'button' && !containsVisualText(children)) {
+      if (
+        allowControlSemantics &&
+        shell === 'button' &&
+        !containsVisualText(children)
+      ) {
         const label = publicControlLabel(element);
         if (label) {
           if (
@@ -1729,7 +1735,7 @@ export function capturePageSnapshot(): PageSnapshot {
             selectState: {
               disabled: currentBooleanProperty(element, 'disabled'),
               multiple: currentBooleanProperty(element, 'multiple'),
-              open: selectPickerIsOpen(element),
+              open: allowFormValues && selectPickerIsOpen(element),
               size: currentSelectSize(element),
             },
           }
@@ -2097,7 +2103,6 @@ function parseVisualAttributes(
     if (name === 'src') {
       if (tag !== 'img' || !isSafeImageSource(rawValue)) continue;
     }
-    if (name === 'alt' && tag !== 'img') continue;
     if (
       (name === 'fill' || name === 'stroke') &&
       /(?:url\s*\(|javascript:|data:)/iu.test(rawValue)

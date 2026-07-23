@@ -156,12 +156,39 @@ describe('isolated HTML sanitizer and protocol', () => {
     expect(graphElementBySourceId(graph, 'blank-video')).toBeUndefined();
     expect(attributesOf(graph, 'static-fallback')).toMatchObject({
       src: 'https://example.test/fallback.jpg',
-      alt: 'Static fallback',
     });
+    expect(attributesOf(graph, 'static-fallback')).not.toHaveProperty('alt');
     expect(JSON.stringify(graph)).not.toContain('movie.mp4');
   });
 
-  it('carries native select labels and selected indices without submission data', () => {
+  it('omits secret attributes before evaluating their value accessors', () => {
+    const { document, window } = parseHTML(
+      '<!doctype html><html><body><input type="password" value="secret" aria-label="secret label"></body></html>',
+    );
+    const input = document.querySelector('input')!;
+    for (const name of ['value', 'aria-label']) {
+      const attribute = input.getAttributeNode(name)!;
+      Object.defineProperty(attribute, 'value', {
+        configurable: true,
+        get: () => {
+          throw new Error(`${name} value must not be read`);
+        },
+      });
+    }
+
+    expect(() => sanitizeSourceDocument(
+      document,
+      window as unknown as Window,
+      new WeakNodeIdRegistry(),
+    )).not.toThrow();
+    expect(JSON.stringify(sanitizeSourceDocument(
+      document,
+      window as unknown as Window,
+      new WeakNodeIdRegistry(),
+    ))).not.toContain('secret');
+  });
+
+  it('keeps native select labels, selection, and submission data out of the base graph', () => {
     const graph = sanitizeMarkup(`<!doctype html><html><body>
       <select id="facility" name="private-name" data-account="private-data">
         <option value="private-1">選択してください。</option>
@@ -180,15 +207,16 @@ describe('isolated HTML sanitizer and protocol', () => {
     const privateSelection = selects[1];
     const serialized = JSON.stringify(graph);
 
-    expect(select?.selectedOptionIndexes).toEqual([1]);
-    expect(area?.controlText).toEqual({
-      kind: 'label', text: '麻布地区', translatable: true,
-    });
-    expect(privateSelection?.selectedOptionIndexes).toEqual([]);
+    expect(select).toBeDefined();
+    expect(area).toBeDefined();
+    expect(privateSelection).toBeDefined();
+    expect(select).not.toHaveProperty('selectedOptionIndexes');
+    expect(area).not.toHaveProperty('controlText');
+    expect(privateSelection).not.toHaveProperty('selectedOptionIndexes');
     expect(Object.fromEntries(select?.attributes ?? [])).not.toHaveProperty('name');
-    expect(serialized).toContain('選択してください。');
-    expect(serialized).toContain('麻布区民センター');
-    expect(serialized).toContain('麻布地区');
+    expect(serialized).not.toContain('選択してください。');
+    expect(serialized).not.toContain('麻布区民センター');
+    expect(serialized).not.toContain('麻布地区');
     expect(serialized).not.toContain('private-name');
     expect(serialized).not.toContain('private-data');
     expect(serialized).not.toContain('private-1');
@@ -197,7 +225,7 @@ describe('isolated HTML sanitizer and protocol', () => {
     expect(serialized).not.toContain('private-title');
     expect(serialized).not.toContain('private role choice');
     expect(serialized).not.toContain('private role label');
-    expect(serialized).toContain('Visible rich choice');
+    expect(serialized).not.toContain('Visible rich choice');
     expect(serialized).not.toContain('leak.invalid');
     expect(serialized).not.toContain('private-rich-name');
     expect(serialized).not.toContain('private-rich-data');
@@ -249,7 +277,7 @@ describe('isolated HTML sanitizer and protocol', () => {
       .toBeUndefined();
   });
 
-  it('keeps public menu labels while removing request-capable descendants', () => {
+  it('keeps public menu payload out of the base graph', () => {
     const graph = sanitizeMarkup(`<!doctype html><html><body>
       <section role="listbox">
         <div role="option">
@@ -262,7 +290,7 @@ describe('isolated HTML sanitizer and protocol', () => {
     </body></html>`, 'passive');
     const serialized = JSON.stringify(graph);
 
-    expect(serialized).toContain('Public menu choice');
+    expect(serialized).not.toContain('Public menu choice');
     expect(serialized).not.toContain('leak.invalid');
     expect(graphElementsByTag(graph, 'video')).toEqual([]);
     expect(readHtmlMirrorNode(graph.root, new Set(), 0, undefined, false,
@@ -278,7 +306,7 @@ describe('isolated HTML sanitizer and protocol', () => {
       .toBeUndefined();
   });
 
-  it('preserves bounded multiple-selection state beyond the former 512 entry cap', () => {
+  it('does not inspect or transport large multiple-selection state in the base graph', () => {
     const options = Array.from(
       { length: 513 },
       (_, index) => `<option selected>Choice ${index}</option>`,
@@ -289,8 +317,9 @@ describe('isolated HTML sanitizer and protocol', () => {
     );
     const select = graphElementsByTag(graph, 'select')[0];
 
-    expect(select?.selectedOptionIndexes).toHaveLength(513);
-    expect(select?.selectedOptionIndexes?.at(-1)).toBe(512);
+    expect(select).toBeDefined();
+    expect(select).not.toHaveProperty('selectedOptionIndexes');
+    expect(JSON.stringify(graph)).not.toContain('Choice 512');
   });
 
   it('keeps blank, hidden, and private select-entry labels out of transport', () => {
@@ -318,8 +347,8 @@ describe('isolated HTML sanitizer and protocol', () => {
     const hiddenSelect = graphElementBySourceId(graph, 'hidden-owner');
     const serialized = JSON.stringify(graph);
 
-    expect(select?.selectedOptionIndexes).toEqual([]);
-    expect(serialized).toContain('Public child');
+    expect(select).not.toHaveProperty('selectedOptionIndexes');
+    expect(serialized).not.toContain('Public child');
     expect(serialized).not.toContain('whitespace fallback secret');
     expect(serialized).not.toContain('hidden group secret');
     expect(serialized).not.toContain('hidden selected secret');
@@ -330,11 +359,11 @@ describe('isolated HTML sanitizer and protocol', () => {
     expect(hiddenSelect).toBeUndefined();
   });
 
-  it('rejects noncanonical native-select presentation attributes', () => {
+  it('keeps native-select presentation state out of the base graph', () => {
     const node = {
       kind: 'element', id: 900, namespace: 'html', tagName: 'select',
       attributes: [['disabled', 'private-token']],
-      selectedOptionIndexes: [], children: [],
+      children: [],
     };
     expect(readHtmlMirrorNode(node)).toBeUndefined();
     expect(readHtmlMirrorNode({
@@ -344,11 +373,11 @@ describe('isolated HTML sanitizer and protocol', () => {
     expect(readHtmlMirrorNode({
       ...node,
       attributes: [['disabled', '']],
-    })).toBeDefined();
+    })).toBeUndefined();
     expect(readHtmlMirrorNode({
       ...node,
       attributes: [['size', '4']],
-    })).toBeDefined();
+    })).toBeUndefined();
     expect(readHtmlMirrorNode({
       ...node,
       attributes: [['size', '04']],
@@ -357,11 +386,14 @@ describe('isolated HTML sanitizer and protocol', () => {
       ...node,
       attributes: [['size', '1001']],
     })).toBeUndefined();
-    const { selectedOptionIndexes: _selected, ...privateNode } = node;
     expect(readHtmlMirrorNode({
-      ...privateNode,
+      ...node,
       attributes: [['role', 'combobox']],
     })).toBeDefined();
+    expect(readHtmlMirrorNode({
+      ...node,
+      selectedOptionIndexes: [],
+    })).toBeUndefined();
   });
 
   it('canonicalizes an already-inert form for source-to-receiver transport', () => {
@@ -938,6 +970,104 @@ describe('isolated HTML sanitizer and protocol', () => {
     expect(JSON.stringify(graph)).not.toContain('javascript:');
   });
 
+  it('replaces a hard-secret region with one canonical opaque identity shell', () => {
+    const qrCanary = 'data:image/png;base64,U0VDUkVUX1FSX0NBTkFSWQ==';
+    const { document, window } = parseHTML(`<!doctype html><html><head>
+      <style>
+        *::before { content: "generic generated content"; background-image: url("https://paint.invalid/pixel.png") }
+        .credential::before { content: "credential generated content" }
+      </style>
+    </head><body>
+      <section id="credential-shell" class="credential"
+        autocomplete="current-password" style="background:red">
+        <img src="${qrCanary}"><span>credential descendant</span>
+      </section>
+    </body></html>`);
+    const graph = sanitizeSourceDocument(
+      document,
+      window as unknown as Window,
+      new WeakNodeIdRegistry(),
+    )!;
+    const placeholders = graphOpaquePlaceholders(graph);
+
+    expect(placeholders).toHaveLength(1);
+    const placeholder = placeholders[0]!;
+    expect(placeholder.tagName).toMatch(/^simul-opaque-region-[a-z0-9]+$/u);
+    expect(placeholder.attributes).toEqual([]);
+    expect(placeholder.children).toEqual([]);
+    expect(placeholder).toEqual(expect.objectContaining({ opaquePlaceholder: true }));
+    expect(placeholder).not.toHaveProperty('selectedImageSource');
+    expect(placeholder).not.toHaveProperty('resolvedStyleSheetText');
+    expect(placeholder).not.toHaveProperty('shadowRoot');
+    const serialized = JSON.stringify(graph);
+    expect(serialized).not.toContain('credential-shell');
+    expect(serialized).not.toContain(qrCanary);
+    expect(serialized).not.toContain('credential descendant');
+    expect(readHtmlMirrorNode(placeholder)).toBeDefined();
+
+    for (const forged of [
+      { ...placeholder, attributes: [['src', qrCanary]] },
+      { ...placeholder, selectedImageSource: qrCanary },
+      { ...placeholder, resolvedStyleSheetText: '*{background:red}' },
+      {
+        ...placeholder,
+        children: [{ kind: 'text', id: 99_991, text: 'forged', translatable: true }],
+      },
+    ]) {
+      expect(readHtmlMirrorNode(forged)).toBeUndefined();
+    }
+  });
+
+  it('withholds directly slotted Text before evaluating its content', () => {
+    const canary = 'direct-slot-credential-canary';
+    const { document, window } = parseHTML(
+      '<!doctype html><html><body><x-credential id="host"></x-credential></body></html>',
+    );
+    const host = document.querySelector('#host')!;
+    const text = document.createTextNode(canary);
+    host.append(text);
+    const shadow = host.attachShadow({ mode: 'open' });
+    Object.defineProperty(shadow, 'mode', { value: 'open' });
+    shadow.innerHTML =
+      '<section autocomplete="one-time-code"><slot></slot></section>';
+    const slot = shadow.querySelector('slot')!;
+    Object.defineProperty(text, 'assignedSlot', {
+      configurable: true,
+      value: slot,
+    });
+    let contentReads = 0;
+    Object.defineProperty(text, 'nodeValue', {
+      configurable: true,
+      get: () => {
+        contentReads += 1;
+        return canary;
+      },
+    });
+
+    const graph = sanitizeSourceDocument(
+      document,
+      window as unknown as Window,
+      new WeakNodeIdRegistry(),
+    )!;
+
+    expect(contentReads).toBe(0);
+    expect(JSON.stringify(graph)).not.toContain(canary);
+    expect(graphOpaquePlaceholders(graph)).toHaveLength(1);
+
+    // The Text identity remains secret even after hostile reassignment into a
+    // public flat-tree path and a later incremental serialization.
+    Object.defineProperty(text, 'assignedSlot', {
+      configurable: true,
+      value: null,
+    });
+    document.body.append(text);
+    expect(sanitizeSourceSubtrees(
+      [text],
+      new WeakNodeIdRegistry(),
+    )).toEqual([undefined]);
+    expect(contentReads).toBe(0);
+  });
+
   it('preserves a synthetic dark canvas and same-document SVG logo only', () => {
     const { document, window } = parseHTML(`<!doctype html><html><body>
       <header>
@@ -960,6 +1090,7 @@ describe('isolated HTML sanitizer and protocol', () => {
         backgroundColor: element === document.documentElement
           ? 'rgb(0, 0, 0)'
           : 'rgba(0, 0, 0, 0)',
+        getPropertyValue: () => '',
       }),
     });
 
@@ -996,7 +1127,7 @@ describe('isolated HTML sanitizer and protocol', () => {
     })).toBeUndefined();
   });
 
-  it('transports only approved live native control text as typed metadata', () => {
+  it('keeps every optional native control value and label out of the base graph', () => {
     const { document, window } = parseHTML(`<!doctype html><html><body>
       <input id="missing" class="query" style="width: 20rem" value="Search me"
         placeholder="ignored" name="private-name" autocomplete="off"
@@ -1022,15 +1153,10 @@ describe('isolated HTML sanitizer and protocol', () => {
     );
     const serialized = JSON.stringify(graph);
 
-    expect(serialized).toContain(
-      '"controlText":{"kind":"value","text":"Search me","translatable":true}',
-    );
-    expect(serialized).toContain(
-      '"controlText":{"kind":"placeholder","text":"Search this site","translatable":true}',
-    );
-    expect(serialized).toContain(
-      '"controlText":{"kind":"placeholder","text":"Write a note","translatable":true}',
-    );
+    expect(serialized).not.toContain('controlText');
+    expect(serialized).not.toContain('Search me');
+    expect(serialized).not.toContain('Search this site');
+    expect(serialized).not.toContain('Write a note');
     expect(serialized).not.toContain('never transport me');
     expect(serialized).not.toContain('nor me');
     expect(serialized).not.toContain('checked secret');
@@ -1039,7 +1165,7 @@ describe('isolated HTML sanitizer and protocol', () => {
     expect(serialized).not.toContain('private aria native value');
     expect(serialized).not.toContain('private activation value');
     expect(serialized).not.toContain('private menu input value');
-    expect(serialized).toContain('private choice');
+    expect(serialized).not.toContain('private choice');
     expect(serialized).not.toContain('private editor');
     expect(serialized).not.toContain('private aria editor');
     expect(serialized).toContain('["id","missing"]');
@@ -1063,12 +1189,17 @@ describe('isolated HTML sanitizer and protocol', () => {
     }
   });
 
-  it('leaves oversize approved control text blank and records the omission', () => {
+  it('does not read or budget oversize optional control text in the base graph', () => {
     const { document, window } = parseHTML(
       '<!doctype html><html><body><input id="oversize" type="text" placeholder=""></body></html>',
     );
     const control = document.querySelector<HTMLInputElement>('#oversize')!;
-    control.value = 'x'.repeat(MAX_HTML_MIRROR_BYTES / 8 + 1);
+    Object.defineProperty(control, 'value', {
+      configurable: true,
+      get: () => {
+        throw new Error('base graph must not read current control values');
+      },
+    });
     const representability = createHtmlMirrorRepresentabilityCollector();
     const graph = sanitizeSourceDocument(
       document,
@@ -1079,7 +1210,7 @@ describe('isolated HTML sanitizer and protocol', () => {
 
     expect(graph).toBeDefined();
     expect(JSON.stringify(graph)).not.toContain('controlText');
-    expect(representability.capacityOmissionCount).toBe(1);
+    expect(representability.capacityOmissionCount).toBe(0);
   });
 
   it('preserves native and ARIA activation labels while masking nested values', () => {
@@ -1133,7 +1264,7 @@ describe('isolated HTML sanitizer and protocol', () => {
     })).toBeUndefined();
   });
 
-  it('carries only canonical hidden/source hints and blanks a broken control icon alt', () => {
+  it('carries only canonical hidden/source hints and omits attribute labels', () => {
     const { document, window } = parseHTML(`<!doctype html><html><body>
       <button><img id="control" alt="Vote" width="24" height="24"><faceplate-screen-reader-content>Vote</faceplate-screen-reader-content></button>
       <button><img id="large-control" alt="Card illustration" width="24" height="24"></button>
@@ -1169,11 +1300,13 @@ describe('isolated HTML sanitizer and protocol', () => {
             position: 'absolute', overflow: 'hidden', overflowX: 'hidden',
             overflowY: 'hidden', clip: 'rect(1px, 1px, 1px, 1px)',
             clipPath: 'inset(50%)', width: '1px', height: '1px',
+            getPropertyValue: () => '',
           }
         : {
             position: 'static', overflow: 'visible', overflowX: 'visible',
             overflowY: 'visible', clip: 'auto', clipPath: 'none',
             width: 'auto', height: 'auto',
+            getPropertyValue: () => '',
           },
     });
 
@@ -1186,9 +1319,9 @@ describe('isolated HTML sanitizer and protocol', () => {
 
     expect(serialized.match(/"visuallyHidden":true/gu)).toHaveLength(1);
     expect(serialized).toContain('normal small text');
-    expect(serialized).toContain('["alt",""]');
-    expect(serialized).toContain('Card illustration');
-    expect(serialized).toContain('Article illustration');
+    expect(serialized).not.toContain('"alt"');
+    expect(serialized).not.toContain('Card illustration');
+    expect(serialized).not.toContain('Article illustration');
     expect(serialized).toContain(
       '"selectedImageSource":"https://example.test/selected.jpg"',
     );
@@ -1380,7 +1513,7 @@ describe('isolated HTML sanitizer and protocol', () => {
 
     expect(serialized).toContain('public activation fallback');
     expect(serialized).not.toContain('private input fallback');
-    expect(serialized).toContain('public menu fallback');
+    expect(serialized).not.toContain('public menu fallback');
     expect(serialized).not.toContain('private menu fallback');
     expect(readHtmlMirrorNode(graph?.root)).toBeDefined();
   });
@@ -2340,6 +2473,24 @@ function graphElementsByTag(
   while (pending.length > 0) {
     const current = pending.shift()!;
     if (current.tagName === tagName) matches.push(current);
+    for (const child of current.children) {
+      if (child.kind === 'element') pending.push(child);
+    }
+    for (const child of current.shadowRoot?.children ?? []) {
+      if (child.kind === 'element') pending.push(child);
+    }
+  }
+  return matches;
+}
+
+function graphOpaquePlaceholders(
+  graph: HtmlMirrorDocumentGraph,
+): HtmlMirrorElementNode[] {
+  const matches: HtmlMirrorElementNode[] = [];
+  const pending: HtmlMirrorElementNode[] = [graph.root];
+  while (pending.length > 0) {
+    const current = pending.pop()!;
+    if (current.opaquePlaceholder) matches.push(current);
     for (const child of current.children) {
       if (child.kind === 'element') pending.push(child);
     }

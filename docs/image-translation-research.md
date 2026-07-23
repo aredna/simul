@@ -6,16 +6,18 @@ broader-source alternatives that remain deferred.
 
 ## Implemented local paths
 
-The canonical artifact exposes two independently compiled local OCR providers
-in a saved priority order. Chrome's experimental `TextDetector` is
-capability-probed in the offscreen document and used only when the installed
-browser exposes it. A packaged Tesseract.js provider is the deterministic
-fallback and does not depend on that platform API. An unchanged empty
+An ordinary unflagged source build exposes two independently compiled local
+OCR providers in a saved priority order. The checked-in ready-to-load trial in
+`dist/chrome-unpacked` instead uses the exact four-provider profile described
+below. Chrome's experimental `TextDetector` is capability-probed in the
+offscreen document and used only when the installed browser exposes it. A
+packaged Tesseract.js provider is the deterministic fallback and does not
+depend on that platform API. An unchanged empty
 detection must be confirmed by a second OCR pass before it is cached. A
 TextDetector result that supplies boxes without authoritative text can pass
 those regions to another provider instead of ending the scan.
 
-An additional default-off PaddleOCR.js trial is available behind
+An additional source-build-optional PaddleOCR.js trial is available behind
 `SIMUL_OCR_PADDLE=1`. It uses the official `@paddleocr/paddleocr-js` 0.4.2
 module Worker, ONNX Runtime Web 1.24.3, and the official
 `PP-OCRv6_tiny_det`/`PP-OCRv6_tiny_rec` model archives. The Worker, Wasm,
@@ -46,32 +48,36 @@ The current pipeline:
 
 1. Remains fully dormant until the saved image-translation option is enabled.
 2. Observes `<img>` revisions without disclosing image URLs or page text.
-3. Captures a stable visible viewport crop below Chrome's two-per-second cap,
-   proportionally downscales high-DPI crops to at most 4 MP, and hashes the
-   encoded crop.
-4. Tries the saved enabled provider order in an offscreen document. The trial
+3. Walks one saved priority list beginning with direct image accessibility
+   text by default. `aria-label`/`alt` evidence can translate without pixels;
+   missing, blocked, untranslated, or disabled semantic evidence falls through.
+4. Only when an OCR group is reached, captures a stable visible viewport crop
+   below Chrome's two-per-second cap, proportionally downscales high-DPI crops
+   to at most 4 MP, and hashes the encoded crop.
+5. Tries contiguous enabled OCR providers as one evidence-sharing group in an
+   offscreen document. The trial
    defaults to PaddleOCR.js, Chrome TextDetector, Tesseract.js, then direct
    Tesseract Wasm. Every compiled provider remains visible in Options with an
    independent on/off control and reorder buttons. Turning all providers off
    pauses OCR without starting capture or a retry loop.
-5. Filters blank, punctuation-only, and regions scored below 0.25. Scored
+6. Filters blank, punctuation-only, and regions scored below 0.25. Scored
    regions at or above the saved confidence threshold are authoritative.
    Confidence-free or intermediate-score regions require exact NFKC/
    whitespace-normalized text agreement and bounding-box IoU of at least 0.5
    from a different provider before translation.
-6. Keeps recognition and line translation caches separate. Recognition uses
+7. Keeps recognition and line translation caches separate. Recognition uses
    provider/model order, language, quality-policy version, selected confidence
    threshold, preprocessing profile, processed dimensions, and pixel hash;
    line translation uses the exact provider, language pair, and recognized
    text. Neither cache uses a DOM node or document identity, and
    matching in-flight requests join one provider load. Recognition retention is
    bounded by both entry count and aggregate transcript/region weight.
-7. Maps the visible-crop coordinates onto clipped inert sibling overlays that
+8. Maps the visible-crop coordinates onto clipped inert sibling overlays that
    follow replay scroll and zoom without changing the image or page layout.
    Text wraps and uses bounded font downscaling inside each recognized box.
    A same-node, same-lease replica image replacement rebinds the existing
    overlay instead of discarding translated work.
-8. Stops explicit same-language configurations before image capture. With
+9. Stops explicit same-language configurations before image capture. With
    Auto-detect, it resolves the nearest image/element or page language after
    capture metadata is available and stops before recognition when it equals
    the target, preserving the original image. If the page remains unresolved,
@@ -95,10 +101,11 @@ steps, defaulting to 65%. Raising it favors precision and suppresses more
 false-positive text; lowering it favors recall. Changing it clears current
 image projections and reprocesses the current image set under a distinct cache
 identity. The Paddle trial supports Latin-script and Chinese language routes;
-an unsupported route fails that provider cleanly. A valid Paddle result that
-returns no candidate regions is terminal. A nonempty Paddle result whose
-candidates remain uncertain continues to later enabled providers so a truly
-independent family can corroborate it.
+an unsupported route fails that provider cleanly. Empty, failed, or uncertain
+Paddle output continues to later enabled providers. Geometry and raw candidate
+evidence remain available within the contiguous group so a truly independent
+family can corroborate it; if translating one accepted candidate fails, the
+coordinator resumes at the next provider without discarding that evidence.
 
 Chrome TextDetector remains platform-dependent. Chromium's macOS adapter may
 return geometry without decoded text, so Simul labels it as a platform
@@ -115,7 +122,10 @@ npm run check:ocr-all-trial
 The second command always creates a temporary Paddle-only production artifact,
 validates every reviewed byte/hash and the local-only runtime boundary, checks
 that no Tesseract assets leaked into it, and removes the temporary artifact.
-The canonical build remains Paddle-free unless the flag is explicitly set.
+The ordinary unflagged `.output` build remains Paddle-free. The checked-in
+`dist/chrome-unpacked` artifact is intentionally generated with the exact
+four-provider trial profile so every reviewed provider is available for local
+switching and priority tests.
 `check:ocr-all-trial` builds the closed four-provider profile in a temporary
 directory and permits its accepted 72 MiB ceiling only when the detected
 provider set is exactly PaddleOCR, TextDetector, Tesseract.js, and direct

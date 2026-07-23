@@ -23,7 +23,6 @@ export interface TranslatedTextItem extends SnapshotTextItem {
 }
 
 export interface TranslatedImageItem extends SnapshotImageItem {
-  altTranslation?: TranslationValue;
   captionTranslation?: TranslationValue;
 }
 
@@ -113,9 +112,6 @@ function createTranslationResult(snapshot: PageSnapshot): TranslatedSnapshot {
 
     return {
       ...item,
-      ...(item.altText
-        ? { altTranslation: pendingValue(item.altText) }
-        : {}),
       ...(item.caption
         ? { captionTranslation: pendingValue(item.caption) }
         : {}),
@@ -348,9 +344,6 @@ function cloneResult(result: TranslatedSnapshot): TranslatedSnapshot {
       }
       return {
         ...item,
-        ...(item.altTranslation
-          ? { altTranslation: cloneValue(item.altTranslation) }
-          : {}),
         ...(item.captionTranslation
           ? { captionTranslation: cloneValue(item.captionTranslation) }
           : {}),
@@ -371,7 +364,6 @@ function collectFieldsFromItems(
     if (item.kind === 'text') {
       fields.push(item.translation);
     } else {
-      if (item.altTranslation) fields.push(item.altTranslation);
       if (item.captionTranslation) fields.push(item.captionTranslation);
     }
   }

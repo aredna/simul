@@ -45,19 +45,42 @@ describe('language selection', () => {
   });
 
   it('invalidates only image-derived language when OCR route settings change', () => {
-    const first = autoImageLanguageConfigurationKey(['tesseract'], 0.65);
-    const targetOnlyChange = autoImageLanguageConfigurationKey(
-      ['tesseract'],
-      0.65,
-    );
-    const confidenceChange = autoImageLanguageConfigurationKey(
-      ['tesseract'],
-      0.8,
-    );
-    const providerChange = autoImageLanguageConfigurationKey(
-      ['paddleocr-wasm', 'tesseract'],
-      0.65,
-    );
+    const configuration = {
+      providerOrder: ['tesseract'],
+      enabledMethodOrder: ['accessibility-text', 'tesseract'],
+      minimumConfidence: 0.65,
+      policyFingerprint: 'read-v1-110000',
+      controlImages: true,
+    } as const;
+    const first = autoImageLanguageConfigurationKey(configuration);
+    // Target language is deliberately absent from this source-evidence key.
+    const targetOnlyChange = autoImageLanguageConfigurationKey(configuration);
+    const confidenceChange = autoImageLanguageConfigurationKey({
+      ...configuration,
+      minimumConfidence: 0.8,
+    });
+    const providerChange = autoImageLanguageConfigurationKey({
+      ...configuration,
+      providerOrder: ['paddleocr-wasm', 'tesseract'],
+      enabledMethodOrder: [
+        'accessibility-text',
+        'paddleocr-wasm',
+        'tesseract',
+      ],
+    });
+    const semanticMethodChange = autoImageLanguageConfigurationKey({
+      ...configuration,
+      enabledMethodOrder: ['tesseract'],
+    });
+    const semanticOrderChange = autoImageLanguageConfigurationKey({
+      ...configuration,
+      enabledMethodOrder: ['tesseract', 'accessibility-text'],
+    });
+    const policyChange = autoImageLanguageConfigurationKey({
+      ...configuration,
+      policyFingerprint: 'read-v1-100000',
+      controlImages: false,
+    });
     expect(shouldClearAutoImageLanguageResolution(
       'image',
       first,
@@ -72,6 +95,21 @@ describe('language selection', () => {
       'image',
       first,
       providerChange,
+    )).toBe(true);
+    expect(shouldClearAutoImageLanguageResolution(
+      'image',
+      first,
+      semanticMethodChange,
+    )).toBe(true);
+    expect(shouldClearAutoImageLanguageResolution(
+      'image',
+      first,
+      semanticOrderChange,
+    )).toBe(true);
+    expect(shouldClearAutoImageLanguageResolution(
+      'image',
+      first,
+      policyChange,
     )).toBe(true);
     expect(shouldClearAutoImageLanguageResolution(
       'page',
