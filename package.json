@@ -23,7 +23,7 @@
     "check": "npm run typecheck && npm test && npm run artifact:check"
   },
   "devDependencies": {
-    "acorn": "8.17.0",
+    "acorn": "8.18.0",
     "linkedom": "0.18.13",
     "typescript": "7.0.2",
     "vitest": "4.1.10",
