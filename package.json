@@ -27,7 +27,7 @@
     "linkedom": "0.18.13",
     "typescript": "7.0.2",
     "vitest": "4.1.10",
-    "wxt": "0.20.27"
+    "wxt": "0.21.3"
   },
   "overrides": {
     "adm-zip": "0.6.0",
