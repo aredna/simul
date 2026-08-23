@@ -296,6 +296,7 @@ export class HtmlMirrorSourceSession {
   #pendingAttributes = new Set<Element>();
   #pendingText = new Set<Text>();
   #pendingDimensions = false;
+  #lastDimensions: ReturnType<typeof readSourceDimensions> | undefined;
   #pendingOverflow = false;
   #mirroredNodes = new WeakSet<Node>();
   #mirroredOpaqueSecrets = new WeakSet<Element>();
@@ -373,6 +374,7 @@ export class HtmlMirrorSourceSession {
     this.#knownMirroredImageCandidates = new WeakSet<Element>();
     this.#selectedImageSources = new WeakMap<Element, string>();
     this.#imageRefreshRequested = false;
+    this.#lastDimensions = undefined;
     this.#adoptedStyleSignatures.reset();
     this.#ordinaryStyleSignatures.reset();
     this.#clearPending();
@@ -579,6 +581,15 @@ export class HtmlMirrorSourceSession {
       );
       this.#ordinaryStyleSignatures.reset();
       this.#markMirroredGraph(checkpoint.payload.root);
+      this.#lastDimensions = Object.freeze({
+        viewportWidth: checkpoint.payload.viewportWidth,
+        viewportHeight: checkpoint.payload.viewportHeight,
+        documentWidth: checkpoint.payload.documentWidth,
+        documentHeight: checkpoint.payload.documentHeight,
+        ...(checkpoint.payload.root.canvasBackgroundColor
+          ? { canvasBackgroundColor: checkpoint.payload.root.canvasBackgroundColor }
+          : {}),
+      });
       this.#observeOpenShadowRoots(this.environment.document.documentElement);
       this.#primeOrdinaryStyleSignatures();
       this.#shadowReconciliationPending = false;
@@ -832,11 +843,17 @@ export class HtmlMirrorSourceSession {
             const graph = newGraphs.get(source);
             if (graph) entries.push(Object.freeze({ kind: 'graph', node: graph }));
           }
-          operations.push(Object.freeze({
-            kind: 'reconcile-children',
-            nodeId: capture.nodeId,
-            children: Object.freeze(entries),
-          }));
+          if (!reconciliationMatchesEmittedChildren(
+            entries,
+            capture.previous,
+            this.environment.registry,
+          )) {
+            operations.push(Object.freeze({
+              kind: 'reconcile-children',
+              nodeId: capture.nodeId,
+              children: Object.freeze(entries),
+            }));
+          }
         }
       }
       for (const target of this.#pendingAttributes) {
@@ -892,11 +909,20 @@ export class HtmlMirrorSourceSession {
           node,
         }));
       }
+      let emittedDimensions:
+        ReturnType<typeof readSourceDimensions> | undefined;
       if (this.#pendingDimensions) {
-        operations.push(Object.freeze({
-          kind: 'dimensions',
-          ...readSourceDimensions(this.environment.document, this.environment.window),
-        }));
+        const dimensions = readSourceDimensions(
+          this.environment.document,
+          this.environment.window,
+        );
+        if (!sameSourceDimensions(dimensions, this.#lastDimensions)) {
+          emittedDimensions = dimensions;
+          operations.push(Object.freeze({
+            kind: 'dimensions',
+            ...dimensions,
+          }));
+        }
       }
       if (operations.length === 0) {
         this.#clearPending();
@@ -929,6 +955,7 @@ export class HtmlMirrorSourceSession {
       }
       this.#clearPending();
       this.#sequence = sequence;
+      if (emittedDimensions) this.#lastDimensions = emittedDimensions;
       this.#post(batch);
     } catch (error) {
       if (
@@ -1728,6 +1755,29 @@ function containsComposedSource(ancestor: Node, descendant: Node): boolean {
       : undefined;
   }
   return false;
+}
+
+function reconciliationMatchesEmittedChildren(
+  entries: readonly HtmlMirrorReconcileChild[],
+  previous: readonly Node[],
+  registry: WeakNodeIdRegistry,
+): boolean {
+  return entries.length === previous.length && entries.every((entry, index) =>
+    entry.kind === 'retain' && registry.peekId(previous[index]!) === entry.nodeId);
+}
+
+function sameSourceDimensions(
+  current: ReturnType<typeof readSourceDimensions>,
+  previous: ReturnType<typeof readSourceDimensions> | undefined,
+): boolean {
+  return Boolean(
+    previous &&
+    current.viewportWidth === previous.viewportWidth &&
+    current.viewportHeight === previous.viewportHeight &&
+    current.documentWidth === previous.documentWidth &&
+    current.documentHeight === previous.documentHeight &&
+    current.canvasBackgroundColor === previous.canvasBackgroundColor
+  );
 }
 
 function incrementSourceRepresentability(
