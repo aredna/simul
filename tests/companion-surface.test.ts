@@ -9,6 +9,7 @@ import {
   sameCompanionSourcePage,
   shouldFollowActivatedTab,
   shouldIgnoreInactiveFollowedTabUpdate,
+  shouldCloseStalePreopenedSidePanel,
   shouldPreopenSidePanel,
   shouldRecoverRemovedActiveSource,
 } from '../lib/companion-surface';
@@ -44,6 +45,20 @@ describe('companion surface launch decisions', () => {
       launchBehavior: 'last-used',
       lastLaunchSurface: 'popout',
     }, true)).toBe(false);
+  });
+
+  it('closes only superseded eager panels from a different window', () => {
+    expect(shouldCloseStalePreopenedSidePanel(1, 2, 4, 8, true)).toBe(true);
+    expect(shouldCloseStalePreopenedSidePanel(1, 2, 4, 4, true)).toBe(false);
+    expect(shouldCloseStalePreopenedSidePanel(2, 2, 4, 8, true)).toBe(false);
+    expect(shouldCloseStalePreopenedSidePanel(1, 2, 4, 8, false)).toBe(false);
+    expect(shouldCloseStalePreopenedSidePanel(
+      1,
+      2,
+      undefined,
+      8,
+      true,
+    )).toBe(false);
   });
 
   it('creates an identity-bound local URL without retaining stale parameters', () => {
