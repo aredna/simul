@@ -128,6 +128,33 @@ describe('packaged Tesseract provider', () => {
     await runner.dispose();
   });
 
+  it('detaches worker-loss listeners after every successful operation', async () => {
+    const worker = fakeWorker('bounded-listeners');
+    const lossController = new AbortController();
+    const add = vi.spyOn(lossController.signal, 'addEventListener');
+    const remove = vi.spyOn(lossController.signal, 'removeEventListener');
+    const runner = new TesseractOffscreenRunner({
+      createWorker: vi.fn(async () => worker.worker) as never,
+      createWorkerLossController: () => lossController,
+      getUrl: (path) => `chrome-extension://id${path}`,
+    });
+
+    await runner.recognize(
+      job('eng'),
+      new Blob([new Uint8Array([1])]),
+      new AbortController().signal,
+    );
+    await runner.recognize(
+      job('eng'),
+      new Blob([new Uint8Array([2])]),
+      new AbortController().signal,
+    );
+
+    expect(add).toHaveBeenCalledTimes(3);
+    expect(remove).toHaveBeenCalledTimes(add.mock.calls.length);
+    await runner.dispose();
+  });
+
   it('uses profile-selected banner segmentation and never infers it from dimensions', async () => {
     const worker = fakeWorker('banner');
     const runner = new TesseractOffscreenRunner({
