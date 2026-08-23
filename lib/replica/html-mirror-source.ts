@@ -50,6 +50,7 @@ import {
 } from './source-secret-classifier';
 import { hasSourceCredentialSecretAncestor } from './source-privacy-policy';
 import type { SelectableReplicaFidelityPolicy } from './fidelity-policy';
+import { StableSignatureTracker } from './stable-signature-tracker';
 
 export class WeakNodeIdRegistry implements HtmlMirrorIdRegistry {
   readonly #ids = new WeakMap<Node, number>();
@@ -261,6 +262,7 @@ const MAX_SHADOW_HOSTS_PER_TICK = 1_000;
 const MAX_STYLE_SHEETS_PER_TICK = 512;
 const MAX_STYLE_RULES_PER_TICK = 25_000;
 const MAX_STYLE_CHARACTERS_PER_TICK = 1024 * 1024;
+const STYLE_CHANGE_STABILITY_OBSERVATIONS = 3;
 const MAX_MIRRORED_IMAGE_CANDIDATES = 4_000;
 const MAX_IMAGE_EVENT_ROOTS = 4_000;
 
@@ -311,8 +313,12 @@ export class HtmlMirrorSourceSession {
   #stylePollingCursor = 0;
   #stylePollingPhases = new WeakMap<object, StylePollChannel>();
   #styleCapacityChannels = new WeakMap<object, number>();
-  #adoptedStyleSignatures = new WeakMap<object, string>();
-  #ordinaryStyleSignatures = new WeakMap<object, string>();
+  readonly #adoptedStyleSignatures = new StableSignatureTracker(
+    STYLE_CHANGE_STABILITY_OBSERVATIONS,
+  );
+  readonly #ordinaryStyleSignatures = new StableSignatureTracker(
+    STYLE_CHANGE_STABILITY_OBSERVATIONS,
+  );
   #shadowDiscoveryTimer: unknown;
   #frame: unknown;
   #sequence = 0;
@@ -365,8 +371,8 @@ export class HtmlMirrorSourceSession {
     this.#knownMirroredImageCandidates = new WeakSet<Element>();
     this.#selectedImageSources = new WeakMap<Element, string>();
     this.#imageRefreshRequested = false;
-    this.#adoptedStyleSignatures = new WeakMap<object, string>();
-    this.#ordinaryStyleSignatures = new WeakMap<object, string>();
+    this.#adoptedStyleSignatures.reset();
+    this.#ordinaryStyleSignatures.reset();
     this.#clearPending();
     if (disconnect) {
       try {
@@ -564,12 +570,12 @@ export class HtmlMirrorSourceSession {
       this.#knownMirroredImageCandidates = new WeakSet<Element>();
       this.#selectedImageSources = new WeakMap<Element, string>();
       this.#imageRefreshRequested = false;
-      this.#adoptedStyleSignatures = new WeakMap<object, string>();
-      this.#adoptedStyleSignatures.set(
+      this.#adoptedStyleSignatures.reset();
+      this.#adoptedStyleSignatures.prime(
         this.environment.document,
         adoptedStyleSignature(checkpoint.payload.adoptedStyleSheets),
       );
-      this.#ordinaryStyleSignatures = new WeakMap<object, string>();
+      this.#ordinaryStyleSignatures.reset();
       this.#markMirroredGraph(checkpoint.payload.root);
       this.#observeOpenShadowRoots(this.environment.document.documentElement);
       this.#primeOrdinaryStyleSignatures();
@@ -1047,7 +1053,7 @@ export class HtmlMirrorSourceSession {
       const shadow = this.environment.registry.getNode(node.shadowRoot.id);
       if (shadow) {
         this.#mirroredNodes.add(shadow);
-        this.#adoptedStyleSignatures.set(
+        this.#adoptedStyleSignatures.prime(
           shadow,
           adoptedStyleSignature(node.shadowRoot.adoptedStyleSheets),
         );
@@ -1300,14 +1306,9 @@ export class HtmlMirrorSourceSession {
     );
     if (!styles) return work.exhausted ? 'capacity' : 'unchanged';
     const signature = adoptedStyleSignature(styles);
-    const previous = this.#adoptedStyleSignatures.get(owner);
-    if (previous === undefined) {
-      this.#adoptedStyleSignatures.set(owner, signature);
-      return 'unchanged';
-    }
-    if (signature === previous) return 'unchanged';
-    this.#adoptedStyleSignatures.set(owner, signature);
-    return 'changed';
+    return this.#adoptedStyleSignatures.observe(owner, signature)
+      ? 'changed'
+      : 'unchanged';
   }
 
   #ordinaryStylesChanged(
@@ -1318,14 +1319,9 @@ export class HtmlMirrorSourceSession {
     if (read.kind === 'capacity') return 'capacity';
     const signature = read.signature;
     if (signature === undefined) return 'unchanged';
-    const previous = this.#ordinaryStyleSignatures.get(owner);
-    if (previous === undefined) {
-      this.#ordinaryStyleSignatures.set(owner, signature);
-      return 'unchanged';
-    }
-    if (signature === previous) return 'unchanged';
-    this.#ordinaryStyleSignatures.set(owner, signature);
-    return 'changed';
+    return this.#ordinaryStyleSignatures.observe(owner, signature)
+      ? 'changed'
+      : 'unchanged';
   }
 
   #primeOrdinaryStyleSignatures(): void {
@@ -1343,7 +1339,7 @@ export class HtmlMirrorSourceSession {
       processed += 1;
       const read = ordinaryStyleSignature(owner, work);
       if (read.kind === 'signature' && read.signature !== undefined) {
-        this.#ordinaryStyleSignatures.set(owner, read.signature);
+        this.#ordinaryStyleSignatures.prime(owner, read.signature);
       }
       if (read.kind === 'capacity') break;
     }

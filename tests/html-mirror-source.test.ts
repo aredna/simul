@@ -1168,7 +1168,20 @@ describe('HtmlMirrorSourceSession', () => {
     ]);
     fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
 
+    rule.cssText = '.page{display:block}';
+    fixture.runTimer();
+    rule.cssText = '.page{display:grid}';
+    fixture.runTimer();
+    expect(fixture.port.posts.some(
+      (message) => (message as { code?: string }).code === 'stream_gap',
+    )).toBe(false);
+
     rule.cssText = '.page{display:flex}';
+    fixture.runTimer();
+    fixture.runTimer();
+    expect(fixture.port.posts.some(
+      (message) => (message as { code?: string }).code === 'stream_gap',
+    )).toBe(false);
     fixture.runTimer();
     expect(fixture.port.posts.at(-1)).toMatchObject({
       kind: 'simul:html-mirror-v1:error',
@@ -1216,6 +1229,11 @@ describe('HtmlMirrorSourceSession', () => {
     fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
 
     rule.cssText = '.page{display:flex}';
+    fixture.runTimer();
+    fixture.runTimer();
+    expect(fixture.port.posts.some(
+      (message) => (message as { code?: string }).code === 'stream_gap',
+    )).toBe(false);
     fixture.runTimer();
     expect(fixture.port.posts.at(-1)).toMatchObject({
       kind: 'simul:html-mirror-v1:error',
@@ -1330,6 +1348,10 @@ describe('HtmlMirrorSourceSession', () => {
     )).toBe(false);
 
     fixture.runTimer();
+    expect(fixture.port.posts.some(
+      (message) => (message as { code?: string }).code === 'stream_gap',
+    )).toBe(false);
+    for (let attempt = 0; attempt < 4; attempt += 1) fixture.runTimer();
     expect(fixture.port.posts.at(-1)).toMatchObject({
       kind: 'simul:html-mirror-v1:error',
       code: 'stream_gap',
