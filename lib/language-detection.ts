@@ -4,10 +4,9 @@ import {
   canonicalizeLanguageTag,
   type SupportedLanguage,
 } from './translation-provider';
-import { strongScriptEvidence } from './ocr/auto-language-probe';
+import { strongAutoLanguageScriptEvidence } from './ocr/auto-language-probe';
 
 const MINIMUM_STRONG_PAGE_SCRIPT_CHARACTERS = 4;
-const MINIMUM_STRONG_PAGE_SCRIPT_DOMINANCE = 0.6;
 
 export interface DetectedLanguageCandidate {
   language: string;
@@ -135,15 +134,10 @@ export async function resolveSourceLanguage(
     .concat(additionalVisibleText)
     .join(' ')
     .slice(0, 20_000);
-  const script = strongScriptEvidence(sample);
-  const meaningfulCharacters = [...sample].filter((character) =>
-    /[\p{L}\p{N}]/u.test(character)
-  ).length;
+  const script = strongAutoLanguageScriptEvidence(sample);
   if (
     script &&
-    script.characters >= MINIMUM_STRONG_PAGE_SCRIPT_CHARACTERS &&
-    script.characters / Math.max(1, meaningfulCharacters) >=
-      MINIMUM_STRONG_PAGE_SCRIPT_DOMINANCE
+    script.characters >= MINIMUM_STRONG_PAGE_SCRIPT_CHARACTERS
   ) {
     return { language: script.language, source: 'content' };
   }
@@ -152,17 +146,20 @@ export async function resolveSourceLanguage(
 
   try {
     const detected = await detectLanguage(sample);
-    const candidate = [...detected.languages]
-      .sort((left, right) => right.percentage - left.percentage)
-      .find(
-        (entry) =>
-          entry.percentage >= 55 &&
-          canonicalizeLanguageTag(entry.language) !== undefined,
-      );
-    const language = candidate
-      ? canonicalizeLanguageTag(candidate.language)
-      : undefined;
-    return detected.isReliable && language
+    if (!detected.isReliable) return { source: 'unknown' };
+    let language: SupportedLanguage | undefined;
+    let highestPercentage = Number.NEGATIVE_INFINITY;
+    for (const candidate of detected.languages) {
+      if (
+        candidate.percentage < 55 ||
+        candidate.percentage <= highestPercentage
+      ) continue;
+      const canonical = canonicalizeLanguageTag(candidate.language);
+      if (!canonical) continue;
+      language = canonical;
+      highestPercentage = candidate.percentage;
+    }
+    return language
       ? { language, source: 'content' }
       : { source: 'unknown' };
   } catch {
