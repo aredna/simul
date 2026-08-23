@@ -93,6 +93,29 @@ describe('ReplicaTranslationCoordinator', () => {
     expect(surface.snapshotCalls).toBeLessThanOrEqual(3);
   });
 
+  it('does not rebuild a full snapshot to admit an incremental source batch', async () => {
+    const surface = new FakeSurface(
+      Array.from({ length: 200 }, (_, index) =>
+        record(index + 1, 1, `Text ${index}`)),
+    );
+    const { provider } = fakeProvider(async (source) => `en:${source}`);
+    const onBackgroundResult = vi.fn();
+    const coordinator = new ReplicaTranslationCoordinator(provider, surface, {
+      onBackgroundResult,
+    });
+    await coordinator.translateCurrent(pair);
+    surface.snapshotCalls = 0;
+    const changed = record(1, 2, 'Changed');
+    surface.records = [changed, ...surface.records.slice(1)];
+
+    coordinator.handleSourceCommit(commitFor(surface, [changed]));
+    await vi.waitFor(() => expect(onBackgroundResult).toHaveBeenCalledOnce());
+
+    // One result context and one final currency check remain; admission itself
+    // does not add another whole-replica snapshot.
+    expect(surface.snapshotCalls).toBeLessThanOrEqual(2);
+  });
+
   it('rejects a late result after source revision changes', async () => {
     let resolve!: (value: string) => void;
     const { provider } = fakeProvider(

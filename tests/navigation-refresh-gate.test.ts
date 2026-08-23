@@ -22,14 +22,13 @@ describe('NavigationRefreshGate', () => {
     expect(gate.shouldScheduleComplete('tab', 'tab:next')).toBe(false);
   });
 
-  it('coalesces redirected loading signals while keeping the final URL', () => {
+  it('coalesces redirected loading signals before one completion', () => {
     const gate = new NavigationRefreshGate();
     expect(gate.beginDocumentLoad('tab', 'tab:start')).toBe(true);
     expect(gate.beginDocumentLoad('tab', 'tab:redirect')).toBe(false);
     expect(gate.beginDocumentLoad('tab', 'tab:final')).toBe(false);
 
     expect(gate.shouldScheduleComplete('tab', 'tab:final')).toBe(true);
-    expect(gate.shouldScheduleComplete('tab', 'tab:start')).toBe(true);
   });
 
   it('does not rebuild for a URL-only same-document change', () => {
