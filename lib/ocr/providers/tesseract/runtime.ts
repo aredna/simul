@@ -27,11 +27,12 @@ type TesseractWorker = Awaited<ReturnType<typeof Tesseract.createWorker>>;
 interface AcquiredTesseractWorker {
   readonly worker: TesseractWorker;
   readonly token: symbol;
-  readonly loss: Promise<void>;
+  readonly loss: AbortSignal;
 }
 
 export interface TesseractRunnerEnvironment {
   readonly createWorker?: typeof Tesseract.createWorker;
+  readonly createWorkerLossController?: () => AbortController;
   readonly getUrl?: (path: string) => string;
   readonly setTimer?: TimeoutScheduler;
   readonly clearTimer?: TimeoutCanceller;
@@ -41,6 +42,7 @@ export interface TesseractRunnerEnvironment {
 
 export class TesseractOffscreenRunner implements OffscreenOcrProviderRunner {
   readonly #createWorker: typeof Tesseract.createWorker;
+  readonly #createWorkerLossController: () => AbortController;
   readonly #getUrl: (path: string) => string;
   readonly #setTimer: TimeoutScheduler;
   readonly #clearTimer: TimeoutCanceller;
@@ -50,13 +52,14 @@ export class TesseractOffscreenRunner implements OffscreenOcrProviderRunner {
   #workerGroup: string | undefined;
   #creating: Promise<TesseractWorker> | undefined;
   #workerToken: symbol | undefined;
-  #workerLoss: Promise<void> | undefined;
-  #signalWorkerLoss: (() => void) | undefined;
+  #workerLossController: AbortController | undefined;
   #idleTimer: ReturnType<typeof setTimeout> | undefined;
   #disposed = false;
 
   constructor(environment: TesseractRunnerEnvironment = {}) {
     this.#createWorker = environment.createWorker ?? Tesseract.createWorker;
+    this.#createWorkerLossController = environment.createWorkerLossController ??
+      (() => new AbortController());
     this.#getUrl = environment.getUrl ?? ((path) =>
       (browser.runtime.getURL as (value: string) => string)(path));
     this.#setTimer = receiverSafeTimeoutScheduler(environment.setTimer);
@@ -193,24 +196,20 @@ export class TesseractOffscreenRunner implements OffscreenOcrProviderRunner {
   async #workerFor(group: string): Promise<AcquiredTesseractWorker> {
     if (
       this.#worker && this.#workerGroup === group &&
-      this.#workerToken && this.#workerLoss
+      this.#workerToken && this.#workerLossController
     ) {
       return {
         worker: this.#worker,
         token: this.#workerToken,
-        loss: this.#workerLoss,
+        loss: this.#workerLossController.signal,
       };
     }
     if (this.#workerGroup !== group) this.#terminateWorker();
     if (!this.#creating) {
       const token = Symbol(group);
-      let signalWorkerLoss!: () => void;
-      const loss = new Promise<void>((resolve) => {
-        signalWorkerLoss = resolve;
-      });
+      const lossController = this.#createWorkerLossController();
       this.#workerToken = token;
-      this.#workerLoss = loss;
-      this.#signalWorkerLoss = signalWorkerLoss;
+      this.#workerLossController = lossController;
       const creation = Promise.resolve().then(() => this.#createWorker(
         group,
         Tesseract.OEM.LSTM_ONLY,
@@ -243,7 +242,7 @@ export class TesseractOffscreenRunner implements OffscreenOcrProviderRunner {
     }
     const creation = this.#creating;
     const token = this.#workerToken;
-    const loss = this.#workerLoss;
+    const loss = this.#workerLossController?.signal;
     if (!creation || !token || !loss) throw new WorkerLostError();
     const worker = await raceWorkerLoss(creation, loss);
     if (this.#disposed || this.#workerToken !== token) {
@@ -256,7 +255,6 @@ export class TesseractOffscreenRunner implements OffscreenOcrProviderRunner {
 
   #handleWorkerError(token: symbol): void {
     if (this.#workerToken !== token) return;
-    this.#signalWorkerLoss?.();
     this.#terminateWorker(token);
   }
 
@@ -265,13 +263,12 @@ export class TesseractOffscreenRunner implements OffscreenOcrProviderRunner {
     this.#cancelIdleTimer();
     const worker = this.#worker;
     const creating = this.#creating;
-    this.#signalWorkerLoss?.();
+    this.#workerLossController?.abort();
     this.#worker = undefined;
     this.#workerGroup = undefined;
     this.#creating = undefined;
     this.#workerToken = undefined;
-    this.#workerLoss = undefined;
-    this.#signalWorkerLoss = undefined;
+    this.#workerLossController = undefined;
     // Worker shutdown is best-effort cleanup and must never hold the host's
     // active slot after this runner has dropped ownership.
     terminateWorkerDetached(worker);
@@ -357,13 +354,23 @@ function withDeadline<T>(
   });
 }
 
-function raceWorkerLoss<T>(promise: Promise<T>, loss: Promise<void>): Promise<T> {
-  return Promise.race([
-    promise,
-    loss.then(() => {
-      throw new WorkerLostError();
-    }),
-  ]);
+function raceWorkerLoss<T>(promise: Promise<T>, loss: AbortSignal): Promise<T> {
+  if (loss.aborted) return Promise.reject(new WorkerLostError());
+  return new Promise<T>((resolve, reject) => {
+    let settled = false;
+    const finish = (callback: () => void): void => {
+      if (settled) return;
+      settled = true;
+      loss.removeEventListener('abort', onLoss);
+      callback();
+    };
+    const onLoss = (): void => finish(() => reject(new WorkerLostError()));
+    loss.addEventListener('abort', onLoss, { once: true });
+    promise.then(
+      (value) => finish(() => resolve(value)),
+      (error: unknown) => finish(() => reject(error)),
+    );
+  });
 }
 
 function positiveTimeout(value: number | undefined, fallback: number): number {
