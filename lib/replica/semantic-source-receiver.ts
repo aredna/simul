@@ -325,7 +325,9 @@ export class SemanticSourceReceiver {
    * Called after base replay patches. Unsafe or disconnected bindings are
    * purged; safe translated/source presentations are reasserted.
    */
-  refreshBindings(): readonly ReplicaSourceTextChange[] {
+  refreshBindings(
+    refreshProofPresentation = true,
+  ): readonly ReplicaSourceTextChange[] {
     const changes: ReplicaSourceTextChange[] = [];
     for (const [projectionNodeId, entry] of this.#entries) {
       if (this.#entryIsStillSafe(entry) && entry.binding.reapply()) continue;
@@ -338,6 +340,7 @@ export class SemanticSourceReceiver {
         revision: entry.translationRecord.revision + 1,
       }));
     }
+    if (!refreshProofPresentation) return Object.freeze(changes);
     const retainedProofs = new Map<string, ResolvedSemanticSourceProof>();
     for (const resolved of this.#proofs.values()) {
       const refreshed = this.#resolveProof(resolved.proof);

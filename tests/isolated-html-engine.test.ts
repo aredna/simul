@@ -488,6 +488,8 @@ describe('IsolatedHtmlReplicaEngine', () => {
                 kind: 'element', id: 5, namespace: 'html', tagName: 'option',
                 attributes: [], children: [],
               }],
+            }, {
+              kind: 'text', id: 6, text: 'status', translatable: true,
             }] },
           ],
         },
@@ -562,6 +564,20 @@ describe('IsolatedHtmlReplicaEngine', () => {
       createReplicaIdentity({ ...identityParts, sequence: 2 }),
       2,
       2,
+      [{
+        kind: 'text', nodeId: 6,
+        node: { kind: 'text', id: 6, text: 'updated', translatable: true },
+      }],
+      undefined,
+      'passive',
+    )!);
+    expect(semantic.disposed).toBe(false);
+    expect(select.getAttribute('data-simul-source-select-presentation')).toBe('v1');
+    expect(reconnectTimers).toHaveLength(0);
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 3 }),
+      3,
+      3,
       [{
         kind: 'attributes', nodeId: 3, namespace: 'html', tagName: 'body',
         attributes: [['class', 'settled-layout']],
