@@ -225,7 +225,7 @@ export function snapshotOpenReadOnlyReplicaDisclosures(
 export function disposeReadOnlyReplicaDisclosures(document: Document): void {
   const state = DOCUMENT_DISCLOSURES.get(document);
   if (!state) return;
-  for (const controller of [...state.controllers]) controller.dispose();
+  for (const controller of state.controllers) controller.dispose();
 }
 
 /**
@@ -779,18 +779,18 @@ function installDocumentDisclosureState(
   const MutationObserverConstructor = document.defaultView?.MutationObserver;
   const observer = MutationObserverConstructor
     ? new MutationObserverConstructor((records) => {
-      const candidates = new Set<ReplicaDisclosureController>();
-      for (const record of records) {
-        for (const removedNode of record.removedNodes) {
-          for (const controller of controllers) {
+      for (const controller of controllers) {
+        let intersectsRemovedNode = false;
+        for (const record of records) {
+          for (const removedNode of record.removedNodes) {
             if (controller.identityIntersects(removedNode)) {
-              candidates.add(controller);
+              intersectsRemovedNode = true;
+              break;
             }
           }
+          if (intersectsRemovedNode) break;
         }
-      }
-      for (const controller of candidates) {
-        controller.disposeIfIdentityLost();
+        if (intersectsRemovedNode) controller.disposeIfIdentityLost();
       }
     })
     : undefined;
@@ -847,10 +847,11 @@ function snapshotAttributes(
   element: HTMLElement,
   attributes: readonly string[],
 ): ReadonlyMap<string, string | null> {
-  return new Map(attributes.map((attribute) => [
-    attribute,
-    element.getAttribute(attribute),
-  ]));
+  const snapshots = new Map<string, string | null>();
+  for (const attribute of attributes) {
+    snapshots.set(attribute, element.getAttribute(attribute));
+  }
+  return snapshots;
 }
 
 function restoreAttributes(

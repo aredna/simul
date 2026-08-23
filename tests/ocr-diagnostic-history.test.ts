@@ -111,7 +111,8 @@ describe('ImageTranslationDiagnosticHistory', () => {
 
     history.clear();
     expect(history.entries).toEqual([]);
-    expect(history.append('disabled')).toEqual(['1. disabled']);
+    history.append('disabled');
+    expect(history.entries).toEqual(['1. disabled']);
   });
 
   it('reports a bounded reason when OCR never activates for a replica run', () => {

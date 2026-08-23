@@ -482,6 +482,7 @@ let replicaTranslationCoordinator!: ReplicaTranslationCoordinator;
 let imageTranslationController!: ImageTranslationController;
 const imageTranslationDiagnosticHistory =
   new ImageTranslationDiagnosticHistory();
+let imageTranslationDiagnosticsDetails: HTMLDetailsElement | undefined;
 let imageTranslationDiagnosticOutput: HTMLOutputElement | undefined;
 const replicaSurfaceRouter = new ReplicaSurfaceRouter();
 const shadowReplicaEngine = new RrwebShadowReplicaEngine({
@@ -533,7 +534,9 @@ replicaEngineController = new ReplicaEngineController({
   onDiagnostics: (diagnostics) => {
     // This object is intentionally content-free: local size/timing/extent
     // numbers and a bounded code only. It never includes page text or URLs.
-    console.info('[Simul replica]', diagnostics);
+    if (import.meta.env.DEV) {
+      console.info('[Simul replica]', diagnostics);
+    }
   },
   onFallback: () => {
     imageTranslationController?.releaseReplica();
@@ -669,11 +672,13 @@ function handleReplicaLiveFailure(
     : 'fallback';
   // Content-free by construction: bounded enums only, with no page identity,
   // source text, URL, DOM identifier, pixels, or resource metadata.
-  console.info('[Simul replica live failure]', {
-    engine: expectedMode,
-    code,
-    state: action,
-  });
+  if (import.meta.env.DEV) {
+    console.info('[Simul replica live failure]', {
+      engine: expectedMode,
+      code,
+      state: action,
+    });
+  }
   if (action === 'rebuild-last-good' && identity) {
     setStatus(
       'The live mirror disconnected. Rebuilding once while keeping the last good replica visible…',
@@ -780,7 +785,9 @@ const companionBuildIdentity = createExtensionBuildIdentity(
   browser.runtime.getManifest(),
 );
 renderExtensionBuildIdentity(buildVersionElement, companionBuildIdentity);
-console.info(companionBuildIdentity.companionReadyMessage);
+if (import.meta.env.DEV) {
+  console.info(companionBuildIdentity.companionReadyMessage);
+}
 
 const preferenceSafetyClient = new PreferenceSafetyClient({
   connect: () => browser.runtime.connect({
@@ -4874,6 +4881,7 @@ function renderImageAnalysisControls(): void {
 
   const diagnostics = document.createElement('details');
   diagnostics.className = 'image-diagnostics';
+  imageTranslationDiagnosticsDetails = diagnostics;
   const summary = document.createElement('summary');
   setUiText(summary, 'OCR diagnostics');
   summary.title = 'Inspect content-free OCR stages and counts for this session.';
@@ -4888,6 +4896,7 @@ function renderImageAnalysisControls(): void {
   output.setAttribute('aria-live', 'polite');
   imageTranslationDiagnosticOutput = output;
   renderImageTranslationDiagnosticHistory();
+  diagnostics.addEventListener('toggle', renderImageTranslationDiagnosticHistory);
   const clear = document.createElement('button');
   clear.type = 'button';
   clear.className = 'image-diagnostics-clear';
@@ -6039,7 +6048,7 @@ function logTranslationCache(
 
 function renderImageTranslationDiagnosticHistory(): void {
   const output = imageTranslationDiagnosticOutput;
-  if (!output) return;
+  if (!output || imageTranslationDiagnosticsDetails?.open === false) return;
   const entries = imageTranslationDiagnosticHistory.entries;
   output.textContent = entries.length > 0
     ? entries.join('\n')

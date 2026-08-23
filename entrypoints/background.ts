@@ -48,7 +48,9 @@ export default defineBackground(() => {
   const buildIdentity = createExtensionBuildIdentity(
     browser.runtime.getManifest(),
   );
-  console.info(buildIdentity.backgroundReadyMessage);
+  if (import.meta.env.DEV) {
+    console.info(buildIdentity.backgroundReadyMessage);
+  }
 
   const offscreenManager = createBrowserOcrOffscreenManager();
   const transientImageStore = new IndexedDbTransientImageStore();
@@ -164,10 +166,12 @@ export default defineBackground(() => {
       clickSequence,
       preopenedSidePanel,
     ).catch((error: unknown) => {
-      console.info('[Simul toolbar launch]', {
-        state: 'failed',
-        code: launchErrorCode(error),
-      });
+      if (import.meta.env.DEV) {
+        console.info('[Simul toolbar launch]', {
+          state: 'failed',
+          code: launchErrorCode(error),
+        });
+      }
     });
   });
 
@@ -233,10 +237,12 @@ export default defineBackground(() => {
       // The popup is already a valid companion. Preference persistence is
       // secondary and must not leave two live surfaces or encourage a retry
       // that creates another popup.
-      console.info('[Simul toolbar launch]', {
-        state: 'preference-save-failed',
-        code: 'surface_not_remembered',
-      });
+      if (import.meta.env.DEV) {
+        console.info('[Simul toolbar launch]', {
+          state: 'preference-save-failed',
+          code: 'surface_not_remembered',
+        });
+      }
     }
     if (clickSequence !== toolbarClickSequence) {
       await closeStaleDetachedWindow(createdWindow?.id);

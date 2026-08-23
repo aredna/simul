@@ -156,6 +156,21 @@ describe('ChromeTranslatorProvider', () => {
     });
   });
 
+  it('counts Unicode code points without a native quota measurer', async () => {
+    const provider = new ChromeTranslatorProvider(
+      createApi({
+        create: vi.fn().mockResolvedValue({
+          inputQuota: 12,
+          translate: vi.fn().mockResolvedValue('Hello'),
+          destroy: vi.fn(),
+        }),
+      }),
+    );
+    const session = await provider.createSession(pair);
+
+    await expect(session.measureInputUsage?.('A😀𐐷')).resolves.toBe(3);
+  });
+
   it('rejects all work after the native session is destroyed', async () => {
     const measureInputUsage = vi.fn().mockResolvedValue(3);
     const translate = vi.fn().mockResolvedValue('Hello');
