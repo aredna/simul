@@ -92,7 +92,8 @@ export class IndexedDbTransientImageStore implements TransientImageInputStore {
   }
 
   #database(): Promise<IDBDatabase> {
-    return this.#databasePromise ??= new Promise<IDBDatabase>((resolve, reject) => {
+    if (this.#databasePromise) return this.#databasePromise;
+    const pending = new Promise<IDBDatabase>((resolve, reject) => {
       const request = indexedDB.open(TRANSIENT_IMAGE_DATABASE, 1);
       request.onupgradeneeded = () => {
         const database = request.result;
@@ -104,6 +105,11 @@ export class IndexedDbTransientImageStore implements TransientImageInputStore {
       request.onerror = () => reject(request.error ?? new Error('Transient image storage failed.'));
       request.onblocked = () => reject(new Error('Transient image storage is blocked.'));
     });
+    this.#databasePromise = pending;
+    void pending.catch(() => {
+      if (this.#databasePromise === pending) this.#databasePromise = undefined;
+    });
+    return pending;
   }
 }
 
