@@ -181,6 +181,17 @@ export function closeReadOnlyReplicaDisclosures(document: Document): void {
   }
 }
 
+/** Capture reader-owned preview state before a live patch restores the DOM. */
+export function snapshotOpenReadOnlyReplicaDisclosures(
+  document: Document,
+): ReadonlySet<HTMLElement> {
+  const anchors = new Set<HTMLElement>();
+  for (const controller of DOCUMENT_DISCLOSURES.get(document)?.controllers ?? []) {
+    if (controller.isOpen()) anchors.add(controller.anchor);
+  }
+  return anchors;
+}
+
 export function disposeReadOnlyReplicaDisclosures(document: Document): void {
   const state = DOCUMENT_DISCLOSURES.get(document);
   if (!state) return;
@@ -310,9 +321,13 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
     setImportant(this.panel, 'z-index', '2147483647');
 
     if (options.initiallyOpen) {
-      queueMicrotask(() => {
-        if (!this.#disposed && isReplicaNodeConnected(this.anchor)) this.open();
-      });
+      if (this.#identityIsConnected() && this.document.body) {
+        this.open();
+      } else {
+        queueMicrotask(() => {
+          if (!this.#disposed && isReplicaNodeConnected(this.anchor)) this.open();
+        });
+      }
     }
   }
 

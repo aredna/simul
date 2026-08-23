@@ -643,6 +643,11 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(trigger.getAttribute('aria-expanded')).toBe('false');
     expect(panel.hasAttribute('hidden')).toBe(true);
 
+    trigger.dispatchEvent(new select.ownerDocument.defaultView!.Event('click', {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+    }));
     stream.observer?.onPatch(createHtmlMirrorPatch(
       createReplicaIdentity({ ...identityParts, sequence: 1 }),
       1,
@@ -657,6 +662,15 @@ describe('IsolatedHtmlReplicaEngine', () => {
       undefined,
       'passive',
     )!);
+    await Promise.resolve();
+    expect(trigger.getAttribute('aria-expanded')).toBe('true');
+    expect(panel.hasAttribute('hidden')).toBe(false);
+    expect(panel.parentElement).toBe(replica.body);
+    trigger.dispatchEvent(new select.ownerDocument.defaultView!.Event('click', {
+      bubbles: true,
+      cancelable: true,
+      composed: true,
+    }));
     expect(select.selectedIndex).toBe(1);
     expect(select.hasAttribute('data-simul-source-picker-open')).toBe(false);
     expect(select.getAttribute('data-simul-select-facsimile')).toBe('v1');
