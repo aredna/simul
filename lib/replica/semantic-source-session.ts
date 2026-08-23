@@ -196,12 +196,7 @@ export class SemanticSourceSession {
     this.environment.port.onDisconnect.removeListener(this.#onDisconnect);
     this.#observer?.disconnect();
     this.#observer = undefined;
-    if (this.#controlPollTimer !== undefined) {
-      (this.environment.clearTimer ?? ((timer) => clearTimeout(
-        timer as ReturnType<typeof setTimeout>,
-      )))(this.#controlPollTimer);
-    }
-    this.#controlPollTimer = undefined;
+    this.#cancelControlPoll();
     this.#controlPollCandidates = [];
     this.#controlPollFingerprints = new WeakMap<Element, string>();
     this.#controlPollCursor = 0;
@@ -369,7 +364,11 @@ export class SemanticSourceSession {
   }
 
   #scheduleControlPoll(): void {
-    if (this.#disposed || this.#controlPollTimer !== undefined) return;
+    if (
+      this.#disposed ||
+      this.#controlPollCandidates.length === 0 ||
+      this.#controlPollTimer !== undefined
+    ) return;
     const setTimer = this.environment.setTimer ?? ((callback, delayMs) =>
       setTimeout(callback, delayMs));
     this.#controlPollTimer = setTimer(() => {
@@ -377,6 +376,14 @@ export class SemanticSourceSession {
       this.#pollSilentControlState();
       this.#scheduleControlPoll();
     }, SEMANTIC_CONTROL_POLL_INTERVAL_MS);
+  }
+
+  #cancelControlPoll(): void {
+    if (this.#controlPollTimer === undefined) return;
+    (this.environment.clearTimer ?? ((timer) => clearTimeout(
+      timer as ReturnType<typeof setTimeout>,
+    )))(this.#controlPollTimer);
+    this.#controlPollTimer = undefined;
   }
 
   #pollSilentControlState(): void {
@@ -416,6 +423,7 @@ export class SemanticSourceSession {
   ): void {
     const scope = this.#scope;
     if (!complete || !scope || (!scope.formValues && !scope.controlSemantics)) {
+      this.#cancelControlPoll();
       this.#controlPollCandidates = [];
       this.#controlPollFingerprints = new WeakMap<Element, string>();
       this.#controlPollCursor = 0;
@@ -435,6 +443,8 @@ export class SemanticSourceSession {
     this.#controlPollCursor = candidates.length === 0
       ? 0
       : this.#controlPollCursor % candidates.length;
+    if (candidates.length === 0) this.#cancelControlPoll();
+    else this.#scheduleControlPoll();
   }
 
   #controlPollFingerprint(element: Element): string | undefined {
