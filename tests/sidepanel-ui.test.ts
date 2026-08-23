@@ -429,6 +429,13 @@ describe('sidepanel UI structure', () => {
     );
   });
 
+  it('protects an in-flight active-tab follow from stale tab updates', () => {
+    expect(script).toContain('let activeFollowRequestId: number | undefined');
+    expect(script).toContain('activeFollowRequestId !== undefined');
+    expect(script).toContain('activeFollowRequestId = requestId');
+    expect(script).toContain('finishActiveFollowRequest(requestId)');
+  });
+
   it('keeps progress non-interactive and supports dark, narrow, and reduced-motion users', () => {
     expect(style).toContain('pointer-events: none');
     expect(style).toContain('@media (prefers-color-scheme: dark)');
