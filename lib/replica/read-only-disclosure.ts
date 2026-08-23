@@ -458,6 +458,12 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
     return root === this.anchor || root.contains(this.anchor);
   }
 
+  identityIntersects(root: Node): boolean {
+    return root === this.anchor || root === this.panel || root === this.trigger ||
+      root.contains(this.anchor) || root.contains(this.panel) ||
+      Boolean(this.trigger && root.contains(this.trigger));
+  }
+
   open(): void {
     this.#cancelDeferredClose();
     if (
@@ -765,8 +771,18 @@ function installDocumentDisclosureState(
   };
   const MutationObserverConstructor = document.defaultView?.MutationObserver;
   const observer = MutationObserverConstructor
-    ? new MutationObserverConstructor(() => {
-      for (const controller of [...controllers]) {
+    ? new MutationObserverConstructor((records) => {
+      const candidates = new Set<ReplicaDisclosureController>();
+      for (const record of records) {
+        for (const removedNode of record.removedNodes) {
+          for (const controller of controllers) {
+            if (controller.identityIntersects(removedNode)) {
+              candidates.add(controller);
+            }
+          }
+        }
+      }
+      for (const controller of candidates) {
         controller.disposeIfIdentityLost();
       }
     })
