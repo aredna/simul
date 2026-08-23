@@ -839,6 +839,59 @@ describe('semantic source session', () => {
     session.dispose();
   });
 
+  it('skips semantic rescans for provable same-value mutations', () => {
+    const { document, window } = parseHTML(
+      '<html><body><main class="stable">Article</main></body></html>',
+    );
+    const target = document.querySelector('main')!;
+    let styleReads = 0;
+    const mutationHarness: SemanticMutationHarness = { observed: [] };
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(
+      port,
+      document,
+      window,
+      'isolated-html',
+      undefined,
+      () => {
+        styleReads += 1;
+        return {
+          display: 'block',
+          visibility: 'visible',
+          getPropertyValue: () => 'none',
+        } as unknown as CSSStyleDeclaration;
+      },
+      undefined,
+      mutationHarness,
+    );
+    port.emit(createSemanticSourceStart(
+      'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+    ));
+    const initial = port.messages[0]!;
+    port.emit(createSemanticSourceAck(
+      identity,
+      initial.policyFingerprint,
+      initial.sequence,
+    ));
+    styleReads = 0;
+
+    mutationHarness.callback?.([{
+      type: 'attributes',
+      target,
+      attributeName: 'class',
+      attributeNamespace: null,
+      oldValue: 'stable',
+    } as unknown as MutationRecord], {} as MutationObserver);
+
+    // The sticky secret ledger still performs its one mandatory classification
+    // read; the full semantic scan would add more reads after that boundary.
+    expect(styleReads).toBe(1);
+    expect(port.messages).toHaveLength(1);
+    session.dispose();
+  });
+
   it('reads text only from a validated disclosure, including its closed state', () => {
     const { document, window } = parseHTML(
       '<html><body><button aria-expanded="false" aria-controls="menu">Menu</button><div id="menu" hidden>Account notices</div><div id="other">Not controlled</div></body></html>',

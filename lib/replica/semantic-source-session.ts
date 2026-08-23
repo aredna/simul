@@ -41,6 +41,7 @@ import {
 } from './source-privacy-policy';
 import type { ReplicaReadScope } from './read-scope-policy';
 import type { ReplicaSourceDocumentIdentity } from './source-identity';
+import { sourceMutationMayChangeCurrentValue } from './source-mutation-filter';
 
 interface MessageEventPort {
   addListener(listener: (message: unknown) => void): void;
@@ -325,6 +326,7 @@ export class SemanticSourceSession {
           this.environment.window,
           this.#classifier,
         );
+        if (!records.some(sourceMutationMayChangeCurrentValue)) return;
         this.refresh();
       });
       this.#observeSemanticRoot(this.environment.document);
