@@ -116,6 +116,7 @@ export class ReplicaTranslationCoordinator {
   readonly #memory: TranslationMemory;
   readonly #providerId: string;
   #pair: TranslationPair | undefined;
+  #pairKey: string | undefined;
   #translationEpoch = 0;
   #pairController = new AbortController();
   #session: TranslationSession | undefined;
@@ -164,7 +165,7 @@ export class ReplicaTranslationCoordinator {
     if (
       this.#disposed ||
       result.translationEpoch !== this.#translationEpoch ||
-      result.pairKey !== this.#selectedPairKey()
+      result.pairKey !== this.#pairKey
     ) return false;
     const snapshot = this.#currentRecords;
     return Boolean(
@@ -189,11 +190,12 @@ export class ReplicaTranslationCoordinator {
     this.#session = undefined;
     this.#sessionTask = undefined;
     this.#pair = pair;
+    this.#pairKey = pair && pair.sourceLanguage !== pair.targetLanguage
+      ? translationPairKey(pair)
+      : undefined;
     this.surface.beginProjection({
       translationEpoch: this.#translationEpoch,
-      pairKey: pair && pair.sourceLanguage !== pair.targetLanguage
-        ? translationPairKey(pair)
-        : undefined,
+      pairKey: this.#pairKey,
     });
   }
 
@@ -213,9 +215,11 @@ export class ReplicaTranslationCoordinator {
     const snapshot = this.surface.snapshot();
     if (!snapshot) return this.#emptyResult();
     this.#replaceCurrentRecords(snapshot);
-    const pairKey = translationPairKey(pair);
-    const candidates = snapshot.records.filter(isTranslatableRecord);
-    for (const record of candidates) {
+    const pairKey = this.#pairKey!;
+    let candidateCount = 0;
+    for (const record of snapshot.records) {
+      if (!isTranslatableRecord(record)) continue;
+      candidateCount += 1;
       this.#enqueue({
         record,
         replayLease: snapshot.replayLease,
@@ -225,7 +229,7 @@ export class ReplicaTranslationCoordinator {
         ...(options.signal ? { signal: options.signal } : {}),
       }, false);
     }
-    return this.#drain(options.onProgress, candidates.length);
+    return this.#drain(options.onProgress, candidateCount);
   }
 
   handleSourceCommit(commit: ReplicaSourceCommit): void {
@@ -255,7 +259,7 @@ export class ReplicaTranslationCoordinator {
       this.#pendingOverflow = 0;
     }
     this.#applySourceCommitToCurrentRecords(commit);
-    const pairKey = translationPairKey(this.#pair);
+    const pairKey = this.#pairKey!;
     let queued = false;
     for (const change of commit.changes) {
       if (change.kind === 'remove') {
@@ -564,12 +568,6 @@ export class ReplicaTranslationCoordinator {
     return value;
   }
 
-  #selectedPairKey(): string | undefined {
-    return this.#pair && this.#pair.sourceLanguage !== this.#pair.targetLanguage
-      ? translationPairKey(this.#pair)
-      : undefined;
-  }
-
   #resultContext(): Pick<
     ReplicaTranslationRunResult,
     'document' | 'replayLease' | 'translationEpoch' | 'pairKey'
@@ -577,7 +575,7 @@ export class ReplicaTranslationCoordinator {
     const snapshot = this.#currentRecords ?? this.surface.snapshot();
     return {
       translationEpoch: this.#translationEpoch,
-      ...(this.#selectedPairKey() ? { pairKey: this.#selectedPairKey() } : {}),
+      ...(this.#pairKey ? { pairKey: this.#pairKey } : {}),
       ...(snapshot
         ? { document: snapshot.document, replayLease: snapshot.replayLease }
         : {}),
@@ -601,7 +599,7 @@ export class ReplicaTranslationCoordinator {
       this.#disposed ||
       job.translationEpoch !== this.#translationEpoch ||
       !this.#pair ||
-      translationPairKey(this.#pair) !== job.pairKey
+      this.#pairKey !== job.pairKey
     ) return false;
     const snapshot = this.#currentRecords;
     if (
@@ -625,7 +623,7 @@ export class ReplicaTranslationCoordinator {
     this.#currentRecords = {
       document: snapshot.document,
       replayLease: snapshot.replayLease,
-      records: new Map(snapshot.records.map((record) => [record.nodeId, record])),
+      records: indexReplicaRecords(snapshot.records),
     };
   }
 
@@ -648,7 +646,7 @@ export class ReplicaTranslationCoordinator {
       this.#currentRecords = {
         document: commit.document,
         replayLease: commit.replayLease,
-        records: new Map(commit.records.map((record) => [record.nodeId, record])),
+        records: indexReplicaRecords(commit.records),
       };
       return;
     }
@@ -657,6 +655,14 @@ export class ReplicaTranslationCoordinator {
       else current.records.set(change.record.nodeId, change.record);
     }
   }
+}
+
+function indexReplicaRecords(
+  records: readonly ReplicaSourceTextRecord[],
+): Map<number, ReplicaSourceTextRecord> {
+  const indexed = new Map<number, ReplicaSourceTextRecord>();
+  for (const record of records) indexed.set(record.nodeId, record);
+  return indexed;
 }
 
 export function translationPairKey(pair: TranslationPair): string {

@@ -123,9 +123,11 @@ export class SemanticSourceReceiver {
   constructor(private readonly environment: SemanticSourceReceiverEnvironment) {}
 
   records(): readonly ReplicaSourceTextRecord[] {
-    return Object.freeze(
-      [...this.#entries.values()].map(({ translationRecord }) => translationRecord),
-    );
+    const records: ReplicaSourceTextRecord[] = [];
+    for (const entry of this.#entries.values()) {
+      records.push(entry.translationRecord);
+    }
+    return Object.freeze(records);
   }
 
   get(projectionNodeId: number): ReplicaSourceTextRecord | undefined {
