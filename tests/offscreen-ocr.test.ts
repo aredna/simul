@@ -350,6 +350,33 @@ describe('offscreen OCR protocol and lifecycle', () => {
     await expect(second).resolves.toMatchObject({ kind: 'simul:ocr-v1:result' });
   });
 
+  it('settles the active job when provider cancellation does not', async () => {
+    const store = memoryStore();
+    await store.put(pixels.encoded, 'input-1');
+    const recognize = vi.fn(
+      async () => new Promise<ImageTextResult>(() => undefined),
+    );
+    const host = new OffscreenComputeHost(store, {
+      recognize,
+      cancelActive: async () => undefined,
+      dispose: async () => undefined,
+    });
+    const job = createJob('job-stuck-on-dispose', 0);
+    const response = host.handle({
+      kind: 'simul:ocr-v1:run',
+      version: 1,
+      job,
+    });
+    await vi.waitFor(() => expect(recognize).toHaveBeenCalledOnce());
+
+    await host.dispose();
+
+    await expect(response).resolves.toMatchObject({
+      kind: 'simul:ocr-v1:error',
+      code: 'cancelled',
+    });
+  });
+
   it('retries infrastructure loss once, deletes transient input, and reuses recognition cache', async () => {
     const store = memoryStore();
     const calls: OffscreenOcrJob[] = [];
