@@ -101,7 +101,11 @@ export class OffscreenComputeHost {
       this.#clearTimer(this.#cleanupTimer);
       this.#cleanupTimer = undefined;
     }
+    const active = this.#active;
+    this.#active = undefined;
     this.#activeAbortController?.abort();
+    this.#activeAbortController = undefined;
+    if (active) active.resolve(createOffscreenOcrError(active.job, 'cancelled'));
     const pending = this.#pending;
     this.#pending = undefined;
     if (pending) pending.resolve(createOffscreenOcrError(pending.job, 'cancelled'));
