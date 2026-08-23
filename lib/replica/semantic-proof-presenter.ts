@@ -353,15 +353,53 @@ function applyTypedProof(
     ['aria-haspopup', trigger.getAttribute('aria-haspopup')],
     ['id', panel.getAttribute('id')],
   ]);
+  const originalTriggerMarker = trigger.getAttribute(
+    'data-simul-source-disclosure-state',
+  );
+  const originalPanelMarker = panel.getAttribute(
+    'data-simul-source-disclosure-state',
+  );
+  const presentedExpanded = proof.expanded ? 'true' : 'false';
   panel.setAttribute('id', proof.relationId);
   trigger.setAttribute('aria-controls', proof.relationId);
-  trigger.setAttribute('aria-expanded', proof.expanded ? 'true' : 'false');
+  trigger.setAttribute('aria-expanded', presentedExpanded);
   trigger.setAttribute('aria-haspopup', proof.popupRole);
+  trigger.setAttribute('data-simul-source-disclosure-state', 'v1');
+  panel.setAttribute('data-simul-source-disclosure-state', 'v1');
   return () => {
-    restoreAttribute(trigger, 'aria-controls', original.get('aria-controls') ?? null);
-    restoreAttribute(trigger, 'aria-expanded', original.get('aria-expanded') ?? null);
-    restoreAttribute(trigger, 'aria-haspopup', original.get('aria-haspopup') ?? null);
-    restoreAttribute(panel, 'id', original.get('id') ?? null);
+    const triggerStillOwned = trigger.getAttribute(
+      'data-simul-source-disclosure-state',
+    ) === 'v1';
+    const panelStillOwned = panel.getAttribute(
+      'data-simul-source-disclosure-state',
+    ) === 'v1';
+    if (
+      triggerStillOwned &&
+      trigger.getAttribute('aria-controls') === proof.relationId &&
+      trigger.getAttribute('aria-expanded') === presentedExpanded &&
+      trigger.getAttribute('aria-haspopup') === proof.popupRole
+    ) {
+      restoreAttribute(trigger, 'aria-controls', original.get('aria-controls') ?? null);
+      restoreAttribute(trigger, 'aria-expanded', original.get('aria-expanded') ?? null);
+      restoreAttribute(trigger, 'aria-haspopup', original.get('aria-haspopup') ?? null);
+    }
+    if (panelStillOwned && panel.getAttribute('id') === proof.relationId) {
+      restoreAttribute(panel, 'id', original.get('id') ?? null);
+    }
+    if (triggerStillOwned) {
+      restoreAttribute(
+        trigger,
+        'data-simul-source-disclosure-state',
+        originalTriggerMarker,
+      );
+    }
+    if (panelStillOwned) {
+      restoreAttribute(
+        panel,
+        'data-simul-source-disclosure-state',
+        originalPanelMarker,
+      );
+    }
   };
 }
 
