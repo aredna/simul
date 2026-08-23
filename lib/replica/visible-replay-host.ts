@@ -423,6 +423,10 @@ export class VisibleReplayHost implements ReplayPresentationHost {
     candidate.installScrollListener(() => {
       if (this.#committed !== candidate || candidate.released) return;
       if (this.#sourceScrollTarget === 'nested') return;
+      // A reader can move the replica before the source's first scroll packet
+      // arrives. Treat that local position as authoritative so an intervening
+      // recovery candidate cannot overwrite it with its initial zero offset.
+      this.#hasSourceScroll = true;
       this.#sourceScrollX = clamp(
         candidate.scroller.scrollLeft / candidate.scale,
         0,
