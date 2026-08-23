@@ -14,7 +14,13 @@ export class NavigationRefreshGate {
     if (!scope || !key) return false;
     this.#sameDocumentScope = undefined;
     this.#sameDocumentKey = undefined;
-    if (this.#pendingScope === scope && this.#pendingKey === key) return false;
+    if (this.#pendingScope === scope) {
+      // Chrome can emit several `loading` updates while redirects or canonical
+      // rewrites retarget one unfinished document. The first update already
+      // invalidated the old replica; only keep the newest capture identity.
+      this.#pendingKey = key;
+      return false;
+    }
     this.#pendingScope = scope;
     this.#pendingKey = key;
     return true;
