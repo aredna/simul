@@ -166,7 +166,7 @@ export class ReplicaTranslationCoordinator {
       result.translationEpoch !== this.#translationEpoch ||
       result.pairKey !== this.#selectedPairKey()
     ) return false;
-    const snapshot = this.surface.snapshot();
+    const snapshot = this.#currentRecords;
     return Boolean(
       snapshot &&
         result.document &&
@@ -184,6 +184,7 @@ export class ReplicaTranslationCoordinator {
     this.#pendingCharacters = 0;
     this.#pendingSkipped = 0;
     this.#pendingOverflow = 0;
+    this.#currentRecords = undefined;
     this.#session?.destroy();
     this.#session = undefined;
     this.#sessionTask = undefined;
@@ -557,7 +558,7 @@ export class ReplicaTranslationCoordinator {
     ReplicaTranslationRunResult,
     'document' | 'replayLease' | 'translationEpoch' | 'pairKey'
   > {
-    const snapshot = this.surface.snapshot();
+    const snapshot = this.#currentRecords ?? this.surface.snapshot();
     return {
       translationEpoch: this.#translationEpoch,
       ...(this.#selectedPairKey() ? { pairKey: this.#selectedPairKey() } : {}),
