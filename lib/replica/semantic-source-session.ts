@@ -126,6 +126,9 @@ const SEMANTIC_SELECT_ACTIVATION_EVENTS = Object.freeze([
   'click',
   'keydown',
 ] as const);
+const SEMANTIC_DOM_CHANGE_EVENTS = Object.freeze([
+  'beforeinput', 'input', 'change', 'toggle',
+] as const);
 const SEMANTIC_CONTROL_ROLES = new Set([
   'button', 'checkbox', 'combobox', 'link', 'menuitem', 'menuitemcheckbox',
   'menuitemradio', 'option', 'radio', 'switch', 'tab', 'treeitem',
@@ -166,6 +169,8 @@ export class SemanticSourceSession {
   #scope: ReplicaReadScope | undefined;
   #policyFingerprint: string | undefined;
   #observer: Pick<MutationObserver, 'observe' | 'disconnect'> | undefined;
+  readonly #observedSemanticRoots = new WeakSet<Document | ShadowRoot>();
+  readonly #semanticEventRoots = new Set<Document | ShadowRoot>();
   #sequence = 0;
   #inFlightSequence: number | undefined;
   #dirty = false;
@@ -200,21 +205,15 @@ export class SemanticSourceSession {
     this.#controlPollCandidates = [];
     this.#controlPollFingerprints = new WeakMap<Element, string>();
     this.#controlPollCursor = 0;
-    this.environment.document.removeEventListener('input', this.#onDomChange, true);
-    this.environment.document.removeEventListener(
-      'beforeinput',
-      this.#onDomChange,
-      true,
-    );
-    this.environment.document.removeEventListener('change', this.#onDomChange, true);
-    this.environment.document.removeEventListener('toggle', this.#onDomChange, true);
-    for (const type of SEMANTIC_SELECT_ACTIVATION_EVENTS) {
-      this.environment.document.removeEventListener(
-        type,
-        this.#onSelectActivation,
-        true,
-      );
+    for (const root of this.#semanticEventRoots) {
+      for (const type of SEMANTIC_DOM_CHANGE_EVENTS) {
+        root.removeEventListener(type, this.#onDomChange, true);
+      }
+      for (const type of SEMANTIC_SELECT_ACTIVATION_EVENTS) {
+        root.removeEventListener(type, this.#onSelectActivation, true);
+      }
     }
+    this.#semanticEventRoots.clear();
     this.#documentIdentity = undefined;
     this.#scope = undefined;
     this.#policyFingerprint = undefined;
@@ -328,29 +327,7 @@ export class SemanticSourceSession {
         );
         this.refresh();
       });
-      this.#observer.observe(this.environment.document, {
-        subtree: true,
-        childList: true,
-        characterData: true,
-        characterDataOldValue: true,
-        attributes: true,
-        attributeOldValue: true,
-      });
-      this.environment.document.addEventListener(
-        'beforeinput',
-        this.#onDomChange,
-        true,
-      );
-      this.environment.document.addEventListener('input', this.#onDomChange, true);
-      this.environment.document.addEventListener('change', this.#onDomChange, true);
-      this.environment.document.addEventListener('toggle', this.#onDomChange, true);
-      for (const type of SEMANTIC_SELECT_ACTIVATION_EVENTS) {
-        this.environment.document.addEventListener(
-          type,
-          this.#onSelectActivation,
-          true,
-        );
-      }
+      this.#observeSemanticRoot(this.environment.document);
       this.#dirty = true;
       this.#flush();
       this.#scheduleControlPoll();
@@ -369,6 +346,26 @@ export class SemanticSourceSession {
       this.#scheduled = false;
       this.#flush();
     });
+  }
+
+  #observeSemanticRoot(root: Document | ShadowRoot): void {
+    if (!this.#observer || this.#observedSemanticRoots.has(root)) return;
+    this.#observer.observe(root, {
+      subtree: true,
+      childList: true,
+      characterData: true,
+      characterDataOldValue: true,
+      attributes: true,
+      attributeOldValue: true,
+    });
+    this.#observedSemanticRoots.add(root);
+    this.#semanticEventRoots.add(root);
+    for (const type of SEMANTIC_DOM_CHANGE_EVENTS) {
+      root.addEventListener(type, this.#onDomChange, true);
+    }
+    for (const type of SEMANTIC_SELECT_ACTIVATION_EVENTS) {
+      root.addEventListener(type, this.#onSelectActivation, true);
+    }
   }
 
   #scheduleControlPoll(): void {
@@ -589,7 +586,10 @@ export class SemanticSourceSession {
       if (secret) continue;
       const children: Node[] = [...element.childNodes];
       const shadowRoot = safelyReadShadowRoot(element);
-      if (shadowRoot) children.push(...shadowRoot.childNodes);
+      if (shadowRoot) {
+        this.#observeSemanticRoot(shadowRoot);
+        children.push(...shadowRoot.childNodes);
+      }
       for (let index = children.length - 1; index >= 0; index -= 1) {
         stack.push({ node: children[index]!, secretAncestor: secret });
       }

@@ -727,6 +727,60 @@ describe('semantic source session', () => {
     session.dispose();
   });
 
+  it('observes controls inserted inside an open shadow root', () => {
+    const { document, window } = parseHTML(
+      '<html><body><div id="host"></div></body></html>',
+    );
+    const shadow = document.querySelector('#host')!.attachShadow({ mode: 'open' });
+    const mutationHarness: SemanticMutationHarness = { observed: [] };
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(
+      port,
+      document,
+      window,
+      'isolated-html',
+      undefined,
+      undefined,
+      undefined,
+      mutationHarness,
+    );
+    port.emit(createSemanticSourceStart(
+      'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+    ));
+    expect(mutationHarness.observed).toEqual(expect.arrayContaining([
+      document,
+      shadow,
+    ]));
+    const initial = port.messages[0]!;
+    port.emit(createSemanticSourceAck(
+      identity,
+      initial.policyFingerprint,
+      initial.sequence,
+    ));
+
+    const select = document.createElement('select');
+    select.innerHTML = '<option selected>Late choice</option>';
+    Object.defineProperty(select, 'multiple', {
+      configurable: true,
+      get: () => false,
+    });
+    shadow.append(select);
+    mutationHarness.callback?.([{
+      type: 'childList',
+      target: shadow,
+      addedNodes: [select],
+      removedNodes: [],
+    } as unknown as MutationRecord], {} as MutationObserver);
+
+    expect(port.messages[1]!.proofs).toContainEqual(expect.objectContaining({
+      kind: 'select-presentation',
+      nodeId: nodeId(select),
+    }));
+    session.dispose();
+  });
+
   it('reads text only from a validated disclosure, including its closed state', () => {
     const { document, window } = parseHTML(
       '<html><body><button aria-expanded="false" aria-controls="menu">Menu</button><div id="menu" hidden>Account notices</div><div id="other">Not controlled</div></body></html>',
@@ -1400,6 +1454,7 @@ function createSession(
   secretClassifier?: StickySourceSecretClassifier,
   getComputedStyle?: Window['getComputedStyle'],
   timers?: Array<() => void>,
+  mutationHarness?: SemanticMutationHarness,
 ): SemanticSourceSession {
   return new SemanticSourceSession({
     port,
@@ -1415,7 +1470,13 @@ function createSession(
     bridge,
     ...(secretClassifier ? { secretClassifier } : {}),
     getNodeId: (node) => nodeId(node),
-    createMutationObserver: () => ({ observe: () => undefined, disconnect: () => undefined }),
+    createMutationObserver: (callback) => {
+      if (mutationHarness) mutationHarness.callback = callback;
+      return {
+        observe: (target) => mutationHarness?.observed.push(target),
+        disconnect: () => undefined,
+      };
+    },
     schedule: (callback) => callback(),
     setTimer: (callback) => {
       if (timers) timers.push(callback);
@@ -1427,6 +1488,11 @@ function createSession(
       if (index >= 0) timers.splice(index, 1);
     },
   });
+}
+
+interface SemanticMutationHarness {
+  readonly observed: Node[];
+  callback?: MutationCallback;
 }
 
 class FakeSemanticPort implements SemanticSourcePort {
