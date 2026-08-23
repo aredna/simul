@@ -2218,6 +2218,30 @@ function applyPatchBatch(
     readonly insertedNodeCount: number;
   }
 
+  let indexedNodeIds: Map<Node, number> | undefined;
+  const currentNodeIds = (): Map<Node, number> => {
+    indexedNodeIds ??= new Map(
+      [...state.nodes].map(([id, node]) => [node, id]),
+    );
+    return indexedNodeIds;
+  };
+  const setCurrentNode = (id: number, node: Node): void => {
+    const previous = state.nodes.get(id);
+    if (previous) currentNodeIds().delete(previous);
+    state.nodes.set(id, node);
+    currentNodeIds().set(node, id);
+  };
+  let indexedPresentationNodes: Set<Node> | undefined;
+  const currentPresentationNodes = (): ReadonlySet<Node> => {
+    if (indexedPresentationNodes) return indexedPresentationNodes;
+    indexedPresentationNodes = new Set();
+    for (const node of state.nodes.values()) {
+      indexedPresentationNodes.add(node);
+      indexedPresentationNodes.add(presentationNodeForMirrorNode(node));
+    }
+    return indexedPresentationNodes;
+  };
+
   const targetOperations: Array<{
     readonly operation: Exclude<HtmlMirrorPatchOperation, { kind: 'dimensions' }>;
     readonly target: Node;
@@ -2261,7 +2285,7 @@ function applyPatchBatch(
       // never accept a partial optgroup/option children patch that could make
       // the browser invent a new selectedIndex before owner state arrives.
       if (select && targetElement !== select) return undefined;
-      const selectNodeId = select ? findDomNodeId(state, select) : undefined;
+      const selectNodeId = select ? currentNodeIds().get(select) : undefined;
       const structuralIndex = operations.indexOf(operation);
       const selectStateOperation = operations.find(
         (candidate) => candidate.kind === 'attributes' &&
@@ -2332,9 +2356,9 @@ function applyPatchBatch(
       ) return undefined;
       const currentContext = containerContext(target);
       const prospectiveContext = batchContainerContext(
-        state,
         target,
         prospectiveAttributeOperations,
+        currentNodeIds(),
       );
       if (
         (
@@ -2442,10 +2466,14 @@ function applyPatchBatch(
   const oldChildren = new Map<number, readonly Node[]>();
   for (const operation of structuralOperations) {
     const target = state.nodes.get(operation.nodeId) as Node;
-    const mirrored = [...target.childNodes].filter((child) => hasDomId(state, child));
+    const mirrored = [...target.childNodes].filter(
+      (child) => currentPresentationNodes().has(child),
+    );
     oldChildren.set(operation.nodeId, mirrored);
     if (operation.kind === 'children') {
-      for (const child of mirrored) collectDomIds(state, child, removedIds);
+      for (const child of mirrored) {
+        collectDomIds(currentNodeIds(), child, removedIds);
+      }
     }
   }
 
@@ -2497,9 +2525,9 @@ function applyPatchBatch(
   const allRemovedIds = new Set(removedIds);
   for (const operation of reconcileOperations) {
     for (const child of oldChildren.get(operation.nodeId) ?? []) {
-      const childId = findDomNodeId(state, child);
+      const childId = currentNodeIds().get(child);
       if (childId !== undefined && retainedIds.has(childId)) continue;
-      collectDomIds(state, child, allRemovedIds);
+      collectDomIds(currentNodeIds(), child, allRemovedIds);
     }
   }
   const prospectiveNodeCount = state.nodes.size - allRemovedIds.size +
@@ -2729,7 +2757,7 @@ function applyPatchBatch(
           (style) => style.parentNode === plan.target,
         );
         for (const child of plan.oldChildren) {
-          removeDomTree(state, child);
+          removeDomTree(state, child, currentNodeIds());
           child.parentNode?.removeChild(child);
         }
         plan.target.appendChild(plan.fragment);
@@ -2737,7 +2765,9 @@ function applyPatchBatch(
         for (const style of plan.ownedAdoptedStyles) {
           state.ownedAdoptedStyles.add(style);
         }
-        for (const [id, node] of plan.nodes) state.nodes.set(id, node);
+        for (const [id, node] of plan.nodes) {
+          setCurrentNode(id, node);
+        }
         for (const [id, node] of plan.textMetadata) state.textMetadata.set(id, node);
         for (const [id, control] of plan.controlMetadata) {
           state.controlMetadata.set(id, control);
@@ -2752,13 +2782,15 @@ function applyPatchBatch(
       if (!plan) throw new Error('Missing children reconciliation plan.');
       for (const child of plan.oldChildren) {
         if (plan.retainedChildren.has(child)) continue;
-        removeDomTree(state, child);
+        removeDomTree(state, child, currentNodeIds());
         child.parentNode?.removeChild(child);
       }
       for (const style of plan.ownedAdoptedStyles) {
         state.ownedAdoptedStyles.add(style);
       }
-      for (const [id, node] of plan.nodes) state.nodes.set(id, node);
+      for (const [id, node] of plan.nodes) {
+        setCurrentNode(id, node);
+      }
       for (const [id, node] of plan.textMetadata) state.textMetadata.set(id, node);
       for (const [id, control] of plan.controlMetadata) {
         state.controlMetadata.set(id, control);
@@ -3059,22 +3091,29 @@ function restoreSet<Value>(target: Set<Value>, source: ReadonlySet<Value>): void
   for (const value of source) target.add(value);
 }
 
-function removeDomTree(state: HtmlMirrorDomState, node: Node): void {
-  for (const child of [...node.childNodes]) removeDomTree(state, child);
+function removeDomTree(
+  state: HtmlMirrorDomState,
+  node: Node,
+  nodeIds: Map<Node, number>,
+): void {
+  for (const child of [...node.childNodes]) {
+    removeDomTree(state, child, nodeIds);
+  }
   if (node.nodeType === Node.ELEMENT_NODE) {
     const shadow = (node as Element).shadowRoot;
-    if (shadow) removeDomTree(state, shadow);
+    if (shadow) removeDomTree(state, shadow, nodeIds);
   }
   if (state.ownedAdoptedStyles.has(node as HTMLStyleElement)) {
     state.ownedAdoptedStyles.delete(node as HTMLStyleElement);
   }
-  for (const [id, candidate] of state.nodes) {
-    if (candidate !== node) continue;
+  const id = nodeIds.get(node);
+  if (id !== undefined) {
+    nodeIds.delete(node);
+    if (state.nodes.get(id) !== node) return;
     state.nodes.delete(id);
     state.textMetadata.delete(id);
     state.controlMetadata.delete(id);
     state.records.delete(id);
-    break;
   }
 }
 
@@ -3109,15 +3148,6 @@ const PUBLIC_DOM_CONTEXT: DomContentContext = Object.freeze({
   nativeSelectRegion: false,
   nativeSelectParent: false,
 });
-
-function hasDomId(state: HtmlMirrorDomState, node: Node): boolean {
-  for (const candidate of state.nodes.values()) {
-    if (candidate === node || presentationNodeForMirrorNode(candidate) === node) {
-      return true;
-    }
-  }
-  return false;
-}
 
 function presentationNodeForMirrorNode(node: Node): Node {
   if (node.nodeType === Node.ELEMENT_NODE) {
@@ -3236,12 +3266,12 @@ function containerContext(
 }
 
 function batchContainerContext(
-  state: HtmlMirrorDomState,
   target: Node,
   pending: ReadonlyMap<
     number,
     Extract<HtmlMirrorPatchOperation, { kind: 'attributes' }>
   >,
+  nodeIds: ReadonlyMap<Node, number>,
 ): DomContentContext {
   let element = target.nodeType === Node.ELEMENT_NODE
     ? target as Element
@@ -3253,7 +3283,7 @@ function batchContainerContext(
   for (; element; element = composedParentElement(element)) chain.push(element);
   let context = PUBLIC_DOM_CONTEXT;
   for (const current of chain.reverse()) {
-    const nodeId = findDomNodeId(state, current);
+    const nodeId = nodeIds.get(current);
     const attributes = nodeId === undefined
       ? undefined
       : pending.get(nodeId)?.attributes;
@@ -3266,16 +3296,6 @@ function batchContainerContext(
     context = extendDomContentContext(context, tagName, values);
   }
   return context;
-}
-
-function findDomNodeId(
-  state: HtmlMirrorDomState,
-  target: Node,
-): number | undefined {
-  for (const [nodeId, node] of state.nodes) {
-    if (node === target) return nodeId;
-  }
-  return undefined;
 }
 
 function domTextContext(node: Node): DomContentContext {
@@ -3517,20 +3537,16 @@ function validTextForContext(
 }
 
 function collectDomIds(
-  state: HtmlMirrorDomState,
+  nodeIds: ReadonlyMap<Node, number>,
   node: Node,
   ids: Set<number>,
 ): void {
-  for (const [id, candidate] of state.nodes) {
-    if (candidate === node) {
-      ids.add(id);
-      break;
-    }
-  }
-  for (const child of [...node.childNodes]) collectDomIds(state, child, ids);
+  const id = nodeIds.get(node);
+  if (id !== undefined) ids.add(id);
+  for (const child of [...node.childNodes]) collectDomIds(nodeIds, child, ids);
   if (node.nodeType === Node.ELEMENT_NODE) {
     const shadow = (node as Element).shadowRoot;
-    if (shadow) collectDomIds(state, shadow, ids);
+    if (shadow) collectDomIds(nodeIds, shadow, ids);
   }
 }
 
