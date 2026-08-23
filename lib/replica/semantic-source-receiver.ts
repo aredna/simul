@@ -205,6 +205,10 @@ export class SemanticSourceReceiver {
     }
     const proofPlans = this.#resolveProofs(batch.proofs);
     if (!proofPlans) return undefined;
+    const proofPresentationChanged = !sameResolvedProofSet(
+      this.#proofs,
+      proofPlans,
+    );
     const previousProofs = Object.freeze([...this.#proofs.values()]);
 
     const changes: ReplicaSourceTextChange[] = [];
@@ -259,7 +263,9 @@ export class SemanticSourceReceiver {
         }
       }
     }
-    if (committed && this.environment.applyProofs) {
+    if (
+      committed && proofPresentationChanged && this.environment.applyProofs
+    ) {
       try {
         committed = this.environment.applyProofs(
           Object.freeze([...proofPlans.values()]),
@@ -679,6 +685,55 @@ export class SemanticSourceReceiver {
       presentation === 'selection',
     );
   }
+}
+
+function sameResolvedProofSet(
+  current: ReadonlyMap<string, ResolvedSemanticSourceProof>,
+  next: ReadonlyMap<string, ResolvedSemanticSourceProof>,
+): boolean {
+  if (current.size !== next.size) return false;
+  for (const [proofId, right] of next) {
+    const left = current.get(proofId);
+    if (!left || !sameResolvedProof(left, right)) return false;
+  }
+  return true;
+}
+
+function sameResolvedProof(
+  left: ResolvedSemanticSourceProof,
+  right: ResolvedSemanticSourceProof,
+): boolean {
+  if (
+    left.kind !== right.kind ||
+    semanticSourceProofSignature(left.proof) !==
+      semanticSourceProofSignature(right.proof)
+  ) return false;
+  if (left.kind === 'select-state') {
+    return right.kind === 'select-state' && left.target === right.target &&
+      sameNodeList(left.selectedOptions, right.selectedOptions);
+  }
+  if (left.kind === 'select-presentation') {
+    return right.kind === 'select-presentation' && left.target === right.target;
+  }
+  if (left.kind === 'choice-state') {
+    return right.kind === 'choice-state' && left.target === right.target;
+  }
+  if (left.kind === 'control-state') {
+    return right.kind === 'control-state' && left.target === right.target;
+  }
+  if (left.kind === 'aria-state') {
+    return right.kind === 'aria-state' && left.target === right.target;
+  }
+  return right.kind === 'disclosure-state' && left.trigger === right.trigger &&
+    left.panel === right.panel;
+}
+
+function sameNodeList(
+  left: readonly Node[],
+  right: readonly Node[],
+): boolean {
+  return left.length === right.length &&
+    left.every((node, index) => node === right[index]);
 }
 
 export function semanticProjectionNodeId(recordId: number): number | undefined {

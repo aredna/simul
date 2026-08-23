@@ -1,5 +1,5 @@
 import { parseHTML } from 'linkedom';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   SemanticSourceReceiver,
@@ -444,6 +444,47 @@ describe('semantic source receiver', () => {
     ))).toBeDefined();
     expect(presented.at(-1)?.map(({ kind }) => kind))
       .toEqual(['select-state', 'select-presentation']);
+  });
+
+  it('retains unchanged control proofs across text-only batches', () => {
+    const { document } = parseHTML(`<html><body>
+      <input id="draft" type="text" value="***">
+      <select><option selected>One</option></select></body></html>`);
+    const input = document.querySelector<HTMLInputElement>('#draft')!;
+    const select = document.querySelector<HTMLSelectElement>('select')!;
+    const option = select.options[0]!;
+    const applyProofs = vi.fn(() => true);
+    const receiver = new SemanticSourceReceiver({
+      document: identity,
+      replicaDocument: document as unknown as Document,
+      resolveNode: (nodeId) => new Map<number, Node>([
+        [7, input], [10, select], [11, option],
+      ]).get(nodeId),
+      applyProofs,
+    });
+    const proof = {
+      kind: 'select-state', bridge: 'rrweb', nodeId: 10, revision: 1,
+      gate: 'formValues', selectedOptionNodeIds: [11], multiple: false,
+      pickerOpen: false, classifierVersion: 1,
+    } as const;
+
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity,
+      'read-v1-111111',
+      1,
+      [valueRecord()],
+      [proof],
+    ))).toBeDefined();
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity,
+      'read-v1-111111',
+      2,
+      [valueRecord({ nodeRevision: 2, text: 'updated draft' })],
+      [proof],
+    ))).toBeDefined();
+
+    expect(input.value).toBe('updated draft');
+    expect(applyProofs).toHaveBeenCalledOnce();
   });
 
   it('reports proof presentation failure after a base replay refresh', () => {
