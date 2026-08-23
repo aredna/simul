@@ -56,11 +56,11 @@ export function normalizeDirectTesseractTextItems(
     transcriptParts.push(text);
     confidenceTotal += confidence;
     confidenceCount += 1;
-    regions.push(Object.freeze({
+    regions.push({
       text,
       confidence,
       boundingBox,
-    }));
+    });
   }
   const aggregateConfidence = confidenceCount > 0
     ? confidenceTotal / confidenceCount
@@ -86,21 +86,21 @@ function normalizeRect(
   bitmapHeight: number,
 ): ImageTextRegion['boundingBox'] | undefined {
   if (!rect) return undefined;
-  const values = [rect.left, rect.top, rect.right, rect.bottom];
-  if (!values.every((value) => typeof value === 'number' && Number.isFinite(value))) {
+  const { left, top, right, bottom } = rect;
+  if (
+    typeof left !== 'number' || !Number.isFinite(left) ||
+    typeof top !== 'number' || !Number.isFinite(top) ||
+    typeof right !== 'number' || !Number.isFinite(right) ||
+    typeof bottom !== 'number' || !Number.isFinite(bottom)
+  ) {
     return undefined;
   }
-  const left = clamp(Math.floor(rect.left as number), 0, bitmapWidth);
-  const top = clamp(Math.floor(rect.top as number), 0, bitmapHeight);
-  const right = clamp(Math.ceil(rect.right as number), 0, bitmapWidth);
-  const bottom = clamp(Math.ceil(rect.bottom as number), 0, bitmapHeight);
-  if (right <= left || bottom <= top) return undefined;
-  return Object.freeze({
-    x: left,
-    y: top,
-    width: right - left,
-    height: bottom - top,
-  });
+  const x0 = clamp(Math.floor(left), 0, bitmapWidth);
+  const y0 = clamp(Math.floor(top), 0, bitmapHeight);
+  const x1 = clamp(Math.ceil(right), 0, bitmapWidth);
+  const y1 = clamp(Math.ceil(bottom), 0, bitmapHeight);
+  if (x1 <= x0 || y1 <= y0) return undefined;
+  return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
 }
 
 function normalizeConfidence(value: unknown): number | undefined {

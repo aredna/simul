@@ -42,6 +42,10 @@ export function normalizePaddleOcrResult(
       item.poly.length !== 4
     ) return undefined;
     const polygon: ImagePoint[] = [];
+    let x0 = Number.POSITIVE_INFINITY;
+    let y0 = Number.POSITIVE_INFINITY;
+    let x1 = Number.NEGATIVE_INFINITY;
+    let y1 = Number.NEGATIVE_INFINITY;
     for (const point of item.poly) {
       if (
         !Array.isArray(point) ||
@@ -49,15 +53,15 @@ export function normalizePaddleOcrResult(
         !isBoundedCoordinate(point[0], bitmapWidth) ||
         !isBoundedCoordinate(point[1], bitmapHeight)
       ) return undefined;
-      polygon.push(Object.freeze({ x: point[0], y: point[1] }));
+      const x = point[0];
+      const y = point[1];
+      polygon.push({ x, y });
+      x0 = Math.min(x0, x);
+      y0 = Math.min(y0, y);
+      x1 = Math.max(x1, x);
+      y1 = Math.max(y1, y);
     }
     if (!isMeaningfulConvexQuadrilateral(polygon)) return undefined;
-    const xs = polygon.map(({ x }) => x);
-    const ys = polygon.map(({ y }) => y);
-    const x0 = Math.min(...xs);
-    const y0 = Math.min(...ys);
-    const x1 = Math.max(...xs);
-    const y1 = Math.max(...ys);
     if (x1 <= x0 || y1 <= y0) return undefined;
     const text = item.text.trim();
     const separatorLength = transcriptParts.length === 0 ? 0 : 1;
@@ -68,17 +72,17 @@ export function normalizePaddleOcrResult(
     transcriptLength += separatorLength + text.length;
     transcriptParts.push(text);
     confidenceTotal += item.score;
-    regions.push(Object.freeze({
+    regions.push({
       text,
       confidence: item.score,
-      boundingBox: Object.freeze({
+      boundingBox: {
         x: x0,
         y: y0,
         width: x1 - x0,
         height: y1 - y0,
-      }),
-      polygon: Object.freeze(polygon),
-    }));
+      },
+      polygon,
+    });
   }
 
   return readImageTextResult({

@@ -11,6 +11,7 @@ import {
   sameSourceDocument,
   type ReplicaSourceDocumentIdentity,
 } from '../replica/source-identity';
+import { hasExactKeysWithOptional } from '../exact-record';
 
 export const MAX_SOURCE_IMAGE_ENTRIES = 10_000;
 
@@ -315,15 +316,16 @@ function readSourceImageUpsert(input: unknown): SourceImageUpsert | undefined {
 function isRecordWithExactKeys(
   value: unknown,
   required: readonly string[],
-  optional: readonly string[] = [],
+  optional?: readonly string[],
 ): value is Record<string, unknown> {
   if (typeof value !== 'object' || value === null || Array.isArray(value)) {
     return false;
   }
-  const actual = Object.keys(value);
-  const allowed = new Set([...required, ...optional]);
-  return required.every((key) => Object.hasOwn(value, key)) &&
-    actual.every((key) => allowed.has(key));
+  return hasExactKeysWithOptional(
+    value as Record<string, unknown>,
+    required,
+    optional,
+  );
 }
 
 function isVisibility(value: string): value is ImageVisibilityTier {
