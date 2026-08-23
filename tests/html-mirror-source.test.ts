@@ -414,11 +414,11 @@ describe('HtmlMirrorSourceSession', () => {
     expect(fixture.patches()).toHaveLength(0);
 
     const area = fixture.document.querySelector('#area')!;
+    const patchesBeforeSemanticLabel = fixture.patches().length;
     area.setAttribute('label', 'Neighborhood');
     fixture.mutate(attributeRecord(area, 'label'));
     fixture.flushFrame();
-    expect(JSON.stringify(fixture.patches().at(-1))).not.toContain('Neighborhood');
-    expect(JSON.stringify(fixture.patches().at(-1))).not.toContain('controlText');
+    expect(fixture.patches()).toHaveLength(patchesBeforeSemanticLabel);
   });
 
   it('atomically clears public labels when a select becomes private', () => {
@@ -712,12 +712,10 @@ describe('HtmlMirrorSourceSession', () => {
     fixture.start();
     fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
 
+    const patchesBeforeUnchangedError = fixture.patches().length;
     light.dispatchEvent(new fixture.window.Event('error', { bubbles: true }));
     fixture.flushFrame();
-    expect(fixture.patches().at(-1)?.operations).toEqual(expect.arrayContaining([
-      expect.objectContaining({ kind: 'attributes' }),
-    ]));
-    fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
+    expect(fixture.patches()).toHaveLength(patchesBeforeUnchangedError);
 
     Object.defineProperty(shadowImage, 'currentSrc', {
       configurable: true,
@@ -728,7 +726,7 @@ describe('HtmlMirrorSourceSession', () => {
     expect(JSON.stringify(fixture.patches().at(-1))).toContain(
       'https://example.test/shadow-selected.jpg',
     );
-    fixture.port.emitMessage(createHtmlMirrorAck(identity, 2));
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
 
     Object.defineProperty(light, 'currentSrc', {
       configurable: true,
@@ -739,7 +737,7 @@ describe('HtmlMirrorSourceSession', () => {
     expect(JSON.stringify(fixture.patches().at(-1))).toContain(
       'https://example.test/light-selected.jpg',
     );
-    fixture.port.emitMessage(createHtmlMirrorAck(identity, 3));
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 2));
 
     const patchesBeforeSettledResize = fixture.patches().length;
     fixture.window.dispatchEvent(new fixture.window.Event('resize'));
@@ -762,6 +760,37 @@ describe('HtmlMirrorSourceSession', () => {
 
     expect(fixture.patches()).toHaveLength(patchesBeforeOmittedMutation);
     expect(JSON.stringify(fixture.port.posts)).not.toContain('changed omitted secret');
+  });
+
+  it('suppresses unchanged sanitized attributes and text', () => {
+    const fixture = sourceFixture(
+      '<main id="target" class="Stable">same</main>',
+    );
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const target = fixture.document.querySelector('#target')!;
+    const text = target.firstChild as Text;
+
+    target.setAttribute('onclick', 'ignored()');
+    fixture.mutate(attributeRecord(target, 'onclick'));
+    fixture.flushFrame();
+    expect(fixture.patches()).toHaveLength(0);
+
+    target.setAttribute('class', 'Stable');
+    fixture.mutate(attributeRecord(target, 'class'));
+    fixture.flushFrame();
+    expect(fixture.patches()).toHaveLength(0);
+
+    text.nodeValue = 'same';
+    fixture.mutate(characterDataRecord(text));
+    fixture.flushFrame();
+    expect(fixture.patches()).toHaveLength(0);
+
+    target.setAttribute('class', 'Changed');
+    fixture.mutate(attributeRecord(target, 'class'));
+    fixture.flushFrame();
+    expect(fixture.patches()).toHaveLength(1);
+    expect(JSON.stringify(fixture.patches()[0])).toContain('Changed');
   });
 
   it('omits embedded frame surfaces from checkpoints and later mutations', () => {
