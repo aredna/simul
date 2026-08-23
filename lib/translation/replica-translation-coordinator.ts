@@ -693,11 +693,17 @@ function samePair(
 
 function samePendingJob(left: PendingJob, right: PendingJob): boolean {
   return (
+    left.record.nodeType === right.record.nodeType &&
+    (left.record.nodeType !== 1 ||
+      (right.record.nodeType === 1 &&
+        left.record.controlTarget === right.record.controlTarget)) &&
     left.record.revision === right.record.revision &&
     left.record.source === right.record.source &&
     left.replayLease === right.replayLease &&
     left.translationEpoch === right.translationEpoch &&
     left.pairKey === right.pairKey &&
+    left.pairSignal === right.pairSignal &&
+    left.signal === right.signal &&
     sameSourceDocument(left.record.document, right.record.document)
   );
 }
