@@ -171,7 +171,8 @@ class ChromeImageSourceLease implements ImageSourceLease {
   ): Promise<SourceImageCaptureMetrics | undefined> {
     if (
       this.#disposed ||
-      this.#pending.size >= MAX_PENDING_MEASUREMENTS ||
+      this.#pending.size + this.#pendingAccessibility.size >=
+        MAX_PENDING_MEASUREMENTS ||
       !this.request.isCurrent()
     ) return Promise.reject(new ImageSourceUnavailableError('Image source is unavailable.'));
     signal?.throwIfAborted();

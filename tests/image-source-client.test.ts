@@ -182,6 +182,37 @@ describe('Chrome image source client', () => {
     expect(port.messages).toHaveLength(1);
     lease.dispose();
   });
+
+  it('shares one bounded pending budget across measurements and accessibility reads', async () => {
+    const port = new FakePort();
+    installBrowser(port);
+    const lease = await openChromeImageSource(
+      request,
+      vi.fn(),
+      undefined,
+      'isolated-html',
+      {
+        policyFingerprint: 'read-v1-111000',
+        controlImages: true,
+        accessibilityTextEnabled: true,
+      },
+    );
+    const pending = Array.from({ length: 16 }, () =>
+      lease.readAccessibilityText!(
+        descriptor,
+        'read-v1-111000',
+        true,
+      ));
+
+    await expect(lease.measure(descriptor)).rejects.toBeInstanceOf(
+      ImageSourceUnavailableError,
+    );
+    expect(port.messages).toHaveLength(17);
+
+    lease.dispose();
+    const settled = await Promise.allSettled(pending);
+    expect(settled.every(({ status }) => status === 'rejected')).toBe(true);
+  });
 });
 
 const request: ReplicaCaptureRequest = {
