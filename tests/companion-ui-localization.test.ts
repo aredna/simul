@@ -2,6 +2,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   resolveUiLabelTranslations,
+  shouldRetryUiLabelLocalization,
   toolbarAttentionTarget,
 } from '../lib/companion-ui-localization';
 
@@ -68,5 +69,27 @@ describe('companion UI localization', () => {
 
     expect(result.localized).toBe(false);
     expect([...result.labels.values()]).toEqual(['From', 'Size', 'Settings']);
+  });
+
+  it('allows one bounded retry after a transient non-English fallback', () => {
+    const fallback = {
+      localized: false,
+      labels: new Map([['From', 'From']]),
+    };
+
+    expect(shouldRetryUiLabelLocalization('ja:From', '', 'ja', fallback))
+      .toBe(true);
+    expect(shouldRetryUiLabelLocalization(
+      'ja:From',
+      'ja:From',
+      'ja',
+      fallback,
+    )).toBe(false);
+    expect(shouldRetryUiLabelLocalization('en:From', '', 'en', fallback))
+      .toBe(false);
+    expect(shouldRetryUiLabelLocalization('ja:From', '', 'ja', {
+      localized: true,
+      labels: new Map([['From', 'から']]),
+    })).toBe(false);
   });
 });

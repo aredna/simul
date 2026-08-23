@@ -8,6 +8,21 @@ export interface UiLabelLocalizationResult {
   readonly labels: ReadonlyMap<string, string>;
 }
 
+/**
+ * Permit one retry for an exact non-English label set. The caller retains the
+ * returned key after scheduling so a persistently unavailable translator does
+ * not create an idle retry loop.
+ */
+export function shouldRetryUiLabelLocalization(
+  inputKey: string,
+  retriedInputKey: string,
+  targetLanguage: SupportedLanguage,
+  result: UiLabelLocalizationResult,
+): boolean {
+  return targetLanguage !== 'en' && !result.localized &&
+    inputKey !== retriedInputKey;
+}
+
 const REFRESH_ATTENTION_PATTERN =
   /\b(?:rebuild|refresh|mirror|replica|capture|source (?:page|tab)|page (?:is )?changing|live update|desynchron|missed)\b/iu;
 

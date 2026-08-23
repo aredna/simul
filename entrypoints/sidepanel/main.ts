@@ -21,6 +21,7 @@ import {
 } from '../../lib/companion-ui-state';
 import {
   resolveUiLabelTranslations,
+  shouldRetryUiLabelLocalization,
   toolbarAttentionTarget,
   type CompanionStatusTone,
   type ToolbarAttentionTarget,
@@ -298,6 +299,7 @@ interface PendingLiveUpdate {
 
 const NAVIGATION_DEBOUNCE_MS = 350;
 const CAPTURE_TIMEOUT_MS = 12_000;
+const UI_LOCALIZATION_RETRY_DELAY_MS = 1_500;
 const DYNAMIC_UI_LABELS = [
   'Fit',
   '1:1',
@@ -762,6 +764,8 @@ let uiLocalizationRequestId = 0;
 let uiLocalizationInputKey = '';
 let uiLocalizationScheduled = false;
 let uiLocalizationAbortController: AbortController | undefined;
+let uiLocalizationRetryTimer: ReturnType<typeof setTimeout> | undefined;
+let uiLocalizationRetriedInputKey = '';
 let uiLocalizedTarget: SupportedLanguage = 'en';
 let uiLabelTranslations: ReadonlyMap<string, string> = new Map();
 
@@ -1005,6 +1009,10 @@ document.addEventListener('keydown', (event) => {
 });
 window.addEventListener('pagehide', () => {
   uiLocalizationAbortController?.abort();
+  if (uiLocalizationRetryTimer !== undefined) {
+    clearTimeout(uiLocalizationRetryTimer);
+    uiLocalizationRetryTimer = undefined;
+  }
   replicaShadowAbortController?.abort();
   imageTranslationController.dispose();
   replicaTranslationCoordinator.dispose();
@@ -3768,6 +3776,11 @@ function prepareUiEnglishFallback(
 ): void {
   if (uiLocalizedTarget === targetLanguage && !force) return;
   uiLocalizationAbortController?.abort();
+  if (uiLocalizationRetryTimer !== undefined) {
+    clearTimeout(uiLocalizationRetryTimer);
+    uiLocalizationRetryTimer = undefined;
+  }
+  uiLocalizationRetriedInputKey = '';
   uiLocalizationInputKey = '';
   uiLabelTranslations = new Map();
   uiLocalizedTarget = targetLanguage;
@@ -3827,6 +3840,25 @@ async function localizeUiLabels(): Promise<void> {
     uiLocalizedTarget = targetLanguage;
     uiLabelTranslations = result.labels;
     applyUiLabelsToDom();
+    if (shouldRetryUiLabelLocalization(
+      inputKey,
+      uiLocalizationRetriedInputKey,
+      targetLanguage,
+      result,
+    )) {
+      uiLocalizationRetriedInputKey = inputKey;
+      uiLocalizationRetryTimer = setTimeout(() => {
+        uiLocalizationRetryTimer = undefined;
+        if (
+          preferences.targetLanguage !== targetLanguage ||
+          uiLocalizationInputKey !== inputKey
+        ) return;
+        uiLocalizationInputKey = '';
+        scheduleUiLocalization();
+      }, UI_LOCALIZATION_RETRY_DELAY_MS);
+    } else if (result.localized || targetLanguage === 'en') {
+      uiLocalizationRetriedInputKey = '';
+    }
   } finally {
     session?.destroy();
     if (uiLocalizationAbortController === abortController) {
