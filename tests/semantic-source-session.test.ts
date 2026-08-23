@@ -672,6 +672,61 @@ describe('semantic source session', () => {
     session.dispose();
   });
 
+  it('tracks a shadow-root select through its composed activation path', () => {
+    const { document, window } = parseHTML(
+      '<html><body><div id="host"></div></body></html>',
+    );
+    const host = document.querySelector('#host')!;
+    const shadow = host.attachShadow({ mode: 'open' });
+    shadow.innerHTML = '<select><option selected>One</option></select>';
+    const select = shadow.querySelector<HTMLSelectElement>('select')!;
+    const option = select.options.item(0)!;
+    let pickerOpen = false;
+    Object.defineProperties(select, {
+      selectedIndex: { configurable: true, get: () => 0 },
+      selectedOptions: { configurable: true, get: () => [option] },
+      multiple: { configurable: true, get: () => false },
+    });
+    Object.defineProperty(option, 'selected', {
+      configurable: true,
+      get: () => true,
+    });
+    const originalMatches = select.matches.bind(select);
+    select.matches = ((selector: string) => selector === ':open'
+      ? pickerOpen
+      : originalMatches(selector)) as typeof select.matches;
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(port, document, window);
+    port.emit(createSemanticSourceStart(
+      'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+    ));
+    const initial = port.messages[0]!;
+    port.emit(createSemanticSourceAck(
+      identity,
+      initial.policyFingerprint,
+      initial.sequence,
+    ));
+
+    pickerOpen = true;
+    const activation = new window.Event('click', {
+      bubbles: true,
+      composed: true,
+    });
+    Object.defineProperty(activation, 'composedPath', {
+      configurable: true,
+      value: () => [select, shadow, host, document.body, document],
+    });
+    host.dispatchEvent(activation);
+
+    expect(port.messages[1]!.proofs).toContainEqual(expect.objectContaining({
+      kind: 'select-state',
+      pickerOpen: true,
+    }));
+    session.dispose();
+  });
+
   it('reads text only from a validated disclosure, including its closed state', () => {
     const { document, window } = parseHTML(
       '<html><body><button aria-expanded="false" aria-controls="menu">Menu</button><div id="menu" hidden>Account notices</div><div id="other">Not controlled</div></body></html>',
