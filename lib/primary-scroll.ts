@@ -143,7 +143,6 @@ export function findPrimaryNestedScroller(
 ): Element | undefined {
   let best: Element | undefined;
   let bestScore = -1;
-  let preferred: Element | undefined;
   let qualifiedOrdinal = 0;
   const roots: ParentNode[] = [sourceDocument];
   let rootIndex = 0;
@@ -173,7 +172,7 @@ export function findPrimaryNestedScroller(
         sourceWindow,
       );
       if (!snapshot) continue;
-      if (qualifiedOrdinal === preferredOrdinal) preferred = candidate;
+      if (qualifiedOrdinal === preferredOrdinal) return candidate;
       qualifiedOrdinal += 1;
       const score = candidate.clientWidth * candidate.clientHeight *
         (1 + Math.log2(1 + snapshot.maxScrollY));
@@ -182,7 +181,7 @@ export function findPrimaryNestedScroller(
       bestScore = score;
     }
   }
-  return preferred ?? best;
+  return best;
 }
 
 /** Returns a bounded, content-free ordinal among currently qualified panes. */

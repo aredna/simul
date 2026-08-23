@@ -107,10 +107,9 @@ export function enabledOcrProviderOrder(
   order: readonly ImageReadingMethodId[],
   disabled: readonly ImageReadingMethodId[],
 ): ImageTextProviderId[] {
-  const disabledSet = new Set(disabled);
   return order.filter(
     (id): id is ImageTextProviderId =>
-      isOcrImageReadingMethod(id) && !disabledSet.has(id),
+      isOcrImageReadingMethod(id) && !disabled.includes(id),
   );
 }
 
@@ -119,10 +118,9 @@ export function visibleImageReadingMethodOrder(
   order: readonly ImageReadingMethodId[],
   compiledProviders: readonly ImageTextProviderId[],
 ): ImageReadingMethodId[] {
-  const compiled = new Set(compiledProviders);
   return order.filter((id) =>
     id === ACCESSIBILITY_TEXT_METHOD_ID ||
-    (isOcrImageReadingMethod(id) && compiled.has(id)));
+    (isOcrImageReadingMethod(id) && compiledProviders.includes(id)));
 }
 
 /**
@@ -136,8 +134,6 @@ export function imageReadingExecutionPlan(
   disabled: readonly ImageReadingMethodId[],
   availableProviders: readonly ImageTextProviderId[],
 ): readonly ImageReadingExecutionStep[] {
-  const disabledSet = new Set(disabled);
-  const availableSet = new Set(availableProviders);
   const steps: ImageReadingExecutionStep[] = [];
   let ocrGroup: ImageTextProviderId[] = [];
   const flushOcrGroup = (): void => {
@@ -149,13 +145,13 @@ export function imageReadingExecutionPlan(
     ocrGroup = [];
   };
   for (const method of order) {
-    if (disabledSet.has(method)) continue;
+    if (disabled.includes(method)) continue;
     if (method === ACCESSIBILITY_TEXT_METHOD_ID) {
       flushOcrGroup();
       steps.push(Object.freeze({ kind: 'accessibility-text' }));
       continue;
     }
-    if (availableSet.has(method)) {
+    if (availableProviders.includes(method)) {
       ocrGroup.push(method);
     }
   }
