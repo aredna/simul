@@ -200,6 +200,7 @@ interface IsolatedHtmlEngineOptions {
   readonly onSourceCommit?: (commit: ReplicaSourceCommit) => void;
   readonly onLiveFailure?: (code: ReplicaDiagnosticCode) => void;
   readonly onInfo?: (info: IsolatedMirrorInfo) => void;
+  readonly scheduleLayoutRefresh?: (callback: () => void) => void;
   readonly iframeDeadlineMs?: number;
   readonly styleSettleDeadlineMs?: number;
   readonly initializeIframe?: (
@@ -1063,7 +1064,7 @@ export class IsolatedHtmlReplicaEngine
     this.#pendingExtentState = state;
     if (this.#extentRefreshQueued) return;
     this.#extentRefreshQueued = true;
-    queueMicrotask(() => {
+    const refresh = (): void => {
       this.#extentRefreshQueued = false;
       const pending = this.#pendingExtentState;
       this.#pendingExtentState = undefined;
@@ -1073,7 +1074,15 @@ export class IsolatedHtmlReplicaEngine
         measureExtent(pending.iframe),
       );
       this.options.onLayoutChanged?.();
-    });
+    };
+    const view = state.iframe.ownerDocument?.defaultView;
+    if (this.options.scheduleLayoutRefresh) {
+      this.options.scheduleLayoutRefresh(refresh);
+    } else if (typeof view?.requestAnimationFrame === 'function') {
+      view.requestAnimationFrame(refresh);
+    } else {
+      queueMicrotask(refresh);
+    }
   }
 
   #isCurrent(
