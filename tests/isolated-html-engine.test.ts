@@ -555,6 +555,21 @@ describe('IsolatedHtmlReplicaEngine', () => {
       'passive',
     )!);
 
+    expect(semantic.disposed).toBe(false);
+    expect(select.getAttribute('data-simul-source-select-presentation')).toBe('v1');
+    expect(reconnectTimers).toHaveLength(0);
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 2 }),
+      2,
+      2,
+      [{
+        kind: 'attributes', nodeId: 3, namespace: 'html', tagName: 'body',
+        attributes: [['class', 'settled-layout']],
+      }],
+      undefined,
+      'passive',
+    )!);
+
     expect(semantic.disposed).toBe(true);
     expect(select.hasAttribute('data-simul-source-select-presentation')).toBe(false);
     expect(reconnectTimers).toHaveLength(1);

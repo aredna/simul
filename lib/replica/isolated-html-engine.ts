@@ -773,7 +773,12 @@ export class IsolatedHtmlReplicaEngine
     this.options.presentationHost.refreshDimensions?.(state.iframe, state.dimensions);
     this.options.presentationHost.markLive(state.iframe);
     const semanticReceiver = this.#semanticReceiver;
-    let semanticChanges = semanticReceiver?.refreshBindings() ?? [];
+    const semanticBindingsMayHaveChanged = batch.operations.some(
+      ({ kind }) => kind !== 'dimensions',
+    );
+    let semanticChanges = semanticBindingsMayHaveChanged
+      ? semanticReceiver?.refreshBindings() ?? []
+      : [];
     if (semanticReceiver && !semanticReceiver.proofPresentationHealthy) {
       semanticChanges = Object.freeze([
         ...semanticChanges,
