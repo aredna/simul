@@ -176,4 +176,59 @@ describe('SemanticProofPresenter', () => {
     expect(second.selected).toBe(true);
     expect(second.hasAttribute('data-simul-source-option-selected')).toBe(false);
   });
+
+  it('preserves same-value mirror updates to typed control state', () => {
+    const { document } = parseHTML(`<html><body>
+      <input id="choice" type="checkbox">
+      <button id="control">Continue</button>
+      <div id="aria" role="checkbox" aria-checked="false"></div>
+    </body></html>`);
+    const choice = document.querySelector<HTMLInputElement>('#choice')!;
+    const control = document.querySelector<HTMLButtonElement>('#control')!;
+    const aria = document.querySelector<HTMLElement>('#aria')!;
+    const proofs: readonly ResolvedSemanticSourceProof[] = [{
+      kind: 'choice-state',
+      proof: {
+        kind: 'choice-state', bridge: 'isolated-html', nodeId: 1,
+        revision: 1, gate: 'formValues', checked: true, indeterminate: false,
+        classifierVersion: 1,
+      },
+      target: choice,
+    }, {
+      kind: 'control-state',
+      proof: {
+        kind: 'control-state', bridge: 'isolated-html', nodeId: 2,
+        revision: 1, gate: 'controlSemantics', disabled: true,
+        classifierVersion: 1,
+      },
+      target: control,
+    }, {
+      kind: 'aria-state',
+      proof: {
+        kind: 'aria-state', bridge: 'isolated-html', nodeId: 3,
+        revision: 1, gate: 'formValues', state: 'checked', value: 'true',
+        classifierVersion: 1,
+      },
+      target: aria,
+    }];
+    const presenter = new SemanticProofPresenter({
+      document: document as unknown as Document,
+    });
+    expect(presenter.apply(proofs)).toBe(true);
+
+    choice.removeAttribute('data-simul-source-choice-state');
+    choice.checked = true;
+    control.removeAttribute('data-simul-source-control-state');
+    control.disabled = true;
+    control.setAttribute('aria-disabled', 'true');
+    aria.removeAttribute('data-simul-source-aria-checked-state');
+    aria.setAttribute('aria-checked', 'true');
+
+    presenter.clear();
+
+    expect(choice.checked).toBe(true);
+    expect(control.disabled).toBe(true);
+    expect(control.getAttribute('aria-disabled')).toBe('true');
+    expect(aria.getAttribute('aria-checked')).toBe('true');
+  });
 });

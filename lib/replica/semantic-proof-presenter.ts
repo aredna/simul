@@ -276,11 +276,30 @@ function applyTypedProof(
   if (resolved.kind === 'choice-state') {
     const originalChecked = resolved.target.checked;
     const originalIndeterminate = resolved.target.indeterminate;
+    const originalMarker = resolved.target.getAttribute(
+      'data-simul-source-choice-state',
+    );
     resolved.target.checked = resolved.proof.checked;
     resolved.target.indeterminate = resolved.proof.indeterminate;
+    resolved.target.setAttribute('data-simul-source-choice-state', 'v1');
     return () => {
-      resolved.target.checked = originalChecked;
-      resolved.target.indeterminate = originalIndeterminate;
+      const stillOwned = resolved.target.getAttribute(
+        'data-simul-source-choice-state',
+      ) === 'v1';
+      if (
+        stillOwned && resolved.target.checked === resolved.proof.checked &&
+        resolved.target.indeterminate === resolved.proof.indeterminate
+      ) {
+        resolved.target.checked = originalChecked;
+        resolved.target.indeterminate = originalIndeterminate;
+      }
+      if (stillOwned) {
+        restoreAttribute(
+          resolved.target,
+          'data-simul-source-choice-state',
+          originalMarker,
+        );
+      }
     };
   }
   if (resolved.kind === 'control-state') {
@@ -289,18 +308,43 @@ function applyTypedProof(
       ? target.disabled
       : undefined;
     const originalAriaDisabled = target.getAttribute('aria-disabled');
+    const originalMarker = target.getAttribute('data-simul-source-control-state');
     if (originalDisabled !== undefined) target.disabled = resolved.proof.disabled;
-    target.setAttribute('aria-disabled', resolved.proof.disabled ? 'true' : 'false');
+    const presentedAriaDisabled = resolved.proof.disabled ? 'true' : 'false';
+    target.setAttribute('aria-disabled', presentedAriaDisabled);
+    target.setAttribute('data-simul-source-control-state', 'v1');
     return () => {
-      if (originalDisabled !== undefined) target.disabled = originalDisabled;
-      restoreAttribute(target, 'aria-disabled', originalAriaDisabled);
+      const stillOwned = target.getAttribute(
+        'data-simul-source-control-state',
+      ) === 'v1';
+      if (
+        stillOwned &&
+        (originalDisabled === undefined || target.disabled === resolved.proof.disabled) &&
+        target.getAttribute('aria-disabled') === presentedAriaDisabled
+      ) {
+        if (originalDisabled !== undefined) target.disabled = originalDisabled;
+        restoreAttribute(target, 'aria-disabled', originalAriaDisabled);
+      }
+      if (stillOwned) {
+        restoreAttribute(target, 'data-simul-source-control-state', originalMarker);
+      }
     };
   }
   if (resolved.kind === 'aria-state') {
     const attribute = `aria-${resolved.proof.state}`;
+    const marker = `data-simul-source-aria-${resolved.proof.state}-state`;
     const original = resolved.target.getAttribute(attribute);
+    const originalMarker = resolved.target.getAttribute(marker);
     resolved.target.setAttribute(attribute, resolved.proof.value);
-    return () => restoreAttribute(resolved.target, attribute, original);
+    resolved.target.setAttribute(marker, 'v1');
+    return () => {
+      const stillOwned = resolved.target.getAttribute(marker) === 'v1';
+      if (
+        stillOwned &&
+        resolved.target.getAttribute(attribute) === resolved.proof.value
+      ) restoreAttribute(resolved.target, attribute, original);
+      if (stillOwned) restoreAttribute(resolved.target, marker, originalMarker);
+    };
   }
   const { trigger, panel, proof } = resolved;
   const original = new Map<string, string | null>([
