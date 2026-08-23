@@ -171,8 +171,10 @@ class ChromeHtmlMirrorStreamLease implements HtmlMirrorStreamLease {
   }
 
   dispose(): void {
-    if (this.#disposed) return;
+    if (this.#explicitlyDisposed) return;
     this.#explicitlyDisposed = true;
+    this.#queue.splice(0);
+    if (this.#disposed) return;
     this.#disposed = true;
     this.#clearInitialTimer();
     this.port.onMessage.removeListener(this.#onMessage);
