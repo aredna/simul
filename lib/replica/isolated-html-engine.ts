@@ -731,15 +731,21 @@ export class IsolatedHtmlReplicaEngine
     }
     const replacementMetrics = readPatchMetrics(state, batch.operations);
     const replicaDocument = state.iframe.contentDocument;
-    const retainedOpenDisclosures = replicaDocument
+    const disclosureBindingsMayHaveChanged = batch.operations.some(
+      ({ kind }) => kind !== 'dimensions' && kind !== 'text',
+    );
+    const retainedOpenDisclosures =
+      replicaDocument && disclosureBindingsMayHaveChanged
       ? snapshotOpenReadOnlyReplicaDisclosures(replicaDocument)
       : undefined;
-    if (replicaDocument) disposeReadOnlyReplicaDisclosures(replicaDocument);
+    if (replicaDocument && disclosureBindingsMayHaveChanged) {
+      disposeReadOnlyReplicaDisclosures(replicaDocument);
+    }
     let applied: AppliedPatchBatch | undefined;
     try {
       applied = applyPatchBatch(state, batch.operations);
     } finally {
-      if (replicaDocument) {
+      if (replicaDocument && disclosureBindingsMayHaveChanged) {
         refreshIsolatedReplicaDisclosures(
           replicaDocument,
           retainedOpenDisclosures,
