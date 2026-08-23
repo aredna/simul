@@ -641,7 +641,9 @@ export class HtmlMirrorSourceSession {
     // final value is exactly its old value. Keep the sticky secret ledger
     // above authoritative, then discard only these provable DOM no-ops before
     // they consume the bounded pending-target budget and force recovery.
-    records = records.filter(sourceMutationMayChangeCurrentValue);
+    if (!records.every(sourceMutationMayChangeCurrentValue)) {
+      records = records.filter(sourceMutationMayChangeCurrentValue);
+    }
     if (records.length === 0) return;
     let accepted = false;
     for (const record of records) {
@@ -1172,9 +1174,11 @@ export class HtmlMirrorSourceSession {
     target: Node,
     children: readonly import('./html-mirror-sanitizer').HtmlMirrorNode[],
   ): void {
-    const sources = children.map(
-      (child) => this.environment.registry.getNode(child.id),
-    ).filter((node): node is Node => Boolean(node));
+    const sources: Node[] = [];
+    for (const child of children) {
+      const source = this.environment.registry.getNode(child.id);
+      if (source) sources.push(source);
+    }
     this.#setEmittedSourceChildren(target, sources);
   }
 
@@ -1199,12 +1203,10 @@ export class HtmlMirrorSourceSession {
     if (this.#pendingAttributes.has(target as Element)) {
       return 'attributeContextFallbackCount';
     }
-    const covers = (candidate: Node): boolean =>
-      candidate !== target && containsComposedSource(target, candidate);
     if (
-      [...this.#pendingChildren].some(covers) ||
-      [...this.#pendingAttributes].some(covers) ||
-      [...this.#pendingText].some(covers)
+      iterableContainsComposedSource(this.#pendingChildren, target, target) ||
+      iterableContainsComposedSource(this.#pendingAttributes, target, target) ||
+      iterableContainsComposedSource(this.#pendingText, target, target)
     ) return 'coveredDirtyBranchFallbackCount';
 
     const previousSet = new Set(previous);
@@ -1235,11 +1237,9 @@ export class HtmlMirrorSourceSession {
     if (target.nodeType !== Node.ELEMENT_NODE) return false;
     const shadow = (target as Element).shadowRoot;
     if (!shadow || shadow.mode !== 'open') return false;
-    const belongsToOwnShadow = (candidate: Node): boolean =>
-      containsComposedSource(shadow, candidate);
-    return [...this.#pendingChildren].some(belongsToOwnShadow) ||
-      [...this.#pendingAttributes].some(belongsToOwnShadow) ||
-      [...this.#pendingText].some(belongsToOwnShadow);
+    return iterableContainsComposedSource(this.#pendingChildren, shadow) ||
+      iterableContainsComposedSource(this.#pendingAttributes, shadow) ||
+      iterableContainsComposedSource(this.#pendingText, shadow);
   }
 
   #registerShadowHostCandidate(element: Element): void {
@@ -1918,6 +1918,17 @@ function composedSourceParentElement(element: Element): Element | undefined {
 
 function belongsToSourceDocument(node: Node, sourceDocument: Document): boolean {
   return node === sourceDocument || node.ownerDocument === sourceDocument;
+}
+
+function iterableContainsComposedSource(
+  values: Iterable<Node>,
+  root: Node,
+  excluded?: Node,
+): boolean {
+  for (const value of values) {
+    if (value !== excluded && containsComposedSource(root, value)) return true;
+  }
+  return false;
 }
 
 function readSourceDimensions(document: Document, window: Window): {
