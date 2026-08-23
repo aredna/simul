@@ -38,6 +38,19 @@ const AUTO_LANGUAGE_PROBE_ROUTE_WINDOWS = Object.freeze([
   Object.freeze(['ja', 'kn', 'ta', 'te', 'ru', 'hi']),
 ] as const satisfies readonly (readonly SupportedLanguage[])[]);
 
+const MEANINGFUL_CHARACTER = /[\p{L}\p{N}]/u;
+const STRONG_SCRIPT_PATTERNS = Object.freeze([
+  ['ja', /[\p{Script=Hiragana}\p{Script=Katakana}]/u],
+  ['ko', /\p{Script=Hangul}/u],
+  ['he', /\p{Script=Hebrew}/u],
+  ['el', /\p{Script=Greek}/u],
+  ['th', /\p{Script=Thai}/u],
+  ['bn', /\p{Script=Bengali}/u],
+  ['kn', /\p{Script=Kannada}/u],
+  ['ta', /\p{Script=Tamil}/u],
+  ['te', /\p{Script=Telugu}/u],
+] as const satisfies readonly (readonly [SupportedLanguage, RegExp])[]);
+
 export type AutoLanguageProbeEvidence =
   | 'single-strong-script'
   | 'distinct-images';
@@ -406,9 +419,10 @@ export class AutoImageLanguageProbe {
       .replace(/\s+/gu, ' ')
       .trim()
       .slice(0, 4_000);
-    const meaningfulCharacters = [...text].filter((character) =>
-      /[\p{L}\p{N}]/u.test(character)
-    ).length;
+    const meaningfulCharacters = countMatchingCharacters(
+      text,
+      MEANINGFUL_CHARACTER,
+    );
     if (meaningfulCharacters < 1) {
       return Object.freeze({ status: 'ignored' as const });
     }
@@ -486,9 +500,11 @@ export class AutoImageLanguageProbe {
   }
 
   #firstAvailableImageSlot(): number | undefined {
-    const occupied = new Set([...this.#samples.values()].map(({ slot }) => slot));
-    for (let slot = 0; slot < MAX_AUTO_LANGUAGE_PROBE_IMAGES; slot += 1) {
-      if (!occupied.has(slot)) return slot;
+    slot: for (let slot = 0; slot < MAX_AUTO_LANGUAGE_PROBE_IMAGES; slot += 1) {
+      for (const sample of this.#samples.values()) {
+        if (sample.slot === slot) continue slot;
+      }
+      return slot;
     }
     return undefined;
   }
@@ -497,24 +513,29 @@ export class AutoImageLanguageProbe {
     slot: number,
     sampleIdentity: AutoLanguageProbeSampleIdentity,
   ): readonly SupportedLanguage[] {
-    const pendingRoute = [...this.#votes.entries()]
-      .find(([, votes]) => !voteHasSample(votes, sampleIdentity));
-    const primary: SupportedLanguage[] = [
-      ...AUTO_LANGUAGE_PROBE_ROUTE_WINDOWS[slot]!,
-    ];
-    const pending = pendingRoute
-      ? representativeProbeRoute(pendingRoute[0])
-      : undefined;
-    if (pending && !primary.includes(pending)) {
-      // Slots 1 and 2 reserve their final route as an earlier-window
-      // duplicate. Replace only that duplicate, then freeze this sample's
-      // six-route plan so later votes cannot expand or crowd its budget.
-      primary.pop();
+    let pendingLanguage: SupportedLanguage | undefined;
+    for (const [language, votes] of this.#votes) {
+      if (!voteHasSample(votes, sampleIdentity)) {
+        pendingLanguage = language;
+        break;
+      }
     }
-    return Object.freeze([...new Set([
-      ...(pending ? [pending] : []),
-      ...primary,
-    ])].slice(0, MAX_AUTO_LANGUAGE_PROBE_ROUTES_PER_IMAGE));
+    const primary = AUTO_LANGUAGE_PROBE_ROUTE_WINDOWS[slot]!;
+    const pending = pendingLanguage
+      ? representativeProbeRoute(pendingLanguage)
+      : undefined;
+    // Slots 1 and 2 reserve their final route as an earlier-window duplicate.
+    // Replace only that duplicate so later votes cannot expand the route budget.
+    const primaryLength = pending && !primary.some((route) => route === pending)
+      ? primary.length - 1
+      : primary.length;
+    const plan: SupportedLanguage[] = pending ? [pending] : [];
+    for (let index = 0; index < primaryLength; index += 1) {
+      const language = primary[index]!;
+      if (!plan.includes(language)) plan.push(language);
+      if (plan.length >= MAX_AUTO_LANGUAGE_PROBE_ROUTES_PER_IMAGE) break;
+    }
+    return Object.freeze(plan);
   }
 
   #inspectOcrCandidate(
@@ -528,9 +549,10 @@ export class AutoImageLanguageProbe {
       .replace(/\s+/gu, ' ')
       .trim()
       .slice(0, 4_000);
-    const meaningfulCharacters = [...transcript].filter((character) =>
-      /[\p{L}\p{N}]/u.test(character)
-    ).length;
+    const meaningfulCharacters = countMatchingCharacters(
+      transcript,
+      MEANINGFUL_CHARACTER,
+    );
     const confidence = Number.isFinite(observation.confidence)
       ? Math.max(0, Math.min(1, Number(observation.confidence)))
       : undefined;
@@ -567,8 +589,14 @@ function semanticVoteSampleIdentities(
 ): Set<AutoLanguageProbeSampleIdentity> {
   const identities = new Set<AutoLanguageProbeSampleIdentity>();
   for (const owners of votes.semanticLabels.values()) {
-    const owner = [...owners].find((identity) => !identities.has(identity)) ??
-      owners.values().next().value;
+    let owner: AutoLanguageProbeSampleIdentity | undefined;
+    for (const candidate of owners) {
+      owner ??= candidate;
+      if (!identities.has(candidate)) {
+        owner = candidate;
+        break;
+      }
+    }
     if (owner) identities.add(owner);
   }
   return identities;
@@ -578,34 +606,30 @@ function voteHasSample(
   votes: LanguageVotes,
   sampleIdentity: AutoLanguageProbeSampleIdentity,
 ): boolean {
-  return votes.ocrSamples.has(sampleIdentity) ||
-    [...votes.semanticLabels.values()].some((owners) =>
-      owners.has(sampleIdentity)
-    );
+  if (votes.ocrSamples.has(sampleIdentity)) return true;
+  for (const owners of votes.semanticLabels.values()) {
+    if (owners.has(sampleIdentity)) return true;
+  }
+  return false;
 }
 
 export function strongScriptEvidence(
   text: string,
 ): StrongScriptEvidence | undefined {
-  const scripts: readonly [SupportedLanguage, RegExp][] = [
-    ['ja', /[\p{Script=Hiragana}\p{Script=Katakana}]/u],
-    ['ko', /\p{Script=Hangul}/u],
-    ['he', /\p{Script=Hebrew}/u],
-    ['el', /\p{Script=Greek}/u],
-    ['th', /\p{Script=Thai}/u],
-    ['bn', /\p{Script=Bengali}/u],
-    ['kn', /\p{Script=Kannada}/u],
-    ['ta', /\p{Script=Tamil}/u],
-    ['te', /\p{Script=Telugu}/u],
-  ];
-  let winner: StrongScriptEvidence | undefined;
-  for (const [language, pattern] of scripts) {
-    const characters = [...text].filter((character) => pattern.test(character)).length;
-    if (characters === 0) continue;
-    if (winner) return undefined;
-    winner = Object.freeze({ language, characters });
+  let winnerLanguage: SupportedLanguage | undefined;
+  let characters = 0;
+  for (const character of text) {
+    for (const [language, pattern] of STRONG_SCRIPT_PATTERNS) {
+      if (!pattern.test(character)) continue;
+      if (winnerLanguage && winnerLanguage !== language) return undefined;
+      winnerLanguage = language;
+      characters += 1;
+      break;
+    }
   }
-  return winner;
+  return winnerLanguage
+    ? Object.freeze({ language: winnerLanguage, characters })
+    : undefined;
 }
 
 export function strongAutoLanguageScriptEvidence(
@@ -613,12 +637,21 @@ export function strongAutoLanguageScriptEvidence(
 ): StrongScriptEvidence | undefined {
   const script = strongScriptEvidence(text);
   if (!script || script.characters < 3) return undefined;
-  const meaningfulCharacters = [...text].filter((character) =>
-    /[\p{L}\p{N}]/u.test(character)
-  ).length;
+  const meaningfulCharacters = countMatchingCharacters(
+    text,
+    MEANINGFUL_CHARACTER,
+  );
   return script.characters / Math.max(1, meaningfulCharacters) >= 0.6
     ? script
     : undefined;
+}
+
+function countMatchingCharacters(text: string, pattern: RegExp): number {
+  let count = 0;
+  for (const character of text) {
+    if (pattern.test(character)) count += 1;
+  }
+  return count;
 }
 
 const LATIN_REPRESENTATIVE_LANGUAGES = new Set<SupportedLanguage>([

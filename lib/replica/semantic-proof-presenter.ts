@@ -60,22 +60,35 @@ export class SemanticProofPresenter {
 
   #install(proofs: readonly ResolvedSemanticSourceProof[]): boolean {
     try {
-      const presentedSelects = new Set(
-        proofs.filter((resolved) => resolved.kind === 'select-presentation')
-          .map((resolved) => resolved.proof.nodeId),
-      );
-      const ordered = [
-        ...proofs.filter((resolved) => resolved.kind === 'select-presentation'),
-        ...proofs.filter((resolved) => resolved.kind !== 'select-presentation'),
-      ];
-      for (const resolved of ordered) {
+      const presentedSelects = new Set<number>();
+      const selectPresentations: Array<Extract<
+        ResolvedSemanticSourceProof,
+        { kind: 'select-presentation' }
+      >> = [];
+      const interactive: Array<Extract<
+        ResolvedSemanticSourceProof,
+        { kind: 'select-presentation' | 'disclosure-state' }
+      >> = [];
+      for (const resolved of proofs) {
+        if (resolved.kind === 'select-presentation') {
+          presentedSelects.add(resolved.proof.nodeId);
+          selectPresentations.push(resolved);
+          interactive.push(resolved);
+        } else if (resolved.kind === 'disclosure-state') {
+          interactive.push(resolved);
+        }
+      }
+      for (const resolved of selectPresentations) {
         const cleanup = applyTypedProof(resolved, presentedSelects);
         if (!cleanup) throw new Error('Typed semantic proof could not apply.');
         this.#cleanups.push(cleanup);
       }
-      const interactive = proofs.filter((resolved) =>
-        resolved.kind === 'select-presentation' ||
-        resolved.kind === 'disclosure-state');
+      for (const resolved of proofs) {
+        if (resolved.kind === 'select-presentation') continue;
+        const cleanup = applyTypedProof(resolved, presentedSelects);
+        if (!cleanup) throw new Error('Typed semantic proof could not apply.');
+        this.#cleanups.push(cleanup);
+      }
       if (this.options.mode === 'rrweb') {
         const selectStates = new Map<number, Extract<
           ResolvedSemanticSourceProof,
@@ -195,8 +208,6 @@ function applyTypedProof(
     if (!presentedSelects.has(resolved.proof.nodeId)) return () => undefined;
     const select = resolved.target;
     const options = [...select.options];
-    const originalSelected = new Map(options.map((option) =>
-      [option, option.selected] as const));
     const originalPickerOpen = select.getAttribute(
       'data-simul-source-picker-open',
     );
@@ -204,14 +215,18 @@ function applyTypedProof(
       'data-simul-source-selection-state',
     );
     const selected = new Set(resolved.selectedOptions);
-    const originalSelectedMarkers = new Map(options.map((option) => [
-      option,
-      option.getAttribute('data-simul-source-option-selected'),
-    ] as const));
-    const presentedSelected = new Map<HTMLOptionElement, boolean>();
+    const originalSelected: boolean[] = [];
+    const originalSelectedMarkers: Array<string | null> = [];
+    const presentedSelected: boolean[] = [];
+    for (const option of options) {
+      originalSelected.push(option.selected);
+      originalSelectedMarkers.push(
+        option.getAttribute('data-simul-source-option-selected'),
+      );
+    }
     for (const option of options) {
       const isSelected = selected.has(option);
-      presentedSelected.set(option, isSelected);
+      presentedSelected.push(isSelected);
       option.selected = isSelected;
       if (isSelected) {
         option.setAttribute('data-simul-source-option-selected', 'v1');
@@ -230,33 +245,40 @@ function applyTypedProof(
     }
     select.setAttribute('data-simul-source-selection-state', 'v1');
     return () => {
-      const markerOwnedOptions = options.filter((option) => {
-        if (!select.contains(option)) return false;
-        const expectedSelected = presentedSelected.get(option) ?? false;
-        const expectedMarker = expectedSelected ? 'v1' : null;
-        return option.getAttribute('data-simul-source-option-selected') ===
-          expectedMarker;
-      });
+      const markerOwnedIndexes: number[] = [];
+      const stateOwnedIndexes: number[] = [];
       const selectionStillOwned = select.getAttribute(
         'data-simul-source-selection-state',
       ) === 'v1';
+      for (let index = 0; index < options.length; index += 1) {
+        const option = options[index]!;
+        if (!select.contains(option)) continue;
+        const expectedSelected = presentedSelected[index] ?? false;
+        const expectedMarker = expectedSelected ? 'v1' : null;
+        if (
+          option.getAttribute('data-simul-source-option-selected') !==
+            expectedMarker
+        ) continue;
+        markerOwnedIndexes.push(index);
+        if (selectionStillOwned && option.selected === expectedSelected) {
+          stateOwnedIndexes.push(index);
+        }
+      }
       if (selectionStillOwned) {
-        const stateOwnedOptions = markerOwnedOptions.filter((option) =>
-          option.selected === (presentedSelected.get(option) ?? false));
         // Snapshot ownership before writing: changing one option can update
         // the selectedness of its siblings in a single-select control.
-        for (const option of stateOwnedOptions) {
-          option.selected = originalSelected.get(option) ?? false;
+        for (const index of stateOwnedIndexes) {
+          options[index]!.selected = originalSelected[index] ?? false;
         }
       }
       // A base mirror patch removes the select-level ownership marker. Clear
       // any option markers that remain ours without rolling source selectedness
       // back over that newer patch.
-      for (const option of markerOwnedOptions) {
+      for (const index of markerOwnedIndexes) {
         restoreAttribute(
-          option,
+          options[index]!,
           'data-simul-source-option-selected',
-          originalSelectedMarkers.get(option) ?? null,
+          originalSelectedMarkers[index] ?? null,
         );
       }
       if (selectionStillOwned) {
@@ -347,12 +369,10 @@ function applyTypedProof(
     };
   }
   const { trigger, panel, proof } = resolved;
-  const original = new Map<string, string | null>([
-    ['aria-controls', trigger.getAttribute('aria-controls')],
-    ['aria-expanded', trigger.getAttribute('aria-expanded')],
-    ['aria-haspopup', trigger.getAttribute('aria-haspopup')],
-    ['id', panel.getAttribute('id')],
-  ]);
+  const originalControls = trigger.getAttribute('aria-controls');
+  const originalExpanded = trigger.getAttribute('aria-expanded');
+  const originalHasPopup = trigger.getAttribute('aria-haspopup');
+  const originalPanelId = panel.getAttribute('id');
   const originalTriggerMarker = trigger.getAttribute(
     'data-simul-source-disclosure-state',
   );
@@ -379,12 +399,12 @@ function applyTypedProof(
       trigger.getAttribute('aria-expanded') === presentedExpanded &&
       trigger.getAttribute('aria-haspopup') === proof.popupRole
     ) {
-      restoreAttribute(trigger, 'aria-controls', original.get('aria-controls') ?? null);
-      restoreAttribute(trigger, 'aria-expanded', original.get('aria-expanded') ?? null);
-      restoreAttribute(trigger, 'aria-haspopup', original.get('aria-haspopup') ?? null);
+      restoreAttribute(trigger, 'aria-controls', originalControls);
+      restoreAttribute(trigger, 'aria-expanded', originalExpanded);
+      restoreAttribute(trigger, 'aria-haspopup', originalHasPopup);
     }
     if (panelStillOwned && panel.getAttribute('id') === proof.relationId) {
-      restoreAttribute(panel, 'id', original.get('id') ?? null);
+      restoreAttribute(panel, 'id', originalPanelId);
     }
     if (triggerStillOwned) {
       restoreAttribute(
