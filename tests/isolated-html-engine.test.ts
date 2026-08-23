@@ -1300,12 +1300,19 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(stream.acknowledged).toContain(1);
   });
 
-  it('coalesces synchronous translation layout refreshes into one measurement', async () => {
+  it('coalesces translation layout refreshes within one frame', async () => {
     const stream = new FakeHtmlStream(makeCheckpoint('source label', 0));
     const host = new FakePresentationHost();
-    const engine = makeEngine(stream, host);
+    const frames: FrameRequestCallback[] = [];
+    const engine = makeEngine(
+      stream,
+      host,
+      undefined,
+      undefined,
+      (callback) => frames.push(callback),
+    );
     await engine.run(request);
-    await Promise.resolve();
+    frames.splice(0).forEach((frame) => frame(0));
     host.refreshExtent.mockClear();
 
     const snapshot = engine.snapshot()!;
@@ -1322,10 +1329,12 @@ describe('IsolatedHtmlReplicaEngine', () => {
         pairKey: 'en\0ja',
         translated: `translation ${index}`,
       })).toBe(true);
+      await Promise.resolve();
     }
 
     expect(host.refreshExtent).not.toHaveBeenCalled();
-    await Promise.resolve();
+    expect(frames).toHaveLength(1);
+    frames[0]!(0);
     expect(host.refreshExtent).toHaveBeenCalledOnce();
   });
 
@@ -3180,6 +3189,7 @@ function makeEngine(
   host: FakePresentationHost,
   onInfo?: ConstructorParameters<typeof IsolatedHtmlReplicaEngine>[0]['onInfo'],
   semantic?: FakeSemanticStream,
+  scheduleLayoutRefresh?: (callback: FrameRequestCallback) => void,
 ): IsolatedHtmlReplicaEngine {
   return new IsolatedHtmlReplicaEngine({
     presentationHost: host,
@@ -3194,5 +3204,6 @@ function makeEngine(
       return document;
     },
     ...(onInfo ? { onInfo } : {}),
+    ...(scheduleLayoutRefresh ? { scheduleLayoutRefresh } : {}),
   });
 }
