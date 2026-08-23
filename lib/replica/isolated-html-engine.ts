@@ -64,6 +64,7 @@ import {
   disposeReadOnlyReplicaDisclosures,
   installReadOnlyReplicaDisclosure,
   isReadOnlyReplicaDisclosureEvent,
+  snapshotOpenReadOnlyReplicaDisclosures,
   type ReadOnlyReplicaDisclosure,
 } from './read-only-disclosure';
 import {
@@ -717,12 +718,20 @@ export class IsolatedHtmlReplicaEngine
     }
     const replacementMetrics = readPatchMetrics(state, batch.operations);
     const replicaDocument = state.iframe.contentDocument;
+    const retainedOpenDisclosures = replicaDocument
+      ? snapshotOpenReadOnlyReplicaDisclosures(replicaDocument)
+      : undefined;
     if (replicaDocument) disposeReadOnlyReplicaDisclosures(replicaDocument);
     let applied: AppliedPatchBatch | undefined;
     try {
       applied = applyPatchBatch(state, batch.operations);
     } finally {
-      if (replicaDocument) refreshIsolatedReplicaDisclosures(replicaDocument);
+      if (replicaDocument) {
+        refreshIsolatedReplicaDisclosures(
+          replicaDocument,
+          retainedOpenDisclosures,
+        );
+      }
     }
     if (!applied) {
       const reconciliationRejected = batch.operations.some(
@@ -988,6 +997,7 @@ export class IsolatedHtmlReplicaEngine
     if (!open || !hasSemanticReadScope(scope)) return;
     const replicaDocument = state.iframe.contentDocument;
     if (!replicaDocument) return;
+    let retainedOpenDisclosures: ReadonlySet<HTMLElement> | undefined;
     const presenter = new SemanticProofPresenter({
       document: replicaDocument,
       iframe: state.iframe,
@@ -997,9 +1007,18 @@ export class IsolatedHtmlReplicaEngine
           state.iframe,
           accessible,
         ) ?? true,
+      beforeApply: () => {
+        retainedOpenDisclosures = snapshotOpenReadOnlyReplicaDisclosures(
+          replicaDocument,
+        );
+      },
       afterApply: () => {
         refreshIsolatedNativeSelectFacsimiles(replicaDocument);
-        refreshIsolatedReplicaDisclosures(replicaDocument);
+        refreshIsolatedReplicaDisclosures(
+          replicaDocument,
+          retainedOpenDisclosures,
+        );
+        retainedOpenDisclosures = undefined;
       },
     });
     const receiver = new SemanticSourceReceiver({
@@ -1947,7 +1966,10 @@ function refreshIsolatedNativeSelectFacsimiles(
   }
 }
 
-function refreshIsolatedReplicaDisclosures(document: Document): void {
+function refreshIsolatedReplicaDisclosures(
+  document: Document,
+  retainedOpenDisclosures = snapshotOpenReadOnlyReplicaDisclosures(document),
+): void {
   disposeReadOnlyReplicaDisclosures(document);
   if (!document.documentElement) return;
   const elements = collectIsolatedElements(document.documentElement);
@@ -1967,8 +1989,10 @@ function refreshIsolatedReplicaDisclosures(document: Document): void {
       presentation,
       ...(presentation === 'popup' ? { trigger: facsimile.trigger } : {}),
       manageTriggerExpanded: presentation === 'popup',
-      initiallyOpen: presentation === 'popup' &&
-        facsimile.select.getAttribute('data-simul-source-picker-open') === 'v1',
+      initiallyOpen: presentation === 'popup' && (
+        retainedOpenDisclosures.has(host) ||
+        facsimile.select.getAttribute('data-simul-source-picker-open') === 'v1'
+      ),
       visibleRows: size,
     });
   }

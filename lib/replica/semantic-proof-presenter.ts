@@ -13,6 +13,7 @@ export interface SemanticProofPresenterOptions {
   readonly document: Document;
   readonly iframe?: HTMLIFrameElement;
   readonly mode: 'isolated-html' | 'rrweb';
+  readonly beforeApply?: () => void;
   readonly afterApply?: () => void;
   readonly setAncestorAccessibility?: (accessible: boolean) => boolean;
 }
@@ -28,16 +29,26 @@ export class SemanticProofPresenter {
 
   apply(proofs: readonly ResolvedSemanticSourceProof[]): boolean {
     const previous = this.#proofs;
-    this.#teardown();
+    try {
+      this.options.beforeApply?.();
+    } catch {
+      // Preview-state retention is best effort and cannot widen source proof.
+    }
+    this.#teardown(false);
     if (this.#install(proofs)) {
       this.#proofs = Object.freeze([...proofs]);
       return true;
     }
-    this.#teardown();
+    this.#teardown(false);
     if (this.#install(previous)) this.#proofs = previous;
     else {
-      this.#teardown();
+      this.#teardown(false);
       this.#proofs = Object.freeze([]);
+      try {
+        this.options.afterApply?.();
+      } catch {
+        // Presentation is already cleared after both installations failed.
+      }
     }
     return false;
   }
@@ -118,7 +129,7 @@ export class SemanticProofPresenter {
     }
   }
 
-  #teardown(): void {
+  #teardown(notify = true): void {
     disposeReadOnlyReplicaDisclosures(this.options.document);
     this.#ancestorCleanup?.();
     this.#ancestorCleanup = undefined;
@@ -132,10 +143,12 @@ export class SemanticProofPresenter {
       }
     }
     this.#cleanups.length = 0;
-    try {
-      this.options.afterApply?.();
-    } catch {
-      // Teardown is already fail-closed when a derived refresh is unavailable.
+    if (notify) {
+      try {
+        this.options.afterApply?.();
+      } catch {
+        // Teardown is already fail-closed when a derived refresh is unavailable.
+      }
     }
   }
 }
