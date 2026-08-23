@@ -173,13 +173,16 @@ function applyTypedProof(
     else select.setAttribute('size', presentedSize);
     select.setAttribute('data-simul-source-select-presentation', 'v1');
     return () => {
-      if (select.multiple === presentedMultiple) {
+      const stillOwned = select.getAttribute(
+        'data-simul-source-select-presentation',
+      ) === 'v1';
+      if (stillOwned && select.multiple === presentedMultiple) {
         select.multiple = originalMultiple;
       }
-      if (select.getAttribute('size') === presentedSize) {
+      if (stillOwned && select.getAttribute('size') === presentedSize) {
         restoreAttribute(select, 'size', originalSize);
       }
-      if (select.getAttribute('data-simul-source-select-presentation') === 'v1') {
+      if (stillOwned) {
         restoreAttribute(
           select,
           'data-simul-source-select-presentation',
@@ -227,32 +230,47 @@ function applyTypedProof(
     }
     select.setAttribute('data-simul-source-selection-state', 'v1');
     return () => {
-      const ownedOptions = options.filter((option) => {
+      const markerOwnedOptions = options.filter((option) => {
         if (!select.contains(option)) return false;
         const expectedSelected = presentedSelected.get(option) ?? false;
         const expectedMarker = expectedSelected ? 'v1' : null;
-        return !(
-          option.selected !== expectedSelected ||
-          option.getAttribute('data-simul-source-option-selected') !==
-            expectedMarker
-        );
+        return option.getAttribute('data-simul-source-option-selected') ===
+          expectedMarker;
       });
-      // Snapshot ownership before writing: changing one option can update the
-      // selectedness of its siblings in a single-select control.
-      for (const option of ownedOptions) {
-        option.selected = originalSelected.get(option) ?? false;
+      const selectionStillOwned = select.getAttribute(
+        'data-simul-source-selection-state',
+      ) === 'v1';
+      if (selectionStillOwned) {
+        const stateOwnedOptions = markerOwnedOptions.filter((option) =>
+          option.selected === (presentedSelected.get(option) ?? false));
+        // Snapshot ownership before writing: changing one option can update
+        // the selectedness of its siblings in a single-select control.
+        for (const option of stateOwnedOptions) {
+          option.selected = originalSelected.get(option) ?? false;
+        }
+      }
+      // A base mirror patch removes the select-level ownership marker. Clear
+      // any option markers that remain ours without rolling source selectedness
+      // back over that newer patch.
+      for (const option of markerOwnedOptions) {
         restoreAttribute(
           option,
           'data-simul-source-option-selected',
           originalSelectedMarkers.get(option) ?? null,
         );
       }
-      restoreAttribute(select, 'data-simul-source-picker-open', originalPickerOpen);
-      restoreAttribute(
-        select,
-        'data-simul-source-selection-state',
-        originalSelectionMarker,
-      );
+      if (selectionStillOwned) {
+        restoreAttribute(
+          select,
+          'data-simul-source-picker-open',
+          originalPickerOpen,
+        );
+        restoreAttribute(
+          select,
+          'data-simul-source-selection-state',
+          originalSelectionMarker,
+        );
+      }
     };
   }
   if (resolved.kind === 'choice-state') {
