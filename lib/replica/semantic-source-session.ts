@@ -593,12 +593,9 @@ export class SemanticSourceSession {
       if (proofIds.has(proofId)) return false;
       const signature = semanticSourceProofSignature(provisional);
       const previous = this.#proofRevisions.get(proofId);
-      if (!previous &&
-        this.#proofRevisions.size + this.#revisions.size >=
-          MAX_SEMANTIC_SOURCE_NODE_IDENTITIES) return false;
       const revision = previous?.signature === signature
         ? previous.revision
-        : (previous?.revision ?? 0) + 1;
+        : this.#sequence + 1;
       const proof = Object.freeze({ ...draft, revision }) as SemanticSourceProof;
       const proofBytes = semanticSourceBatchByteLength([], [proof]);
       if (batchBytes + proofBytes > MAX_SEMANTIC_SOURCE_BATCH_BYTES) return false;
@@ -812,12 +809,9 @@ export class SemanticSourceSession {
         classification.facts.contentEditable ?? '',
       ].join('\u0000');
       const previous = this.#revisions.get(recordId);
-      if (!previous &&
-        this.#revisions.size + this.#proofRevisions.size >=
-          MAX_SEMANTIC_SOURCE_NODE_IDENTITIES) return;
       const nodeRevision = previous?.signature === signature
         ? previous.revision
-        : (previous?.revision ?? 0) + 1;
+        : this.#sequence + 1;
       const record: SemanticSourceRecord = Object.freeze({
         bridge: this.environment.bridge,
         recordId,
@@ -982,11 +976,24 @@ export class SemanticSourceSession {
         });
       }
     }
+    this.#retainCurrentRevisionHistory(recordIds, proofIds);
     this.#replaceControlPollCandidates(elements, stack.length === 0);
     return Object.freeze({
       records: Object.freeze(records),
       proofs: Object.freeze(proofs),
     });
+  }
+
+  #retainCurrentRevisionHistory(
+    recordIds: ReadonlySet<number>,
+    proofIds: ReadonlySet<string>,
+  ): void {
+    for (const recordId of this.#revisions.keys()) {
+      if (!recordIds.has(recordId)) this.#revisions.delete(recordId);
+    }
+    for (const proofId of this.#proofRevisions.keys()) {
+      if (!proofIds.has(proofId)) this.#proofRevisions.delete(proofId);
+    }
   }
 
   #validatedDisclosures(
