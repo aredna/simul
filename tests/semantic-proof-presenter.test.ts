@@ -73,4 +73,56 @@ describe('SemanticProofPresenter', () => {
     expect(second.selected).toBe(false);
     expect(late.getAttribute('data-simul-source-option-selected')).toBe('late');
   });
+
+  it('does not roll stale dropdown proof state over newer mirror updates', () => {
+    const { document } = parseHTML(`<html><body>
+      <select multiple size="2"><option selected>One</option><option>Two</option></select>
+      <iframe></iframe></body></html>`);
+    const select = document.querySelector<HTMLSelectElement>('select')!;
+    const first = select.options[0]!;
+    const second = select.options[1]!;
+    const frame = document.querySelector('iframe') as unknown as HTMLIFrameElement;
+    const proofs = (revision: number, selected: HTMLOptionElement, multiple: boolean) =>
+      [{
+        kind: 'select-presentation' as const,
+        proof: {
+          kind: 'select-presentation' as const, bridge: 'isolated-html' as const,
+          nodeId: 7, revision, gate: 'controlSemantics' as const, multiple,
+          size: multiple ? 2 : null, classifierVersion: 1 as const,
+        },
+        target: select,
+      }, {
+        kind: 'select-state' as const,
+        proof: {
+          kind: 'select-state' as const, bridge: 'isolated-html' as const,
+          nodeId: 7, revision, gate: 'formValues' as const,
+          selectedOptionNodeIds: [selected === first ? 8 : 9], multiple,
+          pickerOpen: false, classifierVersion: 1 as const,
+        },
+        target: select,
+        selectedOptions: [selected],
+      }] satisfies readonly ResolvedSemanticSourceProof[];
+    const presenter = new SemanticProofPresenter({
+      document: document as unknown as Document,
+      iframe: frame,
+    });
+
+    expect(presenter.apply(proofs(1, first, true))).toBe(true);
+
+    // A mirror patch lands before its matching semantic proof batch.
+    select.multiple = false;
+    select.removeAttribute('size');
+    first.selected = false;
+    first.removeAttribute('data-simul-source-option-selected');
+    second.selected = true;
+    second.setAttribute('data-simul-source-option-selected', 'v1');
+
+    expect(presenter.apply(proofs(2, second, false))).toBe(true);
+    presenter.clear();
+
+    expect(select.multiple).toBe(false);
+    expect(select.hasAttribute('size')).toBe(false);
+    expect(first.selected).toBe(false);
+    expect(second.selected).toBe(true);
+  });
 });

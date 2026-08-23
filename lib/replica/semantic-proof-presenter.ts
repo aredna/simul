@@ -164,18 +164,28 @@ function applyTypedProof(
     const originalMarker = select.getAttribute(
       'data-simul-source-select-presentation',
     );
-    select.multiple = resolved.proof.multiple;
-    if (resolved.proof.size === null) select.removeAttribute('size');
-    else select.setAttribute('size', String(resolved.proof.size));
+    const presentedMultiple = resolved.proof.multiple;
+    const presentedSize = resolved.proof.size === null
+      ? null
+      : String(resolved.proof.size);
+    select.multiple = presentedMultiple;
+    if (presentedSize === null) select.removeAttribute('size');
+    else select.setAttribute('size', presentedSize);
     select.setAttribute('data-simul-source-select-presentation', 'v1');
     return () => {
-      select.multiple = originalMultiple;
-      restoreAttribute(select, 'size', originalSize);
-      restoreAttribute(
-        select,
-        'data-simul-source-select-presentation',
-        originalMarker,
-      );
+      if (select.multiple === presentedMultiple) {
+        select.multiple = originalMultiple;
+      }
+      if (select.getAttribute('size') === presentedSize) {
+        restoreAttribute(select, 'size', originalSize);
+      }
+      if (select.getAttribute('data-simul-source-select-presentation') === 'v1') {
+        restoreAttribute(
+          select,
+          'data-simul-source-select-presentation',
+          originalMarker,
+        );
+      }
     };
   }
   if (resolved.kind === 'select-state') {
@@ -195,8 +205,10 @@ function applyTypedProof(
       option,
       option.getAttribute('data-simul-source-option-selected'),
     ] as const));
+    const presentedSelected = new Map<HTMLOptionElement, boolean>();
     for (const option of options) {
       const isSelected = selected.has(option);
+      presentedSelected.set(option, isSelected);
       option.selected = isSelected;
       if (isSelected) {
         option.setAttribute('data-simul-source-option-selected', 'v1');
@@ -215,8 +227,19 @@ function applyTypedProof(
     }
     select.setAttribute('data-simul-source-selection-state', 'v1');
     return () => {
-      for (const option of options) {
-        if (!select.contains(option)) continue;
+      const ownedOptions = options.filter((option) => {
+        if (!select.contains(option)) return false;
+        const expectedSelected = presentedSelected.get(option) ?? false;
+        const expectedMarker = expectedSelected ? 'v1' : null;
+        return !(
+          option.selected !== expectedSelected ||
+          option.getAttribute('data-simul-source-option-selected') !==
+            expectedMarker
+        );
+      });
+      // Snapshot ownership before writing: changing one option can update the
+      // selectedness of its siblings in a single-select control.
+      for (const option of ownedOptions) {
         option.selected = originalSelected.get(option) ?? false;
         restoreAttribute(
           option,
