@@ -562,6 +562,45 @@ describe('semantic source session', () => {
     session.dispose();
   });
 
+  it('sleeps the control poller until a pollable control is discovered', () => {
+    const { document, window } = parseHTML(
+      '<html><body><main>Article text</main></body></html>',
+    );
+    const timers: Array<() => void> = [];
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(
+      port,
+      document,
+      window,
+      'isolated-html',
+      undefined,
+      undefined,
+      timers,
+    );
+    port.emit(createSemanticSourceStart(
+      'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+    ));
+    const initial = port.messages[0]!;
+    expect(timers).toHaveLength(0);
+
+    const input = document.createElement('input');
+    input.value = 'new draft';
+    document.body.append(input);
+    session.refresh();
+    port.emit(createSemanticSourceAck(
+      identity,
+      initial.policyFingerprint,
+      initial.sequence,
+    ));
+
+    expect(port.messages.at(-1)?.records.map(({ text }) => text))
+      .toContain('new draft');
+    expect(timers).toHaveLength(1);
+    session.dispose();
+  });
+
   it('tracks native select picker state on activation and silent close', () => {
     const { document, window } = parseHTML(
       '<html><body><select id="choice"><option selected>One</option></select></body></html>',
