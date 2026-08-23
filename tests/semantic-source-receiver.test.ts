@@ -367,6 +367,37 @@ describe('semantic source receiver', () => {
     expect(presented.at(-1)?.map(({ kind }) => kind))
       .toEqual(['select-state', 'select-presentation']);
   });
+
+  it('reports proof presentation failure after a base replay refresh', () => {
+    const { document } = parseHTML(
+      '<html><body><select><option selected>One</option></select></body></html>',
+    );
+    const select = document.querySelector<HTMLSelectElement>('select')!;
+    const option = select.options[0]!;
+    let rejectPresentation = false;
+    const receiver = new SemanticSourceReceiver({
+      document: identity,
+      replicaDocument: document as unknown as Document,
+      resolveNode: (nodeId) => nodeId === 7 ? select : nodeId === 8
+        ? option
+        : undefined,
+      applyProofs: () => !rejectPresentation,
+    });
+    const proof = {
+      kind: 'select-state', bridge: 'rrweb', nodeId: 7, revision: 1,
+      gate: 'formValues', selectedOptionNodeIds: [8], multiple: false,
+      pickerOpen: false, classifierVersion: 1,
+    } as const;
+
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 1, [], [proof],
+    ))).toBeDefined();
+    expect(receiver.proofPresentationHealthy).toBe(true);
+
+    rejectPresentation = true;
+    expect(receiver.refreshBindings()).toEqual([]);
+    expect(receiver.proofPresentationHealthy).toBe(false);
+  });
 });
 
 function valueRecord(

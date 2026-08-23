@@ -772,7 +772,15 @@ export class IsolatedHtmlReplicaEngine
     stream.acknowledge(state.sequence);
     this.options.presentationHost.refreshDimensions?.(state.iframe, state.dimensions);
     this.options.presentationHost.markLive(state.iframe);
-    const semanticChanges = this.#semanticReceiver?.refreshBindings() ?? [];
+    const semanticReceiver = this.#semanticReceiver;
+    let semanticChanges = semanticReceiver?.refreshBindings() ?? [];
+    if (semanticReceiver && !semanticReceiver.proofPresentationHealthy) {
+      semanticChanges = Object.freeze([
+        ...semanticChanges,
+        ...this.#purgeSemantic(false),
+      ]);
+      this.#scheduleSemanticReconnect(state, request, runVersion);
+    }
     for (const change of semanticChanges) {
       this.#projections.delete(sourceChangeNodeId(change));
     }

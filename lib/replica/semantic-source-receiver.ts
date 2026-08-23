@@ -118,6 +118,7 @@ export class SemanticSourceReceiver {
   readonly #proofs = new Map<string, ResolvedSemanticSourceProof>();
   readonly #classifier = new StickySourceSecretClassifier();
   #lastSequence = 0;
+  #proofPresentationHealthy = true;
 
   constructor(private readonly environment: SemanticSourceReceiverEnvironment) {}
 
@@ -129,6 +130,10 @@ export class SemanticSourceReceiver {
 
   get(projectionNodeId: number): ReplicaSourceTextRecord | undefined {
     return this.#entries.get(projectionNodeId)?.translationRecord;
+  }
+
+  get proofPresentationHealthy(): boolean {
+    return this.#proofPresentationHealthy;
   }
 
   applyBatch(batch: SemanticSourceBatch): readonly ReplicaSourceTextChange[] | undefined {
@@ -302,6 +307,7 @@ export class SemanticSourceReceiver {
       }));
     }
     this.#lastSequence = batch.sequence;
+    this.#proofPresentationHealthy = true;
     return Object.freeze(changes);
   }
 
@@ -347,6 +353,7 @@ export class SemanticSourceReceiver {
     } catch {
       presented = false;
     }
+    this.#proofPresentationHealthy = presented;
     this.#proofs.clear();
     if (presented) {
       for (const [proofId, proof] of retainedProofs) this.#proofs.set(proofId, proof);
@@ -384,6 +391,7 @@ export class SemanticSourceReceiver {
     } catch {
       // Text cleanup still proceeds if an owned presenter was already lost.
     }
+    this.#proofPresentationHealthy = true;
     this.#proofs.clear();
     const changes: ReplicaSourceTextChange[] = [];
     for (const [projectionNodeId, entry] of this.#entries) {
@@ -529,14 +537,18 @@ export class SemanticSourceReceiver {
   }
 
   #presentCurrentProofs(): boolean {
-    if (!this.environment.applyProofs) return true;
+    if (!this.environment.applyProofs) {
+      this.#proofPresentationHealthy = true;
+      return true;
+    }
     try {
-      return this.environment.applyProofs(
+      this.#proofPresentationHealthy = this.environment.applyProofs(
         Object.freeze([...this.#proofs.values()]),
       ) === true;
     } catch {
-      return false;
+      this.#proofPresentationHealthy = false;
     }
+    return this.#proofPresentationHealthy;
   }
 
   #resolveElement(nodeId: number): Element | undefined {
