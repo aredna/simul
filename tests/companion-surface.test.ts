@@ -84,6 +84,18 @@ describe('companion surface launch decisions', () => {
     expect(shouldIgnoreInactiveFollowedTabUpdate(false, 'active', false)).toBe(
       false,
     );
+    expect(shouldIgnoreInactiveFollowedTabUpdate(
+      true,
+      'active',
+      true,
+      true,
+    )).toBe(true);
+    expect(shouldIgnoreInactiveFollowedTabUpdate(
+      true,
+      'locked',
+      true,
+      true,
+    )).toBe(false);
   });
 
   it('reacquires a neighboring tab after the active source closes', () => {
