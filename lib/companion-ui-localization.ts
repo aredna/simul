@@ -49,15 +49,17 @@ export async function resolveUiLabelTranslations(
   targetLanguage: SupportedLanguage,
   translate: (source: string) => Promise<string>,
 ): Promise<UiLabelLocalizationResult> {
-  const uniqueSources = [...new Set(sources.filter((source) => source.length > 0))];
-  const english = new Map(uniqueSources.map((source) => [source, source]));
+  const english = new Map<string, string>();
+  for (const source of sources) {
+    if (source.length > 0) english.set(source, source);
+  }
   if (targetLanguage === 'en') {
     return { localized: false, labels: english };
   }
 
   const localized = new Map<string, string>();
   try {
-    for (const source of uniqueSources) {
+    for (const source of english.keys()) {
       const translated = await translate(source);
       if (!translated.trim()) return { localized: false, labels: english };
       localized.set(source, translated.trim());

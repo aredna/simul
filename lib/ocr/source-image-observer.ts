@@ -805,14 +805,18 @@ function isStyleSourceElement(element: Element): boolean {
 }
 
 function readPrivateSourceToken(image: HTMLImageElement): PrivateSourceToken {
-  let parts: string[];
+  let parts: readonly string[];
   try {
+    const currentSrc = image.currentSrc;
+    const src = image.getAttribute('src');
+    const srcset = image.getAttribute('srcset');
+    const sizes = image.getAttribute('sizes');
     parts = [
-      image.currentSrc,
-      image.getAttribute('src') ?? '',
-      image.getAttribute('srcset') ?? '',
-      image.getAttribute('sizes') ?? '',
-    ].map((value) => typeof value === 'string' ? value : '');
+      typeof currentSrc === 'string' ? currentSrc : '',
+      typeof src === 'string' ? src : '',
+      typeof srcset === 'string' ? srcset : '',
+      typeof sizes === 'string' ? sizes : '',
+    ];
   } catch {
     return OVERSIZED_PRIVATE_SOURCE_TOKEN;
   }
@@ -823,8 +827,9 @@ function readPrivateSourceToken(image: HTMLImageElement): PrivateSourceToken {
       return OVERSIZED_PRIVATE_SOURCE_TOKEN;
     }
   }
-  const encoded = parts.map((part) => `${part.length}:${part}`).join('');
-  return Object.freeze({ kind: 'exact', value: encoded });
+  let value = '';
+  for (const part of parts) value += `${part.length}:${part}`;
+  return Object.freeze({ kind: 'exact', value });
 }
 
 function privateSourceTokenChanged(

@@ -2,7 +2,8 @@ export const PRIMARY_SCROLL_MAX = 100_000;
 
 export type PrimaryScrollTarget = 'document' | 'nested';
 
-const EDITABLE_SCROLL_ROLES = new Set(['combobox', 'searchbox', 'textbox']);
+const EDITABLE_SCROLL_ROLE =
+  /(?:^|\s)(?:combobox|searchbox|textbox)(?=\s|$)/iu;
 
 export interface PrimaryScrollSnapshot {
   readonly scrollTarget: PrimaryScrollTarget;
@@ -244,11 +245,8 @@ function isEditableScrollOwner(element: Element): boolean {
     if (tag === 'textarea' || tag === 'input' || tag === 'select') return true;
     const editable = current.getAttribute('contenteditable');
     if (editable !== null && editable.trim().toLowerCase() !== 'false') return true;
-    const roles = current.getAttribute('role')
-      ?.trim()
-      .toLowerCase()
-      .split(/\s+/u) ?? [];
-    if (roles.some((role) => EDITABLE_SCROLL_ROLES.has(role))) return true;
+    const role = current.getAttribute('role');
+    if (role && EDITABLE_SCROLL_ROLE.test(role)) return true;
     if (current === element.ownerDocument.body) break;
   }
   return false;
@@ -268,7 +266,8 @@ function safeRect(element: Element): DOMRect {
   try {
     const rect = element.getBoundingClientRect();
     if (
-      [rect.left, rect.top, rect.right, rect.bottom].every(Number.isFinite)
+      Number.isFinite(rect.left) && Number.isFinite(rect.top) &&
+      Number.isFinite(rect.right) && Number.isFinite(rect.bottom)
     ) return rect;
   } catch {
     // Fall back to the bounded client box below.
@@ -304,7 +303,9 @@ function finite(value: unknown): number {
 }
 
 function maximumFinite(...values: readonly unknown[]): number {
-  return Math.max(0, ...values.map(finite));
+  let maximum = 0;
+  for (const value of values) maximum = Math.max(maximum, finite(value));
+  return maximum;
 }
 
 function documentAxisPosition(
