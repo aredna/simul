@@ -6,6 +6,7 @@ import {
   isImageTextProviderId,
   type ImageTextProviderId,
 } from './known-provider-ids';
+import { hasExactKeysWithOptional } from '../exact-record';
 
 export const IMAGE_SCAN_POLICIES = Object.freeze([
   'visible-first-background-prescan',
@@ -394,11 +395,8 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function isRecordWithExactKeys(
   value: unknown,
   required: readonly string[],
-  optional: readonly string[] = [],
+  optional?: readonly string[],
 ): value is Record<string, unknown> {
   if (!isRecord(value)) return false;
-  const keys = Object.keys(value);
-  const allowed = new Set([...required, ...optional]);
-  return required.every((key) => Object.hasOwn(value, key)) &&
-    keys.every((key) => allowed.has(key));
+  return hasExactKeysWithOptional(value, required, optional);
 }

@@ -14,6 +14,7 @@ import {
   type SupportedLanguage,
 } from '../translation-provider';
 import { normalizeAccessibilityImageText } from './accessibility-image-text';
+import { hasExactKeysWithOptional } from '../exact-record';
 
 export const IMAGE_SOURCE_PROTOCOL_VERSION = 1;
 export const IMAGE_SOURCE_PORT_PREFIX = 'simul:image-source-v1:';
@@ -525,15 +526,4 @@ function hasExactKeys(
 ): boolean {
   const actual = Object.keys(value);
   return actual.length === keys.length && keys.every((key) => Object.hasOwn(value, key));
-}
-
-function hasExactKeysWithOptional(
-  value: Record<string, unknown>,
-  required: readonly string[],
-  optional: readonly string[],
-): boolean {
-  const allowed = new Set([...required, ...optional]);
-  const actual = Object.keys(value);
-  return required.every((key) => Object.hasOwn(value, key)) &&
-    actual.every((key) => allowed.has(key));
 }

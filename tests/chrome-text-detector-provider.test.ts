@@ -50,6 +50,29 @@ describe('Chrome TextDetector provider', () => {
     });
   });
 
+  it('bounds transcript assembly without dropping later geometry', () => {
+    const detections = Array.from({ length: 9 }, (_, index) => ({
+      rawValue: 'x'.repeat(100_000),
+      boundingBox: { x: index, y: 1, width: 1, height: 10 },
+    }));
+    detections.push(
+      {
+        rawValue: 'x'.repeat(99_990),
+        boundingBox: { x: 10, y: 1, width: 1, height: 10 },
+      },
+      {
+        rawValue: 'later',
+        boundingBox: { x: 20, y: 1, width: 1, height: 10 },
+      },
+    );
+    const normalized = normalizeChromeTextDetection(detections, 100, 50);
+
+    expect(normalized?.transcript).toHaveLength(1_000_000);
+    expect(normalized?.transcript.endsWith('\n')).toBe(true);
+    expect(normalized?.regions).toHaveLength(11);
+    expect(normalized?.regions[10]?.text).toBe('later');
+  });
+
   it('uses a real local detect call for its capability probe', async () => {
     const detect = vi.fn(async () => []);
     const create = vi.fn(async () => ({ detect }));

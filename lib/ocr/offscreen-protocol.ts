@@ -22,6 +22,7 @@ import {
   OCR_QUALITY_POLICY_VERSION,
   type OcrMinimumConfidence,
 } from './result-quality';
+import { hasExactKeysWithOptional } from '../exact-record';
 
 export const OCR_OFFSCREEN_PROTOCOL_VERSION = 1;
 
@@ -458,8 +459,5 @@ function isExactRecordWithOptionalKeys(
   optional: readonly string[],
 ): value is Record<string, unknown> {
   if (!isRecord(value)) return false;
-  const allowed = new Set([...required, ...optional]);
-  const actual = Object.keys(value);
-  return required.every((key) => Object.hasOwn(value, key)) &&
-    actual.every((key) => allowed.has(key));
+  return hasExactKeysWithOptional(value, required, optional);
 }

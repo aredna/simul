@@ -52,11 +52,11 @@ export function normalizeTesseractPage(
           confidenceTotal += confidence;
           confidenceCount += 1;
         }
-        regions.push(Object.freeze({
+        regions.push({
           text,
           ...(confidence !== undefined ? { confidence } : {}),
           boundingBox,
-        }));
+        });
       }
     }
   }
@@ -80,7 +80,13 @@ function normalizeBbox(
   bitmapWidth: number,
   bitmapHeight: number,
 ): ImageTextRegion['boundingBox'] | undefined {
-  if (!bbox || ![bbox.x0, bbox.y0, bbox.x1, bbox.y1].every(Number.isFinite)) {
+  if (
+    !bbox ||
+    !Number.isFinite(bbox.x0) ||
+    !Number.isFinite(bbox.y0) ||
+    !Number.isFinite(bbox.x1) ||
+    !Number.isFinite(bbox.y1)
+  ) {
     return undefined;
   }
   const x0 = clamp(Math.floor(bbox.x0), 0, bitmapWidth);
@@ -88,7 +94,7 @@ function normalizeBbox(
   const x1 = clamp(Math.ceil(bbox.x1), 0, bitmapWidth);
   const y1 = clamp(Math.ceil(bbox.y1), 0, bitmapHeight);
   if (x1 <= x0 || y1 <= y0) return undefined;
-  return Object.freeze({ x: x0, y: y0, width: x1 - x0, height: y1 - y0 });
+  return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
 }
 
 function normalizeOptionalConfidence(value: unknown): number | undefined {

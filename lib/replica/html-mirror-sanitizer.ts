@@ -23,6 +23,7 @@ import {
   isSourceSecretPlaceholderTagName,
   sourceSecretPlaceholderTagName,
 } from './source-secret-classifier';
+import { hasExactKeysWithOptional } from '../exact-record';
 
 export const MAX_HTML_MIRROR_BYTES = 8 * 1024 * 1024;
 export const MAX_HTML_MIRROR_NODES = 50_000;
@@ -4519,15 +4520,4 @@ function hasExactKeys(
 ): boolean {
   const actual = Object.keys(value);
   return actual.length === keys.length && keys.every((key) => Object.hasOwn(value, key));
-}
-
-function hasExactKeysWithOptional(
-  value: Record<string, unknown>,
-  required: readonly string[],
-  optional: readonly string[],
-): boolean {
-  const allowed = new Set([...required, ...optional]);
-  const actual = Object.keys(value);
-  return required.every((key) => Object.hasOwn(value, key)) &&
-    actual.every((key) => allowed.has(key));
 }

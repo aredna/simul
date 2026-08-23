@@ -25,6 +25,7 @@ import {
   isSelectableReplicaFidelityPolicy,
   type SelectableReplicaFidelityPolicy,
 } from './fidelity-policy';
+import { hasExactKeysWithOptional } from '../exact-record';
 
 export const HTML_MIRROR_PROTOCOL_VERSION = 1 as const;
 export const HTML_MIRROR_PORT_PREFIX = 'simul:html-mirror-v1:';
@@ -980,14 +981,4 @@ function isRecord(value: unknown): value is Record<string, unknown> {
 function hasExactKeys(value: Record<string, unknown>, keys: readonly string[]): boolean {
   const actual = Object.keys(value);
   return actual.length === keys.length && keys.every((key) => Object.hasOwn(value, key));
-}
-
-function hasExactKeysWithOptional(
-  value: Record<string, unknown>,
-  required: readonly string[],
-  optional: readonly string[],
-): boolean {
-  const allowed = new Set([...required, ...optional]);
-  return required.every((key) => Object.hasOwn(value, key)) &&
-    Object.keys(value).every((key) => allowed.has(key));
 }

@@ -6,6 +6,8 @@ import {
   type ImageTextResult,
 } from '../../contracts';
 
+const MAX_CHROME_TEXT_TRANSCRIPT_LENGTH = 1_000_000;
+
 /** Normalize both the current WICG shape and legacy boxes-only Chrome output. */
 export function normalizeChromeTextDetection(
   detections: unknown,
@@ -16,7 +18,8 @@ export function normalizeChromeTextDetection(
     return undefined;
   }
   const regions: ImageTextRegion[] = [];
-  const transcript: string[] = [];
+  const transcriptParts: string[] = [];
+  let transcriptLength = 0;
   for (const detection of detections) {
     if (!isRecord(detection)) return undefined;
     const boundingBox = normalizeBoundingBox(
@@ -33,18 +36,25 @@ export function normalizeChromeTextDetection(
       bitmapWidth,
       bitmapHeight,
     );
-    if (text) transcript.push(text);
-    regions.push(Object.freeze({
+    if (text && transcriptLength < MAX_CHROME_TEXT_TRANSCRIPT_LENGTH) {
+      const separatorLength = transcriptParts.length === 0 ? 0 : 1;
+      const remaining = MAX_CHROME_TEXT_TRANSCRIPT_LENGTH -
+        transcriptLength - separatorLength;
+      const part = text.slice(0, remaining);
+      transcriptParts.push(part);
+      transcriptLength += separatorLength + part.length;
+    }
+    regions.push({
       text,
       boundingBox,
       ...(polygon ? { polygon } : {}),
-    }));
+    });
   }
   return readImageTextResult({
     providerId: 'chrome-text-detector',
     bitmapWidth,
     bitmapHeight,
-    transcript: transcript.join('\n').slice(0, 1_000_000),
+    transcript: transcriptParts.join('\n'),
     regions,
   });
 }
@@ -55,23 +65,29 @@ function normalizeBoundingBox(
   bitmapHeight: number,
 ): ImageBoundingBox | undefined {
   if (!isRecord(value)) return undefined;
-  if (![value.x, value.y, value.width, value.height].every(isFiniteNumber)) {
+  const { x, y, width, height } = value;
+  if (
+    !isFiniteNumber(x) ||
+    !isFiniteNumber(y) ||
+    !isFiniteNumber(width) ||
+    !isFiniteNumber(height)
+  ) {
     return undefined;
   }
-  const x0 = clamp(Math.floor(Number(value.x)), 0, bitmapWidth);
-  const y0 = clamp(Math.floor(Number(value.y)), 0, bitmapHeight);
+  const x0 = clamp(Math.floor(x), 0, bitmapWidth);
+  const y0 = clamp(Math.floor(y), 0, bitmapHeight);
   const x1 = clamp(
-    Math.ceil(Number(value.x) + Number(value.width)),
+    Math.ceil(x + width),
     0,
     bitmapWidth,
   );
   const y1 = clamp(
-    Math.ceil(Number(value.y) + Number(value.height)),
+    Math.ceil(y + height),
     0,
     bitmapHeight,
   );
   if (x1 <= x0 || y1 <= y0) return undefined;
-  return Object.freeze({ x: x0, y: y0, width: x1 - x0, height: y1 - y0 });
+  return { x: x0, y: y0, width: x1 - x0, height: y1 - y0 };
 }
 
 function normalizePolygon(
@@ -84,15 +100,17 @@ function normalizePolygon(
   }
   const points: ImagePoint[] = [];
   for (const point of value) {
-    if (!isRecord(point) || !isFiniteNumber(point.x) || !isFiniteNumber(point.y)) {
+    if (!isRecord(point)) return undefined;
+    const { x, y } = point;
+    if (!isFiniteNumber(x) || !isFiniteNumber(y)) {
       return undefined;
     }
-    points.push(Object.freeze({
-      x: clamp(Number(point.x), 0, bitmapWidth),
-      y: clamp(Number(point.y), 0, bitmapHeight),
-    }));
+    points.push({
+      x: clamp(x, 0, bitmapWidth),
+      y: clamp(y, 0, bitmapHeight),
+    });
   }
-  return Object.freeze(points);
+  return points;
 }
 
 function isFiniteNumber(value: unknown): value is number {
