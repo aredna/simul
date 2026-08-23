@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   createDetachedCompanionUrl,
   createDetachedWindowData,
+  isFocusedNormalBrowserWindow,
   isNewerCompanionLaunchStamp,
   resolveCompanionLaunchSurface,
   sameCompanionSourcePage,
@@ -69,6 +70,16 @@ describe('companion surface launch decisions', () => {
     expect(shouldFollowActivatedTab(true, 'locked', 9, 4)).toBe(false);
     expect(shouldFollowActivatedTab(false, 'active', 9, 4)).toBe(false);
     expect(shouldFollowActivatedTab(true, 'active', 9, 9)).toBe(false);
+  });
+
+  it('accepts follow candidates only from the focused normal browser window', () => {
+    expect(isFocusedNormalBrowserWindow({ type: 'normal', focused: true }))
+      .toBe(true);
+    expect(isFocusedNormalBrowserWindow({ type: 'normal', focused: false }))
+      .toBe(false);
+    expect(isFocusedNormalBrowserWindow({ type: 'popup', focused: true }))
+      .toBe(false);
+    expect(isFocusedNormalBrowserWindow({})).toBe(true);
   });
 
   it('ignores stale updates from the tab being left only in active-follow mode', () => {

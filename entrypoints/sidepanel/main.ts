@@ -59,6 +59,7 @@ import {
 import {
   createDetachedCompanionUrl,
   createDetachedWindowData,
+  isFocusedNormalBrowserWindow,
   isNewerCompanionLaunchStamp,
   sameCompanionSourcePage,
   shouldFollowActivatedTab,
@@ -2019,7 +2020,7 @@ async function followFocusedBrowserWindow(
       requestId !== identityRequestId ||
       preferences.popoutTabMode !== 'active'
     ) return;
-    if (sourceWindow.type !== undefined && sourceWindow.type !== 'normal') return;
+    if (!isFocusedNormalBrowserWindow(sourceWindow)) return;
     const [tab] = await browser.tabs.query({ active: true, windowId });
     if (
       requestId !== identityRequestId ||
@@ -2057,7 +2058,7 @@ async function followActivatedSourceTab(
       requestId !== identityRequestId ||
       preferences.popoutTabMode !== 'active'
     ) return;
-    if (sourceWindow.type !== undefined && sourceWindow.type !== 'normal') return;
+    if (!isFocusedNormalBrowserWindow(sourceWindow)) return;
     const identity = identityFromTab(
       knownTab ?? await browser.tabs.get(tabId),
       undefined,
