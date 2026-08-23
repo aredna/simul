@@ -73,6 +73,10 @@ export function filterImageTextResult(
   let rejectedPunctuationRegions = 0;
   let rejectedLowConfidenceRegions = 0;
   let rejectedUncorroboratedRegions = 0;
+  let corroborationIndex: ReadonlyMap<
+    string,
+    readonly ImageTextRegion[]
+  > | undefined;
 
   for (const region of result.regions) {
     const text = region.text.trim();
@@ -100,7 +104,11 @@ export function filterImageTextResult(
     }
 
     uncertainRegions += 1;
-    if (isCorroborated(result.providerId, region, policy.corroboratingResults)) {
+    corroborationIndex ??= indexCorroboratingRegions(
+      result.providerId,
+      policy.corroboratingResults,
+    );
+    if (isCorroborated(region, corroborationIndex)) {
       corroboratedRegions += 1;
       accepted.push(Object.freeze({ ...region, text }));
     } else {
@@ -191,25 +199,40 @@ export function emptyImageTextQualitySummary(): ImageTextQualitySummary {
   });
 }
 
-function isCorroborated(
+function indexCorroboratingRegions(
   providerId: ImageTextResult['providerId'],
-  region: ImageTextRegion,
   results: readonly ImageTextResult[] | undefined,
+): ReadonlyMap<string, readonly ImageTextRegion[]> {
+  const index = new Map<string, ImageTextRegion[]>();
+  if (!results) return index;
+  const primaryFamily = imageTextProviderFamily(providerId);
+  for (const result of results) {
+    if (imageTextProviderFamily(result.providerId) === primaryFamily) continue;
+    for (const candidate of result.regions) {
+      if (
+        candidate.confidence !== undefined &&
+        candidate.confidence < MIN_OCR_REGION_CONFIDENCE
+      ) continue;
+      const normalized = normalizeCorroborationText(candidate.text);
+      if (!normalized) continue;
+      const matching = index.get(normalized);
+      if (matching) matching.push(candidate);
+      else index.set(normalized, [candidate]);
+    }
+  }
+  return index;
+}
+
+function isCorroborated(
+  region: ImageTextRegion,
+  index: ReadonlyMap<string, readonly ImageTextRegion[]>,
 ): boolean {
   const normalized = normalizeCorroborationText(region.text);
-  if (!normalized || !results) return false;
-  return results.some((result) =>
-    imageTextProviderFamily(result.providerId) !==
-      imageTextProviderFamily(providerId) &&
-    result.regions.some((candidate) =>
-      (
-        candidate.confidence === undefined ||
-        candidate.confidence >= MIN_OCR_REGION_CONFIDENCE
-      ) && normalizeCorroborationText(candidate.text) === normalized &&
-      boundingBoxIou(region.boundingBox, candidate.boundingBox) >=
-        CORROBORATION_IOU_THRESHOLD
-    )
-  );
+  if (!normalized) return false;
+  return index.get(normalized)?.some((candidate) =>
+    boundingBoxIou(region.boundingBox, candidate.boundingBox) >=
+      CORROBORATION_IOU_THRESHOLD
+  ) ?? false;
 }
 
 /** Different JS bindings around Tesseract remain one recognition family. */
