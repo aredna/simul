@@ -1455,6 +1455,10 @@ export class HtmlMirrorSourceSession {
         oppositeStylePollChannel(firstChannel),
       ] as const;
       for (const channel of channels) {
+        if (
+          ((this.#styleCapacityChannels.get(owner) ?? 0) &
+            stylePollChannelMask(channel)) !== 0
+        ) continue;
         const channelStartedWithUnusedBudget = work.sheets === 0 &&
           work.rules === 0 && work.characters === 0;
         const result = channel === 'ordinary'
@@ -1477,7 +1481,7 @@ export class HtmlMirrorSourceSession {
           this.#stylePollingPhases.set(owner, channel);
           this.#advanceStylePollingCursor(processed, owners.length);
           if (channelStartedWithUnusedBudget) {
-            this.#signalStyleCapacityRecovery(owner, channel);
+            this.#suppressOversizedStyleChannel(owner, channel);
           }
           return;
         }
@@ -1526,7 +1530,7 @@ export class HtmlMirrorSourceSession {
     }
   }
 
-  #signalStyleCapacityRecovery(
+  #suppressOversizedStyleChannel(
     owner: Document | ShadowRoot,
     channel: StylePollChannel,
   ): void {
@@ -1534,22 +1538,6 @@ export class HtmlMirrorSourceSession {
     const reported = this.#styleCapacityChannels.get(owner) ?? 0;
     if ((reported & mask) !== 0) return;
     this.#styleCapacityChannels.set(owner, reported | mask);
-    if (this.#disposed || !this.#identity || this.#paused) return;
-    const representability = createHtmlMirrorRepresentabilityCollector();
-    incrementSourceRepresentability(
-      representability,
-      'capacityOmissionCount',
-    );
-    this.#shadowReconciliationPending = true;
-    this.#paused = true;
-    if (this.#frame !== undefined) this.environment.cancelFrame(this.#frame);
-    this.#frame = undefined;
-    this.#clearPending();
-    this.#post(createHtmlMirrorError(
-      this.#identityAt(this.#sequence),
-      'stream_overflow',
-      snapshotHtmlMirrorRepresentability(representability),
-    ));
   }
 
   #observeOpenShadowRoots(root: Node): void {

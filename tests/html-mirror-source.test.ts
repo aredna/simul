@@ -1300,35 +1300,35 @@ describe('HtmlMirrorSourceSession', () => {
     );
   });
 
-  it('reports an oversized ordinary CSSOM owner once instead of hashing capacity', () => {
+  it('quarantines oversized CSSOM polling without an idle recovery loop', () => {
     const fixture = sourceFixture('<main class="page">styled content</main>');
     const oversized = fakeStyleSheetWithRules(25_001, '.page{}');
+    let styleSheetReads = 0;
     Object.defineProperty(fixture.document, 'styleSheets', {
       configurable: true,
-      value: styleSheetList(oversized),
+      get: () => {
+        styleSheetReads += 1;
+        return styleSheetList(oversized);
+      },
     });
 
     fixture.start('passive');
     fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    styleSheetReads = 0;
     fixture.runTimer();
 
-    expect(fixture.port.posts.at(-1)).toMatchObject({
-      kind: 'simul:html-mirror-v1:error',
-      code: 'stream_overflow',
-      representability: {
-        capacityOmissionCount: 1,
-      },
-    });
-    const overflowCount = fixture.port.posts.filter(
+    expect(styleSheetReads).toBeGreaterThan(0);
+    expect(fixture.port.posts.some(
       (message) => (message as { code?: string }).code === 'stream_overflow',
-    ).length;
+    )).toBe(false);
 
-    fixture.port.emitMessage(createHtmlMirrorCheckpointRequest(identity, 0));
-    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    styleSheetReads = 0;
     fixture.runTimer();
-    expect(fixture.port.posts.filter(
+    fixture.runTimer();
+    expect(styleSheetReads).toBe(0);
+    expect(fixture.port.posts.some(
       (message) => (message as { code?: string }).code === 'stream_overflow',
-    )).toHaveLength(overflowCount);
+    )).toBe(false);
   });
 
   it('advances the shared style cursor after adopted-style budget exhaustion', () => {
