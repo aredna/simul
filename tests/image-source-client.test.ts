@@ -156,6 +156,42 @@ describe('Chrome image source client', () => {
     expect(port.disconnects).toBe(1);
   });
 
+  it('rejects image measurements that do not match the pending descriptor', async () => {
+    const port = new FakePort();
+    installBrowser(port);
+    const lease = await openChromeImageSource(request, vi.fn());
+    const task = lease.measure(descriptor);
+    const requestId = (port.messages.at(-1) as { requestId?: string })
+      ?.requestId;
+
+    port.emitMessage({
+      kind: 'simul:image-source-v1:metrics',
+      requestId,
+      status: 'ready',
+      metrics: {
+        document: descriptor.document,
+        nodeId: descriptor.nodeId + 1,
+        contentRevision: descriptor.contentRevision,
+        observationRevision: descriptor.observationRevision,
+        left: 0,
+        top: 0,
+        width: 100,
+        height: 50,
+        viewportWidth: 800,
+        viewportHeight: 600,
+        scrollX: 0,
+        scrollY: 0,
+        devicePixelRatio: 1,
+      },
+    });
+
+    await expect(task).rejects.toMatchObject({
+      name: 'ImageSourceUnavailableError',
+      message: 'Mismatched image measurement response.',
+    });
+    expect(port.disconnects).toBe(1);
+  });
+
   it('rejects an accessibility read outside the lease start gates', async () => {
     const port = new FakePort();
     installBrowser(port);
