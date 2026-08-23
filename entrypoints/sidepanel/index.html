@@ -349,8 +349,15 @@
         rows="3"
         maxlength="5000"
         placeholder="Type here…"
+        aria-describedby="composer-guidance composer-character-count"
         aria-keyshortcuts="Control+Enter Meta+Enter"
       ></textarea>
+      <output
+        id="composer-character-count"
+        class="composer-character-count"
+        for="composer-input"
+        aria-label="0 of 5,000 characters used"
+      >0 / 5,000</output>
       <div class="composer-actions">
         <button id="translate-composer" class="primary" type="button" data-ui-label="Translate" title="Translate (Ctrl/Command+Enter)">Translate</button>
         <button id="copy-composer" type="button" disabled data-ui-label="Copy result">Copy result</button>
