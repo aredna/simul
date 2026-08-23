@@ -37,6 +37,7 @@ import {
   type HtmlMirrorStyleWorkBudget,
 } from './html-mirror-sanitizer';
 import { createReplicaIdentity } from './protocol-v2';
+import { minimizeConnectedComposedTargets } from './composed-targets';
 import { readSemanticSourcePortIdentity } from './semantic-source-protocol';
 import {
   SemanticSourceSession,
@@ -716,7 +717,9 @@ export class HtmlMirrorSourceSession {
       this.#signalShadowReconciliation();
       return;
     }
-    const childrenTargets = minimizeTargets(this.#pendingChildren);
+    const childrenTargets = minimizeConnectedComposedTargets(
+      this.#pendingChildren,
+    );
     const covered = (node: Node): boolean =>
       childrenTargets.some(
         (target) => target !== node && containsComposedSource(target, node),
@@ -1666,15 +1669,6 @@ function cssomRuleSignature(
   } finally {
     visited.delete(sheet);
   }
-}
-
-function minimizeTargets(targets: Set<Node>): Node[] {
-  const connected = [...targets].filter((node) => node.isConnected);
-  return connected.filter(
-    (candidate) => !connected.some(
-      (other) => other !== candidate && containsComposedSource(other, candidate),
-    ),
-  );
 }
 
 function collectLiveSubtreeNodes(
