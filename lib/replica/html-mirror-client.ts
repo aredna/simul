@@ -140,12 +140,18 @@ class ChromeHtmlMirrorStreamLease implements HtmlMirrorStreamLease {
     if (this.#explicitlyDisposed || this.#observer) return;
     this.#observer = observer;
     for (const message of this.#queue.splice(0)) {
-      if (message.kind === 'failure') {
-        observer.onFailure(message.code, message.representability);
-      } else if (message.kind === 'simul:html-mirror-v1:checkpoint') {
-        observer.onCheckpoint(message);
-      } else {
-        observer.onPatch(message);
+      try {
+        if (message.kind === 'failure') {
+          observer.onFailure(message.code, message.representability);
+        } else if (message.kind === 'simul:html-mirror-v1:checkpoint') {
+          observer.onCheckpoint(message);
+        } else {
+          observer.onPatch(message);
+        }
+      } catch {
+        if (message.kind === 'failure') this.#closeTransport(true);
+        else this.#fail(new Error('Queued HTML mirror observer failed.'));
+        return;
       }
     }
   }
