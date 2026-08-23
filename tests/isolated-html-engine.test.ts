@@ -791,6 +791,8 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(trigger.getAttribute('aria-expanded')).toBe('false');
     expect(panel.hasAttribute('hidden')).toBe(true);
 
+    const retainedSelectedRow = [...panel.querySelectorAll('[role="option"]')]
+      .find((option) => option.textContent === 'Community center');
     trigger.dispatchEvent(new select.ownerDocument.defaultView!.Event('click', {
       bubbles: true,
       cancelable: true,
@@ -811,6 +813,9 @@ describe('IsolatedHtmlReplicaEngine', () => {
       'passive',
     )!);
     await Promise.resolve();
+    expect([...panel.querySelectorAll('[role="option"]')].find(
+      (option) => option.textContent === 'Community center',
+    )).toBe(retainedSelectedRow);
     expect(trigger.getAttribute('aria-expanded')).toBe('true');
     expect(panel.hasAttribute('hidden')).toBe(false);
     expect(panel.parentElement).toBe(replica.body);
