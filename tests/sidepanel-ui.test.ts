@@ -38,6 +38,22 @@ describe('sidepanel UI structure', () => {
     expect(document.querySelector('#quick-translator #composer-output')).not.toBeNull();
   });
 
+  it('announces mirror rebuilds and labels controls with their current action', () => {
+    const { document } = parseHTML(markup);
+
+    expect(document.querySelector('main > section')?.getAttribute('aria-busy'))
+      .toBe('false');
+    expect(document.querySelector('#replica-preview')?.getAttribute('aria-busy'))
+      .toBe('false');
+    expect(script).toContain(
+      "replicaPreviewContainer.setAttribute('aria-busy', String(captureInFlight))",
+    );
+    expect(script).toContain(
+      "captureInFlight ? 'Rebuilding mirror…' : 'Rebuild mirror'",
+    );
+    expect(script).toContain("translationInFlight\n      ? 'Translating…'");
+  });
+
   it('orders every primary toolbar action in one direct row', () => {
     const { document } = parseHTML(markup);
     const controls = [...document.querySelectorAll<HTMLElement>(
