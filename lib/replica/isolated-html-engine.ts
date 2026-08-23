@@ -776,9 +776,16 @@ export class IsolatedHtmlReplicaEngine
     const semanticBindingsMayHaveChanged = batch.operations.some(
       ({ kind }) => kind !== 'dimensions',
     );
+    const semanticProofsMayHaveChanged = batch.operations.some(
+      ({ kind }) => kind !== 'dimensions' && kind !== 'text',
+    );
     let semanticChanges = semanticBindingsMayHaveChanged
-      ? semanticReceiver?.refreshBindings() ?? []
+      ? semanticReceiver?.refreshBindings(semanticProofsMayHaveChanged) ?? []
       : [];
+    if (
+      semanticReceiver && semanticBindingsMayHaveChanged &&
+      !semanticProofsMayHaveChanged
+    ) refreshIsolatedNativeSelectFacsimiles(replicaDocument);
     if (semanticReceiver && !semanticReceiver.proofPresentationHealthy) {
       semanticChanges = Object.freeze([
         ...semanticChanges,
