@@ -2196,7 +2196,6 @@ function applyPatchBatch(
     { kind: 'children' | 'reconcile-children' }
   >;
   interface ChildrenPlan {
-    readonly operation: Extract<StructuralOperation, { kind: 'children' }>;
     readonly target: Node;
     readonly oldChildren: readonly Node[];
     readonly fragment: DocumentFragment;
@@ -2206,7 +2205,6 @@ function applyPatchBatch(
     readonly ownedAdoptedStyles: Set<HTMLStyleElement>;
   }
   interface ReconcilePlan {
-    readonly operation: Extract<StructuralOperation, { kind: 'reconcile-children' }>;
     readonly target: Node;
     readonly oldChildren: readonly Node[];
     readonly desiredChildren: readonly Node[];
@@ -2553,8 +2551,14 @@ function applyPatchBatch(
     if (prospectiveTextBytes > MAX_HTML_MIRROR_BYTES) return undefined;
   }
 
-  const childrenPlans: ChildrenPlan[] = [];
-  const reconcilePlans: ReconcilePlan[] = [];
+  const childrenPlans = new Map<
+    Extract<StructuralOperation, { kind: 'children' }>,
+    ChildrenPlan
+  >();
+  const reconcilePlans = new Map<
+    Extract<StructuralOperation, { kind: 'reconcile-children' }>,
+    ReconcilePlan
+  >();
   try {
     for (const operation of childrenOperations) {
       const target = state.nodes.get(operation.nodeId) as Node;
@@ -2589,8 +2593,7 @@ function applyPatchBatch(
         );
         if (built) fragment.append(built);
       }
-      childrenPlans.push({
-        operation,
+      childrenPlans.set(operation, {
         target,
         oldChildren: oldChildren.get(operation.nodeId) ?? [],
         fragment,
@@ -2642,8 +2645,7 @@ function applyPatchBatch(
         insertedNodeCount += htmlMirrorGraphNodeCount(entry.node);
         desiredChildren.push(built);
       }
-      reconcilePlans.push({
-        operation,
+      reconcilePlans.set(operation, {
         target,
         oldChildren: oldChildren.get(operation.nodeId) ?? [],
         desiredChildren: Object.freeze(desiredChildren),
@@ -2672,12 +2674,12 @@ function applyPatchBatch(
   let insertedNodeCount = 0;
   let movedNodeCount = 0;
   let removedNodeCount = 0;
-  for (const plan of childrenPlans) {
+  for (const plan of childrenPlans.values()) {
     for (const child of plan.oldChildren) {
       removedNodeCount += domMirrorNodeCount(child, knownBeforeBatch);
     }
   }
-  for (const plan of reconcilePlans) {
+  for (const plan of reconcilePlans.values()) {
     for (const child of plan.oldChildren) {
       if (plan.retainedChildren.has(child)) {
         retainedNodeCount += domMirrorNodeCount(child, knownBeforeBatch);
@@ -2730,9 +2732,7 @@ function applyPatchBatch(
         continue;
       }
       if (operation.kind === 'children') {
-        const plan = childrenPlans.find(
-          ({ operation: candidate }) => candidate === operation,
-        );
+        const plan = childrenPlans.get(operation);
         if (!plan) throw new Error('Missing children replacement plan.');
         const retainedAdoptedStyles = [...state.ownedAdoptedStyles].filter(
           (style) => style.parentNode === plan.target,
@@ -2757,9 +2757,7 @@ function applyPatchBatch(
         }
         continue;
       }
-      const plan = reconcilePlans.find(
-        ({ operation: candidate }) => candidate === operation,
-      );
+      const plan = reconcilePlans.get(operation);
       if (!plan) throw new Error('Missing children reconciliation plan.');
       for (const child of plan.oldChildren) {
         if (plan.retainedChildren.has(child)) continue;
