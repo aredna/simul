@@ -102,3 +102,11 @@ export class NavigationRefreshGate {
     this.#pendingKey = undefined;
   }
 }
+
+/** Chrome history/hash updates carry a URL without a document load status. */
+export function isUrlOnlyNavigationSignal(
+  status: string | undefined,
+  hasUrlChange: boolean,
+): boolean {
+  return hasUrlChange && status === undefined;
+}

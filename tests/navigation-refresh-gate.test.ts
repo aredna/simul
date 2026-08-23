@@ -1,5 +1,17 @@
 import { describe, expect, it } from 'vitest';
-import { NavigationRefreshGate } from '../lib/navigation-refresh-gate';
+import {
+  isUrlOnlyNavigationSignal,
+  NavigationRefreshGate,
+} from '../lib/navigation-refresh-gate';
+
+describe('isUrlOnlyNavigationSignal', () => {
+  it('keeps document completions authoritative even when they include a URL', () => {
+    expect(isUrlOnlyNavigationSignal(undefined, true)).toBe(true);
+    expect(isUrlOnlyNavigationSignal('loading', true)).toBe(false);
+    expect(isUrlOnlyNavigationSignal('complete', true)).toBe(false);
+    expect(isUrlOnlyNavigationSignal(undefined, false)).toBe(false);
+  });
+});
 
 describe('NavigationRefreshGate', () => {
   it('coalesces duplicate loading and completion signals', () => {
