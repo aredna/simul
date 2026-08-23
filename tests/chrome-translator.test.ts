@@ -110,6 +110,28 @@ describe('ChromeTranslatorProvider', () => {
     );
   });
 
+  it('destroys a session that resolves after its creation was cancelled', async () => {
+    let resolveCreate!: (instance: Awaited<ReturnType<BrowserTranslatorApi['create']>>) => void;
+    const destroy = vi.fn();
+    const create = vi.fn(
+      () => new Promise<Awaited<ReturnType<BrowserTranslatorApi['create']>>>((resolve) => {
+        resolveCreate = resolve;
+      }),
+    );
+    const provider = new ChromeTranslatorProvider(createApi({ create }));
+    const controller = new AbortController();
+
+    const pending = provider.createSession(pair, { signal: controller.signal });
+    controller.abort();
+    resolveCreate({
+      translate: vi.fn().mockResolvedValue('Hello'),
+      destroy,
+    });
+
+    await expect(pending).rejects.toMatchObject({ name: 'AbortError' });
+    expect(destroy).toHaveBeenCalledOnce();
+  });
+
   it('exposes valid Chrome input quota measurements to the pipeline', async () => {
     const measureInputUsage = vi.fn().mockResolvedValue(3);
     const provider = new ChromeTranslatorProvider(
@@ -132,6 +154,33 @@ describe('ChromeTranslatorProvider', () => {
     expect(measureInputUsage).toHaveBeenCalledWith('abc', {
       signal: controller.signal,
     });
+  });
+
+  it('rejects all work after the native session is destroyed', async () => {
+    const measureInputUsage = vi.fn().mockResolvedValue(3);
+    const translate = vi.fn().mockResolvedValue('Hello');
+    const provider = new ChromeTranslatorProvider(
+      createApi({
+        create: vi.fn().mockResolvedValue({
+          inputQuota: 12,
+          measureInputUsage,
+          translate,
+          destroy: vi.fn(),
+        }),
+      }),
+    );
+    const session = await provider.createSession(pair);
+
+    session.destroy();
+
+    await expect(session.measureInputUsage?.('abc')).rejects.toMatchObject({
+      code: 'translation-failed',
+    });
+    await expect(session.translate('abc')).rejects.toMatchObject({
+      code: 'translation-failed',
+    });
+    expect(measureInputUsage).not.toHaveBeenCalled();
+    expect(translate).not.toHaveBeenCalled();
   });
 
   it('treats same-language pairs as a local no-op', async () => {

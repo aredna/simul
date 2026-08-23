@@ -91,6 +91,11 @@ export class ChromeTranslatorProvider implements TranslationProvider {
           : {}),
       });
 
+      if (options.signal?.aborted) {
+        instance.destroy();
+        options.signal.throwIfAborted();
+      }
+
       return new ChromeTranslationSession(instance);
     } catch (error) {
       if (isAbortError(error) || options.signal?.aborted) throw error;
@@ -147,6 +152,7 @@ class ChromeTranslationSession implements TranslationSession {
     text: string,
     signal?: AbortSignal,
   ): Promise<number> {
+    this.assertActive();
     signal?.throwIfAborted();
     if (typeof this.instance.measureInputUsage !== 'function') {
       return countCodePoints(text);
@@ -165,13 +171,7 @@ class ChromeTranslationSession implements TranslationSession {
   }
 
   async translate(text: string, signal?: AbortSignal): Promise<string> {
-    if (this.destroyed) {
-      throw new TranslationProviderError(
-        'translation-failed',
-        'The local translation session is no longer available.',
-      );
-    }
-
+    this.assertActive();
     signal?.throwIfAborted();
     try {
       return await this.instance.translate(
@@ -192,6 +192,15 @@ class ChromeTranslationSession implements TranslationSession {
     if (this.destroyed) return;
     this.destroyed = true;
     this.instance.destroy();
+  }
+
+  private assertActive(): void {
+    if (this.destroyed) {
+      throw new TranslationProviderError(
+        'translation-failed',
+        'The local translation session is no longer available.',
+      );
+    }
   }
 }
 
