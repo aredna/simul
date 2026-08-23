@@ -57,6 +57,10 @@ import {
   parseDetachedPageIdentityHint,
 } from '../../lib/page-identity';
 import {
+  isUrlOnlyNavigationSignal,
+  NavigationRefreshGate,
+} from '../../lib/navigation-refresh-gate';
+import {
   createDetachedCompanionUrl,
   createDetachedWindowData,
   isFocusedNormalBrowserWindow,
@@ -714,6 +718,7 @@ let replicaShadowAbortController: AbortController | undefined;
 let activeTranslationTask: Promise<void> | undefined;
 let navigationTimer: ReturnType<typeof setTimeout> | undefined;
 let mirrorResizeObserver: ResizeObserver | undefined;
+const navigationRefreshGate = new NavigationRefreshGate();
 let panelWindowId: number | undefined;
 let detachedSourceWindowId = detachedIdentityHint?.windowId;
 let visualRoot: HTMLElement | undefined;
@@ -1130,7 +1135,17 @@ browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     return;
   }
   const nextIdentity = { tabId, windowId: tab.windowId, url: nextUrl };
-  if (changeInfo.status === 'loading' || typeof changeInfo.url === 'string') {
+  const navigationScope = navigationPageScopeKey(nextIdentity);
+  const navigationKey = navigationPageIdentityKey(nextIdentity);
+  if (changeInfo.status === 'loading') {
+    if (!navigationRefreshGate.beginDocumentLoad(
+      navigationScope,
+      navigationKey,
+    )) {
+      followedPageIdentity = nextIdentity;
+      return;
+    }
+    imageTranslationController.setTopPageOrigin(nextIdentity.url);
     identityRequestId += 1;
     sourceLanguageResolutionRevision += 1;
     autoLanguageEvidencePrecedence.invalidate();
@@ -1149,6 +1164,24 @@ browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     followedPageIdentity = nextIdentity;
     clearNavigationTimer();
     setStatus('The source page is changing; the current mirror stays visible until the new page is ready.');
+  } else if (isUrlOnlyNavigationSignal(
+    changeInfo.status,
+    typeof changeInfo.url === 'string',
+  )) {
+    // History/hash signals do not create a new document. Live replica streams
+    // own the resulting DOM changes, so rebuilding here would discard stable
+    // OCR evidence and replay the entire page.
+    const retargetScheduledDocument = navigationRefreshGate
+      .observeSameDocumentUrl(navigationScope, navigationKey);
+    const retargetPendingDocumentCapture = navigationTimer !== undefined &&
+      retargetScheduledDocument;
+    imageTranslationController.setTopPageOrigin(nextIdentity.url);
+    followedPageIdentity = nextIdentity;
+    // A completed new document can rewrite its history URL during the short
+    // debounce. Retarget that one capture instead of dropping it as stale.
+    if (retargetPendingDocumentCapture) {
+      scheduleNavigationRefresh(nextIdentity);
+    }
   }
   if (changeInfo.status === 'complete') {
     // A redirect may expose its final URL only on the completion signal. Keep
@@ -1158,8 +1191,14 @@ browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     followedPageIdentity = nextIdentity;
   }
   if (
-    changeInfo.status === 'complete' ||
-    (typeof changeInfo.url === 'string' && changeInfo.status !== 'loading')
+    changeInfo.status === 'complete' &&
+    navigationRefreshGate.shouldScheduleComplete(
+      navigationScope,
+      navigationKey,
+      capturedPageIdentity
+        ? navigationPageIdentityKey(capturedPageIdentity)
+        : undefined,
+    )
   ) {
     scheduleNavigationRefresh(nextIdentity);
   }
@@ -2112,6 +2151,11 @@ function finishActiveFollowRequest(requestId: number): void {
 }
 
 function queueCapture(request: CaptureRequest): void {
+  clearNavigationTimer();
+  navigationRefreshGate.consumeCapture(
+    navigationPageScopeKey(request.identity),
+    navigationPageIdentityKey(request.identity),
+  );
   const previousIdentity = capturedPageIdentity ?? followedPageIdentity;
   const samePage = sameCompanionSourcePage(
     previousIdentity,
@@ -5263,7 +5307,9 @@ function scheduleNavigationRefresh(identity: CapturedPageIdentity): void {
     navigationTimer = undefined;
     if (
       followedPageIdentity?.tabId !== identity.tabId ||
-      followedPageIdentity.windowId !== identity.windowId
+      followedPageIdentity.windowId !== identity.windowId ||
+      navigationPageIdentityKey(followedPageIdentity) !==
+        navigationPageIdentityKey(identity)
     ) return;
     queueCapture({ identity, reason: 'navigation' });
   }, NAVIGATION_DEBOUNCE_MS);
@@ -5294,6 +5340,7 @@ function withCaptureTimeout<T>(operation: Promise<T>): Promise<T> {
 }
 
 function invalidateCompanion(message: string): void {
+  navigationRefreshGate.reset();
   identityRequestId += 1;
   activeFollowRequestId = undefined;
   sourceLanguageResolutionRevision += 1;
@@ -5808,6 +5855,25 @@ function normalizedPageUrl(value: string): string {
   } catch {
     return value;
   }
+}
+
+function navigationPageIdentityKey(identity: CapturedPageIdentity): string {
+  let page = identity.url;
+  try {
+    const url = new URL(identity.url);
+    url.username = '';
+    url.password = '';
+    url.hash = '';
+    page = url.toString();
+  } catch {
+    // The caller has already applied the supported-page gate. Keep this
+    // fallback local and opaque rather than surfacing URL material.
+  }
+  return `${identity.tabId}:${identity.windowId}:${page}`;
+}
+
+function navigationPageScopeKey(identity: CapturedPageIdentity): string {
+  return `${identity.tabId}:${identity.windowId}`;
 }
 
 function isSupportedPage(url: string | undefined): boolean {

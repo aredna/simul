@@ -436,6 +436,14 @@ describe('sidepanel UI structure', () => {
     expect(script).toContain('finishActiveFollowRequest(requestId)');
   });
 
+  it('keeps URL-only navigation from rebuilding the live replica', () => {
+    expect(script).toContain('new NavigationRefreshGate()');
+    expect(script).toContain('isUrlOnlyNavigationSignal(');
+    expect(script).toContain('.observeSameDocumentUrl(');
+    expect(script).toContain('.shouldScheduleComplete(');
+    expect(script).toContain('navigationPageIdentityKey(followedPageIdentity)');
+  });
+
   it('keeps progress non-interactive and supports dark, narrow, and reduced-motion users', () => {
     expect(style).toContain('pointer-events: none');
     expect(style).toContain('@media (prefers-color-scheme: dark)');
