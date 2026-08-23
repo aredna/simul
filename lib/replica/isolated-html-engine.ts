@@ -2251,14 +2251,43 @@ function applyPatchBatch(
     number,
     Extract<HtmlMirrorPatchOperation, { kind: 'attributes' }>
   >();
-  const prospectiveAttributeOperations = new Map(
-    operations.flatMap((operation) => operation.kind === 'attributes'
-      ? [[operation.nodeId, operation] as const]
-      : []),
-  );
+  const prospectiveAttributeOperations = new Map<
+    number,
+    Extract<HtmlMirrorPatchOperation, { kind: 'attributes' }>
+  >();
+  const firstAttributeOperations = new Map<number, {
+    readonly operation: Extract<
+      HtmlMirrorPatchOperation,
+      { kind: 'attributes' }
+    >;
+    readonly index: number;
+  }>();
+  const firstStructuralOperations = new Map<number, {
+    readonly operation: StructuralOperation;
+    readonly index: number;
+  }>();
+  const childReplacementNodeIds = new Set<number>();
+  for (const [index, operation] of operations.entries()) {
+    if (operation.kind === 'attributes') {
+      prospectiveAttributeOperations.set(operation.nodeId, operation);
+      if (!firstAttributeOperations.has(operation.nodeId)) {
+        firstAttributeOperations.set(operation.nodeId, { operation, index });
+      }
+    } else if (
+      operation.kind === 'children' ||
+      operation.kind === 'reconcile-children'
+    ) {
+      if (!firstStructuralOperations.has(operation.nodeId)) {
+        firstStructuralOperations.set(operation.nodeId, { operation, index });
+      }
+      if (operation.kind === 'children') {
+        childReplacementNodeIds.add(operation.nodeId);
+      }
+    }
+  }
 
   // Validate every target and payload before touching visible state.
-  for (const operation of operations) {
+  for (const [operationIndex, operation] of operations.entries()) {
     if (operation.kind === 'dimensions') continue;
     const target = state.nodes.get(operation.nodeId);
     if (!target) return undefined;
@@ -2286,14 +2315,11 @@ function applyPatchBatch(
       // the browser invent a new selectedIndex before owner state arrives.
       if (select && targetElement !== select) return undefined;
       const selectNodeId = select ? currentNodeIds().get(select) : undefined;
-      const structuralIndex = operations.indexOf(operation);
-      const selectStateOperation = operations.find(
-        (candidate) => candidate.kind === 'attributes' &&
-          candidate.nodeId === selectNodeId,
-      );
-      const attributesIndex = selectStateOperation
-        ? operations.indexOf(selectStateOperation)
-        : -1;
+      const indexedSelectStateOperation = selectNodeId === undefined
+        ? undefined
+        : firstAttributeOperations.get(selectNodeId);
+      const selectStateOperation = indexedSelectStateOperation?.operation;
+      const attributesIndex = indexedSelectStateOperation?.index ?? -1;
       const selectStateAttributes = selectStateOperation?.kind === 'attributes'
         ? Object.fromEntries(selectStateOperation.attributes)
         : undefined;
@@ -2314,7 +2340,7 @@ function applyPatchBatch(
         select &&
         (
           selectNodeId === undefined ||
-          attributesIndex <= structuralIndex ||
+          attributesIndex <= operationIndex ||
           selectStateOperation?.kind !== 'attributes' ||
           (selectStateOperation.selectedOptionIndexes === undefined &&
             !explicitlyPrivateSelect)
@@ -2376,7 +2402,8 @@ function applyPatchBatch(
           state,
           target as Element,
           operation,
-          operations,
+          firstStructuralOperations.get(operation.nodeId),
+          operationIndex,
         )
       ) return undefined;
       if (
@@ -2397,11 +2424,7 @@ function applyPatchBatch(
         privacyContextChanges(currentContext, prospectiveContext) &&
         (
           (target as Element).shadowRoot ||
-          !operations.some(
-            (candidate) =>
-              candidate.kind === 'children' &&
-              candidate.nodeId === operation.nodeId,
-          )
+          !childReplacementNodeIds.has(operation.nodeId)
         )
       ) return undefined;
       if (
@@ -3377,23 +3400,23 @@ function validPatchSelectedOptionIndexes(
   state: HtmlMirrorDomState,
   target: Element,
   operation: Extract<HtmlMirrorPatchOperation, { kind: 'attributes' }>,
-  operations: readonly HtmlMirrorPatchOperation[],
+  structural: {
+    readonly operation: Extract<
+      HtmlMirrorPatchOperation,
+      { kind: 'children' | 'reconcile-children' }
+    >;
+    readonly index: number;
+  } | undefined,
+  operationIndex: number,
 ): boolean {
   if (target.localName.toLowerCase() !== 'select') return false;
-  const structural = operations.find(
-    (candidate) =>
-      (candidate.kind === 'children' || candidate.kind === 'reconcile-children') &&
-      candidate.nodeId === operation.nodeId,
-  );
-  if (
-    structural &&
-    operations.indexOf(structural) > operations.indexOf(operation)
-  ) return false;
+  if (structural && structural.index > operationIndex) return false;
+  const structuralOperation = structural?.operation;
   let optionCount: number;
-  if (structural?.kind === 'children') {
-    optionCount = nativeSelectGraphOptionCount(structural.children);
-  } else if (structural?.kind === 'reconcile-children') {
-    optionCount = structural.children.reduce((total, child) => {
+  if (structuralOperation?.kind === 'children') {
+    optionCount = nativeSelectGraphOptionCount(structuralOperation.children);
+  } else if (structuralOperation?.kind === 'reconcile-children') {
+    optionCount = structuralOperation.children.reduce((total, child) => {
       if (child.kind === 'graph') {
         return total + nativeSelectGraphOptionCount([child.node]);
       }
