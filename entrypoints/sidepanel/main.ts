@@ -68,6 +68,7 @@ import {
   sameCompanionSourcePage,
   shouldFollowActivatedTab,
   shouldIgnoreInactiveFollowedTabUpdate,
+  shouldRecoverRemovedActiveSource,
   type CompanionLaunchStamp,
 } from '../../lib/companion-surface';
 import {
@@ -1204,10 +1205,35 @@ browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   }
 });
 
-browser.tabs.onRemoved.addListener((tabId) => {
-  if (followedPageIdentity?.tabId === tabId) {
-    invalidateCompanion('The source tab was closed.');
+browser.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
+  if (followedPageIdentity?.tabId !== removedTabId) return;
+  const requestId = ++identityRequestId;
+  clearNavigationTimer();
+  void followReplacedSourceTab(addedTabId, requestId);
+});
+
+browser.tabs.onRemoved.addListener((tabId, removeInfo) => {
+  if (followedPageIdentity?.tabId !== tabId) return;
+  if (shouldRecoverRemovedActiveSource(
+    isDetachedWindow,
+    preferences.popoutTabMode,
+    panelWindowId,
+    removeInfo.windowId,
+    removeInfo.isWindowClosing,
+  )) {
+    const requestId = ++identityRequestId;
+    activeFollowRequestId = requestId;
+    clearNavigationTimer();
+    queueMicrotask(() => {
+      void followFocusedBrowserWindow(
+        removeInfo.windowId,
+        requestId,
+        'The source tab was closed and no neighboring readable tab became active.',
+      );
+    });
+    return;
   }
+  invalidateCompanion('The source tab was closed.');
 });
 
 browser.permissions.onAdded.addListener(() => {
@@ -2003,6 +2029,33 @@ async function followMovedLockedSourceTab(
   }
 }
 
+async function followReplacedSourceTab(
+  tabId: number,
+  requestId: number,
+): Promise<void> {
+  if (requestId !== identityRequestId) return;
+  if (isDetachedWindow && preferences.popoutTabMode === 'active') {
+    activeFollowRequestId = requestId;
+  }
+  try {
+    const identity = identityFromTab(
+      await browser.tabs.get(tabId),
+      undefined,
+      !isDetachedWindow || preferences.popoutTabMode === 'active',
+    );
+    if (requestId !== identityRequestId) return;
+    detachedSourceWindowId = identity.windowId;
+    queueCapture({ identity, reason: 'navigation' });
+  } catch (error) {
+    if (requestId !== identityRequestId) return;
+    invalidateCompanion(
+      `${readPageError(error)} Chrome replaced the source tab, but its new page could not be followed.`,
+    );
+  } finally {
+    finishActiveFollowRequest(requestId);
+  }
+}
+
 async function refreshFollowedPage(reason: CaptureRequest['reason']): Promise<void> {
   const requestId = ++identityRequestId;
   try {
@@ -2065,6 +2118,7 @@ async function followCurrentActiveSourceTab(): Promise<void> {
 async function followFocusedBrowserWindow(
   windowId: number,
   requestId: number,
+  missingTabMessage?: string,
 ): Promise<void> {
   if (
     requestId !== identityRequestId ||
@@ -2086,8 +2140,13 @@ async function followFocusedBrowserWindow(
     detachedSourceWindowId = windowId;
     if (tab?.id !== undefined) {
       await followActivatedSourceTab(tab.id, windowId, tab, requestId);
+    } else if (missingTabMessage && requestId === identityRequestId) {
+      invalidateCompanion(missingTabMessage);
     }
   } catch {
+    if (missingTabMessage && requestId === identityRequestId) {
+      invalidateCompanion(missingTabMessage);
+    }
     // A closing or restricted browser window is not a new source candidate.
   } finally {
     finishActiveFollowRequest(requestId);

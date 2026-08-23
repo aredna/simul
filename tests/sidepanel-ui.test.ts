@@ -444,6 +444,13 @@ describe('sidepanel UI structure', () => {
     expect(script).toContain('navigationPageIdentityKey(followedPageIdentity)');
   });
 
+  it('reacquires the source after an active tab closes or is replaced', () => {
+    expect(script).toContain('browser.tabs.onReplaced.addListener(');
+    expect(script).toContain('shouldRecoverRemovedActiveSource(');
+    expect(script).toContain('followReplacedSourceTab(');
+    expect(script).toContain('The source tab was closed and no neighboring');
+  });
+
   it('keeps progress non-interactive and supports dark, narrow, and reduced-motion users', () => {
     expect(style).toContain('pointer-events: none');
     expect(style).toContain('@media (prefers-color-scheme: dark)');
