@@ -59,6 +59,7 @@ import {
 import {
   isUrlOnlyNavigationSignal,
   NavigationRefreshGate,
+  resolveNavigationUpdateStatus,
 } from '../../lib/navigation-refresh-gate';
 import {
   createDetachedCompanionUrl,
@@ -1125,9 +1126,15 @@ browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     tab.active,
     activeFollowRequestId !== undefined,
   )) return;
+  const hasUrlChange = typeof changeInfo.url === 'string';
+  const navigationStatus = resolveNavigationUpdateStatus(
+    changeInfo.status,
+    tab.status,
+    hasUrlChange,
+  );
   const nextUrl = changeInfo.url ?? tab.url ?? followed.url;
   if (!isSupportedPage(nextUrl)) {
-    if (changeInfo.status === 'loading' || typeof changeInfo.url === 'string') {
+    if (navigationStatus === 'loading' || hasUrlChange) {
       clearNavigationTimer();
       invalidateCompanion(
         'The source tab opened a restricted page. Return to a regular HTTP or HTTPS page and select the extension again.',
@@ -1138,7 +1145,7 @@ browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   const nextIdentity = { tabId, windowId: tab.windowId, url: nextUrl };
   const navigationScope = navigationPageScopeKey(nextIdentity);
   const navigationKey = navigationPageIdentityKey(nextIdentity);
-  if (changeInfo.status === 'loading') {
+  if (navigationStatus === 'loading') {
     if (!navigationRefreshGate.beginDocumentLoad(
       navigationScope,
       navigationKey,
@@ -1166,8 +1173,8 @@ browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     clearNavigationTimer();
     setStatus('The source page is changing; the current mirror stays visible until the new page is ready.');
   } else if (isUrlOnlyNavigationSignal(
-    changeInfo.status,
-    typeof changeInfo.url === 'string',
+    navigationStatus,
+    hasUrlChange,
   )) {
     // History/hash signals do not create a new document. Live replica streams
     // own the resulting DOM changes, so rebuilding here would discard stable
@@ -1184,7 +1191,7 @@ browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
       scheduleNavigationRefresh(nextIdentity);
     }
   }
-  if (changeInfo.status === 'complete') {
+  if (navigationStatus === 'complete') {
     // A redirect may expose its final URL only on the completion signal. Keep
     // the followed identity current before arming the debounce, otherwise its
     // stale-identity guard can discard the only finished-document refresh.
@@ -1192,7 +1199,7 @@ browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     followedPageIdentity = nextIdentity;
   }
   if (
-    changeInfo.status === 'complete' &&
+    navigationStatus === 'complete' &&
     navigationRefreshGate.shouldScheduleComplete(
       navigationScope,
       navigationKey,

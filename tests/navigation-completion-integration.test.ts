@@ -18,7 +18,7 @@ describe('sidepanel navigation completion integration', () => {
     );
     const listenerSource = sidepanelSource.slice(listenerStart, listenerEnd);
     const completionRetarget = listenerSource.indexOf(
-      "if (changeInfo.status === 'complete') {",
+      "if (navigationStatus === 'complete') {",
     );
     const completionSchedule = listenerSource.indexOf(
       'scheduleNavigationRefresh(nextIdentity);',

@@ -111,3 +111,18 @@ export function isUrlOnlyNavigationSignal(
 ): boolean {
   return hasUrlChange && status === undefined;
 }
+
+/**
+ * Chrome may split a cross-document URL update from its `loading` change while
+ * the Tab snapshot already exposes the new loading state. Promote only that
+ * URL-bearing case; using Tab.status for unrelated updates would manufacture
+ * duplicate navigation starts.
+ */
+export function resolveNavigationUpdateStatus(
+  changeStatus: string | undefined,
+  tabStatus: string | undefined,
+  hasUrlChange: boolean,
+): string | undefined {
+  if (changeStatus !== undefined) return changeStatus;
+  return hasUrlChange && tabStatus === 'loading' ? 'loading' : undefined;
+}
