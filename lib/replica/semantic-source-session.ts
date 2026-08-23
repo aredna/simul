@@ -121,6 +121,11 @@ const TEXT_NODE = 3;
 const MAX_SEMANTIC_DISCLOSURE_SUBTREE_NODES = 1_024;
 const SEMANTIC_CONTROL_POLL_INTERVAL_MS = 500;
 const MAX_SEMANTIC_CONTROL_POLL_CANDIDATES = 1_024;
+const SEMANTIC_SELECT_ACTIVATION_EVENTS = Object.freeze([
+  'pointerdown',
+  'click',
+  'keydown',
+] as const);
 const SEMANTIC_CONTROL_ROLES = new Set([
   'button', 'checkbox', 'combobox', 'link', 'menuitem', 'menuitemcheckbox',
   'menuitemradio', 'option', 'radio', 'switch', 'tab', 'treeitem',
@@ -208,6 +213,13 @@ export class SemanticSourceSession {
     );
     this.environment.document.removeEventListener('change', this.#onDomChange, true);
     this.environment.document.removeEventListener('toggle', this.#onDomChange, true);
+    for (const type of SEMANTIC_SELECT_ACTIVATION_EVENTS) {
+      this.environment.document.removeEventListener(
+        type,
+        this.#onSelectActivation,
+        true,
+      );
+    }
     this.#documentIdentity = undefined;
     this.#scope = undefined;
     this.#policyFingerprint = undefined;
@@ -279,6 +291,20 @@ export class SemanticSourceSession {
     );
     this.refresh();
   };
+  readonly #onSelectActivation = (event: Event): void => {
+    if (!this.#scope?.formValues) return;
+    const target = event.target;
+    if (
+      !target || typeof target !== 'object' ||
+      (target as Node).nodeType !== ELEMENT_NODE
+    ) return;
+    const element = target as Element;
+    const select = element.localName.toLowerCase() === 'select'
+      ? element
+      : safelyRead(() => element.closest('select'));
+    if (!select || select.ownerDocument !== this.environment.document) return;
+    this.refresh();
+  };
 
   #start(
     documentIdentity: ReplicaSourceDocumentIdentity,
@@ -315,6 +341,13 @@ export class SemanticSourceSession {
       this.environment.document.addEventListener('input', this.#onDomChange, true);
       this.environment.document.addEventListener('change', this.#onDomChange, true);
       this.environment.document.addEventListener('toggle', this.#onDomChange, true);
+      for (const type of SEMANTIC_SELECT_ACTIVATION_EVENTS) {
+        this.environment.document.addEventListener(
+          type,
+          this.#onSelectActivation,
+          true,
+        );
+      }
       this.#dirty = true;
       this.#flush();
       this.#scheduleControlPoll();
@@ -461,6 +494,9 @@ export class SemanticSourceSession {
       return `${parts.join(':')}:unreadable`;
     }
     parts.push(`count=${optionCount}`, `index=${selectedIndex}`);
+    parts.push(
+      `open=${String(safelyRead(() => element.matches(':open')) === true)}`,
+    );
     const limit = Math.min(optionCount, MAX_SEMANTIC_DISCLOSURE_SUBTREE_NODES);
     for (let index = 0; index < limit; index += 1) {
       const selected = safelyRead(() => select.options.item(index)?.selected);

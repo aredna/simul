@@ -562,6 +562,77 @@ describe('semantic source session', () => {
     session.dispose();
   });
 
+  it('tracks native select picker state on activation and silent close', () => {
+    const { document, window } = parseHTML(
+      '<html><body><select id="choice"><option selected>One</option></select></body></html>',
+    );
+    const select = document.querySelector<HTMLSelectElement>('#choice')!;
+    const option = select.options.item(0)!;
+    const originalMatches = select.matches.bind(select);
+    let pickerOpen = false;
+    Object.defineProperties(select, {
+      selectedIndex: { configurable: true, get: () => 0 },
+      selectedOptions: { configurable: true, get: () => [option] },
+      multiple: { configurable: true, get: () => false },
+    });
+    Object.defineProperty(option, 'selected', {
+      configurable: true,
+      get: () => true,
+    });
+    select.matches = ((selector: string) => selector === ':open'
+      ? pickerOpen
+      : originalMatches(selector)) as typeof select.matches;
+    const timers: Array<() => void> = [];
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(
+      port,
+      document,
+      window,
+      'isolated-html',
+      undefined,
+      undefined,
+      timers,
+    );
+    port.emit(createSemanticSourceStart(
+      'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+    ));
+    const initial = port.messages[0]!;
+    expect(initial.proofs).toContainEqual(expect.objectContaining({
+      kind: 'select-state',
+      pickerOpen: false,
+    }));
+    port.emit(createSemanticSourceAck(
+      identity,
+      initial.policyFingerprint,
+      initial.sequence,
+    ));
+
+    pickerOpen = true;
+    expect(select.matches(':open')).toBe(true);
+    select.dispatchEvent(new window.Event('click', { bubbles: true }));
+    expect(port.messages[1]!.proofs).toContainEqual(expect.objectContaining({
+      kind: 'select-state',
+      pickerOpen: true,
+    }));
+    port.emit(createSemanticSourceAck(
+      identity,
+      port.messages[1]!.policyFingerprint,
+      port.messages[1]!.sequence,
+    ));
+
+    pickerOpen = false;
+    const poll = timers.shift();
+    expect(poll).toBeTypeOf('function');
+    poll?.();
+    expect(port.messages[2]!.proofs).toContainEqual(expect.objectContaining({
+      kind: 'select-state',
+      pickerOpen: false,
+    }));
+    session.dispose();
+  });
+
   it('reads text only from a validated disclosure, including its closed state', () => {
     const { document, window } = parseHTML(
       '<html><body><button aria-expanded="false" aria-controls="menu">Menu</button><div id="menu" hidden>Account notices</div><div id="other">Not controlled</div></body></html>',
