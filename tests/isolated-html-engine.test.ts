@@ -474,6 +474,96 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(input.value).toBe('visible draft');
   });
 
+  it('reconnects when a base patch cannot reapply dropdown presentation', async () => {
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: {
+          kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+          attributes: [], children: [
+            { kind: 'element', id: 2, namespace: 'html', tagName: 'head', attributes: [], children: [] },
+            { kind: 'element', id: 3, namespace: 'html', tagName: 'body', attributes: [], children: [{
+              kind: 'element', id: 4, namespace: 'html', tagName: 'select',
+              attributes: [], children: [{
+                kind: 'element', id: 5, namespace: 'html', tagName: 'option',
+                attributes: [], children: [],
+              }],
+            }] },
+          ],
+        },
+        adoptedStyleSheets: [], captureMs: 1,
+        viewportWidth: 800, viewportHeight: 600,
+        documentWidth: 800, documentHeight: 1_000,
+      },
+      'passive',
+    )!;
+    const stream = new FakeHtmlStream(checkpoint);
+    const semantic = new FakeSemanticStream();
+    const reconnectedSemantic = new FakeSemanticStream();
+    const reconnectTimers: Array<() => void> = [];
+    const host = new FakePresentationHost();
+    let semanticOpens = 0;
+    const engine = new IsolatedHtmlReplicaEngine({
+      presentationHost: host,
+      openStream: async () => stream,
+      openSemanticStream: async () =>
+        semanticOpens++ === 0 ? semantic : reconnectedSemantic,
+      getReplicaReadScope: () => FULL_VISIBLE_REPLICA_READ_SCOPE,
+      setSemanticReconnectTimer: (callback) => {
+        reconnectTimers.push(callback);
+        return callback;
+      },
+      clearSemanticReconnectTimer: (timer) => {
+        const index = reconnectTimers.indexOf(timer as () => void);
+        if (index >= 0) reconnectTimers.splice(index, 1);
+      },
+      initializeIframe: async (iframe, shell) => {
+        const { document } = parseHTML(shell);
+        Object.defineProperty(iframe, 'contentDocument', { value: document });
+        return document;
+      },
+    });
+    await engine.run(request);
+    await Promise.resolve();
+    expect(semantic.emit(createSemanticSourceBatch(
+      engine.snapshot()!.document,
+      'read-v1-111111',
+      1,
+      [],
+      [{
+        kind: 'select-presentation', bridge: 'isolated-html', nodeId: 4,
+        revision: 1, gate: 'controlSemantics', multiple: false, size: null,
+        classifierVersion: 1,
+      }],
+    ))).toBe(true);
+    const selectHost = host.iframe!.contentDocument!.body
+      .firstElementChild as HTMLElement;
+    const select = selectHost.shadowRoot!.querySelector('select')!;
+    expect(select.getAttribute('data-simul-source-select-presentation')).toBe('v1');
+
+    host.setInteractiveAccessibility.mockImplementation((_iframe, accessible) =>
+      !accessible);
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [{
+        kind: 'dimensions', viewportWidth: 801, viewportHeight: 600,
+        documentWidth: 801, documentHeight: 1_000,
+      }],
+      undefined,
+      'passive',
+    )!);
+
+    expect(semantic.disposed).toBe(true);
+    expect(select.hasAttribute('data-simul-source-select-presentation')).toBe(false);
+    expect(reconnectTimers).toHaveLength(1);
+    host.setInteractiveAccessibility.mockReturnValue(true);
+    reconnectTimers.shift()?.();
+    await Promise.resolve();
+    expect(semanticOpens).toBe(2);
+  });
+
   it('renders and updates native select labels without transporting option values', async () => {
     const checkpoint = createHtmlMirrorCheckpoint(
       createReplicaIdentity({ ...identityParts, sequence: 0 }),
@@ -3221,6 +3311,10 @@ class FakePresentationHost implements ReplayPresentationHost {
   markLive = vi.fn();
   refreshExtent = vi.fn();
   refreshDimensions = vi.fn();
+  setInteractiveAccessibility = vi.fn((
+    _iframe: HTMLIFrameElement,
+    _accessible: boolean,
+  ) => true);
   showLegacy = vi.fn();
   dispose = vi.fn();
 }
