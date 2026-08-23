@@ -1131,6 +1131,13 @@ browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     clearNavigationTimer();
     setStatus('The source page is changing; the current mirror stays visible until the new page is ready.');
   }
+  if (changeInfo.status === 'complete') {
+    // A redirect may expose its final URL only on the completion signal. Keep
+    // the followed identity current before arming the debounce, otherwise its
+    // stale-identity guard can discard the only finished-document refresh.
+    imageTranslationController.setTopPageOrigin(nextIdentity.url);
+    followedPageIdentity = nextIdentity;
+  }
   if (
     changeInfo.status === 'complete' ||
     (typeof changeInfo.url === 'string' && changeInfo.status !== 'loading')
