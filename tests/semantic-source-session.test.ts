@@ -562,6 +562,64 @@ describe('semantic source session', () => {
     session.dispose();
   });
 
+  it('polls selected options beyond the first option-scan window', () => {
+    const options = Array.from(
+      { length: 1_026 },
+      (_, index) => `<option>Choice ${index}</option>`,
+    ).join('');
+    const { document, window } = parseHTML(
+      `<html><body><select id="choice" multiple>${options}</select></body></html>`,
+    );
+    const select = document.querySelector<HTMLSelectElement>('#choice')!;
+    const first = select.options.item(0)!;
+    const penultimate = select.options.item(1_024)!;
+    const last = select.options.item(1_025)!;
+    let tail = last;
+    Object.defineProperties(select, {
+      selectedIndex: { configurable: true, get: () => 0 },
+      selectedOptions: { configurable: true, get: () => [first, tail] },
+      multiple: { configurable: true, get: () => true },
+    });
+    for (const option of [first, penultimate, last]) {
+      Object.defineProperty(option, 'selected', {
+        configurable: true,
+        get: () => option === first || option === tail,
+      });
+    }
+    const timers: Array<() => void> = [];
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(
+      port,
+      document,
+      window,
+      'isolated-html',
+      undefined,
+      undefined,
+      timers,
+    );
+    port.emit(createSemanticSourceStart(
+      'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+    ));
+    const firstBatch = port.messages[0]!;
+    port.emit(createSemanticSourceAck(
+      identity,
+      firstBatch.policyFingerprint,
+      firstBatch.sequence,
+    ));
+
+    tail = penultimate;
+    timers.shift()?.();
+
+    expect(port.messages).toHaveLength(2);
+    expect(port.messages[1]!.proofs).toContainEqual(expect.objectContaining({
+      kind: 'select-state',
+      selectedOptionNodeIds: [nodeId(first), nodeId(penultimate)],
+    }));
+    session.dispose();
+  });
+
   it('sleeps the control poller until a pollable control is discovered', () => {
     const { document, window } = parseHTML(
       '<html><body><main>Article text</main></body></html>',
