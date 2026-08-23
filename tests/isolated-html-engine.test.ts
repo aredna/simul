@@ -397,12 +397,26 @@ describe('IsolatedHtmlReplicaEngine', () => {
     )!;
     const stream = new FakeHtmlStream(checkpoint);
     const semantic = new FakeSemanticStream();
+    const reconnectedSemantic = new FakeSemanticStream();
+    const reconnectTimers: Array<() => void> = [];
+    const reconnectDelays: number[] = [];
+    let semanticOpens = 0;
     const host = new FakePresentationHost();
     const engine = new IsolatedHtmlReplicaEngine({
       presentationHost: host,
       openStream: async () => stream,
-      openSemanticStream: async () => semantic,
+      openSemanticStream: async () =>
+        semanticOpens++ === 0 ? semantic : reconnectedSemantic,
       getReplicaReadScope: () => FULL_VISIBLE_REPLICA_READ_SCOPE,
+      setSemanticReconnectTimer: (callback, delayMs) => {
+        reconnectTimers.push(callback);
+        reconnectDelays.push(delayMs);
+        return callback;
+      },
+      clearSemanticReconnectTimer: (timer) => {
+        const index = reconnectTimers.indexOf(timer as () => void);
+        if (index >= 0) reconnectTimers.splice(index, 1);
+      },
       initializeIframe: async (iframe, shell) => {
         const { document } = parseHTML(shell);
         Object.defineProperty(iframe, 'contentDocument', { value: document });
@@ -445,6 +459,19 @@ describe('IsolatedHtmlReplicaEngine', () => {
     semantic.fail();
     expect(engine.snapshot()?.records.some(({ nodeId }) => nodeId < 0)).toBe(false);
     expect(input.value).toBe('');
+    expect(reconnectDelays).toEqual([250]);
+    reconnectTimers.shift()?.();
+    await Promise.resolve();
+    expect(semanticOpens).toBe(2);
+    expect(reconnectedSemantic.emit(createSemanticSourceBatch(
+      snapshot.document,
+      'read-v1-111111',
+      1,
+      [sourceRecord],
+    ))).toBe(true);
+    expect(engine.snapshot()?.records.some(({ nodeId }) => nodeId === -35))
+      .toBe(true);
+    expect(input.value).toBe('visible draft');
   });
 
   it('renders and updates native select labels without transporting option values', async () => {
