@@ -541,6 +541,10 @@ describe('IsolatedHtmlReplicaEngine', () => {
     const selectHost = host.iframe!.contentDocument!.body
       .firstElementChild as HTMLElement;
     const select = selectHost.shadowRoot!.querySelector('select')!;
+    const trigger = selectHost.shadowRoot!.querySelector<HTMLElement>(
+      '[data-simul-owned-select-trigger="v1"]',
+    )!;
+    const addedTriggerListener = vi.spyOn(trigger, 'addEventListener');
     expect(select.getAttribute('data-simul-source-select-presentation')).toBe('v1');
 
     host.setInteractiveAccessibility.mockImplementation((_iframe, accessible) =>
@@ -560,6 +564,7 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(semantic.disposed).toBe(false);
     expect(select.getAttribute('data-simul-source-select-presentation')).toBe('v1');
     expect(reconnectTimers).toHaveLength(0);
+    expect(addedTriggerListener).not.toHaveBeenCalled();
     stream.observer?.onPatch(createHtmlMirrorPatch(
       createReplicaIdentity({ ...identityParts, sequence: 2 }),
       2,
@@ -574,6 +579,7 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(semantic.disposed).toBe(false);
     expect(select.getAttribute('data-simul-source-select-presentation')).toBe('v1');
     expect(reconnectTimers).toHaveLength(0);
+    expect(addedTriggerListener).not.toHaveBeenCalled();
     stream.observer?.onPatch(createHtmlMirrorPatch(
       createReplicaIdentity({ ...identityParts, sequence: 3 }),
       3,
