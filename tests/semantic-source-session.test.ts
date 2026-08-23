@@ -779,6 +779,51 @@ describe('semantic source session', () => {
     session.dispose();
   });
 
+  it('advances a semantic identity after it leaves and reenters a live SPA', () => {
+    const { document, window } = parseHTML(
+      '<html><body><input id="draft" type="text" value="Current draft"></body></html>',
+    );
+    const input = document.querySelector<HTMLInputElement>('#draft')!;
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(port, document, window);
+    port.emit(createSemanticSourceStart(
+      'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+    ));
+    const initial = port.messages[0]!;
+    const initialValue = initial.records.find(
+      (record) => record.nodeId === nodeId(input) &&
+        record.presentation === 'value',
+    );
+    expect(initialValue?.nodeRevision).toBe(1);
+
+    port.emit(createSemanticSourceAck(
+      identity,
+      initial.policyFingerprint,
+      initial.sequence,
+    ));
+    input.remove();
+    session.refresh();
+    const removed = port.messages[1]!;
+    expect(removed.records.some((record) => record.nodeId === nodeId(input)))
+      .toBe(false);
+
+    port.emit(createSemanticSourceAck(
+      identity,
+      removed.policyFingerprint,
+      removed.sequence,
+    ));
+    document.body.append(input);
+    session.refresh();
+    const reenteredValue = port.messages[2]!.records.find(
+      (record) => record.nodeId === nodeId(input) &&
+        record.presentation === 'value',
+    );
+    expect(reenteredValue?.nodeRevision).toBe(3);
+    session.dispose();
+  });
+
   it('does not aggregate selected option labels with secret descendants', () => {
     const { document, window } = parseHTML(`
       <html><body><select id="choice" multiple>
