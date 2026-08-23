@@ -43,6 +43,7 @@ export class SourceImageModel {
   #document: ReplicaSourceDocumentIdentity | undefined;
   #records = new Map<number, SourceImageDescriptor>();
   #revisions = new Map<number, ImageRevisionState>();
+  #retiredRevisionFloor = 0;
 
   constructor(options: { readonly maxEntries?: number } = {}) {
     this.#maxEntries = positiveInteger(
@@ -62,6 +63,7 @@ export class SourceImageModel {
     this.#document = parsed;
     this.#records.clear();
     this.#revisions.clear();
+    this.#retiredRevisionFloor = 0;
     return true;
   }
 
@@ -83,9 +85,16 @@ export class SourceImageModel {
 
     let revision = this.#revisions.get(parsed.nodeId);
     if (!revision && this.#revisions.size >= this.#maxEntries) {
-      return { status: 'overflow' };
+      this.#retireOldestTombstone();
+      revision = this.#revisions.get(parsed.nodeId);
+      if (!revision && this.#revisions.size >= this.#maxEntries) {
+        return { status: 'overflow' };
+      }
     }
     const previous = this.#records.get(parsed.nodeId);
+    const newIdentityRevisionFloor = revision
+      ? 0
+      : this.#retiredRevisionFloor;
     const needsContentRevision =
       !previous ||
       revision?.tombstoned === true ||
@@ -104,9 +113,15 @@ export class SourceImageModel {
     }
 
     const contentRevision = needsContentRevision
-      ? nextRevision(revision?.contentRevision)
+      ? nextRevision(
+          revision?.contentRevision,
+          newIdentityRevisionFloor,
+        )
       : revision?.contentRevision;
-    const observationRevision = nextRevision(revision?.observationRevision);
+    const observationRevision = nextRevision(
+      revision?.observationRevision,
+      newIdentityRevisionFloor,
+    );
     if (!contentRevision || !observationRevision) {
       return { status: 'overflow' };
     }
@@ -184,6 +199,20 @@ export class SourceImageModel {
     this.#document = undefined;
     this.#records.clear();
     this.#revisions.clear();
+    this.#retiredRevisionFloor = 0;
+  }
+
+  #retireOldestTombstone(): void {
+    for (const [nodeId, revision] of this.#revisions) {
+      if (!revision.tombstoned) continue;
+      this.#retiredRevisionFloor = Math.max(
+        this.#retiredRevisionFloor,
+        revision.contentRevision,
+        revision.observationRevision,
+      );
+      this.#revisions.delete(nodeId);
+      return;
+    }
   }
 }
 
@@ -301,8 +330,11 @@ function isVisibility(value: string): value is ImageVisibilityTier {
   return value === 'visible' || value === 'near' || value === 'background';
 }
 
-function nextRevision(value: number | undefined): number | undefined {
-  const next = (value ?? 0) + 1;
+function nextRevision(
+  value: number | undefined,
+  floor = 0,
+): number | undefined {
+  const next = Math.max(value ?? 0, floor) + 1;
   return Number.isSafeInteger(next) ? next : undefined;
 }
 

@@ -132,6 +132,29 @@ describe('SourceImageModel', () => {
     } as never, 1)).toEqual({ status: 'rejected' });
   });
 
+  it('retires old tombstones without allowing stale image revisions to revive', () => {
+    const model = new SourceImageModel({ maxEntries: 2 });
+    model.beginDocument(documentIdentity);
+    expect(model.upsert(upsert(1))).toMatchObject({ status: 'changed' });
+    const stale = model.get(1)!;
+    expect(model.upsert(upsert(2))).toMatchObject({ status: 'changed' });
+    expect(model.remove(documentIdentity, 1)).toMatchObject({ status: 'changed' });
+
+    expect(model.upsert(upsert(3))).toMatchObject({ status: 'changed' });
+    expect(model.get(3)?.contentRevision).toBeGreaterThan(
+      stale.contentRevision,
+    );
+    const third = model.get(3)!;
+    expect(model.remove(documentIdentity, 3)).toMatchObject({ status: 'changed' });
+    expect(model.upsert(upsert(1))).toMatchObject({ status: 'changed' });
+
+    expect(model.get(1)?.contentRevision).toBeGreaterThan(
+      third.contentRevision,
+    );
+    expect(model.isCurrent(stale)).toBe(false);
+    expect(model.records().map(({ nodeId }) => nodeId).sort()).toEqual([1, 2]);
+  });
+
   it('resets all records and watermarks for a new exact document', () => {
     const model = new SourceImageModel();
     model.beginDocument(documentIdentity);
