@@ -12,6 +12,7 @@
   },
   "scripts": {
     "dev": "wxt",
+    "hooks:install": "node tools/git-hooks/install.mjs",
     "build": "wxt build --browser chrome",
     "artifact:sync": "node tools/extension-artifact.mjs sync",
     "artifact:check": "node tools/extension-artifact.mjs check",

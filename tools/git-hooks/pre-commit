@@ -1,0 +1,14 @@
+#!/bin/sh
+
+branch=$(git symbolic-ref --quiet --short HEAD 2>/dev/null || true)
+
+case "$branch" in
+  main|master)
+    printf '%s\n' \
+      "Simul commit guard: commits on '$branch' are blocked." \
+      "Switch to a feature branch. Remove .git/hooks/pre-commit only after the user requests it." >&2
+    exit 1
+    ;;
+esac
+
+exit 0

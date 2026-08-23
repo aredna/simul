@@ -1,0 +1,6 @@
+#!/bin/sh
+
+printf '%s\n' \
+  "Simul push guard: every push from this repository is currently blocked." \
+  "Remove .git/hooks/pre-push only after the user requests it." >&2
+exit 1
