@@ -95,6 +95,26 @@ export function shouldIgnoreInactiveFollowedTabUpdate(
   return isDetachedWindow && followMode === 'active' && !tabIsActive;
 }
 
+/**
+ * Closing the followed tab activates a neighbor without requiring another
+ * click. Detached active-follow companions should reacquire that neighbor,
+ * while locked companions and closing browser windows remain terminal.
+ */
+export function shouldRecoverRemovedActiveSource(
+  isDetachedWindow: boolean,
+  followMode: CompanionPreferences['popoutTabMode'],
+  companionWindowId: number | undefined,
+  removedWindowId: number,
+  isWindowClosing: boolean,
+): boolean {
+  return Boolean(
+    isDetachedWindow &&
+      followMode === 'active' &&
+      !isWindowClosing &&
+      companionWindowId !== removedWindowId,
+  );
+}
+
 export function sameCompanionSourcePage(
   left: CapturedPageIdentity | undefined,
   right: CapturedPageIdentity,
