@@ -24,6 +24,7 @@ import {
   type CompanionStatusTone,
   type ToolbarAttentionTarget,
 } from '../../lib/companion-ui-localization';
+import { isQuickTranslationShortcut } from '../../lib/quick-translation-shortcut';
 import {
   AutoLanguageEvidencePrecedence,
   autoImageLanguageConfigurationKey,
@@ -5658,6 +5659,14 @@ function setImageTranslationBusy(busy: boolean): void {
 composerInput.addEventListener('input', () => {
   invalidateComposerOutput();
   updateControls();
+});
+composerInput.addEventListener('keydown', (event) => {
+  if (
+    !isQuickTranslationShortcut(event) ||
+    translateComposerButton.disabled
+  ) return;
+  event.preventDefault();
+  void translateComposer();
 });
 
 function showProgress(label: string, value: number, max: number): void {

@@ -344,9 +344,15 @@
       </div>
       <p id="composer-guidance" class="microcopy"></p>
       <label class="composer-label" for="composer-input" data-ui-label="Input">Input</label>
-      <textarea id="composer-input" rows="3" maxlength="5000" placeholder="Type here…"></textarea>
+      <textarea
+        id="composer-input"
+        rows="3"
+        maxlength="5000"
+        placeholder="Type here…"
+        aria-keyshortcuts="Control+Enter Meta+Enter"
+      ></textarea>
       <div class="composer-actions">
-        <button id="translate-composer" class="primary" type="button" data-ui-label="Translate">Translate</button>
+        <button id="translate-composer" class="primary" type="button" data-ui-label="Translate" title="Translate (Ctrl/Command+Enter)">Translate</button>
         <button id="copy-composer" type="button" disabled data-ui-label="Copy result">Copy result</button>
       </div>
       <label class="composer-label" for="composer-output" data-ui-label="Output">Output</label>
