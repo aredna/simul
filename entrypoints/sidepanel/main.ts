@@ -153,6 +153,7 @@ import {
   type ReplicaEnginePreference,
   type ReplicaViewMode,
 } from '../../lib/preferences';
+import { ViewPreferencePatchLedger } from '../../lib/view-preference-ledger';
 import {
   PREFERENCE_SAFETY_PORT_NAME,
   PREFERENCE_SAFETY_PROTOCOL_VERSION,
@@ -439,6 +440,7 @@ let setupCleanupWasPending = false;
 let resetInFlight = false;
 const provider = new ChromeTranslatorProvider();
 const captureCoordinator = new LatestWorkCoordinator<CaptureRequest>();
+const viewPreferencePatchLedger = new ViewPreferencePatchLedger();
 const detachedIdentityHint = parseDetachedPageIdentityHint(window.location.search);
 const isDetachedWindow = detachedIdentityHint !== undefined;
 const liveSessionId = crypto.randomUUID();
@@ -1326,14 +1328,18 @@ async function sendPreferenceCommand(
 async function commitViewPreferencePatch(
   patch: CompanionViewSettingsPatch,
 ): Promise<boolean> {
-  const expectedResetRevision = preferences.resetRevision;
+  const pending = viewPreferencePatchLedger.begin(preferences, patch);
+  preferences = pending.preferences;
+  syncPreferenceControls();
+  updateMirrorLayout();
   try {
     const result =
       await sendPreferenceCommand({
         type: 'simul:preferences:patch-view',
-        expectedResetRevision,
+        expectedResetRevision: pending.expectedResetRevision,
         patch,
       });
+    viewPreferencePatchLedger.settle(pending.requestId);
     applyCommittedPreferences(result.preferences);
     if (!result.applied) {
       throw new Error(
@@ -1347,6 +1353,7 @@ async function commitViewPreferencePatch(
     }
     return true;
   } catch (error) {
+    viewPreferencePatchLedger.settle(pending.requestId);
     try {
       applyCommittedPreferences(await readStoredPreferences());
       syncPreferenceControls();
@@ -1632,7 +1639,7 @@ function applyCommittedPreferences(value: unknown): boolean {
       candidate.settingsRevision < previous.settingsRevision
     );
   if (candidateIsOlder) return false;
-  preferences = selected;
+  preferences = viewPreferencePatchLedger.project(selected);
   if (
     preferences.readScopeSetupVersion !== REPLICA_READ_SCOPE_SETUP_VERSION &&
     (
