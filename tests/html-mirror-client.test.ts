@@ -54,6 +54,21 @@ describe('Chrome HTML mirror client', () => {
     );
   });
 
+  it('suppresses a queued disconnect after the lease is explicitly disposed', async () => {
+    const port = new FakePort();
+    installBrowser(port);
+    const lease = await openChromeHtmlMirrorStream(request);
+    port.emitMessage(checkpoint());
+    await lease.initialCheckpoint;
+    port.emitDisconnect();
+    lease.dispose();
+    const observer = fakeObserver();
+
+    lease.setObserver(observer);
+
+    expect(observer.onFailure).not.toHaveBeenCalled();
+  });
+
   it('queues a recoverable early failure instead of silently dropping it', async () => {
     const port = new FakePort();
     installBrowser(port);
