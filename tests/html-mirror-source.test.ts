@@ -793,6 +793,31 @@ describe('HtmlMirrorSourceSession', () => {
     expect(JSON.stringify(fixture.patches()[0])).toContain('Changed');
   });
 
+  it('does not overflow on bulk same-value attribute housekeeping', () => {
+    const fixture = sourceFixture(
+      `<main>${'<span class="stable"></span>'.repeat(4_001)}</main>`,
+    );
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const records = [...fixture.document.querySelectorAll('span')].map(
+      (target) => ({
+        type: 'attributes',
+        target,
+        attributeName: 'class',
+        attributeNamespace: null,
+        oldValue: 'stable',
+      } as unknown as MutationRecord),
+    );
+
+    fixture.mutateAll(records);
+
+    expect(fixture.port.posts).not.toContainEqual(expect.objectContaining({
+      kind: 'simul:html-mirror-v1:error',
+      code: 'stream_overflow',
+    }));
+    expect(fixture.patches()).toHaveLength(0);
+  });
+
   it('omits embedded frame surfaces from checkpoints and later mutations', () => {
     const fixture = sourceFixture('<main id="page"><p>top document</p></main>');
     const page = fixture.document.querySelector('#page')!;
@@ -1477,6 +1502,10 @@ function sourceFixture(markup: string) {
     ) => port.emitMessage(createHtmlMirrorStart(identity, fidelityPolicy)),
     mutate: (record: MutationRecord) => mutationCallback(
       [record],
+      {} as MutationObserver,
+    ),
+    mutateAll: (records: MutationRecord[]) => mutationCallback(
+      records,
       {} as MutationObserver,
     ),
     flushFrame: () => {
