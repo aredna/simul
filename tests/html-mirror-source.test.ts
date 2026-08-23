@@ -1017,6 +1017,14 @@ describe('HtmlMirrorSourceSession', () => {
     const openText = fixture.document.createTextNode('open shadow');
     const openShadow = open.attachShadow({ mode: 'open' });
     Object.defineProperty(openShadow, 'mode', { value: 'open' });
+    let openRootReads = 0;
+    Object.defineProperty(open, 'shadowRoot', {
+      configurable: true,
+      get: () => {
+        openRootReads += 1;
+        return openShadow;
+      },
+    });
     openShadow.append(openText);
     fixture.document.querySelector('#closed')!.attachShadow({ mode: 'closed' })
       .textContent = 'closed shadow';
@@ -1027,6 +1035,9 @@ describe('HtmlMirrorSourceSession', () => {
     expect(checkpointJson).not.toContain('closed shadow');
     expect(fixture.observed.some((node) => node === openShadow)).toBe(true);
     fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const rootReadsAfterCapture = openRootReads;
+    fixture.runTimer();
+    expect(openRootReads).toBe(rootReadsAfterCapture);
 
     openText.nodeValue = 'updated shadow';
     fixture.mutate(characterDataRecord(openText));
