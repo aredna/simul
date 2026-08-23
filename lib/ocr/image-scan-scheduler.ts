@@ -213,7 +213,7 @@ export class ImageScanScheduler {
 
   takeNext(): ImageScanJob | undefined {
     if (this.#active.size >= MAX_ACTIVE_IMAGE_SCANS) return undefined;
-    const next = this.#orderedPending()[0];
+    const next = this.#bestPending();
     if (!next) return undefined;
     this.#pending.delete(next.descriptor.nodeId);
     const job: ImageScanJob = Object.freeze({
@@ -456,7 +456,7 @@ export class ImageScanScheduler {
       this.#overflows.delete(candidate.descriptor.nodeId);
       return;
     }
-    const worst = this.#orderedPending().at(-1);
+    const worst = this.#worstPending();
     if (
       !worst ||
       priorityRank(candidate.priority) >= priorityRank(worst.priority)
@@ -484,6 +484,25 @@ export class ImageScanScheduler {
 
   #orderedPending(): QueuedJob[] {
     return [...this.#pending.values()].sort(compareQueuedJobs);
+  }
+
+  #bestPending(): QueuedJob | undefined {
+    let best: QueuedJob | undefined;
+    for (const job of this.#pending.values()) {
+      if (!best || compareQueuedJobs(job, best) < 0) best = job;
+    }
+    return best;
+  }
+
+  #worstPending(): QueuedJob | undefined {
+    let worst: QueuedJob | undefined;
+    for (const job of this.#pending.values()) {
+      if (
+        !worst ||
+        compareQueuedJobs(job, worst) >= 0
+      ) worst = job;
+    }
+    return worst;
   }
 
   #resultFor(
