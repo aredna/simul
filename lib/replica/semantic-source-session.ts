@@ -288,17 +288,25 @@ export class SemanticSourceSession {
   };
   readonly #onSelectActivation = (event: Event): void => {
     if (!this.#scope?.formValues) return;
-    const target = event.target;
-    if (
-      !target || typeof target !== 'object' ||
-      (target as Node).nodeType !== ELEMENT_NODE
-    ) return;
-    const element = target as Element;
-    const select = element.localName.toLowerCase() === 'select'
-      ? element
-      : safelyRead(() => element.closest('select'));
-    if (!select || select.ownerDocument !== this.environment.document) return;
-    this.refresh();
+    let path: readonly EventTarget[] = [];
+    try {
+      path = event.composedPath();
+    } catch {
+      // Use the retargeted event target when a synthetic path is unreadable.
+    }
+    const retargeted = safelyRead(() => event.target);
+    const candidates = path.length > 0
+      ? path
+      : retargeted ? [retargeted] : [];
+    for (const candidate of candidates) {
+      if (!isElementNode(candidate)) continue;
+      const select = candidate.localName.toLowerCase() === 'select'
+        ? candidate
+        : safelyRead(() => candidate.closest('select'));
+      if (select?.ownerDocument !== this.environment.document) continue;
+      this.refresh();
+      return;
+    }
   };
 
   #start(
