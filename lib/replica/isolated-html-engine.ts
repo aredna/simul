@@ -777,7 +777,12 @@ export class IsolatedHtmlReplicaEngine
     state.replicaRequestsMayOccur ||=
       batch.representability.replicaRequestCapableResourceCount > 0;
     stream.acknowledge(state.sequence);
-    this.options.presentationHost.refreshDimensions?.(state.iframe, state.dimensions);
+    if (batch.operations.some(({ kind }) => kind === 'dimensions')) {
+      this.options.presentationHost.refreshDimensions?.(
+        state.iframe,
+        state.dimensions,
+      );
+    }
     this.options.presentationHost.markLive(state.iframe);
     const semanticReceiver = this.#semanticReceiver;
     const semanticBindingsMayHaveChanged = batch.operations.some(
