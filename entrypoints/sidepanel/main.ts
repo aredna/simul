@@ -63,6 +63,7 @@ import {
   isNewerCompanionLaunchStamp,
   sameCompanionSourcePage,
   shouldFollowActivatedTab,
+  shouldIgnoreInactiveFollowedTabUpdate,
   type CompanionLaunchStamp,
 } from '../../lib/companion-surface';
 import {
@@ -693,6 +694,7 @@ const autoLanguageEvidencePrecedence =
   new AutoLanguageEvidencePrecedence<PendingAutoImageLanguageEvidence>();
 let pageLanguageResolutionPending = false;
 let identityRequestId = 0;
+let activeFollowRequestId: number | undefined;
 let captureInFlight = false;
 let translationInFlight = false;
 let permissionInFlight = false;
@@ -1109,6 +1111,14 @@ browser.tabs.onAttached.addListener((tabId, { newWindowId }) => {
 browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
   const followed = followedPageIdentity;
   if (!followed || followed.tabId !== tabId) return;
+  // The old tab can report one last update while Chrome is resolving the new
+  // active tab. Do not let that stale event invalidate the newer request.
+  if (shouldIgnoreInactiveFollowedTabUpdate(
+    isDetachedWindow,
+    preferences.popoutTabMode,
+    tab.active,
+    activeFollowRequestId !== undefined,
+  )) return;
   const nextUrl = changeInfo.url ?? tab.url ?? followed.url;
   if (!isSupportedPage(nextUrl)) {
     if (changeInfo.status === 'loading' || typeof changeInfo.url === 'string') {
@@ -1975,6 +1985,7 @@ async function refreshFollowedPage(reason: CaptureRequest['reason']): Promise<vo
 async function followCurrentActiveSourceTab(): Promise<void> {
   if (!detachedIdentityHint || preferences.popoutTabMode !== 'active') return;
   const requestId = ++identityRequestId;
+  activeFollowRequestId = requestId;
   clearNavigationTimer();
   try {
     const lastFocused = await browser.windows.getLastFocused({
@@ -2007,6 +2018,8 @@ async function followCurrentActiveSourceTab(): Promise<void> {
     invalidateCompanion(
       `${readPageError(error)} Active-tab following needs page access for each newly selected site.`,
     );
+  } finally {
+    finishActiveFollowRequest(requestId);
   }
 }
 
@@ -2014,6 +2027,11 @@ async function followFocusedBrowserWindow(
   windowId: number,
   requestId: number,
 ): Promise<void> {
+  if (
+    requestId !== identityRequestId ||
+    preferences.popoutTabMode !== 'active'
+  ) return;
+  activeFollowRequestId = requestId;
   try {
     const sourceWindow = await browser.windows.get(windowId);
     if (
@@ -2032,6 +2050,8 @@ async function followFocusedBrowserWindow(
     }
   } catch {
     // A closing or restricted browser window is not a new source candidate.
+  } finally {
+    finishActiveFollowRequest(requestId);
   }
 }
 
@@ -2051,6 +2071,8 @@ async function followActivatedSourceTab(
   ) return;
 
   const requestId = existingRequestId ?? ++identityRequestId;
+  if (requestId !== identityRequestId) return;
+  activeFollowRequestId = requestId;
   clearNavigationTimer();
   try {
     const sourceWindow = await browser.windows.get(windowId);
@@ -2080,7 +2102,13 @@ async function followActivatedSourceTab(
     invalidateCompanion(
       `${readPageError(error)} Active-tab following needs page access for each newly selected site.`,
     );
+  } finally {
+    finishActiveFollowRequest(requestId);
   }
+}
+
+function finishActiveFollowRequest(requestId: number): void {
+  if (activeFollowRequestId === requestId) activeFollowRequestId = undefined;
 }
 
 function queueCapture(request: CaptureRequest): void {
@@ -5267,6 +5295,7 @@ function withCaptureTimeout<T>(operation: Promise<T>): Promise<T> {
 
 function invalidateCompanion(message: string): void {
   identityRequestId += 1;
+  activeFollowRequestId = undefined;
   sourceLanguageResolutionRevision += 1;
   autoLanguageEvidencePrecedence.invalidate();
   pageLanguageResolutionPending = false;
