@@ -52,6 +52,7 @@ export interface FilteredImageTextResult {
 
 const MEANINGFUL_TEXT_PATTERN = /[\p{L}\p{N}]/u;
 const CORROBORATION_IOU_THRESHOLD = 0.5;
+const MAX_FILTERED_TRANSCRIPT_LENGTH = 1_000_000;
 
 /**
  * Accept authoritative scored text and independently corroborated uncertain
@@ -133,7 +134,7 @@ export function filterImageTextResult(
       providerId: result.providerId,
       bitmapWidth: result.bitmapWidth,
       bitmapHeight: result.bitmapHeight,
-      transcript: accepted.map(({ text }) => text).join('\n').slice(0, 1_000_000),
+      transcript: boundedRegionTranscript(accepted),
       ...(transcriptConfidence !== undefined ? { transcriptConfidence } : {}),
       ...(result.geometryConfidence !== undefined
         ? { geometryConfidence: result.geometryConfidence }
@@ -257,6 +258,30 @@ function acceptedRegionConfidence(
     confidenceTotal += region.confidence;
   }
   return confidenceTotal / regions.length;
+}
+
+function boundedRegionTranscript(
+  regions: readonly ImageTextRegion[],
+): string {
+  const parts: string[] = [];
+  let length = 0;
+  for (let index = 0; index < regions.length; index += 1) {
+    const text = regions[index]?.text ?? '';
+    if (index > 0) {
+      if (length >= MAX_FILTERED_TRANSCRIPT_LENGTH) break;
+      parts.push('\n');
+      length += 1;
+    }
+    const remaining = MAX_FILTERED_TRANSCRIPT_LENGTH - length;
+    if (text.length <= remaining) {
+      parts.push(text);
+      length += text.length;
+      continue;
+    }
+    parts.push(text.slice(0, remaining));
+    break;
+  }
+  return parts.join('');
 }
 
 function normalizeCorroborationText(value: string): string {
