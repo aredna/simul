@@ -6,6 +6,7 @@ export const IMAGE_EVIDENCE_RANKING_POLICY_VERSION = 'deterministic-v1';
 export const MAX_IMAGE_SEMANTIC_EVIDENCE_RECORDS = 512;
 const MAX_RANKING_TEXT = 4_000;
 const DECISIVE_SCORE_MARGIN = 2;
+const MEANINGFUL_CHARACTER = /[\p{L}\p{N}]/u;
 
 export type SemanticEvidenceAssessmentReason =
   | 'semantic-preferred'
@@ -287,17 +288,25 @@ function textShape(value: string): Readonly<{
   varied: boolean;
 }> {
   const normalized = normalizeImageEvidenceText(value);
-  const meaningful = [...normalized].filter((character) =>
-    /[\p{L}\p{N}]/u.test(character)
-  );
-  const tokens = normalized.match(/[\p{L}\p{N}]+/gu)?.length ?? 0;
-  const unique = new Set(meaningful.map((character) =>
-    character.toLowerCase()
-  )).size;
+  const unique = new Set<string>();
+  let meaningfulCharacters = 0;
+  let tokens = 0;
+  let insideToken = false;
+  for (const character of normalized) {
+    if (!MEANINGFUL_CHARACTER.test(character)) {
+      insideToken = false;
+      continue;
+    }
+    meaningfulCharacters += 1;
+    unique.add(character.toLowerCase());
+    if (!insideToken) tokens += 1;
+    insideToken = true;
+  }
   return Object.freeze({
-    meaningfulCharacters: meaningful.length,
+    meaningfulCharacters,
     tokens,
-    varied: meaningful.length > 0 && unique / meaningful.length >= 0.4,
+    varied: meaningfulCharacters > 0 &&
+      unique.size / meaningfulCharacters >= 0.4,
   });
 }
 
