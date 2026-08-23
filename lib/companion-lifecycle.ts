@@ -43,6 +43,14 @@ export interface AvailabilityRequestCurrency {
   readonly pairMatches: boolean;
 }
 
+/** A replacement within the current page keeps the reader's chosen position. */
+export function shouldResetReplicaScrollForCapture(
+  reason: string,
+  samePage: boolean,
+): boolean {
+  return !samePage || reason === 'navigation';
+}
+
 /**
  * An async availability result is actionable only while translated mode and
  * every identity boundary from the initiating request are still current.

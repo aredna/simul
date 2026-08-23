@@ -8,6 +8,7 @@ import {
   isAvailabilityRequestCurrent,
   mergeLiveUpdateBatches,
   replicaViewTranslationAction,
+  shouldResetReplicaScrollForCapture,
   type GenerationWork,
 } from '../../lib/companion-lifecycle';
 import {
@@ -2082,7 +2083,7 @@ function queueCapture(request: CaptureRequest): void {
     normalizedPageUrl,
   );
   if (!samePage) liveReplicaFailureRecoveryGate.reset();
-  if (!samePage || request.reason === 'navigation') {
+  if (shouldResetReplicaScrollForCapture(request.reason, samePage)) {
     lastSourceScroll = undefined;
     visibleReplayHost.resetSourceScroll();
   }
