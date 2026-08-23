@@ -275,6 +275,44 @@ describe('read-only replica disclosure placement', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it('limits identity checks to disclosure subtrees removed from the replica', async () => {
+    const { document } = parseHTML(
+      '<html><body><div id="owned"><button id="trigger">Open</button>' +
+      '<div id="panel">Panel</div></div><div id="unrelated"></div></body></html>',
+    );
+    const owned = document.querySelector<HTMLElement>('#owned')!;
+    const trigger = document.querySelector<HTMLElement>('#trigger')!;
+    const panel = document.querySelector<HTMLElement>('#panel')!;
+    const unrelated = document.querySelector<HTMLElement>('#unrelated')!;
+    const controller = installReadOnlyReplicaDisclosure({
+      anchor: trigger,
+      trigger,
+      panel,
+      presentation: 'popup',
+    });
+    const triggerConnected = vi.fn(() => true);
+    const panelConnected = vi.fn(() => true);
+    Object.defineProperty(trigger, 'isConnected', {
+      configurable: true,
+      get: triggerConnected,
+    });
+    Object.defineProperty(panel, 'isConnected', {
+      configurable: true,
+      get: panelConnected,
+    });
+    document.body.append(document.createElement('div'));
+    unrelated.remove();
+    await Promise.resolve();
+    expect(triggerConnected).not.toHaveBeenCalled();
+    expect(panelConnected).not.toHaveBeenCalled();
+
+    owned.remove();
+    await Promise.resolve();
+    expect(triggerConnected).toHaveBeenCalled();
+    expect(panelConnected).toHaveBeenCalled();
+    controller.dispose();
+  });
+
   it('keeps a hover-opened popup open on its first click', () => {
     const { document, window } = parseHTML(
       '<html><body><button id="trigger">Options</button>' +
