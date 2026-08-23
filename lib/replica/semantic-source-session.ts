@@ -176,6 +176,7 @@ export class SemanticSourceSession {
   #inFlightSequence: number | undefined;
   #dirty = false;
   #scheduled = false;
+  #lastEmittedScanSignature: string | undefined;
   #controlPollTimer: unknown;
   #selectActivationTimer: unknown;
   #controlPollCandidates: Element[] = [];
@@ -222,6 +223,7 @@ export class SemanticSourceSession {
     this.#policyFingerprint = undefined;
     this.#revisions.clear();
     this.#proofRevisions.clear();
+    this.#lastEmittedScanSignature = undefined;
     try {
       this.environment.onDispose?.();
     } catch {
@@ -571,6 +573,8 @@ export class SemanticSourceSession {
       this.dispose(true);
       return;
     }
+    const scanSignature = semanticSourceScanSignature(scan);
+    if (scanSignature === this.#lastEmittedScanSignature) return;
     const sequence = this.#sequence + 1;
     let batch: SemanticSourceBatch;
     try {
@@ -586,6 +590,7 @@ export class SemanticSourceSession {
       this.dispose(false);
       return;
     }
+    this.#lastEmittedScanSignature = scanSignature;
     this.#sequence = sequence;
     this.#inFlightSequence = sequence;
   }
@@ -1902,4 +1907,13 @@ function disclosureElementCanCarryUserState(element: Element): boolean {
 function isExplicitlyHidden(element: Element): boolean {
   return element.hasAttribute('hidden') ||
     normalizedToken(safelyReadAttribute(element, 'aria-hidden')) === 'true';
+}
+
+function semanticSourceScanSignature(scan: SemanticSourceScan): string {
+  return [
+    scan.records.map((record) => `${record.recordId}:${record.nodeRevision}`)
+      .join(','),
+    scan.proofs.map((proof) =>
+      `${semanticSourceProofIdentity(proof)}:${proof.revision}`).join(','),
+  ].join('|');
 }
