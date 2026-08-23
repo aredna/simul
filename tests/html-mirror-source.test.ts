@@ -1302,13 +1302,13 @@ describe('HtmlMirrorSourceSession', () => {
 
   it('quarantines oversized CSSOM polling without an idle recovery loop', () => {
     const fixture = sourceFixture('<main class="page">styled content</main>');
-    const oversized = fakeStyleSheetWithRules(25_001, '.page{}');
+    let currentSheet = fakeStyleSheetWithRules(25_001, '.page{}');
     let styleSheetReads = 0;
     Object.defineProperty(fixture.document, 'styleSheets', {
       configurable: true,
       get: () => {
         styleSheetReads += 1;
-        return styleSheetList(oversized);
+        return styleSheetList(currentSheet);
       },
     });
 
@@ -1329,6 +1329,14 @@ describe('HtmlMirrorSourceSession', () => {
     expect(fixture.port.posts.some(
       (message) => (message as { code?: string }).code === 'stream_overflow',
     )).toBe(false);
+
+    currentSheet = fakeStyleSheetWithRules(1, '.page{display:grid}');
+    for (let pass = 0; pass < 130; pass += 1) fixture.runTimer();
+    expect(styleSheetReads).toBeGreaterThan(0);
+    expect(fixture.port.posts.at(-1)).toMatchObject({
+      kind: 'simul:html-mirror-v2:error',
+      code: 'stream_gap',
+    });
   });
 
   it('advances the shared style cursor after adopted-style budget exhaustion', () => {

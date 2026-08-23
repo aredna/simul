@@ -265,6 +265,7 @@ const MAX_STYLE_SHEETS_PER_TICK = 512;
 const MAX_STYLE_RULES_PER_TICK = 25_000;
 const MAX_STYLE_CHARACTERS_PER_TICK = 1024 * 1024;
 const STYLE_CHANGE_STABILITY_OBSERVATIONS = 3;
+const OVERSIZED_STYLE_RETRY_PASSES = 120;
 const MAX_MIRRORED_IMAGE_CANDIDATES = 4_000;
 const MAX_IMAGE_EVENT_ROOTS = 4_000;
 
@@ -316,8 +317,10 @@ export class HtmlMirrorSourceSession {
   #settledShadowHostCandidates = new WeakSet<Element>();
   #shadowDiscoveryCursor = 0;
   #stylePollingCursor = 0;
+  #stylePollingPass = 0;
   #stylePollingPhases = new WeakMap<object, StylePollChannel>();
   #styleCapacityChannels = new WeakMap<object, number>();
+  #styleCapacityRetryPasses = new WeakMap<object, readonly [number, number]>();
   readonly #adoptedStyleSignatures = new StableSignatureTracker(
     STYLE_CHANGE_STABILITY_OBSERVATIONS,
   );
@@ -371,8 +374,13 @@ export class HtmlMirrorSourceSession {
     this.#settledShadowHostCandidates = new WeakSet<Element>();
     this.#shadowDiscoveryCursor = 0;
     this.#stylePollingCursor = 0;
+    this.#stylePollingPass = 0;
     this.#stylePollingPhases = new WeakMap<object, StylePollChannel>();
     this.#styleCapacityChannels = new WeakMap<object, number>();
+    this.#styleCapacityRetryPasses = new WeakMap<
+      object,
+      readonly [number, number]
+    >();
     this.#mirroredImageCandidates = [];
     this.#knownMirroredImageCandidates = new WeakSet<Element>();
     this.#selectedImageSources = new WeakMap<Element, string>();
@@ -1437,6 +1445,7 @@ export class HtmlMirrorSourceSession {
   }
 
   #pollStyleChanges(): void {
+    this.#stylePollingPass += 1;
     const owners = this.#styleOwners();
     if (owners.length === 0) return;
     const work = this.#createStylePollingBudget();
@@ -1455,16 +1464,18 @@ export class HtmlMirrorSourceSession {
         oppositeStylePollChannel(firstChannel),
       ] as const;
       for (const channel of channels) {
-        if (
-          ((this.#styleCapacityChannels.get(owner) ?? 0) &
-            stylePollChannelMask(channel)) !== 0
-        ) continue;
+        const wasCapacity = ((this.#styleCapacityChannels.get(owner) ?? 0) &
+          stylePollChannelMask(channel)) !== 0;
+        if (wasCapacity && this.#styleCapacityRetryPending(owner, channel)) {
+          continue;
+        }
         const channelStartedWithUnusedBudget = work.sheets === 0 &&
           work.rules === 0 && work.characters === 0;
         const result = channel === 'ordinary'
           ? this.#ordinaryStylesChanged(owner, work)
           : this.#adoptedStylesChanged(owner, work);
-        if (result === 'changed') {
+        if (result === 'changed' || (wasCapacity && result === 'unchanged')) {
+          this.#clearStyleCapacity(owner, channel);
           this.#stylePollingPhases.set(
             owner,
             oppositeStylePollChannel(channel),
@@ -1525,9 +1536,27 @@ export class HtmlMirrorSourceSession {
       ~stylePollChannelMask(channel);
     if (next === 0) {
       this.#styleCapacityChannels.delete(owner);
+      this.#styleCapacityRetryPasses.delete(owner);
     } else {
       this.#styleCapacityChannels.set(owner, next);
+      const retries = this.#styleCapacityRetryPasses.get(owner) ?? [0, 0];
+      this.#styleCapacityRetryPasses.set(
+        owner,
+        channel === 'ordinary'
+          ? [0, retries[1]]
+          : [retries[0], 0],
+      );
     }
+  }
+
+  #styleCapacityRetryPending(
+    owner: Document | ShadowRoot,
+    channel: StylePollChannel,
+  ): boolean {
+    const retries = this.#styleCapacityRetryPasses.get(owner);
+    const retryPass = retries?.[channel === 'ordinary' ? 0 : 1] ??
+      Number.MAX_SAFE_INTEGER;
+    return this.#stylePollingPass < retryPass;
   }
 
   #suppressOversizedStyleChannel(
@@ -1536,8 +1565,15 @@ export class HtmlMirrorSourceSession {
   ): void {
     const mask = stylePollChannelMask(channel);
     const reported = this.#styleCapacityChannels.get(owner) ?? 0;
-    if ((reported & mask) !== 0) return;
     this.#styleCapacityChannels.set(owner, reported | mask);
+    const retries = this.#styleCapacityRetryPasses.get(owner) ?? [0, 0];
+    const retryPass = this.#stylePollingPass + OVERSIZED_STYLE_RETRY_PASSES;
+    this.#styleCapacityRetryPasses.set(
+      owner,
+      channel === 'ordinary'
+        ? [retryPass, retries[1]]
+        : [retries[0], retryPass],
+    );
   }
 
   #observeOpenShadowRoots(root: Node): void {
