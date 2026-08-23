@@ -181,7 +181,9 @@ function applyTypedProof(
   if (resolved.kind === 'select-state') {
     if (!presentedSelects.has(resolved.proof.nodeId)) return () => undefined;
     const select = resolved.target;
-    const originalSelected = [...select.options].map((option) => option.selected);
+    const options = [...select.options];
+    const originalSelected = new Map(options.map((option) =>
+      [option, option.selected] as const));
     const originalPickerOpen = select.getAttribute(
       'data-simul-source-picker-open',
     );
@@ -189,9 +191,10 @@ function applyTypedProof(
       'data-simul-source-selection-state',
     );
     const selected = new Set(resolved.selectedOptions);
-    const options = [...select.options];
-    const originalSelectedMarkers = options.map((option) =>
-      option.getAttribute('data-simul-source-option-selected'));
+    const originalSelectedMarkers = new Map(options.map((option) => [
+      option,
+      option.getAttribute('data-simul-source-option-selected'),
+    ] as const));
     for (const option of options) {
       const isSelected = selected.has(option);
       option.selected = isSelected;
@@ -212,12 +215,13 @@ function applyTypedProof(
     }
     select.setAttribute('data-simul-source-selection-state', 'v1');
     return () => {
-      for (let index = 0; index < select.options.length; index += 1) {
-        select.options.item(index)!.selected = originalSelected[index] ?? false;
+      for (const option of options) {
+        if (!select.contains(option)) continue;
+        option.selected = originalSelected.get(option) ?? false;
         restoreAttribute(
-          select.options.item(index)!,
+          option,
           'data-simul-source-option-selected',
-          originalSelectedMarkers[index] ?? null,
+          originalSelectedMarkers.get(option) ?? null,
         );
       }
       restoreAttribute(select, 'data-simul-source-picker-open', originalPickerOpen);
