@@ -125,4 +125,55 @@ describe('SemanticProofPresenter', () => {
     expect(first.selected).toBe(false);
     expect(second.selected).toBe(true);
   });
+
+  it('does not restore stale dropdown state after same-value mirror updates', () => {
+    const { document } = parseHTML(`<html><body>
+      <select><option selected>One</option><option>Two</option></select>
+      <iframe></iframe></body></html>`);
+    const select = document.querySelector<HTMLSelectElement>('select')!;
+    const first = select.options[0]!;
+    const second = select.options[1]!;
+    const frame = document.querySelector('iframe') as unknown as HTMLIFrameElement;
+    const proofs: readonly ResolvedSemanticSourceProof[] = [{
+      kind: 'select-presentation',
+      proof: {
+        kind: 'select-presentation', bridge: 'isolated-html', nodeId: 7,
+        revision: 1, gate: 'controlSemantics', multiple: true, size: 2,
+        classifierVersion: 1,
+      },
+      target: select,
+    }, {
+      kind: 'select-state',
+      proof: {
+        kind: 'select-state', bridge: 'isolated-html', nodeId: 7,
+        revision: 1, gate: 'formValues', selectedOptionNodeIds: [9],
+        multiple: true, pickerOpen: false, classifierVersion: 1,
+      },
+      target: select,
+      selectedOptions: [second],
+    }];
+    const presenter = new SemanticProofPresenter({
+      document: document as unknown as Document,
+      iframe: frame,
+    });
+    expect(presenter.apply(proofs)).toBe(true);
+
+    // Attribute patching clears extension-owned select markers before applying
+    // its own values. The new source values happen to equal the proof values.
+    select.removeAttribute('data-simul-source-select-presentation');
+    select.removeAttribute('data-simul-source-selection-state');
+    select.removeAttribute('data-simul-source-picker-open');
+    select.multiple = true;
+    select.setAttribute('size', '2');
+    first.selected = false;
+    second.selected = true;
+
+    presenter.clear();
+
+    expect(select.multiple).toBe(true);
+    expect(select.getAttribute('size')).toBe('2');
+    expect(first.selected).toBe(false);
+    expect(second.selected).toBe(true);
+    expect(second.hasAttribute('data-simul-source-option-selected')).toBe(false);
+  });
 });
