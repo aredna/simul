@@ -6,6 +6,7 @@ import {
   isAvailabilityRequestCurrent,
   mergeLiveUpdateBatches,
   replicaViewTranslationAction,
+  shouldResetReplicaScrollForCapture,
 } from '../lib/companion-lifecycle';
 
 describe('automaticTranslationAction', () => {
@@ -80,6 +81,21 @@ describe('isAvailabilityRequestCurrent', () => {
         [field]: false,
       }),
     ).toBe(false);
+  });
+});
+
+describe('shouldResetReplicaScrollForCapture', () => {
+  it('retains same-page reader position across manual and recovery rebuilds', () => {
+    expect(shouldResetReplicaScrollForCapture('manual', true)).toBe(false);
+    expect(shouldResetReplicaScrollForCapture('desynchronized', true)).toBe(
+      false,
+    );
+    expect(shouldResetReplicaScrollForCapture('preference', true)).toBe(false);
+  });
+
+  it('resets at actual page and navigation boundaries', () => {
+    expect(shouldResetReplicaScrollForCapture('manual', false)).toBe(true);
+    expect(shouldResetReplicaScrollForCapture('navigation', true)).toBe(true);
   });
 });
 
