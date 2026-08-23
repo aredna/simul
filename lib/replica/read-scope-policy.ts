@@ -86,35 +86,25 @@ export function repairReplicaReadScope(input: unknown): ReplicaReadScope {
 export function readExactReplicaReadScope(
   input: unknown,
 ): ReplicaReadScope | undefined {
-  if (!isRecord(input)) return undefined;
-  const keys = Object.keys(input);
-  if (
-    keys.length !== REPLICA_READ_SCOPE_KEYS.length ||
-    keys.some((key) => !(REPLICA_READ_SCOPE_KEYS as readonly string[]).includes(key))
-  ) return undefined;
-  for (const key of REPLICA_READ_SCOPE_KEYS) {
-    if (typeof input[key] !== 'boolean') return undefined;
-  }
-  // Personal values are meaningful only with the ordinary form-value gate.
-  // Reject rather than silently widening formValues.
-  if (input.personalDataValues && !input.formValues) return undefined;
+  if (readReplicaReadScopeMask(input) === undefined) return undefined;
+  const exact = input as ReplicaReadScope;
   return Object.freeze({
-    controlSemantics: input.controlSemantics === true,
-    controlImages: input.controlImages === true,
-    disclosureContent: input.disclosureContent === true,
-    formValues: input.formValues === true,
-    personalDataValues: input.personalDataValues === true,
-    editableContent: input.editableContent === true,
+    controlSemantics: exact.controlSemantics === true,
+    controlImages: exact.controlImages === true,
+    disclosureContent: exact.disclosureContent === true,
+    formValues: exact.formValues === true,
+    personalDataValues: exact.personalDataValues === true,
+    editableContent: exact.editableContent === true,
   });
 }
 
 export function deriveReplicaReadScopeProfile(
   input: ReplicaReadScope,
 ): DerivedReplicaReadScopeProfileId {
-  const scope = repairReplicaReadScope(input);
-  if (sameReplicaReadScope(scope, PAGE_ONLY)) return 'page-only';
-  if (sameReplicaReadScope(scope, STANDARD)) return 'standard';
-  if (sameReplicaReadScope(scope, FULL_VISIBLE)) return 'full-visible';
+  const mask = normalizedReplicaReadScopeMask(input);
+  if (mask === 0) return 'page-only';
+  if (mask === 56) return 'standard';
+  if (mask === 63) return 'full-visible';
   return 'custom';
 }
 
@@ -130,17 +120,15 @@ export function intersectReplicaReadScopes(
   left: ReplicaReadScope,
   right: ReplicaReadScope,
 ): ReplicaReadScope {
-  const first = repairReplicaReadScope(left);
-  const second = repairReplicaReadScope(right);
+  const mask = normalizedReplicaReadScopeMask(left) &
+    normalizedReplicaReadScopeMask(right);
   return Object.freeze({
-    controlSemantics: first.controlSemantics && second.controlSemantics,
-    controlImages: first.controlImages && second.controlImages,
-    disclosureContent: first.disclosureContent && second.disclosureContent,
-    formValues: first.formValues && second.formValues,
-    personalDataValues:
-      first.formValues && second.formValues &&
-      first.personalDataValues && second.personalDataValues,
-    editableContent: first.editableContent && second.editableContent,
+    controlSemantics: Boolean(mask & 32),
+    controlImages: Boolean(mask & 16),
+    disclosureContent: Boolean(mask & 8),
+    formValues: Boolean(mask & 4),
+    personalDataValues: Boolean(mask & 2),
+    editableContent: Boolean(mask & 1),
   });
 }
 
@@ -148,19 +136,17 @@ export function replicaReadScopeNarrows(
   before: ReplicaReadScope,
   after: ReplicaReadScope,
 ): boolean {
-  const oldScope = repairReplicaReadScope(before);
-  const newScope = repairReplicaReadScope(after);
-  return REPLICA_READ_SCOPE_KEYS.some(
-    (key) => oldScope[key] && !newScope[key],
-  );
+  const oldMask = normalizedReplicaReadScopeMask(before);
+  const newMask = normalizedReplicaReadScopeMask(after);
+  return (oldMask & ~newMask) !== 0;
 }
 
 /** Stable, content-free policy identity for exact-document protocol epochs. */
 export function replicaReadScopeFingerprint(scope: ReplicaReadScope): string {
-  const normalized = repairReplicaReadScope(scope);
-  const bits = REPLICA_READ_SCOPE_KEYS.map((key) => normalized[key] ? '1' : '0')
-    .join('');
-  return `read-v${REPLICA_READ_SCOPE_SCHEMA_VERSION}-${bits}`;
+  const mask = normalizedReplicaReadScopeMask(scope);
+  return `read-v${REPLICA_READ_SCOPE_SCHEMA_VERSION}-${
+    (64 | mask).toString(2).slice(1)
+  }`;
 }
 
 export function effectiveReplicaReadScope(
@@ -181,6 +167,30 @@ function cloneScope(scope: ReplicaReadScope): ReplicaReadScope {
     personalDataValues: scope.personalDataValues,
     editableContent: scope.editableContent,
   };
+}
+
+function normalizedReplicaReadScopeMask(input: unknown): number {
+  return readReplicaReadScopeMask(input) ?? 0;
+}
+
+function readReplicaReadScopeMask(input: unknown): number | undefined {
+  if (!isRecord(input)) return undefined;
+  const keys = Object.keys(input);
+  if (
+    keys.length !== REPLICA_READ_SCOPE_KEYS.length ||
+    keys.some((key) =>
+      !(REPLICA_READ_SCOPE_KEYS as readonly string[]).includes(key)
+    )
+  ) return undefined;
+  let mask = 0;
+  for (const key of REPLICA_READ_SCOPE_KEYS) {
+    if (typeof input[key] !== 'boolean') return undefined;
+    mask = (mask << 1) | (input[key] ? 1 : 0);
+  }
+  // Personal values are meaningful only with the ordinary form-value gate.
+  // Reject rather than silently widening formValues.
+  if (input.personalDataValues && !input.formValues) return undefined;
+  return mask;
 }
 
 function isRecord(value: unknown): value is Record<string, unknown> {

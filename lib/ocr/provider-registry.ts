@@ -48,10 +48,11 @@ export function effectiveCompiledProviderOrder(
   savedOrder: readonly ImageTextProviderId[],
   disabledProviderIds: readonly ImageTextProviderId[] = [],
 ): readonly ImageTextProviderId[] {
-  const available = new Set(compiledImageTextProviderIds);
-  const disabled = new Set(disabledProviderIds);
   return Object.freeze(
-    savedOrder.filter((id) => available.has(id) && !disabled.has(id)),
+    savedOrder.filter((id) =>
+      compiledImageTextProviderIds.includes(id) &&
+      !disabledProviderIds.includes(id)
+    ),
   );
 }
 
