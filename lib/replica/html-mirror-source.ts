@@ -52,6 +52,7 @@ import {
 import { hasSourceCredentialSecretAncestor } from './source-privacy-policy';
 import type { SelectableReplicaFidelityPolicy } from './fidelity-policy';
 import { StableSignatureTracker } from './stable-signature-tracker';
+import { sourceMutationMayChangeCurrentValue } from './source-mutation-filter';
 
 export class WeakNodeIdRegistry implements HtmlMirrorIdRegistry {
   readonly #ids = new WeakMap<Node, number>();
@@ -1624,39 +1625,6 @@ function sourceMutationOwnerElement(node: Node): Element | undefined {
   const shadowRoot = readOpenShadowRoot(node);
   if (shadowRoot) return shadowRoot.host;
   return node.parentElement ?? undefined;
-}
-
-function sourceMutationMayChangeCurrentValue(record: MutationRecord): boolean {
-  if (record.type === 'attributes') {
-    // oldValue is always string|null for the native observer configuration.
-    // Treat incomplete synthetic/polyfilled records conservatively.
-    if (record.oldValue !== null && typeof record.oldValue !== 'string') {
-      return true;
-    }
-    if (!(record.target instanceof Element) || !record.attributeName) return true;
-    try {
-      const current = record.attributeNamespace
-        ? record.target.getAttributeNS(
-            record.attributeNamespace,
-            record.attributeName,
-          )
-        : record.target.getAttribute(record.attributeName);
-      return current !== record.oldValue;
-    } catch {
-      return true;
-    }
-  }
-  if (record.type === 'characterData') {
-    if (record.oldValue !== null && typeof record.oldValue !== 'string') {
-      return true;
-    }
-    try {
-      return record.target.nodeValue !== record.oldValue;
-    } catch {
-      return true;
-    }
-  }
-  return true;
 }
 
 function adoptedStyleSignature(styles: readonly string[]): string {
