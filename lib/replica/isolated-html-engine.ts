@@ -269,6 +269,8 @@ export class IsolatedHtmlReplicaEngine
     pairKey: undefined,
   };
   #projections = new Map<number, ReplicaTextProjection>();
+  #extentRefreshQueued = false;
+  #pendingExtentState: HtmlMirrorDomState | undefined;
 
   constructor(private readonly options: IsolatedHtmlEngineOptions) {}
 
@@ -1058,9 +1060,18 @@ export class IsolatedHtmlReplicaEngine
 
   #refreshExtent(state: HtmlMirrorDomState): void {
     if (this.#committed !== state || state.released) return;
+    this.#pendingExtentState = state;
+    if (this.#extentRefreshQueued) return;
+    this.#extentRefreshQueued = true;
     queueMicrotask(() => {
-      if (this.#committed !== state || state.released) return;
-      this.options.presentationHost.refreshExtent(state.iframe, measureExtent(state.iframe));
+      this.#extentRefreshQueued = false;
+      const pending = this.#pendingExtentState;
+      this.#pendingExtentState = undefined;
+      if (!pending || this.#committed !== pending || pending.released) return;
+      this.options.presentationHost.refreshExtent(
+        pending.iframe,
+        measureExtent(pending.iframe),
+      );
       this.options.onLayoutChanged?.();
     });
   }

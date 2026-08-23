@@ -1300,6 +1300,35 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(stream.acknowledged).toContain(1);
   });
 
+  it('coalesces synchronous translation layout refreshes into one measurement', async () => {
+    const stream = new FakeHtmlStream(makeCheckpoint('source label', 0));
+    const host = new FakePresentationHost();
+    const engine = makeEngine(stream, host);
+    await engine.run(request);
+    await Promise.resolve();
+    host.refreshExtent.mockClear();
+
+    const snapshot = engine.snapshot()!;
+    engine.beginProjection({ translationEpoch: 1, pairKey: 'en\0ja' });
+    for (let index = 0; index < 20; index += 1) {
+      expect(engine.project({
+        document: snapshot.document,
+        replayLease: snapshot.replayLease,
+        nodeId: 4,
+        nodeType: 3,
+        sourceRevision: 1,
+        source: 'source label',
+        translationEpoch: 1,
+        pairKey: 'en\0ja',
+        translated: `translation ${index}`,
+      })).toBe(true);
+    }
+
+    expect(host.refreshExtent).not.toHaveBeenCalled();
+    await Promise.resolve();
+    expect(host.refreshExtent).toHaveBeenCalledOnce();
+  });
+
   it('retains translated projections across a same-document recovery checkpoint', async () => {
     const stream = new FakeHtmlStream(makeCheckpoint('hello', 0));
     const host = new FakePresentationHost();
