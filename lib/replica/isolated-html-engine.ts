@@ -203,6 +203,11 @@ interface IsolatedHtmlEngineOptions {
   readonly onLiveFailure?: (code: ReplicaDiagnosticCode) => void;
   readonly onInfo?: (info: IsolatedMirrorInfo) => void;
   readonly scheduleLayoutRefresh?: (callback: () => void) => void;
+  readonly setSemanticReconnectTimer?: (
+    callback: () => void,
+    delayMs: number,
+  ) => unknown;
+  readonly clearSemanticReconnectTimer?: (timer: unknown) => void;
   readonly iframeDeadlineMs?: number;
   readonly styleSettleDeadlineMs?: number;
   readonly initializeIframe?: (
@@ -240,6 +245,8 @@ type HtmlMirrorLiveDimensions = HtmlMirrorCheckpoint['payload'] & Readonly<{
 const HTML_MIRROR_RECOVERY_TIMEOUT_MS = 5_000;
 const MAX_BUFFERED_RECOVERY_PATCHES = 4;
 const MAX_RETAINED_REPLICA_BYTES = MAX_HTML_MIRROR_BYTES * 4;
+const SEMANTIC_RECONNECT_BASE_DELAY_MS = 250;
+const SEMANTIC_RECONNECT_MAX_DELAY_MS = 8_000;
 
 const NAMESPACE_URIS = Object.freeze({
   html: 'http://www.w3.org/1999/xhtml',
@@ -256,6 +263,8 @@ export class IsolatedHtmlReplicaEngine
   #stream: HtmlMirrorStreamLease | undefined;
   #semanticStream: SemanticSourceStreamLease | undefined;
   #semanticReceiver: SemanticSourceReceiver | undefined;
+  #semanticReconnectTimer: unknown;
+  #semanticReconnectAttempt = 0;
   #stagingLease: VisibleReplayCandidateLease | undefined;
   #candidate: HtmlMirrorDomState | undefined;
   #committed: HtmlMirrorDomState | undefined;
@@ -283,6 +292,7 @@ export class IsolatedHtmlReplicaEngine
   ): Promise<ReplicaRunResult> {
     if (this.#disposed) return this.#failed('stream_failed');
     const runVersion = ++this.#runVersion;
+    this.#cancelSemanticReconnect();
     this.#purgeSemantic(true);
     this.#releaseStream();
     this.#releaseCandidate();
@@ -489,6 +499,7 @@ export class IsolatedHtmlReplicaEngine
 
   releasePresentation(showFallbackLabel = true): void {
     this.#runVersion += 1;
+    this.#cancelSemanticReconnect();
     this.#purgeSemantic(false);
     this.#releaseStream();
     this.#releaseCandidate();
@@ -659,6 +670,7 @@ export class IsolatedHtmlReplicaEngine
     const previousLanguage = previous && !previous.released
       ? readDocumentLanguage(previous)
       : undefined;
+    this.#cancelSemanticReconnect();
     const semanticRemovals = this.#purgeSemantic(false);
     const changes = Object.freeze([
       ...checkpointChanges(state, previous),
@@ -1028,6 +1040,11 @@ export class IsolatedHtmlReplicaEngine
       applyProofs: (proofs) => presenter.apply(proofs),
     });
     this.#semanticReceiver = receiver;
+    const reconnect = (): void => {
+      if (this.#semanticReceiver !== receiver) return;
+      this.#purgeSemantic(true);
+      this.#scheduleSemanticReconnect(state, request, runVersion, signal);
+    };
     void open(request, 'isolated-html', scope, signal).then((lease) => {
       if (
         !this.#isCurrent(runVersion, request, signal) ||
@@ -1045,6 +1062,7 @@ export class IsolatedHtmlReplicaEngine
           ) return false;
           const changes = receiver.applyBatch(batch);
           if (!changes) return false;
+          this.#semanticReconnectAttempt = 0;
           for (const change of changes) {
             this.#projections.delete(sourceChangeNodeId(change));
           }
@@ -1053,13 +1071,49 @@ export class IsolatedHtmlReplicaEngine
           this.#refreshExtent(state);
           return true;
         },
-        onFailure: () => {
-          if (this.#semanticReceiver === receiver) this.#purgeSemantic(true);
-        },
+        onFailure: reconnect,
       });
-    }).catch(() => {
-      if (this.#semanticReceiver === receiver) this.#purgeSemantic(true);
-    });
+    }).catch(reconnect);
+  }
+
+  #scheduleSemanticReconnect(
+    state: HtmlMirrorDomState,
+    request: ReplicaCaptureRequest,
+    runVersion: number,
+    signal?: AbortSignal,
+  ): void {
+    if (
+      this.#semanticReconnectTimer !== undefined ||
+      !this.options.openSemanticStream ||
+      this.#committed !== state ||
+      !this.#isCurrent(runVersion, request, signal)
+    ) return;
+    this.#semanticReconnectAttempt += 1;
+    const delay = Math.min(
+      SEMANTIC_RECONNECT_MAX_DELAY_MS,
+      SEMANTIC_RECONNECT_BASE_DELAY_MS *
+        2 ** Math.min(5, this.#semanticReconnectAttempt - 1),
+    );
+    const setTimer = this.options.setSemanticReconnectTimer ??
+      ((callback: () => void, delayMs: number) => setTimeout(callback, delayMs));
+    this.#semanticReconnectTimer = setTimer(() => {
+      this.#semanticReconnectTimer = undefined;
+      if (
+        this.#committed !== state ||
+        !this.#isCurrent(runVersion, request, signal)
+      ) return;
+      this.#openSemanticSource(state, request, runVersion, signal);
+    }, delay);
+  }
+
+  #cancelSemanticReconnect(): void {
+    if (this.#semanticReconnectTimer !== undefined) {
+      const clearTimer = this.options.clearSemanticReconnectTimer ??
+        ((timer: unknown) => clearTimeout(timer as ReturnType<typeof setTimeout>));
+      clearTimer(this.#semanticReconnectTimer);
+    }
+    this.#semanticReconnectTimer = undefined;
+    this.#semanticReconnectAttempt = 0;
   }
 
   #purgeSemantic(notify: boolean): readonly ReplicaSourceTextChange[] {
