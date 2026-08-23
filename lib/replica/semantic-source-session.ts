@@ -177,6 +177,7 @@ export class SemanticSourceSession {
   #dirty = false;
   #scheduled = false;
   #controlPollTimer: unknown;
+  #selectActivationTimer: unknown;
   #controlPollCandidates: Element[] = [];
   #controlPollFingerprints = new WeakMap<Element, string>();
   #controlPollCursor = 0;
@@ -203,6 +204,7 @@ export class SemanticSourceSession {
     this.#observer?.disconnect();
     this.#observer = undefined;
     this.#cancelControlPoll();
+    this.#cancelSelectActivationRefresh();
     this.#controlPollCandidates = [];
     this.#controlPollFingerprints = new WeakMap<Element, string>();
     this.#controlPollCursor = 0;
@@ -305,6 +307,7 @@ export class SemanticSourceSession {
         : safelyRead(() => candidate.closest('select'));
       if (select?.ownerDocument !== this.environment.document) continue;
       this.refresh();
+      this.#scheduleSelectActivationRefresh();
       return;
     }
   };
@@ -391,6 +394,26 @@ export class SemanticSourceSession {
       timer as ReturnType<typeof setTimeout>,
     )))(this.#controlPollTimer);
     this.#controlPollTimer = undefined;
+  }
+
+  #scheduleSelectActivationRefresh(): void {
+    if (this.#disposed || this.#selectActivationTimer !== undefined) return;
+    const setTimer = this.environment.setTimer ?? ((callback, delayMs) =>
+      setTimeout(callback, delayMs));
+    this.#selectActivationTimer = setTimer(() => {
+      this.#selectActivationTimer = undefined;
+      // Native picker state can change in the browser's default action, after
+      // the activation listener and its immediate scan have already run.
+      this.refresh();
+    }, 0);
+  }
+
+  #cancelSelectActivationRefresh(): void {
+    if (this.#selectActivationTimer === undefined) return;
+    (this.environment.clearTimer ?? ((timer) => clearTimeout(
+      timer as ReturnType<typeof setTimeout>,
+    )))(this.#selectActivationTimer);
+    this.#selectActivationTimer = undefined;
   }
 
   #pollSilentControlState(): void {

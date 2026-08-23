@@ -730,6 +730,55 @@ describe('semantic source session', () => {
     session.dispose();
   });
 
+  it('rechecks native picker state after the browser activation action', () => {
+    const { document, window } = parseHTML(
+      '<html><body><select><option selected>One</option></select></body></html>',
+    );
+    const select = document.querySelector<HTMLSelectElement>('select')!;
+    const option = select.options.item(0)!;
+    const originalMatches = select.matches.bind(select);
+    let pickerOpen = false;
+    Object.defineProperties(select, {
+      selectedIndex: { configurable: true, get: () => 0 },
+      selectedOptions: { configurable: true, get: () => [option] },
+      multiple: { configurable: true, get: () => false },
+    });
+    Object.defineProperty(option, 'selected', {
+      configurable: true,
+      get: () => true,
+    });
+    select.matches = ((selector: string) => selector === ':open'
+      ? pickerOpen
+      : originalMatches(selector)) as typeof select.matches;
+    const timers: Array<() => void> = [];
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(
+      port, document, window, 'isolated-html', undefined, undefined, timers,
+    );
+    port.emit(createSemanticSourceStart(
+      'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+    ));
+    const initial = port.messages[0]!;
+    port.emit(createSemanticSourceAck(
+      identity, initial.policyFingerprint, initial.sequence,
+    ));
+
+    select.dispatchEvent(new window.Event('click', { bubbles: true }));
+    expect(port.messages).toHaveLength(1);
+    pickerOpen = true;
+    const postActivation = timers.pop();
+    expect(postActivation).toBeTypeOf('function');
+    postActivation?.();
+
+    expect(port.messages[1]!.proofs).toContainEqual(expect.objectContaining({
+      kind: 'select-state',
+      pickerOpen: true,
+    }));
+    session.dispose();
+  });
+
   it('tracks a shadow-root select through its composed activation path', () => {
     const { document, window } = parseHTML(
       '<html><body><div id="host"></div></body></html>',
