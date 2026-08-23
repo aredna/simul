@@ -17,9 +17,8 @@ export class OffscreenOcrProviderRouter implements OffscreenOcrProviderRunner {
   constructor(
     private readonly factories: readonly OffscreenOcrProviderRunnerFactory[],
   ) {
-    this.#factories = new Map(
-      factories.map((factory) => [factory.id, factory] as const),
-    );
+    this.#factories = new Map();
+    for (const factory of factories) this.#factories.set(factory.id, factory);
     if (this.#factories.size !== factories.length) {
       throw new Error('The offscreen OCR runtime registry contains duplicates.');
     }

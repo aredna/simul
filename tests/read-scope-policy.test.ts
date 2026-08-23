@@ -30,6 +30,19 @@ describe('replica read scope policy', () => {
       ...replicaReadScopeForProfile('standard'),
       surprise: false,
     })).toBeUndefined();
+
+    const invalid = {
+      ...replicaReadScopeForProfile('full-visible'),
+      surprise: false,
+    } as unknown as ReturnType<typeof replicaReadScopeForProfile>;
+    expect(deriveReplicaReadScopeProfile(invalid)).toBe('page-only');
+    expect(replicaReadScopeFingerprint(invalid)).toBe(
+      replicaReadScopeFingerprint(PAGE_ONLY_REPLICA_READ_SCOPE),
+    );
+    expect(replicaReadScopeNarrows(
+      invalid,
+      PAGE_ONLY_REPLICA_READ_SCOPE,
+    )).toBe(false);
   });
 
   it('derives presets and custom state from capabilities', () => {
@@ -46,6 +59,26 @@ describe('replica read scope policy', () => {
       ...replicaReadScopeForProfile('standard'),
       editableContent: true,
     })).toBe('custom');
+  });
+
+  it('encodes every valid capability combination in canonical key order', () => {
+    for (let mask = 0; mask < 64; mask += 1) {
+      const scope = {
+        controlSemantics: Boolean(mask & 32),
+        controlImages: Boolean(mask & 16),
+        disclosureContent: Boolean(mask & 8),
+        formValues: Boolean(mask & 4),
+        personalDataValues: Boolean(mask & 2),
+        editableContent: Boolean(mask & 1),
+      };
+      const invalid = scope.personalDataValues && !scope.formValues;
+      expect(readExactReplicaReadScope(scope) === undefined).toBe(invalid);
+      expect(replicaReadScopeFingerprint(scope)).toBe(
+        invalid
+          ? 'read-v1-000000'
+          : `read-v1-${(64 | mask).toString(2).slice(1)}`,
+      );
+    }
   });
 
   it('enforces setup and computes safe narrowing intersections', () => {
