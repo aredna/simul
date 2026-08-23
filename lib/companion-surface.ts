@@ -83,6 +83,18 @@ export function shouldFollowActivatedTab(
   );
 }
 
+/**
+ * Once active-tab following is enabled, updates emitted by the tab being left
+ * are stale even if the asynchronous activation lookup has not committed yet.
+ */
+export function shouldIgnoreInactiveFollowedTabUpdate(
+  isDetachedWindow: boolean,
+  followMode: CompanionPreferences['popoutTabMode'],
+  tabIsActive: boolean,
+): boolean {
+  return isDetachedWindow && followMode === 'active' && !tabIsActive;
+}
+
 export function sameCompanionSourcePage(
   left: CapturedPageIdentity | undefined,
   right: CapturedPageIdentity,

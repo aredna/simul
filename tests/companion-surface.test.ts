@@ -7,6 +7,7 @@ import {
   resolveCompanionLaunchSurface,
   sameCompanionSourcePage,
   shouldFollowActivatedTab,
+  shouldIgnoreInactiveFollowedTabUpdate,
 } from '../lib/companion-surface';
 
 describe('companion surface launch decisions', () => {
@@ -67,6 +68,21 @@ describe('companion surface launch decisions', () => {
     expect(shouldFollowActivatedTab(true, 'locked', 9, 4)).toBe(false);
     expect(shouldFollowActivatedTab(false, 'active', 9, 4)).toBe(false);
     expect(shouldFollowActivatedTab(true, 'active', 9, 9)).toBe(false);
+  });
+
+  it('ignores stale updates from the tab being left only in active-follow mode', () => {
+    expect(shouldIgnoreInactiveFollowedTabUpdate(true, 'active', false)).toBe(
+      true,
+    );
+    expect(shouldIgnoreInactiveFollowedTabUpdate(true, 'active', true)).toBe(
+      false,
+    );
+    expect(shouldIgnoreInactiveFollowedTabUpdate(true, 'locked', false)).toBe(
+      false,
+    );
+    expect(shouldIgnoreInactiveFollowedTabUpdate(false, 'active', false)).toBe(
+      false,
+    );
   });
 
   it('treats a moved tab as a new exact source identity', () => {
