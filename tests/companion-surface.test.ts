@@ -8,6 +8,7 @@ import {
   sameCompanionSourcePage,
   shouldFollowActivatedTab,
   shouldIgnoreInactiveFollowedTabUpdate,
+  shouldRecoverRemovedActiveSource,
 } from '../lib/companion-surface';
 
 describe('companion surface launch decisions', () => {
@@ -83,6 +84,37 @@ describe('companion surface launch decisions', () => {
     expect(shouldIgnoreInactiveFollowedTabUpdate(false, 'active', false)).toBe(
       false,
     );
+  });
+
+  it('reacquires a neighboring tab after the active source closes', () => {
+    expect(shouldRecoverRemovedActiveSource(
+      true,
+      'active',
+      9,
+      4,
+      false,
+    )).toBe(true);
+    expect(shouldRecoverRemovedActiveSource(
+      true,
+      'locked',
+      9,
+      4,
+      false,
+    )).toBe(false);
+    expect(shouldRecoverRemovedActiveSource(
+      true,
+      'active',
+      9,
+      4,
+      true,
+    )).toBe(false);
+    expect(shouldRecoverRemovedActiveSource(
+      true,
+      'active',
+      9,
+      9,
+      false,
+    )).toBe(false);
   });
 
   it('treats a moved tab as a new exact source identity', () => {
