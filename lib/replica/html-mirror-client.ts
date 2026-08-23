@@ -230,10 +230,14 @@ class ChromeHtmlMirrorStreamLease implements HtmlMirrorStreamLease {
       return;
     }
     if (this.#observer) {
-      if (message.kind === 'simul:html-mirror-v1:checkpoint') {
-        this.#observer.onCheckpoint(message);
-      } else {
-        this.#observer.onPatch(message);
+      try {
+        if (message.kind === 'simul:html-mirror-v1:checkpoint') {
+          this.#observer.onCheckpoint(message);
+        } else {
+          this.#observer.onPatch(message);
+        }
+      } catch {
+        this.#fail(new Error('HTML mirror observer failed.'));
       }
     } else {
       if (this.#queue.length >= MAX_HTML_MIRROR_PREOBSERVER_MESSAGES) {
@@ -280,7 +284,11 @@ class ChromeHtmlMirrorStreamLease implements HtmlMirrorStreamLease {
     terminal = code === 'stream_failed',
   ): void {
     if (this.#observer) {
-      this.#observer.onFailure(code, representability);
+      try {
+        this.#observer.onFailure(code, representability);
+      } catch {
+        terminal = true;
+      }
     } else {
       if (this.#queue.length >= MAX_HTML_MIRROR_PREOBSERVER_MESSAGES) {
         this.#queue.splice(0);
