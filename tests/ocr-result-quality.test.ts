@@ -197,6 +197,17 @@ describe('OCR result quality', () => {
     expect(filtered.result).toMatchObject({ transcript: '', regions: [] });
     expect(filtered.quality.acceptedRegions).toBe(0);
   });
+
+  it('bounds accepted transcript construction at the protocol limit', () => {
+    const filtered = filterImageTextResult(result([
+      region('a'.repeat(999_999), 0.9),
+      region('second region', 0.9),
+    ]));
+
+    expect(filtered.result.transcript).toHaveLength(1_000_000);
+    expect(filtered.result.transcript.endsWith('\n')).toBe(true);
+    expect(filtered.result.regions).toHaveLength(2);
+  });
 });
 
 function result(
