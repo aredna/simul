@@ -5545,6 +5545,8 @@ function updateControls(): void {
   syncToolbarPreferenceControls();
   syncQuickTranslationPanel();
   const busy = captureInFlight || translationInFlight || permissionInFlight || composerInFlight;
+  snapshotContainer.setAttribute('aria-busy', String(captureInFlight));
+  replicaPreviewContainer.setAttribute('aria-busy', String(captureInFlight));
   sourceSelect.disabled = busy;
   targetSelect.disabled = busy;
   swapButton.disabled = busy || !resolvedSourceLanguage;
@@ -5559,6 +5561,17 @@ function updateControls(): void {
   zoomOutButton.disabled = busy;
   refreshButton.disabled = captureInFlight;
   compactRefreshButton.disabled = captureInFlight;
+  setUiText(
+    refreshButton,
+    captureInFlight ? 'Rebuilding mirror…' : 'Rebuild mirror',
+  );
+  compactRefreshButton.setAttribute(
+    'aria-label',
+    captureInFlight ? 'Rebuilding mirror' : 'Rebuild mirror',
+  );
+  compactRefreshButton.title = captureInFlight
+    ? 'Rebuilding mirror…'
+    : 'Rebuild mirror';
   toolbarAutoDetectButton.disabled = busy;
   toolbarSizeToggleButton.disabled = busy;
   toolbarOcrToggleButton.disabled = busy ||
@@ -5586,7 +5599,11 @@ function updateControls(): void {
     translationComplete;
   setUiText(
     translateButton,
-    translationComplete ? 'Translation current' : 'Translate page',
+    translationInFlight
+      ? 'Translating…'
+      : translationComplete
+        ? 'Translation current'
+        : 'Translate page',
   );
   renderToolbarAttention();
   syncToolbarProgress();
