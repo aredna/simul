@@ -90,6 +90,27 @@ describe('Chrome HTML mirror client', () => {
     expect(port.disconnect).toHaveBeenCalledOnce();
   });
 
+  it('fails safely when a queued message cannot be applied on attachment', async () => {
+    const port = new FakePort();
+    installBrowser(port);
+    const lease = await openChromeHtmlMirrorStream(request);
+    port.emitMessage(checkpoint());
+    await lease.initialCheckpoint;
+    port.emitMessage(checkpoint());
+    const observer = fakeObserver();
+    observer.onCheckpoint.mockImplementation(() => {
+      throw new Error('queued replica apply failed');
+    });
+
+    expect(() => lease.setObserver(observer)).not.toThrow();
+
+    expect(observer.onFailure).toHaveBeenCalledWith(
+      'stream_failed',
+      expect.objectContaining({ capacityOmissionCount: 0 }),
+    );
+    expect(port.disconnect).toHaveBeenCalledOnce();
+  });
+
   it('queues a recoverable early failure instead of silently dropping it', async () => {
     const port = new FakePort();
     installBrowser(port);
