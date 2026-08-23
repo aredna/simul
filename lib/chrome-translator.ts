@@ -230,7 +230,9 @@ function toBrowserPair(pair: TranslationPair): {
 }
 
 function countCodePoints(value: string): number {
-  return [...value].length;
+  let count = 0;
+  for (const _point of value) count += 1;
+  return count;
 }
 
 function normalizeAvailability(value: unknown): TranslationAvailability {

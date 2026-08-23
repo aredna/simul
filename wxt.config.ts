@@ -157,11 +157,18 @@ export default defineConfig({
   },
   filterEntrypoints: [...selectedEntrypoints],
   vite: () => ({
+    build: {
+      target: 'chrome138',
+      cssTarget: 'chrome138',
+    },
     define: {
       __SIMUL_OCR_PADDLE_COMPILED__: JSON.stringify(paddleEnabled),
       __SIMUL_OCR_TESSERACT_WASM_DIRECT_COMPILED__: JSON.stringify(
         tesseractWasmDirectEnabled,
       ),
+    },
+    esbuild: {
+      legalComments: 'none',
     },
     plugins: [
       createOcrBuildProfilePlugin(process.env),

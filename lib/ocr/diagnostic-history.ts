@@ -11,7 +11,7 @@ export class ImageTranslationDiagnosticHistory {
   readonly #entries: string[] = [];
   #sequence = 0;
 
-  append(diagnostic: ImageTranslationDiagnostic): readonly string[] {
+  append(diagnostic: ImageTranslationDiagnostic): void {
     this.#sequence += 1;
     this.#entries.push(
       `${this.#sequence}. ${formatImageTranslationDiagnostic(diagnostic)}`,
@@ -19,7 +19,6 @@ export class ImageTranslationDiagnosticHistory {
     while (this.#entries.length > MAX_IMAGE_TRANSLATION_DIAGNOSTICS) {
       this.#entries.shift();
     }
-    return this.entries;
   }
 
   clear(): void {
