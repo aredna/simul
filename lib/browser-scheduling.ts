@@ -47,3 +47,16 @@ export function receiverSafeAnimationFrameCanceller(
   if (implementation) return (handle) => implementation(handle);
   return (handle) => globalThis.cancelAnimationFrame(handle);
 }
+
+/**
+ * Starts optional readiness work after the current synchronous startup turn.
+ * Every result is settled internally so a failed enhancement cannot delay or
+ * reject the primary UI path.
+ */
+export function startBestEffortBackgroundTasks(
+  tasks: readonly (() => Promise<unknown>)[],
+): void {
+  void Promise.allSettled(
+    tasks.map((task) => Promise.resolve().then(task)),
+  );
+}

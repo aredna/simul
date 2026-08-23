@@ -5,6 +5,7 @@ import {
   receiverSafeAnimationFrameScheduler,
   receiverSafeTimeoutCanceller,
   receiverSafeTimeoutScheduler,
+  startBestEffortBackgroundTasks,
   type AnimationFrameCanceller,
   type AnimationFrameScheduler,
   type TimeoutCanceller,
@@ -94,5 +95,25 @@ describe('receiver-safe browser scheduling', () => {
     Reflect.apply(receiverSafeAnimationFrameCanceller(cancelFrame), {}, [37]);
 
     expect(receivers).toEqual([undefined, undefined, undefined, undefined]);
+  });
+});
+
+describe('best-effort background startup work', () => {
+  it('yields the primary turn and settles independent failures', async () => {
+    const order: string[] = [];
+    startBestEffortBackgroundTasks([
+      async () => {
+        order.push('first');
+        throw new Error('optional failure');
+      },
+      async () => {
+        order.push('second');
+      },
+    ]);
+    order.push('primary');
+
+    expect(order).toEqual(['primary']);
+    await Promise.resolve();
+    expect(order).toEqual(['primary', 'first', 'second']);
   });
 });
