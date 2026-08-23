@@ -88,11 +88,13 @@ export function mergeLiveUpdateBatches<NodeId>(
       nodeIds: new Set(selected.nodeIds),
     };
   }
+  const nodeIds = new Set(current.nodeIds);
+  for (const nodeId of interrupted.nodeIds) nodeIds.add(nodeId);
   return {
     generation: current.generation,
     firstSequence: Math.min(current.firstSequence, interrupted.firstSequence),
     sequence: Math.max(current.sequence, interrupted.sequence),
-    nodeIds: new Set([...current.nodeIds, ...interrupted.nodeIds]),
+    nodeIds,
   };
 }
 
