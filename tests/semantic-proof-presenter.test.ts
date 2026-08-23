@@ -231,4 +231,45 @@ describe('SemanticProofPresenter', () => {
     expect(control.getAttribute('aria-disabled')).toBe('true');
     expect(aria.getAttribute('aria-checked')).toBe('true');
   });
+
+  it('preserves same-value mirror updates to disclosure relationships', () => {
+    const { document } = parseHTML(`<html><body>
+      <button id="trigger">Menu</button><section id="original">Items</section>
+      <iframe></iframe>
+    </body></html>`);
+    const trigger = document.querySelector<HTMLElement>('#trigger')!;
+    const panel = document.querySelector<HTMLElement>('section')!;
+    const frame = document.querySelector('iframe') as unknown as HTMLIFrameElement;
+    const relationId = 'semantic-disclosure-relation-v1:1:2';
+    const proofs: readonly ResolvedSemanticSourceProof[] = [{
+      kind: 'disclosure-state',
+      proof: {
+        kind: 'disclosure-state', bridge: 'isolated-html', relationId,
+        revision: 1, gate: 'disclosureContent', triggerNodeId: 1,
+        panelNodeId: 2, popupRole: 'menu', expanded: true,
+        classifierVersion: 1,
+      },
+      trigger,
+      panel,
+    }];
+    const presenter = new SemanticProofPresenter({
+      document: document as unknown as Document,
+      iframe: frame,
+    });
+    expect(presenter.apply(proofs)).toBe(true);
+
+    trigger.removeAttribute('data-simul-source-disclosure-state');
+    panel.removeAttribute('data-simul-source-disclosure-state');
+    trigger.setAttribute('aria-controls', relationId);
+    trigger.setAttribute('aria-expanded', 'true');
+    trigger.setAttribute('aria-haspopup', 'menu');
+    panel.setAttribute('id', relationId);
+
+    presenter.clear();
+
+    expect(trigger.getAttribute('aria-controls')).toBe(relationId);
+    expect(trigger.getAttribute('aria-expanded')).toBe('true');
+    expect(trigger.getAttribute('aria-haspopup')).toBe('menu');
+    expect(panel.getAttribute('id')).toBe(relationId);
+  });
 });
