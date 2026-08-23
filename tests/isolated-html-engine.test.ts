@@ -565,6 +565,7 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(select.getAttribute('data-simul-source-select-presentation')).toBe('v1');
     expect(reconnectTimers).toHaveLength(0);
     expect(addedTriggerListener).not.toHaveBeenCalled();
+    host.refreshDimensions.mockClear();
     stream.observer?.onPatch(createHtmlMirrorPatch(
       createReplicaIdentity({ ...identityParts, sequence: 2 }),
       2,
@@ -580,6 +581,7 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(select.getAttribute('data-simul-source-select-presentation')).toBe('v1');
     expect(reconnectTimers).toHaveLength(0);
     expect(addedTriggerListener).not.toHaveBeenCalled();
+    expect(host.refreshDimensions).not.toHaveBeenCalled();
     stream.observer?.onPatch(createHtmlMirrorPatch(
       createReplicaIdentity({ ...identityParts, sequence: 3 }),
       3,
