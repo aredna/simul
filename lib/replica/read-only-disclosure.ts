@@ -53,16 +53,46 @@ const PANEL_ATTRIBUTES = Object.freeze([
   'hidden',
   'popover',
 ]);
-const TRIGGER_PREVIEW_EVENTS = new Set(['click', 'keydown', 'pointerdown']);
+const TRIGGER_PREVIEW_EVENTS = new Set([
+  'click', 'focusin', 'focusout', 'keydown', 'pointerdown', 'pointerenter',
+  'pointerleave',
+]);
 const PANEL_PREVIEW_EVENTS = new Set([
   'auxclick',
   'click',
   'contextmenu',
   'dblclick',
+  'focusin',
+  'focusout',
   'keydown',
   'pointerdown',
+  'pointerenter',
+  'pointerleave',
   'scroll',
   'wheel',
+]);
+const DISCLOSURE_LEAVE_GRACE_MS = 100;
+const MAX_DISCLOSURE_FOCUS_CANDIDATES = 256;
+const DISCLOSURE_FOCUS_SELECTOR = [
+  'a[href]',
+  'area[href]',
+  'button',
+  'input',
+  'select',
+  'textarea',
+  '[tabindex]',
+].join(',');
+const KEYBOARD_ACTIVATION_ROLES = new Set([
+  'button',
+  'checkbox',
+  'link',
+  'menuitem',
+  'menuitemcheckbox',
+  'menuitemradio',
+  'option',
+  'radio',
+  'switch',
+  'tab',
 ]);
 const OWNED_DISCLOSURE_TRIGGERS = new WeakSet<object>();
 const OWNED_DISCLOSURE_PANELS = new WeakSet<object>();
@@ -231,16 +261,30 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
   readonly originalNextSibling: ChildNode | null;
   readonly manageTriggerExpanded: boolean;
   readonly originalTriggerExpanded: string | null;
+  readonly originalTriggerStyle: string | null;
   readonly originalPanelAttributes: ReadonlyMap<string, string | null>;
   readonly originalPanelStyle: string | null;
 
   #disposed = false;
   #open = false;
   #wasConnected = false;
+  #triggerHovered = false;
+  #openedFromTriggerHover = false;
+  #panelHovered = false;
+  #focusWithin = false;
+  #suppressFocusOpen = false;
+  #deferredCloseTimer: number | undefined;
   #resizeObserver?: ResizeObserver;
 
   readonly #onTriggerClick = (event: Event): void => {
     blockReplicaActivation(event);
+    if (this.#open && this.#openedFromTriggerHover) {
+      // Pointer entry precedes click in the ordinary mouse sequence. Treat
+      // that first click as adopting the hover preview instead of immediately
+      // toggling it closed again.
+      this.#openedFromTriggerHover = false;
+      return;
+    }
     if (this.#open) this.close();
     else this.open();
   };
@@ -249,15 +293,79 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
     blockReplicaActivation(event);
   };
 
+  readonly #onTriggerPointerEnter = (): void => {
+    this.#triggerHovered = true;
+    this.#cancelDeferredClose();
+    const wasOpen = this.#open;
+    this.open();
+    this.#openedFromTriggerHover = !wasOpen && this.#open;
+  };
+
+  readonly #onTriggerPointerLeave = (): void => {
+    this.#triggerHovered = false;
+    this.#scheduleDeferredClose();
+  };
+
+  readonly #onPanelPointerEnter = (): void => {
+    this.#panelHovered = true;
+    this.#cancelDeferredClose();
+  };
+
+  readonly #onPanelPointerLeave = (): void => {
+    this.#panelHovered = false;
+    this.#scheduleDeferredClose();
+  };
+
+  readonly #onFocusIn = (): void => {
+    this.#focusWithin = true;
+    this.#cancelDeferredClose();
+    if (!this.#suppressFocusOpen) this.open();
+  };
+
+  readonly #onFocusOut = (event: FocusEvent): void => {
+    if (this.#containsInteractiveNode(event.relatedTarget)) {
+      this.#focusWithin = true;
+      this.#cancelDeferredClose();
+      return;
+    }
+    this.#focusWithin = false;
+    this.#scheduleDeferredClose();
+  };
+
   readonly #onTriggerKeyDown = (event: KeyboardEvent): void => {
     if (![' ', 'Enter', 'ArrowDown', 'Escape'].includes(event.key)) return;
     blockReplicaActivation(event);
     if (event.key === 'Escape') this.close();
-    else this.open();
+    else {
+      this.open();
+      if (event.key === 'ArrowDown') this.#focusFirstPanelItem();
+    }
   };
 
   readonly #onPanelActivation = (event: Event): void => {
     blockReplicaActivation(event);
+  };
+
+  readonly #onPanelKeyDown = (event: KeyboardEvent): void => {
+    if (event.key === 'Escape') {
+      blockReplicaActivation(event);
+      this.#suppressFocusOpen = true;
+      try {
+        this.close();
+        this.trigger?.focus({ preventScroll: true });
+      } catch {
+        // Focus restoration is optional; the disclosure is already closed.
+      } finally {
+        this.#suppressFocusOpen = false;
+      }
+      return;
+    }
+    if (
+      event.key === 'Enter' ||
+      (event.key === ' ' && keyboardTargetCanActivate(event.target))
+    ) {
+      blockReplicaActivation(event);
+    }
   };
 
   constructor(options: ReadOnlyReplicaDisclosureOptions) {
@@ -270,6 +378,7 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
     this.originalTriggerExpanded = this.manageTriggerExpanded
       ? options.trigger?.getAttribute('aria-expanded') ?? null
       : null;
+    this.originalTriggerStyle = options.trigger?.getAttribute('style') ?? null;
     this.originalParent = options.panel.parentNode;
     this.originalNextSibling = options.panel.nextSibling;
     this.originalPanelAttributes = snapshotAttributes(
@@ -290,8 +399,12 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
     this.panel.addEventListener('click', this.#onPanelActivation, true);
     this.panel.addEventListener('contextmenu', this.#onPanelActivation, true);
     this.panel.addEventListener('dblclick', this.#onPanelActivation, true);
-    this.panel.addEventListener('keydown', this.#onPanelActivation, true);
+    this.panel.addEventListener('keydown', this.#onPanelKeyDown, true);
     this.panel.addEventListener('pointerdown', this.#onPanelActivation, true);
+    this.panel.addEventListener('pointerenter', this.#onPanelPointerEnter, true);
+    this.panel.addEventListener('pointerleave', this.#onPanelPointerLeave, true);
+    this.panel.addEventListener('focusin', this.#onFocusIn, true);
+    this.panel.addEventListener('focusout', this.#onFocusOut, true);
 
     if (this.presentation === 'list') {
       const rows = clamp(Math.trunc(options.visibleRows ?? 8), 2, 20);
@@ -310,9 +423,14 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
     trigger.setAttribute('data-simul-replica-disclosure-trigger', DISCLOSURE_MARKER);
     OWNED_DISCLOSURE_TRIGGERS.add(trigger);
     if (this.manageTriggerExpanded) trigger.setAttribute('aria-expanded', 'false');
+    setImportant(trigger, 'pointer-events', 'auto');
     trigger.addEventListener('click', this.#onTriggerClick, true);
     trigger.addEventListener('keydown', this.#onTriggerKeyDown, true);
     trigger.addEventListener('pointerdown', this.#onTriggerPointerDown, true);
+    trigger.addEventListener('pointerenter', this.#onTriggerPointerEnter, true);
+    trigger.addEventListener('pointerleave', this.#onTriggerPointerLeave, true);
+    trigger.addEventListener('focusin', this.#onFocusIn, true);
+    trigger.addEventListener('focusout', this.#onFocusOut, true);
     this.panel.setAttribute('hidden', '');
     this.panel.setAttribute('popover', 'manual');
     setImportant(this.panel, 'display', 'none');
@@ -341,6 +459,7 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
   }
 
   open(): void {
+    this.#cancelDeferredClose();
     if (
       this.#disposed || this.presentation !== 'popup' || this.#open ||
       !this.#identityIsConnected()
@@ -366,10 +485,13 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
   }
 
   close(): void {
+    this.#cancelDeferredClose();
     if (!this.#open) return;
     this.#open = false;
+    this.#openedFromTriggerHover = false;
     this.#resizeObserver?.disconnect();
     this.#resizeObserver = undefined;
+    this.#cancelDeferredClose();
     if (this.manageTriggerExpanded) {
       this.trigger?.setAttribute('aria-expanded', 'false');
     }
@@ -413,12 +535,28 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
       this.#onTriggerPointerDown,
       true,
     );
+    this.trigger?.removeEventListener(
+      'pointerenter',
+      this.#onTriggerPointerEnter,
+      true,
+    );
+    this.trigger?.removeEventListener(
+      'pointerleave',
+      this.#onTriggerPointerLeave,
+      true,
+    );
+    this.trigger?.removeEventListener('focusin', this.#onFocusIn, true);
+    this.trigger?.removeEventListener('focusout', this.#onFocusOut, true);
     this.panel.removeEventListener('auxclick', this.#onPanelActivation, true);
     this.panel.removeEventListener('click', this.#onPanelActivation, true);
     this.panel.removeEventListener('contextmenu', this.#onPanelActivation, true);
     this.panel.removeEventListener('dblclick', this.#onPanelActivation, true);
-    this.panel.removeEventListener('keydown', this.#onPanelActivation, true);
+    this.panel.removeEventListener('keydown', this.#onPanelKeyDown, true);
     this.panel.removeEventListener('pointerdown', this.#onPanelActivation, true);
+    this.panel.removeEventListener('pointerenter', this.#onPanelPointerEnter, true);
+    this.panel.removeEventListener('pointerleave', this.#onPanelPointerLeave, true);
+    this.panel.removeEventListener('focusin', this.#onFocusIn, true);
+    this.panel.removeEventListener('focusout', this.#onFocusOut, true);
     this.anchor.removeAttribute('data-simul-replica-disclosure-anchor');
     this.anchor.removeAttribute('data-simul-replica-disclosure-open');
     this.trigger?.removeAttribute('data-simul-replica-disclosure-trigger');
@@ -431,9 +569,48 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
         this.originalTriggerExpanded,
       );
     }
+    if (this.trigger) restoreAttribute(this.trigger, 'style', this.originalTriggerStyle);
     restoreAttributes(this.panel, this.originalPanelAttributes);
     restoreAttribute(this.panel, 'style', this.originalPanelStyle);
     unregisterController(this);
+  }
+
+  #observeAnchorSize(): void {
+    const ResizeObserverConstructor = this.document.defaultView?.ResizeObserver;
+    if (!ResizeObserverConstructor) return;
+    this.#resizeObserver = new ResizeObserverConstructor(() => {
+      if (this.#open) this.#position();
+    });
+    this.#resizeObserver.observe(this.anchor);
+  }
+
+  #containsInteractiveNode(candidate: EventTarget | null): boolean {
+    if (!candidate || !('nodeType' in candidate)) return false;
+    const node = candidate as Node;
+    return node === this.trigger || node === this.panel ||
+      Boolean(this.trigger?.contains(node)) || this.panel.contains(node);
+  }
+
+  #focusFirstPanelItem(): void {
+    let candidates: NodeListOf<HTMLElement>;
+    try {
+      candidates = this.panel.querySelectorAll<HTMLElement>(
+        DISCLOSURE_FOCUS_SELECTOR,
+      );
+    } catch {
+      return;
+    }
+    const limit = Math.min(candidates.length, MAX_DISCLOSURE_FOCUS_CANDIDATES);
+    for (let index = 0; index < limit; index += 1) {
+      const candidate = candidates.item(index);
+      if (!candidate || !replicaFocusTargetIsSafe(candidate, this.panel)) continue;
+      try {
+        candidate.focus({ preventScroll: true });
+        return;
+      } catch {
+        // Continue to the next bounded candidate.
+      }
+    }
   }
 
   #revealSelectedOption(): void {
@@ -449,13 +626,24 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
     }
   }
 
-  #observeAnchorSize(): void {
-    const ResizeObserverConstructor = this.document.defaultView?.ResizeObserver;
-    if (!ResizeObserverConstructor) return;
-    this.#resizeObserver = new ResizeObserverConstructor(() => {
-      if (this.#open) this.#position();
-    });
-    this.#resizeObserver.observe(this.anchor);
+  #scheduleDeferredClose(): void {
+    if (this.#deferredCloseTimer !== undefined) return;
+    const view = this.document.defaultView;
+    const schedule = view?.setTimeout?.bind(view) ?? globalThis.setTimeout;
+    this.#deferredCloseTimer = schedule(() => {
+      this.#deferredCloseTimer = undefined;
+      if (!this.#triggerHovered && !this.#panelHovered && !this.#focusWithin) {
+        this.close();
+      }
+    }, DISCLOSURE_LEAVE_GRACE_MS) as unknown as number;
+  }
+
+  #cancelDeferredClose(): void {
+    if (this.#deferredCloseTimer === undefined) return;
+    const view = this.document.defaultView;
+    const cancel = view?.clearTimeout?.bind(view) ?? globalThis.clearTimeout;
+    cancel(this.#deferredCloseTimer);
+    this.#deferredCloseTimer = undefined;
   }
 
   #identityIsConnected(): boolean {
@@ -653,6 +841,74 @@ function restoreAttribute(
 function blockReplicaActivation(event: Event): void {
   if (event.cancelable) event.preventDefault();
   event.stopImmediatePropagation();
+}
+
+function keyboardTargetCanActivate(target: EventTarget | null): boolean {
+  if (!target || !('nodeType' in target) || target.nodeType !== 1) return false;
+  const element = target as Element;
+  const tagName = element.localName.toLowerCase();
+  if (
+    tagName === 'button' || tagName === 'input' || tagName === 'select' ||
+    tagName === 'summary' || tagName === 'textarea'
+  ) return true;
+  const role = element.getAttribute('role')?.trim().toLowerCase() ?? '';
+  return KEYBOARD_ACTIVATION_ROLES.has(role);
+}
+
+function replicaFocusTargetIsSafe(
+  candidate: HTMLElement,
+  panel: HTMLElement,
+): boolean {
+  if (
+    !candidate.isConnected ||
+    typeof candidate.focus !== 'function' ||
+    candidate.hasAttribute('disabled') ||
+    safelyMatches(candidate, ':disabled')
+  ) return false;
+  const rawTabIndex = candidate.getAttribute('tabindex');
+  if (rawTabIndex !== null) {
+    const tabIndex = Number(rawTabIndex.trim());
+    if (!Number.isInteger(tabIndex) || tabIndex < 0) return false;
+  }
+  let current: Element | null = candidate;
+  let inspected = 0;
+  while (current) {
+    inspected += 1;
+    if (inspected > 64) return false;
+    if (
+      current.hasAttribute('hidden') || current.hasAttribute('inert') ||
+      current.getAttribute('aria-hidden')?.trim().toLowerCase() === 'true' ||
+      elementHasCollapsedPaint(current)
+    ) return false;
+    if (current === panel) return true;
+    current = current.parentElement;
+  }
+  return false;
+}
+
+function elementHasCollapsedPaint(element: Element): boolean {
+  const getComputedStyle = element.ownerDocument.defaultView?.getComputedStyle;
+  if (typeof getComputedStyle !== 'function') return false;
+  try {
+    const style = getComputedStyle.call(element.ownerDocument.defaultView, element);
+    const contentVisibility = style.getPropertyValue('content-visibility')
+      .trim().toLowerCase();
+    const opacity = style.opacity.trim();
+    return style.display.trim().toLowerCase() === 'none' ||
+      ['hidden', 'collapse'].includes(style.visibility.trim().toLowerCase()) ||
+      contentVisibility === 'hidden' ||
+      (opacity !== '' && Number(opacity) <= 0);
+  } catch {
+    return true;
+  }
+}
+
+function safelyMatches(element: Element, selector: string): boolean {
+  try {
+    return element.matches(selector);
+  } catch {
+    return true;
+  }
 }
 
 function setImportant(
