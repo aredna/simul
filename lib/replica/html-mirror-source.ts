@@ -31,6 +31,7 @@ import {
   sanitizeSourceSubtree,
   sanitizeSourceSubtrees,
   snapshotHtmlMirrorRepresentability,
+  type HtmlMirrorElementNode,
   type HtmlMirrorIdRegistry,
   type HtmlMirrorNamespace,
   type HtmlMirrorRepresentabilityCollector,
@@ -302,6 +303,7 @@ export class HtmlMirrorSourceSession {
   #mirroredOpaqueSecrets = new WeakSet<Element>();
   #emittedChildren = new WeakMap<Node, readonly Node[]>();
   #emittedParent = new WeakMap<Node, Node>();
+  #emittedNodeSignatures = new WeakMap<Node, string>();
   #mirroredImageCandidates: Element[] = [];
   #knownMirroredImageCandidates = new WeakSet<Element>();
   #selectedImageSources = new WeakMap<Element, string>();
@@ -375,6 +377,7 @@ export class HtmlMirrorSourceSession {
     this.#selectedImageSources = new WeakMap<Element, string>();
     this.#imageRefreshRequested = false;
     this.#lastDimensions = undefined;
+    this.#emittedNodeSignatures = new WeakMap<Node, string>();
     this.#adoptedStyleSignatures.reset();
     this.#ordinaryStyleSignatures.reset();
     this.#clearPending();
@@ -566,6 +569,7 @@ export class HtmlMirrorSourceSession {
       this.#mirroredOpaqueSecrets = new WeakSet<Element>();
       this.#emittedChildren = new WeakMap<Node, readonly Node[]>();
       this.#emittedParent = new WeakMap<Node, Node>();
+      this.#emittedNodeSignatures = new WeakMap<Node, string>();
       this.#shadowHostCandidates = [];
       this.#knownShadowHostCandidates = new WeakSet<Element>();
       this.#shadowDiscoveryCursor = 0;
@@ -881,14 +885,19 @@ export class HtmlMirrorSourceSession {
             hints.selectedImageSource ?? '',
           );
         }
-        operations.push(Object.freeze({
+        const operation = Object.freeze({
           kind: 'attributes',
           nodeId: this.environment.registry.peekId(target) as number,
           namespace: sourceElementNamespace(target),
           tagName: target.localName.toLowerCase(),
           attributes,
           ...hints,
-        }));
+        } as const);
+        if (
+          emittedElementSignature(operation) ===
+            this.#emittedNodeSignatures.get(target)
+        ) continue;
+        operations.push(operation);
       }
       for (const target of this.#pendingText) {
         if (
@@ -903,11 +912,15 @@ export class HtmlMirrorSourceSession {
           fidelityPolicy,
         );
         if (!node || node.kind !== 'text') throw new Error('Unsafe text patch.');
-        operations.push(Object.freeze({
+        const operation = Object.freeze({
           kind: 'text',
           nodeId: node.id,
           node,
-        }));
+        } as const);
+        if (
+          emittedTextSignature(node) === this.#emittedNodeSignatures.get(target)
+        ) continue;
+        operations.push(operation);
       }
       let emittedDimensions:
         ReturnType<typeof readSourceDimensions> | undefined;
@@ -951,6 +964,22 @@ export class HtmlMirrorSourceSession {
         } else if (operation.kind === 'reconcile-children') {
           const target = this.environment.registry.getNode(operation.nodeId);
           if (target) this.#recordReconciledChildren(target, operation.children);
+        } else if (operation.kind === 'attributes') {
+          const target = this.environment.registry.getNode(operation.nodeId);
+          if (target) {
+            this.#emittedNodeSignatures.set(
+              target,
+              emittedElementSignature(operation),
+            );
+          }
+        } else if (operation.kind === 'text') {
+          const target = this.environment.registry.getNode(operation.nodeId);
+          if (target) {
+            this.#emittedNodeSignatures.set(
+              target,
+              emittedTextSignature(operation.node),
+            );
+          }
         }
       }
       this.#clearPending();
@@ -1064,6 +1093,12 @@ export class HtmlMirrorSourceSession {
     const source = this.environment.registry.getNode(node.id);
     if (source) {
       this.#mirroredNodes.add(source);
+      this.#emittedNodeSignatures.set(
+        source,
+        node.kind === 'text'
+          ? emittedTextSignature(node)
+          : emittedElementSignature(node),
+      );
       if (source instanceof Element) {
         if (node.kind === 'element' && node.opaquePlaceholder === true) {
           this.#mirroredOpaqueSecrets.add(source);
@@ -1764,6 +1799,45 @@ function reconciliationMatchesEmittedChildren(
 ): boolean {
   return entries.length === previous.length && entries.every((entry, index) =>
     entry.kind === 'retain' && registry.peekId(previous[index]!) === entry.nodeId);
+}
+
+function emittedElementSignature(
+  element: Pick<HtmlMirrorElementNode,
+    | 'namespace'
+    | 'tagName'
+    | 'attributes'
+    | 'visuallyHidden'
+    | 'selectedImageSource'
+    | 'selectedOptionIndexes'
+    | 'selectPickerOpen'
+    | 'selectPresentationStyle'
+    | 'controlText'
+    | 'canvasBackgroundColor'
+    | 'resolvedStyleSheetText'
+  >,
+): string {
+  const controlText = element.controlText;
+  return JSON.stringify([
+    element.namespace,
+    element.tagName,
+    element.attributes,
+    element.visuallyHidden === true,
+    element.selectedImageSource ?? null,
+    element.selectedOptionIndexes ?? null,
+    element.selectPickerOpen === true,
+    element.selectPresentationStyle ?? null,
+    controlText
+      ? [controlText.kind, controlText.text, controlText.translatable]
+      : null,
+    element.canvasBackgroundColor ?? null,
+    element.resolvedStyleSheetText ?? null,
+  ]);
+}
+
+function emittedTextSignature(
+  text: Readonly<{ text: string; translatable: boolean }>,
+): string {
+  return JSON.stringify([text.text, text.translatable]);
 }
 
 function sameSourceDimensions(
