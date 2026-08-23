@@ -307,6 +307,7 @@ export class VisibleReplayHost implements ReplayPresentationHost {
     const committed = this.#committed;
     if (committed?.iframe !== iframe || committed.released) return;
     const wasLive = committed.live;
+    if (wasLive) return;
     committed.live = true;
     this.#previewSurface.hidden = false;
     if (committed.interactiveAccessible) {
@@ -326,7 +327,12 @@ export class VisibleReplayHost implements ReplayPresentationHost {
   refreshExtent(iframe: HTMLIFrameElement, extent: VisibleReplayExtent): void {
     const committed = this.#committed;
     if (!committed || committed.iframe !== iframe || committed.released) return;
-    committed.replayExtent = normalizeExtent(extent);
+    const normalized = normalizeExtent(extent);
+    if (
+      committed.replayExtent.width === normalized.width &&
+      committed.replayExtent.height === normalized.height
+    ) return;
+    committed.replayExtent = normalized;
     this.#clampSourceScroll();
     this.#applyLayout(committed);
   }

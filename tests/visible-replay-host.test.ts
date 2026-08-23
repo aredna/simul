@@ -548,6 +548,22 @@ describe('visible rrweb replay host', () => {
     expect(stage.style.height).toBe('4100px');
   });
 
+  it('ignores repeated live and unchanged extent notifications', () => {
+    const fixture = createFixture();
+    const candidate = fixture.host.createCandidate(dimensions());
+    const scrollTo = vi.fn();
+    const iframe = createProtectedIframe(fixture.document, scrollTo);
+    candidate.mount.append(iframe);
+    candidate.commit(iframe, { width: 1_400, height: 2_500 });
+    fixture.host.markLive(iframe);
+    scrollTo.mockClear();
+
+    fixture.host.markLive(iframe);
+    fixture.host.refreshExtent(iframe, { width: 1_400, height: 2_500 });
+
+    expect(scrollTo).not.toHaveBeenCalled();
+  });
+
   it('lets a live document extent shrink below its initial capture size', () => {
     const fixture = createFixture();
     const candidate = commitCandidate(fixture);
