@@ -508,6 +508,7 @@ const isolatedHtmlReplicaEngine = new IsolatedHtmlReplicaEngine({
   onSourceCommit: handleReplicaSourceCommit,
   onLiveFailure: (code) => handleReplicaLiveFailure(code, 'isolated-html'),
   onInfo: (info) => {
+    if (!import.meta.env.DEV) return;
     // Counts and bounded stages only: never source text, URLs, pixels, IDs, or hashes.
     const event = info.eventRepresentability;
     console.info(
@@ -6012,7 +6013,9 @@ function logImageTranslationDiagnostic(
 ): void {
   // Content-free local diagnostics only; image text, URLs, and pixels are
   // deliberately absent from this channel.
-  console.info('[Simul image translation]', diagnostic);
+  if (import.meta.env.DEV) {
+    console.info('[Simul image translation]', diagnostic);
+  }
   imageTranslationDiagnosticHistory.append(diagnostic);
   renderImageTranslationDiagnosticHistory();
 }
@@ -6021,6 +6024,7 @@ function logTranslationCache(
   label: 'page' | 'image-text' | 'quick',
   memory: TranslationMemory,
 ): void {
+  if (!import.meta.env.DEV) return;
   const stats = memory.snapshotStats();
   console.info(
     `[Simul translation cache] scope=${label}; entries=${stats.entries}; characters=${stats.characters}; hits=${stats.hits}; misses=${stats.misses}; joins=${stats.inFlightJoins}; provider-loads=${stats.providerLoads}`,
