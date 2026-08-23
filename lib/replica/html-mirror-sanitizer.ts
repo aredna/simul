@@ -3959,9 +3959,9 @@ function nativeSelectOptionCount(children: readonly HtmlMirrorNode[]): number {
       continue;
     }
     if (child.tagName === 'optgroup') {
-      count += child.children.filter(
-        (nested) => nested.kind === 'element' && nested.tagName === 'option',
-      ).length;
+      for (const nested of child.children) {
+        if (nested.kind === 'element' && nested.tagName === 'option') count += 1;
+      }
     }
   }
   return count;

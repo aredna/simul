@@ -203,14 +203,23 @@ export function selectImageTextEvidence(
   semantic: RankableSemanticImageEvidence,
   ocr: RankableOcrImageEvidence,
 ): ImageEvidenceSelection {
-  const semanticText = normalizeComparableImageEvidenceText(semantic.text);
-  const ocrText = normalizeComparableImageEvidenceText(ocr.result.transcript);
-  if (semanticText && semanticText === ocrText) {
+  const semanticText = normalizeImageEvidenceText(semantic.text);
+  const ocrText = normalizeImageEvidenceText(ocr.result.transcript);
+  const semanticComparable = comparableImageEvidenceText(semanticText);
+  if (
+    semanticComparable &&
+    semanticComparable === comparableImageEvidenceText(ocrText)
+  ) {
     return selectByPriority(semantic, ocr, 'agreement-priority');
   }
 
-  const semanticScore = semanticEvidenceScore(semantic);
-  const ocrScore = ocrEvidenceScore(ocr, semantic);
+  const semanticShape = normalizedTextShape(semanticText);
+  const semanticScore = semanticEvidenceScore(semanticShape);
+  const ocrScore = ocrEvidenceScore(
+    ocr,
+    normalizedTextShape(ocrText),
+    semanticShape,
+  );
   if (ocrScore >= semanticScore + DECISIVE_SCORE_MARGIN) {
     return Object.freeze({ selected: 'ocr', reason: 'ocr-decisive' });
   }
@@ -230,13 +239,14 @@ export function normalizeImageEvidenceText(value: string): string {
 }
 
 export function normalizeComparableImageEvidenceText(value: string): string {
-  return normalizeImageEvidenceText(value)
-    .toLowerCase()
-    .replace(/[^\p{L}\p{N}]+/gu, '');
+  return comparableImageEvidenceText(normalizeImageEvidenceText(value));
 }
 
-function semanticEvidenceScore(evidence: RankableSemanticImageEvidence): number {
-  const shape = textShape(evidence.text);
+function comparableImageEvidenceText(normalized: string): string {
+  return normalized.toLowerCase().replace(/[^\p{L}\p{N}]+/gu, '');
+}
+
+function semanticEvidenceScore(shape: TextShape): number {
   // Shortness and repetition decide whether comparison is worthwhile; they
   // do not lower an admitted authored label's baseline credibility.
   let score = 7;
@@ -246,10 +256,9 @@ function semanticEvidenceScore(evidence: RankableSemanticImageEvidence): number 
 
 function ocrEvidenceScore(
   evidence: RankableOcrImageEvidence,
-  semantic: RankableSemanticImageEvidence,
+  shape: TextShape,
+  semanticShape: TextShape,
 ): number {
-  const shape = textShape(evidence.result.transcript);
-  const semanticShape = textShape(semantic.text);
   let score = 2;
   const confidence = evidence.result.transcriptConfidence;
   if (confidence !== undefined && Number.isFinite(confidence)) {
@@ -282,12 +291,17 @@ function selectByPriority(
   });
 }
 
-function textShape(value: string): Readonly<{
+type TextShape = Readonly<{
   meaningfulCharacters: number;
   tokens: number;
   varied: boolean;
-}> {
-  const normalized = normalizeImageEvidenceText(value);
+}>;
+
+function textShape(value: string): TextShape {
+  return normalizedTextShape(normalizeImageEvidenceText(value));
+}
+
+function normalizedTextShape(normalized: string): TextShape {
   const unique = new Set<string>();
   let meaningfulCharacters = 0;
   let tokens = 0;
