@@ -512,12 +512,22 @@ export class SemanticSourceSession {
     parts.push(
       `open=${String(safelyRead(() => element.matches(':open')) === true)}`,
     );
-    const limit = Math.min(optionCount, MAX_SEMANTIC_DISCLOSURE_SUBTREE_NODES);
+    const selectedOptions = safelyRead(() => [...select.selectedOptions]);
+    if (!selectedOptions) return `${parts.join(':')}:selection=unreadable`;
+    parts.push(`selected-count=${selectedOptions.length}`);
+    const limit = Math.min(
+      selectedOptions.length,
+      MAX_SEMANTIC_SELECTED_OPTION_NODE_IDS,
+    );
     for (let index = 0; index < limit; index += 1) {
-      const selected = safelyRead(() => select.options.item(index)?.selected);
-      if (selected === true) parts.push(`selected=${index}`);
+      const option = selectedOptions[index];
+      const optionNodeId = option && option.ownerDocument === element.ownerDocument &&
+          element.contains(option)
+        ? this.#nodeId(option)
+        : undefined;
+      parts.push(`selected=${optionNodeId ?? 'invalid'}`);
     }
-    if (optionCount > limit) parts.push('overflow');
+    if (selectedOptions.length > limit) parts.push('selection-overflow');
     return parts.join(':');
   }
 
