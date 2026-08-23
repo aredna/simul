@@ -234,12 +234,17 @@ export class ReplicaTranslationCoordinator {
       !this.#pair ||
       this.#pair.sourceLanguage === this.#pair.targetLanguage
     ) return;
-    const snapshot = this.surface.snapshot();
-    if (
-      !snapshot ||
-      snapshot.replayLease !== commit.replayLease ||
-      !sameSourceDocument(snapshot.document, commit.document)
-    ) return;
+    // The current record index already authenticates ordinary in-lease batches.
+    // Avoid rebuilding the surface's full snapshot for every small DOM mutation;
+    // checkpoint/recovery commits still cross-check their new lease explicitly.
+    if (!this.#isCurrentIncrementalCommit(commit)) {
+      const snapshot = this.surface.snapshot();
+      if (
+        !snapshot ||
+        snapshot.replayLease !== commit.replayLease ||
+        !sameSourceDocument(snapshot.document, commit.document)
+      ) return;
+    }
     this.#applySourceCommitToCurrentRecords(commit);
     const pairKey = translationPairKey(this.#pair);
     let queued = false;
@@ -605,6 +610,14 @@ export class ReplicaTranslationCoordinator {
       replayLease: snapshot.replayLease,
       records: new Map(snapshot.records.map((record) => [record.nodeId, record])),
     };
+  }
+
+  #isCurrentIncrementalCommit(commit: ReplicaSourceCommit): boolean {
+    return Boolean(
+      commit.reason === 'batch' &&
+        this.#currentRecords?.replayLease === commit.replayLease &&
+        sameSourceDocument(this.#currentRecords.document, commit.document),
+    );
   }
 
   #applySourceCommitToCurrentRecords(commit: ReplicaSourceCommit): void {

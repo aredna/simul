@@ -5,7 +5,6 @@
  */
 export class NavigationRefreshGate {
   #pendingScope: string | undefined;
-  #pendingKey: string | undefined;
   #sameDocumentScope: string | undefined;
   #sameDocumentKey: string | undefined;
   #lastScheduledKey: string | undefined;
@@ -18,11 +17,9 @@ export class NavigationRefreshGate {
       // Chrome can emit several `loading` updates while redirects or canonical
       // rewrites retarget one unfinished document. The first update already
       // invalidated the old replica; only keep the newest capture identity.
-      this.#pendingKey = key;
       return false;
     }
     this.#pendingScope = scope;
-    this.#pendingKey = key;
     return true;
   }
 
@@ -32,7 +29,6 @@ export class NavigationRefreshGate {
       // Redirects and canonical/history rewrites can change the URL between
       // Chrome's loading and complete signals. Retarget the unfinished load
       // instead of consuming it as a same-document navigation.
-      this.#pendingKey = key;
       return false;
     }
     // Signals are scoped to one opaque tab/document identity. A pending load
@@ -105,7 +101,6 @@ export class NavigationRefreshGate {
 
   #clearPendingLoad(): void {
     this.#pendingScope = undefined;
-    this.#pendingKey = undefined;
   }
 }
 
