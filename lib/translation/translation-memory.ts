@@ -79,7 +79,10 @@ export class TranslationMemory {
   }
 
   get(scope: TranslationMemoryScope, source: string): string | undefined {
-    const key = memoryKey(scope, source);
+    return this.#get(memoryKey(scope, source));
+  }
+
+  #get(key: string): string | undefined {
     const value = this.#values.get(key);
     if (value === undefined) return undefined;
     this.#values.delete(key);
@@ -93,7 +96,10 @@ export class TranslationMemory {
     translated: string,
   ): void {
     if (!translated.trim()) return;
-    const key = memoryKey(scope, source);
+    this.#set(memoryKey(scope, source), translated);
+  }
+
+  #set(key: string, translated: string): void {
     const characters = key.length + translated.length;
     if (characters > this.#maxCharacters) return;
     const replaced = this.#values.get(key);
@@ -130,13 +136,13 @@ export class TranslationMemory {
     load: () => Promise<string>,
     generation: number,
   ): Promise<string> {
-    const cached = this.get(scope, source);
+    const cacheKey = memoryKey(scope, source);
+    const cached = this.#get(cacheKey);
     if (cached !== undefined) {
       this.#hits += 1;
       return Promise.resolve(cached);
     }
     this.#misses += 1;
-    const cacheKey = memoryKey(scope, source);
     const key = inFlightKey(generation, cacheKey);
     const running = this.#inFlight.get(key);
     if (running?.generation === generation) {
@@ -161,7 +167,7 @@ export class TranslationMemory {
       const translated = await load();
       if (!translated.trim()) throw new Error(EMPTY_TRANSLATION_ERROR);
       if (generation === this.#generation) {
-        this.set(scope, source, translated);
+        this.#set(cacheKey, translated);
       }
       return translated;
     })().finally(() => {
