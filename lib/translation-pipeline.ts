@@ -252,17 +252,19 @@ export function splitText(source: string, maxLength: number): string[] {
   if (sourcePoints.length <= boundedLength) return [source];
 
   const chunks: string[] = [];
-  let remaining = sourcePoints;
-  while (remaining.length > boundedLength) {
-    const splitAt = findTextBoundary(remaining, boundedLength);
-    const chunk = remaining.slice(0, splitAt).join('').trim();
+  let start = 0;
+  while (sourcePoints.length - start > boundedLength) {
+    const splitAt = findTextBoundary(sourcePoints, start, boundedLength);
+    const chunk = sourcePoints.slice(start, splitAt).join('').trim();
     if (chunk) chunks.push(chunk);
-    remaining = remaining.slice(splitAt);
-    while (remaining[0] !== undefined && /\s/u.test(remaining[0])) {
-      remaining = remaining.slice(1);
+    start = splitAt;
+    while (true) {
+      const point = sourcePoints[start];
+      if (point === undefined || !/\s/u.test(point)) break;
+      start += 1;
     }
   }
-  const finalChunk = remaining.join('').trim();
+  const finalChunk = sourcePoints.slice(start).join('').trim();
   if (finalChunk) chunks.push(finalChunk);
   return chunks.filter(Boolean);
 }
@@ -313,9 +315,18 @@ async function splitForSessionQuota(
   return quotaSafe;
 }
 
-function findTextBoundary(points: string[], maxLength: number): number {
+function findTextBoundary(
+  points: string[],
+  start: number,
+  maxLength: number,
+): number {
   const minimumUsefulBoundary = Math.max(1, Math.ceil(maxLength / 2));
-  for (let index = maxLength - 1; index >= minimumUsefulBoundary - 1; index -= 1) {
+  const end = Math.min(points.length, start + maxLength);
+  for (
+    let index = end - 1;
+    index >= start + minimumUsefulBoundary - 1;
+    index -= 1
+  ) {
     const point = points[index];
     if (
       point !== undefined &&
@@ -324,7 +335,7 @@ function findTextBoundary(points: string[], maxLength: number): number {
       return index + 1;
     }
   }
-  return maxLength;
+  return end;
 }
 
 function pendingValue(source: string): TranslationValue {
