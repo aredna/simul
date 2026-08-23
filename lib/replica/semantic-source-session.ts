@@ -545,6 +545,8 @@ export class SemanticSourceSession {
       ? this.#validatedDisclosures(elements, classifications)
       : Object.freeze([]);
     const proofs: SemanticSourceProof[] = [];
+    const proofIds = new Set<string>();
+    let batchBytes = 0;
     const selectStates = new WeakMap<Element, SelectStateSnapshot>();
     const disclosurePanels = new Set<Element>();
     const addProof = (draft: SemanticSourceProofDraft): boolean => {
@@ -552,9 +554,7 @@ export class SemanticSourceSession {
       const provisional = Object.freeze({ ...draft, revision: 1 }) as
         SemanticSourceProof;
       const proofId = semanticSourceProofIdentity(provisional);
-      if (proofs.some((proof) => semanticSourceProofIdentity(proof) === proofId)) {
-        return false;
-      }
+      if (proofIds.has(proofId)) return false;
       const signature = semanticSourceProofSignature(provisional);
       const previous = this.#proofRevisions.get(proofId);
       if (!previous &&
@@ -564,9 +564,11 @@ export class SemanticSourceSession {
         ? previous.revision
         : (previous?.revision ?? 0) + 1;
       const proof = Object.freeze({ ...draft, revision }) as SemanticSourceProof;
-      if (semanticSourceBatchByteLength([], [...proofs, proof]) >
-        MAX_SEMANTIC_SOURCE_BATCH_BYTES) return false;
+      const proofBytes = semanticSourceBatchByteLength([], [proof]);
+      if (batchBytes + proofBytes > MAX_SEMANTIC_SOURCE_BATCH_BYTES) return false;
       this.#proofRevisions.set(proofId, { signature, revision });
+      proofIds.add(proofId);
+      batchBytes += proofBytes;
       proofs.push(proof);
       return true;
     };
@@ -748,6 +750,7 @@ export class SemanticSourceSession {
     }
 
     const records: SemanticSourceRecord[] = [];
+    const recordIds = new Set<number>();
     const add = (
       node: Node,
       classification: ElementClassification,
@@ -765,7 +768,7 @@ export class SemanticSourceSession {
       const nodeId = this.#nodeId(node);
       if (!nodeId) return;
       const recordId = semanticSourceRecordId(nodeId, presentation);
-      if (!recordId || records.some((record) => record.recordId === recordId)) return;
+      if (!recordId || recordIds.has(recordId)) return;
       const signature = [
         classification.category, gate, presentation, text,
         classification.facts.tagName, classification.facts.type ?? '',
@@ -795,12 +798,11 @@ export class SemanticSourceSession {
         presentation,
         classifierVersion: SOURCE_SECRET_CLASSIFIER_VERSION,
       });
-      const projectedBytes = semanticSourceBatchByteLength(
-        [...records, record],
-        proofs,
-      );
-      if (projectedBytes > MAX_SEMANTIC_SOURCE_BATCH_BYTES) return;
+      const recordBytes = semanticSourceBatchByteLength([record]);
+      if (batchBytes + recordBytes > MAX_SEMANTIC_SOURCE_BATCH_BYTES) return;
       this.#revisions.set(recordId, { signature, revision: nodeRevision });
+      recordIds.add(recordId);
+      batchBytes += recordBytes;
       records.push(record);
     };
 
