@@ -9,6 +9,7 @@ import {
   sameCompanionSourcePage,
   shouldFollowActivatedTab,
   shouldIgnoreInactiveFollowedTabUpdate,
+  shouldPreopenSidePanel,
   shouldRecoverRemovedActiveSource,
 } from '../lib/companion-surface';
 
@@ -26,6 +27,23 @@ describe('companion surface launch decisions', () => {
       launchBehavior: 'popout',
       lastLaunchSurface: 'side-panel',
     })).toBe('popout');
+  });
+
+  it('preopens a side panel only while launch preferences are unknown or select it', () => {
+    const popout = {
+      launchBehavior: 'popout' as const,
+      lastLaunchSurface: 'side-panel' as const,
+    };
+    expect(shouldPreopenSidePanel(popout, false)).toBe(true);
+    expect(shouldPreopenSidePanel(popout, true)).toBe(false);
+    expect(shouldPreopenSidePanel({
+      launchBehavior: 'side-panel',
+      lastLaunchSurface: 'popout',
+    }, true)).toBe(true);
+    expect(shouldPreopenSidePanel({
+      launchBehavior: 'last-used',
+      lastLaunchSurface: 'popout',
+    }, true)).toBe(false);
   });
 
   it('creates an identity-bound local URL without retaining stale parameters', () => {

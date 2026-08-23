@@ -38,6 +38,23 @@ export function resolveCompanionLaunchSurface(
     : preferences.launchBehavior;
 }
 
+/**
+ * Chrome requires sidePanel.open() in the direct action-click turn. Before
+ * storage hydration the safe fallback is to pre-open it, but a known pop-out
+ * preference must not flash and initialize a side panel that is immediately
+ * closed again.
+ */
+export function shouldPreopenSidePanel(
+  preferences: Pick<
+    CompanionPreferences,
+    'launchBehavior' | 'lastLaunchSurface'
+  >,
+  preferencesHydrated: boolean,
+): boolean {
+  return !preferencesHydrated ||
+    resolveCompanionLaunchSurface(preferences) === 'side-panel';
+}
+
 export function createDetachedCompanionUrl(
   extensionPageUrl: string,
   identity: CapturedPageIdentity,

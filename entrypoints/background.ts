@@ -11,6 +11,7 @@ import {
   createDetachedCompanionUrl,
   createDetachedWindowData,
   resolveCompanionLaunchSurface,
+  shouldPreopenSidePanel,
 } from '../lib/companion-surface';
 import { compiledImageTextProviderIds } from '../lib/ocr/provider-registry';
 import { hasOcrRuntimeProvider } from '../lib/ocr/runtime-provider-readiness';
@@ -88,6 +89,7 @@ export default defineBackground(() => {
   );
   let livePreferenceStorageFailClosed = false;
   let launchPreferenceRevision = 0;
+  let launchPreferencesHydrated = false;
   let toolbarBehaviorQueue = Promise.resolve();
   let toolbarClickSequence = 0;
   const toolbarLaunchEpoch = crypto.randomUUID();
@@ -130,7 +132,9 @@ export default defineBackground(() => {
     () => {
       queueToolbarBehaviorSync();
     },
-  );
+  ).finally(() => {
+    launchPreferencesHydrated = true;
+  });
 
   function queueToolbarBehaviorSync(): void {
     toolbarBehaviorQueue = toolbarBehaviorQueue.then(
@@ -145,7 +149,10 @@ export default defineBackground(() => {
     // requires a direct user gesture. The follow-up message reauthorizes an
     // already-running global panel for the tab that was actually clicked.
     let preopenedSidePanel: Promise<void> | undefined;
-    if (tab.windowId !== undefined) {
+    if (
+      tab.windowId !== undefined &&
+      shouldPreopenSidePanel(launchPreferences, launchPreferencesHydrated)
+    ) {
       preopenedSidePanel = browser.sidePanel.open({ windowId: tab.windowId });
       void preopenedSidePanel.catch(() => undefined);
     }
