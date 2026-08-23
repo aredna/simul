@@ -302,6 +302,7 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
       setImportant(this.panel, 'position', 'static');
       setImportant(this.panel, 'pointer-events', 'auto');
       setImportant(this.panel, 'width', '100%');
+      queueMicrotask(() => this.#revealSelectedOption());
       return;
     }
 
@@ -360,6 +361,7 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
     body.append(this.panel);
     tryShowPopover(this.panel);
     this.#position();
+    this.#revealSelectedOption();
     this.#observeAnchorSize();
   }
 
@@ -432,6 +434,19 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
     restoreAttributes(this.panel, this.originalPanelAttributes);
     restoreAttribute(this.panel, 'style', this.originalPanelStyle);
     unregisterController(this);
+  }
+
+  #revealSelectedOption(): void {
+    if (this.#disposed || !isReplicaNodeConnected(this.panel)) return;
+    try {
+      const selected = this.panel.querySelector<HTMLElement>(
+        '[role="option"][aria-selected="true"]',
+      );
+      if (typeof selected?.scrollIntoView !== 'function') return;
+      selected.scrollIntoView({ block: 'nearest', inline: 'nearest' });
+    } catch {
+      // Selection remains readable even when synthetic layout APIs fail.
+    }
   }
 
   #observeAnchorSize(): void {

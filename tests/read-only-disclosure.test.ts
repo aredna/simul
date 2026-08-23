@@ -1,5 +1,5 @@
 import { parseHTML } from 'linkedom';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   computeReplicaDisclosurePlacement,
@@ -111,6 +111,37 @@ describe('read-only replica disclosure placement', () => {
     window.dispatchEvent(new window.Event('resize'));
     expect(controller.isOpen()).toBe(true);
     expect(panel.style.top).toBe('274px');
+    controller.dispose();
+  });
+
+  it('reveals the selected row when a long dropdown opens', () => {
+    const { document } = parseHTML(
+      '<html><body><button id="trigger">Open</button>' +
+      '<div id="panel"><div role="option">First</div>' +
+      '<div id="selected" role="option" aria-selected="true">Current</div></div>' +
+      '</body></html>',
+    );
+    const trigger = document.querySelector<HTMLElement>('#trigger')!;
+    const panel = document.querySelector<HTMLElement>('#panel')!;
+    const selected = document.querySelector<HTMLElement>('#selected')!;
+    const scrollIntoView = vi.fn();
+    Object.defineProperty(selected, 'scrollIntoView', {
+      configurable: true,
+      value: scrollIntoView,
+    });
+    const controller = installReadOnlyReplicaDisclosure({
+      anchor: trigger,
+      trigger,
+      panel,
+      presentation: 'popup',
+    });
+
+    controller.open();
+
+    expect(scrollIntoView).toHaveBeenCalledWith({
+      block: 'nearest',
+      inline: 'nearest',
+    });
     controller.dispose();
   });
 });
