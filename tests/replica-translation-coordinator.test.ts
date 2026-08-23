@@ -558,6 +558,48 @@ describe('ReplicaTranslationCoordinator', () => {
     }));
   });
 
+  it('replaces queued control work when its projection target changes', async () => {
+    let resolveFirst!: (value: string) => void;
+    const translate = vi.fn((source: string) => {
+      if (source === 'Seed' || source === 'Prompt') {
+        return Promise.resolve(`en:${source}`);
+      }
+      return new Promise<string>((resolve) => {
+        resolveFirst = resolve;
+      });
+    });
+    const { provider } = fakeProvider(translate);
+    const surface = new FakeSurface([record(4, 1, 'Seed')]);
+    const onBackgroundResult = vi.fn();
+    const coordinator = new ReplicaTranslationCoordinator(provider, surface, {
+      onBackgroundResult,
+    });
+    await coordinator.translateCurrent(pair);
+    surface.projections.length = 0;
+    surface.records = [
+      record(10, 1, 'Uno'),
+      controlRecord(11, 1, 'Prompt', 'placeholder'),
+    ];
+    coordinator.handleSourceCommit(commitFor(surface));
+    await vi.waitFor(() => expect(resolveFirst).toBeTypeOf('function'));
+
+    const currentControl = controlRecord(11, 1, 'Prompt', 'label');
+    surface.records = [surface.records[0] as ReplicaSourceTextRecord, currentControl];
+    coordinator.handleSourceCommit(commitFor(surface, [currentControl]));
+    resolveFirst('en:Uno');
+
+    await vi.waitFor(() => expect(onBackgroundResult).toHaveBeenCalledOnce());
+    expect(surface.projections).toEqual([
+      expect.objectContaining({ nodeId: 10, translated: 'en:Uno' }),
+      expect.objectContaining({
+        nodeId: 11,
+        nodeType: 1,
+        controlTarget: 'label',
+        translated: 'en:Prompt',
+      }),
+    ]);
+  });
+
   it('waits for a background drain before giving a user run its own progress', async () => {
     let resolveLive!: (value: string) => void;
     const translate = vi.fn((source: string) =>
@@ -684,6 +726,22 @@ function record(
     document,
     nodeId,
     nodeType: 3,
+    revision,
+    source,
+  };
+}
+
+function controlRecord(
+  nodeId: number,
+  revision: number,
+  source: string,
+  controlTarget: 'value' | 'placeholder' | 'label',
+): ReplicaSourceTextRecord {
+  return {
+    document: documentIdentity,
+    nodeId,
+    nodeType: 1,
+    controlTarget,
     revision,
     source,
   };
