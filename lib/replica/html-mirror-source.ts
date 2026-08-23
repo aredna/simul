@@ -309,6 +309,7 @@ export class HtmlMirrorSourceSession {
   readonly #observedShadowRoots = new WeakSet<ShadowRoot>();
   #shadowHostCandidates: Element[] = [];
   #knownShadowHostCandidates = new WeakSet<Element>();
+  #settledShadowHostCandidates = new WeakSet<Element>();
   #shadowDiscoveryCursor = 0;
   #stylePollingCursor = 0;
   #stylePollingPhases = new WeakMap<object, StylePollChannel>();
@@ -363,6 +364,7 @@ export class HtmlMirrorSourceSession {
     this.#shadowDiscoveryTimer = undefined;
     this.#shadowHostCandidates = [];
     this.#knownShadowHostCandidates = new WeakSet<Element>();
+    this.#settledShadowHostCandidates = new WeakSet<Element>();
     this.#shadowDiscoveryCursor = 0;
     this.#stylePollingCursor = 0;
     this.#stylePollingPhases = new WeakMap<object, StylePollChannel>();
@@ -1164,7 +1166,18 @@ export class HtmlMirrorSourceSession {
   }
 
   #registerShadowHostCandidate(element: Element): void {
-    if (this.#knownShadowHostCandidates.has(element)) return;
+    if (
+      this.#knownShadowHostCandidates.has(element) ||
+      this.#settledShadowHostCandidates.has(element)
+    ) return;
+    const shadow = element.shadowRoot;
+    if (shadow?.mode === 'open') {
+      // A host's shadow root cannot be detached or replaced. Its existing root
+      // is captured by the checkpoint walk, so only unresolved hosts belong in
+      // the periodic late-attachment discovery rotation.
+      this.#settledShadowHostCandidates.add(element);
+      return;
+    }
     if (this.#shadowHostCandidates.length >= MAX_HTML_MIRROR_NODES) {
       this.#compactShadowHostCandidates();
     }
@@ -1252,7 +1265,10 @@ export class HtmlMirrorSourceSession {
 
   #compactShadowHostCandidates(): void {
     const retained = this.#shadowHostCandidates.filter(
-      (element) => element.isConnected && this.#mirroredNodes.has(element),
+      (element) =>
+        element.isConnected &&
+        this.#mirroredNodes.has(element) &&
+        !this.#settledShadowHostCandidates.has(element),
     );
     this.#shadowHostCandidates = retained;
     this.#knownShadowHostCandidates = new WeakSet(retained);
@@ -1277,6 +1293,7 @@ export class HtmlMirrorSourceSession {
     if (candidateCount > 0) {
       const scanCount = Math.min(candidateCount, MAX_SHADOW_HOSTS_PER_TICK);
       let processed = 0;
+      let settled = false;
       for (let offset = 0; offset < scanCount; offset += 1) {
         const index = (this.#shadowDiscoveryCursor + offset) % candidateCount;
         const element = this.#shadowHostCandidates[index];
@@ -1284,11 +1301,14 @@ export class HtmlMirrorSourceSession {
         if (!element?.isConnected || !this.#mirroredNodes.has(element)) continue;
         const shadow = element.shadowRoot;
         if (shadow?.mode !== 'open') continue;
+        this.#settledShadowHostCandidates.add(element);
+        settled = true;
         this.#observeOpenShadowRoot(shadow);
         if (this.#shadowReconciliationPending) return;
       }
       this.#shadowDiscoveryCursor =
         (this.#shadowDiscoveryCursor + processed) % candidateCount;
+      if (settled) this.#compactShadowHostCandidates();
     }
     this.#pollStyleChanges();
   }
