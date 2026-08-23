@@ -179,6 +179,41 @@ describe('read-only replica disclosure placement', () => {
     controller.dispose();
   });
 
+  it('does not schedule deferred closes for permanent or closed surfaces', () => {
+    vi.useFakeTimers();
+    const { document, window } = parseHTML(
+      '<html><body><div id="list"><div role="option">One</div></div>' +
+      '<button id="trigger">Open</button><div id="popup">Panel</div>' +
+      '</body></html>',
+    );
+    const list = document.querySelector<HTMLElement>('#list')!;
+    const listController = installReadOnlyReplicaDisclosure({
+      anchor: list,
+      panel: list,
+      presentation: 'list',
+    });
+    const trigger = document.querySelector<HTMLElement>('#trigger')!;
+    const popup = document.querySelector<HTMLElement>('#popup')!;
+    const popupController = installReadOnlyReplicaDisclosure({
+      anchor: trigger,
+      trigger,
+      panel: popup,
+      presentation: 'popup',
+    });
+
+    list.dispatchEvent(new window.Event('pointerleave'));
+    trigger.dispatchEvent(new window.Event('pointerleave'));
+    expect(vi.getTimerCount()).toBe(0);
+
+    popupController.open();
+    trigger.dispatchEvent(new window.Event('pointerleave'));
+    expect(vi.getTimerCount()).toBe(1);
+
+    popupController.dispose();
+    listController.dispose();
+    expect(vi.getTimerCount()).toBe(0);
+  });
+
   it('keeps a hover-opened popup open on its first click', () => {
     const { document, window } = parseHTML(
       '<html><body><button id="trigger">Options</button>' +
