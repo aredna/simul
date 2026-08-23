@@ -80,6 +80,7 @@ import {
 } from './semantic-source-receiver';
 import { SemanticProofPresenter } from './semantic-proof-presenter';
 import { isSourceSecretPlaceholderTagName } from './source-secret-classifier';
+import { hasStructuralPatchTargetConflict } from './structural-patch-conflict';
 
 export const ISOLATED_HTML_SHELL_MARKER = 'isolated-html-v1';
 const ISOLATED_SECRET_PLACEHOLDER_CSS =
@@ -2410,23 +2411,13 @@ function applyPatchBatch(
   // A parent replacement and a descendant operation cannot be made atomic:
   // the descendant identity ceases to exist. The source normally minimizes
   // these, while the extension treats a malicious/confused batch as recovery.
-  for (let left = 0; left < targetOperations.length; left += 1) {
-    for (let right = left + 1; right < targetOperations.length; right += 1) {
-      const first = targetOperations[left]!;
-      const second = targetOperations[right]!;
-      if (first.target === second.target) continue;
-      if (
-        (
-          first.operation.kind === 'children' ||
-          first.operation.kind === 'reconcile-children' ||
-          second.operation.kind === 'children' ||
-          second.operation.kind === 'reconcile-children'
-        ) &&
-        (containsComposed(first.target, second.target) ||
-          containsComposed(second.target, first.target))
-      ) return undefined;
-    }
-  }
+  if (hasStructuralPatchTargetConflict(targetOperations.map(
+    ({ operation, target }) => ({
+      target,
+      structural: operation.kind === 'children' ||
+        operation.kind === 'reconcile-children',
+    }),
+  ))) return undefined;
 
   const structuralOperations = operations.filter(
     (operation): operation is StructuralOperation =>
@@ -3222,26 +3213,6 @@ function composedParentElement(node: Node): Element | undefined {
   return root.nodeType === Node.DOCUMENT_FRAGMENT_NODE && 'host' in root
     ? (root as ShadowRoot).host
     : undefined;
-}
-
-function containsComposed(ancestor: Node, descendant: Node): boolean {
-  for (let current: Node | undefined = descendant; current;) {
-    if (current === ancestor) return true;
-    if (current.parentNode) {
-      current = current.parentNode;
-      continue;
-    }
-    if (current.nodeType === Node.DOCUMENT_FRAGMENT_NODE && 'host' in current) {
-      current = (current as ShadowRoot).host;
-      continue;
-    }
-    const root = current.getRootNode();
-    current = root !== current && root.nodeType === Node.DOCUMENT_FRAGMENT_NODE &&
-      'host' in root
-      ? (root as ShadowRoot).host
-      : undefined;
-  }
-  return false;
 }
 
 function containerContext(
