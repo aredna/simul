@@ -55,6 +55,25 @@ export function shouldPreopenSidePanel(
     resolveCompanionLaunchSurface(preferences) === 'side-panel';
 }
 
+/**
+ * A newer click in another browser window supersedes an eager side-panel open
+ * made while launch preferences were still loading. Never close the same
+ * window: its newer click may be relying on that exact user-gesture open.
+ */
+export function shouldCloseStalePreopenedSidePanel(
+  clickSequence: number,
+  latestClickSequence: number,
+  clickedWindowId: number | undefined,
+  latestClickWindowId: number | undefined,
+  wasPreopened: boolean,
+): boolean {
+  return wasPreopened &&
+    clickSequence !== latestClickSequence &&
+    clickedWindowId !== undefined &&
+    latestClickWindowId !== undefined &&
+    clickedWindowId !== latestClickWindowId;
+}
+
 export function createDetachedCompanionUrl(
   extensionPageUrl: string,
   identity: CapturedPageIdentity,

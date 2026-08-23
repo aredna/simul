@@ -11,6 +11,7 @@ import {
   createDetachedCompanionUrl,
   createDetachedWindowData,
   resolveCompanionLaunchSurface,
+  shouldCloseStalePreopenedSidePanel,
   shouldPreopenSidePanel,
 } from '../lib/companion-surface';
 import { compiledImageTextProviderIds } from '../lib/ocr/provider-registry';
@@ -92,6 +93,7 @@ export default defineBackground(() => {
   let launchPreferencesHydrated = false;
   let toolbarBehaviorQueue = Promise.resolve();
   let toolbarClickSequence = 0;
+  let latestToolbarClickWindowId: number | undefined;
   const toolbarLaunchEpoch = crypto.randomUUID();
 
   // The action handler below must remain Chrome's authorization boundary.
@@ -145,6 +147,7 @@ export default defineBackground(() => {
 
   browser.action.onClicked.addListener((tab) => {
     const clickSequence = ++toolbarClickSequence;
+    latestToolbarClickWindowId = tab.windowId;
     // sidePanel.open() stays in the synchronous event branch because Chrome
     // requires a direct user gesture. The follow-up message reauthorizes an
     // already-running global panel for the tab that was actually clicked.
@@ -174,7 +177,19 @@ export default defineBackground(() => {
     preopenedSidePanel?: Promise<void>,
   ): Promise<void> {
     await launchPreferencesReady;
-    if (clickSequence !== toolbarClickSequence) return;
+    if (clickSequence !== toolbarClickSequence) {
+      if (shouldCloseStalePreopenedSidePanel(
+        clickSequence,
+        toolbarClickSequence,
+        tab.windowId,
+        latestToolbarClickWindowId,
+        preopenedSidePanel !== undefined,
+      )) {
+        await preopenedSidePanel?.catch(() => undefined);
+        await closeSidePanelIfSupported(tab.windowId!);
+      }
+      return;
+    }
     const surface = resolveCompanionLaunchSurface(launchPreferences);
     if (surface === 'side-panel') {
       if (tab.windowId !== undefined) {
