@@ -103,6 +103,7 @@ interface IsolatedSelectFacsimile {
   readonly select: HTMLSelectElement;
   readonly trigger: HTMLButtonElement;
   controller?: ReadOnlyReplicaDisclosure;
+  contentSignature?: string;
 }
 interface IsolatedPublicMenuFacsimile {
   readonly role: 'listbox' | 'menu';
@@ -1940,7 +1941,6 @@ function syncIsolatedNativeSelectFacsimile(host: HTMLElement): void {
     trigger.removeAttribute('hidden');
     trigger.style.removeProperty('display');
   }
-  panel.replaceChildren();
   panel.setAttribute('role', 'listbox');
   panel.setAttribute('aria-disabled', 'true');
   if (select.multiple || select.hasAttribute('multiple')) {
@@ -1948,6 +1948,18 @@ function syncIsolatedNativeSelectFacsimile(host: HTMLElement): void {
   } else {
     panel.removeAttribute('aria-multiselectable');
   }
+
+  const semanticSelection = exposesSelection
+    ? semanticSelectionTextFor(select)?.trim()
+    : undefined;
+  const contentSignature = isolatedSelectContentSignature(
+    select,
+    exposesSelection,
+    semanticSelection,
+  );
+  if (facsimile.contentSignature === contentSignature) return;
+  facsimile.contentSignature = contentSignature;
+  panel.replaceChildren();
 
   const selectedLabels: string[] = [];
   const appendOption = (
@@ -2015,12 +2027,54 @@ function syncIsolatedNativeSelectFacsimile(host: HTMLElement): void {
     }
     panel.append(group);
   }
-  const semanticSelection = exposesSelection
-    ? semanticSelectionTextFor(select)?.trim()
-    : undefined;
   trigger.textContent = exposesSelection
     ? semanticSelection || selectedLabels.join(', ') || '\u2014'
     : 'Options';
+}
+
+function isolatedSelectContentSignature(
+  select: HTMLSelectElement,
+  exposesSelection: boolean,
+  semanticSelection: string | undefined,
+): string {
+  const entries: unknown[] = [
+    exposesSelection,
+    semanticSelection ?? null,
+    select.multiple || select.hasAttribute('multiple'),
+  ];
+  const appendOption = (option: HTMLOptionElement): void => {
+    entries.push([
+      'option',
+      option.getAttribute('label') ?? option.textContent ?? '',
+      option.getAttribute('data-simul-source-option-selected') === 'v1',
+      option.disabled === true || option.hasAttribute('disabled'),
+    ]);
+  };
+  for (const child of [...select.children]) {
+    const tagName = child.localName.toLowerCase();
+    if (tagName === 'option') {
+      appendOption(child as HTMLOptionElement);
+      continue;
+    }
+    if (tagName !== 'optgroup') {
+      entries.push(['other', tagName]);
+      continue;
+    }
+    const group = child as HTMLOptGroupElement;
+    entries.push([
+      'optgroup',
+      group.getAttribute('label') ?? '',
+      group.disabled === true || group.hasAttribute('disabled'),
+    ]);
+    for (const option of [...group.children]) {
+      if (option.localName.toLowerCase() === 'option') {
+        appendOption(option as HTMLOptionElement);
+      } else {
+        entries.push(['other', option.localName.toLowerCase()]);
+      }
+    }
+  }
+  return JSON.stringify(entries);
 }
 
 function syncContainingIsolatedSelectFacsimile(element: Element): void {
