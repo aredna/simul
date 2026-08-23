@@ -488,12 +488,11 @@ describe('HtmlMirrorSourceSession', () => {
     fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
 
     const insertedText = inserted.firstChild as Text;
+    const patchesBeforeLabelChange = fixture.patches().length;
     insertedText.nodeValue = 'Updated choice';
     fixture.mutate(characterDataRecord(insertedText));
     fixture.flushFrame();
-    expect(JSON.stringify(fixture.patches().at(-1))).not.toContain('Updated choice');
-    expect(JSON.stringify(fixture.patches().at(-1))).not.toContain('controlText');
-    fixture.port.emitMessage(createHtmlMirrorAck(identity, 2));
+    expect(fixture.patches()).toHaveLength(patchesBeforeLabelChange);
 
     select.dispatchEvent(new fixture.window.Event('toggle', { bubbles: true }));
     expect(fixture.frames).toHaveLength(0);
@@ -508,12 +507,12 @@ describe('HtmlMirrorSourceSession', () => {
     fixture.start('passive');
     fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
     const legendText = fixture.document.querySelector('legend')!.firstChild as Text;
+    const patchesBeforeLegendChange = fixture.patches().length;
     legendText.nodeValue = 'Updated group';
     fixture.mutate(characterDataRecord(legendText));
     fixture.flushFrame();
 
-    expect(JSON.stringify(fixture.patches().at(-1))).not.toContain('Updated group');
-    expect(JSON.stringify(fixture.patches().at(-1))).not.toContain('controlText');
+    expect(fixture.patches()).toHaveLength(patchesBeforeLegendChange);
   });
 
   it('emits bounded capacity diagnostics when checkpoint serialization overflows', () => {
@@ -742,11 +741,10 @@ describe('HtmlMirrorSourceSession', () => {
     );
     fixture.port.emitMessage(createHtmlMirrorAck(identity, 3));
 
+    const patchesBeforeSettledResize = fixture.patches().length;
     fixture.window.dispatchEvent(new fixture.window.Event('resize'));
     fixture.flushFrame();
-    expect(fixture.patches().at(-1)?.operations.every(
-      ({ kind }) => kind === 'dimensions',
-    )).toBe(true);
+    expect(fixture.patches()).toHaveLength(patchesBeforeSettledResize);
   });
 
   it('ignores mutations below an intentionally omitted mirror ancestor', () => {
@@ -757,13 +755,13 @@ describe('HtmlMirrorSourceSession', () => {
     // Simulate another page-owned subsystem assigning an ID. Mirror ownership,
     // not registry presence alone, decides whether a patch may be emitted.
     fixture.registry.getId(omitted);
+    const patchesBeforeOmittedMutation = fixture.patches().length;
     omitted.nodeValue = 'changed omitted secret';
     fixture.mutate(characterDataRecord(omitted));
     fixture.flushFrame();
 
-    const patch = fixture.patches().at(-1)!;
-    expect(patch.operations.every(({ kind }) => kind === 'dimensions')).toBe(true);
-    expect(JSON.stringify(patch)).not.toContain('secret');
+    expect(fixture.patches()).toHaveLength(patchesBeforeOmittedMutation);
+    expect(JSON.stringify(fixture.port.posts)).not.toContain('changed omitted secret');
   });
 
   it('omits embedded frame surfaces from checkpoints and later mutations', () => {
@@ -794,21 +792,12 @@ describe('HtmlMirrorSourceSession', () => {
     added.setAttribute('srcdoc', '<p>dynamic frame secret</p>');
     added.append(fixture.document.createTextNode('dynamic frame secret'));
     page.append(added);
+    const patchesBeforeOmittedFrame = fixture.patches().length;
     fixture.mutate(childListRecord(page, [added]));
     fixture.flushFrame();
 
-    const patchJson = JSON.stringify(fixture.patches().at(-1));
-    expect(fixture.patches().at(-1)?.operations).toEqual(expect.arrayContaining([
-      expect.objectContaining({
-        kind: 'reconcile-children',
-        children: [expect.objectContaining({ kind: 'retain' })],
-      }),
-    ]));
-    expect(patchJson).not.toContain('"tagName":"iframe"');
-    expect(patchJson).not.toContain('dynamic frame secret');
-    expect(fixture.patches().at(-1)?.representability).toMatchObject({
-      unsafeElementOmissionCount: 3,
-    });
+    expect(fixture.patches()).toHaveLength(patchesBeforeOmittedFrame);
+    expect(JSON.stringify(fixture.port.posts)).not.toContain('dynamic frame secret');
 
     const foreign = parseHTML('<html><body>foreign frame secret</body></html>');
     const foreignText = foreign.document.body.firstChild as Text;
