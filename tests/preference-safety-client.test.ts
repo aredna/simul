@@ -1,6 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  PREFERENCE_SAFETY_HEARTBEAT_INTERVAL_MS,
   PreferenceSafetyClient,
   type PreferenceSafetyClientPort,
 } from '../lib/preference-safety-client';
@@ -116,6 +117,50 @@ describe('PreferenceSafetyClient', () => {
     expect(client.ready).toBe(false);
     expect(onFailClosed).toHaveBeenCalledTimes(1);
     client.dispose();
+  });
+
+  it('keeps a ready long-lived Port active without rebuilding the replica', async () => {
+    const port = new FakeClientPort();
+    const timers: Array<{ callback: () => void; delay: number }> = [];
+    const client = new PreferenceSafetyClient({
+      connect: () => port,
+      refreshCommittedSnapshot: async () => undefined,
+      onSafetyMessage: vi.fn(),
+      onFailClosed: vi.fn(),
+      onReady: vi.fn(),
+      createNonce: () => 'heartbeat-connection',
+      setTimer: (callback, delay) => {
+        const timer = { callback, delay };
+        timers.push(timer);
+        return timer;
+      },
+      clearTimer: (timer) => {
+        const index = timers.indexOf(
+          timer as { callback: () => void; delay: number },
+        );
+        if (index >= 0) timers.splice(index, 1);
+      },
+    });
+
+    client.start();
+    port.ready('heartbeat-connection');
+    await Promise.resolve();
+    await Promise.resolve();
+
+    expect(timers.map(({ delay }) => delay)).toEqual([
+      PREFERENCE_SAFETY_HEARTBEAT_INTERVAL_MS,
+    ]);
+    timers.shift()!.callback();
+    expect(port.posted.at(-1)).toEqual({
+      kind: 'simul:preference-safety-v1:heartbeat',
+      version: 1,
+    });
+    expect(timers.map(({ delay }) => delay)).toEqual([
+      PREFERENCE_SAFETY_HEARTBEAT_INTERVAL_MS,
+    ]);
+
+    client.dispose();
+    expect(timers).toHaveLength(0);
   });
 
   it('does not post a safety reply until asynchronous teardown completes', async () => {
