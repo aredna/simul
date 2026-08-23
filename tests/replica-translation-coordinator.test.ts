@@ -77,6 +77,22 @@ describe('ReplicaTranslationCoordinator', () => {
     expect(destroy).not.toHaveBeenCalled();
   });
 
+  it('indexes current records once instead of rescanning the snapshot per node', async () => {
+    const surface = new FakeSurface(
+      Array.from({ length: 200 }, (_, index) =>
+        record(index + 1, 1, `Text ${index}`)),
+    );
+    const { provider } = fakeProvider(async (source) => `en:${source}`);
+    const coordinator = new ReplicaTranslationCoordinator(provider, surface);
+
+    await expect(coordinator.translateCurrent(pair)).resolves.toMatchObject({
+      completed: 200,
+      failed: 0,
+    });
+
+    expect(surface.snapshotCalls).toBeLessThanOrEqual(3);
+  });
+
   it('rejects a late result after source revision changes', async () => {
     let resolve!: (value: string) => void;
     const { provider } = fakeProvider(
@@ -583,6 +599,7 @@ class FakeSurface implements ReplicaTranslationSurface {
   lease = 1;
   document = documentIdentity;
   records: ReplicaSourceTextRecord[];
+  snapshotCalls = 0;
   readonly contexts: ReplicaProjectionContext[] = [];
   readonly projections: ReplicaTextProjection[] = [];
   #context: ReplicaProjectionContext = { translationEpoch: 0, pairKey: undefined };
@@ -597,6 +614,7 @@ class FakeSurface implements ReplicaTranslationSurface {
   }
 
   snapshot(): ReplicaTranslationSnapshot {
+    this.snapshotCalls += 1;
     return {
       document: this.document,
       replayLease: this.lease,

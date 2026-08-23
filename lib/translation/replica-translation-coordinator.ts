@@ -88,6 +88,12 @@ interface PendingJob {
   readonly signal?: AbortSignal;
 }
 
+interface CurrentReplicaRecordIndex {
+  readonly document: ReplicaSourceDocumentIdentity;
+  readonly replayLease: number;
+  readonly records: Map<number, ReplicaSourceTextRecord>;
+}
+
 // Match the validated Isolated HTML graph envelope so a fully admitted public
 // option list cannot outrun the downstream translation lane. The lane remains
 // sequential and the memory cache keeps its own tighter eviction budget.
@@ -119,6 +125,7 @@ export class ReplicaTranslationCoordinator {
   #pendingSkipped = 0;
   #pendingOverflow = 0;
   #drainTask: Promise<ReplicaTranslationRunResult> | undefined;
+  #currentRecords: CurrentReplicaRecordIndex | undefined;
   #disposed = false;
   readonly #maxPendingJobs: number;
   readonly #maxPendingCharacters: number;
@@ -204,6 +211,7 @@ export class ReplicaTranslationCoordinator {
     this.#assertRunCurrent(pair, requestedEpoch, options.signal);
     const snapshot = this.surface.snapshot();
     if (!snapshot) return this.#emptyResult();
+    this.#replaceCurrentRecords(snapshot);
     const pairKey = translationPairKey(pair);
     const candidates = snapshot.records.filter(isTranslatableRecord);
     for (const record of candidates) {
@@ -232,6 +240,7 @@ export class ReplicaTranslationCoordinator {
       snapshot.replayLease !== commit.replayLease ||
       !sameSourceDocument(snapshot.document, commit.document)
     ) return;
+    this.#applySourceCommitToCurrentRecords(commit);
     const pairKey = translationPairKey(this.#pair);
     let queued = false;
     for (const change of commit.changes) {
@@ -258,6 +267,7 @@ export class ReplicaTranslationCoordinator {
     this.#pendingCharacters = 0;
     this.#pendingSkipped = 0;
     this.#pendingOverflow = 0;
+    this.#currentRecords = undefined;
   }
 
   dispose(): void {
@@ -271,6 +281,7 @@ export class ReplicaTranslationCoordinator {
     this.#pendingCharacters = 0;
     this.#pendingSkipped = 0;
     this.#pendingOverflow = 0;
+    this.#currentRecords = undefined;
   }
 
   async #ensureSession(
@@ -570,15 +581,13 @@ export class ReplicaTranslationCoordinator {
       !this.#pair ||
       translationPairKey(this.#pair) !== job.pairKey
     ) return false;
-    const snapshot = this.surface.snapshot();
+    const snapshot = this.#currentRecords;
     if (
       !snapshot ||
       snapshot.replayLease !== job.replayLease ||
       !sameSourceDocument(snapshot.document, job.record.document)
     ) return false;
-    const current = snapshot.records.find(
-      (record) => record.nodeId === job.record.nodeId,
-    );
+    const current = snapshot.records.get(job.record.nodeId);
     return Boolean(
       current &&
         current.nodeType === job.record.nodeType &&
@@ -588,6 +597,35 @@ export class ReplicaTranslationCoordinator {
         current.revision === job.record.revision &&
         current.source === job.record.source,
     );
+  }
+
+  #replaceCurrentRecords(snapshot: ReplicaTranslationSnapshot): void {
+    this.#currentRecords = {
+      document: snapshot.document,
+      replayLease: snapshot.replayLease,
+      records: new Map(snapshot.records.map((record) => [record.nodeId, record])),
+    };
+  }
+
+  #applySourceCommitToCurrentRecords(commit: ReplicaSourceCommit): void {
+    const current = this.#currentRecords;
+    if (
+      !current ||
+      commit.reason !== 'batch' ||
+      current.replayLease !== commit.replayLease ||
+      !sameSourceDocument(current.document, commit.document)
+    ) {
+      this.#currentRecords = {
+        document: commit.document,
+        replayLease: commit.replayLease,
+        records: new Map(commit.records.map((record) => [record.nodeId, record])),
+      };
+      return;
+    }
+    for (const change of commit.changes) {
+      if (change.kind === 'remove') current.records.delete(change.nodeId);
+      else current.records.set(change.record.nodeId, change.record);
+    }
   }
 }
 
