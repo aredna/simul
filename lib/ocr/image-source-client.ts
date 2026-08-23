@@ -100,6 +100,7 @@ class ChromeImageSourceLease implements ImageSourceLease {
       readonly timer: ReturnType<typeof setTimeout>;
       readonly signal?: AbortSignal;
       readonly onAbort: () => void;
+      readonly descriptor: SourceImageDescriptor;
     }
   >();
   readonly #pendingAccessibility = new Map<
@@ -190,7 +191,14 @@ class ChromeImageSourceLease implements ImageSourceLease {
         signal?.removeEventListener('abort', onAbort);
         resolve(undefined);
       }, IMAGE_SOURCE_MEASURE_TIMEOUT_MS);
-      this.#pending.set(requestId, { resolve, reject, timer, signal, onAbort });
+      this.#pending.set(requestId, {
+        resolve,
+        reject,
+        timer,
+        signal,
+        onAbort,
+        descriptor,
+      });
       signal?.addEventListener('abort', onAbort, { once: true });
       try {
         this.port.postMessage({
@@ -322,6 +330,17 @@ class ChromeImageSourceLease implements ImageSourceLease {
       );
       return;
     }
+    const pending = this.#pending.get(message.requestId);
+    if (
+      pending &&
+      message.status === 'ready' &&
+      !sameCaptureMetricsDescriptorIdentity(message.metrics, pending.descriptor)
+    ) {
+      this.disposeWithError(new ImageSourceUnavailableError(
+        'Mismatched image measurement response.',
+      ));
+      return;
+    }
     this.#settlePending(
       message.requestId,
       message.status === 'ready' ? message.metrics : undefined,
@@ -406,6 +425,16 @@ function readableError(error: unknown): string {
 
 function sameAccessibilityDescriptorIdentity(
   response: SourceImageDescriptor,
+  pending: SourceImageDescriptor,
+): boolean {
+  return sameSourceDocument(response.document, pending.document) &&
+    response.nodeId === pending.nodeId &&
+    response.contentRevision === pending.contentRevision &&
+    response.observationRevision === pending.observationRevision;
+}
+
+function sameCaptureMetricsDescriptorIdentity(
+  response: SourceImageCaptureMetrics,
   pending: SourceImageDescriptor,
 ): boolean {
   return sameSourceDocument(response.document, pending.document) &&
