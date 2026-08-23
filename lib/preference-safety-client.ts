@@ -38,6 +38,7 @@ interface PortListeners {
 
 const RECONNECT_DELAYS_MS = Object.freeze([100, 250, 500, 1_000, 2_000]);
 const DEFAULT_HANDSHAKE_TIMEOUT_MS = 2_000;
+export const PREFERENCE_SAFETY_HEARTBEAT_INTERVAL_MS = 20_000;
 
 /**
  * Keeps a companion attached to the background-owned privacy barrier.
@@ -52,6 +53,7 @@ export class PreferenceSafetyClient {
   #reconnectAttempt = 0;
   #reconnectTimer: unknown;
   #handshakeTimer: unknown;
+  #heartbeatTimer: unknown;
   #started = false;
   #disposed = false;
   #ready = false;
@@ -74,6 +76,7 @@ export class PreferenceSafetyClient {
     this.#disposed = true;
     this.#clearReconnectTimer();
     this.#clearHandshakeTimer();
+    this.#clearHeartbeatTimer();
     const port = this.#port;
     this.#detachPort(port);
     try {
@@ -182,7 +185,9 @@ export class PreferenceSafetyClient {
     } catch {
       this.#ready = false;
       this.#invalidate(port, generation, true);
+      return;
     }
+    this.#scheduleHeartbeat(port, generation);
   }
 
   #disconnect(
@@ -199,6 +204,7 @@ export class PreferenceSafetyClient {
   ): void {
     if (!this.#isCurrent(port, generation)) return;
     this.#clearHandshakeTimer();
+    this.#clearHeartbeatTimer();
     this.#detachPort(port);
     this.#generation += 1;
     this.#ready = false;
@@ -246,6 +252,35 @@ export class PreferenceSafetyClient {
     }, delay);
   }
 
+  #scheduleHeartbeat(
+    port: PreferenceSafetyClientPort,
+    generation: number,
+  ): void {
+    if (
+      !this.#ready ||
+      !this.#isCurrent(port, generation) ||
+      this.#heartbeatTimer !== undefined
+    ) return;
+    this.#heartbeatTimer = this.#setTimer(() => {
+      this.#heartbeatTimer = undefined;
+      if (!this.#ready || !this.#isCurrent(port, generation)) return;
+      try {
+        // Since Chrome 114, sending a long-lived Port message resets the MV3
+        // worker's 30-second idle timer. The safety coordinator is intentionally
+        // connection-scoped, so letting an otherwise healthy worker time out
+        // would force a full cache purge and replica rebuild every idle cycle.
+        port.postMessage({
+          kind: 'simul:preference-safety-v1:heartbeat',
+          version: PREFERENCE_SAFETY_PROTOCOL_VERSION,
+        });
+      } catch {
+        this.#invalidate(port, generation, true);
+        return;
+      }
+      this.#scheduleHeartbeat(port, generation);
+    }, PREFERENCE_SAFETY_HEARTBEAT_INTERVAL_MS);
+  }
+
   #isCurrent(
     port: PreferenceSafetyClientPort,
     generation: number,
@@ -274,6 +309,14 @@ export class PreferenceSafetyClient {
       timer as ReturnType<typeof setTimeout>,
     )))(this.#handshakeTimer);
     this.#handshakeTimer = undefined;
+  }
+
+  #clearHeartbeatTimer(): void {
+    if (this.#heartbeatTimer === undefined) return;
+    (this.options.clearTimer ?? ((timer) => clearTimeout(
+      timer as ReturnType<typeof setTimeout>,
+    )))(this.#heartbeatTimer);
+    this.#heartbeatTimer = undefined;
   }
 }
 
