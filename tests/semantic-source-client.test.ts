@@ -101,6 +101,23 @@ describe('Chrome semantic source client', () => {
     expect(port.messages).toHaveLength(1);
     expect(port.disconnects).toBe(1);
   });
+
+  it('suppresses a terminal failure after the lease is explicitly disposed', async () => {
+    const port = new FakePort();
+    installBrowser(port);
+    const lease = await openChromeSemanticSource(
+      request,
+      'isolated-html',
+      FULL_VISIBLE_REPLICA_READ_SCOPE,
+    );
+    port.emitDisconnect();
+    lease.dispose();
+    const onFailure = vi.fn();
+
+    lease.setObserver({ onBatch: () => true, onFailure });
+
+    expect(onFailure).not.toHaveBeenCalled();
+  });
 });
 
 function installBrowser(port: FakePort): ReturnType<typeof vi.fn> {
@@ -134,5 +151,9 @@ class FakePort {
 
   emitMessage(message: unknown): void {
     for (const listener of [...this.#messages]) listener(message);
+  }
+
+  emitDisconnect(): void {
+    for (const listener of [...this.#disconnects]) listener();
   }
 }

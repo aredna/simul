@@ -108,8 +108,11 @@ class ChromeSemanticSourceLease implements SemanticSourceStreamLease {
   }
 
   dispose(): void {
-    if (this.#disposed) return;
+    if (this.#explicitlyDisposed) return;
     this.#explicitlyDisposed = true;
+    this.#terminalFailure = false;
+    this.#queue.length = 0;
+    if (this.#disposed) return;
     this.#close(true);
   }
 
