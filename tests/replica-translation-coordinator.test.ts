@@ -524,6 +524,57 @@ describe('ReplicaTranslationCoordinator', () => {
     expect(onBackgroundResult).not.toHaveBeenCalled();
   });
 
+  it('starts a clean current-lease drain after recovery interrupts live work', async () => {
+    let resolveObsolete!: (value: string) => void;
+    const translate = vi.fn((source: string) => {
+      if (source === 'Seed' || source === 'Current') {
+        return Promise.resolve(`en:${source}`);
+      }
+      return new Promise<string>((resolve) => {
+        resolveObsolete = resolve;
+      });
+    });
+    const { provider } = fakeProvider(translate);
+    const surface = new FakeSurface([record(4, 1, 'Seed')]);
+    const onBackgroundResult = vi.fn();
+    const coordinator = new ReplicaTranslationCoordinator(provider, surface, {
+      onBackgroundResult,
+    });
+    await coordinator.translateCurrent(pair);
+    surface.projections.length = 0;
+    surface.records = [
+      record(10, 1, 'Obsolete'),
+      record(12, 1, 'Obsolete queued'),
+    ];
+    coordinator.handleSourceCommit(commitFor(surface));
+    await vi.waitFor(() => expect(resolveObsolete).toBeTypeOf('function'));
+
+    surface.lease = 2;
+    const current = record(11, 1, 'Current');
+    surface.records = [current];
+    coordinator.handleSourceCommit({
+      ...commitFor(surface, [current]),
+      reason: 'recovery',
+    });
+    resolveObsolete('en:Obsolete');
+
+    await vi.waitFor(() => expect(onBackgroundResult).toHaveBeenCalledOnce());
+    expect(onBackgroundResult).toHaveBeenCalledWith(expect.objectContaining({
+      replayLease: 2,
+      total: 1,
+      completed: 1,
+      stale: 0,
+    }));
+    expect(surface.projections).toEqual([
+      expect.objectContaining({
+        replayLease: 2,
+        nodeId: 11,
+        translated: 'en:Current',
+      }),
+    ]);
+    expect(translate).not.toHaveBeenCalledWith('Obsolete queued');
+  });
+
   it('notifies once when multiple commits join one background drain', async () => {
     let resolveFirst!: (value: string) => void;
     const translate = vi.fn((source: string) => {
