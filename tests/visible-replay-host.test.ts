@@ -178,6 +178,41 @@ describe('visible rrweb replay host', () => {
     });
   });
 
+  it('retains reader scroll across recovery before source scroll arrives', () => {
+    const fixture = createFixture();
+    const first = fixture.host.createCandidate(dimensions());
+    const firstScrollTo = vi.fn();
+    const firstIframe = createProtectedIframe(fixture.document, firstScrollTo);
+    first.mount.append(firstIframe);
+    first.commit(firstIframe, { width: 1_400, height: 2_500 });
+    const firstScroller = requireElement<HTMLElement>(
+      fixture.preview,
+      '.replica-replay-scroll',
+    );
+
+    firstScroller.scrollTop = 375;
+    firstScroller.dispatchEvent(new fixture.window.Event('scroll'));
+
+    const recovery = fixture.host.createCandidate(dimensions());
+    const recoveryScrollTo = vi.fn();
+    const recoveryIframe = createProtectedIframe(
+      fixture.document,
+      recoveryScrollTo,
+    );
+    recovery.mount.append(recoveryIframe);
+    recovery.commit(recoveryIframe, { width: 1_400, height: 2_500 });
+
+    expect(recoveryScrollTo).toHaveBeenLastCalledWith({
+      left: 0,
+      top: 375,
+      behavior: 'auto',
+    });
+    expect(requireElement<HTMLElement>(
+      fixture.preview,
+      '.replica-replay-scroll',
+    ).scrollTop).toBe(375);
+  });
+
   it('retains source coordinates while a delayed replica extent catches up', () => {
     const fixture = createFixture();
     fixture.host.followSourceScroll({
