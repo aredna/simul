@@ -54,6 +54,22 @@ describe('sidepanel UI structure', () => {
     expect(script).toContain("translationInFlight\n      ? 'Translating…'");
   });
 
+  it('shows the quick-translation input limit without announcing every keystroke', () => {
+    const { document } = parseHTML(markup);
+    const input = document.querySelector('#composer-input');
+    const count = document.querySelector('#composer-character-count');
+
+    expect(input?.getAttribute('maxlength')).toBe('5000');
+    expect(input?.getAttribute('aria-describedby')).toContain(
+      'composer-character-count',
+    );
+    expect(count?.textContent).toBe('0 / 5,000');
+    expect(count?.hasAttribute('aria-live')).toBe(false);
+    expect(script).toContain('function syncComposerCharacterCount()');
+    expect(script).toContain('current >= maximum * 0.9');
+    expect(style).toContain('.composer-character-count[data-near-limit="true"]');
+  });
+
   it('orders every primary toolbar action in one direct row', () => {
     const { document } = parseHTML(markup);
     const controls = [...document.querySelectorAll<HTMLElement>(

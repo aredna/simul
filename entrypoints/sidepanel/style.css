@@ -342,6 +342,8 @@ select { width: 100%; min-height: 34px; padding: 5px 26px 5px 8px; font-size: 12
 .quick-language-arrow { color: var(--muted); text-align: center; }
 .composer-label { display: block; margin: 10px 0 4px; }
 .quick-translator textarea { width: 100%; padding: 8px; resize: vertical; font-size: 12px; line-height: 1.4; }
+.composer-character-count { display: block; margin-top: 3px; color: var(--muted); font-size: 9px; font-variant-numeric: tabular-nums; text-align: right; }
+.composer-character-count[data-near-limit="true"] { color: var(--warning-text); }
 #composer-output { margin-top: 7px; background: #f8faf8; }
 
 .status { min-height: 17px; margin: 10px 0 0; color: var(--muted); font-size: 10.5px; line-height: 1.4; }

@@ -410,6 +410,10 @@ const snapshotContainer = requireElement<HTMLElement>('#snapshot');
 const replicaPreviewContainer = requireElement<HTMLElement>('#replica-preview');
 const replicaModeBadge = requireElement<HTMLElement>('#replica-mode-badge');
 const composerInput = requireElement<HTMLTextAreaElement>('#composer-input');
+const composerCharacterCount = requireElement<HTMLOutputElement>(
+  '#composer-character-count',
+);
+const composerCharacterCountFormat = new Intl.NumberFormat();
 const composerOutput = requireElement<HTMLTextAreaElement>('#composer-output');
 const translateComposerButton = requireElement<HTMLButtonElement>('#translate-composer');
 const copyComposerButton = requireElement<HTMLButtonElement>('#copy-composer');
@@ -1569,6 +1573,7 @@ function purgeSourceDerivedRuntimeInternal(
 
 function clearResetOnlyRuntimeState(): void {
   composerInput.value = '';
+  syncComposerCharacterCount();
   composerOutput.value = '';
   invalidateComposerOutput();
   imageTranslationDiagnosticHistory.clear();
@@ -5674,6 +5679,7 @@ function setImageTranslationBusy(busy: boolean): void {
 }
 
 composerInput.addEventListener('input', () => {
+  syncComposerCharacterCount();
   invalidateComposerOutput();
   updateControls();
 });
@@ -5685,6 +5691,22 @@ composerInput.addEventListener('keydown', (event) => {
   event.preventDefault();
   void translateComposer();
 });
+syncComposerCharacterCount();
+
+function syncComposerCharacterCount(): void {
+  const current = composerInput.value.length;
+  const maximum = composerInput.maxLength;
+  const currentLabel = composerCharacterCountFormat.format(current);
+  const maximumLabel = composerCharacterCountFormat.format(maximum);
+  composerCharacterCount.value = `${currentLabel} / ${maximumLabel}`;
+  composerCharacterCount.setAttribute(
+    'aria-label',
+    `${currentLabel} of ${maximumLabel} characters used`,
+  );
+  composerCharacterCount.dataset.nearLimit = String(
+    maximum > 0 && current >= maximum * 0.9,
+  );
+}
 
 function showProgress(label: string, value: number, max: number): void {
   progressRegion.hidden = false;
