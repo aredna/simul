@@ -627,7 +627,10 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
   }
 
   #scheduleDeferredClose(): void {
-    if (this.#deferredCloseTimer !== undefined) return;
+    if (
+      this.#disposed || this.presentation !== 'popup' || !this.#open ||
+      this.#deferredCloseTimer !== undefined
+    ) return;
     const view = this.document.defaultView;
     const schedule = view?.setTimeout?.bind(view) ?? globalThis.setTimeout;
     this.#deferredCloseTimer = schedule(() => {
