@@ -11,6 +11,11 @@ export interface BrowserWindowGeometry {
   readonly top?: number;
 }
 
+export interface BrowserWindowFollowState {
+  readonly type?: string;
+  readonly focused?: boolean;
+}
+
 export interface DetachedWindowCreateData extends BrowserWindowGeometry {
   readonly url: string;
   readonly type: 'popup';
@@ -81,6 +86,15 @@ export function shouldFollowActivatedTab(
       followMode === 'active' &&
       companionWindowId !== activatedWindowId,
   );
+}
+
+/** Background-window activations are not user focus changes and must not
+ * retarget a detached companion that follows the visible browser tab. */
+export function isFocusedNormalBrowserWindow(
+  window: BrowserWindowFollowState,
+): boolean {
+  return (window.type === undefined || window.type === 'normal') &&
+    window.focused !== false;
 }
 
 /**
