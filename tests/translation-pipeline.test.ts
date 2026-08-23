@@ -229,6 +229,17 @@ describe('splitText', () => {
     expect(splitText('short', Number.NaN)).toEqual(['short']);
     expect(splitText('short', Number.POSITIVE_INFINITY)).toEqual(['short']);
   });
+
+  it('chunks large inputs without losing code points across the moving cursor', () => {
+    const source = `${'😀abc '.repeat(20_000)}tail`;
+    const chunks = splitText(source, 257);
+
+    expect(chunks.length).toBeGreaterThan(100);
+    expect(chunks.every((chunk) => [...chunk].length <= 257)).toBe(true);
+    expect(chunks.join(' ').replace(/\s+/gu, ' ')).toBe(
+      source.replace(/\s+/gu, ' '),
+    );
+  });
 });
 
 describe('translateWithSession', () => {
