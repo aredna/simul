@@ -91,8 +91,10 @@ export function shouldIgnoreInactiveFollowedTabUpdate(
   isDetachedWindow: boolean,
   followMode: CompanionPreferences['popoutTabMode'],
   tabIsActive: boolean,
+  followTransitionPending = false,
 ): boolean {
-  return isDetachedWindow && followMode === 'active' && !tabIsActive;
+  return isDetachedWindow && followMode === 'active' &&
+    (followTransitionPending || !tabIsActive);
 }
 
 /**
