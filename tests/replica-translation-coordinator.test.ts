@@ -90,7 +90,7 @@ describe('ReplicaTranslationCoordinator', () => {
       failed: 0,
     });
 
-    expect(surface.snapshotCalls).toBeLessThanOrEqual(3);
+    expect(surface.snapshotCalls).toBeLessThanOrEqual(1);
   });
 
   it('does not rebuild a full snapshot to admit an incremental source batch', async () => {
@@ -111,9 +111,7 @@ describe('ReplicaTranslationCoordinator', () => {
     coordinator.handleSourceCommit(commitFor(surface, [changed]));
     await vi.waitFor(() => expect(onBackgroundResult).toHaveBeenCalledOnce());
 
-    // One result context and one final currency check remain; admission itself
-    // does not add another whole-replica snapshot.
-    expect(surface.snapshotCalls).toBeLessThanOrEqual(2);
+    expect(surface.snapshotCalls).toBe(0);
   });
 
   it('rejects a late result after source revision changes', async () => {
