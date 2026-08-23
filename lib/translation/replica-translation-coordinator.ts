@@ -238,13 +238,21 @@ export class ReplicaTranslationCoordinator {
     // The current record index already authenticates ordinary in-lease batches.
     // Avoid rebuilding the surface's full snapshot for every small DOM mutation;
     // checkpoint/recovery commits still cross-check their new lease explicitly.
-    if (!this.#isCurrentIncrementalCommit(commit)) {
+    const incremental = this.#isCurrentIncrementalCommit(commit);
+    if (!incremental) {
       const snapshot = this.surface.snapshot();
       if (
         !snapshot ||
         snapshot.replayLease !== commit.replayLease ||
         !sameSourceDocument(snapshot.document, commit.document)
       ) return;
+      // Checkpoint/recovery replaces the projection lease. Work that has not
+      // started belongs wholly to the prior surface and must not leak stale
+      // counts into the clean current-lease drain queued below.
+      this.#pending.clear();
+      this.#pendingCharacters = 0;
+      this.#pendingSkipped = 0;
+      this.#pendingOverflow = 0;
     }
     this.#applySourceCommitToCurrentRecords(commit);
     const pairKey = translationPairKey(this.#pair);
@@ -382,6 +390,7 @@ export class ReplicaTranslationCoordinator {
     let overflow = this.#takePendingOverflow();
     const task = (async (): Promise<ReplicaTranslationRunResult> => {
       while (this.#pending.size > 0) {
+        if (!sameResultContext(context, this.#resultContext())) break;
         const next = this.#pending.entries().next().value as
           | [number, PendingJob]
           | undefined;
@@ -499,6 +508,13 @@ export class ReplicaTranslationCoordinator {
     }).catch(() => {
       // Background jobs carry only the pair signal and normally settle stale
       // on invalidation. A defensive rejection must not become unhandled.
+    }).finally(() => {
+      if (
+        !this.#disposed &&
+        (this.#pending.size > 0 ||
+          this.#pendingSkipped > 0 ||
+          this.#pendingOverflow > 0)
+      ) this.#startBackgroundDrain();
     });
   }
 
@@ -705,6 +721,29 @@ function samePendingJob(left: PendingJob, right: PendingJob): boolean {
     left.pairSignal === right.pairSignal &&
     left.signal === right.signal &&
     sameSourceDocument(left.record.document, right.record.document)
+  );
+}
+
+function sameResultContext(
+  left: Pick<
+    ReplicaTranslationRunResult,
+    'document' | 'replayLease' | 'translationEpoch' | 'pairKey'
+  >,
+  right: Pick<
+    ReplicaTranslationRunResult,
+    'document' | 'replayLease' | 'translationEpoch' | 'pairKey'
+  >,
+): boolean {
+  return (
+    left.translationEpoch === right.translationEpoch &&
+    left.pairKey === right.pairKey &&
+    left.replayLease === right.replayLease &&
+    ((!left.document && !right.document) ||
+      Boolean(
+        left.document &&
+          right.document &&
+          sameSourceDocument(left.document, right.document),
+      ))
   );
 }
 
