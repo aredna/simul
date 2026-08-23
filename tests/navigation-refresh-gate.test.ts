@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 import {
   isUrlOnlyNavigationSignal,
   NavigationRefreshGate,
+  resolveNavigationUpdateStatus,
 } from '../lib/navigation-refresh-gate';
 
 describe('isUrlOnlyNavigationSignal', () => {
@@ -10,6 +11,19 @@ describe('isUrlOnlyNavigationSignal', () => {
     expect(isUrlOnlyNavigationSignal('loading', true)).toBe(false);
     expect(isUrlOnlyNavigationSignal('complete', true)).toBe(false);
     expect(isUrlOnlyNavigationSignal(undefined, false)).toBe(false);
+  });
+});
+
+describe('resolveNavigationUpdateStatus', () => {
+  it('promotes a split URL update when the tab is already loading', () => {
+    expect(resolveNavigationUpdateStatus(undefined, 'loading', true))
+      .toBe('loading');
+    expect(resolveNavigationUpdateStatus(undefined, 'complete', true))
+      .toBeUndefined();
+    expect(resolveNavigationUpdateStatus(undefined, 'loading', false))
+      .toBeUndefined();
+    expect(resolveNavigationUpdateStatus('complete', 'loading', true))
+      .toBe('complete');
   });
 });
 
