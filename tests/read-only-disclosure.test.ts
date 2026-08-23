@@ -275,6 +275,52 @@ describe('read-only replica disclosure placement', () => {
     expect(vi.getTimerCount()).toBe(0);
   });
 
+  it('dismisses an open popup when another permanent list is clicked', () => {
+    const { document, window } = parseHTML(
+      '<html><body><button id="trigger">Open</button><div id="popup">Panel</div>' +
+      '<div id="list"><button id="list-item">One</button></div></body></html>',
+    );
+    const trigger = document.querySelector<HTMLElement>('#trigger')!;
+    const popup = document.querySelector<HTMLElement>('#popup')!;
+    const list = document.querySelector<HTMLElement>('#list')!;
+    const listItem = document.querySelector<HTMLElement>('#list-item')!;
+    const popupController = installReadOnlyReplicaDisclosure({
+      anchor: trigger,
+      trigger,
+      panel: popup,
+      presentation: 'popup',
+    });
+    const listController = installReadOnlyReplicaDisclosure({
+      anchor: list,
+      panel: list,
+      presentation: 'list',
+    });
+    popupController.open();
+
+    const pointerDown = new window.Event('pointerdown', {
+      bubbles: true,
+      cancelable: true,
+    });
+    Object.defineProperty(pointerDown, 'composedPath', {
+      configurable: true,
+      value: () => [
+        listItem,
+        list,
+        document.body,
+        document.documentElement,
+        document,
+      ],
+    });
+    // Linkedom runs element capture listeners before document capture, unlike
+    // browsers. Dispatch at the document while preserving the browser path so
+    // this test exercises the document-owned dismissal decision directly.
+    document.dispatchEvent(pointerDown);
+
+    expect(popupController.isOpen()).toBe(false);
+    popupController.dispose();
+    listController.dispose();
+  });
+
   it('limits identity checks to disclosure subtrees removed from the replica', async () => {
     const { document } = parseHTML(
       '<html><body><div id="owned"><button id="trigger">Open</button>' +

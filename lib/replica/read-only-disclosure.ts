@@ -233,9 +233,7 @@ export function disposeReadOnlyReplicaDisclosures(document: Document): void {
  * preview controller. Markers never authorize source input/change/form events.
  */
 export function isReadOnlyReplicaDisclosureEvent(event: Event): boolean {
-  const path = typeof event.composedPath === 'function'
-    ? event.composedPath()
-    : [event.target];
+  const path = disclosureEventPath(event);
   return path.some((candidate) => {
     if (isOwnedDisclosureSurface(
       candidate,
@@ -456,6 +454,12 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
 
   isAnchoredWithin(root: Node): boolean {
     return root === this.anchor || root.contains(this.anchor);
+  }
+
+  ownsEventPath(path: readonly EventTarget[]): boolean {
+    return path.includes(this.panel) || Boolean(
+      this.trigger && path.includes(this.trigger),
+    );
   }
 
   identityIntersects(root: Node): boolean {
@@ -761,8 +765,11 @@ function installDocumentDisclosureState(
 ): DocumentDisclosureState {
   const controllers = new Set<ReplicaDisclosureController>();
   const onPointerDown = (event: Event): void => {
-    if (isReadOnlyReplicaDisclosureEvent(event)) return;
-    for (const controller of controllers) controller.close();
+    const path = disclosureEventPath(event);
+    const ownedEvent = isReadOnlyReplicaDisclosureEvent(event);
+    for (const controller of controllers) {
+      if (!ownedEvent || !controller.ownsEventPath(path)) controller.close();
+    }
   };
   const syncOpenControllers = (): void => {
     for (const controller of controllers) {
@@ -826,6 +833,14 @@ function isOwnedDisclosureSurface(
     typeof candidate.getAttribute !== 'function'
   ) return false;
   return candidate.getAttribute(attribute) === DISCLOSURE_MARKER;
+}
+
+function disclosureEventPath(event: Event): readonly EventTarget[] {
+  return typeof event.composedPath === 'function'
+    ? event.composedPath()
+    : event.target
+      ? [event.target]
+      : [];
 }
 
 function snapshotAttributes(
