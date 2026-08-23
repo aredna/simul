@@ -758,11 +758,10 @@ function installDocumentDisclosureState(
     if (isReadOnlyReplicaDisclosureEvent(event)) return;
     for (const controller of controllers) controller.close();
   };
-  const onScroll = (): void => {
-    for (const controller of controllers) controller.sync();
-  };
-  const onResize = (): void => {
-    for (const controller of controllers) controller.sync();
+  const syncOpenControllers = (): void => {
+    for (const controller of controllers) {
+      if (controller.isOpen()) controller.sync();
+    }
   };
   const MutationObserverConstructor = document.defaultView?.MutationObserver;
   const observer = MutationObserverConstructor
@@ -776,24 +775,24 @@ function installDocumentDisclosureState(
     observer.observe(document.documentElement, { childList: true, subtree: true });
   }
   document.addEventListener('pointerdown', onPointerDown, true);
-  document.addEventListener('scroll', onScroll, true);
-  document.defaultView?.addEventListener('resize', onResize);
+  document.addEventListener('scroll', syncOpenControllers, true);
+  document.defaultView?.addEventListener('resize', syncOpenControllers);
 
   const frameElement = document.defaultView?.frameElement;
   const outerDocument = frameElement?.ownerDocument;
   const outerWindow = outerDocument?.defaultView;
-  outerDocument?.addEventListener('scroll', onResize, true);
-  outerWindow?.addEventListener('resize', onResize);
+  outerDocument?.addEventListener('scroll', syncOpenControllers, true);
+  outerWindow?.addEventListener('resize', syncOpenControllers);
 
   return {
     controllers,
     dispose: () => {
       observer?.disconnect();
       document.removeEventListener('pointerdown', onPointerDown, true);
-      document.removeEventListener('scroll', onScroll, true);
-      document.defaultView?.removeEventListener('resize', onResize);
-      outerDocument?.removeEventListener('scroll', onResize, true);
-      outerWindow?.removeEventListener('resize', onResize);
+      document.removeEventListener('scroll', syncOpenControllers, true);
+      document.defaultView?.removeEventListener('resize', syncOpenControllers);
+      outerDocument?.removeEventListener('scroll', syncOpenControllers, true);
+      outerWindow?.removeEventListener('resize', syncOpenControllers);
     },
   };
 }

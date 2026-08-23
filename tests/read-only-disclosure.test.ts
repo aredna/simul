@@ -118,6 +118,67 @@ describe('read-only replica disclosure placement', () => {
     controller.dispose();
   });
 
+  it('skips permanent lists and closed popups during scroll layout work', () => {
+    const { document, window } = parseHTML(
+      '<html><body><div id="list">One</div>' +
+      '<button id="closed-trigger">Closed</button><div id="closed">Panel</div>' +
+      '<button id="open-trigger">Open</button><div id="open">Panel</div>' +
+      '</body></html>',
+    );
+    const list = document.querySelector<HTMLElement>('#list')!;
+    const closedTrigger = document.querySelector<HTMLElement>('#closed-trigger')!;
+    const closedPanel = document.querySelector<HTMLElement>('#closed')!;
+    const openTrigger = document.querySelector<HTMLElement>('#open-trigger')!;
+    const openPanel = document.querySelector<HTMLElement>('#open')!;
+    const listRect = vi.fn(() => ({
+      bottom: 20, height: 20, left: 0, right: 100, top: 0, width: 100,
+    }));
+    const closedRect = vi.fn(() => ({
+      bottom: 50, height: 20, left: 0, right: 100, top: 30, width: 100,
+    }));
+    const openRect = vi.fn(() => ({
+      bottom: 80, height: 20, left: 0, right: 100, top: 60, width: 100,
+    }));
+    Object.defineProperty(list, 'getBoundingClientRect', { value: listRect });
+    Object.defineProperty(closedTrigger, 'getBoundingClientRect', {
+      value: closedRect,
+    });
+    Object.defineProperty(openTrigger, 'getBoundingClientRect', { value: openRect });
+    Object.defineProperty(openPanel, 'getBoundingClientRect', {
+      value: () => ({
+        bottom: 180, height: 100, left: 0, right: 100, top: 80, width: 100,
+      }),
+    });
+    const listController = installReadOnlyReplicaDisclosure({
+      anchor: list,
+      panel: list,
+      presentation: 'list',
+    });
+    const closedController = installReadOnlyReplicaDisclosure({
+      anchor: closedTrigger,
+      trigger: closedTrigger,
+      panel: closedPanel,
+      presentation: 'popup',
+    });
+    const openController = installReadOnlyReplicaDisclosure({
+      anchor: openTrigger,
+      trigger: openTrigger,
+      panel: openPanel,
+      presentation: 'popup',
+    });
+    openController.open();
+    openRect.mockClear();
+
+    document.dispatchEvent(new window.Event('scroll'));
+
+    expect(listRect).not.toHaveBeenCalled();
+    expect(closedRect).not.toHaveBeenCalled();
+    expect(openRect).toHaveBeenCalledOnce();
+    openController.dispose();
+    closedController.dispose();
+    listController.dispose();
+  });
+
   it('reveals the selected row when a long dropdown opens', () => {
     const { document } = parseHTML(
       '<html><body><button id="trigger">Open</button>' +
