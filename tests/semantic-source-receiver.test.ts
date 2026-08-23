@@ -319,6 +319,84 @@ describe('semantic source receiver', () => {
       .toBe('Search');
   });
 
+  it('restores the newest base option label after a semantic refresh', () => {
+    const { document } = parseHTML(
+      '<html><body><select><option label="Original">Original</option></select></body></html>',
+    );
+    const option = document.querySelector<HTMLOptionElement>('option')!;
+    const recordId = semanticSourceRecordId(8, 'label')!;
+    const record: SemanticSourceRecord = {
+      bridge: 'rrweb',
+      recordId,
+      nodeId: 8,
+      nodeRevision: 1,
+      category: 'public-semantic',
+      gate: 'controlSemantics',
+      tagName: 'option',
+      type: '',
+      autocomplete: '',
+      role: '',
+      contentEditable: '',
+      text: 'Original',
+      presentation: 'label',
+      classifierVersion: 1,
+    };
+    const receiver = new SemanticSourceReceiver({
+      document: identity,
+      replicaDocument: document as unknown as Document,
+      resolveNode: () => option,
+    });
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 1, [record],
+    ))).toBeDefined();
+    expect(receiver.project({
+      document: identity,
+      replayLease: 2,
+      nodeId: -recordId,
+      nodeType: 1,
+      controlTarget: 'label',
+      sourceRevision: 1,
+      source: 'Original',
+      translationEpoch: 3,
+      pairKey: 'en:ja',
+      translated: 'Translated',
+    })).toBe(true);
+
+    option.setAttribute('label', 'Updated base');
+    expect(receiver.refreshBindings(false)).toEqual([]);
+    expect(option.getAttribute('label')).toBe('Translated');
+
+    receiver.clear();
+    expect(option.getAttribute('label')).toBe('Updated base');
+  });
+
+  it('reattaches an owned control label removed by a base patch', () => {
+    const { document } = parseHTML(
+      '<html><body><input id="draft" type="text" value="***"></body></html>',
+    );
+    const input = document.querySelector<HTMLInputElement>('#draft')!;
+    const receiver = new SemanticSourceReceiver({
+      document: identity,
+      replicaDocument: document as unknown as Document,
+      resolveNode: () => input,
+    });
+    const label = valueRecord({
+      recordId: 57,
+      category: 'ordinary-form',
+      gate: 'controlSemantics',
+      text: 'Search',
+      presentation: 'label',
+    });
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 1, [label],
+    ))).toBeDefined();
+    document.querySelector('[data-simul-semantic-source="v1"]')?.remove();
+
+    expect(receiver.refreshBindings(false)).toEqual([]);
+    expect(document.querySelector('[data-simul-semantic-source="v1"]')?.textContent)
+      .toBe('Search');
+  });
+
   it('admits custom-scope multiple selection but requires duplicate shape proofs to agree', () => {
     const { document } = parseHTML(
       '<html><body><select><option>One</option><option>Two</option></select></body></html>',

@@ -911,7 +911,7 @@ function evidenceElement(
 
 function textBinding(target: Node): SemanticBinding | undefined {
   if (target.nodeType !== 3) return undefined;
-  const original = target.nodeValue;
+  let original = target.nodeValue;
   let lastWritten: string | undefined;
   return {
     target,
@@ -935,7 +935,15 @@ function textBinding(target: Node): SemanticBinding | undefined {
         return false;
       }
     },
-    reapply: () => lastWritten === undefined || writeNodeValue(target, lastWritten),
+    reapply: () => {
+      if (lastWritten === undefined) return true;
+      try {
+        if (target.nodeValue !== lastWritten) original = target.nodeValue;
+      } catch {
+        return false;
+      }
+      return writeNodeValue(target, lastWritten);
+    },
     snapshot: () => {
       try {
         const value = target.nodeValue;
@@ -991,7 +999,18 @@ function propertyBinding(
         return false;
       }
     },
-    reapply: () => lastWritten === undefined || write(lastWritten),
+    reapply: () => {
+      if (lastWritten === undefined) return true;
+      try {
+        const current = control[property];
+        if (current !== lastWritten) {
+          original = String(current ?? '');
+        }
+      } catch {
+        return false;
+      }
+      return write(lastWritten);
+    },
     snapshot: () => {
       try {
         const value = control[property];
@@ -1016,7 +1035,7 @@ function attributeBinding(
   element: Element,
   attribute: string,
 ): SemanticBinding {
-  const original = safeNullableAttribute(element, attribute);
+  let original = safeNullableAttribute(element, attribute);
   let lastWritten: string | undefined;
   const write = (text: string): boolean => {
     try {
@@ -1043,7 +1062,16 @@ function attributeBinding(
         return false;
       }
     },
-    reapply: () => lastWritten === undefined || write(lastWritten),
+    reapply: () => {
+      if (lastWritten === undefined) return true;
+      try {
+        const current = element.getAttribute(attribute);
+        if (current !== lastWritten) original = current;
+      } catch {
+        return false;
+      }
+      return write(lastWritten);
+    },
     snapshot: () => {
       try {
         const present = element.hasAttribute(attribute);
@@ -1122,8 +1150,10 @@ function ownedTextBinding(
         return false;
       }
     },
-    reapply: () => attached && Boolean(owned.isConnected) &&
-      (lastWritten === undefined || write(lastWritten)),
+    reapply: () => {
+      if (attached && !owned.isConnected) attached = false;
+      return lastWritten === undefined || write(lastWritten);
+    },
     snapshot: () => {
       try {
         const parent = owned.parentNode;
