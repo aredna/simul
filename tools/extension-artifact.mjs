@@ -725,6 +725,14 @@ function validateManifest(manifest, filePaths) {
       'manifest.json version must contain 1-4 numeric components from 0 to 65535 without leading zeros.',
     );
   }
+  const versionName = typeof manifest.version_name === 'string'
+    ? manifest.version_name.trim()
+    : '';
+  if (!versionName.startsWith(`${manifest.version} `)) {
+    throw new ArtifactError(
+      'manifest.json version_name must be non-empty and begin with the exact numeric version followed by a space.',
+    );
+  }
   const chromeVersion = manifest.minimum_chrome_version;
   const minimumVersion =
     typeof chromeVersion === 'string' && /^\d+(?:\.\d+){0,3}$/u.test(chromeVersion)

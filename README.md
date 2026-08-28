@@ -26,8 +26,8 @@ canonical ready-to-load build. You do not need Node.js or npm to install it.
 
 Keep the directory in place while the extension is installed. After pulling a
 new version, select **Reload** on the Simul extension card, reload the source
-tab, and reopen the companion. The extension card and Simul Options should show
-`0.3.3 beta v.20260828.1`.
+tab, and reopen the companion. The extension card should show version `0.3.3`;
+Simul Options should show `Build 0.3.3 beta v.20260828.1`.
 
 This is an unpacked beta, not a Chrome Web Store or auto-updating release.
 
