@@ -2,7 +2,7 @@
 title: 'Fresh public testing build identity'
 type: 'chore'
 created: '2026-08-28T13:35:00+09:00'
-status: 'in-progress'
+status: 'in-review'
 review_loop_iteration: 0
 baseline_commit: '9698946ed896a0628bcff7de56771614e2c24d68'
 context:
@@ -37,8 +37,8 @@ context:
 
 ## Code Map
 
-- `package.json`, `package-lock.json` -- canonical numeric package/manifest version.
-- `wxt.config.ts`, `lib/build-identity.ts` -- generated `version_name` and runtime-visible build label.
+- `package.json`, `package-lock.json` -- canonical numeric version and its derived lockfile copy.
+- `wxt.config.ts`, `lib/build-identity.ts` -- generated `version_name` and its runtime-visible consumer.
 - `README.md`, `THIRD_PARTY_NOTICES.md` -- tester instructions and release inventory identity.
 - `tests/build-identity.test.ts`, `tests/extension-artifact.test.mjs` -- visible-label and generated-manifest assertions.
 - `tools/extension-artifact.mjs`, `dist/chrome-unpacked/` -- guarded sync, validation, and checked-in install directory.
@@ -46,25 +46,37 @@ context:
 ## Tasks & Acceptance
 
 **Execution:**
-- [x] `package.json`, `package-lock.json`, `wxt.config.ts` -- set `0.3.3 beta v.20260828.1` consistently.
-- [x] `README.md`, `THIRD_PARTY_NOTICES.md` -- publish the exact new tester-facing identity and reload instructions.
+- [x] `package.json`, `package-lock.json`, `wxt.config.ts` -- set numeric `0.3.3` and build suffix `beta v.20260828.1` consistently.
+- [x] `README.md`, `THIRD_PARTY_NOTICES.md` -- publish exact tester-facing labels and the numeric notice inventory release.
 - [x] `tests/build-identity.test.ts`, `tests/extension-artifact.test.mjs` -- pin numeric and visible identities.
 - [x] `dist/chrome-unpacked/` -- regenerate through the guarded artifact sync and confirm the manifest and rendered label.
-- [x] Git -- run the release gate, commit on `main`, and verify fetched fast-forward safety; publish only after review.
+- [x] Local Git -- run the release gate, commit through the feature branch, and fast-forward `main`.
+- [x] Push safety -- verify the fetched `origin/main` remains an ancestor without force or history rewriting.
+- [ ] Publication -- push reviewed `main` to `origin/main` only after the workflow marks the spec done.
 
 **Acceptance Criteria:**
 - Given the updated GitHub `main`, when a tester pulls and reloads the same unpacked directory, then Chrome and Simul display `0.3.3 beta v.20260828.1` rather than an ambiguous 0.3.2/July identity.
-- Given a clean checkout, when `npm run check` executes under Node 24/npm 12, then all retained tests and the byte-exact artifact gate pass.
+- Given a checkout with `npm ci` complete, when `npm run check` executes under Node 24/npm 12, then all retained tests and the byte-exact artifact gate pass.
 - Given unchanged remote ancestry, when the release commit is pushed, then `origin/main` advances normally to the reviewed local tip with no tag or rewritten history.
 
 ## Spec Change Log
 
+- 2026-08-29: Adversarial review added generic `version_name` correlation
+  validation and exact Chrome-card versus Options labels, corrected metadata
+  ownership and verification wording, separated publication state, and
+  deferred automated sequence advancement. The exact approved identity,
+  guarded artifact sync, unchanged runtime boundary, and fast-forward-only push
+  remain preserved.
+
 ## Verification
 
 **Commands:**
-- `PATH=/opt/homebrew/Cellar/node@24/24.19.0/bin:$PATH corepack npm run check` -- typecheck, 1,140 retained tests, production build, artifact validation, and byte comparison pass.
+- `node --version && corepack npm --version` -- expected: Node 24 and npm 12.
+- `corepack npm run check` -- typecheck, 1,143 retained tests, production build, artifact validation, and byte comparison pass.
 - `git diff --check` -- no whitespace errors.
 - `git fetch origin main && git merge-base --is-ancestor origin/main main` -- the final push is fast-forward safe.
+
+**Publication after review:**
 - `git push origin main` -- GitHub receives the reviewed public testing build.
 
 **Manual checks:**

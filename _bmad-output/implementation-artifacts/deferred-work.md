@@ -146,3 +146,6 @@ build.
 - source_spec: `_bmad-output/implementation-artifacts/spec-public-release-readiness.md`
   summary: Make optional-host permission rollback transactional when disabling image translation.
   evidence: The disable flow can remove the shared broad grant before a later preference failure and its rollback relies on an earlier user-activation snapshot without proving the exact-origin grant was restored.
+- source_spec: `_bmad-output/implementation-artifacts/spec-fresh-public-testing-build-identity.md`
+  summary: Automate release build-sequence freshness when the canonical Chrome artifact changes.
+  evidence: The current release gate validates and byte-compares an explicit build identity, but deciding when to advance its date/sequence remains a manual release-management step outside this identity correction.

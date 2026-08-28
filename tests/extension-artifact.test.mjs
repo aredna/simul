@@ -69,6 +69,20 @@ describe('validateArtifact', () => {
     }
   });
 
+  it.each([
+    ['missing', undefined],
+    ['empty', '   '],
+    ['a different numeric prefix', '0.2.0 beta'],
+  ])('rejects %s version_name identity', async (_case, versionName) => {
+    const artifact = await createTemporaryArtifact({
+      manifest: { version_name: versionName },
+    });
+
+    await expect(validateArtifact(artifact)).rejects.toThrow(
+      /version_name must be non-empty and begin with the exact numeric version/u,
+    );
+  });
+
   it.each(REQUIRED_RELEASE_LEGAL_FILES)(
     'rejects a missing or changed $artifactPath',
     async (legalFile) => {
@@ -986,6 +1000,7 @@ async function createValidArtifact(
     manifest_version: 3,
     name: 'Simul',
     version: '0.1.0',
+    version_name: '0.1.0 test',
     minimum_chrome_version: '138',
     permissions: [...APPROVED_PERMISSIONS],
     optional_host_permissions: [...APPROVED_OPTIONAL_HOST_PERMISSIONS],
