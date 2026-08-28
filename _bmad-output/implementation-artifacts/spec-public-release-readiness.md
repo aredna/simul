@@ -2,7 +2,7 @@
 title: 'Public GitHub release readiness'
 type: 'chore'
 created: '2026-08-28T12:41:21+09:00'
-status: 'in-review'
+status: 'done'
 review_loop_iteration: 0
 baseline_commit: 'c4f747cdbdc71dd17cd14a9e0412579042355dca'
 context:
@@ -84,3 +84,37 @@ The dependency licenses are permissive and compatible with retaining MIT for ori
 
 **Manual checks:**
 - Reload `dist/chrome-unpacked/` in Chrome 138+, open a normal HTTP(S) page, confirm the build identity, side-panel/popout launch, page translation, privacy setup, scroll following, and optional OCR controls.
+
+## Suggested Review Order
+
+### Public release surface
+
+- Start with [installation and the product model](../../README.md#L14).
+- Confirm the [privacy and permission explanation](../../README.md#L105).
+- Review the [MIT and third-party licensing boundary](../../README.md#L209).
+
+### Replica safety path
+
+- Follow the [source bridge entry point](../../lib/replica/html-mirror-source.ts#L155).
+- Inspect the [source text disclosure policy](../../lib/replica/html-mirror-sanitizer.ts#L291).
+- Continue through [document sanitization](../../lib/replica/html-mirror-sanitizer.ts#L904).
+- Finish at the [isolated replica engine](../../lib/replica/isolated-html-engine.ts#L268).
+
+### Production OCR boundary
+
+- Check the [compiled provider definitions](../../tools/ocr-build-profile.ts#L24).
+- Trace the [local Tesseract job identity](../../lib/ocr/image-analysis-coordinator.ts#L1039).
+- Confirm the [user-facing local-processing disclosure](../../entrypoints/sidepanel/main.ts#L3991).
+
+### Artifact and legal gates
+
+- Verify the [beta identity and permission manifest](../../wxt.config.ts#L12).
+- Review the [artifact validator entry point](../../tools/extension-artifact.mjs#L270).
+- Inspect the [runtime dependency inventory](../../THIRD_PARTY_NOTICES.md#L13).
+- Confirm the [release artifact assertions](../../tests/extension-artifact.test.mjs#L626).
+
+### Documentation and follow-ups
+
+- Read the [current image-text methods](../../docs/image-translation-research.md#L7).
+- Review the [local image-text architecture](../../docs/translation-companion.md#L148).
+- Triage the [review findings deferred beyond this release](deferred-work.md#L131).

@@ -1,3 +1,10 @@
+# Deferred work
+
+`source_spec` records provenance. A path that is absent from the current tree
+identifies a historical implementation artifact retained in Git history after
+the public-release cleanup; it is not a runnable instruction for the current
+build.
+
 - source_spec: `_bmad-output/implementation-artifacts/spec-checkpoint-f-local-tesseract-image-translation.md`
   summary: Extend local image translation beyond visible top-frame `<img>` elements to CSS backgrounds, canvas/video frames, and embedded frames only after a new pixel-access/privacy review.
   evidence: Checkpoint F ships opt-in local Tesseract overlays for stable visible `<img>` crops only. Direct fetch/host access, non-`<img>` sources, durable captures, and remote processing remain outside its approved boundary.
@@ -121,13 +128,6 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-isolated-only-runtime-cache-correctness.md`
   summary: Refresh controlled-content policy when remote selector changes alter a selected tabpanel's visibility without resizing the document.
   evidence: The visibility comparison can identify the changed target while the retained policy still sanitizes the newly visible panel as withheld, leaving it blank.
-# Deferred work
-
-`source_spec` records provenance. A path that is absent from the current tree
-identifies a historical implementation artifact retained in Git history after
-the public-release cleanup; it is not a runnable instruction for the current
-build.
-
 - source_spec: `_bmad-output/implementation-artifacts/spec-public-release-readiness.md`
   summary: Recompute controlled-content visibility when a custom attribute changes CSS-selected tab or disclosure state.
   evidence: The relationship policy observes all attribute mutations but only treats a fixed attribute set as layout-changing, so selectors such as `[data-state="open"]` can reveal a panel without refreshing the withholding proof until another recognized signal arrives.
