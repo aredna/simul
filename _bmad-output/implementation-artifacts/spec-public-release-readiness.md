@@ -87,34 +87,63 @@ The dependency licenses are permissive and compatible with retaining MIT for ori
 
 ## Suggested Review Order
 
-### Public release surface
+**Public release surface**
 
-- Start with [installation and the product model](../../README.md#L14).
-- Confirm the [privacy and permission explanation](../../README.md#L105).
-- Review the [MIT and third-party licensing boundary](../../README.md#L209).
+- The README leads installation, product behavior, privacy, and licensing.
+  [`README.md:14`](../../README.md#L14)
 
-### Replica safety path
+- The permission section explains every required and optional capability.
+  [`README.md:105`](../../README.md#L105)
 
-- Follow the [source bridge entry point](../../lib/replica/html-mirror-source.ts#L155).
-- Inspect the [source text disclosure policy](../../lib/replica/html-mirror-sanitizer.ts#L291).
-- Continue through [document sanitization](../../lib/replica/html-mirror-sanitizer.ts#L904).
-- Finish at the [isolated replica engine](../../lib/replica/isolated-html-engine.ts#L268).
+- The license section separates original MIT work from third-party terms.
+  [`README.md:209`](../../README.md#L209)
 
-### Production OCR boundary
+**Replica safety path**
 
-- Check the [compiled provider definitions](../../tools/ocr-build-profile.ts#L24).
-- Trace the [local Tesseract job identity](../../lib/ocr/image-analysis-coordinator.ts#L1039).
-- Confirm the [user-facing local-processing disclosure](../../entrypoints/sidepanel/main.ts#L3991).
+- The source bridge establishes the bounded, document-specific capture session.
+  [`html-mirror-source.ts:155`](../../lib/replica/html-mirror-source.ts#L155)
 
-### Artifact and legal gates
+- The base policy prevents protected text from crossing the extension boundary.
+  [`html-mirror-sanitizer.ts:291`](../../lib/replica/html-mirror-sanitizer.ts#L291)
 
-- Verify the [beta identity and permission manifest](../../wxt.config.ts#L12).
-- Review the [artifact validator entry point](../../tools/extension-artifact.mjs#L270).
-- Inspect the [runtime dependency inventory](../../THIRD_PARTY_NOTICES.md#L13).
-- Confirm the [release artifact assertions](../../tests/extension-artifact.test.mjs#L626).
+- Document sanitization converts approved source state into a typed graph.
+  [`html-mirror-sanitizer.ts:904`](../../lib/replica/html-mirror-sanitizer.ts#L904)
 
-### Documentation and follow-ups
+- The isolated engine builds the inert replica from validated graph data.
+  [`isolated-html-engine.ts:268`](../../lib/replica/isolated-html-engine.ts#L268)
 
-- Read the [current image-text methods](../../docs/image-translation-research.md#L7).
-- Review the [local image-text architecture](../../docs/translation-companion.md#L148).
-- Triage the [review findings deferred beyond this release](deferred-work.md#L131).
+**Production OCR boundary**
+
+- Compile-time definitions retain only platform TextDetector and packaged Tesseract.
+  [`ocr-build-profile.ts:24`](../../tools/ocr-build-profile.ts#L24)
+
+- Tesseract jobs carry pinned runtime and model identities for deterministic caching.
+  [`image-analysis-coordinator.ts:1039`](../../lib/ocr/image-analysis-coordinator.ts#L1039)
+
+- The settings UI explicitly discloses local packaged-model processing.
+  [`main.ts:3991`](../../entrypoints/sidepanel/main.ts#L3991)
+
+**Artifact and legal gates**
+
+- The manifest generator fixes beta identity and least-privilege permissions.
+  [`wxt.config.ts:12`](../../wxt.config.ts#L12)
+
+- Artifact validation rejects stale, unsafe, oversized, or mismatched output.
+  [`extension-artifact.mjs:270`](../../tools/extension-artifact.mjs#L270)
+
+- The notice inventory records every locked production component and license.
+  [`THIRD_PARTY_NOTICES.md:13`](../../THIRD_PARTY_NOTICES.md#L13)
+
+**Documentation and verification**
+
+- Image-text documentation now describes only the production provider path.
+  [`image-translation-research.md:7`](../../docs/image-translation-research.md#L7)
+
+- Architecture documentation explains local image-text routing and privacy boundaries.
+  [`translation-companion.md:148`](../../docs/translation-companion.md#L148)
+
+- Artifact tests pin the public beta identity and release contract.
+  [`extension-artifact.test.mjs:626`](../../tests/extension-artifact.test.mjs#L626)
+
+- Deferred findings preserve review follow-ups without expanding this release.
+  [`deferred-work.md:131`](deferred-work.md#L131)
