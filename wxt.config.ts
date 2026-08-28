@@ -9,7 +9,7 @@ import {
 } from './tools/ocr-build-profile';
 
 const ocrBuildProfile = readOcrBuildProfile(process.env);
-const betaBuildSuffix = 'beta';
+const betaBuildSuffix = 'beta v.20260828.1';
 const tesseractEnabled = ocrBuildProfile.enabledProviderIds.includes('tesseract');
 const offscreenOcrEnabled = ocrBuildProfile.enabledProviderIds.some((id) =>
   id === 'tesseract' || id === 'chrome-text-detector',
