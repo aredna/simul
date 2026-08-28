@@ -13,7 +13,6 @@ const IDLE_ACTIVITY: ToolbarActivity = {
   translationInFlight: false,
   permissionInFlight: false,
   composerInFlight: false,
-  liveDeltaInFlight: false,
   imageTranslationInFlight: false,
   surfaceTransitionInFlight: false,
 };
@@ -53,7 +52,6 @@ describe('companion UI state', () => {
     'translationInFlight',
     'permissionInFlight',
     'composerInFlight',
-    'liveDeltaInFlight',
     'imageTranslationInFlight',
     'surfaceTransitionInFlight',
   ] as const)('shows indeterminate progress for %s', (activity) => {
@@ -73,10 +71,6 @@ describe('companion UI state', () => {
   });
 
   it('gives indeterminate work a concise accessible label', () => {
-    expect(toolbarActivityLabel({
-      ...IDLE_ACTIVITY,
-      liveDeltaInFlight: true,
-    })).toBe('Updating live mirror');
     expect(toolbarActivityLabel({
       ...IDLE_ACTIVITY,
       composerInFlight: true,

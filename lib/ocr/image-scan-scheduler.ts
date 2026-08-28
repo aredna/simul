@@ -19,6 +19,7 @@ import {
 export const MAX_IMAGE_SCAN_RECORDS = 10_000;
 export const MAX_IMAGE_SCAN_QUEUE = 512;
 export const MAX_ACTIVE_IMAGE_SCANS = 1;
+export const IMAGE_SCAN_STARVATION_DISPATCHES_PER_TIER = 8;
 
 export interface ImageScanGates {
   readonly replicaCommitted: boolean;
@@ -37,7 +38,12 @@ export interface ImageScanJob {
 
 export interface ImageScanCancellation {
   readonly job: ImageScanJob;
-  readonly reason: 'superseded' | 'removed' | 'policy' | 'overflow';
+  readonly reason:
+    | 'superseded'
+    | 'removed'
+    | 'policy'
+    | 'overflow'
+    | 'preempted';
 }
 
 export type ImageScanUpdateResult =
@@ -51,12 +57,16 @@ export type ImageScanUpdateResult =
 interface SchedulerRecord {
   descriptor: SourceImageDescriptor;
   completedContentRevision?: number;
+  completedCaptureRevision?: number;
   completedObservationRevision?: number;
   deferredObservationRevision?: number;
+  enqueueOrder?: number;
+  eligibleSinceDispatch?: number;
 }
 
 interface QueuedJob extends ImageScanJob {
   readonly enqueueOrder: number;
+  readonly eligibleSinceDispatch: number;
 }
 
 const CLOSED_GATES: Readonly<ImageScanGates> = Object.freeze({
@@ -73,7 +83,7 @@ export class ImageScanScheduler {
   readonly #maxQueue: number;
   readonly #records = new Map<number, SchedulerRecord>();
   readonly #pending = new Map<number, QueuedJob>();
-  readonly #active = new Map<number, ImageScanJob>();
+  readonly #active = new Map<number, QueuedJob>();
   readonly #manualOverrides = new Map<number, number>();
   readonly #decisions = new Map<
     number,
@@ -85,6 +95,7 @@ export class ImageScanScheduler {
   #skipSmallImages: boolean;
   #gates: ImageScanGates = CLOSED_GATES;
   #enqueueOrder = 0;
+  #dispatchOrder = 0;
 
   constructor(
     document: ReplicaSourceDocumentIdentity,
@@ -182,6 +193,7 @@ export class ImageScanScheduler {
     }
     this.#manualOverrides.set(nodeId, contentRevision);
     record.completedContentRevision = undefined;
+    record.completedCaptureRevision = undefined;
     record.completedObservationRevision = undefined;
     this.#reconcileNode(nodeId);
     this.#reconsiderOverflowed();
@@ -204,6 +216,7 @@ export class ImageScanScheduler {
       this.#recordCancellation(active, 'superseded');
     }
     record.completedContentRevision = undefined;
+    record.completedCaptureRevision = undefined;
     record.completedObservationRevision = undefined;
     record.deferredObservationRevision = undefined;
     this.#reconcileNode(parsed.nodeId);
@@ -221,8 +234,8 @@ export class ImageScanScheduler {
       priority: next.priority,
       manualOverride: next.manualOverride,
     });
-    this.#active.set(job.descriptor.nodeId, job);
-    this.#reconsiderOverflowed();
+    this.#active.set(job.descriptor.nodeId, next);
+    this.#dispatchOrder += 1;
     return job;
   }
 
@@ -237,8 +250,13 @@ export class ImageScanScheduler {
       return false;
     }
     record.completedContentRevision = record.descriptor.contentRevision;
+    record.completedCaptureRevision = descriptorCaptureRevision(
+      record.descriptor,
+    );
     record.completedObservationRevision =
       record.descriptor.observationRevision;
+    record.enqueueOrder = undefined;
+    record.eligibleSinceDispatch = undefined;
     this.#pending.delete(job.descriptor.nodeId);
     this.#overflows.delete(job.descriptor.nodeId);
     if (
@@ -259,20 +277,26 @@ export class ImageScanScheduler {
   }
 
   /**
-   * Release an unstable/hidden active job without spinning it immediately.
+   * Release an unstable/hidden active or previewed pending job without
+   * spinning it immediately.
    * A later observation revision or explicit manual override makes it eligible
    * again; it is intentionally not marked complete.
    */
   defer(job: ImageScanJob): boolean {
     const active = this.#active.get(job.descriptor.nodeId);
+    const pending = this.#pending.get(job.descriptor.nodeId);
     const record = this.#records.get(job.descriptor.nodeId);
-    if (!active || !sameJob(active, job)) return false;
-    this.#active.delete(job.descriptor.nodeId);
+    const owned = active ?? pending;
+    if (!owned || !sameJob(owned, job)) return false;
+    if (active) this.#active.delete(job.descriptor.nodeId);
+    if (pending) this.#pending.delete(job.descriptor.nodeId);
     if (!record || !sameDescriptor(record.descriptor, job.descriptor)) {
       this.#reconsiderOverflowed();
       return false;
     }
     record.deferredObservationRevision = record.descriptor.observationRevision;
+    record.enqueueOrder = undefined;
+    record.eligibleSinceDispatch = undefined;
     this.#pending.delete(job.descriptor.nodeId);
     this.#decisions.set(job.descriptor.nodeId, 'visibility-gate');
     this.#reconsiderOverflowed();
@@ -314,6 +338,8 @@ export class ImageScanScheduler {
     this.#manualOverrides.clear();
     this.#decisions.clear();
     this.#overflows.clear();
+    this.#enqueueOrder = 0;
+    this.#dispatchOrder = 0;
   }
 
   #upsert(descriptor: SourceImageDescriptor): ImageScanUpdateResult {
@@ -340,14 +366,32 @@ export class ImageScanScheduler {
 
       const contentChanged =
         descriptor.contentRevision !== before.contentRevision;
+      const captureChanged = descriptorCaptureRevision(descriptor) !==
+        descriptorCaptureRevision(before);
+      const carryCompletedObservation = !contentChanged && !captureChanged &&
+        recordHasCurrentCompletion(previous);
       if (contentChanged) {
         this.#cancelNode(descriptor.nodeId, 'superseded');
         this.#manualOverrides.delete(descriptor.nodeId);
       }
-      // Observation revisions are geometry/currentness boundaries. A same-src
-      // resize or visibility transition must cancel stale work and be scanned
-      // again instead of inheriting completion from the prior crop.
-      this.#records.set(descriptor.nodeId, { descriptor });
+      // Observation revisions order geometry and visual priority. A completed
+      // analysis remains complete when both content and capture identity are
+      // unchanged; only its current observation ownership advances. Active or
+      // deferred work is deliberately not carried across the new observation.
+      this.#records.set(descriptor.nodeId, {
+        descriptor,
+        // Reordering current visual work must not erase starvation age.
+        ...(contentChanged
+          ? {}
+          : { eligibleSinceDispatch: previous.eligibleSinceDispatch }),
+        ...(carryCompletedObservation
+          ? {
+              completedContentRevision: descriptor.contentRevision,
+              completedCaptureRevision: descriptorCaptureRevision(descriptor),
+              completedObservationRevision: descriptor.observationRevision,
+            }
+          : {}),
+      });
     } else {
       this.#records.set(descriptor.nodeId, { descriptor });
     }
@@ -397,13 +441,13 @@ export class ImageScanScheduler {
       record.deferredObservationRevision === record.descriptor.observationRevision
     ) {
       this.#pending.delete(nodeId);
+      record.enqueueOrder = undefined;
+      record.eligibleSinceDispatch = undefined;
       this.#decisions.set(nodeId, 'visibility-gate');
       return;
     }
     if (
-      record.completedContentRevision === record.descriptor.contentRevision &&
-      record.completedObservationRevision ===
-        record.descriptor.observationRevision &&
+      recordHasCurrentCompletion(record) &&
       !manualOverride
     ) {
       this.#pending.delete(nodeId);
@@ -416,6 +460,8 @@ export class ImageScanScheduler {
     });
     if (!smallDecision.eligible) {
       this.#dropPending(nodeId, 'policy');
+      record.enqueueOrder = undefined;
+      record.eligibleSinceDispatch = undefined;
       this.#decisions.set(nodeId, smallDecision.reason);
       return;
     }
@@ -427,6 +473,8 @@ export class ImageScanScheduler {
     );
     if (!priority) {
       this.#dropPending(nodeId, 'policy');
+      record.enqueueOrder = undefined;
+      record.eligibleSinceDispatch = undefined;
       this.#decisions.set(nodeId, 'visibility-gate');
       return;
     }
@@ -440,17 +488,32 @@ export class ImageScanScheduler {
       sameDescriptor(existing.descriptor, record.descriptor)
     ) return;
 
+    const descriptorChanged = Boolean(
+      existing && !sameDescriptor(existing.descriptor, record.descriptor),
+    );
+    const enqueueOrder = descriptorChanged
+      ? ++this.#enqueueOrder
+      : existing?.enqueueOrder ??
+      record.enqueueOrder ??
+      ++this.#enqueueOrder;
+    const eligibleSinceDispatch = existing?.eligibleSinceDispatch ??
+      record.eligibleSinceDispatch ??
+      this.#dispatchOrder;
+    record.enqueueOrder = enqueueOrder;
+    record.eligibleSinceDispatch = eligibleSinceDispatch;
     const candidate: QueuedJob = Object.freeze({
       descriptor: record.descriptor,
       priority,
       manualOverride,
-      enqueueOrder: existing?.enqueueOrder ?? ++this.#enqueueOrder,
+      enqueueOrder,
+      eligibleSinceDispatch,
     });
     if (existing) this.#pending.delete(nodeId);
     this.#admit(candidate);
   }
 
   #admit(candidate: QueuedJob): void {
+    if (this.#preemptActiveFor(candidate)) return;
     if (this.#pending.size < this.#maxQueue) {
       this.#pending.set(candidate.descriptor.nodeId, candidate);
       this.#overflows.delete(candidate.descriptor.nodeId);
@@ -459,7 +522,7 @@ export class ImageScanScheduler {
     const worst = this.#worstPending();
     if (
       !worst ||
-      priorityRank(candidate.priority) >= priorityRank(worst.priority)
+      compareQueuedJobs(candidate, worst, this.#dispatchOrder) >= 0
     ) {
       this.#overflows.add(candidate.descriptor.nodeId);
       return;
@@ -469,6 +532,59 @@ export class ImageScanScheduler {
     this.#overflows.add(worst.descriptor.nodeId);
     this.#pending.set(candidate.descriptor.nodeId, candidate);
     this.#overflows.delete(candidate.descriptor.nodeId);
+  }
+
+  #preemptActiveFor(candidate: QueuedJob): boolean {
+    const active = this.#active.values().next().value as
+      | QueuedJob
+      | undefined;
+    if (
+      !active ||
+      this.#manualOverrides.get(active.descriptor.nodeId) ===
+        active.descriptor.contentRevision ||
+      !canPreempt(candidate, active, this.#dispatchOrder)
+    ) return false;
+
+    // A priority transition can produce a current candidate for the same
+    // node as the active job. Keep one contender per node and make the
+    // current candidate authoritative; otherwise the later stale active Map
+    // insertion can overwrite it while the bounded pending queue is rebuilt.
+    const contenders = [
+      ...[...this.#pending.values()].filter((job) =>
+        job.descriptor.nodeId !== candidate.descriptor.nodeId
+      ),
+      ...(active.descriptor.nodeId === candidate.descriptor.nodeId
+        ? []
+        : [active]),
+      candidate,
+    ]
+      .sort((left, right) =>
+        compareQueuedJobs(left, right, this.#dispatchOrder)
+      );
+    const retained = contenders.slice(0, this.#maxQueue);
+    if (!retained.includes(candidate)) return false;
+
+    const previousPending = [...this.#pending.values()];
+    this.#active.delete(active.descriptor.nodeId);
+    this.#recordCancellation(active, 'preempted');
+    this.#pending.clear();
+    for (const job of retained) {
+      this.#pending.set(job.descriptor.nodeId, job);
+      this.#overflows.delete(job.descriptor.nodeId);
+    }
+
+    const retainedNodeIds = new Set(
+      retained.map((job) => job.descriptor.nodeId),
+    );
+    for (const job of previousPending) {
+      if (retainedNodeIds.has(job.descriptor.nodeId)) continue;
+      this.#recordCancellation(job, 'overflow');
+      this.#overflows.add(job.descriptor.nodeId);
+    }
+    if (!retainedNodeIds.has(active.descriptor.nodeId)) {
+      this.#overflows.add(active.descriptor.nodeId);
+    }
+    return true;
   }
 
   #reconsiderOverflowed(): void {
@@ -483,13 +599,18 @@ export class ImageScanScheduler {
   }
 
   #orderedPending(): QueuedJob[] {
-    return [...this.#pending.values()].sort(compareQueuedJobs);
+    return [...this.#pending.values()].sort((left, right) =>
+      compareQueuedJobs(left, right, this.#dispatchOrder)
+    );
   }
 
   #bestPending(): QueuedJob | undefined {
     let best: QueuedJob | undefined;
     for (const job of this.#pending.values()) {
-      if (!best || compareQueuedJobs(job, best) < 0) best = job;
+      if (
+        !best ||
+        compareQueuedJobs(job, best, this.#dispatchOrder) < 0
+      ) best = job;
     }
     return best;
   }
@@ -499,7 +620,7 @@ export class ImageScanScheduler {
     for (const job of this.#pending.values()) {
       if (
         !worst ||
-        compareQueuedJobs(job, worst) >= 0
+        compareQueuedJobs(job, worst, this.#dispatchOrder) >= 0
       ) worst = job;
     }
     return worst;
@@ -514,7 +635,7 @@ export class ImageScanScheduler {
     }
     const record = this.#records.get(nodeId);
     if (
-      record?.completedContentRevision === record?.descriptor.contentRevision
+      record && recordHasCurrentCompletion(record)
     ) return { status: 'coalesced' };
     if (this.#overflows.has(nodeId)) return { status: 'overflow' };
     const reason = this.#decisions.get(nodeId);
@@ -580,12 +701,47 @@ function backgroundGatesOpen(gates: ImageScanGates): boolean {
   );
 }
 
-function compareQueuedJobs(left: QueuedJob, right: QueuedJob): number {
+function compareQueuedJobs(
+  left: QueuedJob,
+  right: QueuedJob,
+  dispatchOrder: number,
+): number {
   return (
-    priorityRank(left.priority) - priorityRank(right.priority) ||
+    effectivePriorityRank(left, dispatchOrder) -
+    effectivePriorityRank(right, dispatchOrder) ||
     left.enqueueOrder - right.enqueueOrder ||
     left.descriptor.nodeId - right.descriptor.nodeId
   );
+}
+
+function canPreempt(
+  candidate: QueuedJob,
+  active: QueuedJob,
+  dispatchOrder: number,
+): boolean {
+  const priorityEligible = candidate.priority === 'manual'
+    ? active.priority !== 'manual'
+    : candidate.priority === 'visible' &&
+      (active.priority === 'near' || active.priority === 'background');
+  return priorityEligible &&
+    effectivePriorityRank(candidate, dispatchOrder) <
+      effectivePriorityRank(active, dispatchOrder);
+}
+
+function effectivePriorityRank(
+  job: QueuedJob,
+  dispatchOrder: number,
+): number {
+  const rank = priorityRank(job.priority);
+  if (rank === 0) return rank;
+  const waitedDispatches = Math.max(
+    0,
+    dispatchOrder - job.eligibleSinceDispatch,
+  );
+  const promotion = Math.floor(
+    waitedDispatches / IMAGE_SCAN_STARVATION_DISPATCHES_PER_TIER,
+  );
+  return Math.max(1, rank - promotion);
 }
 
 function priorityRank(priority: ImageScanPriority): number {
@@ -593,6 +749,21 @@ function priorityRank(priority: ImageScanPriority): number {
   if (priority === 'visible') return 1;
   if (priority === 'near') return 2;
   return 3;
+}
+
+function descriptorCaptureRevision(
+  descriptor: SourceImageDescriptor,
+): number {
+  return descriptor.captureRevision ?? descriptor.contentRevision;
+}
+
+function recordHasCurrentCompletion(record: SchedulerRecord): boolean {
+  return record.completedContentRevision === record.descriptor.contentRevision &&
+    record.completedCaptureRevision === descriptorCaptureRevision(
+      record.descriptor,
+    ) &&
+    record.completedObservationRevision ===
+      record.descriptor.observationRevision;
 }
 
 function sameContent(
@@ -613,6 +784,7 @@ function sameDescriptor(
   return (
     sameContent(left, right) &&
     left.sourceKind === right.sourceKind &&
+    left.captureRevision === right.captureRevision &&
     left.observationRevision === right.observationRevision &&
     left.visibility === right.visibility &&
     left.connected === right.connected &&

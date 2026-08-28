@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  IMAGE_SCAN_STARVATION_DISPATCHES_PER_TIER,
   ImageScanScheduler,
   type ImageScanGates,
 } from '../lib/ocr/image-scan-scheduler';
@@ -88,6 +89,179 @@ describe('ImageScanScheduler', () => {
     ]);
   });
 
+  it('preserves visual-attention discovery order before rendered area', () => {
+    const scheduler = new ImageScanScheduler(documentIdentity, {
+      policy: 'visible-only',
+    });
+    scheduler.apply(upsert(descriptor(1, 'visible', {
+      renderedWidth: 200,
+      renderedHeight: 100,
+    })));
+    scheduler.apply(upsert(descriptor(2, 'visible', {
+      renderedWidth: 320,
+      renderedHeight: 180,
+    })));
+    scheduler.apply(upsert(descriptor(3, 'visible', {
+      renderedWidth: 100,
+      renderedHeight: 50,
+    })));
+
+    expect(scheduler.queueSnapshot().map((job) => job.descriptor.nodeId))
+      .toEqual([1, 2, 3]);
+  });
+
+  it('refreshes queued visual order without resetting starvation age', () => {
+    const scheduler = new ImageScanScheduler(documentIdentity, {
+      policy: 'eager-all',
+      skipSmallImages: false,
+    });
+    scheduler.apply(upsert(descriptor(1, 'visible')));
+    scheduler.apply(upsert(descriptor(2, 'visible')));
+    scheduler.apply(upsert(descriptor(3, 'visible')));
+
+    // Observer updates arrive in current top/left/area order. Revisions may
+    // change after movement or a visibility-tier transition, so old discovery
+    // order must not pin the pending queue forever.
+    scheduler.apply(upsert(descriptor(3, 'visible', {
+      observationRevision: 2,
+    })));
+    scheduler.apply(upsert(descriptor(1, 'visible', {
+      observationRevision: 2,
+    })));
+    scheduler.apply(upsert(descriptor(2, 'visible', {
+      observationRevision: 2,
+    })));
+    expect(scheduler.queueSnapshot().map((job) => job.descriptor.nodeId))
+      .toEqual([3, 1, 2]);
+
+    scheduler.apply(upsert(descriptor(2, 'near', {
+      observationRevision: 3,
+    })));
+    scheduler.apply(upsert(descriptor(2, 'visible', {
+      observationRevision: 4,
+    })));
+    expect(scheduler.queueSnapshot().map((job) => job.descriptor.nodeId))
+      .toEqual([3, 1, 2]);
+  });
+
+  it('preempts active background work for visible attention and bounds starvation', () => {
+    const scheduler = new ImageScanScheduler(documentIdentity, {
+      policy: 'eager-all',
+      skipSmallImages: false,
+    });
+    scheduler.apply(upsert(descriptor(1, 'background')));
+    let background = scheduler.takeNext()!;
+    let backgroundProtected = false;
+
+    for (
+      let attempt = 0;
+      attempt < IMAGE_SCAN_STARVATION_DISPATCHES_PER_TIER * 2 + 2;
+      attempt += 1
+    ) {
+      const visibleNodeId = 100 + attempt;
+      scheduler.apply(upsert(descriptor(visibleNodeId, 'visible')));
+      const cancellations = scheduler.drainCancellations();
+      const preempted = cancellations.some((cancellation) =>
+        cancellation.reason === 'preempted' &&
+        cancellation.job.descriptor.nodeId === 1
+      );
+      if (!preempted) {
+        backgroundProtected = true;
+        expect(scheduler.active).toBe(1);
+        expect(scheduler.queued).toBe(1);
+        expect(scheduler.settle(background)).toBe(true);
+        const visible = scheduler.takeNext()!;
+        expect(visible.descriptor.nodeId).toBe(visibleNodeId);
+        expect(scheduler.settle(visible)).toBe(true);
+        break;
+      }
+
+      expect(scheduler.active).toBe(0);
+      const visible = scheduler.takeNext()!;
+      expect(visible.descriptor.nodeId).toBe(visibleNodeId);
+      expect(scheduler.takeNext()).toBeUndefined();
+      expect(scheduler.settle(visible)).toBe(true);
+      background = scheduler.takeNext()!;
+      expect(background.descriptor.nodeId).toBe(1);
+    }
+
+    expect(backgroundProtected).toBe(true);
+  });
+
+  it('preempts active near work for visible attention but never preempts manual work', () => {
+    const scheduler = new ImageScanScheduler(documentIdentity, {
+      policy: 'eager-all',
+      skipSmallImages: false,
+    });
+    scheduler.apply(upsert(descriptor(1, 'near')));
+    const near = scheduler.takeNext()!;
+
+    scheduler.apply(upsert(descriptor(2, 'visible')));
+    expect(scheduler.drainCancellations()).toMatchObject([
+      { job: { descriptor: { nodeId: 1 } }, reason: 'preempted' },
+    ]);
+    const visible = scheduler.takeNext()!;
+    expect(visible.descriptor.nodeId).toBe(2);
+    expect(scheduler.settle(visible)).toBe(true);
+
+    expect(scheduler.overrideCurrent(documentIdentity, 1, 1)).toBe(true);
+    const manual = scheduler.takeNext()!;
+    expect(manual.priority).toBe('manual');
+    scheduler.apply(upsert(descriptor(3, 'visible')));
+    expect(scheduler.active).toBe(1);
+    expect(scheduler.drainCancellations()).toEqual([]);
+    expect(scheduler.settle(manual)).toBe(true);
+    expect(scheduler.takeNext()?.descriptor.nodeId).toBe(3);
+    expect(scheduler.settle(near)).toBe(false);
+  });
+
+  it('keeps an active same-node manual priority transition authoritative', () => {
+    const scheduler = new ImageScanScheduler(documentIdentity, {
+      policy: 'eager-all',
+      skipSmallImages: false,
+    });
+    scheduler.apply(upsert(descriptor(1, 'background')));
+    const active = scheduler.takeNext()!;
+
+    expect(scheduler.overrideCurrent(documentIdentity, 1, 1)).toBe(true);
+    scheduler.apply(upsert(descriptor(2, 'visible')));
+
+    expect(scheduler.active).toBe(1);
+    expect(scheduler.queueSnapshot()).toMatchObject([
+      { descriptor: { nodeId: 2 }, priority: 'visible' },
+    ]);
+    expect(scheduler.drainCancellations()).toEqual([]);
+    expect(scheduler.settle(active)).toBe(true);
+    expect(scheduler.takeNext()?.descriptor.nodeId).toBe(2);
+  });
+
+  it('retains the current descriptor when an active node becomes visible', () => {
+    const scheduler = new ImageScanScheduler(documentIdentity, {
+      policy: 'eager-all',
+      skipSmallImages: false,
+      maxQueue: 1,
+    });
+    scheduler.apply(upsert(descriptor(1, 'background')));
+    const stale = scheduler.takeNext()!;
+
+    scheduler.apply(upsert(descriptor(1, 'visible', {
+      observationRevision: 2,
+    })));
+
+    expect(scheduler.drainCancellations()).toMatchObject([
+      { job: { descriptor: { nodeId: 1 } }, reason: 'superseded' },
+    ]);
+    expect(scheduler.queueSnapshot()).toMatchObject([{
+      descriptor: { nodeId: 1, observationRevision: 2 },
+      priority: 'visible',
+    }]);
+    expect(scheduler.settle(stale)).toBe(false);
+    expect(scheduler.takeNext()).toMatchObject({
+      descriptor: { nodeId: 1, observationRevision: 2 },
+      priority: 'visible',
+    });
+  });
+
   it('coalesces duplicates, cancels stale work, and scopes override to content revision', () => {
     const scheduler = new ImageScanScheduler(documentIdentity, {
       policy: 'visible-only',
@@ -173,11 +347,13 @@ describe('ImageScanScheduler', () => {
     const first = scheduler.takeNext()!;
     expect(first.descriptor.nodeId).toBe(1);
     expect(scheduler.queueSnapshot().map((job) => job.descriptor.nodeId))
-      .toEqual([2]);
+      .toEqual([]);
     expect(scheduler.takeNext()).toBeUndefined();
     expect(scheduler.active).toBe(1);
 
     expect(scheduler.settle(first)).toBe(true);
+    expect(scheduler.queueSnapshot().map((job) => job.descriptor.nodeId))
+      .toEqual([2]);
     expect(scheduler.takeNext()?.descriptor.nodeId).toBe(2);
   });
 
@@ -213,6 +389,34 @@ describe('ImageScanScheduler', () => {
       [1, 'manual'],
       [2, 'visible'],
     ]);
+  });
+
+  it('carries a settled completion across same-capture observation revisions', () => {
+    const scheduler = new ImageScanScheduler(documentIdentity, {
+      policy: 'visible-only',
+      skipSmallImages: false,
+    });
+    const initial = descriptor(41, 'visible', { captureRevision: 7 });
+    expect(scheduler.apply(upsert(initial))).toMatchObject({ status: 'queued' });
+    expect(scheduler.settle(scheduler.takeNext()!)).toBe(true);
+
+    expect(scheduler.apply(upsert({
+      ...initial,
+      observationRevision: 2,
+      visibility: 'near',
+    }))).toEqual({ status: 'coalesced' });
+    expect(scheduler.queued).toBe(0);
+    expect(scheduler.active).toBe(0);
+    expect(scheduler.takeNext()).toBeUndefined();
+
+    expect(scheduler.apply(upsert({
+      ...initial,
+      observationRevision: 3,
+      captureRevision: 8,
+    }))).toMatchObject({ status: 'queued' });
+    expect(scheduler.queueSnapshot()).toMatchObject([{
+      descriptor: { nodeId: 41, captureRevision: 8, observationRevision: 3 },
+    }]);
   });
 
   it('rejects a stale settle after content supersession', () => {
@@ -307,6 +511,23 @@ describe('ImageScanScheduler', () => {
       renderedWidth: 201,
     })))).toMatchObject({ status: 'queued' });
     expect(scheduler.takeNext()?.descriptor.observationRevision).toBe(2);
+  });
+
+  it('defers a non-consuming preview job until observation changes', () => {
+    const scheduler = new ImageScanScheduler(documentIdentity, {
+      policy: 'eager-all',
+    });
+    scheduler.apply(upsert(descriptor(7, 'visible')));
+    const preview = scheduler.queueSnapshot()[0]!;
+
+    expect(scheduler.defer(preview)).toBe(true);
+    expect(scheduler.active).toBe(0);
+    expect(scheduler.queued).toBe(0);
+    expect(scheduler.decisionFor(7)).toBe('visibility-gate');
+
+    expect(scheduler.apply(upsert(descriptor(7, 'visible', {
+      observationRevision: 2,
+    })))).toMatchObject({ status: 'queued' });
   });
 });
 

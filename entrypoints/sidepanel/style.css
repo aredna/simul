@@ -25,7 +25,7 @@
 
 html,
 body,
-.snapshot,
+.replica-status,
 .replica-preview {
   width: 100%;
   height: 100%;
@@ -356,8 +356,8 @@ select { width: 100%; min-height: 34px; padding: 5px 26px 5px 8px; font-size: 12
 .progress-region label { display: block; margin-bottom: 4px; }
 progress { width: 100%; height: 7px; accent-color: var(--green); }
 
-.snapshot { padding: 0; overflow: hidden; color: #111; background: #fff; color-scheme: light; }
-.snapshot[hidden],
+.replica-status { padding: 0; overflow: hidden; color: #111; background: #fff; color-scheme: light; }
+.replica-status[hidden],
 .replica-preview[hidden] { display: none; }
 
 .replica-preview {
@@ -432,38 +432,6 @@ progress { width: 100%; height: 7px; accent-color: var(--green); }
   height: 100% !important;
   margin: 0 !important;
 }
-.page-copy { width: 100%; height: 100%; margin: 0; overflow: hidden; background: #fff; }
-.mirror-scroll { width: 100%; height: 100%; overflow: auto; overscroll-behavior: contain; background: #fff; color: #111; color-scheme: light; }
-.mirror-stage { position: relative; overflow: visible; }
-.mirror-scale-layer { position: relative; transform-origin: 0 0; }
-.visual-page-root { max-width: none !important; margin: 0; pointer-events: none !important; }
-
-.visual-page-root--adaptive .simul-translated-container {
-  height: auto !important;
-  max-height: none !important;
-  overflow: visible !important;
-  overflow-wrap: anywhere !important;
-  text-overflow: clip !important;
-  white-space: normal !important;
-}
-
-.visual-page-root--faithful .simul-translated-container {
-  overflow: visible !important;
-  text-overflow: clip !important;
-}
-
-[data-simul-control-shell] {
-  opacity: 1 !important;
-  filter: none !important;
-  -webkit-text-fill-color: currentColor !important;
-}
-
-.visual-placeholder { display: grid; min-height: 54px; place-items: center; border: 1px dashed rgb(70 76 73 / 38%); color: #555; background: repeating-linear-gradient(-45deg, #fafafa, #fafafa 8px, #f1f1f1 8px, #f1f1f1 16px); font: 12px/1.4 system-ui, sans-serif; text-align: center; }
-.visual-image--failed { min-height: 48px; background: rgb(0 0 0 / 8%); }
-
-.translated-text { margin: 0; padding: 6px 12px; overflow-wrap: anywhere; white-space: pre-wrap; }
-.translated-image { margin: 0; }
-.translated-image img { display: block; max-width: 100%; }
 .empty-state { display: grid; min-height: 100%; padding: 40px 18px; place-items: center; color: #5d6c64; font-size: 12px; text-align: center; }
 .empty-state--error { color: #9c3737; }
 

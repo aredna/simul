@@ -27,7 +27,7 @@ const documentIdentity = {
   frameId: request.frameId,
 };
 const record: SemanticSourceRecord = {
-  bridge: 'rrweb',
+  bridge: 'isolated-html',
   recordId: 27,
   nodeId: 3,
   nodeRevision: 1,
@@ -49,7 +49,7 @@ describe('Chrome semantic source client', () => {
     const connect = installBrowser(port);
     const lease = await openChromeSemanticSource(
       request,
-      'rrweb',
+      'isolated-html',
       FULL_VISIBLE_REPLICA_READ_SCOPE,
     );
     const onBatch = vi.fn(() => true);
@@ -58,11 +58,11 @@ describe('Chrome semantic source client', () => {
     expect(connect).toHaveBeenCalledWith(request.tabId, expect.objectContaining({
       documentId: request.documentId,
       frameId: request.frameId,
-      name: `simul:semantic-source-v1:rrweb:${request.sessionId}`,
+      name: `simul:semantic-source-v2:isolated-html:${request.sessionId}`,
     }));
     expect(port.messages[0]).toMatchObject({
-      kind: 'simul:semantic-source-v1:start',
-      bridge: 'rrweb',
+      kind: 'simul:semantic-source-v2:start',
+      bridge: 'isolated-html',
       policyFingerprint: 'read-v1-111111',
     });
 
@@ -75,7 +75,7 @@ describe('Chrome semantic source client', () => {
     port.emitMessage(batch);
     expect(onBatch).toHaveBeenCalledWith(batch);
     expect(port.messages[1]).toMatchObject({
-      kind: 'simul:semantic-source-v1:ack',
+      kind: 'simul:semantic-source-v2:ack',
       sequence: 1,
     });
     lease.dispose();
@@ -86,7 +86,7 @@ describe('Chrome semantic source client', () => {
     installBrowser(port);
     const lease = await openChromeSemanticSource(
       request,
-      'rrweb',
+      'isolated-html',
       FULL_VISIBLE_REPLICA_READ_SCOPE,
     );
     const onFailure = vi.fn();

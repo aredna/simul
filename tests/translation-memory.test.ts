@@ -62,6 +62,59 @@ describe('TranslationMemory', () => {
       misses: 2,
       inFlightJoins: 1,
       providerLoads: 1,
+      expirations: 0,
+      purges: 0,
+    });
+  });
+
+  it('expires retained translations after a fixed bounded TTL', async () => {
+    let now = 1_000;
+    const load = vi.fn(async () => 'Fresh hello');
+    const memory = new TranslationMemory({
+      maxAgeMs: 100,
+      now: () => now,
+    });
+    memory.set(esEn, 'Hola', 'Hello');
+
+    now = 1_090;
+    expect(memory.get(esEn, 'Hola')).toBe('Hello');
+    now = 1_100;
+    await expect(memory.getOrCreate(esEn, 'Hola', load)).resolves
+      .toBe('Fresh hello');
+
+    expect(load).toHaveBeenCalledOnce();
+    expect(memory.snapshotStats()).toMatchObject({
+      entries: 1,
+      hits: 0,
+      misses: 1,
+      providerLoads: 1,
+      expirations: 1,
+      purges: 0,
+    });
+  });
+
+  it('purges expired values from size and character accounting', () => {
+    let now = 5_000;
+    const memory = new TranslationMemory({
+      maxAgeMs: 50,
+      now: () => now,
+    });
+    memory.set(esEn, 'Hola', 'Hello');
+    expect(memory.size).toBe(1);
+    expect(memory.characters).toBeGreaterThan(0);
+
+    now = 5_050;
+    expect(memory.size).toBe(0);
+    expect(memory.characters).toBe(0);
+    expect(memory.snapshotStats()).toMatchObject({
+      expirations: 1,
+      purges: 0,
+    });
+
+    memory.clear();
+    expect(memory.snapshotStats()).toMatchObject({
+      expirations: 0,
+      purges: 1,
     });
   });
 
@@ -134,7 +187,7 @@ describe('TranslationMemory', () => {
     ]);
   });
 
-  it('clears cached and in-flight generations without allowing old refill', async () => {
+  it('drops cleared joins while active provider loads retain capacity', async () => {
     let resolveOld!: (value: string) => void;
     let resolveCurrent!: (value: string) => void;
     const oldLoad = vi.fn(
@@ -166,9 +219,15 @@ describe('TranslationMemory', () => {
     await expect(old).resolves.toBe('Stale hello');
     expect(memory.get(esEn, 'Hola')).toBeUndefined();
 
+    await expect(
+      memory.getOrCreate(esEn, 'Nuevo', overflowLoad),
+    ).resolves.toBe('New value');
+    expect(overflowLoad).toHaveBeenCalledOnce();
+
     resolveCurrent('Hello');
     await expect(current).resolves.toBe('Hello');
     expect(memory.get(esEn, 'Hola')).toBe('Hello');
+    expect(memory.get(esEn, 'Nuevo')).toBe('New value');
   });
 
   it('evicts least-recently-used values within entry and character bounds', () => {

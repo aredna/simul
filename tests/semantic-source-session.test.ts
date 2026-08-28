@@ -7,6 +7,7 @@ import {
   STANDARD_REPLICA_READ_SCOPE,
 } from '../lib/replica/read-scope-policy';
 import {
+  MAX_SEMANTIC_SOURCE_RECORDS,
   createSemanticSourceAck,
   createSemanticSourcePortName,
   createSemanticSourceStart,
@@ -389,26 +390,25 @@ describe('semantic source session', () => {
       },
     });
 
-    for (const bridge of ['isolated-html', 'rrweb'] as const) {
-      const port = new FakeSemanticPort(
-        createSemanticSourcePortName(identity.sessionId, bridge),
-      );
-      const session = createSession(
-        port,
-        document,
-        window,
-        bridge,
-        classifier,
-      );
-      port.emit(createSemanticSourceStart(
-        bridge, identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
-      ));
-      expect(port.messages[0]!.records.some(
-        ({ nodeId: recordNodeId }) =>
-          recordNodeId === nodeId(draft) || recordNodeId === nodeId(secretText),
-      ), bridge).toBe(false);
-      session.dispose();
-    }
+    const bridge = 'isolated-html' as const;
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, bridge),
+    );
+    const session = createSession(
+      port,
+      document,
+      window,
+      bridge,
+      classifier,
+    );
+    port.emit(createSemanticSourceStart(
+      bridge, identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+    ));
+    expect(port.messages[0]!.records.some(
+      ({ nodeId: recordNodeId }) =>
+        recordNodeId === nodeId(draft) || recordNodeId === nodeId(secretText),
+    )).toBe(false);
+    session.dispose();
     expect(valueReads).toBe(0);
     expect(textReads).toBe(0);
   });
@@ -450,11 +450,11 @@ describe('semantic source session', () => {
     const draft = document.querySelector<HTMLTextAreaElement>('#draft')!;
     draft.value = 'first';
     const port = new FakeSemanticPort(
-      createSemanticSourcePortName(identity.sessionId, 'rrweb'),
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
     );
-    const session = createSession(port, document, window, 'rrweb');
+    const session = createSession(port, document, window, 'isolated-html');
     port.emit(createSemanticSourceStart(
-      'rrweb',
+      'isolated-html',
       identity,
       FULL_VISIBLE_REPLICA_READ_SCOPE,
     ));
@@ -975,6 +975,54 @@ describe('semantic source session', () => {
     session.dispose();
   });
 
+  it('ignores presentation events outside disclosure neighborhoods', () => {
+    const { document, window } = parseHTML(
+      '<html><body><button id="trigger" aria-expanded="false" ' +
+      'aria-controls="panel">Menu</button><div id="panel" hidden>Items</div>' +
+      '<div id="unrelated">Article</div></body></html>',
+    );
+    let styleReads = 0;
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(
+      port,
+      document,
+      window,
+      'isolated-html',
+      undefined,
+      ((element: Element) => {
+        styleReads += 1;
+        return {
+          display: element.hasAttribute('hidden') ? 'none' : 'block',
+          visibility: 'visible',
+          getPropertyValue: () => 'none',
+        } as unknown as CSSStyleDeclaration;
+      }) as Window['getComputedStyle'],
+    );
+    port.emit(createSemanticSourceStart(
+      'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+    ));
+    const initial = port.messages[0]!;
+    port.emit(createSemanticSourceAck(
+      identity,
+      initial.policyFingerprint,
+      initial.sequence,
+    ));
+    styleReads = 0;
+
+    document.querySelector('#unrelated')!.dispatchEvent(
+      new window.Event('pointerover', { bubbles: true, composed: true }),
+    );
+    expect(styleReads).toBe(0);
+
+    document.querySelector('#trigger')!.dispatchEvent(
+      new window.Event('pointerover', { bubbles: true, composed: true }),
+    );
+    expect(styleReads).toBeGreaterThan(0);
+    session.dispose();
+  });
+
   it('reads text only from a validated disclosure, including its closed state', () => {
     const { document, window } = parseHTML(
       '<html><body><button aria-expanded="false" aria-controls="menu">Menu</button><div id="menu" hidden>Account notices</div><div id="other">Not controlled</div></body></html>',
@@ -1021,6 +1069,283 @@ describe('semantic source session', () => {
       revision: 2,
     }));
     session.dispose();
+  });
+
+  it('infers one bounded non-ARIA navigation menu and admits its hidden text', () => {
+    const { document, window } = parseHTML(`<html><body><nav>
+      <div id="wrapper"><a id="trigger" href="/library">Resources</a>
+        <div id="panel" class="collapsed"><a href="/school">Startup School</a></div>
+      </div></nav></body></html>`);
+    installPaintedTabFixture(document, window as unknown as Window);
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(
+      port,
+      document,
+      window,
+      'isolated-html',
+      undefined,
+      structuralMenuStyle((element) =>
+        element.classList.contains('collapsed') ? 'display' : undefined),
+    );
+    port.emit(createSemanticSourceStart(
+      'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+    ));
+
+    const batch = port.messages[0]!;
+    expect(batch.proofs).toContainEqual(expect.objectContaining({
+      kind: 'structural-menu',
+      containerNodeId: nodeId(document.querySelector('#wrapper')!),
+      triggerNodeId: nodeId(document.querySelector('#trigger')!),
+      panelNodeId: nodeId(document.querySelector('#panel')!),
+      popupRole: 'menu',
+      expanded: false,
+      gate: 'disclosureContent',
+    }));
+    expect(batch.records).toContainEqual(expect.objectContaining({
+      text: 'Startup School',
+      gate: 'disclosureContent',
+      presentation: 'text',
+    }));
+    expect(batch.proofs.some((proof) => proof.kind === 'disclosure-state'))
+      .toBe(false);
+    session.dispose();
+  });
+
+  it.each(['content-visibility', 'opacity'] as const)(
+    'infers a structural menu collapsed with %s',
+    (collapse) => {
+      const { document, window } = parseHTML(`<html><body><nav>
+        <div id="wrapper"><button id="trigger">Resources</button>
+          <div id="panel"><a href="/school">Startup School</a></div>
+        </div></nav></body></html>`);
+      installPaintedTabFixture(document, window as unknown as Window);
+      const panel = document.querySelector('#panel')!;
+      const port = new FakeSemanticPort(
+        createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+      );
+      const session = createSession(
+        port,
+        document,
+        window,
+        'isolated-html',
+        undefined,
+        structuralMenuStyle((element) => element === panel ? collapse : undefined),
+      );
+
+      port.emit(createSemanticSourceStart(
+        'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+      ));
+      expect(port.messages[0]!.proofs).toContainEqual(expect.objectContaining({
+        kind: 'structural-menu',
+        panelNodeId: nodeId(panel),
+      }));
+      session.dispose();
+    },
+  );
+
+  it('rejects a structural menu beneath an unpainted flat-tree ancestor', () => {
+    const { document, window } = parseHTML(`<html><body><section id="outer"><nav>
+      <div id="wrapper"><button id="trigger">Resources</button>
+        <div id="panel"><a href="/school">Startup School</a></div>
+      </div></nav></section></body></html>`);
+    installPaintedTabFixture(document, window as unknown as Window);
+    const outer = document.querySelector('#outer')!;
+    const panel = document.querySelector('#panel')!;
+    Object.defineProperty(outer, 'getClientRects', {
+      configurable: true,
+      value: () => Object.assign([], { item: () => null }) as DOMRectList,
+    });
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(
+      port,
+      document,
+      window,
+      'isolated-html',
+      undefined,
+      structuralMenuStyle((element) => element === panel ? 'display' : undefined),
+    );
+
+    port.emit(createSemanticSourceStart(
+      'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+    ));
+    expect(port.messages[0]!.proofs.some((proof) =>
+      proof.kind === 'structural-menu')).toBe(false);
+    expect(port.messages[0]!.records.map((record) => record.text))
+      .not.toContain('Startup School');
+    session.dispose();
+  });
+
+  it('omits only a structural menu whose required panel text exceeds record capacity', () => {
+    const editable = Array.from(
+      { length: MAX_SEMANTIC_SOURCE_RECORDS },
+      (_, index) => `<div contenteditable="true">Editable ${index}</div>`,
+    ).join('');
+    const { document, window } = parseHTML(`<html><body>
+      <button id="stable"></button>${editable}<nav><div id="wrapper">
+        <button id="trigger">Resources</button><div id="panel">
+          <a href="/school">Startup School</a></div></div></nav>
+      </body></html>`);
+    installPaintedTabFixture(document, window as unknown as Window);
+    const panel = document.querySelector('#panel')!;
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(
+      port,
+      document,
+      window,
+      'isolated-html',
+      undefined,
+      structuralMenuStyle((element) => element === panel ? 'display' : undefined),
+    );
+
+    port.emit(createSemanticSourceStart(
+      'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+    ));
+    const batch = port.messages[0]!;
+    expect(batch.records).toHaveLength(MAX_SEMANTIC_SOURCE_RECORDS);
+    expect(batch.records.map((record) => record.text)).not.toContain('Startup School');
+    expect(batch.proofs.some((proof) => proof.kind === 'structural-menu'))
+      .toBe(false);
+    expect(batch.proofs).toContainEqual(expect.objectContaining({
+      kind: 'control-state',
+      nodeId: nodeId(document.querySelector('#stable')!),
+    }));
+    session.dispose();
+  });
+
+  it('emits inline tab state without reading hidden panels and revisions follow A-B-A', () => {
+    const { document, window } = parseHTML(`
+      <html><body><div role="tablist">
+        <div id="tab-a" role="tab" aria-selected="true" aria-expanded="true"
+          aria-controls="panel-a">A</div>
+        <div id="tab-b" role="tab" aria-selected="false" aria-expanded="false"
+          aria-controls="panel-b">B</div>
+      </div>
+      <section id="panel-a" role="tabpanel" aria-hidden="false">Active news</section>
+      <section id="panel-b" role="tabpanel" aria-hidden="true" hidden>Inactive news</section>
+      </body></html>
+    `);
+    installPaintedTabFixture(document, window as unknown as Window);
+    const inactiveText = document.querySelector('#panel-b')!.firstChild!;
+    Object.defineProperty(inactiveText, 'nodeValue', {
+      configurable: true,
+      get: () => {
+        throw new Error('inactive tab text must stay unread');
+      },
+    });
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(
+      port,
+      document,
+      window,
+      'isolated-html',
+      undefined,
+      tabFixtureComputedStyle,
+    );
+    port.emit(createSemanticSourceStart(
+      'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+    ));
+
+    const tabProofs = port.messages[0]!.proofs.filter(
+      (proof) => proof.kind === 'tab-state',
+    );
+    expect(tabProofs).toHaveLength(2);
+    expect(tabProofs.map((proof) => proof.kind === 'tab-state' && proof.selected))
+      .toEqual(expect.arrayContaining([true, false]));
+    expect(port.messages[0]!.proofs.some(
+      (proof) => proof.kind === 'disclosure-state',
+    )).toBe(false);
+    expect(port.messages[0]!.records.some(
+      ({ gate }) => gate === 'disclosureContent',
+    )).toBe(false);
+
+    port.emit(createSemanticSourceAck(
+      identity,
+      port.messages[0]!.policyFingerprint,
+      port.messages[0]!.sequence,
+    ));
+    selectTab(document, 'b');
+    session.refresh();
+    expect(port.messages[1]!.proofs.filter(
+      (proof) => proof.kind === 'tab-state',
+    )).toEqual(expect.arrayContaining([
+      expect.objectContaining({ selected: false, revision: 2 }),
+      expect.objectContaining({ selected: true, revision: 2 }),
+    ]));
+
+    port.emit(createSemanticSourceAck(
+      identity,
+      port.messages[1]!.policyFingerprint,
+      port.messages[1]!.sequence,
+    ));
+    selectTab(document, 'a');
+    session.refresh();
+    expect(port.messages[2]!.proofs.filter(
+      (proof) => proof.kind === 'tab-state',
+    )).toEqual(expect.arrayContaining([
+      expect.objectContaining({ selected: true, revision: 3 }),
+      expect.objectContaining({ selected: false, revision: 3 }),
+    ]));
+    session.dispose();
+  });
+
+  it('keeps visible tab text and optional tab state on independent gates', () => {
+    const { document, window } = parseHTML(`
+      <html><body><div role="tab" aria-selected="true" aria-controls="panel">A</div>
+      <section id="panel" role="tabpanel">Visible news</section></body></html>
+    `);
+    installPaintedTabFixture(document, window as unknown as Window);
+    const controlOnly = {
+      controlSemantics: true,
+      controlImages: false,
+      disclosureContent: false,
+      formValues: false,
+      personalDataValues: false,
+      editableContent: false,
+    } as const;
+    const controlPort = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const controlSession = createSession(
+      controlPort, document, window, 'isolated-html', undefined,
+      tabFixtureComputedStyle,
+    );
+    controlPort.emit(createSemanticSourceStart(
+      'isolated-html', identity, controlOnly,
+    ));
+    expect(controlPort.messages[0]!.proofs.some(
+      (proof) => proof.kind === 'tab-state',
+    )).toBe(true);
+    expect(controlPort.messages[0]!.records).toEqual([]);
+    controlSession.dispose();
+
+    const disclosureOnly = {
+      ...controlOnly,
+      controlSemantics: false,
+      disclosureContent: true,
+    } as const;
+    const disclosurePort = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const disclosureSession = createSession(
+      disclosurePort, document, window, 'isolated-html', undefined,
+      tabFixtureComputedStyle,
+    );
+    disclosurePort.emit(createSemanticSourceStart(
+      'isolated-html', identity, disclosureOnly,
+    ));
+    expect(disclosurePort.messages[0]!.proofs.some(
+      (proof) => proof.kind === 'tab-state',
+    )).toBe(false);
+    expect(disclosurePort.messages[0]!.records).toEqual([]);
+    disclosureSession.dispose();
   });
 
   it('emits revisioned native select and choice state only through typed proofs', () => {
@@ -1569,34 +1894,34 @@ describe('semantic source session', () => {
     });
     const classifier = new StickySourceSecretClassifier();
     const firstPort = new FakeSemanticPort(
-      createSemanticSourcePortName(identity.sessionId, 'rrweb'),
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
     );
     const first = createSession(
       firstPort,
       document,
       window,
-      'rrweb',
+      'isolated-html',
       classifier,
     );
     firstPort.emit(createSemanticSourceStart(
-      'rrweb', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+      'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
     ));
     expect(firstPort.messages[0]!.records).toEqual([]);
     first.dispose();
 
     secret.setAttribute('type', 'text');
     const secondPort = new FakeSemanticPort(
-      createSemanticSourcePortName(identity.sessionId, 'rrweb'),
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
     );
     const second = createSession(
       secondPort,
       document,
       window,
-      'rrweb',
+      'isolated-html',
       classifier,
     );
     secondPort.emit(createSemanticSourceStart(
-      'rrweb', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+      'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
     ));
     expect(secondPort.messages[0]!.records).toEqual([]);
     expect(reads).toBe(0);
@@ -1644,7 +1969,7 @@ function createSession(
   port: FakeSemanticPort,
   sourceDocument: unknown,
   sourceWindow: unknown,
-  bridge: 'rrweb' | 'isolated-html' = 'isolated-html',
+  bridge: 'isolated-html' = 'isolated-html',
   secretClassifier?: StickySourceSecretClassifier,
   getComputedStyle?: Window['getComputedStyle'],
   timers?: Array<() => void>,
@@ -1687,6 +2012,92 @@ function createSession(
 interface SemanticMutationHarness {
   readonly observed: Node[];
   callback?: MutationCallback;
+}
+
+function installPaintedTabFixture(
+  document: Document,
+  _window: Window,
+): void {
+  for (const element of [...document.querySelectorAll('*')]) {
+    Object.defineProperty(element, 'getClientRects', {
+      configurable: true,
+      value: () => paintedRectList(),
+    });
+  }
+}
+
+function paintedRectList(): DOMRectList {
+  const rect = {
+    x: 0,
+    y: 0,
+    left: 0,
+    top: 0,
+    right: 320,
+    bottom: 40,
+    width: 320,
+    height: 40,
+    toJSON: () => ({}),
+  } as DOMRect;
+  return Object.assign([rect], {
+    item: (index: number) => index === 0 ? rect : null,
+  }) as unknown as DOMRectList;
+}
+
+function structuralMenuStyle(
+  collapseFor: (
+    element: Element,
+  ) => 'display' | 'content-visibility' | 'opacity' | undefined,
+): Window['getComputedStyle'] {
+  return ((element: Element) => {
+    const collapse = collapseFor(element);
+    return {
+      display: collapse === 'display' ? 'none' : 'block',
+      visibility: 'visible',
+      opacity: collapse === 'opacity' ? '0' : '1',
+      overflowX: 'visible',
+      overflowY: 'visible',
+      getPropertyValue: (name: string) => {
+        if (name === '-webkit-text-security') return 'none';
+        if (name === 'content-visibility') {
+          return collapse === 'content-visibility' ? 'hidden' : 'visible';
+        }
+        if (name === 'clip') return 'auto';
+        if (name === 'clip-path') return 'none';
+        if (name === 'overflow-x' || name === 'overflow-y') return 'visible';
+        return '';
+      },
+    } as unknown as CSSStyleDeclaration;
+  }) as Window['getComputedStyle'];
+}
+
+const tabFixtureComputedStyle = ((element: Element) => {
+  const hidden = element.hasAttribute('hidden') ||
+    element.getAttribute('aria-hidden')?.trim().toLowerCase() === 'true';
+  return {
+    display: hidden ? 'none' : 'block',
+    visibility: 'visible',
+    opacity: '1',
+    getPropertyValue: (name: string) => {
+      if (name === '-webkit-text-security') return 'none';
+      if (name === 'content-visibility') return 'visible';
+      if (name === 'clip') return 'auto';
+      if (name === 'clip-path') return 'none';
+      return '';
+    },
+  } as unknown as CSSStyleDeclaration;
+}) as Window['getComputedStyle'];
+
+function selectTab(document: Document, selected: 'a' | 'b'): void {
+  for (const name of ['a', 'b'] as const) {
+    const active = name === selected;
+    const trigger = document.querySelector(`#tab-${name}`)!;
+    const panel = document.querySelector(`#panel-${name}`)!;
+    trigger.setAttribute('aria-selected', active ? 'true' : 'false');
+    trigger.setAttribute('aria-expanded', active ? 'true' : 'false');
+    panel.setAttribute('aria-hidden', active ? 'false' : 'true');
+    if (active) panel.removeAttribute('hidden');
+    else panel.setAttribute('hidden', '');
+  }
 }
 
 class FakeSemanticPort implements SemanticSourcePort {

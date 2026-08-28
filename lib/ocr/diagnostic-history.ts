@@ -49,6 +49,9 @@ export function formatImageTranslationDiagnostic(
   if (diagnostic.stage === 'source-summary') {
     return `source scan: candidates=${diagnostic.candidateImages}; observed=${diagnostic.observedImages}`;
   }
+  if (diagnostic.stage === 'source-read-policy') {
+    return 'image read policy: control-images=off; controls blocked before text and pixel reads';
+  }
   if (diagnostic.stage === 'image-scheduling') {
     return [
       `image scheduling: ${diagnostic.status}`,
@@ -64,7 +67,35 @@ export function formatImageTranslationDiagnostic(
     return `job ${diagnostic.ordinal} recognition complete: provider=${diagnostic.provider}; regions=${diagnostic.regions}; bitmap=${diagnostic.bitmapWidth}x${diagnostic.bitmapHeight}; cache=${diagnostic.cacheHit ? 'hit' : 'miss'}`;
   }
   if (diagnostic.stage === 'recognition-cache') {
-    return `recognition cache: access=${diagnostic.access}; entries=${diagnostic.entries}; weight=${diagnostic.weight}; hits=${diagnostic.hits}; misses=${diagnostic.misses}; joins=${diagnostic.joins}; loads=${diagnostic.loads}`;
+    return [
+      `recognition cache: access=${diagnostic.access}`,
+      `entries=${diagnostic.entries}`,
+      `weight=${diagnostic.weight}`,
+      `hits=${diagnostic.hits}`,
+      `misses=${diagnostic.misses}`,
+      `joins=${diagnostic.joins}`,
+      `loads=${diagnostic.loads}`,
+      `expirations=${diagnostic.expirations ?? 0}`,
+      `purges=${diagnostic.purges ?? 0}`,
+      diagnostic.providerEntries === undefined
+        ? undefined
+        : `provider-entries=${diagnostic.providerEntries}`,
+      diagnostic.providerWeight === undefined
+        ? undefined
+        : `provider-weight=${diagnostic.providerWeight}`,
+      diagnostic.providerHits === undefined
+        ? undefined
+        : `provider-hits=${diagnostic.providerHits}`,
+      diagnostic.providerMisses === undefined
+        ? undefined
+        : `provider-misses=${diagnostic.providerMisses}`,
+    ].filter(Boolean).join('; ');
+  }
+  if (diagnostic.stage === 'image-evidence-cache') {
+    return `image evidence cache: access=${diagnostic.access}; entries=${diagnostic.entries}; weight=${diagnostic.weight}; hits=${diagnostic.hits}; misses=${diagnostic.misses}; revalidations=${diagnostic.revalidations}; expirations=${diagnostic.expirations}; purges=${diagnostic.purges}`;
+  }
+  if (diagnostic.stage === 'image-final-cache') {
+    return `image final cache: access=${diagnostic.access}; entries=${diagnostic.entries}; weight=${diagnostic.weight}; hits=${diagnostic.hits}; misses=${diagnostic.misses}; rebinds=${diagnostic.rebinds}; expirations=${diagnostic.expirations}; purges=${diagnostic.purges}`;
   }
   if (diagnostic.stage === 'recognition-quality') {
     return `recognition quality: candidates=${diagnostic.candidateRegions}; accepted=${diagnostic.acceptedRegions}; corroborated=${diagnostic.corroboratedRegions}; uncertain=${diagnostic.uncertainRegions}; rejected-blank=${diagnostic.rejectedBlankRegions}; rejected-punctuation=${diagnostic.rejectedPunctuationRegions}; rejected-low-confidence=${diagnostic.rejectedLowConfidenceRegions}; rejected-uncorroborated=${diagnostic.rejectedUncorroboratedRegions}`;

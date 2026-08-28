@@ -394,6 +394,36 @@ describe('AutoImageLanguageProbe', () => {
     expect(probe.hasSample(second)).toBe(true);
   });
 
+  it('keeps a resolved language when surviving per-image votes still satisfy it', () => {
+    const rotating = sample();
+    const duplicate = sample();
+    const distinct = sample();
+    const probe = new AutoImageLanguageProbe(0);
+    expect(probe.observeSemantic({
+      sampleIdentity: rotating,
+      text: 'Public notice',
+      detectedLanguage: 'en',
+      now: 1,
+    })).toEqual({ status: 'continue' });
+    expect(probe.observeSemantic({
+      sampleIdentity: duplicate,
+      text: 'public notice!',
+      detectedLanguage: 'en',
+      now: 2,
+    })).toEqual({ status: 'continue' });
+    expect(probe.observeSemantic({
+      sampleIdentity: distinct,
+      text: 'Latest news',
+      detectedLanguage: 'en',
+      now: 3,
+    })).toMatchObject({ status: 'resolved', language: 'en' });
+
+    expect(probe.forgetSample(rotating)).toBe(true);
+    expect(probe.resolvedLanguage).toBe('en');
+    expect(probe.hasSample(duplicate)).toBe(true);
+    expect(probe.hasSample(distinct)).toBe(true);
+  });
+
   it('invalidates a single-image OCR resolution when its contributor changes', () => {
     const identity = sample();
     const pixelHash = hash('65');
@@ -411,6 +441,40 @@ describe('AutoImageLanguageProbe', () => {
     expect(probe.resolvedLanguage).toBeUndefined();
     expect(probe.images).toBe(0);
     expect(probe.attempts).toBe(0);
+  });
+
+  it('restores a cached distinct-images result as one current-image vote', () => {
+    const first = sample();
+    const second = sample();
+    const probe = new AutoImageLanguageProbe(0);
+
+    expect(probe.restoreDistinctImageVote(first, 'ja', 1)).toEqual({
+      status: 'continue',
+    });
+    expect(probe.restoreDistinctImageVote(first, 'ja', 2)).toEqual({
+      status: 'continue',
+    });
+    expect(probe.resolvedLanguage).toBeUndefined();
+    expect(probe.restoreDistinctImageVote(second, 'ja', 3)).toMatchObject({
+      status: 'resolved',
+      language: 'ja',
+      evidence: 'distinct-images',
+      images: 2,
+    });
+  });
+
+  it('restores and revokes cached single-strong-script evidence', () => {
+    const identity = sample();
+    const probe = new AutoImageLanguageProbe(0);
+
+    expect(probe.restoreSingleStrongVote(identity, 'ja', 1)).toMatchObject({
+      status: 'resolved',
+      language: 'ja',
+      evidence: 'single-strong-script',
+      images: 1,
+    });
+    expect(probe.forgetSample(identity)).toBe(true);
+    expect(probe.resolvedLanguage).toBeUndefined();
   });
 
   it('forgets an unresolved sample and releases its semantic label vote', () => {

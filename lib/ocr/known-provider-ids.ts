@@ -1,8 +1,6 @@
 export const IMAGE_TEXT_PROVIDER_IDS = Object.freeze([
-  'paddleocr-wasm',
   'chrome-text-detector',
   'tesseract',
-  'tesseract-wasm-direct',
   'transformers',
   'chromium-screen-ai',
 ] as const);
@@ -10,14 +8,6 @@ export const IMAGE_TEXT_PROVIDER_IDS = Object.freeze([
 export type ImageTextProviderId = (typeof IMAGE_TEXT_PROVIDER_IDS)[number];
 
 const PROVIDER_ID_SET = new Set<string>(IMAGE_TEXT_PROVIDER_IDS);
-const LEGACY_DEFAULT_PROVIDER_ORDER = Object.freeze([
-  'chrome-text-detector',
-  'tesseract',
-  'transformers',
-  'paddleocr-wasm',
-  'chromium-screen-ai',
-] as const);
-
 export function isImageTextProviderId(
   value: unknown,
 ): value is ImageTextProviderId {
@@ -28,9 +18,6 @@ export function isImageTextProviderId(
 export function repairImageTextProviderOrder(
   input: unknown,
 ): ImageTextProviderId[] {
-  if (isExactLegacyDefaultProviderOrder(input)) {
-    return [...IMAGE_TEXT_PROVIDER_IDS];
-  }
   const result: ImageTextProviderId[] = [];
   const seen = new Set<ImageTextProviderId>();
   if (Array.isArray(input)) {
@@ -94,12 +81,4 @@ export function readExactDisabledImageTextProviderIds(
     result.push(value);
   }
   return result;
-}
-
-function isExactLegacyDefaultProviderOrder(
-  input: unknown,
-): input is readonly (typeof LEGACY_DEFAULT_PROVIDER_ORDER)[number][] {
-  return Array.isArray(input) &&
-    input.length === LEGACY_DEFAULT_PROVIDER_ORDER.length &&
-    LEGACY_DEFAULT_PROVIDER_ORDER.every((id, index) => input[index] === id);
 }

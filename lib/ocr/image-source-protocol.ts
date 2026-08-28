@@ -16,10 +16,10 @@ import {
 import { normalizeAccessibilityImageText } from './accessibility-image-text';
 import { hasExactKeysWithOptional } from '../exact-record';
 
-export const IMAGE_SOURCE_PROTOCOL_VERSION = 1;
-export const IMAGE_SOURCE_PORT_PREFIX = 'simul:image-source-v1:';
+export const IMAGE_SOURCE_PROTOCOL_VERSION = 2;
+export const IMAGE_SOURCE_PORT_PREFIX = 'simul:image-source-v2:';
 export const MAX_IMAGE_SOURCE_REQUEST_ID_LENGTH = 96;
-export type ImageSourceBridgeId = 'rrweb' | 'isolated-html';
+export type ImageSourceBridgeId = 'isolated-html';
 
 export interface ImageSourcePortIdentity {
   readonly bridge: ImageSourceBridgeId;
@@ -27,7 +27,7 @@ export interface ImageSourcePortIdentity {
 }
 
 export interface ImageSourceStartMessage {
-  readonly kind: 'simul:image-source-v1:start';
+  readonly kind: 'simul:image-source-v2:start';
   readonly document: ReplicaSourceDocumentIdentity;
   readonly policyFingerprint?: string;
   readonly controlImages?: boolean;
@@ -35,13 +35,13 @@ export interface ImageSourceStartMessage {
 }
 
 export interface ImageSourceMetricsRequest {
-  readonly kind: 'simul:image-source-v1:measure';
+  readonly kind: 'simul:image-source-v2:measure';
   readonly requestId: string;
   readonly descriptor: SourceImageDescriptor;
 }
 
 export interface ImageSourceAccessibilityTextRequest {
-  readonly kind: 'simul:image-source-v1:accessibility-text';
+  readonly kind: 'simul:image-source-v2:accessibility-text';
   readonly requestId: string;
   readonly descriptor: SourceImageDescriptor;
   readonly policyFingerprint: string;
@@ -88,34 +88,34 @@ export interface ImageSourceReadySummary {
 
 export type ImageSourceRecorderMessage =
   | {
-      readonly kind: 'simul:image-source-v1:ready';
+      readonly kind: 'simul:image-source-v2:ready';
       readonly document: ReplicaSourceDocumentIdentity;
       readonly summary: ImageSourceReadySummary;
     }
   | {
-      readonly kind: 'simul:image-source-v1:change';
+      readonly kind: 'simul:image-source-v2:change';
       readonly change: SourceImageChange;
     }
   | {
-      readonly kind: 'simul:image-source-v1:metrics';
+      readonly kind: 'simul:image-source-v2:metrics';
       readonly requestId: string;
       readonly status: 'ready';
       readonly metrics: SourceImageCaptureMetrics;
     }
   | {
-      readonly kind: 'simul:image-source-v1:metrics';
+      readonly kind: 'simul:image-source-v2:metrics';
       readonly requestId: string;
       readonly status: 'stale' | 'hidden';
     }
   | {
-      readonly kind: 'simul:image-source-v1:accessibility-text';
+      readonly kind: 'simul:image-source-v2:accessibility-text';
       readonly requestId: string;
       readonly descriptor: SourceImageDescriptor;
       readonly status: 'ready';
       readonly evidence: SourceImageAccessibilityTextEvidence;
     }
   | {
-      readonly kind: 'simul:image-source-v1:accessibility-text';
+      readonly kind: 'simul:image-source-v2:accessibility-text';
       readonly requestId: string;
       readonly descriptor: SourceImageDescriptor;
       readonly status: 'none' | 'blocked' | 'stale';
@@ -123,7 +123,7 @@ export type ImageSourceRecorderMessage =
 
 export function createImageSourcePortName(
   sessionId: string,
-  bridge: ImageSourceBridgeId = 'rrweb',
+  bridge: ImageSourceBridgeId = 'isolated-html',
 ): string {
   if (!isSafeToken(sessionId)) throw new Error('Invalid image source session.');
   return `${IMAGE_SOURCE_PORT_PREFIX}${bridge}:${sessionId}`;
@@ -142,7 +142,7 @@ export function readImageSourcePortIdentity(
   const bridge = suffix.slice(0, separator);
   const sessionId = suffix.slice(separator + 1);
   if (
-    (bridge !== 'rrweb' && bridge !== 'isolated-html') ||
+    bridge !== 'isolated-html' ||
     expectedBridge && bridge !== expectedBridge ||
     !isSafeToken(sessionId)
   ) return undefined;
@@ -162,7 +162,7 @@ export function readImageSourceControllerMessage(
   expectedDocument?: ReplicaSourceDocumentIdentity,
 ): ImageSourceControllerMessage | undefined {
   if (!isRecord(input) || typeof input.kind !== 'string') return undefined;
-  if (input.kind === 'simul:image-source-v1:start') {
+  if (input.kind === 'simul:image-source-v2:start') {
     if (!(
       hasExactKeys(input, ['kind', 'document']) ||
       (
@@ -191,7 +191,7 @@ export function readImageSourceControllerMessage(
         : {}),
     });
   }
-  if (input.kind === 'simul:image-source-v1:accessibility-text') {
+  if (input.kind === 'simul:image-source-v2:accessibility-text') {
     if (!hasExactKeys(input, [
       'kind', 'requestId', 'descriptor', 'policyFingerprint', 'controlImages',
     ]) ||
@@ -217,7 +217,7 @@ export function readImageSourceControllerMessage(
     });
   }
   if (
-    input.kind !== 'simul:image-source-v1:measure' ||
+    input.kind !== 'simul:image-source-v2:measure' ||
     !hasExactKeys(input, ['kind', 'requestId', 'descriptor']) ||
     !isRequestId(input.requestId)
   ) return undefined;
@@ -240,7 +240,7 @@ export function readImageSourceRecorderMessage(
   expectedDocument: ReplicaSourceDocumentIdentity,
 ): ImageSourceRecorderMessage | undefined {
   if (!isRecord(input) || typeof input.kind !== 'string') return undefined;
-  if (input.kind === 'simul:image-source-v1:ready') {
+  if (input.kind === 'simul:image-source-v2:ready') {
     if (!hasExactKeys(input, ['kind', 'document', 'summary'])) return undefined;
     const document = readSourceDocumentIdentity(input.document);
     const summary = readImageSourceReadySummary(input.summary);
@@ -250,7 +250,7 @@ export function readImageSourceRecorderMessage(
       ? Object.freeze({ kind: input.kind, document, summary })
       : undefined;
   }
-  if (input.kind === 'simul:image-source-v1:change') {
+  if (input.kind === 'simul:image-source-v2:change') {
     if (!hasExactKeys(input, ['kind', 'change'])) return undefined;
     const change = readSourceImageChange(input.change);
     const document = change?.kind === 'upsert'
@@ -261,7 +261,7 @@ export function readImageSourceRecorderMessage(
     }
     return Object.freeze({ kind: input.kind, change });
   }
-  if (input.kind === 'simul:image-source-v1:accessibility-text') {
+  if (input.kind === 'simul:image-source-v2:accessibility-text') {
     if (
       !isRequestId(input.requestId) ||
       typeof input.status !== 'string'
@@ -304,7 +304,7 @@ export function readImageSourceRecorderMessage(
       : undefined;
   }
   if (
-    input.kind !== 'simul:image-source-v1:metrics' ||
+    input.kind !== 'simul:image-source-v2:metrics' ||
     !isRequestId(input.requestId) ||
     typeof input.status !== 'string'
   ) return undefined;

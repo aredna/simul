@@ -1,11 +1,8 @@
-export const REPLICA_PROTOCOL_VERSION = 2 as const;
+export const REPLICA_PROTOCOL_VERSION = 3 as const;
 
 import type { ReplicaSourceDocumentIdentity } from './source-identity';
 
-export type ReplicaEngineId =
-  | 'legacy-v1'
-  | 'isolated-html-v1'
-  | 'rrweb-shadow-v2';
+export type ReplicaEngineId = 'isolated-html-v1';
 
 export interface ReplicaDocumentIdentity {
   readonly protocolVersion: typeof REPLICA_PROTOCOL_VERSION;
@@ -28,21 +25,14 @@ export interface ReplicaCaptureRequest {
 }
 
 export type ReplicaDiagnosticCode =
-  | 'legacy_selected'
-  | 'shadow_disabled'
-  | 'shadow_complete'
   | 'isolated_complete'
   | 'isolated_connected'
   | 'stale_identity'
   | 'access_denied'
-  | 'capture_busy'
-  | 'capture_failed'
-  | 'capture_timeout'
   | 'invalid_message'
   | 'checkpoint_too_large'
   | 'privacy_rejected'
   | 'replay_failed'
-  | 'replay_timeout'
   | 'stream_gap'
   | 'stream_overflow'
   | 'stream_failed';
@@ -78,6 +68,9 @@ export interface ReplicaDiagnostics {
   readonly sourceDocumentHeight: number;
   readonly replayDocumentWidth: number;
   readonly replayDocumentHeight: number;
+  /** Bounded count only; never includes rejected resource values or node IDs. */
+  readonly omittedPassiveImageResources?: number;
+  readonly receiverDiscoveredPassiveImageResources?: number;
 }
 
 export type ReplicaRunResult =
@@ -97,82 +90,8 @@ export type ReplicaRunResult =
 export interface ReplicaEngine {
   readonly id: ReplicaEngineId;
   run(request: ReplicaCaptureRequest, signal?: AbortSignal): Promise<ReplicaRunResult>;
-  releasePresentation(showFallbackLabel?: boolean): void;
+  releasePresentation(): void;
   dispose(): void;
-}
-
-export interface ReplicaLiveBatch {
-  readonly identity: ReplicaDocumentIdentity;
-  readonly firstSequence: number;
-  readonly lastSequence: number;
-  readonly events: readonly unknown[];
-  readonly byteLength: number;
-}
-
-export interface ReplicaLiveStreamObserver {
-  onBatch(batch: ReplicaLiveBatch): void;
-  onCheckpoint(checkpoint: ReplicaCheckpointResponse): void;
-  onFailure(code: Extract<ReplicaDiagnosticCode, 'stream_gap' | 'stream_overflow' | 'stream_failed'>): void;
-}
-
-/**
- * One exact-document Port owned by the visible companion. The recorder does
- * not consider transport delivery an acknowledgement; only the replica engine
- * may advance the applied watermark.
- */
-export interface ReplicaLiveStreamLease {
-  readonly initialCheckpoint: Promise<ReplicaCheckpointResponse>;
-  setObserver(observer: ReplicaLiveStreamObserver): void;
-  acknowledgeCheckpoint(sequence: number): void;
-  acknowledge(sequence: number): void;
-  requestCheckpoint(): void;
-  dispose(): void;
-}
-
-export type ReplicaLiveStreamFactory = (
-  request: ReplicaCaptureRequest,
-  signal?: AbortSignal,
-) => Promise<ReplicaLiveStreamLease>;
-
-export interface ReplicaCheckpointPayload {
-  readonly events: readonly unknown[];
-  readonly byteLength: number;
-  readonly captureMs: number;
-  readonly viewportWidth: number;
-  readonly viewportHeight: number;
-  readonly documentWidth: number;
-  readonly documentHeight: number;
-}
-
-export interface ReplicaCheckpointEnvelope {
-  readonly protocolVersion: typeof REPLICA_PROTOCOL_VERSION;
-  readonly kind: 'simul:replica-v2:checkpoint';
-  readonly identity: ReplicaDocumentIdentity;
-  readonly payload: ReplicaCheckpointPayload;
-}
-
-export interface ReplicaCheckpointErrorEnvelope {
-  readonly protocolVersion: typeof REPLICA_PROTOCOL_VERSION;
-  readonly kind: 'simul:replica-v2:checkpoint-error';
-  readonly identity: ReplicaDocumentIdentity;
-  readonly payload: {
-    readonly code:
-      | 'capture_busy'
-      | 'capture_failed'
-      | 'capture_timeout'
-      | 'checkpoint_too_large'
-      | 'privacy_rejected';
-  };
-}
-
-export type ReplicaCheckpointResponse =
-  | ReplicaCheckpointEnvelope
-  | ReplicaCheckpointErrorEnvelope;
-
-export interface ReplicaCheckpointCommand {
-  readonly protocolVersion: typeof REPLICA_PROTOCOL_VERSION;
-  readonly kind: 'simul:replica-v2:capture-checkpoint';
-  readonly identity: ReplicaDocumentIdentity;
 }
 
 export function emptyReplicaDiagnostics(

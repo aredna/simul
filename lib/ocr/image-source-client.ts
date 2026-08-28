@@ -3,7 +3,7 @@ import {
   sameSourceDocument,
   sourceDocumentIdentity,
 } from '../replica/source-identity';
-import { createReplicaIdentity } from '../replica/protocol-v2';
+import { createReplicaIdentity } from '../replica/replica-identity';
 import type { SourceImageChange, SourceImageDescriptor } from './contracts';
 import {
   createImageSourcePortName,
@@ -55,7 +55,7 @@ export async function openChromeImageSource(
   request: ReplicaCaptureRequest,
   onChange: (change: SourceImageChange) => void,
   signal?: AbortSignal,
-  bridge: ImageSourceBridgeId = 'rrweb',
+  bridge: ImageSourceBridgeId = 'isolated-html',
   policy?: ImageSourceReadPolicy,
 ): Promise<ImageSourceLease> {
   signal?.throwIfAborted();
@@ -149,7 +149,7 @@ class ChromeImageSourceLease implements ImageSourceLease {
     signal?.addEventListener('abort', this.#onAbort, { once: true });
     try {
       port.postMessage({
-        kind: 'simul:image-source-v1:start',
+        kind: 'simul:image-source-v2:start',
         document,
         ...(policy
           ? {
@@ -202,7 +202,7 @@ class ChromeImageSourceLease implements ImageSourceLease {
       signal?.addEventListener('abort', onAbort, { once: true });
       try {
         this.port.postMessage({
-          kind: 'simul:image-source-v1:measure',
+          kind: 'simul:image-source-v2:measure',
           requestId,
           descriptor,
         });
@@ -261,7 +261,7 @@ class ChromeImageSourceLease implements ImageSourceLease {
       signal?.addEventListener('abort', onAbort, { once: true });
       try {
         this.port.postMessage({
-          kind: 'simul:image-source-v1:accessibility-text',
+          kind: 'simul:image-source-v2:accessibility-text',
           requestId,
           descriptor,
           policyFingerprint,
@@ -291,7 +291,7 @@ class ChromeImageSourceLease implements ImageSourceLease {
       );
       return;
     }
-    if (message.kind === 'simul:image-source-v1:change') {
+    if (message.kind === 'simul:image-source-v2:change') {
       try {
         this.onChange(message.change);
       } catch {
@@ -299,7 +299,7 @@ class ChromeImageSourceLease implements ImageSourceLease {
       }
       return;
     }
-    if (message.kind === 'simul:image-source-v1:ready') {
+    if (message.kind === 'simul:image-source-v2:ready') {
       if (this.#readySignalled) {
         this.disposeWithError(
           new ImageSourceUnavailableError('Duplicate image source readiness.'),
@@ -310,7 +310,7 @@ class ChromeImageSourceLease implements ImageSourceLease {
       this.#resolveReady(message.summary);
       return;
     }
-    if (message.kind === 'simul:image-source-v1:accessibility-text') {
+    if (message.kind === 'simul:image-source-v2:accessibility-text') {
       const pending = this.#pendingAccessibility.get(message.requestId);
       if (
         pending &&

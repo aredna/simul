@@ -36,6 +36,7 @@ describe('SourceImageModel', () => {
     });
     const firstDescriptor = model.get(7)!;
     expect(Object.keys(firstDescriptor).sort()).toEqual([
+      'captureRevision',
       'connected',
       'contentRevision',
       'document',
@@ -57,7 +58,11 @@ describe('SourceImageModel', () => {
       visibility: 'visible',
     }))).toMatchObject({
       change: {
-        descriptor: { contentRevision: 1, observationRevision: 2 },
+        descriptor: {
+          captureRevision: 1,
+          contentRevision: 1,
+          observationRevision: 2,
+        },
       },
     });
     expect(model.isCurrent(firstDescriptor)).toBe(false);
@@ -65,6 +70,7 @@ describe('SourceImageModel', () => {
     expect(model.upsert(upsert(7, {
       contentChanged: false,
       observationChanged: true,
+      captureChanged: false,
       visibility: 'visible',
     }))).toMatchObject({
       change: {
@@ -74,10 +80,56 @@ describe('SourceImageModel', () => {
 
     expect(model.upsert(upsert(7, {
       contentChanged: true,
+      captureChanged: true,
       visibility: 'visible',
     }))).toMatchObject({
       change: {
-        descriptor: { contentRevision: 2, observationRevision: 4 },
+        descriptor: {
+          captureRevision: 2,
+          contentRevision: 2,
+          observationRevision: 4,
+        },
+      },
+    });
+  });
+
+  it('keeps capture revision stable for semantic-only content changes', () => {
+    const model = new SourceImageModel();
+    model.beginDocument(documentIdentity);
+    model.upsert(upsert(7));
+
+    expect(model.upsert(upsert(7, {
+      contentChanged: true,
+      captureChanged: false,
+      observationChanged: true,
+    }))).toMatchObject({
+      change: {
+        descriptor: {
+          contentRevision: 2,
+          captureRevision: 1,
+          observationRevision: 2,
+        },
+      },
+    });
+  });
+
+  it('advances observation currency for a capture-only safety change', () => {
+    const model = new SourceImageModel();
+    model.beginDocument(documentIdentity);
+    model.upsert(upsert(7));
+
+    expect(model.upsert(upsert(7, {
+      contentChanged: false,
+      observationChanged: false,
+      captureChanged: true,
+    }))).toMatchObject({
+      status: 'changed',
+      change: {
+        descriptor: {
+          contentRevision: 1,
+          captureRevision: 2,
+          observationRevision: 2,
+        },
       },
     });
   });

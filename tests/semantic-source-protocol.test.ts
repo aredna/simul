@@ -10,6 +10,8 @@ import {
   readSemanticSourcePortIdentity,
   readSemanticSourceRecord,
   semanticDisclosureRelationId,
+  semanticStructuralMenuRelationId,
+  semanticTabRelationId,
   semanticSourceBatchByteLength,
 } from '../lib/replica/semantic-source-protocol';
 import {
@@ -78,6 +80,32 @@ const disclosureProof = {
   classifierVersion: 1,
 } as const;
 
+const tabProof = {
+  kind: 'tab-state',
+  bridge: 'isolated-html',
+  relationId: semanticTabRelationId(14, 15)!,
+  revision: 1,
+  gate: 'controlSemantics',
+  tabNodeId: 14,
+  panelNodeId: 15,
+  selected: true,
+  classifierVersion: 1,
+} as const;
+
+const structuralMenuProof = {
+  kind: 'structural-menu',
+  bridge: 'isolated-html',
+  relationId: semanticStructuralMenuRelationId(16, 17, 18)!,
+  revision: 1,
+  gate: 'disclosureContent',
+  containerNodeId: 16,
+  triggerNodeId: 17,
+  panelNodeId: 18,
+  popupRole: 'menu',
+  expanded: false,
+  classifierVersion: 1,
+} as const;
+
 const choiceProof = {
   kind: 'choice-state',
   bridge: 'isolated-html',
@@ -117,17 +145,19 @@ describe('semantic source protocol', () => {
     expect(readSemanticSourceProof(selectPresentationProof))
       .toEqual(selectPresentationProof);
     expect(readSemanticSourceProof(disclosureProof)).toEqual(disclosureProof);
+    expect(readSemanticSourceProof(tabProof)).toEqual(tabProof);
+    expect(readSemanticSourceProof(structuralMenuProof)).toEqual(structuralMenuProof);
     expect(readSemanticSourceProof(choiceProof)).toEqual(choiceProof);
     expect(readSemanticSourceProof(controlProof)).toEqual(controlProof);
     expect(readSemanticSourceProof(ariaProof)).toEqual(ariaProof);
     const proofs = [
       selectProof, selectPresentationProof, disclosureProof, choiceProof,
-      controlProof, ariaProof,
+      controlProof, ariaProof, tabProof, structuralMenuProof,
     ] as const;
     const computedBytes = semanticSourceBatchByteLength([ordinaryRecord], proofs);
     expect(readSemanticSourceBatch({
       protocolVersion: SEMANTIC_SOURCE_PROTOCOL_VERSION,
-      kind: 'simul:semantic-source-v1:batch',
+      kind: 'simul:semantic-source-v2:batch',
       document: documentIdentity,
       policyFingerprint: 'read-v1-111111',
       sequence: 1,
@@ -139,11 +169,18 @@ describe('semantic source protocol', () => {
   });
 
   it('binds start/ack parsing to the exact bridge, document and scope', () => {
+    expect(SEMANTIC_SOURCE_PROTOCOL_VERSION).toBe(2);
     const portName = createSemanticSourcePortName(
       documentIdentity.sessionId,
       'isolated-html',
     );
     const port = readSemanticSourcePortIdentity(portName, 'isolated-html')!;
+    expect(portName).toBe(
+      `simul:semantic-source-v2:isolated-html:${documentIdentity.sessionId}`,
+    );
+    expect(readSemanticSourcePortIdentity(
+      `simul:semantic-source-v1:isolated-html:${documentIdentity.sessionId}`,
+    )).toBeUndefined();
     const start = createSemanticSourceStart(
       'isolated-html',
       documentIdentity,
@@ -152,7 +189,7 @@ describe('semantic source protocol', () => {
     expect(readSemanticSourceControllerMessage(start, port)).toEqual(start);
     expect(readSemanticSourceControllerMessage({
       ...start,
-      bridge: 'rrweb',
+      bridge: 'legacy',
     }, port)).toBeUndefined();
     expect(readSemanticSourceControllerMessage({
       ...start,
@@ -176,7 +213,7 @@ describe('semantic source protocol', () => {
     })).toBeUndefined();
     expect(readSemanticSourceBatch({
       protocolVersion: 1,
-      kind: 'simul:semantic-source-v1:batch',
+      kind: 'simul:semantic-source-v2:batch',
       document: documentIdentity,
       policyFingerprint: 'read-v1-111111',
       sequence: 1,
@@ -190,6 +227,26 @@ describe('semantic source protocol', () => {
     expect(readSemanticSourceProof({
       ...disclosureProof,
       relationId: 'semantic-relation-v1:10:12',
+    })).toBeUndefined();
+    expect(readSemanticSourceProof({
+      ...tabProof,
+      relationId: semanticTabRelationId(14, 16),
+    })).toBeUndefined();
+    expect(readSemanticSourceProof({
+      ...tabProof,
+      gate: 'disclosureContent',
+    })).toBeUndefined();
+    expect(readSemanticSourceProof({
+      ...structuralMenuProof,
+      relationId: semanticStructuralMenuRelationId(16, 17, 19),
+    })).toBeUndefined();
+    expect(readSemanticSourceProof({
+      ...structuralMenuProof,
+      expanded: true,
+    })).toBeUndefined();
+    expect(readSemanticSourceProof({
+      ...structuralMenuProof,
+      containerNodeId: structuralMenuProof.triggerNodeId,
     })).toBeUndefined();
     expect(readSemanticSourceProof({
       ...selectProof,
@@ -227,7 +284,7 @@ describe('semantic source protocol', () => {
     const proofs = [selectProof, { ...selectProof, revision: 3 }] as const;
     expect(readSemanticSourceBatch({
       protocolVersion: SEMANTIC_SOURCE_PROTOCOL_VERSION,
-      kind: 'simul:semantic-source-v1:batch',
+      kind: 'simul:semantic-source-v2:batch',
       document: documentIdentity,
       policyFingerprint: 'read-v1-111111',
       sequence: 1,
@@ -239,7 +296,7 @@ describe('semantic source protocol', () => {
 
     expect(readSemanticSourceBatch({
       protocolVersion: SEMANTIC_SOURCE_PROTOCOL_VERSION,
-      kind: 'simul:semantic-source-v1:batch',
+      kind: 'simul:semantic-source-v2:batch',
       document: documentIdentity,
       policyFingerprint: 'read-v1-000000',
       sequence: 1,
@@ -251,7 +308,7 @@ describe('semantic source protocol', () => {
 
     expect(readSemanticSourceBatch({
       protocolVersion: SEMANTIC_SOURCE_PROTOCOL_VERSION,
-      kind: 'simul:semantic-source-v1:batch',
+      kind: 'simul:semantic-source-v2:batch',
       document: documentIdentity,
       policyFingerprint: 'read-v1-111111',
       sequence: 1,
@@ -267,7 +324,7 @@ describe('semantic source protocol', () => {
     }));
     expect(readSemanticSourceBatch({
       protocolVersion: SEMANTIC_SOURCE_PROTOCOL_VERSION,
-      kind: 'simul:semantic-source-v1:batch',
+      kind: 'simul:semantic-source-v2:batch',
       document: documentIdentity,
       policyFingerprint: 'read-v1-111111',
       sequence: 1,
@@ -275,6 +332,47 @@ describe('semantic source protocol', () => {
       proofs: tooManyProofs,
       byteLength: semanticSourceBatchByteLength([], tooManyProofs),
     })).toBeUndefined();
+  });
+
+  it('binds inline tab state to control semantics independently of disclosure text', () => {
+    const controlOnly = {
+      controlSemantics: true,
+      controlImages: false,
+      disclosureContent: false,
+      formValues: false,
+      personalDataValues: false,
+      editableContent: false,
+    } as const;
+    const controlBatch = {
+      protocolVersion: SEMANTIC_SOURCE_PROTOCOL_VERSION,
+      kind: 'simul:semantic-source-v2:batch',
+      document: documentIdentity,
+      policyFingerprint: 'read-v1-100000',
+      sequence: 1,
+      records: [],
+      proofs: [tabProof],
+      byteLength: semanticSourceBatchByteLength([], [tabProof]),
+    } as const;
+    expect(readSemanticSourceBatch(
+      controlBatch,
+      documentIdentity,
+      'read-v1-100000',
+      'isolated-html',
+      controlOnly,
+    )).toBeDefined();
+
+    const disclosureOnly = {
+      ...controlOnly,
+      controlSemantics: false,
+      disclosureContent: true,
+    } as const;
+    expect(readSemanticSourceBatch(
+      { ...controlBatch, policyFingerprint: 'read-v1-001000' },
+      documentIdentity,
+      'read-v1-001000',
+      'isolated-html',
+      disclosureOnly,
+    )).toBeUndefined();
   });
 
   it('binds record identity to exactly one bridge node and presentation slot', () => {

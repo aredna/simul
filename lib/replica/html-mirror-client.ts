@@ -7,18 +7,20 @@ import {
   readHtmlMirrorSourceMessage,
   type HtmlMirrorCheckpoint,
   type HtmlMirrorPatchBatch,
+  type HtmlMirrorScrollUpdate,
 } from './html-mirror-protocol';
 import {
   createHtmlMirrorRepresentabilityCollector,
   snapshotHtmlMirrorRepresentability,
   type HtmlMirrorRepresentabilitySummary,
 } from './html-mirror-sanitizer';
-import { createReplicaIdentity } from './protocol-v2';
+import { createReplicaIdentity } from './replica-identity';
 import type { SelectableReplicaFidelityPolicy } from './fidelity-policy';
 
 export interface HtmlMirrorStreamObserver {
   onPatch(batch: HtmlMirrorPatchBatch): void;
   onCheckpoint(checkpoint: HtmlMirrorCheckpoint): void;
+  onScroll(update: HtmlMirrorScrollUpdate): void;
   onFailure(code: Extract<
     ReplicaDiagnosticCode,
     'stream_gap' | 'stream_overflow' | 'stream_failed' | 'privacy_rejected'
@@ -39,6 +41,7 @@ export const MAX_HTML_MIRROR_PREOBSERVER_MESSAGES = 8;
 type QueuedHtmlMirrorMessage =
   | HtmlMirrorCheckpoint
   | HtmlMirrorPatchBatch
+  | HtmlMirrorScrollUpdate
   | {
       readonly kind: 'failure';
       readonly code: Extract<
@@ -143,8 +146,10 @@ class ChromeHtmlMirrorStreamLease implements HtmlMirrorStreamLease {
       try {
         if (message.kind === 'failure') {
           observer.onFailure(message.code, message.representability);
-        } else if (message.kind === 'simul:html-mirror-v1:checkpoint') {
+        } else if (message.kind === 'simul:html-mirror-v2:checkpoint') {
           observer.onCheckpoint(message);
+        } else if (message.kind === 'simul:html-mirror-v2:scroll') {
+          observer.onScroll(message);
         } else {
           observer.onPatch(message);
         }
@@ -211,7 +216,7 @@ class ChromeHtmlMirrorStreamLease implements HtmlMirrorStreamLease {
       this.#fail(new Error('Invalid HTML mirror source message.'));
       return;
     }
-    if (message.kind === 'simul:html-mirror-v1:error') {
+    if (message.kind === 'simul:html-mirror-v2:error') {
       if (!this.#initialSettled) {
         this.#initialSettled = true;
         this.#clearInitialTimer();
@@ -226,7 +231,11 @@ class ChromeHtmlMirrorStreamLease implements HtmlMirrorStreamLease {
       return;
     }
     if (!this.#initialSettled) {
-      if (message.kind !== 'simul:html-mirror-v1:checkpoint') {
+      if (message.kind === 'simul:html-mirror-v2:scroll') {
+        this.#queueLatestScroll(message);
+        return;
+      }
+      if (message.kind !== 'simul:html-mirror-v2:checkpoint') {
         this.#fail(new Error('HTML mirror patch arrived before checkpoint.'));
         return;
       }
@@ -237,8 +246,10 @@ class ChromeHtmlMirrorStreamLease implements HtmlMirrorStreamLease {
     }
     if (this.#observer) {
       try {
-        if (message.kind === 'simul:html-mirror-v1:checkpoint') {
+        if (message.kind === 'simul:html-mirror-v2:checkpoint') {
           this.#observer.onCheckpoint(message);
+        } else if (message.kind === 'simul:html-mirror-v2:scroll') {
+          this.#observer.onScroll(message);
         } else {
           this.#observer.onPatch(message);
         }
@@ -246,7 +257,12 @@ class ChromeHtmlMirrorStreamLease implements HtmlMirrorStreamLease {
         this.#fail(new Error('HTML mirror observer failed.'));
       }
     } else {
-      if (this.#queue.length >= MAX_HTML_MIRROR_PREOBSERVER_MESSAGES) {
+      if (message.kind === 'simul:html-mirror-v2:scroll') {
+        this.#queueLatestScroll(message);
+      } else if (
+        this.#queuedStructuralMessageCount() >=
+          MAX_HTML_MIRROR_PREOBSERVER_MESSAGES
+      ) {
         this.#deliverOrQueueFailure(
           'stream_failed',
           emptyRepresentability(),
@@ -296,7 +312,10 @@ class ChromeHtmlMirrorStreamLease implements HtmlMirrorStreamLease {
         terminal = true;
       }
     } else {
-      if (this.#queue.length >= MAX_HTML_MIRROR_PREOBSERVER_MESSAGES) {
+      if (
+        this.#queuedStructuralMessageCount() >=
+          MAX_HTML_MIRROR_PREOBSERVER_MESSAGES
+      ) {
         this.#queue.splice(0);
         this.#queue.push({
           kind: 'failure',
@@ -309,6 +328,24 @@ class ChromeHtmlMirrorStreamLease implements HtmlMirrorStreamLease {
       }
     }
     if (terminal) this.#closeTransport(true);
+  }
+
+  #queueLatestScroll(message: HtmlMirrorScrollUpdate): void {
+    const previousIndex = this.#queue.findIndex(
+      ({ kind }) => kind === 'simul:html-mirror-v2:scroll',
+    );
+    if (previousIndex >= 0) this.#queue.splice(previousIndex, 1);
+    // Appending after removal preserves the latest scroll's ordering relative
+    // to any checkpoint, patch, or failure that arrived since the old update.
+    this.#queue.push(message);
+  }
+
+  #queuedStructuralMessageCount(): number {
+    return this.#queue.reduce(
+      (count, { kind }) =>
+        count + (kind === 'simul:html-mirror-v2:scroll' ? 0 : 1),
+      0,
+    );
   }
 
   #closeTransport(disconnect: boolean): void {

@@ -22,10 +22,10 @@ describe('Chrome image source client', () => {
     );
 
     expect(connect).toHaveBeenCalledWith(request.tabId, expect.objectContaining({
-      name: `simul:image-source-v1:isolated-html:${request.sessionId}`,
+      name: `simul:image-source-v2:isolated-html:${request.sessionId}`,
     }));
     port.emitMessage({
-      kind: 'simul:image-source-v1:ready',
+      kind: 'simul:image-source-v2:ready',
       document: {
         sessionId: request.sessionId,
         pageEpoch: request.pageEpoch,
@@ -95,7 +95,7 @@ describe('Chrome image source client', () => {
       ?.requestId;
     expect(requestId).toBeDefined();
     port.emitMessage({
-      kind: 'simul:image-source-v1:accessibility-text',
+      kind: 'simul:image-source-v2:accessibility-text',
       requestId,
       descriptor,
       status: 'ready',
@@ -135,7 +135,7 @@ describe('Chrome image source client', () => {
     const requestId = (port.messages.at(-1) as { requestId?: string })
       ?.requestId;
     port.emitMessage({
-      kind: 'simul:image-source-v1:accessibility-text',
+      kind: 'simul:image-source-v2:accessibility-text',
       requestId,
       descriptor: { ...descriptor, nodeId: descriptor.nodeId + 1 },
       status: 'ready',
@@ -165,7 +165,7 @@ describe('Chrome image source client', () => {
       ?.requestId;
 
     port.emitMessage({
-      kind: 'simul:image-source-v1:metrics',
+      kind: 'simul:image-source-v2:metrics',
       requestId,
       status: 'ready',
       metrics: {

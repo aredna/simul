@@ -14,11 +14,11 @@ describe('image reading methods', () => {
   it('migrates an OCR-only order without changing provider-relative order', () => {
     expect(repairImageReadingMethodOrder(undefined, [
       'tesseract',
-      'paddleocr-wasm',
+      'chrome-text-detector',
     ]).slice(0, 3)).toEqual([
       ACCESSIBILITY_TEXT_METHOD_ID,
       'tesseract',
-      'paddleocr-wasm',
+      'chrome-text-detector',
     ]);
   });
 
@@ -48,13 +48,11 @@ describe('image reading methods', () => {
       'chrome-text-detector',
       'tesseract',
       'accessibility-text',
-      'paddleocr-wasm',
-      'tesseract-wasm-direct',
+      'transformers',
     ], [], [
       'chrome-text-detector',
       'tesseract',
-      'paddleocr-wasm',
-      'tesseract-wasm-direct',
+      'transformers',
     ])).toEqual([
       {
         kind: 'ocr',
@@ -63,7 +61,7 @@ describe('image reading methods', () => {
       { kind: 'accessibility-text' },
       {
         kind: 'ocr',
-        providerOrder: ['paddleocr-wasm', 'tesseract-wasm-direct'],
+        providerOrder: ['transformers'],
       },
     ]);
   });

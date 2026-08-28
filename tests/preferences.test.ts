@@ -38,7 +38,6 @@ describe('parseCompanionPreferences', () => {
       zoomPercent: 100,
       syncScroll: true,
       textLayoutMode: 'adaptive',
-      replicaEngine: 'isolated-html',
       replicaFidelityPolicy: 'passive',
       replicaViewMode: 'translated',
       launchBehavior: 'last-used',
@@ -60,19 +59,15 @@ describe('parseCompanionPreferences', () => {
       ocrMinimumConfidence: 0.65,
       imageReadingMethodOrder: [
         'accessibility-text',
-        'paddleocr-wasm',
         'chrome-text-detector',
         'tesseract',
-        'tesseract-wasm-direct',
         'transformers',
         'chromium-screen-ai',
       ],
       disabledImageReadingMethodIds: ['accessibility-text'],
       imageTextProviderOrder: [
-        'paddleocr-wasm',
         'chrome-text-detector',
         'tesseract',
-        'tesseract-wasm-direct',
         'transformers',
         'chromium-screen-ai',
       ],
@@ -97,7 +92,6 @@ describe('parseCompanionPreferences', () => {
       zoomPercent: 100,
       syncScroll: true,
       textLayoutMode: 'adaptive',
-      replicaEngine: 'isolated-html',
       replicaFidelityPolicy: 'passive',
       replicaViewMode: 'translated',
       launchBehavior: 'last-used',
@@ -119,19 +113,15 @@ describe('parseCompanionPreferences', () => {
       ocrMinimumConfidence: 0.65,
       imageReadingMethodOrder: [
         'accessibility-text',
-        'paddleocr-wasm',
         'chrome-text-detector',
         'tesseract',
-        'tesseract-wasm-direct',
         'transformers',
         'chromium-screen-ai',
       ],
       disabledImageReadingMethodIds: ['accessibility-text'],
       imageTextProviderOrder: [
-        'paddleocr-wasm',
         'chrome-text-detector',
         'tesseract',
-        'tesseract-wasm-direct',
         'transformers',
         'chromium-screen-ai',
       ],
@@ -168,7 +158,6 @@ describe('parseCompanionPreferences', () => {
       zoomPercent: 100,
       syncScroll: true,
       textLayoutMode: 'adaptive',
-      replicaEngine: 'isolated-html',
       replicaFidelityPolicy: 'passive',
       replicaViewMode: 'translated',
       launchBehavior: 'last-used',
@@ -190,19 +179,15 @@ describe('parseCompanionPreferences', () => {
       ocrMinimumConfidence: 0.65,
       imageReadingMethodOrder: [
         'accessibility-text',
-        'paddleocr-wasm',
         'chrome-text-detector',
         'tesseract',
-        'tesseract-wasm-direct',
         'transformers',
         'chromium-screen-ai',
       ],
       disabledImageReadingMethodIds: ['accessibility-text'],
       imageTextProviderOrder: [
-        'paddleocr-wasm',
         'chrome-text-detector',
         'tesseract',
-        'tesseract-wasm-direct',
         'transformers',
         'chromium-screen-ai',
       ],
@@ -302,7 +287,7 @@ describe('parseCompanionPreferences', () => {
   });
 
   it('repairs old or damaged image-analysis settings without mutating saved order', () => {
-    const rawOrder = ['paddleocr-wasm', 'unknown', 'paddleocr-wasm', 'tesseract'];
+    const rawOrder = ['retired-provider', 'unknown', 'retired-provider', 'tesseract'];
     const parsed = parseCompanionPreferences({
       imageTranslationEnabled: true,
       ocrMinimumConfidence: 0.8,
@@ -317,10 +302,8 @@ describe('parseCompanionPreferences', () => {
       imageTranslationEnabled: true,
       ocrMinimumConfidence: 0.8,
       imageTextProviderOrder: [
-        'paddleocr-wasm',
         'tesseract',
         'chrome-text-detector',
-        'tesseract-wasm-direct',
         'transformers',
         'chromium-screen-ai',
       ],
@@ -332,16 +315,14 @@ describe('parseCompanionPreferences', () => {
     });
     parsed.imageTextProviderOrder.reverse();
     expect(rawOrder).toEqual([
-      'paddleocr-wasm',
+      'retired-provider',
       'unknown',
-      'paddleocr-wasm',
+      'retired-provider',
       'tesseract',
     ]);
     expect(parseCompanionPreferences(undefined).imageTextProviderOrder).toEqual([
-      'paddleocr-wasm',
       'chrome-text-detector',
       'tesseract',
-      'tesseract-wasm-direct',
       'transformers',
       'chromium-screen-ai',
     ]);
@@ -350,36 +331,33 @@ describe('parseCompanionPreferences', () => {
     }).ocrMinimumConfidence).toBe(0.65);
   });
 
-  it('repairs provider toggles and migrates the exact legacy default priority', () => {
+  it('repairs provider toggles and drops retired provider IDs', () => {
     expect(parseCompanionPreferences({
       imageTextProviderOrder: [
         'chrome-text-detector',
         'tesseract',
         'transformers',
-        'paddleocr-wasm',
+        'retired-provider',
         'chromium-screen-ai',
       ],
       disabledImageTextProviderIds: [
         'tesseract',
         'unknown',
         'tesseract',
-        'paddleocr-wasm',
+        'retired-provider',
       ],
     })).toMatchObject({
       imageTextProviderOrder: [
-        'paddleocr-wasm',
         'chrome-text-detector',
         'tesseract',
-        'tesseract-wasm-direct',
         'transformers',
         'chromium-screen-ai',
       ],
       disabledImageReadingMethodIds: [
         'accessibility-text',
         'tesseract',
-        'paddleocr-wasm',
       ],
-      disabledImageTextProviderIds: ['paddleocr-wasm', 'tesseract'],
+      disabledImageTextProviderIds: ['tesseract'],
     });
 
     expect(parseCompanionPreferences({

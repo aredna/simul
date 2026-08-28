@@ -3,10 +3,11 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   IMAGE_OVERLAY_LAYER_ATTRIBUTE,
+  MAX_IMAGE_OVERLAY_RETAINED_WEIGHT,
   ImageOverlayProjector,
   type ImageOverlayProjection,
 } from '../lib/ocr/image-overlay-projector';
-import type { ReplicaImageAnchor } from '../lib/replica/rrweb-shadow-engine';
+import type { ReplicaImageAnchor } from '../lib/replica/contracts';
 
 const sourceDocument = {
   sessionId: 'image-overlay-session',
@@ -300,5 +301,170 @@ describe('ImageOverlayProjector', () => {
     expect(root?.textContent).toBe('翻訳');
     expect(rebound).toHaveBeenCalledOnce();
     expect(rebound).toHaveBeenCalledWith(17);
+  });
+
+  it('rebases identical projection currency on the existing overlay root', () => {
+    const { document } = parseHTML('<html><body><img></body></html>');
+    const image = document.querySelector('img') as unknown as HTMLImageElement;
+    const bounds = { left: 10, top: 20, width: 100, height: 60 };
+    image.getBoundingClientRect = () => ({
+      ...bounds,
+      right: bounds.left + bounds.width,
+      bottom: bounds.top + bounds.height,
+      x: bounds.left,
+      y: bounds.top,
+      toJSON: () => ({}),
+    });
+    let currentObservation = 4;
+    const projector = new ImageOverlayProjector({
+      resolveAnchor: () => ({
+        document: sourceDocument,
+        replayLease: 9,
+        image,
+        iframe: { contentDocument: document } as HTMLIFrameElement,
+      }),
+      isCurrent: (candidate) =>
+        candidate.observationRevision === currentObservation,
+      scheduleFrame: (callback) => { callback(); return 1; },
+      cancelFrame: () => undefined,
+      createResizeObserver: () => undefined,
+    });
+    projector.beginPair(1, 'en>ja');
+    expect(projector.project(projection())).toBe(true);
+    const originalRoot = document.querySelector(
+      '[data-simul-image-overlay="7"]',
+    );
+    const originalRegion = originalRoot?.firstElementChild;
+
+    bounds.left = 30;
+    bounds.top = 40;
+    currentObservation = 5;
+    expect(projector.project(projection({
+      jobOrdinal: 2,
+      contentRevision: 2,
+      observationRevision: 5,
+    }))).toBe(true);
+
+    const rebasedRoot = document.querySelector(
+      '[data-simul-image-overlay="7"]',
+    ) as HTMLElement | null;
+    expect(rebasedRoot).toBe(originalRoot);
+    expect(rebasedRoot?.firstElementChild).toBe(originalRegion);
+    expect(rebasedRoot?.style.left).toBe('30px');
+    expect(rebasedRoot?.style.top).toBe('40px');
+  });
+
+  it('updates position on scroll without refitting text at stable dimensions', () => {
+    const { document, window } = parseHTML('<html><body><img></body></html>');
+    const image = document.querySelector('img') as unknown as HTMLImageElement;
+    const bounds = { left: 10, top: 20, width: 100, height: 60 };
+    image.getBoundingClientRect = () => ({
+      ...bounds,
+      right: bounds.left + bounds.width,
+      bottom: bounds.top + bounds.height,
+      x: bounds.left,
+      y: bounds.top,
+      toJSON: () => ({}),
+    });
+    const frames: Array<() => void> = [];
+    const projector = new ImageOverlayProjector({
+      resolveAnchor: () => ({
+        document: sourceDocument,
+        replayLease: 9,
+        image,
+        iframe: { contentDocument: document } as HTMLIFrameElement,
+      }),
+      isCurrent: () => true,
+      scheduleFrame: (callback) => {
+        frames.push(callback);
+        return frames.length;
+      },
+      cancelFrame: () => undefined,
+      createResizeObserver: () => undefined,
+    });
+    projector.beginPair(1, 'en>ja');
+    expect(projector.project(projection())).toBe(true);
+    const root = document.querySelector(
+      '[data-simul-image-overlay="7"]',
+    ) as HTMLElement;
+    const region = root.firstElementChild as HTMLElement;
+    let fittingReads = 0;
+    Object.defineProperties(region, {
+      scrollWidth: {
+        configurable: true,
+        get: () => {
+          fittingReads += 1;
+          return 0;
+        },
+      },
+      scrollHeight: {
+        configurable: true,
+        get: () => {
+          fittingReads += 1;
+          return 0;
+        },
+      },
+    });
+
+    bounds.left = 35;
+    bounds.top = 45;
+    window.dispatchEvent(new window.Event('scroll'));
+    frames.splice(0).forEach((frame) => frame());
+
+    expect(root.style.left).toBe('35px');
+    expect(root.style.top).toBe('45px');
+    expect(fittingReads).toBe(0);
+  });
+
+  it('evicts the oldest overlays before retained DOM weight exceeds its bound', () => {
+    const { document } = parseHTML(
+      `<html><body>${'<img>'.repeat(5)}</body></html>`,
+    );
+    const images = [...document.querySelectorAll('img')] as HTMLImageElement[];
+    const anchors = new Map<number, ReplicaImageAnchor>();
+    images.forEach((image, index) => {
+      image.getBoundingClientRect = () => ({
+        left: index * 110,
+        top: 0,
+        width: 100,
+        height: 60,
+        right: index * 110 + 100,
+        bottom: 60,
+        x: index * 110,
+        y: 0,
+        toJSON: () => ({}),
+      });
+      anchors.set(index + 1, {
+        document: sourceDocument,
+        replayLease: 9,
+        image,
+        iframe: { contentDocument: document } as HTMLIFrameElement,
+      });
+    });
+    const projector = new ImageOverlayProjector({
+      resolveAnchor: (_document, nodeId) => anchors.get(nodeId),
+      isCurrent: () => true,
+      scheduleFrame: (callback) => { callback(); return 1; },
+      cancelFrame: () => undefined,
+      createResizeObserver: () => undefined,
+    });
+    projector.beginPair(1, 'en>ja');
+    const retainedText = 'x'.repeat(100_000);
+    for (let nodeId = 1; nodeId <= 5; nodeId += 1) {
+      expect(projector.project(projection({
+        jobOrdinal: nodeId,
+        nodeId,
+        regions: [{
+          text: retainedText,
+          boundingBox: { x: 0, y: 0, width: 40, height: 20 },
+        }],
+      }))).toBe(true);
+    }
+
+    expect(MAX_IMAGE_OVERLAY_RETAINED_WEIGHT).toBe(1_000_000);
+    expect(document.querySelector('[data-simul-image-overlay="1"]')).toBeNull();
+    expect(document.querySelector('[data-simul-image-overlay="5"]')).not.toBeNull();
+    expect(document.querySelectorAll('[data-simul-image-overlay]').length)
+      .toBeLessThan(5);
   });
 });

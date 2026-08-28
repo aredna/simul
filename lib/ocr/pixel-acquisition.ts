@@ -16,6 +16,7 @@ export const MIN_CAPTURE_INTERVAL_MS = 550;
 export const MAX_OCR_INPUT_PIXELS = 4_000_000;
 export const MAX_SCREENSHOT_BYTES = 32 * 1024 * 1024;
 export const IMAGE_CAPTURE_LOCK_NAME = 'simul:ocr-visible-tab-capture-v1';
+const MIN_OCR_BITMAP_AXIS_PX = 3;
 
 export interface AcquiredImagePixels {
   readonly descriptor: SourceImageDescriptor;
@@ -44,6 +45,7 @@ export type PixelAcquisitionDeferralReason =
   | 'hidden'
   | 'unstable'
   | 'oversized'
+  | 'too-small-visible'
   | 'inactive'
   | 'permission'
   | 'quota'
@@ -209,6 +211,15 @@ export class PixelAcquisitionCoordinator {
         visible.bottom - visible.top,
       );
       if (!output) return { status: 'deferred', reason: 'oversized' };
+      if (
+        output.width < MIN_OCR_BITMAP_AXIS_PX ||
+        output.height < MIN_OCR_BITMAP_AXIS_PX
+      ) {
+        // Keep the image eligible for semantic text while deferring only the
+        // unusable pixel crop. A later geometry observation can expose enough
+        // of a clipped image for OCR without capturing neighboring page pixels.
+        return { status: 'deferred', reason: 'too-small-visible' };
+      }
       let surface: CropSurface;
       try {
         surface = this.environment.createSurface(output.width, output.height);

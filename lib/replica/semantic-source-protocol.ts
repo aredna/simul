@@ -15,8 +15,8 @@ import {
   type SourceEvidenceCategory,
 } from './source-secret-classifier';
 
-export const SEMANTIC_SOURCE_PROTOCOL_VERSION = 1;
-export const SEMANTIC_SOURCE_PORT_PREFIX = 'simul:semantic-source-v1:';
+export const SEMANTIC_SOURCE_PROTOCOL_VERSION = 2;
+export const SEMANTIC_SOURCE_PORT_PREFIX = 'simul:semantic-source-v2:';
 export const MAX_SEMANTIC_SOURCE_RECORDS = 128;
 export const MAX_SEMANTIC_SOURCE_PROOFS = 128;
 export const MAX_SEMANTIC_SELECTED_OPTION_NODE_IDS = 32;
@@ -26,7 +26,7 @@ export const MAX_SEMANTIC_SOURCE_TEXT = 3_500;
 export const MAX_SEMANTIC_SOURCE_UNACKED_BATCHES = 4;
 export const MAX_SEMANTIC_SOURCE_NODE_IDENTITIES = 50_000;
 
-export type SemanticSourceBridgeId = 'rrweb' | 'isolated-html';
+export type SemanticSourceBridgeId = 'isolated-html';
 export type SemanticSourceRecordCategory = Exclude<
   SourceEvidenceCategory,
   'secret' | 'withheld'
@@ -63,7 +63,7 @@ export interface SemanticSourcePortIdentity {
 
 export interface SemanticSourceStartMessage {
   readonly protocolVersion: typeof SEMANTIC_SOURCE_PROTOCOL_VERSION;
-  readonly kind: 'simul:semantic-source-v1:start';
+  readonly kind: 'simul:semantic-source-v2:start';
   readonly bridge: SemanticSourceBridgeId;
   readonly document: ReplicaSourceDocumentIdentity;
   readonly policyFingerprint: string;
@@ -72,7 +72,7 @@ export interface SemanticSourceStartMessage {
 
 export interface SemanticSourceAckMessage {
   readonly protocolVersion: typeof SEMANTIC_SOURCE_PROTOCOL_VERSION;
-  readonly kind: 'simul:semantic-source-v1:ack';
+  readonly kind: 'simul:semantic-source-v2:ack';
   readonly document: ReplicaSourceDocumentIdentity;
   readonly policyFingerprint: string;
   readonly sequence: number;
@@ -146,6 +146,43 @@ export interface SemanticDisclosureStateProof {
   readonly classifierVersion: typeof SOURCE_SECRET_CLASSIFIER_VERSION;
 }
 
+/**
+ * A strict non-ARIA navigation menu inferred from one common wrapper. The
+ * relationship is structural only: opening is owned entirely by the inert
+ * replica and never reflects or dispatches source activation.
+ */
+export interface SemanticStructuralMenuProof {
+  readonly kind: 'structural-menu';
+  readonly bridge: SemanticSourceBridgeId;
+  /** Replica-owned identity derived only from the three native bridge IDs. */
+  readonly relationId: string;
+  /** Monotonic revision for this structural relationship. */
+  readonly revision: number;
+  readonly gate: 'disclosureContent';
+  readonly containerNodeId: number;
+  readonly triggerNodeId: number;
+  readonly panelNodeId: number;
+  /** Canonical replica presentation; structural candidates are always menus. */
+  readonly popupRole: 'menu';
+  /** Current source-painted state after the relationship was safely inferred. */
+  readonly expanded: boolean;
+  readonly classifierVersion: typeof SOURCE_SECRET_CLASSIFIER_VERSION;
+}
+
+export interface SemanticTabStateProof {
+  readonly kind: 'tab-state';
+  readonly bridge: SemanticSourceBridgeId;
+  /** Replica-owned identity derived only from the two native bridge IDs. */
+  readonly relationId: string;
+  /** Monotonic revision for this inline tab relationship. */
+  readonly revision: number;
+  readonly gate: 'controlSemantics';
+  readonly tabNodeId: number;
+  readonly panelNodeId: number;
+  readonly selected: boolean;
+  readonly classifierVersion: typeof SOURCE_SECRET_CLASSIFIER_VERSION;
+}
+
 export interface SemanticChoiceStateProof {
   readonly kind: 'choice-state';
   readonly bridge: SemanticSourceBridgeId;
@@ -187,7 +224,9 @@ export interface SemanticAriaStateProof {
 export type SemanticSourceProof =
   | SemanticSelectStateProof
   | SemanticSelectPresentationProof
+  | SemanticTabStateProof
   | SemanticDisclosureStateProof
+  | SemanticStructuralMenuProof
   | SemanticChoiceStateProof
   | SemanticControlStateProof
   | SemanticAriaStateProof;
@@ -195,7 +234,7 @@ export type SemanticSourceProof =
 /** A complete replacement of the admitted semantic set for one policy epoch. */
 export interface SemanticSourceBatch {
   readonly protocolVersion: typeof SEMANTIC_SOURCE_PROTOCOL_VERSION;
-  readonly kind: 'simul:semantic-source-v1:batch';
+  readonly kind: 'simul:semantic-source-v2:batch';
   readonly document: ReplicaSourceDocumentIdentity;
   readonly policyFingerprint: string;
   readonly sequence: number;
@@ -225,7 +264,7 @@ export function readSemanticSourcePortIdentity(
   const bridge = suffix.slice(0, separator);
   const sessionId = suffix.slice(separator + 1);
   if (
-    (bridge !== 'rrweb' && bridge !== 'isolated-html') ||
+    bridge !== 'isolated-html' ||
     (expectedBridge !== undefined && bridge !== expectedBridge) ||
     !isSafeToken(sessionId)
   ) return undefined;
@@ -241,7 +280,7 @@ export function createSemanticSourceStart(
   if (!exactScope) throw new Error('Invalid semantic read scope.');
   return Object.freeze({
     protocolVersion: SEMANTIC_SOURCE_PROTOCOL_VERSION,
-    kind: 'simul:semantic-source-v1:start',
+    kind: 'simul:semantic-source-v2:start',
     bridge,
     document,
     policyFingerprint: replicaReadScopeFingerprint(exactScope),
@@ -259,7 +298,7 @@ export function createSemanticSourceAck(
   }
   return Object.freeze({
     protocolVersion: SEMANTIC_SOURCE_PROTOCOL_VERSION,
-    kind: 'simul:semantic-source-v1:ack',
+    kind: 'simul:semantic-source-v2:ack',
     document,
     policyFingerprint,
     sequence,
@@ -275,7 +314,7 @@ export function readSemanticSourceControllerMessage(
   if (!isRecord(input) || input.protocolVersion !== SEMANTIC_SOURCE_PROTOCOL_VERSION) {
     return undefined;
   }
-  if (input.kind === 'simul:semantic-source-v1:start') {
+  if (input.kind === 'simul:semantic-source-v2:start') {
     if (!hasExactKeys(input, [
       'protocolVersion', 'kind', 'bridge', 'document', 'policyFingerprint',
       'scope',
@@ -300,7 +339,7 @@ export function readSemanticSourceControllerMessage(
       scope,
     });
   }
-  if (input.kind !== 'simul:semantic-source-v1:ack' || !hasExactKeys(input, [
+  if (input.kind !== 'simul:semantic-source-v2:ack' || !hasExactKeys(input, [
     'protocolVersion', 'kind', 'document', 'policyFingerprint', 'sequence',
   ]) || !isPolicyFingerprint(input.policyFingerprint) ||
     !positiveSafeInteger(input.sequence)) return undefined;
@@ -333,7 +372,7 @@ export function createSemanticSourceBatch(
   const byteLength = semanticSourceBatchByteLength(records, proofs);
   const batch = {
     protocolVersion: SEMANTIC_SOURCE_PROTOCOL_VERSION,
-    kind: 'simul:semantic-source-v1:batch' as const,
+    kind: 'simul:semantic-source-v2:batch' as const,
     document,
     policyFingerprint,
     sequence,
@@ -362,6 +401,10 @@ export function semanticSourceBatchByteLength(
       bytes += proof.selectedOptionNodeIds.length * 16 + 192;
     } else if (proof.kind === 'disclosure-state') {
       bytes += proof.relationId.length + proof.popupRole.length + 192;
+    } else if (proof.kind === 'structural-menu') {
+      bytes += proof.relationId.length + 208;
+    } else if (proof.kind === 'tab-state') {
+      bytes += proof.relationId.length + 192;
     } else {
       bytes += 176;
     }
@@ -381,7 +424,7 @@ export function readSemanticSourceBatch(
     'records', 'proofs', 'byteLength',
   ]) ||
     input.protocolVersion !== SEMANTIC_SOURCE_PROTOCOL_VERSION ||
-    input.kind !== 'simul:semantic-source-v1:batch' ||
+    input.kind !== 'simul:semantic-source-v2:batch' ||
     !isPolicyFingerprint(input.policyFingerprint) ||
     (expectedPolicyFingerprint !== undefined &&
       input.policyFingerprint !== expectedPolicyFingerprint) ||
@@ -449,7 +492,7 @@ export function readSemanticSourceProof(
   input: unknown,
 ): SemanticSourceProof | undefined {
   if (!isRecord(input) ||
-    (input.bridge !== 'rrweb' && input.bridge !== 'isolated-html') ||
+    input.bridge !== 'isolated-html' ||
     !positiveSafeInteger(input.revision) ||
     input.classifierVersion !== SOURCE_SECRET_CLASSIFIER_VERSION
   ) return undefined;
@@ -569,6 +612,69 @@ export function readSemanticSourceProof(
       classifierVersion: SOURCE_SECRET_CLASSIFIER_VERSION,
     });
   }
+  if (input.kind === 'tab-state') {
+    if (!hasExactKeys(input, [
+      'kind', 'bridge', 'relationId', 'revision', 'gate', 'tabNodeId',
+      'panelNodeId', 'selected', 'classifierVersion',
+    ]) || input.gate !== 'controlSemantics' ||
+      !positiveSafeInteger(input.tabNodeId) ||
+      !positiveSafeInteger(input.panelNodeId) ||
+      input.tabNodeId === input.panelNodeId ||
+      typeof input.selected !== 'boolean'
+    ) return undefined;
+    const relationId = semanticTabRelationId(
+      input.tabNodeId,
+      input.panelNodeId,
+    );
+    if (!relationId || input.relationId !== relationId) return undefined;
+    return Object.freeze({
+      kind: input.kind,
+      bridge: input.bridge,
+      relationId,
+      revision: input.revision,
+      gate: input.gate,
+      tabNodeId: input.tabNodeId,
+      panelNodeId: input.panelNodeId,
+      selected: input.selected,
+      classifierVersion: SOURCE_SECRET_CLASSIFIER_VERSION,
+    });
+  }
+  if (input.kind === 'structural-menu') {
+    if (!hasExactKeys(input, [
+      'kind', 'bridge', 'relationId', 'revision', 'gate', 'containerNodeId',
+      'triggerNodeId', 'panelNodeId', 'popupRole', 'expanded',
+      'classifierVersion',
+    ]) || input.gate !== 'disclosureContent' ||
+      !positiveSafeInteger(input.containerNodeId) ||
+      !positiveSafeInteger(input.triggerNodeId) ||
+      !positiveSafeInteger(input.panelNodeId) ||
+      input.popupRole !== 'menu' || input.expanded !== false ||
+      new Set([
+        input.containerNodeId,
+        input.triggerNodeId,
+        input.panelNodeId,
+      ]).size !== 3
+    ) return undefined;
+    const relationId = semanticStructuralMenuRelationId(
+      input.containerNodeId,
+      input.triggerNodeId,
+      input.panelNodeId,
+    );
+    if (!relationId || input.relationId !== relationId) return undefined;
+    return Object.freeze({
+      kind: input.kind,
+      bridge: input.bridge,
+      relationId,
+      revision: input.revision,
+      gate: input.gate,
+      containerNodeId: input.containerNodeId,
+      triggerNodeId: input.triggerNodeId,
+      panelNodeId: input.panelNodeId,
+      popupRole: input.popupRole,
+      expanded: input.expanded,
+      classifierVersion: SOURCE_SECRET_CLASSIFIER_VERSION,
+    });
+  }
   if (input.kind !== 'disclosure-state' || !hasExactKeys(input, [
     'kind', 'bridge', 'relationId', 'revision', 'gate', 'triggerNodeId',
     'panelNodeId', 'popupRole', 'expanded', 'classifierVersion',
@@ -608,6 +714,31 @@ export function semanticDisclosureRelationId(
   return `semantic-relation-v1:${triggerNodeId}:${panelNodeId}`;
 }
 
+/** Deterministic identity for an inline tab relationship, never a popup. */
+export function semanticTabRelationId(
+  tabNodeId: number,
+  panelNodeId: number,
+): string | undefined {
+  if (!positiveSafeInteger(tabNodeId) || !positiveSafeInteger(panelNodeId) ||
+    tabNodeId === panelNodeId) return undefined;
+  return `semantic-tab-relation-v1:${tabNodeId}:${panelNodeId}`;
+}
+
+/** Deterministic identity for one receiver-revalidated structural menu. */
+export function semanticStructuralMenuRelationId(
+  containerNodeId: number,
+  triggerNodeId: number,
+  panelNodeId: number,
+): string | undefined {
+  if (
+    !positiveSafeInteger(containerNodeId) ||
+    !positiveSafeInteger(triggerNodeId) ||
+    !positiveSafeInteger(panelNodeId) ||
+    new Set([containerNodeId, triggerNodeId, panelNodeId]).size !== 3
+  ) return undefined;
+  return `semantic-structural-menu-v1:${containerNodeId}:${triggerNodeId}:${panelNodeId}`;
+}
+
 export function semanticSourceProofIdentity(proof: SemanticSourceProof): string {
   if (proof.kind === 'select-state') return `semantic-select-v1:${proof.nodeId}`;
   if (proof.kind === 'select-presentation') {
@@ -618,6 +749,8 @@ export function semanticSourceProofIdentity(proof: SemanticSourceProof): string 
   if (proof.kind === 'aria-state') {
     return `semantic-aria-state-v1:${proof.nodeId}:${proof.state}`;
   }
+  if (proof.kind === 'tab-state') return proof.relationId;
+  if (proof.kind === 'structural-menu') return proof.relationId;
   return proof.relationId;
 }
 
@@ -644,6 +777,16 @@ export function semanticSourceProofSignature(proof: SemanticSourceProof): string
     proof.bridge, proof.kind, proof.nodeId, proof.gate, proof.state, proof.value,
     proof.classifierVersion,
   ].join('\u0000');
+  if (proof.kind === 'tab-state') return [
+    proof.bridge, proof.kind, proof.relationId, proof.gate,
+    proof.tabNodeId, proof.panelNodeId, Number(proof.selected),
+    proof.classifierVersion,
+  ].join('\u0000');
+  if (proof.kind === 'structural-menu') return [
+    proof.bridge, proof.kind, proof.relationId, proof.gate,
+    proof.containerNodeId, proof.triggerNodeId, proof.panelNodeId,
+    proof.popupRole, Number(proof.expanded), proof.classifierVersion,
+  ].join('\u0000');
   return [
     proof.bridge, proof.kind, proof.relationId, proof.gate,
     proof.triggerNodeId, proof.panelNodeId, proof.popupRole,
@@ -659,7 +802,7 @@ export function readSemanticSourceRecord(
     'tagName', 'type', 'autocomplete', 'role', 'contentEditable', 'text',
     'presentation', 'classifierVersion',
   ]) ||
-    (input.bridge !== 'rrweb' && input.bridge !== 'isolated-html') ||
+    input.bridge !== 'isolated-html' ||
     !positiveSafeInteger(input.recordId) ||
     !positiveSafeInteger(input.nodeId) ||
     !positiveSafeInteger(input.nodeRevision) ||

@@ -16,18 +16,13 @@
     "build": "wxt build --browser chrome",
     "artifact:sync": "node tools/extension-artifact.mjs sync",
     "artifact:check": "node tools/extension-artifact.mjs check",
-    "check:ocr-paddle-trial": "node tools/extension-artifact.mjs check-ocr-paddle-trial",
-    "check:ocr-all-trial": "node tools/extension-artifact.mjs check-ocr-all-trial",
-    "artifact:check:ocr-trials": "node tools/extension-artifact.mjs check-synced-ocr-all-trial",
-    "artifact:sync:ocr-trials": "node tools/extension-artifact.mjs sync-ocr-all-trial",
-    "vendor:ocr-paddle": "node tools/vendor-paddle-ocr.mjs",
-    "vendor:ocr-tesseract-wasm": "node tools/vendor-tesseract-wasm.mjs",
     "zip": "wxt zip --browser chrome",
     "postinstall": "wxt prepare",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
+    "test:chrome-disclosure:repeat": "vitest run tests/isolated-disclosure-chrome.test.ts",
     "test:watch": "vitest",
-    "check": "npm run typecheck && npm test && npm run artifact:check:ocr-trials"
+    "check": "npm run typecheck && npm test && npm run artifact:check"
   },
   "devDependencies": {
     "acorn": "8.17.0",
@@ -46,14 +41,10 @@
   },
   "allowScripts": {
     "esbuild@0.28.1": true,
-    "fsevents@2.3.3": true
+    "fsevents@2.3.3": true,
+    "tesseract.js": false
   },
   "dependencies": {
-    "@paddleocr/paddleocr-js": "0.4.2",
-    "@rrweb/record": "2.1.0",
-    "@rrweb/replay": "2.1.0",
-    "onnxruntime-web": "1.24.3",
-    "tesseract-wasm": "0.11.0",
     "tesseract.js": "7.0.0",
     "tesseract.js-core": "7.0.0"
   }

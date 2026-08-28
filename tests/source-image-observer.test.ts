@@ -161,10 +161,19 @@ describe('SourceImageObserver', () => {
       addedNodes: [late],
       removedNodes: [],
     } as unknown as MutationRecord]);
-    expect(events.at(-1)).toMatchObject({
-      kind: 'upsert',
-      input: { nodeId: 19 },
-    });
+    expect(events.slice(-2)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'upsert',
+        input: expect.objectContaining({ nodeId: 19 }),
+      }),
+      expect.objectContaining({
+        kind: 'upsert',
+        input: expect.objectContaining({
+          nodeId: 7,
+          observationChanged: true,
+        }),
+      }),
+    ]));
     stop();
   });
 
@@ -192,6 +201,33 @@ describe('SourceImageObserver', () => {
     ]));
     expect(JSON.stringify(events)).not.toContain('header_logo.svg');
     expect(JSON.stringify(events)).not.toContain('assets.example');
+    stop();
+  });
+
+  it('discovers images in stable viewport-attention order without exposing coordinates', () => {
+    const fixture = createFixture(
+      '<img id="middle" src="middle.png"><img id="top" src="top.png">',
+    );
+    const middle = fixture.document.querySelector<HTMLImageElement>('#middle')!;
+    const top = fixture.document.querySelector<HTMLImageElement>('#top')!;
+    fixture.bounds.top = -50;
+    setImageMetrics(middle, { left: 300, top: 40, width: 200, height: 100 });
+    setImageMetrics(top, { left: 20, top: 40, width: 200, height: 100 });
+    fixture.nodeIds.set(middle, 19);
+    fixture.nodeIds.set(top, 23);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+
+    expect(events.map(eventNodeId)).toEqual([23, 19, 7]);
+    for (const event of events) {
+      if (event.kind !== 'upsert') continue;
+      expect(Object.keys(event.input)).not.toEqual(expect.arrayContaining([
+        'left',
+        'top',
+        'visibleRatio',
+        'area',
+      ]));
+    }
     stop();
   });
 
@@ -223,7 +259,7 @@ describe('SourceImageObserver', () => {
     }));
     expect(events.at(-1)).toMatchObject({
       kind: 'upsert',
-      input: { nodeId: 7, contentChanged: true },
+      input: { nodeId: 7, contentChanged: true, captureChanged: true },
     });
 
     (pictureImage as HTMLImageElement & { currentSrc: string }).currentSrc =
@@ -251,7 +287,7 @@ describe('SourceImageObserver', () => {
     stop();
   });
 
-  it('coalesces source scrolls and revises a still-visible image when its crop moves', () => {
+  it('coalesces scrolls, ignores fully-visible movement, and revises clipping', () => {
     const fixture = createFixture();
     const model = new SourceImageModel();
     model.beginDocument(documentIdentity);
@@ -264,7 +300,7 @@ describe('SourceImageObserver', () => {
     const revisionBeforeScroll = model.get(7)?.observationRevision;
     events.length = 0;
 
-    fixture.bounds.top = -50;
+    fixture.bounds.top = 50;
     const scroll = new fixture.document.defaultView!.Event('scroll');
     fixture.document.dispatchEvent(scroll);
     fixture.document.dispatchEvent(
@@ -273,6 +309,12 @@ describe('SourceImageObserver', () => {
 
     expect(fixture.frames.pending).toBe(1);
     expect(events).toEqual([]);
+    fixture.frames.flush();
+    expect(events).toEqual([]);
+    expect(model.get(7)?.observationRevision).toBe(revisionBeforeScroll);
+
+    fixture.bounds.top = -50;
+    fixture.document.dispatchEvent(scroll);
     fixture.frames.flush();
     expect(events).toHaveLength(1);
     expect(events[0]).toMatchObject({
@@ -288,6 +330,236 @@ describe('SourceImageObserver', () => {
     expect(model.get(7)?.observationRevision).toBe(
       (revisionBeforeScroll ?? 0) + 1,
     );
+    stop();
+  });
+
+  it('advances only visible images that newly overlap a fixed control on scroll', () => {
+    const fixture = createFixture(
+      '<input id="fixed-control" type="password">' +
+        '<img id="distant" src="distant.png">',
+    );
+    const control = fixture.document.querySelector('#fixed-control')!;
+    const distant = fixture.document.querySelector<HTMLImageElement>('#distant')!;
+    const controlBounds = { left: 320, top: 0, width: 80, height: 40 };
+    setElementBounds(control, controlBounds);
+    setImageMetrics(distant, { left: 600, top: 0, width: 100, height: 100 });
+    fixture.nodeIds.set(distant, 19);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    fixture.intersections[0]!.trigger(fixture.image, true);
+    fixture.intersections[0]!.trigger(distant, true);
+    events.length = 0;
+
+    controlBounds.left = 40;
+    fixture.document.dispatchEvent(
+      new fixture.document.defaultView!.Event('scroll'),
+    );
+    fixture.frames.flush();
+
+    expect(events.map(eventNodeId)).toEqual([7]);
+    expect(events[0]).toMatchObject({
+      kind: 'upsert',
+      input: {
+        nodeId: 7,
+        observationChanged: true,
+        captureChanged: true,
+      },
+    });
+    stop();
+  });
+
+  it('keeps capture revisions stable when scrolling preserves control overlap', () => {
+    const fixture = createFixture(
+      '<input id="fixed-control" type="password">',
+    );
+    const control = fixture.document.querySelector('#fixed-control')!;
+    const controlBounds = { left: 40, top: 0, width: 80, height: 40 };
+    setElementBounds(control, controlBounds);
+    const model = new SourceImageModel();
+    model.beginDocument(documentIdentity);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => {
+      events.push(event);
+      applyObservationEvent(model, event);
+    });
+    fixture.intersections[0]!.trigger(fixture.image, true);
+    const captureRevision = model.get(7)?.captureRevision;
+    events.length = 0;
+
+    for (const offset of [20, 40, 60]) {
+      fixture.bounds.left = offset;
+      controlBounds.left = offset + 40;
+      fixture.document.dispatchEvent(
+        new fixture.document.defaultView!.Event('scroll'),
+      );
+      fixture.frames.flush();
+    }
+
+    expect(events).toEqual([]);
+    expect(model.get(7)?.captureRevision).toBe(captureRevision);
+    stop();
+  });
+
+  it('invalidates clear endpoints when a control crosses an image between scroll frames', () => {
+    const fixture = createFixture(
+      '<input id="crossing-control" type="password">',
+    );
+    const control = fixture.document.querySelector('#crossing-control')!;
+    const controlBounds = { left: 320, top: 0, width: 40, height: 40 };
+    setElementBounds(control, controlBounds);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    fixture.intersections[0]!.trigger(fixture.image, true);
+    events.length = 0;
+
+    controlBounds.left = -80;
+    fixture.document.dispatchEvent(
+      new fixture.document.defaultView!.Event('scroll'),
+    );
+    fixture.frames.flush();
+
+    expect(events).toMatchObject([{
+      kind: 'upsert',
+      input: {
+        nodeId: 7,
+        observationChanged: true,
+        captureChanged: true,
+      },
+    }]);
+    stop();
+  });
+
+  it('does not rescan unrelated control classification on stable scroll', () => {
+    const fixture = createFixture(
+      '<input id="unrelated-control" type="password">',
+    );
+    const control = fixture.document.querySelector('#unrelated-control')!;
+    setElementBounds(control, { left: 600, top: 0, width: 80, height: 40 });
+    const stop = fixture.observer.subscribe(() => undefined);
+    fixture.intersections[0]!.trigger(fixture.image, true);
+    let classificationReads = 0;
+    const matches = control.matches;
+    Object.defineProperty(control, 'matches', {
+      configurable: true,
+      value(this: Element, selector: string): boolean {
+        classificationReads += 1;
+        return matches.call(this, selector);
+      },
+    });
+
+    fixture.document.dispatchEvent(
+      new fixture.document.defaultView!.Event('scroll'),
+    );
+    fixture.frames.flush();
+
+    expect(classificationReads).toBe(0);
+    stop();
+  });
+
+  it('advances only images swept by responsive control reflow on resize', () => {
+    const fixture = createFixture(
+      '<input id="responsive-control" type="password">' +
+        '<img id="distant" src="distant.png">',
+    );
+    const control = fixture.document.querySelector('#responsive-control')!;
+    const distant = fixture.document.querySelector<HTMLImageElement>('#distant')!;
+    const controlBounds = { left: 320, top: 0, width: 80, height: 40 };
+    setElementBounds(control, controlBounds);
+    setImageMetrics(distant, { left: 600, top: 0, width: 100, height: 100 });
+    fixture.nodeIds.set(distant, 19);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    events.length = 0;
+
+    controlBounds.left = 40;
+    fixture.document.defaultView!.dispatchEvent(
+      new fixture.document.defaultView!.Event('resize'),
+    );
+
+    expect(events.map(eventNodeId)).toEqual([7]);
+    expect(events[0]).toMatchObject({
+      kind: 'upsert',
+      input: {
+        nodeId: 7,
+        observationChanged: true,
+        captureChanged: true,
+      },
+    });
+    stop();
+  });
+
+  it('tracks nested overflow crops without revising fully exposed pixels', () => {
+    const fixture = createFixture(
+      '<div id="clip"><img id="nested" src="nested.png"></div>',
+    );
+    const clip = fixture.document.querySelector('#clip')!;
+    const nested = fixture.document.querySelector<HTMLImageElement>('#nested')!;
+    const clipBounds = { left: 0, top: 100, width: 240, height: 160 };
+    const nestedBounds = { left: 20, top: 80, width: 120, height: 100 };
+    setElementBounds(clip, clipBounds);
+    setImageMetrics(nested, nestedBounds);
+    fixture.nodeIds.set(nested, 19);
+    Object.defineProperty(fixture.document.defaultView!, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => ({
+        display: 'block',
+        visibility: 'visible',
+        contentVisibility: 'visible',
+        opacity: '1',
+        clipPath: 'none',
+        maskImage: 'none',
+        perspective: 'none',
+        rotate: 'none',
+        transform: 'none',
+        overflowX: element === clip ? 'hidden' : 'visible',
+        overflowY: element === clip ? 'auto' : 'visible',
+        getPropertyValue: () => '',
+      }),
+    });
+    const model = new SourceImageModel();
+    model.beginDocument(documentIdentity);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => {
+      events.push(event);
+      if (event.kind === 'upsert') model.upsert(event.input);
+    });
+    fixture.intersections[0]!.trigger(nested, true);
+    events.length = 0;
+    const initialRevision = model.get(19)?.observationRevision;
+
+    nestedBounds.top = 60;
+    fixture.document.dispatchEvent(
+      new fixture.document.defaultView!.Event('scroll'),
+    );
+    fixture.frames.flush();
+    expect(events).toMatchObject([{
+      kind: 'upsert',
+      input: {
+        nodeId: 19,
+        contentChanged: false,
+        observationChanged: true,
+      },
+    }]);
+    expect(model.get(19)).toMatchObject({
+      contentRevision: 1,
+      observationRevision: (initialRevision ?? 0) + 1,
+    });
+
+    nestedBounds.top = 120;
+    fixture.document.dispatchEvent(
+      new fixture.document.defaultView!.Event('scroll'),
+    );
+    fixture.frames.flush();
+    events.length = 0;
+    const fullyVisibleRevision = model.get(19)?.observationRevision;
+
+    nestedBounds.top = 130;
+    fixture.document.dispatchEvent(
+      new fixture.document.defaultView!.Event('scroll'),
+    );
+    fixture.frames.flush();
+    expect(events).toEqual([]);
+    expect(model.get(19)?.observationRevision).toBe(fullyVisibleRevision);
     stop();
   });
 
@@ -340,7 +612,7 @@ describe('SourceImageObserver', () => {
     stopSecond();
   });
 
-  it('recovers a late rrweb mirror identity without inventing a node ID', () => {
+  it('recovers a late mirror identity without inventing a node ID', () => {
     const fixture = createFixture();
     fixture.nodeIds.delete(fixture.image);
     const events: SourceImageObservationEvent[] = [];
@@ -366,7 +638,7 @@ describe('SourceImageObserver', () => {
     stop();
   });
 
-  it('bounds retries for an image rrweb never assigned to its mirror', () => {
+  it('bounds retries for an image never assigned to its mirror', () => {
     const fixture = createFixture();
     fixture.nodeIds.delete(fixture.image);
     const events: SourceImageObservationEvent[] = [];
@@ -552,6 +824,1669 @@ describe('SourceImageObserver', () => {
     stop();
   });
 
+  it('coalesces broad class and style churn when image routing facts stay equal', () => {
+    const fixture = createFixture(
+      '<section id="shell"><img id="stable" src="stable.png" alt="News"></section>',
+    );
+    const shell = fixture.document.querySelector('#shell')!;
+    const stable = fixture.document.querySelector<HTMLImageElement>('#stable')!;
+    setImageMetrics(stable, fixture.bounds);
+    fixture.nodeIds.set(stable, 19);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    expect(events.map(eventNodeId)).toEqual([7, 19]);
+
+    const beforeFrameworkChurn = events.length;
+    fixture.document.body.classList.add('hydrated');
+    shell.setAttribute('style', '--theme-state: ready');
+    fixture.mutation.trigger([
+      attributeRecord(fixture.document.body, 'class'),
+      attributeRecord(shell, 'style'),
+    ]);
+
+    expect(events).toHaveLength(beforeFrameworkChurn);
+
+    stable.setAttribute('alt', 'Updated news');
+    fixture.mutation.trigger([attributeRecord(stable, 'alt')]);
+    expect(events.at(-1)).toMatchObject({
+      kind: 'upsert',
+      input: { nodeId: 19, contentChanged: true },
+    });
+    stop();
+  });
+
+  it('invalidates when a class mutation materially changes computed visibility', () => {
+    const fixture = createFixture(
+      '<section id="shell"><img id="styled-visible" src="stable.png"></section>',
+    );
+    const shell = fixture.document.querySelector('#shell')!;
+    const styled = fixture.document.querySelector<HTMLImageElement>(
+      '#styled-visible',
+    )!;
+    setImageMetrics(styled, fixture.bounds);
+    fixture.nodeIds.set(styled, 19);
+    let imageVisibility = 'visible';
+    Object.defineProperty(fixture.document.defaultView!, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => ({
+        display: 'block',
+        visibility: element === styled ? imageVisibility : 'visible',
+        contentVisibility: 'visible',
+        opacity: '1',
+        clipPath: 'none',
+        maskImage: 'none',
+        perspective: 'none',
+        rotate: 'none',
+        transform: 'none',
+        overflowX: 'visible',
+        overflowY: 'visible',
+        getPropertyValue: () => '',
+      }),
+    });
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+
+    imageVisibility = 'hidden';
+    shell.classList.add('collapsed');
+    fixture.mutation.trigger([attributeRecord(shell, 'class')]);
+
+    expect(events.at(-1)).toMatchObject({
+      kind: 'upsert',
+      input: {
+        nodeId: 19,
+        contentChanged: false,
+        observationChanged: true,
+      },
+    });
+    stop();
+  });
+
+  it('coalesces safe carousel translation and invalidates unsafe transforms', () => {
+    const fixture = createFixture(
+      '<section id="carousel"><img id="slide" src="slide.png"></section>',
+    );
+    const carousel = fixture.document.querySelector('#carousel')!;
+    const slide = fixture.document.querySelector<HTMLImageElement>('#slide')!;
+    setImageMetrics(slide, fixture.bounds);
+    fixture.nodeIds.set(slide, 19);
+    let carouselTransform =
+      'matrix3d(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -200, 0, 0, 1)';
+    Object.defineProperty(fixture.document.defaultView!, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => ({
+        display: 'block',
+        visibility: 'visible',
+        contentVisibility: 'visible',
+        opacity: '1',
+        clipPath: 'none',
+        maskImage: 'none',
+        perspective: 'none',
+        rotate: 'none',
+        scale: 'none',
+        transform: element === carousel ? carouselTransform : 'none',
+        overflowX: 'visible',
+        overflowY: 'visible',
+        getPropertyValue: () => '',
+      }),
+    });
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    const initialEvents = events.length;
+
+    carouselTransform =
+      'matrix3d(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, -400, 0, 0, 1)';
+    carousel.setAttribute('style', 'transform: translate3d(-400px, 0, 0)');
+    fixture.mutation.trigger([attributeRecord(carousel, 'style')]);
+    expect(events).toHaveLength(initialEvents);
+
+    carouselTransform = 'matrix(0, 1, -1, 0, 0, 0)';
+    carousel.setAttribute('style', 'transform: rotate(90deg)');
+    fixture.mutation.trigger([attributeRecord(carousel, 'style')]);
+    expect(events.at(-1)).toMatchObject({
+      kind: 'upsert',
+      input: {
+        nodeId: 19,
+        contentChanged: false,
+        observationChanged: true,
+      },
+    });
+    stop();
+  });
+
+  it('reconsiders a partially clipped carousel image once after motion settles', () => {
+    const fixture = createFixture(
+      '<section id="carousel"><img id="settling-slide" src="slide.png"></section>',
+    );
+    const carousel = fixture.document.querySelector('#carousel')!;
+    const slide = fixture.document.querySelector<HTMLImageElement>(
+      '#settling-slide',
+    )!;
+    const slideBounds = { left: -80, top: 20, width: 200, height: 100 };
+    setImageMetrics(slide, slideBounds);
+    const readSlideBounds = slide.getBoundingClientRect.bind(slide);
+    let settleGeometryReads = 0;
+    Object.defineProperty(slide, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => {
+        settleGeometryReads += 1;
+        return readSlideBounds();
+      },
+    });
+    fixture.nodeIds.set(slide, 19);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    events.length = 0;
+    settleGeometryReads = 0;
+
+    slideBounds.left = 20;
+    carousel.dispatchEvent(new fixture.document.defaultView!.Event(
+      'transitionend',
+      { bubbles: true },
+    ));
+    carousel.dispatchEvent(new fixture.document.defaultView!.Event(
+      'animationend',
+      { bubbles: true },
+    ));
+
+    expect(fixture.frames.pending).toBe(1);
+    expect(events).toEqual([]);
+    expect(settleGeometryReads).toBe(0);
+    fixture.frames.flush();
+    expect(settleGeometryReads).toBe(1);
+    expect(events).toMatchObject([{
+      kind: 'upsert',
+      input: {
+        nodeId: 19,
+        contentChanged: false,
+        observationChanged: true,
+      },
+    }]);
+
+    events.length = 0;
+    carousel.dispatchEvent(new fixture.document.defaultView!.Event(
+      'transitionend',
+      { bubbles: true },
+    ));
+    fixture.frames.flush();
+    expect(events).toEqual([]);
+    expect(fixture.frames.pending).toBe(0);
+    stop();
+  });
+
+  it('coalesces an image-class burst to one selector proof and changed slides', () => {
+    let globalRefreshes = 0;
+    const fixture = createFixture(
+      '<img id="slide-a" class="current"><img id="slide-b">' +
+        '<img id="stable-slide">',
+      { beforeRefreshAll: () => { globalRefreshes += 1; } },
+    );
+    const slideA = fixture.document.querySelector<HTMLImageElement>('#slide-a')!;
+    const slideB = fixture.document.querySelector<HTMLImageElement>('#slide-b')!;
+    const stable = fixture.document.querySelector<HTMLImageElement>('#stable-slide')!;
+    for (const [image, nodeId] of [
+      [slideA, 19],
+      [slideB, 20],
+      [stable, 21],
+    ] as const) {
+      setImageMetrics(image, fixture.bounds);
+      fixture.nodeIds.set(image, nodeId);
+    }
+    Object.defineProperty(fixture.document.defaultView!, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => ({
+        display: 'block',
+        visibility: 'visible',
+        contentVisibility: 'visible',
+        opacity: element === slideA || element === slideB
+          ? (element.classList.contains('current') ? '1' : '0')
+          : '1',
+        clipPath: 'none',
+        maskImage: 'none',
+        perspective: 'none',
+        rotate: 'none',
+        scale: 'none',
+        transform: 'none',
+        overflowX: 'visible',
+        overflowY: 'visible',
+        getPropertyValue: () => '',
+      }),
+    });
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    events.length = 0;
+
+    slideA.classList.remove('current');
+    slideB.classList.add('current');
+    fixture.mutation.trigger([
+      attributeRecord(slideA, 'class'),
+      attributeRecord(slideB, 'class'),
+    ]);
+    slideA.dispatchEvent(new fixture.document.defaultView!.Event(
+      'transitionend',
+      { bubbles: true },
+    ));
+    slideB.dispatchEvent(new fixture.document.defaultView!.Event(
+      'transitionend',
+      { bubbles: true },
+    ));
+    expect(fixture.frames.pending).toBe(1);
+    fixture.frames.flush();
+
+    expect(events.map(eventNodeId)).toEqual([19, 20]);
+    expect(events.every((event) =>
+      event.kind === 'upsert' && event.input.captureChanged === true
+    )).toBe(true);
+    expect(globalRefreshes).toBe(1);
+    stop();
+  });
+
+  it('observes arbitrary selector attributes but advances only changed images', () => {
+    const fixture = createFixture(
+      '<section id="state-shell" data-state="shown">' +
+        '<img id="state-image" src="state.png"></section>' +
+        '<img id="stable-image" src="stable.png">',
+    );
+    const shell = fixture.document.querySelector<HTMLElement>('#state-shell')!;
+    const affected = fixture.document.querySelector<HTMLImageElement>(
+      '#state-image',
+    )!;
+    const stable = fixture.document.querySelector<HTMLImageElement>(
+      '#stable-image',
+    )!;
+    setImageMetrics(affected, fixture.bounds);
+    setImageMetrics(stable, fixture.bounds);
+    fixture.nodeIds.set(affected, 19);
+    fixture.nodeIds.set(stable, 20);
+    Object.defineProperty(fixture.document.defaultView!, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => ({
+        display: 'block',
+        visibility: 'visible',
+        contentVisibility: 'visible',
+        opacity: element === affected && shell.dataset.state === 'hidden'
+          ? '0'
+          : '1',
+        clipPath: 'none',
+        maskImage: 'none',
+        perspective: 'none',
+        rotate: 'none',
+        scale: 'none',
+        transform: 'none',
+        overflowX: 'visible',
+        overflowY: 'visible',
+        getPropertyValue: () => '',
+      }),
+    });
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    events.length = 0;
+
+    shell.dataset.state = 'hidden';
+    fixture.mutation.trigger([attributeRecord(shell, 'data-state')]);
+
+    expect(events.map(eventNodeId)).toEqual([19]);
+    expect(events[0]).toMatchObject({
+      kind: 'upsert',
+      input: { observationChanged: true },
+    });
+    expect(fixture.mutation.options?.attributeFilter).toBeUndefined();
+    stop();
+  });
+
+  it('performs one bounded selector-safety scan for known attributes', () => {
+    const fixture = createFixture(
+      '<section id="label-shell"><span id="filler"></span></section>',
+    );
+    const shell = fixture.document.querySelector('#label-shell')!;
+    const filler = fixture.document.querySelector('#filler')!;
+    const stop = fixture.observer.subscribe(() => undefined);
+    let descendantMatches = 0;
+    const matches = filler.matches;
+    Object.defineProperty(filler, 'matches', {
+      configurable: true,
+      value(this: Element, selector: string): boolean {
+        descendantMatches += 1;
+        return matches.call(this, selector);
+      },
+    });
+
+    shell.setAttribute('aria-label', 'Updated public label');
+    fixture.mutation.trigger([attributeRecord(shell, 'aria-label')]);
+
+    expect(descendantMatches).toBe(1);
+    stop();
+  });
+
+  it('detects a sibling class that changes image object positioning', () => {
+    const fixture = createFixture('<button id="remote-state">State</button>');
+    const state = fixture.document.querySelector('#remote-state')!;
+    Object.defineProperty(fixture.document.defaultView!, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => ({
+        display: 'block', visibility: 'visible', opacity: '1', filter: 'none',
+        mixBlendMode: 'normal', objectFit: 'cover',
+        objectPosition: element === fixture.image && state.classList.contains('right')
+          ? '100% 50%'
+          : '0% 50%',
+        imageRendering: 'auto', overflowX: 'visible', overflowY: 'visible',
+        getPropertyValue: () => '',
+      }),
+    });
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    events.length = 0;
+
+    state.classList.add('right');
+    fixture.mutation.trigger([attributeRecord(state, 'class')]);
+
+    expect(events).toMatchObject([{
+      kind: 'upsert',
+      input: { nodeId: 7, observationChanged: true, captureChanged: true },
+    }]);
+    stop();
+  });
+
+  it('reroutes remote images for known attributes and image-bearing class targets', () => {
+    const fixture = createFixture(
+      '<section id="remote-state"><img id="contained" src="inside.png"></section>' +
+        '<img id="remote-image" src="remote.png">',
+    );
+    const state = fixture.document.querySelector('#remote-state')!;
+    const contained = fixture.document.querySelector<HTMLImageElement>('#contained')!;
+    const remote = fixture.document.querySelector<HTMLImageElement>('#remote-image')!;
+    setImageMetrics(contained, fixture.bounds);
+    setImageMetrics(remote, fixture.bounds);
+    fixture.nodeIds.set(contained, 19);
+    fixture.nodeIds.set(remote, 20);
+    Object.defineProperty(fixture.document.defaultView!, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => ({
+        display: 'block', visibility: 'visible', opacity: '1', filter: 'none',
+        mixBlendMode: 'normal', objectFit: 'cover',
+        objectPosition: element === remote
+          ? state.getAttribute('aria-expanded') === 'true'
+            ? '50% 50%'
+            : state.classList.contains('active')
+              ? '100% 50%'
+              : '0% 50%'
+          : '50% 50%',
+        imageRendering: 'auto', overflowX: 'visible', overflowY: 'visible',
+        getPropertyValue: () => '',
+      }),
+    });
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    events.length = 0;
+    let containedGeometryReads = 0;
+    let remoteGeometryReads = 0;
+    const readContainedBounds = contained.getBoundingClientRect.bind(contained);
+    const readRemoteBounds = remote.getBoundingClientRect.bind(remote);
+    Object.defineProperty(contained, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => {
+        containedGeometryReads += 1;
+        return readContainedBounds();
+      },
+    });
+    Object.defineProperty(remote, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => {
+        remoteGeometryReads += 1;
+        return readRemoteBounds();
+      },
+    });
+
+    state.setAttribute('aria-expanded', 'true');
+    fixture.mutation.trigger([attributeRecord(state, 'aria-expanded')]);
+    expect(events.map(eventNodeId)).toEqual([19, 20]);
+    expect(containedGeometryReads).toBe(1);
+    expect(remoteGeometryReads).toBe(1);
+
+    events.length = 0;
+    containedGeometryReads = 0;
+    remoteGeometryReads = 0;
+    state.removeAttribute('aria-expanded');
+    state.classList.add('active');
+    fixture.mutation.trigger([
+      attributeRecord(state, 'aria-expanded'),
+      attributeRecord(state, 'class'),
+    ]);
+    expect(events.map(eventNodeId)).toEqual([19, 20]);
+    expect(containedGeometryReads).toBe(1);
+    expect(remoteGeometryReads).toBe(1);
+    stop();
+  });
+
+  it('reroutes remote images for character-data and child-presence selectors', () => {
+    const fixture = createFixture(
+      '<div id="selector-marker"></div><img id="remote-image" src="remote.png">',
+    );
+    const marker = fixture.document.querySelector('#selector-marker')!;
+    const remote = fixture.document.querySelector<HTMLImageElement>('#remote-image')!;
+    const markerText = fixture.document.createTextNode('');
+    marker.append(markerText);
+    setImageMetrics(remote, fixture.bounds);
+    fixture.nodeIds.set(remote, 19);
+    Object.defineProperty(fixture.document.defaultView!, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => ({
+        display: 'block', visibility: 'visible', opacity: '1', filter: 'none',
+        mixBlendMode: 'normal', objectFit: 'cover',
+        objectPosition: element === remote && marker.childNodes.length > 0 &&
+            marker.textContent
+          ? '100% 50%'
+          : '0% 50%',
+        imageRendering: 'auto', overflowX: 'visible', overflowY: 'visible',
+        getPropertyValue: () => '',
+      }),
+    });
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    events.length = 0;
+
+    markerText.data = 'active';
+    fixture.mutation.trigger([{
+      type: 'characterData',
+      target: markerText,
+    } as unknown as MutationRecord]);
+    expect(events.map(eventNodeId)).toEqual([19]);
+
+    events.length = 0;
+    markerText.remove();
+    fixture.mutation.trigger([{
+      type: 'childList',
+      target: marker,
+      addedNodes: [],
+      removedNodes: [markerText],
+    } as unknown as MutationRecord]);
+    expect(events.map(eventNodeId)).toEqual([19]);
+    stop();
+  });
+
+  it('includes image background and border pixels in capture currency', () => {
+    const fixture = createFixture();
+    Object.defineProperty(fixture.document.defaultView!, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => ({
+        display: 'block', visibility: 'visible', opacity: '1', filter: 'none',
+        mixBlendMode: 'normal', objectFit: 'cover', objectPosition: '50% 50%',
+        imageRendering: 'auto', overflowX: 'visible', overflowY: 'visible',
+        background: element === fixture.image && element.classList.contains('painted')
+          ? 'rgb(1, 2, 3)'
+          : 'none',
+        border: element === fixture.image && element.classList.contains('painted')
+          ? '2px solid rgb(4, 5, 6)'
+          : '0px none',
+        padding: '0px',
+        content: 'normal',
+        getPropertyValue: () => '',
+      }),
+    });
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    events.length = 0;
+
+    fixture.image.classList.add('painted');
+    fixture.mutation.trigger([attributeRecord(fixture.image, 'class')]);
+
+    expect(events).toMatchObject([{
+      kind: 'upsert',
+      input: { nodeId: 7, observationChanged: true, captureChanged: true },
+    }]);
+    stop();
+  });
+
+  it('withdraws admitted images when mutation policy refresh fails', () => {
+    let failPolicy = false;
+    const fixture = createFixture('', {
+      beforeMutationRead: () => {
+        if (failPolicy) throw new Error('policy unavailable');
+        return false;
+      },
+    });
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    events.length = 0;
+
+    failPolicy = true;
+    fixture.image.classList.add('changed');
+    fixture.mutation.trigger([attributeRecord(fixture.image, 'class')]);
+
+    expect(events).toEqual([{
+      kind: 'remove',
+      document: documentIdentity,
+      nodeId: 7,
+    }]);
+    stop();
+  });
+
+  it('re-proves an image when its selector id changes', () => {
+    const fixture = createFixture();
+    Object.defineProperty(fixture.document.defaultView!, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => ({
+        display: 'block',
+        visibility: 'visible',
+        contentVisibility: 'visible',
+        opacity: element === fixture.image && element.id === 'inactive'
+          ? '0'
+          : '1',
+        clipPath: 'none',
+        maskImage: 'none',
+        perspective: 'none',
+        rotate: 'none',
+        scale: 'none',
+        transform: 'none',
+        overflowX: 'visible',
+        overflowY: 'visible',
+        getPropertyValue: () => '',
+      }),
+    });
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    events.length = 0;
+
+    fixture.image.id = 'inactive';
+    fixture.mutation.trigger([attributeRecord(fixture.image, 'id')]);
+
+    expect(events).toMatchObject([{
+      kind: 'upsert',
+      input: { nodeId: 7, observationChanged: true },
+    }]);
+    stop();
+  });
+
+  it('forces capture reproof after a CSSOM-only style change', () => {
+    const fixture = createFixture('<img id="second" src="second.png">');
+    const second = fixture.document.querySelector<HTMLImageElement>('#second')!;
+    setImageMetrics(second, fixture.bounds);
+    fixture.nodeIds.set(second, 19);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    events.length = 0;
+
+    fixture.observer.refreshAfterStyleChange();
+
+    expect(events.map(eventNodeId)).toEqual([7, 19]);
+    expect(events.every((event) => event.kind === 'upsert' &&
+      event.input.captureChanged === true)).toBe(true);
+    stop();
+  });
+
+  it('advances images after a sibling protected control moves into or away from them', () => {
+    const fixture = createFixture(
+      '<input id="moving-secret" type="password">',
+    );
+    const secret = fixture.document.querySelector('#moving-secret')!;
+    const secretBounds = { left: 320, top: 0, width: 80, height: 40 };
+    setElementBounds(secret, secretBounds);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    events.length = 0;
+
+    secretBounds.left = 40;
+    secret.dispatchEvent(new fixture.document.defaultView!.Event(
+      'transitionend',
+      { bubbles: true },
+    ));
+    secret.dispatchEvent(new fixture.document.defaultView!.Event(
+      'animationend',
+      { bubbles: true },
+    ));
+    expect(fixture.frames.pending).toBe(1);
+    fixture.frames.flush();
+    expect(events).toMatchObject([{
+      kind: 'upsert',
+      input: {
+        nodeId: 7,
+        observationChanged: true,
+        captureChanged: true,
+      },
+    }]);
+
+    events.length = 0;
+    secretBounds.left = 320;
+    secret.dispatchEvent(new fixture.document.defaultView!.Event(
+      'transitioncancel',
+      { bubbles: true },
+    ));
+    fixture.frames.flush();
+    expect(events).toMatchObject([{
+      kind: 'upsert',
+      input: {
+        nodeId: 7,
+        observationChanged: true,
+        captureChanged: true,
+      },
+    }]);
+    expect(JSON.stringify(events)).not.toMatch(/password|moving-secret/iu);
+    stop();
+  });
+
+  it('advances underlying evidence when an ordinary overlay is removed', () => {
+    const fixture = createFixture('<div id="ordinary-overlay"></div>');
+    const overlay = fixture.document.querySelector('#ordinary-overlay')!;
+    setElementBounds(overlay, { left: 20, top: 0, width: 80, height: 40 });
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    events.length = 0;
+
+    overlay.remove();
+    fixture.mutation.trigger([{
+      type: 'childList',
+      target: fixture.document.body,
+      addedNodes: [],
+      removedNodes: [overlay],
+    } as unknown as MutationRecord]);
+
+    expect(events).toMatchObject([{
+      kind: 'upsert',
+      input: { nodeId: 7, observationChanged: true },
+    }]);
+    expect(JSON.stringify(events)).not.toContain('ordinary-overlay');
+    stop();
+  });
+
+  it('suppresses generic relationship rescans after a prepared irrelevant batch', () => {
+    let globalRefreshes = 0;
+    let mutationPreparations = 0;
+    const fixture = createFixture(
+      '<div id="controller" aria-controls="panel"></div><div id="panel"></div>',
+      {
+        beforeRefreshAll: () => { globalRefreshes += 1; },
+        beforeMutationRead: () => {
+          mutationPreparations += 1;
+          return false;
+        },
+      },
+    );
+    const controller = fixture.document.querySelector('#controller')!;
+    const panel = fixture.document.querySelector('#panel')!;
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    events.length = 0;
+
+    controller.setAttribute('aria-controls', 'other-panel');
+    panel.setAttribute('id', 'other-panel');
+    fixture.mutation.trigger([
+      attributeRecord(controller, 'aria-controls'),
+      attributeRecord(panel, 'id'),
+    ]);
+
+    expect(mutationPreparations).toBe(1);
+    expect(globalRefreshes).toBe(0);
+    expect(events).toEqual([]);
+    stop();
+  });
+
+  it('coalesces stylesheet settling without invalidating a stable capture', () => {
+    let policyRefreshes = 0;
+    const fixture = createFixture(
+      '<link id="late-theme" rel="stylesheet" href="theme.css">',
+      {
+        beforeRefreshAll: () => { policyRefreshes += 1; },
+        beforeMutationRead: () => false,
+      },
+    );
+    const stylesheet = fixture.document.querySelector('#late-theme')!;
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    events.length = 0;
+
+    stylesheet.setAttribute('media', '(min-width: 1px)');
+    fixture.mutation.trigger([attributeRecord(stylesheet, 'media')]);
+    // External stylesheet state needs one explicit admission refresh even when
+    // the generic mutation hook proved controlled relationships unchanged.
+    expect(policyRefreshes).toBe(1);
+    expect(events).toEqual([]);
+
+    stylesheet.dispatchEvent(new fixture.document.defaultView!.Event(
+      'load',
+      { bubbles: true },
+    ));
+    stylesheet.dispatchEvent(new fixture.document.defaultView!.Event(
+      'load',
+      { bubbles: true },
+    ));
+
+    expect(policyRefreshes).toBe(1);
+    expect(fixture.frames.pending).toBe(1);
+    fixture.frames.flush();
+    expect(policyRefreshes).toBe(2);
+    expect(events).toEqual([]);
+    expect(fixture.frames.pending).toBe(0);
+    stop();
+  });
+
+  it('remeasures only images overlapped by a moved sibling control', () => {
+    const fixture = createFixture(
+      '<img id="distant" src="distant.png"><input id="secret" type="password">',
+    );
+    const distant = fixture.document.querySelector<HTMLImageElement>('#distant')!;
+    const secret = fixture.document.querySelector('#secret')!;
+    const distantBounds = { left: 500, top: 0, width: 200, height: 100 };
+    const secretBounds = { left: 300, top: 0, width: 80, height: 40 };
+    setImageMetrics(distant, distantBounds);
+    setElementBounds(secret, secretBounds);
+    fixture.nodeIds.set(distant, 19);
+    const model = new SourceImageModel();
+    model.beginDocument(documentIdentity);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => {
+      events.push(event);
+      if (event.kind === 'upsert') model.upsert(event.input);
+    });
+    events.length = 0;
+    const mainRevision = model.get(7)?.observationRevision;
+    const distantRevision = model.get(19)?.observationRevision;
+
+    secretBounds.left = 40;
+    secret.setAttribute('style', 'position:fixed;left:40px');
+    fixture.mutation.trigger([attributeRecord(secret, 'style')]);
+
+    expect(events).toMatchObject([{
+      kind: 'upsert',
+      input: {
+        nodeId: 7,
+        contentChanged: false,
+        observationChanged: true,
+      },
+    }]);
+    expect(events).toHaveLength(1);
+    expect(model.get(7)?.observationRevision).toBe((mainRevision ?? 0) + 1);
+    expect(model.get(19)?.observationRevision).toBe(distantRevision);
+    expect(JSON.stringify(events)).not.toMatch(/password|secret|style/iu);
+
+    events.length = 0;
+    secret.remove();
+    fixture.mutation.trigger([{
+      type: 'childList',
+      target: fixture.document.body,
+      addedNodes: [],
+      removedNodes: [secret],
+    } as unknown as MutationRecord]);
+    expect(events.map(eventNodeId)).toEqual([7]);
+    expect(events.every((event) =>
+      event.kind === 'upsert' &&
+      event.input.observationChanged &&
+      event.input.captureChanged === true
+    )).toBe(true);
+    expect(JSON.stringify(events)).not.toMatch(/password|secret|style/iu);
+    stop();
+  });
+
+  it('rechecks overlap when protected control text changes its geometry', () => {
+    const fixture = createFixture('<button id="growing-control">Short</button>');
+    const control = fixture.document.querySelector('#growing-control')!;
+    const controlBounds = { left: 220, top: 0, width: 40, height: 40 };
+    setElementBounds(control, controlBounds);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    events.length = 0;
+
+    controlBounds.left = 160;
+    controlBounds.width = 120;
+    const text = control.firstChild!;
+    text.textContent = 'A much wider protected control';
+    fixture.mutation.trigger([{
+      type: 'characterData',
+      target: text,
+    } as unknown as MutationRecord]);
+
+    expect(events).toMatchObject([{
+      kind: 'upsert',
+      input: { nodeId: 7, observationChanged: true, captureChanged: true },
+    }]);
+    stop();
+  });
+
+  it('invalidates an image crossed between non-overlapping motion endpoints', () => {
+    const fixture = createFixture('<input id="crossing-secret" type="password">');
+    const secret = fixture.document.querySelector('#crossing-secret')!;
+    const secretBounds = { left: 320, top: 0, width: 40, height: 40 };
+    setElementBounds(secret, secretBounds);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    events.length = 0;
+
+    secretBounds.left = -80;
+    secret.setAttribute('style', 'transform:translateX(-400px)');
+    fixture.mutation.trigger([attributeRecord(secret, 'style')]);
+
+    expect(events).toMatchObject([{
+      kind: 'upsert',
+      input: {
+        nodeId: 7,
+        observationChanged: true,
+        captureChanged: true,
+      },
+    }]);
+    stop();
+  });
+
+  it('tracks a generic computed text-security surface in overlap safety', () => {
+    const fixture = createFixture(
+      '<div id="computed-secret">Protected rendered surface</div>',
+    );
+    const secret = fixture.document.querySelector('#computed-secret')!;
+    setElementBounds(secret, { left: 300, top: 0, width: 80, height: 40 });
+    Object.defineProperty(fixture.document.defaultView!, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => ({
+        display: 'block',
+        visibility: 'visible',
+        contentVisibility: 'visible',
+        opacity: '1',
+        position: 'static',
+        clipPath: 'none',
+        maskImage: 'none',
+        perspective: 'none',
+        rotate: 'none',
+        scale: 'none',
+        transform: 'none',
+        overflowX: 'visible',
+        overflowY: 'visible',
+        getPropertyValue: (name: string) =>
+          name === '-webkit-text-security' && element === secret
+            ? 'disc'
+            : '',
+      }),
+    });
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    events.length = 0;
+
+    fixture.bounds.left = 290;
+    fixture.image.className = 'moved';
+    fixture.mutation.trigger([attributeRecord(fixture.image, 'class')]);
+
+    expect(events).toMatchObject([{
+      kind: 'upsert',
+      input: {
+        nodeId: 7,
+        observationChanged: true,
+        captureChanged: true,
+      },
+    }]);
+    stop();
+  });
+
+  it('tracks generic computed text-security movement after layout settles', () => {
+    const fixture = createFixture(
+      '<div id="computed-secret">Protected rendered surface</div>',
+    );
+    const secret = fixture.document.querySelector('#computed-secret')!;
+    const secretBounds = { left: 320, top: 0, width: 80, height: 40 };
+    setElementBounds(secret, secretBounds);
+    Object.defineProperty(fixture.document.defaultView!, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => ({
+        display: 'block', visibility: 'visible', contentVisibility: 'visible',
+        opacity: '1', position: 'static', clipPath: 'none', maskImage: 'none',
+        perspective: 'none', rotate: 'none', scale: 'none', transform: 'none',
+        overflowX: 'visible', overflowY: 'visible',
+        getPropertyValue: (name: string) =>
+          name === '-webkit-text-security' && element === secret ? 'disc' : '',
+      }),
+    });
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    events.length = 0;
+
+    secretBounds.left = 40;
+    secret.dispatchEvent(new fixture.document.defaultView!.Event(
+      'transitionend',
+      { bubbles: true },
+    ));
+    expect(fixture.frames.pending).toBe(1);
+    fixture.frames.flush();
+
+    expect(events).toMatchObject([{
+      kind: 'upsert',
+      input: {
+        nodeId: 7,
+        observationChanged: true,
+        captureChanged: true,
+      },
+    }]);
+    stop();
+  });
+
+  it('remeasures only current control overlaps after stylesheet changes', () => {
+    const fixture = createFixture(
+      '<style id="rules">#secret { left: 300px }</style>' +
+      '<img id="distant" src="distant.png">' +
+      '<input id="secret" type="password">',
+    );
+    const rules = fixture.document.querySelector('#rules')!;
+    const distant = fixture.document.querySelector<HTMLImageElement>('#distant')!;
+    const secret = fixture.document.querySelector('#secret')!;
+    const distantBounds = { left: 500, top: 0, width: 200, height: 100 };
+    const secretBounds = { left: 300, top: 0, width: 80, height: 40 };
+    setImageMetrics(distant, distantBounds);
+    setElementBounds(secret, secretBounds);
+    fixture.nodeIds.set(distant, 19);
+    const model = new SourceImageModel();
+    model.beginDocument(documentIdentity);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => {
+      events.push(event);
+      if (event.kind === 'upsert') model.upsert(event.input);
+    });
+    const readSecretBounds = secret.getBoundingClientRect;
+    let secretBoundsReads = 0;
+    Object.defineProperty(secret, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => {
+        secretBoundsReads += 1;
+        return readSecretBounds.call(secret);
+      },
+    });
+    events.length = 0;
+    const mainRevision = model.get(7)?.observationRevision;
+    const distantRevision = model.get(19)?.observationRevision;
+
+    secretBounds.left = 40;
+    const ruleText = rules.firstChild!;
+    ruleText.textContent = '#secret { left: 40px }';
+    fixture.mutation.trigger([{
+      type: 'characterData',
+      target: ruleText,
+    } as unknown as MutationRecord]);
+
+    expect(events).toMatchObject([{
+      kind: 'upsert',
+      input: {
+        nodeId: 7,
+        contentChanged: false,
+        observationChanged: true,
+      },
+    }]);
+    expect(events).toHaveLength(1);
+    expect(model.get(7)?.observationRevision).toBe((mainRevision ?? 0) + 1);
+    expect(model.get(19)?.observationRevision).toBe(distantRevision);
+    expect(secretBoundsReads).toBe(1);
+    expect(JSON.stringify(events)).not.toMatch(/password|secret|style/iu);
+    stop();
+  });
+
+  it.each(['style', 'class'] as const)(
+    'advances old and new protected-control overlaps after a %s move',
+    (attributeName) => {
+      const fixture = createFixture(
+        '<img id="destination" src="destination.png">' +
+          '<img id="distant" src="distant.png">' +
+          '<input id="moving-secret" type="password">',
+      );
+      const destination = fixture.document.querySelector<HTMLImageElement>(
+        '#destination',
+      )!;
+      const distant = fixture.document.querySelector<HTMLImageElement>(
+        '#distant',
+      )!;
+      const secret = fixture.document.querySelector('#moving-secret')!;
+      fixture.bounds.left = 0;
+      const destinationBounds = {
+        left: 220,
+        top: 0,
+        width: 100,
+        height: 100,
+      };
+      const distantBounds = {
+        left: 600,
+        top: 0,
+        width: 100,
+        height: 100,
+      };
+      const secretBounds = { left: 20, top: 0, width: 60, height: 40 };
+      setImageMetrics(destination, destinationBounds);
+      setImageMetrics(distant, distantBounds);
+      setElementBounds(secret, secretBounds);
+      fixture.nodeIds.set(destination, 19);
+      fixture.nodeIds.set(distant, 23);
+      const model = new SourceImageModel();
+      model.beginDocument(documentIdentity);
+      const events: SourceImageObservationEvent[] = [];
+      const stop = fixture.observer.subscribe((event) => {
+        events.push(event);
+        applyObservationEvent(model, event);
+      });
+      const initialMain = model.get(7)!;
+      const initialDestination = model.get(19)!;
+      const initialDistant = model.get(23)!;
+      events.length = 0;
+
+      secretBounds.left = 240;
+      secret.setAttribute(
+        attributeName,
+        attributeName === 'style' ? 'left:240px' : 'at-destination',
+      );
+      fixture.mutation.trigger([attributeRecord(secret, attributeName)]);
+
+      expect(events.map(eventNodeId).sort((left, right) => left - right)).toEqual([
+        7,
+        19,
+      ]);
+      expect(events.every((event) =>
+        event.kind === 'upsert' &&
+        event.input.contentChanged === false &&
+        event.input.observationChanged === true &&
+        event.input.captureChanged === true
+      )).toBe(true);
+      expect(model.get(7)).toMatchObject({
+        contentRevision: initialMain.contentRevision,
+        captureRevision: (initialMain.captureRevision ?? 0) + 1,
+      });
+      expect(model.get(19)).toMatchObject({
+        contentRevision: initialDestination.contentRevision,
+        captureRevision: (initialDestination.captureRevision ?? 0) + 1,
+      });
+      expect(model.get(23)).toMatchObject({
+        contentRevision: initialDistant.contentRevision,
+        captureRevision: initialDistant.captureRevision,
+        observationRevision: initialDistant.observationRevision,
+      });
+      expect(JSON.stringify(events)).not.toMatch(/password|moving-secret/iu);
+      stop();
+    },
+  );
+
+  it('advances only a moving image that crosses a stationary protected control', () => {
+    const fixture = createFixture(
+      '<input id="stationary-secret" type="password">' +
+        '<img id="distant" src="distant.png">',
+    );
+    const secret = fixture.document.querySelector('#stationary-secret')!;
+    const distant = fixture.document.querySelector<HTMLImageElement>('#distant')!;
+    const secretBounds = { left: 300, top: 0, width: 80, height: 40 };
+    setElementBounds(secret, secretBounds);
+    setImageMetrics(distant, { left: 700, top: 0, width: 100, height: 100 });
+    fixture.nodeIds.set(distant, 19);
+    const model = new SourceImageModel();
+    model.beginDocument(documentIdentity);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => {
+      events.push(event);
+      applyObservationEvent(model, event);
+    });
+    const initialMain = model.get(7)!;
+    const initialDistant = model.get(19)!;
+    events.length = 0;
+
+    fixture.bounds.left = 280;
+    fixture.image.dispatchEvent(new fixture.document.defaultView!.Event(
+      'transitionend',
+      { bubbles: true },
+    ));
+    expect(fixture.frames.pending).toBe(1);
+    fixture.frames.flush();
+
+    expect(events).toMatchObject([{
+      kind: 'upsert',
+      input: {
+        nodeId: 7,
+        contentChanged: false,
+        observationChanged: true,
+        captureChanged: true,
+      },
+    }]);
+    expect(model.get(7)?.captureRevision).toBe(
+      (initialMain.captureRevision ?? 0) + 1,
+    );
+    expect(model.get(19)).toMatchObject({
+      captureRevision: initialDistant.captureRevision,
+      observationRevision: initialDistant.observationRevision,
+    });
+
+    const overlappedMain = model.get(7)!;
+    events.length = 0;
+    fixture.bounds.left = 0;
+    fixture.image.dispatchEvent(new fixture.document.defaultView!.Event(
+      'transitionend',
+      { bubbles: true },
+    ));
+    fixture.frames.flush();
+
+    expect(events).toMatchObject([{
+      kind: 'upsert',
+      input: {
+        nodeId: 7,
+        contentChanged: false,
+        observationChanged: true,
+        captureChanged: true,
+      },
+    }]);
+    expect(model.get(7)?.captureRevision).toBe(
+      (overlappedMain.captureRevision ?? 0) + 1,
+    );
+    expect(model.get(19)).toMatchObject({
+      captureRevision: initialDistant.captureRevision,
+      observationRevision: initialDistant.observationRevision,
+    });
+    stop();
+  });
+
+  it('tracks a moving image inside a captioned presentation wrapper', () => {
+    const fixture = createFixture(
+      '<input id="stationary-secret" type="password">' +
+        '<section id="captioned-shell"><img id="nested" src="nested.png">' +
+        '<span>Visible caption</span></section>' +
+        '<img id="distant" src="distant.png">',
+    );
+    const secret = fixture.document.querySelector('#stationary-secret')!;
+    const shell = fixture.document.querySelector('#captioned-shell')!;
+    const nested = fixture.document.querySelector<HTMLImageElement>('#nested')!;
+    const distant = fixture.document.querySelector<HTMLImageElement>('#distant')!;
+    setElementBounds(secret, { left: 300, top: 0, width: 80, height: 40 });
+    setImageMetrics(nested, { left: 500, top: 0, width: 100, height: 100 });
+    setImageMetrics(distant, { left: 700, top: 0, width: 100, height: 100 });
+    fixture.nodeIds.set(nested, 19);
+    fixture.nodeIds.set(distant, 23);
+    const model = new SourceImageModel();
+    model.beginDocument(documentIdentity);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => {
+      events.push(event);
+      applyObservationEvent(model, event);
+    });
+    const initialMain = model.get(7)!;
+    const initialNested = model.get(19)!;
+    const initialDistant = model.get(23)!;
+    events.length = 0;
+
+    setImageMetrics(nested, { left: 290, top: 0, width: 100, height: 100 });
+    shell.classList.add('moved');
+    fixture.mutation.trigger([attributeRecord(shell, 'class')]);
+
+    expect(events).toMatchObject([{
+      kind: 'upsert',
+      input: {
+        nodeId: 19,
+        contentChanged: false,
+        observationChanged: true,
+        captureChanged: true,
+      },
+    }]);
+    expect(model.get(19)?.captureRevision).toBe(
+      (initialNested.captureRevision ?? 0) + 1,
+    );
+    expect(model.get(7)).toMatchObject({
+      captureRevision: initialMain.captureRevision,
+      observationRevision: initialMain.observationRevision,
+    });
+    expect(model.get(23)).toMatchObject({
+      captureRevision: initialDistant.captureRevision,
+      observationRevision: initialDistant.observationRevision,
+    });
+    stop();
+  });
+
+  it('keeps connected remove-add reparenting free of removal and capture invalidation', () => {
+    const fixture = createFixture(
+      '<div id="left-parent"></div><div id="right-parent"></div>' +
+        '<img id="distant" src="distant.png">',
+    );
+    const left = fixture.document.querySelector('#left-parent')!;
+    const right = fixture.document.querySelector('#right-parent')!;
+    const distant = fixture.document.querySelector<HTMLImageElement>('#distant')!;
+    left.append(fixture.image);
+    setImageMetrics(distant, { left: 500, top: 0, width: 100, height: 100 });
+    fixture.nodeIds.set(distant, 19);
+    const model = new SourceImageModel();
+    model.beginDocument(documentIdentity);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => {
+      events.push(event);
+      applyObservationEvent(model, event);
+    });
+    const initialMain = model.get(7)!;
+    const initialDistant = model.get(19)!;
+    events.length = 0;
+
+    right.append(fixture.image);
+    fixture.mutation.trigger([
+      {
+        type: 'childList',
+        target: left,
+        addedNodes: [],
+        removedNodes: [fixture.image],
+      } as unknown as MutationRecord,
+      {
+        type: 'childList',
+        target: right,
+        addedNodes: [fixture.image],
+        removedNodes: [],
+      } as unknown as MutationRecord,
+    ]);
+
+    expect(events.some((event) => event.kind === 'remove')).toBe(false);
+    expect(events.every((event) =>
+      event.kind === 'upsert' &&
+      event.input.contentChanged === false &&
+      event.input.captureChanged !== true
+    )).toBe(true);
+    expect(model.get(7)).toMatchObject({
+      contentRevision: initialMain.contentRevision,
+      captureRevision: initialMain.captureRevision,
+    });
+    expect(model.get(19)).toMatchObject({
+      contentRevision: initialDistant.contentRevision,
+      captureRevision: initialDistant.captureRevision,
+      observationRevision: initialDistant.observationRevision,
+    });
+    stop();
+  });
+
+  it('uses a bounded removed-subtree graph before the global identity fallback', () => {
+    const fixture = createFixture(
+      '<section id="removed-shell"><img id="removed-image" src="gone.png">' +
+        '</section><img id="distant" src="distant.png">',
+    );
+    const shell = fixture.document.querySelector('#removed-shell')!;
+    const removed = fixture.document.querySelector<HTMLImageElement>(
+      '#removed-image',
+    )!;
+    const distant = fixture.document.querySelector<HTMLImageElement>('#distant')!;
+    setImageMetrics(removed, { left: 220, top: 0, width: 100, height: 100 });
+    setImageMetrics(distant, { left: 600, top: 0, width: 100, height: 100 });
+    fixture.nodeIds.set(removed, 19);
+    fixture.nodeIds.set(distant, 23);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    let identityContainmentReads = 0;
+    Object.defineProperty(shell, 'contains', {
+      configurable: true,
+      value: () => {
+        identityContainmentReads += 1;
+        return false;
+      },
+    });
+    events.length = 0;
+
+    shell.remove();
+    fixture.mutation.trigger([{
+      type: 'childList',
+      target: fixture.document.body,
+      addedNodes: [],
+      removedNodes: [shell],
+    } as unknown as MutationRecord]);
+
+    expect(events).toContainEqual({
+      kind: 'remove',
+      document: documentIdentity,
+      nodeId: 19,
+    });
+    expect(identityContainmentReads).toBe(0);
+    stop();
+  });
+
+  it('fails closed with global capture invalidation for unreadable safety geometry', () => {
+    const fixture = createFixture(
+      '<img id="distant" src="distant.png">' +
+        '<input id="unreadable-secret" type="password">',
+    );
+    const distant = fixture.document.querySelector<HTMLImageElement>('#distant')!;
+    const secret = fixture.document.querySelector('#unreadable-secret')!;
+    setImageMetrics(distant, { left: 500, top: 0, width: 100, height: 100 });
+    fixture.nodeIds.set(distant, 19);
+    let readable = true;
+    Object.defineProperty(secret, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => {
+        if (!readable) throw new Error('unreadable geometry');
+        return {
+          x: 300,
+          y: 0,
+          top: 0,
+          left: 300,
+          right: 380,
+          bottom: 40,
+          width: 80,
+          height: 40,
+          toJSON: () => undefined,
+        };
+      },
+    });
+    const model = new SourceImageModel();
+    model.beginDocument(documentIdentity);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => {
+      events.push(event);
+      applyObservationEvent(model, event);
+    });
+    const initialMain = model.get(7)!;
+    const initialDistant = model.get(19)!;
+    events.length = 0;
+
+    readable = false;
+    secret.classList.add('moved-by-css');
+    fixture.mutation.trigger([attributeRecord(secret, 'class')]);
+
+    expect(events.map(eventNodeId).sort((left, right) => left - right)).toEqual([
+      7,
+      19,
+    ]);
+    expect(events.every((event) =>
+      event.kind === 'upsert' &&
+      event.input.contentChanged === false &&
+      event.input.observationChanged === true &&
+      event.input.captureChanged === true
+    )).toBe(true);
+    expect(model.get(7)?.captureRevision).toBe(
+      (initialMain.captureRevision ?? 0) + 1,
+    );
+    expect(model.get(19)?.captureRevision).toBe(
+      (initialDistant.captureRevision ?? 0) + 1,
+    );
+    expect(JSON.stringify(events)).not.toMatch(/password|unreadable-secret/iu);
+    stop();
+  });
+
+  it('fails closed globally when a passive subtree shadow root is unreadable', () => {
+    const fixture = createFixture(
+      '<div id="passive-shell"><img id="nested" src="nested.png"></div>' +
+        '<img id="distant" src="distant.png">',
+    );
+    const shell = fixture.document.querySelector('#passive-shell')!;
+    const nested = fixture.document.querySelector<HTMLImageElement>('#nested')!;
+    const distant = fixture.document.querySelector<HTMLImageElement>('#distant')!;
+    setElementBounds(shell, { left: 220, top: 0, width: 100, height: 100 });
+    setImageMetrics(nested, { left: 220, top: 0, width: 100, height: 100 });
+    setImageMetrics(distant, { left: 600, top: 0, width: 100, height: 100 });
+    fixture.nodeIds.set(nested, 19);
+    fixture.nodeIds.set(distant, 23);
+    const model = new SourceImageModel();
+    model.beginDocument(documentIdentity);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => {
+      events.push(event);
+      applyObservationEvent(model, event);
+    });
+    const initial = new Map([
+      [7, model.get(7)!],
+      [19, model.get(19)!],
+      [23, model.get(23)!],
+    ]);
+    events.length = 0;
+
+    Object.defineProperty(shell, 'shadowRoot', {
+      configurable: true,
+      get: () => {
+        throw new Error('unreadable shadow root');
+      },
+    });
+    shell.classList.add('motion-settled');
+    fixture.mutation.trigger([attributeRecord(shell, 'class')]);
+
+    expect(events.map(eventNodeId).sort((left, right) => left - right)).toEqual([
+      7,
+      19,
+      23,
+    ]);
+    expect(events.every((event) =>
+      event.kind === 'upsert' &&
+      event.input.observationChanged === true &&
+      event.input.captureChanged === true
+    )).toBe(true);
+    for (const nodeId of [7, 19, 23]) {
+      expect(model.get(nodeId)?.captureRevision).toBe(
+        (initial.get(nodeId)?.captureRevision ?? 0) + 1,
+      );
+    }
+    expect(JSON.stringify(events)).not.toContain('unreadable shadow root');
+    stop();
+  });
+
+  it('uses flat-tree ancestry when native contains throws', () => {
+    const fixture = createFixture(
+      '<section id="moving-shell"><input id="moving-secret" type="password">' +
+        '</section><img id="destination" src="destination.png">' +
+        '<img id="distant" src="distant.png">',
+    );
+    const shell = fixture.document.querySelector('#moving-shell')!;
+    const secret = fixture.document.querySelector('#moving-secret')!;
+    const destination = fixture.document.querySelector<HTMLImageElement>(
+      '#destination',
+    )!;
+    const distant = fixture.document.querySelector<HTMLImageElement>('#distant')!;
+    const secretBounds = { left: 20, top: 0, width: 60, height: 40 };
+    setElementBounds(secret, secretBounds);
+    setImageMetrics(destination, { left: 220, top: 0, width: 100, height: 100 });
+    setImageMetrics(distant, { left: 600, top: 0, width: 100, height: 100 });
+    fixture.nodeIds.set(destination, 19);
+    fixture.nodeIds.set(distant, 23);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    events.length = 0;
+
+    Object.defineProperty(shell, 'contains', {
+      configurable: true,
+      value: () => {
+        throw new Error('unreadable native containment');
+      },
+    });
+    secretBounds.left = 240;
+    shell.classList.add('moved');
+    fixture.mutation.trigger([attributeRecord(shell, 'class')]);
+
+    expect(events.map(eventNodeId).sort((left, right) => left - right)).toEqual([
+      7,
+      19,
+    ]);
+    expect(events.every((event) =>
+      event.kind === 'upsert' &&
+      event.input.contentChanged === false &&
+      event.input.observationChanged === true &&
+      event.input.captureChanged === true
+    )).toBe(true);
+    expect(events.some((event) => eventNodeId(event) === 23)).toBe(false);
+    expect(JSON.stringify(events)).not.toContain('unreadable native containment');
+    stop();
+  });
+
+  it('fails closed globally when containment and flat-tree ancestry are unreadable', () => {
+    const fixture = createFixture(
+      '<div id="passive-shell"><img id="nested" src="nested.png"></div>' +
+        '<input id="known-control" type="password">' +
+        '<img id="distant" src="distant.png">',
+    );
+    const shell = fixture.document.querySelector('#passive-shell')!;
+    const nested = fixture.document.querySelector<HTMLImageElement>('#nested')!;
+    const control = fixture.document.querySelector('#known-control')!;
+    const distant = fixture.document.querySelector<HTMLImageElement>('#distant')!;
+    setElementBounds(shell, { left: 220, top: 0, width: 100, height: 100 });
+    setImageMetrics(nested, { left: 220, top: 0, width: 100, height: 100 });
+    setElementBounds(control, { left: 800, top: 0, width: 80, height: 40 });
+    setImageMetrics(distant, { left: 600, top: 0, width: 100, height: 100 });
+    fixture.nodeIds.set(nested, 19);
+    fixture.nodeIds.set(distant, 23);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    events.length = 0;
+
+    Object.defineProperty(shell, 'contains', {
+      configurable: true,
+      value: () => {
+        throw new Error('unreadable native containment');
+      },
+    });
+    Object.defineProperty(control, 'parentElement', {
+      configurable: true,
+      get: () => {
+        throw new Error('unreadable flat-tree ancestry');
+      },
+    });
+    shell.classList.add('motion-settled');
+    fixture.mutation.trigger([attributeRecord(shell, 'class')]);
+
+    expect(events.map(eventNodeId).sort((left, right) => left - right)).toEqual([
+      7,
+      19,
+      23,
+    ]);
+    expect(events.every((event) =>
+      event.kind === 'upsert' &&
+      event.input.observationChanged === true &&
+      event.input.captureChanged === true
+    )).toBe(true);
+    expect(JSON.stringify(events)).not.toMatch(
+      /unreadable (?:native containment|flat-tree ancestry)/u,
+    );
+    stop();
+  });
+
+  it('retains stable captures after stylesheet and font layout settles', () => {
+    const fixture = createFixture(
+      '<link id="late-layout" rel="stylesheet" href="layout.css">' +
+        '<img id="distant" src="distant.png">',
+    );
+    const stylesheet = fixture.document.querySelector('#late-layout')!;
+    const distant = fixture.document.querySelector<HTMLImageElement>('#distant')!;
+    setImageMetrics(distant, { left: 500, top: 0, width: 100, height: 100 });
+    fixture.nodeIds.set(distant, 19);
+    const fontSettles = new FakeFontSettleTarget();
+    Object.defineProperty(fixture.document, 'fonts', {
+      configurable: true,
+      value: fontSettles,
+    });
+    const model = new SourceImageModel();
+    model.beginDocument(documentIdentity);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => {
+      events.push(event);
+      applyObservationEvent(model, event);
+    });
+    const initialMain = model.get(7)!;
+    const initialDistant = model.get(19)!;
+    events.length = 0;
+
+    stylesheet.dispatchEvent(new fixture.document.defaultView!.Event(
+      'load',
+      { bubbles: true },
+    ));
+    expect(fixture.frames.pending).toBe(1);
+    fixture.frames.flush();
+
+    expect(events).toEqual([]);
+    expect(model.get(7)?.captureRevision).toBe(initialMain.captureRevision);
+    expect(model.get(19)?.captureRevision).toBe(
+      initialDistant.captureRevision,
+    );
+
+    const afterStylesheetMain = model.get(7)!;
+    const afterStylesheetDistant = model.get(19)!;
+    events.length = 0;
+    fontSettles.dispatchLoadingDone();
+    expect(fixture.frames.pending).toBe(1);
+    fixture.frames.flush();
+
+    expect(events).toEqual([]);
+    expect(model.get(7)?.captureRevision).toBe(
+      afterStylesheetMain.captureRevision,
+    );
+    expect(model.get(19)?.captureRevision).toBe(
+      afterStylesheetDistant.captureRevision,
+    );
+    stop();
+  });
+
+  it('treats details open mutations as bounded capture-safety changes', () => {
+    const fixture = createFixture(
+      '<details id="disclosure"><summary>More</summary></details>' +
+        '<img id="distant" src="distant.png">',
+    );
+    const disclosure = fixture.document.querySelector('#disclosure')!;
+    const distant = fixture.document.querySelector<HTMLImageElement>('#distant')!;
+    setElementBounds(disclosure, { left: 20, top: 0, width: 80, height: 40 });
+    setImageMetrics(distant, { left: 500, top: 0, width: 100, height: 100 });
+    fixture.nodeIds.set(distant, 19);
+    const model = new SourceImageModel();
+    model.beginDocument(documentIdentity);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => {
+      events.push(event);
+      applyObservationEvent(model, event);
+    });
+    const initialMain = model.get(7)!;
+    const initialDistant = model.get(19)!;
+    events.length = 0;
+
+    expect(fixture.mutation.options).toMatchObject({ attributes: true });
+    expect(fixture.mutation.options?.attributeFilter).toBeUndefined();
+    disclosure.setAttribute('open', '');
+    fixture.mutation.trigger([attributeRecord(disclosure, 'open')]);
+
+    expect(events).toMatchObject([{
+      kind: 'upsert',
+      input: {
+        nodeId: 7,
+        contentChanged: false,
+        observationChanged: true,
+        captureChanged: true,
+      },
+    }]);
+    expect(model.get(7)?.captureRevision).toBe(
+      (initialMain.captureRevision ?? 0) + 1,
+    );
+    expect(model.get(19)).toMatchObject({
+      captureRevision: initialDistant.captureRevision,
+      observationRevision: initialDistant.observationRevision,
+    });
+    stop();
+  });
+
+  it('coalesces popover beforetoggle and toggle into bounded capture safety', () => {
+    const fixture = createFixture(
+      '<div id="popover" popover="auto" role="dialog"></div>' +
+        '<img id="distant" src="distant.png">',
+    );
+    const popover = fixture.document.querySelector('#popover')!;
+    const distant = fixture.document.querySelector<HTMLImageElement>('#distant')!;
+    setElementBounds(popover, { left: 20, top: 0, width: 80, height: 40 });
+    setImageMetrics(distant, { left: 500, top: 0, width: 100, height: 100 });
+    fixture.nodeIds.set(distant, 19);
+    const model = new SourceImageModel();
+    model.beginDocument(documentIdentity);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => {
+      events.push(event);
+      applyObservationEvent(model, event);
+    });
+    const initialMain = model.get(7)!;
+    const initialDistant = model.get(19)!;
+    events.length = 0;
+
+    popover.dispatchEvent(new fixture.document.defaultView!.Event(
+      'beforetoggle',
+      { bubbles: true },
+    ));
+    expect(fixture.frames.pending).toBe(1);
+    popover.dispatchEvent(new fixture.document.defaultView!.Event(
+      'toggle',
+      { bubbles: true },
+    ));
+    expect(fixture.frames.pending).toBe(1);
+    fixture.frames.flush();
+
+    expect(events).toMatchObject([{
+      kind: 'upsert',
+      input: {
+        nodeId: 7,
+        contentChanged: false,
+        observationChanged: true,
+        captureChanged: true,
+      },
+    }]);
+    expect(model.get(7)?.captureRevision).toBe(
+      (initialMain.captureRevision ?? 0) + 1,
+    );
+    expect(model.get(19)).toMatchObject({
+      captureRevision: initialDistant.captureRevision,
+      observationRevision: initialDistant.observationRevision,
+    });
+    stop();
+  });
+
   it('admits HTTP(S) navigation images with passive disclosure metadata', () => {
     const fixture = createFixture(`
       <a href="/news" role="button"><img data-node="19"></a>
@@ -582,22 +2517,8 @@ describe('SourceImageObserver', () => {
     expect(events.map(eventNodeId)).toEqual([7, 19, 30, 31, 32]);
     expect(JSON.stringify(events)).not.toContain('/news');
     expect(JSON.stringify(events)).not.toContain('other.example');
-    expect(fixture.mutation.options?.attributeFilter).toEqual(
-      expect.arrayContaining([
-        'type',
-        'autocomplete',
-        'class',
-        'style',
-        'hidden',
-        'id',
-        'href',
-        'role',
-        'aria-expanded',
-        'aria-haspopup',
-        'aria-controls',
-        'aria-pressed',
-      ]),
-    );
+    expect(fixture.mutation.options).toMatchObject({ attributes: true });
+    expect(fixture.mutation.options?.attributeFilter).toBeUndefined();
     stop();
   });
 
@@ -663,6 +2584,7 @@ describe('SourceImageObserver', () => {
       kind: 'upsert', input: { nodeId: 19, contentChanged: true },
     });
 
+    const beforeBaseRemoval = events.length;
     base.remove();
     fixture.mutation.trigger([{
       type: 'childList',
@@ -670,7 +2592,9 @@ describe('SourceImageObserver', () => {
       addedNodes: [],
       removedNodes: [base],
     } as unknown as MutationRecord]);
-    expect(events.at(-1)).toMatchObject({ kind: 'remove', nodeId: 19 });
+    expect(events.slice(beforeBaseRemoval)).toEqual(expect.arrayContaining([
+      expect.objectContaining({ kind: 'remove', nodeId: 19 }),
+    ]));
     fixture.document.head.append(base);
     fixture.mutation.trigger([{
       type: 'childList',
@@ -774,6 +2698,190 @@ describe('SourceImageObserver', () => {
     stop();
   });
 
+  it('advances changed oversized alt routing without a geometry refresh loop', () => {
+    const fixture = createFixture();
+    fixture.image.setAttribute('alt', `A${'x'.repeat(70_000)}`);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    events.length = 0;
+
+    fixture.image.setAttribute('alt', `B${'y'.repeat(70_000)}`);
+    fixture.mutation.trigger([attributeRecord(fixture.image, 'alt')]);
+    expect(events).toMatchObject([{
+      kind: 'upsert',
+      input: { nodeId: 7, contentChanged: true },
+    }]);
+    events.length = 0;
+    fixture.resize.trigger(fixture.image);
+    expect(events).toEqual([]);
+    expect(JSON.stringify(events)).not.toContain('y'.repeat(1_000));
+    stop();
+  });
+
+  it('invalidates stable boxes when object-position changes displayed pixels', () => {
+    const fixture = createFixture();
+    let objectPosition = '0% 50%';
+    Object.defineProperty(fixture.document.defaultView!, 'getComputedStyle', {
+      configurable: true,
+      value: () => ({
+        display: 'block', visibility: 'visible', contentVisibility: 'visible',
+        opacity: '1', clipPath: 'none', maskImage: 'none', perspective: 'none',
+        rotate: 'none', scale: 'none', transform: 'none', filter: 'none',
+        mixBlendMode: 'normal', objectFit: 'cover', objectPosition,
+        imageRendering: 'auto', overflowX: 'visible', overflowY: 'visible',
+        getPropertyValue: () => '',
+      }),
+    });
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    events.length = 0;
+
+    objectPosition = '100% 50%';
+    fixture.image.className = 'crop-right';
+    fixture.mutation.trigger([attributeRecord(fixture.image, 'class')]);
+    expect(events).toMatchObject([{
+      kind: 'upsert',
+      input: {
+        nodeId: 7,
+        contentChanged: false,
+        observationChanged: true,
+      },
+    }]);
+    stop();
+  });
+
+  it('discovers and observes existing and added open shadow-root images only', () => {
+    const fixture = createFixture(
+      '<div id="existing-host"></div><div id="late-host"></div>',
+    );
+    const host = fixture.document.querySelector('#existing-host')!;
+    const open = host.attachShadow({ mode: 'open' });
+    Object.defineProperty(open, 'mode', { configurable: true, value: 'open' });
+    const existing = fixture.document.createElement('img');
+    setImageMetrics(existing, fixture.bounds);
+    fixture.nodeIds.set(existing, 19);
+    open.append(existing);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    expect(events.map(eventNodeId)).toContain(19);
+    expect(fixture.mutation.targets).toContain(open);
+
+    const late = fixture.document.createElement('img');
+    setImageMetrics(late, fixture.bounds);
+    fixture.nodeIds.set(late, 23);
+    open.append(late);
+    fixture.mutation.trigger([{
+      type: 'childList', target: open, addedNodes: [late], removedNodes: [],
+    } as unknown as MutationRecord]);
+    expect(events.map(eventNodeId)).toContain(23);
+
+    const lateHost = fixture.document.querySelector('#late-host')!;
+    const attached = lateHost.attachShadow({ mode: 'open' });
+    Object.defineProperty(attached, 'mode', {
+      configurable: true,
+      value: 'open',
+    });
+    const attachedImage = fixture.document.createElement('img');
+    setImageMetrics(attachedImage, fixture.bounds);
+    fixture.nodeIds.set(attachedImage, 27);
+    attached.append(attachedImage);
+    fixture.timers.run();
+    expect(events.map(eventNodeId)).toContain(27);
+    expect(fixture.mutation.targets).toContain(attached);
+
+    const closedHost = fixture.document.createElement('div');
+    const closed = closedHost.attachShadow({ mode: 'closed' });
+    Object.defineProperty(closed, 'mode', { configurable: true, value: 'closed' });
+    const hidden = fixture.document.createElement('img');
+    setImageMetrics(hidden, fixture.bounds);
+    fixture.nodeIds.set(hidden, 29);
+    closed.append(hidden);
+    fixture.document.body.append(closedHost);
+    fixture.mutation.trigger([{
+      type: 'childList', target: fixture.document.body,
+      addedNodes: [closedHost], removedNodes: [],
+    } as unknown as MutationRecord]);
+    expect(events.map(eventNodeId)).not.toContain(29);
+    stop();
+  });
+
+  it('checks rotating shadow hosts without periodically rereading images', () => {
+    let admissionReads = 0;
+    const fixture = createFixture('<div id="late-shadow-host"></div>', {
+      isPrivateImage: () => {
+        admissionReads += 1;
+        return false;
+      },
+    });
+    const readMainBounds = fixture.image.getBoundingClientRect.bind(fixture.image);
+    let geometryReads = 0;
+    Object.defineProperty(fixture.image, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => {
+        geometryReads += 1;
+        return readMainBounds();
+      },
+    });
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    events.length = 0;
+    admissionReads = 0;
+    geometryReads = 0;
+
+    fixture.timers.run();
+    expect(admissionReads).toBe(0);
+    expect(geometryReads).toBe(0);
+    expect(events).toEqual([]);
+
+    const host = fixture.document.querySelector('#late-shadow-host')!;
+    const root = host.attachShadow({ mode: 'open' });
+    Object.defineProperty(root, 'mode', { configurable: true, value: 'open' });
+    let settledHostReads = 0;
+    Object.defineProperty(host, 'shadowRoot', {
+      configurable: true,
+      get: () => {
+        settledHostReads += 1;
+        return root;
+      },
+    });
+    const image = fixture.document.createElement('img');
+    setImageMetrics(image, fixture.bounds);
+    fixture.nodeIds.set(image, 31);
+    root.append(image);
+    fixture.timers.run();
+    expect(events).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'upsert',
+        input: expect.objectContaining({ nodeId: 31 }),
+      }),
+    ]));
+    expect(fixture.mutation.targets).toContain(root);
+    const readsAfterDiscovery = settledHostReads;
+    fixture.timers.run();
+    expect(settledHostReads).toBe(readsAfterDiscovery);
+    stop();
+  });
+
+  it('coalesces an oversized mutation delivery into one bounded global refresh', () => {
+    let policyRefreshes = 0;
+    const fixture = createFixture('', {
+      beforeRefreshAll: () => { policyRefreshes += 1; },
+    });
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    events.length = 0;
+    fixture.mutation.trigger(Array.from({ length: 2_049 }, () =>
+      attributeRecord(fixture.document.body, 'class')
+    ));
+    expect(policyRefreshes).toBe(1);
+    expect(events).toHaveLength(1);
+    expect(events[0]).toMatchObject({
+      kind: 'upsert',
+      input: { nodeId: 7, contentChanged: true, observationChanged: true },
+    });
+    stop();
+  });
+
   it('invalidates image content routing when an ancestor lang changes', () => {
     const fixture = createFixture();
     const events: SourceImageObservationEvent[] = [];
@@ -788,7 +2896,7 @@ describe('SourceImageObserver', () => {
 
     expect(events.at(-1)).toMatchObject({
       kind: 'upsert',
-      input: { nodeId: 7, contentChanged: true },
+      input: { nodeId: 7, contentChanged: true, captureChanged: false },
     });
     stop();
   });
@@ -809,17 +2917,19 @@ describe('SourceImageObserver', () => {
     fixture.mutation.trigger([attributeRecord(fixture.image, 'alt')]);
     expect(events.at(-1)).toMatchObject({
       kind: 'upsert',
-      input: { nodeId: 7, contentChanged: true },
+      input: { nodeId: 7, contentChanged: true, captureChanged: false },
     });
     expect(model.get(7)?.contentRevision).toBe(2);
+    expect(model.get(7)?.captureRevision).toBe(1);
 
     fixture.image.setAttribute('aria-label', 'Updated announcement');
     fixture.mutation.trigger([attributeRecord(fixture.image, 'aria-label')]);
     expect(events.at(-1)).toMatchObject({
       kind: 'upsert',
-      input: { nodeId: 7, contentChanged: true },
+      input: { nodeId: 7, contentChanged: true, captureChanged: false },
     });
     expect(model.get(7)?.contentRevision).toBe(3);
+    expect(model.get(7)?.captureRevision).toBe(1);
     stop();
   });
 
@@ -861,11 +2971,20 @@ function createFixture(
     readonly useDefaultFrames?: boolean;
     readonly settleIntersectionsOnObserve?: boolean;
     readonly isPrivateImage?: (image: HTMLImageElement) => boolean;
+    readonly beforeRefreshAll?: () => void;
+    readonly beforeMutationRead?: (
+      records: readonly MutationRecord[],
+    ) => boolean | undefined;
+    readonly layoutSettleRequiresRefreshAll?: (target: Element) => boolean;
   } = {},
 ) {
   const { document } = parseHTML(
     `<html><head><base href="https://page.example/root/"></head><body><img id="main" src="https://private.example/original.png">${extraHtml}</body></html>`,
   );
+  Object.defineProperties(document.defaultView!, {
+    innerWidth: { configurable: true, value: 1024 },
+    innerHeight: { configurable: true, value: 768 },
+  });
   const image = document.querySelector<HTMLImageElement>('#main')!;
   const privateImage = document.querySelector<HTMLImageElement>('#private');
   const bounds = { left: 0, top: 0, width: 200, height: 100 };
@@ -877,6 +2996,7 @@ function createFixture(
   const resize = new FakeResizeObserver();
   const mutation = new FakeMutationObserver();
   const frames = new FakeFrameScheduler();
+  const timers = new FakeTimerScheduler();
   const observer = new SourceImageObserver({
     document: document as unknown as Document,
     documentIdentity,
@@ -900,11 +3020,22 @@ function createFixture(
     ...(options.isPrivateImage
       ? { isPrivateImage: options.isPrivateImage }
       : {}),
+    ...(options.beforeRefreshAll
+      ? { beforeRefreshAll: options.beforeRefreshAll }
+      : {}),
+    ...(options.beforeMutationRead
+      ? { beforeMutationRead: options.beforeMutationRead }
+      : {}),
+    ...(options.layoutSettleRequiresRefreshAll
+      ? { layoutSettleRequiresRefreshAll: options.layoutSettleRequiresRefreshAll }
+      : {}),
     ...(options.useDefaultFrames
       ? {}
       : {
           scheduleFrame: (callback: () => void) => frames.schedule(callback),
           cancelFrame: (frame: number) => frames.cancel(frame),
+          setTimer: (callback: () => void) => timers.schedule(callback),
+          clearTimer: (handle: unknown) => timers.cancel(handle as number),
         }),
     ...(options.maxImages === undefined
       ? {}
@@ -920,6 +3051,7 @@ function createFixture(
     resize,
     mutation,
     frames,
+    timers,
   };
 }
 
@@ -944,6 +3076,26 @@ function setImageMetrics(
         toJSON: () => undefined,
       }),
     },
+  });
+}
+
+function setElementBounds(
+  element: Element,
+  bounds: { left: number; top: number; width: number; height: number },
+): void {
+  Object.defineProperty(element, 'getBoundingClientRect', {
+    configurable: true,
+    value: () => ({
+      x: bounds.left,
+      y: bounds.top,
+      top: bounds.top,
+      left: bounds.left,
+      right: bounds.left + bounds.width,
+      bottom: bounds.top + bounds.height,
+      width: bounds.width,
+      height: bounds.height,
+      toJSON: () => undefined,
+    }),
   });
 }
 
@@ -1002,8 +3154,10 @@ class FakeMutationObserver {
   callback: (records: readonly MutationRecord[]) => void = () => undefined;
   disconnected = false;
   options: MutationObserverInit | undefined;
+  readonly targets: Node[] = [];
 
-  observe(_target: Node, options?: MutationObserverInit): void {
+  observe(target: Node, options?: MutationObserverInit): void {
+    this.targets.push(target);
     this.options = options;
   }
 
@@ -1039,6 +3193,54 @@ class FakeFrameScheduler {
     this.#callbacks.clear();
     for (const callback of callbacks) callback();
   }
+}
+
+class FakeTimerScheduler {
+  readonly #callbacks = new Map<number, () => void>();
+  #sequence = 0;
+
+  schedule(callback: () => void): number {
+    const handle = ++this.#sequence;
+    this.#callbacks.set(handle, callback);
+    return handle;
+  }
+
+  cancel(handle: number): void {
+    this.#callbacks.delete(handle);
+  }
+
+  run(): void {
+    const entry = this.#callbacks.entries().next().value as
+      | [number, () => void]
+      | undefined;
+    if (!entry) throw new Error('Expected a scheduled timer.');
+    this.#callbacks.delete(entry[0]);
+    entry[1]();
+  }
+}
+
+class FakeFontSettleTarget {
+  readonly #loadingDoneListeners = new Set<() => void>();
+
+  addEventListener(type: string, listener: () => void): void {
+    if (type === 'loadingdone') this.#loadingDoneListeners.add(listener);
+  }
+
+  removeEventListener(type: string, listener: () => void): void {
+    if (type === 'loadingdone') this.#loadingDoneListeners.delete(listener);
+  }
+
+  dispatchLoadingDone(): void {
+    for (const listener of [...this.#loadingDoneListeners]) listener();
+  }
+}
+
+function applyObservationEvent(
+  model: SourceImageModel,
+  event: SourceImageObservationEvent,
+): void {
+  if (event.kind === 'upsert') model.upsert(event.input);
+  else model.remove(event.document, event.nodeId);
 }
 
 function eventNodeId(event: SourceImageObservationEvent): number {

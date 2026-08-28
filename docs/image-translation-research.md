@@ -1,201 +1,135 @@
-# Image text translation research
+# Image text translation
 
-Checkpoint F now ships an opt-in local OCR path for stable visible top-frame
-`<img>` elements. This memo records the implemented boundary and the cloud or
-broader-source alternatives that remain deferred.
+Simul includes an opt-in, local image-text path for stable visible top-frame
+`<img>` elements. This document records the implemented privacy, capture,
+recognition, quality, and projection boundaries.
 
-## Implemented local paths
+## Production methods
 
-An ordinary unflagged source build exposes two independently compiled local
-OCR providers in a saved priority order. The checked-in ready-to-load trial in
-`dist/chrome-unpacked` instead uses the exact four-provider profile described
-below. Chrome's experimental `TextDetector` is capability-probed in the
-offscreen document and used only when the installed browser exposes it. A
-packaged Tesseract.js provider is the deterministic fallback and does not
-depend on that platform API. An unchanged empty
-detection must be confirmed by a second OCR pass before it is cached. A
-TextDetector result that supplies boxes without authoritative text can pass
-those regions to another provider instead of ending the scan.
+All image-reading methods share one persisted priority list:
 
-An additional source-build-optional PaddleOCR.js trial is available behind
-`SIMUL_OCR_PADDLE=1`. It uses the official `@paddleocr/paddleocr-js` 0.4.2
-module Worker, ONNX Runtime Web 1.24.3, and the official
-`PP-OCRv6_tiny_det`/`PP-OCRv6_tiny_rec` model archives. The Worker, Wasm,
-models, configuration, licenses, and notices are all packaged locally. The
-trial runs with one Wasm thread and fixed detector thresholds of 0.45 and
-0.75. Cancellation or a 30-second job deadline terminates the Worker instead
-of leaving CPU-bound inference in the offscreen document.
+1. **Accessibility text** reads a direct image `aria-label` or `alt` value after
+   read-scope, visibility, decoration, credential, and policy checks. It needs
+   no screenshot and projects one inert whole-image label.
+2. **Chrome TextDetector** uses the platform API only when the installed Chrome
+   build exposes it. Some platforms return geometry without authoritative text;
+   that evidence may fall through to another method.
+3. **Tesseract.js 7.0.0** is the packaged deterministic pixel-OCR fallback.
+   Its Worker, three WebAssembly core loaders, language files, hashes, licenses,
+   and notices are included in the extension.
 
-For local comparison, an exact four-provider artifact also includes
-`tesseract-wasm` 0.11.0 as **Tesseract WASM (direct A/B)**. Its BSD-2-Clause
-browser binding and packaged Wasm runtime reuse the same Apache-2.0
-`tessdata_fast` models as Tesseract.js. This is a runtime comparison, not an
-independent OCR signal: Simul assigns both bindings to the same corroboration
-family, so agreement between them can never promote uncertain text.
+Image translation is off by default. Turning every pixel method off pauses OCR
+before capture. No JavaScript, Worker, WebAssembly binary, model, image pixel,
+or recognized text is loaded from or sent to a remote OCR service.
 
-[Tesseract.js](https://github.com/naptha/tesseract.js) runs Tesseract OCR in
-WebAssembly and exposes word/line/block geometry. The extension bundles the
-JavaScript, Worker, Wasm core loaders, and trained data locally. Its default CDN paths cannot be
-used: Manifest V3 disallows remotely hosted executable code, offline behavior
-would be unreliable, and the project documents how to configure local worker,
-core, and language paths in its
-[local-installation guide](https://github.com/naptha/tesseract.js/blob/master/docs/local-installation.md).
-The official Tesseract data repository includes a
-[Japanese trained model](https://github.com/tesseract-ocr/tessdata/blob/main/jpn.traineddata)
-and a separate vertical-Japanese model (`jpn_vert`).
+The pinned `tessdata_fast` catalog covers English, Spanish, French, German,
+Portuguese, Italian, Vietnamese, horizontal and vertical Japanese, Korean,
+Simplified and Traditional Chinese, Russian, Ukrainian, Arabic, Hebrew, Hindi,
+Marathi, Bengali, Kannada, Tamil, and Telugu. Only the routed language group is
+loaded into memory.
 
-The current pipeline:
+## End-to-end boundary
 
-1. Remains fully dormant until the saved image-translation option is enabled.
-2. Observes `<img>` revisions without disclosing image URLs or page text.
-3. Walks one saved priority list beginning with direct image accessibility
-   text by default. `aria-label`/`alt` evidence can translate without pixels;
-   missing, blocked, untranslated, or disabled semantic evidence falls through.
-4. Only when an OCR group is reached, captures a stable visible viewport crop
-   below Chrome's two-per-second cap, proportionally downscales high-DPI crops
-   to at most 4 MP, and hashes the encoded crop.
-5. Tries contiguous enabled OCR providers as one evidence-sharing group in an
-   offscreen document. The trial
-   defaults to PaddleOCR.js, Chrome TextDetector, Tesseract.js, then direct
-   Tesseract Wasm. Every compiled provider remains visible in Options with an
-   independent on/off control and reorder buttons. Turning all providers off
-   pauses OCR without starting capture or a retry loop.
-6. Filters blank, punctuation-only, and regions scored below 0.25. Scored
-   regions at or above the saved confidence threshold are authoritative.
-   Confidence-free or intermediate-score regions require exact NFKC/
-   whitespace-normalized text agreement and bounding-box IoU of at least 0.5
-   from a different provider before translation.
-7. Keeps recognition and line translation caches separate. Recognition uses
-   provider/model order, language, quality-policy version, selected confidence
-   threshold, preprocessing profile, processed dimensions, and pixel hash;
-   line translation uses the exact provider, language pair, and recognized
-   text. Neither cache uses a DOM node or document identity, and
-   matching in-flight requests join one provider load. Recognition retention is
-   bounded by both entry count and aggregate transcript/region weight.
-8. Maps the visible-crop coordinates onto clipped inert sibling overlays that
-   follow replay scroll and zoom without changing the image or page layout.
-   Text wraps and uses bounded font downscaling inside each recognized box.
-   A same-node, same-lease replica image replacement rebinds the existing
-   overlay instead of discarding translated work.
-9. Stops explicit same-language configurations before image capture. With
-   Auto-detect, it resolves the nearest image/element or page language after
-   capture metadata is available and stops before recognition when it equals
-   the target, preserving the original image. If the page remains unresolved,
-   a memory-only probe covers at most three eligible source images, six
-   representative language routes per image, 18 routes total, and 20 seconds.
-   Japanese is in every image window; every other packaged representative route is covered
-   within the total budget. A single high-confidence dominant script or
-   corroboration across distinct source images can establish page evidence and requeue
-   the current eligible image set. Explicit and nearest-element language still
-   win. Pixel revisions of one source image remain one sample, and no
-   transcript, URL, pixel hash, or node identifier enters logs.
+1. A source Port observes eligible image revisions using the isolated engine's
+   private node ID. Scheduling descriptors contain no page URL, image URL,
+   text, pixel, or hash.
+2. Accessibility text is tried first by default. Decorative, hidden, zero-area,
+   filename-like, private, and secret-overlapping evidence is rejected.
+3. Pixel OCR is admitted only for a visible stable crop. Simul compares the
+   exact document, revision, scroll position, bounds, and image geometry before
+   and after capture.
+4. `tabs.captureVisibleTab` is limited to two calls per second. The relevant
+   crop is proportionally downscaled when necessary so recognition never
+   receives more than 4 megapixels.
+5. A short-lived crop is handed to the offscreen extension document through
+   extension-origin storage. The entry is deleted after the job and expires
+   after two minutes if normal cleanup is interrupted.
+6. Enabled pixel methods run in saved order through a capacity-one scheduler.
+   Provider-specific unavailability falls through without starting an
+   unbounded retry loop.
+7. Accepted regions are translated with the same local Chrome Translator
+   boundary as page text and projected as clipped, inert sibling overlays in
+   the replica.
+8. Before commit, the document, image revision, pixel key, language-pair epoch,
+   replay lease, replica anchor, and normalized geometry must still match.
 
-The pinned catalog includes English, Spanish, French, German, Portuguese,
-Italian, Vietnamese, Japanese plus vertical Japanese, Korean, Simplified and
-Traditional Chinese, Russian, Ukrainian, Arabic, Hebrew, Hindi, Marathi,
-Bengali, Kannada, Tamil, and Telugu. Models not routed for the current image
-remain stored locally and unloaded from memory.
+Images inside native or ARIA controls require the independent control-images
+read-scope switch and are rechecked immediately before and after capture.
+Password and credential overlap blocks pixel access under every profile.
+Positive-area accessibility labels are not blocked by the pixel-OCR small-image
+setting.
 
-The options screen exposes the minimum confidence as 25–95% in five-point
-steps, defaulting to 65%. Raising it favors precision and suppresses more
-false-positive text; lowering it favors recall. Changing it clears current
-image projections and reprocesses the current image set under a distinct cache
-identity. The Paddle trial supports Latin-script and Chinese language routes;
-an unsupported route fails that provider cleanly. Empty, failed, or uncertain
-Paddle output continues to later enabled providers. Geometry and raw candidate
-evidence remain available within the contiguous group so a truly independent
-family can corroborate it; if translating one accepted candidate fails, the
-coordinator resumes at the next provider without discarding that evidence.
+## Language routing
 
-Chrome TextDetector remains platform-dependent. Chromium's macOS adapter may
-return geometry without decoded text, so Simul labels it as a platform
-provider and falls through instead of treating that outcome as authoritative.
+The source route is chosen from the nearest valid element language, an explicit
+**From** choice, then detected page or bounded image-probe evidence. Explicit
+same-language pairs stop before capture. Auto-detected work stops before
+recognition when its resolved language equals **To**.
 
-Build and validate the isolated local trial with:
+On a text-light page, the memory-only probe considers at most three eligible
+images, six representative routes per image, 18 routes total, and 20 seconds.
+One high-confidence dominant script or corroboration across distinct images can
+establish page evidence. Pixel revisions of the same image are not independent
+samples. Probe transcripts and identifiers never enter logs.
 
-```sh
-SIMUL_OCR_TEXT_DETECTOR=0 SIMUL_OCR_TESSERACT=0 SIMUL_OCR_PADDLE=1 npm run build
-npm run check:ocr-paddle-trial
-npm run check:ocr-all-trial
-```
+Tesseract loads `jpn+jpn_vert` for Japanese. Unsupported language routes fail
+cleanly and leave the source image unchanged.
 
-The second command always creates a temporary Paddle-only production artifact,
-validates every reviewed byte/hash and the local-only runtime boundary, checks
-that no Tesseract assets leaked into it, and removes the temporary artifact.
-The ordinary unflagged `.output` build remains Paddle-free. The checked-in
-`dist/chrome-unpacked` artifact is intentionally generated with the exact
-four-provider trial profile so every reviewed provider is available for local
-switching and priority tests.
-`check:ocr-all-trial` builds the closed four-provider profile in a temporary
-directory and permits its accepted 72 MiB ceiling only when the detected
-provider set is exactly PaddleOCR, TextDetector, Tesseract.js, and direct
-Tesseract Wasm. `npm run artifact:sync:ocr-trials` applies the same validation
-before atomically replacing only `dist/chrome-unpacked` for local Chrome
-testing. The ordinary sync/check path retains the production 42 MiB ceiling.
+## Quality and caching
 
-Cross-origin images can be displayed by the mirror but normally taint a canvas,
-so display permission alone does not provide OCR pixels. The implemented path
-uses `tabs.captureVisibleTab` and can capture only the visible viewport (Chrome
-documents both the sensitive-page behavior and a
-[maximum of two calls per second](https://developer.chrome.com/docs/extensions/reference/api/tabs#method-captureVisibleTab)).
-Chrome accepts that API after a toolbar gesture through `activeTab`, or across
-later origin changes through a literal `<all_urls>` host grant. Simul therefore
-keeps the grant optional, requests it only from an explicit image-translation
-or all-sites-automation gesture, shares it between those two owners, and keeps
-saved OCR intent paused when access is absent or revoked. The grant
-authorizes pixel capture; Simul still does not retrieve the source image URL.
-Requesting narrowly scoped optional access to an image host and fetching the
-resource remains deferred. That alternative needs separate consent,
-animation/crop handling, and new tests before implementation.
+Provider-neutral filtering rejects blank, punctuation-only, and regions below
+25% confidence. The saved minimum confidence is adjustable from 25–95% in
+five-point steps and defaults to 65%. Confidence-free or intermediate-score
+regions require matching normalized text and overlapping geometry from an
+independent recognition family before they can be promoted.
 
-Expected limitations include a multi-megabyte model payload, worker startup
-time, memory pressure, stylized or low-resolution lettering, furigana, text
-over complex backgrounds, vertical ordering, and translations that remain
-unreadable after bounded in-box wrapping and font reduction.
+Recognition and line-translation caches are separate, bounded, and memory-only.
+Recognition identity includes the ordered provider/model route, source
+language, quality-policy version, confidence threshold, preprocessing profile,
+processed dimensions, and SHA-256 pixel key. It deliberately excludes DOM node,
+document, and image URL identity. Identical in-flight work joins one provider
+load; an oversized result may be returned for the current job but is not kept.
 
-OCR Diagnostics correlates one attempt with an ephemeral ordinal and reports
-only rendered/bitmap dimensions, bounded retry decisions, provider/cache
-hit/miss/join/load outcomes, accepted/corroborated/uncertain/rejected region
-counts, and
-projection/rebinding outcomes. It never reports URLs, pixel hashes, recognized
-text, or node/document identifiers. A first transient capture failure receives
-at most one immediate retry. Changing blank pixels are deferred instead of
-being permanently cached as “no text.” A repeated image URL is deliberately
-not sufficient for reuse: identical processed pixels and geometry inputs hit
-the cache, while a new responsive size, crop, or animation frame is recognized
-again so overlay coordinates remain valid.
+An unchanged empty recognition result must occur twice before it is cached. A
+first transient capture failure receives at most one immediate retry. A
+responsive resize, crop, or animation frame is recognized again when the
+processed pixels or geometry inputs differ, even if the image URL is unchanged.
 
-## Cloud alternative
+## Permissions and local assets
 
-Google Cloud Vision's `TEXT_DETECTION` and `DOCUMENT_TEXT_DETECTION` return OCR
-annotations with bounding polygons; see the official
-[OCR documentation](https://cloud.google.com/vision/docs/ocr). Its current
-[pricing page](https://cloud.google.com/vision/pricing) lists the first 1,000
-units per feature each month at no charge and paid usage after that. Billing
-configuration is still required, Cloud Translation is billed separately, and
-prices/allowances can change.
+Cross-origin images can render while still preventing ordinary canvas reads.
+Simul therefore captures the visible tab rather than fetching the image URL.
+Chrome permits that after a toolbar gesture through `activeTab`; continued
+capture after temporary access expires requires the optional literal
+`<all_urls>` host grant.
 
-Cloud OCR must use a key-protecting backend. Credentials must never be bundled
-in the extension. It would also send user image pixels off-device, so it
-requires explicit product approval, consent UI, retention/logging policy,
-regional review, rate limiting, and abuse controls. A browser-side “free API”
-key is not a safe design.
+The grant is shared with all-sites automatic translation, requested only from
+an explicit user gesture, and removed after both owners are disabled. Saved OCR
+intent remains paused when access is absent or revoked; no prompt appears at
+startup.
 
-## Remaining increments
+The complete packaged attribution and license set is described in
+[`THIRD_PARTY_NOTICES.md`](../THIRD_PARTY_NOTICES.md). Tesseract.js,
+tesseract.js-core, and the selected language models are Apache-2.0; compiled
+core dependencies retain their own permissive notices.
 
-Provider screening excluded OCRAD/OCRAD.js and Scribe.js because their GPL or
-AGPL terms do not fit this extension's publishing boundary. `ocrs` has a
-permissive runtime but its reviewed pretrained models are CC-BY-SA, so it is
-not packaged. Browser Transformer OCR candidates were also deferred: the
-reviewed models were either very large, lacked an explicit redistributable
-model license, or returned generative text without calibrated region
-confidence and reliable blank rejection. No candidate may add remotely hosted
-JavaScript, Worker, or Wasm code under Manifest V3.
+## Diagnostics and limitations
 
-Evaluate accuracy and overlay readability on representative non-sensitive
-images across the packaged scripts. Image-only language classification,
-low-confidence styling, CSS backgrounds, canvas/video, embedded frames, and
-direct image fetch each require a separate design and privacy decision. Compare
-a backend Vision prototype only with explicit remote-processing approval. Do
-not add credentials, host permissions, durable captures, or cloud traffic as an
-incidental fidelity fix.
+OCR diagnostics identify attempts with ephemeral ordinals and report safe
+dimensions, bounded retry choices, method/cache outcomes, region counts, and
+projection results. They do not report URLs, pixel hashes, recognized text,
+page text, or node/document identifiers.
+
+Expected limits include model and Worker startup cost, memory pressure,
+stylized or low-resolution lettering, complex backgrounds, furigana, vertical
+ordering, and translations that cannot fit after bounded wrapping and font
+reduction. Supported input is currently limited to stable visible top-frame
+images; CSS backgrounds, canvas, video, embedded frames, hidden images, and
+direct image fetching remain out of scope.
+
+Any future cloud OCR path would require an explicit product decision, a
+credential-protecting backend, consent and retention policy, regional and
+security review, abuse controls, new permissions, and disclosure that pixels
+leave the device. Credentials must never be bundled in the extension. Any new
+local runtime or model must be pinned, hash-validated, locally packaged,
+license-reviewed, and covered by the normal artifact gate before it can ship.

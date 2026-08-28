@@ -6,8 +6,10 @@ The canonical renderer converts the current page into a privacy-sanitized,
 typed DOM graph in Chrome's isolated world. It reconstructs that graph in a
 same-origin-only, inert, scriptless sandbox. Ordered patches are validated
 before application; gaps recover through a staged checkpoint and atomic swap
-while the last good replica stays visible. rrweb remains an explicitly
-selectable experimental renderer, never an automatic fallback.
+while the last good replica stays visible. Isolated HTML is the only renderer.
+An initial failure stays local and retryable; after a
+commit, one bounded recovery keeps the last-good replica visible and a repeated
+failure surfaces without changing engines.
 
 Source scroll messages are animation-frame throttled and one-way. Standards
 and body/document scroll fallbacks are normalized before transport. When a
@@ -22,12 +24,10 @@ replica extent refresh rather than the document range. A changed document
 offset immediately returns ownership to the document; removal, loss of
 scrollability, and range shrink clear or clamp a stale nested owner.
 
-The scroll observer is a locally bundled unlisted extension script, not a
-serialized callback with missing imported dependencies. A tiny closure-free
-invoker starts that bundle, and its implementation revision disconnects and
-replaces an incompatible registry left in an already-open tab. Content-free
-`[Simul scroll]` entries distinguish observer installation, accepted source
-messages, and projection without logging coordinates, URLs, or page content.
+Scroll is carried by the locally bundled `page-mirror` stream that already owns
+the exact-document checkpoint and patch transport. The source coalesces real
+scroll events once per animation frame, and the typed receiver ignores invalid
+or stale identities without logging coordinates, URLs, or page content.
 
 The most recent source position is retained even when it arrives before a
 staged replica commits, then applied as soon as that replica becomes visible.
@@ -37,11 +37,10 @@ offsets for faithful document scroll and proportional offsets when adaptive
 translations or nested layouts change the available range. No mirror
 interaction is sent back to the website.
 
-This restores the direct document-coordinate behavior used by 0.2.3 while
-retaining the later, event-qualified nested-scroll support. A temporary legacy
-build is not required to select that path.
+This retains direct document coordinates together with event-qualified
+nested-scroll support in the sole isolated transport.
 
-Full capture is not scheduled periodically. It is used for initial bootstrap,
+Full checkpoint capture is not scheduled periodically. It is used for initial bootstrap,
 navigation, a manual rebuild, or bounded recovery. Exact document identity,
 sequence, source revision, translation epoch/pair, and replay lease checks
 discard stale asynchronous work.
@@ -63,6 +62,9 @@ corroborating sample. The
 result is memory-only page evidence, never a saved From choice, and explicit or
 nearest-element language remains authoritative. An equal resolved pair is an
 explicit no-op.
+
+The visible sample is built lazily from bounded, sanitized isolated-replica
+text records; no second page snapshot or renderer is involved.
 
 Chrome 138 exposes Translator pair availability and session creation but does
 not expose language enumeration. Simul therefore shows Chrome's documented
@@ -113,7 +115,7 @@ and result only in the current companion window, and stays disabled with
 guidance until Auto-detect resolves the website language. Settings and quick
 translation are mutually exclusive overlays below the toolbar. The toolbar
 background presents determinate page-translation progress or indeterminate
-capture, live-update, permission, quick-translation, image-analysis, and
+capture, permission, quick-translation, image-analysis, and
 surface-transition activity without intercepting pointer input. Reduced-motion
 preferences disable decorative progress animation.
 
@@ -146,9 +148,9 @@ Simul-managed optional origins; interrupted permission cleanup is retryable.
 ## Local image text
 
 When explicitly enabled, an exact-document source Port observes top-frame
-`<img>` elements by the selected engine's private node ID without emitting
-their URL or text. One saved priority list contains direct accessibility text
-and every compiled OCR provider. The accessibility method lazily reads only a
+`<img>` elements by the isolated engine's private node ID without emitting
+their URL or text. One saved priority list contains direct accessibility text,
+Chrome TextDetector, and packaged Tesseract.js. The accessibility method lazily reads only a
 direct image `aria-label` or `alt`, after policy and credential checks, and can
 translate/project it as one inert whole-image label without screenshot access.
 Decorative, hidden, zero-area, filename/URL-like, or secret-overlapping evidence
@@ -166,15 +168,11 @@ before OCR so the processed bitmap never exceeds 4 MP; the CSS crop geometry
 is retained for overlay placement.
 
 The offscreen extension page reads a short-lived crop from extension-origin
-storage and runs packaged Tesseract.js 7.0.0 locally. The ready-to-load
-four-provider test profile also packages direct `tesseract-wasm` 0.11.0 and a
-source-build-optional, independently compiled PaddleOCR.js 0.4.2 trial with
-its module Worker, ONNX
-Runtime Web 1.24.3 Wasm, and PP-OCRv6 tiny models; Chrome TextDetector remains
-a platform-dependent browser provider. The routed language is chosen from
-nearest valid element `lang`, explicit From, then detected page or bounded
-image-probe evidence. Wrapper Tesseract loads `jpn+jpn_vert` for Japanese,
-while the direct runtime loads its supported `jpn` model. Recognition uses a
+storage. Chrome TextDetector is tried only when the platform exposes it;
+packaged Tesseract.js 7.0.0 provides the deterministic local fallback. The
+routed language is chosen from nearest valid element `lang`, explicit From,
+then detected page or bounded image-probe evidence. Tesseract loads
+`jpn+jpn_vert` for Japanese. Recognition uses a
 bounded memory-only content cache keyed by the ordered provider/runtime/model
 route, source language,
 quality-policy version, selected confidence threshold, preprocessing profile,
@@ -204,6 +202,9 @@ and uses bounded font-size reduction within the recognized box instead of
 forcing a single clipped line. Document, content revision, SHA-256 pixel key,
 replay lease, pair epoch, replica image, and normalized geometry must still
 match at commit and on refresh.
+Overlay entries retain a bounded aggregate DOM/text weight. A cached layout
+size lets stable scroll frames update currentness and position without
+remapping regions or rerunning bounded font fitting.
 
 ## Rendering and privacy
 
@@ -212,20 +213,20 @@ The source viewport width remains the layout containing block; the captured
 document width drives horizontal overflow. Fit computes a scale no greater
 than one, while custom zoom is clamped to 25–300%.
 
-Both engines keep optional labels, accessibility attributes, values, checked or
-selected state, and disclosure relationships out of their base streams. A
+The isolated base stream keeps optional labels, accessibility attributes,
+values, checked or selected state, and disclosure relationships out. A
 separate exact-document semantic channel admits only the capabilities selected
 in the live readable-content scope. Standard can add translated public control
 and option labels, disabled semantics, native select shape, and validated
 disclosure content; ordinary/personal values, selected or checked state, and
-editable text require their respective broader switches. rrweb keeps
-`maskAllInputs` and contenteditable masking enabled underneath this supplement.
+editable text require their respective broader switches. Source secret
+classification remains authoritative underneath this supplement.
 
 A public single-row select becomes a companion-owned trigger whose top-layer,
 internally scrolling list escapes source clipping, stays within the replica
 viewport, and repositions on scroll or resize. `multiple` and authored
 `size>1` controls remain bounded inline lists. The same presenter is used by
-both rrweb and Isolated HTML, and may also preview a custom public menu/listbox
+Isolated HTML, and may also preview a custom public menu/listbox
 only when a typed proof names one unique same-document `aria-controls` target
 with matching semantics. Missing, duplicate, stale, private, editable, or
 forged mappings remain static and inert. Local preview events change only
@@ -245,7 +246,7 @@ removes height and clipping constraints from containers holding translated
 text; faithful layout retains geometry but never silently ellipsizes translated
 content.
 
-The extension transports no raw source HTML. Both bootstrap and delta
+The extension transports no raw source HTML. Checkpoint, patch, and semantic
 boundaries allowlist tags, style properties, attributes, image schemes, and the
 narrow typed semantic records above. Scripts, handlers, navigation semantics,
 raw `value` attributes, credential secrets, and cross-origin frame content
@@ -400,9 +401,9 @@ the option. Confirm stale overlays
 disappear, same-language images stay unchanged, and page text translation stays
 responsive.
 
-For the isolated Paddle trial, run `npm run check:ocr-paddle-trial`. Confirm
-the temporary artifact contains `ocr/paddle/` but no `ocr/tesseract/`, remains
-under the 42 MiB unpacked limit, and makes no network request during OCR.
+Run `npm run artifact:check` and confirm the ready-to-load artifact remains
+under the 42 MiB unpacked limit, contains the pinned Tesseract catalog and
+notices, and has no remote OCR runtime or model references.
 
 The manifest must retain Chrome 138, required permissions `activeTab`,
 `scripting`, `sidePanel`, `storage`, and `offscreen`, no required host

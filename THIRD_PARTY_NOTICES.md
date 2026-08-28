@@ -14,24 +14,13 @@ their own packages. Generated BMAD Method files are covered separately below.
 
 | Components | Version | License |
 | --- | --- | --- |
-| `rrweb`, `@rrweb/record`, `@rrweb/replay`, `@rrweb/types`, `@rrweb/utils`, `rrdom`, `rrweb-snapshot` | 2.1.0 | MIT |
-| `@types/css-font-loading-module` | 0.0.7 | MIT |
-| `@xstate/fsm` | 1.6.5 | MIT |
-| `base64-arraybuffer` | 1.0.2 | MIT |
 | `bmp-js` | 0.1.0 | MIT |
 | `idb-keyval` | 6.3.0 | Apache-2.0 |
 | `is-url` | 1.2.4 | MIT |
-| `mitt` | 3.0.1 | MIT |
-| `nanoid` | 3.3.16 | MIT |
 | `node-fetch` | 2.7.0 | MIT |
 | `opencollective-postinstall` | 2.0.3 | MIT |
-| `picocolors` | 1.1.1 | ISC |
-| `postcss` | 8.5.19 | MIT |
 | `regenerator-runtime` | 0.13.11 | MIT |
-| `source-map-js` | 1.2.1 | BSD-3-Clause |
 | `tesseract.js`, `tesseract.js-core` | 7.0.0 | Apache-2.0 |
-| `tesseract-wasm` | 0.11.0 | BSD-2-Clause |
-| `comlink` | 4.4.2 | Apache-2.0 |
 | `tr46` | 0.0.3 | MIT |
 | `wasm-feature-detect` | 1.8.0 | Apache-2.0 |
 | `webidl-conversions` | 3.0.1 | BSD-2-Clause |
@@ -39,24 +28,17 @@ their own packages. Generated BMAD Method files are covered separately below.
 | `zlibjs` | 0.3.1 | MIT |
 | selected `tessdata_fast` language models | commit `87416418657359cb625c412a48b6e1d6d41c29bd` | Apache-2.0 |
 
-`@types/css-font-loading-module` and `opencollective-postinstall` are present
-in the locked production dependency graph but are not expected to contribute
-executable code to the browser bundle. They are listed conservatively.
+`opencollective-postinstall` is present in the locked production dependency
+graph but is not expected to contribute executable code to the browser bundle.
+It is listed conservatively.
 
 ## MIT-licensed material
 
 Copyright notices retained for MIT-licensed material:
 
-- rrweb family: Copyright (c) 2018 rrweb contributors.
-- `@types/css-font-loading-module`: Copyright (c) Microsoft Corporation.
-- `@xstate/fsm`: Copyright (c) 2015 David Khourshid.
-- `base64-arraybuffer`: Copyright (c) 2012 Niklas von Hertzen.
 - `bmp-js`: Copyright (c) 2014 @丝刀口.
-- `mitt`: Copyright (c) 2021 Jason Miller.
-- `nanoid`: Copyright 2017 Andrey Sitnik.
 - `node-fetch`: Copyright (c) 2016 David Frank.
 - `opencollective-postinstall`: Copyright (c) 2018 Open Collective.
-- `postcss`: Copyright 2013 Andrey Sitnik.
 - `regenerator-runtime`: Copyright (c) 2014-present, Facebook, Inc.
 - `tr46`: Copyright (c) Sebastian Mayr.
 - `whatwg-url`: Copyright (c) 2015–2016 Sebastian Mayr.
@@ -100,63 +82,10 @@ The published `wasm-feature-detect` package contains no separate NOTICE file.
 The Tesseract packages and models contain no separate NOTICE file beyond the
 files retained in the vendored license directory.
 
-## PaddleOCR.js local trial (ready-to-load four-provider profile)
-
-The checked-in ready-to-load four-provider profile, and any source build made
-with `SIMUL_OCR_PADDLE=1`, contains
-`@paddleocr/paddleocr-js` 0.4.2 at npm git head
-`e5046169b225bcdfbe25d45b4e809ff0f1a69c2c` (Apache-2.0), the official
-PP-OCRv6 tiny model archives (Apache-2.0),
-`onnxruntime-web`/`onnxruntime-common` 1.24.3 (MIT),
-`@techstark/opencv-js` 4.10.0-release.1 (Apache-2.0), `clipper-lib` 6.4.2
-(Boost-1.0), and the SDK Worker's embedded `js-yaml` 4.1.1 (MIT). The
-repository lock separately resolves `js-yaml` to 4.3.0. These components are
-excluded only from the ordinary unflagged Paddle-free `.output` build; they are
-included in `dist/chrome-unpacked` for the reviewed OCR trial.
-
-The reviewed trial notice and complete packaged license set are retained at
-`legal/paddleocr-js-v0.4.2-third-party-notices.md` and
-`vendor/ocr/paddle/licenses/`. In a Paddle-enabled artifact they appear
-under `ocr/paddle/`. The vendored Worker's unused remote defaults are replaced
-with fail-closed local sentinels; models, Wasm, configuration, and executable
-code are loaded only from the extension package.
-
-## Optional direct Tesseract-Wasm A/B trial
-
-The exact four-provider local trial additionally packages `tesseract-wasm`
-0.11.0 (BSD-2-Clause) and its Comlink 4.4.2 transport (Apache-2.0). The binding
-uses a Tesseract OCR core (Apache-2.0) and Leptonica (BSD-2-Clause), and reuses
-the reviewed Apache-2.0 `tessdata_fast` catalog already listed above. Exact
-commit provenance, hashes, and complete license texts are retained under
-`vendor/ocr/tesseract-wasm/` in source and `ocr/tesseract-wasm/` in the local
-trial artifact. JavaScript, Worker, Wasm, and models are all packaged locally.
-
-Direct Tesseract-Wasm is labeled as a runtime A/B comparison. It belongs to
-the same recognition family as Tesseract.js and cannot independently
-corroborate Tesseract.js output.
-
-## ISC-licensed material
-
-`picocolors` is Copyright (c) 2021-2024 Oleksii Raspopov, Kostiantyn
-Denysov, Anton Verinov.
-
-Permission to use, copy, modify, and/or distribute this software for any
-purpose with or without fee is hereby granted, provided that the above
-copyright notice and this permission notice appear in all copies.
-
-THE SOFTWARE IS PROVIDED "AS IS" AND THE AUTHOR DISCLAIMS ALL WARRANTIES WITH
-REGARD TO THIS SOFTWARE INCLUDING ALL IMPLIED WARRANTIES OF MERCHANTABILITY
-AND FITNESS. IN NO EVENT SHALL THE AUTHOR BE LIABLE FOR ANY SPECIAL, DIRECT,
-INDIRECT, OR CONSEQUENTIAL DAMAGES OR ANY DAMAGES WHATSOEVER RESULTING FROM
-LOSS OF USE, DATA OR PROFITS, WHETHER IN AN ACTION OF CONTRACT, NEGLIGENCE OR
-OTHER TORTIOUS ACTION, ARISING OUT OF OR IN CONNECTION WITH THE USE OR
-PERFORMANCE OF THIS SOFTWARE.
-
 ## BSD-3-Clause material
 
-`source-map-js` is Copyright (c) 2009-2011, Mozilla Foundation and
-contributors. The Tesseract Worker also incorporates `ieee754`, attributed to
-Feross Aboukhadijeh under BSD-3-Clause terms.
+The Tesseract Worker incorporates `ieee754`, attributed to Feross
+Aboukhadijeh under BSD-3-Clause terms.
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:
@@ -226,6 +155,26 @@ ready-to-load extension. The canonical reviewed source is
 
 As required by the Independent JPEG Group terms: this software is based in
 part on the work of the Independent JPEG Group.
+
+## Development dependency audit
+
+The npm lockfile was reviewed separately from the production inventory above.
+The development graph uses MIT, Apache-2.0, BSD, ISC, 0BSD, BlueOak-1.0.0,
+MPL-2.0, Zlib, CC0, and packages offering a permissive license choice. The
+MPL-2.0 packages (`fx-runner`, `lightningcss` platform packages, and `web-ext`)
+are development/build tools and are not shipped in `dist/chrome-unpacked`.
+Their files remain under MPL-2.0 and are not relicensed as Simul code.
+
+Multi-licensed development packages are used under their permissive choices:
+`node-forge` under BSD-3-Clause, `jszip` under MIT, `rc` under its
+BSD-2-Clause/MIT/Apache-2.0 choices, and `type-fest` under MIT. `pako` retains
+both its MIT and Zlib terms. The locked production dependency graph contains no
+GPL-only, AGPL, or proprietary package.
+
+Development packages are fetched by contributors and retain the license files
+published in their npm packages. `node_modules` is not committed or included in
+the extension artifact. Generated or bundled third-party code remains governed
+by its upstream terms even when the surrounding original Simul code is MIT.
 
 ## Source-distribution tooling
 

@@ -10,7 +10,7 @@ import type {
 export type ReplicaProjectionSurface =
   ReplicaTranslationSurface & ReplicaImageSurface;
 
-/** Routes derived translation/OCR work only to the currently selected engine. */
+/** Routes derived translation/OCR work only to the active replica surface. */
 export class ReplicaSurfaceRouter
   implements ReplicaTranslationSurface, ReplicaImageSurface {
   #surface: ReplicaProjectionSurface | undefined;

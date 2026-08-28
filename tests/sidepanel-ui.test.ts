@@ -142,6 +142,25 @@ describe('sidepanel UI structure', () => {
     expect(probeSource).toContain('resetEpoch: preferences.resetRevision');
   });
 
+  it('does not block the first mirror on optional OCR readiness probes', () => {
+    const initializeStart = script.indexOf('async function initialize()');
+    const initializeEnd = script.indexOf(
+      '\nasync function initializeSourcePage()',
+      initializeStart,
+    );
+    const initializeSource = script.slice(initializeStart, initializeEnd);
+
+    expect(initializeStart).toBeGreaterThanOrEqual(0);
+    expect(initializeSource).toContain(
+      'startBestEffortBackgroundTasks([',
+    );
+    expect(initializeSource).toContain('initializeSourcePage(),');
+    expect(initializeSource).not.toContain(
+      'await Promise.all([\n    refreshImageCaptureAccess()',
+    );
+    expect(initializeSource).not.toContain('await optionalReadiness;');
+  });
+
   it('binds ordinary image-option writes to the current settings revision', () => {
     const commitStart = script.indexOf(
       'async function commitImageAnalysisPreferencePatch',
@@ -188,7 +207,7 @@ describe('sidepanel UI structure', () => {
     expect(script).toContain("sourceLanguage: 'en'");
   });
 
-  it('places common controls before engine and OCR experiments', () => {
+  it('places common controls before OCR experiments', () => {
     const { document } = parseHTML(markup);
     const experimental = document.querySelector('#experimental-options');
 
@@ -196,7 +215,7 @@ describe('sidepanel UI structure', () => {
     expect(document.querySelector('#settings-grid #sync-scroll')).not.toBeNull();
     expect(document.querySelector('#settings-grid #replica-fidelity-policy'))
       .not.toBeNull();
-    expect(experimental?.querySelector('#replica-engine')).not.toBeNull();
+    expect(document.querySelector('#replica-engine')).toBeNull();
     expect(experimental?.querySelector('#replica-view-mode')).not.toBeNull();
     expect(experimental?.querySelector('#image-analysis-host')).not.toBeNull();
     expect(markup.indexOf('id="settings-grid"'))
@@ -226,27 +245,22 @@ describe('sidepanel UI structure', () => {
     expect(script).toContain('disabledImageReadingMethodIds: preferences.imageReadingMethodOrder');
     expect(script).toContain("return 'Accessibility text (aria-label / alt)'");
     expect(script).toContain("status.textContent = 'No pixels'");
-    expect(script).toContain("'paddleocr-wasm': 'PaddleOCR Wasm'");
     expect(script).toContain(
       "'chrome-text-detector': 'Chrome TextDetector (platform)'",
     );
-    expect(script).toContain("tesseract: 'Tesseract.js (wrapper A/B)'");
-    expect(script).toContain("'tesseract-wasm-direct': 'Tesseract Wasm (direct A/B)'");
-    expect(DEFAULT_COMPANION_PREFERENCES.imageReadingMethodOrder.slice(0, 5))
+    expect(script).toContain("tesseract: 'Tesseract.js (local)'");
+    expect(DEFAULT_COMPANION_PREFERENCES.imageReadingMethodOrder.slice(0, 3))
       .toEqual([
         'accessibility-text',
-        'paddleocr-wasm',
         'chrome-text-detector',
         'tesseract',
-        'tesseract-wasm-direct',
       ]);
     expect(providerRegistry).toContain(
       'ACCESSIBILITY_IMAGE_TEXT_COMPILED ||',
     );
     expect(script).toContain('visibleImageReadingMethodOrder(');
     expect(script).toContain('Chrome TextDetector is experimental and platform-dependent');
-    expect(script).toContain('same Tesseract OCR family and local language models');
-    expect(script).toContain('do not independently corroborate each other');
+    expect(script).toContain('Tesseract.js runs locally with packaged language models');
     expect(script).toContain('OCR is paused because every compiled provider is off.');
     expect(style).toContain('.ocr-provider-toggle');
   });
@@ -339,8 +353,8 @@ describe('sidepanel UI structure', () => {
     expect(script).toContain('handlePreferenceSafetyMessage(message, reply)');
     expect(script).toContain('preferenceSafetyConnectionReady = false');
     expect(script).toContain('await purge;');
-    expect(script).toContain('requireConfirmedLegacyTeardown');
-    expect(script).toContain('isConfirmedLivePageObserverRelease(results)');
+    expect(script).toContain('isolatedHtmlReplicaEngine.releasePresentation()');
+    expect(script).not.toContain('invokeLivePageObserverUnregisterBridge');
     expect(script).toContain(
       'scope = intersectReplicaReadScopes(scope, PAGE_ONLY_REPLICA_READ_SCOPE)',
     );
@@ -360,7 +374,10 @@ describe('sidepanel UI structure', () => {
     );
     const purgeFunction = script.slice(purgeStart, purgeEnd);
     expect(purgeFunction).toContain('translationMemory.clear()');
-    expect(purgeFunction).toContain('imageTranslationMemory.clear()');
+    expect(purgeFunction).not.toContain('imageTranslationMemory.clear()');
+    expect(purgeFunction).toContain(
+      'imageTranslationController.purgeSourceDerivedCache()',
+    );
     expect(script).toContain('resetEpoch: preferences.resetRevision');
     expect(script).toContain(
       'preferences.readScopeSetupVersion === REPLICA_READ_SCOPE_SETUP_VERSION',
@@ -429,6 +446,41 @@ describe('sidepanel UI structure', () => {
     );
   });
 
+  it('publishes captured identity only after the replacement replica commits', () => {
+    const captureStart = script.indexOf('async function capturePage(');
+    const captureEnd = script.indexOf(
+      '\nasync function runReplicaEngineCheckpoint(',
+      captureStart,
+    );
+    const captureSource = script.slice(captureStart, captureEnd);
+
+    expect(captureStart).toBeGreaterThanOrEqual(0);
+    expect(captureSource.indexOf('await runReplicaEngineCheckpoint('))
+      .toBeLessThan(captureSource.indexOf(
+        'capturedPageIdentity = committedIdentity;',
+      ));
+    expect(captureSource.indexOf('snapshot = replicaSurfaceRouter.snapshot();'))
+      .toBeLessThan(captureSource.indexOf(
+        'capturedPageIdentity = committedIdentity;',
+      ));
+    expect(captureSource).toContain(
+      'const committedIdentity = followedPageIdentity && sameCompanionSourcePage(',
+    );
+
+    const checkpointStart = script.indexOf(
+      'async function runReplicaEngineCheckpoint(',
+    );
+    const checkpointEnd = script.indexOf(
+      '\nfunction ',
+      checkpointStart,
+    );
+    const checkpointSource = script.slice(checkpointStart, checkpointEnd);
+    expect(checkpointSource).toContain('sameCompanionSourcePage(');
+    expect(checkpointSource).not.toContain(
+      'capturedPageIdentity === identity',
+    );
+  });
+
   it('protects an in-flight active-tab follow from stale tab updates', () => {
     expect(script).toContain('let activeFollowRequestId: number | undefined');
     expect(script).toContain('activeFollowRequestId !== undefined');
@@ -464,7 +516,7 @@ describe('sidepanel UI structure', () => {
     expect(script).toContain('composerAbortController === abortController');
     const replicaStyle = style.slice(
       style.lastIndexOf('.replica-preview {'),
-      style.indexOf('.page-copy {'),
+      style.indexOf('.empty-state {'),
     );
     expect(replicaStyle).toContain('background: transparent');
     expect(replicaStyle).not.toContain('color-scheme: light');

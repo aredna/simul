@@ -7,7 +7,6 @@ import {
   shouldClearAutoImageLanguageForDocument,
   shouldClearAutoImageLanguageResolution,
 } from '../lib/language-detection';
-import { parsePageSnapshot } from '../lib/page-snapshot';
 import {
   canonicalizeLanguageTag,
   SUPPORTED_LANGUAGES,
@@ -44,7 +43,7 @@ describe('language selection', () => {
     expect(shouldClearAutoImageLanguageForDocument(undefined, false)).toBe(false);
   });
 
-  it('invalidates only image-derived language when OCR route settings change', () => {
+  it('invalidates image-derived language for evidence membership and policy, not priority order', () => {
     const configuration = {
       providerOrder: ['tesseract'],
       enabledMethodOrder: ['accessibility-text', 'tesseract'],
@@ -61,10 +60,10 @@ describe('language selection', () => {
     });
     const providerChange = autoImageLanguageConfigurationKey({
       ...configuration,
-      providerOrder: ['paddleocr-wasm', 'tesseract'],
+      providerOrder: ['chrome-text-detector', 'tesseract'],
       enabledMethodOrder: [
         'accessibility-text',
-        'paddleocr-wasm',
+        'chrome-text-detector',
         'tesseract',
       ],
     });
@@ -75,6 +74,24 @@ describe('language selection', () => {
     const semanticOrderChange = autoImageLanguageConfigurationKey({
       ...configuration,
       enabledMethodOrder: ['tesseract', 'accessibility-text'],
+    });
+    const twoProviderConfiguration = {
+      ...configuration,
+      providerOrder: ['tesseract', 'chrome-text-detector'],
+      enabledMethodOrder: [
+        'accessibility-text',
+        'tesseract',
+        'chrome-text-detector',
+      ],
+    } as const;
+    const twoProviderPriorityChange = autoImageLanguageConfigurationKey({
+      ...twoProviderConfiguration,
+      providerOrder: ['chrome-text-detector', 'tesseract'],
+      enabledMethodOrder: [
+        'chrome-text-detector',
+        'accessibility-text',
+        'tesseract',
+      ],
     });
     const policyChange = autoImageLanguageConfigurationKey({
       ...configuration,
@@ -105,7 +122,12 @@ describe('language selection', () => {
       'image',
       first,
       semanticOrderChange,
-    )).toBe(true);
+    )).toBe(false);
+    expect(shouldClearAutoImageLanguageResolution(
+      'image',
+      autoImageLanguageConfigurationKey(twoProviderConfiguration),
+      twoProviderPriorityChange,
+    )).toBe(false);
     expect(shouldClearAutoImageLanguageResolution(
       'image',
       first,
@@ -211,13 +233,8 @@ describe('language selection', () => {
 });
 
 function page(documentLanguage: string | undefined, text: string) {
-  return parsePageSnapshot({
-    version: 1,
-    title: 'Page',
-    url: 'https://example.com/',
-    capturedAt: '2026-07-19T00:00:00.000Z',
+  return {
     ...(documentLanguage ? { documentLanguage } : {}),
-    items: [{ id: 'source', kind: 'text', role: 'paragraph', text }],
-    omissions: {},
-  });
+    visibleText: text,
+  };
 }

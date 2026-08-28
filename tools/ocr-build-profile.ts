@@ -4,10 +4,8 @@ export const OCR_PROVIDER_RUNTIME_VIRTUAL_MODULE_ID =
   'virtual:simul-ocr-provider-runtime-registry';
 
 export const OCR_BUILD_FLAGS = Object.freeze([
-  'SIMUL_OCR_PADDLE',
   'SIMUL_OCR_TEXT_DETECTOR',
   'SIMUL_OCR_TESSERACT',
-  'SIMUL_OCR_TESSERACT_WASM_DIRECT',
   'SIMUL_OCR_TRANSFORMERS',
   'SIMUL_OCR_SCREEN_AI',
 ] as const);
@@ -26,14 +24,6 @@ interface OcrProviderBuildDefinition {
 /** Providers stay independently removable from every extension entrypoint. */
 export const OCR_PROVIDER_BUILD_DEFINITIONS = Object.freeze([
   {
-    flag: 'SIMUL_OCR_PADDLE',
-    id: 'paddleocr-wasm',
-    implemented: true,
-    enabledByDefault: false,
-    importPath: '/lib/ocr/providers/paddleocr-wasm/index.ts',
-    runtimeImportPath: '/lib/ocr/providers/paddleocr-wasm/offscreen.ts',
-  },
-  {
     flag: 'SIMUL_OCR_TEXT_DETECTOR',
     id: 'chrome-text-detector',
     implemented: true,
@@ -49,15 +39,6 @@ export const OCR_PROVIDER_BUILD_DEFINITIONS = Object.freeze([
     enabledByDefault: true,
     importPath: '/lib/ocr/providers/tesseract/index.ts',
     runtimeImportPath: '/lib/ocr/providers/tesseract/offscreen.ts',
-  },
-  {
-    flag: 'SIMUL_OCR_TESSERACT_WASM_DIRECT',
-    id: 'tesseract-wasm-direct',
-    implemented: true,
-    enabledByDefault: false,
-    importPath: '/lib/ocr/providers/tesseract-wasm-direct/index.ts',
-    runtimeImportPath:
-      '/lib/ocr/providers/tesseract-wasm-direct/offscreen.ts',
   },
   {
     flag: 'SIMUL_OCR_TRANSFORMERS',

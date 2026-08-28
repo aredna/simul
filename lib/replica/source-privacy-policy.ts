@@ -20,6 +20,13 @@ const MAX_SOURCE_SELECT_LABEL_DESCENDANTS = 512;
 const MAX_SOURCE_SELECT_LABEL_NODES = 1_024;
 const MAX_SOURCE_SELECT_LABEL_TEXT = 3_500;
 const MAX_SOURCE_FLAT_TREE_ANCESTORS = 1_024;
+const MAX_SOURCE_CONTROLLED_RELATIONSHIPS = 1_024;
+const MAX_SOURCE_CONTROLLED_ID_LENGTH = 16 * 1_024;
+const MAX_SOURCE_CONTROLLED_ID_BYTES = 4 * 1_024 * 1_024;
+const MAX_SOURCE_ARIA_CONTROLS_LENGTH = 1 * 1_024 * 1_024;
+const MAX_SOURCE_CONTROLLED_MUTATION_NODES = 2_048;
+const MAX_SOURCE_PAINT_RECTS = 256;
+const DEFAULT_MAX_SOURCE_CONTROLLED_NODES = 50_000;
 const MAX_SOURCE_NAVIGATION_URL_LENGTH = 16 * 1024;
 const SOURCE_STATEFUL_NAVIGATION_ATTRIBUTES = Object.freeze([
   'aria-pressed',
@@ -90,6 +97,808 @@ const SOURCE_IMAGE_CONTROL_TAG_SET = new Set([
   'button', 'input', 'label', 'meter', 'option', 'output', 'progress',
   'select', 'summary', 'textarea',
 ]);
+
+export interface SourceControlledTabRelationship {
+  readonly trigger: Element;
+  readonly panel: Element;
+  readonly selected: boolean;
+}
+
+export interface SourceControlledContentPolicy {
+  /** Every resolved target is withheld unless it is a uniquely proven open tab. */
+  readonly targets: ReadonlyMap<Element, 'open-tab' | 'withheld'>;
+  readonly tabs: readonly SourceControlledTabRelationship[];
+  /** Identity-only context used to avoid rescanning for unrelated mutations. */
+  readonly controllers: ReadonlySet<Element>;
+  readonly referencedIds: ReadonlySet<string>;
+  readonly contextElements: ReadonlySet<Element>;
+  readonly idElements: ReadonlySet<Element>;
+  /** Oversized/unindexable IDs fail closed on that element, not the page. */
+  readonly unindexableIdTargets: ReadonlySet<Element>;
+  /** Only an unresolvable controller forces its own root's ID targets closed. */
+  readonly withheldIdRoots: ReadonlySet<Node>;
+  readonly overflow: boolean;
+  /** True when the bounded scan did not inspect the complete source graph. */
+  readonly incomplete: boolean;
+}
+
+type SourceElementPaintState = 'visible' | 'hidden' | 'unknown';
+
+interface SourceElementPaintInputs {
+  readonly state: SourceElementPaintState;
+  readonly rects: readonly SourcePaintBounds[] | undefined;
+  readonly overflow: { readonly x: boolean; readonly y: boolean } | undefined;
+  readonly readable: boolean;
+}
+
+/** One proof-generation cache; callers must discard it after the current scan. */
+export interface SourcePaintScanCache {
+  readonly paths: Map<Element, readonly Element[] | undefined>;
+  readonly inputs: Map<Element, SourceElementPaintInputs>;
+}
+
+export function createSourcePaintScanCache(): SourcePaintScanCache {
+  return {
+    paths: new Map(),
+    inputs: new Map(),
+  };
+}
+
+/**
+ * Builds one content-free relationship index shared by both base serializers
+ * and the typed semantic channel. A controlled target becomes ordinary base
+ * content only when one same-root, unique tab relationship has consistent
+ * selected/expanded and painted visibility state.
+ */
+export function createSourceControlledContentPolicy(
+  sourceDocument: Document | null | undefined,
+  sourceWindow: Window | null | undefined = sourceDocument?.defaultView,
+  maximumNodes = DEFAULT_MAX_SOURCE_CONTROLLED_NODES,
+): SourceControlledContentPolicy {
+  const targets = new Map<Element, 'open-tab' | 'withheld'>();
+  const tabs: SourceControlledTabRelationship[] = [];
+  const controllers = new Set<Element>();
+  const referencedIds = new Set<string>();
+  const idElements = new Set<Element>();
+  const unindexableIdTargets = new Set<Element>();
+  const withheldIdRoots = new Set<Node>();
+  const root = sourceDocument?.documentElement;
+  if (!root || !Number.isSafeInteger(maximumNodes) || maximumNodes < 1) {
+    return finishSourceControlledContentPolicy(
+      targets,
+      tabs,
+      controllers,
+      referencedIds,
+      idElements,
+      unindexableIdTargets,
+      withheldIdRoots,
+      Boolean(root),
+      Boolean(root),
+    );
+  }
+  try {
+    const paintCache = createSourcePaintScanCache();
+    const idsByRoot = new Map<Node, Map<string, Element[]>>();
+    const idsAcrossRoots = new Map<string, Element[]>();
+    const pending: Node[] = [root];
+    let visited = 0;
+    let indexedIdBytes = 0;
+    while (pending.length > 0 && visited < maximumNodes) {
+      const node = pending.pop();
+      if (!node) break;
+      visited += 1;
+      if (node.nodeType === 11) {
+        pending.push(...node.childNodes);
+        continue;
+      }
+      if (node.nodeType !== 1) continue;
+      const element = node as Element;
+      const scope = element.getRootNode();
+      const id = safelyReadSourceAttribute(element, 'id');
+      if (id) {
+        idElements.add(element);
+        const byteLength = sourceControlledStringByteLength(id);
+        if (
+          id.length > MAX_SOURCE_CONTROLLED_ID_LENGTH ||
+          !Number.isFinite(byteLength) ||
+          indexedIdBytes + byteLength > MAX_SOURCE_CONTROLLED_ID_BYTES
+        ) {
+          unindexableIdTargets.add(element);
+        } else {
+          indexedIdBytes += byteLength;
+          let rootIds = idsByRoot.get(scope);
+          if (!rootIds) idsByRoot.set(scope, rootIds = new Map());
+          appendSourceControlledId(rootIds, id, element);
+          appendSourceControlledId(idsAcrossRoots, id, element);
+        }
+      }
+      if (safelyHasSourceAttribute(element, 'aria-controls')) {
+        controllers.add(element);
+      }
+      pending.push(...element.childNodes);
+      const shadowRoot = safelyReadSourceShadowRoot(element);
+      if (shadowRoot) pending.push(shadowRoot);
+    }
+    if (
+      pending.length > 0 ||
+      controllers.size > MAX_SOURCE_CONTROLLED_RELATIONSHIPS
+    ) {
+      markResolvedSourceControlledTargets(
+        [...controllers].slice(0, MAX_SOURCE_CONTROLLED_RELATIONSHIPS),
+        idsByRoot,
+        idsAcrossRoots,
+        targets,
+      );
+      return finishSourceControlledContentPolicy(
+        targets,
+        tabs,
+        controllers,
+        referencedIds,
+        idElements,
+        unindexableIdTargets,
+        controllerOverflowRoots(controllers),
+        true,
+        pending.length > 0,
+      );
+    }
+
+    const relations = new Map<Element, Array<{
+      readonly trigger: Element;
+      readonly structurallyUnique: boolean;
+    }>>();
+    let referencedIdBytes = 0;
+    let unresolved = false;
+    for (const trigger of controllers) {
+      const rawControls = safelyReadSourceAttribute(trigger, 'aria-controls');
+      if (
+        rawControls === undefined || rawControls === null ||
+        rawControls.length > MAX_SOURCE_ARIA_CONTROLS_LENGTH
+      ) {
+        withheldIdRoots.add(trigger.getRootNode());
+        unresolved = true;
+        continue;
+      }
+      const rawIds = (rawControls ?? '').trim().split(/\s+/u).filter(Boolean);
+      for (const id of rawIds) {
+        const byteLength = sourceControlledStringByteLength(id);
+        if (id.length > MAX_SOURCE_CONTROLLED_ID_LENGTH ||
+          !Number.isFinite(byteLength)) continue;
+        if (referencedIdBytes + byteLength > MAX_SOURCE_CONTROLLED_ID_BYTES) {
+          withheldIdRoots.add(trigger.getRootNode());
+          unresolved = true;
+          break;
+        }
+        referencedIdBytes += byteLength;
+        referencedIds.add(id);
+        const sameRoot = idsByRoot.get(trigger.getRootNode())?.get(id) ?? [];
+        const candidates = sameRoot.length > 0
+          ? sameRoot
+          : idsAcrossRoots.get(id) ?? [];
+        for (const panel of candidates) {
+          targets.set(panel, 'withheld');
+          const entries = relations.get(panel) ?? [];
+          entries.push(Object.freeze({
+            trigger,
+            structurallyUnique: rawIds.length === 1 &&
+              isSafeSourceControlledId(id) &&
+              sameRoot.length === 1 && sameRoot[0] === panel,
+          }));
+          relations.set(panel, entries);
+        }
+      }
+    }
+
+    for (const [panel, entries] of relations) {
+      if (entries.length !== 1 || !entries[0]?.structurallyUnique) continue;
+      const trigger = entries[0].trigger;
+      const selected = readSourceControlledTabSelection(
+        trigger,
+        panel,
+        sourceWindow,
+        paintCache,
+      );
+      if (selected === undefined) continue;
+      if (selected) targets.set(panel, 'open-tab');
+      tabs.push(Object.freeze({ trigger, panel, selected }));
+    }
+    return finishSourceControlledContentPolicy(
+      targets,
+      tabs,
+      controllers,
+      referencedIds,
+      idElements,
+      unindexableIdTargets,
+      withheldIdRoots,
+      unresolved,
+      false,
+    );
+  } catch {
+    return finishSourceControlledContentPolicy(
+      targets,
+      tabs,
+      controllers,
+      referencedIds,
+      idElements,
+      unindexableIdTargets,
+      new Set<Node>([root.getRootNode()]),
+      true,
+      true,
+    );
+  }
+}
+
+export function sourceControlledContentIsWithheld(
+  element: Element,
+  policy: SourceControlledContentPolicy,
+): boolean {
+  if (policy.unindexableIdTargets.has(element)) return true;
+  if (policy.withheldIdRoots.has(element.getRootNode()) && Boolean(
+    safelyReadSourceAttribute(element, 'id'),
+  )) return true;
+  const state = policy.targets.get(element);
+  return state !== undefined && state !== 'open-tab';
+}
+
+/** Identity-only target diff used to rematerialize privacy-context changes. */
+export function sourceControlledContentChangedTargets(
+  previous: SourceControlledContentPolicy,
+  next: SourceControlledContentPolicy,
+): readonly Element[] {
+  const changed: Element[] = [];
+  const targets = new Set<Element>([
+    ...previous.targets.keys(),
+    ...next.targets.keys(),
+    ...previous.unindexableIdTargets,
+    ...next.unindexableIdTargets,
+    ...previous.idElements,
+    ...next.idElements,
+  ]);
+  for (const target of targets) {
+    if (
+      previous.targets.get(target) !== next.targets.get(target) ||
+      sourceControlledContentIsWithheld(target, previous) !==
+        sourceControlledContentIsWithheld(target, next)
+    ) {
+      changed.push(target);
+    }
+  }
+  return Object.freeze(changed);
+}
+
+/** A root-wide fallback or incomplete-scan transition needs a checkpoint. */
+export function sourceControlledContentBoundaryChanged(
+  previous: SourceControlledContentPolicy,
+  next: SourceControlledContentPolicy,
+): boolean {
+  return previous.overflow !== next.overflow ||
+    previous.incomplete !== next.incomplete ||
+    !sameSourceNodeSet(previous.withheldIdRoots, next.withheldIdRoots);
+}
+
+/**
+ * Returns whether a mutation can affect the precomputed controlled-content
+ * policy. It deliberately ignores unrelated carousel/class churn while still
+ * following known controllers, targets, their flat-tree ancestors, and newly
+ * introduced relationship-bearing nodes.
+ */
+export function sourceControlledContentMutationsMayChange(
+  records: readonly MutationRecord[],
+  policy: SourceControlledContentPolicy,
+): boolean {
+  for (const record of records) {
+    if (record.type === 'attributes') {
+      if (record.target.nodeType !== 1) continue;
+      const element = record.target as Element;
+      const name = record.attributeName?.toLowerCase() ?? '';
+      if (name === 'aria-controls') {
+        if (policy.controllers.has(element) ||
+          safelyHasSourceAttribute(element, 'aria-controls')) return true;
+        continue;
+      }
+      if (name === 'aria-selected' || name === 'aria-expanded') {
+        if (policy.controllers.has(element)) return true;
+        continue;
+      }
+      if (name === 'id') {
+        const id = safelyReadSourceAttribute(element, 'id');
+        if (
+          policy.idElements.has(element) ||
+          policy.unindexableIdTargets.has(element) ||
+          policy.withheldIdRoots.has(element.getRootNode()) ||
+          (id !== undefined && id !== null &&
+            id.length > MAX_SOURCE_CONTROLLED_ID_LENGTH) ||
+          (id !== undefined && id !== null && policy.referencedIds.has(id))
+        ) return true;
+        continue;
+      }
+      if (name === 'role') {
+        if (policy.controllers.has(element) || policy.targets.has(element)) {
+          return true;
+        }
+        continue;
+      }
+      if (
+        name === 'aria-hidden' || name === 'hidden' || name === 'class' ||
+        name === 'style'
+      ) {
+        if (sourceControlledContentLayoutMayChange(element, policy)) return true;
+      }
+      continue;
+    }
+    if (record.type === 'characterData') {
+      if (
+        (policy.controllers.size > 0 || policy.targets.size > 0) &&
+        record.target.parentElement?.localName.toLowerCase() === 'style'
+      ) return true;
+      continue;
+    }
+    if (record.type !== 'childList') continue;
+    const mutationElement = record.target.nodeType === 1
+      ? record.target as Element
+      : undefined;
+    if (
+      (mutationElement?.localName.toLowerCase() === 'style' &&
+        (policy.controllers.size > 0 || policy.targets.size > 0)) ||
+      (mutationElement && (
+        policy.controllers.has(mutationElement) ||
+        policy.targets.has(mutationElement) ||
+        (sourceControlledContentLayoutMayChange(mutationElement, policy) &&
+          mutationElement !== mutationElement.ownerDocument.documentElement &&
+          mutationElement !== mutationElement.ownerDocument.body)
+      )) ||
+      controlledMutationNodesMayChange(record.addedNodes, policy) ||
+      controlledMutationNodesMayChange(record.removedNodes, policy)
+    ) return true;
+  }
+  return false;
+}
+
+/**
+ * Returns whether layout work at `element` can change the painted proof of a
+ * known tab/controller relationship. This covers participants, their
+ * ancestors, and descendants whose collapse can change a participant's
+ * painted bounds. The flat-tree walk is bounded by the same privacy path cap;
+ * an unreadable path fails closed only when a relationship actually exists.
+ */
+export function sourceControlledContentLayoutMayChange(
+  element: Element,
+  policy: SourceControlledContentPolicy,
+): boolean {
+  if (policy.overflow || policy.incomplete) return true;
+  if (policy.contextElements.has(element)) return true;
+  if (policy.controllers.size === 0 && policy.targets.size === 0) return false;
+  const path = readSourceFlatTreeElementPath(element);
+  if (!path) return true;
+  return path.some((current) =>
+    policy.controllers.has(current) || policy.targets.has(current)
+  );
+}
+
+function finishSourceControlledContentPolicy(
+  targets: ReadonlyMap<Element, 'open-tab' | 'withheld'>,
+  tabs: readonly SourceControlledTabRelationship[],
+  controllers: ReadonlySet<Element>,
+  referencedIds: ReadonlySet<string>,
+  idElements: ReadonlySet<Element>,
+  unindexableIdTargets: ReadonlySet<Element>,
+  withheldIdRoots: ReadonlySet<Node>,
+  overflow: boolean,
+  incomplete: boolean,
+): SourceControlledContentPolicy {
+  const contextElements = new Set<Element>();
+  for (const participant of [...controllers, ...targets.keys()]) {
+    const path = readSourceFlatTreeElementPath(participant);
+    if (!path) continue;
+    for (const element of path) contextElements.add(element);
+  }
+  return Object.freeze({
+    targets,
+    tabs: Object.freeze([...tabs]),
+    controllers,
+    referencedIds,
+    contextElements,
+    idElements,
+    unindexableIdTargets,
+    withheldIdRoots,
+    overflow,
+    incomplete,
+  });
+}
+
+function controlledMutationNodesMayChange(
+  nodes: NodeList | readonly Node[],
+  policy: SourceControlledContentPolicy,
+): boolean {
+  const pending = Array.from(nodes);
+  let visited = 0;
+  while (pending.length > 0) {
+    if (visited >= MAX_SOURCE_CONTROLLED_MUTATION_NODES) return true;
+    const node = pending.pop();
+    if (!node) break;
+    visited += 1;
+    if (node.nodeType === 11) {
+      pending.push(...node.childNodes);
+      continue;
+    }
+    if (node.nodeType !== 1) continue;
+    const element = node as Element;
+    if (
+      policy.controllers.has(element) || policy.targets.has(element) ||
+      safelyHasSourceAttribute(element, 'aria-controls')
+    ) return true;
+    const id = safelyReadSourceAttribute(element, 'id');
+    if (
+      id !== undefined && id !== null &&
+      (id.length > MAX_SOURCE_CONTROLLED_ID_LENGTH ||
+        policy.withheldIdRoots.has(element.getRootNode()) ||
+        policy.referencedIds.has(id))
+    ) return true;
+    if (element.localName.toLowerCase() === 'style' &&
+      (policy.controllers.size > 0 || policy.targets.size > 0)) return true;
+    pending.push(...element.childNodes);
+    const shadowRoot = safelyReadSourceShadowRoot(element);
+    if (shadowRoot) pending.push(shadowRoot);
+  }
+  return false;
+}
+
+function markResolvedSourceControlledTargets(
+  controllers: readonly Element[],
+  idsByRoot: ReadonlyMap<Node, ReadonlyMap<string, readonly Element[]>>,
+  idsAcrossRoots: ReadonlyMap<string, readonly Element[]>,
+  targets: Map<Element, 'open-tab' | 'withheld'>,
+): void {
+  for (const controller of controllers) {
+    const raw = safelyReadSourceAttribute(controller, 'aria-controls');
+    if (raw === undefined || raw === null ||
+      raw.length > MAX_SOURCE_ARIA_CONTROLS_LENGTH) continue;
+    for (const id of raw.trim().split(/\s+/u).filter(Boolean)) {
+      const sameRoot = idsByRoot.get(controller.getRootNode())?.get(id) ?? [];
+      const matches = sameRoot.length > 0
+        ? sameRoot
+        : idsAcrossRoots.get(id) ?? [];
+      for (const target of matches) targets.set(target, 'withheld');
+    }
+  }
+}
+
+function controllerOverflowRoots(
+  controllers: ReadonlySet<Element>,
+): ReadonlySet<Node> {
+  const roots = new Set<Node>();
+  let index = 0;
+  for (const controller of controllers) {
+    const raw = safelyReadSourceAttribute(controller, 'aria-controls');
+    if (
+      index >= MAX_SOURCE_CONTROLLED_RELATIONSHIPS || raw === undefined ||
+      raw === null || raw.length > MAX_SOURCE_ARIA_CONTROLS_LENGTH
+    ) roots.add(controller.getRootNode());
+    index += 1;
+  }
+  return roots;
+}
+
+function sameSourceNodeSet(
+  left: ReadonlySet<Node>,
+  right: ReadonlySet<Node>,
+): boolean {
+  if (left.size !== right.size) return false;
+  for (const node of left) {
+    if (!right.has(node)) return false;
+  }
+  return true;
+}
+
+function appendSourceControlledId(
+  index: Map<string, Element[]>,
+  id: string,
+  element: Element,
+): void {
+  const entries = index.get(id) ?? [];
+  entries.push(element);
+  index.set(id, entries);
+}
+
+function readSourceControlledTabSelection(
+  trigger: Element,
+  panel: Element,
+  sourceWindow: Window | null | undefined,
+  paintCache: SourcePaintScanCache,
+): boolean | undefined {
+  if (
+    normalizedSourceRole(trigger) !== 'tab' ||
+    normalizedSourceRole(panel) !== 'tabpanel' ||
+    trigger === panel ||
+    trigger.ownerDocument !== panel.ownerDocument ||
+    trigger.getRootNode() !== panel.getRootNode() ||
+    trigger.contains(panel) ||
+    panel.contains(trigger) ||
+    !sourceElementPathIsPainted(trigger, sourceWindow, paintCache)
+  ) return undefined;
+  const selected = normalizedSourceBooleanAttribute(trigger, 'aria-selected');
+  if (selected === undefined) return undefined;
+  const rawExpanded = safelyReadSourceAttribute(trigger, 'aria-expanded');
+  if (rawExpanded === undefined) return undefined;
+  if (rawExpanded !== null && rawExpanded.trim() !== '') {
+    const expanded = normalizedSourceBoolean(rawExpanded);
+    if (expanded === undefined || expanded !== selected) return undefined;
+  }
+  const panelState = sourceElementPaintState(panel, sourceWindow, paintCache);
+  if (panelState !== (selected ? 'visible' : 'hidden')) return undefined;
+  if (selected) {
+    return sourceElementPathIsPainted(panel, sourceWindow, paintCache)
+      ? true
+      : undefined;
+  }
+  const panelPath = sourcePaintPath(panel, paintCache);
+  if (!panelPath || panelPath.slice(1).some(
+    (ancestor) =>
+      sourceElementPaintState(ancestor, sourceWindow, paintCache) !== 'visible',
+  )) return undefined;
+  return selected;
+}
+
+/**
+ * Content-free proof that an element has a positive painted box through its
+ * complete flat-tree clipping path. Unknown style or geometry fails closed.
+ */
+export function sourceElementPathIsPainted(
+  element: Element,
+  sourceWindow: Window | null | undefined,
+  paintCache: SourcePaintScanCache = createSourcePaintScanCache(),
+): boolean {
+  const path = sourcePaintPath(element, paintCache);
+  if (!path || !path.every(
+    (current) =>
+      sourceElementPaintState(current, sourceWindow, paintCache) === 'visible',
+  )) return false;
+  let intersections = sourcePaintInputs(element, sourceWindow, paintCache).rects;
+  if (!intersections || intersections.length === 0) return false;
+  for (const ancestor of path.slice(1)) {
+    if (
+      ancestor === ancestor.ownerDocument.documentElement ||
+      ancestor === ancestor.ownerDocument.body
+    ) continue;
+    const clipped = sourcePaintInputs(ancestor, sourceWindow, paintCache).overflow;
+    if (!clipped) return false;
+    if (!clipped.x && !clipped.y) continue;
+    const clips = sourcePaintInputs(ancestor, sourceWindow, paintCache).rects;
+    if (!clips || clips.length === 0) return false;
+    const nextIntersections: SourcePaintBounds[] = [];
+    for (const intersection of intersections) {
+      for (const clip of clips) {
+        const next = {
+          left: clipped.x
+            ? Math.max(intersection.left, clip.left)
+            : intersection.left,
+          right: clipped.x
+            ? Math.min(intersection.right, clip.right)
+            : intersection.right,
+          top: clipped.y
+            ? Math.max(intersection.top, clip.top)
+            : intersection.top,
+          bottom: clipped.y
+            ? Math.min(intersection.bottom, clip.bottom)
+            : intersection.bottom,
+        };
+        if (next.right <= next.left || next.bottom <= next.top) continue;
+        if (nextIntersections.length >= MAX_SOURCE_PAINT_RECTS) return false;
+        nextIntersections.push(next);
+      }
+    }
+    intersections = nextIntersections;
+    if (intersections.length === 0) return false;
+  }
+  return true;
+}
+
+/**
+ * Proves that every style, attribute, flat-tree, rectangle, and clipping input
+ * consumed by `sourceElementPathIsPainted` is readable. A false result does
+ * not classify authored content; it tells incremental callers that they must
+ * use their conservative recovery path instead of treating two opaque reads
+ * as an unchanged visibility boundary.
+ */
+export function sourceElementPaintInputsAreReadable(
+  element: Element,
+  sourceWindow: Window | null | undefined,
+  paintCache: SourcePaintScanCache = createSourcePaintScanCache(),
+): boolean {
+  const path = sourcePaintPath(element, paintCache);
+  if (!path) return false;
+  return path.every((current) =>
+    sourcePaintInputs(current, sourceWindow, paintCache).readable
+  );
+}
+
+function sourceElementPaintState(
+  element: Element,
+  sourceWindow: Window | null | undefined,
+  paintCache: SourcePaintScanCache,
+): SourceElementPaintState {
+  return sourcePaintInputs(element, sourceWindow, paintCache).state;
+}
+
+interface SourcePaintBounds {
+  readonly left: number;
+  readonly top: number;
+  readonly right: number;
+  readonly bottom: number;
+}
+
+function sourcePaintPath(
+  element: Element,
+  paintCache: SourcePaintScanCache,
+): readonly Element[] | undefined {
+  if (paintCache.paths.has(element)) return paintCache.paths.get(element);
+  const path = readSourceFlatTreeElementPath(element);
+  paintCache.paths.set(element, path);
+  return path;
+}
+
+function sourcePaintInputs(
+  element: Element,
+  sourceWindow: Window | null | undefined,
+  paintCache: SourcePaintScanCache,
+): SourceElementPaintInputs {
+  const retained = paintCache.inputs.get(element);
+  if (retained) return retained;
+  let result: SourceElementPaintInputs;
+  try {
+    const getComputedStyle = sourceWindow?.getComputedStyle;
+    if (typeof getComputedStyle !== 'function') {
+      throw new Error('Computed style is unavailable.');
+    }
+    const hiddenAttribute = element.hasAttribute('hidden');
+    const rawAriaHidden = element.getAttribute('aria-hidden');
+    const ariaHidden = rawAriaHidden === null || rawAriaHidden.trim() === ''
+      ? false
+      : normalizedSourceBoolean(rawAriaHidden);
+    const style = getComputedStyle.call(sourceWindow, element);
+    const display = style.display.trim().toLowerCase();
+    const visibility = style.visibility.trim().toLowerCase();
+    const opacity = style.opacity.trim();
+    const contentVisibility = style.getPropertyValue('content-visibility')
+      .trim().toLowerCase();
+    const clip = style.getPropertyValue('clip').trim().toLowerCase();
+    const clipPath = style.getPropertyValue('clip-path').trim().toLowerCase();
+    const overflowX = (style.overflowX || style.getPropertyValue('overflow-x'))
+      .trim().toLowerCase();
+    const overflowY = (style.overflowY || style.getPropertyValue('overflow-y'))
+      .trim().toLowerCase();
+    const rects = readSourceElementPaintRects(element);
+    if (!rects) throw new Error('Paint geometry is unreadable.');
+    const computedHidden = display === 'none' || visibility === 'hidden' ||
+      visibility === 'collapse' || contentVisibility === 'hidden' ||
+      (opacity !== '' && Number(opacity) === 0);
+    const authoredHidden = ariaHidden === undefined
+      ? undefined
+      : hiddenAttribute || ariaHidden;
+    const state: SourceElementPaintState =
+      authoredHidden === undefined || authoredHidden !== computedHidden
+        ? 'unknown'
+        : computedHidden
+          ? 'hidden'
+          : (clip !== '' && clip !== 'auto' && clip !== 'none') ||
+              (clipPath !== '' && clipPath !== 'none') ||
+              !sourceElementPaintBounds(rects)
+            ? 'unknown'
+            : 'visible';
+    const clips = (value: string): boolean =>
+      value === 'hidden' || value === 'clip' || value === 'scroll' ||
+      value === 'auto' || value === 'overlay';
+    result = Object.freeze({
+      state,
+      rects,
+      overflow: Object.freeze({ x: clips(overflowX), y: clips(overflowY) }),
+      readable: true,
+    });
+  } catch {
+    result = Object.freeze({
+      state: 'unknown',
+      rects: undefined,
+      overflow: undefined,
+      readable: false,
+    });
+  }
+  paintCache.inputs.set(element, result);
+  return result;
+}
+
+function sourceElementPaintBounds(
+  rects: readonly SourcePaintBounds[],
+): SourcePaintBounds | undefined {
+  if (!rects || rects.length === 0) return undefined;
+  const bounds = rects.reduce<SourcePaintBounds>((current, rect) => ({
+    left: Math.min(current.left, rect.left),
+    top: Math.min(current.top, rect.top),
+    right: Math.max(current.right, rect.right),
+    bottom: Math.max(current.bottom, rect.bottom),
+  }), rects[0]!);
+  return Object.freeze(bounds);
+}
+
+function readSourceElementPaintRects(
+  element: Element,
+): readonly SourcePaintBounds[] | undefined {
+  try {
+    if (typeof element.getClientRects !== 'function') return undefined;
+    const rects = element.getClientRects();
+    if (rects.length > MAX_SOURCE_PAINT_RECTS) return undefined;
+    const painted: SourcePaintBounds[] = [];
+    for (let index = 0; index < rects.length; index += 1) {
+      const rect = rects.item(index);
+      if (
+        rect && [rect.left, rect.top, rect.right, rect.bottom, rect.width, rect.height]
+          .every(Number.isFinite) && rect.width > 0 && rect.height > 0
+      ) {
+        painted.push(Object.freeze({
+          left: rect.left,
+          top: rect.top,
+          right: rect.right,
+          bottom: rect.bottom,
+        }));
+      }
+    }
+    return Object.freeze(painted);
+  } catch {
+    return undefined;
+  }
+}
+
+function normalizedSourceRole(element: Element): string {
+  const role = safelyReadSourceAttribute(element, 'role');
+  if (role === undefined || role === null) return '';
+  const tokens = role.trim().toLowerCase().split(/\s+/u).filter(Boolean);
+  return tokens.length === 1 ? tokens[0]! : '';
+}
+
+function normalizedSourceBooleanAttribute(
+  element: Element,
+  name: string,
+): boolean | undefined {
+  const value = safelyReadSourceAttribute(element, name);
+  return value === undefined || value === null
+    ? undefined
+    : normalizedSourceBoolean(value);
+}
+
+function normalizedSourceBoolean(value: string): boolean | undefined {
+  const normalized = value.trim().toLowerCase();
+  return normalized === 'true' ? true : normalized === 'false' ? false : undefined;
+}
+
+function safelyReadSourceAttribute(
+  element: Element,
+  name: string,
+): string | null | undefined {
+  try {
+    return element.getAttribute(name);
+  } catch {
+    return undefined;
+  }
+}
+
+function safelyReadSourceShadowRoot(element: Element): ShadowRoot | undefined {
+  try {
+    return element.shadowRoot?.mode === 'open' ? element.shadowRoot : undefined;
+  } catch {
+    return undefined;
+  }
+}
+
+function isSafeSourceControlledId(value: string): boolean {
+  return value.length >= 1 && value.length <= MAX_SOURCE_CONTROLLED_ID_LENGTH &&
+    !/[\s\u0000-\u001f\u007f]/u.test(value);
+}
+
+function sourceControlledStringByteLength(value: string): number {
+  try {
+    return new TextEncoder().encode(value).byteLength;
+  } catch {
+    return Number.POSITIVE_INFINITY;
+  }
+}
 
 export function isSourcePrivateTagName(value: string): boolean {
   return PRIVATE_TAG_SET.has(value.trim().toLowerCase());

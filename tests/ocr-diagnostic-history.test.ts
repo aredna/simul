@@ -15,6 +15,10 @@ describe('ImageTranslationDiagnosticHistory', () => {
       observedImages: 3,
     })).toBe('source scan: candidates=7; observed=3');
     expect(formatImageTranslationDiagnostic({
+      stage: 'source-read-policy',
+      controlImagesEnabled: false,
+    })).toBe('image read policy: control-images=off; controls blocked before text and pixel reads');
+    expect(formatImageTranslationDiagnostic({
       stage: 'recognition-failed',
       code: 'provider-unavailable',
       ordinal: 7,
@@ -41,7 +45,29 @@ describe('ImageTranslationDiagnosticHistory', () => {
       misses: 5,
       joins: 2,
       loads: 3,
-    })).toBe('recognition cache: access=join; entries=3; weight=99; hits=4; misses=5; joins=2; loads=3');
+    })).toBe('recognition cache: access=join; entries=3; weight=99; hits=4; misses=5; joins=2; loads=3; expirations=0; purges=0');
+    expect(formatImageTranslationDiagnostic({
+      stage: 'image-evidence-cache',
+      access: 'hit',
+      entries: 2,
+      weight: 144,
+      hits: 3,
+      misses: 1,
+      revalidations: 3,
+      expirations: 1,
+      purges: 2,
+    })).toBe('image evidence cache: access=hit; entries=2; weight=144; hits=3; misses=1; revalidations=3; expirations=1; purges=2');
+    expect(formatImageTranslationDiagnostic({
+      stage: 'image-final-cache',
+      access: 'rebind',
+      entries: 2,
+      weight: 155,
+      hits: 4,
+      misses: 1,
+      rebinds: 2,
+      expirations: 1,
+      purges: 3,
+    })).toBe('image final cache: access=rebind; entries=2; weight=155; hits=4; misses=1; rebinds=2; expirations=1; purges=3');
     expect(formatImageTranslationDiagnostic({
       stage: 'recognition-quality',
       candidateRegions: 8,
@@ -146,7 +172,7 @@ describe('ImageTranslationDiagnosticHistory', () => {
 
     const formatted = formatImageTranslationDiagnostic(diagnostic);
     expect(formatted).toBe(
-      'recognition cache: access=hit; entries=1; weight=42; hits=1; misses=0; joins=0; loads=1',
+      'recognition cache: access=hit; entries=1; weight=42; hits=1; misses=0; joins=0; loads=1; expirations=0; purges=0',
     );
     expect(formatted).not.toMatch(/private|secret|44/u);
 
@@ -165,5 +191,50 @@ describe('ImageTranslationDiagnosticHistory', () => {
       'evidence selection: selected=semantic; reason=priority-tie',
     );
     expect(formattedEvidence).not.toMatch(/private|44/u);
+
+    const imageEvidenceDiagnostic = {
+      stage: 'image-evidence-cache',
+      access: 'hit',
+      entries: 1,
+      weight: 42,
+      hits: 1,
+      misses: 0,
+      revalidations: 1,
+      expirations: 0,
+      purges: 0,
+      text: 'private page text',
+      url: 'https://private.example/',
+      pixelHash: 'secret-hash',
+      nodeId: 44,
+      documentId: 'private-document',
+    } as ImageTranslationDiagnostic;
+    const formattedImageEvidence = formatImageTranslationDiagnostic(
+      imageEvidenceDiagnostic,
+    );
+    expect(formattedImageEvidence).toBe(
+      'image evidence cache: access=hit; entries=1; weight=42; hits=1; misses=0; revalidations=1; expirations=0; purges=0',
+    );
+    expect(formattedImageEvidence).not.toMatch(/private|secret|44/u);
+
+    const finalDiagnostic = {
+      stage: 'image-final-cache',
+      access: 'hit',
+      entries: 1,
+      weight: 42,
+      hits: 1,
+      misses: 0,
+      rebinds: 1,
+      expirations: 0,
+      purges: 0,
+      text: 'private page text',
+      url: 'https://private.example/',
+      pixelHash: 'secret-hash',
+      nodeId: 44,
+    } as ImageTranslationDiagnostic;
+    const formattedFinal = formatImageTranslationDiagnostic(finalDiagnostic);
+    expect(formattedFinal).toBe(
+      'image final cache: access=hit; entries=1; weight=42; hits=1; misses=0; rebinds=1; expirations=0; purges=0',
+    );
+    expect(formattedFinal).not.toMatch(/private|secret|44/u);
   });
 });

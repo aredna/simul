@@ -236,13 +236,10 @@ function isCorroborated(
   ) ?? false;
 }
 
-/** Different JS bindings around Tesseract remain one recognition family. */
 export function imageTextProviderFamily(
   providerId: ImageTextResult['providerId'],
-): ImageTextResult['providerId'] | 'tesseract-family' {
-  return providerId === 'tesseract' || providerId === 'tesseract-wasm-direct'
-    ? 'tesseract-family'
-    : providerId;
+): ImageTextResult['providerId'] {
+  return providerId;
 }
 
 function acceptedRegionConfidence(

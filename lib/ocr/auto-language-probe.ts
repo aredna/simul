@@ -116,6 +116,7 @@ export type AutoLanguageProbeObservationInspection =
 
 interface LanguageVotes {
   readonly ocrSamples: Set<AutoLanguageProbeSampleIdentity>;
+  readonly strongOcrSamples: Set<AutoLanguageProbeSampleIdentity>;
   readonly semanticLabels: Map<
     string,
     Set<AutoLanguageProbeSampleIdentity>
@@ -141,6 +142,7 @@ export class AutoImageLanguageProbe {
   readonly #resolvedSamples = new Set<AutoLanguageProbeSampleIdentity>();
   #attempts = 0;
   #resolved: SupportedLanguage | undefined;
+  #resolvedEvidence: AutoLanguageProbeEvidence | undefined;
 
   constructor(
     startedAt: number,
@@ -165,6 +167,20 @@ export class AutoImageLanguageProbe {
     return this.#resolved;
   }
 
+  get resolution(): Extract<AutoLanguageProbeObservationResult, {
+    readonly status: 'resolved';
+  }> | undefined {
+    return this.#resolved && this.#resolvedEvidence
+      ? Object.freeze({
+          status: 'resolved' as const,
+          language: this.#resolved,
+          evidence: this.#resolvedEvidence,
+          attempts: this.#attempts,
+          images: this.#samples.size,
+        })
+      : undefined;
+  }
+
   remainingMs(now: number): number {
     return Math.max(
       0,
@@ -179,10 +195,7 @@ export class AutoImageLanguageProbe {
   /** Remove every vote owned by one changed or removed exact image. */
   forgetSample(sampleIdentity: AutoLanguageProbeSampleIdentity): boolean {
     if (!isSampleIdentity(sampleIdentity)) return false;
-    if (this.#resolvedSamples.has(sampleIdentity)) {
-      this.#resolved = undefined;
-      this.#resolvedSamples.clear();
-    }
+    const resolvedContributor = this.#resolvedSamples.has(sampleIdentity);
     const sample = this.#samples.get(sampleIdentity);
     const removed = this.#samples.delete(sampleIdentity);
     if (sample) {
@@ -193,13 +206,37 @@ export class AutoImageLanguageProbe {
     }
     for (const [language, votes] of this.#votes) {
       votes.ocrSamples.delete(sampleIdentity);
+      votes.strongOcrSamples.delete(sampleIdentity);
       for (const [label, owners] of votes.semanticLabels) {
         owners.delete(sampleIdentity);
         if (owners.size === 0) votes.semanticLabels.delete(label);
       }
       if (voteSampleCount(votes) === 0) this.#votes.delete(language);
     }
+    if (resolvedContributor) this.#recomputeResolution();
     return removed;
+  }
+
+  /**
+   * Restore one current-image vote from same-origin cached OCR that originally
+   * needed corroboration. A cached completed quorum never crosses the document
+   * boundary: each current source image contributes at most one Set member.
+   */
+  restoreDistinctImageVote(
+    sampleIdentity: AutoLanguageProbeSampleIdentity,
+    language: SupportedLanguage,
+    now: number,
+  ): AutoLanguageProbeObservationResult {
+    return this.#restoreOcrVote(sampleIdentity, language, false, now);
+  }
+
+  /** Restore current-pixel proof of the single-image strong-script threshold. */
+  restoreSingleStrongVote(
+    sampleIdentity: AutoLanguageProbeSampleIdentity,
+    language: SupportedLanguage,
+    now: number,
+  ): AutoLanguageProbeObservationResult {
+    return this.#restoreOcrVote(sampleIdentity, language, true, now);
   }
 
   candidateLanguages(
@@ -344,6 +381,17 @@ export class AutoImageLanguageProbe {
       return Object.freeze({ status: 'ignored' as const });
     }
     const { language, singleStrong } = inspected;
+    let votes = this.#votes.get(language);
+    if (!votes) {
+      votes = {
+        ocrSamples: new Set(),
+        strongOcrSamples: new Set(),
+        semanticLabels: new Map(),
+      };
+      this.#votes.set(language, votes);
+    }
+    votes.ocrSamples.add(observation.sampleIdentity);
+    if (singleStrong) votes.strongOcrSamples.add(observation.sampleIdentity);
     if (singleStrong) {
       return this.#resolve(
         language,
@@ -351,13 +399,6 @@ export class AutoImageLanguageProbe {
         [observation.sampleIdentity],
       );
     }
-
-    let votes = this.#votes.get(language);
-    if (!votes) {
-      votes = { ocrSamples: new Set(), semanticLabels: new Map() };
-      this.#votes.set(language, votes);
-    }
-    votes.ocrSamples.add(observation.sampleIdentity);
     const contributors = new Set(votes.ocrSamples);
     if (contributors.size >= 2) {
       return this.#resolve(language, 'distinct-images', contributors);
@@ -443,7 +484,11 @@ export class AutoImageLanguageProbe {
     }
     let votes = this.#votes.get(observation.detectedLanguage);
     if (!votes) {
-      votes = { ocrSamples: new Set(), semanticLabels: new Map() };
+      votes = {
+        ocrSamples: new Set(),
+        strongOcrSamples: new Set(),
+        semanticLabels: new Map(),
+      };
       this.#votes.set(observation.detectedLanguage, votes);
     }
     let labelOwners = votes.semanticLabels.get(normalizedLabel);
@@ -488,6 +533,7 @@ export class AutoImageLanguageProbe {
     contributors: Iterable<AutoLanguageProbeSampleIdentity>,
   ): Extract<AutoLanguageProbeObservationResult, { status: 'resolved' }> {
     this.#resolved = language;
+    this.#resolvedEvidence = evidence;
     this.#resolvedSamples.clear();
     for (const identity of contributors) this.#resolvedSamples.add(identity);
     return Object.freeze({
@@ -497,6 +543,75 @@ export class AutoImageLanguageProbe {
       attempts: this.#attempts,
       images: this.#samples.size,
     });
+  }
+
+  #restoreOcrVote(
+    sampleIdentity: AutoLanguageProbeSampleIdentity,
+    language: SupportedLanguage,
+    singleStrong: boolean,
+    now: number,
+  ): AutoLanguageProbeObservationResult {
+    if (
+      this.#resolved ||
+      this.remainingMs(now) <= 0 ||
+      !isSampleIdentity(sampleIdentity)
+    ) return Object.freeze({ status: 'ignored' as const });
+    let sample = this.#samples.get(sampleIdentity);
+    if (!sample) {
+      const slot = this.#firstAvailableImageSlot();
+      if (slot === undefined) {
+        return Object.freeze({ status: 'ignored' as const });
+      }
+      sample = {
+        slot,
+        routePlan: this.#routePlan(slot, sampleIdentity),
+        attemptedRoutes: new Set(),
+        activePixels: new Map(),
+      };
+      this.#samples.set(sampleIdentity, sample);
+    }
+    let votes = this.#votes.get(language);
+    if (!votes) {
+      votes = {
+        ocrSamples: new Set(),
+        strongOcrSamples: new Set(),
+        semanticLabels: new Map(),
+      };
+      this.#votes.set(language, votes);
+    }
+    votes.ocrSamples.add(sampleIdentity);
+    if (singleStrong) {
+      votes.strongOcrSamples.add(sampleIdentity);
+      return this.#resolve(language, 'single-strong-script', [sampleIdentity]);
+    }
+    return votes.ocrSamples.size >= 2
+      ? this.#resolve(language, 'distinct-images', votes.ocrSamples)
+      : Object.freeze({ status: 'continue' as const });
+  }
+
+  /** Re-reduce the surviving per-image votes after one sample disappears. */
+  #recomputeResolution(): void {
+    this.#resolved = undefined;
+    this.#resolvedEvidence = undefined;
+    this.#resolvedSamples.clear();
+    for (const [language, votes] of this.#votes) {
+      const strong = votes.strongOcrSamples.values().next().value as
+        | AutoLanguageProbeSampleIdentity
+        | undefined;
+      if (strong) {
+        this.#resolve(language, 'single-strong-script', [strong]);
+        return;
+      }
+      if (votes.ocrSamples.size >= 2) {
+        this.#resolve(language, 'distinct-images', votes.ocrSamples);
+        return;
+      }
+      const semantic = semanticVoteSampleIdentities(votes);
+      if (semantic.size >= 2) {
+        this.#resolve(language, 'distinct-images', semantic);
+        return;
+      }
+    }
   }
 
   #firstAvailableImageSlot(): number | undefined {

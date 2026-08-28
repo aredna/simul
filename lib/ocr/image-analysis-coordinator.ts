@@ -13,10 +13,6 @@ import {
 } from './offscreen-protocol';
 import type { AcquiredImagePixels } from './pixel-acquisition';
 import {
-  PADDLE_OCR_COMPILED,
-  TESSERACT_WASM_DIRECT_COMPILED,
-} from './compiled-provider-flags';
-import {
   emptyImageTextQualitySummary,
   filterImageTextResult,
   mergeImageTextQualitySummaries,
@@ -32,6 +28,7 @@ export const MAX_RECOGNITION_CACHE_ENTRIES = 128;
 export const MAX_RECOGNITION_CACHE_WEIGHT = 1_000_000;
 export const MAX_RECOGNITION_IN_FLIGHT = 2;
 export const RECOGNITION_CACHE_REGION_OVERHEAD = 32;
+export const RECOGNITION_CACHE_TTL_MS = 15 * 60 * 1_000;
 
 export interface ImageRecognitionRoute {
   readonly providerOrder?: readonly ImageTextProviderId[];
@@ -74,6 +71,15 @@ export interface ImageRecognitionCacheStats {
   readonly misses: number;
   readonly inFlightJoins: number;
   readonly loads: number;
+  /** Number of retained recognition-evidence records removed by TTL. */
+  readonly expirations?: number;
+  /** Number of explicit generation-fenced cache purges. */
+  readonly purges?: number;
+  /** Order-independent raw provider evidence retained for route recomposition. */
+  readonly providerEntries?: number;
+  readonly providerWeight?: number;
+  readonly providerHits?: number;
+  readonly providerMisses?: number;
 }
 
 export interface ImageRecognitionCoordinatorEnvironment {
@@ -84,6 +90,8 @@ export interface ImageRecognitionCoordinatorEnvironment {
   readonly maxCacheEntries?: number;
   readonly maxCacheWeight?: number;
   readonly maxInFlight?: number;
+  readonly maxCacheAgeMs?: number;
+  readonly now?: () => number;
 }
 
 type UncachedImageRecognitionResult =
@@ -105,6 +113,15 @@ interface CachedImageRecognitionResult {
 
 interface StoredImageRecognitionResult extends CachedImageRecognitionResult {
   readonly weight: number;
+  readonly expiresAt: number;
+  readonly recency: number;
+}
+
+interface StoredProviderRecognitionEvidence {
+  readonly result: ImageTextResult;
+  readonly weight: number;
+  readonly expiresAt: number;
+  readonly recency: number;
 }
 
 interface InFlightImageRecognition {
@@ -126,6 +143,8 @@ interface ImageRecognitionContinuationState {
   readonly corroboratingResults: readonly ImageTextResult[];
   readonly quality: ImageTextQualitySummary;
   readonly weight: number;
+  readonly expiresAt: number;
+  readonly recency: number;
 }
 
 /**
@@ -137,8 +156,14 @@ export class ImageRecognitionCoordinator {
   readonly #maxCacheEntries: number;
   readonly #maxCacheWeight: number;
   readonly #maxInFlight: number;
+  readonly #maxCacheAgeMs: number;
+  readonly #now: () => number;
   readonly #cache = new Map<string, StoredImageRecognitionResult>();
-  readonly #emptyConfirmations = new Set<string>();
+  readonly #providerEvidence = new Map<
+    string,
+    StoredProviderRecognitionEvidence
+  >();
+  readonly #emptyConfirmations = new Map<string, number>();
   readonly #inFlight = new Map<string, InFlightImageRecognition>();
   readonly #continuations = new Map<
     ImageRecognitionContinuation,
@@ -146,10 +171,17 @@ export class ImageRecognitionCoordinator {
   >();
   #generation = 0;
   #cacheWeight = 0;
+  #providerEvidenceWeight = 0;
   #hits = 0;
   #misses = 0;
   #inFlightJoins = 0;
   #loads = 0;
+  #activeRecognitionLoads = 0;
+  #expirations = 0;
+  #purges = 0;
+  #providerHits = 0;
+  #providerMisses = 0;
+  #recency = 0;
   #resetEpoch: number;
 
   constructor(private readonly environment: ImageRecognitionCoordinatorEnvironment) {
@@ -171,6 +203,11 @@ export class ImageRecognitionCoordinator {
       environment.maxInFlight,
       MAX_RECOGNITION_IN_FLIGHT,
     );
+    this.#maxCacheAgeMs = positiveDuration(
+      environment.maxCacheAgeMs,
+      RECOGNITION_CACHE_TTL_MS,
+    );
+    this.#now = environment.now ?? Date.now;
   }
 
   async recognize(
@@ -189,6 +226,13 @@ export class ImageRecognitionCoordinator {
     signal?.throwIfAborted();
     const state = this.#continuations.get(continuation);
     if (!state) throw new TypeError('Invalid image recognition continuation.');
+    if (state.expiresAt <= this.#now()) {
+      this.#expireContinuation(continuation);
+      throw new DOMException(
+        'Image recognition continuation expired.',
+        'AbortError',
+      );
+    }
     if (
       state.generation !== this.#generation ||
       state.resetEpoch !== this.#resetEpoch
@@ -210,12 +254,9 @@ export class ImageRecognitionCoordinator {
   ): Promise<ImageRecognitionResult> {
     signal?.throwIfAborted();
     const cacheKey = context?.cacheKey ?? recognitionCacheKey(pixels, route);
-    const cached = this.#cache.get(cacheKey);
+    const cached = this.#readCachedResult(cacheKey);
     if (cached) {
       this.#hits += 1;
-      this.#cache.delete(cacheKey);
-      this.#cache.set(cacheKey, cached);
-      if (cached.continuation) this.#touchContinuation(cached.continuation);
       return this.#withMetadata({
         status: 'complete',
         result: cached.result,
@@ -248,13 +289,14 @@ export class ImageRecognitionCoordinator {
     if (generation !== this.#generation) {
       throw new DOMException('Image recognition cache was cleared.', 'AbortError');
     }
-    if (this.#inFlight.size >= this.#maxInFlight) {
+    if (this.#activeRecognitionLoads >= this.#maxInFlight) {
       return this.#withMetadata({
         status: 'failed',
         code: 'host-overflow',
       }, 'miss');
     }
     this.#loads += 1;
+    this.#activeRecognitionLoads += 1;
     const task = this.#recognizeUncached(
       cacheKey,
       pixels,
@@ -266,12 +308,14 @@ export class ImageRecognitionCoordinator {
       if (this.#inFlight.get(cacheKey)?.task === task) {
         this.#inFlight.delete(cacheKey);
       }
+      this.#activeRecognitionLoads -= 1;
     });
     this.#inFlight.set(cacheKey, { generation, task });
     return this.#withMetadata(await task, 'miss');
   }
 
   snapshotStats(): ImageRecognitionCacheStats {
+    this.#expireRetained();
     return Object.freeze({
       entries: this.#cache.size + this.#continuations.size,
       weight: this.#cacheWeight,
@@ -279,20 +323,35 @@ export class ImageRecognitionCoordinator {
       misses: this.#misses,
       inFlightJoins: this.#inFlightJoins,
       loads: this.#loads,
+      expirations: this.#expirations,
+      purges: this.#purges,
+      providerEntries: this.#providerEvidence.size,
+      providerWeight: this.#providerEvidenceWeight,
+      providerHits: this.#providerHits,
+      providerMisses: this.#providerMisses,
     });
   }
 
   clear(): void {
     this.#generation += 1;
     this.#cache.clear();
+    this.#providerEvidence.clear();
     this.#continuations.clear();
     this.#cacheWeight = 0;
+    this.#providerEvidenceWeight = 0;
     this.#emptyConfirmations.clear();
+    // Generation-scoped join keys are invalid after a purge, but their real
+    // provider work remains capacity-bearing until each detached task settles.
     this.#inFlight.clear();
     this.#hits = 0;
     this.#misses = 0;
     this.#inFlightJoins = 0;
     this.#loads = 0;
+    this.#expirations = 0;
+    this.#providerHits = 0;
+    this.#providerMisses = 0;
+    this.#recency = 0;
+    this.#purges += 1;
   }
 
   /** Fence every cache, transient write, and host request from older resets. */
@@ -318,17 +377,24 @@ export class ImageRecognitionCoordinator {
       return { status: 'failed', code: 'provider-unavailable' };
     }
     const resetEpoch = this.#resetEpoch;
-    const inputKey = await this.environment.store.put(pixels.encoded);
-    if (
-      generation !== this.#generation ||
-      resetEpoch !== this.#resetEpoch
-    ) {
-      await this.environment.store.remove(inputKey).catch(() => undefined);
-      throw new DOMException('Image recognition reset advanced.', 'AbortError');
-    }
+    let inputKey: string | undefined;
+    const ensureInputKey = async (): Promise<string> => {
+      if (inputKey) return inputKey;
+      const stored = await this.environment.store.put(pixels.encoded);
+      if (
+        generation !== this.#generation ||
+        resetEpoch !== this.#resetEpoch
+      ) {
+        await this.environment.store.remove(stored).catch(() => undefined);
+        throw new DOMException('Image recognition reset advanced.', 'AbortError');
+      }
+      inputKey = stored;
+      return stored;
+    };
     try {
       let lastFailure: OcrHostErrorCode = 'provider-unavailable';
       let lastEmptyResult: CachedImageRecognitionResult | undefined;
+      const confirmingEmptyRoute = this.#hasFreshEmptyConfirmation(cacheKey);
       let hints: readonly ImageTextRegion[] = context?.hints ?? Object.freeze([]);
       const corroboratingResults: ImageTextResult[] = [
         ...(context?.corroboratingResults ?? []),
@@ -341,48 +407,74 @@ export class ImageRecognitionCoordinator {
       ) {
         const providerId = providers[providerIndex] as RuntimeImageTextProviderId;
         signal?.throwIfAborted();
-        const jobId = crypto.randomUUID();
-        const first = createJob(
-          providerId,
-          this.#clientId,
-          jobId,
-          0,
-          inputKey,
+        const providerCacheKey = providerRecognitionCacheKey(
           pixels,
           route,
-          hints,
+          providerId,
         );
-        if (!first) continue;
-        const firstResponse = await this.#run(
-          first,
-          generation,
-          resetEpoch,
-          signal,
-        );
-        let response = firstResponse;
-        if (shouldRetry(firstResponse)) {
-          const retry = createJob(
+        if (!providerCacheKey) continue;
+        // An exact route still requires two real OCR passes before a blank
+        // result becomes authoritative. Reordered routes may reuse the same
+        // completed provider operations, but a pending confirmation deliberately
+        // bypasses them for this one pass.
+        const retainedProvider = confirmingEmptyRoute
+          ? undefined
+          : this.#readProviderEvidence(providerCacheKey);
+        let rawResult: ImageTextResult | undefined = retainedProvider?.result;
+        if (!rawResult) {
+          const jobId = crypto.randomUUID();
+          const first = createJob(
             providerId,
             this.#clientId,
             jobId,
-            1,
-            inputKey,
+            0,
+            await ensureInputKey(),
             pixels,
             route,
             hints,
           );
-          if (retry) response = await this.#run(
-            retry,
+          if (!first) continue;
+          const firstResponse = await this.#run(
+            first,
             generation,
             resetEpoch,
             signal,
           );
+          let response = firstResponse;
+          if (shouldRetry(firstResponse)) {
+            const retry = createJob(
+              providerId,
+              this.#clientId,
+              jobId,
+              1,
+              inputKey!,
+              pixels,
+              route,
+              hints,
+            );
+            if (retry) response = await this.#run(
+              retry,
+              generation,
+              resetEpoch,
+              signal,
+            );
+          }
+          if (response.kind === 'simul:ocr-v1:error') {
+            lastFailure = response.code;
+            continue;
+          }
+          rawResult = response.result;
+          // A validated provider response is one completed OCR operation even
+          // when it contains no accepted text. Retain the raw result and
+          // reapply current-route quality/corroboration below. Host and worker
+          // errors never reach this write.
+          this.#rememberProviderEvidence(
+            providerCacheKey,
+            rawResult,
+            generation,
+          );
         }
-        if (response.kind === 'simul:ocr-v1:error') {
-          lastFailure = response.code;
-          continue;
-        }
-        const filtered = filterImageTextResult(response.result, {
+        const filtered = filterImageTextResult(rawResult, {
           minimumConfidence: repairOcrMinimumConfidence(
             route.minimumConfidence,
           ),
@@ -390,8 +482,8 @@ export class ImageRecognitionCoordinator {
         });
         quality = mergeImageTextQualitySummaries(quality, filtered.quality);
         if (!filtered.hasAcceptedText) {
-          hints = appendGeometryHints(hints, response.result.regions);
-          corroboratingResults.push(response.result);
+          hints = appendGeometryHints(hints, rawResult.regions);
+          corroboratingResults.push(rawResult);
           lastEmptyResult = {
             result: filtered.result,
             quality,
@@ -421,11 +513,11 @@ export class ImageRecognitionCoordinator {
                   nextProviderIndex: providerIndex + 1,
                   hints: appendGeometryHints(
                     hints,
-                    response.result.regions,
+                    rawResult.regions,
                   ),
                   corroboratingResults: Object.freeze([
                     ...corroboratingResults,
-                    response.result,
+                    rawResult,
                   ]),
                   quality,
                 }),
@@ -436,11 +528,14 @@ export class ImageRecognitionCoordinator {
         return { status: 'complete', ...accepted };
       }
       if (lastEmptyResult) {
-        if (this.#emptyConfirmations.has(cacheKey)) {
+        if (confirmingEmptyRoute) {
           this.#emptyConfirmations.delete(cacheKey);
           this.#remember(cacheKey, lastEmptyResult, generation);
         } else if (generation === this.#generation) {
-          this.#emptyConfirmations.add(cacheKey);
+          this.#emptyConfirmations.set(
+            cacheKey,
+            expiresAt(this.#now(), this.#maxCacheAgeMs),
+          );
           this.#boundEmptyConfirmations();
         }
         return {
@@ -450,12 +545,17 @@ export class ImageRecognitionCoordinator {
       }
       return { status: 'failed', code: lastFailure };
     } finally {
-      await this.environment.store.remove(inputKey).catch(() => undefined);
+      if (inputKey) {
+        await this.environment.store.remove(inputKey).catch(() => undefined);
+      }
     }
   }
 
   #createContinuation(
-    state: Omit<ImageRecognitionContinuationState, 'cacheKey' | 'weight'>,
+    state: Omit<
+      ImageRecognitionContinuationState,
+      'cacheKey' | 'weight' | 'expiresAt' | 'recency'
+    >,
   ): ImageRecognitionContinuation {
     const evidence = boundedImageRecognitionContinuationEvidence(
       state.hints,
@@ -475,6 +575,8 @@ export class ImageRecognitionCoordinator {
       hints: evidence.hints,
       corroboratingResults: evidence.corroboratingResults,
       weight: evidence.weight,
+      expiresAt: expiresAt(this.#now(), this.#maxCacheAgeMs),
+      recency: this.#nextRecency(),
     });
     this.#continuations.set(continuation, storedState);
     this.#cacheWeight += storedState.weight;
@@ -488,27 +590,143 @@ export class ImageRecognitionCoordinator {
   ): void {
     const state = knownState ?? this.#continuations.get(continuation);
     if (!state) return;
+    if (state.expiresAt <= this.#now()) {
+      this.#expireContinuation(continuation);
+      return;
+    }
+    const touched = Object.freeze({
+      ...state,
+      recency: this.#nextRecency(),
+    });
     this.#continuations.delete(continuation);
-    this.#continuations.set(continuation, state);
+    this.#continuations.set(continuation, touched);
   }
 
-  #deleteCachedResult(cacheKey: string): void {
+  #readCachedResult(
+    cacheKey: string,
+  ): StoredImageRecognitionResult | undefined {
     const cached = this.#cache.get(cacheKey);
-    if (!cached) return;
+    if (!cached) return undefined;
+    const now = this.#now();
+    if (cached.expiresAt <= now) {
+      this.#expireCachedResult(cacheKey);
+      return undefined;
+    }
+    if (cached.continuation) {
+      const continuationState = this.#continuations.get(cached.continuation);
+      if (!continuationState) {
+        this.#deleteCachedResult(cacheKey);
+        return undefined;
+      }
+      if (continuationState.expiresAt <= now) {
+        this.#expireContinuation(cached.continuation);
+        return undefined;
+      }
+      this.#touchContinuation(cached.continuation, continuationState);
+    }
+    const touched = Object.freeze({
+      ...cached,
+      recency: this.#nextRecency(),
+    });
+    this.#cache.delete(cacheKey);
+    this.#cache.set(cacheKey, touched);
+    return touched;
+  }
+
+  #readProviderEvidence(
+    cacheKey: string,
+  ): StoredProviderRecognitionEvidence | undefined {
+    const cached = this.#providerEvidence.get(cacheKey);
+    if (!cached) {
+      this.#providerMisses += 1;
+      return undefined;
+    }
+    if (cached.expiresAt <= this.#now()) {
+      this.#expireProviderEvidence(cacheKey);
+      this.#providerMisses += 1;
+      return undefined;
+    }
+    this.#providerHits += 1;
+    const touched = Object.freeze({
+      ...cached,
+      recency: this.#nextRecency(),
+    });
+    this.#providerEvidence.delete(cacheKey);
+    this.#providerEvidence.set(cacheKey, touched);
+    return touched;
+  }
+
+  #deleteCachedResult(cacheKey: string): boolean {
+    const cached = this.#cache.get(cacheKey);
+    if (!cached) return false;
     this.#cache.delete(cacheKey);
     this.#cacheWeight -= cached.weight;
+    return true;
   }
 
-  #deleteContinuation(continuation: ImageRecognitionContinuation): void {
+  #deleteProviderEvidence(cacheKey: string): boolean {
+    const cached = this.#providerEvidence.get(cacheKey);
+    if (!cached) return false;
+    this.#providerEvidence.delete(cacheKey);
+    this.#providerEvidenceWeight -= cached.weight;
+    return true;
+  }
+
+  #deleteContinuation(
+    continuation: ImageRecognitionContinuation,
+  ): number {
     const state = this.#continuations.get(continuation);
-    if (!state) return;
+    if (!state) return 0;
+    let deleted = 1;
     this.#continuations.delete(continuation);
     this.#cacheWeight -= state.weight;
     for (const [cacheKey, cached] of [...this.#cache]) {
       if (
         cacheKey === state.cacheKey ||
         cached.continuation === continuation
-      ) this.#deleteCachedResult(cacheKey);
+      ) {
+        if (this.#deleteCachedResult(cacheKey)) deleted += 1;
+      }
+    }
+    return deleted;
+  }
+
+  #expireCachedResult(cacheKey: string): void {
+    const cached = this.#cache.get(cacheKey);
+    if (!cached) return;
+    let deleted = cached.continuation
+      ? this.#deleteContinuation(cached.continuation)
+      : Number(this.#deleteCachedResult(cacheKey));
+    if (deleted === 0) deleted = Number(this.#deleteCachedResult(cacheKey));
+    this.#expirations += deleted;
+  }
+
+  #expireProviderEvidence(cacheKey: string): void {
+    this.#expirations += Number(this.#deleteProviderEvidence(cacheKey));
+  }
+
+  #expireContinuation(
+    continuation: ImageRecognitionContinuation,
+  ): void {
+    this.#expirations += this.#deleteContinuation(continuation);
+  }
+
+  #expireRetained(): void {
+    const now = this.#now();
+    for (const [cacheKey, cached] of [...this.#cache]) {
+      if (cached.expiresAt <= now) this.#expireCachedResult(cacheKey);
+    }
+    for (const [cacheKey, cached] of [...this.#providerEvidence]) {
+      if (cached.expiresAt <= now) this.#expireProviderEvidence(cacheKey);
+    }
+    for (const [continuation, state] of [...this.#continuations]) {
+      if (state.expiresAt <= now) this.#expireContinuation(continuation);
+    }
+    for (const [cacheKey, confirmationExpiresAt] of this.#emptyConfirmations) {
+      if (confirmationExpiresAt <= now) {
+        this.#emptyConfirmations.delete(cacheKey);
+        this.#expirations += 1;
+      }
     }
   }
 
@@ -516,22 +734,87 @@ export class ImageRecognitionCoordinator {
     protectedContinuation?: ImageRecognitionContinuation,
   ): void {
     while (
-      this.#cache.size + this.#continuations.size > this.#maxCacheEntries ||
-      this.#cacheWeight > this.#maxCacheWeight
+      this.#cache.size +
+          this.#continuations.size +
+          this.#providerEvidence.size +
+          this.#emptyConfirmations.size >
+        this.#maxCacheEntries ||
+      this.#cacheWeight + this.#providerEvidenceWeight >
+        this.#maxCacheWeight
     ) {
-      const oldestCacheKey = this.#cache.keys().next().value as
-        | string
-        | undefined;
-      if (oldestCacheKey !== undefined) {
-        this.#deleteCachedResult(oldestCacheKey);
+      const oldestEmptyConfirmation = this.#emptyConfirmations.keys().next()
+        .value as string | undefined;
+      if (oldestEmptyConfirmation !== undefined) {
+        this.#emptyConfirmations.delete(oldestEmptyConfirmation);
         continue;
       }
-      const oldestContinuation = [...this.#continuations.keys()].find(
-        (candidate) => candidate !== protectedContinuation,
+      const oldest = this.#oldestRetainedRecognitionRecord(
+        protectedContinuation,
       );
-      if (!oldestContinuation) break;
-      this.#deleteContinuation(oldestContinuation);
+      if (!oldest) break;
+      if (oldest.kind === 'result') {
+        // A protected continuation may still be returned to the caller even
+        // when its optional route-result cache entry must be dropped.
+        this.#deleteCachedResult(oldest.key);
+      } else if (oldest.kind === 'provider') {
+        this.#deleteProviderEvidence(oldest.key);
+      } else {
+        this.#deleteContinuation(oldest.key);
+      }
     }
+  }
+
+  #oldestRetainedRecognitionRecord(
+    protectedContinuation?: ImageRecognitionContinuation,
+  ):
+    | { readonly kind: 'result'; readonly key: string; readonly recency: number }
+    | { readonly kind: 'provider'; readonly key: string; readonly recency: number }
+    | {
+        readonly kind: 'continuation';
+        readonly key: ImageRecognitionContinuation;
+        readonly recency: number;
+      }
+    | undefined {
+    // Raw provider evidence is a recomposition accelerator; a completed route
+    // result is the directly reusable answer. Shed the accelerator first when
+    // an intentionally tiny test/user budget cannot hold both representations.
+    let oldestProvider:
+      | { readonly kind: 'provider'; readonly key: string; readonly recency: number }
+      | undefined;
+    for (const [key, value] of this.#providerEvidence) {
+      if (!oldestProvider || value.recency < oldestProvider.recency) {
+        oldestProvider = { kind: 'provider', key, recency: value.recency };
+      }
+    }
+    if (oldestProvider) return oldestProvider;
+
+    let oldest:
+      | { readonly kind: 'result'; readonly key: string; readonly recency: number }
+      | {
+          readonly kind: 'continuation';
+          readonly key: ImageRecognitionContinuation;
+          readonly recency: number;
+        }
+      | undefined;
+    for (const [key, value] of this.#cache) {
+      if (!oldest || value.recency < oldest.recency) {
+        oldest = { kind: 'result', key, recency: value.recency };
+      }
+    }
+    for (const [key, value] of this.#continuations) {
+      if (
+        key !== protectedContinuation &&
+        (!oldest || value.recency < oldest.recency)
+      ) {
+        oldest = { kind: 'continuation', key, recency: value.recency };
+      }
+    }
+    return oldest;
+  }
+
+  #nextRecency(): number {
+    this.#recency += 1;
+    return this.#recency;
   }
 
   #withMetadata(
@@ -561,21 +844,54 @@ export class ImageRecognitionCoordinator {
     const weight = imageRecognitionCacheWeight(result.result);
     if (weight > this.#maxCacheWeight) return;
     const replaced = this.#cache.get(cacheKey);
-    if (replaced) this.#cacheWeight -= replaced.weight;
-    this.#cache.delete(cacheKey);
-    this.#cache.set(cacheKey, { ...result, weight });
+    if (
+      replaced?.continuation &&
+      replaced.continuation !== result.continuation
+    ) {
+      this.#deleteContinuation(replaced.continuation);
+    } else if (replaced) {
+      this.#deleteCachedResult(cacheKey);
+    }
+    this.#cache.set(cacheKey, {
+      ...result,
+      weight,
+      expiresAt: expiresAt(this.#now(), this.#maxCacheAgeMs),
+      recency: this.#nextRecency(),
+    });
     this.#cacheWeight += weight;
     this.#boundRetainedRecognitionMemory(result.continuation);
   }
 
+  #rememberProviderEvidence(
+    cacheKey: string,
+    result: ImageTextResult,
+    generation: number,
+  ): void {
+    if (generation !== this.#generation) return;
+    const weight = imageRecognitionCacheWeight(result);
+    if (weight > this.#maxCacheWeight) return;
+    this.#deleteProviderEvidence(cacheKey);
+    this.#providerEvidence.set(cacheKey, Object.freeze({
+      result,
+      weight,
+      expiresAt: expiresAt(this.#now(), this.#maxCacheAgeMs),
+      recency: this.#nextRecency(),
+    }));
+    this.#providerEvidenceWeight += weight;
+    this.#boundRetainedRecognitionMemory();
+  }
+
   #boundEmptyConfirmations(): void {
-    while (this.#emptyConfirmations.size > this.#maxCacheEntries) {
-      const oldest = this.#emptyConfirmations.values().next().value as
-        | string
-        | undefined;
-      if (!oldest) return;
-      this.#emptyConfirmations.delete(oldest);
-    }
+    this.#boundRetainedRecognitionMemory();
+  }
+
+  #hasFreshEmptyConfirmation(cacheKey: string): boolean {
+    const confirmationExpiresAt = this.#emptyConfirmations.get(cacheKey);
+    if (confirmationExpiresAt === undefined) return false;
+    if (confirmationExpiresAt > this.#now()) return true;
+    this.#emptyConfirmations.delete(cacheKey);
+    this.#expirations += 1;
+    return false;
   }
 
   async #run(
@@ -715,31 +1031,6 @@ function createJob(
       modelVersion: 'platform',
     });
   }
-  if (providerId === 'paddleocr-wasm') {
-    if (!PADDLE_OCR_COMPILED || !route.sourceLanguage) return undefined;
-    return Object.freeze({
-      ...base,
-      providerId,
-      languageGroup: route.sourceLanguage,
-      providerVersion: 'paddleocr-js-0.4.2',
-      modelVersion: 'PP-OCRv6_tiny_det+PP-OCRv6_tiny_rec',
-    });
-  }
-  if (providerId === 'tesseract-wasm-direct') {
-    const languageGroup = tesseractLanguageGroupForProvider(providerId, route);
-    if (
-      !TESSERACT_WASM_DIRECT_COMPILED ||
-      !languageGroup ||
-      !route.modelVersion
-    ) return undefined;
-    return Object.freeze({
-      ...base,
-      providerId,
-      languageGroup,
-      providerVersion: 'tesseract-wasm-0.11.0',
-      modelVersion: route.modelVersion,
-    });
-  }
   if (!route.languageGroup || !route.modelVersion) return undefined;
   return Object.freeze({
     ...base,
@@ -750,41 +1041,17 @@ function createJob(
   });
 }
 
+/**
+ * The coordinator's route order is execution semantics because it returns the
+ * first acceptable result. Callers that retain per-provider evidence should
+ * submit singleton routes so saved UI priority never enters that evidence key.
+ */
 function recognitionCacheKey(
   pixels: AcquiredImagePixels,
   route: ImageRecognitionRoute,
 ): string {
   const providers = effectiveRuntimeOrder(route).map((providerId) =>
-    providerId === 'chrome-text-detector'
-      ? [
-          providerId,
-          'chrome-text-detector-v1',
-          'platform',
-          route.sourceLanguage ?? '',
-        ]
-      : PADDLE_OCR_COMPILED && providerId === 'paddleocr-wasm'
-        ? [
-            providerId,
-            'paddleocr-js-0.4.2',
-            'PP-OCRv6_tiny_det+PP-OCRv6_tiny_rec',
-            route.sourceLanguage ?? '',
-          ]
-        : TESSERACT_WASM_DIRECT_COMPILED &&
-            providerId === 'tesseract-wasm-direct'
-          ? [
-              providerId,
-              'tesseract-wasm-0.11.0',
-              route.modelVersion ?? '',
-              route.sourceLanguage ?? '',
-              tesseractLanguageGroupForProvider(providerId, route) ?? '',
-            ]
-          : [
-              providerId,
-              'tesseract.js-7.0.0',
-              route.modelVersion ?? '',
-              route.sourceLanguage ?? '',
-              route.languageGroup ?? '',
-            ]
+    providerRecognitionIdentity(providerId, route)
   );
   return JSON.stringify([
     'image-text-v3',
@@ -794,6 +1061,55 @@ function recognitionCacheKey(
     pixels.bitmapWidth,
     pixels.bitmapHeight,
     pixels.pixelHash,
+  ]);
+}
+
+/**
+ * Raw provider evidence is order-independent. Every compiled provider runtime
+ * currently recognizes the complete bitmap and ignores advisory geometry
+ * hints; hints affect only coordinator-side corroboration. The key therefore
+ * describes the actual provider operation rather than the preceding route.
+ * Quality filtering and corroboration are reapplied whenever a route is
+ * composed, so priority or threshold changes can reuse each completed OCR
+ * operation without treating the old route as final.
+ */
+function providerRecognitionCacheKey(
+  pixels: AcquiredImagePixels,
+  route: ImageRecognitionRoute,
+  providerId: RuntimeImageTextProviderId,
+): string | undefined {
+  const provider = providerRecognitionIdentity(providerId, route);
+  if (!provider) return undefined;
+  return JSON.stringify([
+    'image-text-provider-v2-complete-bitmap',
+    provider,
+    pixels.preprocessingVersion,
+    pixels.bitmapWidth,
+    pixels.bitmapHeight,
+    pixels.pixelHash,
+  ]);
+}
+
+function providerRecognitionIdentity(
+  providerId: RuntimeImageTextProviderId,
+  route: ImageRecognitionRoute,
+): readonly string[] | undefined {
+  if (providerId === 'chrome-text-detector') {
+    if (!route.sourceLanguage) return undefined;
+    return Object.freeze([
+      providerId,
+      'chrome-text-detector-v1',
+      'platform',
+      route.sourceLanguage,
+    ]);
+  }
+  if (!route.languageGroup || !route.modelVersion) return undefined;
+  return Object.freeze([
+    providerId,
+    'tesseract.js-7.0.0',
+    route.modelVersion,
+    route.sourceLanguage ?? '',
+    route.languageGroup,
   ]);
 }
 
@@ -840,17 +1156,6 @@ function snapshotRecognitionRoute(
   });
 }
 
-/** The direct runtime loads one model; the wrapper can combine horizontal/vertical Japanese. */
-function tesseractLanguageGroupForProvider(
-  providerId: RuntimeImageTextProviderId,
-  route: ImageRecognitionRoute,
-): string | undefined {
-  return providerId === 'tesseract-wasm-direct' &&
-      route.languageGroup === 'jpn+jpn_vert'
-    ? 'jpn'
-    : route.languageGroup;
-}
-
 function effectiveRuntimeOrder(
   route: ImageRecognitionRoute,
 ): readonly RuntimeImageTextProviderId[] {
@@ -861,12 +1166,7 @@ function effectiveRuntimeOrder(
     if (
       (
         providerId === 'chrome-text-detector' ||
-        providerId === 'tesseract' ||
-        (PADDLE_OCR_COMPILED && providerId === 'paddleocr-wasm') ||
-        (
-          TESSERACT_WASM_DIRECT_COMPILED &&
-          providerId === 'tesseract-wasm-direct'
-        )
+        providerId === 'tesseract'
       ) &&
       !seen.has(providerId)
     ) {
@@ -879,10 +1179,7 @@ function effectiveRuntimeOrder(
 
 type RuntimeImageTextProviderId = Extract<
   ImageTextProviderId,
-  | 'chrome-text-detector'
-  | 'tesseract'
-  | 'paddleocr-wasm'
-  | 'tesseract-wasm-direct'
+  'chrome-text-detector' | 'tesseract'
 >;
 
 function appendGeometryHints(
@@ -1015,6 +1312,16 @@ function positiveInteger(
   return Number.isSafeInteger(value) && Number(value) > 0
     ? Math.min(Number(value), maximum)
     : fallback;
+}
+
+function positiveDuration(value: number | undefined, fallback: number): number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0
+    ? value
+    : fallback;
+}
+
+function expiresAt(now: number, maxAgeMs: number): number {
+  return Math.min(Number.MAX_SAFE_INTEGER, now + maxAgeMs);
 }
 
 function isAbortError(error: unknown): boolean {

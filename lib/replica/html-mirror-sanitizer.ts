@@ -1,5 +1,6 @@
 import {
   MAX_SOURCE_SELECTED_OPTION_INDEXES,
+  createSourceControlledContentPolicy,
   hasSourceActivationElementAncestor,
   hasSourceCredentialSecretAncestor,
   hasSourcePrivateElementAncestor,
@@ -15,14 +16,17 @@ import {
   readSourceFlatTreeElementPath,
   readSourceStructuralAttributes,
   sourceAttributesArePrivate,
+  sourceControlledContentIsWithheld,
   sourceElementStartsPrivateRegionInContext,
   type SourceControlText,
+  type SourceControlledContentPolicy,
 } from './source-privacy-policy';
 import type { SelectableReplicaFidelityPolicy } from './fidelity-policy';
 import {
   isSourceSecretPlaceholderTagName,
   sourceSecretPlaceholderTagName,
 } from './source-secret-classifier';
+import { isSafeStaticSvgDataImage } from './static-svg-data-image';
 import { hasExactKeysWithOptional } from '../exact-record';
 
 export const MAX_HTML_MIRROR_BYTES = 8 * 1024 * 1024;
@@ -271,7 +275,7 @@ export interface HtmlMirrorReadBudget {
 }
 
 export interface SourceBaseReadPolicy {
-  readonly disclosureTargets: ReadonlySet<Element>;
+  readonly controlledContent: SourceControlledContentPolicy;
 }
 
 /** Precomputes the bounded relationship facts shared by base-content readers. */
@@ -279,7 +283,7 @@ export function createSourceBaseReadPolicy(
   sourceDocument: Document,
 ): SourceBaseReadPolicy {
   return Object.freeze({
-    disclosureTargets: collectSourceControlledDisclosureTargets(sourceDocument),
+    controlledContent: createSourceControlledContentPolicy(sourceDocument),
   });
 }
 
@@ -288,11 +292,12 @@ export function sourceBaseTextIsPublic(
   source: Node,
   policy: SourceBaseReadPolicy,
 ): boolean {
+  if (policy.controlledContent.incomplete) return false;
   try {
     const element = nearestElement(source);
     return !element || !hasSourceBaseWithheldAncestor(
       element,
-      policy.disclosureTargets,
+      policy.controlledContent,
     );
   } catch {
     // A detached non-element has no element privacy boundary to inherit.
@@ -337,7 +342,7 @@ interface SerializeContext {
   readonly depth: number;
   readonly representability: HtmlMirrorRepresentabilityCollector;
   readonly fidelityPolicy: SelectableReplicaFidelityPolicy;
-  readonly disclosureTargets: ReadonlySet<Element>;
+  readonly controlledContent: SourceControlledContentPolicy;
 }
 
 type NativeSelectParentContext = false | 'select' | 'optgroup' | 'option';
@@ -690,9 +695,10 @@ export function sanitizeSourceSubtrees(
   fidelityPolicy: SelectableReplicaFidelityPolicy = 'conservative',
 ): readonly (HtmlMirrorNode | undefined)[] | undefined {
   try {
-    const disclosureTargets = collectSourceControlledDisclosureTargets(
+    const controlledContent = createSourceControlledContentPolicy(
       sources[0]?.ownerDocument,
     );
+    if (controlledContent.incomplete) throw new HtmlMirrorCapacityError();
     return Object.freeze(sources.map((source) => {
       const sourceElement = nearestElement(source);
       const inheritedElement = source.nodeType === Node.ELEMENT_NODE && sourceElement
@@ -704,7 +710,7 @@ export function sanitizeSourceSubtrees(
         budget,
         styleWork,
         privateRegion: inheritedElement
-          ? hasSourceBaseWithheldAncestor(inheritedElement, disclosureTargets)
+          ? hasSourceBaseWithheldAncestor(inheritedElement, controlledContent)
           : false,
         privateAttributeRegion: inheritedElement
           ? hasSourcePrivateAttributeElementAncestor(inheritedElement)
@@ -725,7 +731,7 @@ export function sanitizeSourceSubtrees(
         depth: 0,
         representability,
         fidelityPolicy,
-        disclosureTargets,
+        controlledContent,
       });
     }));
   } catch (error) {
@@ -744,17 +750,18 @@ export function sanitizeSourceChildren(
   fidelityPolicy: SelectableReplicaFidelityPolicy = 'conservative',
   sharedBudget?: HtmlMirrorReadBudget,
   sharedStyleWork?: HtmlMirrorStyleWorkBudget,
+  precomputedControlledContent?: SourceControlledContentPolicy,
 ): readonly HtmlMirrorNode[] | undefined {
   try {
     const budget = sharedBudget ?? createHtmlMirrorReadBudget();
     const styleWork = sharedStyleWork ?? createHtmlMirrorStyleWorkBudget();
-    const disclosureTargets = collectSourceControlledDisclosureTargets(
-      source.ownerDocument,
-    );
+    const controlledContent = precomputedControlledContent ??
+      createSourceControlledContentPolicy(source.ownerDocument);
+    if (controlledContent.incomplete) throw new HtmlMirrorCapacityError();
     const result: HtmlMirrorNode[] = [];
     const parentElement = nearestElement(source);
     const privateRegion = parentElement
-      ? hasSourceBaseWithheldAncestor(parentElement, disclosureTargets)
+      ? hasSourceBaseWithheldAncestor(parentElement, controlledContent)
       : false;
     const privateAttributeRegion = parentElement
       ? hasSourcePrivateAttributeElementAncestor(parentElement)
@@ -788,7 +795,7 @@ export function sanitizeSourceChildren(
         depth: 0,
         representability,
         fidelityPolicy,
-        disclosureTargets,
+        controlledContent,
       });
       if (serialized) result.push(serialized);
     }
@@ -806,6 +813,7 @@ export function sanitizeSourceAttributes(
   baseUrl = source.ownerDocument?.baseURI ?? 'about:blank',
   representability = createHtmlMirrorRepresentabilityCollector(),
   fidelityPolicy: SelectableReplicaFidelityPolicy = 'conservative',
+  precomputedControlledContent?: SourceControlledContentPolicy,
 ): readonly (readonly [string, string])[] | undefined {
   try {
     // A hard-secret node is represented only by a fresh structural
@@ -813,12 +821,18 @@ export function sanitizeSourceAttributes(
     // selectors, resources, or inline presentation.
     if (hasSourceCredentialSecretAncestor(source)) return undefined;
     if (isUnsafeSourceElement(source, fidelityPolicy, baseUrl)) return undefined;
+    const controlledContent = precomputedControlledContent ??
+      createSourceControlledContentPolicy(source.ownerDocument);
+    if (controlledContent.incomplete) {
+      incrementRepresentability(representability, 'capacityOmissionCount');
+      return undefined;
+    }
     return sanitizeAttributes(
       source,
       source.localName.toLowerCase(),
       hasSourceBaseWithheldAncestor(
         source,
-        collectSourceControlledDisclosureTargets(source.ownerDocument),
+        controlledContent,
       ),
       hasSourceActivationElementAncestor(source),
       hasSourcePrivateAttributeElementAncestor(source),
@@ -851,10 +865,13 @@ export function sanitizeSourceElementHints(
       ? isSourceSelectEntryVisuallyHidden(source)
       : isCanonicalClippedSourceElement(source);
   const selectedImageSource = tagName === 'img'
-    && !hasSourceBaseWithheldAncestor(
-      source,
-      collectSourceControlledDisclosureTargets(source.ownerDocument),
-    )
+    && (() => {
+      const controlledContent = createSourceControlledContentPolicy(
+        source.ownerDocument,
+      );
+      return !controlledContent.incomplete &&
+        !hasSourceBaseWithheldAncestor(source, controlledContent);
+    })()
     ? selectedSourceFor(source, baseUrl)
     : undefined;
   const canvasBackgroundColor = tagName === 'html'
@@ -890,11 +907,22 @@ export function sanitizeSourceDocument(
   registry: HtmlMirrorIdRegistry,
   representability = createHtmlMirrorRepresentabilityCollector(),
   fidelityPolicy: SelectableReplicaFidelityPolicy = 'conservative',
+  precomputedControlledContent?: SourceControlledContentPolicy,
 ): HtmlMirrorDocumentGraph | undefined {
   const documentElement = sourceDocument.documentElement;
   if (!documentElement) return undefined;
   const budget = createHtmlMirrorReadBudget();
   const styleWork = createHtmlMirrorStyleWorkBudget();
+  const controlledContent = precomputedControlledContent ??
+    createSourceControlledContentPolicy(
+      sourceDocument,
+      sourceWindow,
+      MAX_HTML_MIRROR_NODES,
+    );
+  if (controlledContent.incomplete) {
+    incrementRepresentability(representability, 'capacityOmissionCount');
+    return undefined;
+  }
   const root = serializeNode(documentElement, {
     registry,
     baseUrl: sourceDocument.baseURI,
@@ -910,7 +938,7 @@ export function sanitizeSourceDocument(
     depth: 0,
     representability,
     fidelityPolicy,
-    disclosureTargets: collectSourceControlledDisclosureTargets(sourceDocument),
+    controlledContent,
   });
   if (!root || root.kind !== 'element' || root.tagName !== 'html') return undefined;
   const adoptedStyleSheets = captureAdoptedStyleSheets(
@@ -1532,7 +1560,7 @@ function serializeNode(
       isSourcePublicMenuRoleValue(liveElement.getAttribute('role'))) ||
     elementStartsHiddenOrControlledDisclosureRegion(
       liveElement,
-      context.disclosureTargets,
+      context.controlledContent,
     );
   const activationRegion = context.activationRegion ||
     elementStartsActivationRegion(liveElement);
@@ -3795,10 +3823,10 @@ function elementStartsPrivateRegion(element: Element): boolean {
  */
 function elementStartsHiddenOrControlledDisclosureRegion(
   element: Element,
-  disclosureTargets: ReadonlySet<Element>,
+  controlledContent: SourceControlledContentPolicy,
 ): boolean {
   try {
-    if (disclosureTargets.has(element)) return true;
+    if (sourceControlledContentIsWithheld(element, controlledContent)) return true;
     if (
       element.hasAttribute('hidden') ||
       element.getAttribute('aria-hidden')?.trim().toLowerCase() === 'true'
@@ -3826,7 +3854,7 @@ function elementStartsHiddenOrControlledDisclosureRegion(
 
 function hasSourceBaseWithheldAncestor(
   element: Element,
-  disclosureTargets: ReadonlySet<Element>,
+  controlledContent: SourceControlledContentPolicy,
 ): boolean {
   if (hasSourcePrivateElementAncestor(element)) return true;
   const path = readSourceFlatTreeElementPath(element);
@@ -3837,65 +3865,10 @@ function hasSourceBaseWithheldAncestor(
       tagName === 'select' ||
       (!isNativeSelectSemanticTag(tagName) &&
         isSourcePublicMenuRoleValue(current.getAttribute('role'))) ||
-      elementStartsHiddenOrControlledDisclosureRegion(current, disclosureTargets)
+      elementStartsHiddenOrControlledDisclosureRegion(current, controlledContent)
     ) return true;
   }
   return false;
-}
-
-/** One bounded, pass-local relationship index; never retained across mutation. */
-function collectSourceControlledDisclosureTargets(
-  sourceDocument: Document | null | undefined,
-): ReadonlySet<Element> {
-  const targets = new Set<Element>();
-  const root = sourceDocument?.documentElement;
-  if (!root) return targets;
-  try {
-    const idsByRoot = new Map<Node, Map<string, Element | null>>();
-    const controllers: Element[] = [];
-    const pending: Node[] = [root];
-    let visited = 0;
-    while (pending.length > 0 && visited < MAX_HTML_MIRROR_NODES) {
-      const node = pending.pop();
-      if (!node) break;
-      visited += 1;
-      if (node.nodeType === 11) {
-        pending.push(...node.childNodes);
-        continue;
-      }
-      if (node.nodeType !== 1) continue;
-      const element = node as Element;
-      const scope = element.getRootNode();
-      const id = element.getAttribute('id')?.trim();
-      if (id && !/\s/u.test(id) && id.length <= 256) {
-        let ids = idsByRoot.get(scope);
-        if (!ids) idsByRoot.set(scope, ids = new Map());
-        ids.set(id, ids.has(id) ? null : element);
-      }
-      if (element.hasAttribute('aria-controls')) controllers.push(element);
-      pending.push(...element.childNodes);
-      if (element.shadowRoot?.mode === 'open') pending.push(element.shadowRoot);
-    }
-    if (pending.length > 0 || controllers.length > 1_024) {
-      // Capacity ambiguity fails closed for every discovered target.
-      for (const ids of idsByRoot.values()) {
-        for (const candidate of ids.values()) if (candidate) targets.add(candidate);
-      }
-      return targets;
-    }
-    for (const controller of controllers) {
-      const ids = idsByRoot.get(controller.getRootNode());
-      const controlled = controller.getAttribute('aria-controls')?.trim();
-      for (const id of controlled?.split(/\s+/u) ?? []) {
-        const target = ids?.get(id);
-        if (target) targets.add(target);
-      }
-    }
-  } catch {
-    // A failed index contains no author content; direct hidden/private checks
-    // below still fail closed for unreadable nodes.
-  }
-  return targets;
 }
 
 function isNativeSelectSemanticTag(tagName: string): boolean {
@@ -3982,311 +3955,6 @@ function isRepresentableSourceNativeSelectChild(node: Node): boolean {
 function elementStartsActivationRegion(element: Element): boolean {
   return isSourceActivationTagName(element.localName) ||
     isSourceActivationRoleValue(element.getAttribute('role'));
-}
-
-const STATIC_SVG_ELEMENTS = new Set([
-  'circle',
-  'clippath',
-  'defs',
-  'ellipse',
-  'feblend',
-  'fecolormatrix',
-  'fecomposite',
-  'fedropshadow',
-  'feflood',
-  'fegaussianblur',
-  'femerge',
-  'femergenode',
-  'femorphology',
-  'feoffset',
-  'fetile',
-  'feturbulence',
-  'filter',
-  'g',
-  'line',
-  'lineargradient',
-  'marker',
-  'mask',
-  'path',
-  'pattern',
-  'polygon',
-  'polyline',
-  'radialgradient',
-  'rect',
-  'stop',
-  'svg',
-  'symbol',
-  'use',
-]);
-
-const STATIC_SVG_ATTRIBUTES = new Set([
-  'aria-hidden',
-  'basefrequency',
-  'class',
-  'clip-path',
-  'clip-rule',
-  'clippathunits',
-  'color-interpolation-filters',
-  'cx',
-  'cy',
-  'd',
-  'dx',
-  'dy',
-  'edgemode',
-  'fill',
-  'fill-opacity',
-  'fill-rule',
-  'focusable',
-  'filter',
-  'filterunits',
-  'flood-color',
-  'flood-opacity',
-  'fx',
-  'fy',
-  'gradienttransform',
-  'gradientunits',
-  'height',
-  'href',
-  'id',
-  'in',
-  'in2',
-  'k1',
-  'k2',
-  'k3',
-  'k4',
-  'linecap',
-  'linejoin',
-  'marker-end',
-  'marker-mid',
-  'marker-start',
-  'markerheight',
-  'markerunits',
-  'markerwidth',
-  'mask',
-  'maskcontentunits',
-  'maskunits',
-  'mode',
-  'numoctaves',
-  'offset',
-  'opacity',
-  'operator',
-  'orient',
-  'patterncontentunits',
-  'patterntransform',
-  'patternunits',
-  'points',
-  'preserveaspectratio',
-  'primitiveunits',
-  'r',
-  'radius',
-  'refx',
-  'refy',
-  'result',
-  'role',
-  'rx',
-  'ry',
-  'scale',
-  'seed',
-  'stddeviation',
-  'stitchtiles',
-  'stop-color',
-  'stop-opacity',
-  'stroke',
-  'stroke-dasharray',
-  'stroke-dashoffset',
-  'stroke-linecap',
-  'stroke-linejoin',
-  'stroke-miterlimit',
-  'stroke-opacity',
-  'stroke-width',
-  'transform',
-  'type',
-  'values',
-  'vector-effect',
-  'viewbox',
-  'width',
-  'x',
-  'x1',
-  'x2',
-  'xmlns',
-  'y',
-  'y1',
-  'y2',
-  'xchannelselector',
-  'ychannelselector',
-]);
-
-/**
- * Admit only a small, URL-encoded, shape-only SVG profile. It deliberately
- * excludes CSS, links, references, animation, text, entities, and every
- * resource-bearing element so an image cannot become a second active graph.
- */
-function isSafeStaticSvgDataImage(value: string): boolean {
-  if (value.length > MAX_HTML_MIRROR_STRING) return false;
-  const match = /^data:image\/svg\+xml(?:;charset=(?:utf-8|us-ascii))?,([\s\S]*)$/iu.exec(
-    value,
-  );
-  if (!match) return false;
-  let xml: string;
-  try {
-    xml = decodeURIComponent(match[1]!);
-  } catch {
-    return false;
-  }
-  if (
-    xml.length === 0 ||
-    xml.length > MAX_HTML_MIRROR_STRING ||
-    /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(xml) ||
-    /(?:<!|<\?|&|javascript\s*:|data\s*:)/iu.test(xml)
-  ) return false;
-
-  const stack: string[] = [];
-  let rootSeen = false;
-  let elementCount = 0;
-  let filterPrimitiveCount = 0;
-  let offset = 0;
-  const tokens = xml.matchAll(/<[^<>]*>/gu);
-  for (const token of tokens) {
-    const index = token.index;
-    if (index === undefined || xml.slice(offset, index).trim() !== '') return false;
-    const rawToken = token[0];
-    offset = index + rawToken.length;
-    const parsed = /^<\s*(\/?)\s*([a-z][a-z0-9-]*)\s*([\s\S]*?)\s*(\/?)>$/iu.exec(
-      rawToken,
-    );
-    if (!parsed) return false;
-    const closing = parsed[1] === '/';
-    const tagName = parsed[2]!.toLowerCase();
-    const attributeText = parsed[3] ?? '';
-    const selfClosing = parsed[4] === '/';
-    if (!STATIC_SVG_ELEMENTS.has(tagName)) return false;
-    if (closing) {
-      if (selfClosing || attributeText.trim() !== '' || stack.pop() !== tagName) {
-        return false;
-      }
-      continue;
-    }
-    if (!rootSeen) {
-      if (tagName !== 'svg' || stack.length !== 0) return false;
-      rootSeen = true;
-    } else if (stack.length === 0) {
-      return false;
-    }
-    elementCount += 1;
-    if (elementCount > 512) return false;
-    if (tagName.startsWith('fe')) {
-      filterPrimitiveCount += 1;
-      if (filterPrimitiveCount > 64) return false;
-    }
-    if (!readSafeStaticSvgAttributes(attributeText, tagName)) return false;
-    if (!selfClosing) {
-      if (stack.length >= MAX_HTML_MIRROR_DEPTH) return false;
-      stack.push(tagName);
-    }
-  }
-  return rootSeen && stack.length === 0 && xml.slice(offset).trim() === '';
-}
-
-function readSafeStaticSvgAttributes(
-  source: string,
-  tagName: string,
-): boolean {
-  const root = tagName === 'svg';
-  const seen = new Set<string>();
-  let offset = 0;
-  while (offset < source.length) {
-    while (offset < source.length && /\s/u.test(source[offset]!)) offset += 1;
-    if (offset >= source.length) break;
-    const attribute = /^([a-z][a-z0-9-]*)\s*=\s*(["'])([\s\S]*?)\2/iu.exec(
-      source.slice(offset),
-    );
-    if (!attribute) return false;
-    const name = attribute[1]!.toLowerCase();
-    const value = attribute[3] ?? '';
-    const decodedValue = decodeCssEscapes(value);
-    if (
-      seen.has(name) ||
-      !STATIC_SVG_ATTRIBUTES.has(name) ||
-      value.length > 16_384 ||
-      /[<>\u0000-\u001f\u007f]/u.test(value) ||
-      /[<>\u0000-\u001f\u007f]/u.test(decodedValue) ||
-      !isBoundedStaticSvgAttribute(name, decodedValue) ||
-      (name === 'xmlns'
-        ? !root || value !== 'http://www.w3.org/2000/svg'
-        : name === 'href'
-          ? !LOCAL_SVG_FRAGMENT_PATTERN.test(decodedValue)
-          : /\burl\s*\(/iu.test(decodedValue)
-            ? !/^url\(\s*["']?#[A-Za-z0-9_.:-]{1,256}["']?\s*\)$/u.test(
-                decodedValue,
-              )
-            : /(?:javascript\s*:|https?\s*:|data\s*:)/iu.test(decodedValue))
-    ) return false;
-    seen.add(name);
-    offset += attribute[0].length;
-  }
-  return true;
-}
-
-const STATIC_SVG_DIMENSION_ATTRIBUTES = new Set([
-  'height', 'markerheight', 'markerwidth', 'width',
-]);
-
-function isBoundedStaticSvgAttribute(name: string, value: string): boolean {
-  const normalized = value.trim();
-  if (name === 'viewbox') {
-    const values = readStaticSvgNumbers(normalized, 4);
-    return Boolean(
-      values && values.length === 4 &&
-      Math.abs(values[0]!) <= 1_000_000 &&
-      Math.abs(values[1]!) <= 1_000_000 &&
-      values[2]! >= 0 && values[2]! <= 1_000_000 &&
-      values[3]! >= 0 && values[3]! <= 1_000_000,
-    );
-  }
-  if (STATIC_SVG_DIMENSION_ATTRIBUTES.has(name)) {
-    const match = /^([+-]?(?:\d+(?:\.\d*)?|\.\d+)(?:e[+-]?\d+)?)\s*(%|px|pt|pc|cm|mm|in|em|ex|rem|ch|vw|vh|vmin|vmax)?$/iu.exec(
-      normalized,
-    );
-    if (!match) return false;
-    const numeric = Number(match[1]);
-    const maximum = match[2] === '%' ? 10_000 : 32_768;
-    return Number.isFinite(numeric) && numeric >= 0 && numeric <= maximum;
-  }
-  if (name === 'numoctaves') {
-    const numeric = Number(normalized);
-    return Number.isSafeInteger(numeric) && numeric >= 0 && numeric <= 8;
-  }
-  if (name === 'basefrequency') {
-    const values = readStaticSvgNumbers(normalized, 2);
-    return Boolean(values && values.length >= 1 && values.every(
-      (numeric) => numeric >= 0 && numeric <= 16,
-    ));
-  }
-  if (name === 'stddeviation' || name === 'radius') {
-    const values = readStaticSvgNumbers(normalized, 2);
-    return Boolean(values && values.length >= 1 && values.every(
-      (numeric) => numeric >= 0 && numeric <= 1_024,
-    ));
-  }
-  if (name === 'scale' || name === 'surfacescale') {
-    const numeric = Number(normalized);
-    return Number.isFinite(numeric) && Math.abs(numeric) <= 1_024;
-  }
-  if (name === 'seed') {
-    const numeric = Number(normalized);
-    return Number.isSafeInteger(numeric) && Math.abs(numeric) <= 1_000_000;
-  }
-  return true;
-}
-
-function readStaticSvgNumbers(
-  value: string,
-  maximumCount: number,
-): readonly number[] | undefined {
-  const parts = value.split(/[\s,]+/u).filter(Boolean);
-  if (parts.length < 1 || parts.length > maximumCount) return undefined;
-  const numbers = parts.map(Number);
-  return numbers.every(Number.isFinite) ? numbers : undefined;
 }
 
 function readTransportedControlText(

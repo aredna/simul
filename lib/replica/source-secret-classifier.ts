@@ -154,6 +154,15 @@ export function replicaReadScopeAdmits(
  */
 export class StickySourceSecretClassifier {
   readonly #secrets = new WeakSet<object>();
+  #revision = 0;
+
+  /**
+   * Monotonic, content-free proof that this document's sticky secret ledger
+   * has not learned another identity since an authoritative checkpoint.
+   */
+  get revision(): number {
+    return this.#revision;
+  }
 
   classify(
     identity: object,
@@ -161,7 +170,10 @@ export class StickySourceSecretClassifier {
   ): SourceEvidenceCategory {
     if (this.#secrets.has(identity)) return 'secret';
     const category = classifySourceEvidence(facts);
-    if (category === 'secret') this.#secrets.add(identity);
+    if (category === 'secret') {
+      this.#secrets.add(identity);
+      this.#revision += 1;
+    }
     return category;
   }
 

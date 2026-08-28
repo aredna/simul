@@ -3,7 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 import type {
   ReplicaSourceDocumentIdentity,
   ReplicaSourceTextRecord,
-} from '../lib/replica/source-value-model';
+} from '../lib/replica/source-text-record';
 import {
   ReplicaTranslationCoordinator,
   isCompleteReplicaTranslationResult,

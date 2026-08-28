@@ -10,6 +10,7 @@ import {
 import {
   createHtmlMirrorCheckpoint,
   createHtmlMirrorPatch,
+  createHtmlMirrorScrollUpdate,
   type HtmlMirrorCheckpoint,
   type HtmlMirrorPatchOperation,
 } from '../lib/replica/html-mirror-protocol';
@@ -21,8 +22,12 @@ import {
   protectIsolatedOpaquePlaceholder,
   type IsolatedMirrorInfo,
 } from '../lib/replica/isolated-html-engine';
-import { createReplicaIdentity } from '../lib/replica/protocol-v2';
+import { createReplicaIdentity } from '../lib/replica/replica-identity';
 import { FULL_VISIBLE_REPLICA_READ_SCOPE } from '../lib/replica/read-scope-policy';
+import {
+  PAINTED_SEMANTIC_LABEL_ATTRIBUTE,
+  PAINTED_SEMANTIC_LABEL_OVERLAY_ATTRIBUTE,
+} from '../lib/replica/painted-semantic-label';
 import type {
   SemanticSourceStreamLease,
   SemanticSourceStreamObserver,
@@ -92,7 +97,7 @@ describe('IsolatedHtmlReplicaEngine', () => {
   });
 
   it('stages a doctype-free shell for a bounded quirks-mode checkpoint', async () => {
-    const standard = makeCheckpoint('legacy page', 0);
+    const standard = makeCheckpoint('standards page', 0);
     const checkpoint = createHtmlMirrorCheckpoint(standard.identity, {
       root: standard.payload.root,
       adoptedStyleSheets: standard.payload.adoptedStyleSheets,
@@ -125,6 +130,48 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(isTrustedIsolatedShellDocument(
       host.iframe!.contentDocument!,
     )).toBe(true);
+  });
+
+  it('forwards only current exact-document scroll state', async () => {
+    const checkpoint = makeCheckpoint('scrolling', 0);
+    const stream = new FakeHtmlStream(checkpoint);
+    const host = new FakePresentationHost();
+    const onSourceScroll = vi.fn();
+    const engine = new IsolatedHtmlReplicaEngine({
+      presentationHost: host,
+      openStream: async () => stream,
+      initializeIframe: async (iframe, shell) => {
+        const { document } = parseHTML(shell);
+        Object.defineProperty(iframe, 'contentDocument', { value: document });
+        return document;
+      },
+      onSourceScroll,
+    });
+    await engine.run(request);
+    const update = createHtmlMirrorScrollUpdate(checkpoint.identity, {
+      scrollTarget: 'document',
+      scrollX: 0,
+      scrollY: 240,
+      maxScrollX: 0,
+      maxScrollY: 400,
+      documentScrollX: 0,
+      documentScrollY: 240,
+      documentMaxScrollX: 0,
+      documentMaxScrollY: 400,
+    })!;
+
+    stream.observer!.onScroll(update);
+    stream.observer!.onScroll({
+      ...update,
+      identity: createReplicaIdentity({
+        ...identityParts,
+        documentId: 'stale-document',
+        sequence: 0,
+      }),
+    });
+
+    expect(onSourceScroll).toHaveBeenCalledOnce();
+    expect(onSourceScroll).toHaveBeenCalledWith(update.scroll);
   });
 
   it('commits an inert real DOM, projects text, and applies a contiguous patch', async () => {
@@ -1541,6 +1588,159 @@ describe('IsolatedHtmlReplicaEngine', () => {
     });
   });
 
+  it('presents, invalidates, and recovers a Mainichi-style painted label', async () => {
+    const initialSource = '毎日新聞デジタル 総合案内';
+    const changedSource = '毎日新聞デジタル';
+    const stream = new FakeHtmlStream(makePaintedLogoCheckpoint(initialSource, 0));
+    const host = new FakePresentationHost();
+    const engine = new IsolatedHtmlReplicaEngine({
+      presentationHost: host,
+      openStream: async () => stream,
+      initializeIframe: async (iframe, shell) => {
+        const parsed = parseHTML(shell);
+        installPaintedLogoLayout(parsed.document, false);
+        Object.defineProperty(iframe, 'contentDocument', {
+          configurable: true,
+          value: parsed.document,
+        });
+        return parsed.document;
+      },
+    });
+
+    await engine.run(request);
+    const initial = engine.snapshot()!;
+    const initialRecord = initial.records.find(({ nodeId }) => nodeId === 5)!;
+    engine.beginProjection({ translationEpoch: 1, pairKey: 'ja\0en' });
+    expect(engine.project({
+      document: initial.document,
+      replayLease: initial.replayLease,
+      nodeId: 5,
+      nodeType: 3,
+      sourceRevision: initialRecord.revision,
+      source: initialRecord.source,
+      translationEpoch: 1,
+      pairKey: 'ja\0en',
+      translated: 'Mainichi Digital General Information',
+    })).toBe(true);
+
+    let logo = host.iframe!.contentDocument!.querySelector<HTMLElement>(
+      '.header-logo',
+    )!;
+    expect(logo.getAttribute(PAINTED_SEMANTIC_LABEL_ATTRIBUTE)).toBe('v1');
+    expect(logo.querySelector(
+      `[${PAINTED_SEMANTIC_LABEL_OVERLAY_ATTRIBUTE}]`,
+    )?.textContent).toBe('Mainichi Digital General Information');
+
+    engine.beginProjection({ translationEpoch: 2, pairKey: 'ja\0en' });
+    expect(logo.hasAttribute(PAINTED_SEMANTIC_LABEL_ATTRIBUTE)).toBe(false);
+    expect(logo.querySelector(
+      `[${PAINTED_SEMANTIC_LABEL_OVERLAY_ATTRIBUTE}]`,
+    )).toBeNull();
+
+    const restored = engine.snapshot()!;
+    const restoredRecord = restored.records.find(({ nodeId }) => nodeId === 5)!;
+    expect(engine.project({
+      document: restored.document,
+      replayLease: restored.replayLease,
+      nodeId: 5,
+      nodeType: 3,
+      sourceRevision: restoredRecord.revision,
+      source: restoredRecord.source,
+      translationEpoch: 2,
+      pairKey: 'ja\0en',
+      translated: 'Mainichi Digital General Information',
+    })).toBe(true);
+
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [{
+        kind: 'text',
+        nodeId: 5,
+        node: {
+          kind: 'text', id: 5, text: changedSource, translatable: true,
+        },
+      }],
+    )!);
+    expect(logo.hasAttribute(PAINTED_SEMANTIC_LABEL_ATTRIBUTE)).toBe(false);
+
+    const changed = engine.snapshot()!;
+    const changedRecord = changed.records.find(({ nodeId }) => nodeId === 5)!;
+    expect(engine.project({
+      document: changed.document,
+      replayLease: changed.replayLease,
+      nodeId: 5,
+      nodeType: 3,
+      sourceRevision: changedRecord.revision,
+      source: changedRecord.source,
+      translationEpoch: 2,
+      pairKey: 'ja\0en',
+      translated: 'Mainichi Digital',
+    })).toBe(true);
+
+    stream.observer?.onFailure('stream_overflow');
+    stream.observer?.onCheckpoint(makePaintedLogoCheckpoint(changedSource, 1));
+    await vi.waitFor(() => {
+      logo = host.iframe!.contentDocument!.querySelector<HTMLElement>(
+        '.header-logo',
+      )!;
+      expect(logo.querySelector(
+        `[${PAINTED_SEMANTIC_LABEL_OVERLAY_ATTRIBUTE}]`,
+      )?.textContent).toBe('Mainichi Digital');
+    });
+  });
+
+  it('presents every translated direct fragment of one painted label in order', async () => {
+    const stream = new FakeHtmlStream(makePaintedLogoCheckpoint(
+      ['毎日新聞デジタル ', '総合案内'],
+      0,
+    ));
+    const host = new FakePresentationHost();
+    const engine = new IsolatedHtmlReplicaEngine({
+      presentationHost: host,
+      openStream: async () => stream,
+      initializeIframe: async (iframe, shell) => {
+        const parsed = parseHTML(shell);
+        installPaintedLogoLayout(parsed.document, false);
+        Object.defineProperty(iframe, 'contentDocument', {
+          configurable: true,
+          value: parsed.document,
+        });
+        return parsed.document;
+      },
+    });
+
+    await engine.run(request);
+    const snapshot = engine.snapshot()!;
+    const first = snapshot.records.find(({ nodeId }) => nodeId === 5)!;
+    const second = snapshot.records.find(({ nodeId }) => nodeId === 6)!;
+    engine.beginProjection({ translationEpoch: 1, pairKey: 'ja\0en' });
+    for (const [record, translated] of [
+      [first, 'Mainichi Digital '],
+      [second, 'General Information'],
+    ] as const) {
+      expect(engine.project({
+        document: snapshot.document,
+        replayLease: snapshot.replayLease,
+        nodeId: record.nodeId,
+        nodeType: 3,
+        sourceRevision: record.revision,
+        source: record.source,
+        translationEpoch: 1,
+        pairKey: 'ja\0en',
+        translated,
+      })).toBe(true);
+    }
+
+    const logo = host.iframe!.contentDocument!.querySelector<HTMLElement>(
+      '.header-logo',
+    )!;
+    expect(logo.querySelector(
+      `[${PAINTED_SEMANTIC_LABEL_OVERLAY_ATTRIBUTE}]`,
+    )?.textContent).toBe('Mainichi Digital General Information');
+  });
+
   it('does not retain records or translated projections across source documents', async () => {
     const nextIdentityParts = {
       ...identityParts,
@@ -1721,7 +1921,7 @@ describe('IsolatedHtmlReplicaEngine', () => {
 
     const run = engine.run(request);
     await vi.waitFor(() => expect(host.releases).toHaveLength(1));
-    engine.releasePresentation(false);
+    engine.releasePresentation();
 
     expect(host.releases[0]).toHaveBeenCalledOnce();
     finishInitialization(parseHTML(ISOLATED_HTML_SHELL).document);
@@ -3097,6 +3297,120 @@ function makeCheckpoint(
   return checkpoint;
 }
 
+function makePaintedLogoCheckpoint(
+  text: string | readonly string[],
+  sequence: number,
+): HtmlMirrorCheckpoint {
+  const fragments = typeof text === 'string' ? [text] : [...text];
+  const checkpoint = createHtmlMirrorCheckpoint(
+    createReplicaIdentity({ ...identityParts, sequence }),
+    {
+      root: {
+        kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+        attributes: [['lang', 'ja']], children: [
+          {
+            kind: 'element', id: 2, namespace: 'html', tagName: 'head',
+            attributes: [], children: [],
+          },
+          {
+            kind: 'element', id: 3, namespace: 'html', tagName: 'body',
+            attributes: [], children: [{
+              kind: 'element', id: 4, namespace: 'html', tagName: 'a',
+              attributes: [['class', 'header-logo']],
+              children: fragments.map((fragment, index) => ({
+                kind: 'text' as const,
+                id: 5 + index,
+                text: fragment,
+                translatable: true,
+              })),
+            }],
+          },
+        ],
+      },
+      adoptedStyleSheets: [],
+      captureMs: 1,
+      viewportWidth: 800,
+      viewportHeight: 600,
+      documentWidth: 800,
+      documentHeight: 1000,
+    },
+  );
+  if (!checkpoint) throw new Error('Painted logo fixture checkpoint rejected.');
+  return checkpoint;
+}
+
+function installPaintedLogoLayout(
+  document: Document,
+  sanitizedBackground: boolean,
+): void {
+  const view = document.defaultView!;
+  Object.defineProperty(document, 'baseURI', {
+    configurable: true,
+    value: 'about:blank',
+  });
+  Object.defineProperty(view, 'innerWidth', { configurable: true, value: 800 });
+  Object.defineProperty(view, 'innerHeight', { configurable: true, value: 600 });
+  Object.defineProperty(view, 'getComputedStyle', {
+    configurable: true,
+    value: (element: Element) => paintedLogoStyle(element, sanitizedBackground),
+  });
+  Object.defineProperty(view.HTMLElement.prototype, 'getBoundingClientRect', {
+    configurable: true,
+    value(this: HTMLElement): DOMRectReadOnly {
+      const painted = this.classList.contains('header-logo');
+      const width = painted ? 130 : 800;
+      const height = painted ? 24 : 600;
+      return {
+        left: 0,
+        top: 0,
+        right: width,
+        bottom: height,
+        width,
+        height,
+        x: 0,
+        y: 0,
+        toJSON: () => ({}),
+      } as DOMRectReadOnly;
+    },
+  });
+}
+
+function paintedLogoStyle(
+  element: Element,
+  sanitizedBackground: boolean,
+): CSSStyleDeclaration {
+  const html = element as HTMLElement;
+  const inline = html.style;
+  const painted = element.classList.contains('header-logo');
+  const values: Readonly<Record<string, string>> = painted
+    ? {
+        'background-image': sanitizedBackground
+          ? 'url("about:blank")'
+          : 'url("https://mainichi.example.test/logo.svg")',
+        'content-visibility': 'visible',
+        display: 'block',
+        'font-size': '16px',
+        opacity: '1',
+        overflow: 'hidden',
+        'overflow-x': 'hidden',
+        position: 'static',
+        'text-indent': '-99em',
+        visibility: 'visible',
+        '-webkit-text-security': 'none',
+      }
+    : {
+        'content-visibility': 'visible',
+        display: 'block',
+        opacity: '1',
+        visibility: 'visible',
+        '-webkit-text-security': 'none',
+      };
+  return {
+    getPropertyValue: (property: string) =>
+      inline?.getPropertyValue(property) || values[property] || '',
+  } as unknown as CSSStyleDeclaration;
+}
+
 function makeReconciliationCheckpoint(): HtmlMirrorCheckpoint {
   const checkpoint = createHtmlMirrorCheckpoint(
     createReplicaIdentity({ ...identityParts, sequence: 0 }),
@@ -3359,7 +3673,7 @@ class FakePresentationHost implements ReplayPresentationHost {
     _iframe: HTMLIFrameElement,
     _accessible: boolean,
   ) => true);
-  showLegacy = vi.fn();
+  clearPresentation = vi.fn();
   dispose = vi.fn();
 }
 
