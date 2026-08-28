@@ -110,8 +110,8 @@ never make the replica interactive.
 On first use Simul remains at **Page-only** until you choose a scope. The
 Page-only, Standard, Full visible, and custom profiles control whether the
 mirror may read public control semantics, non-secret images in controls,
-validated disclosure content, ordinary visible form values, personal/autofill
-values, and editable text.
+validated disclosure content, visible text/search/URL/textarea values and
+selection state, personal/autofill values, and editable text.
 
 Passwords, authentication and one-time-code fields, WebAuthn and payment-card
 autocomplete classes, hidden/file inputs, file paths, and CSS-masked text are
