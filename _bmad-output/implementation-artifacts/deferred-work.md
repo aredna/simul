@@ -121,3 +121,28 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-isolated-only-runtime-cache-correctness.md`
   summary: Refresh controlled-content policy when remote selector changes alter a selected tabpanel's visibility without resizing the document.
   evidence: The visibility comparison can identify the changed target while the retained policy still sanitizes the newly visible panel as withheld, leaving it blank.
+# Deferred work
+
+`source_spec` records provenance. A path that is absent from the current tree
+identifies a historical implementation artifact retained in Git history after
+the public-release cleanup; it is not a runnable instruction for the current
+build.
+
+- source_spec: `_bmad-output/implementation-artifacts/spec-public-release-readiness.md`
+  summary: Recompute controlled-content visibility when a custom attribute changes CSS-selected tab or disclosure state.
+  evidence: The relationship policy observes all attribute mutations but only treats a fixed attribute set as layout-changing, so selectors such as `[data-state="open"]` can reveal a panel without refreshing the withholding proof until another recognized signal arrives.
+- source_spec: `_bmad-output/implementation-artifacts/spec-public-release-readiness.md`
+  summary: Exclude flat-tree control ancestors from protected-sibling overlap when control-image reading is enabled.
+  evidence: `Element.contains()` does not establish host containment for an image inside an open shadow root, so the host control can be misclassified as a different painted protected overlap and block an explicitly enabled image.
+- source_spec: `_bmad-output/implementation-artifacts/spec-public-release-readiness.md`
+  summary: Audit when the isolated replica iframe becomes available to assistive technology for ordinary translated documents.
+  evidence: The iframe starts `aria-hidden`, while the reviewed unhide path is tied to semantic proof presentation; a text-only article needs an installed-Chrome accessibility-tree test proving the committed replica is exposed.
+- source_spec: `_bmad-output/implementation-artifacts/spec-public-release-readiness.md`
+  summary: Add bounded accessible-name support for safe `aria-labelledby` control relationships.
+  evidence: The base sanitizer removes `aria-labelledby` and the semantic label reader uses direct label sources, so a public control named only by referenced visible text may become unnamed in the inert replica.
+- source_spec: `_bmad-output/implementation-artifacts/spec-public-release-readiness.md`
+  summary: Model approved `aria-current`, `aria-pressed`, and range-value semantics in the typed read-scope channel.
+  evidence: These attributes are stripped from the base mirror and the current semantic protocol carries checked/selected state but no current-item, toggle, or bounded range-value proof.
+- source_spec: `_bmad-output/implementation-artifacts/spec-public-release-readiness.md`
+  summary: Make optional-host permission rollback transactional when disabling image translation.
+  evidence: The disable flow can remove the shared broad grant before a later preference failure and its rollback relies on an earlier user-activation snapshot without proving the exact-origin grant was restored.

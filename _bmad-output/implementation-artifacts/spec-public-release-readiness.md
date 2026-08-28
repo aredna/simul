@@ -2,7 +2,7 @@
 title: 'Public GitHub release readiness'
 type: 'chore'
 created: '2026-08-28T12:41:21+09:00'
-status: 'in-progress'
+status: 'in-review'
 review_loop_iteration: 0
 baseline_commit: 'c4f747cdbdc71dd17cd14a9e0412579042355dca'
 context:
@@ -64,6 +64,11 @@ context:
 - 2026-08-28: Implemented the production-profile cleanup, public documentation
   and notice update, guarded unpacked-artifact sync, complete quality gate, and
   local feature-branch integration pass.
+- 2026-08-28: Review removed obsolete runnable experiment records and the stale
+  architecture spine from the current tree, narrowed the README's form-value
+  claim to implemented controls, and recorded isolated-engine accessibility,
+  controlled-content, shadow-control-image, and permission-rollback follow-ups
+  without changing release runtime behavior.
 
 ## Design Notes
 
