@@ -8,10 +8,11 @@ import {
 import {
   createHtmlMirrorCheckpoint,
   createHtmlMirrorError,
+  createHtmlMirrorScrollUpdate,
 } from '../lib/replica/html-mirror-protocol';
 import type { ReplicaCaptureRequest } from '../lib/replica/contracts';
 import { createHtmlMirrorRepresentabilityCollector } from '../lib/replica/html-mirror-sanitizer';
-import { createReplicaIdentity } from '../lib/replica/protocol-v2';
+import { createReplicaIdentity } from '../lib/replica/replica-identity';
 
 afterEach(() => {
   vi.useRealTimers();
@@ -26,7 +27,7 @@ describe('Chrome HTML mirror client', () => {
     const lease = await openChromeHtmlMirrorStream(request, 'passive');
 
     expect(port.posts[0]).toMatchObject({
-      kind: 'simul:html-mirror-v1:start',
+      kind: 'simul:html-mirror-v2:start',
       identity,
       fidelityPolicy: 'passive',
     });
@@ -41,7 +42,7 @@ describe('Chrome HTML mirror client', () => {
     const lease = await openChromeHtmlMirrorStream(request);
     port.emitMessage(checkpoint());
     await expect(lease.initialCheckpoint).resolves.toMatchObject({
-      kind: 'simul:html-mirror-v1:checkpoint',
+      kind: 'simul:html-mirror-v2:checkpoint',
     });
     port.emitDisconnect();
     const observer = fakeObserver();
@@ -111,6 +112,107 @@ describe('Chrome HTML mirror client', () => {
     expect(port.disconnect).toHaveBeenCalledOnce();
   });
 
+  it('queues a typed scroll update that arrives before observer setup', async () => {
+    const port = new FakePort();
+    installBrowser(port);
+    const lease = await openChromeHtmlMirrorStream(request);
+    port.emitMessage(checkpoint());
+    await lease.initialCheckpoint;
+    const update = createHtmlMirrorScrollUpdate(identity, {
+      scrollTarget: 'document',
+      scrollX: 0,
+      scrollY: 320,
+      maxScrollX: 0,
+      maxScrollY: 900,
+      documentScrollX: 0,
+      documentScrollY: 320,
+      documentMaxScrollX: 0,
+      documentMaxScrollY: 900,
+    })!;
+    port.emitMessage(update);
+    const observer = fakeObserver();
+
+    lease.setObserver(observer);
+
+    expect(observer.onScroll).toHaveBeenCalledOnce();
+    expect(observer.onScroll).toHaveBeenCalledWith(update);
+  });
+
+  it('coalesces scroll bursts after checkpoint without consuming structural capacity', async () => {
+    const port = new FakePort();
+    installBrowser(port);
+    const lease = await openChromeHtmlMirrorStream(request);
+    port.emitMessage(checkpoint());
+    await lease.initialCheckpoint;
+    for (let index = 1; index <= 12; index += 1) {
+      port.emitMessage(scrollUpdate(index * 10));
+    }
+    port.emitMessage(checkpoint());
+    const latest = scrollUpdate(700);
+    port.emitMessage(latest);
+    const observer = fakeObserver();
+
+    lease.setObserver(observer);
+
+    expect(observer.onFailure).not.toHaveBeenCalled();
+    expect(observer.onCheckpoint).toHaveBeenCalledOnce();
+    expect(observer.onScroll).toHaveBeenCalledOnce();
+    expect(observer.onScroll).toHaveBeenCalledWith(latest);
+    expect(observer.onCheckpoint.mock.invocationCallOrder[0])
+      .toBeLessThan(observer.onScroll.mock.invocationCallOrder[0]!);
+    expect(port.disconnect).not.toHaveBeenCalled();
+    lease.dispose();
+  });
+
+  it('coalesces scroll bursts that precede the initial checkpoint', async () => {
+    const port = new FakePort();
+    installBrowser(port);
+    const lease = await openChromeHtmlMirrorStream(request);
+    for (let index = 1; index <= 12; index += 1) {
+      port.emitMessage(scrollUpdate(index * 10));
+    }
+    const latest = scrollUpdate(700);
+    port.emitMessage(latest);
+    port.emitMessage(checkpoint());
+    await expect(lease.initialCheckpoint).resolves.toMatchObject({
+      kind: 'simul:html-mirror-v2:checkpoint',
+    });
+    const observer = fakeObserver();
+
+    lease.setObserver(observer);
+
+    expect(observer.onFailure).not.toHaveBeenCalled();
+    expect(observer.onScroll).toHaveBeenCalledOnce();
+    expect(observer.onScroll).toHaveBeenCalledWith(latest);
+    expect(port.disconnect).not.toHaveBeenCalled();
+    lease.dispose();
+  });
+
+  it('still fails closed when the structural pre-observer backlog exceeds its bound', async () => {
+    const port = new FakePort();
+    installBrowser(port);
+    const lease = await openChromeHtmlMirrorStream(request);
+    port.emitMessage(checkpoint());
+    await lease.initialCheckpoint;
+    for (let index = 0; index < 8; index += 1) {
+      port.emitMessage(checkpoint());
+      port.emitMessage(scrollUpdate(index * 10));
+    }
+
+    port.emitMessage(checkpoint());
+    const observer = fakeObserver();
+    lease.setObserver(observer);
+
+    expect(observer.onCheckpoint).not.toHaveBeenCalled();
+    expect(observer.onScroll).not.toHaveBeenCalled();
+    expect(observer.onFailure).toHaveBeenCalledOnce();
+    expect(observer.onFailure).toHaveBeenCalledWith(
+      'stream_failed',
+      expect.objectContaining({ capacityOmissionCount: 0 }),
+    );
+    expect(port.disconnect).toHaveBeenCalledOnce();
+  });
+
   it('queues a recoverable early failure instead of silently dropping it', async () => {
     const port = new FakePort();
     installBrowser(port);
@@ -134,7 +236,7 @@ describe('Chrome HTML mirror client', () => {
     );
     lease.requestCheckpoint(0);
     expect(port.posts.at(-1)).toMatchObject({
-      kind: 'simul:html-mirror-v1:checkpoint-request',
+      kind: 'simul:html-mirror-v2:checkpoint-request',
     });
   });
 
@@ -219,10 +321,25 @@ function checkpoint() {
   })!;
 }
 
+function scrollUpdate(scrollY: number) {
+  return createHtmlMirrorScrollUpdate(identity, {
+    scrollTarget: 'document',
+    scrollX: 0,
+    scrollY,
+    maxScrollX: 0,
+    maxScrollY: 900,
+    documentScrollX: 0,
+    documentScrollY: scrollY,
+    documentMaxScrollX: 0,
+    documentMaxScrollY: 900,
+  })!;
+}
+
 function fakeObserver() {
   return {
     onPatch: vi.fn<HtmlMirrorStreamObserver['onPatch']>(),
     onCheckpoint: vi.fn<HtmlMirrorStreamObserver['onCheckpoint']>(),
+    onScroll: vi.fn<HtmlMirrorStreamObserver['onScroll']>(),
     onFailure: vi.fn<HtmlMirrorStreamObserver['onFailure']>(),
   };
 }

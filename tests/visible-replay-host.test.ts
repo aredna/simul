@@ -2,14 +2,13 @@ import { parseHTML } from 'linkedom';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
-  LEGACY_FALLBACK_LABEL,
   LIVE_REPLAY_LABEL,
   STATIC_REPLAY_LABEL,
   VisibleReplayHost,
   type VisibleReplayCandidateLease,
 } from '../lib/replica/visible-replay-host';
 
-describe('visible rrweb replay host', () => {
+describe('visible isolated replay host', () => {
   it('uses canonical replica labels without claiming fallback bugs are fixed', () => {
     expect(STATIC_REPLAY_LABEL).toBe('Replica reconnecting');
     expect(LIVE_REPLAY_LABEL).toBe('Live page replica');
@@ -22,13 +21,11 @@ describe('visible rrweb replay host', () => {
     const iframe = createProtectedIframe(fixture.document);
     candidate.mount.append(iframe);
 
-    expect(fixture.legacy.hidden).toBe(false);
     expect(fixture.preview.hidden).toBe(true);
     expect(candidate.mount.closest('[data-simul-replica-candidate]')).not.toBeNull();
 
     candidate.commit(iframe, { width: 1_400, height: 2_500 });
 
-    expect(fixture.legacy.hidden).toBe(true);
     expect(fixture.preview.hidden).toBe(false);
     expect(fixture.preview.children).toHaveLength(1);
     expect(fixture.badge.hidden).toBe(false);
@@ -646,14 +643,15 @@ describe('visible rrweb replay host', () => {
     first.release();
     expect(fixture.preview.hidden).toBe(false);
 
-    fixture.host.showLegacy(true);
+    fixture.host.clearPresentation();
     expect(fixture.host.hasCommittedReplica).toBe(true);
+    expect(fixture.preview.hidden).toBe(true);
+    expect(fixture.badge.hidden).toBe(true);
     second.release();
     second.release();
 
-    expect(fixture.legacy.hidden).toBe(false);
     expect(fixture.preview.hidden).toBe(true);
-    expect(fixture.badge.textContent).toBe(LEGACY_FALLBACK_LABEL);
+    expect(fixture.badge.textContent).toBe('');
     expect(fixture.host.hasCommittedReplica).toBe(false);
   });
 
@@ -698,7 +696,6 @@ describe('visible rrweb replay host', () => {
     fixture.host.dispose();
 
     expect(fixture.document.querySelector('[data-simul-replica-candidate]')).toBeNull();
-    expect(fixture.legacy.hidden).toBe(false);
     expect(fixture.badge.hidden).toBe(true);
   });
 
@@ -729,22 +726,18 @@ describe('visible rrweb replay host', () => {
 
 function createFixture() {
   const { document, window } = parseHTML(
-    '<html><body><section id="legacy">legacy</section>' +
-      '<section id="preview" hidden aria-hidden="true"></section>' +
+    '<html><body><section id="preview" hidden aria-hidden="true"></section>' +
       '<p id="badge" hidden></p></body></html>',
   );
-  const legacy = requireElement<HTMLElement>(document, '#legacy');
   const preview = requireElement<HTMLElement>(document, '#preview');
   const badge = requireElement<HTMLElement>(document, '#badge');
   return {
     document,
     window,
-    legacy,
     preview,
     badge,
     host: new VisibleReplayHost({
       hostDocument: document,
-      legacySurface: legacy,
       previewSurface: preview,
       badge,
     }),

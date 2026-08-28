@@ -16,19 +16,19 @@ bounded DOM/style/image/document-or-nested-scroll changes, zoom the replica,
 and compose a reverse translation. A compact quick-translation panel reverses
 the active page pair without opening settings, while a pointer-inert toolbar
 background reports determinate translation progress or indeterminate capture,
-live-update, permission, OCR, composer, and surface-transition work. Common
-options precede window behavior and the collapsed experimental engine/OCR
-controls. The canonical production engine is isolated HTML with
+permission, OCR, composer, and surface-transition work. Common
+options precede window behavior and the collapsed advanced OCR controls. The
+only primary production engine is isolated HTML with
 revision-safe text projection. Its exact-document bridge assigns private
 WeakMap IDs, reads changed DOM directly into a bounded allowlisted graph, and
 sends a sanitized checkpoint plus contiguous targeted patches. The
 extension validates the graph again and creates real nodes with DOM APIs inside
 a `sandbox="allow-same-origin"` iframe whose CSP disables scripts, workers,
 connections, frames, objects, forms, and navigation. Gaps or overflow stage one
-fresh checkpoint and atomically replace the last-good view. rrweb remains a
-persisted experimental choice unless `WXT_SIMUL_RRWEB_SHADOW=0` hides it. The
-legacy renderer is the emergency fallback; neither engine silently falls back
-to the other.
+fresh checkpoint and atomically replace the last-good view. No secondary
+renderer exists: an initial failure stays local and retryable, while a post-commit
+stream failure stages one bounded recovery and otherwise preserves the
+last-good isolated replica.
 
 Direct-child mutations use a final-order reconciliation payload. A receiver
 retains a referenced object only when it already owns that exact ID as a direct
@@ -54,7 +54,12 @@ and bounded same-document CSS `url(#fragment)` effects in cascade order.
 Imports, scriptable or legacy behavior, invalid resources, and external SVG
 references remain sanitized. The bounded computed source canvas color travels
 with checkpoints and live dimension patches and is applied across every
-presentation-shell layer; transparent updates clear the override.
+presentation-shell layer; transparent updates clear the override. Isolated
+checkpoints and live patches carry the exact selected fidelity policy. Only
+Passive may retain source/receiver-revalidated `<img>` `src`/`srcset`
+paint resources; anchor destinations and actions remain stripped, mixed-policy
+documents fail closed, and unsafe omissions are reported only as bounded
+content-free counts.
 
 Native and ARIA control labels remain translatable through a runtime-selectable
 read scope whose independent controls cover public control semantics, control
@@ -68,11 +73,18 @@ text-security fields remain unreadable under every profile, with classification
 performed before value/text/image access and kept sticky for the document
 lifetime. Optional values, selected/checked state, editable text, and
 disclosure payloads travel only through one bounded exact-document semantic
-supplement shared by both engines; base rrweb input/contenteditable masking
-never relaxes. Replica action capability is never configurable: scripts,
+supplement; base source-secret and editable-content classification never
+relaxes. Replica action capability is never configurable: scripts,
 handlers, source events, navigation, forms, and website-owned interaction
 remain absent. Extension-owned select/disclosure facsimiles share a
 viewport-safe, body-level presenter and may change only replica presentation.
+ARIA tabs use a separate inline `tab-state` proof under control semantics and
+never enter the popup presenter. A bounded shared same-root relationship index
+admits ordinary base text only from a unique, selected, consistently painted
+tabpanel; inactive, contradictory, clipped, malformed, cross-root, or secret
+relationships remain withheld. Attribute-only tab transitions rematerialize
+the affected panel privacy context without turning unrelated mutation churn
+into page-wide work.
 Passive image validation admits a narrow, shape-only URL-encoded SVG data-image
 profile, covered by a synthetic static-logo fixture, with the same checks on
 capture and receipt. A
@@ -121,8 +133,9 @@ restartable offscreen host through two-minute extension-origin transient
 storage. Tesseract.js/core 7.0.0, three embedded Wasm core loaders, its Worker,
 and 22 pinned `tessdata_fast` files are local. One routed language group is
 loaded at a time and disposed after a group change or 90 seconds idle.
-Image reading uses one ordered list containing local accessibility text and the
-compiled OCR providers. Accessibility text lazily reads only direct image
+Image reading uses one ordered list containing local accessibility text,
+Chrome TextDetector, packaged Tesseract.js, and reserved future methods.
+Accessibility text lazily reads only direct image
 `aria-label` or `alt` after policy and credential admission, requires no pixel
 permission, carries semantic rather than OCR confidence, and projects as a
 whole-image label. Pixel capture remains blocked for credential overlap, while
@@ -158,11 +171,39 @@ remains reusable across live source refreshes while the companion stays open.
 Recognition retention is bounded by both entry count and aggregate
 transcript/region weight; an oversized result serves its current job without
 entering memory.
+Image observation, capture, and presentation have separate currentness roles.
+Observation revision orders geometry and attention; a settled result remains
+complete across a newer observation only when exact document, content revision,
+and capture revision are unchanged. The controller rebases that projection to
+the new observation and the projector updates metadata/geometry on the existing
+overlay root, so ordinary layout or priority churn cannot unmount stable text.
+Any source, crop, dimension, unsafe paint, protected-overlap, policy, pair, or
+replay-lease boundary keeps its existing conservative invalidation.
+Image-owned class/visibility transitions are targeted to their affected image
+path. A structural text-node-presence proof prevents image-only paint changes
+from requesting privacy rematerialization. Every authored attribute,
+child-presence change, interaction-state change, hash target, and CSSOM update
+still runs a bounded, content-free document comparison so selectors such as
+`:has()`, sibling combinators, `:checked`, and `:target` cannot reveal withheld
+text or change image paint unnoticed. Exact passive-image proof remains sticky
+to the source secret revision until the queued patch commits. Protected control
+and computed-secret geometry compares old and current rectangles, including
+their motion hull, before an affected capture can be reused. These global
+proofs advance only the bounded images whose content or captured pixels changed;
+same-content/same-capture observation updates keep settled work and the mounted
+overlay root. Text-bearing, newly credential-masked, unreadable, mixed,
+structural, or oversized changes retain the atomic checkpoint/last-good
+fallback.
 The same image URL reuses OCR only when its processed pixels and geometry inputs
 match, preserving correct overlays across responsive sizes, crops, and animated
 frames. An unchanged empty result requires two OCR passes before it is cached;
 changing blank pixels defer, and a transient capture failure receives one
 immediate retry.
+Carousel motion keeps layout safety separate from content identity. Positive
+axis-aligned 2D or 3D scale/translation can reposition work without rerunning a
+provider, while reflection, rotation, skew, perspective, unsafe longhand scale,
+clipping changes, or changed pixels require fresh admission. Clone reuse still
+requires current document, policy, secret, geometry, and pixel-hash checks.
 Raw screenshot blobs remain transient and are removed after offscreen handoff.
 Nearest valid element `lang`, explicit From, then detected page language selects
 the OCR group. On an otherwise unresolved Auto page, a memory-only probe may
@@ -259,33 +300,21 @@ extension APIs or page integration.
   state derivation
 - `lib/companion-ui-localization.ts`: atomic target-language label sets and
   action-specific toolbar attention routing
-- `entrypoints/page-snapshot.ts`: unlisted top-frame snapshot entrypoint
-- `entrypoints/page-live-observer.ts`: locally bundled legacy/live scroll and
-  mutation observer with revision-safe installation
-- `entrypoints/page-recorder.ts`: unlisted rrweb checkpoint, live recorder,
-  and exact-document image-source bridge
-- `entrypoints/page-mirror.ts`: unlisted isolated-HTML observer and shared
-  WeakMap image-identity bridge
+- `entrypoints/page-mirror.ts`: sole unlisted isolated-HTML checkpoint, patch,
+  scroll, semantic, and shared WeakMap image-identity bridge
 - `lib/replica/html-mirror-protocol.ts`, `html-mirror-sanitizer.ts`, and
   `html-mirror-source.ts`: typed bounded transport, dual validation, private
   masking, passive visual-resource policy, ACKs, and recovery
 - `lib/replica/isolated-html-engine.ts`: no-script real-DOM construction,
   incremental patches, translation/image anchors, and atomic last-good swaps
-- `lib/replica/replica-surface-router.ts`: selected-engine translation and OCR
+- `lib/replica/replica-surface-router.ts`: isolated translation and OCR
   routing
 - `entrypoints/offscreen/`: static local Tesseract compute host
 - `lib/replica/visible-replay-host.ts`: candidate/committed
   replay ownership, atomic presentation, protected iframe layout, zoom, and
   scroll projection
-- `lib/replica/live-protocol.ts`, `lib/replica/live-recorder-session.ts`, and
-  `lib/replica/live-stream-client.ts`: bounded ordered transport, shared recorder
-  ownership, independent subscriber watermarks, and recovery requests
-- `lib/replica/rrweb-stream-sanitizer.ts`: transactional incremental privacy,
-  identity, and resource validation
-- `lib/replica/source-value-model.ts`: transactional canonical rrweb text,
-  monotonic revisions/tombstones, and committed text-change records
 - `lib/translation/`: bounded exact-source memory and the single-session,
-  revision/epoch/lease-safe engine-neutral translation coordinator
+  revision/epoch/lease-safe isolated translation coordinator
 - `lib/primary-scroll.ts`: generic document/nested primary-scroll
   classification, bounds, and normalized source snapshots
 - `lib/ocr/`: exact-document image observation, capture/currentness,
@@ -295,8 +324,8 @@ extension APIs or page integration.
 - `tools/ocr-build-profile.ts`: strict compile-profile flags; Tesseract is the
   default implemented provider and every other enabled provider fails build
 - `vendor/ocr/`: immutable Tesseract runtime/model assets, hashes, and notices
-- `lib/`: safe bootstrap/delta boundaries, inert renderer, preferences,
-  provider adapter, translation pipeline logic, and replica-engine adapters
+- `lib/`: safe isolated checkpoint/patch/semantic boundaries, inert
+  presentation, preferences, provider adapters, and translation pipeline logic
 - `tests/`: unit tests
 - `tools/extension-artifact.mjs`: guarded release build, validation, sync, and
   byte comparison

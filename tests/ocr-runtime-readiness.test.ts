@@ -7,29 +7,28 @@ import {
 } from '../lib/ocr/runtime-provider-readiness';
 
 describe('OCR host readiness', () => {
-  it('admits Paddle-only and direct-Wasm-only compiled profiles', () => {
-    expect(hasOcrRuntimeProvider(['paddleocr-wasm'])).toBe(true);
-    expect(hasOcrRuntimeProvider(['tesseract-wasm-direct'])).toBe(true);
+  it('admits either production OCR provider profile', () => {
+    expect(hasOcrRuntimeProvider(['chrome-text-detector'])).toBe(true);
+    expect(hasOcrRuntimeProvider(['tesseract'])).toBe(true);
     expect(hasOcrRuntimeProvider([])).toBe(false);
   });
 
   it('skips TextDetector before capture until its platform probe succeeds', () => {
     const order = [
-      'paddleocr-wasm',
-      'chrome-text-detector',
       'tesseract',
+      'chrome-text-detector',
     ] as const;
 
     expect(runtimeReadyOcrProviderOrder(order, new Map([
       ['chrome-text-detector', 'checking'],
-    ]))).toEqual(['paddleocr-wasm', 'tesseract']);
+    ]))).toEqual(['tesseract']);
     expect(runtimeReadyOcrProviderOrder(order, new Map([
       ['chrome-text-detector', {
         status: 'unavailable',
         providerId: 'chrome-text-detector',
         reason: 'api-missing',
       }],
-    ]))).toEqual(['paddleocr-wasm', 'tesseract']);
+    ]))).toEqual(['tesseract']);
     expect(runtimeReadyOcrProviderOrder(order, new Map([
       ['chrome-text-detector', {
         status: 'available',

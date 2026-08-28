@@ -1,9 +1,6 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-checkpoint-f-local-tesseract-image-translation.md`
   summary: Extend local image translation beyond visible top-frame `<img>` elements to CSS backgrounds, canvas/video frames, and embedded frames only after a new pixel-access/privacy review.
   evidence: Checkpoint F ships opt-in local Tesseract overlays for stable visible `<img>` crops only. Direct fetch/host access, non-`<img>` sources, durable captures, and remote processing remain outside its approved boundary.
-- source_spec: `_bmad-output/implementation-artifacts/spec-checkpoint-f-local-tesseract-image-translation.md`
-  summary: Add image-only automatic language detection instead of relying on nearest HTML `lang`, explicit From, or detected page language.
-  evidence: Tesseract recognizes a selected language group but is not a reliable general language detector. Prompt or a dedicated classifier remains separately reviewable.
 - source_spec: `_bmad-output/implementation-artifacts/spec-isolated-html-mirror-engine.md`
   summary: Run an installed-Chrome TextDetector availability and quality matrix on profiles/platforms where the experimental API is exposed.
   evidence: The capability-probed offscreen provider, priority fallback, normalization, and boxes-only handoff are implemented. Standard Chrome builds may not expose TextDetector, and the current platform draft focuses on Latin-1, so real platform acceptance remains distinct from the deterministic packaged-Tesseract path.
@@ -11,20 +8,17 @@
   summary: Add Transformers.js as a locally packaged specialized text-crop recognition provider using Wasm with conditional WebGPU.
   evidence: Transformers.js introduces independent model selection, geometry-composition, packaging, memory, and quality gates and is separately shippable behind its compile-time flag.
 - source_spec: none
-  summary: Add official PaddleOCR.js as a locally packaged Wasm spatial OCR provider with dedicated Worker execution and line-polygon results.
-  evidence: PaddleOCR.js has independent MV3 CSP, Worker emission, offline model, language, memory, and artifact-validation risks and should not share a review boundary with other providers.
-- source_spec: none
   summary: Activate the reserved Chromium Screen AI provider only after Chrome exposes a supported public extension API.
   evidence: Simul preserves the stable provider ID and compile-time module seam, but Chromium's current Screen AI integration is private native C++/Mojo browser infrastructure and cannot be called by a stock MV3 extension.
 - source_spec: none
   summary: Add the two independent Chrome Prompt image sidecars for language hints and transcript interpretation without trusting generated geometry.
   evidence: Prompt capability, user-activation, model-download, schema-validation, hallucination, and fallback behavior form a separate experimental deliverable from deterministic OCR.
 - source_spec: none
-  summary: Extend the production artifact profile matrix and absence validation as Transformers.js, PaddleOCR-Wasm, Prompt sidecars, or future Screen AI become runnable.
+  summary: Extend the production artifact profile matrix and absence validation as Transformers.js, Prompt sidecars, or future Screen AI become runnable.
   evidence: The current release now validates disabled, TextDetector-only, Tesseract-only, and combined profiles independently, including provider-specific CSP/assets/runtime markers. New providers will add distinct Workers, Wasm/models, settings, notices, and permission/CSP boundaries.
 - source_spec: `_bmad-output/implementation-artifacts/spec-live-incremental-replica-engine.md`
-  summary: Diagnose and improve the remaining Mexico City carousel/background and Reddit left-login/right-related-rail fidelity gaps without weakening rrweb privacy or fallback.
-  evidence: Checkpoint F Choice C promoted rrweb with legacy fallback while explicitly retaining these two installed-Chrome rows as known, non-blocking follow-ups rather than passed gates.
+  summary: Diagnose and improve the remaining Mexico City carousel/background and Reddit left-login/right-related-rail fidelity gaps without weakening isolated-mirror privacy or last-good recovery.
+  evidence: The isolated engine is now the sole renderer; these installed-Chrome rows remain known, non-blocking fidelity follow-ups rather than passed gates.
 - source_spec: `_bmad-output/implementation-artifacts/spec-passive-replica-fidelity.md`
   summary: Run a future technical spike for a hidden-until-complete Strict Local Mirror mode that preserves the current inert DOM/layout and translated text while guaranteeing that the replica makes no additional requests to the original website.
   evidence: Passive Fidelity is intentionally request-capable and Conservative still permits some allowlisted visual requests, so neither is a no-network mode. The spike must neutralize every original resource reference (`src`, `srcset`, CSS `url()`/`@import`, remote fonts, posters, frames, and external SVG), lazily substitute already-rendered visible images/backgrounds with `captureVisibleTab()` crops exposed only through revocable temporary local blobs, revoke them on navigation/teardown, and add a restrictive extension-origin network CSP/backstop. Acceptance tests must prove zero replica-initiated network requests while the source page may network normally. Strict Local must remain absent from Settings until those tests pass. `debugger`, `pageCapture`, new host permissions, and MHTML parsing remain prohibited without separate review and approval.
@@ -49,9 +43,6 @@
 - source_spec: `_bmad-output/implementation-artifacts/spec-checkpoint-f-local-tesseract-image-translation.md`
   summary: Evaluate integrity-checked, user-initiated local OCR language/model packs beyond the bundled catalog, loading only the selected script group into memory.
   evidence: The current artifact bundles its approved Tesseract catalog and already loads one group dynamically. Downloadable data packs need offline persistence, checksums, versioning, licensing, quota/eviction UI, CSP review, and a guarantee that no remotely hosted executable code is introduced.
-- source_spec: `_bmad-output/implementation-artifacts/spec-checkpoint-f-local-tesseract-image-translation.md`
-  summary: Add bounded image-language detection and one controlled OCR reroute when HTML/page hints are absent or contradicted by recognition evidence.
-  evidence: Script detection can narrow candidate models but does not reliably identify a language by itself. Any Prompt, OSD, or classifier hint must be capability-probed, confidence-bounded, content-private, and unable to supply trusted geometry.
 - source_spec: `_bmad-output/implementation-artifacts/spec-side-by-side-page-translation.md`
   summary: Add optional companion placement and multi-display window arrangement beyond Chrome's fixed native side-panel placement.
   evidence: Chrome controls native side-panel side/position. A detached companion can be sized and positioned as its own window, but left/right/above pairing, display work areas, and restoring user geometry require a separate cross-platform window-management pass.
@@ -81,4 +72,52 @@
   evidence: The current generic observer switches to the nested surface that actually emits a qualifying source scroll, but a scriptless replica with multiple similarly sized candidates still selects its strongest local candidate independently; translated geometry can make that a different surface.
 - source_spec: `_bmad-output/implementation-artifacts/spec-multi-provider-ocr-testing.md`
   summary: Make exported artifact validation resolve reviewed vendor manifests from the caller's explicit project root instead of the module-owning checkout.
-  evidence: Existing Tesseract/Paddle validation and the new direct-Wasm validator read reviewed assets through module-global `PROJECT_ROOT`; a caller using `check` or `sync` APIs for another checkout can therefore compare against unrelated source state.
+  evidence: Existing Tesseract validation reads reviewed assets through module-global `PROJECT_ROOT`; a caller using `check` or `sync` APIs for another checkout can therefore compare against unrelated source state.
+- source_spec: `_bmad-output/implementation-artifacts/spec-incremental-image-mutation-stability.md`
+  summary: Unify the initial isolated text-serialization privacy floor with the shared computed visibility boundary.
+  evidence: Incremental visibility comparison covers opacity, content visibility, clipping, positive geometry, and ancestor clipping, while the initial isolated serializer still applies a narrower structural/display/visibility floor. Closing that pre-existing mismatch requires a dedicated privacy migration and fixture matrix rather than changing mutation-local OCR behavior alone.
+- source_spec: `_bmad-output/implementation-artifacts/spec-incremental-image-mutation-stability.md`
+  summary: Add bounded in-flight sampling or suspension for protected surfaces that cross images during long-running or infinite CSS motion.
+  evidence: The observer now compares old/current image and protected-surface rectangles plus their endpoint hull, covering ordinary settle crossings. A transition can still curve through an image outside that hull, and an infinite animation may never emit a terminal event; solving that safely needs a separate frame-budget and overlay-suspension design.
+- source_spec: `_bmad-output/implementation-artifacts/spec-incremental-image-mutation-stability.md`
+  summary: Replace the shared oversized private processing-token sentinel with a bounded change-sensitive representation.
+  evidence: Different computed routing or paint dependency strings above 64 KiB currently collapse to the same private sentinel. Always treating the sentinel as changed would make unrelated refreshes loop and discard stable work, so a separately reviewed keyed digest or mutation-scoped fail-closed proof is needed without exposing the underlying private value.
+- source_spec: `_bmad-output/implementation-artifacts/spec-isolated-only-runtime-cache-correctness.md`
+  summary: Preserve authoritative capture when a loading navigation redirects before completion.
+  evidence: A loading key can be overwritten by a URL-only update that is classified as same-document, causing the matching completion event to be suppressed and leaving the previous replica visible.
+- source_spec: `_bmad-output/implementation-artifacts/spec-isolated-only-runtime-cache-correctness.md`
+  summary: Reuse the checkpoint-scoped controlled-content policy while sanitizing image hints.
+  evidence: Rebuilding the policy for every image repeats a bounded whole-document traversal and makes initial checkpoint work scale approximately with image count times node count.
+- source_spec: `_bmad-output/implementation-artifacts/spec-isolated-only-runtime-cache-correctness.md`
+  summary: Align initial text serialization with the computed painted-visibility privacy boundary.
+  evidence: Ordinary opacity-zero, content-visibility-hidden, clipped, or zero-geometry text can pass the serializer's narrower withholding predicate and remain present in the replica.
+- source_spec: `_bmad-output/implementation-artifacts/spec-isolated-only-runtime-cache-correctness.md`
+  summary: Observe semantic mutations inside every admitted open shadow root.
+  evidence: Initial semantic discovery traverses open shadow roots, but the document-only MutationObserver cannot see later shadow-root changes that make text stale or newly secret.
+- source_spec: `_bmad-output/implementation-artifacts/spec-isolated-only-runtime-cache-correctness.md`
+  summary: Reclaim semantic revision history for identities removed from long-lived documents.
+  evidence: Removed semantic records and proofs retain history until disposal, so a virtualized application can exhaust the 50,000-identity limit and permanently block new semantic records.
+- source_spec: `_bmad-output/implementation-artifacts/spec-isolated-only-runtime-cache-correctness.md`
+  summary: Make bounded image discovery retain visually important candidates beyond an early DOM-order prefix.
+  evidence: The 10,000-image budget is exhausted before attention ranking, so a visible image late in DOM order can remain permanently undiscovered behind offscreen early images.
+- source_spec: `_bmad-output/implementation-artifacts/spec-isolated-only-runtime-cache-correctness.md`
+  summary: Include relevant ancestor paint changes in screenshot-based image capture identity.
+  evidence: Ancestor background, border, padding, or content changes can alter pixels beneath a transparent or composited image without advancing its capture revision, allowing stale OCR projection reuse.
+- source_spec: `_bmad-output/implementation-artifacts/spec-isolated-only-runtime-cache-correctness.md`
+  summary: Requeue a retained image projection when replay-lease rebinding cannot install its overlay.
+  evidence: Recovery marks retained work projected before checking the projector result, so a missing anchor or rejected projection can leave settled work with no visible overlay and no retry.
+- source_spec: `_bmad-output/implementation-artifacts/spec-isolated-only-runtime-cache-correctness.md`
+  summary: Preserve normalized scroll progress on documents taller or wider than 100,000 CSS pixels.
+  evidence: Clamping both position and maximum to 100,000 makes intermediate movement on very long documents appear as 100 percent progress and collapses all later source offsets.
+- source_spec: `_bmad-output/implementation-artifacts/spec-isolated-only-runtime-cache-correctness.md`
+  summary: Carry stable source identity for qualified nested scrollers beyond the first 5,000 elements.
+  evidence: A valid late-DOM source scroller can lack an ordinal, causing replay to select a different early candidate or fall back to document scrolling.
+- source_spec: `_bmad-output/implementation-artifacts/spec-isolated-only-runtime-cache-correctness.md`
+  summary: Reject contradictory tablists with more than one independently selected visible tabpanel.
+  evidence: Proving each relationship in isolation can admit multiple selected sibling panels and expose payloads that should remain inactive under a unique-selection contract.
+- source_spec: `_bmad-output/implementation-artifacts/spec-isolated-only-runtime-cache-correctness.md`
+  summary: Use padding-box geometry when proving selected tabpanel visibility through overflow clips.
+  evidence: Border-box intersection can classify a panel as painted even when it lies fully outside an overflow ancestor's padding clip.
+- source_spec: `_bmad-output/implementation-artifacts/spec-isolated-only-runtime-cache-correctness.md`
+  summary: Refresh controlled-content policy when remote selector changes alter a selected tabpanel's visibility without resizing the document.
+  evidence: The visibility comparison can identify the changed target while the retained policy still sanitizes the newly visible panel as withheld, leaving it blank.

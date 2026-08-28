@@ -15,15 +15,13 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   APPROVED_OCR_CSP,
-  APPROVED_PADDLE_SANDBOX_CSP,
   APPROVED_OCR_PACKAGE_LOCK_METADATA,
   APPROVED_OCR_PERMISSIONS,
   APPROVED_OPTIONAL_HOST_PERMISSIONS,
   APPROVED_PERMISSIONS,
   DEFAULT_OCR_PROVIDER_IDS,
-  MAX_OCR_ALL_TRIAL_ARTIFACT_BYTES,
+  FORBIDDEN_LEGACY_REPLICA_BUNDLES,
   MAX_UNPACKED_ARTIFACT_BYTES,
-  OCR_ALL_TRIAL_PROVIDER_IDS,
   REQUIRED_OCR_RUNTIME_MARKERS,
   REQUIRED_RELEASE_LEGAL_FILES,
   REQUIRED_ISOLATED_SANDBOX_MARKERS,
@@ -34,12 +32,8 @@ import {
   buildProductionArtifact,
   canonicalArtifactDirectory,
   checkArtifact,
-  checkOcrAllTrial,
-  checkOcrPaddleTrial,
-  checkSyncedOcrAllTrial,
   compareArtifactDirectories,
   syncArtifact,
-  syncOcrAllTrial,
   validateArtifact,
 } from '../tools/extension-artifact.mjs';
 
@@ -362,10 +356,10 @@ describe('validateArtifact', () => {
     );
   });
 
-  it('requires the packaged recorder and local replica runtime markers', async () => {
-    const missingRecorder = await createTemporaryArtifact();
-    await rm(path.join(missingRecorder, REQUIRED_UNLISTED_BUNDLES[0]));
-    await expect(validateArtifact(missingRecorder)).rejects.toThrow(
+  it('requires the packaged isolated mirror and local runtime markers', async () => {
+    const missingMirror = await createTemporaryArtifact();
+    await rm(path.join(missingMirror, REQUIRED_UNLISTED_BUNDLES[0]));
+    await expect(validateArtifact(missingMirror)).rejects.toThrow(
       'missing required local bundle',
     );
 
@@ -375,34 +369,34 @@ describe('validateArtifact', () => {
       'missing required local replica runtime marker',
     );
 
-    const misplacedRecorderMarker = await createTemporaryArtifact();
+    const misplacedMirrorMarker = await createTemporaryArtifact();
     await writeFile(
-      path.join(misplacedRecorderMarker, REQUIRED_UNLISTED_BUNDLES[0]),
-      'console.info("recorder missing");',
+      path.join(misplacedMirrorMarker, REQUIRED_UNLISTED_BUNDLES[0]),
+      'console.info("mirror missing");',
     );
     await writeFile(
-      path.join(misplacedRecorderMarker, 'side.js'),
+      path.join(misplacedMirrorMarker, 'side.js'),
       `console.info(${JSON.stringify(REQUIRED_REPLICA_RUNTIME_MARKERS)});`,
     );
-    await expect(validateArtifact(misplacedRecorderMarker)).rejects.toThrow(
+    await expect(validateArtifact(misplacedMirrorMarker)).rejects.toThrow(
       REQUIRED_REPLICA_RUNTIME_MARKERS[0],
     );
 
-    const commentOnlyCaptureMarker = await createTemporaryArtifact();
+    const commentOnlyMirrorMarker = await createTemporaryArtifact();
     await writeFile(
-      path.join(commentOnlyCaptureMarker, REQUIRED_UNLISTED_BUNDLES[0]),
-      `// ${REQUIRED_REPLICA_RUNTIME_MARKERS[0]}\nconsole.info("recorder");`,
+      path.join(commentOnlyMirrorMarker, REQUIRED_UNLISTED_BUNDLES[0]),
+      `// ${REQUIRED_REPLICA_RUNTIME_MARKERS[0]}\nconsole.info("mirror");`,
     );
-    await expect(validateArtifact(commentOnlyCaptureMarker)).rejects.toThrow(
+    await expect(validateArtifact(commentOnlyMirrorMarker)).rejects.toThrow(
       REQUIRED_REPLICA_RUNTIME_MARKERS[0],
     );
 
-    const commentOnlyReplayMarker = await createTemporaryArtifact();
+    const commentOnlyIsolatedMarker = await createTemporaryArtifact();
     await writeFile(
-      path.join(commentOnlyReplayMarker, 'side.js'),
+      path.join(commentOnlyIsolatedMarker, 'side.js'),
       `// ${REQUIRED_REPLICA_RUNTIME_MARKERS[1]}\nconsole.info("side");`,
     );
-    await expect(validateArtifact(commentOnlyReplayMarker)).rejects.toThrow(
+    await expect(validateArtifact(commentOnlyIsolatedMarker)).rejects.toThrow(
       REQUIRED_REPLICA_RUNTIME_MARKERS[1],
     );
 
@@ -411,13 +405,23 @@ describe('validateArtifact', () => {
       path.join(missingSandboxMarker, 'side.js'),
       `console.info(${JSON.stringify([
         REQUIRED_REPLICA_RUNTIME_MARKERS[1],
-        REQUIRED_REPLICA_RUNTIME_MARKERS[3],
       ])});`,
     );
     await expect(validateArtifact(missingSandboxMarker)).rejects.toThrow(
       'isolated iframe sandbox/CSP markers',
     );
   });
+
+  it.each(FORBIDDEN_LEGACY_REPLICA_BUNDLES)(
+    'rejects the removed replica bundle %s',
+    async (bundle) => {
+      const artifact = await createTemporaryArtifact();
+      await writeFile(path.join(artifact, bundle), 'console.info("legacy");');
+      await expect(validateArtifact(artifact)).rejects.toThrow(
+        'forbidden legacy replica bundle',
+      );
+    },
+  );
 
   it.each([
     'fetch("https://cdn.example.test/runtime.wasm")',
@@ -489,11 +493,8 @@ describe('OCR provider package boundary', () => {
     const projectRoot = await createTemporaryDirectory('simul-ocr-deps-');
     const packageJson = {
       dependencies: {
-        '@paddleocr/paddleocr-js': '0.4.2',
-        'onnxruntime-web': '1.24.3',
         'tesseract.js': '7.0.0',
         'tesseract.js-core': '7.0.0',
-        'tesseract-wasm': '0.11.0',
       },
     };
     const packageLock = {
@@ -561,25 +562,22 @@ describe('OCR provider package boundary', () => {
     ['a missing resolved URL', 'tesseract.js', 'resolved', undefined],
     [
       'an alternate resolved URL',
-      'js-yaml',
+      'tesseract.js-core',
       'resolved',
-      'https://packages.example.test/js-yaml-4.3.0.tgz',
+      'https://packages.example.test/tesseract.js-core-7.0.0.tgz',
     ],
-    ['a missing integrity', 'onnxruntime-common', 'integrity', undefined],
+    ['a missing integrity', 'tesseract.js', 'integrity', undefined],
     [
       'a changed integrity',
-      '@paddleocr/paddleocr-js',
+      'tesseract.js-core',
       'integrity',
       'sha512-not-the-reviewed-package',
     ],
   ])('rejects %s for an approved package', async (_label, name, field, value) => {
     const projectRoot = await createTemporaryDirectory('simul-ocr-provenance-');
     const dependencies = {
-      '@paddleocr/paddleocr-js': '0.4.2',
-      'onnxruntime-web': '1.24.3',
       'tesseract.js': '7.0.0',
       'tesseract.js-core': '7.0.0',
-      'tesseract-wasm': '0.11.0',
     };
     const packages = Object.fromEntries(
       Object.entries(APPROVED_OCR_PACKAGE_LOCK_METADATA).map(
@@ -626,7 +624,7 @@ describe('disabled OCR production profile', () => {
     expect(validation.ocrEnabled).toBe(false);
     expect(validation.manifest.version).toBe('0.3.2');
     expect(validation.manifest.version_name).toBe(
-      '0.3.2 beta v.20260723.5',
+      '0.3.2 beta',
     );
     expect(validation.manifest.permissions).toEqual(APPROVED_PERMISSIONS);
     expect(validation.manifest).not.toHaveProperty('content_security_policy');
@@ -666,22 +664,14 @@ describe('disabled OCR production profile', () => {
 });
 
 describe('independent OCR production profiles', () => {
-  it('keeps the elevated budget closed to the exact ordered four-provider trial', async () => {
+  it('uses one bounded production artifact workflow', async () => {
     expect(MAX_UNPACKED_ARTIFACT_BYTES).toBe(42 * 1024 * 1024);
-    expect(MAX_OCR_ALL_TRIAL_ARTIFACT_BYTES).toBe(72 * 1024 * 1024);
-    expect(OCR_ALL_TRIAL_PROVIDER_IDS).toEqual([
-      'paddleocr-wasm',
-      'chrome-text-detector',
-      'tesseract',
-      'tesseract-wasm-direct',
-    ]);
 
     const packageManifest = JSON.parse(await readFile('package.json', 'utf8'));
     expect(packageManifest.scripts).toMatchObject({
-      'check:ocr-all-trial':
-        'node tools/extension-artifact.mjs check-ocr-all-trial',
-      'artifact:sync:ocr-trials':
-        'node tools/extension-artifact.mjs sync-ocr-all-trial',
+      'artifact:check': 'node tools/extension-artifact.mjs check',
+      'artifact:sync': 'node tools/extension-artifact.mjs sync',
+      check: 'npm run typecheck && npm test && npm run artifact:check',
     });
   });
 
@@ -725,195 +715,6 @@ describe('independent OCR production profiles', () => {
     });
     expect(validation.files).toContain('ocr/tesseract/asset-manifest.json');
   }, 20_000);
-
-  it('builds and validates a local Paddle-only profile without Tesseract assets', async () => {
-    const temporaryRoot = await createTemporaryDirectory('simul-paddle-build-');
-    const artifact = await buildProductionArtifact({
-      temporaryRoot,
-      ocrProviderIds: ['paddleocr-wasm'],
-    });
-
-    const validation = await validateArtifact(artifact);
-
-    expect(validation.ocrProviderIds).toEqual(['paddleocr-wasm']);
-    expect(validation.manifest.permissions).toEqual(APPROVED_OCR_PERMISSIONS);
-    expect(validation.manifest.content_security_policy).toEqual({
-      extension_pages: APPROVED_OCR_CSP,
-      sandbox: APPROVED_PADDLE_SANDBOX_CSP,
-    });
-    expect(validation.manifest.sandbox).toEqual({
-      pages: ['paddle-ocr.html'],
-    });
-    expect(validation.files).toContain('paddle-ocr.html');
-    expect(validation.files).toContain('ocr/paddle/asset-manifest.json');
-    expect(validation.files).toContain(
-      'ocr/paddle/runtime/ort-wasm-simd-threaded.mjs',
-    );
-    expect(validation.files.some((file) => file.startsWith('ocr/tesseract/')))
-      .toBe(false);
-  }, 20_000);
-
-  it('keeps dynamic Paddle code confined to the exact sandbox CSP', async () => {
-    const temporaryRoot = await createTemporaryDirectory('simul-paddle-csp-');
-    const artifact = await buildProductionArtifact({
-      temporaryRoot,
-      ocrProviderIds: ['paddleocr-wasm'],
-    });
-    const manifestPath = path.join(artifact, 'manifest.json');
-    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
-
-    expect(manifest.content_security_policy.extension_pages).not.toContain(
-      "'unsafe-eval'",
-    );
-    expect(manifest.content_security_policy.extension_pages).toBe(
-      APPROVED_OCR_CSP,
-    );
-    expect(manifest.content_security_policy.sandbox).toBe(
-      APPROVED_PADDLE_SANDBOX_CSP,
-    );
-    expect(manifest.content_security_policy.sandbox).not.toContain(
-      "worker-src 'self' blob:",
-    );
-
-    manifest.content_security_policy.sandbox =
-      "sandbox allow-scripts; script-src 'self' 'wasm-unsafe-eval';";
-    await writeFile(manifestPath, JSON.stringify(manifest));
-    await expect(validateArtifact(artifact)).rejects.toThrow(
-      'requires exact privileged and sandbox CSPs',
-    );
-  }, 20_000);
-
-  it('returns only durable metrics for the temporary Paddle trial', async () => {
-    const trial = await checkOcrPaddleTrial();
-
-    expect(trial).not.toHaveProperty('directory');
-    expect(trial.files).toContain('ocr/paddle/asset-manifest.json');
-    expect(trial.unpackedBytes).toBeGreaterThan(0);
-  }, 20_000);
-
-  it('does not grant the elevated trial budget to an arbitrary provider set', async () => {
-    const artifact = await createTemporaryOcrArtifact();
-
-    await expect(
-      validateArtifact(artifact, { allowExactOcrAllTrial: true }),
-    ).rejects.toThrow(
-      'The elevated OCR trial profile requires exactly: paddleocr-wasm, chrome-text-detector, tesseract, tesseract-wasm-direct.',
-    );
-  });
-
-  it('checks and atomically syncs only the exact four-provider artifact above the normal cap', async () => {
-    const retainedRoot = await createTemporaryDirectory(
-      'simul-all-ocr-retained-',
-    );
-    const retainedArtifact = path.join(retainedRoot, 'chrome-mv3');
-    let checkedProviderIds;
-    const trial = await checkOcrAllTrial({
-      buildArtifact: async (options) => {
-        checkedProviderIds = options.ocrProviderIds;
-        const built = await buildProductionArtifact(options);
-        await cp(built, retainedArtifact, { recursive: true });
-        return built;
-      },
-    });
-
-    expect(checkedProviderIds).toEqual(OCR_ALL_TRIAL_PROVIDER_IDS);
-    expect(trial.ocrProviderIds).toEqual(OCR_ALL_TRIAL_PROVIDER_IDS);
-    expect(trial.unpackedBytes).toBeGreaterThan(
-      MAX_UNPACKED_ARTIFACT_BYTES,
-    );
-    expect(trial.unpackedBytes).toBeLessThanOrEqual(
-      MAX_OCR_ALL_TRIAL_ARTIFACT_BYTES,
-    );
-    await expect(validateArtifact(retainedArtifact)).rejects.toThrow(
-      `the approved maximum is ${MAX_UNPACKED_ARTIFACT_BYTES} bytes`,
-    );
-    await expect(
-      validateArtifact(retainedArtifact, { allowExactOcrAllTrial: true }),
-    ).resolves.toMatchObject({
-      ocrProviderIds: OCR_ALL_TRIAL_PROVIDER_IDS,
-      unpackedBytes: trial.unpackedBytes,
-    });
-
-    const projectRoot = await createTemporaryDirectory('simul-all-ocr-sync-');
-    const committed = canonicalArtifactDirectory(projectRoot);
-    await createValidArtifact(committed, {
-      popupScript: 'console.info("known-good");',
-    });
-    const unrelated = path.join(projectRoot, 'dist', 'keep.txt');
-    await writeFile(unrelated, 'untouched');
-    let syncedProviderIds;
-
-    await syncOcrAllTrial({
-      projectRoot,
-      buildArtifact: async ({ temporaryRoot, ocrProviderIds }) => {
-        syncedProviderIds = ocrProviderIds;
-        const built = path.join(temporaryRoot, 'built');
-        await cp(retainedArtifact, built, { recursive: true });
-        return built;
-      },
-    });
-
-    expect(syncedProviderIds).toEqual(OCR_ALL_TRIAL_PROVIDER_IDS);
-    await expect(
-      validateArtifact(committed, { allowExactOcrAllTrial: true }),
-    ).resolves.toMatchObject({
-      ocrProviderIds: OCR_ALL_TRIAL_PROVIDER_IDS,
-      unpackedBytes: trial.unpackedBytes,
-    });
-    expect(await readFile(unrelated, 'utf8')).toBe('untouched');
-  }, 60_000);
-
-  it('checks the committed artifact against a fresh exact four-provider trial without mutation', async () => {
-    const retainedRoot = await createTemporaryDirectory(
-      'simul-all-ocr-check-retained-',
-    );
-    const retainedArtifact = path.join(retainedRoot, 'chrome-mv3');
-    await checkOcrAllTrial({
-      buildArtifact: async (options) => {
-        const built = await buildProductionArtifact(options);
-        await cp(built, retainedArtifact, { recursive: true });
-        return built;
-      },
-    });
-
-    const projectRoot = await createTemporaryDirectory(
-      'simul-all-ocr-check-',
-    );
-    const committed = canonicalArtifactDirectory(projectRoot);
-    await cp(retainedArtifact, committed, { recursive: true });
-    const before = await readFile(path.join(committed, 'manifest.json'));
-    let checkedProviderIds;
-
-    await expect(
-      checkSyncedOcrAllTrial({
-        projectRoot,
-        buildArtifact: async ({ temporaryRoot, ocrProviderIds }) => {
-          checkedProviderIds = ocrProviderIds;
-          const built = path.join(temporaryRoot, 'built');
-          await cp(retainedArtifact, built, { recursive: true });
-          return built;
-        },
-      }),
-    ).resolves.toEqual({ committedDirectory: committed });
-
-    expect(checkedProviderIds).toEqual(OCR_ALL_TRIAL_PROVIDER_IDS);
-    expect(await readFile(path.join(committed, 'manifest.json'))).toEqual(before);
-
-    await writeFile(
-      path.join(committed, 'page-mirror.js'),
-      `${await readFile(path.join(committed, 'page-mirror.js'), 'utf8')}\n`,
-    );
-    await expect(
-      checkSyncedOcrAllTrial({
-        projectRoot,
-        buildArtifact: async ({ temporaryRoot }) => {
-          const built = path.join(temporaryRoot, 'built');
-          await cp(retainedArtifact, built, { recursive: true });
-          return built;
-        },
-      }),
-    ).rejects.toThrow(/content changed: page-mirror\.js[\s\S]*artifact:sync:ocr-trials/u);
-  }, 60_000);
 
   it('rejects duplicate or unknown requested providers before building', async () => {
     const temporaryRoot = await createTemporaryDirectory('simul-invalid-ocr-build-');
@@ -1213,21 +1014,12 @@ async function createValidArtifact(
       path.join(directory, 'side.js'),
       `console.info("side", ${JSON.stringify([
         REQUIRED_REPLICA_RUNTIME_MARKERS[1],
-        REQUIRED_REPLICA_RUNTIME_MARKERS[3],
         ...REQUIRED_ISOLATED_SANDBOX_MARKERS,
       ])});`,
     ),
     writeFile(
       path.join(directory, REQUIRED_UNLISTED_BUNDLES[0]),
       `console.info(${JSON.stringify(REQUIRED_REPLICA_RUNTIME_MARKERS[0])});`,
-    ),
-    writeFile(
-      path.join(directory, REQUIRED_UNLISTED_BUNDLES[1]),
-      `console.info(${JSON.stringify(REQUIRED_REPLICA_RUNTIME_MARKERS[2])});`,
-    ),
-    writeFile(
-      path.join(directory, REQUIRED_UNLISTED_BUNDLES[2]),
-      `console.info(${JSON.stringify(REQUIRED_REPLICA_RUNTIME_MARKERS[4])});`,
     ),
   ]);
   return directory;

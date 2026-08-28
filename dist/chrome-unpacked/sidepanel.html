@@ -5,9 +5,9 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="color-scheme" content="light dark">
     <title>Translation companion</title>
-    <script type="module" crossorigin src="/chunks/sidepanel-CnFQ-olg.js"></script>
-    <link rel="modulepreload" crossorigin href="/chunks/transient-image-store-DuSHf00Z.js">
-    <link rel="stylesheet" crossorigin href="/assets/sidepanel-DDld-FVC.css">
+    <script type="module" crossorigin src="/chunks/sidepanel-oN28_ITm.js"></script>
+    <link rel="modulepreload" crossorigin href="/chunks/transient-image-store-PFUeDZdZ.js">
+    <link rel="stylesheet" crossorigin href="/assets/sidepanel-GHgVCNji.css">
   </head>
   <body>
     <nav id="compact-toolbar" class="compact-toolbar" aria-label="Translation companion controls">
@@ -142,7 +142,7 @@
 
       <div class="zoom-row" aria-label="Mirror zoom">
         <button id="zoom-out" type="button" aria-label="Zoom out">−</button>
-        <input id="zoom" type="range" min="25" max="300" step="5" value="100">
+        <input id="zoom" type="range" min="25" max="300" step="5" value="100" aria-label="Mirror zoom percentage">
         <output id="zoom-value" for="zoom">100%</output>
         <button id="zoom-in" type="button" aria-label="Zoom in">+</button>
       </div>
@@ -194,15 +194,8 @@
       </details>
 
       <details id="experimental-options" class="options-group options-group--experimental">
-        <summary title="Change replica engines, inspect untranslated source text, and configure experimental local image OCR." data-ui-label="Advanced & experimental">Advanced &amp; experimental</summary>
+        <summary title="Inspect untranslated source text and configure experimental local image OCR." data-ui-label="Advanced & experimental">Advanced &amp; experimental</summary>
         <div class="settings-grid">
-          <label title="Isolated HTML is the recommended inert replica; rrweb remains experimental.">
-            <span data-ui-label="Replica engine">Replica engine</span>
-            <select id="replica-engine">
-              <option value="isolated-html" data-ui-label="Isolated HTML (recommended)">Isolated HTML (recommended)</option>
-              <option value="rrweb" data-ui-label="rrweb (experimental)">rrweb (experimental)</option>
-            </select>
-          </label>
           <label title="Show translated text or temporarily inspect the live source text without translation.">
             <span data-ui-label="Replica text">Replica text</span>
             <select id="replica-view-mode">
@@ -243,9 +236,10 @@
       </div>
       <p id="composer-guidance" class="microcopy"></p>
       <label class="composer-label" for="composer-input" data-ui-label="Input">Input</label>
-      <textarea id="composer-input" rows="3" maxlength="5000" placeholder="Type here…"></textarea>
+      <textarea id="composer-input" rows="3" maxlength="5000" placeholder="Type here…" aria-describedby="composer-guidance composer-character-count" aria-keyshortcuts="Control+Enter Meta+Enter"></textarea>
+      <output id="composer-character-count" class="composer-character-count" for="composer-input" aria-label="0 of 5,000 characters used">0 / 5,000</output>
       <div class="composer-actions">
-        <button id="translate-composer" class="primary" type="button" data-ui-label="Translate">Translate</button>
+        <button id="translate-composer" class="primary" type="button" data-ui-label="Translate" title="Translate (Ctrl/Command+Enter)">Translate</button>
         <button id="copy-composer" type="button" disabled data-ui-label="Copy result">Copy result</button>
       </div>
       <label class="composer-label" for="composer-output" data-ui-label="Output">Output</label>
@@ -254,10 +248,10 @@
     </section>
 
     <main>
-      <section id="snapshot" class="snapshot" aria-label="Page mirror">
+      <section id="replica-status" class="replica-status" aria-label="Page mirror status" aria-busy="false">
         <div class="empty-state"><p>Preparing the live read-only mirror…</p></div>
       </section>
-      <section id="replica-preview" class="replica-preview" aria-label="Live page replica" aria-hidden="true" hidden></section>
+      <section id="replica-preview" class="replica-preview" aria-label="Live page replica" aria-busy="false" aria-hidden="true" hidden></section>
     </main>
 
   </body>

@@ -391,7 +391,7 @@ describe('preference coordinator', () => {
       type: 'simul:preferences:patch-image-analysis',
       expectedResetRevision: 0,
       expectedSettingsRevision: 4,
-      patch: { disabledImageReadingMethodIds: ['paddleocr-wasm'] },
+      patch: { disabledImageReadingMethodIds: ['chrome-text-detector'] },
     });
     const staleSecondPanel = await coordinator.run({
       type: 'simul:preferences:patch-image-analysis',
@@ -404,7 +404,7 @@ describe('preference coordinator', () => {
       applied: true,
       preferences: {
         settingsRevision: 5,
-        disabledImageReadingMethodIds: ['paddleocr-wasm'],
+        disabledImageReadingMethodIds: ['chrome-text-detector'],
       },
     });
     expect(staleSecondPanel).toMatchObject({
@@ -412,11 +412,11 @@ describe('preference coordinator', () => {
       code: 'stale-settings-revision',
       preferences: {
         settingsRevision: 5,
-        disabledImageReadingMethodIds: ['paddleocr-wasm'],
+        disabledImageReadingMethodIds: ['chrome-text-detector'],
       },
     });
     expect(adapter.preferences.disabledImageReadingMethodIds).toEqual([
-      'paddleocr-wasm',
+      'chrome-text-detector',
     ]);
   });
 
@@ -458,6 +458,22 @@ describe('preference coordinator', () => {
     expect(adapter.preferences.disabledImageReadingMethodIds).toEqual([
       'tesseract',
     ]);
+    expect(adapter.saveCalls).toBe(1);
+  });
+
+  it('removes a retired replica-engine preference during reconciliation', async () => {
+    const adapter = new MemoryPreferenceAdapter();
+    adapter.loadValue = {
+      ...adapter.preferences,
+      replicaEngine: 'rrweb',
+    };
+
+    const result = await new PreferenceCoordinator(adapter).run({
+      type: 'simul:preferences:reconcile',
+    });
+
+    expect(Object.hasOwn(result.preferences, 'replicaEngine')).toBe(false);
+    expect(Object.hasOwn(adapter.preferences, 'replicaEngine')).toBe(false);
     expect(adapter.saveCalls).toBe(1);
   });
 
@@ -874,11 +890,9 @@ describe('preference coordinator message boundary', () => {
         expectedResetRevision: 0,
         patch: {
           imageTextProviderOrder: [
-            'paddleocr-wasm',
             'transformers',
             'tesseract',
             'chrome-text-detector',
-            'tesseract-wasm-direct',
             'chromium-screen-ai',
           ],
           disabledImageTextProviderIds: ['chrome-text-detector'],
@@ -893,11 +907,9 @@ describe('preference coordinator message boundary', () => {
       expectedResetRevision: 0,
       patch: {
         imageTextProviderOrder: [
-          'paddleocr-wasm',
           'transformers',
           'tesseract',
           'chrome-text-detector',
-          'tesseract-wasm-direct',
           'chromium-screen-ai',
         ],
         disabledImageTextProviderIds: ['chrome-text-detector'],
@@ -916,8 +928,6 @@ describe('preference coordinator message boundary', () => {
             'tesseract',
             'tesseract',
             'transformers',
-            'paddleocr-wasm',
-            'tesseract-wasm-direct',
             'chromium-screen-ai',
           ],
         },

@@ -84,6 +84,26 @@ describe('source secret classifier', () => {
     })).toBe('secret');
   });
 
+  it('advances its content-free revision only for a new sticky secret identity', () => {
+    const first = {};
+    const second = {};
+    const classifier = new StickySourceSecretClassifier();
+
+    expect(classifier.revision).toBe(0);
+    expect(classifier.classify(first, { tagName: 'p' })).toBe('public-semantic');
+    expect(classifier.revision).toBe(0);
+    expect(classifier.classify(first, {
+      tagName: 'input', type: 'password',
+    })).toBe('secret');
+    expect(classifier.revision).toBe(1);
+    expect(classifier.classify(first, { tagName: 'p' })).toBe('secret');
+    expect(classifier.revision).toBe(1);
+    expect(classifier.classify(second, {
+      tagName: 'div', computedTextSecurity: 'disc',
+    })).toBe('secret');
+    expect(classifier.revision).toBe(2);
+  });
+
   it('shares sticky credential history for one source document', () => {
     const { document } = parseHTML(
       '<html><body><section><input id="credential" type="password"></section></body></html>',

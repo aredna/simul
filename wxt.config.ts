@@ -9,28 +9,17 @@ import {
 } from './tools/ocr-build-profile';
 
 const ocrBuildProfile = readOcrBuildProfile(process.env);
-const betaBuildSuffix = 'beta v.20260723.5';
+const betaBuildSuffix = 'beta';
 const tesseractEnabled = ocrBuildProfile.enabledProviderIds.includes('tesseract');
-const tesseractWasmDirectEnabled = ocrBuildProfile.enabledProviderIds.includes(
-  'tesseract-wasm-direct',
-);
-const paddleEnabled = ocrBuildProfile.enabledProviderIds.includes('paddleocr-wasm');
 const offscreenOcrEnabled = ocrBuildProfile.enabledProviderIds.some((id) =>
-  id === 'tesseract' || id === 'chrome-text-detector' ||
-  id === 'paddleocr-wasm' || id === 'tesseract-wasm-direct',
+  id === 'tesseract' || id === 'chrome-text-detector',
 );
 const privilegedOcrCsp =
   "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; object-src 'self';";
-const paddleSandboxCsp =
-  "sandbox allow-scripts; script-src 'self' 'unsafe-eval' 'wasm-unsafe-eval'; worker-src 'self'; connect-src 'self'; img-src 'self' blob: data:; object-src 'none'; base-uri 'none'; form-action 'none';";
 const selectedEntrypoints = Object.freeze([
   'background',
   ...(offscreenOcrEnabled ? ['offscreen'] : []),
-  ...(paddleEnabled ? ['paddle-ocr'] : []),
-  'page-live-observer',
-  'page-recorder',
   'page-mirror',
-  'page-snapshot',
   'sidepanel',
 ]);
 const releaseLegalFiles = Object.freeze([
@@ -41,7 +30,7 @@ const releaseLegalFiles = Object.freeze([
   },
 ]);
 const selectedOcrAssets = Object.freeze([
-  ...(tesseractEnabled || tesseractWasmDirectEnabled
+  ...(tesseractEnabled
     ? [
         ...collectFiles(
           new URL('./vendor/ocr/tesseract/', import.meta.url),
@@ -52,18 +41,6 @@ const selectedOcrAssets = Object.freeze([
           fileName: 'ocr/THIRD_PARTY_NOTICES.md',
         },
       ]
-    : []),
-  ...(tesseractWasmDirectEnabled
-    ? collectFiles(
-        new URL('./vendor/ocr/tesseract-wasm/', import.meta.url),
-        'ocr/tesseract-wasm',
-      )
-    : []),
-  ...(paddleEnabled
-    ? collectFiles(
-        new URL('./vendor/ocr/paddle/', import.meta.url),
-        'ocr/paddle',
-      )
     : []),
 ]);
 
@@ -100,7 +77,6 @@ function stripSourceMapDirectives(code: string): string {
       .replace(/[^\r\n]/gu, ' ');
     stripped = stripped.slice(0, range.start) + whitespace + stripped.slice(range.end);
   }
-  // rrweb also packages an executable canvas Worker as a multiline string.
   return stripped.replace(
     /(^|\r?\n)[\t ]*\/\/[#@][\t ]*sourceMappingURL[\t ]*=[^\r\n]*/gu,
     '$1',
@@ -123,26 +99,6 @@ function removeRemoteTesseractFallbacks(code: string): string {
     );
 }
 
-function requireExplicitTesseractWasmAssets(code: string): string {
-  const workerFallback =
-    'new URL("./tesseract-worker.js", import.meta.url).href';
-  const wasmFallback = 'new URL("tesseract-core.wasm",import.meta.url).href';
-  if (!code.includes(workerFallback) || !code.includes(wasmFallback)) {
-    throw new Error(
-      'The pinned tesseract-wasm local-asset guards no longer match every fallback.',
-    );
-  }
-  return code
-    .replaceAll(
-      workerFallback,
-      '"__SIMUL_EXPLICIT_TESSERACT_WASM_WORKER_URL_REQUIRED__"',
-    )
-    .replaceAll(
-      wasmFallback,
-      '"__SIMUL_EXPLICIT_TESSERACT_WASM_BINARY_REQUIRED__"',
-    );
-}
-
 export default defineConfig({
   outDir: process.env.SIMUL_WXT_OUT_DIR || '.output',
   publicDir: 'public',
@@ -161,28 +117,11 @@ export default defineConfig({
       target: 'chrome138',
       cssTarget: 'chrome138',
     },
-    define: {
-      __SIMUL_OCR_PADDLE_COMPILED__: JSON.stringify(paddleEnabled),
-      __SIMUL_OCR_TESSERACT_WASM_DIRECT_COMPILED__: JSON.stringify(
-        tesseractWasmDirectEnabled,
-      ),
-    },
     esbuild: {
       legalComments: 'none',
     },
     plugins: [
       createOcrBuildProfilePlugin(process.env),
-      {
-        name: 'simul-require-explicit-local-tesseract-wasm-assets',
-        enforce: 'pre',
-        transform(code, id) {
-          if (!id.replaceAll('\\', '/').endsWith(
-            '/node_modules/tesseract-wasm/dist/lib.js',
-          )) return null;
-          const transformed = requireExplicitTesseractWasmAssets(code);
-          return { code: transformed, map: null };
-        },
-      },
       {
         name: 'simul-release-legal-files',
         generateBundle() {
@@ -202,10 +141,8 @@ export default defineConfig({
         name: 'simul-strip-vendored-worker-sourcemap-directives',
         enforce: 'post',
         renderChunk(code) {
-          // rrweb ships an inline canvas-worker source string containing a
-          // sourceMappingURL comment. Canvas recording is disabled, but the
-          // installable artifact must not retain even an unreachable map
-          // reference. WXT itself already builds without source maps.
+          // Vendored workers can contain raw source-map directives. The
+          // installable artifact must not retain them, including in strings.
           const stripped = removeRemoteTesseractFallbacks(
             stripSourceMapDirectives(code),
           );
@@ -240,11 +177,10 @@ export default defineConfig({
       ...(offscreenOcrEnabled ? ['offscreen' as const] : []),
     ],
     optional_host_permissions: ['<all_urls>'],
-    ...(tesseractEnabled || tesseractWasmDirectEnabled || paddleEnabled
+    ...(tesseractEnabled
       ? {
           content_security_policy: {
             extension_pages: privilegedOcrCsp,
-            ...(paddleEnabled ? { sandbox: paddleSandboxCsp } : {}),
           },
         }
       : {}),

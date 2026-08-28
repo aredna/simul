@@ -1,6 +1,6 @@
 import { describe, expect, it } from 'vitest';
 
-import type { ReplicaSourceTextRecord } from '../lib/replica/source-value-model';
+import type { ReplicaSourceTextRecord } from '../lib/replica/source-text-record';
 import { replicaSourceCommitAction } from '../lib/translation/replica-translation-lifecycle';
 import type { ReplicaSourceCommit } from '../lib/translation/replica-translation-coordinator';
 

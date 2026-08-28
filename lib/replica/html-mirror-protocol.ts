@@ -20,21 +20,21 @@ import {
 import {
   createReplicaIdentity,
   readReplicaIdentity,
-} from './protocol-v2';
+} from './replica-identity';
 import {
   isSelectableReplicaFidelityPolicy,
   type SelectableReplicaFidelityPolicy,
 } from './fidelity-policy';
 import { hasExactKeysWithOptional } from '../exact-record';
 
-export const HTML_MIRROR_PROTOCOL_VERSION = 1 as const;
-export const HTML_MIRROR_PORT_PREFIX = 'simul:html-mirror-v1:';
+export const HTML_MIRROR_PROTOCOL_VERSION = 2 as const;
+export const HTML_MIRROR_PORT_PREFIX = 'simul:html-mirror-v2:';
 export const MAX_HTML_MIRROR_PATCH_OPERATIONS = 1_000;
 export const MAX_HTML_MIRROR_UNACKED_BATCHES = 4;
 
 export interface HtmlMirrorCheckpoint {
   readonly protocolVersion: typeof HTML_MIRROR_PROTOCOL_VERSION;
-  readonly kind: 'simul:html-mirror-v1:checkpoint';
+  readonly kind: 'simul:html-mirror-v2:checkpoint';
   readonly identity: ReplicaDocumentIdentity;
   readonly payload: {
     readonly root: HtmlMirrorElementNode;
@@ -102,7 +102,7 @@ export type HtmlMirrorPatchOperation =
 
 export interface HtmlMirrorPatchBatch {
   readonly protocolVersion: typeof HTML_MIRROR_PROTOCOL_VERSION;
-  readonly kind: 'simul:html-mirror-v1:patch';
+  readonly kind: 'simul:html-mirror-v2:patch';
   readonly identity: ReplicaDocumentIdentity;
   readonly firstSequence: number;
   readonly lastSequence: number;
@@ -111,9 +111,30 @@ export interface HtmlMirrorPatchBatch {
   readonly byteLength: number;
 }
 
+export interface HtmlMirrorScrollState {
+  readonly scrollTarget: 'document' | 'nested';
+  readonly scrollX: number;
+  readonly scrollY: number;
+  readonly maxScrollX: number;
+  readonly maxScrollY: number;
+  readonly nestedOwnerKey?: number;
+  readonly nestedOwnerOrdinal?: number;
+  readonly documentScrollX: number;
+  readonly documentScrollY: number;
+  readonly documentMaxScrollX: number;
+  readonly documentMaxScrollY: number;
+}
+
+export interface HtmlMirrorScrollUpdate {
+  readonly protocolVersion: typeof HTML_MIRROR_PROTOCOL_VERSION;
+  readonly kind: 'simul:html-mirror-v2:scroll';
+  readonly identity: ReplicaDocumentIdentity;
+  readonly scroll: HtmlMirrorScrollState;
+}
+
 export interface HtmlMirrorStreamError {
   readonly protocolVersion: typeof HTML_MIRROR_PROTOCOL_VERSION;
-  readonly kind: 'simul:html-mirror-v1:error';
+  readonly kind: 'simul:html-mirror-v2:error';
   readonly identity: ReplicaDocumentIdentity;
   readonly code: Extract<
     ReplicaDiagnosticCode,
@@ -125,23 +146,24 @@ export interface HtmlMirrorStreamError {
 export type HtmlMirrorSourceMessage =
   | HtmlMirrorCheckpoint
   | HtmlMirrorPatchBatch
+  | HtmlMirrorScrollUpdate
   | HtmlMirrorStreamError;
 
 export type HtmlMirrorControllerMessage =
   | {
       readonly protocolVersion: typeof HTML_MIRROR_PROTOCOL_VERSION;
-      readonly kind: 'simul:html-mirror-v1:start';
+      readonly kind: 'simul:html-mirror-v2:start';
       readonly identity: ReplicaDocumentIdentity;
       readonly fidelityPolicy: SelectableReplicaFidelityPolicy;
     }
   | {
       readonly protocolVersion: typeof HTML_MIRROR_PROTOCOL_VERSION;
-      readonly kind: 'simul:html-mirror-v1:ack';
+      readonly kind: 'simul:html-mirror-v2:ack';
       readonly identity: ReplicaDocumentIdentity;
     }
   | {
       readonly protocolVersion: typeof HTML_MIRROR_PROTOCOL_VERSION;
-      readonly kind: 'simul:html-mirror-v1:checkpoint-request';
+      readonly kind: 'simul:html-mirror-v2:checkpoint-request';
       readonly identity: ReplicaDocumentIdentity;
     };
 
@@ -164,7 +186,7 @@ export function createHtmlMirrorStart(
 ): HtmlMirrorControllerMessage {
   return Object.freeze({
     protocolVersion: HTML_MIRROR_PROTOCOL_VERSION,
-    kind: 'simul:html-mirror-v1:start',
+    kind: 'simul:html-mirror-v2:start',
     identity,
     fidelityPolicy,
   });
@@ -176,7 +198,7 @@ export function createHtmlMirrorAck(
 ): HtmlMirrorControllerMessage {
   return Object.freeze({
     protocolVersion: HTML_MIRROR_PROTOCOL_VERSION,
-    kind: 'simul:html-mirror-v1:ack',
+    kind: 'simul:html-mirror-v2:ack',
     identity: withSequence(identity, sequence),
   });
 }
@@ -187,7 +209,7 @@ export function createHtmlMirrorCheckpointRequest(
 ): HtmlMirrorControllerMessage {
   return Object.freeze({
     protocolVersion: HTML_MIRROR_PROTOCOL_VERSION,
-    kind: 'simul:html-mirror-v1:checkpoint-request',
+    kind: 'simul:html-mirror-v2:checkpoint-request',
     identity: withSequence(identity, sequence),
   });
 }
@@ -205,9 +227,9 @@ export function readHtmlMirrorControllerMessage(
       ['fidelityPolicy'],
     ) ||
     input.protocolVersion !== HTML_MIRROR_PROTOCOL_VERSION ||
-    (input.kind !== 'simul:html-mirror-v1:start' &&
-      input.kind !== 'simul:html-mirror-v1:ack' &&
-      input.kind !== 'simul:html-mirror-v1:checkpoint-request')
+    (input.kind !== 'simul:html-mirror-v2:start' &&
+      input.kind !== 'simul:html-mirror-v2:ack' &&
+      input.kind !== 'simul:html-mirror-v2:checkpoint-request')
   ) return undefined;
   const identity = readReplicaIdentity(input.identity);
   if (
@@ -215,11 +237,11 @@ export function readHtmlMirrorControllerMessage(
     identity.sessionId !== expectedSessionId ||
     (expectedDocument && !sameDocument(identity, expectedDocument))
   ) return undefined;
-  if (input.kind === 'simul:html-mirror-v1:start' && identity.sequence !== 0) {
+  if (input.kind === 'simul:html-mirror-v2:start' && identity.sequence !== 0) {
     return undefined;
   }
   if (
-    input.kind === 'simul:html-mirror-v1:start' &&
+    input.kind === 'simul:html-mirror-v2:start' &&
     (
       !hasExactKeys(input, [
         'protocolVersion', 'kind', 'identity', 'fidelityPolicy',
@@ -228,10 +250,10 @@ export function readHtmlMirrorControllerMessage(
     )
   ) return undefined;
   if (
-    input.kind !== 'simul:html-mirror-v1:start' &&
+    input.kind !== 'simul:html-mirror-v2:start' &&
     Object.hasOwn(input, 'fidelityPolicy')
   ) return undefined;
-  if (input.kind === 'simul:html-mirror-v1:start') {
+  if (input.kind === 'simul:html-mirror-v2:start') {
     return Object.freeze({
       protocolVersion: HTML_MIRROR_PROTOCOL_VERSION,
       kind: input.kind,
@@ -291,7 +313,7 @@ export function createHtmlMirrorCheckpoint(
   }
   return Object.freeze({
     protocolVersion: HTML_MIRROR_PROTOCOL_VERSION,
-    kind: 'simul:html-mirror-v1:checkpoint',
+    kind: 'simul:html-mirror-v2:checkpoint',
     identity,
     payload: Object.freeze({
       root,
@@ -338,7 +360,7 @@ export function createHtmlMirrorPatch(
   }
   return Object.freeze({
     protocolVersion: HTML_MIRROR_PROTOCOL_VERSION,
-    kind: 'simul:html-mirror-v1:patch',
+    kind: 'simul:html-mirror-v2:patch',
     identity,
     firstSequence,
     lastSequence,
@@ -362,10 +384,24 @@ export function createHtmlMirrorError(
   }
   return Object.freeze({
     protocolVersion: HTML_MIRROR_PROTOCOL_VERSION,
-    kind: 'simul:html-mirror-v1:error',
+    kind: 'simul:html-mirror-v2:error',
     identity,
     code,
     representability,
+  });
+}
+
+export function createHtmlMirrorScrollUpdate(
+  identity: ReplicaDocumentIdentity,
+  input: HtmlMirrorScrollState,
+): HtmlMirrorScrollUpdate | undefined {
+  const scroll = readScrollState(input);
+  if (!scroll) return undefined;
+  return Object.freeze({
+    protocolVersion: HTML_MIRROR_PROTOCOL_VERSION,
+    kind: 'simul:html-mirror-v2:scroll',
+    identity,
+    scroll,
   });
 }
 
@@ -383,7 +419,7 @@ export function readHtmlMirrorSourceMessage(
   ) return undefined;
   const identity = readReplicaIdentity(input.identity);
   if (!identity || !sameDocument(identity, expectedIdentity)) return undefined;
-  if (input.kind === 'simul:html-mirror-v1:error') {
+  if (input.kind === 'simul:html-mirror-v2:error') {
     if (
       !hasExactKeys(input, [
         'protocolVersion', 'kind', 'identity', 'code', 'representability',
@@ -398,7 +434,17 @@ export function readHtmlMirrorSourceMessage(
       ? createHtmlMirrorError(identity, input.code, representability)
       : undefined;
   }
-  if (input.kind === 'simul:html-mirror-v1:checkpoint') {
+  if (input.kind === 'simul:html-mirror-v2:scroll') {
+    if (
+      !hasExactKeys(input, ['protocolVersion', 'kind', 'identity', 'scroll']) ||
+      !isRecord(input.scroll)
+    ) return undefined;
+    return createHtmlMirrorScrollUpdate(
+      identity,
+      input.scroll as unknown as HtmlMirrorScrollState,
+    );
+  }
+  if (input.kind === 'simul:html-mirror-v2:checkpoint') {
     if (
       !hasExactKeys(input, ['protocolVersion', 'kind', 'identity', 'payload']) ||
       !isRecord(input.payload) ||
@@ -424,7 +470,7 @@ export function readHtmlMirrorSourceMessage(
       : undefined;
   }
   if (
-    input.kind !== 'simul:html-mirror-v1:patch' ||
+    input.kind !== 'simul:html-mirror-v2:patch' ||
     !hasExactKeys(input, [
       'protocolVersion', 'kind', 'identity', 'firstSequence', 'lastSequence',
       'operations', 'representability', 'byteLength',
@@ -924,6 +970,64 @@ function readDimensions(input: {
     documentHeight: input.documentHeight,
     ...(canvasBackgroundColor ? { canvasBackgroundColor } : {}),
   };
+}
+
+function readScrollState(input: HtmlMirrorScrollState): HtmlMirrorScrollState | undefined {
+  if (
+    !hasExactKeysWithOptional(
+      input as unknown as Record<string, unknown>,
+      [
+        'scrollTarget', 'scrollX', 'scrollY', 'maxScrollX', 'maxScrollY',
+        'documentScrollX', 'documentScrollY', 'documentMaxScrollX',
+        'documentMaxScrollY',
+      ],
+      ['nestedOwnerKey', 'nestedOwnerOrdinal'],
+    ) ||
+    (input.scrollTarget !== 'document' && input.scrollTarget !== 'nested') ||
+    ![
+      input.scrollX,
+      input.scrollY,
+      input.maxScrollX,
+      input.maxScrollY,
+      input.documentScrollX,
+      input.documentScrollY,
+      input.documentMaxScrollX,
+      input.documentMaxScrollY,
+    ].every(isScrollValue) ||
+    input.scrollX > input.maxScrollX ||
+    input.scrollY > input.maxScrollY ||
+    input.documentScrollX > input.documentMaxScrollX ||
+    input.documentScrollY > input.documentMaxScrollY ||
+    (input.scrollTarget === 'document' &&
+      (input.nestedOwnerKey !== undefined || input.nestedOwnerOrdinal !== undefined)) ||
+    (input.nestedOwnerKey !== undefined &&
+      (!isSequence(input.nestedOwnerKey) || input.nestedOwnerKey === 0)) ||
+    (input.nestedOwnerOrdinal !== undefined &&
+      (!Number.isSafeInteger(input.nestedOwnerOrdinal) ||
+        input.nestedOwnerOrdinal < 0))
+  ) return undefined;
+  return Object.freeze({
+    scrollTarget: input.scrollTarget,
+    scrollX: input.scrollX,
+    scrollY: input.scrollY,
+    maxScrollX: input.maxScrollX,
+    maxScrollY: input.maxScrollY,
+    ...(input.scrollTarget === 'nested' && input.nestedOwnerKey !== undefined
+      ? { nestedOwnerKey: input.nestedOwnerKey }
+      : {}),
+    ...(input.scrollTarget === 'nested' && input.nestedOwnerOrdinal !== undefined
+      ? { nestedOwnerOrdinal: input.nestedOwnerOrdinal }
+      : {}),
+    documentScrollX: input.documentScrollX,
+    documentScrollY: input.documentScrollY,
+    documentMaxScrollX: input.documentMaxScrollX,
+    documentMaxScrollY: input.documentMaxScrollY,
+  });
+}
+
+function isScrollValue(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) &&
+    value >= 0 && value <= 100_000;
 }
 
 function withSequence(

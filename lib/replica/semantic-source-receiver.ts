@@ -2,7 +2,7 @@ import type { ReplicaTextProjection } from '../translation/replica-translation-c
 import type {
   ReplicaSourceTextChange,
   ReplicaSourceTextRecord,
-} from './source-value-model';
+} from './source-text-record';
 import {
   StickySourceSecretClassifier,
   classifySourceEvidence,
@@ -64,8 +64,23 @@ export type ResolvedSemanticSourceProof =
       readonly target: HTMLElement;
     }
   | {
+      readonly kind: 'tab-state';
+      readonly proof: Extract<SemanticSourceProof, { kind: 'tab-state' }>;
+      readonly trigger: HTMLElement;
+      readonly panel: HTMLElement;
+      /** Receiver-validated existing CSS/ARIA identity, when safe and unique. */
+      readonly panelId: string | undefined;
+    }
+  | {
       readonly kind: 'disclosure-state';
       readonly proof: Extract<SemanticSourceProof, { kind: 'disclosure-state' }>;
+      readonly trigger: HTMLElement;
+      readonly panel: HTMLElement;
+    }
+  | {
+      readonly kind: 'structural-menu';
+      readonly proof: Extract<SemanticSourceProof, { kind: 'structural-menu' }>;
+      readonly container: HTMLElement;
       readonly trigger: HTMLElement;
       readonly panel: HTMLElement;
     };
@@ -205,7 +220,7 @@ export class SemanticSourceReceiver {
         changed: !unchanged,
       });
     }
-    const proofPlans = this.#resolveProofs(batch.proofs);
+    const proofPlans = this.#resolveProofs(batch.proofs, batch.records);
     if (!proofPlans) return undefined;
     const proofPresentationChanged = !sameResolvedProofSet(
       this.#proofs,
@@ -356,6 +371,10 @@ export class SemanticSourceReceiver {
         retainedProofs.set(semanticSourceProofIdentity(resolved.proof), refreshed);
       }
     }
+    if (!this.#structuralMenusHaveAdmittedText(
+      retainedProofs.values(),
+      [...this.#entries.values()].map(({ sourceRecord }) => sourceRecord),
+    )) retainedProofs.clear();
     let presented = true;
     try {
       presented = this.environment.applyProofs?.(
@@ -420,6 +439,7 @@ export class SemanticSourceReceiver {
 
   #resolveProofs(
     proofs: readonly SemanticSourceProof[],
+    records: readonly SemanticSourceRecord[],
   ): Map<string, ResolvedSemanticSourceProof> | undefined {
     const resolved = new Map<string, ResolvedSemanticSourceProof>();
     for (const proof of proofs) {
@@ -455,6 +475,34 @@ export class SemanticSourceReceiver {
           presentation.proof.multiple !== value.proof.multiple)) {
         return undefined;
       }
+    }
+    const tabTriggers = new Set<number>();
+    const tabPanels = new Set<number>();
+    for (const value of resolved.values()) {
+      if (value.kind !== 'tab-state') continue;
+      if (
+        tabTriggers.has(value.proof.tabNodeId) ||
+        tabPanels.has(value.proof.panelNodeId)
+      ) return undefined;
+      tabTriggers.add(value.proof.tabNodeId);
+      tabPanels.add(value.proof.panelNodeId);
+    }
+    const menuContainers = new Set<number>();
+    const menuTriggers = new Set<number>();
+    const menuPanels = new Set<number>();
+    for (const value of resolved.values()) {
+      if (value.kind !== 'structural-menu') continue;
+      if (
+        menuContainers.has(value.proof.containerNodeId) ||
+        menuTriggers.has(value.proof.triggerNodeId) ||
+        menuPanels.has(value.proof.panelNodeId)
+      ) return undefined;
+      menuContainers.add(value.proof.containerNodeId);
+      menuTriggers.add(value.proof.triggerNodeId);
+      menuPanels.add(value.proof.panelNodeId);
+    }
+    if (!this.#structuralMenusHaveAdmittedText(resolved.values(), records)) {
+      return undefined;
     }
     return resolved;
   }
@@ -526,6 +574,49 @@ export class SemanticSourceReceiver {
         target: target as HTMLElement,
       });
     }
+    if (proof.kind === 'tab-state') {
+      const trigger = this.#resolveElement(proof.tabNodeId);
+      const panel = this.#resolveElement(proof.panelNodeId);
+      if (
+        !trigger || !panel || trigger === panel ||
+        trigger.ownerDocument !== panel.ownerDocument ||
+        trigger.getRootNode() !== panel.getRootNode() ||
+        trigger.contains(panel) || panel.contains(trigger) ||
+        !receiverTabRelationshipIsSafe(trigger, panel) ||
+        !this.#proofTargetIsSafe(trigger, false) ||
+        !this.#proofTargetIsSafe(panel, false) ||
+        !receiverDisclosureSubtreeIsSafe(panel, (element) =>
+          this.#proofTargetIsSafe(element, false))
+      ) return undefined;
+      return Object.freeze({
+        kind: proof.kind,
+        proof,
+        trigger: trigger as HTMLElement,
+        panel: panel as HTMLElement,
+        panelId: receiverUniqueBoundedPanelId(panel),
+      });
+    }
+    if (proof.kind === 'structural-menu') {
+      const container = this.#resolveElement(proof.containerNodeId);
+      const trigger = this.#resolveElement(proof.triggerNodeId);
+      const panel = this.#resolveElement(proof.panelNodeId);
+      if (
+        !container || !trigger || !panel ||
+        !receiverStructuralMenuRelationshipIsSafe(container, trigger, panel) ||
+        !this.#proofTargetIsSafe(container, false) ||
+        !this.#proofTargetIsSafe(trigger, false) ||
+        !this.#proofTargetIsSafe(panel, false) ||
+        !receiverDisclosureSubtreeIsSafe(panel, (element) =>
+          this.#proofTargetIsSafe(element, false))
+      ) return undefined;
+      return Object.freeze({
+        kind: proof.kind,
+        proof,
+        container: container as HTMLElement,
+        trigger: trigger as HTMLElement,
+        panel: panel as HTMLElement,
+      });
+    }
     const trigger = this.#resolveElement(proof.triggerNodeId);
     const panel = this.#resolveElement(proof.panelNodeId);
     if (
@@ -545,6 +636,38 @@ export class SemanticSourceReceiver {
       trigger: trigger as HTMLElement,
       panel: panel as HTMLElement,
     });
+  }
+
+  #structuralMenusHaveAdmittedText(
+    proofs: Iterable<ResolvedSemanticSourceProof>,
+    records: readonly SemanticSourceRecord[],
+  ): boolean {
+    for (const resolved of proofs) {
+      if (resolved.kind !== 'structural-menu') continue;
+      let found = false;
+      for (const record of records) {
+        if (
+          record.gate !== 'disclosureContent' ||
+          record.presentation !== 'text' ||
+          record.text.trim() === ''
+        ) continue;
+        let node: Node | null | undefined;
+        try {
+          node = this.environment.resolveNode(record.nodeId);
+        } catch {
+          return false;
+        }
+        if (
+          node?.nodeType === 3 && node.ownerDocument === resolved.panel.ownerDocument &&
+          resolved.panel.contains(node)
+        ) {
+          found = true;
+          break;
+        }
+      }
+      if (!found) return false;
+    }
+    return true;
   }
 
   #presentCurrentProofs(): boolean {
@@ -726,6 +849,15 @@ function sameResolvedProof(
   if (left.kind === 'aria-state') {
     return right.kind === 'aria-state' && left.target === right.target;
   }
+  if (left.kind === 'tab-state') {
+    return right.kind === 'tab-state' && left.trigger === right.trigger &&
+      left.panel === right.panel && left.panelId === right.panelId;
+  }
+  if (left.kind === 'structural-menu') {
+    return right.kind === 'structural-menu' &&
+      left.container === right.container && left.trigger === right.trigger &&
+      left.panel === right.panel;
+  }
   return right.kind === 'disclosure-state' && left.trigger === right.trigger &&
     left.panel === right.panel;
 }
@@ -857,7 +989,7 @@ const RECEIVER_ARIA_CHECKED_ROLES = new Set([
   'checkbox', 'menuitemcheckbox', 'menuitemradio', 'radio', 'switch',
 ]);
 const RECEIVER_ARIA_MIXED_ROLES = new Set(['checkbox', 'menuitemcheckbox']);
-const RECEIVER_ARIA_SELECTED_ROLES = new Set(['option', 'tab', 'treeitem']);
+const RECEIVER_ARIA_SELECTED_ROLES = new Set(['option', 'treeitem']);
 const RECEIVER_DISCLOSURE_STATE_TAGS = new Set([
   'input', 'option', 'output', 'select', 'textarea',
 ]);
@@ -890,9 +1022,84 @@ function receiverDisclosureTriggerIsSafe(element: Element): boolean {
   const role = safeAttribute(element, 'role').trim().toLowerCase();
   if (tagName === 'button' || tagName === 'summary' ||
     RECEIVER_ACTIVATION_ROLES.has(role)) return true;
+  if (tagName === 'a') return safeAttribute(element, 'href').trim() !== '';
   if (tagName !== 'input') return false;
   const type = safeAttribute(element, 'type').trim().toLowerCase();
   return type === 'button' || type === 'reset' || type === 'submit';
+}
+
+function receiverStructuralMenuRelationshipIsSafe(
+  container: Element,
+  trigger: Element,
+  panel: Element,
+): boolean {
+  if (
+    container === trigger || container === panel || trigger === panel ||
+    container.ownerDocument !== trigger.ownerDocument ||
+    container.ownerDocument !== panel.ownerDocument ||
+    container.getRootNode() !== trigger.getRootNode() ||
+    container.getRootNode() !== panel.getRootNode() ||
+    trigger.parentElement !== container || panel.parentElement !== container ||
+    safeNullableAttribute(container, 'hidden') !== null ||
+    safeNullableAttribute(trigger, 'hidden') !== null ||
+    safeAttribute(container, 'aria-hidden').trim().toLowerCase() === 'true' ||
+    safeAttribute(trigger, 'aria-hidden').trim().toLowerCase() === 'true' ||
+    safeNullableAttribute(trigger, 'aria-expanded') !== null ||
+    safeNullableAttribute(trigger, 'aria-controls') !== null ||
+    !receiverDisclosureTriggerIsSafe(trigger)
+  ) return false;
+  let children: Element[];
+  try {
+    children = [...container.children];
+  } catch {
+    return false;
+  }
+  if (
+    children.length !== 2 || !children.includes(trigger) || !children.includes(panel)
+  ) return false;
+  const path = readSourceFlatTreeElementPath(container);
+  return Boolean(path?.some((ancestor) =>
+    ancestor.localName.toLowerCase() === 'nav' ||
+    safeAttribute(ancestor, 'role').trim().toLowerCase() === 'navigation'));
+}
+
+function receiverTabRelationshipIsSafe(
+  trigger: Element,
+  panel: Element,
+): boolean {
+  return safeAttribute(trigger, 'role').trim().toLowerCase() === 'tab' &&
+    safeAttribute(panel, 'role').trim().toLowerCase() === 'tabpanel';
+}
+
+function receiverUniqueBoundedPanelId(panel: Element): string | undefined {
+  const id = safeAttribute(panel, 'id');
+  if (
+    !id || id.length > 1_024 ||
+    id.startsWith('semantic-tab-relation-v1:') ||
+    /[\s\u0000-\u001f\u007f]/u.test(id)
+  ) {
+    return undefined;
+  }
+  const root = panel.getRootNode();
+  const pending: Node[] = root.nodeType === 9
+    ? [((root as Document).documentElement as Node | null)].filter(
+        (node): node is Node => Boolean(node),
+      )
+    : [...root.childNodes];
+  let visited = 0;
+  let match: Element | undefined;
+  while (pending.length > 0) {
+    const node = pending.pop();
+    if (!node || ++visited > 50_000) return undefined;
+    if (node.nodeType !== 1) continue;
+    const element = node as Element;
+    if (safeAttribute(element, 'id') === id) {
+      if (match) return undefined;
+      match = element;
+    }
+    pending.push(...element.childNodes);
+  }
+  return match === panel ? id : undefined;
 }
 
 function receiverDisclosureRoleMatches(

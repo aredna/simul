@@ -1,8 +1,0 @@
-export const PADDLE_OCR_PROVIDER_VERSION = 'paddleocr-js-0.4.2';
-export const PADDLE_OCR_MODEL_VERSION =
-  'PP-OCRv6_tiny_det+PP-OCRv6_tiny_rec';
-export const PADDLE_OCR_DETECTION_MODEL_NAME = 'PP-OCRv6_tiny_det';
-export const PADDLE_OCR_RECOGNITION_MODEL_NAME = 'PP-OCRv6_tiny_rec';
-export const PADDLE_OCR_DETECTOR_THRESHOLD = 0.45;
-export const PADDLE_OCR_DETECTOR_BOX_THRESHOLD = 0.75;
-export const PADDLE_OCR_RECOGNITION_SCORE_THRESHOLD = 0;

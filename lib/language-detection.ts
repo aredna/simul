@@ -1,4 +1,3 @@
-import type { PageSnapshot } from './page-snapshot';
 import type { SourceLanguagePreference } from './preferences';
 import {
   canonicalizeLanguageTag,
@@ -16,6 +15,11 @@ export interface DetectedLanguageCandidate {
 export interface LanguageDetectionResult {
   language?: SupportedLanguage;
   source: 'manual' | 'html' | 'content' | 'unknown';
+}
+
+export interface LanguageDetectionInput {
+  readonly documentLanguage?: string;
+  readonly visibleText: string;
 }
 
 /**
@@ -69,10 +73,16 @@ export class AutoLanguageEvidencePrecedence<T> {
   }
 }
 
-export type ResolvedSourceLanguageOrigin = 'page' | 'image' | undefined;
+export type ResolvedSourceLanguageOrigin =
+  | 'page'
+  | 'image'
+  | 'explicit'
+  | undefined;
 
 export interface AutoImageLanguageConfigurationIdentity {
+  /** Effective provider membership; saved priority order is not identity. */
   readonly providerOrder: readonly string[];
+  /** Effective method membership; saved priority order is not identity. */
   readonly enabledMethodOrder: readonly string[];
   readonly minimumConfidence: number;
   readonly policyFingerprint: string;
@@ -83,14 +93,18 @@ export function autoImageLanguageConfigurationKey(
   configuration: AutoImageLanguageConfigurationIdentity,
 ): string {
   return JSON.stringify([
-    [...configuration.providerOrder],
-    [...configuration.enabledMethodOrder],
+    canonicalMembership(configuration.providerOrder),
+    canonicalMembership(configuration.enabledMethodOrder),
     Number.isFinite(configuration.minimumConfidence)
       ? configuration.minimumConfidence
       : null,
     configuration.policyFingerprint,
     configuration.controlImages,
   ]);
+}
+
+function canonicalMembership(values: readonly string[]): readonly string[] {
+  return [...new Set(values)].sort();
 }
 
 export function shouldClearAutoImageLanguageResolution(
@@ -110,30 +124,19 @@ export function shouldClearAutoImageLanguageForDocument(
 
 export async function resolveSourceLanguage(
   preference: SourceLanguagePreference,
-  snapshot: PageSnapshot,
+  input: LanguageDetectionInput,
   detectLanguage?: (
     text: string,
   ) => Promise<{ isReliable: boolean; languages: DetectedLanguageCandidate[] }>,
-  additionalVisibleText = '',
 ): Promise<LanguageDetectionResult> {
   if (preference !== 'auto') {
     return { language: preference, source: 'manual' };
   }
 
-  const fromHtml = canonicalizeLanguageTag(snapshot.documentLanguage);
+  const fromHtml = canonicalizeLanguageTag(input.documentLanguage);
   if (fromHtml) return { language: fromHtml, source: 'html' };
 
-  const sample = snapshot.items
-    .flatMap((item) =>
-      item.kind === 'text'
-        ? [item.text]
-        : [item.caption].filter(
-            (value): value is string => Boolean(value),
-          ),
-    )
-    .concat(additionalVisibleText)
-    .join(' ')
-    .slice(0, 20_000);
+  const sample = input.visibleText.slice(0, 20_000);
   const script = strongAutoLanguageScriptEvidence(sample);
   if (
     script &&

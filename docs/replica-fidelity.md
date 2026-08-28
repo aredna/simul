@@ -64,7 +64,7 @@ or mutate the source page.
 Native dropdown popups are browser/OS presentation rather than observable DOM,
 so Simul does not attempt to copy their ephemeral geometry. Instead, each
 approved public native select receives a companion-owned, scriptless facsimile
-in either replica engine. A single-row select keeps a compact trigger whose
+in the isolated replica. A single-row select keeps a compact trigger whose
 popup flips and clamps inside the replica viewport, scrolls internally, and
 repositions when either replica or companion scrolling/resizing moves its
 anchor. `multiple` and authored `size>1` selects retain bounded inline-list
@@ -78,7 +78,7 @@ labels at the privacy boundary.
 
 Public, non-editable ARIA listbox/menu/option text remains visible and
 translatable when the matching read scope is enabled. A shared typed semantic
-proof channel enables a local preview in either replica engine only when a
+proof channel enables a local preview in the isolated replica only when a
 public activation trigger maps through one unique same-document
 `aria-controls` relation to a matching menu/listbox, or to a region containing
 exactly one matching public menu. The preview state is extension-owned and

@@ -222,15 +222,6 @@ function readRunnerError(error: unknown): OcrHostErrorCode {
     if (error.name === 'ProviderUnavailableError') return 'provider-unavailable';
     if (error.name === 'UnsupportedLanguageError') return 'unsupported-language';
     if (error.name === 'WorkerLostError') return 'worker-lost';
-    if (error.name === 'PaddleSandboxUnavailableError') {
-      return 'paddle-sandbox-unavailable';
-    }
-    if (error.name === 'PaddleRuntimeLoaderError') {
-      return 'paddle-runtime-loader-failed';
-    }
-    if (error.name === 'PaddleRuntimeStartupError') {
-      return 'paddle-runtime-startup-failed';
-    }
     if (error.name === 'InvalidNormalizedOcrOutputError') return 'invalid-result';
   }
   return 'recognition-failed';

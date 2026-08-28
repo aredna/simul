@@ -14,10 +14,6 @@ import {
   type OcrPreprocessingVersion,
 } from './preprocessing-profile';
 import {
-  PADDLE_OCR_COMPILED,
-  TESSERACT_WASM_DIRECT_COMPILED,
-} from './compiled-provider-flags';
-import {
   isOcrMinimumConfidence,
   OCR_QUALITY_POLICY_VERSION,
   type OcrMinimumConfidence,
@@ -34,9 +30,6 @@ export const OCR_HOST_ERROR_CODES = Object.freeze([
   'unsupported-language',
   'recognition-failed',
   'worker-lost',
-  'paddle-sandbox-unavailable',
-  'paddle-runtime-loader-failed',
-  'paddle-runtime-startup-failed',
   'cancelled',
   'invalid-result',
 ] as const);
@@ -80,14 +73,6 @@ export interface TesseractOffscreenOcrJob extends BaseOffscreenOcrJob {
   readonly modelVersion: string;
 }
 
-export interface TesseractWasmDirectOffscreenOcrJob
-  extends BaseOffscreenOcrJob {
-  readonly providerId: 'tesseract-wasm-direct';
-  readonly languageGroup: string;
-  readonly providerVersion: 'tesseract-wasm-0.11.0';
-  readonly modelVersion: string;
-}
-
 export interface ChromeTextDetectorOffscreenOcrJob extends BaseOffscreenOcrJob {
   readonly providerId: 'chrome-text-detector';
   readonly languageGroup: string;
@@ -95,18 +80,9 @@ export interface ChromeTextDetectorOffscreenOcrJob extends BaseOffscreenOcrJob {
   readonly modelVersion: 'platform';
 }
 
-export interface PaddleOffscreenOcrJob extends BaseOffscreenOcrJob {
-  readonly providerId: 'paddleocr-wasm';
-  readonly languageGroup: string;
-  readonly providerVersion: 'paddleocr-js-0.4.2';
-  readonly modelVersion: 'PP-OCRv6_tiny_det+PP-OCRv6_tiny_rec';
-}
-
 export type OffscreenOcrJob =
   | TesseractOffscreenOcrJob
-  | TesseractWasmDirectOffscreenOcrJob
-  | ChromeTextDetectorOffscreenOcrJob
-  | PaddleOffscreenOcrJob;
+  | ChromeTextDetectorOffscreenOcrJob;
 
 export interface RunOffscreenOcrCommand {
   readonly kind: 'simul:ocr-v1:run';
@@ -276,22 +252,6 @@ export function readOffscreenOcrJob(input: unknown): OffscreenOcrJob | undefined
     });
   }
   if (
-    TESSERACT_WASM_DIRECT_COMPILED &&
-    input.providerId === 'tesseract-wasm-direct' &&
-    isLanguageGroup(input.languageGroup) &&
-    input.providerVersion === 'tesseract-wasm-0.11.0' &&
-    typeof input.modelVersion === 'string' &&
-    /^[A-Za-z0-9._:+/-]{1,128}$/u.test(input.modelVersion)
-  ) {
-    return Object.freeze({
-      ...base,
-      providerId: 'tesseract-wasm-direct',
-      languageGroup: input.languageGroup,
-      providerVersion: 'tesseract-wasm-0.11.0',
-      modelVersion: input.modelVersion,
-    });
-  }
-  if (
     input.providerId === 'chrome-text-detector' &&
     isLanguageTag(input.languageGroup) &&
     input.providerVersion === 'chrome-text-detector-v1' &&
@@ -303,21 +263,6 @@ export function readOffscreenOcrJob(input: unknown): OffscreenOcrJob | undefined
       languageGroup: input.languageGroup,
       providerVersion: 'chrome-text-detector-v1',
       modelVersion: 'platform',
-    });
-  }
-  if (
-    PADDLE_OCR_COMPILED &&
-    input.providerId === 'paddleocr-wasm' &&
-    isLanguageTag(input.languageGroup) &&
-    input.providerVersion === 'paddleocr-js-0.4.2' &&
-    input.modelVersion === 'PP-OCRv6_tiny_det+PP-OCRv6_tiny_rec'
-  ) {
-    return Object.freeze({
-      ...base,
-      providerId: 'paddleocr-wasm',
-      languageGroup: input.languageGroup,
-      providerVersion: 'paddleocr-js-0.4.2',
-      modelVersion: 'PP-OCRv6_tiny_det+PP-OCRv6_tiny_rec',
     });
   }
   return undefined;

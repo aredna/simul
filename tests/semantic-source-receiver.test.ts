@@ -5,9 +5,14 @@ import {
   SemanticSourceReceiver,
   type ResolvedSemanticSourceProof,
 } from '../lib/replica/semantic-source-receiver';
+import { SemanticProofPresenter } from '../lib/replica/semantic-proof-presenter';
 import {
   createSemanticSourceBatch,
+  semanticSourceRecordId,
+  semanticStructuralMenuRelationId,
+  semanticTabRelationId,
   type SemanticSourceBatch,
+  type SemanticSourceProof,
   type SemanticSourceRecord,
 } from '../lib/replica/semantic-source-protocol';
 import type { ReplicaSourceDocumentIdentity } from '../lib/replica/source-identity';
@@ -326,7 +331,7 @@ describe('semantic source receiver', () => {
     const option = document.querySelector<HTMLOptionElement>('option')!;
     const recordId = semanticSourceRecordId(8, 'label')!;
     const record: SemanticSourceRecord = {
-      bridge: 'rrweb',
+      bridge: 'isolated-html',
       recordId,
       nodeId: 8,
       nodeRevision: 1,
@@ -416,7 +421,7 @@ describe('semantic source receiver', () => {
       },
     });
     const state = {
-      kind: 'select-state', bridge: 'rrweb', nodeId: 7, revision: 1,
+      kind: 'select-state', bridge: 'isolated-html', nodeId: 7, revision: 1,
       gate: 'formValues', selectedOptionNodeIds: [8, 9], multiple: true,
       pickerOpen: false, classifierVersion: 1,
     } as const;
@@ -426,7 +431,7 @@ describe('semantic source receiver', () => {
     expect(presented.at(-1)?.map(({ kind }) => kind)).toEqual(['select-state']);
 
     const mismatchedPresentation = {
-      kind: 'select-presentation', bridge: 'rrweb', nodeId: 7, revision: 1,
+      kind: 'select-presentation', bridge: 'isolated-html', nodeId: 7, revision: 1,
       gate: 'controlSemantics', multiple: false, size: null,
       classifierVersion: 1,
     } as const;
@@ -446,47 +451,6 @@ describe('semantic source receiver', () => {
       .toEqual(['select-state', 'select-presentation']);
   });
 
-  it('retains unchanged control proofs across text-only batches', () => {
-    const { document } = parseHTML(`<html><body>
-      <input id="draft" type="text" value="***">
-      <select><option selected>One</option></select></body></html>`);
-    const input = document.querySelector<HTMLInputElement>('#draft')!;
-    const select = document.querySelector<HTMLSelectElement>('select')!;
-    const option = select.options[0]!;
-    const applyProofs = vi.fn(() => true);
-    const receiver = new SemanticSourceReceiver({
-      document: identity,
-      replicaDocument: document as unknown as Document,
-      resolveNode: (nodeId) => new Map<number, Node>([
-        [7, input], [10, select], [11, option],
-      ]).get(nodeId),
-      applyProofs,
-    });
-    const proof = {
-      kind: 'select-state', bridge: 'rrweb', nodeId: 10, revision: 1,
-      gate: 'formValues', selectedOptionNodeIds: [11], multiple: false,
-      pickerOpen: false, classifierVersion: 1,
-    } as const;
-
-    expect(receiver.applyBatch(createSemanticSourceBatch(
-      identity,
-      'read-v1-111111',
-      1,
-      [valueRecord()],
-      [proof],
-    ))).toBeDefined();
-    expect(receiver.applyBatch(createSemanticSourceBatch(
-      identity,
-      'read-v1-111111',
-      2,
-      [valueRecord({ nodeRevision: 2, text: 'updated draft' })],
-      [proof],
-    ))).toBeDefined();
-
-    expect(input.value).toBe('updated draft');
-    expect(applyProofs).toHaveBeenCalledOnce();
-  });
-
   it('reports proof presentation failure after a base replay refresh', () => {
     const { document } = parseHTML(
       '<html><body><select><option selected>One</option></select></body></html>',
@@ -503,7 +467,7 @@ describe('semantic source receiver', () => {
       applyProofs: () => !rejectPresentation,
     });
     const proof = {
-      kind: 'select-state', bridge: 'rrweb', nodeId: 7, revision: 1,
+      kind: 'select-state', bridge: 'isolated-html', nodeId: 7, revision: 1,
       gate: 'formValues', selectedOptionNodeIds: [8], multiple: false,
       pickerOpen: false, classifierVersion: 1,
     } as const;
@@ -517,13 +481,389 @@ describe('semantic source receiver', () => {
     expect(receiver.refreshBindings()).toEqual([]);
     expect(receiver.proofPresentationHealthy).toBe(false);
   });
+
+  it('receiver-validates a structural menu and requires admitted panel text', () => {
+    const { document } = parseHTML(`<html><body><nav><div id="wrapper">
+      <a id="trigger" href="/resources">Resources</a>
+      <div id="panel" class="hidden"><a id="item" href="/school">***</a></div>
+    </div></nav></body></html>`);
+    const container = document.querySelector<HTMLElement>('#wrapper')!;
+    const trigger = document.querySelector<HTMLElement>('#trigger')!;
+    const panel = document.querySelector<HTMLElement>('#panel')!;
+    const text = document.querySelector('#item')!.firstChild!;
+    const nodes = new Map<number, Node>([
+      [16, container], [17, trigger], [18, panel], [19, text],
+    ]);
+    const presented: Array<readonly ResolvedSemanticSourceProof[]> = [];
+    const receiver = new SemanticSourceReceiver({
+      document: identity,
+      replicaDocument: document as unknown as Document,
+      resolveNode: (nodeId) => nodes.get(nodeId),
+      applyProofs: (proofs) => {
+        presented.push(proofs);
+        return true;
+      },
+    });
+    const proof = structuralMenuProof();
+    const record: SemanticSourceRecord = {
+      bridge: 'isolated-html',
+      recordId: semanticSourceRecordId(19, 'text')!,
+      nodeId: 19,
+      nodeRevision: 1,
+      category: 'public-semantic',
+      gate: 'disclosureContent',
+      tagName: 'a',
+      type: '',
+      autocomplete: '',
+      role: '',
+      contentEditable: '',
+      text: 'Startup School',
+      presentation: 'text',
+      classifierVersion: 1,
+    };
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 1, [record], [proof],
+    ))).toBeDefined();
+    expect(text.nodeValue).toBe('Startup School');
+    expect(presented.at(-1)?.[0]).toMatchObject({
+      kind: 'structural-menu',
+      container,
+      trigger,
+      panel,
+    });
+
+    const missingTextReceiver = new SemanticSourceReceiver({
+      document: identity,
+      replicaDocument: document as unknown as Document,
+      resolveNode: (nodeId) => nodes.get(nodeId),
+    });
+    expect(missingTextReceiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 1, [], [proof],
+    ))).toBeUndefined();
+  });
+
+  it('presents a structural menu locally in the isolated replica', () => {
+      const { document, window } = parseHTML(`<html><body><nav>
+        <div id="wrapper"><a id="trigger" href="/resources">Resources</a>
+        <div id="panel" class="hidden"><a id="item" href="/school">***</a></div>
+        </div></nav><iframe id="frame"></iframe></body></html>`);
+      const container = document.querySelector<HTMLElement>('#wrapper')!;
+      const trigger = document.querySelector<HTMLElement>('#trigger')!;
+      const panel = document.querySelector<HTMLElement>('#panel')!;
+      const item = document.querySelector<HTMLElement>('#item')!;
+      const text = item.firstChild!;
+      const frame = document.querySelector('#frame') as unknown as HTMLIFrameElement;
+      const nodes = new Map<number, Node>([
+        [16, container], [17, trigger], [18, panel], [19, text],
+      ]);
+      const presenter = new SemanticProofPresenter({
+        document: document as unknown as Document,
+        iframe: frame,
+      });
+      const receiver = new SemanticSourceReceiver({
+        document: identity,
+        replicaDocument: document as unknown as Document,
+        resolveNode: (nodeId) => nodes.get(nodeId),
+        applyProofs: (proofs) => presenter.apply(proofs),
+      });
+      const record: SemanticSourceRecord = {
+        bridge: 'isolated-html',
+        recordId: semanticSourceRecordId(19, 'text')!,
+        nodeId: 19,
+        nodeRevision: 1,
+        category: 'public-semantic',
+        gate: 'disclosureContent',
+        tagName: 'a',
+        type: '',
+        autocomplete: '',
+        role: '',
+        contentEditable: '',
+        text: 'Startup School',
+        presentation: 'text',
+        classifierVersion: 1,
+      };
+
+      expect(receiver.applyBatch(createSemanticSourceBatch(
+        identity, 'read-v1-111111', 1, [record], [structuralMenuProof()],
+      ))).toBeDefined();
+      expect(item.textContent).toBe('Startup School');
+      expect(panel.hasAttribute('hidden')).toBe(true);
+
+      trigger.dispatchEvent(new window.Event('pointerenter', { bubbles: true }));
+      expect(panel.hasAttribute('hidden')).toBe(false);
+      expect(panel.style.getPropertyValue('display')).toBe('block');
+      expect(trigger.getAttribute('aria-expanded')).toBe('true');
+
+      const action = new window.Event('click', { bubbles: true, cancelable: true });
+      expect(item.dispatchEvent(action)).toBe(false);
+      expect(action.defaultPrevented).toBe(true);
+      receiver.clear();
+      expect(trigger.hasAttribute('data-simul-replica-disclosure-trigger'))
+        .toBe(false);
+  });
+
+  it('preserves a unique panel CSS id across inline tab apply-update-clear', () => {
+    const { document } = parseHTML(`<html><head><style>#panel{display:block}</style></head>
+      <body><div id="tab" role="tab" aria-selected="false"
+        aria-controls="stale-control" aria-haspopup="menu">Tab</div>
+      <section id="panel" role="tabpanel" aria-hidden="true">Panel</section>
+      <section id="second-panel" role="tabpanel">Second</section></body></html>`);
+    const trigger = document.querySelector<HTMLElement>('#tab')!;
+    const panel = document.querySelector<HTMLElement>('#panel')!;
+    const secondPanel = document.querySelector<HTMLElement>('#second-panel')!;
+    const nodes = new Map<number, Node>([
+      [21, trigger], [22, panel], [23, secondPanel],
+    ]);
+    const presenter = new SemanticProofPresenter({
+      document: document as unknown as Document,
+    });
+    const receiver = new SemanticSourceReceiver({
+      document: identity,
+      replicaDocument: document as unknown as Document,
+      resolveNode: (nodeId) => nodes.get(nodeId),
+      applyProofs: (proofs) => presenter.apply(proofs),
+    });
+
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 1, [], [tabStateProof(1, true)],
+    ))).toBeDefined();
+    expect(panel.id).toBe('panel');
+    expect(trigger.getAttribute('aria-controls')).toBe('panel');
+    expect(trigger.getAttribute('aria-selected')).toBe('true');
+    expect(trigger.hasAttribute('aria-haspopup')).toBe(false);
+    expect(panel.getAttribute('aria-hidden')).toBe('false');
+    expect(document.querySelector('[data-simul-semantic-disclosure-host]'))
+      .toBeNull();
+    expect(document.querySelector('[data-simul-semantic-select-host]')).toBeNull();
+
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 2, [], [tabStateProof(2, false)],
+    ))).toBeDefined();
+    expect(panel.id).toBe('panel');
+    expect(trigger.getAttribute('aria-controls')).toBe('panel');
+    expect(trigger.getAttribute('aria-selected')).toBe('false');
+    expect(panel.getAttribute('aria-hidden')).toBe('true');
+
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 3, [], [tabStateProof(3, true)],
+    ))).toBeDefined();
+    expect(panel.id).toBe('panel');
+    expect(trigger.getAttribute('aria-selected')).toBe('true');
+
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 4, [], [tabStateProof(2, false)],
+    ))).toBeUndefined();
+    expect(trigger.getAttribute('aria-selected')).toBe('true');
+
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity,
+      'read-v1-111111',
+      4,
+      [],
+      [tabStateProof(4, false), tabStateProof(1, true, 21, 23)],
+    ))).toBeUndefined();
+    expect(trigger.getAttribute('aria-selected')).toBe('true');
+
+    panel.setAttribute('role', 'region');
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 4, [], [tabStateProof(4, false)],
+    ))).toBeUndefined();
+    panel.setAttribute('role', 'tabpanel');
+    expect(trigger.getAttribute('aria-selected')).toBe('true');
+
+    receiver.clear();
+    expect(panel.id).toBe('panel');
+    expect(panel.getAttribute('aria-hidden')).toBe('true');
+    expect(trigger.getAttribute('aria-controls')).toBe('stale-control');
+    expect(trigger.getAttribute('aria-selected')).toBe('false');
+    expect(trigger.getAttribute('aria-haspopup')).toBe('menu');
+  });
+
+  it('retains unchanged proof presentation across a text-only batch', () => {
+    const { document } = parseHTML(`<html><body>
+      <div role="tab" aria-selected="false">Tab</div>
+      <section id="panel" role="tabpanel" aria-hidden="true">Panel</section>
+      <span id="label">Replica original</span></body></html>`);
+    const trigger = document.querySelector<HTMLElement>('[role="tab"]')!;
+    const panel = document.querySelector<HTMLElement>('#panel')!;
+    const labelText = document.querySelector('#label')!.firstChild!;
+    const applyProofs = vi.fn(() => true);
+    const receiver = new SemanticSourceReceiver({
+      document: identity,
+      replicaDocument: document as unknown as Document,
+      resolveNode: (nodeId) => new Map<number, Node>([
+        [21, trigger], [22, panel], [29, labelText],
+      ]).get(nodeId),
+      applyProofs,
+    });
+    const textRecord: SemanticSourceRecord = {
+      bridge: 'isolated-html',
+      recordId: semanticSourceRecordId(29, 'text')!,
+      nodeId: 29,
+      nodeRevision: 1,
+      category: 'public-semantic',
+      gate: 'disclosureContent',
+      tagName: 'span',
+      type: '',
+      autocomplete: '',
+      role: '',
+      contentEditable: '',
+      text: 'Updated label',
+      presentation: 'text',
+      classifierVersion: 1,
+    };
+
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 1, [], [tabStateProof(1, true)],
+    ))).toBeDefined();
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 2, [textRecord], [tabStateProof(1, true)],
+    ))).toBeDefined();
+
+    expect(labelText.nodeValue).toBe('Updated label');
+    expect(applyProofs).toHaveBeenCalledOnce();
+  });
+
+  it('rolls back text and tab ARIA when proof presentation rejects a batch', () => {
+    const { document } = parseHTML(`<html><body>
+      <div role="tab" aria-selected="false">Tab</div>
+      <section id="panel" role="tabpanel" aria-hidden="true">Panel</section>
+      <p><span id="label">Replica original</span></p></body></html>`);
+    const trigger = document.querySelector<HTMLElement>('[role="tab"]')!;
+    const panel = document.querySelector<HTMLElement>('#panel')!;
+    const labelText = document.querySelector('#label')!.firstChild!;
+    const presenter = new SemanticProofPresenter({
+      document: document as unknown as Document,
+    });
+    let rejectNext = false;
+    const receiver = new SemanticSourceReceiver({
+      document: identity,
+      replicaDocument: document as unknown as Document,
+      resolveNode: (nodeId) => new Map<number, Node>([
+        [21, trigger], [22, panel], [29, labelText],
+      ]).get(nodeId),
+      applyProofs: (proofs) => {
+        const applied = presenter.apply(proofs);
+        if (rejectNext) {
+          rejectNext = false;
+          return false;
+        }
+        return applied;
+      },
+    });
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 1, [], [tabStateProof(1, true)],
+    ))).toBeDefined();
+    expect(trigger.getAttribute('aria-selected')).toBe('true');
+
+    rejectNext = true;
+    const textRecord: SemanticSourceRecord = {
+      bridge: 'isolated-html',
+      recordId: semanticSourceRecordId(29, 'text')!,
+      nodeId: 29,
+      nodeRevision: 1,
+      category: 'public-semantic',
+      gate: 'disclosureContent',
+      tagName: 'span',
+      type: '',
+      autocomplete: '',
+      role: '',
+      contentEditable: '',
+      text: 'Admitted source title',
+      presentation: 'text',
+      classifierVersion: 1,
+    };
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity,
+      'read-v1-111111',
+      2,
+      [textRecord],
+      [tabStateProof(2, false)],
+    ))).toBeUndefined();
+    expect(labelText.nodeValue).toBe('Replica original');
+    expect(trigger.getAttribute('aria-selected')).toBe('true');
+    expect(panel.getAttribute('aria-hidden')).toBe('false');
+    expect(receiver.records()).toEqual([]);
+  });
+
+  it('recreates and fully rolls back a synthetic tab panel id on updates', () => {
+    const { document } = parseHTML(`<html><body>
+      <div role="tab" aria-selected="false">Tab</div>
+      <section role="tabpanel" aria-hidden="true">Panel</section>
+    </body></html>`);
+    const trigger = document.querySelector<HTMLElement>('[role="tab"]')!;
+    const panel = document.querySelector<HTMLElement>('[role="tabpanel"]')!;
+    const relationId = semanticTabRelationId(21, 22)!;
+    const presenter = new SemanticProofPresenter({
+      document: document as unknown as Document,
+    });
+    const receiver = new SemanticSourceReceiver({
+      document: identity,
+      replicaDocument: document as unknown as Document,
+      resolveNode: (nodeId) => nodeId === 21 ? trigger : nodeId === 22
+        ? panel
+        : undefined,
+      applyProofs: (proofs) => presenter.apply(proofs),
+    });
+
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 1, [], [tabStateProof(1, true)],
+    ))).toBeDefined();
+    expect(panel.id).toBe(relationId);
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 2, [], [tabStateProof(2, false)],
+    ))).toBeDefined();
+    expect(panel.id).toBe(relationId);
+    expect(trigger.getAttribute('aria-controls')).toBe(relationId);
+
+    receiver.clear();
+    expect(panel.hasAttribute('id')).toBe(false);
+    expect(trigger.hasAttribute('aria-controls')).toBe(false);
+  });
 });
+
+function tabStateProof(
+  revision: number,
+  selected: boolean,
+  tabNodeId = 21,
+  panelNodeId = 22,
+): Extract<SemanticSourceProof, { kind: 'tab-state' }> {
+  return {
+    kind: 'tab-state',
+    bridge: 'isolated-html',
+    relationId: semanticTabRelationId(tabNodeId, panelNodeId)!,
+    revision,
+    gate: 'controlSemantics',
+    tabNodeId,
+    panelNodeId,
+    selected,
+    classifierVersion: 1,
+  };
+}
+
+function structuralMenuProof(): Extract<SemanticSourceProof, {
+  kind: 'structural-menu';
+}> {
+  return {
+    kind: 'structural-menu',
+    bridge: 'isolated-html',
+    relationId: semanticStructuralMenuRelationId(16, 17, 18)!,
+    revision: 1,
+    gate: 'disclosureContent',
+    containerNodeId: 16,
+    triggerNodeId: 17,
+    panelNodeId: 18,
+    popupRole: 'menu',
+    expanded: false,
+    classifierVersion: 1,
+  };
+}
 
 function valueRecord(
   overrides: Partial<SemanticSourceRecord> = {},
 ): SemanticSourceRecord {
   return {
-    bridge: 'rrweb',
+    bridge: 'isolated-html',
     recordId: 59,
     nodeId: 7,
     nodeRevision: 1,

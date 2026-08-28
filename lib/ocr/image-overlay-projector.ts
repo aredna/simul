@@ -19,6 +19,9 @@ import {
 
 export const IMAGE_OVERLAY_LAYER_ATTRIBUTE = 'data-simul-image-overlay-layer';
 export const MAX_IMAGE_OVERLAY_REGIONS = 10_000;
+export const MAX_IMAGE_OVERLAY_RETAINED_WEIGHT = 1_000_000;
+const IMAGE_OVERLAY_ENTRY_WEIGHT = 256;
+const IMAGE_OVERLAY_REGION_WEIGHT = 128;
 const MIN_IMAGE_OVERLAY_FONT_PX = 3;
 const MAX_IMAGE_OVERLAY_FONT_PX = 32;
 const IMAGE_OVERLAY_LINE_HEIGHT = 1.12;
@@ -68,9 +71,12 @@ export interface ImageOverlayProjectorEnvironment {
 }
 
 interface ProjectedEntry {
-  readonly projection: ImageOverlayProjection;
+  projection: ImageOverlayProjection;
   anchor: ReplicaImageAnchor;
   readonly root: HTMLElement;
+  readonly weight: number;
+  layoutWidth?: number;
+  layoutHeight?: number;
 }
 
 interface DocumentLayer {
@@ -91,6 +97,8 @@ export class ImageOverlayProjector {
   readonly #scheduleFrame: AnimationFrameScheduler;
   readonly #cancelFrame: AnimationFrameCanceller;
   readonly #layers = new Map<Document, DocumentLayer>();
+  readonly #retainedEntries = new Map<ProjectedEntry, DocumentLayer>();
+  #retainedWeight = 0;
   #pairEpoch = 0;
   #pairKey: string | undefined;
 
@@ -124,6 +132,11 @@ export class ImageOverlayProjector {
       projection.pairKey !== this.#pairKey ||
       !this.environment.isCurrent(projection)
     ) return false;
+    const projectionWeight = imageOverlayProjectionWeight(projection);
+    if (projectionWeight > MAX_IMAGE_OVERLAY_RETAINED_WEIGHT) {
+      this.remove(projection.document, projection.nodeId);
+      return false;
+    }
     const anchor = this.environment.resolveAnchor(
       projection.document,
       projection.nodeId,
@@ -139,6 +152,20 @@ export class ImageOverlayProjector {
     const replayDocument = anchor.image.ownerDocument;
     const layer = this.#layerFor(replayDocument);
     if (!layer) return false;
+    const existing = layer.entries.get(projection.nodeId);
+    if (
+      existing &&
+      projectionCanRebaseInPlace(existing.projection, projection)
+    ) {
+      existing.projection = projection;
+      existing.root.dataset.simulImageMethod = projection.methodId;
+      // Currency rebases are active use, so refresh their bounded FIFO/LRU
+      // position without replacing any retained DOM.
+      this.#retainedEntries.delete(existing);
+      this.#retainedEntries.set(existing, layer);
+      this.#refreshEntry(layer, projection.nodeId);
+      return layer.entries.get(projection.nodeId)?.root === existing.root;
+    }
     this.#removeEntry(layer, projection.nodeId, true);
     if (projection.regions.length === 0) {
       if (layer.entries.size === 0) {
@@ -146,6 +173,13 @@ export class ImageOverlayProjector {
         this.#layers.delete(layer.document);
       }
       return true;
+    }
+    if (!this.#makeRetainedWeightAvailable(projectionWeight, layer)) {
+      if (layer.entries.size === 0) {
+        this.#disposeLayer(layer);
+        this.#layers.delete(layer.document);
+      }
+      return false;
     }
 
     const root = replayDocument.createElement('div');
@@ -160,7 +194,15 @@ export class ImageOverlayProjector {
       root.append(element);
     }
     layer.root.append(root);
-    layer.entries.set(projection.nodeId, { projection, anchor, root });
+    const entry: ProjectedEntry = {
+      projection,
+      anchor,
+      root,
+      weight: projectionWeight,
+    };
+    layer.entries.set(projection.nodeId, entry);
+    this.#retainedEntries.set(entry, layer);
+    this.#retainedWeight += projectionWeight;
     layer.resizeObserver?.observe(anchor.image);
     this.#refreshEntry(layer, projection.nodeId);
     return layer.entries.has(projection.nodeId);
@@ -185,6 +227,8 @@ export class ImageOverlayProjector {
   clear(): void {
     for (const layer of this.#layers.values()) this.#disposeLayer(layer);
     this.#layers.clear();
+    this.#retainedEntries.clear();
+    this.#retainedWeight = 0;
   }
 
   dispose(): void {
@@ -270,6 +314,11 @@ export class ImageOverlayProjector {
     root.hidden = false;
     root.style.left = `${rect.left}px`;
     root.style.top = `${rect.top}px`;
+    if (entry.layoutWidth === rect.width && entry.layoutHeight === rect.height) {
+      return;
+    }
+    entry.layoutWidth = rect.width;
+    entry.layoutHeight = rect.height;
     root.style.width = `${rect.width}px`;
     root.style.height = `${rect.height}px`;
     const scaleX = rect.width / projection.renderedWidthCss;
@@ -295,6 +344,8 @@ export class ImageOverlayProjector {
     const entry = layer.entries.get(nodeId);
     if (!entry) return;
     layer.entries.delete(nodeId);
+    this.#retainedEntries.delete(entry);
+    this.#retainedWeight = Math.max(0, this.#retainedWeight - entry.weight);
     layer.resizeObserver?.unobserve(entry.anchor.image);
     entry.root.remove();
     if (layer.entries.size === 0 && !retainEmptyLayer) {
@@ -310,8 +361,32 @@ export class ImageOverlayProjector {
     const view = layer.document.defaultView;
     view?.removeEventListener('scroll', layer.refresh, true);
     view?.removeEventListener('resize', layer.refresh);
+    for (const entry of layer.entries.values()) {
+      this.#retainedEntries.delete(entry);
+      this.#retainedWeight = Math.max(0, this.#retainedWeight - entry.weight);
+    }
     layer.entries.clear();
     layer.root.remove();
+  }
+
+  #makeRetainedWeightAvailable(
+    weight: number,
+    retainedLayer?: DocumentLayer,
+  ): boolean {
+    while (
+      this.#retainedWeight > MAX_IMAGE_OVERLAY_RETAINED_WEIGHT - weight
+    ) {
+      const oldest = this.#retainedEntries.entries().next().value as
+        | [ProjectedEntry, DocumentLayer]
+        | undefined;
+      if (!oldest) return false;
+      this.#removeEntry(
+        oldest[1],
+        oldest[0].projection.nodeId,
+        oldest[1] === retainedLayer,
+      );
+    }
+    return true;
   }
 }
 
@@ -345,6 +420,69 @@ function validProjection(value: ImageOverlayProjection): boolean {
     region.text.length <= 100_000 &&
     validBox(region.boundingBox, value.bitmapWidth, value.bitmapHeight),
   );
+}
+
+function imageOverlayProjectionWeight(
+  projection: ImageOverlayProjection,
+): number {
+  let weight = IMAGE_OVERLAY_ENTRY_WEIGHT;
+  for (const region of projection.regions) {
+    const regionWeight = IMAGE_OVERLAY_REGION_WEIGHT + region.text.length * 2;
+    if (regionWeight > MAX_IMAGE_OVERLAY_RETAINED_WEIGHT - weight) {
+      return MAX_IMAGE_OVERLAY_RETAINED_WEIGHT + 1;
+    }
+    weight += regionWeight;
+  }
+  return weight;
+}
+
+/**
+ * Observation currency may advance while the translated pixel blueprint stays
+ * exact. Reusing the existing root keeps visible text continuously mounted;
+ * any visual/evidence difference still takes the conservative replacement
+ * path.
+ */
+function projectionCanRebaseInPlace(
+  previous: ImageOverlayProjection,
+  next: ImageOverlayProjection,
+): boolean {
+  return sameSourceDocument(previous.document, next.document) &&
+    previous.nodeId === next.nodeId &&
+    previous.replayLease === next.replayLease &&
+    previous.pairEpoch === next.pairEpoch &&
+    previous.pairKey === next.pairKey &&
+    previous.pixelHash === next.pixelHash &&
+    previous.bitmapWidth === next.bitmapWidth &&
+    previous.bitmapHeight === next.bitmapHeight &&
+    previous.cropOffsetXCss === next.cropOffsetXCss &&
+    previous.cropOffsetYCss === next.cropOffsetYCss &&
+    previous.cropWidthCss === next.cropWidthCss &&
+    previous.cropHeightCss === next.cropHeightCss &&
+    previous.renderedWidthCss === next.renderedWidthCss &&
+    previous.renderedHeightCss === next.renderedHeightCss &&
+    previous.methodId === next.methodId &&
+    previous.evidenceKind === next.evidenceKind &&
+    sameTranslatedRegions(previous.regions, next.regions);
+}
+
+function sameTranslatedRegions(
+  previous: readonly TranslatedImageRegion[],
+  next: readonly TranslatedImageRegion[],
+): boolean {
+  if (previous === next) return true;
+  if (previous.length !== next.length) return false;
+  return previous.every((region, index) => {
+    const candidate = next[index];
+    return Boolean(
+      candidate &&
+      region.text === candidate.text &&
+      region.placement === candidate.placement &&
+      region.boundingBox.x === candidate.boundingBox.x &&
+      region.boundingBox.y === candidate.boundingBox.y &&
+      region.boundingBox.width === candidate.boundingBox.width &&
+      region.boundingBox.height === candidate.boundingBox.height,
+    );
+  });
 }
 
 function validProjectionProvenance(

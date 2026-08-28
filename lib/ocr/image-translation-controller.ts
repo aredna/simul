@@ -8,7 +8,7 @@ import {
   type TimeoutCanceller,
   type TimeoutScheduler,
 } from '../browser-scheduling';
-import { createReplicaIdentity } from '../replica/protocol-v2';
+import { createReplicaIdentity } from '../replica/replica-identity';
 import {
   sourceDocumentIdentity,
   sameSourceDocument,
@@ -24,6 +24,7 @@ import type {
   TranslationSession,
 } from '../translation-provider';
 import { canonicalizeLanguageTag } from '../translation-provider';
+import { autoImageLanguageConfigurationKey } from '../language-detection';
 import {
   AUTO_LANGUAGE_PROBE_MINIMUM_CONFIDENCE,
   AutoImageLanguageProbe,
@@ -79,6 +80,7 @@ import {
 import {
   ACCESSIBILITY_TEXT_METHOD_ID,
   imageReadingExecutionPlan,
+  type ImageReadingExecutionStep,
   type ImageReadingMethodId,
 } from './image-reading-methods';
 import type { ImageSourceReadPolicy } from './image-source-client';
@@ -106,6 +108,15 @@ const MUTATION_QUIET_MS = 1_000;
 const MAX_TRANSLATED_IMAGE_REGIONS = 512;
 const MAX_TRANSIENT_CAPTURE_RETRIES = 1;
 const MAX_UNCHANGED_EMPTY_RETRIES = 2;
+const IMAGE_RESULT_CACHE_TTL_MS = 15 * 60 * 1_000;
+const MAX_RETAINED_IMAGE_EVIDENCE = 512;
+const MAX_RETAINED_IMAGE_EVIDENCE_WEIGHT = 1_000_000;
+const MAX_ORIGIN_OCR_EVIDENCE_WEIGHT = 1_000_000;
+const ORIGIN_OCR_EVIDENCE_SCHEMA_VERSION = 'origin-image-evidence-v2';
+const ORIGIN_OCR_QUALITY_IDENTITY_VERSION = 'origin-image-quality-v1';
+const ORIGIN_FINAL_ANALYSIS_SCHEMA_VERSION = 'origin-final-analysis-v1';
+const UNINITIALIZED_TOP_PAGE_SCOPE = Symbol('uninitialized-top-page-scope');
+const UNREUSABLE_TOP_PAGE_SCOPE = Symbol('unreusable-top-page-scope');
 
 export interface ImageTranslationConfiguration {
   readonly enabled: boolean;
@@ -156,7 +167,9 @@ export type ImageTranslationDiagnosticStage =
   | 'accessibility-text-started'
   | 'accessibility-text-empty'
   | 'accessibility-text-blocked'
+  | 'accessibility-text-provisional'
   | 'accessibility-text-complete'
+  | 'auto-language-probe-reopened'
   | 'projected';
 
 type ImageCaptureDeferralReason = Extract<
@@ -183,6 +196,10 @@ export type ImageTranslationDiagnostic =
       stage: 'source-summary';
       candidateImages: number;
       observedImages: number;
+    }>
+  | Readonly<{
+      stage: 'source-read-policy';
+      controlImagesEnabled: false;
     }>
   | Readonly<{
       stage: 'image-scheduling';
@@ -226,6 +243,34 @@ export type ImageTranslationDiagnostic =
       misses: number;
       joins: number;
       loads: number;
+      expirations?: number;
+      purges?: number;
+      providerEntries?: number;
+      providerWeight?: number;
+      providerHits?: number;
+      providerMisses?: number;
+    }>
+  | Readonly<{
+      stage: 'image-evidence-cache';
+      access: 'hit' | 'miss' | 'purge';
+      entries: number;
+      weight: number;
+      hits: number;
+      misses: number;
+      expirations: number;
+      purges: number;
+      revalidations: number;
+    }>
+  | Readonly<{
+      stage: 'image-final-cache';
+      access: 'hit' | 'miss' | 'purge' | 'rebind';
+      entries: number;
+      weight: number;
+      hits: number;
+      misses: number;
+      expirations: number;
+      purges: number;
+      rebinds: number;
     }>
   | Readonly<{
       stage: 'recognition-quality';
@@ -333,6 +378,9 @@ export interface ImageTranslationControllerEnvironment {
     document: ReplicaSourceDocumentIdentity,
     origin: AutoImageLanguageEvidenceOrigin,
   ) => void;
+  readonly onAutoLanguageInvalidated?: (
+    document: ReplicaSourceDocumentIdentity,
+  ) => void;
   readonly now?: () => number;
   readonly setTimer?: TimeoutScheduler;
   readonly clearTimer?: TimeoutCanceller;
@@ -346,11 +394,12 @@ export interface ImageTranslationControllerEnvironment {
 
 interface AutoLanguageProbeOcrProgress {
   readonly routes: readonly SupportedLanguage[];
-  readonly completedOcrGroups: Set<number>;
+  readonly completedProviders: Set<ImageTextProviderId>;
 }
 
 interface PendingSemanticImageEvidence {
   readonly evidence: SourceImageAccessibilityTextEvidence;
+  readonly identity: string;
   readonly sourceLanguage: SupportedLanguage;
   readonly rankable: RankableSemanticImageEvidence;
 }
@@ -375,14 +424,119 @@ interface ProbedImageLanguage {
   readonly pendingObservation?: PendingAutoLanguageOcrObservation;
 }
 
+interface RetainedAutoLanguageEvidence {
+  readonly resolution: Extract<AutoLanguageProbeObservationResult, {
+    readonly status: 'resolved';
+  }>;
+  /** Present only when recognition used the user's current quality policy. */
+  readonly recognition?: CompleteImageRecognition;
+}
+
 interface PendingOcrImageEvidence {
   readonly recognition: CompleteImageRecognition;
   readonly pixels: AcquiredImagePixels;
   readonly sourceLanguage: SupportedLanguage;
   readonly methodIndex: number;
+  readonly providerOrder: readonly ImageTextProviderId[];
+  readonly finalConfigurationKey?: string;
   readonly pendingAutoLanguageObservation?:
     PendingAutoLanguageOcrObservation;
   readonly autoLanguageVoteEligible?: boolean;
+  /** Providers that still need a real pass after an origin-cache candidate. */
+  readonly fallbackProviderOrder?: readonly ImageTextProviderId[];
+}
+
+interface RetainedPixelFacts {
+  readonly pixelHash: string;
+  readonly preprocessingVersion: AcquiredImagePixels['preprocessingVersion'];
+  readonly bitmapWidth: number;
+  readonly bitmapHeight: number;
+  readonly cropOffsetXCss: number;
+  readonly cropOffsetYCss: number;
+  readonly cropWidthCss: number;
+  readonly cropHeightCss: number;
+  readonly renderedWidthCss: number;
+  readonly renderedHeightCss: number;
+}
+
+interface RetainedOcrImageEvidence {
+  readonly recognition: CompleteImageRecognition;
+  readonly pixels: RetainedPixelFacts;
+  readonly sourceLanguage: SupportedLanguage;
+  readonly precedingProviders: ReadonlySet<ImageTextProviderId>;
+  readonly requiresPrecedingCorroboration: boolean;
+}
+
+interface RetainedOcrRouteOutcome {
+  readonly providerOrder: readonly ImageTextProviderId[];
+  readonly sourceLanguage: SupportedLanguage;
+  readonly status: 'empty' | 'provider-unavailable';
+}
+
+interface RetainedImageEvidence {
+  readonly document: ReplicaSourceDocumentIdentity;
+  readonly evidenceConfigurationKey: string;
+  readonly contentRevision: number;
+  readonly observationRevision: number;
+  /** Capture revision that validates the retained OCR candidates. */
+  readonly captureRevision: number;
+  readonly expiresAt: number;
+  readonly semanticAttempted: boolean;
+  readonly semantic?: PendingSemanticImageEvidence;
+  readonly ocr: ReadonlyMap<ImageTextProviderId, RetainedOcrImageEvidence>;
+  readonly ocrRouteOutcomes: readonly RetainedOcrRouteOutcome[];
+  readonly weight: number;
+}
+
+interface RetainedFinalImageAnalysis {
+  readonly document: ReplicaSourceDocumentIdentity;
+  readonly contentRevision: number;
+  readonly captureRevision: number;
+  readonly finalConfigurationKey: string;
+  readonly projection: ImageOverlayProjection;
+  readonly expiresAt: number;
+  readonly weight: number;
+}
+
+interface OriginFinalImageAnalysis {
+  readonly methodId: ImageReadingMethodId;
+  readonly evidenceKind: 'semantic' | 'ocr';
+  readonly regions: readonly TranslatedImageRegion[];
+  readonly expiresAt: number;
+  readonly weight: number;
+}
+
+interface CommittedAutoLanguageResolution {
+  readonly language: SupportedLanguage;
+  readonly evidence: AutoLanguageProbeEvidence;
+  readonly attempts: number;
+  readonly images: number;
+  readonly autoLanguageConfigurationIdentity: string;
+  readonly precedingProviders: ReadonlySet<ImageTextProviderId>;
+  readonly requiresPrecedingCorroboration: boolean;
+}
+
+interface OriginOcrImageEvidence {
+  readonly providerId: ImageTextProviderId;
+  readonly recognition: CompleteImageRecognition;
+  readonly sourceLanguage: SupportedLanguage;
+  readonly pixelIdentity: string;
+  readonly qualityPolicyIdentity: string;
+  readonly precedingProviders: ReadonlySet<ImageTextProviderId>;
+  readonly requiresPrecedingCorroboration: boolean;
+  readonly autoLanguageResolution?: CommittedAutoLanguageResolution;
+  readonly expiresAt: number;
+  readonly weight: number;
+}
+
+interface OriginOcrEvidenceReuse {
+  readonly recognition: CompleteImageRecognition;
+  readonly fallbackProviderOrder: readonly ImageTextProviderId[];
+}
+
+interface CachedLanguageDetection {
+  readonly language?: SupportedLanguage;
+  readonly expiresAt: number;
 }
 
 /** Capacity-one, opt-in orchestration from source image facts to replay overlays. */
@@ -394,6 +548,17 @@ export class ImageTranslationController {
   readonly #descriptors = new Map<number, SourceImageDescriptor>();
   readonly #projectedHashes = new Map<number, string>();
   readonly #projectedOrdinals = new Map<number, number>();
+  readonly #retainedProjections = new Map<number, ImageOverlayProjection>();
+  readonly #retainedEvidence = new Map<number, RetainedImageEvidence>();
+  readonly #retainedFinalAnalyses = new Map<
+    number,
+    RetainedFinalImageAnalysis
+  >();
+  readonly #originOcrEvidence = new Map<string, OriginOcrImageEvidence>();
+  readonly #originFinalAnalyses = new Map<string, OriginFinalImageAnalysis>();
+  readonly #rerankRequestedNodeIds = new Set<number>();
+  readonly #semanticRefreshRetainedOcrNodeIds = new Set<number>();
+  readonly #languageDetections = new Map<string, CachedLanguageDetection>();
   readonly #captureRetries = new Map<number, {
     readonly contentRevision: number;
     readonly observationRevision: number;
@@ -439,11 +604,30 @@ export class ImageTranslationController {
   #nextJobOrdinal = 0;
   #autoLanguageProbe: AutoImageLanguageProbe | undefined;
   #probeDetectedSourceLanguage: SupportedLanguage | undefined;
+  #revokedProbeDetectedSourceLanguage: SupportedLanguage | undefined;
   #probeSchedulerRebuildRequested = false;
   #probeInconclusiveReported = false;
   #probeStartedReported = false;
+  #autoLanguageRevalidationPending = false;
   #probeDeadlineTimer: ReturnType<typeof setTimeout> | undefined;
   #probeLifetimeAbortController: AbortController | undefined;
+  #topPageScopeIdentity: string |
+    typeof UNINITIALIZED_TOP_PAGE_SCOPE |
+    typeof UNREUSABLE_TOP_PAGE_SCOPE = UNINITIALIZED_TOP_PAGE_SCOPE;
+  #retainedEvidenceWeight = 0;
+  #retainedFinalAnalysisWeight = 0;
+  #originOcrEvidenceWeight = 0;
+  #originEvidenceHits = 0;
+  #originEvidenceMisses = 0;
+  #originEvidenceExpirations = 0;
+  #originEvidencePurges = 0;
+  #originEvidenceRevalidations = 0;
+  #originFinalAnalysisWeight = 0;
+  #originFinalHits = 0;
+  #originFinalMisses = 0;
+  #originFinalExpirations = 0;
+  #originFinalPurges = 0;
+  #originFinalRebinds = 0;
   readonly #now: () => number;
 
   constructor(private readonly environment: ImageTranslationControllerEnvironment) {
@@ -491,6 +675,8 @@ export class ImageTranslationController {
   configure(configuration: ImageTranslationConfiguration): void {
     if (this.#disposed) return;
     const previous = this.#configuration;
+    const previousProbeDetectedSourceLanguage =
+      this.#probeDetectedSourceLanguage;
     const requestedResetEpoch = normalizeResetEpoch(configuration.resetEpoch);
     const resetEpoch = Math.max(previous.resetEpoch, requestedResetEpoch);
     const resetEpochAdvanced = resetEpoch > previous.resetEpoch;
@@ -507,30 +693,99 @@ export class ImageTranslationController {
       ]),
     });
     const enabled = this.#isEnabled();
-    const wasEnabled = imageTranslationConfigurationEnabled(previous);
-    const pairChanged = pairConfigurationKey(previous) !==
-      pairConfigurationKey(this.#configuration);
+    const wasEnabled = imageTranslationConfigurationEnabled(
+      previous,
+      previousProbeDetectedSourceLanguage,
+    );
+    const sameLanguagePause = imageTranslationSameLanguagePause(
+      this.#configuration,
+      this.#probeDetectedSourceLanguage,
+    );
+    const wasSameLanguagePause = imageTranslationSameLanguagePause(
+      previous,
+      previousProbeDetectedSourceLanguage,
+    );
+    const pairChanged = pairConfigurationKey(
+      previous,
+      previousProbeDetectedSourceLanguage,
+    ) !== pairConfigurationKey(
+      this.#configuration,
+      this.#probeDetectedSourceLanguage,
+    );
+    const preserveCommittedProbeAcrossModeToggle =
+      probeConfigurationChanged &&
+      previous.sourceLanguage !== this.#configuration.sourceLanguage &&
+      !pairChanged &&
+      autoLanguageProbeRuntimeConfigurationKey(previous) ===
+        autoLanguageProbeRuntimeConfigurationKey(this.#configuration);
+    const targetOnlyEvidenceCompatibleChange =
+      (wasEnabled || wasSameLanguagePause) && enabled &&
+      previous.targetLanguage !== this.#configuration.targetLanguage &&
+      sourceEvidenceConfigurationKey(
+        previous,
+        previousProbeDetectedSourceLanguage,
+      ) === sourceEvidenceConfigurationKey(
+        this.#configuration,
+        this.#probeDetectedSourceLanguage,
+      );
+    const rankingOrderChanged = rankingOrderConfigurationKey(previous) !==
+      rankingOrderConfigurationKey(this.#configuration);
+    const schedulingPolicyChanged =
+      previous.scanPolicy !== this.#configuration.scanPolicy ||
+      schedulerSkipsSmallImages(previous) !==
+        schedulerSkipsSmallImages(this.#configuration);
     const imageSourcePolicyChanged = imageSourcePolicyConfigurationKey(previous) !==
       imageSourcePolicyConfigurationKey(this.#configuration);
-    const imageContentRetentionBoundary = wasEnabled &&
-      (!enabled || imageSourcePolicyChanged);
+    const enabledMethodNarrowed = removedEnabledImageReadingMethod(
+      previous,
+      this.#configuration,
+    );
+    const imageContentRetentionBoundary =
+      (wasEnabled || wasSameLanguagePause) &&
+      ((!enabled && !sameLanguagePause) || imageSourcePolicyChanged ||
+        enabledMethodNarrowed);
     if (resetEpochAdvanced) {
       this.#recognition?.advanceResetEpoch(resetEpoch);
     }
     if (resetEpochAdvanced || imageContentRetentionBoundary) {
-      this.#translationMemory.clear();
+      this.#purgeReusableResults();
+      this.#projectedHashes.clear();
+      this.#projectedOrdinals.clear();
+      this.#projector.clear();
     }
-    if (imageContentRetentionBoundary) this.#recognition?.clear();
     if (probeConfigurationChanged || resetEpochAdvanced) {
-      this.#resetAutoLanguageProbe();
+      if (preserveCommittedProbeAcrossModeToggle && !resetEpochAdvanced) {
+        this.#suspendAutoLanguageProbeMode();
+      } else {
+        this.#resetAutoLanguageProbe();
+      }
     }
     const pageResolutionGateChanged =
-      Boolean(previous.pageLanguageResolutionPending) !==
-      Boolean(this.#configuration.pageLanguageResolutionPending);
+      imagePageLanguageResolutionBlocksWork(
+        previous,
+        previousProbeDetectedSourceLanguage,
+      ) !== imagePageLanguageResolutionBlocksWork(
+        this.#configuration,
+        this.#probeDetectedSourceLanguage,
+      );
     if (!enabled) {
       this.#reportConfigurationState();
-      if (wasEnabled || this.#source) this.#stopSource(false);
-      this.#beginPair();
+      if (sameLanguagePause && !imageContentRetentionBoundary) {
+        this.#processingVersion += 1;
+        this.#activeAbortController?.abort();
+        this.#beginPair(true);
+        this.#queueRetainedRerank(true);
+        this.#scheduler?.configure({
+          policy: configuration.scanPolicy,
+          skipSmallImages: schedulerSkipsSmallImages(configuration),
+        });
+        this.#refreshGates();
+      } else {
+        if (wasEnabled || wasSameLanguagePause || this.#source) {
+          this.#stopSource(false);
+        }
+        this.#beginPair();
+      }
       return;
     }
     if (
@@ -549,8 +804,50 @@ export class ImageTranslationController {
     if (pairChanged || pageResolutionGateChanged || resetEpochAdvanced) {
       this.#processingVersion += 1;
       this.#activeAbortController?.abort();
-      if (pairChanged || resetEpochAdvanced) this.#beginPair();
-      this.#rebuildScheduler();
+      if (pairChanged || resetEpochAdvanced) {
+        this.#beginPair(targetOnlyEvidenceCompatibleChange);
+      }
+      if (
+        targetOnlyEvidenceCompatibleChange &&
+        !pageResolutionGateChanged &&
+        !resetEpochAdvanced
+      ) {
+        this.#queueRetainedRerank(true);
+        this.#scheduler?.configure({
+          policy: configuration.scanPolicy,
+          skipSmallImages: schedulerSkipsSmallImages(configuration),
+        });
+        this.#refreshGates();
+      } else {
+        this.#rebuildScheduler();
+      }
+    } else if (schedulingPolicyChanged) {
+      // A policy change can make the in-flight descriptor ineligible while
+      // its asynchronous semantic translation or OCR is still resolving.
+      // Release scheduler ownership before advancing the processing epoch so
+      // the current run cannot paint stale work or strand the capacity slot.
+      const activeJob = this.#activeJob();
+      if (activeJob) this.#scheduler?.retry(activeJob);
+      this.#processingVersion += 1;
+      this.#activeAbortController?.abort();
+      this.#scheduler?.configure({
+        policy: configuration.scanPolicy,
+        skipSmallImages: schedulerSkipsSmallImages(configuration),
+      });
+      this.#refreshGates();
+    } else if (rankingOrderChanged) {
+      this.#processingVersion += 1;
+      this.#activeAbortController?.abort();
+      // Retained evidence is reused in-place. A settled descriptor whose
+      // bounded evidence expired or was evicted must still be requeued;
+      // otherwise a pure priority change can leave its old winner projected
+      // forever with no work capable of applying the new order.
+      this.#queueRetainedRerank(true);
+      this.#scheduler?.configure({
+        policy: configuration.scanPolicy,
+        skipSmallImages: schedulerSkipsSmallImages(configuration),
+      });
+      this.#refreshGates();
     } else {
       this.#scheduler?.configure({
         policy: configuration.scanPolicy,
@@ -558,7 +855,12 @@ export class ImageTranslationController {
       });
       this.#refreshGates();
     }
-    if (!wasEnabled && this.#request && this.#sourceWindowId !== undefined) {
+    if (
+      !wasEnabled &&
+      this.#request &&
+      this.#sourceWindowId !== undefined &&
+      !this.#source
+    ) {
       void this.#startSource();
     } else {
       this.#kick();
@@ -656,20 +958,21 @@ export class ImageTranslationController {
   }
 
   #adoptReplayLease(replayLease: number): void {
-    if (this.#replayLease !== 0 && this.#replayLease !== replayLease) {
-      this.#projectedHashes.clear();
-      this.#projectedOrdinals.clear();
+    const leaseChanged = this.#replayLease !== 0 &&
+      this.#replayLease !== replayLease;
+    this.#replayLease = replayLease;
+    if (leaseChanged) {
       this.#projector.clear();
-      this.#rebuildScheduler();
+      this.#rebindRetainedProjections();
     } else {
       this.#projector.refresh();
     }
-    this.#replayLease = replayLease;
     this.#refreshGates();
     this.#kick();
   }
 
   refreshOverlays(): void {
+    this.#rebindRetainedProjections();
     this.#projector.refresh();
   }
 
@@ -679,8 +982,8 @@ export class ImageTranslationController {
     const scheduler = this.#scheduler;
     const abortController = this.#activeAbortController;
     if (!job || !scheduler || !abortController) return false;
+    if (!scheduler.defer(job)) return false;
     this.#processingVersion += 1;
-    scheduler.defer(job);
     abortController.abort();
     return true;
   }
@@ -693,18 +996,67 @@ export class ImageTranslationController {
     this.#sourceRecoveryKey = undefined;
     this.#sourceReconnectUsed = false;
     this.#stopSource(false);
-    this.#recognition?.clear();
-    this.#translationMemory.clear();
     this.#reportConfigurationState();
+  }
+
+  /**
+   * Restrict reusable source-derived results to one top-page source scope.
+   * The identity is kept only in this controller's memory and never
+   * diagnosed. HTTP(S) pages share one normalized origin scope; non-HTTP,
+   * malformed, and unknown pages are deliberately uncacheable across calls.
+   */
+  setTopPageOrigin(pageUrl: string | undefined): void {
+    const nextScopeIdentity = topPageSourceScopeIdentity(pageUrl);
+    if (
+      nextScopeIdentity !== undefined &&
+      nextScopeIdentity === this.#topPageScopeIdentity
+    ) return;
+    this.purgeSourceDerivedCache();
+    // Unsupported/opaque URLs do not expose a stable security origin. Never
+    // retain their full URL (notably large data: payloads), and do not reuse
+    // evidence across two calls that may represent distinct opaque documents.
+    this.#topPageScopeIdentity = nextScopeIdentity ??
+      UNREUSABLE_TOP_PAGE_SCOPE;
+  }
+
+  /** Security boundary used by reset, read narrowing, disable and revocation. */
+  purgeSourceDerivedCache(): void {
+    this.#processingVersion += 1;
+    this.#activeAbortController?.abort();
+    this.#purgeReusableResults();
+    this.#projectedHashes.clear();
+    this.#projectedOrdinals.clear();
+    this.#retainedProjections.clear();
+    this.#rerankRequestedNodeIds.clear();
+    this.#semanticRefreshRetainedOcrNodeIds.clear();
+    this.#projector.clear();
   }
 
   dispose(): void {
     if (this.#disposed) return;
     this.#disposed = true;
     this.releaseReplica();
-    this.#recognition?.clear();
+    this.#purgeReusableResults();
     this.#recognition = undefined;
+    this.#topPageScopeIdentity = UNINITIALIZED_TOP_PAGE_SCOPE;
     this.#projector.dispose();
+  }
+
+  #purgeReusableResults(): void {
+    this.#recognition?.clear();
+    this.#translationMemory.clear();
+    this.#languageDetections.clear();
+    this.#purgeOriginOcrEvidence();
+    this.#purgeOriginFinalAnalyses();
+    this.#clearRetainedEvidence();
+    this.#clearRetainedFinalAnalyses();
+    this.#retainedProjections.clear();
+    this.#rerankRequestedNodeIds.clear();
+    this.#semanticRefreshRetainedOcrNodeIds.clear();
+    this.#captureRetries.clear();
+    this.#emptyRetries.clear();
+    this.#semanticEvidenceIndex.clear();
+    this.#resetAutoLanguageProbe();
   }
 
   async #startSource(): Promise<void> {
@@ -725,6 +1077,16 @@ export class ImageTranslationController {
     this.#scheduler = this.#createScheduler(document);
     this.#setMutationQuiet(false);
     this.environment.onDiagnostic?.('source-connecting');
+    const controlImages = this.#configuration.controlImages === true;
+    if (!controlImages) {
+      // This is deliberately content-free and precedes opening the source
+      // channel: controls are withheld before ALT, pixels, or OCR providers
+      // can observe them.
+      this.environment.onDiagnostic?.(Object.freeze({
+        stage: 'source-read-policy' as const,
+        controlImagesEnabled: false as const,
+      }));
+    }
     try {
       const source = await this.environment.openSource(
         request,
@@ -733,7 +1095,7 @@ export class ImageTranslationController {
         {
           policyFingerprint:
             this.#configuration.policyFingerprint ?? 'read-v1-000000',
-          controlImages: this.#configuration.controlImages === true,
+          controlImages,
           accessibilityTextEnabled: accessibilityMethodEnabled(
             this.#configuration,
           ),
@@ -743,7 +1105,7 @@ export class ImageTranslationController {
         version !== this.#sourceVersion ||
         abortController.signal.aborted ||
         !request.isCurrent() ||
-        !this.#isEnabled()
+        !imageTranslationSourceObservationEnabled(this.#configuration)
       ) {
         source.dispose();
         return;
@@ -795,10 +1157,19 @@ export class ImageTranslationController {
     if (
       sourceVersion !== this.#sourceVersion ||
       this.#disposed ||
-      !this.#isEnabled() ||
       !this.#request?.isCurrent() ||
       !this.#sourceRecoveryKey
     ) return;
+    if (!this.#isEnabled()) {
+      if (imageTranslationSameLanguagePause(
+        this.#configuration,
+        this.#probeDetectedSourceLanguage,
+      )) {
+        this.environment.onDiagnostic?.('source-unavailable');
+        this.#stopSource(true);
+      }
+      return;
+    }
     this.environment.onDiagnostic?.('source-unavailable');
     if (this.#sourceReconnectUsed) {
       this.#stopSource(true);
@@ -823,6 +1194,11 @@ export class ImageTranslationController {
     this.#descriptors.clear();
     this.#projectedHashes.clear();
     this.#projectedOrdinals.clear();
+    this.#retainedProjections.clear();
+    this.#clearRetainedFinalAnalyses();
+    this.#clearRetainedEvidence();
+    this.#rerankRequestedNodeIds.clear();
+    this.#semanticRefreshRetainedOcrNodeIds.clear();
     this.#captureRetries.clear();
     this.#emptyRetries.clear();
     this.#semanticEvidenceIndex.clear();
@@ -849,7 +1225,7 @@ export class ImageTranslationController {
       sourceVersion !== this.#sourceVersion ||
       !this.#scheduler ||
       !this.#document ||
-      !this.#isEnabled()
+      !imageTranslationSourceObservationEnabled(this.#configuration)
     ) return;
     const scheduler = this.#scheduler;
     const scheduling = scheduler.apply(change);
@@ -872,9 +1248,11 @@ export class ImageTranslationController {
       }));
     }
     // The scheduler owns exact-document and monotonic-revision validation.
-    // Rejected/overflowing changes must not mutate controller-owned evidence,
-    // descriptors, projections, or Auto-language votes.
-    if (scheduling.status === 'rejected' || scheduling.status === 'overflow') {
+    // Rejected changes never mutate controller state. Overflow records remain
+    // scheduler-owned candidates and may be admitted later, so mirror their
+    // exact descriptor and invalidate obsolete evidence without processing
+    // them ahead of the bounded queue.
+    if (scheduling.status === 'rejected') {
       this.#setMutationQuiet(false);
       this.#kick();
       return;
@@ -884,13 +1262,21 @@ export class ImageTranslationController {
     let invalidatedAutoResolution = false;
     if (change.kind === 'upsert') {
       const previous = this.#descriptors.get(change.descriptor.nodeId);
-      if (
+      const contentChanged = Boolean(
         previous &&
         previous.contentRevision !== change.descriptor.contentRevision
-      ) {
+      );
+      const captureChanged = Boolean(
+        previous &&
+        descriptorCaptureRevision(previous) !==
+          descriptorCaptureRevision(change.descriptor)
+      );
+      if (previous && contentChanged) {
         for (const nodeId of this.#semanticEvidenceIndex.unregister(
           change.descriptor.nodeId,
         ).reevaluateNodeIds) semanticPeers.add(nodeId);
+      }
+      if (previous && (contentChanged || captureChanged)) {
         invalidatedAutoResolution = this.#forgetAutoLanguageProbeSample(
           change.descriptor.nodeId,
         ) || invalidatedAutoResolution;
@@ -898,15 +1284,91 @@ export class ImageTranslationController {
       this.#descriptors.set(change.descriptor.nodeId, change.descriptor);
       if (
         previous &&
-        (previous.contentRevision !== change.descriptor.contentRevision ||
-          previous.observationRevision !==
-            change.descriptor.observationRevision)
+        previous.observationRevision !== change.descriptor.observationRevision
       ) {
-        this.#projectedHashes.delete(change.descriptor.nodeId);
-        this.#projectedOrdinals.delete(change.descriptor.nodeId);
+        if (contentChanged) {
+          const retainedProjection = this.#retainedProjections.get(
+            change.descriptor.nodeId,
+          );
+          const retainOcrProjection = Boolean(
+            !captureChanged &&
+            retainedProjection?.evidenceKind === 'ocr' &&
+            retainedProjection.pairEpoch === this.#pairEpoch &&
+            retainedProjection.pairKey === this.#pairKey &&
+            sameSourceDocument(
+              retainedProjection.document,
+              change.descriptor.document,
+            ) &&
+            this.#projectedHashes.get(change.descriptor.nodeId) ===
+              retainedProjection.pixelHash,
+          );
+          if (!retainOcrProjection) {
+            this.#projectedHashes.delete(change.descriptor.nodeId);
+            this.#projectedOrdinals.delete(change.descriptor.nodeId);
+            this.#retainedProjections.delete(change.descriptor.nodeId);
+          }
+          if (captureChanged) {
+            this.#deleteRetainedEvidence(change.descriptor.nodeId);
+            this.#semanticRefreshRetainedOcrNodeIds.delete(
+              change.descriptor.nodeId,
+            );
+          } else {
+            if (this.#rebaseRetainedCaptureEvidence(change.descriptor)) {
+              this.#semanticRefreshRetainedOcrNodeIds.add(
+                change.descriptor.nodeId,
+              );
+            } else {
+              this.#semanticRefreshRetainedOcrNodeIds.delete(
+                change.descriptor.nodeId,
+              );
+            }
+          }
+          this.#deleteRetainedFinalAnalysis(change.descriptor.nodeId);
+          if (retainOcrProjection && retainedProjection) {
+            const provisional: ImageOverlayProjection = Object.freeze({
+              ...retainedProjection,
+              contentRevision: change.descriptor.contentRevision,
+              observationRevision: change.descriptor.observationRevision,
+            });
+            this.#retainedProjections.set(change.descriptor.nodeId, provisional);
+            if (!this.#projector.project(provisional)) {
+              this.#projectedHashes.delete(change.descriptor.nodeId);
+              this.#projectedOrdinals.delete(change.descriptor.nodeId);
+              this.#retainedProjections.delete(change.descriptor.nodeId);
+              this.#projector.remove(
+                change.descriptor.document,
+                change.descriptor.nodeId,
+              );
+            }
+          } else {
+            this.#projector.remove(
+              change.descriptor.document,
+              change.descriptor.nodeId,
+            );
+          }
+        } else {
+          this.#semanticRefreshRetainedOcrNodeIds.delete(
+            change.descriptor.nodeId,
+          );
+          if (captureChanged) {
+            this.#projectedHashes.delete(change.descriptor.nodeId);
+            this.#projectedOrdinals.delete(change.descriptor.nodeId);
+            this.#retainedProjections.delete(change.descriptor.nodeId);
+            this.#deleteRetainedFinalAnalysis(change.descriptor.nodeId);
+            this.#projector.remove(
+              change.descriptor.document,
+              change.descriptor.nodeId,
+            );
+          } else if (!this.#rebaseRetainedObservation(change.descriptor)) {
+            // A missing/replaced replay anchor cannot inherit projection
+            // currency. Reopen only this exact image while every unrelated
+            // settled completion remains carried by the scheduler.
+            scheduler.requeueCurrent(change.descriptor);
+          }
+        }
+        this.#rerankRequestedNodeIds.delete(change.descriptor.nodeId);
         this.#captureRetries.delete(change.descriptor.nodeId);
         this.#emptyRetries.delete(change.descriptor.nodeId);
-        this.#projector.remove(change.descriptor.document, change.descriptor.nodeId);
       }
     } else {
       for (const nodeId of this.#semanticEvidenceIndex.unregister(
@@ -918,6 +1380,11 @@ export class ImageTranslationController {
       this.#descriptors.delete(change.nodeId);
       this.#projectedHashes.delete(change.nodeId);
       this.#projectedOrdinals.delete(change.nodeId);
+      this.#retainedProjections.delete(change.nodeId);
+      this.#deleteRetainedFinalAnalysis(change.nodeId);
+      this.#deleteRetainedEvidence(change.nodeId);
+      this.#rerankRequestedNodeIds.delete(change.nodeId);
+      this.#semanticRefreshRetainedOcrNodeIds.delete(change.nodeId);
       this.#captureRetries.delete(change.nodeId);
       this.#emptyRetries.delete(change.nodeId);
       this.#projector.remove(change.document, change.nodeId);
@@ -927,8 +1394,10 @@ export class ImageTranslationController {
       if (!affected) continue;
       invalidatedAutoResolution = this.#forgetAutoLanguageProbeSample(nodeId) ||
         invalidatedAutoResolution;
-      this.#clearProjection(affected);
-      scheduler.requeueCurrent(affected);
+      if (!this.#requeueRetainedEvidence(affected, scheduler)) {
+        this.#clearProjection(affected);
+        scheduler.requeueCurrent(affected);
+      }
     }
     for (const cancellation of scheduler.drainCancellations()) {
       if (
@@ -937,7 +1406,7 @@ export class ImageTranslationController {
       ) this.#activeAbortController?.abort();
     }
     if (invalidatedAutoResolution) {
-      this.#restartAfterAutoLanguageEvidenceInvalidation();
+      this.#reopenAutoLanguageAfterSampleInvalidation();
     }
     this.#setMutationQuiet(false);
     this.#kick();
@@ -997,7 +1466,7 @@ export class ImageTranslationController {
           );
           if (this.#probeSchedulerRebuildRequested) {
             this.#probeSchedulerRebuildRequested = false;
-            this.#rebuildScheduler();
+            this.#rebuildScheduler(true);
             return;
           }
         } catch (error) {
@@ -1023,12 +1492,10 @@ export class ImageTranslationController {
       }
     } finally {
       this.#setProcessing(false);
-      if (
-        processingVersion === this.#processingVersion ||
-        scheduler !== this.#scheduler
-      ) {
-        this.#kick();
-      }
+      // Configuration changes may advance processingVersion while reusing the
+      // same scheduler. Any replacement queued before the active abort must be
+      // allowed to start once this run releases the capacity-one processor.
+      this.#kick();
     }
   }
 
@@ -1062,6 +1529,23 @@ export class ImageTranslationController {
       skipSmallImages: this.#configuration.skipSmallImages,
       manualOverride: job.manualOverride,
     });
+    const semanticRefreshRetainedOcr =
+      this.#semanticRefreshRetainedOcrNodeIds.delete(job.descriptor.nodeId);
+    if (
+      this.#rerankRequestedNodeIds.delete(job.descriptor.nodeId) &&
+      await this.#commitRetainedWinner(
+        job,
+        scheduler,
+        processingVersion,
+        jobOrdinal,
+        replayLease,
+        pairEpoch,
+        pairKey,
+        steps,
+        ocrEligibility.eligible,
+        signal,
+      )
+    ) return;
     let pixels: AcquiredImagePixels | undefined;
     let captureDeferral: Extract<PixelAcquisitionResult, {
       readonly status: 'deferred';
@@ -1070,6 +1554,7 @@ export class ImageTranslationController {
     let sawOcrStep = false;
     let sawEmptyRecognition = false;
     let unsupportedLanguage = false;
+    let originFinalChecked = false;
     let ocrStepIndex = 0;
     let heldSemantic: PendingSemanticImageEvidence | undefined;
     let heldOcr: PendingOcrImageEvidence | undefined;
@@ -1139,6 +1624,98 @@ export class ImageTranslationController {
       return commitOcrCandidate(candidate);
     };
 
+    // Accessibility labels are cheap and useful as a progressive first paint.
+    // Read and, when sufficiently specific, project them before entering the
+    // saved ranking order. The later method loop still performs the ordinary
+    // semantic/OCR comparison using the user's configured priority.
+    const semanticStepIndex = steps.findIndex(
+      (step) => step.kind === 'accessibility-text',
+    );
+    const retainedSemantic = semanticStepIndex >= 0
+      ? this.#retainedEvidenceRecord(job.descriptor)
+      : undefined;
+    let eagerSemanticRead = semanticStepIndex >= 0;
+    let eagerSemanticCandidate: PendingSemanticImageEvidence | undefined;
+    let eagerSemanticProjectionAttempted = false;
+    let eagerSemanticProjected = false;
+    if (eagerSemanticRead) {
+      try {
+        eagerSemanticCandidate = retainedSemantic?.semanticAttempted
+          ? retainedSemantic.semantic
+            ? semanticCandidateAtMethodIndex(
+                retainedSemantic.semantic,
+                semanticStepIndex,
+              )
+            : undefined
+          : await this.#readAccessibilityCandidate(
+              job,
+              scheduler,
+              semanticStepIndex,
+              processingVersion,
+              pairEpoch,
+              pairKey,
+              signal,
+            );
+        if (
+          eagerSemanticCandidate &&
+          !eagerSemanticProjectionAttempted &&
+          progressiveSemanticEvidence(eagerSemanticCandidate.rankable)
+        ) {
+          eagerSemanticProjectionAttempted = true;
+          eagerSemanticProjected = await this.#commitAccessibilityCandidate(
+            eagerSemanticCandidate,
+            job,
+            scheduler,
+            processingVersion,
+            jobOrdinal,
+            replayLease,
+            pairEpoch,
+            pairKey,
+            signal,
+            true,
+          );
+        }
+      } catch (error) {
+        if (
+          isAbortError(error) ||
+          signal.aborted ||
+          isImageSourceUnavailableError(error)
+        ) throw error;
+        // Isolate malformed source evidence to this exact revision. Retrying it
+        // immediately would spin the capacity-one scheduler and starve later
+        // images; a source revision or explicit rerun can try again.
+        this.#rememberSemanticAbsence(job.descriptor);
+        this.environment.onDiagnostic?.('accessibility-text-blocked');
+      }
+    }
+
+    // A semantic-only revision can reuse capture-revision-bound OCR evidence.
+    // Re-rank it only after the fresh accessibility label has been read.
+    if (semanticRefreshRetainedOcr && await this.#commitRetainedWinner(
+      job,
+      scheduler,
+      processingVersion,
+      jobOrdinal,
+      replayLease,
+      pairEpoch,
+      pairKey,
+      steps,
+      ocrEligibility.eligible,
+      signal,
+    )) return;
+
+    if (this.#commitRetainedFinalAnalysis(
+      job,
+      scheduler,
+      processingVersion,
+      jobOrdinal,
+      replayLease,
+      pairEpoch,
+      pairKey,
+      this.#finalAnalysisConfigurationKey(steps, eagerSemanticCandidate),
+      signal,
+    )) return;
+
     methodLoop: for (const [methodIndex, step] of steps.entries()) {
       signal.throwIfAborted();
       if (!this.#isJobCurrent(job, processingVersion, pairEpoch, pairKey)) {
@@ -1146,15 +1723,18 @@ export class ImageTranslationController {
       }
       try {
       if (step.kind === 'accessibility-text') {
-        const candidate = await this.#readAccessibilityCandidate(
-          job,
-          scheduler,
-          methodIndex,
-          processingVersion,
-          pairEpoch,
-          pairKey,
-          signal,
-        );
+        const candidate = eagerSemanticRead
+          ? eagerSemanticCandidate
+          : await this.#readAccessibilityCandidate(
+              job,
+              scheduler,
+              methodIndex,
+              processingVersion,
+              pairEpoch,
+              pairKey,
+              signal,
+            );
+        eagerSemanticRead = false;
         if (!candidate) {
           if (heldOcr && await commitHeldOcr()) return;
           continue;
@@ -1187,13 +1767,22 @@ export class ImageTranslationController {
                 signal,
               );
             } catch (error) {
-              this.#rollbackPendingOcrLanguageObservation(
-                ocr.pendingAutoLanguageObservation,
-              );
-              clearProvisionalSourceLanguage(
-                ocr.pendingAutoLanguageObservation,
-              );
-              throw error;
+              if (
+                isAbortError(error) ||
+                signal.aborted ||
+                isImageSourceUnavailableError(error)
+              ) {
+                this.#rollbackPendingOcrLanguageObservation(
+                  ocr.pendingAutoLanguageObservation,
+                );
+                clearProvisionalSourceLanguage(
+                  ocr.pendingAutoLanguageObservation,
+                );
+                throw error;
+              }
+              // A transient semantic projection failure must not discard the
+              // already-ranked OCR fallback or force another provider route.
+              this.environment.onDiagnostic?.('accessibility-text-blocked');
             }
             if (committed) {
               this.#discardPendingOcrLanguageObservation(
@@ -1217,9 +1806,9 @@ export class ImageTranslationController {
               pairKey,
               signal,
             )) return;
-            if (ocr.recognition.continuation) {
+            if (this.#hasOcrAlternatives(ocr)) {
               this.#reportEvidenceSelection('ocr', 'ocr-fallback');
-              if (await this.#commitOcrContinuations(
+              if (await this.#commitOcrAlternatives(
                 ocr,
                 job,
                 scheduler,
@@ -1234,19 +1823,34 @@ export class ImageTranslationController {
           }
           continue;
         }
-        const assessment = assessSemanticImageEvidence(candidate.rankable);
         const canCompareWithLaterOcr = ocrEligibility.eligible &&
           steps.slice(methodIndex + 1).some(({ kind }) => kind === 'ocr');
         const awaitsEarlierOcrRetry = Boolean(
           captureDeferral && isTransientCaptureReason(captureDeferral.reason),
         );
-        if (
-          assessment.provisional &&
-          (canCompareWithLaterOcr || awaitsEarlierOcrRetry)
-        ) {
+        if (canCompareWithLaterOcr || awaitsEarlierOcrRetry) {
           heldSemantic = candidate;
+          if (
+            !eagerSemanticProjectionAttempted &&
+            progressiveSemanticEvidence(candidate.rankable)
+          ) {
+            eagerSemanticProjectionAttempted = true;
+            eagerSemanticProjected = await this.#commitAccessibilityCandidate(
+              candidate,
+              job,
+              scheduler,
+              processingVersion,
+              jobOrdinal,
+              replayLease,
+              pairEpoch,
+              pairKey,
+              signal,
+              true,
+            );
+          }
           continue;
         }
+        const assessment = assessSemanticImageEvidence(candidate.rankable);
         this.#reportEvidenceSelection(
           'semantic',
           assessment.provisional ? 'semantic-fallback' : 'semantic-decisive',
@@ -1297,15 +1901,48 @@ export class ImageTranslationController {
       }
 
       if (!sourceLanguage) {
+        const revalidateAutoLanguage =
+          this.#autoLanguageRevalidationPending &&
+          this.#configuration.sourceLanguage === 'auto' &&
+          !pixels.nearestElementLanguage;
         sourceLanguage = resolveImageSourceLanguage({
           nearestElementLanguage: pixels.nearestElementLanguage,
           ...(this.#configuration.sourceLanguage === 'auto'
             ? {}
             : { explicitSourceLanguage: this.#configuration.sourceLanguage }),
-          ...(this.#effectiveDetectedSourceLanguage()
+          ...(!revalidateAutoLanguage && this.#effectiveDetectedSourceLanguage()
             ? { detectedPageLanguage: this.#effectiveDetectedSourceLanguage() }
             : {}),
         });
+        if (!sourceLanguage) {
+          const retainedAutoLanguage = this.#readOriginAutoLanguageEvidence(
+            pixels,
+            step.providerOrder,
+          );
+          if (retainedAutoLanguage) {
+            if (retainedAutoLanguage.recognition) {
+              this.#rememberOcrCandidate(job.descriptor, Object.freeze({
+                recognition: retainedAutoLanguage.recognition,
+                pixels,
+                sourceLanguage: retainedAutoLanguage.resolution.language,
+                methodIndex,
+                providerOrder: step.providerOrder,
+              }));
+            }
+            sourceLanguage = this.#restoreOriginAutoLanguageEvidence(
+              retainedAutoLanguage,
+              job.descriptor,
+            );
+            if (this.#pairEpoch !== pairEpoch) return;
+            // A cached resolution that originally required distinct images is
+            // only one current-document vote. Do not rerun OCR for that same
+            // image merely to count the identical source twice.
+            if (!sourceLanguage) {
+              unsupportedLanguage = true;
+              continue;
+            }
+          }
+        }
         if (!sourceLanguage) {
           const probed = await this.#probeImageLanguage(
             pixels,
@@ -1321,10 +1958,44 @@ export class ImageTranslationController {
           stagedOcrLanguageObservation = probed?.pendingObservation;
           if (this.#pairEpoch !== pairEpoch) return;
           if (!sourceLanguage) {
-            unsupportedLanguage = true;
-            continue;
+            sourceLanguage = revalidateAutoLanguage
+              ? this.#effectiveDetectedSourceLanguage()
+              : undefined;
+            if (!sourceLanguage) {
+              unsupportedLanguage = true;
+              continue;
+            }
           }
         }
+      }
+      if (
+        !originFinalChecked &&
+        !stagedOcrLanguageObservation
+      ) {
+        originFinalChecked = true;
+        const finalConfigurationKey = this.#finalAnalysisConfigurationKey(
+          steps,
+          eagerSemanticCandidate,
+        );
+        const retainedFinal = this.#readOriginFinalAnalysis(
+          pixels,
+          sourceLanguage,
+          finalConfigurationKey,
+        );
+        if (retainedFinal && this.#commitOriginFinalAnalysis(
+          retainedFinal,
+          pixels,
+          sourceLanguage,
+          finalConfigurationKey,
+          job,
+          scheduler,
+          processingVersion,
+          jobOrdinal,
+          replayLease,
+          pairEpoch,
+          pairKey,
+          signal,
+        )) return;
       }
       const languageGroup = tesseractLanguageGroupFor(sourceLanguage);
       if (
@@ -1355,15 +2026,22 @@ export class ImageTranslationController {
             }
           : {}),
       };
-      this.environment.onDiagnostic?.('recognition-started');
-      this.#reportJobProgress(
-        jobOrdinal,
-        'recognition-started',
-        job.descriptor,
+      const retainedRecognition = this.#readOriginOcrEvidence(
         pixels,
+        sourceLanguage,
+        step.providerOrder,
       );
-      const recognizer = this.#recognizer();
-      let recognition = await recognizer.recognize(
+      const recognizer = retainedRecognition ? undefined : this.#recognizer();
+      if (!retainedRecognition) {
+        this.environment.onDiagnostic?.('recognition-started');
+        this.#reportJobProgress(
+          jobOrdinal,
+          'recognition-started',
+          job.descriptor,
+          pixels,
+        );
+      }
+      let recognition = retainedRecognition?.recognition ?? await recognizer!.recognize(
         pixels,
         route,
         signal,
@@ -1376,6 +2054,14 @@ export class ImageTranslationController {
           );
         }
         if (recognition.status !== 'complete') {
+          if (recognition.code === 'provider-unavailable') {
+            this.#rememberOcrRouteOutcome(
+              job.descriptor,
+              step.providerOrder,
+              sourceLanguage,
+              'provider-unavailable',
+            );
+          }
           this.environment.onDiagnostic?.(Object.freeze({
             stage: 'recognition-failed' as const,
             code: recognition.code,
@@ -1400,9 +2086,17 @@ export class ImageTranslationController {
           bitmapHeight: pixels.bitmapHeight,
         }));
         if (recognition.result.regions.length === 0) {
+          if (!recognition.continuation) {
+            this.#rememberOcrRouteOutcome(
+              job.descriptor,
+              step.providerOrder,
+              sourceLanguage,
+              'empty',
+            );
+          }
           sawEmptyRecognition = true;
           if (!recognition.continuation) break;
-          recognition = await recognizer.continueRecognition(
+          recognition = await recognizer!.continueRecognition(
             pixels,
             recognition.continuation,
             signal,
@@ -1423,7 +2117,7 @@ export class ImageTranslationController {
         }
         if (stagedOcrLanguageObservation && !selectedOcrLanguageObservation) {
           if (!recognition.continuation) break;
-          recognition = await recognizer.continueRecognition(
+          recognition = await recognizer!.continueRecognition(
             pixels,
             recognition.continuation,
             signal,
@@ -1437,13 +2131,25 @@ export class ImageTranslationController {
           pixels,
           sourceLanguage,
           methodIndex,
+          providerOrder: step.providerOrder,
+          finalConfigurationKey: this.#finalAnalysisConfigurationKey(
+            steps,
+            eagerSemanticCandidate,
+          ),
           ...(selectedOcrLanguageObservation
             ? {
                 pendingAutoLanguageObservation:
                   selectedOcrLanguageObservation.pendingObservation,
               }
             : {}),
+          ...(retainedRecognition?.fallbackProviderOrder.length
+            ? {
+                fallbackProviderOrder:
+                  retainedRecognition.fallbackProviderOrder,
+              }
+            : {}),
         });
+        this.#rememberOcrCandidate(job.descriptor, ocrCandidate);
         stagedOcrLanguageObservation = undefined;
         if (heldSemantic) {
           const semantic = heldSemantic;
@@ -1473,13 +2179,20 @@ export class ImageTranslationController {
                 signal,
               );
             } catch (error) {
-              this.#rollbackPendingOcrLanguageObservation(
-                ocrCandidate.pendingAutoLanguageObservation,
-              );
-              clearProvisionalSourceLanguage(
-                ocrCandidate.pendingAutoLanguageObservation,
-              );
-              throw error;
+              if (
+                isAbortError(error) ||
+                signal.aborted ||
+                isImageSourceUnavailableError(error)
+              ) {
+                this.#rollbackPendingOcrLanguageObservation(
+                  ocrCandidate.pendingAutoLanguageObservation,
+                );
+                clearProvisionalSourceLanguage(
+                  ocrCandidate.pendingAutoLanguageObservation,
+                );
+                throw error;
+              }
+              this.environment.onDiagnostic?.('accessibility-text-blocked');
             }
             if (committed) {
               this.#discardPendingOcrLanguageObservation(
@@ -1504,9 +2217,9 @@ export class ImageTranslationController {
               pairKey,
               signal,
             )) return;
-            if (ocrCandidate.recognition.continuation) {
+            if (this.#hasOcrAlternatives(ocrCandidate)) {
               this.#reportEvidenceSelection('ocr', 'ocr-fallback');
-              if (await this.#commitOcrContinuations(
+              if (await this.#commitOcrAlternatives(
                 ocrCandidate,
                 job,
                 scheduler,
@@ -1696,6 +2409,7 @@ export class ImageTranslationController {
         if (this.#commitPendingOcrLanguageObservation(
           pendingObservation,
           job.descriptor,
+          candidate,
         )) {
           pendingObservation = undefined;
           return true;
@@ -1745,6 +2459,7 @@ export class ImageTranslationController {
         if (this.#commitPendingOcrLanguageObservation(
           pendingObservation,
           job.descriptor,
+          candidate,
         )) {
           pendingObservation = undefined;
           return true;
@@ -1774,9 +2489,11 @@ export class ImageTranslationController {
         };
         this.#projectedHashes.set(job.descriptor.nodeId, pixels.pixelHash);
         this.#projectedOrdinals.set(job.descriptor.nodeId, jobOrdinal);
+        this.#retainedProjections.set(job.descriptor.nodeId, projection);
         if (!this.#projector.project(projection)) {
           this.#projectedHashes.delete(job.descriptor.nodeId);
           this.#projectedOrdinals.delete(job.descriptor.nodeId);
+          this.#retainedProjections.delete(job.descriptor.nodeId);
           scheduler.defer(job);
           this.environment.onDiagnostic?.('projection-deferred');
           this.#reportJobProgress(
@@ -1787,6 +2504,26 @@ export class ImageTranslationController {
           );
           return true;
         }
+        const finalConfigurationKey = candidate.finalConfigurationKey ??
+          this.#finalAnalysisConfigurationKey(
+            imageReadingExecutionPlan(
+              this.#configuration.methodOrder ??
+                this.#configuration.providerOrder,
+              this.#configuration.disabledMethodIds ?? [],
+              this.#configuration.providerOrder,
+            ),
+          );
+        this.#rememberFinalAnalysis(
+          job.descriptor,
+          projection,
+          finalConfigurationKey,
+        );
+        this.#rememberOriginFinalAnalysis({
+          pixels: candidate.pixels,
+          sourceLanguage: candidate.sourceLanguage,
+          methodId: candidate.recognition.result.providerId,
+          finalConfigurationKey,
+        }, regions);
         scheduler.settle(job);
         this.environment.onDiagnostic?.('projected');
         this.#reportJobProgress(
@@ -1807,8 +2544,10 @@ export class ImageTranslationController {
       }
       this.#discardPendingOcrLanguageObservation(pendingObservation);
       pendingObservation = undefined;
-      if (!recognition.continuation || !allowContinuation) return false;
-      return await this.#commitOcrContinuations(
+      if (!allowContinuation || !this.#hasOcrAlternatives(candidate)) {
+        return false;
+      }
+      return await this.#commitOcrAlternatives(
         candidate,
         job,
         scheduler,
@@ -1826,6 +2565,125 @@ export class ImageTranslationController {
     } finally {
       this.#discardPendingOcrLanguageObservation(pendingObservation);
     }
+  }
+
+  #hasOcrAlternatives(candidate: PendingOcrImageEvidence): boolean {
+    return Boolean(
+      candidate.recognition.continuation ||
+      candidate.fallbackProviderOrder?.length,
+    );
+  }
+
+  async #commitOcrAlternatives(
+    candidate: PendingOcrImageEvidence,
+    job: ImageScanJob,
+    scheduler: ImageScanScheduler,
+    processingVersion: number,
+    jobOrdinal: number,
+    replayLease: number,
+    pairEpoch: number,
+    pairKey: string,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    if (candidate.recognition.continuation) {
+      return this.#commitOcrContinuations(
+        candidate,
+        job,
+        scheduler,
+        processingVersion,
+        jobOrdinal,
+        replayLease,
+        pairEpoch,
+        pairKey,
+        signal,
+      );
+    }
+    const providerOrder = candidate.fallbackProviderOrder;
+    if (!providerOrder?.length) return false;
+    signal.throwIfAborted();
+    if (!this.#isJobCurrent(job, processingVersion, pairEpoch, pairKey)) {
+      throw new DOMException('OCR fallback became stale.', 'AbortError');
+    }
+    this.environment.onDiagnostic?.('recognition-started');
+    this.#reportJobProgress(
+      jobOrdinal,
+      'recognition-started',
+      job.descriptor,
+      candidate.pixels,
+    );
+    const languageGroup = tesseractLanguageGroupFor(candidate.sourceLanguage);
+    const recognition = await this.#recognizer().recognize(
+      candidate.pixels,
+      {
+        providerOrder,
+        sourceLanguage: candidate.sourceLanguage,
+        minimumConfidence: repairOcrMinimumConfidence(
+          this.#configuration.ocrMinimumConfidence,
+        ),
+        ...(languageGroup
+          ? { languageGroup, modelVersion: TESSERACT_MODEL_VERSION }
+          : {}),
+      },
+      signal,
+    );
+    signal.throwIfAborted();
+    if (!this.#isJobCurrent(job, processingVersion, pairEpoch, pairKey)) {
+      throw new DOMException('OCR fallback became stale.', 'AbortError');
+    }
+    if (recognition.cacheAccess && recognition.cacheStats) {
+      this.#reportRecognitionCache(
+        recognition.cacheAccess,
+        recognition.cacheStats,
+      );
+    }
+    if (recognition.status !== 'complete') {
+      this.environment.onDiagnostic?.(Object.freeze({
+        stage: 'recognition-failed' as const,
+        code: recognition.code,
+        ordinal: jobOrdinal,
+        renderedWidth: job.descriptor.renderedWidth,
+        renderedHeight: job.descriptor.renderedHeight,
+        bitmapWidth: candidate.pixels.bitmapWidth,
+        bitmapHeight: candidate.pixels.bitmapHeight,
+      }));
+      return false;
+    }
+    if (recognition.quality) {
+      this.#reportRecognitionQuality(recognition.quality);
+    }
+    this.environment.onDiagnostic?.(Object.freeze({
+      stage: 'recognition-complete' as const,
+      provider: recognition.result.providerId,
+      regions: recognition.result.regions.length,
+      cacheHit: recognition.cacheHit,
+      ordinal: jobOrdinal,
+      bitmapWidth: candidate.pixels.bitmapWidth,
+      bitmapHeight: candidate.pixels.bitmapHeight,
+    }));
+    const fallbackCandidate: PendingOcrImageEvidence = Object.freeze({
+      recognition,
+      pixels: candidate.pixels,
+      sourceLanguage: candidate.sourceLanguage,
+      methodIndex: candidate.methodIndex,
+      providerOrder: candidate.providerOrder,
+      ...(candidate.finalConfigurationKey
+        ? { finalConfigurationKey: candidate.finalConfigurationKey }
+        : {}),
+    });
+    if (recognition.result.regions.length > 0) {
+      this.#rememberOcrCandidate(job.descriptor, fallbackCandidate);
+    }
+    return this.#commitOcrCandidate(
+      fallbackCandidate,
+      job,
+      scheduler,
+      processingVersion,
+      jobOrdinal,
+      replayLease,
+      pairEpoch,
+      pairKey,
+      signal,
+    );
   }
 
   async #commitOcrContinuations(
@@ -1894,7 +2752,17 @@ export class ImageTranslationController {
           bitmapHeight: candidate.pixels.bitmapHeight,
         }));
         continuation = recognition.continuation;
-        if (recognition.result.regions.length === 0) continue;
+        if (recognition.result.regions.length === 0) {
+          if (!recognition.continuation) {
+            this.#rememberOcrRouteOutcome(
+              job.descriptor,
+              candidate.providerOrder,
+              candidate.sourceLanguage,
+              'empty',
+            );
+          }
+          continue;
+        }
 
         let selectedSourceLanguage = candidate.sourceLanguage;
         let selectedPendingObservation:
@@ -1941,12 +2809,15 @@ export class ImageTranslationController {
           selectedAutoLanguageVoteEligible = canVote;
           activePendingObservation = undefined;
         }
-        return await this.#commitOcrCandidate(
-          Object.freeze({
+        const continuationCandidate: PendingOcrImageEvidence = Object.freeze({
             recognition,
             pixels: candidate.pixels,
             sourceLanguage: selectedSourceLanguage,
             methodIndex: candidate.methodIndex,
+            providerOrder: candidate.providerOrder,
+            ...(candidate.finalConfigurationKey
+              ? { finalConfigurationKey: candidate.finalConfigurationKey }
+              : {}),
             ...(selectedPendingObservation
               ? {
                   pendingAutoLanguageObservation:
@@ -1955,7 +2826,10 @@ export class ImageTranslationController {
                     selectedAutoLanguageVoteEligible ?? false,
                 }
               : {}),
-          }),
+          });
+        this.#rememberOcrCandidate(job.descriptor, continuationCandidate);
+        return await this.#commitOcrCandidate(
+          continuationCandidate,
           job,
           scheduler,
           processingVersion,
@@ -2018,6 +2892,7 @@ export class ImageTranslationController {
   #commitPendingOcrLanguageObservation(
     pending: PendingAutoLanguageOcrObservation | undefined,
     descriptor: SourceImageDescriptor,
+    candidate?: PendingOcrImageEvidence,
   ): boolean {
     if (!pending) return false;
     if (
@@ -2029,13 +2904,17 @@ export class ImageTranslationController {
       return false;
     }
     const observed = pending.probe.observe(pending.observation);
-    return observed.status === 'resolved'
-      ? Boolean(this.#acceptAutoLanguageResolution(
-          observed,
-          descriptor.document,
-          'ocr',
-        ))
-      : false;
+    if (observed.status !== 'resolved') return false;
+    const pairEpoch = this.#pairEpoch;
+    this.#acceptAutoLanguageResolution(
+      observed,
+      descriptor.document,
+      'ocr',
+    );
+    if (candidate) {
+      this.#markOriginOcrAutoLanguageResolution(candidate, observed);
+    }
+    return this.#pairEpoch !== pairEpoch;
   }
 
   #discardPendingOcrLanguageObservation(
@@ -2091,7 +2970,11 @@ export class ImageTranslationController {
     signal: AbortSignal,
   ): Promise<PendingSemanticImageEvidence | undefined> {
     const read = this.#source?.readAccessibilityText;
-    if (!read || !accessibilityMethodEnabled(this.#configuration)) return undefined;
+    if (!accessibilityMethodEnabled(this.#configuration)) return undefined;
+    if (!read) {
+      this.#rememberSemanticAbsence(job.descriptor);
+      return undefined;
+    }
     this.environment.onDiagnostic?.('accessibility-text-started');
     const evidence = await read.call(
       this.#source,
@@ -2105,6 +2988,7 @@ export class ImageTranslationController {
       throw new DOMException('Accessibility evidence became stale.', 'AbortError');
     }
     if (!evidence) {
+      this.#rememberSemanticAbsence(job.descriptor);
       this.environment.onDiagnostic?.('accessibility-text-empty');
       return undefined;
     }
@@ -2113,7 +2997,33 @@ export class ImageTranslationController {
       evidence.contentRevision !== job.descriptor.contentRevision ||
       evidence.observationRevision !== job.descriptor.observationRevision ||
       !sameSourceDocument(evidence.document, job.descriptor.document)
-    ) throw new DOMException('Accessibility evidence became stale.', 'AbortError');
+    ) throw new Error('Accessibility evidence did not match the requested image.');
+    const sourceLanguage = await this.#resolveAccessibilitySourceLanguage(
+      evidence.text,
+      evidence.nearestElementLanguage,
+      signal,
+    );
+    signal.throwIfAborted();
+    if (!this.#isJobCurrent(job, processingVersion, pairEpoch, pairKey)) {
+      throw new DOMException('Accessibility evidence became stale.', 'AbortError');
+    }
+    if (!sourceLanguage) {
+      this.#rememberSemanticAbsence(job.descriptor);
+      this.environment.onDiagnostic?.('accessibility-text-empty');
+      return undefined;
+    }
+    const identity = await sha256Hex([
+      'semantic-evidence-v1',
+      evidence.source,
+      evidence.text,
+      sourceLanguage,
+    ].join('\u0000'));
+    signal.throwIfAborted();
+    if (!this.#isJobCurrent(job, processingVersion, pairEpoch, pairKey)) {
+      throw new DOMException('Accessibility evidence became stale.', 'AbortError');
+    }
+    // Only language-resolved evidence participates in repetition ranking.
+    // Otherwise an attempted-but-unusable label could downgrade a valid peer.
     const registration = this.#semanticEvidenceIndex.register(
       job.descriptor.nodeId,
       job.descriptor.contentRevision,
@@ -2126,37 +3036,22 @@ export class ImageTranslationController {
       if (!affected) continue;
       invalidatedAutoResolution = this.#forgetAutoLanguageProbeSample(nodeId) ||
         invalidatedAutoResolution;
-      this.#clearProjection(affected);
-      scheduler.requeueCurrent(affected);
+      if (!this.#requeueRetainedEvidence(affected, scheduler)) {
+        this.#clearProjection(affected);
+        scheduler.requeueCurrent(affected);
+      }
     }
-    for (const cancellation of scheduler.drainCancellations()) {
-      if (
-        cancellation.job.descriptor.nodeId ===
-        this.#activeJob()?.descriptor.nodeId
-      ) this.#activeAbortController?.abort();
-    }
+    this.#abortCancelledActiveJob(scheduler);
     if (invalidatedAutoResolution) {
-      this.#restartAfterAutoLanguageEvidenceInvalidation();
+      this.#reopenAutoLanguageAfterSampleInvalidation();
       throw new DOMException(
         'Accessibility evidence changed Auto language.',
         'AbortError',
       );
     }
-    const sourceLanguage = await this.#resolveAccessibilitySourceLanguage(
-      evidence.text,
-      evidence.nearestElementLanguage,
-      signal,
-    );
-    signal.throwIfAborted();
-    if (!this.#isJobCurrent(job, processingVersion, pairEpoch, pairKey)) {
-      throw new DOMException('Accessibility evidence became stale.', 'AbortError');
-    }
-    if (!sourceLanguage) {
-      this.environment.onDiagnostic?.('accessibility-text-empty');
-      return undefined;
-    }
-    return Object.freeze({
+    const candidate = Object.freeze({
       evidence,
+      identity,
       sourceLanguage,
       rankable: Object.freeze({
         kind: 'semantic' as const,
@@ -2166,6 +3061,8 @@ export class ImageTranslationController {
         repeated: registration.repeated,
       }),
     });
+    this.#rememberSemanticCandidate(job.descriptor, candidate);
+    return candidate;
   }
 
   async #commitAccessibilityCandidate(
@@ -2178,6 +3075,7 @@ export class ImageTranslationController {
     pairEpoch: number,
     pairKey: string,
     signal: AbortSignal,
+    provisional = false,
   ): Promise<boolean> {
     const { evidence, sourceLanguage } = candidate;
     if (sourceLanguage === this.#configuration.targetLanguage) {
@@ -2188,14 +3086,16 @@ export class ImageTranslationController {
           'AbortError',
         );
       }
-      if (this.#observeSemanticImageLanguage(
+      if (!provisional && this.#observeSemanticImageLanguage(
         evidence.text,
         sourceLanguage,
         job.descriptor,
       )) return true;
-      this.#clearProjection(job.descriptor);
-      scheduler.settle(job);
-      this.environment.onDiagnostic?.('same-language');
+      if (!provisional) {
+        this.#clearProjection(job.descriptor);
+        scheduler.settle(job);
+        this.environment.onDiagnostic?.('same-language');
+      }
       return true;
     }
     const width = Math.max(1, job.descriptor.renderedWidth);
@@ -2224,17 +3124,8 @@ export class ImageTranslationController {
       this.environment.onDiagnostic?.('translation-empty');
       return false;
     }
-    const evidenceIdentity = await sha256Hex([
-      'accessibility-text',
-      evidence.source,
-      evidence.text,
-      String(evidence.contentRevision),
-    ].join('\u0000'));
-    signal.throwIfAborted();
-    if (!this.#isJobCurrent(job, processingVersion, pairEpoch, pairKey)) {
-      throw new DOMException('Accessibility selection became stale.', 'AbortError');
-    }
-    if (this.#observeSemanticImageLanguage(
+    const evidenceIdentity = candidate.identity;
+    if (!provisional && this.#observeSemanticImageLanguage(
       evidence.text,
       sourceLanguage,
       job.descriptor,
@@ -2263,13 +3154,32 @@ export class ImageTranslationController {
     };
     this.#projectedHashes.set(job.descriptor.nodeId, evidenceIdentity);
     this.#projectedOrdinals.set(job.descriptor.nodeId, jobOrdinal);
+    this.#retainedProjections.set(job.descriptor.nodeId, projection);
     if (!this.#projector.project(projection)) {
       this.#projectedHashes.delete(job.descriptor.nodeId);
       this.#projectedOrdinals.delete(job.descriptor.nodeId);
-      scheduler.defer(job);
+      this.#retainedProjections.delete(job.descriptor.nodeId);
+      if (!provisional) scheduler.defer(job);
       this.environment.onDiagnostic?.('projection-deferred');
+      return !provisional;
+    }
+    if (provisional) {
+      this.environment.onDiagnostic?.('accessibility-text-provisional');
+      this.environment.onDiagnostic?.('projected');
       return true;
     }
+    this.#rememberFinalAnalysis(
+      job.descriptor,
+      projection,
+      this.#finalAnalysisConfigurationKey(
+        imageReadingExecutionPlan(
+          this.#configuration.methodOrder ?? this.#configuration.providerOrder,
+          this.#configuration.disabledMethodIds ?? [],
+          this.#configuration.providerOrder,
+        ),
+        candidate,
+      ),
+    );
     scheduler.settle(job);
     this.environment.onDiagnostic?.('accessibility-text-complete');
     this.environment.onDiagnostic?.('projected');
@@ -2333,6 +3243,1157 @@ export class ImageTranslationController {
     } finally {
       session?.destroy();
     }
+  }
+
+  #rememberSemanticCandidate(
+    descriptor: SourceImageDescriptor,
+    semantic: PendingSemanticImageEvidence,
+  ): void {
+    const current = this.#retainedEvidenceRecord(descriptor);
+    this.#rememberEvidence(descriptor, {
+      captureRevision: current?.captureRevision ?? descriptorCaptureRevision(descriptor),
+      semanticAttempted: true,
+      semantic,
+      ocr: current?.ocr ?? new Map(),
+      ocrRouteOutcomes: current?.ocrRouteOutcomes ?? Object.freeze([]),
+    });
+  }
+
+  #rememberSemanticAbsence(descriptor: SourceImageDescriptor): void {
+    const current = this.#retainedEvidenceRecord(descriptor);
+    this.#rememberEvidence(descriptor, {
+      captureRevision: current?.captureRevision ?? descriptorCaptureRevision(descriptor),
+      semanticAttempted: true,
+      ocr: current?.ocr ?? new Map(),
+      ocrRouteOutcomes: current?.ocrRouteOutcomes ?? Object.freeze([]),
+    });
+  }
+
+  #hasCurrentSemanticProjection(descriptor: SourceImageDescriptor): boolean {
+    const projection = this.#retainedProjections.get(descriptor.nodeId);
+    return Boolean(
+      projection &&
+      projection.evidenceKind === 'semantic' &&
+      projection.methodId === ACCESSIBILITY_TEXT_METHOD_ID &&
+      sameSourceDocument(projection.document, descriptor.document) &&
+      projection.contentRevision === descriptor.contentRevision &&
+      projection.observationRevision === descriptor.observationRevision &&
+      this.#isProjectionCurrent(projection),
+    );
+  }
+
+  #hasCurrentProjection(descriptor: SourceImageDescriptor): boolean {
+    const projection = this.#retainedProjections.get(descriptor.nodeId);
+    return Boolean(
+      projection &&
+      sameSourceDocument(projection.document, descriptor.document) &&
+      projection.contentRevision === descriptor.contentRevision &&
+      projection.observationRevision === descriptor.observationRevision &&
+      this.#isProjectionCurrent(projection),
+    );
+  }
+
+  #rememberOcrCandidate(
+    descriptor: SourceImageDescriptor,
+    candidate: PendingOcrImageEvidence,
+  ): void {
+    const providerId = candidate.recognition.result.providerId;
+    const context = retainedOcrProviderContext(
+      candidate.providerOrder,
+      providerId,
+      candidate.recognition,
+    );
+    if (!context) return;
+    const current = this.#retainedEvidenceRecord(descriptor);
+    const ocr = new Map(current?.ocr ?? []);
+    const { continuation: _continuation, ...recognition } =
+      candidate.recognition;
+    ocr.set(providerId, Object.freeze({
+      recognition: Object.freeze(recognition) as CompleteImageRecognition,
+      pixels: retainedPixelFacts(candidate.pixels),
+      sourceLanguage: candidate.sourceLanguage,
+      ...context,
+    }));
+    this.#rememberEvidence(descriptor, {
+      captureRevision: descriptorCaptureRevision(descriptor),
+      semanticAttempted: current?.semanticAttempted ?? false,
+      ...(current?.semantic ? { semantic: current.semantic } : {}),
+      ocr,
+      ocrRouteOutcomes: current?.ocrRouteOutcomes ?? Object.freeze([]),
+    });
+    this.#rememberOriginOcrEvidence(candidate);
+  }
+
+  #rememberOcrRouteOutcome(
+    descriptor: SourceImageDescriptor,
+    providerOrder: readonly ImageTextProviderId[],
+    sourceLanguage: SupportedLanguage,
+    status: RetainedOcrRouteOutcome['status'],
+  ): void {
+    const current = this.#retainedEvidenceRecord(descriptor);
+    if (providerOrder.length === 0) return;
+    const routeKey = `${sourceLanguage}\u0001${providerOrder.join('\u0000')}`;
+    const ocrRouteOutcomes = [
+      ...(current?.ocrRouteOutcomes ?? []).filter((outcome) =>
+        `${outcome.sourceLanguage}\u0001${
+          outcome.providerOrder.join('\u0000')
+        }` !== routeKey
+      ),
+      Object.freeze({
+        providerOrder: Object.freeze([...providerOrder]),
+        sourceLanguage,
+        status,
+      }),
+    ].slice(-16);
+    this.#rememberEvidence(descriptor, {
+      captureRevision: current?.captureRevision ?? descriptorCaptureRevision(descriptor),
+      semanticAttempted: current?.semanticAttempted ?? false,
+      ...(current?.semantic ? { semantic: current.semantic } : {}),
+      ocr: current?.ocr ?? new Map(),
+      ocrRouteOutcomes: Object.freeze(ocrRouteOutcomes),
+    });
+  }
+
+  #rememberOriginOcrEvidence(
+    candidate: PendingOcrImageEvidence,
+    autoLanguageResolution?: Extract<AutoLanguageProbeObservationResult, {
+      readonly status: 'resolved';
+    }>,
+    recognitionMinimumConfidence = repairOcrMinimumConfidence(
+      this.#configuration.ocrMinimumConfidence,
+    ),
+  ): void {
+    const providerId = candidate.recognition.result.providerId;
+    const context = retainedOcrProviderContext(
+      candidate.providerOrder,
+      providerId,
+      candidate.recognition,
+    );
+    if (!context) return;
+    const key = originOcrEvidenceKey(
+      candidate.pixels,
+      candidate.sourceLanguage,
+      providerId,
+      recognitionMinimumConfidence,
+    );
+    const qualityPolicyIdentity = originOcrQualityPolicyIdentity(
+      recognitionMinimumConfidence,
+    );
+    const recognition = reusableCompleteRecognition(candidate.recognition);
+    const existing = this.#originOcrEvidence.get(key);
+    const pixelIdentity = originOcrPixelIdentity(candidate.pixels);
+    const committedAutoLanguage = autoLanguageResolution &&
+        autoLanguageResolution.language === candidate.sourceLanguage
+      ? committedAutoLanguageResolution(
+          autoLanguageResolution,
+          context,
+          originOcrQualityPolicyIdentity(
+            repairOcrMinimumConfidence(
+              this.#configuration.ocrMinimumConfidence,
+            ),
+          ),
+        )
+      : existing?.pixelIdentity === pixelIdentity
+        ? existing.autoLanguageResolution
+        : undefined;
+    const weight = originOcrEvidenceWeight(
+      key,
+      recognition.result,
+      context.precedingProviders,
+      committedAutoLanguage,
+      qualityPolicyIdentity,
+    );
+    if (weight > MAX_ORIGIN_OCR_EVIDENCE_WEIGHT) return;
+    this.#deleteOriginOcrEvidence(key);
+    this.#originOcrEvidence.set(key, Object.freeze({
+      providerId,
+      recognition,
+      sourceLanguage: candidate.sourceLanguage,
+      pixelIdentity,
+      qualityPolicyIdentity,
+      ...context,
+      ...(committedAutoLanguage
+        ? { autoLanguageResolution: committedAutoLanguage }
+        : {}),
+      expiresAt: this.#now() + IMAGE_RESULT_CACHE_TTL_MS,
+      weight,
+    }));
+    this.#originOcrEvidenceWeight += weight;
+    this.#boundOriginOcrEvidence();
+  }
+
+  #readOriginOcrEvidence(
+    pixels: AcquiredImagePixels,
+    sourceLanguage: SupportedLanguage,
+    providers: readonly ImageTextProviderId[],
+  ): OriginOcrEvidenceReuse | undefined {
+    this.#expireOriginOcrEvidence();
+    const preceding = new Set<ImageTextProviderId>();
+    const enabledProviders = new Set(providers);
+    for (const [providerIndex, providerId] of providers.entries()) {
+      const key = originOcrEvidenceKey(
+        pixels,
+        sourceLanguage,
+        providerId,
+        repairOcrMinimumConfidence(this.#configuration.ocrMinimumConfidence),
+      );
+      const retained = this.#originOcrEvidence.get(key);
+      if (
+        retained &&
+        providerContextAllowsReuse(retained, preceding, enabledProviders)
+      ) {
+        this.#originOcrEvidence.delete(key);
+        this.#originOcrEvidence.set(key, retained);
+        this.#originEvidenceHits += 1;
+        this.#originEvidenceRevalidations += 1;
+        this.#reportOriginEvidenceCache('hit');
+        return Object.freeze({
+          recognition: retained.recognition,
+          fallbackProviderOrder: Object.freeze(
+            providers.slice(providerIndex + 1),
+          ),
+        });
+      }
+      if (retained) break;
+      preceding.add(providerId);
+    }
+    this.#originEvidenceMisses += 1;
+    this.#reportOriginEvidenceCache('miss');
+    return undefined;
+  }
+
+  #readOriginAutoLanguageEvidence(
+    pixels: AcquiredImagePixels,
+    providers: readonly ImageTextProviderId[],
+  ): RetainedAutoLanguageEvidence | undefined {
+    this.#expireOriginOcrEvidence();
+    const pixelIdentity = originOcrPixelIdentity(pixels);
+    const recognitionQualityPolicyIdentity = originOcrQualityPolicyIdentity(
+      repairOcrMinimumConfidence(this.#configuration.ocrMinimumConfidence),
+    );
+    const autoLanguageConfigurationIdentity = originOcrQualityPolicyIdentity(
+      repairOcrMinimumConfidence(
+        this.#configuration.ocrMinimumConfidence,
+      ),
+    );
+    const preceding = new Set<ImageTextProviderId>();
+    const enabledProviders = new Set(providers);
+    for (const providerId of providers) {
+      const match = [...this.#originOcrEvidence.entries()].reverse().find(
+        ([, retained]) => retained.providerId === providerId &&
+          retained.pixelIdentity === pixelIdentity &&
+          retained.autoLanguageResolution?.autoLanguageConfigurationIdentity ===
+            autoLanguageConfigurationIdentity,
+      );
+      if (!match) {
+        preceding.add(providerId);
+        continue;
+      }
+      const [key, retained] = match;
+      const resolution = retained.autoLanguageResolution!;
+      if (!providerContextAllowsReuse(
+        resolution,
+        preceding,
+        enabledProviders,
+      )) break;
+      this.#originOcrEvidence.delete(key);
+      this.#originOcrEvidence.set(key, retained);
+      this.#originEvidenceHits += 1;
+      this.#originEvidenceRevalidations += 1;
+      this.#reportOriginEvidenceCache('hit');
+      return Object.freeze({
+        resolution: Object.freeze({
+          status: 'resolved' as const,
+          language: resolution.language,
+          evidence: resolution.evidence,
+          attempts: resolution.attempts,
+          images: resolution.images,
+        }),
+        ...(retained.qualityPolicyIdentity === recognitionQualityPolicyIdentity
+          ? { recognition: retained.recognition }
+          : {}),
+      });
+    }
+    this.#originEvidenceMisses += 1;
+    this.#reportOriginEvidenceCache('miss');
+    return undefined;
+  }
+
+  #restoreOriginAutoLanguageEvidence(
+    retained: RetainedAutoLanguageEvidence,
+    descriptor: SourceImageDescriptor,
+  ): SupportedLanguage | undefined {
+    if (
+      this.#configuration.sourceLanguage !== 'auto' ||
+      this.#configuration.detectedSourceLanguage ||
+      (this.#probeDetectedSourceLanguage &&
+        !this.#autoLanguageRevalidationPending) ||
+      this.#probeInconclusiveReported ||
+      this.#configuration.pageLanguageResolutionPending
+    ) return undefined;
+    let probe = this.#autoLanguageProbe;
+    if (!probe) {
+      probe = new AutoImageLanguageProbe(
+        this.#now(),
+        autoLanguageProbeMinimumConfidence(
+          this.#configuration.ocrMinimumConfidence,
+        ),
+      );
+      this.#autoLanguageProbe = probe;
+    }
+    const sampleIdentity = this.#probeSampleIdentity(descriptor);
+    const restored = retained.resolution.evidence === 'single-strong-script'
+      ? probe.restoreSingleStrongVote(
+          sampleIdentity,
+          retained.resolution.language,
+          this.#now(),
+        )
+      : probe.restoreDistinctImageVote(
+          sampleIdentity,
+          retained.resolution.language,
+          this.#now(),
+        );
+    if (restored.status === 'resolved') {
+      return this.#acceptAutoLanguageResolution(
+        restored,
+        descriptor.document,
+        'ocr',
+      );
+    }
+    // Weak cached evidence has reopened a live quorum. Start the ordinary
+    // bounded deadline only when a second current image is still required.
+    this.#ensureAutoLanguageProbe();
+    return undefined;
+  }
+
+  #markOriginOcrAutoLanguageResolution(
+    candidate: PendingOcrImageEvidence,
+    observed: Extract<AutoLanguageProbeObservationResult, {
+      readonly status: 'resolved';
+    }>,
+  ): void {
+    if (
+      observed.language !== candidate.sourceLanguage ||
+      candidate.pendingAutoLanguageObservation?.observation.pixelHash !==
+        candidate.pixels.pixelHash
+    ) return;
+    this.#rememberOriginOcrEvidence(candidate, observed);
+  }
+
+  #deleteOriginOcrEvidence(key: string): boolean {
+    const retained = this.#originOcrEvidence.get(key);
+    if (!retained) return false;
+    this.#originOcrEvidence.delete(key);
+    this.#originOcrEvidenceWeight -= retained.weight;
+    return true;
+  }
+
+  #expireOriginOcrEvidence(): void {
+    const now = this.#now();
+    for (const [key, retained] of this.#originOcrEvidence) {
+      if (retained.expiresAt > now) continue;
+      if (this.#deleteOriginOcrEvidence(key)) {
+        this.#originEvidenceExpirations += 1;
+      }
+    }
+  }
+
+  #boundOriginOcrEvidence(): void {
+    while (
+      this.#originOcrEvidence.size > MAX_RETAINED_IMAGE_EVIDENCE ||
+      this.#originOcrEvidenceWeight > MAX_ORIGIN_OCR_EVIDENCE_WEIGHT
+    ) {
+      const oldest = this.#originOcrEvidence.keys().next().value as
+        | string
+        | undefined;
+      if (oldest === undefined) return;
+      this.#deleteOriginOcrEvidence(oldest);
+    }
+  }
+
+  #purgeOriginOcrEvidence(): void {
+    this.#originOcrEvidence.clear();
+    this.#originOcrEvidenceWeight = 0;
+    this.#originEvidenceHits = 0;
+    this.#originEvidenceMisses = 0;
+    this.#originEvidenceExpirations = 0;
+    this.#originEvidenceRevalidations = 0;
+    this.#originEvidencePurges += 1;
+    this.#reportOriginEvidenceCache('purge');
+  }
+
+  #reportOriginEvidenceCache(
+    access: 'hit' | 'miss' | 'purge',
+  ): void {
+    if (this.#disposed) return;
+    this.environment.onDiagnostic?.(Object.freeze({
+      stage: 'image-evidence-cache' as const,
+      access,
+      entries: this.#originOcrEvidence.size,
+      weight: this.#originOcrEvidenceWeight,
+      hits: this.#originEvidenceHits,
+      misses: this.#originEvidenceMisses,
+      expirations: this.#originEvidenceExpirations,
+      purges: this.#originEvidencePurges,
+      revalidations: this.#originEvidenceRevalidations,
+    }));
+  }
+
+  #rememberOriginFinalAnalysis(
+    input: Readonly<{
+      pixels: RetainedPixelFacts | AcquiredImagePixels;
+      sourceLanguage: SupportedLanguage;
+      methodId: ImageReadingMethodId;
+      finalConfigurationKey: string;
+    }>,
+    regions: readonly TranslatedImageRegion[],
+  ): void {
+    if (regions.length === 0) return;
+    const key = originFinalAnalysisKey(
+      input.pixels,
+      input.sourceLanguage,
+      input.finalConfigurationKey,
+    );
+    const weight = finalAnalysisWeight(key, regions);
+    if (weight > MAX_ORIGIN_OCR_EVIDENCE_WEIGHT) return;
+    this.#deleteOriginFinalAnalysis(key);
+    this.#originFinalAnalyses.set(key, Object.freeze({
+      methodId: input.methodId,
+      evidenceKind: input.methodId === ACCESSIBILITY_TEXT_METHOD_ID
+        ? 'semantic'
+        : 'ocr',
+      regions: freezeTranslatedRegions(regions),
+      expiresAt: this.#now() + IMAGE_RESULT_CACHE_TTL_MS,
+      weight,
+    }));
+    this.#originFinalAnalysisWeight += weight;
+    this.#boundOriginFinalAnalyses();
+  }
+
+  #readOriginFinalAnalysis(
+    pixels: AcquiredImagePixels,
+    sourceLanguage: SupportedLanguage,
+    finalConfigurationKey: string,
+  ): OriginFinalImageAnalysis | undefined {
+    this.#expireOriginFinalAnalyses();
+    const key = originFinalAnalysisKey(
+      pixels,
+      sourceLanguage,
+      finalConfigurationKey,
+    );
+    const retained = this.#originFinalAnalyses.get(key);
+    if (!retained) {
+      this.#originFinalMisses += 1;
+      this.#reportOriginFinalCache('miss');
+      return undefined;
+    }
+    this.#originFinalAnalyses.delete(key);
+    this.#originFinalAnalyses.set(key, retained);
+    this.#originFinalHits += 1;
+    this.#reportOriginFinalCache('hit');
+    return retained;
+  }
+
+  #deleteOriginFinalAnalysis(key: string): boolean {
+    const retained = this.#originFinalAnalyses.get(key);
+    if (!retained) return false;
+    this.#originFinalAnalyses.delete(key);
+    this.#originFinalAnalysisWeight -= retained.weight;
+    return true;
+  }
+
+  #expireOriginFinalAnalyses(): void {
+    const now = this.#now();
+    for (const [key, retained] of this.#originFinalAnalyses) {
+      if (retained.expiresAt > now) continue;
+      if (this.#deleteOriginFinalAnalysis(key)) {
+        this.#originFinalExpirations += 1;
+      }
+    }
+  }
+
+  #boundOriginFinalAnalyses(): void {
+    while (
+      this.#originFinalAnalyses.size > MAX_RETAINED_IMAGE_EVIDENCE ||
+      this.#originFinalAnalysisWeight > MAX_ORIGIN_OCR_EVIDENCE_WEIGHT
+    ) {
+      const oldest = this.#originFinalAnalyses.keys().next().value as
+        | string
+        | undefined;
+      if (oldest === undefined) return;
+      this.#deleteOriginFinalAnalysis(oldest);
+    }
+  }
+
+  #purgeOriginFinalAnalyses(): void {
+    this.#originFinalAnalyses.clear();
+    this.#originFinalAnalysisWeight = 0;
+    this.#originFinalHits = 0;
+    this.#originFinalMisses = 0;
+    this.#originFinalExpirations = 0;
+    this.#originFinalRebinds = 0;
+    this.#originFinalPurges += 1;
+    this.#reportOriginFinalCache('purge');
+  }
+
+  #reportOriginFinalCache(
+    access: 'hit' | 'miss' | 'purge' | 'rebind',
+  ): void {
+    if (this.#disposed) return;
+    this.environment.onDiagnostic?.(Object.freeze({
+      stage: 'image-final-cache' as const,
+      access,
+      entries: this.#originFinalAnalyses.size,
+      weight: this.#originFinalAnalysisWeight,
+      hits: this.#originFinalHits,
+      misses: this.#originFinalMisses,
+      expirations: this.#originFinalExpirations,
+      purges: this.#originFinalPurges,
+      rebinds: this.#originFinalRebinds,
+    }));
+  }
+
+  #rememberEvidence(
+    descriptor: SourceImageDescriptor,
+    evidence: Pick<
+      RetainedImageEvidence,
+      | 'semanticAttempted'
+      | 'semantic'
+      | 'ocr'
+      | 'ocrRouteOutcomes'
+      | 'captureRevision'
+    >,
+  ): void {
+    const ocr = new Map(evidence.ocr);
+    const ocrRouteOutcomes = Object.freeze(evidence.ocrRouteOutcomes.map(
+      (outcome) => Object.freeze({
+        providerOrder: Object.freeze([...outcome.providerOrder]),
+        sourceLanguage: outcome.sourceLanguage,
+        status: outcome.status,
+      }),
+    ));
+    const evidenceConfigurationKey = this.#evidenceConfigurationKey();
+    const weight = retainedImageEvidenceWeight(
+      evidence.semantic,
+      ocr,
+      ocrRouteOutcomes,
+    ) + evidenceConfigurationKey.length * 2;
+    // Keep the previous bounded record intact when an individual replacement
+    // is too large to admit. This avoids losing useful evidence merely because
+    // a provider returned an unexpectedly large transcript.
+    if (weight > MAX_RETAINED_IMAGE_EVIDENCE_WEIGHT) return;
+    this.#deleteRetainedEvidence(descriptor.nodeId);
+    this.#retainedEvidence.set(descriptor.nodeId, Object.freeze({
+      document: descriptor.document,
+      evidenceConfigurationKey,
+      contentRevision: descriptor.contentRevision,
+      observationRevision: descriptor.observationRevision,
+      captureRevision: evidence.captureRevision,
+      expiresAt: this.#now() + IMAGE_RESULT_CACHE_TTL_MS,
+      semanticAttempted: evidence.semanticAttempted,
+      ...(evidence.semantic ? { semantic: evidence.semantic } : {}),
+      ocr,
+      ocrRouteOutcomes,
+      weight,
+    }));
+    this.#retainedEvidenceWeight += weight;
+    while (
+      this.#retainedEvidence.size > MAX_RETAINED_IMAGE_EVIDENCE ||
+      this.#retainedEvidenceWeight > MAX_RETAINED_IMAGE_EVIDENCE_WEIGHT
+    ) {
+      const oldest = this.#retainedEvidence.keys().next().value as
+        | number
+        | undefined;
+      if (oldest === undefined) break;
+      this.#deleteRetainedEvidence(oldest);
+      this.#rerankRequestedNodeIds.delete(oldest);
+      this.#semanticRefreshRetainedOcrNodeIds.delete(oldest);
+    }
+  }
+
+  #deleteRetainedEvidence(nodeId: number): boolean {
+    const retained = this.#retainedEvidence.get(nodeId);
+    if (!retained) return false;
+    this.#retainedEvidence.delete(nodeId);
+    this.#retainedEvidenceWeight -= retained.weight;
+    return true;
+  }
+
+  #clearRetainedEvidence(): void {
+    this.#retainedEvidence.clear();
+    this.#retainedEvidenceWeight = 0;
+  }
+
+  #finalAnalysisConfigurationKey(
+    steps: readonly ImageReadingExecutionStep[],
+    semantic?: PendingSemanticImageEvidence,
+  ): string {
+    return [
+      ORIGIN_FINAL_ANALYSIS_SCHEMA_VERSION,
+      this.#pairKey ?? '',
+      this.#evidenceConfigurationKey(),
+      flattenedReadingMethods(steps).join(','),
+      semantic?.identity ?? '',
+      semantic?.rankable.repeated ? 'repeated' : 'unique',
+    ].join('\u0001');
+  }
+
+  #rememberFinalAnalysis(
+    descriptor: SourceImageDescriptor,
+    projection: ImageOverlayProjection,
+    finalConfigurationKey: string,
+  ): void {
+    const weight = finalAnalysisWeight(finalConfigurationKey, projection.regions);
+    if (weight > MAX_RETAINED_IMAGE_EVIDENCE_WEIGHT) return;
+    this.#deleteRetainedFinalAnalysis(descriptor.nodeId);
+    this.#retainedFinalAnalyses.set(descriptor.nodeId, Object.freeze({
+      document: descriptor.document,
+      contentRevision: descriptor.contentRevision,
+      captureRevision: descriptorCaptureRevision(descriptor),
+      finalConfigurationKey,
+      projection: Object.freeze({ ...projection }),
+      expiresAt: this.#now() + IMAGE_RESULT_CACHE_TTL_MS,
+      weight,
+    }));
+    this.#retainedFinalAnalysisWeight += weight;
+    while (
+      this.#retainedFinalAnalyses.size > MAX_RETAINED_IMAGE_EVIDENCE ||
+      this.#retainedFinalAnalysisWeight > MAX_RETAINED_IMAGE_EVIDENCE_WEIGHT
+    ) {
+      const oldest = this.#retainedFinalAnalyses.keys().next().value as
+        | number
+        | undefined;
+      if (oldest === undefined) break;
+      this.#deleteRetainedFinalAnalysis(oldest);
+    }
+  }
+
+  #deleteRetainedFinalAnalysis(nodeId: number): boolean {
+    const retained = this.#retainedFinalAnalyses.get(nodeId);
+    if (!retained) return false;
+    this.#retainedFinalAnalyses.delete(nodeId);
+    this.#retainedFinalAnalysisWeight -= retained.weight;
+    return true;
+  }
+
+  #clearRetainedFinalAnalyses(): void {
+    this.#retainedFinalAnalyses.clear();
+    this.#retainedFinalAnalysisWeight = 0;
+  }
+
+  #commitRetainedFinalAnalysis(
+    job: ImageScanJob,
+    scheduler: ImageScanScheduler,
+    processingVersion: number,
+    jobOrdinal: number,
+    replayLease: number,
+    pairEpoch: number,
+    pairKey: string,
+    finalConfigurationKey: string,
+    signal: AbortSignal,
+  ): boolean {
+    const retained = this.#retainedFinalAnalyses.get(job.descriptor.nodeId);
+    if (!retained) return false;
+    if (
+      retained.expiresAt <= this.#now() ||
+      !sameSourceDocument(retained.document, job.descriptor.document) ||
+      retained.contentRevision !== job.descriptor.contentRevision ||
+      retained.captureRevision !== descriptorCaptureRevision(job.descriptor) ||
+      retained.finalConfigurationKey !== finalConfigurationKey
+    ) {
+      if (retained.expiresAt <= this.#now() ||
+        retained.contentRevision !== job.descriptor.contentRevision) {
+        this.#deleteRetainedFinalAnalysis(job.descriptor.nodeId);
+      }
+      return false;
+    }
+    signal.throwIfAborted();
+    if (!this.#isJobCurrent(job, processingVersion, pairEpoch, pairKey)) {
+      throw new DOMException('Final image analysis became stale.', 'AbortError');
+    }
+    const projection: ImageOverlayProjection = Object.freeze({
+      ...retained.projection,
+      jobOrdinal,
+      document: job.descriptor.document,
+      nodeId: job.descriptor.nodeId,
+      contentRevision: job.descriptor.contentRevision,
+      observationRevision: job.descriptor.observationRevision,
+      replayLease,
+      pairEpoch,
+      pairKey,
+    });
+    this.#projectedHashes.set(job.descriptor.nodeId, projection.pixelHash);
+    this.#projectedOrdinals.set(job.descriptor.nodeId, jobOrdinal);
+    this.#retainedProjections.set(job.descriptor.nodeId, projection);
+    if (!this.#projector.project(projection)) {
+      this.#projectedHashes.delete(job.descriptor.nodeId);
+      this.#projectedOrdinals.delete(job.descriptor.nodeId);
+      this.#retainedProjections.delete(job.descriptor.nodeId);
+      scheduler.defer(job);
+      this.environment.onDiagnostic?.('projection-deferred');
+      return true;
+    }
+    this.#rememberFinalAnalysis(
+      job.descriptor,
+      projection,
+      finalConfigurationKey,
+    );
+    scheduler.settle(job);
+    this.#originFinalRebinds += 1;
+    this.#reportOriginFinalCache('rebind');
+    this.environment.onDiagnostic?.('projected');
+    return true;
+  }
+
+  #commitOriginFinalAnalysis(
+    retained: OriginFinalImageAnalysis,
+    pixels: AcquiredImagePixels,
+    _sourceLanguage: SupportedLanguage,
+    finalConfigurationKey: string,
+    job: ImageScanJob,
+    scheduler: ImageScanScheduler,
+    processingVersion: number,
+    jobOrdinal: number,
+    replayLease: number,
+    pairEpoch: number,
+    pairKey: string,
+    signal: AbortSignal,
+  ): boolean {
+    signal.throwIfAborted();
+    if (!this.#isJobCurrent(job, processingVersion, pairEpoch, pairKey)) {
+      throw new DOMException('Cached final image analysis became stale.', 'AbortError');
+    }
+    const projection: ImageOverlayProjection = Object.freeze({
+      jobOrdinal,
+      document: job.descriptor.document,
+      nodeId: job.descriptor.nodeId,
+      contentRevision: job.descriptor.contentRevision,
+      observationRevision: job.descriptor.observationRevision,
+      replayLease,
+      pairEpoch,
+      pairKey,
+      ...retainedPixelFacts(pixels),
+      methodId: retained.methodId,
+      evidenceKind: retained.evidenceKind,
+      regions: retained.regions,
+    });
+    this.#projectedHashes.set(job.descriptor.nodeId, projection.pixelHash);
+    this.#projectedOrdinals.set(job.descriptor.nodeId, jobOrdinal);
+    this.#retainedProjections.set(job.descriptor.nodeId, projection);
+    if (!this.#projector.project(projection)) {
+      this.#projectedHashes.delete(job.descriptor.nodeId);
+      this.#projectedOrdinals.delete(job.descriptor.nodeId);
+      this.#retainedProjections.delete(job.descriptor.nodeId);
+      scheduler.defer(job);
+      this.environment.onDiagnostic?.('projection-deferred');
+      return true;
+    }
+    this.#rememberFinalAnalysis(
+      job.descriptor,
+      projection,
+      finalConfigurationKey,
+    );
+    scheduler.settle(job);
+    this.environment.onDiagnostic?.('projected');
+    return true;
+  }
+
+  #retainedEvidenceRecord(
+    descriptor: SourceImageDescriptor,
+  ): RetainedImageEvidence | undefined {
+    const retained = this.#retainedEvidence.get(descriptor.nodeId);
+    if (!retained) return undefined;
+    if (
+      retained.expiresAt <= this.#now() ||
+      !sameSourceDocument(retained.document, descriptor.document) ||
+      retained.evidenceConfigurationKey !== this.#evidenceConfigurationKey() ||
+      retained.contentRevision !== descriptor.contentRevision
+    ) {
+      this.#deleteRetainedEvidence(descriptor.nodeId);
+      return undefined;
+    }
+    if (retained.observationRevision !== descriptor.observationRevision) {
+      return undefined;
+    }
+    // LRU touch: ownership and aggregate weight are unchanged.
+    this.#retainedEvidence.delete(descriptor.nodeId);
+    this.#retainedEvidence.set(descriptor.nodeId, retained);
+    return retained;
+  }
+
+  #rebaseRetainedObservation(descriptor: SourceImageDescriptor): boolean {
+    const retained = this.#retainedEvidence.get(descriptor.nodeId);
+    if (
+      retained &&
+      retained.expiresAt > this.#now() &&
+      sameSourceDocument(retained.document, descriptor.document) &&
+      retained.evidenceConfigurationKey === this.#evidenceConfigurationKey() &&
+      retained.contentRevision === descriptor.contentRevision
+    ) {
+      const semantic = retained.semantic
+        ? semanticCandidateForDescriptor(retained.semantic, descriptor)
+        : undefined;
+      this.#rememberEvidence(descriptor, {
+        captureRevision: retained.captureRevision,
+        semanticAttempted: retained.semanticAttempted,
+        ...(semantic ? { semantic } : {}),
+        ocr: retained.ocr,
+        ocrRouteOutcomes: retained.ocrRouteOutcomes,
+      });
+    }
+    const previousProjection = this.#retainedProjections.get(descriptor.nodeId);
+    if (!previousProjection) {
+      // No visible result is valid only when this descriptor has no mounted
+      // projection. If bounded evidence metadata was evicted independently,
+      // reopen the image instead of letting a stale projector entry strand.
+      return !this.#projectedHashes.has(descriptor.nodeId);
+    }
+    if (
+      !sameSourceDocument(previousProjection.document, descriptor.document) ||
+      previousProjection.contentRevision !== descriptor.contentRevision ||
+      previousProjection.pairEpoch !== this.#pairEpoch ||
+      previousProjection.pairKey !== this.#pairKey
+    ) return false;
+    const projection: ImageOverlayProjection = Object.freeze({
+      ...previousProjection,
+      observationRevision: descriptor.observationRevision,
+    });
+    this.#retainedProjections.set(descriptor.nodeId, projection);
+    const retainedFinal = this.#retainedFinalAnalyses.get(descriptor.nodeId);
+    if (
+      retainedFinal &&
+      retainedFinal.expiresAt > this.#now() &&
+      sameSourceDocument(retainedFinal.document, descriptor.document) &&
+      retainedFinal.contentRevision === descriptor.contentRevision &&
+      retainedFinal.captureRevision === descriptorCaptureRevision(descriptor)
+    ) {
+      this.#retainedFinalAnalyses.set(descriptor.nodeId, Object.freeze({
+        ...retainedFinal,
+        projection,
+      }));
+    }
+    if (this.#projector.project(projection)) {
+      this.#originFinalRebinds += 1;
+      this.#reportOriginFinalCache('rebind');
+      return true;
+    }
+    this.#projectedHashes.delete(descriptor.nodeId);
+    this.#projectedOrdinals.delete(descriptor.nodeId);
+    this.#retainedProjections.delete(descriptor.nodeId);
+    this.#deleteRetainedFinalAnalysis(descriptor.nodeId);
+    return false;
+  }
+
+  #rebaseRetainedCaptureEvidence(descriptor: SourceImageDescriptor): boolean {
+    const retained = this.#retainedEvidence.get(descriptor.nodeId);
+    if (
+      !retained ||
+      retained.expiresAt <= this.#now() ||
+      !sameSourceDocument(retained.document, descriptor.document) ||
+      retained.evidenceConfigurationKey !== this.#evidenceConfigurationKey() ||
+      retained.captureRevision !== descriptorCaptureRevision(descriptor)
+    ) {
+      this.#deleteRetainedEvidence(descriptor.nodeId);
+      return false;
+    }
+    // ALT/ARIA/lang changed, so semantic evidence must be read again. OCR and
+    // negative route outcomes remain valid because their pixel revision did not.
+    this.#rememberEvidence(descriptor, {
+      captureRevision: retained.captureRevision,
+      semanticAttempted: false,
+      ocr: retained.ocr,
+      ocrRouteOutcomes: retained.ocrRouteOutcomes,
+    });
+    return true;
+  }
+
+  #evidenceConfigurationKey(): string {
+    return sourceEvidenceConfigurationKey(
+      this.#configuration,
+      this.#effectiveDetectedSourceLanguage(),
+    );
+  }
+
+  #queueRetainedRerank(requeueMissing = false): void {
+    const scheduler = this.#scheduler;
+    if (!scheduler) return;
+    const activeNodeId = this.#activeJob()?.descriptor.nodeId;
+    for (const descriptor of this.#descriptors.values()) {
+      const retained = this.#retainedEvidenceRecord(descriptor);
+      if (retained) {
+        this.#rerankRequestedNodeIds.add(descriptor.nodeId);
+      }
+      // Settled descriptors without retained evidence stay settled unless the
+      // caller explicitly requests a fresh read (for example after a priority
+      // change discovers that bounded evidence expired). The active job is
+      // always requeued because configure() already advanced processingVersion
+      // and its aborted run must not strand the descriptor permanently.
+      if (retained || requeueMissing || descriptor.nodeId === activeNodeId) {
+        scheduler.requeueCurrent(descriptor);
+      }
+    }
+    for (const cancellation of scheduler.drainCancellations()) {
+      if (
+        cancellation.job.descriptor.nodeId ===
+        this.#activeJob()?.descriptor.nodeId
+      ) this.#activeAbortController?.abort();
+    }
+    this.#kick();
+  }
+
+  #requeueRetainedEvidence(
+    descriptor: SourceImageDescriptor,
+    scheduler: ImageScanScheduler,
+  ): boolean {
+    const retained = this.#retainedEvidenceRecord(descriptor);
+    if (!retained) return false;
+    if (retained.semantic) {
+      const registration = this.#semanticEvidenceIndex.register(
+        descriptor.nodeId,
+        descriptor.contentRevision,
+        retained.semantic.evidence.text,
+      );
+      const semantic = Object.freeze({
+        ...retained.semantic,
+        rankable: Object.freeze({
+          ...retained.semantic.rankable,
+          repeated: registration.repeated,
+        }),
+      });
+      this.#rememberEvidence(descriptor, {
+        captureRevision: retained.captureRevision,
+        semanticAttempted: retained.semanticAttempted,
+        semantic,
+        ocr: retained.ocr,
+        ocrRouteOutcomes: retained.ocrRouteOutcomes,
+      });
+      // A peer entering or leaving a repeated group changes whether its cheap
+      // first paint is admissible. Revisit the preview and immediately remove
+      // a provisional semantic overlay that is now known to be boilerplate.
+      if (
+        this.#hasCurrentSemanticProjection(descriptor) &&
+        !progressiveSemanticEvidence(semantic.rankable)
+      ) this.#clearProjection(descriptor);
+    }
+    this.#rerankRequestedNodeIds.add(descriptor.nodeId);
+    return scheduler.requeueCurrent(descriptor);
+  }
+
+  async #commitRetainedWinner(
+    job: ImageScanJob,
+    scheduler: ImageScanScheduler,
+    processingVersion: number,
+    jobOrdinal: number,
+    replayLease: number,
+    pairEpoch: number,
+    pairKey: string,
+    steps: readonly ImageReadingExecutionStep[],
+    ocrEligible: boolean,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    const retained = this.#retainedEvidenceRecord(job.descriptor);
+    if (!retained) return false;
+    const methods = flattenedReadingMethods(steps);
+    const semanticIndex = methods.indexOf(ACCESSIBILITY_TEXT_METHOD_ID);
+    const expectedSourceLanguage = this.#configuration.sourceLanguage === 'auto'
+      ? this.#effectiveDetectedSourceLanguage()
+      : this.#configuration.sourceLanguage;
+    const hasOcr = ocrEligible && steps.some((step) => step.kind === 'ocr');
+    const selectedOcr = hasOcr &&
+        retained.captureRevision === descriptorCaptureRevision(job.descriptor)
+      ? retainedOcrEvidenceForRoute(
+          retained.ocr,
+          retained.ocrRouteOutcomes,
+          steps,
+          expectedSourceLanguage,
+        )
+      : Object.freeze({
+          status: hasOcr ? 'missing' as const : 'empty' as const,
+        });
+    const ocrIndex = selectedOcr.status === 'candidate'
+      ? selectedOcr.methodIndex
+      : -1;
+    const retainedSemantic = semanticIndex >= 0
+      ? retained.semantic
+      : undefined;
+    const semantic = retainedSemantic && (
+        !expectedSourceLanguage ||
+        retainedSemantic.sourceLanguage === expectedSourceLanguage
+      )
+      ? retainedSemantic
+      : undefined;
+    const ocr = selectedOcr.status === 'candidate'
+      ? selectedOcr.candidate
+      : undefined;
+    // The normal pipeline computes only the missing evidence while the old
+    // projection remains visible. A complete retained comparison never
+    // reacquires source pixels.
+    if (
+      (semanticIndex >= 0 && !retained.semanticAttempted) ||
+      (Boolean(retainedSemantic) && !semantic) ||
+      (hasOcr && selectedOcr.status === 'missing')
+    ) {
+      return false;
+    }
+    if (semantic && ocr) {
+      const decision = selectImageTextEvidence({
+        ...semantic.rankable,
+        methodIndex: semanticIndex,
+      }, {
+        kind: 'ocr',
+        result: ocr.recognition.result,
+        selectedQuality: selectedRecognitionQuality(ocr.recognition),
+        methodIndex: ocrIndex,
+        minimumConfidence: repairOcrMinimumConfidence(
+          this.#configuration.ocrMinimumConfidence,
+        ),
+      });
+      this.#reportEvidenceSelection(decision.selected, decision.reason);
+      if (decision.selected === 'semantic') {
+        return this.#commitAccessibilityCandidate(
+          {
+            ...semantic,
+            rankable: Object.freeze({
+              ...semantic.rankable,
+              methodIndex: semanticIndex,
+            }),
+          },
+          job,
+          scheduler,
+          processingVersion,
+          jobOrdinal,
+          replayLease,
+          pairEpoch,
+          pairKey,
+          signal,
+        );
+      }
+      return this.#commitRetainedOcrCandidate(
+        ocr,
+        job,
+        scheduler,
+        processingVersion,
+        jobOrdinal,
+        replayLease,
+        pairEpoch,
+        pairKey,
+        this.#finalAnalysisConfigurationKey(steps, semantic),
+        signal,
+      );
+    }
+    if (semantic) {
+      this.#reportEvidenceSelection('semantic', 'semantic-fallback');
+      return this.#commitAccessibilityCandidate(
+        semantic,
+        job,
+        scheduler,
+        processingVersion,
+        jobOrdinal,
+        replayLease,
+        pairEpoch,
+        pairKey,
+        signal,
+      );
+    }
+    if (ocr) {
+      this.#reportEvidenceSelection('ocr', 'ocr-fallback');
+      return this.#commitRetainedOcrCandidate(
+        ocr,
+        job,
+        scheduler,
+        processingVersion,
+        jobOrdinal,
+        replayLease,
+        pairEpoch,
+        pairKey,
+        this.#finalAnalysisConfigurationKey(steps),
+        signal,
+      );
+    }
+    this.#clearProjection(job.descriptor);
+    scheduler.settle(job);
+    this.environment.onDiagnostic?.('no-text-found');
+    return true;
+  }
+
+  async #commitRetainedOcrCandidate(
+    candidate: RetainedOcrImageEvidence,
+    job: ImageScanJob,
+    scheduler: ImageScanScheduler,
+    processingVersion: number,
+    jobOrdinal: number,
+    replayLease: number,
+    pairEpoch: number,
+    pairKey: string,
+    finalConfigurationKey: string,
+    signal: AbortSignal,
+  ): Promise<boolean> {
+    if (candidate.sourceLanguage === this.#configuration.targetLanguage) {
+      this.#clearProjection(job.descriptor);
+      scheduler.settle(job);
+      this.environment.onDiagnostic?.('same-language');
+      return true;
+    }
+    let regions: readonly TranslatedImageRegion[];
+    try {
+      regions = await this.#translateRegions(
+        candidate.recognition.result.regions,
+        {
+          sourceLanguage: candidate.sourceLanguage,
+          targetLanguage: this.#configuration.targetLanguage,
+        },
+        signal,
+        () => this.environment.onDiagnostic?.('translation-started'),
+      );
+    } catch (error) {
+      if (isAbortError(error) || signal.aborted) throw error;
+      this.environment.onDiagnostic?.('translation-failed');
+      return false;
+    }
+    if (!this.#isJobCurrent(job, processingVersion, pairEpoch, pairKey)) {
+      throw new DOMException('Retained image evidence became stale.', 'AbortError');
+    }
+    if (regions.length === 0) return false;
+    const pixels = candidate.pixels;
+    const projection: ImageOverlayProjection = {
+      jobOrdinal,
+      document: job.descriptor.document,
+      nodeId: job.descriptor.nodeId,
+      contentRevision: job.descriptor.contentRevision,
+      observationRevision: job.descriptor.observationRevision,
+      replayLease,
+      pairEpoch,
+      pairKey,
+      ...pixels,
+      methodId: candidate.recognition.result.providerId,
+      evidenceKind: 'ocr',
+      regions,
+    };
+    this.#projectedHashes.set(job.descriptor.nodeId, pixels.pixelHash);
+    this.#projectedOrdinals.set(job.descriptor.nodeId, jobOrdinal);
+    this.#retainedProjections.set(job.descriptor.nodeId, projection);
+    if (!this.#projector.project(projection)) {
+      this.#projectedHashes.delete(job.descriptor.nodeId);
+      this.#projectedOrdinals.delete(job.descriptor.nodeId);
+      this.#retainedProjections.delete(job.descriptor.nodeId);
+      scheduler.defer(job);
+      this.environment.onDiagnostic?.('projection-deferred');
+      return true;
+    }
+    this.#rememberFinalAnalysis(
+      job.descriptor,
+      projection,
+      finalConfigurationKey,
+    );
+    this.#rememberOriginFinalAnalysis({
+      pixels: candidate.pixels,
+      sourceLanguage: candidate.sourceLanguage,
+      methodId: candidate.recognition.result.providerId,
+      finalConfigurationKey,
+    }, regions);
+    scheduler.settle(job);
+    this.environment.onDiagnostic?.('projected');
+    return true;
   }
 
   #takeCaptureRetry(job: ImageScanJob): number | undefined {
@@ -2435,7 +4496,35 @@ export class ImageTranslationController {
   #clearProjection(descriptor: SourceImageDescriptor): void {
     this.#projectedHashes.delete(descriptor.nodeId);
     this.#projectedOrdinals.delete(descriptor.nodeId);
+    this.#retainedProjections.delete(descriptor.nodeId);
     this.#projector.remove(descriptor.document, descriptor.nodeId);
+  }
+
+  #rebindRetainedProjections(): void {
+    if (this.#replayLease < 1 || !this.#pairKey) return;
+    for (const [nodeId, retained] of this.#retainedProjections) {
+      const descriptor = this.#descriptors.get(nodeId);
+      if (
+        !descriptor ||
+        retained.pairEpoch !== this.#pairEpoch ||
+        retained.pairKey !== this.#pairKey ||
+        retained.contentRevision !== descriptor.contentRevision ||
+        retained.observationRevision !== descriptor.observationRevision ||
+        !sameSourceDocument(retained.document, descriptor.document)
+      ) {
+        this.#retainedProjections.delete(nodeId);
+        continue;
+      }
+      const rebound: ImageOverlayProjection = Object.freeze({
+        ...retained,
+        document: descriptor.document,
+        replayLease: this.#replayLease,
+      });
+      this.#retainedProjections.set(nodeId, rebound);
+      this.#projectedHashes.set(nodeId, rebound.pixelHash);
+      this.#projectedOrdinals.set(nodeId, rebound.jobOrdinal);
+      this.#projector.project(rebound);
+    }
   }
 
   #descriptorForProjectedOrdinal(
@@ -2468,20 +4557,27 @@ export class ImageTranslationController {
     if (
       this.#configuration.sourceLanguage !== 'auto' ||
       this.#configuration.detectedSourceLanguage ||
-      this.#probeDetectedSourceLanguage ||
+      (this.#probeDetectedSourceLanguage &&
+        !this.#autoLanguageRevalidationPending) ||
       this.#probeInconclusiveReported ||
       this.#configuration.pageLanguageResolutionPending
     ) return undefined;
     let probe = this.#autoLanguageProbe;
     if (!probe) {
-      const minimumConfidence = Math.max(
-        AUTO_LANGUAGE_PROBE_MINIMUM_CONFIDENCE,
-        repairOcrMinimumConfidence(this.#configuration.ocrMinimumConfidence),
+      const minimumConfidence = autoLanguageProbeMinimumConfidence(
+        this.#configuration.ocrMinimumConfidence,
       );
       probe = new AutoImageLanguageProbe(this.#now(), minimumConfidence);
       this.#autoLanguageProbe = probe;
-      const probeAtDeadline = probe;
+    }
+    if (
+      !this.#probeLifetimeAbortController ||
+      this.#probeLifetimeAbortController.signal.aborted
+    ) {
       this.#probeLifetimeAbortController = new AbortController();
+    }
+    if (this.#probeDeadlineTimer === undefined) {
+      const probeAtDeadline = probe;
       this.#probeDeadlineTimer = this.#setTimer(() => {
         if (
           this.#autoLanguageProbe !== probeAtDeadline ||
@@ -2510,22 +4606,23 @@ export class ImageTranslationController {
     text: string,
     detectedLanguage: SupportedLanguage,
     descriptor: SourceImageDescriptor,
-  ): SupportedLanguage | undefined {
+  ): boolean {
     const probe = this.#ensureAutoLanguageProbe();
-    if (!probe) return undefined;
+    if (!probe) return false;
     const observed = probe.observeSemantic({
       sampleIdentity: this.#probeSampleIdentity(descriptor),
       text,
       detectedLanguage,
       now: this.#now(),
     });
-    return observed.status === 'resolved'
-      ? this.#acceptAutoLanguageResolution(
-          observed,
-          descriptor.document,
-          'accessibility-text',
-        )
-      : undefined;
+    if (observed.status !== 'resolved') return false;
+    const pairEpoch = this.#pairEpoch;
+    this.#acceptAutoLanguageResolution(
+      observed,
+      descriptor.document,
+      'accessibility-text',
+    );
+    return this.#pairEpoch !== pairEpoch;
   }
 
   #acceptAutoLanguageResolution(
@@ -2535,11 +4632,19 @@ export class ImageTranslationController {
     document: ReplicaSourceDocumentIdentity,
     origin: AutoImageLanguageEvidenceOrigin,
   ): SupportedLanguage {
+    const wasRevalidation = this.#autoLanguageRevalidationPending;
+    const previousLanguage = this.#probeDetectedSourceLanguage ??
+      this.#revokedProbeDetectedSourceLanguage;
+    const sameLanguageRevalidation =
+      wasRevalidation &&
+      previousLanguage === observed.language;
     this.#probeDetectedSourceLanguage = observed.language;
+    this.#revokedProbeDetectedSourceLanguage = undefined;
+    this.#autoLanguageRevalidationPending = false;
     this.#probeInconclusiveReported = false;
     // Auto resolution changes the projection pair, not the exact-document
     // evidence epoch. Configured pair/reset transitions still clear the index.
-    this.#beginPair(true);
+    if (!sameLanguageRevalidation) this.#beginPair(true);
     this.#clearAutoLanguageProbeDeadline();
     this.environment.onDiagnostic?.(Object.freeze({
       stage: 'auto-language-probe-resolved' as const,
@@ -2559,6 +4664,7 @@ export class ImageTranslationController {
       // A UI observer cannot prevent the controller's pair transition.
     } finally {
       if (
+        !sameLanguageRevalidation &&
         this.#isEnabled() &&
         this.#configuration.sourceLanguage === 'auto' &&
         this.#effectiveDetectedSourceLanguage() === observed.language
@@ -2582,10 +4688,9 @@ export class ImageTranslationController {
     const configuredConfidence = repairOcrMinimumConfidence(
       this.#configuration.ocrMinimumConfidence,
     );
-    const minimumConfidence = configuredConfidence <
-        AUTO_LANGUAGE_PROBE_MINIMUM_CONFIDENCE
-      ? AUTO_LANGUAGE_PROBE_MINIMUM_CONFIDENCE
-      : configuredConfidence;
+    const minimumConfidence = autoLanguageProbeMinimumConfidence(
+      this.#configuration.ocrMinimumConfidence,
+    );
     const now = this.#now();
     if (probe.remainingMs(now) <= 0) {
       this.#reportProbeInconclusive(probe, 'deadline');
@@ -2607,11 +4712,14 @@ export class ImageTranslationController {
       if (candidates.length === 0) return undefined;
       progress = {
         routes: candidates,
-        completedOcrGroups: new Set(),
+        completedProviders: new Set(),
       };
       this.#probeOcrProgress.set(sampleIdentity, progress);
     }
-    if (progress.completedOcrGroups.has(ocrGroupIndex)) return undefined;
+    const remainingProviderOrder = providerOrder.filter((providerId) =>
+      !progress.completedProviders.has(providerId)
+    );
+    if (remainingProviderOrder.length === 0) return undefined;
     const candidates = progress.routes;
     const lifetimeSignal = this.#probeLifetimeAbortController?.signal;
     if (!lifetimeSignal) return undefined;
@@ -2654,7 +4762,7 @@ export class ImageTranslationController {
         const languageGroup = tesseractLanguageGroupFor(candidateLanguage);
         let recognition = await raceAbortPromise(
           this.#recognizer().recognize(pixels, {
-            providerOrder,
+            providerOrder: remainingProviderOrder,
             sourceLanguage: candidateLanguage,
             minimumConfidence,
             ...(languageGroup
@@ -2719,12 +4827,28 @@ export class ImageTranslationController {
             const observed = probe.observe(observation);
             if (observed.status === 'resolved') {
               activeCandidate = undefined;
+              const sourceLanguage = this.#acceptAutoLanguageResolution(
+                observed,
+                descriptor.document,
+                'ocr',
+              );
+              const resolvedCandidate = Object.freeze({
+                recognition,
+                pixels,
+                sourceLanguage,
+                methodIndex: 0,
+                providerOrder,
+              });
+              if (minimumConfidence === configuredConfidence) {
+                this.#rememberOcrCandidate(descriptor, resolvedCandidate);
+              }
+              this.#rememberOriginOcrEvidence(
+                resolvedCandidate,
+                observed,
+                minimumConfidence,
+              );
               return Object.freeze({
-                sourceLanguage: this.#acceptAutoLanguageResolution(
-                  observed,
-                  descriptor.document,
-                  'ocr',
-                ),
+                sourceLanguage,
               });
             }
           }
@@ -2752,7 +4876,9 @@ export class ImageTranslationController {
         activeCandidate = undefined;
         activeCandidateWasNew = false;
       }
-      progress.completedOcrGroups.add(ocrGroupIndex);
+      for (const providerId of remainingProviderOrder) {
+        progress.completedProviders.add(providerId);
+      }
     } catch (error) {
       if (activeCandidate) {
         if (activeCandidateWasNew) {
@@ -2796,15 +4922,37 @@ export class ImageTranslationController {
     const sample = transcript.replace(/\s+/gu, ' ').trim().slice(0, 4_000);
     if (!detectLanguage || sample.length < 3) return undefined;
     try {
+      const cacheKey = await sha256Hex(`language-v1\u0000${sample}`);
+      signal.throwIfAborted();
+      const cached = this.#languageDetections.get(cacheKey);
+      if (cached && cached.expiresAt > this.#now()) {
+        this.#languageDetections.delete(cacheKey);
+        this.#languageDetections.set(cacheKey, cached);
+        return cached.language;
+      }
+      if (cached) this.#languageDetections.delete(cacheKey);
       const detected = await raceAbortPromise(detectLanguage(sample), signal);
-      if (!detected.isReliable) return undefined;
-      const candidate = [...detected.languages]
-        .sort((left, right) => right.percentage - left.percentage)
-        .find((entry) => entry.percentage >= 70 &&
-          canonicalizeLanguageTag(entry.language));
-      return candidate
+      const candidate = detected.isReliable
+        ? [...detected.languages]
+          .sort((left, right) => right.percentage - left.percentage)
+          .find((entry) => entry.percentage >= 70 &&
+            canonicalizeLanguageTag(entry.language))
+        : undefined;
+      const language = candidate
         ? canonicalizeLanguageTag(candidate.language)
         : undefined;
+      this.#languageDetections.set(cacheKey, Object.freeze({
+        ...(language ? { language } : {}),
+        expiresAt: this.#now() + IMAGE_RESULT_CACHE_TTL_MS,
+      }));
+      while (this.#languageDetections.size > MAX_RETAINED_IMAGE_EVIDENCE) {
+        const oldest = this.#languageDetections.keys().next().value as
+          | string
+          | undefined;
+        if (!oldest) break;
+        this.#languageDetections.delete(oldest);
+      }
+      return language;
     } catch {
       signal.throwIfAborted();
       return undefined;
@@ -2833,14 +4981,16 @@ export class ImageTranslationController {
   }
 
   #effectiveDetectedSourceLanguage(): SupportedLanguage | undefined {
+    if (this.#autoLanguageRevalidationPending) return undefined;
     return this.#configuration.detectedSourceLanguage ??
       this.#probeDetectedSourceLanguage;
   }
 
   #pageLanguageResolutionBlocksWork(): boolean {
-    return this.#configuration.sourceLanguage === 'auto' &&
-      !this.#effectiveDetectedSourceLanguage() &&
-      Boolean(this.#configuration.pageLanguageResolutionPending);
+    return imagePageLanguageResolutionBlocksWork(
+      this.#configuration,
+      this.#probeDetectedSourceLanguage,
+    );
   }
 
   #resetAutoLanguageProbe(): void {
@@ -2851,6 +5001,8 @@ export class ImageTranslationController {
     this.#probeLifetimeAbortController = undefined;
     this.#autoLanguageProbe = undefined;
     this.#probeDetectedSourceLanguage = undefined;
+    this.#revokedProbeDetectedSourceLanguage = undefined;
+    this.#autoLanguageRevalidationPending = false;
     this.#probeSchedulerRebuildRequested = false;
     this.#probeInconclusiveReported = false;
     this.#probeStartedReported = false;
@@ -2858,14 +5010,63 @@ export class ImageTranslationController {
     this.#probeOcrProgress.clear();
   }
 
-  #restartAfterAutoLanguageEvidenceInvalidation(): void {
+  #suspendAutoLanguageProbeMode(): void {
+    this.#clearAutoLanguageProbeDeadline();
+    this.#probeLifetimeAbortController?.abort(
+      new DOMException('Auto language probe mode changed.', 'AbortError'),
+    );
+    this.#probeLifetimeAbortController = undefined;
+    this.#autoLanguageRevalidationPending = false;
+    this.#probeSchedulerRebuildRequested = false;
+    this.#probeInconclusiveReported = false;
+    this.#probeStartedReported = false;
+  }
+
+  #reopenAutoLanguageAfterSampleInvalidation(): void {
+    const probe = this.#autoLanguageProbe;
+    if (!probe) return;
+    const replacementResolution = probe.resolution;
+    const revokedLanguage = this.#probeDetectedSourceLanguage;
+    if (!revokedLanguage || !this.#document) return;
+    if (this.#configuration.sourceLanguage !== 'auto') {
+      // Explicit source language is authoritative. Retire the stale dormant
+      // Auto promotion without cancelling unrelated explicit-pair work.
+      this.#probeDetectedSourceLanguage = undefined;
+      this.#revokedProbeDetectedSourceLanguage = undefined;
+      try {
+        this.environment.onAutoLanguageInvalidated?.(this.#document);
+      } catch {
+        // A UI observer cannot prevent the controller's revocation boundary.
+      }
+      return;
+    }
+    // Keep the last committed projection visible, but revoke its source
+    // language synchronously so no new work can use an invalid contributor.
+    // The current processor is retried under the revalidation gate.
+    this.#autoLanguageRevalidationPending = true;
+    this.#revokedProbeDetectedSourceLanguage = revokedLanguage;
+    this.#probeDetectedSourceLanguage = undefined;
+    this.#probeInconclusiveReported = false;
+    this.#probeSchedulerRebuildRequested = false;
+    const activeJob = this.#activeJob();
+    if (activeJob) this.#scheduler?.retry(activeJob);
     this.#processingVersion += 1;
-    this.#activeAbortController?.abort();
-    this.#resetAutoLanguageProbe();
-    // The source evidence is unchanged; preserve its bounded ranking index so
-    // an Auto invalidation cannot repeatedly rediscover the same saturation.
-    this.#beginPair(true);
-    this.#rebuildScheduler();
+    this.#activeAbortController?.abort(
+      new DOMException('Auto language evidence changed.', 'AbortError'),
+    );
+    this.environment.onDiagnostic?.('auto-language-probe-reopened');
+    try {
+      this.environment.onAutoLanguageInvalidated?.(this.#document);
+    } catch {
+      // A UI observer cannot prevent the controller's revocation boundary.
+    }
+    if (replacementResolution) {
+      this.#acceptAutoLanguageResolution(
+        replacementResolution,
+        this.#document,
+        'ocr',
+      );
+    }
   }
 
   #probeSampleIdentity(
@@ -2885,9 +5086,10 @@ export class ImageTranslationController {
     const probe = this.#autoLanguageProbe;
     const resolvedBefore = probe?.resolvedLanguage;
     probe?.forgetSample(identity);
+    const resolvedAfter = probe?.resolvedLanguage;
     this.#probeOcrProgress.delete(identity);
     this.#probeSampleIdentities.delete(nodeId);
-    return Boolean(resolvedBefore && !probe?.resolvedLanguage);
+    return Boolean(resolvedBefore && resolvedBefore !== resolvedAfter);
   }
 
   #clearAutoLanguageProbeDeadline(): void {
@@ -2909,6 +5111,20 @@ export class ImageTranslationController {
       misses: stats.misses,
       joins: stats.inFlightJoins,
       loads: stats.loads,
+      expirations: stats.expirations ?? 0,
+      purges: stats.purges ?? 0,
+      ...(stats.providerEntries !== undefined
+        ? { providerEntries: stats.providerEntries }
+        : {}),
+      ...(stats.providerWeight !== undefined
+        ? { providerWeight: stats.providerWeight }
+        : {}),
+      ...(stats.providerHits !== undefined
+        ? { providerHits: stats.providerHits }
+        : {}),
+      ...(stats.providerMisses !== undefined
+        ? { providerMisses: stats.providerMisses }
+        : {}),
     }));
   }
 
@@ -2989,18 +5205,33 @@ export class ImageTranslationController {
     return scheduler;
   }
 
-  #rebuildScheduler(): void {
+  #rebuildScheduler(reuseRetainedEvidence = false): void {
     if (!this.#document || !this.#source) return;
     this.#scheduler?.clear();
     this.#scheduler = this.#createScheduler(this.#document);
     for (const descriptor of this.#descriptors.values()) {
       this.#scheduler.apply({ kind: 'upsert', descriptor });
+      if (reuseRetainedEvidence && this.#retainedEvidenceRecord(descriptor)) {
+        this.#rerankRequestedNodeIds.add(descriptor.nodeId);
+      }
     }
     this.#kick();
   }
 
   #refreshGates(): void {
-    this.#scheduler?.setGates(this.#gates());
+    const scheduler = this.#scheduler;
+    if (!scheduler) return;
+    scheduler.setGates(this.#gates());
+    this.#abortCancelledActiveJob(scheduler);
+  }
+
+  #abortCancelledActiveJob(scheduler: ImageScanScheduler): void {
+    const activeNodeId = this.#activeJob()?.descriptor.nodeId;
+    for (const cancellation of scheduler.drainCancellations()) {
+      if (cancellation.job.descriptor.nodeId === activeNodeId) {
+        this.#activeAbortController?.abort();
+      }
+    }
   }
 
   #gates() {
@@ -3013,11 +5244,23 @@ export class ImageTranslationController {
   }
 
   #setMutationQuiet(quiet: boolean, schedule = true): void {
+    // One continuously rotating image must not perpetually postpone unrelated
+    // background work. A live quiet window is a bounded settle barrier, not a
+    // debounce that every later mutation can restart.
+    if (!quiet && schedule && this.#quietTimer !== undefined) {
+      this.#mutationQuiet = false;
+      this.#refreshGates();
+      return;
+    }
     if (this.#quietTimer !== undefined) this.#clearTimer(this.#quietTimer);
     this.#quietTimer = undefined;
     this.#mutationQuiet = quiet;
     this.#refreshGates();
-    if (!quiet && schedule && this.#isEnabled()) {
+    if (
+      !quiet &&
+      schedule &&
+      imageTranslationSourceObservationEnabled(this.#configuration)
+    ) {
       this.#quietTimer = this.#setTimer(() => {
         this.#quietTimer = undefined;
         this.#mutationQuiet = true;
@@ -3039,6 +5282,10 @@ export class ImageTranslationController {
       : undefined;
     this.#projectedHashes.clear();
     this.#projectedOrdinals.clear();
+    this.#retainedProjections.clear();
+    this.#clearRetainedFinalAnalyses();
+    this.#rerankRequestedNodeIds.clear();
+    this.#semanticRefreshRetainedOcrNodeIds.clear();
     this.#captureRetries.clear();
     this.#emptyRetries.clear();
     if (!preserveSemanticEvidence) this.#semanticEvidenceIndex.clear();
@@ -3047,7 +5294,10 @@ export class ImageTranslationController {
 
   #isEnabled(): boolean {
     return !this.#disposed &&
-      imageTranslationConfigurationEnabled(this.#configuration);
+      imageTranslationConfigurationEnabled(
+        this.#configuration,
+        this.#probeDetectedSourceLanguage,
+      );
   }
 
   #reportConfigurationState(): void {
@@ -3055,7 +5305,10 @@ export class ImageTranslationController {
     if (!this.#isEnabled()) {
       const reason = !hasEnabledImageReadingMethod(this.#configuration)
         ? 'provider-unavailable'
-        : explicitImageLanguagesMatch(this.#configuration)
+        : effectiveImageLanguagesMatch(
+            this.#configuration,
+            this.#probeDetectedSourceLanguage,
+          )
           ? 'same-language'
           : 'feature-off';
       const key = `disabled:${reason}`;
@@ -3106,10 +5359,32 @@ function normalizeResetEpoch(value: unknown): number {
 
 function imageTranslationConfigurationEnabled(
   configuration: ImageTranslationConfiguration,
+  fallbackDetectedSourceLanguage?: SupportedLanguage,
 ): boolean {
   return configuration.enabled &&
     hasEnabledImageReadingMethod(configuration) &&
-    !explicitImageLanguagesMatch(configuration);
+    !effectiveImageLanguagesMatch(
+      configuration,
+      fallbackDetectedSourceLanguage,
+    );
+}
+
+function imageTranslationSameLanguagePause(
+  configuration: ImageTranslationConfiguration,
+  fallbackDetectedSourceLanguage?: SupportedLanguage,
+): boolean {
+  return configuration.enabled &&
+    hasEnabledImageReadingMethod(configuration) &&
+    effectiveImageLanguagesMatch(
+      configuration,
+      fallbackDetectedSourceLanguage,
+    );
+}
+
+function imageTranslationSourceObservationEnabled(
+  configuration: ImageTranslationConfiguration,
+): boolean {
+  return configuration.enabled && hasEnabledImageReadingMethod(configuration);
 }
 
 function hasEnabledImageReadingMethod(
@@ -3120,6 +5395,22 @@ function hasEnabledImageReadingMethod(
     configuration.disabledMethodIds ?? [],
     configuration.providerOrder,
   ).length > 0;
+}
+
+function removedEnabledImageReadingMethod(
+  previous: ImageTranslationConfiguration,
+  next: ImageTranslationConfiguration,
+): boolean {
+  const nextMethods = new Set(flattenedReadingMethods(imageReadingExecutionPlan(
+    next.methodOrder ?? next.providerOrder,
+    next.disabledMethodIds ?? [],
+    next.providerOrder,
+  )));
+  return flattenedReadingMethods(imageReadingExecutionPlan(
+    previous.methodOrder ?? previous.providerOrder,
+    previous.disabledMethodIds ?? [],
+    previous.providerOrder,
+  )).some((method) => !nextMethods.has(method));
 }
 
 function accessibilityMethodEnabled(
@@ -3141,11 +5432,27 @@ function schedulerSkipsSmallImages(
     : configuration.skipSmallImages;
 }
 
-function explicitImageLanguagesMatch(
+function effectiveImageLanguagesMatch(
   configuration: ImageTranslationConfiguration,
+  fallbackDetectedSourceLanguage?: SupportedLanguage,
 ): boolean {
-  return configuration.sourceLanguage !== 'auto' &&
-    configuration.sourceLanguage === configuration.targetLanguage;
+  const sourceLanguage = effectiveImageSourceLanguage(
+    configuration,
+    fallbackDetectedSourceLanguage,
+  );
+  return sourceLanguage !== 'auto' &&
+    sourceLanguage === configuration.targetLanguage;
+}
+
+function effectiveImageSourceLanguage(
+  configuration: ImageTranslationConfiguration,
+  fallbackDetectedSourceLanguage?: SupportedLanguage,
+): SupportedLanguage | 'auto' {
+  return configuration.sourceLanguage === 'auto'
+    ? configuration.detectedSourceLanguage ??
+      fallbackDetectedSourceLanguage ??
+      'auto'
+    : configuration.sourceLanguage;
 }
 
 function imageSchedulingReason(
@@ -3173,15 +5480,18 @@ function selectedRecognitionQuality(recognition: Readonly<{
 
 function pairConfigurationKey(
   configuration: ImageTranslationConfiguration,
+  fallbackDetectedSourceLanguage?: SupportedLanguage,
 ): string {
   return [
-    configuration.enabled ? '1' : '0',
-    configuration.sourceLanguage,
-    configuration.detectedSourceLanguage ?? '',
+    imageTranslationConfigurationEnabled(
+      configuration,
+      fallbackDetectedSourceLanguage,
+    ) ? '1' : '0',
+    effectiveImageSourceLanguage(
+      configuration,
+      fallbackDetectedSourceLanguage,
+    ),
     configuration.targetLanguage,
-    configuration.providerOrder.join(','),
-    (configuration.methodOrder ?? []).join(','),
-    (configuration.disabledMethodIds ?? []).join(','),
     configuration.policyFingerprint ?? '',
     configuration.controlImages ? '1' : '0',
     ocrQualityPolicyKey(repairOcrMinimumConfidence(
@@ -3191,17 +5501,417 @@ function pairConfigurationKey(
   ].join(':');
 }
 
+function sourceEvidenceConfigurationKey(
+  configuration: ImageTranslationConfiguration,
+  fallbackDetectedSourceLanguage?: SupportedLanguage,
+): string {
+  return [
+    configuration.enabled ? '1' : '0',
+    effectiveImageSourceLanguage(
+      configuration,
+      fallbackDetectedSourceLanguage,
+    ),
+    imagePageLanguageResolutionBlocksWork(
+      configuration,
+      fallbackDetectedSourceLanguage,
+    ) ? '1' : '0',
+    configuration.policyFingerprint ?? '',
+    configuration.controlImages ? '1' : '0',
+    ocrQualityPolicyKey(repairOcrMinimumConfidence(
+      configuration.ocrMinimumConfidence,
+    )),
+    IMAGE_EVIDENCE_RANKING_POLICY_VERSION,
+    normalizeResetEpoch(configuration.resetEpoch),
+  ].join(':');
+}
+
+function imagePageLanguageResolutionBlocksWork(
+  configuration: ImageTranslationConfiguration,
+  fallbackDetectedSourceLanguage?: SupportedLanguage,
+): boolean {
+  return configuration.sourceLanguage === 'auto' &&
+    effectiveImageSourceLanguage(
+      configuration,
+      fallbackDetectedSourceLanguage,
+    ) === 'auto' &&
+    Boolean(configuration.pageLanguageResolutionPending);
+}
+
 function imageSourcePolicyConfigurationKey(
   configuration: ImageTranslationConfiguration,
 ): string {
   return [
-    configuration.providerOrder.join(','),
-    (configuration.methodOrder ?? configuration.providerOrder).join(','),
-    (configuration.disabledMethodIds ?? []).join(','),
     configuration.policyFingerprint ?? '',
     configuration.controlImages ? '1' : '0',
     accessibilityMethodEnabled(configuration) ? '1' : '0',
   ].join(':');
+}
+
+function rankingOrderConfigurationKey(
+  configuration: ImageTranslationConfiguration,
+): string {
+  return flattenedReadingMethods(imageReadingExecutionPlan(
+    configuration.methodOrder ?? configuration.providerOrder,
+    configuration.disabledMethodIds ?? [],
+    configuration.providerOrder,
+  )).join(',');
+}
+
+function flattenedReadingMethods(
+  steps: readonly ImageReadingExecutionStep[],
+): readonly ImageReadingMethodId[] {
+  return Object.freeze(steps.flatMap((step) =>
+    step.kind === 'accessibility-text'
+      ? [ACCESSIBILITY_TEXT_METHOD_ID]
+      : [...step.providerOrder]
+  ));
+}
+
+function retainedPixelFacts(pixels: AcquiredImagePixels): RetainedPixelFacts {
+  return Object.freeze({
+    pixelHash: pixels.pixelHash,
+    preprocessingVersion: pixels.preprocessingVersion,
+    bitmapWidth: pixels.bitmapWidth,
+    bitmapHeight: pixels.bitmapHeight,
+    cropOffsetXCss: pixels.cropOffsetXCss,
+    cropOffsetYCss: pixels.cropOffsetYCss,
+    cropWidthCss: pixels.cropWidthCss,
+    cropHeightCss: pixels.cropHeightCss,
+    renderedWidthCss: pixels.renderedWidthCss,
+    renderedHeightCss: pixels.renderedHeightCss,
+  });
+}
+
+function retainedOcrProviderContext(
+  providerOrder: readonly ImageTextProviderId[],
+  providerId: ImageTextProviderId,
+  recognition: CompleteImageRecognition,
+): Pick<
+  RetainedOcrImageEvidence,
+  'precedingProviders' | 'requiresPrecedingCorroboration'
+> | undefined {
+  const providerIndex = providerOrder.indexOf(providerId);
+  if (providerIndex < 0) return undefined;
+  return Object.freeze({
+    precedingProviders: new Set(providerOrder.slice(0, providerIndex)),
+    requiresPrecedingCorroboration:
+      selectedRecognitionQuality(recognition).corroboratedRegions > 0,
+  });
+}
+
+function providerContextAllowsReuse(
+  retained: Readonly<{
+    precedingProviders: ReadonlySet<ImageTextProviderId>;
+    requiresPrecedingCorroboration: boolean;
+  }>,
+  currentPreceding: ReadonlySet<ImageTextProviderId>,
+  currentProviders: ReadonlySet<ImageTextProviderId>,
+): boolean {
+  // A newly preceding provider must run because the retained selection never
+  // established that it was unavailable or empty in this position.
+  if ([...currentPreceding].some((providerId) =>
+    !retained.precedingProviders.has(providerId)
+  )) return false;
+  // A filtered result that accepted corroborated regions remains valid while
+  // every provider that supplied its original context is still enabled. Its
+  // relative position can change without changing the retained pixel evidence.
+  return !retained.requiresPrecedingCorroboration ||
+    [...retained.precedingProviders].every((providerId) =>
+      currentProviders.has(providerId)
+    );
+}
+
+function retainedOcrEvidenceForRoute(
+  retained: ReadonlyMap<ImageTextProviderId, RetainedOcrImageEvidence>,
+  routeOutcomes: readonly RetainedOcrRouteOutcome[],
+  steps: readonly ImageReadingExecutionStep[],
+  expectedSourceLanguage: SupportedLanguage | undefined,
+):
+  | Readonly<{
+      status: 'candidate';
+      candidate: RetainedOcrImageEvidence;
+      methodIndex: number;
+    }>
+  | Readonly<{ status: 'empty' | 'missing' }> {
+  let methodIndex = 0;
+  for (const step of steps) {
+    if (step.kind === 'accessibility-text') {
+      methodIndex += 1;
+      continue;
+    }
+    const preceding = new Set<ImageTextProviderId>();
+    const enabledProviders = new Set(step.providerOrder);
+    for (const providerId of step.providerOrder) {
+      const candidate = retained.get(providerId);
+      if (candidate) {
+        if (
+          expectedSourceLanguage &&
+          candidate.sourceLanguage !== expectedSourceLanguage
+        ) return Object.freeze({ status: 'missing' as const });
+        if (!providerContextAllowsReuse(
+          candidate,
+          preceding,
+          enabledProviders,
+        )) {
+          return Object.freeze({ status: 'missing' as const });
+        }
+        return Object.freeze({
+          status: 'candidate' as const,
+          candidate,
+          methodIndex,
+        });
+      }
+      preceding.add(providerId);
+      methodIndex += 1;
+    }
+    if (!expectedSourceLanguage || !routeOutcomes.some((outcome) =>
+      outcome.status === 'empty' &&
+      outcome.sourceLanguage === expectedSourceLanguage &&
+      providerRoutePrefixMatches(step.providerOrder, outcome.providerOrder)
+    )) return Object.freeze({ status: 'missing' as const });
+  }
+  return Object.freeze({ status: 'empty' as const });
+}
+
+function committedAutoLanguageResolution(
+  observed: Extract<AutoLanguageProbeObservationResult, {
+    readonly status: 'resolved';
+  }>,
+  context: Pick<
+    RetainedOcrImageEvidence,
+    'precedingProviders' | 'requiresPrecedingCorroboration'
+  >,
+  autoLanguageConfigurationIdentity: string,
+): CommittedAutoLanguageResolution {
+  return Object.freeze({
+    language: observed.language,
+    evidence: observed.evidence,
+    attempts: observed.attempts,
+    images: observed.images,
+    autoLanguageConfigurationIdentity,
+    precedingProviders: new Set(context.precedingProviders),
+    requiresPrecedingCorroboration:
+      context.requiresPrecedingCorroboration,
+  });
+}
+
+function retainedImageEvidenceWeight(
+  semantic: PendingSemanticImageEvidence | undefined,
+  ocr: ReadonlyMap<ImageTextProviderId, RetainedOcrImageEvidence>,
+  routeOutcomes: readonly RetainedOcrRouteOutcome[],
+): number {
+  let weight = 128;
+  if (semantic) weight += 256 + semantic.evidence.text.length * 2;
+  for (const [providerId, candidate] of ocr) {
+    weight += 384 + providerId.length * 2 +
+      candidate.sourceLanguage.length * 2 +
+      originOcrEvidenceWeight(
+        '',
+        candidate.recognition.result,
+        candidate.precedingProviders,
+      );
+  }
+  for (const outcome of routeOutcomes) {
+    weight += 96 + outcome.status.length * 2 +
+      outcome.sourceLanguage.length * 2 +
+      outcome.providerOrder.reduce(
+        (total, providerId) => total + providerId.length * 2 + 24,
+        0,
+      );
+  }
+  return weight;
+}
+
+function providerRoutePrefixMatches(
+  current: readonly ImageTextProviderId[],
+  retained: readonly ImageTextProviderId[],
+): boolean {
+  return current.length <= retained.length && current.every(
+    (providerId, index) => retained[index] === providerId,
+  );
+}
+
+function progressiveSemanticEvidence(
+  evidence: RankableSemanticImageEvidence,
+): boolean {
+  return !assessSemanticImageEvidence(evidence).provisional;
+}
+
+function semanticCandidateAtMethodIndex(
+  candidate: PendingSemanticImageEvidence,
+  methodIndex: number,
+): PendingSemanticImageEvidence {
+  if (candidate.rankable.methodIndex === methodIndex) return candidate;
+  return Object.freeze({
+    ...candidate,
+    rankable: Object.freeze({
+      ...candidate.rankable,
+      methodIndex,
+    }),
+  });
+}
+
+function semanticCandidateForDescriptor(
+  candidate: PendingSemanticImageEvidence,
+  descriptor: SourceImageDescriptor,
+): PendingSemanticImageEvidence {
+  return Object.freeze({
+    ...candidate,
+    evidence: Object.freeze({
+      ...candidate.evidence,
+      document: descriptor.document,
+      nodeId: descriptor.nodeId,
+      contentRevision: descriptor.contentRevision,
+      observationRevision: descriptor.observationRevision,
+    }),
+  });
+}
+
+function descriptorCaptureRevision(
+  descriptor: SourceImageDescriptor,
+): number {
+  // Protocol-v1 fixtures and older in-memory callers have no separate capture
+  // revision. Content revision is the conservative stable fallback.
+  return descriptor.captureRevision ?? descriptor.contentRevision;
+}
+
+function reusableCompleteRecognition(
+  recognition: CompleteImageRecognition,
+): CompleteImageRecognition {
+  const {
+    continuation: _continuation,
+    cacheAccess: _cacheAccess,
+    cacheStats: _cacheStats,
+    ...reusable
+  } = recognition;
+  return Object.freeze({ ...reusable, cacheHit: true });
+}
+
+function originOcrEvidenceKey(
+  pixels: AcquiredImagePixels,
+  sourceLanguage: SupportedLanguage,
+  providerId: ImageTextProviderId,
+  minimumConfidence: OcrMinimumConfidence,
+): string {
+  return JSON.stringify([
+    ORIGIN_OCR_EVIDENCE_SCHEMA_VERSION,
+    providerId,
+    sourceLanguage,
+    tesseractLanguageGroupFor(sourceLanguage) ?? '',
+    providerId.includes('tesseract') ? TESSERACT_MODEL_VERSION : '',
+    originOcrQualityPolicyIdentity(minimumConfidence),
+    pixels.preprocessingVersion,
+    pixels.bitmapWidth,
+    pixels.bitmapHeight,
+    pixels.pixelHash,
+  ]);
+}
+
+function originOcrQualityPolicyIdentity(
+  minimumConfidence: OcrMinimumConfidence,
+): string {
+  return JSON.stringify([
+    ORIGIN_OCR_EVIDENCE_SCHEMA_VERSION,
+    ORIGIN_OCR_QUALITY_IDENTITY_VERSION,
+    ocrQualityPolicyKey(minimumConfidence),
+    IMAGE_EVIDENCE_RANKING_POLICY_VERSION,
+  ]);
+}
+
+type PixelIdentityFacts = Pick<
+  AcquiredImagePixels,
+  'preprocessingVersion' | 'bitmapWidth' | 'bitmapHeight' | 'pixelHash'
+>;
+
+function originOcrPixelIdentity(pixels: PixelIdentityFacts): string {
+  return JSON.stringify([
+    'origin-image-pixels-v1',
+    pixels.preprocessingVersion,
+    pixels.bitmapWidth,
+    pixels.bitmapHeight,
+    pixels.pixelHash,
+  ]);
+}
+
+function originFinalAnalysisKey(
+  pixels: PixelIdentityFacts,
+  sourceLanguage: SupportedLanguage,
+  finalConfigurationKey: string,
+): string {
+  return JSON.stringify([
+    ORIGIN_FINAL_ANALYSIS_SCHEMA_VERSION,
+    originOcrPixelIdentity(pixels),
+    sourceLanguage,
+    finalConfigurationKey,
+  ]);
+}
+
+function freezeTranslatedRegions(
+  regions: readonly TranslatedImageRegion[],
+): readonly TranslatedImageRegion[] {
+  return Object.freeze(regions.map((region) => Object.freeze({
+    ...region,
+    boundingBox: Object.freeze({ ...region.boundingBox }),
+  })));
+}
+
+function finalAnalysisWeight(
+  key: string,
+  regions: readonly TranslatedImageRegion[],
+): number {
+  return 256 + key.length * 2 + regions.reduce(
+    (weight, region) => weight + region.text.length * 2 + 96,
+    0,
+  );
+}
+
+function originOcrEvidenceWeight(
+  key: string,
+  result: ImageTextResult,
+  precedingProviders: ReadonlySet<ImageTextProviderId> = new Set(),
+  autoLanguageResolution?: CommittedAutoLanguageResolution,
+  qualityPolicyIdentity = '',
+): number {
+  return 256 + key.length * 2 + result.transcript.length * 2 +
+    result.regions.reduce(
+      (weight, region) => weight + region.text.length * 2 + 64,
+      0,
+    ) + [...precedingProviders].reduce(
+      (weight, providerId) => weight + providerId.length * 2 + 24,
+      0,
+    ) + (autoLanguageResolution
+      ? 128 + autoLanguageResolution.language.length * 2 +
+        autoLanguageResolution.evidence.length * 2 +
+        autoLanguageResolution.autoLanguageConfigurationIdentity.length * 2 +
+        [...autoLanguageResolution.precedingProviders].reduce(
+          (weight, providerId) => weight + providerId.length * 2 + 24,
+          0,
+        )
+      : 0) + qualityPolicyIdentity.length * 2;
+}
+
+function autoLanguageProbeMinimumConfidence(
+  configured: OcrMinimumConfidence | undefined,
+): OcrMinimumConfidence {
+  const repaired = repairOcrMinimumConfidence(configured);
+  return repaired < AUTO_LANGUAGE_PROBE_MINIMUM_CONFIDENCE
+    ? AUTO_LANGUAGE_PROBE_MINIMUM_CONFIDENCE
+    : repaired;
+}
+
+function topPageSourceScopeIdentity(
+  value: string | undefined,
+): string | undefined {
+  if (value === undefined) return undefined;
+  try {
+    const url = new URL(value);
+    if (url.protocol === 'http:' || url.protocol === 'https:') {
+      return `origin:${url.origin}`;
+    }
+    return undefined;
+  } catch {
+    return undefined;
+  }
 }
 
 async function sha256Hex(value: string): Promise<string> {
@@ -3216,18 +5926,34 @@ function autoLanguageProbeConfigurationKey(
   configuration: ImageTranslationConfiguration,
 ): string {
   return [
-    configuration.enabled ? '1' : '0',
     configuration.sourceLanguage,
-    configuration.detectedSourceLanguage ?? '',
-    configuration.providerOrder.join(','),
-    (configuration.methodOrder ?? configuration.providerOrder).join(','),
-    (configuration.disabledMethodIds ?? []).join(','),
-    configuration.policyFingerprint ?? '',
-    configuration.controlImages ? '1' : '0',
-    accessibilityMethodEnabled(configuration) ? '1' : '0',
-    ocrQualityPolicyKey(repairOcrMinimumConfidence(
-      configuration.ocrMinimumConfidence,
-    )),
+    autoLanguageProbeRuntimeConfigurationKey(configuration),
+  ].join(':');
+}
+
+function autoLanguageProbeRuntimeConfigurationKey(
+  configuration: ImageTranslationConfiguration,
+): string {
+  const enabledMethods = flattenedReadingMethods(imageReadingExecutionPlan(
+    configuration.methodOrder ?? configuration.providerOrder,
+    configuration.disabledMethodIds ?? [],
+    configuration.providerOrder,
+  ));
+  const enabledProviders = enabledMethods.filter(
+    (method): method is ImageTextProviderId =>
+      method !== ACCESSIBILITY_TEXT_METHOD_ID,
+  );
+  return [
+    configuration.enabled ? '1' : '0',
+    autoImageLanguageConfigurationKey({
+      providerOrder: enabledProviders,
+      enabledMethodOrder: enabledMethods,
+      minimumConfidence: repairOcrMinimumConfidence(
+        configuration.ocrMinimumConfidence,
+      ),
+      policyFingerprint: configuration.policyFingerprint ?? '',
+      controlImages: configuration.controlImages === true,
+    }),
     IMAGE_EVIDENCE_RANKING_POLICY_VERSION,
   ].join(':');
 }

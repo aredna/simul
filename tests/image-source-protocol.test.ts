@@ -2,6 +2,7 @@ import { describe, expect, it } from 'vitest';
 
 import type { SourceImageDescriptor } from '../lib/ocr/contracts';
 import {
+  IMAGE_SOURCE_PROTOCOL_VERSION,
   createImageSourcePortName,
   readImageSourceControllerMessage,
   readImageSourcePortIdentity,
@@ -55,14 +56,14 @@ describe('image source protocol', () => {
     const name = createImageSourcePortName(documentIdentity.sessionId);
     expect(readImageSourcePortSessionId(name)).toBe(documentIdentity.sessionId);
     expect(readImageSourceControllerMessage({
-      kind: 'simul:image-source-v1:start',
+      kind: 'simul:image-source-v2:start',
       document: documentIdentity,
     }, documentIdentity.sessionId)).toEqual({
-      kind: 'simul:image-source-v1:start',
+      kind: 'simul:image-source-v2:start',
       document: documentIdentity,
     });
     expect(readImageSourceControllerMessage({
-      kind: 'simul:image-source-v1:measure',
+      kind: 'simul:image-source-v2:measure',
       requestId: 'request-1',
       descriptor,
     }, documentIdentity.sessionId, documentIdentity)).toMatchObject({
@@ -71,29 +72,26 @@ describe('image source protocol', () => {
     });
   });
 
-  it('routes each image Port to exactly one replica bridge owner', () => {
-    const rrweb = createImageSourcePortName(documentIdentity.sessionId, 'rrweb');
+  it('routes each image Port to the isolated replica owner', () => {
+    expect(IMAGE_SOURCE_PROTOCOL_VERSION).toBe(2);
     const isolated = createImageSourcePortName(
       documentIdentity.sessionId,
       'isolated-html',
     );
-    expect(readImageSourcePortIdentity(rrweb, 'rrweb')).toEqual({
-      bridge: 'rrweb',
-      sessionId: documentIdentity.sessionId,
-    });
-    expect(readImageSourcePortIdentity(rrweb, 'isolated-html')).toBeUndefined();
     expect(readImageSourcePortIdentity(isolated, 'isolated-html')).toEqual({
       bridge: 'isolated-html',
       sessionId: documentIdentity.sessionId,
     });
-    expect(readImageSourcePortIdentity(isolated, 'rrweb')).toBeUndefined();
-    expect(readImageSourcePortSessionId('simul:image-source-v1:legacy-session'))
+    expect(readImageSourcePortSessionId('simul:image-source-v2:legacy-session'))
       .toBeUndefined();
+    expect(readImageSourcePortSessionId(
+      `simul:image-source-v1:legacy:${documentIdentity.sessionId}`,
+    )).toBeUndefined();
   });
 
   it('admits accessibility text only through an explicit policy-bound read', () => {
     expect(readImageSourceControllerMessage({
-      kind: 'simul:image-source-v1:start',
+      kind: 'simul:image-source-v2:start',
       document: documentIdentity,
       policyFingerprint: 'read-v1-111000',
       controlImages: true,
@@ -104,21 +102,21 @@ describe('image source protocol', () => {
       accessibilityTextEnabled: true,
     });
     expect(readImageSourceControllerMessage({
-      kind: 'simul:image-source-v1:start',
+      kind: 'simul:image-source-v2:start',
       document: documentIdentity,
       policyFingerprint: 'read-v1-101000',
       controlImages: true,
       accessibilityTextEnabled: true,
     }, documentIdentity.sessionId)).toBeUndefined();
     expect(readImageSourceControllerMessage({
-      kind: 'simul:image-source-v1:accessibility-text',
+      kind: 'simul:image-source-v2:accessibility-text',
       requestId: 'alt-1',
       descriptor,
       policyFingerprint: 'read-v1-111000',
       controlImages: true,
     }, documentIdentity.sessionId, documentIdentity)).toBeDefined();
     expect(readImageSourceRecorderMessage({
-      kind: 'simul:image-source-v1:accessibility-text',
+      kind: 'simul:image-source-v2:accessibility-text',
       requestId: 'alt-1',
       descriptor,
       status: 'ready',
@@ -136,7 +134,7 @@ describe('image source protocol', () => {
       evidence: { source: 'alt', nearestElementLanguage: 'ja' },
     });
     expect(readImageSourceControllerMessage({
-      kind: 'simul:image-source-v1:accessibility-text',
+      kind: 'simul:image-source-v2:accessibility-text',
       requestId: 'alt-1',
       descriptor,
       policyFingerprint: 'forged',
@@ -146,7 +144,7 @@ describe('image source protocol', () => {
 
   it('revalidates canonical accessibility text at the receiver boundary', () => {
     const ready = (text: string) => readImageSourceRecorderMessage({
-      kind: 'simul:image-source-v1:accessibility-text',
+      kind: 'simul:image-source-v2:accessibility-text',
       requestId: 'alt-canonical',
       descriptor,
       status: 'ready',
@@ -177,13 +175,13 @@ describe('image source protocol', () => {
 
   it('rejects extra fields, wrong documents, URLs, and malformed geometry', () => {
     expect(readImageSourceControllerMessage({
-      kind: 'simul:image-source-v1:measure',
+      kind: 'simul:image-source-v2:measure',
       requestId: 'request-1',
       descriptor,
       url: 'https://private.example/image.png',
     }, documentIdentity.sessionId, documentIdentity)).toBeUndefined();
     expect(readImageSourceControllerMessage({
-      kind: 'simul:image-source-v1:measure',
+      kind: 'simul:image-source-v2:measure',
       requestId: 'request-1',
       descriptor: {
         ...descriptor,
@@ -202,22 +200,22 @@ describe('image source protocol', () => {
 
   it('parses changes and capture responses without disclosing source data', () => {
     const ready = readImageSourceRecorderMessage({
-      kind: 'simul:image-source-v1:ready',
+      kind: 'simul:image-source-v2:ready',
       document: documentIdentity,
       summary: { candidateImages: 4, observedImages: 3 },
     }, documentIdentity);
     const change = readImageSourceRecorderMessage({
-      kind: 'simul:image-source-v1:change',
+      kind: 'simul:image-source-v2:change',
       change: { kind: 'upsert', descriptor },
     }, documentIdentity);
     const response = readImageSourceRecorderMessage({
-      kind: 'simul:image-source-v1:metrics',
+      kind: 'simul:image-source-v2:metrics',
       requestId: 'request-1',
       status: 'ready',
       metrics,
     }, documentIdentity);
     expect(ready).toEqual({
-      kind: 'simul:image-source-v1:ready',
+      kind: 'simul:image-source-v2:ready',
       document: documentIdentity,
       summary: { candidateImages: 4, observedImages: 3 },
     });
@@ -237,12 +235,12 @@ describe('image source protocol', () => {
       { ...metrics, nearestElementLanguage: 'en' },
     )).toBe(false);
     expect(readImageSourceRecorderMessage({
-      kind: 'simul:image-source-v1:ready',
+      kind: 'simul:image-source-v2:ready',
       document: documentIdentity,
       summary: { candidateImages: 1, observedImages: 2 },
     }, documentIdentity)).toBeUndefined();
     expect(readImageSourceRecorderMessage({
-      kind: 'simul:image-source-v1:ready',
+      kind: 'simul:image-source-v2:ready',
       document: { ...documentIdentity, documentId: 'wrong-document' },
       summary: { candidateImages: 1, observedImages: 1 },
     }, documentIdentity)).toBeUndefined();

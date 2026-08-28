@@ -82,7 +82,7 @@ describe('OCR result quality', () => {
     ], 'chrome-text-detector');
     const corroborator = result([
       region('A B', 0.9, { x: 12, y: 10, width: 78, height: 20 }),
-    ], 'paddleocr-wasm');
+    ], 'tesseract');
     const filtered = filterImageTextResult(primary, {
       minimumConfidence: 0.65,
       corroboratingResults: [corroborator],
@@ -148,34 +148,13 @@ describe('OCR result quality', () => {
       minimumConfidence: 0.65,
       corroboratingResults: [result([
         region('matched', 0.9),
-      ], 'paddleocr-wasm')],
+      ], 'tesseract')],
     });
 
     expect(acceptedWithoutScores.hasAcceptedText).toBe(true);
     expect(acceptedWithoutScores.result).not.toHaveProperty(
       'transcriptConfidence',
     );
-  });
-
-  it('never treats two Tesseract bindings as independent corroborators', () => {
-    const primary = result([
-      region('same engine', 0.5),
-    ], 'tesseract-wasm-direct');
-    const sameFamily = result([
-      region('same engine', 0.9),
-    ], 'tesseract');
-    const independent = result([
-      region('same engine', 0.9),
-    ], 'paddleocr-wasm');
-
-    expect(filterImageTextResult(primary, {
-      minimumConfidence: 0.65,
-      corroboratingResults: [sameFamily],
-    }).hasAcceptedText).toBe(false);
-    expect(filterImageTextResult(primary, {
-      minimumConfidence: 0.65,
-      corroboratingResults: [independent],
-    }).hasAcceptedText).toBe(true);
   });
 
   it('exposes only the persisted 0.25–0.95 threshold steps', () => {

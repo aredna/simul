@@ -1,5 +1,5 @@
 import type { ReplicaCaptureRequest } from './contracts';
-import { createReplicaIdentity } from './protocol-v2';
+import { createReplicaIdentity } from './replica-identity';
 import type { ReplicaReadScope } from './read-scope-policy';
 import { replicaReadScopeFingerprint } from './read-scope-policy';
 import {

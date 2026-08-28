@@ -132,6 +132,91 @@ describe('PixelAcquisitionCoordinator', () => {
     });
   });
 
+  it.each([
+    [2, 36],
+    [36, 2],
+  ] as const)('defers a final %sx%s visible sliver before surface creation', async (
+    visibleWidth,
+    visibleHeight,
+  ) => {
+    const sliverMetrics = {
+      ...metrics,
+      left: visibleWidth - 200,
+      top: visibleHeight - 200,
+      width: 200,
+      height: 200,
+      viewportWidth: 100,
+      viewportHeight: 100,
+    };
+    const close = vi.fn();
+    const createSurface = vi.fn((width: number, height: number) => ({
+      width,
+      height,
+      getContext: () => ({ drawImage: vi.fn() }),
+      convertToBlob: async () => new Blob([new Uint8Array([1])], {
+        type: 'image/png',
+      }),
+    }));
+    const digest = vi.fn(async () => new Uint8Array(32).buffer);
+    const environment = {
+      ...fakeEnvironment(fakeSource([sliverMetrics, sliverMetrics])),
+      decode: async () => ({ width: 100, height: 100, close }),
+      createSurface,
+      digest,
+    };
+
+    await expect(new PixelAcquisitionCoordinator(environment).acquire(descriptor))
+      .resolves.toEqual({
+        status: 'deferred',
+        reason: 'too-small-visible',
+      });
+    expect(createSurface).not.toHaveBeenCalled();
+    expect(digest).not.toHaveBeenCalled();
+    expect(close).toHaveBeenCalledOnce();
+  });
+
+  it('keeps a final 3x36 visible crop eligible for OCR', async () => {
+    const boundaryMetrics = {
+      ...metrics,
+      left: -197,
+      top: -164,
+      width: 200,
+      height: 200,
+      viewportWidth: 100,
+      viewportHeight: 100,
+    };
+    const createSurface = vi.fn((width: number, height: number) => ({
+      width,
+      height,
+      getContext: () => ({ drawImage: vi.fn() }),
+      convertToBlob: async () => new Blob([new Uint8Array([1])], {
+        type: 'image/png',
+      }),
+    }));
+    const environment = {
+      ...fakeEnvironment(fakeSource([boundaryMetrics, boundaryMetrics])),
+      decode: async () => ({
+        width: 100,
+        height: 100,
+        close: vi.fn(),
+      }),
+      createSurface,
+    };
+
+    const result = await new PixelAcquisitionCoordinator(environment)
+      .acquire(descriptor);
+
+    expect(result).toMatchObject({
+      status: 'ready',
+      pixels: {
+        bitmapWidth: 3,
+        bitmapHeight: 36,
+        preprocessingVersion: OCR_NATIVE_PREPROCESSING_VERSION,
+      },
+    });
+    expect(createSurface).toHaveBeenCalledWith(3, 36);
+  });
+
   it('upscales a shallow banner while retaining original CSS geometry', async () => {
     const bannerMetrics = {
       ...metrics,

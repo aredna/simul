@@ -154,4 +154,45 @@ describe('sidepanel Auto image-language reconciliation', () => {
     expect(navigation).toContain("resolvedSourceLanguageOrigin === 'image'");
     expect(navigation).toContain('clearAutoImageLanguageResolution()');
   });
+
+  it('revokes only matching current-document image evidence before reconciling Auto', () => {
+    const callback = script.slice(
+      script.indexOf('function handleAutoImageLanguageInvalidated'),
+      script.indexOf('async function reconcileAutoDetectedImageLanguage'),
+    );
+    expect(callback).toContain("resolvedSourceLanguageOrigin !== 'image'");
+    expect(callback).toContain(
+      '!sameSourceDocument(resolvedImageLanguageDocument, document)',
+    );
+    expect(callback).toContain('!currentReplicaDocumentMatches(document)');
+    expect(callback).toContain("preferences.sourceLanguage !== 'auto'");
+    expect(callback).toContain("resolvedSourceLanguageOrigin = 'explicit'");
+    expect(callback).toContain('resolvedImageLanguageDocument = undefined');
+    expect(callback).toContain('clearAutoImageLanguageResolution()');
+    expect(callback).toContain('queueMicrotask(() =>');
+    expect(callback).toContain('void applyLanguagePreferences(false)');
+  });
+
+  it('keeps unchanged effective-pair work and image provenance across an explicit toggle', () => {
+    const resolver = script.slice(
+      script.indexOf('async function resolveSelectedSourceLanguage'),
+      script.indexOf('function commitAutoDetectedImageLanguage'),
+    );
+    expect(resolver).toContain('unchangedExplicitImageLanguage');
+    expect(resolver).toContain('previousLanguage === detected.language');
+    expect(resolver).toContain('previousImageDocumentIsCurrent');
+
+    const preferences = script.slice(
+      script.indexOf('async function applyLanguagePreferences'),
+      script.indexOf('async function checkAvailability'),
+    );
+    expect(preferences).toContain(
+      'const effectivePairChanged = !sameTranslationPair(previousPair, nextPair)',
+    );
+    expect(preferences.indexOf('if (effectivePairChanged)'))
+      .toBeLessThan(preferences.indexOf('activeAbortController?.abort()'));
+    expect(preferences).toContain(
+      'if (!effectivePairChanged && translationComplete)',
+    );
+  });
 });

@@ -13,6 +13,7 @@ import type { SourceImageDescriptor } from '../lib/ocr/contracts';
 import { createImageSourcePortName } from '../lib/ocr/image-source-protocol';
 import { SourceImageObserver } from '../lib/ocr/source-image-observer';
 import type { ReplicaSourceDocumentIdentity } from '../lib/replica/source-identity';
+import { createSourceControlledContentPolicy } from '../lib/replica/source-privacy-policy';
 import { sourceDocumentSecretClassifier } from '../lib/replica/source-secret-classifier';
 
 const baseStyle = {
@@ -63,18 +64,97 @@ describe('image source capture safety', () => {
     });
 
     port.emitMessage({
-      kind: 'simul:image-source-v1:start',
+      kind: 'simul:image-source-v2:start',
       document: identity,
     });
 
     expect(port.messages.at(-1)).toEqual({
-      kind: 'simul:image-source-v1:ready',
+      kind: 'simul:image-source-v2:ready',
       document: identity,
       summary: { candidateImages: 2, observedImages: 1 },
     });
     expect(JSON.stringify(port.messages.at(-1))).not.toMatch(
       /(?:src|url|pixels|text|hash|nodeId)/iu,
     );
+    session.dispose();
+  });
+
+  it('refreshes only the requested image before validating its descriptor', () => {
+    const { document, window } = parseHTML(
+      '<html><body>' +
+      '<img id="target"><img id="peer">' +
+      '</body></html>',
+    );
+    const target = document.querySelector<HTMLImageElement>('#target')!;
+    const peer = document.querySelector<HTMLImageElement>('#peer')!;
+    setImageFacts(target);
+    setImageFacts(peer);
+    const identity: ReplicaSourceDocumentIdentity = {
+      sessionId: 'targeted-image-refresh-session',
+      pageEpoch: 1,
+      generation: 1,
+      documentId: 'targeted-image-refresh-document',
+      frameId: 0,
+    };
+    const port = new FakeImageSourcePort(
+      createImageSourcePortName(identity.sessionId),
+    );
+    let globalRefreshes = 0;
+    const session = new ImageSourceSession({
+      port,
+      document: document as unknown as Document,
+      window: window as unknown as Window,
+      resolveNode: (nodeId) => nodeId === 7 ? target : nodeId === 9 ? peer : null,
+      getNodeId: (image) => image === target ? 7 : image === peer ? 9 : undefined,
+      createObserver: (environment) => {
+        const beforeRefreshAll = environment.beforeRefreshAll;
+        return new SourceImageObserver({
+          ...environment,
+          beforeRefreshAll: () => {
+            globalRefreshes += 1;
+            beforeRefreshAll?.();
+          },
+          createIntersectionObserver: (callback) =>
+            new ImmediateIntersectionObserver(callback),
+          createResizeObserver: () => new NoopElementObserver(),
+          createMutationObserver: () => new NoopMutationObserver(),
+        });
+      },
+    });
+
+    port.emitMessage({
+      kind: 'simul:image-source-v2:start',
+      document: identity,
+    });
+    const initialTarget = lastUpsertDescriptorForNode(port.messages, 7)!;
+    const initialPeer = lastUpsertDescriptorForNode(port.messages, 9)!;
+    expect(initialTarget).toBeDefined();
+    expect(initialPeer).toBeDefined();
+    const refreshesAfterStart = globalRefreshes;
+    const messagesBeforeRequest = port.messages.length;
+
+    target.setAttribute('alt', 'Second label');
+    port.emitMessage({
+      kind: 'simul:image-source-v2:measure',
+      requestId: 'targeted-stale-measure',
+      descriptor: initialTarget,
+    });
+
+    expect(globalRefreshes).toBe(refreshesAfterStart);
+    expect(port.messages.at(-1)).toMatchObject({
+      kind: 'simul:image-source-v2:metrics',
+      requestId: 'targeted-stale-measure',
+      status: 'stale',
+    });
+    expect(lastUpsertDescriptorForNode(
+      port.messages.slice(messagesBeforeRequest),
+      7,
+    )?.contentRevision).toBeGreaterThan(initialTarget.contentRevision);
+    expect(lastUpsertDescriptorForNode(
+      port.messages.slice(messagesBeforeRequest),
+      9,
+    )).toBeUndefined();
+    expect(lastUpsertDescriptorForNode(port.messages, 9)).toEqual(initialPeer);
     session.dispose();
   });
 
@@ -114,7 +194,7 @@ describe('image source capture safety', () => {
         }),
       });
       port.emitMessage({
-        kind: 'simul:image-source-v1:start',
+        kind: 'simul:image-source-v2:start',
         document: identity,
       });
       return { port, session };
@@ -191,7 +271,7 @@ describe('image source capture safety', () => {
     });
 
     port.emitMessage({
-      kind: 'simul:image-source-v1:start',
+      kind: 'simul:image-source-v2:start',
       document: targetIdentity,
       policyFingerprint: 'read-v1-111111',
       controlImages: true,
@@ -200,7 +280,7 @@ describe('image source capture safety', () => {
     Reflect.deleteProperty(window, 'getComputedStyle');
 
     expect(port.messages.at(-1)).toMatchObject({
-      kind: 'simul:image-source-v1:ready',
+      kind: 'simul:image-source-v2:ready',
       summary: { candidateImages: 1, observedImages: 0 },
     });
     expect(altReads).toBe(0);
@@ -277,6 +357,319 @@ describe('image source capture safety', () => {
     expect(hasSourceAriaControlledRegionAncestor(image)).toBe(false);
   });
 
+  it('uses bounded shared aria-controls rules for duplicate, cyclic, and cross-root targets', () => {
+    const { document } = parseHTML(
+      '<html><body>' +
+      '<button aria-controls="duplicate">Duplicate</button>' +
+      '<div id="duplicate"><img id="first"></div>' +
+      '<div id="duplicate"><img id="second"></div>' +
+      '<div id="cycle-a" aria-controls="cycle-b">' +
+      '<div id="cycle-b" aria-controls="cycle-a"><img id="cycle"></div>' +
+      '</div><button id="shadow-trigger" aria-controls="shadow-panel">Shadow</button>' +
+      '<div id="host"></div><img id="unrelated"></body></html>',
+    );
+    const host = document.querySelector('#host')!;
+    const shadow = host.attachShadow({ mode: 'open' });
+    // linkedom does not currently expose ShadowRoot.mode, while browsers do.
+    Object.defineProperty(shadow, 'mode', { value: 'open' });
+    shadow.innerHTML = '<div id="shadow-panel"><img id="shadow-image"></div>';
+    const policy = createSourceControlledContentPolicy(
+      document as unknown as Document,
+      document.defaultView as unknown as Window,
+    );
+
+    expect(hasSourceAriaControlledRegionAncestor(
+      document.querySelector<HTMLImageElement>('#first')!,
+      policy,
+    )).toBe(true);
+    expect(hasSourceAriaControlledRegionAncestor(
+      document.querySelector<HTMLImageElement>('#second')!,
+      policy,
+    )).toBe(true);
+    expect(hasSourceAriaControlledRegionAncestor(
+      document.querySelector<HTMLImageElement>('#cycle')!,
+      policy,
+    )).toBe(true);
+    expect(hasSourceAriaControlledRegionAncestor(
+      shadow.querySelector<HTMLImageElement>('#shadow-image')!,
+      policy,
+    )).toBe(true);
+    expect(hasSourceAriaControlledRegionAncestor(
+      document.querySelector<HTMLImageElement>('#unrelated')!,
+      policy,
+    )).toBe(false);
+
+    const overflow = createSourceControlledContentPolicy(
+      document as unknown as Document,
+      document.defaultView as unknown as Window,
+      1,
+    );
+    expect(overflow.overflow).toBe(true);
+    expect(hasSourceAriaControlledRegionAncestor(
+      document.querySelector<HTMLImageElement>('#unrelated')!,
+      overflow,
+    )).toBe(true);
+  });
+
+  it('refreshes tab image admission before A to B to A mutation reads', () => {
+    const { document, window } = parseHTML(
+      '<html><body>' +
+      '<div id="tab-a" role="tab" aria-selected="true" aria-expanded="true" ' +
+      'aria-controls="panel-a">A</div>' +
+      '<div id="tab-b" role="tab" aria-selected="false" aria-expanded="false" ' +
+      'aria-controls="panel-b">B</div>' +
+      '<section id="panel-a" role="tabpanel"><img id="image-a" alt="A image"></section>' +
+      '<section id="panel-b" role="tabpanel" hidden><img id="image-b" alt="B image"></section>' +
+      '<section id="carousel"><img id="carousel-image" alt="Carousel"></section>' +
+      '</body></html>',
+    );
+    const tabA = document.querySelector('#tab-a')!;
+    const tabB = document.querySelector('#tab-b')!;
+    const panelA = document.querySelector('#panel-a')!;
+    const panelB = document.querySelector('#panel-b')!;
+    const carousel = document.querySelector('#carousel')!;
+    const imageA = document.querySelector<HTMLImageElement>('#image-a')!;
+    const imageB = document.querySelector<HTMLImageElement>('#image-b')!;
+    const carouselImage = document.querySelector<HTMLImageElement>(
+      '#carousel-image',
+    )!;
+    for (const image of [imageA, imageB, carouselImage]) setImageFacts(image);
+    for (const element of [
+      document.documentElement,
+      document.body,
+      tabA,
+      tabB,
+      panelA,
+      panelB,
+    ]) setPaintFacts(element);
+    Object.defineProperties(window, {
+      innerWidth: { configurable: true, value: 800 },
+      innerHeight: { configurable: true, value: 600 },
+      scrollX: { configurable: true, value: 0 },
+      scrollY: { configurable: true, value: 0 },
+      devicePixelRatio: { configurable: true, value: 1 },
+    });
+    let controlledStyleReads = 0;
+    Object.defineProperty(window, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => {
+        if ([tabA, tabB, panelA, panelB].includes(element)) {
+          controlledStyleReads += 1;
+        }
+        const hidden = element.hasAttribute('hidden');
+        return {
+          ...baseStyle,
+          display: hidden ? 'none' : 'block',
+          getPropertyValue: (name: string) => {
+            if (name === 'content-visibility') return 'visible';
+            if (name === 'clip' || name === 'clip-path') return 'none';
+            if (name === 'overflow-x' || name === 'overflow-y') return 'visible';
+            return '';
+          },
+        } as unknown as CSSStyleDeclaration;
+      },
+    });
+    const readsA = observeImageContentReads(imageA);
+    const readsB = observeImageContentReads(imageB);
+    const identity: ReplicaSourceDocumentIdentity = {
+      sessionId: 'controlled-image-transition-session',
+      pageEpoch: 1,
+      generation: 1,
+      documentId: 'controlled-image-transition-document',
+      frameId: 0,
+    };
+    const port = new FakeImageSourcePort(
+      createImageSourcePortName(identity.sessionId),
+    );
+    const mutation = new NoopMutationObserver();
+    const nodeIds = new Map<HTMLImageElement, number>([
+      [imageA, 7],
+      [imageB, 9],
+      [carouselImage, 11],
+    ]);
+    const session = new ImageSourceSession({
+      port,
+      document: document as unknown as Document,
+      window: window as unknown as Window,
+      resolveNode: (nodeId) =>
+        [...nodeIds].find(([, id]) => id === nodeId)?.[0] ?? null,
+      getNodeId: (image) => nodeIds.get(image),
+      createObserver: (environment) => new SourceImageObserver({
+        ...environment,
+        createIntersectionObserver: (callback) =>
+          new ImmediateIntersectionObserver(callback),
+        createResizeObserver: () => new NoopElementObserver(),
+        createMutationObserver: (callback) => {
+          mutation.callback = callback;
+          return mutation;
+        },
+      }),
+    });
+
+    port.emitMessage({
+      kind: 'simul:image-source-v2:start',
+      document: identity,
+      policyFingerprint: 'read-v1-101000',
+      controlImages: false,
+      accessibilityTextEnabled: true,
+    });
+    const initialDescriptorA = lastUpsertDescriptorForNode(port.messages, 7)!;
+    expect(initialDescriptorA).toBeDefined();
+    expect(lastUpsertDescriptorForNode(port.messages, 9)).toBeUndefined();
+    expect(lastUpsertDescriptorForNode(port.messages, 11)).toBeDefined();
+
+    readsA.reset();
+    readsB.reset();
+    const beforeAtoB = port.messages.length;
+    setTabSelection(tabA, panelA, false);
+    setTabSelection(tabB, panelB, true);
+    mutation.trigger([
+      mutationAttributeRecord(tabA, 'aria-selected'),
+      mutationAttributeRecord(tabA, 'aria-expanded'),
+      mutationAttributeRecord(tabB, 'aria-selected'),
+      mutationAttributeRecord(tabB, 'aria-expanded'),
+      mutationAttributeRecord(panelA, 'hidden'),
+      mutationAttributeRecord(panelB, 'hidden'),
+    ]);
+
+    expect(readsA.snapshot()).toEqual({ label: 0, geometry: 0 });
+    expect(readsB.snapshot().label).toBeGreaterThan(0);
+    expect(readsB.snapshot().geometry).toBeGreaterThan(0);
+    expect(port.messages.slice(beforeAtoB)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'simul:image-source-v2:change',
+        change: expect.objectContaining({ kind: 'remove', nodeId: 7 }),
+      }),
+      expect.objectContaining({
+        kind: 'simul:image-source-v2:change',
+        change: expect.objectContaining({
+          kind: 'upsert',
+          descriptor: expect.objectContaining({ nodeId: 9 }),
+        }),
+      }),
+    ]));
+
+    readsA.reset();
+    port.emitMessage({
+      kind: 'simul:image-source-v2:accessibility-text',
+      requestId: 'inactive-a',
+      descriptor: initialDescriptorA,
+      policyFingerprint: 'read-v1-101000',
+      controlImages: false,
+    });
+    expect(port.messages.at(-1)).toMatchObject({
+      requestId: 'inactive-a',
+      status: 'stale',
+    });
+    expect(readsA.snapshot()).toEqual({ label: 0, geometry: 0 });
+
+    const controlledReadsBeforeCarouselChurn = controlledStyleReads;
+    carousel.classList.add('moving');
+    mutation.trigger([mutationAttributeRecord(carousel, 'class')]);
+    // The carousel already contains an image, but its class remains arbitrary
+    // CSS selector surface for remote controlled panels. One global,
+    // content-free proof is required even when no descriptor ultimately
+    // changes.
+    expect(controlledStyleReads).toBeGreaterThan(
+      controlledReadsBeforeCarouselChurn,
+    );
+
+    readsA.reset();
+    readsB.reset();
+    const beforeBtoA = port.messages.length;
+    setTabSelection(tabA, panelA, true);
+    setTabSelection(tabB, panelB, false);
+    mutation.trigger([
+      mutationAttributeRecord(tabA, 'aria-selected'),
+      mutationAttributeRecord(tabA, 'aria-expanded'),
+      mutationAttributeRecord(tabB, 'aria-selected'),
+      mutationAttributeRecord(tabB, 'aria-expanded'),
+      mutationAttributeRecord(panelA, 'hidden'),
+      mutationAttributeRecord(panelB, 'hidden'),
+    ]);
+
+    expect(readsB.snapshot()).toEqual({ label: 0, geometry: 0 });
+    expect(readsA.snapshot().label).toBeGreaterThan(0);
+    expect(readsA.snapshot().geometry).toBeGreaterThan(0);
+    expect(port.messages.slice(beforeBtoA)).toEqual(expect.arrayContaining([
+      expect.objectContaining({
+        kind: 'simul:image-source-v2:change',
+        change: expect.objectContaining({ kind: 'remove', nodeId: 9 }),
+      }),
+      expect.objectContaining({
+        kind: 'simul:image-source-v2:change',
+        change: expect.objectContaining({
+          kind: 'upsert',
+          descriptor: expect.objectContaining({ nodeId: 7 }),
+        }),
+      }),
+    ]));
+    session.dispose();
+  });
+
+  it('coalesces relationship-selector reproof when control images are enabled', () => {
+    const { document, window } = parseHTML(
+      '<html><body><div id="controller" aria-controls="panel"></div>' +
+      '<section id="panel"><img id="image" alt="Public control image"></section>' +
+      '</body></html>',
+    );
+    const controller = document.querySelector('#controller')!;
+    const panel = document.querySelector('#panel')!;
+    const image = document.querySelector<HTMLImageElement>('#image')!;
+    setImageFacts(image);
+    const reads = observeImageContentReads(image);
+    const identity: ReplicaSourceDocumentIdentity = {
+      sessionId: 'enabled-control-image-mutation-session',
+      pageEpoch: 1,
+      generation: 1,
+      documentId: 'enabled-control-image-mutation-document',
+      frameId: 0,
+    };
+    const port = new FakeImageSourcePort(
+      createImageSourcePortName(identity.sessionId),
+    );
+    const mutation = new NoopMutationObserver();
+    const session = new ImageSourceSession({
+      port,
+      document: document as unknown as Document,
+      window: window as unknown as Window,
+      resolveNode: (nodeId) => nodeId === 7 ? image : null,
+      getNodeId: (candidate) => candidate === image ? 7 : undefined,
+      createObserver: (environment) => new SourceImageObserver({
+        ...environment,
+        createIntersectionObserver: (callback) =>
+          new ImmediateIntersectionObserver(callback),
+        createResizeObserver: () => new NoopElementObserver(),
+        createMutationObserver: (callback) => {
+          mutation.callback = callback;
+          return mutation;
+        },
+      }),
+    });
+    port.emitMessage({
+      kind: 'simul:image-source-v2:start',
+      document: identity,
+      policyFingerprint: 'read-v1-111000',
+      controlImages: true,
+      accessibilityTextEnabled: true,
+    });
+    expect(lastUpsertDescriptorForNode(port.messages, 7)).toBeDefined();
+
+    reads.reset();
+    const messagesBeforeMutation = port.messages.length;
+    controller.setAttribute('aria-controls', 'renamed-panel');
+    panel.setAttribute('id', 'renamed-panel');
+    mutation.trigger([
+      mutationAttributeRecord(controller, 'aria-controls'),
+      mutationAttributeRecord(panel, 'id'),
+    ]);
+
+    expect(reads.snapshot().label).toBeGreaterThan(0);
+    expect(reads.snapshot().geometry).toBeGreaterThan(0);
+    expect(port.messages).toHaveLength(messagesBeforeMutation);
+    session.dispose();
+  });
+
   it('reads direct navigation-image alt text without pixels under the bound policy', () => {
     const { document } = parseHTML(
       '<html lang="ja"><body><a href="/oshirase/"><img id="image" ' +
@@ -327,14 +720,14 @@ describe('image source capture safety', () => {
     );
     const blockedSession = createSession(blockedPort, blockedIdentity);
     blockedPort.emitMessage({
-      kind: 'simul:image-source-v1:start',
+      kind: 'simul:image-source-v2:start',
       document: blockedIdentity,
       policyFingerprint: 'read-v1-100000',
       controlImages: false,
       accessibilityTextEnabled: true,
     });
     expect(blockedPort.messages.at(-1)).toMatchObject({
-      kind: 'simul:image-source-v1:ready',
+      kind: 'simul:image-source-v2:ready',
       summary: { candidateImages: 1, observedImages: 0 },
     });
     blockedSession.dispose();
@@ -343,7 +736,7 @@ describe('image source capture safety', () => {
     );
     const session = createSession(port, identity);
     port.emitMessage({
-      kind: 'simul:image-source-v1:start',
+      kind: 'simul:image-source-v2:start',
       document: identity,
       policyFingerprint: 'read-v1-111000',
       controlImages: true,
@@ -351,14 +744,14 @@ describe('image source capture safety', () => {
     });
     const sourceDescriptor = lastUpsertDescriptor(port.messages)!;
     port.emitMessage({
-      kind: 'simul:image-source-v1:accessibility-text',
+      kind: 'simul:image-source-v2:accessibility-text',
       requestId: 'alt-ready',
       descriptor: sourceDescriptor,
       policyFingerprint: 'read-v1-111000',
       controlImages: true,
     });
     expect(port.messages.at(-1)).toMatchObject({
-      kind: 'simul:image-source-v1:accessibility-text',
+      kind: 'simul:image-source-v2:accessibility-text',
       requestId: 'alt-ready',
       status: 'ready',
       evidence: {
@@ -368,7 +761,7 @@ describe('image source capture safety', () => {
       },
     });
     port.emitMessage({
-      kind: 'simul:image-source-v1:accessibility-text',
+      kind: 'simul:image-source-v2:accessibility-text',
       requestId: 'alt-forged-policy',
       descriptor: sourceDescriptor,
       policyFingerprint: 'read-v1-011000',
@@ -425,7 +818,7 @@ describe('image source capture safety', () => {
       }),
     });
     port.emitMessage({
-      kind: 'simul:image-source-v1:start',
+      kind: 'simul:image-source-v2:start',
       document: identity,
       policyFingerprint: 'read-v1-111000',
       controlImages: true,
@@ -433,14 +826,14 @@ describe('image source capture safety', () => {
     });
     const sourceDescriptor = lastUpsertDescriptor(port.messages)!;
     port.emitMessage({
-      kind: 'simul:image-source-v1:accessibility-text',
+      kind: 'simul:image-source-v2:accessibility-text',
       requestId: 'overlapped-alt',
       descriptor: sourceDescriptor,
       policyFingerprint: 'read-v1-111000',
       controlImages: true,
     });
     expect(port.messages.at(-1)).toMatchObject({
-      kind: 'simul:image-source-v1:accessibility-text',
+      kind: 'simul:image-source-v2:accessibility-text',
       requestId: 'overlapped-alt',
       status: 'blocked',
     });
@@ -495,14 +888,14 @@ describe('image source capture safety', () => {
     );
     const blockedSession = createSession(blockedPort, blockedIdentity);
     blockedPort.emitMessage({
-      kind: 'simul:image-source-v1:start',
+      kind: 'simul:image-source-v2:start',
       document: blockedIdentity,
       policyFingerprint: 'read-v1-100000',
       controlImages: false,
       accessibilityTextEnabled: true,
     });
     expect(blockedPort.messages.at(-1)).toMatchObject({
-      kind: 'simul:image-source-v1:ready',
+      kind: 'simul:image-source-v2:ready',
       summary: { candidateImages: 1, observedImages: 0 },
     });
     blockedSession.dispose();
@@ -512,7 +905,7 @@ describe('image source capture safety', () => {
     const session = createSession(port, identity);
 
     port.emitMessage({
-      kind: 'simul:image-source-v1:start',
+      kind: 'simul:image-source-v2:start',
       document: identity,
       policyFingerprint: 'read-v1-110000',
       controlImages: true,
@@ -520,25 +913,25 @@ describe('image source capture safety', () => {
     });
     const sourceDescriptor = lastUpsertDescriptor(port.messages)!;
     port.emitMessage({
-      kind: 'simul:image-source-v1:measure',
+      kind: 'simul:image-source-v2:measure',
       requestId: 'measure-control-image',
       descriptor: sourceDescriptor,
     });
 
     expect(port.messages.at(-1)).toMatchObject({
-      kind: 'simul:image-source-v1:metrics',
+      kind: 'simul:image-source-v2:metrics',
       requestId: 'measure-control-image',
       status: 'ready',
     });
     port.emitMessage({
-      kind: 'simul:image-source-v1:accessibility-text',
+      kind: 'simul:image-source-v2:accessibility-text',
       requestId: 'read-control-image',
       descriptor: sourceDescriptor,
       policyFingerprint: 'read-v1-110000',
       controlImages: true,
     });
     expect(port.messages.at(-1)).toMatchObject({
-      kind: 'simul:image-source-v1:accessibility-text',
+      kind: 'simul:image-source-v2:accessibility-text',
       requestId: 'read-control-image',
       status: 'ready',
       evidence: { text: 'Open' },
@@ -589,7 +982,7 @@ describe('image source capture safety', () => {
     });
 
     port.emitMessage({
-      kind: 'simul:image-source-v1:start',
+      kind: 'simul:image-source-v2:start',
       document: identity,
       policyFingerprint: 'read-v1-110000',
       controlImages: true,
@@ -598,78 +991,78 @@ describe('image source capture safety', () => {
     const firstDescriptor = lastUpsertDescriptor(port.messages);
     expect(firstDescriptor).toBeDefined();
     port.emitMessage({
-      kind: 'simul:image-source-v1:measure',
+      kind: 'simul:image-source-v2:measure',
       requestId: 'measure-public',
       descriptor: firstDescriptor,
     });
     expect(port.messages.at(-1)).toMatchObject({
-      kind: 'simul:image-source-v1:metrics',
+      kind: 'simul:image-source-v2:metrics',
       requestId: 'measure-public',
       status: 'ready',
     });
 
     navigation.removeAttribute('href');
     port.emitMessage({
-      kind: 'simul:image-source-v1:measure',
+      kind: 'simul:image-source-v2:measure',
       requestId: 'measure-without-href',
       descriptor: firstDescriptor,
     });
     expect(port.messages.at(-1)).toMatchObject({
-      kind: 'simul:image-source-v1:metrics',
+      kind: 'simul:image-source-v2:metrics',
       requestId: 'measure-without-href',
       status: 'ready',
     });
 
     navigation.setAttribute('href', '/restored');
     port.emitMessage({
-      kind: 'simul:image-source-v1:measure',
+      kind: 'simul:image-source-v2:measure',
       requestId: 'measure-old-revision',
       descriptor: firstDescriptor,
     });
     const restoredDescriptor = lastUpsertDescriptor(port.messages);
     expect(restoredDescriptor).toEqual(firstDescriptor);
     port.emitMessage({
-      kind: 'simul:image-source-v1:measure',
+      kind: 'simul:image-source-v2:measure',
       requestId: 'measure-restored',
       descriptor: restoredDescriptor,
     });
     expect(port.messages.at(-1)).toMatchObject({
-      kind: 'simul:image-source-v1:metrics',
+      kind: 'simul:image-source-v2:metrics',
       requestId: 'measure-restored',
       status: 'ready',
     });
 
     navigation.setAttribute('aria-expanded', 'false');
     port.emitMessage({
-      kind: 'simul:image-source-v1:measure',
+      kind: 'simul:image-source-v2:measure',
       requestId: 'measure-stateful',
       descriptor: restoredDescriptor,
     });
     expect(port.messages.at(-1)).toMatchObject({
-      kind: 'simul:image-source-v1:metrics',
+      kind: 'simul:image-source-v2:metrics',
       requestId: 'measure-stateful',
       status: 'ready',
     });
 
     navigation.removeAttribute('aria-expanded');
     port.emitMessage({
-      kind: 'simul:image-source-v1:measure',
+      kind: 'simul:image-source-v2:measure',
       requestId: 'measure-stateful-old-revision',
       descriptor: restoredDescriptor,
     });
     const statelessDescriptor = lastUpsertDescriptor(port.messages);
     expect(port.messages.at(-1)).toMatchObject({
-      kind: 'simul:image-source-v1:metrics',
+      kind: 'simul:image-source-v2:metrics',
       requestId: 'measure-stateful-old-revision',
       status: 'ready',
     });
     port.emitMessage({
-      kind: 'simul:image-source-v1:measure',
+      kind: 'simul:image-source-v2:measure',
       requestId: 'measure-stateless-restored',
       descriptor: statelessDescriptor,
     });
     expect(port.messages.at(-1)).toMatchObject({
-      kind: 'simul:image-source-v1:metrics',
+      kind: 'simul:image-source-v2:metrics',
       requestId: 'measure-stateless-restored',
       status: 'ready',
     });
@@ -734,6 +1127,22 @@ describe('image source capture safety', () => {
     )).toBe(false);
 
     styles.set(image, baseStyle);
+    styles.set(document.body, {
+      ...baseStyle,
+      transform: 'matrix3d(-1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1)',
+    });
+    expect(hasSafeCaptureGeometry(
+      image,
+      imageRect,
+      document as unknown as Document,
+      sourceWindow,
+    )).toBe(false);
+
+    styles.delete(document.body);
+    styles.set(image, {
+      ...baseStyle,
+      transform: 'matrix3d(1, 0, 0, 0, 0, 1, 0, 0, 0, 0, 1, 0, 30, 10, 0, 1)',
+    });
     expect(hasSafeCaptureGeometry(
       image,
       imageRect,
@@ -845,6 +1254,75 @@ function setImageFacts(image: HTMLImageElement): void {
   });
 }
 
+function setPaintFacts(element: Element): void {
+  Object.defineProperty(element, 'getClientRects', {
+    configurable: true,
+    value: () => {
+      const paint = rect(0, 0, 200, 40);
+      return {
+        0: paint,
+        length: 1,
+        item: (index: number) => index === 0 ? paint : null,
+      } as unknown as DOMRectList;
+    },
+  });
+}
+
+function observeImageContentReads(image: HTMLImageElement): {
+  readonly reset: () => void;
+  readonly snapshot: () => { readonly label: number; readonly geometry: number };
+} {
+  let label = 0;
+  let geometry = 0;
+  const getAttribute = image.getAttribute.bind(image);
+  const getBoundingClientRect = image.getBoundingClientRect.bind(image);
+  Object.defineProperties(image, {
+    getAttribute: {
+      configurable: true,
+      value: (name: string) => {
+        if (name === 'alt' || name === 'aria-label') label += 1;
+        return getAttribute(name);
+      },
+    },
+    getBoundingClientRect: {
+      configurable: true,
+      value: () => {
+        geometry += 1;
+        return getBoundingClientRect();
+      },
+    },
+  });
+  return Object.freeze({
+    reset: () => {
+      label = 0;
+      geometry = 0;
+    },
+    snapshot: () => Object.freeze({ label, geometry }),
+  });
+}
+
+function setTabSelection(
+  trigger: Element,
+  panel: Element,
+  selected: boolean,
+): void {
+  trigger.setAttribute('aria-selected', String(selected));
+  trigger.setAttribute('aria-expanded', String(selected));
+  if (selected) panel.removeAttribute('hidden');
+  else panel.setAttribute('hidden', '');
+}
+
+function mutationAttributeRecord(
+  target: Element,
+  attributeName: string,
+): MutationRecord {
+  return {
+    type: 'attributes',
+    target,
+    attributeName,
+  } as unknown as MutationRecord;
+}
+
 function lastUpsertDescriptor(
   messages: readonly unknown[],
 ): SourceImageDescriptor | undefined {
@@ -857,9 +1335,30 @@ function lastUpsertDescriptor(
       };
     };
     if (
-      candidate.kind === 'simul:image-source-v1:change' &&
+      candidate.kind === 'simul:image-source-v2:change' &&
       candidate.change?.kind === 'upsert'
     ) return candidate.change.descriptor as SourceImageDescriptor;
+  }
+  return undefined;
+}
+
+function lastUpsertDescriptorForNode(
+  messages: readonly unknown[],
+  nodeId: number,
+): SourceImageDescriptor | undefined {
+  for (let index = messages.length - 1; index >= 0; index -= 1) {
+    const candidate = messages[index] as {
+      readonly kind?: unknown;
+      readonly change?: {
+        readonly kind?: unknown;
+        readonly descriptor?: SourceImageDescriptor;
+      };
+    };
+    if (
+      candidate.kind === 'simul:image-source-v2:change' &&
+      candidate.change?.kind === 'upsert' &&
+      candidate.change.descriptor?.nodeId === nodeId
+    ) return candidate.change.descriptor;
   }
   return undefined;
 }
@@ -923,6 +1422,11 @@ class ImmediateIntersectionObserver {
 }
 
 class NoopMutationObserver {
+  callback: (records: readonly MutationRecord[]) => void = () => undefined;
   observe(): void {}
   disconnect(): void {}
+
+  trigger(records: readonly MutationRecord[]): void {
+    this.callback(records);
+  }
 }

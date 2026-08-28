@@ -13,7 +13,6 @@ export interface ToolbarActivity {
   readonly translationInFlight: boolean;
   readonly permissionInFlight: boolean;
   readonly composerInFlight: boolean;
-  readonly liveDeltaInFlight: boolean;
   readonly imageTranslationInFlight: boolean;
   readonly surfaceTransitionInFlight: boolean;
 }
@@ -37,7 +36,6 @@ export function toolbarProgressState(
     activity.translationInFlight ||
     activity.permissionInFlight ||
     activity.composerInFlight ||
-    activity.liveDeltaInFlight ||
     activity.imageTranslationInFlight ||
     activity.surfaceTransitionInFlight
   ) {
@@ -53,7 +51,6 @@ export function toolbarActivityLabel(activity: ToolbarActivity): string {
   if (activity.composerInFlight) return 'Translating quick draft';
   if (activity.translationInFlight) return 'Translating page';
   if (activity.imageTranslationInFlight) return 'Recognizing image text';
-  if (activity.liveDeltaInFlight) return 'Updating live mirror';
   return 'Companion idle';
 }
 

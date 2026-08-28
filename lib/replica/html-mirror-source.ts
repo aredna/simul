@@ -8,11 +8,18 @@ import {
   createHtmlMirrorCheckpoint,
   createHtmlMirrorError,
   createHtmlMirrorPatch,
+  createHtmlMirrorScrollUpdate,
   readHtmlMirrorControllerMessage,
   readHtmlMirrorPortSessionId,
   type HtmlMirrorReconcileChild,
   type HtmlMirrorPatchOperation,
 } from './html-mirror-protocol';
+import {
+  isDocumentScrollTarget,
+  nestedScrollerOrdinal,
+  readDocumentScrollSnapshot,
+  readNestedScrollSnapshot,
+} from '../primary-scroll';
 import {
   MAX_HTML_MIRROR_STRING,
   MAX_HTML_MIRROR_NODES,
@@ -31,13 +38,13 @@ import {
   sanitizeSourceSubtree,
   sanitizeSourceSubtrees,
   snapshotHtmlMirrorRepresentability,
-  type HtmlMirrorElementNode,
   type HtmlMirrorIdRegistry,
+  type HtmlMirrorElementNode,
   type HtmlMirrorNamespace,
   type HtmlMirrorRepresentabilityCollector,
   type HtmlMirrorStyleWorkBudget,
 } from './html-mirror-sanitizer';
-import { createReplicaIdentity } from './protocol-v2';
+import { createReplicaIdentity } from './replica-identity';
 import { minimizeConnectedComposedTargets } from './composed-targets';
 import { readSemanticSourcePortIdentity } from './semantic-source-protocol';
 import {
@@ -49,7 +56,19 @@ import {
   sourceDocumentSecretClassifier,
   type StickySourceSecretClassifier,
 } from './source-secret-classifier';
-import { hasSourceCredentialSecretAncestor } from './source-privacy-policy';
+import {
+  createSourceControlledContentPolicy,
+  hasSourceCredentialSecretAncestor,
+  sourceControlledContentBoundaryChanged,
+  sourceControlledContentChangedTargets,
+  sourceControlledContentLayoutMayChange,
+  sourceControlledContentMutationsMayChange,
+  type SourceControlledContentPolicy,
+} from './source-privacy-policy';
+import {
+  SourceVisibilityBoundaryIndex,
+  type SourceVisibilityBoundaryRefresh,
+} from './source-visibility-boundary';
 import type { SelectableReplicaFidelityPolicy } from './fidelity-policy';
 import { StableSignatureTracker } from './stable-signature-tracker';
 import { sourceMutationMayChangeCurrentValue } from './source-mutation-filter';
@@ -108,11 +127,12 @@ export class WeakNodeIdRegistry implements HtmlMirrorIdRegistry {
 
 export interface HtmlMirrorSourceBridgeEnvironment {
   readonly global?: typeof globalThis & {
-    __simulHtmlMirrorV1Installed?: boolean;
-    __simulHtmlMirrorV1SecretObserver?: Pick<
+    __simulHtmlMirrorV2Installed?: boolean;
+    __simulHtmlMirrorV2SecretObserver?: Pick<
       MutationObserver,
       'disconnect'
     >;
+    __simulHtmlMirrorV1SecretObserver?: Pick<MutationObserver, 'disconnect'>;
   };
   readonly runtime?: Pick<typeof browser.runtime, 'onConnect'>;
   readonly document?: Document;
@@ -131,19 +151,21 @@ export interface HtmlMirrorSourceBridgeEnvironment {
   readonly registry?: WeakNodeIdRegistry;
 }
 
-/** Installs a page-owned, rrweb-independent HTML and image identity bridge. */
+/** Installs a page-owned HTML and image identity bridge. */
 export function installHtmlMirrorSourceBridge(
   environment: HtmlMirrorSourceBridgeEnvironment = {},
 ): void {
   const isolatedGlobal = (environment.global ?? globalThis) as typeof globalThis & {
-    __simulHtmlMirrorV1Installed?: boolean;
-    __simulHtmlMirrorV1SecretObserver?: Pick<
+    __simulHtmlMirrorV2Installed?: boolean;
+    __simulHtmlMirrorV2SecretObserver?: Pick<
       MutationObserver,
       'disconnect'
     >;
+    __simulHtmlMirrorV1SecretObserver?: Pick<MutationObserver, 'disconnect'>;
   };
-  if (isolatedGlobal.__simulHtmlMirrorV1Installed) return;
-  isolatedGlobal.__simulHtmlMirrorV1Installed = true;
+  if (isolatedGlobal.__simulHtmlMirrorV2Installed) return;
+  isolatedGlobal.__simulHtmlMirrorV2Installed = true;
+  isolatedGlobal.__simulHtmlMirrorV1SecretObserver?.disconnect();
   const runtime = environment.runtime ?? browser.runtime;
   const sourceDocument = environment.document ?? document;
   const sourceWindow = environment.window ?? window;
@@ -175,7 +197,7 @@ export function installHtmlMirrorSourceBridge(
     // Keep the observer alive for the isolated-world document lifetime so
     // newly created credential nodes remain sticky before and between mirror
     // Port connections.
-    isolatedGlobal.__simulHtmlMirrorV1SecretObserver = secretObserver;
+    isolatedGlobal.__simulHtmlMirrorV2SecretObserver = secretObserver;
   } catch {
     const root = sourceDocument.documentElement;
     if (root) {
@@ -268,6 +290,29 @@ const STYLE_CHANGE_STABILITY_OBSERVATIONS = 3;
 const OVERSIZED_STYLE_RETRY_PASSES = 120;
 const MAX_MIRRORED_IMAGE_CANDIDATES = 4_000;
 const MAX_IMAGE_EVENT_ROOTS = 4_000;
+const MAX_VISIBILITY_MUTATION_RECORDS = 2_048;
+const CONTROLLED_LAYOUT_SETTLE_EVENTS = Object.freeze([
+  'transitionend',
+  'transitioncancel',
+  'animationend',
+  'animationcancel',
+] as const);
+const VISIBILITY_INTERACTION_EVENTS = Object.freeze([
+  'pointerover',
+  'pointerout',
+  'pointerdown',
+  'pointerup',
+  'click',
+  'focusin',
+  'focusout',
+  'keydown',
+  'keyup',
+  'beforeinput',
+  'input',
+  'change',
+  'beforetoggle',
+  'toggle',
+] as const);
 
 type ReconciliationDecision =
   | 'reconcile'
@@ -329,11 +374,27 @@ export class HtmlMirrorSourceSession {
   );
   #shadowDiscoveryTimer: unknown;
   #frame: unknown;
+  #scrollFrame: unknown;
+  #activeNestedScroller: Element | undefined;
+  #pendingNestedScroller: Element | undefined;
+  #nestedOwnerKeys = new WeakMap<Element, number>();
+  #nestedOwnerOrdinals = new WeakMap<Element, number>();
+  #nextNestedOwnerKey = 1;
+  #pendingDocumentScroll = false;
+  #lastDocumentScroll:
+    ReturnType<typeof readDocumentScrollSnapshot> | undefined;
   #sequence = 0;
   #acknowledged = 0;
   #paused = false;
   #recoveryCheckpointSequence: number | undefined;
   #shadowReconciliationPending = false;
+  #controlledContentPolicy: SourceControlledContentPolicy | undefined;
+  #controlledLayoutSettlePending = false;
+  #visibilityBoundaryIndex: SourceVisibilityBoundaryIndex | undefined;
+  #visibilityMutationRecords: MutationRecord[] = [];
+  #visibilityMutationOverflow = false;
+  #visibilityInteractionTargets = new Set<Element>();
+  #visibilityFullRefreshPending = false;
   #disposed = false;
 
   constructor(private readonly environment: HtmlMirrorSourceSessionEnvironment) {
@@ -354,9 +415,29 @@ export class HtmlMirrorSourceSession {
     this.#resizeObserver?.disconnect();
     this.#resizeObserver = undefined;
     this.environment.window.removeEventListener('resize', this.#onLayoutChange);
+    this.environment.window.removeEventListener('scroll', this.#onScroll, true);
+    this.environment.window.removeEventListener(
+      'hashchange',
+      this.#onLayoutChange,
+    );
+    for (const type of CONTROLLED_LAYOUT_SETTLE_EVENTS) {
+      this.environment.document.removeEventListener(
+        type,
+        this.#onControlledLayoutSettle,
+        true,
+      );
+    }
+    for (const type of VISIBILITY_INTERACTION_EVENTS) {
+      this.environment.document.removeEventListener(
+        type,
+        this.#onVisibilityInteraction,
+        true,
+      );
+    }
     for (const root of this.#imageEventRoots) {
       root.removeEventListener('load', this.#onCapturedResourceLoad, true);
       root.removeEventListener('error', this.#onCapturedResourceError, true);
+      root.removeEventListener('scroll', this.#onScroll, true);
     }
     this.#imageEventRoots.clear();
     this.environment.document.fonts?.removeEventListener?.(
@@ -365,6 +446,10 @@ export class HtmlMirrorSourceSession {
     );
     if (this.#frame !== undefined) this.environment.cancelFrame(this.#frame);
     this.#frame = undefined;
+    if (this.#scrollFrame !== undefined) {
+      this.environment.cancelFrame(this.#scrollFrame);
+    }
+    this.#scrollFrame = undefined;
     if (this.#shadowDiscoveryTimer !== undefined) {
       this.environment.clearTimer(this.#shadowDiscoveryTimer);
     }
@@ -385,10 +470,24 @@ export class HtmlMirrorSourceSession {
     this.#knownMirroredImageCandidates = new WeakSet<Element>();
     this.#selectedImageSources = new WeakMap<Element, string>();
     this.#imageRefreshRequested = false;
+    this.#activeNestedScroller = undefined;
+    this.#pendingNestedScroller = undefined;
+    this.#nestedOwnerKeys = new WeakMap<Element, number>();
+    this.#nestedOwnerOrdinals = new WeakMap<Element, number>();
+    this.#pendingDocumentScroll = false;
+    this.#lastDocumentScroll = undefined;
     this.#lastDimensions = undefined;
     this.#emittedNodeSignatures = new WeakMap<Node, string>();
     this.#adoptedStyleSignatures.reset();
     this.#ordinaryStyleSignatures.reset();
+    this.#controlledContentPolicy = undefined;
+    this.#controlledLayoutSettlePending = false;
+    this.#visibilityBoundaryIndex?.dispose();
+    this.#visibilityBoundaryIndex = undefined;
+    this.#visibilityMutationRecords = [];
+    this.#visibilityMutationOverflow = false;
+    this.#visibilityInteractionTargets.clear();
+    this.#visibilityFullRefreshPending = false;
     this.#clearPending();
     if (disconnect) {
       try {
@@ -410,7 +509,7 @@ export class HtmlMirrorSourceSession {
       this.dispose(true);
       return;
     }
-    if (message.kind === 'simul:html-mirror-v1:start') {
+    if (message.kind === 'simul:html-mirror-v2:start') {
       if (this.#identity || message.identity.frameId !== 0) {
         this.dispose(true);
         return;
@@ -422,7 +521,7 @@ export class HtmlMirrorSourceSession {
       this.dispose(true);
       return;
     }
-    if (message.kind === 'simul:html-mirror-v1:ack') {
+    if (message.kind === 'simul:html-mirror-v2:ack') {
       if (
         message.identity.sequence < this.#acknowledged ||
         message.identity.sequence > this.#sequence
@@ -502,6 +601,28 @@ export class HtmlMirrorSourceSession {
         subtree: true,
       });
       this.environment.window.addEventListener('resize', this.#onLayoutChange);
+      this.environment.window.addEventListener('scroll', this.#onScroll, {
+        capture: true,
+        passive: true,
+      });
+      this.environment.window.addEventListener(
+        'hashchange',
+        this.#onLayoutChange,
+      );
+      for (const type of CONTROLLED_LAYOUT_SETTLE_EVENTS) {
+        this.environment.document.addEventListener(
+          type,
+          this.#onControlledLayoutSettle,
+          true,
+        );
+      }
+      for (const type of VISIBILITY_INTERACTION_EVENTS) {
+        this.environment.document.addEventListener(
+          type,
+          this.#onVisibilityInteraction,
+          true,
+        );
+      }
       this.#observeImageEvents(this.environment.document);
       this.environment.document.fonts?.addEventListener?.(
         'loadingdone',
@@ -536,12 +657,18 @@ export class HtmlMirrorSourceSession {
     const startedAt = this.environment.now();
     const representability = createHtmlMirrorRepresentabilityCollector();
     try {
+      const controlledContentPolicy = createSourceControlledContentPolicy(
+        this.environment.document,
+        this.environment.window,
+        MAX_HTML_MIRROR_NODES,
+      );
       const graph = sanitizeSourceDocument(
         this.environment.document,
         this.environment.window,
         this.environment.registry,
         representability,
         fidelityPolicy,
+        controlledContentPolicy,
       );
       const checkpoint = graph && createHtmlMirrorCheckpoint(
         this.#identityAt(this.#sequence),
@@ -593,6 +720,13 @@ export class HtmlMirrorSourceSession {
         adoptedStyleSignature(checkpoint.payload.adoptedStyleSheets),
       );
       this.#ordinaryStyleSignatures.reset();
+      this.#controlledContentPolicy = controlledContentPolicy;
+      this.#visibilityBoundaryIndex?.dispose();
+      this.#visibilityBoundaryIndex = new SourceVisibilityBoundaryIndex(
+        this.environment.document,
+        this.environment.window,
+        MAX_HTML_MIRROR_NODES,
+      );
       this.#markMirroredGraph(checkpoint.payload.root);
       this.#lastDimensions = Object.freeze({
         viewportWidth: checkpoint.payload.viewportWidth,
@@ -607,6 +741,7 @@ export class HtmlMirrorSourceSession {
       this.#primeOrdinaryStyleSignatures();
       this.#shadowReconciliationPending = false;
       this.#post(checkpoint);
+      this.#postScroll();
       this.#scheduleShadowDiscovery();
     } catch (error) {
       if (
@@ -645,7 +780,36 @@ export class HtmlMirrorSourceSession {
       records = records.filter(sourceMutationMayChangeCurrentValue);
     }
     if (records.length === 0) return;
+    if (records.length > 0) {
+      this.#nestedOwnerOrdinals = new WeakMap<Element, number>();
+    }
     let accepted = false;
+    let visibilityQueued = false;
+    const visibilityRecords = this.#visibilityBoundaryIndex
+      ? records.filter((record) =>
+          belongsToSourceDocument(record.target, this.environment.document)
+        )
+      : [];
+    if (this.#visibilityBoundaryIndex && visibilityRecords.length > 0) {
+      visibilityQueued = true;
+      if (
+        this.#visibilityMutationOverflow ||
+        this.#visibilityMutationRecords.length + visibilityRecords.length >
+          MAX_VISIBILITY_MUTATION_RECORDS
+      ) {
+        this.#visibilityMutationRecords = [];
+        this.#visibilityMutationOverflow = true;
+      } else {
+        this.#visibilityMutationRecords.push(...visibilityRecords);
+      }
+    }
+    if (this.#controlledContentPolicy &&
+      sourceControlledContentMutationsMayChange(
+        records,
+        this.#controlledContentPolicy,
+      )) {
+      accepted = this.#refreshControlledContentPolicy() || accepted;
+    }
     for (const record of records) {
       // The top-document observer must never turn a same-origin embedded
       // browsing context into an accidental second mirror surface. This is a
@@ -724,8 +888,8 @@ export class HtmlMirrorSourceSession {
         this.#queuePending(this.#pendingText, record.target);
       }
     }
-    if (!accepted) return;
-    this.#pendingDimensions = true;
+    if (!accepted && !visibilityQueued) return;
+    if (accepted) this.#pendingDimensions = true;
     this.#scheduleFlush();
   }
 
@@ -744,6 +908,28 @@ export class HtmlMirrorSourceSession {
         'stream_overflow',
       ));
       return;
+    }
+    if (this.#controlledLayoutSettlePending) {
+      this.#controlledLayoutSettlePending = false;
+      this.#refreshControlledContentPolicy();
+      if (this.#paused || this.#shadowReconciliationPending) return;
+    }
+    if (this.#visibilityBoundaryIndex) {
+      const mutationRecords = this.#visibilityMutationRecords;
+      const requiresFullRefresh = this.#visibilityFullRefreshPending ||
+        this.#visibilityMutationOverflow ||
+        this.#visibilityInteractionTargets.size > 0;
+      const visibilityRefresh = requiresFullRefresh
+        ? this.#visibilityBoundaryIndex.refreshAll()
+        : mutationRecords.length > 0
+          ? this.#visibilityBoundaryIndex.refreshMutations(mutationRecords)
+          : this.#visibilityBoundaryIndex.refreshInteractionTargets([]);
+      this.#visibilityMutationRecords = [];
+      this.#visibilityMutationOverflow = false;
+      this.#visibilityFullRefreshPending = false;
+      this.#visibilityInteractionTargets.clear();
+      this.#applyVisibilityBoundaryRefresh(visibilityRefresh);
+      if (this.#paused || this.#shadowReconciliationPending) return;
     }
     if (this.#imageRefreshRequested) {
       this.#imageRefreshRequested = false;
@@ -808,6 +994,7 @@ export class HtmlMirrorSourceSession {
             fidelityPolicy,
             batchBudget,
             styleWork,
+            this.#controlledContentPolicy,
           );
           if (!children) throw new Error('Unsafe children patch.');
           const sources = children.map(
@@ -887,6 +1074,7 @@ export class HtmlMirrorSourceSession {
           this.environment.document.baseURI,
           representability,
           fidelityPolicy,
+          this.#controlledContentPolicy,
         );
         if (!attributes) throw new Error('Unsafe attributes patch.');
         const hints = sanitizeSourceElementHints(
@@ -1052,13 +1240,184 @@ export class HtmlMirrorSourceSession {
     this.#pendingAttributes.clear();
     this.#pendingText.clear();
     this.#pendingDimensions = false;
+    this.#controlledLayoutSettlePending = false;
+    this.#visibilityMutationRecords = [];
+    this.#visibilityMutationOverflow = false;
+    this.#visibilityInteractionTargets.clear();
+    this.#visibilityFullRefreshPending = false;
   }
 
   readonly #onLayoutChange = (): void => {
     if (this.#disposed || !this.#identity) return;
     this.#observeOpenShadowRoots(this.environment.document.documentElement);
+    this.#refreshControlledContentPolicy();
+    this.#visibilityFullRefreshPending = true;
     this.#imageRefreshRequested = true;
+    this.#nestedOwnerOrdinals = new WeakMap<Element, number>();
     this.#pendingDimensions = true;
+    this.#scheduleFlush();
+    this.#postScroll();
+  };
+
+  readonly #onScroll = (event?: Event): void => {
+    if (this.#disposed || !this.#identity) return;
+    if (event) {
+      if (isDocumentScrollTarget(
+        event.target,
+        this.environment.document,
+        this.environment.window,
+      )) {
+        this.#pendingDocumentScroll = true;
+      } else if (
+        event.target instanceof Element &&
+        readNestedScrollSnapshot(
+          event.target,
+          this.environment.document,
+          this.environment.window,
+        )
+      ) {
+        if (event.target !== this.#activeNestedScroller) {
+          this.#nestedOwnerOrdinals.delete(event.target);
+        }
+        this.#pendingNestedScroller = event.target;
+      } else {
+        return;
+      }
+    } else {
+      this.#nestedOwnerOrdinals = new WeakMap<Element, number>();
+    }
+    this.#scheduleScroll();
+  };
+
+  #scheduleScroll(): void {
+    if (
+      this.#disposed || !this.#identity || this.#scrollFrame !== undefined
+    ) return;
+    this.#scrollFrame = this.environment.scheduleFrame(() => {
+      this.#scrollFrame = undefined;
+      this.#postScroll();
+    });
+  }
+
+  #postScroll(): void {
+    if (this.#disposed || !this.#identity) return;
+    const documentScroll = readDocumentScrollSnapshot(
+      this.environment.document,
+      this.environment.window,
+    );
+    const documentMoved = this.#lastDocumentScroll !== undefined &&
+      (documentScroll.scrollX !== this.#lastDocumentScroll.scrollX ||
+        documentScroll.scrollY !== this.#lastDocumentScroll.scrollY);
+    let scroll = documentScroll;
+    if (this.#pendingDocumentScroll) {
+      this.#activeNestedScroller = undefined;
+    } else if (this.#pendingNestedScroller) {
+      const nestedScroll = readNestedScrollSnapshot(
+        this.#pendingNestedScroller,
+        this.environment.document,
+        this.environment.window,
+      );
+      if (nestedScroll) {
+        this.#activeNestedScroller = this.#pendingNestedScroller;
+        scroll = nestedScroll;
+      } else if (this.#pendingNestedScroller === this.#activeNestedScroller) {
+        this.#activeNestedScroller = undefined;
+      }
+    } else if (documentMoved) {
+      this.#activeNestedScroller = undefined;
+    } else if (this.#activeNestedScroller) {
+      const nestedScroll = readNestedScrollSnapshot(
+        this.#activeNestedScroller,
+        this.environment.document,
+        this.environment.window,
+      );
+      if (nestedScroll) {
+        scroll = nestedScroll;
+      } else {
+        this.#activeNestedScroller = undefined;
+      }
+    }
+    this.#lastDocumentScroll = documentScroll;
+    this.#pendingNestedScroller = undefined;
+    this.#pendingDocumentScroll = false;
+
+    let nestedOwnerKey: number | undefined;
+    let nestedOwnerOrdinalValue: number | undefined;
+    if (scroll.scrollTarget === 'nested' && this.#activeNestedScroller) {
+      nestedOwnerKey = this.#nestedOwnerKeys.get(this.#activeNestedScroller);
+      if (nestedOwnerKey === undefined) {
+        nestedOwnerKey = this.#nextNestedOwnerKey;
+        this.#nextNestedOwnerKey = this.#nextNestedOwnerKey >= 1_000_000_000
+          ? 1
+          : this.#nextNestedOwnerKey + 1;
+        this.#nestedOwnerKeys.set(this.#activeNestedScroller, nestedOwnerKey);
+      }
+      nestedOwnerOrdinalValue = this.#nestedOwnerOrdinals.get(
+        this.#activeNestedScroller,
+      );
+      if (nestedOwnerOrdinalValue === undefined) {
+        nestedOwnerOrdinalValue = nestedScrollerOrdinal(
+          this.#activeNestedScroller,
+          this.environment.document,
+          this.environment.window,
+        );
+        if (nestedOwnerOrdinalValue !== undefined) {
+          this.#nestedOwnerOrdinals.set(
+            this.#activeNestedScroller,
+            nestedOwnerOrdinalValue,
+          );
+        }
+      }
+    }
+    const update = createHtmlMirrorScrollUpdate(
+      this.#identityAt(this.#sequence),
+      {
+        ...scroll,
+        ...(nestedOwnerKey !== undefined ? { nestedOwnerKey } : {}),
+        ...(nestedOwnerOrdinalValue !== undefined
+          ? { nestedOwnerOrdinal: nestedOwnerOrdinalValue }
+          : {}),
+        documentScrollX: documentScroll.scrollX,
+        documentScrollY: documentScroll.scrollY,
+        documentMaxScrollX: documentScroll.maxScrollX,
+        documentMaxScrollY: documentScroll.maxScrollY,
+      },
+    );
+    if (update) this.#post(update);
+  }
+
+  readonly #onControlledLayoutSettle = (event: Event): void => {
+    const target = event.target;
+    if (
+      this.#disposed || !this.#identity ||
+      !target || typeof target !== 'object' ||
+      (target as Node).nodeType !== 1
+    ) return;
+    const element = target as Element;
+    this.#visibilityInteractionTargets.add(element);
+    const controlledMayChange = this.#controlledContentPolicy &&
+      sourceControlledContentLayoutMayChange(
+        element,
+        this.#controlledContentPolicy,
+      );
+    if (!controlledMayChange && !this.#visibilityBoundaryIndex) return;
+    // A final transition/animation style can reveal or withdraw a selected
+    // panel without another mutation. Refresh admission inside the same one
+    // post-paint frame used for the resulting patch; bursts remain coalesced.
+    this.#controlledLayoutSettlePending = Boolean(controlledMayChange);
+    this.#pendingDimensions = true;
+    this.#scheduleFlush();
+  };
+
+  readonly #onVisibilityInteraction = (event: Event): void => {
+    const target = event.target;
+    if (
+      this.#disposed || !this.#identity ||
+      !target || typeof target !== 'object' ||
+      (target as Node).nodeType !== 1 ||
+      !this.#visibilityBoundaryIndex
+    ) return;
+    this.#visibilityInteractionTargets.add(target as Element);
     this.#scheduleFlush();
   };
 
@@ -1074,13 +1433,55 @@ export class HtmlMirrorSourceSession {
     this.#queueCapturedImageAttributeRefresh(event);
   };
 
+  #refreshControlledContentPolicy(): boolean {
+    const previous = this.#controlledContentPolicy;
+    if (!previous) return false;
+    const next = createSourceControlledContentPolicy(
+      this.environment.document,
+      this.environment.window,
+      MAX_HTML_MIRROR_NODES,
+    );
+    this.#controlledContentPolicy = next;
+    if (sourceControlledContentBoundaryChanged(previous, next)) {
+      this.#shadowReconciliationPending = true;
+      this.#signalShadowReconciliation();
+      return true;
+    }
+    const changed = sourceControlledContentChangedTargets(previous, next);
+    for (const panel of changed) {
+      this.#queuePending(this.#pendingChildren, panel);
+      this.#queuePending(this.#pendingAttributes, panel);
+    }
+    return changed.length > 0;
+  }
+
+  #applyVisibilityBoundaryRefresh(
+    refresh: SourceVisibilityBoundaryRefresh,
+  ): boolean {
+    if (refresh.overflow) {
+      this.#shadowReconciliationPending = true;
+      this.#signalShadowReconciliation();
+      return true;
+    }
+    for (const target of refresh.changedTargets) {
+      this.#queuePending(this.#pendingChildren, target);
+      this.#queuePending(this.#pendingAttributes, target);
+    }
+    return refresh.changedTargets.length > 0;
+  }
+
   #scheduleFlush(): void {
     if (this.#paused || this.#frame !== undefined || this.#disposed) return;
     if (
       this.#pendingChildren.size === 0 &&
       this.#pendingAttributes.size === 0 &&
       this.#pendingText.size === 0 &&
-      !this.#pendingDimensions
+      !this.#pendingDimensions &&
+      !this.#controlledLayoutSettlePending &&
+      this.#visibilityMutationRecords.length === 0 &&
+      !this.#visibilityMutationOverflow &&
+      !this.#visibilityFullRefreshPending &&
+      this.#visibilityInteractionTargets.size === 0
     ) return;
     this.#frame = this.environment.scheduleFrame(() => {
       this.#frame = undefined;
@@ -1327,6 +1728,7 @@ export class HtmlMirrorSourceSession {
     this.#imageEventRoots.add(root);
     root.addEventListener('load', this.#onCapturedResourceLoad, true);
     root.addEventListener('error', this.#onCapturedResourceError, true);
+    root.addEventListener('scroll', this.#onScroll, true);
   }
 
   #compactImageEventRoots(): void {
@@ -1336,6 +1738,7 @@ export class HtmlMirrorSourceSession {
       }
       root.removeEventListener('load', this.#onCapturedResourceLoad, true);
       root.removeEventListener('error', this.#onCapturedResourceError, true);
+      root.removeEventListener('scroll', this.#onScroll, true);
       this.#imageEventRoots.delete(root);
     }
   }

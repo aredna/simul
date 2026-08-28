@@ -2,8 +2,8 @@ import type {
   ReplicaSourceDocumentIdentity,
   ReplicaSourceTextChange,
   ReplicaSourceTextRecord,
-} from '../replica/source-value-model';
-import { sameSourceDocument } from '../replica/source-value-model';
+} from '../replica/source-text-record';
+import { sameSourceDocument } from '../replica/source-text-record';
 import { translateWithSession } from '../translation-pipeline';
 import type {
   CreateTranslationSessionOptions,

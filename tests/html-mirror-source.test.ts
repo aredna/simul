@@ -9,6 +9,7 @@ import {
   createHtmlMirrorStart,
   type HtmlMirrorCheckpoint,
   type HtmlMirrorPatchBatch,
+  type HtmlMirrorScrollUpdate,
 } from '../lib/replica/html-mirror-protocol';
 import {
   HtmlMirrorSourceSession,
@@ -16,8 +17,9 @@ import {
   installHtmlMirrorSourceBridge,
   type HtmlMirrorSourceBridgeEnvironment,
 } from '../lib/replica/html-mirror-source';
-import { createReplicaIdentity } from '../lib/replica/protocol-v2';
+import { createReplicaIdentity } from '../lib/replica/replica-identity';
 import { sourceDocumentIdentity } from '../lib/replica/source-identity';
+import { createSourceControlledContentPolicy } from '../lib/replica/source-privacy-policy';
 
 const SYNTHETIC_STATIC_LOGO = "data:image/svg+xml,%3csvg%20width='48'%20height='48'%20viewBox='0%200%2048%2048'%20fill='none'%20xmlns='http://www.w3.org/2000/svg'%3e%3cpath%20d='M4.25%204.25H43.75V43.75H4.25Z'%20fill='%236C5CE7'/%3e%3cpath%20d='M12.5%2034C15.5%2024.25%2019.75%201.2e1%2024%2012C28.25%2012%2032.5%2024.25%2035.5%2034Z'%20fill='white'/%3e%3c/svg%3e";
 
@@ -29,6 +31,49 @@ describe('HtmlMirrorSourceSession', () => {
       Element: window.Element,
       Text: window.Text,
     });
+  });
+
+  it('does not prove a panel painted only through a gap between ancestor rects', () => {
+    const { document, window } = parseHTML(`<html><body>
+      <div role="tab" aria-selected="true" aria-expanded="true"
+        aria-controls="gap-panel">Tab</div>
+      <div id="clipper"><section id="gap-panel" role="tabpanel">Gap</section></div>
+    </body></html>`);
+    const panel = document.querySelector('#gap-panel')!;
+    const clipper = document.querySelector('#clipper')!;
+    for (const element of [...document.querySelectorAll('*')]) {
+      Object.defineProperty(element, 'getClientRects', {
+        configurable: true,
+        value: () => element === panel
+          ? mirrorRectList([{ left: 45, right: 55 }])
+          : element === clipper
+          ? mirrorRectList([{ left: 0, right: 40 }, { left: 60, right: 100 }])
+          : mirrorRectList([{ left: 0, right: 100 }]),
+      });
+    }
+    Object.defineProperty(window, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => ({
+        display: 'block', visibility: 'visible', opacity: '1',
+        overflowX: element === clipper ? 'hidden' : 'visible',
+        overflowY: element === clipper ? 'hidden' : 'visible',
+        getPropertyValue: (name: string) => {
+          if (name === 'content-visibility') return 'visible';
+          if (name === 'clip') return 'auto';
+          if (name === 'clip-path') return 'none';
+          if (name === 'overflow-x' || name === 'overflow-y') {
+            return element === clipper ? 'hidden' : 'visible';
+          }
+          return '';
+        },
+      }),
+    });
+
+    const policy = createSourceControlledContentPolicy(
+      document as unknown as Document,
+      window as unknown as Window,
+    );
+    expect(policy.targets.get(panel)).toBe('withheld');
   });
 
   it('connects the Integrated image source Port through the installed bridge', () => {
@@ -77,17 +122,17 @@ describe('HtmlMirrorSourceSession', () => {
       );
       onConnect.emit(imagePort as unknown as Browser.runtime.Port);
       imagePort.emitMessage({
-        kind: 'simul:image-source-v1:start',
+        kind: 'simul:image-source-v2:start',
         document: sourceDocumentIdentity(identity),
       });
 
       expect(imagePort.posts).toContainEqual(expect.objectContaining({
-        kind: 'simul:image-source-v1:ready',
+        kind: 'simul:image-source-v2:ready',
         document: sourceDocumentIdentity(identity),
         summary: { candidateImages: 1, observedImages: 1 },
       }));
       expect(imagePort.posts).toContainEqual(expect.objectContaining({
-        kind: 'simul:image-source-v1:change',
+        kind: 'simul:image-source-v2:change',
         change: expect.objectContaining({
           kind: 'upsert',
           descriptor: expect.objectContaining({ nodeId }),
@@ -108,7 +153,7 @@ describe('HtmlMirrorSourceSession', () => {
     const onConnect = new FakeEvent<(port: Browser.runtime.Port) => void>();
     const observers: ControlledBridgeMutationObserver[] = [];
     const bridgeGlobal = {} as typeof globalThis & {
-      __simulHtmlMirrorV1Installed?: boolean;
+      __simulHtmlMirrorV2Installed?: boolean;
     };
     installHtmlMirrorSourceBridge({
       global: bridgeGlobal,
@@ -153,6 +198,41 @@ describe('HtmlMirrorSourceSession', () => {
     onConnect.emit(secondPort as unknown as Browser.runtime.Port);
     secondPort.emitMessage(createHtmlMirrorStart(identity, 'conservative'));
     expect(JSON.stringify(secondPort.posts)).not.toContain(canary);
+  });
+
+  it('installs the v2 bundle beside a stale v1 marker without reusing its Ports', () => {
+    const { document, window } = parseHTML('<html><body></body></html>');
+    Object.defineProperty(window, 'top', { configurable: true, value: window });
+    const staleObserver = { disconnect: vi.fn() };
+    const bridgeGlobal = {
+      __simulHtmlMirrorV1Installed: true,
+      __simulHtmlMirrorV1SecretObserver: staleObserver,
+    } as unknown as typeof globalThis & {
+      __simulHtmlMirrorV1Installed?: boolean;
+      __simulHtmlMirrorV1SecretObserver?: Pick<MutationObserver, 'disconnect'>;
+      __simulHtmlMirrorV2Installed?: boolean;
+    };
+    const onConnect = new FakeEvent<(port: Browser.runtime.Port) => void>();
+    const environment: HtmlMirrorSourceBridgeEnvironment = {
+      global: bridgeGlobal,
+      runtime: { onConnect } as unknown as
+        HtmlMirrorSourceBridgeEnvironment['runtime'],
+      document,
+      window: window as unknown as Window,
+      createMutationObserver: () => new NoopBridgeMutationObserver(),
+      scheduleFrame: () => 1,
+      cancelFrame: () => undefined,
+      setTimer: () => 1,
+      clearTimer: () => undefined,
+    };
+
+    installHtmlMirrorSourceBridge(environment);
+    expect(bridgeGlobal.__simulHtmlMirrorV2Installed).toBe(true);
+    expect(staleObserver.disconnect).toHaveBeenCalledOnce();
+    expect(onConnect.listenerCount).toBe(1);
+
+    installHtmlMirrorSourceBridge(environment);
+    expect(onConnect.listenerCount).toBe(1);
   });
 
   it('stays paused through recovery ACK and retains mutations after its checkpoint', () => {
@@ -200,6 +280,278 @@ describe('HtmlMirrorSourceSession', () => {
     expect(patches[0]?.firstSequence).toBe(1);
     expect(patches[0]?.lastSequence).toBe(1);
     expect(JSON.stringify(patches[0])).toContain('changed while replica stages');
+  });
+
+  it('rematerializes only the selected painted tab across A-B-A transitions', () => {
+    const fixture = sourceFixture(`
+      <style id="tab-style">.tabs { color: inherit; }</style>
+      <div id="carousel" class="slide-one">Unrelated carousel</div>
+      <div role="tablist">
+        <div id="tab-a" role="tab" aria-selected="true" aria-expanded="true"
+          aria-controls="panel-a">Tab A</div>
+        <div id="tab-b" role="tab" aria-selected="false" aria-expanded="false"
+          aria-controls="panel-b">Tab B</div>
+      </div>
+      <section id="panel-a" role="tabpanel" aria-hidden="false"
+        data-test-style-sensitive="true">Panel A payload</section>
+      <section id="panel-b" role="tabpanel" aria-hidden="true" hidden>Panel B payload</section>
+    `);
+    installPaintedMirrorTabFixture(fixture.document, fixture.window);
+    const panelAText = fixture.document.querySelector('#panel-a')!.firstChild!;
+    const panelBText = fixture.document.querySelector('#panel-b')!.firstChild!;
+    let panelAReads = 0;
+    let panelBReads = 0;
+    Object.defineProperty(panelAText, 'nodeValue', {
+      configurable: true,
+      get: () => {
+        panelAReads += 1;
+        return 'Panel A payload';
+      },
+    });
+    Object.defineProperty(panelBText, 'nodeValue', {
+      configurable: true,
+      get: () => {
+        panelBReads += 1;
+        return 'Panel B payload';
+      },
+    });
+
+    fixture.start();
+    const initialJson = JSON.stringify(fixture.checkpoints()[0]);
+    expect(initialJson).toContain('Panel A payload');
+    expect(initialJson).not.toContain('Panel B payload');
+    expect(panelAReads).toBeGreaterThan(0);
+    expect(panelBReads).toBe(0);
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+
+    panelAReads = 0;
+    panelBReads = 0;
+    selectMirrorTab(fixture.document, 'b');
+    for (const [selector, attribute] of [
+      ['#tab-a', 'aria-selected'], ['#tab-a', 'aria-expanded'],
+      ['#tab-b', 'aria-selected'], ['#tab-b', 'aria-expanded'],
+      ['#panel-a', 'aria-hidden'], ['#panel-a', 'hidden'],
+      ['#panel-b', 'aria-hidden'], ['#panel-b', 'hidden'],
+    ] as const) {
+      fixture.mutate(attributeRecord(
+        fixture.document.querySelector(selector)!,
+        attribute,
+      ));
+    }
+    fixture.flushFrame();
+    const toB = fixture.patches().at(-1)!;
+    const toBJson = JSON.stringify(toB);
+    expect(toBJson).toContain('Panel B payload');
+    expect(toBJson).not.toContain('Panel A payload');
+    expect(panelAReads).toBe(0);
+    expect(panelBReads).toBeGreaterThan(0);
+    expect(toB.operations.filter(({ kind }) => kind === 'children')).toHaveLength(2);
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, toB.lastSequence));
+
+    panelAReads = 0;
+    panelBReads = 0;
+    selectMirrorTab(fixture.document, 'a');
+    for (const [selector, attribute] of [
+      ['#tab-a', 'aria-selected'], ['#tab-a', 'aria-expanded'],
+      ['#tab-b', 'aria-selected'], ['#tab-b', 'aria-expanded'],
+      ['#panel-a', 'aria-hidden'], ['#panel-a', 'hidden'],
+      ['#panel-b', 'aria-hidden'], ['#panel-b', 'hidden'],
+    ] as const) {
+      fixture.mutate(attributeRecord(
+        fixture.document.querySelector(selector)!,
+        attribute,
+      ));
+    }
+    fixture.flushFrame();
+    const backToA = fixture.patches().at(-1)!;
+    const backToAJson = JSON.stringify(backToA);
+    expect(backToAJson).toContain('Panel A payload');
+    expect(backToAJson).not.toContain('Panel B payload');
+    expect(panelAReads).toBeGreaterThan(0);
+    expect(panelBReads).toBe(0);
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, backToA.lastSequence));
+
+    const carousel = fixture.document.querySelector('#carousel')!;
+    const readsBeforeUnrelatedMutation = panelAReads;
+    carousel.className = 'slide-two';
+    fixture.mutate(attributeRecord(carousel, 'class'));
+    fixture.flushFrame();
+    const unrelated = fixture.patches().at(-1)!;
+    expect(unrelated.operations.some(({ kind }) => kind === 'children')).toBe(false);
+    expect(panelAReads).toBe(readsBeforeUnrelatedMutation);
+    expect(panelBReads).toBe(0);
+    fixture.port.emitMessage(createHtmlMirrorAck(
+      identity,
+      unrelated.lastSequence,
+    ));
+
+    const panelA = fixture.document.querySelector('#panel-a')!;
+    const panelANodeId = fixture.registry.peekId(panelA);
+    panelA.setAttribute('data-test-computed-hidden', 'true');
+    fixture.window.dispatchEvent(new fixture.window.Event('resize'));
+    fixture.flushFrame();
+    const resizeHidden = fixture.patches().at(-1)!;
+    expect(resizeHidden.operations).toContainEqual(expect.objectContaining({
+      kind: 'children',
+      nodeId: panelANodeId,
+    }));
+    expect(JSON.stringify(resizeHidden)).not.toContain('Panel A payload');
+    fixture.port.emitMessage(createHtmlMirrorAck(
+      identity,
+      resizeHidden.lastSequence,
+    ));
+
+    panelA.removeAttribute('data-test-computed-hidden');
+    fixture.window.dispatchEvent(new fixture.window.Event('resize'));
+    fixture.flushFrame();
+    const resizeVisible = fixture.patches().at(-1)!;
+    expect(JSON.stringify(resizeVisible)).toContain('Panel A payload');
+    fixture.port.emitMessage(createHtmlMirrorAck(
+      identity,
+      resizeVisible.lastSequence,
+    ));
+
+    const style = fixture.document.querySelector('#tab-style')!;
+    const removedStyleNodes = [...style.childNodes];
+    style.textContent = '.tabs { color: inherit; } .hide-panel { display:none; }';
+    fixture.mutate(childListRecord(
+      style,
+      [...style.childNodes],
+      removedStyleNodes,
+    ));
+    fixture.flushFrame();
+    const stylesheetHidden = fixture.patches().at(-1)!;
+    expect(stylesheetHidden.operations).toContainEqual(expect.objectContaining({
+      kind: 'children',
+      nodeId: panelANodeId,
+    }));
+    expect(JSON.stringify(stylesheetHidden)).not.toContain('Panel A payload');
+  });
+
+  it('refreshes selected-panel admission after opacity settle and nested collapse', () => {
+    const fixture = sourceFixture(`
+      <div role="tab" aria-selected="true" aria-expanded="true"
+        aria-controls="settling-panel">Tab</div>
+      <section id="settling-panel" role="tabpanel" aria-hidden="false">
+        <div id="nested-layout">Settled panel payload</div>
+      </section>
+    `);
+    installPaintedMirrorTabFixture(fixture.document, fixture.window);
+    const panel = fixture.document.querySelector('#settling-panel')!;
+    const nested = fixture.document.querySelector('#nested-layout')!;
+    const baseGetComputedStyle = fixture.window.getComputedStyle.bind(fixture.window);
+    let opacity = '0';
+    let collapsed = false;
+    Object.defineProperty(panel, 'getClientRects', {
+      configurable: true,
+      value: () => collapsed ? mirrorEmptyRectList() : mirrorTabRectList(),
+    });
+    Object.defineProperty(fixture.window, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => {
+        const style = baseGetComputedStyle(element);
+        return element === panel
+          ? { ...style, opacity } as unknown as CSSStyleDeclaration
+          : style;
+      },
+    });
+
+    fixture.start();
+    expect(JSON.stringify(fixture.checkpoints()[0])).not.toContain(
+      'Settled panel payload',
+    );
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+
+    opacity = '1';
+    panel.dispatchEvent(new fixture.window.Event('transitionend', { bubbles: true }));
+    panel.dispatchEvent(new fixture.window.Event('animationend', { bubbles: true }));
+    expect(fixture.frames).toHaveLength(1);
+    fixture.flushFrame();
+    const revealed = fixture.patches().at(-1)!;
+    expect(JSON.stringify(revealed)).toContain('Settled panel payload');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, revealed.lastSequence));
+
+    collapsed = true;
+    nested.className = 'collapsed';
+    fixture.mutate(attributeRecord(nested, 'class'));
+    fixture.flushFrame();
+    expect(JSON.stringify(fixture.patches().at(-1))).not.toContain(
+      'Settled panel payload',
+    );
+  });
+
+  it('rematerializes a generic CSS-hidden subtree only across visibility boundaries', () => {
+    const fixture = sourceFixture(`<nav><div id="wrapper" class="closed">
+      <a id="trigger">About</a>
+      <div id="panel">Company and team</div>
+    </div></nav><div id="ordinary" class="one">Ordinary</div>`);
+    installPaintedMirrorTabFixture(fixture.document, fixture.window);
+    const wrapper = fixture.document.querySelector<HTMLElement>('#wrapper')!;
+    const panel = fixture.document.querySelector<HTMLElement>('#panel')!;
+    const ordinary = fixture.document.querySelector<HTMLElement>('#ordinary')!;
+    const baseGetComputedStyle = fixture.window.getComputedStyle
+      .bind(fixture.window);
+    Object.defineProperty(fixture.window, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => {
+        const style = baseGetComputedStyle(element);
+        return element === panel
+          ? {
+              ...style,
+              display: wrapper.classList.contains('closed') ? 'none' : 'block',
+              visibility: 'visible',
+            } as unknown as CSSStyleDeclaration
+          : style;
+      },
+    });
+
+    fixture.start();
+    expect(JSON.stringify(fixture.checkpoints()[0])).not.toContain(
+      'Company and team',
+    );
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+
+    wrapper.classList.remove('closed');
+    fixture.mutate(attributeRecord(wrapper, 'class'));
+    fixture.flushFrame();
+    const revealed = fixture.patches().at(-1)!;
+    expect(JSON.stringify(revealed)).toContain('Company and team');
+    expect(revealed.operations).toContainEqual(expect.objectContaining({
+      kind: 'children',
+      nodeId: fixture.registry.peekId(panel),
+    }));
+    fixture.port.emitMessage(createHtmlMirrorAck(
+      identity,
+      revealed.lastSequence,
+    ));
+
+    ordinary.className = 'two';
+    fixture.mutate(attributeRecord(ordinary, 'class'));
+    fixture.flushFrame();
+    expect(fixture.patches().at(-1)?.operations.some(
+      ({ kind }) => kind === 'children',
+    )).toBe(false);
+  });
+
+  it('signals recovery when an interaction visibility scan overflows', () => {
+    const fixture = sourceFixture(
+      '<nav id="large-menu"><a id="trigger">Large menu</a></nav>',
+    );
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const nav = fixture.document.querySelector('#large-menu')!;
+    nav.innerHTML += '<span></span>'.repeat(50_001);
+
+    fixture.document.querySelector('#trigger')?.dispatchEvent(
+      new fixture.window.Event('pointerover', { bubbles: true }),
+    );
+    fixture.flushFrame();
+
+    expect(fixture.port.posts.at(-1)).toMatchObject({
+      kind: 'simul:html-mirror-v2:error',
+      code: 'stream_gap',
+    });
+    expect(fixture.frames).toHaveLength(0);
   });
 
   it('streams the current computed canvas color with live layout patches', () => {
@@ -251,6 +603,55 @@ describe('HtmlMirrorSourceSession', () => {
     });
   });
 
+  it('removes stale local text when an ID becomes unindexable', () => {
+    const fixture = sourceFixture(
+      '<main><section id="changing">Previously readable</section>' +
+      '<section id="ordinary">Still ordinary</section></main>',
+    );
+    fixture.start();
+    expect(JSON.stringify(fixture.checkpoints()[0])).toContain('Previously readable');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const changing = fixture.document.querySelector('#changing')!;
+    const changingNodeId = fixture.registry.peekId(changing);
+
+    changing.setAttribute('id', `oversized-${'x'.repeat(16 * 1_024)}`);
+    fixture.mutate(attributeRecord(changing, 'id'));
+    fixture.flushFrame();
+    const patch = fixture.patches().at(-1)!;
+    expect(patch.operations).toContainEqual(expect.objectContaining({
+      kind: 'children',
+      nodeId: changingNodeId,
+    }));
+    expect(JSON.stringify(patch)).not.toContain('Previously readable');
+    expect(patch.operations.some(
+      (operation) => operation.kind === 'children' &&
+        operation.nodeId === fixture.registry.peekId(
+          fixture.document.querySelector('#ordinary')!,
+        ),
+    )).toBe(false);
+  });
+
+  it('requests a checkpoint when a root-wide ID fail-closed boundary flips', () => {
+    const fixture = sourceFixture(`
+      <div id="trigger" role="tab" aria-selected="true"
+        aria-controls="panel">Tab</div>
+      <section id="panel" role="tabpanel">Readable panel</section>
+      <p id="ordinary">Ordinary ID text</p>
+    `);
+    installPaintedMirrorTabFixture(fixture.document, fixture.window);
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const trigger = fixture.document.querySelector('#trigger')!;
+
+    trigger.setAttribute('aria-controls', 'x'.repeat((1 * 1_024 * 1_024) + 1));
+    fixture.mutate(attributeRecord(trigger, 'aria-controls'));
+    expect(fixture.frames).toHaveLength(0);
+    expect(fixture.port.posts.at(-1)).toMatchObject({
+      kind: 'simul:html-mirror-v2:error',
+      code: 'stream_gap',
+    });
+  });
+
   it('never reads silent control values while still mirroring structural secret transitions', () => {
     const fixture = sourceFixture(`
       <form><input id="query" class="wide" type="search" value="initial" placeholder=""
@@ -281,7 +682,7 @@ describe('HtmlMirrorSourceSession', () => {
     expect(fixture.frames).toHaveLength(0);
     expect(fixture.patches()).toHaveLength(0);
     expect(fixture.port.posts.at(-1)).toMatchObject({
-      kind: 'simul:html-mirror-v1:error',
+      kind: 'simul:html-mirror-v2:error',
       code: 'stream_gap',
     });
 
@@ -299,7 +700,9 @@ describe('HtmlMirrorSourceSession', () => {
     control.type = 'search';
     fixture.mutate(attributeRecord(control, 'type'));
     expect(fixture.port.posts).toHaveLength(postCount);
-    expect(fixture.frames).toHaveLength(0);
+    expect(fixture.frames).toHaveLength(1);
+    fixture.flushFrame();
+    expect(fixture.port.posts).toHaveLength(postCount);
   });
 
   it('rebuilds computed secret transitions and then ignores the opaque subtree', () => {
@@ -331,7 +734,7 @@ describe('HtmlMirrorSourceSession', () => {
     fixture.mutate(attributeRecord(account, 'class'));
     expect(fixture.frames).toHaveLength(0);
     expect(fixture.port.posts.at(-1)).toMatchObject({
-      kind: 'simul:html-mirror-v1:error',
+      kind: 'simul:html-mirror-v2:error',
       code: 'stream_gap',
     });
 
@@ -345,7 +748,50 @@ describe('HtmlMirrorSourceSession', () => {
     label.textContent = 'private after masking';
     fixture.mutate(childListRecord(label, [...label.childNodes]));
     expect(fixture.port.posts).toHaveLength(postCount);
-    expect(fixture.frames).toHaveLength(0);
+    expect(fixture.frames).toHaveLength(1);
+    fixture.flushFrame();
+    expect(fixture.port.posts).toHaveLength(postCount);
+  });
+
+  it('flushes remote visibility changes caused inside an opaque secret', () => {
+    const fixture = sourceFixture(`
+      <section id="secret" autocomplete="one-time-code">
+        <span id="marker" class="closed">private marker</span>
+      </section>
+      <aside id="remote-panel">Remote public panel</aside>
+    `);
+    installPaintedMirrorTabFixture(fixture.document, fixture.window);
+    const marker = fixture.document.querySelector<HTMLElement>('#marker')!;
+    const panel = fixture.document.querySelector<HTMLElement>('#remote-panel')!;
+    const baseGetComputedStyle = fixture.window.getComputedStyle
+      .bind(fixture.window);
+    Object.defineProperty(fixture.window, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => {
+        const style = baseGetComputedStyle(element);
+        return element === panel
+          ? {
+              ...style,
+              display: marker.classList.contains('open') ? 'block' : 'none',
+            } as unknown as CSSStyleDeclaration
+          : style;
+      },
+    });
+
+    fixture.start();
+    const checkpointJson = JSON.stringify(fixture.checkpoints()[0]);
+    expect(checkpointJson).not.toContain('private marker');
+    expect(checkpointJson).not.toContain('Remote public panel');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+
+    marker.className = 'open';
+    fixture.mutate(attributeRecord(marker, 'class'));
+    expect(fixture.frames).toHaveLength(1);
+    fixture.flushFrame();
+
+    const patchJson = JSON.stringify(fixture.patches().at(-1));
+    expect(patchJson).toContain('Remote public panel');
+    expect(patchJson).not.toContain('private marker');
   });
 
   it('keeps content extracted from an opaque ancestor secret in public additions', () => {
@@ -365,7 +811,7 @@ describe('HtmlMirrorSourceSession', () => {
     secret.setAttribute('autocomplete', 'one-time-code');
     fixture.mutate(attributeRecord(secret, 'autocomplete'));
     expect(fixture.port.posts.at(-1)).toMatchObject({
-      kind: 'simul:html-mirror-v1:error',
+      kind: 'simul:html-mirror-v2:error',
       code: 'stream_gap',
     });
     fixture.port.emitMessage(createHtmlMirrorCheckpointRequest(identity, 0));
@@ -410,7 +856,8 @@ describe('HtmlMirrorSourceSession', () => {
     select.options[0]!.setAttribute('selected', '');
     select.options[1]!.removeAttribute('selected');
     select.dispatchEvent(new fixture.window.Event('change', { bubbles: true }));
-    expect(fixture.frames).toHaveLength(0);
+    expect(fixture.frames).toHaveLength(1);
+    fixture.flushFrame();
     expect(fixture.patches()).toHaveLength(0);
 
     const area = fixture.document.querySelector('#area')!;
@@ -494,8 +941,11 @@ describe('HtmlMirrorSourceSession', () => {
     fixture.flushFrame();
     expect(fixture.patches()).toHaveLength(patchesBeforeLabelChange);
 
+    const patchesBeforeToggle = fixture.patches().length;
     select.dispatchEvent(new fixture.window.Event('toggle', { bubbles: true }));
-    expect(fixture.frames).toHaveLength(0);
+    expect(fixture.frames).toHaveLength(1);
+    fixture.flushFrame();
+    expect(fixture.patches()).toHaveLength(patchesBeforeToggle);
   });
 
   it('does not route optgroup legend text through the base graph', () => {
@@ -531,7 +981,7 @@ describe('HtmlMirrorSourceSession', () => {
 
       expect(fixture.checkpoints()).toHaveLength(0);
       expect(fixture.port.posts.at(-1)).toMatchObject({
-        kind: 'simul:html-mirror-v1:error',
+        kind: 'simul:html-mirror-v2:error',
         code: 'stream_overflow',
         representability: {
           capacityOmissionCount: 1,
@@ -573,7 +1023,7 @@ describe('HtmlMirrorSourceSession', () => {
 
       expect(fixture.patches()).toHaveLength(0);
       expect(fixture.port.posts.at(-1)).toMatchObject({
-        kind: 'simul:html-mirror-v1:error',
+        kind: 'simul:html-mirror-v2:error',
         code: 'stream_overflow',
         representability: {
           capacityOmissionCount: 1,
@@ -629,6 +1079,10 @@ describe('HtmlMirrorSourceSession', () => {
       </section>
       <img id="sample-logo">
     `);
+    installPaintedMirrorTabFixture(
+      fixture.document,
+      fixture.window as unknown as Window,
+    );
     fixture.start();
 
     const checkpointJson = JSON.stringify(fixture.checkpoints()[0]);
@@ -671,6 +1125,10 @@ describe('HtmlMirrorSourceSession', () => {
 
   it('keeps data srcset payloads local in live attribute patches', () => {
     const fixture = sourceFixture('<main><img id="target"></main>');
+    installPaintedMirrorTabFixture(
+      fixture.document,
+      fixture.window as unknown as Window,
+    );
     fixture.start();
     fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
     const target = fixture.document.querySelector('#target')!;
@@ -812,7 +1270,7 @@ describe('HtmlMirrorSourceSession', () => {
     fixture.mutateAll(records);
 
     expect(fixture.port.posts).not.toContainEqual(expect.objectContaining({
-      kind: 'simul:html-mirror-v1:error',
+      kind: 'simul:html-mirror-v2:error',
       code: 'stream_overflow',
     }));
     expect(fixture.patches()).toHaveLength(0);
@@ -1141,7 +1599,7 @@ describe('HtmlMirrorSourceSession', () => {
 
     expect(fixture.patches()).toHaveLength(0);
     expect(fixture.port.posts.at(-1)).toMatchObject({
-      kind: 'simul:html-mirror-v1:error',
+      kind: 'simul:html-mirror-v2:error',
       code: 'stream_gap',
     });
   });
@@ -1163,7 +1621,7 @@ describe('HtmlMirrorSourceSession', () => {
     host.setAttribute('role', 'textbox');
     fixture.mutate(attributeRecord(host, 'role'));
     expect(fixture.port.posts.at(-1)).toMatchObject({
-      kind: 'simul:html-mirror-v1:error',
+      kind: 'simul:html-mirror-v2:error',
       code: 'stream_gap',
     });
     expect(fixture.frames).toHaveLength(0);
@@ -1190,7 +1648,7 @@ describe('HtmlMirrorSourceSession', () => {
     fixture.runTimer();
 
     expect(fixture.port.posts.at(-1)).toMatchObject({
-      kind: 'simul:html-mirror-v1:error',
+      kind: 'simul:html-mirror-v2:error',
       code: 'stream_gap',
     });
     expect(fixture.observed).toContain(shadow);
@@ -1238,7 +1696,7 @@ describe('HtmlMirrorSourceSession', () => {
     )).toBe(false);
     fixture.runTimer();
     expect(fixture.port.posts.at(-1)).toMatchObject({
-      kind: 'simul:html-mirror-v1:error',
+      kind: 'simul:html-mirror-v2:error',
       code: 'stream_gap',
     });
     const gapsAfterChange = fixture.port.posts.filter(
@@ -1290,7 +1748,7 @@ describe('HtmlMirrorSourceSession', () => {
     )).toBe(false);
     fixture.runTimer();
     expect(fixture.port.posts.at(-1)).toMatchObject({
-      kind: 'simul:html-mirror-v1:error',
+      kind: 'simul:html-mirror-v2:error',
       code: 'stream_gap',
     });
 
@@ -1415,7 +1873,7 @@ describe('HtmlMirrorSourceSession', () => {
     )).toBe(false);
     for (let attempt = 0; attempt < 4; attempt += 1) fixture.runTimer();
     expect(fixture.port.posts.at(-1)).toMatchObject({
-      kind: 'simul:html-mirror-v1:error',
+      kind: 'simul:html-mirror-v2:error',
       code: 'stream_gap',
     });
   });
@@ -1442,6 +1900,53 @@ describe('HtmlMirrorSourceSession', () => {
     const serialized = JSON.stringify(graph);
     expect(serialized).toContain('["disabled",""]');
     expect(serialized).toContain('"resolvedStyleSheetText":');
+  });
+
+  it('coalesces real document scroll into one bounded transport update per frame', () => {
+    const fixture = sourceFixture('<main>scrolling page</main>');
+    const root = fixture.document.documentElement;
+    let scrollY = 0;
+    Object.defineProperty(fixture.document, 'scrollingElement', {
+      configurable: true,
+      value: root,
+    });
+    Object.defineProperties(fixture.window, {
+      innerWidth: { configurable: true, value: 800 },
+      innerHeight: { configurable: true, value: 600 },
+      scrollX: { configurable: true, value: 0 },
+      scrollY: { configurable: true, get: () => scrollY },
+    });
+    Object.defineProperties(root, {
+      clientWidth: { configurable: true, value: 800 },
+      clientHeight: { configurable: true, value: 600 },
+      scrollWidth: { configurable: true, value: 800 },
+      scrollHeight: { configurable: true, value: 2_000 },
+      scrollLeft: { configurable: true, value: 0 },
+      scrollTop: { configurable: true, get: () => scrollY },
+    });
+
+    fixture.start();
+    expect(fixture.scrolls()).toHaveLength(1);
+
+    scrollY = 120;
+    root.dispatchEvent(new fixture.window.Event('scroll', { bubbles: true }));
+    scrollY = 240;
+    root.dispatchEvent(new fixture.window.Event('scroll', { bubbles: true }));
+
+    expect(fixture.frames).toHaveLength(1);
+    fixture.flushFrame();
+    expect(fixture.scrolls()).toHaveLength(2);
+    expect(fixture.scrolls().at(-1)?.scroll).toEqual({
+      scrollTarget: 'document',
+      scrollX: 0,
+      scrollY: 240,
+      maxScrollX: 0,
+      maxScrollY: 1_400,
+      documentScrollX: 0,
+      documentScrollY: 240,
+      documentMaxScrollX: 0,
+      documentMaxScrollY: 1_400,
+    });
   });
 });
 
@@ -1528,11 +2033,15 @@ function sourceFixture(markup: string) {
     },
     checkpoints: () => port.posts.filter(
       (message): message is HtmlMirrorCheckpoint =>
-        (message as { kind?: string }).kind === 'simul:html-mirror-v1:checkpoint',
+        (message as { kind?: string }).kind === 'simul:html-mirror-v2:checkpoint',
     ),
     patches: () => port.posts.filter(
       (message): message is HtmlMirrorPatchBatch =>
-        (message as { kind?: string }).kind === 'simul:html-mirror-v1:patch',
+        (message as { kind?: string }).kind === 'simul:html-mirror-v2:patch',
+    ),
+    scrolls: () => port.posts.filter(
+      (message): message is HtmlMirrorScrollUpdate =>
+        (message as { kind?: string }).kind === 'simul:html-mirror-v2:scroll',
     ),
   };
 }
@@ -1563,6 +2072,96 @@ function childListRecord(
     addedNodes,
     removedNodes,
   } as unknown as MutationRecord;
+}
+
+function installPaintedMirrorTabFixture(
+  document: Document,
+  window: Window,
+): void {
+  for (const element of [...document.querySelectorAll('*')]) {
+    Object.defineProperty(element, 'getClientRects', {
+      configurable: true,
+      value: () => mirrorTabRectList(),
+    });
+  }
+  Object.defineProperty(window, 'getComputedStyle', {
+    configurable: true,
+    value: (element: Element) => {
+      const styleForcesHidden = element.getAttribute(
+        'data-test-style-sensitive',
+      ) === 'true' && document.querySelector('#tab-style')?.textContent
+        .includes('display:none') === true;
+      const hidden = element.hasAttribute('hidden') ||
+        element.getAttribute('aria-hidden')?.trim().toLowerCase() === 'true' ||
+        element.getAttribute('data-test-computed-hidden') === 'true' ||
+        styleForcesHidden;
+      return {
+        backgroundColor: 'rgba(0, 0, 0, 0)',
+        display: hidden ? 'none' : 'block',
+        visibility: 'visible',
+        opacity: '1',
+        overflowX: 'visible',
+        overflowY: 'visible',
+        getPropertyValue: (name: string) => {
+          if (name === '-webkit-text-security') return 'none';
+          if (name === 'content-visibility') return 'visible';
+          if (name === 'clip') return 'auto';
+          if (name === 'clip-path') return 'none';
+          if (name === 'overflow' || name === 'overflow-x' ||
+            name === 'overflow-y') return 'visible';
+          return '';
+        },
+      } as unknown as CSSStyleDeclaration;
+    },
+  });
+}
+
+function mirrorTabRectList(): DOMRectList {
+  const rect = {
+    x: 0,
+    y: 0,
+    left: 0,
+    top: 0,
+    right: 320,
+    bottom: 40,
+    width: 320,
+    height: 40,
+    toJSON: () => ({}),
+  } as DOMRect;
+  return Object.assign([rect], {
+    item: (index: number) => index === 0 ? rect : null,
+  }) as unknown as DOMRectList;
+}
+
+function mirrorEmptyRectList(): DOMRectList {
+  return Object.assign([], {
+    item: () => null,
+  }) as unknown as DOMRectList;
+}
+
+function mirrorRectList(
+  horizontal: readonly { readonly left: number; readonly right: number }[],
+): DOMRectList {
+  const rects = horizontal.map(({ left, right }) => ({
+    x: left, y: 0, left, top: 0, right, bottom: 40,
+    width: right - left, height: 40, toJSON: () => ({}),
+  } as DOMRect));
+  return Object.assign(rects, {
+    item: (index: number) => rects[index] ?? null,
+  }) as unknown as DOMRectList;
+}
+
+function selectMirrorTab(document: Document, selected: 'a' | 'b'): void {
+  for (const name of ['a', 'b'] as const) {
+    const active = name === selected;
+    const trigger = document.querySelector(`#tab-${name}`)!;
+    const panel = document.querySelector(`#panel-${name}`)!;
+    trigger.setAttribute('aria-selected', active ? 'true' : 'false');
+    trigger.setAttribute('aria-expanded', active ? 'true' : 'false');
+    panel.setAttribute('aria-hidden', active ? 'false' : 'true');
+    if (active) panel.removeAttribute('hidden');
+    else panel.setAttribute('hidden', '');
+  }
 }
 
 function fakeStyleSheet(rule: { cssText: string }): CSSStyleSheet {
@@ -1623,6 +2222,10 @@ class FakeEvent<T extends (...arguments_: never[]) => void> {
 
   removeListener(listener: T): void {
     this.#listeners.delete(listener);
+  }
+
+  get listenerCount(): number {
+    return this.#listeners.size;
   }
 
   emit(...arguments_: Parameters<T>): void {

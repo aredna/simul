@@ -1,6 +1,9 @@
 import { describe, expect, it } from 'vitest';
 
-import { parseDetachedPageIdentityHint } from '../lib/page-identity';
+import {
+  isSamePageIdentity,
+  parseDetachedPageIdentityHint,
+} from '../lib/page-identity';
 
 describe('parseDetachedPageIdentityHint', () => {
   it('keeps the query-free native side panel in native mode', () => {
@@ -18,5 +21,40 @@ describe('parseDetachedPageIdentityHint', () => {
     expect(
       parseDetachedPageIdentityHint('?sourceTabId=17&sourceWindowId=4.5'),
     ).toBeUndefined();
+  });
+});
+
+describe('isSamePageIdentity', () => {
+  const captured = {
+    tabId: 7,
+    windowId: 3,
+    url: 'https://example.com/page?version=1',
+  };
+
+  it('requires an exact tab, window, and URL match', () => {
+    expect(isSamePageIdentity(captured, {
+      id: 7,
+      windowId: 3,
+      url: captured.url,
+    })).toBe(true);
+    expect(isSamePageIdentity(captured, {
+      id: 7,
+      windowId: 3,
+      url: 'https://example.com/page?version=2',
+    })).toBe(false);
+    expect(isSamePageIdentity(captured, {
+      id: 8,
+      windowId: 3,
+      url: captured.url,
+    })).toBe(false);
+    expect(isSamePageIdentity(captured, {
+      id: 7,
+      windowId: 4,
+      url: captured.url,
+    })).toBe(false);
+  });
+
+  it('treats a missing current URL as stale', () => {
+    expect(isSamePageIdentity(captured, { id: 7, windowId: 3 })).toBe(false);
   });
 });

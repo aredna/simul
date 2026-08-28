@@ -11,10 +11,3 @@ giflib, libjpeg, libpng, libtiff, libwebp, openlibm, and zlib. Their notices
 and exact source provenance are retained in
 `tesseract/licenses/CORE_THIRD_PARTY_NOTICES.txt`.
 No OCR JavaScript, Worker, Wasm core, or language model is loaded remotely.
-
-The local OCR trial can also package tesseract-wasm 0.11.0 as a separately
-labeled direct binding around Tesseract OCR. tesseract-wasm is BSD-2-Clause,
-its bundled Comlink transport and Tesseract core are Apache-2.0, and Leptonica
-is BSD-2-Clause. Exact runtime provenance, hashes, and license texts are
-included under `tesseract-wasm/`. This direct binding reuses the catalog above
-and is treated as the same recognition family as Tesseract.js.

@@ -2,11 +2,15 @@ import { parseHTML } from 'linkedom';
 import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
+  HTML_MIRROR_PROTOCOL_VERSION,
   createHtmlMirrorCheckpoint,
   createHtmlMirrorError,
   createHtmlMirrorPatch,
+  createHtmlMirrorPortName,
+  createHtmlMirrorScrollUpdate,
   createHtmlMirrorStart,
   readHtmlMirrorControllerMessage,
+  readHtmlMirrorPortSessionId,
   readHtmlMirrorSourceMessage,
 } from '../lib/replica/html-mirror-protocol';
 import {
@@ -19,13 +23,18 @@ import {
   type HtmlMirrorElementNode,
   readHtmlMirrorNode,
   sanitizeCss,
+  sanitizeSourceChildren,
   sanitizeSourceDocument,
   sanitizeSourceElementHints,
   sanitizeSourceSubtrees,
   snapshotHtmlMirrorRepresentability,
 } from '../lib/replica/html-mirror-sanitizer';
 import { WeakNodeIdRegistry } from '../lib/replica/html-mirror-source';
-import { createReplicaIdentity } from '../lib/replica/protocol-v2';
+import { createReplicaIdentity } from '../lib/replica/replica-identity';
+import {
+  createSourceControlledContentPolicy,
+  sourceControlledContentIsWithheld,
+} from '../lib/replica/source-privacy-policy';
 
 describe('isolated HTML sanitizer and protocol', () => {
   beforeEach(() => {
@@ -38,11 +47,18 @@ describe('isolated HTML sanitizer and protocol', () => {
   });
 
   it('binds one selectable fidelity policy to the start handshake', () => {
+    expect(HTML_MIRROR_PROTOCOL_VERSION).toBe(2);
     const identity = createReplicaIdentity({
       sessionId: 'policy-session', pageEpoch: 1, generation: 1,
       documentId: 'policy-document', frameId: 0, sequence: 0,
     });
     const passive = createHtmlMirrorStart(identity, 'passive');
+    expect(createHtmlMirrorPortName(identity.sessionId)).toBe(
+      `simul:html-mirror-v2:${identity.sessionId}`,
+    );
+    expect(readHtmlMirrorPortSessionId(
+      `simul:html-mirror-v1:${identity.sessionId}`,
+    )).toBeUndefined();
 
     expect(readHtmlMirrorControllerMessage(
       passive,
@@ -66,7 +82,7 @@ describe('isolated HTML sanitizer and protocol', () => {
     expect(readHtmlMirrorControllerMessage(
       {
         protocolVersion: passive.protocolVersion,
-        kind: 'simul:html-mirror-v1:start',
+        kind: 'simul:html-mirror-v2:start',
         identity,
       },
       identity.sessionId,
@@ -74,10 +90,44 @@ describe('isolated HTML sanitizer and protocol', () => {
     )).toBeUndefined();
     expect(readHtmlMirrorControllerMessage({
       protocolVersion: passive.protocolVersion,
-      kind: 'simul:html-mirror-v1:ack',
+      kind: 'simul:html-mirror-v2:ack',
       identity,
       fidelityPolicy: 'passive',
     }, identity.sessionId, identity)).toBeUndefined();
+  });
+
+  it('accepts only bounded exact-document scroll updates', () => {
+    const identity = createReplicaIdentity({
+      sessionId: 'scroll-session', pageEpoch: 3, generation: 3,
+      documentId: 'scroll-document', frameId: 0, sequence: 4,
+    });
+    const nested = createHtmlMirrorScrollUpdate(identity, {
+      scrollTarget: 'nested',
+      scrollX: 12,
+      scrollY: 240,
+      maxScrollX: 20,
+      maxScrollY: 800,
+      nestedOwnerKey: 7,
+      nestedOwnerOrdinal: 0,
+      documentScrollX: 0,
+      documentScrollY: 40,
+      documentMaxScrollX: 0,
+      documentMaxScrollY: 1_200,
+    });
+
+    expect(readHtmlMirrorSourceMessage(nested, identity)).toEqual(nested);
+    expect(createHtmlMirrorScrollUpdate(identity, {
+      ...nested!.scroll,
+      scrollY: 801,
+    })).toBeUndefined();
+    expect(readHtmlMirrorSourceMessage({
+      ...nested,
+      identity: { ...identity, documentId: 'stale-document' },
+    }, identity)).toBeUndefined();
+    expect(createHtmlMirrorScrollUpdate(identity, {
+      ...nested!.scroll,
+      scrollTarget: 'document',
+    })).toBeUndefined();
   });
 
   it('applies passive HTML resource semantics symmetrically at both boundaries', () => {
@@ -186,6 +236,241 @@ describe('isolated HTML sanitizer and protocol', () => {
       window as unknown as Window,
       new WeakNodeIdRegistry(),
     ))).not.toContain('secret');
+  });
+
+  it('base-reads only the uniquely selected painted tab panel', () => {
+    const { document, window } = parseHTML(`<!doctype html><html><body>
+      <div role="tab" aria-selected="true" aria-expanded="true"
+        aria-controls="active-panel">Active tab</div>
+      <section id="active-panel" role="tabpanel" aria-hidden="false">
+        Active headline <input type="password" value="credential-canary">
+        Ordinary sibling
+      </section>
+      <div role="tab" aria-selected="false" aria-expanded="false"
+        aria-controls="inactive-panel">Inactive tab</div>
+      <section id="inactive-panel" role="tabpanel" aria-hidden="true" hidden>
+        Inactive headline
+      </section>
+      <div role="tab" aria-selected="true" aria-controls="contradictory-panel">
+        Contradictory tab
+      </div>
+      <section id="contradictory-panel" role="tabpanel" hidden>
+        Contradictory headline
+      </section>
+      <button aria-expanded="true" aria-controls="popup-panel">Popup</button>
+      <section id="popup-panel">Popup payload</section>
+    </body></html>`);
+    installPaintedSourceFixture(document, window as unknown as Window);
+    const inactiveText = document.querySelector('#inactive-panel')!.firstChild!;
+    Object.defineProperty(inactiveText, 'nodeValue', {
+      configurable: true,
+      get: () => {
+        throw new Error('inactive panel text must remain unread');
+      },
+    });
+
+    const graph = sanitizeSourceDocument(
+      document,
+      window as unknown as Window,
+      new WeakNodeIdRegistry(),
+    );
+    const serialized = JSON.stringify(graph);
+    expect(serialized).toContain('Active headline');
+    expect(serialized).toContain('Ordinary sibling');
+    expect(serialized).not.toContain('credential-canary');
+    expect(serialized).not.toContain('Inactive headline');
+    expect(serialized).not.toContain('Contradictory headline');
+    expect(serialized).not.toContain('Popup payload');
+  });
+
+  it('fails duplicate and cross-root controls closed without blanking ordinary text', () => {
+    const { document, window } = parseHTML(`<!doctype html><html><body>
+      <p>Ordinary page text</p>
+      <div role="tab" aria-selected="true" aria-controls="duplicate">Tab</div>
+      <section id="duplicate" role="tabpanel">Duplicate one</section>
+      <section id="duplicate" role="tabpanel">Duplicate two</section>
+      <div role="tab" aria-selected="true" aria-controls="cross">Cross tab</div>
+      <div id="host"></div>
+    </body></html>`);
+    const host = document.querySelector('#host')!;
+    const shadow = host.attachShadow({ mode: 'open' });
+    Object.defineProperty(shadow, 'mode', { value: 'open' });
+    shadow.innerHTML = '<section id="cross" role="tabpanel">Cross root</section>';
+    installPaintedSourceFixture(document, window as unknown as Window);
+
+    const graph = sanitizeSourceDocument(
+      document,
+      window as unknown as Window,
+      new WeakNodeIdRegistry(),
+    );
+    const serialized = JSON.stringify(graph);
+    expect(serialized).toContain('Ordinary page text');
+    expect(serialized).not.toContain('Duplicate one');
+    expect(serialized).not.toContain('Duplicate two');
+    expect(serialized).not.toContain('Cross root');
+  });
+
+  it('indexes valid controlled IDs longer than legacy transport limits', () => {
+    const { document, window } = parseHTML(
+      '<!doctype html><html><body><p>Ordinary page text</p></body></html>',
+    );
+    const longId = `panel-${'x'.repeat(300)}`;
+    const trigger = document.createElement('div');
+    trigger.setAttribute('role', 'tab');
+    trigger.setAttribute('aria-selected', 'true');
+    trigger.setAttribute('aria-controls', longId);
+    const panel = document.createElement('section');
+    panel.setAttribute('id', longId);
+    panel.setAttribute('role', 'tabpanel');
+    panel.textContent = 'Long ID panel headline';
+    document.body.append(trigger, panel);
+    installPaintedSourceFixture(document, window as unknown as Window);
+
+    const policy = createSourceControlledContentPolicy(
+      document,
+      window as unknown as Window,
+    );
+    expect(policy.overflow).toBe(false);
+    expect(policy.targets.get(panel)).toBe('open-tab');
+    const graph = sanitizeSourceDocument(
+      document,
+      window as unknown as Window,
+      new WeakNodeIdRegistry(),
+    );
+    expect(JSON.stringify(graph)).toContain('Long ID panel headline');
+  });
+
+  it('resolves but never opens malformed control-character IDREF targets', () => {
+    const { document, window } = parseHTML(
+      '<!doctype html><html><body><p>Ordinary page text</p></body></html>',
+    );
+    const malformedId = 'panel-\u0001-malformed';
+    const trigger = document.createElement('div');
+    trigger.setAttribute('role', 'tab');
+    trigger.setAttribute('aria-selected', 'true');
+    trigger.setAttribute('aria-controls', malformedId);
+    const panel = document.createElement('section');
+    panel.setAttribute('id', malformedId);
+    panel.setAttribute('role', 'tabpanel');
+    panel.textContent = 'Malformed ID panel leak';
+    document.body.append(trigger, panel);
+    installPaintedSourceFixture(document, window as unknown as Window);
+
+    const policy = createSourceControlledContentPolicy(
+      document,
+      window as unknown as Window,
+    );
+    expect(policy.targets.get(panel)).toBe('withheld');
+    const serialized = JSON.stringify(sanitizeSourceDocument(
+      document,
+      window as unknown as Window,
+      new WeakNodeIdRegistry(),
+    ));
+    expect(serialized).toContain('Ordinary page text');
+    expect(serialized).not.toContain('Malformed ID panel leak');
+  });
+
+  it('fails an unindexable controlled ID closed locally', () => {
+    const { document, window } = parseHTML(
+      '<!doctype html><html><body><p id="ordinary">Ordinary ID text</p></body></html>',
+    );
+    const oversizedId = `panel-${'x'.repeat(16 * 1_024)}`;
+    const trigger = document.createElement('div');
+    trigger.setAttribute('role', 'tab');
+    trigger.setAttribute('aria-selected', 'true');
+    trigger.setAttribute('aria-controls', oversizedId);
+    const panel = document.createElement('section');
+    panel.setAttribute('id', oversizedId);
+    panel.setAttribute('role', 'tabpanel');
+    panel.textContent = 'Oversized ID panel leak';
+    document.body.append(trigger, panel);
+    installPaintedSourceFixture(document, window as unknown as Window);
+
+    const policy = createSourceControlledContentPolicy(
+      document,
+      window as unknown as Window,
+    );
+    expect(policy.unindexableIdTargets.has(panel)).toBe(true);
+    expect(sourceControlledContentIsWithheld(
+      document.querySelector('#ordinary')!,
+      policy,
+    )).toBe(false);
+    const serialized = JSON.stringify(sanitizeSourceDocument(
+      document,
+      window as unknown as Window,
+      new WeakNodeIdRegistry(),
+    ));
+    expect(serialized).toContain('Ordinary ID text');
+    expect(serialized).not.toContain('Oversized ID panel leak');
+  });
+
+  it('keeps unrelated ordinary text public when the relationship index overflows', () => {
+    const { document, window } = parseHTML(
+      '<html><body><p id="ordinary">Ordinary text</p></body></html>',
+    );
+    installPaintedSourceFixture(document, window as unknown as Window);
+    const policy = createSourceControlledContentPolicy(
+      document,
+      window as unknown as Window,
+      1,
+    );
+    expect(policy.overflow).toBe(true);
+    expect(sourceControlledContentIsWithheld(
+      document.querySelector('#ordinary')!,
+      policy,
+    )).toBe(false);
+    expect(policy.incomplete).toBe(true);
+
+    const patchDiagnostics = createHtmlMirrorRepresentabilityCollector();
+    expect(sanitizeSourceChildren(
+      document.body,
+      new WeakNodeIdRegistry(),
+      document.baseURI,
+      patchDiagnostics,
+      'conservative',
+      undefined,
+      undefined,
+      policy,
+    )).toBeUndefined();
+    expect(patchDiagnostics.capacityOmissionCount).toBe(1);
+
+    const checkpointDiagnostics = createHtmlMirrorRepresentabilityCollector();
+    expect(sanitizeSourceDocument(
+      document,
+      window as unknown as Window,
+      new WeakNodeIdRegistry(),
+      checkpointDiagnostics,
+      'conservative',
+      policy,
+    )).toBeUndefined();
+    expect(checkpointDiagnostics.capacityOmissionCount).toBe(1);
+  });
+
+  it('withholds a selected panel wholly outside a clipped ancestor', () => {
+    const { document, window } = parseHTML(`<!doctype html><html><body>
+      <div id="clip" data-test-overflow="hidden">
+        <div role="tab" aria-selected="true" aria-controls="panel">Tab</div>
+        <section id="panel" role="tabpanel">Off-clip headline</section>
+      </div>
+    </body></html>`);
+    installPaintedSourceFixture(document, window as unknown as Window);
+    const clip = document.querySelector('#clip')!;
+    const panel = document.querySelector('#panel')!;
+    Object.defineProperty(clip, 'getClientRects', {
+      configurable: true,
+      value: () => sourceRectList({ left: 0, top: 0, width: 100, height: 100 }),
+    });
+    Object.defineProperty(panel, 'getClientRects', {
+      configurable: true,
+      value: () => sourceRectList({ left: 200, top: 0, width: 100, height: 40 }),
+    });
+
+    const graph = sanitizeSourceDocument(
+      document,
+      window as unknown as Window,
+      new WeakNodeIdRegistry(),
+    );
+    expect(JSON.stringify(graph)).not.toContain('Off-clip headline');
   });
 
   it('keeps native select labels, selection, and submission data out of the base graph', () => {
@@ -2442,6 +2727,68 @@ function sanitizeMarkup(
   );
   if (!graph) throw new Error('Expected the test mirror graph to serialize.');
   return graph;
+}
+
+function installPaintedSourceFixture(document: Document, window: Window): void {
+  const elements: Element[] = [...document.querySelectorAll('*')];
+  for (const host of [...elements]) {
+    if (host.shadowRoot?.mode === 'open') {
+      elements.push(...host.shadowRoot.querySelectorAll('*'));
+    }
+  }
+  for (const element of elements) {
+    Object.defineProperty(element, 'getClientRects', {
+      configurable: true,
+      value: () => sourceRectList({ left: 0, top: 0, width: 320, height: 40 }),
+    });
+  }
+  Object.defineProperty(window, 'getComputedStyle', {
+    configurable: true,
+    value: ((element: Element) => {
+      const hidden = element.hasAttribute('hidden') ||
+        element.getAttribute('aria-hidden')?.trim().toLowerCase() === 'true';
+      const overflow = element.getAttribute('data-test-overflow') ?? 'visible';
+      return {
+        display: hidden ? 'none' : 'block',
+        visibility: 'visible',
+        opacity: '1',
+        overflowX: overflow,
+        overflowY: overflow,
+        backgroundColor: 'rgba(0, 0, 0, 0)',
+        getPropertyValue: (name: string) => {
+          if (name === '-webkit-text-security') return 'none';
+          if (name === 'content-visibility') return 'visible';
+          if (name === 'clip') return 'auto';
+          if (name === 'clip-path') return 'none';
+          if (name === 'overflow' || name === 'overflow-x' ||
+            name === 'overflow-y') return overflow;
+          return '';
+        },
+      } as unknown as CSSStyleDeclaration;
+    }) as Window['getComputedStyle'],
+  });
+}
+
+function sourceRectList(input: {
+  readonly left: number;
+  readonly top: number;
+  readonly width: number;
+  readonly height: number;
+}): DOMRectList {
+  const rect = {
+    x: input.left,
+    y: input.top,
+    left: input.left,
+    top: input.top,
+    right: input.left + input.width,
+    bottom: input.top + input.height,
+    width: input.width,
+    height: input.height,
+    toJSON: () => ({}),
+  } as DOMRect;
+  return Object.assign([rect], {
+    item: (index: number) => index === 0 ? rect : null,
+  }) as unknown as DOMRectList;
 }
 
 function graphElementBySourceId(

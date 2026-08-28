@@ -8,15 +8,22 @@ import {
   type ReplicaImageSurface,
   type ReplicaRunResult,
 } from './contracts';
-import type {
-  HtmlMirrorStreamFactory,
-  HtmlMirrorStreamLease,
+import {
+  HtmlMirrorClientError,
+  type HtmlMirrorStreamFactory,
+  type HtmlMirrorStreamLease,
 } from './html-mirror-client';
-import { HtmlMirrorClientError } from './html-mirror-client';
+import {
+  aggregatePaintedSemanticLabelText,
+  removePaintedSemanticLabelPresentation,
+  synchronizePaintedSemanticLabelPresentation,
+} from './painted-semantic-label';
 import type {
   HtmlMirrorCheckpoint,
   HtmlMirrorPatchBatch,
   HtmlMirrorPatchOperation,
+  HtmlMirrorScrollState,
+  HtmlMirrorScrollUpdate,
 } from './html-mirror-protocol';
 import {
   MAX_HTML_MIRROR_BYTES,
@@ -45,7 +52,7 @@ import {
 import type {
   ReplicaSourceTextChange,
   ReplicaSourceTextRecord,
-} from './source-value-model';
+} from './source-text-record';
 import type {
   ReplayPresentationHost,
   VisibleReplayCandidateLease,
@@ -200,6 +207,7 @@ interface IsolatedHtmlEngineOptions {
   readonly openSemanticStream?: SemanticSourceStreamFactory;
   readonly onLiveApplied?: () => void;
   readonly onLayoutChanged?: () => void;
+  readonly onSourceScroll?: (scroll: HtmlMirrorScrollState) => void;
   readonly onSourceCommit?: (commit: ReplicaSourceCommit) => void;
   readonly onLiveFailure?: (code: ReplicaDiagnosticCode) => void;
   readonly onInfo?: (info: IsolatedMirrorInfo) => void;
@@ -227,6 +235,7 @@ interface HtmlMirrorDomState {
   readonly textMetadata: Map<number, Extract<HtmlMirrorNode, { kind: 'text' }>>;
   readonly controlMetadata: Map<number, HtmlMirrorControlText>;
   readonly ownedAdoptedStyles: Set<HTMLStyleElement>;
+  readonly paintedLabelHosts: Map<number, HTMLElement>;
   readonly records: Map<number, ReplicaSourceTextRecord>;
   readonly revisions: Map<number, number>;
   sequence: number;
@@ -255,7 +264,7 @@ const NAMESPACE_URIS = Object.freeze({
   mathml: 'http://www.w3.org/1998/Math/MathML',
 });
 
-/** A scriptless real-DOM mirror with rrweb-independent identity and patches. */
+/** A scriptless real-DOM mirror with private identity and ordered patches. */
 export class IsolatedHtmlReplicaEngine
   implements ReplicaEngine, ReplicaTranslationSurface, ReplicaImageSurface {
   readonly id = 'isolated-html-v1' as const;
@@ -341,6 +350,11 @@ export class IsolatedHtmlReplicaEngine
           request,
           runVersion,
         ),
+        onScroll: (update) => this.#onSourceScroll(
+          update,
+          request,
+          runVersion,
+        ),
         onFailure: (code, representability) => this.#onStreamFailure(
           code,
           request,
@@ -393,6 +407,7 @@ export class IsolatedHtmlReplicaEngine
     this.#projections.clear();
     const state = this.#committed;
     if (!state) return;
+    clearIsolatedPaintedLabels(state);
     for (const record of state.records.values()) {
       const node = state.nodes.get(record.nodeId);
       if (record.nodeType === 3 && node?.nodeType === Node.TEXT_NODE) {
@@ -456,6 +471,12 @@ export class IsolatedHtmlReplicaEngine
     if (projection.nodeType === 3) {
       if (node?.nodeType !== Node.TEXT_NODE) return false;
       node.nodeValue = projection.translated;
+      synchronizeIsolatedPaintedLabel(
+        state,
+        projection.nodeId,
+        node as Text,
+        projection.translated,
+      );
     } else {
       if (
         node?.nodeType !== Node.ELEMENT_NODE ||
@@ -498,7 +519,7 @@ export class IsolatedHtmlReplicaEngine
     });
   }
 
-  releasePresentation(showFallbackLabel = true): void {
+  releasePresentation(): void {
     this.#runVersion += 1;
     this.#cancelSemanticReconnect();
     this.#purgeSemantic(false);
@@ -508,13 +529,13 @@ export class IsolatedHtmlReplicaEngine
     this.#committed = undefined;
     this.#projections.clear();
     this.#replayLease += 1;
-    this.options.presentationHost.showLegacy(showFallbackLabel);
+    this.options.presentationHost.clearPresentation();
   }
 
   dispose(): void {
     if (this.#disposed) return;
     this.#disposed = true;
-    this.releasePresentation(false);
+    this.releasePresentation();
   }
 
   async #stageCheckpoint(
@@ -624,6 +645,7 @@ export class IsolatedHtmlReplicaEngine
         textMetadata,
         controlMetadata,
         ownedAdoptedStyles,
+        paintedLabelHosts: new Map(),
         records,
         revisions,
         sequence: checkpoint.identity.sequence,
@@ -710,6 +732,19 @@ export class IsolatedHtmlReplicaEngine
     this.#applyLivePatch(batch, request, runVersion);
   }
 
+  #onSourceScroll(
+    update: HtmlMirrorScrollUpdate,
+    request: ReplicaCaptureRequest,
+    runVersion: number,
+  ): void {
+    const state = this.#committed;
+    if (
+      !state || !this.#isCurrent(runVersion, request) ||
+      !sameSourceDocument(sourceDocumentIdentity(update.identity), state.document)
+    ) return;
+    this.options.onSourceScroll?.(update.scroll);
+  }
+
   #applyLivePatch(
     batch: HtmlMirrorPatchBatch,
     request: ReplicaCaptureRequest,
@@ -741,6 +776,8 @@ export class IsolatedHtmlReplicaEngine
     if (replicaDocument && disclosureBindingsMayHaveChanged) {
       disposeReadOnlyReplicaDisclosures(replicaDocument);
     }
+    const retainedPaintedLabelIds = [...state.paintedLabelHosts.keys()];
+    clearIsolatedPaintedLabels(state);
     let applied: AppliedPatchBatch | undefined;
     try {
       applied = applyPatchBatch(state, batch.operations);
@@ -753,6 +790,7 @@ export class IsolatedHtmlReplicaEngine
       }
     }
     if (!applied) {
+      reconcileIsolatedPaintedLabels(state, this.#projections, retainedPaintedLabelIds);
       const reconciliationRejected = batch.operations.some(
         ({ kind }) => kind === 'reconcile-children',
       );
@@ -805,13 +843,23 @@ export class IsolatedHtmlReplicaEngine
       ]);
       this.#scheduleSemanticReconnect(state, request, runVersion);
     }
-    for (const change of semanticChanges) {
+    const sourceChanges = Object.freeze([
+      ...applied.changes,
+      ...semanticChanges,
+    ]);
+    for (const change of sourceChanges) {
+      clearIsolatedPaintedLabel(state, sourceChangeNodeId(change));
       this.#projections.delete(sourceChangeNodeId(change));
     }
+    reconcileIsolatedPaintedLabels(
+      state,
+      this.#projections,
+      retainedPaintedLabelIds,
+    );
     this.#notifySourceCommit(
       state,
       'batch',
-      Object.freeze([...applied.changes, ...semanticChanges]),
+      sourceChanges,
       changesDocumentLanguage(batch),
     );
     this.options.onLiveApplied?.();
@@ -1000,6 +1048,12 @@ export class IsolatedHtmlReplicaEngine
       if (projection.nodeType === 3) {
         if (node?.nodeType !== Node.TEXT_NODE) continue;
         node.nodeValue = projection.translated;
+        synchronizeIsolatedPaintedLabel(
+          state,
+          projection.nodeId,
+          node as Text,
+          projection.translated,
+        );
       } else {
         if (
           node?.nodeType !== Node.ELEMENT_NODE ||
@@ -1045,7 +1099,6 @@ export class IsolatedHtmlReplicaEngine
     const presenter = new SemanticProofPresenter({
       document: replicaDocument,
       iframe: state.iframe,
-      mode: 'isolated-html',
       setAncestorAccessibility: (accessible) =>
         this.options.presentationHost.setInteractiveAccessibility?.(
           state.iframe,
@@ -1096,6 +1149,7 @@ export class IsolatedHtmlReplicaEngine
           if (!changes) return false;
           this.#semanticReconnectAttempt = 0;
           for (const change of changes) {
+            clearIsolatedPaintedLabel(state, sourceChangeNodeId(change));
             this.#projections.delete(sourceChangeNodeId(change));
           }
           refreshIsolatedNativeSelectFacsimiles(replicaDocument);
@@ -1154,10 +1208,13 @@ export class IsolatedHtmlReplicaEngine
     const receiver = this.#semanticReceiver;
     this.#semanticReceiver = undefined;
     const changes = receiver?.clear() ?? Object.freeze([]);
+    const state = this.#committed;
     for (const change of changes) {
+      if (state) {
+        clearIsolatedPaintedLabel(state, sourceChangeNodeId(change));
+      }
       this.#projections.delete(sourceChangeNodeId(change));
     }
-    const state = this.#committed;
     if (notify && state && !state.released && changes.length > 0) {
       this.#notifySourceCommit(state, 'batch', changes, false);
       this.#refreshExtent(state);
@@ -3811,6 +3868,72 @@ function sourceChangeNodeId(change: ReplicaSourceTextChange): number {
   return change.kind === 'remove' ? change.nodeId : change.record.nodeId;
 }
 
+function synchronizeIsolatedPaintedLabel(
+  state: HtmlMirrorDomState,
+  nodeId: number,
+  node: Text,
+  translatedText: string,
+): void {
+  const host = node.parentElement;
+  const previous = state.paintedLabelHosts.get(nodeId);
+  if (previous && previous !== host) clearIsolatedPaintedLabel(state, nodeId);
+  if (!host) return;
+  const hostText = aggregatePaintedSemanticLabelText(host) ?? translatedText;
+  if (synchronizePaintedSemanticLabelPresentation(host, hostText)) {
+    state.paintedLabelHosts.set(nodeId, host);
+    return;
+  }
+  clearIsolatedPaintedLabelHost(state, host);
+}
+
+function clearIsolatedPaintedLabel(
+  state: HtmlMirrorDomState,
+  nodeId: number,
+): void {
+  const host = state.paintedLabelHosts.get(nodeId);
+  if (host) clearIsolatedPaintedLabelHost(state, host);
+}
+
+function clearIsolatedPaintedLabelHost(
+  state: HtmlMirrorDomState,
+  host: HTMLElement,
+): void {
+  removePaintedSemanticLabelPresentation(host);
+  for (const [nodeId, candidate] of state.paintedLabelHosts) {
+    if (candidate === host) state.paintedLabelHosts.delete(nodeId);
+  }
+}
+
+function clearIsolatedPaintedLabels(state: HtmlMirrorDomState): void {
+  const hosts = new Set(state.paintedLabelHosts.values());
+  state.paintedLabelHosts.clear();
+  for (const host of hosts) removePaintedSemanticLabelPresentation(host);
+}
+
+function reconcileIsolatedPaintedLabels(
+  state: HtmlMirrorDomState,
+  projections: ReadonlyMap<number, ReplicaTextProjection>,
+  nodeIds: readonly number[],
+): void {
+  for (const nodeId of new Set(nodeIds)) {
+    const projection = projections.get(nodeId);
+    const record = state.records.get(nodeId);
+    const node = state.nodes.get(nodeId);
+    if (
+      !projection || !record || projection.nodeType !== 3 ||
+      record.nodeType !== 3 || node?.nodeType !== Node.TEXT_NODE ||
+      record.source !== projection.source ||
+      record.revision !== projection.sourceRevision
+    ) continue;
+    synchronizeIsolatedPaintedLabel(
+      state,
+      nodeId,
+      node as Text,
+      projection.translated,
+    );
+  }
+}
+
 function readDocumentLanguage(state: HtmlMirrorDomState): string | undefined {
   const root = [...state.nodes.values()].find(
     (node) => node.nodeType === Node.ELEMENT_NODE &&
@@ -4202,6 +4325,7 @@ function installStateLayoutObservers(
 function releaseState(state: HtmlMirrorDomState | undefined): void {
   if (!state || state.released) return;
   state.released = true;
+  clearIsolatedPaintedLabels(state);
   for (const cleanup of state.cleanup) {
     try {
       cleanup();

@@ -38,6 +38,11 @@ export interface SourceImageDescriptor extends ImageDimensions {
   readonly nodeId: number;
   readonly sourceKind: SourceImageKind;
   readonly contentRevision: number;
+  /**
+   * Advances only when the captured crop may have different pixels. Visibility
+   * and position-only observations deliberately leave it unchanged.
+   */
+  readonly captureRevision?: number;
   readonly observationRevision: number;
   readonly visibility: ImageVisibilityTier;
   readonly connected: true;
@@ -147,13 +152,15 @@ export function readSourceImageDescriptor(
     'connected',
     'renderedWidth',
     'renderedHeight',
-  ], ['intrinsicWidth', 'intrinsicHeight'])) return undefined;
+  ], ['intrinsicWidth', 'intrinsicHeight', 'captureRevision'])) return undefined;
   const document = readSourceDocumentIdentity(input.document);
   if (
     !document ||
     !isPositiveSafeInteger(input.nodeId) ||
     input.sourceKind !== 'img' ||
     !isPositiveSafeInteger(input.contentRevision) ||
+    (Object.hasOwn(input, 'captureRevision') &&
+      !isPositiveSafeInteger(input.captureRevision)) ||
     !isPositiveSafeInteger(input.observationRevision) ||
     !isImageVisibilityTier(input.visibility) ||
     input.connected !== true
@@ -177,6 +184,9 @@ export function readSourceImageDescriptor(
     nodeId: input.nodeId,
     sourceKind: 'img',
     contentRevision: input.contentRevision,
+    ...(Object.hasOwn(input, 'captureRevision')
+      ? { captureRevision: input.captureRevision as number }
+      : {}),
     observationRevision: input.observationRevision,
     visibility: input.visibility,
     connected: true,

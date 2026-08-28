@@ -9,6 +9,8 @@ import {
   readSemanticSourceControllerMessage,
   readSemanticSourcePortIdentity,
   semanticDisclosureRelationId,
+  semanticStructuralMenuRelationId,
+  semanticTabRelationId,
   semanticSourceProofIdentity,
   semanticSourceProofSignature,
   semanticSourceRecordId,
@@ -31,13 +33,16 @@ import {
   type SourceEvidenceCategory,
 } from './source-secret-classifier';
 import {
+  createSourceControlledContentPolicy,
   hasSourceCredentialSecretAncestor,
   isSourcePrivateContentEditableValue,
   isSourceSelectLabelElementPublic,
   readSourceFlatTreeElementPath,
   readSourceSelectLabel,
   readSourceStructuralAttributes,
+  sourceElementPathIsPainted,
   sourceAttributesArePrivate,
+  type SourceControlledContentPolicy,
 } from './source-privacy-policy';
 import type { ReplicaReadScope } from './read-scope-policy';
 import type { ReplicaSourceDocumentIdentity } from './source-identity';
@@ -100,6 +105,19 @@ interface ValidatedDisclosure {
   readonly popupRole: SemanticDisclosurePopupRole;
 }
 
+interface ValidatedStructuralMenu {
+  readonly container: Element;
+  readonly trigger: Element;
+  readonly panel: Element;
+  readonly expanded: boolean;
+}
+
+interface ValidatedTab {
+  readonly trigger: Element;
+  readonly panel: Element;
+  readonly selected: boolean;
+}
+
 interface SelectStateSnapshot {
   readonly classification: ElementClassification;
   readonly optionElements: readonly HTMLOptionElement[];
@@ -112,7 +130,9 @@ interface SelectStateSnapshot {
 type SemanticSourceProofDraft =
   | Omit<Extract<SemanticSourceProof, { kind: 'select-state' }>, 'revision'>
   | Omit<Extract<SemanticSourceProof, { kind: 'select-presentation' }>, 'revision'>
+  | Omit<Extract<SemanticSourceProof, { kind: 'tab-state' }>, 'revision'>
   | Omit<Extract<SemanticSourceProof, { kind: 'disclosure-state' }>, 'revision'>
+  | Omit<Extract<SemanticSourceProof, { kind: 'structural-menu' }>, 'revision'>
   | Omit<Extract<SemanticSourceProof, { kind: 'choice-state' }>, 'revision'>
   | Omit<Extract<SemanticSourceProof, { kind: 'control-state' }>, 'revision'>
   | Omit<Extract<SemanticSourceProof, { kind: 'aria-state' }>, 'revision'>;
@@ -129,6 +149,9 @@ const SEMANTIC_SELECT_ACTIVATION_EVENTS = Object.freeze([
 ] as const);
 const SEMANTIC_DOM_CHANGE_EVENTS = Object.freeze([
   'beforeinput', 'input', 'change', 'toggle',
+] as const);
+const SEMANTIC_PRESENTATION_CHANGE_EVENTS = Object.freeze([
+  'pointerover', 'pointerout', 'focusin', 'focusout',
 ] as const);
 const SEMANTIC_CONTROL_ROLES = new Set([
   'button', 'checkbox', 'combobox', 'link', 'menuitem', 'menuitemcheckbox',
@@ -147,7 +170,7 @@ const SEMANTIC_ARIA_MIXED_ROLES = new Set([
   'checkbox', 'menuitemcheckbox',
 ]);
 const SEMANTIC_ARIA_SELECTED_ROLES = new Set([
-  'option', 'tab', 'treeitem',
+  'option', 'treeitem',
 ]);
 const SEMANTIC_ACTIVATION_ROLES = new Set([
   'button', 'combobox', 'menuitem', 'menuitemcheckbox', 'menuitemradio',
@@ -166,6 +189,10 @@ export class SemanticSourceSession {
   readonly #classifier: StickySourceSecretClassifier;
   readonly #revisions = new Map<number, RevisionState>();
   readonly #proofRevisions = new Map<string, RevisionState>();
+  readonly #structuralMenus = new WeakMap<Element, {
+    readonly trigger: Element;
+    readonly panel: Element;
+  }>();
   #documentIdentity: ReplicaSourceDocumentIdentity | undefined;
   #scope: ReplicaReadScope | undefined;
   #policyFingerprint: string | undefined;
@@ -182,6 +209,7 @@ export class SemanticSourceSession {
   #controlPollCandidates: Element[] = [];
   #controlPollFingerprints = new WeakMap<Element, string>();
   #controlPollCursor = 0;
+  #presentationChangeCandidates = new WeakSet<Element>();
   #disposed = false;
 
   constructor(private readonly environment: SemanticSourceSessionEnvironment) {
@@ -209,12 +237,16 @@ export class SemanticSourceSession {
     this.#controlPollCandidates = [];
     this.#controlPollFingerprints = new WeakMap<Element, string>();
     this.#controlPollCursor = 0;
+    this.#presentationChangeCandidates = new WeakSet<Element>();
     for (const root of this.#semanticEventRoots) {
       for (const type of SEMANTIC_DOM_CHANGE_EVENTS) {
         root.removeEventListener(type, this.#onDomChange, true);
       }
       for (const type of SEMANTIC_SELECT_ACTIVATION_EVENTS) {
         root.removeEventListener(type, this.#onSelectActivation, true);
+      }
+      for (const type of SEMANTIC_PRESENTATION_CHANGE_EVENTS) {
+        root.removeEventListener(type, this.#onPresentationChange, true);
       }
     }
     this.#semanticEventRoots.clear();
@@ -257,7 +289,7 @@ export class SemanticSourceSession {
       this.dispose(true);
       return;
     }
-    if (message.kind === 'simul:semantic-source-v1:start') {
+    if (message.kind === 'simul:semantic-source-v2:start') {
       if (this.#documentIdentity) {
         this.dispose(true);
         return;
@@ -288,6 +320,13 @@ export class SemanticSourceSession {
       this.environment.window,
       this.#classifier,
     );
+    this.refresh();
+  };
+  readonly #onPresentationChange = (event: Event): void => {
+    if (
+      !this.#scope?.disclosureContent ||
+      !this.#presentationEventTouchesCandidate(event)
+    ) return;
     this.refresh();
   };
   readonly #onSelectActivation = (event: Event): void => {
@@ -372,6 +411,9 @@ export class SemanticSourceSession {
     }
     for (const type of SEMANTIC_SELECT_ACTIVATION_EVENTS) {
       root.addEventListener(type, this.#onSelectActivation, true);
+    }
+    for (const type of SEMANTIC_PRESENTATION_CHANGE_EVENTS) {
+      root.addEventListener(type, this.#onPresentationChange, true);
     }
   }
 
@@ -477,6 +519,58 @@ export class SemanticSourceSession {
       : this.#controlPollCursor % candidates.length;
     if (candidates.length === 0) this.#cancelControlPoll();
     else this.#scheduleControlPoll();
+  }
+
+  #replacePresentationChangeCandidates(
+    elements: readonly Element[],
+    complete: boolean,
+  ): void {
+    const candidates = new WeakSet<Element>();
+    if (complete && this.#scope?.disclosureContent) {
+      for (const element of elements) {
+        if (!isDisclosureActivationController(element)) continue;
+        candidates.add(element);
+        // Structural hover menus commonly use a trigger and panel beneath one
+        // wrapper. Marking only that immediate neighborhood catches the panel
+        // transition without turning body-level pointer movement into scans.
+        const parent = safelyRead(() => element.parentElement);
+        const parentTagName = parent?.localName.toLowerCase();
+        if (parent && parentTagName !== 'body' && parentTagName !== 'html') {
+          candidates.add(parent);
+        }
+      }
+    }
+    this.#presentationChangeCandidates = candidates;
+  }
+
+  #presentationEventTouchesCandidate(event: Event): boolean {
+    let path: readonly EventTarget[] = [];
+    try {
+      path = event.composedPath();
+    } catch {
+      // Fall through to the bounded parent walk below.
+    }
+    for (const candidate of path) {
+      if (isElementNode(candidate) &&
+        this.#presentationChangeCandidates.has(candidate)) return true;
+    }
+    let current = safelyRead(() => event.target) as Node | null | undefined;
+    for (let depth = 0; current && depth < 64; depth += 1) {
+      if (
+        current.nodeType === ELEMENT_NODE &&
+        this.#presentationChangeCandidates.has(current as Element)
+      ) return true;
+      const parent: Node | null | undefined = safelyRead(() => current?.parentNode);
+      if (parent) {
+        current = parent;
+        continue;
+      }
+      const root: Node | undefined = safelyRead(() => current?.getRootNode());
+      current = root?.nodeType === 11 && 'host' in root
+        ? (root as ShadowRoot).host
+        : null;
+    }
+    return false;
   }
 
   #controlPollFingerprint(element: Element): string | undefined {
@@ -638,11 +732,27 @@ export class SemanticSourceSession {
     const validatedDisclosures = scope.disclosureContent && stack.length === 0
       ? this.#validatedDisclosures(elements, classifications)
       : Object.freeze([]);
+    const validatedStructuralMenus = scope.disclosureContent && stack.length === 0
+      ? this.#validatedStructuralMenus(elements, classifications)
+      : Object.freeze([]);
+    let validatedTabs: readonly ValidatedTab[] = Object.freeze([]);
+    if (scope.controlSemantics && stack.length === 0) {
+      const controlledContent = createSourceControlledContentPolicy(
+        this.environment.document,
+        this.environment.window,
+        MAX_SEMANTIC_SOURCE_NODE_IDENTITIES,
+      );
+      if (!controlledContent.overflow) {
+        validatedTabs = this.#validatedTabs(controlledContent, classifications);
+      }
+    }
     const proofs: SemanticSourceProof[] = [];
     const proofIds = new Set<string>();
     let batchBytes = 0;
     const selectStates = new WeakMap<Element, SelectStateSnapshot>();
     const disclosurePanels = new Set<Element>();
+    const admittedDisclosureTextNodes = new Set<Node>();
+    const structuralMenuPanels = new WeakMap<Element, string>();
     const addProof = (draft: SemanticSourceProofDraft): boolean => {
       if (proofs.length >= MAX_SEMANTIC_SOURCE_PROOFS) return false;
       const provisional = Object.freeze({ ...draft, revision: 1 }) as
@@ -821,6 +931,25 @@ export class SemanticSourceSession {
       }
     }
 
+    for (const tab of validatedTabs) {
+      const tabNodeId = this.#nodeId(tab.trigger);
+      const panelNodeId = this.#nodeId(tab.panel);
+      if (!tabNodeId || !panelNodeId) continue;
+      const relationId = semanticTabRelationId(tabNodeId, panelNodeId);
+      if (scope.controlSemantics && relationId) {
+        addProof({
+          kind: 'tab-state',
+          bridge: this.environment.bridge,
+          relationId,
+          gate: 'controlSemantics',
+          tabNodeId,
+          panelNodeId,
+          selected: tab.selected,
+          classifierVersion: SOURCE_SECRET_CLASSIFIER_VERSION,
+        });
+      }
+    }
+
     for (const disclosure of validatedDisclosures) {
       const triggerNodeId = this.#nodeId(disclosure.trigger);
       const panelNodeId = this.#nodeId(disclosure.panel);
@@ -838,6 +967,32 @@ export class SemanticSourceSession {
         classifierVersion: SOURCE_SECRET_CLASSIFIER_VERSION,
       })) continue;
       disclosurePanels.add(disclosure.panel);
+    }
+
+    for (const menu of validatedStructuralMenus) {
+      const containerNodeId = this.#nodeId(menu.container);
+      const triggerNodeId = this.#nodeId(menu.trigger);
+      const panelNodeId = this.#nodeId(menu.panel);
+      if (!containerNodeId || !triggerNodeId || !panelNodeId) continue;
+      const relationId = semanticStructuralMenuRelationId(
+        containerNodeId,
+        triggerNodeId,
+        panelNodeId,
+      );
+      if (!relationId || !addProof({
+        kind: 'structural-menu',
+        bridge: this.environment.bridge,
+        relationId,
+        gate: 'disclosureContent',
+        containerNodeId,
+        triggerNodeId,
+        panelNodeId,
+        popupRole: 'menu',
+        expanded: menu.expanded,
+        classifierVersion: SOURCE_SECRET_CLASSIFIER_VERSION,
+      })) continue;
+      disclosurePanels.add(menu.panel);
+      structuralMenuPanels.set(menu.panel, relationId);
     }
 
     const records: SemanticSourceRecord[] = [];
@@ -892,6 +1047,9 @@ export class SemanticSourceSession {
       recordIds.add(recordId);
       batchBytes += recordBytes;
       records.push(record);
+      if (gate === 'disclosureContent' && presentation === 'text') {
+        admittedDisclosureTextNodes.add(node);
+      }
     };
 
     for (const element of elements) {
@@ -1034,11 +1192,27 @@ export class SemanticSourceSession {
         });
       }
     }
-    this.#retainCurrentRevisionHistory(recordIds, proofIds);
+    const structuralMenuRelationsWithText = new Set<string>();
+    for (const node of admittedDisclosureTextNodes) {
+      const path = readSourceFlatTreeElementPath(node);
+      if (!path) continue;
+      for (const element of path) {
+        const relationId = structuralMenuPanels.get(element);
+        if (relationId) structuralMenuRelationsWithText.add(relationId);
+      }
+    }
+    const emittedProofs = proofs.filter((proof) =>
+      proof.kind !== 'structural-menu' ||
+      structuralMenuRelationsWithText.has(proof.relationId));
+    this.#retainCurrentRevisionHistory(
+      recordIds,
+      new Set(emittedProofs.map(semanticSourceProofIdentity)),
+    );
     this.#replaceControlPollCandidates(elements, stack.length === 0);
+    this.#replacePresentationChangeCandidates(elements, stack.length === 0);
     return Object.freeze({
       records: Object.freeze(records),
-      proofs: Object.freeze(proofs),
+      proofs: Object.freeze(emittedProofs),
     });
   }
 
@@ -1074,6 +1248,7 @@ export class SemanticSourceSession {
       if ((expandedState !== 'true' && expandedState !== 'false') || !controlled) {
         continue;
       }
+      if (normalizedToken(classification.facts.role) === 'tab') continue;
       const ids = controlled.trim().split(/\s+/u).filter(isSafeDomId);
       if (
         ids.length !== 1 ||
@@ -1091,6 +1266,7 @@ export class SemanticSourceSession {
       const panelClassification = classifications.get(panel);
       if (
         panelClassification?.category !== 'public-semantic' ||
+        normalizedToken(panelClassification.facts.role) === 'tabpanel' ||
         !popupTargetSemanticsMatch(trigger, panel) ||
         !isBoundedSafeDisclosurePanel(panel, classifications) ||
         (expandedState === 'true'
@@ -1107,6 +1283,99 @@ export class SemanticSourceSession {
     return Object.freeze(disclosures);
   }
 
+  #validatedStructuralMenus(
+    elements: readonly Element[],
+    classifications: WeakMap<Element, ElementClassification>,
+  ): readonly ValidatedStructuralMenu[] {
+    const menus: ValidatedStructuralMenu[] = [];
+    for (const container of elements) {
+      const retained = this.#structuralMenus.get(container);
+      if (
+        classifications.get(container)?.category !== 'public-semantic' ||
+        !hasNavigationContext(container) ||
+        !this.#isPaintedStructuralMenuController(container)
+      ) {
+        this.#structuralMenus.delete(container);
+        continue;
+      }
+      const children = safelyRead(() => [...container.children]);
+      if (!children || children.length !== 2) {
+        this.#structuralMenus.delete(container);
+        continue;
+      }
+      const triggers = children.filter((element) =>
+        classifications.get(element)?.category === 'public-semantic' &&
+        isDisclosureActivationController(element) &&
+        this.#isPaintedStructuralMenuController(element));
+      if (triggers.length !== 1) {
+        this.#structuralMenus.delete(container);
+        continue;
+      }
+      const trigger = triggers[0]!;
+      if (
+        safelyRead(() => trigger.hasAttribute('aria-expanded')) !== false ||
+        safelyRead(() => trigger.hasAttribute('aria-controls')) !== false
+      ) {
+        this.#structuralMenus.delete(container);
+        continue;
+      }
+      const panel = children.find((element) => element !== trigger);
+      const collapsed = panel
+        ? this.#isCollapsedStructuralMenuPanel(panel)
+        : false;
+      const visible = panel
+        ? this.#isVisibleDisclosureController(panel)
+        : false;
+      const retainedRelationship = retained?.trigger === trigger &&
+        retained.panel === panel;
+      if (
+        !panel || panel.ownerDocument !== container.ownerDocument ||
+        panel.getRootNode() !== container.getRootNode() ||
+        classifications.get(panel)?.category !== 'public-semantic' ||
+        (!collapsed && (!retainedRelationship || !visible)) ||
+        !isBoundedSafeDisclosurePanel(trigger, classifications, true) ||
+        !isBoundedSafeDisclosurePanel(panel, classifications, true) ||
+        normalizeSemanticText(safelyRead(() => panel.textContent)) === undefined
+      ) {
+        this.#structuralMenus.delete(container);
+        continue;
+      }
+      this.#structuralMenus.set(container, { trigger, panel });
+      menus.push(Object.freeze({
+        container,
+        trigger,
+        panel,
+        // The replica owns structural-menu presentation. Source visibility is
+        // retained only to keep the relationship valid through a real hover;
+        // it never opens or drives the actionless replica control.
+        expanded: false,
+      }));
+    }
+    return Object.freeze(menus);
+  }
+
+  #validatedTabs(
+    controlledContent: SourceControlledContentPolicy,
+    classifications: WeakMap<Element, ElementClassification>,
+  ): readonly ValidatedTab[] {
+    const tabs: ValidatedTab[] = [];
+    for (const relationship of controlledContent.tabs) {
+      const triggerClassification = classifications.get(relationship.trigger);
+      const panelClassification = classifications.get(relationship.panel);
+      if (
+        triggerClassification?.category !== 'public-semantic' ||
+        panelClassification?.category !== 'public-semantic' ||
+        !isBoundedSafeTabPanel(relationship.panel, classifications)
+      ) continue;
+      tabs.push(Object.freeze({
+        trigger: relationship.trigger,
+        panel: relationship.panel,
+        selected: relationship.selected,
+      }));
+    }
+    return Object.freeze(tabs);
+  }
+
   #isVisibleDisclosureController(trigger: Element): boolean {
     if (isExplicitlyHidden(trigger)) return false;
     try {
@@ -1119,6 +1388,10 @@ export class SemanticSourceSession {
     }
   }
 
+  #isPaintedStructuralMenuController(element: Element): boolean {
+    return sourceElementPathIsPainted(element, this.environment.window);
+  }
+
   #isCollapsedDisclosurePanel(panel: Element): boolean {
     const authoredCollapsed = isExplicitlyHidden(panel) ||
       safelyRead(() => panel.hasAttribute('popover') &&
@@ -1129,6 +1402,30 @@ export class SemanticSourceSession {
       return normalizedToken(style.display) === 'none' ||
         normalizedToken(style.visibility) === 'hidden' ||
         normalizedToken(style.visibility) === 'collapse';
+    } catch {
+      return false;
+    }
+  }
+
+  #isCollapsedStructuralMenuPanel(panel: Element): boolean {
+    try {
+      const path = readSourceFlatTreeElementPath(panel);
+      const parent = path?.[1];
+      if (!parent || !sourceElementPathIsPainted(parent, this.environment.window)) {
+        return false;
+      }
+      const style = this.environment.window.getComputedStyle(panel);
+      const contentVisibility = normalizedToken(
+        style.getPropertyValue('content-visibility'),
+      );
+      const opacity = normalizedToken(style.opacity);
+      const numericOpacity = opacity === '' ? undefined : Number(opacity);
+      return normalizedToken(style.display) === 'none' ||
+        normalizedToken(style.visibility) === 'hidden' ||
+        normalizedToken(style.visibility) === 'collapse' ||
+        contentVisibility === 'hidden' ||
+        (numericOpacity !== undefined && Number.isFinite(numericOpacity) &&
+          numericOpacity <= 0);
     } catch {
       return false;
     }
@@ -1854,6 +2151,7 @@ function findUniqueElementById(
 function isBoundedSafeDisclosurePanel(
   panel: Element,
   classifications: WeakMap<Element, ElementClassification>,
+  requireNonEmpty = false,
 ): boolean {
   const pending: Node[] = [panel];
   const admitted: Node[] = [];
@@ -1875,12 +2173,40 @@ function isBoundedSafeDisclosurePanel(
     pending.push(...children);
   }
   let textUnits = 0;
+  let hasText = false;
   for (const node of admitted) {
     if (node.nodeType !== TEXT_NODE) continue;
     const value = safelyRead(() => node.nodeValue);
     if (typeof value !== 'string') return false;
     textUnits += value.length;
     if (textUnits * 2 > MAX_SEMANTIC_SOURCE_BATCH_BYTES) return false;
+    if (value.trim() !== '') hasText = true;
+  }
+  return !requireNonEmpty || hasText;
+}
+
+function isBoundedSafeTabPanel(
+  panel: Element,
+  classifications: WeakMap<Element, ElementClassification>,
+): boolean {
+  const pending: Node[] = [panel];
+  let visited = 0;
+  while (pending.length > 0) {
+    const node = pending.pop();
+    if (
+      !node || ++visited > MAX_SEMANTIC_DISCLOSURE_SUBTREE_NODES ||
+      node.ownerDocument !== panel.ownerDocument
+    ) return false;
+    if (node.nodeType !== ELEMENT_NODE) continue;
+    const element = node as Element;
+    const classification = classifications.get(element);
+    if (
+      !classification || classification.category !== 'public-semantic' ||
+      disclosureElementCanCarryUserState(element)
+    ) return false;
+    pending.push(...element.childNodes);
+    const shadowRoot = safelyReadShadowRoot(element);
+    if (shadowRoot) pending.push(...shadowRoot.childNodes);
   }
   return true;
 }
@@ -1907,6 +2233,13 @@ function disclosureElementCanCarryUserState(element: Element): boolean {
 function isExplicitlyHidden(element: Element): boolean {
   return element.hasAttribute('hidden') ||
     normalizedToken(safelyReadAttribute(element, 'aria-hidden')) === 'true';
+}
+
+function hasNavigationContext(element: Element): boolean {
+  const path = readSourceFlatTreeElementPath(element);
+  return Boolean(path?.some((ancestor) =>
+    ancestor.localName.toLowerCase() === 'nav' ||
+    normalizedToken(safelyReadAttribute(ancestor, 'role')) === 'navigation'));
 }
 
 function semanticSourceScanSignature(scan: SemanticSourceScan): string {

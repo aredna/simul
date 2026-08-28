@@ -4,11 +4,9 @@ import {
   readNestedScrollSnapshot,
   type PrimaryScrollTarget,
 } from '../primary-scroll';
-import { computeMirrorScale } from '../visual-renderer';
 
 export const STATIC_REPLAY_LABEL = 'Replica reconnecting';
 export const LIVE_REPLAY_LABEL = 'Live page replica';
-export const LEGACY_FALLBACK_LABEL = 'Legacy mirror · fallback';
 
 const MAX_REPLAY_DIMENSION = 1_000_000;
 const MAX_REPLAY_SCALE = 3;
@@ -65,13 +63,12 @@ export interface ReplayPresentationHost {
     iframe: HTMLIFrameElement,
     accessible: boolean,
   ): boolean;
-  showLegacy(showFallbackLabel: boolean): void;
+  clearPresentation(): void;
   dispose(): void;
 }
 
 interface VisibleReplayHostOptions {
   readonly hostDocument: Document;
-  readonly legacySurface: HTMLElement;
   readonly previewSurface: HTMLElement;
   readonly badge: HTMLElement;
 }
@@ -83,7 +80,6 @@ interface VisibleReplayHostOptions {
  */
 export class VisibleReplayHost implements ReplayPresentationHost {
   readonly #document: Document;
-  readonly #legacySurface: HTMLElement;
   readonly #previewSurface: HTMLElement;
   readonly #badge: HTMLElement;
   #candidate: CandidateLease | undefined;
@@ -106,7 +102,6 @@ export class VisibleReplayHost implements ReplayPresentationHost {
 
   constructor(options: VisibleReplayHostOptions) {
     this.#document = options.hostDocument;
-    this.#legacySurface = options.legacySurface;
     this.#previewSurface = options.previewSurface;
     this.#badge = options.badge;
   }
@@ -317,8 +312,6 @@ export class VisibleReplayHost implements ReplayPresentationHost {
       committed.root.setAttribute('aria-hidden', 'true');
       this.#previewSurface.setAttribute('aria-hidden', 'true');
     }
-    this.#legacySurface.hidden = true;
-    this.#legacySurface.setAttribute('aria-hidden', 'true');
     this.#badge.textContent = LIVE_REPLAY_LABEL;
     this.#badge.hidden = false;
     if (!wasLive) this.#applyLayout(committed);
@@ -370,23 +363,16 @@ export class VisibleReplayHost implements ReplayPresentationHost {
     return true;
   }
 
-  showLegacy(showFallbackLabel: boolean): void {
-    this.#legacySurface.hidden = false;
-    this.#legacySurface.removeAttribute('aria-hidden');
+  clearPresentation(): void {
     this.#previewSurface.hidden = true;
     this.#previewSurface.setAttribute('aria-hidden', 'true');
-    if (showFallbackLabel) {
-      this.#badge.textContent = LEGACY_FALLBACK_LABEL;
-      this.#badge.hidden = false;
-    } else {
-      this.#badge.textContent = '';
-      this.#badge.hidden = true;
-    }
+    this.#badge.textContent = '';
+    this.#badge.hidden = true;
   }
 
   dispose(): void {
     if (this.#disposed) return;
-    this.showLegacy(false);
+    this.clearPresentation();
     this.#candidate?.release();
     this.#committed?.release();
     this.#resizeObserver?.disconnect();
@@ -465,8 +451,6 @@ export class VisibleReplayHost implements ReplayPresentationHost {
     this.#committed = candidate;
     this.#previewSurface.hidden = false;
     this.#previewSurface.setAttribute('aria-hidden', 'true');
-    this.#legacySurface.hidden = true;
-    this.#legacySurface.setAttribute('aria-hidden', 'true');
     this.#badge.textContent = STATIC_REPLAY_LABEL;
     this.#badge.hidden = false;
     this.#applyLayout(candidate);
@@ -482,7 +466,7 @@ export class VisibleReplayHost implements ReplayPresentationHost {
       const wasVisible = !this.#previewSurface.hidden;
       this.#committed = undefined;
       this.#previewSurface.replaceChildren();
-      if (wasVisible) this.showLegacy(false);
+      if (wasVisible) this.clearPresentation();
     }
   }
 
@@ -799,6 +783,26 @@ function normalizeExtent(extent: VisibleReplayExtent): VisibleReplayExtent {
     width: boundedDimension(extent.width),
     height: boundedDimension(extent.height),
   };
+}
+
+function computeMirrorScale(
+  availableWidth: number,
+  sourceWidth: number,
+  mode: MirrorDisplayMode,
+  zoomPercent = 100,
+): number {
+  if (mode === 'actual') return 1;
+  if (mode === 'custom') {
+    const zoom = Number.isFinite(zoomPercent) ? zoomPercent : 100;
+    return Math.min(3, Math.max(0.25, zoom / 100));
+  }
+  if (
+    !Number.isFinite(availableWidth) ||
+    !Number.isFinite(sourceWidth) ||
+    availableWidth <= 0 ||
+    sourceWidth <= 0
+  ) return 1;
+  return Math.min(1, availableWidth / sourceWidth);
 }
 
 function maximumSourceScrollX(candidate: CandidateLease): number {

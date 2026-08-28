@@ -17,16 +17,14 @@ import {
 } from '../lib/ocr/known-provider-ids';
 
 describe('OCR foundation contracts', () => {
-  it('keeps provider IDs unique and in their stable testing priority order', () => {
+  it('keeps provider IDs unique and in their stable production priority order', () => {
     expect(IMAGE_TEXT_PROVIDER_IDS).toEqual([
-      'paddleocr-wasm',
       'chrome-text-detector',
       'tesseract',
-      'tesseract-wasm-direct',
       'transformers',
       'chromium-screen-ai',
     ]);
-    expect(new Set(IMAGE_TEXT_PROVIDER_IDS).size).toBe(6);
+    expect(new Set(IMAGE_TEXT_PROVIDER_IDS).size).toBe(4);
     expect(IMAGE_SCAN_POLICIES).toEqual([
       'visible-first-background-prescan',
       'visible-only',
@@ -43,9 +41,7 @@ describe('OCR foundation contracts', () => {
     ])).toEqual([
       'transformers',
       'tesseract',
-      'paddleocr-wasm',
       'chrome-text-detector',
-      'tesseract-wasm-direct',
       'chromium-screen-ai',
     ]);
     expect(repairImageTextProviderOrder(undefined)).toEqual(
@@ -62,8 +58,8 @@ describe('OCR foundation contracts', () => {
       'tesseract',
       'unknown',
       'tesseract',
-      'paddleocr-wasm',
-    ])).toEqual(['tesseract', 'paddleocr-wasm']);
+      'chrome-text-detector',
+    ])).toEqual(['tesseract', 'chrome-text-detector']);
     expect(readExactDisabledImageTextProviderIds([])).toEqual([]);
     expect(readExactDisabledImageTextProviderIds([
       'tesseract',

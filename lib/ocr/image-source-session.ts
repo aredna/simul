@@ -13,10 +13,15 @@ import {
   type SourceImageObserverEnvironment,
 } from './source-image-observer';
 import {
+  createSourceControlledContentPolicy,
   hasSourceControlOrEditableElementAncestor,
   hasSourceCredentialSecretAncestor,
   hasSourcePrivateOrActivationElementAncestor,
   readSourceFlatTreeElementPath,
+  sourceControlledContentLayoutMayChange,
+  sourceControlledContentMutationsMayChange,
+  sourceControlledContentIsWithheld,
+  type SourceControlledContentPolicy,
 } from '../replica/source-privacy-policy';
 import {
   sourceDocumentSecretClassifier,
@@ -25,6 +30,10 @@ import {
 import type { ReplicaSourceDocumentIdentity } from '../replica/source-identity';
 import { canonicalizeLanguageTag } from '../translation-provider';
 import { normalizeAccessibilityImageText } from './accessibility-image-text';
+import {
+  imageTransformIsAxisAligned,
+  styleAllowsImageCapture,
+} from './image-capture-style';
 
 interface MessageEventPort {
   addListener(listener: (message: unknown) => void): void;
@@ -68,6 +77,7 @@ export class ImageSourceSession {
   #model: SourceImageModel | undefined;
   #observer: SourceImageObserver | undefined;
   readonly #secretClassifier: StickySourceSecretClassifier;
+  #controlledContentPolicy: SourceControlledContentPolicy | undefined;
   #policyFingerprint: string | undefined;
   #controlImages = false;
   #accessibilityTextEnabled = false;
@@ -96,6 +106,7 @@ export class ImageSourceSession {
     this.#model?.clear();
     this.#model = undefined;
     this.#documentIdentity = undefined;
+    this.#controlledContentPolicy = undefined;
     try {
       this.environment.onDispose?.();
     } catch {
@@ -116,6 +127,12 @@ export class ImageSourceSession {
     this.#observer?.refreshAll();
   }
 
+  /** Re-prove image admission and capture safety after a CSSOM-only change. */
+  refreshAfterStyleChange(): void {
+    if (this.#disposed) return;
+    this.#observer?.refreshAfterStyleChange();
+  }
+
   readonly #onMessage = (input: unknown): void => {
     if (this.#disposed) return;
     const message = readImageSourceControllerMessage(
@@ -127,7 +144,7 @@ export class ImageSourceSession {
       this.dispose(true);
       return;
     }
-    if (message.kind === 'simul:image-source-v1:start') {
+    if (message.kind === 'simul:image-source-v2:start') {
       if (this.#documentIdentity) {
         this.dispose(true);
         return;
@@ -144,10 +161,13 @@ export class ImageSourceSession {
       this.dispose(true);
       return;
     }
-    this.refresh();
+    const requestedNode = this.environment.resolveNode(message.descriptor.nodeId);
+    if (isImageElement(requestedNode)) {
+      this.#observer.refreshImage(requestedNode);
+    }
     const descriptor = this.#model.get(message.descriptor.nodeId);
     if (!descriptor || !this.#model.isCurrent(message.descriptor)) {
-      this.#post(message.kind === 'simul:image-source-v1:accessibility-text'
+      this.#post(message.kind === 'simul:image-source-v2:accessibility-text'
         ? {
             kind: message.kind,
             requestId: message.requestId,
@@ -155,13 +175,13 @@ export class ImageSourceSession {
             status: 'stale',
           }
         : {
-            kind: 'simul:image-source-v1:metrics',
+            kind: 'simul:image-source-v2:metrics',
             requestId: message.requestId,
             status: 'stale',
           });
       return;
     }
-    if (message.kind === 'simul:image-source-v1:accessibility-text') {
+    if (message.kind === 'simul:image-source-v2:accessibility-text') {
       if (
         !this.#accessibilityTextEnabled ||
         message.policyFingerprint !== this.#policyFingerprint ||
@@ -198,13 +218,13 @@ export class ImageSourceSession {
     const metrics = this.#measure(descriptor);
     this.#post(metrics
       ? {
-          kind: 'simul:image-source-v1:metrics',
+          kind: 'simul:image-source-v2:metrics',
           requestId: message.requestId,
           status: 'ready',
           metrics,
         }
       : {
-          kind: 'simul:image-source-v1:metrics',
+          kind: 'simul:image-source-v2:metrics',
           requestId: message.requestId,
           status: 'hidden',
         });
@@ -228,6 +248,7 @@ export class ImageSourceSession {
     this.#controlImages = controlImages;
     this.#accessibilityTextEnabled = accessibilityTextEnabled;
     this.#model = model;
+    this.#refreshControlledContentPolicy();
     try {
       const observer = this.environment.createObserver({
         document: this.environment.document,
@@ -246,18 +267,23 @@ export class ImageSourceSession {
           new MutationObserver(
             callback as MutationCallback,
           ),
+        beforeRefreshAll: () => this.#refreshControlledContentPolicy(),
+        beforeMutationRead: (records) =>
+          this.#refreshControlledContentPolicyForMutations(records),
+        layoutSettleRequiresRefreshAll: (target) =>
+          this.#controlledContentLayoutMayChange(target),
         isPrivateImage: (image: HTMLImageElement) =>
           this.#hasStickySecretAncestor(image) ||
           (!this.#controlImages &&
             (
               hasSourceControlOrEditableElementAncestor(image) ||
-              hasSourceAriaControlledRegionAncestor(image)
+              this.#imageIsInWithheldControlledContent(image)
             )),
       });
       this.#observer = observer;
       this.#unsubscribe = observer.subscribe(this.#onObservation);
       this.#post({
-        kind: 'simul:image-source-v1:ready',
+        kind: 'simul:image-source-v2:ready',
         document: documentIdentity,
         summary: observer.readySummary,
       });
@@ -273,7 +299,7 @@ export class ImageSourceSession {
       ? model.upsert(event.input)
       : model.remove(event.document, event.nodeId);
     if (result.status !== 'changed') return;
-    this.#post({ kind: 'simul:image-source-v1:change', change: result.change });
+    this.#post({ kind: 'simul:image-source-v2:change', change: result.change });
   };
 
   #measure(descriptor: SourceImageDescriptor): SourceImageCaptureMetrics | undefined {
@@ -284,7 +310,7 @@ export class ImageSourceSession {
       !this.#controlImages &&
       (
         hasSourceControlOrEditableElementAncestor(node) ||
-        hasSourceAriaControlledRegionAncestor(node)
+        this.#imageIsInWithheldControlledContent(node)
       )
     ) return undefined;
     const rect = node.getBoundingClientRect();
@@ -344,7 +370,7 @@ export class ImageSourceSession {
     if (this.#hasStickySecretAncestor(node)) return { status: 'blocked' };
     if (!controlImages && (
       hasSourceControlOrEditableElementAncestor(node) ||
-      hasSourceAriaControlledRegionAncestor(node)
+      this.#imageIsInWithheldControlledContent(node)
     )) {
       return { status: 'blocked' };
     }
@@ -383,6 +409,56 @@ export class ImageSourceSession {
 
   #hasStickySecretAncestor(element: Element): boolean {
     return hasSourceCredentialSecretAncestor(element, this.#secretClassifier);
+  }
+
+  #refreshControlledContentPolicy(): void {
+    this.#controlledContentPolicy = this.#controlImages
+      ? undefined
+      : createSourceControlledContentPolicy(
+          this.environment.document,
+          this.environment.window,
+        );
+  }
+
+  /**
+   * Refresh a relationship index before the observer can discover or inspect
+   * any image affected by the same mutation delivery. A false result is still
+   * a prepared decision: the observer must not apply its generic relationship
+   * fallback to a batch proven irrelevant to this read capability.
+   */
+  #refreshControlledContentPolicyForMutations(
+    records: readonly MutationRecord[],
+  ): boolean {
+    // Relationship state is deliberately irrelevant when the user permits
+    // control images. Returning a prepared `false` suppresses the observer's
+    // conservative aria-controls/id global fallback while leaving ordinary
+    // targeted style and geometry refreshes intact.
+    if (this.#controlImages) return false;
+    const current = this.#controlledContentPolicy;
+    if (
+      current &&
+      !sourceControlledContentMutationsMayChange(records, current)
+    ) return false;
+    this.#refreshControlledContentPolicy();
+    return true;
+  }
+
+  /**
+   * A transition inside, around, or above a known controller/target can change
+   * painted tab proof without another DOM mutation. Unrelated carousel tracks
+   * stay on the targeted settle path and do not rebuild the relationship map.
+   */
+  #controlledContentLayoutMayChange(target: Element): boolean {
+    if (this.#controlImages) return false;
+    const policy = this.#controlledContentPolicy;
+    return !policy || sourceControlledContentLayoutMayChange(target, policy);
+  }
+
+  #imageIsInWithheldControlledContent(element: Element): boolean {
+    return hasSourceAriaControlledRegionAncestor(
+      element,
+      this.#controlledContentPolicy,
+    );
   }
 
   #post(message: ImageSourceRecorderMessage): void {
@@ -425,7 +501,7 @@ function imageAccessibilityTextIsVisible(
       return false;
     }
     const style = safeComputedStyle(sourceWindow, current);
-    if (!style || !styleAllowsCapture(style)) return false;
+    if (!style || !styleAllowsImageCapture(style)) return false;
   }
   const rect = image.getBoundingClientRect();
   return finitePositive(rect.width) !== undefined &&
@@ -451,40 +527,17 @@ function imageIsAccessibilityDecorative(image: HTMLImageElement): boolean {
 /** Images inside any region named by aria-controls obey controlImages too. */
 export function hasSourceAriaControlledRegionAncestor(
   element: Element,
+  policy: SourceControlledContentPolicy = createSourceControlledContentPolicy(
+    element.ownerDocument,
+    element.ownerDocument.defaultView,
+  ),
 ): boolean {
   const path = readSourceFlatTreeElementPath(element);
   if (!path) return true;
-  for (const current of path) {
-    let id: string | null;
-    try {
-      id = current.getAttribute('id');
-    } catch {
-      return true;
-    }
-    const normalizedId = id?.trim();
-    if (normalizedId && !/\s/u.test(normalizedId)) {
-      const root = current.getRootNode();
-      if (!('querySelectorAll' in root)) return true;
-      let controllers: NodeListOf<Element>;
-      try {
-        controllers = (root as Document | ShadowRoot)
-          .querySelectorAll('[aria-controls]');
-      } catch {
-        return true;
-      }
-      for (const controller of controllers) {
-        if (controller === current || current.contains(controller)) continue;
-        let controlled: string | null;
-        try {
-          controlled = controller.getAttribute('aria-controls');
-        } catch {
-          return true;
-        }
-        if (controlled?.trim().split(/\s+/u).includes(normalizedId)) return true;
-      }
-    }
-  }
-  return false;
+  if (policy.overflow) return true;
+  return path.some((current) =>
+    sourceControlledContentIsWithheld(current, policy)
+  );
 }
 
 const PRIVATE_CAPTURE_SELECTOR = [
@@ -545,7 +598,11 @@ export function hasSafeCaptureGeometry(
   for (const current of path) {
     if (safeSecretClassification(current, classifySecret)) return false;
     const style = safeComputedStyle(sourceWindow, current);
-    if (!style || !styleAllowsCapture(style) || !axisAlignedTransform(style)) {
+    if (
+      !style ||
+      !styleAllowsImageCapture(style) ||
+      !imageTransformIsAxisAligned(style)
+    ) {
       return false;
     }
     if (
@@ -593,7 +650,7 @@ export function hasProtectedSiblingOverlap(
     // actually contribute pixels to this crop.
     const style = safeComputedStyle(sourceWindow, candidate);
     if (!style) return true;
-    if (!styleAllowsCapture(style)) continue;
+    if (!styleAllowsImageCapture(style)) continue;
     // Classify every painted overlap, not only controls and ARIA role nodes.
     // Generic div/span overlays can carry sticky password, OTP, payment,
     // WebAuthn, or computed text-security classification too.
@@ -664,31 +721,6 @@ function safeComputedStyle(
   } catch {
     return undefined;
   }
-}
-
-function styleAllowsCapture(style: CSSStyleDeclaration): boolean {
-  const opacity = Number.parseFloat(style.opacity || '1');
-  return style.display !== 'none' &&
-    style.visibility !== 'hidden' &&
-    style.visibility !== 'collapse' &&
-    style.contentVisibility !== 'hidden' &&
-    Number.isFinite(opacity) && opacity > 0 &&
-    (style.clipPath === '' || style.clipPath === 'none') &&
-    (style.maskImage === '' || style.maskImage === 'none') &&
-    (style.perspective === '' || style.perspective === 'none');
-}
-
-function axisAlignedTransform(style: CSSStyleDeclaration): boolean {
-  const rotate = style.rotate;
-  if (rotate && rotate !== 'none' && rotate !== '0deg') return false;
-  const transform = style.transform;
-  if (!transform || transform === 'none') return true;
-  const match = /^matrix\(\s*([-+\d.e]+)\s*,\s*([-+\d.e]+)\s*,\s*([-+\d.e]+)\s*,\s*([-+\d.e]+)\s*,\s*([-+\d.e]+)\s*,\s*([-+\d.e]+)\s*\)$/iu.exec(transform);
-  if (!match) return false;
-  const values = match.slice(1).map(Number);
-  return values.every(Number.isFinite) &&
-    Math.abs(values[1] ?? 1) < 1e-7 &&
-    Math.abs(values[2] ?? 1) < 1e-7;
 }
 
 function clipsImage(
