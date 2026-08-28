@@ -2,7 +2,7 @@
 title: 'Fresh public testing build identity'
 type: 'chore'
 created: '2026-08-28T13:35:00+09:00'
-status: 'in-review'
+status: 'done'
 review_loop_iteration: 0
 baseline_commit: '9698946ed896a0628bcff7de56771614e2c24d68'
 context:
@@ -52,7 +52,7 @@ context:
 - [x] `dist/chrome-unpacked/` -- regenerate through the guarded artifact sync and confirm the manifest and rendered label.
 - [x] Local Git -- run the release gate, commit through the feature branch, and fast-forward `main`.
 - [x] Push safety -- verify the fetched `origin/main` remains an ancestor without force or history rewriting.
-- [ ] Publication -- push reviewed `main` to `origin/main` only after the workflow marks the spec done.
+- [x] Publication -- push reviewed `main` to `origin/main` only after the workflow marks the spec done.
 
 **Acceptance Criteria:**
 - Given the updated GitHub `main`, when a tester pulls and reloads the same unpacked directory, then Chrome and Simul display `0.3.3 beta v.20260828.1` rather than an ambiguous 0.3.2/July identity.
@@ -81,3 +81,35 @@ context:
 
 **Manual checks:**
 - In Chrome 138+, reload the same `dist/chrome-unpacked/` installation, reload the source tab, reopen Simul, and confirm `Build 0.3.3 beta v.20260828.1` in Options.
+
+## Suggested Review Order
+
+**Release identity**
+
+- Build configuration composes the approved sequence with the canonical numeric version.
+  [`wxt.config.ts:12`](../../wxt.config.ts#L12)
+
+- Package metadata advances Chrome's sortable release version.
+  [`package.json:3`](../../package.json#L3)
+
+- The committed manifest proves the ready-to-load artifact carries both identities.
+  [`manifest.json:1`](../../dist/chrome-unpacked/manifest.json#L1)
+
+**Artifact safety**
+
+- Validation now correlates every visible name with its exact numeric version.
+  [`extension-artifact.mjs:728`](../../tools/extension-artifact.mjs#L728)
+
+- Identity failures cover missing, blank, and mismatched build names.
+  [`extension-artifact.test.mjs:72`](../../tests/extension-artifact.test.mjs#L72)
+
+**Tester and release guidance**
+
+- Reload instructions distinguish Chrome's numeric card from Simul's full label.
+  [`README.md:27`](../../README.md#L27)
+
+- Legal inventory follows the numeric release without changing dependency terms.
+  [`THIRD_PARTY_NOTICES.md:9`](../../THIRD_PARTY_NOTICES.md#L9)
+
+- Deferred automation records the remaining manual build-sequence decision.
+  [`deferred-work.md:149`](deferred-work.md#L149)
