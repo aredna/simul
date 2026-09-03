@@ -413,16 +413,28 @@ export function installLivePageObserver(
     if (hosts.size < 128) hosts.add(element);
   };
 
-  const forgetTree = (node: Node): void => {
-    const id = nodeIds.get(node);
-    if (id) {
-      nodeIds.delete(node);
-      nodes.delete(id);
-    }
-    for (const child of node.childNodes) forgetTree(child);
-    if (node.nodeType === Node.ELEMENT_NODE) {
-      const shadowRoot = (node as Element).shadowRoot;
-      if (shadowRoot) for (const child of shadowRoot.childNodes) forgetTree(child);
+  // Iterative: this runs inside the MutationObserver callback, where a
+  // hostile DOM depth must not overflow the stack and drop the batch.
+  const forgetTree = (root: Node): void => {
+    const stack: Node[] = [root];
+    while (stack.length > 0) {
+      const node = stack.pop() as Node;
+      const id = nodeIds.get(node);
+      if (id) {
+        nodeIds.delete(node);
+        nodes.delete(id);
+      }
+      for (let child = node.lastChild; child; child = child.previousSibling) {
+        stack.push(child);
+      }
+      if (node.nodeType === Node.ELEMENT_NODE) {
+        const shadowRoot = (node as Element).shadowRoot;
+        if (shadowRoot) {
+          for (let child = shadowRoot.lastChild; child; child = child.previousSibling) {
+            stack.push(child);
+          }
+        }
+      }
     }
   };
 

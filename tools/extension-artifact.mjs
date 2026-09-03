@@ -241,7 +241,9 @@ export async function buildProductionArtifact({
     {
       cwd: resolvedRoot,
       env: {
-        ...process.env,
+        // Developer WXT_*/VITE_* variables must not leak into the release
+        // build, or a local .env could commit bytes CI cannot reproduce.
+        ...releaseBuildEnvironment(process.env),
         FORCE_COLOR: '0',
         NO_COLOR: '1',
         NODE_ENV: 'production',
@@ -262,6 +264,15 @@ export async function buildProductionArtifact({
   );
 
   return path.join(outputBase, 'chrome-mv3');
+}
+
+/** The parent environment minus every build-influencing developer variable. */
+export function releaseBuildEnvironment(environment) {
+  return Object.fromEntries(
+    Object.entries(environment).filter(
+      ([name]) => !/^(?:WXT_|VITE_|SIMUL_OCR_)/u.test(name),
+    ),
+  );
 }
 
 export async function validateArtifact(artifactDirectory) {

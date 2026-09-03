@@ -418,3 +418,20 @@ function installTestPage(body: string): void {
   vi.stubGlobal('HTMLElement', window.HTMLElement);
   vi.stubGlobal('HTMLImageElement', window.HTMLImageElement);
 }
+
+describe('hostile document depth', () => {
+  it('degrades a very deep DOM to a bounded capture instead of overflowing the stack', () => {
+    const depth = 12_000;
+    installTestPage(
+      `${'<div>'.repeat(depth)}deep text${'</div>'.repeat(depth)}`,
+    );
+
+    const snapshot = capturePageSnapshot();
+
+    expect(snapshot).toBeDefined();
+    const captured = snapshot.items.some(
+      (item) => item.kind === 'text' && item.text.includes('deep text'),
+    );
+    expect(captured || snapshot.omissions.truncated).toBe(true);
+  });
+});

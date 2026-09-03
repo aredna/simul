@@ -7,8 +7,9 @@ broader-source alternatives that remain deferred.
 ## Implemented local paths
 
 Simul now exposes two independently compiled local OCR providers in a saved
-priority order. Chrome's experimental `TextDetector` is capability-probed in
-the offscreen document and used only when the installed browser exposes it. A
+priority order. Chrome's experimental `TextDetector` is tried in the offscreen
+document and fails over to the next provider when the installed browser does
+not expose it (the descriptor's side-panel probe is informational only). A
 packaged Tesseract.js provider is the deterministic fallback and does not
 depend on that platform API. An unchanged empty detection must be confirmed by
 a second OCR pass before it is cached. A TextDetector result that supplies

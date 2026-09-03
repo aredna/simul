@@ -434,7 +434,12 @@ export class ImageTranslationController {
       !isReplayLease(replayLease) ||
       replayLease < this.#replayLease
     ) return false;
-    if (replayLease === this.#replayLease) return true;
+    if (replayLease === this.#replayLease) {
+      // A live commit can add the replica node an earlier job was deferred
+      // on because its anchor did not exist yet; give it another try.
+      this.resume();
+      return true;
+    }
     this.#adoptReplayLease(replayLease);
     return true;
   }

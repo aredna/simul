@@ -741,17 +741,21 @@ export function capturePageSnapshot(): PageSnapshot {
 
   const collectContainerTextNodes = (container: Element): Node[] => {
     const textNodes: Node[] = [];
-    const collect = (node: Node, root: boolean): void => {
+    // Iterative walk in document order; a hostile DOM depth must not
+    // overflow the stack inside the injected capture.
+    const stack: Array<{ node: Node; root: boolean }> = [{ node: container, root: true }];
+    while (stack.length > 0) {
+      const { node, root } = stack.pop() as { node: Node; root: boolean };
       if (auxiliaryNodesInspected >= maxVisitedNodes) {
         omissions.truncated = true;
-        return;
+        break;
       }
       auxiliaryNodesInspected += 1;
       if (node.nodeType === Node.TEXT_NODE) {
         textNodes.push(node);
-        return;
+        continue;
       }
-      if (node.nodeType !== Node.ELEMENT_NODE) return;
+      if (node.nodeType !== Node.ELEMENT_NODE) continue;
       const element = node as Element;
       if (
         !root &&
@@ -761,17 +765,13 @@ export function capturePageSnapshot(): PageSnapshot {
           element.tagName === 'FRAME' ||
           isHidden(element))
       ) {
-        return;
+        continue;
       }
-      for (const child of composedChildren(element)) {
-        if (auxiliaryNodesInspected >= maxVisitedNodes) {
-          omissions.truncated = true;
-          break;
-        }
-        collect(child, false);
+      const children = composedChildren(element);
+      for (let index = children.length - 1; index >= 0; index -= 1) {
+        stack.push({ node: children[index] as Node, root: false });
       }
-    };
-    collect(container, true);
+    }
     return textNodes;
   };
 
@@ -844,54 +844,57 @@ export function capturePageSnapshot(): PageSnapshot {
     imageItemIds.set(image, id);
   };
 
-  const visit = (node: Node): void => {
-    if (visitedNodes >= maxVisitedNodes) {
-      omissions.truncated = true;
-      return;
-    }
-    visitedNodes += 1;
-    if (stopIfBounded()) return;
-
-    if (node.nodeType === Node.TEXT_NODE) {
-      const parent = composedParentElement(node);
-      if (parent) appendTextGroup(parent);
-      return;
-    }
-
-    if (node.nodeType !== Node.ELEMENT_NODE) return;
-    const element = node as Element;
-
-    if (element.tagName === 'IFRAME' || element.tagName === 'FRAME') {
-      omissions.frames += 1;
-      return;
-    }
-
-    if (excludedTags.has(element.tagName)) {
-      if (controlTags.has(element.tagName)) omissions.controls += 1;
-      return;
-    }
-
-    if (isPrivateOrInteractive(element)) {
-      omissions.controls += 1;
-      return;
-    }
-
-    if (isHidden(element)) {
-      omissions.hidden += 1;
-      return;
-    }
-
-    if (element instanceof HTMLImageElement) {
-      addImage(element);
-      return;
-    }
-
-    for (const child of composedChildren(element)) {
+  // Iterative document-order walk: the capture is injected into arbitrary
+  // pages, and a hostile DOM depth must degrade to a truncation, not throw.
+  const visit = (start: Node): void => {
+    const stack: Node[] = [start];
+    while (stack.length > 0) {
+      const node = stack.pop() as Node;
       if (visitedNodes >= maxVisitedNodes) {
         omissions.truncated = true;
-        break;
+        return;
       }
-      visit(child);
+      visitedNodes += 1;
+      if (stopIfBounded()) return;
+
+      if (node.nodeType === Node.TEXT_NODE) {
+        const parent = composedParentElement(node);
+        if (parent) appendTextGroup(parent);
+        continue;
+      }
+
+      if (node.nodeType !== Node.ELEMENT_NODE) continue;
+      const element = node as Element;
+
+      if (element.tagName === 'IFRAME' || element.tagName === 'FRAME') {
+        omissions.frames += 1;
+        continue;
+      }
+
+      if (excludedTags.has(element.tagName)) {
+        if (controlTags.has(element.tagName)) omissions.controls += 1;
+        continue;
+      }
+
+      if (isPrivateOrInteractive(element)) {
+        omissions.controls += 1;
+        continue;
+      }
+
+      if (isHidden(element)) {
+        omissions.hidden += 1;
+        continue;
+      }
+
+      if (element instanceof HTMLImageElement) {
+        addImage(element);
+        continue;
+      }
+
+      const children = composedChildren(element);
+      for (let index = children.length - 1; index >= 0; index -= 1) {
+        stack.push(children[index] as Node);
+      }
     }
   };
 

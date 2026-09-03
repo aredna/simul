@@ -226,49 +226,73 @@ export async function translateWithSession(
   signal?: AbortSignal,
   maxInputCharacters = DEFAULT_MAX_INPUT_CHARACTERS,
 ): Promise<string> {
-  const configuredChunks = splitText(
+  const segments = splitTextSegments(
     source,
     finitePositiveInteger(
       maxInputCharacters,
       DEFAULT_MAX_INPUT_CHARACTERS,
     ),
   );
-  const chunks: string[] = [];
-  for (const configuredChunk of configuredChunks) {
-    chunks.push(
-      ...(await splitForSessionQuota(configuredChunk, session, signal)),
-    );
+  const parts: string[] = [];
+  for (const [index, segment] of segments.entries()) {
+    const quotaChunks = await splitForSessionQuota(segment.text, session, signal);
+    const translated: string[] = [];
+    for (const chunk of quotaChunks) {
+      signal?.throwIfAborted();
+      translated.push(await session.translate(chunk, signal));
+    }
+    parts.push(translated.join(' ').trim());
+    // Reinsert the whitespace that separated the chunks in the source so a
+    // paragraph break or newline in a long value survives translation.
+    if (index < segments.length - 1) parts.push(segment.separator);
   }
-  const translated: string[] = [];
-  for (const chunk of chunks) {
-    signal?.throwIfAborted();
-    translated.push(await session.translate(chunk, signal));
-  }
-  return translated.join(' ').trim();
+  return parts.join('').trim();
+}
+
+export interface TextSegment {
+  readonly text: string;
+  /** The source whitespace that followed this segment ('' after the last). */
+  readonly separator: string;
 }
 
 export function splitText(source: string, maxLength: number): string[] {
+  return splitTextSegments(source, maxLength).map((segment) => segment.text);
+}
+
+export function splitTextSegments(source: string, maxLength: number): TextSegment[] {
   const boundedLength = finitePositiveInteger(
     maxLength,
     DEFAULT_MAX_INPUT_CHARACTERS,
   );
   const sourcePoints = [...source];
-  if (sourcePoints.length <= boundedLength) return [source];
+  if (sourcePoints.length <= boundedLength) return [{ text: source, separator: '' }];
 
-  const chunks: string[] = [];
+  const segments: Array<{ text: string; separator: string }> = [];
   let remaining = sourcePoints;
   while (remaining.length > boundedLength) {
     const splitAt = findTextBoundary(remaining, boundedLength);
-    const chunk = remaining.slice(0, splitAt).join('').trim();
-    if (chunk) chunks.push(chunk);
+    const rawChunk = remaining.slice(0, splitAt).join('');
+    const text = rawChunk.trim();
+    const trailing = /\s*$/u.exec(rawChunk)?.[0] ?? '';
     remaining = remaining.slice(splitAt);
+    let leading = '';
     while (remaining[0] !== undefined && /\s/u.test(remaining[0])) {
+      leading += remaining[0];
       remaining = remaining.slice(1);
+    }
+    const separator = `${trailing}${leading}` || ' ';
+    if (text) segments.push({ text, separator });
+    else if (segments.length > 0) {
+      const previous = segments[segments.length - 1] as { text: string; separator: string };
+      previous.separator = `${previous.separator}${separator}`;
     }
   }
   const finalChunk = remaining.join('').trim();
-  if (finalChunk) chunks.push(finalChunk);
-  return chunks.filter(Boolean);
+  if (finalChunk) segments.push({ text: finalChunk, separator: '' });
+  else if (segments.length > 0) {
+    (segments[segments.length - 1] as { text: string; separator: string }).separator = '';
+  }
+  return segments;
 }
 
 async function splitForSessionQuota(

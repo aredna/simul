@@ -408,6 +408,11 @@ progress { width: 100%; height: 7px; accent-color: var(--green); }
     --danger-background: #2a1819;
   }
   #composer-output { background: #111814; }
+  /* The light ring (28% green) disappears on the dark control background. */
+  button:focus-visible,
+  select:focus-visible,
+  textarea:focus-visible,
+  input:focus-visible { outline-color: rgb(123 217 170 / 75%); }
 }
 
 @media (max-width: 360px) {

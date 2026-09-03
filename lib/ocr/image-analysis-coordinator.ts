@@ -241,7 +241,16 @@ export class ImageRecognitionCoordinator {
           route,
           hints,
         );
-        if (!first) continue;
+        if (!first) {
+          // No packaged model for this source language is a language gap,
+          // not a provider outage; say so instead of "provider-unavailable".
+          if (
+            providerId === 'tesseract' &&
+            route.sourceLanguage &&
+            !route.languageGroup
+          ) lastFailure = 'unsupported-language';
+          continue;
+        }
         const firstResponse = await this.#run(first, signal);
         let response = firstResponse;
         if (shouldRetry(firstResponse)) {

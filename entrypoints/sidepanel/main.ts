@@ -386,6 +386,7 @@ const isolatedHtmlReplicaEngine = new IsolatedHtmlReplicaEngine({
   onLiveFailure: (code) => handleReplicaLiveFailure(code, 'isolated-html'),
   onInfo: (info) => {
     // Counts and bounded stages only: never source text, URLs, pixels, IDs, or hashes.
+    if (!shouldLogIsolatedMirrorInfo(info.stage)) return;
     const event = info.eventRepresentability;
     console.info(
       `[Simul isolated mirror] stage=${info.stage}; code=${info.code ?? 'none'}; nodes=${info.nodeCount}; text=${info.textCount}; images=${info.imageCount}; shadow-roots=${info.openShadowRootCount}; adopted-styles=${info.adoptedStyleCount}; hidden-labels=${info.visuallyHiddenCount}; selected-image-sources=${info.selectedImageSourceCount}; stylesheet-links=${info.stylesheetLinkCount}; stylesheet-loaded=${info.stylesheetLoadedCount}; stylesheet-errors=${info.stylesheetErrorCount}; stylesheet-timeouts=${info.stylesheetTimedOutCount}; operations=${info.operationCount}; text-ops=${info.textOperationCount}; attribute-ops=${info.attributeOperationCount}; children-ops=${info.childrenOperationCount}; reconcile-children-ops=${info.reconcileChildrenOperationCount}; dimension-ops=${info.dimensionOperationCount}; replacement-nodes=${info.replacementNodeCount}; largest-replacement=${info.largestReplacementNodeCount}; retained-nodes=${info.retainedNodeCount}; inserted-nodes=${info.insertedNodeCount}; moved-nodes=${info.movedNodeCount}; removed-nodes=${info.removedNodeCount}; full-replacement-fallbacks=${info.fullReplacementFallbackCount}; rejected-reconciliations=${info.reconciliationRejectedCount}; baseline-unsafe-elements=${info.unsafeElementOmissionCount}; baseline-unsupported-nodes=${info.unsupportedNodeOmissionCount}; baseline-depth-omissions=${info.depthBoundaryOmissionCount}; baseline-private-redactions=${info.privateTextRedactionCount}; baseline-stripped-active=${info.strippedActiveAttributeCount}; baseline-stripped-resources=${info.strippedUnsafeResourceCount}; baseline-unreadable-styles=${info.unreadableStyleCount}; baseline-capacity=${info.capacityOmissionCount}; baseline-custom-hosts=${info.customElementHostCount}; baseline-custom-hosts-without-open-root=${info.customElementHostWithoutAccessibleOpenRootCount}; baseline-open-roots=${info.accessibleOpenShadowRootCount}; baseline-missing-proof-fallbacks=${info.missingReconciliationProofFallbackCount}; baseline-covered-dirty-fallbacks=${info.coveredDirtyBranchFallbackCount}; baseline-attribute-context-fallbacks=${info.attributeContextFallbackCount}; baseline-cross-parent-fallbacks=${info.crossParentFallbackCount}; event-unsafe-elements=${event.unsafeElementOmissionCount}; event-unsupported-nodes=${event.unsupportedNodeOmissionCount}; event-depth-omissions=${event.depthBoundaryOmissionCount}; event-private-redactions=${event.privateTextRedactionCount}; event-stripped-active=${event.strippedActiveAttributeCount}; event-stripped-resources=${event.strippedUnsafeResourceCount}; event-unreadable-styles=${event.unreadableStyleCount}; event-capacity=${event.capacityOmissionCount}; event-custom-hosts=${event.customElementHostCount}; event-custom-hosts-without-open-root=${event.customElementHostWithoutAccessibleOpenRootCount}; event-open-roots=${event.accessibleOpenShadowRootCount}; event-missing-proof-fallbacks=${event.missingReconciliationProofFallbackCount}; event-covered-dirty-fallbacks=${event.coveredDirtyBranchFallbackCount}; event-attribute-context-fallbacks=${event.attributeContextFallbackCount}; event-cross-parent-fallbacks=${event.crossParentFallbackCount}; sequence=${info.sequence}`,
@@ -395,6 +396,32 @@ const isolatedHtmlReplicaEngine = new IsolatedHtmlReplicaEngine({
     );
   },
 });
+let lastPatchInfoLogAt = 0;
+let coalescedPatchInfoLogs = 0;
+const PATCH_INFO_LOG_INTERVAL_MS = 2_000;
+
+/**
+ * Checkpoint, recovery and failure summaries always log. Per-patch summaries
+ * are several hundred characters each and arrive many times per second on a
+ * busy page, so they are coalesced to one line per interval.
+ */
+function shouldLogIsolatedMirrorInfo(stage: string): boolean {
+  if (stage !== 'patch') return true;
+  const now = Date.now();
+  if (now - lastPatchInfoLogAt < PATCH_INFO_LOG_INTERVAL_MS) {
+    coalescedPatchInfoLogs += 1;
+    return false;
+  }
+  lastPatchInfoLogAt = now;
+  if (coalescedPatchInfoLogs > 0) {
+    console.info(
+      `[Simul isolated mirror] coalesced=${coalescedPatchInfoLogs} patch summaries in the last ${PATCH_INFO_LOG_INTERVAL_MS}ms`,
+    );
+    coalescedPatchInfoLogs = 0;
+  }
+  return true;
+}
+
 replicaEngineController = new ReplicaEngineController({
   mode: replicaEngineMode,
   legacy: new LegacyReplicaEngine(),
@@ -1049,7 +1076,9 @@ browser.storage.onChanged.addListener((changes, areaName) => {
     activeAbortController?.abort();
     abortAndRequeueLiveDelta();
     invalidateComposerOutput();
-    if (!isLiveSourceOnlyMode()) translationDesired = true;
+    // The window that changed the languages already recorded its own intent
+    // in languageSelectionChanged. A change made in another companion window
+    // must not opt this one into translating.
     translationComplete = false;
     availabilityCheckedForPair = undefined;
     resetVisualMirrorTextIfPresent();
@@ -1758,7 +1787,8 @@ async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> 
     // same-page manual/recovery rebuild keeps last-good visible while the
     // selected engine stages its replacement offscreen and swaps atomically.
     if (!preserveLastGoodReplica) {
-      releaseReplicaPresentationForLegacyWork(true);
+      // A new page is being built, not a fallback: no "fallback" badge.
+      releaseReplicaPresentationForLegacyWork(true, false);
     }
     const results = await withCaptureTimeout(
       browser.scripting.executeScript({
@@ -4215,7 +4245,10 @@ function usesReplicaTranslationProjection(): boolean {
   );
 }
 
-function releaseReplicaPresentationForLegacyWork(force = false): boolean {
+function releaseReplicaPresentationForLegacyWork(
+  force = false,
+  showFallbackLabel = true,
+): boolean {
   if (!force && usesReplicaTranslationProjection()) return false;
   if (
     replicaEngineMode === 'legacy' ||
@@ -4225,7 +4258,7 @@ function releaseReplicaPresentationForLegacyWork(force = false): boolean {
   pendingLiveUpdate = undefined;
   replicaShadowAbortController?.abort();
   imageTranslationController.releaseReplica();
-  replicaEngineController.releasePresentation(true);
+  replicaEngineController.releasePresentation(showFallbackLabel);
   return needsFreshCapture;
 }
 

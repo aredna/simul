@@ -109,6 +109,11 @@ export default defineConfig({
       'import.meta.env.WXT_SIMUL_RRWEB_SHADOW': JSON.stringify(
         rrwebEnabled ? '1' : '0',
       ),
+      // Pinned from process.env only, so a developer .env file cannot switch
+      // the release build to the legacy translation path.
+      'import.meta.env.WXT_SIMUL_RRWEB_TRANSLATION': JSON.stringify(
+        process.env.WXT_SIMUL_RRWEB_TRANSLATION === '0' ? '0' : '1',
+      ),
     },
     plugins: [
       createOcrBuildProfilePlugin(process.env),

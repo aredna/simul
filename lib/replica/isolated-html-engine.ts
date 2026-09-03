@@ -222,12 +222,14 @@ export class IsolatedHtmlReplicaEngine
     signal?: AbortSignal,
   ): Promise<ReplicaRunResult> {
     if (this.#disposed) return this.#failed('stream_failed');
-    const runVersion = ++this.#runVersion;
-    this.#releaseStream();
-    this.#releaseCandidate();
+    // A stale request must not tear down the live stream of the replica that
+    // is still current; check before releasing anything.
     if (!request.isCurrent() || signal?.aborted) {
       return this.#skipped('stale_identity');
     }
+    const runVersion = ++this.#runVersion;
+    this.#releaseStream();
+    this.#releaseCandidate();
     let stream: HtmlMirrorStreamLease | undefined;
     const fidelityPolicy = this.options.getReplicaFidelityPolicy?.() ??
       'conservative';

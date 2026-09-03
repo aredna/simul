@@ -6,6 +6,7 @@ import {
   displayTranslation,
   retryIncompleteTranslations,
   splitText,
+  splitTextSegments,
   translateSnapshot,
   translateWithSession,
 } from '../lib/translation-pipeline';
@@ -280,3 +281,31 @@ function hasUnpairedSurrogate(value: string): boolean {
   }
   return false;
 }
+
+describe('chunk separators', () => {
+  it('preserves the source whitespace between translated chunks', async () => {
+    const calls: string[] = [];
+    const session: TranslationSession = {
+      translate: async (text) => {
+        calls.push(text);
+        return `<${text}>`;
+      },
+      destroy: vi.fn(),
+    };
+
+    const translated = await translateWithSession(
+      session,
+      'Para one.\n\nPara two.',
+      undefined,
+      10,
+    );
+
+    expect(calls).toEqual(['Para one.', 'Para two.']);
+    expect(translated).toBe('<Para one.>\n\n<Para two.>');
+    expect(splitTextSegments('One sentence. Two sentence. Three', 15)).toEqual([
+      { text: 'One sentence.', separator: ' ' },
+      { text: 'Two sentence.', separator: ' ' },
+      { text: 'Three', separator: '' },
+    ]);
+  });
+});

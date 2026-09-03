@@ -255,3 +255,10 @@ describe('source navigation handling', () => {
     expect(follow).toContain("queueCapture({ identity, reason: 'navigation' });");
   });
 });
+
+describe('dark-mode focus ring', () => {
+  it('overrides the light focus ring inside the dark color-scheme block', () => {
+    const darkBlock = style.slice(style.indexOf('@media (prefers-color-scheme: dark)'));
+    expect(darkBlock).toContain('input:focus-visible { outline-color: rgb(123 217 170 / 75%); }');
+  });
+});

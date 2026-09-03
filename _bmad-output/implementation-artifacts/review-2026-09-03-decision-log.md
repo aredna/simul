@@ -283,6 +283,58 @@ fixes.
 - The font-based target-language leak under Passive Fidelity and the
   receiver-side autocomplete check (see D17).
 
+### D21. Low findings applied
+
+- L2: a language change made in another companion window no longer forces
+  this window to start translating; each window keeps its own intent.
+- L6: a new-page rebuild no longer shows the "Legacy mirror · fallback"
+  badge; that label is reserved for real fallbacks.
+- L7: dark mode gets a visible focus ring.
+- L8: per-patch isolated-mirror console summaries are coalesced to one line
+  per two seconds; checkpoint, recovery and failure summaries still log
+  immediately, so the README's troubleshooting guidance still holds.
+- L9: whitespace between translated chunks (paragraph breaks in long values)
+  is preserved instead of collapsing to a single space.
+- L11: a source language with no packaged Tesseract model reports
+  `unsupported-language` instead of `provider-unavailable`.
+- L12: the docs no longer claim the TextDetector probe runs offscreen.
+- L13: a live replica commit re-queues images that were deferred because
+  their anchor did not exist yet.
+- L16: a stale engine run no longer tears down the live stream of the
+  replica that is still current.
+- L18: the injected snapshot walk and the live observer's forget-tree are
+  iterative, so a hostile DOM depth truncates instead of throwing.
+- L21: the release build strips WXT_*, VITE_* and SIMUL_OCR_* variables from
+  the parent environment and pins the two WXT flags through `define`, so a
+  developer `.env` cannot change release bytes.
+
+### D22. Low findings left alone, with reasons
+
+- L1 (remove the broad grant before requesting the narrower one): the order
+  is deliberate. Chrome treats a request for a pattern already covered by
+  `<all_urls>` as granted without a prompt, so requesting first would never
+  produce the per-site prompt. Left as is.
+- L3 (Web Lock held across `permissions.request`): needs a redesign of the
+  preference lock; not attempted unattended.
+- L4/L5 (titles, aria-labels and status strings stay English; whole-UI
+  flash on a new dynamic label): a string catalogue refactor.
+- L10 (`he` sent as `iw`): I could not verify Chrome's runtime behavior
+  here; changing it blind could break Hebrew.
+- L14, L15 (diagnostic fan-out and forced layouts during scroll): mostly
+  moot after D18.
+- L17 (CSS-driven editability), L19 (rrweb lows), L20 (sourcemap strip
+  fragility; validator fails closed), L22 (Dependabot: with no lockfile it
+  only opens PRs for majors), L24 (legacy delta path; unreachable in the
+  release configuration).
+
+### D23. Injection boundary test
+
+`tests/injection-boundary.test.ts` serializes every function passed to
+`scripting.executeScript({ func })` and runs it inside a scope that throws
+on any identifier that is not a real global, so a helper imported from a
+module can never again ride along silently (the cause of the shipped scroll
+regression).
+
 ### D7. Local toolchain notes
 
 - Nothing in the dependency set had a release inside the 7-day window
