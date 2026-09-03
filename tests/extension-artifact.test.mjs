@@ -23,6 +23,7 @@ import {
   REQUIRED_ISOLATED_SANDBOX_MARKERS,
   REQUIRED_REPLICA_RUNTIME_MARKERS,
   REQUIRED_UNLISTED_BUNDLES,
+  REQUIRED_UNLISTED_BUNDLE_MARKERS,
   assertOcrProviderDependenciesApproved,
   assertCanonicalSyncTarget,
   buildProductionArtifact,
@@ -526,7 +527,7 @@ describe('disabled OCR production profile', () => {
     const validation = await validateArtifact(artifact);
 
     expect(validation.ocrEnabled).toBe(false);
-    expect(validation.manifest.version).toBe('0.3.0');
+    expect(validation.manifest.version).toBe('0.3.1');
     expect(validation.manifest.permissions).toEqual(APPROVED_PERMISSIONS);
     expect(validation.manifest).not.toHaveProperty('content_security_policy');
     expect(validation.files).not.toContain('offscreen.html');
@@ -882,13 +883,11 @@ async function createValidArtifact(
         ...REQUIRED_ISOLATED_SANDBOX_MARKERS,
       ])});`,
     ),
-    writeFile(
-      path.join(directory, REQUIRED_UNLISTED_BUNDLES[0]),
-      `console.info(${JSON.stringify(REQUIRED_REPLICA_RUNTIME_MARKERS[0])});`,
-    ),
-    writeFile(
-      path.join(directory, REQUIRED_UNLISTED_BUNDLES[1]),
-      `console.info(${JSON.stringify(REQUIRED_REPLICA_RUNTIME_MARKERS[2])});`,
+    ...Object.entries(REQUIRED_UNLISTED_BUNDLE_MARKERS).map(([bundle, marker]) =>
+      writeFile(
+        path.join(directory, bundle),
+        `console.info(${JSON.stringify(marker)});`,
+      ),
     ),
   ]);
   return directory;

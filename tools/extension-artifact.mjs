@@ -36,9 +36,9 @@ export const APPROVED_OPTIONAL_HOST_PERMISSIONS = Object.freeze([
 ]);
 export const MINIMUM_CHROME_VERSION = 138;
 export const REQUIRED_UNLISTED_BUNDLES = Object.freeze([
-  'page-live-observer.js',
   'page-recorder.js',
   'page-mirror.js',
+  'page-live-observer.js',
 ]);
 export const REQUIRED_REPLICA_RUNTIME_MARKERS = Object.freeze([
   'simul:replica-v2:capture-checkpoint',
@@ -47,6 +47,16 @@ export const REQUIRED_REPLICA_RUNTIME_MARKERS = Object.freeze([
   'isolated-html-v1',
   'simul:live-observer-v2',
 ]);
+/**
+ * Marker that must appear as a JavaScript string inside each required local
+ * bundle. Keyed by bundle name so growing the bundle list can never shift
+ * which file a marker is checked in.
+ */
+export const REQUIRED_UNLISTED_BUNDLE_MARKERS = Object.freeze({
+  'page-recorder.js': REQUIRED_REPLICA_RUNTIME_MARKERS[0],
+  'page-mirror.js': REQUIRED_REPLICA_RUNTIME_MARKERS[2],
+  'page-live-observer.js': REQUIRED_REPLICA_RUNTIME_MARKERS[4],
+});
 export const REQUIRED_ISOLATED_SANDBOX_MARKERS = Object.freeze([
   'simul-isolated-shell',
   'allow-same-origin',
@@ -346,19 +356,15 @@ export async function validateArtifact(artifactDirectory) {
 }
 
 function assertReplicaRuntimeMarkers(executableTextByPath, filePaths) {
-  const [captureMarker, replayMarker, htmlMirrorMarker, isolatedMarker] =
-    REQUIRED_REPLICA_RUNTIME_MARKERS;
-  const recorderText = executableTextByPath.get(REQUIRED_UNLISTED_BUNDLES[0]);
-  if (!recorderText || !hasJavaScriptStringMarker(recorderText, captureMarker)) {
-    throw new ArtifactError(
-      `Extension artifact is missing required local replica runtime marker: ${captureMarker}`,
-    );
-  }
-  const mirrorText = executableTextByPath.get(REQUIRED_UNLISTED_BUNDLES[1]);
-  if (!mirrorText || !hasJavaScriptStringMarker(mirrorText, htmlMirrorMarker)) {
-    throw new ArtifactError(
-      `Extension artifact is missing required local replica runtime marker: ${htmlMirrorMarker}`,
-    );
+  const [, replayMarker, , isolatedMarker] = REQUIRED_REPLICA_RUNTIME_MARKERS;
+  for (const bundle of REQUIRED_UNLISTED_BUNDLES) {
+    const marker = REQUIRED_UNLISTED_BUNDLE_MARKERS[bundle];
+    const text = executableTextByPath.get(bundle);
+    if (!marker || !text || !hasJavaScriptStringMarker(text, marker)) {
+      throw new ArtifactError(
+        `Extension artifact is missing required local replica runtime marker: ${marker ?? bundle}`,
+      );
+    }
   }
 
   const sidepanelText = executableTextByPath.get('sidepanel.html');

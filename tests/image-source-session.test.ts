@@ -80,12 +80,13 @@ describe('image source capture safety', () => {
     expect(nearestValidElementLanguage(document.querySelector('img')!)).toBe('ja');
   });
 
-  it('rejects hidden, rotated, and private-control-overlapped pixels', () => {
+  it('rejects hidden, rotated, and private-control-overlapped pixels but allows eligible text controls', () => {
     const { document } = parseHTML(
-      '<html><body><img id="image"><input id="private"></body></html>',
+      '<html><body><img id="image"><input id="private" type="password"><input id="public" type="search"></body></html>',
     );
     const image = document.querySelector('#image')! as unknown as HTMLImageElement;
     const control = document.querySelector('#private')!;
+    const publicControl = document.querySelector('#public')!;
     const imageRect = rect(10, 10, 200, 100);
     Object.defineProperty(image, 'getBoundingClientRect', {
       value: () => imageRect,
@@ -93,11 +94,15 @@ describe('image source capture safety', () => {
     Object.defineProperty(control, 'getBoundingClientRect', {
       value: () => rect(50, 30, 80, 30),
     });
+    Object.defineProperty(publicControl, 'getBoundingClientRect', {
+      value: () => rect(120, 40, 60, 20),
+    });
     const styles = new Map<Element, CSSStyleDeclaration>();
     const sourceWindow = {
       getComputedStyle: (element: Element) => styles.get(element) ?? baseStyle,
     } as unknown as Window;
 
+    // A password control overlapping the image blocks capture.
     expect(hasSafeCaptureGeometry(
       image,
       imageRect,
@@ -106,6 +111,14 @@ describe('image source capture safety', () => {
     )).toBe(false);
 
     control.remove();
+    // An eligible public text control may overlap: its text is already
+    // readable in the replica, so its pixels expose nothing new.
+    expect(hasSafeCaptureGeometry(
+      image,
+      imageRect,
+      document as unknown as Document,
+      sourceWindow,
+    )).toBe(true);
     styles.set(image, { ...baseStyle, visibility: 'hidden' });
     expect(hasSafeCaptureGeometry(
       image,
