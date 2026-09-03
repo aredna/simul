@@ -4,7 +4,7 @@
   "private": true,
   "description": "Follow a web page in a live read-only mirror with on-device translation in Chrome.",
   "type": "module",
-  "packageManager": "npm@12.0.1",
+  "packageManager": "npm@12.0.2",
   "engines": {
     "node": ">=24 <25",
     "npm": ">=12 <13"
@@ -22,26 +22,22 @@
     "check": "npm run typecheck && npm test && npm run artifact:check"
   },
   "devDependencies": {
-    "acorn": "8.17.0",
-    "linkedom": "0.18.13",
-    "typescript": "7.0.2",
-    "vitest": "4.1.10",
-    "wxt": "0.20.27"
-  },
-  "overrides": {
-    "adm-zip": "0.6.0",
-    "esbuild": "0.28.1",
-    "fx-runner": "1.5.0",
-    "tmp": "0.2.7",
-    "uuid": "11.1.1"
+    "@types/node": "^24.13.3",
+    "acorn": "^8.18.0",
+    "linkedom": "^0.18.13",
+    "typescript": "^7.0.2",
+    "vite": "^8.2.2",
+    "vitest": "^4.1.11",
+    "wxt": "^0.21.4"
   },
   "allowScripts": {
-    "esbuild@0.28.1": true,
-    "fsevents@2.3.3": true
+    "esbuild": true,
+    "fsevents": true,
+    "tesseract.js": false
   },
   "dependencies": {
-    "@rrweb/record": "2.1.0",
-    "@rrweb/replay": "2.1.0",
+    "@rrweb/record": "^2.1.1",
+    "@rrweb/replay": "^2.1.1",
     "tesseract.js": "7.0.0",
     "tesseract.js-core": "7.0.0"
   }

@@ -27,3 +27,6 @@ _bmad/custom/*.user.toml
 # Tesseract cores are embedded in the vendored .wasm.js loaders; separate
 # .wasm copies are stray and would breach the artifact size gate.
 vendor/ocr/tesseract/core/*.wasm
+
+# Not tracked: dependencies float within package.json ranges (decision log D1).
+package-lock.json

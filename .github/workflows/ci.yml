@@ -25,13 +25,14 @@ jobs:
         uses: actions/setup-node@v7
         with:
           node-version-file: .nvmrc
-          cache: npm
 
-      - name: Use the pinned npm release
-        run: npm install --global npm@12.0.1
+      - name: Use the npm release declared in package.json
+        run: corepack enable npm
 
+      # No lockfile is tracked; dependencies resolve within the package.json
+      # ranges at install time.
       - name: Install dependencies
-        run: npm ci
+        run: npm install
 
       - name: Verify source and committed Chrome release
         run: npm run check
