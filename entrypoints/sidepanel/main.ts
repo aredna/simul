@@ -42,9 +42,19 @@ import {
   type LiveVisualNode,
 } from '../../lib/live-page-mirror';
 import {
-  type CapturedPageIdentity,
-  isSamePageIdentity,
+  PageAccessError,
+  assertSnapshotIsCurrent,
+  hasNonDefaultPort,
+  identityFromTab,
+  isSupportedPage,
+  normalizedPageUrl,
   parseDetachedPageIdentityHint,
+  readAuthorizedTabMessage,
+  readPageError,
+  readableError,
+  withPageTimeout,
+  type AuthorizedTabRequest,
+  type CapturedPageIdentity,
 } from '../../lib/page-identity';
 import {
   createDetachedCompanionUrl,
@@ -186,20 +196,6 @@ interface CaptureRequest {
     | 'authorized'
     | 'preference'
     | 'desynchronized';
-}
-
-interface AuthorizedTabMessage {
-  type: 'simul:authorized-tab';
-  tabId: number;
-  windowId: number;
-  url: string;
-  launchEpoch?: string;
-  launchSequence?: number;
-}
-
-interface AuthorizedTabRequest {
-  identity: CapturedPageIdentity;
-  launchStamp?: CompanionLaunchStamp;
 }
 
 interface PendingLiveUpdate {
@@ -1757,7 +1753,7 @@ async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> 
     const snapshotInjection = results[0];
     const nextSnapshot = parsePageSnapshot(snapshotInjection?.result);
     const currentTab = await browser.tabs.get(identity.tabId);
-    assertSnapshotIsCurrent(currentTab, identity);
+    assertSnapshotIsCurrent(currentTab, identity, requiresActiveSourceTab());
     if (!captureCoordinator.isCurrent(work.generation)) return;
 
     translationComplete = false;
@@ -2277,7 +2273,7 @@ async function runTranslation(automatic: boolean, generation: number): Promise<v
   let session: TranslationSession | undefined;
   try {
     const tab = await browser.tabs.get(identity.tabId);
-    assertSnapshotIsCurrent(tab, identity);
+    assertSnapshotIsCurrent(tab, identity, requiresActiveSourceTab());
     if (
       !captureCoordinator.isCurrent(generation) ||
       visualRoot !== root ||
@@ -3472,22 +3468,12 @@ function clearNavigationTimer(): void {
 }
 
 function withCaptureTimeout<T>(operation: Promise<T>): Promise<T> {
-  return new Promise<T>((resolve, reject) => {
-    const timeout = setTimeout(
-      () => reject(new PageAccessError('The page took too long to respond. Retry the current page.')),
-      CAPTURE_TIMEOUT_MS,
-    );
-    operation.then(
-      (value) => {
-        clearTimeout(timeout);
-        resolve(value);
-      },
-      (error: unknown) => {
-        clearTimeout(timeout);
-        reject(error);
-      },
-    );
-  });
+  return withPageTimeout(operation, CAPTURE_TIMEOUT_MS);
+}
+
+/** Side panels and active-following windows must read the active tab only. */
+function requiresActiveSourceTab(): boolean {
+  return !isDetachedWindow || preferences.popoutTabMode === 'active';
 }
 
 function invalidateCompanion(message: string): void {
@@ -3595,80 +3581,6 @@ async function readCurrentFollowedIdentity(
     followed.url,
     !isDetachedWindow || preferences.popoutTabMode === 'active',
   );
-}
-
-function identityFromTab(
-  tab: Browser.tabs.Tab | undefined,
-  fallbackUrl?: string,
-  requireActive = true,
-): CapturedPageIdentity {
-  const url = tab?.url ?? fallbackUrl;
-  if (
-    tab?.id === undefined ||
-    !url ||
-    !isSupportedPage(url) ||
-    (requireActive && !tab.active)
-  ) {
-    throw new PageAccessError('Open a regular HTTP or HTTPS page, then select the extension from that page.');
-  }
-  return { tabId: tab.id, windowId: tab.windowId, url };
-}
-
-function assertSnapshotIsCurrent(
-  tab: Browser.tabs.Tab | undefined,
-  identity: CapturedPageIdentity,
-): void {
-  if (
-    ((!isDetachedWindow || preferences.popoutTabMode === 'active') &&
-      !tab?.active) ||
-    !isSamePageIdentity(identity, tab)
-  ) {
-    throw new PageAccessError('The source page changed or access expired. Select the extension on the source page to authorize it again.');
-  }
-}
-
-function readAuthorizedTabMessage(message: unknown): AuthorizedTabRequest | undefined {
-  if (
-    typeof message !== 'object' ||
-    message === null ||
-    !('type' in message) ||
-    message.type !== 'simul:authorized-tab' ||
-    !('tabId' in message) ||
-    !Number.isSafeInteger(message.tabId) ||
-    Number(message.tabId) < 0 ||
-    !('windowId' in message) ||
-    !Number.isSafeInteger(message.windowId) ||
-    Number(message.windowId) < 0 ||
-    !('url' in message) ||
-    typeof message.url !== 'string' ||
-    !isSupportedPage(message.url)
-  ) return undefined;
-  const authorized = message as AuthorizedTabMessage;
-  const hasLaunchStamp = authorized.launchEpoch !== undefined ||
-    authorized.launchSequence !== undefined;
-  if (
-    hasLaunchStamp &&
-    (typeof authorized.launchEpoch !== 'string' ||
-      authorized.launchEpoch.length === 0 ||
-      authorized.launchEpoch.length > 128 ||
-      !Number.isSafeInteger(authorized.launchSequence) ||
-      Number(authorized.launchSequence) <= 0)
-  ) return undefined;
-  return {
-    identity: {
-      tabId: authorized.tabId,
-      windowId: authorized.windowId,
-      url: authorized.url,
-    },
-    ...(hasLaunchStamp
-      ? {
-          launchStamp: {
-            epoch: authorized.launchEpoch as string,
-            sequence: authorized.launchSequence as number,
-          },
-        }
-      : {}),
-  };
 }
 
 function isMessageFromFollowedTab(
@@ -3928,52 +3840,6 @@ function renderToolbarAttention(): void {
   settingsAttention.dataset.tone = toolbarAttentionTone;
 }
 
-function normalizedPageUrl(value: string): string {
-  try {
-    const url = new URL(value);
-    url.username = '';
-    url.password = '';
-    url.search = '';
-    url.hash = '';
-    return url.toString();
-  } catch {
-    return value;
-  }
-}
-
-function isSupportedPage(url: string | undefined): boolean {
-  if (!url) return false;
-  try {
-    const protocol = new URL(url).protocol;
-    return protocol === 'http:' || protocol === 'https:';
-  } catch {
-    return false;
-  }
-}
-
-function hasNonDefaultPort(url: string | undefined): boolean {
-  if (!url) return false;
-  try {
-    return new URL(url).port.length > 0;
-  } catch {
-    return false;
-  }
-}
-
-function readPageError(error: unknown): string {
-  if (error instanceof PageAccessError) return error.message;
-  const message = readableError(error);
-  return /cannot access|permission|extensions gallery|chrome:\/\//iu.test(message)
-    ? 'The extension no longer has access to this page. Select its toolbar icon on the source page to authorize it again.'
-    : message;
-}
-
-function readableError(error: unknown): string {
-  return error instanceof Error && error.message.trim()
-    ? error.message
-    : 'Something went wrong. Retry the current step.';
-}
-
 function logImageTranslationDiagnostic(
   diagnostic: ImageTranslationDiagnostic,
 ): void {
@@ -4003,9 +3869,3 @@ function requireElement<T extends Element>(selector: string): T {
   return element;
 }
 
-class PageAccessError extends Error {
-  constructor(message: string) {
-    super(message);
-    this.name = 'PageAccessError';
-  }
-}
