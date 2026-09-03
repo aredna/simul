@@ -15,6 +15,14 @@ const script = readFileSync(
   new URL('../entrypoints/sidepanel/main.ts', import.meta.url),
   'utf8',
 );
+const localizerScript = readFileSync(
+  new URL('../entrypoints/sidepanel/ui-localizer.ts', import.meta.url),
+  'utf8',
+);
+const composerScript = readFileSync(
+  new URL('../entrypoints/sidepanel/quick-composer.ts', import.meta.url),
+  'utf8',
+);
 
 describe('sidepanel UI structure', () => {
   it('keeps one quick composer outside settings and exposes semantic progress', () => {
@@ -103,9 +111,9 @@ describe('sidepanel UI structure', () => {
       '#compact-toolbar [data-ui-label="To"]',
     )).not.toBeNull();
     expect(style).toContain('.toolbar-language-control select { width: 108px');
-    expect(script).toContain('resolveUiLabelTranslations(');
-    expect(script).toContain('translateRemembered(pair, source');
-    expect(script).toContain("sourceLanguage: 'en'");
+    expect(localizerScript).toContain('resolveUiLabelTranslations(');
+    expect(localizerScript).toContain('translateRemembered(pair, source');
+    expect(localizerScript).toContain("sourceLanguage: 'en'");
   });
 
   it('places common controls before engine and OCR experiments', () => {
@@ -149,10 +157,10 @@ describe('sidepanel UI structure', () => {
 
   it('keeps From target-localized and To native while using explicit order', () => {
     expect(script).toContain('for (const language of LANGUAGE_OPTION_ORDER)');
-    expect(script).toContain('createSourceLanguageLabeler(locale)');
+    expect(localizerScript).toContain('createSourceLanguageLabeler(locale)');
     expect(script).toContain('languageEndonym(language)');
-    expect(script).toContain("'#source-language [data-language-code]'");
-    expect(script).not.toContain(
+    expect(localizerScript).toContain("'#source-language [data-language-code]'");
+    expect(localizerScript).not.toContain(
       "'#source-language [data-language-code], #target-language [data-language-code]'",
     );
   });
@@ -175,8 +183,9 @@ describe('sidepanel UI structure', () => {
     expect(style).toContain('grid-template-rows: auto minmax(0, 1fr)');
     expect(style).toContain('overflow-x: auto');
     expect(script).toContain("toolbarProgress.setAttribute('aria-valuenow'");
-    expect(script).toContain('translateRemembered(pair, text');
-    expect(script).toContain('composerAbortController === abortController');
+    expect(composerScript).toContain('translateRemembered(pair, text');
+    // The composer applies a result only if its own request is still current.
+    expect(composerScript).toContain('this.#abortController !== abortController');
     const replicaStyle = style.slice(
       style.lastIndexOf('.replica-preview {'),
       style.indexOf('.page-copy {'),

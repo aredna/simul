@@ -125,3 +125,16 @@ function defaultDisplayNamesFactory(
 ): LanguageDisplayNames {
   return new Intl.DisplayNames([locale], { type: 'language' });
 }
+
+/** A language's name in the given locale, falling back to its English name. */
+export function localizedLanguageName(
+  language: SupportedLanguage,
+  locale: SupportedLanguage,
+): string {
+  try {
+    return new Intl.DisplayNames([locale], { type: 'language' }).of(language) ??
+      languageName(language);
+  } catch {
+    return languageName(language);
+  }
+}

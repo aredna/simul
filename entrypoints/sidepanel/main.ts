@@ -19,7 +19,6 @@ import {
   type ToolbarActivity,
 } from '../../lib/companion-ui-state';
 import {
-  resolveUiLabelTranslations,
   toolbarAttentionTarget,
   type CompanionStatusTone,
   type ToolbarAttentionTarget,
@@ -119,6 +118,8 @@ import {
   type ReplicaViewMode,
 } from '../../lib/preferences';
 import { translateWithSession } from '../../lib/translation-pipeline';
+import { QuickComposer } from './quick-composer';
+import { UiLocalizer } from './ui-localizer';
 import {
   type ReplicaCaptureRequest,
   type ReplicaDiagnosticCode,
@@ -411,6 +412,33 @@ const imageTranslationMemory = new TranslationMemory({
   maxEntries: 512,
   maxCharacters: 250_000,
 });
+const uiLocalizer = new UiLocalizer({
+  document,
+  provider,
+  dynamicLabels: DYNAMIC_UI_LABELS,
+  getTargetLanguage: () => preferences.targetLanguage,
+  translateRemembered,
+});
+const quickComposer = new QuickComposer({
+  elements: {
+    input: composerInput,
+    output: composerOutput,
+    copyButton: copyComposerButton,
+    fromLanguage: composerFromLanguage,
+    toLanguage: composerToLanguage,
+    guidance: composerGuidance,
+    status: composerStatus,
+  },
+  provider,
+  selectedPair,
+  getTargetLanguage: () => preferences.targetLanguage,
+  translateRemembered,
+  setUiText: (element, english) => uiLocalizer.setText(element, english),
+  setStatus,
+  onActivityChange: () => updateControls(),
+  onTranslated: () => logTranslationCache('quick', translationMemory),
+  readableError,
+});
 replicaTranslationCoordinator = new ReplicaTranslationCoordinator(
   provider,
   replicaSurfaceRouter,
@@ -559,7 +587,6 @@ let translationInFlight = false;
 let permissionInFlight = false;
 let imageCaptureAccess: 'checking' | 'granted' | 'missing' = 'checking';
 let imageCaptureAccessRevision = 0;
-let composerInFlight = false;
 let imageTranslationInFlight = false;
 let translationDesired = false;
 let translationComplete = false;
@@ -567,7 +594,6 @@ let openCompanionOverlay: CompanionOverlay | undefined;
 let toolbarDeterminateRatio: number | undefined;
 let activeAbortController: AbortController | undefined;
 let activeTranslationKey: string | undefined;
-let composerAbortController: AbortController | undefined;
 let liveDeltaAbortController: AbortController | undefined;
 let replicaShadowAbortController: AbortController | undefined;
 let activeTranslationTask: Promise<void> | undefined;
@@ -605,12 +631,6 @@ let pendingImageReplicaActivation: PendingImageReplicaActivation | undefined;
 let toolbarAttention: ToolbarAttentionTarget | undefined;
 let toolbarAttentionTone: Extract<CompanionStatusTone, 'warning' | 'error'> =
   'warning';
-let uiLocalizationRequestId = 0;
-let uiLocalizationInputKey = '';
-let uiLocalizationScheduled = false;
-let uiLocalizationAbortController: AbortController | undefined;
-let uiLocalizedTarget: SupportedLanguage = 'en';
-let uiLabelTranslations: ReadonlyMap<string, string> = new Map();
 const pendingViewPreferences = new Map<
   keyof CompanionViewSettings,
   { revision: number; value: CompanionViewSettings[keyof CompanionViewSettings] }
@@ -633,7 +653,7 @@ populateLanguageOptions();
 initializeImageAnalysisControls();
 configureSurfaceButton();
 observeReplicaStateLabel();
-scheduleUiLocalization();
+uiLocalizer.schedule();
 
 toggleSettingsButton.addEventListener('click', () => {
   setCompanionOverlay(nextCompanionOverlay(openCompanionOverlay, 'settings'));
@@ -759,7 +779,7 @@ translateButton.addEventListener('click', () => {
 });
 cancelButton.addEventListener('click', () => {
   activeAbortController?.abort();
-  const composerCancelled = cancelComposerTranslation();
+  const composerCancelled = quickComposer.cancel();
   imageTranslationController.cancelCurrent();
   setStatus(
     translationInFlight || imageTranslationInFlight
@@ -772,8 +792,8 @@ cancelButton.addEventListener('click', () => {
       : 'normal',
   );
 });
-translateComposerButton.addEventListener('click', () => void translateComposer());
-copyComposerButton.addEventListener('click', () => void copyComposerOutput());
+translateComposerButton.addEventListener('click', () => void quickComposer.translate());
+copyComposerButton.addEventListener('click', () => void quickComposer.copy());
 document.addEventListener('keydown', (event) => {
   if (event.key === 'Escape' && openCompanionOverlay) {
     event.preventDefault();
@@ -781,7 +801,7 @@ document.addEventListener('keydown', (event) => {
   }
 });
 window.addEventListener('pagehide', () => {
-  uiLocalizationAbortController?.abort();
+  uiLocalizer.cancel();
   replicaShadowAbortController?.abort();
   imageTranslationController.dispose();
   replicaTranslationCoordinator.dispose();
@@ -945,7 +965,7 @@ browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     liveDeltaAbortController?.abort();
     replicaShadowAbortController?.abort();
     imageTranslationController.releaseReplica();
-    invalidateComposerOutput();
+    quickComposer.invalidate();
     pendingLiveUpdate = undefined;
     followedPageIdentity = nextIdentity;
     clearNavigationTimer();
@@ -1005,7 +1025,7 @@ browser.storage.onChanged.addListener((changes, areaName) => {
     const needsFreshCapture = releaseReplicaPresentationForLegacyWork();
     activeAbortController?.abort();
     abortAndRequeueLiveDelta();
-    invalidateComposerOutput();
+    quickComposer.invalidate();
     // The window that changed the languages already recorded its own intent
     // in languageSelectionChanged. A change made in another companion window
     // must not opt this one into translating.
@@ -1612,7 +1632,7 @@ function queueCapture(request: CaptureRequest): void {
     translationDesired = false;
     translationComplete = false;
     availabilityCheckedForPair = undefined;
-    invalidateComposerOutput();
+    quickComposer.invalidate();
   }
   if (previousIdentity && previousIdentity.tabId !== request.identity.tabId) {
     releaseLiveSession(previousIdentity);
@@ -1902,7 +1922,7 @@ async function resolveSelectedSourceLanguage(
 ): Promise<boolean> {
   if (!snapshot) {
     resolvedSourceLanguage = undefined;
-    syncQuickTranslationPanel();
+    quickComposer.syncPanel();
     configureImageTranslation();
     return true;
   }
@@ -1941,7 +1961,7 @@ async function resolveSelectedSourceLanguage(
       : ''
     : 'The page language could not be detected. Choose a From language.';
   detectedLanguageElement.hidden = !detectedLanguageElement.textContent;
-  syncQuickTranslationPanel();
+  quickComposer.syncPanel();
   configureImageTranslation();
   return true;
 }
@@ -2006,7 +2026,7 @@ async function reconcileReplicaTranslationAfterCommit(
     activeAbortController?.abort();
     translationComplete = false;
     availabilityCheckedForPair = undefined;
-    invalidateComposerOutput();
+    quickComposer.invalidate();
     replicaTranslationCoordinator.selectPair(nextPair);
   }
   const expectedAvailabilityKey = nextPair
@@ -2046,7 +2066,7 @@ async function languageSelectionChanged(): Promise<void> {
   const needsFreshCapture = releaseReplicaPresentationForLegacyWork();
   activeAbortController?.abort();
   abortAndRequeueLiveDelta();
-  invalidateComposerOutput();
+  quickComposer.invalidate();
   if (!isLiveSourceOnlyMode()) translationDesired = true;
   translationComplete = false;
   availabilityCheckedForPair = undefined;
@@ -2518,7 +2538,7 @@ async function processPendingLiveUpdate(): Promise<void> {
       if (pairChanged) {
         availabilityCheckedForPair = undefined;
         translationComplete = false;
-        invalidateComposerOutput();
+        quickComposer.invalidate();
         resetVisualMirrorText(beforeRoot);
       }
       await checkAvailability(delta.generation);
@@ -2821,8 +2841,8 @@ function setCompanionOverlay(next?: CompanionOverlay): void {
     return;
   }
   if (quickTranslateOpen) {
-    syncQuickTranslationPanel();
-    composerInput.focus();
+    quickComposer.syncPanel();
+    quickComposer.focusInput();
     return;
   }
   if (previous === 'settings') toggleSettingsButton.focus();
@@ -2831,7 +2851,7 @@ function setCompanionOverlay(next?: CompanionOverlay): void {
 
 function populateLanguageOptions(): void {
   const auto = createLanguageOption('auto', 'Auto-detect');
-  setUiText(auto, 'Auto-detect');
+  uiLocalizer.setText(auto, 'Auto-detect');
   sourceSelect.replaceChildren(auto);
   targetSelect.replaceChildren();
   for (const language of LANGUAGE_OPTION_ORDER) {
@@ -2855,139 +2875,6 @@ function createLanguageOption(value: string, label: string): HTMLOptionElement {
   return option;
 }
 
-function setUiText(element: HTMLElement, english: string): void {
-  element.dataset.uiLabel = english;
-  const translated = uiLocalizedTarget === preferences.targetLanguage
-    ? uiLabelTranslations.get(english)
-    : undefined;
-  const text = translated ?? english;
-  if (element.textContent !== text) element.textContent = text;
-  if (translated && translated !== english) element.lang = uiLocalizedTarget;
-  else element.removeAttribute('lang');
-  if (
-    preferences.targetLanguage !== 'en' &&
-    !uiLabelTranslations.has(english)
-  ) {
-    if (uiLabelTranslations.size > 0) {
-      prepareUiEnglishFallback(preferences.targetLanguage, true);
-    }
-    scheduleUiLocalization();
-  }
-}
-
-function scheduleUiLocalization(): void {
-  prepareUiEnglishFallback(preferences.targetLanguage);
-  if (uiLocalizationScheduled) return;
-  uiLocalizationScheduled = true;
-  queueMicrotask(() => {
-    uiLocalizationScheduled = false;
-    void localizeUiLabels();
-  });
-}
-
-function prepareUiEnglishFallback(
-  targetLanguage: SupportedLanguage,
-  force = false,
-): void {
-  if (uiLocalizedTarget === targetLanguage && !force) return;
-  uiLocalizationAbortController?.abort();
-  uiLocalizationInputKey = '';
-  uiLabelTranslations = new Map();
-  uiLocalizedTarget = targetLanguage;
-  applyUiLabelsToDom();
-}
-
-async function localizeUiLabels(): Promise<void> {
-  const targetLanguage = preferences.targetLanguage;
-  prepareUiEnglishFallback(targetLanguage);
-  const sources = [...new Set(
-    [
-      ...DYNAMIC_UI_LABELS,
-      ...[...document.querySelectorAll<HTMLElement>('[data-ui-label]')]
-        .map((element) => element.dataset.uiLabel ?? '')
-        .filter(Boolean),
-    ],
-  )];
-  const inputKey = JSON.stringify([targetLanguage, sources]);
-  if (uiLocalizationInputKey === inputKey) return;
-  uiLocalizationInputKey = inputKey;
-  const requestId = ++uiLocalizationRequestId;
-  uiLocalizationAbortController?.abort();
-  const abortController = new AbortController();
-  uiLocalizationAbortController = abortController;
-  const pair: TranslationPair = {
-    sourceLanguage: 'en',
-    targetLanguage,
-  };
-  let session: TranslationSession | undefined;
-  let sessionTask: Promise<TranslationSession> | undefined;
-  try {
-    const result = await resolveUiLabelTranslations(
-      sources,
-      targetLanguage,
-      (source) => translateRemembered(pair, source, async (core) => {
-        sessionTask ??= (async () => {
-          const uiAvailability = await provider.availability(pair);
-          abortController.signal.throwIfAborted();
-          // Label localization runs without a user gesture, so it may only
-          // use an already-installed pair. A downloadable pair would either
-          // start a multi-megabyte download as a side effect of a menu
-          // choice or throw NotAllowedError. The page-translation click
-          // prepares the pair; labels follow on the next localization pass.
-          if (uiAvailability !== 'available') {
-            throw new Error('The UI language pair is not installed yet.');
-          }
-          return provider.createSession(pair, {
-            signal: abortController.signal,
-          });
-        })();
-        session = await sessionTask;
-        return translateWithSession(session, core, abortController.signal);
-      }),
-    );
-    if (
-      abortController.signal.aborted ||
-      uiLocalizationAbortController !== abortController ||
-      requestId !== uiLocalizationRequestId ||
-      preferences.targetLanguage !== targetLanguage ||
-      uiLocalizationInputKey !== inputKey
-    ) return;
-    uiLocalizedTarget = targetLanguage;
-    uiLabelTranslations = result.labels;
-    applyUiLabelsToDom();
-  } finally {
-    session?.destroy();
-    if (uiLocalizationAbortController === abortController) {
-      uiLocalizationAbortController = undefined;
-    }
-  }
-}
-
-function applyUiLabelsToDom(): void {
-  for (const element of document.querySelectorAll<HTMLElement>('[data-ui-label]')) {
-    const english = element.dataset.uiLabel;
-    if (!english) continue;
-    const translated = uiLabelTranslations.get(english) ?? english;
-    if (element.textContent !== translated) element.textContent = translated;
-    if (translated === english) element.removeAttribute('lang');
-    else element.lang = uiLocalizedTarget;
-  }
-  updateSourceLanguageOptionLabels(preferences.targetLanguage);
-}
-
-function updateSourceLanguageOptionLabels(locale: SupportedLanguage): void {
-  const labelLanguage = createSourceLanguageLabeler(locale);
-  for (const option of document.querySelectorAll<HTMLOptionElement>(
-    '#source-language [data-language-code]',
-  )) {
-    const language = option.dataset.languageCode as SupportedLanguage | undefined;
-    if (!language) continue;
-    option.textContent = labelLanguage(language);
-    option.lang = locale;
-    option.dir = 'auto';
-  }
-}
-
 function observeReplicaStateLabel(): void {
   const knownLabels = new Set([
     STATIC_REPLAY_LABEL,
@@ -3001,7 +2888,7 @@ function observeReplicaStateLabel(): void {
       return;
     }
     if (!knownLabels.has(english)) return;
-    setUiText(replicaModeBadge, english);
+    uiLocalizer.setText(replicaModeBadge, english);
   }).observe(replicaModeBadge, { childList: true, characterData: true });
 }
 
@@ -3188,10 +3075,10 @@ function syncPreferenceControls(): void {
   zoomOutput.value = `${preferences.zoomPercent}%`;
   zoomInput.disabled = preferences.displayMode !== 'custom';
   syncToolbarPreferenceControls();
-  syncQuickTranslationPanel();
+  quickComposer.syncPanel();
   renderImageAnalysisControls();
   configureImageTranslation();
-  scheduleUiLocalization();
+  uiLocalizer.schedule();
 }
 
 function syncToolbarPreferenceControls(): void {
@@ -3216,7 +3103,7 @@ function syncToolbarPreferenceControls(): void {
     delete toolbarSizeLabel.dataset.uiLabel;
     toolbarSizeLabel.textContent = sizeLabel;
   } else {
-    setUiText(toolbarSizeLabel, sizeLabel);
+    uiLocalizer.setText(toolbarSizeLabel, sizeLabel);
   }
   const nextSize = preferences.displayMode === 'fit' ? '1:1 size' : 'fit width';
   toolbarSizeToggleButton.setAttribute(
@@ -3229,7 +3116,7 @@ function syncToolbarPreferenceControls(): void {
     'aria-pressed',
     String(preferences.imageTranslationEnabled),
   );
-  setUiText(
+  uiLocalizer.setText(
     toolbarOcrLabel,
     preferences.imageTranslationEnabled ? 'OCR On' : 'OCR Off',
   );
@@ -3240,7 +3127,7 @@ function syncToolbarPreferenceControls(): void {
     : 'Image text translation is off. Click to turn it on.';
 
   const followsActive = isDetachedWindow && preferences.popoutTabMode === 'active';
-  setUiText(toolbarTabFollowLabel, followsActive ? 'Active' : 'Current');
+  uiLocalizer.setText(toolbarTabFollowLabel, followsActive ? 'Active' : 'Current');
   toolbarTabFollowButton.setAttribute('aria-pressed', String(followsActive));
   toolbarTabFollowButton.setAttribute(
     'aria-label',
@@ -3311,7 +3198,7 @@ function renderImageAnalysisControls(): void {
     root.querySelector<HTMLDetailsElement>('details.image-diagnostics')?.open ?? false;
   root.replaceChildren();
   const heading = document.createElement('h3');
-  setUiText(heading, 'Image text');
+  uiLocalizer.setText(heading, 'Image text');
   root.append(heading);
 
   root.append(createPromptToggle(
@@ -3323,14 +3210,14 @@ function renderImageAnalysisControls(): void {
   const privacyNote = document.createElement('p');
   privacyNote.className = 'microcopy';
   if (preferences.imageTranslationEnabled && imageCaptureAccess === 'missing') {
-    setUiText(
+    uiLocalizer.setText(
       privacyNote,
       'Image translation is saved but paused. Grant image access so Chrome can capture visible pixels for local OCR.',
     );
   } else if (imageCaptureAccess === 'checking') {
-    setUiText(privacyNote, 'Checking Chrome image access…');
+    uiLocalizer.setText(privacyNote, 'Checking Chrome image access…');
   } else {
-    setUiText(
+    uiLocalizer.setText(
       privacyNote,
       'Off by default. Visible image pixels stay on this device and are discarded after OCR.',
     );
@@ -3340,7 +3227,7 @@ function renderImageAnalysisControls(): void {
     const grant = document.createElement('button');
     grant.type = 'button';
     grant.className = 'image-access-grant';
-    setUiText(grant, 'Grant image access');
+    uiLocalizer.setText(grant, 'Grant image access');
     grant.disabled = permissionInFlight;
     grant.addEventListener('click', () => {
       void changeImageTranslationEnabled(true);
@@ -3354,7 +3241,7 @@ function renderImageAnalysisControls(): void {
   if (compiledOrder.length > 0) {
     const orderLabel = document.createElement('p');
     orderLabel.className = 'microcopy';
-    setUiText(orderLabel, 'OCR priority');
+    uiLocalizer.setText(orderLabel, 'OCR priority');
     orderLabel.title = 'Simul tries locally available OCR providers from top to bottom.';
     root.append(orderLabel);
     const list = document.createElement('ol');
@@ -3387,12 +3274,12 @@ function renderImageAnalysisControls(): void {
     policyLabel.title =
       'Choose whether images are recognized only when visible, after visible work, or immediately.';
     const policyTitle = document.createElement('span');
-    setUiText(policyTitle, 'Scan images');
+    uiLocalizer.setText(policyTitle, 'Scan images');
     const policy = document.createElement('select');
     for (const value of IMAGE_SCAN_POLICIES) {
       const label = imageScanPolicyName(value);
       const option = createLanguageOption(value, label);
-      setUiText(option, label);
+      uiLocalizer.setText(option, label);
       policy.append(option);
     }
     policy.value = preferences.imageScanPolicy;
@@ -3413,7 +3300,7 @@ function renderImageAnalysisControls(): void {
       void commitImageAnalysisPreferencePatch({ skipSmallImages: small.checked });
     });
     const smallTitle = document.createElement('span');
-    setUiText(smallTitle, 'Skip very small images');
+    uiLocalizer.setText(smallTitle, 'Skip very small images');
     smallLabel.append(small, smallTitle);
     grid.append(policyLabel, smallLabel);
     root.append(grid);
@@ -3442,11 +3329,11 @@ function renderImageAnalysisControls(): void {
   diagnostics.className = 'image-diagnostics';
   diagnostics.open = diagnosticsWereOpen;
   const summary = document.createElement('summary');
-  setUiText(summary, 'OCR diagnostics');
+  uiLocalizer.setText(summary, 'OCR diagnostics');
   summary.title = 'Inspect content-free OCR stages and counts for this session.';
   const note = document.createElement('p');
   note.className = 'microcopy';
-  setUiText(
+  uiLocalizer.setText(
     note,
     'Memory-only stages and counts; page text, URLs, pixels, and identifiers are never included.',
   );
@@ -3458,7 +3345,7 @@ function renderImageAnalysisControls(): void {
   const clear = document.createElement('button');
   clear.type = 'button';
   clear.className = 'image-diagnostics-clear';
-  setUiText(clear, 'Clear diagnostics');
+  uiLocalizer.setText(clear, 'Clear diagnostics');
   clear.addEventListener('click', () => {
     imageTranslationDiagnosticHistory.clear();
     renderImageTranslationDiagnosticHistory();
@@ -3516,7 +3403,7 @@ function createPromptToggle(
   input.disabled = disabled;
   input.addEventListener('change', () => void save(input.checked));
   const title = document.createElement('span');
-  setUiText(title, label);
+  uiLocalizer.setText(title, label);
   wrapper.append(input, title);
   return wrapper;
 }
@@ -3643,154 +3530,6 @@ async function closeNativeSidePanel(windowId: number): Promise<boolean> {
     return true;
   } catch {
     return false;
-  }
-}
-
-function syncQuickTranslationPanel(): void {
-  const pair = reverseTranslationPair(selectedPair());
-  composerFromLanguage.textContent = localizedLanguageName(
-    preferences.targetLanguage,
-    preferences.targetLanguage,
-  );
-  composerFromLanguage.lang = preferences.targetLanguage;
-  if (!pair) {
-    setUiText(composerToLanguage, 'Waiting for website language');
-    setUiText(
-      composerGuidance,
-      'Simul is still detecting the website language. If detection remains inconclusive, choose From in the toolbar.',
-    );
-    return;
-  }
-  delete composerToLanguage.dataset.uiLabel;
-  composerToLanguage.textContent = localizedLanguageName(
-    pair.targetLanguage,
-    preferences.targetLanguage,
-  );
-  composerToLanguage.lang = preferences.targetLanguage;
-  setUiText(
-    composerGuidance,
-    pair.sourceLanguage === pair.targetLanguage
-      ? 'The languages match, so Simul will copy the text unchanged.'
-      : 'Your draft stays only in this companion window and is not saved.',
-  );
-}
-
-function localizedLanguageName(
-  language: SupportedLanguage,
-  locale: SupportedLanguage,
-): string {
-  try {
-    return new Intl.DisplayNames([locale], { type: 'language' }).of(language) ??
-      languageName(language);
-  } catch {
-    return languageName(language);
-  }
-}
-
-function setComposerStatus(
-  message: string,
-  tone: 'normal' | 'success' | 'warning' | 'error' = 'normal',
-): void {
-  composerStatus.textContent = message;
-  composerStatus.dataset.tone = tone;
-}
-
-async function translateComposer(): Promise<void> {
-  const text = composerInput.value;
-  const forwardPair = selectedPair();
-  const pair = reverseTranslationPair(forwardPair);
-  if (!text.trim() || !forwardPair || !pair || composerInFlight) return;
-  composerAbortController?.abort();
-  const abortController = new AbortController();
-  composerAbortController = abortController;
-  composerInFlight = true;
-  composerOutput.value = '';
-  copyComposerButton.disabled = true;
-  setComposerStatus('Translating locally…');
-  updateControls();
-  let session: TranslationSession | undefined;
-  try {
-    let translated: string;
-    if (pair.sourceLanguage === pair.targetLanguage) {
-      translated = text;
-    } else {
-      translated = await translateRemembered(pair, text, async (core) => {
-        const composerAvailability = await provider.availability(pair);
-        abortController.signal.throwIfAborted();
-        if (composerAvailability === 'unavailable') {
-          throw new Error('The reverse language pair is unavailable on this device.');
-        }
-        session = await provider.createSession(pair, {
-          signal: abortController.signal,
-        });
-        return translateWithSession(session, core, abortController.signal);
-      });
-    }
-    const currentForwardPair = selectedPair();
-    if (
-      abortController.signal.aborted ||
-      composerAbortController !== abortController ||
-      composerInput.value !== text ||
-      !currentForwardPair ||
-      currentForwardPair.sourceLanguage !== forwardPair.sourceLanguage ||
-      currentForwardPair.targetLanguage !== forwardPair.targetLanguage
-    ) return;
-    composerOutput.value = translated;
-    copyComposerButton.disabled = composerOutput.value.length === 0;
-    setComposerStatus('Translation is ready to copy.', 'success');
-    setStatus('Reply translation is ready to copy. It was not saved.', 'success');
-    logTranslationCache('quick', translationMemory);
-  } catch (error) {
-    if (!isAbortError(error) && !abortController.signal.aborted) {
-      const message = `Could not translate the reply: ${readableError(error)}`;
-      setComposerStatus(message, 'error');
-      setStatus(message, 'error');
-    } else if (composerAbortController === abortController) {
-      setComposerStatus('');
-    }
-  } finally {
-    session?.destroy();
-    if (composerAbortController === abortController) {
-      composerAbortController = undefined;
-      composerInFlight = false;
-      updateControls();
-    }
-  }
-}
-
-function cancelComposerTranslation(): boolean {
-  const abortController = composerAbortController;
-  const wasInFlight = composerInFlight || abortController !== undefined;
-  composerAbortController = undefined;
-  composerInFlight = false;
-  abortController?.abort();
-  if (wasInFlight) setComposerStatus('');
-  updateControls();
-  return wasInFlight;
-}
-
-function invalidateComposerOutput(): void {
-  cancelComposerTranslation();
-  composerOutput.value = '';
-  copyComposerButton.disabled = true;
-  setComposerStatus('');
-  updateControls();
-}
-
-async function copyComposerOutput(): Promise<void> {
-  if (!composerOutput.value) return;
-  try {
-    await navigator.clipboard.writeText(composerOutput.value);
-    setComposerStatus('Translated text copied.', 'success');
-    setStatus('Translated reply copied.', 'success');
-  } catch {
-    composerOutput.focus();
-    composerOutput.select();
-    setComposerStatus(
-      'Chrome could not copy automatically. The output is selected.',
-      'warning',
-    );
-    setStatus('Chrome could not copy automatically. The result is selected for copying.', 'warning');
   }
 }
 
@@ -4010,7 +3749,7 @@ function invalidateCompanion(message: string): void {
   replicaShadowAbortController?.abort();
   imageTranslationController.releaseReplica();
   replicaEngineController.releasePresentation(false);
-  invalidateComposerOutput();
+  quickComposer.invalidate();
   followedPageIdentity = undefined;
   snapshot = undefined;
   capturedPageIdentity = undefined;
@@ -4269,8 +4008,8 @@ function showCaptureNotes(page: PageSnapshot): void {
 
 function updateControls(): void {
   syncToolbarPreferenceControls();
-  syncQuickTranslationPanel();
-  const busy = captureInFlight || translationInFlight || permissionInFlight || composerInFlight;
+  quickComposer.syncPanel();
+  const busy = captureInFlight || translationInFlight || permissionInFlight || quickComposer.inFlight;
   sourceSelect.disabled = busy;
   targetSelect.disabled = busy;
   swapButton.disabled = busy || !resolvedSourceLanguage;
@@ -4294,13 +4033,13 @@ function updateControls(): void {
   popoutButton.disabled = surfaceTransitionInFlight ||
     (!isDetachedWindow && !capturedPageIdentity);
   cancelButton.hidden =
-    !translationInFlight && !composerInFlight && !imageTranslationInFlight;
+    !translationInFlight && !quickComposer.inFlight && !imageTranslationInFlight;
   cancelButton.disabled =
-    !translationInFlight && !composerInFlight && !imageTranslationInFlight;
+    !translationInFlight && !quickComposer.inFlight && !imageTranslationInFlight;
   translateComposerButton.disabled = busy || !composerInput.value.trim() || !selectedPair();
-  setUiText(
+  uiLocalizer.setText(
     translateComposerButton,
-    composerInFlight ? 'Translating…' : 'Translate',
+    quickComposer.inFlight ? 'Translating…' : 'Translate',
   );
   translateButton.disabled =
     busy ||
@@ -4310,7 +4049,7 @@ function updateControls(): void {
     !selectedPair() ||
     availability === 'unavailable' ||
     translationComplete;
-  setUiText(
+  uiLocalizer.setText(
     translateButton,
     translationComplete ? 'Translation current' : 'Translate page',
   );
@@ -4326,7 +4065,7 @@ function syncToolbarProgress(): void {
     captureInFlight,
     translationInFlight,
     permissionInFlight,
-    composerInFlight,
+    composerInFlight: quickComposer.inFlight,
     liveDeltaInFlight,
     imageTranslationInFlight,
     surfaceTransitionInFlight,
@@ -4366,11 +4105,11 @@ function syncToolbarProgress(): void {
 function setImageTranslationBusy(busy: boolean): void {
   const completed = imageTranslationInFlight && !busy;
   imageTranslationInFlight = busy;
-  if (busy && !translationInFlight && !composerInFlight) {
+  if (busy && !translationInFlight && !quickComposer.inFlight) {
     progressRegion.hidden = false;
     progressLabel.textContent = 'Recognizing visible image text locally…';
     progressElement.removeAttribute('value');
-  } else if (!busy && !translationInFlight && !composerInFlight) {
+  } else if (!busy && !translationInFlight && !quickComposer.inFlight) {
     hideProgress();
   }
   if (completed) {
@@ -4383,7 +4122,7 @@ function setImageTranslationBusy(busy: boolean): void {
 }
 
 composerInput.addEventListener('input', () => {
-  invalidateComposerOutput();
+  quickComposer.invalidate();
   updateControls();
 });
 
@@ -4401,7 +4140,7 @@ function hideProgress(): void {
   if (
     imageTranslationInFlight &&
     !translationInFlight &&
-    !composerInFlight
+    !quickComposer.inFlight
   ) {
     progressRegion.hidden = false;
     progressLabel.textContent = 'Recognizing visible image text locally…';
