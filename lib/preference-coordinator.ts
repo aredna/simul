@@ -8,7 +8,6 @@ import {
   isCompanionSurface,
   isMirrorDisplayMode,
   isPopoutTabMode,
-  isReplicaEnginePreference,
   isReplicaViewMode,
   isTextLayoutMode,
   parseCompanionPreferences,
@@ -418,7 +417,6 @@ const VIEW_SETTING_KEYS = new Set([
   'zoomPercent',
   'syncScroll',
   'textLayoutMode',
-  'replicaEngine',
   'replicaFidelityPolicy',
   'replicaViewMode',
   'launchBehavior',
@@ -466,10 +464,6 @@ function readViewSettingsPatch(
   if ('textLayoutMode' in value) {
     if (!isTextLayoutMode(value.textLayoutMode)) return undefined;
     patch.textLayoutMode = value.textLayoutMode;
-  }
-  if ('replicaEngine' in value) {
-    if (!isReplicaEnginePreference(value.replicaEngine)) return undefined;
-    patch.replicaEngine = value.replicaEngine;
   }
   if ('replicaFidelityPolicy' in value) {
     if (!isSelectableReplicaFidelityPolicy(value.replicaFidelityPolicy)) {

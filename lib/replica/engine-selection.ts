@@ -6,46 +6,6 @@ import {
   type ReplicaRunResult,
 } from './contracts';
 
-export type ReplicaEngineMode = 'legacy' | 'isolated-html' | 'rrweb-shadow';
-export type ReplicaTranslationMode = 'legacy' | 'rrweb-projection';
-
-export interface ReplicaBuildEnvironment {
-  readonly DEV?: boolean;
-  readonly WXT_SIMUL_RRWEB_SHADOW?: string;
-  readonly WXT_SIMUL_RRWEB_TRANSLATION?: string;
-}
-
-export function selectReplicaTranslationMode(
-  environment: ReplicaBuildEnvironment,
-  engineMode = selectReplicaEngineMode(environment),
-): ReplicaTranslationMode {
-  return engineMode !== 'legacy' &&
-    environment.WXT_SIMUL_RRWEB_TRANSLATION !== '0'
-    ? 'rrweb-projection'
-    : 'legacy';
-}
-
-/**
- * The experimental rrweb engine is compiled into a build only when it opts in
- * with WXT_SIMUL_RRWEB_SHADOW=1. Release builds omit its replay library and
- * page-recorder bundle entirely.
- */
-export function isRrwebEngineCompiled(
-  environment: ReplicaBuildEnvironment,
-): boolean {
-  return environment.WXT_SIMUL_RRWEB_SHADOW === '1';
-}
-
-export function selectReplicaEngineMode(
-  environment: ReplicaBuildEnvironment,
-  preference: 'isolated-html' | 'rrweb' = 'isolated-html',
-): ReplicaEngineMode {
-  if (preference === 'rrweb' && isRrwebEngineCompiled(environment)) {
-    return 'rrweb-shadow';
-  }
-  return 'isolated-html';
-}
-
 const TRANSIENT_REPLICA_FAILURE_CODES: ReadonlySet<ReplicaDiagnosticCode> =
   new Set<ReplicaDiagnosticCode>([
     'access_denied',
@@ -63,61 +23,42 @@ export function isTransientReplicaFailure(code: ReplicaDiagnosticCode): boolean 
 }
 
 interface ReplicaEngineControllerOptions {
-  readonly mode: ReplicaEngineMode;
   readonly legacy: ReplicaEngine;
-  readonly shadow: ReplicaEngine;
-  readonly isolated?: ReplicaEngine;
+  readonly isolated: ReplicaEngine;
   readonly onDiagnostics?: (diagnostics: ReplicaDiagnostics) => void;
   readonly onFallback?: (code: ReplicaDiagnosticCode) => void;
 }
 
 /**
- * Keeps legacy visible in every mode. A shadow failure disables that shadow
- * for this companion lifetime and invokes the fallback notification once.
+ * Runs the Isolated HTML engine and keeps the legacy view visible beneath it.
+ * A protocol or privacy failure disables the engine for this companion
+ * lifetime and invokes the fallback notification once; a capacity, timing or
+ * access failure only affects the current page.
  */
 export class ReplicaEngineController {
-  #mode: ReplicaEngineMode;
-  readonly #disabled = new Set<ReplicaEngineMode>();
+  #disabled = false;
   #fallbackNotified = false;
 
-  constructor(private readonly options: ReplicaEngineControllerOptions) {
-    this.#mode = options.mode;
-  }
+  constructor(private readonly options: ReplicaEngineControllerOptions) {}
 
   get fallbackNotified(): boolean {
     return this.#fallbackNotified;
   }
 
-  /** True only while a run would still be delegated to the shadow engine. */
-  get shadowAvailable(): boolean {
-    return this.selectedAvailable;
-  }
-
   get selectedAvailable(): boolean {
-    return this.#mode !== 'legacy' &&
-      !this.#disabled.has(this.#mode) &&
-      Boolean(this.#selectedEngine());
-  }
-
-  get mode(): ReplicaEngineMode {
-    return this.#mode;
+    return !this.#disabled;
   }
 
   get selectedEngine(): ReplicaEngine | undefined {
-    return this.selectedAvailable ? this.#selectedEngine() : undefined;
+    return this.selectedAvailable ? this.options.isolated : undefined;
   }
 
-  selectMode(mode: ReplicaEngineMode): void {
-    // An explicit selection is also an explicit retry of a previously failed
-    // engine. This is useful after a transient document/Port failure.
-    this.#disabled.delete(mode);
-    if (mode === this.#mode) {
-      this.#fallbackNotified = false;
-      return;
-    }
-    const previous = this.#selectedEngine();
-    previous?.releasePresentation(false);
-    this.#mode = mode;
+  /**
+   * An explicit retry of a previously failed engine, for example after a
+   * transient document/Port failure or a manual rebuild.
+   */
+  retrySelected(): void {
+    this.#disabled = false;
     this.#fallbackNotified = false;
   }
 
@@ -125,31 +66,22 @@ export class ReplicaEngineController {
     request: ReplicaCaptureRequest,
     signal?: AbortSignal,
   ): Promise<ReplicaRunResult> {
-    const runMode = this.#mode;
-    const selected = this.#engineForMode(runMode);
-    if (
-      runMode === 'legacy' ||
-      this.#disabled.has(runMode) ||
-      !selected
-    ) {
+    if (this.#disabled) {
       const result = await this.options.legacy.run(request, signal);
       this.options.onDiagnostics?.(result.diagnostics);
       return result;
     }
-    const result = await selected.run(request, signal);
+    const result = await this.options.isolated.run(request, signal);
     this.options.onDiagnostics?.(result.diagnostics);
     if (result.status !== 'failed') return result;
 
-    // A late failure from an engine that has already been switched away from
-    // must never disable or release the newly selected engine.
-    if (this.#mode !== runMode) return result;
     // Capacity, timing, and access failures describe this page or attempt,
     // not the engine; disabling the engine for the companion's lifetime on
     // one oversized page left every later page on the legacy fallback.
     if (!isTransientReplicaFailure(result.diagnostics.code)) {
-      this.#disabled.add(runMode);
+      this.#disabled = true;
     }
-    selected.releasePresentation(true);
+    this.options.isolated.releasePresentation(true);
     if (!this.#fallbackNotified) {
       this.#fallbackNotified = true;
       this.options.onFallback?.(result.diagnostics.code);
@@ -161,17 +93,13 @@ export class ReplicaEngineController {
   }
 
   releasePresentation(showFallbackLabel = true): void {
-    this.#selectedEngine()?.releasePresentation(showFallbackLabel);
-  }
-
-  disableShadow(code: ReplicaDiagnosticCode): void {
-    this.disableSelected(code);
+    this.selectedEngine?.releasePresentation(showFallbackLabel);
   }
 
   disableSelected(code: ReplicaDiagnosticCode): void {
     if (!this.selectedAvailable) return;
-    this.#disabled.add(this.#mode);
-    this.#selectedEngine()?.releasePresentation(true);
+    this.#disabled = true;
+    this.options.isolated.releasePresentation(true);
     if (!this.#fallbackNotified) {
       this.#fallbackNotified = true;
       this.options.onFallback?.(code);
@@ -179,18 +107,7 @@ export class ReplicaEngineController {
   }
 
   dispose(): void {
-    this.options.isolated?.dispose();
-    if (this.options.shadow !== this.options.isolated) this.options.shadow.dispose();
+    this.options.isolated.dispose();
     this.options.legacy.dispose();
-  }
-
-  #selectedEngine(): ReplicaEngine | undefined {
-    return this.#engineForMode(this.#mode);
-  }
-
-  #engineForMode(mode: ReplicaEngineMode): ReplicaEngine | undefined {
-    if (mode === 'isolated-html') return this.options.isolated;
-    if (mode === 'rrweb-shadow') return this.options.shadow;
-    return undefined;
   }
 }

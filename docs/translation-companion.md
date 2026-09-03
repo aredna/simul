@@ -6,10 +6,10 @@ The canonical renderer converts the current page into a privacy-sanitized,
 typed DOM graph in Chrome's isolated world. It reconstructs that graph in a
 same-origin-only, inert, scriptless sandbox. Ordered patches are validated
 before application; gaps recover through a staged checkpoint and atomic swap
-while the last good replica stays visible. rrweb is an experimental renderer
-compiled only into developer builds that set `WXT_SIMUL_RRWEB_SHADOW=1`; the
-release artifact contains neither its replay library nor its recorder bundle,
-and it is never an automatic fallback.
+while the last good replica stays visible. Isolated HTML is the only replica
+engine; the earlier experimental rrweb renderer was removed in 0.4.0 because
+it could not observe page-script CSSOM changes from the isolated world and
+could not converge on pages that mutate every frame.
 
 Source scroll messages are animation-frame throttled and one-way. Standards
 and body/document scroll fallbacks are normalized before transport. When a
@@ -154,7 +154,6 @@ never receives raw `value` or `placeholder` attributes. Password and
 password-autocomplete fields, unsupported native controls, selects/options,
 contenteditable regions, and ARIA textbox fallbacks stay blank. A field that
 becomes sensitive clears its prior source record and projection atomically.
-rrweb keeps all editable/value-bearing controls masked.
 
 Other private controls become empty inert shells rather than disabled form
 controls, avoiding browser disabled-state wash while retaining geometry.

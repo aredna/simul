@@ -100,7 +100,6 @@ import {
   isAutoTranslationMode,
   isMirrorDisplayMode,
   isPopoutTabMode,
-  isReplicaEnginePreference,
   isReplicaViewMode,
   isTextLayoutMode,
   parseCompanionPreferences,
@@ -117,22 +116,14 @@ import {
   type CompanionViewSettings,
   type CompanionViewSettingsPatch,
   type PopoutTabMode,
-  type ReplicaEnginePreference,
   type ReplicaViewMode,
 } from '../../lib/preferences';
 import { translateWithSession } from '../../lib/translation-pipeline';
 import {
   type ReplicaCaptureRequest,
-  type ReplicaCheckpointResponse,
   type ReplicaDiagnosticCode,
 } from '../../lib/replica/contracts';
-import {
-  ReplicaEngineController,
-  isRrwebEngineCompiled,
-  selectReplicaEngineMode,
-  selectReplicaTranslationMode,
-  type ReplicaEngineMode,
-} from '../../lib/replica/engine-selection';
+import { ReplicaEngineController } from '../../lib/replica/engine-selection';
 import { openChromeHtmlMirrorStream } from '../../lib/replica/html-mirror-client';
 import {
   isSelectableReplicaFidelityPolicy,
@@ -147,9 +138,6 @@ import {
   shouldReleaseReplicaAfterCaptureFailure,
 } from '../../lib/replica/legacy-transition-gate';
 import { LegacyReplicaEngine } from '../../lib/replica/legacy-engine';
-// Type-only: the rrweb runtime is loaded through a guarded dynamic import so
-// release builds do not ship @rrweb/replay. See createRrwebShadowReplicaEngine.
-import type { RrwebShadowReplicaEngine } from '../../lib/replica/rrweb-shadow-engine';
 import {
   LEGACY_FALLBACK_LABEL,
   LIVE_REPLAY_LABEL,
@@ -228,7 +216,6 @@ interface PendingLiveUpdate {
 interface PendingImageReplicaActivation {
   readonly request: ReplicaCaptureRequest;
   readonly sourceWindowId: number;
-  readonly mode: ReplicaEngineMode;
   readonly signal: AbortSignal;
   activated: boolean;
 }
@@ -281,7 +268,6 @@ const textLayoutSelect = requireElement<HTMLSelectElement>('#text-layout-mode');
 const replicaFidelityPolicySelect = requireElement<HTMLSelectElement>(
   '#replica-fidelity-policy',
 );
-const replicaEngineSelect = requireElement<HTMLSelectElement>('#replica-engine');
 const replicaViewModeSelect = requireElement<HTMLSelectElement>('#replica-view-mode');
 const launchBehaviorSelect = requireElement<HTMLSelectElement>('#launch-behavior');
 const popoutTabModeSelect = requireElement<HTMLSelectElement>('#popout-tab-mode');
@@ -343,20 +329,6 @@ const captureCoordinator = new LatestWorkCoordinator<CaptureRequest>();
 const detachedIdentityHint = parseDetachedPageIdentityHint(window.location.search);
 const isDetachedWindow = detachedIdentityHint !== undefined;
 const liveSessionId = crypto.randomUUID();
-const replicaBuildEnvironment = {
-  DEV: import.meta.env.DEV,
-  WXT_SIMUL_RRWEB_SHADOW: import.meta.env.WXT_SIMUL_RRWEB_SHADOW,
-  WXT_SIMUL_RRWEB_TRANSLATION: import.meta.env.WXT_SIMUL_RRWEB_TRANSLATION,
-};
-if (!isRrwebEngineCompiled(replicaBuildEnvironment)) {
-  replicaEngineSelect.querySelector('option[value="rrweb"]')?.remove();
-}
-let replicaEngineMode = selectReplicaEngineMode(replicaBuildEnvironment);
-const replicaTranslationMode = selectReplicaTranslationMode({
-  DEV: import.meta.env.DEV,
-  WXT_SIMUL_RRWEB_SHADOW: import.meta.env.WXT_SIMUL_RRWEB_SHADOW,
-  WXT_SIMUL_RRWEB_TRANSLATION: import.meta.env.WXT_SIMUL_RRWEB_TRANSLATION,
-}, replicaEngineMode);
 const visibleReplayHost = new VisibleReplayHost({
   hostDocument: document,
   legacySurface: snapshotContainer,
@@ -370,12 +342,6 @@ const imageTranslationDiagnosticHistory =
   new ImageTranslationDiagnosticHistory();
 let imageTranslationDiagnosticOutput: HTMLOutputElement | undefined;
 const replicaSurfaceRouter = new ReplicaSurfaceRouter();
-// The literal comparison is folded at build time, so a release build drops the
-// dynamic import below along with @rrweb/replay and its recorder bundle.
-const shadowReplicaEngine: RrwebShadowReplicaEngine | undefined =
-  import.meta.env.WXT_SIMUL_RRWEB_SHADOW === '1'
-    ? await createRrwebShadowReplicaEngine()
-    : undefined;
 const isolatedHtmlReplicaEngine = new IsolatedHtmlReplicaEngine({
   presentationHost: visibleReplayHost,
   openStream: openChromeHtmlMirrorStream,
@@ -383,7 +349,7 @@ const isolatedHtmlReplicaEngine = new IsolatedHtmlReplicaEngine({
   onLiveApplied: () => legacyTransitionGate.markDirty(),
   onLayoutChanged: () => imageTranslationController?.refreshOverlays(),
   onSourceCommit: handleReplicaSourceCommit,
-  onLiveFailure: (code) => handleReplicaLiveFailure(code, 'isolated-html'),
+  onLiveFailure: (code) => handleReplicaLiveFailure(code),
   onInfo: (info) => {
     // Counts and bounded stages only: never source text, URLs, pixels, IDs, or hashes.
     if (!shouldLogIsolatedMirrorInfo(info.stage)) return;
@@ -423,9 +389,7 @@ function shouldLogIsolatedMirrorInfo(stage: string): boolean {
 }
 
 replicaEngineController = new ReplicaEngineController({
-  mode: replicaEngineMode,
   legacy: new LegacyReplicaEngine(),
-  shadow: shadowReplicaEngine ?? isolatedHtmlReplicaEngine,
   isolated: isolatedHtmlReplicaEngine,
   onDiagnostics: (diagnostics) => {
     // This object is intentionally content-free: local size/timing/extent
@@ -434,9 +398,7 @@ replicaEngineController = new ReplicaEngineController({
   },
   onFallback: () => {
     imageTranslationController?.releaseReplica();
-    if (replicaTranslationMode === 'rrweb-projection') {
-      replicaTranslationCoordinator.selectPair(undefined);
-    }
+    replicaTranslationCoordinator.selectPair(undefined);
   },
 });
 replicaSurfaceRouter.select(isolatedHtmlReplicaEngine);
@@ -484,9 +446,7 @@ imageTranslationController = new ImageTranslationController({
     request,
     onChange,
     signal,
-    replicaEngineController.mode === 'isolated-html'
-      ? 'isolated-html'
-      : 'rrweb',
+    'isolated-html',
   ),
   createPixelCoordinator: (source, sourceTabId, sourceWindowId) =>
     new PixelAcquisitionCoordinator(
@@ -515,7 +475,6 @@ function handleReplicaSourceCommit(commit: ReplicaSourceCommit): void {
     pending &&
     !pending.activated &&
     !pending.signal.aborted &&
-    pending.mode === replicaEngineController.mode &&
     pending.request.isCurrent() &&
     captureRequestMatchesSourceDocument(pending.request, commit.document) &&
     selectedSnapshot &&
@@ -539,7 +498,6 @@ function handleReplicaSourceCommit(commit: ReplicaSourceCommit): void {
       commit.replayLease,
     );
   }
-  if (replicaTranslationMode !== 'rrweb-projection') return;
   if (isLiveSourceOnlyMode()) return;
   replicaTranslationCoordinator.handleSourceCommit(commit);
   const action = replicaSourceCommitAction(
@@ -556,11 +514,7 @@ function handleReplicaSourceCommit(commit: ReplicaSourceCommit): void {
   );
 }
 
-function handleReplicaLiveFailure(
-  code: ReplicaDiagnosticCode,
-  expectedMode: ReplicaEngineMode,
-): void {
-  if (replicaEngineController.mode !== expectedMode) return;
+function handleReplicaLiveFailure(code: ReplicaDiagnosticCode): void {
   const identity = followedPageIdentity ?? capturedPageIdentity;
   const action = identity
     ? liveReplicaFailureRecoveryGate.decide(
@@ -570,7 +524,7 @@ function handleReplicaLiveFailure(
   // Content-free by construction: bounded enums only, with no page identity,
   // source text, URL, DOM identifier, pixels, or resource metadata.
   console.info('[Simul replica live failure]', {
-    engine: expectedMode,
+    engine: 'isolated-html',
     code,
     state: action,
   });
@@ -585,9 +539,7 @@ function handleReplicaLiveFailure(
 
   liveReplicaFailureRecoveryGate.reset();
   imageTranslationController?.releaseReplica();
-  if (replicaTranslationMode === 'rrweb-projection') {
-    replicaTranslationCoordinator.selectPair(undefined);
-  }
+  replicaTranslationCoordinator.selectPair(undefined);
   legacyTransitionGate.release();
   replicaEngineController.disableSelected(code);
   if (identity) queueCapture({ identity, reason: 'desynchronized' });
@@ -763,14 +715,6 @@ replicaFidelityPolicySelect.addEventListener('change', () => {
       ? replicaFidelityPolicySelect.value
       : 'passive';
   void changeReplicaFidelityPolicy(replicaFidelityPolicy);
-});
-
-replicaEngineSelect.addEventListener('change', () => {
-  const replicaEngine: ReplicaEnginePreference =
-    isReplicaEnginePreference(replicaEngineSelect.value)
-      ? replicaEngineSelect.value
-      : 'isolated-html';
-  void changeReplicaEngine(replicaEngine);
 });
 
 replicaViewModeSelect.addEventListener('change', () => {
@@ -1042,21 +986,7 @@ browser.storage.onChanged.addListener((changes, areaName) => {
   ) {
     void followCurrentActiveSourceTab();
   }
-  if (previous.replicaEngine !== preferences.replicaEngine) {
-    liveReplicaFailureRecoveryGate.reset();
-    replicaTranslationCoordinator.selectPair(undefined);
-    applyReplicaEnginePreference();
-    activeAbortController?.abort();
-    liveDeltaAbortController?.abort();
-    replicaShadowAbortController?.abort();
-    imageTranslationController.releaseReplica();
-    legacyTransitionGate.release();
-    const identity = followedPageIdentity ?? capturedPageIdentity;
-    if (identity) queueCapture({ identity, reason: 'preference' });
-  } else if (
-    previous.replicaFidelityPolicy !== preferences.replicaFidelityPolicy &&
-    replicaEngineController.mode === 'isolated-html'
-  ) {
+  if (previous.replicaFidelityPolicy !== preferences.replicaFidelityPolicy) {
     liveReplicaFailureRecoveryGate.reset();
     const identity = followedPageIdentity ?? capturedPageIdentity;
     if (identity) queueCapture({ identity, reason: 'preference' });
@@ -1098,7 +1028,6 @@ void initialize();
 async function initialize(): Promise<void> {
   await Promise.all([loadPreferences(), loadPanelWindowId()]);
   await refreshImageCaptureAccess();
-  applyReplicaEnginePreference();
   const [, sourceResult] = await Promise.allSettled([
     checkPanelPlacement(),
     initializeSourcePage(),
@@ -1679,9 +1608,7 @@ function queueCapture(request: CaptureRequest): void {
       request.reason === 'desynchronized' ||
       request.reason === 'preference');
   if (!retainTranslationIntent) {
-    if (replicaTranslationMode === 'rrweb-projection') {
-      replicaTranslationCoordinator.selectPair(undefined);
-    }
+    replicaTranslationCoordinator.selectPair(undefined);
     translationDesired = false;
     translationComplete = false;
     availabilityCheckedForPair = undefined;
@@ -1908,12 +1835,11 @@ async function runReplicaEngineCheckpoint(
   const imageActivation: PendingImageReplicaActivation = {
     request,
     sourceWindowId: identity.windowId,
-    mode: replicaEngineController.mode,
     signal: abortController.signal,
     activated: false,
   };
   pendingImageReplicaActivation = imageActivation;
-  const shadowOwnershipStarted = replicaEngineController.shadowAvailable;
+  const shadowOwnershipStarted = replicaEngineController.selectedAvailable;
   if (shadowOwnershipStarted) {
     legacyTransitionGate.beginShadowOwnership();
   }
@@ -1930,7 +1856,6 @@ async function runReplicaEngineCheckpoint(
         if (
           pendingImageReplicaActivation === imageActivation &&
           !imageActivation.signal.aborted &&
-          imageActivation.mode === replicaEngineController.mode &&
           request.isCurrent() &&
           selectedSnapshot &&
           captureRequestMatchesSourceDocument(
@@ -1964,84 +1889,6 @@ async function runReplicaEngineCheckpoint(
       replicaShadowAbortController = undefined;
     }
   }
-}
-
-/**
- * Builds the experimental rrweb engine. Only reachable in a build that set
- * WXT_SIMUL_RRWEB_SHADOW=1; everything rrweb-specific (replay library, live
- * stream client, checkpoint protocol, recorder injection) is imported here so
- * release builds contain none of it.
- */
-async function createRrwebShadowReplicaEngine(): Promise<RrwebShadowReplicaEngine> {
-  const [
-    { ReplicaCaptureBoundaryError, RrwebShadowReplicaEngine },
-    { openChromeReplicaLiveStream },
-    { createCheckpointCommand, createReplicaIdentity, readCheckpointResponse },
-  ] = await Promise.all([
-    import('../../lib/replica/rrweb-shadow-engine'),
-    import('../../lib/replica/live-stream-client'),
-    import('../../lib/replica/protocol-v2'),
-  ]);
-
-  async function captureReplicaCheckpoint(
-    request: ReplicaCaptureRequest,
-    signal?: AbortSignal,
-  ): Promise<ReplicaCheckpointResponse> {
-    signal?.throwIfAborted();
-    if (!request.isCurrent()) {
-      throw new ReplicaCaptureBoundaryError('stale_identity');
-    }
-    const injectionResults = await browser.scripting.executeScript({
-      target: { tabId: request.tabId, documentIds: [request.documentId] },
-      files: ['/page-recorder.js'],
-    });
-    signal?.throwIfAborted();
-    const injection = injectionResults.find(
-      (result) =>
-        result.frameId === request.frameId &&
-        result.documentId === request.documentId,
-    );
-    if (!injection || !request.isCurrent()) {
-      throw new ReplicaCaptureBoundaryError('stale_identity');
-    }
-    const expectedIdentity = createReplicaIdentity({
-      sessionId: request.sessionId,
-      pageEpoch: request.pageEpoch,
-      generation: request.generation,
-      documentId: request.documentId,
-      frameId: request.frameId,
-      sequence: 0,
-    });
-    const response: unknown = await browser.tabs.sendMessage(
-      request.tabId,
-      createCheckpointCommand(expectedIdentity),
-      { documentId: request.documentId },
-    );
-    signal?.throwIfAborted();
-    if (!request.isCurrent()) {
-      throw new ReplicaCaptureBoundaryError('stale_identity');
-    }
-    const checkpoint = readCheckpointResponse(response, expectedIdentity);
-    if (!checkpoint) {
-      throw new ReplicaCaptureBoundaryError('invalid_message');
-    }
-    return checkpoint;
-  }
-
-  return new RrwebShadowReplicaEngine({
-    presentationHost: visibleReplayHost,
-    capture: captureReplicaCheckpoint,
-    openStream: openChromeReplicaLiveStream,
-    shouldReplayScroll: () => preferences.syncScroll,
-    onLiveApplied: () => {
-      legacyTransitionGate.markDirty();
-    },
-    onLayoutChanged: () => {
-      imageTranslationController?.refreshOverlays();
-    },
-    onSourceCommit: handleReplicaSourceCommit,
-    onLiveFailure: (code) => handleReplicaLiveFailure(code, 'rrweb-shadow'),
-  });
 }
 
 interface LiveLanguageContext {
@@ -2229,9 +2076,7 @@ async function applyLanguagePreferences(fromUserAction: boolean): Promise<void> 
     updateControls();
     return;
   }
-  if (replicaTranslationMode === 'rrweb-projection') {
-    replicaTranslationCoordinator.selectPair(selectedPair());
-  }
+  replicaTranslationCoordinator.selectPair(selectedPair());
   await checkAvailability(captureCoordinator.generation);
   if (availability === 'available') {
     await startTranslation(!fromUserAction, captureCoordinator.generation);
@@ -2251,9 +2096,7 @@ async function checkAvailability(generation: number): Promise<void> {
     updateControls();
     return;
   }
-  if (replicaTranslationMode === 'rrweb-projection') {
-    replicaTranslationCoordinator.selectPair(pair);
-  }
+  replicaTranslationCoordinator.selectPair(pair);
   if (
     !requestedSnapshot ||
     !visualRoot ||
@@ -3197,22 +3040,6 @@ async function changePopoutTabMode(popoutTabMode: PopoutTabMode): Promise<void> 
   }
 }
 
-async function changeReplicaEngine(
-  replicaEngine: ReplicaEnginePreference,
-): Promise<void> {
-  if (replicaEngine === preferences.replicaEngine) return;
-  liveReplicaFailureRecoveryGate.reset();
-  activeAbortController?.abort();
-  replicaShadowAbortController?.abort();
-  imageTranslationController.releaseReplica();
-  replicaTranslationCoordinator.selectPair(undefined);
-  legacyTransitionGate.release();
-  await commitViewPreferencePatch({ replicaEngine });
-  applyReplicaEnginePreference();
-  const identity = followedPageIdentity ?? capturedPageIdentity;
-  if (identity) queueCapture({ identity, reason: 'preference' });
-}
-
 async function changeReplicaFidelityPolicy(
   replicaFidelityPolicy: SelectableReplicaFidelityPolicy,
 ): Promise<void> {
@@ -3224,11 +3051,7 @@ async function changeReplicaFidelityPolicy(
   updateControls();
   try {
     const saved = await commitViewPreferencePatch({ replicaFidelityPolicy });
-    if (
-      !saved ||
-      preferences.replicaFidelityPolicy !== replicaFidelityPolicy ||
-      replicaEngineController.mode !== 'isolated-html'
-    ) return;
+    if (!saved || preferences.replicaFidelityPolicy !== replicaFidelityPolicy) return;
     liveReplicaFailureRecoveryGate.reset();
     const identity = followedPageIdentity ?? capturedPageIdentity;
     if (identity) queueCapture({ identity, reason: 'preference' });
@@ -3302,9 +3125,7 @@ async function resumeTranslatedReplicaMode(): Promise<void> {
     !captureCoordinator.isCurrent(generation)
   ) return;
   const pair = selectedPair();
-  if (replicaTranslationMode === 'rrweb-projection') {
-    replicaTranslationCoordinator.selectPair(pair);
-  }
+  replicaTranslationCoordinator.selectPair(pair);
   await checkAvailability(generation);
   if (
     isLiveSourceOnlyMode() ||
@@ -3351,22 +3172,6 @@ function isLiveSourceOnlyMode(): boolean {
   return preferences.replicaViewMode === 'source-only';
 }
 
-function applyReplicaEnginePreference(): void {
-  const nextMode = selectReplicaEngineMode(
-    replicaBuildEnvironment,
-    preferences.replicaEngine,
-  );
-  replicaEngineMode = nextMode;
-  replicaEngineController.selectMode(nextMode);
-  replicaSurfaceRouter.select(
-    nextMode === 'rrweb-shadow'
-      ? shadowReplicaEngine
-      : nextMode === 'isolated-html'
-        ? isolatedHtmlReplicaEngine
-        : undefined,
-  );
-}
-
 function syncPreferenceControls(): void {
   const pageUrl = followedPageIdentity?.url ?? capturedPageIdentity?.url;
   sourceSelect.value = preferences.sourceLanguage;
@@ -3375,11 +3180,6 @@ function syncPreferenceControls(): void {
   displayModeSelect.value = preferences.displayMode;
   textLayoutSelect.value = preferences.textLayoutMode;
   replicaFidelityPolicySelect.value = preferences.replicaFidelityPolicy;
-  replicaEngineSelect.value =
-    preferences.replicaEngine === 'rrweb' &&
-    !isRrwebEngineCompiled(replicaBuildEnvironment)
-      ? 'isolated-html'
-      : preferences.replicaEngine;
   replicaViewModeSelect.value = preferences.replicaViewMode;
   launchBehaviorSelect.value = preferences.launchBehavior;
   popoutTabModeSelect.value = preferences.popoutTabMode;
@@ -4220,9 +4020,7 @@ function invalidateCompanion(message: string): void {
   availabilityCheckedForPair = undefined;
   translationDesired = false;
   translationComplete = false;
-  if (replicaTranslationMode === 'rrweb-projection') {
-    replicaTranslationCoordinator.selectPair(undefined);
-  }
+  replicaTranslationCoordinator.selectPair(undefined);
   pendingLiveUpdate = undefined;
   latestLiveSequence = 0;
   highestReceivedLiveSequence = 0;
@@ -4239,7 +4037,6 @@ function invalidateCompanion(message: string): void {
 
 function usesReplicaTranslationProjection(): boolean {
   return (
-    replicaTranslationMode === 'rrweb-projection' &&
     legacyTransitionGate.shadowOwnsPage &&
     visibleReplayHost.hasCommittedReplica
   );
@@ -4250,10 +4047,7 @@ function releaseReplicaPresentationForLegacyWork(
   showFallbackLabel = true,
 ): boolean {
   if (!force && usesReplicaTranslationProjection()) return false;
-  if (
-    replicaEngineMode === 'legacy' ||
-    !legacyTransitionGate.shadowOwnsPage
-  ) return false;
+  if (!legacyTransitionGate.shadowOwnsPage) return false;
   const needsFreshCapture = legacyTransitionGate.release();
   pendingLiveUpdate = undefined;
   replicaShadowAbortController?.abort();

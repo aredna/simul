@@ -16,7 +16,7 @@ import {
 } from '../lib/ocr/image-source-client';
 import type { PixelAcquisitionCoordinator } from '../lib/ocr/pixel-acquisition';
 import type { ReplicaCaptureRequest } from '../lib/replica/contracts';
-import type { ReplicaImageAnchor } from '../lib/replica/rrweb-shadow-engine';
+import type { ReplicaImageAnchor } from '../lib/replica/contracts';
 
 const sourceDocument = {
   sessionId: 'image-controller-session',

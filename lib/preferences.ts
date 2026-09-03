@@ -25,11 +25,6 @@ export const TEXT_LAYOUT_MODES = ['adaptive', 'faithful'] as const;
 
 export type TextLayoutMode = (typeof TEXT_LAYOUT_MODES)[number];
 
-export const REPLICA_ENGINE_PREFERENCES = ['isolated-html', 'rrweb'] as const;
-
-export type ReplicaEnginePreference =
-  (typeof REPLICA_ENGINE_PREFERENCES)[number];
-
 export const REPLICA_VIEW_MODES = ['translated', 'source-only'] as const;
 
 export type ReplicaViewMode = (typeof REPLICA_VIEW_MODES)[number];
@@ -92,7 +87,6 @@ export interface CompanionPreferences {
   zoomPercent: number;
   syncScroll: boolean;
   textLayoutMode: TextLayoutMode;
-  replicaEngine: ReplicaEnginePreference;
   replicaFidelityPolicy: SelectableReplicaFidelityPolicy;
   replicaViewMode: ReplicaViewMode;
   launchBehavior: CompanionLaunchBehavior;
@@ -116,7 +110,6 @@ export const DEFAULT_COMPANION_PREFERENCES: Readonly<CompanionPreferences> =
     zoomPercent: 100,
     syncScroll: true,
     textLayoutMode: 'adaptive',
-    replicaEngine: 'isolated-html',
     replicaFidelityPolicy: 'passive',
     replicaViewMode: 'translated',
     launchBehavior: 'last-used',
@@ -176,9 +169,6 @@ export function parseCompanionPreferences(
     textLayoutMode: isTextLayoutMode(input.textLayoutMode)
       ? input.textLayoutMode
       : DEFAULT_COMPANION_PREFERENCES.textLayoutMode,
-    replicaEngine: isReplicaEnginePreference(input.replicaEngine)
-      ? input.replicaEngine
-      : DEFAULT_COMPANION_PREFERENCES.replicaEngine,
     replicaFidelityPolicy: isSelectableReplicaFidelityPolicy(
       input.replicaFidelityPolicy,
     )
@@ -235,12 +225,6 @@ export function isMirrorDisplayMode(
 
 export function isTextLayoutMode(value: unknown): value is TextLayoutMode {
   return TEXT_LAYOUT_MODES.includes(value as TextLayoutMode);
-}
-
-export function isReplicaEnginePreference(
-  value: unknown,
-): value is ReplicaEnginePreference {
-  return REPLICA_ENGINE_PREFERENCES.includes(value as ReplicaEnginePreference);
 }
 
 export function isReplicaViewMode(value: unknown): value is ReplicaViewMode {
@@ -393,7 +377,6 @@ export interface CompanionViewSettings {
   zoomPercent: number;
   syncScroll: boolean;
   textLayoutMode: TextLayoutMode;
-  replicaEngine: ReplicaEnginePreference;
   replicaFidelityPolicy: SelectableReplicaFidelityPolicy;
   replicaViewMode: ReplicaViewMode;
   launchBehavior: CompanionLaunchBehavior;
@@ -450,7 +433,6 @@ function createDefaultPreferences(): CompanionPreferences {
     zoomPercent: 100,
     syncScroll: true,
     textLayoutMode: 'adaptive',
-    replicaEngine: 'isolated-html',
     replicaFidelityPolicy: 'passive',
     replicaViewMode: 'translated',
     launchBehavior: 'last-used',

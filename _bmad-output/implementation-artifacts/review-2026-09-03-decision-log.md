@@ -335,6 +335,37 @@ on any identifier that is not a real global, so a helper imported from a
 module can never again ride along silently (the cause of the shipped scroll
 regression).
 
+## 2026-09-04 session
+
+You confirmed D1, D8, D11, D12, D18 and D20, then asked for rrweb to be
+removed rather than quarantined, the legacy-mode toggle dropped, version
+0.4.0, the side-panel split next, and a pushed branch with a PR.
+
+### D24. rrweb removed outright
+
+Deleted: `rrweb-shadow-engine`, `rrweb-stream-sanitizer`,
+`live-recorder-session`, `page-recorder` (module and entrypoint),
+`live-stream-client`, `live-protocol`, their tests, and both `@rrweb`
+packages (172 packages installed now). `protocol-v2.ts` keeps only the
+replica document identity helpers the isolated engine and OCR bridge share
+(`tests/replica-identity.test.ts` covers them); `contracts.ts` lost the
+rrweb checkpoint and live-stream types. The Settings "Replica engine" option
+and the saved `replicaEngine` preference are gone (an old saved value is
+ignored by the parser). The OCR image-source bridge has a single
+`isolated-html` kind. The artifact validator no longer has an rrweb profile;
+it requires the mirror and live-observer bundles plus the isolated marker in
+the side panel.
+
+Also removed: the `WXT_SIMUL_RRWEB_SHADOW` and `WXT_SIMUL_RRWEB_TRANSLATION`
+build flags and the never-selected `'legacy'` engine mode. The legacy
+visible fallback view (v1 snapshot renderer) stays; it is what the user sees
+when the isolated engine cannot run. `ReplicaEngineController` is now
+isolated-only with `retrySelected()` replacing mode selection.
+
+`deferred-work.md` still lists two rrweb-era items (Reddit/Mexico City
+fidelity gaps "without weakening rrweb privacy" and the rrweb convergence
+spec); they are history and were left as written.
+
 ### D7. Local toolchain notes
 
 - Nothing in the dependency set had a release inside the 7-day window

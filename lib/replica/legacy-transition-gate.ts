@@ -111,8 +111,7 @@ export function isCommittedShadowReplica(
 ): boolean {
   return (
     result.status === 'complete' &&
-    (result.diagnostics.engine === 'rrweb-shadow-v2' ||
-      result.diagnostics.engine === 'isolated-html-v1') &&
+    result.diagnostics.engine === 'isolated-html-v1' &&
     hasCommittedReplica
   );
 }

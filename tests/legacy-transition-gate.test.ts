@@ -48,10 +48,6 @@ describe('legacy transition gate', () => {
       status: 'complete' as const,
       diagnostics: emptyReplicaDiagnostics('legacy-v1', 'legacy_selected'),
     };
-    const rrwebComplete = {
-      status: 'complete' as const,
-      diagnostics: emptyReplicaDiagnostics('rrweb-shadow-v2', 'shadow_complete'),
-    };
     const isolatedComplete = {
       status: 'complete' as const,
       diagnostics: emptyReplicaDiagnostics(
@@ -75,8 +71,6 @@ describe('legacy transition gate', () => {
     };
 
     expect(isCommittedShadowReplica(legacyComplete, true)).toBe(false);
-    expect(isCommittedShadowReplica(rrwebComplete, false)).toBe(false);
-    expect(isCommittedShadowReplica(rrwebComplete, true)).toBe(true);
     expect(isCommittedShadowReplica(isolatedComplete, false)).toBe(false);
     expect(isCommittedShadowReplica(isolatedComplete, true)).toBe(true);
     expect(isCommittedShadowReplica(isolatedStale, true)).toBe(false);

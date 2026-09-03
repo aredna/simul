@@ -17,7 +17,7 @@ import {
 export const IMAGE_SOURCE_PROTOCOL_VERSION = 1;
 export const IMAGE_SOURCE_PORT_PREFIX = 'simul:image-source-v1:';
 export const MAX_IMAGE_SOURCE_REQUEST_ID_LENGTH = 96;
-export type ImageSourceBridgeId = 'rrweb' | 'isolated-html';
+export type ImageSourceBridgeId = 'isolated-html';
 
 export interface ImageSourcePortIdentity {
   readonly bridge: ImageSourceBridgeId;
@@ -86,7 +86,7 @@ export type ImageSourceRecorderMessage =
 
 export function createImageSourcePortName(
   sessionId: string,
-  bridge: ImageSourceBridgeId = 'rrweb',
+  bridge: ImageSourceBridgeId = 'isolated-html',
 ): string {
   if (!isSafeToken(sessionId)) throw new Error('Invalid image source session.');
   return `${IMAGE_SOURCE_PORT_PREFIX}${bridge}:${sessionId}`;
@@ -105,7 +105,7 @@ export function readImageSourcePortIdentity(
   const bridge = suffix.slice(0, separator);
   const sessionId = suffix.slice(separator + 1);
   if (
-    (bridge !== 'rrweb' && bridge !== 'isolated-html') ||
+    bridge !== 'isolated-html' ||
     expectedBridge && bridge !== expectedBridge ||
     !isSafeToken(sessionId)
   ) return undefined;

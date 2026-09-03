@@ -25,9 +25,9 @@ sends a sanitized checkpoint plus contiguous targeted patches. The
 extension validates the graph again and creates real nodes with DOM APIs inside
 a `sandbox="allow-same-origin"` iframe whose CSP disables scripts, workers,
 connections, frames, objects, forms, and navigation. Gaps or overflow stage one
-fresh checkpoint and atomically replace the last-good view. rrweb is compiled
-only into developer builds that set `WXT_SIMUL_RRWEB_SHADOW=1`; release builds
-omit it and a saved rrweb preference falls back to Isolated HTML. The
+fresh checkpoint and atomically replace the last-good view. Isolated HTML is
+the only replica engine; the experimental rrweb renderer was removed in
+0.4.0. The
 legacy renderer is the emergency fallback; neither engine silently falls back
 to the other.
 
@@ -65,7 +65,7 @@ never as raw `value`/`placeholder` attributes, and stays memory-only and
 content-free in logs. Password/password-autocomplete fields, unsupported
 controls, selects/options, contenteditable regions, and ARIA textbox fallbacks
 remain blank; a safe-to-sensitive transition clears its record and projection
-atomically. rrweb continues masking every editable/value-bearing control.
+atomically.
 Passive image validation admits a narrow, shape-only URL-encoded SVG data-image
 profile (including the YC logo) with the same checks on capture and receipt. A
 persisted `Live source only` mode uses the identical isolated DOM/patch stream,
@@ -223,8 +223,6 @@ extension APIs or page integration.
 - `lib/companion-ui-localization.ts`: atomic target-language label sets and
   action-specific toolbar attention routing
 - `entrypoints/page-snapshot.ts`: unlisted top-frame snapshot entrypoint
-- `entrypoints/page-recorder.ts`: unlisted rrweb checkpoint, live recorder,
-  and exact-document image-source bridge
 - `entrypoints/page-mirror.ts`: unlisted isolated-HTML observer and shared
   WeakMap image-identity bridge
 - `lib/replica/html-mirror-protocol.ts`, `html-mirror-sanitizer.ts`, and
@@ -239,11 +237,7 @@ extension APIs or page integration.
   replay ownership, atomic presentation, protected iframe layout, zoom, and
   scroll projection
 - `lib/replica/live-protocol.ts`, `lib/replica/live-recorder-session.ts`, and
-  `lib/replica/live-stream-client.ts`: bounded ordered transport, shared recorder
-  ownership, independent subscriber watermarks, and recovery requests
-- `lib/replica/rrweb-stream-sanitizer.ts`: transactional incremental privacy,
-  identity, and resource validation
-- `lib/replica/source-value-model.ts`: transactional canonical rrweb text,
+- `lib/replica/source-value-model.ts`: transactional canonical source text,
   monotonic revisions/tombstones, and committed text-change records
 - `lib/translation/`: bounded exact-source memory and the single-session,
   revision/epoch/lease-safe engine-neutral translation coordinator

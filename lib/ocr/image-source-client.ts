@@ -39,7 +39,7 @@ export async function openChromeImageSource(
   request: ReplicaCaptureRequest,
   onChange: (change: SourceImageChange) => void,
   signal?: AbortSignal,
-  bridge: ImageSourceBridgeId = 'rrweb',
+  bridge: ImageSourceBridgeId = 'isolated-html',
 ): Promise<ImageSourceLease> {
   signal?.throwIfAborted();
   if (!request.isCurrent()) throw new DOMException('Stale image source.', 'AbortError');

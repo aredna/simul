@@ -40,29 +40,21 @@ export const REQUIRED_UNLISTED_BUNDLES = Object.freeze([
   'page-mirror.js',
   'page-live-observer.js',
 ]);
-/**
- * Present only in a build that opted into the experimental rrweb engine with
- * WXT_SIMUL_RRWEB_SHADOW=1. Its presence selects the rrweb validation profile.
- */
-export const RRWEB_RECORDER_BUNDLE = 'page-recorder.js';
-/** A string literal unique to the @rrweb/replay runtime. */
-export const RRWEB_REPLAY_LIBRARY_MARKER = 'replayer-wrapper';
 export const REQUIRED_REPLICA_RUNTIME_MARKERS = Object.freeze([
-  'simul:replica-v2:capture-checkpoint',
-  'rrweb-shadow-v2',
   'simul:html-mirror-v1:',
   'isolated-html-v1',
   'simul:live-observer-v2',
 ]);
+/** The side panel must carry the isolated engine's runtime marker. */
+export const REQUIRED_SIDEPANEL_RUNTIME_MARKER = REQUIRED_REPLICA_RUNTIME_MARKERS[1];
 /**
  * Marker that must appear as a JavaScript string inside each required local
  * bundle. Keyed by bundle name so growing the bundle list can never shift
  * which file a marker is checked in.
  */
 export const REQUIRED_UNLISTED_BUNDLE_MARKERS = Object.freeze({
-  'page-recorder.js': REQUIRED_REPLICA_RUNTIME_MARKERS[0],
-  'page-mirror.js': REQUIRED_REPLICA_RUNTIME_MARKERS[2],
-  'page-live-observer.js': REQUIRED_REPLICA_RUNTIME_MARKERS[4],
+  'page-mirror.js': REQUIRED_REPLICA_RUNTIME_MARKERS[0],
+  'page-live-observer.js': REQUIRED_REPLICA_RUNTIME_MARKERS[2],
 });
 export const REQUIRED_ISOLATED_SANDBOX_MARKERS = Object.freeze([
   'simul-isolated-shell',
@@ -220,7 +212,6 @@ export async function buildProductionArtifact({
   temporaryRoot,
   ocrEnabled = true,
   ocrProviderIds,
-  rrwebEnabled = false,
 } = {}) {
   if (!temporaryRoot) {
     throw new ArtifactError('A temporary build root is required.');
@@ -255,10 +246,6 @@ export async function buildProductionArtifact({
         SIMUL_OCR_TRANSFORMERS: '0',
         SIMUL_OCR_PADDLE: '0',
         SIMUL_OCR_SCREEN_AI: '0',
-        // Pinned explicitly so a developer .env file cannot change what the
-        // release build compiles in.
-        WXT_SIMUL_RRWEB_SHADOW: rrwebEnabled ? '1' : '0',
-        WXT_SIMUL_RRWEB_TRANSLATION: '1',
       },
     },
   );
@@ -324,7 +311,7 @@ export async function validateArtifact(artifactDirectory) {
     }
   }
 
-  const rrwebEnabled = assertReplicaRuntimeMarkers(executableTextByPath, filePaths);
+  assertReplicaRuntimeMarkers(executableTextByPath, filePaths);
 
   const manifestPath = path.join(root, 'manifest.json');
   let manifest;
@@ -374,18 +361,12 @@ export async function validateArtifact(artifactDirectory) {
     manifest,
     ocrEnabled: ocrProviderIds.length > 0,
     ocrProviderIds,
-    rrwebEnabled,
     unpackedBytes,
   };
 }
 
 function assertReplicaRuntimeMarkers(executableTextByPath, filePaths) {
-  const [, replayMarker, , isolatedMarker] = REQUIRED_REPLICA_RUNTIME_MARKERS;
-  const rrwebEnabled = filePaths.has(RRWEB_RECORDER_BUNDLE);
-  const requiredBundles = rrwebEnabled
-    ? [...REQUIRED_UNLISTED_BUNDLES, RRWEB_RECORDER_BUNDLE]
-    : REQUIRED_UNLISTED_BUNDLES;
-  for (const bundle of requiredBundles) {
+  for (const bundle of REQUIRED_UNLISTED_BUNDLES) {
     const marker = REQUIRED_UNLISTED_BUNDLE_MARKERS[bundle];
     const text = executableTextByPath.get(bundle);
     if (!marker || !text || !hasJavaScriptStringMarker(text, marker)) {
@@ -394,25 +375,6 @@ function assertReplicaRuntimeMarkers(executableTextByPath, filePaths) {
       );
     }
   }
-  // The recorder bundle and the replay library ship together or not at all,
-  // so a release build provably contains no rrweb runtime.
-  // executableTextByPath also holds HTML documents, which are not JavaScript.
-  const replayLibraryPaths = [...executableTextByPath.entries()]
-    .filter(([artifactPath]) => !/\.html?$/iu.test(artifactPath))
-    .filter(([, text]) => hasJavaScriptStringMarker(text, RRWEB_REPLAY_LIBRARY_MARKER))
-    .map(([artifactPath]) => artifactPath)
-    .sort();
-  if (rrwebEnabled && replayLibraryPaths.length === 0) {
-    throw new ArtifactError(
-      `Extension artifact ships ${RRWEB_RECORDER_BUNDLE} without the rrweb replay runtime marker: ${RRWEB_REPLAY_LIBRARY_MARKER}`,
-    );
-  }
-  if (!rrwebEnabled && replayLibraryPaths.length > 0) {
-    throw new ArtifactError(
-      `Extension artifact ships the rrweb replay runtime without opting into the experimental engine: ${replayLibraryPaths.join(', ')}`,
-    );
-  }
-
   const sidepanelText = executableTextByPath.get('sidepanel.html');
   const sidepanelScripts = sidepanelText
     ? discoverHtmlResourceReferences('sidepanel.html', sidepanelText)
@@ -423,14 +385,15 @@ function assertReplicaRuntimeMarkers(executableTextByPath, filePaths) {
     : [];
   if (
     sidepanelScripts.length === 0 ||
-    !sidepanelScripts.some((script) => {
-      const text = executableTextByPath.get(script);
-      return hasJavaScriptStringMarker(text, replayMarker) &&
-        hasJavaScriptStringMarker(text, isolatedMarker);
-    })
+    !sidepanelScripts.some((script) =>
+      hasJavaScriptStringMarker(
+        executableTextByPath.get(script),
+        REQUIRED_SIDEPANEL_RUNTIME_MARKER,
+      ),
+    )
   ) {
     throw new ArtifactError(
-      `Extension artifact is missing required local replica runtime markers: ${replayMarker}, ${isolatedMarker}`,
+      `Extension artifact is missing required local replica runtime marker: ${REQUIRED_SIDEPANEL_RUNTIME_MARKER}`,
     );
   }
   const isolatedRuntime = sidepanelScripts.find((script) => {
@@ -444,7 +407,6 @@ function assertReplicaRuntimeMarkers(executableTextByPath, filePaths) {
       `Extension artifact is missing isolated iframe sandbox/CSP markers: ${REQUIRED_ISOLATED_SANDBOX_MARKERS.join(', ')}`,
     );
   }
-  return rrwebEnabled;
 }
 
 export async function compareArtifactDirectories(expectedDirectory, actualDirectory) {

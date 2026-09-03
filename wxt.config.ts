@@ -13,9 +13,6 @@ const tesseractEnabled = ocrBuildProfile.enabledProviderIds.includes('tesseract'
 const offscreenOcrEnabled = ocrBuildProfile.enabledProviderIds.some((id) =>
   id === 'tesseract' || id === 'chrome-text-detector',
 );
-// The experimental rrweb engine is an explicit opt-in. Release builds omit
-// its recorder bundle and, through the define below, its replay library.
-const rrwebEnabled = process.env.WXT_SIMUL_RRWEB_SHADOW === '1';
 
 function stripSourceMapDirectives(code: string): string {
   const comments: Comment[] = [];
@@ -34,7 +31,7 @@ function stripSourceMapDirectives(code: string): string {
       .replace(/[^\r\n]/gu, ' ');
     stripped = stripped.slice(0, range.start) + whitespace + stripped.slice(range.end);
   }
-  // rrweb also packages an executable canvas Worker as a multiline string.
+  // A dependency may also carry a directive inside a multiline string.
   return stripped.replace(
     /(^|\r?\n)[\t ]*\/\/[#@][\t ]*sourceMappingURL[\t ]*=[^\r\n]*/gu,
     '$1',
@@ -100,31 +97,17 @@ export default defineConfig({
     'page-snapshot',
     'sidepanel',
     ...(offscreenOcrEnabled ? ['offscreen'] : []),
-    ...(rrwebEnabled ? ['page-recorder'] : []),
   ],
   vite: () => ({
-    define: {
-      // Pinned from the same decision as filterEntrypoints so the side panel
-      // can never believe rrweb is compiled while its recorder is absent.
-      'import.meta.env.WXT_SIMUL_RRWEB_SHADOW': JSON.stringify(
-        rrwebEnabled ? '1' : '0',
-      ),
-      // Pinned from process.env only, so a developer .env file cannot switch
-      // the release build to the legacy translation path.
-      'import.meta.env.WXT_SIMUL_RRWEB_TRANSLATION': JSON.stringify(
-        process.env.WXT_SIMUL_RRWEB_TRANSLATION === '0' ? '0' : '1',
-      ),
-    },
     plugins: [
       createOcrBuildProfilePlugin(process.env),
       {
         name: 'simul-strip-vendored-worker-sourcemap-directives',
         enforce: 'post',
         renderChunk(code) {
-          // rrweb ships an inline canvas-worker source string containing a
-          // sourceMappingURL comment. Canvas recording is disabled, but the
-          // installable artifact must not retain even an unreachable map
-          // reference. WXT itself already builds without source maps.
+          // The installable artifact must not retain even an unreachable
+          // source map reference, including one carried inside a dependency's
+          // string literal. WXT itself already builds without source maps.
           const stripped = removeRemoteTesseractFallbacks(
             stripSourceMapDirectives(code),
           );

@@ -9,7 +9,7 @@ import {
   type VisibleReplayCandidateLease,
 } from '../lib/replica/visible-replay-host';
 
-describe('visible rrweb replay host', () => {
+describe('visible replay host', () => {
   it('uses canonical replica labels without claiming fallback bugs are fixed', () => {
     expect(STATIC_REPLAY_LABEL).toBe('Replica reconnecting');
     expect(LIVE_REPLAY_LABEL).toBe('Live page replica');

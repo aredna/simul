@@ -116,7 +116,7 @@ describe('sidepanel UI structure', () => {
     expect(document.querySelector('#settings-grid #sync-scroll')).not.toBeNull();
     expect(document.querySelector('#settings-grid #replica-fidelity-policy'))
       .not.toBeNull();
-    expect(experimental?.querySelector('#replica-engine')).not.toBeNull();
+    expect(document.querySelector('#replica-engine')).toBeNull();
     expect(experimental?.querySelector('#replica-view-mode')).not.toBeNull();
     expect(experimental?.querySelector('#image-analysis-host')).not.toBeNull();
     expect(markup.indexOf('id="settings-grid"'))

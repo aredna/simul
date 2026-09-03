@@ -6,7 +6,7 @@ import {
   ImageOverlayProjector,
   type ImageOverlayProjection,
 } from '../lib/ocr/image-overlay-projector';
-import type { ReplicaImageAnchor } from '../lib/replica/rrweb-shadow-engine';
+import type { ReplicaImageAnchor } from '../lib/replica/contracts';
 
 const sourceDocument = {
   sessionId: 'image-overlay-session',

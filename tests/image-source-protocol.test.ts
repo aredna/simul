@@ -71,22 +71,20 @@ describe('image source protocol', () => {
     });
   });
 
-  it('routes each image Port to exactly one replica bridge owner', () => {
-    const rrweb = createImageSourcePortName(documentIdentity.sessionId, 'rrweb');
+  it('routes each image Port to the isolated replica bridge only', () => {
     const isolated = createImageSourcePortName(
       documentIdentity.sessionId,
       'isolated-html',
     );
-    expect(readImageSourcePortIdentity(rrweb, 'rrweb')).toEqual({
-      bridge: 'rrweb',
-      sessionId: documentIdentity.sessionId,
-    });
-    expect(readImageSourcePortIdentity(rrweb, 'isolated-html')).toBeUndefined();
     expect(readImageSourcePortIdentity(isolated, 'isolated-html')).toEqual({
       bridge: 'isolated-html',
       sessionId: documentIdentity.sessionId,
     });
-    expect(readImageSourcePortIdentity(isolated, 'rrweb')).toBeUndefined();
+    // A port named for a bridge that no longer exists is not routed.
+    expect(readImageSourcePortIdentity(
+      isolated.replace('isolated-html', 'rrweb'),
+      'isolated-html',
+    )).toBeUndefined();
     expect(readImageSourcePortSessionId('simul:image-source-v1:legacy-session'))
       .toBeUndefined();
   });

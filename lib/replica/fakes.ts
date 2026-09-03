@@ -16,7 +16,7 @@ export class FakeReplicaEngine implements ReplicaEngine {
     readonly id: ReplicaEngineId,
     private result: ReplicaRunResult = {
       status: 'complete',
-      diagnostics: emptyReplicaDiagnostics(id, 'shadow_complete'),
+      diagnostics: emptyReplicaDiagnostics(id, 'isolated_complete'),
     },
   ) {}
 
