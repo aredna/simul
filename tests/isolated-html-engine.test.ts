@@ -17,6 +17,8 @@ import {
   ISOLATED_HTML_QUIRKS_SHELL,
   ISOLATED_HTML_SHELL,
   IsolatedHtmlReplicaEngine,
+  canonicalSvgElementName,
+  createMirrorElement,
   isTrustedIsolatedShellDocument,
   type IsolatedMirrorInfo,
 } from '../lib/replica/isolated-html-engine';
@@ -1652,11 +1654,13 @@ describe('IsolatedHtmlReplicaEngine', () => {
       styleSettleDeadlineMs: 100,
       initializeIframe: async (iframe, shell) => {
         const { document } = parseHTML(shell);
-        const createElementNS = document.createElementNS.bind(document);
-        Object.defineProperty(document, 'createElementNS', {
+        // HTML replica elements are created with createElement (see
+        // createMirrorElement), so the stylesheet probe hooks that path.
+        const createElement = document.createElement.bind(document);
+        Object.defineProperty(document, 'createElement', {
           configurable: true,
-          value: (namespace: string, tagName: string) => {
-            const element = createElementNS(namespace, tagName);
+          value: (tagName: string) => {
+            const element = createElement(tagName);
             if (tagName === 'link') {
               Object.defineProperty(element, 'sheet', {
                 configurable: true,
@@ -1730,11 +1734,13 @@ describe('IsolatedHtmlReplicaEngine', () => {
       },
       initializeIframe: async (iframe, shell) => {
         const { document } = parseHTML(shell);
-        const createElementNS = document.createElementNS.bind(document);
-        Object.defineProperty(document, 'createElementNS', {
+        // HTML replica elements are created with createElement (see
+        // createMirrorElement), so the stylesheet probe hooks that path.
+        const createElement = document.createElement.bind(document);
+        Object.defineProperty(document, 'createElement', {
           configurable: true,
-          value: (namespace: string, tagName: string) => {
-            const element = createElementNS(namespace, tagName);
+          value: (tagName: string) => {
+            const element = createElement(tagName);
             if (tagName === 'link') {
               Object.defineProperty(element, 'disabled', {
                 configurable: true,
@@ -2347,3 +2353,31 @@ function makeEngine(
     ...(onInfo ? { onInfo } : {}),
   });
 }
+
+describe('createMirrorElement', () => {
+  it('restores case-sensitive SVG element names the wire format lowercases', () => {
+    expect(canonicalSvgElementName('lineargradient')).toBe('linearGradient');
+    expect(canonicalSvgElementName('clippath')).toBe('clipPath');
+    expect(canonicalSvgElementName('fegaussianblur')).toBe('feGaussianBlur');
+    expect(canonicalSvgElementName('textpath')).toBe('textPath');
+    expect(canonicalSvgElementName('rect')).toBe('rect');
+
+    const { document } = parseHTML('<html><body></body></html>');
+    const gradient = createMirrorElement(document, 'svg', 'lineargradient');
+    expect(gradient.namespaceURI).toBe('http://www.w3.org/2000/svg');
+    expect(gradient.localName).toBe('linearGradient');
+    const rect = createMirrorElement(document, 'svg', 'rect');
+    expect(rect.localName).toBe('rect');
+  });
+
+  it('keeps colon-prefixed HTML names as one inert unknown element', () => {
+    const { document } = parseHTML('<html><body></body></html>');
+    const legacy = createMirrorElement(document, 'html', 'o:p');
+    expect(legacy.localName).toBe('o:p');
+    expect(legacy.namespaceURI).toBe('http://www.w3.org/1999/xhtml');
+    const disguised = createMirrorElement(document, 'html', 'x:iframe');
+    expect(disguised.localName).toBe('x:iframe');
+    expect(disguised.tagName.toLowerCase()).not.toBe('iframe');
+    expect(createMirrorElement(document, 'html', 'div').localName).toBe('div');
+  });
+});

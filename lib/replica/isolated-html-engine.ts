@@ -1009,7 +1009,7 @@ function buildNode(
   if (input.tagName === 'html' || input.tagName === 'head' || input.tagName === 'body') {
     throw new Error('Nested document element rejected.');
   }
-  const node = target.createElementNS(NAMESPACE_URIS[input.namespace], input.tagName);
+  const node = createMirrorElement(target, input.namespace, input.tagName);
   setAttributes(node, input.attributes);
   applyElementHints(node, input);
   nodes.set(input.id, node);
@@ -1118,6 +1118,73 @@ function setAttributes(
 function canonicalSvgAttributeName(name: string): string {
   return SVG_CASE_SENSITIVE_ATTRIBUTES.get(name) ?? name;
 }
+
+/**
+ * Create a replica element from its transported lowercase tag name.
+ *
+ * HTML names go through createElement so a colon-prefixed legacy name such as
+ * `o:p` becomes the same inert HTMLUnknownElement the source parser produced
+ * instead of being parsed as a namespace prefix. SVG names are restored to
+ * their case-sensitive spelling because Chrome's SVG element factory does not
+ * recognize `lineargradient` or `clippath`.
+ */
+export function createMirrorElement(
+  target: Document,
+  namespace: keyof typeof NAMESPACE_URIS,
+  tagName: string,
+): Element {
+  if (namespace === 'html') return target.createElement(tagName);
+  return target.createElementNS(
+    NAMESPACE_URIS[namespace],
+    namespace === 'svg' ? canonicalSvgElementName(tagName) : tagName,
+  );
+}
+
+export function canonicalSvgElementName(tagName: string): string {
+  return SVG_CASE_SENSITIVE_ELEMENTS.get(tagName) ?? tagName;
+}
+
+const SVG_CASE_SENSITIVE_ELEMENTS = new Map<string, string>(
+  [
+    'altGlyph',
+    'altGlyphDef',
+    'altGlyphItem',
+    'animateColor',
+    'animateMotion',
+    'animateTransform',
+    'clipPath',
+    'feBlend',
+    'feColorMatrix',
+    'feComponentTransfer',
+    'feComposite',
+    'feConvolveMatrix',
+    'feDiffuseLighting',
+    'feDisplacementMap',
+    'feDistantLight',
+    'feDropShadow',
+    'feFlood',
+    'feFuncA',
+    'feFuncB',
+    'feFuncG',
+    'feFuncR',
+    'feGaussianBlur',
+    'feImage',
+    'feMerge',
+    'feMergeNode',
+    'feMorphology',
+    'feOffset',
+    'fePointLight',
+    'feSpecularLighting',
+    'feSpotLight',
+    'feTile',
+    'feTurbulence',
+    'foreignObject',
+    'glyphRef',
+    'linearGradient',
+    'radialGradient',
+    'textPath',
+  ].map((name) => [name.toLowerCase(), name] as const),
+);
 
 const SVG_CASE_SENSITIVE_ATTRIBUTES = new Map<string, string>([
   ['attributename', 'attributeName'],
@@ -1503,11 +1570,13 @@ function applyPatchBatch(
         hasPrivateHtmlMirrorAttribute(operation.attributes)
       ) return undefined;
       try {
-        const sentinel = target.ownerDocument?.createElementNS(
-          NAMESPACE_URIS[operation.namespace],
+        const sentinelDocument = target.ownerDocument;
+        if (!sentinelDocument) return undefined;
+        const sentinel = createMirrorElement(
+          sentinelDocument,
+          operation.namespace,
           operation.tagName,
         );
-        if (!sentinel) return undefined;
         setAttributes(sentinel, operation.attributes);
       } catch {
         return undefined;

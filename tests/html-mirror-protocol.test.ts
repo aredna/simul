@@ -2167,3 +2167,45 @@ function checkpointFor(
     documentHeight: graph.documentHeight,
   }, fidelityPolicy);
 }
+
+describe('tag name representability', () => {
+  beforeEach(() => {
+    const { window } = parseHTML('<html><body></body></html>');
+    Object.assign(globalThis, {
+      Node: window.Node,
+      Element: window.Element,
+      Text: window.Text,
+    });
+  });
+
+  const element = (
+    namespace: 'html' | 'svg' | 'mathml',
+    tagName: string,
+  ) => ({
+    kind: 'element', id: 7, namespace, tagName, attributes: [], children: [],
+  });
+
+  it('rejects colon-prefixed SVG and MathML names that createElementNS would reparse', () => {
+    expect(readHtmlMirrorNode(element('svg', 'x:animate'))).toBeUndefined();
+    expect(readHtmlMirrorNode(element('svg', 'svg:script'))).toBeUndefined();
+    expect(readHtmlMirrorNode(element('svg', 'a:b:c'))).toBeUndefined();
+    expect(readHtmlMirrorNode(element('mathml', 'm:mi'))).toBeUndefined();
+    expect(readHtmlMirrorNode(element('svg', 'rect'))).toBeDefined();
+  });
+
+  it('keeps legacy colon-prefixed HTML names as inert unknown elements', () => {
+    expect(readHtmlMirrorNode(element('html', 'o:p'))).toBeDefined();
+    expect(readHtmlMirrorNode(element('html', 'x:iframe'))).toBeDefined();
+    expect(readHtmlMirrorNode(element('html', 'iframe'))).toBeUndefined();
+  });
+
+  it('omits colon-prefixed foreign-content elements at capture', () => {
+    const graph = sanitizeMarkup(
+      '<!doctype html><html><body><svg><rect id="keep"></rect><x:animate id="drop"></x:animate></svg><o:p id="legacy">text</o:p></body></html>',
+      'passive',
+    );
+    expect(graphElementBySourceId(graph, 'keep')).toBeDefined();
+    expect(graphElementBySourceId(graph, 'drop')).toBeUndefined();
+    expect(graphElementBySourceId(graph, 'legacy')?.tagName).toBe('o:p');
+  });
+});
