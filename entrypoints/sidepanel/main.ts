@@ -83,7 +83,6 @@ import { createBrowserImageRecognitionCoordinator } from '../../lib/ocr/image-an
 import { IndexedDbTransientImageStore } from '../../lib/ocr/transient-image-store';
 import {
   PREFERENCE_LOCK_NAME,
-  readPreferenceCommandResult,
   type PreferenceCommand,
   type PreferenceCommandResult,
 } from '../../lib/preference-coordinator';
@@ -118,6 +117,7 @@ import {
 } from '../../lib/preferences';
 import { translateWithSession } from '../../lib/translation-pipeline';
 import { ImageAnalysisPanel } from './image-analysis-panel';
+import { PreferenceClient } from './preference-client';
 import { QuickComposer } from './quick-composer';
 import { ToolbarStatus } from './toolbar-status';
 import { UiLocalizer } from './ui-localizer';
@@ -466,6 +466,23 @@ const toolbarStatus = new ToolbarStatus({
   }),
   isSettingsOpen: () => openCompanionOverlay === 'settings',
 });
+const preferenceClient = new PreferenceClient({
+  store: {
+    get: () => preferences,
+    set: (next) => {
+      preferences = next;
+      syncPreferenceControls();
+    },
+  },
+  sendMessage: (command) => browser.runtime.sendMessage(command),
+  readStorage: () => browser.storage.local.get(STORAGE_KEY),
+  onViewSettled: () => {
+    updateMirrorLayout();
+    if (visualRoot) applyMirrorTextLayout(visualRoot, preferences.textLayoutMode);
+  },
+  onError: (message) => setStatus(message, 'error'),
+  readableError,
+});
 replicaTranslationCoordinator = new ReplicaTranslationCoordinator(
   provider,
   replicaSurfaceRouter,
@@ -647,23 +664,10 @@ let liveObservationAvailable = true;
 let lastSourceScroll: ReturnType<typeof readLivePageScrollMessage>;
 let acceptedScrollMessageCount = 0;
 let availabilityCheckedForPair: string | undefined;
-let viewPreferenceRevision = 0;
 let replicaFidelityCommitInFlight = false;
-let imageAnalysisPreferenceRevision = 0;
 let surfaceTransitionInFlight = false;
 let latestToolbarLaunchStamp: CompanionLaunchStamp | undefined;
 let pendingImageReplicaActivation: PendingImageReplicaActivation | undefined;
-const pendingViewPreferences = new Map<
-  keyof CompanionViewSettings,
-  { revision: number; value: CompanionViewSettings[keyof CompanionViewSettings] }
->();
-const pendingImageAnalysisPreferences = new Map<
-  keyof CompanionImageAnalysisSettings,
-  {
-    revision: number;
-    value: CompanionImageAnalysisSettings[keyof CompanionImageAnalysisSettings];
-  }
->();
 
 const companionBuildIdentity = createExtensionBuildIdentity(
   browser.runtime.getManifest(),
@@ -1106,106 +1110,39 @@ async function loadPanelWindowId(): Promise<void> {
 }
 
 async function loadPreferences(): Promise<void> {
-  try {
-    preferences = (await sendPreferenceCommand({ type: 'simul:preferences:reconcile' })).preferences;
-  } catch {
-    try {
-      const stored = await browser.storage.local.get(STORAGE_KEY);
-      preferences = parseCompanionPreferences(stored[STORAGE_KEY]);
-    } catch {
-      preferences = parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES);
-    }
-  }
-  syncPreferenceControls();
+  await preferenceClient.load();
 }
 
-async function sendPreferenceCommand(
+function sendPreferenceCommand(
   command: PreferenceCommand,
 ): Promise<PreferenceCommandResult> {
-  const response: unknown = await browser.runtime.sendMessage(command);
-  const result = readPreferenceCommandResult(response);
-  if (!result) throw new Error('The preference service returned an invalid response.');
-  return result;
+  return preferenceClient.send(command);
 }
 
-async function commitViewPreferencePatch(
+function commitViewPreferencePatch(
   patch: CompanionViewSettingsPatch,
 ): Promise<boolean> {
-  preferences = withViewSettings(preferences, patch);
-  syncPreferenceControls();
-  const revision = ++viewPreferenceRevision;
-  for (const [key, value] of Object.entries(patch)) {
-    pendingViewPreferences.set(key as keyof CompanionViewSettings, {
-      revision,
-      value: value as CompanionViewSettings[keyof CompanionViewSettings],
-    });
-  }
-  try {
-    const result =
-      await sendPreferenceCommand({
-        type: 'simul:preferences:patch-view',
-        patch,
-      });
-    clearCommittedViewPreferences(patch, revision);
-    preferences = mergePendingViewPreferences(result.preferences);
-    syncPreferenceControls();
-    updateMirrorLayout();
-    if (visualRoot) {
-      applyMirrorTextLayout(visualRoot, preferences.textLayoutMode);
-    }
-    return true;
-  } catch (error) {
-    clearCommittedViewPreferences(patch, revision);
-    try {
-      preferences = mergePendingViewPreferences(await readStoredPreferences());
-      syncPreferenceControls();
-      updateMirrorLayout();
-      if (visualRoot) {
-        applyMirrorTextLayout(visualRoot, preferences.textLayoutMode);
-      }
-    } catch {
-      // Keep the optimistic controls visible; a later storage event can repair them.
-    }
-    setStatus(`Could not save options: ${readableError(error)}`, 'error');
-    return false;
-  }
+  return preferenceClient.commitView(patch);
 }
 
-async function commitImageAnalysisPreferencePatch(
+function commitImageAnalysisPreferencePatch(
   patch: CompanionImageAnalysisSettingsPatch,
 ): Promise<void> {
-  preferences = withImageAnalysisSettings(preferences, patch);
-  syncPreferenceControls();
-  const revision = ++imageAnalysisPreferenceRevision;
-  for (const [key, value] of Object.entries(patch)) {
-    pendingImageAnalysisPreferences.set(
-      key as keyof CompanionImageAnalysisSettings,
-      {
-        revision,
-        value: value as CompanionImageAnalysisSettings[
-          keyof CompanionImageAnalysisSettings
-        ],
-      },
-    );
-  }
-  try {
-    const result = await sendPreferenceCommand({
-      type: 'simul:preferences:patch-image-analysis',
-      patch,
-    });
-    clearCommittedImageAnalysisPreferences(patch, revision);
-    preferences = mergePendingViewPreferences(result.preferences);
-    syncPreferenceControls();
-  } catch (error) {
-    clearCommittedImageAnalysisPreferences(patch, revision);
-    try {
-      preferences = mergePendingViewPreferences(await readStoredPreferences());
-      syncPreferenceControls();
-    } catch {
-      // A later storage event can reconcile optimistic controls.
-    }
-    setStatus(`Could not save image options: ${readableError(error)}`, 'error');
-  }
+  return preferenceClient.commitImageAnalysis(patch);
+}
+
+function mergePendingViewPreferences(
+  stored: CompanionPreferences,
+): CompanionPreferences {
+  return preferenceClient.mergePending(stored);
+}
+
+function readStoredPreferences(): Promise<CompanionPreferences> {
+  return preferenceClient.readStored();
+}
+
+async function reloadPreferencesFromStorage(): Promise<void> {
+  await preferenceClient.reloadFromStorage();
 }
 
 async function refreshImageCaptureAccess(
@@ -1388,48 +1325,6 @@ async function changeImageTranslationEnabled(enabled: boolean): Promise<void> {
     syncPreferenceControls();
     updateControls();
   }
-}
-
-function clearCommittedViewPreferences(
-  patch: CompanionViewSettingsPatch,
-  revision: number,
-): void {
-  for (const key of Object.keys(patch) as Array<keyof CompanionViewSettings>) {
-    if (pendingViewPreferences.get(key)?.revision === revision) {
-      pendingViewPreferences.delete(key);
-    }
-  }
-}
-
-function clearCommittedImageAnalysisPreferences(
-  patch: CompanionImageAnalysisSettingsPatch,
-  revision: number,
-): void {
-  for (const key of Object.keys(patch) as Array<
-    keyof CompanionImageAnalysisSettings
-  >) {
-    if (pendingImageAnalysisPreferences.get(key)?.revision === revision) {
-      pendingImageAnalysisPreferences.delete(key);
-    }
-  }
-}
-
-function mergePendingViewPreferences(
-  stored: CompanionPreferences,
-): CompanionPreferences {
-  const pending = Object.fromEntries(
-    [...pendingViewPreferences].map(([key, entry]) => [key, entry.value]),
-  ) as CompanionViewSettingsPatch;
-  const pendingImage = Object.fromEntries(
-    [...pendingImageAnalysisPreferences].map(([key, entry]) => [
-      key,
-      entry.value,
-    ]),
-  ) as CompanionImageAnalysisSettingsPatch;
-  return withImageAnalysisSettings(
-    withViewSettings(stored, pending),
-    pendingImage,
-  );
 }
 
 async function acceptAuthorizedTab(request: AuthorizedTabRequest): Promise<void> {
@@ -3447,22 +3342,6 @@ async function reconcileAutomaticAccess(pageUrl: string | undefined): Promise<bo
   preferences = mergePendingViewPreferences(result.preferences);
   syncPreferenceControls();
   return before !== autoTranslationModeForPage(preferences, pageUrl);
-}
-
-async function readStoredPreferences(): Promise<CompanionPreferences> {
-  const stored = await browser.storage.local.get(STORAGE_KEY);
-  return parseCompanionPreferences(stored[STORAGE_KEY]);
-}
-
-async function reloadPreferencesFromStorage(): Promise<void> {
-  try {
-    preferences = mergePendingViewPreferences(await readStoredPreferences());
-  } catch {
-    preferences = mergePendingViewPreferences(
-      parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES),
-    );
-  }
-  syncPreferenceControls();
 }
 
 function scheduleNavigationRefresh(identity: CapturedPageIdentity): void {
