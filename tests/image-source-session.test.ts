@@ -214,3 +214,58 @@ class NoopMutationObserver {
   observe(): void {}
   disconnect(): void {}
 }
+
+describe('foreign text cover detection', () => {
+  function geometryFixture(markup: string) {
+    const { document } = parseHTML(`<html><body>${markup}</body></html>`);
+    const image = document.querySelector('#image')! as unknown as HTMLImageElement;
+    const imageRect = rect(10, 10, 200, 100);
+    Object.defineProperty(image, 'getBoundingClientRect', { value: () => imageRect });
+    const sourceWindow = {
+      getComputedStyle: () => baseStyle,
+    } as unknown as Window;
+    return { document, image, imageRect, sourceWindow };
+  }
+
+  it('defers capture while an element with its own text covers the image', () => {
+    const { document, image, imageRect, sourceWindow } = geometryFixture(
+      '<img id="image"><div id="caption">Sale ends Friday</div>',
+    );
+    const caption = document.querySelector('#caption')!;
+    Object.defineProperty(document, 'elementFromPoint', {
+      configurable: true,
+      value: (x: number, y: number) => x > 100 && y > 60 ? caption : image,
+    });
+    expect(hasSafeCaptureGeometry(
+      image, imageRect, document as unknown as Document, sourceWindow,
+    )).toBe(false);
+  });
+
+  it('ignores transparent overlays and wrappers without text', () => {
+    const { document, image, imageRect, sourceWindow } = geometryFixture(
+      '<a id="link" href="/x"><span id="empty"></span></a><img id="image">',
+    );
+    const link = document.querySelector('#link')!;
+    Object.defineProperty(document, 'elementFromPoint', {
+      configurable: true,
+      value: () => link,
+    });
+    expect(hasSafeCaptureGeometry(
+      image, imageRect, document as unknown as Document, sourceWindow,
+    )).toBe(true);
+  });
+
+  it('treats the image itself and its ancestors as safe', () => {
+    const { document, image, imageRect, sourceWindow } = geometryFixture(
+      '<figure id="figure"><img id="image"><figcaption>Below the image</figcaption></figure>',
+    );
+    const figure = document.querySelector('#figure')!;
+    Object.defineProperty(document, 'elementFromPoint', {
+      configurable: true,
+      value: (x: number) => x < 60 ? image : figure,
+    });
+    expect(hasSafeCaptureGeometry(
+      image, imageRect, document as unknown as Document, sourceWindow,
+    )).toBe(true);
+  });
+});

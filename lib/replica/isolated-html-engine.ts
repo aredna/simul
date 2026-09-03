@@ -48,6 +48,7 @@ import type {
   VisibleReplayExtent,
 } from './visible-replay-host';
 import type {
+  ReplicaCurrentRecord,
   ReplicaProjectionContext,
   ReplicaSourceCommit,
   ReplicaTextProjection,
@@ -160,6 +161,8 @@ interface HtmlMirrorDomState {
   readonly document: ReplicaSourceDocumentIdentity;
   readonly fidelityPolicy: SelectableReplicaFidelityPolicy;
   readonly nodes: Map<number, Node>;
+  /** Reverse index of nodes; kept in step with nodes so lookups stay O(1). */
+  readonly nodeIds: WeakMap<Node, number>;
   readonly textMetadata: Map<number, Extract<HtmlMirrorNode, { kind: 'text' }>>;
   readonly controlMetadata: Map<number, HtmlMirrorControlText>;
   readonly ownedAdoptedStyles: Set<HTMLStyleElement>;
@@ -345,6 +348,17 @@ export class IsolatedHtmlReplicaEngine
     });
   }
 
+  /** O(1) currency lookup for one record without copying every record. */
+  currentRecord(nodeId: number): ReplicaCurrentRecord | undefined {
+    const state = this.#committed;
+    if (!state || state.released) return undefined;
+    return {
+      document: state.document,
+      replayLease: state.replayLease,
+      record: state.records.get(nodeId),
+    };
+  }
+
   project(projection: ReplicaTextProjection): boolean {
     const state = this.#committed;
     if (
@@ -517,6 +531,7 @@ export class IsolatedHtmlReplicaEngine
         document,
         fidelityPolicy,
         nodes,
+        nodeIds: reverseNodeIndex(nodes),
         textMetadata,
         controlMetadata,
         ownedAdoptedStyles,
@@ -1878,7 +1893,10 @@ function applyPatchBatch(
         for (const style of plan.ownedAdoptedStyles) {
           state.ownedAdoptedStyles.add(style);
         }
-        for (const [id, node] of plan.nodes) state.nodes.set(id, node);
+        for (const [id, node] of plan.nodes) {
+          state.nodes.set(id, node);
+          state.nodeIds.set(node, id);
+        }
         for (const [id, node] of plan.textMetadata) state.textMetadata.set(id, node);
         for (const [id, control] of plan.controlMetadata) {
           state.controlMetadata.set(id, control);
@@ -1901,7 +1919,10 @@ function applyPatchBatch(
       for (const style of plan.ownedAdoptedStyles) {
         state.ownedAdoptedStyles.add(style);
       }
-      for (const [id, node] of plan.nodes) state.nodes.set(id, node);
+      for (const [id, node] of plan.nodes) {
+        state.nodes.set(id, node);
+        state.nodeIds.set(node, id);
+      }
       for (const [id, node] of plan.textMetadata) state.textMetadata.set(id, node);
       for (const [id, control] of plan.controlMetadata) {
         state.controlMetadata.set(id, control);
@@ -2160,14 +2181,20 @@ function removeDomTree(state: HtmlMirrorDomState, node: Node): void {
   if (state.ownedAdoptedStyles.has(node as HTMLStyleElement)) {
     state.ownedAdoptedStyles.delete(node as HTMLStyleElement);
   }
-  for (const [id, candidate] of state.nodes) {
-    if (candidate !== node) continue;
+  const id = findDomNodeId(state, node);
+  if (id !== undefined) {
     state.nodes.delete(id);
+    state.nodeIds.delete(node);
     state.textMetadata.delete(id);
     state.controlMetadata.delete(id);
     state.records.delete(id);
-    break;
   }
+}
+
+function reverseNodeIndex(nodes: ReadonlyMap<number, Node>): WeakMap<Node, number> {
+  const index = new WeakMap<Node, number>();
+  for (const [id, node] of nodes) index.set(node, id);
+  return index;
 }
 
 function collectTranslatableIds(node: HtmlMirrorNode, ids: Set<number>): void {
@@ -2199,10 +2226,7 @@ const PUBLIC_DOM_CONTEXT: DomContentContext = Object.freeze({
 });
 
 function hasDomId(state: HtmlMirrorDomState, node: Node): boolean {
-  for (const candidate of state.nodes.values()) {
-    if (candidate === node) return true;
-  }
-  return false;
+  return findDomNodeId(state, node) !== undefined;
 }
 
 function isConnectedReplicaNode(state: HtmlMirrorDomState, node: Node): boolean {
@@ -2353,10 +2377,12 @@ function findDomNodeId(
   state: HtmlMirrorDomState,
   target: Node,
 ): number | undefined {
-  for (const [nodeId, node] of state.nodes) {
-    if (node === target) return nodeId;
-  }
-  return undefined;
+  const nodeId = state.nodeIds.get(target);
+  // The forward map is authoritative; a stale reverse entry (an id reused
+  // for another node) must never resolve.
+  return nodeId !== undefined && state.nodes.get(nodeId) === target
+    ? nodeId
+    : undefined;
 }
 
 function domTextContext(node: Node): DomContentContext {
@@ -2456,12 +2482,8 @@ function collectDomIds(
   node: Node,
   ids: Set<number>,
 ): void {
-  for (const [id, candidate] of state.nodes) {
-    if (candidate === node) {
-      ids.add(id);
-      break;
-    }
-  }
+  const id = findDomNodeId(state, node);
+  if (id !== undefined) ids.add(id);
   for (const child of [...node.childNodes]) collectDomIds(state, child, ids);
   if (node.nodeType === Node.ELEMENT_NODE) {
     const shadow = (node as Element).shadowRoot;

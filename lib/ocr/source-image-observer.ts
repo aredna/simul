@@ -670,6 +670,13 @@ function readImageFacts(image: HTMLImageElement): ImageFacts | undefined {
   });
 }
 
+/**
+ * Geometry that changes what a capture would contain: the rendered size and
+ * how much of the image is inside the viewport, bucketed. The absolute
+ * viewport position is deliberately excluded; overlays are image-relative,
+ * and keying on position made every scroll tear down and re-capture every
+ * visible image.
+ */
 function viewportObservationToken(
   image: HTMLImageElement,
   bounds: DOMRect,
@@ -685,8 +692,33 @@ function viewportObservationToken(
     view?.innerHeight,
     image.ownerDocument.documentElement?.clientHeight,
   );
-  return [left, top, bounds.width, bounds.height, viewportWidth, viewportHeight]
-    .join(',');
+  if (!(viewportWidth > 0) || !(viewportHeight > 0)) {
+    // Without a known viewport the visible share cannot be computed; fall
+    // back to the raw position so a moved crop is still noticed.
+    return [left, top, bounds.width, bounds.height].join(',');
+  }
+  return [
+    bounds.width,
+    bounds.height,
+    visibleFractionBucket(left, top, bounds.width, bounds.height, viewportWidth, viewportHeight),
+  ].join(',');
+}
+
+/** 0, 25, 50, 75 or 100: the share of the image area inside the viewport. */
+function visibleFractionBucket(
+  left: number,
+  top: number,
+  width: number,
+  height: number,
+  viewportWidth: number,
+  viewportHeight: number,
+): number {
+  const area = width * height;
+  if (!(area > 0) || !(viewportWidth > 0) || !(viewportHeight > 0)) return 0;
+  const visibleWidth = Math.max(0, Math.min(left + width, viewportWidth) - Math.max(left, 0));
+  const visibleHeight = Math.max(0, Math.min(top + height, viewportHeight) - Math.max(top, 0));
+  const fraction = (visibleWidth * visibleHeight) / area;
+  return Math.min(100, Math.floor(fraction * 4) * 25);
 }
 
 function finitePosition(primary: unknown, fallback: unknown): number {

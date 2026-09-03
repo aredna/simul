@@ -1,6 +1,7 @@
 import type { ReplicaImageSurface } from './contracts';
 import type { ReplicaSourceDocumentIdentity } from './source-identity';
 import type {
+  ReplicaCurrentRecord,
   ReplicaProjectionContext,
   ReplicaTextProjection,
   ReplicaTranslationSnapshot,
@@ -36,6 +37,10 @@ export class ReplicaSurfaceRouter
 
   snapshot(): ReplicaTranslationSnapshot | undefined {
     return this.#surface?.snapshot();
+  }
+
+  currentRecord(nodeId: number): ReplicaCurrentRecord | undefined {
+    return this.#surface?.currentRecord?.(nodeId);
   }
 
   project(projection: ReplicaTextProjection): boolean {

@@ -21,6 +21,8 @@ import { normalizeTesseractPage } from './normalize';
 
 export const TESSERACT_IDLE_TIMEOUT_MS = 90_000;
 export const TESSERACT_JOB_TIMEOUT_MS = 30_000;
+/** Worker creation, core fetch, WASM compile and traineddata gunzip. */
+export const TESSERACT_BOOTSTRAP_TIMEOUT_MS = 60_000;
 
 type TesseractWorker = Awaited<ReturnType<typeof Tesseract.createWorker>>;
 
@@ -36,6 +38,7 @@ export interface TesseractRunnerEnvironment {
   readonly setTimer?: TimeoutScheduler;
   readonly clearTimer?: TimeoutCanceller;
   readonly jobTimeoutMs?: number;
+  readonly bootstrapTimeoutMs?: number;
   readonly idleTimeoutMs?: number;
 }
 
@@ -45,6 +48,7 @@ export class TesseractOffscreenRunner implements OffscreenOcrProviderRunner {
   readonly #setTimer: TimeoutScheduler;
   readonly #clearTimer: TimeoutCanceller;
   readonly #jobTimeoutMs: number;
+  readonly #bootstrapTimeoutMs: number;
   readonly #idleTimeoutMs: number;
   #worker: TesseractWorker | undefined;
   #workerGroup: string | undefined;
@@ -65,6 +69,10 @@ export class TesseractOffscreenRunner implements OffscreenOcrProviderRunner {
       environment.jobTimeoutMs,
       TESSERACT_JOB_TIMEOUT_MS,
     );
+    this.#bootstrapTimeoutMs = positiveTimeout(
+      environment.bootstrapTimeoutMs,
+      TESSERACT_BOOTSTRAP_TIMEOUT_MS,
+    );
     this.#idleTimeoutMs = positiveTimeout(
       environment.idleTimeoutMs,
       TESSERACT_IDLE_TIMEOUT_MS,
@@ -83,8 +91,18 @@ export class TesseractOffscreenRunner implements OffscreenOcrProviderRunner {
     signal.throwIfAborted();
     this.#cancelIdleTimer();
     try {
+      // Worker bootstrap (core fetch, WASM compile, traineddata gunzip) has
+      // its own deadline so a slow first start is not charged against the
+      // recognition budget and retried from scratch.
+      const acquired = await withDeadline(
+        this.#workerFor(job.languageGroup),
+        this.#bootstrapTimeoutMs,
+        signal,
+        this.#setTimer,
+        this.#clearTimer,
+      );
       const recognition = await withDeadline(
-        this.#recognizeWithWorker(job, encoded),
+        this.#recognizeWithWorker(acquired, job, encoded),
         this.#jobTimeoutMs,
         signal,
         this.#setTimer,
@@ -97,6 +115,13 @@ export class TesseractOffscreenRunner implements OffscreenOcrProviderRunner {
         if (!this.#disposed && this.#worker) this.#scheduleIdleDisposal();
         throw error;
       }
+      if (signal.aborted && !(error instanceof RecognitionTimeoutError)) {
+        // Cancelled by the caller (typically a scroll). Let the in-flight
+        // recognition drain inside the worker; re-creating the worker costs
+        // far more than the leftover work.
+        if (!this.#disposed && this.#worker) this.#scheduleIdleDisposal();
+        throw error;
+      }
       this.#terminateWorker();
       if (signal.aborted) throw error;
       if (error instanceof WorkerLostError) throw error;
@@ -104,8 +129,12 @@ export class TesseractOffscreenRunner implements OffscreenOcrProviderRunner {
     }
   }
 
+  /**
+   * A cancelled job is abandoned through its abort signal; the worker itself
+   * is kept warm. Terminating it here made every scroll during recognition
+   * pay a full worker bootstrap on the next image.
+   */
   cancelActive(): Promise<void> {
-    this.#terminateWorker();
     return Promise.resolve();
   }
 
@@ -117,10 +146,10 @@ export class TesseractOffscreenRunner implements OffscreenOcrProviderRunner {
   }
 
   async #recognizeWithWorker(
+    acquired: AcquiredTesseractWorker,
     job: OffscreenOcrJob,
     encoded: Blob,
   ): Promise<ImageTextResult> {
-    const acquired = await this.#workerFor(job.languageGroup);
     const useSingleLine = isTesseractBannerPreprocessingVersion(
       job.preprocessingVersion,
     );

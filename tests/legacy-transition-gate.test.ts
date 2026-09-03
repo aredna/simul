@@ -131,3 +131,27 @@ describe('live replica failure recovery gate', () => {
     );
   });
 });
+
+describe('live replica failure recovery budget', () => {
+  it('stops rebuilding a page whose stream fails after every commit', () => {
+    let now = 0;
+    const gate = new LiveReplicaFailureRecoveryGate({
+      maxRebuilds: 3,
+      windowMs: 60_000,
+      now: () => now,
+    });
+
+    for (let attempt = 0; attempt < 3; attempt += 1) {
+      expect(gate.decide(true)).toBe('rebuild-last-good');
+      gate.markCommitted();
+      now += 1_000;
+    }
+    expect(gate.decide(true)).toBe('fallback');
+
+    // The budget is a sliding window, and a new page starts fresh.
+    now += 61_000;
+    expect(gate.decide(true)).toBe('rebuild-last-good');
+    gate.reset();
+    expect(gate.decide(true)).toBe('rebuild-last-good');
+  });
+});

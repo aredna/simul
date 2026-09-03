@@ -667,3 +667,61 @@ function fakeProvider(
     destroy,
   };
 }
+
+describe('direct record lookup', () => {
+  class IndexedSurface extends FakeSurface {
+    snapshotCalls = 0;
+
+    override snapshot(): ReplicaTranslationSnapshot {
+      this.snapshotCalls += 1;
+      return super.snapshot();
+    }
+
+    currentRecord(nodeId: number) {
+      return {
+        document: this.document,
+        replayLease: this.lease,
+        record: this.records.find((candidate) => candidate.nodeId === nodeId),
+      };
+    }
+  }
+
+  it('checks job currency through currentRecord instead of copying every record', async () => {
+    const translate = async (source: string) => `en:${source}`;
+    const small = new IndexedSurface([record(4, 1, 'Hola'), record(5, 1, 'Mundo')]);
+    const { provider } = fakeProvider(translate);
+    await new ReplicaTranslationCoordinator(provider, small).translateCurrent(pair);
+
+    const large = new IndexedSurface(
+      Array.from({ length: 12 }, (_, index) => record(10 + index, 1, `Texto ${index}`)),
+    );
+    const { provider: largeProvider } = fakeProvider(translate);
+    const result = await new ReplicaTranslationCoordinator(largeProvider, large)
+      .translateCurrent(pair);
+
+    expect(result).toMatchObject({ completed: 12, failed: 0 });
+    // Snapshots enumerate the run; per-job currency checks use the O(1)
+    // lookup, so the count does not grow with the number of jobs.
+    expect(large.snapshotCalls).toBe(small.snapshotCalls);
+    expect(large.snapshotCalls).toBeLessThanOrEqual(2);
+  });
+
+  it('still rejects a late result when currentRecord reports a newer revision', async () => {
+    let resolve!: (value: string) => void;
+    const { provider } = fakeProvider(
+      () => new Promise<string>((done) => {
+        resolve = done;
+      }),
+    );
+    const surface = new IndexedSurface([record(4, 1, 'Hola')]);
+    const coordinator = new ReplicaTranslationCoordinator(provider, surface);
+
+    const translating = coordinator.translateCurrent(pair);
+    await vi.waitFor(() => expect(resolve).toBeTypeOf('function'));
+    surface.records = [record(4, 2, 'Adiós')];
+    resolve('Hello');
+
+    await expect(translating).resolves.toMatchObject({ completed: 0, stale: 1 });
+    expect(surface.projections).toEqual([]);
+  });
+});

@@ -54,10 +54,22 @@ export interface ReplicaTranslationSnapshot {
   readonly records: readonly ReplicaSourceTextRecord[];
 }
 
+export interface ReplicaCurrentRecord {
+  readonly document: ReplicaSourceDocumentIdentity;
+  readonly replayLease: number;
+  readonly record: ReplicaSourceTextRecord | undefined;
+}
+
 export interface ReplicaTranslationSurface {
   beginProjection(context: ReplicaProjectionContext): void;
   snapshot(): ReplicaTranslationSnapshot | undefined;
   project(projection: ReplicaTextProjection): boolean;
+  /**
+   * O(1) lookup of one record in the committed replica. snapshot() copies
+   * every record, which made the per-job currency check quadratic on large
+   * pages. Optional so alternative surfaces and test fakes can omit it.
+   */
+  currentRecord?(nodeId: number): ReplicaCurrentRecord | undefined;
 }
 
 export interface ReplicaTranslationRunOptions
@@ -567,15 +579,25 @@ export class ReplicaTranslationCoordinator {
       !this.#pair ||
       translationPairKey(this.#pair) !== job.pairKey
     ) return false;
-    const snapshot = this.surface.snapshot();
-    if (
-      !snapshot ||
-      snapshot.replayLease !== job.replayLease ||
-      !sameSourceDocument(snapshot.document, job.record.document)
-    ) return false;
-    const current = snapshot.records.find(
-      (record) => record.nodeId === job.record.nodeId,
-    );
+    let current: ReplicaSourceTextRecord | undefined;
+    const direct = this.surface.currentRecord?.(job.record.nodeId);
+    if (direct) {
+      if (
+        direct.replayLease !== job.replayLease ||
+        !sameSourceDocument(direct.document, job.record.document)
+      ) return false;
+      current = direct.record;
+    } else {
+      const snapshot = this.surface.snapshot();
+      if (
+        !snapshot ||
+        snapshot.replayLease !== job.replayLease ||
+        !sameSourceDocument(snapshot.document, job.record.document)
+      ) return false;
+      current = snapshot.records.find(
+        (record) => record.nodeId === job.record.nodeId,
+      );
+    }
     return Boolean(
       current &&
         current.nodeType === job.record.nodeType &&

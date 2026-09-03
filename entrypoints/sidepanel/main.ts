@@ -233,6 +233,7 @@ interface PendingImageReplicaActivation {
   activated: boolean;
 }
 
+const ZOOM_COMMIT_DEBOUNCE_MS = 150;
 const NAVIGATION_DEBOUNCE_MS = 350;
 const CAPTURE_TIMEOUT_MS = 12_000;
 const DYNAMIC_UI_LABELS = [
@@ -870,7 +871,14 @@ browser.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =
   }
 });
 
+document.addEventListener('visibilitychange', () => {
+  if (!document.hidden) imageTranslationController?.resume();
+});
+
 browser.tabs.onActivated.addListener(({ tabId, windowId }) => {
+  // Images deferred while the followed tab was inactive can be captured
+  // again now that it is the active tab.
+  if (followedPageIdentity?.tabId === tabId) imageTranslationController?.resume();
   if (
     shouldFollowActivatedTab(
       isDetachedWindow,
@@ -3124,13 +3132,31 @@ function observeReplicaStateLabel(): void {
   }).observe(replicaModeBadge, { childList: true, characterData: true });
 }
 
+let zoomCommitTimer: ReturnType<typeof setTimeout> | undefined;
+
+/**
+ * Applies zoom immediately and saves it once the slider settles. Saving on
+ * every input tick sent one storage write per tick, each of which fanned a
+ * storage change to every companion view and rebuilt the settings controls.
+ */
 function setZoom(value: number): void {
   const zoomPercent = clampZoomPercent(value);
-  void commitViewPreferencePatch({
+  preferences = withViewSettings(preferences, {
     displayMode: 'custom',
     zoomPercent,
   });
+  zoomInput.value = String(zoomPercent);
+  zoomOutput.value = `${zoomPercent}%`;
+  displayModeSelect.value = 'custom';
   updateMirrorLayout();
+  if (zoomCommitTimer !== undefined) clearTimeout(zoomCommitTimer);
+  zoomCommitTimer = setTimeout(() => {
+    zoomCommitTimer = undefined;
+    void commitViewPreferencePatch({
+      displayMode: 'custom',
+      zoomPercent: preferences.zoomPercent,
+    });
+  }, ZOOM_COMMIT_DEBOUNCE_MS);
 }
 
 async function changePopoutTabMode(popoutTabMode: PopoutTabMode): Promise<void> {
@@ -3431,9 +3457,28 @@ function initializeImageAnalysisControls(): void {
   renderImageAnalysisControls();
 }
 
+let imageAnalysisRenderKey: string | undefined;
+
 function renderImageAnalysisControls(): void {
   const root = imageAnalysisControls;
   if (!root) return;
+  // Rebuilding on every preference sync destroyed the control that fired the
+  // change (dropping keyboard focus) and collapsed the diagnostics section.
+  // Rebuild only when something the section shows actually changed.
+  const renderKey = JSON.stringify([
+    preferences.imageTranslationEnabled,
+    imageCaptureAccess,
+    permissionInFlight,
+    preferences.imageTextProviderOrder,
+    preferences.imageScanPolicy,
+    preferences.skipSmallImages,
+    preferences.usePromptForImageLanguage,
+    preferences.usePromptForImageText,
+  ]);
+  if (renderKey === imageAnalysisRenderKey && root.childElementCount > 0) return;
+  imageAnalysisRenderKey = renderKey;
+  const diagnosticsWereOpen =
+    root.querySelector<HTMLDetailsElement>('details.image-diagnostics')?.open ?? false;
   root.replaceChildren();
   const heading = document.createElement('h3');
   setUiText(heading, 'Image text');
@@ -3565,6 +3610,7 @@ function renderImageAnalysisControls(): void {
 
   const diagnostics = document.createElement('details');
   diagnostics.className = 'image-diagnostics';
+  diagnostics.open = diagnosticsWereOpen;
   const summary = document.createElement('summary');
   setUiText(summary, 'OCR diagnostics');
   summary.title = 'Inspect content-free OCR stages and counts for this session.';

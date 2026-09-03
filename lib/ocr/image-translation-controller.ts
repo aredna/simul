@@ -453,6 +453,15 @@ export class ImageTranslationController {
     this.#kick();
   }
 
+  /**
+   * Re-queue images deferred while the source tab was inactive or the OCR
+   * host was unavailable. Called when the tab or companion becomes visible.
+   */
+  resume(): void {
+    if (!this.#scheduler || !this.#isEnabled()) return;
+    if (this.#scheduler.reconsiderDeferred() > 0) this.#kick();
+  }
+
   refreshOverlays(): void {
     this.#projector.refresh();
   }
@@ -786,11 +795,12 @@ export class ImageTranslationController {
         ? this.#takeCaptureRetry(job)
         : undefined;
       const retryExhausted = transient && retryAttempt === undefined;
+      // An inactive source tab is a deferral, not a completion: the user
+      // comes back, and resume() re-queues deferred images then.
       if (retryAttempt !== undefined) scheduler.retry(job);
       else if (
         retryExhausted ||
         acquisition.reason === 'permission' ||
-        acquisition.reason === 'inactive' ||
         acquisition.reason === 'oversized'
       ) scheduler.settle(job);
       else scheduler.defer(job);
@@ -873,7 +883,10 @@ export class ImageTranslationController {
       );
     }
     if (recognition.status !== 'complete') {
-      scheduler.settle(job);
+      // Host and worker outages are transient; the image is deferred and
+      // re-queued by resume() instead of being marked done for good.
+      if (isTransientRecognitionCode(recognition.code)) scheduler.defer(job);
+      else scheduler.settle(job);
       this.environment.onDiagnostic?.(Object.freeze({
         stage: 'recognition-failed' as const,
         code: recognition.code,
@@ -1342,6 +1355,17 @@ export class ImageTranslationController {
     this.#processing = value;
     this.environment.onBusyChange?.(value);
   }
+}
+
+const TRANSIENT_RECOGNITION_CODES: ReadonlySet<string> = new Set([
+  'host-unavailable',
+  'host-overflow',
+  'input-missing',
+  'worker-lost',
+]);
+
+function isTransientRecognitionCode(code: unknown): boolean {
+  return typeof code === 'string' && TRANSIENT_RECOGNITION_CODES.has(code);
 }
 
 function isTransientCaptureReason(

@@ -239,6 +239,21 @@ export class ImageScanScheduler {
    * A later observation revision or explicit manual override makes it eligible
    * again; it is intentionally not marked complete.
    */
+  /**
+   * Re-queue every deferred image, for example after the source tab becomes
+   * active again or the OCR host comes back. Returns how many were re-queued.
+   */
+  reconsiderDeferred(): number {
+    let reconsidered = 0;
+    for (const [nodeId, record] of this.#records) {
+      if (record.deferredObservationRevision === undefined) continue;
+      record.deferredObservationRevision = undefined;
+      reconsidered += 1;
+      this.#reconcileNode(nodeId);
+    }
+    return reconsidered;
+  }
+
   defer(job: ImageScanJob): boolean {
     const active = this.#active.get(job.descriptor.nodeId);
     const record = this.#records.get(job.descriptor.nodeId);

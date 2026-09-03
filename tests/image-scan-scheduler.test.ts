@@ -277,3 +277,20 @@ function descriptor(
 function upsert(descriptorValue: SourceImageDescriptor) {
   return { kind: 'upsert' as const, descriptor: descriptorValue };
 }
+
+describe('deferred image reconsideration', () => {
+  it('re-queues deferred images on demand without changing their observation', () => {
+    const scheduler = new ImageScanScheduler(documentIdentity, {
+      policy: 'eager-all',
+    });
+    scheduler.apply(upsert(descriptor(6, 'visible')));
+    const active = scheduler.takeNext()!;
+    expect(scheduler.defer(active)).toBe(true);
+    expect(scheduler.takeNext()).toBeUndefined();
+
+    expect(scheduler.reconsiderDeferred()).toBe(1);
+    expect(scheduler.takeNext()?.descriptor.nodeId).toBe(6);
+    // Nothing left to reconsider once it is active again.
+    expect(scheduler.reconsiderDeferred()).toBe(0);
+  });
+});

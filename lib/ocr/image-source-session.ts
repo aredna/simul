@@ -305,7 +305,63 @@ export function hasSafeCaptureGeometry(
     }
     if (rectanglesOverlap(imageRect, rect)) return false;
   }
-  return true;
+  return !isCoveredByForeignText(image, imageRect, sourceDocument);
+}
+
+/**
+ * captureVisibleTab paints whatever is on top. A fixed header, caption, or
+ * dialog with text lying over the image would be recognized and projected as
+ * if it were part of the picture. Sample a few points and defer while a
+ * non-ancestor element carrying its own text covers one of them. Transparent
+ * link overlays and wrappers without text are deliberately allowed.
+ */
+function isCoveredByForeignText(
+  image: HTMLImageElement,
+  imageRect: DOMRect,
+  sourceDocument: Document,
+): boolean {
+  const elementFromPoint = sourceDocument.elementFromPoint;
+  if (typeof elementFromPoint !== 'function') return false;
+  const samples: ReadonlyArray<readonly [number, number]> = [
+    [0.5, 0.5],
+    [0.2, 0.2],
+    [0.8, 0.2],
+    [0.2, 0.8],
+    [0.8, 0.8],
+  ];
+  for (const [fx, fy] of samples) {
+    const x = imageRect.left + imageRect.width * fx;
+    const y = imageRect.top + imageRect.height * fy;
+    let top: Element | null;
+    try {
+      top = elementFromPoint.call(sourceDocument, x, y);
+    } catch {
+      return true;
+    }
+    if (!top || top === image || top.contains(image) || image.contains(top)) {
+      continue;
+    }
+    if (elementHasOwnVisibleText(top)) return true;
+  }
+  return false;
+}
+
+function elementHasOwnVisibleText(element: Element): boolean {
+  let length = 0;
+  for (const child of element.childNodes) {
+    if (child.nodeType === 3) length += (child.nodeValue ?? '').trim().length;
+    if (length > 0) return true;
+  }
+  // Text nested one level down (a caption span inside an overlay) counts too;
+  // deeper structure is treated as layout rather than a text cover.
+  for (const child of element.children) {
+    for (const grandchild of child.childNodes) {
+      if (grandchild.nodeType === 3 && (grandchild.nodeValue ?? '').trim().length > 0) {
+        return true;
+      }
+    }
+  }
+  return false;
 }
 
 function safeComputedStyle(

@@ -234,15 +234,12 @@ describe('packaged Tesseract provider', () => {
     )).resolves.toMatchObject({ transcript: 'receiver-safe' });
     await runner.dispose();
 
-    expect(receivers).toEqual([
-      undefined,
-      undefined,
-      undefined,
-      undefined,
-    ]);
+    // Bootstrap deadline, recognition deadline and idle timer: one set and
+    // one clear each, all invoked without a receiver.
+    expect(receivers).toEqual(Array.from({ length: 6 }, () => undefined));
   });
 
-  it('applies one total deadline to worker creation and terminates a late worker', async () => {
+  it('applies a bootstrap deadline to worker creation and terminates a late worker', async () => {
     vi.useFakeTimers();
     try {
       const late = fakeWorker('late');
@@ -255,6 +252,7 @@ describe('packaged Tesseract provider', () => {
         createWorker: createWorker as never,
         getUrl: (path) => `chrome-extension://id${path}`,
         jobTimeoutMs: 25,
+        bootstrapTimeoutMs: 25,
       });
       const recognition = runner.recognize(
         job('eng'),
@@ -277,7 +275,7 @@ describe('packaged Tesseract provider', () => {
     }
   });
 
-  it('does not reset the total deadline after worker creation completes', async () => {
+  it('starts the recognition deadline once worker creation completes', async () => {
     vi.useFakeTimers();
     try {
       const terminate = vi.fn(async () => undefined);
@@ -306,7 +304,10 @@ describe('packaged Tesseract provider', () => {
 
       await vi.advanceTimersByTimeAsync(20);
       expect(recognize).toHaveBeenCalledOnce();
+      // Bootstrap time is not charged against the recognition budget.
       await vi.advanceTimersByTimeAsync(5);
+      expect(rejection).toBeUndefined();
+      await vi.advanceTimersByTimeAsync(20);
       expect(rejection).toBeInstanceOf(WorkerLostError);
       expect(terminate).toHaveBeenCalledOnce();
       await runner.dispose();
@@ -356,7 +357,7 @@ describe('packaged Tesseract provider', () => {
     }
   });
 
-  it('settles cancellation without waiting for stalled worker termination', async () => {
+  it('settles cancellation while keeping the worker warm for the next job', async () => {
     const stale = fakeWorker('stale');
     const stalledTerminate = vi.fn(() => new Promise<void>(() => undefined));
     stale.worker.recognize = vi.fn(() => new Promise<never>(() => undefined)) as never;
@@ -387,8 +388,11 @@ describe('packaged Tesseract provider', () => {
 
     expect(cancellationSettled).toBe(true);
     expect(rejection).toMatchObject({ name: 'AbortError' });
-    expect(stalledTerminate).toHaveBeenCalledOnce();
+    // A caller-side cancel abandons the job but keeps the worker; only
+    // disposal terminates it.
+    expect(stalledTerminate).not.toHaveBeenCalled();
     await runner.dispose();
+    expect(stalledTerminate).toHaveBeenCalledOnce();
   });
 
   it('terminates and reports worker loss for recognition infrastructure rejection', async () => {

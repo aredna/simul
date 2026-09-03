@@ -86,7 +86,10 @@ export class IndexedDbTransientImageStore implements TransientImageInputStore {
   }
 
   #database(): Promise<IDBDatabase> {
-    return this.#databasePromise ??= new Promise<IDBDatabase>((resolve, reject) => {
+    // A failed or blocked open must not be cached forever: one transient
+    // failure used to make every later put reject until the offscreen
+    // document was recreated. Reset so the next request retries the open.
+    const opened = this.#databasePromise ??= new Promise<IDBDatabase>((resolve, reject) => {
       const request = indexedDB.open(TRANSIENT_IMAGE_DATABASE, 1);
       request.onupgradeneeded = () => {
         const database = request.result;
@@ -94,10 +97,21 @@ export class IndexedDbTransientImageStore implements TransientImageInputStore {
           database.createObjectStore(TRANSIENT_IMAGE_STORE, { keyPath: 'id' });
         }
       };
-      request.onsuccess = () => resolve(request.result);
+      request.onsuccess = () => {
+        const database = request.result;
+        database.onversionchange = () => {
+          database.close();
+          if (this.#databasePromise === opened) this.#databasePromise = undefined;
+        };
+        resolve(database);
+      };
       request.onerror = () => reject(request.error ?? new Error('Transient image storage failed.'));
       request.onblocked = () => reject(new Error('Transient image storage is blocked.'));
     });
+    opened.catch(() => {
+      if (this.#databasePromise === opened) this.#databasePromise = undefined;
+    });
+    return opened;
   }
 }
 

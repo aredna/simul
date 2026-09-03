@@ -37,17 +37,38 @@ export class LegacyTransitionGate {
 
 export type LiveReplicaFailureAction = 'rebuild-last-good' | 'fallback';
 
+export interface LiveReplicaFailureRecoveryOptions {
+  /** Rebuilds allowed per window before a page falls back. Default 3. */
+  readonly maxRebuilds?: number;
+  /** Sliding window for the rebuild budget in milliseconds. Default 60 s. */
+  readonly windowMs?: number;
+  readonly now?: () => number;
+}
+
 /**
  * Allows one hidden-staging rebuild while a committed replica remains visible.
- * A second live failure before a successful commit falls back, preventing a
- * broken stream from creating an unbounded rebuild loop.
+ * A second live failure before a successful commit falls back, and a stream
+ * that keeps failing after each successful commit exhausts a bounded budget
+ * instead of rebuilding the page forever.
  */
 export class LiveReplicaFailureRecoveryGate {
   #retryPending = false;
+  #rebuildTimes: number[] = [];
+
+  constructor(private readonly options: LiveReplicaFailureRecoveryOptions = {}) {}
 
   decide(hasCommittedReplica: boolean): LiveReplicaFailureAction {
-    if (hasCommittedReplica && !this.#retryPending) {
+    const now = (this.options.now ?? Date.now)();
+    const windowMs = this.options.windowMs ?? 60_000;
+    const maxRebuilds = this.options.maxRebuilds ?? 3;
+    this.#rebuildTimes = this.#rebuildTimes.filter((time) => now - time < windowMs);
+    if (
+      hasCommittedReplica &&
+      !this.#retryPending &&
+      this.#rebuildTimes.length < maxRebuilds
+    ) {
       this.#retryPending = true;
+      this.#rebuildTimes.push(now);
       return 'rebuild-last-good';
     }
     return 'fallback';
@@ -59,6 +80,7 @@ export class LiveReplicaFailureRecoveryGate {
 
   reset(): void {
     this.#retryPending = false;
+    this.#rebuildTimes = [];
   }
 }
 
