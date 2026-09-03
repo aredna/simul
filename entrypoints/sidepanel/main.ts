@@ -168,7 +168,10 @@ import {
   sameSourceReplicaLease,
 } from '../../lib/replica/source-identity';
 import { buildBoundedLanguageSample } from '../../lib/translation/language-sample';
-import { replicaSourceCommitAction } from '../../lib/translation/replica-translation-lifecycle';
+import {
+  replicaSourceCommitAction,
+  snapshotWithLiveDocumentLanguage,
+} from '../../lib/translation/replica-translation-lifecycle';
 import {
   ReplicaTranslationCoordinator,
   isCompleteReplicaTranslationResult,
@@ -1964,14 +1967,12 @@ async function resolveSelectedSourceLanguage(
     return true;
   }
   if (liveContext) {
-    const { documentLanguage: _previousLanguage, ...snapshotWithoutLanguage } =
-      snapshot;
-    snapshot = liveContext.documentLanguage
-      ? {
-          ...snapshotWithoutLanguage,
-          documentLanguage: liveContext.documentLanguage,
-        }
-      : snapshotWithoutLanguage;
+    // Keep the snapshot identity stable unless the language really changed;
+    // an in-flight availability check is discarded when the identity moves.
+    snapshot = snapshotWithLiveDocumentLanguage(
+      snapshot,
+      liveContext.documentLanguage,
+    );
   }
   const requestedSnapshot = snapshot;
   const requestedPreference = preferences.sourceLanguage;
@@ -2071,8 +2072,11 @@ async function reconcileReplicaTranslationAfterCommit(
   const expectedAvailabilityKey = nextPair
     ? availabilityPairKey(nextPair, generation)
     : undefined;
+  // A language refresh can replace the snapshot identity and discard an
+  // in-flight availability check, so any refreshing commit re-establishes
+  // the pair's availability when it is not yet recorded for this generation.
   const needsPreparation =
-    prepareForNewText &&
+    (prepareForNewText || refreshDetectedLanguage) &&
     currentTranslationFieldCount(visualRoot as HTMLElement) > 0 &&
     (!expectedAvailabilityKey ||
       availabilityCheckedForPair !== expectedAvailabilityKey);
@@ -2172,10 +2176,15 @@ async function checkAvailability(generation: number): Promise<void> {
     return;
   }
   const checkedPairKey = availabilityPairKey(pair, generation);
-  availabilityCheckedForPair = checkedPairKey;
+  // The pair is recorded as checked only once a result is accepted. Recording
+  // it before the await let a superseded request leave the pair marked as
+  // checked while availability stayed 'unavailable', which disabled Translate
+  // until a manual rebuild.
+  availabilityCheckedForPair = undefined;
   availability = 'unavailable';
   updateControls();
   if (pair.sourceLanguage === pair.targetLanguage) {
+    availabilityCheckedForPair = checkedPairKey;
     availability = 'available';
     resetVisualMirrorTextIfPresent();
     translationComplete = true;
@@ -2186,6 +2195,7 @@ async function checkAvailability(generation: number): Promise<void> {
   try {
     const next = await provider.availability(pair);
     if (!isCurrentAvailabilityRequest(requestId, requestedSnapshot, pair, generation)) return;
+    availabilityCheckedForPair = checkedPairKey;
     availability = next;
     switch (next) {
       case 'available':
@@ -2200,6 +2210,7 @@ async function checkAvailability(generation: number): Promise<void> {
     }
   } catch (error) {
     if (!isCurrentAvailabilityRequest(requestId, requestedSnapshot, pair, generation)) return;
+    availabilityCheckedForPair = checkedPairKey;
     availability = 'unavailable';
     setStatus(readableError(error), 'error');
   } finally {

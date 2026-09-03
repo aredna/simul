@@ -1,7 +1,10 @@
 import { describe, expect, it } from 'vitest';
 
 import type { ReplicaSourceTextRecord } from '../lib/replica/source-value-model';
-import { replicaSourceCommitAction } from '../lib/translation/replica-translation-lifecycle';
+import {
+  replicaSourceCommitAction,
+  snapshotWithLiveDocumentLanguage,
+} from '../lib/translation/replica-translation-lifecycle';
 import type { ReplicaSourceCommit } from '../lib/translation/replica-translation-coordinator';
 
 const documentIdentity = {
@@ -85,3 +88,35 @@ function text(source: string): ReplicaSourceTextRecord {
     source,
   };
 }
+
+interface LanguageSnapshot {
+  readonly items: readonly string[];
+  readonly documentLanguage?: string;
+}
+
+describe('snapshotWithLiveDocumentLanguage', () => {
+  it('keeps the snapshot identity when the document language is unchanged', () => {
+    const snapshot: LanguageSnapshot = { items: [], documentLanguage: 'ja' };
+    expect(snapshotWithLiveDocumentLanguage(snapshot, 'ja')).toBe(snapshot);
+    const withoutLanguage: LanguageSnapshot = { items: [] };
+    expect(snapshotWithLiveDocumentLanguage(withoutLanguage, undefined)).toBe(
+      withoutLanguage,
+    );
+    expect(snapshotWithLiveDocumentLanguage(withoutLanguage, '')).toBe(
+      withoutLanguage,
+    );
+  });
+
+  it('returns a new snapshot only when the language changes', () => {
+    const snapshot: LanguageSnapshot = { items: [], documentLanguage: 'ja' };
+    const changed = snapshotWithLiveDocumentLanguage(snapshot, 'fr');
+    expect(changed).not.toBe(snapshot);
+    expect(changed).toEqual({ items: [], documentLanguage: 'fr' });
+    expect(snapshot.documentLanguage).toBe('ja');
+
+    const cleared = snapshotWithLiveDocumentLanguage(snapshot, undefined);
+    expect(cleared).not.toBe(snapshot);
+    expect(cleared).toEqual({ items: [] });
+    expect('documentLanguage' in cleared).toBe(false);
+  });
+});

@@ -186,3 +186,44 @@ describe('sidepanel UI structure', () => {
     expect(replicaStyle).not.toContain('background: #fff');
   });
 });
+
+describe('availability check currency', () => {
+  it('records the checked pair only after a result is accepted', () => {
+    const start = script.indexOf('async function checkAvailability(');
+    const end = script.indexOf('async function maybeTranslateAutomatically(');
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+    const body = script.slice(start, end);
+    const awaitIndex = body.indexOf('await provider.availability(pair)');
+    const recordIndex = body.indexOf('availabilityCheckedForPair = checkedPairKey;');
+    expect(awaitIndex).toBeGreaterThan(0);
+    // The same-language shortcut records synchronously; the awaited path must
+    // record only after the currency guard so a superseded request cannot
+    // leave the pair marked as checked while availability stays unavailable.
+    const awaitedRecord = body.indexOf(
+      'availabilityCheckedForPair = checkedPairKey;',
+      awaitIndex,
+    );
+    expect(recordIndex).toBeGreaterThan(0);
+    expect(awaitedRecord).toBeGreaterThan(awaitIndex);
+    expect(body.slice(awaitIndex, awaitedRecord)).toContain(
+      'isCurrentAvailabilityRequest(',
+    );
+    expect(body.slice(0, awaitIndex)).not.toMatch(
+      /availabilityCheckedForPair = checkedPairKey;[\s\S]*availability = 'unavailable';/u,
+    );
+  });
+
+  it('re-establishes availability after any language-refreshing commit', () => {
+    const start = script.indexOf('async function reconcileReplicaTranslationAfterCommit(');
+    const end = script.indexOf('function* replicaRecordSources(');
+    const body = script.slice(start, end);
+    expect(body).toContain('(prepareForNewText || refreshDetectedLanguage) &&');
+
+    const resolveStart = script.indexOf('async function resolveSelectedSourceLanguage(');
+    const resolveEnd = script.indexOf('function mirrorLanguageSample(');
+    const resolveBody = script.slice(resolveStart, resolveEnd);
+    expect(resolveBody).toContain('snapshotWithLiveDocumentLanguage(');
+    expect(resolveBody).not.toContain('...snapshotWithoutLanguage');
+  });
+});
