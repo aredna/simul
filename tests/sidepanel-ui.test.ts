@@ -23,6 +23,10 @@ const composerScript = readFileSync(
   new URL('../entrypoints/sidepanel/quick-composer.ts', import.meta.url),
   'utf8',
 );
+const toolbarStatusScript = readFileSync(
+  new URL('../entrypoints/sidepanel/toolbar-status.ts', import.meta.url),
+  'utf8',
+);
 
 describe('sidepanel UI structure', () => {
   it('keeps one quick composer outside settings and exposes semantic progress', () => {
@@ -182,7 +186,7 @@ describe('sidepanel UI structure', () => {
     expect(style).toContain('--surface: #111814');
     expect(style).toContain('grid-template-rows: auto minmax(0, 1fr)');
     expect(style).toContain('overflow-x: auto');
-    expect(script).toContain("toolbarProgress.setAttribute('aria-valuenow'");
+    expect(toolbarStatusScript).toContain("toolbarProgress.setAttribute('aria-valuenow'");
     expect(composerScript).toContain('translateRemembered(pair, text');
     // The composer applies a result only if its own request is still current.
     expect(composerScript).toContain('this.#abortController !== abortController');
