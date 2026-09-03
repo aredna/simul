@@ -25,11 +25,22 @@ export function selectReplicaTranslationMode(
     : 'legacy';
 }
 
+/**
+ * The experimental rrweb engine is compiled into a build only when it opts in
+ * with WXT_SIMUL_RRWEB_SHADOW=1. Release builds omit its replay library and
+ * page-recorder bundle entirely.
+ */
+export function isRrwebEngineCompiled(
+  environment: ReplicaBuildEnvironment,
+): boolean {
+  return environment.WXT_SIMUL_RRWEB_SHADOW === '1';
+}
+
 export function selectReplicaEngineMode(
   environment: ReplicaBuildEnvironment,
   preference: 'isolated-html' | 'rrweb' = 'isolated-html',
 ): ReplicaEngineMode {
-  if (preference === 'rrweb' && environment.WXT_SIMUL_RRWEB_SHADOW !== '0') {
+  if (preference === 'rrweb' && isRrwebEngineCompiled(environment)) {
     return 'rrweb-shadow';
   }
   return 'isolated-html';

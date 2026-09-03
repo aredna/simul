@@ -101,8 +101,10 @@ than periodic snapshots.
 
 View options include Fit width, exact 1:1 CSS-pixel size, 25–300% custom zoom,
 horizontal and vertical overflow, source-scroll following, and adaptive or
-faithful translated-text layout. **Isolated HTML** is the default engine;
-**rrweb (experimental)** remains selectable under Advanced & experimental. A
+faithful translated-text layout. **Isolated HTML** is the only engine in the
+release build. The experimental **rrweb** engine is compiled only into a
+developer build that sets `WXT_SIMUL_RRWEB_SHADOW=1`, where it appears under
+Advanced & experimental. A
 detached window can stay locked to its opening tab or follow the active tab
 across ordinary browser windows. Settings are saved; quick-translation drafts
 and output are not. Isolated HTML also saves its **Replica fidelity** policy;

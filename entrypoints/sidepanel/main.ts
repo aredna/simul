@@ -128,6 +128,7 @@ import {
 } from '../../lib/replica/contracts';
 import {
   ReplicaEngineController,
+  isRrwebEngineCompiled,
   selectReplicaEngineMode,
   selectReplicaTranslationMode,
   type ReplicaEngineMode,
@@ -146,16 +147,9 @@ import {
   shouldReleaseReplicaAfterCaptureFailure,
 } from '../../lib/replica/legacy-transition-gate';
 import { LegacyReplicaEngine } from '../../lib/replica/legacy-engine';
-import { openChromeReplicaLiveStream } from '../../lib/replica/live-stream-client';
-import {
-  createCheckpointCommand,
-  createReplicaIdentity,
-  readCheckpointResponse,
-} from '../../lib/replica/protocol-v2';
-import {
-  ReplicaCaptureBoundaryError,
-  RrwebShadowReplicaEngine,
-} from '../../lib/replica/rrweb-shadow-engine';
+// Type-only: the rrweb runtime is loaded through a guarded dynamic import so
+// release builds do not ship @rrweb/replay. See createRrwebShadowReplicaEngine.
+import type { RrwebShadowReplicaEngine } from '../../lib/replica/rrweb-shadow-engine';
 import {
   LEGACY_FALLBACK_LABEL,
   LIVE_REPLAY_LABEL,
@@ -353,7 +347,7 @@ const replicaBuildEnvironment = {
   WXT_SIMUL_RRWEB_SHADOW: import.meta.env.WXT_SIMUL_RRWEB_SHADOW,
   WXT_SIMUL_RRWEB_TRANSLATION: import.meta.env.WXT_SIMUL_RRWEB_TRANSLATION,
 };
-if (replicaBuildEnvironment.WXT_SIMUL_RRWEB_SHADOW === '0') {
+if (!isRrwebEngineCompiled(replicaBuildEnvironment)) {
   replicaEngineSelect.querySelector('option[value="rrweb"]')?.remove();
 }
 let replicaEngineMode = selectReplicaEngineMode(replicaBuildEnvironment);
@@ -375,20 +369,12 @@ const imageTranslationDiagnosticHistory =
   new ImageTranslationDiagnosticHistory();
 let imageTranslationDiagnosticOutput: HTMLOutputElement | undefined;
 const replicaSurfaceRouter = new ReplicaSurfaceRouter();
-const shadowReplicaEngine = new RrwebShadowReplicaEngine({
-  presentationHost: visibleReplayHost,
-  capture: captureReplicaCheckpoint,
-  openStream: openChromeReplicaLiveStream,
-  shouldReplayScroll: () => preferences.syncScroll,
-  onLiveApplied: () => {
-    legacyTransitionGate.markDirty();
-  },
-  onLayoutChanged: () => {
-    imageTranslationController?.refreshOverlays();
-  },
-  onSourceCommit: handleReplicaSourceCommit,
-  onLiveFailure: (code) => handleReplicaLiveFailure(code, 'rrweb-shadow'),
-});
+// The literal comparison is folded at build time, so a release build drops the
+// dynamic import below along with @rrweb/replay and its recorder bundle.
+const shadowReplicaEngine: RrwebShadowReplicaEngine | undefined =
+  import.meta.env.WXT_SIMUL_RRWEB_SHADOW === '1'
+    ? await createRrwebShadowReplicaEngine()
+    : undefined;
 const isolatedHtmlReplicaEngine = new IsolatedHtmlReplicaEngine({
   presentationHost: visibleReplayHost,
   openStream: openChromeHtmlMirrorStream,
@@ -411,7 +397,7 @@ const isolatedHtmlReplicaEngine = new IsolatedHtmlReplicaEngine({
 replicaEngineController = new ReplicaEngineController({
   mode: replicaEngineMode,
   legacy: new LegacyReplicaEngine(),
-  shadow: shadowReplicaEngine,
+  shadow: shadowReplicaEngine ?? isolatedHtmlReplicaEngine,
   isolated: isolatedHtmlReplicaEngine,
   onDiagnostics: (diagnostics) => {
     // This object is intentionally content-free: local size/timing/extent
@@ -1906,49 +1892,82 @@ async function runReplicaEngineCheckpoint(
   }
 }
 
-async function captureReplicaCheckpoint(
-  request: ReplicaCaptureRequest,
-  signal?: AbortSignal,
-): Promise<ReplicaCheckpointResponse> {
-  signal?.throwIfAborted();
-  if (!request.isCurrent()) {
-    throw new ReplicaCaptureBoundaryError('stale_identity');
+/**
+ * Builds the experimental rrweb engine. Only reachable in a build that set
+ * WXT_SIMUL_RRWEB_SHADOW=1; everything rrweb-specific (replay library, live
+ * stream client, checkpoint protocol, recorder injection) is imported here so
+ * release builds contain none of it.
+ */
+async function createRrwebShadowReplicaEngine(): Promise<RrwebShadowReplicaEngine> {
+  const [
+    { ReplicaCaptureBoundaryError, RrwebShadowReplicaEngine },
+    { openChromeReplicaLiveStream },
+    { createCheckpointCommand, createReplicaIdentity, readCheckpointResponse },
+  ] = await Promise.all([
+    import('../../lib/replica/rrweb-shadow-engine'),
+    import('../../lib/replica/live-stream-client'),
+    import('../../lib/replica/protocol-v2'),
+  ]);
+
+  async function captureReplicaCheckpoint(
+    request: ReplicaCaptureRequest,
+    signal?: AbortSignal,
+  ): Promise<ReplicaCheckpointResponse> {
+    signal?.throwIfAborted();
+    if (!request.isCurrent()) {
+      throw new ReplicaCaptureBoundaryError('stale_identity');
+    }
+    const injectionResults = await browser.scripting.executeScript({
+      target: { tabId: request.tabId, documentIds: [request.documentId] },
+      files: ['/page-recorder.js'],
+    });
+    signal?.throwIfAborted();
+    const injection = injectionResults.find(
+      (result) =>
+        result.frameId === request.frameId &&
+        result.documentId === request.documentId,
+    );
+    if (!injection || !request.isCurrent()) {
+      throw new ReplicaCaptureBoundaryError('stale_identity');
+    }
+    const expectedIdentity = createReplicaIdentity({
+      sessionId: request.sessionId,
+      pageEpoch: request.pageEpoch,
+      generation: request.generation,
+      documentId: request.documentId,
+      frameId: request.frameId,
+      sequence: 0,
+    });
+    const response: unknown = await browser.tabs.sendMessage(
+      request.tabId,
+      createCheckpointCommand(expectedIdentity),
+      { documentId: request.documentId },
+    );
+    signal?.throwIfAborted();
+    if (!request.isCurrent()) {
+      throw new ReplicaCaptureBoundaryError('stale_identity');
+    }
+    const checkpoint = readCheckpointResponse(response, expectedIdentity);
+    if (!checkpoint) {
+      throw new ReplicaCaptureBoundaryError('invalid_message');
+    }
+    return checkpoint;
   }
-  const injectionResults = await browser.scripting.executeScript({
-    target: { tabId: request.tabId, documentIds: [request.documentId] },
-    files: ['/page-recorder.js'],
+
+  return new RrwebShadowReplicaEngine({
+    presentationHost: visibleReplayHost,
+    capture: captureReplicaCheckpoint,
+    openStream: openChromeReplicaLiveStream,
+    shouldReplayScroll: () => preferences.syncScroll,
+    onLiveApplied: () => {
+      legacyTransitionGate.markDirty();
+    },
+    onLayoutChanged: () => {
+      imageTranslationController?.refreshOverlays();
+    },
+    onSourceCommit: handleReplicaSourceCommit,
+    onLiveFailure: (code) => handleReplicaLiveFailure(code, 'rrweb-shadow'),
   });
-  signal?.throwIfAborted();
-  const injection = injectionResults.find(
-    (result) =>
-      result.frameId === request.frameId &&
-      result.documentId === request.documentId,
-  );
-  if (!injection || !request.isCurrent()) {
-    throw new ReplicaCaptureBoundaryError('stale_identity');
-  }
-  const expectedIdentity = createReplicaIdentity({
-    sessionId: request.sessionId,
-    pageEpoch: request.pageEpoch,
-    generation: request.generation,
-    documentId: request.documentId,
-    frameId: request.frameId,
-    sequence: 0,
-  });
-  const response: unknown = await browser.tabs.sendMessage(
-    request.tabId,
-    createCheckpointCommand(expectedIdentity),
-    { documentId: request.documentId },
-  );
-  signal?.throwIfAborted();
-  if (!request.isCurrent()) {
-    throw new ReplicaCaptureBoundaryError('stale_identity');
-  }
-  const checkpoint = readCheckpointResponse(response, expectedIdentity);
-  if (!checkpoint) {
-    throw new ReplicaCaptureBoundaryError('invalid_message');
-  }
-  return checkpoint;
 }
 
 interface LiveLanguageContext {
@@ -3261,7 +3280,7 @@ function syncPreferenceControls(): void {
   replicaFidelityPolicySelect.value = preferences.replicaFidelityPolicy;
   replicaEngineSelect.value =
     preferences.replicaEngine === 'rrweb' &&
-    replicaBuildEnvironment.WXT_SIMUL_RRWEB_SHADOW === '0'
+    !isRrwebEngineCompiled(replicaBuildEnvironment)
       ? 'isolated-html'
       : preferences.replicaEngine;
   replicaViewModeSelect.value = preferences.replicaViewMode;

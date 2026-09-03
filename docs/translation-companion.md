@@ -6,8 +6,10 @@ The canonical renderer converts the current page into a privacy-sanitized,
 typed DOM graph in Chrome's isolated world. It reconstructs that graph in a
 same-origin-only, inert, scriptless sandbox. Ordered patches are validated
 before application; gaps recover through a staged checkpoint and atomic swap
-while the last good replica stays visible. rrweb remains an explicitly
-selectable experimental renderer, never an automatic fallback.
+while the last good replica stays visible. rrweb is an experimental renderer
+compiled only into developer builds that set `WXT_SIMUL_RRWEB_SHADOW=1`; the
+release artifact contains neither its replay library nor its recorder bundle,
+and it is never an automatic fallback.
 
 Source scroll messages are animation-frame throttled and one-way. Standards
 and body/document scroll fallbacks are normalized before transport. When a

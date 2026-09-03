@@ -10,6 +10,9 @@ const tesseractEnabled = ocrBuildProfile.enabledProviderIds.includes('tesseract'
 const offscreenOcrEnabled = ocrBuildProfile.enabledProviderIds.some((id) =>
   id === 'tesseract' || id === 'chrome-text-detector',
 );
+// The experimental rrweb engine is an explicit opt-in. Release builds omit
+// its recorder bundle and, through the define below, its replay library.
+const rrwebEnabled = process.env.WXT_SIMUL_RRWEB_SHADOW === '1';
 
 function stripSourceMapDirectives(code: string): string {
   const comments: Comment[] = [];
@@ -62,19 +65,25 @@ export default defineConfig({
       if (manifest.action) delete manifest.action.default_popup;
     },
   },
-  ...(offscreenOcrEnabled
-    ? {}
-    : {
-        filterEntrypoints: [
-          'background',
-          'page-live-observer',
-          'page-recorder',
-          'page-mirror',
-          'page-snapshot',
-          'sidepanel',
-        ],
-      }),
+  // Every entrypoint is listed explicitly so optional runtimes stay out of a
+  // build that did not opt into them.
+  filterEntrypoints: [
+    'background',
+    'page-live-observer',
+    'page-mirror',
+    'page-snapshot',
+    'sidepanel',
+    ...(offscreenOcrEnabled ? ['offscreen'] : []),
+    ...(rrwebEnabled ? ['page-recorder'] : []),
+  ],
   vite: () => ({
+    define: {
+      // Pinned from the same decision as filterEntrypoints so the side panel
+      // can never believe rrweb is compiled while its recorder is absent.
+      'import.meta.env.WXT_SIMUL_RRWEB_SHADOW': JSON.stringify(
+        rrwebEnabled ? '1' : '0',
+      ),
+    },
     plugins: [
       createOcrBuildProfilePlugin(process.env),
       {

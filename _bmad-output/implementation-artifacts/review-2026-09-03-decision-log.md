@@ -135,6 +135,40 @@ is to have CI validate the committed artifact for safety (permissions, no
 remote code, size, markers) and validate the fresh build, reporting drift as
 a warning. Say which you prefer.
 
+### D8. rrweb quarantine — **Please confirm**
+
+Your July spec says "Preserve RRWeb as an experimental engine only"; today's
+answer selected the review's quarantine recommendation. I reconciled the two
+as: keep every rrweb source file and its tests in the repository, but compile
+the engine only when a build sets `WXT_SIMUL_RRWEB_SHADOW=1` (previously it
+was compiled in unless the flag was `0`). The release build now ships neither
+`page-recorder.js` nor `@rrweb/replay`; the side-panel chunk shrank from
+547 KB to 285 KB. The artifact validator proves this in both directions: a
+recorder bundle must come with the replay runtime, and the replay runtime
+must not appear without the recorder. A saved `rrweb` engine preference
+silently resolves to Isolated HTML in the release build, and the option is
+removed from Settings. If you want rrweb removed from the repository instead,
+that is a follow-up deletion of about 6,500 lines and two dependencies.
+
+The rrweb-specific defects from the review (import bypass, CSSOM blindness,
+non-convergence, quadratic sanitizer) were **not** fixed; they are now
+unreachable in the release build. They still apply to an opt-in developer
+build.
+
+### D9. OCR privacy policy
+
+Per your answer, an image overlapping an ordinary public text control is now
+capturable; only password and other private controls block capture. This
+matches "avoid reading private data; show public data in parallel". The
+README and the capture-safety test say so explicitly.
+
+### D10. HTML lang stays authoritative
+
+The review flagged that `<html lang>` always wins over content detection
+(M16). Your July spec records "Keep HTML lang authoritative for Auto-detect,
+per the human's explicit decision", so this was left alone. If you want the
+cross-check the review suggested, say so.
+
 ### D7. Local toolchain notes
 
 - Nothing in the dependency set had a release inside the 7-day window

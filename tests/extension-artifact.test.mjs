@@ -24,6 +24,8 @@ import {
   REQUIRED_REPLICA_RUNTIME_MARKERS,
   REQUIRED_UNLISTED_BUNDLES,
   REQUIRED_UNLISTED_BUNDLE_MARKERS,
+  RRWEB_RECORDER_BUNDLE,
+  RRWEB_REPLAY_LIBRARY_MARKER,
   assertOcrProviderDependenciesApproved,
   assertCanonicalSyncTarget,
   buildProductionArtifact,
@@ -330,9 +332,9 @@ describe('validateArtifact', () => {
   });
 
   it('requires the packaged recorder and local replica runtime markers', async () => {
-    const missingRecorder = await createTemporaryArtifact();
-    await rm(path.join(missingRecorder, REQUIRED_UNLISTED_BUNDLES[0]));
-    await expect(validateArtifact(missingRecorder)).rejects.toThrow(
+    const missingBundle = await createTemporaryArtifact();
+    await rm(path.join(missingBundle, REQUIRED_UNLISTED_BUNDLES[0]));
+    await expect(validateArtifact(missingBundle)).rejects.toThrow(
       'missing required local bundle',
     );
 
@@ -344,7 +346,7 @@ describe('validateArtifact', () => {
 
     const misplacedRecorderMarker = await createTemporaryArtifact();
     await writeFile(
-      path.join(misplacedRecorderMarker, REQUIRED_UNLISTED_BUNDLES[0]),
+      path.join(misplacedRecorderMarker, RRWEB_RECORDER_BUNDLE),
       'console.info("recorder missing");',
     );
     await writeFile(
@@ -357,7 +359,7 @@ describe('validateArtifact', () => {
 
     const commentOnlyCaptureMarker = await createTemporaryArtifact();
     await writeFile(
-      path.join(commentOnlyCaptureMarker, REQUIRED_UNLISTED_BUNDLES[0]),
+      path.join(commentOnlyCaptureMarker, RRWEB_RECORDER_BUNDLE),
       `// ${REQUIRED_REPLICA_RUNTIME_MARKERS[0]}\nconsole.info("recorder");`,
     );
     await expect(validateArtifact(commentOnlyCaptureMarker)).rejects.toThrow(
@@ -527,6 +529,8 @@ describe('disabled OCR production profile', () => {
     const validation = await validateArtifact(artifact);
 
     expect(validation.ocrEnabled).toBe(false);
+    expect(validation.rrwebEnabled).toBe(false);
+    expect(validation.files).not.toContain(RRWEB_RECORDER_BUNDLE);
     expect(validation.manifest.version).toBe('0.3.1');
     expect(validation.manifest.permissions).toEqual(APPROVED_PERMISSIONS);
     expect(validation.manifest).not.toHaveProperty('content_security_policy');
@@ -850,7 +854,11 @@ async function createTemporaryDirectory(prefix) {
 
 async function createValidArtifact(
   directory,
-  { manifest: manifestOverrides = {}, popupScript = 'console.info("popup");' } = {},
+  {
+    manifest: manifestOverrides = {},
+    popupScript = 'console.info("popup");',
+    rrweb = true,
+  } = {},
 ) {
   await mkdir(path.join(directory, 'assets'), { recursive: true });
   const manifest = {
@@ -883,12 +891,75 @@ async function createValidArtifact(
         ...REQUIRED_ISOLATED_SANDBOX_MARKERS,
       ])});`,
     ),
-    ...Object.entries(REQUIRED_UNLISTED_BUNDLE_MARKERS).map(([bundle, marker]) =>
-      writeFile(
-        path.join(directory, bundle),
-        `console.info(${JSON.stringify(marker)});`,
+    ...Object.entries(REQUIRED_UNLISTED_BUNDLE_MARKERS)
+      .filter(([bundle]) => rrweb || bundle !== RRWEB_RECORDER_BUNDLE)
+      .map(([bundle, marker]) =>
+        writeFile(
+          path.join(directory, bundle),
+          `console.info(${JSON.stringify(marker)});`,
+        ),
       ),
-    ),
+    ...(rrweb
+      ? [writeFile(
+          path.join(directory, 'rrweb-replay.js'),
+          `console.info(${JSON.stringify(RRWEB_REPLAY_LIBRARY_MARKER)});`,
+        )]
+      : []),
   ]);
   return directory;
 }
+
+describe('experimental rrweb engine profile', () => {
+  it('accepts a release artifact that omits the rrweb engine entirely', async () => {
+    const artifact = await createTemporaryArtifact({ rrweb: false });
+
+    const validation = await validateArtifact(artifact);
+
+    expect(validation.rrwebEnabled).toBe(false);
+    expect(validation.files).not.toContain(RRWEB_RECORDER_BUNDLE);
+    expect(validation.files).not.toContain('rrweb-replay.js');
+  });
+
+  it('rejects the rrweb replay runtime when the build did not opt in', async () => {
+    const artifact = await createTemporaryArtifact({ rrweb: false });
+    await mkdir(path.join(artifact, 'chunks'), { recursive: true });
+    await writeFile(
+      path.join(artifact, 'chunks', 'lazy.js'),
+      `console.info(${JSON.stringify(RRWEB_REPLAY_LIBRARY_MARKER)});`,
+    );
+
+    await expect(validateArtifact(artifact)).rejects.toThrow(
+      /rrweb replay runtime without opting into the experimental engine: chunks\/lazy\.js/u,
+    );
+  });
+
+  it('rejects a recorder bundle that ships without the replay runtime', async () => {
+    const artifact = await createTemporaryArtifact();
+    await rm(path.join(artifact, 'rrweb-replay.js'));
+
+    await expect(validateArtifact(artifact)).rejects.toThrow(
+      `ships ${RRWEB_RECORDER_BUNDLE} without the rrweb replay runtime marker`,
+    );
+  });
+
+  it('compiles the rrweb engine only when a production build opts in', async () => {
+    const temporaryRoot = await createTemporaryDirectory('simul-rrweb-build-');
+    const artifact = await buildProductionArtifact({
+      temporaryRoot,
+      ocrEnabled: false,
+      rrwebEnabled: true,
+    });
+
+    const validation = await validateArtifact(artifact);
+
+    expect(validation.rrwebEnabled).toBe(true);
+    expect(validation.files).toContain(RRWEB_RECORDER_BUNDLE);
+    const chunkSources = await Promise.all(
+      validation.files
+        .filter((file) => /^chunks\/.*\.js$/u.test(file))
+        .map((file) => readFile(path.join(artifact, file), 'utf8')),
+    );
+    expect(chunkSources.some((source) => source.includes(RRWEB_REPLAY_LIBRARY_MARKER)))
+      .toBe(true);
+  });
+});

@@ -53,6 +53,9 @@ describe('replica engine selection and fallback', () => {
       { DEV: false, WXT_SIMUL_RRWEB_SHADOW: '0' },
       'rrweb',
     )).toBe('isolated-html');
+    // A saved rrweb preference is inert in a build that never opted in.
+    expect(selectReplicaEngineMode({ DEV: true }, 'rrweb')).toBe('isolated-html');
+    expect(selectReplicaEngineMode({ DEV: false }, 'rrweb')).toBe('isolated-html');
     expect(selectReplicaTranslationMode({
       DEV: false,
     })).toBe('rrweb-projection');

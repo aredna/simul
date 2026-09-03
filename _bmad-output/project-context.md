@@ -25,8 +25,9 @@ sends a sanitized checkpoint plus contiguous targeted patches. The
 extension validates the graph again and creates real nodes with DOM APIs inside
 a `sandbox="allow-same-origin"` iframe whose CSP disables scripts, workers,
 connections, frames, objects, forms, and navigation. Gaps or overflow stage one
-fresh checkpoint and atomically replace the last-good view. rrweb remains a
-persisted experimental choice unless `WXT_SIMUL_RRWEB_SHADOW=0` hides it. The
+fresh checkpoint and atomically replace the last-good view. rrweb is compiled
+only into developer builds that set `WXT_SIMUL_RRWEB_SHADOW=1`; release builds
+omit it and a saved rrweb preference falls back to Isolated HTML. The
 legacy renderer is the emergency fallback; neither engine silently falls back
 to the other.
 
