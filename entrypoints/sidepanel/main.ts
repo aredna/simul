@@ -66,12 +66,6 @@ import {
   hasCompiledImageAnalysisCapability,
 } from '../../lib/ocr/provider-registry';
 import {
-  IMAGE_SCAN_POLICIES,
-  isImageScanPolicy,
-} from '../../lib/ocr/contracts';
-import type { ImageTextProviderId } from '../../lib/ocr/known-provider-ids';
-import { ImageTranslationDiagnosticHistory } from '../../lib/ocr/diagnostic-history';
-import {
   ImageTranslationController,
   type ImageTranslationDiagnostic,
 } from '../../lib/ocr/image-translation-controller';
@@ -118,6 +112,7 @@ import {
   type ReplicaViewMode,
 } from '../../lib/preferences';
 import { translateWithSession } from '../../lib/translation-pipeline';
+import { ImageAnalysisPanel } from './image-analysis-panel';
 import { QuickComposer } from './quick-composer';
 import { UiLocalizer } from './ui-localizer';
 import {
@@ -339,9 +334,6 @@ const visibleReplayHost = new VisibleReplayHost({
 let replicaEngineController!: ReplicaEngineController;
 let replicaTranslationCoordinator!: ReplicaTranslationCoordinator;
 let imageTranslationController!: ImageTranslationController;
-const imageTranslationDiagnosticHistory =
-  new ImageTranslationDiagnosticHistory();
-let imageTranslationDiagnosticOutput: HTMLOutputElement | undefined;
 const replicaSurfaceRouter = new ReplicaSurfaceRouter();
 const isolatedHtmlReplicaEngine = new IsolatedHtmlReplicaEngine({
   presentationHost: visibleReplayHost,
@@ -438,6 +430,26 @@ const quickComposer = new QuickComposer({
   onActivityChange: () => updateControls(),
   onTranslated: () => logTranslationCache('quick', translationMemory),
   readableError,
+});
+const imageAnalysisPanel = new ImageAnalysisPanel({
+  document,
+  host: imageAnalysisHost,
+  capabilities: compiledImageAnalysisCapabilities,
+  compiledProviderOrder: effectiveCompiledProviderOrder,
+  hasCompiledCapability: hasCompiledImageAnalysisCapability,
+  readView: () => ({
+    imageTranslationEnabled: preferences.imageTranslationEnabled,
+    imageCaptureAccess,
+    permissionInFlight,
+    imageTextProviderOrder: preferences.imageTextProviderOrder,
+    imageScanPolicy: preferences.imageScanPolicy,
+    skipSmallImages: preferences.skipSmallImages,
+    usePromptForImageLanguage: preferences.usePromptForImageLanguage,
+    usePromptForImageText: preferences.usePromptForImageText,
+  }),
+  setUiText: (element, english) => uiLocalizer.setText(element, english),
+  changeImageTranslationEnabled,
+  commitPatch: commitImageAnalysisPreferencePatch,
 });
 replicaTranslationCoordinator = new ReplicaTranslationCoordinator(
   provider,
@@ -624,7 +636,6 @@ let availabilityCheckedForPair: string | undefined;
 let viewPreferenceRevision = 0;
 let replicaFidelityCommitInFlight = false;
 let imageAnalysisPreferenceRevision = 0;
-let imageAnalysisControls: HTMLElement | undefined;
 let surfaceTransitionInFlight = false;
 let latestToolbarLaunchStamp: CompanionLaunchStamp | undefined;
 let pendingImageReplicaActivation: PendingImageReplicaActivation | undefined;
@@ -650,7 +661,7 @@ renderExtensionBuildIdentity(buildVersionElement, companionBuildIdentity);
 console.info(companionBuildIdentity.companionReadyMessage);
 
 populateLanguageOptions();
-initializeImageAnalysisControls();
+imageAnalysisPanel.initialize();
 configureSurfaceButton();
 observeReplicaStateLabel();
 uiLocalizer.schedule();
@@ -1201,7 +1212,7 @@ async function refreshImageCaptureAccess(
   }
   if (revision !== imageCaptureAccessRevision) return;
   imageCaptureAccess = next;
-  renderImageAnalysisControls();
+  imageAnalysisPanel.render();
   configureImageTranslation();
   updateControls();
   if (
@@ -1223,7 +1234,7 @@ async function changeImageTranslationEnabled(enabled: boolean): Promise<void> {
     return;
   }
   permissionInFlight = true;
-  renderImageAnalysisControls();
+  imageAnalysisPanel.render();
   updateControls();
   try {
     if (!navigator.locks) throw new Error('Chrome Web Locks are unavailable.');
@@ -3076,7 +3087,7 @@ function syncPreferenceControls(): void {
   zoomInput.disabled = preferences.displayMode !== 'custom';
   syncToolbarPreferenceControls();
   quickComposer.syncPanel();
-  renderImageAnalysisControls();
+  imageAnalysisPanel.render();
   configureImageTranslation();
   uiLocalizer.schedule();
 }
@@ -3163,266 +3174,6 @@ function configureImageTranslation(): void {
     targetLanguage: preferences.targetLanguage,
     translationIdle: !translationInFlight,
   });
-}
-
-function initializeImageAnalysisControls(): void {
-  if (!hasCompiledImageAnalysisCapability()) return;
-  imageAnalysisControls = document.createElement('section');
-  imageAnalysisControls.className = 'image-analysis-settings';
-  imageAnalysisControls.setAttribute('aria-label', 'Image text options');
-  imageAnalysisHost.append(imageAnalysisControls);
-  renderImageAnalysisControls();
-}
-
-let imageAnalysisRenderKey: string | undefined;
-
-function renderImageAnalysisControls(): void {
-  const root = imageAnalysisControls;
-  if (!root) return;
-  // Rebuilding on every preference sync destroyed the control that fired the
-  // change (dropping keyboard focus) and collapsed the diagnostics section.
-  // Rebuild only when something the section shows actually changed.
-  const renderKey = JSON.stringify([
-    preferences.imageTranslationEnabled,
-    imageCaptureAccess,
-    permissionInFlight,
-    preferences.imageTextProviderOrder,
-    preferences.imageScanPolicy,
-    preferences.skipSmallImages,
-    preferences.usePromptForImageLanguage,
-    preferences.usePromptForImageText,
-  ]);
-  if (renderKey === imageAnalysisRenderKey && root.childElementCount > 0) return;
-  imageAnalysisRenderKey = renderKey;
-  const diagnosticsWereOpen =
-    root.querySelector<HTMLDetailsElement>('details.image-diagnostics')?.open ?? false;
-  root.replaceChildren();
-  const heading = document.createElement('h3');
-  uiLocalizer.setText(heading, 'Image text');
-  root.append(heading);
-
-  root.append(createPromptToggle(
-    'Translate text inside images (local, experimental)',
-    preferences.imageTranslationEnabled,
-    changeImageTranslationEnabled,
-    permissionInFlight || imageCaptureAccess === 'checking',
-  ));
-  const privacyNote = document.createElement('p');
-  privacyNote.className = 'microcopy';
-  if (preferences.imageTranslationEnabled && imageCaptureAccess === 'missing') {
-    uiLocalizer.setText(
-      privacyNote,
-      'Image translation is saved but paused. Grant image access so Chrome can capture visible pixels for local OCR.',
-    );
-  } else if (imageCaptureAccess === 'checking') {
-    uiLocalizer.setText(privacyNote, 'Checking Chrome image access…');
-  } else {
-    uiLocalizer.setText(
-      privacyNote,
-      'Off by default. Visible image pixels stay on this device and are discarded after OCR.',
-    );
-  }
-  root.append(privacyNote);
-  if (preferences.imageTranslationEnabled && imageCaptureAccess === 'missing') {
-    const grant = document.createElement('button');
-    grant.type = 'button';
-    grant.className = 'image-access-grant';
-    uiLocalizer.setText(grant, 'Grant image access');
-    grant.disabled = permissionInFlight;
-    grant.addEventListener('click', () => {
-      void changeImageTranslationEnabled(true);
-    });
-    root.append(grant);
-  }
-
-  const compiledOrder = effectiveCompiledProviderOrder(
-    preferences.imageTextProviderOrder,
-  );
-  if (compiledOrder.length > 0) {
-    const orderLabel = document.createElement('p');
-    orderLabel.className = 'microcopy';
-    uiLocalizer.setText(orderLabel, 'OCR priority');
-    orderLabel.title = 'Simul tries locally available OCR providers from top to bottom.';
-    root.append(orderLabel);
-    const list = document.createElement('ol');
-    list.className = 'ocr-provider-order';
-    compiledOrder.forEach((id, index) => {
-      const item = document.createElement('li');
-      const name = document.createElement('span');
-      name.textContent = imageProviderName(id);
-      item.append(name);
-      const buttons = document.createElement('span');
-      buttons.className = 'ocr-order-buttons';
-      const up = createOrderButton('↑', 'Move earlier', index === 0, () =>
-        moveCompiledProvider(compiledOrder, index, -1),
-      );
-      const down = createOrderButton(
-        '↓',
-        'Move later',
-        index === compiledOrder.length - 1,
-        () => moveCompiledProvider(compiledOrder, index, 1),
-      );
-      buttons.append(up, down);
-      item.append(buttons);
-      list.append(item);
-    });
-    root.append(list);
-
-    const grid = document.createElement('div');
-    grid.className = 'settings-grid';
-    const policyLabel = document.createElement('label');
-    policyLabel.title =
-      'Choose whether images are recognized only when visible, after visible work, or immediately.';
-    const policyTitle = document.createElement('span');
-    uiLocalizer.setText(policyTitle, 'Scan images');
-    const policy = document.createElement('select');
-    for (const value of IMAGE_SCAN_POLICIES) {
-      const label = imageScanPolicyName(value);
-      const option = createLanguageOption(value, label);
-      uiLocalizer.setText(option, label);
-      policy.append(option);
-    }
-    policy.value = preferences.imageScanPolicy;
-    policy.addEventListener('change', () => {
-      if (isImageScanPolicy(policy.value)) {
-        void commitImageAnalysisPreferencePatch({ imageScanPolicy: policy.value });
-      }
-    });
-    policyLabel.append(policyTitle, policy);
-    const smallLabel = document.createElement('label');
-    smallLabel.className = 'check-label';
-    smallLabel.title =
-      'Ignore tiny images that are unlikely to contain useful readable text.';
-    const small = document.createElement('input');
-    small.type = 'checkbox';
-    small.checked = preferences.skipSmallImages;
-    small.addEventListener('change', () => {
-      void commitImageAnalysisPreferencePatch({ skipSmallImages: small.checked });
-    });
-    const smallTitle = document.createElement('span');
-    uiLocalizer.setText(smallTitle, 'Skip very small images');
-    smallLabel.append(small, smallTitle);
-    grid.append(policyLabel, smallLabel);
-    root.append(grid);
-  }
-
-  if (compiledImageAnalysisCapabilities.promptImageLanguage) {
-    root.append(createPromptToggle(
-      'Use local Prompt for image language',
-      preferences.usePromptForImageLanguage,
-      (checked) => commitImageAnalysisPreferencePatch({
-        usePromptForImageLanguage: checked,
-      }),
-    ));
-  }
-  if (compiledImageAnalysisCapabilities.promptImageText) {
-    root.append(createPromptToggle(
-      'Use local Prompt to interpret image text',
-      preferences.usePromptForImageText,
-      (checked) => commitImageAnalysisPreferencePatch({
-        usePromptForImageText: checked,
-      }),
-    ));
-  }
-
-  const diagnostics = document.createElement('details');
-  diagnostics.className = 'image-diagnostics';
-  diagnostics.open = diagnosticsWereOpen;
-  const summary = document.createElement('summary');
-  uiLocalizer.setText(summary, 'OCR diagnostics');
-  summary.title = 'Inspect content-free OCR stages and counts for this session.';
-  const note = document.createElement('p');
-  note.className = 'microcopy';
-  uiLocalizer.setText(
-    note,
-    'Memory-only stages and counts; page text, URLs, pixels, and identifiers are never included.',
-  );
-  const output = document.createElement('output');
-  output.className = 'image-diagnostics-output';
-  output.setAttribute('aria-live', 'polite');
-  imageTranslationDiagnosticOutput = output;
-  renderImageTranslationDiagnosticHistory();
-  const clear = document.createElement('button');
-  clear.type = 'button';
-  clear.className = 'image-diagnostics-clear';
-  uiLocalizer.setText(clear, 'Clear diagnostics');
-  clear.addEventListener('click', () => {
-    imageTranslationDiagnosticHistory.clear();
-    renderImageTranslationDiagnosticHistory();
-  });
-  diagnostics.append(summary, note, output, clear);
-  root.append(diagnostics);
-}
-
-function createOrderButton(
-  text: string,
-  label: string,
-  disabled: boolean,
-  action: () => void,
-): HTMLButtonElement {
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.textContent = text;
-  button.setAttribute('aria-label', label);
-  button.title = label;
-  button.disabled = disabled;
-  button.addEventListener('click', action);
-  return button;
-}
-
-function moveCompiledProvider(
-  compiledOrder: readonly ImageTextProviderId[],
-  index: number,
-  direction: -1 | 1,
-): void {
-  const current = compiledOrder[index];
-  const adjacent = compiledOrder[index + direction];
-  if (!current || !adjacent) return;
-  const next = [...preferences.imageTextProviderOrder];
-  const currentIndex = next.indexOf(current);
-  const adjacentIndex = next.indexOf(adjacent);
-  if (currentIndex < 0 || adjacentIndex < 0) return;
-  [next[currentIndex], next[adjacentIndex]] = [
-    next[adjacentIndex]!,
-    next[currentIndex]!,
-  ];
-  void commitImageAnalysisPreferencePatch({ imageTextProviderOrder: next });
-}
-
-function createPromptToggle(
-  label: string,
-  checked: boolean,
-  save: (checked: boolean) => Promise<void>,
-  disabled = false,
-): HTMLLabelElement {
-  const wrapper = document.createElement('label');
-  wrapper.className = 'check-label image-prompt-toggle';
-  const input = document.createElement('input');
-  input.type = 'checkbox';
-  input.checked = checked;
-  input.disabled = disabled;
-  input.addEventListener('change', () => void save(input.checked));
-  const title = document.createElement('span');
-  uiLocalizer.setText(title, label);
-  wrapper.append(input, title);
-  return wrapper;
-}
-
-function imageProviderName(id: ImageTextProviderId): string {
-  const names: Record<ImageTextProviderId, string> = {
-    'chrome-text-detector': 'Chrome Text Detector',
-    tesseract: 'Tesseract.js',
-    transformers: 'Transformers.js',
-    'paddleocr-wasm': 'PaddleOCR Wasm',
-    'chromium-screen-ai': 'Chromium Screen AI',
-  };
-  return names[id];
-}
-
-function imageScanPolicyName(value: (typeof IMAGE_SCAN_POLICIES)[number]): string {
-  if (value === 'visible-only') return 'Only when visible';
-  if (value === 'eager-all') return 'Everything immediately';
-  return 'Visible first, then background';
 }
 
 function configureSurfaceButton(): void {
@@ -4229,8 +3980,7 @@ function logImageTranslationDiagnostic(
   // Content-free local diagnostics only; image text, URLs, and pixels are
   // deliberately absent from this channel.
   console.info('[Simul image translation]', diagnostic);
-  imageTranslationDiagnosticHistory.append(diagnostic);
-  renderImageTranslationDiagnosticHistory();
+  imageAnalysisPanel.recordDiagnostic(diagnostic);
 }
 
 function logTranslationCache(
@@ -4241,15 +3991,6 @@ function logTranslationCache(
   console.info(
     `[Simul translation cache] scope=${label}; entries=${stats.entries}; characters=${stats.characters}; hits=${stats.hits}; misses=${stats.misses}; joins=${stats.inFlightJoins}; provider-loads=${stats.providerLoads}`,
   );
-}
-
-function renderImageTranslationDiagnosticHistory(): void {
-  const output = imageTranslationDiagnosticOutput;
-  if (!output) return;
-  const entries = imageTranslationDiagnosticHistory.entries;
-  output.textContent = entries.length > 0
-    ? entries.join('\n')
-    : 'No OCR activity in this companion view yet.';
 }
 
 function isAbortError(error: unknown): boolean {
