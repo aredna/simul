@@ -366,6 +366,35 @@ isolated-only with `retrySelected()` replacing mode selection.
 fidelity gaps "without weakening rrweb privacy" and the rrweb convergence
 spec); they are history and were left as written.
 
+### D25. Side-panel split, first pass
+
+Six self-contained clusters left `entrypoints/sidepanel/main.ts` as modules
+with explicit dependencies and their own unit tests (4,587 → 3,688 lines):
+
+| Module | Owns | Tests |
+| --- | --- | --- |
+| `ui-localizer.ts` | atomic target-language labels, English fallback, From-menu names | `tests/ui-localizer.test.ts` |
+| `quick-composer.ts` | the private reverse-translation composer | `tests/quick-composer.test.ts` |
+| `image-analysis-panel.ts` | the "Image text" settings section and OCR diagnostics log | `tests/image-analysis-panel.test.ts` |
+| `toolbar-status.ts` | status line, attention markers, both progress presentations | `tests/toolbar-status.test.ts` |
+| `preference-client.ts` | optimistic preference writes and reconciliation | `tests/preference-client.test.ts` |
+| `lib/page-identity.ts` (extended) | tab identity, authorization message, URL and access-error helpers | `tests/page-identity.test.ts` |
+
+Each module takes its state through a small environment (callbacks and
+element refs), and the side panel keeps one-line wrappers where a function
+had many call sites, so behavior and call sites are unchanged. The
+source-substring tests that covered this code now read the extracted files
+or were replaced by behavioral tests.
+
+**Left for a second pass — please decide whether you want it:** the core
+orchestration (source follower with the tab/window listeners and follow
+functions, the capture pipeline, the translation driver, the permission
+flows) still shares ~50 module-level variables. Splitting it means
+introducing one `CompanionState` object and a single currency token in place
+of the six independent counters, which is a design change I did not want to
+make unattended. It is the change that would prevent the "guard checked the
+wrong counter" class of bug (H1, M1) structurally.
+
 ### D7. Local toolchain notes
 
 - Nothing in the dependency set had a release inside the 7-day window
