@@ -348,6 +348,64 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(stream.acknowledged).toContain(1);
   });
 
+  it('renders and updates native select labels without transporting option values', async () => {
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: {
+          kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+          attributes: [], children: [
+            { kind: 'element', id: 2, namespace: 'html', tagName: 'head', attributes: [], children: [] },
+            { kind: 'element', id: 3, namespace: 'html', tagName: 'body', attributes: [], children: [{
+              kind: 'element', id: 4, namespace: 'html', tagName: 'select',
+              attributes: [['id', 'facility']], selectedOptionIndexes: [1], children: [{
+                kind: 'element', id: 5, namespace: 'html', tagName: 'option',
+                attributes: [], children: [{
+                  kind: 'text', id: 6, text: 'Choose', translatable: true,
+                }],
+              }, {
+                kind: 'element', id: 7, namespace: 'html', tagName: 'option',
+                attributes: [], children: [{
+                  kind: 'text', id: 8, text: 'Community center', translatable: true,
+                }],
+              }],
+            }] },
+          ],
+        },
+        adoptedStyleSheets: [], captureMs: 1,
+        viewportWidth: 800, viewportHeight: 600,
+        documentWidth: 800, documentHeight: 1000,
+      },
+      'passive',
+    )!;
+    const stream = new FakeHtmlStream(checkpoint);
+    const host = new FakePresentationHost();
+    const engine = makeEngine(stream, host);
+    await engine.run(request);
+
+    const select = host.iframe!.contentDocument!.querySelector('select')!;
+    expect(select.selectedIndex).toBe(1);
+    expect([...select.options].map((option) => option.textContent)).toEqual([
+      'Choose', 'Community center',
+    ]);
+    expect(engine.snapshot()?.records.map(({ source }) => source)).toEqual([
+      'Choose', 'Community center',
+    ]);
+
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [{
+        kind: 'attributes', nodeId: 4, namespace: 'html', tagName: 'select',
+        attributes: [['id', 'facility']], selectedOptionIndexes: [0],
+      }],
+      undefined,
+      'passive',
+    )!);
+    expect(select.selectedIndex).toBe(0);
+  });
+
   it('rejects control text when an ancestor becomes private in the same batch', async () => {
     const checkpoint = createHtmlMirrorCheckpoint(
       createReplicaIdentity({ ...identityParts, sequence: 0 }),

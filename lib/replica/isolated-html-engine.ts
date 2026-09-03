@@ -1025,6 +1025,7 @@ function buildNode(
     );
     if (built) node.append(built);
   }
+  applySelectedOptionIndexes(node, input.selectedOptionIndexes);
   applyResolvedStyleSheetText(node, input.resolvedStyleSheetText);
   if (input.shadowRoot) {
     const shadow = (node as Element & {
@@ -1184,12 +1185,14 @@ function applyElementHints(
     HtmlMirrorElementNode,
     | 'visuallyHidden'
     | 'selectedImageSource'
+    | 'selectedOptionIndexes'
     | 'controlText'
     | 'canvasBackgroundColor'
     | 'resolvedStyleSheetText'
   >,
 ): void {
   applyControlText(element, hints.controlText);
+  applySelectedOptionIndexes(element, hints.selectedOptionIndexes);
   if (
     hints.canvasBackgroundColor &&
     element.localName.toLowerCase() === 'html'
@@ -1243,6 +1246,26 @@ function applyElementHints(
   styled.style.setProperty('clip', 'rect(0, 0, 0, 0)', 'important');
   styled.style.setProperty('clip-path', 'inset(50%)', 'important');
   styled.style.setProperty('white-space', 'nowrap', 'important');
+}
+
+function applySelectedOptionIndexes(
+  element: Element,
+  selectedOptionIndexes: readonly number[] | undefined,
+): void {
+  if (
+    element.localName.toLowerCase() !== 'select' ||
+    selectedOptionIndexes === undefined
+  ) return;
+  const select = element as HTMLSelectElement;
+  const selected = new Set(selectedOptionIndexes);
+  const options = [...select.querySelectorAll('option')];
+  if (select.multiple) {
+    options.forEach((option, index) => {
+      option.selected = selected.has(index);
+    });
+    return;
+  }
+  select.selectedIndex = selectedOptionIndexes[0] ?? -1;
 }
 
 function applyResolvedStyleSheetText(
@@ -2095,6 +2118,7 @@ interface DomContentContext {
   readonly privateAttributeRegion: boolean;
   readonly nonContentRegion: boolean;
   readonly styleRegion: boolean;
+  readonly nativeSelectRegion: boolean;
 }
 
 const PUBLIC_DOM_CONTEXT: DomContentContext = Object.freeze({
@@ -2102,6 +2126,7 @@ const PUBLIC_DOM_CONTEXT: DomContentContext = Object.freeze({
   privateAttributeRegion: false,
   nonContentRegion: false,
   styleRegion: false,
+  nativeSelectRegion: false,
 });
 
 function hasDomId(state: HtmlMirrorDomState, node: Node): boolean {
@@ -2214,18 +2239,7 @@ function containerContext(
       : PUBLIC_DOM_CONTEXT;
     const attributes = Object.fromEntries(pendingAttributes);
     const tagName = element.localName.toLowerCase();
-    const privateRegion = inherited.privateRegion ||
-      sourceElementStartsPrivateRegion(tagName, attributes);
-    return {
-      privateRegion,
-      privateAttributeRegion: inherited.privateAttributeRegion ||
-        privateRegion ||
-        isSourceActivationTagName(tagName) ||
-        isSourceActivationRoleValue(attributes.role),
-      nonContentRegion: inherited.nonContentRegion ||
-        tagName === 'head' || tagName === 'style' || tagName === 'title',
-      styleRegion: inherited.styleRegion || tagName === 'style',
-    };
+    return extendDomContentContext(inherited, tagName, attributes);
   }
   const host = target.nodeType === Node.DOCUMENT_FRAGMENT_NODE && 'host' in target
     ? (target as ShadowRoot).host
@@ -2249,10 +2263,7 @@ function batchContainerContext(
   if (!element) return PUBLIC_DOM_CONTEXT;
   const chain: Element[] = [];
   for (; element; element = composedParentElement(element)) chain.push(element);
-  let privateRegion = false;
-  let privateAttributeRegion = false;
-  let nonContentRegion = false;
-  let styleRegion = false;
+  let context = PUBLIC_DOM_CONTEXT;
   for (const current of chain.reverse()) {
     const nodeId = findDomNodeId(state, current);
     const attributes = nodeId === undefined
@@ -2264,16 +2275,9 @@ function batchContainerContext(
           [...current.attributes].map(({ name, value }) => [name, value]),
         );
     const tagName = current.localName.toLowerCase();
-    const currentPrivate = sourceElementStartsPrivateRegion(tagName, values);
-    privateRegion ||= currentPrivate;
-    privateAttributeRegion ||= currentPrivate ||
-      isSourceActivationTagName(tagName) ||
-      isSourceActivationRoleValue(values.role);
-    nonContentRegion ||= tagName === 'head' || tagName === 'style' ||
-      tagName === 'title';
-    styleRegion ||= tagName === 'style';
+    context = extendDomContentContext(context, tagName, values);
   }
-  return { privateRegion, privateAttributeRegion, nonContentRegion, styleRegion };
+  return context;
 }
 
 function findDomNodeId(
@@ -2302,31 +2306,21 @@ function privacyContextChanges(
 }
 
 function domElementContext(element: Element): DomContentContext {
-  let privateRegion = false;
-  let privateAttributeRegion = false;
-  let nonContentRegion = false;
-  let styleRegion = false;
+  const chain: Element[] = [];
   for (
     let current: Element | undefined = element;
     current;
     current = composedParentElement(current)
-  ) {
+  ) chain.push(current);
+  let context = PUBLIC_DOM_CONTEXT;
+  for (const current of chain.reverse()) {
     const tagName = current.localName.toLowerCase();
     const attributes = Object.fromEntries(
       [...current.attributes].map(({ name, value }) => [name, value]),
     );
-    const currentPrivateRegion = sourceElementStartsPrivateRegion(
-      tagName,
-      attributes,
-    );
-    privateRegion ||= currentPrivateRegion;
-    privateAttributeRegion ||= currentPrivateRegion ||
-      isSourceActivationTagName(tagName) ||
-      isSourceActivationRoleValue(current.getAttribute('role'));
-    nonContentRegion ||= tagName === 'head' || tagName === 'style' || tagName === 'title';
-    styleRegion ||= tagName === 'style';
+    context = extendDomContentContext(context, tagName, attributes);
   }
-  return { privateRegion, privateAttributeRegion, nonContentRegion, styleRegion };
+  return context;
 }
 
 function validGraphForContext(
@@ -2338,29 +2332,38 @@ function validGraphForContext(
     return validTextForContext(node, inherited, fidelityPolicy);
   }
   const attributes = Object.fromEntries(node.attributes);
-  const privateRegion = inherited.privateRegion ||
-    sourceElementStartsPrivateRegion(node.tagName, attributes);
-  const privateAttributeRegion = inherited.privateAttributeRegion ||
-    privateRegion ||
-    isSourceActivationTagName(node.tagName) ||
-    isSourceActivationRoleValue(attributes.role);
-  const nonContentRegion = inherited.nonContentRegion ||
-    node.tagName === 'head' || node.tagName === 'style' || node.tagName === 'title';
-  const styleRegion = inherited.styleRegion || node.tagName === 'style';
-  const context = {
-    privateRegion,
-    privateAttributeRegion,
-    nonContentRegion,
-    styleRegion,
-  };
-  return (!privateAttributeRegion || !hasPrivateHtmlMirrorAttribute(node.attributes)) &&
-    (!privateAttributeRegion || !node.controlText) &&
+  const context = extendDomContentContext(inherited, node.tagName, attributes);
+  return (!context.privateAttributeRegion || !hasPrivateHtmlMirrorAttribute(node.attributes)) &&
+    (!context.privateAttributeRegion || !node.controlText) &&
+    (!context.privateAttributeRegion || node.selectedOptionIndexes === undefined) &&
     node.children.every(
       (child) => validGraphForContext(child, context, fidelityPolicy),
     ) &&
     (!node.shadowRoot || node.shadowRoot.children.every(
       (child) => validGraphForContext(child, context, fidelityPolicy),
     ));
+}
+
+function extendDomContentContext(
+  inherited: DomContentContext,
+  tagName: string,
+  attributes: Readonly<Record<string, string>>,
+): DomContentContext {
+  const currentPrivate = !(tagName === 'option' && inherited.nativeSelectRegion) &&
+    sourceElementStartsPrivateRegion(tagName, attributes);
+  const privateRegion = inherited.privateRegion || currentPrivate;
+  return {
+    privateRegion,
+    privateAttributeRegion: inherited.privateAttributeRegion ||
+      privateRegion ||
+      isSourceActivationTagName(tagName) ||
+      isSourceActivationRoleValue(attributes.role),
+    nonContentRegion: inherited.nonContentRegion ||
+      tagName === 'head' || tagName === 'style' || tagName === 'title',
+    styleRegion: inherited.styleRegion || tagName === 'style',
+    nativeSelectRegion: inherited.nativeSelectRegion ||
+      (tagName === 'select' && !privateRegion),
+  };
 }
 
 function validTextForContext(

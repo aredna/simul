@@ -3,7 +3,10 @@ import { parseHTML } from 'linkedom';
 
 import {
   captureLivePageDelta,
+  installLivePageObserverBridge,
   installLivePageObserver,
+  invokeLivePageObserverBridge,
+  invokeLivePageObserverUnregisterBridge,
   parseLivePageDelta,
   readLivePageDirtyMessage,
   readLivePageObserverInstallation,
@@ -28,6 +31,9 @@ afterEach(() => {
   delete (
     globalThis as typeof globalThis & { __simulLiveMirrorV1?: unknown }
   ).__simulLiveMirrorV1;
+  delete (
+    globalThis as typeof globalThis & { __simulLivePageObserverBridgeV2?: unknown }
+  ).__simulLivePageObserverBridgeV2;
   vi.useRealTimers();
   vi.unstubAllGlobals();
 });
@@ -96,6 +102,45 @@ describe('live mirror boundary', () => {
     });
   });
 
+  it('invokes the locally bundled observer through closure-free functions', () => {
+    installLivePageObserverBridge();
+    const bridge = (
+      globalThis as typeof globalThis & {
+        __simulLivePageObserverBridgeV2?: {
+          implementationRevision: number;
+          install: (sessionId: string, generation: number) => unknown;
+          unregister: (sessionId: string) => boolean;
+        };
+      }
+    ).__simulLivePageObserverBridgeV2!;
+    const install = vi.fn(() => ({ installed: true, generation: 7, sequence: 3 }));
+    const unregister = vi.fn(() => true);
+    expect(bridge.implementationRevision).toBe(2);
+    (
+      globalThis as typeof globalThis & {
+        __simulLivePageObserverBridgeV2?: unknown;
+      }
+    ).__simulLivePageObserverBridgeV2 = {
+      implementationRevision: 2,
+      install,
+      unregister,
+    };
+
+    const detachedInstall = Function(
+      `return (${invokeLivePageObserverBridge.toString()})`,
+    )() as typeof invokeLivePageObserverBridge;
+    const detachedUnregister = Function(
+      `return (${invokeLivePageObserverUnregisterBridge.toString()})`,
+    )() as typeof invokeLivePageObserverUnregisterBridge;
+
+    expect(detachedInstall('session_1234', 7)).toEqual({
+      installed: true, generation: 7, sequence: 3,
+    });
+    expect(detachedUnregister('session_1234')).toBe(true);
+    expect(install).toHaveBeenCalledWith('session_1234', 7);
+    expect(unregister).toHaveBeenCalledWith('session_1234');
+  });
+
   it('rejects a seventeenth observer session without evicting an active one', () => {
     const sessions = new Map(
       Array.from({ length: 16 }, (_, index) => [`existing_${index}`, index]),
@@ -104,9 +149,11 @@ describe('live mirror boundary', () => {
     (
       globalThis as typeof globalThis & { __simulLiveMirrorV1?: unknown }
     ).__simulLiveMirrorV1 = {
+      implementationRevision: 2,
       sessions,
       currentSequence: () => 12,
       announceScroll,
+      disconnect: vi.fn(),
     };
 
     expect(installLivePageObserver('session_1234', 17)).toEqual({
@@ -142,10 +189,23 @@ describe('live mirror boundary', () => {
     vi.stubGlobal('chrome', {
       runtime: { sendMessage: vi.fn(async () => undefined) },
     });
+    const staleDisconnect = vi.fn();
+    (
+      globalThis as typeof globalThis & { __simulLiveMirrorV1?: unknown }
+    ).__simulLiveMirrorV1 = {
+      sessions: new Map([['stale_session', 1]]),
+      disconnect: staleDisconnect,
+    };
 
     expect(installLivePageObserver('session_1234', 1)).toMatchObject({
       installed: true,
     });
+    expect(staleDisconnect).toHaveBeenCalledOnce();
+    expect((
+      globalThis as typeof globalThis & {
+        __simulLiveMirrorV1?: { implementationRevision?: number };
+      }
+    ).__simulLiveMirrorV1?.implementationRevision).toBe(2);
     expect(observerOptions).toMatchObject({
       attributes: true,
       childList: true,

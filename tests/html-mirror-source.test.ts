@@ -178,6 +178,40 @@ describe('HtmlMirrorSourceSession', () => {
     expect(JSON.stringify(sensitivePatch)).not.toContain('initial');
   });
 
+  it('streams native select state without values, names, or data attributes', () => {
+    const fixture = sourceFixture(`
+      <select id="facility" name="private-name" data-account="private-data">
+        <option value="private-a">Choose</option>
+        <option value="private-b" selected>Community center</option>
+      </select>
+    `);
+    fixture.start('passive');
+    const initial = fixture.checkpoints()[0]!;
+    expect(JSON.stringify(initial)).toContain('"selectedOptionIndexes":[1]');
+    expect(JSON.stringify(initial)).not.toContain('private-name');
+    expect(JSON.stringify(initial)).not.toContain('private-data');
+    expect(JSON.stringify(initial)).not.toContain('private-a');
+    expect(JSON.stringify(initial)).not.toContain('private-b');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+
+    const select = fixture.document.querySelector<HTMLSelectElement>('#facility')!;
+    // linkedom models selectedness through the content attribute; the browser
+    // path is driven by this same change event without transporting it.
+    select.options[0]!.setAttribute('selected', '');
+    select.options[1]!.removeAttribute('selected');
+    select.dispatchEvent(new fixture.window.Event('change', { bubbles: true }));
+    fixture.flushFrame();
+
+    const operation = fixture.patches().at(-1)?.operations.find(
+      ({ kind }) => kind === 'attributes',
+    );
+    expect(operation).toMatchObject({
+      kind: 'attributes',
+      selectedOptionIndexes: [0],
+    });
+    expect(JSON.stringify(operation)).not.toContain('private-');
+  });
+
   it('emits bounded capacity diagnostics when checkpoint serialization overflows', () => {
     const descriptor = Object.getOwnPropertyDescriptor(
       WeakNodeIdRegistry,

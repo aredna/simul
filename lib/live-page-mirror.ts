@@ -13,6 +13,70 @@ import {
 } from './primary-scroll';
 
 export const LIVE_MIRROR_VERSION = 1 as const;
+export const LIVE_PAGE_OBSERVER_IMPLEMENTATION_REVISION = 2 as const;
+export const LIVE_PAGE_OBSERVER_RUNTIME_MARKER = 'simul:live-observer-v2';
+
+type LivePageObserverBridge = Readonly<{
+  implementationRevision: typeof LIVE_PAGE_OBSERVER_IMPLEMENTATION_REVISION;
+  runtimeMarker: typeof LIVE_PAGE_OBSERVER_RUNTIME_MARKER;
+  install: typeof installLivePageObserver;
+  unregister: typeof unregisterLivePageObserver;
+}>;
+
+type LivePageObserverGlobal = typeof globalThis & {
+  __simulLivePageObserverBridgeV2?: LivePageObserverBridge;
+};
+
+/** Installs the locally bundled bridge used by Chrome's isolated page world. */
+export function installLivePageObserverBridge(): void {
+  const target = globalThis as LivePageObserverGlobal;
+  target.__simulLivePageObserverBridgeV2 = Object.freeze({
+    implementationRevision: LIVE_PAGE_OBSERVER_IMPLEMENTATION_REVISION,
+    runtimeMarker: LIVE_PAGE_OBSERVER_RUNTIME_MARKER,
+    install: installLivePageObserver,
+    unregister: unregisterLivePageObserver,
+  });
+}
+
+/** Self-contained executeScript invoker; Chrome serializes only this body. */
+export function invokeLivePageObserverBridge(
+  sessionId: string,
+  generation: number,
+): LivePageObserverInstallation | undefined {
+  const bridge = (
+    globalThis as typeof globalThis & {
+      __simulLivePageObserverBridgeV2?: {
+        implementationRevision?: unknown;
+        install?: unknown;
+      };
+    }
+  ).__simulLivePageObserverBridgeV2;
+  if (
+    bridge?.implementationRevision !== 2 ||
+    typeof bridge.install !== 'function'
+  ) return undefined;
+  return (bridge.install as (
+    session: string,
+    nextGeneration: number,
+  ) => LivePageObserverInstallation)(sessionId, generation);
+}
+
+/** Self-contained best-effort teardown invoker for an installed page bridge. */
+export function invokeLivePageObserverUnregisterBridge(sessionId: string): boolean {
+  const bridge = (
+    globalThis as typeof globalThis & {
+      __simulLivePageObserverBridgeV2?: {
+        implementationRevision?: unknown;
+        unregister?: unknown;
+      };
+    }
+  ).__simulLivePageObserverBridgeV2;
+  if (
+    bridge?.implementationRevision !== 2 ||
+    typeof bridge.unregister !== 'function'
+  ) return false;
+  return (bridge.unregister as (session: string) => boolean)(sessionId);
+}
 
 export interface LivePageDirtyMessage {
   type: 'simul:page-dirty';
@@ -123,6 +187,7 @@ export function installLivePageObserver(
   generation: number,
 ): LivePageObserverInstallation {
   type Registry = {
+    implementationRevision?: number;
     sessions: Map<string, number>;
     nodeIds: WeakMap<Node, string>;
     nodes: Map<string, Node>;
@@ -134,6 +199,19 @@ export function installLivePageObserver(
   const isolatedGlobal = globalThis as typeof globalThis & {
     __simulLiveMirrorV1?: Registry;
   };
+  const staleRegistry = isolatedGlobal.__simulLiveMirrorV1;
+  if (
+    staleRegistry &&
+    staleRegistry.implementationRevision !==
+      LIVE_PAGE_OBSERVER_IMPLEMENTATION_REVISION
+  ) {
+    try {
+      staleRegistry.disconnect();
+    } catch {
+      // A prior extension version may already have partially failed.
+    }
+    delete isolatedGlobal.__simulLiveMirrorV1;
+  }
   const existingRegistry = isolatedGlobal.__simulLiveMirrorV1;
   if (existingRegistry) {
     if (
@@ -546,6 +624,7 @@ export function installLivePageObserver(
   };
 
   const registry: Registry = {
+    implementationRevision: LIVE_PAGE_OBSERVER_IMPLEMENTATION_REVISION,
     sessions,
     nodeIds,
     nodes,

@@ -72,6 +72,7 @@ export type HtmlMirrorPatchOperation =
       readonly attributes: readonly (readonly [string, string])[];
       readonly visuallyHidden?: true;
       readonly selectedImageSource?: string;
+      readonly selectedOptionIndexes?: readonly number[];
       readonly controlText?: HtmlMirrorControlText;
       readonly canvasBackgroundColor?: string;
       readonly resolvedStyleSheetText?: string;
@@ -511,7 +512,7 @@ function readOperations(
         raw,
         ['kind', 'nodeId', 'namespace', 'tagName', 'attributes'],
         [
-          'visuallyHidden', 'selectedImageSource', 'controlText',
+          'visuallyHidden', 'selectedImageSource', 'selectedOptionIndexes', 'controlText',
           'canvasBackgroundColor', 'resolvedStyleSheetText',
         ],
       ) &&
@@ -523,7 +524,9 @@ function readOperations(
       if (
         (raw.visuallyHidden !== undefined && raw.visuallyHidden !== true) ||
         (raw.selectedImageSource !== undefined &&
-          typeof raw.selectedImageSource !== 'string')
+          typeof raw.selectedImageSource !== 'string') ||
+        (raw.selectedOptionIndexes !== undefined &&
+          !Array.isArray(raw.selectedOptionIndexes))
       ) return undefined;
       const sentinel = readHtmlMirrorNode({
         kind: 'element',
@@ -535,6 +538,9 @@ function readOperations(
         ...(raw.visuallyHidden === true ? { visuallyHidden: true } : {}),
         ...(typeof raw.selectedImageSource === 'string'
           ? { selectedImageSource: raw.selectedImageSource }
+          : {}),
+        ...(Array.isArray(raw.selectedOptionIndexes)
+          ? { selectedOptionIndexes: raw.selectedOptionIndexes }
           : {}),
         ...(raw.controlText !== undefined
           ? { controlText: raw.controlText }
@@ -556,6 +562,9 @@ function readOperations(
         ...(sentinel.visuallyHidden ? { visuallyHidden: true as const } : {}),
         ...(sentinel.selectedImageSource
           ? { selectedImageSource: sentinel.selectedImageSource }
+          : {}),
+        ...(sentinel.selectedOptionIndexes !== undefined
+          ? { selectedOptionIndexes: sentinel.selectedOptionIndexes }
           : {}),
         ...(sentinel.controlText
           ? { controlText: sentinel.controlText }

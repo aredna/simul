@@ -36,6 +36,7 @@ export const APPROVED_OPTIONAL_HOST_PERMISSIONS = Object.freeze([
 ]);
 export const MINIMUM_CHROME_VERSION = 138;
 export const REQUIRED_UNLISTED_BUNDLES = Object.freeze([
+  'page-live-observer.js',
   'page-recorder.js',
   'page-mirror.js',
 ]);
@@ -44,6 +45,7 @@ export const REQUIRED_REPLICA_RUNTIME_MARKERS = Object.freeze([
   'rrweb-shadow-v2',
   'simul:html-mirror-v1:',
   'isolated-html-v1',
+  'simul:live-observer-v2',
 ]);
 export const REQUIRED_ISOLATED_SANDBOX_MARKERS = Object.freeze([
   'simul-isolated-shell',

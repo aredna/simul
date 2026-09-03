@@ -1,4 +1,5 @@
 import {
+  MAX_SOURCE_SELECTED_OPTION_INDEXES,
   hasSourceActivationElementAncestor,
   hasSourcePrivateElementAncestor,
   hasSourcePrivateOrActivationElementAncestor,
@@ -6,7 +7,9 @@ import {
   isSourceActivationTagName,
   isEligibleSourceTextControl,
   isSourceNativeTextControlTagName,
+  isSourceOptionInsideNativeSelect,
   readSourceControlText,
+  readSourceSelectedOptionIndexes,
   sourceElementStartsPrivateRegion,
   type SourceControlText,
 } from './source-privacy-policy';
@@ -43,6 +46,7 @@ export interface HtmlMirrorElementNode {
   readonly children: readonly HtmlMirrorNode[];
   readonly visuallyHidden?: true;
   readonly selectedImageSource?: string;
+  readonly selectedOptionIndexes?: readonly number[];
   readonly controlText?: HtmlMirrorControlText;
   readonly canvasBackgroundColor?: string;
   readonly resolvedStyleSheetText?: string;
@@ -52,6 +56,7 @@ export interface HtmlMirrorElementNode {
 export interface HtmlMirrorElementHints {
   readonly visuallyHidden?: true;
   readonly selectedImageSource?: string;
+  readonly selectedOptionIndexes?: readonly number[];
   readonly controlText?: HtmlMirrorControlText;
   readonly canvasBackgroundColor?: string;
   readonly resolvedStyleSheetText?: string;
@@ -361,6 +366,13 @@ const PRIVATE_ATTRIBUTES = new Set([
 ]);
 
 const RAW_CONTROL_TEXT_ATTRIBUTES = new Set(['placeholder', 'value']);
+const NATIVE_SELECT_PRIVATE_ATTRIBUTES = new Set([
+  'autocomplete',
+  'form',
+  'name',
+  'selected',
+  'value',
+]);
 const LOCAL_SVG_FRAGMENT_PATTERN = /^#[A-Za-z0-9_.:-]{1,256}$/u;
 const SVG_URL_PRESENTATION_ATTRIBUTES = new Set([
   'clip-path',
@@ -651,6 +663,7 @@ export function sanitizeSourceAttributes(
   fidelityPolicy: SelectableReplicaFidelityPolicy = 'conservative',
 ): readonly (readonly [string, string])[] | undefined {
   try {
+    if (isUnsafeSourceElement(source, fidelityPolicy, baseUrl)) return undefined;
     return sanitizeAttributes(
       source,
       source.localName.toLowerCase(),
@@ -691,6 +704,10 @@ export function sanitizeSourceElementHints(
       )
     : undefined;
   const controlParent = composedParentElement(source);
+  const selectedOptionIndexes = tagName === 'select' &&
+      (!controlParent || !hasSourcePrivateOrActivationElementAncestor(controlParent))
+    ? readSourceSelectedOptionIndexes(source)
+    : undefined;
   const sourceControlText = controlParent &&
       hasSourcePrivateOrActivationElementAncestor(controlParent)
     ? undefined
@@ -712,6 +729,7 @@ export function sanitizeSourceElementHints(
   return Object.freeze({
     ...(visuallyHidden ? { visuallyHidden: true as const } : {}),
     ...(selectedImageSource ? { selectedImageSource } : {}),
+    ...(selectedOptionIndexes !== undefined ? { selectedOptionIndexes } : {}),
     ...(controlText ? { controlText } : {}),
     ...(canvasBackgroundColor ? { canvasBackgroundColor } : {}),
     ...(resolvedStyleSheetText !== undefined
@@ -786,6 +804,7 @@ export function readHtmlMirrorNode(
   privateAttributeRegion = false,
   activationRegion = false,
   fidelityPolicy: SelectableReplicaFidelityPolicy = 'conservative',
+  nativeSelectRegion = false,
 ): HtmlMirrorNode | undefined {
   if (!isRecord(input) || depth > MAX_HTML_MIRROR_DEPTH) return undefined;
   budget.nodes += 1;
@@ -822,7 +841,7 @@ export function readHtmlMirrorNode(
     !hasExactKeysWithOptional(input, [
       'kind', 'id', 'namespace', 'tagName', 'attributes', 'children',
     ], [
-      'visuallyHidden', 'selectedImageSource', 'controlText',
+      'visuallyHidden', 'selectedImageSource', 'selectedOptionIndexes', 'controlText',
       'canvasBackgroundColor', 'resolvedStyleSheetText', 'shadowRoot',
     ]) ||
     !isNamespace(input.namespace) ||
@@ -844,6 +863,18 @@ export function readHtmlMirrorNode(
   ) return undefined;
   if (typeof input.selectedImageSource === 'string') {
     budget.bytes += input.selectedImageSource.length * 2;
+    if (budget.bytes > MAX_HTML_MIRROR_BYTES) return undefined;
+  }
+  const selectedOptionIndexes = readTransportedSelectedOptionIndexes(
+    input.selectedOptionIndexes,
+    input.tagName,
+  );
+  if (
+    input.selectedOptionIndexes !== undefined &&
+    selectedOptionIndexes === undefined
+  ) return undefined;
+  if (selectedOptionIndexes) {
+    budget.bytes += selectedOptionIndexes.length * 8 + 16;
     if (budget.bytes > MAX_HTML_MIRROR_BYTES) return undefined;
   }
   const canvasBackgroundColor = input.tagName === 'html'
@@ -879,6 +910,11 @@ export function readHtmlMirrorNode(
     attributes.push(Object.freeze([attribute[0], attribute[1]] as const));
   }
   const attributeValues = Object.fromEntries(attributes);
+  if (
+    input.tagName === 'video' &&
+    fidelityPolicy === 'passive' &&
+    typeof attributeValues.poster !== 'string'
+  ) return undefined;
   const controlText = readTransportedControlText(
     input.controlText,
     input.tagName,
@@ -911,7 +947,8 @@ export function readHtmlMirrorNode(
   ) return undefined;
   const children: HtmlMirrorNode[] = [];
   const transportedPrivateRegion = privateRegion ||
-    sourceElementStartsPrivateRegion(input.tagName, attributeValues);
+    !(input.tagName === 'option' && nativeSelectRegion) &&
+      sourceElementStartsPrivateRegion(input.tagName, attributeValues);
   const transportedActivationElement =
     isSourceActivationTagName(input.tagName) ||
     isSourceActivationRoleValue(Object.fromEntries(attributes).role);
@@ -923,10 +960,15 @@ export function readHtmlMirrorNode(
   const transportedNonContentRegion = nonContentRegion ||
     NON_CONTENT_ELEMENTS.has(input.tagName);
   const transportedStyleRegion = styleRegion || input.tagName === 'style';
+  const transportedNativeSelectRegion = nativeSelectRegion ||
+    (input.tagName === 'select' && !transportedPrivateRegion);
   if (
     transportedPrivateAttributeRegion &&
     hasPrivateHtmlMirrorAttribute(attributes)
   ) {
+    return undefined;
+  }
+  if (transportedPrivateAttributeRegion && selectedOptionIndexes !== undefined) {
     return undefined;
   }
   for (const child of input.children) {
@@ -941,6 +983,7 @@ export function readHtmlMirrorNode(
       transportedPrivateAttributeRegion,
       transportedActivationRegion,
       fidelityPolicy,
+      transportedNativeSelectRegion,
     );
     if (!parsed) return undefined;
     children.push(parsed);
@@ -979,6 +1022,7 @@ export function readHtmlMirrorNode(
         transportedPrivateAttributeRegion,
         transportedActivationRegion,
         fidelityPolicy,
+        transportedNativeSelectRegion,
       );
       if (!parsed) return undefined;
       shadowChildren.push(parsed);
@@ -1007,6 +1051,7 @@ export function readHtmlMirrorNode(
     ...(typeof input.selectedImageSource === 'string'
       ? { selectedImageSource: input.selectedImageSource }
       : {}),
+    ...(selectedOptionIndexes !== undefined ? { selectedOptionIndexes } : {}),
     ...(controlText ? { controlText } : {}),
     ...(canvasBackgroundColor ? { canvasBackgroundColor } : {}),
     ...(resolvedStyleSheetText !== undefined
@@ -1135,7 +1180,14 @@ function serializeNode(
   }
   const liveElement = live as Element;
   const tagName = liveElement.localName.toLowerCase();
-  if (!isSafeTagName(tagName) || isUnsafeElement(tagName, context.fidelityPolicy)) {
+  if (
+    !isSafeTagName(tagName) ||
+    isUnsafeSourceElement(
+      liveElement,
+      context.fidelityPolicy,
+      context.baseUrl,
+    )
+  ) {
     incrementRepresentability(
       context.representability,
       'unsafeElementOmissionCount',
@@ -1195,6 +1247,7 @@ function serializeNode(
       (total, [name, value]) => total + (name.length + value.length) * 2 + 8,
       64,
     ) + (hints.selectedImageSource?.length ?? 0) * 2 +
+      (hints.selectedOptionIndexes?.length ?? 0) * 8 +
       (hints.controlText?.text.length ?? 0) * 2 +
       (hints.canvasBackgroundColor?.length ?? 0) * 2 +
       (hints.resolvedStyleSheetText?.length ?? 0) * 2,
@@ -1321,6 +1374,8 @@ function sanitizeAttributes(
     }
     if (
       name.startsWith('on') || name === 'nonce' ||
+      (isNativeSelectSemanticTag(tagName) &&
+        (NATIVE_SELECT_PRIVATE_ATTRIBUTES.has(name) || name.startsWith('data-'))) ||
       (ACTIVE_OR_NAVIGATIONAL_ATTRIBUTES.has(name) &&
         !localSvgReference && !passiveSvgReference && !passivePoster) ||
       (tagName === 'video' && MEDIA_ACTIVE_ATTRIBUTES.has(name)) ||
@@ -2982,6 +3037,10 @@ function isUnsafeTransportedAttribute(
   fidelityPolicy: SelectableReplicaFidelityPolicy,
 ): boolean {
   if (
+    isNativeSelectSemanticTag(tagName) &&
+    (NATIVE_SELECT_PRIVATE_ATTRIBUTES.has(name) || name.startsWith('data-'))
+  ) return true;
+  if (
     tagName === 'meta' && (name === 'http-equiv' || name === 'content')
   ) return true;
   if (
@@ -3103,13 +3162,30 @@ function isUnsafeElement(
     (tagName === 'video' && fidelityPolicy !== 'passive');
 }
 
+function isUnsafeSourceElement(
+  element: Element,
+  fidelityPolicy: SelectableReplicaFidelityPolicy,
+  baseUrl: string,
+): boolean {
+  const tagName = element.localName.toLowerCase();
+  if (isUnsafeElement(tagName, fidelityPolicy)) return true;
+  if (tagName !== 'video') return false;
+  const poster = element.getAttribute('poster');
+  return !poster || passiveUrl(poster, baseUrl, true) === undefined;
+}
+
 function elementStartsPrivateRegion(element: Element): boolean {
+  if (isSourceOptionInsideNativeSelect(element)) return false;
   return sourceElementStartsPrivateRegion(
     element.localName,
     Object.fromEntries([...element.attributes].map(
       ({ name, value }) => [name.toLowerCase(), value],
     )),
   );
+}
+
+function isNativeSelectSemanticTag(tagName: string): boolean {
+  return tagName === 'select' || tagName === 'option' || tagName === 'optgroup';
 }
 
 function elementStartsActivationRegion(element: Element): boolean {
@@ -3445,6 +3521,31 @@ function readTransportedControlText(
     text: input.text,
     translatable: true,
   });
+}
+
+function readTransportedSelectedOptionIndexes(
+  input: unknown,
+  tagName: string,
+): readonly number[] | undefined {
+  if (input === undefined) return undefined;
+  if (
+    tagName !== 'select' ||
+    !Array.isArray(input) ||
+    input.length > MAX_SOURCE_SELECTED_OPTION_INDEXES
+  ) return undefined;
+  const result: number[] = [];
+  let previous = -1;
+  for (const value of input) {
+    if (
+      !Number.isSafeInteger(value) ||
+      Number(value) < 0 ||
+      Number(value) >= MAX_HTML_MIRROR_NODES ||
+      Number(value) <= previous
+    ) return undefined;
+    previous = Number(value);
+    result.push(previous);
+  }
+  return Object.freeze(result);
 }
 
 function hasNonContentAncestor(element: Element): boolean {

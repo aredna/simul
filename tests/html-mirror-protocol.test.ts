@@ -123,6 +123,65 @@ describe('isolated HTML sanitizer and protocol', () => {
     expect(checkpointFor(identity, passive, 'conservative')).toBeUndefined();
   });
 
+  it('omits posterless video shells while preserving a passive fallback image', () => {
+    const graph = sanitizeMarkup(`<!doctype html><html><body>
+      <section>
+        <video id="blank-video" src="../movie.mp4">Video fallback text</video>
+        <img id="static-fallback" src="../fallback.jpg" alt="Static fallback">
+      </section>
+    </body></html>`, 'passive');
+
+    expect(graphElementBySourceId(graph, 'blank-video')).toBeUndefined();
+    expect(attributesOf(graph, 'static-fallback')).toMatchObject({
+      src: 'https://example.test/fallback.jpg',
+      alt: 'Static fallback',
+    });
+    expect(JSON.stringify(graph)).not.toContain('movie.mp4');
+  });
+
+  it('carries native select labels and selected indices without submission data', () => {
+    const graph = sanitizeMarkup(`<!doctype html><html><body>
+      <select id="facility" name="private-name" data-account="private-data">
+        <option value="private-1">選択してください。</option>
+        <optgroup label="麻布地区">
+          <option value="private-2" data-code="private-code" selected>麻布区民センター</option>
+        </optgroup>
+      </select>
+      <datalist id="private-suggestions"><option value="secret">secret suggestion</option></datalist>
+    </body></html>`, 'passive');
+    const select = graphElementBySourceId(graph, 'facility');
+    const serialized = JSON.stringify(graph);
+
+    expect(select?.selectedOptionIndexes).toEqual([1]);
+    expect(Object.fromEntries(select?.attributes ?? [])).not.toHaveProperty('name');
+    expect(serialized).toContain('選択してください。');
+    expect(serialized).toContain('麻布区民センター');
+    expect(serialized).toContain('麻布地区');
+    expect(serialized).not.toContain('private-name');
+    expect(serialized).not.toContain('private-data');
+    expect(serialized).not.toContain('private-1');
+    expect(serialized).not.toContain('private-2');
+    expect(serialized).not.toContain('private-code');
+    expect(serialized).not.toContain('secret suggestion');
+    expect(readHtmlMirrorNode(graph.root, new Set(), 0, undefined, false,
+      false, false, false, false, 'passive')).toBeDefined();
+    expect(readHtmlMirrorNode({
+      kind: 'element', id: 900, namespace: 'html', tagName: 'div',
+      attributes: [], children: [], selectedOptionIndexes: [0],
+    }, new Set(), 0, undefined, false, false, false, false, false, 'passive'))
+      .toBeUndefined();
+    expect(readHtmlMirrorNode({
+      kind: 'element', id: 901, namespace: 'html', tagName: 'select',
+      attributes: [], selectedOptionIndexes: [50_000], children: [{
+        kind: 'element', id: 902, namespace: 'html', tagName: 'option',
+        attributes: [], children: [{
+          kind: 'text', id: 903, text: 'Only choice', translatable: true,
+        }],
+      }],
+    }, new Set(), 0, undefined, false, false, false, false, false, 'passive'))
+      .toBeUndefined();
+  });
+
   it('canonicalizes an already-inert form for source-to-receiver transport', () => {
     const graph = sanitizeMarkup(
       '<!doctype html><html><body><form id="account" inert><input></form></body></html>',
@@ -796,7 +855,7 @@ describe('isolated HTML sanitizer and protocol', () => {
     expect(serialized).not.toContain('private search value');
     expect(serialized).not.toContain('private aria native value');
     expect(serialized).not.toContain('private activation value');
-    expect(serialized).not.toContain('private choice');
+    expect(serialized).toContain('private choice');
     expect(serialized).not.toContain('private editor');
     expect(serialized).not.toContain('private aria editor');
     expect(serialized).toContain('["id","missing"]');
@@ -1399,6 +1458,7 @@ describe('isolated HTML sanitizer and protocol', () => {
   it('masks private ancestors and rejects malicious private transport canaries', () => {
     const { document, window } = parseHTML(`<!doctype html><html><body>
       <section role="textbox"><span title="secret title" data-secret="secret data">secret text</span></section>
+      <section contenteditable="true"><select><option>secret choice</option></select></section>
     </body></html>`);
     const graph = sanitizeSourceDocument(
       document,

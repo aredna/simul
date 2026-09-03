@@ -36,9 +36,13 @@ import {
 } from './html-mirror-sanitizer';
 import { createReplicaIdentity } from './protocol-v2';
 import {
+  hasSourcePrivateOrActivationElementAncestor,
+  isEligibleSourceSelect,
   isEligibleSourceTextControl,
+  isSourceNativeSelectTagName,
   isSourceNativeTextControlTagName,
   readSourceControlText,
+  readSourceSelectedOptionIndexes,
 } from './source-privacy-policy';
 import type { SelectableReplicaFidelityPolicy } from './fidelity-policy';
 
@@ -742,7 +746,10 @@ export class HtmlMirrorSourceSession {
           fidelityPolicy,
           styleWork,
         );
-        if (isSourceNativeTextControlTagName(target.localName)) {
+        if (
+          isSourceNativeTextControlTagName(target.localName) ||
+          isSourceNativeSelectTagName(target.localName)
+        ) {
           this.#rememberControlFingerprint(target);
         }
         if (target.localName.toLowerCase() === 'img') {
@@ -892,7 +899,8 @@ export class HtmlMirrorSourceSession {
     const target = event.target;
     if (
       !(target instanceof Element) ||
-      !isSourceNativeTextControlTagName(target.localName) ||
+      (!isSourceNativeTextControlTagName(target.localName) &&
+        !isSourceNativeSelectTagName(target.localName)) ||
       !isEligibleControlElement(target) ||
       !belongsToSourceDocument(target, this.environment.document) ||
       !target.isConnected ||
@@ -1750,14 +1758,14 @@ function incrementSourceRepresentability(
 }
 
 function isEligibleControlElement(element: Element): boolean {
-  if (!isSourceNativeTextControlTagName(element.localName)) return false;
   try {
-    return isEligibleSourceTextControl(
-      element.localName,
-      Object.fromEntries(
-        [...element.attributes].map(({ name, value }) => [name, value]),
-      ),
+    const attributes = Object.fromEntries(
+      [...element.attributes].map(({ name, value }) => [name, value]),
     );
+    const eligible = isSourceNativeTextControlTagName(element.localName)
+      ? isEligibleSourceTextControl(element.localName, attributes)
+      : isEligibleSourceSelect(element.localName, attributes);
+    return eligible && !hasSourcePrivateOrActivationElementAncestor(element);
   } catch {
     return false;
   }
@@ -1770,6 +1778,16 @@ function readControlFingerprint(element: Element): Readonly<{
 }> {
   if (!isEligibleControlElement(element)) {
     return { eligible: false, fingerprint: 'private', characters: 0 };
+  }
+  if (isSourceNativeSelectTagName(element.localName)) {
+    const selected = readSourceSelectedOptionIndexes(element);
+    return selected
+      ? {
+          eligible: true,
+          fingerprint: `select:${selected.join(',')}`,
+          characters: 0,
+        }
+      : { eligible: false, fingerprint: 'private', characters: 0 };
   }
   const control = readSourceControlText(element);
   if (!control) {

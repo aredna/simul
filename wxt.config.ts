@@ -67,6 +67,7 @@ export default defineConfig({
     : {
         filterEntrypoints: [
           'background',
+          'page-live-observer',
           'page-recorder',
           'page-mirror',
           'page-snapshot',

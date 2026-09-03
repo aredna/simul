@@ -2,9 +2,10 @@ export const SOURCE_PRIVATE_TAGS = Object.freeze([
   'input',
   'option',
   'output',
-  'select',
   'textarea',
 ] as const);
+
+export const MAX_SOURCE_SELECTED_OPTION_INDEXES = 512;
 
 export const SOURCE_TEXT_CONTROL_TYPES = Object.freeze([
   '',
@@ -117,6 +118,55 @@ export function isSourceNativeTextControlTagName(value: string): boolean {
   return tag === 'input' || tag === 'textarea';
 }
 
+export function isSourceNativeSelectTagName(value: string): boolean {
+  return value.trim().toLowerCase() === 'select';
+}
+
+/** A native select is readable only when it has no explicit private/editor role. */
+export function isEligibleSourceSelect(
+  tagName: string,
+  attributes: Readonly<Record<string, unknown>>,
+): boolean {
+  return isSourceNativeSelectTagName(tagName) &&
+    !sourceAttributesArePrivate(attributes) &&
+    !isSourceActivationRoleValue(attributes.role);
+}
+
+/** Reads indices only; raw option values and names never enter the protocol. */
+export function readSourceSelectedOptionIndexes(
+  element: Element,
+): readonly number[] | undefined {
+  if (!isEligibleSourceSelect(
+    element.localName,
+    sourceElementAttributes(element),
+  )) return undefined;
+  try {
+    const options = [...element.querySelectorAll('option')];
+    const selected: number[] = [];
+    for (let index = 0; index < options.length; index += 1) {
+      if (!(options[index] as Element & { readonly selected?: unknown }).selected) {
+        continue;
+      }
+      if (selected.length >= MAX_SOURCE_SELECTED_OPTION_INDEXES) return undefined;
+      selected.push(index);
+    }
+    return Object.freeze(selected);
+  } catch {
+    return undefined;
+  }
+}
+
+/** Standalone/datalist options stay private; only select descendants are public. */
+export function isSourceOptionInsideNativeSelect(element: Element): boolean {
+  if (element.localName.toLowerCase() !== 'option') return false;
+  for (let current = element.parentElement; current; current = current.parentElement) {
+    const tagName = current.localName.toLowerCase();
+    if (tagName === 'select') return true;
+    if (tagName === 'datalist') return false;
+  }
+  return false;
+}
+
 export function isSourcePrivateRoleValue(value: unknown): boolean {
   return sourceSensitiveRoleKind(value) === 'private';
 }
@@ -169,7 +219,7 @@ export function sourceAttributesArePrivate(
 
 export function hasSourcePrivateElementAncestor(element: Element): boolean {
   for (let current: Element | undefined = element; current;) {
-    if (sourceElementStartsPrivateRegion(
+    if (!isSourceOptionInsideNativeSelect(current) && sourceElementStartsPrivateRegion(
       current.localName,
       sourceElementAttributes(current),
     )) return true;
@@ -191,11 +241,10 @@ export function hasSourcePrivateOrActivationElementAncestor(
 ): boolean {
   for (let current: Element | undefined = element; current;) {
     if (
-      sourceElementStartsPrivateRegion(
+      (!isSourceOptionInsideNativeSelect(current) && sourceElementStartsPrivateRegion(
         current.localName,
         sourceElementAttributes(current),
-      ) ||
-      isSourcePrivateTagName(current.localName) ||
+      )) ||
       isSourceActivationTagName(current.tagName) ||
       isSourceActivationRoleValue(current.getAttribute('role'))
     ) return true;
