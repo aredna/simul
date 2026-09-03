@@ -822,6 +822,9 @@ describe('isolated HTML sanitizer and protocol', () => {
       <input id="search" type="search" placeholder="Search this site">
       <input id="password" type="password" value="never transport me">
       <input id="password-auto" autocomplete="section-login current-password" value="nor me">
+      <input id="card" type="tel" autocomplete="cc-number" value="4111 card secret">
+      <input id="csc" type="text" autocomplete="billing cc-csc" value="123 csc secret">
+      <input id="otp" type="text" autocomplete="one-time-code" value="987654 otp secret">
       <input id="checkbox" type="checkbox" value="checked secret">
       <input id="aria-combobox" type="text" role="combobox" value="private combo value">
       <input id="aria-searchbox" type="search" role="searchbox" value="private search value">
@@ -850,6 +853,9 @@ describe('isolated HTML sanitizer and protocol', () => {
     );
     expect(serialized).not.toContain('never transport me');
     expect(serialized).not.toContain('nor me');
+    expect(serialized).not.toContain('card secret');
+    expect(serialized).not.toContain('csc secret');
+    expect(serialized).not.toContain('otp secret');
     expect(serialized).not.toContain('checked secret');
     expect(serialized).not.toContain('private combo value');
     expect(serialized).not.toContain('private search value');
@@ -2207,5 +2213,19 @@ describe('tag name representability', () => {
     expect(graphElementBySourceId(graph, 'keep')).toBeDefined();
     expect(graphElementBySourceId(graph, 'drop')).toBeUndefined();
     expect(graphElementBySourceId(graph, 'legacy')?.tagName).toBe('o:p');
+  });
+});
+
+describe('cross-origin attribute stripping', () => {
+  it('never transports crossorigin, so the replica cannot announce the extension origin', () => {
+    const graph = sanitizeMarkup(
+      '<!doctype html><html><head><link id="sheet" rel="stylesheet" href="https://cdn.example.test/a.css" crossorigin="anonymous"></head><body><img id="picture" src="https://cdn.example.test/a.png" crossorigin="use-credentials"></body></html>',
+      'passive',
+    );
+    for (const id of ['sheet', 'picture']) {
+      const names = graphElementBySourceId(graph, id)?.attributes.map(([name]) => name);
+      expect(names).toBeDefined();
+      expect(names).not.toContain('crossorigin');
+    }
   });
 });

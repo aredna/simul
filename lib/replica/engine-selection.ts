@@ -46,6 +46,22 @@ export function selectReplicaEngineMode(
   return 'isolated-html';
 }
 
+const TRANSIENT_REPLICA_FAILURE_CODES: ReadonlySet<ReplicaDiagnosticCode> =
+  new Set<ReplicaDiagnosticCode>([
+    'access_denied',
+    'capture_busy',
+    'capture_timeout',
+    'checkpoint_too_large',
+    'replay_timeout',
+    'stale_identity',
+    'stream_overflow',
+  ]);
+
+/** True for failures that a later page or attempt can succeed past. */
+export function isTransientReplicaFailure(code: ReplicaDiagnosticCode): boolean {
+  return TRANSIENT_REPLICA_FAILURE_CODES.has(code);
+}
+
 interface ReplicaEngineControllerOptions {
   readonly mode: ReplicaEngineMode;
   readonly legacy: ReplicaEngine;
@@ -127,7 +143,12 @@ export class ReplicaEngineController {
     // A late failure from an engine that has already been switched away from
     // must never disable or release the newly selected engine.
     if (this.#mode !== runMode) return result;
-    this.#disabled.add(runMode);
+    // Capacity, timing, and access failures describe this page or attempt,
+    // not the engine; disabling the engine for the companion's lifetime on
+    // one oversized page left every later page on the legacy fallback.
+    if (!isTransientReplicaFailure(result.diagnostics.code)) {
+      this.#disabled.add(runMode);
+    }
     selected.releasePresentation(true);
     if (!this.#fallbackNotified) {
       this.#fallbackNotified = true;

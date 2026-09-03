@@ -330,6 +330,8 @@ const ACTIVE_OR_NAVIGATIONAL_ATTRIBUTES = new Set([
   'classid',
   'code',
   'codebase',
+  // Never announce the extension origin to a source host through CORS.
+  'crossorigin',
   'data',
   'download',
   'dynsrc',

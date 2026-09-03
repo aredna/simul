@@ -1236,3 +1236,29 @@ class FakeEvent<T extends (...arguments_: never[]) => void> {
     for (const listener of this.#listeners) listener(...arguments_);
   }
 }
+
+describe('mutation observer resilience', () => {
+  it('reports a gap instead of silently dropping a batch when a record throws', () => {
+    const fixture = sourceFixture('<main><span>steady</span></main>');
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const hostile = new Proxy({}, {
+      get() {
+        throw new Error('hostile node');
+      },
+    }) as unknown as Node;
+
+    fixture.mutate({
+      type: 'childList',
+      target: hostile,
+      addedNodes: [] as unknown as NodeList,
+      removedNodes: [] as unknown as NodeList,
+    } as unknown as MutationRecord);
+
+    const gaps = fixture.port.posts.filter(
+      (message) => (message as { code?: string }).code === 'stream_gap',
+    );
+    expect(gaps).toHaveLength(1);
+    expect(fixture.frames).toHaveLength(0);
+  });
+});

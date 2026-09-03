@@ -545,6 +545,21 @@ export class HtmlMirrorSourceSession {
 
   #onMutations(records: MutationRecord[]): void {
     if (this.#disposed || !this.#identity) return;
+    try {
+      this.#queueMutationRecords(records);
+    } catch {
+      // An exception here used to drop the whole batch silently, after which
+      // the replica drifted with no diagnostic. Report a gap so the receiver
+      // stages a fresh checkpoint; the stream stays paused until it does.
+      this.#paused = true;
+      this.#post(createHtmlMirrorError(
+        this.#identityAt(this.#sequence),
+        'stream_gap',
+      ));
+    }
+  }
+
+  #queueMutationRecords(records: MutationRecord[]): void {
     let accepted = false;
     for (const record of records) {
       // The top-document observer must never turn a same-origin embedded
@@ -555,7 +570,10 @@ export class HtmlMirrorSourceSession {
         continue;
       }
       accepted = true;
-      this.#observeOpenShadowRoots(record.target);
+      // Only the target itself and newly added subtrees can introduce open
+      // shadow roots; walking the target's whole subtree for every record
+      // made a body-level childList mutation traverse the entire document.
+      this.#observeOpenShadowRoots(record.target, 1);
       if (record.type === 'childList') {
         this.#queuePending(this.#pendingChildren, record.target);
         for (const added of record.addedNodes) this.#observeOpenShadowRoots(added);
@@ -1498,18 +1516,34 @@ export class HtmlMirrorSourceSession {
     ));
   }
 
-  #observeOpenShadowRoots(root: Node): void {
-    const directShadow = readOpenShadowRoot(root);
-    if (directShadow) this.#observeOpenShadowRoot(directShadow);
-    if (root.nodeType === Node.ELEMENT_NODE) {
-      const element = root as Element;
-      const shadow = element.shadowRoot;
-      if (shadow && shadow.mode === 'open') this.#observeOpenShadowRoot(shadow);
-      if (shadow) {
-        for (const child of [...shadow.childNodes]) this.#observeOpenShadowRoots(child);
+  /**
+   * Iterative and bounded: a hostile DOM depth must not overflow the stack
+   * inside the MutationObserver callback, and one oversized subtree must not
+   * stall the page. Nodes past the budget are picked up by the next
+   * checkpoint rather than walked here.
+   */
+  #observeOpenShadowRoots(root: Node, budget = 20_000): void {
+    const stack: Node[] = [root];
+    let visited = 0;
+    while (stack.length > 0) {
+      const node = stack.pop() as Node;
+      visited += 1;
+      if (visited > budget) return;
+      const directShadow = readOpenShadowRoot(node);
+      if (directShadow) this.#observeOpenShadowRoot(directShadow);
+      if (node.nodeType === Node.ELEMENT_NODE) {
+        const shadow = (node as Element).shadowRoot;
+        if (shadow && shadow.mode === 'open') this.#observeOpenShadowRoot(shadow);
+        if (shadow) {
+          for (let child = shadow.lastChild; child; child = child.previousSibling) {
+            stack.push(child);
+          }
+        }
+      }
+      for (let child = node.lastChild; child; child = child.previousSibling) {
+        stack.push(child);
       }
     }
-    for (const child of [...root.childNodes]) this.#observeOpenShadowRoots(child);
   }
 
   #observeOpenShadowRoot(shadow: ShadowRoot): void {

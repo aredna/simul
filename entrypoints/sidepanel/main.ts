@@ -817,7 +817,7 @@ window.addEventListener('pagehide', () => {
   releaseLiveSession();
 });
 
-browser.runtime.onMessage.addListener((message: unknown, sender) => {
+browser.runtime.onMessage.addListener((message: unknown, sender, sendResponse) => {
   const authorizedTab = readAuthorizedTabMessage(message);
   if (authorizedTab) {
     void acceptAuthorizedTab(authorizedTab);
@@ -834,6 +834,9 @@ browser.runtime.onMessage.addListener((message: unknown, sender) => {
     )
   ) {
     queueLiveUpdate(dirty);
+    // Acknowledge so the page-side bridge does not treat a consumed message
+    // as undelivered and resend it.
+    sendResponse(true);
     return;
   }
   const scroll = readLivePageScrollMessage(message);
@@ -863,6 +866,7 @@ browser.runtime.onMessage.addListener((message: unknown, sender) => {
         );
       }
     }
+    sendResponse(true);
   }
 });
 
@@ -899,8 +903,10 @@ browser.windows.onFocusChanged.addListener((windowId) => {
     windowId === browser.windows.WINDOW_ID_NONE ||
     windowId === panelWindowId
   ) return;
+  // The pending navigation refresh is left armed: its callback re-validates
+  // the followed identity, and clearing it here lost the refresh whenever
+  // focus moved within the debounce window (review M1).
   const requestId = ++identityRequestId;
-  clearNavigationTimer();
   void followFocusedBrowserWindow(windowId, requestId);
 });
 
@@ -934,6 +940,24 @@ browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     return;
   }
   const nextIdentity = { tabId, windowId: tab.windowId, url: nextUrl };
+  // A hash or query change without a load is a same-document navigation:
+  // the live observer already mirrors any DOM change, so keep the replica,
+  // the translation, and the scroll position and only refresh the identity.
+  if (
+    changeInfo.status !== 'loading' &&
+    typeof changeInfo.url === 'string' &&
+    normalizedPageUrl(nextUrl) === normalizedPageUrl(followed.url)
+  ) {
+    followedPageIdentity = nextIdentity;
+    if (
+      capturedPageIdentity &&
+      capturedPageIdentity.tabId === tabId &&
+      normalizedPageUrl(capturedPageIdentity.url) === normalizedPageUrl(nextUrl)
+    ) {
+      capturedPageIdentity = { ...capturedPageIdentity, url: nextUrl };
+    }
+    return;
+  }
   if (changeInfo.status === 'loading' || typeof changeInfo.url === 'string') {
     identityRequestId += 1;
     captureCoordinator.invalidate();
@@ -1556,7 +1580,6 @@ async function followActivatedSourceTab(
   ) return;
 
   const requestId = existingRequestId ?? ++identityRequestId;
-  clearNavigationTimer();
   try {
     const sourceWindow = await browser.windows.get(windowId);
     if (
@@ -1578,7 +1601,20 @@ async function followActivatedSourceTab(
       followedPageIdentity,
       identity,
       normalizedPageUrl,
-    )) return;
+    )) {
+      // Already following this page. If the rendered replica is still an
+      // older page of the same tab (a navigation whose refresh never ran),
+      // rebuild now instead of leaving the stale mirror frozen.
+      if (
+        !captureInFlight &&
+        navigationTimer === undefined &&
+        capturedPageIdentity?.tabId === identity.tabId &&
+        !sameCompanionSourcePage(capturedPageIdentity, identity, normalizedPageUrl)
+      ) {
+        queueCapture({ identity, reason: 'navigation' });
+      }
+      return;
+    }
     queueCapture({ identity, reason: 'navigation' });
   } catch (error) {
     if (requestId !== identityRequestId) return;
@@ -3012,8 +3048,13 @@ async function localizeUiLabels(): Promise<void> {
         sessionTask ??= (async () => {
           const uiAvailability = await provider.availability(pair);
           abortController.signal.throwIfAborted();
-          if (uiAvailability === 'unavailable') {
-            throw new Error('The UI language pair is unavailable.');
+          // Label localization runs without a user gesture, so it may only
+          // use an already-installed pair. A downloadable pair would either
+          // start a multi-megabyte download as a side effect of a menu
+          // choice or throw NotAllowedError. The page-translation click
+          // prepares the pair; labels follow on the next localization pass.
+          if (uiAvailability !== 'available') {
+            throw new Error('The UI language pair is not installed yet.');
           }
           return provider.createSession(pair, {
             signal: abortController.signal,

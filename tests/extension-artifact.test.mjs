@@ -20,6 +20,7 @@ import {
   APPROVED_PERMISSIONS,
   IMPLEMENTED_OCR_PROVIDER_IDS,
   REQUIRED_OCR_RUNTIME_MARKERS,
+  REQUIRED_ICON_SIZES,
   REQUIRED_ISOLATED_SANDBOX_MARKERS,
   REQUIRED_REPLICA_RUNTIME_MARKERS,
   REQUIRED_UNLISTED_BUNDLES,
@@ -871,9 +872,19 @@ async function createValidArtifact(
     background: { service_worker: 'background.js' },
     action: { default_title: 'Simul' },
     side_panel: { default_path: 'sidepanel.html' },
+    icons: Object.fromEntries(
+      REQUIRED_ICON_SIZES.map((size) => [String(size), `icon/${size}.png`]),
+    ),
     ...manifestOverrides,
   };
+  await mkdir(path.join(directory, 'icon'), { recursive: true });
   await Promise.all([
+    ...REQUIRED_ICON_SIZES.map((size) =>
+      writeFile(
+        path.join(directory, 'icon', `${size}.png`),
+        Buffer.from([0x89, 0x50, 0x4e, 0x47, 0x0d, 0x0a, 0x1a, 0x0a]),
+      ),
+    ),
     writeFile(path.join(directory, 'manifest.json'), JSON.stringify(manifest)),
     writeFile(path.join(directory, 'background.js'), 'console.info("background");'),
     writeFile(
@@ -961,5 +972,18 @@ describe('experimental rrweb engine profile', () => {
     );
     expect(chunkSources.some((source) => source.includes(RRWEB_REPLAY_LIBRARY_MARKER)))
       .toBe(true);
+  });
+});
+
+describe('extension icons', () => {
+  it('requires a PNG icon for every required size', async () => {
+    const missingIcons = await createTemporaryArtifact({ manifest: { icons: undefined } });
+    await expect(validateArtifact(missingIcons)).rejects.toThrow(
+      'icons must declare a PNG for every required size',
+    );
+
+    const missingFile = await createTemporaryArtifact();
+    await rm(path.join(missingFile, 'icon', '128.png'));
+    await expect(validateArtifact(missingFile)).rejects.toThrow(/icon\/128\.png/u);
   });
 });

@@ -173,3 +173,38 @@ function createApi(overrides: Partial<BrowserTranslatorApi> = {}): BrowserTransl
     ...overrides,
   };
 }
+
+describe('Chrome error names', () => {
+  it('reports a missing user activation as activation-required', async () => {
+    const provider = new ChromeTranslatorProvider(
+      createApi({
+        availability: vi.fn().mockResolvedValue('downloadable'),
+        create: vi.fn().mockRejectedValue(
+          new DOMException('Requires a user gesture.', 'NotAllowedError'),
+        ),
+      }),
+    );
+    await expect(provider.createSession(pair)).rejects.toMatchObject({
+      name: 'TranslationProviderError',
+      code: 'activation-required',
+    });
+  });
+
+  it('reports an oversized input as quota-exceeded', async () => {
+    const provider = new ChromeTranslatorProvider(
+      createApi({
+        create: vi.fn().mockResolvedValue({
+          translate: vi.fn().mockRejectedValue(
+            new DOMException('Too large.', 'QuotaExceededError'),
+          ),
+          destroy: vi.fn(),
+        }),
+      }),
+    );
+    const session = await provider.createSession(pair);
+    await expect(session.translate('x'.repeat(10))).rejects.toMatchObject({
+      name: 'TranslationProviderError',
+      code: 'quota-exceeded',
+    });
+  });
+});

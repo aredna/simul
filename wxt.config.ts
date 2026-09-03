@@ -1,3 +1,6 @@
+import { readdirSync } from 'node:fs';
+import path from 'node:path';
+
 import { parse, type Comment } from 'acorn';
 import { defineConfig } from 'wxt';
 import {
@@ -54,15 +57,38 @@ function removeRemoteTesseractFallbacks(code: string): string {
     );
 }
 
+/** Every file under vendor/ocr, as WXT public-asset copy entries. */
+function vendoredOcrPublicFiles(): Array<{ absoluteSrc: string; relativeDest: string }> {
+  const root = path.resolve(import.meta.dirname, 'vendor', 'ocr');
+  return readdirSync(root, { recursive: true, withFileTypes: true })
+    .filter((entry) => entry.isFile())
+    .map((entry) => {
+      const absoluteSrc = path.join(entry.parentPath, entry.name);
+      return {
+        absoluteSrc,
+        relativeDest: path.posix.join(
+          'ocr',
+          path.relative(root, absoluteSrc).split(path.sep).join('/'),
+        ),
+      };
+    });
+}
+
 export default defineConfig({
   outDir: process.env.SIMUL_WXT_OUT_DIR || '.output',
-  publicDir: tesseractEnabled ? 'vendor' : 'public',
+  // public/ always ships (icons live there). The vendored OCR runtime is
+  // added through the public-assets hook only for Tesseract-enabled builds,
+  // instead of swapping the whole public directory and losing its contents.
+  publicDir: 'public',
   hooks: {
     'build:manifestGenerated': (_wxt, manifest) => {
       // The toolbar action launches the saved surface directly. Retaining a
       // default popup would suppress action.onClicked and reintroduce a
       // two-button chooser before every detached-window launch.
       if (manifest.action) delete manifest.action.default_popup;
+    },
+    'build:publicAssets': (_wxt, files) => {
+      if (tesseractEnabled) files.push(...vendoredOcrPublicFiles());
     },
   },
   // Every entrypoint is listed explicitly so optional runtimes stay out of a

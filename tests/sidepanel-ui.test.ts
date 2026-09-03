@@ -227,3 +227,31 @@ describe('availability check currency', () => {
     expect(resolveBody).not.toContain('...snapshotWithoutLanguage');
   });
 });
+
+describe('source navigation handling', () => {
+  it('treats a hash or query change without a load as the same document', () => {
+    const start = script.indexOf('browser.tabs.onUpdated.addListener(');
+    const end = script.indexOf('browser.tabs.onRemoved.addListener(');
+    const body = script.slice(start, end);
+    const sameDocument = body.indexOf(
+      "normalizedPageUrl(nextUrl) === normalizedPageUrl(followed.url)",
+    );
+    const invalidate = body.indexOf('captureCoordinator.invalidate();');
+    expect(sameDocument).toBeGreaterThan(0);
+    expect(invalidate).toBeGreaterThan(sameDocument);
+  });
+
+  it('leaves the navigation refresh armed while focus moves between windows', () => {
+    const start = script.indexOf('browser.windows.onFocusChanged.addListener(');
+    const end = script.indexOf('browser.tabs.onAttached.addListener(');
+    expect(script.slice(start, end)).not.toContain('clearNavigationTimer()');
+
+    const followStart = script.indexOf('async function followActivatedSourceTab(');
+    const followEnd = script.indexOf('\nasync function ', followStart + 1);
+    expect(followStart).toBeGreaterThan(0);
+    expect(followEnd).toBeGreaterThan(followStart);
+    const follow = script.slice(followStart, followEnd);
+    expect(follow).not.toContain('clearNavigationTimer()');
+    expect(follow).toContain("queueCapture({ identity, reason: 'navigation' });");
+  });
+});

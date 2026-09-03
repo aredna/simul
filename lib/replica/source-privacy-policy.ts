@@ -292,9 +292,17 @@ function sourceElementAttributes(element: Element): Record<string, string> {
   return result;
 }
 
+/**
+ * Autocomplete tokens whose values are secrets even inside a text-typed
+ * control: passwords, one-time codes, and every payment-card field.
+ */
 function passwordAutocomplete(value: string): boolean {
   return value.split(/\s+/u).some(
-    (token) => token === 'current-password' || token === 'new-password',
+    (token) =>
+      token === 'current-password' ||
+      token === 'new-password' ||
+      token === 'one-time-code' ||
+      token.startsWith('cc-'),
   );
 }
 

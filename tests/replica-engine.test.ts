@@ -12,6 +12,7 @@ import {
 } from '../lib/replica/contracts';
 import {
   ReplicaEngineController,
+  isTransientReplicaFailure,
   selectReplicaEngineMode,
   selectReplicaTranslationMode,
 } from '../lib/replica/engine-selection';
@@ -1731,3 +1732,36 @@ async function flushAsyncWork(): Promise<void> {
   await Promise.resolve();
   await new Promise((resolve) => setTimeout(resolve, 0));
 }
+
+describe('transient replica failures', () => {
+  it('keeps the selected engine enabled after a capacity or timing failure', async () => {
+    const legacy = new FakeReplicaEngine('legacy-v1', {
+      status: 'skipped',
+      diagnostics: emptyReplicaDiagnostics('legacy-v1', 'legacy_selected'),
+    });
+    const isolated = new FakeReplicaEngine('isolated-html-v1', {
+      status: 'failed',
+      diagnostics: emptyReplicaDiagnostics('isolated-html-v1', 'stream_overflow'),
+    });
+    const fallbackCodes: string[] = [];
+    const controller = new ReplicaEngineController({
+      mode: 'isolated-html',
+      legacy,
+      shadow: isolated,
+      isolated,
+      onFallback: (code) => fallbackCodes.push(code),
+    });
+
+    await controller.run(request);
+    expect(fallbackCodes).toEqual(['stream_overflow']);
+    expect(controller.selectedAvailable).toBe(true);
+
+    // The next page (or attempt) still runs through the selected engine.
+    await controller.run(request);
+    expect(isolated.requests).toHaveLength(2);
+    expect(isTransientReplicaFailure('stream_overflow')).toBe(true);
+    expect(isTransientReplicaFailure('checkpoint_too_large')).toBe(true);
+    expect(isTransientReplicaFailure('replay_failed')).toBe(false);
+    expect(isTransientReplicaFailure('privacy_rejected')).toBe(false);
+  });
+});

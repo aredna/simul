@@ -1251,3 +1251,41 @@ function countLiveImageUrlCharacters(
     0,
   );
 }
+
+describe('orphaned observer bridge', () => {
+  it('disconnects instead of retrying once the extension runtime is gone', async () => {
+    const { document, window } = parseHTML(
+      '<html><body><main>content</main></body></html>',
+    );
+    installLiveDomGlobals(document, window);
+    const disconnect = vi.fn();
+    class TestMutationObserver {
+      observe(): void {}
+      disconnect(): void { disconnect(); }
+    }
+    class TestResizeObserver { observe(): void {} disconnect(): void {} }
+    vi.stubGlobal('MutationObserver', TestMutationObserver);
+    vi.stubGlobal('ResizeObserver', TestResizeObserver);
+    const frames: FrameRequestCallback[] = [];
+    vi.stubGlobal('requestAnimationFrame', (callback: FrameRequestCallback) => {
+      frames.push(callback);
+      return frames.length;
+    });
+    vi.stubGlobal('cancelAnimationFrame', () => undefined);
+    // After a reload the runtime object survives without an id and every
+    // send rejects with "Extension context invalidated".
+    const sendMessage = vi.fn(async () => {
+      throw new Error('Extension context invalidated.');
+    });
+    vi.stubGlobal('chrome', { runtime: { id: undefined, sendMessage } });
+
+    expect(installLivePageObserver('session_1234', 1)).toMatchObject({
+      installed: true,
+    });
+    frames.shift()?.(0);
+    await new Promise((resolve) => setTimeout(resolve, 260));
+
+    expect(sendMessage).toHaveBeenCalledTimes(1);
+    expect(disconnect).toHaveBeenCalled();
+  });
+});

@@ -94,6 +94,13 @@ export class ChromeTranslatorProvider implements TranslationProvider {
       return new ChromeTranslationSession(instance);
     } catch (error) {
       if (isAbortError(error) || options.signal?.aborted) throw error;
+      if (isDomExceptionNamed(error, 'NotAllowedError')) {
+        throw new TranslationProviderError(
+          'activation-required',
+          'Chrome needs a click before it downloads this language pair. Select Translate page once.',
+          { cause: error },
+        );
+      }
       throw new TranslationProviderError(
         'creation-failed',
         'Chrome could not prepare the local language pack. Try again.',
@@ -180,6 +187,13 @@ class ChromeTranslationSession implements TranslationSession {
       );
     } catch (error) {
       if (isAbortError(error) || signal?.aborted) throw error;
+      if (isDomExceptionNamed(error, 'QuotaExceededError')) {
+        throw new TranslationProviderError(
+          'quota-exceeded',
+          'This passage is larger than Chrome can translate at once.',
+          { cause: error },
+        );
+      }
       throw new TranslationProviderError(
         'translation-failed',
         'Chrome could not translate this part of the page.',
@@ -246,4 +260,8 @@ function normalizeProgress(event: {
 
 function isAbortError(error: unknown): boolean {
   return error instanceof DOMException && error.name === 'AbortError';
+}
+
+function isDomExceptionNamed(error: unknown, name: string): boolean {
+  return error instanceof DOMException && error.name === name;
 }

@@ -285,27 +285,42 @@ export function installLivePageObserver(
   };
 
   const send = (message: Record<string, unknown>, attempt = 0): void => {
-    try {
-      const response = (
-        globalThis as typeof globalThis & {
-          chrome?: {
-            runtime?: {
-              sendMessage(value: Record<string, unknown>): Promise<unknown>;
-            };
+    if (stopped) return;
+    const runtime = (
+      globalThis as typeof globalThis & {
+        chrome?: {
+          runtime?: {
+            id?: string;
+            sendMessage(value: Record<string, unknown>): Promise<unknown>;
           };
-        }
-      ).chrome?.runtime?.sendMessage(message);
-      if (response && typeof response.catch === 'function') {
-        void response.catch(() => {
-          if (!stopped && attempt < 2) {
-            setTimeout(() => send(message, attempt + 1), 100 * (attempt + 1));
-          }
-        });
+        };
       }
-    } catch {
-      if (!stopped && attempt < 2) {
+    ).chrome?.runtime;
+    // After an extension reload or update this isolated world is orphaned:
+    // its runtime id disappears and every send fails forever. On a failed
+    // send, tear the observer down instead of retrying for the page's
+    // lifetime; an ordinary transient failure with a live runtime retries.
+    const retryOrStop = (): void => {
+      if (stopped) return;
+      if (!runtime?.id) {
+        try {
+          registry.disconnect();
+        } catch {
+          stopped = true;
+        }
+        return;
+      }
+      if (attempt < 2) {
         setTimeout(() => send(message, attempt + 1), 100 * (attempt + 1));
       }
+    };
+    try {
+      const response = runtime?.sendMessage(message);
+      if (response && typeof response.catch === 'function') {
+        void response.catch(retryOrStop);
+      }
+    } catch {
+      retryOrStop();
     }
   };
 

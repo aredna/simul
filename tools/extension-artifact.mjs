@@ -35,6 +35,7 @@ export const APPROVED_OPTIONAL_HOST_PERMISSIONS = Object.freeze([
   '<all_urls>',
 ]);
 export const MINIMUM_CHROME_VERSION = 138;
+export const REQUIRED_ICON_SIZES = Object.freeze([16, 32, 48, 128]);
 export const REQUIRED_UNLISTED_BUNDLES = Object.freeze([
   'page-mirror.js',
   'page-live-observer.js',
@@ -731,6 +732,19 @@ function validateManifest(manifest, filePaths) {
     throw new ArtifactError(
       `manifest.json must require Chrome ${MINIMUM_CHROME_VERSION} or newer.`,
     );
+  }
+
+  // Chrome falls back to these for the toolbar action; the Web Store rejects
+  // a listing without them.
+  const icons = isRecord(manifest.icons) ? manifest.icons : undefined;
+  for (const size of REQUIRED_ICON_SIZES) {
+    const iconPath = icons?.[String(size)];
+    if (typeof iconPath !== 'string' || !/\.png$/iu.test(iconPath)) {
+      throw new ArtifactError(
+        `manifest.json icons must declare a PNG for every required size: ${REQUIRED_ICON_SIZES.join(', ')}.`,
+      );
+    }
+    assertReferenceExists('manifest.json', iconPath, filePaths);
   }
 
   const permissions = Array.isArray(manifest.permissions)
