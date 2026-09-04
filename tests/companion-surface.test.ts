@@ -70,7 +70,8 @@ describe('companion surface launch decisions', () => {
     );
   });
 
-  it('matches exposed source-window bounds and remains a normal resizable popup', () => {
+  it('docks to the right edge of the source window and remains a normal resizable popup', () => {
+    // 45% of the source width: 1440 * 0.45 = 648, left = -1440 + 1440 - 648.
     expect(createDetachedWindowData('chrome-extension://simul/sidepanel.html', {
       width: 1440,
       height: 900,
@@ -80,10 +81,35 @@ describe('companion surface launch decisions', () => {
       url: 'chrome-extension://simul/sidepanel.html',
       type: 'popup',
       focused: true,
-      width: 1440,
+      width: 648,
       height: 900,
-      left: -1440,
+      left: -648,
       top: 0,
+    });
+    // Narrow sources keep a usable minimum width but never exceed the source.
+    expect(createDetachedWindowData('chrome-extension://simul/sidepanel.html', {
+      width: 800,
+      height: 600,
+      left: 100,
+      top: 50,
+    })).toMatchObject({ width: 480, height: 600, left: 420, top: 50 });
+    expect(createDetachedWindowData('chrome-extension://simul/sidepanel.html', {
+      width: 400,
+      height: 600,
+      left: 100,
+    })).toMatchObject({ width: 400, left: 100 });
+    // Without a source left edge there is nothing to dock against.
+    expect(createDetachedWindowData('chrome-extension://simul/sidepanel.html', {
+      width: 1000,
+      height: 600,
+      top: 20,
+    })).toEqual({
+      url: 'chrome-extension://simul/sidepanel.html',
+      type: 'popup',
+      focused: true,
+      width: 480,
+      height: 600,
+      top: 20,
     });
     expect(createDetachedWindowData('chrome-extension://simul/sidepanel.html', {
       width: 0,
