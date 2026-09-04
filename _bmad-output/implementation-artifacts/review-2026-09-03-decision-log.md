@@ -706,6 +706,83 @@ Gate on the new toolchain before any fix: typecheck clean; 1,143 tests
 pass, 1 skipped (the Chrome-fixture disclosure test skips without a
 browser binary); fresh build validated and synced to `dist/chrome-unpacked`.
 
+### D30. Fixes re-applied over the 0.3.3 line (2026-09-05)
+
+The 22 still-applying items from D28, the five new upstream findings, the
+looser OCR rule (D9) and the docked window (D11) were ported in five
+file-disjoint clusters, each verified against the current code rather than
+pasted from the old branch, each with its own tests, and integrated in this
+order: background/surface/provider, sanitizer/engine, OCR, side panel,
+source observer. Gate at the head: typecheck clean, 1,197 tests across 80
+files (1 Chrome-fixture test skips without a browser), artifact synced and
+verified.
+
+What landed, and where it deliberately differs from the old branch:
+
+- **Sanitizer and engine.** H2: `isRepresentableTagName` rejects colon
+  names outside the HTML namespace on both the transported and the live
+  path; the engine creates HTML elements through `createElement` (so an
+  `x:iframe` stays one inert unknown element instead of being prefix-parsed
+  into a real iframe) and everything else through `createElementNS`. H3:
+  the full SVG camelCase table restores `linearGradient`, `clipPath`,
+  `feGaussianBlur` and the rest. L16: the currency check now runs before a
+  run releases the stream, semantic source or staging candidate.
+  `crossorigin` joined the active/navigational attribute set, so it is
+  stripped on every element.
+- **Source observer.** Shadow-root observation is iterative with a 20,000
+  node budget shared per mutation batch and a per-batch visited set;
+  exhaustion is reported through the existing content-free
+  `capacityOmissionCount`. Roots that already exist at checkpoint are
+  observed while the mirrored graph is marked, so the budget only defers
+  discovery of unmirrored roots. `#onMutations` is guarded: a throwing
+  record posts the receiver's non-terminal `stream_gap` and recovery
+  proceeds. The old branch's target-only per-record walk was not adopted;
+  the per-batch de-duplication achieves the bound without changing what is
+  mirrored.
+- **OCR.** Tesseract bootstrap has its own 60 s deadline; a caller cancel
+  keeps the worker warm; disposal and timeouts still terminate. Inactive
+  tab, host outage, overflow, missing input and lost worker now defer the
+  image; `resume()` re-kicks deferred images and the side panel calls it
+  when the followed tab is activated and when the companion becomes visible.
+  A replica commit re-queues only anchor-deferred images (L13), on purpose:
+  commits are frequent and re-queuing hidden images on each one would churn
+  measurement round trips. The text-cover heuristic samples five points
+  through `elementFromPoint`, descending open shadow roots (bounded to 16),
+  and fails closed on an unreadable hit test; an overlay with
+  `pointer-events: none` is invisible to it, an accepted limit. The overlap
+  rule is now yours: only credential-secret overlaps (password,
+  one-time-code, payment-card autocompletes, hidden/file inputs, CSS-masked
+  text, sticky secret classifications) block capture. README states it.
+- **Side panel.** M1: focus changes and `followActivatedSourceTab` leave
+  the navigation timer armed, and a same-page re-activation rebuilds a stale
+  replica through the new pure helper `lib/followed-replica-currency.ts`
+  (never while a capture is in flight, the refresh is armed, or the tab is
+  still loading). Zoom applies through one optimistic ledger entry and
+  commits once after 150 ms, flushed on `pagehide`. The image-analysis
+  settings render on a key of everything they display and keep the
+  diagnostics disclosure open. Label localization creates a session only for
+  an installed pair and retries once a page translation has prepared the
+  pair. Another window's language change no longer forces this window into
+  translating. The availability pair is recorded only after the guarded
+  result; `followFocusedBrowserWindow` releases its follow marker on the
+  early return; the stale optional chains are gone; the dark focus ring has
+  contrast. Not ported: the old branch's widening of `needsPreparation`,
+  because upstream no longer replaces the snapshot identity on a language
+  refresh.
+- **Background, surface, providers.** A second toolbar click focuses the
+  existing detached window (tracked per worker, cleared on
+  `windows.onRemoved`; reuse follows the popout tab mode) and re-authorizes
+  it through the ordered `simul:authorized-tab` message. The detached window
+  docks right at 45% of the source width (minimum 480 px). Chrome's
+  `NotAllowedError` and `QuotaExceededError` surface as
+  `activation-required` and `quota-exceeded` with readable messages. Long
+  values keep their line breaks across chunks. The recovery gate has a
+  sliding budget of 3 rebuilds per 60 s.
+
+Left for the next PR: the side-panel split over upstream's `main.ts`
+(D25/D26 design, the seven hand-rolled counters listed in D28), and the
+deferred-work items upstream already tracks.
+
 ### D7. Local toolchain notes
 
 - Nothing in the dependency set had a release inside the 7-day window
