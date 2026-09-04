@@ -13,51 +13,92 @@ export async function translateWithSession(
   signal?: AbortSignal,
   maxInputCharacters = DEFAULT_MAX_INPUT_CHARACTERS,
 ): Promise<string> {
-  const configuredChunks = splitText(
+  const segments = splitTextSegments(
     source,
     finitePositiveInteger(
       maxInputCharacters,
       DEFAULT_MAX_INPUT_CHARACTERS,
     ),
   );
-  const chunks: string[] = [];
-  for (const configuredChunk of configuredChunks) {
-    chunks.push(
-      ...(await splitForSessionQuota(configuredChunk, session, signal)),
-    );
+  const parts: string[] = [];
+  for (const segment of segments) {
+    const chunks = await splitForSessionQuota(segment.text, session, signal);
+    const translated: string[] = [];
+    for (const chunk of chunks) {
+      signal?.throwIfAborted();
+      translated.push(await session.translate(chunk, signal));
+    }
+    // Reinsert the whitespace that separated the segments in the source so a
+    // paragraph break or newline in a long value survives translation.
+    parts.push(translated.join(' ').trim(), segment.separator);
   }
-  const translated: string[] = [];
-  for (const chunk of chunks) {
-    signal?.throwIfAborted();
-    translated.push(await session.translate(chunk, signal));
-  }
-  return translated.join(' ').trim();
+  return parts.join('').trim();
+}
+
+export interface TextSegment {
+  readonly text: string;
+  /** The source whitespace that followed this segment ('' after the last). */
+  readonly separator: string;
 }
 
 export function splitText(source: string, maxLength: number): string[] {
+  return splitTextSegments(source, maxLength).map((segment) => segment.text);
+}
+
+/**
+ * Split on the same boundaries as splitText but keep the whitespace between
+ * chunks so callers can rejoin translations without collapsing line breaks.
+ * A boundary without whitespace (sentence punctuation) separates with one
+ * space, matching the previous join behavior.
+ */
+export function splitTextSegments(
+  source: string,
+  maxLength: number,
+): TextSegment[] {
   const boundedLength = finitePositiveInteger(
     maxLength,
     DEFAULT_MAX_INPUT_CHARACTERS,
   );
   const sourcePoints = [...source];
-  if (sourcePoints.length <= boundedLength) return [source];
+  if (sourcePoints.length <= boundedLength) {
+    return [{ text: source, separator: '' }];
+  }
 
-  const chunks: string[] = [];
+  const segments: Array<{ text: string; separator: string }> = [];
   let start = 0;
   while (sourcePoints.length - start > boundedLength) {
     const splitAt = findTextBoundary(sourcePoints, start, boundedLength);
-    const chunk = sourcePoints.slice(start, splitAt).join('').trim();
-    if (chunk) chunks.push(chunk);
-    start = splitAt;
-    while (true) {
-      const point = sourcePoints[start];
-      if (point === undefined || !/\s/u.test(point)) break;
-      start += 1;
+    let textEnd = splitAt;
+    while (textEnd > start && isWhitespace(sourcePoints[textEnd - 1])) {
+      textEnd -= 1;
     }
+    let separatorEnd = splitAt;
+    while (isWhitespace(sourcePoints[separatorEnd])) separatorEnd += 1;
+    appendTextSegment(
+      segments,
+      sourcePoints.slice(start, textEnd).join('').trim(),
+      sourcePoints.slice(textEnd, separatorEnd).join('') || ' ',
+    );
+    start = separatorEnd;
   }
-  const finalChunk = sourcePoints.slice(start).join('').trim();
-  if (finalChunk) chunks.push(finalChunk);
-  return chunks.filter(Boolean);
+  appendTextSegment(segments, sourcePoints.slice(start).join('').trim(), '');
+  const last = segments[segments.length - 1];
+  if (last) last.separator = '';
+  return segments;
+}
+
+function appendTextSegment(
+  segments: Array<{ text: string; separator: string }>,
+  text: string,
+  separator: string,
+): void {
+  if (text) {
+    segments.push({ text, separator });
+    return;
+  }
+  // A whitespace-only chunk only extends the gap after the previous segment.
+  const previous = segments[segments.length - 1];
+  if (previous) previous.separator += separator;
 }
 
 async function splitForSessionQuota(
@@ -127,6 +168,10 @@ function findTextBoundary(
     }
   }
   return end;
+}
+
+function isWhitespace(point: string | undefined): boolean {
+  return point !== undefined && /\s/u.test(point);
 }
 
 function countCodePoints(value: string): number {
