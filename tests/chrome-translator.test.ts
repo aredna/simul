@@ -214,6 +214,57 @@ describe('ChromeTranslatorProvider', () => {
     expect(api.create).not.toHaveBeenCalled();
   });
 
+  it('reports a download that needs user activation as activation-required', async () => {
+    const provider = new ChromeTranslatorProvider(
+      createApi({
+        availability: vi.fn().mockResolvedValue('downloadable'),
+        create: vi.fn().mockRejectedValue(
+          new DOMException('Requires a user gesture.', 'NotAllowedError'),
+        ),
+      }),
+    );
+
+    await expect(provider.createSession(pair)).rejects.toMatchObject({
+      name: 'TranslationProviderError',
+      code: 'activation-required',
+      message: expect.stringContaining('click'),
+    });
+  });
+
+  it('keeps other creation failures on the generic code', async () => {
+    const provider = new ChromeTranslatorProvider(
+      createApi({
+        create: vi.fn().mockRejectedValue(
+          new DOMException('Not allowed.', 'InvalidStateError'),
+        ),
+      }),
+    );
+
+    await expect(provider.createSession(pair)).rejects.toMatchObject({
+      name: 'TranslationProviderError',
+      code: 'creation-failed',
+    });
+  });
+
+  it('reports an oversized input as quota-exceeded', async () => {
+    const provider = new ChromeTranslatorProvider(
+      createApi({
+        create: vi.fn().mockResolvedValue({
+          translate: vi.fn().mockRejectedValue(
+            new DOMException('Too large.', 'QuotaExceededError'),
+          ),
+          destroy: vi.fn(),
+        }),
+      }),
+    );
+    const session = await provider.createSession(pair);
+
+    await expect(session.translate('x'.repeat(10))).rejects.toMatchObject({
+      name: 'TranslationProviderError',
+      code: 'quota-exceeded',
+    });
+  });
+
   it('uses Chrome\'s documented legacy Hebrew code at the API boundary', async () => {
     const api = createApi();
     const provider = new ChromeTranslatorProvider(api);
