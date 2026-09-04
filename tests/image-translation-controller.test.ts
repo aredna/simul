@@ -418,6 +418,253 @@ describe('ImageTranslationController', () => {
     }));
     await new Promise((resolve) => setTimeout(resolve, 5));
     expect(acquire).toHaveBeenCalledOnce();
+    // A permission refusal settles the image; resume() has nothing to re-queue.
+    controller.resume();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(acquire).toHaveBeenCalledOnce();
+    controller.dispose();
+  });
+
+  it('defers capture while the source tab is inactive and re-queues it on resume', async () => {
+    const diagnostics: unknown[] = [];
+    const acquire = vi.fn(async () => ({
+      status: 'deferred' as const,
+      reason: 'inactive' as const,
+    }));
+    const controller = new ImageTranslationController({
+      openSource: async (_request, onChange) => {
+        queueMicrotask(() => onChange({ kind: 'upsert', descriptor }));
+        return { measure: vi.fn(), dispose: vi.fn() };
+      },
+      createPixelCoordinator: () => ({
+        acquire,
+      }) as unknown as PixelAcquisitionCoordinator,
+      createRecognitionCoordinator: vi.fn(),
+      resolveAnchor: () => ({
+        document: sourceDocument,
+        replayLease: 1,
+        image: { isConnected: true } as HTMLImageElement,
+        iframe: {} as HTMLIFrameElement,
+      }),
+      translationProvider: {
+        availability: async () => 'available',
+        createSession: vi.fn(),
+      },
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      projector: testProjectorEnvironment(),
+    });
+    controller.configure({
+      enabled: true,
+      scanPolicy: 'visible-only',
+      skipSmallImages: false,
+      providerOrder: ['tesseract'],
+      sourceLanguage: 'en',
+      targetLanguage: 'ja',
+      translationIdle: true,
+      resetEpoch: 0,
+    });
+    controller.activateReplica(request, 3, 1);
+
+    await vi.waitFor(() => expect(diagnostics).toContainEqual({
+      stage: 'capture-deferred',
+      ordinal: 1,
+      reason: 'inactive',
+      renderedWidth: 200,
+      renderedHeight: 100,
+    }));
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    // No retry loop while the tab stays in the background.
+    expect(acquire).toHaveBeenCalledOnce();
+
+    // The followed tab is activated again: the deferred image is retried
+    // with the same observation instead of staying done for the session.
+    controller.resume();
+    await vi.waitFor(() => expect(diagnostics).toContainEqual({
+      stage: 'capture-deferred',
+      ordinal: 2,
+      reason: 'inactive',
+      renderedWidth: 200,
+      renderedHeight: 100,
+    }));
+    expect(acquire).toHaveBeenCalledTimes(2);
+    expect(JSON.stringify(diagnostics)).not.toMatch(
+      /(?:https?:|pixels|hash|nodeId|documentId)/iu,
+    );
+    controller.dispose();
+    controller.resume();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(acquire).toHaveBeenCalledTimes(2);
+  });
+
+  it('defers a transient OCR host failure and re-runs it on resume', async () => {
+    const diagnostics: unknown[] = [];
+    const pixels = {
+      ...autoProbePixels(descriptor, '7a'.repeat(32)),
+      nearestElementLanguage: 'en' as const,
+    };
+    const recognize = vi.fn(async (): Promise<ImageRecognitionResult> => ({
+      status: 'failed',
+      code: 'host-unavailable',
+    }));
+    const controller = new ImageTranslationController({
+      openSource: async (_request, onChange) => {
+        queueMicrotask(() => onChange({ kind: 'upsert', descriptor }));
+        return { measure: vi.fn(), dispose: vi.fn() };
+      },
+      createPixelCoordinator: () => ({
+        acquire: async () => ({ status: 'ready', pixels }),
+      }) as unknown as PixelAcquisitionCoordinator,
+      createRecognitionCoordinator: () => ({
+        recognize,
+        clear: vi.fn(),
+        advanceResetEpoch: vi.fn(() => true),
+      }) as unknown as ImageRecognitionCoordinator,
+      resolveAnchor: () => ({
+        document: sourceDocument,
+        replayLease: 1,
+        image: { isConnected: true } as HTMLImageElement,
+        iframe: {} as HTMLIFrameElement,
+      }),
+      translationProvider: {
+        availability: async () => 'available',
+        createSession: vi.fn(),
+      },
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      projector: testProjectorEnvironment(),
+    });
+    controller.configure({
+      enabled: true,
+      scanPolicy: 'visible-only',
+      skipSmallImages: false,
+      providerOrder: ['tesseract'],
+      sourceLanguage: 'en',
+      targetLanguage: 'ja',
+      translationIdle: true,
+      resetEpoch: 0,
+    });
+    controller.activateReplica(request, 3, 1);
+    const failure = (ordinal: number, code: string) => ({
+      stage: 'recognition-failed',
+      code,
+      ordinal,
+      renderedWidth: 200,
+      renderedHeight: 100,
+      bitmapWidth: 200,
+      bitmapHeight: 100,
+    });
+
+    await vi.waitFor(() => expect(diagnostics).toContainEqual(
+      failure(1, 'host-unavailable'),
+    ));
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(recognize).toHaveBeenCalledOnce();
+
+    // The offscreen host is back: the image is retried, not marked done.
+    controller.resume();
+    await vi.waitFor(() => expect(diagnostics).toContainEqual(
+      failure(2, 'host-unavailable'),
+    ));
+    expect(recognize).toHaveBeenCalledTimes(2);
+
+    // Losing the worker mid-job is transient in the same way.
+    recognize.mockResolvedValueOnce({ status: 'failed', code: 'worker-lost' });
+    controller.resume();
+    await vi.waitFor(() => expect(diagnostics).toContainEqual(
+      failure(3, 'worker-lost'),
+    ));
+
+    // A recognition error is final for this revision and stays settled.
+    recognize.mockResolvedValueOnce({
+      status: 'failed',
+      code: 'recognition-failed',
+    });
+    controller.resume();
+    await vi.waitFor(() => expect(diagnostics).toContainEqual(
+      failure(4, 'recognition-failed'),
+    ));
+    controller.resume();
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(recognize).toHaveBeenCalledTimes(4);
+    expect(JSON.stringify(diagnostics)).not.toMatch(
+      /(?:https?:|pixels|hash|nodeId|documentId)/iu,
+    );
+    controller.dispose();
+  });
+
+  it('re-queues anchor-deferred images when the live replica commits', async () => {
+    const diagnostics: unknown[] = [];
+    let anchorAvailable = false;
+    const acquire = vi.fn(async () => ({
+      status: 'deferred' as const,
+      reason: 'hidden' as const,
+    }));
+    const controller = new ImageTranslationController({
+      openSource: async (_request, onChange) => {
+        queueMicrotask(() => onChange({ kind: 'upsert', descriptor }));
+        return { measure: vi.fn(), dispose: vi.fn() };
+      },
+      createPixelCoordinator: () => ({
+        acquire,
+      }) as unknown as PixelAcquisitionCoordinator,
+      createRecognitionCoordinator: vi.fn(),
+      resolveAnchor: () => anchorAvailable
+        ? {
+            document: sourceDocument,
+            replayLease: 1,
+            image: { isConnected: true } as HTMLImageElement,
+            iframe: {} as HTMLIFrameElement,
+          }
+        : undefined,
+      translationProvider: {
+        availability: async () => 'available',
+        createSession: vi.fn(),
+      },
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      projector: testProjectorEnvironment(),
+    });
+    controller.configure({
+      enabled: true,
+      scanPolicy: 'visible-only',
+      skipSmallImages: false,
+      providerOrder: ['tesseract'],
+      sourceLanguage: 'en',
+      targetLanguage: 'ja',
+      translationIdle: true,
+      resetEpoch: 0,
+    });
+    controller.activateReplica(request, 3, 1);
+    const anchorDeferrals = () =>
+      diagnostics.filter((diagnostic) => diagnostic === 'anchor-deferred').length;
+
+    await vi.waitFor(() => expect(anchorDeferrals()).toBe(1));
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(acquire).not.toHaveBeenCalled();
+
+    // A same-lease live commit re-checks the anchor; still missing.
+    expect(controller.notifyReplicaCommit(sourceDocument, 1)).toBe(true);
+    await vi.waitFor(() => expect(anchorDeferrals()).toBe(2));
+    expect(acquire).not.toHaveBeenCalled();
+
+    // The commit that adds the replica node lets the job proceed to capture.
+    anchorAvailable = true;
+    expect(controller.notifyReplicaCommit(sourceDocument, 1)).toBe(true);
+    await vi.waitFor(() => expect(acquire).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(diagnostics).toContainEqual({
+      stage: 'capture-deferred',
+      ordinal: 3,
+      reason: 'hidden',
+      renderedWidth: 200,
+      renderedHeight: 100,
+    }));
+
+    // An observation deferral (hidden) is not an anchor deferral: further
+    // commits leave it alone until resume() or a new observation.
+    expect(controller.notifyReplicaCommit(sourceDocument, 1)).toBe(true);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(acquire).toHaveBeenCalledOnce();
+    controller.resume();
+    await vi.waitFor(() => expect(acquire).toHaveBeenCalledTimes(2));
+    expect(anchorDeferrals()).toBe(2);
     controller.dispose();
   });
 
