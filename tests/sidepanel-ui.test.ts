@@ -174,7 +174,7 @@ describe('sidepanel UI structure', () => {
       'const saved = await commitViewPreferencePatch({ popoutTabMode })',
     );
     expect(script).toContain(
-      '!saved || preferences.popoutTabMode !== popoutTabMode',
+      '!saved || state.preferences.popoutTabMode !== popoutTabMode',
     );
   });
 

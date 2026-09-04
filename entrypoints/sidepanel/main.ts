@@ -12,7 +12,6 @@ import {
 } from '../../lib/companion-lifecycle';
 import {
   nextCompanionOverlay,
-  reverseTranslationPair,
   type CompanionOverlay,
 } from '../../lib/companion-ui-state';
 import {
@@ -21,7 +20,6 @@ import {
 import { resolveSourceLanguage } from '../../lib/language-detection';
 import {
   LANGUAGE_OPTION_ORDER,
-  createSourceLanguageLabeler,
   languageEndonym,
 } from '../../lib/language-options';
 import {
@@ -57,13 +55,11 @@ import {
   isNewerCompanionLaunchStamp,
   sameCompanionSourcePage,
   shouldFollowActivatedTab,
-  type CompanionLaunchStamp,
 } from '../../lib/companion-surface';
 import {
   capturePageSnapshot,
   parsePageSnapshot,
   type PageSnapshot,
-  type SnapshotTextRole,
 } from '../../lib/page-snapshot';
 import {
   compiledImageAnalysisCapabilities,
@@ -88,7 +84,6 @@ import {
 } from '../../lib/preference-coordinator';
 import {
   ALL_SITES_PERMISSION_ORIGINS,
-  DEFAULT_COMPANION_PREFERENCES,
   STORAGE_KEY,
   autoTranslationModeForPage,
   clampZoomPercent,
@@ -102,21 +97,29 @@ import {
   parseCompanionPreferences,
   permissionOriginsForMode,
   withAutoTranslationMode,
-  withImageAnalysisSettings,
   withViewSettings,
   type AutoTranslationMode,
   type CompanionLaunchBehavior,
   type CompanionPreferences,
   type CompanionSurface,
-  type CompanionImageAnalysisSettings,
   type CompanionImageAnalysisSettingsPatch,
-  type CompanionViewSettings,
   type CompanionViewSettingsPatch,
   type PopoutTabMode,
   type ReplicaViewMode,
 } from '../../lib/preferences';
 import { translateWithSession } from '../../lib/translation-pipeline';
+import {
+  CompanionState,
+  availabilityPairKey,
+  sameTranslationPair,
+  type CaptureRequest,
+  type ImageCaptureAccess,
+  type PendingImageReplicaActivation,
+  type PendingLiveUpdate,
+} from './companion-state';
+import { Currency, type CurrencyToken } from './currency';
 import { ImageAnalysisPanel } from './image-analysis-panel';
+import { MirrorView } from './mirror-view';
 import { PreferenceClient } from './preference-client';
 import { QuickComposer } from './quick-composer';
 import { ToolbarStatus } from './toolbar-status';
@@ -168,45 +171,14 @@ import {
   SUPPORTED_LANGUAGES,
   languageName,
   type SupportedLanguage,
-  type TranslationAvailability,
   type TranslationPair,
   type TranslationSession,
 } from '../../lib/translation-provider';
 import {
   applyLivePageDelta,
-  applyMirrorTextLayout,
-  countVisualMirrorTranslationFields,
-  computeMirrorExtent,
-  computeMirrorScale,
-  createVisualMirror,
   resetVisualMirrorText,
   translateVisualMirror,
 } from '../../lib/visual-renderer';
-
-interface CaptureRequest {
-  identity: CapturedPageIdentity;
-  reason:
-    | 'initial'
-    | 'manual'
-    | 'navigation'
-    | 'authorized'
-    | 'preference'
-    | 'desynchronized';
-}
-
-interface PendingLiveUpdate {
-  generation: number;
-  firstSequence: number;
-  sequence: number;
-  nodeIds: Set<string>;
-}
-
-interface PendingImageReplicaActivation {
-  readonly request: ReplicaCaptureRequest;
-  readonly sourceWindowId: number;
-  readonly signal: AbortSignal;
-  activated: boolean;
-}
 
 const ZOOM_COMMIT_DEBOUNCE_MS = 150;
 const NAVIGATION_DEBOUNCE_MS = 350;
@@ -309,19 +281,31 @@ const composerToLanguage = requireElement<HTMLElement>('#composer-to-language');
 const composerGuidance = requireElement<HTMLElement>('#composer-guidance');
 const composerStatus = requireElement<HTMLElement>('#composer-status');
 
-let preferences: CompanionPreferences = parseCompanionPreferences(
-  DEFAULT_COMPANION_PREFERENCES,
-);
 const provider = new ChromeTranslatorProvider();
 const captureCoordinator = new LatestWorkCoordinator<CaptureRequest>();
 const detachedIdentityHint = parseDetachedPageIdentityHint(window.location.search);
 const isDetachedWindow = detachedIdentityHint !== undefined;
 const liveSessionId = crypto.randomUUID();
+const state = new CompanionState({
+  isDetachedWindow,
+  ...(detachedIdentityHint ? { detachedSourceWindowId: detachedIdentityHint.windowId } : {}),
+});
+const currency = new Currency();
+const legacyTransitionGate = new LegacyTransitionGate();
+const liveReplicaFailureRecoveryGate = new LiveReplicaFailureRecoveryGate();
 const visibleReplayHost = new VisibleReplayHost({
   hostDocument: document,
   legacySurface: snapshotContainer,
   previewSurface: replicaPreviewContainer,
   badge: replicaModeBadge,
+});
+const mirrorView = new MirrorView({
+  document,
+  container: snapshotContainer,
+  replayHost: visibleReplayHost,
+  readPreferences: () => state.preferences,
+  readSourceScroll: () => state.lastSourceScroll,
+  onLayoutUpdated: () => imageTranslationController?.refreshOverlays(),
 });
 let replicaEngineController!: ReplicaEngineController;
 let replicaTranslationCoordinator!: ReplicaTranslationCoordinator;
@@ -330,7 +314,7 @@ const replicaSurfaceRouter = new ReplicaSurfaceRouter();
 const isolatedHtmlReplicaEngine = new IsolatedHtmlReplicaEngine({
   presentationHost: visibleReplayHost,
   openStream: openChromeHtmlMirrorStream,
-  getReplicaFidelityPolicy: () => preferences.replicaFidelityPolicy,
+  getReplicaFidelityPolicy: () => state.preferences.replicaFidelityPolicy,
   onLiveApplied: () => legacyTransitionGate.markDirty(),
   onLayoutChanged: () => imageTranslationController?.refreshOverlays(),
   onSourceCommit: handleReplicaSourceCommit,
@@ -400,7 +384,7 @@ const uiLocalizer = new UiLocalizer({
   document,
   provider,
   dynamicLabels: DYNAMIC_UI_LABELS,
-  getTargetLanguage: () => preferences.targetLanguage,
+  getTargetLanguage: () => state.preferences.targetLanguage,
   translateRemembered,
 });
 const quickComposer = new QuickComposer({
@@ -414,8 +398,8 @@ const quickComposer = new QuickComposer({
     status: composerStatus,
   },
   provider,
-  selectedPair,
-  getTargetLanguage: () => preferences.targetLanguage,
+  selectedPair: () => state.selectedPair(),
+  getTargetLanguage: () => state.preferences.targetLanguage,
   translateRemembered,
   setUiText: (element, english) => uiLocalizer.setText(element, english),
   setStatus,
@@ -430,14 +414,14 @@ const imageAnalysisPanel = new ImageAnalysisPanel({
   compiledProviderOrder: effectiveCompiledProviderOrder,
   hasCompiledCapability: hasCompiledImageAnalysisCapability,
   readView: () => ({
-    imageTranslationEnabled: preferences.imageTranslationEnabled,
-    imageCaptureAccess,
-    permissionInFlight,
-    imageTextProviderOrder: preferences.imageTextProviderOrder,
-    imageScanPolicy: preferences.imageScanPolicy,
-    skipSmallImages: preferences.skipSmallImages,
-    usePromptForImageLanguage: preferences.usePromptForImageLanguage,
-    usePromptForImageText: preferences.usePromptForImageText,
+    imageTranslationEnabled: state.preferences.imageTranslationEnabled,
+    imageCaptureAccess: state.imageCaptureAccess,
+    permissionInFlight: state.permissionInFlight,
+    imageTextProviderOrder: state.preferences.imageTextProviderOrder,
+    imageScanPolicy: state.preferences.imageScanPolicy,
+    skipSmallImages: state.preferences.skipSmallImages,
+    usePromptForImageLanguage: state.preferences.usePromptForImageLanguage,
+    usePromptForImageText: state.preferences.usePromptForImageText,
   }),
   setUiText: (element, english) => uiLocalizer.setText(element, english),
   changeImageTranslationEnabled,
@@ -456,29 +440,24 @@ const toolbarStatus = new ToolbarStatus({
     progressElement,
   },
   readActivity: () => ({
-    captureInFlight,
-    translationInFlight,
-    permissionInFlight,
+    ...state.activity,
     composerInFlight: quickComposer.inFlight,
-    liveDeltaInFlight,
-    imageTranslationInFlight,
-    surfaceTransitionInFlight,
   }),
-  isSettingsOpen: () => openCompanionOverlay === 'settings',
+  isSettingsOpen: () => state.openCompanionOverlay === 'settings',
 });
 const preferenceClient = new PreferenceClient({
   store: {
-    get: () => preferences,
+    get: () => state.preferences,
     set: (next) => {
-      preferences = next;
+      state.preferences = next;
       syncPreferenceControls();
     },
   },
   sendMessage: (command) => browser.runtime.sendMessage(command),
   readStorage: () => browser.storage.local.get(STORAGE_KEY),
   onViewSettled: () => {
-    updateMirrorLayout();
-    if (visualRoot) applyMirrorTextLayout(visualRoot, preferences.textLayoutMode);
+    mirrorView.updateLayout();
+    mirrorView.applyTextLayout(state.preferences.textLayoutMode);
   },
   onError: (message) => setStatus(message, 'error'),
   readableError,
@@ -492,7 +471,7 @@ replicaTranslationCoordinator = new ReplicaTranslationCoordinator(
       if (!replicaTranslationCoordinator.isResultCurrent(result)) return;
       logTranslationCache('page', translationMemory);
       if (!isCompleteReplicaTranslationResult(result)) {
-        translationComplete = false;
+        state.translationComplete = false;
         setStatus(
           describePartialReplicaTranslation(
             result,
@@ -502,10 +481,10 @@ replicaTranslationCoordinator = new ReplicaTranslationCoordinator(
         );
       } else if (result.completed > 0) {
         setStatus(
-          translationComplete
+          state.translationComplete
             ? 'Live page changes were mirrored and translated.'
             : 'Live page changes were translated, but earlier incomplete text still needs Translate page.',
-          translationComplete ? 'success' : 'warning',
+          state.translationComplete ? 'success' : 'warning',
         );
       }
       updateControls();
@@ -541,7 +520,7 @@ imageTranslationController = new ImageTranslationController({
 });
 
 function handleReplicaSourceCommit(commit: ReplicaSourceCommit): void {
-  const pending = pendingImageReplicaActivation;
+  const pending = state.pendingImageReplicaActivation;
   const selectedSnapshot = replicaSurfaceRouter.snapshot();
   if (
     pending &&
@@ -570,24 +549,24 @@ function handleReplicaSourceCommit(commit: ReplicaSourceCommit): void {
       commit.replayLease,
     );
   }
-  if (isLiveSourceOnlyMode()) return;
+  if (state.isLiveSourceOnlyMode) return;
   replicaTranslationCoordinator.handleSourceCommit(commit);
   const action = replicaSourceCommitAction(
     commit,
-    preferences.sourceLanguage === 'auto',
+    state.preferences.sourceLanguage === 'auto',
   );
   if (!action.prepareForNewText && !action.refreshDetectedLanguage) return;
-  const refreshVersion = ++replicaLanguageRefreshVersion;
+  const refresh = currency.begin('language-refresh');
   void reconcileReplicaTranslationAfterCommit(
     commit,
-    refreshVersion,
+    refresh,
     action.refreshDetectedLanguage,
     action.prepareForNewText,
   );
 }
 
 function handleReplicaLiveFailure(code: ReplicaDiagnosticCode): void {
-  const identity = followedPageIdentity ?? capturedPageIdentity;
+  const identity = state.followedOrCapturedIdentity;
   const action = identity
     ? liveReplicaFailureRecoveryGate.decide(
         visibleReplayHost.hasCommittedReplica,
@@ -617,58 +596,6 @@ function handleReplicaLiveFailure(code: ReplicaDiagnosticCode): void {
   if (identity) queueCapture({ identity, reason: 'desynchronized' });
 }
 
-let snapshot: PageSnapshot | undefined;
-let followedPageIdentity: CapturedPageIdentity | undefined;
-let capturedPageIdentity: CapturedPageIdentity | undefined;
-let capturedPageDocumentId: string | undefined;
-let resolvedSourceLanguage: SupportedLanguage | undefined;
-let availability: TranslationAvailability = 'unavailable';
-let availabilityRequestId = 0;
-let replicaLanguageRefreshVersion = 0;
-let identityRequestId = 0;
-let captureInFlight = false;
-let translationInFlight = false;
-let permissionInFlight = false;
-let imageCaptureAccess: 'checking' | 'granted' | 'missing' = 'checking';
-let imageCaptureAccessRevision = 0;
-let imageTranslationInFlight = false;
-let translationDesired = false;
-let translationComplete = false;
-let openCompanionOverlay: CompanionOverlay | undefined;
-let activeAbortController: AbortController | undefined;
-let activeTranslationKey: string | undefined;
-let liveDeltaAbortController: AbortController | undefined;
-let replicaShadowAbortController: AbortController | undefined;
-let activeTranslationTask: Promise<void> | undefined;
-let navigationTimer: ReturnType<typeof setTimeout> | undefined;
-let mirrorResizeObserver: ResizeObserver | undefined;
-let panelWindowId: number | undefined;
-let detachedSourceWindowId = detachedIdentityHint?.windowId;
-let visualRoot: HTMLElement | undefined;
-let mirrorScroller: HTMLElement | undefined;
-let mirrorStage: HTMLElement | undefined;
-let mirrorScaleLayer: HTMLElement | undefined;
-let mirrorViewportWidth = 1;
-let mirrorDocumentWidth = 1;
-let mirrorDocumentHeight = 1;
-let currentMirrorScale = 1;
-let liveDeltaInFlight = false;
-let pendingLiveUpdate: PendingLiveUpdate | undefined;
-let activeLiveUpdate: PendingLiveUpdate | undefined;
-const legacyTransitionGate = new LegacyTransitionGate();
-const liveReplicaFailureRecoveryGate = new LiveReplicaFailureRecoveryGate();
-let latestLiveSequence = 0;
-let highestReceivedLiveSequence = 0;
-let liveSequenceBaselineReady = false;
-let liveObservationAvailable = true;
-let lastSourceScroll: ReturnType<typeof readLivePageScrollMessage>;
-let acceptedScrollMessageCount = 0;
-let availabilityCheckedForPair: string | undefined;
-let replicaFidelityCommitInFlight = false;
-let surfaceTransitionInFlight = false;
-let latestToolbarLaunchStamp: CompanionLaunchStamp | undefined;
-let pendingImageReplicaActivation: PendingImageReplicaActivation | undefined;
-
 const companionBuildIdentity = createExtensionBuildIdentity(
   browser.runtime.getManifest(),
 );
@@ -682,21 +609,21 @@ observeReplicaStateLabel();
 uiLocalizer.schedule();
 
 toggleSettingsButton.addEventListener('click', () => {
-  setCompanionOverlay(nextCompanionOverlay(openCompanionOverlay, 'settings'));
+  setCompanionOverlay(nextCompanionOverlay(state.openCompanionOverlay, 'settings'));
 });
 toggleQuickTranslateButton.addEventListener('click', () => {
   setCompanionOverlay(
-    nextCompanionOverlay(openCompanionOverlay, 'quick-translate'),
+    nextCompanionOverlay(state.openCompanionOverlay, 'quick-translate'),
   );
 });
 closeSettingsButton.addEventListener('click', () => setCompanionOverlay());
 closeQuickTranslateButton.addEventListener('click', () => setCompanionOverlay());
 popoutButton.addEventListener('click', () => {
-  if (surfaceTransitionInFlight) return;
-  surfaceTransitionInFlight = true;
+  if (state.surfaceTransitionInFlight) return;
+  state.surfaceTransitionInFlight = true;
   updateControls();
   void (isDetachedWindow ? returnToSidePanel() : openDetachedWindow()).finally(() => {
-    surfaceTransitionInFlight = false;
+    state.surfaceTransitionInFlight = false;
     updateControls();
   });
 });
@@ -705,29 +632,29 @@ toolbarAutoDetectButton.addEventListener('click', () => {
   void languageSelectionChanged();
 });
 toolbarSizeToggleButton.addEventListener('click', () => {
-  const displayMode = preferences.displayMode === 'fit' ? 'actual' : 'fit';
+  const displayMode = state.preferences.displayMode === 'fit' ? 'actual' : 'fit';
   void commitViewPreferencePatch({ displayMode });
-  updateMirrorLayout();
+  mirrorView.updateLayout();
 });
 toolbarOcrToggleButton.addEventListener('click', () => {
   void changeImageTranslationEnabled(
-    !preferences.imageTranslationEnabled || imageCaptureAccess !== 'granted',
+    !state.preferences.imageTranslationEnabled || state.imageCaptureAccess !== 'granted',
   );
 });
 toolbarTabFollowButton.addEventListener('click', () => {
   if (!isDetachedWindow) return;
   void changePopoutTabMode(
-    preferences.popoutTabMode === 'active' ? 'locked' : 'active',
+    state.preferences.popoutTabMode === 'active' ? 'locked' : 'active',
   );
 });
 
 sourceSelect.addEventListener('change', () => void languageSelectionChanged());
 targetSelect.addEventListener('change', () => void languageSelectionChanged());
 swapButton.addEventListener('click', () => {
-  if (!resolvedSourceLanguage) return;
+  if (!state.resolvedSourceLanguage) return;
   const previousTarget = targetSelect.value;
   sourceSelect.value = previousTarget;
-  targetSelect.value = resolvedSourceLanguage;
+  targetSelect.value = state.resolvedSourceLanguage;
   void languageSelectionChanged();
 });
 
@@ -743,7 +670,7 @@ displayModeSelect.addEventListener('change', () => {
     ? displayModeSelect.value
     : 'fit';
   void commitViewPreferencePatch({ displayMode: mode });
-  updateMirrorLayout();
+  mirrorView.updateLayout();
 });
 
 textLayoutSelect.addEventListener('change', () => {
@@ -751,8 +678,8 @@ textLayoutSelect.addEventListener('change', () => {
     ? textLayoutSelect.value
     : 'adaptive';
   void commitViewPreferencePatch({ textLayoutMode: mode });
-  if (visualRoot) applyMirrorTextLayout(visualRoot, mode);
-  updateMirrorLayout();
+  mirrorView.applyTextLayout(mode);
+  mirrorView.updateLayout();
 });
 
 replicaFidelityPolicySelect.addEventListener('change', () => {
@@ -788,32 +715,32 @@ popoutTabModeSelect.addEventListener('change', () => {
 
 syncScrollInput.addEventListener('change', () => {
   void commitViewPreferencePatch({ syncScroll: syncScrollInput.checked });
-  if (preferences.syncScroll && lastSourceScroll) followSourceScroll(lastSourceScroll);
+  if (state.preferences.syncScroll && state.lastSourceScroll) mirrorView.followSourceScroll(state.lastSourceScroll);
 });
 
 zoomInput.addEventListener('input', () => setZoom(Number(zoomInput.value)));
-zoomInButton.addEventListener('click', () => setZoom(preferences.zoomPercent + 10));
-zoomOutButton.addEventListener('click', () => setZoom(preferences.zoomPercent - 10));
+zoomInButton.addEventListener('click', () => setZoom(state.preferences.zoomPercent + 10));
+zoomOutButton.addEventListener('click', () => setZoom(state.preferences.zoomPercent - 10));
 const requestManualRefresh = (): void => {
   void refreshFollowedPage('manual');
 };
 refreshButton.addEventListener('click', requestManualRefresh);
 compactRefreshButton.addEventListener('click', requestManualRefresh);
 translateButton.addEventListener('click', () => {
-  if (!isLiveSourceOnlyMode()) translationDesired = true;
+  if (!state.isLiveSourceOnlyMode) state.translationDesired = true;
   void startTranslation(false, captureCoordinator.generation);
 });
 cancelButton.addEventListener('click', () => {
-  activeAbortController?.abort();
+  state.activeAbortController?.abort();
   const composerCancelled = quickComposer.cancel();
   imageTranslationController.cancelCurrent();
   setStatus(
-    translationInFlight || imageTranslationInFlight
+    state.translationInFlight || state.imageTranslationInFlight
       ? 'Cancelling on-device translation…'
       : composerCancelled
         ? 'Quick translation cancelled.'
         : 'Nothing is currently being translated.',
-    composerCancelled && !translationInFlight && !imageTranslationInFlight
+    composerCancelled && !state.translationInFlight && !state.imageTranslationInFlight
       ? 'warning'
       : 'normal',
   );
@@ -821,14 +748,14 @@ cancelButton.addEventListener('click', () => {
 translateComposerButton.addEventListener('click', () => void quickComposer.translate());
 copyComposerButton.addEventListener('click', () => void quickComposer.copy());
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && openCompanionOverlay) {
+  if (event.key === 'Escape' && state.openCompanionOverlay) {
     event.preventDefault();
     setCompanionOverlay();
   }
 });
 window.addEventListener('pagehide', () => {
   uiLocalizer.cancel();
-  replicaShadowAbortController?.abort();
+  state.replicaShadowAbortController?.abort();
   imageTranslationController.dispose();
   replicaTranslationCoordinator.dispose();
   replicaEngineController.dispose();
@@ -867,20 +794,20 @@ browser.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =
       scroll.url,
     )
   ) {
-    lastSourceScroll = scroll;
-    acceptedScrollMessageCount += 1;
-    const logScroll = acceptedScrollMessageCount <= 3 ||
-      acceptedScrollMessageCount % 50 === 0;
+    state.lastSourceScroll = scroll;
+    state.acceptedScrollMessageCount += 1;
+    const logScroll = state.acceptedScrollMessageCount <= 3 ||
+      state.acceptedScrollMessageCount % 50 === 0;
     if (logScroll) {
       console.info(
-        `[Simul scroll] received; count=${acceptedScrollMessageCount}; target=${scroll.scrollTarget}`,
+        `[Simul scroll] received; count=${state.acceptedScrollMessageCount}; target=${scroll.scrollTarget}`,
       );
     }
-    if (preferences.syncScroll) {
-      followSourceScroll(scroll);
+    if (state.preferences.syncScroll) {
+      mirrorView.followSourceScroll(scroll);
       if (logScroll) {
         console.info(
-          `[Simul scroll] projected; count=${acceptedScrollMessageCount}; target=${scroll.scrollTarget}`,
+          `[Simul scroll] projected; count=${state.acceptedScrollMessageCount}; target=${scroll.scrollTarget}`,
         );
       }
     }
@@ -895,12 +822,12 @@ document.addEventListener('visibilitychange', () => {
 browser.tabs.onActivated.addListener(({ tabId, windowId }) => {
   // Images deferred while the followed tab was inactive can be captured
   // again now that it is the active tab.
-  if (followedPageIdentity?.tabId === tabId) imageTranslationController?.resume();
+  if (state.followedPageIdentity?.tabId === tabId) imageTranslationController?.resume();
   if (
     shouldFollowActivatedTab(
       isDetachedWindow,
-      preferences.popoutTabMode,
-      panelWindowId,
+      state.preferences.popoutTabMode,
+      state.panelWindowId,
       windowId,
     )
   ) {
@@ -909,11 +836,11 @@ browser.tabs.onActivated.addListener(({ tabId, windowId }) => {
   }
   if (
     !isDetachedWindow &&
-    followedPageIdentity?.windowId === windowId &&
-    followedPageIdentity.tabId !== tabId
+    state.followedPageIdentity?.windowId === windowId &&
+    state.followedPageIdentity.tabId !== tabId
   ) {
-    identityRequestId += 1;
-    followedPageIdentity = undefined;
+    currency.supersede('identity');
+    state.followedPageIdentity = undefined;
     clearNavigationTimer();
     invalidateCompanion(
       'The active tab changed. Select the extension on the page you want to follow.',
@@ -924,35 +851,35 @@ browser.tabs.onActivated.addListener(({ tabId, windowId }) => {
 browser.windows.onFocusChanged.addListener((windowId) => {
   if (
     !isDetachedWindow ||
-    preferences.popoutTabMode !== 'active' ||
+    state.preferences.popoutTabMode !== 'active' ||
     windowId === browser.windows.WINDOW_ID_NONE ||
-    windowId === panelWindowId
+    windowId === state.panelWindowId
   ) return;
   // The pending navigation refresh is left armed: its callback re-validates
   // the followed identity, and clearing it here lost the refresh whenever
   // focus moved within the debounce window (review M1).
-  const requestId = ++identityRequestId;
-  void followFocusedBrowserWindow(windowId, requestId);
+  const request = currency.begin('identity');
+  void followFocusedBrowserWindow(windowId, request);
 });
 
 browser.tabs.onAttached.addListener((tabId, { newWindowId }) => {
   if (
     isDetachedWindow &&
-    followedPageIdentity?.tabId === tabId &&
-    newWindowId !== panelWindowId
+    state.followedPageIdentity?.tabId === tabId &&
+    newWindowId !== state.panelWindowId
   ) {
-    if (preferences.popoutTabMode === 'active') {
+    if (state.preferences.popoutTabMode === 'active') {
       void followActivatedSourceTab(tabId, newWindowId);
     } else {
-      const requestId = ++identityRequestId;
+      const request = currency.begin('identity');
       clearNavigationTimer();
-      void followMovedLockedSourceTab(tabId, newWindowId, requestId);
+      void followMovedLockedSourceTab(tabId, newWindowId, request);
     }
   }
 });
 
 browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  const followed = followedPageIdentity;
+  const followed = state.followedPageIdentity;
   if (!followed || followed.tabId !== tabId) return;
   const nextUrl = changeInfo.url ?? tab.url ?? followed.url;
   if (!isSupportedPage(nextUrl)) {
@@ -973,27 +900,24 @@ browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     typeof changeInfo.url === 'string' &&
     normalizedPageUrl(nextUrl) === normalizedPageUrl(followed.url)
   ) {
-    followedPageIdentity = nextIdentity;
+    state.followedPageIdentity = nextIdentity;
     if (
-      capturedPageIdentity &&
-      capturedPageIdentity.tabId === tabId &&
-      normalizedPageUrl(capturedPageIdentity.url) === normalizedPageUrl(nextUrl)
+      state.capturedPageIdentity &&
+      state.capturedPageIdentity.tabId === tabId &&
+      normalizedPageUrl(state.capturedPageIdentity.url) === normalizedPageUrl(nextUrl)
     ) {
-      capturedPageIdentity = { ...capturedPageIdentity, url: nextUrl };
+      state.capturedPageIdentity = { ...state.capturedPageIdentity, url: nextUrl };
     }
     return;
   }
   if (changeInfo.status === 'loading' || typeof changeInfo.url === 'string') {
-    identityRequestId += 1;
     captureCoordinator.invalidate();
-    availabilityRequestId += 1;
-    activeAbortController?.abort();
-    liveDeltaAbortController?.abort();
-    replicaShadowAbortController?.abort();
+    currency.supersedePage();
+    state.abortPageWork();
     imageTranslationController.releaseReplica();
     quickComposer.invalidate();
-    pendingLiveUpdate = undefined;
-    followedPageIdentity = nextIdentity;
+    state.pendingLiveUpdate = undefined;
+    state.followedPageIdentity = nextIdentity;
     clearNavigationTimer();
     setStatus('The source page is changing; the current mirror stays visible until the new page is ready.');
   }
@@ -1006,7 +930,7 @@ browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 });
 
 browser.tabs.onRemoved.addListener((tabId) => {
-  if (followedPageIdentity?.tabId === tabId) {
+  if (state.followedPageIdentity?.tabId === tabId) {
     invalidateCompanion('The source tab was closed.');
   }
 });
@@ -1021,45 +945,45 @@ browser.permissions.onRemoved.addListener(() => {
 
 browser.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== 'local' || !(STORAGE_KEY in changes)) return;
-  const previous = preferences;
-  preferences = mergePendingViewPreferences(
+  const previous = state.preferences;
+  state.preferences = mergePendingViewPreferences(
     parseCompanionPreferences(changes[STORAGE_KEY]?.newValue),
   );
   if (
     isDetachedWindow &&
-    previous.popoutTabMode !== preferences.popoutTabMode &&
-    preferences.popoutTabMode === 'active'
+    previous.popoutTabMode !== state.preferences.popoutTabMode &&
+    state.preferences.popoutTabMode === 'active'
   ) {
     void followCurrentActiveSourceTab();
   }
-  if (previous.replicaFidelityPolicy !== preferences.replicaFidelityPolicy) {
+  if (previous.replicaFidelityPolicy !== state.preferences.replicaFidelityPolicy) {
     liveReplicaFailureRecoveryGate.reset();
-    const identity = followedPageIdentity ?? capturedPageIdentity;
+    const identity = state.followedOrCapturedIdentity;
     if (identity) queueCapture({ identity, reason: 'preference' });
   }
-  if (previous.replicaViewMode !== preferences.replicaViewMode) {
+  if (previous.replicaViewMode !== state.preferences.replicaViewMode) {
     applyReplicaViewMode(previous.replicaViewMode);
   }
   syncPreferenceControls();
-  updateMirrorLayout();
-  if (visualRoot) applyMirrorTextLayout(visualRoot, preferences.textLayoutMode);
+  mirrorView.updateLayout();
+  mirrorView.applyTextLayout(state.preferences.textLayoutMode);
   if (
-    snapshot &&
-    (previous.sourceLanguage !== preferences.sourceLanguage ||
-      previous.targetLanguage !== preferences.targetLanguage)
+    state.snapshot &&
+    (previous.sourceLanguage !== state.preferences.sourceLanguage ||
+      previous.targetLanguage !== state.preferences.targetLanguage)
   ) {
     const needsFreshCapture = releaseReplicaPresentationForLegacyWork();
-    activeAbortController?.abort();
+    state.activeAbortController?.abort();
     abortAndRequeueLiveDelta();
     quickComposer.invalidate();
     // The window that changed the languages already recorded its own intent
     // in languageSelectionChanged. A change made in another companion window
     // must not opt this one into translating.
-    translationComplete = false;
-    availabilityCheckedForPair = undefined;
-    resetVisualMirrorTextIfPresent();
+    state.translationComplete = false;
+    state.availabilityCheckedForPair = undefined;
+    mirrorView.resetTextIfPresent();
     if (needsFreshCapture) {
-      const identity = followedPageIdentity ?? capturedPageIdentity;
+      const identity = state.followedOrCapturedIdentity;
       if (identity) {
         queueCapture({ identity, reason: 'preference' });
         return;
@@ -1080,7 +1004,7 @@ async function initialize(): Promise<void> {
   ]);
   if (sourceResult.status === 'rejected') {
     const message = readPageError(sourceResult.reason);
-    renderErrorState(message);
+    mirrorView.renderError(message);
     setStatus(message, 'error');
     updateControls();
   }
@@ -1088,14 +1012,14 @@ async function initialize(): Promise<void> {
 
 async function initializeSourcePage(): Promise<void> {
   if (detachedIdentityHint) {
-    followedPageIdentity = preferences.popoutTabMode === 'active'
+    state.followedPageIdentity = state.preferences.popoutTabMode === 'active'
       ? await readActivePageIdentity(detachedIdentityHint.windowId)
       : identityFromTab(
           await browser.tabs.get(detachedIdentityHint.tabId),
           undefined,
           false,
         );
-    queueCapture({ identity: followedPageIdentity, reason: 'initial' });
+    queueCapture({ identity: state.followedPageIdentity, reason: 'initial' });
     return;
   }
   await refreshFollowedPage('initial');
@@ -1103,9 +1027,9 @@ async function initializeSourcePage(): Promise<void> {
 
 async function loadPanelWindowId(): Promise<void> {
   try {
-    panelWindowId = (await browser.windows.getCurrent()).id;
+    state.panelWindowId = (await browser.windows.getCurrent()).id;
   } catch {
-    panelWindowId = undefined;
+    state.panelWindowId = undefined;
   }
 }
 
@@ -1148,9 +1072,9 @@ async function reloadPreferencesFromStorage(): Promise<void> {
 async function refreshImageCaptureAccess(
   reportRevocation = false,
 ): Promise<void> {
-  const revision = ++imageCaptureAccessRevision;
-  const previous = imageCaptureAccess;
-  let next: typeof imageCaptureAccess;
+  const request = currency.begin('image-access');
+  const previous = state.imageCaptureAccess;
+  let next: ImageCaptureAccess;
   try {
     next = await browser.permissions.contains({
       origins: [...ALL_SITES_PERMISSION_ORIGINS],
@@ -1158,16 +1082,16 @@ async function refreshImageCaptureAccess(
   } catch {
     next = 'missing';
   }
-  if (revision !== imageCaptureAccessRevision) return;
-  imageCaptureAccess = next;
+  if (!currency.isCurrent(request)) return;
+  state.imageCaptureAccess = next;
   imageAnalysisPanel.render();
   configureImageTranslation();
   updateControls();
   if (
     reportRevocation &&
     previous === 'granted' &&
-    imageCaptureAccess === 'missing' &&
-    preferences.imageTranslationEnabled
+    state.imageCaptureAccess === 'missing' &&
+    state.preferences.imageTranslationEnabled
   ) {
     setStatus(
       'Image access was removed. Your image-translation setting is saved but paused; open options and choose Grant image access to resume.',
@@ -1177,11 +1101,11 @@ async function refreshImageCaptureAccess(
 }
 
 async function changeImageTranslationEnabled(enabled: boolean): Promise<void> {
-  if (permissionInFlight) {
+  if (state.permissionInFlight) {
     syncPreferenceControls();
     return;
   }
-  permissionInFlight = true;
+  state.permissionInFlight = true;
   imageAnalysisPanel.render();
   updateControls();
   try {
@@ -1252,7 +1176,7 @@ async function changeImageTranslationEnabled(enabled: boolean): Promise<void> {
           return { kind: 'complete', result, narrowAccessRestored } as const;
         } catch (error) {
           const prior = await readStoredPreferences().catch(
-            () => freshPreferences ?? preferences,
+            () => freshPreferences ?? state.preferences,
           );
           if (
             newlyGranted &&
@@ -1295,7 +1219,7 @@ async function changeImageTranslationEnabled(enabled: boolean): Promise<void> {
     if (outcome.kind === 'denied') {
       await reloadPreferencesFromStorage();
       setStatus(
-        preferences.imageTranslationEnabled
+        state.preferences.imageTranslationEnabled
           ? 'Image translation remains paused. Choose Grant image access when you are ready to retry.'
           : 'Chrome did not grant image access, so image translation remains off. You can retry from options.',
         'warning',
@@ -1303,7 +1227,7 @@ async function changeImageTranslationEnabled(enabled: boolean): Promise<void> {
       return;
     }
 
-    preferences = mergePendingViewPreferences(outcome.result.preferences);
+    state.preferences = mergePendingViewPreferences(outcome.result.preferences);
     syncPreferenceControls();
     setStatus(
       enabled
@@ -1320,7 +1244,7 @@ async function changeImageTranslationEnabled(enabled: boolean): Promise<void> {
       'error',
     );
   } finally {
-    permissionInFlight = false;
+    state.permissionInFlight = false;
     await refreshImageCaptureAccess();
     syncPreferenceControls();
     updateControls();
@@ -1329,40 +1253,40 @@ async function changeImageTranslationEnabled(enabled: boolean): Promise<void> {
 
 async function acceptAuthorizedTab(request: AuthorizedTabRequest): Promise<void> {
   const authorized = request.identity;
-  const lockedIdentity = followedPageIdentity ?? detachedIdentityHint;
+  const lockedIdentity = state.followedPageIdentity ?? detachedIdentityHint;
   if (
     isDetachedWindow &&
     lockedIdentity &&
-    preferences.popoutTabMode === 'locked' &&
+    state.preferences.popoutTabMode === 'locked' &&
     (authorized.windowId !== lockedIdentity.windowId ||
       authorized.tabId !== lockedIdentity.tabId)
   ) return;
   if (request.launchStamp) {
     if (!isNewerCompanionLaunchStamp(
-      latestToolbarLaunchStamp,
+      state.latestToolbarLaunchStamp,
       request.launchStamp,
     )) return;
-    latestToolbarLaunchStamp = request.launchStamp;
+    state.latestToolbarLaunchStamp = request.launchStamp;
   }
-  const requestId = ++identityRequestId;
+  const follow = currency.begin('identity');
   if (!isDetachedWindow) {
-    if (panelWindowId === undefined) await loadPanelWindowId();
+    if (state.panelWindowId === undefined) await loadPanelWindowId();
     if (
-      requestId !== identityRequestId ||
-      panelWindowId === undefined ||
-      authorized.windowId !== panelWindowId
+      !currency.isCurrent(follow) ||
+      state.panelWindowId === undefined ||
+      authorized.windowId !== state.panelWindowId
     ) return;
   }
-  if (requestId !== identityRequestId) return;
+  if (!currency.isCurrent(follow)) return;
   clearNavigationTimer();
-  followedPageIdentity = authorized;
+  state.followedPageIdentity = authorized;
   queueCapture({ identity: authorized, reason: 'authorized' });
 }
 
 async function followMovedLockedSourceTab(
   tabId: number,
   windowId: number,
-  requestId: number,
+  request: CurrencyToken,
 ): Promise<void> {
   try {
     const identity = identityFromTab(
@@ -1371,15 +1295,15 @@ async function followMovedLockedSourceTab(
       false,
     );
     if (
-      requestId !== identityRequestId ||
-      preferences.popoutTabMode !== 'locked' ||
+      !currency.isCurrent(request) ||
+      state.preferences.popoutTabMode !== 'locked' ||
       identity.tabId !== tabId ||
       identity.windowId !== windowId
     ) return;
-    detachedSourceWindowId = windowId;
+    state.detachedSourceWindowId = windowId;
     queueCapture({ identity, reason: 'navigation' });
   } catch (error) {
-    if (requestId !== identityRequestId) return;
+    if (!currency.isCurrent(request)) return;
     invalidateCompanion(
       `${readPageError(error)} The locked source tab could not be followed after it moved windows.`,
     );
@@ -1387,55 +1311,55 @@ async function followMovedLockedSourceTab(
 }
 
 async function refreshFollowedPage(reason: CaptureRequest['reason']): Promise<void> {
-  const requestId = ++identityRequestId;
+  const request = currency.begin('identity');
   try {
-    const identity = followedPageIdentity
-      ? await readCurrentFollowedIdentity(followedPageIdentity)
+    const identity = state.followedPageIdentity
+      ? await readCurrentFollowedIdentity(state.followedPageIdentity)
       : await readActivePageIdentity();
-    if (requestId !== identityRequestId) return;
-    followedPageIdentity = identity;
+    if (!currency.isCurrent(request)) return;
+    state.followedPageIdentity = identity;
     queueCapture({ identity, reason });
   } catch (error) {
-    if (requestId !== identityRequestId) return;
+    if (!currency.isCurrent(request)) return;
     const message = readPageError(error);
-    if (!snapshot) renderErrorState(message);
+    if (!state.snapshot) mirrorView.renderError(message);
     setStatus(message, 'error');
     updateControls();
   }
 }
 
 async function followCurrentActiveSourceTab(): Promise<void> {
-  if (!detachedIdentityHint || preferences.popoutTabMode !== 'active') return;
-  const requestId = ++identityRequestId;
+  if (!detachedIdentityHint || state.preferences.popoutTabMode !== 'active') return;
+  const request = currency.begin('identity');
   clearNavigationTimer();
   try {
     const lastFocused = await browser.windows.getLastFocused({
       windowTypes: ['normal'],
     });
     if (
-      requestId !== identityRequestId ||
-      preferences.popoutTabMode !== 'active'
+      !currency.isCurrent(request) ||
+      state.preferences.popoutTabMode !== 'active'
     ) return;
     const sourceWindowId =
       lastFocused.id ??
-      followedPageIdentity?.windowId ??
-      detachedSourceWindowId ??
+      state.followedPageIdentity?.windowId ??
+      state.detachedSourceWindowId ??
       detachedIdentityHint.windowId;
     const [tab] = await browser.tabs.query({
       active: true,
       windowId: sourceWindowId,
     });
     if (
-      requestId !== identityRequestId ||
-      preferences.popoutTabMode !== 'active'
+      !currency.isCurrent(request) ||
+      state.preferences.popoutTabMode !== 'active'
     ) return;
     if (tab?.id === undefined) {
       invalidateCompanion('The source browser window has no active readable tab.');
       return;
     }
-    await followActivatedSourceTab(tab.id, sourceWindowId, tab, requestId);
+    await followActivatedSourceTab(tab.id, sourceWindowId, tab, request);
   } catch (error) {
-    if (requestId !== identityRequestId) return;
+    if (!currency.isCurrent(request)) return;
     invalidateCompanion(
       `${readPageError(error)} Active-tab following needs page access for each newly selected site.`,
     );
@@ -1444,23 +1368,23 @@ async function followCurrentActiveSourceTab(): Promise<void> {
 
 async function followFocusedBrowserWindow(
   windowId: number,
-  requestId: number,
+  request: CurrencyToken,
 ): Promise<void> {
   try {
     const sourceWindow = await browser.windows.get(windowId);
     if (
-      requestId !== identityRequestId ||
-      preferences.popoutTabMode !== 'active'
+      !currency.isCurrent(request) ||
+      state.preferences.popoutTabMode !== 'active'
     ) return;
     if (sourceWindow.type !== undefined && sourceWindow.type !== 'normal') return;
     const [tab] = await browser.tabs.query({ active: true, windowId });
     if (
-      requestId !== identityRequestId ||
-      preferences.popoutTabMode !== 'active'
+      !currency.isCurrent(request) ||
+      state.preferences.popoutTabMode !== 'active'
     ) return;
-    detachedSourceWindowId = windowId;
+    state.detachedSourceWindowId = windowId;
     if (tab?.id !== undefined) {
-      await followActivatedSourceTab(tab.id, windowId, tab, requestId);
+      await followActivatedSourceTab(tab.id, windowId, tab, request);
     }
   } catch {
     // A closing or restricted browser window is not a new source candidate.
@@ -1471,23 +1395,23 @@ async function followActivatedSourceTab(
   tabId: number,
   windowId: number,
   knownTab?: Browser.tabs.Tab,
-  existingRequestId?: number,
+  existingRequest?: CurrencyToken,
 ): Promise<void> {
   if (
     !shouldFollowActivatedTab(
       isDetachedWindow,
-      preferences.popoutTabMode,
-      panelWindowId,
+      state.preferences.popoutTabMode,
+      state.panelWindowId,
       windowId,
     )
   ) return;
 
-  const requestId = existingRequestId ?? ++identityRequestId;
+  const request = existingRequest ?? currency.begin('identity');
   try {
     const sourceWindow = await browser.windows.get(windowId);
     if (
-      requestId !== identityRequestId ||
-      preferences.popoutTabMode !== 'active'
+      !currency.isCurrent(request) ||
+      state.preferences.popoutTabMode !== 'active'
     ) return;
     if (sourceWindow.type !== undefined && sourceWindow.type !== 'normal') return;
     const identity = identityFromTab(
@@ -1496,12 +1420,12 @@ async function followActivatedSourceTab(
       true,
     );
     if (
-      requestId !== identityRequestId ||
-      preferences.popoutTabMode !== 'active'
+      !currency.isCurrent(request) ||
+      state.preferences.popoutTabMode !== 'active'
     ) return;
-    detachedSourceWindowId = windowId;
+    state.detachedSourceWindowId = windowId;
     if (sameCompanionSourcePage(
-      followedPageIdentity,
+      state.followedPageIdentity,
       identity,
       normalizedPageUrl,
     )) {
@@ -1509,10 +1433,10 @@ async function followActivatedSourceTab(
       // older page of the same tab (a navigation whose refresh never ran),
       // rebuild now instead of leaving the stale mirror frozen.
       if (
-        !captureInFlight &&
+        !state.captureInFlight &&
         navigationTimer === undefined &&
-        capturedPageIdentity?.tabId === identity.tabId &&
-        !sameCompanionSourcePage(capturedPageIdentity, identity, normalizedPageUrl)
+        state.capturedPageIdentity?.tabId === identity.tabId &&
+        !sameCompanionSourcePage(state.capturedPageIdentity, identity, normalizedPageUrl)
       ) {
         queueCapture({ identity, reason: 'navigation' });
       }
@@ -1520,7 +1444,7 @@ async function followActivatedSourceTab(
     }
     queueCapture({ identity, reason: 'navigation' });
   } catch (error) {
-    if (requestId !== identityRequestId) return;
+    if (!currency.isCurrent(request)) return;
     invalidateCompanion(
       `${readPageError(error)} Active-tab following needs page access for each newly selected site.`,
     );
@@ -1528,7 +1452,7 @@ async function followActivatedSourceTab(
 }
 
 function queueCapture(request: CaptureRequest): void {
-  const previousIdentity = capturedPageIdentity ?? followedPageIdentity;
+  const previousIdentity = state.capturedOrFollowedIdentity;
   const samePage = sameCompanionSourcePage(
     previousIdentity,
     request.identity,
@@ -1536,7 +1460,7 @@ function queueCapture(request: CaptureRequest): void {
   );
   if (!samePage) liveReplicaFailureRecoveryGate.reset();
   if (!samePage || request.reason === 'navigation') {
-    lastSourceScroll = undefined;
+    state.lastSourceScroll = undefined;
     visibleReplayHost.resetSourceScroll();
   }
   const retainTranslationIntent =
@@ -1546,26 +1470,19 @@ function queueCapture(request: CaptureRequest): void {
       request.reason === 'preference');
   if (!retainTranslationIntent) {
     replicaTranslationCoordinator.selectPair(undefined);
-    translationDesired = false;
-    translationComplete = false;
-    availabilityCheckedForPair = undefined;
+    state.resetTranslationIntent();
     quickComposer.invalidate();
   }
   if (previousIdentity && previousIdentity.tabId !== request.identity.tabId) {
     releaseLiveSession(previousIdentity);
   }
-  activeAbortController?.abort();
-  liveDeltaAbortController?.abort();
-  replicaShadowAbortController?.abort();
-  pendingImageReplicaActivation = undefined;
+  state.abortPageWork();
+  state.pendingImageReplicaActivation = undefined;
   imageTranslationController.releaseReplica();
-  availabilityRequestId += 1;
-  pendingLiveUpdate = undefined;
-  latestLiveSequence = 0;
-  highestReceivedLiveSequence = 0;
-  liveSequenceBaselineReady = false;
-  followedPageIdentity = request.identity;
-  if (!snapshot) renderLoadingState();
+  currency.supersede('availability');
+  state.resetLiveSequence();
+  state.followedPageIdentity = request.identity;
+  if (!state.snapshot) mirrorView.renderLoading();
   setStatus(
     request.reason === 'desynchronized'
       ? 'A live update could not be reconciled. Rebuilding once while keeping the current mirror visible…'
@@ -1579,7 +1496,7 @@ function queueCapture(request: CaptureRequest): void {
 }
 
 async function runCaptureWork(work: GenerationWork<CaptureRequest>): Promise<void> {
-  captureInFlight = true;
+  state.captureInFlight = true;
   updateControls();
   try {
     await capturePage(work);
@@ -1589,7 +1506,7 @@ async function runCaptureWork(work: GenerationWork<CaptureRequest>): Promise<voi
       void runCaptureWork(next);
       return;
     }
-    captureInFlight = false;
+    state.captureInFlight = false;
     updateControls();
     void processPendingLiveUpdate();
   }
@@ -1624,7 +1541,7 @@ async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> 
     ) {
       throw new PageAccessError('The page could not start its live update bridge.');
     }
-    liveObservationAvailable = observerInstallation.installed;
+    state.liveObservationAvailable = observerInstallation.installed;
     console.info(
       `[Simul scroll] observer-${observerInstallation.installed ? 'installed' : 'limited'}; generation=${work.generation}`,
     );
@@ -1635,10 +1552,10 @@ async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> 
       );
     }
     const sameCapturedPage = Boolean(
-      capturedPageIdentity &&
-        capturedPageIdentity.tabId === identity.tabId &&
-        capturedPageIdentity.windowId === identity.windowId &&
-        normalizedPageUrl(capturedPageIdentity.url) ===
+      state.capturedPageIdentity &&
+        state.capturedPageIdentity.tabId === identity.tabId &&
+        state.capturedPageIdentity.windowId === identity.windowId &&
+        normalizedPageUrl(state.capturedPageIdentity.url) ===
           normalizedPageUrl(identity.url),
     );
     const preserveLastGoodReplica =
@@ -1663,17 +1580,17 @@ async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> 
     const snapshotInjection = results[0];
     const nextSnapshot = parsePageSnapshot(snapshotInjection?.result);
     const currentTab = await browser.tabs.get(identity.tabId);
-    assertSnapshotIsCurrent(currentTab, identity, requiresActiveSourceTab());
+    assertSnapshotIsCurrent(currentTab, identity, state.requiresActiveSourceTab);
     if (!captureCoordinator.isCurrent(work.generation)) return;
 
-    translationComplete = false;
-    renderSnapshot(nextSnapshot);
-    snapshot = nextSnapshot;
-    capturedPageIdentity = identity;
-    capturedPageDocumentId = typeof snapshotInjection?.documentId === 'string'
+    state.translationComplete = false;
+    mirrorView.renderSnapshot(nextSnapshot);
+    state.snapshot = nextSnapshot;
+    state.capturedPageIdentity = identity;
+    state.capturedPageDocumentId = typeof snapshotInjection?.documentId === 'string'
       ? snapshotInjection.documentId
       : undefined;
-    followedPageIdentity = identity;
+    state.followedPageIdentity = identity;
     currentLegacyReady = true;
     showCaptureNotes(nextSnapshot);
     if (snapshotInjection?.documentId) {
@@ -1689,9 +1606,9 @@ async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> 
     }
     await resolveSelectedSourceLanguage();
 
-    if (isLiveSourceOnlyMode()) {
-      availability = 'unavailable';
-      availabilityCheckedForPair = undefined;
+    if (state.isLiveSourceOnlyMode) {
+      state.availability = 'unavailable';
+      state.availabilityCheckedForPair = undefined;
       setStatus(
         'Live source only is active. The sanitized mirror keeps updating without text or image translation.',
         'success',
@@ -1699,15 +1616,15 @@ async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> 
       return;
     }
 
-    if (currentTranslationFieldCount(visualRoot as HTMLElement) === 0) {
-      availability = 'unavailable';
-      availabilityCheckedForPair = undefined;
+    if (currentTranslationFieldCount() === 0) {
+      state.availability = 'unavailable';
+      state.availabilityCheckedForPair = undefined;
       const accessWasRevoked = await reconcileAutomaticAccess(identity.url);
       if (!captureCoordinator.isCurrent(work.generation)) return;
       setStatus(
         accessWasRevoked
           ? 'Chrome removed a saved automatic-access grant. The mirror is waiting for page text.'
-          : liveObservationAvailable
+          : state.liveObservationAvailable
             ? 'The page mirror is live and will prepare translation when visible text arrives.'
             : 'The page was captured, but live updates are unavailable because too many companion views are open. Close one and refresh.',
         'warning',
@@ -1723,7 +1640,7 @@ async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> 
       return;
     }
     await maybeTranslateAutomatically(work.generation, identity.url);
-    if (!liveObservationAvailable && captureCoordinator.isCurrent(work.generation)) {
+    if (!state.liveObservationAvailable && captureCoordinator.isCurrent(work.generation)) {
       setStatus(
         'The page was captured, but live updates are unavailable because too many companion views are open. Close one and refresh.',
         'warning',
@@ -1733,14 +1650,14 @@ async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> 
     if (!captureCoordinator.isCurrent(work.generation)) return;
     if (shouldReleaseReplicaAfterCaptureFailure(
       currentLegacyReady,
-      capturedPageIdentity === identity,
+      state.capturedPageIdentity === identity,
       visibleReplayHost.hasCommittedReplica,
     )) {
       imageTranslationController.releaseReplica();
       replicaEngineController.releasePresentation(true);
     }
     const message = readPageError(error);
-    if (!snapshot) renderErrorState(message);
+    if (!state.snapshot) mirrorView.renderError(message);
     setStatus(message, 'error');
   } finally {
     updateControls();
@@ -1752,9 +1669,9 @@ async function runReplicaEngineCheckpoint(
   identity: CapturedPageIdentity,
   documentId: string,
 ): Promise<void> {
-  replicaShadowAbortController?.abort();
+  state.replicaShadowAbortController?.abort();
   const abortController = new AbortController();
-  replicaShadowAbortController = abortController;
+  state.replicaShadowAbortController = abortController;
   const request: ReplicaCaptureRequest = {
     sessionId: liveSessionId,
     pageEpoch: work.generation,
@@ -1764,9 +1681,9 @@ async function runReplicaEngineCheckpoint(
     documentId,
     isCurrent: () =>
       captureCoordinator.isCurrent(work.generation) &&
-      capturedPageIdentity === identity &&
-      followedPageIdentity?.tabId === identity.tabId &&
-      normalizedPageUrl(followedPageIdentity.url) === normalizedPageUrl(identity.url),
+      state.capturedPageIdentity === identity &&
+      state.followedPageIdentity?.tabId === identity.tabId &&
+      normalizedPageUrl(state.followedPageIdentity.url) === normalizedPageUrl(identity.url),
   };
   let shadowCommitted = false;
   const imageActivation: PendingImageReplicaActivation = {
@@ -1775,7 +1692,7 @@ async function runReplicaEngineCheckpoint(
     signal: abortController.signal,
     activated: false,
   };
-  pendingImageReplicaActivation = imageActivation;
+  state.pendingImageReplicaActivation = imageActivation;
   const shadowOwnershipStarted = replicaEngineController.selectedAvailable;
   if (shadowOwnershipStarted) {
     legacyTransitionGate.beginShadowOwnership();
@@ -1791,7 +1708,7 @@ async function runReplicaEngineCheckpoint(
       if (!imageActivation.activated) {
         const selectedSnapshot = replicaSurfaceRouter.snapshot();
         if (
-          pendingImageReplicaActivation === imageActivation &&
+          state.pendingImageReplicaActivation === imageActivation &&
           !imageActivation.signal.aborted &&
           request.isCurrent() &&
           selectedSnapshot &&
@@ -1807,11 +1724,11 @@ async function runReplicaEngineCheckpoint(
           );
         }
       }
-      updateMirrorLayout();
+      mirrorView.updateLayout();
     }
   } finally {
-    if (pendingImageReplicaActivation === imageActivation) {
-      pendingImageReplicaActivation = undefined;
+    if (state.pendingImageReplicaActivation === imageActivation) {
+      state.pendingImageReplicaActivation = undefined;
     }
     if (shadowOwnershipStarted && !shadowCommitted) {
       const needsFreshCapture = legacyTransitionGate.release();
@@ -1820,10 +1737,10 @@ async function runReplicaEngineCheckpoint(
       }
     }
     if (
-      replicaShadowAbortController === abortController &&
+      state.replicaShadowAbortController === abortController &&
       !visibleReplayHost.hasCommittedReplica
     ) {
-      replicaShadowAbortController = undefined;
+      state.replicaShadowAbortController = undefined;
     }
   }
 }
@@ -1837,8 +1754,8 @@ interface LiveLanguageContext {
 async function resolveSelectedSourceLanguage(
   liveContext?: LiveLanguageContext,
 ): Promise<boolean> {
-  if (!snapshot) {
-    resolvedSourceLanguage = undefined;
+  if (!state.snapshot) {
+    state.resolvedSourceLanguage = undefined;
     quickComposer.syncPanel();
     configureImageTranslation();
     return true;
@@ -1846,14 +1763,14 @@ async function resolveSelectedSourceLanguage(
   if (liveContext) {
     // Keep the snapshot identity stable unless the language really changed;
     // an in-flight availability check is discarded when the identity moves.
-    snapshot = snapshotWithLiveDocumentLanguage(
-      snapshot,
+    state.snapshot = snapshotWithLiveDocumentLanguage(
+      state.snapshot,
       liveContext.documentLanguage,
     );
   }
-  const requestedSnapshot = snapshot;
-  const requestedPreference = preferences.sourceLanguage;
-  const previousLanguage = resolvedSourceLanguage;
+  const requestedSnapshot = state.snapshot;
+  const requestedPreference = state.preferences.sourceLanguage;
+  const previousLanguage = state.resolvedSourceLanguage;
   const detectionSnapshot = liveContext
     ? { ...requestedSnapshot, items: [] }
     : requestedSnapshot;
@@ -1864,17 +1781,17 @@ async function resolveSelectedSourceLanguage(
     liveContext?.visibleText ?? mirrorLanguageSample(),
   );
   if (
-    snapshot !== requestedSnapshot ||
-    preferences.sourceLanguage !== requestedPreference
+    state.snapshot !== requestedSnapshot ||
+    state.preferences.sourceLanguage !== requestedPreference
   ) return false;
-  resolvedSourceLanguage =
+  state.resolvedSourceLanguage =
     detected.language ??
     (liveContext?.preserveOnUnknown ? previousLanguage : undefined);
-  detectedLanguageElement.textContent = resolvedSourceLanguage
+  detectedLanguageElement.textContent = state.resolvedSourceLanguage
     ? requestedPreference === 'auto'
       ? detected.language
-        ? `Detected ${languageName(resolvedSourceLanguage)} from ${detected.source === 'html' ? 'the page language' : 'visible page text'}.`
-        : `Using the previously detected ${languageName(resolvedSourceLanguage)} source language.`
+        ? `Detected ${languageName(state.resolvedSourceLanguage)} from ${detected.source === 'html' ? 'the page language' : 'visible page text'}.`
+        : `Using the previously detected ${languageName(state.resolvedSourceLanguage)} source language.`
       : ''
     : 'The page language could not be detected. Choose a From language.';
   detectedLanguageElement.hidden = !detectedLanguageElement.textContent;
@@ -1889,38 +1806,32 @@ function mirrorLanguageSample(): string {
       replicaRecordSources(replicaSurfaceRouter.snapshot()?.records ?? []),
     );
   }
-  if (!visualRoot) return '';
-  const parts = [visualRoot.textContent ?? ''];
-  for (const image of visualRoot.querySelectorAll('img[alt]')) {
-    const alt = image.getAttribute('alt');
-    if (alt) parts.push(alt);
-  }
-  return parts.join(' ').replace(/\s+/gu, ' ').trim().slice(0, 20_000);
+  return mirrorView.languageSample();
 }
 
-function currentTranslationFieldCount(root: HTMLElement): number {
+function currentTranslationFieldCount(): number {
   return usesReplicaTranslationProjection()
     ? replicaSurfaceRouter.snapshot()?.records.filter(
       ({ source }) => source.trim().length > 0,
     ).length ?? 0
-    : countVisualMirrorTranslationFields(root);
+    : mirrorView.translationFieldCount();
 }
 
 async function reconcileReplicaTranslationAfterCommit(
   commit: ReplicaSourceCommit,
-  refreshVersion: number,
+  refresh: CurrencyToken,
   refreshDetectedLanguage: boolean,
   prepareForNewText: boolean,
 ): Promise<void> {
-  if (isLiveSourceOnlyMode()) return;
+  if (state.isLiveSourceOnlyMode) return;
   const generation = commit.document.generation;
-  const identity = capturedPageIdentity;
+  const identity = state.capturedPageIdentity;
   if (
     !identity ||
-    !snapshot ||
+    !state.snapshot ||
     !captureCoordinator.isCurrent(generation)
   ) return;
-  const previousPair = selectedPair();
+  const previousPair = state.selectedPair();
   if (refreshDetectedLanguage) {
     const committed = await resolveSelectedSourceLanguage({
       documentLanguage: commit.documentLanguage,
@@ -1932,17 +1843,17 @@ async function reconcileReplicaTranslationAfterCommit(
     if (!committed) return;
   }
   if (
-    refreshVersion !== replicaLanguageRefreshVersion ||
+    !currency.isCurrent(refresh) ||
     !captureCoordinator.isCurrent(generation) ||
-    capturedPageIdentity !== identity ||
-    (preferences.sourceLanguage === 'auto') !== refreshDetectedLanguage
+    state.capturedPageIdentity !== identity ||
+    (state.preferences.sourceLanguage === 'auto') !== refreshDetectedLanguage
   ) return;
-  const nextPair = selectedPair();
+  const nextPair = state.selectedPair();
   const pairChanged = !sameTranslationPair(previousPair, nextPair);
   if (pairChanged) {
-    activeAbortController?.abort();
-    translationComplete = false;
-    availabilityCheckedForPair = undefined;
+    state.activeAbortController?.abort();
+    state.translationComplete = false;
+    state.availabilityCheckedForPair = undefined;
     quickComposer.invalidate();
     replicaTranslationCoordinator.selectPair(nextPair);
   }
@@ -1954,16 +1865,16 @@ async function reconcileReplicaTranslationAfterCommit(
   // the pair's availability when it is not yet recorded for this generation.
   const needsPreparation =
     (prepareForNewText || refreshDetectedLanguage) &&
-    currentTranslationFieldCount(visualRoot as HTMLElement) > 0 &&
+    currentTranslationFieldCount() > 0 &&
     (!expectedAvailabilityKey ||
-      availabilityCheckedForPair !== expectedAvailabilityKey);
+      state.availabilityCheckedForPair !== expectedAvailabilityKey);
   if (!pairChanged && !needsPreparation) return;
   await checkAvailability(generation);
   if (
-    refreshVersion === replicaLanguageRefreshVersion &&
+    currency.isCurrent(refresh) &&
     captureCoordinator.isCurrent(generation) &&
-    capturedPageIdentity === identity &&
-    sameTranslationPair(nextPair, selectedPair())
+    state.capturedPageIdentity === identity &&
+    sameTranslationPair(nextPair, state.selectedPair())
   ) {
     await maybeTranslateAutomatically(generation, identity.url);
   }
@@ -1981,16 +1892,16 @@ async function languageSelectionChanged(): Promise<void> {
     : readLanguage(sourceSelect.value);
   const targetLanguage = readLanguage(targetSelect.value);
   const needsFreshCapture = releaseReplicaPresentationForLegacyWork();
-  activeAbortController?.abort();
+  state.activeAbortController?.abort();
   abortAndRequeueLiveDelta();
   quickComposer.invalidate();
-  if (!isLiveSourceOnlyMode()) translationDesired = true;
-  translationComplete = false;
-  availabilityCheckedForPair = undefined;
-  resetVisualMirrorTextIfPresent();
+  if (!state.isLiveSourceOnlyMode) state.translationDesired = true;
+  state.translationComplete = false;
+  state.availabilityCheckedForPair = undefined;
+  mirrorView.resetTextIfPresent();
   await commitViewPreferencePatch({ sourceLanguage, targetLanguage });
   if (needsFreshCapture) {
-    const identity = followedPageIdentity ?? capturedPageIdentity;
+    const identity = state.followedOrCapturedIdentity;
     if (identity) {
       queueCapture({ identity, reason: 'preference' });
       return;
@@ -2000,12 +1911,12 @@ async function languageSelectionChanged(): Promise<void> {
 }
 
 async function applyLanguagePreferences(fromUserAction: boolean): Promise<void> {
-  if (!snapshot) return;
+  if (!state.snapshot) return;
   await resolveSelectedSourceLanguage();
-  if (isLiveSourceOnlyMode()) {
+  if (state.isLiveSourceOnlyMode) {
     replicaTranslationCoordinator.selectPair(undefined);
-    availability = 'unavailable';
-    availabilityCheckedForPair = undefined;
+    state.availability = 'unavailable';
+    state.availabilityCheckedForPair = undefined;
     setStatus(
       'Live source only is active. Language choices are saved for translated mode.',
       'success',
@@ -2013,35 +1924,35 @@ async function applyLanguagePreferences(fromUserAction: boolean): Promise<void> 
     updateControls();
     return;
   }
-  replicaTranslationCoordinator.selectPair(selectedPair());
+  replicaTranslationCoordinator.selectPair(state.selectedPair());
   await checkAvailability(captureCoordinator.generation);
-  if (availability === 'available') {
+  if (state.availability === 'available') {
     await startTranslation(!fromUserAction, captureCoordinator.generation);
-  } else if (availability === 'downloadable' || availability === 'downloading') {
+  } else if (state.availability === 'downloadable' || state.availability === 'downloading') {
     setStatus('This language pair needs its on-device pack. Choose Translate once to prepare it.', 'warning');
   }
 }
 
 async function checkAvailability(generation: number): Promise<void> {
-  const requestId = ++availabilityRequestId;
-  const requestedSnapshot = snapshot;
-  const pair = selectedPair();
-  if (isLiveSourceOnlyMode()) {
+  const request = currency.begin('availability');
+  const requestedSnapshot = state.snapshot;
+  const pair = state.selectedPair();
+  if (state.isLiveSourceOnlyMode) {
     replicaTranslationCoordinator.selectPair(undefined);
-    availability = 'unavailable';
-    availabilityCheckedForPair = undefined;
+    state.availability = 'unavailable';
+    state.availabilityCheckedForPair = undefined;
     updateControls();
     return;
   }
   replicaTranslationCoordinator.selectPair(pair);
   if (
     !requestedSnapshot ||
-    !visualRoot ||
+    !mirrorView.root ||
     !pair ||
-    currentTranslationFieldCount(visualRoot) === 0
+    currentTranslationFieldCount() === 0
   ) {
-    availability = 'unavailable';
-    availabilityCheckedForPair = undefined;
+    state.availability = 'unavailable';
+    state.availabilityCheckedForPair = undefined;
     if (!pair && requestedSnapshot) {
       setStatus('Choose a From language because automatic detection was inconclusive.', 'warning');
     }
@@ -2053,23 +1964,23 @@ async function checkAvailability(generation: number): Promise<void> {
   // it before the await let a superseded request leave the pair marked as
   // checked while availability stayed 'unavailable', which disabled Translate
   // until a manual rebuild.
-  availabilityCheckedForPair = undefined;
-  availability = 'unavailable';
+  state.availabilityCheckedForPair = undefined;
+  state.availability = 'unavailable';
   updateControls();
   if (pair.sourceLanguage === pair.targetLanguage) {
-    availabilityCheckedForPair = checkedPairKey;
-    availability = 'available';
-    resetVisualMirrorTextIfPresent();
-    translationComplete = true;
+    state.availabilityCheckedForPair = checkedPairKey;
+    state.availability = 'available';
+    mirrorView.resetTextIfPresent();
+    state.translationComplete = true;
     setStatus('The source and target languages match, so the original text is unchanged.', 'success');
     updateControls();
     return;
   }
   try {
     const next = await provider.availability(pair);
-    if (!isCurrentAvailabilityRequest(requestId, requestedSnapshot, pair, generation)) return;
-    availabilityCheckedForPair = checkedPairKey;
-    availability = next;
+    if (!isCurrentAvailabilityRequest(request, requestedSnapshot, pair, generation)) return;
+    state.availabilityCheckedForPair = checkedPairKey;
+    state.availability = next;
     switch (next) {
       case 'available':
         setStatus(`Ready to translate ${languageName(pair.sourceLanguage)} to ${languageName(pair.targetLanguage)} on-device.`);
@@ -2082,12 +1993,12 @@ async function checkAvailability(generation: number): Promise<void> {
         setStatus(`${languageName(pair.sourceLanguage)} to ${languageName(pair.targetLanguage)} is unavailable on this device.`, 'error');
     }
   } catch (error) {
-    if (!isCurrentAvailabilityRequest(requestId, requestedSnapshot, pair, generation)) return;
-    availabilityCheckedForPair = checkedPairKey;
-    availability = 'unavailable';
+    if (!isCurrentAvailabilityRequest(request, requestedSnapshot, pair, generation)) return;
+    state.availabilityCheckedForPair = checkedPairKey;
+    state.availability = 'unavailable';
     setStatus(readableError(error), 'error');
   } finally {
-    if (isCurrentAvailabilityRequest(requestId, requestedSnapshot, pair, generation)) updateControls();
+    if (isCurrentAvailabilityRequest(request, requestedSnapshot, pair, generation)) updateControls();
   }
 }
 
@@ -2096,10 +2007,10 @@ async function maybeTranslateAutomatically(
   pageUrl: string,
 ): Promise<void> {
   const action = replicaViewTranslationAction(
-    preferences.replicaViewMode,
-    isAutoTranslationEnabled(preferences, pageUrl),
-    translationDesired,
-    availability,
+    state.preferences.replicaViewMode,
+    isAutoTranslationEnabled(state.preferences, pageUrl),
+    state.translationDesired,
+    state.availability,
   );
   if (action === 'translate') {
     await startTranslation(true, generation);
@@ -2109,40 +2020,40 @@ async function maybeTranslateAutomatically(
 }
 
 function startTranslation(automatic: boolean, generation: number): Promise<void> {
-  if (isLiveSourceOnlyMode()) return Promise.resolve();
+  if (state.isLiveSourceOnlyMode) return Promise.resolve();
   const needsFreshCapture = releaseReplicaPresentationForLegacyWork();
   if (needsFreshCapture) {
-    translationDesired = true;
-    const identity = followedPageIdentity ?? capturedPageIdentity;
+    state.translationDesired = true;
+    const identity = state.followedOrCapturedIdentity;
     if (identity) queueCapture({ identity, reason: 'desynchronized' });
     return Promise.resolve();
   }
-  const requestedKey = currentTranslationTaskKey(generation);
-  if (activeTranslationTask) {
-    if (activeTranslationKey === requestedKey) return activeTranslationTask;
-    activeAbortController?.abort();
-    const previousTask = activeTranslationTask;
+  const requestedKey = state.currentTranslationTaskKey(generation);
+  if (state.activeTranslationTask) {
+    if (state.activeTranslationKey === requestedKey) return state.activeTranslationTask;
+    state.activeAbortController?.abort();
+    const previousTask = state.activeTranslationTask;
     return previousTask.catch(() => undefined).then(async () => {
       if (
         !captureCoordinator.isCurrent(generation) ||
-        currentTranslationTaskKey(generation) !== requestedKey
+        state.currentTranslationTaskKey(generation) !== requestedKey
       ) return;
       await startTranslation(automatic, generation);
     });
   }
   const task = runTranslation(automatic, generation);
-  activeTranslationTask = task;
-  activeTranslationKey = requestedKey;
+  state.activeTranslationTask = task;
+  state.activeTranslationKey = requestedKey;
   void task.then(() => {
-    if (activeTranslationTask === task) {
-      activeTranslationTask = undefined;
-      activeTranslationKey = undefined;
+    if (state.activeTranslationTask === task) {
+      state.activeTranslationTask = undefined;
+      state.activeTranslationKey = undefined;
     }
     void processPendingLiveUpdate();
   }, () => {
-    if (activeTranslationTask === task) {
-      activeTranslationTask = undefined;
-      activeTranslationKey = undefined;
+    if (state.activeTranslationTask === task) {
+      state.activeTranslationTask = undefined;
+      state.activeTranslationKey = undefined;
     }
     void processPendingLiveUpdate();
   });
@@ -2150,48 +2061,48 @@ function startTranslation(automatic: boolean, generation: number): Promise<void>
 }
 
 async function runTranslation(automatic: boolean, generation: number): Promise<void> {
-  const pair = selectedPair();
-  const root = visualRoot;
-  const identity = capturedPageIdentity;
+  const pair = state.selectedPair();
+  const root = mirrorView.root;
+  const identity = state.capturedPageIdentity;
   if (
     !pair ||
     !root ||
     !identity ||
-    isLiveSourceOnlyMode() ||
-    translationInFlight ||
-    availability === 'unavailable' ||
-    (automatic && availability !== 'available')
+    state.isLiveSourceOnlyMode ||
+    state.translationInFlight ||
+    state.availability === 'unavailable' ||
+    (automatic && state.availability !== 'available')
   ) return;
   if (pair.sourceLanguage === pair.targetLanguage) {
     if (usesReplicaTranslationProjection()) {
       replicaTranslationCoordinator.selectPair(pair);
     }
     resetVisualMirrorText(root);
-    translationComplete = true;
+    state.translationComplete = true;
     updateControls();
     return;
   }
 
   const abortController = new AbortController();
-  activeAbortController = abortController;
-  translationInFlight = true;
+  state.activeAbortController = abortController;
+  state.translationInFlight = true;
   configureImageTranslation();
-  translationDesired = true;
-  translationComplete = false;
+  state.translationDesired = true;
+  state.translationComplete = false;
   showProgress('Preparing Chrome\'s on-device language model…', 0, 1);
   updateControls();
   let session: TranslationSession | undefined;
   try {
     const tab = await browser.tabs.get(identity.tabId);
-    assertSnapshotIsCurrent(tab, identity, requiresActiveSourceTab());
+    assertSnapshotIsCurrent(tab, identity, state.requiresActiveSourceTab);
     if (
       !captureCoordinator.isCurrent(generation) ||
-      visualRoot !== root ||
-      !isCurrentTranslationPair(pair) ||
-      isLiveSourceOnlyMode()
+      mirrorView.root !== root ||
+      !state.isCurrentTranslationPair(pair) ||
+      state.isLiveSourceOnlyMode
     ) return;
-    availability = 'available';
-    availabilityCheckedForPair = availabilityPairKey(pair, generation);
+    state.availability = 'available';
+    state.availabilityCheckedForPair = availabilityPairKey(pair, generation);
     const result = usesReplicaTranslationProjection()
       ? await replicaTranslationCoordinator.translateCurrent(pair, {
         signal: abortController.signal,
@@ -2224,18 +2135,18 @@ async function runTranslation(automatic: boolean, generation: number): Promise<v
       })();
     if (
       !captureCoordinator.isCurrent(generation) ||
-      visualRoot !== root ||
-      !isCurrentTranslationPair(pair) ||
-      isLiveSourceOnlyMode()
+      mirrorView.root !== root ||
+      !state.isCurrentTranslationPair(pair) ||
+      state.isLiveSourceOnlyMode
     ) return;
     if (usesReplicaTranslationProjection()) {
       const replicaResult = result as ReplicaTranslationRunResult;
-      translationComplete =
+      state.translationComplete =
         replicaResult.total > 0 &&
         replicaTranslationCoordinator.isResultCurrent(replicaResult) &&
         isCompleteReplicaTranslationResult(replicaResult);
       setStatus(
-        translationComplete
+        state.translationComplete
           ? automatic
             ? 'Automatic translation is complete and live updates will translate as they arrive.'
             : 'Translation is complete and live updates will translate as they arrive.'
@@ -2243,10 +2154,10 @@ async function runTranslation(automatic: boolean, generation: number): Promise<v
             replicaResult,
             'Translation remains partial',
           ),
-        translationComplete ? 'success' : 'warning',
+        state.translationComplete ? 'success' : 'warning',
       );
     } else {
-      translationComplete = result.failed === 0;
+      state.translationComplete = result.failed === 0;
       setStatus(
         result.failed
           ? `${result.failed} text segment(s) could not be translated; the original remains for those parts.`
@@ -2259,21 +2170,21 @@ async function runTranslation(automatic: boolean, generation: number): Promise<v
   } catch (error) {
     if (isAbortError(error) || abortController.signal.aborted) {
       if (
-        !isLiveSourceOnlyMode() &&
+        !state.isLiveSourceOnlyMode &&
         captureCoordinator.isCurrent(generation) &&
-        visualRoot === root &&
-        isCurrentTranslationPair(pair)
+        mirrorView.root === root &&
+        state.isCurrentTranslationPair(pair)
       ) {
         setStatus('Translation cancelled. Existing translated text was kept.', 'warning');
       }
-    } else if (!isLiveSourceOnlyMode()) {
+    } else if (!state.isLiveSourceOnlyMode) {
       setStatus(readableError(error), 'error');
     }
   } finally {
     session?.destroy();
     logTranslationCache('page', translationMemory);
-    if (activeAbortController === abortController) activeAbortController = undefined;
-    translationInFlight = false;
+    if (state.activeAbortController === abortController) state.activeAbortController = undefined;
+    state.translationInFlight = false;
     configureImageTranslation();
     hideProgress();
     updateControls();
@@ -2330,51 +2241,51 @@ async function translateRemembered(
 
 function initializeLiveSequenceBaseline(generation: number, sequence: number): void {
   if (!captureCoordinator.isCurrent(generation)) return;
-  latestLiveSequence = sequence;
-  highestReceivedLiveSequence = sequence;
-  liveSequenceBaselineReady = true;
-  if (!pendingLiveUpdate || pendingLiveUpdate.generation !== generation) return;
-  if (pendingLiveUpdate.sequence <= sequence) {
-    pendingLiveUpdate = undefined;
+  state.latestLiveSequence = sequence;
+  state.highestReceivedLiveSequence = sequence;
+  state.liveSequenceBaselineReady = true;
+  if (!state.pendingLiveUpdate || state.pendingLiveUpdate.generation !== generation) return;
+  if (state.pendingLiveUpdate.sequence <= sequence) {
+    state.pendingLiveUpdate = undefined;
     return;
   }
-  if (pendingLiveUpdate.firstSequence > sequence + 1) {
-    pendingLiveUpdate = undefined;
-    const identity = followedPageIdentity ?? capturedPageIdentity;
+  if (state.pendingLiveUpdate.firstSequence > sequence + 1) {
+    state.pendingLiveUpdate = undefined;
+    const identity = state.followedOrCapturedIdentity;
     if (identity) queueCapture({ identity, reason: 'desynchronized' });
     return;
   }
-  highestReceivedLiveSequence = pendingLiveUpdate.sequence;
+  state.highestReceivedLiveSequence = state.pendingLiveUpdate.sequence;
 }
 
 function queueLiveUpdate(message: LivePageDirtyMessage): void {
-  if (message.sequence <= latestLiveSequence) return;
+  if (message.sequence <= state.latestLiveSequence) return;
   if (legacyTransitionGate.markDirty()) return;
   if (
-    liveSequenceBaselineReady &&
-    highestReceivedLiveSequence > 0 &&
-    message.sequence > highestReceivedLiveSequence + 1
+    state.liveSequenceBaselineReady &&
+    state.highestReceivedLiveSequence > 0 &&
+    message.sequence > state.highestReceivedLiveSequence + 1
   ) {
     releaseReplicaPresentationForLegacyWork();
-    const identity = followedPageIdentity ?? capturedPageIdentity;
+    const identity = state.followedOrCapturedIdentity;
     if (identity) {
       setStatus('A live update was missed. Rebuilding once while keeping the current mirror visible…', 'warning');
       queueCapture({ identity, reason: 'desynchronized' });
     }
     return;
   }
-  if (message.sequence <= highestReceivedLiveSequence) return;
-  highestReceivedLiveSequence = message.sequence;
-  if (!pendingLiveUpdate || pendingLiveUpdate.generation !== message.generation) {
-    pendingLiveUpdate = {
+  if (message.sequence <= state.highestReceivedLiveSequence) return;
+  state.highestReceivedLiveSequence = message.sequence;
+  if (!state.pendingLiveUpdate || state.pendingLiveUpdate.generation !== message.generation) {
+    state.pendingLiveUpdate = {
       generation: message.generation,
       firstSequence: message.sequence,
       sequence: message.sequence,
       nodeIds: new Set(message.nodeIds),
     };
   } else {
-    pendingLiveUpdate.sequence = Math.max(pendingLiveUpdate.sequence, message.sequence);
-    for (const nodeId of message.nodeIds) pendingLiveUpdate.nodeIds.add(nodeId);
+    state.pendingLiveUpdate.sequence = Math.max(state.pendingLiveUpdate.sequence, message.sequence);
+    for (const nodeId of message.nodeIds) state.pendingLiveUpdate.nodeIds.add(nodeId);
   }
   releaseReplicaPresentationForLegacyWork();
   void processPendingLiveUpdate();
@@ -2382,20 +2293,20 @@ function queueLiveUpdate(message: LivePageDirtyMessage): void {
 
 async function processPendingLiveUpdate(): Promise<void> {
   if (
-    liveDeltaInFlight ||
-    captureInFlight ||
-    translationInFlight ||
-    !pendingLiveUpdate ||
-    !capturedPageIdentity ||
-    !visualRoot ||
+    state.liveDeltaInFlight ||
+    state.captureInFlight ||
+    state.translationInFlight ||
+    !state.pendingLiveUpdate ||
+    !state.capturedPageIdentity ||
+    !mirrorView.root ||
     legacyTransitionGate.shadowOwnsPage
   ) return;
-  const update = pendingLiveUpdate;
-  pendingLiveUpdate = undefined;
+  const update = state.pendingLiveUpdate;
+  state.pendingLiveUpdate = undefined;
   const requestedNodeIds = [...update.nodeIds];
   const nodeIds = requestedNodeIds.slice(0, 48);
   if (requestedNodeIds.length > nodeIds.length) {
-    pendingLiveUpdate = {
+    state.pendingLiveUpdate = {
       generation: update.generation,
       firstSequence: update.firstSequence,
       sequence: update.sequence,
@@ -2403,8 +2314,8 @@ async function processPendingLiveUpdate(): Promise<void> {
     };
   }
   if (!captureCoordinator.isCurrent(update.generation)) return;
-  const identity = capturedPageIdentity;
-  const beforeRoot = visualRoot;
+  const identity = state.capturedPageIdentity;
+  const beforeRoot = mirrorView.root;
   const abortController = new AbortController();
   const activeUpdate: PendingLiveUpdate = {
     generation: update.generation,
@@ -2412,9 +2323,9 @@ async function processPendingLiveUpdate(): Promise<void> {
     sequence: update.sequence,
     nodeIds: new Set(nodeIds),
   };
-  activeLiveUpdate = activeUpdate;
-  liveDeltaAbortController = abortController;
-  liveDeltaInFlight = true;
+  state.activeLiveUpdate = activeUpdate;
+  state.liveDeltaAbortController = abortController;
+  state.liveDeltaInFlight = true;
   updateControls();
   let session: TranslationSession | undefined;
   try {
@@ -2428,17 +2339,17 @@ async function processPendingLiveUpdate(): Promise<void> {
     const delta = parseLivePageDelta(results[0]?.result);
     if (
       !captureCoordinator.isCurrent(delta.generation) ||
-      delta.sequence < latestLiveSequence ||
+      delta.sequence < state.latestLiveSequence ||
       normalizedPageUrl(delta.url) !== normalizedPageUrl(identity.url)
     ) return;
     if (delta.desynchronized) {
-      queueCapture({ identity: capturedPageIdentity, reason: 'desynchronized' });
+      queueCapture({ identity: state.capturedPageIdentity, reason: 'desynchronized' });
       return;
     }
-    const pairBeforeRefresh = selectedPair();
+    const pairBeforeRefresh = state.selectedPair();
     let pairChanged = false;
     const visibleLanguageText = liveDeltaLanguageSample(delta);
-    if (preferences.sourceLanguage === 'auto') {
+    if (state.preferences.sourceLanguage === 'auto') {
       const resolutionCommitted = await resolveSelectedSourceLanguage({
         documentLanguage: delta.documentLanguage,
         visibleText: visibleLanguageText,
@@ -2447,42 +2358,42 @@ async function processPendingLiveUpdate(): Promise<void> {
       if (
         !resolutionCommitted ||
         abortController.signal.aborted ||
-        visualRoot !== beforeRoot ||
+        mirrorView.root !== beforeRoot ||
         !captureCoordinator.isCurrent(delta.generation)
       ) return;
-      const refreshedPair = selectedPair();
+      const refreshedPair = state.selectedPair();
       pairChanged = !sameTranslationPair(pairBeforeRefresh, refreshedPair);
       if (pairChanged) {
-        availabilityCheckedForPair = undefined;
-        translationComplete = false;
+        state.availabilityCheckedForPair = undefined;
+        state.translationComplete = false;
         quickComposer.invalidate();
         resetVisualMirrorText(beforeRoot);
       }
       await checkAvailability(delta.generation);
       if (
         abortController.signal.aborted ||
-        visualRoot !== beforeRoot ||
+        mirrorView.root !== beforeRoot ||
         !captureCoordinator.isCurrent(delta.generation) ||
-        (refreshedPair && !isCurrentTranslationPair(refreshedPair))
+        (refreshedPair && !state.isCurrentTranslationPair(refreshedPair))
       ) return;
     }
 
-    const pair = selectedPair();
+    const pair = state.selectedPair();
     const wantsTranslation =
-      !isLiveSourceOnlyMode() &&
-      (translationDesired || isAutoTranslationEnabled(preferences, identity.url));
+      !state.isLiveSourceOnlyMode &&
+      (state.translationDesired || isAutoTranslationEnabled(state.preferences, identity.url));
     const shouldTranslate = Boolean(
       pair &&
       pair.sourceLanguage !== pair.targetLanguage &&
       wantsTranslation &&
       !pairChanged &&
-      availability === 'available',
+      state.availability === 'available',
     );
     if (shouldTranslate && pair) {
       session = await provider.createSession(pair, { signal: abortController.signal });
     }
     const applied = await applyLivePageDelta(beforeRoot, delta, {
-      textLayoutMode: preferences.textLayoutMode,
+      textLayoutMode: state.preferences.textLayoutMode,
       signal: abortController.signal,
       ...(shouldTranslate && pair && session
         ? {
@@ -2493,22 +2404,20 @@ async function processPendingLiveUpdate(): Promise<void> {
     });
     if (
       abortController.signal.aborted ||
-      visualRoot !== beforeRoot ||
+      mirrorView.root !== beforeRoot ||
       !captureCoordinator.isCurrent(delta.generation) ||
-      (pair && !isCurrentTranslationPair(pair))
+      (pair && !state.isCurrentTranslationPair(pair))
     ) return;
-    visualRoot = applied.root;
-    mirrorDocumentWidth = delta.documentWidth;
-    mirrorDocumentHeight = delta.documentHeight;
-    latestLiveSequence = delta.sequence;
-    if (activeLiveUpdate === activeUpdate) activeLiveUpdate = undefined;
-    updateMirrorLayout();
+    mirrorView.replaceRoot(applied.root, delta.documentWidth, delta.documentHeight);
+    state.latestLiveSequence = delta.sequence;
+    if (state.activeLiveUpdate === activeUpdate) state.activeLiveUpdate = undefined;
+    mirrorView.updateLayout();
     if (applied.missingTarget) {
       queueCapture({ identity, reason: 'desynchronized' });
       return;
     }
     if (applied.translation.failed > 0) {
-      translationComplete = false;
+      state.translationComplete = false;
       setStatus(
         `${applied.translation.failed} changed text segment(s) could not be translated; their original text remains.`,
         'warning',
@@ -2520,12 +2429,12 @@ async function processPendingLiveUpdate(): Promise<void> {
     if (shouldTranslate && applied.applied > 0) {
       setStatus('Live page changes were mirrored and translated.', 'success');
     }
-    if (currentTranslationFieldCount(visualRoot) > 0) {
-      const currentPair = selectedPair();
+    if (currentTranslationFieldCount() > 0) {
+      const currentPair = state.selectedPair();
       const pairKey = currentPair
         ? availabilityPairKey(currentPair, update.generation)
         : undefined;
-      if (!currentPair || availabilityCheckedForPair !== pairKey) {
+      if (!currentPair || state.availabilityCheckedForPair !== pairKey) {
         await checkAvailability(update.generation);
       }
       if ((!shouldTranslate || pairChanged) && wantsTranslation) {
@@ -2540,17 +2449,17 @@ async function processPendingLiveUpdate(): Promise<void> {
       );
     }
   } catch (error) {
-    if (!abortController.signal.aborted && capturedPageIdentity) {
+    if (!abortController.signal.aborted && state.capturedPageIdentity) {
       setStatus(`A live update could not be applied: ${readableError(error)}`, 'warning');
-      queueCapture({ identity: capturedPageIdentity, reason: 'desynchronized' });
+      queueCapture({ identity: state.capturedPageIdentity, reason: 'desynchronized' });
     }
   } finally {
     session?.destroy();
-    if (liveDeltaAbortController === abortController) {
-      liveDeltaAbortController = undefined;
+    if (state.liveDeltaAbortController === abortController) {
+      state.liveDeltaAbortController = undefined;
     }
-    if (activeLiveUpdate === activeUpdate) activeLiveUpdate = undefined;
-    liveDeltaInFlight = false;
+    if (state.activeLiveUpdate === activeUpdate) state.activeLiveUpdate = undefined;
+    state.liveDeltaInFlight = false;
     updateControls();
     void processPendingLiveUpdate();
   }
@@ -2583,166 +2492,9 @@ function liveDeltaLanguageSample(delta: LivePageDelta): string {
   return parts.join(' ');
 }
 
-function sameTranslationPair(
-  left: TranslationPair | undefined,
-  right: TranslationPair | undefined,
-): boolean {
-  return Boolean(
-    left &&
-      right &&
-      left.sourceLanguage === right.sourceLanguage &&
-      left.targetLanguage === right.targetLanguage,
-  ) || (!left && !right);
-}
-
-function renderSnapshot(page: PageSnapshot): void {
-  disconnectMirror();
-  const article = document.createElement('article');
-  article.className = 'page-copy';
-  const mirror = createVisualMirror(page, undefined, document);
-  if (mirror && page.visual) {
-    const scroller = document.createElement('div');
-    scroller.className = 'mirror-scroll';
-    const stage = document.createElement('div');
-    stage.className = 'mirror-stage';
-    const scaleLayer = document.createElement('div');
-    scaleLayer.className = 'mirror-scale-layer';
-    scaleLayer.append(mirror);
-    stage.append(scaleLayer);
-    scroller.append(stage);
-    article.append(scroller);
-    snapshotContainer.replaceChildren(article);
-
-    visualRoot = mirror;
-    mirrorScroller = scroller;
-    mirrorStage = stage;
-    mirrorScaleLayer = scaleLayer;
-    mirrorViewportWidth = page.visual.viewportWidth;
-    mirrorDocumentWidth = page.visual.documentWidth;
-    mirrorDocumentHeight = page.visual.documentHeight;
-    applyMirrorTextLayout(mirror, preferences.textLayoutMode);
-    updateMirrorLayout();
-    if (typeof ResizeObserver === 'function') {
-      mirrorResizeObserver = new ResizeObserver(updateMirrorLayout);
-      mirrorResizeObserver.observe(scroller);
-      mirrorResizeObserver.observe(scaleLayer);
-    }
-    requestAnimationFrame(updateMirrorLayout);
-    return;
-  }
-  renderFlatSnapshot(article, page);
-  snapshotContainer.replaceChildren(article);
-}
-
-function updateMirrorLayout(): void {
-  visibleReplayHost.updateLayout({
-    displayMode: preferences.displayMode,
-    zoomPercent: preferences.zoomPercent,
-  });
-  imageTranslationController.refreshOverlays();
-  if (
-    visibleReplayHost.previewVisible &&
-    preferences.syncScroll &&
-    lastSourceScroll
-  ) {
-    visibleReplayHost.followSourceScroll(lastSourceScroll);
-  }
-  if (!mirrorScroller || !mirrorStage || !mirrorScaleLayer || !visualRoot) return;
-  const scale = computeMirrorScale(
-    mirrorScroller.clientWidth,
-    mirrorViewportWidth,
-    preferences.displayMode,
-    preferences.zoomPercent,
-  );
-  currentMirrorScale = scale;
-  mirrorScaleLayer.style.width = `${mirrorViewportWidth}px`;
-  mirrorScaleLayer.style.minHeight = `${mirrorDocumentHeight}px`;
-  visualRoot.style.width = `${mirrorViewportWidth}px`;
-  const extent = computeMirrorExtent(
-    scale,
-    mirrorDocumentWidth,
-    mirrorDocumentHeight,
-    Math.max(mirrorScaleLayer.scrollWidth, visualRoot.scrollWidth),
-    Math.max(mirrorScaleLayer.scrollHeight, visualRoot.scrollHeight),
-  );
-  mirrorScaleLayer.style.transform = `scale(${scale})`;
-  mirrorStage.style.width = `${extent.width}px`;
-  mirrorStage.style.height = `${extent.height}px`;
-  if (preferences.syncScroll && lastSourceScroll) followSourceScroll(lastSourceScroll);
-}
-
-function followSourceScroll(scroll: NonNullable<typeof lastSourceScroll>): void {
-  visibleReplayHost.followSourceScroll(scroll);
-  if (!mirrorScroller) return;
-  const maxMirrorX = Math.max(0, mirrorScroller.scrollWidth - mirrorScroller.clientWidth);
-  const maxMirrorY = Math.max(0, mirrorScroller.scrollHeight - mirrorScroller.clientHeight);
-  const faithful = preferences.textLayoutMode === 'faithful' &&
-    scroll.scrollTarget !== 'nested';
-  mirrorScroller.scrollLeft = faithful
-    ? Math.min(maxMirrorX, scroll.scrollX * currentMirrorScale)
-    : scroll.maxScrollX > 0
-      ? (scroll.scrollX / scroll.maxScrollX) * maxMirrorX
-      : 0;
-  mirrorScroller.scrollTop = faithful
-    ? Math.min(maxMirrorY, scroll.scrollY * currentMirrorScale)
-    : scroll.maxScrollY > 0
-      ? (scroll.scrollY / scroll.maxScrollY) * maxMirrorY
-      : 0;
-}
-
-function disconnectMirror(): void {
-  mirrorResizeObserver?.disconnect();
-  mirrorResizeObserver = undefined;
-  visualRoot = undefined;
-  mirrorScroller = undefined;
-  mirrorStage = undefined;
-  mirrorScaleLayer = undefined;
-}
-
-function resetVisualMirrorTextIfPresent(): void {
-  if (visualRoot) resetVisualMirrorText(visualRoot);
-}
-
-function renderFlatSnapshot(article: HTMLElement, page: PageSnapshot): void {
-  for (const item of page.items) {
-    if (item.kind === 'text') {
-      article.append(renderText(item.role, item.text));
-      continue;
-    }
-    const image = document.createElement('img');
-    image.className = 'translated-image';
-    image.src = item.src;
-    image.alt = item.altText ?? '';
-    image.referrerPolicy = 'no-referrer';
-    article.append(image);
-  }
-  if (page.items.length === 0) {
-    const empty = document.createElement('p');
-    empty.className = 'empty-state';
-    empty.textContent = 'No eligible visible content was found.';
-    article.append(empty);
-  }
-}
-
-function renderText(role: SnapshotTextRole, text: string): HTMLElement {
-  const element = role.startsWith('heading-')
-    ? document.createElement(
-        `h${Math.min(6, Math.max(2, Number(role.at(-1))))}` as keyof HTMLElementTagNameMap,
-      )
-    : role === 'quote'
-      ? document.createElement('blockquote')
-      : role === 'code'
-        ? document.createElement('pre')
-        : document.createElement('p');
-  element.className = 'translated-text';
-  element.textContent = text;
-  element.dir = 'auto';
-  return element;
-}
-
 function setCompanionOverlay(next?: CompanionOverlay): void {
-  const previous = openCompanionOverlay;
-  openCompanionOverlay = next;
+  const previous = state.openCompanionOverlay;
+  state.openCompanionOverlay = next;
   const settingsOpen = next === 'settings';
   const quickTranslateOpen = next === 'quick-translate';
   controlsOverlay.hidden = !settingsOpen;
@@ -2810,6 +2562,7 @@ function observeReplicaStateLabel(): void {
 }
 
 let zoomCommitTimer: ReturnType<typeof setTimeout> | undefined;
+let navigationTimer: ReturnType<typeof setTimeout> | undefined;
 
 /**
  * Applies zoom immediately and saves it once the slider settles. Saving on
@@ -2818,27 +2571,27 @@ let zoomCommitTimer: ReturnType<typeof setTimeout> | undefined;
  */
 function setZoom(value: number): void {
   const zoomPercent = clampZoomPercent(value);
-  preferences = withViewSettings(preferences, {
+  state.preferences = withViewSettings(state.preferences, {
     displayMode: 'custom',
     zoomPercent,
   });
   zoomInput.value = String(zoomPercent);
   zoomOutput.value = `${zoomPercent}%`;
   displayModeSelect.value = 'custom';
-  updateMirrorLayout();
+  mirrorView.updateLayout();
   if (zoomCommitTimer !== undefined) clearTimeout(zoomCommitTimer);
   zoomCommitTimer = setTimeout(() => {
     zoomCommitTimer = undefined;
     void commitViewPreferencePatch({
       displayMode: 'custom',
-      zoomPercent: preferences.zoomPercent,
+      zoomPercent: state.preferences.zoomPercent,
     });
   }, ZOOM_COMMIT_DEBOUNCE_MS);
 }
 
 async function changePopoutTabMode(popoutTabMode: PopoutTabMode): Promise<void> {
   const saved = await commitViewPreferencePatch({ popoutTabMode });
-  if (!saved || preferences.popoutTabMode !== popoutTabMode) return;
+  if (!saved || state.preferences.popoutTabMode !== popoutTabMode) return;
   if (isDetachedWindow && popoutTabMode === 'active') {
     await followCurrentActiveSourceTab();
   }
@@ -2848,19 +2601,19 @@ async function changeReplicaFidelityPolicy(
   replicaFidelityPolicy: SelectableReplicaFidelityPolicy,
 ): Promise<void> {
   if (
-    replicaFidelityCommitInFlight ||
-    replicaFidelityPolicy === preferences.replicaFidelityPolicy
+    state.replicaFidelityCommitInFlight ||
+    replicaFidelityPolicy === state.preferences.replicaFidelityPolicy
   ) return;
-  replicaFidelityCommitInFlight = true;
+  state.replicaFidelityCommitInFlight = true;
   updateControls();
   try {
     const saved = await commitViewPreferencePatch({ replicaFidelityPolicy });
-    if (!saved || preferences.replicaFidelityPolicy !== replicaFidelityPolicy) return;
+    if (!saved || state.preferences.replicaFidelityPolicy !== replicaFidelityPolicy) return;
     liveReplicaFailureRecoveryGate.reset();
-    const identity = followedPageIdentity ?? capturedPageIdentity;
+    const identity = state.followedOrCapturedIdentity;
     if (identity) queueCapture({ identity, reason: 'preference' });
   } finally {
-    replicaFidelityCommitInFlight = false;
+    state.replicaFidelityCommitInFlight = false;
     updateControls();
   }
 }
@@ -2868,18 +2621,18 @@ async function changeReplicaFidelityPolicy(
 async function changeReplicaViewMode(
   replicaViewMode: ReplicaViewMode,
 ): Promise<void> {
-  if (replicaViewMode === preferences.replicaViewMode) return;
-  const previousMode = preferences.replicaViewMode;
+  if (replicaViewMode === state.preferences.replicaViewMode) return;
+  const previousMode = state.preferences.replicaViewMode;
   // commitViewPreferencePatch applies the validated preference optimistically
   // before its first await, so projection gates close immediately.
   const save = commitViewPreferencePatch({ replicaViewMode });
   applyReplicaViewMode(previousMode, false);
   await save;
-  if (preferences.replicaViewMode !== replicaViewMode) {
+  if (state.preferences.replicaViewMode !== replicaViewMode) {
     applyReplicaViewMode(replicaViewMode);
     return;
   }
-  if (replicaViewMode === 'translated' && !isLiveSourceOnlyMode()) {
+  if (replicaViewMode === 'translated' && !state.isLiveSourceOnlyMode) {
     await resumeTranslatedReplicaMode();
   }
 }
@@ -2888,17 +2641,17 @@ function applyReplicaViewMode(
   previousMode: ReplicaViewMode,
   resumeTranslated = true,
 ): void {
-  if (previousMode === preferences.replicaViewMode) return;
-  availabilityRequestId += 1;
-  activeAbortController?.abort();
+  if (previousMode === state.preferences.replicaViewMode) return;
+  currency.supersede('availability');
+  state.activeAbortController?.abort();
   abortAndRequeueLiveDelta();
   replicaTranslationCoordinator.selectPair(undefined);
-  resetVisualMirrorTextIfPresent();
-  translationComplete = false;
-  availabilityCheckedForPair = undefined;
+  mirrorView.resetTextIfPresent();
+  state.translationComplete = false;
+  state.availabilityCheckedForPair = undefined;
   configureImageTranslation();
-  if (isLiveSourceOnlyMode()) {
-    availability = 'unavailable';
+  if (state.isLiveSourceOnlyMode) {
+    state.availability = 'unavailable';
     setStatus(
       'Live source only is active. The current mirror remains live and all translation overlays were removed.',
       'success',
@@ -2911,32 +2664,32 @@ function applyReplicaViewMode(
 }
 
 async function resumeTranslatedReplicaMode(): Promise<void> {
-  const interrupted = activeTranslationTask;
+  const interrupted = state.activeTranslationTask;
   if (interrupted) await interrupted.catch(() => undefined);
-  const identity = capturedPageIdentity;
+  const identity = state.capturedPageIdentity;
   const generation = captureCoordinator.generation;
-  if (isLiveSourceOnlyMode() || !snapshot || !identity) return;
+  if (state.isLiveSourceOnlyMode || !state.snapshot || !identity) return;
   const resolved = await resolveSelectedSourceLanguage(
     currentReplicaLanguageContext(),
   );
-  const requestedSnapshot = snapshot;
+  const requestedSnapshot = state.snapshot;
   if (
     !resolved ||
-    isLiveSourceOnlyMode() ||
+    state.isLiveSourceOnlyMode ||
     !requestedSnapshot ||
-    snapshot !== requestedSnapshot ||
-    capturedPageIdentity !== identity ||
+    state.snapshot !== requestedSnapshot ||
+    state.capturedPageIdentity !== identity ||
     !captureCoordinator.isCurrent(generation)
   ) return;
-  const pair = selectedPair();
+  const pair = state.selectedPair();
   replicaTranslationCoordinator.selectPair(pair);
   await checkAvailability(generation);
   if (
-    isLiveSourceOnlyMode() ||
+    state.isLiveSourceOnlyMode ||
     !pair ||
-    !isCurrentTranslationPair(pair) ||
-    snapshot !== requestedSnapshot ||
-    capturedPageIdentity !== identity ||
+    !state.isCurrentTranslationPair(pair) ||
+    state.snapshot !== requestedSnapshot ||
+    state.capturedPageIdentity !== identity ||
     !captureCoordinator.isCurrent(generation)
   ) return;
   await maybeTranslateAutomatically(generation, identity.url);
@@ -2957,40 +2710,36 @@ function currentReplicaLanguageContext(): LiveLanguageContext | undefined {
 }
 
 function abortAndRequeueLiveDelta(): void {
-  const interrupted = activeLiveUpdate;
+  const interrupted = state.activeLiveUpdate;
   if (
     interrupted &&
-    interrupted.sequence > latestLiveSequence &&
+    interrupted.sequence > state.latestLiveSequence &&
     captureCoordinator.isCurrent(interrupted.generation)
   ) {
-    const merged = mergeLiveUpdateBatches(pendingLiveUpdate, interrupted);
-    pendingLiveUpdate = {
+    const merged = mergeLiveUpdateBatches(state.pendingLiveUpdate, interrupted);
+    state.pendingLiveUpdate = {
       ...merged,
       nodeIds: new Set(merged.nodeIds),
     };
   }
-  liveDeltaAbortController?.abort();
-}
-
-function isLiveSourceOnlyMode(): boolean {
-  return preferences.replicaViewMode === 'source-only';
+  state.liveDeltaAbortController?.abort();
 }
 
 function syncPreferenceControls(): void {
-  const pageUrl = followedPageIdentity?.url ?? capturedPageIdentity?.url;
-  sourceSelect.value = preferences.sourceLanguage;
-  targetSelect.value = preferences.targetLanguage;
-  autoTranslateSelect.value = autoTranslationModeForPage(preferences, pageUrl);
-  displayModeSelect.value = preferences.displayMode;
-  textLayoutSelect.value = preferences.textLayoutMode;
-  replicaFidelityPolicySelect.value = preferences.replicaFidelityPolicy;
-  replicaViewModeSelect.value = preferences.replicaViewMode;
-  launchBehaviorSelect.value = preferences.launchBehavior;
-  popoutTabModeSelect.value = preferences.popoutTabMode;
-  syncScrollInput.checked = preferences.syncScroll;
-  zoomInput.value = String(preferences.zoomPercent);
-  zoomOutput.value = `${preferences.zoomPercent}%`;
-  zoomInput.disabled = preferences.displayMode !== 'custom';
+  const pageUrl = state.pageUrl;
+  sourceSelect.value = state.preferences.sourceLanguage;
+  targetSelect.value = state.preferences.targetLanguage;
+  autoTranslateSelect.value = autoTranslationModeForPage(state.preferences, pageUrl);
+  displayModeSelect.value = state.preferences.displayMode;
+  textLayoutSelect.value = state.preferences.textLayoutMode;
+  replicaFidelityPolicySelect.value = state.preferences.replicaFidelityPolicy;
+  replicaViewModeSelect.value = state.preferences.replicaViewMode;
+  launchBehaviorSelect.value = state.preferences.launchBehavior;
+  popoutTabModeSelect.value = state.preferences.popoutTabMode;
+  syncScrollInput.checked = state.preferences.syncScroll;
+  zoomInput.value = String(state.preferences.zoomPercent);
+  zoomOutput.value = `${state.preferences.zoomPercent}%`;
+  zoomInput.disabled = state.preferences.displayMode !== 'custom';
   syncToolbarPreferenceControls();
   quickComposer.syncPanel();
   imageAnalysisPanel.render();
@@ -2999,7 +2748,7 @@ function syncPreferenceControls(): void {
 }
 
 function syncToolbarPreferenceControls(): void {
-  const autoDetect = preferences.sourceLanguage === 'auto';
+  const autoDetect = state.preferences.sourceLanguage === 'auto';
   toolbarAutoDetectButton.setAttribute('aria-pressed', String(autoDetect));
   toolbarAutoDetectButton.setAttribute(
     'aria-label',
@@ -3011,18 +2760,18 @@ function syncToolbarPreferenceControls(): void {
     ? 'From language is using Auto-detect.'
     : 'Set From language to Auto-detect.';
 
-  const sizeLabel = preferences.displayMode === 'fit'
+  const sizeLabel = state.preferences.displayMode === 'fit'
     ? 'Fit'
-    : preferences.displayMode === 'actual'
+    : state.preferences.displayMode === 'actual'
       ? '1:1'
-      : `${preferences.zoomPercent}%`;
-  if (preferences.displayMode === 'custom') {
+      : `${state.preferences.zoomPercent}%`;
+  if (state.preferences.displayMode === 'custom') {
     delete toolbarSizeLabel.dataset.uiLabel;
     toolbarSizeLabel.textContent = sizeLabel;
   } else {
     uiLocalizer.setText(toolbarSizeLabel, sizeLabel);
   }
-  const nextSize = preferences.displayMode === 'fit' ? '1:1 size' : 'fit width';
+  const nextSize = state.preferences.displayMode === 'fit' ? '1:1 size' : 'fit width';
   toolbarSizeToggleButton.setAttribute(
     'aria-label',
     `Mirror size: ${sizeLabel}. Switch to ${nextSize}`,
@@ -3031,19 +2780,19 @@ function syncToolbarPreferenceControls(): void {
 
   toolbarOcrToggleButton.setAttribute(
     'aria-pressed',
-    String(preferences.imageTranslationEnabled),
+    String(state.preferences.imageTranslationEnabled),
   );
   uiLocalizer.setText(
     toolbarOcrLabel,
-    preferences.imageTranslationEnabled ? 'OCR On' : 'OCR Off',
+    state.preferences.imageTranslationEnabled ? 'OCR On' : 'OCR Off',
   );
-  toolbarOcrToggleButton.title = preferences.imageTranslationEnabled
-    ? imageCaptureAccess === 'granted'
+  toolbarOcrToggleButton.title = state.preferences.imageTranslationEnabled
+    ? state.imageCaptureAccess === 'granted'
       ? 'Image text translation is on. Click to turn it off.'
       : 'Image text translation is saved but needs image access. Click to grant access.'
     : 'Image text translation is off. Click to turn it on.';
 
-  const followsActive = isDetachedWindow && preferences.popoutTabMode === 'active';
+  const followsActive = isDetachedWindow && state.preferences.popoutTabMode === 'active';
   uiLocalizer.setText(toolbarTabFollowLabel, followsActive ? 'Active' : 'Current');
   toolbarTabFollowButton.setAttribute('aria-pressed', String(followsActive));
   toolbarTabFollowButton.setAttribute(
@@ -3064,21 +2813,21 @@ function syncToolbarPreferenceControls(): void {
 function configureImageTranslation(): void {
   imageTranslationController.configure({
     enabled:
-      preferences.imageTranslationEnabled &&
-      imageCaptureAccess === 'granted' &&
-      !isLiveSourceOnlyMode() &&
+      state.preferences.imageTranslationEnabled &&
+      state.imageCaptureAccess === 'granted' &&
+      !state.isLiveSourceOnlyMode &&
       hasCompiledImageAnalysisCapability(),
-    scanPolicy: preferences.imageScanPolicy,
-    skipSmallImages: preferences.skipSmallImages,
+    scanPolicy: state.preferences.imageScanPolicy,
+    skipSmallImages: state.preferences.skipSmallImages,
     providerOrder: effectiveCompiledProviderOrder(
-      preferences.imageTextProviderOrder,
+      state.preferences.imageTextProviderOrder,
     ),
-    sourceLanguage: preferences.sourceLanguage,
-    ...(resolvedSourceLanguage
-      ? { detectedSourceLanguage: resolvedSourceLanguage }
+    sourceLanguage: state.preferences.sourceLanguage,
+    ...(state.resolvedSourceLanguage
+      ? { detectedSourceLanguage: state.resolvedSourceLanguage }
       : {}),
-    targetLanguage: preferences.targetLanguage,
-    translationIdle: !translationInFlight,
+    targetLanguage: state.preferences.targetLanguage,
+    translationIdle: !state.translationInFlight,
   });
 }
 
@@ -3090,7 +2839,7 @@ function configureSurfaceButton(): void {
 }
 
 async function openDetachedWindow(): Promise<void> {
-  const identity = capturedPageIdentity ?? followedPageIdentity;
+  const identity = state.capturedOrFollowedIdentity;
   if (!identity) {
     setStatus('Open a regular page before detaching the companion.', 'warning');
     return;
@@ -3124,8 +2873,8 @@ async function openDetachedWindow(): Promise<void> {
 
 async function returnToSidePanel(): Promise<void> {
   const sourceWindowId =
-    followedPageIdentity?.windowId ??
-    detachedSourceWindowId ??
+    state.followedPageIdentity?.windowId ??
+    state.detachedSourceWindowId ??
     detachedIdentityHint?.windowId;
   if (sourceWindowId === undefined) return;
 
@@ -3156,8 +2905,8 @@ async function returnToSidePanel(): Promise<void> {
         )) throw error;
       });
     }
-    if (panelWindowId !== undefined) {
-      await browser.windows.remove(panelWindowId);
+    if (state.panelWindowId !== undefined) {
+      await browser.windows.remove(state.panelWindowId);
     } else {
       window.close();
     }
@@ -3205,11 +2954,11 @@ async function checkPanelPlacement(): Promise<void> {
 }
 
 async function changeAutoTranslationMode(mode: AutoTranslationMode): Promise<void> {
-  if (permissionInFlight) {
+  if (state.permissionInFlight) {
     syncPreferenceControls();
     return;
   }
-  const pageUrl = followedPageIdentity?.url ?? capturedPageIdentity?.url;
+  const pageUrl = state.pageUrl;
   const requestedOrigins = permissionOriginsForMode(mode, pageUrl);
   if (mode === 'site' && requestedOrigins.length === 0) {
     syncPreferenceControls();
@@ -3221,7 +2970,7 @@ async function changeAutoTranslationMode(mode: AutoTranslationMode): Promise<voi
     );
     return;
   }
-  permissionInFlight = true;
+  state.permissionInFlight = true;
   updateControls();
   try {
     if (!navigator.locks) throw new Error('Chrome Web Locks are unavailable.');
@@ -3244,21 +2993,21 @@ async function changeAutoTranslationMode(mode: AutoTranslationMode): Promise<voi
       return;
     }
     if (outcome.kind === 'limit') {
-      preferences = mergePendingViewPreferences(outcome.preferences);
+      state.preferences = mergePendingViewPreferences(outcome.preferences);
       syncPreferenceControls();
       setStatus('The saved-site limit has been reached.', 'warning');
       return;
     }
     if (outcome.kind === 'failed') {
       if (outcome.result) {
-        preferences = mergePendingViewPreferences(outcome.result.preferences);
+        state.preferences = mergePendingViewPreferences(outcome.result.preferences);
       }
       else await reloadPreferencesFromStorage();
       syncPreferenceControls();
       setStatus(`Chrome could not update automatic access: ${readableError(outcome.error)}`, 'error');
       return;
     }
-    preferences = mergePendingViewPreferences(outcome.result.preferences);
+    state.preferences = mergePendingViewPreferences(outcome.result.preferences);
     syncPreferenceControls();
     if (outcome.kind === 'denied' || outcome.kind === 'not-applied') {
       setStatus('Chrome did not retain the requested automatic-access scope.', 'warning');
@@ -3272,8 +3021,8 @@ async function changeAutoTranslationMode(mode: AutoTranslationMode): Promise<voi
           : 'Automatic translation is enabled for this site.',
       'success',
     );
-    if (mode !== 'off' && snapshot && !isLiveSourceOnlyMode()) {
-      translationDesired = true;
+    if (mode !== 'off' && state.snapshot && !state.isLiveSourceOnlyMode) {
+      state.translationDesired = true;
       await maybeTranslateAutomatically(captureCoordinator.generation, pageUrl ?? '');
     }
   } catch (error) {
@@ -3282,12 +3031,12 @@ async function changeAutoTranslationMode(mode: AutoTranslationMode): Promise<voi
       mode,
       ...(pageUrl ? { pageUrl } : {}),
     }).catch(() => undefined);
-    if (repaired) preferences = mergePendingViewPreferences(repaired.preferences);
+    if (repaired) state.preferences = mergePendingViewPreferences(repaired.preferences);
     else await reloadPreferencesFromStorage();
     syncPreferenceControls();
     setStatus(`Chrome could not update automatic access: ${readableError(error)}`, 'error');
   } finally {
-    permissionInFlight = false;
+    state.permissionInFlight = false;
     updateControls();
   }
 }
@@ -3337,11 +3086,11 @@ async function performLockedAutoTranslationChange(
 }
 
 async function reconcileAutomaticAccess(pageUrl: string | undefined): Promise<boolean> {
-  const before = autoTranslationModeForPage(preferences, pageUrl);
+  const before = autoTranslationModeForPage(state.preferences, pageUrl);
   const result = await sendPreferenceCommand({ type: 'simul:preferences:reconcile' });
-  preferences = mergePendingViewPreferences(result.preferences);
+  state.preferences = mergePendingViewPreferences(result.preferences);
   syncPreferenceControls();
-  return before !== autoTranslationModeForPage(preferences, pageUrl);
+  return before !== autoTranslationModeForPage(state.preferences, pageUrl);
 }
 
 function scheduleNavigationRefresh(identity: CapturedPageIdentity): void {
@@ -3349,8 +3098,8 @@ function scheduleNavigationRefresh(identity: CapturedPageIdentity): void {
   navigationTimer = setTimeout(() => {
     navigationTimer = undefined;
     if (
-      followedPageIdentity?.tabId !== identity.tabId ||
-      followedPageIdentity.windowId !== identity.windowId
+      state.followedPageIdentity?.tabId !== identity.tabId ||
+      state.followedPageIdentity.windowId !== identity.windowId
     ) return;
     queueCapture({ identity, reason: 'navigation' });
   }, NAVIGATION_DEBOUNCE_MS);
@@ -3365,42 +3114,21 @@ function withCaptureTimeout<T>(operation: Promise<T>): Promise<T> {
   return withPageTimeout(operation, CAPTURE_TIMEOUT_MS);
 }
 
-/** Side panels and active-following windows must read the active tab only. */
-function requiresActiveSourceTab(): boolean {
-  return !isDetachedWindow || preferences.popoutTabMode === 'active';
-}
-
 function invalidateCompanion(message: string): void {
-  identityRequestId += 1;
-  releaseLiveSession(capturedPageIdentity ?? followedPageIdentity);
+  releaseLiveSession(state.capturedOrFollowedIdentity);
   captureCoordinator.invalidate();
-  availabilityRequestId += 1;
-  activeAbortController?.abort();
-  liveDeltaAbortController?.abort();
-  replicaShadowAbortController?.abort();
+  currency.supersedePage();
+  state.abortPageWork();
   imageTranslationController.releaseReplica();
   replicaEngineController.releasePresentation(false);
   quickComposer.invalidate();
-  followedPageIdentity = undefined;
-  snapshot = undefined;
-  capturedPageIdentity = undefined;
-  capturedPageDocumentId = undefined;
-  resolvedSourceLanguage = undefined;
-  availability = 'unavailable';
-  availabilityCheckedForPair = undefined;
-  translationDesired = false;
-  translationComplete = false;
   replicaTranslationCoordinator.selectPair(undefined);
-  pendingLiveUpdate = undefined;
-  latestLiveSequence = 0;
-  highestReceivedLiveSequence = 0;
-  liveSequenceBaselineReady = false;
+  state.clearPage();
   legacyTransitionGate.reset();
   liveReplicaFailureRecoveryGate.reset();
-  lastSourceScroll = undefined;
   visibleReplayHost.resetSourceScroll();
-  disconnectMirror();
-  renderErrorState(message);
+  mirrorView.disconnect();
+  mirrorView.renderError(message);
   setStatus(message, 'warning');
   updateControls();
 }
@@ -3419,15 +3147,15 @@ function releaseReplicaPresentationForLegacyWork(
   if (!force && usesReplicaTranslationProjection()) return false;
   if (!legacyTransitionGate.shadowOwnsPage) return false;
   const needsFreshCapture = legacyTransitionGate.release();
-  pendingLiveUpdate = undefined;
-  replicaShadowAbortController?.abort();
+  state.pendingLiveUpdate = undefined;
+  state.replicaShadowAbortController?.abort();
   imageTranslationController.releaseReplica();
   replicaEngineController.releasePresentation(showFallbackLabel);
   return needsFreshCapture;
 }
 
 function releaseLiveSession(
-  identity: CapturedPageIdentity | undefined = capturedPageIdentity ?? followedPageIdentity,
+  identity: CapturedPageIdentity | undefined = state.capturedOrFollowedIdentity,
 ): void {
   if (!identity) return;
   void browser.scripting.executeScript({
@@ -3435,24 +3163,6 @@ function releaseLiveSession(
     func: invokeLivePageObserverUnregisterBridge,
     args: [liveSessionId],
   }).catch(() => undefined);
-}
-
-function renderLoadingState(): void {
-  const wrapper = document.createElement('div');
-  wrapper.className = 'empty-state';
-  const text = document.createElement('p');
-  text.textContent = 'Preparing the live read-only mirror…';
-  wrapper.append(text);
-  snapshotContainer.replaceChildren(wrapper);
-}
-
-function renderErrorState(message: string): void {
-  const wrapper = document.createElement('div');
-  wrapper.className = 'empty-state empty-state--error';
-  const text = document.createElement('p');
-  text.textContent = message;
-  wrapper.append(text);
-  snapshotContainer.replaceChildren(wrapper);
 }
 
 async function readActivePageIdentity(
@@ -3473,7 +3183,7 @@ async function readCurrentFollowedIdentity(
   return identityFromTab(
     tab,
     followed.url,
-    !isDetachedWindow || preferences.popoutTabMode === 'active',
+    !isDetachedWindow || state.preferences.popoutTabMode === 'active',
   );
 }
 
@@ -3483,7 +3193,7 @@ function isMessageFromFollowedTab(
   generation: number,
   url: string,
 ): boolean {
-  const followed = followedPageIdentity ?? capturedPageIdentity;
+  const followed = state.followedOrCapturedIdentity;
   return Boolean(
     sessionId === liveSessionId &&
       followed &&
@@ -3495,52 +3205,23 @@ function isMessageFromFollowedTab(
 }
 
 function isCurrentAvailabilityRequest(
-  requestId: number,
+  request: CurrencyToken,
   requestedSnapshot: PageSnapshot,
   pair: TranslationPair,
   generation: number,
 ): boolean {
-  const currentPair = selectedPair();
+  const currentPair = state.selectedPair();
   return isAvailabilityRequestCurrent({
-    replicaViewMode: preferences.replicaViewMode,
-    requestMatches: requestId === availabilityRequestId,
+    replicaViewMode: state.preferences.replicaViewMode,
+    requestMatches: currency.isCurrent(request),
     generationMatches: captureCoordinator.isCurrent(generation),
-    snapshotMatches: snapshot === requestedSnapshot,
+    snapshotMatches: state.snapshot === requestedSnapshot,
     pairMatches: Boolean(
       currentPair &&
         currentPair.sourceLanguage === pair.sourceLanguage &&
         currentPair.targetLanguage === pair.targetLanguage,
     ),
   });
-}
-
-function selectedPair(): TranslationPair | undefined {
-  return resolvedSourceLanguage
-    ? {
-        sourceLanguage: resolvedSourceLanguage,
-        targetLanguage: preferences.targetLanguage,
-      }
-    : undefined;
-}
-
-function isCurrentTranslationPair(pair: TranslationPair): boolean {
-  const current = selectedPair();
-  return Boolean(
-    current &&
-      current.sourceLanguage === pair.sourceLanguage &&
-      current.targetLanguage === pair.targetLanguage,
-  );
-}
-
-function availabilityPairKey(pair: TranslationPair, generation: number): string {
-  return `${generation}:${pair.sourceLanguage}>${pair.targetLanguage}`;
-}
-
-function currentTranslationTaskKey(generation: number): string {
-  const pair = selectedPair();
-  return pair
-    ? availabilityPairKey(pair, generation)
-    : `${generation}:unresolved`;
 }
 
 function readLanguage(value: string): SupportedLanguage {
@@ -3556,7 +3237,7 @@ function showCaptureNotes(page: PageSnapshot): void {
   if (page.omissions.hidden) details.push('hidden content');
   if (page.omissions.unsafeImages) details.push('unsupported image sources');
   if (page.omissions.truncated) details.push('content beyond the bounded mirror limit');
-  if (!liveObservationAvailable) {
+  if (!state.liveObservationAvailable) {
     details.push('live updates because too many companion views are open');
   }
   captureNotes.textContent = details.length > 0 ? `Safely omitted: ${details.join(', ')}.` : '';
@@ -3566,60 +3247,60 @@ function showCaptureNotes(page: PageSnapshot): void {
 function updateControls(): void {
   syncToolbarPreferenceControls();
   quickComposer.syncPanel();
-  const busy = captureInFlight || translationInFlight || permissionInFlight || quickComposer.inFlight;
+  const busy = state.captureInFlight || state.translationInFlight || state.permissionInFlight || quickComposer.inFlight;
   sourceSelect.disabled = busy;
   targetSelect.disabled = busy;
-  swapButton.disabled = busy || !resolvedSourceLanguage;
+  swapButton.disabled = busy || !state.resolvedSourceLanguage;
   autoTranslateSelect.disabled = busy;
   displayModeSelect.disabled = busy;
   textLayoutSelect.disabled = busy;
-  replicaFidelityPolicySelect.disabled = busy || replicaFidelityCommitInFlight;
+  replicaFidelityPolicySelect.disabled = busy || state.replicaFidelityCommitInFlight;
   launchBehaviorSelect.disabled = busy;
   popoutTabModeSelect.disabled = busy;
-  syncScrollInput.disabled = busy || !liveObservationAvailable;
+  syncScrollInput.disabled = busy || !state.liveObservationAvailable;
   zoomInButton.disabled = busy;
   zoomOutButton.disabled = busy;
-  refreshButton.disabled = captureInFlight;
-  compactRefreshButton.disabled = captureInFlight;
+  refreshButton.disabled = state.captureInFlight;
+  compactRefreshButton.disabled = state.captureInFlight;
   toolbarAutoDetectButton.disabled = busy;
   toolbarSizeToggleButton.disabled = busy;
   toolbarOcrToggleButton.disabled = busy ||
-    imageCaptureAccess === 'checking' ||
+    state.imageCaptureAccess === 'checking' ||
     !hasCompiledImageAnalysisCapability();
   toolbarTabFollowButton.disabled = busy || !isDetachedWindow;
-  popoutButton.disabled = surfaceTransitionInFlight ||
-    (!isDetachedWindow && !capturedPageIdentity);
+  popoutButton.disabled = state.surfaceTransitionInFlight ||
+    (!isDetachedWindow && !state.capturedPageIdentity);
   cancelButton.hidden =
-    !translationInFlight && !quickComposer.inFlight && !imageTranslationInFlight;
+    !state.translationInFlight && !quickComposer.inFlight && !state.imageTranslationInFlight;
   cancelButton.disabled =
-    !translationInFlight && !quickComposer.inFlight && !imageTranslationInFlight;
-  translateComposerButton.disabled = busy || !composerInput.value.trim() || !selectedPair();
+    !state.translationInFlight && !quickComposer.inFlight && !state.imageTranslationInFlight;
+  translateComposerButton.disabled = busy || !composerInput.value.trim() || !state.selectedPair();
   uiLocalizer.setText(
     translateComposerButton,
     quickComposer.inFlight ? 'Translating…' : 'Translate',
   );
   translateButton.disabled =
     busy ||
-    isLiveSourceOnlyMode() ||
-    !snapshot ||
-    !visualRoot ||
-    !selectedPair() ||
-    availability === 'unavailable' ||
-    translationComplete;
+    state.isLiveSourceOnlyMode ||
+    !state.snapshot ||
+    !mirrorView.root ||
+    !state.selectedPair() ||
+    state.availability === 'unavailable' ||
+    state.translationComplete;
   uiLocalizer.setText(
     translateButton,
-    translationComplete ? 'Translation current' : 'Translate page',
+    state.translationComplete ? 'Translation current' : 'Translate page',
   );
   renderToolbarAttention();
   syncToolbarProgress();
 }
 
 function setImageTranslationBusy(busy: boolean): void {
-  const completed = imageTranslationInFlight && !busy;
-  imageTranslationInFlight = busy;
-  if (busy && !translationInFlight && !quickComposer.inFlight) {
+  const completed = state.imageTranslationInFlight && !busy;
+  state.imageTranslationInFlight = busy;
+  if (busy && !state.translationInFlight && !quickComposer.inFlight) {
     toolbarStatus.showImageProgress();
-  } else if (!busy && !translationInFlight && !quickComposer.inFlight) {
+  } else if (!busy && !state.translationInFlight && !quickComposer.inFlight) {
     hideProgress();
   }
   if (completed) {
