@@ -952,7 +952,12 @@ export class ImageTranslationController {
       !isReplayLease(replayLease) ||
       replayLease < this.#replayLease
     ) return false;
-    if (replayLease === this.#replayLease) return true;
+    if (replayLease === this.#replayLease) {
+      // A live commit can add the replica node an earlier job was deferred
+      // on because its anchor did not exist yet; give those another try.
+      this.#reconsiderAnchorDeferred();
+      return true;
+    }
     this.#adoptReplayLease(replayLease);
     return true;
   }
@@ -968,7 +973,24 @@ export class ImageTranslationController {
       this.#projector.refresh();
     }
     this.#refreshGates();
+    this.#scheduler?.reconsiderDeferred('anchor');
     this.#kick();
+  }
+
+  #reconsiderAnchorDeferred(): void {
+    if (!this.#scheduler || !this.#isEnabled()) return;
+    if (this.#scheduler.reconsiderDeferred('anchor') > 0) this.#kick();
+  }
+
+  /**
+   * Re-queue images deferred while the source tab was inactive or the OCR
+   * host was unavailable. Call it when the followed tab is activated and when
+   * the companion document becomes visible again; a deferral otherwise waits
+   * for the next observation of that image.
+   */
+  resume(): void {
+    if (this.#disposed || !this.#scheduler || !this.#isEnabled()) return;
+    if (this.#scheduler.reconsiderDeferred() > 0) this.#kick();
   }
 
   refreshOverlays(): void {
@@ -1514,7 +1536,7 @@ export class ImageTranslationController {
       job.descriptor.nodeId,
     );
     if (!anchor || !pairKey) {
-      scheduler.defer(job);
+      scheduler.defer(job, 'anchor');
       this.environment.onDiagnostic?.('anchor-deferred');
       return;
     }
@@ -1553,6 +1575,7 @@ export class ImageTranslationController {
     let sourceLanguage: SupportedLanguage | undefined;
     let sawOcrStep = false;
     let sawEmptyRecognition = false;
+    let transientRecognitionFailure = false;
     let unsupportedLanguage = false;
     let originFinalChecked = false;
     let ocrStepIndex = 0;
@@ -2062,6 +2085,9 @@ export class ImageTranslationController {
               'provider-unavailable',
             );
           }
+          if (isTransientRecognitionCode(recognition.code)) {
+            transientRecognitionFailure = true;
+          }
           this.environment.onDiagnostic?.(Object.freeze({
             stage: 'recognition-failed' as const,
             code: recognition.code,
@@ -2274,6 +2300,9 @@ export class ImageTranslationController {
             ? 'accessibility-text-blocked'
             : 'recognition-failed',
         );
+        if (error instanceof TransientRecognitionError) {
+          transientRecognitionFailure = true;
+        }
         if (step.kind === 'ocr') {
           const discardedProvisionalSourceLanguage = Boolean(
             stagedOcrLanguageObservation,
@@ -2326,10 +2355,11 @@ export class ImageTranslationController {
         );
       }
       if (await commitHeldSemantic()) return;
+      // An inactive source tab is a deferral, not a completion: resume()
+      // re-queues the image once the tab is active again.
       if (
         retryExhausted ||
         captureDeferral.reason === 'permission' ||
-        captureDeferral.reason === 'inactive' ||
         captureDeferral.reason === 'oversized'
       ) scheduler.settle(job);
       else scheduler.defer(job);
@@ -2364,6 +2394,15 @@ export class ImageTranslationController {
         this.#clearProjection(job.descriptor);
         this.environment.onDiagnostic?.('no-text-found');
       }
+      return;
+    }
+
+    if (transientRecognitionFailure) {
+      // Host and worker outages are transient. Project any held label, then
+      // defer the image so resume() or a later observation re-queues it
+      // instead of marking it done for the session.
+      if (await commitHeldSemantic()) return;
+      scheduler.defer(job);
       return;
     }
 
@@ -4791,6 +4830,12 @@ export class ImageTranslationController {
               bitmapWidth: pixels.bitmapWidth,
               bitmapHeight: pixels.bitmapHeight,
             }));
+            // A host or worker outage says nothing about this candidate
+            // language; roll the attempt back and defer the image instead of
+            // treating the language as tried and empty.
+            if (isTransientRecognitionCode(recognition.code)) {
+              throw new TransientRecognitionError();
+            }
             break;
           }
           if (recognition.result.regions.length > 0) {
@@ -5349,6 +5394,24 @@ function isTransientCaptureReason(
   return reason === 'unstable' || reason === 'quota' || reason === 'api' ||
     reason === 'data' || reason === 'decode' || reason === 'surface' ||
     reason === 'encode' || reason === 'digest';
+}
+
+const TRANSIENT_RECOGNITION_CODES: ReadonlySet<OcrHostErrorCode> = new Set<
+  OcrHostErrorCode
+>([
+  'host-unavailable',
+  'host-overflow',
+  'input-missing',
+  'worker-lost',
+]);
+
+/** Host and worker outages: the image is deferred rather than settled. */
+function isTransientRecognitionCode(code: OcrHostErrorCode): boolean {
+  return TRANSIENT_RECOGNITION_CODES.has(code);
+}
+
+class TransientRecognitionError extends Error {
+  override readonly name = 'TransientRecognitionError';
 }
 
 function normalizeResetEpoch(value: unknown): number {

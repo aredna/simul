@@ -555,3 +555,61 @@ function descriptor(
 function upsert(descriptorValue: SourceImageDescriptor) {
   return { kind: 'upsert' as const, descriptor: descriptorValue };
 }
+
+describe('deferred image reconsideration', () => {
+  it('re-queues deferred images on demand without changing their observation', () => {
+    const scheduler = new ImageScanScheduler(documentIdentity, {
+      policy: 'eager-all',
+    });
+    scheduler.apply(upsert(descriptor(6, 'visible')));
+    const active = scheduler.takeNext()!;
+    expect(scheduler.defer(active)).toBe(true);
+    expect(scheduler.takeNext()).toBeUndefined();
+
+    expect(scheduler.reconsiderDeferred()).toBe(1);
+    expect(scheduler.decisionFor(6)).not.toBe('visibility-gate');
+    expect(scheduler.takeNext()?.descriptor).toEqual(active.descriptor);
+    // Nothing left to reconsider once it is active again.
+    expect(scheduler.reconsiderDeferred()).toBe(0);
+  });
+
+  it('re-queues only anchor deferrals for a commit and every deferral for resume', () => {
+    const scheduler = new ImageScanScheduler(documentIdentity, {
+      policy: 'eager-all',
+    });
+    scheduler.apply(upsert(descriptor(6, 'visible')));
+    scheduler.apply(upsert(descriptor(7, 'visible')));
+    const anchorless = scheduler.takeNext()!;
+    expect(scheduler.defer(anchorless, 'anchor')).toBe(true);
+    const hidden = scheduler.takeNext()!;
+    expect(scheduler.defer(hidden)).toBe(true);
+    expect(scheduler.queued).toBe(0);
+
+    // A replica commit only helps the image whose anchor was missing.
+    expect(scheduler.reconsiderDeferred('anchor')).toBe(1);
+    expect(scheduler.queueSnapshot().map((job) => job.descriptor.nodeId)).toEqual([6]);
+    expect(scheduler.settle(scheduler.takeNext()!)).toBe(true);
+    expect(scheduler.reconsiderDeferred('anchor')).toBe(0);
+
+    // Tab activation or host recovery re-queues whatever is still deferred.
+    expect(scheduler.reconsiderDeferred()).toBe(1);
+    expect(scheduler.queueSnapshot().map((job) => job.descriptor.nodeId)).toEqual([7]);
+  });
+
+  it('keeps a reconsidered image behind the policy and gate checks', () => {
+    const scheduler = new ImageScanScheduler(documentIdentity, {
+      policy: 'visible-first-background-prescan',
+    });
+    scheduler.setGates(openGates);
+    scheduler.apply(upsert(descriptor(8, 'background')));
+    const active = scheduler.takeNext()!;
+    expect(scheduler.defer(active)).toBe(true);
+    scheduler.setGates({ ...openGates, translationIdle: false });
+
+    expect(scheduler.reconsiderDeferred()).toBe(1);
+    expect(scheduler.queued).toBe(0);
+    expect(scheduler.decisionFor(8)).toBe('visibility-gate');
+    scheduler.setGates(openGates);
+    expect(scheduler.queueSnapshot().map((job) => job.descriptor.nodeId)).toEqual([8]);
+  });
+});

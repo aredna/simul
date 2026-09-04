@@ -16,7 +16,6 @@ import {
   createSourceControlledContentPolicy,
   hasSourceControlOrEditableElementAncestor,
   hasSourceCredentialSecretAncestor,
-  hasSourcePrivateOrActivationElementAncestor,
   readSourceFlatTreeElementPath,
   sourceControlledContentLayoutMayChange,
   sourceControlledContentMutationsMayChange,
@@ -540,25 +539,9 @@ export function hasSourceAriaControlledRegionAncestor(
   );
 }
 
-const PRIVATE_CAPTURE_SELECTOR = [
-  'a[href]',
-  'area[href]',
-  'audio[controls]',
-  'button',
-  'input',
-  'label',
-  'meter',
-  'option',
-  'output',
-  'progress',
-  'select',
-  'summary',
-  'textarea',
-  'video[controls]',
-  '[contenteditable]',
-  '[role]',
-].join(',');
 export const MAX_CAPTURE_OVERLAP_ELEMENTS = 50_000;
+/** Bounded descent through open shadow roots under a covering element. */
+const MAX_TEXT_COVER_SHADOW_DEPTH = 16;
 
 /** Skip invalid lang values and continue outward to the nearest valid hint. */
 export function nearestValidElementLanguage(
@@ -578,8 +561,9 @@ export function nearestValidElementLanguage(
 
 /**
  * captureVisibleTab sees painted viewport pixels, not the `<img>` bitmap in
- * isolation. Reject geometry that cannot be mapped safely or intersects a
- * private control, rather than OCRing unrelated/secret pixels.
+ * isolation. Reject geometry that cannot be mapped safely, intersects a
+ * credential-secret control, or is covered by foreign text, rather than
+ * OCRing unrelated/secret pixels.
  */
 export function hasSafeCaptureGeometry(
   image: HTMLImageElement,
@@ -613,19 +597,24 @@ export function hasSafeCaptureGeometry(
     ) return false;
   }
 
-  return !hasProtectedSiblingOverlap(
+  if (hasProtectedSiblingOverlap(
     image,
     imageRect,
     sourceDocument,
     sourceWindow,
     classifySecret,
-  );
+  )) return false;
+  return !isCoveredByForeignText(image, imageRect, path, sourceDocument);
 }
 
 /**
  * An image contained by a control is governed by controlImages. A different
- * control painted over that image is never part of the image and must remain
- * protected for both pixel capture and accessibility-label reads.
+ * element painted over that image is never part of the image; it blocks pixel
+ * capture and accessibility-label reads only when it is credential-secret
+ * (password, one-time-code, payment-card and other secret autocompletes,
+ * hidden/file inputs, CSS-masked text, or a sticky secret classification).
+ * A public text control, button or link painted over the image exposes
+ * nothing the replica does not already show as text, so it does not block.
  */
 export function hasProtectedSiblingOverlap(
   image: HTMLImageElement,
@@ -654,20 +643,77 @@ export function hasProtectedSiblingOverlap(
     // Classify every painted overlap, not only controls and ARIA role nodes.
     // Generic div/span overlays can carry sticky password, OTP, payment,
     // WebAuthn, or computed text-security classification too.
-    const secret = safeSecretClassification(candidate, isSecret);
-    let controlCandidate: boolean;
+    if (safeSecretClassification(candidate, isSecret)) return true;
+  }
+  return false;
+}
+
+/**
+ * captureVisibleTab paints whatever is on top. A fixed header, caption, or
+ * dialog with text lying over the image would be recognized and projected as
+ * if it were part of the picture. Sample a few points and defer while a
+ * non-ancestor element carrying its own text covers one of them. Transparent
+ * link overlays and wrappers without text are deliberately allowed; an
+ * unreadable hit test fails closed.
+ */
+function isCoveredByForeignText(
+  image: HTMLImageElement,
+  imageRect: DOMRect,
+  imagePath: readonly Element[],
+  sourceDocument: Document,
+): boolean {
+  const elementFromPoint = sourceDocument.elementFromPoint;
+  if (typeof elementFromPoint !== 'function') return false;
+  const ancestors = new Set<Element>(imagePath);
+  const samples: ReadonlyArray<readonly [number, number]> = [
+    [0.5, 0.5],
+    [0.2, 0.2],
+    [0.8, 0.2],
+    [0.2, 0.8],
+    [0.8, 0.8],
+  ];
+  for (const [fx, fy] of samples) {
+    const x = imageRect.left + imageRect.width * fx;
+    const y = imageRect.top + imageRect.height * fy;
+    let top: Element | null;
     try {
-      controlCandidate = candidate.matches(PRIVATE_CAPTURE_SELECTOR);
+      top = elementFromPoint.call(sourceDocument, x, y);
+      // The document-level hit test stops at a shadow host; descend so a
+      // text overlay inside an open shadow tree is not mistaken for its
+      // text-free host.
+      for (let depth = 0; top && depth < MAX_TEXT_COVER_SHADOW_DEPTH; depth += 1) {
+        const shadow = top.shadowRoot;
+        if (!shadow || shadow.mode !== 'open' || ancestors.has(top)) break;
+        const shadowHit = shadow.elementFromPoint;
+        if (typeof shadowHit !== 'function') break;
+        const inner = shadowHit.call(shadow, x, y);
+        if (!inner || inner === top) break;
+        top = inner;
+      }
     } catch {
       return true;
     }
-    const protectedOverlap = secret || (
-      controlCandidate && (
-        hasSourcePrivateOrActivationElementAncestor(candidate) ||
-        hasSourceControlOrEditableElementAncestor(candidate)
-      )
-    );
-    if (protectedOverlap) return true;
+    if (!top || ancestors.has(top)) continue;
+    if (elementHasOwnVisibleText(top)) return true;
+  }
+  return false;
+}
+
+function elementHasOwnVisibleText(element: Element): boolean {
+  for (const child of element.childNodes) {
+    if (child.nodeType === 3 && (child.nodeValue ?? '').trim().length > 0) {
+      return true;
+    }
+  }
+  // Text nested one level down (a caption span inside an overlay) counts too;
+  // deeper structure is treated as layout rather than a text cover.
+  for (const child of element.children) {
+    for (const grandchild of child.childNodes) {
+      if (
+        grandchild.nodeType === 3 &&
+        (grandchild.nodeValue ?? '').trim().length > 0
+      ) return true;
+    }
   }
   return false;
 }
