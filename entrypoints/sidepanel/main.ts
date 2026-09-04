@@ -893,6 +893,10 @@ document.addEventListener('keydown', (event) => {
     setCompanionOverlay();
   }
 });
+document.addEventListener('visibilitychange', () => {
+  // A hidden companion defers image work; re-kick it when it is shown again.
+  if (document.visibilityState === 'visible') imageTranslationController.resume();
+});
 window.addEventListener('pagehide', () => {
   commitPendingZoom();
   uiLocalizationAbortController?.abort();
@@ -915,6 +919,9 @@ browser.runtime.onMessage.addListener((message: unknown) => {
 });
 
 browser.tabs.onActivated.addListener(({ tabId, windowId }) => {
+  // Images deferred while the followed tab was inactive can be captured
+  // again now that it is the active tab.
+  if (followedPageIdentity?.tabId === tabId) imageTranslationController.resume();
   if (
     shouldFollowActivatedTab(
       isDetachedWindow,
