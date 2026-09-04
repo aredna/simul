@@ -99,7 +99,10 @@ memory-only.
 
 OCR currently targets stable visible top-frame images. It does not read CSS
 backgrounds, canvas, video frames, embedded documents, hidden images, or
-credential-overlapping pixels. See
+credential-overlapping pixels. A public text field, button, or link that
+overlaps an image does not block capture; only password and other credential
+fields do, and capture waits while text from another element covers the
+image. See
 [Image text translation](docs/image-translation-research.md) for the detailed
 boundary.
 
