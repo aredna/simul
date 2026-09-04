@@ -522,4 +522,181 @@ describe('sidepanel UI structure', () => {
     expect(replicaStyle).not.toContain('color-scheme: light');
     expect(replicaStyle).not.toContain('background: #fff');
   });
+
+  it('keeps the focus ring visible in dark mode', () => {
+    const darkBlock = style.slice(
+      style.indexOf('@media (prefers-color-scheme: dark)'),
+      style.indexOf('@media (max-width: 360px)'),
+    );
+
+    expect(darkBlock).toContain('button:focus-visible,');
+    expect(darkBlock).toContain('select:focus-visible,');
+    expect(darkBlock).toContain('textarea:focus-visible,');
+    expect(darkBlock).toContain(
+      'input:focus-visible { outline-color: rgb(123 217 170 / 75%); }',
+    );
+  });
+
+  it('leaves the navigation refresh armed across focus and activation follows', () => {
+    const focusListener = sliceBetween(
+      'browser.windows.onFocusChanged.addListener(',
+      'browser.tabs.onAttached.addListener(',
+    );
+    expect(focusListener).not.toContain('clearNavigationTimer()');
+    expect(focusListener).toContain('followFocusedBrowserWindow(windowId, requestId)');
+
+    const follow = sliceBetween(
+      'async function followActivatedSourceTab(',
+      '\nfunction finishActiveFollowRequest(',
+    );
+    expect(follow).not.toContain('clearNavigationTimer()');
+    expect(follow).toContain('shouldRebuildStaleFollowedReplica({');
+    expect(follow).toContain('navigationRefreshPending: navigationTimer !== undefined');
+    expect(follow).toContain('tabStatus: tab.status');
+    expect(follow).toContain('captured: capturedPageIdentity');
+    expect(follow.indexOf('shouldRebuildStaleFollowedReplica({'))
+      .toBeGreaterThan(follow.indexOf('if (sameCompanionSourcePage('));
+    // A superseded follow still releases its own marker before returning.
+    const focusFollow = sliceBetween(
+      'async function followFocusedBrowserWindow(',
+      '\nasync function followActivatedSourceTab(',
+    );
+    expect(focusFollow.indexOf('finishActiveFollowRequest(requestId);\n    return;'))
+      .toBeLessThan(focusFollow.indexOf('activeFollowRequestId = requestId;'));
+  });
+
+  it('saves zoom once the slider settles instead of on every input tick', () => {
+    expect(script).toContain('const ZOOM_COMMIT_DEBOUNCE_MS = 150;');
+    const setZoom = sliceBetween('function setZoom(', '\nfunction commitPendingZoom(');
+    expect(setZoom).not.toContain('commitViewPreferencePatch(');
+    expect(setZoom).toContain('viewPreferencePatchLedger.begin(preferences, patch)');
+    expect(setZoom).toContain('updateMirrorLayout();');
+    expect(setZoom).toContain(
+      'zoomCommitTimer = setTimeout(commitPendingZoom, ZOOM_COMMIT_DEBOUNCE_MS);',
+    );
+    const commitZoom = sliceBetween(
+      'function commitPendingZoom(',
+      '\nasync function changePopoutTabMode(',
+    );
+    expect(commitZoom).toContain('viewPreferencePatchLedger.settle(pending.requestId)');
+    expect(commitZoom).toContain('void commitViewPreferencePatch(pending.patch)');
+    const pagehide = sliceBetween(
+      "window.addEventListener('pagehide'",
+      'browser.runtime.onMessage.addListener(',
+    );
+    expect(pagehide).toContain('commitPendingZoom();');
+  });
+
+  it('rebuilds image-analysis settings only when their inputs change and keeps diagnostics open', () => {
+    const render = sliceBetween(
+      'function renderImageAnalysisControls(',
+      '\nfunction createOrderButton(',
+    );
+    expect(render.indexOf('renderKey === imageAnalysisRenderKey'))
+      .toBeLessThan(render.indexOf('root.replaceChildren()'));
+    for (const input of [
+      'imageCaptureAccess,',
+      'permissionInFlight,',
+      'preferences.imageTextProviderOrder,',
+      'preferences.disabledImageReadingMethodIds,',
+      'preferences.ocrMinimumConfidence,',
+      'preferences.imageScanPolicy,',
+      'preferences.usePromptForImageText,',
+      '[...ocrProviderRuntimeStatuses],',
+    ]) {
+      expect(render.indexOf(input)).toBeLessThan(render.indexOf('root.replaceChildren()'));
+    }
+    expect(render.indexOf('const diagnosticsWereOpen = imageTranslationDiagnosticsDetails?.open'))
+      .toBeLessThan(render.indexOf('root.replaceChildren()'));
+    expect(render.indexOf('diagnostics.open = diagnosticsWereOpen;'))
+      .toBeLessThan(render.indexOf('imageTranslationDiagnosticsDetails = diagnostics;'));
+  });
+
+  it('localizes labels only with an installed pair and lets them follow a page translation', () => {
+    const localize = sliceBetween(
+      'async function localizeUiLabels(',
+      '\nfunction retryUiLocalizationAfterPagePairPrepared(',
+    );
+    expect(localize).toContain("if (uiAvailability !== 'available') {");
+    expect(localize).not.toContain("uiAvailability === 'unavailable'");
+    expect(localize.indexOf("uiAvailability !== 'available'"))
+      .toBeLessThan(localize.indexOf('provider.createSession(pair'));
+    // The quick composer is an explicit click and keeps its own path.
+    const composer = sliceBetween(
+      'async function translateComposer(',
+      '\nfunction cancelComposerTranslation(',
+    );
+    expect(composer).toContain("composerAvailability === 'unavailable'");
+    const translation = sliceBetween(
+      'async function runTranslation(',
+      '\nfunction describePartialReplicaTranslation(',
+    );
+    expect(translation).toContain('retryUiLocalizationAfterPagePairPrepared();');
+  });
+
+  it('keeps translation intent local to the window that changed the languages', () => {
+    const storageListener = sliceBetween(
+      'browser.storage.onChanged.addListener(',
+      '\nvoid initialize();',
+    );
+    expect(storageListener).not.toContain('translationDesired = true');
+    expect(storageListener).toContain('applyLanguagePreferences(false, previousPair)');
+    const selectionChanged = sliceBetween(
+      'async function languageSelectionChanged(',
+      '\nasync function applyLanguagePreferences(',
+    );
+    expect(selectionChanged).toContain(
+      'if (!isLiveSourceOnlyMode()) translationDesired = true;',
+    );
+    const apply = sliceBetween(
+      'async function applyLanguagePreferences(',
+      '\nasync function checkAvailability(',
+    );
+    expect(apply).toContain('if (!fromUserAction) {');
+    expect(apply).toContain('await maybeTranslateAutomatically(');
+    expect(apply).not.toContain('startTranslation(!fromUserAction');
+    expect(apply).toContain('await startTranslation(false, captureCoordinator.generation)');
+  });
+
+  it('records the checked pair only after an availability result is accepted', () => {
+    const check = sliceBetween(
+      'async function checkAvailability(',
+      '\nasync function maybeTranslateAutomatically(',
+    );
+    expect(check).not.toContain(
+      "availabilityCheckedForPair = checkedPairKey;\n  availability = 'unavailable';",
+    );
+    expect(check.indexOf('availabilityCheckedForPair = checkedPairKey;'))
+      .toBeGreaterThan(check.indexOf('pair.sourceLanguage === pair.targetLanguage'));
+    expect(check).toContain(
+      'if (!isCurrentAvailabilityRequest(requestId, requestedSnapshot, pair, generation)) return;\n' +
+        '    availabilityCheckedForPair = checkedPairKey;\n' +
+        '    availability = next;',
+    );
+    expect(check).toContain(
+      'if (!isCurrentAvailabilityRequest(requestId, requestedSnapshot, pair, generation)) return;\n' +
+        '    availabilityCheckedForPair = checkedPairKey;\n' +
+        "    availability = 'unavailable';",
+    );
+    // A discarded check leaves the pair unrecorded, so the next text commit
+    // re-establishes availability instead of skipping preparation.
+    const reconcile = sliceBetween(
+      'async function reconcileReplicaTranslationAfterCommit(',
+      '\nfunction* replicaRecordSources(',
+    );
+    expect(reconcile).toContain('availabilityCheckedForPair !== expectedAvailabilityKey');
+  });
+
+  it('does not guard the definitely assigned image translation controller', () => {
+    expect(script).toContain('let imageTranslationController!: ImageTranslationController;');
+    expect(script).not.toContain('imageTranslationController?.');
+  });
 });
+
+function sliceBetween(start: string, end: string): string {
+  const startIndex = script.indexOf(start);
+  expect(startIndex).toBeGreaterThanOrEqual(0);
+  const endIndex = script.indexOf(end, startIndex + start.length);
+  expect(endIndex).toBeGreaterThan(startIndex);
+  return script.slice(startIndex, endIndex);
+}

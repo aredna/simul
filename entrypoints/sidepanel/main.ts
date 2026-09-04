@@ -51,6 +51,7 @@ import {
   NavigationRefreshGate,
   resolveNavigationUpdateStatus,
 } from '../../lib/navigation-refresh-gate';
+import { shouldRebuildStaleFollowedReplica } from '../../lib/followed-replica-currency';
 import {
   createDetachedCompanionUrl,
   createDetachedWindowData,
@@ -245,6 +246,7 @@ interface AuthorizedTabRequest {
   launchStamp?: CompanionLaunchStamp;
 }
 
+const ZOOM_COMMIT_DEBOUNCE_MS = 150;
 const NAVIGATION_DEBOUNCE_MS = 350;
 const CAPTURE_TIMEOUT_MS = 12_000;
 const UI_LOCALIZATION_RETRY_DELAY_MS = 1_500;
@@ -418,7 +420,7 @@ const isolatedHtmlReplicaEngine = new IsolatedHtmlReplicaEngine({
   getReplicaFidelityPolicy: () => preferences.replicaFidelityPolicy,
   openSemanticStream: openChromeSemanticSource,
   getReplicaReadScope: () => currentReplicaReadScope(),
-  onLayoutChanged: () => imageTranslationController?.refreshOverlays(),
+  onLayoutChanged: () => imageTranslationController.refreshOverlays(),
   onSourceScroll: (scroll) => {
     lastSourceScroll = scroll;
     if (preferences.syncScroll) visibleReplayHost.followSourceScroll(scroll);
@@ -533,7 +535,7 @@ function handleReplicaSourceCommit(commit: ReplicaSourceCommit): void {
     clearAutoImageLanguageForDifferentDocument(commit.document);
     // Initial activation is deliberately deferred until the engine run has
     // settled. Checkpoint/live callbacks can only advance an existing lease.
-    imageTranslationController?.notifyReplicaCommit(
+    imageTranslationController.notifyReplicaCommit(
       commit.document,
       commit.replayLease,
     );
@@ -630,7 +632,12 @@ const isolatedReplicaFailureRecoveryGate =
 let lastSourceScroll: HtmlMirrorScrollState | undefined;
 let availabilityCheckedForPair: string | undefined;
 let replicaFidelityCommitInFlight = false;
+let zoomCommitTimer: ReturnType<typeof setTimeout> | undefined;
+let pendingZoomPatch:
+  | { readonly requestId: number; readonly patch: CompanionViewSettingsPatch }
+  | undefined;
 let imageAnalysisControls: HTMLElement | undefined;
+let imageAnalysisRenderKey: string | undefined;
 let surfaceTransitionInFlight = false;
 let latestToolbarLaunchStamp: CompanionLaunchStamp | undefined;
 const ocrProviderRuntimeStatuses = new Map<
@@ -887,6 +894,7 @@ document.addEventListener('keydown', (event) => {
   }
 });
 window.addEventListener('pagehide', () => {
+  commitPendingZoom();
   uiLocalizationAbortController?.abort();
   if (uiLocalizationRetryTimer !== undefined) {
     clearTimeout(uiLocalizationRetryTimer);
@@ -939,8 +947,10 @@ browser.windows.onFocusChanged.addListener((windowId) => {
     windowId === browser.windows.WINDOW_ID_NONE ||
     windowId === panelWindowId
   ) return;
+  // The pending navigation refresh is left armed: its callback re-validates
+  // the followed identity, and clearing it here lost the refresh whenever
+  // focus moved within the debounce window (review M1).
   const requestId = ++identityRequestId;
-  clearNavigationTimer();
   void followFocusedBrowserWindow(windowId, requestId);
 });
 
@@ -1152,7 +1162,9 @@ browser.storage.onChanged.addListener((changes, areaName) => {
     (previous.sourceLanguage !== preferences.sourceLanguage ||
       previous.targetLanguage !== preferences.targetLanguage)
   ) {
-    if (!isLiveSourceOnlyMode()) translationDesired = true;
+    // The window that changed the languages already recorded its own intent
+    // in languageSelectionChanged. A change made in another companion window
+    // must not opt this one into translating (review L2).
     void applyLanguagePreferences(false, previousPair);
   }
 });
@@ -1941,7 +1953,13 @@ async function followFocusedBrowserWindow(
   if (
     requestId !== identityRequestId ||
     preferences.popoutTabMode !== 'active'
-  ) return;
+  ) {
+    // tabs.onRemoved marks its request before the microtask that reaches
+    // here. A request superseded in that gap must still release the marker,
+    // or updates for the followed tab stay ignored until the next follow.
+    finishActiveFollowRequest(requestId);
+    return;
+  }
   activeFollowRequestId = requestId;
   try {
     const sourceWindow = await browser.windows.get(windowId);
@@ -1989,7 +2007,8 @@ async function followActivatedSourceTab(
   const requestId = existingRequestId ?? ++identityRequestId;
   if (requestId !== identityRequestId) return;
   activeFollowRequestId = requestId;
-  clearNavigationTimer();
+  // A pending navigation refresh stays armed (see windows.onFocusChanged);
+  // queueCapture clears it once a different page is followed.
   try {
     const sourceWindow = await browser.windows.get(windowId);
     if (
@@ -1997,11 +2016,8 @@ async function followActivatedSourceTab(
       preferences.popoutTabMode !== 'active'
     ) return;
     if (!isFocusedNormalBrowserWindow(sourceWindow)) return;
-    const identity = identityFromTab(
-      knownTab ?? await browser.tabs.get(tabId),
-      undefined,
-      true,
-    );
+    const tab = knownTab ?? await browser.tabs.get(tabId);
+    const identity = identityFromTab(tab, undefined, true);
     if (
       requestId !== identityRequestId ||
       preferences.popoutTabMode !== 'active'
@@ -2011,7 +2027,22 @@ async function followActivatedSourceTab(
       followedPageIdentity,
       identity,
       normalizedPageUrl,
-    )) return;
+    )) {
+      // Already following this page. If the rendered replica is still an
+      // older page of the same tab (a navigation whose refresh never ran),
+      // rebuild now instead of leaving the stale mirror frozen (review M1).
+      if (shouldRebuildStaleFollowedReplica({
+        captureInFlight,
+        navigationRefreshPending: navigationTimer !== undefined,
+        tabStatus: tab.status,
+        captured: capturedPageIdentity,
+        identity,
+        normalizeUrl: normalizedPageUrl,
+      })) {
+        queueCapture({ identity, reason: 'navigation' });
+      }
+      return;
+    }
     queueCapture({ identity, reason: 'navigation' });
   } catch (error) {
     if (requestId !== identityRequestId) return;
@@ -2683,8 +2714,18 @@ async function applyLanguagePreferences(
     return;
   }
   await checkAvailability(captureCoordinator.generation);
+  if (!fromUserAction) {
+    // A change saved by another companion window, or a re-resolved automatic
+    // language, re-establishes availability here but only resumes a
+    // translation this window already wanted; it records no new intent.
+    await maybeTranslateAutomatically(
+      captureCoordinator.generation,
+      capturedPageIdentity?.url ?? '',
+    );
+    return;
+  }
   if (availability === 'available') {
-    await startTranslation(!fromUserAction, captureCoordinator.generation);
+    await startTranslation(false, captureCoordinator.generation);
   } else if (availability === 'downloadable' || availability === 'downloading') {
     setStatus('This language pair needs its on-device pack. Choose Translate once to prepare it.', 'warning');
   }
@@ -2716,10 +2757,16 @@ async function checkAvailability(generation: number): Promise<void> {
     return;
   }
   const checkedPairKey = availabilityPairKey(pair, generation);
-  availabilityCheckedForPair = checkedPairKey;
+  // The pair is recorded as checked only once a result passes the currency
+  // guard. Recording it before the await let a superseded request leave the
+  // pair marked as checked while availability stayed 'unavailable', which
+  // disabled Translate and skipped automatic translation for that generation
+  // because reconcileReplicaTranslationAfterCommit saw nothing to prepare.
+  availabilityCheckedForPair = undefined;
   availability = 'unavailable';
   updateControls();
   if (pair.sourceLanguage === pair.targetLanguage) {
+    availabilityCheckedForPair = checkedPairKey;
     availability = 'available';
     translationComplete = true;
     setStatus('The source and target languages match, so the original text is unchanged.', 'success');
@@ -2729,6 +2776,7 @@ async function checkAvailability(generation: number): Promise<void> {
   try {
     const next = await provider.availability(pair);
     if (!isCurrentAvailabilityRequest(requestId, requestedSnapshot, pair, generation)) return;
+    availabilityCheckedForPair = checkedPairKey;
     availability = next;
     switch (next) {
       case 'available':
@@ -2743,6 +2791,7 @@ async function checkAvailability(generation: number): Promise<void> {
     }
   } catch (error) {
     if (!isCurrentAvailabilityRequest(requestId, requestedSnapshot, pair, generation)) return;
+    availabilityCheckedForPair = checkedPairKey;
     availability = 'unavailable';
     setStatus(readableError(error), 'error');
   } finally {
@@ -2855,6 +2904,7 @@ async function runTranslation(automatic: boolean, generation: number): Promise<v
       result.total > 0 &&
       replicaTranslationCoordinator.isResultCurrent(result) &&
       isCompleteReplicaTranslationResult(result);
+    retryUiLocalizationAfterPagePairPrepared();
     setStatus(
       translationComplete
         ? automatic
@@ -3079,8 +3129,13 @@ async function localizeUiLabels(): Promise<void> {
         sessionTask ??= (async () => {
           const uiAvailability = await provider.availability(pair);
           abortController.signal.throwIfAborted();
-          if (uiAvailability === 'unavailable') {
-            throw new Error('The UI language pair is unavailable.');
+          // Label localization runs without a user gesture, so it may only
+          // use an already-installed pair. A downloadable pair would either
+          // start a multi-megabyte download as a side effect of a menu
+          // choice or throw NotAllowedError (review D14). The Translate page
+          // click prepares the pair; labels follow once it has been used.
+          if (uiAvailability !== 'available') {
+            throw new Error('The UI language pair is not installed yet.');
           }
           return provider.createSession(pair, {
             signal: abortController.signal,
@@ -3127,6 +3182,23 @@ async function localizeUiLabels(): Promise<void> {
   }
 }
 
+/**
+ * Label localization refuses a pair that is not installed (see
+ * localizeUiLabels), and its retry budget is one pass per label set. A page
+ * translation may have just installed that pair, so let the labels follow
+ * instead of waiting for the next label-set change or a reload.
+ */
+function retryUiLocalizationAfterPagePairPrepared(): void {
+  if (!uiLocalizationRetriedInputKey) return;
+  if (uiLocalizationRetryTimer !== undefined) {
+    clearTimeout(uiLocalizationRetryTimer);
+    uiLocalizationRetryTimer = undefined;
+  }
+  uiLocalizationRetriedInputKey = '';
+  uiLocalizationInputKey = '';
+  scheduleUiLocalization();
+}
+
 function applyUiLabelsToDom(): void {
   for (const element of document.querySelectorAll<HTMLElement>('[data-ui-label]')) {
     const english = element.dataset.uiLabel;
@@ -3168,13 +3240,44 @@ function observeReplicaStateLabel(): void {
   }).observe(replicaModeBadge, { childList: true, characterData: true });
 }
 
+/**
+ * Applies zoom immediately and saves it once the slider settles. Saving on
+ * every input tick sent one storage write per tick, each of which fanned a
+ * storage change to every companion view and rebuilt the settings controls.
+ * One optimistic ledger entry covers the whole drag, so a committed snapshot
+ * arriving mid-drag keeps the slider where the user left it.
+ */
 function setZoom(value: number): void {
-  const zoomPercent = clampZoomPercent(value);
-  void commitViewPreferencePatch({
+  const patch: CompanionViewSettingsPatch = {
     displayMode: 'custom',
-    zoomPercent,
-  });
+    zoomPercent: clampZoomPercent(value),
+  };
+  if (pendingZoomPatch) {
+    viewPreferencePatchLedger.settle(pendingZoomPatch.requestId);
+  }
+  const pending = viewPreferencePatchLedger.begin(preferences, patch);
+  pendingZoomPatch = { requestId: pending.requestId, patch };
+  preferences = pending.preferences;
+  zoomInput.value = String(preferences.zoomPercent);
+  zoomOutput.value = `${preferences.zoomPercent}%`;
+  zoomInput.disabled = false;
+  displayModeSelect.value = preferences.displayMode;
+  syncToolbarPreferenceControls();
   updateMirrorLayout();
+  if (zoomCommitTimer !== undefined) clearTimeout(zoomCommitTimer);
+  zoomCommitTimer = setTimeout(commitPendingZoom, ZOOM_COMMIT_DEBOUNCE_MS);
+}
+
+function commitPendingZoom(): void {
+  if (zoomCommitTimer !== undefined) clearTimeout(zoomCommitTimer);
+  zoomCommitTimer = undefined;
+  const pending = pendingZoomPatch;
+  if (!pending) return;
+  pendingZoomPatch = undefined;
+  // commitViewPreferencePatch opens its own ledger entry synchronously, so
+  // the drag's entry can be released without a gap in the projection.
+  viewPreferencePatchLedger.settle(pending.requestId);
+  void commitViewPreferencePatch(pending.patch);
 }
 
 async function changePopoutTabMode(popoutTabMode: PopoutTabMode): Promise<void> {
@@ -3783,6 +3886,27 @@ function initializeImageAnalysisControls(): void {
 function renderImageAnalysisControls(): void {
   const root = imageAnalysisControls;
   if (!root) return;
+  // Rebuilding on every preference sync destroyed the control that fired the
+  // change (dropping keyboard focus) and collapsed the diagnostics section.
+  // Rebuild only when something the section shows actually changed.
+  const renderKey = JSON.stringify([
+    preferences.imageTranslationEnabled,
+    imageCaptureAccess,
+    permissionInFlight,
+    preferences.imageTextProviderOrder,
+    preferences.disabledImageTextProviderIds,
+    preferences.imageReadingMethodOrder,
+    preferences.disabledImageReadingMethodIds,
+    preferences.ocrMinimumConfidence,
+    preferences.imageScanPolicy,
+    preferences.skipSmallImages,
+    preferences.usePromptForImageLanguage,
+    preferences.usePromptForImageText,
+    [...ocrProviderRuntimeStatuses],
+  ]);
+  if (renderKey === imageAnalysisRenderKey && root.childElementCount > 0) return;
+  imageAnalysisRenderKey = renderKey;
+  const diagnosticsWereOpen = imageTranslationDiagnosticsDetails?.open ?? false;
   root.replaceChildren();
   const heading = document.createElement('h3');
   setUiText(heading, 'Image text');
@@ -4070,6 +4194,7 @@ function renderImageAnalysisControls(): void {
 
   const diagnostics = document.createElement('details');
   diagnostics.className = 'image-diagnostics';
+  diagnostics.open = diagnosticsWereOpen;
   imageTranslationDiagnosticsDetails = diagnostics;
   const summary = document.createElement('summary');
   setUiText(summary, 'OCR diagnostics');
