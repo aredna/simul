@@ -42,6 +42,7 @@ import {
   type HtmlMirrorElementNode,
   type HtmlMirrorNamespace,
   type HtmlMirrorRepresentabilityCollector,
+  type HtmlMirrorRepresentabilitySummary,
   type HtmlMirrorStyleWorkBudget,
 } from './html-mirror-sanitizer';
 import { createReplicaIdentity } from './replica-identity';
@@ -280,9 +281,21 @@ interface HtmlMirrorSourceSessionEnvironment {
   ) => Pick<ResizeObserver, 'observe' | 'disconnect'>;
 }
 
+/**
+ * One bounded open-shadow-root observation pass. A mutation batch shares a
+ * single walk across its records so nested targets are traversed once, and
+ * the node budget keeps a hostile page from stalling the observer callback.
+ */
+interface ShadowObservationWalk {
+  readonly visited: WeakSet<Node>;
+  remaining: number;
+  exhausted: boolean;
+}
+
 const MAX_HTML_MIRROR_PENDING_TARGETS = 4_000;
 const SHADOW_DISCOVERY_INTERVAL_MS = 500;
 const MAX_SHADOW_HOSTS_PER_TICK = 1_000;
+const MAX_SHADOW_OBSERVATION_NODES = 20_000;
 const MAX_STYLE_SHEETS_PER_TICK = 512;
 const MAX_STYLE_RULES_PER_TICK = 25_000;
 const MAX_STYLE_CHARACTERS_PER_TICK = 1024 * 1024;
@@ -361,6 +374,8 @@ export class HtmlMirrorSourceSession {
   #knownShadowHostCandidates = new WeakSet<Element>();
   #settledShadowHostCandidates = new WeakSet<Element>();
   #shadowDiscoveryCursor = 0;
+  #shadowObservationOmissionCount = 0;
+  #shadowObservationVisitCount = 0;
   #stylePollingCursor = 0;
   #stylePollingPass = 0;
   #stylePollingPhases = new WeakMap<object, StylePollChannel>();
@@ -403,6 +418,14 @@ export class HtmlMirrorSourceSession {
     this.#sessionId = sessionId;
     environment.port.onMessage.addListener(this.#onMessage);
     environment.port.onDisconnect.addListener(this.#onDisconnect);
+  }
+
+  /**
+   * Nodes visited by open-shadow-root observation walks since construction.
+   * A content-free traversal counter for tests and diagnostics.
+   */
+  get shadowObservationVisitCount(): number {
+    return this.#shadowObservationVisitCount;
   }
 
   dispose(disconnect = false): void {
@@ -681,7 +704,7 @@ export class HtmlMirrorSourceSession {
           viewportHeight: graph.viewportHeight,
           documentWidth: graph.documentWidth,
           documentHeight: graph.documentHeight,
-          representability: snapshotHtmlMirrorRepresentability(representability),
+          representability: this.#summarizeRepresentability(representability),
         },
         fidelityPolicy,
       );
@@ -765,6 +788,19 @@ export class HtmlMirrorSourceSession {
 
   #onMutations(records: MutationRecord[]): void {
     if (this.#disposed || !this.#identity) return;
+    try {
+      this.#queueMutationRecords(records);
+    } catch {
+      // An exception here used to drop the whole batch silently, after which
+      // the replica drifted with no diagnostic. Reuse the bounded checkpoint
+      // reconciliation signal: the receiver requests a fresh checkpoint and
+      // the stream stays paused until that checkpoint is acknowledged.
+      this.#shadowReconciliationPending = true;
+      this.#signalShadowReconciliation();
+    }
+  }
+
+  #queueMutationRecords(records: MutationRecord[]): void {
     rememberSourceMutationSecrets(
       records,
       this.environment.window,
@@ -810,6 +846,9 @@ export class HtmlMirrorSourceSession {
       )) {
       accepted = this.#refreshControlledContentPolicy() || accepted;
     }
+    // One bounded walk per batch: nested records share the visited set so a
+    // descendant subtree is not traversed again for each ancestor record.
+    const walk = this.#createShadowObservationWalk();
     for (const record of records) {
       // The top-document observer must never turn a same-origin embedded
       // browsing context into an accidental second mirror surface. This is a
@@ -847,12 +886,14 @@ export class HtmlMirrorSourceSession {
       const structuralSelectOwner = sourceNativeSelectStructuralOwner(record.target);
       if (record.type === 'childList') {
         accepted = true;
-        this.#observeOpenShadowRoots(record.target);
+        this.#observeOpenShadowRoots(record.target, walk);
         this.#queuePending(this.#pendingChildren, record.target);
-        for (const added of record.addedNodes) this.#observeOpenShadowRoots(added);
+        for (const added of record.addedNodes) {
+          this.#observeOpenShadowRoots(added, walk);
+        }
       } else if (record.type === 'attributes' && record.target instanceof Element) {
         accepted = true;
-        this.#observeOpenShadowRoots(record.target);
+        this.#observeOpenShadowRoots(record.target, walk);
         const changesPrivacyContext =
           record.attributeName === 'role' ||
           record.attributeName === 'contenteditable' ||
@@ -884,7 +925,7 @@ export class HtmlMirrorSourceSession {
         }
       } else if (record.type === 'characterData' && record.target instanceof Text) {
         accepted = true;
-        this.#observeOpenShadowRoots(record.target);
+        this.#observeOpenShadowRoots(record.target, walk);
         this.#queuePending(this.#pendingText, record.target);
       }
     }
@@ -1152,7 +1193,7 @@ export class HtmlMirrorSourceSession {
         sequence,
         sequence,
         operations,
-        snapshotHtmlMirrorRepresentability(representability),
+        this.#summarizeRepresentability(representability),
         fidelityPolicy,
       );
       if (!batch) {
@@ -1208,9 +1249,30 @@ export class HtmlMirrorSourceSession {
         representability.capacityOmissionCount > 0
           ? 'stream_overflow'
           : 'privacy_rejected',
-        snapshotHtmlMirrorRepresentability(representability),
+        this.#summarizeRepresentability(representability),
       ));
     }
+  }
+
+  /**
+   * Snapshots a batch's diagnostics and folds in the bounded, content-free
+   * count of observation walks that ran out of budget since the last summary.
+   * The collector itself stays untouched so its overflow decisions are not
+   * affected by a deferred walk omission.
+   */
+  #summarizeRepresentability(
+    representability: HtmlMirrorRepresentabilityCollector,
+  ): HtmlMirrorRepresentabilitySummary {
+    const omitted = this.#shadowObservationOmissionCount;
+    this.#shadowObservationOmissionCount = 0;
+    if (omitted === 0) return snapshotHtmlMirrorRepresentability(representability);
+    return snapshotHtmlMirrorRepresentability({
+      ...representability,
+      capacityOmissionCount: Math.min(
+        MAX_HTML_MIRROR_DIAGNOSTIC_COUNT,
+        representability.capacityOmissionCount + omitted,
+      ),
+    });
   }
 
   #identityAt(sequence: number): ReplicaDocumentIdentity {
@@ -1539,6 +1601,11 @@ export class HtmlMirrorSourceSession {
           shadow,
           adoptedStyleSignature(node.shadowRoot.adoptedStyleSheets),
         );
+        // Every mirrored open root is observed here, while the graph is still
+        // bounded by the sanitizer's own capacity, so the budgeted DOM walk
+        // only has to find roots the emitted graph does not carry.
+        const openShadow = readOpenShadowRoot(shadow);
+        if (openShadow) this.#observeOpenShadowRoot(openShadow);
       }
       for (const child of node.shadowRoot.children) this.#markMirroredGraph(child);
       if (shadow) this.#setEmittedChildren(shadow, node.shadowRoot.children);
@@ -1979,18 +2046,59 @@ export class HtmlMirrorSourceSession {
     );
   }
 
-  #observeOpenShadowRoots(root: Node): void {
-    const directShadow = readOpenShadowRoot(root);
-    if (directShadow) this.#observeOpenShadowRoot(directShadow);
-    if (root.nodeType === Node.ELEMENT_NODE) {
-      const element = root as Element;
-      const shadow = element.shadowRoot;
-      if (shadow && shadow.mode === 'open') this.#observeOpenShadowRoot(shadow);
-      if (shadow) {
-        for (const child of [...shadow.childNodes]) this.#observeOpenShadowRoots(child);
+  #createShadowObservationWalk(): ShadowObservationWalk {
+    return {
+      visited: new WeakSet<Node>(),
+      remaining: MAX_SHADOW_OBSERVATION_NODES,
+      exhausted: false,
+    };
+  }
+
+  /**
+   * Iterative and bounded: a hostile DOM depth must not overflow the stack
+   * inside the MutationObserver callback, and one oversized subtree must not
+   * stall the page. Subtrees already covered by the same walk are skipped.
+   * Once the node budget is spent the walk stops and records one bounded,
+   * content-free capacity omission for the next representability summary
+   * instead of stopping silently; mirrored roots are observed as their graph
+   * is marked, so the budget only defers the discovery of unmirrored roots.
+   */
+  #observeOpenShadowRoots(
+    root: Node,
+    walk: ShadowObservationWalk = this.#createShadowObservationWalk(),
+  ): void {
+    const stack: Node[] = [root];
+    while (stack.length > 0) {
+      const node = stack.pop() as Node;
+      if (walk.visited.has(node)) continue;
+      if (walk.remaining === 0) {
+        if (!walk.exhausted) {
+          walk.exhausted = true;
+          this.#shadowObservationOmissionCount = Math.min(
+            MAX_HTML_MIRROR_DIAGNOSTIC_COUNT,
+            this.#shadowObservationOmissionCount + 1,
+          );
+        }
+        return;
+      }
+      walk.remaining -= 1;
+      walk.visited.add(node);
+      this.#shadowObservationVisitCount += 1;
+      const directShadow = readOpenShadowRoot(node);
+      if (directShadow) this.#observeOpenShadowRoot(directShadow);
+      if (node.nodeType === Node.ELEMENT_NODE) {
+        const shadow = (node as Element).shadowRoot;
+        if (shadow && shadow.mode === 'open') this.#observeOpenShadowRoot(shadow);
+        if (shadow) {
+          for (let child = shadow.lastChild; child; child = child.previousSibling) {
+            stack.push(child);
+          }
+        }
+      }
+      for (let child = node.lastChild; child; child = child.previousSibling) {
+        stack.push(child);
       }
     }
-    for (const child of [...root.childNodes]) this.#observeOpenShadowRoots(child);
   }
 
   #observeOpenShadowRoot(shadow: ShadowRoot): void {
