@@ -14,6 +14,7 @@ import path from 'node:path';
 import { afterEach, describe, expect, it } from 'vitest';
 
 import {
+  REQUIRED_ICON_SIZES,
   APPROVED_OCR_CSP,
   APPROVED_OCR_PACKAGE_LOCK_METADATA,
   APPROVED_OCR_PERMISSIONS,
@@ -636,9 +637,9 @@ describe('disabled OCR production profile', () => {
     const validation = await validateArtifact(artifact);
 
     expect(validation.ocrEnabled).toBe(false);
-    expect(validation.manifest.version).toBe('0.3.3');
+    expect(validation.manifest.version).toBe('0.4.0');
     expect(validation.manifest.version_name).toBe(
-      '0.3.3 beta v.20260828.1',
+      '0.4.0 beta v.20260904.1',
     );
     expect(validation.manifest.permissions).toEqual(APPROVED_PERMISSIONS);
     expect(validation.manifest).not.toHaveProperty('content_security_policy');
@@ -942,6 +943,18 @@ describe('artifact orchestration', () => {
   });
 });
 
+describe('extension icons', () => {
+  it('requires a PNG icon for every required size', async () => {
+    const missingIcons = await createTemporaryArtifact({ manifest: { icons: undefined } });
+    await expect(validateArtifact(missingIcons)).rejects.toThrow(
+      'icons must declare a PNG for every required size',
+    );
+    const missingFile = await createTemporaryArtifact();
+    await rm(path.join(missingFile, 'icon', '128.png'));
+    await expect(validateArtifact(missingFile)).rejects.toThrow(/icon\/128\.png/u);
+  });
+});
+
 async function createTemporaryArtifact(options) {
   const root = await createTemporaryDirectory('simul-artifact-');
   await createValidArtifact(root, options);
@@ -1007,9 +1020,19 @@ async function createValidArtifact(
     background: { service_worker: 'background.js' },
     action: { default_title: 'Simul' },
     side_panel: { default_path: 'sidepanel.html' },
+    icons: Object.fromEntries(
+      REQUIRED_ICON_SIZES.map((size) => [String(size), `icon/${size}.png`]),
+    ),
     ...manifestOverrides,
   };
+  await mkdir(path.join(directory, 'icon'), { recursive: true });
   await Promise.all([
+    ...REQUIRED_ICON_SIZES.map((size) =>
+      writeFile(
+        path.join(directory, 'icon', `${size}.png`),
+        Buffer.from('89504e470d0a1a0a', 'hex'),
+      ),
+    ),
     ...REQUIRED_RELEASE_LEGAL_FILES.map(async (legalFile) =>
       writeFile(
         path.join(directory, legalFile.artifactPath),
