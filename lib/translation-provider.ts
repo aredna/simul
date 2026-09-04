@@ -57,6 +57,8 @@ export type TranslationAvailability =
 export type TranslationErrorCode =
   | 'api-unavailable'
   | 'pair-unavailable'
+  | 'activation-required'
+  | 'quota-exceeded'
   | 'creation-failed'
   | 'translation-failed';
 
