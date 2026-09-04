@@ -386,14 +386,110 @@ had many call sites, so behavior and call sites are unchanged. The
 source-substring tests that covered this code now read the extracted files
 or were replaced by behavioral tests.
 
-**Left for a second pass — please decide whether you want it:** the core
-orchestration (source follower with the tab/window listeners and follow
-functions, the capture pipeline, the translation driver, the permission
-flows) still shares ~50 module-level variables. Splitting it means
-introducing one `CompanionState` object and a single currency token in place
-of the six independent counters, which is a design change I did not want to
-make unattended. It is the change that would prevent the "guard checked the
-wrong counter" class of bug (H1, M1) structurally.
+The second pass was approved on 2026-09-04 and is recorded as D26.
+
+### D26. Side-panel split, second pass (approved 2026-09-04)
+
+Done in three gate-green commits so each step reviews on its own.
+
+1. **State and currency.** The 55 module-level variables moved onto one
+   `CompanionState` (`companion-state.ts`), grouped by lifetime, with the
+   reset helpers (`resetTranslationIntent`, `resetLiveSequence`,
+   `abortPageWork`, `clearPage`) as the only way a group is cleared. The
+   four hand-rolled counters (identity request, availability request,
+   language refresh, image access) became one `Currency` (`currency.ts`)
+   that mints scoped tokens: a guard calls `currency.isCurrent(token)`, and
+   the token carries its scope, so a guard can no longer compare against the
+   wrong counter (the H1 / M1 class of bug). `supersedePage()` retires every
+   page-scoped token in one call. The capture generation stays with the
+   existing `LatestWorkCoordinator`, which already models one running and
+   one queued capture; I did not fold it into the currency. The legacy
+   visual mirror (render, scale, scroll following, loading and error states)
+   became `MirrorView` (`mirror-view.ts`).
+2. **Permission flows and the source follower.** `PermissionFlows` owns the
+   two preference changes that also change Chrome grants; `SourceFollower`
+   owns tab following, the toolbar authorization, the tab and window
+   listeners, and the debounced navigation refresh. Both take the browser
+   through a small adapter and are tested against fakes, including the
+   superseded-lookup and armed-refresh cases behind M1 and M2.
+3. **The core.** `CapturePipeline` (observer install, snapshot, isolated
+   replica checkpoint, invalidation, replica commit and live-failure
+   handling), `TranslationDriver` (language resolution, availability with
+   the accepted-result-only rule, page translation over either surface,
+   replica view mode) and `LiveUpdateDriver` (dirty-notice coalescing,
+   sequence baseline and gaps, delta application). Page scripting goes
+   through a two-method `PageScripting` adapter; the functions injected by
+   reference are unchanged and the injection-boundary test still covers
+   them.
+
+`main.ts` went from 3,688 lines (after the first pass; 4,587 at the start
+of the review) to 1,415: element lookups, module construction, DOM listeners,
+the settings sync, the detached-window surface, and the hoisted wrappers the
+engines call into. Unit tests went from 651 to 720 across 65 files.
+
+Behavior is unchanged except for three deliberate details:
+
+- `MirrorView.translationFieldCount()` returns 0 when no visual mirror is
+  mounted. The old call cast an undefined root and would have thrown inside
+  the capture, which the catch then reported as an error; the flat-page path
+  now reads as "no text" like every other guard already did.
+- A page load and an invalidation now supersede the language-refresh scope
+  along with identity and availability (`supersedePage()`). A commit-driven
+  refresh for the old page was already discarded by the generation check;
+  this makes it explicit.
+- `startTranslation`'s two identical settle handlers became one.
+
+The three untested seams left are the ones that need a browser: the
+`PageScripting` adapter, the `FollowerBrowser` adapter, and the
+`chrome.permissions` adapter, each a one-line pass-through in `main.ts`.
+
+### D27. The branch was cut from a stale main — **Please decide**
+
+Found on 2026-09-04 while preparing the merge you asked for. The local clone
+this review started from had `main` at `2fde1c8` ("feat: add passive
+replica fidelity"), but `origin/main` had already moved to `596dec7` with
+119 of your commits dated 2026-07-22 to 2026-08-29, ending with the
+allocation and hot-path perf series, three fixes, "chore: prepare public beta
+release", "chore: publish 0.3.3 testing build", and the release handoff docs. Neither
+the review nor the fixes saw that work.
+
+What upstream contains that this branch does not: version 0.3.3 with exact
+pins (wxt 0.20.27, vitest 4.1.10, typescript 7.0.2) and a tracked lockfile;
+a new semantic-source subsystem under `lib/replica/` (semantic source
+protocol, receiver, session and client, read-scope policy and safety gates,
+secret classifier, source visibility boundary, structural patch conflicts,
+replica recovery); `main.ts` at 5,173 lines; Chrome-fixture tests; git
+hooks under `tools/git-hooks/`; and 1,143 unit tests. Upstream also removed
+the rrweb engine, the legacy engine and the transition gate on its own.
+
+What overlaps: a trial merge in a throwaway worktree conflicts in 46 source,
+test and doc files plus 6 under `dist/`, including `main.ts`,
+`background.ts`, the isolated engine, the mirror protocol and sanitizer,
+the OCR controller and session, the translation pipeline and coordinator,
+`wxt.config.ts`, the artifact validator, `package.json` and the lockfile.
+These are not textual conflicts that a merge tool settles: the side-panel
+split was made over the old `main.ts`, and upstream's `main.ts` has grown
+new features since.
+
+The last CI run on `origin/main` (596dec7, 2026-08-28) failed in
+`tests/isolated-disclosure-chrome.test.ts` because the runner's Chrome
+timed out on a D-Bus error, not because of a code fault.
+
+I did not merge PR #8 and did not touch `main`. The choice is yours:
+
+- **Redo on top of origin/main.** Re-apply this branch's intent as new
+  commits over 596dec7: the shipped-bug fixes that still apply, the
+  dependency policy, the review findings that upstream did not already
+  address, and the side-panel split over upstream's `main.ts`. PR #8 would
+  be closed and replaced. This is the option I recommend; it is a few
+  sessions of work because every finding has to be re-checked against the
+  new code.
+- **Merge and resolve by hand.** Keep PR #8 and resolve the 46 conflicts on
+  the branch, choosing per file. Cheaper up front, but the side-panel split
+  cannot be resolved this way and would be redone anyway.
+- **Take this branch as-is.** Treat the branch as the new line and rebase
+  upstream's 119 commits onto it. I do not recommend this: it discards a
+  published 0.3.3 build and a subsystem this branch never saw.
 
 ### D7. Local toolchain notes
 

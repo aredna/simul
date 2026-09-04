@@ -217,7 +217,18 @@ extension APIs or page integration.
 
 - `entrypoints/background.ts`: Manifest V3 service worker entrypoint
 - `entrypoints/popup/`: active-page side-panel launcher
-- `entrypoints/sidepanel/`: translation companion UI and browser orchestration
+- `entrypoints/sidepanel/`: translation companion UI and browser orchestration.
+  `main.ts` holds the DOM wiring and constructs the modules; the runtime state
+  lives in `companion-state.ts` (one `CompanionState`) and superseding work is
+  tracked by `currency.ts` (scoped tokens). `source-follower.ts` decides which
+  tab is followed, `capture-pipeline.ts` builds the mirror, `translation-driver.ts`
+  resolves the language and translates, `live-update-driver.ts` applies legacy
+  live deltas, `mirror-view.ts` owns the legacy visual mirror,
+  `permission-flows.ts` owns grant-changing preferences, and
+  `preference-client.ts`, `toolbar-status.ts`, `ui-localizer.ts`,
+  `quick-composer.ts` and `image-analysis-panel.ts` own their panels. Every
+  module takes its collaborators through a small environment and has a unit
+  test against fakes.
 - `lib/companion-ui-state.ts`: pure overlay, reverse-pair, and toolbar-progress
   state derivation
 - `lib/companion-ui-localization.ts`: atomic target-language label sets and
@@ -236,7 +247,6 @@ extension APIs or page integration.
 - `lib/replica/visible-replay-host.ts`: candidate/committed
   replay ownership, atomic presentation, protected iframe layout, zoom, and
   scroll projection
-- `lib/replica/live-protocol.ts`, `lib/replica/live-recorder-session.ts`, and
 - `lib/replica/source-value-model.ts`: transactional canonical source text,
   monotonic revisions/tombstones, and committed text-change records
 - `lib/translation/`: bounded exact-source memory and the single-session,
