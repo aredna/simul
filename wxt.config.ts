@@ -9,7 +9,7 @@ import {
 } from './tools/ocr-build-profile';
 
 const ocrBuildProfile = readOcrBuildProfile(process.env);
-const betaBuildSuffix = 'beta v.20260828.1';
+const betaBuildSuffix = 'beta v.20260904.1';
 const tesseractEnabled = ocrBuildProfile.enabledProviderIds.includes('tesseract');
 const offscreenOcrEnabled = ocrBuildProfile.enabledProviderIds.some((id) =>
   id === 'tesseract' || id === 'chrome-text-detector',
@@ -101,6 +101,8 @@ function removeRemoteTesseractFallbacks(code: string): string {
 
 export default defineConfig({
   outDir: process.env.SIMUL_WXT_OUT_DIR || '.output',
+  // public/ ships the extension icons; the vendored OCR runtime and the legal
+  // files are emitted by the release plugin below.
   publicDir: 'public',
   hooks: {
     'build:manifestGenerated': (_wxt, manifest) => {
@@ -116,9 +118,13 @@ export default defineConfig({
     build: {
       target: 'chrome138',
       cssTarget: 'chrome138',
-    },
-    esbuild: {
-      legalComments: 'none',
+      // Vite 8 bundles with rolldown; legal comments are a rolldown output
+      // option now (the former esbuild option is not read for the bundle).
+      rolldownOptions: {
+        output: {
+          comments: { legal: false },
+        },
+      },
     },
     plugins: [
       createOcrBuildProfilePlugin(process.env),
@@ -168,6 +174,14 @@ export default defineConfig({
     minimum_chrome_version: '138',
     action: {
       default_title: 'Simul',
+    },
+    // Chrome falls back to these for the toolbar action; the Web Store
+    // rejects a listing without them. Placeholders until the real mark lands.
+    icons: {
+      16: 'icon/16.png',
+      32: 'icon/32.png',
+      48: 'icon/48.png',
+      128: 'icon/128.png',
     },
     permissions: [
       'activeTab',
