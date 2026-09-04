@@ -491,6 +491,169 @@ I did not merge PR #8 and did not touch `main`. The choice is yours:
   upstream's 119 commits onto it. I do not recommend this: it discards a
   published 0.3.3 build and a subsystem this branch never saw.
 
+### D28. Review of the 119 upstream commits — determination
+
+You asked on 2026-09-04: "Review what changed on main and determine if we
+need to add it in." Four read-only passes over the `origin/main` worktree
+(architecture and release records, a finding-by-finding cross-check of this
+branch, the two side-panel structures, and the tooling) support one answer:
+
+**Yes. `origin/main` is the base; this branch is a set of findings to
+re-apply over it, not a line to merge.**
+
+Why:
+
+1. Upstream is the published line. It carries the 0.3.3 beta testing build
+   (`version_name` "0.3.3 beta v.20260828.1"), `LICENSE`, `SECURITY.md`
+   ("fixes go only to the latest committed release candidate on `main`"),
+   root third-party notices, the public-release readiness spec, and a
+   validator that byte-checks the legal files and the OCR package
+   provenance in the lockfile.
+2. Upstream removed what this branch spent most of its effort on. Commit
+   `c7686de` (2026-08-28) deleted the legacy v1 mirror, the page snapshot,
+   the live page mirror and its dirty/scroll message bridge, the rrweb
+   engine, the legacy engine, the transition gate and the engine selector
+   (236 files). Scroll now rides the isolated `page-mirror` stream. The only
+   remaining `executeScript({ func })` is a no-op used to read a
+   `documentId`. Upstream's own 0.3.1 repair had already fixed the shipped
+   scroll regression (B2) the same way this branch did, then deleted the
+   path.
+3. Upstream added subsystems this branch never saw: the semantic-source
+   supplement (typed, ACKed, bounded, read-scope gated), read-scope policy
+   presets with fail-closed persisted repair, read-only disclosure
+   facsimiles for native selects and menus, replica recovery, accessibility
+   first image text with a deterministic evidence ranker, provider
+   readiness probes, a navigation refresh gate, a view-preference ledger,
+   preference safety with reset confirmation, and a quick-translation
+   shortcut. `main.ts` grew to 5,173 lines and the suite to 79 files.
+
+Cross-check of this branch's 46 items against upstream code (details in the
+reviewer table below): **22 still apply, 13 are already upstream in some
+form, 7 are obsolete because the code is gone, 4 are policy conflicts.**
+
+Still applies (re-fix over upstream, grouped by file):
+
+- `lib/replica/html-mirror-sanitizer.ts` and `isolated-html-engine.ts`:
+  H2 colon-prefixed tag names (`isSafeTagName` allows `:`, :4107-4111),
+  H3 camelCase SVG names lowercased (:1520, engine :1404), L16 stale run
+  releases the current stream before its currency check (engine :304-309),
+  `crossorigin` stripped only on `video` (:533, :1747, :3705).
+- `lib/replica/html-mirror-source.ts`: recursive shadow-root observation
+  without a budget (:1982-1994), whole-subtree walk per record (:850), no
+  guard around `#onMutations` so an exception drops the batch silently.
+- OCR runtime and controller: one deadline covers Tesseract bootstrap
+  (`runtime.ts` :89-95), cancel terminates the worker (:110-113), inactive
+  tab settles the image for the session with no resume
+  (`image-translation-controller.ts` :2329-2335), commit does not re-queue
+  anchor-deferred images (:955, :1516-1519), no text-cover heuristic.
+- `entrypoints/sidepanel/main.ts`: M1 focus change still clears the
+  navigation timer (:943, :1992) and the same-page early return never
+  checks the captured identity (:2010-2014); zoom commits one storage write
+  per slider tick (:854, :3171-3178); image-analysis settings rebuilt with
+  `replaceChildren` on every sync (:3783-3786) and the diagnostics
+  disclosure recreated closed (:4072); D14 label localization still creates
+  a session for a merely downloadable pair (:3080-3086); L2 a language
+  change from another window forces translation (:1155); L7 dark-mode
+  focus ring (`style.css` :75-78, no dark override at :438).
+- Elsewhere: `chrome-translator.ts` still reports generic codes for
+  activation-required and quota (:100-103, :181-184); `background.ts`
+  always creates a second detached window (:219-227); `replica-recovery.ts`
+  re-arms after every commit so a stream that dies after each commit
+  rebuilds without bound (:13-31); `translation-pipeline.ts` joins split
+  segments with ASCII spaces (:16-35); `companion-surface.ts` opens the
+  detached window at the full source bounds (D11); the validator passes raw
+  `process.env` into the release build (`extension-artifact.mjs` :252).
+
+Already upstream: H1's trigger (live language no longer replaces the
+snapshot, :2363-2365, though `availabilityCheckedForPair` is still recorded
+before the await at :2719, see new findings), M2 same-document navigation
+(navigation refresh gate), L8 log coalescing (DEV-only logging), the
+viewport observation token (as `imageClippingToken`), the transient store
+failed-open, `one-time-code` and `cc-*` as secrets (secret classifier),
+the reverse node index (`Map<Node, number>`), the coordinator currency
+index, L11 unsupported-language, L12 docs, the popout pre-open
+short-circuit, the rrweb removal, and the 0.3.1 wip items.
+
+Obsolete: B2 scroll bridge and the injection-boundary test (no injected
+function has a body upstream; the test is cheap to port as a guard), B1
+bundle-marker indexing (one bundle), H4 rrweb, D16 orphaned bridges (ports
+die with the runtime), D13 per-lifetime engine disable (single engine),
+L6 fallback badge, L18 recursive snapshot walks (the same class survives in
+the shadow-root walk above).
+
+Policy conflicts that need your decision before the redo:
+
+- **Dependencies (D1, D4, D6).** Upstream pins every version exactly,
+  tracks `package-lock.json`, runs `npm ci` with a cache, keeps
+  `overrides`, and its validator verifies the lockfile's `resolved` and
+  `integrity` for the OCR packages. Every one of these conflicts with the
+  branch's floating ranges and no lockfile. The reviewers also found that
+  this branch's own validator (`extension-artifact.mjs` :1611-1616) and
+  two tests still read `package-lock.json`; the branch gate passes here
+  only because a stale, ignored 0.3.0 lockfile is on disk, and a fresh
+  checkout would fail. Recommendation: keep upstream's exact pins and
+  tracked lockfile (the provenance check is a real supply-chain property
+  for the vendored OCR runtime) and apply your "newest before 2026-08-27"
+  rule as a pinned bump (wxt 0.21.4, Vite 8.2.2 peer, vitest 4.1.11,
+  `@types/node`), regenerating the lockfile with the same npm.
+- **OCR capture near text controls (D9).** Upstream chose the stricter
+  rule: any painted control overlap blocks pixel capture
+  (`image-source-session.ts` `hasProtectedSiblingOverlap`,
+  `source-privacy-policy.ts` :1590-1611). Your 2026-09-03 instruction was
+  the looser rule (only password and private controls block). Both are
+  defensible; the README and test on this branch state the looser one.
+- **Icons (D12).** Upstream shipped the beta without manifest icons and has
+  no `public/` directory; its validator does not require them. The
+  placeholders and the validator rule can be re-applied as a follow-up.
+- **The side-panel split (D25, D26).** `CompanionState`, `Currency`,
+  `SourceFollower`, `PermissionFlows`, `ToolbarStatus`, `UiLocalizer` and
+  `QuickComposer` map cleanly onto upstream function groups; the capture
+  pipeline, translation driver, preference client and image panel map
+  partially and must absorb upstream's new features; `LiveUpdateDriver`
+  and `MirrorView` have no counterpart because the legacy mirror is gone.
+  Upstream keeps seven hand-rolled counters (`identityRequestId`,
+  `availabilityRequestId`, `replicaLanguageRefreshVersion`,
+  `sourceLanguageResolutionRevision`, `imageCaptureAccessRevision`,
+  `uiLocalizationRequestId`, `activeFollowRequestId`), which is exactly
+  what `Currency` replaces. The split should be redone over upstream's
+  file after the fixes, as its own PR.
+
+New findings in upstream code, noticed while cross-checking (not yet
+fixed anywhere):
+
+1. `main.ts` :3081-3087: a merely `downloadable` pair reaches
+   `provider.createSession` from the gesture-free label pass, which starts
+   a download or throws `NotAllowedError` (the D14 class).
+2. `main.ts` :2718: `availabilityCheckedForPair` is recorded before the
+   await; with the refresh-version skip at :2612-2624 a superseded check can
+   leave the pair marked as checked and automatic translation unrun for
+   that generation (the H1 class, different trigger).
+3. `lib/replica/replica-recovery.ts` :8-31 wired at `main.ts` :557-590,
+   :2260: `markCommitted()` re-arms after every commit, so a stream that
+   fails after each successful commit rebuilds forever; the comment's bound
+   holds only when the rebuild itself fails.
+4. `main.ts` :1941-1944: the early return precedes the `try/finally`, so
+   a follow request superseded in the `onRemoved` microtask gap (:1077)
+   leaves `activeFollowRequestId` set and :970-975 keeps dropping updates.
+   Practically unreachable; the guard shape is wrong.
+5. `main.ts` :421, :541: `imageTranslationController?.` on a definitely
+   assigned `let`; stale guard.
+
+Process facts that affect the redo: upstream's `tools/git-hooks/pre-push`
+blocks every push and `pre-commit` blocks commits on `main`; both install
+only through `npm run hooks:install` and are not installed in this clone.
+`AGENTS.md` forbids hand-editing `.agents/skills/` and `_bmad/` (this
+clone has local modifications there from before the review; they were never
+committed). `README.md` on this branch still says `npm ci`.
+
+Plan for the redo, once you decide the policy rows: fast-forward local
+`main` to `origin/main`; open a new branch; land the tooling decision
+first (pins, lockfile, CI) so the gate is trustworthy; re-apply the
+still-applying fixes file by file with their tests, plus the five new
+findings; then the side-panel split over upstream's `main.ts` as a separate
+PR; close PR #8 with a pointer to the new one. Every re-applied item gets
+re-verified against upstream code rather than ported blind.
+
 ### D7. Local toolchain notes
 
 - Nothing in the dependency set had a release inside the 7-day window
