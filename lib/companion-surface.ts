@@ -84,9 +84,16 @@ export function createDetachedCompanionUrl(
   return url.toString();
 }
 
+/** Share of the source window's width the companion takes when docked. */
+export const DETACHED_WINDOW_WIDTH_RATIO = 0.45;
+export const DETACHED_WINDOW_MIN_WIDTH = 480;
+
 /**
- * Match the source browser window's outer bounds where Chrome exposes them.
- * Popup windows remain user-resizable because no fixed state is requested.
+ * Dock the companion to the right edge of the source window at a fraction of
+ * its width so the page stays readable beside its translation. A window that
+ * covered the source's full bounds hid the page it mirrors. The companion
+ * keeps the source's top and height. Popup windows remain user-resizable
+ * because no fixed state is requested.
  */
 export function createDetachedWindowData(
   url: string,
@@ -96,15 +103,26 @@ export function createDetachedWindowData(
     height: 800,
   },
 ): DetachedWindowCreateData {
+  const sourceWidth = positiveInteger(sourceWindow.width);
+  const width = sourceWidth === undefined
+    ? fallback.width
+    : Math.min(
+        sourceWidth,
+        Math.max(
+          DETACHED_WINDOW_MIN_WIDTH,
+          Math.round(sourceWidth * DETACHED_WINDOW_WIDTH_RATIO),
+        ),
+      );
+  const left = integer(sourceWindow.left);
   return {
     url,
     type: 'popup',
     focused: true,
-    width: positiveInteger(sourceWindow.width) ?? fallback.width,
+    width,
     height: positiveInteger(sourceWindow.height) ?? fallback.height,
-    ...(integer(sourceWindow.left) === undefined
+    ...(left === undefined || sourceWidth === undefined
       ? {}
-      : { left: integer(sourceWindow.left) }),
+      : { left: left + sourceWidth - width }),
     ...(integer(sourceWindow.top) === undefined
       ? {}
       : { top: integer(sourceWindow.top) }),
