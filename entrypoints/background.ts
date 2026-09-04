@@ -13,6 +13,7 @@ import {
   resolveCompanionLaunchSurface,
   shouldCloseStalePreopenedSidePanel,
   shouldPreopenSidePanel,
+  shouldReuseDetachedWindow,
 } from '../lib/companion-surface';
 import { compiledImageTextProviderIds } from '../lib/ocr/provider-registry';
 import { hasOcrRuntimeProvider } from '../lib/ocr/runtime-provider-readiness';
@@ -97,6 +98,10 @@ export default defineBackground(() => {
   let toolbarClickSequence = 0;
   let latestToolbarClickWindowId: number | undefined;
   const toolbarLaunchEpoch = crypto.randomUUID();
+  // The detached companion window this worker created, so a second toolbar
+  // click focuses it instead of opening another one. Lost on worker restart,
+  // in which case one extra window is the worst outcome.
+  let detachedWindow: { id: number; sourceTabId: number } | undefined;
 
   // The action handler below must remain Chrome's authorization boundary.
   // Correct any behavior persisted by an older build as soon as the worker
@@ -218,6 +223,12 @@ export default defineBackground(() => {
       windowId: tab.windowId,
       url: tab.url,
     };
+    if (await focusExistingDetachedWindow(identity, clickSequence)) {
+      await preopenedSidePanel?.catch(() => undefined);
+      await closeSidePanelIfSupported(tab.windowId);
+      return;
+    }
+    if (clickSequence !== toolbarClickSequence) return;
     const sourceWindow = await browser.windows.get(tab.windowId);
     if (clickSequence !== toolbarClickSequence) return;
     const url = createDetachedCompanionUrl(
@@ -230,6 +241,9 @@ export default defineBackground(() => {
     if (clickSequence !== toolbarClickSequence) {
       await closeStaleDetachedWindow(createdWindow?.id);
       return;
+    }
+    if (createdWindow?.id !== undefined) {
+      detachedWindow = { id: createdWindow.id, sourceTabId: tab.id };
     }
     try {
       await rememberSurface('popout');
@@ -251,6 +265,55 @@ export default defineBackground(() => {
     await preopenedSidePanel?.catch(() => undefined);
     await closeSidePanelIfSupported(tab.windowId);
   }
+
+  /**
+   * Reuse the companion window this worker already opened. Returns false when
+   * there is none to reuse or the click was superseded while checking, so
+   * the caller's own currency check decides what happens next.
+   */
+  async function focusExistingDetachedWindow(
+    identity: { tabId: number; windowId: number; url: string },
+    clickSequence: number,
+  ): Promise<boolean> {
+    const existing = detachedWindow;
+    if (
+      !existing ||
+      !shouldReuseDetachedWindow(
+        launchPreferences.popoutTabMode,
+        existing.sourceTabId,
+        identity.tabId,
+      )
+    ) return false;
+    const stillOpen = await browser.windows.get(existing.id).then(
+      (window) => window.type === 'popup',
+      () => false,
+    );
+    if (!stillOpen) {
+      if (detachedWindow?.id === existing.id) detachedWindow = undefined;
+      return false;
+    }
+    if (clickSequence !== toolbarClickSequence) return false;
+    await browser.windows.update(existing.id, { focused: true }).catch(
+      () => undefined,
+    );
+    // The window retargets (or re-authorizes its locked tab) through the same
+    // ordered message a side-panel launch uses.
+    await browser.runtime.sendMessage({
+      type: 'simul:authorized-tab',
+      tabId: identity.tabId,
+      windowId: identity.windowId,
+      url: identity.url,
+      launchEpoch: toolbarLaunchEpoch,
+      launchSequence: clickSequence,
+    }).catch((error: unknown) => {
+      if (!isMissingMessageReceiver(error)) throw error;
+    });
+    return true;
+  }
+
+  browser.windows.onRemoved.addListener((windowId) => {
+    if (detachedWindow?.id === windowId) detachedWindow = undefined;
+  });
 
   async function finishToolbarSidePanelLaunch(
     tab: Browser.tabs.Tab,
