@@ -12,6 +12,7 @@ import {
   shouldCloseStalePreopenedSidePanel,
   shouldPreopenSidePanel,
   shouldRecoverRemovedActiveSource,
+  shouldReuseDetachedWindow,
 } from '../lib/companion-surface';
 
 describe('companion surface launch decisions', () => {
@@ -59,6 +60,15 @@ describe('companion surface launch decisions', () => {
       8,
       true,
     )).toBe(false);
+  });
+
+  it('reuses an open detached window for any tab in active mode and only its own tab when locked', () => {
+    expect(shouldReuseDetachedWindow('active', 17, 17)).toBe(true);
+    expect(shouldReuseDetachedWindow('active', 17, 42)).toBe(true);
+    expect(shouldReuseDetachedWindow('locked', 17, 17)).toBe(true);
+    expect(shouldReuseDetachedWindow('locked', 17, 42)).toBe(false);
+    expect(shouldReuseDetachedWindow('active', undefined, 17)).toBe(false);
+    expect(shouldReuseDetachedWindow('locked', undefined, 17)).toBe(false);
   });
 
   it('creates an identity-bound local URL without retaining stale parameters', () => {

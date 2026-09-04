@@ -74,6 +74,21 @@ export function shouldCloseStalePreopenedSidePanel(
     clickedWindowId !== latestClickWindowId;
 }
 
+/**
+ * A second toolbar click reuses the detached companion this worker already
+ * opened instead of stacking another window over the page. A companion that
+ * follows the active tab retargets through the authorized-tab message, so any
+ * click reuses it; a locked companion is reused only for its own source tab.
+ */
+export function shouldReuseDetachedWindow(
+  followMode: CompanionPreferences['popoutTabMode'],
+  existingSourceTabId: number | undefined,
+  clickedTabId: number,
+): boolean {
+  return existingSourceTabId !== undefined &&
+    (followMode === 'active' || existingSourceTabId === clickedTabId);
+}
+
 export function createDetachedCompanionUrl(
   extensionPageUrl: string,
   identity: CapturedPageIdentity,
