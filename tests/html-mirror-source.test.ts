@@ -1667,6 +1667,142 @@ describe('HtmlMirrorSourceSession', () => {
     );
   });
 
+  it('signals a stream gap instead of silently dropping a batch that throws', () => {
+    const fixture = sourceFixture('<main><p id="guarded">before guard</p></main>');
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const text = fixture.document.querySelector('#guarded')!.firstChild as Text;
+    const poisoned = new Proxy({}, {
+      get: () => {
+        throw new Error('observer record exploded');
+      },
+    }) as MutationRecord;
+
+    text.nodeValue = 'after guard';
+    expect(() => fixture.mutateAll([characterDataRecord(text), poisoned]))
+      .not.toThrow();
+
+    expect(fixture.frames).toHaveLength(0);
+    expect(fixture.patches()).toHaveLength(0);
+    expect(fixture.port.posts.at(-1)).toMatchObject({
+      kind: 'simul:html-mirror-v2:error',
+      code: 'stream_gap',
+    });
+    expect(JSON.stringify(fixture.port.posts)).not.toContain('exploded');
+
+    fixture.port.emitMessage(createHtmlMirrorCheckpointRequest(identity, 0));
+    expect(fixture.checkpoints()).toHaveLength(2);
+    expect(JSON.stringify(fixture.checkpoints().at(-1))).toContain('after guard');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    text.nodeValue = 'resumed after guard';
+    fixture.mutate(characterDataRecord(text));
+    fixture.flushFrame();
+    expect(JSON.stringify(fixture.patches().at(-1))).toContain('resumed after guard');
+  });
+
+  it('walks nested mutation targets once per batch without changing the patch', () => {
+    const depth = 32;
+    const fixture = sourceFixture('<main id="level-0"></main>');
+    const levels: Element[] = [fixture.document.querySelector('#level-0')!];
+    for (let index = 1; index < depth; index += 1) {
+      const level = fixture.document.createElement('div');
+      level.id = `level-${index}`;
+      level.append(fixture.document.createTextNode(`level ${index}`));
+      levels[index - 1]!.append(level);
+      levels.push(level);
+    }
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const visitedBefore = fixture.session.shadowObservationVisitCount;
+
+    // Deepest first, so every later record's target contains the earlier ones.
+    const records = levels.map((level, index) => {
+      const added = fixture.document.createElement('span');
+      added.textContent = `leaf ${index}`;
+      level.append(added);
+      return childListRecord(level, [added]);
+    }).reverse();
+    fixture.mutateAll(records);
+    fixture.flushFrame();
+
+    // Nested dirty targets collapse to one full-children patch at the
+    // outermost target, exactly as before the walk was de-duplicated.
+    const patch = fixture.patches().at(-1)!;
+    expect(patch.operations).toEqual([
+      expect.objectContaining({
+        kind: 'children',
+        nodeId: fixture.registry.peekId(levels[0]!),
+      }),
+    ]);
+    const patchJson = JSON.stringify(patch);
+    for (let index = 0; index < depth; index += 1) {
+      expect(patchJson).toContain(`leaf ${index}`);
+    }
+    // Every node under the outermost target is visited at most once. A walk
+    // per record would traverse the nested chain about depth² / 2 times.
+    const nodesUnderRoot = depth * 4 - 1;
+    const visited = fixture.session.shadowObservationVisitCount - visitedBefore;
+    expect(visited).toBeLessThanOrEqual(nodesUnderRoot);
+    expect(visited).toBeLessThan(depth * depth);
+  });
+
+  it('bounds open-shadow-root observation per batch and records the omission', () => {
+    const fixture = sourceFixture(
+      '<main><p id="budgeted">budget text</p></main><script></script>',
+    );
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const omitted = fixture.document.querySelector('script')!;
+    const bulk = fixture.document.createElement('div');
+    const bulkNodeCount = 25_000;
+    for (let index = 1; index < bulkNodeCount; index += 1) {
+      bulk.append(fixture.document.createElement('i'));
+    }
+    omitted.append(bulk);
+    const text = fixture.document.querySelector('#budgeted')!.firstChild as Text;
+    const visitedBefore = fixture.session.shadowObservationVisitCount;
+
+    text.nodeValue = 'budget text changed';
+    fixture.mutateAll([
+      childListRecord(omitted, [bulk]),
+      characterDataRecord(text),
+    ]);
+    fixture.flushFrame();
+
+    expect(fixture.session.shadowObservationVisitCount - visitedBefore)
+      .toBeLessThan(bulkNodeCount);
+    const patch = fixture.patches().at(-1)!;
+    expect(JSON.stringify(patch)).toContain('budget text changed');
+    expect(patch.representability.capacityOmissionCount).toBe(1);
+
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
+    text.nodeValue = 'budget text settled';
+    fixture.mutate(characterDataRecord(text));
+    fixture.flushFrame();
+    expect(fixture.patches().at(-1)?.representability.capacityOmissionCount)
+      .toBe(0);
+  });
+
+  it('captures a pathologically deep document without recursing per node', () => {
+    const depth = 12_000;
+    const fixture = sourceFixture('<main id="deep-root"></main>');
+    let parent: Element = fixture.document.querySelector('#deep-root')!;
+    for (let index = 0; index < depth; index += 1) {
+      const level = fixture.document.createElement('div');
+      parent.append(level);
+      parent = level;
+    }
+    parent.append(fixture.document.createTextNode('deep leaf'));
+
+    fixture.start();
+
+    expect(fixture.checkpoints()).toHaveLength(1);
+    expect(fixture.port.posts.some(
+      (message) => (message as { kind?: string }).kind ===
+        'simul:html-mirror-v2:error',
+    )).toBe(false);
+  });
+
   it('detects CSSOM-only adopted stylesheet changes and recovers once', () => {
     const fixture = sourceFixture('<main class="page">styled content</main>');
     const rule = { cssText: '.page{display:grid}' };
