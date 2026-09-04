@@ -30,6 +30,13 @@ export interface ImageScanGates {
 
 export type ImageScanPriority = 'manual' | 'visible' | 'near' | 'background';
 
+/**
+ * Why a job was released without completing. Every deferral waits for a new
+ * observation or an explicit `reconsiderDeferred()`; a replica commit
+ * re-queues only the jobs whose replica anchor did not exist yet.
+ */
+export type ImageScanDeferralReason = 'observation' | 'anchor';
+
 export interface ImageScanJob {
   readonly descriptor: SourceImageDescriptor;
   readonly priority: ImageScanPriority;
@@ -60,6 +67,7 @@ interface SchedulerRecord {
   completedCaptureRevision?: number;
   completedObservationRevision?: number;
   deferredObservationRevision?: number;
+  deferralReason?: ImageScanDeferralReason;
   enqueueOrder?: number;
   eligibleSinceDispatch?: number;
 }
@@ -219,6 +227,7 @@ export class ImageScanScheduler {
     record.completedCaptureRevision = undefined;
     record.completedObservationRevision = undefined;
     record.deferredObservationRevision = undefined;
+    record.deferralReason = undefined;
     this.#reconcileNode(parsed.nodeId);
     this.#reconsiderOverflowed();
     return this.#pending.has(parsed.nodeId);
@@ -282,7 +291,10 @@ export class ImageScanScheduler {
    * A later observation revision or explicit manual override makes it eligible
    * again; it is intentionally not marked complete.
    */
-  defer(job: ImageScanJob): boolean {
+  defer(
+    job: ImageScanJob,
+    reason: ImageScanDeferralReason = 'observation',
+  ): boolean {
     const active = this.#active.get(job.descriptor.nodeId);
     const pending = this.#pending.get(job.descriptor.nodeId);
     const record = this.#records.get(job.descriptor.nodeId);
@@ -295,12 +307,36 @@ export class ImageScanScheduler {
       return false;
     }
     record.deferredObservationRevision = record.descriptor.observationRevision;
+    record.deferralReason = reason;
     record.enqueueOrder = undefined;
     record.eligibleSinceDispatch = undefined;
     this.#pending.delete(job.descriptor.nodeId);
     this.#decisions.set(job.descriptor.nodeId, 'visibility-gate');
     this.#reconsiderOverflowed();
     return true;
+  }
+
+  /**
+   * Re-queue deferred images without waiting for a new observation, for
+   * example after the source tab becomes active again, the OCR host comes
+   * back, or a replica commit adds missing anchors. With a reason only the
+   * matching deferrals are reconsidered. Returns how many were reconsidered;
+   * each still passes the ordinary policy and gate checks before queueing.
+   */
+  reconsiderDeferred(reason?: ImageScanDeferralReason): number {
+    let reconsidered = 0;
+    for (const [nodeId, record] of this.#records) {
+      if (
+        record.deferredObservationRevision === undefined ||
+        (reason !== undefined && record.deferralReason !== reason)
+      ) continue;
+      record.deferredObservationRevision = undefined;
+      record.deferralReason = undefined;
+      reconsidered += 1;
+      this.#reconcileNode(nodeId);
+    }
+    if (reconsidered > 0) this.#reconsiderOverflowed();
+    return reconsidered;
   }
 
   queueSnapshot(): readonly ImageScanJob[] {

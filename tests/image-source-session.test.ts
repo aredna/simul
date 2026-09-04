@@ -1069,12 +1069,16 @@ describe('image source capture safety', () => {
     session.dispose();
   });
 
-  it('rejects hidden, rotated, and private-control-overlapped pixels', () => {
+  it('rejects hidden, rotated, and secret-control-overlapped pixels but allows public controls', () => {
     const { document } = parseHTML(
-      '<html><body><img id="image"><input id="private"></body></html>',
+      '<html><body><img id="image"><input id="private">' +
+      '<input id="public" type="search"><button id="button">Go</button>' +
+      '</body></html>',
     );
     const image = document.querySelector('#image')! as unknown as HTMLImageElement;
     const control = document.querySelector('#private')!;
+    const publicControl = document.querySelector('#public')!;
+    const button = document.querySelector('#button')!;
     const imageRect = rect(10, 10, 200, 100);
     Object.defineProperty(image, 'getBoundingClientRect', {
       value: () => imageRect,
@@ -1082,25 +1086,34 @@ describe('image source capture safety', () => {
     Object.defineProperty(control, 'getBoundingClientRect', {
       value: () => rect(50, 30, 80, 30),
     });
+    Object.defineProperty(publicControl, 'getBoundingClientRect', {
+      value: () => rect(120, 40, 60, 20),
+    });
+    Object.defineProperty(button, 'getBoundingClientRect', {
+      value: () => rect(20, 80, 60, 20),
+    });
     const styles = new Map<Element, CSSStyleDeclaration>();
     const sourceWindow = {
       getComputedStyle: (element: Element) => styles.get(element) ?? baseStyle,
     } as unknown as Window;
 
+    // Public text controls and buttons may overlap: their text is already
+    // readable in the replica, so their pixels expose nothing new.
     expect(hasSafeCaptureGeometry(
       image,
       imageRect,
       document as unknown as Document,
       sourceWindow,
-    )).toBe(false);
-    expect(hasSafeCaptureGeometry(
-      image,
-      imageRect,
-      document as unknown as Document,
-      sourceWindow,
-      { allowControlImages: true },
-    )).toBe(false);
+    )).toBe(true);
+    // A password control overlapping the image blocks capture regardless of
+    // the control-images switch.
     control.setAttribute('type', 'password');
+    expect(hasSafeCaptureGeometry(
+      image,
+      imageRect,
+      document as unknown as Document,
+      sourceWindow,
+    )).toBe(false);
     expect(hasSafeCaptureGeometry(
       image,
       imageRect,
@@ -1110,6 +1123,12 @@ describe('image source capture safety', () => {
     )).toBe(false);
 
     control.remove();
+    expect(hasSafeCaptureGeometry(
+      image,
+      imageRect,
+      document as unknown as Document,
+      sourceWindow,
+    )).toBe(true);
     styles.set(image, { ...baseStyle, visibility: 'hidden' });
     expect(hasSafeCaptureGeometry(
       image,
@@ -1151,7 +1170,7 @@ describe('image source capture safety', () => {
     )).toBe(true);
   });
 
-  it('keeps a separate overlapping navigation button protected', () => {
+  it('allows a separate overlapping public navigation button', () => {
     const { document } = parseHTML(
       '<html><head><base href="https://page.example/"></head><body>' +
       '<img id="image"><a id="overlap" href="/news" role="button">News</a>' +
@@ -1170,12 +1189,46 @@ describe('image source capture safety', () => {
       getComputedStyle: () => baseStyle,
     } as unknown as Window;
 
+    // Only credential-secret overlaps block capture; a public link or button
+    // is ordinary page text. Its painted label is handled by the text-cover
+    // hit test, not by the overlap rule.
     expect(hasSafeCaptureGeometry(
       image,
       imageRect,
       document as unknown as Document,
       sourceWindow,
-    )).toBe(false);
+    )).toBe(true);
+  });
+
+  it('blocks payment-card and one-time-code control overlaps under every profile', () => {
+    for (const markup of [
+      '<input id="overlap" autocomplete="cc-number">',
+      '<input id="overlap" type="text" autocomplete="one-time-code">',
+      '<input id="overlap" type="file">',
+    ]) {
+      const { document } = parseHTML(
+        `<html><body><img id="image">${markup}</body></html>`,
+      );
+      const image = document.querySelector('#image')! as unknown as HTMLImageElement;
+      const overlap = document.querySelector('#overlap')!;
+      const imageRect = rect(10, 10, 200, 100);
+      Object.defineProperty(image, 'getBoundingClientRect', {
+        value: () => imageRect,
+      });
+      Object.defineProperty(overlap, 'getBoundingClientRect', {
+        value: () => rect(50, 30, 80, 30),
+      });
+      const sourceWindow = {
+        getComputedStyle: () => baseStyle,
+      } as unknown as Window;
+      expect(hasSafeCaptureGeometry(
+        image,
+        imageRect,
+        document as unknown as Document,
+        sourceWindow,
+        { allowControlImages: true },
+      )).toBe(false);
+    }
   });
 
   it('blocks a generic painted secret overlay and keeps its decision sticky', () => {
@@ -1226,6 +1279,104 @@ describe('image source capture safety', () => {
       sourceWindow,
       { isSecret },
     )).toBe(false);
+  });
+});
+
+describe('foreign text cover detection', () => {
+  function geometryFixture(markup: string) {
+    const { document } = parseHTML(`<html><body>${markup}</body></html>`);
+    const image = document.querySelector('#image')! as unknown as HTMLImageElement;
+    const imageRect = rect(10, 10, 200, 100);
+    Object.defineProperty(image, 'getBoundingClientRect', { value: () => imageRect });
+    const sourceWindow = {
+      getComputedStyle: () => baseStyle,
+    } as unknown as Window;
+    const safe = () => hasSafeCaptureGeometry(
+      image,
+      imageRect,
+      document as unknown as Document,
+      sourceWindow,
+    );
+    const hitTest = (value: (x: number, y: number) => Element | null) => {
+      Object.defineProperty(document, 'elementFromPoint', {
+        configurable: true,
+        value,
+      });
+    };
+    return { document, image, safe, hitTest };
+  }
+
+  it('defers capture while an element with its own text covers the image', () => {
+    const { document, image, safe, hitTest } = geometryFixture(
+      '<img id="image"><div id="caption">Sale ends Friday</div>',
+    );
+    const caption = document.querySelector('#caption')!;
+    hitTest((x, y) => x > 100 && y > 60 ? caption : image);
+    expect(safe()).toBe(false);
+    // Once the caption moves away the same image becomes capturable again.
+    hitTest(() => image);
+    expect(safe()).toBe(true);
+  });
+
+  it('counts text nested one level inside the covering element', () => {
+    const { document, safe, hitTest } = geometryFixture(
+      '<img id="image"><header id="bar"><span>Sign in</span></header>',
+    );
+    hitTest(() => document.querySelector('#bar'));
+    expect(safe()).toBe(false);
+  });
+
+  it('ignores transparent overlays and wrappers without text', () => {
+    const { document, safe, hitTest } = geometryFixture(
+      '<a id="link" href="/x"><span id="empty"></span></a>' +
+      '<div id="layout"><div><p>Deep layout text</p></div></div><img id="image">',
+    );
+    hitTest(() => document.querySelector('#link'));
+    expect(safe()).toBe(true);
+    // Text two levels down is layout structure, not a text cover.
+    hitTest(() => document.querySelector('#layout'));
+    expect(safe()).toBe(true);
+  });
+
+  it('treats the image itself and its ancestors as safe', () => {
+    const { document, image, safe, hitTest } = geometryFixture(
+      '<figure id="figure"><img id="image"><figcaption>Below the image</figcaption></figure>',
+    );
+    const figure = document.querySelector('#figure')!;
+    hitTest((x) => x < 60 ? image : figure);
+    expect(safe()).toBe(true);
+  });
+
+  it('descends into an open shadow root to find a covering text overlay', () => {
+    const { document, safe, hitTest } = geometryFixture(
+      '<div id="host"></div><img id="image">',
+    );
+    const host = document.querySelector('#host')!;
+    const shadow = host.attachShadow({ mode: 'open' });
+    // linkedom does not currently expose ShadowRoot.mode, while browsers do.
+    Object.defineProperty(shadow, 'mode', { value: 'open' });
+    shadow.innerHTML = '<div id="toast">Copied to clipboard</div>';
+    hitTest(() => host);
+    // A text-free host by itself is not a cover.
+    expect(safe()).toBe(true);
+    Object.defineProperty(shadow, 'elementFromPoint', {
+      configurable: true,
+      value: () => shadow.querySelector('#toast'),
+    });
+    expect(safe()).toBe(false);
+  });
+
+  it('fails closed when the hit test itself is unreadable', () => {
+    const { safe, hitTest } = geometryFixture('<img id="image">');
+    hitTest(() => {
+      throw new Error('hostile elementFromPoint');
+    });
+    expect(safe()).toBe(false);
+  });
+
+  it('skips the heuristic on documents without a hit test', () => {
+    const { safe } = geometryFixture('<img id="image"><div>Nearby text</div>');
+    expect(safe()).toBe(true);
   });
 });
 
