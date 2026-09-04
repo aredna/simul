@@ -37,8 +37,6 @@ import {
 import {
   PageAccessError,
   assertSnapshotIsCurrent,
-  hasNonDefaultPort,
-  identityFromTab,
   isSupportedPage,
   normalizedPageUrl,
   parseDetachedPageIdentityHint,
@@ -46,15 +44,12 @@ import {
   readPageError,
   readableError,
   withPageTimeout,
-  type AuthorizedTabRequest,
   type CapturedPageIdentity,
 } from '../../lib/page-identity';
 import {
   createDetachedCompanionUrl,
   createDetachedWindowData,
-  isNewerCompanionLaunchStamp,
   sameCompanionSourcePage,
-  shouldFollowActivatedTab,
 } from '../../lib/companion-surface';
 import {
   capturePageSnapshot,
@@ -78,12 +73,6 @@ import {
 import { createBrowserImageRecognitionCoordinator } from '../../lib/ocr/image-analysis-coordinator';
 import { IndexedDbTransientImageStore } from '../../lib/ocr/transient-image-store';
 import {
-  PREFERENCE_LOCK_NAME,
-  type PreferenceCommand,
-  type PreferenceCommandResult,
-} from '../../lib/preference-coordinator';
-import {
-  ALL_SITES_PERMISSION_ORIGINS,
   STORAGE_KEY,
   autoTranslationModeForPage,
   clampZoomPercent,
@@ -95,10 +84,7 @@ import {
   isReplicaViewMode,
   isTextLayoutMode,
   parseCompanionPreferences,
-  permissionOriginsForMode,
-  withAutoTranslationMode,
   withViewSettings,
-  type AutoTranslationMode,
   type CompanionLaunchBehavior,
   type CompanionPreferences,
   type CompanionSurface,
@@ -113,15 +99,16 @@ import {
   availabilityPairKey,
   sameTranslationPair,
   type CaptureRequest,
-  type ImageCaptureAccess,
   type PendingImageReplicaActivation,
   type PendingLiveUpdate,
 } from './companion-state';
 import { Currency, type CurrencyToken } from './currency';
 import { ImageAnalysisPanel } from './image-analysis-panel';
 import { MirrorView } from './mirror-view';
+import { PermissionFlows } from './permission-flows';
 import { PreferenceClient } from './preference-client';
 import { QuickComposer } from './quick-composer';
+import { SourceFollower } from './source-follower';
 import { ToolbarStatus } from './toolbar-status';
 import { UiLocalizer } from './ui-localizer';
 import {
@@ -424,7 +411,8 @@ const imageAnalysisPanel = new ImageAnalysisPanel({
     usePromptForImageText: state.preferences.usePromptForImageText,
   }),
   setUiText: (element, english) => uiLocalizer.setText(element, english),
-  changeImageTranslationEnabled,
+  changeImageTranslationEnabled: (enabled) =>
+    permissionFlows.changeImageTranslationEnabled(enabled),
   commitPatch: commitImageAnalysisPreferencePatch,
 });
 const toolbarStatus = new ToolbarStatus({
@@ -461,6 +449,65 @@ const preferenceClient = new PreferenceClient({
   },
   onError: (message) => setStatus(message, 'error'),
   readableError,
+});
+const permissionFlows = new PermissionFlows({
+  state,
+  currency,
+  permissions: {
+    contains: (permissions) => browser.permissions.contains(permissions),
+    request: (permissions) => browser.permissions.request(permissions),
+    remove: (permissions) => browser.permissions.remove(permissions),
+    getAll: () => browser.permissions.getAll(),
+  },
+  locks: () => navigator.locks,
+  isUserActivationActive: () => navigator.userActivation.isActive,
+  preferenceClient,
+  setStatus,
+  syncPreferenceControls: () => syncPreferenceControls(),
+  updateControls: () => updateControls(),
+  renderImagePanel: () => imageAnalysisPanel.render(),
+  configureImageTranslation: () => configureImageTranslation(),
+  requestAutomaticTranslation: async (pageUrl) => {
+    if (!state.snapshot || state.isLiveSourceOnlyMode) return;
+    state.translationDesired = true;
+    await maybeTranslateAutomatically(captureCoordinator.generation, pageUrl);
+  },
+});
+const sourceFollower = new SourceFollower({
+  state,
+  currency,
+  browser: {
+    getTab: (tabId) => browser.tabs.get(tabId),
+    queryActiveTab: async (windowId) => {
+      const [tab] = await browser.tabs.query(
+        windowId === undefined
+          ? { active: true, currentWindow: true }
+          : { active: true, windowId },
+      );
+      return tab;
+    },
+    getWindow: (windowId) => browser.windows.get(windowId),
+    getCurrentWindowId: async () => (await browser.windows.getCurrent()).id,
+    getLastFocusedNormalWindowId: async () =>
+      (await browser.windows.getLastFocused({ windowTypes: ['normal'] })).id,
+    windowIdNone: browser.windows.WINDOW_ID_NONE,
+  },
+  detachedIdentityHint,
+  navigationDebounceMs: NAVIGATION_DEBOUNCE_MS,
+  queueCapture,
+  invalidateCompanion,
+  onSourceNavigationStarted: () => {
+    captureCoordinator.invalidate();
+    currency.supersedePage();
+    state.abortPageWork();
+    imageTranslationController.releaseReplica();
+    quickComposer.invalidate();
+    state.pendingLiveUpdate = undefined;
+  },
+  onFollowedTabActivated: () => imageTranslationController?.resume(),
+  setStatus,
+  renderError: (message) => mirrorView.renderError(message),
+  updateControls: () => updateControls(),
 });
 replicaTranslationCoordinator = new ReplicaTranslationCoordinator(
   provider,
@@ -637,7 +684,7 @@ toolbarSizeToggleButton.addEventListener('click', () => {
   mirrorView.updateLayout();
 });
 toolbarOcrToggleButton.addEventListener('click', () => {
-  void changeImageTranslationEnabled(
+  void permissionFlows.changeImageTranslationEnabled(
     !state.preferences.imageTranslationEnabled || state.imageCaptureAccess !== 'granted',
   );
 });
@@ -662,7 +709,7 @@ autoTranslateSelect.addEventListener('change', () => {
   const mode = isAutoTranslationMode(autoTranslateSelect.value)
     ? autoTranslateSelect.value
     : 'off';
-  void changeAutoTranslationMode(mode);
+  void permissionFlows.changeAutoTranslationMode(mode);
 });
 
 displayModeSelect.addEventListener('change', () => {
@@ -722,7 +769,7 @@ zoomInput.addEventListener('input', () => setZoom(Number(zoomInput.value)));
 zoomInButton.addEventListener('click', () => setZoom(state.preferences.zoomPercent + 10));
 zoomOutButton.addEventListener('click', () => setZoom(state.preferences.zoomPercent - 10));
 const requestManualRefresh = (): void => {
-  void refreshFollowedPage('manual');
+  void sourceFollower.refreshFollowedPage('manual');
 };
 refreshButton.addEventListener('click', requestManualRefresh);
 compactRefreshButton.addEventListener('click', requestManualRefresh);
@@ -765,7 +812,7 @@ window.addEventListener('pagehide', () => {
 browser.runtime.onMessage.addListener((message: unknown, sender, sendResponse) => {
   const authorizedTab = readAuthorizedTabMessage(message);
   if (authorizedTab) {
-    void acceptAuthorizedTab(authorizedTab);
+    void sourceFollower.acceptAuthorizedTab(authorizedTab);
     return;
   }
   const dirty = readLivePageDirtyMessage(message);
@@ -820,127 +867,27 @@ document.addEventListener('visibilitychange', () => {
 });
 
 browser.tabs.onActivated.addListener(({ tabId, windowId }) => {
-  // Images deferred while the followed tab was inactive can be captured
-  // again now that it is the active tab.
-  if (state.followedPageIdentity?.tabId === tabId) imageTranslationController?.resume();
-  if (
-    shouldFollowActivatedTab(
-      isDetachedWindow,
-      state.preferences.popoutTabMode,
-      state.panelWindowId,
-      windowId,
-    )
-  ) {
-    void followActivatedSourceTab(tabId, windowId);
-    return;
-  }
-  if (
-    !isDetachedWindow &&
-    state.followedPageIdentity?.windowId === windowId &&
-    state.followedPageIdentity.tabId !== tabId
-  ) {
-    currency.supersede('identity');
-    state.followedPageIdentity = undefined;
-    clearNavigationTimer();
-    invalidateCompanion(
-      'The active tab changed. Select the extension on the page you want to follow.',
-    );
-  }
+  sourceFollower.handleTabActivated(tabId, windowId);
 });
-
 browser.windows.onFocusChanged.addListener((windowId) => {
-  if (
-    !isDetachedWindow ||
-    state.preferences.popoutTabMode !== 'active' ||
-    windowId === browser.windows.WINDOW_ID_NONE ||
-    windowId === state.panelWindowId
-  ) return;
-  // The pending navigation refresh is left armed: its callback re-validates
-  // the followed identity, and clearing it here lost the refresh whenever
-  // focus moved within the debounce window (review M1).
-  const request = currency.begin('identity');
-  void followFocusedBrowserWindow(windowId, request);
+  sourceFollower.handleWindowFocusChanged(windowId);
 });
-
 browser.tabs.onAttached.addListener((tabId, { newWindowId }) => {
-  if (
-    isDetachedWindow &&
-    state.followedPageIdentity?.tabId === tabId &&
-    newWindowId !== state.panelWindowId
-  ) {
-    if (state.preferences.popoutTabMode === 'active') {
-      void followActivatedSourceTab(tabId, newWindowId);
-    } else {
-      const request = currency.begin('identity');
-      clearNavigationTimer();
-      void followMovedLockedSourceTab(tabId, newWindowId, request);
-    }
-  }
+  sourceFollower.handleTabAttached(tabId, newWindowId);
 });
-
 browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  const followed = state.followedPageIdentity;
-  if (!followed || followed.tabId !== tabId) return;
-  const nextUrl = changeInfo.url ?? tab.url ?? followed.url;
-  if (!isSupportedPage(nextUrl)) {
-    if (changeInfo.status === 'loading' || typeof changeInfo.url === 'string') {
-      clearNavigationTimer();
-      invalidateCompanion(
-        'The source tab opened a restricted page. Return to a regular HTTP or HTTPS page and select the extension again.',
-      );
-    }
-    return;
-  }
-  const nextIdentity = { tabId, windowId: tab.windowId, url: nextUrl };
-  // A hash or query change without a load is a same-document navigation:
-  // the live observer already mirrors any DOM change, so keep the replica,
-  // the translation, and the scroll position and only refresh the identity.
-  if (
-    changeInfo.status !== 'loading' &&
-    typeof changeInfo.url === 'string' &&
-    normalizedPageUrl(nextUrl) === normalizedPageUrl(followed.url)
-  ) {
-    state.followedPageIdentity = nextIdentity;
-    if (
-      state.capturedPageIdentity &&
-      state.capturedPageIdentity.tabId === tabId &&
-      normalizedPageUrl(state.capturedPageIdentity.url) === normalizedPageUrl(nextUrl)
-    ) {
-      state.capturedPageIdentity = { ...state.capturedPageIdentity, url: nextUrl };
-    }
-    return;
-  }
-  if (changeInfo.status === 'loading' || typeof changeInfo.url === 'string') {
-    captureCoordinator.invalidate();
-    currency.supersedePage();
-    state.abortPageWork();
-    imageTranslationController.releaseReplica();
-    quickComposer.invalidate();
-    state.pendingLiveUpdate = undefined;
-    state.followedPageIdentity = nextIdentity;
-    clearNavigationTimer();
-    setStatus('The source page is changing; the current mirror stays visible until the new page is ready.');
-  }
-  if (
-    changeInfo.status === 'complete' ||
-    (typeof changeInfo.url === 'string' && changeInfo.status !== 'loading')
-  ) {
-    scheduleNavigationRefresh(nextIdentity);
-  }
+  sourceFollower.handleTabUpdated(tabId, changeInfo, tab);
 });
-
 browser.tabs.onRemoved.addListener((tabId) => {
-  if (state.followedPageIdentity?.tabId === tabId) {
-    invalidateCompanion('The source tab was closed.');
-  }
+  sourceFollower.handleTabRemoved(tabId);
 });
 
 browser.permissions.onAdded.addListener(() => {
-  void refreshImageCaptureAccess();
+  void permissionFlows.refreshImageCaptureAccess();
 });
 
 browser.permissions.onRemoved.addListener(() => {
-  void refreshImageCaptureAccess(true);
+  void permissionFlows.refreshImageCaptureAccess(true);
 });
 
 browser.storage.onChanged.addListener((changes, areaName) => {
@@ -954,7 +901,7 @@ browser.storage.onChanged.addListener((changes, areaName) => {
     previous.popoutTabMode !== state.preferences.popoutTabMode &&
     state.preferences.popoutTabMode === 'active'
   ) {
-    void followCurrentActiveSourceTab();
+    void sourceFollower.followCurrentActiveSourceTab();
   }
   if (previous.replicaFidelityPolicy !== state.preferences.replicaFidelityPolicy) {
     liveReplicaFailureRecoveryGate.reset();
@@ -996,11 +943,11 @@ browser.storage.onChanged.addListener((changes, areaName) => {
 void initialize();
 
 async function initialize(): Promise<void> {
-  await Promise.all([loadPreferences(), loadPanelWindowId()]);
-  await refreshImageCaptureAccess();
+  await Promise.all([loadPreferences(), sourceFollower.loadPanelWindowId()]);
+  await permissionFlows.refreshImageCaptureAccess();
   const [, sourceResult] = await Promise.allSettled([
     checkPanelPlacement(),
-    initializeSourcePage(),
+    sourceFollower.initializeSourcePage(),
   ]);
   if (sourceResult.status === 'rejected') {
     const message = readPageError(sourceResult.reason);
@@ -1010,37 +957,8 @@ async function initialize(): Promise<void> {
   }
 }
 
-async function initializeSourcePage(): Promise<void> {
-  if (detachedIdentityHint) {
-    state.followedPageIdentity = state.preferences.popoutTabMode === 'active'
-      ? await readActivePageIdentity(detachedIdentityHint.windowId)
-      : identityFromTab(
-          await browser.tabs.get(detachedIdentityHint.tabId),
-          undefined,
-          false,
-        );
-    queueCapture({ identity: state.followedPageIdentity, reason: 'initial' });
-    return;
-  }
-  await refreshFollowedPage('initial');
-}
-
-async function loadPanelWindowId(): Promise<void> {
-  try {
-    state.panelWindowId = (await browser.windows.getCurrent()).id;
-  } catch {
-    state.panelWindowId = undefined;
-  }
-}
-
 async function loadPreferences(): Promise<void> {
   await preferenceClient.load();
-}
-
-function sendPreferenceCommand(
-  command: PreferenceCommand,
-): Promise<PreferenceCommandResult> {
-  return preferenceClient.send(command);
 }
 
 function commitViewPreferencePatch(
@@ -1059,396 +977,6 @@ function mergePendingViewPreferences(
   stored: CompanionPreferences,
 ): CompanionPreferences {
   return preferenceClient.mergePending(stored);
-}
-
-function readStoredPreferences(): Promise<CompanionPreferences> {
-  return preferenceClient.readStored();
-}
-
-async function reloadPreferencesFromStorage(): Promise<void> {
-  await preferenceClient.reloadFromStorage();
-}
-
-async function refreshImageCaptureAccess(
-  reportRevocation = false,
-): Promise<void> {
-  const request = currency.begin('image-access');
-  const previous = state.imageCaptureAccess;
-  let next: ImageCaptureAccess;
-  try {
-    next = await browser.permissions.contains({
-      origins: [...ALL_SITES_PERMISSION_ORIGINS],
-    }) ? 'granted' : 'missing';
-  } catch {
-    next = 'missing';
-  }
-  if (!currency.isCurrent(request)) return;
-  state.imageCaptureAccess = next;
-  imageAnalysisPanel.render();
-  configureImageTranslation();
-  updateControls();
-  if (
-    reportRevocation &&
-    previous === 'granted' &&
-    state.imageCaptureAccess === 'missing' &&
-    state.preferences.imageTranslationEnabled
-  ) {
-    setStatus(
-      'Image access was removed. Your image-translation setting is saved but paused; open options and choose Grant image access to resume.',
-      'warning',
-    );
-  }
-}
-
-async function changeImageTranslationEnabled(enabled: boolean): Promise<void> {
-  if (state.permissionInFlight) {
-    syncPreferenceControls();
-    return;
-  }
-  state.permissionInFlight = true;
-  imageAnalysisPanel.render();
-  updateControls();
-  try {
-    if (!navigator.locks) throw new Error('Chrome Web Locks are unavailable.');
-    const outcome = await navigator.locks.request(
-      PREFERENCE_LOCK_NAME,
-      { ifAvailable: true },
-      async (lock) => {
-        if (!lock) return { kind: 'busy' } as const;
-        const userActivationAvailable = navigator.userActivation.isActive;
-        let freshPreferences: CompanionPreferences | undefined;
-        let newlyGranted = false;
-        let removedImageCaptureGrant = false;
-        try {
-          const hadImageCaptureGrant = await browser.permissions.contains({
-            origins: [...ALL_SITES_PERMISSION_ORIGINS],
-          });
-          if (enabled && !hadImageCaptureGrant) {
-            if (!userActivationAvailable || !navigator.userActivation.isActive) {
-              return { kind: 'activation' } as const;
-            }
-            const granted = await browser.permissions.request({
-              origins: [...ALL_SITES_PERMISSION_ORIGINS],
-            });
-            if (!granted) return { kind: 'denied' } as const;
-            newlyGranted = true;
-          }
-
-          freshPreferences = await readStoredPreferences();
-          let narrowAccessRestored = true;
-          if (
-            !enabled &&
-            freshPreferences.imageTranslationEnabled &&
-            !freshPreferences.autoTranslateAllSites &&
-            hadImageCaptureGrant
-          ) {
-            const removed = await browser.permissions.remove({
-              origins: [...ALL_SITES_PERMISSION_ORIGINS],
-            });
-            const broadStillPresent = await browser.permissions.contains({
-              origins: [...ALL_SITES_PERMISSION_ORIGINS],
-            });
-            if (!removed && broadStillPresent) {
-              throw new Error('Chrome retained image capture access.');
-            }
-            removedImageCaptureGrant = !broadStillPresent;
-            const exactOrigins = freshPreferences.autoTranslateOrigins.flatMap(
-              (origin) => permissionOriginsForMode('site', origin),
-            );
-            if (exactOrigins.length > 0) {
-              narrowAccessRestored = userActivationAvailable &&
-                await browser.permissions.request({ origins: exactOrigins });
-              if (narrowAccessRestored) {
-                const actual = new Set(
-                  (await browser.permissions.getAll()).origins ?? [],
-                );
-                narrowAccessRestored = exactOrigins.every((origin) =>
-                  actual.has(origin)
-                );
-              }
-            }
-          }
-
-          const result = await sendPreferenceCommand({
-            type: 'simul:preferences:patch-image-analysis',
-            patch: { imageTranslationEnabled: enabled },
-          });
-          return { kind: 'complete', result, narrowAccessRestored } as const;
-        } catch (error) {
-          const prior = await readStoredPreferences().catch(
-            () => freshPreferences ?? state.preferences,
-          );
-          if (
-            newlyGranted &&
-            !prior.autoTranslateAllSites &&
-            !prior.imageTranslationEnabled
-          ) {
-            await browser.permissions.remove({
-              origins: [...ALL_SITES_PERMISSION_ORIGINS],
-            }).catch(() => false);
-          }
-          if (
-            removedImageCaptureGrant &&
-            prior.imageTranslationEnabled
-          ) {
-            await browser.permissions.request({
-              origins: [...ALL_SITES_PERMISSION_ORIGINS],
-            }).catch(() => false);
-          }
-          throw error;
-        }
-      },
-    );
-
-    if (outcome.kind === 'busy') {
-      await reloadPreferencesFromStorage();
-      setStatus(
-        'Another companion window is saving image access. Try again.',
-        'warning',
-      );
-      return;
-    }
-    if (outcome.kind === 'activation') {
-      await reloadPreferencesFromStorage();
-      setStatus(
-        'Choose the image setting again so Chrome can show its access prompt.',
-        'warning',
-      );
-      return;
-    }
-    if (outcome.kind === 'denied') {
-      await reloadPreferencesFromStorage();
-      setStatus(
-        state.preferences.imageTranslationEnabled
-          ? 'Image translation remains paused. Choose Grant image access when you are ready to retry.'
-          : 'Chrome did not grant image access, so image translation remains off. You can retry from options.',
-        'warning',
-      );
-      return;
-    }
-
-    state.preferences = mergePendingViewPreferences(outcome.result.preferences);
-    syncPreferenceControls();
-    setStatus(
-      enabled
-        ? 'Image translation is enabled for visible page images.'
-        : outcome.narrowAccessRestored
-          ? 'Image translation is off.'
-          : 'Image translation is off. Chrome did not retain some saved one-site automatic access.',
-      outcome.narrowAccessRestored ? 'success' : 'warning',
-    );
-  } catch {
-    await reloadPreferencesFromStorage();
-    setStatus(
-      'Chrome could not update image access. Your saved setting was left unchanged; try again from options.',
-      'error',
-    );
-  } finally {
-    state.permissionInFlight = false;
-    await refreshImageCaptureAccess();
-    syncPreferenceControls();
-    updateControls();
-  }
-}
-
-async function acceptAuthorizedTab(request: AuthorizedTabRequest): Promise<void> {
-  const authorized = request.identity;
-  const lockedIdentity = state.followedPageIdentity ?? detachedIdentityHint;
-  if (
-    isDetachedWindow &&
-    lockedIdentity &&
-    state.preferences.popoutTabMode === 'locked' &&
-    (authorized.windowId !== lockedIdentity.windowId ||
-      authorized.tabId !== lockedIdentity.tabId)
-  ) return;
-  if (request.launchStamp) {
-    if (!isNewerCompanionLaunchStamp(
-      state.latestToolbarLaunchStamp,
-      request.launchStamp,
-    )) return;
-    state.latestToolbarLaunchStamp = request.launchStamp;
-  }
-  const follow = currency.begin('identity');
-  if (!isDetachedWindow) {
-    if (state.panelWindowId === undefined) await loadPanelWindowId();
-    if (
-      !currency.isCurrent(follow) ||
-      state.panelWindowId === undefined ||
-      authorized.windowId !== state.panelWindowId
-    ) return;
-  }
-  if (!currency.isCurrent(follow)) return;
-  clearNavigationTimer();
-  state.followedPageIdentity = authorized;
-  queueCapture({ identity: authorized, reason: 'authorized' });
-}
-
-async function followMovedLockedSourceTab(
-  tabId: number,
-  windowId: number,
-  request: CurrencyToken,
-): Promise<void> {
-  try {
-    const identity = identityFromTab(
-      await browser.tabs.get(tabId),
-      undefined,
-      false,
-    );
-    if (
-      !currency.isCurrent(request) ||
-      state.preferences.popoutTabMode !== 'locked' ||
-      identity.tabId !== tabId ||
-      identity.windowId !== windowId
-    ) return;
-    state.detachedSourceWindowId = windowId;
-    queueCapture({ identity, reason: 'navigation' });
-  } catch (error) {
-    if (!currency.isCurrent(request)) return;
-    invalidateCompanion(
-      `${readPageError(error)} The locked source tab could not be followed after it moved windows.`,
-    );
-  }
-}
-
-async function refreshFollowedPage(reason: CaptureRequest['reason']): Promise<void> {
-  const request = currency.begin('identity');
-  try {
-    const identity = state.followedPageIdentity
-      ? await readCurrentFollowedIdentity(state.followedPageIdentity)
-      : await readActivePageIdentity();
-    if (!currency.isCurrent(request)) return;
-    state.followedPageIdentity = identity;
-    queueCapture({ identity, reason });
-  } catch (error) {
-    if (!currency.isCurrent(request)) return;
-    const message = readPageError(error);
-    if (!state.snapshot) mirrorView.renderError(message);
-    setStatus(message, 'error');
-    updateControls();
-  }
-}
-
-async function followCurrentActiveSourceTab(): Promise<void> {
-  if (!detachedIdentityHint || state.preferences.popoutTabMode !== 'active') return;
-  const request = currency.begin('identity');
-  clearNavigationTimer();
-  try {
-    const lastFocused = await browser.windows.getLastFocused({
-      windowTypes: ['normal'],
-    });
-    if (
-      !currency.isCurrent(request) ||
-      state.preferences.popoutTabMode !== 'active'
-    ) return;
-    const sourceWindowId =
-      lastFocused.id ??
-      state.followedPageIdentity?.windowId ??
-      state.detachedSourceWindowId ??
-      detachedIdentityHint.windowId;
-    const [tab] = await browser.tabs.query({
-      active: true,
-      windowId: sourceWindowId,
-    });
-    if (
-      !currency.isCurrent(request) ||
-      state.preferences.popoutTabMode !== 'active'
-    ) return;
-    if (tab?.id === undefined) {
-      invalidateCompanion('The source browser window has no active readable tab.');
-      return;
-    }
-    await followActivatedSourceTab(tab.id, sourceWindowId, tab, request);
-  } catch (error) {
-    if (!currency.isCurrent(request)) return;
-    invalidateCompanion(
-      `${readPageError(error)} Active-tab following needs page access for each newly selected site.`,
-    );
-  }
-}
-
-async function followFocusedBrowserWindow(
-  windowId: number,
-  request: CurrencyToken,
-): Promise<void> {
-  try {
-    const sourceWindow = await browser.windows.get(windowId);
-    if (
-      !currency.isCurrent(request) ||
-      state.preferences.popoutTabMode !== 'active'
-    ) return;
-    if (sourceWindow.type !== undefined && sourceWindow.type !== 'normal') return;
-    const [tab] = await browser.tabs.query({ active: true, windowId });
-    if (
-      !currency.isCurrent(request) ||
-      state.preferences.popoutTabMode !== 'active'
-    ) return;
-    state.detachedSourceWindowId = windowId;
-    if (tab?.id !== undefined) {
-      await followActivatedSourceTab(tab.id, windowId, tab, request);
-    }
-  } catch {
-    // A closing or restricted browser window is not a new source candidate.
-  }
-}
-
-async function followActivatedSourceTab(
-  tabId: number,
-  windowId: number,
-  knownTab?: Browser.tabs.Tab,
-  existingRequest?: CurrencyToken,
-): Promise<void> {
-  if (
-    !shouldFollowActivatedTab(
-      isDetachedWindow,
-      state.preferences.popoutTabMode,
-      state.panelWindowId,
-      windowId,
-    )
-  ) return;
-
-  const request = existingRequest ?? currency.begin('identity');
-  try {
-    const sourceWindow = await browser.windows.get(windowId);
-    if (
-      !currency.isCurrent(request) ||
-      state.preferences.popoutTabMode !== 'active'
-    ) return;
-    if (sourceWindow.type !== undefined && sourceWindow.type !== 'normal') return;
-    const identity = identityFromTab(
-      knownTab ?? await browser.tabs.get(tabId),
-      undefined,
-      true,
-    );
-    if (
-      !currency.isCurrent(request) ||
-      state.preferences.popoutTabMode !== 'active'
-    ) return;
-    state.detachedSourceWindowId = windowId;
-    if (sameCompanionSourcePage(
-      state.followedPageIdentity,
-      identity,
-      normalizedPageUrl,
-    )) {
-      // Already following this page. If the rendered replica is still an
-      // older page of the same tab (a navigation whose refresh never ran),
-      // rebuild now instead of leaving the stale mirror frozen.
-      if (
-        !state.captureInFlight &&
-        navigationTimer === undefined &&
-        state.capturedPageIdentity?.tabId === identity.tabId &&
-        !sameCompanionSourcePage(state.capturedPageIdentity, identity, normalizedPageUrl)
-      ) {
-        queueCapture({ identity, reason: 'navigation' });
-      }
-      return;
-    }
-    queueCapture({ identity, reason: 'navigation' });
-  } catch (error) {
-    if (!currency.isCurrent(request)) return;
-    invalidateCompanion(
-      `${readPageError(error)} Active-tab following needs page access for each newly selected site.`,
-    );
-  }
 }
 
 function queueCapture(request: CaptureRequest): void {
@@ -1619,7 +1147,7 @@ async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> 
     if (currentTranslationFieldCount() === 0) {
       state.availability = 'unavailable';
       state.availabilityCheckedForPair = undefined;
-      const accessWasRevoked = await reconcileAutomaticAccess(identity.url);
+      const accessWasRevoked = await permissionFlows.reconcileAutomaticAccess(identity.url);
       if (!captureCoordinator.isCurrent(work.generation)) return;
       setStatus(
         accessWasRevoked
@@ -1633,7 +1161,7 @@ async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> 
     }
     await checkAvailability(work.generation);
     if (!captureCoordinator.isCurrent(work.generation)) return;
-    const accessWasRevoked = await reconcileAutomaticAccess(identity.url);
+    const accessWasRevoked = await permissionFlows.reconcileAutomaticAccess(identity.url);
     if (!captureCoordinator.isCurrent(work.generation)) return;
     if (accessWasRevoked) {
       setStatus('Chrome removed a saved automatic-access grant, so that scope was turned off.', 'warning');
@@ -2562,7 +2090,6 @@ function observeReplicaStateLabel(): void {
 }
 
 let zoomCommitTimer: ReturnType<typeof setTimeout> | undefined;
-let navigationTimer: ReturnType<typeof setTimeout> | undefined;
 
 /**
  * Applies zoom immediately and saves it once the slider settles. Saving on
@@ -2593,7 +2120,7 @@ async function changePopoutTabMode(popoutTabMode: PopoutTabMode): Promise<void> 
   const saved = await commitViewPreferencePatch({ popoutTabMode });
   if (!saved || state.preferences.popoutTabMode !== popoutTabMode) return;
   if (isDetachedWindow && popoutTabMode === 'active') {
-    await followCurrentActiveSourceTab();
+    await sourceFollower.followCurrentActiveSourceTab();
   }
 }
 
@@ -2953,163 +2480,6 @@ async function checkPanelPlacement(): Promise<void> {
   }
 }
 
-async function changeAutoTranslationMode(mode: AutoTranslationMode): Promise<void> {
-  if (state.permissionInFlight) {
-    syncPreferenceControls();
-    return;
-  }
-  const pageUrl = state.pageUrl;
-  const requestedOrigins = permissionOriginsForMode(mode, pageUrl);
-  if (mode === 'site' && requestedOrigins.length === 0) {
-    syncPreferenceControls();
-    setStatus(
-      hasNonDefaultPort(pageUrl)
-        ? 'Chrome cannot grant narrow one-site access to a non-default port.'
-        : 'Open a regular HTTP or HTTPS page before enabling this-site automation.',
-      'warning',
-    );
-    return;
-  }
-  state.permissionInFlight = true;
-  updateControls();
-  try {
-    if (!navigator.locks) throw new Error('Chrome Web Locks are unavailable.');
-    const outcome = await navigator.locks.request(
-      PREFERENCE_LOCK_NAME,
-      { ifAvailable: true },
-      async (lock) => {
-        if (!lock) return { kind: 'busy' } as const;
-        return performLockedAutoTranslationChange(mode, pageUrl, requestedOrigins);
-      },
-    );
-    if (outcome.kind === 'busy') {
-      await reloadPreferencesFromStorage();
-      setStatus('Another companion window is saving this setting. Try again.', 'warning');
-      return;
-    }
-    if (outcome.kind === 'activation') {
-      await reloadPreferencesFromStorage();
-      setStatus('Choose the setting again so Chrome can show its access prompt.', 'warning');
-      return;
-    }
-    if (outcome.kind === 'limit') {
-      state.preferences = mergePendingViewPreferences(outcome.preferences);
-      syncPreferenceControls();
-      setStatus('The saved-site limit has been reached.', 'warning');
-      return;
-    }
-    if (outcome.kind === 'failed') {
-      if (outcome.result) {
-        state.preferences = mergePendingViewPreferences(outcome.result.preferences);
-      }
-      else await reloadPreferencesFromStorage();
-      syncPreferenceControls();
-      setStatus(`Chrome could not update automatic access: ${readableError(outcome.error)}`, 'error');
-      return;
-    }
-    state.preferences = mergePendingViewPreferences(outcome.result.preferences);
-    syncPreferenceControls();
-    if (outcome.kind === 'denied' || outcome.kind === 'not-applied') {
-      setStatus('Chrome did not retain the requested automatic-access scope.', 'warning');
-      return;
-    }
-    setStatus(
-      mode === 'off'
-        ? 'Automatic translation is off for this scope.'
-        : mode === 'all'
-          ? 'Automatic translation is enabled for regular web pages.'
-          : 'Automatic translation is enabled for this site.',
-      'success',
-    );
-    if (mode !== 'off' && state.snapshot && !state.isLiveSourceOnlyMode) {
-      state.translationDesired = true;
-      await maybeTranslateAutomatically(captureCoordinator.generation, pageUrl ?? '');
-    }
-  } catch (error) {
-    const repaired = await sendPreferenceCommand({
-      type: 'simul:preferences:abort-auto',
-      mode,
-      ...(pageUrl ? { pageUrl } : {}),
-    }).catch(() => undefined);
-    if (repaired) state.preferences = mergePendingViewPreferences(repaired.preferences);
-    else await reloadPreferencesFromStorage();
-    syncPreferenceControls();
-    setStatus(`Chrome could not update automatic access: ${readableError(error)}`, 'error');
-  } finally {
-    state.permissionInFlight = false;
-    updateControls();
-  }
-}
-
-async function performLockedAutoTranslationChange(
-  mode: AutoTranslationMode,
-  pageUrl: string | undefined,
-  requestedOrigins: string[],
-) {
-  try {
-    const freshPreferences = await readStoredPreferences();
-    const candidate = withAutoTranslationMode(freshPreferences, pageUrl, mode);
-    if (mode === 'site' && autoTranslationModeForPage(candidate, pageUrl) !== 'site') {
-      return { kind: 'limit', preferences: freshPreferences } as const;
-    }
-    if ((mode === 'site' || mode === 'all') && !navigator.userActivation.isActive) {
-      return { kind: 'activation' } as const;
-    }
-    if (mode === 'site' && !freshPreferences.imageTranslationEnabled) {
-      await browser.permissions.remove({ origins: permissionOriginsForMode('all') });
-    }
-    const granted =
-      requestedOrigins.length === 0 ||
-      (await browser.permissions.request({ origins: requestedOrigins }));
-    if (!granted) {
-      const result = await sendPreferenceCommand({
-        type: 'simul:preferences:abort-auto',
-        mode,
-        ...(pageUrl ? { pageUrl } : {}),
-      });
-      return { kind: 'denied', result } as const;
-    }
-    const result = await sendPreferenceCommand({
-      type: 'simul:preferences:commit-auto',
-      mode,
-      ...(pageUrl ? { pageUrl } : {}),
-    });
-    return { kind: result.applied ? 'complete' : 'not-applied', result } as const;
-  } catch (error) {
-    const result = await sendPreferenceCommand({
-      type: 'simul:preferences:abort-auto',
-      mode,
-      ...(pageUrl ? { pageUrl } : {}),
-    }).catch(() => undefined);
-    return { kind: 'failed', error, result } as const;
-  }
-}
-
-async function reconcileAutomaticAccess(pageUrl: string | undefined): Promise<boolean> {
-  const before = autoTranslationModeForPage(state.preferences, pageUrl);
-  const result = await sendPreferenceCommand({ type: 'simul:preferences:reconcile' });
-  state.preferences = mergePendingViewPreferences(result.preferences);
-  syncPreferenceControls();
-  return before !== autoTranslationModeForPage(state.preferences, pageUrl);
-}
-
-function scheduleNavigationRefresh(identity: CapturedPageIdentity): void {
-  clearNavigationTimer();
-  navigationTimer = setTimeout(() => {
-    navigationTimer = undefined;
-    if (
-      state.followedPageIdentity?.tabId !== identity.tabId ||
-      state.followedPageIdentity.windowId !== identity.windowId
-    ) return;
-    queueCapture({ identity, reason: 'navigation' });
-  }, NAVIGATION_DEBOUNCE_MS);
-}
-
-function clearNavigationTimer(): void {
-  if (navigationTimer !== undefined) clearTimeout(navigationTimer);
-  navigationTimer = undefined;
-}
-
 function withCaptureTimeout<T>(operation: Promise<T>): Promise<T> {
   return withPageTimeout(operation, CAPTURE_TIMEOUT_MS);
 }
@@ -3163,28 +2533,6 @@ function releaseLiveSession(
     func: invokeLivePageObserverUnregisterBridge,
     args: [liveSessionId],
   }).catch(() => undefined);
-}
-
-async function readActivePageIdentity(
-  sourceWindowId?: number,
-): Promise<CapturedPageIdentity> {
-  const [tab] = await browser.tabs.query(
-    sourceWindowId === undefined
-      ? { active: true, currentWindow: true }
-      : { active: true, windowId: sourceWindowId },
-  );
-  return identityFromTab(tab, undefined, true);
-}
-
-async function readCurrentFollowedIdentity(
-  followed: CapturedPageIdentity,
-): Promise<CapturedPageIdentity> {
-  const tab = await browser.tabs.get(followed.tabId);
-  return identityFromTab(
-    tab,
-    followed.url,
-    !isDetachedWindow || state.preferences.popoutTabMode === 'active',
-  );
 }
 
 function isMessageFromFollowedTab(

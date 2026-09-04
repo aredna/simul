@@ -23,6 +23,10 @@ const composerScript = readFileSync(
   new URL('../entrypoints/sidepanel/quick-composer.ts', import.meta.url),
   'utf8',
 );
+const followerScript = readFileSync(
+  new URL('../entrypoints/sidepanel/source-follower.ts', import.meta.url),
+  'utf8',
+);
 const toolbarStatusScript = readFileSync(
   new URL('../entrypoints/sidepanel/toolbar-status.ts', import.meta.url),
   'utf8',
@@ -243,27 +247,32 @@ describe('availability check currency', () => {
 
 describe('source navigation handling', () => {
   it('treats a hash or query change without a load as the same document', () => {
-    const start = script.indexOf('browser.tabs.onUpdated.addListener(');
-    const end = script.indexOf('browser.tabs.onRemoved.addListener(');
-    const body = script.slice(start, end);
+    const start = followerScript.indexOf('  handleTabUpdated(');
+    const end = followerScript.indexOf('  handleTabRemoved(');
+    const body = followerScript.slice(start, end);
     const sameDocument = body.indexOf(
       "normalizedPageUrl(nextUrl) === normalizedPageUrl(followed.url)",
     );
-    const invalidate = body.indexOf('captureCoordinator.invalidate();');
+    const navigationStarted = body.indexOf('this.environment.onSourceNavigationStarted();');
     expect(sameDocument).toBeGreaterThan(0);
-    expect(invalidate).toBeGreaterThan(sameDocument);
+    expect(navigationStarted).toBeGreaterThan(sameDocument);
+    // The side panel invalidates the capture generation for a real load.
+    const wiringStart = script.indexOf('onSourceNavigationStarted: () => {');
+    const wiring = script.slice(wiringStart, script.indexOf('},', wiringStart));
+    expect(wiring).toContain('captureCoordinator.invalidate();');
   });
 
   it('leaves the navigation refresh armed while focus moves between windows', () => {
-    const start = script.indexOf('browser.windows.onFocusChanged.addListener(');
-    const end = script.indexOf('browser.tabs.onAttached.addListener(');
-    expect(script.slice(start, end)).not.toContain('clearNavigationTimer()');
+    const start = followerScript.indexOf('  handleWindowFocusChanged(');
+    const end = followerScript.indexOf('  handleTabAttached(');
+    expect(start).toBeGreaterThan(0);
+    expect(followerScript.slice(start, end)).not.toContain('clearNavigationTimer()');
 
-    const followStart = script.indexOf('async function followActivatedSourceTab(');
-    const followEnd = script.indexOf('\nasync function ', followStart + 1);
+    const followStart = followerScript.indexOf('  async followActivatedSourceTab(');
+    const followEnd = followerScript.indexOf('// --- Browser event handlers.', followStart);
     expect(followStart).toBeGreaterThan(0);
     expect(followEnd).toBeGreaterThan(followStart);
-    const follow = script.slice(followStart, followEnd);
+    const follow = followerScript.slice(followStart, followEnd);
     expect(follow).not.toContain('clearNavigationTimer()');
     expect(follow).toContain("queueCapture({ identity, reason: 'navigation' });");
   });
