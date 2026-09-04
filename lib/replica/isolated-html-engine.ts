@@ -301,14 +301,17 @@ export class IsolatedHtmlReplicaEngine
     signal?: AbortSignal,
   ): Promise<ReplicaRunResult> {
     if (this.#disposed) return this.#failed('stream_failed');
+    // A superseded request must not tear down the stream, semantic source or
+    // staging candidate of the replica that is still current; check currency
+    // before releasing anything.
+    if (!request.isCurrent() || signal?.aborted) {
+      return this.#skipped('stale_identity');
+    }
     const runVersion = ++this.#runVersion;
     this.#cancelSemanticReconnect();
     this.#purgeSemantic(true);
     this.#releaseStream();
     this.#releaseCandidate();
-    if (!request.isCurrent() || signal?.aborted) {
-      return this.#skipped('stale_identity');
-    }
     let stream: HtmlMirrorStreamLease | undefined;
     const fidelityPolicy = this.options.getReplicaFidelityPolicy?.() ??
       'conservative';
@@ -1401,7 +1404,7 @@ function buildNode(
   if (input.tagName === 'html' || input.tagName === 'head' || input.tagName === 'body') {
     throw new Error('Nested document element rejected.');
   }
-  const node = target.createElementNS(NAMESPACE_URIS[input.namespace], input.tagName);
+  const node = createMirrorElement(target, input.namespace, input.tagName);
   if (input.opaquePlaceholder) {
     if (
       input.namespace !== 'html' ||
@@ -1550,6 +1553,76 @@ function setAttributes(
     }
   }
 }
+
+/**
+ * Create a replica element from its transported lowercase tag name.
+ *
+ * HTML names go through createElement so a colon-prefixed legacy name such as
+ * `o:p` becomes the same inert HTMLUnknownElement the source parser produced;
+ * createElementNS would read the colon as a namespace prefix and materialize
+ * the real local element (`x:iframe` -> HTMLIFrameElement), bypassing every
+ * tag-keyed rule. The sanitizer rejects colon names outside the HTML
+ * namespace. SVG names are restored to their case-sensitive spelling because
+ * Chrome's SVG element factory does not recognize `lineargradient` or
+ * `clippath` and would create unknown elements instead.
+ */
+export function createMirrorElement(
+  target: Document,
+  namespace: keyof typeof NAMESPACE_URIS,
+  tagName: string,
+): Element {
+  if (namespace === 'html') return target.createElement(tagName);
+  return target.createElementNS(
+    NAMESPACE_URIS[namespace],
+    namespace === 'svg' ? canonicalSvgElementName(tagName) : tagName,
+  );
+}
+
+export function canonicalSvgElementName(tagName: string): string {
+  return SVG_CASE_SENSITIVE_ELEMENTS.get(tagName) ?? tagName;
+}
+
+const SVG_CASE_SENSITIVE_ELEMENTS = new Map<string, string>(
+  [
+    'altGlyph',
+    'altGlyphDef',
+    'altGlyphItem',
+    'animateColor',
+    'animateMotion',
+    'animateTransform',
+    'clipPath',
+    'feBlend',
+    'feColorMatrix',
+    'feComponentTransfer',
+    'feComposite',
+    'feConvolveMatrix',
+    'feDiffuseLighting',
+    'feDisplacementMap',
+    'feDistantLight',
+    'feDropShadow',
+    'feFlood',
+    'feFuncA',
+    'feFuncB',
+    'feFuncG',
+    'feFuncR',
+    'feGaussianBlur',
+    'feImage',
+    'feMerge',
+    'feMergeNode',
+    'feMorphology',
+    'feOffset',
+    'fePointLight',
+    'feSpecularLighting',
+    'feSpotLight',
+    'feTile',
+    'feTurbulence',
+    'foreignObject',
+    'glyphRef',
+    'linearGradient',
+    'radialGradient',
+    'textPath',
+  ].map((name) => [name.toLowerCase(), name] as const),
+);
 
 function canonicalSvgAttributeName(name: string): string {
   return SVG_CASE_SENSITIVE_ATTRIBUTES.get(name) ?? name;
@@ -2652,11 +2725,13 @@ function applyPatchBatch(
         hasPrivateHtmlMirrorAttribute(operation.attributes)
       ) return undefined;
       try {
-        const sentinel = target.ownerDocument?.createElementNS(
-          NAMESPACE_URIS[operation.namespace],
+        const sentinelDocument = target.ownerDocument;
+        if (!sentinelDocument) return undefined;
+        const sentinel = createMirrorElement(
+          sentinelDocument,
+          operation.namespace,
           operation.tagName,
         );
-        if (!sentinel) return undefined;
         setAttributes(sentinel, operation.attributes);
       } catch {
         return undefined;

@@ -18,6 +18,8 @@ import {
   ISOLATED_HTML_QUIRKS_SHELL,
   ISOLATED_HTML_SHELL,
   IsolatedHtmlReplicaEngine,
+  canonicalSvgElementName,
+  createMirrorElement,
   isTrustedIsolatedShellDocument,
   protectIsolatedOpaquePlaceholder,
   type IsolatedMirrorInfo,
@@ -36,7 +38,10 @@ import {
   createSemanticSourceBatch,
   type SemanticSourceRecord,
 } from '../lib/replica/semantic-source-protocol';
-import { createHtmlMirrorRepresentabilityCollector } from '../lib/replica/html-mirror-sanitizer';
+import {
+  createHtmlMirrorRepresentabilityCollector,
+  type HtmlMirrorNode,
+} from '../lib/replica/html-mirror-sanitizer';
 import { sourceSecretPlaceholderTagName } from '../lib/replica/source-secret-classifier';
 import type {
   ReplayPresentationHost,
@@ -2859,11 +2864,12 @@ describe('IsolatedHtmlReplicaEngine', () => {
       styleSettleDeadlineMs: 100,
       initializeIframe: async (iframe, shell) => {
         const { document } = parseHTML(shell);
-        const createElementNS = document.createElementNS.bind(document);
-        Object.defineProperty(document, 'createElementNS', {
+        // HTML mirror elements are created through createElement.
+        const createElement = document.createElement.bind(document);
+        Object.defineProperty(document, 'createElement', {
           configurable: true,
-          value: (namespace: string, tagName: string) => {
-            const element = createElementNS(namespace, tagName);
+          value: (tagName: string) => {
+            const element = createElement(tagName);
             if (tagName === 'link') {
               Object.defineProperty(element, 'sheet', {
                 configurable: true,
@@ -2937,11 +2943,12 @@ describe('IsolatedHtmlReplicaEngine', () => {
       },
       initializeIframe: async (iframe, shell) => {
         const { document } = parseHTML(shell);
-        const createElementNS = document.createElementNS.bind(document);
-        Object.defineProperty(document, 'createElementNS', {
+        // HTML mirror elements are created through createElement.
+        const createElement = document.createElement.bind(document);
+        Object.defineProperty(document, 'createElement', {
           configurable: true,
-          value: (namespace: string, tagName: string) => {
-            const element = createElementNS(namespace, tagName);
+          value: (tagName: string) => {
+            const element = createElement(tagName);
             if (tagName === 'link') {
               Object.defineProperty(element, 'disabled', {
                 configurable: true,
@@ -3252,6 +3259,216 @@ describe('IsolatedHtmlReplicaEngine', () => {
     await Promise.resolve();
 
     expect(host.iframe?.contentDocument?.body.textContent).toBe('new current run');
+  });
+
+  it('lets a superseded run skip without tearing down the current stream', async () => {
+    const stream = new FakeHtmlStream(makeCheckpoint('hello', 0));
+    const host = new FakePresentationHost();
+    const openStream = vi.fn(async () => stream);
+    const engine = new IsolatedHtmlReplicaEngine({
+      presentationHost: host,
+      openStream,
+      initializeIframe: async (iframe, shell) => {
+        const { document } = parseHTML(shell);
+        Object.defineProperty(iframe, 'contentDocument', { value: document });
+        return document;
+      },
+    });
+    await engine.run(request);
+    expect(host.iframe?.contentDocument?.body.textContent).toBe('hello');
+
+    const staleRequest: ReplicaCaptureRequest = {
+      ...identityParts,
+      pageEpoch: 2,
+      tabId: 1,
+      isCurrent: () => false,
+    };
+    await expect(engine.run(staleRequest)).resolves.toMatchObject({
+      status: 'skipped',
+      diagnostics: { code: 'stale_identity' },
+    });
+    expect(openStream).toHaveBeenCalledOnce();
+    expect(stream.dispose).not.toHaveBeenCalled();
+    expect(host.clearPresentation).not.toHaveBeenCalled();
+
+    // The current replica keeps applying live patches from its own stream.
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [{
+        kind: 'text',
+        nodeId: 4,
+        node: { kind: 'text', id: 4, text: 'world', translatable: true },
+      }],
+    )!);
+    expect(host.iframe?.contentDocument?.body.textContent).toBe('world');
+    expect(stream.acknowledged).toContain(1);
+  });
+
+  it('creates HTML names without prefix parsing and restores SVG element case', () => {
+    expect(canonicalSvgElementName('lineargradient')).toBe('linearGradient');
+    expect(canonicalSvgElementName('radialgradient')).toBe('radialGradient');
+    expect(canonicalSvgElementName('clippath')).toBe('clipPath');
+    expect(canonicalSvgElementName('foreignobject')).toBe('foreignObject');
+    expect(canonicalSvgElementName('fegaussianblur')).toBe('feGaussianBlur');
+    expect(canonicalSvgElementName('rect')).toBe('rect');
+
+    const { document } = parseHTML('<html><body></body></html>');
+    const createElementNS = vi.spyOn(document, 'createElementNS');
+    const legacy = createMirrorElement(document, 'html', 'o:p');
+    const disguised = createMirrorElement(document, 'html', 'x:iframe');
+    expect(createElementNS).not.toHaveBeenCalled();
+    expect(legacy.localName).toBe('o:p');
+    expect(legacy.namespaceURI).toBe('http://www.w3.org/1999/xhtml');
+    expect(disguised.localName).toBe('x:iframe');
+    expect(disguised.tagName.toLowerCase()).not.toBe('iframe');
+    expect(createMirrorElement(document, 'html', 'div').localName).toBe('div');
+
+    const gradient = createMirrorElement(document, 'svg', 'lineargradient');
+    expect(createElementNS).toHaveBeenCalledWith(
+      'http://www.w3.org/2000/svg',
+      'linearGradient',
+    );
+    expect(gradient.localName).toBe('linearGradient');
+    expect(gradient.namespaceURI).toBe('http://www.w3.org/2000/svg');
+    createMirrorElement(document, 'mathml', 'mi');
+    expect(createElementNS).toHaveBeenLastCalledWith(
+      'http://www.w3.org/1998/Math/MathML',
+      'mi',
+    );
+  });
+
+  it('never materializes a colon-prefixed name as the element it disguises', async () => {
+    const identity = createReplicaIdentity({ ...identityParts, sequence: 0 });
+    const content = (child: HtmlMirrorNode) => ({
+      root: {
+        kind: 'element' as const, id: 1, namespace: 'html' as const,
+        tagName: 'html', attributes: [], children: [
+          {
+            kind: 'element' as const, id: 2, namespace: 'html' as const,
+            tagName: 'head', attributes: [], children: [],
+          },
+          {
+            kind: 'element' as const, id: 3, namespace: 'html' as const,
+            tagName: 'body', attributes: [], children: [child],
+          },
+        ],
+      },
+      adoptedStyleSheets: [], captureMs: 1,
+      viewportWidth: 800, viewportHeight: 600,
+      documentWidth: 800, documentHeight: 1000,
+    });
+    // Outside the HTML namespace the prefix is rejected before any element.
+    expect(createHtmlMirrorCheckpoint(identity, content({
+      kind: 'element', id: 4, namespace: 'svg', tagName: 'svg',
+      attributes: [], children: [{
+        kind: 'element', id: 5, namespace: 'svg', tagName: 'svg:animate',
+        attributes: [['attributename', 'x']], children: [],
+      }],
+    }))).toBeUndefined();
+    expect(createHtmlMirrorCheckpoint(identity, content({
+      kind: 'element', id: 4, namespace: 'svg', tagName: 'svg',
+      attributes: [], children: [{
+        kind: 'element', id: 5, namespace: 'svg', tagName: 'foo:bar',
+        attributes: [], children: [],
+      }],
+    }))).toBeUndefined();
+
+    // In the HTML namespace it stays one inert unknown element.
+    const checkpoint = createHtmlMirrorCheckpoint(identity, content({
+      kind: 'element', id: 4, namespace: 'html', tagName: 'x:iframe',
+      attributes: [['id', 'disguised']], children: [],
+    }));
+    if (!checkpoint) throw new Error('Fixture checkpoint rejected.');
+    const stream = new FakeHtmlStream(checkpoint);
+    const host = new FakePresentationHost();
+    const engine = makeEngine(stream, host);
+    await engine.run(request);
+
+    const replica = host.iframe!.contentDocument!;
+    expect(replica.querySelector('iframe')).toBeNull();
+    const disguised = replica.getElementById('disguised')!;
+    expect(disguised.localName).toBe('x:iframe');
+    expect(disguised.namespaceURI).toBe('http://www.w3.org/1999/xhtml');
+  });
+
+  it('creates SVG elements with their canonical case-sensitive names', async () => {
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: {
+          kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+          attributes: [], children: [
+            {
+              kind: 'element', id: 2, namespace: 'html', tagName: 'head',
+              attributes: [], children: [],
+            },
+            {
+              kind: 'element', id: 3, namespace: 'html', tagName: 'body',
+              attributes: [], children: [{
+                kind: 'element', id: 4, namespace: 'svg', tagName: 'svg',
+                attributes: [], children: [{
+                  kind: 'element', id: 5, namespace: 'svg', tagName: 'defs',
+                  attributes: [], children: [{
+                    kind: 'element', id: 6, namespace: 'svg',
+                    tagName: 'lineargradient', attributes: [['id', 'fill']],
+                    children: [{
+                      kind: 'element', id: 7, namespace: 'svg',
+                      tagName: 'stop', attributes: [['offset', '0']],
+                      children: [],
+                    }],
+                  }, {
+                    kind: 'element', id: 8, namespace: 'svg',
+                    tagName: 'clippath', attributes: [['id', 'frame']],
+                    children: [{
+                      kind: 'element', id: 9, namespace: 'svg',
+                      tagName: 'rect', attributes: [], children: [],
+                    }],
+                  }],
+                }, {
+                  kind: 'element', id: 10, namespace: 'svg', tagName: 'rect',
+                  attributes: [], children: [],
+                }],
+              }],
+            },
+          ],
+        },
+        adoptedStyleSheets: [], captureMs: 1,
+        viewportWidth: 800, viewportHeight: 600,
+        documentWidth: 800, documentHeight: 1000,
+      },
+    );
+    if (!checkpoint) throw new Error('Fixture checkpoint rejected.');
+    const stream = new FakeHtmlStream(checkpoint);
+    const host = new FakePresentationHost();
+    const engine = makeEngine(stream, host);
+    await engine.run(request);
+
+    const replica = host.iframe!.contentDocument!;
+    const descendants = [...replica.querySelector('svg')!.querySelectorAll('*')];
+    expect(descendants.map((element) => element.localName)).toEqual([
+      'defs', 'linearGradient', 'stop', 'clipPath', 'rect', 'rect',
+    ]);
+    for (const element of descendants) {
+      expect(element.namespaceURI).toBe('http://www.w3.org/2000/svg');
+    }
+
+    // A later attribute patch still addresses the canonical-cased node by
+    // its lowercase wire name.
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [{
+        kind: 'attributes', nodeId: 6, namespace: 'svg',
+        tagName: 'lineargradient',
+        attributes: [['id', 'fill'], ['gradientunits', 'userSpaceOnUse']],
+      }],
+    )!);
+    expect(replica.getElementById('fill')?.getAttribute('gradientUnits'))
+      .toBe('userSpaceOnUse');
+    expect(stream.acknowledged).toContain(1);
   });
 });
 

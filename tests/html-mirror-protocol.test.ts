@@ -19,6 +19,7 @@ import {
   createHtmlMirrorRepresentabilityCollector,
   createHtmlMirrorStyleWorkBudget,
   htmlMirrorJsonBytes,
+  isRepresentableTagName,
   type HtmlMirrorDocumentGraph,
   type HtmlMirrorElementNode,
   readHtmlMirrorNode,
@@ -2673,6 +2674,78 @@ describe('isolated HTML sanitizer and protocol', () => {
       '.unsafe{/**/ *behavior:url("legacy.htc")}',
       'https://example.com/',
     )).toBeUndefined();
+  });
+
+  it('rejects colon-prefixed tag names outside the HTML namespace before any tag-keyed rule', () => {
+    expect(isRepresentableTagName('svg:animate', 'svg')).toBe(false);
+    expect(isRepresentableTagName('foo:bar', 'svg')).toBe(false);
+    expect(isRepresentableTagName('m:mi', 'mathml')).toBe(false);
+    expect(isRepresentableTagName('rect', 'svg')).toBe(true);
+    // A legacy HTML name stays the inert unknown element the parser made.
+    expect(isRepresentableTagName('o:p', 'html')).toBe(true);
+
+    const read = (
+      namespace: HtmlMirrorElementNode['namespace'],
+      tagName: string,
+    ) => readHtmlMirrorNode({
+      kind: 'element', id: 1, namespace, tagName, attributes: [], children: [],
+    }, new Set(), 0, undefined, false, false, false, false, false, 'passive');
+    // createElementNS would read the prefix and build the real local element
+    // (svg:animate -> SVGAnimateElement) that the tag-keyed block never sees.
+    expect(read('svg', 'svg:animate')).toBeUndefined();
+    expect(read('svg', 'foo:bar')).toBeUndefined();
+    expect(read('mathml', 'm:mi')).toBeUndefined();
+    expect(read('html', 'o:p')).toBeDefined();
+
+    const { document, window } = parseHTML(
+      '<!doctype html><html><body><svg id="art"><svg:animate id="disguised" attributeName="x"></svg:animate><foo:bar id="unknown"></foo:bar><rect id="shape"></rect></svg><o:p id="legacy"></o:p></body></html>',
+    );
+    Object.defineProperty(document, 'baseURI', {
+      configurable: true,
+      value: 'https://example.test/app/page',
+    });
+    const representability = createHtmlMirrorRepresentabilityCollector();
+    const graph = sanitizeSourceDocument(
+      document,
+      window as unknown as Window,
+      new WeakNodeIdRegistry(),
+      representability,
+      'passive',
+    );
+    expect(graph).toBeDefined();
+    expect(graphElementBySourceId(graph!, 'art')).toBeDefined();
+    expect(graphElementBySourceId(graph!, 'shape')).toBeDefined();
+    expect(graphElementBySourceId(graph!, 'disguised')).toBeUndefined();
+    expect(graphElementBySourceId(graph!, 'unknown')).toBeUndefined();
+    expect(graphElementBySourceId(graph!, 'legacy')?.tagName).toBe('o:p');
+    expect(JSON.stringify(graph)).not.toContain('svg:animate');
+    expect(JSON.stringify(graph)).not.toContain('foo:bar');
+    expect(representability.unsafeElementOmissionCount).toBe(2);
+  });
+
+  it('strips crossorigin from every element, not only video', () => {
+    const graph = sanitizeMarkup(
+      '<!doctype html><html><head><link id="sheet" rel="stylesheet" href="https://cdn.example.test/a.css" crossorigin="anonymous"></head><body><img id="picture" src="https://cdn.example.test/a.png" crossorigin="use-credentials"><svg><image id="art" href="https://cdn.example.test/b.png" crossorigin="anonymous"></image></svg></body></html>',
+      'passive',
+    );
+    for (const id of ['sheet', 'picture', 'art']) {
+      const names = graphElementBySourceId(graph, id)?.attributes
+        .map(([name]) => name);
+      expect(names).toBeDefined();
+      expect(names).not.toContain('crossorigin');
+    }
+    for (const fidelityPolicy of ['passive', 'conservative'] as const) {
+      expect(readHtmlMirrorNode({
+        kind: 'element', id: 1, namespace: 'html', tagName: 'img',
+        attributes: [['crossorigin', 'anonymous']], children: [],
+      }, new Set(), 0, undefined, false, false, false, false, false,
+      fidelityPolicy)).toBeUndefined();
+      expect(readHtmlMirrorNode({
+        kind: 'element', id: 2, namespace: 'html', tagName: 'link',
+        attributes: [['rel', 'stylesheet'], ['crossorigin', '']], children: [],
+      }, new Set(), 0, undefined, false, false, false, false, false,
+      fidelityPolicy)).toBeUndefined();
+    }
   });
 });
 
