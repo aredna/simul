@@ -388,6 +388,10 @@ const ACTIVE_OR_NAVIGATIONAL_ATTRIBUTES = new Set([
   'classid',
   'code',
   'codebase',
+  // crossorigin changes how the replica fetches a resource and can carry
+  // credentials or announce the extension origin; a scriptless mirror never
+  // needs it on any element.
+  'crossorigin',
   'data',
   'download',
   'dynsrc',
@@ -1028,6 +1032,7 @@ export function readHtmlMirrorNode(
     ]) ||
     !isNamespace(input.namespace) ||
     !isSafeTagName(input.tagName) ||
+    !isRepresentableTagName(input.tagName, input.namespace) ||
     isUnsafeElement(input.tagName, fidelityPolicy) ||
     !Array.isArray(input.attributes) ||
     input.attributes.length > MAX_HTML_MIRROR_ATTRIBUTES ||
@@ -1543,6 +1548,17 @@ function serializeNode(
     incrementRepresentability(
       context.representability,
       'unsupportedNodeOmissionCount',
+    );
+    return undefined;
+  }
+  if (!isRepresentableTagName(tagName, namespace)) {
+    incrementRepresentability(
+      context.representability,
+      'unsafeElementOmissionCount',
+    );
+    incrementRepresentability(
+      context.representability,
+      'executionRiskBlockCount',
     );
     return undefined;
   }
@@ -4108,6 +4124,22 @@ function isSafeTagName(value: unknown): value is string {
   return typeof value === 'string' &&
     value.length >= 1 && value.length <= 128 &&
     /^[a-z][a-z0-9._:-]*$/u.test(value);
+}
+
+/**
+ * Colon-prefixed names are only representable in the HTML namespace, where
+ * the receiver recreates them with createElement as the same inert
+ * HTMLUnknownElement the source parser produced. In the SVG and MathML
+ * namespaces createElementNS would read the prefix and materialize the real
+ * local element (`svg:animate` -> SVGAnimateElement), bypassing every
+ * tag-keyed rule, or throw on an invalid qualified name and abort the whole
+ * patch. This must run before any rule keyed on the tag name.
+ */
+export function isRepresentableTagName(
+  tagName: string,
+  namespace: HtmlMirrorNamespace,
+): boolean {
+  return namespace === 'html' || !tagName.includes(':');
 }
 
 function isCustomElementName(value: string | null): boolean {
