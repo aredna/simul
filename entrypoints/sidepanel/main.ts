@@ -3,59 +3,28 @@ import {
   createExtensionBuildIdentity,
   renderExtensionBuildIdentity,
 } from '../../lib/build-identity';
-import {
-  LatestWorkCoordinator,
-  isAvailabilityRequestCurrent,
-  mergeLiveUpdateBatches,
-  replicaViewTranslationAction,
-  type GenerationWork,
-} from '../../lib/companion-lifecycle';
+import { LatestWorkCoordinator } from '../../lib/companion-lifecycle';
 import {
   nextCompanionOverlay,
   type CompanionOverlay,
 } from '../../lib/companion-ui-state';
-import {
-  type CompanionStatusTone,
-} from '../../lib/companion-ui-localization';
-import { resolveSourceLanguage } from '../../lib/language-detection';
+import { type CompanionStatusTone } from '../../lib/companion-ui-localization';
 import {
   LANGUAGE_OPTION_ORDER,
   languageEndonym,
 } from '../../lib/language-options';
 import {
-  captureLivePageDelta,
-  invokeLivePageObserverBridge,
-  invokeLivePageObserverUnregisterBridge,
-  parseLivePageDelta,
-  readLivePageDirtyMessage,
-  readLivePageObserverInstallation,
-  readLivePageScrollMessage,
-  type LivePageDirtyMessage,
-  type LivePageDelta,
-  type LiveVisualNode,
-} from '../../lib/live-page-mirror';
-import {
-  PageAccessError,
-  assertSnapshotIsCurrent,
   isSupportedPage,
-  normalizedPageUrl,
   parseDetachedPageIdentityHint,
   readAuthorizedTabMessage,
   readPageError,
   readableError,
-  withPageTimeout,
-  type CapturedPageIdentity,
 } from '../../lib/page-identity';
 import {
   createDetachedCompanionUrl,
   createDetachedWindowData,
-  sameCompanionSourcePage,
 } from '../../lib/companion-surface';
-import {
-  capturePageSnapshot,
-  parsePageSnapshot,
-  type PageSnapshot,
-} from '../../lib/page-snapshot';
+import { type PageSnapshot } from '../../lib/page-snapshot';
 import {
   compiledImageAnalysisCapabilities,
   effectiveCompiledProviderOrder,
@@ -77,7 +46,6 @@ import {
   autoTranslationModeForPage,
   clampZoomPercent,
   isCompanionLaunchBehavior,
-  isAutoTranslationEnabled,
   isAutoTranslationMode,
   isMirrorDisplayMode,
   isPopoutTabMode,
@@ -93,28 +61,21 @@ import {
   type PopoutTabMode,
   type ReplicaViewMode,
 } from '../../lib/preferences';
-import { translateWithSession } from '../../lib/translation-pipeline';
-import {
-  CompanionState,
-  availabilityPairKey,
-  sameTranslationPair,
-  type CaptureRequest,
-  type PendingImageReplicaActivation,
-  type PendingLiveUpdate,
-} from './companion-state';
-import { Currency, type CurrencyToken } from './currency';
+import { CapturePipeline } from './capture-pipeline';
+import { CompanionState, type CaptureRequest } from './companion-state';
+import { Currency } from './currency';
 import { ImageAnalysisPanel } from './image-analysis-panel';
+import { LiveUpdateDriver } from './live-update-driver';
 import { MirrorView } from './mirror-view';
+import type { PageScripting } from './page-scripting';
 import { PermissionFlows } from './permission-flows';
 import { PreferenceClient } from './preference-client';
 import { QuickComposer } from './quick-composer';
 import { SourceFollower } from './source-follower';
 import { ToolbarStatus } from './toolbar-status';
+import { TranslationDriver, describePartialReplicaTranslation } from './translation-driver';
 import { UiLocalizer } from './ui-localizer';
-import {
-  type ReplicaCaptureRequest,
-  type ReplicaDiagnosticCode,
-} from '../../lib/replica/contracts';
+import { type ReplicaDiagnosticCode } from '../../lib/replica/contracts';
 import { ReplicaEngineController } from '../../lib/replica/engine-selection';
 import { openChromeHtmlMirrorStream } from '../../lib/replica/html-mirror-client';
 import {
@@ -125,9 +86,6 @@ import { IsolatedHtmlReplicaEngine } from '../../lib/replica/isolated-html-engin
 import {
   LiveReplicaFailureRecoveryGate,
   LegacyTransitionGate,
-  isCommittedShadowReplica,
-  shouldPreserveCommittedReplicaForCapture,
-  shouldReleaseReplicaAfterCaptureFailure,
 } from '../../lib/replica/legacy-transition-gate';
 import { LegacyReplicaEngine } from '../../lib/replica/legacy-engine';
 import {
@@ -138,20 +96,9 @@ import {
 } from '../../lib/replica/visible-replay-host';
 import { ReplicaSurfaceRouter } from '../../lib/replica/replica-surface-router';
 import {
-  captureRequestMatchesSourceDocument,
-  sameSourceReplicaLease,
-} from '../../lib/replica/source-identity';
-import { buildBoundedLanguageSample } from '../../lib/translation/language-sample';
-import {
-  replicaSourceCommitAction,
-  snapshotWithLiveDocumentLanguage,
-} from '../../lib/translation/replica-translation-lifecycle';
-import {
   ReplicaTranslationCoordinator,
   isCompleteReplicaTranslationResult,
-  splitBoundaryWhitespace,
   type ReplicaSourceCommit,
-  type ReplicaTranslationRunResult,
 } from '../../lib/translation/replica-translation-coordinator';
 import { TranslationMemory } from '../../lib/translation/translation-memory';
 import {
@@ -159,13 +106,7 @@ import {
   languageName,
   type SupportedLanguage,
   type TranslationPair,
-  type TranslationSession,
 } from '../../lib/translation-provider';
-import {
-  applyLivePageDelta,
-  resetVisualMirrorText,
-  translateVisualMirror,
-} from '../../lib/visual-renderer';
 
 const ZOOM_COMMIT_DEBOUNCE_MS = 150;
 const NAVIGATION_DEBOUNCE_MS = 350;
@@ -470,7 +411,7 @@ const permissionFlows = new PermissionFlows({
   requestAutomaticTranslation: async (pageUrl) => {
     if (!state.snapshot || state.isLiveSourceOnlyMode) return;
     state.translationDesired = true;
-    await maybeTranslateAutomatically(captureCoordinator.generation, pageUrl);
+    await translationDriver.maybeTranslateAutomatically(captureCoordinator.generation, pageUrl);
   },
 });
 const sourceFollower = new SourceFollower({
@@ -566,81 +507,125 @@ imageTranslationController = new ImageTranslationController({
   onDiagnostic: logImageTranslationDiagnostic,
 });
 
+const pageScripting: PageScripting = {
+  runFile: (tabId, file) => browser.scripting.executeScript({
+    target: { tabId, frameIds: [0] },
+    files: [file],
+  }),
+  runFunction: (tabId, func, args) => browser.scripting.executeScript({
+    target: { tabId, frameIds: [0] },
+    func,
+    args,
+  }),
+};
+const translationDriver = new TranslationDriver({
+  state,
+  currency,
+  captureCoordinator,
+  provider,
+  translationMemory,
+  mirrorView,
+  replicaSurface: replicaSurfaceRouter,
+  replicaTranslation: replicaTranslationCoordinator,
+  detectLanguage: (text) => browser.i18n.detectLanguage(text),
+  getTab: (tabId) => browser.tabs.get(tabId),
+  usesReplicaTranslationProjection: () => capturePipeline.usesReplicaTranslationProjection(),
+  releaseReplicaPresentationForLegacyWork: () =>
+    capturePipeline.releaseReplicaPresentationForLegacyWork(),
+  queueCapture,
+  abortAndRequeueLiveDelta: () => liveUpdateDriver.abortAndRequeue(),
+  processPendingLiveUpdate: () => liveUpdateDriver.processPending(),
+  commitViewPreferencePatch,
+  renderDetectedLanguage: (text) => {
+    detectedLanguageElement.textContent = text;
+    detectedLanguageElement.hidden = !text;
+  },
+  onLanguageResolved: () => {
+    quickComposer.syncPanel();
+    configureImageTranslation();
+  },
+  invalidateComposer: () => quickComposer.invalidate(),
+  configureImageTranslation: () => configureImageTranslation(),
+  setStatus,
+  showProgress,
+  hideProgress,
+  updateControls: () => updateControls(),
+  logTranslationCache: () => logTranslationCache('page', translationMemory),
+});
+const liveUpdateDriver = new LiveUpdateDriver({
+  state,
+  captureCoordinator,
+  liveSessionId,
+  scripting: pageScripting,
+  captureTimeoutMs: CAPTURE_TIMEOUT_MS,
+  mirrorView,
+  legacyTransitionGate,
+  provider,
+  translation: translationDriver,
+  queueCapture,
+  releaseReplicaPresentationForLegacyWork: () =>
+    capturePipeline.releaseReplicaPresentationForLegacyWork(),
+  invalidateComposer: () => quickComposer.invalidate(),
+  setStatus,
+  updateControls: () => updateControls(),
+});
+const capturePipeline = new CapturePipeline({
+  state,
+  currency,
+  captureCoordinator,
+  liveSessionId,
+  scripting: pageScripting,
+  captureTimeoutMs: CAPTURE_TIMEOUT_MS,
+  getTab: (tabId) => browser.tabs.get(tabId),
+  mirrorView,
+  replayHost: visibleReplayHost,
+  engineController: replicaEngineController,
+  replicaSurface: replicaSurfaceRouter,
+  replicaTranslation: replicaTranslationCoordinator,
+  imageTranslation: imageTranslationController,
+  legacyTransitionGate,
+  failureRecoveryGate: liveReplicaFailureRecoveryGate,
+  translation: translationDriver,
+  liveUpdates: liveUpdateDriver,
+  reconcileAutomaticAccess: (pageUrl) => permissionFlows.reconcileAutomaticAccess(pageUrl),
+  invalidateComposer: () => quickComposer.invalidate(),
+  renderCaptureNotes: showCaptureNotes,
+  setStatus,
+  updateControls: () => updateControls(),
+});
+
+// Hoisted wrappers: the engines and modules above are constructed before the
+// pipeline they call into, so they reach it through these declarations.
+function queueCapture(request: CaptureRequest): void {
+  capturePipeline.queueCapture(request);
+}
+
+function invalidateCompanion(message: string): void {
+  capturePipeline.invalidateCompanion(message);
+}
+
 function handleReplicaSourceCommit(commit: ReplicaSourceCommit): void {
-  const pending = state.pendingImageReplicaActivation;
-  const selectedSnapshot = replicaSurfaceRouter.snapshot();
-  if (
-    pending &&
-    !pending.activated &&
-    !pending.signal.aborted &&
-    pending.request.isCurrent() &&
-    captureRequestMatchesSourceDocument(pending.request, commit.document) &&
-    selectedSnapshot &&
-    captureRequestMatchesSourceDocument(
-      pending.request,
-      selectedSnapshot.document,
-    ) &&
-    sameSourceReplicaLease(selectedSnapshot, commit)
-  ) {
-    pending.activated = imageTranslationController?.activateReplica(
-      pending.request,
-      pending.sourceWindowId,
-      commit.replayLease,
-    ) ?? false;
-  } else if (
-    selectedSnapshot &&
-    sameSourceReplicaLease(selectedSnapshot, commit)
-  ) {
-    imageTranslationController?.notifyReplicaCommit(
-      commit.document,
-      commit.replayLease,
-    );
-  }
-  if (state.isLiveSourceOnlyMode) return;
-  replicaTranslationCoordinator.handleSourceCommit(commit);
-  const action = replicaSourceCommitAction(
-    commit,
-    state.preferences.sourceLanguage === 'auto',
-  );
-  if (!action.prepareForNewText && !action.refreshDetectedLanguage) return;
-  const refresh = currency.begin('language-refresh');
-  void reconcileReplicaTranslationAfterCommit(
-    commit,
-    refresh,
-    action.refreshDetectedLanguage,
-    action.prepareForNewText,
-  );
+  capturePipeline.handleReplicaSourceCommit(commit);
 }
 
 function handleReplicaLiveFailure(code: ReplicaDiagnosticCode): void {
-  const identity = state.followedOrCapturedIdentity;
-  const action = identity
-    ? liveReplicaFailureRecoveryGate.decide(
-        visibleReplayHost.hasCommittedReplica,
-      )
-    : 'fallback';
-  // Content-free by construction: bounded enums only, with no page identity,
-  // source text, URL, DOM identifier, pixels, or resource metadata.
-  console.info('[Simul replica live failure]', {
-    engine: 'isolated-html',
-    code,
-    state: action,
-  });
-  if (action === 'rebuild-last-good' && identity) {
-    setStatus(
-      'The live mirror disconnected. Rebuilding once while keeping the last good replica visible…',
-      'warning',
-    );
-    queueCapture({ identity, reason: 'desynchronized' });
-    return;
-  }
+  capturePipeline.handleReplicaLiveFailure(code);
+}
 
-  liveReplicaFailureRecoveryGate.reset();
-  imageTranslationController?.releaseReplica();
-  replicaTranslationCoordinator.selectPair(undefined);
-  legacyTransitionGate.release();
-  replicaEngineController.disableSelected(code);
-  if (identity) queueCapture({ identity, reason: 'desynchronized' });
+function translateRemembered(
+  pair: TranslationPair,
+  source: string,
+  load: (core: string) => Promise<string>,
+): Promise<string> {
+  return translationDriver.translateRemembered(pair, source, load);
+}
+
+async function languageSelectionChanged(): Promise<void> {
+  const sourceLanguage = sourceSelect.value === 'auto'
+    ? 'auto'
+    : readLanguage(sourceSelect.value);
+  const targetLanguage = readLanguage(targetSelect.value);
+  await translationDriver.changeLanguages(sourceLanguage, targetLanguage);
 }
 
 const companionBuildIdentity = createExtensionBuildIdentity(
@@ -742,7 +727,7 @@ replicaViewModeSelect.addEventListener('change', () => {
     isReplicaViewMode(replicaViewModeSelect.value)
       ? replicaViewModeSelect.value
       : 'translated';
-  void changeReplicaViewMode(replicaViewMode);
+  void translationDriver.changeReplicaViewMode(replicaViewMode);
 });
 
 launchBehaviorSelect.addEventListener('change', () => {
@@ -775,7 +760,7 @@ refreshButton.addEventListener('click', requestManualRefresh);
 compactRefreshButton.addEventListener('click', requestManualRefresh);
 translateButton.addEventListener('click', () => {
   if (!state.isLiveSourceOnlyMode) state.translationDesired = true;
-  void startTranslation(false, captureCoordinator.generation);
+  void translationDriver.startTranslation(false, captureCoordinator.generation);
 });
 cancelButton.addEventListener('click', () => {
   state.activeAbortController?.abort();
@@ -806,7 +791,7 @@ window.addEventListener('pagehide', () => {
   imageTranslationController.dispose();
   replicaTranslationCoordinator.dispose();
   replicaEngineController.dispose();
-  releaseLiveSession();
+  capturePipeline.releaseLiveSession();
 });
 
 browser.runtime.onMessage.addListener((message: unknown, sender, sendResponse) => {
@@ -815,51 +800,9 @@ browser.runtime.onMessage.addListener((message: unknown, sender, sendResponse) =
     void sourceFollower.acceptAuthorizedTab(authorizedTab);
     return;
   }
-  const dirty = readLivePageDirtyMessage(message);
-  if (
-    dirty &&
-    isMessageFromFollowedTab(
-      sender.tab,
-      dirty.sessionId,
-      dirty.generation,
-      dirty.url,
-    )
-  ) {
-    queueLiveUpdate(dirty);
-    // Acknowledge so the page-side bridge does not treat a consumed message
-    // as undelivered and resend it.
-    sendResponse(true);
-    return;
-  }
-  const scroll = readLivePageScrollMessage(message);
-  if (
-    scroll &&
-    isMessageFromFollowedTab(
-      sender.tab,
-      scroll.sessionId,
-      scroll.generation,
-      scroll.url,
-    )
-  ) {
-    state.lastSourceScroll = scroll;
-    state.acceptedScrollMessageCount += 1;
-    const logScroll = state.acceptedScrollMessageCount <= 3 ||
-      state.acceptedScrollMessageCount % 50 === 0;
-    if (logScroll) {
-      console.info(
-        `[Simul scroll] received; count=${state.acceptedScrollMessageCount}; target=${scroll.scrollTarget}`,
-      );
-    }
-    if (state.preferences.syncScroll) {
-      mirrorView.followSourceScroll(scroll);
-      if (logScroll) {
-        console.info(
-          `[Simul scroll] projected; count=${state.acceptedScrollMessageCount}; target=${scroll.scrollTarget}`,
-        );
-      }
-    }
-    sendResponse(true);
-  }
+  // Acknowledge consumed live messages so the page-side bridge does not
+  // treat them as undelivered and resend them.
+  if (liveUpdateDriver.handleRuntimeMessage(message, sender.tab)) sendResponse(true);
 });
 
 document.addEventListener('visibilitychange', () => {
@@ -909,7 +852,7 @@ browser.storage.onChanged.addListener((changes, areaName) => {
     if (identity) queueCapture({ identity, reason: 'preference' });
   }
   if (previous.replicaViewMode !== state.preferences.replicaViewMode) {
-    applyReplicaViewMode(previous.replicaViewMode);
+    translationDriver.applyReplicaViewMode(previous.replicaViewMode);
   }
   syncPreferenceControls();
   mirrorView.updateLayout();
@@ -919,9 +862,9 @@ browser.storage.onChanged.addListener((changes, areaName) => {
     (previous.sourceLanguage !== state.preferences.sourceLanguage ||
       previous.targetLanguage !== state.preferences.targetLanguage)
   ) {
-    const needsFreshCapture = releaseReplicaPresentationForLegacyWork();
+    const needsFreshCapture = capturePipeline.releaseReplicaPresentationForLegacyWork();
     state.activeAbortController?.abort();
-    abortAndRequeueLiveDelta();
+    liveUpdateDriver.abortAndRequeue();
     quickComposer.invalidate();
     // The window that changed the languages already recorded its own intent
     // in languageSelectionChanged. A change made in another companion window
@@ -936,7 +879,7 @@ browser.storage.onChanged.addListener((changes, areaName) => {
         return;
       }
     }
-    void applyLanguagePreferences(false);
+    void translationDriver.applyLanguagePreferences(false);
   }
 });
 
@@ -977,1047 +920,6 @@ function mergePendingViewPreferences(
   stored: CompanionPreferences,
 ): CompanionPreferences {
   return preferenceClient.mergePending(stored);
-}
-
-function queueCapture(request: CaptureRequest): void {
-  const previousIdentity = state.capturedOrFollowedIdentity;
-  const samePage = sameCompanionSourcePage(
-    previousIdentity,
-    request.identity,
-    normalizedPageUrl,
-  );
-  if (!samePage) liveReplicaFailureRecoveryGate.reset();
-  if (!samePage || request.reason === 'navigation') {
-    state.lastSourceScroll = undefined;
-    visibleReplayHost.resetSourceScroll();
-  }
-  const retainTranslationIntent =
-    samePage &&
-    (request.reason === 'manual' ||
-      request.reason === 'desynchronized' ||
-      request.reason === 'preference');
-  if (!retainTranslationIntent) {
-    replicaTranslationCoordinator.selectPair(undefined);
-    state.resetTranslationIntent();
-    quickComposer.invalidate();
-  }
-  if (previousIdentity && previousIdentity.tabId !== request.identity.tabId) {
-    releaseLiveSession(previousIdentity);
-  }
-  state.abortPageWork();
-  state.pendingImageReplicaActivation = undefined;
-  imageTranslationController.releaseReplica();
-  currency.supersede('availability');
-  state.resetLiveSequence();
-  state.followedPageIdentity = request.identity;
-  if (!state.snapshot) mirrorView.renderLoading();
-  setStatus(
-    request.reason === 'desynchronized'
-      ? 'A live update could not be reconciled. Rebuilding once while keeping the current mirror visible…'
-      : request.reason === 'navigation'
-        ? 'Building the live mirror for the newly loaded page…'
-        : 'Building the initial live read-only mirror…',
-  );
-  const enqueued = captureCoordinator.enqueue(request);
-  updateControls();
-  if (enqueued.startNow) void runCaptureWork(enqueued.work);
-}
-
-async function runCaptureWork(work: GenerationWork<CaptureRequest>): Promise<void> {
-  state.captureInFlight = true;
-  updateControls();
-  try {
-    await capturePage(work);
-  } finally {
-    const next = captureCoordinator.finish(work.generation);
-    if (next) {
-      void runCaptureWork(next);
-      return;
-    }
-    state.captureInFlight = false;
-    updateControls();
-    void processPendingLiveUpdate();
-  }
-}
-
-async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> {
-  const identity = work.value.identity;
-  let currentLegacyReady = false;
-  try {
-    const observerBundleResults = await withCaptureTimeout(
-      browser.scripting.executeScript({
-        target: { tabId: identity.tabId, frameIds: [0] },
-        files: ['/page-live-observer.js'],
-      }),
-    );
-    if (observerBundleResults.length === 0) {
-      throw new PageAccessError('The page could not load its live update bridge.');
-    }
-    const observerResults = await withCaptureTimeout(
-      browser.scripting.executeScript({
-        target: { tabId: identity.tabId, frameIds: [0] },
-        func: invokeLivePageObserverBridge,
-        args: [liveSessionId, work.generation],
-      }),
-    );
-    const observerInstallation = readLivePageObserverInstallation(
-      observerResults[0]?.result,
-    );
-    if (
-      !observerInstallation ||
-      observerInstallation.generation !== work.generation
-    ) {
-      throw new PageAccessError('The page could not start its live update bridge.');
-    }
-    state.liveObservationAvailable = observerInstallation.installed;
-    console.info(
-      `[Simul scroll] observer-${observerInstallation.installed ? 'installed' : 'limited'}; generation=${work.generation}`,
-    );
-    if (observerInstallation.installed) {
-      initializeLiveSequenceBaseline(
-        work.generation,
-        observerInstallation.sequence,
-      );
-    }
-    const sameCapturedPage = Boolean(
-      state.capturedPageIdentity &&
-        state.capturedPageIdentity.tabId === identity.tabId &&
-        state.capturedPageIdentity.windowId === identity.windowId &&
-        normalizedPageUrl(state.capturedPageIdentity.url) ===
-          normalizedPageUrl(identity.url),
-    );
-    const preserveLastGoodReplica =
-      shouldPreserveCommittedReplicaForCapture(
-        work.value.reason,
-        sameCapturedPage,
-        visibleReplayHost.hasCommittedReplica,
-      );
-    // New identities hand authority back to v1 before serialization. A
-    // same-page manual/recovery rebuild keeps last-good visible while the
-    // selected engine stages its replacement offscreen and swaps atomically.
-    if (!preserveLastGoodReplica) {
-      // A new page is being built, not a fallback: no "fallback" badge.
-      releaseReplicaPresentationForLegacyWork(true, false);
-    }
-    const results = await withCaptureTimeout(
-      browser.scripting.executeScript({
-        target: { tabId: identity.tabId, frameIds: [0] },
-        func: capturePageSnapshot,
-      }),
-    );
-    const snapshotInjection = results[0];
-    const nextSnapshot = parsePageSnapshot(snapshotInjection?.result);
-    const currentTab = await browser.tabs.get(identity.tabId);
-    assertSnapshotIsCurrent(currentTab, identity, state.requiresActiveSourceTab);
-    if (!captureCoordinator.isCurrent(work.generation)) return;
-
-    state.translationComplete = false;
-    mirrorView.renderSnapshot(nextSnapshot);
-    state.snapshot = nextSnapshot;
-    state.capturedPageIdentity = identity;
-    state.capturedPageDocumentId = typeof snapshotInjection?.documentId === 'string'
-      ? snapshotInjection.documentId
-      : undefined;
-    state.followedPageIdentity = identity;
-    currentLegacyReady = true;
-    showCaptureNotes(nextSnapshot);
-    if (snapshotInjection?.documentId) {
-      await runReplicaEngineCheckpoint(
-        work,
-        identity,
-        snapshotInjection.documentId,
-      );
-      if (!captureCoordinator.isCurrent(work.generation)) return;
-    } else if (!snapshotInjection?.documentId) {
-      imageTranslationController.releaseReplica();
-      replicaEngineController.releasePresentation(true);
-    }
-    await resolveSelectedSourceLanguage();
-
-    if (state.isLiveSourceOnlyMode) {
-      state.availability = 'unavailable';
-      state.availabilityCheckedForPair = undefined;
-      setStatus(
-        'Live source only is active. The sanitized mirror keeps updating without text or image translation.',
-        'success',
-      );
-      return;
-    }
-
-    if (currentTranslationFieldCount() === 0) {
-      state.availability = 'unavailable';
-      state.availabilityCheckedForPair = undefined;
-      const accessWasRevoked = await permissionFlows.reconcileAutomaticAccess(identity.url);
-      if (!captureCoordinator.isCurrent(work.generation)) return;
-      setStatus(
-        accessWasRevoked
-          ? 'Chrome removed a saved automatic-access grant. The mirror is waiting for page text.'
-          : state.liveObservationAvailable
-            ? 'The page mirror is live and will prepare translation when visible text arrives.'
-            : 'The page was captured, but live updates are unavailable because too many companion views are open. Close one and refresh.',
-        'warning',
-      );
-      return;
-    }
-    await checkAvailability(work.generation);
-    if (!captureCoordinator.isCurrent(work.generation)) return;
-    const accessWasRevoked = await permissionFlows.reconcileAutomaticAccess(identity.url);
-    if (!captureCoordinator.isCurrent(work.generation)) return;
-    if (accessWasRevoked) {
-      setStatus('Chrome removed a saved automatic-access grant, so that scope was turned off.', 'warning');
-      return;
-    }
-    await maybeTranslateAutomatically(work.generation, identity.url);
-    if (!state.liveObservationAvailable && captureCoordinator.isCurrent(work.generation)) {
-      setStatus(
-        'The page was captured, but live updates are unavailable because too many companion views are open. Close one and refresh.',
-        'warning',
-      );
-    }
-  } catch (error) {
-    if (!captureCoordinator.isCurrent(work.generation)) return;
-    if (shouldReleaseReplicaAfterCaptureFailure(
-      currentLegacyReady,
-      state.capturedPageIdentity === identity,
-      visibleReplayHost.hasCommittedReplica,
-    )) {
-      imageTranslationController.releaseReplica();
-      replicaEngineController.releasePresentation(true);
-    }
-    const message = readPageError(error);
-    if (!state.snapshot) mirrorView.renderError(message);
-    setStatus(message, 'error');
-  } finally {
-    updateControls();
-  }
-}
-
-async function runReplicaEngineCheckpoint(
-  work: GenerationWork<CaptureRequest>,
-  identity: CapturedPageIdentity,
-  documentId: string,
-): Promise<void> {
-  state.replicaShadowAbortController?.abort();
-  const abortController = new AbortController();
-  state.replicaShadowAbortController = abortController;
-  const request: ReplicaCaptureRequest = {
-    sessionId: liveSessionId,
-    pageEpoch: work.generation,
-    generation: work.generation,
-    tabId: identity.tabId,
-    frameId: 0,
-    documentId,
-    isCurrent: () =>
-      captureCoordinator.isCurrent(work.generation) &&
-      state.capturedPageIdentity === identity &&
-      state.followedPageIdentity?.tabId === identity.tabId &&
-      normalizedPageUrl(state.followedPageIdentity.url) === normalizedPageUrl(identity.url),
-  };
-  let shadowCommitted = false;
-  const imageActivation: PendingImageReplicaActivation = {
-    request,
-    sourceWindowId: identity.windowId,
-    signal: abortController.signal,
-    activated: false,
-  };
-  state.pendingImageReplicaActivation = imageActivation;
-  const shadowOwnershipStarted = replicaEngineController.selectedAvailable;
-  if (shadowOwnershipStarted) {
-    legacyTransitionGate.beginShadowOwnership();
-  }
-  try {
-    const result = await replicaEngineController.run(request, abortController.signal);
-    shadowCommitted = isCommittedShadowReplica(
-      result,
-      visibleReplayHost.hasCommittedReplica,
-    );
-    if (shadowCommitted) {
-      liveReplicaFailureRecoveryGate.markCommitted();
-      if (!imageActivation.activated) {
-        const selectedSnapshot = replicaSurfaceRouter.snapshot();
-        if (
-          state.pendingImageReplicaActivation === imageActivation &&
-          !imageActivation.signal.aborted &&
-          request.isCurrent() &&
-          selectedSnapshot &&
-          captureRequestMatchesSourceDocument(
-            request,
-            selectedSnapshot.document,
-          )
-        ) {
-          imageActivation.activated = imageTranslationController.activateReplica(
-            request,
-            identity.windowId,
-            selectedSnapshot.replayLease,
-          );
-        }
-      }
-      mirrorView.updateLayout();
-    }
-  } finally {
-    if (state.pendingImageReplicaActivation === imageActivation) {
-      state.pendingImageReplicaActivation = undefined;
-    }
-    if (shadowOwnershipStarted && !shadowCommitted) {
-      const needsFreshCapture = legacyTransitionGate.release();
-      if (needsFreshCapture && request.isCurrent()) {
-        queueCapture({ identity, reason: 'desynchronized' });
-      }
-    }
-    if (
-      state.replicaShadowAbortController === abortController &&
-      !visibleReplayHost.hasCommittedReplica
-    ) {
-      state.replicaShadowAbortController = undefined;
-    }
-  }
-}
-
-interface LiveLanguageContext {
-  documentLanguage?: string;
-  visibleText: string;
-  preserveOnUnknown: boolean;
-}
-
-async function resolveSelectedSourceLanguage(
-  liveContext?: LiveLanguageContext,
-): Promise<boolean> {
-  if (!state.snapshot) {
-    state.resolvedSourceLanguage = undefined;
-    quickComposer.syncPanel();
-    configureImageTranslation();
-    return true;
-  }
-  if (liveContext) {
-    // Keep the snapshot identity stable unless the language really changed;
-    // an in-flight availability check is discarded when the identity moves.
-    state.snapshot = snapshotWithLiveDocumentLanguage(
-      state.snapshot,
-      liveContext.documentLanguage,
-    );
-  }
-  const requestedSnapshot = state.snapshot;
-  const requestedPreference = state.preferences.sourceLanguage;
-  const previousLanguage = state.resolvedSourceLanguage;
-  const detectionSnapshot = liveContext
-    ? { ...requestedSnapshot, items: [] }
-    : requestedSnapshot;
-  const detected = await resolveSourceLanguage(
-    requestedPreference,
-    detectionSnapshot,
-    async (text) => browser.i18n.detectLanguage(text),
-    liveContext?.visibleText ?? mirrorLanguageSample(),
-  );
-  if (
-    state.snapshot !== requestedSnapshot ||
-    state.preferences.sourceLanguage !== requestedPreference
-  ) return false;
-  state.resolvedSourceLanguage =
-    detected.language ??
-    (liveContext?.preserveOnUnknown ? previousLanguage : undefined);
-  detectedLanguageElement.textContent = state.resolvedSourceLanguage
-    ? requestedPreference === 'auto'
-      ? detected.language
-        ? `Detected ${languageName(state.resolvedSourceLanguage)} from ${detected.source === 'html' ? 'the page language' : 'visible page text'}.`
-        : `Using the previously detected ${languageName(state.resolvedSourceLanguage)} source language.`
-      : ''
-    : 'The page language could not be detected. Choose a From language.';
-  detectedLanguageElement.hidden = !detectedLanguageElement.textContent;
-  quickComposer.syncPanel();
-  configureImageTranslation();
-  return true;
-}
-
-function mirrorLanguageSample(): string {
-  if (usesReplicaTranslationProjection()) {
-    return buildBoundedLanguageSample(
-      replicaRecordSources(replicaSurfaceRouter.snapshot()?.records ?? []),
-    );
-  }
-  return mirrorView.languageSample();
-}
-
-function currentTranslationFieldCount(): number {
-  return usesReplicaTranslationProjection()
-    ? replicaSurfaceRouter.snapshot()?.records.filter(
-      ({ source }) => source.trim().length > 0,
-    ).length ?? 0
-    : mirrorView.translationFieldCount();
-}
-
-async function reconcileReplicaTranslationAfterCommit(
-  commit: ReplicaSourceCommit,
-  refresh: CurrencyToken,
-  refreshDetectedLanguage: boolean,
-  prepareForNewText: boolean,
-): Promise<void> {
-  if (state.isLiveSourceOnlyMode) return;
-  const generation = commit.document.generation;
-  const identity = state.capturedPageIdentity;
-  if (
-    !identity ||
-    !state.snapshot ||
-    !captureCoordinator.isCurrent(generation)
-  ) return;
-  const previousPair = state.selectedPair();
-  if (refreshDetectedLanguage) {
-    const committed = await resolveSelectedSourceLanguage({
-      documentLanguage: commit.documentLanguage,
-      visibleText: buildBoundedLanguageSample(
-        replicaRecordSources(commit.records),
-      ),
-      preserveOnUnknown: true,
-    });
-    if (!committed) return;
-  }
-  if (
-    !currency.isCurrent(refresh) ||
-    !captureCoordinator.isCurrent(generation) ||
-    state.capturedPageIdentity !== identity ||
-    (state.preferences.sourceLanguage === 'auto') !== refreshDetectedLanguage
-  ) return;
-  const nextPair = state.selectedPair();
-  const pairChanged = !sameTranslationPair(previousPair, nextPair);
-  if (pairChanged) {
-    state.activeAbortController?.abort();
-    state.translationComplete = false;
-    state.availabilityCheckedForPair = undefined;
-    quickComposer.invalidate();
-    replicaTranslationCoordinator.selectPair(nextPair);
-  }
-  const expectedAvailabilityKey = nextPair
-    ? availabilityPairKey(nextPair, generation)
-    : undefined;
-  // A language refresh can replace the snapshot identity and discard an
-  // in-flight availability check, so any refreshing commit re-establishes
-  // the pair's availability when it is not yet recorded for this generation.
-  const needsPreparation =
-    (prepareForNewText || refreshDetectedLanguage) &&
-    currentTranslationFieldCount() > 0 &&
-    (!expectedAvailabilityKey ||
-      state.availabilityCheckedForPair !== expectedAvailabilityKey);
-  if (!pairChanged && !needsPreparation) return;
-  await checkAvailability(generation);
-  if (
-    currency.isCurrent(refresh) &&
-    captureCoordinator.isCurrent(generation) &&
-    state.capturedPageIdentity === identity &&
-    sameTranslationPair(nextPair, state.selectedPair())
-  ) {
-    await maybeTranslateAutomatically(generation, identity.url);
-  }
-}
-
-function* replicaRecordSources(
-  records: readonly { readonly source: string }[],
-): Generator<string> {
-  for (const record of records) yield record.source;
-}
-
-async function languageSelectionChanged(): Promise<void> {
-  const sourceLanguage = sourceSelect.value === 'auto'
-    ? 'auto'
-    : readLanguage(sourceSelect.value);
-  const targetLanguage = readLanguage(targetSelect.value);
-  const needsFreshCapture = releaseReplicaPresentationForLegacyWork();
-  state.activeAbortController?.abort();
-  abortAndRequeueLiveDelta();
-  quickComposer.invalidate();
-  if (!state.isLiveSourceOnlyMode) state.translationDesired = true;
-  state.translationComplete = false;
-  state.availabilityCheckedForPair = undefined;
-  mirrorView.resetTextIfPresent();
-  await commitViewPreferencePatch({ sourceLanguage, targetLanguage });
-  if (needsFreshCapture) {
-    const identity = state.followedOrCapturedIdentity;
-    if (identity) {
-      queueCapture({ identity, reason: 'preference' });
-      return;
-    }
-  }
-  await applyLanguagePreferences(true);
-}
-
-async function applyLanguagePreferences(fromUserAction: boolean): Promise<void> {
-  if (!state.snapshot) return;
-  await resolveSelectedSourceLanguage();
-  if (state.isLiveSourceOnlyMode) {
-    replicaTranslationCoordinator.selectPair(undefined);
-    state.availability = 'unavailable';
-    state.availabilityCheckedForPair = undefined;
-    setStatus(
-      'Live source only is active. Language choices are saved for translated mode.',
-      'success',
-    );
-    updateControls();
-    return;
-  }
-  replicaTranslationCoordinator.selectPair(state.selectedPair());
-  await checkAvailability(captureCoordinator.generation);
-  if (state.availability === 'available') {
-    await startTranslation(!fromUserAction, captureCoordinator.generation);
-  } else if (state.availability === 'downloadable' || state.availability === 'downloading') {
-    setStatus('This language pair needs its on-device pack. Choose Translate once to prepare it.', 'warning');
-  }
-}
-
-async function checkAvailability(generation: number): Promise<void> {
-  const request = currency.begin('availability');
-  const requestedSnapshot = state.snapshot;
-  const pair = state.selectedPair();
-  if (state.isLiveSourceOnlyMode) {
-    replicaTranslationCoordinator.selectPair(undefined);
-    state.availability = 'unavailable';
-    state.availabilityCheckedForPair = undefined;
-    updateControls();
-    return;
-  }
-  replicaTranslationCoordinator.selectPair(pair);
-  if (
-    !requestedSnapshot ||
-    !mirrorView.root ||
-    !pair ||
-    currentTranslationFieldCount() === 0
-  ) {
-    state.availability = 'unavailable';
-    state.availabilityCheckedForPair = undefined;
-    if (!pair && requestedSnapshot) {
-      setStatus('Choose a From language because automatic detection was inconclusive.', 'warning');
-    }
-    updateControls();
-    return;
-  }
-  const checkedPairKey = availabilityPairKey(pair, generation);
-  // The pair is recorded as checked only once a result is accepted. Recording
-  // it before the await let a superseded request leave the pair marked as
-  // checked while availability stayed 'unavailable', which disabled Translate
-  // until a manual rebuild.
-  state.availabilityCheckedForPair = undefined;
-  state.availability = 'unavailable';
-  updateControls();
-  if (pair.sourceLanguage === pair.targetLanguage) {
-    state.availabilityCheckedForPair = checkedPairKey;
-    state.availability = 'available';
-    mirrorView.resetTextIfPresent();
-    state.translationComplete = true;
-    setStatus('The source and target languages match, so the original text is unchanged.', 'success');
-    updateControls();
-    return;
-  }
-  try {
-    const next = await provider.availability(pair);
-    if (!isCurrentAvailabilityRequest(request, requestedSnapshot, pair, generation)) return;
-    state.availabilityCheckedForPair = checkedPairKey;
-    state.availability = next;
-    switch (next) {
-      case 'available':
-        setStatus(`Ready to translate ${languageName(pair.sourceLanguage)} to ${languageName(pair.targetLanguage)} on-device.`);
-        break;
-      case 'downloadable':
-      case 'downloading':
-        setStatus('Choose Translate once so Chrome can prepare this on-device language pair.', 'warning');
-        break;
-      default:
-        setStatus(`${languageName(pair.sourceLanguage)} to ${languageName(pair.targetLanguage)} is unavailable on this device.`, 'error');
-    }
-  } catch (error) {
-    if (!isCurrentAvailabilityRequest(request, requestedSnapshot, pair, generation)) return;
-    state.availabilityCheckedForPair = checkedPairKey;
-    state.availability = 'unavailable';
-    setStatus(readableError(error), 'error');
-  } finally {
-    if (isCurrentAvailabilityRequest(request, requestedSnapshot, pair, generation)) updateControls();
-  }
-}
-
-async function maybeTranslateAutomatically(
-  generation: number,
-  pageUrl: string,
-): Promise<void> {
-  const action = replicaViewTranslationAction(
-    state.preferences.replicaViewMode,
-    isAutoTranslationEnabled(state.preferences, pageUrl),
-    state.translationDesired,
-    state.availability,
-  );
-  if (action === 'translate') {
-    await startTranslation(true, generation);
-  } else if (action === 'needs-user-action') {
-    setStatus('Automatic translation is ready, but this pair needs one Translate click to prepare its local pack.', 'warning');
-  }
-}
-
-function startTranslation(automatic: boolean, generation: number): Promise<void> {
-  if (state.isLiveSourceOnlyMode) return Promise.resolve();
-  const needsFreshCapture = releaseReplicaPresentationForLegacyWork();
-  if (needsFreshCapture) {
-    state.translationDesired = true;
-    const identity = state.followedOrCapturedIdentity;
-    if (identity) queueCapture({ identity, reason: 'desynchronized' });
-    return Promise.resolve();
-  }
-  const requestedKey = state.currentTranslationTaskKey(generation);
-  if (state.activeTranslationTask) {
-    if (state.activeTranslationKey === requestedKey) return state.activeTranslationTask;
-    state.activeAbortController?.abort();
-    const previousTask = state.activeTranslationTask;
-    return previousTask.catch(() => undefined).then(async () => {
-      if (
-        !captureCoordinator.isCurrent(generation) ||
-        state.currentTranslationTaskKey(generation) !== requestedKey
-      ) return;
-      await startTranslation(automatic, generation);
-    });
-  }
-  const task = runTranslation(automatic, generation);
-  state.activeTranslationTask = task;
-  state.activeTranslationKey = requestedKey;
-  void task.then(() => {
-    if (state.activeTranslationTask === task) {
-      state.activeTranslationTask = undefined;
-      state.activeTranslationKey = undefined;
-    }
-    void processPendingLiveUpdate();
-  }, () => {
-    if (state.activeTranslationTask === task) {
-      state.activeTranslationTask = undefined;
-      state.activeTranslationKey = undefined;
-    }
-    void processPendingLiveUpdate();
-  });
-  return task;
-}
-
-async function runTranslation(automatic: boolean, generation: number): Promise<void> {
-  const pair = state.selectedPair();
-  const root = mirrorView.root;
-  const identity = state.capturedPageIdentity;
-  if (
-    !pair ||
-    !root ||
-    !identity ||
-    state.isLiveSourceOnlyMode ||
-    state.translationInFlight ||
-    state.availability === 'unavailable' ||
-    (automatic && state.availability !== 'available')
-  ) return;
-  if (pair.sourceLanguage === pair.targetLanguage) {
-    if (usesReplicaTranslationProjection()) {
-      replicaTranslationCoordinator.selectPair(pair);
-    }
-    resetVisualMirrorText(root);
-    state.translationComplete = true;
-    updateControls();
-    return;
-  }
-
-  const abortController = new AbortController();
-  state.activeAbortController = abortController;
-  state.translationInFlight = true;
-  configureImageTranslation();
-  state.translationDesired = true;
-  state.translationComplete = false;
-  showProgress('Preparing Chrome\'s on-device language model…', 0, 1);
-  updateControls();
-  let session: TranslationSession | undefined;
-  try {
-    const tab = await browser.tabs.get(identity.tabId);
-    assertSnapshotIsCurrent(tab, identity, state.requiresActiveSourceTab);
-    if (
-      !captureCoordinator.isCurrent(generation) ||
-      mirrorView.root !== root ||
-      !state.isCurrentTranslationPair(pair) ||
-      state.isLiveSourceOnlyMode
-    ) return;
-    state.availability = 'available';
-    state.availabilityCheckedForPair = availabilityPairKey(pair, generation);
-    const result = usesReplicaTranslationProjection()
-      ? await replicaTranslationCoordinator.translateCurrent(pair, {
-        signal: abortController.signal,
-        onDownloadProgress: (progress) =>
-          showProgress(`Downloading language pack… ${Math.round(progress * 100)}%`, progress, 1),
-        onProgress: (completed, total) =>
-          showProgress(`Translating ${completed} of ${total}…`, completed, Math.max(1, total)),
-      })
-      : await (async () => {
-        session = await provider.createSession(pair, {
-          signal: abortController.signal,
-          onDownloadProgress: (progress) =>
-            showProgress(`Downloading language pack… ${Math.round(progress * 100)}%`, progress, 1),
-        });
-        abortController.signal.throwIfAborted();
-        return translateVisualMirror(
-          root,
-          (source, signal) => translateCached(
-            pair,
-            session as TranslationSession,
-            source,
-            signal,
-          ),
-          {
-            signal: abortController.signal,
-            onProgress: (completed, total) =>
-              showProgress(`Translating ${completed} of ${total}…`, completed, Math.max(1, total)),
-          },
-        );
-      })();
-    if (
-      !captureCoordinator.isCurrent(generation) ||
-      mirrorView.root !== root ||
-      !state.isCurrentTranslationPair(pair) ||
-      state.isLiveSourceOnlyMode
-    ) return;
-    if (usesReplicaTranslationProjection()) {
-      const replicaResult = result as ReplicaTranslationRunResult;
-      state.translationComplete =
-        replicaResult.total > 0 &&
-        replicaTranslationCoordinator.isResultCurrent(replicaResult) &&
-        isCompleteReplicaTranslationResult(replicaResult);
-      setStatus(
-        state.translationComplete
-          ? automatic
-            ? 'Automatic translation is complete and live updates will translate as they arrive.'
-            : 'Translation is complete and live updates will translate as they arrive.'
-          : describePartialReplicaTranslation(
-            replicaResult,
-            'Translation remains partial',
-          ),
-        state.translationComplete ? 'success' : 'warning',
-      );
-    } else {
-      state.translationComplete = result.failed === 0;
-      setStatus(
-        result.failed
-          ? `${result.failed} text segment(s) could not be translated; the original remains for those parts.`
-          : automatic
-            ? 'Automatic translation is complete and live updates will translate as they arrive.'
-            : 'Translation is complete and live updates will translate as they arrive.',
-        result.failed ? 'warning' : 'success',
-      );
-    }
-  } catch (error) {
-    if (isAbortError(error) || abortController.signal.aborted) {
-      if (
-        !state.isLiveSourceOnlyMode &&
-        captureCoordinator.isCurrent(generation) &&
-        mirrorView.root === root &&
-        state.isCurrentTranslationPair(pair)
-      ) {
-        setStatus('Translation cancelled. Existing translated text was kept.', 'warning');
-      }
-    } else if (!state.isLiveSourceOnlyMode) {
-      setStatus(readableError(error), 'error');
-    }
-  } finally {
-    session?.destroy();
-    logTranslationCache('page', translationMemory);
-    if (state.activeAbortController === abortController) state.activeAbortController = undefined;
-    state.translationInFlight = false;
-    configureImageTranslation();
-    hideProgress();
-    updateControls();
-  }
-}
-
-function describePartialReplicaTranslation(
-  result: ReplicaTranslationRunResult,
-  prefix: string,
-): string {
-  const details: string[] = [];
-  if (result.failed > 0) details.push(`${result.failed} failed`);
-  if (result.stale > 0) details.push(`${result.stale} became stale`);
-  if (result.skipped > 0) details.push(`${result.skipped} were superseded`);
-  if (result.overflow > 0) {
-    details.push(`${result.overflow} exceeded the bounded local queue`);
-  }
-  if (result.completed < result.total && details.length === 0) {
-    details.push(`${result.total - result.completed} were not projected`);
-  }
-  return `${prefix}: ${details.join(', ') || 'no current text was projected'}. Original text remains for those segments; choose Translate page to retry.`;
-}
-
-async function translateCached(
-  pair: TranslationPair,
-  session: TranslationSession,
-  source: string,
-  signal?: AbortSignal,
-): Promise<string> {
-  return translateRemembered(
-    pair,
-    source,
-    (core) => translateWithSession(session, core, signal),
-  );
-}
-
-async function translateRemembered(
-  pair: TranslationPair,
-  source: string,
-  load: (core: string) => Promise<string>,
-): Promise<string> {
-  const boundary = splitBoundaryWhitespace(source);
-  if (!boundary.core) return source;
-  const translated = await translationMemory.getOrCreate(
-    {
-      provider: 'chrome-translator-v1',
-      pair,
-    },
-    boundary.core,
-    () => load(boundary.core),
-  );
-  return `${boundary.leading}${translated.trim()}${boundary.trailing}`;
-}
-
-function initializeLiveSequenceBaseline(generation: number, sequence: number): void {
-  if (!captureCoordinator.isCurrent(generation)) return;
-  state.latestLiveSequence = sequence;
-  state.highestReceivedLiveSequence = sequence;
-  state.liveSequenceBaselineReady = true;
-  if (!state.pendingLiveUpdate || state.pendingLiveUpdate.generation !== generation) return;
-  if (state.pendingLiveUpdate.sequence <= sequence) {
-    state.pendingLiveUpdate = undefined;
-    return;
-  }
-  if (state.pendingLiveUpdate.firstSequence > sequence + 1) {
-    state.pendingLiveUpdate = undefined;
-    const identity = state.followedOrCapturedIdentity;
-    if (identity) queueCapture({ identity, reason: 'desynchronized' });
-    return;
-  }
-  state.highestReceivedLiveSequence = state.pendingLiveUpdate.sequence;
-}
-
-function queueLiveUpdate(message: LivePageDirtyMessage): void {
-  if (message.sequence <= state.latestLiveSequence) return;
-  if (legacyTransitionGate.markDirty()) return;
-  if (
-    state.liveSequenceBaselineReady &&
-    state.highestReceivedLiveSequence > 0 &&
-    message.sequence > state.highestReceivedLiveSequence + 1
-  ) {
-    releaseReplicaPresentationForLegacyWork();
-    const identity = state.followedOrCapturedIdentity;
-    if (identity) {
-      setStatus('A live update was missed. Rebuilding once while keeping the current mirror visible…', 'warning');
-      queueCapture({ identity, reason: 'desynchronized' });
-    }
-    return;
-  }
-  if (message.sequence <= state.highestReceivedLiveSequence) return;
-  state.highestReceivedLiveSequence = message.sequence;
-  if (!state.pendingLiveUpdate || state.pendingLiveUpdate.generation !== message.generation) {
-    state.pendingLiveUpdate = {
-      generation: message.generation,
-      firstSequence: message.sequence,
-      sequence: message.sequence,
-      nodeIds: new Set(message.nodeIds),
-    };
-  } else {
-    state.pendingLiveUpdate.sequence = Math.max(state.pendingLiveUpdate.sequence, message.sequence);
-    for (const nodeId of message.nodeIds) state.pendingLiveUpdate.nodeIds.add(nodeId);
-  }
-  releaseReplicaPresentationForLegacyWork();
-  void processPendingLiveUpdate();
-}
-
-async function processPendingLiveUpdate(): Promise<void> {
-  if (
-    state.liveDeltaInFlight ||
-    state.captureInFlight ||
-    state.translationInFlight ||
-    !state.pendingLiveUpdate ||
-    !state.capturedPageIdentity ||
-    !mirrorView.root ||
-    legacyTransitionGate.shadowOwnsPage
-  ) return;
-  const update = state.pendingLiveUpdate;
-  state.pendingLiveUpdate = undefined;
-  const requestedNodeIds = [...update.nodeIds];
-  const nodeIds = requestedNodeIds.slice(0, 48);
-  if (requestedNodeIds.length > nodeIds.length) {
-    state.pendingLiveUpdate = {
-      generation: update.generation,
-      firstSequence: update.firstSequence,
-      sequence: update.sequence,
-      nodeIds: new Set(requestedNodeIds.slice(48)),
-    };
-  }
-  if (!captureCoordinator.isCurrent(update.generation)) return;
-  const identity = state.capturedPageIdentity;
-  const beforeRoot = mirrorView.root;
-  const abortController = new AbortController();
-  const activeUpdate: PendingLiveUpdate = {
-    generation: update.generation,
-    firstSequence: update.firstSequence,
-    sequence: update.sequence,
-    nodeIds: new Set(nodeIds),
-  };
-  state.activeLiveUpdate = activeUpdate;
-  state.liveDeltaAbortController = abortController;
-  state.liveDeltaInFlight = true;
-  updateControls();
-  let session: TranslationSession | undefined;
-  try {
-    const results = await withCaptureTimeout(
-      browser.scripting.executeScript({
-        target: { tabId: identity.tabId, frameIds: [0] },
-        func: captureLivePageDelta,
-        args: [liveSessionId, update.generation, update.sequence, nodeIds],
-      }),
-    );
-    const delta = parseLivePageDelta(results[0]?.result);
-    if (
-      !captureCoordinator.isCurrent(delta.generation) ||
-      delta.sequence < state.latestLiveSequence ||
-      normalizedPageUrl(delta.url) !== normalizedPageUrl(identity.url)
-    ) return;
-    if (delta.desynchronized) {
-      queueCapture({ identity: state.capturedPageIdentity, reason: 'desynchronized' });
-      return;
-    }
-    const pairBeforeRefresh = state.selectedPair();
-    let pairChanged = false;
-    const visibleLanguageText = liveDeltaLanguageSample(delta);
-    if (state.preferences.sourceLanguage === 'auto') {
-      const resolutionCommitted = await resolveSelectedSourceLanguage({
-        documentLanguage: delta.documentLanguage,
-        visibleText: visibleLanguageText,
-        preserveOnUnknown: true,
-      });
-      if (
-        !resolutionCommitted ||
-        abortController.signal.aborted ||
-        mirrorView.root !== beforeRoot ||
-        !captureCoordinator.isCurrent(delta.generation)
-      ) return;
-      const refreshedPair = state.selectedPair();
-      pairChanged = !sameTranslationPair(pairBeforeRefresh, refreshedPair);
-      if (pairChanged) {
-        state.availabilityCheckedForPair = undefined;
-        state.translationComplete = false;
-        quickComposer.invalidate();
-        resetVisualMirrorText(beforeRoot);
-      }
-      await checkAvailability(delta.generation);
-      if (
-        abortController.signal.aborted ||
-        mirrorView.root !== beforeRoot ||
-        !captureCoordinator.isCurrent(delta.generation) ||
-        (refreshedPair && !state.isCurrentTranslationPair(refreshedPair))
-      ) return;
-    }
-
-    const pair = state.selectedPair();
-    const wantsTranslation =
-      !state.isLiveSourceOnlyMode &&
-      (state.translationDesired || isAutoTranslationEnabled(state.preferences, identity.url));
-    const shouldTranslate = Boolean(
-      pair &&
-      pair.sourceLanguage !== pair.targetLanguage &&
-      wantsTranslation &&
-      !pairChanged &&
-      state.availability === 'available',
-    );
-    if (shouldTranslate && pair) {
-      session = await provider.createSession(pair, { signal: abortController.signal });
-    }
-    const applied = await applyLivePageDelta(beforeRoot, delta, {
-      textLayoutMode: state.preferences.textLayoutMode,
-      signal: abortController.signal,
-      ...(shouldTranslate && pair && session
-        ? {
-            translate: (source: string, signal?: AbortSignal) =>
-              translateCached(pair, session as TranslationSession, source, signal),
-          }
-        : {}),
-    });
-    if (
-      abortController.signal.aborted ||
-      mirrorView.root !== beforeRoot ||
-      !captureCoordinator.isCurrent(delta.generation) ||
-      (pair && !state.isCurrentTranslationPair(pair))
-    ) return;
-    mirrorView.replaceRoot(applied.root, delta.documentWidth, delta.documentHeight);
-    state.latestLiveSequence = delta.sequence;
-    if (state.activeLiveUpdate === activeUpdate) state.activeLiveUpdate = undefined;
-    mirrorView.updateLayout();
-    if (applied.missingTarget) {
-      queueCapture({ identity, reason: 'desynchronized' });
-      return;
-    }
-    if (applied.translation.failed > 0) {
-      state.translationComplete = false;
-      setStatus(
-        `${applied.translation.failed} changed text segment(s) could not be translated; their original text remains.`,
-        'warning',
-      );
-      return;
-    }
-
-    let translationStatusWasHandled = shouldTranslate;
-    if (shouldTranslate && applied.applied > 0) {
-      setStatus('Live page changes were mirrored and translated.', 'success');
-    }
-    if (currentTranslationFieldCount() > 0) {
-      const currentPair = state.selectedPair();
-      const pairKey = currentPair
-        ? availabilityPairKey(currentPair, update.generation)
-        : undefined;
-      if (!currentPair || state.availabilityCheckedForPair !== pairKey) {
-        await checkAvailability(update.generation);
-      }
-      if ((!shouldTranslate || pairChanged) && wantsTranslation) {
-        translationStatusWasHandled = true;
-        await maybeTranslateAutomatically(update.generation, identity.url);
-      }
-    }
-    if (applied.applied > 0 && !translationStatusWasHandled) {
-      setStatus(
-        'Live page changes were mirrored.',
-        'success',
-      );
-    }
-  } catch (error) {
-    if (!abortController.signal.aborted && state.capturedPageIdentity) {
-      setStatus(`A live update could not be applied: ${readableError(error)}`, 'warning');
-      queueCapture({ identity: state.capturedPageIdentity, reason: 'desynchronized' });
-    }
-  } finally {
-    session?.destroy();
-    if (state.liveDeltaAbortController === abortController) {
-      state.liveDeltaAbortController = undefined;
-    }
-    if (state.activeLiveUpdate === activeUpdate) state.activeLiveUpdate = undefined;
-    state.liveDeltaInFlight = false;
-    updateControls();
-    void processPendingLiveUpdate();
-  }
-}
-
-function liveDeltaLanguageSample(delta: LivePageDelta): string {
-  const parts: string[] = [];
-  let characters = 0;
-  const append = (value: string | undefined): void => {
-    if (!value || characters >= 20_000) return;
-    const remaining = 20_000 - characters;
-    const text = value.replace(/\s+/gu, ' ').trim().slice(0, remaining);
-    if (!text) return;
-    parts.push(text);
-    characters += text.length + 1;
-  };
-  const visit = (node: LiveVisualNode): void => {
-    if (characters >= 20_000) return;
-    if (node.kind === 'text') {
-      append(node.text);
-      return;
-    }
-    if (node.kind === 'placeholder') return;
-    append(node.attributes?.alt);
-    for (const child of node.children) visit(child);
-  };
-  for (const replacement of delta.replacements) {
-    if (replacement.node) visit(replacement.node);
-  }
-  return parts.join(' ');
 }
 
 function setCompanionOverlay(next?: CompanionOverlay): void {
@@ -2143,113 +1045,6 @@ async function changeReplicaFidelityPolicy(
     state.replicaFidelityCommitInFlight = false;
     updateControls();
   }
-}
-
-async function changeReplicaViewMode(
-  replicaViewMode: ReplicaViewMode,
-): Promise<void> {
-  if (replicaViewMode === state.preferences.replicaViewMode) return;
-  const previousMode = state.preferences.replicaViewMode;
-  // commitViewPreferencePatch applies the validated preference optimistically
-  // before its first await, so projection gates close immediately.
-  const save = commitViewPreferencePatch({ replicaViewMode });
-  applyReplicaViewMode(previousMode, false);
-  await save;
-  if (state.preferences.replicaViewMode !== replicaViewMode) {
-    applyReplicaViewMode(replicaViewMode);
-    return;
-  }
-  if (replicaViewMode === 'translated' && !state.isLiveSourceOnlyMode) {
-    await resumeTranslatedReplicaMode();
-  }
-}
-
-function applyReplicaViewMode(
-  previousMode: ReplicaViewMode,
-  resumeTranslated = true,
-): void {
-  if (previousMode === state.preferences.replicaViewMode) return;
-  currency.supersede('availability');
-  state.activeAbortController?.abort();
-  abortAndRequeueLiveDelta();
-  replicaTranslationCoordinator.selectPair(undefined);
-  mirrorView.resetTextIfPresent();
-  state.translationComplete = false;
-  state.availabilityCheckedForPair = undefined;
-  configureImageTranslation();
-  if (state.isLiveSourceOnlyMode) {
-    state.availability = 'unavailable';
-    setStatus(
-      'Live source only is active. The current mirror remains live and all translation overlays were removed.',
-      'success',
-    );
-  } else {
-    setStatus('Translated mode restored. Preparing the saved language settings…');
-    if (resumeTranslated) void resumeTranslatedReplicaMode();
-  }
-  updateControls();
-}
-
-async function resumeTranslatedReplicaMode(): Promise<void> {
-  const interrupted = state.activeTranslationTask;
-  if (interrupted) await interrupted.catch(() => undefined);
-  const identity = state.capturedPageIdentity;
-  const generation = captureCoordinator.generation;
-  if (state.isLiveSourceOnlyMode || !state.snapshot || !identity) return;
-  const resolved = await resolveSelectedSourceLanguage(
-    currentReplicaLanguageContext(),
-  );
-  const requestedSnapshot = state.snapshot;
-  if (
-    !resolved ||
-    state.isLiveSourceOnlyMode ||
-    !requestedSnapshot ||
-    state.snapshot !== requestedSnapshot ||
-    state.capturedPageIdentity !== identity ||
-    !captureCoordinator.isCurrent(generation)
-  ) return;
-  const pair = state.selectedPair();
-  replicaTranslationCoordinator.selectPair(pair);
-  await checkAvailability(generation);
-  if (
-    state.isLiveSourceOnlyMode ||
-    !pair ||
-    !state.isCurrentTranslationPair(pair) ||
-    state.snapshot !== requestedSnapshot ||
-    state.capturedPageIdentity !== identity ||
-    !captureCoordinator.isCurrent(generation)
-  ) return;
-  await maybeTranslateAutomatically(generation, identity.url);
-}
-
-function currentReplicaLanguageContext(): LiveLanguageContext | undefined {
-  const current = replicaSurfaceRouter.snapshot();
-  if (!current) return undefined;
-  return {
-    ...(current.documentLanguage
-      ? { documentLanguage: current.documentLanguage }
-      : {}),
-    visibleText: buildBoundedLanguageSample(
-      replicaRecordSources(current.records),
-    ),
-    preserveOnUnknown: true,
-  };
-}
-
-function abortAndRequeueLiveDelta(): void {
-  const interrupted = state.activeLiveUpdate;
-  if (
-    interrupted &&
-    interrupted.sequence > state.latestLiveSequence &&
-    captureCoordinator.isCurrent(interrupted.generation)
-  ) {
-    const merged = mergeLiveUpdateBatches(state.pendingLiveUpdate, interrupted);
-    state.pendingLiveUpdate = {
-      ...merged,
-      nodeIds: new Set(merged.nodeIds),
-    };
-  }
-  state.liveDeltaAbortController?.abort();
 }
 
 function syncPreferenceControls(): void {
@@ -2480,98 +1275,6 @@ async function checkPanelPlacement(): Promise<void> {
   }
 }
 
-function withCaptureTimeout<T>(operation: Promise<T>): Promise<T> {
-  return withPageTimeout(operation, CAPTURE_TIMEOUT_MS);
-}
-
-function invalidateCompanion(message: string): void {
-  releaseLiveSession(state.capturedOrFollowedIdentity);
-  captureCoordinator.invalidate();
-  currency.supersedePage();
-  state.abortPageWork();
-  imageTranslationController.releaseReplica();
-  replicaEngineController.releasePresentation(false);
-  quickComposer.invalidate();
-  replicaTranslationCoordinator.selectPair(undefined);
-  state.clearPage();
-  legacyTransitionGate.reset();
-  liveReplicaFailureRecoveryGate.reset();
-  visibleReplayHost.resetSourceScroll();
-  mirrorView.disconnect();
-  mirrorView.renderError(message);
-  setStatus(message, 'warning');
-  updateControls();
-}
-
-function usesReplicaTranslationProjection(): boolean {
-  return (
-    legacyTransitionGate.shadowOwnsPage &&
-    visibleReplayHost.hasCommittedReplica
-  );
-}
-
-function releaseReplicaPresentationForLegacyWork(
-  force = false,
-  showFallbackLabel = true,
-): boolean {
-  if (!force && usesReplicaTranslationProjection()) return false;
-  if (!legacyTransitionGate.shadowOwnsPage) return false;
-  const needsFreshCapture = legacyTransitionGate.release();
-  state.pendingLiveUpdate = undefined;
-  state.replicaShadowAbortController?.abort();
-  imageTranslationController.releaseReplica();
-  replicaEngineController.releasePresentation(showFallbackLabel);
-  return needsFreshCapture;
-}
-
-function releaseLiveSession(
-  identity: CapturedPageIdentity | undefined = state.capturedOrFollowedIdentity,
-): void {
-  if (!identity) return;
-  void browser.scripting.executeScript({
-    target: { tabId: identity.tabId, frameIds: [0] },
-    func: invokeLivePageObserverUnregisterBridge,
-    args: [liveSessionId],
-  }).catch(() => undefined);
-}
-
-function isMessageFromFollowedTab(
-  tab: Browser.tabs.Tab | undefined,
-  sessionId: string,
-  generation: number,
-  url: string,
-): boolean {
-  const followed = state.followedOrCapturedIdentity;
-  return Boolean(
-    sessionId === liveSessionId &&
-      followed &&
-      tab?.id === followed.tabId &&
-      tab.windowId === followed.windowId &&
-      captureCoordinator.isCurrent(generation) &&
-      normalizedPageUrl(url) === normalizedPageUrl(followed.url),
-  );
-}
-
-function isCurrentAvailabilityRequest(
-  request: CurrencyToken,
-  requestedSnapshot: PageSnapshot,
-  pair: TranslationPair,
-  generation: number,
-): boolean {
-  const currentPair = state.selectedPair();
-  return isAvailabilityRequestCurrent({
-    replicaViewMode: state.preferences.replicaViewMode,
-    requestMatches: currency.isCurrent(request),
-    generationMatches: captureCoordinator.isCurrent(generation),
-    snapshotMatches: state.snapshot === requestedSnapshot,
-    pairMatches: Boolean(
-      currentPair &&
-        currentPair.sourceLanguage === pair.sourceLanguage &&
-        currentPair.targetLanguage === pair.targetLanguage,
-    ),
-  });
-}
-
 function readLanguage(value: string): SupportedLanguage {
   return (SUPPORTED_LANGUAGES as readonly string[]).includes(value)
     ? (value as SupportedLanguage)
@@ -2702,10 +1405,6 @@ function logTranslationCache(
   console.info(
     `[Simul translation cache] scope=${label}; entries=${stats.entries}; characters=${stats.characters}; hits=${stats.hits}; misses=${stats.misses}; joins=${stats.inFlightJoins}; provider-loads=${stats.providerLoads}`,
   );
-}
-
-function isAbortError(error: unknown): boolean {
-  return error instanceof DOMException && error.name === 'AbortError';
 }
 
 function requireElement<T extends Element>(selector: string): T {

@@ -23,6 +23,10 @@ const composerScript = readFileSync(
   new URL('../entrypoints/sidepanel/quick-composer.ts', import.meta.url),
   'utf8',
 );
+const translationScript = readFileSync(
+  new URL('../entrypoints/sidepanel/translation-driver.ts', import.meta.url),
+  'utf8',
+);
 const followerScript = readFileSync(
   new URL('../entrypoints/sidepanel/source-follower.ts', import.meta.url),
   'utf8',
@@ -206,11 +210,11 @@ describe('sidepanel UI structure', () => {
 
 describe('availability check currency', () => {
   it('records the checked pair only after a result is accepted', () => {
-    const start = script.indexOf('async function checkAvailability(');
-    const end = script.indexOf('async function maybeTranslateAutomatically(');
+    const start = translationScript.indexOf('  async checkAvailability(');
+    const end = translationScript.indexOf('  #isCurrentAvailabilityRequest(');
     expect(start).toBeGreaterThan(0);
     expect(end).toBeGreaterThan(start);
-    const body = script.slice(start, end);
+    const body = translationScript.slice(start, end);
     const awaitIndex = body.indexOf('await provider.availability(pair)');
     const recordIndex = body.indexOf('availabilityCheckedForPair = checkedPairKey;');
     expect(awaitIndex).toBeGreaterThan(0);
@@ -232,14 +236,18 @@ describe('availability check currency', () => {
   });
 
   it('re-establishes availability after any language-refreshing commit', () => {
-    const start = script.indexOf('async function reconcileReplicaTranslationAfterCommit(');
-    const end = script.indexOf('function* replicaRecordSources(');
-    const body = script.slice(start, end);
+    const start = translationScript.indexOf('  async reconcileReplicaTranslationAfterCommit(');
+    const end = translationScript.indexOf('  async changeLanguages(');
+    expect(start).toBeGreaterThan(0);
+    expect(end).toBeGreaterThan(start);
+    const body = translationScript.slice(start, end);
     expect(body).toContain('(prepareForNewText || refreshDetectedLanguage) &&');
 
-    const resolveStart = script.indexOf('async function resolveSelectedSourceLanguage(');
-    const resolveEnd = script.indexOf('function mirrorLanguageSample(');
-    const resolveBody = script.slice(resolveStart, resolveEnd);
+    const resolveStart = translationScript.indexOf('  async resolveSelectedSourceLanguage(');
+    const resolveEnd = translationScript.indexOf('  #mirrorLanguageSample(');
+    expect(resolveStart).toBeGreaterThan(0);
+    expect(resolveEnd).toBeGreaterThan(resolveStart);
+    const resolveBody = translationScript.slice(resolveStart, resolveEnd);
     expect(resolveBody).toContain('snapshotWithLiveDocumentLanguage(');
     expect(resolveBody).not.toContain('...snapshotWithoutLanguage');
   });
