@@ -141,7 +141,10 @@ cloud translation/OCR integration.
 `<all_urls>` is an **optional** host permission. Simul requests it only from an
 explicit gesture when all-sites automation or reliable image capture needs it.
 A saved feature remains paused if its grant is absent; Simul does not prompt for
-broad access at startup.
+broad access at startup. Simul releases only the site access it asked for and
+no longer needs; access you grant yourself in `chrome://extensions` is left in
+place (and covers your saved per-site choices) until you remove it there or
+use **Reset all**, which clears every grant.
 
 ## Fidelity
 
