@@ -1005,3 +1005,47 @@ Checked and left alone, with reasons:
 - **D10** stays as your July decision (HTML `lang` authoritative).
 
 `deferred-work.md` lost the six entries this batch closes.
+
+### D35. Side-panel items stacked on the split (2026-09-06)
+
+The third track from your 2026-09-05 answer. Branch
+`fix/image-permission-rollback` off `refactor/side-panel-split` (PR #16,
+base #10), because these files exist only in the split's module layout.
+Numbering note: D34 was written on `fix/deferred-lib-batch-2` (#14); both
+entries append to this log, so the second of the two merges will need the two
+sections kept one after the other.
+
+- **Transactional image-permission rollback (deferred item, done).** Turning
+  image translation off releases the broad grant, re-requests the exact site
+  grants it had covered, then saves. Two holes are closed. Before anything is
+  released, the flow now asks for a fresh gesture when exact grants would be
+  needed but no user activation is live; previously the release went ahead and
+  the exact re-request then failed silently. After a failed save, the rollback
+  re-request is verified with `permissions.contains`; when Chrome keeps the
+  grant released, the panel purges image-derived caches, reports the
+  revocation and explains that the setting could not be saved and pixel OCR is
+  paused until access is granted again, instead of the generic "setting left
+  unchanged" message that was no longer true.
+- **Redirect during load (deferred item, removed without a change).**
+  `NavigationRefreshGate` scopes a pending load by tab and window only, so a
+  URL-only update while a load is pending retargets the load instead of being
+  consumed as a same-document change, and the completion still schedules its
+  capture; `tests/navigation-refresh-gate.test.ts` covers it ("retargets a
+  pending document load across redirects"). The described suppression does not
+  exist in the current code.
+- **L4/L5 string catalogue (scoped, not started).** Inventory on the split:
+  about 240 user-facing literals across the side-panel modules
+  (`main.ts` 67, `image-analysis-panel.ts` 37, `read-scope-controller.ts` 31,
+  `permission-flows.ts` 29, `translation-driver.ts` 23, `capture-pipeline.ts`
+  18, `quick-composer.ts` 13, the rest under ten each) plus 102 labels,
+  titles and aria strings in `index.html`. Doing L4 properly means one
+  catalogue module keyed by purpose, every `setStatus` and DOM label reading
+  from it, `UiLocalizer` extended from the atomic control labels to titles,
+  aria labels and status templates, and L5's flash addressed by swapping a
+  whole localized catalogue at once. That is a dedicated session of its own
+  with a browser check at the end, and it should start after #10 merges so it
+  is not stacked on twenty unreviewed commits. Left for you to schedule.
+
+`deferred-work.md` is down to 40 entries on this branch (36 once #14's
+removals merge).
+
