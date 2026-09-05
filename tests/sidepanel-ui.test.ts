@@ -453,10 +453,9 @@ describe('sidepanel UI structure', () => {
   });
 
   it('protects an in-flight active-tab follow from stale tab updates', () => {
-    expect(script).toContain('let activeFollowRequestId: number | undefined');
-    expect(script).toContain('activeFollowRequestId !== undefined');
-    expect(script).toContain('activeFollowRequestId = requestId');
-    expect(script).toContain('finishActiveFollowRequest(requestId)');
+    expect(script).toContain('state.activeFollowRequest !== undefined');
+    expect(script).toContain('state.activeFollowRequest = request');
+    expect(script).toContain('finishActiveFollowRequest(request)');
   });
 
   it('keeps URL-only navigation from rebuilding the live replica', () => {
@@ -511,7 +510,7 @@ describe('sidepanel UI structure', () => {
       'browser.tabs.onAttached.addListener(',
     );
     expect(focusListener).not.toContain('clearNavigationTimer()');
-    expect(focusListener).toContain('followFocusedBrowserWindow(windowId, requestId)');
+    expect(focusListener).toContain('followFocusedBrowserWindow(windowId, request)');
 
     const follow = sliceBetween(
       'async function followActivatedSourceTab(',
@@ -529,8 +528,8 @@ describe('sidepanel UI structure', () => {
       'async function followFocusedBrowserWindow(',
       '\nasync function followActivatedSourceTab(',
     );
-    expect(focusFollow.indexOf('finishActiveFollowRequest(requestId);\n    return;'))
-      .toBeLessThan(focusFollow.indexOf('activeFollowRequestId = requestId;'));
+    expect(focusFollow.indexOf('finishActiveFollowRequest(request);\n    return;'))
+      .toBeLessThan(focusFollow.indexOf('state.activeFollowRequest = request;'));
   });
 
   it('saves zoom once the slider settles instead of on every input tick', () => {
@@ -598,12 +597,12 @@ describe('sidepanel UI structure', () => {
     expect(check.indexOf('availabilityCheckedForPair = checkedPairKey;'))
       .toBeGreaterThan(check.indexOf('pair.sourceLanguage === pair.targetLanguage'));
     expect(check).toContain(
-      'if (!isCurrentAvailabilityRequest(requestId, requestedSnapshot, pair, generation)) return;\n' +
+      'if (!isCurrentAvailabilityRequest(request, requestedSnapshot, pair, generation)) return;\n' +
         '    state.availabilityCheckedForPair = checkedPairKey;\n' +
         '    state.availability = next;',
     );
     expect(check).toContain(
-      'if (!isCurrentAvailabilityRequest(requestId, requestedSnapshot, pair, generation)) return;\n' +
+      'if (!isCurrentAvailabilityRequest(request, requestedSnapshot, pair, generation)) return;\n' +
         '    state.availabilityCheckedForPair = checkedPairKey;\n' +
         "    state.availability = 'unavailable';",
     );
