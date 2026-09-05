@@ -511,7 +511,6 @@ describe('sidepanel UI structure', () => {
     expect(style).toContain('--surface: #111814');
     expect(style).toContain('grid-template-rows: auto minmax(0, 1fr)');
     expect(style).toContain('overflow-x: auto');
-    expect(script).toContain("toolbarProgress.setAttribute('aria-valuenow'");
     expect(script).toContain('translateRemembered(pair, text');
     expect(script).toContain('composerAbortController === abortController');
     const replicaStyle = style.slice(

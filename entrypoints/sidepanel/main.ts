@@ -16,18 +16,14 @@ import {
 import {
   nextCompanionOverlay,
   reverseTranslationPair,
-  toolbarActivityLabel,
-  toolbarProgressState,
   type CompanionOverlay,
-  type ToolbarActivity,
 } from '../../lib/companion-ui-state';
 import {
   resolveUiLabelTranslations,
   shouldRetryUiLabelLocalization,
-  toolbarAttentionTarget,
   type CompanionStatusTone,
-  type ToolbarAttentionTarget,
 } from '../../lib/companion-ui-localization';
+import { ToolbarStatus } from './toolbar-status';
 import { isQuickTranslationShortcut } from '../../lib/quick-translation-shortcut';
 import {
   AutoLanguageEvidencePrecedence,
@@ -615,7 +611,6 @@ let imageTranslationInFlight = false;
 let translationDesired = false;
 let translationComplete = false;
 let openCompanionOverlay: CompanionOverlay | undefined;
-let toolbarDeterminateRatio: number | undefined;
 let activeAbortController: AbortController | undefined;
 let activeTranslationKey: string | undefined;
 let composerAbortController: AbortController | undefined;
@@ -646,9 +641,6 @@ let textDetectorProbeRetryUsed = false;
 if (compiledImageTextProviderIds.includes('chrome-text-detector')) {
   ocrProviderRuntimeStatuses.set('chrome-text-detector', 'checking');
 }
-let toolbarAttention: ToolbarAttentionTarget | undefined;
-let toolbarAttentionTone: Extract<CompanionStatusTone, 'warning' | 'error'> =
-  'warning';
 let uiLocalizationRequestId = 0;
 let uiLocalizationInputKey = '';
 let uiLocalizationScheduled = false;
@@ -657,6 +649,29 @@ let uiLocalizationRetryTimer: ReturnType<typeof setTimeout> | undefined;
 let uiLocalizationRetriedInputKey = '';
 let uiLocalizedTarget: SupportedLanguage = 'en';
 let uiLabelTranslations: ReadonlyMap<string, string> = new Map();
+
+const toolbarStatus = new ToolbarStatus({
+  elements: {
+    status: statusElement,
+    refreshAttention,
+    settingsAttention,
+    toolbarProgress,
+    toolbarProgressFill,
+    compactToolbar,
+    progressRegion,
+    progressLabel,
+    progressElement,
+  },
+  readActivity: () => ({
+    captureInFlight,
+    translationInFlight,
+    permissionInFlight,
+    composerInFlight,
+    imageTranslationInFlight,
+    surfaceTransitionInFlight,
+  }),
+  isSettingsOpen: () => openCompanionOverlay === 'settings',
+});
 
 const companionBuildIdentity = createExtensionBuildIdentity(
   browser.runtime.getManifest(),
@@ -2880,7 +2895,7 @@ async function runTranslation(automatic: boolean, generation: number): Promise<v
   configureImageTranslation();
   translationDesired = true;
   translationComplete = false;
-  showProgress('Preparing Chrome\'s on-device language model…', 0, 1);
+  toolbarStatus.showProgress('Preparing Chrome\'s on-device language model…', 0, 1);
   updateControls();
   try {
     const tab = await browser.tabs.get(identity.tabId);
@@ -2896,9 +2911,17 @@ async function runTranslation(automatic: boolean, generation: number): Promise<v
     const result = await replicaTranslationCoordinator.translateCurrent(pair, {
       signal: abortController.signal,
       onDownloadProgress: (progress) =>
-        showProgress(`Downloading language pack… ${Math.round(progress * 100)}%`, progress, 1),
+        toolbarStatus.showProgress(
+          `Downloading language pack… ${Math.round(progress * 100)}%`,
+          progress,
+          1,
+        ),
       onProgress: (completed, total) =>
-        showProgress(`Translating ${completed} of ${total}…`, completed, Math.max(1, total)),
+        toolbarStatus.showProgress(
+          `Translating ${completed} of ${total}…`,
+          completed,
+          Math.max(1, total),
+        ),
     });
     if (
       !captureCoordinator.isCurrent(generation) ||
@@ -2937,7 +2960,7 @@ async function runTranslation(automatic: boolean, generation: number): Promise<v
     if (activeAbortController === abortController) activeAbortController = undefined;
     translationInFlight = false;
     configureImageTranslation();
-    hideProgress();
+    toolbarStatus.hideProgress();
     updateControls();
   }
 }
@@ -3016,7 +3039,7 @@ function setCompanionOverlay(next?: CompanionOverlay): void {
     'aria-expanded',
     String(quickTranslateOpen),
   );
-  renderToolbarAttention();
+  toolbarStatus.renderAttention();
   if (settingsOpen) {
     closeSettingsButton.focus();
     return;
@@ -4949,67 +4972,21 @@ function updateControls(): void {
         ? 'Translation current'
         : 'Translate page',
   );
-  renderToolbarAttention();
-  syncToolbarProgress();
-}
-
-function syncToolbarProgress(): void {
-  const activity: ToolbarActivity = {
-    ...(toolbarDeterminateRatio === undefined
-      ? {}
-      : { determinateRatio: toolbarDeterminateRatio }),
-    captureInFlight,
-    translationInFlight,
-    permissionInFlight,
-    composerInFlight,
-    imageTranslationInFlight,
-    surfaceTransitionInFlight,
-  };
-  const state = toolbarProgressState(activity);
-  const busy = state.kind !== 'idle';
-  toolbarProgress.hidden = !busy;
-  compactToolbar.setAttribute('aria-busy', String(busy));
-  if (state.kind === 'idle') {
-    delete toolbarProgress.dataset.mode;
-    toolbarProgressFill.style.removeProperty('--toolbar-progress-ratio');
-    toolbarProgress.setAttribute('aria-label', 'Companion idle');
-    toolbarProgress.removeAttribute('aria-valuenow');
-    toolbarProgress.removeAttribute('aria-valuetext');
-    return;
-  }
-  toolbarProgress.dataset.mode = state.kind;
-  if (state.kind === 'determinate') {
-    const percent = Math.round(state.ratio * 100);
-    const label = progressLabel.textContent?.trim() || 'Translating page';
-    toolbarProgressFill.style.setProperty(
-      '--toolbar-progress-ratio',
-      String(state.ratio),
-    );
-    toolbarProgress.setAttribute('aria-label', label);
-    toolbarProgress.setAttribute('aria-valuenow', String(percent));
-    toolbarProgress.setAttribute('aria-valuetext', `${label} ${percent}%`);
-  } else {
-    const label = toolbarActivityLabel(activity);
-    toolbarProgressFill.style.removeProperty('--toolbar-progress-ratio');
-    toolbarProgress.setAttribute('aria-label', label);
-    toolbarProgress.removeAttribute('aria-valuenow');
-    toolbarProgress.setAttribute('aria-valuetext', label);
-  }
+  toolbarStatus.renderAttention();
+  toolbarStatus.syncProgress();
 }
 
 function setImageTranslationBusy(busy: boolean): void {
   const completed = imageTranslationInFlight && !busy;
   imageTranslationInFlight = busy;
   if (busy && !translationInFlight && !composerInFlight) {
-    progressRegion.hidden = false;
-    progressLabel.textContent = 'Recognizing visible image text locally…';
-    progressElement.removeAttribute('value');
+    toolbarStatus.showImageProgress();
   } else if (!busy && !translationInFlight && !composerInFlight) {
-    hideProgress();
+    toolbarStatus.hideProgress();
   }
   if (completed) {
     logTranslationCache('image-text', imageTranslationMemory);
-    if (statusElement.textContent === 'Cancelling on-device translation…') {
+    if (toolbarStatus.statusText === 'Cancelling on-device translation…') {
       setStatus('Image text processing stopped.', 'warning');
     }
   }
@@ -5046,55 +5023,11 @@ function syncComposerCharacterCount(): void {
   );
 }
 
-function showProgress(label: string, value: number, max: number): void {
-  progressRegion.hidden = false;
-  progressLabel.textContent = label;
-  progressElement.max = Math.max(1, max);
-  progressElement.value = Math.min(progressElement.max, Math.max(0, value));
-  toolbarDeterminateRatio = progressElement.value / progressElement.max;
-  syncToolbarProgress();
-}
-
-function hideProgress(): void {
-  toolbarDeterminateRatio = undefined;
-  if (
-    imageTranslationInFlight &&
-    !translationInFlight &&
-    !composerInFlight
-  ) {
-    progressRegion.hidden = false;
-    progressLabel.textContent = 'Recognizing visible image text locally…';
-    progressElement.removeAttribute('value');
-    syncToolbarProgress();
-    return;
-  }
-  progressRegion.hidden = true;
-  progressElement.setAttribute('value', '0');
-  progressElement.value = 0;
-  syncToolbarProgress();
-}
-
 function setStatus(
   message: string,
   tone: CompanionStatusTone = 'normal',
 ): void {
-  statusElement.textContent = message;
-  statusElement.dataset.tone = tone;
-  toolbarAttention = toolbarAttentionTarget(message, tone);
-  if (tone === 'warning' || tone === 'error') toolbarAttentionTone = tone;
-  refreshAttention.title = toolbarAttention === 'refresh' ? message : '';
-  settingsAttention.title = toolbarAttention === 'settings' ? message : '';
-  renderToolbarAttention();
-}
-
-function renderToolbarAttention(): void {
-  const refreshVisible = toolbarAttention === 'refresh';
-  const settingsVisible =
-    toolbarAttention === 'settings' && openCompanionOverlay !== 'settings';
-  refreshAttention.hidden = !refreshVisible;
-  settingsAttention.hidden = !settingsVisible;
-  refreshAttention.dataset.tone = toolbarAttentionTone;
-  settingsAttention.dataset.tone = toolbarAttentionTone;
+  toolbarStatus.setStatus(message, tone);
 }
 
 function logImageTranslationDiagnostic(
