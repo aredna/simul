@@ -8,8 +8,6 @@ import {
 } from '../../lib/browser-scheduling';
 import {
   LatestWorkCoordinator,
-  isAvailabilityRequestCurrent,
-  replicaViewTranslationAction,
   shouldResetReplicaScrollForCapture,
   type GenerationWork,
 } from '../../lib/companion-lifecycle';
@@ -20,8 +18,6 @@ import {
 import type { CompanionStatusTone } from '../../lib/companion-ui-localization';
 import {
   CompanionState,
-  availabilityPairKey,
-  sameTranslationPair,
   type CaptureRequest,
 } from './companion-state';
 import { Currency, type CurrencyToken } from './currency';
@@ -31,12 +27,16 @@ import { PreferenceClient } from './preference-client';
 import { QuickComposer } from './quick-composer';
 import { SourceFollower } from './source-follower';
 import { ToolbarStatus } from './toolbar-status';
+import {
+  TranslationDriver,
+  describePartialReplicaTranslation,
+  type PendingAutoImageLanguageEvidence,
+} from './translation-driver';
 import { UiLocalizer } from './ui-localizer';
 import { isQuickTranslationShortcut } from '../../lib/quick-translation-shortcut';
 import {
   AutoLanguageEvidencePrecedence,
   autoImageLanguageConfigurationKey,
-  resolveSourceLanguage,
   shouldClearAutoImageLanguageForDocument,
   shouldClearAutoImageLanguageResolution,
 } from '../../lib/language-detection';
@@ -76,10 +76,8 @@ import {
   enabledOcrProviderOrder,
   type ImageReadingMethodId,
 } from '../../lib/ocr/image-reading-methods';
-import type { AutoLanguageProbeEvidence } from '../../lib/ocr/auto-language-probe';
 import {
   ImageTranslationController,
-  type AutoImageLanguageEvidenceOrigin,
   type ImageTranslationDiagnostic,
 } from '../../lib/ocr/image-translation-controller';
 import { openChromeImageSource } from '../../lib/ocr/image-source-client';
@@ -107,7 +105,6 @@ import {
   STORAGE_KEY,
   autoTranslationModeForPage,
   isCompanionLaunchBehavior,
-  isAutoTranslationEnabled,
   isAutoTranslationMode,
   isMirrorDisplayMode,
   isPopoutTabMode,
@@ -169,19 +166,14 @@ import {
 import { ReplicaSurfaceRouter } from '../../lib/replica/replica-surface-router';
 import {
   captureRequestMatchesSourceDocument,
-  sameSourceDocument,
   sameSourceReplicaLease,
-  type ReplicaSourceDocumentIdentity,
 } from '../../lib/replica/source-identity';
-import { buildBoundedLanguageSample } from '../../lib/translation/language-sample';
 import { replicaSourceCommitAction } from '../../lib/translation/replica-translation-lifecycle';
 import {
   ReplicaTranslationCoordinator,
   isCompleteReplicaTranslationResult,
   splitBoundaryWhitespace,
   type ReplicaSourceCommit,
-  type ReplicaTranslationSnapshot,
-  type ReplicaTranslationRunResult,
 } from '../../lib/translation/replica-translation-coordinator';
 import { TranslationMemory } from '../../lib/translation/translation-memory';
 import {
@@ -439,21 +431,10 @@ imageTranslationController = new ImageTranslationController({
   onBusyChange: (busy) => setImageTranslationBusy(busy),
   onDiagnostic: logImageTranslationDiagnostic,
   detectLanguage: async (text) => browser.i18n.detectLanguage(text),
-  onAutoLanguageDetected: (language, evidence, document, origin) => {
-    if (state.preferences.sourceLanguage !== 'auto' || state.resolvedSourceLanguage) return;
-    const ready = autoLanguageEvidencePrecedence.offerImageEvidence({
-      language,
-      evidence,
-      document,
-      origin,
-      replayLease: state.snapshot?.replayLease,
-      identity: state.capturedPageIdentity,
-      generation: captureCoordinator.generation,
-      configurationKey: currentAutoImageLanguageConfigurationKey(),
-    });
-    if (ready) commitAutoDetectedImageLanguage(ready);
-  },
-  onAutoLanguageInvalidated: handleAutoImageLanguageInvalidated,
+  onAutoLanguageDetected: (language, evidence, document, origin) =>
+    translationDriver.offerImageLanguageEvidence(language, evidence, document, origin),
+  onAutoLanguageInvalidated: (document) =>
+    translationDriver.handleAutoImageLanguageInvalidated(document),
 });
 
 function handleReplicaSourceCommit(commit: ReplicaSourceCommit): void {
@@ -461,7 +442,7 @@ function handleReplicaSourceCommit(commit: ReplicaSourceCommit): void {
   if (selectedSnapshot && sameSourceReplicaLease(selectedSnapshot, commit)) {
     state.snapshot = selectedSnapshot;
     replicaStatusContainer.hidden = true;
-    clearAutoImageLanguageForDifferentDocument(commit.document);
+    translationDriver.clearAutoImageLanguageForDifferentDocument(commit.document);
     // Initial activation is deliberately deferred until the engine run has
     // settled. Checkpoint/live callbacks can only advance an existing lease.
     imageTranslationController.notifyReplicaCommit(
@@ -477,7 +458,7 @@ function handleReplicaSourceCommit(commit: ReplicaSourceCommit): void {
   );
   if (!action.prepareForNewText && !action.refreshDetectedLanguage) return;
   const refresh = currency.begin('language-refresh');
-  void reconcileReplicaTranslationAfterCommit(
+  void translationDriver.reconcileAfterCommit(
     commit,
     refresh,
     action.refreshDetectedLanguage,
@@ -653,8 +634,33 @@ const permissionFlows = new PermissionFlows({
   purgeImageCache: () => imageTranslationController.purgeSourceDerivedCache(),
   requestAutomaticTranslation: async (pageUrl) => {
     state.translationDesired = true;
-    await maybeTranslateAutomatically(captureCoordinator.generation, pageUrl);
+    await translationDriver.maybeTranslateAutomatically(captureCoordinator.generation, pageUrl);
   },
+});
+
+const translationDriver = new TranslationDriver({
+  state,
+  currency,
+  provider,
+  coordinator: replicaTranslationCoordinator,
+  captureCoordinator,
+  evidence: autoLanguageEvidencePrecedence,
+  detectLanguage: async (text) => browser.i18n.detectLanguage(text),
+  getTab: (tabId) => browser.tabs.get(tabId),
+  autoImageLanguageConfigurationKey: () => currentAutoImageLanguageConfigurationKey(),
+  configureImageTranslation: () => configureImageTranslation(),
+  setStatus,
+  updateControls: () => updateControls(),
+  showProgress: (label, value, max) => toolbarStatus.showProgress(label, value, max),
+  hideProgress: () => toolbarStatus.hideProgress(),
+  renderDetectedLanguage: (text) => {
+    detectedLanguageElement.textContent = text;
+    detectedLanguageElement.hidden = !text;
+  },
+  invalidateComposer: () => quickComposer.invalidate(),
+  syncComposerPanel: () => quickComposer.syncPanel(),
+  onPairPrepared: () => uiLocalizer.retryAfterPagePairPrepared(),
+  onTranslationSettled: () => logTranslationCache('page', translationMemory),
 });
 
 const sourceFollower = new SourceFollower({
@@ -684,7 +690,7 @@ const sourceFollower = new SourceFollower({
     autoLanguageEvidencePrecedence.invalidate();
     state.pageLanguageResolutionPending = false;
     if (state.resolvedSourceLanguageOrigin === 'image') {
-      clearAutoImageLanguageResolution();
+      translationDriver.clearAutoImageLanguageResolution();
     }
     captureCoordinator.invalidate();
     state.abortPageWork();
@@ -907,7 +913,7 @@ refreshButton.addEventListener('click', requestManualRefresh);
 compactRefreshButton.addEventListener('click', requestManualRefresh);
 translateButton.addEventListener('click', () => {
   if (!state.isLiveSourceOnlyMode) state.translationDesired = true;
-  void startTranslation(false, captureCoordinator.generation);
+  void translationDriver.startTranslation(false, captureCoordinator.generation);
 });
 cancelButton.addEventListener('click', () => {
   state.activeAbortController?.abort();
@@ -1032,7 +1038,7 @@ browser.storage.onChanged.addListener((changes, areaName) => {
     if (identity) queueCapture({ identity, reason: 'preference' });
   }
   if (previous.replicaViewMode !== state.preferences.replicaViewMode) {
-    applyReplicaViewMode(previous.replicaViewMode);
+    translationDriver.applyReplicaViewMode(previous.replicaViewMode);
   }
   syncPreferenceControls();
   updateMirrorLayout();
@@ -1045,7 +1051,7 @@ browser.storage.onChanged.addListener((changes, areaName) => {
     // The window that changed the languages already recorded its own intent
     // in languageSelectionChanged. A change made in another companion window
     // must not opt this one into translating (review L2).
-    void applyLanguagePreferences(false, previousPair);
+    void translationDriver.applyLanguagePreferences(false, previousPair);
   }
 });
 
@@ -1220,7 +1226,7 @@ function purgeSourceDerivedRuntimeInternal(
   message: string,
 ): Promise<void> {
   if (state.resolvedSourceLanguageOrigin === 'image') {
-    clearAutoImageLanguageResolution();
+    translationDriver.clearAutoImageLanguageResolution();
   }
   captureCoordinator.invalidate();
   currency.supersede('availability');
@@ -1243,7 +1249,7 @@ function purgeSourceDerivedRuntimeInternal(
 function clearResetOnlyRuntimeState(): void {
   quickComposer.reset();
   imageAnalysisPanel.clearDiagnostics();
-  clearAutoImageLanguageResolution();
+  translationDriver.clearAutoImageLanguageResolution();
 }
 
 async function handlePreferenceSafetyMessage(
@@ -1462,7 +1468,9 @@ async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> 
       : identity;
     state.capturedPageIdentity = committedIdentity;
     state.followedPageIdentity = committedIdentity;
-    await resolveSelectedSourceLanguage(currentReplicaLanguageContext());
+    await translationDriver.resolveSelectedSourceLanguage(
+      translationDriver.currentReplicaLanguageContext(),
+    );
 
     if (state.isLiveSourceOnlyMode) {
       state.availability = 'unavailable';
@@ -1474,7 +1482,7 @@ async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> 
       return;
     }
 
-    if (currentTranslationFieldCount() === 0) {
+    if (translationDriver.currentTranslationFieldCount() === 0) {
       state.availability = 'unavailable';
       state.availabilityCheckedForPair = undefined;
       const accessWasRevoked = await permissionFlows.reconcileAutomaticAccess(
@@ -1489,7 +1497,7 @@ async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> 
       );
       return;
     }
-    await checkAvailability(work.generation);
+    await translationDriver.checkAvailability(work.generation);
     if (!captureCoordinator.isCurrent(work.generation)) return;
     const accessWasRevoked = await permissionFlows.reconcileAutomaticAccess(
       committedIdentity.url,
@@ -1499,7 +1507,7 @@ async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> 
       setStatus('Chrome removed a saved automatic-access grant, so that scope was turned off.', 'warning');
       return;
     }
-    await maybeTranslateAutomatically(work.generation, committedIdentity.url);
+    await translationDriver.maybeTranslateAutomatically(work.generation, committedIdentity.url);
   } catch (error) {
     if (!captureCoordinator.isCurrent(work.generation)) return;
     const message = readPageError(error);
@@ -1613,340 +1621,6 @@ async function runReplicaEngineCheckpoint(
   }
 }
 
-interface LiveLanguageContext {
-  documentLanguage?: string;
-  visibleText: string;
-  preserveOnUnknown: boolean;
-}
-
-interface PendingAutoImageLanguageEvidence {
-  readonly language: SupportedLanguage;
-  readonly evidence: AutoLanguageProbeEvidence;
-  readonly origin: AutoImageLanguageEvidenceOrigin;
-  readonly document: ReplicaSourceDocumentIdentity;
-  readonly replayLease: number | undefined;
-  readonly identity: CapturedPageIdentity | undefined;
-  readonly generation: number;
-  readonly configurationKey: string;
-}
-
-async function resolveSelectedSourceLanguage(
-  liveContext?: LiveLanguageContext,
-): Promise<boolean> {
-  if (shouldClearAutoImageLanguageForDocument(
-    state.resolvedSourceLanguageOrigin,
-    state.resolvedImageLanguageDocument !== undefined &&
-      currentReplicaDocumentMatches(state.resolvedImageLanguageDocument),
-  )) {
-    clearAutoImageLanguageResolution();
-  }
-  const resolution = currency.begin('language-resolution');
-  const resolutionRevision = resolution.id;
-  if (!state.snapshot) {
-    autoLanguageEvidencePrecedence.invalidate();
-    state.pageLanguageResolutionPending = false;
-    state.resolvedSourceLanguage = undefined;
-    state.resolvedSourceLanguageOrigin = undefined;
-    state.resolvedImageLanguageConfigurationKey = undefined;
-    state.resolvedImageLanguageDocument = undefined;
-    quickComposer.syncPanel();
-    configureImageTranslation();
-    return true;
-  }
-  const requestedSnapshot = state.snapshot;
-  const requestedPreference = state.preferences.sourceLanguage;
-  const previousLanguage = state.resolvedSourceLanguage;
-  const previousOrigin = state.resolvedSourceLanguageOrigin;
-  const previousImageConfigurationKey = state.resolvedImageLanguageConfigurationKey;
-  const previousImageDocument = state.resolvedImageLanguageDocument;
-  if (requestedPreference !== 'auto') autoLanguageEvidencePrecedence.invalidate();
-  autoLanguageEvidencePrecedence.beginPageResolution(resolutionRevision);
-  state.pageLanguageResolutionPending =
-    autoLanguageEvidencePrecedence.pageResolutionPending;
-  // This controller gate is raised before page detection yields. It prevents
-  // image probing from adopting a language while stronger page evidence is
-  // unresolved, instead of trying to undo a projection afterward.
-  configureImageTranslation();
-  const detected = await resolveSourceLanguage(
-    requestedPreference,
-    {
-      documentLanguage:
-        liveContext?.documentLanguage ?? requestedSnapshot.documentLanguage,
-      visibleText: liveContext?.visibleText ?? mirrorLanguageSample(),
-    },
-    async (text) => browser.i18n.detectLanguage(text),
-  );
-  if (
-    !currency.isCurrent(resolution) ||
-    !currentReplicaSnapshotMatches(requestedSnapshot) ||
-    state.preferences.sourceLanguage !== requestedPreference
-  ) {
-    autoLanguageEvidencePrecedence.cancelPageResolution(resolutionRevision);
-    state.pageLanguageResolutionPending =
-      autoLanguageEvidencePrecedence.pageResolutionPending;
-    configureImageTranslation();
-    return false;
-  }
-  const previousImageDocumentIsCurrent = previousOrigin === 'image' &&
-    previousImageDocument !== undefined &&
-    currentReplicaDocumentMatches(previousImageDocument);
-  const preservePreviousLanguage = previousOrigin === 'image'
-    ? previousImageDocumentIsCurrent
-    : previousOrigin === 'page' && Boolean(liveContext?.preserveOnUnknown);
-  state.resolvedSourceLanguage =
-    detected.language ??
-    (preservePreviousLanguage
-      ? previousLanguage
-      : undefined);
-  if (detected.language) {
-    const unchangedExplicitImageLanguage =
-      requestedPreference !== 'auto' &&
-      previousOrigin === 'image' &&
-      previousLanguage === detected.language &&
-      previousImageDocumentIsCurrent;
-    state.resolvedSourceLanguageOrigin = unchangedExplicitImageLanguage
-      ? 'image'
-      : requestedPreference === 'auto'
-        ? 'page'
-        : 'explicit';
-    state.resolvedImageLanguageConfigurationKey = unchangedExplicitImageLanguage
-      ? previousImageConfigurationKey
-      : undefined;
-    state.resolvedImageLanguageDocument = unchangedExplicitImageLanguage
-      ? previousImageDocument
-      : undefined;
-  } else if (state.resolvedSourceLanguage) {
-    state.resolvedSourceLanguageOrigin = previousOrigin;
-    state.resolvedImageLanguageConfigurationKey = previousImageConfigurationKey;
-    state.resolvedImageLanguageDocument = previousOrigin === 'image'
-      ? previousImageDocument
-      : undefined;
-  } else {
-    state.resolvedSourceLanguageOrigin = undefined;
-    state.resolvedImageLanguageConfigurationKey = undefined;
-    state.resolvedImageLanguageDocument = undefined;
-  }
-  const pendingImageEvidence =
-    autoLanguageEvidencePrecedence.settlePageResolution(
-      resolutionRevision,
-      Boolean(state.resolvedSourceLanguage),
-    );
-  state.pageLanguageResolutionPending =
-    autoLanguageEvidencePrecedence.pageResolutionPending;
-  if (pendingImageEvidence &&
-      pendingAutoImageLanguageEvidenceIsCurrent(pendingImageEvidence)) {
-    commitAutoDetectedImageLanguage(pendingImageEvidence);
-    return true;
-  }
-  detectedLanguageElement.textContent = state.resolvedSourceLanguage
-    ? requestedPreference === 'auto'
-      ? detected.language
-        ? `Detected ${languageName(state.resolvedSourceLanguage)} from ${detected.source === 'html' ? 'the page language' : 'visible page text'}.`
-        : `Using the previously detected ${languageName(state.resolvedSourceLanguage)} source language.`
-      : ''
-    : 'The page language could not be detected. Choose a From language.';
-  detectedLanguageElement.hidden = !detectedLanguageElement.textContent;
-  quickComposer.syncPanel();
-  configureImageTranslation();
-  return true;
-}
-
-function commitAutoDetectedImageLanguage(
-  proposal: PendingAutoImageLanguageEvidence,
-): void {
-  if (
-    state.preferences.sourceLanguage !== 'auto' ||
-    state.resolvedSourceLanguage ||
-    !pendingAutoImageLanguageEvidenceIsCurrent(proposal)
-  ) return;
-  const resolution = currency.begin('language-resolution');
-  state.resolvedSourceLanguage = proposal.language;
-  state.resolvedSourceLanguageOrigin = 'image';
-  state.resolvedImageLanguageConfigurationKey = proposal.configurationKey;
-  state.resolvedImageLanguageDocument = proposal.document;
-  currency.supersede('availability');
-  state.availabilityCheckedForPair = undefined;
-  state.translationComplete = false;
-  quickComposer.invalidate();
-  const evidenceSource = proposal.origin === 'accessibility-text'
-    ? 'accessibility image text'
-    : 'bounded image OCR';
-  detectedLanguageElement.textContent =
-    `Detected ${languageName(proposal.language)} from ${evidenceSource} (${proposal.evidence.replaceAll('-', ' ')}).`;
-  detectedLanguageElement.hidden = false;
-  quickComposer.syncPanel();
-  updateControls();
-  queueMicrotask(() => {
-    void reconcileAutoDetectedImageLanguage(proposal.language, resolution);
-  });
-}
-
-function pendingAutoImageLanguageEvidenceIsCurrent(
-  proposal: PendingAutoImageLanguageEvidence,
-): boolean {
-  return (
-    proposal.configurationKey === currentAutoImageLanguageConfigurationKey() &&
-    currentReplicaDocumentMatches(proposal.document) &&
-    proposal.replayLease === state.snapshot?.replayLease &&
-    proposal.identity === state.capturedPageIdentity &&
-    captureCoordinator.isCurrent(proposal.generation)
-  );
-}
-
-function handleAutoImageLanguageInvalidated(
-  document: ReplicaSourceDocumentIdentity,
-): void {
-  if (
-    state.resolvedSourceLanguageOrigin !== 'image' ||
-    !state.resolvedImageLanguageDocument ||
-    !sameSourceDocument(state.resolvedImageLanguageDocument, document) ||
-    !currentReplicaDocumentMatches(document)
-  ) return;
-  if (state.preferences.sourceLanguage !== 'auto') {
-    // Explicit selection remains authoritative and keeps the effective pair
-    // running, but the dormant image contributor must not be resurrected if
-    // the user later returns to Auto.
-    currency.supersede('language-resolution');
-    autoLanguageEvidencePrecedence.invalidate();
-    state.pageLanguageResolutionPending = false;
-    state.resolvedSourceLanguageOrigin = 'explicit';
-    state.resolvedImageLanguageConfigurationKey = undefined;
-    state.resolvedImageLanguageDocument = undefined;
-    return;
-  }
-  clearAutoImageLanguageResolution();
-  queueMicrotask(() => {
-    if (
-      state.preferences.sourceLanguage !== 'auto' ||
-      !currentReplicaDocumentMatches(document)
-    ) return;
-    configureImageTranslation();
-    void applyLanguagePreferences(false);
-  });
-}
-
-async function reconcileAutoDetectedImageLanguage(
-  language: SupportedLanguage,
-  resolution: CurrencyToken,
-): Promise<void> {
-  if (
-    !currency.isCurrent(resolution) ||
-    state.preferences.sourceLanguage !== 'auto' ||
-    state.resolvedSourceLanguage !== language ||
-    !state.resolvedImageLanguageDocument ||
-    !currentReplicaDocumentMatches(state.resolvedImageLanguageDocument)
-  ) return;
-  const generation = captureCoordinator.generation;
-  const identity = state.capturedPageIdentity;
-  const requestedSnapshot = state.snapshot;
-  const pair = state.selectedPair();
-  if (!state.isLiveSourceOnlyMode) {
-    replicaTranslationCoordinator.selectPair(pair);
-  }
-  configureImageTranslation();
-  if (
-    !currency.isCurrent(resolution) ||
-    !requestedSnapshot ||
-    !identity ||
-    !pair ||
-    !captureCoordinator.isCurrent(generation)
-  ) {
-    updateControls();
-    return;
-  }
-  await checkAvailability(generation);
-  if (
-    !currency.isCurrent(resolution) ||
-    state.preferences.sourceLanguage !== 'auto' ||
-    state.resolvedSourceLanguage !== language ||
-    !state.resolvedImageLanguageDocument ||
-    !currentReplicaDocumentMatches(state.resolvedImageLanguageDocument) ||
-    !currentReplicaSnapshotMatches(requestedSnapshot) ||
-    state.capturedPageIdentity !== identity ||
-    !captureCoordinator.isCurrent(generation) ||
-    !state.isCurrentTranslationPair(pair)
-  ) return;
-  await maybeTranslateAutomatically(generation, identity.url);
-}
-
-function mirrorLanguageSample(): string {
-  return buildBoundedLanguageSample(
-    replicaRecordSources(state.snapshot?.records ?? []),
-  );
-}
-
-function currentTranslationFieldCount(): number {
-  return state.snapshot?.records.some(
-    ({ source }) => source.trim().length > 0,
-  ) ? 1 : 0;
-}
-
-async function reconcileReplicaTranslationAfterCommit(
-  commit: ReplicaSourceCommit,
-  refresh: CurrencyToken,
-  refreshDetectedLanguage: boolean,
-  prepareForNewText: boolean,
-): Promise<void> {
-  if (state.isLiveSourceOnlyMode) return;
-  const generation = commit.document.generation;
-  const identity = state.capturedPageIdentity;
-  if (
-    !identity ||
-    !state.snapshot ||
-    !captureCoordinator.isCurrent(generation)
-  ) return;
-  const previousPair = state.selectedPair();
-  if (refreshDetectedLanguage) {
-    const committed = await resolveSelectedSourceLanguage({
-      documentLanguage: commit.documentLanguage,
-      visibleText: buildBoundedLanguageSample(
-        replicaRecordSources(commit.records),
-      ),
-      preserveOnUnknown: true,
-    });
-    if (!committed) return;
-  }
-  if (
-    !currency.isCurrent(refresh) ||
-    !captureCoordinator.isCurrent(generation) ||
-    state.capturedPageIdentity !== identity ||
-    (state.preferences.sourceLanguage === 'auto') !== refreshDetectedLanguage
-  ) return;
-  const nextPair = state.selectedPair();
-  const pairChanged = !sameTranslationPair(previousPair, nextPair);
-  if (pairChanged) {
-    state.activeAbortController?.abort();
-    state.translationComplete = false;
-    state.availabilityCheckedForPair = undefined;
-    quickComposer.invalidate();
-    replicaTranslationCoordinator.selectPair(nextPair);
-  }
-  const expectedAvailabilityKey = nextPair
-    ? availabilityPairKey(nextPair, generation)
-    : undefined;
-  const needsPreparation =
-    prepareForNewText &&
-    currentTranslationFieldCount() > 0 &&
-    (!expectedAvailabilityKey ||
-      state.availabilityCheckedForPair !== expectedAvailabilityKey);
-  if (!pairChanged && !needsPreparation) return;
-  await checkAvailability(generation);
-  if (
-    currency.isCurrent(refresh) &&
-    captureCoordinator.isCurrent(generation) &&
-    state.capturedPageIdentity === identity &&
-    sameTranslationPair(nextPair, state.selectedPair())
-  ) {
-    await maybeTranslateAutomatically(generation, identity.url);
-  }
-}
-
-function* replicaRecordSources(
-  records: readonly { readonly source: string }[],
-): Generator<string> {
-  for (const record of records) yield record.source;
-}
-
 async function languageSelectionChanged(): Promise<void> {
   const sourceLanguage = sourceSelect.value === 'auto'
     ? 'auto'
@@ -1956,285 +1630,7 @@ async function languageSelectionChanged(): Promise<void> {
   if (!state.isLiveSourceOnlyMode) state.translationDesired = true;
   const saved = await preferenceClient.commitView({ sourceLanguage, targetLanguage });
   if (!saved) return;
-  await applyLanguagePreferences(true, previousPair);
-}
-
-async function applyLanguagePreferences(
-  fromUserAction: boolean,
-  previousPair = state.selectedPair(),
-): Promise<void> {
-  if (!state.snapshot) return;
-  await resolveSelectedSourceLanguage(currentReplicaLanguageContext());
-  if (state.isLiveSourceOnlyMode) {
-    replicaTranslationCoordinator.selectPair(undefined);
-    state.availability = 'unavailable';
-    state.availabilityCheckedForPair = undefined;
-    setStatus(
-      'Live source only is active. Language choices are saved for translated mode.',
-      'success',
-    );
-    updateControls();
-    return;
-  }
-  const nextPair = state.selectedPair();
-  const effectivePairChanged = !sameTranslationPair(previousPair, nextPair);
-  if (effectivePairChanged) {
-    state.activeAbortController?.abort();
-    quickComposer.invalidate();
-    state.translationComplete = false;
-    state.availabilityCheckedForPair = undefined;
-  }
-  replicaTranslationCoordinator.selectPair(nextPair);
-  if (!effectivePairChanged && state.translationComplete) {
-    updateControls();
-    return;
-  }
-  await checkAvailability(captureCoordinator.generation);
-  if (!fromUserAction) {
-    // A change saved by another companion window, or a re-resolved automatic
-    // language, re-establishes state.availability here but only resumes a
-    // translation this window already wanted; it records no new intent.
-    await maybeTranslateAutomatically(
-      captureCoordinator.generation,
-      state.capturedPageIdentity?.url ?? '',
-    );
-    return;
-  }
-  if (state.availability === 'available') {
-    await startTranslation(false, captureCoordinator.generation);
-  } else if (state.availability === 'downloadable' || state.availability === 'downloading') {
-    setStatus('This language pair needs its on-device pack. Choose Translate once to prepare it.', 'warning');
-  }
-}
-
-async function checkAvailability(generation: number): Promise<void> {
-  const request = currency.begin('availability');
-  const requestedSnapshot = state.snapshot;
-  const pair = state.selectedPair();
-  if (state.isLiveSourceOnlyMode) {
-    replicaTranslationCoordinator.selectPair(undefined);
-    state.availability = 'unavailable';
-    state.availabilityCheckedForPair = undefined;
-    updateControls();
-    return;
-  }
-  replicaTranslationCoordinator.selectPair(pair);
-  if (
-    !requestedSnapshot ||
-    !pair ||
-    currentTranslationFieldCount() === 0
-  ) {
-    state.availability = 'unavailable';
-    state.availabilityCheckedForPair = undefined;
-    if (!pair && requestedSnapshot) {
-      setStatus('Choose a From language because automatic detection was inconclusive.', 'warning');
-    }
-    updateControls();
-    return;
-  }
-  const checkedPairKey = availabilityPairKey(pair, generation);
-  // The pair is recorded as checked only once a result passes the currency
-  // guard. Recording it before the await let a superseded request leave the
-  // pair marked as checked while state.availability stayed 'unavailable', which
-  // disabled Translate and skipped automatic translation for that generation
-  // because reconcileReplicaTranslationAfterCommit saw nothing to prepare.
-  state.availabilityCheckedForPair = undefined;
-  state.availability = 'unavailable';
-  updateControls();
-  if (pair.sourceLanguage === pair.targetLanguage) {
-    state.availabilityCheckedForPair = checkedPairKey;
-    state.availability = 'available';
-    state.translationComplete = true;
-    setStatus('The source and target languages match, so the original text is unchanged.', 'success');
-    updateControls();
-    return;
-  }
-  try {
-    const next = await provider.availability(pair);
-    if (!isCurrentAvailabilityRequest(request, requestedSnapshot, pair, generation)) return;
-    state.availabilityCheckedForPair = checkedPairKey;
-    state.availability = next;
-    switch (next) {
-      case 'available':
-        setStatus(`Ready to translate ${languageName(pair.sourceLanguage)} to ${languageName(pair.targetLanguage)} on-device.`);
-        break;
-      case 'downloadable':
-      case 'downloading':
-        setStatus('Choose Translate once so Chrome can prepare this on-device language pair.', 'warning');
-        break;
-      default:
-        setStatus(`${languageName(pair.sourceLanguage)} to ${languageName(pair.targetLanguage)} is unavailable on this device.`, 'error');
-    }
-  } catch (error) {
-    if (!isCurrentAvailabilityRequest(request, requestedSnapshot, pair, generation)) return;
-    state.availabilityCheckedForPair = checkedPairKey;
-    state.availability = 'unavailable';
-    setStatus(readableError(error), 'error');
-  } finally {
-    if (isCurrentAvailabilityRequest(request, requestedSnapshot, pair, generation)) updateControls();
-  }
-}
-
-async function maybeTranslateAutomatically(
-  generation: number,
-  pageUrl: string,
-): Promise<void> {
-  const action = replicaViewTranslationAction(
-    state.preferences.replicaViewMode,
-    isAutoTranslationEnabled(state.preferences, pageUrl),
-    state.translationDesired,
-    state.availability,
-  );
-  if (action === 'translate') {
-    await startTranslation(true, generation);
-  } else if (action === 'needs-user-action') {
-    setStatus('Automatic translation is ready, but this pair needs one Translate click to prepare its local pack.', 'warning');
-  }
-}
-
-function startTranslation(automatic: boolean, generation: number): Promise<void> {
-  if (state.isLiveSourceOnlyMode) return Promise.resolve();
-  const requestedKey = state.currentTranslationTaskKey(generation);
-  if (state.activeTranslationTask) {
-    if (state.activeTranslationKey === requestedKey) return state.activeTranslationTask;
-    state.activeAbortController?.abort();
-    const previousTask = state.activeTranslationTask;
-    return previousTask.catch(() => undefined).then(async () => {
-      if (
-        !captureCoordinator.isCurrent(generation) ||
-        state.currentTranslationTaskKey(generation) !== requestedKey
-      ) return;
-      await startTranslation(automatic, generation);
-    });
-  }
-  const task = runTranslation(automatic, generation);
-  state.activeTranslationTask = task;
-  state.activeTranslationKey = requestedKey;
-  void task.then(() => {
-    if (state.activeTranslationTask === task) {
-      state.activeTranslationTask = undefined;
-      state.activeTranslationKey = undefined;
-    }
-  }, () => {
-    if (state.activeTranslationTask === task) {
-      state.activeTranslationTask = undefined;
-      state.activeTranslationKey = undefined;
-    }
-  });
-  return task;
-}
-
-async function runTranslation(automatic: boolean, generation: number): Promise<void> {
-  const pair = state.selectedPair();
-  const requestedSnapshot = state.snapshot;
-  const identity = state.capturedPageIdentity;
-  if (
-    !pair ||
-    !requestedSnapshot ||
-    !identity ||
-    state.isLiveSourceOnlyMode ||
-    state.translationInFlight ||
-    state.availability === 'unavailable' ||
-    (automatic && state.availability !== 'available')
-  ) return;
-  if (pair.sourceLanguage === pair.targetLanguage) {
-    replicaTranslationCoordinator.selectPair(pair);
-    state.translationComplete = true;
-    updateControls();
-    return;
-  }
-
-  const abortController = new AbortController();
-  state.activeAbortController = abortController;
-  state.translationInFlight = true;
-  configureImageTranslation();
-  state.translationDesired = true;
-  state.translationComplete = false;
-  toolbarStatus.showProgress('Preparing Chrome\'s on-device language model…', 0, 1);
-  updateControls();
-  try {
-    const tab = await browser.tabs.get(identity.tabId);
-    assertSourceTabIsCurrent(tab, identity, state.requiresActiveSourceTab);
-    if (
-      !captureCoordinator.isCurrent(generation) ||
-      !currentReplicaSnapshotMatches(requestedSnapshot) ||
-      !state.isCurrentTranslationPair(pair) ||
-      state.isLiveSourceOnlyMode
-    ) return;
-    state.availability = 'available';
-    state.availabilityCheckedForPair = availabilityPairKey(pair, generation);
-    const result = await replicaTranslationCoordinator.translateCurrent(pair, {
-      signal: abortController.signal,
-      onDownloadProgress: (progress) =>
-        toolbarStatus.showProgress(
-          `Downloading language pack… ${Math.round(progress * 100)}%`,
-          progress,
-          1,
-        ),
-      onProgress: (completed, total) =>
-        toolbarStatus.showProgress(
-          `Translating ${completed} of ${total}…`,
-          completed,
-          Math.max(1, total),
-        ),
-    });
-    if (
-      !captureCoordinator.isCurrent(generation) ||
-      !currentReplicaSnapshotMatches(requestedSnapshot) ||
-      !state.isCurrentTranslationPair(pair) ||
-      state.isLiveSourceOnlyMode
-    ) return;
-    state.translationComplete =
-      result.total > 0 &&
-      replicaTranslationCoordinator.isResultCurrent(result) &&
-      isCompleteReplicaTranslationResult(result);
-    uiLocalizer.retryAfterPagePairPrepared();
-    setStatus(
-      state.translationComplete
-        ? automatic
-          ? 'Automatic translation is complete and live updates will translate as they arrive.'
-          : 'Translation is complete and live updates will translate as they arrive.'
-        : describePartialReplicaTranslation(result, 'Translation remains partial'),
-      state.translationComplete ? 'success' : 'warning',
-    );
-  } catch (error) {
-    if (isAbortError(error) || abortController.signal.aborted) {
-      if (
-        !state.isLiveSourceOnlyMode &&
-        captureCoordinator.isCurrent(generation) &&
-        currentReplicaSnapshotMatches(requestedSnapshot) &&
-        state.isCurrentTranslationPair(pair)
-      ) {
-        setStatus('Translation cancelled. Existing translated text was kept.', 'warning');
-      }
-    } else if (!state.isLiveSourceOnlyMode) {
-      setStatus(readableError(error), 'error');
-    }
-  } finally {
-    logTranslationCache('page', translationMemory);
-    if (state.activeAbortController === abortController) state.activeAbortController = undefined;
-    state.translationInFlight = false;
-    configureImageTranslation();
-    toolbarStatus.hideProgress();
-    updateControls();
-  }
-}
-
-function describePartialReplicaTranslation(
-  result: ReplicaTranslationRunResult,
-  prefix: string,
-): string {
-  const details: string[] = [];
-  if (result.failed > 0) details.push(`${result.failed} failed`);
-  if (result.stale > 0) details.push(`${result.stale} became stale`);
-  if (result.skipped > 0) details.push(`${result.skipped} were superseded`);
-  if (result.overflow > 0) {
-    details.push(`${result.overflow} exceeded the bounded local queue`);
-  }
-  if (result.completed < result.total && details.length === 0) {
-    details.push(`${result.total - result.completed} were not projected`);
-  }
-  return `${prefix}: ${details.join(', ') || 'no current text was projected'}. Original text remains for those segments; choose Translate page to retry.`;
+  await translationDriver.applyLanguagePreferences(true, previousPair);
 }
 
 async function translateRemembered(
@@ -2382,85 +1778,15 @@ async function changeReplicaViewMode(
   // commitViewPreferencePatch applies the validated preference optimistically
   // before its first await, so projection gates close immediately.
   const save = preferenceClient.commitView({ replicaViewMode });
-  applyReplicaViewMode(previousMode, false);
+  translationDriver.applyReplicaViewMode(previousMode, false);
   await save;
   if (state.preferences.replicaViewMode !== replicaViewMode) {
-    applyReplicaViewMode(replicaViewMode);
+    translationDriver.applyReplicaViewMode(replicaViewMode);
     return;
   }
   if (replicaViewMode === 'translated' && !state.isLiveSourceOnlyMode) {
-    await resumeTranslatedReplicaMode();
+    await translationDriver.resumeTranslatedReplicaMode();
   }
-}
-
-function applyReplicaViewMode(
-  previousMode: ReplicaViewMode,
-  resumeTranslated = true,
-): void {
-  if (previousMode === state.preferences.replicaViewMode) return;
-  currency.supersede('availability');
-  state.activeAbortController?.abort();
-  replicaTranslationCoordinator.selectPair(undefined);
-  state.translationComplete = false;
-  state.availabilityCheckedForPair = undefined;
-  configureImageTranslation();
-  if (state.isLiveSourceOnlyMode) {
-    state.availability = 'unavailable';
-    setStatus(
-      'Live source only is active. The current mirror remains live and all translation overlays were removed.',
-      'success',
-    );
-  } else {
-    setStatus('Translated mode restored. Preparing the saved language settings…');
-    if (resumeTranslated) void resumeTranslatedReplicaMode();
-  }
-  updateControls();
-}
-
-async function resumeTranslatedReplicaMode(): Promise<void> {
-  const interrupted = state.activeTranslationTask;
-  if (interrupted) await interrupted.catch(() => undefined);
-  const identity = state.capturedPageIdentity;
-  const generation = captureCoordinator.generation;
-  if (state.isLiveSourceOnlyMode || !state.snapshot || !identity) return;
-  const resolved = await resolveSelectedSourceLanguage(
-    currentReplicaLanguageContext(),
-  );
-  const requestedSnapshot = state.snapshot;
-  if (
-    !resolved ||
-    state.isLiveSourceOnlyMode ||
-    !requestedSnapshot ||
-    !currentReplicaSnapshotMatches(requestedSnapshot) ||
-    state.capturedPageIdentity !== identity ||
-    !captureCoordinator.isCurrent(generation)
-  ) return;
-  const pair = state.selectedPair();
-  replicaTranslationCoordinator.selectPair(pair);
-  await checkAvailability(generation);
-  if (
-    state.isLiveSourceOnlyMode ||
-    !pair ||
-    !state.isCurrentTranslationPair(pair) ||
-    !currentReplicaSnapshotMatches(requestedSnapshot) ||
-    state.capturedPageIdentity !== identity ||
-    !captureCoordinator.isCurrent(generation)
-  ) return;
-  await maybeTranslateAutomatically(generation, identity.url);
-}
-
-function currentReplicaLanguageContext(): LiveLanguageContext | undefined {
-  const current = state.snapshot;
-  if (!current) return undefined;
-  return {
-    ...(current.documentLanguage
-      ? { documentLanguage: current.documentLanguage }
-      : {}),
-    visibleText: buildBoundedLanguageSample(
-      replicaRecordSources(current.records),
-    ),
-    preserveOnUnknown: true,
-  };
 }
 
 function syncPreferenceControls(): void {
@@ -2742,16 +2068,16 @@ function configureImageTranslation(): void {
   if (shouldClearAutoImageLanguageForDocument(
     state.resolvedSourceLanguageOrigin,
     state.resolvedImageLanguageDocument !== undefined &&
-      currentReplicaDocumentMatches(state.resolvedImageLanguageDocument),
+      translationDriver.currentReplicaDocumentMatches(state.resolvedImageLanguageDocument),
   )) {
-    clearAutoImageLanguageResolution();
+    translationDriver.clearAutoImageLanguageResolution();
   }
   if (shouldClearAutoImageLanguageResolution(
     state.resolvedSourceLanguageOrigin,
     state.resolvedImageLanguageConfigurationKey,
     nextAutoLanguageConfigurationKey,
   )) {
-    clearAutoImageLanguageResolution();
+    translationDriver.clearAutoImageLanguageResolution();
   }
   imageTranslationController.configure({
     enabled:
@@ -2840,55 +2166,6 @@ function enabledAutoImageLanguageMethodOrder(
     !disabled.has(method) &&
     (method === ACCESSIBILITY_TEXT_METHOD_ID || providers.has(method)),
   );
-}
-
-function clearAutoImageLanguageResolution(): void {
-  currency.supersede('language-resolution');
-  autoLanguageEvidencePrecedence.invalidate();
-  state.pageLanguageResolutionPending = false;
-  state.resolvedSourceLanguage = undefined;
-  state.resolvedSourceLanguageOrigin = undefined;
-  state.resolvedImageLanguageConfigurationKey = undefined;
-  state.resolvedImageLanguageDocument = undefined;
-  currency.supersede('availability');
-  state.availability = 'unavailable';
-  state.availabilityCheckedForPair = undefined;
-  state.translationComplete = false;
-  state.activeAbortController?.abort();
-  quickComposer.invalidate();
-  replicaTranslationCoordinator.selectPair(undefined);
-  detectedLanguageElement.textContent =
-    'Image-derived language evidence was cleared. OCR is checking again with the updated settings.';
-  detectedLanguageElement.hidden = false;
-  quickComposer.syncPanel();
-}
-
-function currentReplicaDocumentMatches(
-  document: ReplicaSourceDocumentIdentity,
-): boolean {
-  const current = state.snapshot?.document;
-  return Boolean(current && sameSourceDocument(current, document));
-}
-
-function currentReplicaSnapshotMatches(
-  requested: Pick<ReplicaTranslationSnapshot, 'document' | 'replayLease'>,
-): boolean {
-  const current = state.snapshot;
-  return Boolean(current && sameSourceReplicaLease(current, requested));
-}
-
-function clearAutoImageLanguageForDifferentDocument(
-  document: ReplicaSourceDocumentIdentity,
-): void {
-  if (!shouldClearAutoImageLanguageForDocument(
-    state.resolvedSourceLanguageOrigin,
-    Boolean(
-      state.resolvedImageLanguageDocument &&
-      sameSourceDocument(state.resolvedImageLanguageDocument, document),
-    ),
-  )) return;
-  clearAutoImageLanguageResolution();
-  configureImageTranslation();
 }
 
 async function refreshOcrProviderRuntimeStatuses(): Promise<void> {
@@ -3089,26 +2366,6 @@ function renderErrorState(message: string): void {
   replicaStatusContainer.hidden = false;
 }
 
-function isCurrentAvailabilityRequest(
-  request: CurrencyToken,
-  requestedSnapshot: ReplicaTranslationSnapshot,
-  pair: TranslationPair,
-  generation: number,
-): boolean {
-  const currentPair = state.selectedPair();
-  return isAvailabilityRequestCurrent({
-    replicaViewMode: state.preferences.replicaViewMode,
-    requestMatches: currency.isCurrent(request),
-    generationMatches: captureCoordinator.isCurrent(generation),
-    snapshotMatches: currentReplicaSnapshotMatches(requestedSnapshot),
-    pairMatches: Boolean(
-      currentPair &&
-        currentPair.sourceLanguage === pair.sourceLanguage &&
-        currentPair.targetLanguage === pair.targetLanguage,
-    ),
-  });
-}
-
 function readLanguage(value: string): SupportedLanguage {
   return (SUPPORTED_LANGUAGES as readonly string[]).includes(value)
     ? (value as SupportedLanguage)
@@ -3168,7 +2425,7 @@ function updateControls(): void {
     busy ||
     state.isLiveSourceOnlyMode ||
     !state.snapshot ||
-    currentTranslationFieldCount() === 0 ||
+    translationDriver.currentTranslationFieldCount() === 0 ||
     !state.selectedPair() ||
     state.availability === 'unavailable' ||
     state.translationComplete;
