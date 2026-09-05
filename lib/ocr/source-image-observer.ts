@@ -2066,11 +2066,19 @@ function collectBoundedImageGraph(
         budget.overflow = true;
       }
       if (isImageElement(node)) {
+        // Images are collected past the configured cap, up to the absolute
+        // observer maximum, so admission can rank them by visual attention
+        // instead of by DOM order; the image budget only records that the
+        // configured cap was exceeded.
         if (budget.imagesRemaining <= 0) {
           budget.overflow = true;
         } else {
           budget.imagesRemaining -= 1;
+        }
+        if (images.length < MAX_OBSERVED_SOURCE_IMAGES) {
           images.push(node);
+        } else {
+          budget.overflow = true;
         }
       }
       const shadow = readOpenSourceShadowRoot(node);
