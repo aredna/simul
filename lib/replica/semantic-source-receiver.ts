@@ -66,6 +66,16 @@ export type ResolvedSemanticSourceProof =
       readonly target: HTMLElement;
     }
   | {
+      readonly kind: 'aria-relationship';
+      readonly proof: Extract<SemanticSourceProof, {
+        kind: 'aria-relationship';
+      }>;
+      readonly target: HTMLElement;
+      /** Replica references in author order, filtered to represented, safe,
+       * same-tree-scope nodes. */
+      readonly references: readonly HTMLElement[];
+    }
+  | {
       readonly kind: 'tab-state';
       readonly proof: Extract<SemanticSourceProof, { kind: 'tab-state' }>;
       readonly trigger: HTMLElement;
@@ -576,6 +586,32 @@ export class SemanticSourceReceiver {
         target: target as HTMLElement,
       });
     }
+    if (proof.kind === 'aria-relationship') {
+      const target = this.#resolveElement(proof.nodeId);
+      if (!target || !this.#proofTargetIsSafe(target, false)) return undefined;
+      const references: HTMLElement[] = [];
+      const seen = new Set<Element>();
+      for (const refNodeId of proof.targetNodeIds) {
+        const ref = this.#resolveElement(refNodeId);
+        if (
+          !ref || ref === target || seen.has(ref) ||
+          ref.ownerDocument !== target.ownerDocument ||
+          ref.getRootNode() !== target.getRootNode() ||
+          !this.#proofTargetIsSafe(ref, false)
+        ) continue;
+        seen.add(ref);
+        references.push(ref as HTMLElement);
+      }
+      // Individual references that are not represented, not safe, or in another
+      // tree scope are filtered out rather than voiding the whole batch (unlike
+      // a select's contained options); an empty result presents as a no-op.
+      return Object.freeze({
+        kind: proof.kind,
+        proof,
+        target: target as HTMLElement,
+        references: Object.freeze(references),
+      });
+    }
     if (proof.kind === 'tab-state') {
       const trigger = this.#resolveElement(proof.tabNodeId);
       const panel = this.#resolveElement(proof.panelNodeId);
@@ -850,6 +886,10 @@ function sameResolvedProof(
   }
   if (left.kind === 'aria-state') {
     return right.kind === 'aria-state' && left.target === right.target;
+  }
+  if (left.kind === 'aria-relationship') {
+    return right.kind === 'aria-relationship' && left.target === right.target &&
+      sameNodeList(left.references, right.references);
   }
   if (left.kind === 'tab-state') {
     return right.kind === 'tab-state' && left.trigger === right.trigger &&

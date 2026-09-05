@@ -298,6 +298,47 @@ describe('SemanticProofPresenter', () => {
       .toBe(false);
   });
 
+  it('re-points aria relationships at replica nodes and restores them', () => {
+    const { document } = parseHTML(`<html><body>
+      <div id="region" role="group">Fields</div>
+      <h2 id="keepid">Billing</h2>
+      <span>Your billing address</span>
+    </body></html>`);
+    const region = document.querySelector<HTMLElement>('#region')!;
+    const heading = document.querySelector<HTMLElement>('#keepid')!;
+    const note = document.querySelector<HTMLElement>('span')!;
+    const proofs: readonly ResolvedSemanticSourceProof[] = [{
+      kind: 'aria-relationship',
+      proof: {
+        kind: 'aria-relationship', bridge: 'isolated-html', nodeId: 1,
+        revision: 1, gate: 'controlSemantics', relation: 'labelledby',
+        targetNodeIds: [2, 3], classifierVersion: 1,
+      },
+      target: region,
+      references: [heading, note],
+    }];
+    const presenter = new SemanticProofPresenter({
+      document: document as unknown as Document,
+    });
+    expect(presenter.apply(proofs)).toBe(true);
+    // The heading keeps its own unique id; the note gets a replica-owned one.
+    expect(heading.getAttribute('id')).toBe('keepid');
+    const assignedId = note.getAttribute('id');
+    expect(assignedId).toMatch(/^simul-aria-ref-/u);
+    expect(region.getAttribute('aria-labelledby')).toBe(`keepid ${assignedId}`);
+    expect(note.getAttribute('data-simul-aria-relationship-ref')).toBe('v1');
+
+    presenter.clear();
+    // The relationship and the replica-owned id are removed; the source id
+    // is left untouched.
+    expect(region.hasAttribute('aria-labelledby')).toBe(false);
+    expect(region.hasAttribute('data-simul-source-aria-labelledby-relationship'))
+      .toBe(false);
+    expect(note.hasAttribute('id')).toBe(false);
+    expect(note.hasAttribute('data-simul-aria-relationship-ref')).toBe(false);
+    expect(heading.getAttribute('id')).toBe('keepid');
+  });
+
   it('preserves same-value mirror updates to disclosure relationships', () => {
     const { document } = parseHTML(`<html><body>
       <button id="trigger">Menu</button><section id="original">Items</section>

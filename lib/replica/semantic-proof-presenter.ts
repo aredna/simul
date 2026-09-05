@@ -348,6 +348,53 @@ function applyTypedProof(
       if (stillOwned) restoreAttribute(resolved.target, marker, originalMarker);
     };
   }
+  if (resolved.kind === 'aria-relationship') {
+    // No represented reference resolved: leave the control untouched.
+    if (resolved.references.length === 0) return () => undefined;
+    const doc = resolved.target.ownerDocument;
+    const attribute = `aria-${resolved.proof.relation}`;
+    const marker =
+      `data-simul-source-aria-${resolved.proof.relation}-relationship`;
+    // Point the control at the already-present replica nodes it named,
+    // assigning a replica-owned id only when the node has no usable unique one.
+    const assigned: Array<{ element: Element; id: string; added: boolean }> = [];
+    const ids: string[] = [];
+    for (const ref of resolved.references) {
+      const existing = ref.getAttribute('id');
+      if (existing && doc.getElementById(existing) === ref) {
+        assigned.push({ element: ref, id: existing, added: false });
+        ids.push(existing);
+        continue;
+      }
+      const id = uniqueReplicaAriaReferenceId(doc);
+      ref.setAttribute('id', id);
+      ref.setAttribute(ARIA_RELATIONSHIP_REF_MARKER, 'v1');
+      assigned.push({ element: ref, id, added: true });
+      ids.push(id);
+    }
+    const joined = ids.join(' ');
+    const original = resolved.target.getAttribute(attribute);
+    const originalMarker = resolved.target.getAttribute(marker);
+    resolved.target.setAttribute(attribute, joined);
+    resolved.target.setAttribute(marker, 'v1');
+    return () => {
+      const stillOwned = resolved.target.getAttribute(marker) === 'v1';
+      if (stillOwned && resolved.target.getAttribute(attribute) === joined) {
+        restoreAttribute(resolved.target, attribute, original);
+      }
+      if (stillOwned) restoreAttribute(resolved.target, marker, originalMarker);
+      for (const entry of assigned) {
+        if (
+          entry.added &&
+          entry.element.getAttribute(ARIA_RELATIONSHIP_REF_MARKER) === 'v1' &&
+          entry.element.getAttribute('id') === entry.id
+        ) {
+          entry.element.removeAttribute('id');
+          entry.element.removeAttribute(ARIA_RELATIONSHIP_REF_MARKER);
+        }
+      }
+    };
+  }
   if (resolved.kind === 'tab-state') {
     const { trigger, panel, proof } = resolved;
     const controlId = resolved.panelId ?? proof.relationId;
@@ -490,4 +537,20 @@ function restoreAttribute(
 ): void {
   if (value === null) element.removeAttribute(name);
   else element.setAttribute(name, value);
+}
+
+/** Marks a replica id assigned by an aria-relationship proof so teardown can
+ * remove exactly the ids it added and leave source-authored ids untouched. */
+const ARIA_RELATIONSHIP_REF_MARKER = 'data-simul-aria-relationship-ref';
+let ariaRelationshipReferenceCounter = 0;
+
+/** A replica-owned id that no current replica node already uses. */
+function uniqueReplicaAriaReferenceId(doc: Document): string {
+  for (let attempt = 0; attempt < 1_000_000; attempt += 1) {
+    const candidate =
+      `simul-aria-ref-${(ariaRelationshipReferenceCounter++).toString(36)}`;
+    if (!doc.getElementById(candidate)) return candidate;
+  }
+  return `simul-aria-ref-x${Date.now().toString(36)}` +
+    Math.random().toString(36).slice(2);
 }

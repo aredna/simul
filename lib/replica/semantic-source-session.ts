@@ -27,6 +27,8 @@ import {
   semanticAriaStateAttribute,
   semanticAriaStateGate,
   type SemanticAriaState,
+  type SemanticAriaRelation,
+  MAX_SEMANTIC_ARIA_RELATIONSHIP_TARGETS,
 } from './semantic-source-protocol';
 import {
   SOURCE_SECRET_CLASSIFIER_VERSION,
@@ -139,7 +141,8 @@ type SemanticSourceProofDraft =
   | Omit<Extract<SemanticSourceProof, { kind: 'structural-menu' }>, 'revision'>
   | Omit<Extract<SemanticSourceProof, { kind: 'choice-state' }>, 'revision'>
   | Omit<Extract<SemanticSourceProof, { kind: 'control-state' }>, 'revision'>
-  | Omit<Extract<SemanticSourceProof, { kind: 'aria-state' }>, 'revision'>;
+  | Omit<Extract<SemanticSourceProof, { kind: 'aria-state' }>, 'revision'>
+  | Omit<Extract<SemanticSourceProof, { kind: 'aria-relationship' }>, 'revision'>;
 
 const ELEMENT_NODE = 1;
 const TEXT_NODE = 3;
@@ -192,6 +195,10 @@ const SEMANTIC_ARIA_RANGE_INDICATOR_ROLES = new Set([
 const SEMANTIC_ARIA_RANGE_INPUT_ROLES = new Set([
   'slider', 'spinbutton',
 ]);
+/** Accessible-name/description relationships carried as native bridge IDs. */
+const SEMANTIC_ARIA_RELATIONS: readonly SemanticAriaRelation[] = [
+  'labelledby', 'describedby',
+];
 const SEMANTIC_ACTIVATION_ROLES = new Set([
   'button', 'combobox', 'menuitem', 'menuitemcheckbox', 'menuitemradio',
   'tab', 'treeitem',
@@ -947,6 +954,30 @@ export class SemanticSourceSession {
       }
     }
 
+    if (scope.controlSemantics && stack.length === 0) {
+      for (const element of elements) {
+        const classification = classifications.get(element);
+        if (classification?.category !== 'public-semantic') continue;
+        const controlNodeId = this.#nodeId(element);
+        if (!controlNodeId) continue;
+        for (const relation of SEMANTIC_ARIA_RELATIONS) {
+          const targetNodeIds = this.#readAriaRelationshipTargets(
+            element, relation, controlNodeId,
+          );
+          if (!targetNodeIds) continue;
+          addProof({
+            kind: 'aria-relationship',
+            bridge: this.environment.bridge,
+            nodeId: controlNodeId,
+            gate: 'controlSemantics',
+            relation,
+            targetNodeIds,
+            classifierVersion: SOURCE_SECRET_CLASSIFIER_VERSION,
+          });
+        }
+      }
+    }
+
     for (const tab of validatedTabs) {
       const tabNodeId = this.#nodeId(tab.trigger);
       const panelNodeId = this.#nodeId(tab.panel);
@@ -1531,6 +1562,44 @@ export class SemanticSourceSession {
     } catch {
       return undefined;
     }
+  }
+
+  /**
+   * Resolves an `aria-labelledby`/`aria-describedby` id list to the native
+   * bridge identities of the referenced nodes, in author order. Ids are
+   * resolved only within the element's own tree scope (aria references never
+   * cross a shadow boundary), never to the element itself, never to a
+   * credential-secret node, and never as text. Returns undefined when the
+   * attribute is absent or nothing safe resolves.
+   */
+  #readAriaRelationshipTargets(
+    element: Element,
+    relation: SemanticAriaRelation,
+    controlNodeId: number,
+  ): readonly number[] | undefined {
+    const raw = safelyReadAttribute(element, `aria-${relation}`);
+    const ids = raw.trim().split(/\s+/u).filter(Boolean);
+    if (ids.length === 0) return undefined;
+    const root = safelyRead(() => element.getRootNode());
+    const lookup = root as Document | ShadowRoot | undefined;
+    if (!lookup || typeof lookup.getElementById !== 'function') return undefined;
+    const targetNodeIds: number[] = [];
+    const seen = new Set<number>();
+    for (const id of ids) {
+      if (targetNodeIds.length >= MAX_SEMANTIC_ARIA_RELATIONSHIP_TARGETS) break;
+      if (!isSafeDomId(id)) continue;
+      const ref = safelyRead(() => lookup.getElementById(id));
+      if (!ref || ref === element) continue;
+      if (safelyRead(() => ref.getRootNode()) !== root) continue;
+      if (this.#classifyElement(ref, false, false).category === 'secret') continue;
+      const refNodeId = this.#nodeId(ref);
+      if (!refNodeId || refNodeId === controlNodeId || seen.has(refNodeId)) {
+        continue;
+      }
+      seen.add(refNodeId);
+      targetNodeIds.push(refNodeId);
+    }
+    return targetNodeIds.length > 0 ? Object.freeze(targetNodeIds) : undefined;
   }
 }
 

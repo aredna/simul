@@ -281,6 +281,39 @@ export function isSemanticAriaStateValue(
   return value === 'true' || value === 'false' || value === 'mixed';
 }
 
+export const MAX_SEMANTIC_ARIA_RELATIONSHIP_TARGETS = 32;
+export type SemanticAriaRelation = 'labelledby' | 'describedby';
+
+/**
+ * A safe accessible-name/description relationship carried as native bridge
+ * identities, never as label text. The base sanitizer strips `aria-labelledby`
+ * and `aria-describedby` as private ID-reference surface, so a control named
+ * only by referenced visible text arrives unnamed. This proof lets the
+ * presenter re-point the control at the already-present replica nodes it named
+ * (assigning them replica-owned ids as needed), restoring the accessible name
+ * or description without duplicating the referenced text. Page state, so it
+ * reads under `controlSemantics`.
+ */
+export interface SemanticAriaRelationshipProof {
+  readonly kind: 'aria-relationship';
+  readonly bridge: SemanticSourceBridgeId;
+  /** Native bridge identity of the control that carries the reference. */
+  readonly nodeId: number;
+  /** Monotonic revision for this relationship identity. */
+  readonly revision: number;
+  readonly gate: 'controlSemantics';
+  readonly relation: SemanticAriaRelation;
+  /** Native bridge identities of the referenced nodes, in author order. */
+  readonly targetNodeIds: readonly number[];
+  readonly classifierVersion: typeof SOURCE_SECRET_CLASSIFIER_VERSION;
+}
+
+export function isSemanticAriaRelation(
+  value: unknown,
+): value is SemanticAriaRelation {
+  return value === 'labelledby' || value === 'describedby';
+}
+
 export type SemanticSourceProof =
   | SemanticSelectStateProof
   | SemanticSelectPresentationProof
@@ -289,7 +322,8 @@ export type SemanticSourceProof =
   | SemanticStructuralMenuProof
   | SemanticChoiceStateProof
   | SemanticControlStateProof
-  | SemanticAriaStateProof;
+  | SemanticAriaStateProof
+  | SemanticAriaRelationshipProof;
 
 /** A complete replacement of the admitted semantic set for one policy epoch. */
 export interface SemanticSourceBatch {
@@ -465,6 +499,8 @@ export function semanticSourceBatchByteLength(
       bytes += proof.relationId.length + 208;
     } else if (proof.kind === 'tab-state') {
       bytes += proof.relationId.length + 192;
+    } else if (proof.kind === 'aria-relationship') {
+      bytes += proof.targetNodeIds.length * 16 + proof.relation.length + 176;
     } else {
       bytes += 176;
     }
@@ -671,6 +707,37 @@ export function readSemanticSourceProof(
       classifierVersion: SOURCE_SECRET_CLASSIFIER_VERSION,
     });
   }
+  if (input.kind === 'aria-relationship') {
+    if (!hasExactKeys(input, [
+      'kind', 'bridge', 'nodeId', 'revision', 'gate', 'relation',
+      'targetNodeIds', 'classifierVersion',
+    ]) || input.gate !== 'controlSemantics' ||
+      !positiveSafeInteger(input.nodeId) ||
+      !isSemanticAriaRelation(input.relation) ||
+      !Array.isArray(input.targetNodeIds) ||
+      input.targetNodeIds.length < 1 ||
+      input.targetNodeIds.length > MAX_SEMANTIC_ARIA_RELATIONSHIP_TARGETS
+    ) return undefined;
+    const targetNodeIds: number[] = [];
+    const seen = new Set<number>();
+    for (const value of input.targetNodeIds) {
+      if (!positiveSafeInteger(value) || value === input.nodeId || seen.has(value)) {
+        return undefined;
+      }
+      seen.add(value);
+      targetNodeIds.push(value);
+    }
+    return Object.freeze({
+      kind: input.kind,
+      bridge: input.bridge,
+      nodeId: input.nodeId,
+      revision: input.revision,
+      gate: input.gate,
+      relation: input.relation,
+      targetNodeIds: Object.freeze(targetNodeIds),
+      classifierVersion: SOURCE_SECRET_CLASSIFIER_VERSION,
+    });
+  }
   if (input.kind === 'tab-state') {
     if (!hasExactKeys(input, [
       'kind', 'bridge', 'relationId', 'revision', 'gate', 'tabNodeId',
@@ -808,6 +875,9 @@ export function semanticSourceProofIdentity(proof: SemanticSourceProof): string 
   if (proof.kind === 'aria-state') {
     return `semantic-aria-state-v1:${proof.nodeId}:${proof.state}`;
   }
+  if (proof.kind === 'aria-relationship') {
+    return `semantic-aria-relationship-v1:${proof.nodeId}:${proof.relation}`;
+  }
   if (proof.kind === 'tab-state') return proof.relationId;
   if (proof.kind === 'structural-menu') return proof.relationId;
   return proof.relationId;
@@ -835,6 +905,10 @@ export function semanticSourceProofSignature(proof: SemanticSourceProof): string
   if (proof.kind === 'aria-state') return [
     proof.bridge, proof.kind, proof.nodeId, proof.gate, proof.state, proof.value,
     proof.classifierVersion,
+  ].join('\u0000');
+  if (proof.kind === 'aria-relationship') return [
+    proof.bridge, proof.kind, proof.nodeId, proof.gate, proof.relation,
+    proof.targetNodeIds.join(','), proof.classifierVersion,
   ].join('\u0000');
   if (proof.kind === 'tab-state') return [
     proof.bridge, proof.kind, proof.relationId, proof.gate,
