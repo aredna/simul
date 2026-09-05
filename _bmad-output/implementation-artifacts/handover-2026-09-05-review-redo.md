@@ -7,11 +7,12 @@
 | Merged | [#9 "0.4.0: review fixes re-applied over the 0.3.3 line"](https://github.com/aredna/simul/pull/9), rebase-merged 2026-09-05; [#11](https://github.com/aredna/simul/pull/11) removed the GitHub Actions workflow at your request. `main` is `95f1ba7` |
 | Released | tag `v0.4.0` at `9f4987f` (the publish commit); GitHub pre-release [Simul 0.4.0 beta (v.20260905.1)](https://github.com/aredna/simul/releases/tag/v0.4.0) with the zipped `dist/chrome-unpacked` and notes from D29 and D30 |
 | Open PR | [#10 "Side-panel split over the 0.4.0 line"](https://github.com/aredna/simul/pull/10), branch `refactor/side-panel-split`, 17 commits rebased onto `main`. Fifteen modules, `main.ts` 5,305 → 1,472 lines (D31). Ready for review |
+| Open PR | [#12 "Review remainder and deferred-work fixes outside the side panel"](https://github.com/aredna/simul/pull/12), branch `fix/review-remainder-lib` off `main`, 10 commits: L10 Hebrew tag probe, M5 host-grant ledger, and six deferred-work items (validator project root, shadow-host overlap, scroll progress bound, contradictory tablists, padding-box clip, scroller scan budget). Logged as D33 (on that branch). Independent of #10 in source; both rebuild the side-panel chunk, so whichever merges second needs a rebase and `npm run artifact:sync` |
 | Closed | [#8](https://github.com/aredna/simul/pull/8) (superseded; branch deleted) and Dependabot #1, #2, #4, #6 (superseded by the 0.4.0 pins) |
 | Local `main` | at `origin/main` (`95f1ba7`) |
 | Gate at #10 head | typecheck clean; 1,333 tests across 94 files (the Chrome-fixture test skips without a browser); `dist/chrome-unpacked` synced and byte-verified. There is no CI any more: run `npm run check` before every push |
 | Build identity | `0.4.0 beta v.20260905.1`; placeholder icons (your choice for this build); exact pins with a tracked lockfile |
-| Records | `review-2026-09-03-decision-log.md` D1–D32 and `review-2026-09-03-findings.md` (the original review, 52 findings and 12 recommendations, converted from the page it was first published on) in this directory. Reports stay in the repository from now on; nothing further is published to claude.ai. |
+| Records | `review-2026-09-03-decision-log.md` D1–D32 here and D33 on `fix/review-remainder-lib`, plus `review-2026-09-03-findings.md` (the original review, 52 findings and 12 recommendations, converted from the page it was first published on) in this directory. Reports stay in the repository from now on; nothing further is published to claude.ai. |
 
 ## What happened, in order
 
@@ -125,13 +126,17 @@ recovery gate has a sliding budget of 3 rebuilds per 60 s.
    before any further release; `v0.4.0` stays on the #9 merge.
 2. **Decide on `.github/dependabot.yml`** (D32): it was left when the CI
    workflow was removed because it is not CI.
-3. **Remaining review items** (your 2026-09-05 choice for the next session):
-   L3 Web Lock held across `permissions.request`, L4/L5 string catalogue for
-   titles and aria labels, M5 recording granted origins, D17 receiver-side
-   autocomplete check, L10 verifying Chrome's `he` versus `iw` handling.
-4. **Upstream's own deferred work** is listed in
-   `_bmad-output/implementation-artifacts/deferred-work.md` and untouched.
-5. **Real icon mark** whenever it exists (replace `public/icon/*.png`; the
+3. **Review and merge PR #12** (D33). L10 and M5 are fixed there; L3 is
+   obsolete on this line and D17 stays a documented limit (reasons in D33).
+   Two choices in M5 are marked "please confirm". Merging #12 first and then
+   rebasing #10 (with an artifact resync) is the smaller rebase.
+4. **Side-panel items that wait for #10:** L4/L5 string catalogue for titles
+   and aria labels, the transactional image-permission rollback, and the
+   redirect-during-load capture from `deferred-work.md`.
+5. **Upstream's remaining deferred work** is listed in
+   `_bmad-output/implementation-artifacts/deferred-work.md` (42 entries after
+   #12).
+6. **Real icon mark** whenever it exists (replace `public/icon/*.png`; the
    validator only checks presence and size names).
 
 ## Known limits and loose ends
