@@ -1097,3 +1097,67 @@ side panel:
   code.
 
 `deferred-work.md` is down to 38 entries.
+
+### D36. Third lib-level batch: controlled-content admission and launch ordering (2026-09-06)
+
+Branch `fix/deferred-lib-batch-3` off `main` (`ce5b314`), again outside the
+side panel, so it is independent of #10 and #16 in source and of #14 except
+for three lines of `html-mirror-source.ts` context. Numbering note: D34 (#14)
+and D35 (#16) live on their own branches; whichever of the three merges later
+needs the sections kept one after the other. The current handover is the one
+on `refactor/side-panel-split`; the copy on `main` still describes PR #9.
+
+- **Deferred: custom attribute state (done).**
+  `sourceControlledContentMutationsMayChange` treated only `aria-hidden`,
+  `hidden`, `class` and `style` as layout-changing, so `[data-state="open"]`
+  on a tabpanel's wrapper revealed the panel without refreshing the withholding
+  proof until another recognized signal arrived. Every remaining attribute name
+  now runs the same bounded check (`sourceControlledContentLayoutMayChange`:
+  participants, their flat-tree ancestors, and descendants of participants);
+  the specific `aria-controls`, `aria-selected`, `aria-expanded`, `id` and
+  `role` branches are unchanged, and churn outside those paths is still
+  ignored. The test asserts both directions and the resulting patch.
+- **Deferred: remote selector changes (done).** When the painted-visibility
+  comparison reports a changed target that is a controlled-content participant
+  or lies on a participant's path, `HtmlMirrorSourceSession` refreshes the
+  controlled-content policy before that target is re-emitted. A sibling
+  combinator or `:has()` reveal touches no participant, so no mutation record
+  refreshed the policy; the visibility index queued the panel and the retained
+  policy sanitized it as withheld, re-emitting it blank. The test toggles
+  `data-open` on a sibling button that is neither a participant nor on a
+  participant's path and checks the reveal and the withdrawal.
+- **Deferred: monotonic toolbar authorization (done).** The launch epoch is
+  `<generation>.<uuid>`. The generation is allocated once per worker lifecycle
+  as `max(persisted + 1, Date.now())` and persisted in `chrome.storage.session`,
+  which outlives service-worker restarts and is cleared with the browser,
+  together with every companion that could hold a stamp.
+  `isNewerCompanionLaunchStamp` orders different epochs by generation, so a
+  delayed message from an older lifecycle no longer supersedes a newer launch;
+  epochs without a shared order (an older build's bare UUID, or two lifecycles
+  that read the same persisted value because a write failed) keep the previous
+  rule that a different worker is newer. If session storage is unavailable the
+  generation degrades to clock order. The wire shape (`launchEpoch` string
+  under 128 characters, `launchSequence`) and the side-panel consumer are
+  unchanged, which keeps this batch off the files #10 rewrites.
+  **Please confirm** the `storage.session` choice: `storage.local` would also
+  order across browser restarts, but nothing that survives a restart holds a
+  stamp, and session storage cannot leave a stale counter behind.
+- **Deferred: semantic mutations inside open shadow roots (removed without a
+  change).** `SemanticSourceSession.#observeSemanticRoot` already attaches the
+  same MutationObserver and the DOM-change, select-activation and
+  presentation-change listeners to every open shadow root the scan admits, and
+  `tests/semantic-source-session.test.ts` ("observes controls inserted inside
+  an open shadow root") covers a later insertion inside such a root. A root
+  attached to an already-scanned host is picked up at the next refresh, which
+  any observed mutation or the control poll triggers. The document-only
+  observer the entry describes does not exist in the current code.
+
+Not attempted from the remaining list, with the reason: ancestor paint changes
+in the screenshot capture identity need a design for which ancestors and
+properties count without turning every scroll into a recapture; the
+text-serialization privacy floor items need the fixture matrix the entries
+call for; the `aria-labelledby` and `aria-current`/`aria-pressed`/range items
+change the typed read-scope protocol and deserve their own review.
+
+`deferred-work.md` is down to 38 entries on this branch (32 once #14 and #16
+merge).

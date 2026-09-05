@@ -57,9 +57,6 @@ build.
   summary: Extend image discovery and OCR overlay routing into accessible open shadow roots.
   evidence: The isolated mirror reconstructs open shadow roots, but the current source image observer intentionally scans ordinary document `<img>` elements and does not traverse separate shadow-root trees, so those mirrored images are outside the current OCR boundary.
 - source_spec: `_bmad-output/implementation-artifacts/spec-fix-ocr-native-callback-binding-and-build-identity.md`
-  summary: Give toolbar authorization stamps a monotonic generation that remains ordered across background service-worker restarts.
-  evidence: Sequence ordering is deterministic within one worker epoch, but UUID epochs have no cross-epoch order, so an exceptionally delayed message from an older worker lifecycle cannot be distinguished from the first launch of a newer lifecycle.
-- source_spec: `_bmad-output/implementation-artifacts/spec-fix-ocr-native-callback-binding-and-build-identity.md`
   summary: Make rapid toolbar launches across multiple windows clean up every losing preopened side panel without disturbing the winning surface.
   evidence: Chrome's user-gesture constraint requires synchronously preopening the panel before saved launch preferences hydrate; a superseded cross-window click can leave that preopened panel visible, while Chrome 138's global disable/re-enable fallback cannot safely close only the losing window.
 - source_spec: `_bmad-output/implementation-artifacts/spec-isolated-html-fidelity-baseline-mode.md`
@@ -90,17 +87,8 @@ build.
   summary: Align initial text serialization with the computed painted-visibility privacy boundary.
   evidence: Ordinary opacity-zero, content-visibility-hidden, clipped, or zero-geometry text can pass the serializer's narrower withholding predicate and remain present in the replica.
 - source_spec: `_bmad-output/implementation-artifacts/spec-isolated-only-runtime-cache-correctness.md`
-  summary: Observe semantic mutations inside every admitted open shadow root.
-  evidence: Initial semantic discovery traverses open shadow roots, but the document-only MutationObserver cannot see later shadow-root changes that make text stale or newly secret.
-- source_spec: `_bmad-output/implementation-artifacts/spec-isolated-only-runtime-cache-correctness.md`
   summary: Include relevant ancestor paint changes in screenshot-based image capture identity.
   evidence: Ancestor background, border, padding, or content changes can alter pixels beneath a transparent or composited image without advancing its capture revision, allowing stale OCR projection reuse.
-- source_spec: `_bmad-output/implementation-artifacts/spec-isolated-only-runtime-cache-correctness.md`
-  summary: Refresh controlled-content policy when remote selector changes alter a selected tabpanel's visibility without resizing the document.
-  evidence: The visibility comparison can identify the changed target while the retained policy still sanitizes the newly visible panel as withheld, leaving it blank.
-- source_spec: `_bmad-output/implementation-artifacts/spec-public-release-readiness.md`
-  summary: Recompute controlled-content visibility when a custom attribute changes CSS-selected tab or disclosure state.
-  evidence: The relationship policy observes all attribute mutations but only treats a fixed attribute set as layout-changing, so selectors such as `[data-state="open"]` can reveal a panel without refreshing the withholding proof until another recognized signal arrives.
 - source_spec: `_bmad-output/implementation-artifacts/spec-public-release-readiness.md`
   summary: Audit when the isolated replica iframe becomes available to assistive technology for ordinary translated documents.
   evidence: The iframe starts `aria-hidden`, while the reviewed unhide path is tied to semantic proof presentation; a text-only article needs an installed-Chrome accessibility-tree test proving the committed replica is exposed.
