@@ -4,7 +4,10 @@ import {
   createDetachedCompanionUrl,
   createDetachedWindowData,
   isFocusedNormalBrowserWindow,
+  allocateCompanionLaunchGeneration,
+  createCompanionLaunchEpoch,
   isNewerCompanionLaunchStamp,
+  readCompanionLaunchEpochGeneration,
   resolveCompanionLaunchSurface,
   sameCompanionSourcePage,
   shouldFollowActivatedTab,
@@ -242,5 +245,87 @@ describe('companion surface launch decisions', () => {
       epoch: 'worker-b',
       sequence: 1,
     })).toBe(true);
+  });
+
+  it('orders launch epochs by their persisted generation across worker lifecycles', () => {
+    const older = createCompanionLaunchEpoch(41, 'nonce-a');
+    const newer = createCompanionLaunchEpoch(42, 'nonce-b');
+    expect(readCompanionLaunchEpochGeneration(older)).toBe(41);
+    expect(readCompanionLaunchEpochGeneration('worker-a')).toBeUndefined();
+    expect(readCompanionLaunchEpochGeneration('0.nonce')).toBeUndefined();
+    expect(readCompanionLaunchEpochGeneration('99999999999999999.nonce'))
+      .toBeUndefined();
+
+    // A delayed message from the older lifecycle no longer supersedes the
+    // newer one, whatever its click sequence.
+    expect(isNewerCompanionLaunchStamp(
+      { epoch: newer, sequence: 1 },
+      { epoch: older, sequence: 7 },
+    )).toBe(false);
+    expect(isNewerCompanionLaunchStamp(
+      { epoch: older, sequence: 7 },
+      { epoch: newer, sequence: 1 },
+    )).toBe(true);
+    expect(isNewerCompanionLaunchStamp(
+      { epoch: newer, sequence: 2 },
+      { epoch: newer, sequence: 1 },
+    )).toBe(false);
+    expect(isNewerCompanionLaunchStamp(undefined, { epoch: newer, sequence: 0 }))
+      .toBe(false);
+
+    // Two lifecycles that read the same persisted generation, or an older
+    // build's bare UUID, have no shared order and keep the previous rule.
+    expect(isNewerCompanionLaunchStamp(
+      { epoch: createCompanionLaunchEpoch(42, 'nonce-a'), sequence: 5 },
+      { epoch: createCompanionLaunchEpoch(42, 'nonce-b'), sequence: 1 },
+    )).toBe(true);
+    expect(isNewerCompanionLaunchStamp(
+      { epoch: 'legacy-uuid', sequence: 5 },
+      { epoch: newer, sequence: 1 },
+    )).toBe(true);
+    expect(isNewerCompanionLaunchStamp(
+      { epoch: newer, sequence: 5 },
+      { epoch: 'legacy-uuid', sequence: 1 },
+    )).toBe(true);
+  });
+
+  it('allocates a generation above the persisted one and never below the clock', async () => {
+    let stored: unknown;
+    const store = {
+      read: async () => stored,
+      write: async (generation: number) => {
+        stored = generation;
+      },
+    };
+    await expect(allocateCompanionLaunchGeneration(store, () => 1_000))
+      .resolves.toBe(1_000);
+    expect(stored).toBe(1_000);
+    // Clock rollback: the persisted generation still advances.
+    await expect(allocateCompanionLaunchGeneration(store, () => 900))
+      .resolves.toBe(1_001);
+    // Clock ahead: the clock wins, so a later lifecycle without storage still
+    // orders after this one.
+    await expect(allocateCompanionLaunchGeneration(store, () => 5_000))
+      .resolves.toBe(5_000);
+    expect(stored).toBe(5_000);
+    // A corrupt persisted value falls back to the clock.
+    stored = 'not a number';
+    await expect(allocateCompanionLaunchGeneration(store, () => 6_000))
+      .resolves.toBe(6_000);
+  });
+
+  it('degrades to clock order when session storage is unavailable', async () => {
+    const failing = {
+      read: async (): Promise<unknown> => {
+        throw new Error('no session storage');
+      },
+      write: async () => {
+        throw new Error('no session storage');
+      },
+    };
+    await expect(allocateCompanionLaunchGeneration(failing, () => 7_000))
+      .resolves.toBe(7_000);
+    await expect(allocateCompanionLaunchGeneration(failing, () => Number.NaN))
+      .resolves.toBe(1);
   });
 });
