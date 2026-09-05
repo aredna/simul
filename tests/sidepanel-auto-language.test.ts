@@ -114,7 +114,7 @@ describe('sidepanel Auto image-language reconciliation', () => {
       script.indexOf('async function resetAllExtensionSettings'),
     );
     expect(commit.indexOf('purgeSourceDerivedRuntime('))
-      .toBeLessThan(commit.indexOf('await sendPreferenceCommand'));
+      .toBeLessThan(commit.indexOf('await preferenceClient.send'));
 
     const purge = script.slice(
       script.indexOf('function purgeSourceDerivedRuntime'),
