@@ -101,7 +101,11 @@ describe('sidepanel Auto image-language reconciliation', () => {
     expect(currency).toContain('this.currentReplicaDocumentMatches(proposal.document)');
     expect(currency).toContain('proposal.replayLease === state.snapshot?.replayLease');
 
-    const navigation = slice(script, 'onSourceNavigationStarted: (next) => {', 'onFollowedUrlChanged:');
+    const pipeline = readFileSync(
+      new URL('../entrypoints/sidepanel/capture-pipeline.ts', import.meta.url),
+      'utf8',
+    );
+    const navigation = slice(pipeline, 'beginSourceNavigation(next', 'invalidateCompanion(message');
     expect(navigation).toContain("resolvedSourceLanguageOrigin === 'image'");
     expect(navigation).toContain('translationDriver.clearAutoImageLanguageResolution()');
   });
