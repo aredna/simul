@@ -60,10 +60,14 @@ describe('sidepanel Auto image-language reconciliation', () => {
   });
 
   it('keys image-derived language to the exact enabled method and read policy', () => {
-    const configuration = slice(script, 'function configureImageTranslation', 'async function refreshOcrProviderRuntimeStatuses');
+    const config = readFileSync(
+      new URL('../entrypoints/sidepanel/image-translation-config.ts', import.meta.url),
+      'utf8',
+    );
+    const configuration = slice(config, '  configure(): void {', 'usablePixelProviderOrder(): readonly');
     expect(configuration).toContain('autoImageLanguageConfigurationKey({');
     expect(configuration).toContain('providerOrder: routedProviderOrder,');
-    expect(configuration).toContain('enabledMethodOrder: enabledAutoImageLanguageMethodOrder(');
+    expect(configuration).toContain('enabledMethodOrder: this.#enabledAutoImageLanguageMethodOrder(');
     expect(configuration).toContain('policyFingerprint: replicaReadScopeFingerprint(readScope),');
     expect(configuration).toContain('controlImages: readScope.controlImages,');
     expect(configuration).toContain('shouldClearAutoImageLanguageResolution');
