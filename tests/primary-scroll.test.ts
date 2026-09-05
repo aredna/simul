@@ -125,6 +125,71 @@ describe('primary scroll classification', () => {
       window,
     )).toBe(true);
   });
+
+  it('preserves scroll progress on a document taller than the protocol bound', () => {
+    const { document, window } = parseHTML('<html><body></body></html>');
+    defineScrollBox(document.documentElement, {
+      clientWidth: 1_200, clientHeight: 800,
+      scrollWidth: 1_500, scrollHeight: 250_800,
+      scrollLeft: 60, scrollTop: 125_000,
+    });
+    Object.defineProperties(window, {
+      innerWidth: { configurable: true, value: 1_200 },
+      innerHeight: { configurable: true, value: 800 },
+      scrollX: { configurable: true, value: 60 },
+      scrollY: { configurable: true, value: 125_000 },
+    });
+    Object.defineProperty(document, 'scrollingElement', {
+      configurable: true,
+      value: document.documentElement,
+    });
+
+    // The vertical axis is 250,000 px deep: halfway reads as halfway of the
+    // bound, while the horizontal axis inside the bound stays exact.
+    expect(readDocumentScrollSnapshot(document, window)).toEqual({
+      scrollTarget: 'document', scrollX: 60, scrollY: 50_000,
+      maxScrollX: 300, maxScrollY: 100_000,
+    });
+
+    document.documentElement.scrollTop = 200_000;
+    Object.defineProperty(window, 'scrollY', {
+      configurable: true,
+      value: 200_000,
+    });
+    expect(readDocumentScrollSnapshot(document, window)).toMatchObject({
+      scrollY: 80_000, maxScrollY: 100_000,
+    });
+
+    document.documentElement.scrollTop = 250_000;
+    Object.defineProperty(window, 'scrollY', {
+      configurable: true,
+      value: 250_000,
+    });
+    expect(readDocumentScrollSnapshot(document, window)).toMatchObject({
+      scrollY: 100_000, maxScrollY: 100_000,
+    });
+  });
+
+  it('scales an oversized nested scroller the same way', () => {
+    const { document, window } = parseHTML(
+      '<html><body><main id="feed" style="overflow-y:auto"></main></body></html>',
+    );
+    Object.defineProperties(window, {
+      innerWidth: { configurable: true, value: 1_200 },
+      innerHeight: { configurable: true, value: 800 },
+    });
+    const feed = document.querySelector('#feed')!;
+    defineScrollBox(feed, {
+      clientWidth: 900, clientHeight: 720,
+      scrollWidth: 900, scrollHeight: 400_720,
+      scrollLeft: 0, scrollTop: 100_000,
+    }, { left: 240, top: 60, right: 1_140, bottom: 780 });
+
+    expect(readNestedScrollSnapshot(feed, document, window)).toEqual({
+      scrollTarget: 'nested', scrollX: 0, scrollY: 25_000,
+      maxScrollX: 0, maxScrollY: 100_000,
+    });
+  });
 });
 
 function defineScrollBox(
