@@ -213,16 +213,104 @@ export function sameCompanionSourcePage(
   );
 }
 
-/** Orders toolbar authorizations by click time rather than asynchronous API
- * completion. A new service-worker epoch supersedes the previous worker. */
+/** Session-storage key of the last toolbar launch generation this browser
+ * session allocated. Session storage outlives service-worker restarts and is
+ * cleared with the browser, together with every companion that could hold a
+ * stamp. */
+export const COMPANION_LAUNCH_GENERATION_STORAGE_KEY =
+  'simul:companion-launch-generation';
+
+export interface CompanionLaunchGenerationStore {
+  read(): Promise<unknown>;
+  write(generation: number): Promise<void>;
+}
+
+/**
+ * Allocates the launch generation of a new worker lifecycle: above every
+ * generation this browser session persisted, and never below the clock, so a
+ * lifecycle that cannot reach storage still orders after the ones that could.
+ * Never rejects; storage failures degrade to clock order for this lifecycle.
+ */
+export async function allocateCompanionLaunchGeneration(
+  store: CompanionLaunchGenerationStore,
+  now: () => number = Date.now,
+): Promise<number> {
+  let persisted: number | undefined;
+  try {
+    const stored = await store.read();
+    if (typeof stored === 'number' && Number.isSafeInteger(stored) && stored > 0) {
+      persisted = stored;
+    }
+  } catch {
+    persisted = undefined;
+  }
+  let clock = 1;
+  try {
+    const value = now();
+    if (Number.isSafeInteger(value) && value > 0) clock = value;
+  } catch {
+    clock = 1;
+  }
+  const generation = Math.max(persisted === undefined ? 1 : persisted + 1, clock);
+  try {
+    await store.write(generation);
+  } catch {
+    // The clock-derived generation still orders against the lifecycles that
+    // could persist theirs.
+  }
+  return generation;
+}
+
+/** `<generation>.<nonce>`: the generation orders lifecycles, the nonce keeps
+ * two lifecycles that read the same persisted generation apart. */
+export function createCompanionLaunchEpoch(
+  generation: number,
+  nonce: string,
+): string {
+  return `${generation}.${nonce}`;
+}
+
+/** The generation prefix of a launch epoch, or undefined for an epoch without
+ * one (an older build's bare UUID). */
+export function readCompanionLaunchEpochGeneration(
+  epoch: string,
+): number | undefined {
+  const match = /^([1-9]\d{0,15})\./.exec(epoch);
+  if (!match) return undefined;
+  const generation = Number(match[1]);
+  return Number.isSafeInteger(generation) ? generation : undefined;
+}
+
+/**
+ * Orders toolbar authorizations by click time rather than asynchronous API
+ * completion. Within one worker lifecycle the click sequence orders; across
+ * lifecycles the persisted generation orders, so an exceptionally delayed
+ * message from an older lifecycle no longer supersedes a newer launch. Epochs
+ * without a shared order keep the previous rule: a different worker is newer.
+ */
 export function isNewerCompanionLaunchStamp(
   current: CompanionLaunchStamp | undefined,
   candidate: CompanionLaunchStamp,
 ): boolean {
-  return candidate.epoch.length > 0 &&
-    Number.isSafeInteger(candidate.sequence) &&
-    candidate.sequence > 0 &&
-    (current?.epoch !== candidate.epoch || candidate.sequence > current.sequence);
+  if (
+    candidate.epoch.length === 0 ||
+    !Number.isSafeInteger(candidate.sequence) ||
+    candidate.sequence <= 0
+  ) return false;
+  if (!current) return true;
+  if (current.epoch === candidate.epoch) {
+    return candidate.sequence > current.sequence;
+  }
+  const currentGeneration = readCompanionLaunchEpochGeneration(current.epoch);
+  const candidateGeneration = readCompanionLaunchEpochGeneration(candidate.epoch);
+  if (
+    currentGeneration !== undefined &&
+    candidateGeneration !== undefined &&
+    currentGeneration !== candidateGeneration
+  ) {
+    return candidateGeneration > currentGeneration;
+  }
+  return true;
 }
 
 function positiveInteger(value: number | undefined): number | undefined {

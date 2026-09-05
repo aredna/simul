@@ -47,8 +47,22 @@ describe('background detached companion reuse', () => {
       background.indexOf('browser.windows.onRemoved.addListener('),
     );
     expect(focusFunction).toContain("type: 'simul:authorized-tab'");
-    expect(focusFunction).toContain('launchEpoch: toolbarLaunchEpoch');
+    expect(focusFunction).toContain('launchEpoch: await toolbarLaunchEpoch');
     expect(focusFunction).toContain('launchSequence: clickSequence');
+  });
+
+  it('orders authorizations across worker lifecycles with a persisted generation', () => {
+    expect(background).not.toContain('const toolbarLaunchEpoch = crypto.randomUUID();');
+    expect(background).toContain('allocateCompanionLaunchGeneration({');
+    expect(background).toContain('browser.storage.session.get(');
+    expect(background).toContain('browser.storage.session.set({');
+    expect(background).toContain('createCompanionLaunchEpoch(');
+    const sidePanelLaunch = background.slice(
+      background.indexOf('async function finishToolbarSidePanelLaunch('),
+      background.indexOf('async function rememberSurface('),
+    );
+    expect(sidePanelLaunch).toContain("type: 'simul:authorized-tab'");
+    expect(sidePanelLaunch).toContain('launchEpoch: await toolbarLaunchEpoch');
   });
 
   it('forgets the window once it closes', () => {
