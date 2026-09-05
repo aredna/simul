@@ -1526,11 +1526,26 @@ export class HtmlMirrorSourceSession {
       this.#signalShadowReconciliation();
       return true;
     }
+    // A remote selector change (a sibling's attribute through `~` or `:has()`)
+    // can paint a selected panel without touching any participant, so no
+    // mutation record refreshed the controlled-content policy. Re-admit the
+    // panel before it is re-emitted, or the retained policy would still
+    // sanitize it as withheld and leave it blank.
+    const policy = this.#controlledContentPolicy;
+    let accepted = false;
+    if (
+      policy &&
+      refresh.changedTargets.some((target) =>
+        sourceControlledContentLayoutMayChange(target, policy))
+    ) {
+      accepted = this.#refreshControlledContentPolicy();
+      if (this.#shadowReconciliationPending) return true;
+    }
     for (const target of refresh.changedTargets) {
       this.#queuePending(this.#pendingChildren, target);
       this.#queuePending(this.#pendingAttributes, target);
     }
-    return refresh.changedTargets.length > 0;
+    return accepted || refresh.changedTargets.length > 0;
   }
 
   #scheduleFlush(): void {
