@@ -284,6 +284,79 @@ describe('isolated HTML sanitizer and protocol', () => {
     expect(serialized).not.toContain('Popup payload');
   });
 
+  it('withholds every panel of a tablist whose tabs both claim selection', () => {
+    const { document, window } = parseHTML(`<!doctype html><html><body>
+      <div role="tablist">
+        <div role="tab" aria-selected="true" aria-controls="first-panel">First</div>
+        <div role="tab" aria-selected="true" aria-controls="second-panel">Second</div>
+      </div>
+      <section id="first-panel" role="tabpanel">First contradictory headline</section>
+      <section id="second-panel" role="tabpanel">Second contradictory headline</section>
+      <div role="tablist">
+        <div role="tab" aria-selected="true" aria-controls="sound-panel">Sound</div>
+        <div role="tab" aria-selected="false" aria-controls="closed-panel">Closed</div>
+      </div>
+      <section id="sound-panel" role="tabpanel">Sound headline</section>
+      <section id="closed-panel" role="tabpanel" hidden>Closed headline</section>
+    </body></html>`);
+    installPaintedSourceFixture(document, window as unknown as Window);
+
+    const serialized = JSON.stringify(sanitizeSourceDocument(
+      document,
+      window as unknown as Window,
+      new WeakNodeIdRegistry(),
+    ));
+
+    // Each contradictory pair proves on its own; the tablist as a whole
+    // cannot have two selected panels, so neither is admitted. The sound
+    // tablist next to it is unaffected.
+    expect(serialized).toContain('Sound headline');
+    expect(serialized).not.toContain('Closed headline');
+    expect(serialized).not.toContain('First contradictory headline');
+    expect(serialized).not.toContain('Second contradictory headline');
+  });
+
+  it('proves a selected panel through an overflow clip by the padding box, not the border box', () => {
+    const { document, window } = parseHTML(`<!doctype html><html><body>
+      <div role="tablist">
+        <div role="tab" aria-selected="true" aria-controls="clipped-panel">Tab</div>
+      </div>
+      <div id="clipper" data-test-overflow="hidden">
+        <section id="clipped-panel" role="tabpanel">Clipped headline</section>
+      </div>
+    </body></html>`);
+    installPaintedSourceFixture(document, window as unknown as Window);
+    const clipper = document.querySelector('#clipper')!;
+    const panel = document.querySelector('#clipped-panel')!;
+    Object.defineProperty(clipper, 'getClientRects', {
+      configurable: true,
+      value: () => sourceRectList({ left: 0, top: 0, width: 320, height: 40 }),
+    });
+    // The panel lies inside the clipper's border box but beyond its padding
+    // box (a 40 px border or scrollbar occupies the right edge).
+    Object.defineProperty(panel, 'getClientRects', {
+      configurable: true,
+      value: () => sourceRectList({ left: 300, top: 0, width: 20, height: 40 }),
+    });
+    const clientBox = { clientLeft: 0, clientTop: 0, clientWidth: 280, clientHeight: 40 };
+    for (const [name, value] of Object.entries(clientBox)) {
+      Object.defineProperty(clipper, name, { configurable: true, writable: true, value });
+    }
+    const serialize = () => JSON.stringify(sanitizeSourceDocument(
+      document,
+      window as unknown as Window,
+      new WeakNodeIdRegistry(),
+    ));
+
+    expect(serialize()).not.toContain('Clipped headline');
+
+    // Once the padding box reaches the panel, the same proof admits it.
+    Object.defineProperty(clipper, 'clientWidth', {
+      configurable: true, writable: true, value: 320,
+    });
+    expect(serialize()).toContain('Clipped headline');
+  });
+
   it('fails duplicate and cross-root controls closed without blanking ordinary text', () => {
     const { document, window } = parseHTML(`<!doctype html><html><body>
       <p>Ordinary page text</p>
