@@ -402,6 +402,60 @@ describe('semantic source receiver', () => {
       .toBe('Search');
   });
 
+  it('admits typed ARIA state only on widgets whose replica role fits the state', () => {
+    const { document } = parseHTML(
+      '<html><body><a id="here" href="/here">Here</a><div id="plain">Plain</div>' +
+      '<div id="upload" role="progressbar"></div><div id="volume" role="slider"></div>' +
+      '<button id="bold">Bold</button></body></html>',
+    );
+    const nodes = new Map<number, Node>([
+      [1, document.querySelector('#here')!],
+      [2, document.querySelector('#plain')!],
+      [3, document.querySelector('#upload')!],
+      [4, document.querySelector('#volume')!],
+      [5, document.querySelector('#bold')!],
+    ]);
+    const presented: Array<readonly ResolvedSemanticSourceProof[]> = [];
+    const receiver = new SemanticSourceReceiver({
+      document: identity,
+      replicaDocument: document as unknown as Document,
+      resolveNode: (nodeId) => nodes.get(nodeId),
+      applyProofs: (proofs) => {
+        presented.push(proofs);
+        return true;
+      },
+    });
+    const aria = (
+      nodeId: number,
+      state: 'pressed' | 'current' | 'valuenow',
+      value: string,
+    ) => ({
+      kind: 'aria-state', bridge: 'isolated-html', nodeId, revision: 1,
+      gate: state === 'pressed' ? 'formValues' : 'controlSemantics',
+      state, value, classifierVersion: 1,
+    } as const);
+
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 1, [],
+      [aria(1, 'current', 'page'), aria(3, 'valuenow', '42'), aria(5, 'pressed', 'true')],
+    ))).toBeDefined();
+    expect(presented.at(-1)?.map((proof) => proof.kind === 'aria-state'
+      ? `${proof.proof.state}=${proof.proof.value}`
+      : proof.kind)).toEqual(['current=page', 'valuenow=42', 'pressed=true']);
+
+    // A slider's value is user input, not an indicator; a plain div has no
+    // current-item semantics; a link is not a toggle button.
+    for (const forged of [
+      aria(4, 'valuenow', '7'),
+      aria(2, 'current', 'page'),
+      aria(1, 'pressed', 'true'),
+    ]) {
+      expect(receiver.applyBatch(createSemanticSourceBatch(
+        identity, 'read-v1-111111', 2, [], [forged],
+      ))).toBeUndefined();
+    }
+  });
+
   it('admits custom-scope multiple selection but requires duplicate shape proofs to agree', () => {
     const { document } = parseHTML(
       '<html><body><select><option>One</option><option>Two</option></select></body></html>',

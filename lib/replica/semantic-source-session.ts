@@ -23,6 +23,9 @@ import {
   type SemanticSourcePresentation,
   type SemanticSourceProof,
   type SemanticSourceRecord,
+  isSemanticAriaStateValue,
+  semanticAriaStateGate,
+  type SemanticAriaState,
 } from './semantic-source-protocol';
 import {
   SOURCE_SECRET_CLASSIFIER_VERSION,
@@ -171,6 +174,18 @@ const SEMANTIC_ARIA_MIXED_ROLES = new Set([
 ]);
 const SEMANTIC_ARIA_SELECTED_ROLES = new Set([
   'option', 'treeitem',
+]);
+const SEMANTIC_ARIA_PRESSED_ROLES = new Set(['button']);
+const SEMANTIC_ARIA_CURRENT_TAGS = new Set([
+  'a', 'button', 'li', 'option', 'summary',
+]);
+const SEMANTIC_ARIA_CURRENT_ROLES = new Set([
+  'button', 'gridcell', 'link', 'listitem', 'menuitem', 'menuitemradio',
+  'option', 'row', 'tab', 'treeitem',
+]);
+/** Read-only indicators only: slider and spinbutton carry user values. */
+const SEMANTIC_ARIA_RANGE_INDICATOR_ROLES = new Set([
+  'meter', 'progressbar', 'scrollbar',
 ]);
 const SEMANTIC_ACTIVATION_ROLES = new Set([
   'button', 'combobox', 'menuitem', 'menuitemcheckbox', 'menuitemradio',
@@ -856,37 +871,33 @@ export class SemanticSourceSession {
       }
     }
 
-    if (scope.formValues && stack.length === 0) {
+    if ((scope.formValues || scope.controlSemantics) && stack.length === 0) {
       for (const element of elements) {
         const classification = classifications.get(element);
-        const role = normalizedToken(classification?.facts.role);
-        const state = SEMANTIC_ARIA_CHECKED_ROLES.has(role)
-          ? 'checked' as const
-          : SEMANTIC_ARIA_SELECTED_ROLES.has(role)
-            ? 'selected' as const
-            : undefined;
-        if (!state || classification?.category !== 'public-semantic') continue;
-        const currentClassification = this.#classifyElement(element, false, false);
-        if (currentClassification.category !== 'public-semantic') continue;
-        const value = normalizedToken(
-          safelyReadAttribute(element, `aria-${state}`),
-        );
-        if ((value !== 'true' && value !== 'false' && value !== 'mixed') ||
-          (value === 'mixed' &&
-            (state === 'selected' || !SEMANTIC_ARIA_MIXED_ROLES.has(role)))) {
-          continue;
+        if (classification?.category !== 'public-semantic') continue;
+        const role = normalizedToken(classification.facts.role);
+        const states = semanticAriaStatesFor(classification.facts.tagName, role);
+        if (states.length === 0) continue;
+        let currentClassification: ElementClassification | undefined;
+        for (const state of states) {
+          const gate = semanticAriaStateGate(state);
+          if (!scope[gate]) continue;
+          const value = readSemanticAriaStateValue(element, state, role);
+          if (value === undefined) continue;
+          currentClassification ??= this.#classifyElement(element, false, false);
+          if (currentClassification.category !== 'public-semantic') break;
+          const ariaNodeId = this.#nodeId(element);
+          if (!ariaNodeId) break;
+          addProof({
+            kind: 'aria-state',
+            bridge: this.environment.bridge,
+            nodeId: ariaNodeId,
+            gate,
+            state,
+            value,
+            classifierVersion: SOURCE_SECRET_CLASSIFIER_VERSION,
+          });
         }
-        const ariaNodeId = this.#nodeId(element);
-        if (!ariaNodeId) continue;
-        addProof({
-          kind: 'aria-state',
-          bridge: this.environment.bridge,
-          nodeId: ariaNodeId,
-          gate: 'formValues',
-          state,
-          value,
-          classifierVersion: SOURCE_SECRET_CLASSIFIER_VERSION,
-        });
       }
     }
 
@@ -1966,6 +1977,41 @@ function sourceClassificationFacts(
     secretAncestor,
     valueBearing,
   };
+}
+
+/** The typed ARIA states a public widget of this tag and role may carry. */
+function semanticAriaStatesFor(
+  tagName: string,
+  role: string,
+): readonly SemanticAriaState[] {
+  const states: SemanticAriaState[] = [];
+  if (SEMANTIC_ARIA_CHECKED_ROLES.has(role)) states.push('checked');
+  if (SEMANTIC_ARIA_SELECTED_ROLES.has(role)) states.push('selected');
+  if (SEMANTIC_ARIA_PRESSED_ROLES.has(role) || (role === '' && tagName === 'button')) {
+    states.push('pressed');
+  }
+  if (
+    SEMANTIC_ARIA_CURRENT_ROLES.has(role) ||
+    (role === '' && SEMANTIC_ARIA_CURRENT_TAGS.has(tagName))
+  ) states.push('current');
+  if (SEMANTIC_ARIA_RANGE_INDICATOR_ROLES.has(role)) states.push('valuenow');
+  return states;
+}
+
+/** Reads one bounded state token; anything else is left unproven. */
+function readSemanticAriaStateValue(
+  element: Element,
+  state: SemanticAriaState,
+  role: string,
+): string | undefined {
+  const raw = safelyReadAttribute(element, `aria-${state}`);
+  if (typeof raw !== 'string') return undefined;
+  const value = state === 'valuenow' ? raw.trim() : normalizedToken(raw);
+  if (!isSemanticAriaStateValue(state, value)) return undefined;
+  if (value === 'mixed' && state === 'checked' && !SEMANTIC_ARIA_MIXED_ROLES.has(role)) {
+    return undefined;
+  }
+  return value;
 }
 
 function readDirectControlLabel(

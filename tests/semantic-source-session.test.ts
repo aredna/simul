@@ -1348,6 +1348,81 @@ describe('semantic source session', () => {
     disclosureSession.dispose();
   });
 
+  it('emits toggle, current-item and indicator range state through typed ARIA proofs', () => {
+    const { document, window } = parseHTML(
+      '<html><body><nav><a id="here" href="/here" aria-current="page">Here</a>' +
+      '<a id="there" href="/there">There</a></nav>' +
+      '<button id="bold" aria-pressed="true">Bold</button>' +
+      '<ol><li id="step" aria-current="Step">Step two</li></ol>' +
+      '<div id="upload" role="progressbar" aria-valuemin="0" aria-valuemax="100" aria-valuenow="42">Uploading</div>' +
+      '<div id="volume" role="slider" aria-valuemin="0" aria-valuemax="10" aria-valuenow="7" aria-valuetext="seven">Volume</div>' +
+      '<div id="toggle" role="button" aria-pressed="mixed">Mixed</div>' +
+      '</body></html>',
+    );
+    const here = document.querySelector<HTMLElement>('#here')!;
+    const there = document.querySelector<HTMLElement>('#there')!;
+    const bold = document.querySelector<HTMLElement>('#bold')!;
+    const step = document.querySelector<HTMLElement>('#step')!;
+    const upload = document.querySelector<HTMLElement>('#upload')!;
+    const volume = document.querySelector<HTMLElement>('#volume')!;
+    const toggle = document.querySelector<HTMLElement>('#toggle')!;
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(port, document, window);
+    port.emit(createSemanticSourceStart(
+      'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+    ));
+    const ariaProofs = (index: number) => port.messages[index]!.proofs
+      .filter((proof) => proof.kind === 'aria-state')
+      .map((proof) => proof.kind === 'aria-state'
+        ? [proof.nodeId, proof.gate, proof.state, proof.value, proof.revision]
+        : [])
+      .sort((left, right) => Number(left[0]) - Number(right[0]));
+    expect(ariaProofs(0)).toEqual([
+      [nodeId(here), 'controlSemantics', 'current', 'page', 1],
+      [nodeId(bold), 'formValues', 'pressed', 'true', 1],
+      [nodeId(step), 'controlSemantics', 'current', 'step', 1],
+      [nodeId(upload), 'controlSemantics', 'valuenow', '42', 1],
+      [nodeId(toggle), 'formValues', 'pressed', 'mixed', 1],
+    ]);
+    expect(JSON.stringify(port.messages[0])).not.toContain('seven');
+    expect(port.messages[0]!.proofs.some((proof) =>
+      proof.kind === 'aria-state' &&
+      (proof.nodeId === nodeId(volume) || proof.nodeId === nodeId(there)),
+    )).toBe(false);
+
+    const first = port.messages[0]!;
+    port.emit(createSemanticSourceAck(
+      identity, first.policyFingerprint, first.sequence,
+    ));
+    bold.setAttribute('aria-pressed', 'false');
+    upload.setAttribute('aria-valuenow', '1e3');
+    session.refresh();
+    expect(ariaProofs(1)).toEqual([
+      [nodeId(here), 'controlSemantics', 'current', 'page', 1],
+      [nodeId(bold), 'formValues', 'pressed', 'false', 2],
+      [nodeId(step), 'controlSemantics', 'current', 'step', 1],
+      [nodeId(toggle), 'formValues', 'pressed', 'mixed', 1],
+    ]);
+    session.dispose();
+
+    const structurePort = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const structureSession = createSession(structurePort, document, window);
+    structurePort.emit(createSemanticSourceStart('isolated-html', identity, {
+      ...FULL_VISIBLE_REPLICA_READ_SCOPE,
+      formValues: false,
+      personalDataValues: false,
+    }));
+    expect(structurePort.messages[0]!.proofs
+      .filter((proof) => proof.kind === 'aria-state')
+      .map((proof) => proof.kind === 'aria-state' ? proof.state : '')
+      .sort()).toEqual(['current', 'current']);
+    structureSession.dispose();
+  });
+
   it('emits revisioned native select and choice state only through typed proofs', () => {
     const { document, window } = parseHTML(
       '<html><body><select id="choice" multiple><option id="one" selected>One</option><option id="two">Two</option></select><input id="toggle" type="checkbox"><div id="aria" role="checkbox" aria-checked="mixed" aria-disabled="true">ARIA choice</div></body></html>',

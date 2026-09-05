@@ -232,6 +232,56 @@ describe('SemanticProofPresenter', () => {
     expect(aria.getAttribute('aria-checked')).toBe('true');
   });
 
+  it('presents toggle, current-item and indicator range state and restores them', () => {
+    const { document } = parseHTML(`<html><body>
+      <button id="bold">Bold</button>
+      <a id="here" href="/here">Here</a>
+      <div id="upload" role="progressbar" aria-valuemin="0" aria-valuemax="100"></div>
+    </body></html>`);
+    const bold = document.querySelector<HTMLElement>('#bold')!;
+    const here = document.querySelector<HTMLElement>('#here')!;
+    const upload = document.querySelector<HTMLElement>('#upload')!;
+    const base = {
+      kind: 'aria-state', bridge: 'isolated-html', revision: 1,
+      classifierVersion: 1,
+    } as const;
+    const proofs: readonly ResolvedSemanticSourceProof[] = [{
+      kind: 'aria-state',
+      proof: { ...base, nodeId: 1, gate: 'formValues', state: 'pressed', value: 'true' },
+      target: bold,
+    }, {
+      kind: 'aria-state',
+      proof: { ...base, nodeId: 2, gate: 'controlSemantics', state: 'current', value: 'page' },
+      target: here,
+    }, {
+      kind: 'aria-state',
+      proof: { ...base, nodeId: 3, gate: 'controlSemantics', state: 'valuenow', value: '42' },
+      target: upload,
+    }];
+    const presenter = new SemanticProofPresenter({
+      document: document as unknown as Document,
+    });
+    expect(presenter.apply(proofs)).toBe(true);
+    expect(bold.getAttribute('aria-pressed')).toBe('true');
+    expect(here.getAttribute('aria-current')).toBe('page');
+    expect(upload.getAttribute('aria-valuenow')).toBe('42');
+    expect(upload.getAttribute('aria-valuemin')).toBe('0');
+
+    expect(presenter.apply([{
+      kind: 'aria-state',
+      proof: { ...base, nodeId: 1, revision: 2, gate: 'formValues', state: 'pressed', value: 'false' },
+      target: bold,
+    }])).toBe(true);
+    expect(bold.getAttribute('aria-pressed')).toBe('false');
+    expect(here.hasAttribute('aria-current')).toBe(false);
+    expect(upload.hasAttribute('aria-valuenow')).toBe(false);
+
+    presenter.clear();
+    expect(bold.hasAttribute('aria-pressed')).toBe(false);
+    expect(bold.hasAttribute('data-simul-source-aria-pressed-state')).toBe(false);
+    expect(upload.getAttribute('aria-valuemax')).toBe('100');
+  });
+
   it('preserves same-value mirror updates to disclosure relationships', () => {
     const { document } = parseHTML(`<html><body>
       <button id="trigger">Menu</button><section id="original">Items</section>
