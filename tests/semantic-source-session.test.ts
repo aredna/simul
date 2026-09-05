@@ -1471,6 +1471,62 @@ describe('semantic source session', () => {
     pageOnlySession.dispose();
   });
 
+  it('carries aria-labelledby and aria-describedby as native-id relationships', () => {
+    const { document, window } = parseHTML(
+      '<html><body>' +
+      '<h2 id="title">Billing</h2>' +
+      '<p id="desc">Your billing address</p>' +
+      '<input id="pw" type="password">' +
+      '<div id="region" role="group" aria-labelledby="title" aria-describedby="desc">Fields</div>' +
+      '<div id="mixed" role="group" aria-labelledby="title pw">More</div>' +
+      '<div id="dangling" role="group" aria-labelledby="missing">Nope</div>' +
+      '</body></html>',
+    );
+    const title = document.querySelector<HTMLElement>('#title')!;
+    const desc = document.querySelector<HTMLElement>('#desc')!;
+    const region = document.querySelector<HTMLElement>('#region')!;
+    const mixed = document.querySelector<HTMLElement>('#mixed')!;
+    const dangling = document.querySelector<HTMLElement>('#dangling')!;
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(port, document, window);
+    port.emit(createSemanticSourceStart(
+      'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+    ));
+    const relationships = port.messages[0]!.proofs
+      .filter((proof) => proof.kind === 'aria-relationship')
+      .map((proof) => proof.kind === 'aria-relationship'
+        ? [proof.nodeId, proof.gate, proof.relation, [...proof.targetNodeIds]]
+        : []);
+    expect(relationships).toEqual(expect.arrayContaining([
+      [nodeId(region), 'controlSemantics', 'labelledby', [nodeId(title)]],
+      [nodeId(region), 'controlSemantics', 'describedby', [nodeId(desc)]],
+      // The secret password reference is dropped; the public heading survives.
+      [nodeId(mixed), 'controlSemantics', 'labelledby', [nodeId(title)]],
+    ]));
+    // A dangling reference produces no relationship proof, and no source id
+    // string ever travels.
+    expect(relationships.some((entry) => entry[0] === nodeId(dangling)))
+      .toBe(false);
+    expect(JSON.stringify(port.messages[0])).not.toContain('title');
+    expect(JSON.stringify(port.messages[0])).not.toContain('missing');
+    session.dispose();
+
+    const pageOnly = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const pageOnlySession = createSession(pageOnly, document, window);
+    pageOnly.emit(createSemanticSourceStart('isolated-html', identity, {
+      ...FULL_VISIBLE_REPLICA_READ_SCOPE,
+      controlSemantics: false,
+    }));
+    expect(pageOnly.messages[0]!.proofs.some(
+      (proof) => proof.kind === 'aria-relationship',
+    )).toBe(false);
+    pageOnlySession.dispose();
+  });
+
   it('emits revisioned native select and choice state only through typed proofs', () => {
     const { document, window } = parseHTML(
       '<html><body><select id="choice" multiple><option id="one" selected>One</option><option id="two">Two</option></select><input id="toggle" type="checkbox"><div id="aria" role="checkbox" aria-checked="mixed" aria-disabled="true">ARIA choice</div></body></html>',

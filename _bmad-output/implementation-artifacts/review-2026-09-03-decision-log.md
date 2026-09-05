@@ -1264,3 +1264,60 @@ native range/number as ordinary form while keeping personal/secret precedence.
 
 The second open call (D37's `aria-labelledby` accessible names, plus
 `aria-describedby`) is a separate relationship-proof change on its own branch.
+
+### D39. Accessible-name relationships: aria-labelledby and aria-describedby (2026-09-06)
+
+Branch `fix/aria-labelledby-relationship-proof` stacked on D38's branch (both
+resolve the two calls D37 left open; they touch the same ARIA code, so they
+stack rather than run independently). Resolves the deferred entry "Add bounded
+accessible-name support for safe `aria-labelledby` control relationships" and,
+per the approved scope, `aria-describedby` in the same mechanism.
+
+The problem. The base sanitizer strips `aria-labelledby`/`aria-describedby` as
+private ID-reference surface, and the semantic label reader uses only direct
+label sources (`aria-label`, `title`, option text, button value). A control
+named only by referenced visible text therefore arrives unnamed. Carrying the
+resolved name as a text record was rejected in D37: it would paint an
+`aria-hidden` span duplicating the already-visible referenced text.
+
+The design (approved before building): a relationship proof, not a text record.
+
+- **Protocol.** A new `aria-relationship` proof carries the control's native
+  bridge nodeId, the `relation` (`labelledby`/`describedby`), and the referenced
+  nodes' native bridge ids in author order -- never a source id string and never
+  text. Gate `controlSemantics` (page-authored structure). Bounded: 1..32
+  targets, each a positive integer, unique, and never the control itself. Its
+  identity is per (control, relation); its signature includes the ordered id
+  list; byte accounting scales with the id count.
+- **Source.** For each public-semantic element the session parses the id list,
+  resolves each id within the element's own tree scope only (aria references
+  never cross a shadow boundary), skips the element itself and any
+  credential-secret referenced node, maps the survivors to native bridge ids,
+  and emits one proof per relation. No id string or text leaves the source.
+- **Receiver.** Resolves the control (voiding the batch if the control itself is
+  absent or unsafe, like every other proof) and then filters the references to
+  those that are represented, safe (non-secret), and in the same replica tree
+  scope. Unlike a select's contained options, label references point anywhere in
+  the tree scope, so a dropped reference is filtered rather than voiding the
+  whole batch; a fully-unresolved relationship resolves to an empty reference
+  set and presents as a no-op.
+- **Presenter.** Points the control's `aria-labelledby`/`aria-describedby` at
+  the already-present replica nodes, reusing a node's own unique id when it has
+  one and otherwise assigning a replica-owned `simul-aria-ref-*` id (checked
+  unique against the live document). Every change is reversible: teardown
+  restores the control attribute and removes only the ids this proof added,
+  leaving source-authored ids untouched. No text is painted, so the visible
+  referenced text is never duplicated.
+
+Tests: protocol round-trip plus rejections (wrong gate, non-`labelledby`/
+`describedby` relation, empty/self/duplicate/oversized target lists, distinct
+per-relation identity); session emits both relations, drops a secret reference,
+drops a dangling reference, carries no id string, and is gated by
+controlSemantics; receiver filters secret/unknown/foreign-scope references and
+no-ops rather than voiding on a fully-unresolved set; presenter reuses an
+existing id, assigns a replica-owned id, and restores everything on teardown.
+`npm run check` is green and `dist/chrome-unpacked` is re-synced.
+
+Both of D37's open calls are now resolved (D38 range values, D39 accessible-name
+relationships). The two text-serialization privacy-floor entries and the other
+deferred entries still stand.
