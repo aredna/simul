@@ -21,11 +21,13 @@ import {
 } from './companion-state';
 import { Currency, type CurrencyToken } from './currency';
 import { ImageAnalysisPanel } from './image-analysis-panel';
+import { ImageTranslationConfig } from './image-translation-config';
 import { PermissionFlows } from './permission-flows';
 import { PreferenceClient } from './preference-client';
 import { QuickComposer } from './quick-composer';
 import { ReadScopeController } from './read-scope-controller';
 import { SourceFollower } from './source-follower';
+import { SurfaceSwitcher } from './surface-switcher';
 import { ToolbarStatus } from './toolbar-status';
 import {
   TranslationDriver,
@@ -37,15 +39,12 @@ import { isQuickTranslationShortcut } from '../../lib/quick-translation-shortcut
 import {
   AutoLanguageEvidencePrecedence,
   autoImageLanguageConfigurationKey,
-  shouldClearAutoImageLanguageForDocument,
-  shouldClearAutoImageLanguageResolution,
 } from '../../lib/language-detection';
 import {
   LANGUAGE_OPTION_ORDER,
   languageEndonym,
 } from '../../lib/language-options';
 import {
-  isSupportedPage,
   parseDetachedPageIdentityHint,
   readAuthorizedTabMessage,
   readPageError,
@@ -53,20 +52,13 @@ import {
 } from '../../lib/page-identity';
 import { NavigationRefreshGate } from '../../lib/navigation-refresh-gate';
 import {
-  createDetachedCompanionUrl,
-  createDetachedWindowData,
-} from '../../lib/companion-surface';
-import {
   compiledImageAnalysisCapabilities,
   compiledImageTextProviderIds,
   effectiveCompiledProviderOrder,
   hasCompiledImageAnalysisCapability,
 } from '../../lib/ocr/provider-registry';
-import type { ImageTextProviderId } from '../../lib/ocr/known-provider-ids';
 import {
   ACCESSIBILITY_TEXT_METHOD_ID,
-  enabledOcrProviderOrder,
-  type ImageReadingMethodId,
 } from '../../lib/ocr/image-reading-methods';
 import {
   ImageTranslationController,
@@ -79,16 +71,6 @@ import {
 } from '../../lib/ocr/pixel-acquisition';
 import { createBrowserImageRecognitionCoordinator } from '../../lib/ocr/image-analysis-coordinator';
 import { IndexedDbTransientImageStore } from '../../lib/ocr/transient-image-store';
-import { readEnsureOcrHostResponse } from '../../lib/ocr/offscreen-protocol';
-import {
-  createProbeOcrProviderCommand,
-  readProbeOcrProviderResponse,
-  type OcrProviderRuntimeStatus,
-} from '../../lib/ocr/provider-status-protocol';
-import {
-  runtimeReadyOcrProviderOrder,
-  shouldRetryOcrProviderProbe,
-} from '../../lib/ocr/runtime-provider-readiness';
 import {
   STORAGE_KEY,
   autoTranslationModeForPage,
@@ -118,10 +100,6 @@ import {
   IsolatedHtmlReplicaEngine,
   type IsolatedMirrorInfo,
 } from '../../lib/replica/isolated-html-engine';
-import {
-  REPLICA_READ_SCOPE_SETUP_VERSION,
-  replicaReadScopeFingerprint,
-} from '../../lib/replica/read-scope-policy';
 import {
   IsolatedReplicaFailureRecoveryGate,
 } from '../../lib/replica/replica-recovery';
@@ -459,7 +437,7 @@ const imageAnalysisPanel = new ImageAnalysisPanel({
     usePromptForImageLanguage: state.preferences.usePromptForImageLanguage,
     usePromptForImageText: state.preferences.usePromptForImageText,
     providerRuntimeStatuses: state.ocrProviderRuntimeStatuses,
-    usablePixelProviderCount: enabledUsablePixelOcrProviderOrder().length,
+    usablePixelProviderCount: imageTranslationConfig.usablePixelProviderOrder().length,
   }),
   setUiText,
   changeImageTranslationEnabled: (enabled, requestPixelAccess) =>
@@ -537,7 +515,7 @@ const permissionFlows = new PermissionFlows({
   permissions: browser.permissions,
   isUserActivationActive: () => navigator.userActivation.isActive,
   preferenceClient,
-  usablePixelProviderCount: () => enabledUsablePixelOcrProviderOrder().length,
+  usablePixelProviderCount: () => imageTranslationConfig.usablePixelProviderOrder().length,
   setStatus,
   syncPreferenceControls: () => syncPreferenceControls(),
   updateControls: () => updateControls(),
@@ -559,7 +537,8 @@ const translationDriver = new TranslationDriver({
   evidence: autoLanguageEvidencePrecedence,
   detectLanguage: async (text) => browser.i18n.detectLanguage(text),
   getTab: (tabId) => browser.tabs.get(tabId),
-  autoImageLanguageConfigurationKey: () => currentAutoImageLanguageConfigurationKey(),
+  autoImageLanguageConfigurationKey: () =>
+    imageTranslationConfig.autoImageLanguageConfigurationKey(),
   configureImageTranslation: () => configureImageTranslation(),
   setStatus,
   updateControls: () => updateControls(),
@@ -623,6 +602,42 @@ const capturePipeline = new CapturePipeline({
         },
       }
     : {}),
+});
+
+const imageTranslationConfig = new ImageTranslationConfig({
+  state,
+  controller: imageTranslationController,
+  currentReplicaReadScope: () => readScopeController.currentReplicaReadScope(),
+  translationDriver,
+  compiledProviderIds: compiledImageTextProviderIds,
+  compiledProviderOrder: effectiveCompiledProviderOrder,
+  renderImagePanel: () => imageAnalysisPanel.render(),
+  sendMessage: (message) => browser.runtime.sendMessage(message),
+});
+
+const surfaceSwitcher = new SurfaceSwitcher({
+  state,
+  browser: {
+    getWindow: (windowId) => browser.windows.get(windowId),
+    createWindow: (data) => browser.windows.create(data),
+    removeWindow: (windowId) => browser.windows.remove(windowId),
+    queryActiveTab: async (windowId) =>
+      (await browser.tabs.query({ active: true, windowId }))[0],
+    openSidePanel: (windowId) => browser.sidePanel.open({ windowId }),
+    closeSidePanel: typeof browser.sidePanel.close === 'function'
+      ? (windowId) => browser.sidePanel.close({ windowId })
+      : undefined,
+    setSidePanelOptions: (options) => browser.sidePanel.setOptions(options),
+    getSidePanelLayout: readSidePanelLayoutProbe(),
+    sendMessage: (message) => browser.runtime.sendMessage(message),
+    sidePanelUrl: () => browser.runtime.getURL('/sidepanel.html'),
+    closeSelf: () => window.close(),
+  },
+  detachedIdentityHint,
+  elements: { popoutButton, placementGuidance },
+  rememberSurface: (surface) => preferenceClient.rememberSurface(surface),
+  setStatus,
+  updateControls: () => updateControls(),
 });
 
 const sourceFollower = new SourceFollower({
@@ -694,7 +709,7 @@ window.addEventListener('pagehide', () => preferenceSafetyClient.dispose(), {
 
 populateLanguageOptions();
 imageAnalysisPanel.initialize();
-configureSurfaceButton();
+surfaceSwitcher.configureButton();
 observeReplicaStateLabel();
 uiLocalizer.schedule();
 
@@ -708,15 +723,7 @@ toggleQuickTranslateButton.addEventListener('click', () => {
 });
 closeSettingsButton.addEventListener('click', () => setCompanionOverlay());
 closeQuickTranslateButton.addEventListener('click', () => setCompanionOverlay());
-popoutButton.addEventListener('click', () => {
-  if (state.surfaceTransitionInFlight) return;
-  state.surfaceTransitionInFlight = true;
-  updateControls();
-  void (isDetachedWindow ? returnToSidePanel() : openDetachedWindow()).finally(() => {
-    state.surfaceTransitionInFlight = false;
-    updateControls();
-  });
-});
+popoutButton.addEventListener('click', () => surfaceSwitcher.toggle());
 toolbarAutoDetectButton.addEventListener('click', () => {
   sourceSelect.value = 'auto';
   void languageSelectionChanged();
@@ -731,7 +738,7 @@ toolbarOcrToggleButton.addEventListener('click', () => {
     void permissionFlows.changeImageTranslationEnabled(true);
   } else if (
     state.imageCaptureAccess !== 'granted' &&
-    enabledUsablePixelOcrProviderOrder().length > 0
+    imageTranslationConfig.usablePixelProviderOrder().length > 0
   ) {
     void permissionFlows.changeImageTranslationEnabled(true, true);
   } else {
@@ -976,10 +983,10 @@ async function initialize(): Promise<void> {
   // for the first visible replica.
   startBestEffortBackgroundTasks([
     () => permissionFlows.refreshImageCaptureAccess(),
-    refreshOcrProviderRuntimeStatuses,
+    () => imageTranslationConfig.refreshProviderRuntimeStatuses(),
   ]);
   const [, sourceResult] = await Promise.allSettled([
-    checkPanelPlacement(),
+    surfaceSwitcher.checkPanelPlacement(),
     sourceFollower.initializeSourcePage(),
   ]);
   if (sourceResult.status === 'rejected') {
@@ -1267,7 +1274,7 @@ function syncToolbarPreferenceControls(): void {
   toolbarOcrToggleButton.title = state.preferences.imageTranslationEnabled
     ? state.imageCaptureAccess === 'granted'
       ? 'Image text translation is on. Click to turn it off.'
-      : enabledUsablePixelOcrProviderOrder().length === 0
+      : imageTranslationConfig.usablePixelProviderOrder().length === 0
         ? state.preferences.disabledImageReadingMethodIds.includes(
             ACCESSIBILITY_TEXT_METHOD_ID,
           )
@@ -1299,304 +1306,17 @@ function syncToolbarPreferenceControls(): void {
 }
 
 function configureImageTranslation(): void {
-  const readScope = readScopeController.currentReplicaReadScope();
-  const disabledMethodIds =
-    state.preferences.readScopeSetupVersion === REPLICA_READ_SCOPE_SETUP_VERSION ||
-    state.preferences.disabledImageReadingMethodIds.includes(
-      ACCESSIBILITY_TEXT_METHOD_ID,
-    )
-      ? state.preferences.disabledImageReadingMethodIds
-      : [
-          ACCESSIBILITY_TEXT_METHOD_ID,
-          ...state.preferences.disabledImageReadingMethodIds,
-        ];
-  const enabledMethodIds = new Set(
-    state.preferences.imageReadingMethodOrder.filter((method) =>
-      !disabledMethodIds.includes(method),
-    ),
-  );
-  const enabledProviderOrder = effectiveCompiledProviderOrder(
-    enabledOcrProviderOrder(
-      state.preferences.imageReadingMethodOrder,
-      disabledMethodIds,
-    ),
-    state.preferences.disabledImageTextProviderIds,
-  );
-  const usableProviderOrder = runtimeReadyOcrProviderOrder(
-    enabledProviderOrder,
-    state.ocrProviderRuntimeStatuses,
-  );
-  const routedProviderOrder = state.imageCaptureAccess === 'granted'
-    ? usableProviderOrder
-    : [];
-  const nextAutoLanguageConfigurationKey = autoImageLanguageConfigurationKey({
-    providerOrder: routedProviderOrder,
-    enabledMethodOrder: enabledAutoImageLanguageMethodOrder(
-      disabledMethodIds,
-      routedProviderOrder,
-    ),
-    minimumConfidence: state.preferences.ocrMinimumConfidence,
-    policyFingerprint: replicaReadScopeFingerprint(readScope),
-    controlImages: readScope.controlImages,
-  });
-  if (shouldClearAutoImageLanguageForDocument(
-    state.resolvedSourceLanguageOrigin,
-    state.resolvedImageLanguageDocument !== undefined &&
-      translationDriver.currentReplicaDocumentMatches(state.resolvedImageLanguageDocument),
-  )) {
-    translationDriver.clearAutoImageLanguageResolution();
-  }
-  if (shouldClearAutoImageLanguageResolution(
-    state.resolvedSourceLanguageOrigin,
-    state.resolvedImageLanguageConfigurationKey,
-    nextAutoLanguageConfigurationKey,
-  )) {
-    translationDriver.clearAutoImageLanguageResolution();
-  }
-  imageTranslationController.configure({
-    enabled:
-      state.preferences.imageTranslationEnabled &&
-      !state.isLiveSourceOnlyMode &&
-      (
-        enabledMethodIds.has(ACCESSIBILITY_TEXT_METHOD_ID) ||
-        (state.imageCaptureAccess === 'granted' && usableProviderOrder.length > 0)
-      ),
-    scanPolicy: state.preferences.imageScanPolicy,
-    skipSmallImages: state.preferences.skipSmallImages,
-    providerOrder: routedProviderOrder,
-    methodOrder: state.preferences.imageReadingMethodOrder,
-    disabledMethodIds,
-    resetEpoch: state.preferences.resetRevision,
-    policyFingerprint: replicaReadScopeFingerprint(readScope),
-    controlImages: readScope.controlImages,
-    ocrMinimumConfidence: state.preferences.ocrMinimumConfidence,
-    sourceLanguage: state.preferences.sourceLanguage,
-    ...(state.resolvedSourceLanguage
-      ? { detectedSourceLanguage: state.resolvedSourceLanguage }
-      : {}),
-    pageLanguageResolutionPending: state.pageLanguageResolutionPending,
-    targetLanguage: state.preferences.targetLanguage,
-    translationIdle: !state.translationInFlight,
-  });
+  imageTranslationConfig.configure();
 }
 
-function enabledUsablePixelOcrProviderOrder(): readonly ImageTextProviderId[] {
-  return runtimeReadyOcrProviderOrder(
-    effectiveCompiledProviderOrder(
-      enabledOcrProviderOrder(
-        state.preferences.imageReadingMethodOrder,
-        state.preferences.disabledImageReadingMethodIds,
-      ),
-      state.preferences.disabledImageTextProviderIds,
-    ),
-    state.ocrProviderRuntimeStatuses,
-  );
-}
-
-function currentAutoImageLanguageConfigurationKey(): string {
-  const readScope = readScopeController.currentReplicaReadScope();
-  const disabledMethodIds =
-    state.preferences.readScopeSetupVersion === REPLICA_READ_SCOPE_SETUP_VERSION ||
-    state.preferences.disabledImageReadingMethodIds.includes(
-      ACCESSIBILITY_TEXT_METHOD_ID,
-    )
-      ? state.preferences.disabledImageReadingMethodIds
-      : [
-          ACCESSIBILITY_TEXT_METHOD_ID,
-          ...state.preferences.disabledImageReadingMethodIds,
-        ];
-  const enabledProviderOrder = effectiveCompiledProviderOrder(
-    enabledOcrProviderOrder(
-      state.preferences.imageReadingMethodOrder,
-      disabledMethodIds,
-    ),
-    state.preferences.disabledImageTextProviderIds,
-  );
-  const usableProviderOrder = state.imageCaptureAccess === 'granted'
-    ? runtimeReadyOcrProviderOrder(
-      enabledProviderOrder,
-      state.ocrProviderRuntimeStatuses,
-    )
-    : [];
-  return autoImageLanguageConfigurationKey({
-    providerOrder: usableProviderOrder,
-    enabledMethodOrder: enabledAutoImageLanguageMethodOrder(
-      disabledMethodIds,
-      usableProviderOrder,
-    ),
-    minimumConfidence: state.preferences.ocrMinimumConfidence,
-    policyFingerprint: replicaReadScopeFingerprint(readScope),
-    controlImages: readScope.controlImages,
-  });
-}
-
-function enabledAutoImageLanguageMethodOrder(
-  disabledMethodIds: readonly ImageReadingMethodId[],
-  providerOrder: readonly ImageTextProviderId[],
-): ImageReadingMethodId[] {
-  const disabled = new Set(disabledMethodIds);
-  const providers = new Set<ImageReadingMethodId>(providerOrder);
-  return state.preferences.imageReadingMethodOrder.filter((method) =>
-    !disabled.has(method) &&
-    (method === ACCESSIBILITY_TEXT_METHOD_ID || providers.has(method)),
-  );
-}
-
-async function refreshOcrProviderRuntimeStatuses(): Promise<void> {
-  if (!compiledImageTextProviderIds.includes('chrome-text-detector')) return;
-  state.ocrProviderRuntimeStatuses.set('chrome-text-detector', 'checking');
-  imageAnalysisPanel.render();
-  configureImageTranslation();
-  let status: OcrProviderRuntimeStatus;
-  try {
-    const ensureRaw: unknown = await browser.runtime.sendMessage({
-      kind: 'simul:ocr-v1:ensure-host',
-      version: 1,
-      resetEpoch: state.preferences.resetRevision,
-    });
-    const ready = readEnsureOcrHostResponse(ensureRaw);
-    if (!ready?.ready) throw new Error('OCR host unavailable.');
-    const raw: unknown = await browser.runtime.sendMessage(
-      createProbeOcrProviderCommand('chrome-text-detector'),
-    );
-    const response = readProbeOcrProviderResponse(
-      raw,
-      'chrome-text-detector',
-    );
-    if (!response) throw new Error('Invalid OCR provider probe response.');
-    status = response.provider;
-  } catch {
-    status = Object.freeze({
-      status: 'unavailable',
-      providerId: 'chrome-text-detector',
-      reason: 'probe-failed',
-    });
-  }
-  state.ocrProviderRuntimeStatuses.set('chrome-text-detector', status);
-  imageAnalysisPanel.render();
-  configureImageTranslation();
-  if (shouldRetryOcrProviderProbe(status, state.textDetectorProbeRetryUsed)) {
-    state.textDetectorProbeRetryUsed = true;
-    window.setTimeout(() => {
-      void refreshOcrProviderRuntimeStatuses();
-    }, 1_000);
-  }
-}
-
-function configureSurfaceButton(): void {
-  if (!isDetachedWindow) return;
-  popoutButton.textContent = '↙';
-  popoutButton.setAttribute('aria-label', 'Return companion to the side panel');
-  popoutButton.title = 'Return to side panel';
-}
-
-async function openDetachedWindow(): Promise<void> {
-  const identity = state.capturedPageIdentity ?? state.followedPageIdentity;
-  if (!identity) {
-    setStatus('Open a regular page before detaching the companion.', 'warning');
-    return;
-  }
-  try {
-    const sourceWindow = await browser.windows.get(identity.windowId);
-    const url = createDetachedCompanionUrl(
-      browser.runtime.getURL('/sidepanel.html'),
-      identity,
-    );
-    await browser.windows.create(createDetachedWindowData(url, sourceWindow));
-    let preferenceSaveFailed = false;
-    try {
-      await preferenceClient.rememberSurface('popout');
-    } catch {
-      preferenceSaveFailed = true;
-    }
-    const closed = await closeNativeSidePanel(identity.windowId);
-    if (!closed || preferenceSaveFailed) {
-      setStatus(
-        !closed
-          ? 'Detached window opened, but Chrome could not close the old side panel automatically. Close it manually.'
-          : 'Detached window opened, but Chrome could not remember it as the last-used surface.',
-        'warning',
-      );
-    }
-  } catch (error) {
-    setStatus(`Chrome could not open a detached window: ${readableError(error)}`, 'error');
-  }
-}
-
-async function returnToSidePanel(): Promise<void> {
-  const sourceWindowId =
-    state.followedPageIdentity?.windowId ??
-    state.detachedSourceWindowId ??
-    detachedIdentityHint?.windowId;
-  if (sourceWindowId === undefined) return;
-
-  // Keep this call before the first await. Chrome requires sidePanel.open() to
-  // remain directly associated with the user's button gesture.
-  const openPromise = browser.sidePanel.open({ windowId: sourceWindowId });
-  const activeTabPromise = browser.tabs.query({
-    active: true,
-    windowId: sourceWindowId,
-  });
-  try {
-    const [, [tab]] = await Promise.all([openPromise, activeTabPromise]);
-    try {
-      await preferenceClient.rememberSurface('side-panel');
-    } catch {
-      // A successfully opened side panel remains authoritative even if the
-      // optional last-used preference could not be persisted.
-    }
-    if (tab?.id !== undefined && isSupportedPage(tab.url)) {
-      await browser.runtime.sendMessage({
-        type: 'simul:authorized-tab',
-        tabId: tab.id,
-        windowId: sourceWindowId,
-        url: tab.url,
-      }).catch((error: unknown) => {
-        if (!/receiving end does not exist|could not establish connection/iu.test(
-          readableError(error),
-        )) throw error;
-      });
-    }
-    if (state.panelWindowId !== undefined) {
-      await browser.windows.remove(state.panelWindowId);
-    } else {
-      window.close();
-    }
-  } catch (error) {
-    setStatus(`Chrome could not return to the side panel: ${readableError(error)}`, 'error');
-  }
-}
-
-async function closeNativeSidePanel(windowId: number): Promise<boolean> {
-  if (typeof browser.sidePanel.close === 'function') {
-    try {
-      await browser.sidePanel.close({ windowId });
-      return true;
-    } catch {
-      // Fall through to the pre-close API teardown below.
-    }
-  }
-  try {
-    await browser.sidePanel.setOptions({ enabled: false });
-    await browser.sidePanel.setOptions({ enabled: true });
-    return true;
-  } catch {
-    return false;
-  }
-}
-
-async function checkPanelPlacement(): Promise<void> {
-  if (detachedIdentityHint) return;
+/** Chrome exposes sidePanel.getLayout only in some channels. */
+function readSidePanelLayoutProbe(): (() => Promise<{ side: string }>) | undefined {
   const sidePanel = browser.sidePanel as typeof browser.sidePanel & {
     getLayout?: () => Promise<{ side: string }>;
   };
-  if (typeof sidePanel.getLayout !== 'function') return;
-  try {
-    const layout = await sidePanel.getLayout();
-    placementGuidance.hidden = layout.side !== 'left';
-  } catch {
-    // Chrome 138 does not expose placement inspection in every channel.
-  }
+  return typeof sidePanel.getLayout === 'function'
+    ? () => sidePanel.getLayout!()
+    : undefined;
 }
 
 function renderLoadingState(): void {

@@ -17,6 +17,10 @@ const script = readFileSync(
   new URL('../entrypoints/sidepanel/main.ts', import.meta.url),
   'utf8',
 );
+const imageConfig = readFileSync(
+  new URL('../entrypoints/sidepanel/image-translation-config.ts', import.meta.url),
+  'utf8',
+);
 const readScope = readFileSync(
   new URL('../entrypoints/sidepanel/read-scope-controller.ts', import.meta.url),
   'utf8',
@@ -143,18 +147,14 @@ describe('sidepanel UI structure', () => {
   });
 
   it('binds OCR provider availability probes to the current reset epoch', () => {
-    const probeStart = script.indexOf(
-      'async function refreshOcrProviderRuntimeStatuses',
-    );
-    const probeEnd = script.indexOf('\nfunction ', probeStart + 1);
-    const probeSource = script.slice(
-      probeStart,
-      probeEnd === -1 ? undefined : probeEnd,
-    );
+    const probeStart = imageConfig.indexOf('async refreshProviderRuntimeStatuses(');
+    const probeEnd = imageConfig.indexOf('#disabledMethodIds(', probeStart);
+    const probeSource = imageConfig.slice(probeStart, probeEnd);
 
     expect(probeStart).toBeGreaterThanOrEqual(0);
     expect(probeSource).toContain("kind: 'simul:ocr-v1:ensure-host'");
     expect(probeSource).toContain('resetEpoch: state.preferences.resetRevision');
+    expect(script).toContain('() => imageTranslationConfig.refreshProviderRuntimeStatuses(),');
   });
 
   it('does not block the first mirror on optional OCR readiness probes', () => {
@@ -311,10 +311,10 @@ describe('sidepanel UI structure', () => {
     );
     expect(script).toContain('new PreferenceSafetyClient({');
     expect(script).toContain(
-      'usablePixelProviderCount: enabledUsablePixelOcrProviderOrder().length,',
+      'usablePixelProviderCount: imageTranslationConfig.usablePixelProviderOrder().length,',
     );
     expect(script).toContain(
-      "imageCaptureAccess !== 'granted' &&\n    enabledUsablePixelOcrProviderOrder().length > 0",
+      "imageCaptureAccess !== 'granted' &&\n    imageTranslationConfig.usablePixelProviderOrder().length > 0",
     );
     expect(permissionFlows).toContain(
       'const shouldRequestPixelAccess = requestPixelAccess &&',
@@ -350,8 +350,8 @@ describe('sidepanel UI structure', () => {
     expect(purgeFunction).toContain(
       'imageTranslationController.purgeSourceDerivedCache()',
     );
-    expect(script).toContain('resetEpoch: state.preferences.resetRevision');
-    expect(script).toContain(
+    expect(imageConfig).toContain('resetEpoch: state.preferences.resetRevision');
+    expect(readScope).toContain(
       'preferences.readScopeSetupVersion === REPLICA_READ_SCOPE_SETUP_VERSION',
     );
 
