@@ -54,14 +54,8 @@ build.
   summary: Add optional companion placement and multi-display window arrangement beyond Chrome's fixed native side-panel placement.
   evidence: Chrome controls native side-panel side/position. A detached companion can be sized and positioned as its own window, but left/right/above pairing, display work areas, and restoring user geometry require a separate cross-platform window-management pass.
 - source_spec: `_bmad-output/implementation-artifacts/spec-fix-ocr-native-callback-binding-and-build-identity.md`
-  summary: Extend image discovery and OCR overlay routing into accessible open shadow roots.
-  evidence: The isolated mirror reconstructs open shadow roots, but the current source image observer intentionally scans ordinary document `<img>` elements and does not traverse separate shadow-root trees, so those mirrored images are outside the current OCR boundary.
-- source_spec: `_bmad-output/implementation-artifacts/spec-fix-ocr-native-callback-binding-and-build-identity.md`
   summary: Make rapid toolbar launches across multiple windows clean up every losing preopened side panel without disturbing the winning surface.
   evidence: Chrome's user-gesture constraint requires synchronously preopening the panel before saved launch preferences hydrate; a superseded cross-window click can leave that preopened panel visible, while Chrome 138's global disable/re-enable fallback cannot safely close only the losing window.
-- source_spec: `_bmad-output/implementation-artifacts/spec-isolated-html-fidelity-baseline-mode.md`
-  summary: Assess whether source doctype and standards/quirks mode can be represented safely in the fixed isolated shell.
-  evidence: Simul owns a constant standards-mode `srcdoc` shell and transports the document element, not the source doctype. Quirks-mode pages can therefore retain DOM content while producing different layout metrics.
 - source_spec: `_bmad-output/implementation-artifacts/spec-isolated-html-fidelity-baseline-mode.md`
   summary: Audit custom-element fidelity that depends on inaccessible internal state, closed roots, lifecycle code, or browser-managed rendering.
   evidence: Simul intentionally never defines or executes copied custom elements and captures only representable light DOM plus accessible open roots. Exact behavior for closed or script-owned state remains outside the safe mirror boundary.
@@ -95,9 +89,6 @@ build.
 - source_spec: `_bmad-output/implementation-artifacts/spec-public-release-readiness.md`
   summary: Add bounded accessible-name support for safe `aria-labelledby` control relationships.
   evidence: The base sanitizer removes `aria-labelledby` and the semantic label reader uses direct label sources, so a public control named only by referenced visible text may become unnamed in the inert replica.
-- source_spec: `_bmad-output/implementation-artifacts/spec-public-release-readiness.md`
-  summary: Model approved `aria-current`, `aria-pressed`, and range-value semantics in the typed read-scope channel.
-  evidence: These attributes are stripped from the base mirror and the current semantic protocol carries checked/selected state but no current-item, toggle, or bounded range-value proof.
 - source_spec: `_bmad-output/implementation-artifacts/spec-fresh-public-testing-build-identity.md`
   summary: Automate release build-sequence freshness when the canonical Chrome artifact changes.
   evidence: The current release gate validates and byte-compares an explicit build identity, but deciding when to advance its date/sequence remains a manual release-management step outside this identity correction.
