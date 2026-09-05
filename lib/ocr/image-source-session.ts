@@ -625,8 +625,15 @@ export function hasProtectedSiblingOverlap(
 ): boolean {
   const candidates = collectCaptureOverlapElements(sourceDocument);
   if (!candidates) return true;
+  // Element.contains() stops at a shadow boundary. An image inside an open
+  // shadow root is composed under its host and the host's ancestors, and none
+  // of those is a foreign element painted over the image. The flat-tree path
+  // covers both cases; an unreadable path fails closed.
+  const imagePath = readSourceFlatTreeElementPath(image);
+  if (!imagePath) return true;
+  const imageAncestry = new Set<Element>(imagePath);
   for (const candidate of candidates) {
-    if (candidate === image || candidate.contains(image)) continue;
+    if (imageAncestry.has(candidate)) continue;
     let rect: DOMRect;
     try {
       rect = candidate.getBoundingClientRect();

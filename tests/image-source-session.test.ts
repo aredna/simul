@@ -2,6 +2,7 @@ import { parseHTML } from 'linkedom';
 import { describe, expect, it } from 'vitest';
 
 import {
+  hasProtectedSiblingOverlap,
   hasSafeCaptureGeometry,
   hasSourceAriaControlledRegionAncestor,
   ImageSourceSession,
@@ -1279,6 +1280,57 @@ describe('image source capture safety', () => {
       sourceWindow,
       { isSecret },
     )).toBe(false);
+  });
+
+  it('never treats a shadow host or its ancestors as a foreign overlay over the hosted image', () => {
+    const { document } = parseHTML(
+      '<html><body><section id="wrapper"><div id="host"></div>' +
+      '<div id="overlay"></div></section></body></html>',
+    );
+    const host = document.querySelector('#host')!;
+    const wrapper = document.querySelector('#wrapper')!;
+    const overlay = document.querySelector('#overlay')!;
+    const shadow = host.attachShadow({ mode: 'open' });
+    // linkedom does not currently expose ShadowRoot.mode, while browsers do.
+    Object.defineProperty(shadow, 'mode', { value: 'open' });
+    shadow.innerHTML = '<img id="image">';
+    const image = shadow.querySelector('#image')! as unknown as HTMLImageElement;
+    const imageRect = rect(10, 10, 200, 100);
+    for (const element of [image, host, wrapper]) {
+      Object.defineProperty(element, 'getBoundingClientRect', {
+        value: () => imageRect,
+      });
+    }
+    Object.defineProperty(overlay, 'getBoundingClientRect', {
+      value: () => rect(40, 25, 100, 40),
+    });
+    const sourceWindow = {
+      getComputedStyle: () => baseStyle,
+    } as unknown as Window;
+    const flagged = new Set<Element>([host, wrapper]);
+    const isSecret = (element: Element) => flagged.has(element);
+
+    // The host and its ancestors are the image's own composed ancestry, not
+    // elements painted over it, even though Element.contains() cannot see
+    // through the shadow boundary.
+    expect(host.contains(image)).toBe(false);
+    expect(hasProtectedSiblingOverlap(
+      image,
+      imageRect,
+      document as unknown as Document,
+      sourceWindow,
+      isSecret,
+    )).toBe(false);
+
+    // A genuinely foreign secret element painted over the image still blocks.
+    flagged.add(overlay);
+    expect(hasProtectedSiblingOverlap(
+      image,
+      imageRect,
+      document as unknown as Document,
+      sourceWindow,
+      isSecret,
+    )).toBe(true);
   });
 });
 
