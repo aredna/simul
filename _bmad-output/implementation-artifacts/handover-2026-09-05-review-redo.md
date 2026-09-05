@@ -5,7 +5,7 @@
 | Item | State |
 | --- | --- |
 | Open PR | [#9 "0.4.0: review fixes re-applied over the 0.3.3 line"](https://github.com/aredna/simul/pull/9), branch `chore/review-redo`, 12 commits over `origin/main` (`596dec7`), CI green |
-| Split PR | [#10 "Side-panel split: leaf modules over the 0.4.0 line"](https://github.com/aredna/simul/pull/10), draft, branch `refactor/side-panel-split` stacked on `chore/review-redo`; retarget to `main` once #9 merges. Ten modules landed, `main.ts` 5,305 → 3,242 lines, 1,292 tests (D31) |
+| Split PR | [#10 "Side-panel split: leaf modules over the 0.4.0 line"](https://github.com/aredna/simul/pull/10), draft, branch `refactor/side-panel-split` stacked on `chore/review-redo`; retarget to `main` once #9 merges. Twelve modules landed, `main.ts` 5,305 → 2,151 lines, 1,316 tests (D31) |
 | Superseded PR | [#8](https://github.com/aredna/simul/pull/8) closed with a pointer; its branch `chore/deps-refresh-and-review-fixes` is kept only as the reference for the side-panel split design |
 | Local `main` | fast-forwarded to `origin/main` (`596dec7`) |
 | Gate at PR head | typecheck clean; 1,197 tests across 80 files (the Chrome-fixture test skips without a browser); `dist/chrome-unpacked` synced and byte-verified (0.4.0, 37.5 MiB) |
@@ -125,12 +125,12 @@ recovery gate has a sliding budget of 3 rebuilds per 60 s.
    Landed (D31): `lib/page-identity` extension, `toolbar-status`,
    `ui-localizer`, `quick-composer`, `image-analysis-panel`,
    `companion-state`, `currency` (the counters are gone), `source-follower`,
-   `preference-client`, `permission-flows`. Still in `main.ts`: the capture
-   pipeline, the translation driver (language resolution with image
-   evidence, availability, page translation, replica view mode), the
-   read-scope and reset controller, the image-translation configuration
-   cluster, the detached surface and the settings sync. Continue on the
-   branch in gate-green commits; run `npm run artifact:sync` before pushing.
+   `preference-client`, `permission-flows`, `translation-driver`,
+   `capture-pipeline`. Still in `main.ts`: the read-scope and reset
+   controller, the image-translation configuration cluster, the detached
+   surface, and the settings sync and DOM wiring that will stay. Continue on
+   the branch in gate-green commits; run `npm run artifact:sync` before
+   pushing.
 4. **Real icon mark** (replace `public/icon/*.png`; the validator only checks
    presence and size names).
 5. **Upstream's own deferred work** is listed in
