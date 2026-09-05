@@ -785,13 +785,15 @@ deferred-work items upstream already tracks.
 
 ### D31. Side-panel split over the 0.4.0 line, first pass (2026-09-05)
 
-Branch `refactor/side-panel-split` off `chore/review-redo`, PR #10 (draft,
-stacked on PR #9; retarget to `main` once #9 merges). The D25/D26 design is
-being redone over upstream's `main.ts` (5,305 lines at the start), in
-gate-green commits, each module with a unit test against fakes or a linkedom
-document. Behavior is unchanged except where noted.
+Branch `refactor/side-panel-split` off `chore/review-redo`, PR #10 (stacked
+on PR #9; retarget to `main` once #9 merges). The D25/D26 design was redone
+over upstream's `main.ts` (5,305 lines at the start), in gate-green commits,
+each module with a unit test against fakes or a linkedom document. Behavior
+is unchanged except where noted.
 
-Landed so far (main.ts 5,305 → 2,151 lines; suite 1,197 → 1,316 tests):
+Landed (main.ts 5,305 → 1,472 lines; suite 1,197 → 1,333 tests across 94
+files; two `let`s remain in main.ts, the two collaborators that reference
+each other at construction):
 
 | Module | Owns |
 | --- | --- |
@@ -807,6 +809,9 @@ Landed so far (main.ts 5,305 → 2,151 lines; suite 1,197 → 1,316 tests):
 | `permission-flows.ts` | image-access and automatic-translation changes with grant rollback |
 | `translation-driver.ts` | source-language resolution (page, image evidence, explicit), availability with the accepted-result-only rule, page translation, commit reconciliation, replica view mode |
 | `capture-pipeline.ts` | capture queueing, the page capture and engine checkpoint with image-replica activation, commit and live-failure handlers, source-navigation teardown, companion invalidation |
+| `read-scope-controller.ts` | the mandatory first-run setup, profile menus and per-key toggles, read-scope commits with the purge-before-save rule and narrowing ceilings, the full reset with cleanup retry, the preference safety protocol |
+| `image-translation-config.ts` | the image-translation controller's configuration from preferences, grant, probes and read scope; retiring image-derived language evidence on a key change; the TextDetector probe |
+| `surface-switcher.ts` | detaching to a window, returning to the side panel, the placement note |
 
 Deliberate details:
 
@@ -835,11 +840,26 @@ Deliberate details:
 - The capture pipeline's only injected function stays bodiless and lives in
   the side panel's `readDocumentId` adapter, so the injection boundary is
   unchanged.
+- Two status strings ("The committed settings snapshot was older than this
+  panel." and the invalid-storage message) had picked up a stray `state.`
+  inside their text during the mechanical state migration; restored in the
+  read-scope commit.
 
-Still in `main.ts` (next steps, in order): the read-scope and reset
-controller (commit, reset, safety messages, gates, controls), the
-image-translation configuration cluster, the detached surface, and the
-settings sync and DOM wiring that will stay. Expect one more session.
+What stays in `main.ts` by design (1,472 lines): the element lookups, the
+engine, coordinator and controller constructions with their wiring, the
+module constructions with their environments (the browser adapters are
+one-line pass-throughs), the DOM listeners, the settings sync and toolbar
+control sync, `updateControls`, the runtime purge (engine, coordinator,
+memories and image cache in one place) and the hoisted wrappers the engines
+call into. The untested seams are the browser adapters. Not carried over
+from the old branch: `live-update-driver` and `mirror-view` (the legacy
+mirror is gone upstream), and the old `preference-client`'s Web Lock
+handling (upstream deliberately never waits for the background while holding
+the preference lock).
+
+**Please review** PR #10 after #9. Order of reading: `companion-state.ts`
+and `currency.ts` first, then `main.ts` (what remains and how modules are
+wired), then the modules in the table order.
 
 ### D7. Local toolchain notes
 
