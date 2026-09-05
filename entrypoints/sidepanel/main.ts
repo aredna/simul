@@ -8,14 +8,13 @@ import {
 } from '../../lib/browser-scheduling';
 import {
   LatestWorkCoordinator,
-  shouldResetReplicaScrollForCapture,
-  type GenerationWork,
 } from '../../lib/companion-lifecycle';
 import {
   nextCompanionOverlay,
   type CompanionOverlay,
 } from '../../lib/companion-ui-state';
 import type { CompanionStatusTone } from '../../lib/companion-ui-localization';
+import { CapturePipeline } from './capture-pipeline';
 import {
   CompanionState,
   type CaptureRequest,
@@ -45,24 +44,16 @@ import {
   languageEndonym,
 } from '../../lib/language-options';
 import {
-  PageAccessError,
-  assertSourceTabIsCurrent,
   isSupportedPage,
-  navigationPageIdentityKey,
-  navigationPageScopeKey,
-  normalizedPageUrl,
   parseDetachedPageIdentityHint,
   readAuthorizedTabMessage,
   readPageError,
   readableError,
-  withPageTimeout,
-  type CapturedPageIdentity,
 } from '../../lib/page-identity';
 import { NavigationRefreshGate } from '../../lib/navigation-refresh-gate';
 import {
   createDetachedCompanionUrl,
   createDetachedWindowData,
-  sameCompanionSourcePage,
 } from '../../lib/companion-surface';
 import {
   compiledImageAnalysisCapabilities,
@@ -98,10 +89,6 @@ import {
   shouldRetryOcrProviderProbe,
 } from '../../lib/ocr/runtime-provider-readiness';
 import {
-  activateImageReplicaAfterRun,
-  imageReplicaActivationFailureReason,
-} from '../../lib/ocr/replica-activation';
-import {
   STORAGE_KEY,
   autoTranslationModeForPage,
   isCompanionLaunchBehavior,
@@ -125,10 +112,7 @@ import {
 } from '../../lib/preference-safety-coordinator';
 import { PreferenceSafetyClient } from '../../lib/preference-safety-client';
 import { installResetConfirmationController } from '../../lib/reset-confirmation-controller';
-import {
-  type ReplicaCaptureRequest,
-  type ReplicaDiagnosticCode,
-} from '../../lib/replica/contracts';
+import type { ReplicaRunResult } from '../../lib/replica/contracts';
 import { openChromeHtmlMirrorStream } from '../../lib/replica/html-mirror-client';
 import {
   isSelectableReplicaFidelityPolicy,
@@ -154,8 +138,6 @@ import {
 } from '../../lib/replica/read-scope-policy';
 import {
   IsolatedReplicaFailureRecoveryGate,
-  isCommittedPrimaryReplica,
-  shouldPreserveCommittedReplicaForCapture,
 } from '../../lib/replica/replica-recovery';
 import { openChromeSemanticSource } from '../../lib/replica/semantic-source-client';
 import {
@@ -165,15 +147,9 @@ import {
 } from '../../lib/replica/visible-replay-host';
 import { ReplicaSurfaceRouter } from '../../lib/replica/replica-surface-router';
 import {
-  captureRequestMatchesSourceDocument,
-  sameSourceReplicaLease,
-} from '../../lib/replica/source-identity';
-import { replicaSourceCommitAction } from '../../lib/translation/replica-translation-lifecycle';
-import {
   ReplicaTranslationCoordinator,
   isCompleteReplicaTranslationResult,
   splitBoundaryWhitespace,
-  type ReplicaSourceCommit,
 } from '../../lib/translation/replica-translation-coordinator';
 import { TranslationMemory } from '../../lib/translation/translation-memory';
 import {
@@ -346,8 +322,8 @@ const isolatedHtmlReplicaEngine = new IsolatedHtmlReplicaEngine({
     state.lastSourceScroll = scroll;
     if (state.preferences.syncScroll) visibleReplayHost.followSourceScroll(scroll);
   },
-  onSourceCommit: handleReplicaSourceCommit,
-  onLiveFailure: handleReplicaLiveFailure,
+  onSourceCommit: (commit) => capturePipeline.handleReplicaSourceCommit(commit),
+  onLiveFailure: (code) => capturePipeline.handleReplicaLiveFailure(code),
   ...(import.meta.env.DEV
     ? {
         onInfo: (info: IsolatedMirrorInfo) => {
@@ -436,70 +412,6 @@ imageTranslationController = new ImageTranslationController({
   onAutoLanguageInvalidated: (document) =>
     translationDriver.handleAutoImageLanguageInvalidated(document),
 });
-
-function handleReplicaSourceCommit(commit: ReplicaSourceCommit): void {
-  const selectedSnapshot = replicaSurfaceRouter.snapshot();
-  if (selectedSnapshot && sameSourceReplicaLease(selectedSnapshot, commit)) {
-    state.snapshot = selectedSnapshot;
-    replicaStatusContainer.hidden = true;
-    translationDriver.clearAutoImageLanguageForDifferentDocument(commit.document);
-    // Initial activation is deliberately deferred until the engine run has
-    // settled. Checkpoint/live callbacks can only advance an existing lease.
-    imageTranslationController.notifyReplicaCommit(
-      commit.document,
-      commit.replayLease,
-    );
-  }
-  if (state.isLiveSourceOnlyMode) return;
-  replicaTranslationCoordinator.handleSourceCommit(commit);
-  const action = replicaSourceCommitAction(
-    commit,
-    state.preferences.sourceLanguage === 'auto',
-  );
-  if (!action.prepareForNewText && !action.refreshDetectedLanguage) return;
-  const refresh = currency.begin('language-refresh');
-  void translationDriver.reconcileAfterCommit(
-    commit,
-    refresh,
-    action.refreshDetectedLanguage,
-    action.prepareForNewText,
-  );
-}
-
-function handleReplicaLiveFailure(
-  code: ReplicaDiagnosticCode,
-): void {
-  const identity = state.followedPageIdentity ?? state.capturedPageIdentity;
-  const action = identity
-    ? isolatedReplicaFailureRecoveryGate.decide(
-        visibleReplayHost.hasCommittedReplica,
-      )
-    : 'terminal-error';
-  // Content-free by construction: bounded enums only, with no page identity,
-  // source text, URL, DOM identifier, pixels, or resource metadata.
-  if (import.meta.env.DEV) {
-    console.info('[Simul replica live failure]', {
-      engine: 'isolated-html',
-      code,
-      state: action,
-    });
-  }
-  if (action === 'rebuild-last-good' && identity) {
-    setStatus(
-      'The live mirror disconnected. Rebuilding once while keeping the last good replica visible…',
-      'warning',
-    );
-    queueCapture({ identity, reason: 'desynchronized' });
-    return;
-  }
-
-  isolatedReplicaFailureRecoveryGate.reset();
-  setStatus(
-    'The live replica disconnected again. The last good replica is preserved; choose Refresh to retry.',
-    'error',
-  );
-  updateControls();
-}
 
 const autoLanguageEvidencePrecedence =
   new AutoLanguageEvidencePrecedence<PendingAutoImageLanguageEvidence>();
@@ -663,6 +575,56 @@ const translationDriver = new TranslationDriver({
   onTranslationSettled: () => logTranslationCache('page', translationMemory),
 });
 
+const capturePipeline = new CapturePipeline({
+  state,
+  currency,
+  captureCoordinator,
+  navigationRefreshGate,
+  recoveryGate: isolatedReplicaFailureRecoveryGate,
+  engine: isolatedHtmlReplicaEngine,
+  surface: replicaSurfaceRouter,
+  presentation: visibleReplayHost,
+  coordinator: replicaTranslationCoordinator,
+  imageController: imageTranslationController,
+  translationDriver,
+  evidence: autoLanguageEvidencePrecedence,
+  mirrorSessionId,
+  captureTimeoutMs: CAPTURE_TIMEOUT_MS,
+  readDocumentId: async (tabId) => {
+    // The injected function is bodiless on purpose: only the frame's
+    // documentId is read from the injection result.
+    const results = await browser.scripting.executeScript({
+      target: { tabId, frameIds: [0] },
+      func: () => undefined,
+    });
+    return results.find(({ frameId }) => frameId === 0)?.documentId;
+  },
+  getTab: (tabId) => browser.tabs.get(tabId),
+  reconcileAutomaticAccess: (pageUrl) => permissionFlows.reconcileAutomaticAccess(pageUrl),
+  cancelNavigationRefresh: () => sourceFollower.cancelNavigationRefresh(),
+  invalidateComposer: () => quickComposer.invalidate(),
+  setStatus,
+  updateControls: () => updateControls(),
+  renderLoading: renderLoadingState,
+  renderError: renderErrorState,
+  hideReplicaStatus: () => {
+    replicaStatusContainer.hidden = true;
+  },
+  clearCaptureNotes: () => {
+    captureNotes.hidden = true;
+    captureNotes.textContent = '';
+  },
+  updateMirrorLayout: () => updateMirrorLayout(),
+  logImageDiagnostic: logImageTranslationDiagnostic,
+  ...(import.meta.env.DEV
+    ? {
+        onEngineResult: (result: ReplicaRunResult) => {
+          console.info('[Simul replica]', result.diagnostics);
+        },
+      }
+    : {}),
+});
+
 const sourceFollower = new SourceFollower({
   state,
   currency,
@@ -682,21 +644,9 @@ const sourceFollower = new SourceFollower({
   detachedIdentityHint,
   navigationDebounceMs: NAVIGATION_DEBOUNCE_MS,
   navigationRefreshGate,
-  queueCapture,
-  invalidateCompanion,
-  onSourceNavigationStarted: (next) => {
-    imageTranslationController.setTopPageOrigin(next.url);
-    currency.supersedePage();
-    autoLanguageEvidencePrecedence.invalidate();
-    state.pageLanguageResolutionPending = false;
-    if (state.resolvedSourceLanguageOrigin === 'image') {
-      translationDriver.clearAutoImageLanguageResolution();
-    }
-    captureCoordinator.invalidate();
-    state.abortPageWork();
-    imageTranslationController.releaseReplica();
-    quickComposer.invalidate();
-  },
+  queueCapture: (request) => capturePipeline.queueCapture(request),
+  invalidateCompanion: (message) => capturePipeline.invalidateCompanion(message),
+  onSourceNavigationStarted: (next) => capturePipeline.beginSourceNavigation(next),
   onFollowedUrlChanged: (next) =>
     imageTranslationController.setTopPageOrigin(next.url),
   onFollowedTabActivated: () => imageTranslationController.resume(),
@@ -1035,7 +985,7 @@ browser.storage.onChanged.addListener((changes, areaName) => {
   ) {
     isolatedReplicaFailureRecoveryGate.reset();
     const identity = state.followedPageIdentity ?? state.capturedPageIdentity;
-    if (identity) queueCapture({ identity, reason: 'preference' });
+    if (identity) capturePipeline.queueCapture({ identity, reason: 'preference' });
   }
   if (previous.replicaViewMode !== state.preferences.replicaViewMode) {
     translationDriver.applyReplicaViewMode(previous.replicaViewMode);
@@ -1317,7 +1267,7 @@ function readScopeIsNoBroaderThan(
 
 function restartReplicaAfterReadPolicyChange(): void {
   const identity = state.followedPageIdentity ?? state.capturedPageIdentity;
-  if (identity) queueCapture({ identity, reason: 'preference' });
+  if (identity) capturePipeline.queueCapture({ identity, reason: 'preference' });
   configureImageTranslation();
 }
 
@@ -1342,283 +1292,6 @@ function committedReplicaReadScope(
     candidate.replicaReadScope,
     candidate.readScopeSetupVersion,
   );
-}
-
-function queueCapture(request: CaptureRequest): void {
-  sourceFollower.cancelNavigationRefresh();
-  navigationRefreshGate.consumeCapture(
-    navigationPageScopeKey(request.identity),
-    navigationPageIdentityKey(request.identity),
-  );
-  const previousIdentity = state.capturedPageIdentity ?? state.followedPageIdentity;
-  const samePage = sameCompanionSourcePage(
-    previousIdentity,
-    request.identity,
-    normalizedPageUrl,
-  );
-  if (!samePage) isolatedReplicaFailureRecoveryGate.reset();
-  if (shouldResetReplicaScrollForCapture(request.reason, samePage)) {
-    state.lastSourceScroll = undefined;
-    visibleReplayHost.resetSourceScroll();
-  }
-  const retainTranslationIntent =
-    samePage &&
-    (request.reason === 'manual' ||
-      request.reason === 'desynchronized' ||
-      request.reason === 'preference');
-  if (!retainTranslationIntent) {
-    replicaTranslationCoordinator.selectPair(undefined);
-    state.resetTranslationIntent();
-    quickComposer.invalidate();
-  }
-  state.abortPageWork();
-  imageTranslationController.setTopPageOrigin(request.identity.url);
-  imageTranslationController.releaseReplica();
-  currency.supersede('availability');
-  state.followedPageIdentity = request.identity;
-  if (!state.snapshot && !visibleReplayHost.hasCommittedReplica) renderLoadingState();
-  setStatus(
-    request.reason === 'desynchronized'
-      ? 'A live update could not be reconciled. Rebuilding once while keeping the current mirror visible…'
-      : request.reason === 'navigation'
-        ? 'Building the live mirror for the newly loaded page…'
-        : 'Building the initial live read-only mirror…',
-  );
-  const enqueued = captureCoordinator.enqueue(request);
-  updateControls();
-  if (enqueued.startNow) void runCaptureWork(enqueued.work);
-}
-
-async function runCaptureWork(work: GenerationWork<CaptureRequest>): Promise<void> {
-  state.captureInFlight = true;
-  updateControls();
-  try {
-    await capturePage(work);
-  } finally {
-    const next = captureCoordinator.finish(work.generation);
-    if (next) {
-      void runCaptureWork(next);
-      return;
-    }
-    state.captureInFlight = false;
-    updateControls();
-  }
-}
-
-async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> {
-  const identity = work.value.identity;
-  try {
-    const sameCapturedPage = Boolean(
-      state.capturedPageIdentity &&
-        state.capturedPageIdentity.tabId === identity.tabId &&
-        state.capturedPageIdentity.windowId === identity.windowId &&
-        normalizedPageUrl(state.capturedPageIdentity.url) ===
-          normalizedPageUrl(identity.url),
-    );
-    const preserveLastGoodReplica =
-      shouldPreserveCommittedReplicaForCapture(
-        work.value.reason,
-        sameCapturedPage,
-        visibleReplayHost.hasCommittedReplica,
-      );
-    // A same-page manual/recovery rebuild keeps last-good visible while the
-    // isolated engine stages its replacement offscreen and swaps atomically.
-    if (!preserveLastGoodReplica) {
-      isolatedHtmlReplicaEngine.releasePresentation();
-      state.snapshot = undefined;
-    }
-    const results = await withPageTimeout(
-      browser.scripting.executeScript({
-        target: { tabId: identity.tabId, frameIds: [0] },
-        func: () => undefined,
-      }),
-      CAPTURE_TIMEOUT_MS,
-    );
-    if (!captureCoordinator.isCurrent(work.generation)) return;
-    const bootstrap = results.find(({ frameId }) => frameId === 0);
-    const documentId = bootstrap?.documentId;
-    if (typeof documentId !== 'string' || documentId.length === 0) {
-      throw new PageAccessError('The page did not expose a current document boundary.');
-    }
-    const currentTab = await browser.tabs.get(identity.tabId);
-    assertSourceTabIsCurrent(currentTab, identity, state.requiresActiveSourceTab);
-    if (!captureCoordinator.isCurrent(work.generation)) return;
-
-    state.translationComplete = false;
-    captureNotes.hidden = true;
-    captureNotes.textContent = '';
-    await runReplicaEngineCheckpoint(work, identity, documentId);
-    if (!captureCoordinator.isCurrent(work.generation)) return;
-    state.snapshot = replicaSurfaceRouter.snapshot();
-    if (!state.snapshot) {
-      throw new PageAccessError('The isolated replica did not commit a current document.');
-    }
-    // Only published replica state is captured state. Keeping the candidate
-    // identity in state.followedPageIdentity lets a failed replacement retain an
-    // accurate last-good identity instead of pretending the failed page won.
-    // A history/replaceState URL can arrive while this same document is
-    // staging. Preserve that newer identity instead of writing the capture's
-    // older request URL back over it after the replica commits.
-    const committedIdentity = state.followedPageIdentity && sameCompanionSourcePage(
-        state.followedPageIdentity,
-        identity,
-        normalizedPageUrl,
-      )
-      ? state.followedPageIdentity
-      : identity;
-    state.capturedPageIdentity = committedIdentity;
-    state.followedPageIdentity = committedIdentity;
-    await translationDriver.resolveSelectedSourceLanguage(
-      translationDriver.currentReplicaLanguageContext(),
-    );
-
-    if (state.isLiveSourceOnlyMode) {
-      state.availability = 'unavailable';
-      state.availabilityCheckedForPair = undefined;
-      setStatus(
-        'Live source only is active. The isolated mirror keeps updating without text or image translation.',
-        'success',
-      );
-      return;
-    }
-
-    if (translationDriver.currentTranslationFieldCount() === 0) {
-      state.availability = 'unavailable';
-      state.availabilityCheckedForPair = undefined;
-      const accessWasRevoked = await permissionFlows.reconcileAutomaticAccess(
-        committedIdentity.url,
-      );
-      if (!captureCoordinator.isCurrent(work.generation)) return;
-      setStatus(
-        accessWasRevoked
-          ? 'Chrome removed a saved automatic-access grant. The mirror is waiting for page text.'
-          : 'The page mirror is live and will prepare translation when visible text arrives.',
-        'warning',
-      );
-      return;
-    }
-    await translationDriver.checkAvailability(work.generation);
-    if (!captureCoordinator.isCurrent(work.generation)) return;
-    const accessWasRevoked = await permissionFlows.reconcileAutomaticAccess(
-      committedIdentity.url,
-    );
-    if (!captureCoordinator.isCurrent(work.generation)) return;
-    if (accessWasRevoked) {
-      setStatus('Chrome removed a saved automatic-access grant, so that scope was turned off.', 'warning');
-      return;
-    }
-    await translationDriver.maybeTranslateAutomatically(work.generation, committedIdentity.url);
-  } catch (error) {
-    if (!captureCoordinator.isCurrent(work.generation)) return;
-    const message = readPageError(error);
-    state.snapshot = replicaSurfaceRouter.snapshot();
-    if (!state.snapshot && !visibleReplayHost.hasCommittedReplica) {
-      renderErrorState(message);
-    }
-    setStatus(message, 'error');
-  } finally {
-    updateControls();
-  }
-}
-
-async function runReplicaEngineCheckpoint(
-  work: GenerationWork<CaptureRequest>,
-  identity: CapturedPageIdentity,
-  documentId: string,
-): Promise<void> {
-  state.replicaShadowAbortController?.abort();
-  const abortController = new AbortController();
-  state.replicaShadowAbortController = abortController;
-  const request: ReplicaCaptureRequest = {
-    sessionId: mirrorSessionId,
-    pageEpoch: work.generation,
-    generation: work.generation,
-    tabId: identity.tabId,
-    frameId: 0,
-    documentId,
-    isCurrent: () =>
-      captureCoordinator.isCurrent(work.generation) &&
-      sameCompanionSourcePage(
-        state.followedPageIdentity,
-        identity,
-        normalizedPageUrl,
-      ),
-  };
-  let replicaCommitted = false;
-  let engineRunSettled = false;
-  let activationDecisionSettled = false;
-  try {
-    const result = await isolatedHtmlReplicaEngine.run(
-      request,
-      abortController.signal,
-    );
-    if (import.meta.env.DEV) {
-      console.info('[Simul replica]', result.diagnostics);
-    }
-    engineRunSettled = true;
-    replicaCommitted = isCommittedPrimaryReplica(
-      result,
-      visibleReplayHost.hasCommittedReplica,
-    );
-    const selectedSnapshot = state.snapshot;
-    const activation = activateImageReplicaAfterRun({
-      runStatus: result.status,
-      hasCommittedReplica: replicaCommitted,
-      aborted: abortController.signal.aborted,
-      modeMatches: true,
-      requestCurrent: request.isCurrent(),
-      snapshotAvailable: selectedSnapshot !== undefined,
-      snapshotMatches: Boolean(
-        selectedSnapshot &&
-        captureRequestMatchesSourceDocument(
-          request,
-          selectedSnapshot.document,
-        ),
-      ),
-      activate: () => Boolean(
-        selectedSnapshot &&
-        imageTranslationController.activateReplica(
-          request,
-          identity.windowId,
-          selectedSnapshot.replayLease,
-        ),
-      ),
-    });
-    if (activation.status === 'not-activated') {
-      logImageTranslationDiagnostic(Object.freeze({
-        stage: 'replica-not-activated' as const,
-        reason: activation.reason,
-      }));
-    }
-    activationDecisionSettled = true;
-    if (replicaCommitted) {
-      isolatedReplicaFailureRecoveryGate.markCommitted();
-      updateMirrorLayout();
-      return;
-    }
-    throw new PageAccessError('The isolated replica could not be prepared. Retry the current page.');
-  } catch (error) {
-    if (!activationDecisionSettled) {
-      const reason = imageReplicaActivationFailureReason({
-        aborted: abortController.signal.aborted,
-        requestCurrent: request.isCurrent(),
-        modeMatches: true,
-        engineRunSettled,
-      });
-      logImageTranslationDiagnostic(Object.freeze({
-        stage: 'replica-not-activated' as const,
-        reason,
-      }));
-    }
-    throw error;
-  } finally {
-    if (
-      state.replicaShadowAbortController === abortController &&
-      !visibleReplayHost.hasCommittedReplica
-    ) {
-      state.replicaShadowAbortController = undefined;
-    }
-  }
 }
 
 async function languageSelectionChanged(): Promise<void> {
@@ -1763,7 +1436,7 @@ async function changeReplicaFidelityPolicy(
     ) return;
     isolatedReplicaFailureRecoveryGate.reset();
     const identity = state.followedPageIdentity ?? state.capturedPageIdentity;
-    if (identity) queueCapture({ identity, reason: 'preference' });
+    if (identity) capturePipeline.queueCapture({ identity, reason: 'preference' });
   } finally {
     state.replicaFidelityCommitInFlight = false;
     updateControls();
@@ -2323,27 +1996,6 @@ async function checkPanelPlacement(): Promise<void> {
   } catch {
     // Chrome 138 does not expose placement inspection in every channel.
   }
-}
-
-function invalidateCompanion(message: string): void {
-  navigationRefreshGate.reset();
-  currency.supersedePage();
-  state.activeFollowRequest = undefined;
-  autoLanguageEvidencePrecedence.invalidate();
-  state.pageLanguageResolutionPending = false;
-  captureCoordinator.invalidate();
-  state.abortPageWork();
-  imageTranslationController.setTopPageOrigin(undefined);
-  imageTranslationController.releaseReplica();
-  isolatedHtmlReplicaEngine.releasePresentation();
-  quickComposer.invalidate();
-  state.clearPage();
-  replicaTranslationCoordinator.selectPair(undefined);
-  isolatedReplicaFailureRecoveryGate.reset();
-  visibleReplayHost.resetSourceScroll();
-  renderErrorState(message);
-  setStatus(message, 'warning');
-  updateControls();
 }
 
 function renderLoadingState(): void {

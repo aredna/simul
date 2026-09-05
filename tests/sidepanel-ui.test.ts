@@ -17,6 +17,10 @@ const script = readFileSync(
   new URL('../entrypoints/sidepanel/main.ts', import.meta.url),
   'utf8',
 );
+const capturePipeline = readFileSync(
+  new URL('../entrypoints/sidepanel/capture-pipeline.ts', import.meta.url),
+  'utf8',
+);
 const translationDriver = readFileSync(
   new URL('../entrypoints/sidepanel/translation-driver.ts', import.meta.url),
   'utf8',
@@ -410,19 +414,19 @@ describe('sidepanel UI structure', () => {
   });
 
   it('publishes captured identity only after the replacement replica commits', () => {
-    const captureStart = script.indexOf('async function capturePage(');
-    const captureEnd = script.indexOf(
-      '\nasync function runReplicaEngineCheckpoint(',
+    const captureStart = capturePipeline.indexOf('async #capturePage(');
+    const captureEnd = capturePipeline.indexOf(
+      'async #runReplicaEngineCheckpoint(',
       captureStart,
     );
-    const captureSource = script.slice(captureStart, captureEnd);
+    const captureSource = capturePipeline.slice(captureStart, captureEnd);
 
     expect(captureStart).toBeGreaterThanOrEqual(0);
-    expect(captureSource.indexOf('await runReplicaEngineCheckpoint('))
+    expect(captureSource.indexOf('await this.#runReplicaEngineCheckpoint('))
       .toBeLessThan(captureSource.indexOf(
         'capturedPageIdentity = committedIdentity;',
       ));
-    expect(captureSource.indexOf('snapshot = replicaSurfaceRouter.snapshot();'))
+    expect(captureSource.indexOf('snapshot = surface.snapshot();'))
       .toBeLessThan(captureSource.indexOf(
         'capturedPageIdentity = committedIdentity;',
       ));
@@ -430,23 +434,18 @@ describe('sidepanel UI structure', () => {
       'const committedIdentity = state.followedPageIdentity && sameCompanionSourcePage(',
     );
 
-    const checkpointStart = script.indexOf(
-      'async function runReplicaEngineCheckpoint(',
-    );
-    const checkpointEnd = script.indexOf(
-      '\nfunction ',
-      checkpointStart,
-    );
-    const checkpointSource = script.slice(checkpointStart, checkpointEnd);
+    const checkpointSource = capturePipeline.slice(captureEnd);
     expect(checkpointSource).toContain('sameCompanionSourcePage(');
     expect(checkpointSource).not.toContain(
       'capturedPageIdentity === identity',
     );
+    // The only injected function stays bodiless.
+    expect(script).toContain('func: () => undefined,');
   });
 
   it('routes every tab and window event through the source follower', () => {
     expect(script).toContain('new NavigationRefreshGate()');
-    expect(script).toContain('navigationRefreshGate.consumeCapture(');
+    expect(capturePipeline).toContain('navigationRefreshGate.consumeCapture(');
     for (const handler of [
       'sourceFollower.acceptAuthorizedTab(authorizedTab)',
       'sourceFollower.handleTabActivated(tabId, windowId)',
