@@ -87,9 +87,6 @@ build.
   summary: Replace the shared oversized private processing-token sentinel with a bounded change-sensitive representation.
   evidence: Different computed routing or paint dependency strings above 64 KiB currently collapse to the same private sentinel. Always treating the sentinel as changed would make unrelated refreshes loop and discard stable work, so a separately reviewed keyed digest or mutation-scoped fail-closed proof is needed without exposing the underlying private value.
 - source_spec: `_bmad-output/implementation-artifacts/spec-isolated-only-runtime-cache-correctness.md`
-  summary: Preserve authoritative capture when a loading navigation redirects before completion.
-  evidence: A loading key can be overwritten by a URL-only update that is classified as same-document, causing the matching completion event to be suppressed and leaving the previous replica visible.
-- source_spec: `_bmad-output/implementation-artifacts/spec-isolated-only-runtime-cache-correctness.md`
   summary: Reuse the checkpoint-scoped controlled-content policy while sanitizing image hints.
   evidence: Rebuilding the policy for every image repeats a bounded whole-document traversal and makes initial checkpoint work scale approximately with image count times node count.
 - source_spec: `_bmad-output/implementation-artifacts/spec-isolated-only-runtime-cache-correctness.md`
@@ -125,9 +122,6 @@ build.
 - source_spec: `_bmad-output/implementation-artifacts/spec-public-release-readiness.md`
   summary: Model approved `aria-current`, `aria-pressed`, and range-value semantics in the typed read-scope channel.
   evidence: These attributes are stripped from the base mirror and the current semantic protocol carries checked/selected state but no current-item, toggle, or bounded range-value proof.
-- source_spec: `_bmad-output/implementation-artifacts/spec-public-release-readiness.md`
-  summary: Make optional-host permission rollback transactional when disabling image translation.
-  evidence: The disable flow can remove the shared broad grant before a later preference failure and its rollback relies on an earlier user-activation snapshot without proving the exact-origin grant was restored.
 - source_spec: `_bmad-output/implementation-artifacts/spec-fresh-public-testing-build-identity.md`
   summary: Automate release build-sequence freshness when the canonical Chrome artifact changes.
   evidence: The current release gate validates and byte-compares an explicit build identity, but deciding when to advance its date/sequence remains a manual release-management step outside this identity correction.
