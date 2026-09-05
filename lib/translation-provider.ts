@@ -144,12 +144,19 @@ export function canonicalizeLanguageTag(
   return isSupportedLanguage(base) ? base : undefined;
 }
 
-/** Chrome documents the legacy `iw` code for Hebrew in some API locales. */
-export function chromeTranslatorLanguageCode(
+/**
+ * Language tags to try at Chrome's Translator API boundary, in order. Chrome
+ * documents BCP-47 `he` for Hebrew, while its translation stack used the
+ * legacy `iw` tag for years and older builds may still expect it. The provider
+ * probes the candidates and keeps the first one Chrome accepts.
+ */
+export function chromeTranslatorLanguageCodes(
   language: SupportedLanguage,
-): string {
-  return language === 'he' ? 'iw' : language;
+): readonly string[] {
+  return language === 'he' ? HEBREW_TRANSLATOR_TAGS : [language];
 }
+
+const HEBREW_TRANSLATOR_TAGS: readonly string[] = Object.freeze(['he', 'iw']);
 
 const LANGUAGE_NAMES: Readonly<Record<SupportedLanguage, string>> = {
   ar: 'Arabic',
