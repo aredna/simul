@@ -5,6 +5,7 @@ import {
   createSemanticSourcePortName,
   createSemanticSourceStart,
   readSemanticSourceProof,
+  semanticSourceProofIdentity,
   readSemanticSourceControllerMessage,
   readSemanticSourceBatch,
   readSemanticSourcePortIdentity,
@@ -149,6 +150,21 @@ const rangeProof = {
   ...ariaProof, nodeId: 23, gate: 'controlSemantics', state: 'valuenow',
   value: '42.5',
 } as const;
+const valueInputProof = {
+  ...ariaProof, nodeId: 24, gate: 'formValues', state: 'valueinput',
+  value: '7',
+} as const;
+
+const relationshipProof = {
+  kind: 'aria-relationship',
+  bridge: 'isolated-html',
+  nodeId: 30,
+  revision: 1,
+  gate: 'controlSemantics',
+  relation: 'labelledby',
+  targetNodeIds: [31, 32],
+  classifierVersion: 1,
+} as const;
 
 describe('semantic source protocol', () => {
   it('accepts exact classified, policy-bound records', () => {
@@ -165,13 +181,19 @@ describe('semantic source protocol', () => {
     expect(readSemanticSourceProof(pressedProof)).toEqual(pressedProof);
     expect(readSemanticSourceProof(currentProof)).toEqual(currentProof);
     expect(readSemanticSourceProof(rangeProof)).toEqual(rangeProof);
+    expect(readSemanticSourceProof(valueInputProof)).toEqual(valueInputProof);
+    expect(readSemanticSourceProof(relationshipProof)).toEqual(relationshipProof);
+    expect(readSemanticSourceProof({
+      ...relationshipProof, relation: 'describedby',
+    })).toEqual({ ...relationshipProof, relation: 'describedby' });
     expect(readSemanticSourceProof({ ...pressedProof, value: 'mixed' }))
       .toEqual({ ...pressedProof, value: 'mixed' });
     expect(readSemanticSourceProof({ ...rangeProof, value: '-7' }))
       .toEqual({ ...rangeProof, value: '-7' });
     const proofs = [
       selectProof, selectPresentationProof, disclosureProof, choiceProof,
-      controlProof, ariaProof, tabProof, structuralMenuProof,
+      controlProof, ariaProof, valueInputProof, relationshipProof, tabProof,
+      structuralMenuProof,
     ] as const;
     const computedBytes = semanticSourceBatchByteLength([ordinaryRecord], proofs);
     expect(readSemanticSourceBatch({
@@ -185,6 +207,36 @@ describe('semantic source protocol', () => {
       byteLength: computedBytes,
     }, documentIdentity, 'read-v1-111111', 'isolated-html',
     FULL_VISIBLE_REPLICA_READ_SCOPE)).toBeDefined();
+  });
+
+  it('rejects unsafe or malformed aria relationship proofs', () => {
+    // Page-authored relationship, so it must read under controlSemantics.
+    expect(readSemanticSourceProof({ ...relationshipProof, gate: 'formValues' }))
+      .toBeUndefined();
+    // Only labelledby/describedby travel; controls/owns/details do not.
+    expect(readSemanticSourceProof({ ...relationshipProof, relation: 'owns' }))
+      .toBeUndefined();
+    // At least one, no self-reference, no duplicates, all positive integers.
+    expect(readSemanticSourceProof({ ...relationshipProof, targetNodeIds: [] }))
+      .toBeUndefined();
+    expect(readSemanticSourceProof({ ...relationshipProof, targetNodeIds: [30] }))
+      .toBeUndefined();
+    expect(readSemanticSourceProof({
+      ...relationshipProof, targetNodeIds: [31, 31],
+    })).toBeUndefined();
+    expect(readSemanticSourceProof({
+      ...relationshipProof, targetNodeIds: [31, 0],
+    })).toBeUndefined();
+    expect(readSemanticSourceProof({
+      ...relationshipProof,
+      targetNodeIds: Array.from({ length: 33 }, (_unused, index) => index + 31),
+    })).toBeUndefined();
+    // labelledby and describedby on one node are distinct proof identities.
+    expect(semanticSourceProofIdentity(relationshipProof)).not.toBe(
+      semanticSourceProofIdentity({
+        ...relationshipProof, relation: 'describedby',
+      }),
+    );
   });
 
   it('binds start/ack parsing to the exact bridge, document and scope', () => {

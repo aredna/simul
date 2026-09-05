@@ -86,9 +86,6 @@ build.
 - source_spec: `_bmad-output/implementation-artifacts/spec-public-release-readiness.md`
   summary: Audit when the isolated replica iframe becomes available to assistive technology for ordinary translated documents.
   evidence: The iframe starts `aria-hidden`, while the reviewed unhide path is tied to semantic proof presentation; a text-only article needs an installed-Chrome accessibility-tree test proving the committed replica is exposed.
-- source_spec: `_bmad-output/implementation-artifacts/spec-public-release-readiness.md`
-  summary: Add bounded accessible-name support for safe `aria-labelledby` control relationships.
-  evidence: The base sanitizer removes `aria-labelledby` and the semantic label reader uses direct label sources, so a public control named only by referenced visible text may become unnamed in the inert replica.
 - source_spec: `_bmad-output/implementation-artifacts/spec-fresh-public-testing-build-identity.md`
   summary: Automate release build-sequence freshness when the canonical Chrome artifact changes.
   evidence: The current release gate validates and byte-compares an explicit build identity, but deciding when to advance its date/sequence remains a manual release-management step outside this identity correction.

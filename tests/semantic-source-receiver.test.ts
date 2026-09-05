@@ -465,6 +465,62 @@ describe('semantic source receiver', () => {
     }
   });
 
+  it('re-points aria relationships at represented, safe, same-scope nodes only', () => {
+    const { document } = parseHTML(
+      '<html><body><h2 id="t">Billing</h2><p id="d">Desc</p>' +
+      '<div id="region">Fields</div><input id="pw" type="password"></body></html>',
+    );
+    const nodes = new Map<number, Node>([
+      [1, document.querySelector('#region')!],
+      [2, document.querySelector('#t')!],
+      [3, document.querySelector('#d')!],
+      [4, document.querySelector('#pw')!],
+    ]);
+    const presented: Array<readonly ResolvedSemanticSourceProof[]> = [];
+    const receiver = new SemanticSourceReceiver({
+      document: identity,
+      replicaDocument: document as unknown as Document,
+      resolveNode: (nodeId) => nodes.get(nodeId),
+      applyProofs: (proofs) => {
+        presented.push(proofs);
+        return true;
+      },
+    });
+    const rel = (
+      nodeId: number,
+      relation: 'labelledby' | 'describedby',
+      targetNodeIds: number[],
+      revision = 1,
+    ) => ({
+      kind: 'aria-relationship', bridge: 'isolated-html', nodeId, revision,
+      gate: 'controlSemantics', relation, targetNodeIds, classifierVersion: 1,
+    } as const);
+    const relationshipsBy = (index: number) => presented[index]!
+      .filter((proof) => proof.kind === 'aria-relationship')
+      .map((proof) => proof.kind === 'aria-relationship'
+        ? [proof.proof.relation,
+          proof.references.map((ref) => (ref as HTMLElement).id)]
+        : []);
+
+    // The secret password reference (4) and the unknown id (9) are filtered;
+    // the public heading and description survive.
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 1, [],
+      [rel(1, 'labelledby', [2, 4, 9]), rel(1, 'describedby', [3])],
+    ))).toBeDefined();
+    expect(relationshipsBy(0)).toEqual([
+      ['labelledby', ['t']],
+      ['describedby', ['d']],
+    ]);
+
+    // A relationship whose every reference is unrepresented resolves to an
+    // empty reference set rather than voiding the whole batch.
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 2, [], [rel(1, 'labelledby', [9], 2)],
+    ))).toBeDefined();
+    expect(relationshipsBy(1)).toEqual([['labelledby', []]]);
+  });
+
   it('admits custom-scope multiple selection but requires duplicate shape proofs to agree', () => {
     const { document } = parseHTML(
       '<html><body><select><option>One</option><option>Two</option></select></body></html>',
