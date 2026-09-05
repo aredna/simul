@@ -18,12 +18,9 @@ import {
   reverseTranslationPair,
   type CompanionOverlay,
 } from '../../lib/companion-ui-state';
-import {
-  resolveUiLabelTranslations,
-  shouldRetryUiLabelLocalization,
-  type CompanionStatusTone,
-} from '../../lib/companion-ui-localization';
+import type { CompanionStatusTone } from '../../lib/companion-ui-localization';
 import { ToolbarStatus } from './toolbar-status';
+import { UiLocalizer } from './ui-localizer';
 import { isQuickTranslationShortcut } from '../../lib/quick-translation-shortcut';
 import {
   AutoLanguageEvidencePrecedence,
@@ -34,7 +31,6 @@ import {
 } from '../../lib/language-detection';
 import {
   LANGUAGE_OPTION_ORDER,
-  createSourceLanguageLabeler,
   languageEndonym,
 } from '../../lib/language-options';
 import {
@@ -243,7 +239,6 @@ interface CaptureRequest {
 const ZOOM_COMMIT_DEBOUNCE_MS = 150;
 const NAVIGATION_DEBOUNCE_MS = 350;
 const CAPTURE_TIMEOUT_MS = 12_000;
-const UI_LOCALIZATION_RETRY_DELAY_MS = 1_500;
 const DYNAMIC_UI_LABELS = [
   'Fit',
   '1:1',
@@ -641,14 +636,13 @@ let textDetectorProbeRetryUsed = false;
 if (compiledImageTextProviderIds.includes('chrome-text-detector')) {
   ocrProviderRuntimeStatuses.set('chrome-text-detector', 'checking');
 }
-let uiLocalizationRequestId = 0;
-let uiLocalizationInputKey = '';
-let uiLocalizationScheduled = false;
-let uiLocalizationAbortController: AbortController | undefined;
-let uiLocalizationRetryTimer: ReturnType<typeof setTimeout> | undefined;
-let uiLocalizationRetriedInputKey = '';
-let uiLocalizedTarget: SupportedLanguage = 'en';
-let uiLabelTranslations: ReadonlyMap<string, string> = new Map();
+const uiLocalizer = new UiLocalizer({
+  document,
+  provider,
+  dynamicLabels: DYNAMIC_UI_LABELS,
+  getTargetLanguage: () => preferences.targetLanguage,
+  translateRemembered,
+});
 
 const toolbarStatus = new ToolbarStatus({
   elements: {
@@ -715,7 +709,7 @@ populateLanguageOptions();
 initializeImageAnalysisControls();
 configureSurfaceButton();
 observeReplicaStateLabel();
-scheduleUiLocalization();
+uiLocalizer.schedule();
 
 toggleSettingsButton.addEventListener('click', () => {
   setCompanionOverlay(nextCompanionOverlay(openCompanionOverlay, 'settings'));
@@ -912,11 +906,7 @@ document.addEventListener('visibilitychange', () => {
 });
 window.addEventListener('pagehide', () => {
   commitPendingZoom();
-  uiLocalizationAbortController?.abort();
-  if (uiLocalizationRetryTimer !== undefined) {
-    clearTimeout(uiLocalizationRetryTimer);
-    uiLocalizationRetryTimer = undefined;
-  }
+  uiLocalizer.dispose();
   replicaShadowAbortController?.abort();
   imageTranslationController.dispose();
   replicaTranslationCoordinator.dispose();
@@ -2933,7 +2923,7 @@ async function runTranslation(automatic: boolean, generation: number): Promise<v
       result.total > 0 &&
       replicaTranslationCoordinator.isResultCurrent(result) &&
       isCompleteReplicaTranslationResult(result);
-    retryUiLocalizationAfterPagePairPrepared();
+    uiLocalizer.retryAfterPagePairPrepared();
     setStatus(
       translationComplete
         ? automatic
@@ -3080,177 +3070,7 @@ function createLanguageOption(value: string, label: string): HTMLOptionElement {
 }
 
 function setUiText(element: HTMLElement, english: string): void {
-  element.dataset.uiLabel = english;
-  const translated = uiLocalizedTarget === preferences.targetLanguage
-    ? uiLabelTranslations.get(english)
-    : undefined;
-  const text = translated ?? english;
-  if (element.textContent !== text) element.textContent = text;
-  if (translated && translated !== english) element.lang = uiLocalizedTarget;
-  else element.removeAttribute('lang');
-  if (
-    preferences.targetLanguage !== 'en' &&
-    !uiLabelTranslations.has(english)
-  ) {
-    if (uiLabelTranslations.size > 0) {
-      prepareUiEnglishFallback(preferences.targetLanguage, true);
-    }
-    scheduleUiLocalization();
-  }
-}
-
-function scheduleUiLocalization(): void {
-  prepareUiEnglishFallback(preferences.targetLanguage);
-  if (uiLocalizationScheduled) return;
-  uiLocalizationScheduled = true;
-  queueMicrotask(() => {
-    uiLocalizationScheduled = false;
-    void localizeUiLabels();
-  });
-}
-
-function prepareUiEnglishFallback(
-  targetLanguage: SupportedLanguage,
-  force = false,
-): void {
-  if (uiLocalizedTarget === targetLanguage && !force) return;
-  uiLocalizationAbortController?.abort();
-  if (uiLocalizationRetryTimer !== undefined) {
-    clearTimeout(uiLocalizationRetryTimer);
-    uiLocalizationRetryTimer = undefined;
-  }
-  uiLocalizationRetriedInputKey = '';
-  uiLocalizationInputKey = '';
-  uiLabelTranslations = new Map();
-  uiLocalizedTarget = targetLanguage;
-  applyUiLabelsToDom();
-}
-
-async function localizeUiLabels(): Promise<void> {
-  const targetLanguage = preferences.targetLanguage;
-  prepareUiEnglishFallback(targetLanguage);
-  const sources = [...new Set(
-    [
-      ...DYNAMIC_UI_LABELS,
-      ...[...document.querySelectorAll<HTMLElement>('[data-ui-label]')]
-        .map((element) => element.dataset.uiLabel ?? '')
-        .filter(Boolean),
-    ],
-  )];
-  const inputKey = JSON.stringify([targetLanguage, sources]);
-  if (uiLocalizationInputKey === inputKey) return;
-  uiLocalizationInputKey = inputKey;
-  const requestId = ++uiLocalizationRequestId;
-  uiLocalizationAbortController?.abort();
-  const abortController = new AbortController();
-  uiLocalizationAbortController = abortController;
-  const pair: TranslationPair = {
-    sourceLanguage: 'en',
-    targetLanguage,
-  };
-  let session: TranslationSession | undefined;
-  let sessionTask: Promise<TranslationSession> | undefined;
-  try {
-    const result = await resolveUiLabelTranslations(
-      sources,
-      targetLanguage,
-      (source) => translateRemembered(pair, source, async (core) => {
-        sessionTask ??= (async () => {
-          const uiAvailability = await provider.availability(pair);
-          abortController.signal.throwIfAborted();
-          // Label localization runs without a user gesture, so it may only
-          // use an already-installed pair. A downloadable pair would either
-          // start a multi-megabyte download as a side effect of a menu
-          // choice or throw NotAllowedError (review D14). The Translate page
-          // click prepares the pair; labels follow once it has been used.
-          if (uiAvailability !== 'available') {
-            throw new Error('The UI language pair is not installed yet.');
-          }
-          return provider.createSession(pair, {
-            signal: abortController.signal,
-          });
-        })();
-        session = await sessionTask;
-        return translateWithSession(session, core, abortController.signal);
-      }),
-    );
-    if (
-      abortController.signal.aborted ||
-      uiLocalizationAbortController !== abortController ||
-      requestId !== uiLocalizationRequestId ||
-      preferences.targetLanguage !== targetLanguage ||
-      uiLocalizationInputKey !== inputKey
-    ) return;
-    uiLocalizedTarget = targetLanguage;
-    uiLabelTranslations = result.labels;
-    applyUiLabelsToDom();
-    if (shouldRetryUiLabelLocalization(
-      inputKey,
-      uiLocalizationRetriedInputKey,
-      targetLanguage,
-      result,
-    )) {
-      uiLocalizationRetriedInputKey = inputKey;
-      uiLocalizationRetryTimer = setTimeout(() => {
-        uiLocalizationRetryTimer = undefined;
-        if (
-          preferences.targetLanguage !== targetLanguage ||
-          uiLocalizationInputKey !== inputKey
-        ) return;
-        uiLocalizationInputKey = '';
-        scheduleUiLocalization();
-      }, UI_LOCALIZATION_RETRY_DELAY_MS);
-    } else if (result.localized || targetLanguage === 'en') {
-      uiLocalizationRetriedInputKey = '';
-    }
-  } finally {
-    session?.destroy();
-    if (uiLocalizationAbortController === abortController) {
-      uiLocalizationAbortController = undefined;
-    }
-  }
-}
-
-/**
- * Label localization refuses a pair that is not installed (see
- * localizeUiLabels), and its retry budget is one pass per label set. A page
- * translation may have just installed that pair, so let the labels follow
- * instead of waiting for the next label-set change or a reload.
- */
-function retryUiLocalizationAfterPagePairPrepared(): void {
-  if (!uiLocalizationRetriedInputKey) return;
-  if (uiLocalizationRetryTimer !== undefined) {
-    clearTimeout(uiLocalizationRetryTimer);
-    uiLocalizationRetryTimer = undefined;
-  }
-  uiLocalizationRetriedInputKey = '';
-  uiLocalizationInputKey = '';
-  scheduleUiLocalization();
-}
-
-function applyUiLabelsToDom(): void {
-  for (const element of document.querySelectorAll<HTMLElement>('[data-ui-label]')) {
-    const english = element.dataset.uiLabel;
-    if (!english) continue;
-    const translated = uiLabelTranslations.get(english) ?? english;
-    if (element.textContent !== translated) element.textContent = translated;
-    if (translated === english) element.removeAttribute('lang');
-    else element.lang = uiLocalizedTarget;
-  }
-  updateSourceLanguageOptionLabels(preferences.targetLanguage);
-}
-
-function updateSourceLanguageOptionLabels(locale: SupportedLanguage): void {
-  const labelLanguage = createSourceLanguageLabeler(locale);
-  for (const option of document.querySelectorAll<HTMLOptionElement>(
-    '#source-language [data-language-code]',
-  )) {
-    const language = option.dataset.languageCode as SupportedLanguage | undefined;
-    if (!language) continue;
-    option.textContent = labelLanguage(language);
-    option.lang = locale;
-    option.dir = 'auto';
-  }
+  uiLocalizer.setText(element, english);
 }
 
 function observeReplicaStateLabel(): void {
@@ -3454,7 +3274,7 @@ function syncPreferenceControls(): void {
   renderReadScopeControls();
   renderImageAnalysisControls();
   configureImageTranslation();
-  scheduleUiLocalization();
+  uiLocalizer.schedule();
 }
 
 const READ_SCOPE_COPY: Readonly<Record<

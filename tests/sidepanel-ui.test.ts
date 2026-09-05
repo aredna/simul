@@ -202,9 +202,8 @@ describe('sidepanel UI structure', () => {
       '#compact-toolbar [data-ui-label="To"]',
     )).not.toBeNull();
     expect(style).toContain('.toolbar-language-control select { width: 108px');
-    expect(script).toContain('resolveUiLabelTranslations(');
-    expect(script).toContain('translateRemembered(pair, source');
-    expect(script).toContain("sourceLanguage: 'en'");
+    expect(script).toContain('new UiLocalizer({');
+    expect(script).toContain('dynamicLabels: DYNAMIC_UI_LABELS,');
   });
 
   it('places common controls before OCR experiments', () => {
@@ -429,12 +428,9 @@ describe('sidepanel UI structure', () => {
 
   it('keeps From target-localized and To native while using explicit order', () => {
     expect(script).toContain('for (const language of LANGUAGE_OPTION_ORDER)');
-    expect(script).toContain('createSourceLanguageLabeler(locale)');
     expect(script).toContain('languageEndonym(language)');
-    expect(script).toContain("'#source-language [data-language-code]'");
-    expect(script).not.toContain(
-      "'#source-language [data-language-code], #target-language [data-language-code]'",
-    );
+    expect(script).toContain("source.dataset.languageCode = language;");
+    expect(script).not.toContain("target.dataset.uiLabel");
   });
 
   it('does not follow a new active tab when its mode preference failed to save', () => {
@@ -611,15 +607,7 @@ describe('sidepanel UI structure', () => {
       .toBeLessThan(render.indexOf('imageTranslationDiagnosticsDetails = diagnostics;'));
   });
 
-  it('localizes labels only with an installed pair and lets them follow a page translation', () => {
-    const localize = sliceBetween(
-      'async function localizeUiLabels(',
-      '\nfunction retryUiLocalizationAfterPagePairPrepared(',
-    );
-    expect(localize).toContain("if (uiAvailability !== 'available') {");
-    expect(localize).not.toContain("uiAvailability === 'unavailable'");
-    expect(localize.indexOf("uiAvailability !== 'available'"))
-      .toBeLessThan(localize.indexOf('provider.createSession(pair'));
+  it('lets UI labels follow a page translation that prepared their pair', () => {
     // The quick composer is an explicit click and keeps its own path.
     const composer = sliceBetween(
       'async function translateComposer(',
@@ -630,7 +618,7 @@ describe('sidepanel UI structure', () => {
       'async function runTranslation(',
       '\nfunction describePartialReplicaTranslation(',
     );
-    expect(translation).toContain('retryUiLocalizationAfterPagePairPrepared();');
+    expect(translation).toContain('uiLocalizer.retryAfterPagePairPrepared();');
   });
 
   it('keeps translation intent local to the window that changed the languages', () => {
