@@ -111,15 +111,6 @@ build.
   summary: Requeue a retained image projection when replay-lease rebinding cannot install its overlay.
   evidence: Recovery marks retained work projected before checking the projector result, so a missing anchor or rejected projection can leave settled work with no visible overlay and no retry.
 - source_spec: `_bmad-output/implementation-artifacts/spec-isolated-only-runtime-cache-correctness.md`
-  summary: Carry stable source identity for qualified nested scrollers beyond the first 5,000 elements.
-  evidence: A valid late-DOM source scroller can lack an ordinal, causing replay to select a different early candidate or fall back to document scrolling.
-- source_spec: `_bmad-output/implementation-artifacts/spec-isolated-only-runtime-cache-correctness.md`
-  summary: Reject contradictory tablists with more than one independently selected visible tabpanel.
-  evidence: Proving each relationship in isolation can admit multiple selected sibling panels and expose payloads that should remain inactive under a unique-selection contract.
-- source_spec: `_bmad-output/implementation-artifacts/spec-isolated-only-runtime-cache-correctness.md`
-  summary: Use padding-box geometry when proving selected tabpanel visibility through overflow clips.
-  evidence: Border-box intersection can classify a panel as painted even when it lies fully outside an overflow ancestor's padding clip.
-- source_spec: `_bmad-output/implementation-artifacts/spec-isolated-only-runtime-cache-correctness.md`
   summary: Refresh controlled-content policy when remote selector changes alter a selected tabpanel's visibility without resizing the document.
   evidence: The visibility comparison can identify the changed target while the retained policy still sanitizes the newly visible panel as withheld, leaving it blank.
 - source_spec: `_bmad-output/implementation-artifacts/spec-public-release-readiness.md`
