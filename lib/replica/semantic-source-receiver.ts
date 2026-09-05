@@ -17,6 +17,8 @@ import {
   type SemanticSourceProof,
   type SemanticSourcePresentation,
   type SemanticSourceRecord,
+  isSemanticAriaStateValue,
+  type SemanticAriaState,
 } from './semantic-source-protocol';
 import {
   sameSourceDocument,
@@ -990,6 +992,17 @@ const RECEIVER_ARIA_CHECKED_ROLES = new Set([
 ]);
 const RECEIVER_ARIA_MIXED_ROLES = new Set(['checkbox', 'menuitemcheckbox']);
 const RECEIVER_ARIA_SELECTED_ROLES = new Set(['option', 'treeitem']);
+const RECEIVER_ARIA_PRESSED_ROLES = new Set(['button']);
+const RECEIVER_ARIA_CURRENT_TAGS = new Set([
+  'a', 'button', 'li', 'option', 'summary',
+]);
+const RECEIVER_ARIA_CURRENT_ROLES = new Set([
+  'button', 'gridcell', 'link', 'listitem', 'menuitem', 'menuitemradio',
+  'option', 'row', 'tab', 'treeitem',
+]);
+const RECEIVER_ARIA_RANGE_INDICATOR_ROLES = new Set([
+  'meter', 'progressbar', 'scrollbar',
+]);
 const RECEIVER_DISCLOSURE_STATE_TAGS = new Set([
   'input', 'option', 'output', 'select', 'textarea',
 ]);
@@ -1006,15 +1019,26 @@ function receiverControlCanBeDisabled(element: Element): boolean {
 
 function receiverAriaStateMatches(
   element: Element,
-  state: 'checked' | 'selected',
-  value: 'true' | 'false' | 'mixed',
+  state: SemanticAriaState,
+  value: string,
 ): boolean {
+  if (!isSemanticAriaStateValue(state, value)) return false;
   const role = safeAttribute(element, 'role').trim().toLowerCase();
-  if (state === 'selected') {
-    return value !== 'mixed' && RECEIVER_ARIA_SELECTED_ROLES.has(role);
+  const tagName = element.localName.toLowerCase();
+  if (state === 'selected') return RECEIVER_ARIA_SELECTED_ROLES.has(role);
+  if (state === 'checked') {
+    return RECEIVER_ARIA_CHECKED_ROLES.has(role) &&
+      (value !== 'mixed' || RECEIVER_ARIA_MIXED_ROLES.has(role));
   }
-  return RECEIVER_ARIA_CHECKED_ROLES.has(role) &&
-    (value !== 'mixed' || RECEIVER_ARIA_MIXED_ROLES.has(role));
+  if (state === 'pressed') {
+    return RECEIVER_ARIA_PRESSED_ROLES.has(role) ||
+      (role === '' && tagName === 'button');
+  }
+  if (state === 'current') {
+    return RECEIVER_ARIA_CURRENT_ROLES.has(role) ||
+      (role === '' && RECEIVER_ARIA_CURRENT_TAGS.has(tagName));
+  }
+  return RECEIVER_ARIA_RANGE_INDICATOR_ROLES.has(role);
 }
 
 function receiverDisclosureTriggerIsSafe(element: Element): boolean {

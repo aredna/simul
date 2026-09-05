@@ -138,6 +138,18 @@ const ariaProof = {
   classifierVersion: 1,
 } as const;
 
+const pressedProof = {
+  ...ariaProof, nodeId: 21, state: 'pressed', value: 'true',
+} as const;
+const currentProof = {
+  ...ariaProof, nodeId: 22, gate: 'controlSemantics', state: 'current',
+  value: 'page',
+} as const;
+const rangeProof = {
+  ...ariaProof, nodeId: 23, gate: 'controlSemantics', state: 'valuenow',
+  value: '42.5',
+} as const;
+
 describe('semantic source protocol', () => {
   it('accepts exact classified, policy-bound records', () => {
     expect(readSemanticSourceRecord(ordinaryRecord)).toEqual(ordinaryRecord);
@@ -150,6 +162,13 @@ describe('semantic source protocol', () => {
     expect(readSemanticSourceProof(choiceProof)).toEqual(choiceProof);
     expect(readSemanticSourceProof(controlProof)).toEqual(controlProof);
     expect(readSemanticSourceProof(ariaProof)).toEqual(ariaProof);
+    expect(readSemanticSourceProof(pressedProof)).toEqual(pressedProof);
+    expect(readSemanticSourceProof(currentProof)).toEqual(currentProof);
+    expect(readSemanticSourceProof(rangeProof)).toEqual(rangeProof);
+    expect(readSemanticSourceProof({ ...pressedProof, value: 'mixed' }))
+      .toEqual({ ...pressedProof, value: 'mixed' });
+    expect(readSemanticSourceProof({ ...rangeProof, value: '-7' }))
+      .toEqual({ ...rangeProof, value: '-7' });
     const proofs = [
       selectProof, selectPresentationProof, disclosureProof, choiceProof,
       controlProof, ariaProof, tabProof, structuralMenuProof,
@@ -280,6 +299,24 @@ describe('semantic source protocol', () => {
       ...ariaProof,
       state: 'selected',
     })).toBeUndefined();
+    // Page state never reads under the choice gate and choice state never
+    // reads under the structure gate.
+    expect(readSemanticSourceProof({ ...ariaProof, state: 'current' }))
+      .toBeUndefined();
+    expect(readSemanticSourceProof({ ...currentProof, gate: 'formValues' }))
+      .toBeUndefined();
+    expect(readSemanticSourceProof({ ...pressedProof, gate: 'controlSemantics' }))
+      .toBeUndefined();
+    // Bounded tokens and decimals only.
+    expect(readSemanticSourceProof({ ...currentProof, value: 'mixed' }))
+      .toBeUndefined();
+    expect(readSemanticSourceProof({ ...currentProof, value: 'Page' }))
+      .toBeUndefined();
+    for (const value of ['1e3', '0x10', '.5', '01', '1.', '12345678901234567', 'NaN', '']) {
+      expect(readSemanticSourceProof({ ...rangeProof, value })).toBeUndefined();
+    }
+    expect(readSemanticSourceProof({ ...rangeProof, value: 42.5 }))
+      .toBeUndefined();
 
     const proofs = [selectProof, { ...selectProof, revision: 3 }] as const;
     expect(readSemanticSourceBatch({

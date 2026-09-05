@@ -208,6 +208,25 @@ export interface SemanticControlStateProof {
   readonly classifierVersion: typeof SOURCE_SECRET_CLASSIFIER_VERSION;
 }
 
+/**
+ * Typed ARIA widget state. `checked`, `selected` and `pressed` are user
+ * choice state (formValues); `current` and the indicator-only `valuenow` are
+ * page state (controlSemantics). Every value is a bounded token or a bounded
+ * decimal; `aria-valuetext` and slider/spinbutton values never travel.
+ */
+export type SemanticAriaState =
+  | 'checked'
+  | 'selected'
+  | 'pressed'
+  | 'current'
+  | 'valuenow';
+export type SemanticAriaStateGate = 'formValues' | 'controlSemantics';
+const SEMANTIC_ARIA_CURRENT_VALUES = new Set([
+  'page', 'step', 'location', 'date', 'time', 'true', 'false',
+]);
+/** Up to 15 integer digits and 6 fraction digits; no exponent, no sign noise. */
+const SEMANTIC_ARIA_DECIMAL_VALUE = /^-?(?:0|[1-9]\d{0,14})(?:\.\d{1,6})?$/u;
+
 export interface SemanticAriaStateProof {
   readonly kind: 'aria-state';
   readonly bridge: SemanticSourceBridgeId;
@@ -215,10 +234,38 @@ export interface SemanticAriaStateProof {
   readonly nodeId: number;
   /** Monotonic revision for this typed ARIA-state identity. */
   readonly revision: number;
-  readonly gate: 'formValues';
-  readonly state: 'checked' | 'selected';
-  readonly value: 'true' | 'false' | 'mixed';
+  readonly gate: SemanticAriaStateGate;
+  readonly state: SemanticAriaState;
+  /** Validated by `isSemanticAriaStateValue` for the proof's state. */
+  readonly value: string;
   readonly classifierVersion: typeof SOURCE_SECRET_CLASSIFIER_VERSION;
+}
+
+export function isSemanticAriaState(value: unknown): value is SemanticAriaState {
+  return value === 'checked' || value === 'selected' || value === 'pressed' ||
+    value === 'current' || value === 'valuenow';
+}
+
+/** Choice state reads under formValues; page state under controlSemantics. */
+export function semanticAriaStateGate(
+  state: SemanticAriaState,
+): SemanticAriaStateGate {
+  return state === 'current' || state === 'valuenow'
+    ? 'controlSemantics'
+    : 'formValues';
+}
+
+export function isSemanticAriaStateValue(
+  state: SemanticAriaState,
+  value: unknown,
+): value is string {
+  if (typeof value !== 'string') return false;
+  if (state === 'current') return SEMANTIC_ARIA_CURRENT_VALUES.has(value);
+  if (state === 'valuenow') {
+    return value.length <= 24 && SEMANTIC_ARIA_DECIMAL_VALUE.test(value);
+  }
+  if (state === 'selected') return value === 'true' || value === 'false';
+  return value === 'true' || value === 'false' || value === 'mixed';
 }
 
 export type SemanticSourceProof =
@@ -594,19 +641,18 @@ export function readSemanticSourceProof(
     if (!hasExactKeys(input, [
       'kind', 'bridge', 'nodeId', 'revision', 'gate', 'state', 'value',
       'classifierVersion',
-    ]) || input.gate !== 'formValues' ||
+    ]) ||
       !positiveSafeInteger(input.nodeId) ||
-      (input.state !== 'checked' && input.state !== 'selected') ||
-      (input.value !== 'true' && input.value !== 'false' &&
-        input.value !== 'mixed') ||
-      (input.state === 'selected' && input.value === 'mixed')
+      !isSemanticAriaState(input.state) ||
+      input.gate !== semanticAriaStateGate(input.state) ||
+      !isSemanticAriaStateValue(input.state, input.value)
     ) return undefined;
     return Object.freeze({
       kind: input.kind,
       bridge: input.bridge,
       nodeId: input.nodeId,
       revision: input.revision,
-      gate: input.gate,
+      gate: semanticAriaStateGate(input.state),
       state: input.state,
       value: input.value,
       classifierVersion: SOURCE_SECRET_CLASSIFIER_VERSION,
