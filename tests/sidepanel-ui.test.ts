@@ -17,6 +17,10 @@ const script = readFileSync(
   new URL('../entrypoints/sidepanel/main.ts', import.meta.url),
   'utf8',
 );
+const translationDriver = readFileSync(
+  new URL('../entrypoints/sidepanel/translation-driver.ts', import.meta.url),
+  'utf8',
+);
 const permissionFlows = readFileSync(
   new URL('../entrypoints/sidepanel/permission-flows.ts', import.meta.url),
   'utf8',
@@ -497,11 +501,12 @@ describe('sidepanel UI structure', () => {
   });
 
   it('lets UI labels follow a page translation that prepared their pair', () => {
-    const translation = sliceBetween(
-      'async function runTranslation(',
-      '\nfunction describePartialReplicaTranslation(',
+    expect(script).toContain('onPairPrepared: () => uiLocalizer.retryAfterPagePairPrepared(),');
+    const translation = translationDriver.slice(
+      translationDriver.indexOf('async #runTranslation('),
+      translationDriver.indexOf('applyReplicaViewMode('),
     );
-    expect(translation).toContain('uiLocalizer.retryAfterPagePairPrepared();');
+    expect(translation).toContain('this.environment.onPairPrepared();');
   });
 
   it('keeps translation intent local to the window that changed the languages', () => {
@@ -513,46 +518,43 @@ describe('sidepanel UI structure', () => {
     expect(storageListener).toContain('applyLanguagePreferences(false, previousPair)');
     const selectionChanged = sliceBetween(
       'async function languageSelectionChanged(',
-      '\nasync function applyLanguagePreferences(',
+      '\nasync function translateRemembered(',
     );
     expect(selectionChanged).toContain(
       'if (!state.isLiveSourceOnlyMode) state.translationDesired = true;',
     );
-    const apply = sliceBetween(
-      'async function applyLanguagePreferences(',
-      '\nasync function checkAvailability(',
+    const apply = translationDriver.slice(
+      translationDriver.indexOf('async applyLanguagePreferences('),
+      translationDriver.indexOf('async checkAvailability('),
     );
     expect(apply).toContain('if (!fromUserAction) {');
-    expect(apply).toContain('await maybeTranslateAutomatically(');
+    expect(apply).toContain('await this.maybeTranslateAutomatically(');
     expect(apply).not.toContain('startTranslation(!fromUserAction');
-    expect(apply).toContain('await startTranslation(false, captureCoordinator.generation)');
+    expect(apply).toContain('await this.startTranslation(false, captureCoordinator.generation)');
   });
 
   it('records the checked pair only after an availability result is accepted', () => {
-    const check = sliceBetween(
-      'async function checkAvailability(',
-      '\nasync function maybeTranslateAutomatically(',
-    );
-    expect(check).not.toContain(
-      "availabilityCheckedForPair = checkedPairKey;\n  state.availability = 'unavailable';",
+    const check = translationDriver.slice(
+      translationDriver.indexOf('async checkAvailability('),
+      translationDriver.indexOf('async maybeTranslateAutomatically('),
     );
     expect(check.indexOf('availabilityCheckedForPair = checkedPairKey;'))
       .toBeGreaterThan(check.indexOf('pair.sourceLanguage === pair.targetLanguage'));
     expect(check).toContain(
-      'if (!isCurrentAvailabilityRequest(request, requestedSnapshot, pair, generation)) return;\n' +
-        '    state.availabilityCheckedForPair = checkedPairKey;\n' +
-        '    state.availability = next;',
+      'if (!isCurrent()) return;\n' +
+        '      state.availabilityCheckedForPair = checkedPairKey;\n' +
+        '      state.availability = next;',
     );
     expect(check).toContain(
-      'if (!isCurrentAvailabilityRequest(request, requestedSnapshot, pair, generation)) return;\n' +
-        '    state.availabilityCheckedForPair = checkedPairKey;\n' +
-        "    state.availability = 'unavailable';",
+      'if (!isCurrent()) return;\n' +
+        '      state.availabilityCheckedForPair = checkedPairKey;\n' +
+        "      state.availability = 'unavailable';",
     );
     // A discarded check leaves the pair unrecorded, so the next text commit
     // re-establishes availability instead of skipping preparation.
-    const reconcile = sliceBetween(
-      'async function reconcileReplicaTranslationAfterCommit(',
-      '\nfunction* replicaRecordSources(',
+    const reconcile = translationDriver.slice(
+      translationDriver.indexOf('async reconcileAfterCommit('),
+      translationDriver.indexOf('async applyLanguagePreferences('),
     );
     expect(reconcile).toContain('availabilityCheckedForPair !== expectedAvailabilityKey');
   });

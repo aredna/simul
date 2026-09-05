@@ -6,39 +6,35 @@ const script = readFileSync(
   new URL('../entrypoints/sidepanel/main.ts', import.meta.url),
   'utf8',
 );
+const driver = readFileSync(
+  new URL('../entrypoints/sidepanel/translation-driver.ts', import.meta.url),
+  'utf8',
+);
+
+function slice(source: string, start: string, end: string): string {
+  const startIndex = source.indexOf(start);
+  expect(startIndex).toBeGreaterThanOrEqual(0);
+  const endIndex = source.indexOf(end, startIndex + start.length);
+  expect(endIndex).toBeGreaterThan(startIndex);
+  return source.slice(startIndex, endIndex);
+}
 
 describe('sidepanel Auto image-language reconciliation', () => {
   it('holds image evidence until an active page resolution settles', () => {
-    const callback = script.slice(
-      script.indexOf('onAutoLanguageDetected:'),
-      script.indexOf('function handleReplicaSourceCommit'),
-    );
-    expect(callback).toContain(
-      'autoLanguageEvidencePrecedence.offerImageEvidence',
-    );
-    expect(callback).toContain('document,');
-    expect(callback).toContain('origin,');
-    expect(callback).toContain(
-      'if (ready) commitAutoDetectedImageLanguage(ready)',
-    );
+    const offer = slice(driver, 'offerImageLanguageEvidence(', 'commitAutoDetectedImageLanguage(proposal');
+    expect(offer).toContain('evidence.offerImageEvidence({');
+    expect(offer).toContain('document,');
+    expect(offer).toContain('origin,');
+    expect(offer).toContain('if (ready) this.commitAutoDetectedImageLanguage(ready)');
 
-    const resolver = script.slice(
-      script.indexOf('async function resolveSelectedSourceLanguage'),
-      script.indexOf('function mirrorLanguageSample'),
-    );
-    expect(resolver).toContain(
-      "const resolution = currency.begin('language-resolution')",
-    );
-    expect(resolver).toContain(
-      'autoLanguageEvidencePrecedence.beginPageResolution(resolutionRevision)',
-    );
-    expect(resolver).toContain(
-      'autoLanguageEvidencePrecedence.settlePageResolution',
-    );
+    const resolver = slice(driver, 'async resolveSelectedSourceLanguage(', 'offerImageLanguageEvidence(');
+    expect(resolver).toContain("const resolution = currency.begin('language-resolution')");
+    expect(resolver).toContain('evidence.beginPageResolution(resolutionRevision)');
+    expect(resolver).toContain('evidence.settlePageResolution');
     expect(resolver.indexOf('beginPageResolution(resolutionRevision)'))
       .toBeLessThan(resolver.indexOf('await resolveSourceLanguage'));
     expect(resolver).toContain(
-      'pageLanguageResolutionPending =\n    autoLanguageEvidencePrecedence.pageResolutionPending',
+      'state.pageLanguageResolutionPending = evidence.pageResolutionPending',
     );
     expect(resolver.indexOf('configureImageTranslation()'))
       .toBeLessThan(resolver.indexOf('await resolveSourceLanguage'));
@@ -47,150 +43,94 @@ describe('sidepanel Auto image-language reconciliation', () => {
   });
 
   it('labels accessibility-derived and OCR-derived image evidence accurately', () => {
-    const proposal = script.slice(
-      script.indexOf('interface PendingAutoImageLanguageEvidence'),
-      script.indexOf('async function reconcileAutoDetectedImageLanguage'),
-    );
-    expect(proposal).toContain(
-      "readonly origin: AutoImageLanguageEvidenceOrigin",
-    );
-    expect(proposal).toContain(
-      "proposal.origin === 'accessibility-text'",
-    );
+    const proposal = slice(driver, 'interface PendingAutoImageLanguageEvidence', 'handleAutoImageLanguageInvalidated(');
+    expect(proposal).toContain('readonly origin: AutoImageLanguageEvidenceOrigin');
+    expect(proposal).toContain("proposal.origin === 'accessibility-text'");
     expect(proposal).toContain("'accessibility image text'");
     expect(proposal).toContain("'bounded image OCR'");
   });
 
   it('runs normal pair, OCR, availability, and automatic-translation reconciliation', () => {
-    const reconciliation = script.slice(
-      script.indexOf('async function reconcileAutoDetectedImageLanguage'),
-      script.indexOf('function mirrorLanguageSample'),
-    );
-    expect(reconciliation).toContain(
-      'replicaTranslationCoordinator.selectPair(pair)',
-    );
+    const reconciliation = slice(driver, 'async #reconcileAutoDetectedImageLanguage(', '#isCurrentAvailabilityRequest(');
+    expect(reconciliation).toContain('coordinator.selectPair(pair)');
     expect(reconciliation).toContain('configureImageTranslation()');
-    expect(reconciliation).toContain('await checkAvailability(generation)');
-    expect(reconciliation).toContain(
-      'await maybeTranslateAutomatically(generation, identity.url)',
-    );
-    expect(reconciliation).toContain('!currency.isCurrent(resolution)');
+    expect(reconciliation).toContain('await this.checkAvailability(generation)');
+    expect(reconciliation).toContain('await this.maybeTranslateAutomatically(generation, identity.url)');
+    expect(reconciliation).toContain('currency.isCurrent(resolution)');
   });
 
   it('keys image-derived language to the exact enabled method and read policy', () => {
-    const configuration = script.slice(
-      script.indexOf('function configureImageTranslation'),
-      script.indexOf('async function refreshOcrProviderRuntimeStatuses'),
-    );
-    expect(configuration).toContain(
-      'autoImageLanguageConfigurationKey({',
-    );
+    const configuration = slice(script, 'function configureImageTranslation', 'async function refreshOcrProviderRuntimeStatuses');
+    expect(configuration).toContain('autoImageLanguageConfigurationKey({');
     expect(configuration).toContain('providerOrder: routedProviderOrder,');
-    expect(configuration).toContain(
-      'enabledMethodOrder: enabledAutoImageLanguageMethodOrder(',
-    );
-    expect(configuration).toContain(
-      'policyFingerprint: replicaReadScopeFingerprint(readScope),',
-    );
+    expect(configuration).toContain('enabledMethodOrder: enabledAutoImageLanguageMethodOrder(');
+    expect(configuration).toContain('policyFingerprint: replicaReadScopeFingerprint(readScope),');
     expect(configuration).toContain('controlImages: readScope.controlImages,');
-    expect(configuration).toContain(
-      'shouldClearAutoImageLanguageResolution',
-    );
-    expect(configuration).toContain(
-      'shouldClearAutoImageLanguageForDocument',
-    );
-    expect(configuration).toContain('currentReplicaDocumentMatches');
-    expect(configuration).toContain('pageLanguageResolutionPending,');
-    expect(configuration).toContain('clearAutoImageLanguageResolution()');
-    expect(configuration).toContain("resolvedSourceLanguageOrigin = undefined");
+    expect(configuration).toContain('shouldClearAutoImageLanguageResolution');
+    expect(configuration).toContain('shouldClearAutoImageLanguageForDocument');
+    expect(configuration).toContain('translationDriver.currentReplicaDocumentMatches');
+    expect(configuration).toContain('pageLanguageResolutionPending: state.pageLanguageResolutionPending,');
+    expect(configuration).toContain('translationDriver.clearAutoImageLanguageResolution()');
     expect(configuration).not.toContain(
       'preferences.targetLanguage,\n  );\n  if (shouldClearAutoImageLanguageResolution',
     );
+    const clear = slice(driver, 'clearAutoImageLanguageResolution(): void {', 'clearAutoImageLanguageForDifferentDocument(');
+    expect(clear).toContain('state.clearLanguageResolution()');
+    expect(clear).toContain("currency.supersede('language-resolution')");
+    expect(clear).toContain("currency.supersede('availability')");
   });
 
   it('drops image-derived language inside the pre-persist narrowing purge', () => {
-    const commit = script.slice(
-      script.indexOf('async function commitReplicaReadScope'),
-      script.indexOf('async function resetAllExtensionSettings'),
-    );
+    const commit = slice(script, 'async function commitReplicaReadScope', 'async function resetAllExtensionSettings');
     expect(commit.indexOf('purgeSourceDerivedRuntime('))
       .toBeLessThan(commit.indexOf('await preferenceClient.send'));
 
-    const purge = script.slice(
-      script.indexOf('function purgeSourceDerivedRuntime'),
-      script.indexOf('function clearResetOnlyRuntimeState'),
-    );
+    const purge = slice(script, 'function purgeSourceDerivedRuntime', 'function clearResetOnlyRuntimeState');
     expect(purge).toContain("resolvedSourceLanguageOrigin === 'image'");
-    expect(purge).toContain('clearAutoImageLanguageResolution()');
+    expect(purge).toContain('translationDriver.clearAutoImageLanguageResolution()');
   });
 
   it('binds accepted OCR language to the exact replica document and clears it on navigation', () => {
-    const callback = script.slice(
-      script.indexOf('onAutoLanguageDetected:'),
-      script.indexOf('function handleReplicaSourceCommit'),
-    );
-    expect(callback).toContain('document,');
+    const callback = slice(script, 'onAutoLanguageDetected:', 'onAutoLanguageInvalidated:');
+    expect(callback).toContain('document, origin');
 
-    const proposal = script.slice(
-      script.indexOf('interface PendingAutoImageLanguageEvidence'),
-      script.indexOf('async function reconcileAutoDetectedImageLanguage'),
-    );
-    expect(proposal).toContain(
-      'readonly document: ReplicaSourceDocumentIdentity',
-    );
-    expect(proposal).toContain(
-      'resolvedImageLanguageDocument = proposal.document',
-    );
-    expect(proposal).toContain(
-      'currentReplicaDocumentMatches(proposal.document)',
-    );
+    const proposal = slice(driver, 'interface PendingAutoImageLanguageEvidence', 'handleAutoImageLanguageInvalidated(');
+    expect(proposal).toContain('readonly document: ReplicaSourceDocumentIdentity');
+    expect(proposal).toContain('state.resolvedImageLanguageDocument = proposal.document');
+    const currency = slice(driver, '#pendingImageEvidenceIsCurrent(proposal', 'async #reconcileAutoDetectedImageLanguage(');
+    expect(currency).toContain('this.currentReplicaDocumentMatches(proposal.document)');
+    expect(currency).toContain('proposal.replayLease === state.snapshot?.replayLease');
 
-    const navigation = script.slice(
-      script.indexOf('onSourceNavigationStarted: (next) => {'),
-      script.indexOf('onFollowedUrlChanged:'),
-    );
+    const navigation = slice(script, 'onSourceNavigationStarted: (next) => {', 'onFollowedUrlChanged:');
     expect(navigation).toContain("resolvedSourceLanguageOrigin === 'image'");
-    expect(navigation).toContain('clearAutoImageLanguageResolution()');
+    expect(navigation).toContain('translationDriver.clearAutoImageLanguageResolution()');
   });
 
   it('revokes only matching current-document image evidence before reconciling Auto', () => {
-    const callback = script.slice(
-      script.indexOf('function handleAutoImageLanguageInvalidated'),
-      script.indexOf('async function reconcileAutoDetectedImageLanguage'),
-    );
+    const callback = slice(driver, 'handleAutoImageLanguageInvalidated(document', 'clearAutoImageLanguageResolution(): void {');
     expect(callback).toContain("resolvedSourceLanguageOrigin !== 'image'");
-    expect(callback).toContain(
-      '!sameSourceDocument(state.resolvedImageLanguageDocument, document)',
-    );
-    expect(callback).toContain('!currentReplicaDocumentMatches(document)');
+    expect(callback).toContain('!sameSourceDocument(state.resolvedImageLanguageDocument, document)');
+    expect(callback).toContain('!this.currentReplicaDocumentMatches(document)');
     expect(callback).toContain("preferences.sourceLanguage !== 'auto'");
     expect(callback).toContain("resolvedSourceLanguageOrigin = 'explicit'");
     expect(callback).toContain('resolvedImageLanguageDocument = undefined');
-    expect(callback).toContain('clearAutoImageLanguageResolution()');
+    expect(callback).toContain('this.clearAutoImageLanguageResolution()');
     expect(callback).toContain('queueMicrotask(() =>');
-    expect(callback).toContain('void applyLanguagePreferences(false)');
+    expect(callback).toContain('void this.applyLanguagePreferences(false)');
   });
 
   it('keeps unchanged effective-pair work and image provenance across an explicit toggle', () => {
-    const resolver = script.slice(
-      script.indexOf('async function resolveSelectedSourceLanguage'),
-      script.indexOf('function commitAutoDetectedImageLanguage'),
-    );
+    const resolver = slice(driver, 'async resolveSelectedSourceLanguage(', 'offerImageLanguageEvidence(');
     expect(resolver).toContain('unchangedExplicitImageLanguage');
     expect(resolver).toContain('previousLanguage === detected.language');
     expect(resolver).toContain('previousImageDocumentIsCurrent');
 
-    const preferences = script.slice(
-      script.indexOf('async function applyLanguagePreferences'),
-      script.indexOf('async function checkAvailability'),
-    );
+    const preferences = slice(driver, 'async applyLanguagePreferences(', 'async checkAvailability(');
     expect(preferences).toContain(
       'const effectivePairChanged = !sameTranslationPair(previousPair, nextPair)',
     );
     expect(preferences.indexOf('if (effectivePairChanged)'))
       .toBeLessThan(preferences.indexOf('activeAbortController?.abort()'));
-    expect(preferences).toContain(
-      'if (!effectivePairChanged && state.translationComplete)',
-    );
+    expect(preferences).toContain('if (!effectivePairChanged && state.translationComplete)');
   });
 });
