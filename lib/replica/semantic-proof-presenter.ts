@@ -6,6 +6,7 @@ import {
 import {
   type ResolvedSemanticSourceProof,
 } from './semantic-source-receiver';
+import { semanticAriaStateAttribute } from './semantic-source-protocol';
 
 export interface SemanticProofPresenterOptions {
   readonly document: Document;
@@ -332,7 +333,7 @@ function applyTypedProof(
     };
   }
   if (resolved.kind === 'aria-state') {
-    const attribute = `aria-${resolved.proof.state}`;
+    const attribute = semanticAriaStateAttribute(resolved.proof.state);
     const marker = `data-simul-source-aria-${resolved.proof.state}-state`;
     const original = resolved.target.getAttribute(attribute);
     const originalMarker = resolved.target.getAttribute(marker);

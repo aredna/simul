@@ -1348,7 +1348,7 @@ describe('semantic source session', () => {
     disclosureSession.dispose();
   });
 
-  it('emits toggle, current-item and indicator range state through typed ARIA proofs', () => {
+  it('emits toggle, current-item, indicator and input range state through typed ARIA proofs', () => {
     const { document, window } = parseHTML(
       '<html><body><nav><a id="here" href="/here" aria-current="page">Here</a>' +
       '<a id="there" href="/there">There</a></nav>' +
@@ -1384,12 +1384,14 @@ describe('semantic source session', () => {
       [nodeId(bold), 'formValues', 'pressed', 'true', 1],
       [nodeId(step), 'controlSemantics', 'current', 'step', 1],
       [nodeId(upload), 'controlSemantics', 'valuenow', '42', 1],
+      [nodeId(volume), 'formValues', 'valueinput', '7', 1],
       [nodeId(toggle), 'formValues', 'pressed', 'mixed', 1],
     ]);
+    // The slider's numeric aria-valuenow travels under formValues, but its
+    // free-text aria-valuetext ("seven") is never carried.
     expect(JSON.stringify(port.messages[0])).not.toContain('seven');
     expect(port.messages[0]!.proofs.some((proof) =>
-      proof.kind === 'aria-state' &&
-      (proof.nodeId === nodeId(volume) || proof.nodeId === nodeId(there)),
+      proof.kind === 'aria-state' && proof.nodeId === nodeId(there),
     )).toBe(false);
 
     const first = port.messages[0]!;
@@ -1403,6 +1405,7 @@ describe('semantic source session', () => {
       [nodeId(here), 'controlSemantics', 'current', 'page', 1],
       [nodeId(bold), 'formValues', 'pressed', 'false', 2],
       [nodeId(step), 'controlSemantics', 'current', 'step', 1],
+      [nodeId(volume), 'formValues', 'valueinput', '7', 1],
       [nodeId(toggle), 'formValues', 'pressed', 'mixed', 1],
     ]);
     session.dispose();
@@ -1421,6 +1424,51 @@ describe('semantic source session', () => {
       .map((proof) => proof.kind === 'aria-state' ? proof.state : '')
       .sort()).toEqual(['current', 'current']);
     structureSession.dispose();
+  });
+
+  it('carries native range and number values under the form-value gate', () => {
+    const { document, window } = parseHTML(
+      '<html><body>' +
+      '<input id="volume" type="range" min="0" max="10" value="5">' +
+      '<input id="count" type="number" value="42">' +
+      '</body></html>',
+    );
+    const volume = document.querySelector<HTMLInputElement>('#volume')!;
+    const count = document.querySelector<HTMLInputElement>('#count')!;
+    volume.value = '5';
+    count.value = '42';
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(port, document, window);
+    port.emit(createSemanticSourceStart(
+      'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+    ));
+    const valueRecord = (node: object) => port.messages[0]!.records.find(
+      (record) => record.nodeId === nodeId(node) &&
+        record.presentation === 'value',
+    );
+    expect(valueRecord(volume)).toMatchObject({
+      category: 'ordinary-form', gate: 'formValues', text: '5',
+    });
+    expect(valueRecord(count)).toMatchObject({
+      category: 'ordinary-form', gate: 'formValues', text: '42',
+    });
+    session.dispose();
+
+    const pageOnlyPort = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const pageOnlySession = createSession(pageOnlyPort, document, window);
+    pageOnlyPort.emit(createSemanticSourceStart('isolated-html', identity, {
+      ...FULL_VISIBLE_REPLICA_READ_SCOPE,
+      formValues: false,
+      personalDataValues: false,
+    }));
+    expect(pageOnlyPort.messages[0]!.records.some(
+      (record) => record.presentation === 'value',
+    )).toBe(false);
+    pageOnlySession.dispose();
   });
 
   it('emits revisioned native select and choice state only through typed proofs', () => {
