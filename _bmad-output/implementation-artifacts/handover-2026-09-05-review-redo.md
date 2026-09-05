@@ -5,6 +5,7 @@
 | Item | State |
 | --- | --- |
 | Open PR | [#9 "0.4.0: review fixes re-applied over the 0.3.3 line"](https://github.com/aredna/simul/pull/9), branch `chore/review-redo`, 12 commits over `origin/main` (`596dec7`), CI green |
+| Split PR | [#10 "Side-panel split: leaf modules over the 0.4.0 line"](https://github.com/aredna/simul/pull/10), draft, branch `refactor/side-panel-split` stacked on `chore/review-redo`; retarget to `main` once #9 merges. Ten modules landed, `main.ts` 5,305 → 3,242 lines, 1,292 tests (D31) |
 | Superseded PR | [#8](https://github.com/aredna/simul/pull/8) closed with a pointer; its branch `chore/deps-refresh-and-review-fixes` is kept only as the reference for the side-panel split design |
 | Local `main` | fast-forwarded to `origin/main` (`596dec7`) |
 | Gate at PR head | typecheck clean; 1,197 tests across 80 files (the Chrome-fixture test skips without a browser); `dist/chrome-unpacked` synced and byte-verified (0.4.0, 37.5 MiB) |
@@ -118,21 +119,18 @@ recovery gate has a sliding budget of 3 rebuilds per 60 s.
 2. **Delete the old branch once #9 is merged:** `git branch -D
    chore/deps-refresh-and-review-fixes` locally and on the remote. Keep the
    decision log; it is already on the new branch.
-3. **Side-panel split, as its own PR.** Upstream's `main.ts` is 5,173 lines and
-   keeps seven hand-rolled request counters (`identityRequestId`,
-   `availabilityRequestId`, `replicaLanguageRefreshVersion`,
-   `sourceLanguageResolutionRevision`, `imageCaptureAccessRevision`,
-   `uiLocalizationRequestId`, `activeFollowRequestId`). The reference design is
-   on the old branch under `entrypoints/sidepanel/` (D25, D26): one
+3. **Side-panel split, PR #10 (in progress).** The design is D25/D26: one
    `CompanionState`, one `Currency` of scoped tokens, and modules that take
    their collaborators through a small environment and test against fakes.
-   Per D28's porting map: `companion-state`, `currency`, `source-follower`,
-   `permission-flows`, `toolbar-status`, `ui-localizer` and `quick-composer`
-   map cleanly; the capture pipeline, translation driver, preference client
-   and image panel map partially and must absorb upstream's navigation refresh
-   gate, view-preference ledger, preference safety, read-scope setup and
-   semantic source wiring; `live-update-driver` and `mirror-view` have no
-   counterpart. Expect a few sessions; land it in gate-green commits.
+   Landed (D31): `lib/page-identity` extension, `toolbar-status`,
+   `ui-localizer`, `quick-composer`, `image-analysis-panel`,
+   `companion-state`, `currency` (the counters are gone), `source-follower`,
+   `preference-client`, `permission-flows`. Still in `main.ts`: the capture
+   pipeline, the translation driver (language resolution with image
+   evidence, availability, page translation, replica view mode), the
+   read-scope and reset controller, the image-translation configuration
+   cluster, the detached surface and the settings sync. Continue on the
+   branch in gate-green commits; run `npm run artifact:sync` before pushing.
 4. **Real icon mark** (replace `public/icon/*.png`; the validator only checks
    presence and size names).
 5. **Upstream's own deferred work** is listed in
@@ -166,3 +164,7 @@ recovery gate has a sliding budget of 3 rebuilds per 60 s.
   installer).
 - Every non-obvious choice goes in the decision log with a "Please confirm"
   marker when a different reading of your instructions would change the work.
+- Side-panel modules: class + explicit environment (callbacks and element
+  refs, browser calls behind a small adapter) + a unit test against fakes or
+  a linkedom document. Source-substring tests over `main.ts` are replaced by
+  behavioral tests when the code they cover moves.
