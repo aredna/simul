@@ -861,6 +861,58 @@ the preference lock).
 and `currency.ts` first, then `main.ts` (what remains and how modules are
 wired), then the modules in the table order.
 
+### D32. Merge, release and housekeeping (2026-09-05)
+
+Your answers to the outstanding items: merge #9 now and retarget #10; ship
+0.4.0 with the placeholder icons; a publish commit plus tag and GitHub
+release; next work is the remaining review items, upstream's deferred work,
+and anything else I can take on. Mid-session you added: remove any GitHub CI
+work that may have been installed.
+
+Done, in order:
+
+- **Publish commit.** `chore: publish 0.4.0 testing build` on
+  `chore/review-redo`: build identity `0.4.0 beta v.20260905.1`
+  (`wxt.config.ts`, README, the two identity tests), third-party notices name
+  0.4.0 (they still said 0.3.3), dist resynced (manifest and notices only).
+  Gate green locally and on the PR run.
+- **PR #9 merged** as a rebase merge, so `main` stays linear like upstream's
+  history and the gate-green commits survive. `main` became `9f4987f`, the
+  same tree as the tested commit. GitHub retargeted #10 to `main` on its own.
+- **Tag and release.** Annotated tag `v0.4.0` at `9f4987f`. GitHub
+  pre-release "Simul 0.4.0 beta (v.20260905.1)" at
+  https://github.com/aredna/simul/releases/tag/v0.4.0 with
+  `simul-0.4.0-chrome-unpacked.zip` (the committed `dist/chrome-unpacked`,
+  58 files, 31 MB) and notes drawn from D29 and D30. Marked pre-release
+  because it is a beta testing build.
+- **GitHub CI removed** (your mid-session instruction).
+  `.github/workflows/ci.yml` dated from the 2026-07-19 bootstrap; the review
+  sessions had only bumped its npm version. Removed through PR #11
+  (rebase-merged; `main` is `95f1ba7`). `.github/dependabot.yml` was left in
+  place because it is not CI; **please confirm** whether it should go too.
+  The workflow's last run on `main` (the publish commit) failed only in the
+  Chrome-fixture disclosure test, which timed out on the runner's D-Bus after
+  8 s; the same tree had passed on the PR run minutes earlier and the other
+  1,197 tests passed. Verification is now local only: `npm run check` before
+  any push.
+- **PR #10 rebased** onto `main` with `git rebase --onto` (17 commits, no
+  conflicts; the identity bump and the workflow removal carry through). Gate
+  on the rebased head: typecheck clean, 1,333 tests across 94 files (1
+  Chrome-fixture skip), artifact verified. Force-pushed with lease.
+- **Branches deleted,** local and remote: `chore/review-redo` (merged) and
+  `chore/deps-refresh-and-review-fixes` (the D28 reference; the split has
+  been redone as D31).
+- **Dependabot PRs #1, #2 and #4 closed** with a comment (rrweb removed;
+  acorn 8.18.0 pinned on `main`). #6 (wxt 0.21.3) had already been closed by
+  Dependabot once `main` reached 0.21.4.
+
+Not done: the icons stay placeholders (your choice). The decision log on
+`main` ends at D30; D31 and D32 live on the split branch until #10 merges.
+
+After #10 merges, advance the build identity again (`v.2026MMDD.1` on the
+merge date) before any further release; the `v0.4.0` tag stays on the #9
+merge.
+
 ### D7. Local toolchain notes
 
 - Nothing in the dependency set had a release inside the 7-day window
