@@ -49,6 +49,61 @@ afterEach(async () => {
 });
 
 describe('validateArtifact', () => {
+  it('compares legal files against the caller\'s project root, not the tool\'s checkout', async () => {
+    const artifact = await createTemporaryArtifact();
+    const reviewedRoot = await createTemporaryDirectory('simul-project-');
+    for (const legalFile of REQUIRED_RELEASE_LEGAL_FILES) {
+      await cp(
+        path.resolve(legalFile.sourcePath),
+        path.join(reviewedRoot, legalFile.sourcePath),
+      );
+    }
+
+    await expect(
+      validateArtifact(artifact, { projectRoot: reviewedRoot }),
+    ).resolves.toMatchObject({ directory: artifact });
+
+    await writeFile(path.join(reviewedRoot, 'LICENSE'), 'a different reviewed license');
+    await expect(
+      validateArtifact(artifact, { projectRoot: reviewedRoot }),
+    ).rejects.toThrow(/differs from its reviewed source: LICENSE/u);
+
+    await rm(path.join(reviewedRoot, 'LICENSE'));
+    await expect(
+      validateArtifact(artifact, { projectRoot: reviewedRoot }),
+    ).rejects.toThrow(/ENOENT/u);
+  });
+
+  it('compares the packaged OCR runtime against the caller\'s vendor manifests', async () => {
+    const artifact = await createTemporaryOcrArtifact();
+    const reviewedRoot = await createTemporaryDirectory('simul-project-');
+    for (const legalFile of REQUIRED_RELEASE_LEGAL_FILES) {
+      await cp(
+        path.resolve(legalFile.sourcePath),
+        path.join(reviewedRoot, legalFile.sourcePath),
+      );
+    }
+    await mkdir(path.join(reviewedRoot, 'vendor/ocr/tesseract'), { recursive: true });
+    for (const vendorFile of [
+      'vendor/ocr/tesseract/asset-manifest.json',
+      'vendor/ocr/THIRD_PARTY_NOTICES.md',
+    ]) {
+      await cp(path.resolve(vendorFile), path.join(reviewedRoot, vendorFile));
+    }
+
+    await expect(
+      validateArtifact(artifact, { projectRoot: reviewedRoot }),
+    ).resolves.toMatchObject({ ocrEnabled: true });
+
+    await writeFile(
+      path.join(reviewedRoot, 'vendor/ocr/tesseract/asset-manifest.json'),
+      '{"assets":[]}',
+    );
+    await expect(
+      validateArtifact(artifact, { projectRoot: reviewedRoot }),
+    ).rejects.toThrow(/reviewed vendor manifest/u);
+  });
+
   it('accepts a complete, local MV3 artifact with the approved boundary', async () => {
     const artifact = await createTemporaryArtifact();
 
@@ -766,7 +821,7 @@ describe('compareArtifactDirectories', () => {
 
 describe('artifact orchestration', () => {
   it('checks through a temporary build without mutating the committed artifact and cleans up', async () => {
-    const projectRoot = await createTemporaryDirectory('simul-project-');
+    const projectRoot = await createTemporaryProjectRoot('simul-project-');
     const committed = canonicalArtifactDirectory(projectRoot);
     await createValidArtifact(committed);
     const before = await readFile(path.join(committed, 'popup.js'));
@@ -790,7 +845,7 @@ describe('artifact orchestration', () => {
   });
 
   it('fails stale checks actionably without changing the release', async () => {
-    const projectRoot = await createTemporaryDirectory('simul-stale-');
+    const projectRoot = await createTemporaryProjectRoot('simul-stale-');
     const committed = canonicalArtifactDirectory(projectRoot);
     await createValidArtifact(committed, {
       popupScript: 'console.info("committed");',
@@ -814,7 +869,7 @@ describe('artifact orchestration', () => {
   });
 
   it('reports an unsafe fresh build as a source problem instead of recommending sync', async () => {
-    const projectRoot = await createTemporaryDirectory('simul-invalid-build-');
+    const projectRoot = await createTemporaryProjectRoot('simul-invalid-build-');
     const committed = canonicalArtifactDirectory(projectRoot);
     await createValidArtifact(committed);
 
@@ -840,7 +895,7 @@ describe('artifact orchestration', () => {
   });
 
   it('synchronizes only the exact canonical directory and preserves unrelated paths', async () => {
-    const projectRoot = await createTemporaryDirectory('simul-sync-');
+    const projectRoot = await createTemporaryProjectRoot('simul-sync-');
     const committed = canonicalArtifactDirectory(projectRoot);
     await createValidArtifact(committed, { popupScript: 'console.info("old");' });
     const unrelated = path.join(projectRoot, 'dist', 'keep.txt');
@@ -865,7 +920,7 @@ describe('artifact orchestration', () => {
   });
 
   it('does not replace the existing release when the new build is unsafe', async () => {
-    const projectRoot = await createTemporaryDirectory('simul-unsafe-sync-');
+    const projectRoot = await createTemporaryProjectRoot('simul-unsafe-sync-');
     const committed = canonicalArtifactDirectory(projectRoot);
     await createValidArtifact(committed, {
       popupScript: 'console.info("known-good");',
@@ -890,7 +945,7 @@ describe('artifact orchestration', () => {
   });
 
   it('restores the previous release when post-promotion validation fails', async () => {
-    const projectRoot = await createTemporaryDirectory('simul-restore-sync-');
+    const projectRoot = await createTemporaryProjectRoot('simul-restore-sync-');
     const committed = canonicalArtifactDirectory(projectRoot);
     await createValidArtifact(committed, {
       popupScript: 'console.info("known-good");',
@@ -917,7 +972,7 @@ describe('artifact orchestration', () => {
   });
 
   it('reports cleanup failure accurately while leaving the new release active', async () => {
-    const projectRoot = await createTemporaryDirectory('simul-cleanup-sync-');
+    const projectRoot = await createTemporaryProjectRoot('simul-cleanup-sync-');
     const committed = canonicalArtifactDirectory(projectRoot);
     await createValidArtifact(committed, { popupScript: 'console.info("old");' });
 
@@ -996,6 +1051,21 @@ async function createTemporaryOcrArtifact() {
     `globalThis.__simulOcrRuntime = Object.freeze(${JSON.stringify(REQUIRED_OCR_RUNTIME_MARKERS)});`,
   );
   return artifact;
+}
+
+async function createTemporaryProjectRoot(prefix) {
+  const projectRoot = await createTemporaryDirectory(prefix);
+  // A project root carries the reviewed legal files that the validator
+  // compares packaged copies against; a root without them fails closed.
+  await Promise.all(
+    REQUIRED_RELEASE_LEGAL_FILES.map(async (legalFile) =>
+      writeFile(
+        path.join(projectRoot, legalFile.sourcePath),
+        await readFile(legalFile.sourcePath),
+      ),
+    ),
+  );
+  return projectRoot;
 }
 
 async function createTemporaryDirectory(prefix) {
