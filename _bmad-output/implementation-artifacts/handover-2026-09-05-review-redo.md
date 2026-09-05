@@ -4,13 +4,14 @@
 
 | Item | State |
 | --- | --- |
-| Open PR | [#9 "0.4.0: review fixes re-applied over the 0.3.3 line"](https://github.com/aredna/simul/pull/9), branch `chore/review-redo`, 12 commits over `origin/main` (`596dec7`), CI green |
-| Split PR | [#10 "Side-panel split over the 0.4.0 line"](https://github.com/aredna/simul/pull/10), branch `refactor/side-panel-split` stacked on `chore/review-redo`; retarget to `main` once #9 merges. Fifteen modules, `main.ts` 5,305 → 1,472 lines, 1,333 tests, artifact synced (D31). Ready for review |
-| Superseded PR | [#8](https://github.com/aredna/simul/pull/8) closed with a pointer; its branch `chore/deps-refresh-and-review-fixes` is kept only as the reference for the side-panel split design |
-| Local `main` | fast-forwarded to `origin/main` (`596dec7`) |
-| Gate at PR head | typecheck clean; 1,197 tests across 80 files (the Chrome-fixture test skips without a browser); `dist/chrome-unpacked` synced and byte-verified (0.4.0, 37.5 MiB) |
-| Build identity | `0.4.0 beta v.20260904.1`; placeholder icons; exact pins with a tracked lockfile |
-| Records | `review-2026-09-03-decision-log.md` D1–D30 and `review-2026-09-03-findings.md` (the original review, 52 findings and 12 recommendations, converted from the page it was first published on) in this directory. Reports stay in the repository from now on; nothing further is published to claude.ai. |
+| Merged | [#9 "0.4.0: review fixes re-applied over the 0.3.3 line"](https://github.com/aredna/simul/pull/9), rebase-merged 2026-09-05; [#11](https://github.com/aredna/simul/pull/11) removed the GitHub Actions workflow at your request. `main` is `95f1ba7` |
+| Released | tag `v0.4.0` at `9f4987f` (the publish commit); GitHub pre-release [Simul 0.4.0 beta (v.20260905.1)](https://github.com/aredna/simul/releases/tag/v0.4.0) with the zipped `dist/chrome-unpacked` and notes from D29 and D30 |
+| Open PR | [#10 "Side-panel split over the 0.4.0 line"](https://github.com/aredna/simul/pull/10), branch `refactor/side-panel-split`, 17 commits rebased onto `main`. Fifteen modules, `main.ts` 5,305 → 1,472 lines (D31). Ready for review |
+| Closed | [#8](https://github.com/aredna/simul/pull/8) (superseded; branch deleted) and Dependabot #1, #2, #4, #6 (superseded by the 0.4.0 pins) |
+| Local `main` | at `origin/main` (`95f1ba7`) |
+| Gate at #10 head | typecheck clean; 1,333 tests across 94 files (the Chrome-fixture test skips without a browser); `dist/chrome-unpacked` synced and byte-verified. There is no CI any more: run `npm run check` before every push |
+| Build identity | `0.4.0 beta v.20260905.1`; placeholder icons (your choice for this build); exact pins with a tracked lockfile |
+| Records | `review-2026-09-03-decision-log.md` D1–D32 and `review-2026-09-03-findings.md` (the original review, 52 findings and 12 recommendations, converted from the page it was first published on) in this directory. Reports stay in the repository from now on; nothing further is published to claude.ai. |
 
 ## What happened, in order
 
@@ -112,14 +113,7 @@ recovery gate has a sliding budget of 3 rebuilds per 60 s.
 
 ## What is next, in order
 
-1. **Review and merge PR #9.** Read D28 for the reasoning, D30 for what changed
-   and the two deliberate deviations (commits re-queue only anchor-deferred
-   images; the text-cover heuristic cannot see `pointer-events: none`
-   overlays).
-2. **Delete the old branch once #9 is merged:** `git branch -D
-   chore/deps-refresh-and-review-fixes` locally and on the remote. Keep the
-   decision log; it is already on the new branch.
-3. **Review and merge PR #10 after #9.** The design is D25/D26: one
+1. **Review and merge PR #10.** The design is D25/D26: one
    `CompanionState`, one `Currency` of scoped tokens, and modules that take
    their collaborators through a small environment and test against fakes.
    D31 lists the fifteen modules, the deliberate details, and what stays in
@@ -127,17 +121,26 @@ recovery gate has a sliding budget of 3 rebuilds per 60 s.
    `currency.ts`, then `main.ts`, then the modules. A manual pass in Chrome
    is worth doing before a public build: the browser adapters (tabs, windows,
    side panel, scripting, permissions, storage) are the seams no unit test
-   covers.
-4. **Real icon mark** (replace `public/icon/*.png`; the validator only checks
-   presence and size names).
-5. **Upstream's own deferred work** is listed in
+   covers. After it merges, advance the build identity (`v.2026MMDD.1`)
+   before any further release; `v0.4.0` stays on the #9 merge.
+2. **Decide on `.github/dependabot.yml`** (D32): it was left when the CI
+   workflow was removed because it is not CI.
+3. **Remaining review items** (your 2026-09-05 choice for the next session):
+   L3 Web Lock held across `permissions.request`, L4/L5 string catalogue for
+   titles and aria labels, M5 recording granted origins, D17 receiver-side
+   autocomplete check, L10 verifying Chrome's `he` versus `iw` handling.
+4. **Upstream's own deferred work** is listed in
    `_bmad-output/implementation-artifacts/deferred-work.md` and untouched.
+5. **Real icon mark** whenever it exists (replace `public/icon/*.png`; the
+   validator only checks presence and size names).
 
 ## Known limits and loose ends
 
 - The Chrome-fixture test (`tests/isolated-disclosure-chrome.test.ts`) skips
-  without a browser and timed out on the runner's D-Bus on 2026-08-28; it passed
-  on PR #9's run but is the one flaky spot in CI.
+  without a browser. On the GitHub runner it timed out on D-Bus on 2026-08-28
+  and again on the 0.4.0 publish commit's run (the same tree had passed on the
+  PR run minutes earlier). The workflow is gone since PR #11, so this only
+  matters if CI ever comes back.
 - wxt 0.21 reports about 116 MB for the build because upstream's release plugin
   emits the OCR assets once per Vite build; the artifact on disk is 37.5 MiB and
   the validator measures disk.
