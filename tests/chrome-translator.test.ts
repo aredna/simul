@@ -265,15 +265,143 @@ describe('ChromeTranslatorProvider', () => {
     });
   });
 
-  it('uses Chrome\'s documented legacy Hebrew code at the API boundary', async () => {
-    const api = createApi();
-    const provider = new ChromeTranslatorProvider(api);
+  describe('Hebrew language tags', () => {
+    const hebrewSource = { sourceLanguage: 'he', targetLanguage: 'en' } as const;
+    const hebrewTarget = { sourceLanguage: 'en', targetLanguage: 'he' } as const;
+    const sourceTagOf = (call: unknown[]) =>
+      (call[0] as { sourceLanguage: string }).sourceLanguage;
 
-    await provider.availability({ sourceLanguage: 'he', targetLanguage: 'en' });
+    it('probes the documented he tag first and stops when Chrome accepts it', async () => {
+      const api = createApi();
+      const provider = new ChromeTranslatorProvider(api);
 
-    expect(api.availability).toHaveBeenCalledWith({
-      sourceLanguage: 'iw',
-      targetLanguage: 'en',
+      await expect(provider.availability(hebrewSource)).resolves.toBe('available');
+      await provider.createSession(hebrewSource);
+
+      expect(api.availability).toHaveBeenCalledTimes(1);
+      expect(api.availability).toHaveBeenCalledWith({
+        sourceLanguage: 'he',
+        targetLanguage: 'en',
+      });
+      expect(api.create).toHaveBeenCalledWith(
+        expect.objectContaining({ sourceLanguage: 'he', targetLanguage: 'en' }),
+      );
+    });
+
+    it('falls back to the legacy iw tag when he is refused and keeps it for sessions', async () => {
+      const availability = vi.fn(
+        async (options: { sourceLanguage: string; targetLanguage: string }) =>
+          options.sourceLanguage === 'iw' ? 'downloadable' : 'unavailable',
+      );
+      const api = createApi({ availability });
+      const provider = new ChromeTranslatorProvider(api);
+
+      await expect(provider.availability(hebrewSource)).resolves.toBe('downloadable');
+      expect(availability.mock.calls.map(sourceTagOf)).toEqual(['he', 'iw']);
+
+      await provider.createSession(hebrewSource);
+      expect(api.create).toHaveBeenCalledWith(
+        expect.objectContaining({ sourceLanguage: 'iw', targetLanguage: 'en' }),
+      );
+      // The accepted tag is reused: no second probe round before the session,
+      // and the next availability check asks Chrome about iw only.
+      expect(availability).toHaveBeenCalledTimes(2);
+      await expect(provider.availability(hebrewSource)).resolves.toBe('downloadable');
+      expect(availability).toHaveBeenCalledTimes(3);
+      expect(availability).toHaveBeenLastCalledWith({
+        sourceLanguage: 'iw',
+        targetLanguage: 'en',
+      });
+    });
+
+    it('resolves the tag for a Hebrew target language as well', async () => {
+      const availability = vi.fn(
+        async (options: { sourceLanguage: string; targetLanguage: string }) =>
+          options.targetLanguage === 'iw' ? 'available' : 'unavailable',
+      );
+      const api = createApi({ availability });
+      const provider = new ChromeTranslatorProvider(api);
+
+      await expect(provider.availability(hebrewTarget)).resolves.toBe('available');
+      await provider.createSession(hebrewTarget);
+
+      expect(api.create).toHaveBeenCalledWith(
+        expect.objectContaining({ sourceLanguage: 'en', targetLanguage: 'iw' }),
+      );
+    });
+
+    it('reports unavailable only after every tag was refused', async () => {
+      const availability = vi.fn().mockResolvedValue('unavailable');
+      const provider = new ChromeTranslatorProvider(createApi({ availability }));
+
+      await expect(provider.availability(hebrewSource)).resolves.toBe('unavailable');
+      expect(availability.mock.calls.map(sourceTagOf)).toEqual(['he', 'iw']);
+    });
+
+    it('settles the tag with a probe before the first session when none was accepted yet', async () => {
+      const availability = vi.fn(
+        async (options: { sourceLanguage: string; targetLanguage: string }) =>
+          options.sourceLanguage === 'iw' ? 'available' : 'unavailable',
+      );
+      const api = createApi({ availability });
+      const provider = new ChromeTranslatorProvider(api);
+
+      await provider.createSession(hebrewSource);
+
+      expect(availability.mock.calls.map(sourceTagOf)).toEqual(['he', 'iw']);
+      expect(api.create).toHaveBeenCalledWith(
+        expect.objectContaining({ sourceLanguage: 'iw' }),
+      );
+    });
+
+    it('sends the documented tag to creation when Chrome refused both, so Chrome reports the failure', async () => {
+      const availability = vi.fn().mockResolvedValue('unavailable');
+      const create = vi.fn().mockRejectedValue(
+        new DOMException('Unsupported.', 'NotSupportedError'),
+      );
+      const provider = new ChromeTranslatorProvider(createApi({ availability, create }));
+
+      await expect(provider.createSession(hebrewSource)).rejects.toMatchObject({
+        code: 'creation-failed',
+      });
+      expect(create).toHaveBeenCalledWith(
+        expect.objectContaining({ sourceLanguage: 'he' }),
+      );
+    });
+
+    it('treats a probe that throws for one tag as a refusal of that tag only', async () => {
+      const availability = vi.fn(
+        async (options: { sourceLanguage: string; targetLanguage: string }) => {
+          if (options.sourceLanguage === 'he') throw new RangeError('bad tag');
+          return 'available';
+        },
+      );
+      const provider = new ChromeTranslatorProvider(createApi({ availability }));
+
+      await expect(provider.availability(hebrewSource)).resolves.toBe('available');
+    });
+
+    it('still surfaces a capability error when the only probe throws', async () => {
+      const availability = vi.fn().mockRejectedValue(new Error('broken'));
+      const provider = new ChromeTranslatorProvider(createApi({ availability }));
+
+      await expect(provider.availability(pair)).rejects.toMatchObject({
+        code: 'api-unavailable',
+      });
+    });
+
+    it('probes other languages exactly once with their own tag', async () => {
+      const api = createApi();
+      const provider = new ChromeTranslatorProvider(api);
+
+      await provider.availability(pair);
+      await provider.createSession(pair);
+
+      expect(api.availability).toHaveBeenCalledTimes(1);
+      expect(api.availability).toHaveBeenCalledWith({
+        sourceLanguage: 'ja',
+        targetLanguage: 'en',
+      });
     });
   });
 });

@@ -1,13 +1,19 @@
 import {
   type CreateTranslationSessionOptions,
+  type SupportedLanguage,
   type TranslationAvailability,
   type TranslationPair,
   type TranslationProvider,
   TranslationProviderError,
   type TranslationSession,
-  chromeTranslatorLanguageCode,
+  chromeTranslatorLanguageCodes,
   isSupportedTranslationPair,
 } from './translation-provider';
+
+interface BrowserLanguagePair {
+  readonly sourceLanguage: string;
+  readonly targetLanguage: string;
+}
 
 export interface BrowserTranslatorApi {
   availability(options: {
@@ -41,6 +47,8 @@ export interface BrowserTranslatorInstance {
 
 export class ChromeTranslatorProvider implements TranslationProvider {
   private readonly api: BrowserTranslatorApi | undefined;
+  /** Language tags Chrome accepted in an availability probe, per language. */
+  private readonly acceptedTags = new Map<SupportedLanguage, string>();
 
   constructor(api: BrowserTranslatorApi | undefined = readTranslatorApi()) {
     this.api = api;
@@ -54,8 +62,7 @@ export class ChromeTranslatorProvider implements TranslationProvider {
     const api = this.requireApi();
 
     try {
-      const availability = await api.availability(toBrowserPair(pair));
-      return normalizeAvailability(availability);
+      return await this.probeAvailability(api, pair);
     } catch (error) {
       throw new TranslationProviderError(
         'api-unavailable',
@@ -75,10 +82,16 @@ export class ChromeTranslatorProvider implements TranslationProvider {
     }
     const api = this.requireApi();
     options.signal?.throwIfAborted();
+    // Only a language with alternative tags needs a probe before creation;
+    // every other pair reaches Chrome synchronously, as before.
+    const browserPair = this.browserPairCandidates(pair).length > 1
+      ? await this.settleBrowserPair(api, pair)
+      : this.firstBrowserPair(pair);
+    options.signal?.throwIfAborted();
 
     try {
       const instance = await api.create({
-        ...toBrowserPair(pair),
+        ...browserPair,
         ...(options.signal ? { signal: options.signal } : {}),
         ...(options.onDownloadProgress
           ? {
@@ -114,6 +127,79 @@ export class ChromeTranslatorProvider implements TranslationProvider {
         { cause: error },
       );
     }
+  }
+
+  /**
+   * Probes the candidate tag combinations in order and returns the first
+   * result Chrome does not report as unavailable, remembering the tags that
+   * worked so later probes and sessions use them directly. A probe that throws
+   * for one tag counts as a refusal of that tag; only when every candidate
+   * throws is the failure surfaced.
+   */
+  private async probeAvailability(
+    api: BrowserTranslatorApi,
+    pair: TranslationPair,
+  ): Promise<TranslationAvailability> {
+    const candidates = this.browserPairCandidates(pair);
+    let refusedByError = 0;
+    let lastError: unknown;
+    for (const candidate of candidates) {
+      let availability: TranslationAvailability;
+      try {
+        availability = normalizeAvailability(await api.availability(candidate));
+      } catch (error) {
+        refusedByError += 1;
+        lastError = error;
+        continue;
+      }
+      if (availability === 'unavailable') continue;
+      this.acceptedTags.set(pair.sourceLanguage, candidate.sourceLanguage);
+      this.acceptedTags.set(pair.targetLanguage, candidate.targetLanguage);
+      return availability;
+    }
+    if (refusedByError > 0 && refusedByError === candidates.length) {
+      throw lastError;
+    }
+    return 'unavailable';
+  }
+
+  /**
+   * Chrome rejects the wrong tag at creation with a generic error, so a pair
+   * with alternative tags is settled by an availability probe first; if
+   * nothing was accepted, the documented tag goes through and Chrome reports
+   * the failure.
+   */
+  private async settleBrowserPair(
+    api: BrowserTranslatorApi,
+    pair: TranslationPair,
+  ): Promise<BrowserLanguagePair> {
+    await this.probeAvailability(api, pair).catch(() => undefined);
+    return this.firstBrowserPair(pair);
+  }
+
+  private firstBrowserPair(pair: TranslationPair): BrowserLanguagePair {
+    const [first] = this.browserPairCandidates(pair);
+    return first ?? {
+      sourceLanguage: pair.sourceLanguage,
+      targetLanguage: pair.targetLanguage,
+    };
+  }
+
+  private browserPairCandidates(
+    pair: TranslationPair,
+  ): readonly BrowserLanguagePair[] {
+    const candidates: BrowserLanguagePair[] = [];
+    for (const sourceLanguage of this.tagCandidates(pair.sourceLanguage)) {
+      for (const targetLanguage of this.tagCandidates(pair.targetLanguage)) {
+        candidates.push({ sourceLanguage, targetLanguage });
+      }
+    }
+    return candidates;
+  }
+
+  private tagCandidates(language: SupportedLanguage): readonly string[] {
+    const accepted = this.acceptedTags.get(language);
+    return accepted ? [accepted] : chromeTranslatorLanguageCodes(language);
   }
 
   private assertPair(pair: TranslationPair): void {
@@ -233,16 +319,6 @@ export function readTranslatorApi(): BrowserTranslatorApi | undefined {
     return candidate as BrowserTranslatorApi;
   }
   return undefined;
-}
-
-function toBrowserPair(pair: TranslationPair): {
-  sourceLanguage: string;
-  targetLanguage: string;
-} {
-  return {
-    sourceLanguage: chromeTranslatorLanguageCode(pair.sourceLanguage),
-    targetLanguage: chromeTranslatorLanguageCode(pair.targetLanguage),
-  };
 }
 
 function countCodePoints(value: string): number {
