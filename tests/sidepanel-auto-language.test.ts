@@ -146,8 +146,8 @@ describe('sidepanel Auto image-language reconciliation', () => {
     );
 
     const navigation = script.slice(
-      script.indexOf('browser.tabs.onUpdated.addListener'),
-      script.indexOf('browser.tabs.onRemoved.addListener'),
+      script.indexOf('onSourceNavigationStarted: (next) => {'),
+      script.indexOf('onFollowedUrlChanged:'),
     );
     expect(navigation).toContain("resolvedSourceLanguageOrigin === 'image'");
     expect(navigation).toContain('clearAutoImageLanguageResolution()');
