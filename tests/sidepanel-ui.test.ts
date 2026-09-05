@@ -17,6 +17,10 @@ const script = readFileSync(
   new URL('../entrypoints/sidepanel/main.ts', import.meta.url),
   'utf8',
 );
+const readScope = readFileSync(
+  new URL('../entrypoints/sidepanel/read-scope-controller.ts', import.meta.url),
+  'utf8',
+);
 const capturePipeline = readFileSync(
   new URL('../entrypoints/sidepanel/capture-pipeline.ts', import.meta.url),
   'utf8',
@@ -269,8 +273,8 @@ describe('sidepanel UI structure', () => {
     expect(setupCleanup?.querySelector('[role="status"]')).not.toBeNull();
     expect(document.querySelector('#read-scope-profile')).not.toBeNull();
     expect(controls).not.toBeNull();
-    expect(script).toContain('for (const key of REPLICA_READ_SCOPE_KEYS)');
-    expect(script).toContain('READ_SCOPE_COPY[key].label');
+    expect(readScope).toContain('for (const key of REPLICA_READ_SCOPE_KEYS)');
+    expect(readScope).toContain('READ_SCOPE_COPY[key].label');
     expect(document.querySelector('#reset-all-settings')).not.toBeNull();
     const resetDialog = document.querySelector('#reset-settings-dialog');
     expect(resetDialog?.localName).toBe('dialog');
@@ -284,25 +288,25 @@ describe('sidepanel UI structure', () => {
     expect(resetDialog?.querySelector('button[value="cancel"]')).not.toBeNull();
     expect(resetDialog?.querySelector('button[value="reset"]')).not.toBeNull();
     expect(script).not.toContain('window.confirm(');
-    expect(script).toContain('installResetConfirmationController({');
-    expect(script).toContain('readScopeSetup.showModal()');
-    expect(script).toContain("readScopeSetup.addEventListener('cancel'");
-    expect(script).toContain("resetSettingsDialog.close('cancel')");
-    expect(script).toContain('preferences.resetCleanupPendingRevision > 0');
-    expect(script).toContain("type: 'simul:preferences:patch-read-scope'");
-    expect(script).toContain("type: 'simul:preferences:complete-read-scope-setup'");
-    expect(script).toContain(
+    expect(readScope).toContain('installResetConfirmationController({');
+    expect(readScope).toContain('readScopeSetup.showModal()');
+    expect(readScope).toContain("readScopeSetup.addEventListener('cancel'");
+    expect(readScope).toContain("resetSettingsDialog.close('cancel')");
+    expect(readScope).toContain('preferences.resetCleanupPendingRevision > 0');
+    expect(readScope).toContain("type: 'simul:preferences:patch-read-scope'");
+    expect(readScope).toContain("type: 'simul:preferences:complete-read-scope-setup'");
+    expect(readScope).toContain(
       'expectedSetupVersion: state.preferences.readScopeSetupVersion',
     );
-    expect(script).toContain("type: 'simul:preferences:reset-all'");
+    expect(readScope).toContain("type: 'simul:preferences:reset-all'");
     expect(script).toContain('purgeSourceDerivedRuntime(');
-    expect(script).toContain(
+    expect(readScope).toContain(
       'localReadScopeNarrowingGates.set(sequence',
     );
-    expect(script).toContain(
+    expect(readScope).toContain(
       'remoteReadScopeNarrowingGates.prepare(',
     );
-    expect(script).toContain(
+    expect(readScope).toContain(
       'remoteReadScopeNarrowingGates.authorizeCommittedRelease(',
     );
     expect(script).toContain('new PreferenceSafetyClient({');
@@ -318,21 +322,21 @@ describe('sidepanel UI structure', () => {
     expect(permissionFlows).toContain(
       'Accessibility image text remains active; only pixel OCR is paused.',
     );
-    expect(script).toContain('handlePreferenceSafetyMessage(message, reply)');
+    expect(script).toContain('readScopeController.handleSafetyMessage(message, reply)');
     expect(script).toContain('preferenceSafetyConnectionReady = false');
-    expect(script).toContain('await purge;');
+    expect(readScope).toContain('await purge;');
     expect(script).toContain('isolatedHtmlReplicaEngine.releasePresentation()');
     expect(script).not.toContain('invokeLivePageObserverUnregisterBridge');
-    expect(script).toContain(
+    expect(readScope).toContain(
       'scope = intersectReplicaReadScopes(scope, PAGE_ONLY_REPLICA_READ_SCOPE)',
     );
     expect(script).toContain('livePreferenceStorageFailClosed');
     expect(script).toContain('selectLiveCompanionPreferenceChange(');
-    expect(script).toContain('retrySetupResetCleanupButton.focus()');
-    expect(script).toContain(
+    expect(readScope).toContain('retrySetupResetCleanupButton.focus()');
+    expect(readScope).toContain(
       "retrySetupResetCleanupButton.addEventListener('click'",
     );
-    expect(script).toContain('expectedReadScopeFingerprint:');
+    expect(readScope).toContain('expectedReadScopeFingerprint:');
     const purgeStart = script.indexOf(
       'function purgeSourceDerivedRuntime(message: string)',
     );
@@ -351,14 +355,9 @@ describe('sidepanel UI structure', () => {
       'preferences.readScopeSetupVersion === REPLICA_READ_SCOPE_SETUP_VERSION',
     );
 
-    const resetStart = script.indexOf(
-      'async function resetAllExtensionSettings()',
-    );
-    const resetEnd = script.indexOf(
-      'function purgeSourceDerivedRuntime',
-      resetStart,
-    );
-    const resetFunction = script.slice(resetStart, resetEnd);
+    const resetStart = readScope.indexOf('async resetAllExtensionSettings()');
+    const resetEnd = readScope.indexOf('async handleSafetyMessage(', resetStart);
+    const resetFunction = readScope.slice(resetStart, resetEnd);
     expect(resetFunction.indexOf("result.code === 'stale-reset-revision'"))
       .toBeLessThan(resetFunction.indexOf('purgeSourceDerivedRuntime('));
   });
