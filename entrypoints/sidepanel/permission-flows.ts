@@ -45,6 +45,14 @@ export interface PermissionFlowsEnvironment {
   readonly requestAutomaticTranslation: (pageUrl: string) => Promise<void>;
 }
 
+/** The broad grant was released, the save failed, and Chrome kept it released. */
+class ImageAccessReleasedError extends Error {
+  constructor(cause: unknown) {
+    super('Image access was released and could not be restored.', { cause });
+    this.name = 'ImageAccessReleasedError';
+  }
+}
+
 type ImageChangeOutcome =
   | { readonly kind: 'activation' }
   | { readonly kind: 'denied' }
@@ -173,8 +181,18 @@ export class PermissionFlows {
             : 'Image translation is off. Chrome did not retain some saved one-site automatic access.',
         outcome.narrowAccessRestored ? 'success' : 'warning',
       );
-    } catch {
+    } catch (error) {
       await preferenceClient.reloadFromStorage();
+      if (error instanceof ImageAccessReleasedError) {
+        // The panel must show the state Chrome is in: purge image-derived
+        // caches and report the revocation, then explain why it happened.
+        await this.refreshImageCaptureAccess(true);
+        setStatus(
+          'Image access was released but the change could not be saved, and Chrome did not give the access back. Pixel OCR is paused until you choose Grant image access in options.',
+          'error',
+        );
+        return;
+      }
       setStatus(
         'Chrome could not update image access. Your saved setting was left unchanged; try again from options.',
         'error',
@@ -219,6 +237,19 @@ export class PermissionFlows {
         !freshPreferences.autoTranslateAllSites &&
         hadImageCaptureGrant
       ) {
+        const exactOrigins = freshPreferences.autoTranslateOrigins.flatMap(
+          (origin) => permissionOriginsForMode('site', origin),
+        );
+        // Releasing the broad grant is safe only while the narrower grants it
+        // covered can be requested right away. Without a live gesture that
+        // request would fail and saved one-site automation would lose its
+        // access, so ask for a fresh gesture before touching anything.
+        if (
+          exactOrigins.length > 0 &&
+          (!userActivationAvailable || !isUserActivationActive())
+        ) {
+          return { kind: 'activation' };
+        }
         const removed = await permissions.remove({
           origins: [...ALL_SITES_PERMISSION_ORIGINS],
         });
@@ -229,9 +260,6 @@ export class PermissionFlows {
           throw new Error('Chrome retained image capture access.');
         }
         removedImageCaptureGrant = !broadStillPresent;
-        const exactOrigins = freshPreferences.autoTranslateOrigins.flatMap(
-          (origin) => permissionOriginsForMode('site', origin),
-        );
         if (exactOrigins.length > 0) {
           narrowAccessRestored = userActivationAvailable &&
             await permissions.request({ origins: exactOrigins });
@@ -264,9 +292,15 @@ export class PermissionFlows {
         }).catch(() => false);
       }
       if (removedImageCaptureGrant && prior.imageTranslationEnabled) {
-        await permissions.request({
+        // The rollback is only a rollback once Chrome confirms the grant is
+        // back; a refused or expired re-request leaves the saved setting
+        // pointing at access that no longer exists, and the caller must say so.
+        const restored = await permissions.request({
+          origins: [...ALL_SITES_PERMISSION_ORIGINS],
+        }).catch(() => false) && await permissions.contains({
           origins: [...ALL_SITES_PERMISSION_ORIGINS],
         }).catch(() => false);
+        if (!restored) throw new ImageAccessReleasedError(error);
       }
       throw error;
     }
