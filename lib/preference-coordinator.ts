@@ -7,6 +7,7 @@ import {
   isAutoTranslationMode,
   isCompanionLaunchBehavior,
   isCompanionSurface,
+  isManagedPermissionOriginPattern,
   isMirrorDisplayMode,
   isPopoutTabMode,
   isReplicaViewMode,
@@ -147,6 +148,8 @@ const NOOP_RESET_RUNTIME_ADAPTER: PreferenceResetRuntimeAdapter = {
  */
 export class PreferenceCoordinator {
   private pending: Promise<void> = Promise.resolve();
+  /** Managed origins the current command released; pruned from the ledger. */
+  private removedOrigins = new Set<string>();
 
   constructor(
     private readonly adapter: PreferenceCoordinatorAdapter,
@@ -170,8 +173,18 @@ export class PreferenceCoordinator {
   private async apply(
     command: PreferenceCommand,
   ): Promise<PreferenceCommandResult> {
+    this.removedOrigins = new Set<string>();
     const stored = await this.adapter.load();
-    const current = parseCompanionPreferences(stored);
+    let current = parseCompanionPreferences(stored);
+    // An install that predates the grant ledger adopts every managed grant it
+    // holds, once, so its cleanup stays exactly as it was. Grants the user
+    // makes in chrome://extensions from then on stay theirs.
+    const repairStoredGrantLedger =
+      !isRecord(stored) || !Array.isArray(stored.grantedPermissionOrigins);
+    if (repairStoredGrantLedger) {
+      const adopted = await this.adoptManagedGrants();
+      if (adopted) current = { ...current, grantedPermissionOrigins: adopted };
+    }
     const repairStoredOcrMinimumConfidence =
       !isRecord(stored) ||
       !isOcrMinimumConfidence(stored.ocrMinimumConfidence);
@@ -305,6 +318,7 @@ export class PreferenceCoordinator {
         repairStoredImageAnalysis ||
         repairStoredSettingsRevision ||
         repairStoredReplicaEngine ||
+        repairStoredGrantLedger ||
         !samePreferences(current, preferences)
       ) {
         preferences = await this.saveNext(preferences);
@@ -324,6 +338,7 @@ export class PreferenceCoordinator {
         repairStoredImageAnalysis ||
         repairStoredSettingsRevision ||
         repairStoredReplicaEngine ||
+        repairStoredGrantLedger ||
         !samePreferences(current, preferences)
       ) {
         preferences = await this.saveNext(preferences);
@@ -343,8 +358,10 @@ export class PreferenceCoordinator {
     // A global grant makes every exact-site contains() check return true. Drop
     // it before validating narrower choices so saved site scopes always have
     // their own grant and cannot become orphaned when All sites is disabled.
+    // Only a broad grant Simul owns is dropped; one the user made outside
+    // Simul stays, and reconcile lets it cover the narrower choice.
     if (command.mode !== 'all' && !current.imageTranslationEnabled) {
-      await this.removeIfPresent(allBroadPermissionOrigins());
+      await this.removeIfPresent(this.releasableBroadOrigins(current));
     }
 
     const preferences = await this.reconcile(candidate);
@@ -421,12 +438,15 @@ export class PreferenceCoordinator {
   private async removeResetManagedPermissions(
     preferences: CompanionPreferences,
   ): Promise<number> {
+    // Reset is the user's explicit request to release Simul's site access,
+    // so every managed grant goes, owned or not.
     const retained = new Set(retainedPermissionOrigins(preferences));
     const actual = await this.adapter.getAllOrigins();
     const removable = actual.filter(
-      (origin) => isManagedPermissionOrigin(origin) && !retained.has(origin),
+      (origin) =>
+        isManagedPermissionOriginPattern(origin) && !retained.has(origin),
     );
-    if (removable.length > 0) await this.adapter.remove(removable);
+    await this.removeIfPresent(removable);
     return this.countUndesiredManagedOrigins(preferences);
   }
 
@@ -435,7 +455,8 @@ export class PreferenceCoordinator {
   ): Promise<number> {
     const retained = new Set(retainedPermissionOrigins(preferences));
     return (await this.adapter.getAllOrigins()).filter(
-      (origin) => isManagedPermissionOrigin(origin) && !retained.has(origin),
+      (origin) =>
+        isManagedPermissionOriginPattern(origin) && !retained.has(origin),
     ).length;
   }
 
@@ -478,24 +499,32 @@ export class PreferenceCoordinator {
     } else if (!preferences.autoTranslateAllSites) {
       await this.removeIfPresent([...LEGACY_ALL_SITES_PERMISSION_ORIGINS]);
     }
+    const owned = this.ownedOrigins(preferences);
     if (
       !preferences.autoTranslateAllSites &&
       !preferences.imageTranslationEnabled
     ) {
-      await this.removeIfPresent([...ALL_SITES_PERMISSION_ORIGINS]);
+      await this.removeIfPresent(
+        ALL_SITES_PERMISSION_ORIGINS.filter((origin) => owned.has(origin)),
+      );
     }
 
     // A broad grant makes permissions.contains(exactSite) return true even
     // when Chrome did not retain an independent exact-site permission. Keep
     // that dependent intent only while image translation owns the canonical
-    // grant; its explicit disable flow materializes exact grants first. Once
-    // broad access is revoked, getAll() is the only proof a site grant remains.
-    const imageOwnedBroadCoverage =
-      preferences.imageTranslationEnabled && hasCanonicalGlobalGrant;
+    // grant (its explicit disable flow materializes exact grants first) or
+    // while a broad grant the user made outside Simul is in force (Simul
+    // never releases it, so it cannot prove exact grants either). Otherwise
+    // getAll() is the only proof a site grant remains.
+    const userBroadCoverage = hasCanonicalGlobalGrant &&
+      ALL_SITES_PERMISSION_ORIGINS.every((origin) => !owned.has(origin));
+    const broadCoverage =
+      (preferences.imageTranslationEnabled && hasCanonicalGlobalGrant) ||
+      userBroadCoverage;
     const grants = preferences.autoTranslateOrigins.map((origin) => {
       const origins = permissionOriginsForMode('site', origin);
       return origins.length > 0 && (
-        imageOwnedBroadCoverage ||
+        broadCoverage ||
         origins.every((value) => actualOrigins.has(value))
       );
     });
@@ -506,18 +535,67 @@ export class PreferenceCoordinator {
       ),
     };
     await this.removeOrphanPermissions(reconciled);
-    return reconciled;
+    return this.withoutReleasedGrants(reconciled);
   }
 
+  /** Drops grants this command released, so the change reaches the save. */
+  private withoutReleasedGrants(
+    preferences: CompanionPreferences,
+  ): CompanionPreferences {
+    if (this.removedOrigins.size === 0) return preferences;
+    const ledger = preferences.grantedPermissionOrigins.filter(
+      (origin) => !this.removedOrigins.has(origin),
+    );
+    return ledger.length === preferences.grantedPermissionOrigins.length
+      ? preferences
+      : { ...preferences, grantedPermissionOrigins: ledger };
+  }
+
+  /**
+   * Releases managed grants that no saved intent needs any more, but only the
+   * ones Simul owns: a grant the user made in chrome://extensions that Simul
+   * never relied on is not Simul's to revoke. Legacy wildcard shapes are only
+   * ever Simul's own and are always released.
+   */
   private async removeOrphanPermissions(
     preferences: CompanionPreferences,
   ): Promise<void> {
     const retained = new Set(retainedPermissionOrigins(preferences));
+    const owned = this.ownedOrigins(preferences);
     const actual = await this.adapter.getAllOrigins();
     const orphaned = actual.filter(
-      (origin) => isManagedPermissionOrigin(origin) && !retained.has(origin),
+      (origin) =>
+        (owned.has(origin) || isLegacyBroadOrigin(origin)) &&
+        !retained.has(origin),
     );
     await this.removeIfPresent(orphaned);
+  }
+
+  /** Grants Simul may release: its ledger plus everything its intent needs. */
+  private ownedOrigins(preferences: CompanionPreferences): Set<string> {
+    return new Set([
+      ...preferences.grantedPermissionOrigins,
+      ...retainedPermissionOrigins(preferences),
+    ]);
+  }
+
+  private releasableBroadOrigins(
+    preferences: CompanionPreferences,
+  ): string[] {
+    const owned = this.ownedOrigins(preferences);
+    return allBroadPermissionOrigins().filter(
+      (origin) => isLegacyBroadOrigin(origin) || owned.has(origin),
+    );
+  }
+
+  private async adoptManagedGrants(): Promise<string[] | undefined> {
+    try {
+      return (await this.adapter.getAllOrigins()).filter(
+        isManagedPermissionOriginPattern,
+      );
+    } catch {
+      return undefined;
+    }
   }
 
   private async removeNoLongerNeededPermissions(
@@ -534,14 +612,39 @@ export class PreferenceCoordinator {
   private async removeIfPresent(origins: string[]): Promise<void> {
     if (origins.length === 0) return;
     await this.adapter.remove(origins);
+    for (const origin of origins) this.removedOrigins.add(origin);
   }
 
   private async saveNext(
     candidate: CompanionPreferences,
   ): Promise<CompanionPreferences> {
-    const preferences = advanceCompanionSettingsRevision(candidate);
+    const preferences = advanceCompanionSettingsRevision(
+      await this.withGrantLedger(candidate),
+    );
     await this.adapter.save(preferences);
     return preferences;
+  }
+
+  /**
+   * The ledger holds every managed grant the saved intent relies on, minus
+   * the grants this command released. A grant present in Chrome that no
+   * intent ever needed stays outside it and is never revoked automatically.
+   */
+  private async withGrantLedger(
+    preferences: CompanionPreferences,
+  ): Promise<CompanionPreferences> {
+    const ledger = new Set(preferences.grantedPermissionOrigins);
+    let actual: Set<string> | undefined;
+    try {
+      actual = new Set(await this.adapter.getAllOrigins());
+    } catch {
+      // Without a readable grant list the ledger only shrinks by releases.
+    }
+    for (const origin of retainedPermissionOrigins(preferences)) {
+      if (actual?.has(origin)) ledger.add(origin);
+    }
+    for (const origin of this.removedOrigins) ledger.delete(origin);
+    return { ...preferences, grantedPermissionOrigins: [...ledger] };
   }
 }
 
@@ -800,15 +903,10 @@ function retainedPermissionOrigins(
   return [...globalOrigins, ...siteOrigins];
 }
 
-function isManagedPermissionOrigin(value: string): boolean {
-  if (
-    (ALL_SITES_PERMISSION_ORIGINS as readonly string[]).includes(value) ||
-    (LEGACY_ALL_SITES_PERMISSION_ORIGINS as readonly string[]).includes(value)
-  ) {
-    return true;
-  }
-  if (!value.endsWith('/*')) return false;
-  return permissionOriginsForMode('site', value.slice(0, -1))[0] === value;
+function isLegacyBroadOrigin(value: string): boolean {
+  return (LEGACY_ALL_SITES_PERMISSION_ORIGINS as readonly string[]).includes(
+    value,
+  );
 }
 
 function allBroadPermissionOrigins(): string[] {

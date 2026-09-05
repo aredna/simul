@@ -564,13 +564,16 @@ describe('preference coordinator', () => {
     expect(adapter.hasGrant('https://kept.example/*')).toBe(true);
   });
 
-  it('removes partial wildcard and untracked exact grants during reconciliation', async () => {
+  it('removes partial wildcard grants but keeps an exact grant Simul never relied on', async () => {
     const adapter = new MemoryPreferenceAdapter({
       ...parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES),
       autoTranslateAllSites: true,
       autoTranslateOrigins: ['https://kept.example'],
       displayMode: 'fit',
     });
+    // The wildcard shape is only ever Simul's own; the exact grant for
+    // orphan.example was made outside Simul (it is in no saved intent and
+    // not in the ledger), so it is not Simul's to revoke.
     adapter.grant(
       'https://*/*',
       'https://kept.example/*',
@@ -585,10 +588,137 @@ describe('preference coordinator', () => {
     expect(result.preferences).toMatchObject({
       autoTranslateAllSites: false,
       autoTranslateOrigins: ['https://kept.example'],
+      grantedPermissionOrigins: ['https://kept.example/*'],
     });
     expect(adapter.hasGrant('https://*/*')).toBe(false);
     expect(adapter.hasGrant('https://kept.example/*')).toBe(true);
-    expect(adapter.hasGrant('https://orphan.example/*')).toBe(false);
+    expect(adapter.hasGrant('https://orphan.example/*')).toBe(true);
+  });
+
+  it('releases a grant it once relied on when the intent behind it is gone', async () => {
+    const adapter = new MemoryPreferenceAdapter({
+      ...parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES),
+      grantedPermissionOrigins: ['https://stale.example/*'],
+    });
+    adapter.grant('https://stale.example/*', 'https://user.example/*');
+
+    const result = await new PreferenceCoordinator(adapter).run({
+      type: 'simul:preferences:reconcile',
+    });
+
+    expect(adapter.hasGrant('https://stale.example/*')).toBe(false);
+    expect(adapter.hasGrant('https://user.example/*')).toBe(true);
+    expect(result.preferences.grantedPermissionOrigins).toEqual([]);
+  });
+
+  it('keeps a broad grant the user made outside Simul and lets it cover site intent', async () => {
+    const adapter = new MemoryPreferenceAdapter({
+      ...parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES),
+      autoTranslateOrigins: ['https://kept.example'],
+    });
+    // Granted in chrome://extensions: no saved intent asked for it.
+    adapter.grant('<all_urls>');
+    const coordinator = new PreferenceCoordinator(adapter);
+
+    const reconciled = await coordinator.run({
+      type: 'simul:preferences:reconcile',
+    });
+    expect(reconciled.preferences).toMatchObject({
+      autoTranslateAllSites: false,
+      autoTranslateOrigins: ['https://kept.example'],
+      grantedPermissionOrigins: [],
+    });
+    expect(adapter.hasGrant('<all_urls>')).toBe(true);
+
+    // Choosing this site does not drop the user's broad grant to prove the
+    // narrower one; the intent is kept under the user's coverage instead.
+    const committed = await coordinator.run({
+      type: 'simul:preferences:commit-auto',
+      expectedResetRevision: 0,
+      mode: 'site',
+      pageUrl: 'https://another.example/page',
+    });
+    expect(committed).toMatchObject({
+      applied: true,
+      preferences: {
+        autoTranslateOrigins: ['https://kept.example', 'https://another.example'],
+      },
+    });
+    expect(adapter.hasGrant('<all_urls>')).toBe(true);
+  });
+
+  it('owns the broad grant once all-sites automation relies on it and releases it with the intent', async () => {
+    const adapter = new MemoryPreferenceAdapter();
+    // The side panel requested and received the grant before committing.
+    adapter.grant('<all_urls>');
+    const coordinator = new PreferenceCoordinator(adapter);
+
+    const enabled = await coordinator.run({
+      type: 'simul:preferences:commit-auto',
+      expectedResetRevision: 0,
+      mode: 'all',
+      pageUrl: 'https://current.example/page',
+    });
+    expect(enabled.preferences).toMatchObject({
+      autoTranslateAllSites: true,
+      grantedPermissionOrigins: ['<all_urls>'],
+    });
+
+    const disabled = await coordinator.run({
+      type: 'simul:preferences:commit-auto',
+      expectedResetRevision: 0,
+      mode: 'off',
+      pageUrl: 'https://current.example/page',
+    });
+    expect(disabled.preferences).toMatchObject({
+      autoTranslateAllSites: false,
+      grantedPermissionOrigins: [],
+    });
+    expect(adapter.hasGrant('<all_urls>')).toBe(false);
+  });
+
+  it('adopts every managed grant once when stored preferences predate the ledger', async () => {
+    const adapter = new MemoryPreferenceAdapter();
+    const { grantedPermissionOrigins: _ledger, ...legacyStored } =
+      parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES);
+    adapter.loadValue = legacyStored;
+    adapter.grant('<all_urls>', 'https://old.example/*');
+    const coordinator = new PreferenceCoordinator(adapter);
+
+    // Pre-ledger installs keep the cleanup they always had: grants no intent
+    // needs are released on the first reconcile after the update.
+    const migrated = await coordinator.run({
+      type: 'simul:preferences:reconcile',
+    });
+    expect(migrated.preferences.grantedPermissionOrigins).toEqual([]);
+    expect(adapter.saveCalls).toBe(1);
+    expect(adapter.hasGrant('<all_urls>')).toBe(false);
+    expect(adapter.hasGrant('https://old.example/*')).toBe(false);
+
+    // From then on a grant the user makes stays theirs.
+    adapter.grant('https://user.example/*');
+    await coordinator.run({ type: 'simul:preferences:reconcile' });
+    expect(adapter.hasGrant('https://user.example/*')).toBe(true);
+  });
+
+  it('still releases every managed grant on an explicit reset', async () => {
+    const adapter = new MemoryPreferenceAdapter({
+      ...parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES),
+      readScopeSetupVersion: 1,
+    });
+    adapter.grant('<all_urls>', 'https://user.example/*');
+
+    const result = await new PreferenceCoordinator(adapter).run({
+      type: 'simul:preferences:reset-all',
+      expectedResetRevision: 0,
+    });
+
+    expect(result).toMatchObject({
+      applied: true,
+      cleanup: { status: 'complete', remainingManagedOrigins: 0 },
+    });
+    expect(adapter.hasGrant('<all_urls>')).toBe(false);
+    expect(adapter.hasGrant('https://user.example/*')).toBe(false);
   });
 
   it('merges display and automatic changes through one current stored value', async () => {
@@ -619,6 +749,7 @@ describe('preference coordinator', () => {
       ...parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES),
       autoTranslateAllSites: false,
       autoTranslateOrigins: ['https://one.example'],
+      grantedPermissionOrigins: ['https://one.example/*'],
       displayMode: 'actual',
       imageTranslationEnabled: true,
       settingsRevision: 3,
@@ -832,10 +963,13 @@ describe('preference coordinator', () => {
     });
   });
 
-  it('does not treat broad coverage as proof of an exact-site grant', async () => {
+  it('does not treat a broad grant Simul owns as proof of an exact-site grant', async () => {
     const adapter = new MemoryPreferenceAdapter({
       ...parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES),
       autoTranslateOrigins: ['https://one.example'],
+      // Left over from an earlier all-sites intent: Simul's own grant, which
+      // no current intent needs, so it is released rather than relied on.
+      grantedPermissionOrigins: ['<all_urls>'],
     });
     adapter.grant('<all_urls>');
     const result = await new PreferenceCoordinator(adapter).run({
@@ -843,6 +977,8 @@ describe('preference coordinator', () => {
     });
 
     expect(result.preferences.autoTranslateOrigins).toEqual([]);
+    expect(result.preferences.grantedPermissionOrigins).toEqual([]);
+    expect(adapter.hasGrant('<all_urls>')).toBe(false);
   });
 
   it('drops broad-dependent site intent after image access is revoked', async () => {
