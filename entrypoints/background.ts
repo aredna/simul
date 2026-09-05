@@ -8,6 +8,9 @@ import {
 } from '../lib/preference-coordinator';
 import { createExtensionBuildIdentity } from '../lib/build-identity';
 import {
+  COMPANION_LAUNCH_GENERATION_STORAGE_KEY,
+  allocateCompanionLaunchGeneration,
+  createCompanionLaunchEpoch,
   createDetachedCompanionUrl,
   createDetachedWindowData,
   resolveCompanionLaunchSurface,
@@ -97,7 +100,23 @@ export default defineBackground(() => {
   let toolbarBehaviorQueue = Promise.resolve();
   let toolbarClickSequence = 0;
   let latestToolbarClickWindowId: number | undefined;
-  const toolbarLaunchEpoch = crypto.randomUUID();
+  // Toolbar authorizations are ordered across worker lifecycles by a
+  // generation persisted in session storage; the nonce keeps two lifecycles
+  // that read the same generation apart. Resolved once, before the first
+  // authorized-tab message is sent; allocation never rejects.
+  const toolbarLaunchEpoch = allocateCompanionLaunchGeneration({
+    read: async () => (await browser.storage.session.get(
+      COMPANION_LAUNCH_GENERATION_STORAGE_KEY,
+    ))[COMPANION_LAUNCH_GENERATION_STORAGE_KEY],
+    write: async (generation) => {
+      await browser.storage.session.set({
+        [COMPANION_LAUNCH_GENERATION_STORAGE_KEY]: generation,
+      });
+    },
+  }).then((generation) => createCompanionLaunchEpoch(
+    generation,
+    crypto.randomUUID(),
+  ));
   // The detached companion window this worker created, so a second toolbar
   // click focuses it instead of opening another one. Lost on worker restart,
   // in which case one extra window is the worst outcome.
@@ -303,7 +322,7 @@ export default defineBackground(() => {
       tabId: identity.tabId,
       windowId: identity.windowId,
       url: identity.url,
-      launchEpoch: toolbarLaunchEpoch,
+      launchEpoch: await toolbarLaunchEpoch,
       launchSequence: clickSequence,
     }).catch((error: unknown) => {
       if (!isMissingMessageReceiver(error)) throw error;
@@ -332,7 +351,7 @@ export default defineBackground(() => {
         tabId: tab.id,
         windowId: tab.windowId,
         url: tab.url,
-        launchEpoch: toolbarLaunchEpoch,
+        launchEpoch: await toolbarLaunchEpoch,
         launchSequence: clickSequence,
       }).catch((error: unknown) => {
         if (!isMissingMessageReceiver(error)) throw error;
