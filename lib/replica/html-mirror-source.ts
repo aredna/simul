@@ -1124,6 +1124,7 @@ export class HtmlMirrorSourceSession {
           representability,
           fidelityPolicy,
           styleWork,
+          this.#controlledContentPolicy,
         );
         if (target.localName.toLowerCase() === 'img') {
           this.#selectedImageSources.set(
@@ -1762,6 +1763,8 @@ export class HtmlMirrorSourceSession {
           this.environment.document.baseURI,
           undefined,
           this.#fidelityPolicy ?? 'conservative',
+          undefined,
+          this.#controlledContentPolicy,
         ).selectedImageSource ?? '';
       } catch {
         continue;
