@@ -77,9 +77,6 @@ build.
 - source_spec: `_bmad-output/implementation-artifacts/spec-release-candidate-privacy-ux-hardening.md`
   summary: Add a privacy-reviewed stable identity for mapping among multiple simultaneous viewport-scale nested scrollers.
   evidence: The current generic observer switches to the nested surface that actually emits a qualifying source scroll, but a scriptless replica with multiple similarly sized candidates still selects its strongest local candidate independently; translated geometry can make that a different surface.
-- source_spec: `_bmad-output/implementation-artifacts/spec-multi-provider-ocr-testing.md`
-  summary: Make exported artifact validation resolve reviewed vendor manifests from the caller's explicit project root instead of the module-owning checkout.
-  evidence: Existing Tesseract validation reads reviewed assets through module-global `PROJECT_ROOT`; a caller using `check` or `sync` APIs for another checkout can therefore compare against unrelated source state.
 - source_spec: `_bmad-output/implementation-artifacts/spec-incremental-image-mutation-stability.md`
   summary: Unify the initial isolated text-serialization privacy floor with the shared computed visibility boundary.
   evidence: Incremental visibility comparison covers opacity, content visibility, clipping, positive geometry, and ancestor clipping, while the initial isolated serializer still applies a narrower structural/display/visibility floor. Closing that pre-existing mismatch requires a dedicated privacy migration and fixture matrix rather than changing mutation-local OCR behavior alone.
@@ -114,9 +111,6 @@ build.
   summary: Requeue a retained image projection when replay-lease rebinding cannot install its overlay.
   evidence: Recovery marks retained work projected before checking the projector result, so a missing anchor or rejected projection can leave settled work with no visible overlay and no retry.
 - source_spec: `_bmad-output/implementation-artifacts/spec-isolated-only-runtime-cache-correctness.md`
-  summary: Preserve normalized scroll progress on documents taller or wider than 100,000 CSS pixels.
-  evidence: Clamping both position and maximum to 100,000 makes intermediate movement on very long documents appear as 100 percent progress and collapses all later source offsets.
-- source_spec: `_bmad-output/implementation-artifacts/spec-isolated-only-runtime-cache-correctness.md`
   summary: Carry stable source identity for qualified nested scrollers beyond the first 5,000 elements.
   evidence: A valid late-DOM source scroller can lack an ordinal, causing replay to select a different early candidate or fall back to document scrolling.
 - source_spec: `_bmad-output/implementation-artifacts/spec-isolated-only-runtime-cache-correctness.md`
@@ -131,9 +125,6 @@ build.
 - source_spec: `_bmad-output/implementation-artifacts/spec-public-release-readiness.md`
   summary: Recompute controlled-content visibility when a custom attribute changes CSS-selected tab or disclosure state.
   evidence: The relationship policy observes all attribute mutations but only treats a fixed attribute set as layout-changing, so selectors such as `[data-state="open"]` can reveal a panel without refreshing the withholding proof until another recognized signal arrives.
-- source_spec: `_bmad-output/implementation-artifacts/spec-public-release-readiness.md`
-  summary: Exclude flat-tree control ancestors from protected-sibling overlap when control-image reading is enabled.
-  evidence: `Element.contains()` does not establish host containment for an image inside an open shadow root, so the host control can be misclassified as a different painted protected overlap and block an explicitly enabled image.
 - source_spec: `_bmad-output/implementation-artifacts/spec-public-release-readiness.md`
   summary: Audit when the isolated replica iframe becomes available to assistive technology for ordinary translated documents.
   evidence: The iframe starts `aria-hidden`, while the reviewed unhide path is tied to semantic proof presentation; a text-only article needs an installed-Chrome accessibility-tree test proving the committed replica is exposed.
