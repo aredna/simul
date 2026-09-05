@@ -9,7 +9,7 @@
 | Local `main` | fast-forwarded to `origin/main` (`596dec7`) |
 | Gate at PR head | typecheck clean; 1,197 tests across 80 files (the Chrome-fixture test skips without a browser); `dist/chrome-unpacked` synced and byte-verified (0.4.0, 37.5 MiB) |
 | Build identity | `0.4.0 beta v.20260904.1`; placeholder icons; exact pins with a tracked lockfile |
-| Records | `review-2026-09-03-decision-log.md` D1–D30 in this directory; the original review at https://claude.ai/code/artifact/a7dde2d3-b6fd-4855-b435-7a08598fe473 |
+| Records | `review-2026-09-03-decision-log.md` D1–D30 and `review-2026-09-03-findings.md` (the original review, 52 findings and 12 recommendations, converted from the page it was first published on) in this directory. Reports stay in the repository from now on; nothing further is published to claude.ai. |
 
 ## What happened, in order
 
