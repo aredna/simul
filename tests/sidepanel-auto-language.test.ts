@@ -81,7 +81,11 @@ describe('sidepanel Auto image-language reconciliation', () => {
   });
 
   it('drops image-derived language inside the pre-persist narrowing purge', () => {
-    const commit = slice(script, 'async function commitReplicaReadScope', 'async function resetAllExtensionSettings');
+    const controller = readFileSync(
+      new URL('../entrypoints/sidepanel/read-scope-controller.ts', import.meta.url),
+      'utf8',
+    );
+    const commit = slice(controller, 'async commitReplicaReadScope(', 'async resetAllExtensionSettings(');
     expect(commit.indexOf('purgeSourceDerivedRuntime('))
       .toBeLessThan(commit.indexOf('await preferenceClient.send'));
 
