@@ -87,26 +87,14 @@ build.
   summary: Replace the shared oversized private processing-token sentinel with a bounded change-sensitive representation.
   evidence: Different computed routing or paint dependency strings above 64 KiB currently collapse to the same private sentinel. Always treating the sentinel as changed would make unrelated refreshes loop and discard stable work, so a separately reviewed keyed digest or mutation-scoped fail-closed proof is needed without exposing the underlying private value.
 - source_spec: `_bmad-output/implementation-artifacts/spec-isolated-only-runtime-cache-correctness.md`
-  summary: Reuse the checkpoint-scoped controlled-content policy while sanitizing image hints.
-  evidence: Rebuilding the policy for every image repeats a bounded whole-document traversal and makes initial checkpoint work scale approximately with image count times node count.
-- source_spec: `_bmad-output/implementation-artifacts/spec-isolated-only-runtime-cache-correctness.md`
   summary: Align initial text serialization with the computed painted-visibility privacy boundary.
   evidence: Ordinary opacity-zero, content-visibility-hidden, clipped, or zero-geometry text can pass the serializer's narrower withholding predicate and remain present in the replica.
 - source_spec: `_bmad-output/implementation-artifacts/spec-isolated-only-runtime-cache-correctness.md`
   summary: Observe semantic mutations inside every admitted open shadow root.
   evidence: Initial semantic discovery traverses open shadow roots, but the document-only MutationObserver cannot see later shadow-root changes that make text stale or newly secret.
 - source_spec: `_bmad-output/implementation-artifacts/spec-isolated-only-runtime-cache-correctness.md`
-  summary: Reclaim semantic revision history for identities removed from long-lived documents.
-  evidence: Removed semantic records and proofs retain history until disposal, so a virtualized application can exhaust the 50,000-identity limit and permanently block new semantic records.
-- source_spec: `_bmad-output/implementation-artifacts/spec-isolated-only-runtime-cache-correctness.md`
-  summary: Make bounded image discovery retain visually important candidates beyond an early DOM-order prefix.
-  evidence: The 10,000-image budget is exhausted before attention ranking, so a visible image late in DOM order can remain permanently undiscovered behind offscreen early images.
-- source_spec: `_bmad-output/implementation-artifacts/spec-isolated-only-runtime-cache-correctness.md`
   summary: Include relevant ancestor paint changes in screenshot-based image capture identity.
   evidence: Ancestor background, border, padding, or content changes can alter pixels beneath a transparent or composited image without advancing its capture revision, allowing stale OCR projection reuse.
-- source_spec: `_bmad-output/implementation-artifacts/spec-isolated-only-runtime-cache-correctness.md`
-  summary: Requeue a retained image projection when replay-lease rebinding cannot install its overlay.
-  evidence: Recovery marks retained work projected before checking the projector result, so a missing anchor or rejected projection can leave settled work with no visible overlay and no retry.
 - source_spec: `_bmad-output/implementation-artifacts/spec-isolated-only-runtime-cache-correctness.md`
   summary: Refresh controlled-content policy when remote selector changes alter a selected tabpanel's visibility without resizing the document.
   evidence: The visibility comparison can identify the changed target while the retained policy still sanitizes the newly visible panel as withheld, leaving it blank.
