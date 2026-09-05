@@ -133,6 +133,13 @@ export function readNestedScrollSnapshot(
   });
 }
 
+/** Elements walked per scan; querySelectorAll('*') already materializes them. */
+const MAX_SCROLLER_SCAN_ELEMENTS = 50_000;
+/** Candidates that pass the cheap geometry prefilter and get a full read. */
+const MAX_SCROLLER_SCAN_CANDIDATES = 5_000;
+/** The smallest vertical overflow readNestedScrollSnapshot ever accepts. */
+const MIN_SCROLLER_OVERFLOW_PX = 96;
+
 /** Finds the strongest generic replica/source candidate without site rules. */
 export function findPrimaryNestedScroller(
   sourceDocument: Document,
@@ -141,45 +148,25 @@ export function findPrimaryNestedScroller(
 ): Element | undefined {
   let best: Element | undefined;
   let bestScore = -1;
-  let qualifiedOrdinal = 0;
-  const roots: ParentNode[] = [sourceDocument];
-  let rootIndex = 0;
-  let inspected = 0;
-  while (rootIndex < roots.length && inspected < 5_000) {
-    const root = roots[rootIndex];
-    rootIndex += 1;
-    if (!root) continue;
-    let candidates: NodeListOf<Element>;
-    try {
-      candidates = root.querySelectorAll('*');
-    } catch {
-      continue;
-    }
-    for (
-      let index = 0;
-      index < candidates.length && inspected < 5_000;
-      index += 1
-    ) {
-      const candidate = candidates[index];
-      if (!candidate) continue;
-      inspected += 1;
-      if (candidate.shadowRoot) roots.push(candidate.shadowRoot);
-      const snapshot = readNestedScrollSnapshot(
-        candidate,
-        sourceDocument,
-        sourceWindow,
-      );
-      if (!snapshot) continue;
-      if (qualifiedOrdinal === preferredOrdinal) return candidate;
-      qualifiedOrdinal += 1;
+  let preferred: Element | undefined;
+  forEachQualifiedScroller(
+    sourceDocument,
+    sourceWindow,
+    (candidate, snapshot, qualifiedOrdinal) => {
+      if (qualifiedOrdinal === preferredOrdinal) {
+        preferred = candidate;
+        return false;
+      }
       const score = candidate.clientWidth * candidate.clientHeight *
         (1 + Math.log2(1 + snapshot.maxScrollY));
-      if (score <= bestScore) continue;
-      best = candidate;
-      bestScore = score;
-    }
-  }
-  return best;
+      if (score > bestScore) {
+        best = candidate;
+        bestScore = score;
+      }
+      return true;
+    },
+  );
+  return preferred ?? best;
 }
 
 /** Returns a bounded, content-free ordinal among currently qualified panes. */
@@ -188,11 +175,41 @@ export function nestedScrollerOrdinal(
   sourceDocument: Document,
   sourceWindow: NestedViewportLike,
 ): number | undefined {
+  let ordinal: number | undefined;
+  forEachQualifiedScroller(
+    sourceDocument,
+    sourceWindow,
+    (candidate, _snapshot, qualifiedOrdinal) => {
+      if (candidate !== target) return true;
+      ordinal = qualifiedOrdinal;
+      return false;
+    },
+  );
+  return ordinal;
+}
+
+/**
+ * Walks the document and its open shadow roots in order and reports every
+ * qualified nested scroller with its ordinal. The full read (computed style,
+ * geometry) is budgeted over candidates that show viewport-scale overflow at
+ * all, not over every element, so a long page of ordinary content cannot
+ * exhaust the budget before its scroller is reached. Return false to stop.
+ */
+function forEachQualifiedScroller(
+  sourceDocument: Document,
+  sourceWindow: NestedViewportLike,
+  visit: (
+    candidate: Element,
+    snapshot: PrimaryScrollSnapshot,
+    qualifiedOrdinal: number,
+  ) => boolean,
+): void {
   const roots: ParentNode[] = [sourceDocument];
   let rootIndex = 0;
-  let inspected = 0;
+  let walked = 0;
+  let read = 0;
   let qualifiedOrdinal = 0;
-  while (rootIndex < roots.length && inspected < 5_000) {
+  while (rootIndex < roots.length) {
     const root = roots[rootIndex];
     rootIndex += 1;
     if (!root) continue;
@@ -202,23 +219,33 @@ export function nestedScrollerOrdinal(
     } catch {
       continue;
     }
-    for (
-      let index = 0;
-      index < candidates.length && inspected < 5_000;
-      index += 1
-    ) {
+    for (let index = 0; index < candidates.length; index += 1) {
+      if (
+        walked >= MAX_SCROLLER_SCAN_ELEMENTS ||
+        read >= MAX_SCROLLER_SCAN_CANDIDATES
+      ) return;
       const candidate = candidates[index];
       if (!candidate) continue;
-      inspected += 1;
+      walked += 1;
       if (candidate.shadowRoot) roots.push(candidate.shadowRoot);
-      if (!readNestedScrollSnapshot(candidate, sourceDocument, sourceWindow)) {
-        continue;
-      }
-      if (candidate === target) return qualifiedOrdinal;
+      if (!mayBeNestedScroller(candidate)) continue;
+      read += 1;
+      const snapshot = readNestedScrollSnapshot(
+        candidate,
+        sourceDocument,
+        sourceWindow,
+      );
+      if (!snapshot) continue;
+      if (!visit(candidate, snapshot, qualifiedOrdinal)) return;
       qualifiedOrdinal += 1;
     }
   }
-  return undefined;
+}
+
+/** Layout-only prefilter: no style read, no rectangle, no allocation. */
+function mayBeNestedScroller(candidate: Element): boolean {
+  return finite(candidate.scrollHeight) - finite(candidate.clientHeight) >=
+    MIN_SCROLLER_OVERFLOW_PX;
 }
 
 export function isDocumentScrollTarget(

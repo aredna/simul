@@ -2,6 +2,7 @@ import { parseHTML } from 'linkedom';
 import { describe, expect, it } from 'vitest';
 
 import {
+  findPrimaryNestedScroller,
   isDocumentScrollTarget,
   nestedScrollerOrdinal,
   readDocumentScrollSnapshot,
@@ -168,6 +169,33 @@ describe('primary scroll classification', () => {
     expect(readDocumentScrollSnapshot(document, window)).toMatchObject({
       scrollY: 100_000, maxScrollY: 100_000,
     });
+  });
+
+  it('finds a qualified scroller behind thousands of ordinary elements', () => {
+    const { document, window } = parseHTML('<html><body></body></html>');
+    Object.defineProperties(window, {
+      innerWidth: { configurable: true, value: 1_200 },
+      innerHeight: { configurable: true, value: 800 },
+    });
+    // Ordinary content has no overflow, so it costs no style or geometry read
+    // and does not count against the candidate budget.
+    const filler = document.createDocumentFragment();
+    for (let index = 0; index < 6_000; index += 1) {
+      filler.append(document.createElement('span'));
+    }
+    document.body.append(filler);
+    const feed = document.createElement('main');
+    feed.setAttribute('style', 'overflow-y:auto');
+    document.body.append(feed);
+    defineScrollBox(feed, {
+      clientWidth: 900, clientHeight: 720,
+      scrollWidth: 900, scrollHeight: 5_000,
+      scrollLeft: 0, scrollTop: 0,
+    }, { left: 240, top: 60, right: 1_140, bottom: 780 });
+
+    expect(nestedScrollerOrdinal(feed, document, window)).toBe(0);
+    expect(findPrimaryNestedScroller(document, window)).toBe(feed);
+    expect(findPrimaryNestedScroller(document, window, 0)).toBe(feed);
   });
 
   it('scales an oversized nested scroller the same way', () => {
