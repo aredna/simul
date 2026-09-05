@@ -32,6 +32,7 @@ describe('parseCompanionPreferences', () => {
     expect(parseCompanionPreferences(undefined)).toEqual({
       autoTranslateAllSites: false,
       autoTranslateOrigins: [],
+      grantedPermissionOrigins: [],
       displayMode: 'fit',
       sourceLanguage: 'auto',
       targetLanguage: 'en',
@@ -86,6 +87,7 @@ describe('parseCompanionPreferences', () => {
     })).toEqual({
       autoTranslateAllSites: false,
       autoTranslateOrigins: [],
+      grantedPermissionOrigins: [],
       displayMode: 'fit',
       sourceLanguage: 'auto',
       targetLanguage: 'en',
@@ -152,6 +154,7 @@ describe('parseCompanionPreferences', () => {
     ).toEqual({
       autoTranslateAllSites: true,
       autoTranslateOrigins: ['https://example.com'],
+      grantedPermissionOrigins: [],
       displayMode: 'actual',
       sourceLanguage: 'auto',
       targetLanguage: 'en',
@@ -197,6 +200,27 @@ describe('parseCompanionPreferences', () => {
       usePromptForImageLanguage: false,
       usePromptForImageText: false,
     });
+  });
+
+  it('keeps only managed permission patterns in the granted-origin ledger', () => {
+    expect(parseCompanionPreferences({
+      grantedPermissionOrigins: [
+        '<all_urls>',
+        'https://site.example/*',
+        'https://site.example/*',
+        'http://*/*',
+        'https://site.example',
+        'https://site.example/path/*',
+        'file:///*',
+        42,
+      ],
+    }).grantedPermissionOrigins).toEqual([
+      '<all_urls>',
+      'https://site.example/*',
+      'http://*/*',
+    ]);
+    expect(parseCompanionPreferences({ grantedPermissionOrigins: 'https://x/*' })
+      .grantedPermissionOrigins).toEqual([]);
   });
 
   it('returns fresh origin arrays so callers cannot mutate defaults or input', () => {

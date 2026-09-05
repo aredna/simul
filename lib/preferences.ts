@@ -101,6 +101,12 @@ export interface CompanionPreferences {
   autoTranslateAllSites: boolean;
   /** Canonical HTTP(S) origins individually opted in by the user. */
   autoTranslateOrigins: string[];
+  /**
+   * Host permission patterns Simul itself relies on and may release again.
+   * Automatic reconciliation revokes only these; a grant the user made in
+   * chrome://extensions that Simul never asked for is left alone.
+   */
+  grantedPermissionOrigins: string[];
   displayMode: MirrorDisplayMode;
   sourceLanguage: SourceLanguagePreference;
   targetLanguage: SupportedLanguage;
@@ -140,6 +146,7 @@ export const DEFAULT_COMPANION_PREFERENCES: Readonly<CompanionPreferences> =
   Object.freeze({
     autoTranslateAllSites: false,
     autoTranslateOrigins: Object.freeze([]) as unknown as string[],
+    grantedPermissionOrigins: Object.freeze([]) as unknown as string[],
     displayMode: 'fit',
     sourceLanguage: 'auto',
     targetLanguage: 'en',
@@ -177,6 +184,7 @@ export const DEFAULT_COMPANION_PREFERENCES: Readonly<CompanionPreferences> =
   });
 
 const MAX_SAVED_ORIGINS = 256;
+const MAX_GRANTED_PERMISSION_ORIGINS = 512;
 
 /** Parse untrusted persisted data without allowing it to broaden site access. */
 export function parseCompanionPreferences(
@@ -242,6 +250,9 @@ export function parseCompanionPreferences(
   return {
     autoTranslateAllSites: input.autoTranslateAllSites === true,
     autoTranslateOrigins,
+    grantedPermissionOrigins: parseGrantedPermissionOrigins(
+      input.grantedPermissionOrigins,
+    ),
     displayMode: isMirrorDisplayMode(input.displayMode)
       ? input.displayMode
       : DEFAULT_COMPANION_PREFERENCES.displayMode,
@@ -682,6 +693,7 @@ function createDefaultPreferences(): CompanionPreferences {
   return {
     autoTranslateAllSites: false,
     autoTranslateOrigins: [],
+    grantedPermissionOrigins: [],
     displayMode: 'fit',
     sourceLanguage: 'auto',
     targetLanguage: 'en',
@@ -752,6 +764,38 @@ function nextRevision(value: number): number {
     throw new Error('Preference revision exhausted.');
   }
   return value + 1;
+}
+
+/**
+ * A host permission pattern Simul manages: the canonical or legacy all-sites
+ * patterns, or the exact-site pattern Simul requests for one origin.
+ */
+export function isManagedPermissionOriginPattern(value: string): boolean {
+  if (
+    (ALL_SITES_PERMISSION_ORIGINS as readonly string[]).includes(value) ||
+    (LEGACY_ALL_SITES_PERMISSION_ORIGINS as readonly string[]).includes(value)
+  ) {
+    return true;
+  }
+  if (!value.endsWith('/*')) return false;
+  return permissionOriginsForMode('site', value.slice(0, -1))[0] === value;
+}
+
+function parseGrantedPermissionOrigins(value: unknown): string[] {
+  if (!Array.isArray(value)) return [];
+  const origins: string[] = [];
+  const seen = new Set<string>();
+  for (const entry of value) {
+    if (
+      typeof entry !== 'string' ||
+      seen.has(entry) ||
+      !isManagedPermissionOriginPattern(entry)
+    ) continue;
+    seen.add(entry);
+    origins.push(entry);
+    if (origins.length >= MAX_GRANTED_PERMISSION_ORIGINS) break;
+  }
+  return origins;
 }
 
 function parseStoredOrigin(value: unknown): string | undefined {
