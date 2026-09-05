@@ -1049,3 +1049,51 @@ sections kept one after the other.
 `deferred-work.md` is down to 40 entries on this branch (36 once #14's
 removals merge).
 
+
+### D34. Answers of 2026-09-05 and the second lib-level batch
+
+Your answers to the D32/D33 questions: remove `.github/dependabot.yml` too
+(done, PR #13); both M5 choices stand (reset clears every managed grant; a
+grant Simul is told to use becomes Simul's to release); merge #12 first and
+rebase #10 onto it; next work is more deferred items outside the side panel,
+the side-panel items stacked on #10, and a Chrome manual test plan.
+
+Done: PR #12 and PR #13 rebase-merged; `main` is `cf3e79e`. PR #10 was
+rebased with `git rebase --onto` (one dist conflict, resolved by taking the
+replayed commit and resyncing once at the end), gate-green at 1,355 tests,
+force-pushed with lease. The handover on the split branch points at #12 and
+the D33 batch.
+
+This batch, branch `fix/deferred-lib-batch-2` off `main`, again outside the
+side panel:
+
+- **Deferred: overlay rebinding.** When a new replay lease cannot install a
+  retained overlay (`ImageTranslationController.#rebindRetainedProjections`),
+  the retained projection is dropped and the exact current descriptor is
+  requeued through `ImageScanScheduler.requeueCurrent`, so settled work waits
+  on the anchor (`anchor-deferred`) and projects on the commit that adds the
+  node, instead of staying "projected" with nothing on screen. The test
+  fixture that found this had to be corrected on the way: the job resolves
+  its own anchor and adopts the anchor's lease, so a resolver that returns a
+  stale-lease anchor is not something the side panel ever does; the realistic
+  fixture returns no anchor until the new replica has the node.
+- **Deferred: policy reuse for image hints.** `sanitizeSourceElementHints`
+  accepts the caller's controlled-content policy; the checkpoint serializer
+  passes its context policy and the live patch and image-source refresh paths
+  pass the source's retained policy, so the per-image whole-document rebuild
+  is now the fallback only.
+- **Deferred: attention-ranked discovery.** `collectBoundedImageGraph` keeps
+  every image inside the node budget (the image budget only records that the
+  cap was exceeded), so admission ranks candidates by visual attention rather
+  than by the DOM-order prefix the traversal reached. A visible image late in
+  the document now wins a slot over offscreen images before it. Eviction of an
+  already admitted offscreen image in favour of a later visible one is a
+  separate design and was not attempted.
+- **Deferred: semantic revision history** was removed from the list without
+  a change: `SemanticSourceSession` already prunes `#revisions` and
+  `#proofRevisions` to the current record and proof ids on every full scan,
+  the 50,000 constant is only a traversal budget, and the node registry prunes
+  dead references; the described exhaustion does not exist in the current
+  code.
+
+`deferred-work.md` is down to 38 entries.
