@@ -162,7 +162,7 @@ describe('sidepanel Auto image-language reconciliation', () => {
     );
     expect(callback).toContain("resolvedSourceLanguageOrigin !== 'image'");
     expect(callback).toContain(
-      '!sameSourceDocument(resolvedImageLanguageDocument, document)',
+      '!sameSourceDocument(state.resolvedImageLanguageDocument, document)',
     );
     expect(callback).toContain('!currentReplicaDocumentMatches(document)');
     expect(callback).toContain("preferences.sourceLanguage !== 'auto'");
@@ -192,7 +192,7 @@ describe('sidepanel Auto image-language reconciliation', () => {
     expect(preferences.indexOf('if (effectivePairChanged)'))
       .toBeLessThan(preferences.indexOf('activeAbortController?.abort()'));
     expect(preferences).toContain(
-      'if (!effectivePairChanged && translationComplete)',
+      'if (!effectivePairChanged && state.translationComplete)',
     );
   });
 });

@@ -18,6 +18,13 @@ import {
   type CompanionOverlay,
 } from '../../lib/companion-ui-state';
 import type { CompanionStatusTone } from '../../lib/companion-ui-localization';
+import {
+  CompanionState,
+  availabilityPairKey,
+  sameTranslationPair,
+  type CaptureRequest,
+} from './companion-state';
+import { Currency } from './currency';
 import { ImageAnalysisPanel } from './image-analysis-panel';
 import { QuickComposer } from './quick-composer';
 import { ToolbarStatus } from './toolbar-status';
@@ -66,7 +73,6 @@ import {
   shouldFollowActivatedTab,
   shouldIgnoreInactiveFollowedTabUpdate,
   shouldRecoverRemovedActiveSource,
-  type CompanionLaunchStamp,
 } from '../../lib/companion-surface';
 import {
   compiledImageAnalysisCapabilities,
@@ -153,7 +159,6 @@ import {
   type ReplicaDiagnosticCode,
 } from '../../lib/replica/contracts';
 import { openChromeHtmlMirrorStream } from '../../lib/replica/html-mirror-client';
-import type { HtmlMirrorScrollState } from '../../lib/replica/html-mirror-protocol';
 import {
   isSelectableReplicaFidelityPolicy,
   type SelectableReplicaFidelityPolicy,
@@ -176,7 +181,6 @@ import {
   type ReplicaReadScopeKey,
   type ReplicaReadScopeProfileId,
 } from '../../lib/replica/read-scope-policy';
-import { RemoteReadScopeSafetyGates } from '../../lib/replica/read-scope-safety-gates';
 import {
   IsolatedReplicaFailureRecoveryGate,
   isCommittedPrimaryReplica,
@@ -210,20 +214,8 @@ import {
   SUPPORTED_LANGUAGES,
   languageName,
   type SupportedLanguage,
-  type TranslationAvailability,
   type TranslationPair,
 } from '../../lib/translation-provider';
-
-interface CaptureRequest {
-  identity: CapturedPageIdentity;
-  reason:
-    | 'initial'
-    | 'manual'
-    | 'navigation'
-    | 'authorized'
-    | 'preference'
-    | 'desynchronized';
-}
 
 const ZOOM_COMMIT_DEBOUNCE_MS = 150;
 const NAVIGATION_DEBOUNCE_MS = 350;
@@ -359,25 +351,16 @@ const composerToLanguage = requireElement<HTMLElement>('#composer-to-language');
 const composerGuidance = requireElement<HTMLElement>('#composer-guidance');
 const composerStatus = requireElement<HTMLElement>('#composer-status');
 
-let preferences: CompanionPreferences = parseCompanionPreferences(
-  DEFAULT_COMPANION_PREFERENCES,
-);
-let readScopeCommitSequence = 0;
-const localReadScopeNarrowingGates = new Map<
-  number,
-  { readonly scope: ReplicaReadScope; failed: boolean }
->();
-const remoteReadScopeNarrowingGates = new RemoteReadScopeSafetyGates();
-let setupReadScopeDraft = replicaReadScopeForProfile('standard');
-let preferenceSafetyConnectionReady = false;
-let livePreferenceStorageFailClosed = false;
-let setupCleanupWasPending = false;
-let resetInFlight = false;
+const detachedIdentityHint = parseDetachedPageIdentityHint(window.location.search);
+const isDetachedWindow = detachedIdentityHint !== undefined;
+const state = new CompanionState({
+  isDetachedWindow,
+  detachedSourceWindowId: detachedIdentityHint?.windowId,
+});
+const currency = new Currency();
 const provider = new ChromeTranslatorProvider();
 const captureCoordinator = new LatestWorkCoordinator<CaptureRequest>();
 const viewPreferencePatchLedger = new ViewPreferencePatchLedger();
-const detachedIdentityHint = parseDetachedPageIdentityHint(window.location.search);
-const isDetachedWindow = detachedIdentityHint !== undefined;
 const mirrorSessionId = crypto.randomUUID();
 const visibleReplayHost = new VisibleReplayHost({
   hostDocument: document,
@@ -390,13 +373,13 @@ const replicaSurfaceRouter = new ReplicaSurfaceRouter();
 const isolatedHtmlReplicaEngine = new IsolatedHtmlReplicaEngine({
   presentationHost: visibleReplayHost,
   openStream: openChromeHtmlMirrorStream,
-  getReplicaFidelityPolicy: () => preferences.replicaFidelityPolicy,
+  getReplicaFidelityPolicy: () => state.preferences.replicaFidelityPolicy,
   openSemanticStream: openChromeSemanticSource,
   getReplicaReadScope: () => currentReplicaReadScope(),
   onLayoutChanged: () => imageTranslationController.refreshOverlays(),
   onSourceScroll: (scroll) => {
-    lastSourceScroll = scroll;
-    if (preferences.syncScroll) visibleReplayHost.followSourceScroll(scroll);
+    state.lastSourceScroll = scroll;
+    if (state.preferences.syncScroll) visibleReplayHost.followSourceScroll(scroll);
   },
   onSourceCommit: handleReplicaSourceCommit,
   onLiveFailure: handleReplicaLiveFailure,
@@ -434,7 +417,7 @@ replicaTranslationCoordinator = new ReplicaTranslationCoordinator(
       if (!replicaTranslationCoordinator.isResultCurrent(result)) return;
       logTranslationCache('page', translationMemory);
       if (!isCompleteReplicaTranslationResult(result)) {
-        translationComplete = false;
+        state.translationComplete = false;
         setStatus(
           describePartialReplicaTranslation(
             result,
@@ -444,10 +427,10 @@ replicaTranslationCoordinator = new ReplicaTranslationCoordinator(
         );
       } else if (result.completed > 0) {
         setStatus(
-          translationComplete
+          state.translationComplete
             ? 'Live page changes were mirrored and translated.'
             : 'Live page changes were translated, but earlier incomplete text still needs Translate page.',
-          translationComplete ? 'success' : 'warning',
+          state.translationComplete ? 'success' : 'warning',
         );
       }
       updateControls();
@@ -474,7 +457,7 @@ imageTranslationController = new ImageTranslationController({
   createRecognitionCoordinator: () =>
     createBrowserImageRecognitionCoordinator(
       new IndexedDbTransientImageStore(),
-      preferences.resetRevision,
+      state.preferences.resetRevision,
     ),
   resolveAnchor: (sourceDocument, nodeId) =>
     replicaSurfaceRouter.resolveImageAnchor(sourceDocument, nodeId),
@@ -484,14 +467,14 @@ imageTranslationController = new ImageTranslationController({
   onDiagnostic: logImageTranslationDiagnostic,
   detectLanguage: async (text) => browser.i18n.detectLanguage(text),
   onAutoLanguageDetected: (language, evidence, document, origin) => {
-    if (preferences.sourceLanguage !== 'auto' || resolvedSourceLanguage) return;
+    if (state.preferences.sourceLanguage !== 'auto' || state.resolvedSourceLanguage) return;
     const ready = autoLanguageEvidencePrecedence.offerImageEvidence({
       language,
       evidence,
       document,
       origin,
-      replayLease: snapshot?.replayLease,
-      identity: capturedPageIdentity,
+      replayLease: state.snapshot?.replayLease,
+      identity: state.capturedPageIdentity,
       generation: captureCoordinator.generation,
       configurationKey: currentAutoImageLanguageConfigurationKey(),
     });
@@ -503,7 +486,7 @@ imageTranslationController = new ImageTranslationController({
 function handleReplicaSourceCommit(commit: ReplicaSourceCommit): void {
   const selectedSnapshot = replicaSurfaceRouter.snapshot();
   if (selectedSnapshot && sameSourceReplicaLease(selectedSnapshot, commit)) {
-    snapshot = selectedSnapshot;
+    state.snapshot = selectedSnapshot;
     replicaStatusContainer.hidden = true;
     clearAutoImageLanguageForDifferentDocument(commit.document);
     // Initial activation is deliberately deferred until the engine run has
@@ -513,11 +496,11 @@ function handleReplicaSourceCommit(commit: ReplicaSourceCommit): void {
       commit.replayLease,
     );
   }
-  if (isLiveSourceOnlyMode()) return;
+  if (state.isLiveSourceOnlyMode) return;
   replicaTranslationCoordinator.handleSourceCommit(commit);
   const action = replicaSourceCommitAction(
     commit,
-    preferences.sourceLanguage === 'auto',
+    state.preferences.sourceLanguage === 'auto',
   );
   if (!action.prepareForNewText && !action.refreshDetectedLanguage) return;
   const refreshVersion = ++replicaLanguageRefreshVersion;
@@ -532,7 +515,7 @@ function handleReplicaSourceCommit(commit: ReplicaSourceCommit): void {
 function handleReplicaLiveFailure(
   code: ReplicaDiagnosticCode,
 ): void {
-  const identity = followedPageIdentity ?? capturedPageIdentity;
+  const identity = state.followedPageIdentity ?? state.capturedPageIdentity;
   const action = identity
     ? isolatedReplicaFailureRecoveryGate.decide(
         visibleReplayHost.hasCommittedReplica,
@@ -564,63 +547,25 @@ function handleReplicaLiveFailure(
   updateControls();
 }
 
-let snapshot: ReplicaTranslationSnapshot | undefined;
-let followedPageIdentity: CapturedPageIdentity | undefined;
-let capturedPageIdentity: CapturedPageIdentity | undefined;
-let resolvedSourceLanguage: SupportedLanguage | undefined;
-let resolvedSourceLanguageOrigin: 'page' | 'image' | 'explicit' | undefined;
-let resolvedImageLanguageConfigurationKey: string | undefined;
-let resolvedImageLanguageDocument: ReplicaSourceDocumentIdentity | undefined;
-let availability: TranslationAvailability = 'unavailable';
 let availabilityRequestId = 0;
 let replicaLanguageRefreshVersion = 0;
 let sourceLanguageResolutionRevision = 0;
 const autoLanguageEvidencePrecedence =
   new AutoLanguageEvidencePrecedence<PendingAutoImageLanguageEvidence>();
-let pageLanguageResolutionPending = false;
 let identityRequestId = 0;
 let activeFollowRequestId: number | undefined;
-let captureInFlight = false;
-let translationInFlight = false;
-let permissionInFlight = false;
-let imageCaptureAccess: 'checking' | 'granted' | 'missing' = 'checking';
 let imageCaptureAccessRevision = 0;
-let imageTranslationInFlight = false;
-let translationDesired = false;
-let translationComplete = false;
-let openCompanionOverlay: CompanionOverlay | undefined;
-let activeAbortController: AbortController | undefined;
-let activeTranslationKey: string | undefined;
-let replicaShadowAbortController: AbortController | undefined;
-let activeTranslationTask: Promise<void> | undefined;
-let navigationTimer: ReturnType<typeof setTimeout> | undefined;
 const navigationRefreshGate = new NavigationRefreshGate();
-let panelWindowId: number | undefined;
-let detachedSourceWindowId = detachedIdentityHint?.windowId;
 const isolatedReplicaFailureRecoveryGate =
   new IsolatedReplicaFailureRecoveryGate();
-let lastSourceScroll: HtmlMirrorScrollState | undefined;
-let availabilityCheckedForPair: string | undefined;
-let replicaFidelityCommitInFlight = false;
-let zoomCommitTimer: ReturnType<typeof setTimeout> | undefined;
-let pendingZoomPatch:
-  | { readonly requestId: number; readonly patch: CompanionViewSettingsPatch }
-  | undefined;
-let surfaceTransitionInFlight = false;
-let latestToolbarLaunchStamp: CompanionLaunchStamp | undefined;
-const ocrProviderRuntimeStatuses = new Map<
-  ImageTextProviderId,
-  OcrProviderRuntimeStatus | 'checking'
->();
-let textDetectorProbeRetryUsed = false;
 if (compiledImageTextProviderIds.includes('chrome-text-detector')) {
-  ocrProviderRuntimeStatuses.set('chrome-text-detector', 'checking');
+  state.ocrProviderRuntimeStatuses.set('chrome-text-detector', 'checking');
 }
 const uiLocalizer = new UiLocalizer({
   document,
   provider,
   dynamicLabels: DYNAMIC_UI_LABELS,
-  getTargetLanguage: () => preferences.targetLanguage,
+  getTargetLanguage: () => state.preferences.targetLanguage,
   translateRemembered,
 });
 
@@ -637,8 +582,8 @@ const quickComposer = new QuickComposer({
     status: composerStatus,
   },
   provider,
-  selectedPair,
-  getTargetLanguage: () => preferences.targetLanguage,
+  selectedPair: () => state.selectedPair(),
+  getTargetLanguage: () => state.preferences.targetLanguage,
   translateRemembered,
   setUiText,
   setStatus,
@@ -655,19 +600,19 @@ const imageAnalysisPanel = new ImageAnalysisPanel({
   compiledProviderOrder: effectiveCompiledProviderOrder,
   hasCompiledCapability: hasCompiledImageAnalysisCapability,
   readView: () => ({
-    imageTranslationEnabled: preferences.imageTranslationEnabled,
-    imageCaptureAccess,
-    permissionInFlight,
-    imageTextProviderOrder: preferences.imageTextProviderOrder,
-    disabledImageTextProviderIds: preferences.disabledImageTextProviderIds,
-    imageReadingMethodOrder: preferences.imageReadingMethodOrder,
-    disabledImageReadingMethodIds: preferences.disabledImageReadingMethodIds,
-    ocrMinimumConfidence: preferences.ocrMinimumConfidence,
-    imageScanPolicy: preferences.imageScanPolicy,
-    skipSmallImages: preferences.skipSmallImages,
-    usePromptForImageLanguage: preferences.usePromptForImageLanguage,
-    usePromptForImageText: preferences.usePromptForImageText,
-    providerRuntimeStatuses: ocrProviderRuntimeStatuses,
+    imageTranslationEnabled: state.preferences.imageTranslationEnabled,
+    imageCaptureAccess: state.imageCaptureAccess,
+    permissionInFlight: state.permissionInFlight,
+    imageTextProviderOrder: state.preferences.imageTextProviderOrder,
+    disabledImageTextProviderIds: state.preferences.disabledImageTextProviderIds,
+    imageReadingMethodOrder: state.preferences.imageReadingMethodOrder,
+    disabledImageReadingMethodIds: state.preferences.disabledImageReadingMethodIds,
+    ocrMinimumConfidence: state.preferences.ocrMinimumConfidence,
+    imageScanPolicy: state.preferences.imageScanPolicy,
+    skipSmallImages: state.preferences.skipSmallImages,
+    usePromptForImageLanguage: state.preferences.usePromptForImageLanguage,
+    usePromptForImageText: state.preferences.usePromptForImageText,
+    providerRuntimeStatuses: state.ocrProviderRuntimeStatuses,
     usablePixelProviderCount: enabledUsablePixelOcrProviderOrder().length,
   }),
   setUiText,
@@ -688,14 +633,10 @@ const toolbarStatus = new ToolbarStatus({
     progressElement,
   },
   readActivity: () => ({
-    captureInFlight,
-    translationInFlight,
-    permissionInFlight,
+    ...state.activity,
     composerInFlight: quickComposer.inFlight,
-    imageTranslationInFlight,
-    surfaceTransitionInFlight,
   }),
-  isSettingsOpen: () => openCompanionOverlay === 'settings',
+  isSettingsOpen: () => state.openCompanionOverlay === 'settings',
 });
 
 const companionBuildIdentity = createExtensionBuildIdentity(
@@ -712,21 +653,21 @@ const preferenceSafetyClient = new PreferenceSafetyClient({
   }),
   refreshCommittedSnapshot: async () => {
     if (!applyCommittedPreferences(await readStoredPreferences())) {
-      throw new Error('The committed settings snapshot was older than this panel.');
+      throw new Error('The committed settings state.snapshot was older than this panel.');
     }
   },
   onSafetyMessage: (message, reply) => {
     return handlePreferenceSafetyMessage(message, reply);
   },
   onFailClosed: () => {
-    preferenceSafetyConnectionReady = false;
+    state.preferenceSafetyConnectionReady = false;
     purgeSourceDerivedRuntime(
       'The settings safety connection was lost. Read access is Page-only while Simul reconnects…',
     );
     syncPreferenceControls();
   },
   onReady: () => {
-    preferenceSafetyConnectionReady = true;
+    state.preferenceSafetyConnectionReady = true;
     syncPreferenceControls();
     restartReplicaAfterReadPolicyChange();
   },
@@ -743,21 +684,21 @@ observeReplicaStateLabel();
 uiLocalizer.schedule();
 
 toggleSettingsButton.addEventListener('click', () => {
-  setCompanionOverlay(nextCompanionOverlay(openCompanionOverlay, 'settings'));
+  setCompanionOverlay(nextCompanionOverlay(state.openCompanionOverlay, 'settings'));
 });
 toggleQuickTranslateButton.addEventListener('click', () => {
   setCompanionOverlay(
-    nextCompanionOverlay(openCompanionOverlay, 'quick-translate'),
+    nextCompanionOverlay(state.openCompanionOverlay, 'quick-translate'),
   );
 });
 closeSettingsButton.addEventListener('click', () => setCompanionOverlay());
 closeQuickTranslateButton.addEventListener('click', () => setCompanionOverlay());
 popoutButton.addEventListener('click', () => {
-  if (surfaceTransitionInFlight) return;
-  surfaceTransitionInFlight = true;
+  if (state.surfaceTransitionInFlight) return;
+  state.surfaceTransitionInFlight = true;
   updateControls();
   void (isDetachedWindow ? returnToSidePanel() : openDetachedWindow()).finally(() => {
-    surfaceTransitionInFlight = false;
+    state.surfaceTransitionInFlight = false;
     updateControls();
   });
 });
@@ -766,15 +707,15 @@ toolbarAutoDetectButton.addEventListener('click', () => {
   void languageSelectionChanged();
 });
 toolbarSizeToggleButton.addEventListener('click', () => {
-  const displayMode = preferences.displayMode === 'fit' ? 'actual' : 'fit';
+  const displayMode = state.preferences.displayMode === 'fit' ? 'actual' : 'fit';
   void commitViewPreferencePatch({ displayMode });
   updateMirrorLayout();
 });
 toolbarOcrToggleButton.addEventListener('click', () => {
-  if (!preferences.imageTranslationEnabled) {
+  if (!state.preferences.imageTranslationEnabled) {
     void changeImageTranslationEnabled(true);
   } else if (
-    imageCaptureAccess !== 'granted' &&
+    state.imageCaptureAccess !== 'granted' &&
     enabledUsablePixelOcrProviderOrder().length > 0
   ) {
     void changeImageTranslationEnabled(true, true);
@@ -785,17 +726,17 @@ toolbarOcrToggleButton.addEventListener('click', () => {
 toolbarTabFollowButton.addEventListener('click', () => {
   if (!isDetachedWindow) return;
   void changePopoutTabMode(
-    preferences.popoutTabMode === 'active' ? 'locked' : 'active',
+    state.preferences.popoutTabMode === 'active' ? 'locked' : 'active',
   );
 });
 
 sourceSelect.addEventListener('change', () => void languageSelectionChanged());
 targetSelect.addEventListener('change', () => void languageSelectionChanged());
 swapButton.addEventListener('click', () => {
-  if (!resolvedSourceLanguage) return;
+  if (!state.resolvedSourceLanguage) return;
   const previousTarget = targetSelect.value;
   sourceSelect.value = previousTarget;
-  targetSelect.value = resolvedSourceLanguage;
+  targetSelect.value = state.resolvedSourceLanguage;
   void languageSelectionChanged();
 });
 
@@ -855,8 +796,8 @@ popoutTabModeSelect.addEventListener('change', () => {
 
 syncScrollInput.addEventListener('change', () => {
   void commitViewPreferencePatch({ syncScroll: syncScrollInput.checked });
-  if (preferences.syncScroll && lastSourceScroll) {
-    visibleReplayHost.followSourceScroll(lastSourceScroll);
+  if (state.preferences.syncScroll && state.lastSourceScroll) {
+    visibleReplayHost.followSourceScroll(state.lastSourceScroll);
   }
 });
 
@@ -870,12 +811,12 @@ readScopeProfile.addEventListener('change', () => {
 
 setupReadProfile.addEventListener('change', () => {
   if (!isReplicaReadScopeProfileId(setupReadProfile.value)) return;
-  setupReadScopeDraft = replicaReadScopeForProfile(setupReadProfile.value);
+  state.setupReadScopeDraft = replicaReadScopeForProfile(setupReadProfile.value);
   renderReadScopeControls();
 });
 
 completeReadScopeSetupButton.addEventListener('click', () => {
-  void commitReplicaReadScope(setupReadScopeDraft, true);
+  void commitReplicaReadScope(state.setupReadScopeDraft, true);
 });
 
 retrySetupResetCleanupButton.addEventListener('click', () => {
@@ -892,33 +833,33 @@ installResetConfirmationController({
   dialog: resetSettingsDialog,
   trigger: resetAllSettingsButton,
   shouldBypassConfirmation: () =>
-    preferences.resetCleanupPendingRevision > 0,
+    state.preferences.resetCleanupPendingRevision > 0,
   onConfirm: resetAllExtensionSettings,
 });
 
 zoomInput.addEventListener('input', () => setZoom(Number(zoomInput.value)));
-zoomInButton.addEventListener('click', () => setZoom(preferences.zoomPercent + 10));
-zoomOutButton.addEventListener('click', () => setZoom(preferences.zoomPercent - 10));
+zoomInButton.addEventListener('click', () => setZoom(state.preferences.zoomPercent + 10));
+zoomOutButton.addEventListener('click', () => setZoom(state.preferences.zoomPercent - 10));
 const requestManualRefresh = (): void => {
   void refreshFollowedPage('manual');
 };
 refreshButton.addEventListener('click', requestManualRefresh);
 compactRefreshButton.addEventListener('click', requestManualRefresh);
 translateButton.addEventListener('click', () => {
-  if (!isLiveSourceOnlyMode()) translationDesired = true;
+  if (!state.isLiveSourceOnlyMode) state.translationDesired = true;
   void startTranslation(false, captureCoordinator.generation);
 });
 cancelButton.addEventListener('click', () => {
-  activeAbortController?.abort();
+  state.activeAbortController?.abort();
   const composerCancelled = quickComposer.cancel();
   imageTranslationController.cancelCurrent();
   setStatus(
-    translationInFlight || imageTranslationInFlight
+    state.translationInFlight || state.imageTranslationInFlight
       ? 'Cancelling on-device translation…'
       : composerCancelled
         ? 'Quick translation cancelled.'
         : 'Nothing is currently being translated.',
-    composerCancelled && !translationInFlight && !imageTranslationInFlight
+    composerCancelled && !state.translationInFlight && !state.imageTranslationInFlight
       ? 'warning'
       : 'normal',
   );
@@ -927,7 +868,7 @@ translateComposerButton.addEventListener('click', () => void quickComposer.trans
 copyComposerButton.addEventListener('click', () => void quickComposer.copy());
 quickComposer.install();
 document.addEventListener('keydown', (event) => {
-  if (event.key === 'Escape' && openCompanionOverlay) {
+  if (event.key === 'Escape' && state.openCompanionOverlay) {
     event.preventDefault();
     setCompanionOverlay();
   }
@@ -939,7 +880,7 @@ document.addEventListener('visibilitychange', () => {
 window.addEventListener('pagehide', () => {
   commitPendingZoom();
   uiLocalizer.dispose();
-  replicaShadowAbortController?.abort();
+  state.replicaShadowAbortController?.abort();
   imageTranslationController.dispose();
   replicaTranslationCoordinator.dispose();
   isolatedHtmlReplicaEngine.dispose();
@@ -956,12 +897,12 @@ browser.runtime.onMessage.addListener((message: unknown) => {
 browser.tabs.onActivated.addListener(({ tabId, windowId }) => {
   // Images deferred while the followed tab was inactive can be captured
   // again now that it is the active tab.
-  if (followedPageIdentity?.tabId === tabId) imageTranslationController.resume();
+  if (state.followedPageIdentity?.tabId === tabId) imageTranslationController.resume();
   if (
     shouldFollowActivatedTab(
       isDetachedWindow,
-      preferences.popoutTabMode,
-      panelWindowId,
+      state.preferences.popoutTabMode,
+      state.panelWindowId,
       windowId,
     )
   ) {
@@ -970,11 +911,11 @@ browser.tabs.onActivated.addListener(({ tabId, windowId }) => {
   }
   if (
     !isDetachedWindow &&
-    followedPageIdentity?.windowId === windowId &&
-    followedPageIdentity.tabId !== tabId
+    state.followedPageIdentity?.windowId === windowId &&
+    state.followedPageIdentity.tabId !== tabId
   ) {
     identityRequestId += 1;
-    followedPageIdentity = undefined;
+    state.followedPageIdentity = undefined;
     clearNavigationTimer();
     invalidateCompanion(
       'The active tab changed. Select the extension on the page you want to follow.',
@@ -985,9 +926,9 @@ browser.tabs.onActivated.addListener(({ tabId, windowId }) => {
 browser.windows.onFocusChanged.addListener((windowId) => {
   if (
     !isDetachedWindow ||
-    preferences.popoutTabMode !== 'active' ||
+    state.preferences.popoutTabMode !== 'active' ||
     windowId === browser.windows.WINDOW_ID_NONE ||
-    windowId === panelWindowId
+    windowId === state.panelWindowId
   ) return;
   // The pending navigation refresh is left armed: its callback re-validates
   // the followed identity, and clearing it here lost the refresh whenever
@@ -999,10 +940,10 @@ browser.windows.onFocusChanged.addListener((windowId) => {
 browser.tabs.onAttached.addListener((tabId, { newWindowId }) => {
   if (
     isDetachedWindow &&
-    followedPageIdentity?.tabId === tabId &&
-    newWindowId !== panelWindowId
+    state.followedPageIdentity?.tabId === tabId &&
+    newWindowId !== state.panelWindowId
   ) {
-    if (preferences.popoutTabMode === 'active') {
+    if (state.preferences.popoutTabMode === 'active') {
       void followActivatedSourceTab(tabId, newWindowId);
     } else {
       const requestId = ++identityRequestId;
@@ -1013,14 +954,14 @@ browser.tabs.onAttached.addListener((tabId, { newWindowId }) => {
 });
 
 browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  const followed = followedPageIdentity;
+  const followed = state.followedPageIdentity;
   if (!followed || followed.tabId !== tabId) return;
   // An update from the tab being left can race the activation event for the
   // newly selected tab. In active-follow mode it is stale immediately and
   // must not invalidate the newer identity request.
   if (shouldIgnoreInactiveFollowedTabUpdate(
     isDetachedWindow,
-    preferences.popoutTabMode,
+    state.preferences.popoutTabMode,
     tab.active,
     activeFollowRequestId !== undefined,
   )) return;
@@ -1048,24 +989,24 @@ browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
       navigationScope,
       navigationKey,
     )) {
-      followedPageIdentity = nextIdentity;
+      state.followedPageIdentity = nextIdentity;
       return;
     }
     imageTranslationController.setTopPageOrigin(nextIdentity.url);
     identityRequestId += 1;
     sourceLanguageResolutionRevision += 1;
     autoLanguageEvidencePrecedence.invalidate();
-    pageLanguageResolutionPending = false;
-    if (resolvedSourceLanguageOrigin === 'image') {
+    state.pageLanguageResolutionPending = false;
+    if (state.resolvedSourceLanguageOrigin === 'image') {
       clearAutoImageLanguageResolution();
     }
     captureCoordinator.invalidate();
     availabilityRequestId += 1;
-    activeAbortController?.abort();
-    replicaShadowAbortController?.abort();
+    state.activeAbortController?.abort();
+    state.replicaShadowAbortController?.abort();
     imageTranslationController.releaseReplica();
     quickComposer.invalidate();
-    followedPageIdentity = nextIdentity;
+    state.followedPageIdentity = nextIdentity;
     clearNavigationTimer();
     setStatus('The source page is changing; the current mirror stays visible until the new page is ready.');
   } else if (isUrlOnlyNavigationSignal(
@@ -1077,10 +1018,10 @@ browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     // would discard stable OCR evidence and replay the entire page.
     const retargetScheduledDocument = navigationRefreshGate
       .observeSameDocumentUrl(navigationScope, navigationKey);
-    const retargetPendingDocumentCapture = navigationTimer !== undefined &&
+    const retargetPendingDocumentCapture = state.navigationTimer !== undefined &&
       retargetScheduledDocument;
     imageTranslationController.setTopPageOrigin(nextIdentity.url);
-    followedPageIdentity = nextIdentity;
+    state.followedPageIdentity = nextIdentity;
     // A completed new document may update its history URL during our short
     // debounce. Keep that one authoritative initial capture, retargeted to the
     // current same-document URL, instead of letting the stale timer self-drop.
@@ -1093,15 +1034,15 @@ browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
     // the followed identity current before arming the debounce, otherwise its
     // stale-identity guard can discard the only finished-document refresh.
     imageTranslationController.setTopPageOrigin(nextIdentity.url);
-    followedPageIdentity = nextIdentity;
+    state.followedPageIdentity = nextIdentity;
   }
   if (
     navigationStatus === 'complete' &&
     navigationRefreshGate.shouldScheduleComplete(
       navigationScope,
       navigationKey,
-      capturedPageIdentity
-        ? navigationPageIdentityKey(capturedPageIdentity)
+      state.capturedPageIdentity
+        ? navigationPageIdentityKey(state.capturedPageIdentity)
         : undefined,
     )
   ) {
@@ -1110,18 +1051,18 @@ browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
 });
 
 browser.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
-  if (followedPageIdentity?.tabId !== removedTabId) return;
+  if (state.followedPageIdentity?.tabId !== removedTabId) return;
   const requestId = ++identityRequestId;
   clearNavigationTimer();
   void followReplacedSourceTab(addedTabId, requestId);
 });
 
 browser.tabs.onRemoved.addListener((tabId, removeInfo) => {
-  if (followedPageIdentity?.tabId !== tabId) return;
+  if (state.followedPageIdentity?.tabId !== tabId) return;
   if (shouldRecoverRemovedActiveSource(
     isDetachedWindow,
-    preferences.popoutTabMode,
-    panelWindowId,
+    state.preferences.popoutTabMode,
+    state.panelWindowId,
     removeInfo.windowId,
     removeInfo.isWindowClosing,
   )) {
@@ -1151,58 +1092,58 @@ browser.permissions.onRemoved.addListener(() => {
 browser.storage.onChanged.addListener((changes, areaName) => {
   if (areaName !== 'local' || !(STORAGE_KEY in changes)) return;
   const liveChange = selectLiveCompanionPreferenceChange(
-    preferences,
-    livePreferenceStorageFailClosed,
+    state.preferences,
+    state.livePreferenceStorageFailClosed,
     changes[STORAGE_KEY]?.newValue,
   );
   if (liveChange.status === 'invalid') {
-    livePreferenceStorageFailClosed = true;
+    state.livePreferenceStorageFailClosed = true;
     purgeSourceDerivedRuntime(
-      'Stored settings became unavailable or invalid. Read access is Page-only until a current valid snapshot is restored…',
+      'Stored settings became unavailable or invalid. Read access is Page-only until a current valid state.snapshot is restored…',
     );
     syncPreferenceControls();
     return;
   }
   if (liveChange.status === 'stale') return;
-  const previous = preferences;
-  const previousPair = selectedPair();
-  const wasStorageFailClosed = livePreferenceStorageFailClosed;
+  const previous = state.preferences;
+  const previousPair = state.selectedPair();
+  const wasStorageFailClosed = state.livePreferenceStorageFailClosed;
   if (!applyCommittedPreferences(liveChange.preferences)) return;
-  livePreferenceStorageFailClosed = false;
+  state.livePreferenceStorageFailClosed = false;
   const previousReadScope = committedReplicaReadScope(previous);
-  const nextReadScope = committedReplicaReadScope(preferences);
+  const nextReadScope = committedReplicaReadScope(state.preferences);
   const readPolicyChanged =
     wasStorageFailClosed ||
     replicaReadScopeFingerprint(previousReadScope) !==
       replicaReadScopeFingerprint(nextReadScope) ||
-    previous.resetRevision !== preferences.resetRevision;
+    previous.resetRevision !== state.preferences.resetRevision;
   if (readPolicyChanged) {
     purgeSourceDerivedRuntime('Readable-content policy changed; rebuilding safely…');
   }
   if (
     isDetachedWindow &&
-    previous.popoutTabMode !== preferences.popoutTabMode &&
-    preferences.popoutTabMode === 'active'
+    previous.popoutTabMode !== state.preferences.popoutTabMode &&
+    state.preferences.popoutTabMode === 'active'
   ) {
     void followCurrentActiveSourceTab();
   }
   if (
-    previous.replicaFidelityPolicy !== preferences.replicaFidelityPolicy
+    previous.replicaFidelityPolicy !== state.preferences.replicaFidelityPolicy
   ) {
     isolatedReplicaFailureRecoveryGate.reset();
-    const identity = followedPageIdentity ?? capturedPageIdentity;
+    const identity = state.followedPageIdentity ?? state.capturedPageIdentity;
     if (identity) queueCapture({ identity, reason: 'preference' });
   }
-  if (previous.replicaViewMode !== preferences.replicaViewMode) {
+  if (previous.replicaViewMode !== state.preferences.replicaViewMode) {
     applyReplicaViewMode(previous.replicaViewMode);
   }
   syncPreferenceControls();
   updateMirrorLayout();
   if (readPolicyChanged) restartReplicaAfterReadPolicyChange();
   if (
-    snapshot &&
-    (previous.sourceLanguage !== preferences.sourceLanguage ||
-      previous.targetLanguage !== preferences.targetLanguage)
+    state.snapshot &&
+    (previous.sourceLanguage !== state.preferences.sourceLanguage ||
+      previous.targetLanguage !== state.preferences.targetLanguage)
   ) {
     // The window that changed the languages already recorded its own intent
     // in languageSelectionChanged. A change made in another companion window
@@ -1216,7 +1157,7 @@ void initialize();
 async function initialize(): Promise<void> {
   await Promise.all([loadPreferences(), loadPanelWindowId()]);
   // Permission and experimental-provider probes are optional readiness work.
-  // Start them after preferences load, but never put them on the critical path
+  // Start them after state.preferences load, but never put them on the critical path
   // for the first visible replica.
   startBestEffortBackgroundTasks([
     refreshImageCaptureAccess,
@@ -1236,14 +1177,14 @@ async function initialize(): Promise<void> {
 
 async function initializeSourcePage(): Promise<void> {
   if (detachedIdentityHint) {
-    followedPageIdentity = preferences.popoutTabMode === 'active'
+    state.followedPageIdentity = state.preferences.popoutTabMode === 'active'
       ? await readActivePageIdentity(detachedIdentityHint.windowId)
       : identityFromTab(
           await browser.tabs.get(detachedIdentityHint.tabId),
           undefined,
           false,
         );
-    queueCapture({ identity: followedPageIdentity, reason: 'initial' });
+    queueCapture({ identity: state.followedPageIdentity, reason: 'initial' });
     return;
   }
   await refreshFollowedPage('initial');
@@ -1251,9 +1192,9 @@ async function initializeSourcePage(): Promise<void> {
 
 async function loadPanelWindowId(): Promise<void> {
   try {
-    panelWindowId = (await browser.windows.getCurrent()).id;
+    state.panelWindowId = (await browser.windows.getCurrent()).id;
   } catch {
-    panelWindowId = undefined;
+    state.panelWindowId = undefined;
   }
 }
 
@@ -1286,8 +1227,8 @@ async function sendPreferenceCommand(
 async function commitViewPreferencePatch(
   patch: CompanionViewSettingsPatch,
 ): Promise<boolean> {
-  const pending = viewPreferencePatchLedger.begin(preferences, patch);
-  preferences = pending.preferences;
+  const pending = viewPreferencePatchLedger.begin(state.preferences, patch);
+  state.preferences = pending.preferences;
   syncPreferenceControls();
   updateMirrorLayout();
   try {
@@ -1324,8 +1265,8 @@ async function commitViewPreferencePatch(
 async function commitImageAnalysisPreferencePatch(
   patch: CompanionImageAnalysisSettingsPatch,
 ): Promise<void> {
-  const expectedResetRevision = preferences.resetRevision;
-  const expectedSettingsRevision = preferences.settingsRevision;
+  const expectedResetRevision = state.preferences.resetRevision;
+  const expectedSettingsRevision = state.preferences.settingsRevision;
   try {
     const result = await sendPreferenceCommand({
       type: 'simul:preferences:patch-image-analysis',
@@ -1357,12 +1298,12 @@ async function commitReplicaReadScope(
   scope: ReplicaReadScope,
   completeSetup: boolean,
 ): Promise<void> {
-  const sequence = ++readScopeCommitSequence;
-  const committedAtDispatch = committedReplicaReadScope(preferences);
+  const sequence = ++state.readScopeCommitSequence;
+  const committedAtDispatch = committedReplicaReadScope(state.preferences);
   const current = currentReplicaReadScope();
   const narrowing = replicaReadScopeNarrows(current, scope);
   if (narrowing) {
-    localReadScopeNarrowingGates.set(sequence, {
+    state.localReadScopeNarrowingGates.set(sequence, {
       scope: intersectReplicaReadScopes(current, scope),
       failed: false,
     });
@@ -1374,22 +1315,22 @@ async function commitReplicaReadScope(
     const result = await sendPreferenceCommand(completeSetup
       ? {
           type: 'simul:preferences:complete-read-scope-setup',
-          expectedResetRevision: preferences.resetRevision,
-          expectedSetupVersion: preferences.readScopeSetupVersion,
+          expectedResetRevision: state.preferences.resetRevision,
+          expectedSetupVersion: state.preferences.readScopeSetupVersion,
           expectedReadScopeFingerprint:
             replicaReadScopeFingerprint(committedAtDispatch),
           patch: { replicaReadScope: scope },
         }
       : {
           type: 'simul:preferences:patch-read-scope',
-          expectedResetRevision: preferences.resetRevision,
+          expectedResetRevision: state.preferences.resetRevision,
           expectedReadScopeFingerprint:
             replicaReadScopeFingerprint(committedAtDispatch),
           patch: { replicaReadScope: scope },
         });
     applyCommittedPreferences(result.preferences);
     if (!result.applied) {
-      const gate = localReadScopeNarrowingGates.get(sequence);
+      const gate = state.localReadScopeNarrowingGates.get(sequence);
       if (gate) gate.failed = true;
       throw new Error(result.code === 'stale-reset-revision'
         ? 'Settings changed in another companion. Review the current choices and try again.'
@@ -1399,23 +1340,23 @@ async function commitReplicaReadScope(
             ? 'Another companion could not confirm its safety purge. Close it or retry the change.'
         : 'The read settings were not applied.');
     }
-    for (const pendingSequence of [...localReadScopeNarrowingGates.keys()]) {
+    for (const pendingSequence of [...state.localReadScopeNarrowingGates.keys()]) {
       if (pendingSequence <= sequence) {
-        localReadScopeNarrowingGates.delete(pendingSequence);
+        state.localReadScopeNarrowingGates.delete(pendingSequence);
       }
     }
-    setupReadScopeDraft = { ...preferences.replicaReadScope };
+    state.setupReadScopeDraft = { ...state.preferences.replicaReadScope };
     syncPreferenceControls();
     restartReplicaAfterReadPolicyChange();
     setupReadScopeStatus.textContent = '';
     setStatus('Readable-content settings applied. The replica is rebuilding.', 'success');
   } catch (error) {
-    const gate = localReadScopeNarrowingGates.get(sequence);
+    const gate = state.localReadScopeNarrowingGates.get(sequence);
     if (gate) gate.failed = true;
     setupReadScopeStatus.textContent = readableError(error);
     setupReadScopeStatus.dataset.tone = 'error';
     syncPreferenceControls();
-    if (localReadScopeNarrowingGates.has(sequence)) {
+    if (state.localReadScopeNarrowingGates.has(sequence)) {
       restartReplicaAfterReadPolicyChange();
     }
     setStatus(`Could not save readable-content settings: ${readableError(error)}`, 'error');
@@ -1425,32 +1366,32 @@ async function commitReplicaReadScope(
 }
 
 async function resetAllExtensionSettings(): Promise<void> {
-  if (resetInFlight) return;
-  resetInFlight = true;
+  if (state.resetInFlight) return;
+  state.resetInFlight = true;
   resetAllSettingsButton.disabled = true;
   retrySetupResetCleanupButton.disabled = true;
   resetSettingsStatus.textContent = 'Resetting settings and optional permissions…';
-  if (preferences.resetCleanupPendingRevision > 0) {
+  if (state.preferences.resetCleanupPendingRevision > 0) {
     setupResetCleanupStatus.textContent =
       'Retrying optional permission and runtime cleanup…';
   }
   try {
-    const retry = preferences.resetCleanupPendingRevision > 0;
+    const retry = state.preferences.resetCleanupPendingRevision > 0;
     const result = await sendPreferenceCommand(retry
       ? {
           type: 'simul:preferences:retry-reset-cleanup',
-          expectedResetRevision: preferences.resetRevision,
+          expectedResetRevision: state.preferences.resetRevision,
         }
       : {
           type: 'simul:preferences:reset-all',
-          expectedResetRevision: preferences.resetRevision,
+          expectedResetRevision: state.preferences.resetRevision,
         });
     applyCommittedPreferences(result.preferences);
     if (!result.applied && result.code === 'stale-reset-revision') {
       syncPreferenceControls();
       resetSettingsStatus.textContent =
         'Settings changed in another companion. Review the current state before resetting.';
-      if (preferences.resetCleanupPendingRevision > 0) {
+      if (state.preferences.resetCleanupPendingRevision > 0) {
         setupResetCleanupStatus.textContent = resetSettingsStatus.textContent;
       }
       return;
@@ -1463,7 +1404,7 @@ async function resetAllExtensionSettings(): Promise<void> {
     }
     purgeSourceDerivedRuntime('Resetting extension settings…');
     clearResetOnlyRuntimeState();
-    setupReadScopeDraft = replicaReadScopeForProfile('standard');
+    state.setupReadScopeDraft = replicaReadScopeForProfile('standard');
     syncPreferenceControls();
     if (result.cleanup?.status === 'pending') {
       const cleanupMessage =
@@ -1478,11 +1419,11 @@ async function resetAllExtensionSettings(): Promise<void> {
     }
   } catch (error) {
     resetSettingsStatus.textContent = `Reset could not finish: ${readableError(error)}`;
-    if (preferences.resetCleanupPendingRevision > 0) {
+    if (state.preferences.resetCleanupPendingRevision > 0) {
       setupResetCleanupStatus.textContent = resetSettingsStatus.textContent;
     }
   } finally {
-    resetInFlight = false;
+    state.resetInFlight = false;
     resetAllSettingsButton.disabled = false;
     retrySetupResetCleanupButton.disabled = false;
     renderReadScopeControls();
@@ -1500,13 +1441,13 @@ function purgeSourceDerivedRuntimeForSafety(message: string): Promise<void> {
 function purgeSourceDerivedRuntimeInternal(
   message: string,
 ): Promise<void> {
-  if (resolvedSourceLanguageOrigin === 'image') {
+  if (state.resolvedSourceLanguageOrigin === 'image') {
     clearAutoImageLanguageResolution();
   }
   captureCoordinator.invalidate();
   availabilityRequestId += 1;
-  activeAbortController?.abort();
-  replicaShadowAbortController?.abort();
+  state.activeAbortController?.abort();
+  state.replicaShadowAbortController?.abort();
   imageTranslationController.purgeSourceDerivedCache();
   imageTranslationController.releaseReplica();
   isolatedHtmlReplicaEngine.releasePresentation();
@@ -1515,8 +1456,8 @@ function purgeSourceDerivedRuntimeInternal(
   // rebuild. Semantic form/personal text and translated image labels may have
   // populated these memories under the old, broader policy.
   translationMemory.clear();
-  snapshot = undefined;
-  translationComplete = false;
+  state.snapshot = undefined;
+  state.translationComplete = false;
   renderLoadingState();
   setStatus(message, 'warning');
   return Promise.resolve();
@@ -1534,12 +1475,12 @@ async function handlePreferenceSafetyMessage(
 ): Promise<void> {
   const prepare = readPreferenceSafetyPrepareMessage(value);
   if (prepare) {
-    remoteReadScopeNarrowingGates.prepare(
+    state.remoteReadScopeNarrowingGates.prepare(
       prepare.requestId,
       prepare.targetReadScope,
     );
     if (prepare.operation === 'reset') {
-      localReadScopeNarrowingGates.clear();
+      state.localReadScopeNarrowingGates.clear();
     }
     const purge = purgeSourceDerivedRuntimeForSafety(
       prepare.operation === 'reset'
@@ -1560,7 +1501,7 @@ async function handlePreferenceSafetyMessage(
   if (!release) return;
   if (
     release.committed &&
-    remoteReadScopeNarrowingGates.authorizeCommittedRelease(release.requestId)
+    state.remoteReadScopeNarrowingGates.authorizeCommittedRelease(release.requestId)
   ) {
     releaseAuthorizedRemoteReadScopeSafetyGates();
     releaseSatisfiedLocalReadScopeSafetyGates();
@@ -1569,7 +1510,7 @@ async function handlePreferenceSafetyMessage(
 
 function applyCommittedPreferences(value: unknown): boolean {
   const candidate = parseCompanionPreferences(value);
-  const previous = preferences;
+  const previous = state.preferences;
   const selected = selectLatestCompanionPreferences(previous, candidate);
   const candidateIsOlder =
     candidate.resetRevision < previous.resetRevision ||
@@ -1578,15 +1519,15 @@ function applyCommittedPreferences(value: unknown): boolean {
       candidate.settingsRevision < previous.settingsRevision
     );
   if (candidateIsOlder) return false;
-  preferences = viewPreferencePatchLedger.project(selected);
+  state.preferences = viewPreferencePatchLedger.project(selected);
   if (
-    preferences.readScopeSetupVersion !== REPLICA_READ_SCOPE_SETUP_VERSION &&
+    state.preferences.readScopeSetupVersion !== REPLICA_READ_SCOPE_SETUP_VERSION &&
     (
       previous.readScopeSetupVersion === REPLICA_READ_SCOPE_SETUP_VERSION ||
-      preferences.resetRevision > previous.resetRevision
+      state.preferences.resetRevision > previous.resetRevision
     )
   ) {
-    setupReadScopeDraft = replicaReadScopeForProfile('standard');
+    state.setupReadScopeDraft = replicaReadScopeForProfile('standard');
   }
   releaseAuthorizedRemoteReadScopeSafetyGates();
   releaseSatisfiedLocalReadScopeSafetyGates();
@@ -1594,16 +1535,16 @@ function applyCommittedPreferences(value: unknown): boolean {
 }
 
 function releaseAuthorizedRemoteReadScopeSafetyGates(): void {
-  remoteReadScopeNarrowingGates.releaseSatisfied(
-    committedReplicaReadScope(preferences),
+  state.remoteReadScopeNarrowingGates.releaseSatisfied(
+    committedReplicaReadScope(state.preferences),
   );
 }
 
 function releaseSatisfiedLocalReadScopeSafetyGates(): void {
-  const committed = committedReplicaReadScope(preferences);
-  for (const [sequence, gate] of localReadScopeNarrowingGates) {
+  const committed = committedReplicaReadScope(state.preferences);
+  for (const [sequence, gate] of state.localReadScopeNarrowingGates) {
     if (gate.failed && readScopeIsNoBroaderThan(committed, gate.scope)) {
-      localReadScopeNarrowingGates.delete(sequence);
+      state.localReadScopeNarrowingGates.delete(sequence);
     }
   }
 }
@@ -1618,20 +1559,20 @@ function readScopeIsNoBroaderThan(
 }
 
 function restartReplicaAfterReadPolicyChange(): void {
-  const identity = followedPageIdentity ?? capturedPageIdentity;
+  const identity = state.followedPageIdentity ?? state.capturedPageIdentity;
   if (identity) queueCapture({ identity, reason: 'preference' });
   configureImageTranslation();
 }
 
 function currentReplicaReadScope(): ReplicaReadScope {
-  let scope = committedReplicaReadScope(preferences);
-  if (!preferenceSafetyConnectionReady || livePreferenceStorageFailClosed) {
+  let scope = committedReplicaReadScope(state.preferences);
+  if (!state.preferenceSafetyConnectionReady || state.livePreferenceStorageFailClosed) {
     scope = intersectReplicaReadScopes(scope, PAGE_ONLY_REPLICA_READ_SCOPE);
   }
-  for (const gate of localReadScopeNarrowingGates.values()) {
+  for (const gate of state.localReadScopeNarrowingGates.values()) {
     scope = intersectReplicaReadScopes(scope, gate.scope);
   }
-  for (const gate of remoteReadScopeNarrowingGates.scopes()) {
+  for (const gate of state.remoteReadScopeNarrowingGates.scopes()) {
     scope = intersectReplicaReadScopes(scope, gate);
   }
   return scope;
@@ -1650,8 +1591,8 @@ async function refreshImageCaptureAccess(
   reportRevocation = false,
 ): Promise<void> {
   const revision = ++imageCaptureAccessRevision;
-  const previous = imageCaptureAccess;
-  let next: typeof imageCaptureAccess;
+  const previous = state.imageCaptureAccess;
+  let next: typeof state.imageCaptureAccess;
   try {
     next = await browser.permissions.contains({
       origins: [...ALL_SITES_PERMISSION_ORIGINS],
@@ -1665,18 +1606,18 @@ async function refreshImageCaptureAccess(
   if (capturePermissionRevoked) {
     imageTranslationController.purgeSourceDerivedCache();
   }
-  imageCaptureAccess = next;
+  state.imageCaptureAccess = next;
   imageAnalysisPanel.render();
   configureImageTranslation();
   updateControls();
   if (
     reportRevocation &&
     previous === 'granted' &&
-    imageCaptureAccess === 'missing' &&
-    preferences.imageTranslationEnabled
+    state.imageCaptureAccess === 'missing' &&
+    state.preferences.imageTranslationEnabled
   ) {
     setStatus(
-      preferences.disabledImageReadingMethodIds.includes(
+      state.preferences.disabledImageReadingMethodIds.includes(
         ACCESSIBILITY_TEXT_METHOD_ID,
       )
         ? 'Image access was removed. Pixel OCR is paused; open options and choose Grant image access to resume.'
@@ -1690,11 +1631,11 @@ async function changeImageTranslationEnabled(
   enabled: boolean,
   requestPixelAccess = false,
 ): Promise<void> {
-  if (permissionInFlight) {
+  if (state.permissionInFlight) {
     syncPreferenceControls();
     return;
   }
-  permissionInFlight = true;
+  state.permissionInFlight = true;
   imageAnalysisPanel.render();
   updateControls();
   try {
@@ -1769,7 +1710,7 @@ async function changeImageTranslationEnabled(
           return { kind: 'complete', result, narrowAccessRestored } as const;
         } catch (error) {
           const prior = await readStoredPreferences().catch(
-            () => freshPreferences ?? preferences,
+            () => freshPreferences ?? state.preferences,
           );
           if (
             newlyGranted &&
@@ -1802,8 +1743,8 @@ async function changeImageTranslationEnabled(
     if (outcome.kind === 'denied') {
       await reloadPreferencesFromStorage();
       setStatus(
-        preferences.imageTranslationEnabled
-          ? preferences.disabledImageReadingMethodIds.includes(
+        state.preferences.imageTranslationEnabled
+          ? state.preferences.disabledImageReadingMethodIds.includes(
               ACCESSIBILITY_TEXT_METHOD_ID,
             )
             ? 'Pixel OCR remains paused. Choose Grant image access when you are ready to retry.'
@@ -1831,7 +1772,7 @@ async function changeImageTranslationEnabled(
       'error',
     );
   } finally {
-    permissionInFlight = false;
+    state.permissionInFlight = false;
     await refreshImageCaptureAccess();
     syncPreferenceControls();
     updateControls();
@@ -1840,33 +1781,33 @@ async function changeImageTranslationEnabled(
 
 async function acceptAuthorizedTab(request: AuthorizedTabRequest): Promise<void> {
   const authorized = request.identity;
-  const lockedIdentity = followedPageIdentity ?? detachedIdentityHint;
+  const lockedIdentity = state.followedPageIdentity ?? detachedIdentityHint;
   if (
     isDetachedWindow &&
     lockedIdentity &&
-    preferences.popoutTabMode === 'locked' &&
+    state.preferences.popoutTabMode === 'locked' &&
     (authorized.windowId !== lockedIdentity.windowId ||
       authorized.tabId !== lockedIdentity.tabId)
   ) return;
   if (request.launchStamp) {
     if (!isNewerCompanionLaunchStamp(
-      latestToolbarLaunchStamp,
+      state.latestToolbarLaunchStamp,
       request.launchStamp,
     )) return;
-    latestToolbarLaunchStamp = request.launchStamp;
+    state.latestToolbarLaunchStamp = request.launchStamp;
   }
   const requestId = ++identityRequestId;
   if (!isDetachedWindow) {
-    if (panelWindowId === undefined) await loadPanelWindowId();
+    if (state.panelWindowId === undefined) await loadPanelWindowId();
     if (
       requestId !== identityRequestId ||
-      panelWindowId === undefined ||
-      authorized.windowId !== panelWindowId
+      state.panelWindowId === undefined ||
+      authorized.windowId !== state.panelWindowId
     ) return;
   }
   if (requestId !== identityRequestId) return;
   clearNavigationTimer();
-  followedPageIdentity = authorized;
+  state.followedPageIdentity = authorized;
   queueCapture({ identity: authorized, reason: 'authorized' });
 }
 
@@ -1883,11 +1824,11 @@ async function followMovedLockedSourceTab(
     );
     if (
       requestId !== identityRequestId ||
-      preferences.popoutTabMode !== 'locked' ||
+      state.preferences.popoutTabMode !== 'locked' ||
       identity.tabId !== tabId ||
       identity.windowId !== windowId
     ) return;
-    detachedSourceWindowId = windowId;
+    state.detachedSourceWindowId = windowId;
     queueCapture({ identity, reason: 'navigation' });
   } catch (error) {
     if (requestId !== identityRequestId) return;
@@ -1902,17 +1843,17 @@ async function followReplacedSourceTab(
   requestId: number,
 ): Promise<void> {
   if (requestId !== identityRequestId) return;
-  if (isDetachedWindow && preferences.popoutTabMode === 'active') {
+  if (isDetachedWindow && state.preferences.popoutTabMode === 'active') {
     activeFollowRequestId = requestId;
   }
   try {
     const identity = identityFromTab(
       await browser.tabs.get(tabId),
       undefined,
-      requiresActiveSourceTab(),
+      state.requiresActiveSourceTab,
     );
     if (requestId !== identityRequestId) return;
-    detachedSourceWindowId = identity.windowId;
+    state.detachedSourceWindowId = identity.windowId;
     queueCapture({ identity, reason: 'navigation' });
   } catch (error) {
     if (requestId !== identityRequestId) return;
@@ -1927,23 +1868,23 @@ async function followReplacedSourceTab(
 async function refreshFollowedPage(reason: CaptureRequest['reason']): Promise<void> {
   const requestId = ++identityRequestId;
   try {
-    const identity = followedPageIdentity
-      ? await readCurrentFollowedIdentity(followedPageIdentity)
+    const identity = state.followedPageIdentity
+      ? await readCurrentFollowedIdentity(state.followedPageIdentity)
       : await readActivePageIdentity();
     if (requestId !== identityRequestId) return;
-    followedPageIdentity = identity;
+    state.followedPageIdentity = identity;
     queueCapture({ identity, reason });
   } catch (error) {
     if (requestId !== identityRequestId) return;
     const message = readPageError(error);
-    if (!snapshot) renderErrorState(message);
+    if (!state.snapshot) renderErrorState(message);
     setStatus(message, 'error');
     updateControls();
   }
 }
 
 async function followCurrentActiveSourceTab(): Promise<void> {
-  if (!detachedIdentityHint || preferences.popoutTabMode !== 'active') return;
+  if (!detachedIdentityHint || state.preferences.popoutTabMode !== 'active') return;
   const requestId = ++identityRequestId;
   activeFollowRequestId = requestId;
   clearNavigationTimer();
@@ -1953,12 +1894,12 @@ async function followCurrentActiveSourceTab(): Promise<void> {
     });
     if (
       requestId !== identityRequestId ||
-      preferences.popoutTabMode !== 'active'
+      state.preferences.popoutTabMode !== 'active'
     ) return;
     const sourceWindowId =
       lastFocused.id ??
-      followedPageIdentity?.windowId ??
-      detachedSourceWindowId ??
+      state.followedPageIdentity?.windowId ??
+      state.detachedSourceWindowId ??
       detachedIdentityHint.windowId;
     const [tab] = await browser.tabs.query({
       active: true,
@@ -1966,7 +1907,7 @@ async function followCurrentActiveSourceTab(): Promise<void> {
     });
     if (
       requestId !== identityRequestId ||
-      preferences.popoutTabMode !== 'active'
+      state.preferences.popoutTabMode !== 'active'
     ) return;
     if (tab?.id === undefined) {
       invalidateCompanion('The source browser window has no active readable tab.');
@@ -1990,7 +1931,7 @@ async function followFocusedBrowserWindow(
 ): Promise<void> {
   if (
     requestId !== identityRequestId ||
-    preferences.popoutTabMode !== 'active'
+    state.preferences.popoutTabMode !== 'active'
   ) {
     // tabs.onRemoved marks its request before the microtask that reaches
     // here. A request superseded in that gap must still release the marker,
@@ -2003,15 +1944,15 @@ async function followFocusedBrowserWindow(
     const sourceWindow = await browser.windows.get(windowId);
     if (
       requestId !== identityRequestId ||
-      preferences.popoutTabMode !== 'active'
+      state.preferences.popoutTabMode !== 'active'
     ) return;
     if (!isFocusedNormalBrowserWindow(sourceWindow)) return;
     const [tab] = await browser.tabs.query({ active: true, windowId });
     if (
       requestId !== identityRequestId ||
-      preferences.popoutTabMode !== 'active'
+      state.preferences.popoutTabMode !== 'active'
     ) return;
-    detachedSourceWindowId = windowId;
+    state.detachedSourceWindowId = windowId;
     if (tab?.id !== undefined) {
       await followActivatedSourceTab(tab.id, windowId, tab, requestId);
     } else if (missingTabMessage && requestId === identityRequestId) {
@@ -2036,8 +1977,8 @@ async function followActivatedSourceTab(
   if (
     !shouldFollowActivatedTab(
       isDetachedWindow,
-      preferences.popoutTabMode,
-      panelWindowId,
+      state.preferences.popoutTabMode,
+      state.panelWindowId,
       windowId,
     )
   ) return;
@@ -2051,18 +1992,18 @@ async function followActivatedSourceTab(
     const sourceWindow = await browser.windows.get(windowId);
     if (
       requestId !== identityRequestId ||
-      preferences.popoutTabMode !== 'active'
+      state.preferences.popoutTabMode !== 'active'
     ) return;
     if (!isFocusedNormalBrowserWindow(sourceWindow)) return;
     const tab = knownTab ?? await browser.tabs.get(tabId);
     const identity = identityFromTab(tab, undefined, true);
     if (
       requestId !== identityRequestId ||
-      preferences.popoutTabMode !== 'active'
+      state.preferences.popoutTabMode !== 'active'
     ) return;
-    detachedSourceWindowId = windowId;
+    state.detachedSourceWindowId = windowId;
     if (sameCompanionSourcePage(
-      followedPageIdentity,
+      state.followedPageIdentity,
       identity,
       normalizedPageUrl,
     )) {
@@ -2070,10 +2011,10 @@ async function followActivatedSourceTab(
       // older page of the same tab (a navigation whose refresh never ran),
       // rebuild now instead of leaving the stale mirror frozen (review M1).
       if (shouldRebuildStaleFollowedReplica({
-        captureInFlight,
-        navigationRefreshPending: navigationTimer !== undefined,
+        captureInFlight: state.captureInFlight,
+        navigationRefreshPending: state.navigationTimer !== undefined,
         tabStatus: tab.status,
-        captured: capturedPageIdentity,
+        captured: state.capturedPageIdentity,
         identity,
         normalizeUrl: normalizedPageUrl,
       })) {
@@ -2102,7 +2043,7 @@ function queueCapture(request: CaptureRequest): void {
     navigationPageScopeKey(request.identity),
     navigationPageIdentityKey(request.identity),
   );
-  const previousIdentity = capturedPageIdentity ?? followedPageIdentity;
+  const previousIdentity = state.capturedPageIdentity ?? state.followedPageIdentity;
   const samePage = sameCompanionSourcePage(
     previousIdentity,
     request.identity,
@@ -2110,7 +2051,7 @@ function queueCapture(request: CaptureRequest): void {
   );
   if (!samePage) isolatedReplicaFailureRecoveryGate.reset();
   if (shouldResetReplicaScrollForCapture(request.reason, samePage)) {
-    lastSourceScroll = undefined;
+    state.lastSourceScroll = undefined;
     visibleReplayHost.resetSourceScroll();
   }
   const retainTranslationIntent =
@@ -2120,18 +2061,18 @@ function queueCapture(request: CaptureRequest): void {
       request.reason === 'preference');
   if (!retainTranslationIntent) {
     replicaTranslationCoordinator.selectPair(undefined);
-    translationDesired = false;
-    translationComplete = false;
-    availabilityCheckedForPair = undefined;
+    state.translationDesired = false;
+    state.translationComplete = false;
+    state.availabilityCheckedForPair = undefined;
     quickComposer.invalidate();
   }
-  activeAbortController?.abort();
-  replicaShadowAbortController?.abort();
+  state.activeAbortController?.abort();
+  state.replicaShadowAbortController?.abort();
   imageTranslationController.setTopPageOrigin(request.identity.url);
   imageTranslationController.releaseReplica();
   availabilityRequestId += 1;
-  followedPageIdentity = request.identity;
-  if (!snapshot && !visibleReplayHost.hasCommittedReplica) renderLoadingState();
+  state.followedPageIdentity = request.identity;
+  if (!state.snapshot && !visibleReplayHost.hasCommittedReplica) renderLoadingState();
   setStatus(
     request.reason === 'desynchronized'
       ? 'A live update could not be reconciled. Rebuilding once while keeping the current mirror visible…'
@@ -2145,7 +2086,7 @@ function queueCapture(request: CaptureRequest): void {
 }
 
 async function runCaptureWork(work: GenerationWork<CaptureRequest>): Promise<void> {
-  captureInFlight = true;
+  state.captureInFlight = true;
   updateControls();
   try {
     await capturePage(work);
@@ -2155,7 +2096,7 @@ async function runCaptureWork(work: GenerationWork<CaptureRequest>): Promise<voi
       void runCaptureWork(next);
       return;
     }
-    captureInFlight = false;
+    state.captureInFlight = false;
     updateControls();
   }
 }
@@ -2164,10 +2105,10 @@ async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> 
   const identity = work.value.identity;
   try {
     const sameCapturedPage = Boolean(
-      capturedPageIdentity &&
-        capturedPageIdentity.tabId === identity.tabId &&
-        capturedPageIdentity.windowId === identity.windowId &&
-        normalizedPageUrl(capturedPageIdentity.url) ===
+      state.capturedPageIdentity &&
+        state.capturedPageIdentity.tabId === identity.tabId &&
+        state.capturedPageIdentity.windowId === identity.windowId &&
+        normalizedPageUrl(state.capturedPageIdentity.url) ===
           normalizedPageUrl(identity.url),
     );
     const preserveLastGoodReplica =
@@ -2180,7 +2121,7 @@ async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> 
     // isolated engine stages its replacement offscreen and swaps atomically.
     if (!preserveLastGoodReplica) {
       isolatedHtmlReplicaEngine.releasePresentation();
-      snapshot = undefined;
+      state.snapshot = undefined;
     }
     const results = await withPageTimeout(
       browser.scripting.executeScript({
@@ -2196,38 +2137,38 @@ async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> 
       throw new PageAccessError('The page did not expose a current document boundary.');
     }
     const currentTab = await browser.tabs.get(identity.tabId);
-    assertSourceTabIsCurrent(currentTab, identity, requiresActiveSourceTab());
+    assertSourceTabIsCurrent(currentTab, identity, state.requiresActiveSourceTab);
     if (!captureCoordinator.isCurrent(work.generation)) return;
 
-    translationComplete = false;
+    state.translationComplete = false;
     captureNotes.hidden = true;
     captureNotes.textContent = '';
     await runReplicaEngineCheckpoint(work, identity, documentId);
     if (!captureCoordinator.isCurrent(work.generation)) return;
-    snapshot = replicaSurfaceRouter.snapshot();
-    if (!snapshot) {
+    state.snapshot = replicaSurfaceRouter.snapshot();
+    if (!state.snapshot) {
       throw new PageAccessError('The isolated replica did not commit a current document.');
     }
     // Only published replica state is captured state. Keeping the candidate
-    // identity in followedPageIdentity lets a failed replacement retain an
+    // identity in state.followedPageIdentity lets a failed replacement retain an
     // accurate last-good identity instead of pretending the failed page won.
     // A history/replaceState URL can arrive while this same document is
     // staging. Preserve that newer identity instead of writing the capture's
     // older request URL back over it after the replica commits.
-    const committedIdentity = followedPageIdentity && sameCompanionSourcePage(
-        followedPageIdentity,
+    const committedIdentity = state.followedPageIdentity && sameCompanionSourcePage(
+        state.followedPageIdentity,
         identity,
         normalizedPageUrl,
       )
-      ? followedPageIdentity
+      ? state.followedPageIdentity
       : identity;
-    capturedPageIdentity = committedIdentity;
-    followedPageIdentity = committedIdentity;
+    state.capturedPageIdentity = committedIdentity;
+    state.followedPageIdentity = committedIdentity;
     await resolveSelectedSourceLanguage(currentReplicaLanguageContext());
 
-    if (isLiveSourceOnlyMode()) {
-      availability = 'unavailable';
-      availabilityCheckedForPair = undefined;
+    if (state.isLiveSourceOnlyMode) {
+      state.availability = 'unavailable';
+      state.availabilityCheckedForPair = undefined;
       setStatus(
         'Live source only is active. The isolated mirror keeps updating without text or image translation.',
         'success',
@@ -2236,8 +2177,8 @@ async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> 
     }
 
     if (currentTranslationFieldCount() === 0) {
-      availability = 'unavailable';
-      availabilityCheckedForPair = undefined;
+      state.availability = 'unavailable';
+      state.availabilityCheckedForPair = undefined;
       const accessWasRevoked = await reconcileAutomaticAccess(
         committedIdentity.url,
       );
@@ -2264,8 +2205,8 @@ async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> 
   } catch (error) {
     if (!captureCoordinator.isCurrent(work.generation)) return;
     const message = readPageError(error);
-    snapshot = replicaSurfaceRouter.snapshot();
-    if (!snapshot && !visibleReplayHost.hasCommittedReplica) {
+    state.snapshot = replicaSurfaceRouter.snapshot();
+    if (!state.snapshot && !visibleReplayHost.hasCommittedReplica) {
       renderErrorState(message);
     }
     setStatus(message, 'error');
@@ -2279,9 +2220,9 @@ async function runReplicaEngineCheckpoint(
   identity: CapturedPageIdentity,
   documentId: string,
 ): Promise<void> {
-  replicaShadowAbortController?.abort();
+  state.replicaShadowAbortController?.abort();
   const abortController = new AbortController();
-  replicaShadowAbortController = abortController;
+  state.replicaShadowAbortController = abortController;
   const request: ReplicaCaptureRequest = {
     sessionId: mirrorSessionId,
     pageEpoch: work.generation,
@@ -2292,7 +2233,7 @@ async function runReplicaEngineCheckpoint(
     isCurrent: () =>
       captureCoordinator.isCurrent(work.generation) &&
       sameCompanionSourcePage(
-        followedPageIdentity,
+        state.followedPageIdentity,
         identity,
         normalizedPageUrl,
       ),
@@ -2313,7 +2254,7 @@ async function runReplicaEngineCheckpoint(
       result,
       visibleReplayHost.hasCommittedReplica,
     );
-    const selectedSnapshot = snapshot;
+    const selectedSnapshot = state.snapshot;
     const activation = activateImageReplicaAfterRun({
       runStatus: result.status,
       hasCommittedReplica: replicaCommitted,
@@ -2366,10 +2307,10 @@ async function runReplicaEngineCheckpoint(
     throw error;
   } finally {
     if (
-      replicaShadowAbortController === abortController &&
+      state.replicaShadowAbortController === abortController &&
       !visibleReplayHost.hasCommittedReplica
     ) {
-      replicaShadowAbortController = undefined;
+      state.replicaShadowAbortController = undefined;
     }
   }
 }
@@ -2395,33 +2336,33 @@ async function resolveSelectedSourceLanguage(
   liveContext?: LiveLanguageContext,
 ): Promise<boolean> {
   if (shouldClearAutoImageLanguageForDocument(
-    resolvedSourceLanguageOrigin,
-    resolvedImageLanguageDocument !== undefined &&
-      currentReplicaDocumentMatches(resolvedImageLanguageDocument),
+    state.resolvedSourceLanguageOrigin,
+    state.resolvedImageLanguageDocument !== undefined &&
+      currentReplicaDocumentMatches(state.resolvedImageLanguageDocument),
   )) {
     clearAutoImageLanguageResolution();
   }
   const resolutionRevision = ++sourceLanguageResolutionRevision;
-  if (!snapshot) {
+  if (!state.snapshot) {
     autoLanguageEvidencePrecedence.invalidate();
-    pageLanguageResolutionPending = false;
-    resolvedSourceLanguage = undefined;
-    resolvedSourceLanguageOrigin = undefined;
-    resolvedImageLanguageConfigurationKey = undefined;
-    resolvedImageLanguageDocument = undefined;
+    state.pageLanguageResolutionPending = false;
+    state.resolvedSourceLanguage = undefined;
+    state.resolvedSourceLanguageOrigin = undefined;
+    state.resolvedImageLanguageConfigurationKey = undefined;
+    state.resolvedImageLanguageDocument = undefined;
     quickComposer.syncPanel();
     configureImageTranslation();
     return true;
   }
-  const requestedSnapshot = snapshot;
-  const requestedPreference = preferences.sourceLanguage;
-  const previousLanguage = resolvedSourceLanguage;
-  const previousOrigin = resolvedSourceLanguageOrigin;
-  const previousImageConfigurationKey = resolvedImageLanguageConfigurationKey;
-  const previousImageDocument = resolvedImageLanguageDocument;
+  const requestedSnapshot = state.snapshot;
+  const requestedPreference = state.preferences.sourceLanguage;
+  const previousLanguage = state.resolvedSourceLanguage;
+  const previousOrigin = state.resolvedSourceLanguageOrigin;
+  const previousImageConfigurationKey = state.resolvedImageLanguageConfigurationKey;
+  const previousImageDocument = state.resolvedImageLanguageDocument;
   if (requestedPreference !== 'auto') autoLanguageEvidencePrecedence.invalidate();
   autoLanguageEvidencePrecedence.beginPageResolution(resolutionRevision);
-  pageLanguageResolutionPending =
+  state.pageLanguageResolutionPending =
     autoLanguageEvidencePrecedence.pageResolutionPending;
   // This controller gate is raised before page detection yields. It prevents
   // image probing from adopting a language while stronger page evidence is
@@ -2439,10 +2380,10 @@ async function resolveSelectedSourceLanguage(
   if (
     resolutionRevision !== sourceLanguageResolutionRevision ||
     !currentReplicaSnapshotMatches(requestedSnapshot) ||
-    preferences.sourceLanguage !== requestedPreference
+    state.preferences.sourceLanguage !== requestedPreference
   ) {
     autoLanguageEvidencePrecedence.cancelPageResolution(resolutionRevision);
-    pageLanguageResolutionPending =
+    state.pageLanguageResolutionPending =
       autoLanguageEvidencePrecedence.pageResolutionPending;
     configureImageTranslation();
     return false;
@@ -2453,7 +2394,7 @@ async function resolveSelectedSourceLanguage(
   const preservePreviousLanguage = previousOrigin === 'image'
     ? previousImageDocumentIsCurrent
     : previousOrigin === 'page' && Boolean(liveContext?.preserveOnUnknown);
-  resolvedSourceLanguage =
+  state.resolvedSourceLanguage =
     detected.language ??
     (preservePreviousLanguage
       ? previousLanguage
@@ -2464,45 +2405,45 @@ async function resolveSelectedSourceLanguage(
       previousOrigin === 'image' &&
       previousLanguage === detected.language &&
       previousImageDocumentIsCurrent;
-    resolvedSourceLanguageOrigin = unchangedExplicitImageLanguage
+    state.resolvedSourceLanguageOrigin = unchangedExplicitImageLanguage
       ? 'image'
       : requestedPreference === 'auto'
         ? 'page'
         : 'explicit';
-    resolvedImageLanguageConfigurationKey = unchangedExplicitImageLanguage
+    state.resolvedImageLanguageConfigurationKey = unchangedExplicitImageLanguage
       ? previousImageConfigurationKey
       : undefined;
-    resolvedImageLanguageDocument = unchangedExplicitImageLanguage
+    state.resolvedImageLanguageDocument = unchangedExplicitImageLanguage
       ? previousImageDocument
       : undefined;
-  } else if (resolvedSourceLanguage) {
-    resolvedSourceLanguageOrigin = previousOrigin;
-    resolvedImageLanguageConfigurationKey = previousImageConfigurationKey;
-    resolvedImageLanguageDocument = previousOrigin === 'image'
+  } else if (state.resolvedSourceLanguage) {
+    state.resolvedSourceLanguageOrigin = previousOrigin;
+    state.resolvedImageLanguageConfigurationKey = previousImageConfigurationKey;
+    state.resolvedImageLanguageDocument = previousOrigin === 'image'
       ? previousImageDocument
       : undefined;
   } else {
-    resolvedSourceLanguageOrigin = undefined;
-    resolvedImageLanguageConfigurationKey = undefined;
-    resolvedImageLanguageDocument = undefined;
+    state.resolvedSourceLanguageOrigin = undefined;
+    state.resolvedImageLanguageConfigurationKey = undefined;
+    state.resolvedImageLanguageDocument = undefined;
   }
   const pendingImageEvidence =
     autoLanguageEvidencePrecedence.settlePageResolution(
       resolutionRevision,
-      Boolean(resolvedSourceLanguage),
+      Boolean(state.resolvedSourceLanguage),
     );
-  pageLanguageResolutionPending =
+  state.pageLanguageResolutionPending =
     autoLanguageEvidencePrecedence.pageResolutionPending;
   if (pendingImageEvidence &&
       pendingAutoImageLanguageEvidenceIsCurrent(pendingImageEvidence)) {
     commitAutoDetectedImageLanguage(pendingImageEvidence);
     return true;
   }
-  detectedLanguageElement.textContent = resolvedSourceLanguage
+  detectedLanguageElement.textContent = state.resolvedSourceLanguage
     ? requestedPreference === 'auto'
       ? detected.language
-        ? `Detected ${languageName(resolvedSourceLanguage)} from ${detected.source === 'html' ? 'the page language' : 'visible page text'}.`
-        : `Using the previously detected ${languageName(resolvedSourceLanguage)} source language.`
+        ? `Detected ${languageName(state.resolvedSourceLanguage)} from ${detected.source === 'html' ? 'the page language' : 'visible page text'}.`
+        : `Using the previously detected ${languageName(state.resolvedSourceLanguage)} source language.`
       : ''
     : 'The page language could not be detected. Choose a From language.';
   detectedLanguageElement.hidden = !detectedLanguageElement.textContent;
@@ -2515,18 +2456,18 @@ function commitAutoDetectedImageLanguage(
   proposal: PendingAutoImageLanguageEvidence,
 ): void {
   if (
-    preferences.sourceLanguage !== 'auto' ||
-    resolvedSourceLanguage ||
+    state.preferences.sourceLanguage !== 'auto' ||
+    state.resolvedSourceLanguage ||
     !pendingAutoImageLanguageEvidenceIsCurrent(proposal)
   ) return;
   const resolutionRevision = ++sourceLanguageResolutionRevision;
-  resolvedSourceLanguage = proposal.language;
-  resolvedSourceLanguageOrigin = 'image';
-  resolvedImageLanguageConfigurationKey = proposal.configurationKey;
-  resolvedImageLanguageDocument = proposal.document;
+  state.resolvedSourceLanguage = proposal.language;
+  state.resolvedSourceLanguageOrigin = 'image';
+  state.resolvedImageLanguageConfigurationKey = proposal.configurationKey;
+  state.resolvedImageLanguageDocument = proposal.document;
   availabilityRequestId += 1;
-  availabilityCheckedForPair = undefined;
-  translationComplete = false;
+  state.availabilityCheckedForPair = undefined;
+  state.translationComplete = false;
   quickComposer.invalidate();
   const evidenceSource = proposal.origin === 'accessibility-text'
     ? 'accessibility image text'
@@ -2550,8 +2491,8 @@ function pendingAutoImageLanguageEvidenceIsCurrent(
   return (
     proposal.configurationKey === currentAutoImageLanguageConfigurationKey() &&
     currentReplicaDocumentMatches(proposal.document) &&
-    proposal.replayLease === snapshot?.replayLease &&
-    proposal.identity === capturedPageIdentity &&
+    proposal.replayLease === state.snapshot?.replayLease &&
+    proposal.identity === state.capturedPageIdentity &&
     captureCoordinator.isCurrent(proposal.generation)
   );
 }
@@ -2560,27 +2501,27 @@ function handleAutoImageLanguageInvalidated(
   document: ReplicaSourceDocumentIdentity,
 ): void {
   if (
-    resolvedSourceLanguageOrigin !== 'image' ||
-    !resolvedImageLanguageDocument ||
-    !sameSourceDocument(resolvedImageLanguageDocument, document) ||
+    state.resolvedSourceLanguageOrigin !== 'image' ||
+    !state.resolvedImageLanguageDocument ||
+    !sameSourceDocument(state.resolvedImageLanguageDocument, document) ||
     !currentReplicaDocumentMatches(document)
   ) return;
-  if (preferences.sourceLanguage !== 'auto') {
+  if (state.preferences.sourceLanguage !== 'auto') {
     // Explicit selection remains authoritative and keeps the effective pair
     // running, but the dormant image contributor must not be resurrected if
     // the user later returns to Auto.
     sourceLanguageResolutionRevision += 1;
     autoLanguageEvidencePrecedence.invalidate();
-    pageLanguageResolutionPending = false;
-    resolvedSourceLanguageOrigin = 'explicit';
-    resolvedImageLanguageConfigurationKey = undefined;
-    resolvedImageLanguageDocument = undefined;
+    state.pageLanguageResolutionPending = false;
+    state.resolvedSourceLanguageOrigin = 'explicit';
+    state.resolvedImageLanguageConfigurationKey = undefined;
+    state.resolvedImageLanguageDocument = undefined;
     return;
   }
   clearAutoImageLanguageResolution();
   queueMicrotask(() => {
     if (
-      preferences.sourceLanguage !== 'auto' ||
+      state.preferences.sourceLanguage !== 'auto' ||
       !currentReplicaDocumentMatches(document)
     ) return;
     configureImageTranslation();
@@ -2594,16 +2535,16 @@ async function reconcileAutoDetectedImageLanguage(
 ): Promise<void> {
   if (
     resolutionRevision !== sourceLanguageResolutionRevision ||
-    preferences.sourceLanguage !== 'auto' ||
-    resolvedSourceLanguage !== language ||
-    !resolvedImageLanguageDocument ||
-    !currentReplicaDocumentMatches(resolvedImageLanguageDocument)
+    state.preferences.sourceLanguage !== 'auto' ||
+    state.resolvedSourceLanguage !== language ||
+    !state.resolvedImageLanguageDocument ||
+    !currentReplicaDocumentMatches(state.resolvedImageLanguageDocument)
   ) return;
   const generation = captureCoordinator.generation;
-  const identity = capturedPageIdentity;
-  const requestedSnapshot = snapshot;
-  const pair = selectedPair();
-  if (!isLiveSourceOnlyMode()) {
+  const identity = state.capturedPageIdentity;
+  const requestedSnapshot = state.snapshot;
+  const pair = state.selectedPair();
+  if (!state.isLiveSourceOnlyMode) {
     replicaTranslationCoordinator.selectPair(pair);
   }
   configureImageTranslation();
@@ -2620,26 +2561,26 @@ async function reconcileAutoDetectedImageLanguage(
   await checkAvailability(generation);
   if (
     resolutionRevision !== sourceLanguageResolutionRevision ||
-    preferences.sourceLanguage !== 'auto' ||
-    resolvedSourceLanguage !== language ||
-    !resolvedImageLanguageDocument ||
-    !currentReplicaDocumentMatches(resolvedImageLanguageDocument) ||
+    state.preferences.sourceLanguage !== 'auto' ||
+    state.resolvedSourceLanguage !== language ||
+    !state.resolvedImageLanguageDocument ||
+    !currentReplicaDocumentMatches(state.resolvedImageLanguageDocument) ||
     !currentReplicaSnapshotMatches(requestedSnapshot) ||
-    capturedPageIdentity !== identity ||
+    state.capturedPageIdentity !== identity ||
     !captureCoordinator.isCurrent(generation) ||
-    !isCurrentTranslationPair(pair)
+    !state.isCurrentTranslationPair(pair)
   ) return;
   await maybeTranslateAutomatically(generation, identity.url);
 }
 
 function mirrorLanguageSample(): string {
   return buildBoundedLanguageSample(
-    replicaRecordSources(snapshot?.records ?? []),
+    replicaRecordSources(state.snapshot?.records ?? []),
   );
 }
 
 function currentTranslationFieldCount(): number {
-  return snapshot?.records.some(
+  return state.snapshot?.records.some(
     ({ source }) => source.trim().length > 0,
   ) ? 1 : 0;
 }
@@ -2650,15 +2591,15 @@ async function reconcileReplicaTranslationAfterCommit(
   refreshDetectedLanguage: boolean,
   prepareForNewText: boolean,
 ): Promise<void> {
-  if (isLiveSourceOnlyMode()) return;
+  if (state.isLiveSourceOnlyMode) return;
   const generation = commit.document.generation;
-  const identity = capturedPageIdentity;
+  const identity = state.capturedPageIdentity;
   if (
     !identity ||
-    !snapshot ||
+    !state.snapshot ||
     !captureCoordinator.isCurrent(generation)
   ) return;
-  const previousPair = selectedPair();
+  const previousPair = state.selectedPair();
   if (refreshDetectedLanguage) {
     const committed = await resolveSelectedSourceLanguage({
       documentLanguage: commit.documentLanguage,
@@ -2672,15 +2613,15 @@ async function reconcileReplicaTranslationAfterCommit(
   if (
     refreshVersion !== replicaLanguageRefreshVersion ||
     !captureCoordinator.isCurrent(generation) ||
-    capturedPageIdentity !== identity ||
-    (preferences.sourceLanguage === 'auto') !== refreshDetectedLanguage
+    state.capturedPageIdentity !== identity ||
+    (state.preferences.sourceLanguage === 'auto') !== refreshDetectedLanguage
   ) return;
-  const nextPair = selectedPair();
+  const nextPair = state.selectedPair();
   const pairChanged = !sameTranslationPair(previousPair, nextPair);
   if (pairChanged) {
-    activeAbortController?.abort();
-    translationComplete = false;
-    availabilityCheckedForPair = undefined;
+    state.activeAbortController?.abort();
+    state.translationComplete = false;
+    state.availabilityCheckedForPair = undefined;
     quickComposer.invalidate();
     replicaTranslationCoordinator.selectPair(nextPair);
   }
@@ -2691,14 +2632,14 @@ async function reconcileReplicaTranslationAfterCommit(
     prepareForNewText &&
     currentTranslationFieldCount() > 0 &&
     (!expectedAvailabilityKey ||
-      availabilityCheckedForPair !== expectedAvailabilityKey);
+      state.availabilityCheckedForPair !== expectedAvailabilityKey);
   if (!pairChanged && !needsPreparation) return;
   await checkAvailability(generation);
   if (
     refreshVersion === replicaLanguageRefreshVersion &&
     captureCoordinator.isCurrent(generation) &&
-    capturedPageIdentity === identity &&
-    sameTranslationPair(nextPair, selectedPair())
+    state.capturedPageIdentity === identity &&
+    sameTranslationPair(nextPair, state.selectedPair())
   ) {
     await maybeTranslateAutomatically(generation, identity.url);
   }
@@ -2715,8 +2656,8 @@ async function languageSelectionChanged(): Promise<void> {
     ? 'auto'
     : readLanguage(sourceSelect.value);
   const targetLanguage = readLanguage(targetSelect.value);
-  const previousPair = selectedPair();
-  if (!isLiveSourceOnlyMode()) translationDesired = true;
+  const previousPair = state.selectedPair();
+  if (!state.isLiveSourceOnlyMode) state.translationDesired = true;
   const saved = await commitViewPreferencePatch({ sourceLanguage, targetLanguage });
   if (!saved) return;
   await applyLanguagePreferences(true, previousPair);
@@ -2724,14 +2665,14 @@ async function languageSelectionChanged(): Promise<void> {
 
 async function applyLanguagePreferences(
   fromUserAction: boolean,
-  previousPair = selectedPair(),
+  previousPair = state.selectedPair(),
 ): Promise<void> {
-  if (!snapshot) return;
+  if (!state.snapshot) return;
   await resolveSelectedSourceLanguage(currentReplicaLanguageContext());
-  if (isLiveSourceOnlyMode()) {
+  if (state.isLiveSourceOnlyMode) {
     replicaTranslationCoordinator.selectPair(undefined);
-    availability = 'unavailable';
-    availabilityCheckedForPair = undefined;
+    state.availability = 'unavailable';
+    state.availabilityCheckedForPair = undefined;
     setStatus(
       'Live source only is active. Language choices are saved for translated mode.',
       'success',
@@ -2739,45 +2680,45 @@ async function applyLanguagePreferences(
     updateControls();
     return;
   }
-  const nextPair = selectedPair();
+  const nextPair = state.selectedPair();
   const effectivePairChanged = !sameTranslationPair(previousPair, nextPair);
   if (effectivePairChanged) {
-    activeAbortController?.abort();
+    state.activeAbortController?.abort();
     quickComposer.invalidate();
-    translationComplete = false;
-    availabilityCheckedForPair = undefined;
+    state.translationComplete = false;
+    state.availabilityCheckedForPair = undefined;
   }
   replicaTranslationCoordinator.selectPair(nextPair);
-  if (!effectivePairChanged && translationComplete) {
+  if (!effectivePairChanged && state.translationComplete) {
     updateControls();
     return;
   }
   await checkAvailability(captureCoordinator.generation);
   if (!fromUserAction) {
     // A change saved by another companion window, or a re-resolved automatic
-    // language, re-establishes availability here but only resumes a
+    // language, re-establishes state.availability here but only resumes a
     // translation this window already wanted; it records no new intent.
     await maybeTranslateAutomatically(
       captureCoordinator.generation,
-      capturedPageIdentity?.url ?? '',
+      state.capturedPageIdentity?.url ?? '',
     );
     return;
   }
-  if (availability === 'available') {
+  if (state.availability === 'available') {
     await startTranslation(false, captureCoordinator.generation);
-  } else if (availability === 'downloadable' || availability === 'downloading') {
+  } else if (state.availability === 'downloadable' || state.availability === 'downloading') {
     setStatus('This language pair needs its on-device pack. Choose Translate once to prepare it.', 'warning');
   }
 }
 
 async function checkAvailability(generation: number): Promise<void> {
   const requestId = ++availabilityRequestId;
-  const requestedSnapshot = snapshot;
-  const pair = selectedPair();
-  if (isLiveSourceOnlyMode()) {
+  const requestedSnapshot = state.snapshot;
+  const pair = state.selectedPair();
+  if (state.isLiveSourceOnlyMode) {
     replicaTranslationCoordinator.selectPair(undefined);
-    availability = 'unavailable';
-    availabilityCheckedForPair = undefined;
+    state.availability = 'unavailable';
+    state.availabilityCheckedForPair = undefined;
     updateControls();
     return;
   }
@@ -2787,8 +2728,8 @@ async function checkAvailability(generation: number): Promise<void> {
     !pair ||
     currentTranslationFieldCount() === 0
   ) {
-    availability = 'unavailable';
-    availabilityCheckedForPair = undefined;
+    state.availability = 'unavailable';
+    state.availabilityCheckedForPair = undefined;
     if (!pair && requestedSnapshot) {
       setStatus('Choose a From language because automatic detection was inconclusive.', 'warning');
     }
@@ -2798,16 +2739,16 @@ async function checkAvailability(generation: number): Promise<void> {
   const checkedPairKey = availabilityPairKey(pair, generation);
   // The pair is recorded as checked only once a result passes the currency
   // guard. Recording it before the await let a superseded request leave the
-  // pair marked as checked while availability stayed 'unavailable', which
+  // pair marked as checked while state.availability stayed 'unavailable', which
   // disabled Translate and skipped automatic translation for that generation
   // because reconcileReplicaTranslationAfterCommit saw nothing to prepare.
-  availabilityCheckedForPair = undefined;
-  availability = 'unavailable';
+  state.availabilityCheckedForPair = undefined;
+  state.availability = 'unavailable';
   updateControls();
   if (pair.sourceLanguage === pair.targetLanguage) {
-    availabilityCheckedForPair = checkedPairKey;
-    availability = 'available';
-    translationComplete = true;
+    state.availabilityCheckedForPair = checkedPairKey;
+    state.availability = 'available';
+    state.translationComplete = true;
     setStatus('The source and target languages match, so the original text is unchanged.', 'success');
     updateControls();
     return;
@@ -2815,8 +2756,8 @@ async function checkAvailability(generation: number): Promise<void> {
   try {
     const next = await provider.availability(pair);
     if (!isCurrentAvailabilityRequest(requestId, requestedSnapshot, pair, generation)) return;
-    availabilityCheckedForPair = checkedPairKey;
-    availability = next;
+    state.availabilityCheckedForPair = checkedPairKey;
+    state.availability = next;
     switch (next) {
       case 'available':
         setStatus(`Ready to translate ${languageName(pair.sourceLanguage)} to ${languageName(pair.targetLanguage)} on-device.`);
@@ -2830,8 +2771,8 @@ async function checkAvailability(generation: number): Promise<void> {
     }
   } catch (error) {
     if (!isCurrentAvailabilityRequest(requestId, requestedSnapshot, pair, generation)) return;
-    availabilityCheckedForPair = checkedPairKey;
-    availability = 'unavailable';
+    state.availabilityCheckedForPair = checkedPairKey;
+    state.availability = 'unavailable';
     setStatus(readableError(error), 'error');
   } finally {
     if (isCurrentAvailabilityRequest(requestId, requestedSnapshot, pair, generation)) updateControls();
@@ -2843,10 +2784,10 @@ async function maybeTranslateAutomatically(
   pageUrl: string,
 ): Promise<void> {
   const action = replicaViewTranslationAction(
-    preferences.replicaViewMode,
-    isAutoTranslationEnabled(preferences, pageUrl),
-    translationDesired,
-    availability,
+    state.preferences.replicaViewMode,
+    isAutoTranslationEnabled(state.preferences, pageUrl),
+    state.translationDesired,
+    state.availability,
   );
   if (action === 'translate') {
     await startTranslation(true, generation);
@@ -2856,76 +2797,76 @@ async function maybeTranslateAutomatically(
 }
 
 function startTranslation(automatic: boolean, generation: number): Promise<void> {
-  if (isLiveSourceOnlyMode()) return Promise.resolve();
-  const requestedKey = currentTranslationTaskKey(generation);
-  if (activeTranslationTask) {
-    if (activeTranslationKey === requestedKey) return activeTranslationTask;
-    activeAbortController?.abort();
-    const previousTask = activeTranslationTask;
+  if (state.isLiveSourceOnlyMode) return Promise.resolve();
+  const requestedKey = state.currentTranslationTaskKey(generation);
+  if (state.activeTranslationTask) {
+    if (state.activeTranslationKey === requestedKey) return state.activeTranslationTask;
+    state.activeAbortController?.abort();
+    const previousTask = state.activeTranslationTask;
     return previousTask.catch(() => undefined).then(async () => {
       if (
         !captureCoordinator.isCurrent(generation) ||
-        currentTranslationTaskKey(generation) !== requestedKey
+        state.currentTranslationTaskKey(generation) !== requestedKey
       ) return;
       await startTranslation(automatic, generation);
     });
   }
   const task = runTranslation(automatic, generation);
-  activeTranslationTask = task;
-  activeTranslationKey = requestedKey;
+  state.activeTranslationTask = task;
+  state.activeTranslationKey = requestedKey;
   void task.then(() => {
-    if (activeTranslationTask === task) {
-      activeTranslationTask = undefined;
-      activeTranslationKey = undefined;
+    if (state.activeTranslationTask === task) {
+      state.activeTranslationTask = undefined;
+      state.activeTranslationKey = undefined;
     }
   }, () => {
-    if (activeTranslationTask === task) {
-      activeTranslationTask = undefined;
-      activeTranslationKey = undefined;
+    if (state.activeTranslationTask === task) {
+      state.activeTranslationTask = undefined;
+      state.activeTranslationKey = undefined;
     }
   });
   return task;
 }
 
 async function runTranslation(automatic: boolean, generation: number): Promise<void> {
-  const pair = selectedPair();
-  const requestedSnapshot = snapshot;
-  const identity = capturedPageIdentity;
+  const pair = state.selectedPair();
+  const requestedSnapshot = state.snapshot;
+  const identity = state.capturedPageIdentity;
   if (
     !pair ||
     !requestedSnapshot ||
     !identity ||
-    isLiveSourceOnlyMode() ||
-    translationInFlight ||
-    availability === 'unavailable' ||
-    (automatic && availability !== 'available')
+    state.isLiveSourceOnlyMode ||
+    state.translationInFlight ||
+    state.availability === 'unavailable' ||
+    (automatic && state.availability !== 'available')
   ) return;
   if (pair.sourceLanguage === pair.targetLanguage) {
     replicaTranslationCoordinator.selectPair(pair);
-    translationComplete = true;
+    state.translationComplete = true;
     updateControls();
     return;
   }
 
   const abortController = new AbortController();
-  activeAbortController = abortController;
-  translationInFlight = true;
+  state.activeAbortController = abortController;
+  state.translationInFlight = true;
   configureImageTranslation();
-  translationDesired = true;
-  translationComplete = false;
+  state.translationDesired = true;
+  state.translationComplete = false;
   toolbarStatus.showProgress('Preparing Chrome\'s on-device language model…', 0, 1);
   updateControls();
   try {
     const tab = await browser.tabs.get(identity.tabId);
-    assertSourceTabIsCurrent(tab, identity, requiresActiveSourceTab());
+    assertSourceTabIsCurrent(tab, identity, state.requiresActiveSourceTab);
     if (
       !captureCoordinator.isCurrent(generation) ||
       !currentReplicaSnapshotMatches(requestedSnapshot) ||
-      !isCurrentTranslationPair(pair) ||
-      isLiveSourceOnlyMode()
+      !state.isCurrentTranslationPair(pair) ||
+      state.isLiveSourceOnlyMode
     ) return;
-    availability = 'available';
-    availabilityCheckedForPair = availabilityPairKey(pair, generation);
+    state.availability = 'available';
+    state.availabilityCheckedForPair = availabilityPairKey(pair, generation);
     const result = await replicaTranslationCoordinator.translateCurrent(pair, {
       signal: abortController.signal,
       onDownloadProgress: (progress) =>
@@ -2944,39 +2885,39 @@ async function runTranslation(automatic: boolean, generation: number): Promise<v
     if (
       !captureCoordinator.isCurrent(generation) ||
       !currentReplicaSnapshotMatches(requestedSnapshot) ||
-      !isCurrentTranslationPair(pair) ||
-      isLiveSourceOnlyMode()
+      !state.isCurrentTranslationPair(pair) ||
+      state.isLiveSourceOnlyMode
     ) return;
-    translationComplete =
+    state.translationComplete =
       result.total > 0 &&
       replicaTranslationCoordinator.isResultCurrent(result) &&
       isCompleteReplicaTranslationResult(result);
     uiLocalizer.retryAfterPagePairPrepared();
     setStatus(
-      translationComplete
+      state.translationComplete
         ? automatic
           ? 'Automatic translation is complete and live updates will translate as they arrive.'
           : 'Translation is complete and live updates will translate as they arrive.'
         : describePartialReplicaTranslation(result, 'Translation remains partial'),
-      translationComplete ? 'success' : 'warning',
+      state.translationComplete ? 'success' : 'warning',
     );
   } catch (error) {
     if (isAbortError(error) || abortController.signal.aborted) {
       if (
-        !isLiveSourceOnlyMode() &&
+        !state.isLiveSourceOnlyMode &&
         captureCoordinator.isCurrent(generation) &&
         currentReplicaSnapshotMatches(requestedSnapshot) &&
-        isCurrentTranslationPair(pair)
+        state.isCurrentTranslationPair(pair)
       ) {
         setStatus('Translation cancelled. Existing translated text was kept.', 'warning');
       }
-    } else if (!isLiveSourceOnlyMode()) {
+    } else if (!state.isLiveSourceOnlyMode) {
       setStatus(readableError(error), 'error');
     }
   } finally {
     logTranslationCache('page', translationMemory);
-    if (activeAbortController === abortController) activeAbortController = undefined;
-    translationInFlight = false;
+    if (state.activeAbortController === abortController) state.activeAbortController = undefined;
+    state.translationInFlight = false;
     configureImageTranslation();
     toolbarStatus.hideProgress();
     updateControls();
@@ -3018,36 +2959,24 @@ async function translateRemembered(
   return `${boundary.leading}${translated.trim()}${boundary.trailing}`;
 }
 
-function sameTranslationPair(
-  left: TranslationPair | undefined,
-  right: TranslationPair | undefined,
-): boolean {
-  return Boolean(
-    left &&
-      right &&
-      left.sourceLanguage === right.sourceLanguage &&
-      left.targetLanguage === right.targetLanguage,
-  ) || (!left && !right);
-}
-
 function updateMirrorLayout(): void {
   visibleReplayHost.updateLayout({
-    displayMode: preferences.displayMode,
-    zoomPercent: preferences.zoomPercent,
+    displayMode: state.preferences.displayMode,
+    zoomPercent: state.preferences.zoomPercent,
   });
   imageTranslationController.refreshOverlays();
   if (
     visibleReplayHost.previewVisible &&
-    preferences.syncScroll &&
-    lastSourceScroll
+    state.preferences.syncScroll &&
+    state.lastSourceScroll
   ) {
-    visibleReplayHost.followSourceScroll(lastSourceScroll);
+    visibleReplayHost.followSourceScroll(state.lastSourceScroll);
   }
 }
 
 function setCompanionOverlay(next?: CompanionOverlay): void {
-  const previous = openCompanionOverlay;
-  openCompanionOverlay = next;
+  const previous = state.openCompanionOverlay;
+  state.openCompanionOverlay = next;
   const settingsOpen = next === 'settings';
   const quickTranslateOpen = next === 'quick-translate';
   controlsOverlay.hidden = !settingsOpen;
@@ -3121,7 +3050,7 @@ function observeReplicaStateLabel(): void {
  * Applies zoom immediately and saves it once the slider settles. Saving on
  * every input tick sent one storage write per tick, each of which fanned a
  * storage change to every companion view and rebuilt the settings controls.
- * One optimistic ledger entry covers the whole drag, so a committed snapshot
+ * One optimistic ledger entry covers the whole drag, so a committed state.snapshot
  * arriving mid-drag keeps the slider where the user left it.
  */
 function setZoom(value: number): void {
@@ -3129,28 +3058,28 @@ function setZoom(value: number): void {
     displayMode: 'custom',
     zoomPercent: clampZoomPercent(value),
   };
-  if (pendingZoomPatch) {
-    viewPreferencePatchLedger.settle(pendingZoomPatch.requestId);
+  if (state.pendingZoomPatch) {
+    viewPreferencePatchLedger.settle(state.pendingZoomPatch.requestId);
   }
-  const pending = viewPreferencePatchLedger.begin(preferences, patch);
-  pendingZoomPatch = { requestId: pending.requestId, patch };
-  preferences = pending.preferences;
-  zoomInput.value = String(preferences.zoomPercent);
-  zoomOutput.value = `${preferences.zoomPercent}%`;
+  const pending = viewPreferencePatchLedger.begin(state.preferences, patch);
+  state.pendingZoomPatch = { requestId: pending.requestId, patch };
+  state.preferences = pending.preferences;
+  zoomInput.value = String(state.preferences.zoomPercent);
+  zoomOutput.value = `${state.preferences.zoomPercent}%`;
   zoomInput.disabled = false;
-  displayModeSelect.value = preferences.displayMode;
+  displayModeSelect.value = state.preferences.displayMode;
   syncToolbarPreferenceControls();
   updateMirrorLayout();
-  if (zoomCommitTimer !== undefined) clearTimeout(zoomCommitTimer);
-  zoomCommitTimer = setTimeout(commitPendingZoom, ZOOM_COMMIT_DEBOUNCE_MS);
+  if (state.zoomCommitTimer !== undefined) clearTimeout(state.zoomCommitTimer);
+  state.zoomCommitTimer = setTimeout(commitPendingZoom, ZOOM_COMMIT_DEBOUNCE_MS);
 }
 
 function commitPendingZoom(): void {
-  if (zoomCommitTimer !== undefined) clearTimeout(zoomCommitTimer);
-  zoomCommitTimer = undefined;
-  const pending = pendingZoomPatch;
+  if (state.zoomCommitTimer !== undefined) clearTimeout(state.zoomCommitTimer);
+  state.zoomCommitTimer = undefined;
+  const pending = state.pendingZoomPatch;
   if (!pending) return;
-  pendingZoomPatch = undefined;
+  state.pendingZoomPatch = undefined;
   // commitViewPreferencePatch opens its own ledger entry synchronously, so
   // the drag's entry can be released without a gap in the projection.
   viewPreferencePatchLedger.settle(pending.requestId);
@@ -3159,7 +3088,7 @@ function commitPendingZoom(): void {
 
 async function changePopoutTabMode(popoutTabMode: PopoutTabMode): Promise<void> {
   const saved = await commitViewPreferencePatch({ popoutTabMode });
-  if (!saved || preferences.popoutTabMode !== popoutTabMode) return;
+  if (!saved || state.preferences.popoutTabMode !== popoutTabMode) return;
   if (isDetachedWindow && popoutTabMode === 'active') {
     await followCurrentActiveSourceTab();
   }
@@ -3169,22 +3098,22 @@ async function changeReplicaFidelityPolicy(
   replicaFidelityPolicy: SelectableReplicaFidelityPolicy,
 ): Promise<void> {
   if (
-    replicaFidelityCommitInFlight ||
-    replicaFidelityPolicy === preferences.replicaFidelityPolicy
+    state.replicaFidelityCommitInFlight ||
+    replicaFidelityPolicy === state.preferences.replicaFidelityPolicy
   ) return;
-  replicaFidelityCommitInFlight = true;
+  state.replicaFidelityCommitInFlight = true;
   updateControls();
   try {
     const saved = await commitViewPreferencePatch({ replicaFidelityPolicy });
     if (
       !saved ||
-      preferences.replicaFidelityPolicy !== replicaFidelityPolicy
+      state.preferences.replicaFidelityPolicy !== replicaFidelityPolicy
     ) return;
     isolatedReplicaFailureRecoveryGate.reset();
-    const identity = followedPageIdentity ?? capturedPageIdentity;
+    const identity = state.followedPageIdentity ?? state.capturedPageIdentity;
     if (identity) queueCapture({ identity, reason: 'preference' });
   } finally {
-    replicaFidelityCommitInFlight = false;
+    state.replicaFidelityCommitInFlight = false;
     updateControls();
   }
 }
@@ -3192,18 +3121,18 @@ async function changeReplicaFidelityPolicy(
 async function changeReplicaViewMode(
   replicaViewMode: ReplicaViewMode,
 ): Promise<void> {
-  if (replicaViewMode === preferences.replicaViewMode) return;
-  const previousMode = preferences.replicaViewMode;
+  if (replicaViewMode === state.preferences.replicaViewMode) return;
+  const previousMode = state.preferences.replicaViewMode;
   // commitViewPreferencePatch applies the validated preference optimistically
   // before its first await, so projection gates close immediately.
   const save = commitViewPreferencePatch({ replicaViewMode });
   applyReplicaViewMode(previousMode, false);
   await save;
-  if (preferences.replicaViewMode !== replicaViewMode) {
+  if (state.preferences.replicaViewMode !== replicaViewMode) {
     applyReplicaViewMode(replicaViewMode);
     return;
   }
-  if (replicaViewMode === 'translated' && !isLiveSourceOnlyMode()) {
+  if (replicaViewMode === 'translated' && !state.isLiveSourceOnlyMode) {
     await resumeTranslatedReplicaMode();
   }
 }
@@ -3212,15 +3141,15 @@ function applyReplicaViewMode(
   previousMode: ReplicaViewMode,
   resumeTranslated = true,
 ): void {
-  if (previousMode === preferences.replicaViewMode) return;
+  if (previousMode === state.preferences.replicaViewMode) return;
   availabilityRequestId += 1;
-  activeAbortController?.abort();
+  state.activeAbortController?.abort();
   replicaTranslationCoordinator.selectPair(undefined);
-  translationComplete = false;
-  availabilityCheckedForPair = undefined;
+  state.translationComplete = false;
+  state.availabilityCheckedForPair = undefined;
   configureImageTranslation();
-  if (isLiveSourceOnlyMode()) {
-    availability = 'unavailable';
+  if (state.isLiveSourceOnlyMode) {
+    state.availability = 'unavailable';
     setStatus(
       'Live source only is active. The current mirror remains live and all translation overlays were removed.',
       'success',
@@ -3233,39 +3162,39 @@ function applyReplicaViewMode(
 }
 
 async function resumeTranslatedReplicaMode(): Promise<void> {
-  const interrupted = activeTranslationTask;
+  const interrupted = state.activeTranslationTask;
   if (interrupted) await interrupted.catch(() => undefined);
-  const identity = capturedPageIdentity;
+  const identity = state.capturedPageIdentity;
   const generation = captureCoordinator.generation;
-  if (isLiveSourceOnlyMode() || !snapshot || !identity) return;
+  if (state.isLiveSourceOnlyMode || !state.snapshot || !identity) return;
   const resolved = await resolveSelectedSourceLanguage(
     currentReplicaLanguageContext(),
   );
-  const requestedSnapshot = snapshot;
+  const requestedSnapshot = state.snapshot;
   if (
     !resolved ||
-    isLiveSourceOnlyMode() ||
+    state.isLiveSourceOnlyMode ||
     !requestedSnapshot ||
     !currentReplicaSnapshotMatches(requestedSnapshot) ||
-    capturedPageIdentity !== identity ||
+    state.capturedPageIdentity !== identity ||
     !captureCoordinator.isCurrent(generation)
   ) return;
-  const pair = selectedPair();
+  const pair = state.selectedPair();
   replicaTranslationCoordinator.selectPair(pair);
   await checkAvailability(generation);
   if (
-    isLiveSourceOnlyMode() ||
+    state.isLiveSourceOnlyMode ||
     !pair ||
-    !isCurrentTranslationPair(pair) ||
+    !state.isCurrentTranslationPair(pair) ||
     !currentReplicaSnapshotMatches(requestedSnapshot) ||
-    capturedPageIdentity !== identity ||
+    state.capturedPageIdentity !== identity ||
     !captureCoordinator.isCurrent(generation)
   ) return;
   await maybeTranslateAutomatically(generation, identity.url);
 }
 
 function currentReplicaLanguageContext(): LiveLanguageContext | undefined {
-  const current = snapshot;
+  const current = state.snapshot;
   if (!current) return undefined;
   return {
     ...(current.documentLanguage
@@ -3278,25 +3207,21 @@ function currentReplicaLanguageContext(): LiveLanguageContext | undefined {
   };
 }
 
-function isLiveSourceOnlyMode(): boolean {
-  return preferences.replicaViewMode === 'source-only';
-}
-
 function syncPreferenceControls(): void {
-  const pageUrl = followedPageIdentity?.url ?? capturedPageIdentity?.url;
-  sourceSelect.value = preferences.sourceLanguage;
-  targetSelect.value = preferences.targetLanguage;
-  autoTranslateSelect.value = autoTranslationModeForPage(preferences, pageUrl);
-  displayModeSelect.value = preferences.displayMode;
-  textLayoutSelect.value = preferences.textLayoutMode;
-  replicaFidelityPolicySelect.value = preferences.replicaFidelityPolicy;
-  replicaViewModeSelect.value = preferences.replicaViewMode;
-  launchBehaviorSelect.value = preferences.launchBehavior;
-  popoutTabModeSelect.value = preferences.popoutTabMode;
-  syncScrollInput.checked = preferences.syncScroll;
-  zoomInput.value = String(preferences.zoomPercent);
-  zoomOutput.value = `${preferences.zoomPercent}%`;
-  zoomInput.disabled = preferences.displayMode !== 'custom';
+  const pageUrl = state.followedPageIdentity?.url ?? state.capturedPageIdentity?.url;
+  sourceSelect.value = state.preferences.sourceLanguage;
+  targetSelect.value = state.preferences.targetLanguage;
+  autoTranslateSelect.value = autoTranslationModeForPage(state.preferences, pageUrl);
+  displayModeSelect.value = state.preferences.displayMode;
+  textLayoutSelect.value = state.preferences.textLayoutMode;
+  replicaFidelityPolicySelect.value = state.preferences.replicaFidelityPolicy;
+  replicaViewModeSelect.value = state.preferences.replicaViewMode;
+  launchBehaviorSelect.value = state.preferences.launchBehavior;
+  popoutTabModeSelect.value = state.preferences.popoutTabMode;
+  syncScrollInput.checked = state.preferences.syncScroll;
+  zoomInput.value = String(state.preferences.zoomPercent);
+  zoomOutput.value = `${state.preferences.zoomPercent}%`;
+  zoomInput.disabled = state.preferences.displayMode !== 'custom';
   syncToolbarPreferenceControls();
   quickComposer.syncPanel();
   renderReadScopeControls();
@@ -3337,8 +3262,8 @@ const READ_SCOPE_COPY: Readonly<Record<
 
 function renderReadScopeControls(): void {
   const setupComplete =
-    preferences.readScopeSetupVersion === REPLICA_READ_SCOPE_SETUP_VERSION;
-  const cleanupPending = preferences.resetCleanupPendingRevision > 0;
+    state.preferences.readScopeSetupVersion === REPLICA_READ_SCOPE_SETUP_VERSION;
+  const cleanupPending = state.preferences.resetCleanupPendingRevision > 0;
   const setupDialogWasOpen = readScopeSetup.open;
   if (setupComplete) {
     if (readScopeSetup.open) readScopeSetup.close();
@@ -3350,10 +3275,10 @@ function renderReadScopeControls(): void {
     readScopeSetup.showModal();
   }
   const configuredScope = setupComplete
-    ? preferences.replicaReadScope
+    ? state.preferences.replicaReadScope
     : replicaReadScopeForProfile('page-only');
   readScopeProfile.value = deriveReplicaReadScopeProfile(configuredScope);
-  setupReadProfile.value = deriveReplicaReadScopeProfile(setupReadScopeDraft);
+  setupReadProfile.value = deriveReplicaReadScopeProfile(state.setupReadScopeDraft);
   renderReadScopeToggleSet(
     readScopeControls,
     configuredScope,
@@ -3364,10 +3289,10 @@ function renderReadScopeControls(): void {
   );
   renderReadScopeToggleSet(
     setupReadScopeControls,
-    setupReadScopeDraft,
+    state.setupReadScopeDraft,
     (key, checked) => {
-      setupReadScopeDraft = normalizeReadScopeToggle(
-        setupReadScopeDraft,
+      state.setupReadScopeDraft = normalizeReadScopeToggle(
+        state.setupReadScopeDraft,
         key,
         checked,
       );
@@ -3375,26 +3300,26 @@ function renderReadScopeControls(): void {
     },
   );
   setupResetCleanup.hidden = !cleanupPending;
-  retrySetupResetCleanupButton.disabled = resetInFlight;
-  if (cleanupPending && !setupCleanupWasPending && !resetInFlight) {
+  retrySetupResetCleanupButton.disabled = state.resetInFlight;
+  if (cleanupPending && !state.setupCleanupWasPending && !state.resetInFlight) {
     setupResetCleanupStatus.textContent =
       'Core settings are already safe, but optional permission or runtime cleanup is still pending.';
   }
   if (
     cleanupPending &&
     !setupComplete &&
-    (!setupDialogWasOpen || !setupCleanupWasPending)
+    (!setupDialogWasOpen || !state.setupCleanupWasPending)
   ) {
     retrySetupResetCleanupButton.focus();
   } else if (
     !cleanupPending &&
-    setupCleanupWasPending &&
+    state.setupCleanupWasPending &&
     readScopeSetup.open &&
     document.activeElement === retrySetupResetCleanupButton
   ) {
     setupReadProfile.focus();
   }
-  setupCleanupWasPending = cleanupPending;
+  state.setupCleanupWasPending = cleanupPending;
   resetAllSettingsButton.textContent = cleanupPending
     ? 'Retry reset cleanup'
     : 'Reset all extension settings…';
@@ -3445,7 +3370,7 @@ function isReplicaReadScopeProfileId(
 }
 
 function syncToolbarPreferenceControls(): void {
-  const autoDetect = preferences.sourceLanguage === 'auto';
+  const autoDetect = state.preferences.sourceLanguage === 'auto';
   toolbarAutoDetectButton.setAttribute('aria-pressed', String(autoDetect));
   toolbarAutoDetectButton.setAttribute(
     'aria-label',
@@ -3457,18 +3382,18 @@ function syncToolbarPreferenceControls(): void {
     ? 'From language is using Auto-detect.'
     : 'Set From language to Auto-detect.';
 
-  const sizeLabel = preferences.displayMode === 'fit'
+  const sizeLabel = state.preferences.displayMode === 'fit'
     ? 'Fit'
-    : preferences.displayMode === 'actual'
+    : state.preferences.displayMode === 'actual'
       ? '1:1'
-      : `${preferences.zoomPercent}%`;
-  if (preferences.displayMode === 'custom') {
+      : `${state.preferences.zoomPercent}%`;
+  if (state.preferences.displayMode === 'custom') {
     delete toolbarSizeLabel.dataset.uiLabel;
     toolbarSizeLabel.textContent = sizeLabel;
   } else {
     setUiText(toolbarSizeLabel, sizeLabel);
   }
-  const nextSize = preferences.displayMode === 'fit' ? '1:1 size' : 'fit width';
+  const nextSize = state.preferences.displayMode === 'fit' ? '1:1 size' : 'fit width';
   toolbarSizeToggleButton.setAttribute(
     'aria-label',
     `Mirror size: ${sizeLabel}. Switch to ${nextSize}`,
@@ -3477,29 +3402,29 @@ function syncToolbarPreferenceControls(): void {
 
   toolbarOcrToggleButton.setAttribute(
     'aria-pressed',
-    String(preferences.imageTranslationEnabled),
+    String(state.preferences.imageTranslationEnabled),
   );
   setUiText(
     toolbarOcrLabel,
-    preferences.imageTranslationEnabled ? 'OCR On' : 'OCR Off',
+    state.preferences.imageTranslationEnabled ? 'OCR On' : 'OCR Off',
   );
-  toolbarOcrToggleButton.title = preferences.imageTranslationEnabled
-    ? imageCaptureAccess === 'granted'
+  toolbarOcrToggleButton.title = state.preferences.imageTranslationEnabled
+    ? state.imageCaptureAccess === 'granted'
       ? 'Image text translation is on. Click to turn it off.'
       : enabledUsablePixelOcrProviderOrder().length === 0
-        ? preferences.disabledImageReadingMethodIds.includes(
+        ? state.preferences.disabledImageReadingMethodIds.includes(
             ACCESSIBILITY_TEXT_METHOD_ID,
           )
           ? 'Image translation has no enabled reading method. Click to turn it off.'
           : 'Accessibility image text is on. Click to turn it off.'
-      : preferences.disabledImageReadingMethodIds.includes(
+      : state.preferences.disabledImageReadingMethodIds.includes(
           ACCESSIBILITY_TEXT_METHOD_ID,
         )
         ? 'Image translation is saved but pixel OCR needs image access. Click to grant access.'
         : 'Accessibility image text is on; pixel OCR is paused. Click to grant image access.'
     : 'Image text translation is off. Click to turn it on.';
 
-  const followsActive = isDetachedWindow && preferences.popoutTabMode === 'active';
+  const followsActive = isDetachedWindow && state.preferences.popoutTabMode === 'active';
   setUiText(toolbarTabFollowLabel, followsActive ? 'Active' : 'Current');
   toolbarTabFollowButton.setAttribute('aria-pressed', String(followsActive));
   toolbarTabFollowButton.setAttribute(
@@ -3520,32 +3445,32 @@ function syncToolbarPreferenceControls(): void {
 function configureImageTranslation(): void {
   const readScope = currentReplicaReadScope();
   const disabledMethodIds =
-    preferences.readScopeSetupVersion === REPLICA_READ_SCOPE_SETUP_VERSION ||
-    preferences.disabledImageReadingMethodIds.includes(
+    state.preferences.readScopeSetupVersion === REPLICA_READ_SCOPE_SETUP_VERSION ||
+    state.preferences.disabledImageReadingMethodIds.includes(
       ACCESSIBILITY_TEXT_METHOD_ID,
     )
-      ? preferences.disabledImageReadingMethodIds
+      ? state.preferences.disabledImageReadingMethodIds
       : [
           ACCESSIBILITY_TEXT_METHOD_ID,
-          ...preferences.disabledImageReadingMethodIds,
+          ...state.preferences.disabledImageReadingMethodIds,
         ];
   const enabledMethodIds = new Set(
-    preferences.imageReadingMethodOrder.filter((method) =>
+    state.preferences.imageReadingMethodOrder.filter((method) =>
       !disabledMethodIds.includes(method),
     ),
   );
   const enabledProviderOrder = effectiveCompiledProviderOrder(
     enabledOcrProviderOrder(
-      preferences.imageReadingMethodOrder,
+      state.preferences.imageReadingMethodOrder,
       disabledMethodIds,
     ),
-    preferences.disabledImageTextProviderIds,
+    state.preferences.disabledImageTextProviderIds,
   );
   const usableProviderOrder = runtimeReadyOcrProviderOrder(
     enabledProviderOrder,
-    ocrProviderRuntimeStatuses,
+    state.ocrProviderRuntimeStatuses,
   );
-  const routedProviderOrder = imageCaptureAccess === 'granted'
+  const routedProviderOrder = state.imageCaptureAccess === 'granted'
     ? usableProviderOrder
     : [];
   const nextAutoLanguageConfigurationKey = autoImageLanguageConfigurationKey({
@@ -3554,48 +3479,48 @@ function configureImageTranslation(): void {
       disabledMethodIds,
       routedProviderOrder,
     ),
-    minimumConfidence: preferences.ocrMinimumConfidence,
+    minimumConfidence: state.preferences.ocrMinimumConfidence,
     policyFingerprint: replicaReadScopeFingerprint(readScope),
     controlImages: readScope.controlImages,
   });
   if (shouldClearAutoImageLanguageForDocument(
-    resolvedSourceLanguageOrigin,
-    resolvedImageLanguageDocument !== undefined &&
-      currentReplicaDocumentMatches(resolvedImageLanguageDocument),
+    state.resolvedSourceLanguageOrigin,
+    state.resolvedImageLanguageDocument !== undefined &&
+      currentReplicaDocumentMatches(state.resolvedImageLanguageDocument),
   )) {
     clearAutoImageLanguageResolution();
   }
   if (shouldClearAutoImageLanguageResolution(
-    resolvedSourceLanguageOrigin,
-    resolvedImageLanguageConfigurationKey,
+    state.resolvedSourceLanguageOrigin,
+    state.resolvedImageLanguageConfigurationKey,
     nextAutoLanguageConfigurationKey,
   )) {
     clearAutoImageLanguageResolution();
   }
   imageTranslationController.configure({
     enabled:
-      preferences.imageTranslationEnabled &&
-      !isLiveSourceOnlyMode() &&
+      state.preferences.imageTranslationEnabled &&
+      !state.isLiveSourceOnlyMode &&
       (
         enabledMethodIds.has(ACCESSIBILITY_TEXT_METHOD_ID) ||
-        (imageCaptureAccess === 'granted' && usableProviderOrder.length > 0)
+        (state.imageCaptureAccess === 'granted' && usableProviderOrder.length > 0)
       ),
-    scanPolicy: preferences.imageScanPolicy,
-    skipSmallImages: preferences.skipSmallImages,
+    scanPolicy: state.preferences.imageScanPolicy,
+    skipSmallImages: state.preferences.skipSmallImages,
     providerOrder: routedProviderOrder,
-    methodOrder: preferences.imageReadingMethodOrder,
+    methodOrder: state.preferences.imageReadingMethodOrder,
     disabledMethodIds,
-    resetEpoch: preferences.resetRevision,
+    resetEpoch: state.preferences.resetRevision,
     policyFingerprint: replicaReadScopeFingerprint(readScope),
     controlImages: readScope.controlImages,
-    ocrMinimumConfidence: preferences.ocrMinimumConfidence,
-    sourceLanguage: preferences.sourceLanguage,
-    ...(resolvedSourceLanguage
-      ? { detectedSourceLanguage: resolvedSourceLanguage }
+    ocrMinimumConfidence: state.preferences.ocrMinimumConfidence,
+    sourceLanguage: state.preferences.sourceLanguage,
+    ...(state.resolvedSourceLanguage
+      ? { detectedSourceLanguage: state.resolvedSourceLanguage }
       : {}),
-    pageLanguageResolutionPending,
-    targetLanguage: preferences.targetLanguage,
-    translationIdle: !translationInFlight,
+    pageLanguageResolutionPending: state.pageLanguageResolutionPending,
+    targetLanguage: state.preferences.targetLanguage,
+    translationIdle: !state.translationInFlight,
   });
 }
 
@@ -3603,38 +3528,38 @@ function enabledUsablePixelOcrProviderOrder(): readonly ImageTextProviderId[] {
   return runtimeReadyOcrProviderOrder(
     effectiveCompiledProviderOrder(
       enabledOcrProviderOrder(
-        preferences.imageReadingMethodOrder,
-        preferences.disabledImageReadingMethodIds,
+        state.preferences.imageReadingMethodOrder,
+        state.preferences.disabledImageReadingMethodIds,
       ),
-      preferences.disabledImageTextProviderIds,
+      state.preferences.disabledImageTextProviderIds,
     ),
-    ocrProviderRuntimeStatuses,
+    state.ocrProviderRuntimeStatuses,
   );
 }
 
 function currentAutoImageLanguageConfigurationKey(): string {
   const readScope = currentReplicaReadScope();
   const disabledMethodIds =
-    preferences.readScopeSetupVersion === REPLICA_READ_SCOPE_SETUP_VERSION ||
-    preferences.disabledImageReadingMethodIds.includes(
+    state.preferences.readScopeSetupVersion === REPLICA_READ_SCOPE_SETUP_VERSION ||
+    state.preferences.disabledImageReadingMethodIds.includes(
       ACCESSIBILITY_TEXT_METHOD_ID,
     )
-      ? preferences.disabledImageReadingMethodIds
+      ? state.preferences.disabledImageReadingMethodIds
       : [
           ACCESSIBILITY_TEXT_METHOD_ID,
-          ...preferences.disabledImageReadingMethodIds,
+          ...state.preferences.disabledImageReadingMethodIds,
         ];
   const enabledProviderOrder = effectiveCompiledProviderOrder(
     enabledOcrProviderOrder(
-      preferences.imageReadingMethodOrder,
+      state.preferences.imageReadingMethodOrder,
       disabledMethodIds,
     ),
-    preferences.disabledImageTextProviderIds,
+    state.preferences.disabledImageTextProviderIds,
   );
-  const usableProviderOrder = imageCaptureAccess === 'granted'
+  const usableProviderOrder = state.imageCaptureAccess === 'granted'
     ? runtimeReadyOcrProviderOrder(
       enabledProviderOrder,
-      ocrProviderRuntimeStatuses,
+      state.ocrProviderRuntimeStatuses,
     )
     : [];
   return autoImageLanguageConfigurationKey({
@@ -3643,7 +3568,7 @@ function currentAutoImageLanguageConfigurationKey(): string {
       disabledMethodIds,
       usableProviderOrder,
     ),
-    minimumConfidence: preferences.ocrMinimumConfidence,
+    minimumConfidence: state.preferences.ocrMinimumConfidence,
     policyFingerprint: replicaReadScopeFingerprint(readScope),
     controlImages: readScope.controlImages,
   });
@@ -3655,7 +3580,7 @@ function enabledAutoImageLanguageMethodOrder(
 ): ImageReadingMethodId[] {
   const disabled = new Set(disabledMethodIds);
   const providers = new Set<ImageReadingMethodId>(providerOrder);
-  return preferences.imageReadingMethodOrder.filter((method) =>
+  return state.preferences.imageReadingMethodOrder.filter((method) =>
     !disabled.has(method) &&
     (method === ACCESSIBILITY_TEXT_METHOD_ID || providers.has(method)),
   );
@@ -3664,16 +3589,16 @@ function enabledAutoImageLanguageMethodOrder(
 function clearAutoImageLanguageResolution(): void {
   sourceLanguageResolutionRevision += 1;
   autoLanguageEvidencePrecedence.invalidate();
-  pageLanguageResolutionPending = false;
-  resolvedSourceLanguage = undefined;
-  resolvedSourceLanguageOrigin = undefined;
-  resolvedImageLanguageConfigurationKey = undefined;
-  resolvedImageLanguageDocument = undefined;
+  state.pageLanguageResolutionPending = false;
+  state.resolvedSourceLanguage = undefined;
+  state.resolvedSourceLanguageOrigin = undefined;
+  state.resolvedImageLanguageConfigurationKey = undefined;
+  state.resolvedImageLanguageDocument = undefined;
   availabilityRequestId += 1;
-  availability = 'unavailable';
-  availabilityCheckedForPair = undefined;
-  translationComplete = false;
-  activeAbortController?.abort();
+  state.availability = 'unavailable';
+  state.availabilityCheckedForPair = undefined;
+  state.translationComplete = false;
+  state.activeAbortController?.abort();
   quickComposer.invalidate();
   replicaTranslationCoordinator.selectPair(undefined);
   detectedLanguageElement.textContent =
@@ -3685,14 +3610,14 @@ function clearAutoImageLanguageResolution(): void {
 function currentReplicaDocumentMatches(
   document: ReplicaSourceDocumentIdentity,
 ): boolean {
-  const current = snapshot?.document;
+  const current = state.snapshot?.document;
   return Boolean(current && sameSourceDocument(current, document));
 }
 
 function currentReplicaSnapshotMatches(
   requested: Pick<ReplicaTranslationSnapshot, 'document' | 'replayLease'>,
 ): boolean {
-  const current = snapshot;
+  const current = state.snapshot;
   return Boolean(current && sameSourceReplicaLease(current, requested));
 }
 
@@ -3700,10 +3625,10 @@ function clearAutoImageLanguageForDifferentDocument(
   document: ReplicaSourceDocumentIdentity,
 ): void {
   if (!shouldClearAutoImageLanguageForDocument(
-    resolvedSourceLanguageOrigin,
+    state.resolvedSourceLanguageOrigin,
     Boolean(
-      resolvedImageLanguageDocument &&
-      sameSourceDocument(resolvedImageLanguageDocument, document),
+      state.resolvedImageLanguageDocument &&
+      sameSourceDocument(state.resolvedImageLanguageDocument, document),
     ),
   )) return;
   clearAutoImageLanguageResolution();
@@ -3712,7 +3637,7 @@ function clearAutoImageLanguageForDifferentDocument(
 
 async function refreshOcrProviderRuntimeStatuses(): Promise<void> {
   if (!compiledImageTextProviderIds.includes('chrome-text-detector')) return;
-  ocrProviderRuntimeStatuses.set('chrome-text-detector', 'checking');
+  state.ocrProviderRuntimeStatuses.set('chrome-text-detector', 'checking');
   imageAnalysisPanel.render();
   configureImageTranslation();
   let status: OcrProviderRuntimeStatus;
@@ -3720,7 +3645,7 @@ async function refreshOcrProviderRuntimeStatuses(): Promise<void> {
     const ensureRaw: unknown = await browser.runtime.sendMessage({
       kind: 'simul:ocr-v1:ensure-host',
       version: 1,
-      resetEpoch: preferences.resetRevision,
+      resetEpoch: state.preferences.resetRevision,
     });
     const ready = readEnsureOcrHostResponse(ensureRaw);
     if (!ready?.ready) throw new Error('OCR host unavailable.');
@@ -3740,11 +3665,11 @@ async function refreshOcrProviderRuntimeStatuses(): Promise<void> {
       reason: 'probe-failed',
     });
   }
-  ocrProviderRuntimeStatuses.set('chrome-text-detector', status);
+  state.ocrProviderRuntimeStatuses.set('chrome-text-detector', status);
   imageAnalysisPanel.render();
   configureImageTranslation();
-  if (shouldRetryOcrProviderProbe(status, textDetectorProbeRetryUsed)) {
-    textDetectorProbeRetryUsed = true;
+  if (shouldRetryOcrProviderProbe(status, state.textDetectorProbeRetryUsed)) {
+    state.textDetectorProbeRetryUsed = true;
     window.setTimeout(() => {
       void refreshOcrProviderRuntimeStatuses();
     }, 1_000);
@@ -3759,7 +3684,7 @@ function configureSurfaceButton(): void {
 }
 
 async function openDetachedWindow(): Promise<void> {
-  const identity = capturedPageIdentity ?? followedPageIdentity;
+  const identity = state.capturedPageIdentity ?? state.followedPageIdentity;
   if (!identity) {
     setStatus('Open a regular page before detaching the companion.', 'warning');
     return;
@@ -3793,8 +3718,8 @@ async function openDetachedWindow(): Promise<void> {
 
 async function returnToSidePanel(): Promise<void> {
   const sourceWindowId =
-    followedPageIdentity?.windowId ??
-    detachedSourceWindowId ??
+    state.followedPageIdentity?.windowId ??
+    state.detachedSourceWindowId ??
     detachedIdentityHint?.windowId;
   if (sourceWindowId === undefined) return;
 
@@ -3825,8 +3750,8 @@ async function returnToSidePanel(): Promise<void> {
         )) throw error;
       });
     }
-    if (panelWindowId !== undefined) {
-      await browser.windows.remove(panelWindowId);
+    if (state.panelWindowId !== undefined) {
+      await browser.windows.remove(state.panelWindowId);
     } else {
       window.close();
     }
@@ -3874,11 +3799,11 @@ async function checkPanelPlacement(): Promise<void> {
 }
 
 async function changeAutoTranslationMode(mode: AutoTranslationMode): Promise<void> {
-  if (permissionInFlight) {
+  if (state.permissionInFlight) {
     syncPreferenceControls();
     return;
   }
-  const pageUrl = followedPageIdentity?.url ?? capturedPageIdentity?.url;
+  const pageUrl = state.followedPageIdentity?.url ?? state.capturedPageIdentity?.url;
   const requestedOrigins = permissionOriginsForMode(mode, pageUrl);
   if (mode === 'site' && requestedOrigins.length === 0) {
     syncPreferenceControls();
@@ -3890,7 +3815,7 @@ async function changeAutoTranslationMode(mode: AutoTranslationMode): Promise<voi
     );
     return;
   }
-  permissionInFlight = true;
+  state.permissionInFlight = true;
   updateControls();
   try {
     const outcome = await performAutoTranslationChange(
@@ -3932,14 +3857,14 @@ async function changeAutoTranslationMode(mode: AutoTranslationMode): Promise<voi
           : 'Automatic translation is enabled for this site.',
       'success',
     );
-    if (mode !== 'off' && snapshot && !isLiveSourceOnlyMode()) {
-      translationDesired = true;
+    if (mode !== 'off' && state.snapshot && !state.isLiveSourceOnlyMode) {
+      state.translationDesired = true;
       await maybeTranslateAutomatically(captureCoordinator.generation, pageUrl ?? '');
     }
   } catch (error) {
     const repaired = await sendPreferenceCommand({
       type: 'simul:preferences:abort-auto',
-      expectedResetRevision: preferences.resetRevision,
+      expectedResetRevision: state.preferences.resetRevision,
       mode,
       ...(pageUrl ? { pageUrl } : {}),
     }).catch(() => undefined);
@@ -3948,7 +3873,7 @@ async function changeAutoTranslationMode(mode: AutoTranslationMode): Promise<voi
     syncPreferenceControls();
     setStatus(`Chrome could not update automatic access: ${readableError(error)}`, 'error');
   } finally {
-    permissionInFlight = false;
+    state.permissionInFlight = false;
     updateControls();
   }
 }
@@ -4000,7 +3925,7 @@ async function performAutoTranslationChange(
     return { kind: 'not-applied', result: repaired } as const;
   } catch (error) {
     const latest = await readStoredPreferences().catch(
-      () => freshPreferences ?? preferences,
+      () => freshPreferences ?? state.preferences,
     );
     const result = await sendPreferenceCommand({
       type: 'simul:preferences:abort-auto',
@@ -4013,11 +3938,11 @@ async function performAutoTranslationChange(
 }
 
 async function reconcileAutomaticAccess(pageUrl: string | undefined): Promise<boolean> {
-  const before = autoTranslationModeForPage(preferences, pageUrl);
+  const before = autoTranslationModeForPage(state.preferences, pageUrl);
   const result = await sendPreferenceCommand({ type: 'simul:preferences:reconcile' });
   applyCommittedPreferences(result.preferences);
   syncPreferenceControls();
-  return before !== autoTranslationModeForPage(preferences, pageUrl);
+  return before !== autoTranslationModeForPage(state.preferences, pageUrl);
 }
 
 async function readStoredPreferences(): Promise<CompanionPreferences> {
@@ -4036,12 +3961,12 @@ async function reloadPreferencesFromStorage(): Promise<void> {
 
 function scheduleNavigationRefresh(identity: CapturedPageIdentity): void {
   clearNavigationTimer();
-  navigationTimer = setTimeout(() => {
-    navigationTimer = undefined;
+  state.navigationTimer = setTimeout(() => {
+    state.navigationTimer = undefined;
     if (
-      followedPageIdentity?.tabId !== identity.tabId ||
-      followedPageIdentity.windowId !== identity.windowId ||
-      navigationPageIdentityKey(followedPageIdentity) !==
+      state.followedPageIdentity?.tabId !== identity.tabId ||
+      state.followedPageIdentity.windowId !== identity.windowId ||
+      navigationPageIdentityKey(state.followedPageIdentity) !==
         navigationPageIdentityKey(identity)
     ) return;
     queueCapture({ identity, reason: 'navigation' });
@@ -4049,8 +3974,8 @@ function scheduleNavigationRefresh(identity: CapturedPageIdentity): void {
 }
 
 function clearNavigationTimer(): void {
-  if (navigationTimer !== undefined) clearTimeout(navigationTimer);
-  navigationTimer = undefined;
+  if (state.navigationTimer !== undefined) clearTimeout(state.navigationTimer);
+  state.navigationTimer = undefined;
 }
 
 function invalidateCompanion(message: string): void {
@@ -4059,29 +3984,29 @@ function invalidateCompanion(message: string): void {
   activeFollowRequestId = undefined;
   sourceLanguageResolutionRevision += 1;
   autoLanguageEvidencePrecedence.invalidate();
-  pageLanguageResolutionPending = false;
+  state.pageLanguageResolutionPending = false;
   captureCoordinator.invalidate();
   availabilityRequestId += 1;
-  activeAbortController?.abort();
-  replicaShadowAbortController?.abort();
+  state.activeAbortController?.abort();
+  state.replicaShadowAbortController?.abort();
   imageTranslationController.setTopPageOrigin(undefined);
   imageTranslationController.releaseReplica();
   isolatedHtmlReplicaEngine.releasePresentation();
   quickComposer.invalidate();
-  followedPageIdentity = undefined;
-  snapshot = undefined;
-  capturedPageIdentity = undefined;
-  resolvedSourceLanguage = undefined;
-  resolvedSourceLanguageOrigin = undefined;
-  resolvedImageLanguageConfigurationKey = undefined;
-  resolvedImageLanguageDocument = undefined;
-  availability = 'unavailable';
-  availabilityCheckedForPair = undefined;
-  translationDesired = false;
-  translationComplete = false;
+  state.followedPageIdentity = undefined;
+  state.snapshot = undefined;
+  state.capturedPageIdentity = undefined;
+  state.resolvedSourceLanguage = undefined;
+  state.resolvedSourceLanguageOrigin = undefined;
+  state.resolvedImageLanguageConfigurationKey = undefined;
+  state.resolvedImageLanguageDocument = undefined;
+  state.availability = 'unavailable';
+  state.availabilityCheckedForPair = undefined;
+  state.translationDesired = false;
+  state.translationComplete = false;
   replicaTranslationCoordinator.selectPair(undefined);
   isolatedReplicaFailureRecoveryGate.reset();
-  lastSourceScroll = undefined;
+  state.lastSourceScroll = undefined;
   visibleReplayHost.resetSourceScroll();
   renderErrorState(message);
   setStatus(message, 'warning');
@@ -4123,13 +4048,9 @@ async function readCurrentFollowedIdentity(
   followed: CapturedPageIdentity,
 ): Promise<CapturedPageIdentity> {
   const tab = await browser.tabs.get(followed.tabId);
-  return identityFromTab(tab, followed.url, requiresActiveSourceTab());
+  return identityFromTab(tab, followed.url, state.requiresActiveSourceTab);
 }
 
-/** Side panels and active-following windows must read the active tab only. */
-function requiresActiveSourceTab(): boolean {
-  return !isDetachedWindow || preferences.popoutTabMode === 'active';
-}
 
 function isCurrentAvailabilityRequest(
   requestId: number,
@@ -4137,9 +4058,9 @@ function isCurrentAvailabilityRequest(
   pair: TranslationPair,
   generation: number,
 ): boolean {
-  const currentPair = selectedPair();
+  const currentPair = state.selectedPair();
   return isAvailabilityRequestCurrent({
-    replicaViewMode: preferences.replicaViewMode,
+    replicaViewMode: state.preferences.replicaViewMode,
     requestMatches: requestId === availabilityRequestId,
     generationMatches: captureCoordinator.isCurrent(generation),
     snapshotMatches: currentReplicaSnapshotMatches(requestedSnapshot),
@@ -4149,35 +4070,6 @@ function isCurrentAvailabilityRequest(
         currentPair.targetLanguage === pair.targetLanguage,
     ),
   });
-}
-
-function selectedPair(): TranslationPair | undefined {
-  return resolvedSourceLanguage
-    ? {
-        sourceLanguage: resolvedSourceLanguage,
-        targetLanguage: preferences.targetLanguage,
-      }
-    : undefined;
-}
-
-function isCurrentTranslationPair(pair: TranslationPair): boolean {
-  const current = selectedPair();
-  return Boolean(
-    current &&
-      current.sourceLanguage === pair.sourceLanguage &&
-      current.targetLanguage === pair.targetLanguage,
-  );
-}
-
-function availabilityPairKey(pair: TranslationPair, generation: number): string {
-  return `${generation}:${pair.sourceLanguage}>${pair.targetLanguage}`;
-}
-
-function currentTranslationTaskKey(generation: number): string {
-  const pair = selectedPair();
-  return pair
-    ? availabilityPairKey(pair, generation)
-    : `${generation}:unresolved`;
 }
 
 function readLanguage(value: string): SupportedLanguage {
@@ -4190,64 +4082,64 @@ function updateControls(): void {
   syncToolbarPreferenceControls();
   quickComposer.syncPanel();
   const composerInFlight = quickComposer.inFlight;
-  const busy = captureInFlight || translationInFlight || permissionInFlight || composerInFlight;
-  replicaStatusContainer.setAttribute('aria-busy', String(captureInFlight));
-  replicaPreviewContainer.setAttribute('aria-busy', String(captureInFlight));
+  const busy = state.captureInFlight || state.translationInFlight || state.permissionInFlight || composerInFlight;
+  replicaStatusContainer.setAttribute('aria-busy', String(state.captureInFlight));
+  replicaPreviewContainer.setAttribute('aria-busy', String(state.captureInFlight));
   sourceSelect.disabled = busy;
   targetSelect.disabled = busy;
-  swapButton.disabled = busy || !resolvedSourceLanguage;
+  swapButton.disabled = busy || !state.resolvedSourceLanguage;
   autoTranslateSelect.disabled = busy;
   displayModeSelect.disabled = busy;
   textLayoutSelect.disabled = busy;
-  replicaFidelityPolicySelect.disabled = busy || replicaFidelityCommitInFlight;
+  replicaFidelityPolicySelect.disabled = busy || state.replicaFidelityCommitInFlight;
   launchBehaviorSelect.disabled = busy;
   popoutTabModeSelect.disabled = busy;
   syncScrollInput.disabled = busy;
   zoomInButton.disabled = busy;
   zoomOutButton.disabled = busy;
-  refreshButton.disabled = captureInFlight;
-  compactRefreshButton.disabled = captureInFlight;
+  refreshButton.disabled = state.captureInFlight;
+  compactRefreshButton.disabled = state.captureInFlight;
   setUiText(
     refreshButton,
-    captureInFlight ? 'Rebuilding mirror…' : 'Rebuild mirror',
+    state.captureInFlight ? 'Rebuilding mirror…' : 'Rebuild mirror',
   );
   compactRefreshButton.setAttribute(
     'aria-label',
-    captureInFlight ? 'Rebuilding mirror' : 'Rebuild mirror',
+    state.captureInFlight ? 'Rebuilding mirror' : 'Rebuild mirror',
   );
-  compactRefreshButton.title = captureInFlight
+  compactRefreshButton.title = state.captureInFlight
     ? 'Rebuilding mirror…'
     : 'Rebuild mirror';
   toolbarAutoDetectButton.disabled = busy;
   toolbarSizeToggleButton.disabled = busy;
   toolbarOcrToggleButton.disabled = busy ||
-    imageCaptureAccess === 'checking' ||
+    state.imageCaptureAccess === 'checking' ||
     !hasCompiledImageAnalysisCapability();
   toolbarTabFollowButton.disabled = busy || !isDetachedWindow;
-  popoutButton.disabled = surfaceTransitionInFlight ||
-    (!isDetachedWindow && !capturedPageIdentity);
+  popoutButton.disabled = state.surfaceTransitionInFlight ||
+    (!isDetachedWindow && !state.capturedPageIdentity);
   cancelButton.hidden =
-    !translationInFlight && !composerInFlight && !imageTranslationInFlight;
+    !state.translationInFlight && !composerInFlight && !state.imageTranslationInFlight;
   cancelButton.disabled =
-    !translationInFlight && !composerInFlight && !imageTranslationInFlight;
-  translateComposerButton.disabled = busy || !composerInput.value.trim() || !selectedPair();
+    !state.translationInFlight && !composerInFlight && !state.imageTranslationInFlight;
+  translateComposerButton.disabled = busy || !composerInput.value.trim() || !state.selectedPair();
   setUiText(
     translateComposerButton,
     composerInFlight ? 'Translating…' : 'Translate',
   );
   translateButton.disabled =
     busy ||
-    isLiveSourceOnlyMode() ||
-    !snapshot ||
+    state.isLiveSourceOnlyMode ||
+    !state.snapshot ||
     currentTranslationFieldCount() === 0 ||
-    !selectedPair() ||
-    availability === 'unavailable' ||
-    translationComplete;
+    !state.selectedPair() ||
+    state.availability === 'unavailable' ||
+    state.translationComplete;
   setUiText(
     translateButton,
-    translationInFlight
+    state.translationInFlight
       ? 'Translating…'
-      : translationComplete
+      : state.translationComplete
         ? 'Translation current'
         : 'Translate page',
   );
@@ -4256,12 +4148,12 @@ function updateControls(): void {
 }
 
 function setImageTranslationBusy(busy: boolean): void {
-  const completed = imageTranslationInFlight && !busy;
-  imageTranslationInFlight = busy;
+  const completed = state.imageTranslationInFlight && !busy;
+  state.imageTranslationInFlight = busy;
   const composerInFlight = quickComposer.inFlight;
-  if (busy && !translationInFlight && !composerInFlight) {
+  if (busy && !state.translationInFlight && !composerInFlight) {
     toolbarStatus.showImageProgress();
-  } else if (!busy && !translationInFlight && !composerInFlight) {
+  } else if (!busy && !state.translationInFlight && !composerInFlight) {
     toolbarStatus.hideProgress();
   }
   if (completed) {

@@ -46,7 +46,7 @@ describe('sidepanel UI structure', () => {
     expect(document.querySelector('#replica-preview')?.getAttribute('aria-busy'))
       .toBe('false');
     expect(script).toContain(
-      "replicaPreviewContainer.setAttribute('aria-busy', String(captureInFlight))",
+      "replicaPreviewContainer.setAttribute('aria-busy', String(state.captureInFlight))",
     );
     expect(script).toContain(
       "captureInFlight ? 'Rebuilding mirror…' : 'Rebuild mirror'",
@@ -138,7 +138,7 @@ describe('sidepanel UI structure', () => {
 
     expect(probeStart).toBeGreaterThanOrEqual(0);
     expect(probeSource).toContain("kind: 'simul:ocr-v1:ensure-host'");
-    expect(probeSource).toContain('resetEpoch: preferences.resetRevision');
+    expect(probeSource).toContain('resetEpoch: state.preferences.resetRevision');
   });
 
   it('does not block the first mirror on optional OCR readiness probes', () => {
@@ -172,7 +172,7 @@ describe('sidepanel UI structure', () => {
 
     expect(commitStart).toBeGreaterThanOrEqual(0);
     expect(commitSource).toContain(
-      'const expectedSettingsRevision = preferences.settingsRevision;',
+      'const expectedSettingsRevision = state.preferences.settingsRevision;',
     );
     expect(commitSource).toContain('expectedSettingsRevision,');
     expect(commitSource).toContain("result.code === 'stale-settings-revision'");
@@ -298,7 +298,7 @@ describe('sidepanel UI structure', () => {
     expect(script).toContain("type: 'simul:preferences:patch-read-scope'");
     expect(script).toContain("type: 'simul:preferences:complete-read-scope-setup'");
     expect(script).toContain(
-      'expectedSetupVersion: preferences.readScopeSetupVersion',
+      'expectedSetupVersion: state.preferences.readScopeSetupVersion',
     );
     expect(script).toContain("type: 'simul:preferences:reset-all'");
     expect(script).toContain('purgeSourceDerivedRuntime(');
@@ -352,7 +352,7 @@ describe('sidepanel UI structure', () => {
     expect(purgeFunction).toContain(
       'imageTranslationController.purgeSourceDerivedCache()',
     );
-    expect(script).toContain('resetEpoch: preferences.resetRevision');
+    expect(script).toContain('resetEpoch: state.preferences.resetRevision');
     expect(script).toContain(
       'preferences.readScopeSetupVersion === REPLICA_READ_SCOPE_SETUP_VERSION',
     );
@@ -413,7 +413,7 @@ describe('sidepanel UI structure', () => {
       'const saved = await commitViewPreferencePatch({ popoutTabMode })',
     );
     expect(script).toContain(
-      '!saved || preferences.popoutTabMode !== popoutTabMode',
+      '!saved || state.preferences.popoutTabMode !== popoutTabMode',
     );
   });
 
@@ -435,7 +435,7 @@ describe('sidepanel UI structure', () => {
         'capturedPageIdentity = committedIdentity;',
       ));
     expect(captureSource).toContain(
-      'const committedIdentity = followedPageIdentity && sameCompanionSourcePage(',
+      'const committedIdentity = state.followedPageIdentity && sameCompanionSourcePage(',
     );
 
     const checkpointStart = script.indexOf(
@@ -464,7 +464,7 @@ describe('sidepanel UI structure', () => {
     expect(script).toContain('isUrlOnlyNavigationSignal(');
     expect(script).toContain('.observeSameDocumentUrl(');
     expect(script).toContain('.shouldScheduleComplete(');
-    expect(script).toContain('navigationPageIdentityKey(followedPageIdentity)');
+    expect(script).toContain('navigationPageIdentityKey(state.followedPageIdentity)');
   });
 
   it('reacquires the source after an active tab closes or is replaced', () => {
@@ -519,9 +519,9 @@ describe('sidepanel UI structure', () => {
     );
     expect(follow).not.toContain('clearNavigationTimer()');
     expect(follow).toContain('shouldRebuildStaleFollowedReplica({');
-    expect(follow).toContain('navigationRefreshPending: navigationTimer !== undefined');
+    expect(follow).toContain('navigationRefreshPending: state.navigationTimer !== undefined');
     expect(follow).toContain('tabStatus: tab.status');
-    expect(follow).toContain('captured: capturedPageIdentity');
+    expect(follow).toContain('captured: state.capturedPageIdentity');
     expect(follow.indexOf('shouldRebuildStaleFollowedReplica({'))
       .toBeGreaterThan(follow.indexOf('if (sameCompanionSourcePage('));
     // A superseded follow still releases its own marker before returning.
@@ -537,7 +537,7 @@ describe('sidepanel UI structure', () => {
     expect(script).toContain('const ZOOM_COMMIT_DEBOUNCE_MS = 150;');
     const setZoom = sliceBetween('function setZoom(', '\nfunction commitPendingZoom(');
     expect(setZoom).not.toContain('commitViewPreferencePatch(');
-    expect(setZoom).toContain('viewPreferencePatchLedger.begin(preferences, patch)');
+    expect(setZoom).toContain('viewPreferencePatchLedger.begin(state.preferences, patch)');
     expect(setZoom).toContain('updateMirrorLayout();');
     expect(setZoom).toContain(
       'zoomCommitTimer = setTimeout(commitPendingZoom, ZOOM_COMMIT_DEBOUNCE_MS);',
@@ -575,7 +575,7 @@ describe('sidepanel UI structure', () => {
       '\nasync function applyLanguagePreferences(',
     );
     expect(selectionChanged).toContain(
-      'if (!isLiveSourceOnlyMode()) translationDesired = true;',
+      'if (!state.isLiveSourceOnlyMode) state.translationDesired = true;',
     );
     const apply = sliceBetween(
       'async function applyLanguagePreferences(',
@@ -593,19 +593,19 @@ describe('sidepanel UI structure', () => {
       '\nasync function maybeTranslateAutomatically(',
     );
     expect(check).not.toContain(
-      "availabilityCheckedForPair = checkedPairKey;\n  availability = 'unavailable';",
+      "availabilityCheckedForPair = checkedPairKey;\n  state.availability = 'unavailable';",
     );
     expect(check.indexOf('availabilityCheckedForPair = checkedPairKey;'))
       .toBeGreaterThan(check.indexOf('pair.sourceLanguage === pair.targetLanguage'));
     expect(check).toContain(
       'if (!isCurrentAvailabilityRequest(requestId, requestedSnapshot, pair, generation)) return;\n' +
-        '    availabilityCheckedForPair = checkedPairKey;\n' +
-        '    availability = next;',
+        '    state.availabilityCheckedForPair = checkedPairKey;\n' +
+        '    state.availability = next;',
     );
     expect(check).toContain(
       'if (!isCurrentAvailabilityRequest(requestId, requestedSnapshot, pair, generation)) return;\n' +
-        '    availabilityCheckedForPair = checkedPairKey;\n' +
-        "    availability = 'unavailable';",
+        '    state.availabilityCheckedForPair = checkedPairKey;\n' +
+        "    state.availability = 'unavailable';",
     );
     // A discarded check leaves the pair unrecorded, so the next text commit
     // re-establishes availability instead of skipping preparation.
