@@ -134,6 +134,12 @@ const imageOn = () => withImageAnalysisSettings(
   { imageTranslationEnabled: true },
 );
 
+const imageOnWithSite = () => withAutoTranslationMode(
+  imageOn(),
+  'https://kept.example/page',
+  'site',
+);
+
 describe('PermissionFlows image access', () => {
   it('reads the broad grant and reports a revocation while image translation is on', async () => {
     const harness = setup({ granted: ['<all_urls>'], stored: imageOn() });
@@ -204,6 +210,41 @@ describe('PermissionFlows image access', () => {
     expect(harness.granted.has('<all_urls>')).toBe(false);
     expect(harness.stored.imageTranslationEnabled).toBe(false);
     expect(harness.statuses.at(-1)).toBe('Image translation is off.');
+  });
+
+  it('keeps the broad grant when the narrow re-grant would need a gesture it no longer has', async () => {
+    const harness = setup({
+      granted: ['<all_urls>'],
+      stored: imageOnWithSite(),
+      userActivation: false,
+    });
+    await harness.flows.changeImageTranslationEnabled(false);
+    expect(harness.permissions.remove).not.toHaveBeenCalled();
+    expect(harness.granted.has('<all_urls>')).toBe(true);
+    expect(harness.stored.imageTranslationEnabled).toBe(true);
+    expect(harness.statuses.at(-1)).toContain('Choose the image setting again');
+  });
+
+  it('reports released access when the save fails and Chrome does not give the grant back', async () => {
+    const harness = setup({
+      granted: ['<all_urls>'],
+      stored: imageOnWithSite(),
+      failPatch: true,
+      requestAnswer: false,
+    });
+    await harness.flows.refreshImageCaptureAccess();
+    expect(harness.state.imageCaptureAccess).toBe('granted');
+
+    await harness.flows.changeImageTranslationEnabled(false);
+
+    // The broad grant is gone, the re-request was refused, and the saved
+    // setting still says on: the panel shows exactly that.
+    expect(harness.granted.has('<all_urls>')).toBe(false);
+    expect(harness.stored.imageTranslationEnabled).toBe(true);
+    expect(harness.state.imageCaptureAccess).toBe('missing');
+    expect(harness.purgeImageCache).toHaveBeenCalled();
+    expect(harness.statuses.at(-1)).toContain('could not be saved');
+    expect(harness.statuses.at(-1)).toContain('Grant image access');
   });
 
   it('ignores a second change while one is in flight', async () => {
