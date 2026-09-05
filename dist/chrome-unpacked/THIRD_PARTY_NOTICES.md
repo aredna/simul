@@ -6,7 +6,7 @@ source repository. It does not grant a license to original Simul material;
 see [LICENSE](LICENSE).
 
 The inventory is derived from the locked production dependency graph and the
-pinned OCR asset manifest for Simul 0.3.3. Development-only npm packages are
+pinned OCR asset manifest for Simul 0.4.0. Development-only npm packages are
 not included in the extension artifact and retain the licenses shipped in
 their own packages. Generated BMAD Method files are covered separately below.
 
