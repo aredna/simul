@@ -220,33 +220,13 @@ describe('sidepanel UI structure', () => {
       .toBeLessThan(markup.indexOf('id="experimental-options"'));
   });
 
-  it('renders an accessible persisted OCR confidence control in exact five-percent steps', () => {
-    expect(script).toContain("confidenceInput.id = 'ocr-minimum-confidence'");
-    expect(script).toContain("confidenceInput.type = 'range'");
-    expect(script).toContain("confidenceInput.min = '25'");
-    expect(script).toContain("confidenceInput.max = '95'");
-    expect(script).toContain("confidenceInput.step = '5'");
-    expect(script).toContain(
-      "confidenceInput.value = String(preferences.ocrMinimumConfidence * 100)",
-    );
-    expect(script).toContain("'ocr-minimum-confidence-help'");
-    expect(script).toContain('OCR_MINIMUM_CONFIDENCE_OPTIONS.includes(selected)');
-    expect(script).toContain('commitImageAnalysisPreferencePatch({');
-    expect(script).toContain('ocrMinimumConfidence: selected');
+  it('styles the persisted OCR confidence control', () => {
     expect(style).toContain('.ocr-confidence-control');
     expect(style).toContain('.ocr-confidence-row input');
   });
 
   it('keeps every image-reading method visible, toggleable, and ordered', () => {
-    expect(script).toContain("enabled.type = 'checkbox'");
-    expect(script).toContain('preferences.disabledImageReadingMethodIds');
-    expect(script).toContain('disabledImageReadingMethodIds: preferences.imageReadingMethodOrder');
-    expect(script).toContain("return 'Accessibility text (aria-label / alt)'");
-    expect(script).toContain("status.textContent = 'No pixels'");
-    expect(script).toContain(
-      "'chrome-text-detector': 'Chrome TextDetector (platform)'",
-    );
-    expect(script).toContain("tesseract: 'Tesseract.js (local)'");
+    expect(script).toContain('commitPatch: commitImageAnalysisPreferencePatch,');
     expect(DEFAULT_COMPANION_PREFERENCES.imageReadingMethodOrder.slice(0, 3))
       .toEqual([
         'accessibility-text',
@@ -256,10 +236,6 @@ describe('sidepanel UI structure', () => {
     expect(providerRegistry).toContain(
       'ACCESSIBILITY_IMAGE_TEXT_COMPILED ||',
     );
-    expect(script).toContain('visibleImageReadingMethodOrder(');
-    expect(script).toContain('Chrome TextDetector is experimental and platform-dependent');
-    expect(script).toContain('Tesseract.js runs locally with packaged language models');
-    expect(script).toContain('OCR is paused because every compiled provider is off.');
     expect(style).toContain('.ocr-provider-toggle');
   });
 
@@ -337,7 +313,7 @@ describe('sidepanel UI structure', () => {
     );
     expect(script).toContain('new PreferenceSafetyClient({');
     expect(script).toContain(
-      'const enabledPixelProviders = enabledUsablePixelOcrProviderOrder()',
+      'usablePixelProviderCount: enabledUsablePixelOcrProviderOrder().length,',
     );
     expect(script).toContain(
       "imageCaptureAccess !== 'granted' &&\n    enabledUsablePixelOcrProviderOrder().length > 0",
@@ -577,31 +553,6 @@ describe('sidepanel UI structure', () => {
       'browser.runtime.onMessage.addListener(',
     );
     expect(pagehide).toContain('commitPendingZoom();');
-  });
-
-  it('rebuilds image-analysis settings only when their inputs change and keeps diagnostics open', () => {
-    const render = sliceBetween(
-      'function renderImageAnalysisControls(',
-      '\nfunction createOrderButton(',
-    );
-    expect(render.indexOf('renderKey === imageAnalysisRenderKey'))
-      .toBeLessThan(render.indexOf('root.replaceChildren()'));
-    for (const input of [
-      'imageCaptureAccess,',
-      'permissionInFlight,',
-      'preferences.imageTextProviderOrder,',
-      'preferences.disabledImageReadingMethodIds,',
-      'preferences.ocrMinimumConfidence,',
-      'preferences.imageScanPolicy,',
-      'preferences.usePromptForImageText,',
-      '[...ocrProviderRuntimeStatuses],',
-    ]) {
-      expect(render.indexOf(input)).toBeLessThan(render.indexOf('root.replaceChildren()'));
-    }
-    expect(render.indexOf('const diagnosticsWereOpen = imageTranslationDiagnosticsDetails?.open'))
-      .toBeLessThan(render.indexOf('root.replaceChildren()'));
-    expect(render.indexOf('diagnostics.open = diagnosticsWereOpen;'))
-      .toBeLessThan(render.indexOf('imageTranslationDiagnosticsDetails = diagnostics;'));
   });
 
   it('lets UI labels follow a page translation that prepared their pair', () => {

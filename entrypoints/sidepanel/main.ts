@@ -18,6 +18,7 @@ import {
   type CompanionOverlay,
 } from '../../lib/companion-ui-state';
 import type { CompanionStatusTone } from '../../lib/companion-ui-localization';
+import { ImageAnalysisPanel } from './image-analysis-panel';
 import { QuickComposer } from './quick-composer';
 import { ToolbarStatus } from './toolbar-status';
 import { UiLocalizer } from './ui-localizer';
@@ -73,19 +74,13 @@ import {
   effectiveCompiledProviderOrder,
   hasCompiledImageAnalysisCapability,
 } from '../../lib/ocr/provider-registry';
-import {
-  IMAGE_SCAN_POLICIES,
-  isImageScanPolicy,
-} from '../../lib/ocr/contracts';
 import type { ImageTextProviderId } from '../../lib/ocr/known-provider-ids';
 import {
   ACCESSIBILITY_TEXT_METHOD_ID,
   enabledOcrProviderOrder,
-  visibleImageReadingMethodOrder,
   type ImageReadingMethodId,
 } from '../../lib/ocr/image-reading-methods';
 import type { AutoLanguageProbeEvidence } from '../../lib/ocr/auto-language-probe';
-import { ImageTranslationDiagnosticHistory } from '../../lib/ocr/diagnostic-history';
 import {
   ImageTranslationController,
   type AutoImageLanguageEvidenceOrigin,
@@ -108,10 +103,6 @@ import {
   runtimeReadyOcrProviderOrder,
   shouldRetryOcrProviderProbe,
 } from '../../lib/ocr/runtime-provider-readiness';
-import {
-  OCR_MINIMUM_CONFIDENCE_OPTIONS,
-  isOcrMinimumConfidence,
-} from '../../lib/ocr/result-quality';
 import {
   activateImageReplicaAfterRun,
   imageReplicaActivationFailureReason,
@@ -395,10 +386,6 @@ const visibleReplayHost = new VisibleReplayHost({
 });
 let replicaTranslationCoordinator!: ReplicaTranslationCoordinator;
 let imageTranslationController!: ImageTranslationController;
-const imageTranslationDiagnosticHistory =
-  new ImageTranslationDiagnosticHistory();
-let imageTranslationDiagnosticsDetails: HTMLDetailsElement | undefined;
-let imageTranslationDiagnosticOutput: HTMLOutputElement | undefined;
 const replicaSurfaceRouter = new ReplicaSurfaceRouter();
 const isolatedHtmlReplicaEngine = new IsolatedHtmlReplicaEngine({
   presentationHost: visibleReplayHost,
@@ -619,8 +606,6 @@ let zoomCommitTimer: ReturnType<typeof setTimeout> | undefined;
 let pendingZoomPatch:
   | { readonly requestId: number; readonly patch: CompanionViewSettingsPatch }
   | undefined;
-let imageAnalysisControls: HTMLElement | undefined;
-let imageAnalysisRenderKey: string | undefined;
 let surfaceTransitionInFlight = false;
 let latestToolbarLaunchStamp: CompanionLaunchStamp | undefined;
 const ocrProviderRuntimeStatuses = new Map<
@@ -661,6 +646,33 @@ const quickComposer = new QuickComposer({
   onTranslated: () => logTranslationCache('quick', translationMemory),
   readableError,
   isSubmitShortcut: isQuickTranslationShortcut,
+});
+
+const imageAnalysisPanel = new ImageAnalysisPanel({
+  document,
+  host: imageAnalysisHost,
+  capabilities: compiledImageAnalysisCapabilities,
+  compiledProviderOrder: effectiveCompiledProviderOrder,
+  hasCompiledCapability: hasCompiledImageAnalysisCapability,
+  readView: () => ({
+    imageTranslationEnabled: preferences.imageTranslationEnabled,
+    imageCaptureAccess,
+    permissionInFlight,
+    imageTextProviderOrder: preferences.imageTextProviderOrder,
+    disabledImageTextProviderIds: preferences.disabledImageTextProviderIds,
+    imageReadingMethodOrder: preferences.imageReadingMethodOrder,
+    disabledImageReadingMethodIds: preferences.disabledImageReadingMethodIds,
+    ocrMinimumConfidence: preferences.ocrMinimumConfidence,
+    imageScanPolicy: preferences.imageScanPolicy,
+    skipSmallImages: preferences.skipSmallImages,
+    usePromptForImageLanguage: preferences.usePromptForImageLanguage,
+    usePromptForImageText: preferences.usePromptForImageText,
+    providerRuntimeStatuses: ocrProviderRuntimeStatuses,
+    usablePixelProviderCount: enabledUsablePixelOcrProviderOrder().length,
+  }),
+  setUiText,
+  changeImageTranslationEnabled,
+  commitPatch: commitImageAnalysisPreferencePatch,
 });
 
 const toolbarStatus = new ToolbarStatus({
@@ -725,7 +737,7 @@ window.addEventListener('pagehide', () => preferenceSafetyClient.dispose(), {
 });
 
 populateLanguageOptions();
-initializeImageAnalysisControls();
+imageAnalysisPanel.initialize();
 configureSurfaceButton();
 observeReplicaStateLabel();
 uiLocalizer.schedule();
@@ -1512,8 +1524,7 @@ function purgeSourceDerivedRuntimeInternal(
 
 function clearResetOnlyRuntimeState(): void {
   quickComposer.reset();
-  imageTranslationDiagnosticHistory.clear();
-  renderImageTranslationDiagnosticHistory();
+  imageAnalysisPanel.clearDiagnostics();
   clearAutoImageLanguageResolution();
 }
 
@@ -1655,7 +1666,7 @@ async function refreshImageCaptureAccess(
     imageTranslationController.purgeSourceDerivedCache();
   }
   imageCaptureAccess = next;
-  renderImageAnalysisControls();
+  imageAnalysisPanel.render();
   configureImageTranslation();
   updateControls();
   if (
@@ -1684,7 +1695,7 @@ async function changeImageTranslationEnabled(
     return;
   }
   permissionInFlight = true;
-  renderImageAnalysisControls();
+  imageAnalysisPanel.render();
   updateControls();
   try {
     const shouldRequestPixelAccess = requestPixelAccess &&
@@ -3289,7 +3300,7 @@ function syncPreferenceControls(): void {
   syncToolbarPreferenceControls();
   quickComposer.syncPanel();
   renderReadScopeControls();
-  renderImageAnalysisControls();
+  imageAnalysisPanel.render();
   configureImageTranslation();
   uiLocalizer.schedule();
 }
@@ -3702,7 +3713,7 @@ function clearAutoImageLanguageForDifferentDocument(
 async function refreshOcrProviderRuntimeStatuses(): Promise<void> {
   if (!compiledImageTextProviderIds.includes('chrome-text-detector')) return;
   ocrProviderRuntimeStatuses.set('chrome-text-detector', 'checking');
-  renderImageAnalysisControls();
+  imageAnalysisPanel.render();
   configureImageTranslation();
   let status: OcrProviderRuntimeStatus;
   try {
@@ -3730,7 +3741,7 @@ async function refreshOcrProviderRuntimeStatuses(): Promise<void> {
     });
   }
   ocrProviderRuntimeStatuses.set('chrome-text-detector', status);
-  renderImageAnalysisControls();
+  imageAnalysisPanel.render();
   configureImageTranslation();
   if (shouldRetryOcrProviderProbe(status, textDetectorProbeRetryUsed)) {
     textDetectorProbeRetryUsed = true;
@@ -3738,428 +3749,6 @@ async function refreshOcrProviderRuntimeStatuses(): Promise<void> {
       void refreshOcrProviderRuntimeStatuses();
     }, 1_000);
   }
-}
-
-function initializeImageAnalysisControls(): void {
-  if (!hasCompiledImageAnalysisCapability()) return;
-  imageAnalysisControls = document.createElement('section');
-  imageAnalysisControls.className = 'image-analysis-settings';
-  imageAnalysisControls.setAttribute('aria-label', 'Image text options');
-  imageAnalysisHost.append(imageAnalysisControls);
-  renderImageAnalysisControls();
-}
-
-function renderImageAnalysisControls(): void {
-  const root = imageAnalysisControls;
-  if (!root) return;
-  // Rebuilding on every preference sync destroyed the control that fired the
-  // change (dropping keyboard focus) and collapsed the diagnostics section.
-  // Rebuild only when something the section shows actually changed.
-  const renderKey = JSON.stringify([
-    preferences.imageTranslationEnabled,
-    imageCaptureAccess,
-    permissionInFlight,
-    preferences.imageTextProviderOrder,
-    preferences.disabledImageTextProviderIds,
-    preferences.imageReadingMethodOrder,
-    preferences.disabledImageReadingMethodIds,
-    preferences.ocrMinimumConfidence,
-    preferences.imageScanPolicy,
-    preferences.skipSmallImages,
-    preferences.usePromptForImageLanguage,
-    preferences.usePromptForImageText,
-    [...ocrProviderRuntimeStatuses],
-  ]);
-  if (renderKey === imageAnalysisRenderKey && root.childElementCount > 0) return;
-  imageAnalysisRenderKey = renderKey;
-  const diagnosticsWereOpen = imageTranslationDiagnosticsDetails?.open ?? false;
-  root.replaceChildren();
-  const heading = document.createElement('h3');
-  setUiText(heading, 'Image text');
-  root.append(heading);
-
-  root.append(createPromptToggle(
-    'Translate text inside images (local, experimental)',
-    preferences.imageTranslationEnabled,
-    changeImageTranslationEnabled,
-    permissionInFlight || imageCaptureAccess === 'checking',
-  ));
-  const privacyNote = document.createElement('p');
-  privacyNote.className = 'microcopy';
-  const enabledPixelProviders = enabledUsablePixelOcrProviderOrder();
-  if (
-    preferences.imageTranslationEnabled &&
-    imageCaptureAccess === 'missing' &&
-    enabledPixelProviders.length > 0
-  ) {
-    setUiText(
-      privacyNote,
-      'Accessibility text can run without image access. Grant image access only to enable local pixel OCR fallbacks.',
-    );
-  } else if (imageCaptureAccess === 'checking') {
-    setUiText(privacyNote, 'Checking Chrome image access…');
-  } else {
-    setUiText(
-      privacyNote,
-      'Off by default. Visible image pixels stay on this device and are discarded after OCR.',
-    );
-  }
-  root.append(privacyNote);
-  if (
-    preferences.imageTranslationEnabled &&
-    imageCaptureAccess === 'missing' &&
-    enabledPixelProviders.length > 0
-  ) {
-    const grant = document.createElement('button');
-    grant.type = 'button';
-    grant.className = 'image-access-grant';
-    setUiText(grant, 'Grant image access');
-    grant.disabled = permissionInFlight;
-    grant.addEventListener('click', () => {
-      void changeImageTranslationEnabled(true, true);
-    });
-    root.append(grant);
-  }
-
-  const compiledOrder = effectiveCompiledProviderOrder(
-    preferences.imageTextProviderOrder,
-  );
-  if (compiledOrder.length > 0) {
-    const confidence = document.createElement('label');
-    confidence.className = 'ocr-confidence-control';
-    confidence.title =
-      'Require this provider confidence before OCR text can be used without independent corroboration.';
-    const confidenceTitle = document.createElement('span');
-    setUiText(confidenceTitle, 'Minimum OCR confidence');
-    const confidenceRow = document.createElement('span');
-    confidenceRow.className = 'ocr-confidence-row';
-    const confidenceInput = document.createElement('input');
-    confidenceInput.id = 'ocr-minimum-confidence';
-    confidenceInput.type = 'range';
-    confidenceInput.min = '25';
-    confidenceInput.max = '95';
-    confidenceInput.step = '5';
-    confidenceInput.value = String(preferences.ocrMinimumConfidence * 100);
-    confidenceInput.setAttribute(
-      'aria-describedby',
-      'ocr-minimum-confidence-help',
-    );
-    const confidenceOutput = document.createElement('output');
-    confidenceOutput.setAttribute('for', confidenceInput.id);
-    const renderConfidence = (): void => {
-      confidenceOutput.value = `${confidenceInput.value}%`;
-    };
-    renderConfidence();
-    confidenceInput.addEventListener('input', renderConfidence);
-    confidenceInput.addEventListener('change', () => {
-      const selected = Number(confidenceInput.value) / 100;
-      if (
-        isOcrMinimumConfidence(selected) &&
-        OCR_MINIMUM_CONFIDENCE_OPTIONS.includes(selected)
-      ) {
-        void commitImageAnalysisPreferencePatch({
-          ocrMinimumConfidence: selected,
-        });
-      }
-    });
-    confidenceRow.append(confidenceInput, confidenceOutput);
-    const confidenceHelp = document.createElement('small');
-    confidenceHelp.id = 'ocr-minimum-confidence-help';
-    confidenceHelp.className = 'microcopy';
-    setUiText(
-      confidenceHelp,
-      'Higher values reduce false text detections but may miss faint or stylized text.',
-    );
-    confidence.append(confidenceTitle, confidenceRow, confidenceHelp);
-    root.append(confidence);
-  }
-
-    const orderLabel = document.createElement('p');
-    orderLabel.className = 'microcopy';
-    setUiText(orderLabel, 'Image reading priority');
-    orderLabel.title =
-      'This order controls which methods Simul attempts first and breaks close evidence ties.';
-    root.append(orderLabel);
-    const orderHelp = document.createElement('p');
-    orderHelp.className = 'microcopy';
-    setUiText(
-      orderHelp,
-      'Methods are attempted from top to bottom. Uncertain accessibility text may be compared with later OCR; the saved order breaks close ties.',
-    );
-    root.append(orderHelp);
-    const list = document.createElement('ol');
-    list.className = 'ocr-provider-order';
-    const disabledMethods = new Set(
-      preferences.disabledImageReadingMethodIds,
-    );
-    const readingOrder = visibleImageReadingMethodOrder(
-      preferences.imageReadingMethodOrder,
-      compiledOrder,
-    );
-    readingOrder.forEach((id, index) => {
-      const item = document.createElement('li');
-      const providerToggle = document.createElement('label');
-      providerToggle.className = 'ocr-provider-toggle';
-      providerToggle.title =
-        'Turn this local image-reading method on or off without changing its priority.';
-      const enabled = document.createElement('input');
-      enabled.type = 'checkbox';
-      enabled.checked = !disabledMethods.has(id);
-      enabled.setAttribute(
-        'aria-label',
-        `${enabled.checked ? 'Disable' : 'Enable'} ${imageReadingMethodName(id)}`,
-      );
-      enabled.addEventListener('change', () => {
-        const nextDisabled = new Set(
-          preferences.disabledImageReadingMethodIds,
-        );
-        if (enabled.checked) nextDisabled.delete(id);
-        else nextDisabled.add(id);
-        void commitImageAnalysisPreferencePatch({
-          disabledImageReadingMethodIds: preferences.imageReadingMethodOrder
-            .filter((methodId) => nextDisabled.has(methodId)),
-        });
-      });
-      const name = document.createElement('span');
-      name.textContent = imageReadingMethodName(id);
-      providerToggle.append(enabled, name);
-      item.append(providerToggle);
-      const runtimeStatus = id === ACCESSIBILITY_TEXT_METHOD_ID
-        ? undefined
-        : ocrProviderRuntimeStatuses.get(id);
-      if (id === ACCESSIBILITY_TEXT_METHOD_ID) {
-        const status = document.createElement('span');
-        status.className = 'ocr-provider-status ocr-provider-status-available';
-        status.textContent = 'No pixels';
-        status.title = 'Uses direct image aria-label or alt text and does not require screenshot permission.';
-        item.append(status);
-      }
-      if (runtimeStatus) {
-        const status = document.createElement('span');
-        status.className = runtimeStatus === 'checking'
-          ? 'ocr-provider-status'
-          : `ocr-provider-status ocr-provider-status-${runtimeStatus.status}`;
-        status.textContent = runtimeStatus === 'checking'
-          ? 'Checking…'
-          : runtimeStatus.status === 'available'
-            ? 'Available'
-            : 'Unavailable';
-        status.title = runtimeStatus === 'checking'
-          ? 'Checking whether this Chrome runtime can complete a local detect call.'
-          : runtimeStatus.status === 'available'
-            ? 'This Chrome runtime completed the local capability probe.'
-            : runtimeStatus.reason === 'api-missing'
-              ? 'This Chrome runtime does not expose the experimental TextDetector API.'
-              : 'This Chrome runtime could not complete the TextDetector capability probe.';
-        item.append(status);
-      }
-      const buttons = document.createElement('span');
-      buttons.className = 'ocr-order-buttons';
-      const up = createOrderButton('↑', 'Move earlier', index === 0, () =>
-        moveImageReadingMethod(readingOrder, index, -1),
-      );
-      const down = createOrderButton(
-        '↓',
-        'Move later',
-        index === readingOrder.length - 1,
-        () => moveImageReadingMethod(readingOrder, index, 1),
-      );
-      buttons.append(up, down);
-      item.append(buttons);
-      list.append(item);
-    });
-    root.append(list);
-    if (compiledOrder.includes('chrome-text-detector')) {
-      const platformNote = document.createElement('p');
-      platformNote.className = 'microcopy';
-      setUiText(
-        platformNote,
-        'Chrome TextDetector is experimental and platform-dependent. When its local detect probe is unavailable, Simul skips capture work for it and falls through to the next enabled provider.',
-      );
-      root.append(platformNote);
-    }
-    if (compiledOrder.includes('tesseract')) {
-      const tesseractNote = document.createElement('p');
-      tesseractNote.className = 'microcopy';
-      setUiText(
-        tesseractNote,
-        'Tesseract.js runs locally with packaged language models. Simul loads only the language group needed for the current page.',
-      );
-      root.append(tesseractNote);
-    }
-    if (
-      effectiveCompiledProviderOrder(
-        preferences.imageTextProviderOrder,
-        preferences.disabledImageTextProviderIds,
-      ).length === 0
-    ) {
-      const paused = document.createElement('p');
-      paused.className = 'microcopy ocr-provider-paused';
-      setUiText(
-        paused,
-        'OCR is paused because every compiled provider is off.',
-      );
-      root.append(paused);
-    }
-
-    const grid = document.createElement('div');
-    grid.className = 'settings-grid';
-    const policyLabel = document.createElement('label');
-    policyLabel.title =
-      'Choose whether images are recognized only when visible, after visible work, or immediately.';
-    const policyTitle = document.createElement('span');
-    setUiText(policyTitle, 'Scan images');
-    const policy = document.createElement('select');
-    for (const value of IMAGE_SCAN_POLICIES) {
-      const label = imageScanPolicyName(value);
-      const option = createLanguageOption(value, label);
-      setUiText(option, label);
-      policy.append(option);
-    }
-    policy.value = preferences.imageScanPolicy;
-    policy.addEventListener('change', () => {
-      if (isImageScanPolicy(policy.value)) {
-        void commitImageAnalysisPreferencePatch({ imageScanPolicy: policy.value });
-      }
-    });
-    policyLabel.append(policyTitle, policy);
-    const smallLabel = document.createElement('label');
-    smallLabel.className = 'check-label';
-    smallLabel.title =
-      'Ignore tiny images that are unlikely to contain useful readable text.';
-    const small = document.createElement('input');
-    small.type = 'checkbox';
-    small.checked = preferences.skipSmallImages;
-    small.addEventListener('change', () => {
-      void commitImageAnalysisPreferencePatch({ skipSmallImages: small.checked });
-    });
-    const smallTitle = document.createElement('span');
-    setUiText(smallTitle, 'Skip very small images');
-    smallLabel.append(small, smallTitle);
-    grid.append(policyLabel, smallLabel);
-    root.append(grid);
-
-  if (compiledImageAnalysisCapabilities.promptImageLanguage) {
-    root.append(createPromptToggle(
-      'Use local Prompt for image language',
-      preferences.usePromptForImageLanguage,
-      (checked) => commitImageAnalysisPreferencePatch({
-        usePromptForImageLanguage: checked,
-      }),
-    ));
-  }
-  if (compiledImageAnalysisCapabilities.promptImageText) {
-    root.append(createPromptToggle(
-      'Use local Prompt to interpret image text',
-      preferences.usePromptForImageText,
-      (checked) => commitImageAnalysisPreferencePatch({
-        usePromptForImageText: checked,
-      }),
-    ));
-  }
-
-  const diagnostics = document.createElement('details');
-  diagnostics.className = 'image-diagnostics';
-  diagnostics.open = diagnosticsWereOpen;
-  imageTranslationDiagnosticsDetails = diagnostics;
-  const summary = document.createElement('summary');
-  setUiText(summary, 'OCR diagnostics');
-  summary.title = 'Inspect content-free OCR stages and counts for this session.';
-  const note = document.createElement('p');
-  note.className = 'microcopy';
-  setUiText(
-    note,
-    'Memory-only stages and counts; page text, URLs, pixels, and identifiers are never included.',
-  );
-  const output = document.createElement('output');
-  output.className = 'image-diagnostics-output';
-  output.setAttribute('aria-live', 'polite');
-  imageTranslationDiagnosticOutput = output;
-  renderImageTranslationDiagnosticHistory();
-  diagnostics.addEventListener('toggle', renderImageTranslationDiagnosticHistory);
-  const clear = document.createElement('button');
-  clear.type = 'button';
-  clear.className = 'image-diagnostics-clear';
-  setUiText(clear, 'Clear diagnostics');
-  clear.addEventListener('click', () => {
-    imageTranslationDiagnosticHistory.clear();
-    renderImageTranslationDiagnosticHistory();
-  });
-  diagnostics.append(summary, note, output, clear);
-  root.append(diagnostics);
-}
-
-function createOrderButton(
-  text: string,
-  label: string,
-  disabled: boolean,
-  action: () => void,
-): HTMLButtonElement {
-  const button = document.createElement('button');
-  button.type = 'button';
-  button.textContent = text;
-  button.setAttribute('aria-label', label);
-  button.title = label;
-  button.disabled = disabled;
-  button.addEventListener('click', action);
-  return button;
-}
-
-function moveImageReadingMethod(
-  renderedOrder: readonly ImageReadingMethodId[],
-  index: number,
-  direction: -1 | 1,
-): void {
-  const current = renderedOrder[index];
-  const adjacent = renderedOrder[index + direction];
-  if (!current || !adjacent) return;
-  const next = [...preferences.imageReadingMethodOrder];
-  const currentIndex = next.indexOf(current);
-  const adjacentIndex = next.indexOf(adjacent);
-  if (currentIndex < 0 || adjacentIndex < 0) return;
-  [next[currentIndex], next[adjacentIndex]] = [
-    next[adjacentIndex]!,
-    next[currentIndex]!,
-  ];
-  void commitImageAnalysisPreferencePatch({ imageReadingMethodOrder: next });
-}
-
-function createPromptToggle(
-  label: string,
-  checked: boolean,
-  save: (checked: boolean) => Promise<void>,
-  disabled = false,
-): HTMLLabelElement {
-  const wrapper = document.createElement('label');
-  wrapper.className = 'check-label image-prompt-toggle';
-  const input = document.createElement('input');
-  input.type = 'checkbox';
-  input.checked = checked;
-  input.disabled = disabled;
-  input.addEventListener('change', () => void save(input.checked));
-  const title = document.createElement('span');
-  setUiText(title, label);
-  wrapper.append(input, title);
-  return wrapper;
-}
-
-function imageReadingMethodName(id: ImageReadingMethodId): string {
-  if (id === ACCESSIBILITY_TEXT_METHOD_ID) {
-    return 'Accessibility text (aria-label / alt)';
-  }
-  const names: Record<ImageTextProviderId, string> = {
-    'chrome-text-detector': 'Chrome TextDetector (platform)',
-    tesseract: 'Tesseract.js (local)',
-    transformers: 'Transformers.js',
-    'chromium-screen-ai': 'Chromium Screen AI',
-  };
-  return names[id];
-}
-
-function imageScanPolicyName(value: (typeof IMAGE_SCAN_POLICIES)[number]): string {
-  if (value === 'visible-only') return 'Only when visible';
-  if (value === 'eager-all') return 'Everything immediately';
-  return 'Visible first, then background';
 }
 
 function configureSurfaceButton(): void {
@@ -4699,8 +4288,7 @@ function logImageTranslationDiagnostic(
   if (import.meta.env.DEV) {
     console.info('[Simul image translation]', diagnostic);
   }
-  imageTranslationDiagnosticHistory.append(diagnostic);
-  renderImageTranslationDiagnosticHistory();
+  imageAnalysisPanel.recordDiagnostic(diagnostic);
 }
 
 function logTranslationCache(
@@ -4712,15 +4300,6 @@ function logTranslationCache(
   console.info(
     `[Simul translation cache] scope=${label}; entries=${stats.entries}; characters=${stats.characters}; hits=${stats.hits}; misses=${stats.misses}; joins=${stats.inFlightJoins}; provider-loads=${stats.providerLoads}; expirations=${stats.expirations ?? 0}; purges=${stats.purges ?? 0}`,
   );
-}
-
-function renderImageTranslationDiagnosticHistory(): void {
-  const output = imageTranslationDiagnosticOutput;
-  if (!output || imageTranslationDiagnosticsDetails?.open === false) return;
-  const entries = imageTranslationDiagnosticHistory.entries;
-  output.textContent = entries.length > 0
-    ? entries.join('\n')
-    : 'No OCR activity in this companion view yet.';
 }
 
 function isAbortError(error: unknown): boolean {
