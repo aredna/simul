@@ -783,6 +783,56 @@ Left for the next PR: the side-panel split over upstream's `main.ts`
 (D25/D26 design, the seven hand-rolled counters listed in D28), and the
 deferred-work items upstream already tracks.
 
+### D31. Side-panel split over the 0.4.0 line, first pass (2026-09-05)
+
+Branch `refactor/side-panel-split` off `chore/review-redo`, PR #10 (draft,
+stacked on PR #9; retarget to `main` once #9 merges). The D25/D26 design is
+being redone over upstream's `main.ts` (5,305 lines at the start), in
+gate-green commits, each module with a unit test against fakes or a linkedom
+document. Behavior is unchanged except where noted.
+
+Landed so far (main.ts 5,305 → 3,242 lines; suite 1,197 → 1,292 tests):
+
+| Module | Owns |
+| --- | --- |
+| `lib/page-identity.ts` (extended) | tab identity reader, current-tab assertion, toolbar authorization parser, navigation and same-page URL keys, `PageAccessError`, page timeout |
+| `toolbar-status.ts` | status line, attention markers, both progress presentations |
+| `ui-localizer.ts` | atomic label localization, installed-pair rule (D14), single delayed retry, follow-up after a page translation |
+| `quick-composer.ts` | reverse-translation composer, draft counter, submit shortcut |
+| `image-analysis-panel.ts` | the "Image text" settings section and diagnostics log, rendered from a keyed view |
+| `companion-state.ts` | the 42 former module-level variables, grouped by lifetime, with `clearPage`, `resetTranslationIntent`, `clearLanguageResolution`, `abortPageWork` |
+| `currency.ts` | one `Currency` of scoped tokens replacing five hand-rolled counters and the active-follow marker |
+| `source-follower.ts` | tab following, toolbar authorization, navigation refresh gate and debounce, moved/replaced/closed-tab recovery |
+| `preference-client.ts` | preference service transport, load fallbacks, revision-guarded apply with ledger projection, view and image patches, zoom debounce |
+| `permission-flows.ts` | image-access and automatic-translation changes with grant rollback |
+
+Deliberate details:
+
+- `Currency` scopes are `identity`, `availability`, `language-refresh`,
+  `language-resolution` and `image-access`; the first four are page scopes.
+  A page load and an invalidation call `supersedePage()`, which also retires
+  a commit-driven language refresh for the old page explicitly (that refresh
+  was already discarded by the capture generation check).
+- `uiLocalizationRequestId` did not become a scope; the localizer keeps its
+  own request id because it is not page-scoped.
+- The `AutoLanguageEvidencePrecedence` API still takes a numeric revision,
+  so the language-resolution token's `id` is passed through.
+- The navigation debounce timer lives in `SourceFollower`; `queueCapture`
+  cancels it through `cancelNavigationRefresh()`.
+- `PreferenceClient.applyCommitted` reports the previous snapshot through
+  `onCommitted`, and the side panel keeps the read-scope setup-draft reset
+  and the safety-gate releases in that callback.
+- Source-substring tests that covered moved code became behavioral tests;
+  `tests/navigation-completion-integration.test.ts` is now a follower test.
+
+Still in `main.ts` (next steps, in order): the capture pipeline
+(`queueCapture` … `runReplicaEngineCheckpoint`, the commit and live-failure
+handlers, `invalidateCompanion`), the translation driver (language
+resolution with image evidence, availability, page translation, replica view
+mode), the read-scope and reset controller (commit, reset, safety messages,
+gates, controls), the image-translation configuration cluster, the detached
+surface, and the settings sync. Expect one or two more sessions.
+
 ### D7. Local toolchain notes
 
 - Nothing in the dependency set had a release inside the 7-day window
