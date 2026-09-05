@@ -537,6 +537,60 @@ describe('HtmlMirrorSourceSession', () => {
     );
   });
 
+  it('re-admits a selected panel that a remote selector change paints', () => {
+    const fixture = sourceFixture(`
+      <button id="remote" data-open="false">Open</button>
+      <div role="tab" aria-selected="true" aria-expanded="true"
+        aria-controls="remote-panel">Tab</div>
+      <section id="remote-panel" role="tabpanel">Remote panel payload</section>
+    `);
+    installPaintedMirrorTabFixture(fixture.document, fixture.window);
+    const remote = fixture.document.querySelector('#remote')!;
+    const panel = fixture.document.querySelector('#remote-panel')!;
+    const baseGetComputedStyle = fixture.window.getComputedStyle.bind(fixture.window);
+    Object.defineProperty(fixture.window, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => {
+        const style = baseGetComputedStyle(element);
+        // Models `#remote[data-open="true"] ~ [role="tabpanel"]`: the mutated
+        // element is neither a participant nor on a participant's path, so
+        // only the painted-visibility comparison can notice the reveal.
+        return element === panel && remote.getAttribute('data-open') !== 'true'
+          ? { ...style, display: 'none' } as unknown as CSSStyleDeclaration
+          : style;
+      },
+    });
+    const policy = createSourceControlledContentPolicy(
+      fixture.document as unknown as Document,
+      fixture.window as unknown as Window,
+    );
+    expect(policy.targets.get(panel)).toBe('withheld');
+    expect(sourceControlledContentMutationsMayChange(
+      [attributeRecord(remote, 'data-open')],
+      policy,
+    )).toBe(false);
+
+    fixture.start();
+    expect(JSON.stringify(fixture.checkpoints()[0])).not.toContain(
+      'Remote panel payload',
+    );
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+
+    remote.setAttribute('data-open', 'true');
+    fixture.mutate(attributeRecord(remote, 'data-open'));
+    fixture.flushFrame();
+    const revealed = fixture.patches().at(-1)!;
+    expect(JSON.stringify(revealed)).toContain('Remote panel payload');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, revealed.lastSequence));
+
+    remote.setAttribute('data-open', 'false');
+    fixture.mutate(attributeRecord(remote, 'data-open'));
+    fixture.flushFrame();
+    expect(JSON.stringify(fixture.patches().at(-1))).not.toContain(
+      'Remote panel payload',
+    );
+  });
+
   it('rematerializes a generic CSS-hidden subtree only across visibility boundaries', () => {
     const fixture = sourceFixture(`<nav><div id="wrapper" class="closed">
       <a id="trigger">About</a>
