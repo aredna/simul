@@ -1161,3 +1161,58 @@ change the typed read-scope protocol and deserve their own review.
 
 `deferred-work.md` is down to 38 entries on this branch (32 once #14 and #16
 merge).
+
+### D37. Fourth lib-level batch: typed ARIA state and two retired entries (2026-09-06)
+
+Branch `fix/deferred-lib-batch-4` off `main` (`ce5b314`), again outside the
+side panel and independent of #10, #14, #16 and #17 in source. Numbering:
+D34 (#14), D35 (#16), D36 (#17), D37 here; the later merges keep the sections
+in sequence. Trial merges of the four earlier PRs in every order found no
+source conflicts, only the regenerated `dist/` bundles and, between #14 and
+#17, these two log files; each later merge still needs a rebase and
+`npm run artifact:sync`.
+
+- **Deferred: `aria-current`, `aria-pressed` and range values (done,
+  bounded).** The typed `aria-state` proof carried only `checked` and
+  `selected`. It now also carries `pressed` (role `button`, or the `button`
+  tag without a role; `true`, `false`, `mixed`), `current` (links, buttons,
+  list items, options and summaries, and the tab, treeitem, menuitem,
+  menuitemradio, row and gridcell roles; the seven ARIA tokens, lower-cased)
+  and `valuenow` for the read-only indicator roles `progressbar`, `meter` and
+  `scrollbar` only, as a bounded decimal (up to 15 integer and 6 fraction
+  digits, no exponent). Gates: `pressed` reads under `formValues` like
+  `checked`; `current` and `valuenow` read under `controlSemantics` because
+  they are page state rather than user input. The protocol validator binds
+  each state to its gate and value set, the receiver re-checks the replica
+  element's tag and role before presenting, and the presenter path is the
+  existing generic one. Not carried, by design: `aria-valuetext` (free text)
+  and `slider`/`spinbutton` values (user input, which the classifier treats as
+  withheld on non-native widgets). Because the base sanitizer strips these
+  attributes as private, the proofs also restore source CSS that keys on
+  `[aria-current]` and `[aria-pressed]`. **Please confirm** the indicator-only
+  range choice; sliders could follow the `formValues` category rules instead.
+- **Deferred: image discovery in open shadow roots (removed without a
+  change).** `collectBoundedImageGraph` in `source-image-observer.ts` already
+  traverses open shadow roots under a root budget, the observer discovers
+  late-attached roots on a timer, and the replica anchors overlays through the
+  node map (`resolveImageAnchor`), which includes reconstructed open roots.
+  Test: "discovers and observes existing and added open shadow-root images
+  only".
+- **Deferred: doctype and quirks mode (removed without a change).** The
+  checkpoint carries `documentMode` (`standards` or `quirks`, read from
+  `compatMode`) and the engine stages `ISOLATED_HTML_QUIRKS_SHELL`, the shell
+  without the doctype, for quirks documents. Tests: "transports a bounded
+  standards-or-quirks document mode" and the engine's quirks-shell assertion.
+
+Considered and left for your call: `aria-labelledby` accessible names need a
+relationship proof (native node ids, replica-side id assignment) rather than a
+text record, because a label record becomes a painted `aria-hidden` span next
+to the control and would duplicate the visible referenced text; that is a
+protocol design to approve first. The two text-serialization privacy-floor
+entries stand: the serializer still uses its own withheld-ancestor predicate
+rather than the shared painted-visibility boundary. No Chrome binary is
+installed on this machine, so the Chrome-fixture test stays skipped and the
+manual pass remains yours.
+
+`deferred-work.md` is down to 39 entries on this branch (29 once #14, #16,
+#17 and this batch all merge).
