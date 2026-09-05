@@ -65,8 +65,7 @@ describe('sidepanel UI structure', () => {
     );
     expect(count?.textContent).toBe('0 / 5,000');
     expect(count?.hasAttribute('aria-live')).toBe(false);
-    expect(script).toContain('function syncComposerCharacterCount()');
-    expect(script).toContain('current >= maximum * 0.9');
+    expect(script).toContain('quickComposer.install();');
     expect(style).toContain('.composer-character-count[data-near-limit="true"]');
   });
 
@@ -507,8 +506,6 @@ describe('sidepanel UI structure', () => {
     expect(style).toContain('--surface: #111814');
     expect(style).toContain('grid-template-rows: auto minmax(0, 1fr)');
     expect(style).toContain('overflow-x: auto');
-    expect(script).toContain('translateRemembered(pair, text');
-    expect(script).toContain('composerAbortController === abortController');
     const replicaStyle = style.slice(
       style.lastIndexOf('.replica-preview {'),
       style.indexOf('.empty-state {'),
@@ -608,12 +605,6 @@ describe('sidepanel UI structure', () => {
   });
 
   it('lets UI labels follow a page translation that prepared their pair', () => {
-    // The quick composer is an explicit click and keeps its own path.
-    const composer = sliceBetween(
-      'async function translateComposer(',
-      '\nfunction cancelComposerTranslation(',
-    );
-    expect(composer).toContain("composerAvailability === 'unavailable'");
     const translation = sliceBetween(
       'async function runTranslation(',
       '\nfunction describePartialReplicaTranslation(',
