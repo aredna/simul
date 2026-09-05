@@ -284,6 +284,44 @@ describe('isolated HTML sanitizer and protocol', () => {
     expect(serialized).not.toContain('Popup payload');
   });
 
+  it('reuses a caller-provided controlled-content policy for image hints', () => {
+    const { document, window } = parseHTML(`<!doctype html><html><body>
+      <img id="photo" src="/photo.png">
+    </body></html>`);
+    installPaintedSourceFixture(document, window as unknown as Window);
+    const image = document.querySelector('#photo')!;
+    // The hint reports a responsive selection that differs from `src`.
+    Object.defineProperty(image, 'currentSrc', {
+      configurable: true,
+      value: 'https://example.test/photo-2x.png',
+    });
+    const base = 'https://example.test/';
+
+    const fresh = createSourceControlledContentPolicy(
+      document as unknown as Document,
+      window as unknown as Window,
+    );
+    expect(sanitizeSourceElementHints(
+      image, base, undefined, 'conservative', undefined, fresh,
+    ).selectedImageSource).toBe('https://example.test/photo-2x.png');
+
+    // The provided policy is the one consulted: a policy that withholds the
+    // image suppresses its source even though a fresh rebuild would not.
+    const withholding = createSourceControlledContentPolicy(
+      document as unknown as Document,
+      window as unknown as Window,
+    );
+    (withholding.targets as Map<Element, 'open-tab' | 'withheld'>).set(
+      image,
+      'withheld',
+    );
+    expect(sanitizeSourceElementHints(
+      image, base, undefined, 'conservative', undefined, withholding,
+    ).selectedImageSource).toBeUndefined();
+    expect(sanitizeSourceElementHints(image, base).selectedImageSource)
+      .toBe('https://example.test/photo-2x.png');
+  });
+
   it('withholds every panel of a tablist whose tabs both claim selection', () => {
     const { document, window } = parseHTML(`<!doctype html><html><body>
       <div role="tablist">
