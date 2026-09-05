@@ -791,7 +791,7 @@ being redone over upstream's `main.ts` (5,305 lines at the start), in
 gate-green commits, each module with a unit test against fakes or a linkedom
 document. Behavior is unchanged except where noted.
 
-Landed so far (main.ts 5,305 → 3,242 lines; suite 1,197 → 1,292 tests):
+Landed so far (main.ts 5,305 → 2,151 lines; suite 1,197 → 1,316 tests):
 
 | Module | Owns |
 | --- | --- |
@@ -805,6 +805,8 @@ Landed so far (main.ts 5,305 → 3,242 lines; suite 1,197 → 1,292 tests):
 | `source-follower.ts` | tab following, toolbar authorization, navigation refresh gate and debounce, moved/replaced/closed-tab recovery |
 | `preference-client.ts` | preference service transport, load fallbacks, revision-guarded apply with ledger projection, view and image patches, zoom debounce |
 | `permission-flows.ts` | image-access and automatic-translation changes with grant rollback |
+| `translation-driver.ts` | source-language resolution (page, image evidence, explicit), availability with the accepted-result-only rule, page translation, commit reconciliation, replica view mode |
+| `capture-pipeline.ts` | capture queueing, the page capture and engine checkpoint with image-replica activation, commit and live-failure handlers, source-navigation teardown, companion invalidation |
 
 Deliberate details:
 
@@ -824,14 +826,20 @@ Deliberate details:
   and the safety-gate releases in that callback.
 - Source-substring tests that covered moved code became behavioral tests;
   `tests/navigation-completion-integration.test.ts` is now a follower test.
+  The remaining source tests over `main.ts` read the module that now holds
+  the code where an ordering property is what they assert.
+- The translation driver's test covers the superseded availability check
+  that used to leave a pair marked as checked (H1); the pipeline's test
+  covers the same-page rebuild that keeps the last good replica, the
+  superseded capture, the engine failure diagnostics and the rebuild budget.
+- The capture pipeline's only injected function stays bodiless and lives in
+  the side panel's `readDocumentId` adapter, so the injection boundary is
+  unchanged.
 
-Still in `main.ts` (next steps, in order): the capture pipeline
-(`queueCapture` … `runReplicaEngineCheckpoint`, the commit and live-failure
-handlers, `invalidateCompanion`), the translation driver (language
-resolution with image evidence, availability, page translation, replica view
-mode), the read-scope and reset controller (commit, reset, safety messages,
-gates, controls), the image-translation configuration cluster, the detached
-surface, and the settings sync. Expect one or two more sessions.
+Still in `main.ts` (next steps, in order): the read-scope and reset
+controller (commit, reset, safety messages, gates, controls), the
+image-translation configuration cluster, the detached surface, and the
+settings sync and DOM wiring that will stay. Expect one more session.
 
 ### D7. Local toolchain notes
 
