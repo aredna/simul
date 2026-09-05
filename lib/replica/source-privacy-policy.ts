@@ -127,6 +127,12 @@ type SourceElementPaintState = 'visible' | 'hidden' | 'unknown';
 interface SourceElementPaintInputs {
   readonly state: SourceElementPaintState;
   readonly rects: readonly SourcePaintBounds[] | undefined;
+  /**
+   * The padding box, which is what an overflow clip actually confines
+   * descendants to; the border box in `rects` over-approximates it. Absent
+   * when the element has several fragments or no client geometry.
+   */
+  readonly clipRects: readonly SourcePaintBounds[] | undefined;
   readonly overflow: { readonly x: boolean; readonly y: boolean } | undefined;
   readonly readable: boolean;
 }
@@ -301,6 +307,7 @@ export function createSourceControlledContentPolicy(
       if (selected) targets.set(panel, 'open-tab');
       tabs.push(Object.freeze({ trigger, panel, selected }));
     }
+    withholdContradictoryTablists(tabs, targets);
     return finishSourceControlledContentPolicy(
       targets,
       tabs,
@@ -599,6 +606,47 @@ function appendSourceControlledId(
   index.set(id, entries);
 }
 
+/**
+ * Each tab/panel pair is proven on its own, so two tabs of one tablist that
+ * both claim selection with both panels painted would each be admitted. That
+ * contradicts the unique-selection contract; every panel of such a tablist is
+ * withheld instead. Tabs with no tablist ancestor cannot be related this way
+ * and keep their individual proofs.
+ */
+function withholdContradictoryTablists(
+  tabs: SourceControlledTabRelationship[],
+  targets: Map<Element, 'open-tab' | 'withheld'>,
+): void {
+  const groups = new Map<Element, SourceControlledTabRelationship[]>();
+  for (const tab of tabs) {
+    const tablist = closestSourceTablist(tab.trigger);
+    if (!tablist) continue;
+    const group = groups.get(tablist) ?? [];
+    group.push(tab);
+    groups.set(tablist, group);
+  }
+  const contradictory = new Set<SourceControlledTabRelationship>();
+  for (const group of groups.values()) {
+    if (group.filter((tab) => tab.selected).length <= 1) continue;
+    for (const tab of group) contradictory.add(tab);
+  }
+  if (contradictory.size === 0) return;
+  for (const tab of contradictory) targets.set(tab.panel, 'withheld');
+  for (let index = tabs.length - 1; index >= 0; index -= 1) {
+    const tab = tabs[index];
+    if (tab && contradictory.has(tab)) tabs.splice(index, 1);
+  }
+}
+
+function closestSourceTablist(trigger: Element): Element | undefined {
+  const path = readSourceFlatTreeElementPath(trigger);
+  if (!path) return undefined;
+  for (const element of path.slice(1)) {
+    if (normalizedSourceRole(element) === 'tablist') return element;
+  }
+  return undefined;
+}
+
 function readSourceControlledTabSelection(
   trigger: Element,
   panel: Element,
@@ -659,10 +707,11 @@ export function sourceElementPathIsPainted(
       ancestor === ancestor.ownerDocument.documentElement ||
       ancestor === ancestor.ownerDocument.body
     ) continue;
-    const clipped = sourcePaintInputs(ancestor, sourceWindow, paintCache).overflow;
+    const ancestorInputs = sourcePaintInputs(ancestor, sourceWindow, paintCache);
+    const clipped = ancestorInputs.overflow;
     if (!clipped) return false;
     if (!clipped.x && !clipped.y) continue;
-    const clips = sourcePaintInputs(ancestor, sourceWindow, paintCache).rects;
+    const clips = ancestorInputs.clipRects ?? ancestorInputs.rects;
     if (!clips || clips.length === 0) return false;
     const nextIntersections: SourcePaintBounds[] = [];
     for (const intersection of intersections) {
@@ -790,6 +839,7 @@ function sourcePaintInputs(
     result = Object.freeze({
       state,
       rects,
+      clipRects: readSourceElementPaddingBoxRects(element, rects),
       overflow: Object.freeze({ x: clips(overflowX), y: clips(overflowY) }),
       readable: true,
     });
@@ -797,6 +847,7 @@ function sourcePaintInputs(
     result = Object.freeze({
       state: 'unknown',
       rects: undefined,
+      clipRects: undefined,
       overflow: undefined,
       readable: false,
     });
@@ -844,6 +895,33 @@ function readSourceElementPaintRects(
   } catch {
     return undefined;
   }
+}
+
+/**
+ * An overflow clip confines descendants to the padding box: the border box
+ * shifted in by the border widths (`clientLeft`/`clientTop`) and sized by the
+ * client box, which also excludes scrollbars. Only a single-fragment element
+ * with client geometry yields one; others fall back to the border box.
+ */
+function readSourceElementPaddingBoxRects(
+  element: Element,
+  rects: readonly SourcePaintBounds[],
+): readonly SourcePaintBounds[] | undefined {
+  const [rect] = rects;
+  if (!rect || rects.length !== 1) return undefined;
+  const { clientLeft, clientTop, clientWidth, clientHeight } = element;
+  if (
+    ![clientLeft, clientTop, clientWidth, clientHeight].every(Number.isFinite) ||
+    clientWidth <= 0 || clientHeight <= 0
+  ) return undefined;
+  const left = rect.left + clientLeft;
+  const top = rect.top + clientTop;
+  return Object.freeze([Object.freeze({
+    left,
+    top,
+    right: Math.min(rect.right, left + clientWidth),
+    bottom: Math.min(rect.bottom, top + clientHeight),
+  })]);
 }
 
 function normalizedSourceRole(element: Element): string {
