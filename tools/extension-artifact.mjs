@@ -281,8 +281,13 @@ export function releaseBuildEnvironment(environment) {
 
 export async function validateArtifact(
   artifactDirectory,
+  { projectRoot = PROJECT_ROOT } = {},
 ) {
   const root = path.resolve(artifactDirectory);
+  // Reviewed sources (legal files, vendor OCR manifests) are compared from the
+  // caller's project root, so a check or sync run for another checkout never
+  // validates against this module's own tree.
+  const reviewedRoot = path.resolve(projectRoot);
   const rootStat = await safeLstat(root);
   if (!rootStat?.isDirectory() || rootStat.isSymbolicLink()) {
     throw new ArtifactError(
@@ -310,7 +315,7 @@ export async function validateArtifact(
       );
     }
   }
-  await assertReleaseLegalFiles(root, filePaths);
+  await assertReleaseLegalFiles(root, filePaths, reviewedRoot);
 
   const executableTextByPath = new Map();
   let unpackedBytes = 0;
@@ -363,6 +368,7 @@ export async function validateArtifact(
       unpackedBytes,
       providerIds: ocrProviderIds,
       maximumUnpackedBytes: MAX_UNPACKED_ARTIFACT_BYTES,
+      projectRoot: reviewedRoot,
     });
   } else if (ocrProviderIds.includes('chrome-text-detector')) {
     validateAssetFreeOcrRuntime({
@@ -389,7 +395,7 @@ export async function validateArtifact(
   };
 }
 
-async function assertReleaseLegalFiles(root, filePaths) {
+async function assertReleaseLegalFiles(root, filePaths, projectRoot) {
   for (const legalFile of REQUIRED_RELEASE_LEGAL_FILES) {
     if (!filePaths.has(legalFile.artifactPath)) {
       throw new ArtifactError(
@@ -398,7 +404,7 @@ async function assertReleaseLegalFiles(root, filePaths) {
     }
     const [artifactBytes, reviewedBytes] = await Promise.all([
       readFile(path.join(root, legalFile.artifactPath)),
-      readFile(path.join(PROJECT_ROOT, legalFile.sourcePath)),
+      readFile(path.join(projectRoot, legalFile.sourcePath)),
     ]);
     if (artifactBytes.byteLength === 0 || !artifactBytes.equals(reviewedBytes)) {
       throw new ArtifactError(
@@ -504,7 +510,7 @@ export async function checkArtifact({
         projectRoot: resolvedRoot,
         temporaryRoot,
       });
-      await validateArtifact(builtDirectory);
+      await validateArtifact(builtDirectory, { projectRoot: resolvedRoot });
     } catch (error) {
       throw new ArtifactError(
         [
@@ -516,7 +522,7 @@ export async function checkArtifact({
     }
 
     try {
-      await validateArtifact(committedDirectory);
+      await validateArtifact(committedDirectory, { projectRoot: resolvedRoot });
       const differences = await compareArtifactDirectories(
         builtDirectory,
         committedDirectory,
@@ -562,7 +568,7 @@ export async function syncArtifact({
       projectRoot: resolvedRoot,
       temporaryRoot,
     });
-    await validateArtifact(builtDirectory);
+    await validateArtifact(builtDirectory, { projectRoot: resolvedRoot });
     await replaceCanonicalDirectory({
       projectRoot: resolvedRoot,
       sourceDirectory: builtDirectory,
@@ -650,7 +656,7 @@ async function replaceCanonicalDirectory({
     }
 
     try {
-      await validatePromotedArtifact(targetDirectory);
+      await validatePromotedArtifact(targetDirectory, { projectRoot });
     } catch (error) {
       await rm(targetDirectory, { recursive: true, force: true });
       targetPromoted = false;
@@ -1337,6 +1343,7 @@ async function validatePackagedOcrRuntimeAssets({
   unpackedBytes,
   providerIds,
   maximumUnpackedBytes,
+  projectRoot,
 }) {
   if (unpackedBytes > maximumUnpackedBytes) {
     throw new ArtifactError(
@@ -1350,6 +1357,7 @@ async function validatePackagedOcrRuntimeAssets({
       root,
       filePaths,
       unpackedBytes,
+      projectRoot,
     })) approvedRuntimePaths.add(assetPath);
   }
   for (const relativePath of filePaths) {
@@ -1403,6 +1411,7 @@ async function validateTesseractRuntimeAssets({
   root,
   filePaths,
   unpackedBytes,
+  projectRoot,
 }) {
 
   const manifestPath = 'ocr/tesseract/asset-manifest.json';
@@ -1417,7 +1426,7 @@ async function validateTesseractRuntimeAssets({
     path.join(root, ...manifestPath.split('/')),
   );
   const approvedManifestBytes = await readFile(
-    path.join(PROJECT_ROOT, 'vendor', 'ocr', 'tesseract', 'asset-manifest.json'),
+    path.join(projectRoot, 'vendor', 'ocr', 'tesseract', 'asset-manifest.json'),
   );
   if (!artifactManifestBytes.equals(approvedManifestBytes)) {
     throw new ArtifactError(
@@ -1428,7 +1437,7 @@ async function validateTesseractRuntimeAssets({
     path.join(root, ...noticesPath.split('/')),
   );
   const approvedNoticesBytes = await readFile(
-    path.join(PROJECT_ROOT, 'vendor', 'ocr', 'THIRD_PARTY_NOTICES.md'),
+    path.join(projectRoot, 'vendor', 'ocr', 'THIRD_PARTY_NOTICES.md'),
   );
   if (
     artifactNoticesBytes.byteLength === 0 ||
