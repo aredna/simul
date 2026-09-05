@@ -1216,3 +1216,51 @@ manual pass remains yours.
 
 `deferred-work.md` is down to 39 entries on this branch (29 once #14, #16,
 #17 and this batch all merge).
+
+### D38. Slider and spinbutton range values under formValues (2026-09-06)
+
+Branch `fix/slider-spinbutton-form-values` off `main` (`33501d8`). Resolves the
+first of the two calls D37 left open ("Please confirm the indicator-only range
+choice; sliders could follow the formValues category rules instead"). The call:
+carry user-editable range values, under the form-value gate.
+
+- **ARIA widgets (`role="slider"`, `role="spinbutton"`).** The typed `aria-state`
+  proof gains a `valueinput` state that reads the same `aria-valuenow`
+  attribute as the indicator-only `valuenow`, but gates under `formValues`
+  instead of `controlSemantics` because the value is user input. Value
+  validation is identical (bounded decimal, up to 15 integer and 6 fraction
+  digits, no exponent). `semanticAriaStateGate` keeps the state->gate binding
+  the validator relies on; a new `semanticAriaStateAttribute` helper maps
+  `valueinput` back to `aria-valuenow` so the session reads and the presenter
+  paints the real attribute (never a literal `aria-valueinput`). The receiver
+  re-checks that the replica element's role is `slider`/`spinbutton` before
+  presenting, and rejects `valueinput` on an indicator or `valuenow` on a
+  slider. `aria-valuetext` (free text) still never travels.
+- **Native `<input type="range">` and `<input type="number">`.** These are the
+  native slider/spinbutton; their value lives in `.value`, not
+  `aria-valuenow`. The classifier now admits them as `ordinary-form`, so the
+  existing value-record path carries `.value` under `formValues` exactly like a
+  text field's value (and a label under `controlSemantics`). Secret and
+  personal precedence is unchanged: a `cc-*` autocomplete still classifies
+  secret and a personal autocomplete (e.g. `bday-year`) still takes the
+  stronger `personal` gate before the ordinary-form branch is reached.
+
+Why this is safe. Both paths are opt-in: nothing travels unless `formValues` is
+granted (the `full-visible` profile). The always-on base mirror still strips
+the `value` attribute and treats slider/spinbutton as private roles, so the
+page-only baseline is unchanged; the semantic protocol is the one authorized,
+gated channel, exactly as it already is for ordinary text-input values. The
+asymmetry D37 noted -- typed text carried, dragged/spun values withheld -- is
+now closed.
+
+Tests: the session ARIA proof test now expects the slider's `valueinput` under
+`formValues` (the D37 fixture that asserted exclusion is inverted) and a new
+case carries native range/number value records; the receiver test admits
+`valueinput` on a slider and rejects it on an indicator (and the reverse for
+`valuenow`); the presenter test proves `valueinput` paints and restores
+`aria-valuenow` without a literal `aria-valueinput`; the classifier test admits
+native range/number as ordinary form while keeping personal/secret precedence.
+`npm run check` is green and `dist/chrome-unpacked` is re-synced.
+
+The second open call (D37's `aria-labelledby` accessible names, plus
+`aria-describedby`) is a separate relationship-proof change on its own branch.

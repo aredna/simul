@@ -427,26 +427,35 @@ describe('semantic source receiver', () => {
     });
     const aria = (
       nodeId: number,
-      state: 'pressed' | 'current' | 'valuenow',
+      state: 'pressed' | 'current' | 'valuenow' | 'valueinput',
       value: string,
     ) => ({
       kind: 'aria-state', bridge: 'isolated-html', nodeId, revision: 1,
-      gate: state === 'pressed' ? 'formValues' : 'controlSemantics',
+      gate: state === 'pressed' || state === 'valueinput'
+        ? 'formValues'
+        : 'controlSemantics',
       state, value, classifierVersion: 1,
     } as const);
 
     expect(receiver.applyBatch(createSemanticSourceBatch(
       identity, 'read-v1-111111', 1, [],
-      [aria(1, 'current', 'page'), aria(3, 'valuenow', '42'), aria(5, 'pressed', 'true')],
+      [
+        aria(1, 'current', 'page'), aria(3, 'valuenow', '42'),
+        aria(4, 'valueinput', '7'), aria(5, 'pressed', 'true'),
+      ],
     ))).toBeDefined();
     expect(presented.at(-1)?.map((proof) => proof.kind === 'aria-state'
       ? `${proof.proof.state}=${proof.proof.value}`
-      : proof.kind)).toEqual(['current=page', 'valuenow=42', 'pressed=true']);
+      : proof.kind)).toEqual([
+        'current=page', 'valuenow=42', 'valueinput=7', 'pressed=true',
+      ]);
 
-    // A slider's value is user input, not an indicator; a plain div has no
-    // current-item semantics; a link is not a toggle button.
+    // A slider's value is user input (valueinput), never an indicator's
+    // read-only valuenow; an indicator never carries the user-input value; a
+    // plain div has no current-item semantics; a link is not a toggle button.
     for (const forged of [
       aria(4, 'valuenow', '7'),
+      aria(3, 'valueinput', '42'),
       aria(2, 'current', 'page'),
       aria(1, 'pressed', 'true'),
     ]) {
