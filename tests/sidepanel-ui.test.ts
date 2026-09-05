@@ -452,25 +452,20 @@ describe('sidepanel UI structure', () => {
     );
   });
 
-  it('protects an in-flight active-tab follow from stale tab updates', () => {
-    expect(script).toContain('state.activeFollowRequest !== undefined');
-    expect(script).toContain('state.activeFollowRequest = request');
-    expect(script).toContain('finishActiveFollowRequest(request)');
-  });
-
-  it('keeps URL-only navigation from rebuilding the live replica', () => {
+  it('routes every tab and window event through the source follower', () => {
     expect(script).toContain('new NavigationRefreshGate()');
-    expect(script).toContain('isUrlOnlyNavigationSignal(');
-    expect(script).toContain('.observeSameDocumentUrl(');
-    expect(script).toContain('.shouldScheduleComplete(');
-    expect(script).toContain('navigationPageIdentityKey(state.followedPageIdentity)');
-  });
-
-  it('reacquires the source after an active tab closes or is replaced', () => {
-    expect(script).toContain('browser.tabs.onReplaced.addListener(');
-    expect(script).toContain('shouldRecoverRemovedActiveSource(');
-    expect(script).toContain('followReplacedSourceTab(');
-    expect(script).toContain('The source tab was closed and no neighboring');
+    expect(script).toContain('navigationRefreshGate.consumeCapture(');
+    for (const handler of [
+      'sourceFollower.acceptAuthorizedTab(authorizedTab)',
+      'sourceFollower.handleTabActivated(tabId, windowId)',
+      'sourceFollower.handleWindowFocusChanged(windowId)',
+      'sourceFollower.handleTabAttached(tabId, newWindowId)',
+      'sourceFollower.handleTabUpdated(tabId, changeInfo, tab)',
+      'sourceFollower.handleTabReplaced(addedTabId, removedTabId)',
+      'sourceFollower.handleTabRemoved(tabId, removeInfo)',
+    ]) {
+      expect(script).toContain(handler);
+    }
   });
 
   it('keeps progress non-interactive and supports dark, narrow, and reduced-motion users', () => {
@@ -502,34 +497,6 @@ describe('sidepanel UI structure', () => {
     expect(darkBlock).toContain(
       'input:focus-visible { outline-color: rgb(123 217 170 / 75%); }',
     );
-  });
-
-  it('leaves the navigation refresh armed across focus and activation follows', () => {
-    const focusListener = sliceBetween(
-      'browser.windows.onFocusChanged.addListener(',
-      'browser.tabs.onAttached.addListener(',
-    );
-    expect(focusListener).not.toContain('clearNavigationTimer()');
-    expect(focusListener).toContain('followFocusedBrowserWindow(windowId, request)');
-
-    const follow = sliceBetween(
-      'async function followActivatedSourceTab(',
-      '\nfunction finishActiveFollowRequest(',
-    );
-    expect(follow).not.toContain('clearNavigationTimer()');
-    expect(follow).toContain('shouldRebuildStaleFollowedReplica({');
-    expect(follow).toContain('navigationRefreshPending: state.navigationTimer !== undefined');
-    expect(follow).toContain('tabStatus: tab.status');
-    expect(follow).toContain('captured: state.capturedPageIdentity');
-    expect(follow.indexOf('shouldRebuildStaleFollowedReplica({'))
-      .toBeGreaterThan(follow.indexOf('if (sameCompanionSourcePage('));
-    // A superseded follow still releases its own marker before returning.
-    const focusFollow = sliceBetween(
-      'async function followFocusedBrowserWindow(',
-      '\nasync function followActivatedSourceTab(',
-    );
-    expect(focusFollow.indexOf('finishActiveFollowRequest(request);\n    return;'))
-      .toBeLessThan(focusFollow.indexOf('state.activeFollowRequest = request;'));
   });
 
   it('saves zoom once the slider settles instead of on every input tick', () => {

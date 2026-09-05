@@ -119,7 +119,6 @@ export class CompanionState {
   activeTranslationKey: string | undefined;
   /** The identity request of an active-tab follow still resolving. */
   activeFollowRequest: CurrencyToken | undefined;
-  navigationTimer: ReturnType<typeof setTimeout> | undefined;
   zoomCommitTimer: ReturnType<typeof setTimeout> | undefined;
   pendingZoomPatch: PendingZoomPatch | undefined;
 

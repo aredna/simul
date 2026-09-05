@@ -27,6 +27,7 @@ import {
 import { Currency, type CurrencyToken } from './currency';
 import { ImageAnalysisPanel } from './image-analysis-panel';
 import { QuickComposer } from './quick-composer';
+import { SourceFollower } from './source-follower';
 import { ToolbarStatus } from './toolbar-status';
 import { UiLocalizer } from './ui-localizer';
 import { isQuickTranslationShortcut } from '../../lib/quick-translation-shortcut';
@@ -45,7 +46,6 @@ import {
   PageAccessError,
   assertSourceTabIsCurrent,
   hasNonDefaultPort,
-  identityFromTab,
   isSupportedPage,
   navigationPageIdentityKey,
   navigationPageScopeKey,
@@ -55,24 +55,13 @@ import {
   readPageError,
   readableError,
   withPageTimeout,
-  type AuthorizedTabRequest,
   type CapturedPageIdentity,
 } from '../../lib/page-identity';
-import {
-  isUrlOnlyNavigationSignal,
-  NavigationRefreshGate,
-  resolveNavigationUpdateStatus,
-} from '../../lib/navigation-refresh-gate';
-import { shouldRebuildStaleFollowedReplica } from '../../lib/followed-replica-currency';
+import { NavigationRefreshGate } from '../../lib/navigation-refresh-gate';
 import {
   createDetachedCompanionUrl,
   createDetachedWindowData,
-  isFocusedNormalBrowserWindow,
-  isNewerCompanionLaunchStamp,
   sameCompanionSourcePage,
-  shouldFollowActivatedTab,
-  shouldIgnoreInactiveFollowedTabUpdate,
-  shouldRecoverRemovedActiveSource,
 } from '../../lib/companion-surface';
 import {
   compiledImageAnalysisCapabilities,
@@ -633,6 +622,48 @@ const toolbarStatus = new ToolbarStatus({
   isSettingsOpen: () => state.openCompanionOverlay === 'settings',
 });
 
+const sourceFollower = new SourceFollower({
+  state,
+  currency,
+  browser: {
+    getTab: (tabId) => browser.tabs.get(tabId),
+    queryActiveTab: async (windowId) => (await browser.tabs.query(
+      windowId === undefined
+        ? { active: true, currentWindow: true }
+        : { active: true, windowId },
+    ))[0],
+    getWindow: (windowId) => browser.windows.get(windowId),
+    getCurrentWindowId: async () => (await browser.windows.getCurrent()).id,
+    getLastFocusedNormalWindowId: async () =>
+      (await browser.windows.getLastFocused({ windowTypes: ['normal'] })).id,
+    windowIdNone: browser.windows.WINDOW_ID_NONE,
+  },
+  detachedIdentityHint,
+  navigationDebounceMs: NAVIGATION_DEBOUNCE_MS,
+  navigationRefreshGate,
+  queueCapture,
+  invalidateCompanion,
+  onSourceNavigationStarted: (next) => {
+    imageTranslationController.setTopPageOrigin(next.url);
+    currency.supersedePage();
+    autoLanguageEvidencePrecedence.invalidate();
+    state.pageLanguageResolutionPending = false;
+    if (state.resolvedSourceLanguageOrigin === 'image') {
+      clearAutoImageLanguageResolution();
+    }
+    captureCoordinator.invalidate();
+    state.abortPageWork();
+    imageTranslationController.releaseReplica();
+    quickComposer.invalidate();
+  },
+  onFollowedUrlChanged: (next) =>
+    imageTranslationController.setTopPageOrigin(next.url),
+  onFollowedTabActivated: () => imageTranslationController.resume(),
+  setStatus,
+  renderError: renderErrorState,
+  updateControls,
+});
+
 const companionBuildIdentity = createExtensionBuildIdentity(
   browser.runtime.getManifest(),
 );
@@ -835,7 +866,7 @@ zoomInput.addEventListener('input', () => setZoom(Number(zoomInput.value)));
 zoomInButton.addEventListener('click', () => setZoom(state.preferences.zoomPercent + 10));
 zoomOutButton.addEventListener('click', () => setZoom(state.preferences.zoomPercent - 10));
 const requestManualRefresh = (): void => {
-  void refreshFollowedPage('manual');
+  void sourceFollower.refreshFollowedPage('manual');
 };
 refreshButton.addEventListener('click', requestManualRefresh);
 compactRefreshButton.addEventListener('click', requestManualRefresh);
@@ -883,193 +914,33 @@ window.addEventListener('pagehide', () => {
 browser.runtime.onMessage.addListener((message: unknown) => {
   const authorizedTab = readAuthorizedTabMessage(message);
   if (authorizedTab) {
-    void acceptAuthorizedTab(authorizedTab);
+    void sourceFollower.acceptAuthorizedTab(authorizedTab);
     return;
   }
 });
 
 browser.tabs.onActivated.addListener(({ tabId, windowId }) => {
-  // Images deferred while the followed tab was inactive can be captured
-  // again now that it is the active tab.
-  if (state.followedPageIdentity?.tabId === tabId) imageTranslationController.resume();
-  if (
-    shouldFollowActivatedTab(
-      isDetachedWindow,
-      state.preferences.popoutTabMode,
-      state.panelWindowId,
-      windowId,
-    )
-  ) {
-    void followActivatedSourceTab(tabId, windowId);
-    return;
-  }
-  if (
-    !isDetachedWindow &&
-    state.followedPageIdentity?.windowId === windowId &&
-    state.followedPageIdentity.tabId !== tabId
-  ) {
-    currency.supersede('identity');
-    state.followedPageIdentity = undefined;
-    clearNavigationTimer();
-    invalidateCompanion(
-      'The active tab changed. Select the extension on the page you want to follow.',
-    );
-  }
+  sourceFollower.handleTabActivated(tabId, windowId);
 });
 
 browser.windows.onFocusChanged.addListener((windowId) => {
-  if (
-    !isDetachedWindow ||
-    state.preferences.popoutTabMode !== 'active' ||
-    windowId === browser.windows.WINDOW_ID_NONE ||
-    windowId === state.panelWindowId
-  ) return;
-  // The pending navigation refresh is left armed: its callback re-validates
-  // the followed identity, and clearing it here lost the refresh whenever
-  // focus moved within the debounce window (review M1).
-  const request = currency.begin('identity');
-  void followFocusedBrowserWindow(windowId, request);
+  sourceFollower.handleWindowFocusChanged(windowId);
 });
 
 browser.tabs.onAttached.addListener((tabId, { newWindowId }) => {
-  if (
-    isDetachedWindow &&
-    state.followedPageIdentity?.tabId === tabId &&
-    newWindowId !== state.panelWindowId
-  ) {
-    if (state.preferences.popoutTabMode === 'active') {
-      void followActivatedSourceTab(tabId, newWindowId);
-    } else {
-      const request = currency.begin('identity');
-      clearNavigationTimer();
-      void followMovedLockedSourceTab(tabId, newWindowId, request);
-    }
-  }
+  sourceFollower.handleTabAttached(tabId, newWindowId);
 });
 
 browser.tabs.onUpdated.addListener((tabId, changeInfo, tab) => {
-  const followed = state.followedPageIdentity;
-  if (!followed || followed.tabId !== tabId) return;
-  // An update from the tab being left can race the activation event for the
-  // newly selected tab. In active-follow mode it is stale immediately and
-  // must not invalidate the newer identity request.
-  if (shouldIgnoreInactiveFollowedTabUpdate(
-    isDetachedWindow,
-    state.preferences.popoutTabMode,
-    tab.active,
-    state.activeFollowRequest !== undefined,
-  )) return;
-  const hasUrlChange = typeof changeInfo.url === 'string';
-  const navigationStatus = resolveNavigationUpdateStatus(
-    changeInfo.status,
-    tab.status,
-    hasUrlChange,
-  );
-  const nextUrl = changeInfo.url ?? tab.url ?? followed.url;
-  if (!isSupportedPage(nextUrl)) {
-    if (navigationStatus === 'loading' || hasUrlChange) {
-      clearNavigationTimer();
-      invalidateCompanion(
-        'The source tab opened a restricted page. Return to a regular HTTP or HTTPS page and select the extension again.',
-      );
-    }
-    return;
-  }
-  const nextIdentity = { tabId, windowId: tab.windowId, url: nextUrl };
-  const navigationScope = navigationPageScopeKey(nextIdentity);
-  const navigationKey = navigationPageIdentityKey(nextIdentity);
-  if (navigationStatus === 'loading') {
-    if (!navigationRefreshGate.beginDocumentLoad(
-      navigationScope,
-      navigationKey,
-    )) {
-      state.followedPageIdentity = nextIdentity;
-      return;
-    }
-    imageTranslationController.setTopPageOrigin(nextIdentity.url);
-    currency.supersedePage();
-    autoLanguageEvidencePrecedence.invalidate();
-    state.pageLanguageResolutionPending = false;
-    if (state.resolvedSourceLanguageOrigin === 'image') {
-      clearAutoImageLanguageResolution();
-    }
-    captureCoordinator.invalidate();
-    state.abortPageWork();
-    imageTranslationController.releaseReplica();
-    quickComposer.invalidate();
-    state.followedPageIdentity = nextIdentity;
-    clearNavigationTimer();
-    setStatus('The source page is changing; the current mirror stays visible until the new page is ready.');
-  } else if (isUrlOnlyNavigationSignal(
-    navigationStatus,
-    hasUrlChange,
-  )) {
-    // Chrome emits URL-only updates for history/hash changes in the current
-    // document. The isolated mirror stream owns those DOM changes; rebuilding here
-    // would discard stable OCR evidence and replay the entire page.
-    const retargetScheduledDocument = navigationRefreshGate
-      .observeSameDocumentUrl(navigationScope, navigationKey);
-    const retargetPendingDocumentCapture = state.navigationTimer !== undefined &&
-      retargetScheduledDocument;
-    imageTranslationController.setTopPageOrigin(nextIdentity.url);
-    state.followedPageIdentity = nextIdentity;
-    // A completed new document may update its history URL during our short
-    // debounce. Keep that one authoritative initial capture, retargeted to the
-    // current same-document URL, instead of letting the stale timer self-drop.
-    if (retargetPendingDocumentCapture) {
-      scheduleNavigationRefresh(nextIdentity);
-    }
-  }
-  if (navigationStatus === 'complete') {
-    // A redirect may expose its final URL only on the completion signal. Keep
-    // the followed identity current before arming the debounce, otherwise its
-    // stale-identity guard can discard the only finished-document refresh.
-    imageTranslationController.setTopPageOrigin(nextIdentity.url);
-    state.followedPageIdentity = nextIdentity;
-  }
-  if (
-    navigationStatus === 'complete' &&
-    navigationRefreshGate.shouldScheduleComplete(
-      navigationScope,
-      navigationKey,
-      state.capturedPageIdentity
-        ? navigationPageIdentityKey(state.capturedPageIdentity)
-        : undefined,
-    )
-  ) {
-    scheduleNavigationRefresh(nextIdentity);
-  }
+  sourceFollower.handleTabUpdated(tabId, changeInfo, tab);
 });
 
 browser.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
-  if (state.followedPageIdentity?.tabId !== removedTabId) return;
-  const request = currency.begin('identity');
-  clearNavigationTimer();
-  void followReplacedSourceTab(addedTabId, request);
+  sourceFollower.handleTabReplaced(addedTabId, removedTabId);
 });
 
 browser.tabs.onRemoved.addListener((tabId, removeInfo) => {
-  if (state.followedPageIdentity?.tabId !== tabId) return;
-  if (shouldRecoverRemovedActiveSource(
-    isDetachedWindow,
-    state.preferences.popoutTabMode,
-    state.panelWindowId,
-    removeInfo.windowId,
-    removeInfo.isWindowClosing,
-  )) {
-    const request = currency.begin('identity');
-    state.activeFollowRequest = request;
-    clearNavigationTimer();
-    queueMicrotask(() => {
-      void followFocusedBrowserWindow(
-        removeInfo.windowId,
-        request,
-        'The source tab was closed and no neighboring readable tab became active.',
-      );
-    });
-    return;
-  }
-  invalidateCompanion('The source tab was closed.');
+  sourceFollower.handleTabRemoved(tabId, removeInfo);
 });
 
 browser.permissions.onAdded.addListener(() => {
@@ -1116,7 +987,7 @@ browser.storage.onChanged.addListener((changes, areaName) => {
     previous.popoutTabMode !== state.preferences.popoutTabMode &&
     state.preferences.popoutTabMode === 'active'
   ) {
-    void followCurrentActiveSourceTab();
+    void sourceFollower.followCurrentActiveSourceTab();
   }
   if (
     previous.replicaFidelityPolicy !== state.preferences.replicaFidelityPolicy
@@ -1146,7 +1017,7 @@ browser.storage.onChanged.addListener((changes, areaName) => {
 void initialize();
 
 async function initialize(): Promise<void> {
-  await Promise.all([loadPreferences(), loadPanelWindowId()]);
+  await Promise.all([loadPreferences(), sourceFollower.loadPanelWindowId()]);
   // Permission and experimental-provider probes are optional readiness work.
   // Start them after state.preferences load, but never put them on the critical path
   // for the first visible replica.
@@ -1156,36 +1027,13 @@ async function initialize(): Promise<void> {
   ]);
   const [, sourceResult] = await Promise.allSettled([
     checkPanelPlacement(),
-    initializeSourcePage(),
+    sourceFollower.initializeSourcePage(),
   ]);
   if (sourceResult.status === 'rejected') {
     const message = readPageError(sourceResult.reason);
     renderErrorState(message);
     setStatus(message, 'error');
     updateControls();
-  }
-}
-
-async function initializeSourcePage(): Promise<void> {
-  if (detachedIdentityHint) {
-    state.followedPageIdentity = state.preferences.popoutTabMode === 'active'
-      ? await readActivePageIdentity(detachedIdentityHint.windowId)
-      : identityFromTab(
-          await browser.tabs.get(detachedIdentityHint.tabId),
-          undefined,
-          false,
-        );
-    queueCapture({ identity: state.followedPageIdentity, reason: 'initial' });
-    return;
-  }
-  await refreshFollowedPage('initial');
-}
-
-async function loadPanelWindowId(): Promise<void> {
-  try {
-    state.panelWindowId = (await browser.windows.getCurrent()).id;
-  } catch {
-    state.panelWindowId = undefined;
   }
 }
 
@@ -1769,268 +1617,8 @@ async function changeImageTranslationEnabled(
   }
 }
 
-async function acceptAuthorizedTab(authorization: AuthorizedTabRequest): Promise<void> {
-  const authorized = authorization.identity;
-  const lockedIdentity = state.followedPageIdentity ?? detachedIdentityHint;
-  if (
-    isDetachedWindow &&
-    lockedIdentity &&
-    state.preferences.popoutTabMode === 'locked' &&
-    (authorized.windowId !== lockedIdentity.windowId ||
-      authorized.tabId !== lockedIdentity.tabId)
-  ) return;
-  if (authorization.launchStamp) {
-    if (!isNewerCompanionLaunchStamp(
-      state.latestToolbarLaunchStamp,
-      authorization.launchStamp,
-    )) return;
-    state.latestToolbarLaunchStamp = authorization.launchStamp;
-  }
-  const request = currency.begin('identity');
-  if (!isDetachedWindow) {
-    if (state.panelWindowId === undefined) await loadPanelWindowId();
-    if (
-      !currency.isCurrent(request) ||
-      state.panelWindowId === undefined ||
-      authorized.windowId !== state.panelWindowId
-    ) return;
-  }
-  if (!currency.isCurrent(request)) return;
-  clearNavigationTimer();
-  state.followedPageIdentity = authorized;
-  queueCapture({ identity: authorized, reason: 'authorized' });
-}
-
-async function followMovedLockedSourceTab(
-  tabId: number,
-  windowId: number,
-  request: CurrencyToken,
-): Promise<void> {
-  try {
-    const identity = identityFromTab(
-      await browser.tabs.get(tabId),
-      undefined,
-      false,
-    );
-    if (
-      !currency.isCurrent(request) ||
-      state.preferences.popoutTabMode !== 'locked' ||
-      identity.tabId !== tabId ||
-      identity.windowId !== windowId
-    ) return;
-    state.detachedSourceWindowId = windowId;
-    queueCapture({ identity, reason: 'navigation' });
-  } catch (error) {
-    if (!currency.isCurrent(request)) return;
-    invalidateCompanion(
-      `${readPageError(error)} The locked source tab could not be followed after it moved windows.`,
-    );
-  }
-}
-
-async function followReplacedSourceTab(
-  tabId: number,
-  request: CurrencyToken,
-): Promise<void> {
-  if (!currency.isCurrent(request)) return;
-  if (isDetachedWindow && state.preferences.popoutTabMode === 'active') {
-    state.activeFollowRequest = request;
-  }
-  try {
-    const identity = identityFromTab(
-      await browser.tabs.get(tabId),
-      undefined,
-      state.requiresActiveSourceTab,
-    );
-    if (!currency.isCurrent(request)) return;
-    state.detachedSourceWindowId = identity.windowId;
-    queueCapture({ identity, reason: 'navigation' });
-  } catch (error) {
-    if (!currency.isCurrent(request)) return;
-    invalidateCompanion(
-      `${readPageError(error)} Chrome replaced the source tab, but its new page could not be followed.`,
-    );
-  } finally {
-    finishActiveFollowRequest(request);
-  }
-}
-
-async function refreshFollowedPage(reason: CaptureRequest['reason']): Promise<void> {
-  const request = currency.begin('identity');
-  try {
-    const identity = state.followedPageIdentity
-      ? await readCurrentFollowedIdentity(state.followedPageIdentity)
-      : await readActivePageIdentity();
-    if (!currency.isCurrent(request)) return;
-    state.followedPageIdentity = identity;
-    queueCapture({ identity, reason });
-  } catch (error) {
-    if (!currency.isCurrent(request)) return;
-    const message = readPageError(error);
-    if (!state.snapshot) renderErrorState(message);
-    setStatus(message, 'error');
-    updateControls();
-  }
-}
-
-async function followCurrentActiveSourceTab(): Promise<void> {
-  if (!detachedIdentityHint || state.preferences.popoutTabMode !== 'active') return;
-  const request = currency.begin('identity');
-  state.activeFollowRequest = request;
-  clearNavigationTimer();
-  try {
-    const lastFocused = await browser.windows.getLastFocused({
-      windowTypes: ['normal'],
-    });
-    if (
-      !currency.isCurrent(request) ||
-      state.preferences.popoutTabMode !== 'active'
-    ) return;
-    const sourceWindowId =
-      lastFocused.id ??
-      state.followedPageIdentity?.windowId ??
-      state.detachedSourceWindowId ??
-      detachedIdentityHint.windowId;
-    const [tab] = await browser.tabs.query({
-      active: true,
-      windowId: sourceWindowId,
-    });
-    if (
-      !currency.isCurrent(request) ||
-      state.preferences.popoutTabMode !== 'active'
-    ) return;
-    if (tab?.id === undefined) {
-      invalidateCompanion('The source browser window has no active readable tab.');
-      return;
-    }
-    await followActivatedSourceTab(tab.id, sourceWindowId, tab, request);
-  } catch (error) {
-    if (!currency.isCurrent(request)) return;
-    invalidateCompanion(
-      `${readPageError(error)} Active-tab following needs page access for each newly selected site.`,
-    );
-  } finally {
-    finishActiveFollowRequest(request);
-  }
-}
-
-async function followFocusedBrowserWindow(
-  windowId: number,
-  request: CurrencyToken,
-  missingTabMessage?: string,
-): Promise<void> {
-  if (
-    !currency.isCurrent(request) ||
-    state.preferences.popoutTabMode !== 'active'
-  ) {
-    // tabs.onRemoved marks its request before the microtask that reaches
-    // here. A request superseded in that gap must still release the marker,
-    // or updates for the followed tab stay ignored until the next follow.
-    finishActiveFollowRequest(request);
-    return;
-  }
-  state.activeFollowRequest = request;
-  try {
-    const sourceWindow = await browser.windows.get(windowId);
-    if (
-      !currency.isCurrent(request) ||
-      state.preferences.popoutTabMode !== 'active'
-    ) return;
-    if (!isFocusedNormalBrowserWindow(sourceWindow)) return;
-    const [tab] = await browser.tabs.query({ active: true, windowId });
-    if (
-      !currency.isCurrent(request) ||
-      state.preferences.popoutTabMode !== 'active'
-    ) return;
-    state.detachedSourceWindowId = windowId;
-    if (tab?.id !== undefined) {
-      await followActivatedSourceTab(tab.id, windowId, tab, request);
-    } else if (missingTabMessage && currency.isCurrent(request)) {
-      invalidateCompanion(missingTabMessage);
-    }
-  } catch {
-    if (missingTabMessage && currency.isCurrent(request)) {
-      invalidateCompanion(missingTabMessage);
-    }
-    // A closing or restricted browser window is not a new source candidate.
-  } finally {
-    finishActiveFollowRequest(request);
-  }
-}
-
-async function followActivatedSourceTab(
-  tabId: number,
-  windowId: number,
-  knownTab?: Browser.tabs.Tab,
-  existingRequest?: CurrencyToken,
-): Promise<void> {
-  if (
-    !shouldFollowActivatedTab(
-      isDetachedWindow,
-      state.preferences.popoutTabMode,
-      state.panelWindowId,
-      windowId,
-    )
-  ) return;
-
-  const request = existingRequest ?? currency.begin('identity');
-  if (!currency.isCurrent(request)) return;
-  state.activeFollowRequest = request;
-  // A pending navigation refresh stays armed (see windows.onFocusChanged);
-  // queueCapture clears it once a different page is followed.
-  try {
-    const sourceWindow = await browser.windows.get(windowId);
-    if (
-      !currency.isCurrent(request) ||
-      state.preferences.popoutTabMode !== 'active'
-    ) return;
-    if (!isFocusedNormalBrowserWindow(sourceWindow)) return;
-    const tab = knownTab ?? await browser.tabs.get(tabId);
-    const identity = identityFromTab(tab, undefined, true);
-    if (
-      !currency.isCurrent(request) ||
-      state.preferences.popoutTabMode !== 'active'
-    ) return;
-    state.detachedSourceWindowId = windowId;
-    if (sameCompanionSourcePage(
-      state.followedPageIdentity,
-      identity,
-      normalizedPageUrl,
-    )) {
-      // Already following this page. If the rendered replica is still an
-      // older page of the same tab (a navigation whose refresh never ran),
-      // rebuild now instead of leaving the stale mirror frozen (review M1).
-      if (shouldRebuildStaleFollowedReplica({
-        captureInFlight: state.captureInFlight,
-        navigationRefreshPending: state.navigationTimer !== undefined,
-        tabStatus: tab.status,
-        captured: state.capturedPageIdentity,
-        identity,
-        normalizeUrl: normalizedPageUrl,
-      })) {
-        queueCapture({ identity, reason: 'navigation' });
-      }
-      return;
-    }
-    queueCapture({ identity, reason: 'navigation' });
-  } catch (error) {
-    if (!currency.isCurrent(request)) return;
-    invalidateCompanion(
-      `${readPageError(error)} Active-tab following needs page access for each newly selected site.`,
-    );
-  } finally {
-    finishActiveFollowRequest(request);
-  }
-}
-
-function finishActiveFollowRequest(request: CurrencyToken): void {
-  if (state.activeFollowRequest?.id === request.id) {
-    state.activeFollowRequest = undefined;
-  }
-}
-
 function queueCapture(request: CaptureRequest): void {
-  clearNavigationTimer();
+  sourceFollower.cancelNavigationRefresh();
   navigationRefreshGate.consumeCapture(
     navigationPageScopeKey(request.identity),
     navigationPageIdentityKey(request.identity),
@@ -3077,7 +2665,7 @@ async function changePopoutTabMode(popoutTabMode: PopoutTabMode): Promise<void> 
   const saved = await commitViewPreferencePatch({ popoutTabMode });
   if (!saved || state.preferences.popoutTabMode !== popoutTabMode) return;
   if (isDetachedWindow && popoutTabMode === 'active') {
-    await followCurrentActiveSourceTab();
+    await sourceFollower.followCurrentActiveSourceTab();
   }
 }
 
@@ -3946,25 +3534,6 @@ async function reloadPreferencesFromStorage(): Promise<void> {
   syncPreferenceControls();
 }
 
-function scheduleNavigationRefresh(identity: CapturedPageIdentity): void {
-  clearNavigationTimer();
-  state.navigationTimer = setTimeout(() => {
-    state.navigationTimer = undefined;
-    if (
-      state.followedPageIdentity?.tabId !== identity.tabId ||
-      state.followedPageIdentity.windowId !== identity.windowId ||
-      navigationPageIdentityKey(state.followedPageIdentity) !==
-        navigationPageIdentityKey(identity)
-    ) return;
-    queueCapture({ identity, reason: 'navigation' });
-  }, NAVIGATION_DEBOUNCE_MS);
-}
-
-function clearNavigationTimer(): void {
-  if (state.navigationTimer !== undefined) clearTimeout(state.navigationTimer);
-  state.navigationTimer = undefined;
-}
-
 function invalidateCompanion(message: string): void {
   navigationRefreshGate.reset();
   currency.supersedePage();
@@ -4005,25 +3574,6 @@ function renderErrorState(message: string): void {
   replicaStatusContainer.replaceChildren(wrapper);
   replicaStatusContainer.hidden = false;
 }
-
-async function readActivePageIdentity(
-  sourceWindowId?: number,
-): Promise<CapturedPageIdentity> {
-  const [tab] = await browser.tabs.query(
-    sourceWindowId === undefined
-      ? { active: true, currentWindow: true }
-      : { active: true, windowId: sourceWindowId },
-  );
-  return identityFromTab(tab, undefined, true);
-}
-
-async function readCurrentFollowedIdentity(
-  followed: CapturedPageIdentity,
-): Promise<CapturedPageIdentity> {
-  const tab = await browser.tabs.get(followed.tabId);
-  return identityFromTab(tab, followed.url, state.requiresActiveSourceTab);
-}
-
 
 function isCurrentAvailabilityRequest(
   request: CurrencyToken,
