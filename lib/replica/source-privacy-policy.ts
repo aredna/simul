@@ -424,12 +424,11 @@ export function sourceControlledContentMutationsMayChange(
         }
         continue;
       }
-      if (
-        name === 'aria-hidden' || name === 'hidden' || name === 'class' ||
-        name === 'style'
-      ) {
-        if (sourceControlledContentLayoutMayChange(element, policy)) return true;
-      }
+      // Every remaining attribute is CSS selector surface. A custom state such
+      // as `data-state="open"` on a participant or on one of its flat-tree
+      // ancestors reveals or withdraws a panel exactly as `hidden` does, so
+      // the same bounded layout check decides instead of a fixed name list.
+      if (sourceControlledContentLayoutMayChange(element, policy)) return true;
       continue;
     }
     if (record.type === 'characterData') {

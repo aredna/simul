@@ -19,7 +19,10 @@ import {
 } from '../lib/replica/html-mirror-source';
 import { createReplicaIdentity } from '../lib/replica/replica-identity';
 import { sourceDocumentIdentity } from '../lib/replica/source-identity';
-import { createSourceControlledContentPolicy } from '../lib/replica/source-privacy-policy';
+import {
+  createSourceControlledContentPolicy,
+  sourceControlledContentMutationsMayChange,
+} from '../lib/replica/source-privacy-policy';
 
 const SYNTHETIC_STATIC_LOGO = "data:image/svg+xml,%3csvg%20width='48'%20height='48'%20viewBox='0%200%2048%2048'%20fill='none'%20xmlns='http://www.w3.org/2000/svg'%3e%3cpath%20d='M4.25%204.25H43.75V43.75H4.25Z'%20fill='%236C5CE7'/%3e%3cpath%20d='M12.5%2034C15.5%2024.25%2019.75%201.2e1%2024%2012C28.25%2012%2032.5%2024.25%2035.5%2034Z'%20fill='white'/%3e%3c/svg%3e";
 
@@ -477,6 +480,60 @@ describe('HtmlMirrorSourceSession', () => {
     fixture.flushFrame();
     expect(JSON.stringify(fixture.patches().at(-1))).not.toContain(
       'Settled panel payload',
+    );
+  });
+
+  it('refreshes selected-panel admission when a custom ancestor attribute reveals it', () => {
+    const fixture = sourceFixture(`
+      <div role="tab" aria-selected="true" aria-expanded="true"
+        aria-controls="state-panel">Tab</div>
+      <div id="state-wrapper" data-state="closed">
+        <section id="state-panel" role="tabpanel">State panel payload</section>
+      </div>
+      <div id="elsewhere" data-state="closed">Elsewhere</div>
+    `);
+    installPaintedMirrorTabFixture(fixture.document, fixture.window);
+    const wrapper = fixture.document.querySelector('#state-wrapper')!;
+    const panel = fixture.document.querySelector('#state-panel')!;
+    const elsewhere = fixture.document.querySelector('#elsewhere')!;
+    const baseGetComputedStyle = fixture.window.getComputedStyle.bind(fixture.window);
+    Object.defineProperty(fixture.window, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => {
+        const style = baseGetComputedStyle(element);
+        // Models `#state-wrapper[data-state="open"] > [role="tabpanel"]`
+        // revealing the panel through a custom attribute, not `hidden`.
+        return element === panel && wrapper.getAttribute('data-state') !== 'open'
+          ? { ...style, display: 'none' } as unknown as CSSStyleDeclaration
+          : style;
+      },
+    });
+
+    const policy = createSourceControlledContentPolicy(
+      fixture.document as unknown as Document,
+      fixture.window as unknown as Window,
+    );
+    expect(policy.targets.get(panel)).toBe('withheld');
+    expect(sourceControlledContentMutationsMayChange(
+      [attributeRecord(wrapper, 'data-state')],
+      policy,
+    )).toBe(true);
+    expect(sourceControlledContentMutationsMayChange(
+      [attributeRecord(elsewhere, 'data-state')],
+      policy,
+    )).toBe(false);
+
+    fixture.start();
+    expect(JSON.stringify(fixture.checkpoints()[0])).not.toContain(
+      'State panel payload',
+    );
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+
+    wrapper.setAttribute('data-state', 'open');
+    fixture.mutate(attributeRecord(wrapper, 'data-state'));
+    fixture.flushFrame();
+    expect(JSON.stringify(fixture.patches().at(-1))).toContain(
+      'State panel payload',
     );
   });
 
