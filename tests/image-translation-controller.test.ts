@@ -870,6 +870,106 @@ describe('ImageTranslationController', () => {
     controller.dispose();
   });
 
+  it('requeues settled work when a new replay lease cannot install its overlay', async () => {
+    const { document } = parseHTML('<html><body><img></body></html>');
+    const image = document.querySelector('img') as unknown as HTMLImageElement;
+    const pixels = autoProbePixels(descriptor, 'ab'.repeat(32));
+    const diagnostics: unknown[] = [];
+    const recognize = vi.fn(async (): Promise<ImageRecognitionResult> => ({
+      status: 'complete',
+      cacheHit: false,
+      selectedQuality: acceptedQualitySummary(),
+      result: {
+        providerId: 'tesseract',
+        bitmapWidth: 200,
+        bitmapHeight: 100,
+        transcript: 'Opening hours',
+        transcriptConfidence: 0.95,
+        regions: [{
+          text: 'Opening hours',
+          confidence: 0.95,
+          boundingBox: { x: 10, y: 10, width: 180, height: 40 },
+        }],
+      },
+    }));
+    // The replica under lease 2 has no node for the image until it commits;
+    // the resolver reports no anchor at all until then.
+    let anchorLease = 1;
+    let anchorAvailable = true;
+    const controller = new ImageTranslationController({
+      openSource: async (_request, onChange) => {
+        queueMicrotask(() => onChange({ kind: 'upsert', descriptor }));
+        return { measure: vi.fn(), dispose: vi.fn() };
+      },
+      createPixelCoordinator: () => ({
+        acquire: async () => ({ status: 'ready', pixels }),
+      }) as unknown as PixelAcquisitionCoordinator,
+      createRecognitionCoordinator: () => ({
+        recognize,
+        clear: vi.fn(),
+        advanceResetEpoch: vi.fn(() => true),
+      }) as unknown as ImageRecognitionCoordinator,
+      resolveAnchor: () => anchorAvailable
+        ? {
+            document: sourceDocument,
+            replayLease: anchorLease,
+            image,
+            iframe: { contentDocument: document } as HTMLIFrameElement,
+          }
+        : undefined,
+      translationProvider: {
+        availability: async () => 'available',
+        createSession: async () => ({
+          translate: async (text: string) => `translated:${text}`,
+          destroy: vi.fn(),
+        }),
+      },
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      projector: {
+        scheduleFrame: (callback) => { callback(); return 1; },
+        cancelFrame: () => undefined,
+        createResizeObserver: () => undefined,
+      },
+    });
+    controller.configure({
+      enabled: true,
+      scanPolicy: 'visible-only',
+      skipSmallImages: false,
+      providerOrder: ['tesseract'],
+      sourceLanguage: 'en',
+      targetLanguage: 'ja',
+      translationIdle: true,
+      resetEpoch: 0,
+    });
+    const overlay = () =>
+      document.querySelector('[data-simul-image-method="tesseract"]');
+    const projections = () =>
+      diagnostics.filter((diagnostic) => diagnostic === 'projected').length;
+    controller.activateReplica(request, 3, 1);
+    await vi.waitFor(() => expect(diagnostics).toContain('projected'));
+    expect(overlay()?.textContent).toBe('translated:Opening hours');
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    const settled = projections();
+
+    // The recovered replica arrives under a new lease before its image node
+    // exists: the retained overlay cannot be rebound, so the settled work is
+    // reopened and waits on the anchor instead of staying "projected" with
+    // nothing on screen in the new replica.
+    anchorAvailable = false;
+    controller.activateReplica(request, 3, 2);
+    await vi.waitFor(() => expect(diagnostics).toContain('anchor-deferred'));
+    expect(diagnostics).toContain('projection-deferred');
+    expect(projections()).toBe(settled);
+
+    // The commit that adds the node under lease 2 lets it project again.
+    anchorLease = 2;
+    anchorAvailable = true;
+    expect(controller.notifyReplicaCommit(sourceDocument, 2)).toBe(true);
+    await vi.waitFor(() => expect(projections()).toBeGreaterThan(settled));
+    expect(overlay()?.textContent).toBe('translated:Opening hours');
+    controller.dispose();
+  });
+
   it('suppresses a provisional accessibility label and translates stronger OCR once', async () => {
     const { document } = parseHTML('<html><body><img></body></html>');
     const image = document.querySelector('img') as unknown as HTMLImageElement;

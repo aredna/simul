@@ -4559,10 +4559,21 @@ export class ImageTranslationController {
         document: descriptor.document,
         replayLease: this.#replayLease,
       });
-      this.#retainedProjections.set(nodeId, rebound);
-      this.#projectedHashes.set(nodeId, rebound.pixelHash);
-      this.#projectedOrdinals.set(nodeId, rebound.jobOrdinal);
-      this.#projector.project(rebound);
+      if (this.#projector.project(rebound)) {
+        this.#retainedProjections.set(nodeId, rebound);
+        this.#projectedHashes.set(nodeId, rebound.pixelHash);
+        this.#projectedOrdinals.set(nodeId, rebound.jobOrdinal);
+        continue;
+      }
+      // The new lease has no anchor for this image yet, or refused the
+      // overlay. Settled work with no visible overlay would never retry on
+      // its own; requeue the exact current descriptor so the next kick
+      // projects it again, usually straight from the final-analysis cache.
+      this.#retainedProjections.delete(nodeId);
+      this.#projectedHashes.delete(nodeId);
+      this.#projectedOrdinals.delete(nodeId);
+      this.#scheduler?.requeueCurrent(descriptor);
+      this.environment.onDiagnostic?.('projection-deferred');
     }
   }
 
