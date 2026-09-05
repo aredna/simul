@@ -24,6 +24,7 @@ import { ImageAnalysisPanel } from './image-analysis-panel';
 import { PermissionFlows } from './permission-flows';
 import { PreferenceClient } from './preference-client';
 import { QuickComposer } from './quick-composer';
+import { ReadScopeController } from './read-scope-controller';
 import { SourceFollower } from './source-follower';
 import { ToolbarStatus } from './toolbar-status';
 import {
@@ -99,19 +100,14 @@ import {
   isTextLayoutMode,
   selectLiveCompanionPreferenceChange,
   type CompanionLaunchBehavior,
-  type CompanionPreferences,
   type PopoutTabMode,
   type ReplicaViewMode,
 } from '../../lib/preferences';
 import { ViewPreferencePatchLedger } from '../../lib/view-preference-ledger';
 import {
   PREFERENCE_SAFETY_PORT_NAME,
-  PREFERENCE_SAFETY_PROTOCOL_VERSION,
-  readPreferenceSafetyPrepareMessage,
-  readPreferenceSafetyReleaseMessage,
 } from '../../lib/preference-safety-coordinator';
 import { PreferenceSafetyClient } from '../../lib/preference-safety-client';
-import { installResetConfirmationController } from '../../lib/reset-confirmation-controller';
 import type { ReplicaRunResult } from '../../lib/replica/contracts';
 import { openChromeHtmlMirrorStream } from '../../lib/replica/html-mirror-client';
 import {
@@ -123,18 +119,8 @@ import {
   type IsolatedMirrorInfo,
 } from '../../lib/replica/isolated-html-engine';
 import {
-  PAGE_ONLY_REPLICA_READ_SCOPE,
-  effectiveReplicaReadScope,
-  REPLICA_READ_SCOPE_KEYS,
   REPLICA_READ_SCOPE_SETUP_VERSION,
-  deriveReplicaReadScopeProfile,
-  intersectReplicaReadScopes,
-  replicaReadScopeForProfile,
   replicaReadScopeFingerprint,
-  replicaReadScopeNarrows,
-  type ReplicaReadScope,
-  type ReplicaReadScopeKey,
-  type ReplicaReadScopeProfileId,
 } from '../../lib/replica/read-scope-policy';
 import {
   IsolatedReplicaFailureRecoveryGate,
@@ -316,7 +302,7 @@ const isolatedHtmlReplicaEngine = new IsolatedHtmlReplicaEngine({
   openStream: openChromeHtmlMirrorStream,
   getReplicaFidelityPolicy: () => state.preferences.replicaFidelityPolicy,
   openSemanticStream: openChromeSemanticSource,
-  getReplicaReadScope: () => currentReplicaReadScope(),
+  getReplicaReadScope: () => readScopeController.currentReplicaReadScope(),
   onLayoutChanged: () => imageTranslationController.refreshOverlays(),
   onSourceScroll: (scroll) => {
     state.lastSourceScroll = scroll;
@@ -505,19 +491,7 @@ const preferenceClient = new PreferenceClient({
   ledger: viewPreferencePatchLedger,
   sendMessage: (command) => browser.runtime.sendMessage(command),
   readStorage: () => browser.storage.local.get(STORAGE_KEY),
-  onCommitted: (previous) => {
-    if (
-      state.preferences.readScopeSetupVersion !== REPLICA_READ_SCOPE_SETUP_VERSION &&
-      (
-        previous.readScopeSetupVersion === REPLICA_READ_SCOPE_SETUP_VERSION ||
-        state.preferences.resetRevision > previous.resetRevision
-      )
-    ) {
-      state.setupReadScopeDraft = replicaReadScopeForProfile('standard');
-    }
-    releaseAuthorizedRemoteReadScopeSafetyGates();
-    releaseSatisfiedLocalReadScopeSafetyGates();
-  },
+  onCommitted: (previous) => readScopeController.handleCommittedPreferences(previous),
   onControlsChanged: () => syncPreferenceControls(),
   onLayoutChanged: () => updateMirrorLayout(),
   onZoomApplied: () => {
@@ -529,6 +503,32 @@ const preferenceClient = new PreferenceClient({
     updateMirrorLayout();
   },
   onError: (message) => setStatus(message, 'error'),
+});
+
+const readScopeController = new ReadScopeController({
+  state,
+  document,
+  elements: {
+    readScopeSetup,
+    setupReadProfile,
+    setupReadScopeControls,
+    completeReadScopeSetupButton,
+    setupReadScopeStatus,
+    setupResetCleanup,
+    setupResetCleanupStatus,
+    retrySetupResetCleanupButton,
+    readScopeProfile,
+    readScopeControls,
+    resetAllSettingsButton,
+    resetSettingsDialog,
+    resetSettingsStatus,
+  },
+  preferenceClient,
+  purgeSourceDerivedRuntime: purgeSourceDerivedRuntimeForSafety,
+  clearResetOnlyRuntimeState: () => clearResetOnlyRuntimeState(),
+  restartReplica: () => restartReplicaAfterReadPolicyChange(),
+  syncPreferenceControls: () => syncPreferenceControls(),
+  setStatus,
 });
 
 const permissionFlows = new PermissionFlows({
@@ -669,12 +669,11 @@ const preferenceSafetyClient = new PreferenceSafetyClient({
   }),
   refreshCommittedSnapshot: async () => {
     if (!preferenceClient.applyCommitted(await preferenceClient.readStored())) {
-      throw new Error('The committed settings state.snapshot was older than this panel.');
+      throw new Error('The committed settings snapshot was older than this panel.');
     }
   },
-  onSafetyMessage: (message, reply) => {
-    return handlePreferenceSafetyMessage(message, reply);
-  },
+  onSafetyMessage: (message, reply) =>
+    readScopeController.handleSafetyMessage(message, reply),
   onFailClosed: () => {
     state.preferenceSafetyConnectionReady = false;
     purgeSourceDerivedRuntime(
@@ -817,41 +816,7 @@ syncScrollInput.addEventListener('change', () => {
   }
 });
 
-readScopeProfile.addEventListener('change', () => {
-  if (!isReplicaReadScopeProfileId(readScopeProfile.value)) return;
-  void commitReplicaReadScope(
-    replicaReadScopeForProfile(readScopeProfile.value),
-    false,
-  );
-});
-
-setupReadProfile.addEventListener('change', () => {
-  if (!isReplicaReadScopeProfileId(setupReadProfile.value)) return;
-  state.setupReadScopeDraft = replicaReadScopeForProfile(setupReadProfile.value);
-  renderReadScopeControls();
-});
-
-completeReadScopeSetupButton.addEventListener('click', () => {
-  void commitReplicaReadScope(state.setupReadScopeDraft, true);
-});
-
-retrySetupResetCleanupButton.addEventListener('click', () => {
-  void resetAllExtensionSettings();
-});
-
-readScopeSetup.addEventListener('cancel', (event) => {
-  // Choosing a read scope is mandatory. Keep the effective policy at Page-only
-  // until a setup choice has been committed successfully.
-  event.preventDefault();
-});
-
-installResetConfirmationController({
-  dialog: resetSettingsDialog,
-  trigger: resetAllSettingsButton,
-  shouldBypassConfirmation: () =>
-    state.preferences.resetCleanupPendingRevision > 0,
-  onConfirm: resetAllExtensionSettings,
-});
+readScopeController.installListeners();
 
 zoomInput.addEventListener('input', () => preferenceClient.setZoom(Number(zoomInput.value)));
 zoomInButton.addEventListener('click', () => preferenceClient.setZoom(state.preferences.zoomPercent + 10));
@@ -952,7 +917,7 @@ browser.storage.onChanged.addListener((changes, areaName) => {
   if (liveChange.status === 'invalid') {
     state.livePreferenceStorageFailClosed = true;
     purgeSourceDerivedRuntime(
-      'Stored settings became unavailable or invalid. Read access is Page-only until a current valid state.snapshot is restored…',
+      'Stored settings became unavailable or invalid. Read access is Page-only until a current valid snapshot is restored…',
     );
     syncPreferenceControls();
     return;
@@ -963,13 +928,10 @@ browser.storage.onChanged.addListener((changes, areaName) => {
   const wasStorageFailClosed = state.livePreferenceStorageFailClosed;
   if (!preferenceClient.applyCommitted(liveChange.preferences)) return;
   state.livePreferenceStorageFailClosed = false;
-  const previousReadScope = committedReplicaReadScope(previous);
-  const nextReadScope = committedReplicaReadScope(state.preferences);
-  const readPolicyChanged =
-    wasStorageFailClosed ||
-    replicaReadScopeFingerprint(previousReadScope) !==
-      replicaReadScopeFingerprint(nextReadScope) ||
-    previous.resetRevision !== state.preferences.resetRevision;
+  const readPolicyChanged = readScopeController.readPolicyChanged(
+    previous,
+    wasStorageFailClosed,
+  );
   if (readPolicyChanged) {
     purgeSourceDerivedRuntime('Readable-content policy changed; rebuilding safely…');
   }
@@ -1028,142 +990,6 @@ async function initialize(): Promise<void> {
   }
 }
 
-async function commitReplicaReadScope(
-  scope: ReplicaReadScope,
-  completeSetup: boolean,
-): Promise<void> {
-  const sequence = ++state.readScopeCommitSequence;
-  const committedAtDispatch = committedReplicaReadScope(state.preferences);
-  const current = currentReplicaReadScope();
-  const narrowing = replicaReadScopeNarrows(current, scope);
-  if (narrowing) {
-    state.localReadScopeNarrowingGates.set(sequence, {
-      scope: intersectReplicaReadScopes(current, scope),
-      failed: false,
-    });
-    purgeSourceDerivedRuntime('Applying narrower read settings…');
-  }
-  completeReadScopeSetupButton.disabled = completeSetup;
-  setupReadScopeStatus.textContent = completeSetup ? 'Saving…' : '';
-  try {
-    const result = await preferenceClient.send(completeSetup
-      ? {
-          type: 'simul:preferences:complete-read-scope-setup',
-          expectedResetRevision: state.preferences.resetRevision,
-          expectedSetupVersion: state.preferences.readScopeSetupVersion,
-          expectedReadScopeFingerprint:
-            replicaReadScopeFingerprint(committedAtDispatch),
-          patch: { replicaReadScope: scope },
-        }
-      : {
-          type: 'simul:preferences:patch-read-scope',
-          expectedResetRevision: state.preferences.resetRevision,
-          expectedReadScopeFingerprint:
-            replicaReadScopeFingerprint(committedAtDispatch),
-          patch: { replicaReadScope: scope },
-        });
-    preferenceClient.applyCommitted(result.preferences);
-    if (!result.applied) {
-      const gate = state.localReadScopeNarrowingGates.get(sequence);
-      if (gate) gate.failed = true;
-      throw new Error(result.code === 'stale-reset-revision'
-        ? 'Settings changed in another companion. Review the current choices and try again.'
-        : result.code === 'stale-read-scope'
-          ? 'Readable-content settings changed in another companion. Review the current choices and try again.'
-          : result.code === 'safety-ack-failed'
-            ? 'Another companion could not confirm its safety purge. Close it or retry the change.'
-        : 'The read settings were not applied.');
-    }
-    for (const pendingSequence of [...state.localReadScopeNarrowingGates.keys()]) {
-      if (pendingSequence <= sequence) {
-        state.localReadScopeNarrowingGates.delete(pendingSequence);
-      }
-    }
-    state.setupReadScopeDraft = { ...state.preferences.replicaReadScope };
-    syncPreferenceControls();
-    restartReplicaAfterReadPolicyChange();
-    setupReadScopeStatus.textContent = '';
-    setStatus('Readable-content settings applied. The replica is rebuilding.', 'success');
-  } catch (error) {
-    const gate = state.localReadScopeNarrowingGates.get(sequence);
-    if (gate) gate.failed = true;
-    setupReadScopeStatus.textContent = readableError(error);
-    setupReadScopeStatus.dataset.tone = 'error';
-    syncPreferenceControls();
-    if (state.localReadScopeNarrowingGates.has(sequence)) {
-      restartReplicaAfterReadPolicyChange();
-    }
-    setStatus(`Could not save readable-content settings: ${readableError(error)}`, 'error');
-  } finally {
-    completeReadScopeSetupButton.disabled = false;
-  }
-}
-
-async function resetAllExtensionSettings(): Promise<void> {
-  if (state.resetInFlight) return;
-  state.resetInFlight = true;
-  resetAllSettingsButton.disabled = true;
-  retrySetupResetCleanupButton.disabled = true;
-  resetSettingsStatus.textContent = 'Resetting settings and optional permissions…';
-  if (state.preferences.resetCleanupPendingRevision > 0) {
-    setupResetCleanupStatus.textContent =
-      'Retrying optional permission and runtime cleanup…';
-  }
-  try {
-    const retry = state.preferences.resetCleanupPendingRevision > 0;
-    const result = await preferenceClient.send(retry
-      ? {
-          type: 'simul:preferences:retry-reset-cleanup',
-          expectedResetRevision: state.preferences.resetRevision,
-        }
-      : {
-          type: 'simul:preferences:reset-all',
-          expectedResetRevision: state.preferences.resetRevision,
-        });
-    preferenceClient.applyCommitted(result.preferences);
-    if (!result.applied && result.code === 'stale-reset-revision') {
-      syncPreferenceControls();
-      resetSettingsStatus.textContent =
-        'Settings changed in another companion. Review the current state before resetting.';
-      if (state.preferences.resetCleanupPendingRevision > 0) {
-        setupResetCleanupStatus.textContent = resetSettingsStatus.textContent;
-      }
-      return;
-    }
-    if (!result.applied && result.code === 'safety-ack-failed') {
-      syncPreferenceControls();
-      resetSettingsStatus.textContent =
-        'Another companion could not confirm its safety purge. Close it or retry the reset.';
-      return;
-    }
-    purgeSourceDerivedRuntime('Resetting extension settings…');
-    clearResetOnlyRuntimeState();
-    state.setupReadScopeDraft = replicaReadScopeForProfile('standard');
-    syncPreferenceControls();
-    if (result.cleanup?.status === 'pending') {
-      const cleanupMessage =
-        result.cleanup.remainingManagedOrigins > 0
-          ? `Core settings are reset. ${result.cleanup.remainingManagedOrigins} optional permission entr${result.cleanup.remainingManagedOrigins === 1 ? 'y remains' : 'ies remain'} and cleanup is still pending; choose Retry cleanup.`
-          : 'Core settings are reset, but permission or runtime cleanup is still pending; choose Retry cleanup.';
-      resetSettingsStatus.textContent = cleanupMessage;
-      setupResetCleanupStatus.textContent = cleanupMessage;
-    } else {
-      resetSettingsStatus.textContent =
-        'Settings and optional permissions were reset. Choose a read profile to continue.';
-    }
-  } catch (error) {
-    resetSettingsStatus.textContent = `Reset could not finish: ${readableError(error)}`;
-    if (state.preferences.resetCleanupPendingRevision > 0) {
-      setupResetCleanupStatus.textContent = resetSettingsStatus.textContent;
-    }
-  } finally {
-    state.resetInFlight = false;
-    resetAllSettingsButton.disabled = false;
-    retrySetupResetCleanupButton.disabled = false;
-    renderReadScopeControls();
-  }
-}
-
 function purgeSourceDerivedRuntime(message: string): void {
   void purgeSourceDerivedRuntimeInternal(message);
 }
@@ -1202,96 +1028,10 @@ function clearResetOnlyRuntimeState(): void {
   translationDriver.clearAutoImageLanguageResolution();
 }
 
-async function handlePreferenceSafetyMessage(
-  value: unknown,
-  reply: (message: unknown) => void,
-): Promise<void> {
-  const prepare = readPreferenceSafetyPrepareMessage(value);
-  if (prepare) {
-    state.remoteReadScopeNarrowingGates.prepare(
-      prepare.requestId,
-      prepare.targetReadScope,
-    );
-    if (prepare.operation === 'reset') {
-      state.localReadScopeNarrowingGates.clear();
-    }
-    const purge = purgeSourceDerivedRuntimeForSafety(
-      prepare.operation === 'reset'
-        ? 'Preparing a safe settings reset…'
-        : 'Preparing narrower read settings…',
-    );
-    if (prepare.operation === 'reset') clearResetOnlyRuntimeState();
-    await purge;
-    reply({
-      kind: 'simul:preference-safety-v1:ack',
-      version: PREFERENCE_SAFETY_PROTOCOL_VERSION,
-      requestId: prepare.requestId,
-    });
-    return;
-  }
-
-  const release = readPreferenceSafetyReleaseMessage(value);
-  if (!release) return;
-  if (
-    release.committed &&
-    state.remoteReadScopeNarrowingGates.authorizeCommittedRelease(release.requestId)
-  ) {
-    releaseAuthorizedRemoteReadScopeSafetyGates();
-    releaseSatisfiedLocalReadScopeSafetyGates();
-  }
-}
-
-function releaseAuthorizedRemoteReadScopeSafetyGates(): void {
-  state.remoteReadScopeNarrowingGates.releaseSatisfied(
-    committedReplicaReadScope(state.preferences),
-  );
-}
-
-function releaseSatisfiedLocalReadScopeSafetyGates(): void {
-  const committed = committedReplicaReadScope(state.preferences);
-  for (const [sequence, gate] of state.localReadScopeNarrowingGates) {
-    if (gate.failed && readScopeIsNoBroaderThan(committed, gate.scope)) {
-      state.localReadScopeNarrowingGates.delete(sequence);
-    }
-  }
-}
-
-function readScopeIsNoBroaderThan(
-  candidate: ReplicaReadScope,
-  ceiling: ReplicaReadScope,
-): boolean {
-  return replicaReadScopeFingerprint(
-    intersectReplicaReadScopes(candidate, ceiling),
-  ) === replicaReadScopeFingerprint(candidate);
-}
-
 function restartReplicaAfterReadPolicyChange(): void {
   const identity = state.followedPageIdentity ?? state.capturedPageIdentity;
   if (identity) capturePipeline.queueCapture({ identity, reason: 'preference' });
   configureImageTranslation();
-}
-
-function currentReplicaReadScope(): ReplicaReadScope {
-  let scope = committedReplicaReadScope(state.preferences);
-  if (!state.preferenceSafetyConnectionReady || state.livePreferenceStorageFailClosed) {
-    scope = intersectReplicaReadScopes(scope, PAGE_ONLY_REPLICA_READ_SCOPE);
-  }
-  for (const gate of state.localReadScopeNarrowingGates.values()) {
-    scope = intersectReplicaReadScopes(scope, gate.scope);
-  }
-  for (const gate of state.remoteReadScopeNarrowingGates.scopes()) {
-    scope = intersectReplicaReadScopes(scope, gate);
-  }
-  return scope;
-}
-
-function committedReplicaReadScope(
-  candidate: CompanionPreferences,
-): ReplicaReadScope {
-  return effectiveReplicaReadScope(
-    candidate.replicaReadScope,
-    candidate.readScopeSetupVersion,
-  );
 }
 
 async function languageSelectionChanged(): Promise<void> {
@@ -1479,149 +1219,10 @@ function syncPreferenceControls(): void {
   zoomInput.disabled = state.preferences.displayMode !== 'custom';
   syncToolbarPreferenceControls();
   quickComposer.syncPanel();
-  renderReadScopeControls();
+  readScopeController.renderControls();
   imageAnalysisPanel.render();
   configureImageTranslation();
   uiLocalizer.schedule();
-}
-
-const READ_SCOPE_COPY: Readonly<Record<
-  ReplicaReadScopeKey,
-  { readonly label: string; readonly description: string }
->> = Object.freeze({
-  controlSemantics: {
-    label: 'Control labels and semantics',
-    description: 'Read public button, menu, field-label, and disabled-state text.',
-  },
-  controlImages: {
-    label: 'Images inside controls',
-    description: 'Read non-secret navigation and control images; actions stay disabled.',
-  },
-  disclosureContent: {
-    label: 'Collapsed disclosure content',
-    description: 'Read validated same-page menus and disclosures even while collapsed.',
-  },
-  formValues: {
-    label: 'Ordinary visible form values',
-    description: 'Read visible text, search, URL, textarea, and selection state.',
-  },
-  personalDataValues: {
-    label: 'Personal and autofill values',
-    description: 'Read visible email, telephone, name, address, and username fields. Credential and card data stay blocked.',
-  },
-  editableContent: {
-    label: 'Editable page content',
-    description: 'Read visible non-secret contenteditable and ARIA text editor drafts.',
-  },
-});
-
-function renderReadScopeControls(): void {
-  const setupComplete =
-    state.preferences.readScopeSetupVersion === REPLICA_READ_SCOPE_SETUP_VERSION;
-  const cleanupPending = state.preferences.resetCleanupPendingRevision > 0;
-  const setupDialogWasOpen = readScopeSetup.open;
-  if (setupComplete) {
-    if (readScopeSetup.open) readScopeSetup.close();
-  } else if (!readScopeSetup.open) {
-    // A reset committed in another companion can arrive while this panel's
-    // reset confirmation is open. Do not leave a stale modal underneath the
-    // mandatory setup dialog.
-    if (resetSettingsDialog.open) resetSettingsDialog.close('cancel');
-    readScopeSetup.showModal();
-  }
-  const configuredScope = setupComplete
-    ? state.preferences.replicaReadScope
-    : replicaReadScopeForProfile('page-only');
-  readScopeProfile.value = deriveReplicaReadScopeProfile(configuredScope);
-  setupReadProfile.value = deriveReplicaReadScopeProfile(state.setupReadScopeDraft);
-  renderReadScopeToggleSet(
-    readScopeControls,
-    configuredScope,
-    (key, checked) => {
-      const next = normalizeReadScopeToggle(configuredScope, key, checked);
-      void commitReplicaReadScope(next, false);
-    },
-  );
-  renderReadScopeToggleSet(
-    setupReadScopeControls,
-    state.setupReadScopeDraft,
-    (key, checked) => {
-      state.setupReadScopeDraft = normalizeReadScopeToggle(
-        state.setupReadScopeDraft,
-        key,
-        checked,
-      );
-      renderReadScopeControls();
-    },
-  );
-  setupResetCleanup.hidden = !cleanupPending;
-  retrySetupResetCleanupButton.disabled = state.resetInFlight;
-  if (cleanupPending && !state.setupCleanupWasPending && !state.resetInFlight) {
-    setupResetCleanupStatus.textContent =
-      'Core settings are already safe, but optional permission or runtime cleanup is still pending.';
-  }
-  if (
-    cleanupPending &&
-    !setupComplete &&
-    (!setupDialogWasOpen || !state.setupCleanupWasPending)
-  ) {
-    retrySetupResetCleanupButton.focus();
-  } else if (
-    !cleanupPending &&
-    state.setupCleanupWasPending &&
-    readScopeSetup.open &&
-    document.activeElement === retrySetupResetCleanupButton
-  ) {
-    setupReadProfile.focus();
-  }
-  state.setupCleanupWasPending = cleanupPending;
-  resetAllSettingsButton.textContent = cleanupPending
-    ? 'Retry reset cleanup'
-    : 'Reset all extension settings…';
-}
-
-function renderReadScopeToggleSet(
-  host: HTMLElement,
-  scope: ReplicaReadScope,
-  onChange: (key: ReplicaReadScopeKey, checked: boolean) => void,
-): void {
-  const fragment = document.createDocumentFragment();
-  for (const key of REPLICA_READ_SCOPE_KEYS) {
-    const label = document.createElement('label');
-    label.className = 'read-scope-control';
-    const input = document.createElement('input');
-    input.type = 'checkbox';
-    input.checked = scope[key];
-    input.disabled = key === 'personalDataValues' && !scope.formValues;
-    input.dataset.readScopeKey = key;
-    const text = document.createElement('span');
-    text.textContent = READ_SCOPE_COPY[key].label;
-    const description = document.createElement('small');
-    description.textContent = READ_SCOPE_COPY[key].description;
-    text.append(description);
-    label.append(input, text);
-    input.addEventListener('change', () => onChange(key, input.checked));
-    fragment.append(label);
-  }
-  host.replaceChildren(fragment);
-}
-
-function normalizeReadScopeToggle(
-  scope: ReplicaReadScope,
-  key: ReplicaReadScopeKey,
-  checked: boolean,
-): ReplicaReadScope {
-  const next = { ...scope, [key]: checked };
-  if (key === 'formValues' && !checked) next.personalDataValues = false;
-  if (key === 'personalDataValues' && checked) next.formValues = true;
-  return next;
-}
-
-function isReplicaReadScopeProfileId(
-  value: string,
-): value is ReplicaReadScopeProfileId {
-  return value === 'page-only' || value === 'standard' ||
-    value === 'full-visible';
 }
 
 function syncToolbarPreferenceControls(): void {
@@ -1698,7 +1299,7 @@ function syncToolbarPreferenceControls(): void {
 }
 
 function configureImageTranslation(): void {
-  const readScope = currentReplicaReadScope();
+  const readScope = readScopeController.currentReplicaReadScope();
   const disabledMethodIds =
     state.preferences.readScopeSetupVersion === REPLICA_READ_SCOPE_SETUP_VERSION ||
     state.preferences.disabledImageReadingMethodIds.includes(
@@ -1793,7 +1394,7 @@ function enabledUsablePixelOcrProviderOrder(): readonly ImageTextProviderId[] {
 }
 
 function currentAutoImageLanguageConfigurationKey(): string {
-  const readScope = currentReplicaReadScope();
+  const readScope = readScopeController.currentReplicaReadScope();
   const disabledMethodIds =
     state.preferences.readScopeSetupVersion === REPLICA_READ_SCOPE_SETUP_VERSION ||
     state.preferences.disabledImageReadingMethodIds.includes(
