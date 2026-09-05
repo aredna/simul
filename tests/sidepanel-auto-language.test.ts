@@ -27,7 +27,7 @@ describe('sidepanel Auto image-language reconciliation', () => {
       script.indexOf('function mirrorLanguageSample'),
     );
     expect(resolver).toContain(
-      'const resolutionRevision = ++sourceLanguageResolutionRevision',
+      "const resolution = currency.begin('language-resolution')",
     );
     expect(resolver).toContain(
       'autoLanguageEvidencePrecedence.beginPageResolution(resolutionRevision)',
@@ -74,9 +74,7 @@ describe('sidepanel Auto image-language reconciliation', () => {
     expect(reconciliation).toContain(
       'await maybeTranslateAutomatically(generation, identity.url)',
     );
-    expect(reconciliation).toContain(
-      'resolutionRevision !== sourceLanguageResolutionRevision',
-    );
+    expect(reconciliation).toContain('!currency.isCurrent(resolution)');
   });
 
   it('keys image-derived language to the exact enabled method and read policy', () => {
