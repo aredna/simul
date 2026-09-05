@@ -51,25 +51,23 @@ export function readDocumentScrollSnapshot(
     root?.clientHeight,
     sourceDocument.documentElement?.clientHeight,
   );
-  const maxScrollX = bounded(Math.max(0, width - viewportWidth));
-  const maxScrollY = bounded(Math.max(0, height - viewportHeight));
+  // document.scrollingElement is the browser's authoritative owner. Do not
+  // take the largest coordinate from body/html: a former scrolling element
+  // can retain a stale offset after a responsive layout switches owners.
+  const horizontal = boundedAxis(
+    documentAxisPosition(root?.scrollLeft, sourceWindow.scrollX),
+    Math.max(0, width - viewportWidth),
+  );
+  const vertical = boundedAxis(
+    documentAxisPosition(root?.scrollTop, sourceWindow.scrollY),
+    Math.max(0, height - viewportHeight),
+  );
   return Object.freeze({
     scrollTarget: 'document',
-    // document.scrollingElement is the browser's authoritative owner. Do not
-    // take the largest coordinate from body/html: a former scrolling element
-    // can retain a stale offset after a responsive layout switches owners.
-    scrollX: clamp(
-      documentAxisPosition(root?.scrollLeft, sourceWindow.scrollX),
-      0,
-      maxScrollX,
-    ),
-    scrollY: clamp(
-      documentAxisPosition(root?.scrollTop, sourceWindow.scrollY),
-      0,
-      maxScrollY,
-    ),
-    maxScrollX,
-    maxScrollY,
+    scrollX: horizontal.position,
+    scrollY: vertical.position,
+    maxScrollX: horizontal.maximum,
+    maxScrollY: vertical.maximum,
   });
 }
 
@@ -100,15 +98,15 @@ export function readNestedScrollSnapshot(
   const viewportHeight = positiveFinite(sourceWindow.innerHeight, 1);
   const clientWidth = positiveFinite(candidate.clientWidth, 0);
   const clientHeight = positiveFinite(candidate.clientHeight, 0);
-  const maxScrollX = bounded(Math.max(
-    0,
-    finite(candidate.scrollWidth) - clientWidth,
-  ));
-  const maxScrollY = bounded(Math.max(
-    0,
-    finite(candidate.scrollHeight) - clientHeight,
-  ));
-  if (maxScrollY < Math.max(96, viewportHeight * 0.2)) return undefined;
+  const horizontal = boundedAxis(
+    finite(candidate.scrollLeft),
+    Math.max(0, finite(candidate.scrollWidth) - clientWidth),
+  );
+  const vertical = boundedAxis(
+    finite(candidate.scrollTop),
+    Math.max(0, finite(candidate.scrollHeight) - clientHeight),
+  );
+  if (vertical.maximum < Math.max(96, viewportHeight * 0.2)) return undefined;
 
   const rect = safeRect(candidate);
   const visibleWidth = Math.max(
@@ -128,10 +126,10 @@ export function readNestedScrollSnapshot(
 
   return Object.freeze({
     scrollTarget: 'nested',
-    scrollX: clamp(finite(candidate.scrollLeft), 0, maxScrollX),
-    scrollY: clamp(finite(candidate.scrollTop), 0, maxScrollY),
-    maxScrollX,
-    maxScrollY,
+    scrollX: horizontal.position,
+    scrollY: vertical.position,
+    maxScrollX: horizontal.maximum,
+    maxScrollY: vertical.maximum,
   });
 }
 
@@ -325,8 +323,26 @@ function positiveFinite(...values: readonly unknown[]): number {
   return 1;
 }
 
-function bounded(value: number): number {
-  return Math.min(PRIMARY_SCROLL_MAX, Math.max(0, value));
+/**
+ * Keeps one axis inside the protocol bound without losing progress. Within the
+ * bound, coordinates are exact CSS pixels. Beyond it, position and maximum are
+ * scaled together, so a very long document still reports where the reader is
+ * instead of pinning every later offset to the maximum.
+ */
+function boundedAxis(
+  position: number,
+  maximum: number,
+): { readonly position: number; readonly maximum: number } {
+  const rawMaximum = Math.max(0, maximum);
+  const rawPosition = clamp(position, 0, rawMaximum);
+  if (rawMaximum <= PRIMARY_SCROLL_MAX) {
+    return { position: rawPosition, maximum: rawMaximum };
+  }
+  const scale = PRIMARY_SCROLL_MAX / rawMaximum;
+  return {
+    position: Math.round(rawPosition * scale),
+    maximum: PRIMARY_SCROLL_MAX,
+  };
 }
 
 function clamp(value: number, minimum: number, maximum: number): number {
