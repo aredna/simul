@@ -231,6 +231,27 @@ describe('SourceImageObserver', () => {
     stop();
   });
 
+  it('admits the most visible image first when discovery exceeds the capacity', () => {
+    // Two offscreen images precede the visible one in DOM order and the
+    // observer has room for a single image. Ranking by attention must decide
+    // admission, not the DOM-order prefix the traversal happened to reach.
+    const fixture = createFixture(
+      '<img id="far-a" src="far-a.png"><img id="far-b" src="far-b.png">',
+      { maxImages: 1 },
+    );
+    const farA = fixture.document.querySelector<HTMLImageElement>('#far-a')!;
+    const farB = fixture.document.querySelector<HTMLImageElement>('#far-b')!;
+    setImageMetrics(farA, { left: 20, top: 9_000, width: 200, height: 100 });
+    setImageMetrics(farB, { left: 20, top: 9_400, width: 200, height: 100 });
+    fixture.nodeIds.set(farA, 31);
+    fixture.nodeIds.set(farB, 37);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+
+    expect(events.map(eventNodeId)).toEqual([7]);
+    stop();
+  });
+
   it('tracks load/currentSrc, picture source, and viewport geometry changes', () => {
     const fixture = createFixture(
       '<picture><source id="source" srcset="a.webp"><img id="picture" src="fallback.png"></picture>',
