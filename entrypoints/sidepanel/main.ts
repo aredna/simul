@@ -26,6 +26,8 @@ import {
 } from './companion-state';
 import { Currency, type CurrencyToken } from './currency';
 import { ImageAnalysisPanel } from './image-analysis-panel';
+import { PermissionFlows } from './permission-flows';
+import { PreferenceClient } from './preference-client';
 import { QuickComposer } from './quick-composer';
 import { SourceFollower } from './source-follower';
 import { ToolbarStatus } from './toolbar-status';
@@ -45,7 +47,6 @@ import {
 import {
   PageAccessError,
   assertSourceTabIsCurrent,
-  hasNonDefaultPort,
   isSupportedPage,
   navigationPageIdentityKey,
   navigationPageScopeKey,
@@ -103,16 +104,8 @@ import {
   imageReplicaActivationFailureReason,
 } from '../../lib/ocr/replica-activation';
 import {
-  readPreferenceCommandResult,
-  type PreferenceCommand,
-  type PreferenceCommandResult,
-} from '../../lib/preference-coordinator';
-import {
-  ALL_SITES_PERMISSION_ORIGINS,
-  DEFAULT_COMPANION_PREFERENCES,
   STORAGE_KEY,
   autoTranslationModeForPage,
-  clampZoomPercent,
   isCompanionLaunchBehavior,
   isAutoTranslationEnabled,
   isAutoTranslationMode,
@@ -120,17 +113,9 @@ import {
   isPopoutTabMode,
   isReplicaViewMode,
   isTextLayoutMode,
-  parseCompanionPreferences,
-  permissionOriginsForMode,
   selectLiveCompanionPreferenceChange,
-  selectLatestCompanionPreferences,
-  withAutoTranslationMode,
-  type AutoTranslationMode,
   type CompanionLaunchBehavior,
   type CompanionPreferences,
-  type CompanionSurface,
-  type CompanionImageAnalysisSettingsPatch,
-  type CompanionViewSettingsPatch,
   type PopoutTabMode,
   type ReplicaViewMode,
 } from '../../lib/preferences';
@@ -206,7 +191,6 @@ import {
   type TranslationPair,
 } from '../../lib/translation-provider';
 
-const ZOOM_COMMIT_DEBOUNCE_MS = 150;
 const NAVIGATION_DEBOUNCE_MS = 350;
 const CAPTURE_TIMEOUT_MS = 12_000;
 const DYNAMIC_UI_LABELS = [
@@ -599,8 +583,9 @@ const imageAnalysisPanel = new ImageAnalysisPanel({
     usablePixelProviderCount: enabledUsablePixelOcrProviderOrder().length,
   }),
   setUiText,
-  changeImageTranslationEnabled,
-  commitPatch: commitImageAnalysisPreferencePatch,
+  changeImageTranslationEnabled: (enabled, requestPixelAccess) =>
+    permissionFlows.changeImageTranslationEnabled(enabled, requestPixelAccess),
+  commitPatch: (patch) => preferenceClient.commitImageAnalysis(patch),
 });
 
 const toolbarStatus = new ToolbarStatus({
@@ -620,6 +605,56 @@ const toolbarStatus = new ToolbarStatus({
     composerInFlight: quickComposer.inFlight,
   }),
   isSettingsOpen: () => state.openCompanionOverlay === 'settings',
+});
+
+const preferenceClient = new PreferenceClient({
+  state,
+  ledger: viewPreferencePatchLedger,
+  sendMessage: (command) => browser.runtime.sendMessage(command),
+  readStorage: () => browser.storage.local.get(STORAGE_KEY),
+  onCommitted: (previous) => {
+    if (
+      state.preferences.readScopeSetupVersion !== REPLICA_READ_SCOPE_SETUP_VERSION &&
+      (
+        previous.readScopeSetupVersion === REPLICA_READ_SCOPE_SETUP_VERSION ||
+        state.preferences.resetRevision > previous.resetRevision
+      )
+    ) {
+      state.setupReadScopeDraft = replicaReadScopeForProfile('standard');
+    }
+    releaseAuthorizedRemoteReadScopeSafetyGates();
+    releaseSatisfiedLocalReadScopeSafetyGates();
+  },
+  onControlsChanged: () => syncPreferenceControls(),
+  onLayoutChanged: () => updateMirrorLayout(),
+  onZoomApplied: () => {
+    zoomInput.value = String(state.preferences.zoomPercent);
+    zoomOutput.value = `${state.preferences.zoomPercent}%`;
+    zoomInput.disabled = false;
+    displayModeSelect.value = state.preferences.displayMode;
+    syncToolbarPreferenceControls();
+    updateMirrorLayout();
+  },
+  onError: (message) => setStatus(message, 'error'),
+});
+
+const permissionFlows = new PermissionFlows({
+  state,
+  currency,
+  permissions: browser.permissions,
+  isUserActivationActive: () => navigator.userActivation.isActive,
+  preferenceClient,
+  usablePixelProviderCount: () => enabledUsablePixelOcrProviderOrder().length,
+  setStatus,
+  syncPreferenceControls: () => syncPreferenceControls(),
+  updateControls: () => updateControls(),
+  renderImagePanel: () => imageAnalysisPanel.render(),
+  configureImageTranslation: () => configureImageTranslation(),
+  purgeImageCache: () => imageTranslationController.purgeSourceDerivedCache(),
+  requestAutomaticTranslation: async (pageUrl) => {
+    state.translationDesired = true;
+    await maybeTranslateAutomatically(captureCoordinator.generation, pageUrl);
+  },
 });
 
 const sourceFollower = new SourceFollower({
@@ -677,7 +712,7 @@ const preferenceSafetyClient = new PreferenceSafetyClient({
     name: PREFERENCE_SAFETY_PORT_NAME,
   }),
   refreshCommittedSnapshot: async () => {
-    if (!applyCommittedPreferences(await readStoredPreferences())) {
+    if (!preferenceClient.applyCommitted(await preferenceClient.readStored())) {
       throw new Error('The committed settings state.snapshot was older than this panel.');
     }
   },
@@ -733,19 +768,19 @@ toolbarAutoDetectButton.addEventListener('click', () => {
 });
 toolbarSizeToggleButton.addEventListener('click', () => {
   const displayMode = state.preferences.displayMode === 'fit' ? 'actual' : 'fit';
-  void commitViewPreferencePatch({ displayMode });
+  void preferenceClient.commitView({ displayMode });
   updateMirrorLayout();
 });
 toolbarOcrToggleButton.addEventListener('click', () => {
   if (!state.preferences.imageTranslationEnabled) {
-    void changeImageTranslationEnabled(true);
+    void permissionFlows.changeImageTranslationEnabled(true);
   } else if (
     state.imageCaptureAccess !== 'granted' &&
     enabledUsablePixelOcrProviderOrder().length > 0
   ) {
-    void changeImageTranslationEnabled(true, true);
+    void permissionFlows.changeImageTranslationEnabled(true, true);
   } else {
-    void changeImageTranslationEnabled(false);
+    void permissionFlows.changeImageTranslationEnabled(false);
   }
 });
 toolbarTabFollowButton.addEventListener('click', () => {
@@ -769,14 +804,14 @@ autoTranslateSelect.addEventListener('change', () => {
   const mode = isAutoTranslationMode(autoTranslateSelect.value)
     ? autoTranslateSelect.value
     : 'off';
-  void changeAutoTranslationMode(mode);
+  void permissionFlows.changeAutoTranslationMode(mode);
 });
 
 displayModeSelect.addEventListener('change', () => {
   const mode = isMirrorDisplayMode(displayModeSelect.value)
     ? displayModeSelect.value
     : 'fit';
-  void commitViewPreferencePatch({ displayMode: mode });
+  void preferenceClient.commitView({ displayMode: mode });
   updateMirrorLayout();
 });
 
@@ -784,7 +819,7 @@ textLayoutSelect.addEventListener('change', () => {
   const mode = isTextLayoutMode(textLayoutSelect.value)
     ? textLayoutSelect.value
     : 'adaptive';
-  void commitViewPreferencePatch({ textLayoutMode: mode });
+  void preferenceClient.commitView({ textLayoutMode: mode });
   updateMirrorLayout();
 });
 
@@ -809,7 +844,7 @@ launchBehaviorSelect.addEventListener('change', () => {
     isCompanionLaunchBehavior(launchBehaviorSelect.value)
       ? launchBehaviorSelect.value
       : 'last-used';
-  void commitViewPreferencePatch({ launchBehavior });
+  void preferenceClient.commitView({ launchBehavior });
 });
 
 popoutTabModeSelect.addEventListener('change', () => {
@@ -820,7 +855,7 @@ popoutTabModeSelect.addEventListener('change', () => {
 });
 
 syncScrollInput.addEventListener('change', () => {
-  void commitViewPreferencePatch({ syncScroll: syncScrollInput.checked });
+  void preferenceClient.commitView({ syncScroll: syncScrollInput.checked });
   if (state.preferences.syncScroll && state.lastSourceScroll) {
     visibleReplayHost.followSourceScroll(state.lastSourceScroll);
   }
@@ -862,9 +897,9 @@ installResetConfirmationController({
   onConfirm: resetAllExtensionSettings,
 });
 
-zoomInput.addEventListener('input', () => setZoom(Number(zoomInput.value)));
-zoomInButton.addEventListener('click', () => setZoom(state.preferences.zoomPercent + 10));
-zoomOutButton.addEventListener('click', () => setZoom(state.preferences.zoomPercent - 10));
+zoomInput.addEventListener('input', () => preferenceClient.setZoom(Number(zoomInput.value)));
+zoomInButton.addEventListener('click', () => preferenceClient.setZoom(state.preferences.zoomPercent + 10));
+zoomOutButton.addEventListener('click', () => preferenceClient.setZoom(state.preferences.zoomPercent - 10));
 const requestManualRefresh = (): void => {
   void sourceFollower.refreshFollowedPage('manual');
 };
@@ -903,7 +938,7 @@ document.addEventListener('visibilitychange', () => {
   if (document.visibilityState === 'visible') imageTranslationController.resume();
 });
 window.addEventListener('pagehide', () => {
-  commitPendingZoom();
+  preferenceClient.flushPendingZoom();
   uiLocalizer.dispose();
   state.replicaShadowAbortController?.abort();
   imageTranslationController.dispose();
@@ -944,11 +979,11 @@ browser.tabs.onRemoved.addListener((tabId, removeInfo) => {
 });
 
 browser.permissions.onAdded.addListener(() => {
-  void refreshImageCaptureAccess();
+  void permissionFlows.refreshImageCaptureAccess();
 });
 
 browser.permissions.onRemoved.addListener(() => {
-  void refreshImageCaptureAccess(true);
+  void permissionFlows.refreshImageCaptureAccess(true);
 });
 
 browser.storage.onChanged.addListener((changes, areaName) => {
@@ -970,7 +1005,7 @@ browser.storage.onChanged.addListener((changes, areaName) => {
   const previous = state.preferences;
   const previousPair = state.selectedPair();
   const wasStorageFailClosed = state.livePreferenceStorageFailClosed;
-  if (!applyCommittedPreferences(liveChange.preferences)) return;
+  if (!preferenceClient.applyCommitted(liveChange.preferences)) return;
   state.livePreferenceStorageFailClosed = false;
   const previousReadScope = committedReplicaReadScope(previous);
   const nextReadScope = committedReplicaReadScope(state.preferences);
@@ -1017,12 +1052,12 @@ browser.storage.onChanged.addListener((changes, areaName) => {
 void initialize();
 
 async function initialize(): Promise<void> {
-  await Promise.all([loadPreferences(), sourceFollower.loadPanelWindowId()]);
+  await Promise.all([preferenceClient.load(), sourceFollower.loadPanelWindowId()]);
   // Permission and experimental-provider probes are optional readiness work.
   // Start them after state.preferences load, but never put them on the critical path
   // for the first visible replica.
   startBestEffortBackgroundTasks([
-    refreshImageCaptureAccess,
+    () => permissionFlows.refreshImageCaptureAccess(),
     refreshOcrProviderRuntimeStatuses,
   ]);
   const [, sourceResult] = await Promise.allSettled([
@@ -1034,102 +1069,6 @@ async function initialize(): Promise<void> {
     renderErrorState(message);
     setStatus(message, 'error');
     updateControls();
-  }
-}
-
-async function loadPreferences(): Promise<void> {
-  try {
-    applyCommittedPreferences(
-      (await sendPreferenceCommand({ type: 'simul:preferences:reconcile' }))
-        .preferences,
-    );
-  } catch {
-    try {
-      const stored = await browser.storage.local.get(STORAGE_KEY);
-      applyCommittedPreferences(stored[STORAGE_KEY]);
-    } catch {
-      applyCommittedPreferences(DEFAULT_COMPANION_PREFERENCES);
-    }
-  }
-  syncPreferenceControls();
-}
-
-async function sendPreferenceCommand(
-  command: PreferenceCommand,
-): Promise<PreferenceCommandResult> {
-  const response: unknown = await browser.runtime.sendMessage(command);
-  const result = readPreferenceCommandResult(response);
-  if (!result) throw new Error('The preference service returned an invalid response.');
-  return result;
-}
-
-async function commitViewPreferencePatch(
-  patch: CompanionViewSettingsPatch,
-): Promise<boolean> {
-  const pending = viewPreferencePatchLedger.begin(state.preferences, patch);
-  state.preferences = pending.preferences;
-  syncPreferenceControls();
-  updateMirrorLayout();
-  try {
-    const result =
-      await sendPreferenceCommand({
-        type: 'simul:preferences:patch-view',
-        expectedResetRevision: pending.expectedResetRevision,
-        patch,
-      });
-    viewPreferencePatchLedger.settle(pending.requestId);
-    applyCommittedPreferences(result.preferences);
-    if (!result.applied) {
-      throw new Error(
-        'Settings were reset in another companion. Review the current choices and try again.',
-      );
-    }
-    syncPreferenceControls();
-    updateMirrorLayout();
-    return true;
-  } catch (error) {
-    viewPreferencePatchLedger.settle(pending.requestId);
-    try {
-      applyCommittedPreferences(await readStoredPreferences());
-      syncPreferenceControls();
-      updateMirrorLayout();
-    } catch {
-      // Keep the optimistic controls visible; a later storage event can repair them.
-    }
-    setStatus(`Could not save options: ${readableError(error)}`, 'error');
-    return false;
-  }
-}
-
-async function commitImageAnalysisPreferencePatch(
-  patch: CompanionImageAnalysisSettingsPatch,
-): Promise<void> {
-  const expectedResetRevision = state.preferences.resetRevision;
-  const expectedSettingsRevision = state.preferences.settingsRevision;
-  try {
-    const result = await sendPreferenceCommand({
-      type: 'simul:preferences:patch-image-analysis',
-      expectedResetRevision,
-      expectedSettingsRevision,
-      patch,
-    });
-    applyCommittedPreferences(result.preferences);
-    if (!result.applied) {
-      throw new Error(
-        result.code === 'stale-settings-revision'
-          ? 'Image options changed in another companion. Review the current choices and try again.'
-          : 'Settings were reset in another companion. Review the current choices and try again.',
-      );
-    }
-    syncPreferenceControls();
-  } catch (error) {
-    try {
-      applyCommittedPreferences(await readStoredPreferences());
-      syncPreferenceControls();
-    } catch {
-      // A later storage event can reconcile optimistic controls.
-    }
-    setStatus(`Could not save image options: ${readableError(error)}`, 'error');
   }
 }
 
@@ -1151,7 +1090,7 @@ async function commitReplicaReadScope(
   completeReadScopeSetupButton.disabled = completeSetup;
   setupReadScopeStatus.textContent = completeSetup ? 'Saving…' : '';
   try {
-    const result = await sendPreferenceCommand(completeSetup
+    const result = await preferenceClient.send(completeSetup
       ? {
           type: 'simul:preferences:complete-read-scope-setup',
           expectedResetRevision: state.preferences.resetRevision,
@@ -1167,7 +1106,7 @@ async function commitReplicaReadScope(
             replicaReadScopeFingerprint(committedAtDispatch),
           patch: { replicaReadScope: scope },
         });
-    applyCommittedPreferences(result.preferences);
+    preferenceClient.applyCommitted(result.preferences);
     if (!result.applied) {
       const gate = state.localReadScopeNarrowingGates.get(sequence);
       if (gate) gate.failed = true;
@@ -1216,7 +1155,7 @@ async function resetAllExtensionSettings(): Promise<void> {
   }
   try {
     const retry = state.preferences.resetCleanupPendingRevision > 0;
-    const result = await sendPreferenceCommand(retry
+    const result = await preferenceClient.send(retry
       ? {
           type: 'simul:preferences:retry-reset-cleanup',
           expectedResetRevision: state.preferences.resetRevision,
@@ -1225,7 +1164,7 @@ async function resetAllExtensionSettings(): Promise<void> {
           type: 'simul:preferences:reset-all',
           expectedResetRevision: state.preferences.resetRevision,
         });
-    applyCommittedPreferences(result.preferences);
+    preferenceClient.applyCommitted(result.preferences);
     if (!result.applied && result.code === 'stale-reset-revision') {
       syncPreferenceControls();
       resetSettingsStatus.textContent =
@@ -1346,32 +1285,6 @@ async function handlePreferenceSafetyMessage(
   }
 }
 
-function applyCommittedPreferences(value: unknown): boolean {
-  const candidate = parseCompanionPreferences(value);
-  const previous = state.preferences;
-  const selected = selectLatestCompanionPreferences(previous, candidate);
-  const candidateIsOlder =
-    candidate.resetRevision < previous.resetRevision ||
-    (
-      candidate.resetRevision === previous.resetRevision &&
-      candidate.settingsRevision < previous.settingsRevision
-    );
-  if (candidateIsOlder) return false;
-  state.preferences = viewPreferencePatchLedger.project(selected);
-  if (
-    state.preferences.readScopeSetupVersion !== REPLICA_READ_SCOPE_SETUP_VERSION &&
-    (
-      previous.readScopeSetupVersion === REPLICA_READ_SCOPE_SETUP_VERSION ||
-      state.preferences.resetRevision > previous.resetRevision
-    )
-  ) {
-    state.setupReadScopeDraft = replicaReadScopeForProfile('standard');
-  }
-  releaseAuthorizedRemoteReadScopeSafetyGates();
-  releaseSatisfiedLocalReadScopeSafetyGates();
-  return true;
-}
-
 function releaseAuthorizedRemoteReadScopeSafetyGates(): void {
   state.remoteReadScopeNarrowingGates.releaseSatisfied(
     committedReplicaReadScope(state.preferences),
@@ -1423,198 +1336,6 @@ function committedReplicaReadScope(
     candidate.replicaReadScope,
     candidate.readScopeSetupVersion,
   );
-}
-
-async function refreshImageCaptureAccess(
-  reportRevocation = false,
-): Promise<void> {
-  const request = currency.begin('image-access');
-  const previous = state.imageCaptureAccess;
-  let next: typeof state.imageCaptureAccess;
-  try {
-    next = await browser.permissions.contains({
-      origins: [...ALL_SITES_PERMISSION_ORIGINS],
-    }) ? 'granted' : 'missing';
-  } catch {
-    next = 'missing';
-  }
-  if (!currency.isCurrent(request)) return;
-  const capturePermissionRevoked = reportRevocation &&
-    previous === 'granted' && next === 'missing';
-  if (capturePermissionRevoked) {
-    imageTranslationController.purgeSourceDerivedCache();
-  }
-  state.imageCaptureAccess = next;
-  imageAnalysisPanel.render();
-  configureImageTranslation();
-  updateControls();
-  if (
-    reportRevocation &&
-    previous === 'granted' &&
-    state.imageCaptureAccess === 'missing' &&
-    state.preferences.imageTranslationEnabled
-  ) {
-    setStatus(
-      state.preferences.disabledImageReadingMethodIds.includes(
-        ACCESSIBILITY_TEXT_METHOD_ID,
-      )
-        ? 'Image access was removed. Pixel OCR is paused; open options and choose Grant image access to resume.'
-        : 'Image access was removed. Accessibility image text remains active; only pixel OCR is paused.',
-      'warning',
-    );
-  }
-}
-
-async function changeImageTranslationEnabled(
-  enabled: boolean,
-  requestPixelAccess = false,
-): Promise<void> {
-  if (state.permissionInFlight) {
-    syncPreferenceControls();
-    return;
-  }
-  state.permissionInFlight = true;
-  imageAnalysisPanel.render();
-  updateControls();
-  try {
-    const shouldRequestPixelAccess = requestPixelAccess &&
-      enabledUsablePixelOcrProviderOrder().length > 0;
-    const outcome = await (async () => {
-        const userActivationAvailable = navigator.userActivation.isActive;
-        let freshPreferences: CompanionPreferences | undefined;
-        let newlyGranted = false;
-        let removedImageCaptureGrant = false;
-        try {
-          const hadImageCaptureGrant = await browser.permissions.contains({
-            origins: [...ALL_SITES_PERMISSION_ORIGINS],
-          });
-          if (enabled && shouldRequestPixelAccess && !hadImageCaptureGrant) {
-            if (!userActivationAvailable || !navigator.userActivation.isActive) {
-              return { kind: 'activation' } as const;
-            }
-            const granted = await browser.permissions.request({
-              origins: [...ALL_SITES_PERMISSION_ORIGINS],
-            });
-            if (!granted) return { kind: 'denied' } as const;
-            newlyGranted = true;
-          }
-
-          freshPreferences = await readStoredPreferences();
-          let narrowAccessRestored = true;
-          if (
-            !enabled &&
-            freshPreferences.imageTranslationEnabled &&
-            !freshPreferences.autoTranslateAllSites &&
-            hadImageCaptureGrant
-          ) {
-            const removed = await browser.permissions.remove({
-              origins: [...ALL_SITES_PERMISSION_ORIGINS],
-            });
-            const broadStillPresent = await browser.permissions.contains({
-              origins: [...ALL_SITES_PERMISSION_ORIGINS],
-            });
-            if (!removed && broadStillPresent) {
-              throw new Error('Chrome retained image capture access.');
-            }
-            removedImageCaptureGrant = !broadStillPresent;
-            const exactOrigins = freshPreferences.autoTranslateOrigins.flatMap(
-              (origin) => permissionOriginsForMode('site', origin),
-            );
-            if (exactOrigins.length > 0) {
-              narrowAccessRestored = userActivationAvailable &&
-                await browser.permissions.request({ origins: exactOrigins });
-              if (narrowAccessRestored) {
-                const actual = new Set(
-                  (await browser.permissions.getAll()).origins ?? [],
-                );
-                narrowAccessRestored = exactOrigins.every((origin) =>
-                  actual.has(origin)
-                );
-              }
-            }
-          }
-
-          const result = await sendPreferenceCommand({
-            type: 'simul:preferences:patch-image-analysis',
-            expectedResetRevision: freshPreferences.resetRevision,
-            expectedSettingsRevision: freshPreferences.settingsRevision,
-            patch: { imageTranslationEnabled: enabled },
-          });
-          if (!result.applied) {
-            throw new Error(
-              'Settings were reset in another companion while image access was changing.',
-            );
-          }
-          return { kind: 'complete', result, narrowAccessRestored } as const;
-        } catch (error) {
-          const prior = await readStoredPreferences().catch(
-            () => freshPreferences ?? state.preferences,
-          );
-          if (
-            newlyGranted &&
-            !prior.autoTranslateAllSites &&
-            !prior.imageTranslationEnabled
-          ) {
-            await browser.permissions.remove({
-              origins: [...ALL_SITES_PERMISSION_ORIGINS],
-            }).catch(() => false);
-          }
-          if (
-            removedImageCaptureGrant &&
-            prior.imageTranslationEnabled
-          ) {
-            await browser.permissions.request({
-              origins: [...ALL_SITES_PERMISSION_ORIGINS],
-            }).catch(() => false);
-          }
-          throw error;
-        }
-    })();
-    if (outcome.kind === 'activation') {
-      await reloadPreferencesFromStorage();
-      setStatus(
-        'Choose the image setting again so Chrome can show its access prompt.',
-        'warning',
-      );
-      return;
-    }
-    if (outcome.kind === 'denied') {
-      await reloadPreferencesFromStorage();
-      setStatus(
-        state.preferences.imageTranslationEnabled
-          ? state.preferences.disabledImageReadingMethodIds.includes(
-              ACCESSIBILITY_TEXT_METHOD_ID,
-            )
-            ? 'Pixel OCR remains paused. Choose Grant image access when you are ready to retry.'
-            : 'Accessibility image text remains active without image access; pixel OCR was not enabled.'
-          : 'Chrome did not grant image access, so image translation remains off. You can retry from options.',
-        'warning',
-      );
-      return;
-    }
-
-    applyCommittedPreferences(outcome.result.preferences);
-    syncPreferenceControls();
-    setStatus(
-      enabled
-        ? 'Image translation is enabled for visible page images.'
-        : outcome.narrowAccessRestored
-          ? 'Image translation is off.'
-          : 'Image translation is off. Chrome did not retain some saved one-site automatic access.',
-      outcome.narrowAccessRestored ? 'success' : 'warning',
-    );
-  } catch {
-    await reloadPreferencesFromStorage();
-    setStatus(
-      'Chrome could not update image access. Your saved setting was left unchanged; try again from options.',
-      'error',
-    );
-  } finally {
-    state.permissionInFlight = false;
-    await refreshImageCaptureAccess();
-    syncPreferenceControls();
-    updateControls();
-  }
 }
 
 function queueCapture(request: CaptureRequest): void {
@@ -1756,7 +1477,7 @@ async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> 
     if (currentTranslationFieldCount() === 0) {
       state.availability = 'unavailable';
       state.availabilityCheckedForPair = undefined;
-      const accessWasRevoked = await reconcileAutomaticAccess(
+      const accessWasRevoked = await permissionFlows.reconcileAutomaticAccess(
         committedIdentity.url,
       );
       if (!captureCoordinator.isCurrent(work.generation)) return;
@@ -1770,7 +1491,7 @@ async function capturePage(work: GenerationWork<CaptureRequest>): Promise<void> 
     }
     await checkAvailability(work.generation);
     if (!captureCoordinator.isCurrent(work.generation)) return;
-    const accessWasRevoked = await reconcileAutomaticAccess(
+    const accessWasRevoked = await permissionFlows.reconcileAutomaticAccess(
       committedIdentity.url,
     );
     if (!captureCoordinator.isCurrent(work.generation)) return;
@@ -2233,7 +1954,7 @@ async function languageSelectionChanged(): Promise<void> {
   const targetLanguage = readLanguage(targetSelect.value);
   const previousPair = state.selectedPair();
   if (!state.isLiveSourceOnlyMode) state.translationDesired = true;
-  const saved = await commitViewPreferencePatch({ sourceLanguage, targetLanguage });
+  const saved = await preferenceClient.commitView({ sourceLanguage, targetLanguage });
   if (!saved) return;
   await applyLanguagePreferences(true, previousPair);
 }
@@ -2621,48 +2342,8 @@ function observeReplicaStateLabel(): void {
   }).observe(replicaModeBadge, { childList: true, characterData: true });
 }
 
-/**
- * Applies zoom immediately and saves it once the slider settles. Saving on
- * every input tick sent one storage write per tick, each of which fanned a
- * storage change to every companion view and rebuilt the settings controls.
- * One optimistic ledger entry covers the whole drag, so a committed state.snapshot
- * arriving mid-drag keeps the slider where the user left it.
- */
-function setZoom(value: number): void {
-  const patch: CompanionViewSettingsPatch = {
-    displayMode: 'custom',
-    zoomPercent: clampZoomPercent(value),
-  };
-  if (state.pendingZoomPatch) {
-    viewPreferencePatchLedger.settle(state.pendingZoomPatch.requestId);
-  }
-  const pending = viewPreferencePatchLedger.begin(state.preferences, patch);
-  state.pendingZoomPatch = { requestId: pending.requestId, patch };
-  state.preferences = pending.preferences;
-  zoomInput.value = String(state.preferences.zoomPercent);
-  zoomOutput.value = `${state.preferences.zoomPercent}%`;
-  zoomInput.disabled = false;
-  displayModeSelect.value = state.preferences.displayMode;
-  syncToolbarPreferenceControls();
-  updateMirrorLayout();
-  if (state.zoomCommitTimer !== undefined) clearTimeout(state.zoomCommitTimer);
-  state.zoomCommitTimer = setTimeout(commitPendingZoom, ZOOM_COMMIT_DEBOUNCE_MS);
-}
-
-function commitPendingZoom(): void {
-  if (state.zoomCommitTimer !== undefined) clearTimeout(state.zoomCommitTimer);
-  state.zoomCommitTimer = undefined;
-  const pending = state.pendingZoomPatch;
-  if (!pending) return;
-  state.pendingZoomPatch = undefined;
-  // commitViewPreferencePatch opens its own ledger entry synchronously, so
-  // the drag's entry can be released without a gap in the projection.
-  viewPreferencePatchLedger.settle(pending.requestId);
-  void commitViewPreferencePatch(pending.patch);
-}
-
 async function changePopoutTabMode(popoutTabMode: PopoutTabMode): Promise<void> {
-  const saved = await commitViewPreferencePatch({ popoutTabMode });
+  const saved = await preferenceClient.commitView({ popoutTabMode });
   if (!saved || state.preferences.popoutTabMode !== popoutTabMode) return;
   if (isDetachedWindow && popoutTabMode === 'active') {
     await sourceFollower.followCurrentActiveSourceTab();
@@ -2679,7 +2360,7 @@ async function changeReplicaFidelityPolicy(
   state.replicaFidelityCommitInFlight = true;
   updateControls();
   try {
-    const saved = await commitViewPreferencePatch({ replicaFidelityPolicy });
+    const saved = await preferenceClient.commitView({ replicaFidelityPolicy });
     if (
       !saved ||
       state.preferences.replicaFidelityPolicy !== replicaFidelityPolicy
@@ -2700,7 +2381,7 @@ async function changeReplicaViewMode(
   const previousMode = state.preferences.replicaViewMode;
   // commitViewPreferencePatch applies the validated preference optimistically
   // before its first await, so projection gates close immediately.
-  const save = commitViewPreferencePatch({ replicaViewMode });
+  const save = preferenceClient.commitView({ replicaViewMode });
   applyReplicaViewMode(previousMode, false);
   await save;
   if (state.preferences.replicaViewMode !== replicaViewMode) {
@@ -3273,7 +2954,7 @@ async function openDetachedWindow(): Promise<void> {
     await browser.windows.create(createDetachedWindowData(url, sourceWindow));
     let preferenceSaveFailed = false;
     try {
-      await rememberCompanionSurface('popout');
+      await preferenceClient.rememberSurface('popout');
     } catch {
       preferenceSaveFailed = true;
     }
@@ -3308,7 +2989,7 @@ async function returnToSidePanel(): Promise<void> {
   try {
     const [, [tab]] = await Promise.all([openPromise, activeTabPromise]);
     try {
-      await rememberCompanionSurface('side-panel');
+      await preferenceClient.rememberSurface('side-panel');
     } catch {
       // A successfully opened side panel remains authoritative even if the
       // optional last-used preference could not be persisted.
@@ -3333,12 +3014,6 @@ async function returnToSidePanel(): Promise<void> {
   } catch (error) {
     setStatus(`Chrome could not return to the side panel: ${readableError(error)}`, 'error');
   }
-}
-
-async function rememberCompanionSurface(
-  surface: CompanionSurface,
-): Promise<void> {
-  await commitViewPreferencePatch({ lastLaunchSurface: surface });
 }
 
 async function closeNativeSidePanel(windowId: number): Promise<boolean> {
@@ -3371,167 +3046,6 @@ async function checkPanelPlacement(): Promise<void> {
   } catch {
     // Chrome 138 does not expose placement inspection in every channel.
   }
-}
-
-async function changeAutoTranslationMode(mode: AutoTranslationMode): Promise<void> {
-  if (state.permissionInFlight) {
-    syncPreferenceControls();
-    return;
-  }
-  const pageUrl = state.followedPageIdentity?.url ?? state.capturedPageIdentity?.url;
-  const requestedOrigins = permissionOriginsForMode(mode, pageUrl);
-  if (mode === 'site' && requestedOrigins.length === 0) {
-    syncPreferenceControls();
-    setStatus(
-      hasNonDefaultPort(pageUrl)
-        ? 'Chrome cannot grant narrow one-site access to a non-default port.'
-        : 'Open a regular HTTP or HTTPS page before enabling this-site automation.',
-      'warning',
-    );
-    return;
-  }
-  state.permissionInFlight = true;
-  updateControls();
-  try {
-    const outcome = await performAutoTranslationChange(
-      mode,
-      pageUrl,
-      requestedOrigins,
-    );
-    if (outcome.kind === 'activation') {
-      await reloadPreferencesFromStorage();
-      setStatus('Choose the setting again so Chrome can show its access prompt.', 'warning');
-      return;
-    }
-    if (outcome.kind === 'limit') {
-      applyCommittedPreferences(outcome.preferences);
-      syncPreferenceControls();
-      setStatus('The saved-site limit has been reached.', 'warning');
-      return;
-    }
-    if (outcome.kind === 'failed') {
-      if (outcome.result) {
-        applyCommittedPreferences(outcome.result.preferences);
-      }
-      else await reloadPreferencesFromStorage();
-      syncPreferenceControls();
-      setStatus(`Chrome could not update automatic access: ${readableError(outcome.error)}`, 'error');
-      return;
-    }
-    applyCommittedPreferences(outcome.result.preferences);
-    syncPreferenceControls();
-    if (outcome.kind === 'denied' || outcome.kind === 'not-applied') {
-      setStatus('Chrome did not retain the requested automatic-access scope.', 'warning');
-      return;
-    }
-    setStatus(
-      mode === 'off'
-        ? 'Automatic translation is off for this scope.'
-        : mode === 'all'
-          ? 'Automatic translation is enabled for regular web pages.'
-          : 'Automatic translation is enabled for this site.',
-      'success',
-    );
-    if (mode !== 'off' && state.snapshot && !state.isLiveSourceOnlyMode) {
-      state.translationDesired = true;
-      await maybeTranslateAutomatically(captureCoordinator.generation, pageUrl ?? '');
-    }
-  } catch (error) {
-    const repaired = await sendPreferenceCommand({
-      type: 'simul:preferences:abort-auto',
-      expectedResetRevision: state.preferences.resetRevision,
-      mode,
-      ...(pageUrl ? { pageUrl } : {}),
-    }).catch(() => undefined);
-    if (repaired) applyCommittedPreferences(repaired.preferences);
-    else await reloadPreferencesFromStorage();
-    syncPreferenceControls();
-    setStatus(`Chrome could not update automatic access: ${readableError(error)}`, 'error');
-  } finally {
-    state.permissionInFlight = false;
-    updateControls();
-  }
-}
-
-async function performAutoTranslationChange(
-  mode: AutoTranslationMode,
-  pageUrl: string | undefined,
-  requestedOrigins: string[],
-) {
-  let freshPreferences: CompanionPreferences | undefined;
-  try {
-    freshPreferences = await readStoredPreferences();
-    const candidate = withAutoTranslationMode(freshPreferences, pageUrl, mode);
-    if (mode === 'site' && autoTranslationModeForPage(candidate, pageUrl) !== 'site') {
-      return { kind: 'limit', preferences: freshPreferences } as const;
-    }
-    if ((mode === 'site' || mode === 'all') && !navigator.userActivation.isActive) {
-      return { kind: 'activation' } as const;
-    }
-    if (mode === 'site' && !freshPreferences.imageTranslationEnabled) {
-      await browser.permissions.remove({ origins: permissionOriginsForMode('all') });
-    }
-    const granted =
-      requestedOrigins.length === 0 ||
-      (await browser.permissions.request({ origins: requestedOrigins }));
-    if (!granted) {
-      const result = await sendPreferenceCommand({
-        type: 'simul:preferences:abort-auto',
-        expectedResetRevision: freshPreferences.resetRevision,
-        mode,
-        ...(pageUrl ? { pageUrl } : {}),
-      });
-      return { kind: 'denied', result } as const;
-    }
-    const result = await sendPreferenceCommand({
-      type: 'simul:preferences:commit-auto',
-      expectedResetRevision: freshPreferences.resetRevision,
-      expectedSettingsRevision: freshPreferences.settingsRevision,
-      mode,
-      ...(pageUrl ? { pageUrl } : {}),
-    });
-    if (result.applied) return { kind: 'complete', result } as const;
-    const repaired = await sendPreferenceCommand({
-      type: 'simul:preferences:abort-auto',
-      expectedResetRevision: result.preferences.resetRevision,
-      mode,
-      ...(pageUrl ? { pageUrl } : {}),
-    }).catch(() => result);
-    return { kind: 'not-applied', result: repaired } as const;
-  } catch (error) {
-    const latest = await readStoredPreferences().catch(
-      () => freshPreferences ?? state.preferences,
-    );
-    const result = await sendPreferenceCommand({
-      type: 'simul:preferences:abort-auto',
-      expectedResetRevision: latest.resetRevision,
-      mode,
-      ...(pageUrl ? { pageUrl } : {}),
-    }).catch(() => undefined);
-    return { kind: 'failed', error, result } as const;
-  }
-}
-
-async function reconcileAutomaticAccess(pageUrl: string | undefined): Promise<boolean> {
-  const before = autoTranslationModeForPage(state.preferences, pageUrl);
-  const result = await sendPreferenceCommand({ type: 'simul:preferences:reconcile' });
-  applyCommittedPreferences(result.preferences);
-  syncPreferenceControls();
-  return before !== autoTranslationModeForPage(state.preferences, pageUrl);
-}
-
-async function readStoredPreferences(): Promise<CompanionPreferences> {
-  const stored = await browser.storage.local.get(STORAGE_KEY);
-  return parseCompanionPreferences(stored[STORAGE_KEY]);
-}
-
-async function reloadPreferencesFromStorage(): Promise<void> {
-  try {
-    applyCommittedPreferences(await readStoredPreferences());
-  } catch {
-    applyCommittedPreferences(DEFAULT_COMPANION_PREFERENCES);
-  }
-  syncPreferenceControls();
 }
 
 function invalidateCompanion(message: string): void {

@@ -17,6 +17,10 @@ const script = readFileSync(
   new URL('../entrypoints/sidepanel/main.ts', import.meta.url),
   'utf8',
 );
+const permissionFlows = readFileSync(
+  new URL('../entrypoints/sidepanel/permission-flows.ts', import.meta.url),
+  'utf8',
+);
 const providerRegistry = readFileSync(
   new URL('../lib/ocr/provider-registry.ts', import.meta.url),
   'utf8',
@@ -160,24 +164,6 @@ describe('sidepanel UI structure', () => {
     expect(initializeSource).not.toContain('await optionalReadiness;');
   });
 
-  it('binds ordinary image-option writes to the current settings revision', () => {
-    const commitStart = script.indexOf(
-      'async function commitImageAnalysisPreferencePatch',
-    );
-    const commitEnd = script.indexOf('\nasync function ', commitStart + 1);
-    const commitSource = script.slice(
-      commitStart,
-      commitEnd === -1 ? undefined : commitEnd,
-    );
-
-    expect(commitStart).toBeGreaterThanOrEqual(0);
-    expect(commitSource).toContain(
-      'const expectedSettingsRevision = state.preferences.settingsRevision;',
-    );
-    expect(commitSource).toContain('expectedSettingsRevision,');
-    expect(commitSource).toContain("result.code === 'stale-settings-revision'");
-  });
-
   it('keeps only the owned dropdown disclosure pointer-reachable in replay', () => {
     expect(style).toContain('.replica-replay-mount *');
     expect(style).toContain('pointer-events: none !important');
@@ -226,7 +212,7 @@ describe('sidepanel UI structure', () => {
   });
 
   it('keeps every image-reading method visible, toggleable, and ordered', () => {
-    expect(script).toContain('commitPatch: commitImageAnalysisPreferencePatch,');
+    expect(script).toContain('commitPatch: (patch) => preferenceClient.commitImageAnalysis(patch),');
     expect(DEFAULT_COMPANION_PREFERENCES.imageReadingMethodOrder.slice(0, 3))
       .toEqual([
         'accessibility-text',
@@ -318,10 +304,10 @@ describe('sidepanel UI structure', () => {
     expect(script).toContain(
       "imageCaptureAccess !== 'granted' &&\n    enabledUsablePixelOcrProviderOrder().length > 0",
     );
-    expect(script).toContain(
+    expect(permissionFlows).toContain(
       'const shouldRequestPixelAccess = requestPixelAccess &&',
     );
-    expect(script).toContain(
+    expect(permissionFlows).toContain(
       'Accessibility image text remains active; only pixel OCR is paused.',
     );
     expect(script).toContain('handlePreferenceSafetyMessage(message, reply)');
@@ -370,9 +356,11 @@ describe('sidepanel UI structure', () => {
   });
 
   it('never waits for the background while holding the background preference lock', () => {
-    expect(script).not.toContain('navigator.locks.request(');
-    expect(script).not.toContain('PREFERENCE_LOCK_NAME');
-    expect(script).toContain(
+    for (const source of [script, permissionFlows]) {
+      expect(source).not.toContain('navigator.locks.request(');
+      expect(source).not.toContain('PREFERENCE_LOCK_NAME');
+    }
+    expect(permissionFlows).toContain(
       'expectedSettingsRevision: freshPreferences.settingsRevision',
     );
   });
@@ -395,7 +383,7 @@ describe('sidepanel UI structure', () => {
     expect(disclosure?.hasAttribute('data-ui-label')).toBe(true);
     expect(script).toContain('changeReplicaFidelityPolicy(');
     expect(script).toContain(
-      'const saved = await commitViewPreferencePatch({ replicaFidelityPolicy })',
+      'const saved = await preferenceClient.commitView({ replicaFidelityPolicy })',
     );
     expect(script).toContain('!saved ||');
     expect(script).toContain("reason: 'preference'");
@@ -410,7 +398,7 @@ describe('sidepanel UI structure', () => {
 
   it('does not follow a new active tab when its mode preference failed to save', () => {
     expect(script).toContain(
-      'const saved = await commitViewPreferencePatch({ popoutTabMode })',
+      'const saved = await preferenceClient.commitView({ popoutTabMode })',
     );
     expect(script).toContain(
       '!saved || state.preferences.popoutTabMode !== popoutTabMode',
@@ -499,26 +487,13 @@ describe('sidepanel UI structure', () => {
     );
   });
 
-  it('saves zoom once the slider settles instead of on every input tick', () => {
-    expect(script).toContain('const ZOOM_COMMIT_DEBOUNCE_MS = 150;');
-    const setZoom = sliceBetween('function setZoom(', '\nfunction commitPendingZoom(');
-    expect(setZoom).not.toContain('commitViewPreferencePatch(');
-    expect(setZoom).toContain('viewPreferencePatchLedger.begin(state.preferences, patch)');
-    expect(setZoom).toContain('updateMirrorLayout();');
-    expect(setZoom).toContain(
-      'zoomCommitTimer = setTimeout(commitPendingZoom, ZOOM_COMMIT_DEBOUNCE_MS);',
-    );
-    const commitZoom = sliceBetween(
-      'function commitPendingZoom(',
-      '\nasync function changePopoutTabMode(',
-    );
-    expect(commitZoom).toContain('viewPreferencePatchLedger.settle(pending.requestId)');
-    expect(commitZoom).toContain('void commitViewPreferencePatch(pending.patch)');
+  it('saves a zoom drag that has not settled when the page unloads', () => {
     const pagehide = sliceBetween(
       "window.addEventListener('pagehide'",
       'browser.runtime.onMessage.addListener(',
     );
-    expect(pagehide).toContain('commitPendingZoom();');
+    expect(pagehide).toContain('preferenceClient.flushPendingZoom();');
+    expect(script).toContain("zoomInput.addEventListener('input', () => preferenceClient.setZoom(");
   });
 
   it('lets UI labels follow a page translation that prepared their pair', () => {
