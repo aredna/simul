@@ -209,17 +209,21 @@ export interface SemanticControlStateProof {
 }
 
 /**
- * Typed ARIA widget state. `checked`, `selected` and `pressed` are user
- * choice state (formValues); `current` and the indicator-only `valuenow` are
- * page state (controlSemantics). Every value is a bounded token or a bounded
- * decimal; `aria-valuetext` and slider/spinbutton values never travel.
+ * Typed ARIA widget state. `checked`, `selected`, `pressed` and the
+ * slider/spinbutton `valueinput` are user input (formValues); `current` and
+ * the read-only indicator `valuenow` are page state (controlSemantics). Every
+ * value is a bounded token or a bounded decimal; `aria-valuetext` (free text)
+ * never travels. `valueinput` carries the same `aria-valuenow` attribute as
+ * `valuenow`, but from a user-editable slider/spinbutton, so it reads under
+ * the form-value gate rather than the page-state gate.
  */
 export type SemanticAriaState =
   | 'checked'
   | 'selected'
   | 'pressed'
   | 'current'
-  | 'valuenow';
+  | 'valuenow'
+  | 'valueinput';
 export type SemanticAriaStateGate = 'formValues' | 'controlSemantics';
 const SEMANTIC_ARIA_CURRENT_VALUES = new Set([
   'page', 'step', 'location', 'date', 'time', 'true', 'false',
@@ -243,10 +247,10 @@ export interface SemanticAriaStateProof {
 
 export function isSemanticAriaState(value: unknown): value is SemanticAriaState {
   return value === 'checked' || value === 'selected' || value === 'pressed' ||
-    value === 'current' || value === 'valuenow';
+    value === 'current' || value === 'valuenow' || value === 'valueinput';
 }
 
-/** Choice state reads under formValues; page state under controlSemantics. */
+/** User input reads under formValues; read-only page state under controlSemantics. */
 export function semanticAriaStateGate(
   state: SemanticAriaState,
 ): SemanticAriaStateGate {
@@ -255,13 +259,22 @@ export function semanticAriaStateGate(
     : 'formValues';
 }
 
+/**
+ * The source attribute a state reads from. `valueinput` shares the numeric
+ * `aria-valuenow` attribute of `valuenow`; every other state reads its own
+ * `aria-<state>`.
+ */
+export function semanticAriaStateAttribute(state: SemanticAriaState): string {
+  return state === 'valueinput' ? 'aria-valuenow' : `aria-${state}`;
+}
+
 export function isSemanticAriaStateValue(
   state: SemanticAriaState,
   value: unknown,
 ): value is string {
   if (typeof value !== 'string') return false;
   if (state === 'current') return SEMANTIC_ARIA_CURRENT_VALUES.has(value);
-  if (state === 'valuenow') {
+  if (state === 'valuenow' || state === 'valueinput') {
     return value.length <= 24 && SEMANTIC_ARIA_DECIMAL_VALUE.test(value);
   }
   if (state === 'selected') return value === 'true' || value === 'false';

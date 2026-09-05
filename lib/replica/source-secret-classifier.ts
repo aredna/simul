@@ -122,7 +122,8 @@ export function classifySourceEvidence(
   if (
     tag === 'textarea' ||
     (tag === 'select' && facts.valueBearing === true) ||
-    (tag === 'input' && ['', 'text', 'search', 'url'].includes(type) &&
+    (tag === 'input' &&
+      ['', 'text', 'search', 'url', 'range', 'number'].includes(type) &&
       tokens.every(isHarmlessAutocompleteToken))
   ) return 'ordinary-form';
   const contentEditable = normalized(facts.contentEditable);

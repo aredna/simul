@@ -232,15 +232,17 @@ describe('SemanticProofPresenter', () => {
     expect(aria.getAttribute('aria-checked')).toBe('true');
   });
 
-  it('presents toggle, current-item and indicator range state and restores them', () => {
+  it('presents toggle, current-item, indicator and input range state and restores them', () => {
     const { document } = parseHTML(`<html><body>
       <button id="bold">Bold</button>
       <a id="here" href="/here">Here</a>
       <div id="upload" role="progressbar" aria-valuemin="0" aria-valuemax="100"></div>
+      <div id="volume" role="slider" aria-valuemin="0" aria-valuemax="10"></div>
     </body></html>`);
     const bold = document.querySelector<HTMLElement>('#bold')!;
     const here = document.querySelector<HTMLElement>('#here')!;
     const upload = document.querySelector<HTMLElement>('#upload')!;
+    const volume = document.querySelector<HTMLElement>('#volume')!;
     const base = {
       kind: 'aria-state', bridge: 'isolated-html', revision: 1,
       classifierVersion: 1,
@@ -257,6 +259,10 @@ describe('SemanticProofPresenter', () => {
       kind: 'aria-state',
       proof: { ...base, nodeId: 3, gate: 'controlSemantics', state: 'valuenow', value: '42' },
       target: upload,
+    }, {
+      kind: 'aria-state',
+      proof: { ...base, nodeId: 4, gate: 'formValues', state: 'valueinput', value: '7' },
+      target: volume,
     }];
     const presenter = new SemanticProofPresenter({
       document: document as unknown as Document,
@@ -266,6 +272,12 @@ describe('SemanticProofPresenter', () => {
     expect(here.getAttribute('aria-current')).toBe('page');
     expect(upload.getAttribute('aria-valuenow')).toBe('42');
     expect(upload.getAttribute('aria-valuemin')).toBe('0');
+    // A slider's user-input value is painted onto aria-valuenow, not a
+    // literal aria-valueinput attribute.
+    expect(volume.getAttribute('aria-valuenow')).toBe('7');
+    expect(volume.hasAttribute('aria-valueinput')).toBe(false);
+    expect(volume.getAttribute('data-simul-source-aria-valueinput-state'))
+      .toBe('v1');
 
     expect(presenter.apply([{
       kind: 'aria-state',
@@ -275,11 +287,15 @@ describe('SemanticProofPresenter', () => {
     expect(bold.getAttribute('aria-pressed')).toBe('false');
     expect(here.hasAttribute('aria-current')).toBe(false);
     expect(upload.hasAttribute('aria-valuenow')).toBe(false);
+    expect(volume.hasAttribute('aria-valuenow')).toBe(false);
 
     presenter.clear();
     expect(bold.hasAttribute('aria-pressed')).toBe(false);
     expect(bold.hasAttribute('data-simul-source-aria-pressed-state')).toBe(false);
     expect(upload.getAttribute('aria-valuemax')).toBe('100');
+    expect(volume.getAttribute('aria-valuemax')).toBe('10');
+    expect(volume.hasAttribute('data-simul-source-aria-valueinput-state'))
+      .toBe(false);
   });
 
   it('preserves same-value mirror updates to disclosure relationships', () => {

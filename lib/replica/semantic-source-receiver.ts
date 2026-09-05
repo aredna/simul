@@ -1003,6 +1003,9 @@ const RECEIVER_ARIA_CURRENT_ROLES = new Set([
 const RECEIVER_ARIA_RANGE_INDICATOR_ROLES = new Set([
   'meter', 'progressbar', 'scrollbar',
 ]);
+const RECEIVER_ARIA_RANGE_INPUT_ROLES = new Set([
+  'slider', 'spinbutton',
+]);
 const RECEIVER_DISCLOSURE_STATE_TAGS = new Set([
   'input', 'option', 'output', 'select', 'textarea',
 ]);
@@ -1038,6 +1041,7 @@ function receiverAriaStateMatches(
     return RECEIVER_ARIA_CURRENT_ROLES.has(role) ||
       (role === '' && RECEIVER_ARIA_CURRENT_TAGS.has(tagName));
   }
+  if (state === 'valueinput') return RECEIVER_ARIA_RANGE_INPUT_ROLES.has(role);
   return RECEIVER_ARIA_RANGE_INDICATOR_ROLES.has(role);
 }
 

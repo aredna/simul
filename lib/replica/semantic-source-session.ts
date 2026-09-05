@@ -24,6 +24,7 @@ import {
   type SemanticSourceProof,
   type SemanticSourceRecord,
   isSemanticAriaStateValue,
+  semanticAriaStateAttribute,
   semanticAriaStateGate,
   type SemanticAriaState,
 } from './semantic-source-protocol';
@@ -183,9 +184,13 @@ const SEMANTIC_ARIA_CURRENT_ROLES = new Set([
   'button', 'gridcell', 'link', 'listitem', 'menuitem', 'menuitemradio',
   'option', 'row', 'tab', 'treeitem',
 ]);
-/** Read-only indicators only: slider and spinbutton carry user values. */
+/** Read-only indicators: their range value is page state (controlSemantics). */
 const SEMANTIC_ARIA_RANGE_INDICATOR_ROLES = new Set([
   'meter', 'progressbar', 'scrollbar',
+]);
+/** User-editable range widgets: their value is user input (formValues). */
+const SEMANTIC_ARIA_RANGE_INPUT_ROLES = new Set([
+  'slider', 'spinbutton',
 ]);
 const SEMANTIC_ACTIVATION_ROLES = new Set([
   'button', 'combobox', 'menuitem', 'menuitemcheckbox', 'menuitemradio',
@@ -1995,6 +2000,7 @@ function semanticAriaStatesFor(
     (role === '' && SEMANTIC_ARIA_CURRENT_TAGS.has(tagName))
   ) states.push('current');
   if (SEMANTIC_ARIA_RANGE_INDICATOR_ROLES.has(role)) states.push('valuenow');
+  if (SEMANTIC_ARIA_RANGE_INPUT_ROLES.has(role)) states.push('valueinput');
   return states;
 }
 
@@ -2004,9 +2010,11 @@ function readSemanticAriaStateValue(
   state: SemanticAriaState,
   role: string,
 ): string | undefined {
-  const raw = safelyReadAttribute(element, `aria-${state}`);
+  const raw = safelyReadAttribute(element, semanticAriaStateAttribute(state));
   if (typeof raw !== 'string') return undefined;
-  const value = state === 'valuenow' ? raw.trim() : normalizedToken(raw);
+  const value = state === 'valuenow' || state === 'valueinput'
+    ? raw.trim()
+    : normalizedToken(raw);
   if (!isSemanticAriaStateValue(state, value)) return undefined;
   if (value === 'mixed' && state === 'checked' && !SEMANTIC_ARIA_MIXED_ROLES.has(role)) {
     return undefined;

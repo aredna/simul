@@ -51,6 +51,25 @@ describe('source secret classifier', () => {
     expect(replicaReadScopeAdmits(full, 'editable')).toBe(true);
   });
 
+  it('admits native range and number values as ordinary form input', () => {
+    const standard = replicaReadScopeForProfile('standard');
+    const full = replicaReadScopeForProfile('full-visible');
+    for (const type of ['range', 'number']) {
+      expect(classifySourceEvidence({ tagName: 'input', type }))
+        .toBe('ordinary-form');
+    }
+    // A number field carrying a personal autocomplete keeps the stronger gate.
+    expect(classifySourceEvidence({
+      tagName: 'input', type: 'number', autocomplete: 'bday-year',
+    })).toBe('personal');
+    // A payment field stays secret regardless of its input type.
+    expect(classifySourceEvidence({
+      tagName: 'input', type: 'number', autocomplete: 'cc-number',
+    })).toBe('secret');
+    expect(replicaReadScopeAdmits(standard, 'ordinary-form')).toBe(false);
+    expect(replicaReadScopeAdmits(full, 'ordinary-form')).toBe(true);
+  });
+
   it('treats autocomplete switches and grouping tokens as harmless metadata', () => {
     for (const autocomplete of [
       'on',
