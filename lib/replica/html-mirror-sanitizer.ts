@@ -857,6 +857,7 @@ export function sanitizeSourceElementHints(
   representability?: HtmlMirrorRepresentabilityCollector,
   fidelityPolicy: SelectableReplicaFidelityPolicy = 'conservative',
   styleWork?: HtmlMirrorStyleWorkBudget,
+  precomputedControlledContent?: SourceControlledContentPolicy,
 ): HtmlMirrorElementHints {
   // This function is also used by live attribute refreshes. Establish the
   // credential boundary before reading selected image sources, CSSOM, canvas
@@ -870,9 +871,10 @@ export function sanitizeSourceElementHints(
       : isCanonicalClippedSourceElement(source);
   const selectedImageSource = tagName === 'img'
     && (() => {
-      const controlledContent = createSourceControlledContentPolicy(
-        source.ownerDocument,
-      );
+      // A checkpoint or live patch already holds the document's policy; the
+      // fallback rebuild is a bounded whole-document walk per image.
+      const controlledContent = precomputedControlledContent ??
+        createSourceControlledContentPolicy(source.ownerDocument);
       return !controlledContent.incomplete &&
         !hasSourceBaseWithheldAncestor(source, controlledContent);
     })()
@@ -1621,6 +1623,7 @@ function serializeNode(
     context.representability,
     context.fidelityPolicy,
     context.styleWork,
+    context.controlledContent,
   );
   admitNode(
     context.budget,
