@@ -382,13 +382,21 @@ function localizeUiTemplate(
 }
 
 /**
- * Re-renders imperatively written surfaces (the status line and progress
- * labels) after a localization pass installs a new set, so they never stay
- * English while the labelled controls translate (review finding L4).
+ * Re-renders imperatively written surfaces after a localization pass installs
+ * a new set, so they never stay English while the labelled controls translate
+ * (review finding L4). Beyond the toolbar status line, progress labels and the
+ * templated size toggle, this re-drives the secondary status surfaces that are
+ * written from code rather than through the `data-ui` marker path: the composer
+ * status, the read-scope setup/reset statuses, the image diagnostics output,
+ * and the detected-language note (review finding F2).
  */
 function relocalizeDynamicSurfaces(): void {
   toolbarStatus.relocalize();
   relocalizeSizeToggle();
+  quickComposer.relocalize();
+  readScopeController.relocalize();
+  imageAnalysisPanel.relocalize();
+  translationDriver.relocalizeDetectedLanguage();
 }
 
 /**

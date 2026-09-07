@@ -1436,3 +1436,51 @@ Gate: `npm run check` green — typecheck clean, **1,387 tests pass, 1 skipped**
 (one guard test added), `dist/chrome-unpacked` re-synced and byte-verified. The
 build identity is still not bumped (owed after the browser pass). See
 `handover-2026-09-08-l4-followup.md`.
+
+### D42. Implement F2 and bump the build identity every change (2026-09-08)
+
+Same branch `feat/ui-string-catalogue` / PR #22, follow-up on `8434078`. At the
+owner's direction, **F2 is now implemented** (rather than staying gated on the
+manual Chrome pass) and the **build identity is bumped on every change** so the
+newest build is always identifiable from its version name.
+
+- **F2 (implemented).** The imperative status surfaces that previously
+  re-localized only at set-time now re-render on a pure language switch, driven
+  from `relocalizeDynamicSurfaces()` (the localizer's `onApply`), mirroring
+  `ToolbarStatus.relocalize()` / `relocalizeSizeToggle()`:
+  - A shared primitive, `entrypoints/sidepanel/dynamic-status-text.ts`
+    (`DynamicStatusText`), stores the last English catalogue **frame + args** and
+    re-renders via `formatUiTemplate(localize(frame), args)`; tone stays
+    caller-owned (a tone never changes with language). It backs the **composer
+    status** (`quick-composer.ts`) and the three **read-scope** statuses — setup,
+    reset, and reset-cleanup (`read-scope-controller.ts`), including the templated
+    pending-cleanup count and the copied cleanup message.
+  - The **image-panel status** is the diagnostics empty-state
+    (`imagePanelNoActivity`), the panel's only imperative text — everything else
+    goes through the `data-ui` marker path the localizer already re-drives; a new
+    `ImageAnalysisPanel.relocalize()` re-runs `renderDiagnostics()`.
+  - The **detected-language note** (`translation-driver.ts`) embeds a
+    source-language name shown *in the current target language*, so a finished
+    string cannot be re-localized by frame+args alone. It stores a re-render
+    **thunk** capturing the raw inputs (detection source, resolved language code,
+    image proposal); `relocalizeDetectedLanguage()` re-runs it, re-deriving the
+    language name via `localizeLanguageName` in the language now current.
+  - The refactor is output-preserving under an identity localizer (existing tests
+    unchanged). New coverage: `dynamic-status-text.test.ts` (5) plus one
+    language-switch test per surface (composer, read-scope with an interpolated
+    count, image panel, detected-language re-deriving the language name).
+- **Build identity bumped to `0.4.0 beta v.20260908.1`** (`wxt.config.ts`).
+  D40/D41 deferred the bump so a shipped id would map to a browser-verified
+  build; the owner prefers the id always track the newest build, so it is bumped
+  now and should be re-bumped on each subsequent change. Fixtures updated
+  (`build-identity`, `extension-artifact` tests); `dist/chrome-unpacked` re-synced.
+- **Newly spotted, deferred.** The image method-toggle checkbox aria-label
+  (`image-analysis-panel.ts` `#createMethodList`) is a *templated* aria written
+  with `localizeTemplate` directly (not the marker path) and guarded behind the
+  panel `renderKey`, so it is stale after a pure language switch — the same class
+  as F5. Not fixed here to keep F2 scoped; worth folding into the browser pass.
+
+Gate: `npm run check` green — typecheck clean, **1,396 tests pass, 1 skipped**
+(+9), `dist/chrome-unpacked` re-synced and byte-verified. Still owed: the manual
+Chrome pass (unchanged), which should now also confirm the F2 surfaces above and
+the deferred method-toggle aria-label.

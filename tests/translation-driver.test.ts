@@ -57,6 +57,10 @@ function setup(options: {
   const statuses: string[] = [];
   const notes: string[] = [];
   const events: string[] = [];
+  // Mutable dictionaries so a test can simulate a pure UI language switch,
+  // including the source-language name shown in the new target language.
+  const translations = new Map<string, string>();
+  const languageNames = new Map<SupportedLanguage, string>();
   const provider = {
     availability: vi.fn(async () => options.availability ?? 'available'),
   };
@@ -78,11 +82,12 @@ function setup(options: {
     autoImageLanguageConfigurationKey: () => 'configuration',
     configureImageTranslation: () => events.push('configure'),
     setStatus: (message) => statuses.push(message),
-    localizeUi: (english: string) => english,
+    localizeUi: (english: string) => translations.get(english) ?? english,
     localizeTemplate: (frame: string, ...args: readonly (string | number)[]) =>
-      frame.replace(/\{(\d+)\}/g, (whole, index: string) =>
+      (translations.get(frame) ?? frame).replace(/\{(\d+)\}/g, (whole, index: string) =>
         args[Number(index)] === undefined ? whole : String(args[Number(index)])),
-    localizeLanguageName: (language: SupportedLanguage) => languageName(language),
+    localizeLanguageName: (language: SupportedLanguage) =>
+      languageNames.get(language) ?? languageName(language),
     updateControls: () => events.push('controls'),
     showProgress: (label) => events.push(`progress:${label}`),
     hideProgress: () => events.push('hide-progress'),
@@ -92,7 +97,18 @@ function setup(options: {
     onPairPrepared: () => events.push('pair-prepared'),
     onTranslationSettled: () => events.push('settled'),
   });
-  return { driver, state, currency, provider, coordinator, statuses, notes, events };
+  return {
+    driver,
+    state,
+    currency,
+    provider,
+    coordinator,
+    statuses,
+    notes,
+    events,
+    translations,
+    languageNames,
+  };
 }
 
 describe('TranslationDriver language resolution', () => {
@@ -106,6 +122,24 @@ describe('TranslationDriver language resolution', () => {
     expect(harness.state.pageLanguageResolutionPending).toBe(false);
     expect(harness.notes.at(-1)).toBe('Detected Japanese from the page language.');
     expect(harness.state.selectedPair()).toEqual({ sourceLanguage: 'ja', targetLanguage: 'en' });
+  });
+
+  it('re-localizes the detected-language note, re-deriving the language name (F2)', async () => {
+    const harness = setup({ documentLanguage: 'ja' });
+    await harness.driver.resolveSelectedSourceLanguage(
+      harness.driver.currentReplicaLanguageContext(),
+    );
+    expect(harness.notes.at(-1)).toBe('Detected Japanese from the page language.');
+
+    // A pure To-language switch: both the frame and the embedded source-language
+    // name must re-render, so storing the finished string would not suffice.
+    harness.translations.set(
+      'Detected {0} from the page language.',
+      'Se detectó {0} por el idioma de la página.',
+    );
+    harness.languageNames.set('ja', 'japonés');
+    harness.driver.relocalizeDetectedLanguage();
+    expect(harness.notes.at(-1)).toBe('Se detectó japonés por el idioma de la página.');
   });
 
   it('treats an explicit From choice as authoritative', async () => {

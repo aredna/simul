@@ -134,10 +134,30 @@ export interface TranslationDriverEnvironment {
  * answer can never overwrite a newer page, language or view mode.
  */
 export class TranslationDriver {
+  #detectedLanguageRender: (() => string) | undefined;
+
   constructor(private readonly environment: TranslationDriverEnvironment) {}
 
   get #state(): CompanionState {
     return this.environment.state;
+  }
+
+  /**
+   * Renders the detected-language note and remembers how to re-render it. The
+   * note embeds a source-language name shown in the current UI language, so a
+   * pure language switch must re-derive it; the stored thunk re-runs the whole
+   * localization from the captured raw inputs (review finding F2).
+   */
+  #showDetectedLanguage(render: () => string): void {
+    this.#detectedLanguageRender = render;
+    this.environment.renderDetectedLanguage(render());
+  }
+
+  /** Re-renders the detected-language note in the language now current (F2). */
+  relocalizeDetectedLanguage(): void {
+    if (this.#detectedLanguageRender) {
+      this.environment.renderDetectedLanguage(this.#detectedLanguageRender());
+    }
   }
 
   // --- Snapshot currency.
@@ -272,19 +292,20 @@ export class TranslationDriver {
       this.commitAutoDetectedImageLanguage(pendingImageEvidence);
       return true;
     }
-    this.environment.renderDetectedLanguage(
-      state.resolvedSourceLanguage
+    const resolvedLanguage = state.resolvedSourceLanguage;
+    this.#showDetectedLanguage(() =>
+      resolvedLanguage
         ? requestedPreference === 'auto'
           ? detected.language
             ? this.environment.localizeTemplate(
                 detected.source === 'html'
                   ? UI_STRINGS.statusDetectedFromPageLanguage
                   : UI_STRINGS.statusDetectedFromVisibleText,
-                this.environment.localizeLanguageName(state.resolvedSourceLanguage),
+                this.environment.localizeLanguageName(resolvedLanguage),
               )
             : this.environment.localizeTemplate(
                 UI_STRINGS.statusPreviouslyDetectedSource,
-                this.environment.localizeLanguageName(state.resolvedSourceLanguage),
+                this.environment.localizeLanguageName(resolvedLanguage),
               )
           : ''
         : this.environment.localizeTemplate(UI_STRINGS.statusCouldNotDetect),
@@ -333,16 +354,15 @@ export class TranslationDriver {
     state.availabilityCheckedForPair = undefined;
     state.translationComplete = false;
     this.environment.invalidateComposer();
-    const evidenceSource = this.environment.localizeTemplate(
-      proposal.origin === 'accessibility-text'
-        ? UI_STRINGS.imageAccessibilityText
-        : UI_STRINGS.imageBoundedOcr,
-    );
-    this.environment.renderDetectedLanguage(
+    this.#showDetectedLanguage(() =>
       this.environment.localizeTemplate(
         UI_STRINGS.statusDetectedFromImage,
         this.environment.localizeLanguageName(proposal.language),
-        evidenceSource,
+        this.environment.localizeTemplate(
+          proposal.origin === 'accessibility-text'
+            ? UI_STRINGS.imageAccessibilityText
+            : UI_STRINGS.imageBoundedOcr,
+        ),
         proposal.evidence.replaceAll('-', ' '),
       ),
     );
@@ -399,7 +419,7 @@ export class TranslationDriver {
     state.activeAbortController?.abort();
     this.environment.invalidateComposer();
     this.environment.coordinator.selectPair(undefined);
-    this.environment.renderDetectedLanguage(
+    this.#showDetectedLanguage(() =>
       this.environment.localizeTemplate(UI_STRINGS.statusImageEvidenceCleared),
     );
     this.environment.syncComposerPanel();

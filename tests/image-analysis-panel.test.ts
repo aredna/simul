@@ -34,6 +34,8 @@ function setup(initial: Partial<ImageAnalysisPanelView> = {}) {
   };
   const commitPatch = vi.fn(async () => undefined);
   const changeImageTranslationEnabled = vi.fn(async () => undefined);
+  // A mutable dictionary so a test can simulate a pure language switch.
+  const translations = new Map<string, string>();
   const panel = new ImageAnalysisPanel({
     document: document as unknown as Document,
     host: document.getElementById('host') as unknown as HTMLElement,
@@ -49,9 +51,9 @@ function setup(initial: Partial<ImageAnalysisPanelView> = {}) {
     setUiAttr: (element: HTMLElement, attribute: string, english: string) => {
       element.setAttribute(attribute, english);
     },
-    localizeUi: (english: string) => english,
+    localizeUi: (english: string) => translations.get(english) ?? english,
     localizeTemplate: (frame: string, ...args: readonly (string | number)[]) =>
-      frame.replace(/\{(\d+)\}/g, (whole, index: string) =>
+      (translations.get(frame) ?? frame).replace(/\{(\d+)\}/g, (whole, index: string) =>
         args[Number(index)] === undefined ? whole : String(args[Number(index)])),
     changeImageTranslationEnabled,
     commitPatch,
@@ -62,6 +64,7 @@ function setup(initial: Partial<ImageAnalysisPanelView> = {}) {
     panel,
     commitPatch,
     changeImageTranslationEnabled,
+    translations,
     setView: (next: Partial<ImageAnalysisPanelView>) => {
       view = { ...view, ...next };
     },
@@ -254,6 +257,26 @@ describe('ImageAnalysisPanel', () => {
       .dispatchEvent(new window.Event('click'));
     expect(output.textContent).toContain('No OCR activity');
     expect(panel.diagnostics.entries).toHaveLength(0);
+  });
+
+  it('re-localizes the diagnostics empty-state on a pure language switch (F2)', () => {
+    const { window, panel, translations } = setup();
+    panel.initialize();
+    const root = panel.root!;
+    const details = root.querySelector<HTMLDetailsElement>('details.image-diagnostics')!;
+    const output = root.querySelector('output.image-diagnostics-output')!;
+    details.open = true;
+    details.dispatchEvent(new window.Event('toggle'));
+    expect(output.textContent).toBe('No OCR activity in this companion view yet.');
+
+    // The empty-state is written imperatively, so only relocalize() re-drives it;
+    // render() is guarded by the view key and does not re-run on a language flip.
+    translations.set(
+      'No OCR activity in this companion view yet.',
+      'Aún no hay actividad de OCR en esta vista.',
+    );
+    panel.relocalize();
+    expect(output.textContent).toBe('Aún no hay actividad de OCR en esta vista.');
   });
 
   it('renders nothing without a compiled image-analysis capability', () => {

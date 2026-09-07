@@ -124,6 +124,17 @@ export class ImageAnalysisPanel {
     this.renderDiagnostics();
   }
 
+  /**
+   * Re-renders the diagnostics output after a language switch (finding F2).
+   * Its empty-state placeholder is written imperatively rather than through the
+   * `data-ui` marker path, so the localizer's DOM pass does not re-drive it; the
+   * rest of the panel re-localizes through that pass. Recorded diagnostic lines
+   * are content-free and language-independent, so re-joining them is harmless.
+   */
+  relocalize(): void {
+    this.renderDiagnostics();
+  }
+
   renderDiagnostics(): void {
     const output = this.#output;
     if (!output || this.#details?.open === false) return;
