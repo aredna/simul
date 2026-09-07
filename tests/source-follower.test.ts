@@ -50,6 +50,9 @@ function setup(options: Options = {}) {
     onFollowedUrlChanged: vi.fn(),
     onFollowedTabActivated: vi.fn(),
     setStatus: vi.fn(),
+    localizeTemplate: (frame: string, ...args: readonly (string | number)[]) =>
+      frame.replace(/\{(\d+)\}/g, (whole, index: string) =>
+        args[Number(index)] === undefined ? whole : String(args[Number(index)])),
     renderError: vi.fn(),
     updateControls: vi.fn(),
   };

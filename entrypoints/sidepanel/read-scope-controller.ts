@@ -1,4 +1,5 @@
 import type { CompanionStatusTone } from '../../lib/companion-ui-localization';
+import { UI_STRINGS } from '../../lib/companion-ui-strings';
 import { readableError } from '../../lib/page-identity';
 import type { PreferenceCommand, PreferenceCommandResult } from '../../lib/preference-coordinator';
 import {
@@ -56,6 +57,14 @@ export interface ReadScopeControllerEnvironment {
   readonly restartReplica: () => void;
   readonly syncPreferenceControls: () => void;
   readonly setStatus: (message: string, tone?: CompanionStatusTone) => void;
+  readonly setUiText: (element: HTMLElement, english: string) => void;
+  /** Localizes one English catalogue string for this module's own surfaces. */
+  readonly localizeUi: (english: string) => string;
+  /** Localizes a template frame and fills its numbered placeholders. */
+  readonly localizeTemplate: (
+    frame: string,
+    ...args: readonly (string | number)[]
+  ) => string;
 }
 
 const READ_SCOPE_COPY: Readonly<Record<
@@ -63,28 +72,28 @@ const READ_SCOPE_COPY: Readonly<Record<
   { readonly label: string; readonly description: string }
 >> = Object.freeze({
   controlSemantics: {
-    label: 'Control labels and semantics',
-    description: 'Read public button, menu, field-label, and disabled-state text.',
+    label: UI_STRINGS.scopeControlLabelsTitle,
+    description: UI_STRINGS.scopeControlLabelsDesc,
   },
   controlImages: {
-    label: 'Images inside controls',
-    description: 'Read non-secret navigation and control images; actions stay disabled.',
+    label: UI_STRINGS.scopeControlImagesTitle,
+    description: UI_STRINGS.scopeControlImagesDesc,
   },
   disclosureContent: {
-    label: 'Collapsed disclosure content',
-    description: 'Read validated same-page menus and disclosures even while collapsed.',
+    label: UI_STRINGS.scopeDisclosureTitle,
+    description: UI_STRINGS.scopeDisclosureDesc,
   },
   formValues: {
-    label: 'Ordinary visible form values',
-    description: 'Read visible text, search, URL, textarea, and selection state.',
+    label: UI_STRINGS.scopeFormValuesTitle,
+    description: UI_STRINGS.scopeFormValuesDesc,
   },
   personalDataValues: {
-    label: 'Personal and autofill values',
-    description: 'Read visible email, telephone, name, address, and username fields. Credential and card data stay blocked.',
+    label: UI_STRINGS.scopePersonalTitle,
+    description: UI_STRINGS.scopePersonalDesc,
   },
   editableContent: {
-    label: 'Editable page content',
-    description: 'Read visible non-secret contenteditable and ARIA text editor drafts.',
+    label: UI_STRINGS.scopeEditableTitle,
+    description: UI_STRINGS.scopeEditableDesc,
   },
 });
 
@@ -190,10 +199,11 @@ export class ReadScopeController {
         scope: intersectReplicaReadScopes(current, scope),
         failed: false,
       });
-      void this.environment.purgeSourceDerivedRuntime('Applying narrower read settings…');
+      void this.environment.purgeSourceDerivedRuntime(UI_STRINGS.statusApplyingNarrower);
     }
     elements.completeReadScopeSetupButton.disabled = completeSetup;
-    elements.setupReadScopeStatus.textContent = completeSetup ? 'Saving…' : '';
+    elements.setupReadScopeStatus.textContent =
+      completeSetup ? this.environment.localizeUi(UI_STRINGS.statusSaving) : '';
     try {
       const result = await preferenceClient.send(completeSetup
         ? {
@@ -214,12 +224,12 @@ export class ReadScopeController {
         const gate = state.localReadScopeNarrowingGates.get(sequence);
         if (gate) gate.failed = true;
         throw new Error(result.code === 'stale-reset-revision'
-          ? 'Settings changed in another companion. Review the current choices and try again.'
+          ? UI_STRINGS.statusReadChangedElsewhere
           : result.code === 'stale-read-scope'
-            ? 'Readable-content settings changed in another companion. Review the current choices and try again.'
+            ? UI_STRINGS.statusReadableChangedElsewhere
             : result.code === 'safety-ack-failed'
-              ? 'Another companion could not confirm its safety purge. Close it or retry the change.'
-          : 'The read settings were not applied.');
+              ? UI_STRINGS.statusPurgeUnconfirmedChange
+          : UI_STRINGS.statusReadNotApplied);
       }
       for (const pendingSequence of [...state.localReadScopeNarrowingGates.keys()]) {
         if (pendingSequence <= sequence) {
@@ -230,17 +240,20 @@ export class ReadScopeController {
       this.environment.syncPreferenceControls();
       this.environment.restartReplica();
       elements.setupReadScopeStatus.textContent = '';
-      setStatus('Readable-content settings applied. The replica is rebuilding.', 'success');
+      setStatus(UI_STRINGS.statusReadableApplied, 'success');
     } catch (error) {
       const gate = state.localReadScopeNarrowingGates.get(sequence);
       if (gate) gate.failed = true;
-      elements.setupReadScopeStatus.textContent = readableError(error);
+      elements.setupReadScopeStatus.textContent = this.environment.localizeUi(readableError(error));
       elements.setupReadScopeStatus.dataset.tone = 'error';
       this.environment.syncPreferenceControls();
       if (state.localReadScopeNarrowingGates.has(sequence)) {
         this.environment.restartReplica();
       }
-      setStatus(`Could not save readable-content settings: ${readableError(error)}`, 'error');
+      setStatus(
+        this.environment.localizeTemplate(UI_STRINGS.statusCouldNotSaveReadable, readableError(error)),
+        'error',
+      );
     } finally {
       elements.completeReadScopeSetupButton.disabled = false;
     }
@@ -253,10 +266,11 @@ export class ReadScopeController {
     state.resetInFlight = true;
     elements.resetAllSettingsButton.disabled = true;
     elements.retrySetupResetCleanupButton.disabled = true;
-    elements.resetSettingsStatus.textContent = 'Resetting settings and optional permissions…';
+    elements.resetSettingsStatus.textContent =
+      this.environment.localizeUi(UI_STRINGS.statusResettingSettingsPermissions);
     if (state.preferences.resetCleanupPendingRevision > 0) {
       elements.setupResetCleanupStatus.textContent =
-        'Retrying optional permission and runtime cleanup…';
+        this.environment.localizeUi(UI_STRINGS.statusRetryingCleanup);
     }
     try {
       const retry = state.preferences.resetCleanupPendingRevision > 0;
@@ -273,7 +287,7 @@ export class ReadScopeController {
       if (!result.applied && result.code === 'stale-reset-revision') {
         this.environment.syncPreferenceControls();
         elements.resetSettingsStatus.textContent =
-          'Settings changed in another companion. Review the current state before resetting.';
+          this.environment.localizeUi(UI_STRINGS.statusResetChangedElsewhere);
         if (state.preferences.resetCleanupPendingRevision > 0) {
           elements.setupResetCleanupStatus.textContent = elements.resetSettingsStatus.textContent;
         }
@@ -282,26 +296,33 @@ export class ReadScopeController {
       if (!result.applied && result.code === 'safety-ack-failed') {
         this.environment.syncPreferenceControls();
         elements.resetSettingsStatus.textContent =
-          'Another companion could not confirm its safety purge. Close it or retry the reset.';
+          this.environment.localizeUi(UI_STRINGS.statusPurgeUnconfirmedReset);
         return;
       }
-      void this.environment.purgeSourceDerivedRuntime('Resetting extension settings…');
+      void this.environment.purgeSourceDerivedRuntime(UI_STRINGS.statusResettingSettings);
       this.environment.clearResetOnlyRuntimeState();
       state.setupReadScopeDraft = replicaReadScopeForProfile('standard');
       this.environment.syncPreferenceControls();
       if (result.cleanup?.status === 'pending') {
+        const remaining = result.cleanup.remainingManagedOrigins;
         const cleanupMessage =
-          result.cleanup.remainingManagedOrigins > 0
-            ? `Core settings are reset. ${result.cleanup.remainingManagedOrigins} optional permission entr${result.cleanup.remainingManagedOrigins === 1 ? 'y remains' : 'ies remain'} and cleanup is still pending; choose Retry cleanup.`
-            : 'Core settings are reset, but permission or runtime cleanup is still pending; choose Retry cleanup.';
+          remaining > 0
+            ? this.environment.localizeTemplate(
+                remaining === 1
+                  ? UI_STRINGS.statusResetPendingOne
+                  : UI_STRINGS.statusResetPendingMany,
+                remaining,
+              )
+            : this.environment.localizeUi(UI_STRINGS.statusResetPendingGeneric);
         elements.resetSettingsStatus.textContent = cleanupMessage;
         elements.setupResetCleanupStatus.textContent = cleanupMessage;
       } else {
         elements.resetSettingsStatus.textContent =
-          'Settings and optional permissions were reset. Choose a read profile to continue.';
+          this.environment.localizeUi(UI_STRINGS.statusResetComplete);
       }
     } catch (error) {
-      elements.resetSettingsStatus.textContent = `Reset could not finish: ${readableError(error)}`;
+      elements.resetSettingsStatus.textContent =
+        this.environment.localizeTemplate(UI_STRINGS.statusResetCouldNotFinish, readableError(error));
       if (state.preferences.resetCleanupPendingRevision > 0) {
         elements.setupResetCleanupStatus.textContent = elements.resetSettingsStatus.textContent;
       }
@@ -401,7 +422,7 @@ export class ReadScopeController {
     elements.retrySetupResetCleanupButton.disabled = state.resetInFlight;
     if (cleanupPending && !state.setupCleanupWasPending && !state.resetInFlight) {
       elements.setupResetCleanupStatus.textContent =
-        'Core settings are already safe, but optional permission or runtime cleanup is still pending.';
+        this.environment.localizeUi(UI_STRINGS.setupCleanupPending);
     }
     if (
       cleanupPending &&
@@ -418,9 +439,10 @@ export class ReadScopeController {
       elements.setupReadProfile.focus();
     }
     state.setupCleanupWasPending = cleanupPending;
-    elements.resetAllSettingsButton.textContent = cleanupPending
-      ? 'Retry reset cleanup'
-      : 'Reset all extension settings…';
+    this.environment.setUiText(
+      elements.resetAllSettingsButton,
+      cleanupPending ? UI_STRINGS.retryResetCleanup : UI_STRINGS.resetAllSettings,
+    );
   }
 
   #renderToggleSet(
@@ -439,9 +461,9 @@ export class ReadScopeController {
       input.disabled = key === 'personalDataValues' && !scope.formValues;
       input.dataset.readScopeKey = key;
       const text = document.createElement('span');
-      text.textContent = READ_SCOPE_COPY[key].label;
+      this.environment.setUiText(text, READ_SCOPE_COPY[key].label);
       const description = document.createElement('small');
-      description.textContent = READ_SCOPE_COPY[key].description;
+      this.environment.setUiText(description, READ_SCOPE_COPY[key].description);
       text.append(description);
       label.append(input, text);
       input.addEventListener('change', () => onChange(key, input.checked));

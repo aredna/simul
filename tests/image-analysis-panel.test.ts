@@ -46,6 +46,13 @@ function setup(initial: Partial<ImageAnalysisPanelView> = {}) {
       element.dataset.uiLabel = english;
       element.textContent = english;
     },
+    setUiAttr: (element: HTMLElement, attribute: string, english: string) => {
+      element.setAttribute(attribute, english);
+    },
+    localizeUi: (english: string) => english,
+    localizeTemplate: (frame: string, ...args: readonly (string | number)[]) =>
+      frame.replace(/\{(\d+)\}/g, (whole, index: string) =>
+        args[Number(index)] === undefined ? whole : String(args[Number(index)])),
     changeImageTranslationEnabled,
     commitPatch,
   });
@@ -261,6 +268,9 @@ describe('ImageAnalysisPanel', () => {
         throw new Error('should not read the view');
       },
       setUiText: () => undefined,
+      setUiAttr: () => undefined,
+      localizeUi: (english: string) => english,
+      localizeTemplate: (frame: string) => frame,
       changeImageTranslationEnabled: async () => undefined,
       commitPatch: async () => undefined,
     });

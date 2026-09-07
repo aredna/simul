@@ -69,9 +69,9 @@ describe('sidepanel UI structure', () => {
       "replicaPreviewContainer.setAttribute('aria-busy', String(state.captureInFlight))",
     );
     expect(script).toContain(
-      "captureInFlight ? 'Rebuilding mirror…' : 'Rebuild mirror'",
+      'state.captureInFlight ? UI_STRINGS.rebuildingMirrorEllipsis : UI_STRINGS.rebuildMirror',
     );
-    expect(script).toContain("translationInFlight\n      ? 'Translating…'");
+    expect(script).toContain('state.translationInFlight\n      ? UI_STRINGS.translating');
   });
 
   it('shows the quick-translation input limit without announcing every keystroke', () => {
@@ -139,7 +139,9 @@ describe('sidepanel UI structure', () => {
   it('shows explicit OCR state and preserves compact button affordance', () => {
     const { document } = parseHTML(markup);
     expect(document.querySelector('#toolbar-ocr-label')?.textContent).toBe('OCR Off');
-    expect(script).toContain("preferences.imageTranslationEnabled ? 'OCR On' : 'OCR Off'");
+    expect(script).toContain(
+      'state.preferences.imageTranslationEnabled ? UI_STRINGS.ocrOn : UI_STRINGS.ocrOff',
+    );
     expect(style).toContain('.toolbar-button {');
     expect(style).toContain('border: 1px solid var(--line)');
     expect(style).toContain('.toolbar-button[aria-pressed="true"]');
@@ -320,7 +322,7 @@ describe('sidepanel UI structure', () => {
       'const shouldRequestPixelAccess = requestPixelAccess &&',
     );
     expect(permissionFlows).toContain(
-      'Accessibility image text remains active; only pixel OCR is paused.',
+      'UI_STRINGS.statusImageAccessRemovedAccessibilityActive',
     );
     expect(script).toContain('readScopeController.handleSafetyMessage(message, reply)');
     expect(script).toContain('preferenceSafetyConnectionReady = false');

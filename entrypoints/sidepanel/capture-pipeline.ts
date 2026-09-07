@@ -5,6 +5,7 @@ import {
 } from '../../lib/companion-lifecycle';
 import { sameCompanionSourcePage } from '../../lib/companion-surface';
 import type { CompanionStatusTone } from '../../lib/companion-ui-localization';
+import { UI_STRINGS } from '../../lib/companion-ui-strings';
 import type { NavigationRefreshGate } from '../../lib/navigation-refresh-gate';
 import type { ImageTranslationDiagnostic } from '../../lib/ocr/image-translation-controller';
 import {
@@ -184,10 +185,10 @@ export class CapturePipeline {
     }
     this.environment.setStatus(
       request.reason === 'desynchronized'
-        ? 'A live update could not be reconciled. Rebuilding once while keeping the current mirror visible…'
+        ? UI_STRINGS.statusReconcileRebuild
         : request.reason === 'navigation'
-          ? 'Building the live mirror for the newly loaded page…'
-          : 'Building the initial live read-only mirror…',
+          ? UI_STRINGS.statusBuildingNewPage
+          : UI_STRINGS.statusBuildingInitial,
     );
     const enqueued = captureCoordinator.enqueue(request);
     this.environment.updateControls();
@@ -281,7 +282,7 @@ export class CapturePipeline {
     }
     if (action === 'rebuild-last-good' && identity) {
       this.environment.setStatus(
-        'The live mirror disconnected. Rebuilding once while keeping the last good replica visible…',
+        UI_STRINGS.statusLiveDisconnectedRebuild,
         'warning',
       );
       this.queueCapture({ identity, reason: 'desynchronized' });
@@ -289,7 +290,7 @@ export class CapturePipeline {
     }
     recoveryGate.reset();
     this.environment.setStatus(
-      'The live replica disconnected again. The last good replica is preserved; choose Refresh to retry.',
+      UI_STRINGS.statusLiveDisconnectedAgain,
       'error',
     );
     this.environment.updateControls();
@@ -348,7 +349,7 @@ export class CapturePipeline {
       );
       if (!captureCoordinator.isCurrent(work.generation)) return;
       if (typeof documentId !== 'string' || documentId.length === 0) {
-        throw new PageAccessError('The page did not expose a current document boundary.');
+        throw new PageAccessError(UI_STRINGS.statusNoDocumentBoundary);
       }
       const currentTab = await this.environment.getTab(identity.tabId);
       assertSourceTabIsCurrent(currentTab, identity, state.requiresActiveSourceTab);
@@ -360,7 +361,7 @@ export class CapturePipeline {
       if (!captureCoordinator.isCurrent(work.generation)) return;
       state.snapshot = surface.snapshot();
       if (!state.snapshot) {
-        throw new PageAccessError('The isolated replica did not commit a current document.');
+        throw new PageAccessError(UI_STRINGS.statusNoCommittedDocument);
       }
       // Only published replica state is captured state. Keeping the candidate
       // identity in followedPageIdentity lets a failed replacement retain an
@@ -385,7 +386,7 @@ export class CapturePipeline {
         state.availability = 'unavailable';
         state.availabilityCheckedForPair = undefined;
         setStatus(
-          'Live source only is active. The isolated mirror keeps updating without text or image translation.',
+          UI_STRINGS.statusLiveSourceKeepsUpdating,
           'success',
         );
         return;
@@ -400,8 +401,8 @@ export class CapturePipeline {
         if (!captureCoordinator.isCurrent(work.generation)) return;
         setStatus(
           accessWasRevoked
-            ? 'Chrome removed a saved automatic-access grant. The mirror is waiting for page text.'
-            : 'The page mirror is live and will prepare translation when visible text arrives.',
+            ? UI_STRINGS.statusGrantRemovedWaiting
+            : UI_STRINGS.statusMirrorLiveWaiting,
           'warning',
         );
         return;
@@ -413,7 +414,7 @@ export class CapturePipeline {
       );
       if (!captureCoordinator.isCurrent(work.generation)) return;
       if (accessWasRevoked) {
-        setStatus('Chrome removed a saved automatic-access grant, so that scope was turned off.', 'warning');
+        setStatus(UI_STRINGS.statusGrantRemovedScopeOff, 'warning');
         return;
       }
       await translationDriver.maybeTranslateAutomatically(work.generation, committedIdentity.url);
@@ -493,7 +494,7 @@ export class CapturePipeline {
         this.environment.updateMirrorLayout();
         return;
       }
-      throw new PageAccessError('The isolated replica could not be prepared. Retry the current page.');
+      throw new PageAccessError(UI_STRINGS.statusReplicaNotPrepared);
     } catch (error) {
       if (!activationDecisionSettled) {
         const reason = imageReplicaActivationFailureReason({

@@ -1321,3 +1321,66 @@ existing id, assigns a replica-owned id, and restores everything on teardown.
 Both of D37's open calls are now resolved (D38 range values, D39 accessible-name
 relationships). The two text-serialization privacy-floor entries and the other
 deferred entries still stand.
+
+### D40. L4/L5: the UI string catalogue and atomic localization (2026-09-07)
+
+Branch `feat/ui-string-catalogue` off `main` (`eb09813`). Resolves the two
+low-severity review findings held since 2026-09-03 and scoped in D35:
+
+- **L4** — localization was not atomic in practice: `[data-ui-label]` text
+  translated, but titles, aria-labels, placeholders, status lines, and loading
+  states stayed English.
+- **L5** — every newly seen dynamic label forced the whole interface back to
+  English and re-localized, a visible flash.
+
+The design (as scoped in D35): one catalogue module, every code-driven label
+and status reading from it, `UiLocalizer` extended from atomic control labels to
+titles/aria/status templates, and the flash closed by pre-registering the whole
+catalogue as one atomic set.
+
+- **Catalogue.** `lib/companion-ui-strings.ts` is the single source of truth for
+  every code-driven user-facing English string (statuses, toolbar
+  labels/titles/aria, settings and image-panel copy). Templated strings are
+  frames carrying numbered `{0}` placeholders that survive machine translation;
+  `formatUiTemplate` fills them after the frame is localized, so interpolated
+  values (counts, already-localized language names, opaque error text) land in
+  the target language's word order. `ALL_UI_STRINGS` is derived with
+  `Object.values`, so the atomic localization set can never drift from what the
+  modules actually show. Static markup keeps its English in `index.html`; the
+  localizer gathers those `data-ui-*` strings from the DOM.
+- **Localizer.** `UiLocalizer` now gathers and applies `data-ui-title`,
+  `data-ui-aria-label` and `data-ui-placeholder` in the same atomic pass as
+  `data-ui-label` text, exposes `localized()` and `localizeTemplate()` for
+  imperatively written surfaces, `setAttribute()` for code-driven attributes
+  (which re-localize on the next pass via their marker), and an `onApply` hook.
+- **Status surfaces.** `ToolbarStatus` keeps the English message for
+  `statusText` and attention routing (both still match English), displays the
+  localized form, and re-renders through `onApply`. The composer, read-scope and
+  image-analysis panels localize their own status/labels at set-time through
+  injected helpers.
+- **L5.** `DYNAMIC_UI_LABELS` is now `[...ALL_UI_STRINGS, replica badges]`, so a
+  newly shown string is already in the set and never triggers an
+  English-then-localized flash.
+
+Every side-panel module (`main.ts`, `translation-driver`, `capture-pipeline`,
+`surface-switcher`, `source-follower`, `permission-flows`, `read-scope-controller`,
+`image-analysis-panel`, `quick-composer`, `preference-client`) reads its
+displayed strings from the catalogue; `index.html` static titles/aria/placeholder
+and headings/dialog text carry `data-ui-*` hooks.
+
+Tests: a new `companion-ui-strings` test (template fill/reorder, contiguous
+frame tokens, `ALL_UI_STRINGS` dedup/coverage); `ui-localizer` extended for
+attribute localization, the `localized()`/`localizeTemplate()` accessors, and
+`onApply`; each migrated module's test env supplies the new injected helpers;
+the two `main.ts`/module source-substring assertions that named moved literals
+now assert the catalogue references. `npm run check` is green (1,386 tests, 1
+skipped) and `dist/chrome-unpacked` is re-synced.
+
+Owed and documented (see `handover-2026-09-07-ui-string-catalogue.md`): the
+manual Chrome pass must confirm real on-device Translator behaviour for the
+`{0}` frames (token preservation, RTL) and that the imperative status surfaces
+(composer, read-scope, image-panel, and the detected-language line) also
+re-localize on a pure language switch — they localize at set-time and via the
+toolbar's `onApply`, but those secondary surfaces are not yet re-driven on a
+language change with no other state change. The build identity is deliberately
+not bumped (still owed after the browser pass, per the prior handover).

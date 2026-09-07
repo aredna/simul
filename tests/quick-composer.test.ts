@@ -53,6 +53,10 @@ function setup(options: {
     setUiText: (target, english) => {
       target.textContent = english;
     },
+    localizeUi: (english: string) => english,
+    localizeTemplate: (frame: string, ...args: readonly (string | number)[]) =>
+      frame.replace(/\{(\d+)\}/g, (whole, index: string) =>
+        args[Number(index)] === undefined ? whole : String(args[Number(index)])),
     setStatus: (message) => statuses.push(message),
     onActivityChange: () => activity.push(composer.inFlight),
     onTranslated,
