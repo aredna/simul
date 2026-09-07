@@ -4,6 +4,11 @@ Follows `handover-2026-09-07-ui-string-catalogue.md`. Same branch
 `feat/ui-string-catalogue` / PR #22; this is a follow-up commit on top of the
 D40 commit `cbb5e2c`.
 
+**Landed 2026-09-08:** the fixes below shipped as commit `8434078` and were
+pushed to `origin/feat/ui-string-catalogue`, so PR #22 is updated (still open,
+not merged). This doc's own "Landed" line was added in a small follow-up
+doc-only commit on top of `8434078`.
+
 ## What was done
 
 PR #22 (D40) was reviewed (`review-2026-09-08-ui-string-catalogue.md`,
