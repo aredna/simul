@@ -1,5 +1,5 @@
 import type { CompanionStatusTone } from '../../lib/companion-ui-localization';
-import { UI_STRINGS } from '../../lib/companion-ui-strings';
+import { UI_STRINGS, formatUiTemplate } from '../../lib/companion-ui-strings';
 import { reverseTranslationPair } from '../../lib/companion-ui-state';
 import { translateWithSession } from '../../lib/translation-pipeline';
 import {
@@ -42,7 +42,11 @@ export interface QuickComposerEnvironment {
     ...args: readonly (string | number)[]
   ) => string;
   /** Companion-level status line. */
-  readonly setStatus: (message: string, tone?: CompanionStatusTone) => void;
+  readonly setStatus: (
+    message: string,
+    tone?: CompanionStatusTone,
+    englishMessage?: string,
+  ) => void;
   /** Called whenever the in-flight state or the draft changes. */
   readonly onActivityChange: () => void;
   readonly onTranslated?: () => void;
@@ -186,12 +190,15 @@ export class QuickComposer {
       this.environment.onTranslated?.();
     } catch (error) {
       if (!isAbortError(error) && !abortController.signal.aborted) {
+        const detail = this.environment.readableError(error);
         const message = this.environment.localizeTemplate(
           UI_STRINGS.composerCouldNotTranslate,
-          this.environment.readableError(error),
+          detail,
         );
         this.#setComposerStatus(message, 'error');
-        setStatus(message, 'error');
+        // Pass the English assembly so toolbar attention routing and statusText
+        // keep matching English, not the localized composite (finding F4).
+        setStatus(message, 'error', formatUiTemplate(UI_STRINGS.composerCouldNotTranslate, [detail]));
       } else if (this.#abortController === abortController) {
         this.#setComposerStatus('');
       }

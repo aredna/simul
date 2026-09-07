@@ -1384,3 +1384,55 @@ re-localize on a pure language switch — they localize at set-time and via the
 toolbar's `onApply`, but those secondary surfaces are not yet re-driven on a
 language change with no other state change. The build identity is deliberately
 not bumped (still owed after the browser pass, per the prior handover).
+
+---
+
+### D41. Review of PR #22: close the toolbar-side L4 gaps (2026-09-08)
+
+Same branch `feat/ui-string-catalogue`, follow-up commit on top of `cbb5e2c`.
+A review of the D40 commit (findings recorded in
+`review-2026-09-08-ui-string-catalogue.md`, corroborated by an independent
+reviewer) found that D40 achieved atomic localization for the catalogued and
+markup surfaces but left the **toolbar progress presentation** English: it wired
+`localize()` into the progressbar labels but the source strings lived outside the
+catalogue, so the call was an inert no-op (finding **F1**). Five findings were
+fixed here; **F2** stays deferred and **F6** was declined.
+
+- **F1 (medium, fixed).** The visible image-OCR progress label and the whole
+  `toolbarActivityLabel()` family plus the idle/determinate fallbacks are now
+  catalogue entries (`UI_STRINGS.progressRecognizingImageText`,
+  `UI_STRINGS.activity*`). `lib/companion-ui-state.ts` `toolbarActivityLabel`
+  returns `UI_STRINGS.*` (no import cycle — the catalogue module has no imports),
+  and `toolbar-status.ts` references the catalogue instead of module-local
+  literals. They therefore flow into `ALL_UI_STRINGS` → `DYNAMIC_UI_LABELS` and
+  localize by construction. A guard test in `companion-ui-state.test.ts` asserts
+  every `toolbarActivityLabel` output is a member of `ALL_UI_STRINGS`, so the
+  "bare literal reaches `localize()`" class cannot regress.
+- **F3 (low, fixed).** `ToolbarStatus.showProgress` now takes a raw English frame
+  plus its interpolation args (`#englishProgressLabel` truly holds English), and a
+  new `#renderProgressLabel()` localizes then fills. `translation-driver` passes
+  the raw `progressDownloadingPack` / `progressTranslating` frames with their
+  counts, so a language switch re-localizes and re-fills them correctly.
+- **F4 (low, fixed).** `setStatus` gained an optional `englishMessage` used for
+  attention routing and `statusText`; the composite partial-translation summaries
+  (`main.ts`, `translation-driver`) and the composer error path (`quick-composer`)
+  now hand it the English assembly while still displaying the localized form,
+  restoring the D40 invariant that routing matches English, never localized text.
+- **F5 (low, fixed).** The templated size-toggle aria-label/title are re-driven by
+  a new `relocalizeSizeToggle()` called from `relocalizeDynamicSurfaces()`
+  (`onApply`) as well as `syncToolbarPreferenceControls`, so they follow a pure
+  To-language switch instead of sticking until the next size/zoom change.
+- **F7 (low, fixed).** `translation-driver` now passes the plain `localizeUi`
+  (newly injected into its environment) to `describePartialReplicaTranslation`,
+  matching `main.ts` and removing the redundant double `formatUiTemplate`.
+- **F2 (low, deferred — unchanged).** The other imperative surfaces (composer,
+  read-scope, image-panel status, detected-language line) still re-localize only
+  at set-time; re-driving them on a pure language switch stays gated on the manual
+  Chrome pass, per D40 and the prior handover.
+- **F6 (low, declined).** Memoizing `Intl.DisplayNames` per target language is a
+  minor allocation cleanup, not taken here.
+
+Gate: `npm run check` green — typecheck clean, **1,387 tests pass, 1 skipped**
+(one guard test added), `dist/chrome-unpacked` re-synced and byte-verified. The
+build identity is still not bumped (owed after the browser pass). See
+`handover-2026-09-08-l4-followup.md`.

@@ -78,6 +78,7 @@ function setup(options: {
     autoImageLanguageConfigurationKey: () => 'configuration',
     configureImageTranslation: () => events.push('configure'),
     setStatus: (message) => statuses.push(message),
+    localizeUi: (english: string) => english,
     localizeTemplate: (frame: string, ...args: readonly (string | number)[]) =>
       frame.replace(/\{(\d+)\}/g, (whole, index: string) =>
         args[Number(index)] === undefined ? whole : String(args[Number(index)])),

@@ -301,6 +301,8 @@ replicaTranslationCoordinator = new ReplicaTranslationCoordinator(
             localizeUi,
           ),
           'warning',
+          // English assembly for attention routing and statusText (finding F4).
+          describePartialReplicaTranslation(result, UI_STRINGS.statusLivePartiallyTranslated),
         );
       } else if (result.completed > 0) {
         setStatus(
@@ -386,6 +388,33 @@ function localizeUiTemplate(
  */
 function relocalizeDynamicSurfaces(): void {
   toolbarStatus.relocalize();
+  relocalizeSizeToggle();
+}
+
+/**
+ * Re-applies the mirror size-toggle aria-label and title. They are templated,
+ * so they cannot use the `data-ui-*` marker path and are not re-driven by the
+ * localizer's DOM pass; re-computing them here keeps them in the current
+ * language after a pure To-language switch (review finding F5).
+ */
+function relocalizeSizeToggle(): void {
+  const sizeLabel = state.preferences.displayMode === 'fit'
+    ? UI_STRINGS.sizeFit
+    : state.preferences.displayMode === 'actual'
+      ? UI_STRINGS.sizeActual
+      : `${state.preferences.zoomPercent}%`;
+  const localizedSize = localizeUi(sizeLabel);
+  const localizedNextSize = localizeUi(
+    state.preferences.displayMode === 'fit'
+      ? UI_STRINGS.sizeNextActual
+      : UI_STRINGS.sizeNextFit,
+  );
+  toolbarSizeToggleButton.setAttribute(
+    'aria-label',
+    localizeUiTemplate(UI_STRINGS.sizeToggleAria, localizedSize, localizedNextSize),
+  );
+  toolbarSizeToggleButton.title =
+    localizeUiTemplate(UI_STRINGS.sizeToggleTitle, localizedSize, localizedNextSize);
 }
 
 const quickComposer = new QuickComposer({
@@ -547,11 +576,13 @@ const translationDriver = new TranslationDriver({
     imageTranslationConfig.autoImageLanguageConfigurationKey(),
   configureImageTranslation: () => configureImageTranslation(),
   setStatus,
+  localizeUi,
   localizeTemplate: localizeUiTemplate,
   localizeLanguageName: (language) =>
     createSourceLanguageLabeler(state.preferences.targetLanguage)(language),
   updateControls: () => updateControls(),
-  showProgress: (label, value, max) => toolbarStatus.showProgress(label, value, max),
+  showProgress: (label, value, max, labelArgs) =>
+    toolbarStatus.showProgress(label, value, max, labelArgs),
   hideProgress: () => toolbarStatus.hideProgress(),
   renderDetectedLanguage: (text) => {
     detectedLanguageElement.textContent = text;
@@ -1274,18 +1305,9 @@ function syncToolbarPreferenceControls(): void {
     setUiText(toolbarSizeLabel, sizeLabel);
   }
   // The size label is a catalogue value (localizable) or a live "N%"; either
-  // way its localized form is what the templated aria/title should read.
-  const localizedSize = localizeUi(sizeLabel);
-  const nextSize = state.preferences.displayMode === 'fit'
-    ? UI_STRINGS.sizeNextActual
-    : UI_STRINGS.sizeNextFit;
-  const localizedNextSize = localizeUi(nextSize);
-  toolbarSizeToggleButton.setAttribute(
-    'aria-label',
-    localizeUiTemplate(UI_STRINGS.sizeToggleAria, localizedSize, localizedNextSize),
-  );
-  toolbarSizeToggleButton.title =
-    localizeUiTemplate(UI_STRINGS.sizeToggleTitle, localizedSize, localizedNextSize);
+  // way its localized form is what the templated aria/title should read. The
+  // aria/title are also re-driven on a language switch by relocalizeSizeToggle.
+  relocalizeSizeToggle();
 
   toolbarOcrToggleButton.setAttribute(
     'aria-pressed',
@@ -1471,8 +1493,9 @@ function setImageTranslationBusy(busy: boolean): void {
 function setStatus(
   message: string,
   tone: CompanionStatusTone = 'normal',
+  englishMessage?: string,
 ): void {
-  toolbarStatus.setStatus(message, tone);
+  toolbarStatus.setStatus(message, tone, englishMessage);
 }
 
 function logImageTranslationDiagnostic(
