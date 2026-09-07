@@ -94,6 +94,18 @@ export const UI_STRINGS = {
   progressPreparingModel: 'Preparing Chrome’s on-device language model…',
   progressDownloadingPack: 'Downloading language pack… {0}%',
   progressTranslating: 'Translating {0} of {1}…',
+  progressRecognizingImageText: 'Recognizing visible image text locally…',
+
+  // Toolbar progressbar aria-labels (one per in-flight activity; the idle and
+  // determinate fallbacks). Shown to assistive tech, so they localize with the
+  // rest of the UI (review finding F1).
+  activityChangingView: 'Changing companion view',
+  activityUpdatingSiteAccess: 'Updating site access',
+  activityBuildingMirror: 'Building page mirror',
+  activityTranslatingDraft: 'Translating quick draft',
+  activityTranslatingPage: 'Translating page',
+  activityRecognizingImageText: 'Recognizing image text',
+  activityIdle: 'Companion idle',
 
   // Translation-driver: detected-language line (`#detected-language`).
   statusDetectedFromPageLanguage: 'Detected {0} from the page language.',

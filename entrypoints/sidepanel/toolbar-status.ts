@@ -8,6 +8,7 @@ import {
   toolbarProgressState,
   type ToolbarActivity,
 } from '../../lib/companion-ui-state';
+import { UI_STRINGS, formatUiTemplate } from '../../lib/companion-ui-strings';
 
 export interface ToolbarStatusElements {
   readonly status: HTMLElement;
@@ -32,9 +33,8 @@ export interface ToolbarStatusEnvironment {
   readonly localize: (english: string) => string;
 }
 
-export const IMAGE_PROGRESS_LABEL = 'Recognizing visible image text locally…';
-const IDLE_LABEL = 'Companion idle';
-const DETERMINATE_FALLBACK_LABEL = 'Translating page';
+/** Kept as a named export for tests; the source of truth is the catalogue. */
+export const IMAGE_PROGRESS_LABEL = UI_STRINGS.progressRecognizingImageText;
 
 /**
  * The status line, the attention markers on Refresh and Settings, and the
@@ -48,6 +48,7 @@ export class ToolbarStatus {
   #determinateRatio: number | undefined;
   #englishMessage = '';
   #englishProgressLabel = '';
+  #progressLabelArgs: readonly (string | number)[] = [];
 
   constructor(private readonly environment: ToolbarStatusEnvironment) {}
 
@@ -67,14 +68,25 @@ export class ToolbarStatus {
     return this.#englishMessage;
   }
 
-  setStatus(message: string, tone: CompanionStatusTone = 'normal'): void {
+  /**
+   * Sets the status line. `englishMessage` is the English form used for
+   * attention routing and `statusText`; it defaults to `message`, but a caller
+   * that has already localized a composite message (one assembled from several
+   * catalogue entries) must pass its English assembly so routing keeps matching
+   * English keywords and `statusText` stays English (review finding F4).
+   */
+  setStatus(
+    message: string,
+    tone: CompanionStatusTone = 'normal',
+    englishMessage: string = message,
+  ): void {
     const { status, refreshAttention, settingsAttention } = this.environment.elements;
-    this.#englishMessage = message;
+    this.#englishMessage = englishMessage;
     const localized = this.environment.localize(message);
     status.textContent = localized;
     status.dataset.tone = tone;
     // Attention routing matches English keywords, never the localized text.
-    this.#attention = toolbarAttentionTarget(message, tone);
+    this.#attention = toolbarAttentionTarget(englishMessage, tone);
     if (tone === 'warning' || tone === 'error') this.#attentionTone = tone;
     refreshAttention.title = this.#attention === 'refresh' ? localized : '';
     settingsAttention.title = this.#attention === 'settings' ? localized : '';
@@ -92,10 +104,18 @@ export class ToolbarStatus {
       if (this.#attention === 'settings') settingsAttention.title = localized;
     }
     if (this.#englishProgressLabel) {
-      const localized = this.environment.localize(this.#englishProgressLabel);
+      const localized = this.#renderProgressLabel();
       if (progressLabel.textContent !== localized) progressLabel.textContent = localized;
       this.syncProgress();
     }
+  }
+
+  /** Localizes the stored English progress frame, then fills its arguments. */
+  #renderProgressLabel(): string {
+    return formatUiTemplate(
+      this.environment.localize(this.#englishProgressLabel),
+      this.#progressLabelArgs,
+    );
   }
 
   renderAttention(): void {
@@ -125,7 +145,10 @@ export class ToolbarStatus {
     if (state.kind === 'idle') {
       delete toolbarProgress.dataset.mode;
       toolbarProgressFill.style.removeProperty('--toolbar-progress-ratio');
-      toolbarProgress.setAttribute('aria-label', this.environment.localize(IDLE_LABEL));
+      toolbarProgress.setAttribute(
+        'aria-label',
+        this.environment.localize(UI_STRINGS.activityIdle),
+      );
       toolbarProgress.removeAttribute('aria-valuenow');
       toolbarProgress.removeAttribute('aria-valuetext');
       return;
@@ -134,7 +157,7 @@ export class ToolbarStatus {
     if (state.kind === 'determinate') {
       const percent = Math.round(state.ratio * 100);
       const label = progressLabel.textContent?.trim() ||
-        this.environment.localize(DETERMINATE_FALLBACK_LABEL);
+        this.environment.localize(UI_STRINGS.activityTranslatingPage);
       toolbarProgressFill.style.setProperty(
         '--toolbar-progress-ratio',
         String(state.ratio),
@@ -151,14 +174,24 @@ export class ToolbarStatus {
     }
   }
 
-  /** Determinate progress for a page translation. */
-  showProgress(label: string, value: number, max: number): void {
+  /**
+   * Determinate progress for a page translation. `labelFrame` is a raw English
+   * catalogue frame and `labelArgs` its interpolation values, so the label can be
+   * re-localized (and re-filled) on a language switch (review finding F3).
+   */
+  showProgress(
+    labelFrame: string,
+    value: number,
+    max: number,
+    labelArgs: readonly (string | number)[] = [],
+  ): void {
     const { progressRegion, progressLabel, progressElement } = this.environment.elements;
     const boundedMax = Math.max(1, max);
     const boundedValue = Math.min(boundedMax, Math.max(0, value));
     progressRegion.hidden = false;
-    this.#englishProgressLabel = label;
-    progressLabel.textContent = this.environment.localize(label);
+    this.#englishProgressLabel = labelFrame;
+    this.#progressLabelArgs = labelArgs;
+    progressLabel.textContent = this.#renderProgressLabel();
     progressElement.setAttribute('max', String(boundedMax));
     progressElement.setAttribute('value', String(boundedValue));
     this.#determinateRatio = boundedValue / boundedMax;
@@ -169,8 +202,9 @@ export class ToolbarStatus {
   showImageProgress(): void {
     const { progressRegion, progressLabel, progressElement } = this.environment.elements;
     progressRegion.hidden = false;
-    this.#englishProgressLabel = IMAGE_PROGRESS_LABEL;
-    progressLabel.textContent = this.environment.localize(IMAGE_PROGRESS_LABEL);
+    this.#englishProgressLabel = UI_STRINGS.progressRecognizingImageText;
+    this.#progressLabelArgs = [];
+    progressLabel.textContent = this.#renderProgressLabel();
     progressElement.removeAttribute('value');
     this.syncProgress();
   }

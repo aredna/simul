@@ -7,6 +7,7 @@ import {
   toolbarProgressState,
   type ToolbarActivity,
 } from '../lib/companion-ui-state';
+import { ALL_UI_STRINGS } from '../lib/companion-ui-strings';
 
 const IDLE_ACTIVITY: ToolbarActivity = {
   captureInFlight: false,
@@ -76,5 +77,23 @@ describe('companion UI state', () => {
       composerInFlight: true,
     })).toBe('Translating quick draft');
     expect(toolbarActivityLabel(IDLE_ACTIVITY)).toBe('Companion idle');
+  });
+
+  it('draws every activity label from the atomic localization set', () => {
+    // The progressbar aria-labels are localized through the catalogue, so each
+    // must be a registered string or it silently stays English (finding F1).
+    const activities: readonly (keyof ToolbarActivity)[] = [
+      'captureInFlight',
+      'translationInFlight',
+      'permissionInFlight',
+      'composerInFlight',
+      'imageTranslationInFlight',
+      'surfaceTransitionInFlight',
+    ];
+    for (const activity of activities) {
+      const label = toolbarActivityLabel({ ...IDLE_ACTIVITY, [activity]: true });
+      expect(ALL_UI_STRINGS).toContain(label);
+    }
+    expect(ALL_UI_STRINGS).toContain(toolbarActivityLabel(IDLE_ACTIVITY));
   });
 });

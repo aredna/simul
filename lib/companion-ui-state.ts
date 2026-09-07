@@ -1,3 +1,4 @@
+import { UI_STRINGS } from './companion-ui-strings';
 import type { TranslationPair } from './translation-provider';
 
 export type CompanionOverlay = 'settings' | 'quick-translate';
@@ -45,13 +46,13 @@ export function toolbarProgressState(
 }
 
 export function toolbarActivityLabel(activity: ToolbarActivity): string {
-  if (activity.surfaceTransitionInFlight) return 'Changing companion view';
-  if (activity.permissionInFlight) return 'Updating site access';
-  if (activity.captureInFlight) return 'Building page mirror';
-  if (activity.composerInFlight) return 'Translating quick draft';
-  if (activity.translationInFlight) return 'Translating page';
-  if (activity.imageTranslationInFlight) return 'Recognizing image text';
-  return 'Companion idle';
+  if (activity.surfaceTransitionInFlight) return UI_STRINGS.activityChangingView;
+  if (activity.permissionInFlight) return UI_STRINGS.activityUpdatingSiteAccess;
+  if (activity.captureInFlight) return UI_STRINGS.activityBuildingMirror;
+  if (activity.composerInFlight) return UI_STRINGS.activityTranslatingDraft;
+  if (activity.translationInFlight) return UI_STRINGS.activityTranslatingPage;
+  if (activity.imageTranslationInFlight) return UI_STRINGS.activityRecognizingImageText;
+  return UI_STRINGS.activityIdle;
 }
 
 /** The quick composer translates in the reverse direction of the page. */

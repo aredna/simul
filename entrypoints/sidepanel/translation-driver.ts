@@ -94,7 +94,13 @@ export interface TranslationDriverEnvironment {
   /** The auto-image language configuration key for the current settings. */
   readonly autoImageLanguageConfigurationKey: () => string;
   readonly configureImageTranslation: () => void;
-  readonly setStatus: (message: string, tone?: CompanionStatusTone) => void;
+  readonly setStatus: (
+    message: string,
+    tone?: CompanionStatusTone,
+    englishMessage?: string,
+  ) => void;
+  /** Localizes one English catalogue string into the current UI language. */
+  readonly localizeUi: (english: string) => string;
   /** Localizes a template frame and fills its numbered placeholders. */
   readonly localizeTemplate: (
     frame: string,
@@ -103,7 +109,12 @@ export interface TranslationDriverEnvironment {
   /** The language's display name in the current UI language. */
   readonly localizeLanguageName: (language: SupportedLanguage) => string;
   readonly updateControls: () => void;
-  readonly showProgress: (label: string, value: number, max: number) => void;
+  readonly showProgress: (
+    label: string,
+    value: number,
+    max: number,
+    labelArgs?: readonly (string | number)[],
+  ) => void;
   readonly hideProgress: () => void;
   /** Renders the detected-language note; an empty string hides it. */
   readonly renderDetectedLanguage: (text: string) => void;
@@ -684,22 +695,17 @@ export class TranslationDriver {
         signal: abortController.signal,
         onDownloadProgress: (progress) =>
           this.environment.showProgress(
-            this.environment.localizeTemplate(
-              UI_STRINGS.progressDownloadingPack,
-              Math.round(progress * 100),
-            ),
+            UI_STRINGS.progressDownloadingPack,
             progress,
             1,
+            [Math.round(progress * 100)],
           ),
         onProgress: (completed, total) =>
           this.environment.showProgress(
-            this.environment.localizeTemplate(
-              UI_STRINGS.progressTranslating,
-              completed,
-              total,
-            ),
+            UI_STRINGS.progressTranslating,
             completed,
             Math.max(1, total),
+            [completed, total],
           ),
       });
       if (!stillCurrent()) return;
@@ -708,18 +714,28 @@ export class TranslationDriver {
         coordinator.isResultCurrent(result) &&
         isCompleteReplicaTranslationResult(result);
       this.environment.onPairPrepared();
-      setStatus(
-        state.translationComplete
-          ? automatic
+      if (state.translationComplete) {
+        setStatus(
+          automatic
             ? UI_STRINGS.statusAutomaticComplete
-            : UI_STRINGS.statusTranslationComplete
-          : describePartialReplicaTranslation(
-              result,
-              UI_STRINGS.partialPrefixRemainsPartial,
-              (english) => this.environment.localizeTemplate(english),
-            ),
-        state.translationComplete ? 'success' : 'warning',
-      );
+            : UI_STRINGS.statusTranslationComplete,
+          'success',
+        );
+      } else {
+        // A partial summary is assembled from several catalogue entries, so it
+        // cannot round-trip through the single-key localizer. Localize it for
+        // display, but hand setStatus the English assembly for attention
+        // routing and statusText (review findings F4/F7).
+        setStatus(
+          describePartialReplicaTranslation(
+            result,
+            UI_STRINGS.partialPrefixRemainsPartial,
+            this.environment.localizeUi,
+          ),
+          'warning',
+          describePartialReplicaTranslation(result, UI_STRINGS.partialPrefixRemainsPartial),
+        );
+      }
     } catch (error) {
       if (isAbortError(error) || abortController.signal.aborted) {
         if (stillCurrent()) {
