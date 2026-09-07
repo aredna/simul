@@ -91,6 +91,8 @@ function setup(options: {
   const events: string[] = [];
   const statuses: Array<[string, string | undefined]> = [];
   const commands: PreferenceCommand[] = [];
+  // A mutable dictionary so a test can simulate a pure language switch.
+  const translations = new Map<string, string>();
   const result = (
     preferences: CompanionPreferences,
     applied = true,
@@ -150,13 +152,14 @@ function setup(options: {
       element.dataset.uiLabel = english;
       element.textContent = english;
     },
-    localizeUi: (english: string) => english,
+    localizeUi: (english: string) => translations.get(english) ?? english,
     localizeTemplate: (frame: string, ...args: readonly (string | number)[]) =>
-      frame.replace(/\{(\d+)\}/g, (whole, index: string) =>
+      (translations.get(frame) ?? frame).replace(/\{(\d+)\}/g, (whole, index: string) =>
         args[Number(index)] === undefined ? whole : String(args[Number(index)])),
   });
   return {
     window, controller, state, elements, events, statuses, commands, preferenceClient,
+    translations,
     get stored() {
       return stored;
     },
@@ -282,6 +285,23 @@ describe('ReadScopeController reset and safety', () => {
 
     await harness.controller.resetAllExtensionSettings();
     expect(harness.commands[1]?.type).toBe('simul:preferences:retry-reset-cleanup');
+  });
+
+  it('re-localizes the reset status with its interpolated count on a language switch (F2)', async () => {
+    const harness = setup({ stored: setupComplete('standard'), cleanupRemaining: 2 });
+    await harness.controller.resetAllExtensionSettings();
+    expect(harness.elements.resetSettingsStatus.textContent)
+      .toContain('2 optional permission entries remain');
+
+    // Storing the finished string would strand the count in the old language;
+    // relocalize() re-renders the stored frame and re-fills the argument.
+    harness.translations.set(
+      'Core settings are reset. {0} optional permission entries remain and cleanup is still pending; choose Retry cleanup.',
+      'Ajustes básicos restablecidos. Quedan {0} permisos opcionales; elige Reintentar limpieza.',
+    );
+    harness.controller.relocalize();
+    expect(harness.elements.resetSettingsStatus.textContent)
+      .toBe('Ajustes básicos restablecidos. Quedan 2 permisos opcionales; elige Reintentar limpieza.');
   });
 
   it('purges and acknowledges a safety prepare, then releases on the committed release', async () => {

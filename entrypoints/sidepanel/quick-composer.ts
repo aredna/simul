@@ -1,6 +1,7 @@
 import type { CompanionStatusTone } from '../../lib/companion-ui-localization';
 import { UI_STRINGS, formatUiTemplate } from '../../lib/companion-ui-strings';
 import { reverseTranslationPair } from '../../lib/companion-ui-state';
+import { DynamicStatusText } from './dynamic-status-text';
 import { translateWithSession } from '../../lib/translation-pipeline';
 import {
   languageName,
@@ -69,9 +70,14 @@ export class QuickComposer {
   #inFlight = false;
   #abortController: AbortController | undefined;
   readonly #numberFormat: Intl.NumberFormat;
+  readonly #status: DynamicStatusText;
 
   constructor(private readonly environment: QuickComposerEnvironment) {
     this.#numberFormat = environment.numberFormat ?? new Intl.NumberFormat();
+    this.#status = new DynamicStatusText(
+      environment.elements.status,
+      environment.localizeUi,
+    );
   }
 
   get inFlight(): boolean {
@@ -191,14 +197,15 @@ export class QuickComposer {
     } catch (error) {
       if (!isAbortError(error) && !abortController.signal.aborted) {
         const detail = this.environment.readableError(error);
-        const message = this.environment.localizeTemplate(
-          UI_STRINGS.composerCouldNotTranslate,
-          detail,
+        this.#setComposerStatus(UI_STRINGS.composerCouldNotTranslate, 'error', [detail]);
+        // Show the localized composite, and pass the English assembly so toolbar
+        // attention routing and statusText keep matching English, not the
+        // localized composite (finding F4).
+        setStatus(
+          this.environment.localizeTemplate(UI_STRINGS.composerCouldNotTranslate, detail),
+          'error',
+          formatUiTemplate(UI_STRINGS.composerCouldNotTranslate, [detail]),
         );
-        this.#setComposerStatus(message, 'error');
-        // Pass the English assembly so toolbar attention routing and statusText
-        // keep matching English, not the localized composite (finding F4).
-        setStatus(message, 'error', formatUiTemplate(UI_STRINGS.composerCouldNotTranslate, [detail]));
       } else if (this.#abortController === abortController) {
         this.#setComposerStatus('');
       }
@@ -257,8 +264,17 @@ export class QuickComposer {
     }
   }
 
-  #setComposerStatus(message: string, tone: ComposerStatusTone = 'normal'): void {
-    this.environment.elements.status.textContent = this.environment.localizeUi(message);
+  /** Re-renders the composer's own status line after a language switch (F2). */
+  relocalize(): void {
+    this.#status.relocalize();
+  }
+
+  #setComposerStatus(
+    frame: string,
+    tone: ComposerStatusTone = 'normal',
+    args: readonly (string | number)[] = [],
+  ): void {
+    this.#status.set(frame, args);
     this.environment.elements.status.dataset.tone = tone;
   }
 }

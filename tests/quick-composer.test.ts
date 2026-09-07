@@ -42,6 +42,8 @@ function setup(options: {
   } as unknown as TranslationProvider;
   const statuses: string[] = [];
   const activity: boolean[] = [];
+  // A mutable dictionary so a test can simulate a pure language switch.
+  const translations = new Map<string, string>();
   const writeText = vi.fn(async () => undefined);
   const onTranslated = vi.fn();
   const composer = new QuickComposer({
@@ -53,9 +55,9 @@ function setup(options: {
     setUiText: (target, english) => {
       target.textContent = english;
     },
-    localizeUi: (english: string) => english,
+    localizeUi: (english: string) => translations.get(english) ?? english,
     localizeTemplate: (frame: string, ...args: readonly (string | number)[]) =>
-      frame.replace(/\{(\d+)\}/g, (whole, index: string) =>
+      (translations.get(frame) ?? frame).replace(/\{(\d+)\}/g, (whole, index: string) =>
         args[Number(index)] === undefined ? whole : String(args[Number(index)])),
     setStatus: (message) => statuses.push(message),
     onActivityChange: () => activity.push(composer.inFlight),
@@ -75,6 +77,7 @@ function setup(options: {
     activity,
     writeText,
     onTranslated,
+    translations,
     setPair: (next: TranslationPair | undefined) => {
       pair = next;
     },
@@ -237,6 +240,19 @@ describe('QuickComposer', () => {
     elements.translateButton.disabled = false;
     elements.input.dispatchEvent(shortcut());
     await vi.waitFor(() => expect(elements.output.value).toBe('<eighteen chars....>'));
+  });
+
+  it('re-localizes the composer status on a pure language switch (F2)', async () => {
+    const { composer, elements, translations } = setup();
+    elements.input.value = 'Thanks!';
+
+    await composer.translate();
+    expect(elements.status.textContent).toBe('Translation is ready to copy.');
+
+    translations.set('Translation is ready to copy.', 'La traducción está lista para copiar.');
+    composer.relocalize();
+    expect(elements.status.textContent).toBe('La traducción está lista para copiar.');
+    expect(elements.status.dataset.tone).toBe('success');
   });
 });
 

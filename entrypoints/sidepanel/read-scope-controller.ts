@@ -24,6 +24,7 @@ import {
 } from '../../lib/replica/read-scope-policy';
 import { installResetConfirmationController } from '../../lib/reset-confirmation-controller';
 import type { CompanionState } from './companion-state';
+import { DynamicStatusText } from './dynamic-status-text';
 
 export interface ReadScopeElements {
   readonly readScopeSetup: HTMLDialogElement;
@@ -105,10 +106,29 @@ const READ_SCOPE_COPY: Readonly<Record<
  * so a purge runs before the save and a failed save keeps the ceiling.
  */
 export class ReadScopeController {
-  constructor(private readonly environment: ReadScopeControllerEnvironment) {}
+  readonly #setupStatus: DynamicStatusText;
+  readonly #resetCleanupStatus: DynamicStatusText;
+  readonly #resetStatus: DynamicStatusText;
+
+  constructor(private readonly environment: ReadScopeControllerEnvironment) {
+    const { elements, localizeUi } = environment;
+    this.#setupStatus = new DynamicStatusText(elements.setupReadScopeStatus, localizeUi);
+    this.#resetCleanupStatus = new DynamicStatusText(
+      elements.setupResetCleanupStatus,
+      localizeUi,
+    );
+    this.#resetStatus = new DynamicStatusText(elements.resetSettingsStatus, localizeUi);
+  }
 
   get #state(): CompanionState {
     return this.environment.state;
+  }
+
+  /** Re-renders this module's imperatively written status lines (F2). */
+  relocalize(): void {
+    this.#setupStatus.relocalize();
+    this.#resetCleanupStatus.relocalize();
+    this.#resetStatus.relocalize();
   }
 
   /** Wires the setup dialog, the profile menus and the reset confirmation. */
@@ -202,8 +222,8 @@ export class ReadScopeController {
       void this.environment.purgeSourceDerivedRuntime(UI_STRINGS.statusApplyingNarrower);
     }
     elements.completeReadScopeSetupButton.disabled = completeSetup;
-    elements.setupReadScopeStatus.textContent =
-      completeSetup ? this.environment.localizeUi(UI_STRINGS.statusSaving) : '';
+    if (completeSetup) this.#setupStatus.set(UI_STRINGS.statusSaving);
+    else this.#setupStatus.clear();
     try {
       const result = await preferenceClient.send(completeSetup
         ? {
@@ -239,12 +259,12 @@ export class ReadScopeController {
       state.setupReadScopeDraft = { ...state.preferences.replicaReadScope };
       this.environment.syncPreferenceControls();
       this.environment.restartReplica();
-      elements.setupReadScopeStatus.textContent = '';
+      this.#setupStatus.clear();
       setStatus(UI_STRINGS.statusReadableApplied, 'success');
     } catch (error) {
       const gate = state.localReadScopeNarrowingGates.get(sequence);
       if (gate) gate.failed = true;
-      elements.setupReadScopeStatus.textContent = this.environment.localizeUi(readableError(error));
+      this.#setupStatus.set(readableError(error));
       elements.setupReadScopeStatus.dataset.tone = 'error';
       this.environment.syncPreferenceControls();
       if (state.localReadScopeNarrowingGates.has(sequence)) {
@@ -266,11 +286,9 @@ export class ReadScopeController {
     state.resetInFlight = true;
     elements.resetAllSettingsButton.disabled = true;
     elements.retrySetupResetCleanupButton.disabled = true;
-    elements.resetSettingsStatus.textContent =
-      this.environment.localizeUi(UI_STRINGS.statusResettingSettingsPermissions);
+    this.#resetStatus.set(UI_STRINGS.statusResettingSettingsPermissions);
     if (state.preferences.resetCleanupPendingRevision > 0) {
-      elements.setupResetCleanupStatus.textContent =
-        this.environment.localizeUi(UI_STRINGS.statusRetryingCleanup);
+      this.#resetCleanupStatus.set(UI_STRINGS.statusRetryingCleanup);
     }
     try {
       const retry = state.preferences.resetCleanupPendingRevision > 0;
@@ -286,17 +304,15 @@ export class ReadScopeController {
       preferenceClient.applyCommitted(result.preferences);
       if (!result.applied && result.code === 'stale-reset-revision') {
         this.environment.syncPreferenceControls();
-        elements.resetSettingsStatus.textContent =
-          this.environment.localizeUi(UI_STRINGS.statusResetChangedElsewhere);
+        this.#resetStatus.set(UI_STRINGS.statusResetChangedElsewhere);
         if (state.preferences.resetCleanupPendingRevision > 0) {
-          elements.setupResetCleanupStatus.textContent = elements.resetSettingsStatus.textContent;
+          this.#resetCleanupStatus.set(UI_STRINGS.statusResetChangedElsewhere);
         }
         return;
       }
       if (!result.applied && result.code === 'safety-ack-failed') {
         this.environment.syncPreferenceControls();
-        elements.resetSettingsStatus.textContent =
-          this.environment.localizeUi(UI_STRINGS.statusPurgeUnconfirmedReset);
+        this.#resetStatus.set(UI_STRINGS.statusPurgeUnconfirmedReset);
         return;
       }
       void this.environment.purgeSourceDerivedRuntime(UI_STRINGS.statusResettingSettings);
@@ -305,26 +321,23 @@ export class ReadScopeController {
       this.environment.syncPreferenceControls();
       if (result.cleanup?.status === 'pending') {
         const remaining = result.cleanup.remainingManagedOrigins;
-        const cleanupMessage =
+        const cleanupFrame =
           remaining > 0
-            ? this.environment.localizeTemplate(
-                remaining === 1
-                  ? UI_STRINGS.statusResetPendingOne
-                  : UI_STRINGS.statusResetPendingMany,
-                remaining,
-              )
-            : this.environment.localizeUi(UI_STRINGS.statusResetPendingGeneric);
-        elements.resetSettingsStatus.textContent = cleanupMessage;
-        elements.setupResetCleanupStatus.textContent = cleanupMessage;
+            ? remaining === 1
+              ? UI_STRINGS.statusResetPendingOne
+              : UI_STRINGS.statusResetPendingMany
+            : UI_STRINGS.statusResetPendingGeneric;
+        const cleanupArgs = remaining > 0 ? [remaining] : [];
+        this.#resetStatus.set(cleanupFrame, cleanupArgs);
+        this.#resetCleanupStatus.set(cleanupFrame, cleanupArgs);
       } else {
-        elements.resetSettingsStatus.textContent =
-          this.environment.localizeUi(UI_STRINGS.statusResetComplete);
+        this.#resetStatus.set(UI_STRINGS.statusResetComplete);
       }
     } catch (error) {
-      elements.resetSettingsStatus.textContent =
-        this.environment.localizeTemplate(UI_STRINGS.statusResetCouldNotFinish, readableError(error));
+      const detail = readableError(error);
+      this.#resetStatus.set(UI_STRINGS.statusResetCouldNotFinish, [detail]);
       if (state.preferences.resetCleanupPendingRevision > 0) {
-        elements.setupResetCleanupStatus.textContent = elements.resetSettingsStatus.textContent;
+        this.#resetCleanupStatus.set(UI_STRINGS.statusResetCouldNotFinish, [detail]);
       }
     } finally {
       state.resetInFlight = false;
@@ -421,8 +434,7 @@ export class ReadScopeController {
     elements.setupResetCleanup.hidden = !cleanupPending;
     elements.retrySetupResetCleanupButton.disabled = state.resetInFlight;
     if (cleanupPending && !state.setupCleanupWasPending && !state.resetInFlight) {
-      elements.setupResetCleanupStatus.textContent =
-        this.environment.localizeUi(UI_STRINGS.setupCleanupPending);
+      this.#resetCleanupStatus.set(UI_STRINGS.setupCleanupPending);
     }
     if (
       cleanupPending &&
