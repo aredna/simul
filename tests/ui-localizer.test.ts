@@ -11,6 +11,9 @@ import type {
 const MARKUP = `<html><body>
   <button id="a"><span data-ui-label="Fit">Fit</span></button>
   <label><span data-ui-label="Size">Size</span></label>
+  <button id="rebuild" title="Rebuild mirror" data-ui-title="Rebuild mirror"
+    aria-label="Rebuild mirror" data-ui-aria-label="Rebuild mirror"></button>
+  <textarea id="draft" placeholder="Type here" data-ui-placeholder="Type here"></textarea>
   <select id="source-language">
     <option value="auto">Auto-detect</option>
     <option value="ja" data-language-code="ja">Japanese</option>
@@ -80,13 +83,74 @@ describe('UiLocalizer', () => {
     expect(fit().getAttribute('lang')).toBe('ja');
     expect(document.querySelector('[data-ui-label="Size"]')?.textContent).toBe('ja:Size');
     expect(localizer.translations.get('Translate page')).toBe('ja:Translate page');
-    expect(translate.mock.calls.map(([text]) => text)).toEqual(['Translate page', 'Fit', 'Size']);
+    expect(translate.mock.calls.map(([text]) => text)).toEqual(
+      ['Translate page', 'Fit', 'Size', 'Rebuild mirror', 'Type here'],
+    );
     expect(destroy).toHaveBeenCalledOnce();
     expect(localizer.retryPending).toBe(false);
     // From-menu entries are named in the target language.
     const option = document.querySelector<HTMLOptionElement>('[data-language-code="ja"]')!;
     expect(option.getAttribute('lang')).toBe('ja');
     expect(option.textContent).not.toBe('');
+  });
+
+  it('localizes title, aria-label and placeholder attributes in the same pass', async () => {
+    const { document, localizer, translate } = setup();
+
+    await localizer.localize();
+
+    const rebuild = document.querySelector('#rebuild')!;
+    const draft = document.querySelector('#draft')!;
+    expect(rebuild.getAttribute('title')).toBe('ja:Rebuild mirror');
+    expect(rebuild.getAttribute('aria-label')).toBe('ja:Rebuild mirror');
+    expect(draft.getAttribute('placeholder')).toBe('ja:Type here');
+    // A duplicate English source ("Rebuild mirror" on title and aria-label) is
+    // only translated once for the whole set.
+    expect(translate.mock.calls.filter(([t]) => t === 'Rebuild mirror')).toHaveLength(1);
+  });
+
+  it('localizes a template frame then fills its numbered placeholders', async () => {
+    const { document, localizer } = setup({
+      translations: { 'Ready {0} to {1}': 'ja {0} to {1} ready' },
+    });
+    const button = document.querySelector<HTMLElement>('#rebuild')!;
+    // setAttribute records the English source so the pass can localize it.
+    localizer.setAttribute(button, 'aria-label', 'Ready {0} to {1}');
+
+    await localizer.localize();
+
+    expect(localizer.localizeTemplate('Ready {0} to {1}', 'A', 'B')).toBe('ja A to B ready');
+    // A missing placeholder argument degrades to the literal token, never
+    // "undefined".
+    expect(localizer.localizeTemplate('Ready {0} to {1}', 'A')).toBe('ja A to {1} ready');
+  });
+
+  it('re-renders imperative surfaces through onApply after a pass', async () => {
+    const applied: number[] = [];
+    const { document } = parseHTML(MARKUP);
+    let target: SupportedLanguage = 'ja';
+    const translate = vi.fn(async (text: string) => `ja:${text}`);
+    const provider = {
+      availability: vi.fn(async () => 'available' as const),
+      createSession: vi.fn(async () => ({ translate, destroy: vi.fn() })),
+    } as unknown as TranslationProvider;
+    const localizer = new UiLocalizer({
+      document: document as unknown as Document,
+      provider,
+      dynamicLabels: ['Rebuild mirror', 'Type here'],
+      getTargetLanguage: () => target,
+      translateRemembered: async (_p: TranslationPair, source, load) => load(source),
+      onApply: () => applied.push(1),
+    });
+
+    localizer.applyToDom();
+    await localizer.localize();
+
+    // English fallback apply plus the completed-pass apply both fire onApply.
+    expect(applied.length).toBeGreaterThanOrEqual(2);
+    expect(localizer.localized('Rebuild mirror')).toBe('ja:Rebuild mirror');
+    // A string outside the current set falls back to its English self.
+    expect(localizer.localized('Not in set')).toBe('Not in set');
   });
 
   it('keeps every label English when one translation fails', async () => {

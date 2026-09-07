@@ -1,3 +1,4 @@
+import { UI_STRINGS } from '../../lib/companion-ui-strings';
 import { IMAGE_SCAN_POLICIES, isImageScanPolicy } from '../../lib/ocr/contracts';
 import { ImageTranslationDiagnosticHistory } from '../../lib/ocr/diagnostic-history';
 import {
@@ -56,6 +57,18 @@ export interface ImageAnalysisPanelEnvironment {
   readonly hasCompiledCapability: () => boolean;
   readonly readView: () => ImageAnalysisPanelView;
   readonly setUiText: (element: HTMLElement, english: string) => void;
+  readonly setUiAttr: (
+    element: HTMLElement,
+    attribute: 'title' | 'aria-label' | 'placeholder',
+    english: string,
+  ) => void;
+  /** Localizes one English catalogue string for imperatively set text. */
+  readonly localizeUi: (english: string) => string;
+  /** Localizes a template frame and fills its numbered placeholders. */
+  readonly localizeTemplate: (
+    frame: string,
+    ...args: readonly (string | number)[]
+  ) => string;
   readonly changeImageTranslationEnabled: (
     enabled: boolean,
     requestPixelAccess?: boolean,
@@ -95,7 +108,7 @@ export class ImageAnalysisPanel {
     const { document, host } = this.environment;
     this.#root = document.createElement('section');
     this.#root.className = 'image-analysis-settings';
-    this.#root.setAttribute('aria-label', 'Image text options');
+    this.environment.setUiAttr(this.#root, 'aria-label', UI_STRINGS.imagePanelOptions);
     host.append(this.#root);
     this.render();
   }
@@ -117,7 +130,7 @@ export class ImageAnalysisPanel {
     const entries = this.diagnostics.entries;
     output.textContent = entries.length > 0
       ? entries.join('\n')
-      : 'No OCR activity in this companion view yet.';
+      : this.environment.localizeUi(UI_STRINGS.imagePanelNoActivity);
   }
 
   render(): void {
@@ -147,11 +160,11 @@ export class ImageAnalysisPanel {
     root.replaceChildren();
 
     const heading = document.createElement('h3');
-    setUiText(heading, 'Image text');
+    setUiText(heading, UI_STRINGS.imagePanelHeading);
     root.append(heading);
 
     root.append(this.#createToggle(
-      'Translate text inside images (local, experimental)',
+      UI_STRINGS.imageEnableLabel,
       view.imageTranslationEnabled,
       (checked) => this.environment.changeImageTranslationEnabled(checked),
       view.permissionInFlight || view.imageCaptureAccess === 'checking',
@@ -163,24 +176,18 @@ export class ImageAnalysisPanel {
       view.imageCaptureAccess === 'missing' &&
       view.usablePixelProviderCount > 0;
     if (pixelAccessMissing) {
-      setUiText(
-        privacyNote,
-        'Accessibility text can run without image access. Grant image access only to enable local pixel OCR fallbacks.',
-      );
+      setUiText(privacyNote, UI_STRINGS.imageAccessibilityHint);
     } else if (view.imageCaptureAccess === 'checking') {
-      setUiText(privacyNote, 'Checking Chrome image access…');
+      setUiText(privacyNote, UI_STRINGS.imageCheckingAccess);
     } else {
-      setUiText(
-        privacyNote,
-        'Off by default. Visible image pixels stay on this device and are discarded after OCR.',
-      );
+      setUiText(privacyNote, UI_STRINGS.imageOffByDefault);
     }
     root.append(privacyNote);
     if (pixelAccessMissing) {
       const grant = document.createElement('button');
       grant.type = 'button';
       grant.className = 'image-access-grant';
-      setUiText(grant, 'Grant image access');
+      setUiText(grant, UI_STRINGS.imageGrantAccess);
       grant.disabled = view.permissionInFlight;
       grant.addEventListener('click', () => {
         void this.environment.changeImageTranslationEnabled(true, true);
@@ -197,34 +204,24 @@ export class ImageAnalysisPanel {
 
     const orderLabel = document.createElement('p');
     orderLabel.className = 'microcopy';
-    setUiText(orderLabel, 'Image reading priority');
-    orderLabel.title =
-      'This order controls which methods Simul attempts first and breaks close evidence ties.';
+    setUiText(orderLabel, UI_STRINGS.imageReadingPriority);
+    this.environment.setUiAttr(orderLabel, 'title', UI_STRINGS.imagePriorityOrderHint);
     root.append(orderLabel);
     const orderHelp = document.createElement('p');
     orderHelp.className = 'microcopy';
-    setUiText(
-      orderHelp,
-      'Methods are attempted from top to bottom. Uncertain accessibility text may be compared with later OCR; the saved order breaks close ties.',
-    );
+    setUiText(orderHelp, UI_STRINGS.imagePriorityMethodsHint);
     root.append(orderHelp);
     root.append(this.#createMethodList(view, compiledOrder));
     if (compiledOrder.includes('chrome-text-detector')) {
       const platformNote = document.createElement('p');
       platformNote.className = 'microcopy';
-      setUiText(
-        platformNote,
-        'Chrome TextDetector is experimental and platform-dependent. When its local detect probe is unavailable, Simul skips capture work for it and falls through to the next enabled provider.',
-      );
+      setUiText(platformNote, UI_STRINGS.imageTextDetectorHint);
       root.append(platformNote);
     }
     if (compiledOrder.includes('tesseract')) {
       const tesseractNote = document.createElement('p');
       tesseractNote.className = 'microcopy';
-      setUiText(
-        tesseractNote,
-        'Tesseract.js runs locally with packaged language models. Simul loads only the language group needed for the current page.',
-      );
+      setUiText(tesseractNote, UI_STRINGS.imageTesseractNote);
       root.append(tesseractNote);
     }
     if (
@@ -235,17 +232,16 @@ export class ImageAnalysisPanel {
     ) {
       const paused = document.createElement('p');
       paused.className = 'microcopy ocr-provider-paused';
-      setUiText(paused, 'OCR is paused because every compiled provider is off.');
+      setUiText(paused, UI_STRINGS.imageProvidersPaused);
       root.append(paused);
     }
 
     const grid = document.createElement('div');
     grid.className = 'settings-grid';
     const policyLabel = document.createElement('label');
-    policyLabel.title =
-      'Choose whether images are recognized only when visible, after visible work, or immediately.';
+    this.environment.setUiAttr(policyLabel, 'title', UI_STRINGS.imageScanScopeHint);
     const policyTitle = document.createElement('span');
-    setUiText(policyTitle, 'Scan images');
+    setUiText(policyTitle, UI_STRINGS.imageScanImages);
     const policy = document.createElement('select');
     for (const value of IMAGE_SCAN_POLICIES) {
       const label = imageScanPolicyName(value);
@@ -263,8 +259,7 @@ export class ImageAnalysisPanel {
     policyLabel.append(policyTitle, policy);
     const smallLabel = document.createElement('label');
     smallLabel.className = 'check-label';
-    smallLabel.title =
-      'Ignore tiny images that are unlikely to contain useful readable text.';
+    this.environment.setUiAttr(smallLabel, 'title', UI_STRINGS.imageSkipSmallHint);
     const small = document.createElement('input');
     small.type = 'checkbox';
     small.checked = view.skipSmallImages;
@@ -272,14 +267,14 @@ export class ImageAnalysisPanel {
       void this.environment.commitPatch({ skipSmallImages: small.checked });
     });
     const smallTitle = document.createElement('span');
-    setUiText(smallTitle, 'Skip very small images');
+    setUiText(smallTitle, UI_STRINGS.imageSkipSmall);
     smallLabel.append(small, smallTitle);
     grid.append(policyLabel, smallLabel);
     root.append(grid);
 
     if (this.environment.capabilities.promptImageLanguage) {
       root.append(this.#createToggle(
-        'Use local Prompt for image language',
+        UI_STRINGS.imagePromptLanguage,
         view.usePromptForImageLanguage,
         (checked) => this.environment.commitPatch({
           usePromptForImageLanguage: checked,
@@ -288,7 +283,7 @@ export class ImageAnalysisPanel {
     }
     if (this.environment.capabilities.promptImageText) {
       root.append(this.#createToggle(
-        'Use local Prompt to interpret image text',
+        UI_STRINGS.imagePromptInterpret,
         view.usePromptForImageText,
         (checked) => this.environment.commitPatch({
           usePromptForImageText: checked,
@@ -301,14 +296,11 @@ export class ImageAnalysisPanel {
     diagnostics.open = diagnosticsWereOpen;
     this.#details = diagnostics;
     const summary = document.createElement('summary');
-    setUiText(summary, 'OCR diagnostics');
-    summary.title = 'Inspect content-free OCR stages and counts for this session.';
+    setUiText(summary, UI_STRINGS.imageDiagnostics);
+    this.environment.setUiAttr(summary, 'title', UI_STRINGS.imageDiagnosticsHint);
     const note = document.createElement('p');
     note.className = 'microcopy';
-    setUiText(
-      note,
-      'Memory-only stages and counts; page text, URLs, pixels, and identifiers are never included.',
-    );
+    setUiText(note, UI_STRINGS.imageDiagnosticsPrivacy);
     const output = document.createElement('output');
     output.className = 'image-diagnostics-output';
     output.setAttribute('aria-live', 'polite');
@@ -318,7 +310,7 @@ export class ImageAnalysisPanel {
     const clear = document.createElement('button');
     clear.type = 'button';
     clear.className = 'image-diagnostics-clear';
-    setUiText(clear, 'Clear diagnostics');
+    setUiText(clear, UI_STRINGS.imageClearDiagnostics);
     clear.addEventListener('click', () => this.clearDiagnostics());
     diagnostics.append(summary, note, output, clear);
     root.append(diagnostics);
@@ -328,10 +320,9 @@ export class ImageAnalysisPanel {
     const { document, setUiText } = this.environment;
     const confidence = document.createElement('label');
     confidence.className = 'ocr-confidence-control';
-    confidence.title =
-      'Require this provider confidence before OCR text can be used without independent corroboration.';
+    this.environment.setUiAttr(confidence, 'title', UI_STRINGS.imageConfidenceHint);
     const confidenceTitle = document.createElement('span');
-    setUiText(confidenceTitle, 'Minimum OCR confidence');
+    setUiText(confidenceTitle, UI_STRINGS.imageMinConfidence);
     const confidenceRow = document.createElement('span');
     confidenceRow.className = 'ocr-confidence-row';
     const confidenceInput = document.createElement('input');
@@ -362,10 +353,7 @@ export class ImageAnalysisPanel {
     const confidenceHelp = document.createElement('small');
     confidenceHelp.id = 'ocr-minimum-confidence-help';
     confidenceHelp.className = 'microcopy';
-    setUiText(
-      confidenceHelp,
-      'Higher values reduce false text detections but may miss faint or stylized text.',
-    );
+    setUiText(confidenceHelp, UI_STRINGS.imageHigherConfidenceHint);
     confidence.append(confidenceTitle, confidenceRow, confidenceHelp);
     return confidence;
   }
@@ -386,14 +374,16 @@ export class ImageAnalysisPanel {
       const item = document.createElement('li');
       const providerToggle = document.createElement('label');
       providerToggle.className = 'ocr-provider-toggle';
-      providerToggle.title =
-        'Turn this local image-reading method on or off without changing its priority.';
+      this.environment.setUiAttr(providerToggle, 'title', UI_STRINGS.imageMethodToggleHint);
       const enabled = document.createElement('input');
       enabled.type = 'checkbox';
       enabled.checked = !disabledMethods.has(id);
       enabled.setAttribute(
         'aria-label',
-        `${enabled.checked ? 'Disable' : 'Enable'} ${imageReadingMethodName(id)}`,
+        this.environment.localizeTemplate(
+          enabled.checked ? UI_STRINGS.imageMethodDisable : UI_STRINGS.imageMethodEnable,
+          this.environment.localizeUi(imageReadingMethodName(id)),
+        ),
       );
       enabled.addEventListener('change', () => {
         const nextDisabled = new Set(view.disabledImageReadingMethodIds);
@@ -405,15 +395,14 @@ export class ImageAnalysisPanel {
         });
       });
       const name = document.createElement('span');
-      name.textContent = imageReadingMethodName(id);
+      this.environment.setUiText(name, imageReadingMethodName(id));
       providerToggle.append(enabled, name);
       item.append(providerToggle);
       if (id === ACCESSIBILITY_TEXT_METHOD_ID) {
         const status = document.createElement('span');
         status.className = 'ocr-provider-status ocr-provider-status-available';
-        status.textContent = 'No pixels';
-        status.title =
-          'Uses direct image aria-label or alt text and does not require screenshot permission.';
+        this.environment.setUiText(status, UI_STRINGS.imageNoPixels);
+        this.environment.setUiAttr(status, 'title', UI_STRINGS.imageAccessibilityUses);
         item.append(status);
       } else {
         const runtimeStatus = view.providerRuntimeStatuses.get(id);
@@ -421,12 +410,12 @@ export class ImageAnalysisPanel {
       }
       const buttons = document.createElement('span');
       buttons.className = 'ocr-order-buttons';
-      const up = this.#createOrderButton('↑', 'Move earlier', index === 0, () =>
+      const up = this.#createOrderButton('↑', UI_STRINGS.imageMoveEarlier, index === 0, () =>
         this.#moveMethod(view.imageReadingMethodOrder, readingOrder, index, -1),
       );
       const down = this.#createOrderButton(
         '↓',
-        'Move later',
+        UI_STRINGS.imageMoveLater,
         index === readingOrder.length - 1,
         () => this.#moveMethod(view.imageReadingMethodOrder, readingOrder, index, 1),
       );
@@ -444,18 +433,18 @@ export class ImageAnalysisPanel {
     status.className = runtimeStatus === 'checking'
       ? 'ocr-provider-status'
       : `ocr-provider-status ocr-provider-status-${runtimeStatus.status}`;
-    status.textContent = runtimeStatus === 'checking'
-      ? 'Checking…'
+    this.environment.setUiText(status, runtimeStatus === 'checking'
+      ? UI_STRINGS.imageProviderChecking
       : runtimeStatus.status === 'available'
-        ? 'Available'
-        : 'Unavailable';
-    status.title = runtimeStatus === 'checking'
-      ? 'Checking whether this Chrome runtime can complete a local detect call.'
+        ? UI_STRINGS.imageProviderAvailable
+        : UI_STRINGS.imageProviderUnavailable);
+    this.environment.setUiAttr(status, 'title', runtimeStatus === 'checking'
+      ? UI_STRINGS.imageProbeChecking
       : runtimeStatus.status === 'available'
-        ? 'This Chrome runtime completed the local capability probe.'
+        ? UI_STRINGS.imageProbeAvailable
         : runtimeStatus.reason === 'api-missing'
-          ? 'This Chrome runtime does not expose the experimental TextDetector API.'
-          : 'This Chrome runtime could not complete the TextDetector capability probe.';
+          ? UI_STRINGS.imageProbeUnavailable
+          : UI_STRINGS.imageProbeError);
     return status;
   }
 
@@ -468,8 +457,8 @@ export class ImageAnalysisPanel {
     const button = this.environment.document.createElement('button');
     button.type = 'button';
     button.textContent = text;
-    button.setAttribute('aria-label', label);
-    button.title = label;
+    this.environment.setUiAttr(button, 'aria-label', label);
+    this.environment.setUiAttr(button, 'title', label);
     button.disabled = disabled;
     button.addEventListener('click', action);
     return button;
@@ -518,19 +507,19 @@ export class ImageAnalysisPanel {
 
 export function imageReadingMethodName(id: ImageReadingMethodId): string {
   if (id === ACCESSIBILITY_TEXT_METHOD_ID) {
-    return 'Accessibility text (aria-label / alt)';
+    return UI_STRINGS.imageMethodAccessibility;
   }
   const names: Record<ImageTextProviderId, string> = {
-    'chrome-text-detector': 'Chrome TextDetector (platform)',
-    tesseract: 'Tesseract.js (local)',
-    transformers: 'Transformers.js',
-    'chromium-screen-ai': 'Chromium Screen AI',
+    'chrome-text-detector': UI_STRINGS.imageMethodTextDetector,
+    tesseract: UI_STRINGS.imageMethodTesseract,
+    transformers: UI_STRINGS.imageMethodTransformers,
+    'chromium-screen-ai': UI_STRINGS.imageMethodScreenAi,
   };
   return names[id];
 }
 
 export function imageScanPolicyName(value: ImageScanPolicyValue): string {
-  if (value === 'visible-only') return 'Only when visible';
-  if (value === 'eager-all') return 'Everything immediately';
-  return 'Visible first, then background';
+  if (value === 'visible-only') return UI_STRINGS.imageScanVisible;
+  if (value === 'eager-all') return UI_STRINGS.imageScanImmediate;
+  return UI_STRINGS.imageScanVisibleFirst;
 }

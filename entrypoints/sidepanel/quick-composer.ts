@@ -1,4 +1,5 @@
 import type { CompanionStatusTone } from '../../lib/companion-ui-localization';
+import { UI_STRINGS } from '../../lib/companion-ui-strings';
 import { reverseTranslationPair } from '../../lib/companion-ui-state';
 import { translateWithSession } from '../../lib/translation-pipeline';
 import {
@@ -33,6 +34,13 @@ export interface QuickComposerEnvironment {
     load: (core: string) => Promise<string>,
   ) => Promise<string>;
   readonly setUiText: (element: HTMLElement, english: string) => void;
+  /** Localizes one English catalogue string for the composer's own status. */
+  readonly localizeUi: (english: string) => string;
+  /** Localizes a template frame and fills its numbered placeholders. */
+  readonly localizeTemplate: (
+    frame: string,
+    ...args: readonly (string | number)[]
+  ) => string;
   /** Companion-level status line. */
   readonly setStatus: (message: string, tone?: CompanionStatusTone) => void;
   /** Called whenever the in-flight state or the draft changes. */
@@ -98,7 +106,11 @@ export class QuickComposer {
     characterCount.value = `${currentLabel} / ${maximumLabel}`;
     characterCount.setAttribute(
       'aria-label',
-      `${currentLabel} of ${maximumLabel} characters used`,
+      this.environment.localizeTemplate(
+        UI_STRINGS.composerCharacterCount,
+        currentLabel,
+        maximumLabel,
+      ),
     );
     characterCount.dataset.nearLimit = String(
       maximum > 0 && current >= maximum * 0.9,
@@ -113,11 +125,8 @@ export class QuickComposer {
     elements.fromLanguage.textContent = localizedLanguageName(targetLanguage, targetLanguage);
     elements.fromLanguage.setAttribute('lang', targetLanguage);
     if (!pair) {
-      setUiText(elements.toLanguage, 'Waiting for website language');
-      setUiText(
-        elements.guidance,
-        'Simul is still detecting the website language. If detection remains inconclusive, choose From in the toolbar.',
-      );
+      setUiText(elements.toLanguage, UI_STRINGS.composerWaitingLanguage);
+      setUiText(elements.guidance, UI_STRINGS.composerDetecting);
       return;
     }
     delete elements.toLanguage.dataset.uiLabel;
@@ -126,8 +135,8 @@ export class QuickComposer {
     setUiText(
       elements.guidance,
       pair.sourceLanguage === pair.targetLanguage
-        ? 'The languages match, so Simul will copy the text unchanged.'
-        : 'Your draft stays only in this companion window and is not saved.',
+        ? UI_STRINGS.composerLanguagesMatch
+        : UI_STRINGS.composerDraftNotSaved,
     );
   }
 
@@ -143,7 +152,7 @@ export class QuickComposer {
     this.#inFlight = true;
     elements.output.value = '';
     elements.copyButton.disabled = true;
-    this.#setComposerStatus('Translating locally…');
+    this.#setComposerStatus(UI_STRINGS.composerTranslatingLocally);
     this.environment.onActivityChange();
     let session: TranslationSession | undefined;
     try {
@@ -155,7 +164,7 @@ export class QuickComposer {
           const composerAvailability = await provider.availability(pair);
           abortController.signal.throwIfAborted();
           if (composerAvailability === 'unavailable') {
-            throw new Error('The reverse language pair is unavailable on this device.');
+            throw new Error(UI_STRINGS.composerReversePairUnavailable);
           }
           session = await provider.createSession(pair, { signal: abortController.signal });
           return translateWithSession(session, core, abortController.signal);
@@ -172,12 +181,15 @@ export class QuickComposer {
       ) return;
       elements.output.value = translated;
       elements.copyButton.disabled = elements.output.value.length === 0;
-      this.#setComposerStatus('Translation is ready to copy.', 'success');
-      setStatus('Reply translation is ready to copy. It was not saved.', 'success');
+      this.#setComposerStatus(UI_STRINGS.composerReadyToCopy, 'success');
+      setStatus(UI_STRINGS.composerReplyReadyToCopy, 'success');
       this.environment.onTranslated?.();
     } catch (error) {
       if (!isAbortError(error) && !abortController.signal.aborted) {
-        const message = `Could not translate the reply: ${this.environment.readableError(error)}`;
+        const message = this.environment.localizeTemplate(
+          UI_STRINGS.composerCouldNotTranslate,
+          this.environment.readableError(error),
+        );
         this.#setComposerStatus(message, 'error');
         setStatus(message, 'error');
       } else if (this.#abortController === abortController) {
@@ -228,21 +240,18 @@ export class QuickComposer {
     try {
       const clipboard = this.environment.clipboard ?? navigator.clipboard;
       await clipboard.writeText(elements.output.value);
-      this.#setComposerStatus('Translated text copied.', 'success');
-      setStatus('Translated reply copied.', 'success');
+      this.#setComposerStatus(UI_STRINGS.composerCopied, 'success');
+      setStatus(UI_STRINGS.composerReplyCopied, 'success');
     } catch {
       elements.output.focus();
       elements.output.select();
-      this.#setComposerStatus(
-        'Chrome could not copy automatically. The output is selected.',
-        'warning',
-      );
-      setStatus('Chrome could not copy automatically. The result is selected for copying.', 'warning');
+      this.#setComposerStatus(UI_STRINGS.composerCopyFailedSelected, 'warning');
+      setStatus(UI_STRINGS.composerCopyFailedSelectedResult, 'warning');
     }
   }
 
   #setComposerStatus(message: string, tone: ComposerStatusTone = 'normal'): void {
-    this.environment.elements.status.textContent = message;
+    this.environment.elements.status.textContent = this.environment.localizeUi(message);
     this.environment.elements.status.dataset.tone = tone;
   }
 }

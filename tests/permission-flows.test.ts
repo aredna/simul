@@ -94,6 +94,9 @@ function setup(options: Options = {}) {
     onLayoutChanged: () => undefined,
     onZoomApplied: () => undefined,
     onError: (message) => statuses.push(message),
+    localizeTemplate: (frame: string, ...args: readonly (string | number)[]) =>
+      frame.replace(/\{(\d+)\}/g, (whole, index: string) =>
+        args[Number(index)] === undefined ? whole : String(args[Number(index)])),
   });
   const requestAutomaticTranslation = vi.fn(async () => undefined);
   const environment = {
@@ -111,6 +114,9 @@ function setup(options: Options = {}) {
     preferenceClient,
     usablePixelProviderCount: () => options.usablePixelProviders ?? 1,
     setStatus: (message) => statuses.push(message),
+    localizeTemplate: (frame: string, ...args: readonly (string | number)[]) =>
+      frame.replace(/\{(\d+)\}/g, (whole, index: string) =>
+        args[Number(index)] === undefined ? whole : String(args[Number(index)])),
     requestAutomaticTranslation,
     ...environment,
   });

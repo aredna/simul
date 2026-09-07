@@ -14,6 +14,7 @@ import {
   type CompanionOverlay,
 } from '../../lib/companion-ui-state';
 import type { CompanionStatusTone } from '../../lib/companion-ui-localization';
+import { ALL_UI_STRINGS, UI_STRINGS } from '../../lib/companion-ui-strings';
 import { CapturePipeline } from './capture-pipeline';
 import {
   CompanionState,
@@ -42,6 +43,7 @@ import {
 } from '../../lib/language-detection';
 import {
   LANGUAGE_OPTION_ORDER,
+  createSourceLanguageLabeler,
   languageEndonym,
 } from '../../lib/language-options';
 import {
@@ -125,45 +127,14 @@ import {
 
 const NAVIGATION_DEBOUNCE_MS = 350;
 const CAPTURE_TIMEOUT_MS = 12_000;
+// The whole catalogue plus the replica mode badges is pre-registered as one
+// atomic localization set, so a newly shown string never forces the interface
+// back to English to re-localize (review finding L5).
 const DYNAMIC_UI_LABELS = [
-  'Fit',
-  '1:1',
-  'Current',
-  'Active',
-  'Translate',
-  'Translating…',
-  'Translate page',
-  'Translation current',
-  'Image text',
-  'OCR On',
-  'OCR Off',
-  'Translate text inside images (local, experimental)',
-  'Accessibility text can run without image access. Grant image access only to enable local pixel OCR fallbacks.',
-  'Image translation is saved but pixel OCR needs image access. Click to grant access.',
-  'Checking Chrome image access…',
-  'Off by default. Visible image pixels stay on this device and are discarded after OCR.',
-  'Grant image access',
-  'Image reading priority',
-  'Methods are attempted from top to bottom. Uncertain accessibility text may be compared with later OCR; the saved order breaks close ties.',
-  'Minimum OCR confidence',
-  'Higher values reduce false text detections but may miss faint or stylized text.',
-  'Scan images',
-  'Skip very small images',
-  'Use local Prompt for image language',
-  'Use local Prompt to interpret image text',
-  'OCR diagnostics',
-  'Memory-only stages and counts; page text, URLs, pixels, and identifiers are never included.',
-  'Clear diagnostics',
-  'Only when visible',
-  'Everything immediately',
-  'Visible first, then background',
-  'Waiting for website language',
-  'Simul is still detecting the website language. If detection remains inconclusive, choose From in the toolbar.',
-  'The languages match, so Simul will copy the text unchanged.',
-  'Your draft stays only in this companion window and is not saved.',
+  ...ALL_UI_STRINGS,
   STATIC_REPLAY_LABEL,
   LIVE_REPLAY_LABEL,
-] as const;
+];
 
 const sourceSelect = requireElement<HTMLSelectElement>('#source-language');
 const targetSelect = requireElement<HTMLSelectElement>('#target-language');
@@ -326,15 +297,16 @@ replicaTranslationCoordinator = new ReplicaTranslationCoordinator(
         setStatus(
           describePartialReplicaTranslation(
             result,
-            'Live page changes were only partially translated',
+            UI_STRINGS.statusLivePartiallyTranslated,
+            localizeUi,
           ),
           'warning',
         );
       } else if (result.completed > 0) {
         setStatus(
           state.translationComplete
-            ? 'Live page changes were mirrored and translated.'
-            : 'Live page changes were translated, but earlier incomplete text still needs Translate page.',
+            ? UI_STRINGS.statusLiveMirroredTranslated
+            : UI_STRINGS.statusLiveNeedsTranslate,
           state.translationComplete ? 'success' : 'warning',
         );
       }
@@ -391,7 +363,30 @@ const uiLocalizer = new UiLocalizer({
   dynamicLabels: DYNAMIC_UI_LABELS,
   getTargetLanguage: () => state.preferences.targetLanguage,
   translateRemembered,
+  onApply: () => relocalizeDynamicSurfaces(),
 });
+
+/** Localizes one English catalogue string in the current UI set. */
+function localizeUi(english: string): string {
+  return uiLocalizer.localized(english);
+}
+
+/** Localizes a template frame, then fills its numbered placeholders. */
+function localizeUiTemplate(
+  frame: string,
+  ...args: readonly (string | number)[]
+): string {
+  return uiLocalizer.localizeTemplate(frame, ...args);
+}
+
+/**
+ * Re-renders imperatively written surfaces (the status line and progress
+ * labels) after a localization pass installs a new set, so they never stay
+ * English while the labelled controls translate (review finding L4).
+ */
+function relocalizeDynamicSurfaces(): void {
+  toolbarStatus.relocalize();
+}
 
 const quickComposer = new QuickComposer({
   elements: {
@@ -410,6 +405,8 @@ const quickComposer = new QuickComposer({
   getTargetLanguage: () => state.preferences.targetLanguage,
   translateRemembered,
   setUiText,
+  localizeUi,
+  localizeTemplate: localizeUiTemplate,
   setStatus,
   onActivityChange: () => updateControls(),
   onTranslated: () => logTranslationCache('quick', translationMemory),
@@ -440,6 +437,9 @@ const imageAnalysisPanel = new ImageAnalysisPanel({
     usablePixelProviderCount: imageTranslationConfig.usablePixelProviderOrder().length,
   }),
   setUiText,
+  setUiAttr,
+  localizeUi,
+  localizeTemplate: localizeUiTemplate,
   changeImageTranslationEnabled: (enabled, requestPixelAccess) =>
     permissionFlows.changeImageTranslationEnabled(enabled, requestPixelAccess),
   commitPatch: (patch) => preferenceClient.commitImageAnalysis(patch),
@@ -462,6 +462,7 @@ const toolbarStatus = new ToolbarStatus({
     composerInFlight: quickComposer.inFlight,
   }),
   isSettingsOpen: () => state.openCompanionOverlay === 'settings',
+  localize: localizeUi,
 });
 
 const preferenceClient = new PreferenceClient({
@@ -481,6 +482,7 @@ const preferenceClient = new PreferenceClient({
     updateMirrorLayout();
   },
   onError: (message) => setStatus(message, 'error'),
+  localizeTemplate: localizeUiTemplate,
 });
 
 const readScopeController = new ReadScopeController({
@@ -507,6 +509,9 @@ const readScopeController = new ReadScopeController({
   restartReplica: () => restartReplicaAfterReadPolicyChange(),
   syncPreferenceControls: () => syncPreferenceControls(),
   setStatus,
+  setUiText,
+  localizeUi,
+  localizeTemplate: localizeUiTemplate,
 });
 
 const permissionFlows = new PermissionFlows({
@@ -517,6 +522,7 @@ const permissionFlows = new PermissionFlows({
   preferenceClient,
   usablePixelProviderCount: () => imageTranslationConfig.usablePixelProviderOrder().length,
   setStatus,
+  localizeTemplate: localizeUiTemplate,
   syncPreferenceControls: () => syncPreferenceControls(),
   updateControls: () => updateControls(),
   renderImagePanel: () => imageAnalysisPanel.render(),
@@ -541,6 +547,9 @@ const translationDriver = new TranslationDriver({
     imageTranslationConfig.autoImageLanguageConfigurationKey(),
   configureImageTranslation: () => configureImageTranslation(),
   setStatus,
+  localizeTemplate: localizeUiTemplate,
+  localizeLanguageName: (language) =>
+    createSourceLanguageLabeler(state.preferences.targetLanguage)(language),
   updateControls: () => updateControls(),
   showProgress: (label, value, max) => toolbarStatus.showProgress(label, value, max),
   hideProgress: () => toolbarStatus.hideProgress(),
@@ -637,6 +646,8 @@ const surfaceSwitcher = new SurfaceSwitcher({
   elements: { popoutButton, placementGuidance },
   rememberSurface: (surface) => preferenceClient.rememberSurface(surface),
   setStatus,
+  localizeTemplate: localizeUiTemplate,
+  setUiAttr,
   updateControls: () => updateControls(),
 });
 
@@ -666,6 +677,7 @@ const sourceFollower = new SourceFollower({
     imageTranslationController.setTopPageOrigin(next.url),
   onFollowedTabActivated: () => imageTranslationController.resume(),
   setStatus,
+  localizeTemplate: localizeUiTemplate,
   renderError: renderErrorState,
   updateControls,
 });
@@ -684,16 +696,14 @@ const preferenceSafetyClient = new PreferenceSafetyClient({
   }),
   refreshCommittedSnapshot: async () => {
     if (!preferenceClient.applyCommitted(await preferenceClient.readStored())) {
-      throw new Error('The committed settings snapshot was older than this panel.');
+      throw new Error(UI_STRINGS.statusSnapshotOlder);
     }
   },
   onSafetyMessage: (message, reply) =>
     readScopeController.handleSafetyMessage(message, reply),
   onFailClosed: () => {
     state.preferenceSafetyConnectionReady = false;
-    purgeSourceDerivedRuntime(
-      'The settings safety connection was lost. Read access is Page-only while Simul reconnects…',
-    );
+    purgeSourceDerivedRuntime(UI_STRINGS.statusSafetyLost);
     syncPreferenceControls();
   },
   onReady: () => {
@@ -843,10 +853,10 @@ cancelButton.addEventListener('click', () => {
   imageTranslationController.cancelCurrent();
   setStatus(
     state.translationInFlight || state.imageTranslationInFlight
-      ? 'Cancelling on-device translation…'
+      ? UI_STRINGS.statusCancellingTranslation
       : composerCancelled
-        ? 'Quick translation cancelled.'
-        : 'Nothing is currently being translated.',
+        ? UI_STRINGS.statusQuickCancelled
+        : UI_STRINGS.statusNothingTranslating,
     composerCancelled && !state.translationInFlight && !state.imageTranslationInFlight
       ? 'warning'
       : 'normal',
@@ -923,9 +933,7 @@ browser.storage.onChanged.addListener((changes, areaName) => {
   );
   if (liveChange.status === 'invalid') {
     state.livePreferenceStorageFailClosed = true;
-    purgeSourceDerivedRuntime(
-      'Stored settings became unavailable or invalid. Read access is Page-only until a current valid snapshot is restored…',
-    );
+    purgeSourceDerivedRuntime(UI_STRINGS.statusSnapshotInvalid);
     syncPreferenceControls();
     return;
   }
@@ -940,7 +948,7 @@ browser.storage.onChanged.addListener((changes, areaName) => {
     wasStorageFailClosed,
   );
   if (readPolicyChanged) {
-    purgeSourceDerivedRuntime('Readable-content policy changed; rebuilding safely…');
+    purgeSourceDerivedRuntime(UI_STRINGS.statusReadablePolicyRebuilding);
   }
   if (
     isDetachedWindow &&
@@ -1113,8 +1121,8 @@ function setCompanionOverlay(next?: CompanionOverlay): void {
 }
 
 function populateLanguageOptions(): void {
-  const auto = createLanguageOption('auto', 'Auto-detect');
-  setUiText(auto, 'Auto-detect');
+  const auto = createLanguageOption('auto', UI_STRINGS.autoDetectOption);
+  setUiText(auto, UI_STRINGS.autoDetectOption);
   sourceSelect.replaceChildren(auto);
   targetSelect.replaceChildren();
   for (const language of LANGUAGE_OPTION_ORDER) {
@@ -1140,6 +1148,14 @@ function createLanguageOption(value: string, label: string): HTMLOptionElement {
 
 function setUiText(element: HTMLElement, english: string): void {
   uiLocalizer.setText(element, english);
+}
+
+function setUiAttr(
+  element: HTMLElement,
+  attribute: 'title' | 'aria-label' | 'placeholder',
+  english: string,
+): void {
+  uiLocalizer.setAttribute(element, attribute, english);
 }
 
 function observeReplicaStateLabel(): void {
@@ -1235,20 +1251,21 @@ function syncPreferenceControls(): void {
 function syncToolbarPreferenceControls(): void {
   const autoDetect = state.preferences.sourceLanguage === 'auto';
   toolbarAutoDetectButton.setAttribute('aria-pressed', String(autoDetect));
-  toolbarAutoDetectButton.setAttribute(
+  setUiAttr(
+    toolbarAutoDetectButton,
     'aria-label',
-    autoDetect
-      ? 'From language is using Auto-detect'
-      : 'Set From language to Auto-detect',
+    autoDetect ? UI_STRINGS.autoDetectOnAria : UI_STRINGS.autoDetectOffAria,
   );
-  toolbarAutoDetectButton.title = autoDetect
-    ? 'From language is using Auto-detect.'
-    : 'Set From language to Auto-detect.';
+  setUiAttr(
+    toolbarAutoDetectButton,
+    'title',
+    autoDetect ? UI_STRINGS.autoDetectOnTitle : UI_STRINGS.autoDetectOffTitle,
+  );
 
   const sizeLabel = state.preferences.displayMode === 'fit'
-    ? 'Fit'
+    ? UI_STRINGS.sizeFit
     : state.preferences.displayMode === 'actual'
-      ? '1:1'
+      ? UI_STRINGS.sizeActual
       : `${state.preferences.zoomPercent}%`;
   if (state.preferences.displayMode === 'custom') {
     delete toolbarSizeLabel.dataset.uiLabel;
@@ -1256,12 +1273,19 @@ function syncToolbarPreferenceControls(): void {
   } else {
     setUiText(toolbarSizeLabel, sizeLabel);
   }
-  const nextSize = state.preferences.displayMode === 'fit' ? '1:1 size' : 'fit width';
+  // The size label is a catalogue value (localizable) or a live "N%"; either
+  // way its localized form is what the templated aria/title should read.
+  const localizedSize = localizeUi(sizeLabel);
+  const nextSize = state.preferences.displayMode === 'fit'
+    ? UI_STRINGS.sizeNextActual
+    : UI_STRINGS.sizeNextFit;
+  const localizedNextSize = localizeUi(nextSize);
   toolbarSizeToggleButton.setAttribute(
     'aria-label',
-    `Mirror size: ${sizeLabel}. Switch to ${nextSize}`,
+    localizeUiTemplate(UI_STRINGS.sizeToggleAria, localizedSize, localizedNextSize),
   );
-  toolbarSizeToggleButton.title = `Mirror size: ${sizeLabel}. Click for ${nextSize}.`;
+  toolbarSizeToggleButton.title =
+    localizeUiTemplate(UI_STRINGS.sizeToggleTitle, localizedSize, localizedNextSize);
 
   toolbarOcrToggleButton.setAttribute(
     'aria-pressed',
@@ -1269,40 +1293,49 @@ function syncToolbarPreferenceControls(): void {
   );
   setUiText(
     toolbarOcrLabel,
-    state.preferences.imageTranslationEnabled ? 'OCR On' : 'OCR Off',
+    state.preferences.imageTranslationEnabled ? UI_STRINGS.ocrOn : UI_STRINGS.ocrOff,
   );
-  toolbarOcrToggleButton.title = state.preferences.imageTranslationEnabled
-    ? state.imageCaptureAccess === 'granted'
-      ? 'Image text translation is on. Click to turn it off.'
-      : imageTranslationConfig.usablePixelProviderOrder().length === 0
-        ? state.preferences.disabledImageReadingMethodIds.includes(
-            ACCESSIBILITY_TEXT_METHOD_ID,
-          )
-          ? 'Image translation has no enabled reading method. Click to turn it off.'
-          : 'Accessibility image text is on. Click to turn it off.'
-      : state.preferences.disabledImageReadingMethodIds.includes(
-          ACCESSIBILITY_TEXT_METHOD_ID,
-        )
-        ? 'Image translation is saved but pixel OCR needs image access. Click to grant access.'
-        : 'Accessibility image text is on; pixel OCR is paused. Click to grant image access.'
-    : 'Image text translation is off. Click to turn it on.';
+  setUiAttr(
+    toolbarOcrToggleButton,
+    'title',
+    state.preferences.imageTranslationEnabled
+      ? state.imageCaptureAccess === 'granted'
+        ? UI_STRINGS.ocrTitleOn
+        : imageTranslationConfig.usablePixelProviderOrder().length === 0
+          ? state.preferences.disabledImageReadingMethodIds.includes(
+              ACCESSIBILITY_TEXT_METHOD_ID,
+            )
+            ? UI_STRINGS.ocrTitleNoMethod
+            : UI_STRINGS.ocrTitleAccessibilityOn
+          : state.preferences.disabledImageReadingMethodIds.includes(
+              ACCESSIBILITY_TEXT_METHOD_ID,
+            )
+            ? UI_STRINGS.ocrTitleNeedsAccess
+            : UI_STRINGS.ocrTitleAccessibilityPaused
+      : UI_STRINGS.ocrTitleOff,
+  );
 
   const followsActive = isDetachedWindow && state.preferences.popoutTabMode === 'active';
-  setUiText(toolbarTabFollowLabel, followsActive ? 'Active' : 'Current');
+  setUiText(toolbarTabFollowLabel, followsActive ? UI_STRINGS.tabFollowActive : UI_STRINGS.tabFollowCurrent);
   toolbarTabFollowButton.setAttribute('aria-pressed', String(followsActive));
-  toolbarTabFollowButton.setAttribute(
+  setUiAttr(
+    toolbarTabFollowButton,
     'aria-label',
     isDetachedWindow
       ? followsActive
-        ? 'Follow the opening tab instead of the active browser tab'
-        : 'Follow the active browser tab instead of the opening tab'
-      : 'Tab following is fixed to the current side-panel tab',
+        ? UI_STRINGS.tabFollowActiveAria
+        : UI_STRINGS.tabFollowCurrentAria
+      : UI_STRINGS.tabFollowFixedAria,
   );
-  toolbarTabFollowButton.title = isDetachedWindow
-    ? followsActive
-      ? 'Following the active browser tab. Click to stay on the opening tab.'
-      : 'Staying on the opening tab. Click to follow the active browser tab.'
-    : 'The side panel is attached to the current tab. Active-tab following is available in a detached window.';
+  setUiAttr(
+    toolbarTabFollowButton,
+    'title',
+    isDetachedWindow
+      ? followsActive
+        ? UI_STRINGS.tabFollowActiveTitle
+        : UI_STRINGS.tabFollowCurrentTitle
+      : UI_STRINGS.tabFollowFixedTitle,
+  );
 }
 
 function configureImageTranslation(): void {
@@ -1323,7 +1356,7 @@ function renderLoadingState(): void {
   const wrapper = document.createElement('div');
   wrapper.className = 'empty-state';
   const text = document.createElement('p');
-  text.textContent = 'Preparing the live read-only mirror…';
+  setUiText(text, UI_STRINGS.preparingMirror);
   wrapper.append(text);
   replicaStatusContainer.replaceChildren(wrapper);
   replicaStatusContainer.hidden = false;
@@ -1333,7 +1366,7 @@ function renderErrorState(message: string): void {
   const wrapper = document.createElement('div');
   wrapper.className = 'empty-state empty-state--error';
   const text = document.createElement('p');
-  text.textContent = message;
+  text.textContent = localizeUi(message);
   wrapper.append(text);
   replicaStatusContainer.replaceChildren(wrapper);
   replicaStatusContainer.hidden = false;
@@ -1368,15 +1401,18 @@ function updateControls(): void {
   compactRefreshButton.disabled = state.captureInFlight;
   setUiText(
     refreshButton,
-    state.captureInFlight ? 'Rebuilding mirror…' : 'Rebuild mirror',
+    state.captureInFlight ? UI_STRINGS.rebuildingMirrorEllipsis : UI_STRINGS.rebuildMirror,
   );
-  compactRefreshButton.setAttribute(
+  setUiAttr(
+    compactRefreshButton,
     'aria-label',
-    state.captureInFlight ? 'Rebuilding mirror' : 'Rebuild mirror',
+    state.captureInFlight ? UI_STRINGS.rebuildingMirror : UI_STRINGS.rebuildMirror,
   );
-  compactRefreshButton.title = state.captureInFlight
-    ? 'Rebuilding mirror…'
-    : 'Rebuild mirror';
+  setUiAttr(
+    compactRefreshButton,
+    'title',
+    state.captureInFlight ? UI_STRINGS.rebuildingMirrorEllipsis : UI_STRINGS.rebuildMirror,
+  );
   toolbarAutoDetectButton.disabled = busy;
   toolbarSizeToggleButton.disabled = busy;
   toolbarOcrToggleButton.disabled = busy ||
@@ -1392,7 +1428,7 @@ function updateControls(): void {
   translateComposerButton.disabled = busy || !composerInput.value.trim() || !state.selectedPair();
   setUiText(
     translateComposerButton,
-    composerInFlight ? 'Translating…' : 'Translate',
+    composerInFlight ? UI_STRINGS.translating : UI_STRINGS.translate,
   );
   translateButton.disabled =
     busy ||
@@ -1405,10 +1441,10 @@ function updateControls(): void {
   setUiText(
     translateButton,
     state.translationInFlight
-      ? 'Translating…'
+      ? UI_STRINGS.translating
       : state.translationComplete
-        ? 'Translation current'
-        : 'Translate page',
+        ? UI_STRINGS.translationCurrent
+        : UI_STRINGS.translatePage,
   );
   toolbarStatus.renderAttention();
   toolbarStatus.syncProgress();
@@ -1425,8 +1461,8 @@ function setImageTranslationBusy(busy: boolean): void {
   }
   if (completed) {
     logTranslationCache('image-text', imageTranslationMemory);
-    if (toolbarStatus.statusText === 'Cancelling on-device translation…') {
-      setStatus('Image text processing stopped.', 'warning');
+    if (toolbarStatus.statusText === UI_STRINGS.statusCancellingTranslation) {
+      setStatus(UI_STRINGS.statusImageProcessingStopped, 'warning');
     }
   }
   updateControls();

@@ -1,4 +1,5 @@
 import type { CompanionStatusTone } from '../../lib/companion-ui-localization';
+import { UI_STRINGS } from '../../lib/companion-ui-strings';
 import {
   isFocusedNormalBrowserWindow,
   isNewerCompanionLaunchStamp,
@@ -82,6 +83,10 @@ export interface SourceFollowerEnvironment {
   /** The followed tab became the active tab again. */
   readonly onFollowedTabActivated: () => void;
   readonly setStatus: (message: string, tone?: CompanionStatusTone) => void;
+  readonly localizeTemplate: (
+    frame: string,
+    ...args: readonly (string | number)[]
+  ) => string;
   readonly renderError: (message: string) => void;
   readonly updateControls: () => void;
 }
@@ -213,14 +218,14 @@ export class SourceFollower {
       const tab = await browser.queryActiveTab(sourceWindowId);
       if (!currency.isCurrent(request) || state.preferences.popoutTabMode !== 'active') return;
       if (tab?.id === undefined) {
-        this.environment.invalidateCompanion('The source browser window has no active readable tab.');
+        this.environment.invalidateCompanion(UI_STRINGS.statusNoActiveReadableTab);
         return;
       }
       await this.followActivatedSourceTab(tab.id, sourceWindowId, tab, request);
     } catch (error) {
       if (!currency.isCurrent(request)) return;
       this.environment.invalidateCompanion(
-        `${readPageError(error)} Active-tab following needs page access for each newly selected site.`,
+        this.environment.localizeTemplate(UI_STRINGS.statusFollowNeedsAccess, readPageError(error)),
       );
     } finally {
       this.#finishActiveFollowRequest(request);
@@ -277,7 +282,7 @@ export class SourceFollower {
     } catch (error) {
       if (!currency.isCurrent(request)) return;
       this.environment.invalidateCompanion(
-        `${readPageError(error)} Active-tab following needs page access for each newly selected site.`,
+        this.environment.localizeTemplate(UI_STRINGS.statusFollowNeedsAccess, readPageError(error)),
       );
     } finally {
       this.#finishActiveFollowRequest(request);
@@ -311,7 +316,7 @@ export class SourceFollower {
       state.followedPageIdentity = undefined;
       this.#clearNavigationTimer();
       this.environment.invalidateCompanion(
-        'The active tab changed. Select the extension on the page you want to follow.',
+        UI_STRINGS.statusActiveTabChanged,
       );
     }
   }
@@ -373,7 +378,7 @@ export class SourceFollower {
       if (navigationStatus === 'loading' || hasUrlChange) {
         this.#clearNavigationTimer();
         this.environment.invalidateCompanion(
-          'The source tab opened a restricted page. Return to a regular HTTP or HTTPS page and select the extension again.',
+          UI_STRINGS.statusSourceRestricted,
         );
       }
       return;
@@ -390,7 +395,7 @@ export class SourceFollower {
       state.followedPageIdentity = nextIdentity;
       this.#clearNavigationTimer();
       this.environment.setStatus(
-        'The source page is changing; the current mirror stays visible until the new page is ready.',
+        UI_STRINGS.statusSourcePageChanging,
       );
     } else if (isUrlOnlyNavigationSignal(navigationStatus, hasUrlChange)) {
       // Chrome emits URL-only updates for history/hash changes in the current
@@ -456,12 +461,12 @@ export class SourceFollower {
         void this.#followFocusedBrowserWindow(
           removeInfo.windowId,
           request,
-          'The source tab was closed and no neighboring readable tab became active.',
+          UI_STRINGS.statusSourceClosedNoNeighbor,
         );
       });
       return;
     }
-    this.environment.invalidateCompanion('The source tab was closed.');
+    this.environment.invalidateCompanion(UI_STRINGS.statusSourceClosed);
   }
 
   // --- Private resolution steps.
@@ -490,7 +495,7 @@ export class SourceFollower {
     } catch (error) {
       if (!currency.isCurrent(request)) return;
       this.environment.invalidateCompanion(
-        `${readPageError(error)} The locked source tab could not be followed after it moved windows.`,
+        this.environment.localizeTemplate(UI_STRINGS.statusLockedTabMovedWindows, readPageError(error)),
       );
     }
   }
@@ -514,7 +519,7 @@ export class SourceFollower {
     } catch (error) {
       if (!currency.isCurrent(request)) return;
       this.environment.invalidateCompanion(
-        `${readPageError(error)} Chrome replaced the source tab, but its new page could not be followed.`,
+        this.environment.localizeTemplate(UI_STRINGS.statusReplacedTabNotFollowed, readPageError(error)),
       );
     } finally {
       this.#finishActiveFollowRequest(request);

@@ -42,6 +42,7 @@ function setup() {
       progressLabel: el('label'),
       progressElement: el('bar'),
     },
+    localize: (english: string) => english,
     readActivity: () => activity,
     isSettingsOpen: () => settingsOpen,
   });

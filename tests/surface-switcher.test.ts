@@ -54,6 +54,11 @@ function setup(options: {
     },
     rememberSurface,
     setStatus: (message) => statuses.push(message),
+    localizeTemplate: (frame: string, ...args: readonly (string | number)[]) =>
+      frame.replace(/\{(\d+)\}/g, (whole, index: string) =>
+        args[Number(index)] === undefined ? whole : String(args[Number(index)])),
+    setUiAttr: (element: HTMLElement, attribute: string, english: string) =>
+      element.setAttribute(attribute, english),
     updateControls: () => calls.push('controls'),
   });
   return { switcher, state, browser, calls, statuses, rememberSurface, document };

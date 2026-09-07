@@ -146,6 +146,14 @@ function setup(options: {
     restartReplica: () => events.push('restart'),
     syncPreferenceControls: () => events.push('sync'),
     setStatus: (message, tone) => statuses.push([message, tone]),
+    setUiText: (element: HTMLElement, english: string) => {
+      element.dataset.uiLabel = english;
+      element.textContent = english;
+    },
+    localizeUi: (english: string) => english,
+    localizeTemplate: (frame: string, ...args: readonly (string | number)[]) =>
+      frame.replace(/\{(\d+)\}/g, (whole, index: string) =>
+        args[Number(index)] === undefined ? whole : String(args[Number(index)])),
   });
   return {
     window, controller, state, elements, events, statuses, commands, preferenceClient,

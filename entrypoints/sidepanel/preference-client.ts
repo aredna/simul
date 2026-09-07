@@ -1,3 +1,4 @@
+import { UI_STRINGS } from '../../lib/companion-ui-strings';
 import { readableError } from '../../lib/page-identity';
 import {
   readPreferenceCommandResult,
@@ -35,6 +36,10 @@ export interface PreferenceClientEnvironment {
   /** Zoom was applied optimistically; the zoom controls should follow. */
   readonly onZoomApplied: () => void;
   readonly onError: (message: string) => void;
+  readonly localizeTemplate: (
+    frame: string,
+    ...args: readonly (string | number)[]
+  ) => string;
   readonly zoomCommitDebounceMs?: number;
 }
 
@@ -55,7 +60,7 @@ export class PreferenceClient {
   async send(command: PreferenceCommand): Promise<PreferenceCommandResult> {
     const response = await this.environment.sendMessage(command);
     const result = readPreferenceCommandResult(response);
-    if (!result) throw new Error('The preference service returned an invalid response.');
+    if (!result) throw new Error(UI_STRINGS.statusInvalidPreferenceResponse);
     return result;
   }
 
@@ -126,9 +131,7 @@ export class PreferenceClient {
       ledger.settle(pending.requestId);
       this.applyCommitted(result.preferences);
       if (!result.applied) {
-        throw new Error(
-          'Settings were reset in another companion. Review the current choices and try again.',
-        );
+        throw new Error(UI_STRINGS.statusSettingsResetElsewhere);
       }
       this.environment.onControlsChanged();
       this.environment.onLayoutChanged();
@@ -142,7 +145,9 @@ export class PreferenceClient {
       } catch {
         // Keep the optimistic controls visible; a later storage event can repair them.
       }
-      this.environment.onError(`Could not save options: ${readableError(error)}`);
+      this.environment.onError(
+        this.environment.localizeTemplate(UI_STRINGS.statusCouldNotSaveOptions, readableError(error)),
+      );
       return false;
     }
   }
@@ -162,8 +167,8 @@ export class PreferenceClient {
       if (!result.applied) {
         throw new Error(
           result.code === 'stale-settings-revision'
-            ? 'Image options changed in another companion. Review the current choices and try again.'
-            : 'Settings were reset in another companion. Review the current choices and try again.',
+            ? UI_STRINGS.statusImageOptionsChangedElsewhere
+            : UI_STRINGS.statusSettingsResetElsewhere,
         );
       }
       this.environment.onControlsChanged();
@@ -174,7 +179,9 @@ export class PreferenceClient {
       } catch {
         // A later storage event can reconcile optimistic controls.
       }
-      this.environment.onError(`Could not save image options: ${readableError(error)}`);
+      this.environment.onError(
+        this.environment.localizeTemplate(UI_STRINGS.statusCouldNotSaveImageOptions, readableError(error)),
+      );
     }
   }
 

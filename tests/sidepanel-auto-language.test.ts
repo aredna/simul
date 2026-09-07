@@ -46,8 +46,8 @@ describe('sidepanel Auto image-language reconciliation', () => {
     const proposal = slice(driver, 'interface PendingAutoImageLanguageEvidence', 'handleAutoImageLanguageInvalidated(');
     expect(proposal).toContain('readonly origin: AutoImageLanguageEvidenceOrigin');
     expect(proposal).toContain("proposal.origin === 'accessibility-text'");
-    expect(proposal).toContain("'accessibility image text'");
-    expect(proposal).toContain("'bounded image OCR'");
+    expect(proposal).toContain('UI_STRINGS.imageAccessibilityText');
+    expect(proposal).toContain('UI_STRINGS.imageBoundedOcr');
   });
 
   it('runs normal pair, OCR, availability, and automatic-translation reconciliation', () => {

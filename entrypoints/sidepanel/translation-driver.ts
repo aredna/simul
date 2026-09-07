@@ -3,6 +3,7 @@ import {
   replicaViewTranslationAction,
 } from '../../lib/companion-lifecycle';
 import type { CompanionStatusTone } from '../../lib/companion-ui-localization';
+import { UI_STRINGS, formatUiTemplate } from '../../lib/companion-ui-strings';
 import {
   resolveSourceLanguage,
   shouldClearAutoImageLanguageForDocument,
@@ -35,7 +36,6 @@ import {
   type ReplicaTranslationSnapshot,
 } from '../../lib/translation/replica-translation-coordinator';
 import {
-  languageName,
   type SupportedLanguage,
   type TranslationPair,
   type TranslationProvider,
@@ -95,6 +95,13 @@ export interface TranslationDriverEnvironment {
   readonly autoImageLanguageConfigurationKey: () => string;
   readonly configureImageTranslation: () => void;
   readonly setStatus: (message: string, tone?: CompanionStatusTone) => void;
+  /** Localizes a template frame and fills its numbered placeholders. */
+  readonly localizeTemplate: (
+    frame: string,
+    ...args: readonly (string | number)[]
+  ) => string;
+  /** The language's display name in the current UI language. */
+  readonly localizeLanguageName: (language: SupportedLanguage) => string;
   readonly updateControls: () => void;
   readonly showProgress: (label: string, value: number, max: number) => void;
   readonly hideProgress: () => void;
@@ -258,10 +265,18 @@ export class TranslationDriver {
       state.resolvedSourceLanguage
         ? requestedPreference === 'auto'
           ? detected.language
-            ? `Detected ${languageName(state.resolvedSourceLanguage)} from ${detected.source === 'html' ? 'the page language' : 'visible page text'}.`
-            : `Using the previously detected ${languageName(state.resolvedSourceLanguage)} source language.`
+            ? this.environment.localizeTemplate(
+                detected.source === 'html'
+                  ? UI_STRINGS.statusDetectedFromPageLanguage
+                  : UI_STRINGS.statusDetectedFromVisibleText,
+                this.environment.localizeLanguageName(state.resolvedSourceLanguage),
+              )
+            : this.environment.localizeTemplate(
+                UI_STRINGS.statusPreviouslyDetectedSource,
+                this.environment.localizeLanguageName(state.resolvedSourceLanguage),
+              )
           : ''
-        : 'The page language could not be detected. Choose a From language.',
+        : this.environment.localizeTemplate(UI_STRINGS.statusCouldNotDetect),
     );
     this.environment.syncComposerPanel();
     this.environment.configureImageTranslation();
@@ -307,11 +322,18 @@ export class TranslationDriver {
     state.availabilityCheckedForPair = undefined;
     state.translationComplete = false;
     this.environment.invalidateComposer();
-    const evidenceSource = proposal.origin === 'accessibility-text'
-      ? 'accessibility image text'
-      : 'bounded image OCR';
+    const evidenceSource = this.environment.localizeTemplate(
+      proposal.origin === 'accessibility-text'
+        ? UI_STRINGS.imageAccessibilityText
+        : UI_STRINGS.imageBoundedOcr,
+    );
     this.environment.renderDetectedLanguage(
-      `Detected ${languageName(proposal.language)} from ${evidenceSource} (${proposal.evidence.replaceAll('-', ' ')}).`,
+      this.environment.localizeTemplate(
+        UI_STRINGS.statusDetectedFromImage,
+        this.environment.localizeLanguageName(proposal.language),
+        evidenceSource,
+        proposal.evidence.replaceAll('-', ' '),
+      ),
     );
     this.environment.syncComposerPanel();
     this.environment.updateControls();
@@ -367,7 +389,7 @@ export class TranslationDriver {
     this.environment.invalidateComposer();
     this.environment.coordinator.selectPair(undefined);
     this.environment.renderDetectedLanguage(
-      'Image-derived language evidence was cleared. OCR is checking again with the updated settings.',
+      this.environment.localizeTemplate(UI_STRINGS.statusImageEvidenceCleared),
     );
     this.environment.syncComposerPanel();
   }
@@ -456,10 +478,7 @@ export class TranslationDriver {
       coordinator.selectPair(undefined);
       state.availability = 'unavailable';
       state.availabilityCheckedForPair = undefined;
-      setStatus(
-        'Live source only is active. Language choices are saved for translated mode.',
-        'success',
-      );
+      setStatus(UI_STRINGS.statusLiveSourceLanguagesSaved, 'success');
       this.environment.updateControls();
       return;
     }
@@ -490,7 +509,7 @@ export class TranslationDriver {
     if (state.availability === 'available') {
       await this.startTranslation(false, captureCoordinator.generation);
     } else if (state.availability === 'downloadable' || state.availability === 'downloading') {
-      setStatus('This language pair needs its on-device pack. Choose Translate once to prepare it.', 'warning');
+      setStatus(UI_STRINGS.statusPairNeedsPack, 'warning');
     }
   }
 
@@ -512,7 +531,7 @@ export class TranslationDriver {
       state.availability = 'unavailable';
       state.availabilityCheckedForPair = undefined;
       if (!pair && requestedSnapshot) {
-        setStatus('Choose a From language because automatic detection was inconclusive.', 'warning');
+        setStatus(UI_STRINGS.statusChooseFromInconclusive, 'warning');
       }
       updateControls();
       return;
@@ -530,7 +549,7 @@ export class TranslationDriver {
       state.availabilityCheckedForPair = checkedPairKey;
       state.availability = 'available';
       state.translationComplete = true;
-      setStatus('The source and target languages match, so the original text is unchanged.', 'success');
+      setStatus(UI_STRINGS.statusLanguagesMatchUnchanged, 'success');
       updateControls();
       return;
     }
@@ -547,14 +566,22 @@ export class TranslationDriver {
       state.availability = next;
       switch (next) {
         case 'available':
-          setStatus(`Ready to translate ${languageName(pair.sourceLanguage)} to ${languageName(pair.targetLanguage)} on-device.`);
+          setStatus(this.environment.localizeTemplate(
+            UI_STRINGS.statusReadyToTranslate,
+            this.environment.localizeLanguageName(pair.sourceLanguage),
+            this.environment.localizeLanguageName(pair.targetLanguage),
+          ));
           break;
         case 'downloadable':
         case 'downloading':
-          setStatus('Choose Translate once so Chrome can prepare this on-device language pair.', 'warning');
+          setStatus(UI_STRINGS.statusChooseTranslateOnce, 'warning');
           break;
         default:
-          setStatus(`${languageName(pair.sourceLanguage)} to ${languageName(pair.targetLanguage)} is unavailable on this device.`, 'error');
+          setStatus(this.environment.localizeTemplate(
+            UI_STRINGS.statusPairUnavailable,
+            this.environment.localizeLanguageName(pair.sourceLanguage),
+            this.environment.localizeLanguageName(pair.targetLanguage),
+          ), 'error');
       }
     } catch (error) {
       if (!isCurrent()) return;
@@ -577,10 +604,7 @@ export class TranslationDriver {
     if (action === 'translate') {
       await this.startTranslation(true, generation);
     } else if (action === 'needs-user-action') {
-      this.environment.setStatus(
-        'Automatic translation is ready, but this pair needs one Translate click to prepare its local pack.',
-        'warning',
-      );
+      this.environment.setStatus(UI_STRINGS.statusAutomaticNeedsOneClick, 'warning');
     }
   }
 
@@ -643,7 +667,7 @@ export class TranslationDriver {
     this.environment.configureImageTranslation();
     state.translationDesired = true;
     state.translationComplete = false;
-    this.environment.showProgress('Preparing Chrome\'s on-device language model…', 0, 1);
+    this.environment.showProgress(UI_STRINGS.progressPreparingModel, 0, 1);
     updateControls();
     const stillCurrent = () =>
       captureCoordinator.isCurrent(generation) &&
@@ -660,13 +684,20 @@ export class TranslationDriver {
         signal: abortController.signal,
         onDownloadProgress: (progress) =>
           this.environment.showProgress(
-            `Downloading language pack… ${Math.round(progress * 100)}%`,
+            this.environment.localizeTemplate(
+              UI_STRINGS.progressDownloadingPack,
+              Math.round(progress * 100),
+            ),
             progress,
             1,
           ),
         onProgress: (completed, total) =>
           this.environment.showProgress(
-            `Translating ${completed} of ${total}…`,
+            this.environment.localizeTemplate(
+              UI_STRINGS.progressTranslating,
+              completed,
+              total,
+            ),
             completed,
             Math.max(1, total),
           ),
@@ -680,15 +711,19 @@ export class TranslationDriver {
       setStatus(
         state.translationComplete
           ? automatic
-            ? 'Automatic translation is complete and live updates will translate as they arrive.'
-            : 'Translation is complete and live updates will translate as they arrive.'
-          : describePartialReplicaTranslation(result, 'Translation remains partial'),
+            ? UI_STRINGS.statusAutomaticComplete
+            : UI_STRINGS.statusTranslationComplete
+          : describePartialReplicaTranslation(
+              result,
+              UI_STRINGS.partialPrefixRemainsPartial,
+              (english) => this.environment.localizeTemplate(english),
+            ),
         state.translationComplete ? 'success' : 'warning',
       );
     } catch (error) {
       if (isAbortError(error) || abortController.signal.aborted) {
         if (stillCurrent()) {
-          setStatus('Translation cancelled. Existing translated text was kept.', 'warning');
+          setStatus(UI_STRINGS.statusTranslationCancelledKept, 'warning');
         }
       } else if (!state.isLiveSourceOnlyMode) {
         setStatus(readableError(error), 'error');
@@ -719,12 +754,9 @@ export class TranslationDriver {
     this.environment.configureImageTranslation();
     if (state.isLiveSourceOnlyMode) {
       state.availability = 'unavailable';
-      setStatus(
-        'Live source only is active. The current mirror remains live and all translation overlays were removed.',
-        'success',
-      );
+      setStatus(UI_STRINGS.statusLiveSourceRestored, 'success');
     } else {
-      setStatus('Translated mode restored. Preparing the saved language settings…');
+      setStatus(UI_STRINGS.statusTranslatedModeRestored);
       if (resumeTranslated) void this.resumeTranslatedReplicaMode();
     }
     this.environment.updateControls();
@@ -837,21 +869,37 @@ export class TranslationDriver {
   }
 }
 
+/**
+ * Builds the partial-projection status from catalogue frames. `prefix` is a
+ * catalogue string; `localize` returns the localized frame for each piece,
+ * which `formatUiTemplate` then fills with the counts.
+ */
 export function describePartialReplicaTranslation(
   result: ReplicaTranslationRunResult,
   prefix: string,
+  localize: (english: string) => string = (english) => english,
 ): string {
   const details: string[] = [];
-  if (result.failed > 0) details.push(`${result.failed} failed`);
-  if (result.stale > 0) details.push(`${result.stale} became stale`);
-  if (result.skipped > 0) details.push(`${result.skipped} were superseded`);
+  if (result.failed > 0) {
+    details.push(formatUiTemplate(localize(UI_STRINGS.partialFailed), [result.failed]));
+  }
+  if (result.stale > 0) {
+    details.push(formatUiTemplate(localize(UI_STRINGS.partialStale), [result.stale]));
+  }
+  if (result.skipped > 0) {
+    details.push(formatUiTemplate(localize(UI_STRINGS.partialSuperseded), [result.skipped]));
+  }
   if (result.overflow > 0) {
-    details.push(`${result.overflow} exceeded the bounded local queue`);
+    details.push(formatUiTemplate(localize(UI_STRINGS.partialOverflow), [result.overflow]));
   }
   if (result.completed < result.total && details.length === 0) {
-    details.push(`${result.total - result.completed} were not projected`);
+    details.push(formatUiTemplate(
+      localize(UI_STRINGS.partialNotProjected),
+      [result.total - result.completed],
+    ));
   }
-  return `${prefix}: ${details.join(', ') || 'no current text was projected'}. Original text remains for those segments; choose Translate page to retry.`;
+  const summary = details.join(', ') || localize(UI_STRINGS.partialNoneProjected);
+  return formatUiTemplate(localize(UI_STRINGS.partialSummary), [localize(prefix), summary]);
 }
 
 function* replicaRecordSources(

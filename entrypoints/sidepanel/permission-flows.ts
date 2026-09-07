@@ -1,4 +1,5 @@
 import type { CompanionStatusTone } from '../../lib/companion-ui-localization';
+import { UI_STRINGS } from '../../lib/companion-ui-strings';
 import { ACCESSIBILITY_TEXT_METHOD_ID } from '../../lib/ocr/image-reading-methods';
 import { hasNonDefaultPort, readableError } from '../../lib/page-identity';
 import type { PreferenceCommandResult } from '../../lib/preference-coordinator';
@@ -35,6 +36,10 @@ export interface PermissionFlowsEnvironment {
   /** Pixel OCR providers that are enabled and ready in this runtime. */
   readonly usablePixelProviderCount: () => number;
   readonly setStatus: (message: string, tone?: CompanionStatusTone) => void;
+  readonly localizeTemplate: (
+    frame: string,
+    ...args: readonly (string | number)[]
+  ) => string;
   readonly syncPreferenceControls: () => void;
   readonly updateControls: () => void;
   readonly renderImagePanel: () => void;
@@ -48,7 +53,7 @@ export interface PermissionFlowsEnvironment {
 /** The broad grant was released, the save failed, and Chrome kept it released. */
 class ImageAccessReleasedError extends Error {
   constructor(cause: unknown) {
-    super('Image access was released and could not be restored.', { cause });
+    super(UI_STRINGS.statusImageAccessNotRestored, { cause });
     this.name = 'ImageAccessReleasedError';
   }
 }
@@ -121,8 +126,8 @@ export class PermissionFlows {
         state.preferences.disabledImageReadingMethodIds.includes(
           ACCESSIBILITY_TEXT_METHOD_ID,
         )
-          ? 'Image access was removed. Pixel OCR is paused; open options and choose Grant image access to resume.'
-          : 'Image access was removed. Accessibility image text remains active; only pixel OCR is paused.',
+          ? UI_STRINGS.statusImageAccessRemovedPixelPaused
+          : UI_STRINGS.statusImageAccessRemovedAccessibilityActive,
         'warning',
       );
     }
@@ -151,7 +156,7 @@ export class PermissionFlows {
       if (outcome.kind === 'activation') {
         await preferenceClient.reloadFromStorage();
         setStatus(
-          'Choose the image setting again so Chrome can show its access prompt.',
+          UI_STRINGS.statusChooseImageSettingAgain,
           'warning',
         );
         return;
@@ -163,9 +168,9 @@ export class PermissionFlows {
             ? state.preferences.disabledImageReadingMethodIds.includes(
                 ACCESSIBILITY_TEXT_METHOD_ID,
               )
-              ? 'Pixel OCR remains paused. Choose Grant image access when you are ready to retry.'
-              : 'Accessibility image text remains active without image access; pixel OCR was not enabled.'
-            : 'Chrome did not grant image access, so image translation remains off. You can retry from options.',
+              ? UI_STRINGS.statusPixelOcrRemainsPaused
+              : UI_STRINGS.statusAccessibilityActiveNoPixel
+            : UI_STRINGS.statusImageAccessDeniedOff,
           'warning',
         );
         return;
@@ -175,10 +180,10 @@ export class PermissionFlows {
       this.environment.syncPreferenceControls();
       setStatus(
         enabled
-          ? 'Image translation is enabled for visible page images.'
+          ? UI_STRINGS.statusImageTranslationEnabled
           : outcome.narrowAccessRestored
-            ? 'Image translation is off.'
-            : 'Image translation is off. Chrome did not retain some saved one-site automatic access.',
+            ? UI_STRINGS.statusImageTranslationOff
+            : UI_STRINGS.statusImageTranslationOffPartialAccess,
         outcome.narrowAccessRestored ? 'success' : 'warning',
       );
     } catch (error) {
@@ -188,13 +193,13 @@ export class PermissionFlows {
         // caches and report the revocation, then explain why it happened.
         await this.refreshImageCaptureAccess(true);
         setStatus(
-          'Image access was released but the change could not be saved, and Chrome did not give the access back. Pixel OCR is paused until you choose Grant image access in options.',
+          UI_STRINGS.statusImageAccessReleasedNotSaved,
           'error',
         );
         return;
       }
       setStatus(
-        'Chrome could not update image access. Your saved setting was left unchanged; try again from options.',
+        UI_STRINGS.statusImageAccessUpdateFailed,
         'error',
       );
     } finally {
@@ -257,7 +262,7 @@ export class PermissionFlows {
           origins: [...ALL_SITES_PERMISSION_ORIGINS],
         });
         if (!removed && broadStillPresent) {
-          throw new Error('Chrome retained image capture access.');
+          throw new Error(UI_STRINGS.statusImageCaptureRetained);
         }
         removedImageCaptureGrant = !broadStillPresent;
         if (exactOrigins.length > 0) {
@@ -278,7 +283,7 @@ export class PermissionFlows {
       });
       if (!result.applied) {
         throw new Error(
-          'Settings were reset in another companion while image access was changing.',
+          UI_STRINGS.statusSettingsResetElsewhereImage,
         );
       }
       return { kind: 'complete', result, narrowAccessRestored };
@@ -319,8 +324,8 @@ export class PermissionFlows {
       this.environment.syncPreferenceControls();
       setStatus(
         hasNonDefaultPort(pageUrl)
-          ? 'Chrome cannot grant narrow one-site access to a non-default port.'
-          : 'Open a regular HTTP or HTTPS page before enabling this-site automation.',
+          ? UI_STRINGS.statusNoNarrowPortAccess
+          : UI_STRINGS.statusOpenRegularBeforeSiteAuto,
         'warning',
       );
       return;
@@ -335,34 +340,34 @@ export class PermissionFlows {
       );
       if (outcome.kind === 'activation') {
         await preferenceClient.reloadFromStorage();
-        setStatus('Choose the setting again so Chrome can show its access prompt.', 'warning');
+        setStatus(UI_STRINGS.statusChooseSettingAgain, 'warning');
         return;
       }
       if (outcome.kind === 'limit') {
         preferenceClient.applyCommitted(outcome.preferences);
         this.environment.syncPreferenceControls();
-        setStatus('The saved-site limit has been reached.', 'warning');
+        setStatus(UI_STRINGS.statusSavedSiteLimit, 'warning');
         return;
       }
       if (outcome.kind === 'failed') {
         if (outcome.result) preferenceClient.applyCommitted(outcome.result.preferences);
         else await preferenceClient.reloadFromStorage();
         this.environment.syncPreferenceControls();
-        setStatus(`Chrome could not update automatic access: ${readableError(outcome.error)}`, 'error');
+        setStatus(this.environment.localizeTemplate(UI_STRINGS.statusAutoAccessUpdateError, readableError(outcome.error)), 'error');
         return;
       }
       preferenceClient.applyCommitted(outcome.result.preferences);
       this.environment.syncPreferenceControls();
       if (outcome.kind === 'denied' || outcome.kind === 'not-applied') {
-        setStatus('Chrome did not retain the requested automatic-access scope.', 'warning');
+        setStatus(UI_STRINGS.statusAutoScopeNotRetained, 'warning');
         return;
       }
       setStatus(
         mode === 'off'
-          ? 'Automatic translation is off for this scope.'
+          ? UI_STRINGS.statusAutoOffForScope
           : mode === 'all'
-            ? 'Automatic translation is enabled for regular web pages.'
-            : 'Automatic translation is enabled for this site.',
+            ? UI_STRINGS.statusAutoEnabledRegular
+            : UI_STRINGS.statusAutoEnabledThisSite,
         'success',
       );
       if (mode !== 'off' && state.snapshot && !state.isLiveSourceOnlyMode) {
@@ -378,7 +383,7 @@ export class PermissionFlows {
       if (repaired) preferenceClient.applyCommitted(repaired.preferences);
       else await preferenceClient.reloadFromStorage();
       this.environment.syncPreferenceControls();
-      setStatus(`Chrome could not update automatic access: ${readableError(error)}`, 'error');
+      setStatus(this.environment.localizeTemplate(UI_STRINGS.statusAutoAccessUpdateError, readableError(error)), 'error');
     } finally {
       state.permissionInFlight = false;
       this.environment.updateControls();

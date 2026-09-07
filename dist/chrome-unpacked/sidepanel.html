@@ -5,12 +5,12 @@
     <meta name="viewport" content="width=device-width, initial-scale=1.0">
     <meta name="color-scheme" content="light dark">
     <title>Translation companion</title>
-    <script type="module" crossorigin src="/chunks/sidepanel-D46wKX75.js"></script>
+    <script type="module" crossorigin src="/chunks/sidepanel-yWRLEEFG.js"></script>
     <link rel="modulepreload" crossorigin href="/chunks/transient-image-store-0x_C8z0P.js">
     <link rel="stylesheet" crossorigin href="/assets/sidepanel-Cmrh14A3.css">
   </head>
   <body>
-    <nav id="compact-toolbar" class="compact-toolbar" aria-label="Translation companion controls">
+    <nav id="compact-toolbar" class="compact-toolbar" aria-label="Translation companion controls" data-ui-aria-label="Translation companion controls">
       <span id="toolbar-progress" class="toolbar-progress" role="progressbar" aria-label="Companion processing" aria-valuemin="0" aria-valuemax="100" hidden>
         <span id="toolbar-progress-fill" class="toolbar-progress-fill"></span>
       </span>
@@ -18,37 +18,37 @@
         ↻
         <span id="refresh-attention" class="toolbar-attention" aria-hidden="true" hidden></span>
       </button>
-      <div class="toolbar-language-group" role="group" aria-label="Page translation languages">
-        <div class="toolbar-language-control" title="Language used by the source website">
+      <div class="toolbar-language-group" role="group" aria-label="Page translation languages" data-ui-aria-label="Page translation languages">
+        <div class="toolbar-language-control" title="Language used by the source website" data-ui-title="Language used by the source website">
           <label for="source-language" data-ui-label="From">From</label>
           <button id="toolbar-auto-detect" class="toolbar-button toolbar-auto-detect" type="button" aria-pressed="false" title="Set From language to Auto-detect">
             <span aria-hidden="true">[A]</span>
           </button>
-          <select id="source-language" aria-label="From language"></select>
+          <select id="source-language" aria-label="From language" data-ui-aria-label="From language"></select>
         </div>
-        <button id="swap-languages" class="toolbar-button toolbar-swap" type="button" aria-label="Swap languages" title="Swap languages">⇄</button>
-        <label class="toolbar-language-control" title="Language Simul translates the page into">
+        <button id="swap-languages" class="toolbar-button toolbar-swap" type="button" aria-label="Swap languages" data-ui-aria-label="Swap languages" title="Swap languages" data-ui-title="Swap languages">⇄</button>
+        <label class="toolbar-language-control" title="Language Simul translates the page into" data-ui-title="Language Simul translates the page into">
           <span data-ui-label="To">To</span>
-          <select id="target-language" aria-label="To language"></select>
+          <select id="target-language" aria-label="To language" data-ui-aria-label="To language"></select>
         </label>
       </div>
       <button id="toolbar-size-toggle" class="toolbar-button toolbar-text-button" type="button" aria-label="Change mirror size" title="Change mirror size">
         <span id="toolbar-size-label" data-ui-label="Fit">Fit</span>
       </button>
-      <button id="toolbar-ocr-toggle" class="toolbar-button toolbar-text-button" type="button" aria-label="Toggle image text translation" aria-pressed="false" title="Image text translation is off">
+      <button id="toolbar-ocr-toggle" class="toolbar-button toolbar-text-button" type="button" aria-label="Toggle image text translation" data-ui-aria-label="Toggle image text translation" aria-pressed="false" title="Image text translation is off">
         <span id="toolbar-ocr-label" data-ui-label="OCR Off">OCR Off</span>
       </button>
       <button id="toolbar-tab-follow" class="toolbar-button toolbar-text-button" type="button" aria-label="Follow the current browser tab" aria-pressed="false" title="Available in a detached companion window" disabled>
         <span id="toolbar-tab-follow-label" data-ui-label="Current">Current</span>
       </button>
-      <button id="toggle-quick-translate" class="toolbar-button toolbar-button--translate" type="button" aria-label="Open quick translation" aria-expanded="false" aria-controls="quick-translator" title="Quick translation">
+      <button id="toggle-quick-translate" class="toolbar-button toolbar-button--translate" type="button" aria-label="Open quick translation" data-ui-aria-label="Open quick translation" aria-expanded="false" aria-controls="quick-translator" title="Quick translation" data-ui-title="Quick translation">
         <span aria-hidden="true">文</span>
       </button>
-      <button id="toggle-settings" class="toolbar-button" type="button" aria-label="Open translation options" aria-expanded="false" aria-controls="control-overlay" title="Translation options">
+      <button id="toggle-settings" class="toolbar-button" type="button" aria-label="Open translation options" data-ui-aria-label="Open translation options" aria-expanded="false" aria-controls="control-overlay" title="Translation options" data-ui-title="Translation options">
         ⚙
         <span id="settings-attention" class="toolbar-attention" aria-hidden="true" hidden></span>
       </button>
-      <button id="open-popout" class="toolbar-button" type="button" aria-label="Open detached companion window" title="Open detached window">
+      <button id="open-popout" class="toolbar-button" type="button" aria-label="Open detached companion window" data-ui-aria-label="Open detached companion window" title="Open detached window" data-ui-title="Open detached window">
         ↗
       </button>
       <span id="replica-mode-badge" class="replica-state-label" role="status" aria-live="polite" hidden></span>
@@ -56,25 +56,25 @@
 
     <dialog id="read-scope-setup" class="setup-dialog" aria-modal="true" aria-labelledby="read-scope-setup-title" aria-describedby="read-scope-setup-description">
       <div class="setup-dialog__card">
-        <h1 id="read-scope-setup-title">Choose what the replica may read</h1>
-        <p id="read-scope-setup-description">Website actions are always disabled. Passwords, authentication codes, card-autofill fields, hidden/file inputs, and CSS-masked secrets are never read. Other visible content may be personal, so choose the level you want.</p>
+        <h1 id="read-scope-setup-title" data-ui-label="Choose what the replica may read">Choose what the replica may read</h1>
+        <p id="read-scope-setup-description" data-ui-label="Website actions are always disabled. Passwords, authentication codes, card-autofill fields, hidden/file inputs, and CSS-masked secrets are never read. Other visible content may be personal, so choose the level you want.">Website actions are always disabled. Passwords, authentication codes, card-autofill fields, hidden/file inputs, and CSS-masked secrets are never read. Other visible content may be personal, so choose the level you want.</p>
         <label>
-          <span>Starting profile</span>
+          <span data-ui-label="Starting profile">Starting profile</span>
           <select id="setup-read-profile" autofocus>
-            <option value="page-only">Page only</option>
-            <option value="standard" selected>Standard (recommended)</option>
-            <option value="full-visible">Full visible</option>
-            <option value="custom" disabled>Custom (set with the choices below)</option>
+            <option value="page-only" data-ui-label="Page only">Page only</option>
+            <option value="standard" selected data-ui-label="Standard (recommended)">Standard (recommended)</option>
+            <option value="full-visible" data-ui-label="Full visible">Full visible</option>
+            <option value="custom" disabled data-ui-label="Custom (set with the choices below)">Custom (set with the choices below)</option>
           </select>
         </label>
         <div id="setup-read-scope-controls" class="read-scope-controls"></div>
         <section id="setup-reset-cleanup" class="setup-reset-cleanup" aria-labelledby="setup-reset-cleanup-title" hidden>
-          <h2 id="setup-reset-cleanup-title">Reset cleanup needs attention</h2>
+          <h2 id="setup-reset-cleanup-title" data-ui-label="Reset cleanup needs attention">Reset cleanup needs attention</h2>
           <p id="setup-reset-cleanup-status" role="status" aria-live="polite">Core settings are already safe, but optional permission or runtime cleanup is still pending.</p>
-          <button id="retry-setup-reset-cleanup" type="button" aria-describedby="setup-reset-cleanup-status">Retry cleanup</button>
+          <button id="retry-setup-reset-cleanup" type="button" aria-describedby="setup-reset-cleanup-status" data-ui-label="Retry cleanup">Retry cleanup</button>
         </section>
         <div class="action-row">
-          <button id="complete-read-scope-setup" class="primary" type="button">Use these settings</button>
+          <button id="complete-read-scope-setup" class="primary" type="button" data-ui-label="Use these settings">Use these settings</button>
         </div>
         <p id="setup-read-scope-status" class="status" role="status" aria-live="polite"></p>
       </div>
@@ -82,28 +82,28 @@
 
     <dialog id="reset-settings-dialog" class="reset-settings-dialog" aria-modal="true" aria-labelledby="reset-settings-dialog-title" aria-describedby="reset-settings-dialog-description">
       <form method="dialog">
-        <h2 id="reset-settings-dialog-title">Reset all extension settings?</h2>
-        <p id="reset-settings-dialog-description">This resets Simul settings and removes optional site and image permissions. Packaged OCR files and Chrome translation models are not removed.</p>
+        <h2 id="reset-settings-dialog-title" data-ui-label="Reset all extension settings?">Reset all extension settings?</h2>
+        <p id="reset-settings-dialog-description" data-ui-label="This resets Simul settings and removes optional site and image permissions. Packaged OCR files and Chrome translation models are not removed.">This resets Simul settings and removes optional site and image permissions. Packaged OCR files and Chrome translation models are not removed.</p>
         <div class="action-row">
-          <button value="cancel" type="submit">Cancel</button>
-          <button id="confirm-reset-all-settings" class="danger" value="reset" type="submit">Reset settings</button>
+          <button value="cancel" type="submit" data-ui-label="Cancel">Cancel</button>
+          <button id="confirm-reset-all-settings" class="danger" value="reset" type="submit" data-ui-label="Reset settings">Reset settings</button>
         </div>
       </form>
     </dialog>
 
-    <section id="control-overlay" class="control-overlay" hidden aria-label="Translation options">
+    <section id="control-overlay" class="control-overlay" hidden aria-label="Translation options" data-ui-aria-label="Translation options">
       <div class="overlay-heading">
         <div class="overlay-title">
           <strong data-ui-label="Options">Options</strong>
           <span id="build-version" class="build-version"></span>
         </div>
-        <button id="close-settings" class="quiet-button" type="button" aria-label="Close options">×</button>
+        <button id="close-settings" class="quiet-button" type="button" aria-label="Close options" data-ui-aria-label="Close options">×</button>
       </div>
 
       <p id="detected-language" class="microcopy" hidden></p>
 
       <div id="settings-grid" class="settings-grid settings-grid--common">
-        <label title="Choose whether Simul translates automatically on this site or every authorized site.">
+        <label title="Choose whether Simul translates automatically on this site or every authorized site." data-ui-title="Choose whether Simul translates automatically on this site or every authorized site.">
           <span data-ui-label="Automatic translation">Automatic translation</span>
           <select id="auto-translate-mode">
             <option value="off" data-ui-label="Off">Off</option>
@@ -111,7 +111,7 @@
             <option value="all" data-ui-label="All sites">All sites</option>
           </select>
         </label>
-        <label title="Fit the source width, preserve its original size, or use a custom zoom.">
+        <label title="Fit the source width, preserve its original size, or use a custom zoom." data-ui-title="Fit the source width, preserve its original size, or use a custom zoom.">
           <span data-ui-label="Size">Size</span>
           <select id="mirror-display-mode">
             <option value="fit" data-ui-label="Fit width">Fit width</option>
@@ -119,14 +119,14 @@
             <option value="custom" data-ui-label="Custom zoom">Custom zoom</option>
           </select>
         </label>
-        <label title="Allow translated text to expand or preserve the source element geometry.">
+        <label title="Allow translated text to expand or preserve the source element geometry." data-ui-title="Allow translated text to expand or preserve the source element geometry.">
           <span data-ui-label="Translated text">Translated text</span>
           <select id="text-layout-mode">
             <option value="adaptive" data-ui-label="Let boxes grow">Let boxes grow</option>
             <option value="faithful" data-ui-label="Keep geometry">Keep geometry</option>
           </select>
         </label>
-        <label title="Choose how many safely representable visual resources Isolated HTML preserves.">
+        <label title="Choose how many safely representable visual resources Isolated HTML preserves." data-ui-title="Choose how many safely representable visual resources Isolated HTML preserves.">
           <span data-ui-label="Replica fidelity">Replica fidelity</span>
           <select id="replica-fidelity-policy" aria-describedby="replica-fidelity-disclosure">
             <option value="passive" data-ui-label="Passive Fidelity (recommended)">Passive Fidelity (recommended)</option>
@@ -134,17 +134,17 @@
           </select>
           <small id="replica-fidelity-disclosure" class="microcopy" data-ui-label="Passive Fidelity may make additional HTTP(S) requests for inert visual resources in the replica.">Passive Fidelity may make additional HTTP(S) requests for inert visual resources in the replica.</small>
         </label>
-        <label class="check-label" title="Keep the replica near the same reading position as the source page scrolls.">
+        <label class="check-label" title="Keep the replica near the same reading position as the source page scrolls." data-ui-title="Keep the replica near the same reading position as the source page scrolls.">
           <input id="sync-scroll" type="checkbox">
           <span data-ui-label="Follow source scrolling">Follow source scrolling</span>
         </label>
       </div>
 
-      <div class="zoom-row" aria-label="Mirror zoom">
-        <button id="zoom-out" type="button" aria-label="Zoom out">−</button>
-        <input id="zoom" type="range" min="25" max="300" step="5" value="100" aria-label="Mirror zoom percentage">
+      <div class="zoom-row" aria-label="Mirror zoom" data-ui-aria-label="Mirror zoom">
+        <button id="zoom-out" type="button" aria-label="Zoom out" data-ui-aria-label="Zoom out">−</button>
+        <input id="zoom" type="range" min="25" max="300" step="5" value="100" aria-label="Mirror zoom percentage" data-ui-aria-label="Mirror zoom percentage">
         <output id="zoom-value" for="zoom">100%</output>
-        <button id="zoom-in" type="button" aria-label="Zoom in">+</button>
+        <button id="zoom-in" type="button" aria-label="Zoom in" data-ui-aria-label="Zoom in">+</button>
       </div>
 
       <div class="action-row">
@@ -154,9 +154,9 @@
       </div>
 
       <details class="options-group">
-        <summary title="Control where Simul opens and which tab a detached window follows." data-ui-label="Window behavior">Window behavior</summary>
+        <summary title="Control where Simul opens and which tab a detached window follows." data-ui-title="Control where Simul opens and which tab a detached window follows." data-ui-label="Window behavior">Window behavior</summary>
         <div class="settings-grid">
-          <label title="Use the last companion view or always open a particular view.">
+          <label title="Use the last companion view or always open a particular view." data-ui-title="Use the last companion view or always open a particular view.">
             <span data-ui-label="Toolbar opens">Toolbar opens</span>
             <select id="launch-behavior">
               <option value="last-used" data-ui-label="Last used view">Last used view</option>
@@ -164,7 +164,7 @@
               <option value="popout" data-ui-label="Always detached window">Always detached window</option>
             </select>
           </label>
-          <label title="Keep a detached window on its opening tab or follow the active browser tab.">
+          <label title="Keep a detached window on its opening tab or follow the active browser tab." data-ui-title="Keep a detached window on its opening tab or follow the active browser tab.">
             <span data-ui-label="Detached window follows">Detached window follows</span>
             <select id="popout-tab-mode">
               <option value="locked" data-ui-label="The opening tab">The opening tab</option>
@@ -175,15 +175,15 @@
       </details>
 
       <details id="readable-content-options" class="options-group" open>
-        <summary>Readable content &amp; security</summary>
-        <p class="microcopy">The mirror stays actionless under every choice. Credential secrets remain blocked. Changes apply while the companion is running.</p>
+        <summary data-ui-label="Readable content & security">Readable content &amp; security</summary>
+        <p class="microcopy" data-ui-label="The mirror stays actionless under every choice. Credential secrets remain blocked. Changes apply while the companion is running.">The mirror stays actionless under every choice. Credential secrets remain blocked. Changes apply while the companion is running.</p>
         <label>
-          <span>Read profile</span>
+          <span data-ui-label="Read profile">Read profile</span>
           <select id="read-scope-profile">
-            <option value="page-only">Page only</option>
-            <option value="standard">Standard</option>
-            <option value="full-visible">Full visible</option>
-            <option value="custom" disabled>Custom (set with the choices below)</option>
+            <option value="page-only" data-ui-label="Page only">Page only</option>
+            <option value="standard" data-ui-label="Standard">Standard</option>
+            <option value="full-visible" data-ui-label="Full visible">Full visible</option>
+            <option value="custom" disabled data-ui-label="Custom (set with the choices below)">Custom (set with the choices below)</option>
           </select>
         </label>
         <div id="read-scope-controls" class="read-scope-controls"></div>
@@ -194,9 +194,9 @@
       </details>
 
       <details id="experimental-options" class="options-group options-group--experimental">
-        <summary title="Inspect untranslated source text and configure experimental local image OCR." data-ui-label="Advanced & experimental">Advanced &amp; experimental</summary>
+        <summary title="Inspect untranslated source text and configure experimental local image OCR." data-ui-title="Inspect untranslated source text and configure experimental local image OCR." data-ui-label="Advanced & experimental">Advanced &amp; experimental</summary>
         <div class="settings-grid">
-          <label title="Show translated text or temporarily inspect the live source text without translation.">
+          <label title="Show translated text or temporarily inspect the live source text without translation." data-ui-title="Show translated text or temporarily inspect the live source text without translation.">
             <span data-ui-label="Replica text">Replica text</span>
             <select id="replica-view-mode">
               <option value="translated" data-ui-label="Translated">Translated</option>
@@ -213,7 +213,7 @@
       </div>
       <p id="status" class="status" role="status" aria-live="polite">Reading the source page…</p>
       <p id="capture-notes" class="microcopy" hidden></p>
-      <p id="placement-guidance" class="microcopy" hidden>
+      <p id="placement-guidance" class="microcopy" data-ui-label="Chrome places native side panels globally. Use the ↗ button for a detached companion window." hidden>
         Chrome places native side panels globally. Use the ↗ button for a detached companion window.
       </p>
     </section>
@@ -221,9 +221,9 @@
     <section id="quick-translator" class="quick-translator" role="dialog" aria-labelledby="quick-translator-title" hidden>
       <div class="overlay-heading">
         <strong id="quick-translator-title" data-ui-label="Quick translation">Quick translation</strong>
-        <button id="close-quick-translate" class="quiet-button" type="button" aria-label="Close quick translation">×</button>
+        <button id="close-quick-translate" class="quiet-button" type="button" aria-label="Close quick translation" data-ui-aria-label="Close quick translation">×</button>
       </div>
-      <div class="quick-language-row" aria-label="Quick translation direction">
+      <div class="quick-language-row" aria-label="Quick translation direction" data-ui-aria-label="Quick translation direction">
         <span>
           <small data-ui-label="From">From</small>
           <strong id="composer-from-language">Your language</strong>
@@ -236,10 +236,10 @@
       </div>
       <p id="composer-guidance" class="microcopy"></p>
       <label class="composer-label" for="composer-input" data-ui-label="Input">Input</label>
-      <textarea id="composer-input" rows="3" maxlength="5000" placeholder="Type here…" aria-describedby="composer-guidance composer-character-count" aria-keyshortcuts="Control+Enter Meta+Enter"></textarea>
+      <textarea id="composer-input" rows="3" maxlength="5000" placeholder="Type here…" data-ui-placeholder="Type here…" aria-describedby="composer-guidance composer-character-count" aria-keyshortcuts="Control+Enter Meta+Enter"></textarea>
       <output id="composer-character-count" class="composer-character-count" for="composer-input" aria-label="0 of 5,000 characters used">0 / 5,000</output>
       <div class="composer-actions">
-        <button id="translate-composer" class="primary" type="button" data-ui-label="Translate" title="Translate (Ctrl/Command+Enter)">Translate</button>
+        <button id="translate-composer" class="primary" type="button" data-ui-label="Translate" title="Translate (Ctrl/Command+Enter)" data-ui-title="Translate (Ctrl/Command+Enter)">Translate</button>
         <button id="copy-composer" type="button" disabled data-ui-label="Copy result">Copy result</button>
       </div>
       <label class="composer-label" for="composer-output" data-ui-label="Output">Output</label>
@@ -248,10 +248,10 @@
     </section>
 
     <main>
-      <section id="replica-status" class="replica-status" aria-label="Page mirror status" aria-busy="false">
+      <section id="replica-status" class="replica-status" aria-label="Page mirror status" data-ui-aria-label="Page mirror status" aria-busy="false">
         <div class="empty-state"><p>Preparing the live read-only mirror…</p></div>
       </section>
-      <section id="replica-preview" class="replica-preview" aria-label="Live page replica" aria-busy="false" aria-hidden="true" hidden></section>
+      <section id="replica-preview" class="replica-preview" aria-label="Live page replica" data-ui-aria-label="Live page replica" aria-busy="false" aria-hidden="true" hidden></section>
     </main>
 
   </body>

@@ -60,6 +60,9 @@ function setup(options: {
     onLayoutChanged: () => events.push('layout'),
     onZoomApplied: () => events.push('zoom'),
     onError: (message) => errors.push(message),
+    localizeTemplate: (frame: string, ...args: readonly (string | number)[]) =>
+      frame.replace(/\{(\d+)\}/g, (whole, index: string) =>
+        args[Number(index)] === undefined ? whole : String(args[Number(index)])),
     zoomCommitDebounceMs: 150,
   });
   return {

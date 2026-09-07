@@ -9,6 +9,7 @@ import {
 } from '../entrypoints/sidepanel/translation-driver';
 import { AutoLanguageEvidencePrecedence } from '../lib/language-detection';
 import { withViewSettings } from '../lib/preferences';
+import { languageName, type SupportedLanguage } from '../lib/translation-provider';
 import type { ReplicaSourceDocumentIdentity } from '../lib/replica/source-identity';
 import type {
   ReplicaTranslationRunResult,
@@ -77,6 +78,10 @@ function setup(options: {
     autoImageLanguageConfigurationKey: () => 'configuration',
     configureImageTranslation: () => events.push('configure'),
     setStatus: (message) => statuses.push(message),
+    localizeTemplate: (frame: string, ...args: readonly (string | number)[]) =>
+      frame.replace(/\{(\d+)\}/g, (whole, index: string) =>
+        args[Number(index)] === undefined ? whole : String(args[Number(index)])),
+    localizeLanguageName: (language: SupportedLanguage) => languageName(language),
     updateControls: () => events.push('controls'),
     showProgress: (label) => events.push(`progress:${label}`),
     hideProgress: () => events.push('hide-progress'),

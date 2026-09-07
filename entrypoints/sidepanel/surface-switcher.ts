@@ -3,6 +3,7 @@ import {
   createDetachedWindowData,
 } from '../../lib/companion-surface';
 import type { CompanionStatusTone } from '../../lib/companion-ui-localization';
+import { UI_STRINGS } from '../../lib/companion-ui-strings';
 import {
   isSupportedPage,
   readableError,
@@ -43,6 +44,15 @@ export interface SurfaceSwitcherEnvironment {
   };
   readonly rememberSurface: (surface: CompanionSurface) => Promise<unknown>;
   readonly setStatus: (message: string, tone?: CompanionStatusTone) => void;
+  readonly localizeTemplate: (
+    frame: string,
+    ...args: readonly (string | number)[]
+  ) => string;
+  readonly setUiAttr: (
+    element: HTMLElement,
+    attribute: 'title' | 'aria-label' | 'placeholder',
+    english: string,
+  ) => void;
   readonly updateControls: () => void;
 }
 
@@ -63,8 +73,8 @@ export class SurfaceSwitcher {
     if (!this.#state.isDetachedWindow) return;
     const { popoutButton } = this.environment.elements;
     popoutButton.textContent = '↙';
-    popoutButton.setAttribute('aria-label', 'Return companion to the side panel');
-    popoutButton.title = 'Return to side panel';
+    this.environment.setUiAttr(popoutButton, 'aria-label', UI_STRINGS.returnToSidePanelAria);
+    this.environment.setUiAttr(popoutButton, 'title', UI_STRINGS.returnToSidePanel);
   }
 
   /** The surface button was clicked. */
@@ -84,7 +94,7 @@ export class SurfaceSwitcher {
     const { browser, setStatus } = this.environment;
     const identity = this.#state.capturedOrFollowedIdentity;
     if (!identity) {
-      setStatus('Open a regular page before detaching the companion.', 'warning');
+      setStatus(UI_STRINGS.statusOpenRegularBeforeDetach, 'warning');
       return;
     }
     try {
@@ -101,13 +111,16 @@ export class SurfaceSwitcher {
       if (!closed || preferenceSaveFailed) {
         setStatus(
           !closed
-            ? 'Detached window opened, but Chrome could not close the old side panel automatically. Close it manually.'
-            : 'Detached window opened, but Chrome could not remember it as the last-used surface.',
+            ? UI_STRINGS.statusDetachedCouldNotCloseOld
+            : UI_STRINGS.statusDetachedCouldNotRemember,
           'warning',
         );
       }
     } catch (error) {
-      setStatus(`Chrome could not open a detached window: ${readableError(error)}`, 'error');
+      setStatus(
+        this.environment.localizeTemplate(UI_STRINGS.statusDetachedOpenError, readableError(error)),
+        'error',
+      );
     }
   }
 
@@ -150,7 +163,10 @@ export class SurfaceSwitcher {
         browser.closeSelf();
       }
     } catch (error) {
-      setStatus(`Chrome could not return to the side panel: ${readableError(error)}`, 'error');
+      setStatus(
+        this.environment.localizeTemplate(UI_STRINGS.statusReturnPanelError, readableError(error)),
+        'error',
+      );
     }
   }
 

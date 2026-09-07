@@ -2,6 +2,7 @@ import {
   resolveUiLabelTranslations,
   shouldRetryUiLabelLocalization,
 } from '../../lib/companion-ui-localization';
+import { formatUiTemplate } from '../../lib/companion-ui-strings';
 import { createSourceLanguageLabeler } from '../../lib/language-options';
 import { translateWithSession } from '../../lib/translation-pipeline';
 import type {
@@ -29,7 +30,28 @@ export interface UiLocalizerEnvironment {
   readonly schedule?: (callback: () => void) => void;
   /** Delay before the single retry of a label set that was not installed. */
   readonly retryDelayMs?: number;
+  /**
+   * Fires after every DOM apply (a completed pass or an English fallback), so
+   * imperatively written surfaces such as the status line can re-render their
+   * last English message in the set that is now current.
+   */
+  readonly onApply?: () => void;
 }
+
+/**
+ * Attributes localized from a `data-ui-*` marker that carries the English
+ * source. The marker, not the live attribute, is the source of truth, so a
+ * partially localized set can always fall back to English without losing it.
+ */
+const LOCALIZED_ATTRIBUTES = [
+  { selector: '[data-ui-title]', datasetKey: 'uiTitle', attribute: 'title' },
+  { selector: '[data-ui-aria-label]', datasetKey: 'uiAriaLabel', attribute: 'aria-label' },
+  { selector: '[data-ui-placeholder]', datasetKey: 'uiPlaceholder', attribute: 'placeholder' },
+] as const satisfies readonly {
+  readonly selector: string;
+  readonly datasetKey: string;
+  readonly attribute: string;
+}[];
 
 /**
  * Localizes every `[data-ui-label]` element into the target language as one
@@ -65,6 +87,51 @@ export class UiLocalizer {
   /** True while the single delayed retry for the current label set is armed. */
   get retryPending(): boolean {
     return this.#retryTimer !== undefined;
+  }
+
+  /**
+   * The localized form of one English catalogue string in the current set, or
+   * the English itself when the set is English, incomplete, or stale. Used by
+   * imperatively written surfaces (status lines, code-driven attributes).
+   */
+  localized(english: string): string {
+    if (this.#localizedTarget !== this.environment.getTargetLanguage()) {
+      return english;
+    }
+    return this.#translations.get(english) ?? english;
+  }
+
+  /**
+   * Localizes a template frame, then fills its numbered placeholders. The
+   * frame is localized as a unit so the target language controls word order
+   * around the interpolated values.
+   */
+  localizeTemplate(frame: string, ...args: readonly (string | number)[]): string {
+    return formatUiTemplate(this.localized(frame), args);
+  }
+
+  /**
+   * Sets a localized attribute from code. The English source is recorded on the
+   * matching `data-ui-*` marker so the next pass re-localizes it, and the live
+   * attribute is set to the current localized form immediately.
+   */
+  setAttribute(
+    element: HTMLElement,
+    attribute: 'title' | 'aria-label' | 'placeholder',
+    english: string,
+  ): void {
+    const entry = LOCALIZED_ATTRIBUTES.find((item) => item.attribute === attribute);
+    if (entry) element.dataset[entry.datasetKey] = english;
+    const translated = this.localized(english);
+    if (element.getAttribute(attribute) !== translated) {
+      element.setAttribute(attribute, translated);
+    }
+    if (this.environment.getTargetLanguage() !== 'en' && !this.#translations.has(english)) {
+      if (this.#translations.size > 0) {
+        this.prepareEnglishFallback(this.environment.getTargetLanguage(), true);
+      }
+      this.schedule();
+    }
   }
 
   /** Sets an element's English label and renders it in the current set. */
@@ -129,6 +196,10 @@ export class UiLocalizer {
         ...[...document.querySelectorAll<HTMLElement>('[data-ui-label]')]
           .map((element) => element.dataset.uiLabel ?? '')
           .filter(Boolean),
+        ...LOCALIZED_ATTRIBUTES.flatMap(({ selector, datasetKey }) =>
+          [...document.querySelectorAll<HTMLElement>(selector)]
+            .map((element) => element.dataset[datasetKey] ?? '')
+            .filter(Boolean)),
       ],
     )];
     const inputKey = JSON.stringify([targetLanguage, sources]);
@@ -223,7 +294,18 @@ export class UiLocalizer {
       if (translated === english) element.removeAttribute('lang');
       else element.setAttribute('lang', this.#localizedTarget);
     }
+    for (const { selector, datasetKey, attribute } of LOCALIZED_ATTRIBUTES) {
+      for (const element of document.querySelectorAll<HTMLElement>(selector)) {
+        const english = element.dataset[datasetKey];
+        if (!english) continue;
+        const translated = this.#translations.get(english) ?? english;
+        if (element.getAttribute(attribute) !== translated) {
+          element.setAttribute(attribute, translated);
+        }
+      }
+    }
     this.updateSourceLanguageOptionLabels(this.environment.getTargetLanguage());
+    this.environment.onApply?.();
   }
 
   /** From-menu entries show each language's name in the target language. */
