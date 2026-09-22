@@ -1672,3 +1672,53 @@ Build identity `0.5.0 beta v.20260922.5`; `dist/chrome-unpacked` re-synced
 green, **1,403 tests pass, 1 skipped** (+4). NAS `Dev/simul/` re-mirrored.
 Remaining from the owner's pass: nothing open; the carousel images resolved
 with the `.4` build.
+
+### D47. Image translation on by default; a reset still clears every grant (2026-09-22)
+
+Same branch `feat/ui-string-catalogue` / PR #22, follow-up on `b825bab`. Owner
+direction after the `.5` pass: "please make sure OCR on is the default, not
+off"; everything else on freee.co.jp was reported working, except that the top
+carousel's images "disappeared again".
+
+- **Default.** `DEFAULT_COMPANION_PREFERENCES` and `createDefaultPreferences()`
+  now set `imageTranslationEnabled: true`. Pixel OCR still needs the optional
+  `<all_urls>` grant, which only a gesture can give, so a fresh install shows
+  **OCR On** with the existing "needs image access" title; the first click on
+  the OCR button requests the grant (that flow already existed), a later click
+  turns image text off. The accessibility-text method stays disabled by
+  default as before. With D46, an enabled OCR also carries page translation, so
+  a mirrored page now translates on open without a Translate click. The image
+  panel's microcopy key `imageOffByDefault` became `imageOnByDefault` with
+  matching text; README (steps 4 and 6, the Image text section, the
+  troubleshooting bullet) and both docs pages say on by default.
+- **Reset semantics.** "Reset all" must still clear every grant (README), but
+  the reset's fresh defaults now say image translation is on, and the cleanup
+  retained whatever the saved intent needed, so the broad grant would have
+  survived. `resetRetainedPermissionOrigins` now treats image translation's
+  broad access as retained only when the grant ledger holds it: a reset clears
+  the ledger and the OCR button's grant flow refills it, so "on" alone no
+  longer proves the user asked for the grant after the reset. A reset therefore
+  leaves image translation on but without the grant, exactly like a fresh
+  install. `withGrantLedger` only adopts a retained origin that is actually
+  granted at save time and never runs before a pending cleanup, so a pre-reset
+  grant cannot slip into the ledger.
+- **Tests.** Default expectations updated (`preferences`, coordinator reset and
+  patch results, the image panel microcopy); the ledger and grant tests that
+  are about automation alone now pin image translation off in their fixtures;
+  the two manual-intent driver tests do the same because of D46; the
+  pending-reset test's fixture carries the ledger entry the new rule requires;
+  the two permission-flow tests that start from "off" use the harness's
+  `stored` override. Gate: `npm run check` green, **1,403 tests pass,
+  1 skipped**.
+- **Carousel images (explained, decision pending).** The images had reappeared
+  with `.4` while the page was untranslated and vanished with `.5` once the
+  page translated automatically. That is the image-text feature itself: OCR
+  overlays are opaque white boxes (`rgba(255,255,255,0.94)` per recognised
+  line, `0.86` for a whole-image label) placed over the recognised text, and
+  the carousel banner is almost entirely text, so the overlays whitewash it.
+  With OCR on by default this will be common on text-heavy banners. Options
+  put to the owner: keep as is; make the backdrop more translucent so the
+  picture shows through; or render label-based results as a caption band.
+
+Build identity `0.5.0 beta v.20260922.6`; `dist/chrome-unpacked` re-synced.
+NAS `Dev/simul/` re-mirrored.

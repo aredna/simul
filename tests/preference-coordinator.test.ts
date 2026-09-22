@@ -186,7 +186,7 @@ describe('preference coordinator', () => {
       applied: true,
       cleanup: { status: 'complete', remainingManagedOrigins: 0 },
       preferences: {
-        imageTranslationEnabled: false,
+        imageTranslationEnabled: true,
         autoTranslateAllSites: false,
         readScopeSetupVersion: 0,
         resetRevision: 1,
@@ -295,6 +295,9 @@ describe('preference coordinator', () => {
       ...parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES),
       autoTranslateOrigins: ['https://kept.example'],
       imageTranslationEnabled: true,
+      // The ledger proves the broad grant was requested after the reset
+      // (image translation is on by default, so "on" alone proves nothing).
+      grantedPermissionOrigins: ['<all_urls>'],
       resetRevision: 4,
       resetCleanupPendingRevision: 4,
     });
@@ -350,7 +353,7 @@ describe('preference coordinator', () => {
     expect(adapter.preferences).toMatchObject({
       resetRevision: 1,
       targetLanguage: 'en',
-      imageTranslationEnabled: false,
+      imageTranslationEnabled: true,
       autoTranslateOrigins: [],
     });
   });
@@ -372,7 +375,7 @@ describe('preference coordinator', () => {
       code: 'stale-settings-revision',
       preferences: {
         settingsRevision: 4,
-        imageTranslationEnabled: false,
+        imageTranslationEnabled: true,
       },
     });
     expect(adapter.saveCalls).toBe(0);
@@ -648,7 +651,11 @@ describe('preference coordinator', () => {
   });
 
   it('owns the broad grant once all-sites automation relies on it and releases it with the intent', async () => {
-    const adapter = new MemoryPreferenceAdapter();
+    // Image translation off: this test is about automation's ownership alone.
+    const adapter = new MemoryPreferenceAdapter({
+      ...parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES),
+      imageTranslationEnabled: false,
+    });
     // The side panel requested and received the grant before committing.
     adapter.grant('<all_urls>');
     const coordinator = new PreferenceCoordinator(adapter);
@@ -681,7 +688,8 @@ describe('preference coordinator', () => {
     const adapter = new MemoryPreferenceAdapter();
     const { grantedPermissionOrigins: _ledger, ...legacyStored } =
       parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES);
-    adapter.loadValue = legacyStored;
+    // Image translation off: no current intent may need the old grants.
+    adapter.loadValue = { ...legacyStored, imageTranslationEnabled: false };
     adapter.grant('<all_urls>', 'https://old.example/*');
     const coordinator = new PreferenceCoordinator(adapter);
 
@@ -774,7 +782,7 @@ describe('preference coordinator', () => {
 
     expect(result.applied).toBe(true);
     expect(adapter.preferences).toMatchObject({
-      imageTranslationEnabled: false,
+      imageTranslationEnabled: true,
       sourceLanguage: 'auto',
       targetLanguage: 'ja',
       displayMode: 'custom',
@@ -967,6 +975,7 @@ describe('preference coordinator', () => {
     const adapter = new MemoryPreferenceAdapter({
       ...parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES),
       autoTranslateOrigins: ['https://one.example'],
+      imageTranslationEnabled: false,
       // Left over from an earlier all-sites intent: Simul's own grant, which
       // no current intent needs, so it is released rather than relied on.
       grantedPermissionOrigins: ['<all_urls>'],

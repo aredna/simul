@@ -301,6 +301,8 @@ describe('TranslationDriver page translation', () => {
 
   it('runs automatic translation only when wanted and available', async () => {
     const harness = setup();
+    // Image translation off: with it on, D46 treats it as intent for the page.
+    harness.state.preferences = { ...harness.state.preferences, imageTranslationEnabled: false };
     harness.state.resolvedSourceLanguage = 'ja';
     harness.state.availability = 'available';
     await harness.driver.maybeTranslateAutomatically(1, IDENTITY.url);
@@ -328,6 +330,7 @@ describe('TranslationDriver page translation', () => {
 
   it('applies language preferences without recording intent unless the user acted', async () => {
     const harness = setup({ documentLanguage: 'ja' });
+    harness.state.preferences = { ...harness.state.preferences, imageTranslationEnabled: false };
     await harness.driver.applyLanguagePreferences(false);
     expect(harness.state.availability).toBe('available');
     expect(harness.coordinator.translateCurrent).not.toHaveBeenCalled();

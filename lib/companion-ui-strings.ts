@@ -353,8 +353,8 @@ export const UI_STRINGS = {
   imageAccessibilityHint:
     'Accessibility text can run without image access. Grant image access only to enable local pixel OCR fallbacks.',
   imageCheckingAccess: 'Checking Chrome image access…',
-  imageOffByDefault:
-    'Off by default. Visible image pixels stay on this device and are discarded after OCR.',
+  imageOnByDefault:
+    'On by default. Pixel OCR waits for image access; visible image pixels stay on this device and are discarded after OCR.',
   imageGrantAccess: 'Grant image access',
   imageReadingPriority: 'Image reading priority',
   imagePriorityOrderHint:

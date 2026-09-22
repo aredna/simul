@@ -104,7 +104,7 @@ describe('ImageAnalysisPanel', () => {
     setView({ usablePixelProviderCount: 0 });
     panel.render();
     expect(root.querySelector('.image-access-grant')).toBeNull();
-    expect(root.querySelector('.microcopy')?.textContent).toContain('Off by default');
+    expect(root.querySelector('.microcopy')?.textContent).toContain('On by default');
   });
 
   it('toggles image translation and requests pixel access from the grant button', () => {

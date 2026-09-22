@@ -82,7 +82,8 @@ first download.
 zoom, zoom percent, adaptive/faithful text layout, scroll following, explicit
 automatic-translation scopes, the selected replica-fidelity policy, and
 image-analysis options, plus the selected readable-content scope and its
-setup/reset revisions. Image translation is off by default. Composer input,
+setup/reset revisions. Image translation is on by default; pixel OCR waits
+for the optional image-access grant. Composer input,
 output, page text, accessibility labels, OCR text, and translation results are
 never stored.
 

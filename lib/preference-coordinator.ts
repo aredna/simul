@@ -440,7 +440,7 @@ export class PreferenceCoordinator {
   ): Promise<number> {
     // Reset is the user's explicit request to release Simul's site access,
     // so every managed grant goes, owned or not.
-    const retained = new Set(retainedPermissionOrigins(preferences));
+    const retained = new Set(resetRetainedPermissionOrigins(preferences));
     const actual = await this.adapter.getAllOrigins();
     const removable = actual.filter(
       (origin) =>
@@ -453,7 +453,7 @@ export class PreferenceCoordinator {
   private async countUndesiredManagedOrigins(
     preferences: CompanionPreferences,
   ): Promise<number> {
-    const retained = new Set(retainedPermissionOrigins(preferences));
+    const retained = new Set(resetRetainedPermissionOrigins(preferences));
     return (await this.adapter.getAllOrigins()).filter(
       (origin) =>
         isManagedPermissionOriginPattern(origin) && !retained.has(origin),
@@ -901,6 +901,27 @@ function retainedPermissionOrigins(
       ? [...ALL_SITES_PERMISSION_ORIGINS]
       : [];
   return [...globalOrigins, ...siteOrigins];
+}
+
+/**
+ * What a reset keeps. Image translation is on by default, so "on" alone is no
+ * longer proof that the user asked for the broad grant after the reset; only
+ * the ledger is, because a reset clears it and the OCR button's grant flow
+ * refills it. Without that entry a reset leaves image translation on but
+ * without the grant, exactly like a fresh install.
+ */
+function resetRetainedPermissionOrigins(
+  preferences: CompanionPreferences,
+): string[] {
+  const ledger = new Set(preferences.grantedPermissionOrigins);
+  const broadGrantRequested = ALL_SITES_PERMISSION_ORIGINS.some((origin) =>
+    ledger.has(origin),
+  );
+  return retainedPermissionOrigins({
+    ...preferences,
+    imageTranslationEnabled:
+      preferences.imageTranslationEnabled && broadGrantRequested,
+  });
 }
 
 function isLegacyBroadOrigin(value: string): boolean {

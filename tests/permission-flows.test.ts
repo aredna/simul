@@ -206,7 +206,10 @@ describe('PermissionFlows image access', () => {
   });
 
   it('keeps the setting off when Chrome denies the grant', async () => {
-    const harness = setup({ requestAnswer: false });
+    const harness = setup({
+      requestAnswer: false,
+      stored: { ...parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES), imageTranslationEnabled: false },
+    });
     await harness.flows.changeImageTranslationEnabled(true, true);
     expect(harness.stored.imageTranslationEnabled).toBe(false);
     expect(harness.statuses.at(-1)).toContain('Chrome did not grant image access');
@@ -221,7 +224,10 @@ describe('PermissionFlows image access', () => {
   });
 
   it('rolls a fresh grant back when the save fails', async () => {
-    const harness = setup({ failPatch: true });
+    const harness = setup({
+      failPatch: true,
+      stored: { ...parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES), imageTranslationEnabled: false },
+    });
     await harness.flows.changeImageTranslationEnabled(true, true);
     expect(harness.permissions.remove).toHaveBeenCalledWith({ origins: ['<all_urls>'] });
     expect(harness.granted.has('<all_urls>')).toBe(false);
