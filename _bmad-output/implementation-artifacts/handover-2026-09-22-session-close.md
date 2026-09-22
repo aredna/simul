@@ -2,18 +2,19 @@
 
 Chains from `handover-2026-09-22-release-readiness.md`, which keeps the
 publish runbook and the release-notes draft; this file records where the day
-ended. Decision-log entries **D43** through **D49** (with addenda) hold the
-reasoning for everything below. Updated at the end of the evening session
-that produced D49 and D50.
+ended. Decision-log entries **D43** through **D54** (with addenda) hold the
+reasoning for everything below. Updated at the end of the late session that
+produced the bug-hunt review (`review-2026-09-22-pr22-bug-hunt.md`) and
+D51–D54.
 
 ## Where things stand
 
 | Item | State |
 | --- | --- |
-| Branch / PR | `feat/ui-string-catalogue`, PR #22, **open, mergeable, fifteen commits**, head = the docs commit after D50 (D50 addendum: owner confirmation, overlay assessment). Description covers D40–D50. |
-| Version / identity | `0.5.0` / `0.5.0 beta v.20260922.9` (bumped on every shipped change; next is `.10`). |
-| Gate | `npm run check` green at head: typecheck clean, **1,415 tests pass, 1 skipped** (Chrome fixture), `dist/chrome-unpacked` re-synced and byte-verified. No CI by decision. |
-| NAS | `Dev/simul/` on the rsync daemon mirrors the head commit (checksum dry-run clean). Load `Dev/simul/dist/chrome-unpacked`; settings must show `Build 0.5.0 beta v.20260922.9`. |
+| Branch / PR | `feat/ui-string-catalogue`, PR #22, **open, twenty-two commits**, head `8d92960` (D54). Description covers D40–D54. The owner keeps it open while they use the build and hunt bugs. |
+| Version / identity | `0.5.0` / `0.5.0 beta v.20260922.13` (bumped on every shipped change; next is `.14`). |
+| Gate | `npm run check` green at head: typecheck clean, **1,427 tests pass, 1 skipped** (Chrome fixture), `dist/chrome-unpacked` re-synced and byte-verified. No CI by decision. |
+| NAS | `Dev/simul/` on the rsync daemon mirrors the head commit (checksum dry-run clean). Load `Dev/simul/dist/chrome-unpacked`; settings must show `Build 0.5.0 beta v.20260922.13`. |
 | `main` | `eb09813` (through D39); its committed build still says `0.4.0 beta v.20260905.1`. |
 | Release | `v0.4.0` pre-release only; the Releases page serves an older build than the branch until 0.5.0 is published. |
 | Repo | Public, MIT, description in the public voice, PVR / secret scanning / push protection on, Dependabot: no open alerts or PRs. |
@@ -29,31 +30,44 @@ that produced D49 and D50.
 - **D49** a region that stateless controls reference with `aria-controls` (Swiper's previous/next buttons and its slide wrapper) is readable page content; a stateful control or a tab relation still withholds it. Found by the carousel readout: Swiper's accessibility module made the whole freee.co.jp slide wrapper a withheld region from the moment it initialised.
 - **D50** a class or style that flips twice in one observer batch on a region holding only activation controls (links, buttons, `role=button`) is ordinary churn, not a masking transition; the sticky credential rule now needs a value-bearing control in the region. Found by driving the source session with Swiper's real move records: every move had turned the active/next/prev slides, the wrapper and the bullets into permanent opaque placeholders, which is what the owner saw as "shrinks and goes away".
 
+## What landed late (bug-hunt review)
+
+- **D51 (.10)** read-scope toggle descriptions survive localization passes.
+- **D52 (.11)** image overlays clipped to what the page shows, hidden while
+  the image is unpainted, and following slide motion (the "text outside the
+  image" carousel report). **Owner to confirm on freee.co.jp.**
+- **D53 (.12)** a pending reset cannot re-adopt `<all_urls>`; the toolbar OCR
+  button turns OCR off after a refusal; docs for alt captions after setup.
+- **D54 (.13)** declared-hidden and stateless-controlled regions need a really
+  painted box again (P1, P2).
+- Owner rulings: the broad grant keeps the one simple rule (G2, no change);
+  alt-text captions stay on after setup (G4, docs only).
+
 ## Open items
 
-1. **Carousel overlay lands beside the picture after a slide change**
-   (owner, after the `.9` build: "the third image in the carousel has text
-   that shows up outside of the image instead of on top of the image").
-   Assessment in the D50 addendum: the overlay layer is measured on the frame
-   after the patch, at the start of the replica's 300 ms transform transition,
-   and nothing re-measures when the transition ends. Candidate fixes: refresh
-   overlays on `transitionend`/`transitioncancel` in the replica document (plus
-   a bounded settle timer), or a `transition: none` backstop for reconstructed
-   HTML like the SVG one. Not started; the owner has not asked for a change.
-2. **Closed by the owner on `.9`:** the freee.co.jp carousel keeps its text
-   slides, picture and pagination through automatic moves (D49 + D50).
-3. **Publish 0.5.0** — only when the owner says it is ready, in their own
+1. **Owner is using the `.13` build and hunting bugs.** Check the carousel
+   overlay (D52) on freee.co.jp first.
+2. **Rest of the review** (`review-2026-09-22-pr22-bug-hunt.md`): L2–L9
+   (status-line re-localization, language names, error details, guidance
+   strings, placeholders, a11y lang), T1–T3, O3, P3–P6, and the process items
+   (single-source build identity, default-state tests, README step 4).
+3. **Simplification proposal** (end of the review file, R1–R13): the owner
+   asked for it; first batch R1+R7, R2–R6, R10+R9, R8. R11 (auto-commit
+   Standard read scope instead of the setup dialog) and R12 (automatic
+   translation made redundant by OCR-on) need owner rulings.
+4. **Publish 0.5.0** — only when the owner says it is ready, in their own
    words; do not ask. Runbook and release-notes draft:
-   `handover-2026-09-22-release-readiness.md`. Log it as **D51**.
-4. Unchanged: F6 (memoizing `Intl.DisplayNames`) stays declined;
+   `handover-2026-09-22-release-readiness.md`. Log it as **D55**. The
+   release-notes draft predates D51–D54 and should gain one line for them.
+5. Unchanged: F6 (memoizing `Intl.DisplayNames`) stays declined;
    `deferred-work.md` holds the 28 research-sized entries.
 
 ## Working notes for the next session
 
 - `git fetch origin` and compare `origin/feat/ui-string-catalogue` before
-  starting; the tree here is clean at the D49 commit.
+  starting; the tree here is clean at `8d92960` (D54).
 - Toolchain on the path: `export PATH=$HOME/.nvm/versions/node/v24.18.0/bin:$PATH`.
-- Any shipped change: bump `betaBuildSuffix` in `wxt.config.ts` (`.10`), update
+- Any shipped change: bump `betaBuildSuffix` in `wxt.config.ts` (`.14`), update
   README (two places) and the two identity tests, `npm run artifact:sync`,
   `npm run check`, then mirror the committed tree to the NAS (the exact rsync
   is in the memory note `simul-nas-mirror`; dry-run first).
