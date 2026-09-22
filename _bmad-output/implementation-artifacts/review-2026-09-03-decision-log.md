@@ -2215,3 +2215,50 @@ than a regression, and asked for three follow-ups. They are carried in
   caption band), and the missing button text is replica text, most likely the
   Page-only read scope that withholds control labels (the queued D54-addendum
   ruling changes that default to Full visible).
+
+### D56. A carousel move is a live patch, not a mirror rebuild (2026-09-23)
+
+Same branch / PR #22, second owner report from the D55 addendum: "when the top
+image carousel scrolls, we redraw the screen from the top and it kind of jumps
+back to the top and then scrolls back to the same place ... it didn't used to
+do that in old versions."
+
+- **Cause.** Every Swiper move on freee.co.jp sends one batch holding a
+  `children` replacement for the slide that comes into view (its content is
+  withheld while it is off screen and re-sent when it is painted, D49/D54) and
+  an `attributes` update for the `.swiper-wrapper` that contains it (the new
+  `transform`). `hasStructuralPatchTargetConflict` refused any batch in which
+  one target was an ancestor of another and either was structural, so
+  `applyPatchBatch` returned nothing, `#applyLivePatch` reported
+  `privacy_rejected` and the engine rebuilt the whole replica from a fresh
+  checkpoint. Logged in Chrome for Testing with an instrumented dev build: all
+  ten refusals in 40 s came from that one check, each on the slide + wrapper
+  pair. Before D50 the slides and wrapper were opaque placeholders, whose
+  mutations were ignored, so the pair never reached the engine; that is why the
+  jump starts at `.9`.
+- **Change.** A batch conflicts only when an operation targets something
+  *inside* a subtree the same batch replaces or reconciles (the replacement
+  removes or re-parents it). An attribute update on an ancestor of a replaced
+  subtree is accepted. This is safe because the attribute-dependent parts of
+  the content context (private region, private-attribute region, public menu)
+  are exactly what `privacyContextChanges` compares, and `applyPatchBatch`
+  already refuses an attribute update that changes them unless that element's
+  own children are replaced too, which makes the element structural and keeps
+  the conflict. The new children are therefore validated against the context
+  they will live in. The apply and rollback phases treat each target on its
+  own, so nothing there relied on the broader refusal.
+- **Verified in Chrome.** On freee.co.jp with the fix: 0 replica rebuilds in
+  40 s after the first checkpoint (10 before), the mirror's wrapper transform
+  and active slide follow the source through the full cycle, and a reader
+  scrolled to 1500 px stays at 1500 through five moves.
+- **Tests.** `structural-patch-conflict`: an update inside a structural target
+  is still refused in either order and for two structural targets; an
+  attribute update on the ancestor of a structural target is not. Engine: the
+  freee move batch (slide replacement + wrapper transform) is applied in place
+  with no recovery and the same wrapper and slide nodes; a wrapper that turns
+  `role=textbox` beside a slide replacement is still refused and recovered.
+  The carousel engine test fails on `4925bd8`.
+
+Build identity `0.5.0 beta v.20260922.15`; `dist/chrome-unpacked` re-synced.
+Gate: `npm run check` green, **1,431 tests pass, 1 skipped** (+3). Publishing
+0.5.0 moves to **D57**.

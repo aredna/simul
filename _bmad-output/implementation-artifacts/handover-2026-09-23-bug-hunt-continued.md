@@ -10,11 +10,11 @@ through **D55** hold the reasoning.
 
 | Item | State |
 | --- | --- |
-| Branch / PR | `feat/ui-string-catalogue`, PR #22, **open**, head `1fe18b4` (D55). Description covers D40–D55. |
-| Version / identity | `0.5.0` / `0.5.0 beta v.20260922.14` (bumped on every shipped change; next is `.15`). |
-| Gate | `npm run check` green at head: typecheck clean, **1,428 tests pass, 1 skipped**, `dist/chrome-unpacked` re-synced and byte-verified. |
-| NAS | `Dev/simul/` mirrors `1fe18b4` (checksum dry-run clean). Load `Dev/simul/dist/chrome-unpacked`; settings must show `Build 0.5.0 beta v.20260922.14`. |
-| `main` | `eb09813` (through D39). Release: `v0.4.0` pre-release only. Publishing 0.5.0 is **D56**, and only when the owner says so. |
+| Branch / PR | `feat/ui-string-catalogue`, PR #22, **open**, head is the D56 commit (`.15`). Description covers D40–D56. |
+| Version / identity | `0.5.0` / `0.5.0 beta v.20260922.15` (bumped on every shipped change; next is `.16`). |
+| Gate | `npm run check` green at head: typecheck clean, **1,431 tests pass, 1 skipped**, `dist/chrome-unpacked` re-synced and byte-verified. |
+| NAS | `Dev/simul/` mirrors the D56 commit. Load `Dev/simul/dist/chrome-unpacked`; settings must show `Build 0.5.0 beta v.20260922.15`. |
+| `main` | `eb09813` (through D39). Release: `v0.4.0` pre-release only. Publishing 0.5.0 is **D57**, and only when the owner says so. |
 
 ## What this session shipped
 
@@ -71,7 +71,14 @@ the visible images, and the existing recognition/final caches keyed as today so
 a rebuild does not redo it. Also check `MIN_CAPTURE_INTERVAL_MS` and the
 scheduler's concurrency before turning a whole page loose.
 
-### 2. The mirror jumps to the top when the carousel advances (new bug, root cause narrowed)
+### 2. The mirror jumps to the top when the carousel advances (fixed in D56, `.15`)
+
+**Fixed.** The refused batch was a slide's content replacement plus the
+wrapper's transform in one batch; the structural-conflict rule refused any
+ancestor/descendant pair. D56 accepts an attribute update on an ancestor of a
+replaced subtree (the privacy-context check already guards it). On freee:
+0 rebuilds in 40 s (was 10) and a scrolled reader stays put. The notes below
+are the pre-fix analysis.
 
 Owner's words: *"when the top image carousel scrolls, we redraw the screen from
 the top and it kind of jumps back to the top and then scrolls back to the same
@@ -167,7 +174,7 @@ each; keep them serial, because concurrent runs make OCR timings noisy.
    with no forced setup question; tab follow defaults to `active` with two
    clearer words; mirror size defaults to 1:1; toolbar buttons stay until the
    owner reviews them one by one.
-3. **Publish 0.5.0** as **D56**, only when the owner says it is ready; do not
+3. **Publish 0.5.0** as **D57**, only when the owner says it is ready; do not
    ask. Runbook: `handover-2026-09-22-release-readiness.md`; the release-notes
    draft needs a line for D51–D55.
 4. Unchanged: F6 (memoizing `Intl.DisplayNames`) stays declined;

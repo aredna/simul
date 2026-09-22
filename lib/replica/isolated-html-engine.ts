@@ -2753,6 +2753,8 @@ function applyPatchBatch(
   // A parent replacement and a descendant operation cannot be made atomic:
   // the descendant identity ceases to exist. The source normally minimizes
   // these, while the extension treats a malicious/confused batch as recovery.
+  // A parent *attribute* update beside a descendant replacement is accepted:
+  // the loop above already refused any that changes the privacy context.
   if (hasStructuralPatchTargetConflict(targetOperations.map(
     ({ operation, target }) => ({
       target,
