@@ -11,6 +11,26 @@ session scratchpad reproduced it (none were committed). No code was changed.
 Baseline: `npm run check` re-run at `5a55302`: exit 0, **1,415 tests pass,
 1 skipped**, working tree clean.
 
+## Status (updated the same evening)
+
+The owner chose four fixes, each shipped as its own build, and ruled on two
+questions:
+
+| Build | Decision | Fixed |
+| --- | --- | --- |
+| `.10` | D51 | L1: read-scope descriptions |
+| `.11` | D52 | O1 + O2: overlays clipped to what the page shows, hidden while unpainted, following slide motion |
+| `.12` | D53 | G1: a pending reset can't re-adopt the broad grant. G3: the OCR button turns OCR off after a refusal. G4: docs |
+| `.13` | D54 | P1 + P2: the D45 and D49 paint checks read opacity, `content-visibility`, clips and collapsed boxes |
+
+Rulings:
+- **G2:** keep the simplest option. One broad grant stays while any enabled
+  feature, including default-on image text, uses it. No change.
+- **G4:** alt-text captions stay on after setup. Docs fixed.
+
+Still open: L2–L9, T1–T3, O3, P3–P6, the process items, and the
+simplification proposal at the end of this file.
+
 ## Summary
 
 | ID | Sev | Area | Finding | Evidence |
@@ -348,3 +368,69 @@ Arabic gets no RTL. Set `lang` and `dir="auto"` in `onApply`.
 
 Each shipped fix follows the usual routine: identity bump (`.10` next),
 `npm run artifact:sync`, `npm run check`, NAS mirror, decision-log entry.
+
+## Simplification proposal
+
+The owner asked what could be simplified, hidden, or moved to an advanced
+section. Below is an inventory of every control, checked against the code, and
+what to do with each. None of this is implemented.
+
+### What is redundant or never needed today
+
+- **Automatic translation (Off / This site / All sites).** With OCR on by
+  default this mostly does nothing extra: an enabled OCR already counts as
+  intent to translate the page (`lib/companion-lifecycle.ts:28-40`, D46). "All
+  sites" asks for the same `<all_urls>` grant that OCR uses. Only "This site"
+  adds anything, and only once OCR is off.
+- **The [A] auto-detect toolbar button** does the same as the From select's
+  Auto-detect option.
+- **The tab-follow toolbar button** is always greyed out in the side panel
+  (`main.ts`, `toolbarTabFollowButton.disabled = busy || !isDetachedWindow`).
+  "Detached window follows" in Settings duplicates it.
+- **"Toolbar opens"** (last used, side panel or window) duplicates the ↗/↙
+  button, which already records the choice.
+- **The Size select** duplicates the Fit/1:1 toolbar toggle. Moving the zoom
+  slider already switches to Custom.
+- **Rebuild in the Settings action row** duplicates the toolbar ↻.
+- **The image panel** has about 15 controls a normal user never touches:
+  - the minimum-confidence slider;
+  - three reading methods, each with a toggle, a status badge and ↑/↓ order
+    buttons;
+  - four help notes;
+  - the scan policy and the "skip very small images" switch;
+  - two prompt toggles that the build compiles out
+    (`tools/ocr-build-profile.ts`, `promptImageLanguage: false`,
+    `promptImageText: false`).
+- **The mandatory read-scope setup dialog** asks one profile question plus six
+  checkboxes before anything shows, and returns after every reset.
+
+### Recommendations
+
+| # | Change | Kind | Size | Privacy / permissions |
+| --- | --- | --- | --- | --- |
+| R1 | Close the "Readable content" section by default and put its six checkboxes behind a nested "Customize" disclosure; keep the profile select visible | hide | S | none |
+| R2 | Drop Rebuild from the Settings action row (the toolbar ↻ stays) | merge | S | none |
+| R3 | Remove the [A] toolbar button | merge | S | none |
+| R4 | Hide the tab-follow button in the side panel and remove the "Detached window follows" select (the button covers it in the window) | merge | S | none |
+| R5 | Remove "Toolbar opens"; always reopen where it was last used | remove | S | none |
+| R6 | Remove the Size select; keep Fit/1:1 and the zoom slider | merge | S | none |
+| R7 | One closed "Advanced" section for Translated text, Replica fidelity, Follow scrolling, Automatic translation, Replica text, Image text and Reset | hide | S | keep fidelity (it is the only choice that cuts network requests) and keep Reset reachable (the README promises it clears every grant) |
+| R8 | Image panel: fix confidence at 65%, the scan policy, skip-small and method order; remove the ↑/↓ buttons, badges, help notes, per-provider toggles and the dead prompt code; keep one "Show image alt text as captions" checkbox and Diagnostics | remove + hide | M | none; pixel OCR still needs the broad grant. Keep the stored preference keys and force defaults on load (`lib/preferences.ts` validates exact key sets) |
+| R9 | Remove the image panel's own on/off checkbox and Grant button; the toolbar OCR button becomes the only switch | merge | S | possible now that D53 lets the toolbar turn OCR off after a refusal |
+| R10 | Setup dialog: keep the profile select and the button, drop the six checkboxes (they live in Settings) | hide | S | none |
+| R11 | **Needs a ruling.** Replace the setup dialog with an automatic Standard commit on first run and after reset, plus a one-line notice | remove | M | widens first-use reading from Page-only to Standard without asking (control labels, control images, collapsed menus); form values, personal data and editable content stay off, and secrets are always blocked |
+| R12 | **Needs a ruling.** Hide Automatic translation now (R7). Later, either treat opening the companion as the intent to translate even with OCR off, or remove "This site" and the per-site permission code behind it | hide now, remove later | S / L | removing per-site grants only narrows access |
+| R13 | Remove the "Live source only" view (the untranslated page is already in the source tab) | remove | M | none |
+
+Suggested first batch, the biggest simplification for the least risk:
+1. R1 + R7: Settings becomes the zoom row, Translate/Cancel, the read profile,
+   and one closed Advanced section. Mostly markup.
+2. R2–R6: remove the duplicate controls, with no privacy effect.
+3. R10 and R9: the setup question shrinks to one choice, and OCR has one
+   switch.
+4. R8: the image panel goes from about 15 controls to one checkbox plus
+   diagnostics.
+
+R11 and R12 each need the owner's ruling. R11 is the only change that
+touches a privacy default, so it would also need a decision-log entry and a
+README change.
