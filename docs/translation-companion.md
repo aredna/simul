@@ -200,7 +200,12 @@ before source capture. Auto-detected work uses the nearest valid image/element
 language and stops before recognition when that resolved language equals To.
 Translated line boxes are inert siblings in the replay document; text wraps
 and uses bounded font-size reduction within the recognized box instead of
-forcing a single clipped line. Document, content revision, SHA-256 pixel key,
+forcing a single clipped line. Because the overlay layer sits outside the
+page's own boxes, each overlay copies what the page does to its image: it is
+clipped to the part of the image that clipping ancestors (a carousel window, a
+scroller) leave visible, hidden while the image is not painted (a faded-out
+slide), and re-measured every frame for a bounded time while a transition or
+animation moves the image, then once more when that motion ends. Document, content revision, SHA-256 pixel key,
 replay lease, pair epoch, replica image, and normalized geometry must still
 match at commit and on refresh.
 Overlay entries retain a bounded aggregate DOM/text weight. A cached layout

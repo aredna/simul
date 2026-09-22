@@ -28,6 +28,25 @@ const IMAGE_OVERLAY_LINE_HEIGHT = 1.12;
 const IMAGE_OVERLAY_FIT_STEPS = 7;
 export const CAPTION_BAND_MIN_PX = 20;
 export const CAPTION_BAND_MAX_FRACTION = 0.34;
+/**
+ * Frames an overlay layer keeps re-measuring after a CSS transition or
+ * animation starts around a projected image (about 1.5 s at 60 Hz); the end
+ * event always re-measures once more, so a longer motion still settles.
+ */
+export const IMAGE_OVERLAY_MOTION_FRAMES = 90;
+const MAX_CLIP_ANCESTOR_DEPTH = 256;
+const MOTION_EVENTS = [
+  'transitionrun',
+  'transitionend',
+  'transitioncancel',
+  'animationstart',
+  'animationend',
+  'animationcancel',
+] as const;
+const MOTION_START_EVENTS: ReadonlySet<string> = new Set([
+  'transitionrun',
+  'animationstart',
+]);
 
 export interface TranslatedImageRegion {
   readonly text: string;
@@ -79,6 +98,21 @@ interface ProjectedEntry {
   readonly weight: number;
   layoutWidth?: number;
   layoutHeight?: number;
+  /** Ancestors that clip the image, cached until the replica's layout changes. */
+  clipAncestors?: readonly ClipAncestor[];
+}
+
+interface ClipAncestor {
+  readonly element: Element;
+  readonly clipsX: boolean;
+  readonly clipsY: boolean;
+}
+
+interface ViewportBox {
+  readonly left: number;
+  readonly top: number;
+  readonly right: number;
+  readonly bottom: number;
 }
 
 interface DocumentLayer {
@@ -86,14 +120,23 @@ interface DocumentLayer {
   readonly root: HTMLElement;
   readonly entries: Map<number, ProjectedEntry>;
   readonly refresh: () => void;
+  readonly onMotion: (event: Event) => void;
   readonly resizeObserver?: ResizeObserver;
   frame?: number;
+  /** Frames left to follow a running transition or animation. */
+  motionFrames: number;
 }
 
 /**
  * Projects inert translated line boxes into a viewport layer in the replay
  * document. The layer is a body sibling, never a wrapper around the image, so
  * projection cannot influence page layout or source/replay ownership.
+ *
+ * Because the layer sits outside the page's own boxes, each overlay copies
+ * what the page would do to the image: it is clipped to the part of the image
+ * its clipping ancestors (a carousel window, a scroller) leave visible, hidden
+ * while the image is not painted (a faded-out slide), and re-measured every
+ * frame while a transition or animation moves the image.
  */
 export class ImageOverlayProjector {
   readonly #scheduleFrame: AnimationFrameScheduler;
@@ -222,8 +265,12 @@ export class ImageOverlayProjector {
     }
   }
 
+  /** The replica's layout changed: re-read clipping ancestors and positions. */
   refresh(): void {
-    for (const layer of this.#layers.values()) this.#scheduleRefresh(layer);
+    for (const layer of this.#layers.values()) {
+      for (const entry of layer.entries.values()) entry.clipAncestors = undefined;
+      this.#scheduleRefresh(layer);
+    }
   }
 
   clear(): void {
@@ -251,6 +298,14 @@ export class ImageOverlayProjector {
       const layer = this.#layers.get(replayDocument);
       if (layer) this.#scheduleRefresh(layer);
     };
+    const onMotion = (event: Event): void => {
+      const layer = this.#layers.get(replayDocument);
+      if (!layer || !motionMovesAnOverlaidImage(layer, event.target)) return;
+      if (MOTION_START_EVENTS.has(event.type)) {
+        layer.motionFrames = IMAGE_OVERLAY_MOTION_FRAMES;
+      }
+      this.#scheduleRefresh(layer);
+    };
     const resizeObserver = this.environment.createResizeObserver?.(refresh) ??
       (typeof ResizeObserver === 'function'
         ? new ResizeObserver(refresh)
@@ -260,11 +315,19 @@ export class ImageOverlayProjector {
       root,
       entries: new Map(),
       refresh,
+      onMotion,
+      motionFrames: 0,
       ...(resizeObserver ? { resizeObserver } : {}),
     };
     parent.append(root);
     view.addEventListener('scroll', refresh, { passive: true, capture: true });
     view.addEventListener('resize', refresh, { passive: true });
+    for (const type of MOTION_EVENTS) {
+      replayDocument.addEventListener(type, onMotion, {
+        passive: true,
+        capture: true,
+      });
+    }
     this.#layers.set(replayDocument, layer);
     return layer;
   }
@@ -276,6 +339,12 @@ export class ImageOverlayProjector {
       if (this.#layers.get(layer.document) !== layer) return;
       for (const nodeId of [...layer.entries.keys()]) {
         this.#refreshEntry(layer, nodeId);
+      }
+      if (layer.motionFrames > 0 && layer.entries.size > 0) {
+        layer.motionFrames -= 1;
+        this.#scheduleRefresh(layer);
+      } else {
+        layer.motionFrames = 0;
       }
     });
   }
@@ -304,18 +373,27 @@ export class ImageOverlayProjector {
     if (currentAnchor.image !== entry.anchor.image) {
       layer.resizeObserver?.unobserve(entry.anchor.image);
       entry.anchor = currentAnchor;
+      entry.clipAncestors = undefined;
       layer.resizeObserver?.observe(currentAnchor.image);
       this.environment.onAnchorRebound?.(projection.jobOrdinal);
     }
     const anchor = entry.anchor;
     const rect = anchor.image.getBoundingClientRect();
-    if (!validRect(rect)) {
+    if (!validRect(rect) || !imageIsPainted(anchor.image)) {
+      root.hidden = true;
+      return;
+    }
+    entry.clipAncestors ??= clippingAncestors(anchor.image);
+    const visible = visibleImageBox(rect, entry.clipAncestors);
+    if (!visible) {
       root.hidden = true;
       return;
     }
     root.hidden = false;
     root.style.left = `${rect.left}px`;
     root.style.top = `${rect.top}px`;
+    const clipPath = insetClipPath(rect, visible);
+    if (root.style.clipPath !== clipPath) root.style.clipPath = clipPath;
     if (entry.layoutWidth === rect.width && entry.layoutHeight === rect.height) {
       return;
     }
@@ -365,6 +443,10 @@ export class ImageOverlayProjector {
     const view = layer.document.defaultView;
     view?.removeEventListener('scroll', layer.refresh, true);
     view?.removeEventListener('resize', layer.refresh);
+    for (const type of MOTION_EVENTS) {
+      layer.document.removeEventListener(type, layer.onMotion, true);
+    }
+    layer.motionFrames = 0;
     for (const entry of layer.entries.values()) {
       this.#retainedEntries.delete(entry);
       this.#retainedWeight = Math.max(0, this.#retainedWeight - entry.weight);
@@ -673,6 +755,176 @@ function estimatedTextUnits(text: string): number {
     }
   }
   return units;
+}
+
+/**
+ * Whether a transition or animation event came from the image or from an
+ * element that contains it (across shadow roots). An unreadable target counts,
+ * since following it for a bounded number of frames is only extra work.
+ */
+function motionMovesAnOverlaidImage(
+  layer: DocumentLayer,
+  target: EventTarget | null,
+): boolean {
+  if (layer.entries.size === 0) return false;
+  const candidate = target as Partial<Node> | null;
+  if (!candidate || typeof candidate.contains !== 'function') return true;
+  try {
+    for (const entry of layer.entries.values()) {
+      let node: Node | undefined = entry.anchor.image;
+      for (let depth = 0; node && depth < MAX_CLIP_ANCESTOR_DEPTH; depth += 1) {
+        if (candidate.contains(node)) return true;
+        const root = node.getRootNode?.() as (Node & { host?: Element }) | undefined;
+        node = root?.host;
+      }
+    }
+    return false;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * False only when Chrome reports the image as not painted: hidden, inside a
+ * `display: none` or skipped `content-visibility` subtree, or at zero opacity
+ * (a faded-out carousel slide). Without the API the overlay stays visible.
+ */
+function imageIsPainted(image: Element): boolean {
+  const check = (image as Element & {
+    checkVisibility?: (options?: Record<string, boolean>) => boolean;
+  }).checkVisibility;
+  if (typeof check !== 'function') return true;
+  try {
+    return check.call(image, {
+      opacityProperty: true,
+      visibilityProperty: true,
+    }) !== false;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * The ancestors whose overflow clips the image, following the containing-block
+ * chain: an absolutely positioned box escapes non-positioned ancestors, and a
+ * fixed box escapes all of them. `body` and the root clip at the viewport,
+ * which the layer already does. Content-free: only computed style is read.
+ */
+function clippingAncestors(image: Element): readonly ClipAncestor[] {
+  const view = image.ownerDocument?.defaultView;
+  const getComputedStyle = view?.getComputedStyle;
+  if (!view || typeof getComputedStyle !== 'function') return [];
+  const read = (element: Element): CSSStyleDeclaration | undefined => {
+    try {
+      return getComputedStyle.call(view, element) ?? undefined;
+    } catch {
+      return undefined;
+    }
+  };
+  const ancestors: ClipAncestor[] = [];
+  const ownPosition = styleValue(read(image), 'position');
+  if (ownPosition === 'fixed') return ancestors;
+  let skipToContainingBlock = ownPosition === 'absolute';
+  let current = composedParentElement(image);
+  for (
+    let depth = 0;
+    current && depth < MAX_CLIP_ANCESTOR_DEPTH;
+    current = composedParentElement(current), depth += 1
+  ) {
+    const tagName = current.localName?.toLowerCase();
+    if (tagName === 'body' || tagName === 'html') break;
+    const style = read(current);
+    if (!style) continue;
+    if (skipToContainingBlock && !containsAbsoluteBoxes(style)) continue;
+    skipToContainingBlock = false;
+    const paintContained = /\b(paint|strict|content)\b/u.test(
+      styleValue(style, 'contain'),
+    );
+    const clipsX = paintContained || clipsOverflow(styleValue(style, 'overflowX'));
+    const clipsY = paintContained || clipsOverflow(styleValue(style, 'overflowY'));
+    if (clipsX || clipsY) ancestors.push({ element: current, clipsX, clipsY });
+    const position = styleValue(style, 'position');
+    if (position === 'fixed') break;
+    if (position === 'absolute') skipToContainingBlock = true;
+  }
+  return ancestors;
+}
+
+function composedParentElement(element: Element): Element | undefined {
+  const slot = (element as Element & { assignedSlot?: Element | null })
+    .assignedSlot;
+  if (slot) return slot;
+  if (element.parentElement) return element.parentElement;
+  const host = (element.parentNode as (Node & { host?: Element }) | null)?.host;
+  return host ?? undefined;
+}
+
+function containsAbsoluteBoxes(style: CSSStyleDeclaration): boolean {
+  const position = styleValue(style, 'position');
+  if (position !== '' && position !== 'static') return true;
+  const transform = styleValue(style, 'transform');
+  const filter = styleValue(style, 'filter');
+  return (transform !== '' && transform !== 'none') ||
+    (filter !== '' && filter !== 'none') ||
+    /\b(paint|layout|strict|content)\b/u.test(styleValue(style, 'contain'));
+}
+
+function clipsOverflow(value: string): boolean {
+  return value !== '' && value !== 'visible';
+}
+
+function styleValue(
+  style: CSSStyleDeclaration | undefined,
+  property: 'position' | 'overflowX' | 'overflowY' | 'contain' | 'transform' | 'filter',
+): string {
+  const value = style?.[property];
+  return typeof value === 'string' ? value.trim().toLowerCase() : '';
+}
+
+/**
+ * The part of the image box its clipping ancestors leave visible, or
+ * undefined when nothing is left. Ancestor border boxes are used, so a
+ * clipping border can show at most its own width of overlay.
+ */
+function visibleImageBox(
+  rect: DOMRect,
+  ancestors: readonly ClipAncestor[],
+): ViewportBox | undefined {
+  let left = rect.left;
+  let top = rect.top;
+  let right = rect.left + rect.width;
+  let bottom = rect.top + rect.height;
+  for (const { element, clipsX, clipsY } of ancestors) {
+    let box: DOMRect;
+    try {
+      box = element.getBoundingClientRect();
+    } catch {
+      continue;
+    }
+    if (
+      !Number.isFinite(box.left) || !Number.isFinite(box.top) ||
+      !Number.isFinite(box.width) || !Number.isFinite(box.height)
+    ) continue;
+    if (clipsX) {
+      left = Math.max(left, box.left);
+      right = Math.min(right, box.left + box.width);
+    }
+    if (clipsY) {
+      top = Math.max(top, box.top);
+      bottom = Math.min(bottom, box.top + box.height);
+    }
+  }
+  if (right - left < 0.5 || bottom - top < 0.5) return undefined;
+  return { left, top, right, bottom };
+}
+
+function insetClipPath(rect: DOMRect, visible: ViewportBox): string {
+  const top = roundCss(Math.max(0, visible.top - rect.top));
+  const right = roundCss(Math.max(0, rect.left + rect.width - visible.right));
+  const bottom = roundCss(Math.max(0, rect.top + rect.height - visible.bottom));
+  const left = roundCss(Math.max(0, visible.left - rect.left));
+  if (top === 0 && right === 0 && bottom === 0 && left === 0) return '';
+  return `inset(${top}px ${right}px ${bottom}px ${left}px)`;
 }
 
 function validRect(rect: DOMRect): boolean {
