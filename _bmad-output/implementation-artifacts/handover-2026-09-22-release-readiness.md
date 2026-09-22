@@ -3,7 +3,7 @@
 Follows `handover-2026-09-08-f2-and-build-bump.md`. Same branch
 `feat/ui-string-catalogue` / PR #22. Reasoning is decision-log **D43**, its
 same-day addendum, **D44** and **D45** (the two freee.co.jp fixes found during
-the pass). The owner tests this afternoon, then wants Simul published on
+the pass), and **D46** (page text and image text translate together). The owner tests this afternoon, then wants Simul published on
 GitHub for anyone to use. Their answers today: the release is **0.5.0**; merge
 and release happen **after** their Chrome pass; the version inside the
 extension is updated now; the build goes to the NAS so they can load it on
@@ -29,10 +29,14 @@ their computer; and the public voice is set (below).
   links keep their text. Test added. The README's image-text bullet now
   explains the OCR toggle and that images inside links or buttons need the
   Standard scope.
-- **Version is 0.5.0, identity `0.5.0 beta v.20260922.4`.** `package.json`,
+- **Page text and image text translate together (D46).** Enabled image
+  translation now counts as intent for the page text, and switching OCR on for
+  a mirrored page asks for the page text at once; the owner ruled that both
+  must run together. Tests added; README steps 4 and 6 reworded.
+- **Version is 0.5.0, identity `0.5.0 beta v.20260922.5`.** `package.json`,
   `package-lock.json`, `wxt.config.ts`, README, `THIRD_PARTY_NOTICES.md`, the
   two identity tests, and `dist/chrome-unpacked` all agree. The extension card
-  shows `0.5.0`; Simul's settings show `Build 0.5.0 beta v.20260922.4`. What is
+  shows `0.5.0`; Simul's settings show `Build 0.5.0 beta v.20260922.5`. What is
   tested is byte-for-byte what will be released.
 - **README rewritten for a public reader** (top sections only; the reference
   sections from "How it works" down are unchanged). Voice per the owner: one
@@ -56,7 +60,7 @@ this doc and the decision log.
 
 ## Gate
 
-`npm run check` is green at the head commit: typecheck clean, **1,399 tests
+`npm run check` is green at the head commit: typecheck clean, **1,403 tests
 pass, 1 skipped** (the Chrome-fixture test), `dist/chrome-unpacked` re-synced
 and byte-verified. No CI by decision (D32); run locally with the pinned
 toolchain (`export PATH=$HOME/.nvm/versions/node/v24.18.0/bin:$PATH`, Node
@@ -68,9 +72,9 @@ toolchain (`export PATH=$HOME/.nvm/versions/node/v24.18.0/bin:$PATH`, Node
 | --- | --- |
 | Repository | Public, MIT, description and topics set, issues on. Private vulnerability reporting, secret scanning and push protection are on. |
 | Dependabot | Security updates on. No open alerts (the four earlier ones are fixed) and no open Dependabot PRs. |
-| PR #22 | Open, mergeable, merge state clean. Commits: D40, D41, D41 docs, D42, D43, D43 addendum (0.5.0 + README), D44 and D45 (freee fixes). No review checks configured. |
+| PR #22 | Open, mergeable, merge state clean. Commits: D40, D41, D41 docs, D42, D43, D43 addendum (0.5.0 + README), D44 and D45 (freee fixes), D46 (OCR carries page translation). No review checks configured. |
 | `main` | `eb09813`: everything through D39; its `dist/chrome-unpacked` still says `0.4.0 beta v.20260905.1`. |
-| GitHub release | `v0.4.0` pre-release (2026-09-05) with the `v.20260905.1` zip. `main` is 48 commits past that tag and PR #22 adds eight more. Until 0.5.0 is released, the Releases page serves an older build than a clone of the branch. |
+| GitHub release | `v0.4.0` pre-release (2026-09-05) with the `v.20260905.1` zip. `main` is 48 commits past that tag and PR #22 adds nine more. Until 0.5.0 is released, the Releases page serves an older build than a clone of the branch. |
 | NAS | `Dev/simul/` on the owner's NAS (the same rsync daemon another project's tooling uses). It held a July checkout (build `0.3.2 beta v.20260725.15`, `.git` on `main`, `node_modules`, `.github`, the old hackathon disclosure doc). The committed tree is now mirrored over it with `--delete` for tracked content; `.git`, `node_modules`, `.output`, `.wxt` and `@eaDir` were excluded and therefore left as they were. Load `Dev/simul/dist/chrome-unpacked`. That folder's stale `.git` no longer matches its working tree; it is a copy, not a checkout to commit from. |
 | Icons | Still generated placeholders (owner's choice, D32). |
 
@@ -79,7 +83,7 @@ toolchain (`export PATH=$HOME/.nvm/versions/node/v24.18.0/bin:$PATH`, Node
 Load `dist/chrome-unpacked` from the NAS copy or from a pull of
 `feat/ui-string-catalogue`. Reload the extension card, reload the source tab,
 reopen the companion. The card must show `0.5.0` and Simul's settings
-`Build 0.5.0 beta v.20260922.4`; anything else means the old folder is still
+`Build 0.5.0 beta v.20260922.5`; anything else means the old folder is still
 loaded.
 
 The owed list, accumulated since 2026-09-06, all of it needing a browser:
@@ -107,9 +111,11 @@ The owed list, accumulated since 2026-09-06, all of it needing a browser:
    mirror no longer shows the sign-up modal's Google and mail icons at the top,
    and that the footer product links under each "製品" heading carry their
    text; the page should look like the tab, with the 2.7 MB global stylesheet
-   fetched by the replica. Still open there: the top carousel's images (see
-   D45). For image text, switch the readable-content scope to Standard and turn
-   **OCR** on; the banners on this page all sit inside links or buttons.
+   fetched by the replica. The carousel images resolved with the `.4` build.
+   For image text, switch the readable-content scope to Standard and turn
+   **OCR** on; the banners on this page all sit inside links or buttons, and
+   with OCR on the page text translates without a separate Translate click
+   (D46).
 4. **Replica proofs (D37–D39):** a page with a slider or spinbutton (values
    travel only under the personal-values read scope), an `aria-labelledby` /
    `aria-describedby` control, and a `progressbar` or `meter`.
@@ -117,7 +123,7 @@ The owed list, accumulated since 2026-09-06, all of it needing a browser:
 ## Publish runbook — after the test passes
 
 The publish commit is already on the branch (0.5.0, identity
-`0.5.0 beta v.20260922.4`), so what remains mirrors the 0.4.0 publish (D32): a
+`0.5.0 beta v.20260922.5`), so what remains mirrors the 0.4.0 publish (D32): a
 rebase merge so `main` stays linear, an annotated tag at the merge head, and a
 GitHub pre-release carrying a zip of the committed `dist/chrome-unpacked`.
 If anything else ships before the merge, bump the suffix to `.4` and re-sync
@@ -132,13 +138,13 @@ gh pr merge 22 --rebase --delete-branch
 git checkout main && git pull --ff-only
 
 # 2. Tag the merge head
-git tag -a v0.5.0 -m "Simul 0.5.0 beta (v.20260922.4)"
+git tag -a v0.5.0 -m "Simul 0.5.0 beta (v.20260922.5)"
 git push origin v0.5.0
 
 # 3. Zip the committed artifact and create the pre-release
 (cd dist && zip -r ../simul-0.5.0-chrome-unpacked.zip chrome-unpacked)   # ~31 MB, *.zip is ignored
 gh release create v0.5.0 simul-0.5.0-chrome-unpacked.zip \
-  --prerelease --title "Simul 0.5.0 beta (v.20260922.4)" \
+  --prerelease --title "Simul 0.5.0 beta (v.20260922.5)" \
   --notes-file _bmad-output/implementation-artifacts/release-notes-0.5.0.md
 rm simul-0.5.0-chrome-unpacked.zip
 
@@ -146,7 +152,7 @@ rm simul-0.5.0-chrome-unpacked.zip
 gh release view v0.5.0
 ```
 
-Then log it as D46 (merge SHA, tag, release URL, gate numbers) and update the
+Then log it as D47 (merge SHA, tag, release URL, gate numbers) and update the
 state memory. The README's "latest release" link starts pointing at the right
 zip the moment the release exists.
 
@@ -163,18 +169,21 @@ it so others can use it too.
 `simul-0.5.0-chrome-unpacked.zip`, unzip it, open `chrome://extensions`, turn
 on Developer mode, choose **Load unpacked**, and select the `chrome-unpacked`
 folder. Then open any normal web page and select the Simul icon. Simul's
-settings show `Build 0.5.0 beta v.20260922.4`. This is an unpacked beta, so
+settings show `Build 0.5.0 beta v.20260922.5`. This is an unpacked beta, so
 Chrome does not update it automatically. The zip is a byte-for-byte copy of the
 committed `dist/chrome-unpacked` at the tagged commit, which `npm run check`
 verifies against a fresh build.
 
-What changed since 0.4.0 (decision log D31–D45):
+What changed since 0.4.0 (decision log D31–D46):
 
 - **Companion UI in your language.** Every label, title, hint, placeholder,
   status and progress line follows the To language once that pair is
   installed, switches as one set with no English flash, and re-localizes on a
   pure language switch. Placeholder frames keep counts and language names in
   the target language's word order.
+- **OCR On translates the page too.** With image translation on, the page
+  text and the image text are translated together; no separate Translate
+  click is needed for the page.
 - **Hidden modals stay hidden, visible accordions stay readable.** A page
   that hides a modal with a `<style>` placed inside the modal now mirrors
   correctly, and content a script declares hidden but the stylesheet paints

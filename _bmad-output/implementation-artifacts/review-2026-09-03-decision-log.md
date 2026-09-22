@@ -1630,3 +1630,45 @@ not show, and asked whether text inside images is still translated.
 Build identity `0.5.0 beta v.20260922.4`; `dist/chrome-unpacked` re-synced
 (manifest and the page bridge bundle). Gate: `npm run check` green,
 **1,399 tests pass, 1 skipped** (+1). NAS `Dev/simul/` re-mirrored.
+
+### D46. Page text and image text translate together (2026-09-22)
+
+Same branch `feat/ui-string-catalogue` / PR #22, follow-up on `0c42f47`. After
+the `.4` build the owner confirmed the footer links carry their text (D45) and
+that the carousel images had loaded, then reported that "regular text is not
+being translated now, only the OCR text", with no status line they noticed;
+pressing **Translate page** fixed it.
+
+- **Cause (by design until now).** Page text translates only under a saved
+  automatic-translation mode for the site ("Off / This site / All sites") or
+  after a **Translate page** press, and that press is remembered in memory
+  only. Reloading the extension for the new build gave a fresh panel, so the
+  rebuilt mirror sat at "Ready to translate … on-device" in the quiet success
+  tone. Image translation, once enabled, is a saved setting that runs on the
+  current mirror by itself (`enabled` depended only on the OCR preference, the
+  view mode, methods and access), so translated image overlays appeared on an
+  untranslated page. The intent flag itself survives same-page rebuilds
+  (`retainTranslationIntent` for manual, desynchronized and preference
+  captures), so this was not a reset bug.
+- **Owner ruling.** "We need both to run at the same time." Enabled image
+  translation now counts as intent for the page text:
+  `replicaViewTranslationAction` takes `imageTranslationEnabled` and treats it
+  like a retained manual request (source-only mode still skips; a downloadable
+  pack still needs the one Translate click that prepares it);
+  `TranslationDriver.maybeTranslateAutomatically` passes the preference; and
+  `PermissionFlows.changeImageTranslationEnabled` asks for the page text right
+  when OCR is switched on for a mirrored page, through the same
+  `requestAutomaticTranslation` hook the automatic-scope flow uses. Switching
+  OCR off leaves the page translated. Tests: lifecycle (image intent in
+  translated, downloadable and source-only cases), driver (translates with the
+  preference on and no click), permission flows (asks on enable, not on
+  disable, not without a replica).
+- **README.** Step 4 no longer calls the Translate press conditional; step 6
+  and the "Image text" section say page text and image text translate
+  together.
+
+Build identity `0.5.0 beta v.20260922.5`; `dist/chrome-unpacked` re-synced
+(manifest, `sidepanel.html` and the side-panel chunk). Gate: `npm run check`
+green, **1,403 tests pass, 1 skipped** (+4). NAS `Dev/simul/` re-mirrored.
+Remaining from the owner's pass: nothing open; the carousel images resolved
+with the `.4` build.
