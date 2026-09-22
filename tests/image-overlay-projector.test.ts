@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   IMAGE_OVERLAY_LAYER_ATTRIBUTE,
+  IMAGE_OVERLAY_MOTION_FRAMES,
   MAX_IMAGE_OVERLAY_RETAINED_WEIGHT,
   ImageOverlayProjector,
   captionBandBox,
@@ -467,6 +468,191 @@ describe('ImageOverlayProjector', () => {
     expect(root.style.left).toBe('35px');
     expect(root.style.top).toBe('45px');
     expect(fittingReads).toBe(0);
+  });
+
+  describe('carousel geometry (D52)', () => {
+    type Box = { left: number; top: number; width: number; height: number };
+    const rectOf = (box: Box) => ({
+      ...box,
+      right: box.left + box.width,
+      bottom: box.top + box.height,
+      x: box.left,
+      y: box.top,
+      toJSON: () => ({}),
+    });
+
+    /**
+     * A 300×200 carousel window (`overflow: hidden`) around a moving track
+     * that holds one 300×200 slide image, like Swiper's container, wrapper
+     * and slide.
+     */
+    function carousel() {
+      const { document, window } = parseHTML(`<html><body>
+        <div class="window"><div class="track"><img></div></div>
+        <aside class="elsewhere"></aside>
+      </body></html>`);
+      const windowElement = document.querySelector('.window') as unknown as HTMLElement;
+      const track = document.querySelector('.track') as unknown as HTMLElement;
+      const elsewhere = document.querySelector('.elsewhere') as unknown as HTMLElement;
+      const image = document.querySelector('img') as unknown as HTMLImageElement;
+      const imageBox: Box = { left: 0, top: 0, width: 300, height: 200 };
+      image.getBoundingClientRect = () => rectOf(imageBox);
+      windowElement.getBoundingClientRect = () =>
+        rectOf({ left: 0, top: 0, width: 300, height: 200 });
+      let painted = true;
+      Object.assign(image, { checkVisibility: () => painted });
+      Object.assign(window, {
+        getComputedStyle: (element: Element) => ({
+          position: 'static',
+          overflowX: element === windowElement ? 'hidden' : 'visible',
+          overflowY: element === windowElement ? 'hidden' : 'visible',
+          contain: 'none',
+          transform: 'none',
+          filter: 'none',
+        }),
+      });
+      const frames: Array<() => void> = [];
+      const projector = new ImageOverlayProjector({
+        resolveAnchor: () => ({
+          document: sourceDocument,
+          replayLease: 9,
+          image,
+          iframe: { contentDocument: document } as HTMLIFrameElement,
+        }),
+        isCurrent: () => true,
+        scheduleFrame: (callback) => {
+          frames.push(callback);
+          return frames.length;
+        },
+        cancelFrame: () => undefined,
+        createResizeObserver: () => undefined,
+      });
+      projector.beginPair(1, 'en>ja');
+      expect(projector.project(projection({
+        renderedWidthCss: 300,
+        renderedHeightCss: 200,
+        cropOffsetXCss: 0,
+        cropOffsetYCss: 0,
+        cropWidthCss: 300,
+        cropHeightCss: 200,
+      }))).toBe(true);
+      const root = document.querySelector(
+        '[data-simul-image-overlay="7"]',
+      ) as HTMLElement;
+      const runFrames = (limit = 1_000) => {
+        let ran = 0;
+        while (frames.length > 0 && ran < limit) {
+          frames.shift()?.();
+          ran += 1;
+        }
+        return ran;
+      };
+      const motion = (target: HTMLElement, type: string) =>
+        target.dispatchEvent(new window.Event(type, { bubbles: true }));
+      return {
+        window,
+        track,
+        elsewhere,
+        imageBox,
+        root,
+        frames,
+        projector,
+        runFrames,
+        motion,
+        setPainted: (value: boolean) => {
+          painted = value;
+        },
+      };
+    }
+
+    it('clips an overlay to the part of its image the carousel window shows', () => {
+      const view = carousel();
+      expect(view.root.hidden).toBe(false);
+      expect(view.root.style.clipPath).toBe('');
+
+      // Halfway through a move: 200px of the slide are still inside the window.
+      view.imageBox.left = -100;
+      view.window.dispatchEvent(new view.window.Event('scroll'));
+      view.runFrames();
+      expect(view.root.hidden).toBe(false);
+      expect(view.root.style.left).toBe('-100px');
+      expect(view.root.style.clipPath).toBe('inset(0px 0px 0px 100px)');
+
+      // The slide has left the window: its caption must not show beside it.
+      view.imageBox.left = 300;
+      view.window.dispatchEvent(new view.window.Event('scroll'));
+      view.runFrames();
+      expect(view.root.hidden).toBe(true);
+
+      view.imageBox.left = 0;
+      view.window.dispatchEvent(new view.window.Event('scroll'));
+      view.runFrames();
+      expect(view.root.hidden).toBe(false);
+      expect(view.root.style.clipPath).toBe('');
+    });
+
+    it('hides an overlay while its image is not painted, as on a faded-out slide', () => {
+      const view = carousel();
+      view.setPainted(false);
+      view.projector.refresh();
+      view.runFrames();
+      expect(view.root.hidden).toBe(true);
+
+      view.setPainted(true);
+      view.projector.refresh();
+      view.runFrames();
+      expect(view.root.hidden).toBe(false);
+    });
+
+    it('follows a slide transition frame by frame and settles when it ends', () => {
+      const view = carousel();
+      view.imageBox.left = 300;
+      view.projector.refresh();
+      view.runFrames();
+      expect(view.root.hidden).toBe(true);
+
+      // The track starts sliding the image in; nothing else re-measures.
+      view.motion(view.track, 'transitionrun');
+      expect(view.frames).toHaveLength(1);
+      view.imageBox.left = 150;
+      view.runFrames(1);
+      expect(view.root.hidden).toBe(false);
+      expect(view.root.style.left).toBe('150px');
+      expect(view.root.style.clipPath).toBe('inset(0px 150px 0px 0px)');
+      expect(view.frames).toHaveLength(1);
+
+      view.imageBox.left = 0;
+      view.runFrames(1);
+      expect(view.root.style.left).toBe('0px');
+      expect(view.root.style.clipPath).toBe('');
+
+      // Following stops on its own, well within the frame budget.
+      expect(view.runFrames()).toBeLessThanOrEqual(IMAGE_OVERLAY_MOTION_FRAMES);
+      expect(view.frames).toHaveLength(0);
+
+      // A motion longer than the budget still settles on its end event.
+      view.imageBox.left = -40;
+      view.motion(view.track, 'transitionend');
+      view.runFrames();
+      expect(view.root.style.left).toBe('-40px');
+      expect(view.frames).toHaveLength(0);
+    });
+
+    it('ignores transitions on elements that do not contain an overlaid image', () => {
+      const view = carousel();
+      view.runFrames();
+      view.motion(view.elsewhere, 'transitionrun');
+      view.motion(view.elsewhere, 'animationstart');
+      expect(view.frames).toHaveLength(0);
+    });
+
+    it('stops listening for motion once the layer is disposed', () => {
+      const view = carousel();
+      view.runFrames();
+      view.projector.dispose();
+      view.motion(view.track, 'transitionrun');
+      expect(view.frames).toHaveLength(0);
+    });
   });
 
   it('evicts the oldest overlays before retained DOM weight exceeds its bound', () => {

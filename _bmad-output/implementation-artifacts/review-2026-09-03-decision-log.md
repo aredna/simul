@@ -1955,3 +1955,50 @@ stay on after setup (fix the docs, not the behaviour).
 Build identity `0.5.0 beta v.20260922.10`; `dist/chrome-unpacked` re-synced
 (side-panel chunk, `sidepanel.html`, manifest). Gate: `npm run check` green,
 **1,416 tests pass, 1 skipped** (+1).
+
+### D52. Image overlays follow the page's clipping, painting and motion (2026-09-22)
+
+Same branch / PR #22, follow-up on D51. Closes the open item from the D50
+addendum ("the third image in the carousel has text that shows up outside of
+the image instead of on top of the image"), findings O1 and O2 of the bug-hunt
+review.
+
+- **Cause (two parts).** The projector draws every overlay in one
+  `position: fixed` layer at the image's `getBoundingClientRect()`, so the
+  page's own clipping never applied: a carousel window's `overflow: hidden`
+  did not cut the overlay, and label captions (D48) exist for slides outside
+  the window because the scan policy pre-scans in the background. Those
+  captions were painted beside the carousel. Second, a slide move plays a
+  300 ms transform transition in the replica and nothing re-measured when it
+  ended (scroll, resize, ResizeObserver and the engine's layout callback do not
+  fire for a transform), so text measured at the start of the move stayed
+  where the incoming slide had been, outside the window. A fade carousel
+  (every slide stacked, all but one at `opacity: 0`) would also have shown
+  every slide's overlay at once.
+- **Change.** `ImageOverlayProjector` now (1) hides an overlay while
+  `checkVisibility({ opacityProperty, visibilityProperty })` reports its image
+  as not painted; (2) clips each overlay root with `clip-path: inset(…)` to the
+  part of the image its clipping ancestors leave visible, walking the
+  containing-block chain (absolute boxes skip non-positioned ancestors, fixed
+  boxes escape all, `body`/root are the viewport's job), and hides it when
+  nothing is left; the ancestor list is cached per entry and re-read when the
+  replica's layout changes (`refresh()`), so scroll frames only read rects;
+  (3) listens for `transitionrun`/`animationstart` on the replay document
+  (capture) and, when the moving element contains an overlaid image (across
+  shadow roots), re-measures every frame for at most
+  `IMAGE_OVERLAY_MOTION_FRAMES` (90) frames, and once more on
+  `transitionend`/`transitioncancel`/`animationend`/`animationcancel`. The
+  listeners are removed with the layer. Option (b) of the addendum
+  (`transition: none` on reconstructed HTML) was not taken: it fixes neither
+  clipping nor fade carousels and changes page fidelity.
+- **Tests.** `tests/image-overlay-projector.test.ts`, "carousel geometry
+  (D52)" (5): partial and full clipping by a 300×200 carousel window and
+  recovery, hiding while unpainted, following a transition frame by frame
+  with a bounded loop and settling on the end event, ignoring motion on
+  unrelated elements, and no listening after dispose. The first three fail on
+  `5d78c73`.
+- **Docs.** `docs/translation-companion.md` (image text) states the rule;
+  `docs/image-translation-research.md` already called the overlays "clipped".
+
+Build identity `0.5.0 beta v.20260922.11`; `dist/chrome-unpacked` re-synced.
+Gate: `npm run check` green, **1,421 tests pass, 1 skipped** (+5).
