@@ -26,6 +26,8 @@ const MIN_IMAGE_OVERLAY_FONT_PX = 3;
 const MAX_IMAGE_OVERLAY_FONT_PX = 32;
 const IMAGE_OVERLAY_LINE_HEIGHT = 1.12;
 const IMAGE_OVERLAY_FIT_STEPS = 7;
+export const CAPTION_BAND_MIN_PX = 20;
+export const CAPTION_BAND_MAX_FRACTION = 0.34;
 
 export interface TranslatedImageRegion {
   readonly text: string;
@@ -327,7 +329,9 @@ export class ImageOverlayProjector {
     projection.regions.forEach((region, index) => {
       const element = regionElements.item(index) as HTMLElement | null;
       if (!element) return;
-      const box = mappedBox(projection, region.boundingBox, scaleX, scaleY);
+      const box = region.placement === 'whole-image'
+        ? captionBandBox(rect.width, rect.height)
+        : mappedBox(projection, region.boundingBox, scaleX, scaleY);
       element.style.left = `${box.x}px`;
       element.style.top = `${box.y}px`;
       element.style.width = `${box.width}px`;
@@ -508,6 +512,28 @@ function validBox(
     positiveFinite(box.height) &&
     box.x + box.width <= bitmapWidth &&
     box.y + box.height <= bitmapHeight;
+}
+
+/**
+ * A label-based result (accessibility text) carries no geometry, so it is
+ * shown as a caption band along the bottom edge of the image rather than as a
+ * box over the whole picture (D48): the image stays visible and the
+ * translation reads as its caption. OCR regions, which do have geometry,
+ * replace it when they arrive.
+ */
+export function captionBandBox(
+  width: number,
+  height: number,
+): ImageBoundingBox {
+  const bandHeight = roundCss(Math.min(
+    height,
+    Math.max(CAPTION_BAND_MIN_PX, height * CAPTION_BAND_MAX_FRACTION),
+  ));
+  return { x: 0, y: roundCss(height - bandHeight), width, height: bandHeight };
+}
+
+function roundCss(value: number): number {
+  return Math.round(value * 100) / 100;
 }
 
 function mappedBox(

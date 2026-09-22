@@ -5,6 +5,7 @@ import {
   IMAGE_OVERLAY_LAYER_ATTRIBUTE,
   MAX_IMAGE_OVERLAY_RETAINED_WEIGHT,
   ImageOverlayProjector,
+  captionBandBox,
   type ImageOverlayProjection,
 } from '../lib/ocr/image-overlay-projector';
 import type { ReplicaImageAnchor } from '../lib/replica/contracts';
@@ -154,6 +155,58 @@ describe('ImageOverlayProjector', () => {
     projector.dispose();
     expect(document.querySelector(`[${IMAGE_OVERLAY_LAYER_ATTRIBUTE}]`)).toBeNull();
     expect(window).toBeDefined();
+  });
+
+  it('shows a label-based translation as a caption band along the bottom edge, not over the whole image (D48)', () => {
+    const { document } = parseHTML('<html><body><main><img></main></body></html>');
+    const image = document.querySelector('img') as unknown as HTMLImageElement;
+    image.getBoundingClientRect = () => ({
+      left: 10, top: 30, width: 200, height: 120,
+      right: 210, bottom: 150, x: 10, y: 30, toJSON: () => ({}),
+    });
+    const projector = new ImageOverlayProjector({
+      resolveAnchor: () => ({
+        document: sourceDocument,
+        replayLease: 9,
+        image,
+        iframe: { contentDocument: document } as HTMLIFrameElement,
+      }),
+      isCurrent: () => true,
+      scheduleFrame: (callback) => {
+        callback();
+        return 1;
+      },
+      cancelFrame: () => undefined,
+      createResizeObserver: () => undefined,
+    });
+    expect(projector.beginPair(1, 'en>ja')).toBe(true);
+    expect(projector.project(projection({
+      methodId: 'accessibility-text',
+      evidenceKind: 'semantic',
+      bitmapWidth: 160,
+      bitmapHeight: 80,
+      // An accessibility label has no geometry: the controller hands the
+      // projector the whole rendered image as its box.
+      regions: [{
+        text: 'For individuals: file your tax return with freee',
+        boundingBox: { x: 0, y: 0, width: 160, height: 80 },
+        placement: 'whole-image',
+      }],
+    }))).toBe(true);
+
+    const root = document.querySelector('[data-simul-image-overlay="7"]') as HTMLElement;
+    const band = root.firstElementChild as HTMLElement;
+    // 34% of the 120px image, pinned to the bottom edge, full width.
+    expect(band.style.left).toBe('0px');
+    expect(band.style.width).toBe('200px');
+    expect(band.style.height).toBe('40.8px');
+    expect(band.style.top).toBe('79.2px');
+    projector.dispose();
+  });
+
+  it('keeps a caption band at least 20px tall on a short image', () => {
+    expect(captionBandBox(300, 40)).toEqual({ x: 0, y: 20, width: 300, height: 20 });
+    expect(captionBandBox(300, 12)).toEqual({ x: 0, y: 0, width: 300, height: 12 });
   });
 
   it('wraps and downscales long Latin and CJK translations inside fixed OCR boxes', () => {

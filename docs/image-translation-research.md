@@ -10,7 +10,8 @@ All image-reading methods share one persisted priority list:
 
 1. **Accessibility text** reads a direct image `aria-label` or `alt` value after
    read-scope, visibility, decoration, credential, and policy checks. It needs
-   no screenshot and projects one inert whole-image label.
+   no screenshot and projects one inert caption band along the bottom edge of
+   the image, so the picture stays visible.
 2. **Chrome TextDetector** uses the platform API only when the installed Chrome
    build exposes it. Some platforms return geometry without authoritative text;
    that evidence may fall through to another method.
