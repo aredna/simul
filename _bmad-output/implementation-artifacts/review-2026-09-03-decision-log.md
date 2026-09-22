@@ -1767,3 +1767,10 @@ overlay they see is "one box covering the whole image with all text".
 Build identity `0.5.0 beta v.20260922.7`; `dist/chrome-unpacked` re-synced.
 Gate: `npm run check` green, **1,405 tests pass, 1 skipped** (+2). NAS
 `Dev/simul/` re-mirrored.
+
+**D48 addendum (session close).** With the `.7` build the owner still saw the
+carousel image "shrink or vanish at times"; the one-line readout sent in the
+question had a syntax error, so nothing was measured. The owner asked to close
+the session and continue in a new one. `handover-2026-09-22-session-close.md`
+records the state, the parsed readout to run first, what is already ruled
+out, and the publish step (to be logged as D49).

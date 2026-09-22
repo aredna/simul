@@ -231,7 +231,8 @@ skips without a browser.
 ## Still owed after the publish
 
 - Open from the Chrome pass: only the unconfirmed "resized very small after a
-  move" observation on the freee.co.jp carousel (D48). The final go for the
+  move" observation on the freee.co.jp carousel (D48); the readout to run
+  first is in `handover-2026-09-22-session-close.md`. The final go for the
   publish is otherwise the only thing left.
 - F6 (memoizing `Intl.DisplayNames` per target language) stays declined (D41).
 - `deferred-work.md` still holds the 28 research-sized entries listed in
