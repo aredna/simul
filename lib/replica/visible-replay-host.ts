@@ -97,6 +97,8 @@ export class VisibleReplayHost implements ReplayPresentationHost {
   #nestedOwnerKey: number | undefined;
   #nestedOwnerOrdinal: number | undefined;
   #hasSourceScroll = false;
+  /** The last source position the replica followed, to tell real moves apart. */
+  #lastFollowedScroll: VisibleReplayScroll | undefined;
   #disposed = false;
   #resizeObserver: ResizeObserver | undefined;
 
@@ -199,7 +201,21 @@ export class VisibleReplayHost implements ReplayPresentationHost {
     this.#projectScroll(committed);
   }
 
-  followSourceScroll(scroll: VisibleReplayScroll): void {
+  /**
+   * Moves the replica to the source's reading position when the source moved.
+   * The source re-reports an unchanged position after every layout change
+   * (an image load, a font, a resize) and with every checkpoint; following
+   * those would throw away the reader's own scrolling in the replica, so a
+   * repeat is ignored unless `force` asks to re-align (following turned on).
+   */
+  followSourceScroll(scroll: VisibleReplayScroll, force = false): void {
+    const lastFollowed = this.#lastFollowedScroll;
+    this.#lastFollowedScroll = scroll;
+    if (
+      !force &&
+      lastFollowed &&
+      sameSourceScrollPosition(lastFollowed, scroll)
+    ) return;
     const previousTarget = this.#sourceScrollTarget;
     const nextNestedOwnerKey = scroll.scrollTarget === 'nested' &&
         Number.isSafeInteger(scroll.nestedOwnerKey) &&
@@ -295,6 +311,7 @@ export class VisibleReplayHost implements ReplayPresentationHost {
     this.#sourceDocumentMaxScrollX = 0;
     this.#sourceDocumentMaxScrollY = 0;
     this.#hasSourceScroll = false;
+    this.#lastFollowedScroll = undefined;
     if (this.#committed) this.#committed.nestedScroller = undefined;
   }
 
@@ -803,6 +820,20 @@ function computeMirrorScale(
     sourceWidth <= 0
   ) return 1;
   return Math.min(1, availableWidth / sourceWidth);
+}
+
+/** Same scroller, same offsets; the scrollable maxima may differ. */
+function sameSourceScrollPosition(
+  left: VisibleReplayScroll,
+  right: VisibleReplayScroll,
+): boolean {
+  return (left.scrollTarget ?? 'document') === (right.scrollTarget ?? 'document') &&
+    left.nestedOwnerKey === right.nestedOwnerKey &&
+    left.nestedOwnerOrdinal === right.nestedOwnerOrdinal &&
+    left.scrollX === right.scrollX &&
+    left.scrollY === right.scrollY &&
+    left.documentScrollX === right.documentScrollX &&
+    left.documentScrollY === right.documentScrollY;
 }
 
 function maximumSourceScrollX(candidate: CandidateLease): number {

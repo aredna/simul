@@ -881,7 +881,7 @@ popoutTabModeSelect.addEventListener('change', () => {
 syncScrollInput.addEventListener('change', () => {
   void preferenceClient.commitView({ syncScroll: syncScrollInput.checked });
   if (state.preferences.syncScroll && state.lastSourceScroll) {
-    visibleReplayHost.followSourceScroll(state.lastSourceScroll);
+    visibleReplayHost.followSourceScroll(state.lastSourceScroll, true);
   }
 });
 

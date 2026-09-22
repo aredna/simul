@@ -140,6 +140,44 @@ describe('visible isolated replay host', () => {
     expect(iframe.style.width).toBe('1200px');
   });
 
+  it('keeps the reader scroll when the source re-reports an unchanged position', () => {
+    const fixture = createFixture();
+    const candidate = fixture.host.createCandidate(dimensions());
+    const scrollTo = vi.fn();
+    const iframe = createProtectedIframe(fixture.document, scrollTo);
+    candidate.mount.append(iframe);
+    candidate.commit(iframe, { width: 1_400, height: 2_500 });
+    const scroller = requireElement<HTMLElement>(fixture.preview, '.replica-replay-scroll');
+    const sourceAtTop = { scrollTarget: 'document' as const, scrollX: 0, scrollY: 0, maxScrollY: 1_800 };
+    fixture.host.followSourceScroll(sourceAtTop);
+
+    scroller.scrollTop = 900;
+    scroller.dispatchEvent(new fixture.window.Event('scroll'));
+    // An image load or resize in the source posts the same position again,
+    // possibly with a new maximum; the replica must stay where the reader is.
+    fixture.host.followSourceScroll({ ...sourceAtTop, maxScrollY: 2_400 });
+    fixture.host.refreshExtent(iframe, { width: 1_400, height: 3_100 });
+    expect(scroller.scrollTop).toBe(900);
+    expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, top: 900, behavior: 'auto' });
+
+    // A real source move still wins.
+    fixture.host.followSourceScroll({ ...sourceAtTop, scrollY: 300, maxScrollY: 2_400 });
+    expect(scroller.scrollTop).toBe(300);
+
+    // Turning following back on re-aligns even without a new source position.
+    scroller.scrollTop = 1_200;
+    scroller.dispatchEvent(new fixture.window.Event('scroll'));
+    fixture.host.followSourceScroll({ ...sourceAtTop, scrollY: 300, maxScrollY: 2_400 }, true);
+    expect(scroller.scrollTop).toBe(300);
+
+    // A new page starts following afresh, even at the same offsets.
+    scroller.scrollTop = 700;
+    scroller.dispatchEvent(new fixture.window.Event('scroll'));
+    fixture.host.resetSourceScroll();
+    fixture.host.followSourceScroll({ ...sourceAtTop, scrollY: 300, maxScrollY: 2_400 });
+    expect(scroller.scrollTop).toBe(300);
+  });
+
   it('retains source scroll received before a slow replica commits and resets it between pages', () => {
     const fixture = createFixture();
     fixture.host.followSourceScroll({
