@@ -31,6 +31,17 @@ Rulings:
 Still open: L2–L9, T1–T3, O3, P3–P6, the process items, and the
 simplification proposal at the end of this file.
 
+Owner rulings on the proposal (D54 addendum), queued until after the bug hunt:
+- The default read scope becomes **Full visible**, and the user can reduce it.
+  This replaces R10/R11's forced question. The number of profiles may shrink
+  later.
+- **Keep most toolbar buttons.** The owner may remove some after going
+  through them one by one, so R2–R6 wait.
+- **Tab follow:** keep the toggle, make `active` the default, and find two
+  clearer words than "Active"/"Current". Candidates: Follow/Pinned, Any
+  tab/This tab, Switches/Stays.
+- **Mirror size:** the default becomes **1:1**.
+
 ## Summary
 
 | ID | Sev | Area | Finding | Evidence |

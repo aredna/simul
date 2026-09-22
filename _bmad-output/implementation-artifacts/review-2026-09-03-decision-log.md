@@ -2095,3 +2095,31 @@ replica. Password, OTP and card values were never affected.
 Build identity `0.5.0 beta v.20260922.13`; `dist/chrome-unpacked` re-synced
 (`page-mirror.js`, manifest). Gate: `npm run check` green, **1,427 tests pass,
 1 skipped** (+2).
+
+**D54 addendum (owner rulings, queued).** Asked whether to start the
+simplification proposal, the owner chose to test the `.13` build first; no code
+changed. Rulings recorded for the batch after the bug hunt:
+
+- **Read scope.** "We may reduce the number of choices for what can be read.
+  Default will be full visible, but let the user reduce it." The default
+  becomes the Full visible profile (all six switches: control labels, control
+  images, collapsed content, visible form values, personal-data fields and
+  editable text; passwords, one-time codes and card data stay blocked by the
+  privacy boundary) instead of Page-only until a mandatory setup answer. The
+  user can narrow it in Settings; the number of profiles may shrink later.
+  Implementation must also cover reset (which today returns to Page-only and
+  reopens the setup dialog), the README privacy text, and the setup dialog
+  (R10/R11 in the review become: no forced question).
+- **Toolbar.** Keep most toolbar buttons ("The new bar is very useful"); the
+  owner may remove some after going through them one by one. The duplicate-
+  control removals R2–R6 wait for that review.
+- **Tab follow.** Keep the toggle; the default becomes `active` (follow the
+  active browser tab) instead of `locked`. The labels "Active"/"Current" both
+  read as "follows me"; two new words are wanted. Candidates for the owner:
+  "Follow"/"Pinned", "Any tab"/"This tab", "Switches"/"Stays". Following the
+  active tab still needs access to each tab's site, as today.
+- **Mirror size.** The default becomes 1:1 (`displayMode: 'actual'`) instead
+  of Fit.
+
+Stored preferences keep their saved values; the new defaults apply to fresh
+installs and after a reset.

@@ -51,10 +51,15 @@ D51–D54.
    (status-line re-localization, language names, error details, guidance
    strings, placeholders, a11y lang), T1–T3, O3, P3–P6, and the process items
    (single-source build identity, default-state tests, README step 4).
-3. **Simplification proposal** (end of the review file, R1–R13): the owner
-   asked for it; first batch R1+R7, R2–R6, R10+R9, R8. R11 (auto-commit
-   Standard read scope instead of the setup dialog) and R12 (automatic
-   translation made redundant by OCR-on) need owner rulings.
+3. **Queued after the bug hunt (owner rulings, D54 addendum):**
+   - default read scope Full visible, and the user can reduce it (no forced
+     setup question);
+   - tab follow defaults to `active`, with two clearer words than
+     Active/Current (candidates in D54 addendum);
+   - mirror size defaults to 1:1;
+   - most toolbar buttons stay (the owner reviews them one by one). The rest of
+     the simplification proposal (R1, R7, R8, R9, R12, R13) is still a
+     proposal.
 4. **Publish 0.5.0** — only when the owner says it is ready, in their own
    words; do not ask. Runbook and release-notes draft:
    `handover-2026-09-22-release-readiness.md`. Log it as **D55**. The
