@@ -1526,3 +1526,25 @@ Publish state and the runbook for after the browser pass are in
 `handover-2026-09-22-release-readiness.md`. Still owed: the manual Chrome pass
 (unchanged list, now including the method-toggle aria-labels), then the
 numeric version bump, PR #22 merge, tag and GitHub release.
+
+**D43 addendum (same day, owner answers).** The owner chose **0.5.0** for the
+release and asked for the version inside the extension to be updated now, so
+the numeric bump is no longer a post-test publish step: `package.json` /
+`package-lock.json` are 0.5.0 and the identity is **`0.5.0 beta v.20260922.2`**
+(second shipped build today), with README, `THIRD_PARTY_NOTICES.md` and the two
+identity tests in agreement and `dist/chrome-unpacked` re-synced. What the owner
+tests this afternoon is byte-for-byte what the release will carry; the
+remaining publish steps are merge, tag and release. The owner also set the
+public voice: mention only that Simul started as a quick build for the OpenAI
+Build Week hackathon as something we would use ourselves and is now shared for
+others; say plainly that translation is fully on-device with nothing remote;
+give the install steps, that it is a Chrome extension, and the requirements,
+all as simply as possible. The README's top (intro, "What you need",
+"Install", "Use Simul") was rewritten to that brief; the reference sections
+below it are unchanged. The owner asked for everything to be pushed to the
+NAS so they can load it on their computer: the committed tree was mirrored
+over the stale July copy at `Dev/simul/` on the rsync daemon another project's
+tooling uses (the owner's NAS), protecting that copy's
+`.git`, `node_modules`, `.output`, `.wxt` and `@eaDir`; the loadable folder is
+`Dev/simul/dist/chrome-unpacked`. Merge and release remain gated on the
+owner's Chrome pass, as they chose.
