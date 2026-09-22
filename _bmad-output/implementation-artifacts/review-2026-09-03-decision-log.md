@@ -2123,3 +2123,66 @@ changed. Rulings recorded for the batch after the bug hunt:
 
 Stored preferences keep their saved values; the new defaults apply to fresh
 installs and after a reset.
+
+### D55. The mirror follows the source only when the source moves (2026-09-22)
+
+Same branch / PR #22, first owner report from the `.13` bug hunt: "Our page in
+the app is auto rescrolling every time something updates or changes."
+
+- **Cause.** The source session re-posts its scroll position on every layout
+  change (image load or error, font load, `html`/`body` resize, hash change) and
+  after each checkpoint, even when the reader has not scrolled the page. The
+  side panel handed every packet to `VisibleReplayHost.followSourceScroll`,
+  which re-applied the source offsets and threw away the reader's own scrolling
+  in the mirror. Reproduced in Chrome for Testing 153 with the unmodified
+  `.13` build: scroll the mirror to 1600 px with the source at 0, then let the
+  page load an image or grow; about a second later the mirror jumps back to 0.
+  A stack trace on freee.co.jp showed the same path (`onSourceScroll` →
+  `followSourceScroll`) 400 ms after the wheel gesture.
+- **Not new in this PR.** The same test snaps back on 0.3.3 (`9c4c6c6`),
+  0.4.0, `main` (`eb09813`) and `.9`; text-only page updates never triggered
+  it. It likely became more visible with busier pages and more mirror reading.
+- **Change.** `followSourceScroll` remembers the last position it followed and
+  ignores a packet with the same scroller and offsets (maxima may differ). A
+  real source move still wins, `resetSourceScroll` (new page, navigation)
+  forgets the memory, and turning "Follow source scrolling" back on passes
+  `force` to re-align. Rebuilt replicas keep the reader's position as before.
+- **Verified in Chrome.** With the fix the mirror stays at 1600 px through image
+  loads and page growth, and on freee.co.jp through 30 s of layout changes and
+  six replica rebuilds (each new scroller restored to 1600).
+- **Test.** `visible-replay-host`: a repeated position (with a new maximum and an
+  extent refresh) keeps the reader scroll, a real move follows, `force`
+  re-aligns, and a reset follows afresh. Fails on `b1dc116`.
+- **Docs.** `docs/translation-companion.md` states the rule.
+
+**Image text report investigated, no code change.** Second owner report: "In
+the current version, images are no longer getting their text on top of them",
+"most images", "a few images seem to be working". Findings:
+
+- The D52 overlay checks (clipping ancestors, `checkVisibility` paint test) did
+  not hide an overlay on any visible image: 0 false hides over six live sites
+  (freee, Yahoo! JAPAN, ITmedia, GIGAZINE, note, Rakuten) measured against
+  `IntersectionObserver`, and none inside the real replica of GIGAZINE.
+- End to end (Tesseract, stand-in translator), `.10` and `.13` gave identical
+  results on a 14-structure page (inline and block links, buttons, clipping
+  boxes, fades, transforms, `contain: paint`, `content-visibility`, picture,
+  lazy, alt text, a carousel), with and without an autoplaying carousel.
+  Yahoo! JAPAN, GIGAZINE and Rakuten matched build for build; freee.co.jp,
+  whose carousel keeps moving, varied run to run (images with text over four
+  scroll positions: 7 and 12 on `.10`, 8 and 7 on `.13`), far from a "most
+  images" gap. Replica rebuild frequency on freee is
+  the same in `.10` and `.13` (about one every 5 s), and overlays survive them.
+- The owner's Image diagnostics log shows captures deferred with
+  `reason=hidden` and images skipped as `visibility=background`, with the final
+  image cache empty: the pixels never came in, only alt-text captions did.
+  Pixel OCR reads a screenshot of the source tab, so an image that is not fully
+  on screen and unclipped there cannot be read, whatever the mirror shows. In
+  Fit mode a side panel shows about three source screens at once, and the
+  owner also scrolls the mirror, so most images seen in the mirror are off
+  screen in the tab. This limit dates from the first OCR commit (`654d8e9`).
+- Open: confirm with the owner whether the missing text returns when the source
+  tab itself shows the image; if the owner wants mirror-only images read, that
+  needs a different pixel source (a ruling, not a bug fix).
+
+Build identity `0.5.0 beta v.20260922.14`; `dist/chrome-unpacked` re-synced.
+Publishing 0.5.0 moves to **D56**.

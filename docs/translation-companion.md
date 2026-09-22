@@ -37,6 +37,12 @@ offsets for faithful document scroll and proportional offsets when adaptive
 translations or nested layouts change the available range. No mirror
 interaction is sent back to the website.
 
+The mirror moves only when the source position actually changes. The source
+re-reports its unchanged position after every layout change (an image load, a
+font, a resize) and with each checkpoint; those repeats leave the reader's own
+scrolling in the mirror where it is. Turning scroll following back on
+re-aligns the mirror with the source.
+
 This retains direct document coordinates together with event-qualified
 nested-scroll support in the sole isolated transport.
 
