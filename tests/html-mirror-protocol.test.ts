@@ -22,6 +22,7 @@ import {
   isRepresentableTagName,
   type HtmlMirrorDocumentGraph,
   type HtmlMirrorElementNode,
+  type HtmlMirrorNode,
   readHtmlMirrorNode,
   sanitizeCss,
   sanitizeSourceChildren,
@@ -1336,6 +1337,62 @@ describe('isolated HTML sanitizer and protocol', () => {
     expect(styleWork.exhausted).toBe(true);
     expect(representability.capacityOmissionCount).toBe(1);
     expect(representability.replicaRequestCapableResourceCount).toBe(0);
+  });
+
+  it('keeps stylesheet text inside a hidden region while withholding its page text', () => {
+    // A modal that carries its own <style> inside itself is hidden by that very
+    // CSS. Withholding the region's page text must not also withhold the CSS,
+    // or the replica shows the modal that the source page hides.
+    // Compact markup: every text node in the fixture is deliberate, so the
+    // redaction count below is exact.
+    const { document, window } = parseHTML(
+      '<!doctype html><html><head></head><body>' +
+      '<div id="modal" hidden><style id="modal-style">.modal{display:none;position:fixed}</style><p id="modal-text">hidden modal text</p></div>' +
+      '<div id="announced" aria-hidden="true"><style id="announced-style">.announced{visibility:hidden}</style><span>announced text</span></div>' +
+      '<div id="editable" role="textbox"><style id="editable-style">.editable{color:red}</style>private editable text</div>' +
+      '</body></html>',
+    );
+    Object.defineProperty(document, 'baseURI', {
+      configurable: true,
+      value: 'https://example.test/app/',
+    });
+    const representability = createHtmlMirrorRepresentabilityCollector();
+    const graph = sanitizeSourceDocument(
+      document,
+      window as unknown as Window,
+      new WeakNodeIdRegistry(),
+      representability,
+      'passive',
+    );
+    expect(graph).toBeDefined();
+    const styleTexts = new Map<string, string>();
+    const pageTexts: string[] = [];
+    const visit = (node: HtmlMirrorNode): void => {
+      if (node.kind !== 'element') return;
+      const id = node.attributes.find(([name]) => name === 'id')?.[1];
+      for (const child of node.children) {
+        if (child.kind === 'text') {
+          if (node.tagName === 'style' && id) styleTexts.set(id, child.text);
+          else if (child.text.trim()) pageTexts.push(child.text.trim());
+        }
+        visit(child);
+      }
+    };
+    visit(graph!.root);
+
+    // Hidden and aria-hidden regions keep their CSS; the region's page text is withheld.
+    expect(styleTexts.get('modal-style')).toBe('.modal{display:none;position:fixed}');
+    expect(styleTexts.get('announced-style')).toBe('.announced{visibility:hidden}');
+    expect(pageTexts).not.toContain('hidden modal text');
+    expect(pageTexts).not.toContain('announced text');
+    // A privacy boundary still withholds stylesheet text along with the page text.
+    expect(styleTexts.get('editable-style')).toBe('');
+    expect(pageTexts).not.toContain('private editable text');
+    // Redactions count only withheld page text: the two hidden page texts and
+    // the private page text. The kept stylesheet texts are not redactions, and
+    // the withheld private stylesheet text reports through the throwaway
+    // collector a style element with resolved CSSOM text uses for its child.
+    expect(representability.privateTextRedactionCount).toBe(3);
   });
 
   it('deep-clones into a passive typed graph while masking private text', () => {
