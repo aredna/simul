@@ -3862,6 +3862,14 @@ function elementStartsPrivateRegion(element: Element): boolean {
  * Hidden and ARIA-controlled panels are optional disclosure payload, not base
  * page text.  This reads only visibility/relationship structure and never an
  * authored label or value.
+ *
+ * A `hidden` or `aria-hidden="true"` declaration alone is not proof: a site's
+ * accordion script can mark collapsed content hidden while its desktop
+ * stylesheet forces that content visible. Computed style decides; when it
+ * shows the element, the declaration is kept only if the element has no
+ * painted box, and without readable style or geometry the declaration fails
+ * closed. (The strict paint proof cannot be used here: it reports a
+ * declared-versus-computed contradiction as unknown by design.)
  */
 function elementStartsHiddenOrControlledDisclosureRegion(
   element: Element,
@@ -3869,29 +3877,46 @@ function elementStartsHiddenOrControlledDisclosureRegion(
 ): boolean {
   try {
     if (sourceControlledContentIsWithheld(element, controlledContent)) return true;
-    if (
+    const declaredHidden =
       element.hasAttribute('hidden') ||
-      element.getAttribute('aria-hidden')?.trim().toLowerCase() === 'true'
-    ) return true;
+      element.getAttribute('aria-hidden')?.trim().toLowerCase() === 'true';
     const view = element.ownerDocument.defaultView;
     const getComputedStyle = view?.getComputedStyle;
-    if (typeof getComputedStyle === 'function') {
-      const style = getComputedStyle.call(view, element);
-      const display = typeof style?.display === 'string'
-        ? style.display.trim().toLowerCase()
-        : '';
-      const visibility = typeof style?.visibility === 'string'
-        ? style.visibility.trim().toLowerCase()
-        : '';
-      if (
-        display === 'none' ||
-        visibility === 'hidden' || visibility === 'collapse'
-      ) return true;
-    }
+    if (typeof getComputedStyle !== 'function') return declaredHidden;
+    const style = getComputedStyle.call(view, element);
+    const display = typeof style?.display === 'string'
+      ? style.display.trim().toLowerCase()
+      : '';
+    const visibility = typeof style?.visibility === 'string'
+      ? style.visibility.trim().toLowerCase()
+      : '';
+    if (
+      display === 'none' ||
+      visibility === 'hidden' || visibility === 'collapse'
+    ) return true;
+    if (!declaredHidden) return false;
+    return !hasSourcePositivePaintBox(element);
   } catch {
     return true;
   }
-  return false;
+}
+
+/** Content-free: whether any client rect of the element has a positive size. */
+function hasSourcePositivePaintBox(element: Element): boolean {
+  try {
+    const rects = element.getClientRects();
+    for (let index = 0; index < rects.length; index += 1) {
+      const rect = rects[index] ?? rects.item(index);
+      if (
+        rect &&
+        Number.isFinite(rect.width) && Number.isFinite(rect.height) &&
+        rect.width > 0 && rect.height > 0
+      ) return true;
+    }
+    return false;
+  } catch {
+    return false;
+  }
 }
 
 function hasSourceBaseWithheldAncestor(

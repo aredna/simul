@@ -1596,3 +1596,37 @@ Build identity `0.5.0 beta v.20260922.3` (third shipped build today);
 `npm run check` green, **1,398 tests pass, 1 skipped** (+1). The temporary
 bisect builds under `Dev/simul-bisect/` on the NAS were removed; `Dev/simul/`
 was re-mirrored to this commit.
+
+### D45. Declared-hidden but painted regions are ordinary page text (freee.co.jp footer) (2026-09-22)
+
+Same branch `feat/ui-string-catalogue` / PR #22, follow-up on `86443ad`. After
+D44 the owner reported, on the same page, that the footer's product links
+under each "製品" heading showed no text, that the top carousel's images did
+not show, and asked whether text inside images is still translated.
+
+- **Footer links (fixed).** The site's accordion script marks collapsed
+  `[data-js-accordion-content]` lists `aria-hidden="true"` (and inline
+  `display:none`), while the desktop stylesheet forces that content visible
+  again (`[data-js-accordion=pcDisabled] [aria-hidden=true]{display:block
+  !important}`). The sanitizer withheld any region carrying `hidden` or
+  `aria-hidden="true"` before consulting computed style, so painted links lost
+  their text; the base graph of the served HTML kept all 93 footer links with
+  text, which pointed at live-page state rather than markup. Now
+  `elementStartsHiddenOrControlledDisclosureRegion` lets computed style decide:
+  a computed-hidden element is withheld; a declared-hidden element that
+  computed style shows is withheld only when it has no client rect with a
+  positive size (`hasSourcePositivePaintBox`, content-free); unreadable style
+  or geometry keeps the declaration (fail closed). The strict
+  `sourceElementPathIsPainted` proof could not be used because it reports a
+  declared-versus-computed contradiction as `unknown` by design. Test: `keeps
+  the page text of a painted region that is only declared hidden` (painted
+  `aria-hidden` link kept; `hidden` with computed `display:none` withheld;
+  declared hidden with a zero-size box withheld), verified to fail without the
+  fix. The semantic channel's `isExplicitlyHidden` (trigger/panel collapse
+  proofs) is untouched.
+- **Image text (answered, documented).** OCR is off by default (`imageTranslationEnabled: false`; the toolbar **OCR** toggle). With it on, pixels are captured from the source tab, so the image must be on screen there. Every text-bearing raster image on this page sits inside a link or button, and images inside controls are one read capability (`controlImages`), off under the Page-only scope and on under Standard and Full visible. The README troubleshooting bullet now says so.
+- **Carousel images (open).** The `.kv-carousel` slides keep their `<img src>` in the base graph, inline Swiper transforms pass `sanitizeCss` unchanged, the Swiper stylesheet is retained as a link, and neither the visually-hidden detector nor the control-images switch touches base `<img>` transport. The live Swiper state cannot be reproduced from served HTML; the owner is asked what the top area shows (the text slides but never the picture slide, or an empty box) to separate a withheld image from a missing layout.
+
+Build identity `0.5.0 beta v.20260922.4`; `dist/chrome-unpacked` re-synced
+(manifest and the page bridge bundle). Gate: `npm run check` green,
+**1,399 tests pass, 1 skipped** (+1). NAS `Dev/simul/` re-mirrored.
