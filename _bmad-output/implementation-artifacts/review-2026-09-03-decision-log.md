@@ -1831,3 +1831,66 @@ will.
 Build identity `0.5.0 beta v.20260922.8`; `dist/chrome-unpacked` re-synced.
 Gate: `npm run check` green, **1,410 tests pass, 1 skipped** (+5). The publish
 becomes **D50**.
+
+### D50. A class flip on a region of activation controls is not a masking transition (2026-09-22)
+
+Same branch `feat/ui-string-catalogue` / PR #22, follow-up on `b49a540`. With
+the `.8` build the owner still saw the freee.co.jp carousel empty out "as
+soon as the first move happens": the deactivated pagination bullet vanished,
+then the next one on the next move, then the slides, and the empty 333px box
+stayed. That shape (elements disappearing exactly when the page mutates them)
+pointed at the live patch path, and the source session reproduced it offline
+with the mutation records Swiper 8 emits for one `slideNext()`.
+
+- **Cause.** `rememberSourceMutationSecrets` treats an element whose `class`
+  or `style` attribute mutates twice within one observer batch as a transient
+  style boundary: the observer cannot see the intermediate CSSOM state, so if
+  that region "may hold a value" the element is classified with a computed
+  text-security of `disc`, which the sticky classifier keeps as a credential
+  secret for the page's lifetime. The mirror then rebuilds (`stream_gap`) and
+  the element returns as an opaque placeholder, empty and unstyled, and every
+  later mutation under it is ignored. "May hold a value" walked the subtree
+  for `sourceElementIsValueOrControlBoundary`, which counted every activation
+  control: `a`, `button`, `summary`, and the button/link/menuitem/tab/treeitem
+  roles. Swiper removes the state classes from every slide and re-adds the
+  new active/next/prev ones in the same tick, writes the wrapper's transition
+  duration and transform as two style values, and re-marks the bullets, so
+  each move made two class or style records on regions that hold a `<button>`
+  or `<a>`, or on a `role="button"` bullet itself. From the first move on, the
+  active, next and previous slides, the wrapper, and the bullets became
+  placeholders one by one.
+- **Change.** The masking rule now asks whether the region holds a
+  *value-bearing* control: native `input`, `select`, `option`, `optgroup`,
+  `textarea`, `label`, `output`; editable text (`contenteditable`, private
+  roles); or a text-entry, checked or selected role (textbox, searchbox,
+  combobox, listbox, option, spinbutton, slider, checkbox, radio, switch,
+  menuitemcheckbox, menuitemradio). A region that holds only activation
+  controls is ordinary content: its class and style churn is mirrored as
+  attribute patches like any other. The sticky classification, the same-task
+  computed-mask rule, the contenteditable and role transitions, and the
+  control semantics of `a`/`button` everywhere else are unchanged. The unused
+  control-token helper was removed.
+- **Tests.** `tests/carousel-move-patches.test.ts` (5): a Swiper move
+  batch (two style values on the wrapper, remove-then-add classes on five
+  slides, bullets and `aria-current`) is mirrored as attribute patches with no
+  error, three consecutive moves stay error-free, a region of links, buttons
+  and a `role=button` span with two class records is not a credential, six
+  value-bearing controls inside such a region still fail closed, and an
+  element that becomes a textbox while its class flips still fails closed.
+  The existing "conservatively remembers existing-node class and content
+  transitions" and "does not turn ordinary dynamic class and text updates into
+  credentials" cases pass unchanged.
+- **Docs.** `docs/replica-fidelity.md` states the rule under the
+  text-security invariant.
+- **Method note.** No browser on this machine; the owner could not run the
+  console readouts (the question dialog truncated them), so the cause was
+  reached by driving `HtmlMirrorSourceSession` in the test harness with the
+  page's real DOM shape and Swiper's real mutation sequence, bisecting the
+  batch until one record combination forced the rebuild, then tracing the
+  signal to the secret branch. D49 stays correct and necessary (the wrapper
+  was withheld as controlled content before Swiper's first move); D50 is what
+  emptied it after the move.
+
+Build identity `0.5.0 beta v.20260922.9`; `dist/chrome-unpacked` re-synced
+(only `page-mirror.js` and the manifest changed). Gate: `npm run check`
+green, **1,415 tests pass, 1 skipped** (+5). The publish becomes **D51**.

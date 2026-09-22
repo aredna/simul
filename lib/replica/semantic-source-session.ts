@@ -1849,7 +1849,7 @@ function sourceMutationBoundaryMayHoldValue(
     if (!element || visited.has(element)) continue;
     visited.add(element);
     if (visited.size > MAX_SEMANTIC_SOURCE_NODE_IDENTITIES) return true;
-    if (sourceElementIsValueOrControlBoundary(element, records)) return true;
+    if (sourceElementIsValueBoundary(element, records)) return true;
     stack.push(...[...element.children]);
     const shadowRoot = safelyReadShadowRoot(element);
     if (shadowRoot) stack.push(...[...shadowRoot.children]);
@@ -1918,22 +1918,44 @@ function sourceMutationBatchChangesValueBearingContentWithin(
     const boundaryIndex = path.indexOf(boundary);
     if (boundaryIndex < 0) continue;
     if (path.slice(0, boundaryIndex + 1).some(
-      (element) => sourceElementIsValueOrControlBoundary(element, records),
+      (element) => sourceElementIsValueBoundary(element, records),
     )) return true;
   }
   return false;
 }
 
-function sourceElementIsValueOrControlBoundary(
+/**
+ * Tags and roles whose text or state is a value a page can mask with
+ * `-webkit-text-security`: form values, editable text and checked/selected
+ * state. Activation controls (`a`, `button`, `summary`, and the button, link,
+ * menuitem, tab and treeitem roles) carry a public label, not a maskable
+ * value, so a class or style that flips twice in one batch on a region that
+ * merely contains them (a carousel's slides and bullets on every move) is not
+ * a credential transition. Those controls keep their own control semantics
+ * everywhere else.
+ */
+const SEMANTIC_VALUE_BOUNDARY_TAGS = new Set([
+  'input', 'label', 'optgroup', 'option', 'output', 'select', 'textarea',
+]);
+const SEMANTIC_VALUE_BOUNDARY_ROLES = new Set([
+  'checkbox', 'combobox', 'listbox', 'menuitemcheckbox', 'menuitemradio',
+  'option', 'radio', 'searchbox', 'slider', 'spinbutton', 'switch', 'textbox',
+]);
+
+function sourceRoleHasValueToken(value: unknown): boolean {
+  return typeof value === 'string' && value.trim().toLowerCase()
+    .split(/\s+/u).some((role) => SEMANTIC_VALUE_BOUNDARY_ROLES.has(role));
+}
+
+function sourceElementIsValueBoundary(
   element: Element,
   records: readonly MutationRecord[],
 ): boolean {
   const tagName = element.localName.toLowerCase();
   const attributes = readSourceStructuralAttributes(element);
   if (
-    SEMANTIC_CONTROL_TAGS.has(tagName) ||
-    ['label', 'output', 'textarea'].includes(tagName) ||
-    sourceRoleHasControlToken(attributes.role) ||
+    SEMANTIC_VALUE_BOUNDARY_TAGS.has(tagName) ||
+    sourceRoleHasValueToken(attributes.role) ||
     sourceAttributesArePrivate(attributes)
   ) return true;
   for (const record of records) {
@@ -1947,7 +1969,7 @@ function sourceElementIsValueOrControlBoundary(
     if (
       name === 'role' &&
       (
-        sourceRoleHasControlToken(record.oldValue) ||
+        sourceRoleHasValueToken(record.oldValue) ||
         sourceAttributesArePrivate({ role: record.oldValue })
       )
     ) return true;
@@ -1955,10 +1977,6 @@ function sourceElementIsValueOrControlBoundary(
   return false;
 }
 
-function sourceRoleHasControlToken(value: unknown): boolean {
-  return typeof value === 'string' && value.trim().toLowerCase()
-    .split(/\s+/u).some((role) => SEMANTIC_CONTROL_ROLES.has(role));
-}
 
 function isElementNode(value: unknown): value is Element {
   return typeof value === 'object' && value !== null &&

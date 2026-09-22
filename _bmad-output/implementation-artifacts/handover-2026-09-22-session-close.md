@@ -4,16 +4,16 @@ Chains from `handover-2026-09-22-release-readiness.md`, which keeps the
 publish runbook and the release-notes draft; this file records where the day
 ended. Decision-log entries **D43** through **D49** (with addenda) hold the
 reasoning for everything below. Updated at the end of the evening session
-that produced D49.
+that produced D49 and D50.
 
 ## Where things stand
 
 | Item | State |
 | --- | --- |
-| Branch / PR | `feat/ui-string-catalogue`, PR #22, **open, mergeable, fourteen commits**, head = the D49 commit ("fix(replica): keep a carousel controlled by stateless buttons readable"). Description covers D40–D49. |
-| Version / identity | `0.5.0` / `0.5.0 beta v.20260922.8` (bumped on every shipped change; next is `.9`). |
-| Gate | `npm run check` green at head: typecheck clean, **1,410 tests pass, 1 skipped** (Chrome fixture), `dist/chrome-unpacked` re-synced and byte-verified. No CI by decision. |
-| NAS | `Dev/simul/` on the rsync daemon mirrors the D49 commit (checksum dry-run clean). Load `Dev/simul/dist/chrome-unpacked`; settings must show `Build 0.5.0 beta v.20260922.8`. |
+| Branch / PR | `feat/ui-string-catalogue`, PR #22, **open, mergeable, fifteen commits**, head = the D50 commit ("fix(replica): a class flip on a region of links and buttons is not a masking transition"). Description covers D40–D50. |
+| Version / identity | `0.5.0` / `0.5.0 beta v.20260922.9` (bumped on every shipped change; next is `.10`). |
+| Gate | `npm run check` green at head: typecheck clean, **1,415 tests pass, 1 skipped** (Chrome fixture), `dist/chrome-unpacked` re-synced and byte-verified. No CI by decision. |
+| NAS | `Dev/simul/` on the rsync daemon mirrors the D50 commit (checksum dry-run clean). Load `Dev/simul/dist/chrome-unpacked`; settings must show `Build 0.5.0 beta v.20260922.9`. |
 | `main` | `eb09813` (through D39); its committed build still says `0.4.0 beta v.20260905.1`. |
 | Release | `v0.4.0` pre-release only; the Releases page serves an older build than the branch until 0.5.0 is published. |
 | Repo | Public, MIT, description in the public voice, PVR / secret scanning / push protection on, Dependabot: no open alerts or PRs. |
@@ -27,19 +27,25 @@ that produced D49.
 - **D47** image translation on by default; a reset still clears every grant via the ledger rule; OCR overlays stay opaque per line (owner ruling).
 - **D48** a label-based image translation is a caption band along the bottom edge, not a box over the whole picture.
 - **D49** a region that stateless controls reference with `aria-controls` (Swiper's previous/next buttons and its slide wrapper) is readable page content; a stateful control or a tab relation still withholds it. Found by the carousel readout: Swiper's accessibility module made the whole freee.co.jp slide wrapper a withheld region from the moment it initialised.
+- **D50** a class or style that flips twice in one observer batch on a region holding only activation controls (links, buttons, `role=button`) is ordinary churn, not a masking transition; the sticky credential rule now needs a value-bearing control in the region. Found by driving the source session with Swiper's real move records: every move had turned the active/next/prev slides, the wrapper and the bullets into permanent opaque placeholders, which is what the owner saw as "shrinks and goes away".
 
 ## Open items
 
-1. **freee.co.jp carousel: confirm D49 with the `.8` build.** Load the NAS
-   copy, reload the extension card and the tab, reopen the companion, and
-   watch the top carousel through a few slide changes: the two text slides must
-   carry their text and the picture slide its picture, before and after the
-   first move, and after **Rebuild mirror**. If the picture still shrinks or
-   vanishes, run this in the panel's DevTools Console (right-click the panel,
-   Inspect, Console) while it looks wrong; it prints the carousel's replica
-   subtree with sizes, text, image sources and Simul's own markers, which pins
-   whether the image element is present, where its size collapses, or which
-   region is hidden. Paste the output into the next session's question.
+1. **freee.co.jp carousel: confirm D49 + D50 with the `.9` build.** Load the
+   NAS copy, reload the extension card and the tab, reopen the companion, and
+   watch the top carousel through several automatic slide changes (every 5 s)
+   and after **Rebuild mirror**: the two text slides keep their text, the
+   picture slide its picture, and the three pagination circles stay put with
+   the blue one moving. The owner reported after `.8`: "as soon as the first
+   move happens ... it shrinks and goes away", the deactivated circle vanishes
+   on each move, "the circles also move to the top of the window and the
+   blank space remains"; D50 explains all of that (the elements became opaque
+   placeholders). If anything still goes wrong, run this in the panel's
+   DevTools Console (right-click the panel, Inspect, Console) while it looks
+   wrong; it prints the carousel's replica subtree with sizes, text, image
+   sources and Simul's own markers. Note the owner could not run the earlier
+   readouts from the question dialog (truncated); print the snippet in the
+   chat message as well, and keep it short.
 
    ```js
 [...document.querySelectorAll('iframe')].map((frame) => {
@@ -59,13 +65,12 @@ that produced D49.
 }).join('\n');
    ```
 
-   Known from D49's offline reproduction: the sanitizer never removed the slide
-   `<img>` element itself, only the region's text and private attributes, so a
-   picture that is still missing after `.8` points at the live patch path or
-   at the page's own lazy loader, not at the withholding rule.
+   Reproduction without a browser: `tests/carousel-move-patches.test.ts`
+   drives `HtmlMirrorSourceSession` with Swiper's real move records; extend
+   its fixture if a new symptom appears rather than asking for readouts first.
 2. **Publish 0.5.0** — waits for the owner's go. Runbook and release-notes
    draft (now with the carousel bullet): `handover-2026-09-22-release-readiness.md`.
-   Log it as **D50**.
+   Log it as **D51**.
 3. Unchanged: F6 (memoizing `Intl.DisplayNames`) stays declined;
    `deferred-work.md` holds the 28 research-sized entries.
 
@@ -74,7 +79,7 @@ that produced D49.
 - `git fetch origin` and compare `origin/feat/ui-string-catalogue` before
   starting; the tree here is clean at the D49 commit.
 - Toolchain on the path: `export PATH=$HOME/.nvm/versions/node/v24.18.0/bin:$PATH`.
-- Any shipped change: bump `betaBuildSuffix` in `wxt.config.ts` (`.9`), update
+- Any shipped change: bump `betaBuildSuffix` in `wxt.config.ts` (`.10`), update
   README (two places) and the two identity tests, `npm run artifact:sync`,
   `npm run check`, then mirror the committed tree to the NAS (the exact rsync
   is in the memory note `simul-nas-mirror`; dry-run first).
