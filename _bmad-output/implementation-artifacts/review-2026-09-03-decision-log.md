@@ -2186,3 +2186,32 @@ the current version, images are no longer getting their text on top of them",
 
 Build identity `0.5.0 beta v.20260922.14`; `dist/chrome-unpacked` re-synced.
 Publishing 0.5.0 moves to **D56**.
+
+**D55 addendum (owner reports at session close, 2026-09-23).** The owner
+confirmed on `.14` that an image does get its text when the source tab itself
+shows it, which settles the image-text report as the screenshot limit rather
+than a regression, and asked for three follow-ups. They are carried in
+`handover-2026-09-23-bug-hunt-continued.md`; no code changed.
+
+- **Read the whole page at load.** "We should go ahead and do the entire web
+  page at once when it loads. We can do processing in the background."
+  Scheduling alone cannot do it: `captureVisibleTab` only contains what the tab
+  shows, so off-screen images would defer forever. A pixel source has to be
+  chosen first (fetching each image file in the extension and decoding it
+  offscreen is the recommended one; reusing the replica's images taints the
+  canvas).
+- **The mirror jumps to the top when the carousel advances.** Measured on
+  freee.co.jp in Chrome for Testing over 40 s: 2 replica rebuilds on 0.3.3,
+  0.4.0 and `main`, 2–3 on `.2`/`.4`/`.6`/`.8`, and 9–10 from **`.9` (D50,
+  `8243ab0`)** onwards, which matches the owner's "it didn't used to do that".
+  The dev build reports `recovery/privacy_rejected` ten times in that window:
+  `applyPatchBatch` refuses a carousel batch and `#applyLivePatch` asks for a
+  full recovery, so the replica is rebuilt from a checkpoint. That rebuild is
+  the redraw; D55 restoring the reader's position onto the new scroller is the
+  "scrolls back" half. Each rebuild also empties the image final cache.
+- **Carousel images and buttons show no text.** Two halves: carousel slides
+  never reached OCR in any build tested (a moving slide fails the stability
+  check, a clipped one fails `hasSafeCaptureGeometry`, leaving only the D48
+  caption band), and the missing button text is replica text, most likely the
+  Page-only read scope that withholds control labels (the queued D54-addendum
+  ruling changes that default to Full visible).

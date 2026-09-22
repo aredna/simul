@@ -1,5 +1,8 @@
 # Handover: session close, 0.5.0 release candidate on PR #22 (2026-09-22, late)
 
+> Superseded by `handover-2026-09-23-bug-hunt-continued.md`, which carries the
+> `.14` state and the three open owner reports.
+
 Chains from `handover-2026-09-22-release-readiness.md`, which keeps the
 publish runbook and the release-notes draft; this file records where the day
 ended. Decision-log entries **D43** through **D55** (with addenda) hold the
