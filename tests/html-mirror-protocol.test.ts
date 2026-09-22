@@ -1395,6 +1395,77 @@ describe('isolated HTML sanitizer and protocol', () => {
     expect(representability.privateTextRedactionCount).toBe(3);
   });
 
+  it('keeps the page text of a painted region that is only declared hidden', () => {
+    // A footer accordion script marks collapsed lists aria-hidden while the
+    // desktop stylesheet forces them visible. Computed style and paint decide;
+    // the declaration alone must not empty links the user can see.
+    const { document, window } = parseHTML(
+      '<!doctype html><html><head></head><body>' +
+      '<div id="painted" aria-hidden="true"><a id="painted-link" href="https://example.test/accounting/">Accounting</a></div>' +
+      '<div id="collapsed" hidden><a id="collapsed-link" href="https://example.test/hr/">Payroll</a></div>' +
+      '<div id="unpainted" aria-hidden="true"><span id="unpainted-text">Off canvas</span></div>' +
+      '</body></html>',
+    );
+    Object.defineProperty(document, 'baseURI', {
+      configurable: true,
+      value: 'https://example.test/app/',
+    });
+    for (const element of document.querySelectorAll('*')) {
+      const unpainted = element.closest('#unpainted') !== null;
+      Object.defineProperty(element, 'getClientRects', {
+        configurable: true,
+        value: () => unpainted
+          ? sourceRectList({ left: 0, top: 0, width: 0, height: 0 })
+          : sourceRectList({ left: 0, top: 0, width: 320, height: 40 }),
+      });
+    }
+    Object.defineProperty(window, 'getComputedStyle', {
+      configurable: true,
+      value: ((element: Element) => ({
+        display: element.hasAttribute('hidden') ? 'none' : 'block',
+        visibility: 'visible',
+        opacity: '1',
+        overflowX: 'visible',
+        overflowY: 'visible',
+        backgroundColor: 'rgba(0, 0, 0, 0)',
+        getPropertyValue: (name: string) => {
+          if (name === 'content-visibility') return 'visible';
+          if (name === 'clip') return 'auto';
+          if (name === 'clip-path') return 'none';
+          if (name.startsWith('overflow')) return 'visible';
+          return '';
+        },
+      }) as unknown as CSSStyleDeclaration) as Window['getComputedStyle'],
+    });
+    const representability = createHtmlMirrorRepresentabilityCollector();
+    const graph = sanitizeSourceDocument(
+      document,
+      window as unknown as Window,
+      new WeakNodeIdRegistry(),
+      representability,
+      'passive',
+    );
+    expect(graph).toBeDefined();
+    const texts = new Map<string, string>();
+    const visit = (node: HtmlMirrorNode): void => {
+      if (node.kind !== 'element') return;
+      const id = node.attributes.find(([name]) => name === 'id')?.[1];
+      for (const child of node.children) {
+        if (child.kind === 'text' && id) texts.set(id, child.text);
+        visit(child);
+      }
+    };
+    visit(graph!.root);
+
+    // Declared hidden but styled visible and painted: ordinary page text.
+    expect(texts.get('painted-link')).toBe('Accounting');
+    // Really hidden by computed style: withheld.
+    expect(texts.get('collapsed-link')).toBe('');
+    // Declared hidden, styled visible, but nothing painted: withheld.
+    expect(texts.get('unpainted-text')).toBe('');
+    expect(representability.privateTextRedactionCount).toBe(2);
+  });
+
   it('deep-clones into a passive typed graph while masking private text', () => {
     const { document, window } = parseHTML(`<!doctype html><html lang="ja"><head>
       <style>@import "https://tracker.invalid/a.css"; .hero{background:url('/hero.png')}</style>

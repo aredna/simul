@@ -34,7 +34,10 @@ stylesheets, and styles inside accessible open shadow roots. Stylesheet element
 order, media attributes, disabled state, and the normal cascade remain
 representable. A `<style>` element inside a hidden or controlled disclosure
 region keeps its CSS (those rules are often what hides the region); only the
-region's page text is withheld, and a privacy boundary withholds both.
+region's page text is withheld, and a privacy boundary withholds both. Whether
+a region is hidden is decided by computed style and geometry: content a script
+declares `hidden` or `aria-hidden` but the stylesheet paints anyway is ordinary
+page text.
 
 When CSSOM is readable, Simul serializes sanitized rules and recursively
 flattens readable imports in order within rule, depth, string, and total payload

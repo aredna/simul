@@ -14,7 +14,7 @@ Simul started as a quick build for the OpenAI Build Week hackathon, made as
 something we would use ourselves. We are now sharing it so others can use it
 too.
 
-Current build: **0.5.0 beta v.20260922.3** · Desktop Chrome **138+** ·
+Current build: **0.5.0 beta v.20260922.4** · Desktop Chrome **138+** ·
 Manifest V3
 
 ## What you need
@@ -48,7 +48,7 @@ Keep the folder where it is while the extension is installed. To update,
 replace the folder with the new version, then select **Reload** on the Simul
 card in `chrome://extensions`, reload the page, and reopen the companion. The
 card shows version `0.5.0`; Simul's settings show
-`Build 0.5.0 beta v.20260922.3`.
+`Build 0.5.0 beta v.20260922.4`.
 
 This is an unpacked beta, not a Chrome Web Store release, so Chrome does not
 update it automatically.
@@ -204,8 +204,10 @@ complete design and browser-boundary rationale.
   access does not transfer between sites. Select Simul again or explicitly
   grant the intended site/all-sites scope.
 - **Image text is unchanged:** turn on OCR, grant image access if requested,
-  keep the image visible, and use a supported source language. Small images are
-  skipped by default.
+  keep the image visible in the source tab, and use a supported source
+  language. Small images are skipped by default, and an image inside a link or
+  button is read only under the **Standard** or **Full visible** readable-content
+  scope (Page-only leaves images in controls alone).
 - **The replica is stale:** use **Rebuild mirror**. Some closed-root, opaque
   resource, CSSOM, and script-only changes cannot be observed safely.
 - **An update still looks old:** reload Simul at `chrome://extensions`, then
