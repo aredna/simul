@@ -56,7 +56,7 @@ describe('parseCompanionPreferences', () => {
       settingsRevision: 0,
       resetRevision: 0,
       resetCleanupPendingRevision: 0,
-      imageTranslationEnabled: false,
+      imageTranslationEnabled: true,
       ocrMinimumConfidence: 0.65,
       imageReadingMethodOrder: [
         'accessibility-text',
@@ -111,7 +111,7 @@ describe('parseCompanionPreferences', () => {
       settingsRevision: 0,
       resetRevision: 0,
       resetCleanupPendingRevision: 0,
-      imageTranslationEnabled: false,
+      imageTranslationEnabled: true,
       ocrMinimumConfidence: 0.65,
       imageReadingMethodOrder: [
         'accessibility-text',
@@ -178,7 +178,7 @@ describe('parseCompanionPreferences', () => {
       settingsRevision: 0,
       resetRevision: 0,
       resetCleanupPendingRevision: 0,
-      imageTranslationEnabled: false,
+      imageTranslationEnabled: true,
       ocrMinimumConfidence: 0.65,
       imageReadingMethodOrder: [
         'accessibility-text',

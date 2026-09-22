@@ -163,7 +163,7 @@ export const DEFAULT_COMPANION_PREFERENCES: Readonly<CompanionPreferences> =
     settingsRevision: 0,
     resetRevision: 0,
     resetCleanupPendingRevision: 0,
-    imageTranslationEnabled: false,
+    imageTranslationEnabled: true,
     ocrMinimumConfidence: DEFAULT_OCR_MINIMUM_CONFIDENCE,
     imageReadingMethodOrder: Object.freeze([
       ...IMAGE_READING_METHOD_IDS,
@@ -710,7 +710,7 @@ function createDefaultPreferences(): CompanionPreferences {
     settingsRevision: 0,
     resetRevision: 0,
     resetCleanupPendingRevision: 0,
-    imageTranslationEnabled: false,
+    imageTranslationEnabled: true,
     ocrMinimumConfidence: DEFAULT_OCR_MINIMUM_CONFIDENCE,
     imageReadingMethodOrder: [...IMAGE_READING_METHOD_IDS],
     disabledImageReadingMethodIds: [ACCESSIBILITY_TEXT_METHOD_ID],

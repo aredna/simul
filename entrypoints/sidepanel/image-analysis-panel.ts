@@ -200,7 +200,7 @@ export class ImageAnalysisPanel {
     } else if (view.imageCaptureAccess === 'checking') {
       setUiText(privacyNote, UI_STRINGS.imageCheckingAccess);
     } else {
-      setUiText(privacyNote, UI_STRINGS.imageOffByDefault);
+      setUiText(privacyNote, UI_STRINGS.imageOnByDefault);
     }
     root.append(privacyNote);
     if (pixelAccessMissing) {

@@ -18,8 +18,8 @@ All image-reading methods share one persisted priority list:
    Its Worker, three WebAssembly core loaders, language files, hashes, licenses,
    and notices are included in the extension.
 
-Image translation is off by default. Turning every pixel method off pauses OCR
-before capture. No JavaScript, Worker, WebAssembly binary, model, image pixel,
+Image translation is on by default, and pixel OCR waits for the optional
+image-access grant. Turning every pixel method off pauses OCR before capture. No JavaScript, Worker, WebAssembly binary, model, image pixel,
 or recognized text is loaded from or sent to a remote OCR service.
 
 The pinned `tessdata_fast` catalog covers English, Spanish, French, German,

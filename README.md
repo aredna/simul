@@ -14,7 +14,7 @@ Simul started as a quick build for the OpenAI Build Week hackathon, made as
 something we would use ourselves. We are now sharing it so others can use it
 too.
 
-Current build: **0.5.0 beta v.20260922.5** · Desktop Chrome **138+** ·
+Current build: **0.5.0 beta v.20260922.6** · Desktop Chrome **138+** ·
 Manifest V3
 
 ## What you need
@@ -48,7 +48,7 @@ Keep the folder where it is while the extension is installed. To update,
 replace the folder with the new version, then select **Reload** on the Simul
 card in `chrome://extensions`, reload the page, and reopen the companion. The
 card shows version `0.5.0`; Simul's settings show
-`Build 0.5.0 beta v.20260922.5`.
+`Build 0.5.0 beta v.20260922.6`.
 
 This is an unpacked beta, not a Chrome Web Store release, so Chrome does not
 update it automatically.
@@ -67,8 +67,9 @@ update it automatically.
    translation for the site in settings, or if OCR is on.
 5. Use **Fit**, **1:1**, zoom, layout, and scroll-following to compare the
    original with the translation.
-6. Turn **OCR On** when you want text inside images translated too. Page text
-   and image text are translated together.
+6. Image text (OCR) is on by default and is translated together with the page
+   text. The first time, select the **OCR** button to grant image access when
+   Chrome asks; select it again to turn image text off.
 7. Use **Rebuild mirror** if the page changed in a way the mirror could not
    follow.
 
@@ -108,7 +109,8 @@ extension session.
 
 ### Image text
 
-Image translation is persisted but **off by default**. When enabled, it also
+Image translation is **on by default** and saved with your settings; pixel OCR
+waits until you grant image access from the **OCR** button. While on, it also
 translates the page text of the mirrored page, and for images Simul:
 
 1. inspects policy-approved, visible top-frame `<img>` elements;
@@ -206,9 +208,9 @@ complete design and browser-boundary rationale.
 - **Automatic translation paused after navigation:** temporary `activeTab`
   access does not transfer between sites. Select Simul again or explicitly
   grant the intended site/all-sites scope.
-- **Image text is unchanged:** turn on OCR, grant image access if requested,
-  keep the image visible in the source tab, and use a supported source
-  language. Small images are skipped by default, and an image inside a link or
+- **Image text is unchanged:** OCR is on by default, but pixel reading waits
+  for image access; select the **OCR** button to grant it. Keep the image
+  visible in the source tab and use a supported source language. Small images are skipped by default, and an image inside a link or
   button is read only under the **Standard** or **Full visible** readable-content
   scope (Page-only leaves images in controls alone).
 - **The replica is stale:** use **Rebuild mirror**. Some closed-root, opaque
