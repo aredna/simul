@@ -1,55 +1,81 @@
 # Simul
 
-Simul is a Chrome translation companion. It keeps the original website intact
-and opens a live, read-only translated replica in Chrome's side panel or a
-detached window.
+Simul is a Chrome extension that shows a translated copy of the web page you
+are reading, next to the original. The page itself is left untouched; the
+translation opens as a live, read-only mirror in Chrome's side panel or in a
+separate window, so you can compare the two as you read and scroll.
 
-Current build: **0.4.0 beta v.20260922.1** · Desktop Chrome **138+** ·
+Everything is translated on your own computer with Chrome's built-in on-device
+translator. Page text never leaves your machine, and Simul has no server, no
+account, no API key, and nothing remote to set up. The optional reading of text
+inside images is also fully local.
+
+Simul started as a quick build for the OpenAI Build Week hackathon, made as
+something we would use ourselves. We are now sharing it so others can use it
+too.
+
+Current build: **0.5.0 beta v.20260922.2** · Desktop Chrome **138+** ·
 Manifest V3
 
-Simul is useful when you want to compare the original page and its translation
-instead of replacing the page in place. Page text is translated with Chrome's
-on-device Translator API. Optional image text reading uses accessibility text,
-Chrome's platform TextDetector when available, or packaged Tesseract.js.
+## What you need
 
-## Install or reload in Chrome
+- Desktop Chrome 138 or newer.
+- about 35 MB of disk space for the extension folder (most of it is the
+  packaged image-text reader).
+- The first time you translate into a new language, Chrome may download that
+  language pack. That is Chrome's own download, not a Simul service.
 
-The checked-in [`dist/chrome-unpacked`](dist/chrome-unpacked/) directory is the
-canonical ready-to-load build. You do not need Node.js or npm to install it.
+Nothing else: no Node.js, no account, no key.
 
-1. Download or clone this repository and extract it if needed.
-2. Open `chrome://extensions` in desktop Chrome 138 or newer.
-3. Enable **Developer mode**.
-4. Select **Load unpacked**.
-5. Choose this repository's `dist/chrome-unpacked` directory.
-6. Open a normal HTTP(S) page and select the Simul toolbar icon.
+## Install
 
-Keep the directory in place while the extension is installed. After pulling a
-new version, select **Reload** on the Simul extension card, reload the source
-tab, and reopen the companion. The extension card should show version `0.4.0`;
-Simul Options should show `Build 0.4.0 beta v.20260922.1`.
+Get the extension folder in either of two ways:
 
-This is an unpacked beta, not a Chrome Web Store or auto-updating release.
+- **Release zip.** Download `simul-<version>-chrome-unpacked.zip` from the
+  [latest release](https://github.com/aredna/simul/releases/latest) and unzip
+  it. The folder inside is `chrome-unpacked`.
+- **Repository.** Use **Code → Download ZIP** (or clone) and unzip it. The
+  folder is `dist/chrome-unpacked` inside the download.
+
+Then load it in Chrome:
+
+1. Open `chrome://extensions`.
+2. Turn on **Developer mode** (top right).
+3. Select **Load unpacked** and choose the `chrome-unpacked` folder.
+4. Open any normal web page and select the Simul icon in the toolbar.
+
+Keep the folder where it is while the extension is installed. To update,
+replace the folder with the new version, then select **Reload** on the Simul
+card in `chrome://extensions`, reload the page, and reopen the companion. The
+card shows version `0.5.0`; Simul's settings show
+`Build 0.5.0 beta v.20260922.2`.
+
+This is an unpacked beta, not a Chrome Web Store release, so Chrome does not
+update it automatically.
 
 ## Use Simul
 
-1. Open a normal HTTP(S) page. Chrome does not allow extensions to run on every
-   internal, store, or protected page.
-2. Select the Simul icon to open the saved side-panel or detached-window
-   surface.
-3. Leave **From** on **Auto-detect** or choose a source language, then choose
+1. Open a normal HTTP(S) page. Chrome does not let extensions run on its own
+   internal pages, the Web Store, or some protected pages.
+2. Select the Simul icon to open the companion in the side panel or a separate
+   window (your saved choice).
+3. Leave **From** on **Auto-detect** or pick the page's language, then pick
    **To**. Once that language pair is installed, the companion's own labels,
-   titles, hints, and status messages follow the **To** language as well.
+   hints, and status messages follow the **To** language as well.
 4. If Chrome asks, select **Translate page** so it can prepare the on-device
    language pack.
-5. Use **Fit**, **1:1**, custom zoom, layout, and scroll-following controls to
-   compare the source with the replica.
-6. Turn **OCR On** only when you want to translate text inside visible images.
-7. Use **Rebuild mirror** if a browser-level page change cannot be observed
-   incrementally.
+5. Use **Fit**, **1:1**, zoom, layout, and scroll-following to compare the
+   original with the translation.
+6. Turn **OCR On** only when you want text inside images translated too.
+7. Use **Rebuild mirror** if the page changed in a way the mirror could not
+   follow.
 
-The settings screen controls launch behavior, automatic translation scopes,
-readable-content scope, visual fidelity, image-reading methods, and reset.
+Settings cover launch behavior, automatic translation, how much of the page
+may be read, visual fidelity, image-reading methods, and reset.
+
+The rest of this file is the detailed reference: how the mirror works, the
+privacy boundary, permissions, fidelity limits, troubleshooting, and
+development.
 
 ## How it works
 

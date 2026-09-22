@@ -692,9 +692,9 @@ describe('disabled OCR production profile', () => {
     const validation = await validateArtifact(artifact);
 
     expect(validation.ocrEnabled).toBe(false);
-    expect(validation.manifest.version).toBe('0.4.0');
+    expect(validation.manifest.version).toBe('0.5.0');
     expect(validation.manifest.version_name).toBe(
-      '0.4.0 beta v.20260922.1',
+      '0.5.0 beta v.20260922.2',
     );
     expect(validation.manifest.permissions).toEqual(APPROVED_PERMISSIONS);
     expect(validation.manifest).not.toHaveProperty('content_security_policy');
