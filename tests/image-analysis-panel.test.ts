@@ -279,6 +279,35 @@ describe('ImageAnalysisPanel', () => {
     expect(output.textContent).toBe('Aún no hay actividad de OCR en esta vista.');
   });
 
+  it('re-localizes the templated method-toggle aria-labels on a pure language switch', () => {
+    const { panel, translations } = setup({
+      disabledImageReadingMethodIds: ['tesseract'],
+    });
+    panel.initialize();
+    const root = panel.root!;
+    const toggles = [...root.querySelectorAll<HTMLInputElement>('.ocr-provider-toggle input')];
+    expect(toggles.map((toggle) => toggle.getAttribute('aria-label'))).toEqual([
+      'Disable Accessibility text (aria-label / alt)',
+      'Disable Chrome TextDetector (platform)',
+      'Enable Tesseract.js (local)',
+    ]);
+
+    // The aria-label is a filled template written with localizeTemplate, not a
+    // data-ui marker, and the list is guarded by the render key; only
+    // relocalize() re-drives it after a To-language change.
+    translations.set('Disable {0}', 'Desactivar {0}');
+    translations.set('Enable {0}', 'Activar {0}');
+    translations.set('Accessibility text (aria-label / alt)', 'Texto de accesibilidad (aria-label / alt)');
+    panel.relocalize();
+    expect(toggles.map((toggle) => toggle.getAttribute('aria-label'))).toEqual([
+      'Desactivar Texto de accesibilidad (aria-label / alt)',
+      'Desactivar Chrome TextDetector (platform)',
+      'Activar Tesseract.js (local)',
+    ]);
+    // Same nodes: relocalize() must not rebuild the list under the user's focus.
+    expect([...root.querySelectorAll('.ocr-provider-toggle input')]).toEqual(toggles);
+  });
+
   it('renders nothing without a compiled image-analysis capability', () => {
     const { document } = parseHTML('<html><body><div id="host"></div></body></html>');
     const panel = new ImageAnalysisPanel({

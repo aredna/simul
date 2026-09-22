@@ -4,7 +4,7 @@ Simul is a Chrome translation companion. It keeps the original website intact
 and opens a live, read-only translated replica in Chrome's side panel or a
 detached window.
 
-Current build: **0.4.0 beta v.20260905.1** · Desktop Chrome **138+** ·
+Current build: **0.4.0 beta v.20260922.1** · Desktop Chrome **138+** ·
 Manifest V3
 
 Simul is useful when you want to compare the original page and its translation
@@ -27,7 +27,7 @@ canonical ready-to-load build. You do not need Node.js or npm to install it.
 Keep the directory in place while the extension is installed. After pulling a
 new version, select **Reload** on the Simul extension card, reload the source
 tab, and reopen the companion. The extension card should show version `0.4.0`;
-Simul Options should show `Build 0.4.0 beta v.20260905.1`.
+Simul Options should show `Build 0.4.0 beta v.20260922.1`.
 
 This is an unpacked beta, not a Chrome Web Store or auto-updating release.
 
@@ -38,7 +38,8 @@ This is an unpacked beta, not a Chrome Web Store or auto-updating release.
 2. Select the Simul icon to open the saved side-panel or detached-window
    surface.
 3. Leave **From** on **Auto-detect** or choose a source language, then choose
-   **To**.
+   **To**. Once that language pair is installed, the companion's own labels,
+   titles, hints, and status messages follow the **To** language as well.
 4. If Chrome asks, select **Translate page** so it can prepare the on-device
    language pack.
 5. Use **Fit**, **1:1**, custom zoom, layout, and scroll-following controls to

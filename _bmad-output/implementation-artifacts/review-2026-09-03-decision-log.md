@@ -1484,3 +1484,45 @@ Gate: `npm run check` green — typecheck clean, **1,396 tests pass, 1 skipped**
 (+9), `dist/chrome-unpacked` re-synced and byte-verified. Still owed: the manual
 Chrome pass (unchanged), which should now also confirm the F2 surfaces above and
 the deferred method-toggle aria-label.
+
+### D43. Release-readiness pass: close the method-toggle aria gap and stamp today's identity (2026-09-22)
+
+Same branch `feat/ui-string-catalogue` / PR #22, follow-up on `b0cb195`. A
+review of the project state ahead of the owner's manual Chrome pass and the
+public publish. Everything pushed was already current (PR #22 open and
+mergeable, no open Dependabot alerts or PRs, gate green at 1,396 tests); three
+things were stale or still owed and are fixed here.
+
+- **The deferred method-toggle aria-label is now re-driven (closes the D42
+  "newly spotted" item).** In `image-analysis-panel.ts` `#createMethodList`,
+  each method checkbox's `aria-label` is a filled template (`Enable {0}` /
+  `Disable {0}` around the localized method name) written with
+  `localizeTemplate` rather than the `data-ui` marker path, and the list is
+  guarded by the panel `renderKey`, so it stayed in the old language after a
+  pure To-language switch — the same class as F5. Each toggle now records a
+  re-apply thunk (`#methodToggleRelocalizers`, rebuilt whenever the list is)
+  that re-reads the live `checked` state and re-fills the template;
+  `ImageAnalysisPanel.relocalize()` runs those thunks before
+  `renderDiagnostics()`. The list is not rebuilt, so no control is destroyed
+  under the user's focus. One language-switch test added
+  (`image-analysis-panel.test.ts`): three toggles, one disabled, asserted before
+  and after a dictionary flip, and the same input nodes survive.
+- **Build identity advanced to `0.4.0 beta v.20260922.1`** (`wxt.config.ts`),
+  per the D42 rule that the id tracks every shipped change. Fixtures updated
+  (`build-identity`, `extension-artifact` tests); `dist/chrome-unpacked`
+  re-synced (manifest, `sidepanel.html`, and the side-panel chunk hash).
+- **README brought back into agreement with the build.** It still named
+  `v.20260905.1` in both places (the D42 bump to `v.20260908.1` did not touch
+  it); the fresh-identity spec requires the Options label, manifest, README
+  and identity tests to agree exactly. Also added one sentence under "Use
+  Simul" saying the companion's own labels, titles, hints and status messages
+  follow the To language once the pair is installed — the L4/L5 behaviour was
+  not described anywhere a tester would read.
+
+Gate: `npm run check` green — typecheck clean, **1,397 tests pass, 1 skipped**
+(+1), `dist/chrome-unpacked` re-synced and byte-verified.
+
+Publish state and the runbook for after the browser pass are in
+`handover-2026-09-22-release-readiness.md`. Still owed: the manual Chrome pass
+(unchanged list, now including the method-toggle aria-labels), then the
+numeric version bump, PR #22 merge, tag and GitHub release.
