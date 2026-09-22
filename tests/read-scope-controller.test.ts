@@ -2,12 +2,14 @@ import { parseHTML } from 'linkedom';
 import { describe, expect, it, vi } from 'vitest';
 
 import { CompanionState } from '../entrypoints/sidepanel/companion-state';
+import { UiLocalizer } from '../entrypoints/sidepanel/ui-localizer';
 import {
   ReadScopeController,
   committedReplicaReadScope,
   normalizeReadScopeToggle,
 } from '../entrypoints/sidepanel/read-scope-controller';
 import type { PreferenceCommand, PreferenceCommandResult } from '../lib/preference-coordinator';
+import type { TranslationProvider } from '../lib/translation-provider';
 import {
   DEFAULT_COMPANION_PREFERENCES,
   parseCompanionPreferences,
@@ -217,6 +219,52 @@ describe('ReadScopeController setup', () => {
     expect(committedReplicaReadScope(setupComplete('full-visible')).formValues).toBe(true);
     expect(committedReplicaReadScope(parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES)))
       .toEqual(replicaReadScopeForProfile('page-only'));
+  });
+
+  it('keeps every toggle description through a real localization pass', async () => {
+    const harness = setup();
+    harness.controller.renderControls();
+    const document = harness.elements.readScopeControls.ownerDocument;
+    let target: 'en' | 'es' = 'en';
+    const localizer = new UiLocalizer({
+      document,
+      provider: {
+        availability: async () => 'available',
+        createSession: async () => ({
+          translate: async (text: string) => `es:${text}`,
+          destroy: () => undefined,
+        }),
+      } as unknown as TranslationProvider,
+      dynamicLabels: [],
+      getTargetLanguage: () => target,
+      translateRemembered: async (_pair, source, load) => load(source),
+      schedule: () => undefined,
+      retryDelayMs: 10_000,
+    });
+    const descriptions = () => [
+      ...harness.elements.readScopeControls.querySelectorAll('small'),
+      ...harness.elements.setupReadScopeControls.querySelectorAll('small'),
+    ];
+    const credentialNote = 'Credential and card data stay blocked.';
+    expect(descriptions()).toHaveLength(12);
+
+    // An English pass rewrites every marked element to its English label.
+    localizer.applyToDom();
+    expect(descriptions()).toHaveLength(12);
+    expect(descriptions().some((element) =>
+      element.textContent?.endsWith(credentialNote))).toBe(true);
+
+    target = 'es';
+    await localizer.localize();
+    expect(descriptions()).toHaveLength(12);
+    expect(descriptions().every((element) =>
+      element.textContent?.startsWith('es:'))).toBe(true);
+    expect(descriptions().some((element) =>
+      element.textContent?.endsWith(credentialNote))).toBe(true);
+    const firstTitle = harness.elements.readScopeControls
+      .querySelector('label span > span[data-ui-label]');
+    expect(firstTitle?.textContent).toMatch(/^es:/);
+    expect(firstTitle?.querySelector('small')).toBeNull();
   });
 });
 

@@ -1922,3 +1922,36 @@ keeps the post-patch measurement correct; keyframe `animation` should not be
 suppressed the same way, since a page can rely on an animation's end state to
 reveal content.
 
+
+### D51. Read-scope toggle descriptions survive a localization pass (2026-09-22)
+
+Same branch `feat/ui-string-catalogue` / PR #22, follow-up on `5a55302`. First
+fix from the bug-hunt review (`review-2026-09-22-pr22-bug-hunt.md`, finding
+L1); the owner chose to fix L1, the carousel overlay (O1+O2), the reset grant
+and OCR button (G1+G3), and the hidden-text checks (P1+P2), one build each, and
+ruled on the two open questions: the broad grant keeps today's single rule
+("keep the simplest option": one `<all_urls>` grant retained while any enabled
+feature uses it, no per-purpose bookkeeping), and accessibility-text captions
+stay on after setup (fix the docs, not the behaviour).
+
+- **Cause.** `ReadScopeController.#renderToggleSet` appended each toggle's
+  `<small>` description inside the span that carries the title's
+  `data-ui-label` marker. `UiLocalizer.applyToDom` compares a marked element's
+  `textContent` with its label and rewrites it on a mismatch; title plus
+  description never matches, so every pass, English included, replaced the
+  span's children and the descriptions (among them "Credential and card data
+  stay blocked.") vanished from Settings and the setup dialog until the next
+  control re-sync. The controller test stubbed `setUiText`, so no test drove
+  the real localizer over this markup.
+- **Change.** The toggle text is an unmarked span holding two marked
+  siblings: the title span and the `<small>` description. Layout is
+  unchanged (the description was already `display: block`).
+- **Tests.** `tests/read-scope-controller.test.ts`: "keeps every toggle
+  description through a real localization pass" renders both toggle sets,
+  runs the real `UiLocalizer` (an English `applyToDom`, then an `es` pass) and
+  checks all twelve descriptions survive and localize, and that no title
+  contains a description. It fails on `5a55302` (0 of 12 descriptions left).
+
+Build identity `0.5.0 beta v.20260922.10`; `dist/chrome-unpacked` re-synced
+(side-panel chunk, `sidepanel.html`, manifest). Gate: `npm run check` green,
+**1,416 tests pass, 1 skipped** (+1).

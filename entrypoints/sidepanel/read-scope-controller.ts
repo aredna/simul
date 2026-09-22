@@ -472,11 +472,15 @@ export class ReadScopeController {
       input.checked = scope[key];
       input.disabled = key === 'personalDataValues' && !scope.formValues;
       input.dataset.readScopeKey = key;
+      // The title and the description are separate localized elements: a
+      // localization pass replaces a marked element's whole text, so the
+      // description must not be a child of the title's marker.
       const text = document.createElement('span');
-      this.environment.setUiText(text, READ_SCOPE_COPY[key].label);
+      const title = document.createElement('span');
+      this.environment.setUiText(title, READ_SCOPE_COPY[key].label);
       const description = document.createElement('small');
       this.environment.setUiText(description, READ_SCOPE_COPY[key].description);
-      text.append(description);
+      text.append(title, description);
       label.append(input, text);
       input.addEventListener('change', () => onChange(key, input.checked));
       fragment.append(label);
