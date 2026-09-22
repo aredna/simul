@@ -45,10 +45,10 @@ their computer; and the public voice is set (below).
   the image stays visible. OCR boxes stay per line and replace the band when
   they arrive. Owner ruling: text should appear where it belongs, not replace
   everything.
-- **Version is 0.5.0, identity `0.5.0 beta v.20260922.7`.** `package.json`,
+- **Version is 0.5.0, identity `0.5.0 beta v.20260922.8`.** `package.json`,
   `package-lock.json`, `wxt.config.ts`, README, `THIRD_PARTY_NOTICES.md`, the
   two identity tests, and `dist/chrome-unpacked` all agree. The extension card
-  shows `0.5.0`; Simul's settings show `Build 0.5.0 beta v.20260922.7`. What is
+  shows `0.5.0`; Simul's settings show `Build 0.5.0 beta v.20260922.8`. What is
   tested is byte-for-byte what will be released.
 - **README rewritten for a public reader** (top sections only; the reference
   sections from "How it works" down are unchanged). Voice per the owner: one
@@ -95,7 +95,7 @@ toolchain (`export PATH=$HOME/.nvm/versions/node/v24.18.0/bin:$PATH`, Node
 Load `dist/chrome-unpacked` from the NAS copy or from a pull of
 `feat/ui-string-catalogue`. Reload the extension card, reload the source tab,
 reopen the companion. The card must show `0.5.0` and Simul's settings
-`Build 0.5.0 beta v.20260922.7`; anything else means the old folder is still
+`Build 0.5.0 beta v.20260922.8`; anything else means the old folder is still
 loaded.
 
 The owed list, accumulated since 2026-09-06, all of it needing a browser:
@@ -137,11 +137,11 @@ The owed list, accumulated since 2026-09-06, all of it needing a browser:
 ## Publish runbook — after the test passes
 
 The publish commit is already on the branch (0.5.0, identity
-`0.5.0 beta v.20260922.7`), so what remains mirrors the 0.4.0 publish (D32): a
+`0.5.0 beta v.20260922.8`), so what remains mirrors the 0.4.0 publish (D32): a
 rebase merge so `main` stays linear, an annotated tag at the merge head, and a
 GitHub pre-release carrying a zip of the committed `dist/chrome-unpacked`.
-If anything else ships before the merge, bump the suffix to `.4` and re-sync
-first.
+If anything else ships before the merge, bump the suffix (`.9` after the
+D49 build) and re-sync first.
 
 ```sh
 export PATH=$HOME/.nvm/versions/node/v24.18.0/bin:$PATH
@@ -152,13 +152,13 @@ gh pr merge 22 --rebase --delete-branch
 git checkout main && git pull --ff-only
 
 # 2. Tag the merge head
-git tag -a v0.5.0 -m "Simul 0.5.0 beta (v.20260922.7)"
+git tag -a v0.5.0 -m "Simul 0.5.0 beta (v.20260922.8)"
 git push origin v0.5.0
 
 # 3. Zip the committed artifact and create the pre-release
 (cd dist && zip -r ../simul-0.5.0-chrome-unpacked.zip chrome-unpacked)   # ~31 MB, *.zip is ignored
 gh release create v0.5.0 simul-0.5.0-chrome-unpacked.zip \
-  --prerelease --title "Simul 0.5.0 beta (v.20260922.7)" \
+  --prerelease --title "Simul 0.5.0 beta (v.20260922.8)" \
   --notes-file _bmad-output/implementation-artifacts/release-notes-0.5.0.md
 rm simul-0.5.0-chrome-unpacked.zip
 
@@ -166,7 +166,7 @@ rm simul-0.5.0-chrome-unpacked.zip
 gh release view v0.5.0
 ```
 
-Then log it as D49 (merge SHA, tag, release URL, gate numbers) and update the
+Then log it as D50 (merge SHA, tag, release URL, gate numbers) and update the
 state memory. The README's "latest release" link starts pointing at the right
 zip the moment the release exists.
 
@@ -183,7 +183,7 @@ it so others can use it too.
 `simul-0.5.0-chrome-unpacked.zip`, unzip it, open `chrome://extensions`, turn
 on Developer mode, choose **Load unpacked**, and select the `chrome-unpacked`
 folder. Then open any normal web page and select the Simul icon. Simul's
-settings show `Build 0.5.0 beta v.20260922.7`. This is an unpacked beta, so
+settings show `Build 0.5.0 beta v.20260922.8`. This is an unpacked beta, so
 Chrome does not update it automatically. The zip is a byte-for-byte copy of the
 committed `dist/chrome-unpacked` at the tagged commit, which `npm run check`
 verifies against a fresh build.
@@ -206,6 +206,10 @@ What changed since 0.4.0 (decision log D31–D48):
   that hides a modal with a `<style>` placed inside the modal now mirrors
   correctly, and content a script declares hidden but the stylesheet paints
   anyway keeps its text.
+- **Carousels stay readable.** A slide container that previous/next buttons
+  reference with `aria-controls` but never collapse is ordinary page content
+  again; only a control with expanded, selected, pressed, checked or popup
+  state, or a tab relation, can withhold what it controls.
 - **Side panel restructured** into a dozen tested modules with a transactional
   image-permission rollback.
 - **Replica proofs.** Slider and spinbutton values travel under the
@@ -230,10 +234,10 @@ skips without a browser.
 
 ## Still owed after the publish
 
-- Open from the Chrome pass: only the unconfirmed "resized very small after a
-  move" observation on the freee.co.jp carousel (D48); the readout to run
-  first is in `handover-2026-09-22-session-close.md`. The final go for the
-  publish is otherwise the only thing left.
+- Open from the Chrome pass: the freee.co.jp carousel. The readout named the
+  cause (Swiper's `aria-controls` made the slide wrapper a withheld region) and
+  D49 fixes it; the owner confirms with the `.8` build. The final go for the
+  publish is otherwise the only thing left (logged as D50).
 - F6 (memoizing `Intl.DisplayNames` per target language) stays declined (D41).
 - `deferred-work.md` still holds the 28 research-sized entries listed in
   `handover-2026-09-06-batches-merged.md`.

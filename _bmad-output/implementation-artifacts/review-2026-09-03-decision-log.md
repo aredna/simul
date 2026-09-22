@@ -1774,3 +1774,60 @@ question had a syntax error, so nothing was measured. The owner asked to close
 the session and continue in a new one. `handover-2026-09-22-session-close.md`
 records the state, the parsed readout to run first, what is already ruled
 out, and the publish step (to be logged as D49).
+
+### D49. A carousel controlled by stateless buttons is page content (2026-09-22)
+
+Same branch `feat/ui-string-catalogue` / PR #22, follow-up on `9e995e4`. The
+open freee.co.jp item ("the carousel image shrinks or vanishes after a move")
+was read out this session with a selector-agnostic console snippet: of the 137
+images in the replica, the only one inside `.kv-carousel` was the 24px pause
+icon that the page's own script injects *outside* the Swiper wrapper; no slide
+text or slide image was present, and the owner placed the change "when the
+carousel advances from the first slide to the second", not reproducible at
+will.
+
+- **Cause.** Swiper 8.1.4's accessibility module (on by default in the bundle
+  the page loads) gives the slide wrapper a generated `id` and points the
+  previous/next buttons at it with `aria-controls`. Simul's controlled-content
+  policy marks every resolved `aria-controls` target `withheld` and reopens
+  only a structurally unique `role=tab` → `role=tabpanel` relation; the wrapper
+  has two triggers and no tab semantics, so from the moment Swiper initialises
+  it is a withheld region: text blank, `alt` and other private attributes
+  stripped, image sources dropped from the hint path. The panel that opens
+  before Swiper's `afterInit` shows the slides; the first attribute churn on a
+  participant path (the slide change) refreshes the policy and withdraws them,
+  which is the "after a move". Reproduced offline: the served HTML through
+  `sanitizeSourceDocument` keeps the slide text as served and blanks it once
+  the wrapper id and the buttons' `aria-controls` are added, with one or two
+  buttons alike. Neither the semantic channel (`aria-expanded` disclosures and
+  tabs only) nor any read scope could re-admit it, so visible content was
+  unreadable under every profile.
+- **Change.** A target is now `controlled-region` (readable, hidden-region
+  rules unchanged) when every controller that references it is stateless: no
+  `aria-expanded`, `aria-selected`, `aria-pressed`, `aria-checked` or
+  `aria-haspopup` (any value, and an unreadable attribute fails closed), no
+  `role` of tab/combobox/switch/checkbox/radio/menuitemcheckbox/menuitemradio,
+  not a native `input`/`select`/`textarea`/`details`/`summary`, and not inside
+  a `tablist`. One stateful trigger keeps the target `withheld`; the popup
+  case (`<button aria-expanded="true" aria-controls>`) and every tab rule are
+  unchanged. State flips are reported by `sourceControlledContentChangedTargets`
+  so the source session re-emits the region. Image policy is unchanged: an
+  image inside a stateless controlled region still counts as a control image
+  (`hasSourceAriaControlledRegionAncestor`), so the OCR gate is as before.
+- **Tests.** `tests/stateless-controlled-region.test.ts` (5): the carousel
+  wrapper is readable while its stateful neighbour stays withheld; each state
+  attribute, `role=tab`, a native control and a tablist member flip it back to
+  withheld; the flip is a changed target in both directions; the banner image
+  remains a control image. The offline freee reproduction was a temporary test,
+  not kept (site HTML is not committed).
+- **Docs.** `docs/replica-fidelity.md` states the rule.
+- **Not proven.** Whether this is the whole of the owner's observation. The
+  sanitizer never removed the slide `<img>` element itself, only its text and
+  private attributes, so the missing image in the readout is either the same
+  refresh seen mid-replacement or something in the live patch path; the owner
+  re-tests with the `.8` build and, if the picture still shrinks or vanishes,
+  runs the structural readout in the session-close handover.
+
+Build identity `0.5.0 beta v.20260922.8`; `dist/chrome-unpacked` re-synced.
+Gate: `npm run check` green, **1,410 tests pass, 1 skipped** (+5). The publish
+becomes **D50**.
