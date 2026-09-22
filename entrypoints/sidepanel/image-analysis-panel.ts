@@ -92,6 +92,13 @@ export class ImageAnalysisPanel {
   #renderKey: string | undefined;
   #details: HTMLDetailsElement | undefined;
   #output: HTMLOutputElement | undefined;
+  /**
+   * Re-applies each method toggle's templated aria-label. The label is
+   * written with `localizeTemplate` rather than the `data-ui` marker path, so
+   * the localizer's DOM pass cannot re-drive it; these thunks are rebuilt
+   * whenever the method list is.
+   */
+  #methodToggleRelocalizers: readonly (() => void)[] = [];
 
   constructor(private readonly environment: ImageAnalysisPanelEnvironment) {
     this.diagnostics =
@@ -125,13 +132,15 @@ export class ImageAnalysisPanel {
   }
 
   /**
-   * Re-renders the diagnostics output after a language switch (finding F2).
-   * Its empty-state placeholder is written imperatively rather than through the
-   * `data-ui` marker path, so the localizer's DOM pass does not re-drive it; the
-   * rest of the panel re-localizes through that pass. Recorded diagnostic lines
-   * are content-free and language-independent, so re-joining them is harmless.
+   * Re-renders the panel's imperatively written text after a language switch
+   * (finding F2): the diagnostics empty-state placeholder and each method
+   * toggle's templated aria-label. Both are written outside the `data-ui`
+   * marker path, so the localizer's DOM pass does not re-drive them; the rest
+   * of the panel re-localizes through that pass. Recorded diagnostic lines are
+   * content-free and language-independent, so re-joining them is harmless.
    */
   relocalize(): void {
+    for (const apply of this.#methodToggleRelocalizers) apply();
     this.renderDiagnostics();
   }
 
@@ -381,6 +390,8 @@ export class ImageAnalysisPanel {
       view.imageReadingMethodOrder,
       compiledOrder,
     );
+    const toggleRelocalizers: (() => void)[] = [];
+    this.#methodToggleRelocalizers = toggleRelocalizers;
     readingOrder.forEach((id, index) => {
       const item = document.createElement('li');
       const providerToggle = document.createElement('label');
@@ -389,13 +400,17 @@ export class ImageAnalysisPanel {
       const enabled = document.createElement('input');
       enabled.type = 'checkbox';
       enabled.checked = !disabledMethods.has(id);
-      enabled.setAttribute(
-        'aria-label',
-        this.environment.localizeTemplate(
-          enabled.checked ? UI_STRINGS.imageMethodDisable : UI_STRINGS.imageMethodEnable,
-          this.environment.localizeUi(imageReadingMethodName(id)),
-        ),
-      );
+      const applyToggleLabel = (): void => {
+        enabled.setAttribute(
+          'aria-label',
+          this.environment.localizeTemplate(
+            enabled.checked ? UI_STRINGS.imageMethodDisable : UI_STRINGS.imageMethodEnable,
+            this.environment.localizeUi(imageReadingMethodName(id)),
+          ),
+        );
+      };
+      applyToggleLabel();
+      toggleRelocalizers.push(applyToggleLabel);
       enabled.addEventListener('change', () => {
         const nextDisabled = new Set(view.disabledImageReadingMethodIds);
         if (enabled.checked) nextDisabled.delete(id);
