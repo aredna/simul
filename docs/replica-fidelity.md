@@ -37,12 +37,19 @@ region keeps its CSS (those rules are often what hides the region); only the
 region's page text is withheld, and a privacy boundary withholds both. Whether
 a region is hidden is decided by computed style and geometry: content a script
 declares `hidden` or `aria-hidden` but the stylesheet paints anyway is ordinary
-page text. A region that controls reference with `aria-controls` but never
-collapse or select is ordinary page content too: a carousel's previous/next
-buttons carry no `aria-expanded`, `aria-selected`, pressed, checked or popup
-state and are not native controls or tabs, so the slide container they control
-keeps its text and images. A controlled region is withheld only while a
-stateful control references it and no unique tab relation proves it open.
+page text. "Paints" means a positive box that is not at zero opacity, not
+skipped by `content-visibility: hidden` (which is how Chrome renders
+`hidden="until-found"`), and not cut away by `clip` or `clip-path`; unreadable
+style keeps the declaration. A region that controls reference with
+`aria-controls` but never collapse or select is ordinary page content too: a
+carousel's previous/next buttons carry no `aria-expanded`, `aria-selected`,
+pressed, checked or popup state and are not native controls or tabs, so the
+slide container they control keeps its text and images. That holds only while
+the region's own box is painted and survives its overflow-clipping ancestors: a
+stateless "Show details" button that controls a panel collapsed to zero height,
+faded out or clipped away leaves the panel withheld until a layout change
+proves it painted. A controlled region is also withheld while a stateful
+control references it and no unique tab relation proves it open.
 
 When CSSOM is readable, Simul serializes sanitized rules and recursively
 flattens readable imports in order within rule, depth, string, and total payload

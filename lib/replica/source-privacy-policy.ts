@@ -325,11 +325,15 @@ export function createSourceControlledContentPolicy(
     // A region whose every controller is stateless (no expanded, selected,
     // pressed, checked or popup state, and no native control) is not a
     // disclosure: nothing collapses it, so its content is ordinary page
-    // content. Hidden-region rules still decide whether it is painted.
+    // content, but only while it is actually painted. A stateless "Show
+    // details" button can still control a panel collapsed to zero height,
+    // faded out or clipped away (bug-hunt P2); that stays withheld until a
+    // layout change re-proves it.
     for (const [panel, entries] of relations) {
       if (
         targets.get(panel) === 'withheld' &&
-        entries.every((entry) => entry.stateless)
+        entries.every((entry) => entry.stateless) &&
+        sourceElementBoxIsPainted(panel, sourceWindow, paintCache)
       ) targets.set(panel, 'controlled-region');
     }
     return finishSourceControlledContentPolicy(
@@ -781,6 +785,35 @@ export function sourceElementPathIsPainted(
     (current) =>
       sourceElementPaintState(current, sourceWindow, paintCache) === 'visible',
   )) return false;
+  return sourcePaintSurvivesClipping(element, path, sourceWindow, paintCache);
+}
+
+/**
+ * The element's own box is painted (displayed, visible, not faded, skipped or
+ * clipped, positive size) and some of it survives every overflow-clipping
+ * ancestor. Unlike `sourceElementPathIsPainted`, ancestors are not required to
+ * prove their own paint state; hidden-region rules already withhold content
+ * under a hidden ancestor. Unknown geometry fails closed.
+ */
+function sourceElementBoxIsPainted(
+  element: Element,
+  sourceWindow: Window | null | undefined,
+  paintCache: SourcePaintScanCache,
+): boolean {
+  if (sourceElementPaintState(element, sourceWindow, paintCache) !== 'visible') {
+    return false;
+  }
+  const path = sourcePaintPath(element, paintCache);
+  return Boolean(path) &&
+    sourcePaintSurvivesClipping(element, path!, sourceWindow, paintCache);
+}
+
+function sourcePaintSurvivesClipping(
+  element: Element,
+  path: readonly Element[],
+  sourceWindow: Window | null | undefined,
+  paintCache: SourcePaintScanCache,
+): boolean {
   let intersections = sourcePaintInputs(element, sourceWindow, paintCache).rects;
   if (!intersections || intersections.length === 0) return false;
   for (const ancestor of path.slice(1)) {

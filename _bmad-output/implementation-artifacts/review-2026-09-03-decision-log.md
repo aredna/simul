@@ -2050,3 +2050,48 @@ ruling from the bug-hunt review.
 
 Build identity `0.5.0 beta v.20260922.12`; `dist/chrome-unpacked` re-synced.
 Gate: `npm run check` green, **1,425 tests pass, 1 skipped** (+4).
+
+### D54. Hidden-region and stateless-region checks require a really painted box (2026-09-22)
+
+Same branch / PR #22, follow-up on D53. Findings P1 and P2 of the bug-hunt
+review: two of today's relaxations let text that `main` withheld reach the
+replica. Password, OTP and card values were never affected.
+
+- **P1 cause and change (D45).** A declared-hidden (`hidden`/`aria-hidden`)
+  region whose computed style showed it was kept whenever it had a positive
+  client rect, although `opacity: 0`, `content-visibility: hidden` (Chrome's
+  rendering of `hidden="until-found"`), `clip` and `clip-path` leave such a box
+  unpainted; the strict paint proof already reads all of them. The declaration
+  now also holds when any of these apply, for `hidden="until-found"`, and when
+  `display`/`visibility` are unreadable (the comment already promised that).
+  A faded account dropdown marked `aria-hidden`, a find-in-page answer and a
+  clipped panel are withheld again; the freee footer case (declared hidden,
+  forced visible and painted) is unchanged.
+- **P2 cause and change (D49).** A region every controller of which is
+  stateless became `controlled-region` without any paint check, so a "Show
+  details" button without `aria-expanded` exposed a panel collapsed with
+  `max-height: 0`, faded out, or clipped away by a zero-size overflow window.
+  The grant now requires the panel's own box to be painted
+  (`sourceElementPaintState` visible) and to survive its overflow-clipping
+  ancestors (the intersection half of `sourceElementPathIsPainted`, extracted
+  as `sourcePaintSurvivesClipping`). Ancestors are deliberately not required to
+  prove their own paint state, so an unrelated `clip-path` or declared-hidden
+  ancestor does not re-close a painted carousel; hidden ancestors are still
+  handled by the hidden-region rules. The existing layout-triggered policy
+  refresh re-proves the panel when it expands, and the flip is reported as a
+  changed target.
+- **Tests.** `html-mirror-protocol`: faded, `until-found`, `clip-path` and
+  `clip` regions are withheld while a painted declared-hidden region keeps its
+  text. `stateless-controlled-region`: collapsed, faded and clipped-away panels
+  behind stateless buttons stay withheld and out of the graph, the carousel
+  wrapper stays readable, and expanding the panel flips it to
+  `controlled-region` as a reported change. Both fail on `3533354`.
+- **Docs.** `docs/replica-fidelity.md` defines "paints" for both rules.
+- **Left open.** P3 (multi-token or unreadable roles count as stateless), P4
+  (`resolvedStyleSheetText` inside privacy regions, pre-existing), P5 (ancestor
+  role change does not refresh the policy) and P6 (the accepted D50 trade-off)
+  stay in the review.
+
+Build identity `0.5.0 beta v.20260922.13`; `dist/chrome-unpacked` re-synced
+(`page-mirror.js`, manifest). Gate: `npm run check` green, **1,427 tests pass,
+1 skipped** (+2).

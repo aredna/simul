@@ -3886,19 +3886,52 @@ function elementStartsHiddenOrControlledDisclosureRegion(
     const style = getComputedStyle.call(view, element);
     const display = typeof style?.display === 'string'
       ? style.display.trim().toLowerCase()
-      : '';
+      : undefined;
     const visibility = typeof style?.visibility === 'string'
       ? style.visibility.trim().toLowerCase()
-      : '';
+      : undefined;
     if (
       display === 'none' ||
       visibility === 'hidden' || visibility === 'collapse'
     ) return true;
     if (!declaredHidden) return false;
+    // The declaration yields only to a box that is really painted, by the
+    // same inputs the strict paint proof reads (bug-hunt P1): unreadable
+    // style, `hidden="until-found"`, zero opacity, skipped content, or a
+    // clip keep it.
+    if (
+      display === undefined ||
+      visibility === undefined ||
+      element.getAttribute('hidden')?.trim().toLowerCase() === 'until-found' ||
+      declaredHiddenRegionIsUnpainted(style)
+    ) return true;
     return !hasSourcePositivePaintBox(element);
   } catch {
     return true;
   }
+}
+
+/** Content-free: computed style that leaves a displayed box unpainted. */
+function declaredHiddenRegionIsUnpainted(style: CSSStyleDeclaration): boolean {
+  const read = (name: string): string | undefined => {
+    const value = typeof style.getPropertyValue === 'function'
+      ? style.getPropertyValue(name)
+      : undefined;
+    return typeof value === 'string' ? value.trim().toLowerCase() : undefined;
+  };
+  const opacity = typeof style.opacity === 'string'
+    ? style.opacity.trim()
+    : read('opacity');
+  if (opacity !== undefined && opacity !== '' && Number(opacity) === 0) {
+    return true;
+  }
+  if (read('content-visibility') === 'hidden') return true;
+  const clip = read('clip');
+  if (
+    clip !== undefined && clip !== '' && clip !== 'auto' && clip !== 'none'
+  ) return true;
+  const clipPath = read('clip-path');
+  return clipPath !== undefined && clipPath !== '' && clipPath !== 'none';
 }
 
 /** Content-free: whether any client rect of the element has a positive size. */

@@ -151,6 +151,71 @@ describe('stateless controlled regions', () => {
     expect(sourceControlledContentChangedTargets(after, before)).toContain(wrapper);
   });
 
+  it('keeps a stateless-controlled panel withheld while it is collapsed, faded or clipped away (P2)', () => {
+    const { document, window } = load(CAROUSEL.replace('</body>', `
+      <button id="show-collapsed" aria-controls="collapsed-panel">Show details</button>
+      <div id="collapsed-panel">Collapsed details</div>
+      <button id="show-faded" aria-controls="faded-panel">Show more</button>
+      <div id="faded-panel">Faded details</div>
+      <button id="show-clipped" aria-controls="clipped-panel">Show extra</button>
+      <div id="clip-window"><div id="clipped-panel">Clipped details</div></div>
+    </body>`));
+    const setRect = (
+      selector: string,
+      rect: { left: number; top: number; width: number; height: number },
+    ) => Object.defineProperty(document.querySelector(selector)!, 'getClientRects', {
+      configurable: true,
+      value: () => rectList(rect),
+    });
+    // `max-height: 0; overflow: hidden` on the panel, and on the clipping
+    // window around the third panel.
+    setRect('#collapsed-panel', { left: 0, top: 0, width: 320, height: 0 });
+    setRect('#clip-window', { left: 0, top: 0, width: 320, height: 0 });
+    const painted = window.getComputedStyle.bind(window);
+    Object.defineProperty(window, 'getComputedStyle', {
+      configurable: true,
+      value: ((element: Element) => {
+        const style = painted(element) as unknown as Record<string, unknown> & {
+          getPropertyValue: (name: string) => string;
+        };
+        if (element.id === 'faded-panel') return { ...style, opacity: '0' };
+        if (element.id === 'clip-window') {
+          return {
+            ...style,
+            overflowX: 'hidden',
+            overflowY: 'hidden',
+            getPropertyValue: (name: string) =>
+              name.startsWith('overflow') ? 'hidden' : style.getPropertyValue(name),
+          };
+        }
+        return style;
+      }) as unknown as Window['getComputedStyle'],
+    });
+
+    const policy = createSourceControlledContentPolicy(document, window);
+    for (const id of ['#collapsed-panel', '#faded-panel', '#clipped-panel']) {
+      expect(policy.targets.get(document.querySelector(id)!)).toBe('withheld');
+    }
+    // The painted carousel wrapper is unaffected.
+    expect(policy.targets.get(document.querySelector('#swiper-wrapper-1')!))
+      .toBe('controlled-region');
+    const serialized = JSON.stringify(
+      sanitizeSourceDocument(document, window, new WeakNodeIdRegistry(), undefined, 'passive'),
+    );
+    expect(serialized).toContain('Slide one headline');
+    expect(serialized).not.toContain('Collapsed details');
+    expect(serialized).not.toContain('Faded details');
+    expect(serialized).not.toContain('Clipped details');
+
+    // Expanding the panel makes it ordinary page content, and the flip is
+    // reported so the source session re-emits it.
+    setRect('#collapsed-panel', { left: 0, top: 0, width: 320, height: 40 });
+    const expanded = createSourceControlledContentPolicy(document, window);
+    const panel = document.querySelector('#collapsed-panel')!;
+    expect(expanded.targets.get(panel)).toBe('controlled-region');
+    expect(sourceControlledContentChangedTargets(policy, expanded)).toContain(panel);
+  });
+
   it('still counts images inside a stateless controlled region as control images', () => {
     const { document, window } = load();
     const policy = createSourceControlledContentPolicy(document, window);
