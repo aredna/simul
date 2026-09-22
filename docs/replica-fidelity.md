@@ -128,7 +128,15 @@ Both selectable policies continue to block:
   effects, plus base-URL overrides that could externalize local SVG fragments;
 - passwords, password/authentication autocomplete, one-time codes, WebAuthn,
   every `cc-*` autocomplete class, hidden/file inputs, file paths, and CSS
-  text-security content regardless of the selected readable-content profile;
+  text-security content regardless of the selected readable-content profile
+  (a class or style that changes twice within one observer batch on a region
+  that holds a value-bearing control, such as a native input, select or
+  textarea, editable text, or a text-entry, checked or selected role, is
+  treated as a possible masking transition and that region stays a credential
+  secret for the page's lifetime; a region that holds only activation
+  controls, such as links, buttons, tabs and menu items, is ordinary content,
+  so a carousel's slides and bullets keep their text and images through every
+  move);
 - native-select submission values, names, data attributes, datalist content,
   rich picker descendants, and private dropdown ancestry (only bounded visible
   labels and presentation state are eligible); and
