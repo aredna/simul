@@ -21,16 +21,21 @@ export function automaticTranslationAction(
 /**
  * Source-only mode never resumes translation, even when saved automation or a
  * prior manual request would otherwise make the translation eligible.
+ *
+ * Enabled image translation counts as intent for the page text: the owner
+ * wants page text and image text translated together, never image overlays on
+ * an untranslated page (D46).
  */
 export function replicaViewTranslationAction(
   replicaViewMode: ReplicaViewMode,
   autoTranslationEnabled: boolean,
   translationDesired: boolean,
   availability: TranslationAvailability,
+  imageTranslationEnabled = false,
 ): AutomaticTranslationAction {
   if (replicaViewMode === 'source-only') return 'skip';
   return automaticTranslationAction(
-    autoTranslationEnabled || translationDesired,
+    autoTranslationEnabled || translationDesired || imageTranslationEnabled,
     availability,
   );
 }

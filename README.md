@@ -14,7 +14,7 @@ Simul started as a quick build for the OpenAI Build Week hackathon, made as
 something we would use ourselves. We are now sharing it so others can use it
 too.
 
-Current build: **0.5.0 beta v.20260922.4** · Desktop Chrome **138+** ·
+Current build: **0.5.0 beta v.20260922.5** · Desktop Chrome **138+** ·
 Manifest V3
 
 ## What you need
@@ -48,7 +48,7 @@ Keep the folder where it is while the extension is installed. To update,
 replace the folder with the new version, then select **Reload** on the Simul
 card in `chrome://extensions`, reload the page, and reopen the companion. The
 card shows version `0.5.0`; Simul's settings show
-`Build 0.5.0 beta v.20260922.4`.
+`Build 0.5.0 beta v.20260922.5`.
 
 This is an unpacked beta, not a Chrome Web Store release, so Chrome does not
 update it automatically.
@@ -62,11 +62,13 @@ update it automatically.
 3. Leave **From** on **Auto-detect** or pick the page's language, then pick
    **To**. Once that language pair is installed, the companion's own labels,
    hints, and status messages follow the **To** language as well.
-4. If Chrome asks, select **Translate page** so it can prepare the on-device
-   language pack.
+4. Select **Translate page**. Chrome may first prepare the on-device language
+   pack. The page is translated on every visit only if you save automatic
+   translation for the site in settings, or if OCR is on.
 5. Use **Fit**, **1:1**, zoom, layout, and scroll-following to compare the
    original with the translation.
-6. Turn **OCR On** only when you want text inside images translated too.
+6. Turn **OCR On** when you want text inside images translated too. Page text
+   and image text are translated together.
 7. Use **Rebuild mirror** if the page changed in a way the mirror could not
    follow.
 
@@ -106,7 +108,8 @@ extension session.
 
 ### Image text
 
-Image translation is persisted but **off by default**. When enabled, Simul:
+Image translation is persisted but **off by default**. When enabled, it also
+translates the page text of the mirrored page, and for images Simul:
 
 1. inspects policy-approved, visible top-frame `<img>` elements;
 2. first tries direct `aria-label` or `alt` text, which needs no pixel access;

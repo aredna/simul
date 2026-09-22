@@ -316,6 +316,16 @@ describe('TranslationDriver page translation', () => {
     expect(harness.statuses.at(-1)).toContain('needs one Translate click');
   });
 
+  it('translates the page text when image translation is on, without a Translate click (D46)', async () => {
+    const harness = setup();
+    harness.state.resolvedSourceLanguage = 'ja';
+    harness.state.availability = 'available';
+    harness.state.preferences = { ...harness.state.preferences, imageTranslationEnabled: true };
+    expect(harness.state.translationDesired).toBe(false);
+    await harness.driver.maybeTranslateAutomatically(1, IDENTITY.url);
+    expect(harness.coordinator.translateCurrent).toHaveBeenCalledTimes(1);
+  });
+
   it('applies language preferences without recording intent unless the user acted', async () => {
     const harness = setup({ documentLanguage: 'ja' });
     await harness.driver.applyLanguagePreferences(false);

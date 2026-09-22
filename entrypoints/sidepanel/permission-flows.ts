@@ -186,6 +186,12 @@ export class PermissionFlows {
             : UI_STRINGS.statusImageTranslationOffPartialAccess,
         outcome.narrowAccessRestored ? 'success' : 'warning',
       );
+      // Page text and image text translate together: switching image
+      // translation on for a mirrored page also asks for the page text, the
+      // same way saving an automatic scope does (D46).
+      if (enabled && state.snapshot && !state.isLiveSourceOnlyMode) {
+        await this.environment.requestAutomaticTranslation(state.pageUrl ?? '');
+      }
     } catch (error) {
       await preferenceClient.reloadFromStorage();
       if (error instanceof ImageAccessReleasedError) {

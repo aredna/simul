@@ -631,6 +631,7 @@ export class TranslationDriver {
       isAutoTranslationEnabled(state.preferences, pageUrl),
       state.translationDesired,
       state.availability,
+      state.preferences.imageTranslationEnabled,
     );
     if (action === 'translate') {
       await this.startTranslation(true, generation);

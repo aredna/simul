@@ -179,6 +179,25 @@ describe('PermissionFlows image access', () => {
     expect(harness.state.imageCaptureAccess).toBe('granted');
   });
 
+  it('asks for the page text when image translation is switched on for a mirrored page (D46)', async () => {
+    const harness = setup({ pageUrl: 'https://example.com/article' });
+    harness.state.snapshot = {} as never;
+    await harness.flows.changeImageTranslationEnabled(true);
+    expect(harness.state.preferences.imageTranslationEnabled).toBe(true);
+    expect(harness.requestAutomaticTranslation).toHaveBeenCalledWith('https://example.com/article');
+
+    await harness.flows.changeImageTranslationEnabled(false);
+    expect(harness.requestAutomaticTranslation).toHaveBeenCalledTimes(1);
+  });
+
+  it('does not ask for the page text without a mirrored replica', async () => {
+    // Source-only mode is covered by replicaViewTranslationAction, which the
+    // request resolves through; this harness cannot persist that view mode.
+    const harness = setup({ pageUrl: 'https://example.com/article' });
+    await harness.flows.changeImageTranslationEnabled(true);
+    expect(harness.requestAutomaticTranslation).not.toHaveBeenCalled();
+  });
+
   it('skips the grant prompt when no pixel provider could use it', async () => {
     const harness = setup({ usablePixelProviders: 0 });
     await harness.flows.changeImageTranslationEnabled(true, true);

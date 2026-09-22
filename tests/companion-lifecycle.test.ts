@@ -45,6 +45,18 @@ describe('replicaViewTranslationAction', () => {
       replicaViewTranslationAction('translated', false, true, 'available'),
     ).toBe('translate');
   });
+
+  it('treats enabled image translation as intent for the page text (D46)', () => {
+    expect(
+      replicaViewTranslationAction('translated', false, false, 'available', true),
+    ).toBe('translate');
+    expect(
+      replicaViewTranslationAction('translated', false, false, 'downloadable', true),
+    ).toBe('needs-user-action');
+    expect(
+      replicaViewTranslationAction('source-only', false, false, 'available', true),
+    ).toBe('skip');
+  });
 });
 
 describe('isAvailabilityRequestCurrent', () => {
