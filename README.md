@@ -14,7 +14,7 @@ Simul started as a quick build for the OpenAI Build Week hackathon, made as
 something we would use ourselves. We are now sharing it so others can use it
 too.
 
-Current build: **0.5.0 beta v.20260922.11** · Desktop Chrome **138+** ·
+Current build: **0.5.0 beta v.20260922.12** · Desktop Chrome **138+** ·
 Manifest V3
 
 ## What you need
@@ -48,7 +48,7 @@ Keep the folder where it is while the extension is installed. To update,
 replace the folder with the new version, then select **Reload** on the Simul
 card in `chrome://extensions`, reload the page, and reopen the companion. The
 card shows version `0.5.0`; Simul's settings show
-`Build 0.5.0 beta v.20260922.11`.
+`Build 0.5.0 beta v.20260922.12`.
 
 This is an unpacked beta, not a Chrome Web Store release, so Chrome does not
 update it automatically.
@@ -115,7 +115,9 @@ translates the page text of the mirrored page, and for images Simul:
 
 1. inspects policy-approved, visible top-frame `<img>` elements;
 2. first tries direct `aria-label` or `alt` text, which needs no pixel access
-   and is shown as a caption band along the bottom edge of the image;
+   and is shown as a caption band along the bottom edge of the image (this
+   method is on once the first-run setup is done, so images with alt text get
+   a translated caption before image access is granted);
 3. for pixel OCR, verifies stable visible geometry, captures only the relevant
    visible-tab crop, and reduces it to at most 4 megapixels;
 4. tries Chrome TextDetector when the installed platform exposes it, then the

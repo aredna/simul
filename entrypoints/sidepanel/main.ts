@@ -11,6 +11,7 @@ import {
 } from '../../lib/companion-lifecycle';
 import {
   nextCompanionOverlay,
+  toolbarOcrClickAction,
   type CompanionOverlay,
 } from '../../lib/companion-ui-state';
 import type { CompanionStatusTone } from '../../lib/companion-ui-localization';
@@ -245,6 +246,9 @@ const visibleReplayHost = new VisibleReplayHost({
 });
 let replicaTranslationCoordinator!: ReplicaTranslationCoordinator;
 let imageTranslationController!: ImageTranslationController;
+// Set when Chrome refused image access after a toolbar request; the next
+// toolbar click then turns image text off instead of prompting again (G3).
+let toolbarOcrAccessDeclined = false;
 const replicaSurfaceRouter = new ReplicaSurfaceRouter();
 const isolatedHtmlReplicaEngine = new IsolatedHtmlReplicaEngine({
   presentationHost: visibleReplayHost,
@@ -477,8 +481,9 @@ const imageAnalysisPanel = new ImageAnalysisPanel({
   setUiAttr,
   localizeUi,
   localizeTemplate: localizeUiTemplate,
-  changeImageTranslationEnabled: (enabled, requestPixelAccess) =>
-    permissionFlows.changeImageTranslationEnabled(enabled, requestPixelAccess),
+  changeImageTranslationEnabled: async (enabled, requestPixelAccess) => {
+    await permissionFlows.changeImageTranslationEnabled(enabled, requestPixelAccess);
+  },
   commitPatch: (patch) => preferenceClient.commitImageAnalysis(patch),
 });
 
@@ -783,13 +788,21 @@ toolbarSizeToggleButton.addEventListener('click', () => {
   updateMirrorLayout();
 });
 toolbarOcrToggleButton.addEventListener('click', () => {
-  if (!state.preferences.imageTranslationEnabled) {
+  const action = toolbarOcrClickAction({
+    enabled: state.preferences.imageTranslationEnabled,
+    accessGranted: state.imageCaptureAccess === 'granted',
+    usablePixelProviders: imageTranslationConfig.usablePixelProviderOrder().length,
+    accessDeclined: toolbarOcrAccessDeclined,
+  });
+  if (action === 'enable') {
+    toolbarOcrAccessDeclined = false;
     void permissionFlows.changeImageTranslationEnabled(true);
-  } else if (
-    state.imageCaptureAccess !== 'granted' &&
-    imageTranslationConfig.usablePixelProviderOrder().length > 0
-  ) {
-    void permissionFlows.changeImageTranslationEnabled(true, true);
+  } else if (action === 'request-access') {
+    void permissionFlows.changeImageTranslationEnabled(true, true).then((result) => {
+      if (result !== 'denied') return;
+      toolbarOcrAccessDeclined = true;
+      updateControls();
+    });
   } else {
     void permissionFlows.changeImageTranslationEnabled(false);
   }
@@ -1331,6 +1344,8 @@ function syncToolbarPreferenceControls(): void {
     state.preferences.imageTranslationEnabled
       ? state.imageCaptureAccess === 'granted'
         ? UI_STRINGS.ocrTitleOn
+        : toolbarOcrAccessDeclined
+          ? UI_STRINGS.ocrTitleAccessDeclined
         : imageTranslationConfig.usablePixelProviderOrder().length === 0
           ? state.preferences.disabledImageReadingMethodIds.includes(
               ACCESSIBILITY_TEXT_METHOD_ID,

@@ -317,6 +317,53 @@ describe('preference coordinator', () => {
     expect(adapter.hasGrant('https://orphan.example/*')).toBe(false);
   });
 
+  it('keeps a pending reset from adopting the old broad grant through the setup save (G1)', async () => {
+    const adapter = new MemoryPreferenceAdapter({
+      ...parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES),
+      autoTranslateAllSites: true,
+      readScopeSetupVersion: 1,
+      grantedPermissionOrigins: ['<all_urls>'],
+    });
+    adapter.grant('<all_urls>');
+    const coordinator = new PreferenceCoordinator(adapter);
+
+    adapter.failRemove = true;
+    const reset = await coordinator.run({
+      type: 'simul:preferences:reset-all',
+      expectedResetRevision: 0,
+    });
+    expect(reset.cleanup).toMatchObject({ status: 'pending' });
+    expect(adapter.preferences.imageTranslationEnabled).toBe(true);
+    adapter.failRemove = false;
+
+    // The mandatory setup dialog saves while the cleanup is still pending.
+    const setup = await coordinator.run({
+      type: 'simul:preferences:complete-read-scope-setup',
+      expectedResetRevision: 1,
+      expectedSetupVersion: 0,
+      expectedReadScopeFingerprint: 'read-v1-000000',
+      patch: {
+        replicaReadScope: {
+          controlSemantics: true,
+          controlImages: true,
+          disclosureContent: true,
+          formValues: false,
+          personalDataValues: false,
+          editableContent: false,
+        },
+      },
+    });
+    expect(setup.applied).toBe(true);
+    expect(adapter.preferences.grantedPermissionOrigins).not.toContain('<all_urls>');
+
+    const retry = await coordinator.run({
+      type: 'simul:preferences:retry-reset-cleanup',
+      expectedResetRevision: 1,
+    });
+    expect(retry.cleanup).toEqual({ status: 'complete', remainingManagedOrigins: 0 });
+    expect(adapter.hasGrant('<all_urls>')).toBe(false);
+  });
+
   it('rejects every stale settings writer after a reset revision advances', async () => {
     const adapter = new MemoryPreferenceAdapter();
     adapter.grant('https://site.example/*');
@@ -1265,6 +1312,7 @@ class MemoryPreferenceAdapter implements PreferenceCoordinatorAdapter {
   saveCalls = 0;
   getAllOriginsCalls = 0;
   failGetAllOriginsOnCall: number | undefined;
+  failRemove = false;
   private readonly grants = new Set<string>();
 
   constructor(initial?: CompanionPreferences) {
@@ -1294,6 +1342,7 @@ class MemoryPreferenceAdapter implements PreferenceCoordinatorAdapter {
   }
 
   async remove(origins: string[]): Promise<boolean> {
+    if (this.failRemove) throw new Error('permission removal failed');
     let removed = false;
     for (const origin of origins) {
       removed = this.grants.delete(origin) || removed;

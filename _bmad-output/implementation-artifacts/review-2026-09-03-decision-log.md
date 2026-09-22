@@ -2002,3 +2002,51 @@ review.
 
 Build identity `0.5.0 beta v.20260922.11`; `dist/chrome-unpacked` re-synced.
 Gate: `npm run check` green, **1,421 tests pass, 1 skipped** (+5).
+
+### D53. A pending reset cannot re-adopt the broad grant; the OCR button can always turn OCR off (2026-09-22)
+
+Same branch / PR #22, follow-up on D52. Findings G1, G3 and the G4 docs
+ruling from the bug-hunt review.
+
+- **G1 cause.** `withGrantLedger` runs on every save and adopts each origin
+  the saved intent retains that Chrome still grants. While a reset's cleanup
+  was pending (Chrome's `permissions.remove` failed), the setup dialog's save
+  found image translation on (the D47 default) and the pre-reset
+  `<all_urls>` still granted, so it wrote `<all_urls>` into the freshly
+  cleared ledger; the retry then treated that entry as the user's request and
+  reported `{ status: 'complete', remainingManagedOrigins: 0 }` with the
+  grant still in Chrome. D47's claim that the ledger "never runs before a
+  pending cleanup" was wrong.
+- **G1 change.** While `resetCleanupPendingRevision > 0` the ledger adopts only
+  what the reset keeps (`resetRetainedPermissionOrigins`: site and all-sites
+  automation the user chose after the reset, and image translation's broad
+  grant only when the ledger already holds it). Outside a pending reset the
+  rule is unchanged. Per the owner's ruling ("keep the simplest option"), G2 is
+  not changed: one broad grant stays while any enabled feature, including
+  default-on image translation, uses it.
+- **G3 cause and change.** With OCR on by default, no image access and a usable
+  pixel provider, every toolbar OCR click re-requested the grant, and a refusal
+  left OCR on, so the toolbar could never turn OCR off (and, through D46, never
+  stop the automatic page translation). The click decision is now
+  `toolbarOcrClickAction` (`lib/companion-ui-state.ts`): after Chrome refuses in
+  this panel, the next click turns image text off, and the button's title says
+  so (`ocrTitleAccessDeclined`). Turning OCR on again clears the refusal.
+  `PermissionFlows.changeImageTranslationEnabled` now resolves with
+  `'applied' | 'denied' | 'activation' | 'busy' | 'failed'` so the toolbar can
+  tell a refusal from a prompt that needs another gesture.
+- **G4 (docs).** Completing the first-run setup turns the accessibility-text
+  method on (unchanged, owner ruling "keep, fix the docs"), so with image
+  translation on by default every eligible alt-bearing image gets a translated
+  caption band before any image access. D47's sentence that the method "stays
+  disabled by default" holds only before setup. README (Image text, step 2) and
+  `docs/translation-companion.md` now say so, and the latter no longer calls
+  the label a whole-image box (D48).
+- **Tests.** `preference-coordinator`: a reset with failing removal, then the
+  setup save, then the retry leaves no `<all_urls>` (fails before the change).
+  `companion-ui-state`: the click decision table (2). `permission-flows`: a
+  refusal from the default "on" state resolves `'denied'` and OCR can then be
+  turned off; the activation case resolves `'activation'`. `sidepanel-ui`'s
+  source assertion follows the new wiring.
+
+Build identity `0.5.0 beta v.20260922.12`; `dist/chrome-unpacked` re-synced.
+Gate: `npm run check` green, **1,425 tests pass, 1 skipped** (+4).

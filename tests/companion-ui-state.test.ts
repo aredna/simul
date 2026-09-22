@@ -4,6 +4,7 @@ import {
   nextCompanionOverlay,
   reverseTranslationPair,
   toolbarActivityLabel,
+  toolbarOcrClickAction,
   toolbarProgressState,
   type ToolbarActivity,
 } from '../lib/companion-ui-state';
@@ -95,5 +96,27 @@ describe('companion UI state', () => {
       expect(ALL_UI_STRINGS).toContain(label);
     }
     expect(ALL_UI_STRINGS).toContain(toolbarActivityLabel(IDLE_ACTIVITY));
+  });
+});
+
+describe('toolbar OCR click (G3)', () => {
+  const click = (overrides: Partial<Parameters<typeof toolbarOcrClickAction>[0]>) =>
+    toolbarOcrClickAction({
+      enabled: true,
+      accessGranted: false,
+      usablePixelProviders: 1,
+      accessDeclined: false,
+      ...overrides,
+    });
+
+  it('asks for image access from the default "on" state, then turns OCR off once Chrome refused', () => {
+    expect(click({})).toBe('request-access');
+    expect(click({ accessDeclined: true })).toBe('disable');
+  });
+
+  it('turns OCR on when off and off when it has access or nothing to ask for', () => {
+    expect(click({ enabled: false, accessDeclined: true })).toBe('enable');
+    expect(click({ accessGranted: true })).toBe('disable');
+    expect(click({ usablePixelProviders: 0 })).toBe('disable');
   });
 });

@@ -153,7 +153,10 @@ When explicitly enabled, an exact-document source Port observes top-frame
 their URL or text. One saved priority list contains direct accessibility text,
 Chrome TextDetector, and packaged Tesseract.js. The accessibility method lazily reads only a
 direct image `aria-label` or `alt`, after policy and credential checks, and can
-translate/project it as one inert whole-image label without screenshot access.
+translate/project it as one inert caption band along the image's bottom edge
+without screenshot access. Completing the first-run read-scope setup turns
+this method on, so with image translation on by default every eligible image
+with alt text gets a translated caption before any image access is granted.
 Decorative, hidden, zero-area, filename/URL-like, or secret-overlapping evidence
 is rejected. Positive-area accessibility labels are not blocked by the OCR
 small-image setting.

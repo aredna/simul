@@ -629,6 +629,11 @@ export class PreferenceCoordinator {
    * The ledger holds every managed grant the saved intent relies on, minus
    * the grants this command released. A grant present in Chrome that no
    * intent ever needed stays outside it and is never revoked automatically.
+   *
+   * While a reset's cleanup is pending, only what the reset keeps may be
+   * adopted: image translation is on by default, so a save in that window
+   * (the setup dialog) must not turn the pre-reset broad grant into proof
+   * that the user asked for it again.
    */
   private async withGrantLedger(
     preferences: CompanionPreferences,
@@ -640,7 +645,10 @@ export class PreferenceCoordinator {
     } catch {
       // Without a readable grant list the ledger only shrinks by releases.
     }
-    for (const origin of retainedPermissionOrigins(preferences)) {
+    const adoptable = preferences.resetCleanupPendingRevision > 0
+      ? resetRetainedPermissionOrigins(preferences)
+      : retainedPermissionOrigins(preferences);
+    for (const origin of adoptable) {
       if (actual?.has(origin)) ledger.add(origin);
     }
     for (const origin of this.removedOrigins) ledger.delete(origin);

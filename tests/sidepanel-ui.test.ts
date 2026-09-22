@@ -315,8 +315,10 @@ describe('sidepanel UI structure', () => {
     expect(script).toContain(
       'usablePixelProviderCount: imageTranslationConfig.usablePixelProviderOrder().length,',
     );
+    // The toolbar asks for pixel access only while a pixel provider could use
+    // it and Chrome has not refused in this panel (toolbarOcrClickAction, G3).
     expect(script).toContain(
-      "imageCaptureAccess !== 'granted' &&\n    imageTranslationConfig.usablePixelProviderOrder().length > 0",
+      "accessGranted: state.imageCaptureAccess === 'granted',\n    usablePixelProviders: imageTranslationConfig.usablePixelProviderOrder().length,",
     );
     expect(permissionFlows).toContain(
       'const shouldRequestPixelAccess = requestPixelAccess &&',
