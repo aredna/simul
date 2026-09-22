@@ -117,8 +117,8 @@ The owed list, accumulated since 2026-09-06, all of it needing a browser:
    and that the footer product links under each "製品" heading carry their
    text; the page should look like the tab, with the 2.7 MB global stylesheet
    fetched by the replica. The carousel banner is whitewashed by OCR overlays
-   once the page translates (it is almost all text); how those overlays should
-   look is the one open decision (D47). For image text, switch the
+   once the page translates (it is almost all text); the owner ruled that the
+   overlays stay as they are (D47 addendum). For image text, switch the
    readable-content scope to Standard; OCR is on by default and, once image
    access is granted, the page text translates with it (D46).
 4. **Replica proofs (D37–D39):** a page with a slider or spinbutton (values
@@ -218,8 +218,8 @@ skips without a browser.
 
 ## Still owed after the publish
 
-- The owner's decision on how OCR overlays should look on text-heavy banners
-  (D47) and the final go for the publish are the only things left.
+- Nothing is open from the Chrome pass. The final go for the publish is the
+  only thing left.
 - F6 (memoizing `Intl.DisplayNames` per target language) stays declined (D41).
 - `deferred-work.md` still holds the 28 research-sized entries listed in
   `handover-2026-09-06-batches-merged.md`.

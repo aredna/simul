@@ -1722,3 +1722,8 @@ carousel's images "disappeared again".
 
 Build identity `0.5.0 beta v.20260922.6`; `dist/chrome-unpacked` re-synced.
 NAS `Dev/simul/` re-mirrored.
+
+**D47 addendum (owner ruling).** OCR overlays stay as they are: opaque white
+boxes over each recognised line, also on text-heavy banners such as the
+freee.co.jp carousel. Nothing is open from the Chrome pass; the publish waits
+only for the owner's go.
