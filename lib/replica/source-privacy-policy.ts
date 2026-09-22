@@ -104,9 +104,21 @@ export interface SourceControlledTabRelationship {
   readonly selected: boolean;
 }
 
+/**
+ * A resolved `aria-controls` target is withheld unless it is a uniquely proven
+ * open tab, or every control that references it carries no disclosure state
+ * (a carousel's previous/next buttons, a "scroll to" control). Such a
+ * controlled region is ordinary page content rather than a collapsed
+ * disclosure; the hidden-region rules still apply to it.
+ */
+export type SourceControlledTargetState =
+  | 'open-tab'
+  | 'controlled-region'
+  | 'withheld';
+
 export interface SourceControlledContentPolicy {
-  /** Every resolved target is withheld unless it is a uniquely proven open tab. */
-  readonly targets: ReadonlyMap<Element, 'open-tab' | 'withheld'>;
+  /** Every resolved target is withheld unless it is a proven open tab or a stateless controlled region. */
+  readonly targets: ReadonlyMap<Element, SourceControlledTargetState>;
   readonly tabs: readonly SourceControlledTabRelationship[];
   /** Identity-only context used to avoid rescanning for unrelated mutations. */
   readonly controllers: ReadonlySet<Element>;
@@ -161,7 +173,7 @@ export function createSourceControlledContentPolicy(
   sourceWindow: Window | null | undefined = sourceDocument?.defaultView,
   maximumNodes = DEFAULT_MAX_SOURCE_CONTROLLED_NODES,
 ): SourceControlledContentPolicy {
-  const targets = new Map<Element, 'open-tab' | 'withheld'>();
+  const targets = new Map<Element, SourceControlledTargetState>();
   const tabs: SourceControlledTabRelationship[] = [];
   const controllers = new Set<Element>();
   const referencedIds = new Set<string>();
@@ -251,6 +263,7 @@ export function createSourceControlledContentPolicy(
     const relations = new Map<Element, Array<{
       readonly trigger: Element;
       readonly structurallyUnique: boolean;
+      readonly stateless: boolean;
     }>>();
     let referencedIdBytes = 0;
     let unresolved = false;
@@ -288,6 +301,7 @@ export function createSourceControlledContentPolicy(
             structurallyUnique: rawIds.length === 1 &&
               isSafeSourceControlledId(id) &&
               sameRoot.length === 1 && sameRoot[0] === panel,
+            stateless: !sourceTriggerCarriesDisclosureState(trigger),
           }));
           relations.set(panel, entries);
         }
@@ -308,6 +322,16 @@ export function createSourceControlledContentPolicy(
       tabs.push(Object.freeze({ trigger, panel, selected }));
     }
     withholdContradictoryTablists(tabs, targets);
+    // A region whose every controller is stateless (no expanded, selected,
+    // pressed, checked or popup state, and no native control) is not a
+    // disclosure: nothing collapses it, so its content is ordinary page
+    // content. Hidden-region rules still decide whether it is painted.
+    for (const [panel, entries] of relations) {
+      if (
+        targets.get(panel) === 'withheld' &&
+        entries.every((entry) => entry.stateless)
+      ) targets.set(panel, 'controlled-region');
+    }
     return finishSourceControlledContentPolicy(
       targets,
       tabs,
@@ -343,7 +367,20 @@ export function sourceControlledContentIsWithheld(
     safelyReadSourceAttribute(element, 'id'),
   )) return true;
   const state = policy.targets.get(element);
-  return state !== undefined && state !== 'open-tab';
+  return state !== undefined && state !== 'open-tab' &&
+    state !== 'controlled-region';
+}
+
+/**
+ * True when `element` is an `aria-controls` target that stays readable only
+ * because every control referencing it is stateless. Image policy still
+ * treats such a region as control-adjacent.
+ */
+export function sourceControlledContentIsControlledRegion(
+  element: Element,
+  policy: SourceControlledContentPolicy,
+): boolean {
+  return policy.targets.get(element) === 'controlled-region';
 }
 
 /** Identity-only target diff used to rematerialize privacy-context changes. */
@@ -481,7 +518,7 @@ export function sourceControlledContentLayoutMayChange(
 }
 
 function finishSourceControlledContentPolicy(
-  targets: ReadonlyMap<Element, 'open-tab' | 'withheld'>,
+  targets: ReadonlyMap<Element, SourceControlledTargetState>,
   tabs: readonly SourceControlledTabRelationship[],
   controllers: ReadonlySet<Element>,
   referencedIds: ReadonlySet<string>,
@@ -552,7 +589,7 @@ function markResolvedSourceControlledTargets(
   controllers: readonly Element[],
   idsByRoot: ReadonlyMap<Node, ReadonlyMap<string, readonly Element[]>>,
   idsAcrossRoots: ReadonlyMap<string, readonly Element[]>,
-  targets: Map<Element, 'open-tab' | 'withheld'>,
+  targets: Map<Element, SourceControlledTargetState>,
 ): void {
   for (const controller of controllers) {
     const raw = safelyReadSourceAttribute(controller, 'aria-controls');
@@ -614,7 +651,7 @@ function appendSourceControlledId(
  */
 function withholdContradictoryTablists(
   tabs: SourceControlledTabRelationship[],
-  targets: Map<Element, 'open-tab' | 'withheld'>,
+  targets: Map<Element, SourceControlledTargetState>,
 ): void {
   const groups = new Map<Element, SourceControlledTabRelationship[]>();
   for (const tab of tabs) {
@@ -635,6 +672,51 @@ function withholdContradictoryTablists(
     const tab = tabs[index];
     if (tab && contradictory.has(tab)) tabs.splice(index, 1);
   }
+}
+
+const STATEFUL_CONTROLLER_ATTRIBUTES = Object.freeze([
+  'aria-expanded',
+  'aria-selected',
+  'aria-pressed',
+  'aria-checked',
+  'aria-haspopup',
+]);
+const STATEFUL_CONTROLLER_ROLES = new Set([
+  'tab',
+  'combobox',
+  'switch',
+  'checkbox',
+  'radio',
+  'menuitemcheckbox',
+  'menuitemradio',
+]);
+const STATEFUL_CONTROLLER_TAGS = new Set([
+  'input',
+  'select',
+  'textarea',
+  'details',
+  'summary',
+]);
+
+/**
+ * Whether a controller carries disclosure state that can collapse or select
+ * its target. Any present state attribute counts, whatever its value, so a
+ * `false` or malformed value still fails closed; unreadable attributes do too.
+ */
+function sourceTriggerCarriesDisclosureState(trigger: Element): boolean {
+  let tagName = '';
+  try {
+    tagName = trigger.localName.toLowerCase();
+  } catch {
+    return true;
+  }
+  if (STATEFUL_CONTROLLER_TAGS.has(tagName)) return true;
+  if (STATEFUL_CONTROLLER_ROLES.has(normalizedSourceRole(trigger))) return true;
+  for (const name of STATEFUL_CONTROLLER_ATTRIBUTES) {
+    // Present (any value) or unreadable both count as state.
+    if (safelyReadSourceAttribute(trigger, name) !== null) return true;
+  }
+  return closestSourceTablist(trigger) !== undefined;
 }
 
 function closestSourceTablist(trigger: Element): Element | undefined {

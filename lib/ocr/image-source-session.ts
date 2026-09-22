@@ -19,6 +19,7 @@ import {
   readSourceFlatTreeElementPath,
   sourceControlledContentLayoutMayChange,
   sourceControlledContentMutationsMayChange,
+  sourceControlledContentIsControlledRegion,
   sourceControlledContentIsWithheld,
   type SourceControlledContentPolicy,
 } from '../replica/source-privacy-policy';
@@ -534,8 +535,12 @@ export function hasSourceAriaControlledRegionAncestor(
   const path = readSourceFlatTreeElementPath(element);
   if (!path) return true;
   if (policy.overflow) return true;
+  // A stateless controlled region (a carousel's slide container) stays
+  // readable in the base graph, but its images remain control-adjacent for
+  // image policy, exactly as before.
   return path.some((current) =>
-    sourceControlledContentIsWithheld(current, policy)
+    sourceControlledContentIsWithheld(current, policy) ||
+    sourceControlledContentIsControlledRegion(current, policy)
   );
 }
 
