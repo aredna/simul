@@ -58,6 +58,14 @@ class ImageAccessReleasedError extends Error {
   }
 }
 
+/** What a request to change image translation ended with. */
+export type ImageTranslationChangeResult =
+  | 'applied'
+  | 'denied'
+  | 'activation'
+  | 'busy'
+  | 'failed';
+
 type ImageChangeOutcome =
   | { readonly kind: 'activation' }
   | { readonly kind: 'denied' }
@@ -133,15 +141,20 @@ export class PermissionFlows {
     }
   }
 
+  /**
+   * Turns image translation on or off, asking Chrome for image access when
+   * requested. Resolves with what happened so the toolbar can tell a refused
+   * grant ('denied') from a prompt that needs another gesture ('activation').
+   */
   async changeImageTranslationEnabled(
     enabled: boolean,
     requestPixelAccess = false,
-  ): Promise<void> {
+  ): Promise<ImageTranslationChangeResult> {
     const state = this.#state;
     const { setStatus, preferenceClient } = this.environment;
     if (state.permissionInFlight) {
       this.environment.syncPreferenceControls();
-      return;
+      return 'busy';
     }
     state.permissionInFlight = true;
     this.environment.renderImagePanel();
@@ -159,7 +172,7 @@ export class PermissionFlows {
           UI_STRINGS.statusChooseImageSettingAgain,
           'warning',
         );
-        return;
+        return 'activation';
       }
       if (outcome.kind === 'denied') {
         await preferenceClient.reloadFromStorage();
@@ -173,7 +186,7 @@ export class PermissionFlows {
             : UI_STRINGS.statusImageAccessDeniedOff,
           'warning',
         );
-        return;
+        return 'denied';
       }
 
       preferenceClient.applyCommitted(outcome.result.preferences);
@@ -192,6 +205,7 @@ export class PermissionFlows {
       if (enabled && state.snapshot && !state.isLiveSourceOnlyMode) {
         await this.environment.requestAutomaticTranslation(state.pageUrl ?? '');
       }
+      return 'applied';
     } catch (error) {
       await preferenceClient.reloadFromStorage();
       if (error instanceof ImageAccessReleasedError) {
@@ -202,12 +216,13 @@ export class PermissionFlows {
           UI_STRINGS.statusImageAccessReleasedNotSaved,
           'error',
         );
-        return;
+        return 'failed';
       }
       setStatus(
         UI_STRINGS.statusImageAccessUpdateFailed,
         'error',
       );
+      return 'failed';
     } finally {
       state.permissionInFlight = false;
       await this.refreshImageCaptureAccess();

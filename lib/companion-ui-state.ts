@@ -73,3 +73,26 @@ export function nextCompanionOverlay(
 ): CompanionOverlay | undefined {
   return current === requested ? undefined : requested;
 }
+
+export type ToolbarOcrClickAction = 'enable' | 'request-access' | 'disable';
+
+/**
+ * What a click on the toolbar OCR button does. Off turns image text on. On
+ * without image access asks Chrome for it until Chrome has refused in this
+ * panel; after a refusal the click turns image text off, so the toolbar never
+ * traps the user in a repeating prompt (bug-hunt finding G3).
+ */
+export function toolbarOcrClickAction(input: {
+  readonly enabled: boolean;
+  readonly accessGranted: boolean;
+  readonly usablePixelProviders: number;
+  readonly accessDeclined: boolean;
+}): ToolbarOcrClickAction {
+  if (!input.enabled) return 'enable';
+  if (
+    !input.accessGranted &&
+    input.usablePixelProviders > 0 &&
+    !input.accessDeclined
+  ) return 'request-access';
+  return 'disable';
+}

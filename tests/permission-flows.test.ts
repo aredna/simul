@@ -215,9 +215,20 @@ describe('PermissionFlows image access', () => {
     expect(harness.statuses.at(-1)).toContain('Chrome did not grant image access');
   });
 
+  it('reports a refused grant from the default "on" state so the toolbar can turn OCR off next (G3)', async () => {
+    const harness = setup({ requestAnswer: false });
+    expect(harness.stored.imageTranslationEnabled).toBe(true);
+    expect(await harness.flows.changeImageTranslationEnabled(true, true)).toBe('denied');
+    expect(harness.stored.imageTranslationEnabled).toBe(true);
+    expect(harness.state.permissionInFlight).toBe(false);
+
+    expect(await harness.flows.changeImageTranslationEnabled(false)).toBe('applied');
+    expect(harness.stored.imageTranslationEnabled).toBe(false);
+  });
+
   it('asks for a second gesture without user activation', async () => {
     const harness = setup({ userActivation: false });
-    await harness.flows.changeImageTranslationEnabled(true, true);
+    expect(await harness.flows.changeImageTranslationEnabled(true, true)).toBe('activation');
     expect(harness.permissions.request).not.toHaveBeenCalled();
     expect(harness.statuses.at(-1)).toContain('Choose the image setting again');
     expect(harness.state.permissionInFlight).toBe(false);

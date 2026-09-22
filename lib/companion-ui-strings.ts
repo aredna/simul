@@ -63,6 +63,8 @@ export const UI_STRINGS = {
     'Image translation is saved but pixel OCR needs image access. Click to grant access.',
   ocrTitleAccessibilityPaused:
     'Accessibility image text is on; pixel OCR is paused. Click to grant image access.',
+  ocrTitleAccessDeclined:
+    'Chrome did not grant image access. Click to turn image text off.',
   ocrTitleOff: 'Image text translation is off. Click to turn it on.',
 
   // Toolbar: tab-follow aria/title for the detached-window states.
