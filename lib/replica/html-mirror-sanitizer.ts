@@ -332,6 +332,12 @@ interface SerializeContext {
   readonly budget: HtmlMirrorReadBudget;
   readonly styleWork: HtmlMirrorStyleWorkBudget;
   readonly privateRegion: boolean;
+  /**
+   * True when page text is withheld for a privacy or menu reason. It is a
+   * subset of `privateRegion`, which also withholds hidden and controlled
+   * disclosure regions; stylesheet text is kept in those.
+   */
+  readonly privacyRegion: boolean;
   readonly privateAttributeRegion: boolean;
   readonly publicMenuRegion: boolean;
   readonly activationRegion: boolean;
@@ -716,6 +722,9 @@ export function sanitizeSourceSubtrees(
         privateRegion: inheritedElement
           ? hasSourceBaseWithheldAncestor(inheritedElement, controlledContent)
           : false,
+        privacyRegion: inheritedElement
+          ? hasSourcePrivacyWithheldAncestor(inheritedElement)
+          : false,
         privateAttributeRegion: inheritedElement
           ? hasSourcePrivateAttributeElementAncestor(inheritedElement)
           : false,
@@ -767,6 +776,9 @@ export function sanitizeSourceChildren(
     const privateRegion = parentElement
       ? hasSourceBaseWithheldAncestor(parentElement, controlledContent)
       : false;
+    const privacyRegion = parentElement
+      ? hasSourcePrivacyWithheldAncestor(parentElement)
+      : false;
     const privateAttributeRegion = parentElement
       ? hasSourcePrivateAttributeElementAncestor(parentElement)
       : false;
@@ -790,6 +802,7 @@ export function sanitizeSourceChildren(
         budget,
         styleWork,
         privateRegion,
+        privacyRegion,
         privateAttributeRegion,
         publicMenuRegion,
         activationRegion,
@@ -935,6 +948,7 @@ export function sanitizeSourceDocument(
     budget,
     styleWork,
     privateRegion: false,
+    privacyRegion: false,
     privateAttributeRegion: false,
     publicMenuRegion: false,
     activationRegion: false,
@@ -1464,8 +1478,13 @@ function serializeNode(
   }
   if (live.nodeType === Node.TEXT_NODE) {
     // Establish the structural/computed privacy boundary before touching page
-    // content.  Accessors for withheld text are never evaluated.
-    const rawText = context.privateRegion ? '' : (live.nodeValue ?? '');
+    // content.  Accessors for withheld text are never evaluated. Stylesheet
+    // text is presentation rather than page content, so a hidden or controlled
+    // disclosure region keeps its CSS (those rules are often what hides it);
+    // a privacy or menu boundary still withholds it.
+    const withholdText = context.privateRegion &&
+      !(context.styleRegion && !context.privacyRegion);
+    const rawText = withholdText ? '' : (live.nodeValue ?? '');
     const classifiedBefore = classifiedStyleOmissionCount(
       context.representability,
     );
@@ -1491,8 +1510,8 @@ function serializeNode(
       incrementRepresentability(context.representability, 'omittedStyleSheetCount');
     }
     const styledText = sanitizedStyleText ?? '';
-    const text = context.privateRegion ? '' : styledText;
-    if (context.privateRegion) {
+    const text = withholdText ? '' : styledText;
+    if (withholdText) {
       incrementRepresentability(
         context.representability,
         'privateTextRedactionCount',
@@ -1571,11 +1590,13 @@ function serializeNode(
   if (customElementHost) {
     incrementRepresentability(context.representability, 'customElementHostCount');
   }
-  const privateRegion = context.privateRegion ||
+  const privacyRegion = context.privacyRegion ||
     elementStartsPrivateRegion(liveElement) ||
     tagName === 'select' ||
     (!isNativeSelectSemanticTag(tagName) &&
-      isSourcePublicMenuRoleValue(liveElement.getAttribute('role'))) ||
+      isSourcePublicMenuRoleValue(liveElement.getAttribute('role')));
+  const privateRegion = context.privateRegion ||
+    privacyRegion ||
     elementStartsHiddenOrControlledDisclosureRegion(
       liveElement,
       context.controlledContent,
@@ -1652,6 +1673,7 @@ function serializeNode(
         representability: childRepresentability,
         fidelityPolicy: childFidelityPolicy,
         privateRegion,
+        privacyRegion,
         privateAttributeRegion,
         publicMenuRegion,
         activationRegion,
@@ -1683,6 +1705,7 @@ function serializeNode(
       const child = serializeNode(childNode, {
         ...context,
         privateRegion,
+        privacyRegion,
         privateAttributeRegion,
         publicMenuRegion,
         activationRegion,
@@ -3875,6 +3898,22 @@ function hasSourceBaseWithheldAncestor(
   element: Element,
   controlledContent: SourceControlledContentPolicy,
 ): boolean {
+  return hasSourceWithheldAncestor(element, controlledContent);
+}
+
+/**
+ * The privacy-only subset of `hasSourceBaseWithheldAncestor`: private
+ * controls, native selects and public menus, but not hidden or controlled
+ * disclosure regions.
+ */
+function hasSourcePrivacyWithheldAncestor(element: Element): boolean {
+  return hasSourceWithheldAncestor(element, undefined);
+}
+
+function hasSourceWithheldAncestor(
+  element: Element,
+  controlledContent: SourceControlledContentPolicy | undefined,
+): boolean {
   if (hasSourcePrivateElementAncestor(element)) return true;
   const path = readSourceFlatTreeElementPath(element);
   if (!path) return true;
@@ -3884,7 +3923,8 @@ function hasSourceBaseWithheldAncestor(
       tagName === 'select' ||
       (!isNativeSelectSemanticTag(tagName) &&
         isSourcePublicMenuRoleValue(current.getAttribute('role'))) ||
-      elementStartsHiddenOrControlledDisclosureRegion(current, controlledContent)
+      (controlledContent !== undefined &&
+        elementStartsHiddenOrControlledDisclosureRegion(current, controlledContent))
     ) return true;
   }
   return false;

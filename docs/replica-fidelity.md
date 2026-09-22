@@ -32,7 +32,9 @@ queries, layers, pseudo-elements, passive fonts and HTTP(S) backgrounds,
 same-document `url(#fragment)` references, readable constructed/adopted
 stylesheets, and styles inside accessible open shadow roots. Stylesheet element
 order, media attributes, disabled state, and the normal cascade remain
-representable.
+representable. A `<style>` element inside a hidden or controlled disclosure
+region keeps its CSS (those rules are often what hides the region); only the
+region's page text is withheld, and a privacy boundary withholds both.
 
 When CSSOM is readable, Simul serializes sanitized rules and recursively
 flattens readable imports in order within rule, depth, string, and total payload

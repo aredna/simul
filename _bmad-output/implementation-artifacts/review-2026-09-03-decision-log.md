@@ -1548,3 +1548,51 @@ tooling uses (the owner's NAS), protecting that copy's
 `.git`, `node_modules`, `.output`, `.wxt` and `@eaDir`; the loadable folder is
 `Dev/simul/dist/chrome-unpacked`. Merge and release remain gated on the
 owner's Chrome pass, as they chose.
+
+### D44. Hidden regions keep their stylesheet text (freee.co.jp sign-up modal) (2026-09-22)
+
+Same branch `feat/ui-string-catalogue` / PR #22, follow-up on `93f2cf0`. During
+the owner's Chrome pass, https://www.freee.co.jp/ showed "a giant Google logo
+and a mail icon, scaling with the page width, on top of the page" in the
+mirror only; the source tab was fine. The staged 0.3.3 build showed it too, so
+it was not a regression. Root cause found by running the real page and its
+three real stylesheets through the sanitizer (temporary test, not kept), then
+reduced to a deterministic case:
+
+- **The page** hides its sign-up modal (`#individual-modal`, class
+  `modal__signup`, `display:none` until opened) with a `<style>` element that
+  sits *inside* the modal. Neither external stylesheet mentions that class.
+- **The sanitizer** treats a hidden or controlled disclosure region as
+  withheld and blanked every text node inside it, including the CSS text of
+  that `<style>`. The replica therefore never received
+  `.modal__signup{display:none;position:fixed;…}`; the modal rendered as flow
+  content. Its page text was withheld as well, so only its icons survived: the
+  Google and mail sign-up marks, unsized because their modal-scoped rules were
+  gone with them. Exactly what the owner described.
+- **Why Passive's CSSOM path did not rescue it.** The site's global stylesheet
+  is 2.7 MB with about 35,000 rules, above the per-sheet 512 KB cap, so it
+  exhausts the shared style budget; every later `<style>`/`<link>` then falls
+  back to raw text or a plain link. The raw text of this one was blanked. Under
+  Conservative the CSSOM path never runs, so it failed there always. The large
+  sheet itself is handled as designed: it is kept as a request-capable link and
+  the replica fetches it (the CDN serves it to an extension-style request).
+- **Fix.** `SerializeContext` gains `privacyRegion`, the privacy-and-menu-only
+  subset of `privateRegion` (private controls, native selects, public menus;
+  never merely hidden). The text branch withholds a node when
+  `privateRegion && !(styleRegion && !privacyRegion)`: stylesheet text is
+  presentation, not page content, so a hidden or controlled region keeps its
+  CSS while a privacy or menu boundary still withholds it. Root contexts derive
+  it through a new `hasSourcePrivacyWithheldAncestor`, sharing the walk with
+  `hasSourceBaseWithheldAncestor`. The redaction counter no longer counts kept
+  CSS. Test: `keeps stylesheet text inside a hidden region while withholding
+  its page text` (hidden, aria-hidden, and a `role=textbox` privacy control),
+  verified to fail without the fix on the CSS assertion.
+- **Not changed.** The shared style budget still stops at the first oversized
+  sheet for the rest of the pass; with the raw-text fallback now intact for
+  hidden regions this is safe, and a page that big is what the budget is for.
+
+Build identity `0.5.0 beta v.20260922.3` (third shipped build today);
+`dist/chrome-unpacked` re-synced (manifest and the page bridge bundle). Gate:
+`npm run check` green, **1,398 tests pass, 1 skipped** (+1). The temporary
+bisect builds under `Dev/simul-bisect/` on the NAS were removed; `Dev/simul/`
+was re-mirrored to this commit.
