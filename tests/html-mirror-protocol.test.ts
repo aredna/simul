@@ -1466,6 +1466,77 @@ describe('isolated HTML sanitizer and protocol', () => {
     expect(representability.privateTextRedactionCount).toBe(2);
   });
 
+  it('withholds a declared-hidden region that is faded, skipped or clipped although it has a box (P1)', () => {
+    const { document, window } = parseHTML(
+      '<!doctype html><html><head></head><body>' +
+      '<div id="painted" aria-hidden="true"><span id="painted-text">Visible menu</span></div>' +
+      '<div id="faded" aria-hidden="true"><span id="faded-text">Faded account menu</span></div>' +
+      '<div id="found" hidden="until-found"><span id="found-text">Hidden answer</span></div>' +
+      '<div id="clip-path" aria-hidden="true"><span id="clip-path-text">Clip-path panel</span></div>' +
+      '<div id="clip-rect" aria-hidden="true"><span id="clip-rect-text">Clip-rect panel</span></div>' +
+      '</body></html>',
+    );
+    Object.defineProperty(document, 'baseURI', {
+      configurable: true,
+      value: 'https://example.test/app/',
+    });
+    for (const element of document.querySelectorAll('*')) {
+      Object.defineProperty(element, 'getClientRects', {
+        configurable: true,
+        value: () => sourceRectList({ left: 0, top: 0, width: 320, height: 40 }),
+      });
+    }
+    Object.defineProperty(window, 'getComputedStyle', {
+      configurable: true,
+      value: ((element: Element) => {
+        const id = element.id;
+        const hiddenValue = element.getAttribute('hidden')?.trim().toLowerCase();
+        return {
+          // Chrome gives hidden="until-found" content-visibility: hidden, not
+          // display: none, so it keeps a box.
+          display: hiddenValue !== undefined && hiddenValue !== 'until-found'
+            ? 'none'
+            : 'block',
+          visibility: 'visible',
+          opacity: id === 'faded' ? '0' : '1',
+          overflowX: 'visible',
+          overflowY: 'visible',
+          backgroundColor: 'rgba(0, 0, 0, 0)',
+          getPropertyValue: (name: string) => {
+            if (name === 'content-visibility') return id === 'found' ? 'hidden' : 'visible';
+            if (name === 'clip') return id === 'clip-rect' ? 'rect(0px, 0px, 0px, 0px)' : 'auto';
+            if (name === 'clip-path') return id === 'clip-path' ? 'inset(100%)' : 'none';
+            if (name.startsWith('overflow')) return 'visible';
+            return '';
+          },
+        } as unknown as CSSStyleDeclaration;
+      }) as Window['getComputedStyle'],
+    });
+    const graph = sanitizeSourceDocument(
+      document,
+      window as unknown as Window,
+      new WeakNodeIdRegistry(),
+      undefined,
+      'passive',
+    );
+    const texts = new Map<string, string>();
+    const visit = (node: HtmlMirrorNode): void => {
+      if (node.kind !== 'element') return;
+      const id = node.attributes.find(([name]) => name === 'id')?.[1];
+      for (const child of node.children) {
+        if (child.kind === 'text' && id) texts.set(id, child.text);
+        visit(child);
+      }
+    };
+    visit(graph!.root);
+
+    expect(texts.get('painted-text')).toBe('Visible menu');
+    expect(texts.get('faded-text')).toBe('');
+    expect(texts.get('found-text')).toBe('');
+    expect(texts.get('clip-path-text')).toBe('');
+    expect(texts.get('clip-rect-text')).toBe('');
+  });
+
   it('deep-clones into a passive typed graph while masking private text', () => {
     const { document, window } = parseHTML(`<!doctype html><html lang="ja"><head>
       <style>@import "https://tracker.invalid/a.css"; .hero{background:url('/hero.png')}</style>
