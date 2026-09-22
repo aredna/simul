@@ -1727,3 +1727,43 @@ NAS `Dev/simul/` re-mirrored.
 boxes over each recognised line, also on text-heavy banners such as the
 freee.co.jp carousel. Nothing is open from the Chrome pass; the publish waits
 only for the owner's go.
+
+### D48. Label-based image translations become a caption band (2026-09-22)
+
+Same branch `feat/ui-string-catalogue` / PR #22, follow-up on `797988f`. The
+owner reported that the freee.co.jp carousel "still disappears", possibly
+"resized very small after a move", and ruled on the overlay: "the text should
+try to appear where it belongs on the image. It shouldn't just replace
+everything." Their Image text settings have every reading method on, and the
+overlay they see is "one box covering the whole image with all text".
+
+- **Cause.** With the accessibility-text method enabled, the banner's `alt`
+  ("個人向け 確定申告するなら、freee いますぐ！無料で登録") is translated and
+  projected as a `whole-image` region: one box the size of the picture with an
+  86% white backdrop. It is a provisional preview; pixel OCR replaces it with
+  per-line boxes when its capture succeeds, and stays when capture does not
+  (a slide that moved, text covering the image, a pack not ready). That is why
+  the cover came and went, and why it read as the picture vanishing. OCR
+  regions were already placed per line (`normalizeTesseractPage` walks
+  blocks/paragraphs/lines; TextDetector returns per-detection boxes; the
+  controller hands `recognition.result.regions` to the projector unchanged), so
+  "where it belongs" already held for pixel results.
+- **Change.** In `ImageOverlayProjector.#refreshEntry`, a region with
+  `placement: 'whole-image'` is laid out by `captionBandBox(width, height)`:
+  a full-width band along the bottom edge, 34% of the image height and at
+  least 20px (never taller than the image), geometry rounded to CSS
+  hundredths. The picture stays visible and the translated label reads as its
+  caption; OCR boxes, which have geometry, still replace it when they arrive.
+  The controller and the 0.86 backdrop are unchanged. Tests: a projection-level
+  test (200×120 image → band at top 79.2px, height 40.8px, full width; fails
+  without the change with the old full-cover box) and the band's minimum
+  height on short images.
+- **Docs.** README image-text step 2 and `docs/image-translation-research.md`
+  now say the label is shown as a caption band along the bottom edge.
+- **Not isolated.** Whether anything is "resized very small after a move" was
+  not reproduced; the console readout that would show it was not run. If it
+  persists with the band, the next question will carry the snippet inside it.
+
+Build identity `0.5.0 beta v.20260922.7`; `dist/chrome-unpacked` re-synced.
+Gate: `npm run check` green, **1,405 tests pass, 1 skipped** (+2). NAS
+`Dev/simul/` re-mirrored.
