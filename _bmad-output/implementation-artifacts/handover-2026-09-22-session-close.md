@@ -10,10 +10,10 @@ that produced D49 and D50.
 
 | Item | State |
 | --- | --- |
-| Branch / PR | `feat/ui-string-catalogue`, PR #22, **open, mergeable, fifteen commits**, head = the D50 commit ("fix(replica): a class flip on a region of links and buttons is not a masking transition"). Description covers D40–D50. |
+| Branch / PR | `feat/ui-string-catalogue`, PR #22, **open, mergeable, fifteen commits**, head = the docs commit after D50 (D50 addendum: owner confirmation, overlay assessment). Description covers D40–D50. |
 | Version / identity | `0.5.0` / `0.5.0 beta v.20260922.9` (bumped on every shipped change; next is `.10`). |
 | Gate | `npm run check` green at head: typecheck clean, **1,415 tests pass, 1 skipped** (Chrome fixture), `dist/chrome-unpacked` re-synced and byte-verified. No CI by decision. |
-| NAS | `Dev/simul/` on the rsync daemon mirrors the D50 commit (checksum dry-run clean). Load `Dev/simul/dist/chrome-unpacked`; settings must show `Build 0.5.0 beta v.20260922.9`. |
+| NAS | `Dev/simul/` on the rsync daemon mirrors the head commit (checksum dry-run clean). Load `Dev/simul/dist/chrome-unpacked`; settings must show `Build 0.5.0 beta v.20260922.9`. |
 | `main` | `eb09813` (through D39); its committed build still says `0.4.0 beta v.20260905.1`. |
 | Release | `v0.4.0` pre-release only; the Releases page serves an older build than the branch until 0.5.0 is published. |
 | Repo | Public, MIT, description in the public voice, PVR / secret scanning / push protection on, Dependabot: no open alerts or PRs. |
@@ -31,47 +31,21 @@ that produced D49 and D50.
 
 ## Open items
 
-1. **freee.co.jp carousel: confirm D49 + D50 with the `.9` build.** Load the
-   NAS copy, reload the extension card and the tab, reopen the companion, and
-   watch the top carousel through several automatic slide changes (every 5 s)
-   and after **Rebuild mirror**: the two text slides keep their text, the
-   picture slide its picture, and the three pagination circles stay put with
-   the blue one moving. The owner reported after `.8`: "as soon as the first
-   move happens ... it shrinks and goes away", the deactivated circle vanishes
-   on each move, "the circles also move to the top of the window and the
-   blank space remains"; D50 explains all of that (the elements became opaque
-   placeholders). If anything still goes wrong, run this in the panel's
-   DevTools Console (right-click the panel, Inspect, Console) while it looks
-   wrong; it prints the carousel's replica subtree with sizes, text, image
-   sources and Simul's own markers. Note the owner could not run the earlier
-   readouts from the question dialog (truncated); print the snippet in the
-   chat message as well, and keep it short.
-
-   ```js
-[...document.querySelectorAll('iframe')].map((frame) => {
-  const doc = frame.contentDocument;
-  const root = doc && doc.querySelector('.kv-carousel');
-  if (!root) return 'no carousel';
-  const lines = [];
-  const walk = (el, depth) => {
-    const b = el.getBoundingClientRect();
-    const marks = [...el.attributes].filter((a) => a.name.startsWith('data-simul') || a.name === 'aria-hidden' || a.name === 'hidden').map((a) => `${a.name}=${a.value}`).join(' ');
-    const src = el.tagName === 'IMG' ? ` src=${(el.currentSrc || el.src || '(none)').slice(-40)} nat=${el.naturalWidth}x${el.naturalHeight}` : '';
-    lines.push(`${'  '.repeat(depth)}${el.tagName.toLowerCase()}.${String(el.className || '').split(' ').slice(0, 2).join('.')} ${Math.round(b.width)}x${Math.round(b.height)} text=${JSON.stringify((el.textContent || '').trim().slice(0, 20))}${src} ${marks}`);
-    if (depth < 6) for (const child of el.children) walk(child, depth + 1);
-  };
-  walk(root, 0);
-  return lines.join('\n');
-}).join('\n');
-   ```
-
-   Reproduction without a browser: `tests/carousel-move-patches.test.ts`
-   drives `HtmlMirrorSourceSession` with Swiper's real move records; extend
-   its fixture if a new symptom appears rather than asking for readouts first.
-2. **Publish 0.5.0** — waits for the owner's go. Runbook and release-notes
-   draft (now with the carousel bullet): `handover-2026-09-22-release-readiness.md`.
-   Log it as **D51**.
-3. Unchanged: F6 (memoizing `Intl.DisplayNames`) stays declined;
+1. **Carousel overlay lands beside the picture after a slide change**
+   (owner, after the `.9` build: "the third image in the carousel has text
+   that shows up outside of the image instead of on top of the image").
+   Assessment in the D50 addendum: the overlay layer is measured on the frame
+   after the patch, at the start of the replica's 300 ms transform transition,
+   and nothing re-measures when the transition ends. Candidate fixes: refresh
+   overlays on `transitionend`/`transitioncancel` in the replica document (plus
+   a bounded settle timer), or a `transition: none` backstop for reconstructed
+   HTML like the SVG one. Not started; the owner has not asked for a change.
+2. **Closed by the owner on `.9`:** the freee.co.jp carousel keeps its text
+   slides, picture and pagination through automatic moves (D49 + D50).
+3. **Publish 0.5.0** — only when the owner says it is ready, in their own
+   words; do not ask. Runbook and release-notes draft:
+   `handover-2026-09-22-release-readiness.md`. Log it as **D51**.
+4. Unchanged: F6 (memoizing `Intl.DisplayNames`) stays declined;
    `deferred-work.md` holds the 28 research-sized entries.
 
 ## Working notes for the next session
@@ -88,7 +62,8 @@ that produced D49 and D50.
   decision log.
 - `grep` on this machine is ugrep: minified or non-ASCII files need `-a`, and
   bounded `.{0,N}` patterns fail on them; use python for context extraction.
-- Owner's standing preferences from today: OCR on by default; page text and
+- Owner's standing preferences from today: no publish prompts (they announce
+  readiness); OCR on by default; page text and
   image text translate together; OCR overlays stay opaque per line but label
   results must not cover the picture; public voice per D43; a snippet the owner
   must run goes inside the question itself, and a long one is also printed in

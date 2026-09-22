@@ -238,11 +238,11 @@ skips without a browser.
 
 ## Still owed after the publish
 
-- Open from the Chrome pass: the freee.co.jp carousel. D49 (the wrapper was
-  withheld as controlled content) and D50 (a slide change turned the slides,
-  wrapper and bullets into secret placeholders) fix the two causes found; the
-  owner confirms with the `.9` build. The final go for the publish is
-  otherwise the only thing left (logged as D51).
+- The freee.co.jp carousel is confirmed fixed by the owner on the `.9` build
+  (D49 + D50). New from that pass: after a slide change the translated text of
+  the picture stays where the picture was (D50 addendum assessment; no fix
+  requested yet). The publish happens only when the owner says it is ready;
+  do not ask (logged as D51 when it happens).
 - F6 (memoizing `Intl.DisplayNames` per target language) stays declined (D41).
 - `deferred-work.md` still holds the 28 research-sized entries listed in
   `handover-2026-09-06-batches-merged.md`.

@@ -1894,3 +1894,31 @@ with the mutation records Swiper 8 emits for one `slideNext()`.
 Build identity `0.5.0 beta v.20260922.9`; `dist/chrome-unpacked` re-synced
 (only `page-mirror.js` and the manifest changed). Gate: `npm run check`
 green, **1,415 tests pass, 1 skipped** (+5). The publish becomes **D51**.
+
+**D50 addendum (owner confirmation).** With the `.9` build the owner confirmed
+"slides, picture and circles stay" through the automatic moves, which closes
+the carousel item that D48 left open. Two rulings from the same answer: the
+release waits until the owner says, in their own words, that it is ready (they
+had been asked three times and said "Don't keep pushing for that"), so the
+publish runbook is not to be offered again; and a new observation, "the third
+image in the carousel has text that shows up outside of the image instead of
+on top of the image". Assessment (no code changed): the overlay projector
+positions each image's overlay layer at `getBoundingClientRect()` when it is
+asked to refresh, and after a live patch that refresh runs on the next
+animation frame (`#refreshExtent` → `onLayoutChanged` →
+`refreshOverlays()`); a Swiper move rewrites the wrapper's transform under a
+300 ms transition that the replica plays, so the measurement is taken at the
+start of the movement and the translated text stays where the picture was
+while the picture slides on, which reads as text beside the next slide.
+Nothing re-measures when the transition ends: the replica document has no
+`transitionend`/`transitioncancel` listener and the image's ResizeObserver
+does not fire for a pure translation. Two candidate fixes for a later
+decision: (a) listen for `transitionend`/`transitioncancel` (and a bounded
+settle timer) on the replica document and refresh the overlays then; or (b)
+apply the same `transition: none` backstop to reconstructed HTML that the
+fidelity doc already applies to inline SVG ("passive visual animation is not
+enabled in this release"), which makes every replica state change instant and
+keeps the post-patch measurement correct; keyframe `animation` should not be
+suppressed the same way, since a page can rely on an animation's end state to
+reveal content.
+
