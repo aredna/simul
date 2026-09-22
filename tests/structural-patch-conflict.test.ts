@@ -22,7 +22,7 @@ describe('hasStructuralPatchTargetConflict', () => {
     ])).toBe(false);
   });
 
-  it('rejects a structural ancestor or descendant in one batch', () => {
+  it('rejects any update inside a structural target in one batch', () => {
     const { document } = parseHTML(
       '<main><section><span>value</span></section></main>',
     );
@@ -34,9 +34,33 @@ describe('hasStructuralPatchTargetConflict', () => {
       { target: span.firstChild!, structural: false },
     ])).toBe(true);
     expect(hasStructuralPatchTargetConflict([
-      { target: main, structural: false },
+      { target: span, structural: false },
+      { target: main, structural: true },
+    ])).toBe(true);
+    expect(hasStructuralPatchTargetConflict([
+      { target: main, structural: true },
       { target: span, structural: true },
     ])).toBe(true);
+  });
+
+  it('allows an attribute update on an ancestor of a structural target', () => {
+    // A carousel move: the wrapper's transform changes while a slide's
+    // content is replaced. The slide stays in place under the wrapper.
+    const { document } = parseHTML(
+      '<div class="wrapper"><div class="slide"><img></div></div>',
+    );
+    const wrapper = document.querySelector('.wrapper')!;
+    const slide = document.querySelector('.slide')!;
+
+    expect(hasStructuralPatchTargetConflict([
+      { target: slide, structural: true },
+      { target: wrapper, structural: false },
+    ])).toBe(false);
+    expect(hasStructuralPatchTargetConflict([
+      { target: wrapper, structural: false },
+      { target: slide, structural: true },
+      { target: slide, structural: false },
+    ])).toBe(false);
   });
 
   it('crosses open shadow-root boundaries', () => {

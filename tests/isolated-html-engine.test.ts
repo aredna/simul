@@ -2567,6 +2567,99 @@ describe('IsolatedHtmlReplicaEngine', () => {
     });
   });
 
+  it('applies a carousel move that replaces a slide while the wrapper moves', async () => {
+    // Swiper's move on freee.co.jp: the slide that comes into view has its
+    // content re-sent while the wrapper's transform changes in the same batch.
+    // Refusing the pair rebuilt the whole mirror on every move (D56).
+    const stream = new FakeHtmlStream(makeCarouselCheckpoint());
+    const host = new FakePresentationHost();
+    const infos: IsolatedMirrorInfo[] = [];
+    const engine = makeEngine(stream, host, (info) => infos.push(info));
+    await engine.run(request);
+    const replica = host.iframe!.contentDocument!;
+    const wrapper = replica.querySelector('.swiper-wrapper')!;
+    const slide = replica.querySelector('.kvslide1')!;
+
+    const patch = createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [
+        {
+          kind: 'children',
+          nodeId: 5,
+          children: [{
+            kind: 'element', id: 6, namespace: 'html', tagName: 'div',
+            attributes: [], children: [{
+              kind: 'text', id: 7, text: 'slide one in view', translatable: true,
+            }],
+          }],
+        },
+        {
+          kind: 'attributes',
+          namespace: 'html',
+          nodeId: 4,
+          tagName: 'div',
+          attributes: [
+            ['class', 'swiper-wrapper'],
+            ['style', 'transform: translate3d(-2136px, 0px, 0px)'],
+          ],
+        },
+      ],
+    );
+    expect(patch).toBeDefined();
+    stream.observer?.onPatch(patch!);
+
+    expect(stream.requested).toEqual([]);
+    expect(stream.acknowledged).toContain(1);
+    expect(infos.some(({ stage }) => stage === 'recovery')).toBe(false);
+    expect(replica.querySelector('.swiper-wrapper')).toBe(wrapper);
+    expect(replica.querySelector('.kvslide1')).toBe(slide);
+    expect(wrapper.getAttribute('style')).toContain('-2136px');
+    expect(slide.textContent).toBe('slide one in view');
+    expect(replica.querySelector('.kvslide2')?.textContent).toBe('slide two');
+  });
+
+  it('still refuses a wrapper that turns private beside a slide replacement', async () => {
+    const stream = new FakeHtmlStream(makeCarouselCheckpoint());
+    const host = new FakePresentationHost();
+    const engine = makeEngine(stream, host);
+    await engine.run(request);
+    const replica = host.iframe!.contentDocument!;
+
+    const patch = createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [
+        {
+          kind: 'children',
+          nodeId: 5,
+          children: [{
+            kind: 'element', id: 6, namespace: 'html', tagName: 'div',
+            attributes: [], children: [{
+              kind: 'text', id: 7, text: 'value typed into the region', translatable: true,
+            }],
+          }],
+        },
+        {
+          kind: 'attributes',
+          namespace: 'html',
+          nodeId: 4,
+          tagName: 'div',
+          attributes: [['class', 'swiper-wrapper'], ['role', 'textbox']],
+        },
+      ],
+    );
+    expect(patch).toBeDefined();
+    stream.observer?.onPatch(patch!);
+
+    expect(stream.requested).toEqual([0]);
+    expect(stream.acknowledged).not.toContain(1);
+    expect(replica.querySelector('.swiper-wrapper')?.hasAttribute('role')).toBe(false);
+    expect(replica.querySelector('.kvslide1')?.textContent).toBe('slide one');
+  });
+
   it('rejects an activation transition that does not re-sanitize descendants', async () => {
     const stream = new FakeHtmlStream(makeCheckpoint('public value', 0));
     const host = new FakePresentationHost();
@@ -3500,6 +3593,49 @@ function makeCheckpoint(
           { kind: 'element', id: 3, namespace: 'html', tagName: 'body', attributes: [], children: [
             { kind: 'text', id: 4, text, translatable: true },
           ] },
+        ],
+      },
+      adoptedStyleSheets: [],
+      captureMs: 1,
+      viewportWidth: 800,
+      viewportHeight: 600,
+      documentWidth: 800,
+      documentHeight: 1000,
+    },
+  );
+  if (!checkpoint) throw new Error('Fixture checkpoint rejected.');
+  return checkpoint;
+}
+
+function makeCarouselCheckpoint(): HtmlMirrorCheckpoint {
+  const slide = (id: number, name: string, text: string): HtmlMirrorNode => ({
+    kind: 'element', id, namespace: 'html', tagName: 'div',
+    attributes: [['class', `swiper-slide ${name}`], ['role', 'group']],
+    children: [{
+      kind: 'element', id: id + 1, namespace: 'html', tagName: 'div',
+      attributes: [], children: [{
+        kind: 'text', id: id + 2, text, translatable: true,
+      }],
+    }],
+  });
+  const checkpoint = createHtmlMirrorCheckpoint(
+    createReplicaIdentity({ ...identityParts, sequence: 0 }),
+    {
+      root: {
+        kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+        attributes: [], children: [
+          { kind: 'element', id: 2, namespace: 'html', tagName: 'head', attributes: [], children: [] },
+          { kind: 'element', id: 3, namespace: 'html', tagName: 'body', attributes: [], children: [{
+            kind: 'element', id: 4, namespace: 'html', tagName: 'div',
+            attributes: [
+              ['class', 'swiper-wrapper'],
+              ['style', 'transform: translate3d(-1068px, 0px, 0px)'],
+            ],
+            children: [
+              slide(5, 'kvslide1', 'slide one'),
+              slide(8, 'kvslide2', 'slide two'),
+            ],
+          }] },
         ],
       },
       adoptedStyleSheets: [],

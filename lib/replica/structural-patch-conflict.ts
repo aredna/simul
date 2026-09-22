@@ -3,7 +3,14 @@ export interface ReplicaPatchTarget {
   readonly structural: boolean;
 }
 
-/** Detects ancestor/descendant updates that cannot be applied atomically.
+/** Detects updates inside a subtree that the same batch replaces or
+ * reconciles: the replacement removes or re-parents the descendant, so the
+ * two cannot be applied atomically. An attribute update on an ancestor of a
+ * structural target is not a conflict: the target stays in place, and the
+ * engine separately refuses an attribute update that would change the privacy
+ * context the new children are validated against unless that element's own
+ * children are replaced too. A carousel move is the common case: a slide's
+ * content is replaced while the wrapper's transform changes.
  * Indexing targets avoids pairwise tree walks for large live patch batches. */
 export function hasStructuralPatchTargetConflict(
   targets: readonly ReplicaPatchTarget[],
@@ -16,17 +23,13 @@ export function hasStructuralPatchTargetConflict(
     );
   }
 
-  for (const [target, structural] of indexedTargets) {
+  for (const target of indexedTargets.keys()) {
     for (
       let ancestor = composedParent(target);
       ancestor;
       ancestor = composedParent(ancestor)
     ) {
-      const ancestorStructural = indexedTargets.get(ancestor);
-      if (
-        ancestorStructural !== undefined &&
-        (structural || ancestorStructural)
-      ) return true;
+      if (indexedTargets.get(ancestor) === true) return true;
     }
   }
   return false;
