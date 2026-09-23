@@ -17,8 +17,10 @@ resource as equally safe or equally private.
 | **Conservative** | Selectable fallback | Uses the earlier stricter sanitizer and omits newer passive semantics such as anchor identity, responsive `<source>` candidates, static posters, external SVG references, and retained unreadable imports. It can still load allowlisted images, stylesheet links, fonts, and CSS URLs, so it is not a zero-network policy. | The same scriptless, inert receiver and active-content blocks as Passive Fidelity. |
 | **Strict Local Mirror** | Hidden and deferred | Will become selectable only after every replica visual is local and deterministic no-network tests pass. | Must retain every current active-content block and add a restrictive no-network backstop. |
 
-Changing the selected policy is saved with the other companion settings and
-rebuilds Isolated HTML through that policy. The policy is fixed for the lifetime
+The policy is chosen under **Advanced & experimental** (moved there in D64,
+since Passive Fidelity is the default and the truthful choice). Changing it is
+saved with the other companion settings and rebuilds Isolated HTML through that
+policy. The policy is fixed for the lifetime
 of each source/receiver stream and is validated on both sides; a wider payload
 cannot be replayed into a narrower Conservative session.
 
@@ -68,7 +70,13 @@ counted at two bytes per character, because one checkpoint crosses the runtime
 port as a single message and Chrome refuses messages above 64 MiB. A stylesheet
 over its cap is omitted and the page still mirrors; a page over the total
 budget or the node cap is not mirrored (the panel reports that the replica
-could not be prepared). An inline
+could not be prepared). These three are **Advanced & experimental** settings:
+largest single item (1–30 MB), largest page (1–60 MB) and most page elements
+(1,000–1,000,000), with a button that restores the defaults above. Rule caps
+follow them. The panel applies them before it opens a mirror and sends them in
+the start message, so the page and the panel always use the same limits, and a
+change rebuilds the mirror. Reading a page pauses its tab for about a second
+per 40,000 nodes. An inline
 `<style>` whose rules are read from CSSOM sends those rules once, not its raw
 text as well. When Chrome makes an imported sheet unreadable, Passive Fidelity may
 retain only a normalized HTTP(S) `@import`; that import is request-capable.

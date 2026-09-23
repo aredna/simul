@@ -212,9 +212,25 @@ describe('sidepanel UI structure', () => {
     expect(document.querySelector('#settings-grid #auto-translate-mode')).not.toBeNull();
     expect(document.querySelector('#settings-grid #sync-scroll')).not.toBeNull();
     expect(document.querySelector('#settings-grid #replica-fidelity-policy'))
-      .not.toBeNull();
+      .toBeNull();
     expect(document.querySelector('#replica-engine')).toBeNull();
     expect(experimental?.querySelector('#replica-view-mode')).not.toBeNull();
+    // D64: fidelity and the mirror's size limits are Advanced settings.
+    expect(experimental?.querySelector('#replica-fidelity-policy')).not.toBeNull();
+    for (const [id, min, max] of [
+      ['mirror-item-megabytes', '1', '30'],
+      ['mirror-page-megabytes', '1', '60'],
+      ['mirror-max-elements', '1000', '1000000'],
+    ]) {
+      const input = experimental?.querySelector<HTMLInputElement>(`#${id}`);
+      expect(input?.getAttribute('type'), id).toBe('number');
+      expect([input?.getAttribute('min'), input?.getAttribute('max')], id)
+        .toEqual([min, max]);
+      expect(input?.closest('label')?.querySelector('[data-ui-label]'), id)
+        .not.toBeNull();
+    }
+    expect(experimental?.querySelector('#restore-mirror-limits')?.hasAttribute('data-ui-label'))
+      .toBe(true);
     expect(experimental?.querySelector('#image-analysis-host')).not.toBeNull();
     expect(markup.indexOf('id="settings-grid"'))
       .toBeLessThan(markup.indexOf('id="experimental-options"'));

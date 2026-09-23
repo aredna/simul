@@ -17,6 +17,11 @@ import {
   type SelectableReplicaFidelityPolicy,
 } from './replica/fidelity-policy';
 import {
+  DEFAULT_HTML_MIRROR_LIMIT_SETTINGS,
+  repairHtmlMirrorLimitValue,
+  type HtmlMirrorLimitSettings,
+} from './replica/html-mirror-limits';
+import {
   PAGE_ONLY_REPLICA_READ_SCOPE,
   REPLICA_READ_SCOPE_SETUP_VERSION,
   repairReplicaReadScope,
@@ -114,6 +119,8 @@ export interface CompanionPreferences {
   syncScroll: boolean;
   textLayoutMode: TextLayoutMode;
   replicaFidelityPolicy: SelectableReplicaFidelityPolicy;
+  /** The mirror's size limits, set in Advanced (D64). */
+  mirrorLimits: HtmlMirrorLimitSettings;
   replicaViewMode: ReplicaViewMode;
   launchBehavior: CompanionLaunchBehavior;
   lastLaunchSurface: CompanionSurface;
@@ -154,6 +161,7 @@ export const DEFAULT_COMPANION_PREFERENCES: Readonly<CompanionPreferences> =
     syncScroll: true,
     textLayoutMode: 'adaptive',
     replicaFidelityPolicy: 'passive',
+    mirrorLimits: DEFAULT_HTML_MIRROR_LIMIT_SETTINGS,
     replicaViewMode: 'translated',
     launchBehavior: 'last-used',
     lastLaunchSurface: 'side-panel',
@@ -276,6 +284,7 @@ export function parseCompanionPreferences(
     )
       ? input.replicaFidelityPolicy
       : DEFAULT_COMPANION_PREFERENCES.replicaFidelityPolicy,
+    mirrorLimits: repairMirrorLimits(input.mirrorLimits),
     replicaViewMode: isReplicaViewMode(input.replicaViewMode)
       ? input.replicaViewMode
       : DEFAULT_COMPANION_PREFERENCES.replicaViewMode,
@@ -491,6 +500,7 @@ export interface CompanionViewSettings {
   syncScroll: boolean;
   textLayoutMode: TextLayoutMode;
   replicaFidelityPolicy: SelectableReplicaFidelityPolicy;
+  mirrorLimits: HtmlMirrorLimitSettings;
   replicaViewMode: ReplicaViewMode;
   launchBehavior: CompanionLaunchBehavior;
   lastLaunchSurface: CompanionSurface;
@@ -689,6 +699,18 @@ export function clampZoomPercent(value: number): number {
   return Math.min(MAX_ZOOM_PERCENT, Math.max(MIN_ZOOM_PERCENT, Math.round(value)));
 }
 
+/** Each stored limit is clamped to its range; a missing one defaults. */
+function repairMirrorLimits(input: unknown): HtmlMirrorLimitSettings {
+  const record = typeof input === 'object' && input !== null
+    ? input as Record<string, unknown>
+    : {};
+  return Object.freeze({
+    itemMegabytes: repairHtmlMirrorLimitValue('itemMegabytes', record.itemMegabytes),
+    pageMegabytes: repairHtmlMirrorLimitValue('pageMegabytes', record.pageMegabytes),
+    maxElements: repairHtmlMirrorLimitValue('maxElements', record.maxElements),
+  });
+}
+
 function createDefaultPreferences(): CompanionPreferences {
   return {
     autoTranslateAllSites: false,
@@ -701,6 +723,7 @@ function createDefaultPreferences(): CompanionPreferences {
     syncScroll: true,
     textLayoutMode: 'adaptive',
     replicaFidelityPolicy: 'passive',
+    mirrorLimits: DEFAULT_HTML_MIRROR_LIMIT_SETTINGS,
     replicaViewMode: 'translated',
     launchBehavior: 'last-used',
     lastLaunchSurface: 'side-panel',

@@ -13,6 +13,7 @@ import {
   readHtmlMirrorPortSessionId,
   readHtmlMirrorSourceMessage,
 } from '../lib/replica/html-mirror-protocol';
+import { DEFAULT_HTML_MIRROR_LIMIT_SETTINGS } from '../lib/replica/html-mirror-limits';
 import {
   MAX_ADOPTED_STYLE_RULES_PER_OWNER,
   MAX_HTML_MIRROR_BYTES,
@@ -99,6 +100,44 @@ describe('isolated HTML sanitizer and protocol', () => {
       kind: 'simul:html-mirror-v2:ack',
       identity,
       fidelityPolicy: 'passive',
+    }, identity.sessionId, identity)).toBeUndefined();
+  });
+
+  it('carries the size limits in the start handshake (D64)', () => {
+    const identity = createReplicaIdentity({
+      sessionId: 'limits-session', pageEpoch: 1, generation: 1,
+      documentId: 'limits-document', frameId: 0, sequence: 0,
+    });
+    const limits = { itemMegabytes: 2, pageMegabytes: 8, maxElements: 5_000 };
+    const start = createHtmlMirrorStart(identity, 'passive', limits);
+    expect(start).toMatchObject({ limits });
+    expect(readHtmlMirrorControllerMessage(start, identity.sessionId, identity))
+      .toEqual(start);
+    // A start from an older panel has no limits and gets the defaults.
+    expect(readHtmlMirrorControllerMessage({
+      protocolVersion: start.protocolVersion,
+      kind: 'simul:html-mirror-v2:start',
+      identity,
+      fidelityPolicy: 'passive',
+    }, identity.sessionId, identity)).toMatchObject({
+      limits: DEFAULT_HTML_MIRROR_LIMIT_SETTINGS,
+    });
+    for (const invalid of [
+      { ...limits, pageMegabytes: 61 },
+      { ...limits, maxElements: 0 },
+      'large',
+    ]) {
+      expect(readHtmlMirrorControllerMessage(
+        { ...start, limits: invalid },
+        identity.sessionId,
+        identity,
+      )).toBeUndefined();
+    }
+    expect(readHtmlMirrorControllerMessage({
+      protocolVersion: start.protocolVersion,
+      kind: 'simul:html-mirror-v2:ack',
+      identity,
+      limits,
     }, identity.sessionId, identity)).toBeUndefined();
   });
 

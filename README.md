@@ -14,7 +14,7 @@ Simul started as a quick build for the OpenAI Build Week hackathon, made as
 something we would use ourselves. We are now sharing it so others can use it
 too.
 
-Current build: **0.5.0 beta v.20260922.22** · Desktop Chrome **138+** ·
+Current build: **0.5.0 beta v.20260922.23** · Desktop Chrome **138+** ·
 Manifest V3
 
 ## What you need
@@ -48,7 +48,7 @@ Keep the folder where it is while the extension is installed. To update,
 replace the folder with the new version, then select **Reload** on the Simul
 card in `chrome://extensions`, reload the page, and reopen the companion. The
 card shows version `0.5.0`; Simul's settings show
-`Build 0.5.0 beta v.20260922.22`.
+`Build 0.5.0 beta v.20260922.23`.
 
 This is an unpacked beta, not a Chrome Web Store release, so Chrome does not
 update it automatically.
@@ -197,7 +197,8 @@ passive CSS, images, fonts, responsive sources, static posters, and static SVG
 presentation. Those references can make ordinary HTTP(S) requests to their
 existing hosts. **Conservative** admits fewer passive semantics but is not a
 zero-network mode. Both policies keep the same scriptless sandbox and
-active-content blocks.
+active-content blocks. The policy, and the mirror's size limits (largest single
+item, largest page, most page elements), are under **Advanced & experimental**.
 
 Simul is a safe reconstruction, not a browser clone. Current limitations
 include closed shadow roots, script-only custom-element state, virtualized DOM

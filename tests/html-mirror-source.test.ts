@@ -18,6 +18,7 @@ import {
   type HtmlMirrorSourceBridgeEnvironment,
 } from '../lib/replica/html-mirror-source';
 import { MAX_HTML_MIRROR_NODES } from '../lib/replica/html-mirror-sanitizer';
+import { applyHtmlMirrorLimitSettings } from '../lib/replica/html-mirror-limits';
 import { createReplicaIdentity } from '../lib/replica/replica-identity';
 import { sourceDocumentIdentity } from '../lib/replica/source-identity';
 import {
@@ -643,6 +644,25 @@ describe('HtmlMirrorSourceSession', () => {
     expect(fixture.patches().at(-1)?.operations.some(
       ({ kind }) => kind === 'children',
     )).toBe(false);
+  });
+
+  it("applies the panel's size limits from the start handshake (D64)", () => {
+    const fixture = sourceFixture('<p>row</p>'.repeat(1_200));
+    try {
+      fixture.port.emitMessage(createHtmlMirrorStart(identity, 'conservative', {
+        itemMegabytes: 10,
+        pageMegabytes: 60,
+        maxElements: 1_000,
+      }));
+      expect(MAX_HTML_MIRROR_NODES).toBe(1_000);
+      expect(fixture.checkpoints()).toHaveLength(0);
+      expect(fixture.port.posts.at(-1)).toMatchObject({
+        kind: 'simul:html-mirror-v2:error',
+        code: 'stream_overflow',
+      });
+    } finally {
+      applyHtmlMirrorLimitSettings();
+    }
   });
 
   it('signals recovery when an interaction visibility scan overflows', () => {

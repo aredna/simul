@@ -97,6 +97,12 @@ import { PreferenceSafetyClient } from '../../lib/preference-safety-client';
 import type { ReplicaRunResult } from '../../lib/replica/contracts';
 import { openChromeHtmlMirrorStream } from '../../lib/replica/html-mirror-client';
 import {
+  DEFAULT_HTML_MIRROR_LIMIT_SETTINGS,
+  isHtmlMirrorLimitValue,
+  type HtmlMirrorLimitKey,
+  type HtmlMirrorLimitSettings,
+} from '../../lib/replica/html-mirror-limits';
+import {
   isSelectableReplicaFidelityPolicy,
   type SelectableReplicaFidelityPolicy,
 } from '../../lib/replica/fidelity-policy';
@@ -147,6 +153,14 @@ const replicaFidelityPolicySelect = requireElement<HTMLSelectElement>(
   '#replica-fidelity-policy',
 );
 const replicaViewModeSelect = requireElement<HTMLSelectElement>('#replica-view-mode');
+const mirrorLimitInputs = {
+  itemMegabytes: requireElement<HTMLInputElement>('#mirror-item-megabytes'),
+  pageMegabytes: requireElement<HTMLInputElement>('#mirror-page-megabytes'),
+  maxElements: requireElement<HTMLInputElement>('#mirror-max-elements'),
+} as const satisfies Record<HtmlMirrorLimitKey, HTMLInputElement>;
+const restoreMirrorLimitsButton = requireElement<HTMLButtonElement>(
+  '#restore-mirror-limits',
+);
 const launchBehaviorSelect = requireElement<HTMLSelectElement>('#launch-behavior');
 const popoutTabModeSelect = requireElement<HTMLSelectElement>('#popout-tab-mode');
 const syncScrollInput = requireElement<HTMLInputElement>('#sync-scroll');
@@ -255,6 +269,7 @@ const isolatedHtmlReplicaEngine = new IsolatedHtmlReplicaEngine({
   presentationHost: visibleReplayHost,
   openStream: openChromeHtmlMirrorStream,
   getReplicaFidelityPolicy: () => state.preferences.replicaFidelityPolicy,
+  getMirrorLimits: () => state.preferences.mirrorLimits,
   openSemanticStream: openChromeSemanticSource,
   getReplicaReadScope: () => readScopeController.currentReplicaReadScope(),
   onLayoutChanged: () => imageTranslationController.refreshOverlays(),
@@ -877,6 +892,21 @@ replicaFidelityPolicySelect.addEventListener('change', () => {
   void changeReplicaFidelityPolicy(replicaFidelityPolicy);
 });
 
+for (const key of Object.keys(mirrorLimitInputs) as HtmlMirrorLimitKey[]) {
+  mirrorLimitInputs[key].addEventListener('change', () => {
+    const value = Number(mirrorLimitInputs[key].value);
+    if (!isHtmlMirrorLimitValue(key, value)) {
+      syncPreferenceControls();
+      return;
+    }
+    void changeMirrorLimits({ ...state.preferences.mirrorLimits, [key]: value });
+  });
+}
+
+restoreMirrorLimitsButton.addEventListener('click', () => {
+  void changeMirrorLimits(DEFAULT_HTML_MIRROR_LIMIT_SETTINGS);
+});
+
 replicaViewModeSelect.addEventListener('change', () => {
   const replicaViewMode: ReplicaViewMode =
     isReplicaViewMode(replicaViewModeSelect.value)
@@ -1032,7 +1062,8 @@ browser.storage.onChanged.addListener((changes, areaName) => {
     void sourceFollower.followCurrentActiveSourceTab();
   }
   if (
-    previous.replicaFidelityPolicy !== state.preferences.replicaFidelityPolicy
+    previous.replicaFidelityPolicy !== state.preferences.replicaFidelityPolicy ||
+    !sameMirrorLimits(previous.mirrorLimits, state.preferences.mirrorLimits)
   ) {
     isolatedReplicaFailureRecoveryGate.reset();
     const identity = state.followedPageIdentity ?? state.capturedPageIdentity;
@@ -1280,6 +1311,44 @@ async function changeReplicaFidelityPolicy(
   }
 }
 
+async function changeMirrorLimits(
+  mirrorLimits: HtmlMirrorLimitSettings,
+): Promise<void> {
+  if (
+    state.mirrorLimitsCommitInFlight ||
+    sameMirrorLimits(mirrorLimits, state.preferences.mirrorLimits)
+  ) {
+    syncPreferenceControls();
+    return;
+  }
+  state.mirrorLimitsCommitInFlight = true;
+  updateControls();
+  try {
+    const saved = await preferenceClient.commitView({ mirrorLimits });
+    if (
+      !saved ||
+      !sameMirrorLimits(state.preferences.mirrorLimits, mirrorLimits)
+    ) return;
+    // Both sides of the next mirror take the new limits from its start.
+    isolatedReplicaFailureRecoveryGate.reset();
+    const identity = state.followedPageIdentity ?? state.capturedPageIdentity;
+    if (identity) capturePipeline.queueCapture({ identity, reason: 'preference' });
+  } finally {
+    state.mirrorLimitsCommitInFlight = false;
+    syncPreferenceControls();
+    updateControls();
+  }
+}
+
+function sameMirrorLimits(
+  left: HtmlMirrorLimitSettings,
+  right: HtmlMirrorLimitSettings,
+): boolean {
+  return left.itemMegabytes === right.itemMegabytes &&
+    left.pageMegabytes === right.pageMegabytes &&
+    left.maxElements === right.maxElements;
+}
+
 async function changeReplicaViewMode(
   replicaViewMode: ReplicaViewMode,
 ): Promise<void> {
@@ -1307,6 +1376,9 @@ function syncPreferenceControls(): void {
   displayModeSelect.value = state.preferences.displayMode;
   textLayoutSelect.value = state.preferences.textLayoutMode;
   replicaFidelityPolicySelect.value = state.preferences.replicaFidelityPolicy;
+  for (const key of Object.keys(mirrorLimitInputs) as HtmlMirrorLimitKey[]) {
+    mirrorLimitInputs[key].value = String(state.preferences.mirrorLimits[key]);
+  }
   replicaViewModeSelect.value = state.preferences.replicaViewMode;
   launchBehaviorSelect.value = state.preferences.launchBehavior;
   popoutTabModeSelect.value = state.preferences.popoutTabMode;
@@ -1459,6 +1531,10 @@ function updateControls(): void {
   displayModeSelect.disabled = busy;
   textLayoutSelect.disabled = busy;
   replicaFidelityPolicySelect.disabled = busy || state.replicaFidelityCommitInFlight;
+  for (const input of Object.values(mirrorLimitInputs)) {
+    input.disabled = busy || state.mirrorLimitsCommitInFlight;
+  }
+  restoreMirrorLimitsButton.disabled = busy || state.mirrorLimitsCommitInFlight;
   launchBehaviorSelect.disabled = busy;
   popoutTabModeSelect.disabled = busy;
   syncScrollInput.disabled = busy;

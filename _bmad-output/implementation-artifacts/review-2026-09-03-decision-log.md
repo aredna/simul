@@ -2753,9 +2753,62 @@ number."
   600-element SVG drawing is kept. Cap tests now derive from the constants
   (image budget, adopted rules, node budget, depth, visibility scan).
 - **Docs.** `docs/replica-fidelity.md` (limits and the polling gap).
-- **Next, owner direction.** The caps as numeric Advanced settings; queued
-  with the design question for the owner.
+- **Next, owner direction.** The caps as numeric Advanced settings: done in
+  D64.
 
 Build identity `0.5.0 beta v.20260922.22`; `dist/chrome-unpacked` re-synced.
 Gate: `npm run check` green, **1,472 tests pass, 1 skipped** (+4).
 Publishing 0.5.0 moves to **D64**.
+
+### D64. The mirror's size limits are Advanced settings; fidelity moves there too (2026-09-23)
+
+Same branch / PR #22. Following D63 the owner chose, from a preview, "Three
+numbers" in **Advanced & experimental**: largest single item (MB), largest page
+(MB, up to 60), most page elements, with one Restore button. Asked whether to
+remove the Replica fidelity setting (Passive / Conservative), the owner chose
+"Move it to Advanced".
+
+- **Settings.** Largest single item 1–30 MB (default 10; above 30 an item could
+  never fit the largest page), largest page 1–60 MB (default 60, counted as
+  memory at two bytes per character; Chrome's 64 MiB message limit), most page
+  elements 1,000–1,000,000 (default 200,000). The rule caps follow them. The
+  titles give the unit, what happens over a limit (a larger item is left out
+  and the page shows; a larger page is not mirrored) and the measured cost
+  (reading a page pauses its tab for about a second per 40,000 nodes). An
+  entry outside its range is refused and the box shows the saved value again.
+- **How both sides agree.** The limits live in `html-mirror-limits.ts` as live
+  bindings with one `applyHtmlMirrorLimitSettings()`, so every existing cap
+  reference reads the current value (the sanitizer re-exports them). The panel
+  applies the saved settings before it opens each mirror and sends them in the
+  start message (`limits`, validated exactly; a start without them gets the
+  defaults); the page applies them from there. A change rebuilds the mirror,
+  like a fidelity change. Two walks must never stop short of the node cap, so
+  they no longer follow it and use its largest setting instead: the semantic
+  walk, which treats the whole document as secret when it runs out, and the
+  node-ID registry (four times that).
+- **Preferences.** `mirrorLimits` is a view setting (whitelisted and validated
+  exactly by the coordinator); stored values are clamped to their ranges and a
+  missing one defaults. Reset all restores the defaults.
+- **Layout.** Replica fidelity and the three numbers sit in Advanced after
+  Replica text. Settings labels now align their content to the top, so a
+  neighbour with microcopy no longer stretches a select (it did in Advanced,
+  and could in the main grid); number inputs are styled like the selects.
+- **Verified in Chrome for Testing.** On the 5 MB-sheet page, a largest item of
+  1 MB rebuilds the mirror without the sheet and Restore brings it back; on the
+  135,000-node page, 1,000 elements gives "The isolated replica could not be
+  prepared" and Restore brings back all 75,014 elements; a page limit of 99 is
+  refused and the box shows 60; the stored preference is back at the defaults
+  after Restore. Screenshots of the options and of Advanced checked.
+- **Tests.** Limits module (defaults, live values in importers, derived rule
+  caps, exact reading, clamping, a lowered node limit refuses a page and a
+  lowered item limit omits an item); start handshake (limits carried, absent
+  means defaults, invalid refused, not allowed on an ack); the page applies the
+  panel's limits and refuses a larger page; the engine applies the limits and
+  passes them to the stream; the coordinator accepts valid limits and refuses
+  invalid ones; preference defaults; fidelity and the three inputs sit in
+  Advanced with localizable labels.
+- **Docs.** `docs/replica-fidelity.md`, `docs/translation-companion.md`, README.
+
+Build identity `0.5.0 beta v.20260922.23`; `dist/chrome-unpacked` re-synced.
+Gate: `npm run check` green, **1,479 tests pass, 1 skipped** (+7).
+Publishing 0.5.0 moves to **D65**.

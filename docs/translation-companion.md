@@ -281,8 +281,8 @@ responsive images. It does not transport arbitrary computed styles. Candidate
 stylesheets settle through load/error outcomes, two paints, or a short fixed
 deadline before the staged candidate replaces the last good view.
 
-Isolated HTML has two saved, selectable fidelity policies. **Passive Fidelity**
-is the default. It preserves more inert presentation semantics and may cause
+Isolated HTML has two saved fidelity policies, selectable under **Advanced &
+experimental**. **Passive Fidelity** is the default. It preserves more inert presentation semantics and may cause
 additional HTTP(S) requests from the replica. **Conservative** retains the
 stricter sanitizer as a fallback, but still allows some visual resources and
 does not promise zero networking. The planned **Strict Local Mirror** is hidden

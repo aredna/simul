@@ -113,6 +113,7 @@ export class CompanionState {
   imageTranslationInFlight = false;
   surfaceTransitionInFlight = false;
   replicaFidelityCommitInFlight = false;
+  mirrorLimitsCommitInFlight = false;
   activeAbortController: AbortController | undefined;
   replicaShadowAbortController: AbortController | undefined;
   activeTranslationTask: Promise<void> | undefined;
