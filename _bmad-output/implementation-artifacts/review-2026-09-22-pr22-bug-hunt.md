@@ -398,9 +398,10 @@ what to do with each. None of this is implemented.
   adds anything, and only once OCR is off.
 - **The [A] auto-detect toolbar button** does the same as the From select's
   Auto-detect option.
-- **The tab-follow toolbar button** is always greyed out in the side panel
+- **The tab-follow toolbar button** was always greyed out in the side panel
   (`main.ts`, `toolbarTabFollowButton.disabled = busy || !isDetachedWindow`).
-  "Detached window follows" in Settings duplicates it.
+  Since D73 it works on both surfaces; "Mirror follows" in Settings
+  duplicates it.
 - **"Toolbar opens"** (last used, side panel or window) duplicates the ↗/↙
   button, which already records the choice.
 - **The Size select** duplicates the Fit/1:1 toolbar toggle. Moving the zoom
@@ -425,7 +426,7 @@ what to do with each. None of this is implemented.
 | R1 | Close the "Readable content" section by default and put its six checkboxes behind a nested "Customize" disclosure; keep the profile select visible | hide | S | none |
 | R2 | Drop Rebuild from the Settings action row (the toolbar ↻ stays) | merge | S | none |
 | R3 | Remove the [A] toolbar button | merge | S | none |
-| R4 | Hide the tab-follow button in the side panel and remove the "Detached window follows" select (the button covers it in the window) | merge | S | none |
+| R4 | ~~Hide the tab-follow button in the side panel~~ Superseded by D73 (owner: the side panel follows by default and the button works there). Still open: remove the "Mirror follows" select, which duplicates the button on both surfaces | merge | S | none |
 | R5 | Remove "Toolbar opens"; always reopen where it was last used | remove | S | none |
 | R6 | Remove the Size select; keep Fit/1:1 and the zoom slider | merge | S | none |
 | R7 | One closed "Advanced" section for Translated text, Replica fidelity, Follow scrolling, Automatic translation, Replica text, Image text and Reset | hide | S | keep fidelity (it is the only choice that cuts network requests) and keep Reset reachable (the README promises it clears every grant) |

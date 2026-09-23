@@ -874,7 +874,6 @@ toolbarOcrToggleButton.addEventListener('click', () => {
   }
 });
 toolbarTabFollowButton.addEventListener('click', () => {
-  if (!isDetachedWindow) return;
   void changePopoutTabMode(
     state.preferences.popoutTabMode === 'active' ? 'locked' : 'active',
   );
@@ -1084,7 +1083,6 @@ browser.storage.onChanged.addListener((changes, areaName) => {
     purgeSourceDerivedRuntime(UI_STRINGS.statusReadablePolicyRebuilding);
   }
   if (
-    isDetachedWindow &&
     previous.popoutTabMode !== state.preferences.popoutTabMode &&
     state.preferences.popoutTabMode === 'active'
   ) {
@@ -1311,7 +1309,7 @@ function observeReplicaStateLabel(): void {
 async function changePopoutTabMode(popoutTabMode: PopoutTabMode): Promise<void> {
   const saved = await preferenceClient.commitView({ popoutTabMode });
   if (!saved || state.preferences.popoutTabMode !== popoutTabMode) return;
-  if (isDetachedWindow && popoutTabMode === 'active') {
+  if (popoutTabMode === 'active') {
     await sourceFollower.followCurrentActiveSourceTab();
   }
 }
@@ -1483,26 +1481,18 @@ function syncToolbarPreferenceControls(): void {
       : UI_STRINGS.ocrTitleOff,
   );
 
-  const followsActive = isDetachedWindow && state.preferences.popoutTabMode === 'active';
+  const followsActive = state.preferences.popoutTabMode === 'active';
   setUiText(toolbarTabFollowLabel, followsActive ? UI_STRINGS.tabFollowActive : UI_STRINGS.tabFollowCurrent);
   toolbarTabFollowButton.setAttribute('aria-pressed', String(followsActive));
   setUiAttr(
     toolbarTabFollowButton,
     'aria-label',
-    isDetachedWindow
-      ? followsActive
-        ? UI_STRINGS.tabFollowActiveAria
-        : UI_STRINGS.tabFollowCurrentAria
-      : UI_STRINGS.tabFollowFixedAria,
+    followsActive ? UI_STRINGS.tabFollowActiveAria : UI_STRINGS.tabFollowCurrentAria,
   );
   setUiAttr(
     toolbarTabFollowButton,
     'title',
-    isDetachedWindow
-      ? followsActive
-        ? UI_STRINGS.tabFollowActiveTitle
-        : UI_STRINGS.tabFollowCurrentTitle
-      : UI_STRINGS.tabFollowFixedTitle,
+    followsActive ? UI_STRINGS.tabFollowActiveTitle : UI_STRINGS.tabFollowCurrentTitle,
   );
 }
 
@@ -1602,7 +1592,7 @@ function updateControls(): void {
   toolbarOcrToggleButton.disabled = busy ||
     state.imageCaptureAccess === 'checking' ||
     !hasCompiledImageAnalysisCapability();
-  toolbarTabFollowButton.disabled = busy || !isDetachedWindow;
+  toolbarTabFollowButton.disabled = busy;
   popoutButton.disabled = state.surfaceTransitionInFlight ||
     (!isDetachedWindow && !state.capturedPageIdentity);
   cancelButton.hidden =

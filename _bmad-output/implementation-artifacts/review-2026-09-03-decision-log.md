@@ -3125,3 +3125,47 @@ data-URL fonts ("Allow them") and let the caption band grow when needed
 Build identity `0.5.0 beta v.20260922.31`; `dist/chrome-unpacked` re-synced.
 Gate: `npm run check` green, **1,497 tests pass, 1 skipped** (+2).
 Publishing 0.5.0 moves to **D73**.
+
+### D73. The side panel follows the active tab; Follow / Pinned works there (2026-09-23)
+
+Same branch / PR #22. Owner report: "I cannot click the pinned button in the
+main screen. The default should be set to follow instead of pinned." Owner
+choice for Pinned in the side panel: keep the tab it shows (same as the
+detached window).
+
+- **Cause.** Tab following was built for the detached window only. In the
+  side panel the button always read Pinned and was disabled
+  (`followsActive = isDetachedWindow && …`, `disabled = busy ||
+  !isDetachedWindow`), and switching tabs cleared the mirror with "The active
+  tab changed. Select the extension on the page you want to follow." The saved
+  default was already Follow (D66); the side panel ignored it.
+- **Fix.** Both surfaces honor the one saved setting. `isFollowedBrowserWindow`
+  (`lib/companion-surface.ts`) names the window a following companion
+  mirrors: a side panel its own window, a detached window the other windows.
+  Activation, closed-tab recovery, loaded-tab and stale-update decisions use
+  it. `requiresActiveSourceTab` is now simply Follow, so a pinned side panel
+  reads its tab while another tab is active (pixel capture still waits until
+  that tab is visible). Switching to Follow re-reads the active tab of the
+  panel's window. The "active tab changed" invalidation and the side-panel
+  "fixed" button strings are removed.
+- **Copy.** Button titles say "pin the mirror to the tab it shows"; Settings
+  reads "Mirror follows: The tab it shows (Pinned) / Active browser tab
+  (Follow)", and its title says the toolbar button switches the same setting.
+  Review R4 (hide the button in the side panel) is superseded; removing the
+  now fully duplicate Settings select stays open.
+- **Verified in Chrome for Testing** with the real side panel (opened with
+  CDP `Extensions.triggerAction` on the tab): opens on page A reading Follow
+  (enabled, pressed); activating tab B rebuilds the mirror as B; clicking the
+  button reads Pinned; activating tab A leaves the mirror on B; clicking
+  Follow again rebuilds it as A.
+- **Tests.** Side-panel follow and pin: stays on its tab when pinned and still
+  reads it while inactive; follows an activated tab of its own window and
+  ignores other windows; switching to Follow reads the panel's own window,
+  not the last focused one; closing the followed tab recovers only in Follow.
+  Surface-helper cases for the side panel.
+- **Docs.** README step 5, `docs/translation-companion.md` (new "Following
+  tabs" section).
+
+Build identity `0.5.0 beta v.20260922.32`; `dist/chrome-unpacked` re-synced.
+Gate: `npm run check` green, **1,500 tests pass, 1 skipped** (+3).
+Publishing 0.5.0 moves to **D74**.

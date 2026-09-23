@@ -68,16 +68,13 @@ export const UI_STRINGS = {
     'Chrome did not grant image access. Click to turn image text off.',
   ocrTitleOff: 'Image text translation is off. Click to turn it on.',
 
-  // Toolbar: tab-follow aria/title for the detached-window states.
-  tabFollowActiveAria: 'Follow the opening tab instead of the active browser tab',
-  tabFollowCurrentAria: 'Follow the active browser tab instead of the opening tab',
-  tabFollowFixedAria: 'Tab following is fixed to the current side-panel tab',
+  // Toolbar: tab-follow aria/title (side panel and detached window alike).
+  tabFollowActiveAria: 'Pin the mirror to the tab it shows instead of following the active browser tab',
+  tabFollowCurrentAria: 'Follow the active browser tab instead of the pinned tab',
   tabFollowActiveTitle:
-    'Following the active browser tab. Click to stay on the opening tab.',
+    'Following the active browser tab. Click to pin the mirror to the tab it shows.',
   tabFollowCurrentTitle:
-    'Staying on the opening tab. Click to follow the active browser tab.',
-  tabFollowFixedTitle:
-    'The side panel is attached to the current tab. Active-tab following is available in a detached window.',
+    'Pinned to the tab the mirror shows. Click to follow the active browser tab.',
 
   // Toolbar: refresh button while a rebuild is in flight.
   rebuildMirror: 'Rebuild mirror',
@@ -214,8 +211,6 @@ export const UI_STRINGS = {
   statusActiveTabNotWebPage: 'Waiting for a web page in the active tab.',
   statusFollowNeedsAccess:
     '{0} Active-tab following needs page access for each newly selected site.',
-  statusActiveTabChanged:
-    'The active tab changed. Select the extension on the page you want to follow.',
   statusSourceRestricted:
     'The source tab opened a restricted page. Return to a regular HTTP or HTTPS page and select the extension again.',
   statusSourcePageChanging:

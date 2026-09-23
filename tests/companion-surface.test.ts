@@ -140,8 +140,12 @@ describe('companion surface launch decisions', () => {
   it('follows activation only for opted-in detached windows outside the companion window', () => {
     expect(shouldFollowActivatedTab(true, 'active', 9, 4)).toBe(true);
     expect(shouldFollowActivatedTab(true, 'locked', 9, 4)).toBe(false);
-    expect(shouldFollowActivatedTab(false, 'active', 9, 4)).toBe(false);
     expect(shouldFollowActivatedTab(true, 'active', 9, 9)).toBe(false);
+    // A side panel follows the tabs of its own window (D73).
+    expect(shouldFollowActivatedTab(false, 'active', 9, 9)).toBe(true);
+    expect(shouldFollowActivatedTab(false, 'active', 9, 4)).toBe(false);
+    expect(shouldFollowActivatedTab(false, 'locked', 9, 9)).toBe(false);
+    expect(shouldFollowActivatedTab(false, 'active', undefined, 9)).toBe(false);
   });
 
   it('accepts follow candidates only from the focused normal browser window', () => {
@@ -155,30 +159,11 @@ describe('companion surface launch decisions', () => {
   });
 
   it('ignores stale updates from the tab being left only in active-follow mode', () => {
-    expect(shouldIgnoreInactiveFollowedTabUpdate(true, 'active', false)).toBe(
-      true,
-    );
-    expect(shouldIgnoreInactiveFollowedTabUpdate(true, 'active', true)).toBe(
-      false,
-    );
-    expect(shouldIgnoreInactiveFollowedTabUpdate(true, 'locked', false)).toBe(
-      false,
-    );
-    expect(shouldIgnoreInactiveFollowedTabUpdate(false, 'active', false)).toBe(
-      false,
-    );
-    expect(shouldIgnoreInactiveFollowedTabUpdate(
-      true,
-      'active',
-      true,
-      true,
-    )).toBe(true);
-    expect(shouldIgnoreInactiveFollowedTabUpdate(
-      true,
-      'locked',
-      true,
-      true,
-    )).toBe(false);
+    expect(shouldIgnoreInactiveFollowedTabUpdate('active', false)).toBe(true);
+    expect(shouldIgnoreInactiveFollowedTabUpdate('active', true)).toBe(false);
+    expect(shouldIgnoreInactiveFollowedTabUpdate('locked', false)).toBe(false);
+    expect(shouldIgnoreInactiveFollowedTabUpdate('active', true, true)).toBe(true);
+    expect(shouldIgnoreInactiveFollowedTabUpdate('locked', true, true)).toBe(false);
   });
 
   it('reacquires a neighboring tab after the active source closes', () => {
@@ -210,6 +195,10 @@ describe('companion surface launch decisions', () => {
       9,
       false,
     )).toBe(false);
+    // A side panel recovers only in its own window.
+    expect(shouldRecoverRemovedActiveSource(false, 'active', 9, 9, false)).toBe(true);
+    expect(shouldRecoverRemovedActiveSource(false, 'active', 9, 4, false)).toBe(false);
+    expect(shouldRecoverRemovedActiveSource(false, 'locked', 9, 9, false)).toBe(false);
   });
 
   it('treats a moved tab as a new exact source identity', () => {

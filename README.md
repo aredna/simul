@@ -14,7 +14,7 @@ Simul started as a quick build for the OpenAI Build Week hackathon, made as
 something we would use ourselves. We are now sharing it so others can use it
 too.
 
-Current build: **0.5.0 beta v.20260922.31** · Desktop Chrome **138+** ·
+Current build: **0.5.0 beta v.20260922.32** · Desktop Chrome **138+** ·
 Manifest V3
 
 ## What you need
@@ -48,7 +48,7 @@ Keep the folder where it is while the extension is installed. To update,
 replace the folder with the new version, then select **Reload** on the Simul
 card in `chrome://extensions`, reload the page, and reopen the companion. The
 card shows version `0.5.0`; Simul's settings show
-`Build 0.5.0 beta v.20260922.31`.
+`Build 0.5.0 beta v.20260922.32`.
 
 This is an unpacked beta, not a Chrome Web Store release, so Chrome does not
 update it automatically.
@@ -68,9 +68,9 @@ update it automatically.
    with the page text. With OCR off, a page translates on its own only for
    sites you save for automatic translation in settings.
 5. Use **1:1** (the default), **Fit**, zoom, layout, and scroll-following to
-   compare the original with the translation. In a separate window the mirror
-   **Follow**s whichever tab is active; select it to keep the mirror **Pinned**
-   to one tab.
+   compare the original with the translation. The mirror **Follow**s
+   whichever tab is active, in the side panel and in a separate window; select
+   it to keep the mirror **Pinned** to the tab it shows.
 6. Image text (OCR) is on by default and is translated together with the page
    text. The first time, select the **OCR** button to grant image access when
    Chrome asks; select it again to turn image text off.
