@@ -1410,7 +1410,8 @@ export function isSourceSelectEntryVisuallyHidden(element: Element): boolean {
           ['hidden', 'collapse'].includes(
             style.visibility.trim().toLowerCase(),
           ) ||
-          (opacity !== '' && Number(opacity) === 0) ||
+          (opacity !== '' && Number(opacity) === 0 &&
+            !isSourceTransparentSelectClickTarget(current, view, style)) ||
           style.getPropertyValue('content-visibility').trim().toLowerCase() ===
             'hidden'
         ) return true;
@@ -1424,6 +1425,29 @@ export function isSourceSelectEntryVisuallyHidden(element: Element): boolean {
     }
   }
   return false;
+}
+
+/**
+ * A select at zero opacity that still takes pointer input over a rendered box
+ * is the page's click target for a styled label drawn beneath it (Wikipedia's
+ * search language picker). Clicking there opens its options in the page, so it
+ * is not hidden: its option labels stay readable and the replica keeps its box
+ * with a transparent trigger.
+ */
+export function isSourceTransparentSelectClickTarget(
+  select: Element,
+  view: Window,
+  style: CSSStyleDeclaration,
+): boolean {
+  try {
+    const opacity = style.opacity.trim();
+    return select.localName.toLowerCase() === 'select' &&
+      opacity !== '' && Number(opacity) === 0 &&
+      style.pointerEvents.trim().toLowerCase() !== 'none' &&
+      !sourceSelectHasNoRenderedDocumentBox(select, view, style);
+  } catch {
+    return false;
+  }
 }
 
 function sourceSelectHasNoRenderedDocumentBox(

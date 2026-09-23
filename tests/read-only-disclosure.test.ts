@@ -105,6 +105,8 @@ describe('read-only replica disclosure placement', () => {
     controller.open();
     expect(controller.isOpen()).toBe(true);
     expect(panel.style.top).toBe('114px');
+    // A menu the site collapses with opacity (freee) must not open invisible.
+    expect(panel.style.getPropertyValue('opacity')).toBe('1');
 
     top = 180;
     document.dispatchEvent(new window.Event('scroll'));

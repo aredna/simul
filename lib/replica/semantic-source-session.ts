@@ -916,47 +916,6 @@ export class SemanticSourceSession {
     if (scope.controlSemantics && stack.length === 0) {
       for (const element of elements) {
         const classification = classifications.get(element);
-        if (!classification ||
-          classification.category === 'secret' ||
-          classification.category === 'withheld') continue;
-        const tagName = classification.facts.tagName;
-        const role = normalizedToken(classification.facts.role);
-        const nativeDisableable = SEMANTIC_DISABLEABLE_TAGS.has(tagName);
-        const ariaDisableable = SEMANTIC_CONTROL_TAGS.has(tagName) ||
-          SEMANTIC_CONTROL_ROLES.has(role);
-        if (!nativeDisableable && !ariaDisableable) continue;
-        const currentClassification = this.#classifyElement(element, false, false);
-        if (currentClassification.category === 'secret' ||
-          currentClassification.category === 'withheld') continue;
-        const disabled = nativeDisableable
-          ? safelyRead(
-              () => (element as HTMLButtonElement | HTMLFieldSetElement |
-                HTMLInputElement | HTMLOptGroupElement | HTMLOptionElement |
-                HTMLSelectElement | HTMLTextAreaElement).disabled,
-            )
-          : false;
-        const ariaDisabled = normalizedToken(
-          safelyReadAttribute(element, 'aria-disabled'),
-        ) === 'true';
-        const controlNodeId = this.#nodeId(element);
-        if (!controlNodeId) continue;
-        addProof({
-          kind: 'control-state',
-          bridge: this.environment.bridge,
-          nodeId: controlNodeId,
-          gate: 'controlSemantics',
-          disabled: ariaDisabled || (typeof disabled === 'boolean'
-            ? disabled
-            : safelyRead(() => element.hasAttribute('disabled')) === true) ||
-            safelyRead(() => element.matches(':disabled')) === true,
-          classifierVersion: SOURCE_SECRET_CLASSIFIER_VERSION,
-        });
-      }
-    }
-
-    if (scope.controlSemantics && stack.length === 0) {
-      for (const element of elements) {
-        const classification = classifications.get(element);
         if (classification?.category !== 'public-semantic') continue;
         const controlNodeId = this.#nodeId(element);
         if (!controlNodeId) continue;
@@ -1239,6 +1198,54 @@ export class SemanticSourceSession {
         });
       }
     }
+
+    // Every control gets a disabled-state proof, so on a page with hundreds
+    // of links and buttons they would fill the proof and byte budgets. They
+    // come last, after the tab, disclosure and menu proofs and the labels and
+    // text that let the replica open a dropdown and show its options.
+    if (scope.controlSemantics && stack.length === 0) {
+      for (const element of elements) {
+        const classification = classifications.get(element);
+        if (!classification ||
+          classification.category === 'secret' ||
+          classification.category === 'withheld') continue;
+        const tagName = classification.facts.tagName;
+        const role = normalizedToken(classification.facts.role);
+        const nativeDisableable = SEMANTIC_DISABLEABLE_TAGS.has(tagName);
+        // The receiver accepts a disabled state only on a form control or a
+        // control role. A plain link or summary is neither, and one proof it
+        // refuses makes it refuse the whole batch (every link on a page did).
+        const ariaDisableable = SEMANTIC_CONTROL_ROLES.has(role);
+        if (!nativeDisableable && !ariaDisableable) continue;
+        const currentClassification = this.#classifyElement(element, false, false);
+        if (currentClassification.category === 'secret' ||
+          currentClassification.category === 'withheld') continue;
+        const disabled = nativeDisableable
+          ? safelyRead(
+              () => (element as HTMLButtonElement | HTMLFieldSetElement |
+                HTMLInputElement | HTMLOptGroupElement | HTMLOptionElement |
+                HTMLSelectElement | HTMLTextAreaElement).disabled,
+            )
+          : false;
+        const ariaDisabled = normalizedToken(
+          safelyReadAttribute(element, 'aria-disabled'),
+        ) === 'true';
+        const controlNodeId = this.#nodeId(element);
+        if (!controlNodeId) continue;
+        addProof({
+          kind: 'control-state',
+          bridge: this.environment.bridge,
+          nodeId: controlNodeId,
+          gate: 'controlSemantics',
+          disabled: ariaDisabled || (typeof disabled === 'boolean'
+            ? disabled
+            : safelyRead(() => element.hasAttribute('disabled')) === true) ||
+            safelyRead(() => element.matches(':disabled')) === true,
+          classifierVersion: SOURCE_SECRET_CLASSIFIER_VERSION,
+        });
+      }
+    }
+
     const structuralMenuRelationsWithText = new Set<string>();
     for (const node of admittedDisclosureTextNodes) {
       const path = readSourceFlatTreeElementPath(node);
@@ -1360,8 +1367,8 @@ export class SemanticSourceSession {
       }
       const trigger = triggers[0]!;
       if (
-        safelyRead(() => trigger.hasAttribute('aria-expanded')) !== false ||
-        safelyRead(() => trigger.hasAttribute('aria-controls')) !== false
+        safelyRead(() => trigger.hasAttribute('aria-controls')) !== false ||
+        !hasPlainStructuralMenuExpandedState(trigger)
       ) {
         this.#structuralMenus.delete(container);
         continue;
@@ -2374,6 +2381,20 @@ function disclosureElementCanCarryUserState(element: Element): boolean {
 function isExplicitlyHidden(element: Element): boolean {
   return element.hasAttribute('hidden') ||
     normalizedToken(safelyReadAttribute(element, 'aria-hidden')) === 'true';
+}
+
+/**
+ * A structural menu trigger may carry its own `aria-expanded` as a plain
+ * true/false (freee's header buttons do, with `aria-haspopup="menu"` and the
+ * menu as their sibling); without `aria-controls` no ARIA relation proves the
+ * menu, so the container shape does. A malformed or unreadable value fails
+ * closed.
+ */
+function hasPlainStructuralMenuExpandedState(trigger: Element): boolean {
+  const expanded = safelyRead(() => trigger.getAttribute('aria-expanded'));
+  if (expanded === null) return true;
+  const token = normalizedToken(expanded);
+  return token === 'true' || token === 'false';
 }
 
 function hasNavigationContext(element: Element): boolean {

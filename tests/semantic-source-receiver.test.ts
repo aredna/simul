@@ -320,8 +320,11 @@ describe('semantic source receiver', () => {
       identity, 'read-v1-111111', 1, [label],
     ))).toBeDefined();
     expect(input.value).toBe('***');
-    expect(document.querySelector('[data-simul-semantic-source="v1"]')?.textContent)
-      .toBe('Search');
+    const owned = document.querySelector<HTMLElement>('[data-simul-semantic-source="v1"]');
+    expect(owned?.textContent).toBe('Search');
+    // An accessible name is not painted beside the control in the source.
+    expect(owned?.hidden).toBe(true);
+    expect(owned?.style.getPropertyValue('display')).toBe('none');
   });
 
   it('restores the newest base option label after a semantic refresh', () => {
@@ -719,6 +722,66 @@ describe('semantic source receiver', () => {
       receiver.clear();
       expect(trigger.hasAttribute('data-simul-replica-disclosure-trigger'))
         .toBe(false);
+  });
+
+  it('keeps a presented structural menu when the next batch re-validates it', () => {
+    // The presenter writes aria-controls and aria-expanded on the replica
+    // trigger; the next batch must not mistake that for source state and
+    // refuse the menu, and with it the whole batch.
+    const { document } = parseHTML(`<html><body><nav>
+      <div id="wrapper"><button id="trigger">Resources</button>
+      <div id="panel" class="hidden"><a id="item" href="/school">***</a></div>
+      </div></nav><iframe id="frame"></iframe></body></html>`);
+    const container = document.querySelector<HTMLElement>('#wrapper')!;
+    const trigger = document.querySelector<HTMLElement>('#trigger')!;
+    const panel = document.querySelector<HTMLElement>('#panel')!;
+    const text = document.querySelector('#item')!.firstChild!;
+    const frame = document.querySelector('#frame') as unknown as HTMLIFrameElement;
+    const nodes = new Map<number, Node>([
+      [16, container], [17, trigger], [18, panel], [19, text],
+    ]);
+    const presenter = new SemanticProofPresenter({
+      document: document as unknown as Document,
+      iframe: frame,
+    });
+    const receiver = new SemanticSourceReceiver({
+      document: identity,
+      replicaDocument: document as unknown as Document,
+      resolveNode: (nodeId) => nodes.get(nodeId),
+      applyProofs: (proofs) => presenter.apply(proofs),
+    });
+    const record: SemanticSourceRecord = {
+      bridge: 'isolated-html',
+      recordId: semanticSourceRecordId(19, 'text')!,
+      nodeId: 19,
+      nodeRevision: 1,
+      category: 'public-semantic',
+      gate: 'disclosureContent',
+      tagName: 'a',
+      type: '',
+      autocomplete: '',
+      role: '',
+      contentEditable: '',
+      text: 'Startup School',
+      presentation: 'text',
+      classifierVersion: 1,
+    };
+
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 1, [record], [structuralMenuProof()],
+    ))).toBeDefined();
+    expect(trigger.getAttribute('aria-controls')).toBe(
+      structuralMenuProof().relationId,
+    );
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 2, [record], [structuralMenuProof()],
+    ))).toBeDefined();
+
+    // A trigger that claims another relation is still refused.
+    trigger.setAttribute('aria-controls', 'somewhere-else');
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 3, [record], [structuralMenuProof()],
+    ))).toBeUndefined();
   });
 
   it('preserves a unique panel CSS id across inline tab apply-update-clear', () => {

@@ -17,6 +17,7 @@ import {
 import {
   ISOLATED_HTML_QUIRKS_SHELL,
   ISOLATED_HTML_SHELL,
+  ISOLATED_PUBLIC_MENU_SHADOW_CSS,
   IsolatedHtmlReplicaEngine,
   canonicalSvgElementName,
   createMirrorElement,
@@ -71,6 +72,14 @@ describe('IsolatedHtmlReplicaEngine', () => {
     )?.textContent ?? '';
     expect(inert).not.toMatch(/margin|min-width|min-height/u);
     expect(inert).toContain('body{font-family:inherit;font-size:inherit}');
+  });
+
+  it('gives an opened public menu overlay an opaque canvas background', () => {
+    // Menu content has its backgrounds stripped so it cannot fetch images;
+    // once opened over the page it still needs a plain background.
+    expect(ISOLATED_PUBLIC_MENU_SHADOW_CSS).toContain(
+      ':host([data-simul-replica-disclosure-overlay="v1"]){background-color:Canvas!important;color:CanvasText!important;',
+    );
   });
 
   it('rejects the initial about:blank document and accepts only the marked srcdoc shell', () => {
@@ -666,6 +675,64 @@ describe('IsolatedHtmlReplicaEngine', () => {
     reconnectTimers.shift()?.();
     await Promise.resolve();
     expect(semanticOpens).toBe(2);
+  });
+
+  it('keeps a transparent source select as a clickable transparent trigger', async () => {
+    // Wikipedia draws its own "EN" label under an opacity:0 select. The
+    // replica keeps the select's box and click target, makes only the
+    // trigger transparent, and leaves the options panel opaque.
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: {
+          kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+          attributes: [], children: [
+            { kind: 'element', id: 2, namespace: 'html', tagName: 'head', attributes: [], children: [] },
+            { kind: 'element', id: 3, namespace: 'html', tagName: 'body', attributes: [], children: [{
+              kind: 'element', id: 4, namespace: 'html', tagName: 'select',
+              attributes: [],
+              selectPresentationStyle:
+                'opacity:0;position:absolute;width:110px;height:24px',
+              children: [{
+                kind: 'element', id: 5, namespace: 'html', tagName: 'option',
+                attributes: [], children: [],
+              }],
+            }] },
+          ],
+        },
+        adoptedStyleSheets: [], captureMs: 1,
+        viewportWidth: 800, viewportHeight: 600,
+        documentWidth: 800, documentHeight: 1000,
+      },
+    )!;
+    expect(checkpoint).toBeDefined();
+    // linkedom's style declaration has no item(); Chrome's does.
+    const styleProto = Object.getPrototypeOf(
+      parseHTML('<p></p>').document.createElement('p').style,
+    ) as { item?: (this: Record<string, string>, index: number) => string };
+    const hadItem = Object.prototype.hasOwnProperty.call(styleProto, 'item');
+    if (!hadItem) {
+      styleProto.item = function item(index) {
+        return this[String(index)] ?? '';
+      };
+    }
+    try {
+      const host = new FakePresentationHost();
+      const engine = makeEngine(new FakeHtmlStream(checkpoint), host);
+      await engine.run(request);
+
+      const selectHost = host.iframe!.contentDocument!.body
+        .firstElementChild as HTMLElement;
+      expect(selectHost.getAttribute('data-simul-select-transparent')).toBe('v1');
+      expect(selectHost.style.getPropertyValue('opacity')).toBe('');
+      expect(selectHost.style.getPropertyValue('width')).toBe('110px');
+      expect(selectHost.style.getPropertyValue('display')).not.toBe('none');
+      expect(selectHost.shadowRoot!.querySelector('style')?.textContent).toContain(
+        ':host([data-simul-select-transparent="v1"]) [data-simul-owned-select-trigger="v1"]{opacity:0!important}',
+      );
+    } finally {
+      if (!hadItem) delete styleProto.item;
+    }
   });
 
   it('renders and updates native select labels without transporting option values', async () => {

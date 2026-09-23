@@ -2560,3 +2560,89 @@ Same branch / PR #22, the owner's first queued report (above).
 Build identity `0.5.0 beta v.20260922.20`; `dist/chrome-unpacked` re-synced.
 Gate: `npm run check` green, **1,460 tests pass, 1 skipped** (+3).
 Publishing 0.5.0 moves to **D62**.
+
+### D62. Dropdowns and menus open in the mirror on real pages (2026-09-23)
+
+Same branch / PR #22, the owner's second queued report: "Dropdowns do not show
+options when we cl[ick] the drop down menu." Asked which dropdowns, the owner
+chose "Site menus in the mirror" and "Form select boxes in mirror".
+
+- **What worked before.** A local page with a plain select and an
+  `aria-controls` menu opened fine in the mirror. Real pages did not, for five
+  reasons found in Chrome for Testing (Wikipedia's search language select,
+  freee's header menus, Google sign-in's language picker, Yahoo! JAPAN).
+- **1. Every semantic batch was refused on pages with links (since
+  `a3fb374`, 2026-07-23, in v0.4.0).** With `controlSemantics` on (Full
+  visible, the owner's profile) the page side sent a disabled-state proof for
+  every control tag including plain `<a>` and `<summary>`; the receiver accepts
+  that proof only on form controls and control roles, and one refused proof
+  refuses the whole batch. So on any page with an ordinary link no option
+  label, select state, menu, tab or ARIA state ever reached the replica. The
+  page side now sends the proof only where the receiver accepts it.
+- **2. Batch caps.** 128 records and 128 proofs, filled in document order by
+  per-control disabled proofs (measured: Wikipedia 206 records and 492 proofs
+  in 122 KB, freee 233 proofs, Yahoo! JAPAN 278). Caps are now 1,024 records
+  and 2,048 proofs (the 256 KB byte cap still bounds a batch), and the bulk
+  disabled-state proofs are assembled last, after the tab, disclosure and menu
+  proofs and the records, so they can never starve what opens a dropdown.
+- **3. Forms were `inert`.** The sanitizer marked every form `inert`, which
+  also blocked clicks on Simul's own select facsimiles and menu triggers inside
+  it. Submission stays impossible (sandbox without `allow-forms`, CSP
+  `form-action 'none'`, the document-wide activation guard), so forms are no
+  longer marked.
+- **4. Transparent selects.** Wikipedia draws "EN ⌄" and lays an `opacity:0`
+  select over it; the mirror treated it as hidden (no box, no option labels).
+  A zero-opacity select that still takes pointer input over a rendered box is
+  now a transparent click target (`isSourceTransparentSelectClickTarget`): it
+  keeps its box and labels, its facsimile trigger is transparent, and the
+  options panel opens opaque.
+- **5. freee's menus.** The button carries `aria-expanded` and
+  `aria-haspopup="menu"` but no `aria-controls`; its menu is the sibling
+  `div.productMenu`. The ARIA path needs `aria-controls` and the structural
+  (non-ARIA navigation) menu path refused any trigger with `aria-expanded`, so
+  neither applied. A structural menu trigger may now carry a plain true/false
+  `aria-expanded` (still no `aria-controls`). Two follow-on fixes: the receiver
+  refused the structural menu on the second batch because the presenter had
+  written `aria-controls`/`aria-expanded` onto the replica trigger (it now
+  accepts its own presentation for the same relation, marked by
+  `data-simul-source-disclosure-state`), and an opened preview is forced to
+  `opacity:1` (freee collapses the menu with opacity as well as display).
+- **Side effects of batches now applying, contained.** The control "label"
+  presentation drew an accessible name (`aria-label`, `title`) as a visible
+  span beside or inside the control, and the "selection" presentation drew the
+  selected label under the select facsimile. Never visible on real pages
+  before (the batches were refused), they squeezed Yahoo! JAPAN's search box
+  and wrote "自動スライドを一時停止" over freee's carousel dots. Those spans
+  are now always hidden; they still carry the text for translation and the
+  dropdown trigger. An opened public (ARIA) menu overlay gets a plain
+  `Canvas` background, since menu content has its backgrounds stripped.
+- **Privacy note.** Two changes widen what reaches the replica, both within
+  the owner's request: option labels of a transparent click-target select, and
+  the hidden panel text of a navigation menu whose trigger has a plain
+  `aria-expanded`. Both are public page content the source shows on click. The
+  batch fix itself only lets through what the Full visible scope already
+  admits.
+- **Verified in Chrome for Testing.** Wikipedia: the language select opens
+  with all 77 languages, trigger "English". freee: all three header menus open
+  with their content and the header chevrons match the page. Google sign-in:
+  the language picker reads "English (United States)" (was "Options") and
+  opens its list. Yahoo! JAPAN: search box unchanged from before. Local page:
+  selects plain, in a form, transparent, and transparent in a form all open
+  with labels.
+- **Tests.** Session: a plain link gets no disabled proof and menu proofs come
+  first; a trigger with plain `aria-expanded` is a structural menu, a
+  malformed one is not; a session batch from a page with a link, a select and
+  a menu is accepted by the receiver and writes the option labels (fails with
+  the old rule). Receiver: a presented structural menu survives the next
+  batch, another relation's claim is still refused; label spans are hidden.
+  Policy: a transparent clickable select keeps its option labels, a
+  transparent select without pointer input does not. Sanitizer: a form is not
+  inert. Engine: a transparent select keeps its box with a transparent
+  trigger; the menu overlay has a canvas background. Disclosure: an opened
+  panel is opaque. Protocol: the proof-cap test uses the constant.
+- **Docs.** `docs/replica-fidelity.md` (forms, transparent selects, structural
+  menus, hidden accessible names).
+
+Build identity `0.5.0 beta v.20260922.21`; `dist/chrome-unpacked` re-synced.
+Gate: `npm run check` green, **1,468 tests pass, 1 skipped** (+8).
+Publishing 0.5.0 moves to **D63**.

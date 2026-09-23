@@ -11,6 +11,7 @@ import { replicaReadScopeForProfile } from '../lib/replica/read-scope-policy';
 import {
   hasSourceControlOrEditableElementAncestor,
   hasSourceCredentialSecretAncestor,
+  isSourceSelectEntryVisuallyHidden,
   isSourceSelectLabelElementPublic,
   readSourceFlatTreeElementPath,
   readSourceSelectLabel,
@@ -324,5 +325,56 @@ describe('source secret classifier', () => {
     expect(readSourceSelectLabel(otp)).toBeUndefined();
     expect(readSourceSelectLabel(masked)).toBeUndefined();
     expect(aggregateReads).toBe(0);
+  });
+
+  it('reads the options of a transparent select that is the click target over its label', () => {
+    // Wikipedia's language picker: an opacity:0 select laid over a styled
+    // "EN" label. Clicking it opens the options in the page, so it is not
+    // hidden; a transparent select that takes no pointer input still is.
+    const { document, window } = parseHTML(`<html><body>
+      <span>EN<select id="clickable"><option id="en">English</option></select></span>
+      <select id="inert"><option id="fr">Français</option></select></body></html>`);
+    const clickable = document.querySelector('#clickable')!;
+    const inert = document.querySelector('#inert')!;
+    for (const select of [clickable, inert]) {
+      Object.defineProperties(select, {
+        getClientRects: { configurable: true, value: () => [{}] },
+        getBoundingClientRect: {
+          configurable: true,
+          value: () => ({
+            left: 10, top: 10, right: 120, bottom: 34, width: 110, height: 24,
+          }),
+        },
+      });
+    }
+    const globalNode = Object.getOwnPropertyDescriptor(globalThis, 'Node');
+    Object.defineProperty(globalThis, 'Node', {
+      configurable: true,
+      writable: true,
+      value: (window as unknown as { Node: typeof Node }).Node,
+    });
+    Object.defineProperty(window, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => ({
+        display: 'block',
+        visibility: 'visible',
+        position: 'absolute',
+        transform: 'none',
+        opacity: element.localName === 'select' ? '0' : '1',
+        pointerEvents: element === inert ? 'none' : 'auto',
+        getPropertyValue: (name: string) =>
+          name === '-webkit-text-security' ? 'none' : '',
+      }),
+    });
+    try {
+      expect(isSourceSelectEntryVisuallyHidden(clickable)).toBe(false);
+      expect(readSourceSelectLabel(document.querySelector('#en')!)?.text)
+        .toBe('English');
+      expect(isSourceSelectEntryVisuallyHidden(inert)).toBe(true);
+      expect(readSourceSelectLabel(document.querySelector('#fr')!)).toBeUndefined();
+    } finally {
+      if (globalNode) Object.defineProperty(globalThis, 'Node', globalNode);
+      else delete (globalThis as { Node?: unknown }).Node;
+    }
   });
 });
