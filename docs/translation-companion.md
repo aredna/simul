@@ -211,14 +211,24 @@ Changing the threshold clears overlays and reprocesses current images under a
 new cache identity. Explicit same-language pairs stop
 before source capture. Auto-detected work uses the nearest valid image/element
 language and stops before recognition when that resolved language equals To.
-Translated line boxes are inert siblings in the replay document; text wraps
-and uses bounded font-size reduction within the recognized box instead of
-forcing a single clipped line. Because the overlay layer sits outside the
-page's own boxes, each overlay copies what the page does to its image: it is
-clipped to the part of the image that clipping ancestors (a carousel window, a
-scroller) leave visible, hidden while the image is not painted (a faded-out
-slide), and re-measured every frame for a bounded time while a transition or
-animation moves the image, then once more when that motion ends. Document, content revision, SHA-256 pixel key,
+Each image's translated line boxes live in an inert `simul-image-overlay`
+element placed right after the image in the replay document (D74). It is
+absolutely positioned with no z-index, so it paints where the image paints:
+a pop-up, sticky header or menu that covers the image covers its translation,
+and a dimming backdrop dims it. It takes no part in layout, resets every
+property with inline `!important`, and keeps its boxes in a closed shadow
+root, so page CSS cannot restyle them; page rules that count siblings (such
+as `img + figcaption`) can see it. When the mirror rewrites the image's
+parent, the next refresh puts the element back after the image. It is placed
+by measuring where it lands, so a transformed or zoomed containing block is
+handled; rotation is not. Text wraps and uses bounded font-size reduction
+within the recognized box instead of forcing a single clipped line. Each
+overlay covers only the part of the image that clipping ancestors (a carousel
+window, a scroller) leave visible, so it never widens the page, is hidden
+while the image is not painted (a faded-out slide), and is re-measured every
+frame for a bounded time while a transition or animation moves the image,
+then once more when that motion ends. Painted logo labels likewise carry no
+z-index of their own. Document, content revision, SHA-256 pixel key,
 replay lease, pair epoch, replica image, and normalized geometry must still
 match at commit and on refresh.
 Overlay entries retain a bounded aggregate DOM/text weight. A cached layout

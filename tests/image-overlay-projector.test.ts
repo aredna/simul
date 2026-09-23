@@ -2,11 +2,12 @@ import { parseHTML } from 'linkedom';
 import { describe, expect, it, vi } from 'vitest';
 
 import {
-  IMAGE_OVERLAY_LAYER_ATTRIBUTE,
+  IMAGE_OVERLAY_ELEMENT,
   IMAGE_OVERLAY_MOTION_FRAMES,
   MAX_IMAGE_OVERLAY_RETAINED_WEIGHT,
   ImageOverlayProjector,
   captionBandBox,
+  imageOverlayContent,
   type ImageOverlayProjection,
 } from '../lib/ocr/image-overlay-projector';
 import type { ReplicaImageAnchor } from '../lib/replica/contracts';
@@ -91,7 +92,7 @@ describe('ImageOverlayProjector', () => {
     expect(receivers).toEqual([undefined, undefined]);
   });
 
-  it('maps a visible crop onto an inert sibling layer without changing image layout', () => {
+  it('maps a visible crop onto an inert overlay right after the image (D74)', () => {
     const { document, window } = parseHTML('<html><body><main><img></main></body></html>');
     const image = document.querySelector('img') as unknown as HTMLImageElement;
     image.getBoundingClientRect = () => ({
@@ -134,14 +135,25 @@ describe('ImageOverlayProjector', () => {
       }],
     }))).toBe(true);
 
-    const layer = document.querySelector(`[${IMAGE_OVERLAY_LAYER_ATTRIBUTE}]`);
-    const root = layer?.querySelector('[data-simul-image-overlay="7"]') as HTMLElement;
-    const region = root?.firstElementChild as HTMLElement;
-    expect(layer?.parentElement).toBe(document.body);
-    expect(image.parentElement?.tagName.toLowerCase()).toBe('main');
+    const root = document.querySelector('[data-simul-image-overlay="7"]') as HTMLElement;
+    const content = imageOverlayContent(root) as HTMLElement;
+    const region = content?.firstElementChild as HTMLElement;
+    // In the page, right after its image, so the page's stacking decides
+    // what paints over it; no z-index of its own.
+    expect(root.localName).toBe(IMAGE_OVERLAY_ELEMENT);
+    expect(image.nextSibling).toBe(root);
+    expect(root.parentElement?.tagName.toLowerCase()).toBe('main');
+    expect(root.style.zIndex).toBe('');
+    expect(root.style.position).toBe('absolute');
+    expect(root.style.pointerEvents).toBe('none');
+    // The boxes are in a closed shadow root, out of reach of page CSS.
+    expect(root.childNodes).toHaveLength(0);
+    expect(root.hidden).toBe(false);
     expect(root.style.left).toBe('10px');
     expect(root.style.top).toBe('30px');
     expect(root.style.width).toBe('200px');
+    expect(content.style.left).toBe('0px');
+    expect(content.style.width).toBe('200px');
     expect(region.textContent).toBe('翻訳');
     expect(region.style.left).toBe('40px');
     expect(region.style.top).toBe('20px');
@@ -154,7 +166,7 @@ describe('ImageOverlayProjector', () => {
     expect(region.style.pointerEvents).toBe('none');
     expect(current).toHaveBeenCalled();
     projector.dispose();
-    expect(document.querySelector(`[${IMAGE_OVERLAY_LAYER_ATTRIBUTE}]`)).toBeNull();
+    expect(document.querySelector(IMAGE_OVERLAY_ELEMENT)).toBeNull();
     expect(window).toBeDefined();
   });
 
@@ -196,7 +208,7 @@ describe('ImageOverlayProjector', () => {
     }))).toBe(true);
 
     const root = document.querySelector('[data-simul-image-overlay="7"]') as HTMLElement;
-    const band = root.firstElementChild as HTMLElement;
+    const band = imageOverlayContent(root)?.firstElementChild as HTMLElement;
     // 34% of the 120px image, pinned to the bottom edge, full width.
     expect(band.style.left).toBe('0px');
     expect(band.style.width).toBe('200px');
@@ -236,8 +248,9 @@ describe('ImageOverlayProjector', () => {
         bitmapHeight: 60,
         regions: [{ text, boundingBox: { x: 0, y: 0, width: 200, height: 60 }, placement: 'whole-image' }],
       }));
-      const band = document.querySelector('[data-simul-image-overlay="7"]')!
-        .firstElementChild as HTMLElement;
+      const band = imageOverlayContent(
+        document.querySelector('[data-simul-image-overlay="7"]'),
+      )!.firstElementChild as HTMLElement;
       const result = { height: band.style.height, top: band.style.top };
       projector.dispose();
       return result;
@@ -295,9 +308,9 @@ describe('ImageOverlayProjector', () => {
       ],
     }))).toBe(true);
 
-    const regions = [...document.querySelectorAll(
-      '[data-simul-image-overlay="7"] > span',
-    )] as HTMLElement[];
+    const regions = [...imageOverlayContent(
+      document.querySelector('[data-simul-image-overlay="7"]'),
+    )!.children] as HTMLElement[];
     expect(regions).toHaveLength(2);
     expect(Number.parseFloat(regions[1]!.style.fontSize)).toBeLessThan(
       Number.parseFloat(regions[0]!.style.fontSize),
@@ -351,7 +364,7 @@ describe('ImageOverlayProjector', () => {
     projector.refresh();
     frames.splice(0).forEach((frame) => frame());
 
-    expect(document.querySelector(`[${IMAGE_OVERLAY_LAYER_ATTRIBUTE}]`)).toBeNull();
+    expect(document.querySelector(IMAGE_OVERLAY_ELEMENT)).toBeNull();
     expect(projector.project(projection())).toBe(false);
     expect(projector.beginPair(2, 'en>es')).toBe(true);
   });
@@ -396,7 +409,8 @@ describe('ImageOverlayProjector', () => {
     ) as HTMLElement | null;
     expect(root?.style.left).toBe('30px');
     expect(root?.style.top).toBe('40px');
-    expect(root?.textContent).toBe('翻訳');
+    expect(replacement.nextSibling).toBe(root);
+    expect(imageOverlayContent(root)?.textContent).toBe('翻訳');
     expect(rebound).toHaveBeenCalledOnce();
     expect(rebound).toHaveBeenCalledWith(17);
   });
@@ -432,7 +446,7 @@ describe('ImageOverlayProjector', () => {
     const originalRoot = document.querySelector(
       '[data-simul-image-overlay="7"]',
     );
-    const originalRegion = originalRoot?.firstElementChild;
+    const originalRegion = imageOverlayContent(originalRoot)?.firstElementChild;
 
     bounds.left = 30;
     bounds.top = 40;
@@ -447,7 +461,7 @@ describe('ImageOverlayProjector', () => {
       '[data-simul-image-overlay="7"]',
     ) as HTMLElement | null;
     expect(rebasedRoot).toBe(originalRoot);
-    expect(rebasedRoot?.firstElementChild).toBe(originalRegion);
+    expect(imageOverlayContent(rebasedRoot)?.firstElementChild).toBe(originalRegion);
     expect(rebasedRoot?.style.left).toBe('30px');
     expect(rebasedRoot?.style.top).toBe('40px');
   });
@@ -485,7 +499,7 @@ describe('ImageOverlayProjector', () => {
     const root = document.querySelector(
       '[data-simul-image-overlay="7"]',
     ) as HTMLElement;
-    const region = root.firstElementChild as HTMLElement;
+    const region = imageOverlayContent(root)?.firstElementChild as HTMLElement;
     let fittingReads = 0;
     Object.defineProperties(region, {
       scrollWidth: {
@@ -512,6 +526,143 @@ describe('ImageOverlayProjector', () => {
     expect(root.style.left).toBe('35px');
     expect(root.style.top).toBe('45px');
     expect(fittingReads).toBe(0);
+  });
+
+  it('puts the overlay back after its image when the mirror rewrites the parent (D74)', () => {
+    const { document } = parseHTML(
+      '<html><body><main><img><p>caption</p></main><section></section></body></html>',
+    );
+    const image = document.querySelector('img') as unknown as HTMLImageElement;
+    image.getBoundingClientRect = () => ({
+      left: 10, top: 20, width: 100, height: 60,
+      right: 110, bottom: 80, x: 10, y: 20, toJSON: () => ({}),
+    });
+    const frames: Array<() => void> = [];
+    const projector = new ImageOverlayProjector({
+      resolveAnchor: () => ({
+        document: sourceDocument,
+        replayLease: 9,
+        image,
+        iframe: { contentDocument: document } as HTMLIFrameElement,
+      }),
+      isCurrent: () => true,
+      scheduleFrame: (callback) => { frames.push(callback); return frames.length; },
+      cancelFrame: () => undefined,
+      createResizeObserver: () => undefined,
+    });
+    const refresh = () => {
+      projector.refresh();
+      frames.splice(0).forEach((frame) => frame());
+    };
+    projector.beginPair(1, 'en>ja');
+    expect(projector.project(projection())).toBe(true);
+    const root = document.querySelector(IMAGE_OVERLAY_ELEMENT) as HTMLElement;
+    expect(image.nextSibling).toBe(root);
+
+    // A reconcile moved a sibling in between.
+    image.after(document.querySelector('p')!);
+    refresh();
+    expect(image.nextSibling).toBe(root);
+
+    // A children replacement dropped the overlay.
+    root.remove();
+    refresh();
+    expect(image.nextSibling).toBe(root);
+
+    // The image itself moved to another parent.
+    document.querySelector('section')!.append(image);
+    refresh();
+    expect(root.parentElement?.localName).toBe('section');
+    expect(image.nextSibling).toBe(root);
+    expect(document.querySelectorAll(IMAGE_OVERLAY_ELEMENT)).toHaveLength(1);
+    projector.dispose();
+  });
+
+  it('positions the overlay by measuring its containing block, including a scale (D74)', () => {
+    const { document } = parseHTML('<html><body><main><img></main></body></html>');
+    const image = document.querySelector('img') as unknown as HTMLImageElement;
+    // The image renders at 200×120 at (100, 80) inside an ancestor scaled
+    // by 0.5 whose origin is at (40, 70) in the viewport.
+    image.getBoundingClientRect = () => ({
+      left: 100, top: 80, width: 200, height: 120,
+      right: 300, bottom: 200, x: 100, y: 80, toJSON: () => ({}),
+    });
+    const origin = { x: 40, y: 70 };
+    const scale = 0.5;
+    let jitter = 0;
+    let measurements = 0;
+    const frames: Array<() => void> = [];
+    const projector = new ImageOverlayProjector({
+      resolveAnchor: () => ({
+        document: sourceDocument,
+        replayLease: 9,
+        image,
+        iframe: { contentDocument: document } as HTMLIFrameElement,
+      }),
+      isCurrent: () => true,
+      scheduleFrame: (callback) => { frames.push(callback); return frames.length; },
+      cancelFrame: () => undefined,
+      createResizeObserver: () => undefined,
+    });
+    projector.beginPair(1, 'en>ja');
+    const originalCreate = document.createElement.bind(document);
+    let root: HTMLElement | undefined;
+    document.createElement = ((name: string) => {
+      const element = originalCreate(name) as HTMLElement;
+      if (name === IMAGE_OVERLAY_ELEMENT) {
+        root = element;
+        element.getBoundingClientRect = () => {
+          measurements += 1;
+          const css = (property: string) => Number.parseFloat(element.style.getPropertyValue(property));
+          const left = origin.x + scale * css('left') + jitter;
+          const top = origin.y + scale * css('top');
+          const width = scale * css('width') + jitter;
+          const height = scale * css('height');
+          return {
+            left, top, width, height,
+            right: left + width, bottom: top + height, x: left, y: top,
+            toJSON: () => ({}),
+          };
+        };
+      }
+      return element;
+    }) as typeof document.createElement;
+    expect(projector.project(projection({
+      renderedWidthCss: 200,
+      renderedHeightCss: 120,
+      cropOffsetXCss: 0,
+      cropOffsetYCss: 0,
+      cropWidthCss: 200,
+      cropHeightCss: 120,
+    }))).toBe(true);
+    document.createElement = originalCreate;
+    const content = imageOverlayContent(root) as HTMLElement;
+    // (100 - 40) / 0.5 = 120 and (80 - 70) / 0.5 = 20, in the ancestor's
+    // CSS pixels; the image's 200×120 is 400×240 there.
+    expect(root?.style.left).toBe('120px');
+    expect(root?.style.top).toBe('20px');
+    expect(root?.style.width).toBe('400px');
+    expect(root?.style.height).toBe('240px');
+    expect(content.style.width).toBe('400px');
+    const region = content.firstElementChild as HTMLElement;
+    // The 40px-wide OCR box is 100 CSS px of the image, 200px in the ancestor.
+    expect(region.style.width).toBe('200px');
+
+    // Sub-pixel layout rounding neither moves nor refits a settled overlay.
+    let fittingReads = 0;
+    Object.defineProperty(region, 'scrollWidth', {
+      configurable: true,
+      get: () => { fittingReads += 1; return 0; },
+    });
+    jitter = 0.01;
+    const before = measurements;
+    projector.refresh();
+    frames.splice(0).forEach((frame) => frame());
+    expect(measurements).toBeGreaterThan(before);
+    expect(root?.style.left).toBe('120px');
+    expect(root?.style.width).toBe('400px');
+    expect(fittingReads).toBe(0);
+    projector.dispose();
   });
 
   describe('carousel geometry (D52)', () => {
@@ -583,6 +734,7 @@ describe('ImageOverlayProjector', () => {
       const root = document.querySelector(
         '[data-simul-image-overlay="7"]',
       ) as HTMLElement;
+      const content = imageOverlayContent(root) as HTMLElement;
       const runFrames = (limit = 1_000) => {
         let ran = 0;
         while (frames.length > 0 && ran < limit) {
@@ -599,6 +751,7 @@ describe('ImageOverlayProjector', () => {
         elsewhere,
         imageBox,
         root,
+        content,
         frames,
         projector,
         runFrames,
@@ -612,15 +765,20 @@ describe('ImageOverlayProjector', () => {
     it('clips an overlay to the part of its image the carousel window shows', () => {
       const view = carousel();
       expect(view.root.hidden).toBe(false);
-      expect(view.root.style.clipPath).toBe('');
+      expect(view.root.style.left).toBe('0px');
+      expect(view.root.style.width).toBe('300px');
 
       // Halfway through a move: 200px of the slide are still inside the window.
+      // The overlay covers only those 200px, so it never reaches past the
+      // window into the page's scrollable area; its content is shifted.
       view.imageBox.left = -100;
       view.window.dispatchEvent(new view.window.Event('scroll'));
       view.runFrames();
       expect(view.root.hidden).toBe(false);
-      expect(view.root.style.left).toBe('-100px');
-      expect(view.root.style.clipPath).toBe('inset(0px 0px 0px 100px)');
+      expect(view.root.style.left).toBe('0px');
+      expect(view.root.style.width).toBe('200px');
+      expect(view.content.style.left).toBe('-100px');
+      expect(view.content.style.width).toBe('300px');
 
       // The slide has left the window: its caption must not show beside it.
       view.imageBox.left = 300;
@@ -632,7 +790,8 @@ describe('ImageOverlayProjector', () => {
       view.window.dispatchEvent(new view.window.Event('scroll'));
       view.runFrames();
       expect(view.root.hidden).toBe(false);
-      expect(view.root.style.clipPath).toBe('');
+      expect(view.root.style.width).toBe('300px');
+      expect(view.content.style.left).toBe('0px');
     });
 
     it('hides an overlay while its image is not painted, as on a faded-out slide', () => {
@@ -662,13 +821,13 @@ describe('ImageOverlayProjector', () => {
       view.runFrames(1);
       expect(view.root.hidden).toBe(false);
       expect(view.root.style.left).toBe('150px');
-      expect(view.root.style.clipPath).toBe('inset(0px 150px 0px 0px)');
+      expect(view.root.style.width).toBe('150px');
       expect(view.frames).toHaveLength(1);
 
       view.imageBox.left = 0;
       view.runFrames(1);
       expect(view.root.style.left).toBe('0px');
-      expect(view.root.style.clipPath).toBe('');
+      expect(view.root.style.width).toBe('300px');
 
       // Following stops on its own, well within the frame budget.
       expect(view.runFrames()).toBeLessThanOrEqual(IMAGE_OVERLAY_MOTION_FRAMES);
@@ -678,7 +837,8 @@ describe('ImageOverlayProjector', () => {
       view.imageBox.left = -40;
       view.motion(view.track, 'transitionend');
       view.runFrames();
-      expect(view.root.style.left).toBe('-40px');
+      expect(view.root.style.width).toBe('260px');
+      expect(view.content.style.left).toBe('-40px');
       expect(view.frames).toHaveLength(0);
     });
 

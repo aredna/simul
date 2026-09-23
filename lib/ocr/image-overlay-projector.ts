@@ -17,7 +17,11 @@ import {
   type ReplicaSourceDocumentIdentity,
 } from '../replica/source-identity';
 
-export const IMAGE_OVERLAY_LAYER_ATTRIBUTE = 'data-simul-image-overlay-layer';
+/**
+ * The element that holds one image's translation. It is placed right after
+ * the image, so the page's own stacking decides what paints over it (D74).
+ */
+export const IMAGE_OVERLAY_ELEMENT = 'simul-image-overlay';
 export const MAX_IMAGE_OVERLAY_REGIONS = 10_000;
 export const MAX_IMAGE_OVERLAY_RETAINED_WEIGHT = 1_000_000;
 const IMAGE_OVERLAY_ENTRY_WEIGHT = 256;
@@ -97,13 +101,60 @@ export interface ImageOverlayProjectorEnvironment {
 interface ProjectedEntry {
   projection: ImageOverlayProjection;
   anchor: ReplicaImageAnchor;
+  /** The overlay element after the image, sized to the image's visible part. */
   readonly root: HTMLElement;
+  /** The image-sized box inside the root's closed shadow root. */
+  readonly content: HTMLElement;
   readonly weight: number;
   layoutWidth?: number;
   layoutHeight?: number;
   /** Ancestors that clip the image, cached until the replica's layout changes. */
   clipAncestors?: readonly ClipAncestor[];
+  /** The root's last written box, in its containing block's coordinates. */
+  placed?: OverlayBox;
+  /** How the root's containing block maps to the viewport, last measured. */
+  calibration?: OverlayCalibration;
 }
+
+interface OverlayBox {
+  readonly left: number;
+  readonly top: number;
+  readonly width: number;
+  readonly height: number;
+}
+
+/**
+ * Viewport position = origin + scale × CSS position, for boxes positioned in
+ * the root's containing block. A transformed or zoomed ancestor gives a scale
+ * other than 1; rotation is not modelled.
+ */
+interface OverlayCalibration {
+  readonly originX: number;
+  readonly originY: number;
+  readonly scaleX: number;
+  readonly scaleY: number;
+}
+
+const IDENTITY_CALIBRATION: OverlayCalibration = {
+  originX: 0,
+  originY: 0,
+  scaleX: 1,
+  scaleY: 1,
+};
+const MIN_CALIBRATION_SCALE = 0.01;
+const MAX_CALIBRATION_SCALE = 100;
+/**
+ * Layout rounds boxes to fractions of a pixel, so a measured mapping jitters
+ * slightly. Changes below these tolerances keep the previous mapping (and a
+ * scale this close to 1 is 1), so a settled overlay is neither rewritten nor
+ * refitted every frame.
+ */
+const CALIBRATION_ORIGIN_TOLERANCE_PX = 0.25;
+const CALIBRATION_SCALE_TOLERANCE = 0.002;
+const OVERLAY_BOX_TOLERANCE_PX = 0.1;
+const overlayContents = new WeakMap<Element, HTMLElement>();
+const OVERLAY_SHADOW_CSS =
+  ':host::before,:host::after{content:none!important;display:none!important}';
 
 interface ClipAncestor {
   readonly element: Element;
@@ -120,7 +171,6 @@ interface ViewportBox {
 
 interface DocumentLayer {
   readonly document: Document;
-  readonly root: HTMLElement;
   readonly entries: Map<number, ProjectedEntry>;
   readonly refresh: () => void;
   readonly onMotion: (event: Event) => void;
@@ -131,15 +181,21 @@ interface DocumentLayer {
 }
 
 /**
- * Projects inert translated line boxes into a viewport layer in the replay
- * document. The layer is a body sibling, never a wrapper around the image, so
- * projection cannot influence page layout or source/replay ownership.
+ * Projects inert translated line boxes over images in the replay document.
+ * Each image's overlay is an absolutely positioned element placed right after
+ * the image, with no z-index, so it paints where the image paints: whatever
+ * the page draws over the image (a pop-up, a sticky header, a dimming
+ * backdrop) also covers or dims its translation (D74). It never wraps the
+ * image and takes no part in layout; its content sits in a closed shadow root
+ * so page CSS cannot restyle it. The mirror may drop or displace it when it
+ * rewrites the image's parent, so every refresh puts it back after the image.
  *
- * Because the layer sits outside the page's own boxes, each overlay copies
- * what the page would do to the image: it is clipped to the part of the image
- * its clipping ancestors (a carousel window, a scroller) leave visible, hidden
- * while the image is not painted (a faded-out slide), and re-measured every
- * frame while a transition or animation moves the image.
+ * The overlay is positioned by measuring where it actually lands, so any
+ * containing block (a transformed carousel track, a zoomed subtree) is
+ * accounted for. It is sized to the part of the image its clipping ancestors
+ * (a carousel window, a scroller) leave visible, hidden while the image is not
+ * painted (a faded-out slide), and re-measured every frame while a transition
+ * or animation moves the image.
  */
 export class ImageOverlayProjector {
   readonly #scheduleFrame: AnimationFrameScheduler;
@@ -230,22 +286,28 @@ export class ImageOverlayProjector {
       return false;
     }
 
-    const root = replayDocument.createElement('div');
+    const { root, content } = createOverlayElement(replayDocument);
     root.dataset.simulImageOverlay = String(projection.nodeId);
     root.dataset.simulImageMethod = projection.methodId;
-    applyImageRootStyle(root);
     for (const region of projection.regions) {
       const element = replayDocument.createElement('span');
       element.textContent = region.text;
       element.dir = 'auto';
       applyRegionStyle(element, region.placement === 'whole-image');
-      root.append(element);
+      content.append(element);
     }
-    layer.root.append(root);
+    if (!placeAfterImage(root, anchor.image)) {
+      if (layer.entries.size === 0) {
+        this.#disposeLayer(layer);
+        this.#layers.delete(layer.document);
+      }
+      return false;
+    }
     const entry: ProjectedEntry = {
       projection,
       anchor,
       root,
+      content,
       weight: projectionWeight,
     };
     layer.entries.set(projection.nodeId, entry);
@@ -289,14 +351,9 @@ export class ImageOverlayProjector {
 
   #layerFor(replayDocument: Document): DocumentLayer | undefined {
     const existing = this.#layers.get(replayDocument);
-    if (existing?.root.isConnected) return existing;
-    if (existing) this.#disposeLayer(existing);
-    const parent = replayDocument.body ?? replayDocument.documentElement;
+    if (existing) return existing;
     const view = replayDocument.defaultView;
-    if (!parent || !view) return undefined;
-    const root = replayDocument.createElement('div');
-    root.setAttribute(IMAGE_OVERLAY_LAYER_ATTRIBUTE, 'v1');
-    applyLayerStyle(root);
+    if (!view) return undefined;
     const refresh = (): void => {
       const layer = this.#layers.get(replayDocument);
       if (layer) this.#scheduleRefresh(layer);
@@ -315,14 +372,12 @@ export class ImageOverlayProjector {
         : undefined);
     const layer: DocumentLayer = {
       document: replayDocument,
-      root,
       entries: new Map(),
       refresh,
       onMotion,
       motionFrames: 0,
       ...(resizeObserver ? { resizeObserver } : {}),
     };
-    parent.append(root);
     view.addEventListener('scroll', refresh, { passive: true, capture: true });
     view.addEventListener('resize', refresh, { passive: true });
     for (const type of MOTION_EVENTS) {
@@ -355,7 +410,7 @@ export class ImageOverlayProjector {
   #refreshEntry(layer: DocumentLayer, nodeId: number): void {
     const entry = layer.entries.get(nodeId);
     if (!entry) return;
-    const { projection, root } = entry;
+    const { projection, root, content } = entry;
     const currentAnchor = this.environment.resolveAnchor(
       projection.document,
       projection.nodeId,
@@ -367,8 +422,7 @@ export class ImageOverlayProjector {
       !currentAnchor ||
       currentAnchor.replayLease !== projection.replayLease ||
       currentAnchor.image.ownerDocument !== layer.document ||
-      !currentAnchor.image.isConnected ||
-      !root.isConnected
+      !currentAnchor.image.isConnected
     ) {
       this.#removeEntry(layer, nodeId);
       return;
@@ -381,40 +435,57 @@ export class ImageOverlayProjector {
       this.environment.onAnchorRebound?.(projection.jobOrdinal);
     }
     const anchor = entry.anchor;
+    if (!placeAfterImage(root, anchor.image)) {
+      this.#removeEntry(layer, nodeId);
+      return;
+    }
     const rect = anchor.image.getBoundingClientRect();
     if (!validRect(rect) || !imageIsPainted(anchor.image)) {
-      root.hidden = true;
+      setOverlayShown(root, false);
       return;
     }
     entry.clipAncestors ??= clippingAncestors(anchor.image);
     const visible = visibleImageBox(rect, entry.clipAncestors);
     if (!visible) {
-      root.hidden = true;
+      setOverlayShown(root, false);
       return;
     }
-    root.hidden = false;
-    root.style.left = `${rect.left}px`;
-    root.style.top = `${rect.top}px`;
-    const clipPath = insetClipPath(rect, visible);
-    if (root.style.clipPath !== clipPath) root.style.clipPath = clipPath;
-    if (entry.layoutWidth === rect.width && entry.layoutHeight === rect.height) {
+    const calibration = calibrateOverlay(entry, visible);
+    const { scaleX, scaleY } = calibration;
+    const placed: OverlayBox = {
+      left: roundCss((visible.left - calibration.originX) / scaleX),
+      top: roundCss((visible.top - calibration.originY) / scaleY),
+      width: roundCss((visible.right - visible.left) / scaleX),
+      height: roundCss((visible.bottom - visible.top) / scaleY),
+    };
+    if (!entry.placed || !sameOverlayBox(entry.placed, placed)) {
+      writeOverlayBox(root, placed);
+      entry.placed = placed;
+    }
+    setImportantStyle(content, 'left', `${roundCss((rect.left - visible.left) / scaleX)}px`);
+    setImportantStyle(content, 'top', `${roundCss((rect.top - visible.top) / scaleY)}px`);
+    // Regions are laid out in the containing block's CSS pixels, which a
+    // scaled ancestor then scales exactly as it scales the image.
+    const width = roundCss(rect.width / scaleX);
+    const height = roundCss(rect.height / scaleY);
+    if (entry.layoutWidth === width && entry.layoutHeight === height) {
       return;
     }
-    entry.layoutWidth = rect.width;
-    entry.layoutHeight = rect.height;
-    root.style.width = `${rect.width}px`;
-    root.style.height = `${rect.height}px`;
-    const scaleX = rect.width / projection.renderedWidthCss;
-    const scaleY = rect.height / projection.renderedHeightCss;
-    const regionElements = root.children;
+    entry.layoutWidth = width;
+    entry.layoutHeight = height;
+    setImportantStyle(content, 'width', `${width}px`);
+    setImportantStyle(content, 'height', `${height}px`);
+    const regionScaleX = width / projection.renderedWidthCss;
+    const regionScaleY = height / projection.renderedHeightCss;
+    const regionElements = content.children;
     projection.regions.forEach((region, index) => {
       const element = regionElements.item(index) as HTMLElement | null;
       if (!element) return;
       if (region.placement === 'whole-image') {
-        placeCaptionBand(element, region.text, rect.width, rect.height);
+        placeCaptionBand(element, region.text, width, height);
         return;
       }
-      const box = mappedBox(projection, region.boundingBox, scaleX, scaleY);
+      const box = mappedBox(projection, region.boundingBox, regionScaleX, regionScaleY);
       placeRegion(element, box);
       fitRegionText(element, region.text, box.width, box.height);
     });
@@ -452,9 +523,9 @@ export class ImageOverlayProjector {
     for (const entry of layer.entries.values()) {
       this.#retainedEntries.delete(entry);
       this.#retainedWeight = Math.max(0, this.#retainedWeight - entry.weight);
+      entry.root.remove();
     }
     layer.entries.clear();
-    layer.root.remove();
   }
 
   #makeRetainedWeightAvailable(
@@ -667,24 +738,169 @@ function mappedBox(
   };
 }
 
-function applyLayerStyle(element: HTMLElement): void {
-  Object.assign(element.style, {
-    position: 'fixed',
-    inset: '0',
-    overflow: 'hidden',
-    pointerEvents: 'none',
-    zIndex: '2147483647',
-    contain: 'strict',
-  });
+/**
+ * The translated boxes of an overlay element. They live in its closed shadow
+ * root, so diagnostics and tests read them through this.
+ */
+export function imageOverlayContent(
+  root: Element | null | undefined,
+): HTMLElement | undefined {
+  return root ? overlayContents.get(root) : undefined;
 }
 
-function applyImageRootStyle(element: HTMLElement): void {
-  Object.assign(element.style, {
-    position: 'absolute',
-    overflow: 'hidden',
-    pointerEvents: 'none',
-    contain: 'strict',
-  });
+/**
+ * The overlay element resets every property with inline `!important` so page
+ * rules that match it (`* {}`, `.card > *`) cannot move or restyle it. It
+ * keeps `z-index: auto`: it paints in tree order right after its image.
+ * Visibility is inherited so a hidden ancestor hides it with the image.
+ */
+function createOverlayElement(
+  document: Document,
+): { root: HTMLElement; content: HTMLElement } {
+  const root = document.createElement(IMAGE_OVERLAY_ELEMENT);
+  root.style.setProperty('all', 'initial', 'important');
+  for (const [property, value] of [
+    ['position', 'absolute'],
+    ['display', 'none'],
+    ['box-sizing', 'border-box'],
+    ['margin', '0'],
+    ['overflow', 'hidden'],
+    ['contain', 'strict'],
+    ['pointer-events', 'none'],
+    ['visibility', 'inherit'],
+  ] as const) {
+    root.style.setProperty(property, value, 'important');
+  }
+  root.hidden = true;
+  const content = document.createElement('div');
+  for (const [property, value] of [
+    ['position', 'absolute'],
+    ['margin', '0'],
+    ['padding', '0'],
+    ['border', '0'],
+    ['pointer-events', 'none'],
+  ] as const) {
+    content.style.setProperty(property, value, 'important');
+  }
+  let parent: ParentNode = root;
+  try {
+    const shadow = root.attachShadow({ mode: 'closed' });
+    // Page rules such as `.card > *::after` would otherwise add boxes to the
+    // overlay; an important rule from inside the shadow wins over the page's.
+    const style = document.createElement('style');
+    style.textContent = OVERLAY_SHADOW_CSS;
+    shadow.append(style);
+    parent = shadow;
+  } catch {
+    // Without shadow DOM the boxes still render; page CSS may reach them.
+  }
+  parent.append(content);
+  overlayContents.set(root, content);
+  return { root, content };
+}
+
+/** Keeps the overlay directly after its image, where the mirror left or moved it. */
+function placeAfterImage(root: HTMLElement, image: HTMLImageElement): boolean {
+  if (root.previousSibling === image) return true;
+  try {
+    image.after(root);
+  } catch {
+    return false;
+  }
+  return root.previousSibling === image;
+}
+
+function setOverlayShown(root: HTMLElement, shown: boolean): void {
+  if (root.hidden === !shown) return;
+  root.hidden = !shown;
+  root.style.setProperty('display', shown ? 'block' : 'none', 'important');
+}
+
+function setImportantStyle(
+  element: HTMLElement,
+  property: string,
+  value: string,
+): void {
+  if (element.style.getPropertyValue(property) === value) return;
+  element.style.setProperty(property, value, 'important');
+}
+
+function writeOverlayBox(root: HTMLElement, box: OverlayBox): void {
+  setImportantStyle(root, 'left', `${box.left}px`);
+  setImportantStyle(root, 'top', `${box.top}px`);
+  setImportantStyle(root, 'width', `${box.width}px`);
+  setImportantStyle(root, 'height', `${box.height}px`);
+}
+
+/**
+ * Shows the overlay and measures where its last written box landed, which
+ * gives the mapping from its containing block to the viewport. A first
+ * placement assumes no transform so there is a box to measure. Without a
+ * layout (a zero-size box) the last mapping, or the identity, is kept.
+ */
+function calibrateOverlay(
+  entry: ProjectedEntry,
+  visible: ViewportBox,
+): OverlayCalibration {
+  const { root } = entry;
+  if (!entry.placed) {
+    const guess: OverlayBox = {
+      left: roundCss(visible.left),
+      top: roundCss(visible.top),
+      width: roundCss(visible.right - visible.left),
+      height: roundCss(visible.bottom - visible.top),
+    };
+    writeOverlayBox(root, guess);
+    entry.placed = guess;
+  }
+  setOverlayShown(root, true);
+  const placed = entry.placed;
+  let measured: DOMRect | undefined;
+  try {
+    measured = root.getBoundingClientRect();
+  } catch {
+    measured = undefined;
+  }
+  if (measured && validRect(measured) && placed.width > 0 && placed.height > 0) {
+    const scaleX = measured.width / placed.width;
+    const scaleY = measured.height / placed.height;
+    if (
+      scaleX >= MIN_CALIBRATION_SCALE && scaleX <= MAX_CALIBRATION_SCALE &&
+      scaleY >= MIN_CALIBRATION_SCALE && scaleY <= MAX_CALIBRATION_SCALE
+    ) {
+      const next: OverlayCalibration = {
+        originX: measured.left - scaleX * placed.left,
+        originY: measured.top - scaleY * placed.top,
+        scaleX: settledScale(scaleX, entry.calibration?.scaleX),
+        scaleY: settledScale(scaleY, entry.calibration?.scaleY),
+      };
+      const previous = entry.calibration;
+      entry.calibration = previous &&
+          previous.scaleX === next.scaleX &&
+          previous.scaleY === next.scaleY &&
+          Math.abs(previous.originX - next.originX) < CALIBRATION_ORIGIN_TOLERANCE_PX &&
+          Math.abs(previous.originY - next.originY) < CALIBRATION_ORIGIN_TOLERANCE_PX
+        ? previous
+        : next;
+    }
+  }
+  return entry.calibration ?? IDENTITY_CALIBRATION;
+}
+
+function settledScale(measured: number, previous: number | undefined): number {
+  if (Math.abs(measured - 1) < CALIBRATION_SCALE_TOLERANCE) return 1;
+  if (
+    previous !== undefined &&
+    Math.abs(measured - previous) < previous * CALIBRATION_SCALE_TOLERANCE
+  ) return previous;
+  return measured;
+}
+
+function sameOverlayBox(left: OverlayBox, right: OverlayBox): boolean {
+  return Math.abs(left.left - right.left) < OVERLAY_BOX_TOLERANCE_PX &&
+    Math.abs(left.top - right.top) < OVERLAY_BOX_TOLERANCE_PX &&
+    Math.abs(left.width - right.width) < OVERLAY_BOX_TOLERANCE_PX &&
+    Math.abs(left.height - right.height) < OVERLAY_BOX_TOLERANCE_PX;
 }
 
 function applyRegionStyle(element: HTMLElement, wholeImage = false): void {
@@ -947,15 +1163,6 @@ function visibleImageBox(
   }
   if (right - left < 0.5 || bottom - top < 0.5) return undefined;
   return { left, top, right, bottom };
-}
-
-function insetClipPath(rect: DOMRect, visible: ViewportBox): string {
-  const top = roundCss(Math.max(0, visible.top - rect.top));
-  const right = roundCss(Math.max(0, rect.left + rect.width - visible.right));
-  const bottom = roundCss(Math.max(0, rect.top + rect.height - visible.bottom));
-  const left = roundCss(Math.max(0, visible.left - rect.left));
-  if (top === 0 && right === 0 && bottom === 0 && left === 0) return '';
-  return `inset(${top}px ${right}px ${bottom}px ${left}px)`;
 }
 
 function validRect(rect: DOMRect): boolean {

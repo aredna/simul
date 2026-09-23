@@ -3169,3 +3169,59 @@ detached window).
 Build identity `0.5.0 beta v.20260922.32`; `dist/chrome-unpacked` re-synced.
 Gate: `npm run check` green, **1,500 tests pass, 1 skipped** (+3).
 Publishing 0.5.0 moves to **D74**.
+
+### D74. Image translations paint where the image paints (2026-09-23)
+
+Same branch / PR #22. Owner report: a page's own pop-up covered its images,
+but the image translations were drawn above the pop-up. Owner choice from two
+options: put each translation inside the page, right after its image ("A"),
+rather than keep a top layer and guess what covers the image.
+
+- **Cause.** All image overlays lived in one `position: fixed` layer appended
+  to the replica's body with `z-index: 2147483647`. It copied clipping and
+  visibility from the page but never what paints over the image, so a pop-up
+  sat under the translation and a dim backdrop left it bright. Hit testing
+  cannot find occluders: the replica sets `pointer-events: none` on every
+  element.
+- **Fix.** Each image gets a `simul-image-overlay` element inserted right after
+  it, absolutely positioned with no z-index, so the page's own stacking covers
+  or dims the translation exactly as it does the image. The element resets
+  every property with inline `!important`, holds its boxes in a closed shadow
+  root (with a rule suppressing page `::before`/`::after` on it), and takes no
+  part in layout. It is sized to the image's visible part (the old clip-path
+  would have let a half-visible slide widen the page), with an image-sized box
+  inside. Its position comes from measuring where it lands: origin and scale
+  of whatever containing block it ends up in (a transformed carousel track, a
+  scaled or zoomed subtree, a nested scroller), with small tolerances so
+  layout rounding never rewrites or refits a settled overlay. The engine only
+  touches children it created, so the element survives patches; when a
+  rewrite drops or displaces it, the next refresh (`onLayoutChanged`) puts it
+  back after the image.
+- **Logo labels.** Painted-label overlays dropped their `z-index: 2147483646`
+  for the same reason.
+- **Known cost.** Page rules that count siblings (`img + figcaption`,
+  `:last-child`, `:nth-child` of later siblings) can see the extra element.
+  Rotation of an ancestor is not modelled.
+- **Verified in Chrome for Testing** on a page with a fixed pop-up and a 50%
+  backdrop over an image, an image in a `scale(0.5)` box, an absolutely
+  positioned cover image, two slides in a translated carousel track, and
+  images in positioned and static nested scrollers. The D73 build draws the
+  alt-text caption over the pop-up and undimmed; this build puts it under the
+  pop-up and dims it with the backdrop. Every overlay's rendered box equals
+  its image's visible box (the half-scale image 200×100, each carousel slide
+  the 150px the window shows), including after scrolling both nested
+  scrollers by 40px.
+- **Tests.** The overlay is the image's next sibling, has no z-index, and keeps
+  its boxes out of the light DOM; it is put back after its image when a
+  sibling moves in between, when it is dropped, and when the image moves to
+  another parent; a measured containing block at origin (40, 70) and scale 0.5
+  gives the expected local box and region size, and 0.01px jitter neither
+  moves nor refits it. Carousel expectations now check the visible-part box
+  and the shifted content. Controller tests read overlay text through
+  `imageOverlayContent`.
+- **Docs.** `docs/translation-companion.md` (overlay placement),
+  `docs/image-translation-research.md`.
+
+Build identity `0.5.0 beta v.20260922.33`; `dist/chrome-unpacked` re-synced.
+Gate: `npm run check` green, **1,502 tests pass, 1 skipped** (+2).
+Publishing 0.5.0 moves to **D75**.
