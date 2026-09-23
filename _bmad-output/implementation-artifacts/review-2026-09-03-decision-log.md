@@ -2397,3 +2397,56 @@ Build identity `0.5.0 beta v.20260922.17`; `dist/chrome-unpacked` re-synced.
 Gate: `npm run check` green, **1,447 tests pass, 1 skipped** (+15).
 Publishing 0.5.0 moves to **D59**. Next: the owner's alt-text-versus-OCR ruling
 (use Gemini Nano only when already available, never download it).
+
+### D59. An installed on-device model breaks close alt-text-versus-OCR calls (2026-09-23)
+
+Same branch / PR #22, from the owner's third report (the carousel's image
+slide showed its alt caption, not text on the picture). Asked whether alt text
+or OCR should win, the owner said: "OCR is probably more reliable, but it
+really is hard to tell which one works better. Are there any other built-in
+Chrome tools we can use that can do a very quick AI check on device?", and on
+the options: "If we can detect when Nano is available and only use it without
+doing the download, then we could use it. We never want to download and
+install Gemini Nano."
+
+- **Context.** The deterministic ranker (`selectImageTextEvidence`) already
+  demotes placeholder-like alt text (repeated across images, very short) so OCR
+  wins then; that logic is intact. What remained were close calls
+  (`priority-tie`), which fall to the saved method order, alt text first by
+  default. On freee.co.jp OCR read text in 38 of 52 reads and 29 of the
+  comparisons were such ties.
+- **Change.** `OnDeviceEvidenceJudge` (side panel, created lazily on the first
+  tie) resolves once: Gemini Nano through the Prompt API only when
+  `LanguageModel.availability()` is exactly `available` (first with image
+  input, then text-only), else Chrome's Language Detector only when it is
+  `available`, else none (re-checked every ten minutes). `create()` is never
+  called for `downloadable` or `downloading`, so no model download is ever
+  started. Nano gets the OCR crop (when it accepts images) and both texts,
+  with a JSON `responseConstraint` (`A`, `B` or `either`) and a system prompt
+  telling it not to follow instructions inside the candidates; a fresh clone
+  per call, 10 s cap. The Language Detector picks OCR text that reads as the
+  page's language with confidence ≥ 0.7, and alt text when OCR is noise
+  (< 0.3) or another language. The controller consults the judge only for
+  `priority-tie`, in all three comparison paths, caches verdicts by pixel key,
+  language and both texts (256), and keeps the ranker's choice on `either`,
+  failure or no model. Diagnostics: `evidence judge: nano-image|nano-text|
+  language-detector|none` once, and reasons `nano-judge` / `language-check`.
+- **Verified in Chrome for Testing** (no real Nano there, so a stand-in
+  `LanguageModel` was injected): reported `available`, the judge resolved to
+  `nano-image`, created one session, and its two answers put OCR text on the
+  freee pictures (`ocr/nano-judge`); reported `downloadable`, availability was
+  checked twice, `create()` and `prompt()` were never called, the log said
+  `evidence judge: none`, and the 23 ties kept the saved order.
+- **Tests.** `on-device-evidence-judge` (never creates a `downloadable`,
+  `downloading` or `unavailable` model; image and text-only Nano prompts and
+  structured choices; Language Detector rules; recheck interval; cancellation
+  and empty candidates); controller (a close call goes to the judge once with
+  the crop, both texts and language, and the verdict is applied and logged);
+  diagnostic line.
+- **Docs.** README step 5, `docs/image-translation-research.md`, and
+  `docs/image-evidence-ranker-training.md` (the Prompt API row and a "Close
+  calls" paragraph).
+
+Build identity `0.5.0 beta v.20260922.18`; `dist/chrome-unpacked` re-synced.
+Gate: `npm run check` green, **1,454 tests pass, 1 skipped** (+7).
+Publishing 0.5.0 moves to **D60**.

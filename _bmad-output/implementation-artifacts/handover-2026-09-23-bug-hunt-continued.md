@@ -10,11 +10,11 @@ through **D55** hold the reasoning.
 
 | Item | State |
 | --- | --- |
-| Branch / PR | `feat/ui-string-catalogue`, PR #22, **open**, head is the D58 commit (`.17`). Description covers D40–D58. |
-| Version / identity | `0.5.0` / `0.5.0 beta v.20260922.17` (bumped on every shipped change; next is `.18`). |
-| Gate | `npm run check` green at head: typecheck clean, **1,447 tests pass, 1 skipped**, `dist/chrome-unpacked` re-synced and byte-verified. |
-| NAS | `Dev/simul/` mirrors the D58 commit. Load `Dev/simul/dist/chrome-unpacked`; settings must show `Build 0.5.0 beta v.20260922.17`. |
-| `main` | `eb09813` (through D39). Release: `v0.4.0` pre-release only. Publishing 0.5.0 is **D59**, and only when the owner says so. |
+| Branch / PR | `feat/ui-string-catalogue`, PR #22, **open**, head is the D59 commit (`.18`). Description covers D40–D59. |
+| Version / identity | `0.5.0` / `0.5.0 beta v.20260922.18` (bumped on every shipped change; next is `.19`). |
+| Gate | `npm run check` green at head: typecheck clean, **1,454 tests pass, 1 skipped**, `dist/chrome-unpacked` re-synced and byte-verified. |
+| NAS | `Dev/simul/` mirrors the D59 commit. Load `Dev/simul/dist/chrome-unpacked`; settings must show `Build 0.5.0 beta v.20260922.18`. |
+| `main` | `eb09813` (through D39). Release: `v0.4.0` pre-release only. Publishing 0.5.0 is **D60**, and only when the owner says so. |
 
 ## What this session shipped
 
@@ -190,7 +190,7 @@ each; keep them serial, because concurrent runs make OCR timings noisy.
    with no forced setup question; tab follow defaults to `active` with two
    clearer words; mirror size defaults to 1:1; toolbar buttons stay until the
    owner reviews them one by one.
-3. **Publish 0.5.0** as **D59**, only when the owner says it is ready; do not
+3. **Publish 0.5.0** as **D60**, only when the owner says it is ready; do not
    ask. Runbook: `handover-2026-09-22-release-readiness.md`; the release-notes
    draft needs a line for D51–D55.
 4. Unchanged: F6 (memoizing `Intl.DisplayNames`) stays declined;

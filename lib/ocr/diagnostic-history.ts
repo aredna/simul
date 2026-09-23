@@ -103,6 +103,9 @@ export function formatImageTranslationDiagnostic(
   if (diagnostic.stage === 'recognition-quality') {
     return `recognition quality: candidates=${diagnostic.candidateRegions}; accepted=${diagnostic.acceptedRegions}; corroborated=${diagnostic.corroboratedRegions}; uncertain=${diagnostic.uncertainRegions}; rejected-blank=${diagnostic.rejectedBlankRegions}; rejected-punctuation=${diagnostic.rejectedPunctuationRegions}; rejected-low-confidence=${diagnostic.rejectedLowConfidenceRegions}; rejected-uncorroborated=${diagnostic.rejectedUncorroboratedRegions}`;
   }
+  if (diagnostic.stage === 'evidence-judge') {
+    return `evidence judge: ${diagnostic.judge}`;
+  }
   if (diagnostic.stage === 'evidence-selection') {
     return `evidence selection: selected=${diagnostic.selected}; reason=${diagnostic.reason}`;
   }
