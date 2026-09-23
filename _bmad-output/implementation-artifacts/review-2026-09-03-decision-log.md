@@ -2812,3 +2812,44 @@ remove the Replica fidelity setting (Passive / Conservative), the owner chose
 Build identity `0.5.0 beta v.20260922.23`; `dist/chrome-unpacked` re-synced.
 Gate: `npm run check` green, **1,479 tests pass, 1 skipped** (+7).
 Publishing 0.5.0 moves to **D65**.
+
+### D65. A quirks page's replica is in quirks mode (2026-09-23)
+
+Same branch / PR #22. Second item of `handover-2026-09-23-session-close.md`,
+found in D60 on Google's 404 page (`accounts.google.com/signin/OAuth`, no
+doctype).
+
+- **Cause.** The source's compat mode was transported and selected a
+  doctype-free shell, but the shell was loaded through `srcdoc`, and an
+  `srcdoc` document is always in no-quirks mode whatever its doctype (HTML
+  parsing rules). A quirks page's replica rendered in standards mode: on a
+  local fixture the replica was `CSS1Compat` and a table cell took the body's
+  30px where the source, in quirks mode, has 16px.
+- **Change.** For a quirks checkpoint the engine creates the frame blank (same
+  `allow-same-origin` sandbox), appends it, and writes the doctype-free shell
+  with `document.open()`/`write()`/`close()` from the panel. A document
+  written without a doctype is in quirks mode. It takes the writer's URL (the
+  panel's), which is the base URL an `srcdoc` shell inherits anyway, so
+  `isTrustedIsolatedShellDocument` accepts a written shell only at the panel's
+  own URL, and the engine also requires `BackCompat`. Standards pages keep the
+  `srcdoc` path unchanged.
+- **Verified in Chrome for Testing** (old `.23` against new `.24`). The local
+  fixture's replica is `BackCompat` with the cell at 16px, like the source
+  (was `CSS1Compat`, 30px). Google's 404 page is `BackCompat` and matches the
+  source screenshot. In both, the sandbox is unchanged and the shell CSP still
+  applies: a media request in the replica raises a `media-src` violation. A
+  standards page still loads through `srcdoc` (`about:srcdoc`, `CSS1Compat`).
+  First confirmed with a probe that a blank sandboxed frame written from an
+  extension page is `BackCompat`, keeps its content after its initial load,
+  and takes the writer's URL.
+- **Not represented.** Chrome's limited-quirks mode reports `CSS1Compat` and
+  gets the standards shell, as before.
+- **Tests.** A written quirks shell is trusted only at the URL that wrote it;
+  the quirks shell has no doctype. The engine's blank-frame write needs a real
+  browser and is covered by the harness check above.
+- **Docs.** `docs/replica-fidelity.md` and `docs/translation-companion.md` no
+  longer list quirks mode as an open gap.
+
+Build identity `0.5.0 beta v.20260922.24`; `dist/chrome-unpacked` re-synced.
+Gate: `npm run check` green, **1,480 tests pass, 1 skipped** (+1).
+Publishing 0.5.0 moves to **D66**.

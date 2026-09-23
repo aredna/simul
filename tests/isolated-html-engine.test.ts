@@ -119,6 +119,30 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(isTrustedIsolatedShellDocument(shell)).toBe(false);
   });
 
+  it('trusts a written quirks shell only at the panel URL that wrote it', () => {
+    // D65: an srcdoc document is never in quirks mode, so a quirks shell is
+    // written into a blank frame, which takes the writer's URL.
+    expect(ISOLATED_HTML_QUIRKS_SHELL.startsWith('<!doctype')).toBe(false);
+    const panelUrl = 'chrome-extension://simul/sidepanel.html';
+    const written = parseHTML(ISOLATED_HTML_QUIRKS_SHELL).document;
+    Object.defineProperty(written, 'location', {
+      configurable: true,
+      value: { href: panelUrl },
+    });
+    expect(isTrustedIsolatedShellDocument(written, panelUrl)).toBe(true);
+    expect(isTrustedIsolatedShellDocument(written)).toBe(false);
+    expect(isTrustedIsolatedShellDocument(
+      written,
+      'chrome-extension://simul/other.html',
+    )).toBe(false);
+    const unmarked = parseHTML('<html><head></head><body></body></html>').document;
+    Object.defineProperty(unmarked, 'location', {
+      configurable: true,
+      value: { href: panelUrl },
+    });
+    expect(isTrustedIsolatedShellDocument(unmarked, panelUrl)).toBe(false);
+  });
+
   it('suppresses universal pseudo-content and resource paint on opaque shells', () => {
     const { document } = parseHTML('<html><body></body></html>');
     const placeholder = document.createElementNS(
