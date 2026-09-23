@@ -80,7 +80,8 @@ export class WeakNodeIdRegistry implements HtmlMirrorIdRegistry {
   #nextId = 1;
   #allocationsSincePrune = 0;
 
-  static readonly MAX_TRACKED_NODES = 200_000;
+  /** Room for the node cap plus removed nodes not yet garbage-collected. */
+  static readonly MAX_TRACKED_NODES = MAX_HTML_MIRROR_NODES * 4;
   static readonly PRUNE_INTERVAL = 256;
 
   getId(node: Node): number {
@@ -97,8 +98,13 @@ export class WeakNodeIdRegistry implements HtmlMirrorIdRegistry {
     this.#ids.set(node, id);
     this.#nodes.set(id, new WeakRef(node));
     this.#allocationsSincePrune += 1;
+    // A prune visits every tracked node, so on a large page it waits until
+    // as many new IDs as tracked ones: pruning stays linear overall.
     if (
-      this.#allocationsSincePrune >= WeakNodeIdRegistry.PRUNE_INTERVAL ||
+      this.#allocationsSincePrune >= Math.max(
+        WeakNodeIdRegistry.PRUNE_INTERVAL,
+        this.#nodes.size,
+      ) ||
       this.#nodes.size > WeakNodeIdRegistry.MAX_TRACKED_NODES
     ) this.prune();
     return id;

@@ -1725,6 +1725,24 @@ export function hasSourcePrivateElementAncestor(element: Element): boolean {
 }
 
 /**
+ * Ancestor results reused within one synchronous walk of the source document.
+ * The page cannot run, so its DOM and computed styles cannot change, during
+ * such a walk; without this, every node re-classified its whole ancestor path
+ * (a large page spent seconds there). Create one per walk and never keep it
+ * across tasks. Entries map an element to whether it or an ancestor is secret,
+ * and are dropped whenever the classifier learns a new secret.
+ */
+export interface SourceSecretAncestorMemo {
+  classifier: StickySourceSecretClassifier | undefined;
+  revision: number;
+  readonly results: Map<Element, boolean>;
+}
+
+export function createSourceSecretAncestorMemo(): SourceSecretAncestorMemo {
+  return { classifier: undefined, revision: -1, results: new Map() };
+}
+
+/**
  * Hard credential floor shared by semantic and image admission.  It examines
  * only structural metadata/computed masking, never value, label or alt text.
  */
@@ -1734,6 +1752,7 @@ export function hasSourceCredentialSecretAncestor(
     node.ownerDocument ?? node,
   ),
   sourceWindow: Window | null | undefined = node.ownerDocument?.defaultView,
+  memo?: SourceSecretAncestorMemo,
 ): boolean {
   if (classifier.isSecret(node)) return true;
   const path = readSourceFlatTreeElementPath(node);
@@ -1744,8 +1763,29 @@ export function hasSourceCredentialSecretAncestor(
     });
     return true;
   }
+  if (
+    memo &&
+    (memo.classifier !== classifier || memo.revision !== classifier.revision)
+  ) {
+    memo.results.clear();
+    memo.classifier = classifier;
+    memo.revision = classifier.revision;
+  }
   let secretAncestor = false;
-  for (const current of [...path].reverse()) {
+  // `path` runs from the node up to the root; classify from the root down,
+  // starting below the nearest ancestor this walk already classified.
+  let first = path.length - 1;
+  if (memo) {
+    for (let index = 0; index < path.length; index += 1) {
+      const known = memo.results.get(path[index]!);
+      if (known === undefined) continue;
+      secretAncestor = known;
+      first = index - 1;
+      break;
+    }
+  }
+  for (let index = first; index >= 0; index -= 1) {
+    const current = path[index]!;
     let computedTextSecurity = '';
     const view = sourceWindow;
     let getComputedStyle:
@@ -1788,6 +1828,12 @@ export function hasSourceCredentialSecretAncestor(
       secretAncestor,
     });
     if (category === 'secret') secretAncestor = true;
+    memo?.results.set(current, secretAncestor);
+  }
+  if (memo && memo.revision !== classifier.revision) {
+    // A new secret was learned on this path: start the next lookup afresh.
+    memo.results.clear();
+    memo.revision = classifier.revision;
   }
   // Elements are classified while walking `path`. A directly slotted Text
   // node is not an element path member, so persist the same document-lifetime

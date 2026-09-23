@@ -40,6 +40,7 @@ import {
 } from './source-secret-classifier';
 import {
   createSourceControlledContentPolicy,
+  createSourceSecretAncestorMemo,
   hasSourceCredentialSecretAncestor,
   isSourcePrivateContentEditableValue,
   isSourceSelectLabelElementPublic,
@@ -49,6 +50,7 @@ import {
   sourceElementPathIsPainted,
   sourceAttributesArePrivate,
   type SourceControlledContentPolicy,
+  type SourceSecretAncestorMemo,
 } from './source-privacy-policy';
 import type { ReplicaReadScope } from './read-scope-policy';
 import type { ReplicaSourceDocumentIdentity } from './source-identity';
@@ -214,6 +216,8 @@ const SEMANTIC_POPUP_ROLES = new Set([
 export class SemanticSourceSession {
   readonly #portIdentity: SemanticSourcePortIdentity;
   readonly #classifier: StickySourceSecretClassifier;
+  /** Set only while one synchronous #scan runs; see SourceSecretAncestorMemo. */
+  #scanSecretAncestors: SourceSecretAncestorMemo | undefined;
   readonly #revisions = new Map<number, RevisionState>();
   readonly #proofRevisions = new Map<string, RevisionState>();
   readonly #structuralMenus = new WeakMap<Element, {
@@ -689,10 +693,13 @@ export class SemanticSourceSession {
     this.#dirty = false;
     let scan: SemanticSourceScan;
     try {
+      this.#scanSecretAncestors = createSourceSecretAncestorMemo();
       scan = this.#scan();
     } catch {
       this.dispose(true);
       return;
+    } finally {
+      this.#scanSecretAncestors = undefined;
     }
     const scanSignature = semanticSourceScanSignature(scan);
     if (scanSignature === this.#lastEmittedScanSignature) return;
@@ -1152,6 +1159,7 @@ export class SemanticSourceSession {
             current.node,
             this.#classifier,
             this.environment.window,
+            this.#scanSecretAncestors,
           )
         ) continue;
         const parent = current.node.parentElement;
@@ -1547,6 +1555,7 @@ export class SemanticSourceSession {
       element,
       this.#classifier,
       this.environment.window,
+      this.#scanSecretAncestors,
     );
     const facts = sourceClassificationFacts(
       element,
@@ -1627,6 +1636,7 @@ export function eagerlyClassifySourceDocumentSecrets(
     { node: root, secretAncestor: false },
   ];
   let visited = 0;
+  const secretAncestors = createSourceSecretAncestorMemo();
   try {
     while (stack.length > 0 && visited < MAX_SEMANTIC_SOURCE_NODE_IDENTITIES) {
       const current = stack.pop();
@@ -1640,6 +1650,7 @@ export function eagerlyClassifySourceDocumentSecrets(
         current.node,
         classifier,
         sourceWindow,
+        secretAncestors,
       );
       if (current.secretAncestor && !flatTreeSecret) {
         rememberSourceNodeSecret(current.node, classifier);
@@ -2000,6 +2011,7 @@ function eagerlyClassifySourceDocumentSubtree(
     readonly secretAncestor: boolean;
   }> = [{ node: root, secretAncestor: false }];
   let visited = 0;
+  const secretAncestors = createSourceSecretAncestorMemo();
   try {
     while (stack.length > 0 && visited < MAX_SEMANTIC_SOURCE_NODE_IDENTITIES) {
       const current = stack.pop();
@@ -2009,6 +2021,7 @@ function eagerlyClassifySourceDocumentSubtree(
         current.node,
         classifier,
         sourceWindow,
+        secretAncestors,
       );
       if (current.secretAncestor && !flatTreeSecret) {
         rememberSourceNodeSecret(current.node, classifier);

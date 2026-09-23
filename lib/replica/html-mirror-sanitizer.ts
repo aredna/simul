@@ -1,6 +1,7 @@
 import {
   MAX_SOURCE_SELECTED_OPTION_INDEXES,
   createSourceControlledContentPolicy,
+  createSourceSecretAncestorMemo,
   hasSourceActivationElementAncestor,
   hasSourceCredentialSecretAncestor,
   hasSourcePrivateElementAncestor,
@@ -21,6 +22,7 @@ import {
   sourceElementStartsPrivateRegionInContext,
   type SourceControlText,
   type SourceControlledContentPolicy,
+  type SourceSecretAncestorMemo,
 } from './source-privacy-policy';
 import type { SelectableReplicaFidelityPolicy } from './fidelity-policy';
 import {
@@ -30,25 +32,41 @@ import {
 import { isSafeStaticSvgDataImage } from './static-svg-data-image';
 import { hasExactKeysWithOptional } from '../exact-record';
 
-export const MAX_HTML_MIRROR_BYTES = 8 * 1024 * 1024;
-export const MAX_HTML_MIRROR_NODES = 50_000;
-export const MAX_HTML_MIRROR_DEPTH = 64;
-export const MAX_HTML_MIRROR_STRING = 512 * 1024;
+// These caps keep the tab and the panel responsive; they do not protect
+// data. The mirror runs locally, so they are set as high as Chrome carries
+// comfortably (owner ruling, D63).
+
 /**
- * One stylesheet's text. Large sites ship a single inline sheet above the
- * general string cap (Google's sign-in page carries about 700 KB), and
- * omitting it leaves the replica unstyled. The total mirror budget still
- * bounds the page as a whole.
+ * The whole document, counted as 2 bytes per character. A checkpoint crosses
+ * the runtime port as one message, and Chrome refuses a message above
+ * 64 MiB, so this stays just below that.
  */
-export const MAX_HTML_MIRROR_STYLE_SHEET_STRING = 1024 * 1024;
+export const MAX_HTML_MIRROR_BYTES = 60 * 1024 * 1024;
+export const MAX_HTML_MIRROR_NODES = 200_000;
+export const MAX_HTML_MIRROR_DEPTH = 256;
+/**
+ * Any one string: a stylesheet, a text node, an attribute value or a URL
+ * (inline images are data URLs). Google's sign-in page carries one inline
+ * stylesheet of about 700 KB; YouTube and freee link sheets of 3 MB.
+ */
+export const MAX_HTML_MIRROR_STRING = 10 * 1024 * 1024;
 export const MAX_HTML_MIRROR_ATTRIBUTES = 512;
 export const MAX_HTML_MIRROR_ADOPTED_STYLE_SHEETS = 4_096;
-export const MAX_HTML_MIRROR_ADOPTED_STYLE_RULES = 100_000;
+/**
+ * Rule counts follow the character budgets at one rule per 16 characters, so
+ * a stylesheet within its character cap is not refused for its rule count
+ * (freee's 2.7 MB sheet has 35,000 rule blocks, about 78 characters each).
+ */
+const MIN_CSS_CHARACTERS_PER_RULE = 16;
+export const MAX_HTML_MIRROR_ADOPTED_STYLE_RULES = Math.floor(
+  MAX_HTML_MIRROR_BYTES / 2 / MIN_CSS_CHARACTERS_PER_RULE,
+);
 export const MAX_HTML_MIRROR_DIAGNOSTIC_COUNT = 1_000_000;
 const MAX_ADOPTED_STYLE_SHEETS_PER_OWNER = 256;
-const MAX_ADOPTED_STYLE_RULES_PER_OWNER = 20_000;
-const MAX_ADOPTED_STYLE_CHARACTERS_PER_OWNER =
-  MAX_HTML_MIRROR_STYLE_SHEET_STRING;
+export const MAX_ADOPTED_STYLE_RULES_PER_OWNER = Math.floor(
+  MAX_HTML_MIRROR_STRING / MIN_CSS_CHARACTERS_PER_RULE,
+);
+const MAX_ADOPTED_STYLE_CHARACTERS_PER_OWNER = MAX_HTML_MIRROR_STRING;
 const MAX_BROKEN_CONTROL_ICON_EDGE = 64;
 
 export class HtmlMirrorCapacityError extends Error {
@@ -364,6 +382,8 @@ interface SerializeContext {
   readonly representability: HtmlMirrorRepresentabilityCollector;
   readonly fidelityPolicy: SelectableReplicaFidelityPolicy;
   readonly controlledContent: SourceControlledContentPolicy;
+  /** Shared by one walk; see SourceSecretAncestorMemo. */
+  readonly secretAncestors: SourceSecretAncestorMemo;
 }
 
 type NativeSelectParentContext = false | 'select' | 'optgroup' | 'option';
@@ -724,6 +744,7 @@ export function sanitizeSourceSubtrees(
       sources[0]?.ownerDocument,
     );
     if (controlledContent.incomplete) throw new HtmlMirrorCapacityError();
+    const secretAncestors = createSourceSecretAncestorMemo();
     return Object.freeze(sources.map((source) => {
       const sourceElement = nearestElement(source);
       const inheritedElement = source.nodeType === Node.ELEMENT_NODE && sourceElement
@@ -760,6 +781,7 @@ export function sanitizeSourceSubtrees(
         representability,
         fidelityPolicy,
         controlledContent,
+        secretAncestors,
       });
     }));
   } catch (error) {
@@ -810,6 +832,7 @@ export function sanitizeSourceChildren(
     const hardSecretRegion = parentElement
       ? hasSourceCredentialSecretAncestor(parentElement)
       : false;
+    const secretAncestors = createSourceSecretAncestorMemo();
     for (const child of source.childNodes) {
       const serialized = serializeNode(child, {
         registry,
@@ -828,6 +851,7 @@ export function sanitizeSourceChildren(
         representability,
         fidelityPolicy,
         controlledContent,
+        secretAncestors,
       });
       if (serialized) result.push(serialized);
     }
@@ -886,11 +910,14 @@ export function sanitizeSourceElementHints(
   fidelityPolicy: SelectableReplicaFidelityPolicy = 'conservative',
   styleWork?: HtmlMirrorStyleWorkBudget,
   precomputedControlledContent?: SourceControlledContentPolicy,
+  secretAncestors?: SourceSecretAncestorMemo,
 ): HtmlMirrorElementHints {
   // This function is also used by live attribute refreshes. Establish the
   // credential boundary before reading selected image sources, CSSOM, canvas
   // color, native-control presentation, or any other authored hint.
-  if (hasSourceCredentialSecretAncestor(source)) return Object.freeze({});
+  if (
+    hasSourceCredentialSecretAncestor(source, undefined, undefined, secretAncestors)
+  ) return Object.freeze({});
   const tagName = source.localName.toLowerCase();
   const visuallyHidden = tagName === 'select'
     ? isSourceSelectVisuallyHidden(source)
@@ -974,6 +1001,7 @@ export function sanitizeSourceDocument(
     representability,
     fidelityPolicy,
     controlledContent,
+    secretAncestors: createSourceSecretAncestorMemo(),
   });
   if (!root || root.kind !== 'element' || root.tagName !== 'html') return undefined;
   const adoptedStyleSheets = captureAdoptedStyleSheets(
@@ -1029,11 +1057,7 @@ export function readHtmlMirrorNode(
     if (
       !hasExactKeys(input, ['kind', 'id', 'text', 'translatable']) ||
       typeof input.text !== 'string' ||
-      input.text.length > (
-        styleRegion
-          ? MAX_HTML_MIRROR_STYLE_SHEET_STRING
-          : MAX_HTML_MIRROR_STRING
-      ) ||
+      input.text.length > MAX_HTML_MIRROR_STRING ||
       typeof input.translatable !== 'boolean' ||
       nativeSelectParent !== false ||
       (privateRegion && input.text !== '') ||
@@ -1450,7 +1474,12 @@ function serializeNode(
   // returns, so the Text identity itself becomes sticky.
   if (
     live.nodeType === Node.TEXT_NODE &&
-    hasSourceCredentialSecretAncestor(live)
+    hasSourceCredentialSecretAncestor(
+      live,
+      undefined,
+      undefined,
+      context.secretAncestors,
+    )
   ) {
     incrementRepresentability(
       context.representability,
@@ -1469,7 +1498,12 @@ function serializeNode(
   }
   if (
     live.nodeType === Node.ELEMENT_NODE &&
-    hasSourceCredentialSecretAncestor(live as Element)
+    hasSourceCredentialSecretAncestor(
+      live as Element,
+      undefined,
+      undefined,
+      context.secretAncestors,
+    )
   ) {
     // Replace the first hard-secret boundary before reading its original tag,
     // attributes, resources, descendants, open shadow root, or style hints.
@@ -1538,13 +1572,7 @@ function serializeNode(
         'privateTextRedactionCount',
       );
     }
-    if (
-      text.length > (
-        context.styleRegion
-          ? MAX_HTML_MIRROR_STYLE_SHEET_STRING
-          : MAX_HTML_MIRROR_STRING
-      )
-    ) {
+    if (text.length > MAX_HTML_MIRROR_STRING) {
       incrementRepresentability(context.representability, 'capacityOmissionCount');
       return undefined;
     }
@@ -1618,7 +1646,7 @@ function serializeNode(
     incrementRepresentability(context.representability, 'customElementHostCount');
   }
   const privacyRegion = context.privacyRegion ||
-    elementStartsPrivateRegion(liveElement) ||
+    elementStartsPrivateRegion(liveElement, context.secretAncestors) ||
     tagName === 'select' ||
     (!isNativeSelectSemanticTag(tagName) &&
       isSourcePublicMenuRoleValue(liveElement.getAttribute('role')));
@@ -1672,6 +1700,7 @@ function serializeNode(
     context.fidelityPolicy,
     context.styleWork,
     context.controlledContent,
+    context.secretAncestors,
   );
   admitNode(
     context.budget,
@@ -2206,7 +2235,7 @@ function readTransportedAdoptedStyleSheets(
   for (const cssText of input) {
     if (
       typeof cssText !== 'string' ||
-      cssText.length > MAX_HTML_MIRROR_STYLE_SHEET_STRING ||
+      cssText.length > MAX_HTML_MIRROR_STRING ||
       sanitizeCss(
         cssText,
         'about:blank',
@@ -2390,7 +2419,7 @@ function serializeReadableStyleSheetRules(
       if (!cssText) continue;
       const separator = parts.length > 0 ? 1 : 0;
       characters += separator + cssText.length;
-      if (characters > MAX_HTML_MIRROR_STYLE_SHEET_STRING) {
+      if (characters > MAX_HTML_MIRROR_STRING) {
         incrementRepresentability(representability, 'capacityOmissionCount');
         return { status: 'blocked' };
       }
@@ -2538,7 +2567,7 @@ function readTransportedResolvedStyleSheetText(
     fidelityPolicy !== 'passive' ||
     (tagName !== 'style' && tagName !== 'link') ||
     typeof input !== 'string' ||
-    input.length > MAX_HTML_MIRROR_STYLE_SHEET_STRING ||
+    input.length > MAX_HTML_MIRROR_STRING ||
     sanitizeCss(
       input,
       'about:blank',
@@ -2587,7 +2616,7 @@ export function sanitizeCss(
   representability?: HtmlMirrorRepresentabilityCollector,
   fidelityPolicy: SelectableReplicaFidelityPolicy = 'conservative',
 ): string | undefined {
-  if (css.length > MAX_HTML_MIRROR_STYLE_SHEET_STRING) {
+  if (css.length > MAX_HTML_MIRROR_STRING) {
     if (representability) {
       incrementRepresentability(
         representability,
@@ -2804,60 +2833,60 @@ function readTransportedSelectPresentationStyle(
   return budget.bytes <= MAX_HTML_MIRROR_BYTES ? input : undefined;
 }
 
+// The CSS passes below copy unchanged runs as slices rather than one
+// character at a time: a stylesheet may be several megabytes, and building
+// it character by character spent most of the time in garbage collection.
+
 function stripCssCommentsOutsideStrings(css: string): string | undefined {
-  let output = '';
+  const parts: string[] = [];
+  let segmentStart = 0;
   let quote: '"' | "'" | undefined;
   for (let index = 0; index < css.length; index += 1) {
     const character = css[index]!;
     if (quote) {
-      output += character;
-      if (character === '\\' && index + 1 < css.length) {
-        output += css[index + 1]!;
-        index += 1;
-      } else if (character === quote) {
-        quote = undefined;
-      }
+      if (character === '\\') index += 1;
+      else if (character === quote) quote = undefined;
       continue;
     }
     if (character === '"' || character === "'") {
       quote = character;
-      output += character;
       continue;
     }
     if (character === '/' && css[index + 1] === '*') {
       const close = css.indexOf('*/', index + 2);
       if (close < 0) return undefined;
+      parts.push(css.slice(segmentStart, index));
       index = close + 1;
-      continue;
+      segmentStart = close + 2;
     }
-    output += character;
   }
-  return quote ? undefined : output;
+  if (quote) return undefined;
+  parts.push(css.slice(segmentStart));
+  return parts.join('');
 }
 
+/** Replaces each string, quotes included, with spaces of the same length. */
 function cssExecutableProjection(css: string): string {
-  let output = '';
-  let quote: '"' | "'" | undefined;
+  const parts: string[] = [];
+  let segmentStart = 0;
   for (let index = 0; index < css.length; index += 1) {
-    const character = css[index]!;
-    if (quote) {
-      output += ' ';
-      if (character === '\\' && index + 1 < css.length) {
-        output += ' ';
-        index += 1;
-      } else if (character === quote) {
-        quote = undefined;
-      }
-      continue;
+    const quote = css[index]!;
+    if (quote !== '"' && quote !== "'") continue;
+    parts.push(css.slice(segmentStart, index));
+    const stringStart = index;
+    index += 1;
+    while (index < css.length) {
+      const character = css[index]!;
+      if (character === quote) break;
+      index += character === '\\' ? 2 : 1;
     }
-    if (character === '"' || character === "'") {
-      quote = character;
-      output += ' ';
-    } else {
-      output += character;
-    }
+    const stringEnd = Math.min(index + 1, css.length);
+    parts.push(' '.repeat(stringEnd - stringStart));
+    segmentStart = stringEnd;
+    index = stringEnd - 1;
   }
-  return output;
+  parts.push(css.slice(segmentStart));
+  return parts.join('');
 }
 
 function rewriteCssUrlsOutsideStrings(
@@ -3045,6 +3074,9 @@ function rewriteCssImageSetOption(
   return `${leading}url("${url.replaceAll('"', '%22')}")${content.slice(end + 1)}`;
 }
 
+/** Sticky: matches only at `lastIndex`, without slicing the stylesheet. */
+const CSS_IMAGE_SET_AT_INDEX = /(?:-webkit-)?image-set\s*\(/iuy;
+
 function findNextCssImageSet(
   css: string,
   start: number,
@@ -3064,7 +3096,10 @@ function findNextCssImageSet(
       quote = character;
       continue;
     }
-    const match = /^(?:-webkit-)?image-set\s*\(/iu.exec(css.slice(index));
+    // Only these can start a match (no other character case-folds to i).
+    if (character !== '-' && character !== 'i' && character !== 'I') continue;
+    CSS_IMAGE_SET_AT_INDEX.lastIndex = index;
+    const match = CSS_IMAGE_SET_AT_INDEX.exec(css);
     if (!match) continue;
     const previous = css[index - 1];
     if (previous && /[a-z0-9_-]/iu.test(previous)) continue;
@@ -3147,15 +3182,14 @@ function containsLegacyBehaviorDeclaration(
 
 /** Removes escaped/comment-obfuscated imports without discarding passive CSS. */
 function stripCssImports(css: string, onStrip?: () => void): string {
-  let output = '';
+  const parts: string[] = [];
+  let segmentStart = 0;
   let index = 0;
   let quote: '"' | "'" | undefined;
   while (index < css.length) {
     const character = css[index]!;
     if (quote) {
-      output += character;
       if (character === '\\' && index + 1 < css.length) {
-        output += css[index + 1]!;
         index += 2;
         continue;
       }
@@ -3165,7 +3199,6 @@ function stripCssImports(css: string, onStrip?: () => void): string {
     }
     if (character === '"' || character === "'") {
       quote = character;
-      output += character;
       index += 1;
       continue;
     }
@@ -3173,6 +3206,7 @@ function stripCssImports(css: string, onStrip?: () => void): string {
       const decodedPrefix = decodeCssEscapes(css.slice(index, index + 128));
       if (/^@\s*import\b/iu.test(decodedPrefix)) {
         onStrip?.();
+        parts.push(css.slice(segmentStart, index));
         let depth = 0;
         let importQuote: '"' | "'" | undefined;
         while (index < css.length) {
@@ -3198,13 +3232,14 @@ function stripCssImports(css: string, onStrip?: () => void): string {
           }
           index += 1;
         }
+        segmentStart = index;
         continue;
       }
     }
-    output += character;
     index += 1;
   }
-  return output;
+  parts.push(css.slice(segmentStart));
+  return parts.join('');
 }
 
 /** Retains only canonical passive HTTP(S) imports under Passive Fidelity. */
@@ -3213,15 +3248,14 @@ function rewritePassiveCssImports(
   baseUrl: string,
   representability?: HtmlMirrorRepresentabilityCollector,
 ): string | undefined {
-  let output = '';
+  const parts: string[] = [];
+  let segmentStart = 0;
   let index = 0;
   let quote: '"' | "'" | undefined;
   while (index < css.length) {
     const character = css[index]!;
     if (quote) {
-      output += character;
       if (character === '\\' && index + 1 < css.length) {
-        output += css[index + 1]!;
         index += 2;
         continue;
       }
@@ -3231,7 +3265,6 @@ function rewritePassiveCssImports(
     }
     if (character === '"' || character === "'") {
       quote = character;
-      output += character;
       index += 1;
       continue;
     }
@@ -3239,12 +3272,12 @@ function rewritePassiveCssImports(
       character !== '@' ||
       !/^@\s*import\b/iu.test(decodeCssEscapes(css.slice(index, index + 128)))
     ) {
-      output += character;
       index += 1;
       continue;
     }
 
     const start = index;
+    parts.push(css.slice(segmentStart, start));
     let depth = 0;
     let importQuote: '"' | "'" | undefined;
     let terminated = false;
@@ -3282,7 +3315,7 @@ function rewritePassiveCssImports(
       ? undefined
       : normalizePassiveCssImport(statement, baseUrl);
     if (normalized) {
-      output += normalized;
+      parts.push(normalized);
       if (representability) {
         incrementRepresentability(
           representability,
@@ -3311,8 +3344,10 @@ function rewritePassiveCssImports(
       }
     }
     if (executableImport) return undefined;
+    segmentStart = index;
   }
-  return output;
+  parts.push(css.slice(segmentStart));
+  return parts.join('');
 }
 
 function extractCssImportUrl(statement: string): string | undefined {
@@ -3877,8 +3912,13 @@ function isUnsafeSourceElement(
   return !poster || passiveUrl(poster, baseUrl, true) === undefined;
 }
 
-function elementStartsPrivateRegion(element: Element): boolean {
-  if (hasSourceCredentialSecretAncestor(element)) return true;
+function elementStartsPrivateRegion(
+  element: Element,
+  secretAncestors?: SourceSecretAncestorMemo,
+): boolean {
+  if (
+    hasSourceCredentialSecretAncestor(element, undefined, undefined, secretAncestors)
+  ) return true;
   return sourceElementStartsPrivateRegionInContext(
     element.localName,
     readSourceStructuralAttributes(element),

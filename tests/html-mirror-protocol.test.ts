@@ -14,9 +14,11 @@ import {
   readHtmlMirrorSourceMessage,
 } from '../lib/replica/html-mirror-protocol';
 import {
+  MAX_ADOPTED_STYLE_RULES_PER_OWNER,
   MAX_HTML_MIRROR_BYTES,
+  MAX_HTML_MIRROR_DEPTH,
+  MAX_HTML_MIRROR_NODES,
   MAX_HTML_MIRROR_STRING,
-  MAX_HTML_MIRROR_STYLE_SHEET_STRING,
   createHtmlMirrorReadBudget,
   createHtmlMirrorRepresentabilityCollector,
   createHtmlMirrorStyleWorkBudget,
@@ -919,7 +921,7 @@ describe('isolated HTML sanitizer and protocol', () => {
 
     const capacity = createHtmlMirrorRepresentabilityCollector();
     expect(sanitizeCss(
-      `.too-large{content:"${'x'.repeat(1_100_000)}"}`,
+      `.too-large{content:"${'x'.repeat(MAX_HTML_MIRROR_STRING)}"}`,
       'https://example.test/page',
       false,
       capacity,
@@ -2098,15 +2100,17 @@ describe('isolated HTML sanitizer and protocol', () => {
       attributes: [], children: [], selectedImageSource: longSource,
     }, new Set(), 0, withHintBudget)).toBeUndefined();
 
+    // Each source fits the string cap; together they exceed the page budget.
+    const imageSourceLength = 4 * 1024 * 1024;
+    const imageSource = `data:image/png;base64,${'A'.repeat(imageSourceLength)}`;
+    const imageCount = Math.ceil(MAX_HTML_MIRROR_BYTES / 2 / imageSourceLength) + 1;
     const { document, window } = parseHTML(
       '<!doctype html><html><body>' +
-      Array.from({ length: 9 }, (_, index) => `<img id="image-${index}">`).join('') +
+      Array.from({ length: imageCount }, (_, index) => `<img id="image-${index}">`).join('') +
       '</body></html>',
     );
     for (const image of document.querySelectorAll('img')) {
-      Object.defineProperty(image, 'currentSrc', {
-        value: `data:image/png;base64,${'A'.repeat(500_000)}`,
-      });
+      Object.defineProperty(image, 'currentSrc', { value: imageSource });
     }
     expect(() => sanitizeSourceDocument(
       document,
@@ -2146,13 +2150,18 @@ describe('isolated HTML sanitizer and protocol', () => {
       '<svg xmlns="http://www.w3.org/2000/svg"><path fill="u\\72l(h\\74tps://tracker.invalid/p)"/></svg>',
       '<!DOCTYPE svg [<!ENTITY xxe SYSTEM "https://tracker.invalid/x">]><svg xmlns="http://www.w3.org/2000/svg"/>',
       `<svg xmlns="http://www.w3.org/2000/svg">${'<g>'.repeat(65)}${'</g>'.repeat(65)}</svg>`,
-      `<svg xmlns="http://www.w3.org/2000/svg">${'<rect/>'.repeat(513)}</svg>`,
+      `<svg xmlns="http://www.w3.org/2000/svg">${'<rect/>'.repeat(10_001)}</svg>`,
       '<svg xmlns="http://www.w3.org/2000/svg" width="999999999999999999999" height="48"/>',
       '<svg xmlns="http://www.w3.org/2000/svg"><filter><feTurbulence numOctaves="999999999"/></filter></svg>',
       `<svg xmlns="http://www.w3.org/2000/svg"><filter>${'<feFlood/>'.repeat(65)}</filter></svg>`,
     ].map((svg) => `data:image/svg+xml,${encodeURIComponent(svg)}`);
+    // A detailed drawing is not hostile; only the profile keeps SVG inert.
+    const drawing = `data:image/svg+xml,${encodeURIComponent(
+      `<svg xmlns="http://www.w3.org/2000/svg">${'<rect width="1" height="1"/>'.repeat(600)}</svg>`,
+    )}`;
     const { document, window } = parseHTML(`<!doctype html><html><body>
       <img id="logo" src="${syntheticLogo}">
+      <img id="drawing" src="${drawing}">
       ${hostile.map((src, index) => `<img id="bad-${index}" src="${src}">`).join('')}
     </body></html>`);
     const graph = sanitizeSourceDocument(
@@ -2163,6 +2172,7 @@ describe('isolated HTML sanitizer and protocol', () => {
     const serialized = JSON.stringify(graph);
 
     expect(serialized).toContain(syntheticLogo);
+    expect(serialized).toContain(drawing);
     for (const src of hostile) expect(serialized).not.toContain(src);
     expect(readHtmlMirrorNode(graph?.root)).toBeDefined();
     expect(readHtmlMirrorNode({
@@ -2583,7 +2593,7 @@ describe('isolated HTML sanitizer and protocol', () => {
     };
     expect(createHtmlMirrorCheckpoint(identity, {
       root,
-      adoptedStyleSheets: ['.a{}'.repeat(20_001)],
+      adoptedStyleSheets: ['.a{}'.repeat(MAX_ADOPTED_STYLE_RULES_PER_OWNER + 1)],
       captureMs: 1,
       viewportWidth: 1,
       viewportHeight: 1,
@@ -2690,12 +2700,14 @@ describe('isolated HTML sanitizer and protocol', () => {
       sessionId: 'reconcile-budget-session', pageEpoch: 1, generation: 1,
       documentId: 'reconcile-budget-document', frameId: 0, sequence: 1,
     });
+    // Each operation fits the node cap; together they exceed it.
+    const perOperation = Math.floor(MAX_HTML_MIRROR_NODES / 2) + 1;
     const operations = [0, 1].map((group) => ({
       kind: 'reconcile-children' as const,
       nodeId: group + 1,
-      children: Array.from({ length: 25_001 }, (_, index) => ({
+      children: Array.from({ length: perOperation }, (_, index) => ({
         kind: 'retain' as const,
-        nodeId: group * 25_001 + index + 10,
+        nodeId: group * perOperation + index + 10,
       })),
     }));
 
@@ -2774,7 +2786,9 @@ describe('isolated HTML sanitizer and protocol', () => {
     }, identity)).toBeUndefined();
 
     const deep = parseHTML(
-      `<html><body>${'<div>'.repeat(66)}deep${'</div>'.repeat(66)}</body></html>`,
+      `<html><body>${'<div>'.repeat(MAX_HTML_MIRROR_DEPTH + 2)}deep${
+        '</div>'.repeat(MAX_HTML_MIRROR_DEPTH + 2)
+      }</body></html>`,
     );
     const depthDiagnostics = createHtmlMirrorRepresentabilityCollector();
     expect(sanitizeSourceDocument(
@@ -2930,15 +2944,15 @@ describe('isolated HTML sanitizer and protocol', () => {
     expect(representability.capacityOmissionCount).toBe(1);
   });
 
-  it('keeps an inline stylesheet above the general string cap and sends its text once', () => {
-    // Google's sign-in page ships one inline sheet of about 700 KB; omitting
-    // it left the replica unstyled.
+  it('keeps a large inline stylesheet and sends its text once', () => {
+    // Google's sign-in page ships one inline sheet of about 700 KB; the
+    // former 512 KiB string cap omitted it and left the replica unstyled.
     const rules = Array.from({ length: 2_000 }, (_, index) => ({
       cssText: `.rule-${index}{padding:${index}px;${'color:red;'.repeat(32)}}`,
     }));
     const css = rules.map((rule) => rule.cssText).join('\n');
-    expect(css.length).toBeGreaterThan(MAX_HTML_MIRROR_STRING);
-    expect(css.length).toBeLessThan(MAX_HTML_MIRROR_STYLE_SHEET_STRING);
+    expect(css.length).toBeGreaterThan(512 * 1024);
+    expect(css.length).toBeLessThan(MAX_HTML_MIRROR_STRING);
     const { document, window } = parseHTML(
       `<!doctype html><html><head><style id="theme">${css}</style></head>` +
       '<body class="rule-1">styled</body></html>',
@@ -2996,9 +3010,9 @@ describe('isolated HTML sanitizer and protocol', () => {
     )).toEqual(conservativeCheckpoint);
   });
 
-  it('still omits one stylesheet above the stylesheet cap', () => {
+  it('still omits one stylesheet above the string cap', () => {
     const css = `.page{${'color:red;'.repeat(
-      Math.ceil(MAX_HTML_MIRROR_STYLE_SHEET_STRING / 10),
+      Math.ceil(MAX_HTML_MIRROR_STRING / 10),
     )}}`;
     const representability = createHtmlMirrorRepresentabilityCollector();
 
@@ -3010,6 +3024,83 @@ describe('isolated HTML sanitizer and protocol', () => {
       'passive',
     )).toBeUndefined();
     expect(representability.capacityOmissionCount).toBe(1);
+  });
+
+  it('mirrors a page past the former size caps', () => {
+    // Until D63 a string was capped at 512 KiB (a stylesheet at 1 MiB) and
+    // the page at 8 MiB. This page exceeds all three and still mirrors.
+    const { document, window } = parseHTML(
+      '<!doctype html><html><head><style id="theme"></style></head><body>' +
+      '<pre id="log"></pre><img id="photo" alt="photo"></body></html>',
+    );
+    const css = `.page{${'color:red;'.repeat(200_000)}}`;
+    const text = 'log line\n'.repeat(350_000);
+    const image = `data:image/png;base64,${'A'.repeat(1024 * 1024)}`;
+    document.querySelector('#theme')!.textContent = css;
+    document.querySelector('#log')!.textContent = text;
+    document.querySelector('#photo')!.setAttribute('src', image);
+    expect((css.length + text.length + image.length) * 2)
+      .toBeGreaterThan(8 * 1024 * 1024);
+
+    const graph = sanitizeSourceDocument(
+      document,
+      window as unknown as Window,
+      new WeakNodeIdRegistry(),
+    )!;
+    expect(graph).toBeDefined();
+    expect(graphElementBySourceId(graph, 'theme')?.children).toEqual([
+      expect.objectContaining({ kind: 'text', text: css }),
+    ]);
+    expect(graphElementBySourceId(graph, 'log')?.children).toEqual([
+      expect.objectContaining({ kind: 'text', text }),
+    ]);
+    expect(graphElementBySourceId(graph, 'photo')?.attributes)
+      .toContainEqual(['src', image]);
+    const identity = createReplicaIdentity({
+      sessionId: 'large-page', pageEpoch: 1, generation: 1,
+      documentId: 'large-page-document', frameId: 0, sequence: 0,
+    });
+    const checkpoint = checkpointFor(identity, graph, 'conservative');
+    expect(checkpoint).toBeDefined();
+    expect(readHtmlMirrorSourceMessage(checkpoint, identity, 'conservative'))
+      .toEqual(checkpoint);
+  });
+
+  it('keeps strings, comments and escapes exact in the CSS passes', () => {
+    // The passes copy unchanged runs as slices (D63); these pin the
+    // character-by-character behaviour they replaced.
+    const base = 'https://example.test/page';
+    expect(sanitizeCss('a{content:"/* kept */"}/* dropped */b{color:red}', base))
+      .toBe('a{content:"/* kept */"}b{color:red}');
+    const quotedImport =
+      'a{content:"say \\"@import\\" here"}@import "https://cdn.example.test/x.css";b{}';
+    expect(sanitizeCss(quotedImport, base, false, undefined, 'passive')).toBe(
+      'a{content:"say \\"@import\\" here"}' +
+      '@import url("https://cdn.example.test/x.css");b{}',
+    );
+    expect(sanitizeCss(quotedImport, base))
+      .toBe('a{content:"say \\"@import\\" here"}b{}');
+    expect(sanitizeCss(
+      "a{content:'it\\'s'}.b{background:IMAGE-SET(\"a.png\" 1x, url(b.png) 2x)}",
+      base,
+    )).toBe(
+      "a{content:'it\\'s'}.b{background:IMAGE-SET(" +
+      'url("https://example.test/a.png") 1x, url("https://example.test/b.png") 2x)}',
+    );
+    expect(sanitizeCss(
+      '.c{background:-webkit-image-set(url("c.png") 1x)}.d{mask:url(d.png)}',
+      base,
+    )).toBe(
+      '.c{background:-webkit-image-set(url("https://example.test/c.png") 1x)}' +
+      '.d{mask:url("https://example.test/d.png")}',
+    );
+    for (const unterminated of [
+      'a{content:"open}',
+      'a{}/* open',
+      'a{content:"ends with \\',
+    ]) {
+      expect(sanitizeCss(unterminated, base)).toBeUndefined();
+    }
   });
 
   it('preserves meaningful CSS escapes while still removing escaped imports', () => {

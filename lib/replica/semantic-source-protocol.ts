@@ -1,3 +1,4 @@
+import { MAX_HTML_MIRROR_NODES } from './html-mirror-sanitizer';
 import {
   readExactReplicaReadScope,
   replicaReadScopeFingerprint,
@@ -19,15 +20,20 @@ export const SEMANTIC_SOURCE_PROTOCOL_VERSION = 2;
 export const SEMANTIC_SOURCE_PORT_PREFIX = 'simul:semantic-source-v2:';
 // Measured on real pages (2026-09-23): Wikipedia's portal needs 206 records
 // and 492 proofs in 122 KB, freee 233 proofs, Yahoo! JAPAN 278. At 128 each,
-// option labels and menu proofs were dropped. The byte cap bounds the batch.
+// option labels and menu proofs were dropped. The record and proof counts
+// bound the batch; the byte cap (1,024 records of 3,500 characters fit) only
+// keeps one message well inside Chrome's 64 MiB, and the node walk follows
+// the mirror's node cap (D63).
 export const MAX_SEMANTIC_SOURCE_RECORDS = 1_024;
 export const MAX_SEMANTIC_SOURCE_PROOFS = 2_048;
 export const MAX_SEMANTIC_SELECTED_OPTION_NODE_IDS = 32;
 export const MAX_SEMANTIC_SELECT_SIZE = 1_000;
-export const MAX_SEMANTIC_SOURCE_BATCH_BYTES = 256 * 1024;
+export const MAX_SEMANTIC_SOURCE_BATCH_BYTES = 8 * 1024 * 1024;
 export const MAX_SEMANTIC_SOURCE_TEXT = 3_500;
 export const MAX_SEMANTIC_SOURCE_UNACKED_BATCHES = 4;
-export const MAX_SEMANTIC_SOURCE_NODE_IDENTITIES = 50_000;
+// Never below the mirror's node cap: a walk that runs out of identities
+// treats the whole document as secret.
+export const MAX_SEMANTIC_SOURCE_NODE_IDENTITIES = MAX_HTML_MIRROR_NODES;
 
 export type SemanticSourceBridgeId = 'isolated-html';
 export type SemanticSourceRecordCategory = Exclude<

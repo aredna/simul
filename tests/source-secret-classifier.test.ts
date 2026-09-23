@@ -9,6 +9,7 @@ import {
 } from '../lib/replica/source-secret-classifier';
 import { replicaReadScopeForProfile } from '../lib/replica/read-scope-policy';
 import {
+  createSourceSecretAncestorMemo,
   hasSourceControlOrEditableElementAncestor,
   hasSourceCredentialSecretAncestor,
   isSourceSelectEntryVisuallyHidden,
@@ -176,6 +177,86 @@ describe('source secret classifier', () => {
     } finally {
       Reflect.deleteProperty(present.window, 'getComputedStyle');
     }
+  });
+
+  it('gives the same answers and ledger with a per-walk ancestor memo', () => {
+    // D63: the memo only skips re-classifying ancestors within one walk.
+    const build = () => {
+      const { document, window } = parseHTML(
+        '<html><body><main><p>text <b>bold</b></p>' +
+        '<form><input type="password"><label>label <i>x</i></label></form>' +
+        '<div id="masked"><span>masked <em>deep</em></span></div>' +
+        '<section autocomplete="one-time-code"><div><span>code</span></div></section>' +
+        '<div id="host"><b>slotted</b></div><p>after</p></main></body></html>',
+      );
+      Object.defineProperty(window, 'getComputedStyle', {
+        configurable: true,
+        value: (element: Element) => ({
+          getPropertyValue: (property: string) =>
+            property === '-webkit-text-security' && element.id === 'masked'
+              ? 'disc'
+              : '',
+        }),
+      });
+      const host = document.querySelector('#host')!;
+      const shadow = host.attachShadow({ mode: 'open' });
+      shadow.innerHTML = '<section autocomplete="one-time-code"><slot></slot></section><p>open</p>';
+      Object.defineProperty(host.firstElementChild!, 'assignedSlot', {
+        configurable: true,
+        value: shadow.querySelector('slot'),
+      });
+      const nodes: Node[] = [];
+      const stack: Node[] = [document.documentElement];
+      while (stack.length > 0) {
+        const node = stack.pop()!;
+        nodes.push(node);
+        const children = [...node.childNodes];
+        const nodeShadow = (node as Element).shadowRoot;
+        if (nodeShadow) children.push(...nodeShadow.childNodes);
+        stack.push(...children.reverse());
+      }
+      return { window: window as unknown as Window, nodes };
+    };
+    const plain = build();
+    const memoized = build();
+    const plainClassifier = new StickySourceSecretClassifier();
+    const memoClassifier = new StickySourceSecretClassifier();
+    const memo = createSourceSecretAncestorMemo();
+    // Document order, then reverse order, so lookups both hit and miss.
+    for (const order of [(list: Node[]) => list, (list: Node[]) => [...list].reverse()]) {
+      const plainAnswers = order(plain.nodes).map((node) =>
+        hasSourceCredentialSecretAncestor(node, plainClassifier, plain.window));
+      const memoAnswers = order(memoized.nodes).map((node) =>
+        hasSourceCredentialSecretAncestor(node, memoClassifier, memoized.window, memo));
+      expect(memoAnswers).toEqual(plainAnswers);
+      expect(memoAnswers).toContain(true);
+      expect(memoAnswers).toContain(false);
+    }
+    expect(memoized.nodes.map((node) => memoClassifier.isSecret(node)))
+      .toEqual(plain.nodes.map((node) => plainClassifier.isSecret(node)));
+    expect(memoClassifier.revision).toBe(plainClassifier.revision);
+  });
+
+  it('drops the ancestor memo when the classifier learns a new secret', () => {
+    const { document, window } = parseHTML(
+      '<html><body><div id="outer"><p id="inner">text</p></div></body></html>',
+    );
+    const classifier = new StickySourceSecretClassifier();
+    const memo = createSourceSecretAncestorMemo();
+    const sourceWindow = window as unknown as Window;
+    const inner = document.querySelector('#inner')!;
+    expect(hasSourceCredentialSecretAncestor(inner, classifier, sourceWindow, memo))
+      .toBe(false);
+    classifier.classify(document.querySelector('#outer')!, {
+      tagName: 'div',
+      computedTextSecurity: 'disc',
+    });
+    expect(hasSourceCredentialSecretAncestor(
+      inner.firstChild!,
+      classifier,
+      sourceWindow,
+      memo,
+    )).toBe(true);
   });
 
   it('uses assigned-slot ancestry before the light-DOM parent', () => {

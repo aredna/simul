@@ -2674,3 +2674,88 @@ into a handover file, and then don't do any code here."
   loosening a privacy default, this ruling now favours truthful recreation.
   Anything that would let the mirror act on the page (scripts, navigation,
   submission, source mutation) stays blocked.
+
+### D63. The mirror's size caps follow what Chrome carries, not privacy (2026-09-23)
+
+Same branch / PR #22. First item of `handover-2026-09-23-session-close.md`: the
+owner's D62-addendum request to raise the stylesheet limit to about 10 MB. Asked
+what should happen when a page is still too big, the owner kept today's
+behaviour (the mirror is not prepared). Asked whether other single pieces (inline
+images, attributes, long text) should get the same limit, the owner said: "Let's
+raise caps where possible to numbers that are less likely to cause issues. These
+also feel like something that could be advanced settings where we can enter a
+number."
+
+- **Measured first.** Chrome refuses one runtime-port message above 64 MiB
+  ("Message exceeded maximum allowed size of 64MiB."); a checkpoint is one
+  message, so that bounds the page. Real pages: English Wikipedia's Falcon 9
+  launch list has 53,208 nodes (over the old 50,000 cap: "The isolated replica
+  could not be prepared"), the United States article 43,185; YouTube links a
+  3.4 MB stylesheet (18,922 top-level rules), freee 2.97 MB (18,955; 35,102
+  rule blocks in all, about 78 characters each); the deepest page measured was
+  35 levels.
+- **New caps** (`html-mirror-sanitizer.ts` unless noted). Any one string, which
+  is a stylesheet, a text node, an attribute value or a URL including data URLs,
+  is 10 MiB: `MAX_HTML_MIRROR_STYLE_SHEET_STRING` is folded into
+  `MAX_HTML_MIRROR_STRING`. Whole page 60 MiB at two bytes per character (was
+  8 MiB), just under Chrome's message limit. Nodes 200,000 (was 50,000). Depth
+  256 (was 64). Rule caps follow the character caps at one rule per 16
+  characters (per sheet or owner 655,360, was 20,000; per page 1,966,080, was
+  100,000). Static SVG data images 10 MiB and 10,000 elements (was 512 KiB and
+  512). Semantic batches 8 MiB (was 256 KB; the 1,024-record and 2,048-proof
+  counts bound them). The semantic node walk now equals the node cap by
+  construction, because a walk that runs out of identities treats the whole
+  document as secret. The node-ID registry tracks four times the node cap.
+- **Kept.** A page over the total or node cap still fails as before (owner
+  choice); a stylesheet over 10 MiB is omitted and the page mirrors without it.
+  The style-change polling budget stays at 1 MiB of rule text per half-second
+  tick on the page's main thread. A document with more (freee, YouTube) is
+  therefore not polled, and its CSSOM-only changes wait for the next
+  checkpoint. That was already true on freee and is now documented.
+- **CPU.** The page pays capture on its main thread, so the raise needed two
+  fixes to stay responsive:
+  1. `sanitizeCss` built its output one character at a time and sliced the
+     sheet at every character when looking for `image-set(`; two-thirds of its
+     time was garbage collection. The passes now copy unchanged runs as slices
+     and use a sticky regular expression: about 165 ms to 26 ms per MB on
+     freee's sheet. A differential check against the previous code (330,000
+     random and structured stylesheets plus freee's sheet and 600 slices of
+     it, each under both policies, both declaration modes and two base URLs)
+     found no difference in output or in any representability counter.
+  2. `hasSourceCredentialSecretAncestor` re-classified every ancestor, with
+     `getComputedStyle`, for every node, three times per element during a
+     checkpoint. A per-walk memo (`SourceSecretAncestorMemo`) reuses ancestor
+     results within one synchronous walk (the page cannot run, so nothing can
+     change) and is dropped whenever the classifier learns a new secret. It is
+     used by the sanitizer's walks, the eager document classification and each
+     semantic scan. Registry pruning also became amortized (it visited every
+     tracked node every 256 new IDs).
+  On a 135,000-node page the checkpoint went from 7.1 s to 3.5 s of main-thread
+  time. Existing large pages gained too: the Donald Trump article (46,000
+  nodes) was ready in 6.5 s with page blocks of 3.3, 3.0, 1.5 and 0.8 s, and is
+  now ready in 2.3 s with blocks of 1.5, 1.3 and 1.2 s. freee and YouTube now carry their 3 MB
+  linked sheets as resolved CSSOM text instead of the mirror refetching them;
+  that costs about 0.3 s more per capture (blocks 0.6 s and 0.7 s), and it is
+  the truthful path because it keeps runtime rule changes and needs no network.
+  Still O(nodes × depth) and not changed: the visibility index's painted-path
+  check (about a quarter of the remaining capture time).
+- **Verified in Chrome for Testing** (old `.21` against new `.22`). Synthetic:
+  a 5 MB inline sheet styles its last rule (was unstyled); a 12 MB sheet is
+  omitted and the page mirrors; 135,000 nodes mirror (was refused); a 3 MB
+  `<pre>` keeps its text (was empty); a 633 KB data-URL PNG renders (the
+  element was dropped). Real: the Falcon 9 list mirrors fully styled with all
+  792 rows (was refused); freee, YouTube and Google sign-in unchanged in look.
+- **Tests.** A page past all three former caps (2 MB sheet, 3 MB text, 1 MB
+  data image, over 8 MiB) mirrors and round-trips the receiver; the CSS passes
+  keep strings, comments and escapes exact (expected values from the previous
+  code); the ancestor memo gives the same answers and the same secret ledger in
+  document and reverse order and is dropped when a new secret is learned; a
+  600-element SVG drawing is kept. Cap tests now derive from the constants
+  (image budget, adopted rules, node budget, depth, visibility scan).
+- **Docs.** `docs/replica-fidelity.md` (limits and the polling gap).
+- **Next, owner direction.** The caps as numeric Advanced settings; queued
+  with the design question for the owner.
+
+Build identity `0.5.0 beta v.20260922.22`; `dist/chrome-unpacked` re-synced.
+Gate: `npm run check` green, **1,472 tests pass, 1 skipped** (+4).
+Publishing 0.5.0 moves to **D64**.
