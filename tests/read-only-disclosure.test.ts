@@ -361,6 +361,82 @@ describe('read-only replica disclosure placement', () => {
     controller.dispose();
   });
 
+  it('closes a popup when an item is chosen, not on empty space (D71)', () => {
+    const { document, window } = parseHTML(
+      '<html><body><button id="trigger">Menu</button><div id="panel">' +
+      '<p id="heading">Products</p><a id="item" href="/team">Team</a></div></body></html>',
+    );
+    const trigger = document.querySelector<HTMLElement>('#trigger')!;
+    const panel = document.querySelector<HTMLElement>('#panel')!;
+    const controller = installReadOnlyReplicaDisclosure({
+      anchor: trigger,
+      trigger,
+      panel,
+      presentation: 'popup',
+      manageTriggerExpanded: true,
+    });
+    const click = (target: Element) => {
+      const event = new window.Event('click', { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'button', { value: 0 });
+      target.dispatchEvent(event);
+      return event;
+    };
+
+    controller.open();
+    click(document.querySelector('#heading')!);
+    expect(controller.isOpen()).toBe(true);
+    const chosen = click(document.querySelector('#item')!);
+    // The choice closes the menu; the link itself is still never followed.
+    expect(controller.isOpen()).toBe(false);
+    expect(chosen.defaultPrevented).toBe(true);
+    controller.dispose();
+  });
+
+  it('opens a select only on click and closes it on an enabled option (D71)', () => {
+    const { document, window } = parseHTML(
+      '<html><body><button id="trigger">Pick</button><div id="panel">' +
+      '<div id="apple" data-simul-owned-select-option="v1">Apple</div>' +
+      '<div id="banana" data-simul-owned-select-option="v1" aria-disabled="true">Banana</div>' +
+      '</div></body></html>',
+    );
+    const trigger = document.querySelector<HTMLElement>('#trigger')!;
+    const panel = document.querySelector<HTMLElement>('#panel')!;
+    const rows = { apple: 0, banana: 20 };
+    for (const [id, top] of Object.entries(rows)) {
+      Object.defineProperty(document.querySelector(`#${id}`)!, 'getBoundingClientRect', {
+        value: () => ({ left: 0, right: 100, top, bottom: top + 20, width: 100, height: 20 }),
+      });
+    }
+    const controller = installReadOnlyReplicaDisclosure({
+      anchor: trigger,
+      trigger,
+      panel,
+      presentation: 'popup',
+      manageTriggerExpanded: true,
+      openOnHover: false,
+    });
+    // Owned options ignore pointer input, so a click lands on their list.
+    const clickPanelAt = (clientY: number) => {
+      const event = new window.Event('click', { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'button', { value: 0 });
+      Object.defineProperty(event, 'clientX', { value: 10 });
+      Object.defineProperty(event, 'clientY', { value: clientY });
+      panel.dispatchEvent(event);
+    };
+
+    trigger.dispatchEvent(new window.Event('pointerenter'));
+    expect(controller.isOpen()).toBe(false);
+    trigger.dispatchEvent(new window.Event('click', { bubbles: true, cancelable: true }));
+    expect(controller.isOpen()).toBe(true);
+    clickPanelAt(30);
+    expect(controller.isOpen()).toBe(true);
+    clickPanelAt(60);
+    expect(controller.isOpen()).toBe(true);
+    clickPanelAt(10);
+    expect(controller.isOpen()).toBe(false);
+    controller.dispose();
+  });
+
   it('keeps a hover-opened popup open on its first click', () => {
     const { document, window } = parseHTML(
       '<html><body><button id="trigger">Options</button>' +

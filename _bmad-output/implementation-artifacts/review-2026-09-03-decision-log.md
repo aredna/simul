@@ -3043,3 +3043,46 @@ items of `review-2026-09-22-pr22-bug-hunt.md`.
 Build identity `0.5.0 beta v.20260922.29`; `dist/chrome-unpacked` re-synced.
 Gate: `npm run check` green, **1,493 tests pass, 1 skipped** (+2).
 Publishing 0.5.0 moves to **D71**.
+
+### D71. Choosing an option closes the mirror's dropdown (2026-09-23)
+
+Same branch / PR #22. Owner report after D70: "The overlay is now working
+when the user clicks the drop down, but once they select something in the
+item, the drop down itself doesn't actually go away." Also recorded here:
+the owner's answers on the open review items. Allow data-URL fonts and let
+the caption band grow (both queued next). On P3–P6: "Do whatever is
+necessary, but if it's low priority, let's not spend a lot of time on it yet.
+Better to focus on it in the future when it becomes an actual issue." They
+are deferred.
+
+- **Reproduced in Chrome for Testing** (local `selects.html`): clicking
+  "Banana" in the plain select's open options left the panel open. The panel
+  only blocked the activation; nothing closed it. Site menus already closed
+  after a click inside, so the report is about selects.
+- **Change.** A primary click on an item in an open popup closes it, as
+  choosing does on the page. An item is an enabled option, link, button or
+  menu item; empty space, group labels and disabled options do not count.
+  Owned select options ignore pointer input, so the click lands on their list
+  and the option under the pointer is found by its box. The choice itself is
+  still never applied to the source. Inline list selects are unchanged.
+- **Found while verifying.** After a choice closed one select, the pointer
+  rested on the next row's select, which then opened because the facsimile
+  opened on hover. A native select never opens on hover, so select facsimiles
+  now open only on click or keyboard (`openOnHover: false`) and are not
+  closed by the pointer leaving. Site menus keep their hover previews.
+- **Verified in Chrome for Testing.** Local selects (plain, in a form,
+  transparent, transparent in a form) and the menu page: every select closes
+  after a choice and none opens by hover. On the Wikipedia portal the
+  language select closes after "Shqip". On freee a link click closes the
+  header menu, and all three menus still open; one earlier miss did not
+  repeat in two further runs and matched the previous build.
+- **Tests.** Choosing a menu link closes the popup while a heading click
+  does not, and the link is still blocked. A select does not open on hover,
+  opens on click, stays open for a disabled option and for empty space, and
+  closes on an enabled option. Both fail without the change.
+- **Docs.** `docs/replica-fidelity.md` (select and menu behaviour); the
+  review's status records O3 approved and P3–P6 deferred.
+
+Build identity `0.5.0 beta v.20260922.30`; `dist/chrome-unpacked` re-synced.
+Gate: `npm run check` green, **1,495 tests pass, 1 skipped** (+2).
+Publishing 0.5.0 moves to **D72**.

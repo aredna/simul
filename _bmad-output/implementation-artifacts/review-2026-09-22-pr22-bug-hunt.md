@@ -28,9 +28,10 @@ Rulings:
   feature, including default-on image text, uses it. No change.
 - **G4:** alt-text captions stay on after setup. Docs fixed.
 
-Still open: O3 (a visible overlay change, left for the owner), P3–P6, the
-default-state tests, and the simplification proposal at the end of this
-file. T1–T3 were fixed in D68, L2–L5 with L7 in D69, and L6, L8, L9, README
+Still open: O3 (the owner approved letting the band grow, 2026-09-23),
+the default-state tests, and the simplification proposal at the end of this
+file. P3–P6 are deferred by the owner until one becomes an actual issue
+("if it's low priority, let's not spend a lot of time on it yet"). T1–T3 were fixed in D68, L2–L5 with L7 in D69, and L6, L8, L9, README
 step 4 and a build-identity bump script (`npm run bump-build`) in D70
 (2026-09-23); the D54-addendum rulings below were implemented in D66.
 
