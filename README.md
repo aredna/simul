@@ -14,7 +14,7 @@ Simul started as a quick build for the OpenAI Build Week hackathon, made as
 something we would use ourselves. We are now sharing it so others can use it
 too.
 
-Current build: **0.5.0 beta v.20260922.24** · Desktop Chrome **138+** ·
+Current build: **0.5.0 beta v.20260922.25** · Desktop Chrome **138+** ·
 Manifest V3
 
 ## What you need
@@ -48,7 +48,7 @@ Keep the folder where it is while the extension is installed. To update,
 replace the folder with the new version, then select **Reload** on the Simul
 card in `chrome://extensions`, reload the page, and reopen the companion. The
 card shows version `0.5.0`; Simul's settings show
-`Build 0.5.0 beta v.20260922.24`.
+`Build 0.5.0 beta v.20260922.25`.
 
 This is an unpacked beta, not a Chrome Web Store release, so Chrome does not
 update it automatically.
@@ -65,8 +65,10 @@ update it automatically.
 4. Select **Translate page**. Chrome may first prepare the on-device language
    pack. The page is translated on every visit only if you save automatic
    translation for the site in settings, or if OCR is on.
-5. Use **Fit**, **1:1**, zoom, layout, and scroll-following to compare the
-   original with the translation.
+5. Use **1:1** (the default), **Fit**, zoom, layout, and scroll-following to
+   compare the original with the translation. In a separate window the mirror
+   **Follow**s whichever tab is active; select it to keep the mirror **Pinned**
+   to one tab.
 6. Image text (OCR) is on by default and is translated together with the page
    text. The first time, select the **OCR** button to grant image access when
    Chrome asks; select it again to turn image text off.
@@ -117,8 +119,8 @@ translates the page text of the mirrored page, and for images Simul:
    the ones on screen first and the rest in the background;
 2. first tries direct `aria-label` or `alt` text, which needs no pixel access
    and is shown as a caption band along the bottom edge of the image (this
-   method is on once the first-run setup is done, so images with alt text get
-   a translated caption before image access is granted);
+   method is on from the start, so images with alt text get a translated
+   caption before image access is granted);
 3. for pixel OCR, reads an image on screen from a crop of the visible tab
    (after checking its geometry is stable); an image off screen, moving, or in
    a background tab is read from its own file instead: the copy the mirror has
@@ -155,11 +157,12 @@ boundary.
 Reading and acting are separate contracts. Broader readable-content settings
 never make the replica interactive.
 
-On first use Simul remains at **Page-only** until you choose a scope. The
-Page-only, Standard, Full visible, and custom profiles control whether the
-mirror may read public control semantics, non-secret images in controls,
-validated disclosure content, visible text/search/URL/textarea values and
-selection state, personal/autofill values, and editable text.
+Simul starts at **Full visible**, with no setup question: the mirror shows
+what the page shows. You can narrow it in settings. The Page-only, Standard,
+Full visible, and custom profiles control whether the mirror may read public
+control semantics, non-secret images in controls, validated disclosure
+content, visible text/search/URL/textarea values and selection state,
+personal/autofill values, and editable text.
 
 Passwords, authentication and one-time-code fields, WebAuthn and payment-card
 autocomplete classes, hidden/file inputs, file paths, and CSS-masked text are

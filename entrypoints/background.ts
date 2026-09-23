@@ -85,6 +85,8 @@ export default defineBackground(() => {
         [PREFERENCE_SAFETY_JOURNAL_STORAGE_KEY]: snapshot,
       });
     },
+    hasStoredPreferences: async () =>
+      (await browser.storage.local.get(STORAGE_KEY))[STORAGE_KEY] !== undefined,
   };
   const preferenceSafety = new PreferenceSafetyCoordinator(
     2_000,

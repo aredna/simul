@@ -28,12 +28,13 @@ function setup(options: {
   // The parser keeps accessibility text off until the read-scope setup has
   // completed, so setup is marked complete before the method is enabled.
   let preferences = parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES);
-  if (options.setupComplete ?? true) {
-    preferences = withReadSettings(preferences, {
-      replicaReadScope: replicaReadScopeForProfile('standard'),
-      readScopeSetupVersion: REPLICA_READ_SCOPE_SETUP_VERSION,
-    });
-  }
+  // New installs start set up (D66); stored preferences from before may not be.
+  preferences = withReadSettings(preferences, options.setupComplete ?? true
+    ? {
+        replicaReadScope: replicaReadScopeForProfile('standard'),
+        readScopeSetupVersion: REPLICA_READ_SCOPE_SETUP_VERSION,
+      }
+    : { readScopeSetupVersion: 0 });
   preferences = withImageAnalysisSettings(preferences, {
     imageTranslationEnabled: options.imageTranslationEnabled ?? true,
     disabledImageReadingMethodIds: [],

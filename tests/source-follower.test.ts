@@ -42,9 +42,11 @@ function setup(options: Options = {}) {
     ...(options.detached ? { detachedSourceWindowId: options.detached.windowId } : {}),
   });
   state.panelWindowId = options.panelWindowId;
-  if (options.popoutTabMode) {
-    state.preferences = withViewSettings(state.preferences, { popoutTabMode: options.popoutTabMode });
-  }
+  // The harness pins by default (the product default became Follow in D66);
+  // active-following tests say so.
+  state.preferences = withViewSettings(state.preferences, {
+    popoutTabMode: options.popoutTabMode ?? 'locked',
+  });
   const environment = {
     queueCapture: vi.fn(),
     invalidateCompanion: vi.fn(),
