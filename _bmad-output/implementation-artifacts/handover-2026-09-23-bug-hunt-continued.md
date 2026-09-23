@@ -4,18 +4,19 @@ Chains from `handover-2026-09-22-session-close.md` (which chains from
 `handover-2026-09-22-release-readiness.md`, holding the publish runbook and the
 release-notes draft). This file records the session that shipped **D55** and
 the follow-up session (same day) that closed its three owner reports with
-**D56**–**D59**, then the Google sign-in layout fix **D60**. Decision-log
-entries **D43** through **D60** hold the reasoning.
+**D56**–**D59**, then the Google sign-in layout fix **D60** and the new-tab
+follow fix **D61**. Decision-log entries **D43** through **D61** hold the
+reasoning.
 
 ## Where things stand
 
 | Item | State |
 | --- | --- |
-| Branch / PR | `feat/ui-string-catalogue`, PR #22, **open**, head is the D60 commit (`.19`) plus this handover. Description covers D40–D60. |
-| Version / identity | `0.5.0` / `0.5.0 beta v.20260922.19` (bumped on every shipped change; next is `.20`). |
-| Gate | `npm run check` green at the D60 commit: typecheck clean, **1,457 tests pass, 1 skipped**, `dist/chrome-unpacked` re-synced and byte-verified. |
-| NAS | `Dev/simul/` mirrors head. Load `Dev/simul/dist/chrome-unpacked`; settings must show `Build 0.5.0 beta v.20260922.19`. |
-| `main` | `eb09813` (through D39). Release: `v0.4.0` pre-release only. Publishing 0.5.0 is **D61**, and only when the owner says so. |
+| Branch / PR | `feat/ui-string-catalogue`, PR #22, **open**, head is the D61 commit (`.20`) plus this handover. Description covers D40–D61. |
+| Version / identity | `0.5.0` / `0.5.0 beta v.20260922.20` (bumped on every shipped change; next is `.21`). |
+| Gate | `npm run check` green at the D61 commit: typecheck clean, **1,460 tests pass, 1 skipped**, `dist/chrome-unpacked` re-synced and byte-verified. |
+| NAS | `Dev/simul/` mirrors head. Load `Dev/simul/dist/chrome-unpacked`; settings must show `Build 0.5.0 beta v.20260922.20`. |
+| `main` | `eb09813` (through D39). Release: `v0.4.0` pre-release only. Publishing 0.5.0 is **D62**, and only when the owner says so. |
 
 ## What this session shipped
 
@@ -67,7 +68,7 @@ tie can be re-ranked many times (23 tie reports for about two images on freee);
 the judge's verdict cache keeps that cheap, but the re-rank churn itself may be
 worth a look.
 
-## Third session (2026-09-23): D60 and two queued reports
+## Third session (2026-09-23): D60, D61 and the dropdown report
 
 - **D60 (`.19`)**: Google's OAuth sign-in (owner: "It's in a box in the center
   of the screen. Our layout is not bounding things properly") rendered
@@ -89,17 +90,26 @@ worth a look.
   quirks; a `<style>` inside a privacy boundary still sends its resolved sheet
   (CSS only); Google's language picker shows as "Options".
 
-**Queued by the owner (not started):**
+**Queued by the owner:**
 
 1. *"Often when opening a new tab we receive: Open a regular HTTP or HTTPS
-   page, then select the extension from that page."* That is the companion's
-   message for a non-web source tab; check how the companion picks its source
-   tab when a new tab (`chrome://newtab`) opens and whether it should wait for
-   the tab to navigate instead.
+   page, then select the extension from that page."* **Fixed in D61 (`.20`)**:
+   with Active following, a new tab shows "Waiting for a web page in the
+   active tab." and the companion follows the tab once it loads a web page
+   (before, it stayed on the error until a tab switch). Harness:
+   `newtab-follow.mjs <ext> [newTabUrl] [nextUrl]` (`MODE=locked` to compare).
 2. *"Dropdowns do not show options when we cl[ick] the drop down menu."*
-   Native select facsimiles and the ARIA menu preview are the two dropdown
-   paths in the replica (`docs/replica-fidelity.md`, "Inert HTML semantics");
-   find which the owner means and on which site.
+   **Open; asked the owner which dropdowns.** Findings so far
+   (`dropdown-click.mjs`, `site/dropdown.html`): on a plain page the mirror's
+   native select facsimiles and an `aria-controls` menu do open (the menu
+   overlay has no background, so it overlaps the text below). freee's header
+   menus cannot open in the mirror: the button has `aria-haspopup="menu"` and
+   `aria-expanded` but no `aria-controls` (the menu is its sibling
+   `div.productMenu`), and the mirror drops both ARIA attributes from those
+   buttons, which is also why both chevrons (down and up) show. Separately,
+   the toolbar's From/To selects (and the Settings selects) are disabled
+   whenever a capture or translation is in flight (`updateControls`, `busy`),
+   which on a live page can be most of the time.
 
 ## Open owner reports (closed in the follow-up session)
 
