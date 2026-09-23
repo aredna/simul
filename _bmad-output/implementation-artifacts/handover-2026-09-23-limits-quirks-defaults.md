@@ -1,18 +1,18 @@
 # Handover: mirror limits, quirks mode, new defaults (2026-09-23, second session)
 
 Chains from `handover-2026-09-23-session-close.md`, whose work list this
-session worked through. Decision-log entries **D63**–**D70** hold the reasoning
+session worked through. Decision-log entries **D63**–**D72** hold the reasoning
 and measurements; this file is the summary and the next steps.
 
 ## Where things stand
 
 | Item | State |
 | --- | --- |
-| Branch / PR | `feat/ui-string-catalogue`, PR #22, **open**, head at the D70 commit plus this file. Description covers D40–D70. |
-| Version / identity | `0.5.0` / `0.5.0 beta v.20260922.29` (next is `.30`). |
-| Gate | `npm run check` green at D70: **1,493 tests pass, 1 skipped**; `dist/chrome-unpacked` byte-verified. |
-| NAS | `Dev/simul/` mirrors head; the owner loads `Dev/simul/dist/chrome-unpacked` (`Build 0.5.0 beta v.20260922.29`). |
-| `main` / release | Only `v0.4.0` released. Publishing 0.5.0 is **D71**, only when the owner says so; do not ask. |
+| Branch / PR | `feat/ui-string-catalogue`, PR #22, **open**, head at the D72 commit plus this file. Description covers D40–D72. |
+| Version / identity | `0.5.0` / `0.5.0 beta v.20260922.31` (next is `.32`; `npm run bump-build`). |
+| Gate | `npm run check` green at D72: **1,497 tests pass, 1 skipped**; `dist/chrome-unpacked` byte-verified. |
+| NAS | `Dev/simul/` mirrors head; the owner loads `Dev/simul/dist/chrome-unpacked` (`Build 0.5.0 beta v.20260922.31`). |
+| `main` / release | Only `v0.4.0` released. Publishing 0.5.0 is **D73**, only when the owner says so; do not ask. |
 
 ## Owner rulings this session
 
@@ -27,6 +27,13 @@ and measurements; this file is the summary and the next steps.
 - **Replica fidelity (Passive / Conservative):** "Move it to Advanced" (not
   removed).
 - **Tab-follow words:** **Follow / Pinned**.
+- **Data-URL fonts:** allow them (D72). **Caption band (O3):** grow when
+  needed (D72).
+- **P3–P6:** "Do whatever is necessary, but if it's low priority, let's not
+  spend a lot of time on it yet. Better to focus on it in the future when it
+  becomes an actual issue." Deferred.
+- **Owner report (D71):** after choosing an item, the mirror's dropdown
+  stayed open. Fixed.
 
 ## What shipped (all verified in Chrome for Testing unless noted)
 
@@ -40,6 +47,8 @@ and measurements; this file is the summary and the next steps.
 | `.27` | D68 | Review T1–T3: a newer snapshot no longer joins a stale translation task; the OCR lock is released before the page translation; unreadable storage keeps OCR off. Unit-tested; the T1 race was not reproduced in the browser. |
 | `.28` | D69 | Review L2–L5 and L7: status text is kept as `UiText` (`lib/ui-text.ts`) and re-renders in the current UI language; language names follow the language the UI is shown in; catalogue error details and page-access guidance localize; the error panel re-renders. |
 | `.29` | D70 | Review L6, L8, L9: translated frames keep their placeholders; the count label follows a language switch; code-written text gets `lang` and `dir="auto"`. README step 4 reworded. `npm run bump-build` added. |
+| `.30` | D71 | Choosing an option, link or menu item closes the mirror's dropdown; select facsimiles open only on click or keyboard (not hover), like native selects. |
+| `.31` | D72 | Base64 font data URLs in CSS are kept (embedded web fonts render); the caption band grows to at most 60% when its text would be under 9px. |
 
 ## Found, not fixed (candidates, in rough order of value)
 
@@ -56,15 +65,11 @@ and measurements; this file is the summary and the next steps.
    D63's secret-ancestor memo, keyed per scan, would help. On a 46,000-node
    Wikipedia article the page still blocks 1.2–1.5 s per pass, with
    checkpoint, visibility refresh and semantic scan as separate passes.
-3. **Data-URL fonts are dropped.** `passiveUrl` admits `data:image/*` only,
-   so `@font-face { src: url(data:font/woff2;base64,…) }` becomes `none`. The
-   shell CSP already allows `font-src data:`. Under the truthful-first ruling
-   this is worth an owner ruling (inert, often CJK web fonts).
-4. **The receiver refuses a whole semantic batch for one bad item**
+3. **The receiver refuses a whole semantic batch for one bad item**
    (session-close item 5). D62's months-long outage was one such case.
    Dropping only the failing record or proof and logging it would limit the
    damage. It needs care, because proofs can depend on records.
-5. **Limited-quirks mode** is not represented (reports `CSS1Compat`, gets the
+4. **Limited-quirks mode** is not represented (reports `CSS1Compat`, gets the
    standards shell).
 
 ## Next work, in order
@@ -76,15 +81,14 @@ and measurements; this file is the summary and the next steps.
    painted-path check per scan, the same way D63 memoized the secret-ancestor
    walk. It is behaviour-preserving, so no owner input is needed; verify
    with `mirror-timing.mjs` and a differential check.
-3. **Owner questions:** O3 (let the caption band grow on short images, a
-   visible overlay change, and the owner ruled on overlays in D47), data-URL
-   fonts (candidate 3), and P3–P6 (privacy edge cases written before the
-   truthful-first ruling, so some may now be declined).
-4. Candidates 1 and 4 (style polling on large documents; per-item semantic
-   refusal) need a design first.
-5. Publish 0.5.0 as **D71** only when the owner says so. The release-notes
+3. Candidates 1 and 3 (style polling on large documents; per-item semantic
+   refusal) need a design first. P3–P6 wait until one becomes an actual
+   issue (owner).
+4. Watch for owner reports on D71 (dropdowns) and D66 (new defaults), the
+   most visible changes.
+5. Publish 0.5.0 as **D73** only when the owner says so. The release-notes
    draft (`handover-2026-09-22-release-readiness.md`) needs lines for
-   D51–D70.
+   D51–D72.
 
 ## Reproduction and verification
 
@@ -98,7 +102,7 @@ and measurements; this file is the summary and the next steps.
   `limits-ui.mjs`, `advanced-shot.mjs`, `overlay-top.mjs`, `quirks-probe.mjs`,
   `quirks-check.mjs`, `fresh-defaults.mjs`, `labels-timeline.mjs` (select
   labels through shadow roots), `scope-safety.mjs` (narrow, widen, reset),
-  `count-translations.mjs` (counts stand-in Translator calls), `status-smoke.mjs` (status line after a To switch; flags "[object"). The `d63/`
+  `count-translations.mjs` (counts stand-in Translator calls), `status-smoke.mjs` / `status-lang.mjs` (status line after a To switch; flags "[object"; `lang`/`dir`), `dropdown-select.mjs` (open each select and menu, choose an item, report what is still open), `data-font.mjs`, `caption-band.mjs`. The `d63/`
   folder has `run-cap-matrix.sh` (old vs new build table),
   `build-unminified.sh` (profiling build), the profile summarizers, the
   `sanitizeCss` differential and benchmark, `make-cap-pages.py` (the
@@ -106,7 +110,7 @@ and measurements; this file is the summary and the next steps.
   first).
 - Test pages: `site/big-sheet-5mb.html`, `big-sheet-12mb.html`,
   `big-nodes.html` (about 135,000 nodes), `big-text.html`, `big-image.html`,
-  `quirks.html`. Real pages: the Falcon 9 launch list, the Donald Trump and
+  `quirks.html`, `data-font.html`, `caption-band.html`. Real pages: the Falcon 9 launch list, the Donald Trump and
   United States articles, freee, YouTube, Google sign-in and 404, and the
   Wikipedia portal.
 - Harness artifacts: the manifest copy makes `<all_urls>` required, so the
