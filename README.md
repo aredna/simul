@@ -14,7 +14,7 @@ Simul started as a quick build for the OpenAI Build Week hackathon, made as
 something we would use ourselves. We are now sharing it so others can use it
 too.
 
-Current build: **0.5.0 beta v.20260922.17** · Desktop Chrome **138+** ·
+Current build: **0.5.0 beta v.20260922.18** · Desktop Chrome **138+** ·
 Manifest V3
 
 ## What you need
@@ -48,7 +48,7 @@ Keep the folder where it is while the extension is installed. To update,
 replace the folder with the new version, then select **Reload** on the Simul
 card in `chrome://extensions`, reload the page, and reopen the companion. The
 card shows version `0.5.0`; Simul's settings show
-`Build 0.5.0 beta v.20260922.17`.
+`Build 0.5.0 beta v.20260922.18`.
 
 This is an unpacked beta, not a Chrome Web Store release, so Chrome does not
 update it automatically.
@@ -127,7 +127,10 @@ translates the page text of the mirrored page, and for images Simul:
    crop is reduced to at most 4 megapixels;
 4. tries Chrome TextDetector when the installed platform exposes it, then the
    packaged Tesseract.js 7.0.0 fallback according to the saved method order;
-5. rejects blank, punctuation-only, and insufficient-confidence results; and
+5. rejects blank, punctuation-only, and insufficient-confidence results, and
+   when alt text and OCR text are too close to call, lets Gemini Nano (or
+   Chrome's Language Detector) pick, but only if Chrome already has it
+   installed; Simul never downloads a model; and
 6. translates accepted lines and places inert overlays over the replica image.
 
 The Tesseract worker, WebAssembly cores, notices, and 22 pinned

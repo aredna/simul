@@ -16,7 +16,7 @@ voting.
 | Bigham 2007 ALT-quality AdaBoost classifier | The closest task-specific published approach, but no licensed pretrained weights were released. Its small English, web-search-dependent corpus is not suitable for an offline multilingual extension. | Do not ship. |
 | MS MARCO TinyBERT cross-encoder | Apache-2.0 and relatively small, but trained to rank an English passage against a query. ALT and OCR are competing claims about pixels, not a retrieval query and passage, so its score is not calibrated for the harmful-error asymmetry in this task. | License-compatible but not task-fit; do not ship. |
 | all-MiniLM-L6-v2 sentence encoder | Apache-2.0, but trained for English sentence/paragraph embeddings. Similarity can identify agreement; exact normalized agreement already does that without a model, while disagreement still cannot reveal which candidate matches the image. | License-compatible but not task-fit; do not ship. |
-| Browser Prompt API / Gemini Nano | Chrome exposes this to extensions, but the generative model is separately downloaded, requires qualifying desktop hardware/storage, and availability and output stability vary by device and browser version. A text-only prompt still cannot inspect the source pixels under the current contract. | Not a deterministic ranking dependency. |
+| Browser Prompt API / Gemini Nano | Chrome exposes this to extensions, but the generative model is separately downloaded, requires qualifying desktop hardware/storage, and availability and output stability vary by device and browser version. With image input it can look at the crop. | Not a ranking dependency. Since D59 it breaks close calls only, and only when Chrome reports it already installed; Simul never starts its download. |
 | Simul-specific pairwise logistic model | A small coefficient table can remain fast, deterministic, explainable, and local if it is trained and calibrated on a licensed task-specific dataset. | Future candidate, subject to the gates below. |
 
 Longest-text-wins is intentionally excluded. A longer OCR hallucination is not
@@ -39,6 +39,19 @@ must remain the same bounded, source-neutral feature vector:
 
 The saved method position is not a learned feature. It is applied only after
 the calibrated decisive margin cannot separate the candidates.
+
+**Close calls (D59).** When the margin cannot separate the candidates
+(`priority-tie`), an on-device judge may decide before the saved order does,
+using only models Chrome reports as `available` (never `downloadable`, so no
+download is ever started): Gemini Nano through the Prompt API, shown the OCR
+crop when it accepts images, answering a JSON choice; otherwise Chrome's
+Language Detector, which picks OCR text that reads as confident natural
+language in the page's language (confidence ≥ 0.7) and alt text when the OCR
+text is noise or another language. Verdicts are cached by pixel key, language
+and both texts. Every decisive or agreement result, and every judge failure or
+`either` answer, keeps the deterministic ranker's choice. The Image
+diagnostics log records `evidence judge: nano-image|nano-text|language-detector|none`
+and the reasons `nano-judge` / `language-check`.
 
 It must not use source URLs, hostnames, DOM identifiers, page categories,
 language-specific phrases, translated text, user feedback, or the identity of

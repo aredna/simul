@@ -28,6 +28,10 @@ describe('ImageTranslationDiagnosticHistory', () => {
       bitmapHeight: 761,
     })).toBe('job 7 recognition failed: code=provider-unavailable; rendered=603x381; bitmap=1206x761');
     expect(formatImageTranslationDiagnostic({
+      stage: 'evidence-judge',
+      judge: 'nano-image',
+    })).toBe('evidence judge: nano-image');
+    expect(formatImageTranslationDiagnostic({
       stage: 'pixel-source',
       ordinal: 3,
       source: 'mirror',

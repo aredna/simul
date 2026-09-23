@@ -73,6 +73,7 @@ import {
   createBrowserPixelAcquisitionEnvironment,
 } from '../../lib/ocr/pixel-acquisition';
 import { createBrowserImageRecognitionCoordinator } from '../../lib/ocr/image-analysis-coordinator';
+import { OnDeviceEvidenceJudge } from '../../lib/ocr/on-device-evidence-judge';
 import { IndexedDbTransientImageStore } from '../../lib/ocr/transient-image-store';
 import {
   STORAGE_KEY,
@@ -321,6 +322,15 @@ replicaTranslationCoordinator = new ReplicaTranslationCoordinator(
   },
 );
 
+// Uses Gemini Nano or the Language Detector only when already installed;
+// never starts a model download (owner ruling, D59).
+const evidenceJudge = new OnDeviceEvidenceJudge({
+  onResolved: (judge) => logImageTranslationDiagnostic(Object.freeze({
+    stage: 'evidence-judge' as const,
+    judge,
+  })),
+});
+
 imageTranslationController = new ImageTranslationController({
   openSource: (request, onChange, signal, policy) => openChromeImageSource(
     request,
@@ -355,6 +365,7 @@ imageTranslationController = new ImageTranslationController({
     replicaSurfaceRouter.resolveImageAnchor(sourceDocument, nodeId),
   translationProvider: provider,
   translationMemory: imageTranslationMemory,
+  judgeImageText: (input, signal) => evidenceJudge.judge(input, signal),
   onBusyChange: (busy) => setImageTranslationBusy(busy),
   onDiagnostic: logImageTranslationDiagnostic,
   detectLanguage: async (text) => browser.i18n.detectLanguage(text),

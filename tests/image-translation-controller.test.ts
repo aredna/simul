@@ -1930,6 +1930,116 @@ describe('ImageTranslationController', () => {
     controller.dispose();
   });
 
+  it('refers a close alt-versus-OCR call to the on-device judge once', async () => {
+    const { document } = parseHTML('<html><body><img></body></html>');
+    const image = document.querySelector('img') as unknown as HTMLImageElement;
+    const pixels = autoProbePixels(descriptor, '92'.repeat(32));
+    const translate = vi.fn(async (_text: string) => 'News');
+    const acquire = vi.fn(async () => ({ status: 'ready' as const, pixels }));
+    const recognize = vi.fn(async (): Promise<ImageRecognitionResult> => ({
+      status: 'complete',
+      cacheHit: false,
+      selectedQuality: acceptedQualitySummary(),
+      result: {
+        providerId: 'tesseract',
+        bitmapWidth: 200,
+        bitmapHeight: 100,
+        transcript: 'notice',
+        transcriptConfidence: 0.96,
+        regions: [{
+          text: 'not',
+          confidence: 0.96,
+          boundingBox: { x: 10, y: 10, width: 50, height: 40 },
+        }, {
+          text: 'ice',
+          confidence: 0.96,
+          boundingBox: { x: 65, y: 10, width: 55, height: 40 },
+        }],
+      },
+    }));
+    const diagnostics: unknown[] = [];
+    const judgeImageText = vi.fn(async () => ({
+      selected: 'ocr' as const,
+      method: 'nano-judge' as const,
+    }));
+    const controller = new ImageTranslationController({
+      judgeImageText,
+      openSource: async (_request, onChange) => {
+        queueMicrotask(() => onChange({ kind: 'upsert', descriptor }));
+        return {
+          measure: vi.fn(),
+          readAccessibilityText: async () => ({
+            document: sourceDocument,
+            nodeId: descriptor.nodeId,
+            contentRevision: descriptor.contentRevision,
+            observationRevision: descriptor.observationRevision,
+            text: 'お知らせ',
+            source: 'alt' as const,
+            nearestElementLanguage: 'ja' as const,
+          }),
+          dispose: vi.fn(),
+        };
+      },
+      createPixelCoordinator: () => ({ acquire }) as unknown as
+        PixelAcquisitionCoordinator,
+      createRecognitionCoordinator: () => ({
+        recognize,
+        clear: vi.fn(),
+        advanceResetEpoch: vi.fn(() => true),
+      }) as unknown as ImageRecognitionCoordinator,
+      resolveAnchor: () => ({
+        document: sourceDocument,
+        replayLease: 1,
+        image,
+        iframe: { contentDocument: document } as HTMLIFrameElement,
+      }),
+      translationProvider: {
+        availability: async () => 'available',
+        createSession: async () => ({ translate, destroy: vi.fn() }),
+      },
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      projector: {
+        scheduleFrame: (callback) => { callback(); return 1; },
+        cancelFrame: () => undefined,
+        createResizeObserver: () => undefined,
+      },
+    });
+    const configuration = {
+      enabled: true,
+      scanPolicy: 'visible-only' as const,
+      skipSmallImages: false,
+      providerOrder: ['tesseract'] as const,
+      methodOrder: ['accessibility-text', 'tesseract'] as const,
+      disabledMethodIds: [] as const,
+      sourceLanguage: 'ja' as const,
+      targetLanguage: 'en' as const,
+      translationIdle: true,
+      resetEpoch: 0,
+    };
+    controller.configure(configuration);
+    controller.activateReplica(request, 3, 1);
+
+    await vi.waitFor(() => expect(document.querySelector(
+      '[data-simul-image-method="tesseract"]',
+    )).not.toBeNull());
+    expect(judgeImageText).toHaveBeenCalledOnce();
+    expect(judgeImageText.mock.calls[0]).toEqual([{
+      altText: 'お知らせ',
+      ocrText: 'notice',
+      sourceLanguage: 'ja',
+      image: pixels.encoded,
+    }, expect.any(AbortSignal)]);
+    expect(diagnostics).toContainEqual({
+      stage: 'evidence-selection',
+      selected: 'ocr',
+      reason: 'nano-judge',
+    });
+    expect(diagnostics).not.toContainEqual(expect.objectContaining({
+      reason: 'priority-tie',
+    }));
+    controller.dispose();
+  });
+
   it('ranks later descriptive accessibility evidence after accepted OCR', async () => {
     const { document } = parseHTML('<html><body><img></body></html>');
     const image = document.querySelector('img') as unknown as HTMLImageElement;

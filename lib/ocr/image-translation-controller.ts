@@ -75,8 +75,14 @@ import {
   ImageSemanticEvidenceIndex,
   selectImageTextEvidence,
   type ImageEvidenceSelectionReason,
+  type RankableOcrImageEvidence,
   type RankableSemanticImageEvidence,
 } from './image-evidence-ranker';
+import type {
+  EvidenceJudgeInput,
+  EvidenceJudgeKind,
+  EvidenceJudgeVerdict,
+} from './on-device-evidence-judge';
 import {
   ACCESSIBILITY_TEXT_METHOD_ID,
   imageReadingExecutionPlan,
@@ -291,10 +297,11 @@ export type ImageTranslationDiagnostic =
   | Readonly<{
       stage: 'evidence-selection';
       selected: 'semantic' | 'ocr';
-      reason:
-        | ImageEvidenceSelectionReason
-        | 'semantic-fallback'
-        | 'ocr-fallback';
+      reason: EvidenceSelectionReport;
+    }>
+  | Readonly<{
+      stage: 'evidence-judge';
+      judge: EvidenceJudgeKind;
     }>
   | Readonly<{
       stage: 'translation-started' | 'translation-failed' | 'translation-empty';
@@ -348,6 +355,14 @@ export type ImageTranslationDiagnostic =
       samples: number;
     }>;
 
+type EvidenceSelectionReport =
+  | ImageEvidenceSelectionReason
+  | EvidenceJudgeVerdict['method']
+  | 'semantic-fallback'
+  | 'ocr-fallback';
+
+const MAX_EVIDENCE_JUDGE_VERDICTS = 256;
+
 export interface ImageTranslationControllerEnvironment {
   readonly openSource: (
     request: ReplicaCaptureRequest,
@@ -369,6 +384,15 @@ export interface ImageTranslationControllerEnvironment {
   ) => ReplicaImageAnchor | undefined;
   readonly translationProvider: TranslationProvider;
   readonly translationMemory?: TranslationMemory;
+  /**
+   * Breaks a close alt-text-versus-OCR call with an on-device model that is
+   * already installed (see `OnDeviceEvidenceJudge`); undefined keeps the
+   * saved method order.
+   */
+  readonly judgeImageText?: (
+    input: EvidenceJudgeInput,
+    signal?: AbortSignal,
+  ) => Promise<EvidenceJudgeVerdict | undefined>;
   readonly onDiagnostic?: (diagnostic: ImageTranslationDiagnostic) => void;
   readonly onBusyChange?: (busy: boolean) => void;
   readonly detectLanguage?: (
@@ -563,6 +587,8 @@ export class ImageTranslationController {
   readonly #originFinalAnalyses = new Map<string, OriginFinalImageAnalysis>();
   readonly #rerankRequestedNodeIds = new Set<number>();
   readonly #semanticRefreshRetainedOcrNodeIds = new Set<number>();
+  /** Judge verdicts by pixel hash, language and both texts (null: no call). */
+  readonly #judgeVerdicts = new Map<string, EvidenceJudgeVerdict | null>();
   readonly #languageDetections = new Map<string, CachedLanguageDetection>();
   readonly #captureRetries = new Map<number, {
     readonly contentRevision: number;
@@ -1083,6 +1109,7 @@ export class ImageTranslationController {
     this.#captureRetries.clear();
     this.#emptyRetries.clear();
     this.#semanticEvidenceIndex.clear();
+    this.#judgeVerdicts.clear();
     this.#resetAutoLanguageProbe();
   }
 
@@ -1229,6 +1256,7 @@ export class ImageTranslationController {
     this.#captureRetries.clear();
     this.#emptyRetries.clear();
     this.#semanticEvidenceIndex.clear();
+    this.#judgeVerdicts.clear();
     this.#projector.clear();
     this.#resetAutoLanguageProbe();
     this.#setMutationQuiet(false, false);
@@ -1770,7 +1798,7 @@ export class ImageTranslationController {
         if (heldOcr) {
           const ocr = heldOcr;
           heldOcr = undefined;
-          const decision = selectImageTextEvidence(candidate.rankable, {
+          const decision = await this.#selectEvidence(candidate.rankable, {
             kind: 'ocr',
             result: ocr.recognition.result,
             selectedQuality: selectedRecognitionQuality(ocr.recognition),
@@ -1778,8 +1806,11 @@ export class ImageTranslationController {
             minimumConfidence: repairOcrMinimumConfidence(
               this.#configuration.ocrMinimumConfidence,
             ),
-          });
-          this.#reportEvidenceSelection(decision.selected, decision.reason);
+          }, {
+            pixelHash: ocr.pixels.pixelHash,
+            image: ocr.pixels.encoded,
+            sourceLanguage: ocr.sourceLanguage,
+          }, signal);
           if (decision.selected === 'semantic') {
             let committed = false;
             try {
@@ -2189,7 +2220,7 @@ export class ImageTranslationController {
         stagedOcrLanguageObservation = undefined;
         if (heldSemantic) {
           const semantic = heldSemantic;
-          const decision = selectImageTextEvidence(semantic.rankable, {
+          const decision = await this.#selectEvidence(semantic.rankable, {
             kind: 'ocr',
             result: recognition.result,
             selectedQuality: selectedRecognitionQuality(recognition),
@@ -2197,8 +2228,11 @@ export class ImageTranslationController {
             minimumConfidence: repairOcrMinimumConfidence(
               this.#configuration.ocrMinimumConfidence,
             ),
-          });
-          this.#reportEvidenceSelection(decision.selected, decision.reason);
+          }, {
+            pixelHash: ocrCandidate.pixels.pixelHash,
+            image: ocrCandidate.pixels.encoded,
+            sourceLanguage: ocrCandidate.sourceLanguage,
+          }, signal);
           if (decision.selected === 'semantic') {
             heldSemantic = undefined;
             let committed = false;
@@ -4285,7 +4319,9 @@ export class ImageTranslationController {
       return false;
     }
     if (semantic && ocr) {
-      const decision = selectImageTextEvidence({
+      // No pixels are held here; a verdict from the first comparison of the
+      // same pixels and texts is reused, else a text-only judge may answer.
+      const decision = await this.#selectEvidence({
         ...semantic.rankable,
         methodIndex: semanticIndex,
       }, {
@@ -4296,8 +4332,10 @@ export class ImageTranslationController {
         minimumConfidence: repairOcrMinimumConfidence(
           this.#configuration.ocrMinimumConfidence,
         ),
-      });
-      this.#reportEvidenceSelection(decision.selected, decision.reason);
+      }, {
+        pixelHash: ocr.pixels.pixelHash,
+        sourceLanguage: ocr.sourceLanguage,
+      }, signal);
       if (decision.selected === 'semantic') {
         return this.#commitAccessibilityCandidate(
           {
@@ -5209,12 +5247,86 @@ export class ImageTranslationController {
     }));
   }
 
+  /**
+   * The ranker decides; only its `priority-tie` (a close call) is referred to
+   * the on-device judge. Everything else, and every judge failure, keeps the
+   * ranker's choice.
+   */
+  async #selectEvidence(
+    semantic: RankableSemanticImageEvidence,
+    ocr: RankableOcrImageEvidence,
+    judge: {
+      readonly pixelHash: string;
+      readonly image?: Blob;
+      readonly sourceLanguage: SupportedLanguage;
+    },
+    signal: AbortSignal,
+  ): Promise<{
+    readonly selected: 'semantic' | 'ocr';
+    readonly reason: EvidenceSelectionReport;
+  }> {
+    const decision = selectImageTextEvidence(semantic, ocr);
+    let result: {
+      readonly selected: 'semantic' | 'ocr';
+      readonly reason: EvidenceSelectionReport;
+    } = decision;
+    if (decision.reason === 'priority-tie' && this.environment.judgeImageText) {
+      const verdict = await this.#judgeTie(
+        semantic.text,
+        ocr.result.transcript,
+        judge,
+        signal,
+      );
+      if (verdict) result = { selected: verdict.selected, reason: verdict.method };
+    }
+    this.#reportEvidenceSelection(result.selected, result.reason);
+    return result;
+  }
+
+  async #judgeTie(
+    altText: string,
+    ocrText: string,
+    judge: {
+      readonly pixelHash: string;
+      readonly image?: Blob;
+      readonly sourceLanguage: SupportedLanguage;
+    },
+    signal: AbortSignal,
+  ): Promise<EvidenceJudgeVerdict | undefined> {
+    const key = [judge.pixelHash, judge.sourceLanguage, altText, ocrText]
+      .join('\u0000');
+    if (this.#judgeVerdicts.has(key)) {
+      return this.#judgeVerdicts.get(key) ?? undefined;
+    }
+    let verdict: EvidenceJudgeVerdict | undefined;
+    try {
+      verdict = await this.environment.judgeImageText!({
+        altText,
+        ocrText,
+        sourceLanguage: judge.sourceLanguage,
+        ...(judge.image ? { image: judge.image } : {}),
+      }, signal);
+    } catch (error) {
+      if (isAbortError(error) || signal.aborted) throw error;
+      verdict = undefined;
+    }
+    // Only a verdict made with the picture (or by a text-only judge) is kept;
+    // a later pass without the picture must not freeze a text-only answer
+    // over a better picture-based one.
+    if (judge.image || verdict) {
+      this.#judgeVerdicts.set(key, verdict ?? null);
+      while (this.#judgeVerdicts.size > MAX_EVIDENCE_JUDGE_VERDICTS) {
+        const oldest = this.#judgeVerdicts.keys().next().value;
+        if (oldest === undefined) break;
+        this.#judgeVerdicts.delete(oldest);
+      }
+    }
+    return verdict;
+  }
+
   #reportEvidenceSelection(
     selected: 'semantic' | 'ocr',
-    reason:
-      | ImageEvidenceSelectionReason
-      | 'semantic-fallback'
-      | 'ocr-fallback',
+    reason: EvidenceSelectionReport,
   ): void {
     this.environment.onDiagnostic?.(Object.freeze({
       stage: 'evidence-selection' as const,
