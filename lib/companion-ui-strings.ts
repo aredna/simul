@@ -210,6 +210,7 @@ export const UI_STRINGS = {
 
   // Source-follower statuses (frames prepend an opaque page-error sentence).
   statusNoActiveReadableTab: 'The source browser window has no active readable tab.',
+  statusActiveTabNotWebPage: 'Waiting for a web page in the active tab.',
   statusFollowNeedsAccess:
     '{0} Active-tab following needs page access for each newly selected site.',
   statusActiveTabChanged:

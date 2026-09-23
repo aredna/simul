@@ -2516,7 +2516,47 @@ Build identity `0.5.0 beta v.20260922.19`; `dist/chrome-unpacked` re-synced.
 Gate: `npm run check` green, **1,457 tests pass, 1 skipped** (+3).
 Publishing 0.5.0 moves to **D61**.
 
-**Queued by the owner during this session (not started):**
+**Queued by the owner during this session:**
 1. "Often when opening a new tab we receive: Open a regular HTTP or HTTPS page,
-   then select the extension from that page."
+   then select the extension from that page." (D61)
 2. "Dropdowns do not show options when we cl[ick] the drop down menu."
+
+### D61. Active following waits for a new tab's web page and then follows it (2026-09-23)
+
+Same branch / PR #22, the owner's first queued report (above).
+
+- **Reproduced in Chrome for Testing** (popout, tab following Active, all-site
+  access granted): opening a new tab put the companion in its error state with
+  "Open a regular HTTP or HTTPS page, then select the extension from that page.
+  Active-tab following needs page access for each newly selected site.", and
+  when that tab then loaded a site the companion stayed on the error until the
+  user switched tabs. The follower read the new tab (Chrome hides a
+  `chrome://newtab` URL), `identityFromTab` threw the access guidance, and the
+  invalidation cleared the followed page, so `handleTabUpdated` ignored every
+  later update of the new tab.
+- **Change.** In `followActivatedSourceTab`, a tab without a readable web URL
+  shows "Waiting for a web page in the active tab." when its URL is a visible
+  non-web URL or Simul holds all-site access (`permissions.contains
+  <all_urls>`; Chrome then hides only browser-page URLs). Without all-site
+  access a hidden URL may be a site Simul cannot read, so the access guidance
+  stays. `handleTabUpdated`, while nothing is followed and no follow is
+  resolving, follows the active tab of a focused window once it completes
+  loading a web page (Active mode in the popout only). This also recovers after
+  the followed tab visits a restricted page and comes back. Locked mode and the
+  side panel are unchanged.
+- **Verified in Chrome for Testing**: new tab -> "Waiting for a web page in the
+  active tab."; the tab loads Wikipedia -> the mirror shows Wikipedia with no
+  tab switch.
+- **Harness note.** The harness copy lists `<all_urls>` as a required host
+  permission, so every preference reconcile answers "You cannot remove required
+  permissions." and the status line shows "The preference service returned an
+  invalid response." That is an artifact of the test manifest, not a product
+  bug (the shipped manifest has it as optional).
+- **Tests.** Follower: a new tab waits, then its loaded page is followed; a
+  hidden URL without all-site access still asks for access; no follow in
+  Locked mode, for a background tab, or while a follow resolves.
+- **Docs.** `docs/translation-companion.md` (Detached window).
+
+Build identity `0.5.0 beta v.20260922.20`; `dist/chrome-unpacked` re-synced.
+Gate: `npm run check` green, **1,460 tests pass, 1 skipped** (+3).
+Publishing 0.5.0 moves to **D62**.

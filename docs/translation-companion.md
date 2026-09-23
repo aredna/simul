@@ -383,6 +383,12 @@ window IDs in its extension URL. The popup follows that tab even though it is
 not the active tab in the popup's own window. This requires no new permission;
 the user must reauthorize after temporary page access expires.
 
+With Active tab following, a newly selected new-tab or browser page shows
+"Waiting for a web page in the active tab." when Simul may read every site
+(Chrome hides only such URLs then), and the companion follows that tab as soon
+as it finishes loading a web page. Without all-site access a hidden URL may be
+a site Simul cannot read yet, so the companion still asks for page access.
+
 ## Manual release checks
 
 After loading `dist/chrome-unpacked`, verify dynamic expansion, late content,

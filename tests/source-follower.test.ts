@@ -16,6 +16,7 @@ interface Options {
   panelWindowId?: number;
   tabs?: FollowerTab[];
   windowTypes?: Record<number, string>;
+  allSitesAccess?: boolean;
 }
 
 function setup(options: Options = {}) {
@@ -33,6 +34,7 @@ function setup(options: Options = {}) {
       ({ id: windowId, type: options.windowTypes?.[windowId] ?? 'normal' })),
     getCurrentWindowId: vi.fn(async () => options.panelWindowId),
     getLastFocusedNormalWindowId: vi.fn(async () => 1),
+    hasAllSitesAccess: vi.fn(async () => options.allSitesAccess ?? false),
     windowIdNone: -1,
   };
   const state = new CompanionState({
@@ -413,6 +415,84 @@ describe('SourceFollower in a detached window', () => {
       identity: { tabId: 4, windowId: 5, url: 'https://a.example/' },
       reason: 'navigation',
     });
+  });
+
+  it('waits for a web page when the active tab is a new tab and follows it once loaded', async () => {
+    const newTab: FollowerTab = { id: 6, windowId: 2, active: true };
+    const harness = setup({
+      detached: { tabId: 4, windowId: 1 },
+      popoutTabMode: 'active',
+      panelWindowId: 9,
+      allSitesAccess: true,
+      tabs: [newTab],
+    });
+    harness.state.followedPageIdentity = { tabId: 4, windowId: 1, url: 'https://a.example/' };
+    harness.follower.handleTabActivated(6, 2);
+    await vi.runAllTimersAsync();
+    expect(harness.invalidateCompanion).toHaveBeenCalledWith(
+      'Waiting for a web page in the active tab.',
+    );
+    expect(harness.queueCapture).not.toHaveBeenCalled();
+
+    // invalidateCompanion clears the followed page in the side panel.
+    harness.state.followedPageIdentity = undefined;
+    harness.tabs.set(6, { ...newTab, url: 'https://b.example/' });
+    harness.follower.handleTabUpdated(
+      6,
+      { status: 'loading', url: 'https://b.example/' },
+      { windowId: 2, active: true, url: 'https://b.example/', status: 'loading' },
+    );
+    await vi.runAllTimersAsync();
+    expect(harness.queueCapture).not.toHaveBeenCalled();
+    harness.follower.handleTabUpdated(
+      6,
+      { status: 'complete' },
+      { windowId: 2, active: true, url: 'https://b.example/', status: 'complete' },
+    );
+    await vi.runAllTimersAsync();
+    expect(harness.queueCapture).toHaveBeenCalledWith({
+      identity: { tabId: 6, windowId: 2, url: 'https://b.example/' },
+      reason: 'navigation',
+    });
+  });
+
+  it('still asks for page access when a hidden tab URL may be a site Simul cannot read', async () => {
+    const harness = setup({
+      detached: { tabId: 4, windowId: 1 },
+      popoutTabMode: 'active',
+      panelWindowId: 9,
+      allSitesAccess: false,
+      tabs: [{ id: 6, windowId: 2, active: true }],
+    });
+    harness.follower.handleTabActivated(6, 2);
+    await vi.runAllTimersAsync();
+    expect(harness.invalidateCompanion).toHaveBeenCalledWith(
+      expect.stringContaining('Active-tab following needs page access'),
+    );
+  });
+
+  it('does not follow a loaded tab in locked mode, in the background, or while a follow resolves', async () => {
+    const loaded = { windowId: 2, url: 'https://b.example/', status: 'complete' };
+    const locked = setup({
+      detached: { tabId: 4, windowId: 1 },
+      panelWindowId: 9,
+      tabs: [page(6, 2, 'https://b.example/')],
+    });
+    locked.follower.handleTabUpdated(6, { status: 'complete' }, { ...loaded, active: true });
+    await vi.runAllTimersAsync();
+    expect(locked.queueCapture).not.toHaveBeenCalled();
+
+    const active = setup({
+      detached: { tabId: 4, windowId: 1 },
+      popoutTabMode: 'active',
+      panelWindowId: 9,
+      tabs: [page(6, 2, 'https://b.example/')],
+    });
+    active.follower.handleTabUpdated(6, { status: 'complete' }, { ...loaded, active: false });
+    active.state.activeFollowRequest = active.currency.begin('identity');
+    active.follower.handleTabUpdated(6, { status: 'complete' }, { ...loaded, active: true });
+    await vi.runAllTimersAsync();
+    expect(active.queueCapture).not.toHaveBeenCalled();
   });
 
   it('follows the active tab of the last focused window when switched to active mode', async () => {
