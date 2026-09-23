@@ -1,18 +1,20 @@
 # Handover: mirror limits, quirks mode, new defaults (2026-09-23, second session)
 
 Chains from `handover-2026-09-23-session-close.md`, whose work list this
-session worked through. Decision-log entries **D63**–**D72** hold the reasoning
-and measurements; this file is the summary and the next steps.
+session worked through. Decision-log entries **D63**–**D74** hold the reasoning
+and measurements; this file is the summary and the next steps. D73–D74 came
+from a third session the same day (owner reports on the side panel and on
+image overlays).
 
 ## Where things stand
 
 | Item | State |
 | --- | --- |
-| Branch / PR | `feat/ui-string-catalogue`, PR #22, **open**, head at the D72 commit plus this file. Description covers D40–D72. |
-| Version / identity | `0.5.0` / `0.5.0 beta v.20260922.31` (next is `.32`; `npm run bump-build`). |
-| Gate | `npm run check` green at D72: **1,497 tests pass, 1 skipped**; `dist/chrome-unpacked` byte-verified. |
-| NAS | `Dev/simul/` mirrors head; the owner loads `Dev/simul/dist/chrome-unpacked` (`Build 0.5.0 beta v.20260922.31`). |
-| `main` / release | Only `v0.4.0` released. Publishing 0.5.0 is **D73**, only when the owner says so; do not ask. |
+| Branch / PR | `feat/ui-string-catalogue`, PR #22, **open**, head at the D74 commit plus this file. Description covers D40–D74. |
+| Version / identity | `0.5.0` / `0.5.0 beta v.20260922.33` (next is `.34`; `npm run bump-build`). |
+| Gate | `npm run check` green at D74: **1,502 tests pass, 1 skipped**; `dist/chrome-unpacked` byte-verified. |
+| NAS | `Dev/simul/` mirrors head; the owner loads `Dev/simul/dist/chrome-unpacked` (`Build 0.5.0 beta v.20260922.33`). |
+| `main` / release | Only `v0.4.0` released. Publishing 0.5.0 is **D75**, only when the owner says so; do not ask. |
 
 ## Owner rulings this session
 
@@ -34,6 +36,12 @@ and measurements; this file is the summary and the next steps.
   becomes an actual issue." Deferred.
 - **Owner report (D71):** after choosing an item, the mirror's dropdown
   stayed open. Fixed.
+- **Owner report (D73):** "I cannot click the pinned button in the main
+  screen. The default should be set to follow instead of pinned." Pinned in
+  the side panel keeps the tab it shows (owner's pick, same as the window).
+- **Owner report (D74):** a page's pop-up covered its images, but image
+  translations were drawn above it. Owner's pick: put each translation inside
+  the page right after its image ("A"), not a top layer that hides parts.
 
 ## What shipped (all verified in Chrome for Testing unless noted)
 
@@ -49,6 +57,8 @@ and measurements; this file is the summary and the next steps.
 | `.29` | D70 | Review L6, L8, L9: translated frames keep their placeholders; the count label follows a language switch; code-written text gets `lang` and `dir="auto"`. README step 4 reworded. `npm run bump-build` added. |
 | `.30` | D71 | Choosing an option, link or menu item closes the mirror's dropdown; select facsimiles open only on click or keyboard (not hover), like native selects. |
 | `.31` | D72 | Base64 font data URLs in CSS are kept (embedded web fonts render); the caption band grows to at most 60% when its text would be under 9px. |
+| `.32` | D73 | The side panel honours Follow / Pinned (default Follow): it follows the active tab of its own window, the button is clickable there, and Pinned keeps the tab it shows. Settings reads "Mirror follows". Verified with the real side panel (CDP `Extensions.triggerAction`). |
+| `.33` | D74 | Image translations are `simul-image-overlay` elements right after each image with no z-index, so pop-ups cover them and backdrops dim them; closed shadow root, inline `!important` reset, positioned by measuring its containing block (transforms, scale, nested scrollers), sized to the visible part, re-inserted after mirror rewrites. Painted logo labels drop their z-index. |
 
 ## Found, not fixed (candidates, in rough order of value)
 
@@ -71,6 +81,14 @@ and measurements; this file is the summary and the next steps.
    damage. It needs care, because proofs can depend on records.
 4. **Limited-quirks mode** is not represented (reports `CSS1Compat`, gets the
    standards shell).
+5. **The overlay element is visible to sibling-counting page CSS** (D74's
+   known cost): `img + figcaption`, `:last-child` on the image, or
+   `:nth-child` of later siblings can change. No report yet; if one comes,
+   options are placing it last in the parent (paints above later positioned
+   siblings) or accepting per-site cases.
+6. **Review R4 remainder:** "Mirror follows" in Settings now fully duplicates
+   the toolbar's Follow / Pinned button on both surfaces; a simplification
+   candidate to bring to the owner.
 
 ## Next work, in order
 
@@ -84,11 +102,12 @@ and measurements; this file is the summary and the next steps.
 3. Candidates 1 and 3 (style polling on large documents; per-item semantic
    refusal) need a design first. P3–P6 wait until one becomes an actual
    issue (owner).
-4. Watch for owner reports on D71 (dropdowns) and D66 (new defaults), the
-   most visible changes.
-5. Publish 0.5.0 as **D73** only when the owner says so. The release-notes
+4. Watch for owner reports on D74 (overlays inside the page), D73 (side
+   panel following), D71 (dropdowns) and D66 (new defaults), the most
+   visible changes.
+5. Publish 0.5.0 as **D75** only when the owner says so. The release-notes
    draft (`handover-2026-09-22-release-readiness.md`) needs lines for
-   D51–D72.
+   D51–D74.
 
 ## Reproduction and verification
 
@@ -102,7 +121,7 @@ and measurements; this file is the summary and the next steps.
   `limits-ui.mjs`, `advanced-shot.mjs`, `overlay-top.mjs`, `quirks-probe.mjs`,
   `quirks-check.mjs`, `fresh-defaults.mjs`, `labels-timeline.mjs` (select
   labels through shadow roots), `scope-safety.mjs` (narrow, widen, reset),
-  `count-translations.mjs` (counts stand-in Translator calls), `status-smoke.mjs` / `status-lang.mjs` (status line after a To switch; flags "[object"; `lang`/`dir`), `dropdown-select.mjs` (open each select and menu, choose an item, report what is still open), `data-font.mjs`, `caption-band.mjs`. The `d63/`
+  `count-translations.mjs` (counts stand-in Translator calls), `status-smoke.mjs` / `status-lang.mjs` (status line after a To switch; flags "[object"; `lang`/`dir`), `dropdown-select.mjs` (open each select and menu, choose an item, report what is still open), `data-font.mjs`, `caption-band.mjs`, `sidepanel-follow.mjs` (opens the real side panel with CDP `Extensions.triggerAction` on a `tab` target, found with `Target.getTargets({filter:[{}]})`; checks Follow / Pinned across tab switches), `overlay-stacking.mjs` (pop-up, backdrop, scaled box, cover image, carousel; alt-text captions via the stand-in Translator, source `en`), `overlay-scrollers.mjs` (adds positioned and static nested scrollers and scrolls them). The `d63/`
   folder has `run-cap-matrix.sh` (old vs new build table),
   `build-unminified.sh` (profiling build), the profile summarizers, the
   `sanitizeCss` differential and benchmark, `make-cap-pages.py` (the
