@@ -322,6 +322,16 @@ export const UI_STRINGS = {
   retryResetCleanup: 'Retry reset cleanup',
   resetAllSettings: 'Reset all extension settings…',
 
+  // Page-access guidance, raised as errors by lib/page-identity.ts and shown
+  // in the status line and the mirror's error panel (review L5).
+  pageAccessGuidance:
+    'Open a regular HTTP or HTTPS page, then select the extension from that page.',
+  pageChangedGuidance:
+    'The source page changed or access expired. Select the extension on the source page to authorize it again.',
+  pageTimeoutGuidance: 'The page took too long to respond. Retry the current page.',
+  pageAccessLostGuidance:
+    'The extension no longer has access to this page. Select its toolbar icon on the source page to authorize it again.',
+
   // Preference client statuses.
   statusInvalidPreferenceResponse: 'The preference service returned an invalid response.',
   statusSettingsResetElsewhere:

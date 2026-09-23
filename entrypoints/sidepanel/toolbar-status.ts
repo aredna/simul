@@ -9,6 +9,13 @@ import {
   type ToolbarActivity,
 } from '../../lib/companion-ui-state';
 import { UI_STRINGS, formatUiTemplate } from '../../lib/companion-ui-strings';
+import type { SupportedLanguage } from '../../lib/translation-provider';
+import {
+  englishUiText,
+  renderUiText,
+  type UiText,
+  type UiTextRenderer,
+} from '../../lib/ui-text';
 
 export interface ToolbarStatusElements {
   readonly status: HTMLElement;
@@ -31,6 +38,8 @@ export interface ToolbarStatusEnvironment {
   readonly isSettingsOpen: () => boolean;
   /** Localizes one English catalogue string into the current UI language. */
   readonly localize: (english: string) => string;
+  /** Names a language in the language the UI is rendered in. */
+  readonly languageName: (language: SupportedLanguage) => string;
 }
 
 /** Kept as a named export for tests; the source of truth is the catalogue. */
@@ -46,6 +55,7 @@ export class ToolbarStatus {
   #attention: ToolbarAttentionTarget | undefined;
   #attentionTone: Extract<CompanionStatusTone, 'warning' | 'error'> = 'warning';
   #determinateRatio: number | undefined;
+  #message: UiText = '';
   #englishMessage = '';
   #englishProgressLabel = '';
   #progressLabelArgs: readonly (string | number)[] = [];
@@ -69,20 +79,19 @@ export class ToolbarStatus {
   }
 
   /**
-   * Sets the status line. `englishMessage` is the English form used for
-   * attention routing and `statusText`; it defaults to `message`, but a caller
-   * that has already localized a composite message (one assembled from several
-   * catalogue entries) must pass its English assembly so routing keeps matching
-   * English keywords and `statusText` stays English (review finding F4).
+   * Sets the status line. The message is kept as UI text, so `relocalize()`
+   * renders it again in a new UI language (review L2); its English form is
+   * `statusText` and drives attention routing (review F4).
    */
   setStatus(
-    message: string,
+    message: UiText,
     tone: CompanionStatusTone = 'normal',
-    englishMessage: string = message,
   ): void {
     const { status, refreshAttention, settingsAttention } = this.environment.elements;
+    const englishMessage = englishUiText(message);
+    this.#message = message;
     this.#englishMessage = englishMessage;
-    const localized = this.environment.localize(message);
+    const localized = renderUiText(message, this.#renderer());
     status.textContent = localized;
     status.dataset.tone = tone;
     // Attention routing matches English keywords, never the localized text.
@@ -98,7 +107,7 @@ export class ToolbarStatus {
     const { status, refreshAttention, settingsAttention, progressLabel } =
       this.environment.elements;
     if (this.#englishMessage) {
-      const localized = this.environment.localize(this.#englishMessage);
+      const localized = renderUiText(this.#message, this.#renderer());
       if (status.textContent !== localized) status.textContent = localized;
       if (this.#attention === 'refresh') refreshAttention.title = localized;
       if (this.#attention === 'settings') settingsAttention.title = localized;
@@ -108,6 +117,13 @@ export class ToolbarStatus {
       if (progressLabel.textContent !== localized) progressLabel.textContent = localized;
       this.syncProgress();
     }
+  }
+
+  #renderer(): UiTextRenderer {
+    return {
+      localize: this.environment.localize,
+      languageName: this.environment.languageName,
+    };
   }
 
   /** Localizes the stored English progress frame, then fills its arguments. */

@@ -1,5 +1,6 @@
 import { parseHTML } from 'linkedom';
 import { describe, expect, it, vi } from 'vitest';
+import { englishUiText } from '../lib/ui-text';
 
 import { CompanionState } from '../entrypoints/sidepanel/companion-state';
 import { UiLocalizer } from '../entrypoints/sidepanel/ui-localizer';
@@ -149,7 +150,7 @@ function setup(options: {
     clearResetOnlyRuntimeState: () => events.push('reset-only-cleared'),
     restartReplica: () => events.push('restart'),
     syncPreferenceControls: () => events.push('sync'),
-    setStatus: (message, tone) => statuses.push([message, tone]),
+    setStatus: (message, tone) => statuses.push([englishUiText(message), tone]),
     setUiText: (element: HTMLElement, english: string) => {
       element.dataset.uiLabel = english;
       element.textContent = english;

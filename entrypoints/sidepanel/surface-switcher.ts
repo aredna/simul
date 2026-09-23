@@ -4,6 +4,7 @@ import {
 } from '../../lib/companion-surface';
 import type { CompanionStatusTone } from '../../lib/companion-ui-localization';
 import { UI_STRINGS } from '../../lib/companion-ui-strings';
+import { uiText, type UiText } from '../../lib/ui-text';
 import {
   isSupportedPage,
   readableError,
@@ -43,7 +44,7 @@ export interface SurfaceSwitcherEnvironment {
     readonly placementGuidance: HTMLElement;
   };
   readonly rememberSurface: (surface: CompanionSurface) => Promise<unknown>;
-  readonly setStatus: (message: string, tone?: CompanionStatusTone) => void;
+  readonly setStatus: (message: UiText, tone?: CompanionStatusTone) => void;
   readonly localizeTemplate: (
     frame: string,
     ...args: readonly (string | number)[]
@@ -118,7 +119,7 @@ export class SurfaceSwitcher {
       }
     } catch (error) {
       setStatus(
-        this.environment.localizeTemplate(UI_STRINGS.statusDetachedOpenError, readableError(error)),
+        uiText(UI_STRINGS.statusDetachedOpenError, readableError(error)),
         'error',
       );
     }
@@ -164,7 +165,7 @@ export class SurfaceSwitcher {
       }
     } catch (error) {
       setStatus(
-        this.environment.localizeTemplate(UI_STRINGS.statusReturnPanelError, readableError(error)),
+        uiText(UI_STRINGS.statusReturnPanelError, readableError(error)),
         'error',
       );
     }

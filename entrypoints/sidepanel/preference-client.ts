@@ -1,4 +1,5 @@
 import { UI_STRINGS } from '../../lib/companion-ui-strings';
+import { uiText, type UiText } from '../../lib/ui-text';
 import { readableError } from '../../lib/page-identity';
 import {
   readPreferenceCommandResult,
@@ -47,7 +48,7 @@ export interface PreferenceClientEnvironment {
   readonly onLayoutChanged: () => void;
   /** Zoom was applied optimistically; the zoom controls should follow. */
   readonly onZoomApplied: () => void;
-  readonly onError: (message: string) => void;
+  readonly onError: (message: UiText) => void;
   readonly localizeTemplate: (
     frame: string,
     ...args: readonly (string | number)[]
@@ -158,7 +159,7 @@ export class PreferenceClient {
         // Keep the optimistic controls visible; a later storage event can repair them.
       }
       this.environment.onError(
-        this.environment.localizeTemplate(UI_STRINGS.statusCouldNotSaveOptions, readableError(error)),
+        uiText(UI_STRINGS.statusCouldNotSaveOptions, readableError(error)),
       );
       return false;
     }
@@ -192,7 +193,7 @@ export class PreferenceClient {
         // A later storage event can reconcile optimistic controls.
       }
       this.environment.onError(
-        this.environment.localizeTemplate(UI_STRINGS.statusCouldNotSaveImageOptions, readableError(error)),
+        uiText(UI_STRINGS.statusCouldNotSaveImageOptions, readableError(error)),
       );
     }
   }

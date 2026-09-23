@@ -1,5 +1,6 @@
 import { parseHTML } from 'linkedom';
 import { describe, expect, it, vi } from 'vitest';
+import { englishUiText } from '../lib/ui-text';
 
 import { CompanionState } from '../entrypoints/sidepanel/companion-state';
 import { SurfaceSwitcher, type SurfaceBrowser } from '../entrypoints/sidepanel/surface-switcher';
@@ -53,7 +54,7 @@ function setup(options: {
       placementGuidance: document.getElementById('placement') as unknown as HTMLElement,
     },
     rememberSurface,
-    setStatus: (message) => statuses.push(message),
+    setStatus: (message) => statuses.push(englishUiText(message)),
     localizeTemplate: (frame: string, ...args: readonly (string | number)[]) =>
       frame.replace(/\{(\d+)\}/g, (whole, index: string) =>
         args[Number(index)] === undefined ? whole : String(args[Number(index)])),

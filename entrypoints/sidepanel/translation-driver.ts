@@ -5,6 +5,12 @@ import {
 import type { CompanionStatusTone } from '../../lib/companion-ui-localization';
 import { UI_STRINGS, formatUiTemplate } from '../../lib/companion-ui-strings';
 import {
+  uiLanguageName,
+  uiText,
+  type UiText,
+  type UiTextRenderer,
+} from '../../lib/ui-text';
+import {
   resolveSourceLanguage,
   shouldClearAutoImageLanguageForDocument,
   type AutoLanguageEvidencePrecedence,
@@ -94,11 +100,7 @@ export interface TranslationDriverEnvironment {
   /** The auto-image language configuration key for the current settings. */
   readonly autoImageLanguageConfigurationKey: () => string;
   readonly configureImageTranslation: () => void;
-  readonly setStatus: (
-    message: string,
-    tone?: CompanionStatusTone,
-    englishMessage?: string,
-  ) => void;
+  readonly setStatus: (message: UiText, tone?: CompanionStatusTone) => void;
   /** Localizes one English catalogue string into the current UI language. */
   readonly localizeUi: (english: string) => string;
   /** Localizes a template frame and fills its numbered placeholders. */
@@ -597,10 +599,10 @@ export class TranslationDriver {
       state.availability = next;
       switch (next) {
         case 'available':
-          setStatus(this.environment.localizeTemplate(
+          setStatus(uiText(
             UI_STRINGS.statusReadyToTranslate,
-            this.environment.localizeLanguageName(pair.sourceLanguage),
-            this.environment.localizeLanguageName(pair.targetLanguage),
+            uiLanguageName(pair.sourceLanguage),
+            uiLanguageName(pair.targetLanguage),
           ));
           break;
         case 'downloadable':
@@ -608,10 +610,10 @@ export class TranslationDriver {
           setStatus(UI_STRINGS.statusChooseTranslateOnce, 'warning');
           break;
         default:
-          setStatus(this.environment.localizeTemplate(
+          setStatus(uiText(
             UI_STRINGS.statusPairUnavailable,
-            this.environment.localizeLanguageName(pair.sourceLanguage),
-            this.environment.localizeLanguageName(pair.targetLanguage),
+            uiLanguageName(pair.sourceLanguage),
+            uiLanguageName(pair.targetLanguage),
           ), 'error');
       }
     } catch (error) {
@@ -743,18 +745,15 @@ export class TranslationDriver {
           'success',
         );
       } else {
-        // A partial summary is assembled from several catalogue entries, so it
-        // cannot round-trip through the single-key localizer. Localize it for
-        // display, but hand setStatus the English assembly for attention
-        // routing and statusText (review findings F4/F7).
+        // A partial summary is assembled from several catalogue entries; as
+        // composed UI text it renders in the current language and routes on
+        // its English form (review findings F4/F7, L2).
         setStatus(
-          describePartialReplicaTranslation(
+          partialReplicaTranslationText(
             result,
             UI_STRINGS.partialPrefixRemainsPartial,
-            this.environment.localizeUi,
           ),
           'warning',
-          describePartialReplicaTranslation(result, UI_STRINGS.partialPrefixRemainsPartial),
         );
       }
     } catch (error) {
@@ -904,6 +903,20 @@ export class TranslationDriver {
       ),
     });
   }
+}
+
+/**
+ * The partial-projection status as UI text: it is assembled again in the
+ * current UI language each time it is shown (review L2, F4).
+ */
+export function partialReplicaTranslationText(
+  result: ReplicaTranslationRunResult,
+  prefix: string,
+): UiText {
+  return Object.freeze({
+    compose: (renderer: UiTextRenderer) =>
+      describePartialReplicaTranslation(result, prefix, renderer.localize),
+  });
 }
 
 /**

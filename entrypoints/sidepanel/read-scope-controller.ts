@@ -1,5 +1,6 @@
 import type { CompanionStatusTone } from '../../lib/companion-ui-localization';
 import { UI_STRINGS } from '../../lib/companion-ui-strings';
+import { uiText, type UiText } from '../../lib/ui-text';
 import { readableError } from '../../lib/page-identity';
 import type { PreferenceCommand, PreferenceCommandResult } from '../../lib/preference-coordinator';
 import {
@@ -57,7 +58,7 @@ export interface ReadScopeControllerEnvironment {
   /** Rebuilds the replica and reconfigures image work under the new policy. */
   readonly restartReplica: () => void;
   readonly syncPreferenceControls: () => void;
-  readonly setStatus: (message: string, tone?: CompanionStatusTone) => void;
+  readonly setStatus: (message: UiText, tone?: CompanionStatusTone) => void;
   readonly setUiText: (element: HTMLElement, english: string) => void;
   /** Localizes one English catalogue string for this module's own surfaces. */
   readonly localizeUi: (english: string) => string;
@@ -271,7 +272,7 @@ export class ReadScopeController {
         this.environment.restartReplica();
       }
       setStatus(
-        this.environment.localizeTemplate(UI_STRINGS.statusCouldNotSaveReadable, readableError(error)),
+        uiText(UI_STRINGS.statusCouldNotSaveReadable, readableError(error)),
         'error',
       );
     } finally {

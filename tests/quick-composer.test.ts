@@ -1,5 +1,6 @@
 import { parseHTML } from 'linkedom';
 import { describe, expect, it, vi } from 'vitest';
+import { renderUiText } from '../lib/ui-text';
 
 import { QuickComposer, localizedLanguageName } from '../entrypoints/sidepanel/quick-composer';
 import type { TranslationPair, TranslationProvider } from '../lib/translation-provider';
@@ -59,7 +60,10 @@ function setup(options: {
     localizeTemplate: (frame: string, ...args: readonly (string | number)[]) =>
       (translations.get(frame) ?? frame).replace(/\{(\d+)\}/g, (whole, index: string) =>
         args[Number(index)] === undefined ? whole : String(args[Number(index)])),
-    setStatus: (message) => statuses.push(message),
+    setStatus: (message) => statuses.push(renderUiText(message, {
+      localize: (english) => translations.get(english) ?? english,
+      languageName: (language) => language,
+    })),
     onActivityChange: () => activity.push(composer.inFlight),
     onTranslated,
     readableError: (error) => (error instanceof Error ? error.message : String(error)),

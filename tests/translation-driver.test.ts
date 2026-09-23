@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { renderUiText } from '../lib/ui-text';
 
 import { CompanionState } from '../entrypoints/sidepanel/companion-state';
 import { Currency } from '../entrypoints/sidepanel/currency';
@@ -81,7 +82,10 @@ function setup(options: {
     getTab: vi.fn(async () => ({ id: 4, windowId: 1, url: IDENTITY.url, active: true })),
     autoImageLanguageConfigurationKey: () => 'configuration',
     configureImageTranslation: () => events.push('configure'),
-    setStatus: (message) => statuses.push(message),
+    setStatus: (message) => statuses.push(renderUiText(message, {
+      localize: (english) => translations.get(english) ?? english,
+      languageName: (language) => languageNames.get(language) ?? languageName(language),
+    })),
     localizeUi: (english: string) => translations.get(english) ?? english,
     localizeTemplate: (frame: string, ...args: readonly (string | number)[]) =>
       (translations.get(frame) ?? frame).replace(/\{(\d+)\}/g, (whole, index: string) =>

@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { englishUiText } from '../lib/ui-text';
 
 import { CapturePipeline } from '../entrypoints/sidepanel/capture-pipeline';
 import { CompanionState } from '../entrypoints/sidepanel/companion-state';
@@ -98,7 +99,7 @@ function setup(options: {
     reconcileAutomaticAccess: vi.fn(async () => options.accessRevoked ?? false),
     cancelNavigationRefresh: () => events.push('refresh-cancelled'),
     invalidateComposer: () => events.push('composer-invalidated'),
-    setStatus: (message, tone) => statuses.push([message, tone]),
+    setStatus: (message, tone) => statuses.push([englishUiText(message), tone]),
     updateControls: () => events.push('controls'),
     renderLoading: () => events.push('loading'),
     renderError: (message) => events.push(`error:${message}`),

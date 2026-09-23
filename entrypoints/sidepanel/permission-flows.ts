@@ -1,5 +1,6 @@
 import type { CompanionStatusTone } from '../../lib/companion-ui-localization';
 import { UI_STRINGS } from '../../lib/companion-ui-strings';
+import { uiText, type UiText } from '../../lib/ui-text';
 import { ACCESSIBILITY_TEXT_METHOD_ID } from '../../lib/ocr/image-reading-methods';
 import { hasNonDefaultPort, readableError } from '../../lib/page-identity';
 import type { PreferenceCommandResult } from '../../lib/preference-coordinator';
@@ -35,7 +36,7 @@ export interface PermissionFlowsEnvironment {
   readonly preferenceClient: PreferenceClient;
   /** Pixel OCR providers that are enabled and ready in this runtime. */
   readonly usablePixelProviderCount: () => number;
-  readonly setStatus: (message: string, tone?: CompanionStatusTone) => void;
+  readonly setStatus: (message: UiText, tone?: CompanionStatusTone) => void;
   readonly localizeTemplate: (
     frame: string,
     ...args: readonly (string | number)[]
@@ -381,7 +382,7 @@ export class PermissionFlows {
         if (outcome.result) preferenceClient.applyCommitted(outcome.result.preferences);
         else await preferenceClient.reloadFromStorage();
         this.environment.syncPreferenceControls();
-        setStatus(this.environment.localizeTemplate(UI_STRINGS.statusAutoAccessUpdateError, readableError(outcome.error)), 'error');
+        setStatus(uiText(UI_STRINGS.statusAutoAccessUpdateError, readableError(outcome.error)), 'error');
         return;
       }
       preferenceClient.applyCommitted(outcome.result.preferences);
@@ -411,7 +412,7 @@ export class PermissionFlows {
       if (repaired) preferenceClient.applyCommitted(repaired.preferences);
       else await preferenceClient.reloadFromStorage();
       this.environment.syncPreferenceControls();
-      setStatus(this.environment.localizeTemplate(UI_STRINGS.statusAutoAccessUpdateError, readableError(error)), 'error');
+      setStatus(uiText(UI_STRINGS.statusAutoAccessUpdateError, readableError(error)), 'error');
     } finally {
       state.permissionInFlight = false;
       this.environment.updateControls();
