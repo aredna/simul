@@ -11,6 +11,7 @@ import {
   ImageTranslationController,
   type ImageTranslationControllerEnvironment,
 } from '../lib/ocr/image-translation-controller';
+import { imageOverlayContent } from '../lib/ocr/image-overlay-projector';
 import {
   ImageSourceUnavailableError,
   type ImageSourceLease,
@@ -32,6 +33,10 @@ import type {
 import type { ReplicaCaptureRequest } from '../lib/replica/contracts';
 import type { ReplicaImageAnchor } from '../lib/replica/contracts';
 import { TranslationMemory } from '../lib/translation/translation-memory';
+
+/** Overlay text lives in the overlay element's closed shadow root (D74). */
+const overlayText = (overlay: Element | null | undefined) =>
+  imageOverlayContent(overlay)?.textContent;
 
 const sourceDocument = {
   sessionId: 'image-controller-session',
@@ -763,7 +768,7 @@ describe('ImageTranslationController', () => {
     const overlay = document.querySelector<HTMLElement>(
       '[data-simul-image-method="accessibility-text"]',
     );
-    expect(overlay?.textContent).toBe('News');
+    expect(overlayText(overlay)).toBe('News');
     expect(memory.size).toBeGreaterThan(0);
     expect(JSON.stringify(diagnostics)).not.toContain('お知らせ');
 
@@ -864,9 +869,7 @@ describe('ImageTranslationController', () => {
       observationRevision: tinyDescriptor.observationRevision,
     });
     await Promise.resolve();
-    expect(document.querySelector(
-      '[data-simul-image-method="accessibility-text"]',
-    )?.textContent).toBe('News');
+    expect(overlayText(document.querySelector('[data-simul-image-method="accessibility-text"]'))).toBe('News');
     controller.dispose();
   });
 
@@ -947,7 +950,7 @@ describe('ImageTranslationController', () => {
       diagnostics.filter((diagnostic) => diagnostic === 'projected').length;
     controller.activateReplica(request, 3, 1);
     await vi.waitFor(() => expect(diagnostics).toContain('projected'));
-    expect(overlay()?.textContent).toBe('translated:Opening hours');
+    expect(overlayText(overlay())).toBe('translated:Opening hours');
     await new Promise((resolve) => setTimeout(resolve, 5));
     const settled = projections();
 
@@ -966,7 +969,7 @@ describe('ImageTranslationController', () => {
     anchorAvailable = true;
     expect(controller.notifyReplicaCommit(sourceDocument, 2)).toBe(true);
     await vi.waitFor(() => expect(projections()).toBeGreaterThan(settled));
-    expect(overlay()?.textContent).toBe('translated:Opening hours');
+    expect(overlayText(overlay())).toBe('translated:Opening hours');
     controller.dispose();
   });
 
@@ -1060,9 +1063,7 @@ describe('ImageTranslationController', () => {
       selected: 'ocr',
       reason: 'ocr-decisive',
     });
-    expect(document.querySelector(
-      '[data-simul-image-method="tesseract"]',
-    )?.textContent).toBe('translated:Latest account security update');
+    expect(overlayText(document.querySelector('[data-simul-image-method="tesseract"]'))).toBe('translated:Latest account security update');
     expect(JSON.stringify(diagnostics)).not.toContain('IRS Help');
     controller.dispose();
   });
@@ -1135,9 +1136,7 @@ describe('ImageTranslationController', () => {
     await vi.waitFor(() => expect(diagnostics).toContain(
       'accessibility-text-provisional',
     ));
-    expect(document.querySelector(
-      '[data-simul-image-method="accessibility-text"]',
-    )?.textContent).toBe(`translated:${semanticText}`);
+    expect(overlayText(document.querySelector('[data-simul-image-method="accessibility-text"]'))).toBe(`translated:${semanticText}`);
     expect(recognize).toHaveBeenCalledOnce();
 
     finishRecognition({
@@ -1157,9 +1156,7 @@ describe('ImageTranslationController', () => {
         }],
       },
     });
-    await vi.waitFor(() => expect(document.querySelector(
-      '[data-simul-image-method="tesseract"]',
-    )?.textContent).toBe(`translated:${ocrText}`));
+    await vi.waitFor(() => expect(overlayText(document.querySelector('[data-simul-image-method="tesseract"]'))).toBe(`translated:${ocrText}`));
     expect(acquire).toHaveBeenCalledOnce();
     controller.dispose();
   });
@@ -1292,6 +1289,8 @@ describe('ImageTranslationController', () => {
       '[data-simul-image-method="accessibility-text"]',
     )).toHaveLength(1);
     expect(document.body.textContent).not.toContain('CDN Media');
+    expect([...document.querySelectorAll('[data-simul-image-overlay]')]
+      .map(overlayText).join('')).not.toContain('CDN Media');
 
     releaseFirstCapture();
     await vi.waitFor(() => expect(acquire).toHaveBeenCalledTimes(4));
@@ -1628,9 +1627,7 @@ describe('ImageTranslationController', () => {
     });
     controller.activateReplica(request, 3, 1);
 
-    await vi.waitFor(() => expect(document.querySelector(
-      '[data-simul-image-method="accessibility-text"]',
-    )?.textContent).toBe('translated:Valid account help'));
+    await vi.waitFor(() => expect(overlayText(document.querySelector('[data-simul-image-method="accessibility-text"]'))).toBe('translated:Valid account help'));
     expect(readAccessibilityText).toHaveBeenCalledTimes(2);
     controller.dispose();
   });
@@ -1699,9 +1696,7 @@ describe('ImageTranslationController', () => {
     });
     controller.activateReplica(request, 3, 1);
 
-    await vi.waitFor(() => expect(document.querySelector(
-      '[data-simul-image-method="accessibility-text"]',
-    )?.textContent).toBe(`translated:${semanticText}`));
+    await vi.waitFor(() => expect(overlayText(document.querySelector('[data-simul-image-method="accessibility-text"]'))).toBe(`translated:${semanticText}`));
     expect(translate.mock.calls.map(([text]) => text)).toEqual([
       semanticText,
       semanticText,
@@ -1814,9 +1809,7 @@ describe('ImageTranslationController', () => {
       firstOcrText,
       'Account help',
     ]);
-    expect(document.querySelector(
-      '[data-simul-image-method="accessibility-text"]',
-    )?.textContent).toBe('translated:Account help');
+    expect(overlayText(document.querySelector('[data-simul-image-method="accessibility-text"]'))).toBe('translated:Account help');
     controller.dispose();
   });
 
@@ -1914,17 +1907,13 @@ describe('ImageTranslationController', () => {
       selected: 'semantic',
       reason: 'priority-tie',
     });
-    expect(document.querySelector(
-      '[data-simul-image-method="accessibility-text"]',
-    )?.textContent).toBe('News');
+    expect(overlayText(document.querySelector('[data-simul-image-method="accessibility-text"]'))).toBe('News');
 
     controller.configure({
       ...configuration,
       methodOrder: ['tesseract', 'accessibility-text'],
     });
-    await vi.waitFor(() => expect(document.querySelector(
-      '[data-simul-image-method="tesseract"]',
-    )?.textContent).toBe('NewsNews'));
+    await vi.waitFor(() => expect(overlayText(document.querySelector('[data-simul-image-method="tesseract"]'))).toBe('NewsNews'));
     expect(acquire).toHaveBeenCalledOnce();
     expect(recognize).toHaveBeenCalledOnce();
     controller.dispose();
@@ -2265,9 +2254,7 @@ describe('ImageTranslationController', () => {
       },
     });
     await vi.waitFor(() => expect(detected).toEqual(['ja']));
-    await vi.waitFor(() => expect(document.querySelector(
-      '[data-simul-image-method="tesseract"]',
-    )?.textContent).toBe(`translated:${ocrText}`));
+    await vi.waitFor(() => expect(overlayText(document.querySelector('[data-simul-image-method="tesseract"]'))).toBe(`translated:${ocrText}`));
     controller.dispose();
   });
 
@@ -4174,10 +4161,10 @@ describe('ImageTranslationController', () => {
     });
     await vi.waitFor(() => expect(invalidated).toEqual([sourceDocument]));
     await vi.waitFor(() => expect(detected).toEqual(['ja', 'ja']));
-    await vi.waitFor(() => expect(document.querySelector(
+    await vi.waitFor(() => expect(overlayText(document.querySelector(
       `[data-simul-image-overlay="${firstDescriptor.nodeId}"]` +
         '[data-simul-image-method="accessibility-text"]',
-    )?.textContent).toBe(`translated:${revisedFirstText}`));
+    ))).toBe(`translated:${revisedFirstText}`));
     await vi.waitFor(() => expect(controller.busy).toBe(false));
     expect(diagnostics.filter((entry) => entry === 'projected').length)
       .toBeGreaterThan(projectedBefore);
@@ -4316,9 +4303,7 @@ describe('ImageTranslationController', () => {
       stage: 'recognition-quality',
       corroboratedRegions: 1,
     }));
-    expect(document.querySelector(
-      '[data-simul-image-method="tesseract"]',
-    )?.textContent).toBe('ニュース');
+    expect(overlayText(document.querySelector('[data-simul-image-method="tesseract"]'))).toBe('ニュース');
     controller.dispose();
   });
 
@@ -4418,9 +4403,7 @@ describe('ImageTranslationController', () => {
     expect(diagnostics).toContain('recognition-failed');
     expect(diagnostics).toContain('accessibility-text-blocked');
     expect(JSON.stringify(diagnostics)).not.toContain('private');
-    expect(document.querySelector(
-      '[data-simul-image-method="tesseract"]',
-    )?.textContent).toBe('ニュース');
+    expect(overlayText(document.querySelector('[data-simul-image-method="tesseract"]'))).toBe('ニュース');
     controller.dispose();
   });
 
@@ -4533,9 +4516,7 @@ describe('ImageTranslationController', () => {
     ]);
     expect(continueRecognition).toHaveBeenCalledOnce();
     expect(translationAttempt).toBe(2);
-    expect(document.querySelector(
-      '[data-simul-image-method="tesseract"]',
-    )?.textContent).toBe('ニュース');
+    expect(overlayText(document.querySelector('[data-simul-image-method="tesseract"]'))).toBe('ニュース');
     controller.dispose();
   });
 
@@ -5323,7 +5304,7 @@ describe('ImageTranslationController', () => {
       },
       'projected',
     ]));
-    expect(document.querySelector('[data-simul-image-overlay="12"]')?.textContent)
+    expect(overlayText(document.querySelector('[data-simul-image-overlay="12"]')))
       .toBe('hello-日本語');
     expect(createTranslationSession).toHaveBeenCalledOnce();
     activeReplayLease = 8;
@@ -5337,7 +5318,7 @@ describe('ImageTranslationController', () => {
     expect(recognize).toHaveBeenCalledOnce();
     expect(diagnostics.filter((diagnostic) => diagnostic === 'projected'))
       .toHaveLength(1);
-    expect(document.querySelector('[data-simul-image-overlay="12"]')?.textContent)
+    expect(overlayText(document.querySelector('[data-simul-image-overlay="12"]')))
       .toBe('hello-日本語');
     expect(createTranslationSession).toHaveBeenCalledOnce();
     emit?.({
@@ -5359,7 +5340,7 @@ describe('ImageTranslationController', () => {
     await vi.waitFor(() => expect(
       diagnostics.filter((diagnostic) => diagnostic === 'projected'),
     ).toHaveLength(2));
-    expect(document.querySelector('[data-simul-image-overlay="12"]')?.textContent)
+    expect(overlayText(document.querySelector('[data-simul-image-overlay="12"]')))
       .toBe('hello-日本語');
     expect(createTranslationSession).toHaveBeenCalledOnce();
 
@@ -7667,9 +7648,7 @@ describe('ImageTranslationController', () => {
     expect(translationAborted).not.toHaveBeenCalled();
 
     finishTranslation('Daily News');
-    await vi.waitFor(() => expect(document.querySelector(
-      '[data-simul-image-method="tesseract"]',
-    )?.textContent).toBe('Daily News'));
+    await vi.waitFor(() => expect(overlayText(document.querySelector('[data-simul-image-method="tesseract"]'))).toBe('Daily News'));
     const settledOverlay = document.querySelector('[data-simul-image-overlay]');
 
     controller.configure({
@@ -7779,7 +7758,7 @@ describe('ImageTranslationController', () => {
     await vi.waitFor(() => expect(controller.busy).toBe(false));
     expect(acquire).toHaveBeenCalledOnce();
     expect(recognize).toHaveBeenCalledOnce();
-    expect(document.querySelector('[data-simul-image-overlay="12"]')?.textContent)
+    expect(overlayText(document.querySelector('[data-simul-image-overlay="12"]')))
       .toBe('Avis public');
     controller.dispose();
   });
@@ -7849,9 +7828,7 @@ describe('ImageTranslationController', () => {
     };
     controller.configure(configuration);
     controller.activateReplica(request, 3, 1);
-    await vi.waitFor(() => expect(document.querySelector(
-      '[data-simul-image-method="tesseract"]',
-    )?.textContent).toBe('en:毎日新聞'));
+    await vi.waitFor(() => expect(overlayText(document.querySelector('[data-simul-image-method="tesseract"]'))).toBe('en:毎日新聞'));
 
     controller.configure({ ...configuration, targetLanguage: 'ja' });
     expect(document.querySelector('[data-simul-image-overlay]')).toBeNull();
@@ -7862,9 +7839,7 @@ describe('ImageTranslationController', () => {
     }));
 
     controller.configure({ ...configuration, targetLanguage: 'fr' });
-    await vi.waitFor(() => expect(document.querySelector(
-      '[data-simul-image-method="tesseract"]',
-    )?.textContent).toBe('fr:毎日新聞'));
+    await vi.waitFor(() => expect(overlayText(document.querySelector('[data-simul-image-method="tesseract"]'))).toBe('fr:毎日新聞'));
 
     expect(readAccessibilityText).toHaveBeenCalledOnce();
     expect(acquire).toHaveBeenCalledOnce();

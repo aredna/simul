@@ -69,8 +69,9 @@ loaded into memory.
    Provider-specific unavailability falls through without starting an
    unbounded retry loop.
 8. Accepted regions are translated with the same local Chrome Translator
-   boundary as page text and projected as clipped, inert sibling overlays in
-   the replica.
+   boundary as page text and projected as clipped, inert overlays placed
+   right after each image in the replica, so the page's own stacking covers
+   them as it covers the image (D74).
 9. Before commit, the document, image revision, pixel key, language-pair epoch,
    replay lease, replica anchor, and normalized geometry must still match.
 

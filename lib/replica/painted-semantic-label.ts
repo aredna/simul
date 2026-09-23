@@ -585,7 +585,8 @@ function applyOverlayStyle(style: CSSStyleDeclaration): void {
     ['user-select', 'none'],
     ['white-space', 'normal'],
     ['word-break', 'break-word'],
-    ['z-index', '2147483646'],
+    // No z-index: the label paints above its host's own content but under
+    // whatever the page draws over the host, such as a pop-up (D74).
   ];
   for (const [property, value] of declarations) {
     style.setProperty(property, value, 'important');
