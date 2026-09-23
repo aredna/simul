@@ -80,6 +80,16 @@ export class UiLocalizer {
     return this.#localizedTarget;
   }
 
+  /**
+   * The language the UI shows now: the To language once its set is
+   * installed, English otherwise (the same rule as `localized`).
+   */
+  get renderedLanguage(): SupportedLanguage {
+    return this.#localizedTarget === this.environment.getTargetLanguage()
+      ? this.#localizedTarget
+      : 'en';
+  }
+
   get translations(): ReadonlyMap<string, string> {
     return this.#translations;
   }

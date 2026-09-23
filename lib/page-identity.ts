@@ -1,3 +1,4 @@
+import { UI_STRINGS } from './companion-ui-strings';
 import type { CompanionLaunchStamp } from './companion-surface';
 
 export interface CapturedPageIdentity {
@@ -69,14 +70,11 @@ export class PageAccessError extends Error {
   }
 }
 
-export const PAGE_ACCESS_GUIDANCE =
-  'Open a regular HTTP or HTTPS page, then select the extension from that page.';
-export const PAGE_CHANGED_GUIDANCE =
-  'The source page changed or access expired. Select the extension on the source page to authorize it again.';
-export const PAGE_TIMEOUT_GUIDANCE =
-  'The page took too long to respond. Retry the current page.';
-export const PAGE_ACCESS_LOST_GUIDANCE =
-  'The extension no longer has access to this page. Select its toolbar icon on the source page to authorize it again.';
+// Catalogue entries, so the status line and error panel localize them (L5).
+export const PAGE_ACCESS_GUIDANCE = UI_STRINGS.pageAccessGuidance;
+export const PAGE_CHANGED_GUIDANCE = UI_STRINGS.pageChangedGuidance;
+export const PAGE_TIMEOUT_GUIDANCE = UI_STRINGS.pageTimeoutGuidance;
+export const PAGE_ACCESS_LOST_GUIDANCE = UI_STRINGS.pageAccessLostGuidance;
 
 /** Reads a followable identity from a tab, or throws a PageAccessError. */
 export function identityFromTab(

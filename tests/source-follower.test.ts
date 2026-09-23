@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { englishUiText } from '../lib/ui-text';
 
 import { CompanionState } from '../entrypoints/sidepanel/companion-state';
 import { Currency } from '../entrypoints/sidepanel/currency';
@@ -468,9 +469,8 @@ describe('SourceFollower in a detached window', () => {
     });
     harness.follower.handleTabActivated(6, 2);
     await vi.runAllTimersAsync();
-    expect(harness.invalidateCompanion).toHaveBeenCalledWith(
-      expect.stringContaining('Active-tab following needs page access'),
-    );
+    expect(englishUiText(harness.invalidateCompanion.mock.calls.at(-1)?.[0]))
+      .toContain('Active-tab following needs page access');
   });
 
   it('does not follow a loaded tab in locked mode, in the background, or while a follow resolves', async () => {

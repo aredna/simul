@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { englishUiText } from '../lib/ui-text';
 import { UI_STRINGS } from '../lib/companion-ui-strings';
 
 import { CompanionState } from '../entrypoints/sidepanel/companion-state';
@@ -94,7 +95,7 @@ function setup(options: Options = {}) {
     onControlsChanged: () => undefined,
     onLayoutChanged: () => undefined,
     onZoomApplied: () => undefined,
-    onError: (message) => statuses.push(message),
+    onError: (message) => statuses.push(englishUiText(message)),
     localizeTemplate: (frame: string, ...args: readonly (string | number)[]) =>
       frame.replace(/\{(\d+)\}/g, (whole, index: string) =>
         args[Number(index)] === undefined ? whole : String(args[Number(index)])),
@@ -114,7 +115,7 @@ function setup(options: Options = {}) {
     isUserActivationActive: () => options.userActivation ?? true,
     preferenceClient,
     usablePixelProviderCount: () => options.usablePixelProviders ?? 1,
-    setStatus: (message) => statuses.push(message),
+    setStatus: (message) => statuses.push(englishUiText(message)),
     localizeTemplate: (frame: string, ...args: readonly (string | number)[]) =>
       frame.replace(/\{(\d+)\}/g, (whole, index: string) =>
         args[Number(index)] === undefined ? whole : String(args[Number(index)])),

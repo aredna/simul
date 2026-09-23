@@ -1,4 +1,10 @@
 import { describe, expect, it } from 'vitest';
+import {
+  PAGE_ACCESS_GUIDANCE,
+  PAGE_ACCESS_LOST_GUIDANCE,
+  PAGE_CHANGED_GUIDANCE,
+  PAGE_TIMEOUT_GUIDANCE,
+} from '../lib/page-identity';
 
 import {
   ALL_UI_STRINGS,
@@ -48,5 +54,16 @@ describe('UI_STRINGS catalogue', () => {
   it('exposes every distinct string once through ALL_UI_STRINGS', () => {
     expect(new Set(ALL_UI_STRINGS).size).toBe(ALL_UI_STRINGS.length);
     expect(new Set(ALL_UI_STRINGS)).toEqual(new Set(values));
+  });
+
+  it('includes the page-access guidance shown on restricted pages (review L5)', () => {
+    for (const guidance of [
+      PAGE_ACCESS_GUIDANCE,
+      PAGE_CHANGED_GUIDANCE,
+      PAGE_TIMEOUT_GUIDANCE,
+      PAGE_ACCESS_LOST_GUIDANCE,
+    ]) {
+      expect(ALL_UI_STRINGS).toContain(guidance);
+    }
   });
 });

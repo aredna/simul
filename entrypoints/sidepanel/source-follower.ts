@@ -1,5 +1,6 @@
 import type { CompanionStatusTone } from '../../lib/companion-ui-localization';
 import { UI_STRINGS } from '../../lib/companion-ui-strings';
+import { uiText, type UiText } from '../../lib/ui-text';
 import {
   isFocusedNormalBrowserWindow,
   isNewerCompanionLaunchStamp,
@@ -77,19 +78,19 @@ export interface SourceFollowerEnvironment {
   readonly navigationDebounceMs: number;
   readonly navigationRefreshGate: NavigationRefreshGate;
   readonly queueCapture: (request: CaptureRequest) => void;
-  readonly invalidateCompanion: (message: string) => void;
+  readonly invalidateCompanion: (message: UiText) => void;
   /** The source tab started loading another document; page work is stale. */
   readonly onSourceNavigationStarted: (next: CapturedPageIdentity) => void;
   /** The followed document's URL changed without a new document load. */
   readonly onFollowedUrlChanged: (next: CapturedPageIdentity) => void;
   /** The followed tab became the active tab again. */
   readonly onFollowedTabActivated: () => void;
-  readonly setStatus: (message: string, tone?: CompanionStatusTone) => void;
+  readonly setStatus: (message: UiText, tone?: CompanionStatusTone) => void;
   readonly localizeTemplate: (
     frame: string,
     ...args: readonly (string | number)[]
   ) => string;
-  readonly renderError: (message: string) => void;
+  readonly renderError: (message: UiText) => void;
   readonly updateControls: () => void;
 }
 
@@ -227,7 +228,7 @@ export class SourceFollower {
     } catch (error) {
       if (!currency.isCurrent(request)) return;
       this.environment.invalidateCompanion(
-        this.environment.localizeTemplate(UI_STRINGS.statusFollowNeedsAccess, readPageError(error)),
+        uiText(UI_STRINGS.statusFollowNeedsAccess, readPageError(error)),
       );
     } finally {
       this.#finishActiveFollowRequest(request);
@@ -298,7 +299,7 @@ export class SourceFollower {
     } catch (error) {
       if (!currency.isCurrent(request)) return;
       this.environment.invalidateCompanion(
-        this.environment.localizeTemplate(UI_STRINGS.statusFollowNeedsAccess, readPageError(error)),
+        uiText(UI_STRINGS.statusFollowNeedsAccess, readPageError(error)),
       );
     } finally {
       this.#finishActiveFollowRequest(request);
@@ -542,7 +543,7 @@ export class SourceFollower {
     } catch (error) {
       if (!currency.isCurrent(request)) return;
       this.environment.invalidateCompanion(
-        this.environment.localizeTemplate(UI_STRINGS.statusLockedTabMovedWindows, readPageError(error)),
+        uiText(UI_STRINGS.statusLockedTabMovedWindows, readPageError(error)),
       );
     }
   }
@@ -566,7 +567,7 @@ export class SourceFollower {
     } catch (error) {
       if (!currency.isCurrent(request)) return;
       this.environment.invalidateCompanion(
-        this.environment.localizeTemplate(UI_STRINGS.statusReplacedTabNotFollowed, readPageError(error)),
+        uiText(UI_STRINGS.statusReplacedTabNotFollowed, readPageError(error)),
       );
     } finally {
       this.#finishActiveFollowRequest(request);

@@ -1,5 +1,6 @@
 import type { CompanionStatusTone } from '../../lib/companion-ui-localization';
 import { UI_STRINGS, formatUiTemplate } from '../../lib/companion-ui-strings';
+import { uiText, type UiText } from '../../lib/ui-text';
 import { reverseTranslationPair } from '../../lib/companion-ui-state';
 import { DynamicStatusText } from './dynamic-status-text';
 import { translateWithSession } from '../../lib/translation-pipeline';
@@ -43,11 +44,7 @@ export interface QuickComposerEnvironment {
     ...args: readonly (string | number)[]
   ) => string;
   /** Companion-level status line. */
-  readonly setStatus: (
-    message: string,
-    tone?: CompanionStatusTone,
-    englishMessage?: string,
-  ) => void;
+  readonly setStatus: (message: UiText, tone?: CompanionStatusTone) => void;
   /** Called whenever the in-flight state or the draft changes. */
   readonly onActivityChange: () => void;
   readonly onTranslated?: () => void;
@@ -198,14 +195,10 @@ export class QuickComposer {
       if (!isAbortError(error) && !abortController.signal.aborted) {
         const detail = this.environment.readableError(error);
         this.#setComposerStatus(UI_STRINGS.composerCouldNotTranslate, 'error', [detail]);
-        // Show the localized composite, and pass the English assembly so toolbar
-        // attention routing and statusText keep matching English, not the
-        // localized composite (finding F4).
-        setStatus(
-          this.environment.localizeTemplate(UI_STRINGS.composerCouldNotTranslate, detail),
-          'error',
-          formatUiTemplate(UI_STRINGS.composerCouldNotTranslate, [detail]),
-        );
+        // As UI text the status line renders it in the current language, the
+        // detail included when it is a catalogue sentence, and routes on its
+        // English form (findings F4, L2, L4).
+        setStatus(uiText(UI_STRINGS.composerCouldNotTranslate, detail), 'error');
       } else if (this.#abortController === abortController) {
         this.#setComposerStatus('');
       }

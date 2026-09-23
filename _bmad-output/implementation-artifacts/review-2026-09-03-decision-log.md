@@ -2968,3 +2968,42 @@ Same branch / PR #22. Carried-over items T1–T3 of
 Build identity `0.5.0 beta v.20260922.27`; `dist/chrome-unpacked` re-synced.
 Gate: `npm run check` green, **1,485 tests pass, 1 skipped** (+2).
 Publishing 0.5.0 moves to **D69**.
+
+### D69. Status text re-renders in the current UI language (review L2–L5, L7) (2026-09-23)
+
+Same branch / PR #22. Carried-over localization items of
+`review-2026-09-22-pr22-bug-hunt.md`.
+
+- **Change.** A small `UiText` value (`lib/ui-text.ts`) replaces rendered
+  strings on the status paths. It is an English catalogue string, a frame
+  with arguments (an argument can itself be UI text or a language), or a
+  composed text for summaries. `ToolbarStatus` keeps the `UiText` and renders
+  it on demand; its English form is still `statusText` and still drives
+  attention routing (F4).
+  - **L2.** A filled or composite status (for example "Ready to translate {0}
+    to {1}", "Could not save options: {0}", the partial-translation summary)
+    re-renders after a language switch instead of staying in the old
+    language or reverting to English.
+  - **L3.** Language names in those statuses, and the language names the
+    driver shows, use the language the UI is actually rendered in
+    (`UiLocalizer.renderedLanguage`, English until the To language's set is
+    installed), not the To language.
+  - **L4.** An error detail that is a catalogue sentence is localized at
+    render time; other detail text passes through unchanged.
+  - **L5.** The four page-access guidance sentences are catalogue entries
+    (`lib/page-identity.ts` points at them), so they localize in the status
+    line and the error panel.
+  - **L7.** The mirror's error panel remembers its text and re-renders it on
+    a language switch.
+- **Verified.** Unit tests cover each item (render and relocalize a filled
+  status and a language argument; a catalogue detail is localized and other
+  text passes through; `renderedLanguage` is English until the set is
+  installed; the guidance is in the catalogue). In Chrome for Testing,
+  switching To to Japanese localized the status line through the stand-in
+  translator, and no status or panel showed "[object"; a restricted page
+  cannot be opened in the harness, so L5's panel text rests on its test.
+- **Docs.** The review's status lists L2–L5 and L7 as fixed.
+
+Build identity `0.5.0 beta v.20260922.28`; `dist/chrome-unpacked` re-synced.
+Gate: `npm run check` green, **1,491 tests pass, 1 skipped** (+6).
+Publishing 0.5.0 moves to **D70**.

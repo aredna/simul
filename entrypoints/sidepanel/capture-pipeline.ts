@@ -6,6 +6,7 @@ import {
 import { sameCompanionSourcePage } from '../../lib/companion-surface';
 import type { CompanionStatusTone } from '../../lib/companion-ui-localization';
 import { UI_STRINGS } from '../../lib/companion-ui-strings';
+import type { UiText } from '../../lib/ui-text';
 import type { NavigationRefreshGate } from '../../lib/navigation-refresh-gate';
 import type { ImageTranslationDiagnostic } from '../../lib/ocr/image-translation-controller';
 import {
@@ -114,10 +115,10 @@ export interface CapturePipelineEnvironment {
   readonly reconcileAutomaticAccess: (pageUrl: string) => Promise<boolean>;
   readonly cancelNavigationRefresh: () => void;
   readonly invalidateComposer: () => void;
-  readonly setStatus: (message: string, tone?: CompanionStatusTone) => void;
+  readonly setStatus: (message: UiText, tone?: CompanionStatusTone) => void;
   readonly updateControls: () => void;
   readonly renderLoading: () => void;
-  readonly renderError: (message: string) => void;
+  readonly renderError: (message: UiText) => void;
   readonly hideReplicaStatus: () => void;
   readonly clearCaptureNotes: () => void;
   readonly updateMirrorLayout: () => void;
@@ -212,7 +213,7 @@ export class CapturePipeline {
   }
 
   /** The followed page is gone; clear everything that described it. */
-  invalidateCompanion(message: string): void {
+  invalidateCompanion(message: UiText): void {
     const state = this.#state;
     this.environment.navigationRefreshGate.reset();
     this.environment.currency.supersedePage();

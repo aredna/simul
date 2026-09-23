@@ -28,9 +28,10 @@ Rulings:
   feature, including default-on image text, uses it. No change.
 - **G4:** alt-text captions stay on after setup. Docs fixed.
 
-Still open: L2–L9, O3, P3–P6, the process items, and the simplification
-proposal at the end of this file. T1–T3 were fixed in D68 (2026-09-23); the
-D54-addendum rulings below were implemented in D66.
+Still open: L6, L8, L9, O3, P3–P6, the process items, and the
+simplification proposal at the end of this file. T1–T3 were fixed in D68 and
+L2–L5 with L7 in D69 (2026-09-23); the D54-addendum rulings below were
+implemented in D66.
 
 Owner rulings on the proposal (D54 addendum), queued until after the bug hunt:
 - The default read scope becomes **Full visible**, and the user can reduce it.

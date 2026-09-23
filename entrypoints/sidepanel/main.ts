@@ -33,7 +33,7 @@ import { SurfaceSwitcher } from './surface-switcher';
 import { ToolbarStatus } from './toolbar-status';
 import {
   TranslationDriver,
-  describePartialReplicaTranslation,
+  partialReplicaTranslationText,
   type PendingAutoImageLanguageEvidence,
 } from './translation-driver';
 import { UiLocalizer } from './ui-localizer';
@@ -96,6 +96,7 @@ import {
 import { PreferenceSafetyClient } from '../../lib/preference-safety-client';
 import type { ReplicaRunResult } from '../../lib/replica/contracts';
 import { openChromeHtmlMirrorStream } from '../../lib/replica/html-mirror-client';
+import { renderUiText, type UiText } from '../../lib/ui-text';
 import {
   DEFAULT_HTML_MIRROR_LIMIT_SETTINGS,
   isHtmlMirrorLimitValue,
@@ -315,14 +316,11 @@ replicaTranslationCoordinator = new ReplicaTranslationCoordinator(
       if (!isCompleteReplicaTranslationResult(result)) {
         state.translationComplete = false;
         setStatus(
-          describePartialReplicaTranslation(
+          partialReplicaTranslationText(
             result,
             UI_STRINGS.statusLivePartiallyTranslated,
-            localizeUi,
           ),
           'warning',
-          // English assembly for attention routing and statusText (finding F4).
-          describePartialReplicaTranslation(result, UI_STRINGS.statusLivePartiallyTranslated),
         );
       } else if (result.completed > 0) {
         setStatus(
@@ -431,6 +429,9 @@ function localizeUiTemplate(
  */
 function relocalizeDynamicSurfaces(): void {
   toolbarStatus.relocalize();
+  if (errorState?.element.isConnected) {
+    errorState.element.textContent = renderUi(errorState.message);
+  }
   relocalizeSizeToggle();
   quickComposer.relocalize();
   readScopeController.relocalize();
@@ -540,6 +541,7 @@ const toolbarStatus = new ToolbarStatus({
   }),
   isSettingsOpen: () => state.openCompanionOverlay === 'settings',
   localize: localizeUi,
+  languageName: (language) => localizeLanguageName(language),
 });
 
 const preferenceClient = new PreferenceClient({
@@ -626,8 +628,7 @@ const translationDriver = new TranslationDriver({
   setStatus,
   localizeUi,
   localizeTemplate: localizeUiTemplate,
-  localizeLanguageName: (language) =>
-    createSourceLanguageLabeler(state.preferences.targetLanguage)(language),
+  localizeLanguageName: (language) => localizeLanguageName(language),
   updateControls: () => updateControls(),
   showProgress: (label, value, max, labelArgs) =>
     toolbarStatus.showProgress(label, value, max, labelArgs),
@@ -1501,14 +1502,26 @@ function renderLoadingState(): void {
   replicaStatusContainer.hidden = false;
 }
 
-function renderErrorState(message: string): void {
+/** The shown error panel's text, re-rendered on a language switch (L7). */
+let errorState: { readonly element: HTMLElement; readonly message: UiText } | undefined;
+
+function renderErrorState(message: UiText): void {
   const wrapper = document.createElement('div');
   wrapper.className = 'empty-state empty-state--error';
   const text = document.createElement('p');
-  text.textContent = localizeUi(message);
+  text.textContent = renderUi(message);
+  errorState = { element: text, message };
   wrapper.append(text);
   replicaStatusContainer.replaceChildren(wrapper);
   replicaStatusContainer.hidden = false;
+}
+
+/** Renders UI text in the language the UI shows now. */
+function renderUi(message: UiText): string {
+  return renderUiText(message, {
+    localize: localizeUi,
+    languageName: localizeLanguageName,
+  });
 }
 
 function readLanguage(value: string): SupportedLanguage {
@@ -1612,11 +1625,18 @@ function setImageTranslationBusy(busy: boolean): void {
 }
 
 function setStatus(
-  message: string,
+  message: UiText,
   tone: CompanionStatusTone = 'normal',
-  englishMessage?: string,
 ): void {
-  toolbarStatus.setStatus(message, tone, englishMessage);
+  toolbarStatus.setStatus(message, tone);
+}
+
+/**
+ * A language's name in the language the UI is rendered in now, which is
+ * English until the To language's label set is installed (review L3).
+ */
+function localizeLanguageName(language: SupportedLanguage): string {
+  return createSourceLanguageLabeler(uiLocalizer.renderedLanguage)(language);
 }
 
 function logImageTranslationDiagnostic(

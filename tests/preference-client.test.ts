@@ -1,4 +1,5 @@
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
+import { englishUiText } from '../lib/ui-text';
 
 import { CompanionState } from '../entrypoints/sidepanel/companion-state';
 import { PreferenceClient } from '../entrypoints/sidepanel/preference-client';
@@ -59,7 +60,7 @@ function setup(options: {
     onControlsChanged: () => events.push('controls'),
     onLayoutChanged: () => events.push('layout'),
     onZoomApplied: () => events.push('zoom'),
-    onError: (message) => errors.push(message),
+    onError: (message) => errors.push(englishUiText(message)),
     localizeTemplate: (frame: string, ...args: readonly (string | number)[]) =>
       frame.replace(/\{(\d+)\}/g, (whole, index: string) =>
         args[Number(index)] === undefined ? whole : String(args[Number(index)])),

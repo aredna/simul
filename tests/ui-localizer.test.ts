@@ -74,6 +74,16 @@ function setup(options: {
 }
 
 describe('UiLocalizer', () => {
+  it('renders in the To language only once its set is installed (review L3)', async () => {
+    const harness = setup({ target: 'ja' });
+    expect(harness.localizer.renderedLanguage).toBe('en');
+    await harness.localizer.localize();
+    expect(harness.localizer.renderedLanguage).toBe('ja');
+    // A To language whose set is not installed renders the UI in English.
+    harness.setTarget('fr');
+    expect(harness.localizer.renderedLanguage).toBe('en');
+  });
+
   it('localizes the complete label set and marks each element with its language', async () => {
     const { document, localizer, destroy, translate, fit } = setup();
 

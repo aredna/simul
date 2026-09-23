@@ -6,6 +6,8 @@ import {
   ToolbarStatus,
   type ToolbarActivityFlags,
 } from '../entrypoints/sidepanel/toolbar-status';
+import { UI_STRINGS } from '../lib/companion-ui-strings';
+import { uiLanguageName, uiText } from '../lib/ui-text';
 
 const IDLE: ToolbarActivityFlags = {
   captureInFlight: false,
@@ -17,6 +19,7 @@ const IDLE: ToolbarActivityFlags = {
 };
 
 function setup() {
+  const translations = new Map<string, string>();
   const { document } = parseHTML(`<html><body>
     <nav id="toolbar">
       <span id="progress" hidden><span id="fill"></span></span>
@@ -42,13 +45,15 @@ function setup() {
       progressLabel: el('label'),
       progressElement: el('bar'),
     },
-    localize: (english: string) => english,
+    localize: (english: string) => translations.get(english) ?? english,
+    languageName: (language) => translations.get(`language:${language}`) ?? language,
     readActivity: () => activity,
     isSettingsOpen: () => settingsOpen,
   });
   return {
     el,
     status,
+    translations,
     setActivity: (next: Partial<ToolbarActivityFlags>) => {
       activity = { ...activity, ...next };
     },
@@ -59,6 +64,29 @@ function setup() {
 }
 
 describe('ToolbarStatus', () => {
+  it('renders a filled status again in a new UI language (review L2-L4)', () => {
+    const { el, status, translations } = setup();
+    status.setStatus(uiText(
+      UI_STRINGS.statusCouldNotSaveOptions,
+      UI_STRINGS.statusSettingsResetElsewhere,
+    ), 'error');
+    const english = `Could not save options: ${UI_STRINGS.statusSettingsResetElsewhere}`;
+    expect(el('status').textContent).toBe(english);
+
+    translations.set(UI_STRINGS.statusCouldNotSaveOptions, 'No se pudieron guardar las opciones: {0}');
+    translations.set(UI_STRINGS.statusSettingsResetElsewhere, 'Restablecido en otro acompañante.');
+    status.relocalize();
+    expect(el('status').textContent)
+      .toBe('No se pudieron guardar las opciones: Restablecido en otro acompañante.');
+    // Routing and flows keep the English form.
+    expect(status.statusText).toBe(english);
+
+    status.setStatus(uiText(UI_STRINGS.statusReadyToTranslate, uiLanguageName('ja'), uiLanguageName('fr')));
+    translations.set('language:ja', 'japonés');
+    status.relocalize();
+    expect(el('status').textContent).toContain('japonés');
+  });
+
   it('routes warnings to the action that resolves them and keeps healthy state unmarked', () => {
     const { el, status } = setup();
     status.setStatus('The source page changed. Rebuild the mirror.', 'warning');
