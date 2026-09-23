@@ -12,10 +12,10 @@ and the follow-up on what D75 still hid).
 | Item | State |
 | --- | --- |
 | Branch / PR | `feat/ui-string-catalogue`, PR #22, **rebase-merged into `main` at the 0.5.0 publish (D77)**; the branch is deleted. |
-| Version / identity | `0.5.0` / `0.5.0 beta v.20260922.36` on `docs/readme-simple-and-ocr-notices` (D78: minimal README, OCR license notices; next is `.37`; `npm run bump-build`). The released v0.5.0 zip is `.35`. |
+| Version / identity | `0.5.1` / `0.5.1 beta v.20260924.1`, released as v0.5.1 (D79, minor update carrying D78). Next is `.2`; `npm run bump-build`. |
 | Gate | `npm run check` green at D76: **1,513 tests pass, 1 skipped**; `dist/chrome-unpacked` byte-verified. |
 | NAS | `Dev/simul/` mirrors head; the owner loads `Dev/simul/dist/chrome-unpacked` (`Build 0.5.0 beta v.20260922.35`). |
-| `main` / release | **0.5.0 published (D77)**: PR #22 rebase-merged, tag `v0.5.0`, GitHub release "Simul 0.5.0 beta (v.20260922.35)" marked Latest with `simul-0.5.0-chrome-unpacked.zip`. New work branches from `main`; bump to `.36` before the next shipped change. |
+| `main` / release | Latest release **v0.5.1** (D79): PR #23 rebase-merged, tag `v0.5.1`, `simul-0.5.1-chrome-unpacked.zip`. v0.5.0 (D77) is the previous release. New work branches from `main`. |
 
 ## Owner rulings this session
 

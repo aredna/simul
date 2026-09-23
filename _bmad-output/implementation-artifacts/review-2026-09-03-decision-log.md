@@ -3503,3 +3503,24 @@ Build identity `0.5.0 beta v.20260922.36`; `dist/chrome-unpacked` re-synced.
 
 Gate: `npm run check` green, typecheck clean, **1,514 tests pass, 1 skipped**
 (+1, the modification-notice test), artifact byte-verified.
+
+### D79. Publish 0.5.1, a minor update carrying D78 (2026-09-24)
+
+Same branch / PR #23. Owner: "Go ahead and fix all of this. Push out a
+release and mark it as a minor update." Read as a small patch release: the
+version is **0.5.1** (`package.json`, `package-lock.json`, the notices'
+inventory line, the two identity tests) and the build identity restarts on
+the release date as `0.5.1 beta v.20260924.1`. Nothing about how the
+extension behaves changed since 0.5.0; the release ships D78's completed OCR
+license notices and the minimal README, so the published zip no longer lacks
+them.
+
+- **Release.** PR #23 rebase-merged, annotated tag `v0.5.1` at the merge
+  head, GitHub release "Simul 0.5.1 beta (v.20260924.1) — minor update"
+  marked **Latest**, with `simul-0.5.1-chrome-unpacked.zip` (the committed
+  `dist/chrome-unpacked`, made with `git archive`). Notes in
+  `release-notes-0.5.1.md` open with "**Minor update.**". v0.5.0 stays
+  published as the previous release.
+
+Gate before the merge: `npm run check` green, typecheck clean, **1,514 tests
+pass, 1 skipped**, artifact byte-verified.
