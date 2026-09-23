@@ -11,11 +11,11 @@ and the follow-up on what D75 still hid).
 
 | Item | State |
 | --- | --- |
-| Branch / PR | `feat/ui-string-catalogue`, PR #22, **open**, head at the D76 commit. Description covers D40–D76. |
+| Branch / PR | `feat/ui-string-catalogue`, PR #22, **rebase-merged into `main` at the 0.5.0 publish (D77)**; the branch is deleted. |
 | Version / identity | `0.5.0` / `0.5.0 beta v.20260922.35` (next is `.36`; `npm run bump-build`). |
 | Gate | `npm run check` green at D76: **1,513 tests pass, 1 skipped**; `dist/chrome-unpacked` byte-verified. |
 | NAS | `Dev/simul/` mirrors head; the owner loads `Dev/simul/dist/chrome-unpacked` (`Build 0.5.0 beta v.20260922.35`). |
-| `main` / release | Only `v0.4.0` released. Publishing 0.5.0 is **D77**, only when the owner says so; do not ask. |
+| `main` / release | **0.5.0 published (D77)**: PR #22 rebase-merged, tag `v0.5.0`, GitHub release "Simul 0.5.0 beta (v.20260922.35)" marked Latest with `simul-0.5.0-chrome-unpacked.zip`. New work branches from `main`; bump to `.36` before the next shipped change. |
 
 ## Owner rulings this session
 
@@ -135,9 +135,9 @@ and the follow-up on what D75 still hid).
    banking form: anything still missing with it on is not a privacy rule), D74
    (overlays inside the page), D73 (side panel following), D71 (dropdowns)
    and D66 (new defaults), the most visible changes.
-5. Publish 0.5.0 as **D76** only when the owner says so. The release-notes
-   draft (`handover-2026-09-22-release-readiness.md`) needs lines for
-   D51–D75.
+5. Done: 0.5.0 published as **D77** (notes in `release-notes-0.5.0.md`;
+   README lists Chrome 138+ and Edge 148+ as the browsers with the
+   Translator API; no packed `.crx`, see D77).
 
 ## Reproduction and verification
 

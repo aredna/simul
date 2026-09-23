@@ -3396,3 +3396,50 @@ complaint."
 Build identity `0.5.0 beta v.20260922.35`; `dist/chrome-unpacked` re-synced.
 Gate: `npm run check` green, **1,513 tests pass, 1 skipped** (+2).
 Publishing 0.5.0 moves to **D77**.
+
+### D77. Publish 0.5.0 (2026-09-23)
+
+Same branch / PR #22. The owner's go-ahead: "Review the folder. Make sure
+everything is good to push up to Git, and let's put version five out there
+with the latest README. Let's make the project public if it's not already."
+They also asked for a packed extension if one can be loaded, and for the
+README to explain that the Translator API is required and to list every
+browser that has it.
+
+- **Folder review.** Working tree clean and pushed; `.gitignore` covers
+  `*.crx`, `*.zip`, `*.pem` and other signing material, `.env*` and the
+  personal BMAD `*.user.toml`. A secret scan of the tracked tree found only
+  the test canaries. Three tracked docs named the owner's NAS (LAN address,
+  rsync user, password-file path; never the password) and one owner report
+  named the bank the owner was signed in to; the tip now says "the owner's
+  NAS" and "a banking page". Earlier commits still hold those lines; the
+  address is a private LAN one. The repository was already public.
+- **Browsers with the Translator API (checked 2026-09-23).** Desktop Chrome
+  138+ (stable since 138, not on mobile) and desktop Microsoft Edge 148+ (its
+  own on-device models; Microsoft says the API works in extensions). Firefox,
+  Safari and mobile browsers have none. Brave disables Chromium's built-in AI,
+  and the built-in AI depends on Chrome-only components, so other Chromium
+  browsers are listed as "can load it, translates only if the browser has the
+  API"; caniuse's Opera row mirrors Chromium and was not taken as proof. Simul
+  has no user-agent gating (`minimum_chrome_version` 138 is met by Edge 148),
+  but Edge has not been tested by us; the README says so.
+- **Packed extension: not provided.** Chrome on Windows (since 33) and macOS
+  (since 44) installs a `.crx` only from the Chrome Web Store; a self-signed
+  CRX3 dropped on `chrome://extensions` fails with
+  `CRX_REQUIRED_PROOF_MISSING` unless enterprise policy allows it. A packed
+  file would help only Linux users and would need a signing key to guard, so
+  the release stays a zip of the unpacked folder, and the README says why.
+  The Chrome Web Store (or Edge Add-ons) is the route to a one-click install.
+- **README.** "What you need" names the Translator API and the two browsers,
+  and what does not work; Install has the Edge steps and the packed-file
+  note; Troubleshooting has "Nothing translates at all". Only the README and
+  docs changed, so the build identity stays `0.5.0 beta v.20260922.35`.
+- **Release.** Notes in `release-notes-0.5.0.md`. PR #22 rebase-merged (as
+  D32), annotated tag `v0.5.0` at the merge head, GitHub release
+  "Simul 0.5.0 beta (v.20260922.35)" with `simul-0.5.0-chrome-unpacked.zip`
+  (the committed `dist/chrome-unpacked`). It is marked **Latest**, not
+  pre-release as 0.4.0 was: with no full release, the README's
+  `releases/latest` link fell back to the release list instead of the zip.
+
+Gate before the merge: `npm run check` green, typecheck clean, **1,513 tests
+pass, 1 skipped**, artifact byte-verified.
