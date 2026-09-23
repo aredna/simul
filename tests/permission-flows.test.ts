@@ -1,4 +1,5 @@
 import { describe, expect, it, vi } from 'vitest';
+import { UI_STRINGS } from '../lib/companion-ui-strings';
 
 import { CompanionState } from '../entrypoints/sidepanel/companion-state';
 import { Currency } from '../entrypoints/sidepanel/currency';
@@ -188,6 +189,22 @@ describe('PermissionFlows image access', () => {
 
     await harness.flows.changeImageTranslationEnabled(false);
     expect(harness.requestAutomaticTranslation).toHaveBeenCalledTimes(1);
+  });
+
+  it('asks for the page text only after releasing the image-access lock (T2)', async () => {
+    const harness = setup({ pageUrl: 'https://example.com/article' });
+    harness.state.snapshot = {} as never;
+    let lockedAtRequest: boolean | undefined;
+    harness.requestAutomaticTranslation.mockImplementation(async () => {
+      lockedAtRequest = harness.state.permissionInFlight;
+      throw new Error('translation failed');
+    });
+    await expect(harness.flows.changeImageTranslationEnabled(true))
+      .resolves.toBe('applied');
+    await vi.waitFor(() => expect(harness.requestAutomaticTranslation).toHaveBeenCalled());
+    expect(lockedAtRequest).toBe(false);
+    // A failed page translation is not an image-access failure.
+    expect(harness.statuses).not.toContain(UI_STRINGS.statusImageAccessUpdateFailed);
   });
 
   it('does not ask for the page text without a mirrored replica', async () => {

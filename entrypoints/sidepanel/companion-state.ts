@@ -191,11 +191,22 @@ export class CompanionState {
     );
   }
 
+  /**
+   * One task per pair, capture generation and replica snapshot. A request for
+   * a newer snapshot must not join a running task that will find its own
+   * snapshot stale and stop without translating (review T1).
+   */
   currentTranslationTaskKey(generation: number): string {
     const pair = this.selectedPair();
-    return pair
+    const key = pair
       ? availabilityPairKey(pair, generation)
       : `${generation}:unresolved`;
+    const snapshot = this.snapshot;
+    if (!snapshot) return key;
+    const { document } = snapshot;
+    return `${key}@${document.sessionId}:${document.pageEpoch}:` +
+      `${document.generation}:${document.documentId}:${document.frameId}` +
+      `#${snapshot.replayLease}`;
   }
 
   /** Aborts every cancellable unit of page work; handles clear themselves. */

@@ -19,6 +19,18 @@ import {
 import type { ViewPreferencePatchLedger } from '../../lib/view-preference-ledger';
 import type { CompanionState } from './companion-state';
 
+/**
+ * Used only when neither the preference service nor storage can be read: the
+ * defaults with image OCR off, which would otherwise start image access and a
+ * page translation from settings nobody saved (review T3). The read scope
+ * needs no change here; without readable storage the safety connection never
+ * becomes ready, so the replica stays at Page-only.
+ */
+const UNREADABLE_STORAGE_PREFERENCES = Object.freeze({
+  ...DEFAULT_COMPANION_PREFERENCES,
+  imageTranslationEnabled: false,
+});
+
 export const ZOOM_COMMIT_DEBOUNCE_MS = 150;
 
 export interface PreferenceClientEnvironment {
@@ -79,7 +91,7 @@ export class PreferenceClient {
       try {
         this.applyCommitted((await this.readStored()));
       } catch {
-        this.applyCommitted(DEFAULT_COMPANION_PREFERENCES);
+        this.applyCommitted(UNREADABLE_STORAGE_PREFERENCES);
       }
     }
     this.environment.onControlsChanged();
@@ -89,7 +101,7 @@ export class PreferenceClient {
     try {
       this.applyCommitted(await this.readStored());
     } catch {
-      this.applyCommitted(DEFAULT_COMPANION_PREFERENCES);
+      this.applyCommitted(UNREADABLE_STORAGE_PREFERENCES);
     }
     this.environment.onControlsChanged();
   }

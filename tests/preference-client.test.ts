@@ -111,8 +111,13 @@ describe('PreferenceClient', () => {
       },
     });
     await viaDefaults.client.load();
-    expect(viaDefaults.state.preferences)
-      .toEqual(parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES));
+    // Unreadable storage keeps image OCR off: nothing saved asked for it (T3).
+    expect(viaDefaults.state.preferences).toEqual(parseCompanionPreferences({
+      ...DEFAULT_COMPANION_PREFERENCES,
+      imageTranslationEnabled: false,
+    }));
+    await viaDefaults.client.reloadFromStorage();
+    expect(viaDefaults.state.preferences.imageTranslationEnabled).toBe(false);
   });
 
   it('accepts a committed snapshot only when it is not older than the current one', () => {

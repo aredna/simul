@@ -159,6 +159,7 @@ export class PermissionFlows {
     state.permissionInFlight = true;
     this.environment.renderImagePanel();
     this.environment.updateControls();
+    let translatePageAfter = false;
     try {
       const shouldRequestPixelAccess = requestPixelAccess &&
         this.environment.usablePixelProviderCount() > 0;
@@ -201,10 +202,12 @@ export class PermissionFlows {
       );
       // Page text and image text translate together: switching image
       // translation on for a mirrored page also asks for the page text, the
-      // same way saving an automatic scope does (D46).
-      if (enabled && state.snapshot && !state.isLiveSourceOnlyMode) {
-        await this.environment.requestAutomaticTranslation(state.pageUrl ?? '');
-      }
+      // same way saving an automatic scope does (D46). It runs after the lock
+      // is released, so the OCR controls do not stay disabled for the whole
+      // translation and its errors are its own, not an image-access failure
+      // (review T2).
+      translatePageAfter = enabled && Boolean(state.snapshot) &&
+        !state.isLiveSourceOnlyMode;
       return 'applied';
     } catch (error) {
       await preferenceClient.reloadFromStorage();
@@ -228,6 +231,10 @@ export class PermissionFlows {
       await this.refreshImageCaptureAccess();
       this.environment.syncPreferenceControls();
       this.environment.updateControls();
+      if (translatePageAfter) {
+        void this.environment.requestAutomaticTranslation(state.pageUrl ?? '')
+          .catch(() => undefined);
+      }
     }
   }
 
