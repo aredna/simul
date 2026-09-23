@@ -2931,3 +2931,40 @@ Build identity `0.5.0 beta v.20260922.26`; `dist/chrome-unpacked` re-synced.
 Gate: `npm run check` green, **1,483 tests pass, 1 skipped** (tests extended,
 none added).
 Publishing 0.5.0 moves to **D68**.
+
+### D68. Translation requests: a newer snapshot, the OCR lock, and unreadable storage (review T1–T3) (2026-09-23)
+
+Same branch / PR #22. Carried-over items T1–T3 of
+`review-2026-09-22-pr22-bug-hunt.md`.
+
+- **T1 (medium).** A translation task was keyed by pair and capture
+  generation only. A request for a newer replica snapshot in the same
+  generation (switching OCR on during a same-page rebuild, then the commit's
+  automatic translation) joined the running task, which then found its own
+  snapshot stale and returned without translating or reporting: image
+  overlays over an untranslated page. The key now includes the snapshot's
+  document and replay lease, so that request aborts the stale task and runs
+  its own. A test reproduces the case; it fails with the old key (the second
+  request returned the first task) and passes now.
+- **T2 (low).** Switching image translation on awaited the page translation
+  inside the image-access lock, so the OCR toggle and Grant button stayed
+  disabled for the whole translation, and a translation error was reported
+  as "Chrome could not update image access". The request now runs after the
+  lock is released and reports its own outcome.
+- **T3 (low).** When neither the preference service nor storage could be
+  read, the panel fell back to the defaults, which have OCR on and so also
+  started image access and a page translation nobody asked for. That fallback
+  now keeps OCR off. The read scope needs no change there: without readable
+  storage the safety connection never becomes ready, so the replica stays at
+  Page-only.
+- **Verified.** Unit tests cover each path (T1 and T3 reproduce the failure,
+  T2 checks the lock is released before the request and that a failed
+  translation is not an image-access error). In Chrome for Testing the
+  Wikipedia portal still translates as in D67 (471 Translator calls, select
+  trigger translated); the T1 race itself is timing-dependent and was not
+  reproduced in the browser.
+- **Docs.** The bug-hunt review's status now lists T1–T3 as fixed.
+
+Build identity `0.5.0 beta v.20260922.27`; `dist/chrome-unpacked` re-synced.
+Gate: `npm run check` green, **1,485 tests pass, 1 skipped** (+2).
+Publishing 0.5.0 moves to **D69**.

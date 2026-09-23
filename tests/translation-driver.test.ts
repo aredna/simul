@@ -273,6 +273,35 @@ describe('TranslationDriver page translation', () => {
     expect(harness.state.activeTranslationTask).toBeUndefined();
   });
 
+  it('runs a fresh task for a newer snapshot instead of joining a stale one (T1)', async () => {
+    let releaseFirst!: () => void;
+    let calls = 0;
+    const harness = setup({
+      translate: () => {
+        calls += 1;
+        if (calls > 1) return Promise.resolve(complete());
+        return new Promise((resolve) => {
+          releaseFirst = () => resolve(complete());
+        });
+      },
+    });
+    harness.state.resolvedSourceLanguage = 'ja';
+    harness.state.availability = 'available';
+    const first = harness.driver.startTranslation(false, 1);
+    await vi.waitFor(() => expect(calls).toBe(1));
+    // A same-generation rebuild commits a newer snapshot, and its automatic
+    // translation is requested while the first task is still running.
+    harness.state.snapshot = { ...harness.state.snapshot!, replayLease: 2 };
+    const second = harness.driver.startTranslation(true, 1);
+    expect(second).not.toBe(first);
+    releaseFirst();
+    await first;
+    await second;
+    expect(harness.coordinator.translateCurrent).toHaveBeenCalledTimes(2);
+    expect(harness.state.translationComplete).toBe(true);
+    expect(harness.statuses.at(-1)).toContain('complete');
+  });
+
   it('reports a partial translation and a cancellation', async () => {
     const partial = setup({
       translate: async () => ({ ...complete(3), completed: 1, failed: 2 }),
