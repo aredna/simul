@@ -28,12 +28,13 @@ import {
 import { replicaReadScopeForProfile } from '../lib/replica/read-scope-policy';
 
 describe('parseCompanionPreferences', () => {
-  it('uses privacy-preserving defaults for absent or invalid data', () => {
+  it('uses the defaults for absent or invalid data', () => {
+    // A fresh install starts set up at Full visible, following, at 1:1 (D66).
     expect(parseCompanionPreferences(undefined)).toEqual({
       autoTranslateAllSites: false,
       autoTranslateOrigins: [],
       grantedPermissionOrigins: [],
-      displayMode: 'fit',
+      displayMode: 'actual',
       sourceLanguage: 'auto',
       targetLanguage: 'en',
       zoomPercent: 100,
@@ -44,16 +45,16 @@ describe('parseCompanionPreferences', () => {
       replicaViewMode: 'translated',
       launchBehavior: 'last-used',
       lastLaunchSurface: 'side-panel',
-      popoutTabMode: 'locked',
+      popoutTabMode: 'active',
       replicaReadScope: {
-        controlSemantics: false,
-        controlImages: false,
-        disclosureContent: false,
-        formValues: false,
-        personalDataValues: false,
-        editableContent: false,
+        controlSemantics: true,
+        controlImages: true,
+        disclosureContent: true,
+        formValues: true,
+        personalDataValues: true,
+        editableContent: true,
       },
-      readScopeSetupVersion: 0,
+      readScopeSetupVersion: 1,
       settingsRevision: 0,
       resetRevision: 0,
       resetCleanupPendingRevision: 0,
@@ -66,7 +67,7 @@ describe('parseCompanionPreferences', () => {
         'transformers',
         'chromium-screen-ai',
       ],
-      disabledImageReadingMethodIds: ['accessibility-text'],
+      disabledImageReadingMethodIds: [],
       imageTextProviderOrder: [
         'chrome-text-detector',
         'tesseract',
@@ -82,6 +83,8 @@ describe('parseCompanionPreferences', () => {
     expect(parseCompanionPreferences('all')).toEqual(
       DEFAULT_COMPANION_PREFERENCES,
     );
+    // A stored record without a setup version was never set up: it keeps
+    // Page-only and the setup question; view settings repair to defaults.
     expect(parseCompanionPreferences({
       autoTranslateAllSites: 'yes',
       displayMode: 'giant',
@@ -89,7 +92,7 @@ describe('parseCompanionPreferences', () => {
       autoTranslateAllSites: false,
       autoTranslateOrigins: [],
       grantedPermissionOrigins: [],
-      displayMode: 'fit',
+      displayMode: 'actual',
       sourceLanguage: 'auto',
       targetLanguage: 'en',
       zoomPercent: 100,
@@ -100,7 +103,7 @@ describe('parseCompanionPreferences', () => {
       replicaViewMode: 'translated',
       launchBehavior: 'last-used',
       lastLaunchSurface: 'side-panel',
-      popoutTabMode: 'locked',
+      popoutTabMode: 'active',
       replicaReadScope: {
         controlSemantics: false,
         controlImages: false,
@@ -168,7 +171,7 @@ describe('parseCompanionPreferences', () => {
       replicaViewMode: 'translated',
       launchBehavior: 'last-used',
       lastLaunchSurface: 'side-panel',
-      popoutTabMode: 'locked',
+      popoutTabMode: 'active',
       replicaReadScope: {
         controlSemantics: false,
         controlImages: false,
@@ -266,11 +269,11 @@ describe('parseCompanionPreferences', () => {
     expect(parseCompanionPreferences({
       launchBehavior: 'popout',
       lastLaunchSurface: 'popout',
-      popoutTabMode: 'active',
+      popoutTabMode: 'locked',
     })).toMatchObject({
       launchBehavior: 'popout',
       lastLaunchSurface: 'popout',
-      popoutTabMode: 'active',
+      popoutTabMode: 'locked',
     });
     expect(parseCompanionPreferences({
       launchBehavior: 'chooser',
@@ -279,7 +282,7 @@ describe('parseCompanionPreferences', () => {
     })).toMatchObject({
       launchBehavior: 'last-used',
       lastLaunchSurface: 'side-panel',
-      popoutTabMode: 'locked',
+      popoutTabMode: 'active',
     });
   });
 

@@ -77,6 +77,12 @@ export interface PreferenceSafetyJournalSnapshot {
 export interface PreferenceSafetyJournalAdapter {
   load(): Promise<unknown>;
   save(snapshot: PreferenceSafetyJournalSnapshot): Promise<void>;
+  /**
+   * Whether companion preferences were ever saved. With neither preferences
+   * nor a journal the extension is new (or its data was cleared, which is a
+   * reset), so there is no narrowing in flight to recover.
+   */
+  hasStoredPreferences?(): Promise<boolean>;
 }
 
 export type PreferenceSafetyJournalObservation = 'current' | 'recovered';
@@ -358,12 +364,14 @@ export class PreferenceSafetyCoordinator {
   private async hydrateJournal(): Promise<void> {
     if (!this.journal) return;
     let loaded: readonly PreferenceSafetyPrepareMessage[] | undefined;
+    let journalAbsent = false;
     try {
       const value = await this.journal.load();
       // Absence is indistinguishable from an externally deleted journal after
       // a suspended service worker. Start under a durable Page-only ceiling;
       // the subsequently loaded preferences may release it only if their
       // effective scope is already Page-only.
+      journalAbsent = value === undefined;
       loaded = value === undefined
         ? undefined
         : readPreferenceSafetyJournalSnapshot(value);
@@ -376,11 +384,28 @@ export class PreferenceSafetyCoordinator {
       }
       return;
     }
+    // The one exception: no journal and no saved preferences is a first run
+    // (D66: new installs start at Full visible, which could never release a
+    // Page-only ceiling). An empty journal is written, so a later absence is
+    // still a deletion. Any doubt keeps the recovery ceiling.
+    if (journalAbsent && await this.isFirstRun()) {
+      await this.persistJournal().catch(() => undefined);
+      return;
+    }
     this.#unresolvedCeilings.set(
       RECOVERY_CEILING_REQUEST_ID,
       createRecoveryCeiling(),
     );
     await this.persistJournal().catch(() => undefined);
+  }
+
+  private async isFirstRun(): Promise<boolean> {
+    try {
+      return this.journal?.hasStoredPreferences !== undefined &&
+        !(await this.journal.hasStoredPreferences());
+    } catch {
+      return false;
+    }
   }
 
   private async reconcileJournalStorageChange(

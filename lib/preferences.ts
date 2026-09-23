@@ -22,7 +22,7 @@ import {
   type HtmlMirrorLimitSettings,
 } from './replica/html-mirror-limits';
 import {
-  PAGE_ONLY_REPLICA_READ_SCOPE,
+  FULL_VISIBLE_REPLICA_READ_SCOPE,
   REPLICA_READ_SCOPE_SETUP_VERSION,
   repairReplicaReadScope,
   type ReplicaReadScope,
@@ -127,7 +127,11 @@ export interface CompanionPreferences {
   popoutTabMode: PopoutTabMode;
   /** Six independent, runtime-selectable source evidence gates. */
   replicaReadScope: ReplicaReadScope;
-  /** Zero means first-load setup is required and Page-only is effective. */
+  /**
+   * Zero means first-load setup is required and Page-only is effective. New
+   * installs and a reset start set up, at Full visible (D54 addendum, D66);
+   * stored preferences keep their saved state.
+   */
   readScopeSetupVersion: number;
   /** Monotonic revision for ordering committed preference snapshots. */
   settingsRevision: number;
@@ -154,7 +158,7 @@ export const DEFAULT_COMPANION_PREFERENCES: Readonly<CompanionPreferences> =
     autoTranslateAllSites: false,
     autoTranslateOrigins: Object.freeze([]) as unknown as string[],
     grantedPermissionOrigins: Object.freeze([]) as unknown as string[],
-    displayMode: 'fit',
+    displayMode: 'actual',
     sourceLanguage: 'auto',
     targetLanguage: 'en',
     zoomPercent: 100,
@@ -165,9 +169,9 @@ export const DEFAULT_COMPANION_PREFERENCES: Readonly<CompanionPreferences> =
     replicaViewMode: 'translated',
     launchBehavior: 'last-used',
     lastLaunchSurface: 'side-panel',
-    popoutTabMode: 'locked',
-    replicaReadScope: PAGE_ONLY_REPLICA_READ_SCOPE,
-    readScopeSetupVersion: 0,
+    popoutTabMode: 'active',
+    replicaReadScope: FULL_VISIBLE_REPLICA_READ_SCOPE,
+    readScopeSetupVersion: REPLICA_READ_SCOPE_SETUP_VERSION,
     settingsRevision: 0,
     resetRevision: 0,
     resetCleanupPendingRevision: 0,
@@ -176,9 +180,9 @@ export const DEFAULT_COMPANION_PREFERENCES: Readonly<CompanionPreferences> =
     imageReadingMethodOrder: Object.freeze([
       ...IMAGE_READING_METHOD_IDS,
     ]) as unknown as ImageReadingMethodId[],
-    disabledImageReadingMethodIds: Object.freeze([
-      ACCESSIBILITY_TEXT_METHOD_ID,
-    ]) as unknown as ImageReadingMethodId[],
+    disabledImageReadingMethodIds: Object.freeze(
+      [],
+    ) as unknown as ImageReadingMethodId[],
     imageTextProviderOrder: Object.freeze([
       ...IMAGE_TEXT_PROVIDER_IDS,
     ]) as unknown as ImageTextProviderId[],
@@ -716,7 +720,7 @@ function createDefaultPreferences(): CompanionPreferences {
     autoTranslateAllSites: false,
     autoTranslateOrigins: [],
     grantedPermissionOrigins: [],
-    displayMode: 'fit',
+    displayMode: 'actual',
     sourceLanguage: 'auto',
     targetLanguage: 'en',
     zoomPercent: 100,
@@ -727,16 +731,16 @@ function createDefaultPreferences(): CompanionPreferences {
     replicaViewMode: 'translated',
     launchBehavior: 'last-used',
     lastLaunchSurface: 'side-panel',
-    popoutTabMode: 'locked',
-    replicaReadScope: { ...PAGE_ONLY_REPLICA_READ_SCOPE },
-    readScopeSetupVersion: 0,
+    popoutTabMode: 'active',
+    replicaReadScope: { ...FULL_VISIBLE_REPLICA_READ_SCOPE },
+    readScopeSetupVersion: REPLICA_READ_SCOPE_SETUP_VERSION,
     settingsRevision: 0,
     resetRevision: 0,
     resetCleanupPendingRevision: 0,
     imageTranslationEnabled: true,
     ocrMinimumConfidence: DEFAULT_OCR_MINIMUM_CONFIDENCE,
     imageReadingMethodOrder: [...IMAGE_READING_METHOD_IDS],
-    disabledImageReadingMethodIds: [ACCESSIBILITY_TEXT_METHOD_ID],
+    disabledImageReadingMethodIds: [],
     imageTextProviderOrder: [...IMAGE_TEXT_PROVIDER_IDS],
     disabledImageTextProviderIds: [],
     imageScanPolicy: 'visible-first-background-prescan',

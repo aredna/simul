@@ -37,8 +37,9 @@ export const UI_STRINGS = {
   autoDetectOption: 'Auto-detect',
   sizeFit: 'Fit',
   sizeActual: '1:1',
-  tabFollowCurrent: 'Current',
-  tabFollowActive: 'Active',
+  // Owner's words (D66): the mirror follows the active tab, or stays pinned.
+  tabFollowCurrent: 'Pinned',
+  tabFollowActive: 'Follow',
   ocrOn: 'OCR On',
   ocrOff: 'OCR Off',
 

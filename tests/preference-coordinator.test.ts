@@ -14,10 +14,16 @@ import {
   permissionOriginsForMode,
   type CompanionPreferences,
 } from '../lib/preferences';
+import { replicaReadScopeForProfile } from '../lib/replica/read-scope-policy';
 
 describe('preference coordinator', () => {
   it('commits selectable read scope only at the current reset/setup revision', async () => {
-    const adapter = new MemoryPreferenceAdapter();
+    // Stored preferences from before D66 that never completed setup.
+    const adapter = new MemoryPreferenceAdapter({
+      ...parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES),
+      replicaReadScope: replicaReadScopeForProfile('page-only'),
+      readScopeSetupVersion: 0,
+    });
     const coordinator = new PreferenceCoordinator(adapter);
     const scope = {
       controlSemantics: true,
@@ -188,7 +194,9 @@ describe('preference coordinator', () => {
       preferences: {
         imageTranslationEnabled: true,
         autoTranslateAllSites: false,
-        readScopeSetupVersion: 0,
+        // A reset starts set up at Full visible, with no setup question (D66).
+        readScopeSetupVersion: 1,
+        replicaReadScope: replicaReadScopeForProfile('full-visible'),
         resetRevision: 1,
         resetCleanupPendingRevision: 0,
       },
@@ -317,7 +325,7 @@ describe('preference coordinator', () => {
     expect(adapter.hasGrant('https://orphan.example/*')).toBe(false);
   });
 
-  it('keeps a pending reset from adopting the old broad grant through the setup save (G1)', async () => {
+  it('keeps a pending reset from adopting the old broad grant through a read-scope save (G1)', async () => {
     const adapter = new MemoryPreferenceAdapter({
       ...parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES),
       autoTranslateAllSites: true,
@@ -336,12 +344,12 @@ describe('preference coordinator', () => {
     expect(adapter.preferences.imageTranslationEnabled).toBe(true);
     adapter.failRemove = false;
 
-    // The mandatory setup dialog saves while the cleanup is still pending.
+    // A reset has no setup question since D66; narrowing the read scope in
+    // settings saves while the cleanup is still pending.
     const setup = await coordinator.run({
-      type: 'simul:preferences:complete-read-scope-setup',
+      type: 'simul:preferences:patch-read-scope',
       expectedResetRevision: 1,
-      expectedSetupVersion: 0,
-      expectedReadScopeFingerprint: 'read-v1-000000',
+      expectedReadScopeFingerprint: 'read-v1-111111',
       patch: {
         replicaReadScope: {
           controlSemantics: true,

@@ -40,6 +40,9 @@ describe('CompanionState', () => {
     expect(panel.requiresActiveSourceTab).toBe(true);
     const popout = new CompanionState({ isDetachedWindow: true, detachedSourceWindowId: 9 });
     expect(popout.detachedSourceWindowId).toBe(9);
+    // A detached window follows the active tab by default (D66).
+    expect(popout.requiresActiveSourceTab).toBe(true);
+    popout.preferences = withViewSettings(popout.preferences, { popoutTabMode: 'locked' });
     expect(popout.requiresActiveSourceTab).toBe(false);
     popout.preferences = withViewSettings(popout.preferences, { popoutTabMode: 'active' });
     expect(popout.requiresActiveSourceTab).toBe(true);

@@ -130,10 +130,12 @@ preferences disable decorative progress animation.
 
 Reading and acting are separate contracts. The replica remains scriptless,
 pointer-inert, unable to navigate or submit, and unable to forward source
-events under every setting. Before first-load setup is committed, the effective
-scope is Page-only; Standard is only the suggested choice shown in the setup
-dialog. Page-only, Standard, and Full visible are presets over six independent
-switches, and any other combination is shown as Custom:
+events under every setting. A new install and a reset start at Full visible
+with no setup question (D66, the owner's D54-addendum ruling); the user can
+narrow it in settings. Stored preferences saved before D66 that never completed
+setup keep the setup dialog, and until it is committed the effective scope is
+Page-only. Page-only, Standard, and Full visible are presets over six
+independent switches, and any other combination is shown as Custom:
 
 - public control labels and semantics;
 - non-secret images inside controls;

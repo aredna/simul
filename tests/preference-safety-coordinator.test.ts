@@ -207,6 +207,49 @@ describe('PreferenceSafetyCoordinator', () => {
     });
   });
 
+  it('starts a first run (no journal, no saved preferences) without a recovery ceiling (D66)', async () => {
+    const journal = new MemorySafetyJournal();
+    journal.value = undefined;
+    journal.hasStoredPreferences = async () => false;
+    const coordinator = new PreferenceSafetyCoordinator(1_000, () => 'unused', journal);
+    const port = new FakeSafetyPort(true);
+    coordinator.connect(port);
+    port.hello('first-run');
+    await coordinator.whenHydrated();
+    await Promise.resolve();
+
+    expect(port.prepares()).toEqual([]);
+    // An empty journal is written, so a later absence is a deletion.
+    expect(readPreferenceSafetyJournalSnapshot(journal.value)).toEqual([]);
+    expect(port.posted.at(-1)).toMatchObject({
+      kind: 'simul:preference-safety-v1:ready',
+      connectionNonce: 'first-run',
+    });
+  });
+
+  it('keeps the recovery ceiling when preferences exist, their check fails, or the journal is malformed', async () => {
+    const cases: Array<[unknown, () => Promise<boolean>]> = [
+      [undefined, async () => true],
+      [undefined, async () => { throw new Error('storage unavailable'); }],
+      [{ unsafe: 'unknown ceiling' }, async () => false],
+    ];
+    for (const [value, hasStoredPreferences] of cases) {
+      const journal = new MemorySafetyJournal(value);
+      journal.value = value;
+      journal.hasStoredPreferences = hasStoredPreferences;
+      const coordinator = new PreferenceSafetyCoordinator(1_000, () => 'unused', journal);
+      const port = new FakeSafetyPort(true);
+      coordinator.connect(port);
+      port.hello('recover');
+      await coordinator.whenHydrated();
+      await Promise.resolve();
+      expect(port.prepares()).toContainEqual(expect.objectContaining({
+        requestId: 'journal-recovery-page-only',
+        targetFingerprint: 'read-v1-000000',
+      }));
+    }
+  });
+
   it('fails closed to Page-only when the journal key is absent on restart', async () => {
     const journal = new MemorySafetyJournal();
     journal.value = undefined;
@@ -444,6 +487,7 @@ class FakeSafetyPort implements PreferenceSafetyPort {
 
 class MemorySafetyJournal implements PreferenceSafetyJournalAdapter {
   value: unknown;
+  hasStoredPreferences?: () => Promise<boolean>;
 
   constructor(value: unknown = journalSnapshot([])) {
     this.value = value;

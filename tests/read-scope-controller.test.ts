@@ -173,10 +173,27 @@ const setupComplete = (profile: 'page-only' | 'standard' | 'full-visible') =>
     replicaReadScope: replicaReadScopeForProfile(profile),
     readScopeSetupVersion: REPLICA_READ_SCOPE_SETUP_VERSION,
   });
+/** Stored preferences from before D66 that never completed setup. */
+const neverSetUp = () =>
+  withReadSettings(parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES), {
+    replicaReadScope: replicaReadScopeForProfile('page-only'),
+    readScopeSetupVersion: 0,
+  });
 
 describe('ReadScopeController setup', () => {
-  it('opens the mandatory setup dialog until a profile is committed', async () => {
-    const harness = setup({ safetyReady: false });
+  it('asks no setup question on a fresh install (D66)', () => {
+    const harness = setup();
+    harness.controller.installListeners();
+    harness.controller.renderControls();
+    expect(harness.elements.readScopeSetup.open).toBe(false);
+    expect(sameReplicaReadScope(
+      harness.controller.currentReplicaReadScope(),
+      replicaReadScopeForProfile('full-visible'),
+    )).toBe(true);
+  });
+
+  it('opens the setup dialog for stored preferences never set up, until a profile is committed', async () => {
+    const harness = setup({ safetyReady: false, stored: neverSetUp() });
     harness.controller.installListeners();
     harness.controller.renderControls();
     expect(harness.elements.readScopeSetup.open).toBe(true);
@@ -218,6 +235,8 @@ describe('ReadScopeController setup', () => {
     expect(withPersonal.formValues).toBe(true);
     expect(committedReplicaReadScope(setupComplete('full-visible')).formValues).toBe(true);
     expect(committedReplicaReadScope(parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES)))
+      .toEqual(replicaReadScopeForProfile('full-visible'));
+    expect(committedReplicaReadScope(neverSetUp()))
       .toEqual(replicaReadScopeForProfile('page-only'));
   });
 
@@ -327,8 +346,9 @@ describe('ReadScopeController reset and safety', () => {
     expect(harness.elements.resetSettingsStatus.textContent)
       .toContain('2 optional permission entries remain');
     expect(harness.state.resetInFlight).toBe(false);
-    expect(harness.elements.readScopeSetup.open).toBe(true);
-    expect(harness.elements.setupResetCleanup.hidden).toBe(false);
+    // A reset starts set up at Full visible: no setup question (D66). The
+    // pending cleanup stays visible in settings.
+    expect(harness.elements.readScopeSetup.open).toBe(false);
     expect(harness.elements.resetAllSettingsButton.textContent).toBe('Retry reset cleanup');
 
     await harness.controller.resetAllExtensionSettings();

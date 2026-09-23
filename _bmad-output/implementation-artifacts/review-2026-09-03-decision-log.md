@@ -2853,3 +2853,50 @@ doctype).
 Build identity `0.5.0 beta v.20260922.24`; `dist/chrome-unpacked` re-synced.
 Gate: `npm run check` green, **1,480 tests pass, 1 skipped** (+1).
 Publishing 0.5.0 moves to **D66**.
+
+### D66. New installs start at Full visible, following the active tab, at 1:1 (2026-09-23)
+
+Same branch / PR #22. Implements the D54-addendum rulings (read scope, tab
+follow, mirror size; third item of `handover-2026-09-23-session-close.md`
+under the truthful-first ruling). For the tab-follow words the owner chose
+"Follow / Pinned" from the D54 candidates.
+
+- **Defaults.** A new install and a reset start set up at **Full visible**
+  (setup version 1, the accessibility-text image method on, as completing the
+  setup dialog did), with **no setup question**; the mirror follows the
+  active tab in a detached window (`popoutTabMode: 'active'`) and is at 1:1
+  (`displayMode: 'actual'`). The toolbar reads **Follow** / **Pinned**
+  (previously Active / Current); the tooltips were already descriptive.
+  Stored preferences keep their saved values; stored preferences that never
+  completed setup keep the setup dialog and Page-only until it is committed.
+- **Found while verifying: the safety journal's first-run ceiling.** On a
+  fresh profile the new build mirrored at Page-only (select labels read
+  "Options") and never widened, even after a rebuild. With no safety journal,
+  the background installs a durable Page-only recovery ceiling ("absence is
+  indistinguishable from an externally deleted journal"), which it releases
+  only when the committed scope is already Page-only. The old fresh-install
+  default was Page-only, so it released at once and the setup commit widened
+  properly; a Full-visible default could never release it. Now, and only
+  when the journal **and** the stored preferences are both absent (a first
+  run; clearing the extension's data is equivalent to a reset), the
+  coordinator writes an empty journal instead, so a later absence still
+  counts as a deletion. A missing journal with saved preferences, a
+  malformed journal, or an error while checking still installs the ceiling.
+- **Verified in Chrome for Testing** (fresh profile). No setup dialog; the
+  toolbar shows 1:1 and Follow; settings show Full visible; the select
+  labels appear within a second (Apple, Cherry, Elder, Afrikaans; the `.24`
+  build showed them only after the setup dialog). Narrowing to Page-only in
+  settings withholds them, widening restores them; Follow toggles to Pinned;
+  Reset all restores Full visible, Follow and 1:1 without a dialog (the
+  harness's required `<all_urls>` leaves reset cleanup pending, as known).
+- **Tests.** Defaults (fresh install and reset), a fresh install asks no
+  setup question, a never-set-up stored state still opens the dialog, reset
+  lands set up, a read-scope save during a pending reset cleanup still cannot
+  adopt the old broad grant (G1, now through a settings narrowing), the
+  first-run journal exception and its fail-closed cases; fixtures that test
+  Pinned behaviour or the setup dialog now set that state explicitly.
+- **Docs.** README (privacy boundary, usage), `docs/translation-companion.md`.
+
+Build identity `0.5.0 beta v.20260922.25`; `dist/chrome-unpacked` re-synced.
+Gate: `npm run check` green, **1,483 tests pass, 1 skipped** (+3).
+Publishing 0.5.0 moves to **D67**.
