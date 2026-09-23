@@ -144,17 +144,29 @@ export function createDetachedWindowData(
   };
 }
 
+/**
+ * The browser window whose active tab a following companion mirrors: a side
+ * panel follows the tabs of its own window, a detached window follows the
+ * tabs of the other windows (D73).
+ */
+export function isFollowedBrowserWindow(
+  isDetachedWindow: boolean,
+  companionWindowId: number | undefined,
+  windowId: number,
+): boolean {
+  return isDetachedWindow
+    ? companionWindowId !== windowId
+    : companionWindowId !== undefined && companionWindowId === windowId;
+}
+
 export function shouldFollowActivatedTab(
   isDetachedWindow: boolean,
   followMode: CompanionPreferences['popoutTabMode'],
   companionWindowId: number | undefined,
   activatedWindowId: number,
 ): boolean {
-  return Boolean(
-    isDetachedWindow &&
-      followMode === 'active' &&
-      companionWindowId !== activatedWindowId,
-  );
+  return followMode === 'active' &&
+    isFollowedBrowserWindow(isDetachedWindow, companionWindowId, activatedWindowId);
 }
 
 /** Background-window activations are not user focus changes and must not
@@ -171,19 +183,17 @@ export function isFocusedNormalBrowserWindow(
  * are stale even if the asynchronous activation lookup has not committed yet.
  */
 export function shouldIgnoreInactiveFollowedTabUpdate(
-  isDetachedWindow: boolean,
   followMode: CompanionPreferences['popoutTabMode'],
   tabIsActive: boolean,
   followTransitionPending = false,
 ): boolean {
-  return isDetachedWindow && followMode === 'active' &&
-    (followTransitionPending || !tabIsActive);
+  return followMode === 'active' && (followTransitionPending || !tabIsActive);
 }
 
 /**
  * Closing the followed tab activates a neighbor without requiring another
- * click. Detached active-follow companions should reacquire that neighbor,
- * while locked companions and closing browser windows remain terminal.
+ * click. Active-follow companions should reacquire that neighbor, while
+ * pinned companions and closing browser windows remain terminal.
  */
 export function shouldRecoverRemovedActiveSource(
   isDetachedWindow: boolean,
@@ -192,12 +202,9 @@ export function shouldRecoverRemovedActiveSource(
   removedWindowId: number,
   isWindowClosing: boolean,
 ): boolean {
-  return Boolean(
-    isDetachedWindow &&
-      followMode === 'active' &&
-      !isWindowClosing &&
-      companionWindowId !== removedWindowId,
-  );
+  return followMode === 'active' &&
+    !isWindowClosing &&
+    isFollowedBrowserWindow(isDetachedWindow, companionWindowId, removedWindowId);
 }
 
 export function sameCompanionSourcePage(

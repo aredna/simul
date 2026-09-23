@@ -103,7 +103,7 @@ does not weaken stale-result protection.
 
 The slim full-width toolbar exposes Refresh; the From label, `[A]` (set From to
 Auto-detect), and a wider From selector; swap and a wider To selector; Fit/1:1
-size; OCR On/Off; Current/Active tab following; quick reverse translation; Settings;
+size; OCR On/Off; Follow/Pinned tab following; quick reverse translation; Settings;
 Side/Popout; and the replica-state label at the far right. It scrolls
 horizontally only at unusually narrow widths. A healthy toolbar has no detached
 status dot. Warning and error markers attach to Refresh or Settings according
@@ -390,7 +390,18 @@ window IDs in its extension URL. The popup follows that tab even though it is
 not the active tab in the popup's own window. This requires no new permission;
 the user must reauthorize after temporary page access expires.
 
-With Active tab following, a newly selected new-tab or browser page shows
+## Following tabs
+
+The toolbar's Follow / Pinned button and Settings' "Mirror follows" switch the
+same saved setting, and both surfaces honor it (D73). Follow is the default: a
+side panel mirrors whichever tab becomes active in its own window, and a
+detached window mirrors the active tab of the focused browser window. Pinned
+keeps the mirror on the tab it shows while other tabs are active; image text
+on that tab waits until it is visible again, because pixel capture reads only
+the visible tab. Clicking the extension on another tab of the side panel's
+window still moves a pinned side panel to that tab.
+
+With Follow, a newly selected new-tab or browser page shows
 "Waiting for a web page in the active tab." when Simul may read every site
 (Chrome hides only such URLs then), and the companion follows that tab as soon
 as it finishes loading a web page. Without all-site access a hidden URL may be

@@ -102,14 +102,81 @@ describe('SourceFollower in the side panel', () => {
     expect(harness.setStatus).toHaveBeenCalledWith(expect.stringContaining('Open a regular HTTP'), 'error');
   });
 
-  it('invalidates when another tab in the same window becomes active', () => {
-    const harness = setup({ panelWindowId: 1 });
+  it('stays on its tab when pinned and another tab becomes active (D73)', async () => {
+    const harness = setup({
+      panelWindowId: 1,
+      tabs: [page(4, 1, 'https://a.example/', false), page(5, 1, 'https://b.example/')],
+    });
     harness.state.followedPageIdentity = { tabId: 4, windowId: 1, url: 'https://a.example/' };
-    const pending = harness.currency.begin('identity');
     harness.follower.handleTabActivated(5, 1);
-    expect(harness.currency.isCurrent(pending)).toBe(false);
-    expect(harness.state.followedPageIdentity).toBeUndefined();
-    expect(harness.invalidateCompanion).toHaveBeenCalledWith(expect.stringContaining('The active tab changed'));
+    await vi.runAllTimersAsync();
+    expect(harness.invalidateCompanion).not.toHaveBeenCalled();
+    expect(harness.queueCapture).not.toHaveBeenCalled();
+    expect(harness.state.followedPageIdentity?.tabId).toBe(4);
+
+    // A pinned tab is read even while another tab is active.
+    await harness.follower.refreshFollowedPage('manual');
+    expect(harness.queueCapture).toHaveBeenCalledWith({
+      identity: { tabId: 4, windowId: 1, url: 'https://a.example/' },
+      reason: 'manual',
+    });
+  });
+
+  it('follows a newly activated tab of its own window by default (D73)', async () => {
+    const harness = setup({
+      popoutTabMode: 'active',
+      panelWindowId: 1,
+      tabs: [page(5, 1, 'https://b.example/'), page(7, 2, 'https://c.example/')],
+    });
+    harness.state.followedPageIdentity = { tabId: 4, windowId: 1, url: 'https://a.example/' };
+    harness.follower.handleTabActivated(7, 2);
+    await vi.runAllTimersAsync();
+    expect(harness.queueCapture).not.toHaveBeenCalled();
+
+    harness.follower.handleTabActivated(5, 1);
+    await vi.runAllTimersAsync();
+    expect(harness.invalidateCompanion).not.toHaveBeenCalled();
+    expect(harness.queueCapture).toHaveBeenCalledWith({
+      identity: { tabId: 5, windowId: 1, url: 'https://b.example/' },
+      reason: 'navigation',
+    });
+    expect(harness.state.activeFollowRequest).toBeUndefined();
+  });
+
+  it('follows the active tab of its own window when switched to Follow', async () => {
+    const harness = setup({
+      popoutTabMode: 'active',
+      panelWindowId: 3,
+      tabs: [page(6, 1, 'https://other-window.example/'), page(8, 3, 'https://own.example/')],
+    });
+    await harness.follower.followCurrentActiveSourceTab();
+    expect(harness.browser.getLastFocusedNormalWindowId).not.toHaveBeenCalled();
+    expect(harness.queueCapture).toHaveBeenCalledWith({
+      identity: { tabId: 8, windowId: 3, url: 'https://own.example/' },
+      reason: 'navigation',
+    });
+  });
+
+  it('reacquires the neighboring tab when the followed tab closes in Follow', async () => {
+    const harness = setup({
+      popoutTabMode: 'active',
+      panelWindowId: 1,
+      tabs: [page(5, 1, 'https://b.example/')],
+    });
+    harness.state.followedPageIdentity = { tabId: 4, windowId: 1, url: 'https://a.example/' };
+    harness.follower.handleTabRemoved(4, { windowId: 1, isWindowClosing: false });
+    await vi.runAllTimersAsync();
+    expect(harness.queueCapture).toHaveBeenCalledWith({
+      identity: { tabId: 5, windowId: 1, url: 'https://b.example/' },
+      reason: 'navigation',
+    });
+
+    const pinned = setup({ panelWindowId: 1, tabs: [page(5, 1, 'https://b.example/')] });
+    pinned.state.followedPageIdentity = { tabId: 4, windowId: 1, url: 'https://a.example/' };
+    pinned.follower.handleTabRemoved(4, { windowId: 1, isWindowClosing: false });
+    await vi.runAllTimersAsync();
+    expect(pinned.queueCapture).not.toHaveBeenCalled();
+    expect(pinned.invalidateCompanion).toHaveBeenCalled();
   });
 
   it('resumes deferred image work when the followed tab is activated again', () => {

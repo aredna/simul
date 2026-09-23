@@ -73,10 +73,9 @@
         id="toolbar-tab-follow"
         class="toolbar-button toolbar-text-button"
         type="button"
-        aria-label="Follow the current browser tab"
-        aria-pressed="false"
-        title="Available in a detached companion window"
-        disabled
+        aria-label="Pin the mirror to the tab it shows instead of following the active browser tab"
+        aria-pressed="true"
+        title="Following the active browser tab. Click to pin the mirror to the tab it shows."
       >
         <span id="toolbar-tab-follow-label" data-ui-label="Follow">Follow</span>
       </button>
@@ -234,7 +233,7 @@
       </div>
 
       <details class="options-group">
-        <summary title="Control where Simul opens and which tab a detached window follows." data-ui-title="Control where Simul opens and which tab a detached window follows." data-ui-label="Window behavior">Window behavior</summary>
+        <summary title="Control where Simul opens and which tab the mirror follows." data-ui-title="Control where Simul opens and which tab the mirror follows." data-ui-label="Window behavior">Window behavior</summary>
         <div class="settings-grid">
           <label title="Use the last companion view or always open a particular view." data-ui-title="Use the last companion view or always open a particular view.">
             <span data-ui-label="Toolbar opens">Toolbar opens</span>
@@ -244,11 +243,11 @@
               <option value="popout" data-ui-label="Always detached window">Always detached window</option>
             </select>
           </label>
-          <label title="Keep a detached window on its opening tab or follow the active browser tab." data-ui-title="Keep a detached window on its opening tab or follow the active browser tab.">
-            <span data-ui-label="Detached window follows">Detached window follows</span>
+          <label title="Keep the mirror on the tab it shows or follow the active browser tab. The toolbar's Follow / Pinned button switches the same setting." data-ui-title="Keep the mirror on the tab it shows or follow the active browser tab. The toolbar's Follow / Pinned button switches the same setting.">
+            <span data-ui-label="Mirror follows">Mirror follows</span>
             <select id="popout-tab-mode">
-              <option value="locked" data-ui-label="The opening tab">The opening tab</option>
-              <option value="active" data-ui-label="Active browser tab">Active browser tab</option>
+              <option value="locked" data-ui-label="The tab it shows (Pinned)">The tab it shows (Pinned)</option>
+              <option value="active" data-ui-label="Active browser tab (Follow)">Active browser tab (Follow)</option>
             </select>
           </label>
         </div>

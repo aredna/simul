@@ -158,9 +158,9 @@ export class CompanionState {
     return this.preferences.replicaViewMode === 'source-only';
   }
 
-  /** Side panels and active-following windows must read the active tab only. */
+  /** A following companion reads the active tab only; a pinned one keeps its tab. */
   get requiresActiveSourceTab(): boolean {
-    return !this.isDetachedWindow || this.preferences.popoutTabMode === 'active';
+    return this.preferences.popoutTabMode === 'active';
   }
 
   get activity(): CompanionActivity {

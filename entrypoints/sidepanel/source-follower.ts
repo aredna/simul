@@ -202,25 +202,22 @@ export class SourceFollower {
     }
   }
 
-  /** In active mode, follows whichever tab is active in the source window. */
+  /** In active mode, follows whichever tab is active in the followed window. */
   async followCurrentActiveSourceTab(): Promise<void> {
     const state = this.#state;
-    const { currency, browser, detachedIdentityHint } = this.environment;
-    if (!detachedIdentityHint || state.preferences.popoutTabMode !== 'active') return;
+    const { currency, browser } = this.environment;
+    if (state.preferences.popoutTabMode !== 'active') return;
     const request = currency.begin('identity');
     state.activeFollowRequest = request;
     this.#clearNavigationTimer();
     try {
-      const lastFocusedId = await browser.getLastFocusedNormalWindowId();
+      const sourceWindowId = await this.#currentFollowedWindowId();
       if (!currency.isCurrent(request) || state.preferences.popoutTabMode !== 'active') return;
-      const sourceWindowId =
-        lastFocusedId ??
-        state.followedPageIdentity?.windowId ??
-        state.detachedSourceWindowId ??
-        detachedIdentityHint.windowId;
-      const tab = await browser.queryActiveTab(sourceWindowId);
+      const tab = sourceWindowId === undefined
+        ? undefined
+        : await browser.queryActiveTab(sourceWindowId);
       if (!currency.isCurrent(request) || state.preferences.popoutTabMode !== 'active') return;
-      if (tab?.id === undefined) {
+      if (sourceWindowId === undefined || tab?.id === undefined) {
         this.environment.invalidateCompanion(UI_STRINGS.statusNoActiveReadableTab);
         return;
       }
@@ -322,19 +319,6 @@ export class SourceFollower {
       )
     ) {
       void this.followActivatedSourceTab(tabId, windowId);
-      return;
-    }
-    if (
-      !this.#isDetachedWindow &&
-      state.followedPageIdentity?.windowId === windowId &&
-      state.followedPageIdentity.tabId !== tabId
-    ) {
-      this.environment.currency.supersede('identity');
-      state.followedPageIdentity = undefined;
-      this.#clearNavigationTimer();
-      this.environment.invalidateCompanion(
-        UI_STRINGS.statusActiveTabChanged,
-      );
     }
   }
 
@@ -356,17 +340,17 @@ export class SourceFollower {
   handleTabAttached(tabId: number, newWindowId: number): void {
     const state = this.#state;
     if (
-      this.#isDetachedWindow &&
-      state.followedPageIdentity?.tabId === tabId &&
-      newWindowId !== state.panelWindowId
-    ) {
-      if (state.preferences.popoutTabMode === 'active') {
-        void this.followActivatedSourceTab(tabId, newWindowId);
-      } else {
-        const request = this.environment.currency.begin('identity');
-        this.#clearNavigationTimer();
-        void this.#followMovedLockedSourceTab(tabId, newWindowId, request);
-      }
+      state.followedPageIdentity?.tabId !== tabId ||
+      (this.#isDetachedWindow && newWindowId === state.panelWindowId)
+    ) return;
+    if (state.preferences.popoutTabMode === 'active') {
+      // A side panel keeps following its own window: the tab that becomes
+      // active there is followed through its activation event.
+      void this.followActivatedSourceTab(tabId, newWindowId);
+    } else {
+      const request = this.environment.currency.begin('identity');
+      this.#clearNavigationTimer();
+      void this.#followMovedLockedSourceTab(tabId, newWindowId, request);
     }
   }
 
@@ -383,7 +367,6 @@ export class SourceFollower {
     // newly selected tab. In active-follow mode it is stale immediately and
     // must not invalidate the newer identity request.
     if (shouldIgnoreInactiveFollowedTabUpdate(
-      this.#isDetachedWindow,
       state.preferences.popoutTabMode,
       tab.active ?? false,
       state.activeFollowRequest !== undefined,
@@ -552,7 +535,7 @@ export class SourceFollower {
     const state = this.#state;
     const { currency } = this.environment;
     if (!currency.isCurrent(request)) return;
-    if (this.#isDetachedWindow && state.preferences.popoutTabMode === 'active') {
+    if (state.preferences.popoutTabMode === 'active') {
       state.activeFollowRequest = request;
     }
     try {
@@ -634,6 +617,23 @@ export class SourceFollower {
   #clearNavigationTimer(): void {
     if (this.#navigationTimer !== undefined) clearTimeout(this.#navigationTimer);
     this.#navigationTimer = undefined;
+  }
+
+  /**
+   * The window whose active tab Follow mirrors: a side panel's own window, or
+   * for a detached window the last focused browser window.
+   */
+  async #currentFollowedWindowId(): Promise<number | undefined> {
+    const state = this.#state;
+    const hint = this.environment.detachedIdentityHint;
+    if (!hint) {
+      if (state.panelWindowId === undefined) await this.loadPanelWindowId();
+      return state.panelWindowId;
+    }
+    return (await this.environment.browser.getLastFocusedNormalWindowId()) ??
+      state.followedPageIdentity?.windowId ??
+      state.detachedSourceWindowId ??
+      hint.windowId;
   }
 
   async #readActivePageIdentity(sourceWindowId?: number): Promise<CapturedPageIdentity> {
