@@ -254,9 +254,13 @@ describe('QuickComposer', () => {
     expect(elements.status.textContent).toBe('Translation is ready to copy.');
 
     translations.set('Translation is ready to copy.', 'La traducción está lista para copiar.');
+    translations.set('{0} of {1} characters used', '{0} de {1} caracteres usados');
     composer.relocalize();
     expect(elements.status.textContent).toBe('La traducción está lista para copiar.');
     expect(elements.status.dataset.tone).toBe('success');
+    // The character-count label follows the switch too (review L8).
+    expect(elements.characterCount.getAttribute('aria-label'))
+      .toBe('7 de 20 caracteres usados');
   });
 });
 

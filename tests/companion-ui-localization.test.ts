@@ -1,12 +1,33 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  repairTranslatedFrame,
   resolveUiLabelTranslations,
   shouldRetryUiLabelLocalization,
   toolbarAttentionTarget,
 } from '../lib/companion-ui-localization';
 
 describe('companion UI localization', () => {
+  it('keeps a translated frame only with the same placeholders (review L6)', async () => {
+    const frame = 'Ready to translate {0} to {1} on-device.';
+    expect(repairTranslatedFrame(frame, '{0}から{1}へ翻訳できます。'))
+      .toBe('{0}から{1}へ翻訳できます。');
+    expect(repairTranslatedFrame(frame, '{ 0 }から｛１｝へ翻訳できます。'))
+      .toBe('{0}から{1}へ翻訳できます。');
+    // A dropped placeholder keeps the English frame for this label only.
+    expect(repairTranslatedFrame(frame, '{0}を翻訳できます。')).toBe(frame);
+    expect(repairTranslatedFrame('Fit', 'Ajuster')).toBe('Ajuster');
+
+    const result = await resolveUiLabelTranslations(
+      [frame, 'Fit'],
+      'ja',
+      async (source) => source === frame ? '{0}を翻訳できます。' : 'フィット',
+    );
+    expect(result.localized).toBe(true);
+    expect(result.labels.get(frame)).toBe(frame);
+    expect(result.labels.get('Fit')).toBe('フィット');
+  });
+
   it('attaches warning and error state to the action that can resolve it', () => {
     expect(toolbarAttentionTarget(
       'A live update was missed. Rebuilding the current mirror…',

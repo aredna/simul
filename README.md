@@ -14,7 +14,7 @@ Simul started as a quick build for the OpenAI Build Week hackathon, made as
 something we would use ourselves. We are now sharing it so others can use it
 too.
 
-Current build: **0.5.0 beta v.20260922.28** · Desktop Chrome **138+** ·
+Current build: **0.5.0 beta v.20260922.29** · Desktop Chrome **138+** ·
 Manifest V3
 
 ## What you need
@@ -48,7 +48,7 @@ Keep the folder where it is while the extension is installed. To update,
 replace the folder with the new version, then select **Reload** on the Simul
 card in `chrome://extensions`, reload the page, and reopen the companion. The
 card shows version `0.5.0`; Simul's settings show
-`Build 0.5.0 beta v.20260922.28`.
+`Build 0.5.0 beta v.20260922.29`.
 
 This is an unpacked beta, not a Chrome Web Store release, so Chrome does not
 update it automatically.
@@ -62,9 +62,11 @@ update it automatically.
 3. Leave **From** on **Auto-detect** or pick the page's language, then pick
    **To**. Once that language pair is installed, the companion's own labels,
    hints, and status messages follow the **To** language as well.
-4. Select **Translate page**. Chrome may first prepare the on-device language
-   pack. The page is translated on every visit only if you save automatic
-   translation for the site in settings, or if OCR is on.
+4. Select **Translate page** the first time, so Chrome can prepare the
+   on-device language pack. After that a mirrored page translates as soon as
+   it opens, because image text (OCR, on by default) is translated together
+   with the page text. With OCR off, a page translates on its own only for
+   sites you save for automatic translation in settings.
 5. Use **1:1** (the default), **Fit**, zoom, layout, and scroll-following to
    compare the original with the translation. In a separate window the mirror
    **Follow**s whichever tab is active; select it to keep the mirror **Pinned**

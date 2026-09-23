@@ -257,9 +257,13 @@ export class QuickComposer {
     }
   }
 
-  /** Re-renders the composer's own status line after a language switch (F2). */
+  /**
+   * Re-renders the composer's own status line (F2) and its character-count
+   * label (review L8) after a language switch.
+   */
   relocalize(): void {
     this.#status.relocalize();
+    this.syncCharacterCount();
   }
 
   #setComposerStatus(
