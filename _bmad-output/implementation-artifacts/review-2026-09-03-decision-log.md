@@ -2646,3 +2646,31 @@ chose "Site menus in the mirror" and "Form select boxes in mirror".
 Build identity `0.5.0 beta v.20260922.21`; `dist/chrome-unpacked` re-synced.
 Gate: `npm run check` green, **1,468 tests pass, 1 skipped** (+8).
 Publishing 0.5.0 moves to **D63**.
+
+**D62 addendum: owner ruling, truthful recreation first (2026-09-23).** Asked
+whether the found-but-unfixed items were documented, the owner said: "We want
+to recreate the page as truthfully as we can. This is all ran locally, so
+privacy is only a very minimal concern." On the D60 stylesheet limit: "I'm not
+sure of any reason to have a limit, but maybe ten megabytes could be our
+limit. I mean, we're running it locally, so if we can load the web page, we can
+load it in the mirror, and it's just two copies of the page being loaded." The
+owner then ended the session with no further code: "Go ahead and put everything
+into a handover file, and then don't do any code here."
+
+- **Documentation corrected now (no code).** `docs/replica-fidelity.md` no
+  longer claims a privacy boundary withholds a `<style>`'s CSS (under Passive
+  its CSSOM rules travel; Conservative withholds them) and now lists the
+  quirks-mode gap as open (an `srcdoc` shell is always no-quirks, so quirks
+  pages render in standards mode). It also notes that hidden accessible names
+  are still translated. `docs/translation-companion.md` carries the same
+  quirks correction. The third D60 finding (Google's language picker showing
+  "Options") was fixed by D62.
+- **Queued for the next session** (`handover-2026-09-23-session-close.md`):
+  raise the per-stylesheet limit to about 10 MB, together with the total
+  mirror budget it would otherwise overflow; fix quirks mode; review
+  privacy-driven withholding case by case under this ruling; skip translating
+  hidden accessible names.
+- **Precedence.** Where earlier notes required an explicit ruling before
+  loosening a privacy default, this ruling now favours truthful recreation.
+  Anything that would let the mirror act on the page (scripts, navigation,
+  submission, source mutation) stays blocked.

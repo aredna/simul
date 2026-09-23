@@ -34,7 +34,11 @@ stylesheets, and styles inside accessible open shadow roots. Stylesheet element
 order, media attributes, disabled state, and the normal cascade remain
 representable. A `<style>` element inside a hidden or controlled disclosure
 region keeps its CSS (those rules are often what hides the region); only the
-region's page text is withheld, and a privacy boundary withholds both. Whether
+region's page text is withheld. Inside a privacy boundary (for example an
+editable `role="textbox"` region) the page text is withheld too; under Passive
+Fidelity the `<style>`'s rules still travel, read from CSSOM, because they are
+presentation rather than page content, while Conservative withholds that
+`<style>`'s text with the region. Whether
 a region is hidden is decided by computed style and geometry: content a script
 declares `hidden` or `aria-hidden` but the stylesheet paints anyway is ordinary
 page text. "Paints" means a positive box that is not at zero opacity, not
@@ -131,7 +135,10 @@ masked. This distinction admits public navigation labels without transporting
 user-entered data. An accessible name (`aria-label`, `title`) or a select's
 current choice travels with its control for translation and the dropdown
 trigger, but is never drawn as extra text: the source page does not paint it
-beside the control.
+beside the control. Such hidden accessible names are still sent for
+translation even though nothing shows them (except option labels and the
+current choice, which the dropdown facsimile displays); skipping that work is
+open.
 
 ### Static SVG
 
@@ -209,11 +216,16 @@ Some gaps cannot be fixed by admitting more sanitizer syntax:
   Such resources are omitted and counted as browser-inaccessible unless a
   separately authorized local pixel/byte path exists. Temporary local blobs
   are not yet a general fallback.
-- **Source document mode.** The source's standards-versus-quirks state is
-  transported as a validated enum and selects a doctype or doctype-free
-  `srcdoc` shell. Chrome's distinct limited-quirks mode is not separately
-  represented, so a legacy limited-quirks page can still have different layout
-  metrics.
+- **Source document mode (open gap, to fix).** The source's
+  standards-versus-quirks state is transported as a validated enum and selects
+  a doctype or doctype-free shell, but the shell is loaded through `srcdoc`,
+  and an `srcdoc` document is always in no-quirks mode (HTML parsing rules), so
+  a quirks-mode page renders in standards mode in the replica. Found in D60 on
+  Google's 404 page, which has no doctype. Quirks rules that differ (for
+  example percentage heights, table font inheritance, body sizing) can
+  therefore lay out differently. Loading the quirks shell another way, such as
+  writing the doctype-free shell into a blank frame, would close the gap.
+  Chrome's distinct limited-quirks mode is not separately represented either.
 - **Cross-origin CSSOM.** A stylesheet link may render while Chrome's same-origin
   rules prevent Simul from reading its rules. Passive Fidelity can retain the
   normalized link/import, but cannot flatten or inspect inaccessible CSSOM.

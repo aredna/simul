@@ -1,5 +1,6 @@
 # Handover: bug hunt on the `.14` build, PR #22 (2026-09-23)
 
+Superseded for next steps by `handover-2026-09-23-session-close.md`.
 Chains from `handover-2026-09-22-session-close.md` (which chains from
 `handover-2026-09-22-release-readiness.md`, holding the publish runbook and the
 release-notes draft). This file records the session that shipped **D55** and
@@ -88,7 +89,8 @@ worth a look.
 - **Found in D60, not changed** (details in the decision log): quirks-mode
   pages render in standards mode because an `srcdoc` document can never be
   quirks; a `<style>` inside a privacy boundary still sends its resolved sheet
-  (CSS only); Google's language picker shows as "Options".
+  (CSS only); Google's language picker shows as "Options" (fixed by D62). The
+  next session's plan for these is in `handover-2026-09-23-session-close.md`.
 
 **Queued by the owner:**
 
@@ -272,7 +274,7 @@ each; keep them serial, because concurrent runs make OCR timings noisy.
    with no forced setup question; tab follow defaults to `active` with two
    clearer words; mirror size defaults to 1:1; toolbar buttons stay until the
    owner reviews them one by one.
-3. **Publish 0.5.0** as **D61**, only when the owner says it is ready; do not
+3. **Publish 0.5.0** as **D63**, only when the owner says it is ready; do not
    ask. Runbook: `handover-2026-09-22-release-readiness.md`; the release-notes
    draft needs a line for D51–D60.
 4. Unchanged: F6 (memoizing `Intl.DisplayNames`) stays declined;
