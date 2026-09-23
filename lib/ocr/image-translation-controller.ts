@@ -59,6 +59,7 @@ import {
 } from './image-overlay-projector';
 import {
   ImageScanScheduler,
+  MAX_ACTIVE_IMAGE_SCANS,
   type ImageScanJob,
   type ImageScanUpdateResult,
 } from './image-scan-scheduler';
@@ -1481,6 +1482,8 @@ export class ImageTranslationController {
       !this.#pixels ||
       !this.#scheduler ||
       this.#scheduler.queued === 0 ||
+      // A job still holds the capacity slot: a run would find nothing to take.
+      this.#scheduler.active >= MAX_ACTIVE_IMAGE_SCANS ||
       !this.#request?.isCurrent() ||
       this.#pageLanguageResolutionBlocksWork()
     ) return;
@@ -1543,6 +1546,14 @@ export class ImageTranslationController {
             this.#activeAbortController = undefined;
           }
           this.#activeJobValue = undefined;
+          // A newer processing version (a purge, a pause, a source-policy
+          // change) abandoned this job; release its capacity slot so the next
+          // run can dispatch. It used to stay active, and each restart below
+          // found nothing to take and restarted at once until the call stack
+          // overflowed (D75).
+          if (processingVersion !== this.#processingVersion) {
+            scheduler.retry(job);
+          }
         }
       }
     } finally {

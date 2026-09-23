@@ -85,7 +85,7 @@ function load(html = CAROUSEL) {
   return { document: document as unknown as Document, window: window as unknown as Window };
 }
 
-describe('stateless controlled regions', () => {
+describe('painted controlled regions', () => {
   beforeEach(() => {
     const { window } = parseHTML('<html><body></body></html>');
     Object.assign(globalThis, { Node: window.Node, Element: window.Element, Text: window.Text });
@@ -98,19 +98,19 @@ describe('stateless controlled regions', () => {
     expect(policy.targets.get(wrapper)).toBe('controlled-region');
     expect(sourceControlledContentIsWithheld(wrapper, policy)).toBe(false);
     expect(sourceControlledContentIsControlledRegion(wrapper, policy)).toBe(true);
-    // A stateful disclosure next to it still fails closed in the base graph.
+    // An open disclosure the page paints is page content too (D75).
     const popup = document.querySelector('#popup-panel')!;
-    expect(policy.targets.get(popup)).toBe('withheld');
+    expect(policy.targets.get(popup)).toBe('controlled-region');
 
     const graph = sanitizeSourceDocument(document, window, new WeakNodeIdRegistry(), undefined, 'passive');
     const serialized = JSON.stringify(graph);
     expect(serialized).toContain('Slide one headline');
     expect(serialized).toContain('Slide three headline');
     expect(serialized).toContain('https://example.test/kv.png');
-    expect(serialized).not.toContain('Popup payload');
+    expect(serialized).toContain('Popup payload');
   });
 
-  it('withholds the same wrapper once any of its controllers carries disclosure state', () => {
+  it('keeps the painted wrapper readable whatever state its controllers carry (D75)', () => {
     for (const mutate of [
       (button: Element) => button.setAttribute('aria-expanded', 'false'),
       (button: Element) => button.setAttribute('aria-expanded', 'true'),
@@ -123,28 +123,31 @@ describe('stateless controlled regions', () => {
       mutate(document.querySelector('#next')!);
       const policy = createSourceControlledContentPolicy(document, window);
       const wrapper = document.querySelector('#swiper-wrapper-1')!;
-      expect(policy.targets.get(wrapper)).toBe('withheld');
+      expect(policy.targets.get(wrapper)).toBe('controlled-region');
       const serialized = JSON.stringify(
         sanitizeSourceDocument(document, window, new WeakNodeIdRegistry(), undefined, 'passive'),
       );
-      expect(serialized).not.toContain('Slide one headline');
+      expect(serialized).toContain('Slide one headline');
       expect(serialized).toContain('https://example.test/kv.png');
     }
   });
 
-  it('treats a native control or a tablist member as stateful', () => {
+  it('reads a painted wrapper that a native control or a tablist member controls (D75)', () => {
     const { document, window } = load(CAROUSEL
       .replace('<div id="prev" role="button" tabindex="0"', '<input id="prev" type="range"')
       .replace('<div id="next" role="button" tabindex="0"', '<div role="tablist"><div id="next"'));
     const policy = createSourceControlledContentPolicy(document, window);
     const wrapper = document.querySelector('#swiper-wrapper-1')!;
-    expect(policy.targets.get(wrapper)).toBe('withheld');
+    expect(policy.targets.get(wrapper)).toBe('controlled-region');
   });
 
-  it('reports the wrapper as changed when a controller gains disclosure state', () => {
+  it('reports the wrapper as changed when it stops being painted', () => {
     const { document, window } = load();
     const before = createSourceControlledContentPolicy(document, window);
-    document.querySelector('#next')!.setAttribute('aria-expanded', 'false');
+    Object.defineProperty(document.querySelector('#swiper-wrapper-1')!, 'getClientRects', {
+      configurable: true,
+      value: () => rectList({ left: 0, top: 0, width: 320, height: 0 }),
+    });
     const after = createSourceControlledContentPolicy(document, window);
     const wrapper = document.querySelector('#swiper-wrapper-1')!;
     expect(sourceControlledContentChangedTargets(before, after)).toContain(wrapper);

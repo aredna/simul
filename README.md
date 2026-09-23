@@ -14,7 +14,7 @@ Simul started as a quick build for the OpenAI Build Week hackathon, made as
 something we would use ourselves. We are now sharing it so others can use it
 too.
 
-Current build: **0.5.0 beta v.20260922.33** · Desktop Chrome **138+** ·
+Current build: **0.5.0 beta v.20260922.34** · Desktop Chrome **138+** ·
 Manifest V3
 
 ## What you need
@@ -48,7 +48,7 @@ Keep the folder where it is while the extension is installed. To update,
 replace the folder with the new version, then select **Reload** on the Simul
 card in `chrome://extensions`, reload the page, and reopen the companion. The
 card shows version `0.5.0`; Simul's settings show
-`Build 0.5.0 beta v.20260922.33`.
+`Build 0.5.0 beta v.20260922.34`.
 
 This is an unpacked beta, not a Chrome Web Store release, so Chrome does not
 update it automatically.
@@ -167,10 +167,17 @@ content, visible text/search/URL/textarea values and selection state,
 personal/autofill values, and editable text.
 
 Passwords, authentication and one-time-code fields, WebAuthn and payment-card
-autocomplete classes, hidden/file inputs, file paths, and CSS-masked text are
-blocked under every profile. A node classified as secret remains secret for
-that document. Narrowing the scope clears the current replica, translations,
-and image overlays before rebuilding.
+autocomplete classes, hidden inputs, file names, and CSS-masked text are
+blocked under every profile. A file input shows as the empty control the page
+draws. A node classified as secret remains secret for that document. Narrowing
+the scope clears the current replica, translations, and image overlays before
+rebuilding.
+
+**Show everything (testing)**, under **Advanced & experimental**, turns every
+privacy filter off, to find out whether a privacy rule hides a missing part of
+a page: hidden text, labels, card numbers, one-time codes, and form values are
+copied as the page holds them (typed passwords are not). The mirror still
+cannot act on the page. It is off by default.
 
 Diagnostics contain bounded stages, dimensions, and counts. They do not log
 page text, recognized text, URLs, pixels, hashes, DOM IDs, or attribute values.
@@ -202,8 +209,9 @@ passive CSS, images, fonts, responsive sources, static posters, and static SVG
 presentation. Those references can make ordinary HTTP(S) requests to their
 existing hosts. **Conservative** admits fewer passive semantics but is not a
 zero-network mode. Both policies keep the same scriptless sandbox and
-active-content blocks. The policy, and the mirror's size limits (largest single
-item, largest page, most page elements), are under **Advanced & experimental**.
+active-content blocks. The policy, the mirror's size limits (largest single
+item, largest page, most page elements), and **Show everything (testing)** are
+under **Advanced & experimental**.
 
 Simul is a safe reconstruction, not a browser clone. Current limitations
 include closed shadow roots, script-only custom-element state, virtualized DOM

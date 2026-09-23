@@ -1191,6 +1191,7 @@ describe('preference coordinator message boundary', () => {
           popoutTabMode: 'active',
           replicaFidelityPolicy: 'conservative',
           mirrorLimits: { itemMegabytes: 2, pageMegabytes: 8, maxElements: 5_000 },
+          mirrorShowEverything: true,
           replicaViewMode: 'source-only',
         },
       }),
@@ -1206,6 +1207,7 @@ describe('preference coordinator message boundary', () => {
         popoutTabMode: 'active',
         replicaFidelityPolicy: 'conservative',
         mirrorLimits: { itemMegabytes: 2, pageMegabytes: 8, maxElements: 5_000 },
+        mirrorShowEverything: true,
         replicaViewMode: 'source-only',
       },
     });
@@ -1223,6 +1225,15 @@ describe('preference coordinator message boundary', () => {
         patch: { replicaFidelityPolicy: 'maximum' },
       }),
     ).toBeUndefined();
+    for (const mirrorShowEverything of ['true', 1, null]) {
+      expect(
+        readPreferenceCommand({
+          type: 'simul:preferences:patch-view',
+          expectedResetRevision: 0,
+          patch: { mirrorShowEverything },
+        }),
+      ).toBeUndefined();
+    }
     for (const mirrorLimits of [
       { itemMegabytes: 2, pageMegabytes: 61, maxElements: 5_000 },
       { itemMegabytes: 2, pageMegabytes: 8 },

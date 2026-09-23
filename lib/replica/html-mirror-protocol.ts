@@ -162,6 +162,8 @@ export type HtmlMirrorControllerMessage =
       readonly fidelityPolicy: SelectableReplicaFidelityPolicy;
       /** The size limits both sides of this mirror use (D64). */
       readonly limits: HtmlMirrorLimitSettings;
+      /** Advanced "Show everything (testing)": no privacy filtering (D75). */
+      readonly showEverything: boolean;
     }
   | {
       readonly protocolVersion: typeof HTML_MIRROR_PROTOCOL_VERSION;
@@ -191,6 +193,7 @@ export function createHtmlMirrorStart(
   identity: ReplicaDocumentIdentity,
   fidelityPolicy: SelectableReplicaFidelityPolicy = 'conservative',
   limits: HtmlMirrorLimitSettings = DEFAULT_HTML_MIRROR_LIMIT_SETTINGS,
+  showEverything = false,
 ): HtmlMirrorControllerMessage {
   return Object.freeze({
     protocolVersion: HTML_MIRROR_PROTOCOL_VERSION,
@@ -198,6 +201,7 @@ export function createHtmlMirrorStart(
     identity,
     fidelityPolicy,
     limits,
+    showEverything,
   });
 }
 
@@ -233,7 +237,7 @@ export function readHtmlMirrorControllerMessage(
     !hasExactKeysWithOptional(
       input,
       ['protocolVersion', 'kind', 'identity'],
-      ['fidelityPolicy', 'limits'],
+      ['fidelityPolicy', 'limits', 'showEverything'],
     ) ||
     input.protocolVersion !== HTML_MIRROR_PROTOCOL_VERSION ||
     (input.kind !== 'simul:html-mirror-v2:start' &&
@@ -260,14 +264,20 @@ export function readHtmlMirrorControllerMessage(
     (
       !hasExactKeysWithOptional(input, [
         'protocolVersion', 'kind', 'identity', 'fidelityPolicy',
-      ], ['limits']) ||
+      ], ['limits', 'showEverything']) ||
       !isSelectableReplicaFidelityPolicy(input.fidelityPolicy) ||
-      !limits
+      !limits ||
+      (input.showEverything !== undefined &&
+        typeof input.showEverything !== 'boolean')
     )
   ) return undefined;
   if (
     input.kind !== 'simul:html-mirror-v2:start' &&
-    (Object.hasOwn(input, 'fidelityPolicy') || Object.hasOwn(input, 'limits'))
+    (
+      Object.hasOwn(input, 'fidelityPolicy') ||
+      Object.hasOwn(input, 'limits') ||
+      Object.hasOwn(input, 'showEverything')
+    )
   ) return undefined;
   if (input.kind === 'simul:html-mirror-v2:start') {
     return Object.freeze({
@@ -276,6 +286,8 @@ export function readHtmlMirrorControllerMessage(
       identity,
       fidelityPolicy: input.fidelityPolicy as SelectableReplicaFidelityPolicy,
       limits: limits!,
+      // An older panel sends no switch; it filters as before.
+      showEverything: input.showEverything === true,
     });
   }
   return Object.freeze({

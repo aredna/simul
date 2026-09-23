@@ -30,6 +30,7 @@ import {
   sourceSecretPlaceholderTagName,
 } from './source-secret-classifier';
 import { isSafeStaticSvgDataImage } from './static-svg-data-image';
+import { SOURCE_PRIVACY_FILTERS_OFF } from './source-privacy-mode';
 import {
   MAX_ADOPTED_STYLE_CHARACTERS_PER_OWNER,
   MAX_ADOPTED_STYLE_RULES_PER_OWNER,
@@ -349,9 +350,10 @@ interface SerializeContext {
   readonly styleWork: HtmlMirrorStyleWorkBudget;
   readonly privateRegion: boolean;
   /**
-   * True when page text is withheld for a privacy or menu reason. It is a
-   * subset of `privateRegion`, which also withholds hidden and controlled
-   * disclosure regions; stylesheet text is kept in those.
+   * True when page text is withheld for a privacy reason (a private control
+   * or a native select). It is a subset of `privateRegion`, which also
+   * withholds hidden and controlled disclosure regions; stylesheet text is
+   * kept in those.
    */
   readonly privacyRegion: boolean;
   readonly privateAttributeRegion: boolean;
@@ -473,7 +475,21 @@ const PRIVATE_ATTRIBUTES = new Set([
   'value',
 ]);
 
+/**
+ * The replica's dropdown previews set these on a trigger and read them back
+ * as their own (receiverStructuralTriggerIsUnclaimed), so a source value never
+ * travels, even with "Show everything (testing)" on (D75).
+ */
+const REPLICA_OWNED_DISCLOSURE_ATTRIBUTES = new Set([
+  'aria-controls',
+  'aria-expanded',
+  'aria-haspopup',
+]);
+
 function isPrivateBaseAttribute(tagName: string, name: string): boolean {
+  if (SOURCE_PRIVACY_FILTERS_OFF) {
+    return REPLICA_OWNED_DISCLOSURE_ATTRIBUTES.has(name);
+  }
   // A stylesheet's disabled bit is presentation state, not user-authored
   // control state.  It is required to keep a captured stylesheet inert.
   if (name === 'disabled' && (tagName === 'link' || tagName === 'style')) {
@@ -481,6 +497,11 @@ function isPrivateBaseAttribute(tagName: string, name: string): boolean {
   }
   // Slot names are inert tree-layout metadata, unlike form submission names.
   if (name === 'name' && tagName === 'slot') return false;
+  // An open details or dialog shows its content; without the attribute the
+  // replica drew it closed (D75).
+  if (name === 'open' && (tagName === 'details' || tagName === 'dialog')) {
+    return false;
+  }
   return PRIVATE_ATTRIBUTES.has(name);
 }
 const PUBLIC_MENU_RESOURCE_ATTRIBUTES = new Set([
@@ -1264,7 +1285,7 @@ export function readHtmlMirrorNode(
   const children: HtmlMirrorNode[] = [];
   if (
     transportedPrivateAttributeRegion &&
-    hasPrivateHtmlMirrorAttribute(attributes)
+    hasPrivateHtmlMirrorAttribute(input.tagName, attributes)
   ) {
     return undefined;
   }
@@ -1634,11 +1655,12 @@ function serializeNode(
   if (customElementHost) {
     incrementRepresentability(context.representability, 'customElementHostCount');
   }
+  // A painted ARIA menu or listbox shows its labels, so its text travels
+  // (D75); a collapsed one is hidden and withheld until painted like any
+  // other region.
   const privacyRegion = context.privacyRegion ||
     elementStartsPrivateRegion(liveElement, context.secretAncestors) ||
-    tagName === 'select' ||
-    (!isNativeSelectSemanticTag(tagName) &&
-      isSourcePublicMenuRoleValue(liveElement.getAttribute('role')));
+    tagName === 'select';
   const privateRegion = context.privateRegion ||
     privacyRegion ||
     elementStartsHiddenOrControlledDisclosureRegion(
@@ -1835,9 +1857,11 @@ function sanitizeAttributes(
         (privateRegion || activationRegion) && name === 'label') ||
       (tagName === 'video' && MEDIA_ACTIVE_ATTRIBUTES.has(name)) ||
       (isSourceNativeTextControlTagName(tagName) &&
-        RAW_CONTROL_TEXT_ATTRIBUTES.has(name)) ||
+        RAW_CONTROL_TEXT_ATTRIBUTES.has(name) &&
+        !SOURCE_PRIVACY_FILTERS_OFF) ||
       isPrivateBaseAttribute(tagName, name) ||
-      (privateAttributes && name.startsWith('data-')) ||
+      (privateAttributes && name.startsWith('data-') &&
+        !SOURCE_PRIVACY_FILTERS_OFF) ||
       (publicMenuRegion && PUBLIC_MENU_RESOURCE_ATTRIBUTES.has(name))
     ) {
       incrementRepresentability(representability, 'strippedActiveAttributeCount');
@@ -1906,7 +1930,7 @@ function sanitizeAttributes(
       value = size;
     }
     if (isNativeSelectSemanticTag(tagName) && name === 'role') {
-      if (isSourcePrivateRoleValue(value)) value = 'combobox';
+      if (isSourcePrivateRoleValue(value)) value = 'textbox';
       else if (isSourceActivationRoleValue(value)) value = 'button';
       else {
         incrementRepresentability(
@@ -3767,7 +3791,7 @@ function isUnsafeTransportedAttribute(
     (
       ((name === 'disabled' || name === 'multiple') && value !== '') ||
       (name === 'size' && canonicalNativeSelectSize(value) !== value) ||
-      (name === 'role' && value !== 'combobox' && value !== 'button')
+      (name === 'role' && value !== 'textbox' && value !== 'button')
     )
   ) return true;
   if ((tagName === 'option' || tagName === 'optgroup') && name === 'style') {
@@ -3812,7 +3836,8 @@ function isUnsafeTransportedAttribute(
       !localSvgReference && !passiveSvgReference && !passivePoster) ||
     (tagName === 'video' && MEDIA_ACTIVE_ATTRIBUTES.has(name)) ||
     (isSourceNativeTextControlTagName(tagName) &&
-      RAW_CONTROL_TEXT_ATTRIBUTES.has(name))
+      RAW_CONTROL_TEXT_ATTRIBUTES.has(name) &&
+      !SOURCE_PRIVACY_FILTERS_OFF)
   ) return true;
   if (localSvgReference || passiveSvgReference || passivePoster) return false;
   if (name === 'href') {
@@ -3946,6 +3971,9 @@ function elementStartsHiddenOrControlledDisclosureRegion(
   element: Element,
   controlledContent: SourceControlledContentPolicy,
 ): boolean {
+  // "Show everything (testing)" copies hidden text too; the page's CSS still
+  // hides it in the replica (D75).
+  if (SOURCE_PRIVACY_FILTERS_OFF) return false;
   try {
     if (sourceControlledContentIsWithheld(element, controlledContent)) return true;
     const declaredHidden =
@@ -4032,8 +4060,8 @@ function hasSourceBaseWithheldAncestor(
 
 /**
  * The privacy-only subset of `hasSourceBaseWithheldAncestor`: private
- * controls, native selects and public menus, but not hidden or controlled
- * disclosure regions.
+ * controls and native selects, but not hidden or controlled disclosure
+ * regions.
  */
 function hasSourcePrivacyWithheldAncestor(element: Element): boolean {
   return hasSourceWithheldAncestor(element, undefined);
@@ -4050,8 +4078,6 @@ function hasSourceWithheldAncestor(
     const tagName = current.localName.toLowerCase();
     if (
       tagName === 'select' ||
-      (!isNativeSelectSemanticTag(tagName) &&
-        isSourcePublicMenuRoleValue(current.getAttribute('role'))) ||
       (controlledContent !== undefined &&
         elementStartsHiddenOrControlledDisclosureRegion(current, controlledContent))
     ) return true;
@@ -4245,10 +4271,12 @@ export function hasPublicMenuResourceAttribute(
 }
 
 export function hasPrivateHtmlMirrorAttribute(
+  tagName: string,
   attributes: readonly (readonly [string, string])[],
 ): boolean {
   return attributes.some(
-    ([name]) => PRIVATE_ATTRIBUTES.has(name) || name.startsWith('data-'),
+    ([name]) => isPrivateBaseAttribute(tagName, name) ||
+      (name.startsWith('data-') && !SOURCE_PRIVACY_FILTERS_OFF),
   );
 }
 

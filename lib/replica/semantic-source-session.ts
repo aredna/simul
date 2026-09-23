@@ -42,13 +42,10 @@ import {
   createSourceControlledContentPolicy,
   createSourceSecretAncestorMemo,
   hasSourceCredentialSecretAncestor,
-  isSourcePrivateContentEditableValue,
   isSourceSelectLabelElementPublic,
   readSourceFlatTreeElementPath,
   readSourceSelectLabel,
-  readSourceStructuralAttributes,
   sourceElementPathIsPainted,
-  sourceAttributesArePrivate,
   type SourceControlledContentPolicy,
   type SourceSecretAncestorMemo,
 } from './source-privacy-policy';
@@ -1676,6 +1673,13 @@ export function eagerlyClassifySourceDocumentSecrets(
  * MutationObserver supplies old structural facts for same-task transitions.
  * Remember those credential states before any later semantic/base scan can
  * inspect the node in its apparently ordinary state.
+ *
+ * Only explicit evidence counts: an old password type, credential
+ * autocomplete, or inline `-webkit-text-security`. A class or style that
+ * changes, even twice in one batch or with content beside it, is not taken as
+ * a masking transition any more (D75). Frameworks do that on every focus and
+ * input, and on `<body>` when a dialog opens, and the rule then hid whole form
+ * rows, or the whole page, for the page's lifetime.
  */
 export function rememberSourceMutationSecrets(
   records: readonly MutationRecord[],
@@ -1683,23 +1687,9 @@ export function rememberSourceMutationSecrets(
   classifier: StickySourceSecretClassifier,
 ): void {
   const addedRoots: Node[] = [];
-  const styleMutationCounts = new WeakMap<Element, Map<string, number>>();
-  const transientStyleBoundaries = new WeakSet<Element>();
   for (const record of records) {
     if (record.type === 'childList') addedRoots.push(...record.addedNodes);
-    if (record.type !== 'attributes' || !isElementNode(record.target)) continue;
-    const name = record.attributeName?.toLowerCase();
-    if (name !== 'class' && name !== 'style') continue;
-    let counts = styleMutationCounts.get(record.target);
-    if (!counts) {
-      counts = new Map<string, number>();
-      styleMutationCounts.set(record.target, counts);
-    }
-    const count = (counts.get(name) ?? 0) + 1;
-    counts.set(name, count);
-    if (count >= 2) transientStyleBoundaries.add(record.target);
   }
-  const addedRootIdentities = new Set<Node>(addedRoots);
   for (const record of records) {
     if (record.type !== 'attributes' || !isElementNode(record.target)) {
       continue;
@@ -1709,35 +1699,13 @@ export function rememberSourceMutationSecrets(
     if (!name) continue;
     const facts = sourceClassificationFacts(element, sourceWindow, false, false);
     const oldValue = record.oldValue ?? '';
-    const addedSubtreeStyleTransition =
-      (name === 'class' || name === 'style') &&
-      oldValue.trim() !== '' &&
-      sourceNodeIsWithinAddedSubtree(element, addedRootIdentities);
     const oldFacts: SourceClassificationFacts = {
       ...facts,
       ...(name === 'type' ? { type: oldValue } : {}),
       ...(name === 'autocomplete' ? { autocomplete: oldValue } : {}),
       ...(name === 'role' ? { role: oldValue } : {}),
       ...(name === 'contenteditable' ? { contentEditable: oldValue } : {}),
-      ...(
-        (name === 'style' && oldStyleUsedTextSecurity(oldValue)) ||
-        (
-          (name === 'class' || name === 'style') &&
-          (
-            transientStyleBoundaries.has(element) ||
-            addedSubtreeStyleTransition
-          ) &&
-          sourceMutationBoundaryMayHoldValue(element, records)
-        )
-        ? { computedTextSecurity: 'disc' }
-        : {}),
-      // MutationObserver cannot recover an intermediate CSSOM/class match.
-      // When a class changes in the same batch as descendant content, retain
-      // the conservative credential decision for an existing node too.
-      ...(name === 'class' && sourceMutationBatchChangesValueBearingContentWithin(
-        element,
-        records,
-      )
+      ...(name === 'style' && oldStyleUsedTextSecurity(oldValue)
         ? { computedTextSecurity: 'disc' }
         : {}),
     };
@@ -1831,60 +1799,6 @@ function sourceDocumentElementForNode(node: Node): Element | undefined {
   }
 }
 
-function sourceNodeIsWithinAddedSubtree(
-  node: Node,
-  addedRoots: ReadonlySet<Node>,
-): boolean {
-  if (addedRoots.size === 0) return false;
-  const seen = new Set<Node>();
-  try {
-    let current: Node | null = node;
-    while (current) {
-      if (addedRoots.has(current)) return true;
-      if (
-        seen.has(current) ||
-        seen.size >= MAX_SEMANTIC_SOURCE_NODE_IDENTITIES
-      ) return true;
-      seen.add(current);
-      current = current.parentNode;
-    }
-    return false;
-  } catch {
-    // Unreadable or malformed ancestry cannot prove independence from a new
-    // subtree whose pre-insertion masking state was not observable.
-    return true;
-  }
-}
-
-function sourceMutationBoundaryMayHoldValue(
-  boundary: Element,
-  records: readonly MutationRecord[],
-): boolean {
-  const stack = [boundary];
-  const visited = new Set<Element>();
-  while (stack.length > 0) {
-    const element = stack.pop();
-    if (!element || visited.has(element)) continue;
-    visited.add(element);
-    if (visited.size > MAX_SEMANTIC_SOURCE_NODE_IDENTITIES) return true;
-    if (sourceElementIsValueBoundary(element, records)) return true;
-    stack.push(...[...element.children]);
-    const shadowRoot = safelyReadShadowRoot(element);
-    if (shadowRoot) stack.push(...[...shadowRoot.children]);
-    if (element.localName.toLowerCase() === 'slot') {
-      try {
-        const assigned = (element as HTMLSlotElement).assignedElements?.({
-          flatten: true,
-        });
-        if (assigned) stack.push(...assigned);
-      } catch {
-        return true;
-      }
-    }
-  }
-  return false;
-}
-
 /**
  * beforeinput/input/change run synchronously while the page's intermediate
  * computed masking is still observable. Classify only structural/style facts;
@@ -1911,90 +1825,6 @@ export function rememberSourceEventSecret(
   if (!isElementNode(candidate)) return;
   hasSourceCredentialSecretAncestor(candidate, classifier, sourceWindow);
 }
-
-function sourceMutationBatchChangesValueBearingContentWithin(
-  boundary: Element,
-  records: readonly MutationRecord[],
-): boolean {
-  for (const record of records) {
-    let contentElement: Element | undefined;
-    if (record.type === 'characterData') {
-      contentElement = record.target.parentElement ?? undefined;
-    } else if (record.type === 'childList') {
-      contentElement = isElementNode(record.target)
-        ? record.target
-        : record.target.parentElement ?? undefined;
-    } else if (
-      record.type === 'attributes' &&
-      ['value', 'placeholder'].includes(record.attributeName?.toLowerCase() ?? '')
-    ) {
-      contentElement = isElementNode(record.target) ? record.target : undefined;
-    }
-    if (!contentElement) continue;
-    const path = readSourceFlatTreeElementPath(contentElement);
-    if (!path) return true;
-    const boundaryIndex = path.indexOf(boundary);
-    if (boundaryIndex < 0) continue;
-    if (path.slice(0, boundaryIndex + 1).some(
-      (element) => sourceElementIsValueBoundary(element, records),
-    )) return true;
-  }
-  return false;
-}
-
-/**
- * Tags and roles whose text or state is a value a page can mask with
- * `-webkit-text-security`: form values, editable text and checked/selected
- * state. Activation controls (`a`, `button`, `summary`, and the button, link,
- * menuitem, tab and treeitem roles) carry a public label, not a maskable
- * value, so a class or style that flips twice in one batch on a region that
- * merely contains them (a carousel's slides and bullets on every move) is not
- * a credential transition. Those controls keep their own control semantics
- * everywhere else.
- */
-const SEMANTIC_VALUE_BOUNDARY_TAGS = new Set([
-  'input', 'label', 'optgroup', 'option', 'output', 'select', 'textarea',
-]);
-const SEMANTIC_VALUE_BOUNDARY_ROLES = new Set([
-  'checkbox', 'combobox', 'listbox', 'menuitemcheckbox', 'menuitemradio',
-  'option', 'radio', 'searchbox', 'slider', 'spinbutton', 'switch', 'textbox',
-]);
-
-function sourceRoleHasValueToken(value: unknown): boolean {
-  return typeof value === 'string' && value.trim().toLowerCase()
-    .split(/\s+/u).some((role) => SEMANTIC_VALUE_BOUNDARY_ROLES.has(role));
-}
-
-function sourceElementIsValueBoundary(
-  element: Element,
-  records: readonly MutationRecord[],
-): boolean {
-  const tagName = element.localName.toLowerCase();
-  const attributes = readSourceStructuralAttributes(element);
-  if (
-    SEMANTIC_VALUE_BOUNDARY_TAGS.has(tagName) ||
-    sourceRoleHasValueToken(attributes.role) ||
-    sourceAttributesArePrivate(attributes)
-  ) return true;
-  for (const record of records) {
-    if (record.type !== 'attributes' || record.target !== element) continue;
-    const name = record.attributeName?.toLowerCase();
-    if (
-      name === 'contenteditable' &&
-      record.oldValue !== null &&
-      isSourcePrivateContentEditableValue(record.oldValue)
-    ) return true;
-    if (
-      name === 'role' &&
-      (
-        sourceRoleHasValueToken(record.oldValue) ||
-        sourceAttributesArePrivate({ role: record.oldValue })
-      )
-    ) return true;
-  }
-  return false;
-}
-
 
 function isElementNode(value: unknown): value is Element {
   return typeof value === 'object' && value !== null &&

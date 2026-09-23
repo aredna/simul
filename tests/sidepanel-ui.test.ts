@@ -241,6 +241,16 @@ describe('sidepanel UI structure', () => {
     }
     expect(experimental?.querySelector('#restore-mirror-limits')?.hasAttribute('data-ui-label'))
       .toBe(true);
+    // D75: the testing switch that turns every privacy filter off.
+    const showEverything = experimental?.querySelector<HTMLInputElement>(
+      '#mirror-show-everything',
+    );
+    expect(showEverything?.getAttribute('type')).toBe('checkbox');
+    expect(showEverything?.closest('label')?.querySelector('[data-ui-label]'))
+      .not.toBeNull();
+    const disclosureId = showEverything?.getAttribute('aria-describedby');
+    expect(experimental?.querySelector(`#${disclosureId}`)
+      ?.hasAttribute('data-ui-label')).toBe(true);
     expect(experimental?.querySelector('#image-analysis-host')).not.toBeNull();
     expect(markup.indexOf('id="settings-grid"'))
       .toBeLessThan(markup.indexOf('id="experimental-options"'));

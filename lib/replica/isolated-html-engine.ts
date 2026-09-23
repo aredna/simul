@@ -44,6 +44,10 @@ import {
   type HtmlMirrorLimitSettings,
 } from './html-mirror-limits';
 import {
+  SOURCE_PRIVACY_FILTERS_OFF,
+  applySourcePrivacyFiltersOff,
+} from './source-privacy-mode';
+import {
   isSourceActivationRoleValue,
   isSourceActivationTagName,
   isSourcePublicMenuRoleValue,
@@ -80,6 +84,7 @@ import {
   type ReadOnlyReplicaDisclosure,
 } from './read-only-disclosure';
 import {
+  FULL_VISIBLE_REPLICA_READ_SCOPE,
   PAGE_ONLY_REPLICA_READ_SCOPE,
   type ReplicaReadScope,
 } from './read-scope-policy';
@@ -216,6 +221,11 @@ interface IsolatedHtmlEngineOptions {
   readonly getReplicaFidelityPolicy?: () => SelectableReplicaFidelityPolicy;
   /** The Advanced size limits; applied here and sent to the page (D64). */
   readonly getMirrorLimits?: () => HtmlMirrorLimitSettings;
+  /**
+   * The Advanced "Show everything (testing)" switch; applied here and sent to
+   * the page (D75). While it is on the semantic channel reads at Full visible.
+   */
+  readonly getShowEverything?: () => boolean;
   readonly getReplicaReadScope?: () => ReplicaReadScope;
   readonly openSemanticStream?: SemanticSourceStreamFactory;
   readonly onLiveApplied?: () => void;
@@ -331,12 +341,15 @@ export class IsolatedHtmlReplicaEngine
     const limits = this.options.getMirrorLimits?.() ??
       DEFAULT_HTML_MIRROR_LIMIT_SETTINGS;
     applyHtmlMirrorLimitSettings(limits);
+    const showEverything = this.options.getShowEverything?.() === true;
+    applySourcePrivacyFiltersOff(showEverything);
     try {
       stream = await this.options.openStream(
         request,
         fidelityPolicy,
         signal,
         limits,
+        showEverything,
       );
       if (!this.#isCurrent(runVersion, request, signal)) {
         stream.dispose();
@@ -1119,8 +1132,9 @@ export class IsolatedHtmlReplicaEngine
     signal?: AbortSignal,
   ): void {
     const open = this.options.openSemanticStream;
-    const scope = this.options.getReplicaReadScope?.() ??
-      PAGE_ONLY_REPLICA_READ_SCOPE;
+    const scope = SOURCE_PRIVACY_FILTERS_OFF
+      ? FULL_VISIBLE_REPLICA_READ_SCOPE
+      : this.options.getReplicaReadScope?.() ?? PAGE_ONLY_REPLICA_READ_SCOPE;
     if (!open || !hasSemanticReadScope(scope)) return;
     const replicaDocument = state.iframe.contentDocument;
     if (!replicaDocument) return;
@@ -2443,6 +2457,9 @@ function applyControlText(
     return;
   }
   if (tagName !== 'input' && tagName !== 'textarea') return;
+  // With "Show everything (testing)" on, the page's value and placeholder
+  // attributes travel and show until the semantic channel sets live values.
+  if (SOURCE_PRIVACY_FILTERS_OFF && !controlText) return;
   const control = element as Element & {
     value: string;
     placeholder: string;
@@ -2763,7 +2780,7 @@ function applyPatchBatch(
       ) return undefined;
       if (
         prospectiveContext.privateAttributeRegion &&
-        hasPrivateHtmlMirrorAttribute(operation.attributes)
+        hasPrivateHtmlMirrorAttribute(operation.tagName, operation.attributes)
       ) return undefined;
       try {
         const sentinelDocument = target.ownerDocument;
@@ -3821,7 +3838,10 @@ function validGraphForContext(
   }
   const attributes = Object.fromEntries(node.attributes);
   const context = extendDomContentContext(inherited, node.tagName, attributes);
-  return (!context.privateAttributeRegion || !hasPrivateHtmlMirrorAttribute(node.attributes)) &&
+  return (
+    !context.privateAttributeRegion ||
+    !hasPrivateHtmlMirrorAttribute(node.tagName, node.attributes)
+  ) &&
     (!context.publicMenuRegion ||
       (
         node.tagName !== 'link' && node.tagName !== 'style' &&

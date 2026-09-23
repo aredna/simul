@@ -26,7 +26,11 @@ import {
   type IsolatedMirrorInfo,
 } from '../lib/replica/isolated-html-engine';
 import { createReplicaIdentity } from '../lib/replica/replica-identity';
-import { FULL_VISIBLE_REPLICA_READ_SCOPE } from '../lib/replica/read-scope-policy';
+import {
+  FULL_VISIBLE_REPLICA_READ_SCOPE,
+  PAGE_ONLY_REPLICA_READ_SCOPE,
+  type ReplicaReadScope,
+} from '../lib/replica/read-scope-policy';
 import {
   PAINTED_SEMANTIC_LABEL_ATTRIBUTE,
   PAINTED_SEMANTIC_LABEL_OVERLAY_ATTRIBUTE,
@@ -45,6 +49,10 @@ import {
   type HtmlMirrorNode,
 } from '../lib/replica/html-mirror-sanitizer';
 import { applyHtmlMirrorLimitSettings } from '../lib/replica/html-mirror-limits';
+import {
+  SOURCE_PRIVACY_FILTERS_OFF,
+  applySourcePrivacyFiltersOff,
+} from '../lib/replica/source-privacy-mode';
 import { sourceSecretPlaceholderTagName } from '../lib/replica/source-secret-classifier';
 import type {
   ReplayPresentationHost,
@@ -104,6 +112,84 @@ describe('IsolatedHtmlReplicaEngine', () => {
     }
     expect(sent).toEqual([limits]);
     expect(nodeCapsAtOpen).toEqual([5_000]);
+  });
+
+  it('applies Show everything and sends it with the stream (D75)', async () => {
+    const sent: unknown[] = [];
+    const switchAtOpen: boolean[] = [];
+    const engine = new IsolatedHtmlReplicaEngine({
+      presentationHost: new FakePresentationHost(),
+      getShowEverything: () => true,
+      openStream: async (_request, _policy, _signal, _limits, showEverything) => {
+        sent.push(showEverything);
+        switchAtOpen.push(SOURCE_PRIVACY_FILTERS_OFF);
+        throw new Error('The test stops at the stream.');
+      },
+    });
+    try {
+      await engine.run(request);
+    } finally {
+      applySourcePrivacyFiltersOff(false);
+    }
+    expect(sent).toEqual([true]);
+    expect(switchAtOpen).toEqual([true]);
+  });
+
+  it('shows authored control values and reads at Full visible under Show everything (D75)', async () => {
+    applySourcePrivacyFiltersOff(true);
+    try {
+      const checkpoint = createHtmlMirrorCheckpoint(
+        createReplicaIdentity({ ...identityParts, sequence: 0 }),
+        {
+          root: {
+            kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+            attributes: [], children: [
+              { kind: 'element', id: 2, namespace: 'html', tagName: 'head', attributes: [], children: [] },
+              { kind: 'element', id: 3, namespace: 'html', tagName: 'body', attributes: [], children: [{
+                kind: 'element', id: 4, namespace: 'html', tagName: 'input',
+                attributes: [['type', 'date'], ['value', '2026-09-23']],
+                children: [],
+              }, {
+                kind: 'element', id: 5, namespace: 'html', tagName: 'input',
+                attributes: [['placeholder', 'Authored placeholder']],
+                children: [],
+              }] },
+            ],
+          },
+          adoptedStyleSheets: [], captureMs: 1,
+          viewportWidth: 800, viewportHeight: 600,
+          documentWidth: 800, documentHeight: 1000,
+        },
+        'passive',
+      )!;
+      expect(checkpoint).toBeDefined();
+      const scopes: ReplicaReadScope[] = [];
+      const host = new FakePresentationHost();
+      const engine = new IsolatedHtmlReplicaEngine({
+        presentationHost: host,
+        getShowEverything: () => true,
+        openStream: async () => new FakeHtmlStream(checkpoint),
+        openSemanticStream: async (_request, _bridge, scope) => {
+          scopes.push(scope);
+          return new FakeSemanticStream();
+        },
+        getReplicaReadScope: () => PAGE_ONLY_REPLICA_READ_SCOPE,
+        initializeIframe: async (iframe, shell) => {
+          const { document } = parseHTML(shell);
+          Object.defineProperty(iframe, 'contentDocument', { value: document });
+          return document;
+        },
+      });
+      await engine.run(request);
+      await Promise.resolve();
+      const replica = host.iframe!.contentDocument!;
+      const [date, text] = [...replica.querySelectorAll('input')];
+      expect(date?.getAttribute('value')).toBe('2026-09-23');
+      expect(text?.getAttribute('placeholder')).toBe('Authored placeholder');
+      expect(scopes).toEqual([FULL_VISIBLE_REPLICA_READ_SCOPE]);
+    } finally {
+      applySourcePrivacyFiltersOff(false);
+    }
   });
 
   it('rejects the initial about:blank document and accepts only the marked srcdoc shell', () => {
@@ -1077,7 +1163,7 @@ describe('IsolatedHtmlReplicaEngine', () => {
         }],
       }, {
         kind: 'attributes', nodeId: 4, namespace: 'html', tagName: 'select',
-        attributes: [['role', 'combobox']],
+        attributes: [['role', 'textbox']],
       }],
       undefined,
       'passive',

@@ -49,6 +49,7 @@ import {
   MAX_HTML_MIRROR_NODES_SETTING,
   applyHtmlMirrorLimitSettings,
 } from './html-mirror-limits';
+import { applySourcePrivacyFiltersOff } from './source-privacy-mode';
 import { createReplicaIdentity } from './replica-identity';
 import { minimizeConnectedComposedTargets } from './composed-targets';
 import { readSemanticSourcePortIdentity } from './semantic-source-protocol';
@@ -547,8 +548,10 @@ export class HtmlMirrorSourceSession {
         this.dispose(true);
         return;
       }
-      // Both sides of this mirror use the panel's size limits.
+      // Both sides of this mirror use the panel's size limits and its
+      // "Show everything (testing)" switch.
       applyHtmlMirrorLimitSettings(message.limits);
+      applySourcePrivacyFiltersOff(message.showEverything);
       this.#start(message.identity, message.fidelityPolicy);
       return;
     }

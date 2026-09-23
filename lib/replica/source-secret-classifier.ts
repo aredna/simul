@@ -1,4 +1,5 @@
 import type { ReplicaReadScope } from './read-scope-policy';
+import { SOURCE_PRIVACY_FILTERS_OFF } from './source-privacy-mode';
 
 export const SOURCE_SECRET_CLASSIFIER_VERSION = 1;
 
@@ -80,6 +81,14 @@ const PERSONAL_AUTOCOMPLETE_SET = new Set<string>(
 const SECRET_AUTOCOMPLETE_SET = new Set<string>(
   SOURCE_SECRET_AUTOCOMPLETE_TOKENS,
 );
+/**
+ * Input types whose value the page draws as the field's text. Dates, times
+ * and colours were withheld under every read scope until D75.
+ */
+const ORDINARY_FORM_INPUT_TYPES = new Set([
+  '', 'text', 'search', 'url', 'range', 'number', 'date', 'time',
+  'datetime-local', 'month', 'week', 'color',
+]);
 const HARMLESS_AUTOCOMPLETE_TOKENS = new Set([
   'on', 'off', 'shipping', 'billing', 'home', 'work', 'mobile', 'fax',
   'pager',
@@ -93,11 +102,15 @@ export function normalizeAutocompleteTokens(value: unknown): readonly string[] {
 export function sourceFactsAreSecret(
   facts: SourceClassificationFacts,
 ): boolean {
+  // "Show everything (testing)" treats nothing as a credential (D75).
+  if (SOURCE_PRIVACY_FILTERS_OFF) return false;
   const tag = normalized(facts.tagName);
   const type = normalized(facts.type);
   if (isSourceSecretPlaceholderTagName(tag)) return true;
   if (facts.secretAncestor === true) return true;
-  if (tag === 'input' && (type === 'password' || type === 'hidden' || type === 'file')) {
+  // A file input is not a secret (D75): the replica draws the empty control
+  // the page shows. Its value, a file name, is never read.
+  if (tag === 'input' && (type === 'password' || type === 'hidden')) {
     return true;
   }
   const textSecurity = normalized(facts.computedTextSecurity);
@@ -122,9 +135,10 @@ export function classifySourceEvidence(
   if (
     tag === 'textarea' ||
     (tag === 'select' && facts.valueBearing === true) ||
-    (tag === 'input' &&
-      ['', 'text', 'search', 'url', 'range', 'number'].includes(type) &&
-      tokens.every(isHarmlessAutocompleteToken))
+    (tag === 'input' && ORDINARY_FORM_INPUT_TYPES.has(type) &&
+      // "Show everything (testing)" also reads card and one-time-code
+      // fields; never a password (only its dots show) or a file name (D75).
+      (SOURCE_PRIVACY_FILTERS_OFF || tokens.every(isHarmlessAutocompleteToken)))
   ) return 'ordinary-form';
   const contentEditable = normalized(facts.contentEditable);
   if (
@@ -169,7 +183,9 @@ export class StickySourceSecretClassifier {
     identity: object,
     facts: SourceClassificationFacts,
   ): SourceEvidenceCategory {
-    if (this.#secrets.has(identity)) return 'secret';
+    if (!SOURCE_PRIVACY_FILTERS_OFF && this.#secrets.has(identity)) {
+      return 'secret';
+    }
     const category = classifySourceEvidence(facts);
     if (category === 'secret') {
       this.#secrets.add(identity);
@@ -179,7 +195,7 @@ export class StickySourceSecretClassifier {
   }
 
   isSecret(identity: object): boolean {
-    return this.#secrets.has(identity);
+    return !SOURCE_PRIVACY_FILTERS_OFF && this.#secrets.has(identity);
   }
 }
 

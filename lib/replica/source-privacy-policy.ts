@@ -3,6 +3,7 @@ import {
   sourceFactsAreSecret,
   type StickySourceSecretClassifier,
 } from './source-secret-classifier';
+import { SOURCE_PRIVACY_FILTERS_OFF } from './source-privacy-mode';
 
 export const SOURCE_PRIVATE_TAGS = Object.freeze([
   'input',
@@ -53,21 +54,24 @@ export interface SourceControlText {
   readonly text: string;
 }
 
+/**
+ * Roles whose content is what the user entered or chose. A checkbox, radio or
+ * switch shows its label, which is page text, and a combobox that is not an
+ * editable input shows its current choice the way a button shows its label;
+ * those are activation roles (D75). An editable combobox is an input or a
+ * contenteditable region and stays private through those.
+ */
 export const SOURCE_PRIVATE_ROLES = Object.freeze([
-  'checkbox',
-  'combobox',
-  'radio',
   'searchbox',
   'slider',
   'spinbutton',
-  'switch',
   'textbox',
 ] as const);
 
 /**
  * Structural menu roles expose public labels rather than editable values.
  * Their editable descendants still start their own private regions, and an
- * editable combobox remains private through SOURCE_PRIVATE_ROLES.
+ * editable combobox (an input or a contenteditable region) stays private.
  */
 export const SOURCE_PUBLIC_MENU_ROLES = Object.freeze([
   'listbox',
@@ -81,9 +85,13 @@ export const SOURCE_ACTIVATION_TAGS = Object.freeze([
 
 export const SOURCE_ACTIVATION_ROLES = Object.freeze([
   'button',
+  'checkbox',
+  'combobox',
   'menuitem',
   'menuitemcheckbox',
   'menuitemradio',
+  'radio',
+  'switch',
   'tab',
   'treeitem',
 ] as const);
@@ -106,10 +114,9 @@ export interface SourceControlledTabRelationship {
 
 /**
  * A resolved `aria-controls` target is withheld unless it is a uniquely proven
- * open tab, or every control that references it carries no disclosure state
- * (a carousel's previous/next buttons, a "scroll to" control). Such a
- * controlled region is ordinary page content rather than a collapsed
- * disclosure; the hidden-region rules still apply to it.
+ * open tab, or the page paints it (a carousel slide, an open accordion panel;
+ * D75). Such a controlled region is ordinary page content rather than a
+ * collapsed disclosure; the hidden-region rules still apply to it.
  */
 export type SourceControlledTargetState =
   | 'open-tab'
@@ -117,7 +124,7 @@ export type SourceControlledTargetState =
   | 'withheld';
 
 export interface SourceControlledContentPolicy {
-  /** Every resolved target is withheld unless it is a proven open tab or a stateless controlled region. */
+  /** Every resolved target is withheld unless it is a proven open tab or a painted controlled region. */
   readonly targets: ReadonlyMap<Element, SourceControlledTargetState>;
   readonly tabs: readonly SourceControlledTabRelationship[];
   /** Identity-only context used to avoid rescanning for unrelated mutations. */
@@ -263,7 +270,6 @@ export function createSourceControlledContentPolicy(
     const relations = new Map<Element, Array<{
       readonly trigger: Element;
       readonly structurallyUnique: boolean;
-      readonly stateless: boolean;
     }>>();
     let referencedIdBytes = 0;
     let unresolved = false;
@@ -301,7 +307,6 @@ export function createSourceControlledContentPolicy(
             structurallyUnique: rawIds.length === 1 &&
               isSafeSourceControlledId(id) &&
               sameRoot.length === 1 && sameRoot[0] === panel,
-            stateless: !sourceTriggerCarriesDisclosureState(trigger),
           }));
           relations.set(panel, entries);
         }
@@ -322,17 +327,16 @@ export function createSourceControlledContentPolicy(
       tabs.push(Object.freeze({ trigger, panel, selected }));
     }
     withholdContradictoryTablists(tabs, targets);
-    // A region whose every controller is stateless (no expanded, selected,
-    // pressed, checked or popup state, and no native control) is not a
-    // disclosure: nothing collapses it, so its content is ordinary page
-    // content, but only while it is actually painted. A stateless "Show
-    // details" button can still control a panel collapsed to zero height,
-    // faded out or clipped away (bug-hunt P2); that stays withheld until a
-    // layout change re-proves it.
-    for (const [panel, entries] of relations) {
+    // A controlled region the page actually paints is ordinary page content,
+    // whatever state its controls carry (D75): a carousel slide whose dots
+    // are tabs, an accordion panel that is open. Until D75 only regions whose
+    // every controller was stateless qualified, so a slider whose tab dots
+    // were not painted lost every slide's text. A panel collapsed to zero
+    // height, faded out or clipped away (bug-hunt P2) stays withheld until a
+    // layout change proves it painted.
+    for (const panel of relations.keys()) {
       if (
         targets.get(panel) === 'withheld' &&
-        entries.every((entry) => entry.stateless) &&
         sourceElementBoxIsPainted(panel, sourceWindow, paintCache)
       ) targets.set(panel, 'controlled-region');
     }
@@ -366,6 +370,7 @@ export function sourceControlledContentIsWithheld(
   element: Element,
   policy: SourceControlledContentPolicy,
 ): boolean {
+  if (SOURCE_PRIVACY_FILTERS_OFF) return false;
   if (policy.unindexableIdTargets.has(element)) return true;
   if (policy.withheldIdRoots.has(element.getRootNode()) && Boolean(
     safelyReadSourceAttribute(element, 'id'),
@@ -377,8 +382,8 @@ export function sourceControlledContentIsWithheld(
 
 /**
  * True when `element` is an `aria-controls` target that stays readable only
- * because every control referencing it is stateless. Image policy still
- * treats such a region as control-adjacent.
+ * because the page paints it. Image policy still treats such a region as
+ * control-adjacent.
  */
 export function sourceControlledContentIsControlledRegion(
   element: Element,
@@ -676,51 +681,6 @@ function withholdContradictoryTablists(
     const tab = tabs[index];
     if (tab && contradictory.has(tab)) tabs.splice(index, 1);
   }
-}
-
-const STATEFUL_CONTROLLER_ATTRIBUTES = Object.freeze([
-  'aria-expanded',
-  'aria-selected',
-  'aria-pressed',
-  'aria-checked',
-  'aria-haspopup',
-]);
-const STATEFUL_CONTROLLER_ROLES = new Set([
-  'tab',
-  'combobox',
-  'switch',
-  'checkbox',
-  'radio',
-  'menuitemcheckbox',
-  'menuitemradio',
-]);
-const STATEFUL_CONTROLLER_TAGS = new Set([
-  'input',
-  'select',
-  'textarea',
-  'details',
-  'summary',
-]);
-
-/**
- * Whether a controller carries disclosure state that can collapse or select
- * its target. Any present state attribute counts, whatever its value, so a
- * `false` or malformed value still fails closed; unreadable attributes do too.
- */
-function sourceTriggerCarriesDisclosureState(trigger: Element): boolean {
-  let tagName = '';
-  try {
-    tagName = trigger.localName.toLowerCase();
-  } catch {
-    return true;
-  }
-  if (STATEFUL_CONTROLLER_TAGS.has(tagName)) return true;
-  if (STATEFUL_CONTROLLER_ROLES.has(normalizedSourceRole(trigger))) return true;
-  for (const name of STATEFUL_CONTROLLER_ATTRIBUTES) {
-    // Present (any value) or unreadable both count as state.
-    if (safelyReadSourceAttribute(trigger, name) !== null) return true;
-  }
-  return closestSourceTablist(trigger) !== undefined;
 }
 
 function closestSourceTablist(trigger: Element): Element | undefined {
@@ -1119,6 +1079,7 @@ function sourceControlledStringByteLength(value: string): number {
 }
 
 export function isSourcePrivateTagName(value: string): boolean {
+  if (SOURCE_PRIVACY_FILTERS_OFF) return false;
   return PRIVATE_TAG_SET.has(value.trim().toLowerCase());
 }
 
@@ -1209,6 +1170,7 @@ export function sourceElementStartsPrivateRegion(
   tagName: string,
   attributes: Readonly<Record<string, unknown>>,
 ): boolean {
+  if (SOURCE_PRIVACY_FILTERS_OFF) return false;
   const tag = tagName.trim().toLowerCase();
   if (tag === 'input' || tag === 'textarea') {
     return !isEligibleSourceTextControl(tag, attributes);
@@ -1222,6 +1184,7 @@ export function sourceElementStartsPrivateRegionInContext(
   attributes: Readonly<Record<string, unknown>>,
   nativeSelectRegion: boolean,
 ): boolean {
+  if (SOURCE_PRIVACY_FILTERS_OFF) return false;
   const tag = tagName.trim().toLowerCase();
   if (tag === 'option' && nativeSelectRegion) {
     return sourceAttributesArePrivate(attributes);
@@ -1659,7 +1622,14 @@ export function isSourcePrivateRoleValue(value: unknown): boolean {
   return sourceSensitiveRoleKind(value) === 'private';
 }
 
+/**
+ * With "Show everything (testing)" on, an ARIA menu or listbox is ordinary
+ * content: the replica draws it with the page's own styles instead of an
+ * isolated facsimile, at the cost of the replica's own dropdown preview for
+ * it (D75).
+ */
 export function isSourcePublicMenuRoleValue(value: unknown): boolean {
+  if (SOURCE_PRIVACY_FILTERS_OFF) return false;
   return sourceSensitiveRoleKind(value) === 'public-menu';
 }
 
@@ -1699,6 +1669,7 @@ export function isSourcePrivateContentEditableValue(value: unknown): boolean {
 export function sourceAttributesArePrivate(
   attributes: Readonly<Record<string, unknown>>,
 ): boolean {
+  if (SOURCE_PRIVACY_FILTERS_OFF) return false;
   for (const [rawName, rawValue] of Object.entries(attributes)) {
     const name = rawName.toLowerCase();
     if (
@@ -1711,6 +1682,7 @@ export function sourceAttributesArePrivate(
 }
 
 export function hasSourcePrivateElementAncestor(element: Element): boolean {
+  if (SOURCE_PRIVACY_FILTERS_OFF) return false;
   if (hasSourceCredentialSecretAncestor(element)) return true;
   const path = readSourceFlatTreeElementPath(element);
   if (!path) return true;
@@ -1754,6 +1726,7 @@ export function hasSourceCredentialSecretAncestor(
   sourceWindow: Window | null | undefined = node.ownerDocument?.defaultView,
   memo?: SourceSecretAncestorMemo,
 ): boolean {
+  if (SOURCE_PRIVACY_FILTERS_OFF) return false;
   if (classifier.isSecret(node)) return true;
   const path = readSourceFlatTreeElementPath(node);
   if (!path) {
@@ -1851,6 +1824,7 @@ export function hasSourceCredentialSecretAncestor(
 export function hasSourcePrivateOrActivationElementAncestor(
   element: Element,
 ): boolean {
+  if (SOURCE_PRIVACY_FILTERS_OFF) return false;
   if (hasSourceCredentialSecretAncestor(element)) return true;
   const path = readSourceFlatTreeElementPath(element);
   if (!path) return true;
@@ -1878,6 +1852,7 @@ export function hasSourcePrivateOrActivationElementAncestor(
 export function hasSourceControlOrEditableElementAncestor(
   element: Element,
 ): boolean {
+  if (SOURCE_PRIVACY_FILTERS_OFF) return false;
   const path = readSourceFlatTreeElementPath(element);
   if (!path) return true;
   for (const current of path) {
@@ -1909,6 +1884,7 @@ export function hasSourceImageCaptureBlockingAncestor(
   element: Element,
   options: { readonly allowActivationControls?: boolean } = {},
 ): boolean {
+  if (SOURCE_PRIVACY_FILTERS_OFF) return false;
   const path = readSourceFlatTreeElementPath(element);
   if (!path) return true;
   for (const current of path) {

@@ -121,6 +121,8 @@ export interface CompanionPreferences {
   replicaFidelityPolicy: SelectableReplicaFidelityPolicy;
   /** The mirror's size limits, set in Advanced (D64). */
   mirrorLimits: HtmlMirrorLimitSettings;
+  /** Advanced "Show everything (testing)": no privacy filtering (D75). */
+  mirrorShowEverything: boolean;
   replicaViewMode: ReplicaViewMode;
   launchBehavior: CompanionLaunchBehavior;
   lastLaunchSurface: CompanionSurface;
@@ -166,6 +168,7 @@ export const DEFAULT_COMPANION_PREFERENCES: Readonly<CompanionPreferences> =
     textLayoutMode: 'adaptive',
     replicaFidelityPolicy: 'passive',
     mirrorLimits: DEFAULT_HTML_MIRROR_LIMIT_SETTINGS,
+    mirrorShowEverything: false,
     replicaViewMode: 'translated',
     launchBehavior: 'last-used',
     lastLaunchSurface: 'side-panel',
@@ -289,6 +292,7 @@ export function parseCompanionPreferences(
       ? input.replicaFidelityPolicy
       : DEFAULT_COMPANION_PREFERENCES.replicaFidelityPolicy,
     mirrorLimits: repairMirrorLimits(input.mirrorLimits),
+    mirrorShowEverything: input.mirrorShowEverything === true,
     replicaViewMode: isReplicaViewMode(input.replicaViewMode)
       ? input.replicaViewMode
       : DEFAULT_COMPANION_PREFERENCES.replicaViewMode,
@@ -505,6 +509,7 @@ export interface CompanionViewSettings {
   textLayoutMode: TextLayoutMode;
   replicaFidelityPolicy: SelectableReplicaFidelityPolicy;
   mirrorLimits: HtmlMirrorLimitSettings;
+  mirrorShowEverything: boolean;
   replicaViewMode: ReplicaViewMode;
   launchBehavior: CompanionLaunchBehavior;
   lastLaunchSurface: CompanionSurface;
@@ -728,6 +733,7 @@ function createDefaultPreferences(): CompanionPreferences {
     textLayoutMode: 'adaptive',
     replicaFidelityPolicy: 'passive',
     mirrorLimits: DEFAULT_HTML_MIRROR_LIMIT_SETTINGS,
+    mirrorShowEverything: false,
     replicaViewMode: 'translated',
     launchBehavior: 'last-used',
     lastLaunchSurface: 'side-panel',

@@ -60,6 +60,7 @@ export type HtmlMirrorStreamFactory = (
   fidelityPolicy: SelectableReplicaFidelityPolicy,
   signal?: AbortSignal,
   limits?: HtmlMirrorLimitSettings,
+  showEverything?: boolean,
 ) => Promise<HtmlMirrorStreamLease>;
 
 export async function openChromeHtmlMirrorStream(
@@ -67,6 +68,7 @@ export async function openChromeHtmlMirrorStream(
   fidelityPolicy: SelectableReplicaFidelityPolicy = 'conservative',
   signal?: AbortSignal,
   limits: HtmlMirrorLimitSettings = DEFAULT_HTML_MIRROR_LIMIT_SETTINGS,
+  showEverything = false,
 ): Promise<HtmlMirrorStreamLease> {
   signal?.throwIfAborted();
   if (!request.isCurrent()) {
@@ -103,6 +105,7 @@ export async function openChromeHtmlMirrorStream(
     request,
     fidelityPolicy,
     limits,
+    showEverything,
     signal,
   );
 }
@@ -124,6 +127,7 @@ class ChromeHtmlMirrorStreamLease implements HtmlMirrorStreamLease {
     private readonly request: ReplicaCaptureRequest,
     private readonly fidelityPolicy: SelectableReplicaFidelityPolicy,
     limits: HtmlMirrorLimitSettings,
+    showEverything: boolean,
     private readonly signal?: AbortSignal,
   ) {
     let resolveInitial!: (checkpoint: HtmlMirrorCheckpoint) => void;
@@ -141,7 +145,12 @@ class ChromeHtmlMirrorStreamLease implements HtmlMirrorStreamLease {
       this.#fail(new Error('HTML mirror initial checkpoint timed out.'));
     }, HTML_MIRROR_INITIAL_CHECKPOINT_TIMEOUT_MS);
     try {
-      port.postMessage(createHtmlMirrorStart(identity, fidelityPolicy, limits));
+      port.postMessage(createHtmlMirrorStart(
+        identity,
+        fidelityPolicy,
+        limits,
+        showEverything,
+      ));
     } catch (error) {
       this.#fail(error);
     }

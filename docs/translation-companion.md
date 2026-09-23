@@ -140,14 +140,18 @@ independent switches, and any other combination is shown as Custom:
 - public control labels and semantics;
 - non-secret images inside controls;
 - validated same-document disclosure content;
-- ordinary visible text/search/URL/textarea values and selection state;
+- ordinary visible text/search/URL/number/date/time/textarea values and
+  selection state;
 - personal/autofill values such as names, addresses, usernames, email, and
   telephone; and
 - visible non-secret contenteditable or ARIA editor text.
 
-Password fields, CSS text-security fields, hidden/file inputs, file paths,
-password/authentication/one-time-code/WebAuthn autocomplete, and every `cc-*`
-autocomplete token are a non-configurable floor. Classification occurs before
+Password fields, CSS text-security fields, hidden inputs, file names and
+paths, password/authentication/one-time-code/WebAuthn autocomplete, and every
+`cc-*` autocomplete token are a floor no read scope lifts; only the Advanced
+**Show everything (testing)** switch does (D75, see
+[Replica fidelity](replica-fidelity.md)). A file input is drawn as the empty
+control the page shows. Classification occurs before
 reading; once a node is classified as a secret it remains secret for the
 document lifetime. A narrower live setting clears source-derived replica,
 translation, and image state before the new preference is saved. Reset commits
@@ -264,8 +268,8 @@ event to the source page.
 
 Raw option values, names, data attributes, datalist/standalone-option content,
 rich picker descendants, and private select ancestry stay blank. Password,
-authentication, payment-autofill, hidden/file, and CSS-masked secrets stay
-outside every scope and disclose neither their text nor length. A field that
+authentication, payment-autofill, hidden-input, file-name, and CSS-masked
+secrets stay outside every scope and disclose neither their text nor length. A field that
 becomes sensitive clears its prior semantic record and projection atomically.
 
 Other private controls become empty inert shells rather than disabled form
