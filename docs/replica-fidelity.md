@@ -155,10 +155,9 @@ masked. This distinction admits public navigation labels without transporting
 user-entered data. An accessible name (`aria-label`, `title`) or a select's
 current choice travels with its control for translation and the dropdown
 trigger, but is never drawn as extra text: the source page does not paint it
-beside the control. Such hidden accessible names are still sent for
-translation even though nothing shows them (except option labels and the
-current choice, which the dropdown facsimile displays); skipping that work is
-open.
+beside the control. Because nothing shows it, a hidden accessible name is not
+translated (D67); option labels and a select's current choice are, since the
+dropdown facsimile draws them.
 
 ### Static SVG
 

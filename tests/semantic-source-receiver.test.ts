@@ -316,15 +316,19 @@ describe('semantic source receiver', () => {
       text: 'Search',
       presentation: 'label',
     });
+    // Nothing draws an accessible name, so it is kept but not translated
+    // (D67): no translation change and no translation record.
     expect(receiver.applyBatch(createSemanticSourceBatch(
       identity, 'read-v1-111111', 1, [label],
-    ))).toBeDefined();
+    ))).toEqual([]);
+    expect(receiver.records()).toEqual([]);
     expect(input.value).toBe('***');
     const owned = document.querySelector<HTMLElement>('[data-simul-semantic-source="v1"]');
     expect(owned?.textContent).toBe('Search');
     // An accessible name is not painted beside the control in the source.
     expect(owned?.hidden).toBe(true);
     expect(owned?.style.getPropertyValue('display')).toBe('none');
+    expect(receiver.clear()).toEqual([]);
   });
 
   it('restores the newest base option label after a semantic refresh', () => {
@@ -354,9 +358,11 @@ describe('semantic source receiver', () => {
       replicaDocument: document as unknown as Document,
       resolveNode: () => option,
     });
+    // The dropdown draws option labels, so this one is translated.
     expect(receiver.applyBatch(createSemanticSourceBatch(
       identity, 'read-v1-111111', 1, [record],
-    ))).toBeDefined();
+    ))).toEqual([expect.objectContaining({ kind: 'upsert' })]);
+    expect(receiver.records()).toHaveLength(1);
     expect(receiver.project({
       document: identity,
       replayLease: 2,

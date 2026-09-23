@@ -14,7 +14,7 @@ Simul started as a quick build for the OpenAI Build Week hackathon, made as
 something we would use ourselves. We are now sharing it so others can use it
 too.
 
-Current build: **0.5.0 beta v.20260922.25** · Desktop Chrome **138+** ·
+Current build: **0.5.0 beta v.20260922.26** · Desktop Chrome **138+** ·
 Manifest V3
 
 ## What you need
@@ -48,7 +48,7 @@ Keep the folder where it is while the extension is installed. To update,
 replace the folder with the new version, then select **Reload** on the Simul
 card in `chrome://extensions`, reload the page, and reopen the companion. The
 card shows version `0.5.0`; Simul's settings show
-`Build 0.5.0 beta v.20260922.25`.
+`Build 0.5.0 beta v.20260922.26`.
 
 This is an unpacked beta, not a Chrome Web Store release, so Chrome does not
 update it automatically.
