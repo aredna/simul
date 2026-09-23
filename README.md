@@ -14,16 +14,32 @@ Simul started as a quick build for the OpenAI Build Week hackathon, made as
 something we would use ourselves. We are now sharing it so others can use it
 too.
 
-Current build: **0.5.0 beta v.20260922.35** · Desktop Chrome **138+** ·
-Manifest V3
+Current build: **0.5.0 beta v.20260922.35** · Desktop Chrome **138+** or
+Edge **148+** · Manifest V3
 
 ## What you need
 
-- Desktop Chrome 138 or newer.
+Simul translates with the browser's built-in **Translator API**, the on-device
+translator that runs inside the browser itself. It needs a browser that has
+that API:
+
+- **Google Chrome 138 or newer** on a desktop or laptop (Windows, macOS, or
+  Linux). Simul is built and tested in Chrome.
+- **Microsoft Edge 148 or newer** on a desktop or laptop. Edge has its own
+  on-device Translator API from version 148, and Simul loads there the same
+  way, but it has had less testing in Edge.
+
+Firefox, Safari, and browsers on phones and tablets do not have the
+Translator API, so Simul cannot run there. Other Chromium-based browsers, such
+as Brave, Opera, or Vivaldi, can load the extension, but Simul can translate
+there only if the browser includes the Translator API.
+
+You also need:
+
 - about 35 MB of disk space for the extension folder (most of it is the
   packaged image-text reader).
-- The first time you translate into a new language, Chrome may download that
-  language pack. That is Chrome's own download, not a Simul service.
+- The first time you translate into a new language, the browser may download
+  that language pack. That is the browser's own download, not a Simul service.
 
 Nothing else: no Node.js, no account, no key.
 
@@ -44,6 +60,9 @@ Then load it in Chrome:
 3. Select **Load unpacked** and choose the `chrome-unpacked` folder.
 4. Open any normal web page and select the Simul icon in the toolbar.
 
+In Edge, open `edge://extensions`, turn on **Developer mode** (in the left
+pane), and use **Load unpacked** the same way.
+
 Keep the folder where it is while the extension is installed. To update,
 replace the folder with the new version, then select **Reload** on the Simul
 card in `chrome://extensions`, reload the page, and reopen the companion. The
@@ -51,7 +70,9 @@ card shows version `0.5.0`; Simul's settings show
 `Build 0.5.0 beta v.20260922.35`.
 
 This is an unpacked beta, not a Chrome Web Store release, so Chrome does not
-update it automatically.
+update it automatically. It comes as a folder rather than a packed `.crx` file
+because Chrome on Windows and macOS installs packed extensions only from the
+Chrome Web Store.
 
 ## Use Simul
 
@@ -230,6 +251,9 @@ complete design and browser-boundary rationale.
   itself, not the repository root.
 - **The icon does not work:** try a normal HTTP(S) page; Chrome blocks extension
   access on some internal and protected URLs.
+- **Nothing translates at all:** the browser must have the Translator API
+  (Chrome 138 or newer, or Edge 148 or newer, on a computer). Other browsers
+  can load Simul but cannot translate with it.
 - **A language pair is unavailable:** update Chrome and allow its on-device
   Translator to prepare that pair.
 - **Automatic translation paused after navigation:** temporary `activeTab`
