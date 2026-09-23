@@ -3,8 +3,9 @@
 Chains from `handover-2026-09-22-session-close.md` (which chains from
 `handover-2026-09-22-release-readiness.md`, holding the publish runbook and the
 release-notes draft). This file records the session that shipped **D55** and
-the three owner reports that are still open. Decision-log entries **D43**
-through **D55** hold the reasoning.
+the follow-up session (same day) that closed its three owner reports with
+**D56**–**D59**. Decision-log entries **D43** through **D59** hold the
+reasoning.
 
 ## Where things stand
 
@@ -35,7 +36,38 @@ through **D55** hold the reasoning.
   scrolling the web page itself so the image is fully on screen does make its
   text appear.
 
-## Open owner reports (next session starts here)
+## Follow-up session (2026-09-23): D56–D59
+
+All three reports below are closed; each shipped as its own build and was
+verified in Chrome for Testing before the gate.
+
+- **D56 (`.15`)**: a carousel move is a live patch, not a mirror rebuild
+  (report 2). The structural-conflict rule refused a slide's content
+  replacement together with its wrapper's transform; freee went from 10
+  rebuilds in 40 s to 0.
+- **D57 (`.16`)**: a carousel track is painted when the slide it overflows into
+  is (report 3). D54's paint proof withheld all of freee's slide text and
+  button labels because Swiper translates the wrapper's own box off to the side.
+  The owner's read profile is Full visible, so the read scope was not the cause.
+- **D58 (`.17`)**: images off screen are read from their own file (report 1).
+  Owner ruling "tab first, then download"; the order became mirror copy (no
+  request), then tab pixels, then a cache-first download (Passive only). Lazy
+  0×0 images are no longer skipped.
+- **D59 (`.18`)**: close alt-text-versus-OCR calls go to Gemini Nano or the
+  Language Detector, only when already installed (owner: "We never want to
+  download and install Gemini Nano").
+
+**Ask the owner to check on `.18`:** the Image diagnostics log should show
+`job N pixels: source=mirror` for images below the fold (the harness had
+`<all_urls>` in the manifest; the owner's build grants it at runtime), and
+`evidence judge: …` once, which tells whether their Chrome has Nano installed.
+
+**Observed, not changed:** on a page where semantic evidence repeats, the same
+tie can be re-ranked many times (23 tie reports for about two images on freee);
+the judge's verdict cache keeps that cheap, but the re-rank churn itself may be
+worth a look.
+
+## Open owner reports (closed in the follow-up session)
 
 ### 1. Read the whole page's images when it loads (built in D58, `.17`)
 
