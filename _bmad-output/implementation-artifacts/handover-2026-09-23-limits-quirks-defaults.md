@@ -1,18 +1,18 @@
 # Handover: mirror limits, quirks mode, new defaults (2026-09-23, second session)
 
 Chains from `handover-2026-09-23-session-close.md`, whose work list this
-session worked through. Decision-log entries **D63**–**D68** hold the reasoning
+session worked through. Decision-log entries **D63**–**D69** hold the reasoning
 and measurements; this file is the summary and the next steps.
 
 ## Where things stand
 
 | Item | State |
 | --- | --- |
-| Branch / PR | `feat/ui-string-catalogue`, PR #22, **open**, head `1fdfc07` (D68). Description covers D40–D68. |
-| Version / identity | `0.5.0` / `0.5.0 beta v.20260922.27` (next is `.28`). |
-| Gate | `npm run check` green at `1fdfc07`: **1,485 tests pass, 1 skipped**; `dist/chrome-unpacked` byte-verified. |
-| NAS | `Dev/simul/` mirrors head; the owner loads `Dev/simul/dist/chrome-unpacked` (`Build 0.5.0 beta v.20260922.27`). |
-| `main` / release | Only `v0.4.0` released. Publishing 0.5.0 is **D69**, only when the owner says so; do not ask. |
+| Branch / PR | `feat/ui-string-catalogue`, PR #22, **open**, head at the D69 commit plus this file. Description covers D40–D69. |
+| Version / identity | `0.5.0` / `0.5.0 beta v.20260922.28` (next is `.29`). |
+| Gate | `npm run check` green at D69: **1,491 tests pass, 1 skipped**; `dist/chrome-unpacked` byte-verified. |
+| NAS | `Dev/simul/` mirrors head; the owner loads `Dev/simul/dist/chrome-unpacked` (`Build 0.5.0 beta v.20260922.28`). |
+| `main` / release | Only `v0.4.0` released. Publishing 0.5.0 is **D70**, only when the owner says so; do not ask. |
 
 ## Owner rulings this session
 
@@ -38,6 +38,7 @@ and measurements; this file is the summary and the next steps.
 | `.25` | D66 | D54-addendum defaults: new installs and resets start set up at Full visible with no setup question, the detached mirror follows the active tab, and the mirror opens at 1:1; the toolbar reads Follow / Pinned. Also fixed: with no safety journal the background's Page-only recovery ceiling could never release at a Full-visible default. A true first run (no journal and no saved preferences) now writes an empty journal instead. |
 | `.26` | D67 | Hidden accessible names (label records in always-hidden owned spans) are no longer translated: 593 → 471 Translator calls on the Wikipedia portal. |
 | `.27` | D68 | Review T1–T3: a newer snapshot no longer joins a stale translation task; the OCR lock is released before the page translation; unreadable storage keeps OCR off. Unit-tested; the T1 race was not reproduced in the browser. |
+| `.28` | D69 | Review L2–L5 and L7: status text is kept as `UiText` (`lib/ui-text.ts`) and re-renders in the current UI language; language names follow the language the UI is shown in; catalogue error details and page-access guidance localize; the error panel re-renders. |
 
 ## Found, not fixed (candidates, in rough order of value)
 
@@ -67,22 +68,17 @@ and measurements; this file is the summary and the next steps.
 
 ## Next work, in order
 
-1. **Review L2 + L3** (`review-2026-09-22-pr22-bug-hunt.md`): one
-   status-rendering change. `setStatus` takes a frame plus args (as
-   `DynamicStatusText` does), so the status line re-localizes, and language
-   names follow the UI's actual language. Then **L4** (localize error details
-   at render time) and **L5** (page-access guidance into `UI_STRINGS` and the
-   F1 guard test).
-2. **Low items:** L6–L9, O3, and the process items. A build-identity bump
+1. **Low items** (`review-2026-09-22-pr22-bug-hunt.md`): L6, L8, L9, O3, and
+   the process items. A build-identity bump
    script would save a step per shipped change: this session bumped five
    files by hand six times. Also default-state tests, and README step 4.
-3. **P3–P6** are privacy edge cases written before the truthful-first
+2. **P3–P6** are privacy edge cases written before the truthful-first
    ruling. Bring them to the owner, since some may now be declined.
-4. The candidates above, 1–4, each with an owner question where it changes
+3. The candidates above, 1–4, each with an owner question where it changes
    behaviour.
-5. Publish 0.5.0 as **D69** only when the owner says so. The release-notes
+4. Publish 0.5.0 as **D70** only when the owner says so. The release-notes
    draft (`handover-2026-09-22-release-readiness.md`) needs lines for
-   D51–D68.
+   D51–D69.
 
 ## Reproduction and verification
 
@@ -96,7 +92,7 @@ and measurements; this file is the summary and the next steps.
   `limits-ui.mjs`, `advanced-shot.mjs`, `overlay-top.mjs`, `quirks-probe.mjs`,
   `quirks-check.mjs`, `fresh-defaults.mjs`, `labels-timeline.mjs` (select
   labels through shadow roots), `scope-safety.mjs` (narrow, widen, reset),
-  `count-translations.mjs` (counts stand-in Translator calls). The `d63/`
+  `count-translations.mjs` (counts stand-in Translator calls), `status-smoke.mjs` (status line after a To switch; flags "[object"). The `d63/`
   folder has `run-cap-matrix.sh` (old vs new build table),
   `build-unminified.sh` (profiling build), the profile summarizers, the
   `sanitizeCss` differential and benchmark, `make-cap-pages.py` (the
