@@ -1,4 +1,7 @@
-const MAX_STATIC_SVG_DATA_IMAGE_LENGTH = 512 * 1024;
+// Size caps follow the mirror's: a drawing is often a data URL, and the
+// profile below, not its size, is what keeps it inert.
+const MAX_STATIC_SVG_DATA_IMAGE_LENGTH = 10 * 1024 * 1024;
+const MAX_STATIC_SVG_ELEMENTS = 10_000;
 const MAX_STATIC_SVG_DEPTH = 64;
 const LOCAL_SVG_FRAGMENT_PATTERN = /^#[A-Za-z0-9_.:-]{1,256}$/u;
 
@@ -139,7 +142,7 @@ const STATIC_SVG_DIMENSION_ATTRIBUTES = new Set([
 ]);
 
 /**
- * Admits only a small, URL-encoded, shape-only SVG profile. It deliberately
+ * Admits only a URL-encoded, shape-only SVG profile. It deliberately
  * excludes CSS, links, references, animation, text, entities, and every
  * resource-bearing element so an image cannot become a second active graph.
  */
@@ -195,7 +198,7 @@ export function isSafeStaticSvgDataImage(value: string): boolean {
       return false;
     }
     elementCount += 1;
-    if (elementCount > 512) return false;
+    if (elementCount > MAX_STATIC_SVG_ELEMENTS) return false;
     if (tagName.startsWith('fe')) {
       filterPrimitiveCount += 1;
       if (filterPrimitiveCount > 64) return false;

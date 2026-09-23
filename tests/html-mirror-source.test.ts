@@ -17,6 +17,7 @@ import {
   installHtmlMirrorSourceBridge,
   type HtmlMirrorSourceBridgeEnvironment,
 } from '../lib/replica/html-mirror-source';
+import { MAX_HTML_MIRROR_NODES } from '../lib/replica/html-mirror-sanitizer';
 import { createReplicaIdentity } from '../lib/replica/replica-identity';
 import { sourceDocumentIdentity } from '../lib/replica/source-identity';
 import {
@@ -651,7 +652,10 @@ describe('HtmlMirrorSourceSession', () => {
     fixture.start();
     fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
     const nav = fixture.document.querySelector('#large-menu')!;
-    nav.innerHTML += '<span></span>'.repeat(50_001);
+    // Chunked: linkedom's parser overflows its stack on one huge fragment.
+    for (let added = 0; added <= MAX_HTML_MIRROR_NODES; added += 10_000) {
+      nav.insertAdjacentHTML('beforeend', '<span></span>'.repeat(10_000));
+    }
 
     fixture.document.querySelector('#trigger')?.dispatchEvent(
       new fixture.window.Event('pointerover', { bubbles: true }),

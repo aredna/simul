@@ -59,10 +59,18 @@ control references it and no unique tab relation proves it open.
 
 When CSSOM is readable, Simul serializes sanitized rules and recursively
 flattens readable imports in order within rule, depth, string, and total payload
-budgets. One stylesheet may carry up to 1 MiB of text (large sites ship a single
-inline sheet of several hundred kilobytes); other strings stay within 512 KiB.
-An inline `<style>` whose rules are read from CSSOM sends those rules once, not
-its raw text as well. When Chrome makes an imported sheet unreadable, Passive Fidelity may
+budgets. These budgets keep the tab and the panel responsive; they do not
+protect data. Any one string (a stylesheet, a text node, an attribute value or
+a data URL such as an inline image) may be up to 10 MiB; YouTube and freee link
+stylesheets of about 3 MB, and Google's sign-in page carries one inline sheet of
+700 KB. A page may have up to 200,000 nodes, 256 levels deep, and up to 60 MiB
+counted at two bytes per character, because one checkpoint crosses the runtime
+port as a single message and Chrome refuses messages above 64 MiB. A stylesheet
+over its cap is omitted and the page still mirrors; a page over the total
+budget or the node cap is not mirrored (the panel reports that the replica
+could not be prepared). An inline
+`<style>` whose rules are read from CSSOM sends those rules once, not its raw
+text as well. When Chrome makes an imported sheet unreadable, Passive Fidelity may
 retain only a normalized HTTP(S) `@import`; that import is request-capable.
 Conservative removes imports. Scriptable URLs, CSS `expression()`, `behavior:`,
 `-moz-binding`, invalid schemes, and over-budget rule graphs are rejected.
@@ -77,7 +85,11 @@ font, so the replica resets body font to inheritance, and any source rule for
 A bounded maintenance signature detects ordinary stylesheet `insertRule`,
 `deleteRule`, declaration, disabled-state, media, and order changes that do not
 emit DOM mutations. A detected change requests a fresh staged checkpoint while
-the last good replica remains visible. Simul does not patch website prototypes.
+the last good replica remains visible. The signature reads at most 1 MiB of rule
+text (25,000 rules) per half-second tick on the page's main thread, so a
+document whose stylesheets are larger (freee and YouTube link about 3 MB) is
+not polled: its CSSOM-only changes reach the replica with the next checkpoint
+rather than on their own. Simul does not patch website prototypes.
 
 ### Inert HTML semantics
 
