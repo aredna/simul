@@ -794,6 +794,13 @@ export function sourceElementPathIsPainted(
  * ancestor. Unlike `sourceElementPathIsPainted`, ancestors are not required to
  * prove their own paint state; hidden-region rules already withhold content
  * under a hidden ancestor. Unknown geometry fails closed.
+ *
+ * An element that does not clip its own overflow also counts as painted when
+ * one of its painted children survives the same clipping. A carousel track is
+ * the case: Swiper translates the wrapper so its own box sits beside the
+ * carousel window while the slide it overflows into is on screen. A panel
+ * collapsed with `overflow: hidden`, faded out, or clipped away by an
+ * ancestor still fails, because its children are clipped or faded with it.
  */
 function sourceElementBoxIsPainted(
   element: Element,
@@ -804,8 +811,27 @@ function sourceElementBoxIsPainted(
     return false;
   }
   const path = sourcePaintPath(element, paintCache);
-  return Boolean(path) &&
-    sourcePaintSurvivesClipping(element, path!, sourceWindow, paintCache);
+  if (!path) return false;
+  if (sourcePaintSurvivesClipping(element, path, sourceWindow, paintCache)) {
+    return true;
+  }
+  const overflow = sourcePaintInputs(element, sourceWindow, paintCache).overflow;
+  if (!overflow || overflow.x || overflow.y) return false;
+  let children: readonly Element[];
+  try {
+    children = [...element.children];
+  } catch {
+    return false;
+  }
+  if (children.length > MAX_SOURCE_PAINT_RECTS) return false;
+  return children.some((child) =>
+    sourceElementPaintState(child, sourceWindow, paintCache) === 'visible' &&
+    sourcePaintSurvivesClipping(
+      child,
+      [child, ...path],
+      sourceWindow,
+      paintCache,
+    ));
 }
 
 function sourcePaintSurvivesClipping(
