@@ -4,19 +4,19 @@ Chains from `handover-2026-09-22-session-close.md` (which chains from
 `handover-2026-09-22-release-readiness.md`, holding the publish runbook and the
 release-notes draft). This file records the session that shipped **D55** and
 the follow-up session (same day) that closed its three owner reports with
-**D56**–**D59**, then the Google sign-in layout fix **D60** and the new-tab
-follow fix **D61**. Decision-log entries **D43** through **D61** hold the
-reasoning.
+**D56**–**D59**, then the Google sign-in layout fix **D60**, the new-tab
+follow fix **D61** and the dropdown fix **D62**. Decision-log entries **D43**
+through **D62** hold the reasoning.
 
 ## Where things stand
 
 | Item | State |
 | --- | --- |
-| Branch / PR | `feat/ui-string-catalogue`, PR #22, **open**, head is the D61 commit (`.20`) plus this handover. Description covers D40–D61. |
-| Version / identity | `0.5.0` / `0.5.0 beta v.20260922.20` (bumped on every shipped change; next is `.21`). |
-| Gate | `npm run check` green at the D61 commit: typecheck clean, **1,460 tests pass, 1 skipped**, `dist/chrome-unpacked` re-synced and byte-verified. |
-| NAS | `Dev/simul/` mirrors head. Load `Dev/simul/dist/chrome-unpacked`; settings must show `Build 0.5.0 beta v.20260922.20`. |
-| `main` | `eb09813` (through D39). Release: `v0.4.0` pre-release only. Publishing 0.5.0 is **D62**, and only when the owner says so. |
+| Branch / PR | `feat/ui-string-catalogue`, PR #22, **open**, head is the D62 commit (`.21`) plus this handover. Description covers D40–D62. |
+| Version / identity | `0.5.0` / `0.5.0 beta v.20260922.21` (bumped on every shipped change; next is `.22`). |
+| Gate | `npm run check` green at the D62 commit: typecheck clean, **1,468 tests pass, 1 skipped**, `dist/chrome-unpacked` re-synced and byte-verified. |
+| NAS | `Dev/simul/` mirrors head. Load `Dev/simul/dist/chrome-unpacked`; settings must show `Build 0.5.0 beta v.20260922.21`. |
+| `main` | `eb09813` (through D39). Release: `v0.4.0` pre-release only. Publishing 0.5.0 is **D63**, and only when the owner says so. |
 
 ## What this session shipped
 
@@ -68,7 +68,7 @@ tie can be re-ranked many times (23 tie reports for about two images on freee);
 the judge's verdict cache keeps that cheap, but the re-rank churn itself may be
 worth a look.
 
-## Third session (2026-09-23): D60, D61 and the dropdown report
+## Third session (2026-09-23): D60, D61, D62
 
 - **D60 (`.19`)**: Google's OAuth sign-in (owner: "It's in a box in the center
   of the screen. Our layout is not bounding things properly") rendered
@@ -99,17 +99,23 @@ worth a look.
    (before, it stayed on the error until a tab switch). Harness:
    `newtab-follow.mjs <ext> [newTabUrl] [nextUrl]` (`MODE=locked` to compare).
 2. *"Dropdowns do not show options when we cl[ick] the drop down menu."*
-   **Open; asked the owner which dropdowns.** Findings so far
-   (`dropdown-click.mjs`, `site/dropdown.html`): on a plain page the mirror's
-   native select facsimiles and an `aria-controls` menu do open (the menu
-   overlay has no background, so it overlaps the text below). freee's header
-   menus cannot open in the mirror: the button has `aria-haspopup="menu"` and
-   `aria-expanded` but no `aria-controls` (the menu is its sibling
-   `div.productMenu`), and the mirror drops both ARIA attributes from those
-   buttons, which is also why both chevrons (down and up) show. Separately,
-   the toolbar's From/To selects (and the Settings selects) are disabled
-   whenever a capture or translation is in flight (`updateControls`, `busy`),
-   which on a live page can be most of the time.
+   The owner meant site menus and form select boxes in the mirror.
+   **Fixed in D62 (`.21`)**: every semantic batch had been refused on pages
+   with plain links since v0.4.0 (a disabled-state proof the receiver does not
+   accept), so no option label, menu or tab state reached the replica on real
+   pages; plus low batch caps, `inert` forms, transparent selects counted as
+   hidden, and freee's `aria-expanded` menu triggers. Verified on Wikipedia,
+   freee, Google sign-in and Yahoo! JAPAN. Harness: `dropdown-click.mjs`,
+   `select-labels.mjs`, `select-click-debug.mjs`, `find-text.mjs`,
+   `measure-semantic.mjs` (needs a build that logs `SIMUL-MEASURE`), pages
+   `site/dropdown.html`, `selects.html`, `selects2.html`, `bigselect.html`.
+
+**Watch next:** semantic presentation (tab and ARIA states, menu previews,
+label records) now runs on real pages for the first time under Full visible.
+The visible label spans were hidden in D62; other effects looked right on the
+four sites checked, but report anything new in the mirror's look. Hidden
+accessible-name records are still sent for translation (invisible work that
+could be skipped).
 
 ## Open owner reports (closed in the follow-up session)
 
