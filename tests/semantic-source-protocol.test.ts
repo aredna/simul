@@ -1,6 +1,7 @@
 import { describe, expect, it } from 'vitest';
 
 import {
+  MAX_SEMANTIC_SOURCE_PROOFS,
   SEMANTIC_SOURCE_PROTOCOL_VERSION,
   createSemanticSourcePortName,
   createSemanticSourceStart,
@@ -407,7 +408,7 @@ describe('semantic source protocol', () => {
     }, documentIdentity, undefined, 'isolated-html',
     PAGE_ONLY_REPLICA_READ_SCOPE)).toBeUndefined();
 
-    const tooManyProofs = Array.from({ length: 129 }, (_, index) => ({
+    const tooManyProofs = Array.from({ length: MAX_SEMANTIC_SOURCE_PROOFS + 1 }, (_, index) => ({
       ...choiceProof,
       nodeId: 100 + index,
     }));

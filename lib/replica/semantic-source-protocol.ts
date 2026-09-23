@@ -17,8 +17,11 @@ import {
 
 export const SEMANTIC_SOURCE_PROTOCOL_VERSION = 2;
 export const SEMANTIC_SOURCE_PORT_PREFIX = 'simul:semantic-source-v2:';
-export const MAX_SEMANTIC_SOURCE_RECORDS = 128;
-export const MAX_SEMANTIC_SOURCE_PROOFS = 128;
+// Measured on real pages (2026-09-23): Wikipedia's portal needs 206 records
+// and 492 proofs in 122 KB, freee 233 proofs, Yahoo! JAPAN 278. At 128 each,
+// option labels and menu proofs were dropped. The byte cap bounds the batch.
+export const MAX_SEMANTIC_SOURCE_RECORDS = 1_024;
+export const MAX_SEMANTIC_SOURCE_PROOFS = 2_048;
 export const MAX_SEMANTIC_SELECTED_OPTION_NODE_IDS = 32;
 export const MAX_SEMANTIC_SELECT_SIZE = 1_000;
 export const MAX_SEMANTIC_SOURCE_BATCH_BYTES = 256 * 1024;

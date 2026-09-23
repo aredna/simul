@@ -20,6 +20,7 @@ import {
   rememberSourceMutationSecrets,
   type SemanticSourcePort,
 } from '../lib/replica/semantic-source-session';
+import { SemanticSourceReceiver } from '../lib/replica/semantic-source-receiver';
 import { StickySourceSecretClassifier } from '../lib/replica/source-secret-classifier';
 import { hasSourceCredentialSecretAncestor } from '../lib/replica/source-privacy-policy';
 import type { ReplicaSourceDocumentIdentity } from '../lib/replica/source-identity';
@@ -1111,6 +1112,164 @@ describe('semantic source session', () => {
     expect(batch.proofs.some((proof) => proof.kind === 'disclosure-state'))
       .toBe(false);
     session.dispose();
+  });
+
+  it('infers a navigation menu whose trigger carries its own plain aria-expanded', () => {
+    // freee's header: the button carries aria-expanded and aria-haspopup but
+    // no aria-controls, and its menu is the sibling the page script opens.
+    const markup = (expanded: string) => `<html><body><nav>
+      <div id="wrapper"><button id="trigger" aria-expanded="${expanded}"
+        aria-haspopup="menu">Products</button>
+        <div id="panel" class="collapsed"><a href="/books">Accounting</a></div>
+      </div></nav></body></html>`;
+    for (const [expanded, proven] of [['false', true], ['maybe', false]] as const) {
+      const { document, window } = parseHTML(markup(expanded));
+      installPaintedTabFixture(document, window as unknown as Window);
+      const port = new FakeSemanticPort(
+        createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+      );
+      const session = createSession(
+        port,
+        document,
+        window,
+        'isolated-html',
+        undefined,
+        structuralMenuStyle((element) =>
+          element.classList.contains('collapsed') ? 'display' : undefined),
+      );
+      port.emit(createSemanticSourceStart(
+        'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+      ));
+      expect(port.messages[0]!.proofs.some((proof) =>
+        proof.kind === 'structural-menu' &&
+        proof.triggerNodeId === nodeId(document.querySelector('#trigger')!)))
+        .toBe(proven);
+      session.dispose();
+    }
+  });
+
+  it('sends no disabled-state proof for a plain link and sends it after menu proofs', () => {
+    const { document, window } = parseHTML(`<html><body>
+      <a id="link" href="/about">About</a><button id="button">Go</button>
+      <nav><div id="wrapper"><button id="trigger">Products</button>
+        <div id="panel" class="collapsed"><a href="/books">Accounting</a></div>
+      </div></nav></body></html>`);
+    installPaintedTabFixture(document, window as unknown as Window);
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(
+      port,
+      document,
+      window,
+      'isolated-html',
+      undefined,
+      structuralMenuStyle((element) =>
+        element.classList.contains('collapsed') ? 'display' : undefined),
+    );
+    port.emit(createSemanticSourceStart(
+      'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+    ));
+
+    const proofs = port.messages[0]!.proofs;
+    const controlStates = proofs.filter((proof) => proof.kind === 'control-state');
+    expect(controlStates.map((proof) =>
+      proof.kind === 'control-state' ? proof.nodeId : 0)).not.toContain(
+      nodeId(document.querySelector('#link')!),
+    );
+    expect(controlStates.map((proof) =>
+      proof.kind === 'control-state' ? proof.nodeId : 0)).toContain(
+      nodeId(document.querySelector('#button')!),
+    );
+    const menuIndex = proofs.findIndex((proof) => proof.kind === 'structural-menu');
+    expect(menuIndex).toBeGreaterThanOrEqual(0);
+    expect(menuIndex).toBeLessThan(
+      proofs.findIndex((proof) => proof.kind === 'control-state'),
+    );
+    session.dispose();
+  });
+
+  it('produces batches the receiver accepts on a page with links, a select and a menu', () => {
+    // Before D62 every plain link carried a disabled-state proof the receiver
+    // refuses, and one refused proof drops the whole batch: no option labels,
+    // menus or tab states reached the replica on a real page.
+    const markup = (stripped: boolean) => `<html><body>
+      <a id="link" href="/about">About</a><button id="button">Go</button>
+      <select id="lang"><option>English</option><option>Deutsch</option></select>
+      <nav><div id="wrapper"><button id="trigger"${stripped
+        ? ''
+        : ' aria-expanded="false" aria-haspopup="menu"'}>Products</button>
+        <div id="panel" class="collapsed"><a href="/books">Accounting</a></div>
+      </div></nav></body></html>`;
+    const source = parseHTML(markup(false));
+    // The replica is the sanitized page: private ARIA state is stripped.
+    const replica = parseHTML(markup(true));
+    installPaintedTabFixture(source.document, source.window as unknown as Window);
+    const style = structuralMenuStyle((element) =>
+      element.classList.contains('collapsed') ? 'display' : undefined);
+    // Option labels are read through the page's own window and need a box.
+    const pageStyle = Object.getOwnPropertyDescriptor(
+      source.window,
+      'getComputedStyle',
+    );
+    const globalNode = Object.getOwnPropertyDescriptor(globalThis, 'Node');
+    Object.defineProperty(globalThis, 'Node', {
+      configurable: true,
+      writable: true,
+      value: (source.window as unknown as { Node: typeof Node }).Node,
+    });
+    Object.defineProperty(source.window, 'getComputedStyle', {
+      configurable: true,
+      value: style,
+    });
+    Object.defineProperty(source.document.querySelector('#lang'), 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({ left: 0, top: 0, right: 120, bottom: 24, width: 120, height: 24 }),
+    });
+    const mirrored = new Map<number, Node>();
+    const pair = (from: Node, to: Node): void => {
+      mirrored.set(nodeId(from), to);
+      const fromChildren = [...from.childNodes];
+      const toChildren = [...to.childNodes];
+      fromChildren.forEach((child, index) => {
+        if (toChildren[index]) pair(child, toChildren[index]!);
+      });
+    };
+    pair(source.document.documentElement, replica.document.documentElement);
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(
+      port,
+      source.document,
+      source.window,
+      'isolated-html',
+      undefined,
+      style,
+    );
+    port.emit(createSemanticSourceStart(
+      'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+    ));
+    const receiver = new SemanticSourceReceiver({
+      document: identity,
+      replicaDocument: replica.document as unknown as Document,
+      resolveNode: (id) => mirrored.get(id),
+    });
+
+    try {
+      expect(receiver.applyBatch(port.messages[0]!)).toBeDefined();
+      expect([...replica.document.querySelectorAll('option')].map((option) =>
+        option.getAttribute('label'))).toEqual(['English', 'Deutsch']);
+    } finally {
+      session.dispose();
+      if (pageStyle) {
+        Object.defineProperty(source.window, 'getComputedStyle', pageStyle);
+      } else {
+        delete (source.window as { getComputedStyle?: unknown }).getComputedStyle;
+      }
+      if (globalNode) Object.defineProperty(globalThis, 'Node', globalNode);
+      else delete (globalThis as { Node?: unknown }).Node;
+    }
   });
 
   it.each(['content-visibility', 'opacity'] as const)(

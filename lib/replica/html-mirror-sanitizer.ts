@@ -13,6 +13,7 @@ import {
   isSourceOptionInsideNativeSelect,
   isSourcePublicMenuRoleValue,
   isSourceSelectEntryVisuallyHidden,
+  isSourceTransparentSelectClickTarget,
   readSourceFlatTreeElementPath,
   readSourceStructuralAttributes,
   sourceAttributesArePrivate,
@@ -2114,12 +2115,10 @@ function sanitizeAttributes(
   ) {
     result.unshift(Object.freeze(['disabled', ''] as const));
   }
-  if (
-    tagName === 'form' &&
-    !result.some(([name]) => name === 'inert')
-  ) {
-    result.push(Object.freeze(['inert', ''] as const));
-  }
+  // A form is not made inert: that would also block Simul's own dropdowns
+  // inside it (most real select boxes sit in a form). Submission stays
+  // impossible through the frame sandbox (no allow-forms), the shell CSP's
+  // form-action 'none', and the document-wide activation guard.
   return Object.freeze(result);
 }
 
@@ -3651,7 +3650,8 @@ function isComputedHiddenSourceSelect(element: Element): boolean {
     })();
     return style.display.trim().toLowerCase() === 'none' ||
       ['hidden', 'collapse'].includes(style.visibility.trim().toLowerCase()) ||
-      Number(style.opacity) === 0 ||
+      (Number(style.opacity) === 0 &&
+        !isSourceTransparentSelectClickTarget(element, view, style)) ||
       style.getPropertyValue('content-visibility').trim().toLowerCase() === 'hidden' ||
       positionedOffscreen ||
       transformCollapses ||

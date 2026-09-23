@@ -87,8 +87,11 @@ image source are retained where they can be represented safely. A video is
 retained only when it can carry a sanitized static poster; a posterless shell
 is omitted rather than displayed as an empty player. Media source attributes,
 controls, autoplay, preloading, and playback are disabled. Frames, objects,
-embeds, portals, and webviews remain absent. Forms are inert and cannot submit
-or mutate the source page.
+embeds, portals, and webviews remain absent. Forms cannot submit or mutate the
+source page: the frame sandbox omits `allow-forms`, the shell CSP sets
+`form-action 'none'`, and the document-wide activation guard blocks every
+activation event. A form is not marked `inert`, because that would also block
+Simul's own dropdown facsimiles inside it, where most real select boxes sit.
 
 Native dropdown popups are browser/OS presentation rather than observable DOM,
 so Simul does not attempt to copy their ephemeral geometry. Instead, each
@@ -100,7 +103,12 @@ anchor. `multiple` and authored `size>1` selects retain bounded inline-list
 presentation. Labels and disabled/shape semantics are independent from the
 selected state: the latter appears only when ordinary form state is enabled.
 Every admitted state is presentation-only and cannot mutate or submit the
-source control. No source clipping ancestor is rewritten. For Chrome
+source control. No source clipping ancestor is rewritten. A select at zero
+opacity that still takes pointer input over a rendered box is the page's click
+target for a label the site draws beneath it (Wikipedia's search language
+picker); it counts as visible, keeps its box and option labels, and its
+facsimile trigger is transparent so the site's own label shows through while
+the options panel opens opaque. For Chrome
 customizable selects, `:open` state and toggle-driven refresh are mirrored
 progressively; rich website picker descendants remain reduced to typed public
 labels at the privacy boundary.
@@ -110,13 +118,20 @@ translatable when the matching read scope is enabled. A shared typed semantic
 proof channel enables a local preview in the isolated replica only when a
 public activation trigger maps through one unique same-document
 `aria-controls` relation to a matching menu/listbox, or to a region containing
-exactly one matching public menu. The preview state is extension-owned and
+exactly one matching public menu. Inside navigation, a container holding only a
+trigger and a collapsed panel of public links is also a menu even without ARIA
+roles; its trigger may carry its own plain `aria-expanded` (freee's header
+buttons do) but no `aria-controls`. An opened preview is forced opaque and
+drawn on a plain canvas background. The preview state is extension-owned and
 does not send events to the source or rewrite authored source state. Missing,
 duplicate, stale, mismatched, editable, or private relations remain
 pointer-inert. Editable comboboxes, searchboxes, textboxes, contenteditable
 regions, native inputs, and any menu branch containing private controls remain
 masked. This distinction admits public navigation labels without transporting
-user-entered data.
+user-entered data. An accessible name (`aria-label`, `title`) or a select's
+current choice travels with its control for translation and the dropdown
+trigger, but is never drawn as extra text: the source page does not paint it
+beside the control.
 
 ### Static SVG
 

@@ -487,6 +487,9 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
     this.panel.setAttribute('data-simul-replica-disclosure-overlay', DISCLOSURE_MARKER);
     this.panel.removeAttribute('hidden');
     setImportant(this.panel, 'display', 'block');
+    // A site that collapses its menu with opacity as well as display (freee's
+    // header menus) would otherwise open an invisible panel.
+    setImportant(this.panel, 'opacity', '1');
     body.append(this.panel);
     tryShowPopover(this.panel);
     this.#position();

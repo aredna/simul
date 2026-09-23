@@ -796,6 +796,18 @@ describe('isolated HTML sanitizer and protocol', () => {
     })).toBeUndefined();
   });
 
+  it('does not make a form inert, so Simul dropdowns inside it stay clickable', () => {
+    const graph = sanitizeMarkup(
+      '<!doctype html><html><body><form id="search" action="/find"><select><option>EN</option></select></form></body></html>',
+      'passive',
+    );
+    const form = graphElementBySourceId(graph, 'search');
+
+    expect(form?.attributes.some(([name]) => name === 'inert')).toBe(false);
+    expect(form?.attributes.some(([name]) => name === 'action')).toBe(false);
+    expect(readHtmlMirrorNode(graph.root)).toBeDefined();
+  });
+
   it('canonicalizes an already-inert form for source-to-receiver transport', () => {
     const graph = sanitizeMarkup(
       '<!doctype html><html><body><form id="account" inert><input></form></body></html>',

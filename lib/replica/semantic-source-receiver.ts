@@ -640,7 +640,12 @@ export class SemanticSourceReceiver {
       const panel = this.#resolveElement(proof.panelNodeId);
       if (
         !container || !trigger || !panel ||
-        !receiverStructuralMenuRelationshipIsSafe(container, trigger, panel) ||
+        !receiverStructuralMenuRelationshipIsSafe(
+          container,
+          trigger,
+          panel,
+          proof.relationId,
+        ) ||
         !this.#proofTargetIsSafe(container, false) ||
         !this.#proofTargetIsSafe(trigger, false) ||
         !this.#proofTargetIsSafe(panel, false) ||
@@ -1100,6 +1105,7 @@ function receiverStructuralMenuRelationshipIsSafe(
   container: Element,
   trigger: Element,
   panel: Element,
+  relationId: string,
 ): boolean {
   if (
     container === trigger || container === panel || trigger === panel ||
@@ -1112,8 +1118,7 @@ function receiverStructuralMenuRelationshipIsSafe(
     safeNullableAttribute(trigger, 'hidden') !== null ||
     safeAttribute(container, 'aria-hidden').trim().toLowerCase() === 'true' ||
     safeAttribute(trigger, 'aria-hidden').trim().toLowerCase() === 'true' ||
-    safeNullableAttribute(trigger, 'aria-expanded') !== null ||
-    safeNullableAttribute(trigger, 'aria-controls') !== null ||
+    !receiverStructuralTriggerIsUnclaimed(trigger, relationId) ||
     !receiverDisclosureTriggerIsSafe(trigger)
   ) return false;
   let children: Element[];
@@ -1129,6 +1134,25 @@ function receiverStructuralMenuRelationshipIsSafe(
   return Boolean(path?.some((ancestor) =>
     ancestor.localName.toLowerCase() === 'nav' ||
     safeAttribute(ancestor, 'role').trim().toLowerCase() === 'navigation'));
+}
+
+/**
+ * The sanitizer strips a source trigger's aria-expanded and aria-controls, so
+ * in the replica they can only be Simul's own presentation. After the first
+ * batch presents this menu they carry this relation's marker and id, and the
+ * next batch must not refuse the menu (and with it the whole batch) for them.
+ */
+function receiverStructuralTriggerIsUnclaimed(
+  trigger: Element,
+  relationId: string,
+): boolean {
+  const expanded = safeNullableAttribute(trigger, 'aria-expanded');
+  const controls = safeNullableAttribute(trigger, 'aria-controls');
+  if (expanded === null && controls === null) return true;
+  return safeNullableAttribute(
+    trigger,
+    'data-simul-source-disclosure-state',
+  ) === 'v1' && controls === relationId;
 }
 
 function receiverTabRelationshipIsSafe(
@@ -1437,7 +1461,13 @@ function ownedTextBinding(
   owned.setAttribute('data-simul-semantic-presentation', presentation);
   owned.setAttribute('aria-hidden', 'true');
   owned.style.setProperty('pointer-events', 'none', 'important');
-  owned.hidden = hasMeaningfulUnownedText(element);
+  // An accessible name (aria-label, title) or a select's current choice is
+  // not painted as text beside the control in the source page, so the
+  // replica carries it for translation and the dropdown trigger without
+  // drawing it: a visible copy squeezed Yahoo! JAPAN's search box and wrote
+  // a label over freee's carousel buttons.
+  owned.hidden = true;
+  owned.style.setProperty('display', 'none', 'important');
   let attached = false;
   let lastWritten: string | undefined;
   const write = (text: string): boolean => {
@@ -1530,26 +1560,6 @@ function ownedTextBinding(
       }
     },
   };
-}
-
-function hasMeaningfulUnownedText(element: Element): boolean {
-  try {
-    const pending = [...element.childNodes];
-    while (pending.length > 0) {
-      const node = pending.pop();
-      if (!node) continue;
-      if (node.nodeType === 3 && /[\p{L}\p{N}]/u.test(node.nodeValue ?? '')) {
-        return true;
-      }
-      if (node.nodeType === 1 &&
-        (node as Element).getAttribute('data-simul-semantic-source') !== 'v1') {
-        pending.push(...node.childNodes);
-      }
-    }
-    return false;
-  } catch {
-    return true;
-  }
 }
 
 function writeNodeValue(target: Node, text: string): boolean {
