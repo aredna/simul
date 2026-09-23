@@ -3443,3 +3443,63 @@ browser that has it.
 
 Gate before the merge: `npm run check` green, typecheck clean, **1,513 tests
 pass, 1 skipped**, artifact byte-verified.
+
+### D78. A minimal README, and the OCR license notices completed (2026-09-23)
+
+Branch `docs/readme-simple-and-ocr-notices`, after the 0.5.0 release. Owner:
+"Update the readme to talk about how it does on-device translation using the
+built-in translator API. Check the packages we're using for OCR and make sure
+we're following all appropriate licenses for that - especially the
+notifications. Simplify the readme as much as possible ... The callout of
+where it does not work currently is worth keeping."
+
+- **README.** Now an intro (on-device translation through the browser's
+  built-in Translator API; local Tesseract OCR; the hackathon line),
+  Requirements (Chrome 138+ or Edge 148+ on a computer, about 35 MB, the
+  browser's language-pack download), the "Where it does not work" callout,
+  a three-step Install, a three-step Use, and License. The reference sections
+  (how it works, privacy, permissions, fidelity, troubleshooting,
+  development) moved verbatim to `docs/reference.md`, linked once from the
+  README. The build identity is no longer in the README, so
+  `tools/bump-build.mjs` stops writing it there.
+- **OCR license audit** (every shipped file compared with its upstream: core
+  loaders byte-identical to tesseract.js-core 7.0.0; the 22 models decompress
+  to the `tessdata_fast@87416418` blobs; Worker contents read from its
+  published source map; no Apache component has a NOTICE file). Gaps found in
+  the 0.5.0 artifact and closed here:
+  1. *Modified files had no change notice (Apache-2.0 4(b)).* The vendored
+     Worker (remote fallback prefixes replaced, `sourceMappingURL` removed)
+     now starts with a "Modified by Simul" comment (`tools/vendor-tesseract.mjs`),
+     and the build prepends one to the chunk holding the patched tesseract.js
+     code (`wxt.config.ts`). Both notice files list the changes, and that the
+     models are gzip-compressed with content unchanged. A new test fails if
+     either comment is missing.
+  2. *musl libc and the Emscripten runtime had no notice.* The core is built
+     with Emscripten 4.0.15 (pinned by tesseract.js-core's
+     `build-with-docker.sh`); its `LICENSE` and `system/lib/libc/musl/COPYRIGHT`
+     at tag 4.0.15 are appended verbatim to
+     `legal/tesseract-core-v7-third-party-notices.txt` (shipped as
+     `CORE_THIRD_PARTY_NOTICES.txt`), with the Tesseract submodule commit and
+     the LLVM-exception note for libc++/compiler-rt.
+  3. *`base64-js` 1.5.1 (MIT, Jameson Little) was bundled in the Worker but
+     not listed.* Added.
+  4. *`ieee754` named the wrong holder.* It is Copyright 2008 Fair Oaks Labs,
+     Inc.; the BSD-3 text is now upstream's wording.
+  5. *Inventory.* The Worker carries `idb-keyval` 6.2.1 (not the locked
+     6.3.0), plus `buffer` 6.0.3, `ieee754` and `base64-js`; each row says
+     where it ships. `node-fetch`, `whatwg-url`, `tr46`, `webidl-conversions`,
+     `opencollective-postinstall` and `idb-keyval` 6.3.0 ship no code and are
+     listed as such. The webpack runtime (Worker), Vite's module-preload
+     helper and `@wxt-dev/browser` (Simul's chunks) got their MIT lines.
+- **Re-vendoring.** Running `tools/vendor-tesseract.mjs` with this Node
+  re-gzips the models to different bytes; the committed `.gz` files were kept
+  (each decompresses to the same model) and their manifest entries restored.
+  Only the Worker, the core notices and the manifest changed.
+- **The released 0.5.0 zip** predates these fixes; it lacks the change
+  notices and the musl/Emscripten/base64-js notices. A release built from this
+  branch carries them.
+
+Build identity `0.5.0 beta v.20260922.36`; `dist/chrome-unpacked` re-synced.
+
+Gate: `npm run check` green, typecheck clean, **1,514 tests pass, 1 skipped**
+(+1, the modification-notice test), artifact byte-verified.

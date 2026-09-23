@@ -31,6 +31,12 @@ export const TESSDATA_CODES = Object.freeze([
   'tel',
 ]);
 
+const WORKER_MODIFICATION_NOTICE =
+  `/*! Modified by Simul: tesseract.js ${TESSERACT_VERSION} dist/worker.min.js ` +
+  '(Apache-2.0) with its remote fallback locations for the core and the ' +
+  'language data replaced by local-only markers and its sourceMappingURL ' +
+  'line removed. */\n';
+
 const root = resolve(dirname(fileURLToPath(import.meta.url)), '..');
 const outputRoot = resolve(root, 'vendor/ocr/tesseract');
 const sourceRoot = resolve(root, 'node_modules');
@@ -168,5 +174,6 @@ function patchRemoteFallbacks(source) {
       throw new Error(`Patched Worker retains remote URLs: ${executableUrls.join(', ')}`);
     }
   }
-  return patched;
+  // Apache-2.0 section 4(b): a modified file states that it was changed.
+  return `${WORKER_MODIFICATION_NOTICE}${patched}`;
 }

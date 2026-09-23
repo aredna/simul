@@ -28,7 +28,7 @@
     "tam",
     "tel"
   ],
-  "totalBytes": 38509898,
+  "totalBytes": 38522313,
   "files": [
     {
       "path": "core/tesseract-core-lstm.wasm.js",
@@ -209,8 +209,8 @@
       "path": "licenses/CORE_THIRD_PARTY_NOTICES.txt",
       "role": "license",
       "source": "repo:legal/tesseract-core-v7-third-party-notices.txt",
-      "bytes": 43820,
-      "sha256": "fafcd3d016e92a113ef2f87b5535df259923a99dcffb2109728ad10d738c943c"
+      "bytes": 56018,
+      "sha256": "6efda6ccb22fa465cb16ae66aacab19434c1250e8f4e90163d162965d89b482f"
     },
     {
       "path": "licenses/TESSDATA_FAST_APACHE-2.0.txt",
@@ -244,8 +244,8 @@
       "path": "worker/worker.min.js",
       "role": "worker",
       "source": "npm:tesseract.js@7.0.0/dist/worker.min.js",
-      "bytes": 111231,
-      "sha256": "66df46bf7127be0f6f99542bb67ab1479898f36f531c1800a9d55abf83ec4dcd"
+      "bytes": 111448,
+      "sha256": "ff7ebda5e26738ba9d06031611436ae5f9067a771813076fb67378b384aca696"
     }
   ]
 }

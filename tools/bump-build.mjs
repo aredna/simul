@@ -1,6 +1,6 @@
 #!/usr/bin/env node
 // Bumps the beta build suffix (`beta v.YYYYMMDD.NN` -> `.NN+1`) everywhere
-// the build identity is written: wxt.config.ts, README (two places) and the
+// the build identity is written: wxt.config.ts and the
 // two identity tests. Every shipped change bumps it (review process item).
 import { readFileSync, writeFileSync } from 'node:fs';
 import { fileURLToPath } from 'node:url';
@@ -8,7 +8,6 @@ import { fileURLToPath } from 'node:url';
 const root = fileURLToPath(new URL('..', import.meta.url));
 const FILES = [
   'wxt.config.ts',
-  'README.md',
   'tests/build-identity.test.ts',
   'tests/extension-artifact.test.mjs',
 ];
