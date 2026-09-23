@@ -45,6 +45,10 @@ import {
   type HtmlMirrorRepresentabilitySummary,
   type HtmlMirrorStyleWorkBudget,
 } from './html-mirror-sanitizer';
+import {
+  MAX_HTML_MIRROR_NODES_SETTING,
+  applyHtmlMirrorLimitSettings,
+} from './html-mirror-limits';
 import { createReplicaIdentity } from './replica-identity';
 import { minimizeConnectedComposedTargets } from './composed-targets';
 import { readSemanticSourcePortIdentity } from './semantic-source-protocol';
@@ -80,8 +84,8 @@ export class WeakNodeIdRegistry implements HtmlMirrorIdRegistry {
   #nextId = 1;
   #allocationsSincePrune = 0;
 
-  /** Room for the node cap plus removed nodes not yet garbage-collected. */
-  static readonly MAX_TRACKED_NODES = MAX_HTML_MIRROR_NODES * 4;
+  /** Room for the largest node cap plus removed nodes not yet collected. */
+  static readonly MAX_TRACKED_NODES = MAX_HTML_MIRROR_NODES_SETTING * 4;
   static readonly PRUNE_INTERVAL = 256;
 
   getId(node: Node): number {
@@ -543,6 +547,8 @@ export class HtmlMirrorSourceSession {
         this.dispose(true);
         return;
       }
+      // Both sides of this mirror use the panel's size limits.
+      applyHtmlMirrorLimitSettings(message.limits);
       this.#start(message.identity, message.fidelityPolicy);
       return;
     }

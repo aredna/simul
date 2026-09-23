@@ -26,6 +26,11 @@ import {
   type SelectableReplicaFidelityPolicy,
 } from './fidelity-policy';
 import { hasExactKeysWithOptional } from '../exact-record';
+import {
+  DEFAULT_HTML_MIRROR_LIMIT_SETTINGS,
+  readHtmlMirrorLimitSettings,
+  type HtmlMirrorLimitSettings,
+} from './html-mirror-limits';
 
 export const HTML_MIRROR_PROTOCOL_VERSION = 2 as const;
 export const HTML_MIRROR_PORT_PREFIX = 'simul:html-mirror-v2:';
@@ -155,6 +160,8 @@ export type HtmlMirrorControllerMessage =
       readonly kind: 'simul:html-mirror-v2:start';
       readonly identity: ReplicaDocumentIdentity;
       readonly fidelityPolicy: SelectableReplicaFidelityPolicy;
+      /** The size limits both sides of this mirror use (D64). */
+      readonly limits: HtmlMirrorLimitSettings;
     }
   | {
       readonly protocolVersion: typeof HTML_MIRROR_PROTOCOL_VERSION;
@@ -183,12 +190,14 @@ export function readHtmlMirrorPortSessionId(value: unknown): string | undefined 
 export function createHtmlMirrorStart(
   identity: ReplicaDocumentIdentity,
   fidelityPolicy: SelectableReplicaFidelityPolicy = 'conservative',
+  limits: HtmlMirrorLimitSettings = DEFAULT_HTML_MIRROR_LIMIT_SETTINGS,
 ): HtmlMirrorControllerMessage {
   return Object.freeze({
     protocolVersion: HTML_MIRROR_PROTOCOL_VERSION,
     kind: 'simul:html-mirror-v2:start',
     identity,
     fidelityPolicy,
+    limits,
   });
 }
 
@@ -224,7 +233,7 @@ export function readHtmlMirrorControllerMessage(
     !hasExactKeysWithOptional(
       input,
       ['protocolVersion', 'kind', 'identity'],
-      ['fidelityPolicy'],
+      ['fidelityPolicy', 'limits'],
     ) ||
     input.protocolVersion !== HTML_MIRROR_PROTOCOL_VERSION ||
     (input.kind !== 'simul:html-mirror-v2:start' &&
@@ -240,18 +249,25 @@ export function readHtmlMirrorControllerMessage(
   if (input.kind === 'simul:html-mirror-v2:start' && identity.sequence !== 0) {
     return undefined;
   }
+  // A start without limits (an older panel) uses the defaults.
+  const limits = input.kind === 'simul:html-mirror-v2:start'
+    ? (input.limits === undefined
+      ? DEFAULT_HTML_MIRROR_LIMIT_SETTINGS
+      : readHtmlMirrorLimitSettings(input.limits))
+    : undefined;
   if (
     input.kind === 'simul:html-mirror-v2:start' &&
     (
-      !hasExactKeys(input, [
+      !hasExactKeysWithOptional(input, [
         'protocolVersion', 'kind', 'identity', 'fidelityPolicy',
-      ]) ||
-      !isSelectableReplicaFidelityPolicy(input.fidelityPolicy)
+      ], ['limits']) ||
+      !isSelectableReplicaFidelityPolicy(input.fidelityPolicy) ||
+      !limits
     )
   ) return undefined;
   if (
     input.kind !== 'simul:html-mirror-v2:start' &&
-    Object.hasOwn(input, 'fidelityPolicy')
+    (Object.hasOwn(input, 'fidelityPolicy') || Object.hasOwn(input, 'limits'))
   ) return undefined;
   if (input.kind === 'simul:html-mirror-v2:start') {
     return Object.freeze({
@@ -259,6 +275,7 @@ export function readHtmlMirrorControllerMessage(
       kind: input.kind,
       identity,
       fidelityPolicy: input.fidelityPolicy as SelectableReplicaFidelityPolicy,
+      limits: limits!,
     });
   }
   return Object.freeze({

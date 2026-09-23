@@ -39,6 +39,11 @@ import {
   type HtmlMirrorRepresentabilitySummary,
 } from './html-mirror-sanitizer';
 import {
+  DEFAULT_HTML_MIRROR_LIMIT_SETTINGS,
+  applyHtmlMirrorLimitSettings,
+  type HtmlMirrorLimitSettings,
+} from './html-mirror-limits';
+import {
   isSourceActivationRoleValue,
   isSourceActivationTagName,
   isSourcePublicMenuRoleValue,
@@ -209,6 +214,8 @@ interface IsolatedHtmlEngineOptions {
   readonly presentationHost: ReplayPresentationHost;
   readonly openStream: HtmlMirrorStreamFactory;
   readonly getReplicaFidelityPolicy?: () => SelectableReplicaFidelityPolicy;
+  /** The Advanced size limits; applied here and sent to the page (D64). */
+  readonly getMirrorLimits?: () => HtmlMirrorLimitSettings;
   readonly getReplicaReadScope?: () => ReplicaReadScope;
   readonly openSemanticStream?: SemanticSourceStreamFactory;
   readonly onLiveApplied?: () => void;
@@ -260,7 +267,6 @@ type HtmlMirrorLiveDimensions = HtmlMirrorCheckpoint['payload'] & Readonly<{
 
 const HTML_MIRROR_RECOVERY_TIMEOUT_MS = 5_000;
 const MAX_BUFFERED_RECOVERY_PATCHES = 4;
-const MAX_RETAINED_REPLICA_BYTES = MAX_HTML_MIRROR_BYTES * 4;
 const SEMANTIC_RECONNECT_BASE_DELAY_MS = 250;
 const SEMANTIC_RECONNECT_MAX_DELAY_MS = 8_000;
 
@@ -322,8 +328,16 @@ export class IsolatedHtmlReplicaEngine
     const fidelityPolicy = this.options.getReplicaFidelityPolicy?.() ??
       'conservative';
     this.#activeFidelityPolicy = fidelityPolicy;
+    const limits = this.options.getMirrorLimits?.() ??
+      DEFAULT_HTML_MIRROR_LIMIT_SETTINGS;
+    applyHtmlMirrorLimitSettings(limits);
     try {
-      stream = await this.options.openStream(request, fidelityPolicy, signal);
+      stream = await this.options.openStream(
+        request,
+        fidelityPolicy,
+        signal,
+        limits,
+      );
       if (!this.#isCurrent(runVersion, request, signal)) {
         stream.dispose();
         return this.#skipped('stale_identity');
@@ -4045,6 +4059,8 @@ function retainedReplicaStateFitsBudget(state: HtmlMirrorDomState): boolean {
     if (!root) return false;
     const pending: Node[] = [root];
     const seen = new Set<Node>();
+    // The panel keeps the previous replica while it stages the next one.
+    const maxRetainedBytes = MAX_HTML_MIRROR_BYTES * 4;
     let bytes = 0;
     while (pending.length > 0) {
       const node = pending.pop();
@@ -4059,7 +4075,7 @@ function retainedReplicaStateFitsBudget(state: HtmlMirrorDomState): boolean {
         bytes += element.localName.length * 2;
         for (const { name, value } of [...element.attributes]) {
           bytes += (name.length + value.length) * 2 + 16;
-          if (bytes > MAX_RETAINED_REPLICA_BYTES) return false;
+          if (bytes > maxRetainedBytes) return false;
         }
         if (isNativeReplicaTextControl(element)) {
           bytes += (element.value.length + element.placeholder.length) * 2;
@@ -4068,15 +4084,15 @@ function retainedReplicaStateFitsBudget(state: HtmlMirrorDomState): boolean {
         if (shadow) pending.push(shadow);
       }
       for (const child of [...node.childNodes]) pending.push(child);
-      if (bytes > MAX_RETAINED_REPLICA_BYTES) return false;
+      if (bytes > maxRetainedBytes) return false;
     }
     for (const metadata of state.textMetadata.values()) {
       bytes += metadata.text.length * 2 + 32;
-      if (bytes > MAX_RETAINED_REPLICA_BYTES) return false;
+      if (bytes > maxRetainedBytes) return false;
     }
     for (const control of state.controlMetadata.values()) {
       bytes += control.text.length * 2 + 32;
-      if (bytes > MAX_RETAINED_REPLICA_BYTES) return false;
+      if (bytes > maxRetainedBytes) return false;
     }
     return state.revisions.size <= 1;
   } catch {

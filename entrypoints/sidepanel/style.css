@@ -295,6 +295,20 @@ select { width: 100%; min-height: 34px; padding: 5px 26px 5px 8px; font-size: 12
 .icon-button { width: 34px; padding: 0; font-size: 17px; }
 
 .settings-grid { display: grid; grid-template-columns: repeat(2, minmax(0, 1fr)); gap: 9px; margin-top: 11px; }
+/* A tall neighbour (a control with microcopy) must not stretch a select. */
+.settings-grid label { align-content: start; }
+.settings-grid input[type="number"] {
+  width: 100%;
+  min-height: 34px;
+  padding: 5px 8px;
+  border: 1px solid var(--line);
+  border-radius: 8px;
+  color: var(--text);
+  background: var(--control-background);
+  font-size: 12px;
+}
+.settings-grid input[type="number"]:disabled { cursor: not-allowed; opacity: .52; }
+.settings-grid > button { align-self: end; }
 .options-group { margin-top: 12px; padding-top: 10px; border-top: 1px solid var(--line); }
 .options-group summary { color: var(--accent-text); font-size: 12px; font-weight: 750; cursor: pointer; }
 .options-group--experimental { margin-top: 10px; }

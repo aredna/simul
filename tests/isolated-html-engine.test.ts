@@ -40,9 +40,11 @@ import {
   type SemanticSourceRecord,
 } from '../lib/replica/semantic-source-protocol';
 import {
+  MAX_HTML_MIRROR_NODES,
   createHtmlMirrorRepresentabilityCollector,
   type HtmlMirrorNode,
 } from '../lib/replica/html-mirror-sanitizer';
+import { applyHtmlMirrorLimitSettings } from '../lib/replica/html-mirror-limits';
 import { sourceSecretPlaceholderTagName } from '../lib/replica/source-secret-classifier';
 import type {
   ReplayPresentationHost,
@@ -80,6 +82,28 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(ISOLATED_PUBLIC_MENU_SHADOW_CSS).toContain(
       ':host([data-simul-replica-disclosure-overlay="v1"]){background-color:Canvas!important;color:CanvasText!important;',
     );
+  });
+
+  it('applies the panel size limits and sends them with the stream (D64)', async () => {
+    const limits = { itemMegabytes: 2, pageMegabytes: 8, maxElements: 5_000 };
+    const sent: unknown[] = [];
+    const nodeCapsAtOpen: number[] = [];
+    const engine = new IsolatedHtmlReplicaEngine({
+      presentationHost: new FakePresentationHost(),
+      getMirrorLimits: () => limits,
+      openStream: async (_request, _policy, _signal, sentLimits) => {
+        sent.push(sentLimits);
+        nodeCapsAtOpen.push(MAX_HTML_MIRROR_NODES);
+        throw new Error('The test stops at the stream.');
+      },
+    });
+    try {
+      await engine.run(request);
+    } finally {
+      applyHtmlMirrorLimitSettings();
+    }
+    expect(sent).toEqual([limits]);
+    expect(nodeCapsAtOpen).toEqual([5_000]);
   });
 
   it('rejects the initial about:blank document and accepts only the marked srcdoc shell', () => {

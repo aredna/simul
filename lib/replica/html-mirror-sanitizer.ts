@@ -30,43 +30,32 @@ import {
   sourceSecretPlaceholderTagName,
 } from './source-secret-classifier';
 import { isSafeStaticSvgDataImage } from './static-svg-data-image';
+import {
+  MAX_ADOPTED_STYLE_CHARACTERS_PER_OWNER,
+  MAX_ADOPTED_STYLE_RULES_PER_OWNER,
+  MAX_HTML_MIRROR_ADOPTED_STYLE_RULES,
+  MAX_HTML_MIRROR_BYTES,
+  MAX_HTML_MIRROR_NODES,
+  MAX_HTML_MIRROR_STRING,
+} from './html-mirror-limits';
 import { hasExactKeysWithOptional } from '../exact-record';
 
-// These caps keep the tab and the panel responsive; they do not protect
-// data. The mirror runs locally, so they are set as high as Chrome carries
-// comfortably (owner ruling, D63).
-
-/**
- * The whole document, counted as 2 bytes per character. A checkpoint crosses
- * the runtime port as one message, and Chrome refuses a message above
- * 64 MiB, so this stays just below that.
- */
-export const MAX_HTML_MIRROR_BYTES = 60 * 1024 * 1024;
-export const MAX_HTML_MIRROR_NODES = 200_000;
+// The size caps (any one string, the page, nodes, and the rule caps that
+// follow them) are the Advanced settings in html-mirror-limits.ts: live
+// values, re-exported here. They keep the tab and the panel responsive; they
+// do not protect data (owner ruling, D63).
+export {
+  MAX_ADOPTED_STYLE_RULES_PER_OWNER,
+  MAX_HTML_MIRROR_ADOPTED_STYLE_RULES,
+  MAX_HTML_MIRROR_BYTES,
+  MAX_HTML_MIRROR_NODES,
+  MAX_HTML_MIRROR_STRING,
+};
 export const MAX_HTML_MIRROR_DEPTH = 256;
-/**
- * Any one string: a stylesheet, a text node, an attribute value or a URL
- * (inline images are data URLs). Google's sign-in page carries one inline
- * stylesheet of about 700 KB; YouTube and freee link sheets of 3 MB.
- */
-export const MAX_HTML_MIRROR_STRING = 10 * 1024 * 1024;
 export const MAX_HTML_MIRROR_ATTRIBUTES = 512;
 export const MAX_HTML_MIRROR_ADOPTED_STYLE_SHEETS = 4_096;
-/**
- * Rule counts follow the character budgets at one rule per 16 characters, so
- * a stylesheet within its character cap is not refused for its rule count
- * (freee's 2.7 MB sheet has 35,000 rule blocks, about 78 characters each).
- */
-const MIN_CSS_CHARACTERS_PER_RULE = 16;
-export const MAX_HTML_MIRROR_ADOPTED_STYLE_RULES = Math.floor(
-  MAX_HTML_MIRROR_BYTES / 2 / MIN_CSS_CHARACTERS_PER_RULE,
-);
 export const MAX_HTML_MIRROR_DIAGNOSTIC_COUNT = 1_000_000;
 const MAX_ADOPTED_STYLE_SHEETS_PER_OWNER = 256;
-export const MAX_ADOPTED_STYLE_RULES_PER_OWNER = Math.floor(
-  MAX_HTML_MIRROR_STRING / MIN_CSS_CHARACTERS_PER_RULE,
-);
-const MAX_ADOPTED_STYLE_CHARACTERS_PER_OWNER = MAX_HTML_MIRROR_STRING;
 const MAX_BROKEN_CONTROL_ICON_EDGE = 64;
 
 export class HtmlMirrorCapacityError extends Error {

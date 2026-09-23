@@ -1182,6 +1182,7 @@ describe('preference coordinator message boundary', () => {
           lastLaunchSurface: 'popout',
           popoutTabMode: 'active',
           replicaFidelityPolicy: 'conservative',
+          mirrorLimits: { itemMegabytes: 2, pageMegabytes: 8, maxElements: 5_000 },
           replicaViewMode: 'source-only',
         },
       }),
@@ -1196,6 +1197,7 @@ describe('preference coordinator message boundary', () => {
         lastLaunchSurface: 'popout',
         popoutTabMode: 'active',
         replicaFidelityPolicy: 'conservative',
+        mirrorLimits: { itemMegabytes: 2, pageMegabytes: 8, maxElements: 5_000 },
         replicaViewMode: 'source-only',
       },
     });
@@ -1213,6 +1215,19 @@ describe('preference coordinator message boundary', () => {
         patch: { replicaFidelityPolicy: 'maximum' },
       }),
     ).toBeUndefined();
+    for (const mirrorLimits of [
+      { itemMegabytes: 2, pageMegabytes: 61, maxElements: 5_000 },
+      { itemMegabytes: 2, pageMegabytes: 8 },
+      { itemMegabytes: 2.5, pageMegabytes: 8, maxElements: 5_000 },
+    ]) {
+      expect(
+        readPreferenceCommand({
+          type: 'simul:preferences:patch-view',
+          expectedResetRevision: 0,
+          patch: { mirrorLimits },
+        }),
+      ).toBeUndefined();
+    }
     expect(
       readPreferenceCommand({
         type: 'simul:preferences:patch-view',

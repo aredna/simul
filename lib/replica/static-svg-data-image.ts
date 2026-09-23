@@ -1,6 +1,7 @@
-// Size caps follow the mirror's: a drawing is often a data URL, and the
-// profile below, not its size, is what keeps it inert.
-const MAX_STATIC_SVG_DATA_IMAGE_LENGTH = 10 * 1024 * 1024;
+import { MAX_HTML_MIRROR_STRING } from './html-mirror-limits';
+
+// The length follows the mirror's string cap: a drawing is often a data URL,
+// and the profile below, not its size, is what keeps it inert.
 const MAX_STATIC_SVG_ELEMENTS = 10_000;
 const MAX_STATIC_SVG_DEPTH = 64;
 const LOCAL_SVG_FRAGMENT_PATTERN = /^#[A-Za-z0-9_.:-]{1,256}$/u;
@@ -147,7 +148,7 @@ const STATIC_SVG_DIMENSION_ATTRIBUTES = new Set([
  * resource-bearing element so an image cannot become a second active graph.
  */
 export function isSafeStaticSvgDataImage(value: string): boolean {
-  if (value.length > MAX_STATIC_SVG_DATA_IMAGE_LENGTH) return false;
+  if (value.length > MAX_HTML_MIRROR_STRING) return false;
   const match = /^data:image\/svg\+xml(?:;charset=(?:utf-8|us-ascii))?,([\s\S]*)$/iu.exec(
     value,
   );
@@ -160,7 +161,7 @@ export function isSafeStaticSvgDataImage(value: string): boolean {
   }
   if (
     xml.length === 0 ||
-    xml.length > MAX_STATIC_SVG_DATA_IMAGE_LENGTH ||
+    xml.length > MAX_HTML_MIRROR_STRING ||
     /[\u0000-\u0008\u000b\u000c\u000e-\u001f\u007f]/u.test(xml) ||
     /(?:<!|<\?|&|javascript\s*:|data\s*:)/iu.test(xml)
   ) return false;

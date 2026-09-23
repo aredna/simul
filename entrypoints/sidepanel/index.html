@@ -214,21 +214,6 @@
             <option value="faithful" data-ui-label="Keep geometry">Keep geometry</option>
           </select>
         </label>
-        <label title="Choose how many safely representable visual resources Isolated HTML preserves." data-ui-title="Choose how many safely representable visual resources Isolated HTML preserves.">
-          <span data-ui-label="Replica fidelity">Replica fidelity</span>
-          <select
-            id="replica-fidelity-policy"
-            aria-describedby="replica-fidelity-disclosure"
-          >
-            <option value="passive" data-ui-label="Passive Fidelity (recommended)">Passive Fidelity (recommended)</option>
-            <option value="conservative" data-ui-label="Conservative (fewer requests)">Conservative (fewer requests)</option>
-          </select>
-          <small
-            id="replica-fidelity-disclosure"
-            class="microcopy"
-            data-ui-label="Passive Fidelity may make additional HTTP(S) requests for inert visual resources in the replica."
-          >Passive Fidelity may make additional HTTP(S) requests for inert visual resources in the replica.</small>
-        </label>
         <label class="check-label" title="Keep the replica near the same reading position as the source page scrolls." data-ui-title="Keep the replica near the same reading position as the source page scrolls.">
           <input id="sync-scroll" type="checkbox" />
           <span data-ui-label="Follow source scrolling">Follow source scrolling</span>
@@ -289,7 +274,7 @@
       </details>
 
       <details id="experimental-options" class="options-group options-group--experimental">
-        <summary title="Inspect untranslated source text and configure experimental local image OCR." data-ui-title="Inspect untranslated source text and configure experimental local image OCR." data-ui-label="Advanced &amp; experimental">Advanced &amp; experimental</summary>
+        <summary title="Inspect untranslated source text, set the replica's fidelity and size limits, and configure experimental local image OCR." data-ui-title="Inspect untranslated source text, set the replica's fidelity and size limits, and configure experimental local image OCR." data-ui-label="Advanced &amp; experimental">Advanced &amp; experimental</summary>
         <div class="settings-grid">
           <label title="Show translated text or temporarily inspect the live source text without translation." data-ui-title="Show translated text or temporarily inspect the live source text without translation.">
             <span data-ui-label="Replica text">Replica text</span>
@@ -298,6 +283,34 @@
               <option value="source-only" data-ui-label="Live source only">Live source only</option>
             </select>
           </label>
+          <label title="Choose how many safely representable visual resources Isolated HTML preserves." data-ui-title="Choose how many safely representable visual resources Isolated HTML preserves.">
+            <span data-ui-label="Replica fidelity">Replica fidelity</span>
+            <select
+              id="replica-fidelity-policy"
+              aria-describedby="replica-fidelity-disclosure"
+            >
+              <option value="passive" data-ui-label="Passive Fidelity (recommended)">Passive Fidelity (recommended)</option>
+              <option value="conservative" data-ui-label="Conservative (fewer requests)">Conservative (fewer requests)</option>
+            </select>
+            <small
+              id="replica-fidelity-disclosure"
+              class="microcopy"
+              data-ui-label="Passive Fidelity may make additional HTTP(S) requests for inert visual resources in the replica."
+            >Passive Fidelity may make additional HTTP(S) requests for inert visual resources in the replica.</small>
+          </label>
+          <label title="The largest single stylesheet, text or inline image the mirror copies. A larger one is left out and the rest of the page still shows." data-ui-title="The largest single stylesheet, text or inline image the mirror copies. A larger one is left out and the rest of the page still shows.">
+            <span data-ui-label="Largest single item (MB)">Largest single item (MB)</span>
+            <input id="mirror-item-megabytes" type="number" inputmode="numeric" min="1" max="30" step="1" />
+          </label>
+          <label title="The largest page the mirror copies, counted in memory, where text takes about twice its size on disk. Chrome passes at most 60 MB at once. A larger page is not mirrored." data-ui-title="The largest page the mirror copies, counted in memory, where text takes about twice its size on disk. Chrome passes at most 60 MB at once. A larger page is not mirrored.">
+            <span data-ui-label="Largest page (MB, up to 60)">Largest page (MB, up to 60)</span>
+            <input id="mirror-page-megabytes" type="number" inputmode="numeric" min="1" max="60" step="1" />
+          </label>
+          <label title="The most elements and text pieces the mirror copies. Reading a large page pauses its tab for about a second per 40,000. A larger page is not mirrored." data-ui-title="The most elements and text pieces the mirror copies. Reading a large page pauses its tab for about a second per 40,000. A larger page is not mirrored.">
+            <span data-ui-label="Most page elements">Most page elements</span>
+            <input id="mirror-max-elements" type="number" inputmode="numeric" min="1000" max="1000000" step="1000" />
+          </label>
+          <button id="restore-mirror-limits" type="button" data-ui-label="Restore default limits">Restore default limits</button>
         </div>
         <div id="image-analysis-host"></div>
       </details>

@@ -27,6 +27,7 @@ import {
   type CompanionViewSettingsPatch,
   type MirrorDisplayMode,
 } from './preferences';
+import { readHtmlMirrorLimitSettings } from './replica/html-mirror-limits';
 import { isImageScanPolicy } from './ocr/contracts';
 import {
   readExactDisabledImageTextProviderIds,
@@ -957,6 +958,7 @@ const VIEW_SETTING_KEYS = new Set([
   'syncScroll',
   'textLayoutMode',
   'replicaFidelityPolicy',
+  'mirrorLimits',
   'replicaViewMode',
   'launchBehavior',
   'lastLaunchSurface',
@@ -1009,6 +1011,11 @@ function readViewSettingsPatch(
       return undefined;
     }
     patch.replicaFidelityPolicy = value.replicaFidelityPolicy;
+  }
+  if ('mirrorLimits' in value) {
+    const limits = readHtmlMirrorLimitSettings(value.mirrorLimits);
+    if (!limits) return undefined;
+    patch.mirrorLimits = limits;
   }
   if ('replicaViewMode' in value) {
     if (!isReplicaViewMode(value.replicaViewMode)) return undefined;

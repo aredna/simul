@@ -14,6 +14,10 @@ import {
   snapshotHtmlMirrorRepresentability,
   type HtmlMirrorRepresentabilitySummary,
 } from './html-mirror-sanitizer';
+import {
+  DEFAULT_HTML_MIRROR_LIMIT_SETTINGS,
+  type HtmlMirrorLimitSettings,
+} from './html-mirror-limits';
 import { createReplicaIdentity } from './replica-identity';
 import type { SelectableReplicaFidelityPolicy } from './fidelity-policy';
 
@@ -55,12 +59,14 @@ export type HtmlMirrorStreamFactory = (
   request: ReplicaCaptureRequest,
   fidelityPolicy: SelectableReplicaFidelityPolicy,
   signal?: AbortSignal,
+  limits?: HtmlMirrorLimitSettings,
 ) => Promise<HtmlMirrorStreamLease>;
 
 export async function openChromeHtmlMirrorStream(
   request: ReplicaCaptureRequest,
   fidelityPolicy: SelectableReplicaFidelityPolicy = 'conservative',
   signal?: AbortSignal,
+  limits: HtmlMirrorLimitSettings = DEFAULT_HTML_MIRROR_LIMIT_SETTINGS,
 ): Promise<HtmlMirrorStreamLease> {
   signal?.throwIfAborted();
   if (!request.isCurrent()) {
@@ -96,6 +102,7 @@ export async function openChromeHtmlMirrorStream(
     identity,
     request,
     fidelityPolicy,
+    limits,
     signal,
   );
 }
@@ -116,6 +123,7 @@ class ChromeHtmlMirrorStreamLease implements HtmlMirrorStreamLease {
     private readonly identity: ReturnType<typeof createReplicaIdentity>,
     private readonly request: ReplicaCaptureRequest,
     private readonly fidelityPolicy: SelectableReplicaFidelityPolicy,
+    limits: HtmlMirrorLimitSettings,
     private readonly signal?: AbortSignal,
   ) {
     let resolveInitial!: (checkpoint: HtmlMirrorCheckpoint) => void;
@@ -133,7 +141,7 @@ class ChromeHtmlMirrorStreamLease implements HtmlMirrorStreamLease {
       this.#fail(new Error('HTML mirror initial checkpoint timed out.'));
     }, HTML_MIRROR_INITIAL_CHECKPOINT_TIMEOUT_MS);
     try {
-      port.postMessage(createHtmlMirrorStart(identity, fidelityPolicy));
+      port.postMessage(createHtmlMirrorStart(identity, fidelityPolicy, limits));
     } catch (error) {
       this.#fail(error);
     }
