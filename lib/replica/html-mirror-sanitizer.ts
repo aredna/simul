@@ -33,13 +33,21 @@ export const MAX_HTML_MIRROR_BYTES = 8 * 1024 * 1024;
 export const MAX_HTML_MIRROR_NODES = 50_000;
 export const MAX_HTML_MIRROR_DEPTH = 64;
 export const MAX_HTML_MIRROR_STRING = 512 * 1024;
+/**
+ * One stylesheet's text. Large sites ship a single inline sheet above the
+ * general string cap (Google's sign-in page carries about 700 KB), and
+ * omitting it leaves the replica unstyled. The total mirror budget still
+ * bounds the page as a whole.
+ */
+export const MAX_HTML_MIRROR_STYLE_SHEET_STRING = 1024 * 1024;
 export const MAX_HTML_MIRROR_ATTRIBUTES = 512;
 export const MAX_HTML_MIRROR_ADOPTED_STYLE_SHEETS = 4_096;
 export const MAX_HTML_MIRROR_ADOPTED_STYLE_RULES = 100_000;
 export const MAX_HTML_MIRROR_DIAGNOSTIC_COUNT = 1_000_000;
 const MAX_ADOPTED_STYLE_SHEETS_PER_OWNER = 256;
 const MAX_ADOPTED_STYLE_RULES_PER_OWNER = 20_000;
-const MAX_ADOPTED_STYLE_CHARACTERS_PER_OWNER = MAX_HTML_MIRROR_STRING;
+const MAX_ADOPTED_STYLE_CHARACTERS_PER_OWNER =
+  MAX_HTML_MIRROR_STYLE_SHEET_STRING;
 const MAX_BROKEN_CONTROL_ICON_EDGE = 64;
 
 export class HtmlMirrorCapacityError extends Error {
@@ -343,6 +351,12 @@ interface SerializeContext {
   readonly activationRegion: boolean;
   readonly nonContentRegion: boolean;
   readonly styleRegion: boolean;
+  /**
+   * True for the text of a `<style>` whose CSSOM text travels as
+   * `resolvedStyleSheetText`. The receiver replaces that text with the
+   * resolved sheet, so it is not sent (or budgeted) twice.
+   */
+  readonly styleResolved?: boolean;
   /** True only below a hard-secret boundary that was already replaced. */
   readonly hardSecretRegion: boolean;
   readonly depth: number;
@@ -1014,7 +1028,11 @@ export function readHtmlMirrorNode(
     if (
       !hasExactKeys(input, ['kind', 'id', 'text', 'translatable']) ||
       typeof input.text !== 'string' ||
-      input.text.length > MAX_HTML_MIRROR_STRING ||
+      input.text.length > (
+        styleRegion
+          ? MAX_HTML_MIRROR_STYLE_SHEET_STRING
+          : MAX_HTML_MIRROR_STRING
+      ) ||
       typeof input.translatable !== 'boolean' ||
       nativeSelectParent !== false ||
       (privateRegion && input.text !== '') ||
@@ -1484,7 +1502,9 @@ function serializeNode(
     // a privacy or menu boundary still withholds it.
     const withholdText = context.privateRegion &&
       !(context.styleRegion && !context.privacyRegion);
-    const rawText = withholdText ? '' : (live.nodeValue ?? '');
+    const rawText = withholdText || context.styleResolved
+      ? ''
+      : (live.nodeValue ?? '');
     const classifiedBefore = classifiedStyleOmissionCount(
       context.representability,
     );
@@ -1517,7 +1537,13 @@ function serializeNode(
         'privateTextRedactionCount',
       );
     }
-    if (text.length > MAX_HTML_MIRROR_STRING) {
+    if (
+      text.length > (
+        context.styleRegion
+          ? MAX_HTML_MIRROR_STYLE_SHEET_STRING
+          : MAX_HTML_MIRROR_STRING
+      )
+    ) {
       incrementRepresentability(context.representability, 'capacityOmissionCount');
       return undefined;
     }
@@ -1660,8 +1686,9 @@ function serializeNode(
   );
   const children: HtmlMirrorNode[] = [];
   if (!isVoidElement(tagName) && !isSourceNativeTextControlTagName(tagName)) {
-    const childRepresentability = tagName === 'style' &&
-        hints.resolvedStyleSheetText !== undefined
+    const styleResolved = tagName === 'style' &&
+      hints.resolvedStyleSheetText !== undefined;
+    const childRepresentability = styleResolved
       ? createHtmlMirrorRepresentabilityCollector()
       : context.representability;
     const childFidelityPolicy = tagName === 'style' && context.styleWork.exhausted
@@ -1679,6 +1706,7 @@ function serializeNode(
         activationRegion,
         nonContentRegion,
         styleRegion,
+        styleResolved,
         depth: context.depth + 1,
       });
       if (child) children.push(child);
@@ -2179,7 +2207,7 @@ function readTransportedAdoptedStyleSheets(
   for (const cssText of input) {
     if (
       typeof cssText !== 'string' ||
-      cssText.length > MAX_HTML_MIRROR_STRING ||
+      cssText.length > MAX_HTML_MIRROR_STYLE_SHEET_STRING ||
       sanitizeCss(
         cssText,
         'about:blank',
@@ -2363,7 +2391,7 @@ function serializeReadableStyleSheetRules(
       if (!cssText) continue;
       const separator = parts.length > 0 ? 1 : 0;
       characters += separator + cssText.length;
-      if (characters > MAX_HTML_MIRROR_STRING) {
+      if (characters > MAX_HTML_MIRROR_STYLE_SHEET_STRING) {
         incrementRepresentability(representability, 'capacityOmissionCount');
         return { status: 'blocked' };
       }
@@ -2511,7 +2539,7 @@ function readTransportedResolvedStyleSheetText(
     fidelityPolicy !== 'passive' ||
     (tagName !== 'style' && tagName !== 'link') ||
     typeof input !== 'string' ||
-    input.length > MAX_HTML_MIRROR_STRING ||
+    input.length > MAX_HTML_MIRROR_STYLE_SHEET_STRING ||
     sanitizeCss(
       input,
       'about:blank',
@@ -2560,7 +2588,7 @@ export function sanitizeCss(
   representability?: HtmlMirrorRepresentabilityCollector,
   fidelityPolicy: SelectableReplicaFidelityPolicy = 'conservative',
 ): string | undefined {
-  if (css.length > MAX_HTML_MIRROR_STRING) {
+  if (css.length > MAX_HTML_MIRROR_STYLE_SHEET_STRING) {
     if (representability) {
       incrementRepresentability(
         representability,

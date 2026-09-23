@@ -15,6 +15,8 @@ import {
 } from '../lib/replica/html-mirror-protocol';
 import {
   MAX_HTML_MIRROR_BYTES,
+  MAX_HTML_MIRROR_STRING,
+  MAX_HTML_MIRROR_STYLE_SHEET_STRING,
   createHtmlMirrorReadBudget,
   createHtmlMirrorRepresentabilityCollector,
   createHtmlMirrorStyleWorkBudget,
@@ -1366,23 +1368,31 @@ describe('isolated HTML sanitizer and protocol', () => {
     );
     expect(graph).toBeDefined();
     const styleTexts = new Map<string, string>();
+    const styleSheets = new Map<string, string | undefined>();
     const pageTexts: string[] = [];
     const visit = (node: HtmlMirrorNode): void => {
       if (node.kind !== 'element') return;
       const id = node.attributes.find(([name]) => name === 'id')?.[1];
       for (const child of node.children) {
         if (child.kind === 'text') {
-          if (node.tagName === 'style' && id) styleTexts.set(id, child.text);
-          else if (child.text.trim()) pageTexts.push(child.text.trim());
+          if (node.tagName === 'style' && id) {
+            styleTexts.set(id, child.text);
+            styleSheets.set(id, node.resolvedStyleSheetText);
+          } else if (child.text.trim()) pageTexts.push(child.text.trim());
         }
         visit(child);
       }
     };
     visit(graph!.root);
+    // A resolved sheet travels in place of the raw text, which the receiver
+    // replaces with it.
+    const keptCss = (id: string): string =>
+      (styleSheets.get(id) ?? styleTexts.get(id) ?? '')
+        .replace(/\s+|;(?=\})/gu, '');
 
     // Hidden and aria-hidden regions keep their CSS; the region's page text is withheld.
-    expect(styleTexts.get('modal-style')).toBe('.modal{display:none;position:fixed}');
-    expect(styleTexts.get('announced-style')).toBe('.announced{visibility:hidden}');
+    expect(keptCss('modal-style')).toBe('.modal{display:none;position:fixed}');
+    expect(keptCss('announced-style')).toBe('.announced{visibility:hidden}');
     expect(pageTexts).not.toContain('hidden modal text');
     expect(pageTexts).not.toContain('announced text');
     // A privacy boundary still withholds stylesheet text along with the page text.
@@ -2905,6 +2915,88 @@ describe('isolated HTML sanitizer and protocol', () => {
       work,
     ).resolvedStyleSheetText).toBeUndefined();
     expect(work.sheets).toBe(1);
+    expect(representability.capacityOmissionCount).toBe(1);
+  });
+
+  it('keeps an inline stylesheet above the general string cap and sends its text once', () => {
+    // Google's sign-in page ships one inline sheet of about 700 KB; omitting
+    // it left the replica unstyled.
+    const rules = Array.from({ length: 2_000 }, (_, index) => ({
+      cssText: `.rule-${index}{padding:${index}px;${'color:red;'.repeat(32)}}`,
+    }));
+    const css = rules.map((rule) => rule.cssText).join('\n');
+    expect(css.length).toBeGreaterThan(MAX_HTML_MIRROR_STRING);
+    expect(css.length).toBeLessThan(MAX_HTML_MIRROR_STYLE_SHEET_STRING);
+    const { document, window } = parseHTML(
+      `<!doctype html><html><head><style id="theme">${css}</style></head>` +
+      '<body class="rule-1">styled</body></html>',
+    );
+    Object.defineProperty(document.querySelector('#theme'), 'sheet', {
+      configurable: true,
+      value: fakeStyleSheetRules(rules),
+    });
+    const identity = createReplicaIdentity({
+      sessionId: 'large-sheet', pageEpoch: 1, generation: 1,
+      documentId: 'large-sheet-document', frameId: 0, sequence: 0,
+    });
+
+    const passive = sanitizeSourceDocument(
+      document,
+      window as unknown as Window,
+      new WeakNodeIdRegistry(),
+      createHtmlMirrorRepresentabilityCollector(),
+      'passive',
+    )!;
+    const passiveStyle = graphElementBySourceId(passive, 'theme')!;
+    expect(passiveStyle.resolvedStyleSheetText).toBe(css);
+    // The receiver replaces the raw text with the resolved sheet, so the raw
+    // copy is not transported or budgeted a second time.
+    expect(passiveStyle.children).toEqual([
+      expect.objectContaining({ kind: 'text', text: '' }),
+    ]);
+    const passiveCheckpoint = checkpointFor(identity, passive, 'passive');
+    expect(passiveCheckpoint).toBeDefined();
+    expect(readHtmlMirrorSourceMessage(passiveCheckpoint, identity, 'passive'))
+      .toEqual(passiveCheckpoint);
+
+    const conservative = sanitizeSourceDocument(
+      document,
+      window as unknown as Window,
+      new WeakNodeIdRegistry(),
+      createHtmlMirrorRepresentabilityCollector(),
+      'conservative',
+    )!;
+    const conservativeStyle = graphElementBySourceId(conservative, 'theme')!;
+    expect(conservativeStyle.resolvedStyleSheetText).toBeUndefined();
+    expect(conservativeStyle.children).toEqual([
+      expect.objectContaining({ kind: 'text', text: css }),
+    ]);
+    const conservativeCheckpoint = checkpointFor(
+      identity,
+      conservative,
+      'conservative',
+    );
+    expect(conservativeCheckpoint).toBeDefined();
+    expect(readHtmlMirrorSourceMessage(
+      conservativeCheckpoint,
+      identity,
+      'conservative',
+    )).toEqual(conservativeCheckpoint);
+  });
+
+  it('still omits one stylesheet above the stylesheet cap', () => {
+    const css = `.page{${'color:red;'.repeat(
+      Math.ceil(MAX_HTML_MIRROR_STYLE_SHEET_STRING / 10),
+    )}}`;
+    const representability = createHtmlMirrorRepresentabilityCollector();
+
+    expect(sanitizeCss(
+      css,
+      'https://example.test/',
+      false,
+      representability,
+      'passive',
+    )).toBeUndefined();
     expect(representability.capacityOmissionCount).toBe(1);
   });
 

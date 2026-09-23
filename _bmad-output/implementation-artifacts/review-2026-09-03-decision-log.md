@@ -2450,3 +2450,73 @@ install Gemini Nano."
 Build identity `0.5.0 beta v.20260922.18`; `dist/chrome-unpacked` re-synced.
 Gate: `npm run check` green, **1,454 tests pass, 1 skipped** (+7).
 Publishing 0.5.0 moves to **D60**.
+
+### D60. The mirror keeps a large stylesheet and the browser's own html and body (2026-09-23)
+
+Same branch / PR #22. Owner report on Google's OAuth sign-in:
+"accounts.google.com/signin/OAuth It's in a box in the center of the screen.
+Our layout is not bounding things properly and not following the original
+screen properly."
+
+- **Reproduced in Chrome for Testing** on a real OAuth sign-in
+  (`/o/oauth2/v2/auth` for the OAuth Playground client, which lands on
+  `/v3/signin/identifier`) and on the bare `/signin/OAuth` URL, which is
+  Google's 404 page. On the sign-in page the replica was fully unstyled: the
+  page's only stylesheet is one inline `<style>` of 680 KB (706 KB as CSSOM),
+  above the 512 KiB per-string cap, so the sanitizer dropped both its raw text
+  and its resolved sheet. On the 404 page the text was left-aligned and
+  full-width, without the robot, and in 11.25 px instead of 15 px.
+- **Three causes.**
+  1. *Stylesheet size.* Every CSS text shared the general 512 KiB string cap.
+  2. *Shell rules.* The replica shell's own `html,body{margin:0;min-width:100%;
+     min-height:100%}` (from the first isolated-mirror commit, no recorded
+     reason) overrode the page: `min-width:100%` beats a body's `max-width`, so
+     a body centred with auto margins filled the frame, and `margin:0` removed
+     the 8px body margin of pages that never reset it.
+  3. *Chrome's extension font.* Chrome inserts `body{font-family:<system
+     font>;font-size:75%}` into every extension-origin document, which the
+     same-origin srcdoc replica is. CDP lists it as an `injected` author sheet
+     ahead of the page's sheets. Any page that sets its font on `html` (or
+     relies on the default) showed body text at 75% in the system font; freee
+     showed tofu boxes for Japanese in the harness for the same reason.
+- **Change.** `MAX_HTML_MIRROR_STYLE_SHEET_STRING` (1 MiB) now bounds one
+  stylesheet's text (inline text, resolved CSSOM, adopted sheets, and
+  `sanitizeCss`, on both sides); other strings keep 512 KiB. A `<style>` whose
+  rules are read from CSSOM no longer sends its raw text too (the receiver
+  replaced it with the resolved sheet anyway), so a large inline sheet costs
+  the page budget once; this also skips one sanitize pass (about 50 ms for
+  700 KB). The shell keeps only `html,body{pointer-events:none}` and adds
+  `body{font-family:inherit;font-size:inherit}`, which sits after Chrome's
+  injected sheet at equal specificity, so any page rule for `body` still wins.
+  The one difference left: a page's zero-specificity rule (`*`, `:where(body)`)
+  with a relative font size no longer compounds on body.
+- **Verified in Chrome for Testing.** Sign-in page: the replica shows the
+  bordered card centred at the source's size and position, with the header,
+  field, links and buttons laid out as in the source. 404 page: centred column,
+  robot on the right, 15 px text. freee.co.jp: body text now in the page's own
+  Japanese font; no other layout change.
+- **Found, not changed.** (a) Quirks-mode pages render in standards mode: the
+  doctype-free shell is loaded through `srcdoc`, and an `srcdoc` document is
+  never in quirks mode, so `docs/replica-fidelity.md`'s "selects a doctype or
+  doctype-free srcdoc shell" does not achieve quirks (the 404 page is a quirks
+  page and happens to look right). (b) A `<style>` inside a privacy boundary
+  (for example `role=textbox`) sends its resolved sheet even though its raw
+  text is withheld, so the documented "a privacy boundary withholds both" holds
+  only for the raw text; CSS, not user data. (c) Google's language picker shows
+  as "Options" in the replica (the privacy rules for an editable combobox).
+- **Tests.** Protocol: an inline sheet above 512 KiB is kept, travels once in
+  Passive and as raw text in Conservative, and both checkpoints pass receiver
+  validation; a sheet above 1 MiB is still omitted. Engine: the shell leaves
+  html and body margins and sizes alone and resets body font. The hidden-region
+  stylesheet test now reads the CSS the receiver applies (resolved or raw).
+- **Docs.** `docs/replica-fidelity.md` (stylesheet size, single transport,
+  shell defaults and the font reset).
+
+Build identity `0.5.0 beta v.20260922.19`; `dist/chrome-unpacked` re-synced.
+Gate: `npm run check` green, **1,457 tests pass, 1 skipped** (+3).
+Publishing 0.5.0 moves to **D61**.
+
+**Queued by the owner during this session (not started):**
+1. "Often when opening a new tab we receive: Open a regular HTTP or HTTPS page,
+   then select the extension from that page."
+2. "Dropdowns do not show options when we cl[ick] the drop down menu."
