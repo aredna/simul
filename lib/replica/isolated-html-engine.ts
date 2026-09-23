@@ -2297,6 +2297,8 @@ function refreshIsolatedReplicaDisclosures(
       presentation,
       ...(presentation === 'popup' ? { trigger: facsimile.trigger } : {}),
       manageTriggerExpanded: presentation === 'popup',
+      // A native select does not open on hover.
+      openOnHover: false,
       initiallyOpen: presentation === 'popup' && (
         retainedOpenDisclosures.has(host) ||
         facsimile.select.getAttribute('data-simul-source-picker-open') === 'v1'

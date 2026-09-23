@@ -31,6 +31,12 @@ export interface ReadOnlyReplicaDisclosureOptions {
   readonly trigger?: HTMLElement;
   readonly initiallyOpen?: boolean;
   readonly visibleRows?: number;
+  /**
+   * Menus preview on hover and close when the pointer leaves. A select opens
+   * only on click or keyboard and stays open until a choice, Escape or an
+   * outside click, as a native select does. Defaults to true.
+   */
+  readonly openOnHover?: boolean;
 }
 
 export interface ReadOnlyReplicaDisclosure {
@@ -258,6 +264,7 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
   readonly originalParent: ParentNode | null;
   readonly originalNextSibling: ChildNode | null;
   readonly manageTriggerExpanded: boolean;
+  readonly openOnHover: boolean;
   readonly originalTriggerExpanded: string | null;
   readonly originalTriggerStyle: string | null;
   readonly originalPanelAttributes: ReadonlyMap<string, string | null>;
@@ -294,6 +301,7 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
   readonly #onTriggerPointerEnter = (): void => {
     this.#triggerHovered = true;
     this.#cancelDeferredClose();
+    if (!this.openOnHover) return;
     const wasOpen = this.#open;
     this.open();
     this.#openedFromTriggerHover = !wasOpen && this.#open;
@@ -301,7 +309,7 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
 
   readonly #onTriggerPointerLeave = (): void => {
     this.#triggerHovered = false;
-    this.#scheduleDeferredClose();
+    if (this.openOnHover) this.#scheduleDeferredClose();
   };
 
   readonly #onPanelPointerEnter = (): void => {
@@ -311,7 +319,7 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
 
   readonly #onPanelPointerLeave = (): void => {
     this.#panelHovered = false;
-    this.#scheduleDeferredClose();
+    if (this.openOnHover) this.#scheduleDeferredClose();
   };
 
   readonly #onFocusIn = (): void => {
@@ -342,6 +350,14 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
 
   readonly #onPanelActivation = (event: Event): void => {
     blockReplicaActivation(event);
+    // Choosing an option or a menu entry closes the popup, as on the page
+    // (where the choice then changes the control or navigates). The replica
+    // never acts on the choice itself.
+    if (
+      this.presentation !== 'list' &&
+      this.#open &&
+      clickChoosesPanelItem(event, this.panel)
+    ) this.close();
   };
 
   readonly #onPanelKeyDown = (event: KeyboardEvent): void => {
@@ -368,6 +384,7 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
 
   constructor(options: ReadOnlyReplicaDisclosureOptions) {
     this.presentation = options.presentation;
+    this.openOnHover = options.openOnHover !== false;
     this.document = options.anchor.ownerDocument;
     this.anchor = options.anchor;
     this.panel = options.panel;
@@ -878,6 +895,53 @@ function restoreAttribute(
 function blockReplicaActivation(event: Event): void {
   if (event.cancelable) event.preventDefault();
   event.stopImmediatePropagation();
+}
+
+const PANEL_ITEM_SELECTOR = [
+  'a[href]',
+  'button',
+  'input[type="button"]',
+  'input[type="submit"]',
+  '[role="menuitem"]',
+  '[role="menuitemcheckbox"]',
+  '[role="menuitemradio"]',
+  '[role="option"]',
+].join(',');
+
+/**
+ * A primary click on an item in an open panel: a link, button, menu item or
+ * option, not empty space, a group label or a disabled option. Owned select
+ * options ignore pointer input, so the click lands on their list and the
+ * option is found under the pointer. Nodes belong to the replica frame, so
+ * they are tested by `nodeType`, never `instanceof`.
+ */
+function clickChoosesPanelItem(event: Event, panel: HTMLElement): boolean {
+  if (event.type !== 'click') return false;
+  const mouse = event as MouseEvent;
+  if (mouse.button !== 0) return false;
+  for (const node of event.composedPath()) {
+    if (node === panel) break;
+    if (
+      typeof node === 'object' && node !== null && 'nodeType' in node &&
+      (node as Node).nodeType === 1 &&
+      (node as Element).matches(PANEL_ITEM_SELECTOR)
+    ) {
+      return (node as Element).getAttribute('aria-disabled') !== 'true';
+    }
+  }
+  for (const option of panel.querySelectorAll<HTMLElement>(
+    '[data-simul-owned-select-option="v1"]',
+  )) {
+    const rect = option.getBoundingClientRect();
+    if (
+      rect.width > 0 && rect.height > 0 &&
+      mouse.clientX >= rect.left && mouse.clientX < rect.right &&
+      mouse.clientY >= rect.top && mouse.clientY < rect.bottom
+    ) {
+      return option.getAttribute('aria-disabled') !== 'true';
+    }
+  }
+  return false;
 }
 
 function keyboardTargetCanActivate(target: EventTarget | null): boolean {

@@ -123,7 +123,11 @@ approved public native select receives a companion-owned, scriptless facsimile
 in the isolated replica. A single-row select keeps a compact trigger whose
 popup flips and clamps inside the replica viewport, scrolls internally, and
 repositions when either replica or companion scrolling/resizing moves its
-anchor. `multiple` and authored `size>1` selects retain bounded inline-list
+anchor. Like a native select, it opens on click or keyboard (not on hover)
+and closes when an enabled option is chosen, on Escape or on an outside click;
+the choice is never applied to the source. A menu preview likewise closes when
+one of its links, buttons or menu items is chosen, since the page would act on
+it. `multiple` and authored `size>1` selects retain bounded inline-list
 presentation. Labels and disabled/shape semantics are independent from the
 selected state: the latter appears only when ordinary form state is enabled.
 Every admitted state is presentation-only and cannot mutate or submit the
