@@ -4,18 +4,18 @@ Chains from `handover-2026-09-22-session-close.md` (which chains from
 `handover-2026-09-22-release-readiness.md`, holding the publish runbook and the
 release-notes draft). This file records the session that shipped **D55** and
 the follow-up session (same day) that closed its three owner reports with
-**D56**–**D59**. Decision-log entries **D43** through **D59** hold the
-reasoning.
+**D56**–**D59**, then the Google sign-in layout fix **D60**. Decision-log
+entries **D43** through **D60** hold the reasoning.
 
 ## Where things stand
 
 | Item | State |
 | --- | --- |
-| Branch / PR | `feat/ui-string-catalogue`, PR #22, **open**, head is the D59 commit (`.18`). Description covers D40–D59. |
-| Version / identity | `0.5.0` / `0.5.0 beta v.20260922.18` (bumped on every shipped change; next is `.19`). |
-| Gate | `npm run check` green at head: typecheck clean, **1,454 tests pass, 1 skipped**, `dist/chrome-unpacked` re-synced and byte-verified. |
-| NAS | `Dev/simul/` mirrors the D59 commit. Load `Dev/simul/dist/chrome-unpacked`; settings must show `Build 0.5.0 beta v.20260922.18`. |
-| `main` | `eb09813` (through D39). Release: `v0.4.0` pre-release only. Publishing 0.5.0 is **D60**, and only when the owner says so. |
+| Branch / PR | `feat/ui-string-catalogue`, PR #22, **open**, head is the D60 commit (`.19`) plus this handover. Description covers D40–D60. |
+| Version / identity | `0.5.0` / `0.5.0 beta v.20260922.19` (bumped on every shipped change; next is `.20`). |
+| Gate | `npm run check` green at the D60 commit: typecheck clean, **1,457 tests pass, 1 skipped**, `dist/chrome-unpacked` re-synced and byte-verified. |
+| NAS | `Dev/simul/` mirrors head. Load `Dev/simul/dist/chrome-unpacked`; settings must show `Build 0.5.0 beta v.20260922.19`. |
+| `main` | `eb09813` (through D39). Release: `v0.4.0` pre-release only. Publishing 0.5.0 is **D61**, and only when the owner says so. |
 
 ## What this session shipped
 
@@ -66,6 +66,40 @@ verified in Chrome for Testing before the gate.
 tie can be re-ranked many times (23 tie reports for about two images on freee);
 the judge's verdict cache keeps that cheap, but the re-rank churn itself may be
 worth a look.
+
+## Third session (2026-09-23): D60 and two queued reports
+
+- **D60 (`.19`)**: Google's OAuth sign-in (owner: "It's in a box in the center
+  of the screen. Our layout is not bounding things properly") rendered
+  unstyled because its one 680 KB inline stylesheet exceeded the 512 KiB string
+  cap. One stylesheet may now carry 1 MiB, and a `<style>` read from CSSOM no
+  longer also sends its raw text. Two shell problems were fixed with it: the
+  shell's `html,body{margin:0;min-width:100%;min-height:100%}` overrode pages,
+  and Chrome's injected extension sheet `body{font-size:75%}` (system font)
+  shrank body text on every page that sets its font on `html`. Verified in
+  Chrome for Testing on the sign-in page, Google's 404 page and freee.
+  Harness scripts: `google-shots.mjs` (source and panel screenshots),
+  `google-styles.mjs` (stylesheet/compat-mode comparison, `OUT=` dumps the
+  replica CSS), `matched-body.mjs` (CDP matched rules for a replica element),
+  `dump-source-css.mjs`; copied to `~/.cache/simul-harness/`. A real OAuth
+  sign-in page: `https://accounts.google.com/o/oauth2/v2/auth?client_id=407408718192.apps.googleusercontent.com&redirect_uri=https://developers.google.com/oauthplayground&response_type=code&scope=email`
+  (the bare `/signin/OAuth` URL is Google's 404 page).
+- **Found in D60, not changed** (details in the decision log): quirks-mode
+  pages render in standards mode because an `srcdoc` document can never be
+  quirks; a `<style>` inside a privacy boundary still sends its resolved sheet
+  (CSS only); Google's language picker shows as "Options".
+
+**Queued by the owner (not started):**
+
+1. *"Often when opening a new tab we receive: Open a regular HTTP or HTTPS
+   page, then select the extension from that page."* That is the companion's
+   message for a non-web source tab; check how the companion picks its source
+   tab when a new tab (`chrome://newtab`) opens and whether it should wait for
+   the tab to navigate instead.
+2. *"Dropdowns do not show options when we cl[ick] the drop down menu."*
+   Native select facsimiles and the ARIA menu preview are the two dropdown
+   paths in the replica (`docs/replica-fidelity.md`, "Inert HTML semantics");
+   find which the owner means and on which site.
 
 ## Open owner reports (closed in the follow-up session)
 
@@ -222,7 +256,7 @@ each; keep them serial, because concurrent runs make OCR timings noisy.
    with no forced setup question; tab follow defaults to `active` with two
    clearer words; mirror size defaults to 1:1; toolbar buttons stay until the
    owner reviews them one by one.
-3. **Publish 0.5.0** as **D60**, only when the owner says it is ready; do not
+3. **Publish 0.5.0** as **D61**, only when the owner says it is ready; do not
    ask. Runbook: `handover-2026-09-22-release-readiness.md`; the release-notes
    draft needs a line for D51–D55.
 4. Unchanged: F6 (memoizing `Intl.DisplayNames`) stays declined;
