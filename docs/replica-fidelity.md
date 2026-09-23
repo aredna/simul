@@ -55,10 +55,20 @@ control references it and no unique tab relation proves it open.
 
 When CSSOM is readable, Simul serializes sanitized rules and recursively
 flattens readable imports in order within rule, depth, string, and total payload
-budgets. When Chrome makes an imported sheet unreadable, Passive Fidelity may
+budgets. One stylesheet may carry up to 1 MiB of text (large sites ship a single
+inline sheet of several hundred kilobytes); other strings stay within 512 KiB.
+An inline `<style>` whose rules are read from CSSOM sends those rules once, not
+its raw text as well. When Chrome makes an imported sheet unreadable, Passive Fidelity may
 retain only a normalized HTTP(S) `@import`; that import is request-capable.
 Conservative removes imports. Scriptable URLs, CSS `expression()`, `behavior:`,
 `-moz-binding`, invalid schemes, and over-budget rule graphs are rejected.
+
+The replica frame leaves `html` and `body` at the browser's defaults, as the
+source has them, so a body sized with `max-width` and auto margins stays centred
+and an unreset body keeps its 8px margin. The one exception is font: Chrome
+gives every extension-origin document `body { font-size: 75% }` in its system
+font, so the replica resets body font to inheritance, and any source rule for
+`body` still wins.
 
 A bounded maintenance signature detects ordinary stylesheet `insertRule`,
 `deleteRule`, declaration, disabled-state, media, and order changes that do not

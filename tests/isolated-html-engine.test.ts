@@ -60,6 +60,19 @@ describe('IsolatedHtmlReplicaEngine', () => {
     });
   });
 
+  it('leaves html and body at browser defaults apart from Chrome\'s extension font', () => {
+    // A body centred by max-width and auto margins (Google's error page) must
+    // keep its width, and pages that never reset body margin keep the
+    // browser's 8px. Chrome injects body{font-size:75%} into extension-origin
+    // documents, so the shell hands body font back to inheritance.
+    const shell = parseHTML(ISOLATED_HTML_SHELL).document;
+    const inert = shell.querySelector(
+      'style[data-simul-owned-shell="inert"]',
+    )?.textContent ?? '';
+    expect(inert).not.toMatch(/margin|min-width|min-height/u);
+    expect(inert).toContain('body{font-family:inherit;font-size:inherit}');
+  });
+
   it('rejects the initial about:blank document and accepts only the marked srcdoc shell', () => {
     const blank = parseHTML('<html><head></head><body></body></html>').document;
     expect(isTrustedIsolatedShellDocument(blank)).toBe(false);
