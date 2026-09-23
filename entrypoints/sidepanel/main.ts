@@ -335,6 +335,15 @@ imageTranslationController = new ImageTranslationController({
         source,
         sourceTabId,
         sourceWindowId,
+        {
+          resolveMirrorImage: (descriptor) =>
+            replicaSurfaceRouter.resolveImageAnchor(
+              descriptor.document,
+              descriptor.nodeId,
+            )?.image,
+          downloadsEnabled: () =>
+            state.preferences.replicaFidelityPolicy === 'passive',
+        },
       ),
     ),
   createRecognitionCoordinator: () =>

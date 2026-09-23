@@ -2311,3 +2311,89 @@ Full visible, so the read scope was not the cause.
 Build identity `0.5.0 beta v.20260922.16`; `dist/chrome-unpacked` re-synced
 (`page-mirror.js`, manifest). Gate: `npm run check` green, **1,432 tests pass,
 1 skipped** (+1). Publishing 0.5.0 moves to **D58**.
+
+### D58. Images off screen are read from their own file (2026-09-23)
+
+Same branch / PR #22, first owner report from the D55 addendum: "we should go
+ahead and do the entire web page at once when it loads. We can do processing
+in the background." Pixel OCR could only read a `captureVisibleTab` screenshot,
+so an image not fully on screen in the source tab deferred with
+`reason=hidden` forever.
+
+- **Owner rulings.** Asked how to get pixels for images the tab is not
+  showing, the owner asked whether Simul could use the image data already
+  loaded instead of downloading it again, then chose **"tab first, then
+  download"** after seeing that most sites serve images from a separate host
+  the page cannot read (measured: readable in the tab without a new request,
+  freee 35/35, Yahoo! JAPAN 0/356, ITmedia 0/12, GIGAZINE 0/45, note 0/116,
+  Rakuten 0/184).
+- **Finding that shaped the order.** In Chrome for Testing the side panel can
+  read the *mirror's* already-loaded copies (the replica iframe is
+  same-origin with the extension, and the host grant keeps the canvas clean:
+  20/20 cross-origin Yahoo images readable), and a `force-cache` fetch of the
+  same URLs was served from Chrome's disk cache in 1–2 ms. So the order is the
+  mirror copy (no request), then the tab (same-site images, and Conservative
+  fidelity), then a cache-first download, which honours the ruling and avoids
+  new downloads almost everywhere.
+- **Change.**
+  - `PixelAcquisitionCoordinator` keeps the screenshot for on-screen images
+    and falls back to `readFilePixels` when the screenshot defers with
+    `hidden`, `unstable`, `too-small-visible` or `inactive` (a moving carousel
+    slide and a background source tab are covered too). Quota, permission and
+    API failures keep today's retry.
+  - New tab request `simul:image-source-v2:pixels` (strict exact-document
+    protocol). The tab re-checks the same read policy as `measure` (sticky
+    secret ancestors, control images, withheld controlled content) and the
+    image's own paint path (display, visibility, opacity, clip, mask, axis
+    aligned), but not on-screen, clipping, overlap or text-cover checks: file
+    pixels contain only the image. It answers with the box layout (size,
+    border+padding, `object-fit`, `object-position`), the CSS natural size once
+    loaded, the HTTP(S) URL, and with `includePixels` the painted region as a
+    PNG when the page may read it (a tainted canvas returns nothing).
+  - `readImageFilePixels` (side panel): mirror copy when it is loaded,
+    readable, and offers the tab's URL among its `src`/`srcset`/`<picture>`
+    candidates (a stale or different mirror picture is never read); else the
+    tab's pixels; else, only under Passive fidelity with a host grant for the
+    URL's origin, a credential-free `force-cache` fetch (image types only, no
+    SVG, 16 MB and 15 s caps). Placement is computed per copy from the layout
+    (`computeImageFilePlacement`: fill, contain, cover, none, scale-down, with
+    percentage, pixel and `calc()` positions); `none`/`scale-down` need the
+    tab's CSS natural size.
+  - A lazy image the page has not fetched reports 0×0; the small-image rule
+    treated that as a tiny icon. 0×0 is now "not loaded yet" and the rendered
+    box decides (a real icon still skips once it loads).
+  - Diagnostics: `job N pixels: source=screenshot|mirror|tab|download`.
+- **Verified in Chrome.** Yahoo! JAPAN with the source tab left at the top:
+  every image processed within ~20 s, 90 file reads all from the mirror copy,
+  10 screenshots, no deferrals, no downloads (most are photos without text).
+  A local page with five text images below the fold (plain, `loading=lazy`,
+  `object-fit: cover`, `contain`, border+padding): all five got OCR text from
+  the mirror copy, placed exactly on the picture text in the mirror. freee:
+  42 mirror reads; OCR found text in 38 of 52 reads but alt text still wins
+  the ranking (the next owner question). Rakuten: no rebuilds; its rotating
+  top banner replaces overlays as it rotates, the same on `.16`.
+- **Not verified here.** The harness build carries `<all_urls>` in its
+  manifest; the owner's build holds it as a runtime grant. If Chrome treated
+  the mirror canvas differently under a runtime grant, the reader falls back
+  to the tab or the download (or defers); the Image diagnostics log shows the
+  source used.
+- **Tests.** `image-file-pixels` (placement math for every fit, insets,
+  positions, fail-closed cases; rendering at copy resolution; reader order:
+  mirror first with the tab only confirming, tab pixels when the mirror shows
+  another picture, download only when allowed, lazy image via download,
+  `none` without CSS size skipped, a refused image reads nothing, srcset and
+  `<picture>` matching; the fake lease is a class so an unbound method call
+  fails); `image-source-protocol` (strict request and reply, rejected URLs
+  with credentials or non-HTTP schemes, oversized pixels, layout and identity
+  mismatches, pixels without a natural size); `image-source-session` (an
+  off-screen image answers although `measure` says hidden, tab pixels, tainted
+  pixels omitted, style-hidden blocked, stale revision, lazy image keeps URL
+  and layout only); `pixel-acquisition` (off-screen, moving and
+  background-tab fallback; quota keeps the screenshot deferral);
+  `small-image-policy` (0×0 unknown, 16×16 still small); diagnostic line.
+- **Docs.** README "Image text" and `docs/image-translation-research.md`.
+
+Build identity `0.5.0 beta v.20260922.17`; `dist/chrome-unpacked` re-synced.
+Gate: `npm run check` green, **1,447 tests pass, 1 skipped** (+15).
+Publishing 0.5.0 moves to **D59**. Next: the owner's alt-text-versus-OCR ruling
+(use Gemini Nano only when already available, never download it).

@@ -10,11 +10,11 @@ through **D55** hold the reasoning.
 
 | Item | State |
 | --- | --- |
-| Branch / PR | `feat/ui-string-catalogue`, PR #22, **open**, head is the D57 commit (`.16`). Description covers D40–D57. |
-| Version / identity | `0.5.0` / `0.5.0 beta v.20260922.16` (bumped on every shipped change; next is `.17`). |
-| Gate | `npm run check` green at head: typecheck clean, **1,432 tests pass, 1 skipped**, `dist/chrome-unpacked` re-synced and byte-verified. |
-| NAS | `Dev/simul/` mirrors the D57 commit. Load `Dev/simul/dist/chrome-unpacked`; settings must show `Build 0.5.0 beta v.20260922.16`. |
-| `main` | `eb09813` (through D39). Release: `v0.4.0` pre-release only. Publishing 0.5.0 is **D58**, and only when the owner says so. |
+| Branch / PR | `feat/ui-string-catalogue`, PR #22, **open**, head is the D58 commit (`.17`). Description covers D40–D58. |
+| Version / identity | `0.5.0` / `0.5.0 beta v.20260922.17` (bumped on every shipped change; next is `.18`). |
+| Gate | `npm run check` green at head: typecheck clean, **1,447 tests pass, 1 skipped**, `dist/chrome-unpacked` re-synced and byte-verified. |
+| NAS | `Dev/simul/` mirrors the D58 commit. Load `Dev/simul/dist/chrome-unpacked`; settings must show `Build 0.5.0 beta v.20260922.17`. |
+| `main` | `eb09813` (through D39). Release: `v0.4.0` pre-release only. Publishing 0.5.0 is **D59**, and only when the owner says so. |
 
 ## What this session shipped
 
@@ -37,7 +37,15 @@ through **D55** hold the reasoning.
 
 ## Open owner reports (next session starts here)
 
-### 1. Read the whole page's images when it loads (owner request, needs a design decision)
+### 1. Read the whole page's images when it loads (built in D58, `.17`)
+
+**Built.** Owner ruling "tab first, then download"; the order is the mirror's
+already-loaded copy (no request), then the tab's own pixels, then a cache-first
+credential-free download (Passive only). Lazy 0x0 images are no longer skipped
+as small. Verified on Yahoo! JAPAN (all images read, from the mirror copy) and
+a below-the-fold test page (overlays placed correctly). Open: confirm on the
+owner's machine that the Image diagnostics log shows `pixels: source=mirror`
+(runtime host grant). Pre-build notes below.
 
 Owner's words: *"I don't think there's images that are only on screen in the
 mirror, but we should go ahead and do the entire web page at once when it
@@ -182,7 +190,7 @@ each; keep them serial, because concurrent runs make OCR timings noisy.
    with no forced setup question; tab follow defaults to `active` with two
    clearer words; mirror size defaults to 1:1; toolbar buttons stay until the
    owner reviews them one by one.
-3. **Publish 0.5.0** as **D58**, only when the owner says it is ready; do not
+3. **Publish 0.5.0** as **D59**, only when the owner says it is ready; do not
    ask. Runbook: `handover-2026-09-22-release-readiness.md`; the release-notes
    draft needs a line for D51–D55.
 4. Unchanged: F6 (memoizing `Intl.DisplayNames`) stays declined;

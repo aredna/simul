@@ -1,11 +1,21 @@
 import type { SourceImageDescriptor } from './contracts';
 import {
+  isSourceImageFileUrl,
+  MAX_SOURCE_IMAGE_PIXELS_DATA_URL_LENGTH,
+  MAX_SOURCE_IMAGE_TAB_PIXELS,
   readImageSourceControllerMessage,
   readImageSourcePortSessionId,
   type ImageSourceRecorderMessage,
   type SourceImageAccessibilityTextEvidence,
   type SourceImageCaptureMetrics,
+  type SourceImageFileEvidence,
 } from './image-source-protocol';
+import {
+  computeImageFilePlacement,
+  readImageFileLayout,
+  type ImageFilePlacement,
+} from './image-file-pixels';
+import { MAX_OCR_BITMAP_DIMENSION } from './contracts';
 import { SourceImageModel } from './source-image-model';
 import {
   SourceImageObserver,
@@ -64,12 +74,33 @@ export interface ImageSourceSessionEnvironment {
   readonly getNodeId: (image: HTMLImageElement) => number | undefined;
   /** Share one sticky classifier for the lifetime of the source document. */
   readonly secretClassifier?: StickySourceSecretClassifier;
+  /**
+   * Draws a region of a loaded image and returns it as a PNG data URL, or
+   * undefined when the page may not read it (a cross-origin image without
+   * CORS taints the canvas). Tests inject a stand-in.
+   */
+  readonly encodeImageRegion?: ImageRegionEncoder;
   readonly onDispose?: () => void;
 }
 
+export type ImageRegionEncoder = (
+  image: HTMLImageElement,
+  region: {
+    readonly sourceX: number;
+    readonly sourceY: number;
+    readonly sourceWidth: number;
+    readonly sourceHeight: number;
+    readonly width: number;
+    readonly height: number;
+  },
+) => Promise<string | undefined>;
+
 /**
- * Document-targeted image facts and capture metrics. The session never emits
- * URLs, pixels, text, or source tokens and is torn down with its Port.
+ * Document-targeted image facts and capture metrics, torn down with its Port.
+ * Scheduling facts never carry URLs, pixels, text, or source tokens. Only an
+ * explicit request for one eligible image answers with its accessibility
+ * text, or with its file facts: its HTTP(S) URL, where it paints, and (when
+ * the page may read them) its pixels.
  */
 export class ImageSourceSession {
   readonly #sessionId: string;
@@ -167,18 +198,29 @@ export class ImageSourceSession {
     }
     const descriptor = this.#model.get(message.descriptor.nodeId);
     if (!descriptor || !this.#model.isCurrent(message.descriptor)) {
-      this.#post(message.kind === 'simul:image-source-v2:accessibility-text'
-        ? {
-            kind: message.kind,
-            requestId: message.requestId,
-            descriptor: message.descriptor,
-            status: 'stale',
-          }
-        : {
-            kind: 'simul:image-source-v2:metrics',
-            requestId: message.requestId,
-            status: 'stale',
-          });
+      this.#post(
+        message.kind === 'simul:image-source-v2:accessibility-text' ||
+          message.kind === 'simul:image-source-v2:pixels'
+          ? {
+              kind: message.kind,
+              requestId: message.requestId,
+              descriptor: message.descriptor,
+              status: 'stale',
+            }
+          : {
+              kind: 'simul:image-source-v2:metrics',
+              requestId: message.requestId,
+              status: 'stale',
+            },
+      );
+      return;
+    }
+    if (message.kind === 'simul:image-source-v2:pixels') {
+      void this.#answerPixels(
+        message.requestId,
+        descriptor,
+        message.includePixels,
+      );
       return;
     }
     if (message.kind === 'simul:image-source-v2:accessibility-text') {
@@ -359,6 +401,108 @@ export class ImageSourceSession {
     });
   }
 
+  async #answerPixels(
+    requestId: string,
+    descriptor: SourceImageDescriptor,
+    includePixels: boolean,
+  ): Promise<void> {
+    let file: SourceImageFileEvidence | undefined;
+    try {
+      file = await this.#readFile(descriptor, includePixels);
+    } catch {
+      file = undefined;
+    }
+    if (this.#disposed || !this.#model) return;
+    if (!this.#model.isCurrent(descriptor)) {
+      this.#post({
+        kind: 'simul:image-source-v2:pixels',
+        requestId,
+        descriptor,
+        status: 'stale',
+      });
+      return;
+    }
+    this.#post(file
+      ? {
+          kind: 'simul:image-source-v2:pixels',
+          requestId,
+          descriptor,
+          status: 'ready',
+          file,
+        }
+      : {
+          kind: 'simul:image-source-v2:pixels',
+          requestId,
+          descriptor,
+          status: 'blocked',
+        });
+  }
+
+  /**
+   * File pixels hold only the image itself: no overlay, neighbour or secret
+   * control painted over it. So unlike a screenshot the image need not be on
+   * screen, unclipped or uncovered; it must be admitted by the same read
+   * policy and painted by its own style path. A lazy image the tab has not
+   * fetched yet is still described (layout and URL), so the extension can
+   * read a copy of it.
+   */
+  async #readFile(
+    descriptor: SourceImageDescriptor,
+    includePixels: boolean,
+  ): Promise<SourceImageFileEvidence | undefined> {
+    const node = this.environment.resolveNode(descriptor.nodeId);
+    if (!isImageElement(node) || !node.isConnected) return undefined;
+    if (this.#hasStickySecretAncestor(node)) return undefined;
+    if (
+      !this.#controlImages &&
+      (
+        hasSourceControlOrEditableElementAncestor(node) ||
+        this.#imageIsInWithheldControlledContent(node)
+      )
+    ) return undefined;
+    if (!imageFileIsPainted(
+      node,
+      this.environment.window,
+      (candidate) => this.#hasStickySecretAncestor(candidate),
+    )) return undefined;
+    const layout = readImageFileLayout(node, this.environment.window);
+    if (!layout) return undefined;
+    const loaded = node.complete && node.naturalWidth > 0 &&
+      node.naturalHeight > 0;
+    const url = node.currentSrc || node.getAttribute('src') || '';
+    const fileUrl = isSourceImageFileUrl(url) ? url : undefined;
+    // Nothing to read yet: not loaded here and no URL to fetch it from.
+    if (!loaded && !fileUrl) return undefined;
+    const placement = loaded
+      ? computeImageFilePlacement({
+          ...layout,
+          naturalWidth: node.naturalWidth,
+          naturalHeight: node.naturalHeight,
+        })
+      : undefined;
+    const pixels = includePixels && placement
+      ? await readTabImagePixels(
+          node,
+          placement,
+          this.environment.encodeImageRegion ?? encodeImageRegionAsPngDataUrl,
+        )
+      : undefined;
+    const nearestElementLanguage = nearestValidElementLanguage(node);
+    return Object.freeze({
+      document: descriptor.document,
+      nodeId: descriptor.nodeId,
+      contentRevision: descriptor.contentRevision,
+      observationRevision: descriptor.observationRevision,
+      layout,
+      ...(loaded
+        ? { naturalWidth: node.naturalWidth, naturalHeight: node.naturalHeight }
+        : {}),
+      ...(fileUrl ? { url: fileUrl } : {}),
+      ...(pixels ? { pixels } : {}),
+      ...(nearestElementLanguage ? { nearestElementLanguage } : {}),
+    });
+  }
+
   #readAccessibilityText(
     descriptor: SourceImageDescriptor,
     controlImages: boolean,
@@ -507,6 +651,110 @@ function imageAccessibilityTextIsVisible(
   return finitePositive(rect.width) !== undefined &&
     finitePositive(rect.height) !== undefined;
 }
+
+/** Every element on the image's path paints it and none is secret. */
+function imageFileIsPainted(
+  image: HTMLImageElement,
+  sourceWindow: Window,
+  isSecret: (element: Element) => boolean,
+): boolean {
+  const path = readSourceFlatTreeElementPath(image);
+  if (!path) return false;
+  for (const current of path) {
+    if (safeSecretClassification(current, isSecret)) return false;
+    const style = safeComputedStyle(sourceWindow, current);
+    if (
+      !style ||
+      !styleAllowsImageCapture(style) ||
+      !imageTransformIsAxisAligned(style)
+    ) return false;
+  }
+  let rect: DOMRect;
+  try {
+    rect = image.getBoundingClientRect();
+  } catch {
+    return false;
+  }
+  return finitePositive(rect.width) !== undefined &&
+    finitePositive(rect.height) !== undefined;
+}
+
+/**
+ * Reads the painted region of a loaded image inside the page, scaled under
+ * the OCR pixel budget. A cross-origin image without CORS cannot be read here;
+ * the encoder then returns undefined and the extension uses another copy.
+ */
+async function readTabImagePixels(
+  image: HTMLImageElement,
+  placement: ImageFilePlacement,
+  encode: ImageRegionEncoder,
+): Promise<SourceImageFileEvidence['pixels']> {
+  const sourceX = placement.sourceX * image.naturalWidth;
+  const sourceY = placement.sourceY * image.naturalHeight;
+  const sourceWidth = placement.sourceWidth * image.naturalWidth;
+  const sourceHeight = placement.sourceHeight * image.naturalHeight;
+  if (!(sourceWidth > 0) || !(sourceHeight > 0)) return undefined;
+  const factor = Math.min(
+    1,
+    Math.sqrt(MAX_SOURCE_IMAGE_TAB_PIXELS / (sourceWidth * sourceHeight)),
+    MAX_OCR_BITMAP_DIMENSION / sourceWidth,
+    MAX_OCR_BITMAP_DIMENSION / sourceHeight,
+  );
+  let width = Math.max(1, Math.floor(sourceWidth * factor));
+  let height = Math.max(1, Math.floor(sourceHeight * factor));
+  while (width * height > MAX_SOURCE_IMAGE_TAB_PIXELS) {
+    if (width >= height) width -= 1;
+    else height -= 1;
+  }
+  const dataUrl = await encode(image, {
+    sourceX,
+    sourceY,
+    sourceWidth,
+    sourceHeight,
+    width,
+    height,
+  });
+  if (
+    !dataUrl ||
+    !dataUrl.startsWith('data:image/png;base64,') ||
+    dataUrl.length > MAX_SOURCE_IMAGE_PIXELS_DATA_URL_LENGTH
+  ) return undefined;
+  return Object.freeze({ dataUrl, width, height });
+}
+
+export const encodeImageRegionAsPngDataUrl: ImageRegionEncoder = async (
+  image,
+  region,
+) => {
+  try {
+    const canvas = new OffscreenCanvas(region.width, region.height);
+    const context = canvas.getContext('2d');
+    if (!context) return undefined;
+    context.drawImage(
+      image,
+      region.sourceX,
+      region.sourceY,
+      region.sourceWidth,
+      region.sourceHeight,
+      0,
+      0,
+      region.width,
+      region.height,
+    );
+    // A tainted canvas rejects here with a SecurityError.
+    const blob = await canvas.convertToBlob({ type: 'image/png' });
+    return await new Promise<string | undefined>((resolve) => {
+      const reader = new FileReader();
+      reader.onload = () => resolve(
+        typeof reader.result === 'string' ? reader.result : undefined,
+      );
+      reader.onerror = () => resolve(undefined);
+      reader.readAsDataURL(blob);
+    });
+  } catch {
+    return undefined;
+  }
+};
 
 function imageIsAccessibilityDecorative(image: HTMLImageElement): boolean {
   try {

@@ -15,6 +15,11 @@ import {
 } from '../translation-provider';
 import { normalizeAccessibilityImageText } from './accessibility-image-text';
 import { hasExactKeysWithOptional } from '../exact-record';
+import { MAX_OCR_BITMAP_DIMENSION } from './contracts';
+import {
+  validImageFileLayout,
+  type ImageFileLayout,
+} from './image-file-pixels';
 
 export const IMAGE_SOURCE_PROTOCOL_VERSION = 2;
 export const IMAGE_SOURCE_PORT_PREFIX = 'simul:image-source-v2:';
@@ -48,10 +53,54 @@ export interface ImageSourceAccessibilityTextRequest {
   readonly controlImages: boolean;
 }
 
+/**
+ * Asks the source tab whether an image may be read from its file rather than
+ * from a viewport screenshot, and where the file paints inside the image box.
+ * With `includePixels` the tab also returns the painted region's pixels when
+ * the page itself may read them (a same-site or CORS-enabled image).
+ */
+export interface ImageSourcePixelsRequest {
+  readonly kind: 'simul:image-source-v2:pixels';
+  readonly requestId: string;
+  readonly descriptor: SourceImageDescriptor;
+  readonly includePixels: boolean;
+}
+
 export type ImageSourceControllerMessage =
   | ImageSourceStartMessage
   | ImageSourceMetricsRequest
-  | ImageSourceAccessibilityTextRequest;
+  | ImageSourceAccessibilityTextRequest
+  | ImageSourcePixelsRequest;
+
+/** Largest tab-read PNG a pixels response may carry, as a data URL. */
+export const MAX_SOURCE_IMAGE_PIXELS_DATA_URL_LENGTH = 32 * 1024 * 1024;
+/** Tab-read pixels stay within the OCR input budget. */
+export const MAX_SOURCE_IMAGE_TAB_PIXELS = 4_000_000;
+export const MAX_SOURCE_IMAGE_URL_LENGTH = 16 * 1024;
+
+/**
+ * An eligible image's own file facts, answered only to an explicit pixels
+ * request: its HTTP(S) URL (the same URL the mirror already loads under
+ * Passive fidelity), how its box lays the file out, its CSS natural size once
+ * the tab has loaded it, and, when the page may read them, the painted
+ * region's pixels as a PNG.
+ */
+export interface SourceImageFileEvidence {
+  readonly document: ReplicaSourceDocumentIdentity;
+  readonly nodeId: number;
+  readonly contentRevision: number;
+  readonly observationRevision: number;
+  readonly layout: ImageFileLayout;
+  readonly naturalWidth?: number;
+  readonly naturalHeight?: number;
+  readonly url?: string;
+  readonly pixels?: {
+    readonly dataUrl: string;
+    readonly width: number;
+    readonly height: number;
+  };
+  readonly nearestElementLanguage?: SupportedLanguage;
+}
 
 export interface SourceImageAccessibilityTextEvidence {
   readonly document: ReplicaSourceDocumentIdentity;
@@ -119,6 +168,19 @@ export type ImageSourceRecorderMessage =
       readonly requestId: string;
       readonly descriptor: SourceImageDescriptor;
       readonly status: 'none' | 'blocked' | 'stale';
+    }
+  | {
+      readonly kind: 'simul:image-source-v2:pixels';
+      readonly requestId: string;
+      readonly descriptor: SourceImageDescriptor;
+      readonly status: 'ready';
+      readonly file: SourceImageFileEvidence;
+    }
+  | {
+      readonly kind: 'simul:image-source-v2:pixels';
+      readonly requestId: string;
+      readonly descriptor: SourceImageDescriptor;
+      readonly status: 'blocked' | 'stale';
     };
 
 export function createImageSourcePortName(
@@ -216,6 +278,26 @@ export function readImageSourceControllerMessage(
       controlImages: input.controlImages,
     });
   }
+  if (input.kind === 'simul:image-source-v2:pixels') {
+    if (
+      !hasExactKeys(input, ['kind', 'requestId', 'descriptor', 'includePixels']) ||
+      !isRequestId(input.requestId) ||
+      typeof input.includePixels !== 'boolean'
+    ) return undefined;
+    const descriptor = readSourceImageDescriptor(input.descriptor);
+    if (
+      !descriptor ||
+      descriptor.document.sessionId !== expectedSessionId ||
+      (expectedDocument &&
+        !sameSourceDocument(descriptor.document, expectedDocument))
+    ) return undefined;
+    return Object.freeze({
+      kind: input.kind,
+      requestId: input.requestId,
+      descriptor,
+      includePixels: input.includePixels,
+    });
+  }
   if (
     input.kind !== 'simul:image-source-v2:measure' ||
     !hasExactKeys(input, ['kind', 'requestId', 'descriptor']) ||
@@ -303,6 +385,42 @@ export function readImageSourceRecorderMessage(
         })
       : undefined;
   }
+  if (input.kind === 'simul:image-source-v2:pixels') {
+    if (
+      !isRequestId(input.requestId) ||
+      typeof input.status !== 'string'
+    ) return undefined;
+    const descriptor = readSourceImageDescriptor(input.descriptor);
+    if (!descriptor || !sameSourceDocument(
+      descriptor.document,
+      expectedDocument,
+    )) return undefined;
+    if (input.status === 'blocked' || input.status === 'stale') {
+      return hasExactKeys(input, ['kind', 'requestId', 'descriptor', 'status'])
+        ? Object.freeze({
+            kind: input.kind,
+            requestId: input.requestId,
+            descriptor,
+            status: input.status,
+          })
+        : undefined;
+    }
+    if (
+      input.status !== 'ready' ||
+      !hasExactKeys(input, ['kind', 'requestId', 'descriptor', 'status', 'file'])
+    ) return undefined;
+    const file = readSourceImageFileEvidence(input.file);
+    return file && sameSourceDocument(file.document, expectedDocument) &&
+      sameFileEvidenceDescriptor(file, descriptor)
+      ? Object.freeze({
+          kind: input.kind,
+          requestId: input.requestId,
+          descriptor,
+          status: 'ready' as const,
+          file,
+        })
+      : undefined;
+  }
   if (
     input.kind !== 'simul:image-source-v2:metrics' ||
     !isRequestId(input.requestId) ||
@@ -362,6 +480,88 @@ export function readSourceImageAccessibilityTextEvidence(
       ? { nearestElementLanguage: input.nearestElementLanguage }
       : {}),
   });
+}
+
+export function readSourceImageFileEvidence(
+  input: unknown,
+): SourceImageFileEvidence | undefined {
+  if (!isRecord(input) || !hasExactKeysWithOptional(input, [
+    'document', 'nodeId', 'contentRevision', 'observationRevision', 'layout',
+  ], [
+    'naturalWidth', 'naturalHeight', 'url', 'pixels', 'nearestElementLanguage',
+  ])) return undefined;
+  const document = readSourceDocumentIdentity(input.document);
+  const hasNatural = input.naturalWidth !== undefined ||
+    input.naturalHeight !== undefined;
+  if (
+    !document ||
+    !isPositiveSafeInteger(input.nodeId) ||
+    !isPositiveSafeInteger(input.contentRevision) ||
+    !isPositiveSafeInteger(input.observationRevision) ||
+    !validImageFileLayout(input.layout) ||
+    (hasNatural && (
+      !isFiniteBounded(input.naturalWidth, 0.01, 1_000_000) ||
+      !isFiniteBounded(input.naturalHeight, 0.01, 1_000_000)
+    )) ||
+    // Tab pixels exist only for an image the tab has loaded.
+    (input.pixels !== undefined && !hasNatural) ||
+    (input.url !== undefined && !isSourceImageFileUrl(input.url)) ||
+    (input.nearestElementLanguage !== undefined &&
+      !isSupportedLanguage(input.nearestElementLanguage))
+  ) return undefined;
+  let pixels: SourceImageFileEvidence['pixels'];
+  if (input.pixels !== undefined) {
+    const value = input.pixels;
+    if (
+      !isRecord(value) ||
+      !hasExactKeys(value, ['dataUrl', 'width', 'height']) ||
+      typeof value.dataUrl !== 'string' ||
+      !value.dataUrl.startsWith('data:image/png;base64,') ||
+      value.dataUrl.length > MAX_SOURCE_IMAGE_PIXELS_DATA_URL_LENGTH ||
+      !isBoundedPositiveSafeInteger(value.width, MAX_OCR_BITMAP_DIMENSION) ||
+      !isBoundedPositiveSafeInteger(value.height, MAX_OCR_BITMAP_DIMENSION) ||
+      value.width * value.height > MAX_SOURCE_IMAGE_TAB_PIXELS
+    ) return undefined;
+    pixels = Object.freeze({
+      dataUrl: value.dataUrl,
+      width: value.width,
+      height: value.height,
+    });
+  }
+  return Object.freeze({
+    document,
+    nodeId: input.nodeId,
+    contentRevision: input.contentRevision,
+    observationRevision: input.observationRevision,
+    layout: Object.freeze({ ...input.layout }),
+    ...(hasNatural
+      ? {
+          naturalWidth: input.naturalWidth as number,
+          naturalHeight: input.naturalHeight as number,
+        }
+      : {}),
+    ...(typeof input.url === 'string' ? { url: input.url } : {}),
+    ...(pixels ? { pixels } : {}),
+    ...(isSupportedLanguage(input.nearestElementLanguage)
+      ? { nearestElementLanguage: input.nearestElementLanguage }
+      : {}),
+  });
+}
+
+/** Only an HTTP(S) URL may leave the tab; inline data stays tab-read. */
+export function isSourceImageFileUrl(value: unknown): value is string {
+  if (
+    typeof value !== 'string' ||
+    value.length < 1 ||
+    value.length > MAX_SOURCE_IMAGE_URL_LENGTH
+  ) return false;
+  try {
+    const url = new URL(value);
+    return (url.protocol === 'https:' || url.protocol === 'http:') &&
+      url.username === '' && url.password === '';
+  } catch {
+    return false;
+  }
 }
 
 export function readImageSourceReadySummary(
@@ -463,6 +663,24 @@ function isRequestId(value: unknown): value is string {
     value.length >= 1 &&
     value.length <= MAX_IMAGE_SOURCE_REQUEST_ID_LENGTH &&
     /^[A-Za-z0-9._:-]+$/u.test(value);
+}
+
+function sameFileEvidenceDescriptor(
+  file: SourceImageFileEvidence,
+  descriptor: SourceImageDescriptor,
+): boolean {
+  return sameSourceDocument(file.document, descriptor.document) &&
+    file.nodeId === descriptor.nodeId &&
+    file.contentRevision === descriptor.contentRevision &&
+    file.observationRevision === descriptor.observationRevision;
+}
+
+function isBoundedPositiveSafeInteger(
+  value: unknown,
+  maximum: number,
+): value is number {
+  return Number.isSafeInteger(value) && Number(value) > 0 &&
+    Number(value) <= maximum;
 }
 
 function sameAccessibilityEvidenceDescriptor(

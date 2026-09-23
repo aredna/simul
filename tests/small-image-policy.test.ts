@@ -20,6 +20,24 @@ describe('small image policy', () => {
     }, { skipSmallImages: true })).toMatchObject({ reason });
   });
 
+  it('treats a lazy image that has not loaded (0x0) as unknown, not small', () => {
+    expect(decideSmallImageEligibility({
+      renderedWidth: 300,
+      renderedHeight: 200,
+      intrinsicWidth: 0,
+      intrinsicHeight: 0,
+    }, { skipSmallImages: true })).toEqual({ eligible: true, reason: 'eligible' });
+    expect(decideSmallImageEligibility({
+      renderedWidth: 300,
+      renderedHeight: 200,
+      intrinsicWidth: 16,
+      intrinsicHeight: 16,
+    }, { skipSmallImages: true })).toEqual({
+      eligible: false,
+      reason: 'small-intrinsic',
+    });
+  });
+
   it('uses strict intrinsic boundaries and lets an override bypass valid small dimensions', () => {
     expect(decideSmallImageEligibility({
       renderedWidth: 200,

@@ -1,5 +1,5 @@
 import { parseHTML } from 'linkedom';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   hasProtectedSiblingOverlap,
@@ -772,6 +772,211 @@ describe('image source capture safety', () => {
       requestId: 'alt-forged-policy',
       status: 'blocked',
     });
+    session.dispose();
+  });
+
+  it('answers a pixels request for an off-screen image with its file facts', async () => {
+    const { document } = parseHTML(
+      '<html lang="ja"><body>' +
+      '<img id="image" src="https://cdn.example.test/kv.png" alt="Banner">' +
+      '</body></html>',
+    );
+    const image = document.querySelector<HTMLImageElement>('#image')!;
+    Object.defineProperties(image, {
+      complete: { configurable: true, value: true },
+      naturalWidth: { configurable: true, value: 400 },
+      naturalHeight: { configurable: true, value: 200 },
+      offsetWidth: { configurable: true, value: 200 },
+      offsetHeight: { configurable: true, value: 100 },
+      currentSrc: { configurable: true, value: 'https://cdn.example.test/kv.png' },
+      // Far below the 800x600 viewport: a screenshot cannot see it.
+      getBoundingClientRect: {
+        configurable: true,
+        value: () => rect(0, 5_000, 200, 100),
+      },
+    });
+    const hidden = new Set<Element>();
+    const style = (element: Element) => ({
+      ...baseStyle,
+      display: hidden.has(element) ? 'none' : 'block',
+      getPropertyValue: (name: string) => {
+        if (name === 'object-fit') return 'fill';
+        if (name === 'object-position') return '50% 50%';
+        if (name.startsWith('border-') || name.startsWith('padding-')) return '0px';
+        return '';
+      },
+    }) as unknown as CSSStyleDeclaration;
+    const identity: ReplicaSourceDocumentIdentity = {
+      sessionId: 'image-file-session',
+      pageEpoch: 1,
+      generation: 1,
+      documentId: 'image-file-document',
+      frameId: 0,
+    };
+    const port = new FakeImageSourcePort(
+      createImageSourcePortName(identity.sessionId),
+    );
+    let encoded: string | undefined = 'data:image/png;base64,AAAA';
+    const encodeImageRegion = vi.fn(async () => encoded);
+    const session = new ImageSourceSession({
+      port,
+      document: document as unknown as Document,
+      window: {
+        innerWidth: 800,
+        innerHeight: 600,
+        scrollX: 0,
+        scrollY: 0,
+        devicePixelRatio: 1,
+        getComputedStyle: style,
+      } as unknown as Window,
+      resolveNode: (nodeId) => nodeId === 7 ? image : null,
+      getNodeId: () => 7,
+      encodeImageRegion,
+      createObserver: (environment) => new SourceImageObserver({
+        ...environment,
+        createIntersectionObserver: (callback) =>
+          new ImmediateIntersectionObserver(callback),
+        createResizeObserver: () => new NoopElementObserver(),
+        createMutationObserver: () => new NoopMutationObserver(),
+      }),
+    });
+    port.emitMessage({
+      kind: 'simul:image-source-v2:start',
+      document: identity,
+      policyFingerprint: 'read-v1-100000',
+      controlImages: false,
+      accessibilityTextEnabled: true,
+    });
+    const descriptor = lastUpsertDescriptorForNode(port.messages, 7)!;
+    expect(descriptor).toBeDefined();
+
+    port.emitMessage({
+      kind: 'simul:image-source-v2:measure',
+      requestId: 'off-screen-measure',
+      descriptor,
+    });
+    expect(port.messages.at(-1)).toMatchObject({
+      requestId: 'off-screen-measure',
+      status: 'hidden',
+    });
+
+    port.emitMessage({
+      kind: 'simul:image-source-v2:pixels',
+      requestId: 'facts-only',
+      descriptor,
+      includePixels: false,
+    });
+    await vi.waitFor(() => expect(port.messages.at(-1)).toMatchObject({
+      requestId: 'facts-only',
+    }));
+    expect(port.messages.at(-1)).toEqual({
+      kind: 'simul:image-source-v2:pixels',
+      requestId: 'facts-only',
+      descriptor,
+      status: 'ready',
+      file: {
+        document: descriptor.document,
+        nodeId: 7,
+        contentRevision: descriptor.contentRevision,
+        observationRevision: descriptor.observationRevision,
+        layout: {
+          boxWidth: 200, boxHeight: 100,
+          insetLeft: 0, insetTop: 0, insetRight: 0, insetBottom: 0,
+          objectFit: 'fill', objectPosition: '50% 50%',
+        },
+        naturalWidth: 400,
+        naturalHeight: 200,
+        url: 'https://cdn.example.test/kv.png',
+        nearestElementLanguage: 'ja',
+      },
+    });
+    expect(encodeImageRegion).not.toHaveBeenCalled();
+
+    port.emitMessage({
+      kind: 'simul:image-source-v2:pixels',
+      requestId: 'with-pixels',
+      descriptor,
+      includePixels: true,
+    });
+    await vi.waitFor(() => expect(port.messages.at(-1)).toMatchObject({
+      requestId: 'with-pixels',
+      status: 'ready',
+      file: { pixels: { dataUrl: 'data:image/png;base64,AAAA', width: 400, height: 200 } },
+    }));
+    expect(encodeImageRegion).toHaveBeenCalledWith(image, {
+      sourceX: 0, sourceY: 0, sourceWidth: 400, sourceHeight: 200,
+      width: 400, height: 200,
+    });
+
+    // A cross-origin image the page may not read keeps its URL and placement.
+    encoded = undefined;
+    port.emitMessage({
+      kind: 'simul:image-source-v2:pixels',
+      requestId: 'tainted',
+      descriptor,
+      includePixels: true,
+    });
+    await vi.waitFor(() => expect(port.messages.at(-1)).toMatchObject({
+      requestId: 'tainted',
+      status: 'ready',
+    }));
+    expect((port.messages.at(-1) as { file: object }).file).not.toHaveProperty('pixels');
+
+    // An image its own style hides is not read from its file either.
+    hidden.add(image);
+    port.emitMessage({
+      kind: 'simul:image-source-v2:pixels',
+      requestId: 'style-hidden',
+      descriptor,
+      includePixels: true,
+    });
+    await vi.waitFor(() => expect(port.messages.at(-1)).toMatchObject({
+      requestId: 'style-hidden',
+    }));
+    expect(port.messages.at(-1)).toMatchObject({ status: 'blocked' });
+    expect(JSON.stringify(port.messages.at(-1))).not.toContain('kv.png');
+
+    port.emitMessage({
+      kind: 'simul:image-source-v2:pixels',
+      requestId: 'stale',
+      descriptor: { ...descriptor, contentRevision: descriptor.contentRevision + 1 },
+      includePixels: false,
+    });
+    expect(port.messages.at(-1)).toMatchObject({
+      requestId: 'stale',
+      status: 'stale',
+    });
+
+    // A lazy image the tab has not fetched keeps its layout and URL only. Its
+    // 0x0 natural size is a new observation, so ask with the new descriptor.
+    hidden.delete(image);
+    Object.defineProperties(image, {
+      complete: { configurable: true, value: false },
+      naturalWidth: { configurable: true, value: 0 },
+      naturalHeight: { configurable: true, value: 0 },
+    });
+    encoded = 'data:image/png;base64,AAAA';
+    port.emitMessage({
+      kind: 'simul:image-source-v2:measure',
+      requestId: 'refresh-lazy',
+      descriptor,
+    });
+    const lazyDescriptor = lastUpsertDescriptorForNode(port.messages, 7)!;
+    expect(lazyDescriptor.intrinsicWidth).toBe(0);
+    port.emitMessage({
+      kind: 'simul:image-source-v2:pixels',
+      requestId: 'lazy',
+      descriptor: lazyDescriptor,
+      includePixels: true,
+    });
+    await vi.waitFor(() => expect(port.messages.at(-1)).toMatchObject({
+      requestId: 'lazy',
+      status: 'ready',
+      file: { url: 'https://cdn.example.test/kv.png' },
+    }));
+    const lazyFile = (port.messages.at(-1) as { file: object }).file;
+    expect(lazyFile).not.toHaveProperty('pixels');
+    expect(lazyFile).not.toHaveProperty('naturalWidth');
     session.dispose();
   });
 

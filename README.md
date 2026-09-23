@@ -14,7 +14,7 @@ Simul started as a quick build for the OpenAI Build Week hackathon, made as
 something we would use ourselves. We are now sharing it so others can use it
 too.
 
-Current build: **0.5.0 beta v.20260922.16** · Desktop Chrome **138+** ·
+Current build: **0.5.0 beta v.20260922.17** · Desktop Chrome **138+** ·
 Manifest V3
 
 ## What you need
@@ -48,7 +48,7 @@ Keep the folder where it is while the extension is installed. To update,
 replace the folder with the new version, then select **Reload** on the Simul
 card in `chrome://extensions`, reload the page, and reopen the companion. The
 card shows version `0.5.0`; Simul's settings show
-`Build 0.5.0 beta v.20260922.16`.
+`Build 0.5.0 beta v.20260922.17`.
 
 This is an unpacked beta, not a Chrome Web Store release, so Chrome does not
 update it automatically.
@@ -113,13 +113,18 @@ Image translation is **on by default** and saved with your settings; pixel OCR
 waits until you grant image access from the **OCR** button. While on, it also
 translates the page text of the mirrored page, and for images Simul:
 
-1. inspects policy-approved, visible top-frame `<img>` elements;
+1. inspects policy-approved top-frame `<img>` elements on the whole page,
+   the ones on screen first and the rest in the background;
 2. first tries direct `aria-label` or `alt` text, which needs no pixel access
    and is shown as a caption band along the bottom edge of the image (this
    method is on once the first-run setup is done, so images with alt text get
    a translated caption before image access is granted);
-3. for pixel OCR, verifies stable visible geometry, captures only the relevant
-   visible-tab crop, and reduces it to at most 4 megapixels;
+3. for pixel OCR, reads an image on screen from a crop of the visible tab
+   (after checking its geometry is stable); an image off screen, moving, or in
+   a background tab is read from its own file instead: the copy the mirror has
+   already loaded, then the page's own copy for same-site images, then (Passive
+   fidelity only) a cache-first download of the same URL without cookies. Each
+   crop is reduced to at most 4 megapixels;
 4. tries Chrome TextDetector when the installed platform exposes it, then the
    packaged Tesseract.js 7.0.0 fallback according to the saved method order;
 5. rejects blank, punctuation-only, and insufficient-confidence results; and
@@ -132,9 +137,10 @@ service. Crops use short-lived extension storage for the offscreen handoff and
 are deleted after the job; OCR and translation caches are bounded and
 memory-only.
 
-OCR currently targets stable visible top-frame images. It does not read CSS
+OCR reads top-frame `<img>` images, on screen or not. It does not read CSS
 backgrounds, canvas, video frames, embedded documents, hidden images, or
-credential-overlapping pixels. A public text field, button, or link that
+credential-overlapping pixels, and text a page draws over an off-screen image
+is not part of its file. A public text field, button, or link that
 overlaps an image does not block capture; only password and other credential
 fields do, and capture waits while text from another element covers the
 image. See

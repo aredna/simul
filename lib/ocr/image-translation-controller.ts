@@ -217,6 +217,11 @@ export type ImageTranslationDiagnostic =
       renderedHeight: number;
     }>
   | Readonly<{
+      stage: 'pixel-source';
+      ordinal: number;
+      source: 'screenshot' | 'mirror' | 'tab' | 'download';
+    }>
+  | Readonly<{
       stage: 'recognition-failed';
       code: OcrHostErrorCode;
       ordinal: number;
@@ -1918,6 +1923,11 @@ export class ImageTranslationController {
         }
         this.#captureRetries.delete(job.descriptor.nodeId);
         pixels = acquisition.pixels;
+        this.environment.onDiagnostic?.(Object.freeze({
+          stage: 'pixel-source' as const,
+          ordinal: jobOrdinal,
+          source: pixels.pixelSource ?? 'screenshot',
+        }));
         if (!this.#isJobCurrent(job, processingVersion, pairEpoch, pairKey)) {
           throw new DOMException('Image job became stale.', 'AbortError');
         }

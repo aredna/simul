@@ -12,9 +12,12 @@ import {
   type ImageSourceReadySummary,
   type SourceImageAccessibilityTextEvidence,
   type SourceImageCaptureMetrics,
+  type SourceImageFileEvidence,
 } from './image-source-protocol';
 
 export const IMAGE_SOURCE_MEASURE_TIMEOUT_MS = 1_500;
+/** Encoding a large same-site image as PNG in the tab can take a while. */
+export const IMAGE_SOURCE_PIXELS_TIMEOUT_MS = 10_000;
 const MAX_PENDING_MEASUREMENTS = 16;
 
 export class ImageSourceUnavailableError extends Error {
@@ -42,6 +45,15 @@ export interface ImageSourceLease {
     controlImages: boolean,
     signal?: AbortSignal,
   ) => Promise<SourceImageAccessibilityTextEvidence | undefined>;
+  /**
+   * File facts for one eligible image (see `SourceImageFileEvidence`), or
+   * undefined when the tab refuses, the image changed, or it timed out.
+   */
+  readonly readFile?: (
+    descriptor: SourceImageDescriptor,
+    includePixels: boolean,
+    signal?: AbortSignal,
+  ) => Promise<SourceImageFileEvidence | undefined>;
   dispose(): void;
 }
 
@@ -116,6 +128,17 @@ class ChromeImageSourceLease implements ImageSourceLease {
       readonly descriptor: SourceImageDescriptor;
     }
   >();
+  readonly #pendingFiles = new Map<
+    string,
+    {
+      readonly resolve: (value: SourceImageFileEvidence | undefined) => void;
+      readonly reject: (reason: unknown) => void;
+      readonly timer: ReturnType<typeof setTimeout>;
+      readonly signal?: AbortSignal;
+      readonly onAbort: () => void;
+      readonly descriptor: SourceImageDescriptor;
+    }
+  >();
   readonly #resolveUnavailable: (error: ImageSourceUnavailableError) => void;
   readonly #resolveReady: (
     summary: ImageSourceReadySummary | undefined,
@@ -172,8 +195,7 @@ class ChromeImageSourceLease implements ImageSourceLease {
   ): Promise<SourceImageCaptureMetrics | undefined> {
     if (
       this.#disposed ||
-      this.#pending.size + this.#pendingAccessibility.size >=
-        MAX_PENDING_MEASUREMENTS ||
+      this.#pendingCount() >= MAX_PENDING_MEASUREMENTS ||
       !this.request.isCurrent()
     ) return Promise.reject(new ImageSourceUnavailableError('Image source is unavailable.'));
     signal?.throwIfAborted();
@@ -222,8 +244,7 @@ class ChromeImageSourceLease implements ImageSourceLease {
   ): Promise<SourceImageAccessibilityTextEvidence | undefined> {
     if (
       this.#disposed ||
-      this.#pending.size + this.#pendingAccessibility.size >=
-        MAX_PENDING_MEASUREMENTS ||
+      this.#pendingCount() >= MAX_PENDING_MEASUREMENTS ||
       !this.request.isCurrent()
     ) return Promise.reject(new ImageSourceUnavailableError('Image source is unavailable.'));
     if (
@@ -275,8 +296,62 @@ class ChromeImageSourceLease implements ImageSourceLease {
     });
   }
 
+  readFile(
+    descriptor: SourceImageDescriptor,
+    includePixels: boolean,
+    signal?: AbortSignal,
+  ): Promise<SourceImageFileEvidence | undefined> {
+    if (
+      this.#disposed ||
+      this.#pendingCount() >= MAX_PENDING_MEASUREMENTS ||
+      !this.request.isCurrent()
+    ) return Promise.reject(new ImageSourceUnavailableError('Image source is unavailable.'));
+    signal?.throwIfAborted();
+    const requestId = crypto.randomUUID();
+    return new Promise((resolve, reject) => {
+      const onAbort = (): void => {
+        const pending = this.#pendingFiles.get(requestId);
+        if (!pending) return;
+        this.#pendingFiles.delete(requestId);
+        clearTimeout(pending.timer);
+        reject(new DOMException('Image file read cancelled.', 'AbortError'));
+      };
+      const timer = setTimeout(() => {
+        this.#pendingFiles.delete(requestId);
+        signal?.removeEventListener('abort', onAbort);
+        resolve(undefined);
+      }, IMAGE_SOURCE_PIXELS_TIMEOUT_MS);
+      this.#pendingFiles.set(requestId, {
+        resolve,
+        reject,
+        timer,
+        signal,
+        onAbort,
+        descriptor,
+      });
+      signal?.addEventListener('abort', onAbort, { once: true });
+      try {
+        this.port.postMessage({
+          kind: 'simul:image-source-v2:pixels',
+          requestId,
+          descriptor,
+          includePixels,
+        });
+      } catch (error) {
+        this.disposeWithError(
+          new ImageSourceUnavailableError(readableError(error)),
+        );
+      }
+    });
+  }
+
   dispose(): void {
     this.disposeWithError(new DOMException('Image source closed.', 'AbortError'));
+  }
+
+  #pendingCount(): number {
+    return this.#pending.size + this.#pendingAccessibility.size +
+      this.#pendingFiles.size;
   }
 
   readonly #onMessage = (input: unknown): void => {
@@ -308,6 +383,23 @@ class ChromeImageSourceLease implements ImageSourceLease {
       }
       this.#readySignalled = true;
       this.#resolveReady(message.summary);
+      return;
+    }
+    if (message.kind === 'simul:image-source-v2:pixels') {
+      const pending = this.#pendingFiles.get(message.requestId);
+      if (
+        pending &&
+        !sameAccessibilityDescriptorIdentity(message.descriptor, pending.descriptor)
+      ) {
+        this.disposeWithError(new ImageSourceUnavailableError(
+          'Mismatched image file response.',
+        ));
+        return;
+      }
+      this.#settlePendingFile(
+        message.requestId,
+        message.status === 'ready' ? message.file : undefined,
+      );
       return;
     }
     if (message.kind === 'simul:image-source-v2:accessibility-text') {
@@ -384,6 +476,20 @@ class ChromeImageSourceLease implements ImageSourceLease {
     else pending.resolve(value);
   }
 
+  #settlePendingFile(
+    requestId: string,
+    value: SourceImageFileEvidence | undefined,
+    error?: unknown,
+  ): void {
+    const pending = this.#pendingFiles.get(requestId);
+    if (!pending) return;
+    this.#pendingFiles.delete(requestId);
+    clearTimeout(pending.timer);
+    pending.signal?.removeEventListener('abort', pending.onAbort);
+    if (error) pending.reject(error);
+    else pending.resolve(value);
+  }
+
   private disposeWithError(error: unknown, disconnect = true): void {
     if (this.#disposed) return;
     this.#disposed = true;
@@ -399,6 +505,9 @@ class ChromeImageSourceLease implements ImageSourceLease {
     }
     for (const requestId of [...this.#pendingAccessibility.keys()]) {
       this.#settlePendingAccessibility(requestId, undefined, error);
+    }
+    for (const requestId of [...this.#pendingFiles.keys()]) {
+      this.#settlePendingFile(requestId, undefined, error);
     }
     if (
       isImageSourceUnavailableError(error) &&

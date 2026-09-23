@@ -18,6 +18,7 @@ import {
   selectOcrPreprocessingPlan,
 } from '../lib/ocr/preprocessing-profile';
 import type { ImageSourceLease } from '../lib/ocr/image-source-client';
+import type { ImageFilePixels } from '../lib/ocr/image-file-pixel-reader';
 import type { SourceImageCaptureMetrics } from '../lib/ocr/image-source-protocol';
 
 const documentIdentity = {
@@ -459,6 +460,101 @@ describe('PixelAcquisitionCoordinator', () => {
       status: 'deferred',
       reason,
     });
+  });
+
+  it('reads an off-screen, moving or background-tab image from its file instead', async () => {
+    const file: ImageFilePixels = {
+      source: 'mirror',
+      encoded: new Blob([new Uint8Array([4])], { type: 'image/png' }),
+      pixelHash: 'ef'.repeat(32),
+      bitmapWidth: 800,
+      bitmapHeight: 400,
+      preprocessingVersion: OCR_NATIVE_PREPROCESSING_VERSION,
+      cropOffsetXCss: 0,
+      cropOffsetYCss: 0,
+      cropWidthCss: 200,
+      cropHeightCss: 100,
+      renderedWidthCss: 200,
+      renderedHeightCss: 100,
+      nearestElementLanguage: 'ja',
+    };
+    const readFilePixels = vi.fn(async () => file);
+    const offScreenCapture = vi.fn(async () => 'data:image/png;base64,AQID');
+    const offScreen = new PixelAcquisitionCoordinator({
+      ...fakeEnvironment(fakeSource([undefined]), offScreenCapture),
+      readFilePixels,
+    });
+    const result = await offScreen.acquire(descriptor);
+    expect(result).toEqual({
+      status: 'ready',
+      pixels: {
+        descriptor,
+        pixelHash: 'ef'.repeat(32),
+        encoded: file.encoded,
+        bitmapWidth: 800,
+        bitmapHeight: 400,
+        preprocessingVersion: OCR_NATIVE_PREPROCESSING_VERSION,
+        cropOffsetXCss: 0,
+        cropOffsetYCss: 0,
+        cropWidthCss: 200,
+        cropHeightCss: 100,
+        renderedWidthCss: 200,
+        renderedHeightCss: 100,
+        pixelSource: 'mirror',
+        nearestElementLanguage: 'ja',
+      },
+    });
+    expect(offScreenCapture).not.toHaveBeenCalled();
+
+    const moving = new PixelAcquisitionCoordinator({
+      ...fakeEnvironment(fakeSource([metrics, { ...metrics, left: 90 }])),
+      readFilePixels,
+    });
+    expect(await moving.acquire(descriptor)).toMatchObject({
+      status: 'ready',
+      pixels: { pixelSource: 'mirror' },
+    });
+
+    const background = new PixelAcquisitionCoordinator({
+      ...fakeEnvironment(
+        fakeSource([metrics]),
+        vi.fn(async () => {
+          throw new SourceTabCaptureError('inactive');
+        }),
+      ),
+      readFilePixels,
+    });
+    expect(await background.acquire(descriptor)).toMatchObject({ status: 'ready' });
+    expect(readFilePixels).toHaveBeenCalledTimes(3);
+  });
+
+  it('keeps the screenshot result when the file path cannot help', async () => {
+    const readFilePixels = vi.fn(async (): Promise<ImageFilePixels | undefined> => undefined);
+    const refused = new PixelAcquisitionCoordinator({
+      ...fakeEnvironment(fakeSource([undefined])),
+      readFilePixels,
+    });
+    expect(await refused.acquire(descriptor)).toEqual({
+      status: 'deferred',
+      reason: 'hidden',
+    });
+
+    // A quota or permission failure is not a visibility problem; the file
+    // path is not consulted and the ordinary retry applies.
+    const quota = new PixelAcquisitionCoordinator({
+      ...fakeEnvironment(
+        fakeSource([metrics]),
+        vi.fn(async () => {
+          throw new SourceTabCaptureError('quota');
+        }),
+      ),
+      readFilePixels,
+    });
+    expect(await quota.acquire(descriptor)).toEqual({
+      status: 'deferred',
+      reason: 'quota',
+    });
+    expect(readFilePixels).toHaveBeenCalledOnce();
   });
 
   it('propagates capture aborts instead of relabeling them as failures', async () => {

@@ -51,9 +51,13 @@ export function decideSmallImageEligibility(
   if (area < 1_600 && longest < 96) {
     return { eligible: false, reason: 'small-rendered' };
   }
+  // A lazy image the page has not fetched yet reports 0x0: that is unknown,
+  // not small. Its rendered box decides until it loads and is observed again.
   if (
     dimensions.intrinsicWidth !== undefined &&
     dimensions.intrinsicHeight !== undefined &&
+    dimensions.intrinsicWidth > 0 &&
+    dimensions.intrinsicHeight > 0 &&
     dimensions.intrinsicWidth < 32 &&
     dimensions.intrinsicHeight < 32
   ) {
