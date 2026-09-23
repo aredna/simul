@@ -62,10 +62,40 @@ export async function resolveUiLabelTranslations(
     for (const source of english.keys()) {
       const translated = await translate(source);
       if (!translated.trim()) return { localized: false, labels: english };
-      localized.set(source, translated.trim());
+      localized.set(source, repairTranslatedFrame(source, translated.trim()));
     }
     return { localized: true, labels: localized };
   } catch {
     return { localized: false, labels: english };
   }
+}
+
+const FRAME_PLACEHOLDER = /\{(\d+)\}/gu;
+// Machine translation sometimes spaces the braces or makes them full-width.
+const LOOSE_FRAME_PLACEHOLDER = /[{\uFF5B]\s*([0-9\uFF10-\uFF19]+)\s*[}\uFF5D]/gu;
+
+/**
+ * A translated template frame must keep exactly the English frame's numbered
+ * placeholders, or the values could not be filled in. Loosely written ones
+ * are normalized; if the set still differs, that label stays English
+ * (review L6).
+ */
+export function repairTranslatedFrame(source: string, translated: string): string {
+  const expected = framePlaceholderSignature(source);
+  if (!expected) return translated;
+  const repaired = translated.replace(
+    LOOSE_FRAME_PLACEHOLDER,
+    (_match, digits: string) => `{${Number(digits.replace(
+      /[\uFF10-\uFF19]/gu,
+      (digit) => String(digit.charCodeAt(0) - 0xff10),
+    ))}}`,
+  );
+  return framePlaceholderSignature(repaired) === expected ? repaired : source;
+}
+
+function framePlaceholderSignature(text: string): string {
+  return [...text.matchAll(FRAME_PLACEHOLDER)]
+    .map((match) => match[1])
+    .sort()
+    .join(',');
 }

@@ -427,7 +427,34 @@ function localizeUiTemplate(
  * status, the read-scope setup/reset statuses, the image diagnostics output,
  * and the detected-language note (review finding F2).
  */
+/**
+ * Text that code writes is outside the localizer's `data-ui-*` pass, so it
+ * gets its language here: screen readers pick the voice from `lang`, and
+ * `dir="auto"` lays out right-to-left languages (review L9).
+ */
+const CODE_WRITTEN_TEXT_SELECTOR = [
+  '#status',
+  '#progress-label',
+  '#detected-language',
+  '#composer-status',
+  '#reset-settings-status',
+  '#setup-read-scope-status',
+  '#setup-reset-cleanup-status',
+].join(',');
+
+function applyCodeWrittenTextLanguage(): void {
+  const language = uiLocalizer.renderedLanguage;
+  for (const element of document.querySelectorAll<HTMLElement>(
+    CODE_WRITTEN_TEXT_SELECTOR,
+  )) {
+    element.setAttribute('dir', 'auto');
+    if (language === 'en') element.removeAttribute('lang');
+    else element.setAttribute('lang', language);
+  }
+}
+
 function relocalizeDynamicSurfaces(): void {
+  applyCodeWrittenTextLanguage();
   toolbarStatus.relocalize();
   if (errorState?.element.isConnected) {
     errorState.element.textContent = renderUi(errorState.message);
@@ -800,6 +827,7 @@ window.addEventListener('pagehide', () => preferenceSafetyClient.dispose(), {
 });
 
 populateLanguageOptions();
+applyCodeWrittenTextLanguage();
 imageAnalysisPanel.initialize();
 surfaceSwitcher.configureButton();
 observeReplicaStateLabel();

@@ -16,6 +16,7 @@
     "build": "wxt build --browser chrome",
     "artifact:sync": "node tools/extension-artifact.mjs sync",
     "artifact:check": "node tools/extension-artifact.mjs check",
+    "bump-build": "node tools/bump-build.mjs",
     "zip": "wxt zip --browser chrome",
     "postinstall": "wxt prepare",
     "typecheck": "tsc --noEmit",

@@ -205,6 +205,16 @@ describe('sidepanel UI structure', () => {
     expect(script).toContain('dynamicLabels: DYNAMIC_UI_LABELS,');
   });
 
+  it('gives every code-written text surface its language and direction (review L9)', () => {
+    const list = /const CODE_WRITTEN_TEXT_SELECTOR = \[([^\]]*)\]/u.exec(script)?.[1] ?? '';
+    const ids = [...list.matchAll(/'#([a-z-]+)'/gu)].map((match) => match[1]!);
+    expect(ids).toEqual(expect.arrayContaining([
+      'status', 'progress-label', 'detected-language', 'composer-status',
+    ]));
+    for (const id of ids) expect(markup, id).toContain(`id="${id}"`);
+    expect(script).toContain("element.setAttribute('dir', 'auto');");
+  });
+
   it('places common controls before OCR experiments', () => {
     const { document } = parseHTML(markup);
     const experimental = document.querySelector('#experimental-options');

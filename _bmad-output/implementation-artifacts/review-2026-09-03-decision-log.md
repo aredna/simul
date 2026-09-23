@@ -3007,3 +3007,39 @@ Same branch / PR #22. Carried-over localization items of
 Build identity `0.5.0 beta v.20260922.28`; `dist/chrome-unpacked` re-synced.
 Gate: `npm run check` green, **1,491 tests pass, 1 skipped** (+6).
 Publishing 0.5.0 moves to **D70**.
+
+### D70. Localization details and a build-identity bump script (review L6, L8, L9, process) (2026-09-23)
+
+Same branch / PR #22. The remaining low localization items and two process
+items of `review-2026-09-22-pr22-bug-hunt.md`.
+
+- **L6.** A machine-translated template frame must keep the English frame's
+  `{n}` placeholders. Loosely written ones (`{ 0 }`, full-width `｛０｝`) are
+  normalized; if the set still differs, that one label stays English instead
+  of showing a sentence whose values cannot be filled in.
+- **L8.** The composer's character-count label is refreshed on a language
+  switch.
+- **L9.** Text that code writes (the status line, progress label,
+  detected-language line, composer and read-scope statuses) gets
+  `dir="auto"` and the `lang` of the language the UI is rendered in, so
+  screen readers use the right voice and right-to-left text lays out
+  correctly.
+- **README step 4** now says a mirrored page translates as soon as it opens
+  by default (image text is on and translates with the page), after the
+  first Translate page prepares the pack.
+- **Process.** `npm run bump-build` (`tools/bump-build.mjs`) bumps the
+  `.NN` build suffix in `wxt.config.ts`, README and the two identity tests,
+  checking all four before writing any. This build was the first bumped
+  with it.
+- **Not done.** O3 (letting the caption band grow on short images) changes
+  how overlays look, and the owner ruled on overlay appearance in D47; left
+  for the owner.
+- **Verified in Chrome for Testing.** After switching To to Japanese the
+  status line has `lang="ja"` and `dir="auto"` (no `lang` in English) and the
+  character-count label is localized; unit tests cover L6 (normalized,
+  rejected per label, untouched without placeholders), L8 (fails without the
+  fix) and the L9 selector list against the markup.
+
+Build identity `0.5.0 beta v.20260922.29`; `dist/chrome-unpacked` re-synced.
+Gate: `npm run check` green, **1,493 tests pass, 1 skipped** (+2).
+Publishing 0.5.0 moves to **D71**.
