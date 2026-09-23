@@ -3086,3 +3086,42 @@ are deferred.
 Build identity `0.5.0 beta v.20260922.30`; `dist/chrome-unpacked` re-synced.
 Gate: `npm run check` green, **1,495 tests pass, 1 skipped** (+2).
 Publishing 0.5.0 moves to **D72**.
+
+### D72. Embedded data-URL fonts, and a caption band that stays legible (2026-09-23)
+
+Same branch / PR #22. Two owner approvals from the D71 questions: allow
+data-URL fonts ("Allow them") and let the caption band grow when needed
+("Grow when needed", review O3).
+
+- **Data-URL fonts.** Every CSS `url()` went through `passiveUrl`, which
+  admits only `data:image/*`, so `@font-face { src: url(data:font/…;base64,…) }`
+  became `none` and the replica drew the text in a fallback font. A base64
+  font data URL (`font/woff2`, `woff`, `ttf`, `otf`, `sfnt`, `collection`,
+  and the legacy `application/…` font types and `octet-stream`) within the
+  string cap is now kept in CSS, under both policies. Attributes are
+  unchanged; other data URLs in CSS stay blocked unless they are images. The
+  shell CSP already allowed `font-src data:`. Fonts are inert data the page
+  already loaded.
+- **Caption band (O3).** A label-based translation is a band at the bottom
+  of the image, a third of its height (at least 20px). On a short image with
+  long alt text the text shrank to a few pixels. When the fitted text would
+  be under 9px, the band now grows to at most 60% of the image and the text
+  is fitted again; other captions are unchanged.
+- **Verified in Chrome for Testing.**
+  - A page embedding Lato as a TrueType data URL: the sample text is 578px
+    wide in the source and 674px in the `.29` replica (fallback font). It is
+    578px now, with the face listed as loaded.
+  - A 320×60 banner with long alt text: 20.4px band at 5.59px text before,
+    36px band at 9.68px now; a short "Menu" caption is unchanged (20.4px,
+    11.2px).
+- **Tests.** Data fonts are kept (both policies, legacy type with a charset
+  parameter) while `data:text/html` still becomes `none`. The band grows for
+  long text on a short image and not for a short caption; this test fails
+  without the change.
+- **Docs.** `docs/replica-fidelity.md` (embedded fonts),
+  `docs/translation-companion.md` (band growth; the accessibility method is
+  on from the start since D66). The review's status lists O3 as fixed.
+
+Build identity `0.5.0 beta v.20260922.31`; `dist/chrome-unpacked` re-synced.
+Gate: `npm run check` green, **1,497 tests pass, 1 skipped** (+2).
+Publishing 0.5.0 moves to **D73**.

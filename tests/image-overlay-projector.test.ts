@@ -205,6 +205,50 @@ describe('ImageOverlayProjector', () => {
     projector.dispose();
   });
 
+  it('grows the caption band on a short image only when its text would be illegible (O3)', () => {
+    const bandFor = (text: string) => {
+      const { document } = parseHTML('<html><body><main><img></main></body></html>');
+      const image = document.querySelector('img') as unknown as HTMLImageElement;
+      image.getBoundingClientRect = () => ({
+        left: 0, top: 0, width: 200, height: 60,
+        right: 200, bottom: 60, x: 0, y: 0, toJSON: () => ({}),
+      });
+      const projector = new ImageOverlayProjector({
+        resolveAnchor: () => ({
+          document: sourceDocument,
+          replayLease: 9,
+          image,
+          iframe: { contentDocument: document } as HTMLIFrameElement,
+        }),
+        isCurrent: () => true,
+        scheduleFrame: (callback) => {
+          callback();
+          return 1;
+        },
+        cancelFrame: () => undefined,
+        createResizeObserver: () => undefined,
+      });
+      projector.beginPair(1, 'en>ja');
+      projector.project(projection({
+        methodId: 'accessibility-text',
+        evidenceKind: 'semantic',
+        bitmapWidth: 200,
+        bitmapHeight: 60,
+        regions: [{ text, boundingBox: { x: 0, y: 0, width: 200, height: 60 }, placement: 'whole-image' }],
+      }));
+      const band = document.querySelector('[data-simul-image-overlay="7"]')!
+        .firstElementChild as HTMLElement;
+      const result = { height: band.style.height, top: band.style.top };
+      projector.dispose();
+      return result;
+    };
+    // A short caption keeps the usual third of the image (20.4px here).
+    expect(bandFor('Menu')).toEqual({ height: '20.4px', top: '39.6px' });
+    // Long alt text would shrink below 9px, so the band grows to 60%.
+    expect(bandFor('A long description of the photograph for screen readers '.repeat(4)))
+      .toEqual({ height: '36px', top: '24px' });
+  });
+
   it('keeps a caption band at least 20px tall on a short image', () => {
     expect(captionBandBox(300, 40)).toEqual({ x: 0, y: 20, width: 300, height: 20 });
     expect(captionBandBox(300, 12)).toEqual({ x: 0, y: 0, width: 300, height: 12 });

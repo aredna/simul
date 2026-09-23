@@ -3105,6 +3105,28 @@ describe('isolated HTML sanitizer and protocol', () => {
       .toEqual(checkpoint);
   });
 
+  it('keeps embedded data-URL fonts and nothing else of that kind (D72)', () => {
+    const base = 'https://example.test/page';
+    for (const policy of ['passive', 'conservative'] as const) {
+      expect(sanitizeCss(
+        '@font-face{font-family:Kaku;src:url(data:font/woff2;base64,d09GMgAB) format("woff2")}',
+        base,
+        false,
+        undefined,
+        policy,
+      )).toBe(
+        '@font-face{font-family:Kaku;src:url("data:font/woff2;base64,d09GMgAB") format("woff2")}',
+      );
+    }
+    expect(sanitizeCss(
+      '@font-face{src:url("data:application/x-font-woff;charset=utf-8;base64,AAAA")}',
+      base,
+    )).toBe('@font-face{src:url("data:application/x-font-woff;charset=utf-8;base64,AAAA")}');
+    // Other data URLs in CSS stay blocked unless they are images.
+    expect(sanitizeCss('.x{background:url(data:text/html;base64,PGI+)}', base))
+      .toBe('.x{background:none}');
+  });
+
   it('keeps strings, comments and escapes exact in the CSS passes', () => {
     // The passes copy unchanged runs as slices (D63); these pin the
     // character-by-character behaviour they replaced.

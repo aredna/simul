@@ -162,9 +162,11 @@ their URL or text. One saved priority list contains direct accessibility text,
 Chrome TextDetector, and packaged Tesseract.js. The accessibility method lazily reads only a
 direct image `aria-label` or `alt`, after policy and credential checks, and can
 translate/project it as one inert caption band along the image's bottom edge
-without screenshot access. Completing the first-run read-scope setup turns
-this method on, so with image translation on by default every eligible image
-with alt text gets a translated caption before any image access is granted.
+without screenshot access. The band takes a third of the image, growing to at
+most 60% when long text on a short image would otherwise shrink below about
+9px (D72). This method is on from the start (D66), so with image translation
+on by default every eligible image with alt text gets a translated caption
+before any image access is granted.
 Decorative, hidden, zero-area, filename/URL-like, or secret-overlapping evidence
 is rejected. Positive-area accessibility labels are not blocked by the OCR
 small-image setting.
