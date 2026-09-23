@@ -369,6 +369,12 @@ interface SerializeContext {
   readonly styleResolved?: boolean;
   /** True only below a hard-secret boundary that was already replaced. */
   readonly hardSecretRegion: boolean;
+  /**
+   * The parent's computed `visibility` hides its text. Unlike `display:
+   * none`, a descendant can set `visibility: visible` and paint again, so
+   * this is decided per element, not inherited as a withheld region (D76).
+   */
+  readonly visibilityHidden: boolean;
   readonly depth: number;
   readonly representability: HtmlMirrorRepresentabilityCollector;
   readonly fidelityPolicy: SelectableReplicaFidelityPolicy;
@@ -446,8 +452,13 @@ const ACTIVE_OR_NAVIGATIONAL_ATTRIBUTES = new Set([
   'xlink:href',
 ]);
 
+/**
+ * Control state and values the semantic channel restores under the read
+ * scope. Author-written text (`alt`, `aria-label`, `title`) is page text and
+ * travels with its element (D76): a stylesheet can draw it with
+ * `content: attr(...)`, and a broken image shows its alt text.
+ */
 const PRIVATE_ATTRIBUTES = new Set([
-  'alt',
   'aria-checked',
   'aria-controls',
   'aria-current',
@@ -455,7 +466,6 @@ const PRIVATE_ATTRIBUTES = new Set([
   'aria-details',
   'aria-expanded',
   'aria-haspopup',
-  'aria-label',
   'aria-labelledby',
   'aria-owns',
   'aria-pressed',
@@ -471,7 +481,6 @@ const PRIVATE_ATTRIBUTES = new Set([
   'open',
   'placeholder',
   'selected',
-  'title',
   'value',
 ]);
 
@@ -787,6 +796,10 @@ export function sanitizeSourceSubtrees(
         hardSecretRegion: inheritedElement
           ? hasSourceCredentialSecretAncestor(inheritedElement)
           : false,
+        visibilityHidden: inheritedElement
+          ? readSourceHiddenRegionState(inheritedElement, controlledContent)
+            .visibilityHidden
+          : false,
         depth: 0,
         representability,
         fidelityPolicy,
@@ -842,6 +855,10 @@ export function sanitizeSourceChildren(
     const hardSecretRegion = parentElement
       ? hasSourceCredentialSecretAncestor(parentElement)
       : false;
+    const visibilityHidden = parentElement
+      ? readSourceHiddenRegionState(parentElement, controlledContent)
+        .visibilityHidden
+      : false;
     const secretAncestors = createSourceSecretAncestorMemo();
     for (const child of source.childNodes) {
       const serialized = serializeNode(child, {
@@ -857,6 +874,7 @@ export function sanitizeSourceChildren(
         nonContentRegion,
         styleRegion,
         hardSecretRegion,
+        visibilityHidden,
         depth: 0,
         representability,
         fidelityPolicy,
@@ -901,7 +919,7 @@ export function sanitizeSourceAttributes(
         controlledContent,
       ),
       hasSourceActivationElementAncestor(source),
-      hasSourcePrivateAttributeElementAncestor(source),
+      false,
       hasSourcePublicMenuElementAncestor(source),
       baseUrl,
       representability,
@@ -1007,6 +1025,7 @@ export function sanitizeSourceDocument(
     nonContentRegion: false,
     styleRegion: false,
     hardSecretRegion: false,
+    visibilityHidden: false,
     depth: 0,
     representability,
     fidelityPolicy,
@@ -1515,7 +1534,13 @@ function serializeNode(
       context.secretAncestors,
     )
   ) {
-    // Replace the first hard-secret boundary before reading its original tag,
+    const credentialInput = serializeCredentialInputShell(
+      live as Element,
+      id,
+      context,
+    );
+    if (credentialInput) return credentialInput;
+    // Replace any other hard-secret boundary before reading its original tag,
     // attributes, resources, descendants, open shadow root, or style hints.
     // The node ID is retained solely for exact-document mirror identity.
     const tagName = sourceSecretPlaceholderTagName(id);
@@ -1545,7 +1570,7 @@ function serializeNode(
     // text is presentation rather than page content, so a hidden or controlled
     // disclosure region keeps its CSS (those rules are often what hides it);
     // a privacy or menu boundary still withholds it.
-    const withholdText = context.privateRegion &&
+    const withholdText = (context.privateRegion || context.visibilityHidden) &&
       !(context.styleRegion && !context.privacyRegion);
     const rawText = withholdText || context.styleResolved
       ? ''
@@ -1661,12 +1686,14 @@ function serializeNode(
   const privacyRegion = context.privacyRegion ||
     elementStartsPrivateRegion(liveElement, context.secretAncestors) ||
     tagName === 'select';
+  const hiddenState = readSourceHiddenRegionState(
+    liveElement,
+    context.controlledContent,
+  );
   const privateRegion = context.privateRegion ||
     privacyRegion ||
-    elementStartsHiddenOrControlledDisclosureRegion(
-      liveElement,
-      context.controlledContent,
-    );
+    hiddenState.starts;
+  const visibilityHidden = hiddenState.visibilityHidden;
   const activationRegion = context.activationRegion ||
     elementStartsActivationRegion(liveElement);
   const privateAttributeRegion = context.privateAttributeRegion ||
@@ -1697,7 +1724,7 @@ function serializeNode(
     tagName,
     privateRegion,
     activationRegion,
-    privateAttributeRegion,
+    false,
     publicMenuRegion,
     context.baseUrl,
     context.representability,
@@ -1748,6 +1775,7 @@ function serializeNode(
         nonContentRegion,
         styleRegion,
         styleResolved,
+        visibilityHidden,
         depth: context.depth + 1,
       });
       if (child) children.push(child);
@@ -1780,6 +1808,7 @@ function serializeNode(
         activationRegion,
         nonContentRegion,
         styleRegion,
+        visibilityHidden,
         depth: context.depth + 1,
       });
       if (child) shadowChildren.push(child);
@@ -1814,12 +1843,73 @@ function serializeNode(
   });
 }
 
+/**
+ * The only attributes a credential input's empty field carries: what draws
+ * the box. Nothing that can hold text about the field (value, placeholder,
+ * labels, `data-*`) is read.
+ */
+const CREDENTIAL_SHELL_ATTRIBUTES = new Set([
+  'class', 'dir', 'height', 'hidden', 'id', 'lang', 'maxlength', 'minlength',
+  'readonly', 'required', 'size', 'style', 'type', 'width',
+]);
+
+/**
+ * A credential input (a password, card-number or one-time-code field) is
+ * drawn as the empty field the page shows instead of vanishing (D76): only
+ * `CREDENTIAL_SHELL_ATTRIBUTES` travel, and no value is read. Any other
+ * credential region keeps the opaque identity shell, since it can hold
+ * content such as a sign-in QR code.
+ */
+function serializeCredentialInputShell(
+  element: Element,
+  id: number,
+  context: SerializeContext,
+): HtmlMirrorElementNode | undefined {
+  if (
+    element.namespaceURI !== 'http://www.w3.org/1999/xhtml' ||
+    element.localName.toLowerCase() !== 'input'
+  ) return undefined;
+  const attributes = sanitizeAttributes(
+    element,
+    'input',
+    true,
+    false,
+    true,
+    false,
+    context.baseUrl,
+    context.representability,
+    context.fidelityPolicy,
+  );
+  if (!attributes) return undefined;
+  admitNode(
+    context.budget,
+    id,
+    attributes.reduce(
+      (total, [name, value]) => total + (name.length + value.length) * 2 + 8,
+      74,
+    ),
+    context.representability,
+  );
+  incrementRepresentability(
+    context.representability,
+    'privateTextRedactionCount',
+  );
+  return Object.freeze({
+    kind: 'element',
+    id,
+    namespace: 'html',
+    tagName: 'input',
+    attributes,
+    children: Object.freeze([]),
+  });
+}
+
 function sanitizeAttributes(
   element: Element,
   tagName: string,
   privateRegion: boolean,
   activationRegion: boolean,
-  inheritedPrivateAttributes: boolean,
+  credentialShell: boolean,
   publicMenuRegion: boolean,
   baseUrl: string,
   representability: HtmlMirrorRepresentabilityCollector,
@@ -1830,13 +1920,6 @@ function sanitizeAttributes(
     return undefined;
   }
   const result: Array<readonly [string, string]> = [];
-  const privateAttributes = inheritedPrivateAttributes ||
-    privateRegion || activationRegion ||
-    isSourceNativeTextControlTagName(tagName) ||
-    isSourceActivationTagName(tagName) ||
-    isSourceActivationRoleValue(element.getAttribute('role')) ||
-    (!isNativeSelectSemanticTag(tagName) &&
-      isSourcePublicMenuRoleValue(element.getAttribute('role')));
   for (const attribute of element.attributes) {
     const name = attribute.name.toLowerCase();
     const svgResourceReferenceAttribute =
@@ -1860,8 +1943,9 @@ function sanitizeAttributes(
         RAW_CONTROL_TEXT_ATTRIBUTES.has(name) &&
         !SOURCE_PRIVACY_FILTERS_OFF) ||
       isPrivateBaseAttribute(tagName, name) ||
-      (privateAttributes && name.startsWith('data-') &&
-        !SOURCE_PRIVACY_FILTERS_OFF) ||
+      // `data-*` is the page's own markup and travels (D76); a credential
+      // input's empty field keeps only what draws its box.
+      (credentialShell && !CREDENTIAL_SHELL_ATTRIBUTES.has(name)) ||
       (publicMenuRegion && PUBLIC_MENU_RESOURCE_ATTRIBUTES.has(name))
     ) {
       incrementRepresentability(representability, 'strippedActiveAttributeCount');
@@ -3954,6 +4038,22 @@ function elementStartsPrivateRegion(
   );
 }
 
+interface SourceHiddenRegionState {
+  /** The element starts a withheld region: hidden, collapsed or controlled. */
+  readonly starts: boolean;
+  /** Its own computed `visibility` hides its text (see SerializeContext). */
+  readonly visibilityHidden: boolean;
+}
+
+const SOURCE_REGION_VISIBLE: SourceHiddenRegionState = Object.freeze({
+  starts: false,
+  visibilityHidden: false,
+});
+const SOURCE_REGION_WITHHELD: SourceHiddenRegionState = Object.freeze({
+  starts: true,
+  visibilityHidden: false,
+});
+
 /**
  * Hidden and ARIA-controlled panels are optional disclosure payload, not base
  * page text.  This reads only visibility/relationship structure and never an
@@ -3966,22 +4066,30 @@ function elementStartsPrivateRegion(
  * painted box, and without readable style or geometry the declaration fails
  * closed. (The strict paint proof cannot be used here: it reports a
  * declared-versus-computed contradiction as unknown by design.)
+ *
+ * `visibility: hidden` does not start a region (D76): a descendant can set
+ * `visibility: visible` and paint, so each element reports its own computed
+ * visibility and text follows its parent's.
  */
-function elementStartsHiddenOrControlledDisclosureRegion(
+function readSourceHiddenRegionState(
   element: Element,
   controlledContent: SourceControlledContentPolicy,
-): boolean {
+): SourceHiddenRegionState {
   // "Show everything (testing)" copies hidden text too; the page's CSS still
   // hides it in the replica (D75).
-  if (SOURCE_PRIVACY_FILTERS_OFF) return false;
+  if (SOURCE_PRIVACY_FILTERS_OFF) return SOURCE_REGION_VISIBLE;
   try {
-    if (sourceControlledContentIsWithheld(element, controlledContent)) return true;
+    if (sourceControlledContentIsWithheld(element, controlledContent)) {
+      return SOURCE_REGION_WITHHELD;
+    }
     const declaredHidden =
       element.hasAttribute('hidden') ||
       element.getAttribute('aria-hidden')?.trim().toLowerCase() === 'true';
     const view = element.ownerDocument.defaultView;
     const getComputedStyle = view?.getComputedStyle;
-    if (typeof getComputedStyle !== 'function') return declaredHidden;
+    if (typeof getComputedStyle !== 'function') {
+      return declaredHidden ? SOURCE_REGION_WITHHELD : SOURCE_REGION_VISIBLE;
+    }
     const style = getComputedStyle.call(view, element);
     const display = typeof style?.display === 'string'
       ? style.display.trim().toLowerCase()
@@ -3989,11 +4097,11 @@ function elementStartsHiddenOrControlledDisclosureRegion(
     const visibility = typeof style?.visibility === 'string'
       ? style.visibility.trim().toLowerCase()
       : undefined;
-    if (
-      display === 'none' ||
-      visibility === 'hidden' || visibility === 'collapse'
-    ) return true;
-    if (!declaredHidden) return false;
+    const visibilityHidden = visibility === 'hidden' || visibility === 'collapse';
+    const state = (starts: boolean): SourceHiddenRegionState =>
+      Object.freeze({ starts, visibilityHidden });
+    if (display === 'none') return state(true);
+    if (!declaredHidden) return state(false);
     // The declaration yields only to a box that is really painted, by the
     // same inputs the strict paint proof reads (bug-hunt P1): unreadable
     // style, `hidden="until-found"`, zero opacity, skipped content, or a
@@ -4003,11 +4111,18 @@ function elementStartsHiddenOrControlledDisclosureRegion(
       visibility === undefined ||
       element.getAttribute('hidden')?.trim().toLowerCase() === 'until-found' ||
       declaredHiddenRegionIsUnpainted(style)
-    ) return true;
-    return !hasSourcePositivePaintBox(element);
+    ) return state(true);
+    return state(!hasSourcePositivePaintBox(element));
   } catch {
-    return true;
+    return SOURCE_REGION_WITHHELD;
   }
+}
+
+function elementStartsHiddenOrControlledDisclosureRegion(
+  element: Element,
+  controlledContent: SourceControlledContentPolicy,
+): boolean {
+  return readSourceHiddenRegionState(element, controlledContent).starts;
 }
 
 /** Content-free: computed style that leaves a displayed box unpainted. */
@@ -4274,10 +4389,7 @@ export function hasPrivateHtmlMirrorAttribute(
   tagName: string,
   attributes: readonly (readonly [string, string])[],
 ): boolean {
-  return attributes.some(
-    ([name]) => isPrivateBaseAttribute(tagName, name) ||
-      (name.startsWith('data-') && !SOURCE_PRIVACY_FILTERS_OFF),
-  );
+  return attributes.some(([name]) => isPrivateBaseAttribute(tagName, name));
 }
 
 function composedParentElement(element: Element): Element | undefined {

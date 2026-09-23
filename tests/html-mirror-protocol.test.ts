@@ -209,6 +209,84 @@ describe('isolated HTML sanitizer and protocol', () => {
       false, false, false, false, 'passive')).toBeDefined();
   });
 
+  it('draws credential inputs as empty fields; other credential regions stay opaque (D76)', () => {
+    const { document, window } = parseHTML(`<!doctype html><html><body>
+      <input id="pw" class="field" style="width: 10rem" type="password"
+        value="hunter2" placeholder="Password" aria-label="Password label"
+        data-typed="copied-value" name="login-pw" autocomplete="current-password">
+      <input id="card" size="20" autocomplete="cc-number" value="4111111111111111">
+      <section autocomplete="one-time-code"><span>otp region text</span></section>
+    </body></html>`);
+    const password = document.querySelector('#pw')!;
+    for (const name of ['value', 'placeholder', 'aria-label', 'data-typed']) {
+      Object.defineProperty(password.getAttributeNode(name)!, 'value', {
+        configurable: true,
+        get: () => {
+          throw new Error(`${name} must not be read`);
+        },
+      });
+    }
+    const graph = sanitizeSourceDocument(
+      document,
+      window as unknown as Window,
+      new WeakNodeIdRegistry(),
+    )!;
+    const serialized = JSON.stringify(graph);
+
+    expect(attributesOf(graph, 'pw')).toEqual({
+      id: 'pw', class: 'field', style: 'width: 10rem', type: 'password',
+    });
+    expect(attributesOf(graph, 'card')).toEqual({ id: 'card', size: '20' });
+    for (const text of [
+      'hunter2', 'Password', 'copied-value', 'login-pw', '4111', 'otp region text',
+    ]) expect(serialized, text).not.toContain(text);
+    // A credential region other than an input keeps the opaque shell.
+    expect(graphOpaquePlaceholders(graph)).toHaveLength(1);
+    expect(readHtmlMirrorNode(graph.root)).toBeDefined();
+  });
+
+  it('shows output and spinbutton text and a visible child of a hidden parent (D76)', () => {
+    const { document, window } = parseHTML(`<!doctype html><html><body>
+      <output>Total 3,300 yen</output>
+      <div role="spinbutton" aria-valuenow="3">3 items</div>
+      <div role="slider" aria-valuenow="40">40 percent</div>
+      <div data-visibility="hidden">Hidden parent text<span data-visibility="visible">Visible child text</span><b>Hidden bold text</b></div>
+    </body></html>`);
+    // Computed visibility inherits unless an element sets its own.
+    const visibility = (element: Element): string => {
+      for (let current: Element | null = element; current; current = current.parentElement) {
+        const own = current.getAttribute('data-visibility');
+        if (own) return own;
+      }
+      return 'visible';
+    };
+    Object.defineProperty(window, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => ({
+        display: 'block',
+        visibility: visibility(element),
+        opacity: '1',
+        getPropertyValue: () => '',
+      }),
+    });
+    const graph = sanitizeSourceDocument(
+      document,
+      window as unknown as Window,
+      new WeakNodeIdRegistry(),
+    )!;
+    const serialized = JSON.stringify(graph);
+
+    for (const text of [
+      'Total 3,300 yen', '3 items', '40 percent', 'Visible child text',
+    ]) expect(serialized, text).toContain(text);
+    expect(serialized).not.toContain('Hidden parent text');
+    expect(serialized).not.toContain('Hidden bold text');
+    expect(graphTextNodes(graph.root).find(
+      (node) => node.text === 'Visible child text',
+    )?.translatable).toBe(true);
+    expect(readHtmlMirrorNode(graph.root)).toBeDefined();
+  });
+
   it('copies everything while Show everything is on (D75)', () => {
     applySourcePrivacyFiltersOff(true);
     const graph = sanitizeMarkup(`<!doctype html><html><body>
@@ -358,7 +436,11 @@ describe('isolated HTML sanitizer and protocol', () => {
     expect(attributesOf(graph, 'static-fallback')).toMatchObject({
       src: 'https://example.test/fallback.jpg',
     });
-    expect(attributesOf(graph, 'static-fallback')).not.toHaveProperty('alt');
+    // Alt text is page text and travels (D76).
+    expect(attributesOf(graph, 'static-fallback')).toHaveProperty(
+      'alt',
+      'Static fallback',
+    );
     expect(JSON.stringify(graph)).not.toContain('movie.mp4');
   });
 
@@ -1905,7 +1987,7 @@ describe('isolated HTML sanitizer and protocol', () => {
     })).toBeUndefined();
   });
 
-  it('keeps every optional native control value and label out of the base graph', () => {
+  it('keeps every optional native control value out of the base graph', () => {
     const { document, window } = parseHTML(`<!doctype html><html><body>
       <input id="missing" class="query" style="width: 20rem" value="Search me"
         placeholder="ignored" name="private-name" autocomplete="off"
@@ -1950,8 +2032,12 @@ describe('isolated HTML sanitizer and protocol', () => {
     expect(serialized).toContain('["class","query"]');
     expect(serialized).toContain('["style","width: 20rem"]');
     expect(serialized).not.toContain('private-name');
-    expect(serialized).not.toContain('private-title');
-    expect(serialized).not.toContain('private-data');
+    // Author attributes travel with a text input (D76); its value does not.
+    expect(serialized).toContain('["title","private-title"]');
+    expect(serialized).toContain('["data-account","private-data"]');
+    // A password field is drawn as its empty box (D76).
+    expect(serialized).toContain('["id","password"],["type","password"]');
+    expect(serialized).toContain('["id","password-auto"]');
     expect(serialized).not.toContain('["autocomplete"');
     expect(serialized).not.toContain('["value"');
     expect(serialized).not.toContain('["placeholder"');
@@ -1991,7 +2077,7 @@ describe('isolated HTML sanitizer and protocol', () => {
     expect(representability.capacityOmissionCount).toBe(0);
   });
 
-  it('preserves native and ARIA activation labels while masking nested values', () => {
+  it('preserves activation labels and author attributes while masking nested values (D76)', () => {
     const { document, window } = parseHTML(`<!doctype html><html><body>
       <button data-account="private-button-state">
         <span title="private-descendant-title" data-user="private-descendant-data">公開資料を検索する</span>
@@ -2016,19 +2102,26 @@ describe('isolated HTML sanitizer and protocol', () => {
     expect(serialized).toContain('Sample Studio');
     expect(serialized).toContain('Example Workshop');
     expect(serialized).not.toContain('nested-private-value');
-    expect(serialized).not.toContain('private-button-state');
-    expect(serialized).not.toContain('private-aria-label');
-    expect(serialized).not.toContain('private-descendant-title');
-    expect(serialized).not.toContain('private-descendant-data');
+    // `data-*`, `title` and `aria-label` are the page's own markup (D76):
+    // stylesheets key on them and can draw them with attr().
+    expect(serialized).toContain('private-button-state');
+    expect(serialized).toContain('private-aria-label');
+    expect(serialized).toContain('private-descendant-title');
+    expect(serialized).toContain('private-descendant-data');
     expect(readHtmlMirrorNode(graph?.root)).toBeDefined();
     expect(readHtmlMirrorNode({
       kind: 'element', id: 91, namespace: 'html', tagName: 'button',
-      attributes: [], children: [{
+      attributes: [['data-state', 'on']], children: [{
         kind: 'element', id: 92, namespace: 'html', tagName: 'span',
-        attributes: [['title', 'transported descendant secret']], children: [{
+        attributes: [['title', 'transported descendant title']], children: [{
           kind: 'text', id: 93, text: 'public activation label', translatable: true,
         }],
       }],
+    })).toBeDefined();
+    // Control state still comes only from the semantic channel.
+    expect(readHtmlMirrorNode({
+      kind: 'element', id: 96, namespace: 'html', tagName: 'button',
+      attributes: [['aria-pressed', 'true']], children: [],
     })).toBeUndefined();
     expect(readHtmlMirrorNode({
       kind: 'element', id: 94, namespace: 'html', tagName: 'section',
@@ -2042,7 +2135,7 @@ describe('isolated HTML sanitizer and protocol', () => {
     })).toBeUndefined();
   });
 
-  it('carries only canonical hidden/source hints and omits attribute labels', () => {
+  it('carries only canonical hidden/source hints and keeps alt text (D76)', () => {
     const { document, window } = parseHTML(`<!doctype html><html><body>
       <button><img id="control" alt="Vote" width="24" height="24"><faceplate-screen-reader-content>Vote</faceplate-screen-reader-content></button>
       <button><img id="large-control" alt="Card illustration" width="24" height="24"></button>
@@ -2097,9 +2190,11 @@ describe('isolated HTML sanitizer and protocol', () => {
 
     expect(serialized.match(/"visuallyHidden":true/gu)).toHaveLength(1);
     expect(serialized).toContain('normal small text');
-    expect(serialized).not.toContain('"alt"');
-    expect(serialized).not.toContain('Card illustration');
-    expect(serialized).not.toContain('Article illustration');
+    // A small broken icon in a control keeps an empty alt (its label is drawn
+    // beside it); other alt text travels.
+    expect(serialized).toContain('["id","control"],["alt",""]');
+    expect(serialized).toContain('Card illustration');
+    expect(serialized).toContain('Article illustration');
     expect(serialized).toContain(
       '"selectedImageSource":"https://example.test/selected.jpg"',
     );
@@ -2564,7 +2659,7 @@ describe('isolated HTML sanitizer and protocol', () => {
     }, identity)).toBeUndefined();
   });
 
-  it('masks private ancestors and rejects malicious private transport canaries', () => {
+  it('masks private text and rejects malicious private transport canaries', () => {
     const { document, window } = parseHTML(`<!doctype html><html><body>
       <section role="textbox"><span title="secret title" data-secret="secret data">secret text</span></section>
       <section contenteditable="true"><select><option label="secret label">secret choice</option></select></section>
@@ -2574,7 +2669,14 @@ describe('isolated HTML sanitizer and protocol', () => {
       window as unknown as Window,
       new WeakNodeIdRegistry(),
     );
-    expect(JSON.stringify(graph)).not.toContain('secret');
+    const serialized = JSON.stringify(graph);
+    // The editor's text and the select's choice stay withheld; the author
+    // attributes of an editable region's elements travel (D76).
+    expect(serialized).not.toContain('secret text');
+    expect(serialized).not.toContain('secret label');
+    expect(serialized).not.toContain('secret choice');
+    expect(serialized).toContain('secret title');
+    expect(serialized).toContain('secret data');
 
     expect(readHtmlMirrorNode({
       kind: 'element', id: 1, namespace: 'html', tagName: 'section',
@@ -2877,7 +2979,7 @@ describe('isolated HTML sanitizer and protocol', () => {
   it('transports only bounded aggregate representability diagnostics', () => {
     const { document, window } = parseHTML(`<!doctype html><html><body>
       <script>private script text</script>
-      <button onclick="private-handler()" data-account="private-state">label</button>
+      <button onclick="private-handler()" value="private-state">label</button>
       <a href="javascript:private-url()">link</a>
       <div role="textbox">private editable text</div>
       <x-open></x-open><x-opaque></x-opaque>

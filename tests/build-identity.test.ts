@@ -9,7 +9,7 @@ describe('extension build identity', () => {
   it('renders and logs the trimmed runtime manifest version name', () => {
     const identity = createExtensionBuildIdentity({
       version: '0.5.0',
-      version_name: ' 0.5.0 beta v.20260922.34 ',
+      version_name: ' 0.5.0 beta v.20260922.35 ',
     });
     const target: Pick<HTMLElement, 'textContent'> = { textContent: '' };
 
@@ -17,13 +17,13 @@ describe('extension build identity', () => {
 
     expect(identity).toEqual({
       version: '0.5.0',
-      label: 'Build 0.5.0 beta v.20260922.34',
+      label: 'Build 0.5.0 beta v.20260922.35',
       companionReadyMessage:
-        '[Simul] Companion ready. Build 0.5.0 beta v.20260922.34.',
+        '[Simul] Companion ready. Build 0.5.0 beta v.20260922.35.',
       backgroundReadyMessage:
-        '[Simul] Background service worker ready. Build 0.5.0 beta v.20260922.34.',
+        '[Simul] Background service worker ready. Build 0.5.0 beta v.20260922.35.',
     });
-    expect(target.textContent).toBe('Build 0.5.0 beta v.20260922.34');
+    expect(target.textContent).toBe('Build 0.5.0 beta v.20260922.35');
   });
 
   it.each([

@@ -2957,7 +2957,7 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(stream.requested).toEqual([0]);
   });
 
-  it('rejects private metadata before an activation-descendant patch is admitted', async () => {
+  it('rejects private state before an activation-descendant patch is admitted', async () => {
     const checkpoint = createHtmlMirrorCheckpoint(
       createReplicaIdentity({ ...identityParts, sequence: 0 }),
       {
@@ -2998,14 +2998,16 @@ describe('IsolatedHtmlReplicaEngine', () => {
         namespace: 'html',
         nodeId: 5,
         tagName: 'span',
-        attributes: [['title', 'transported descendant secret']],
+        // Control state travels only through the semantic channel; author
+        // text such as `title` is page markup since D76.
+        attributes: [['aria-checked', 'true']],
       }],
     );
     expect(patch).toBeUndefined();
 
     const span = host.iframe?.contentDocument?.querySelector('button span');
     expect(span?.textContent).toBe('public activation label');
-    expect(span?.hasAttribute('title')).toBe(false);
+    expect(span?.hasAttribute('aria-checked')).toBe(false);
     expect(stream.requested).toEqual([]);
   });
 
