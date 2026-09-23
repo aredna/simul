@@ -216,6 +216,84 @@ describe('stateless controlled regions', () => {
     expect(sourceControlledContentChangedTargets(policy, expanded)).toContain(panel);
   });
 
+  it('reads a carousel whose track box is translated beside the window while a slide is in view', () => {
+    // freee.co.jp: Swiper moves the wrapper with translate3d(-1068px, ...), so
+    // the wrapper's own 320px box sits left of the carousel window and only
+    // the slides it overflows into are painted. D54 withheld every slide's
+    // text and button labels because the wrapper's own box was clipped away.
+    const geometry = (options: {
+      readonly wrapperClips?: boolean;
+      readonly slideInView?: boolean;
+    } = {}) => {
+      const { document, window } = load();
+      const setRect = (
+        selector: string,
+        rect: { left: number; top: number; width: number; height: number },
+      ) => Object.defineProperty(document.querySelector(selector)!, 'getClientRects', {
+        configurable: true,
+        value: () => rectList(rect),
+      });
+      setRect('.carousel', { left: 100, top: 0, width: 320, height: 40 });
+      setRect('#swiper-wrapper-1', { left: -220, top: 0, width: 320, height: 40 });
+      const slides = [...document.querySelectorAll('.swiper-slide')];
+      const firstLeft = options.slideInView === false ? 420 : -220;
+      slides.forEach((slide, index) => Object.defineProperty(slide, 'getClientRects', {
+        configurable: true,
+        value: () => rectList({ left: firstLeft + index * 320, top: 0, width: 320, height: 40 }),
+      }));
+      const painted = window.getComputedStyle.bind(window);
+      const clipping = (style: Record<string, unknown> & {
+        getPropertyValue: (name: string) => string;
+      }) => ({
+        ...style,
+        overflowX: 'hidden',
+        overflowY: 'hidden',
+        getPropertyValue: (name: string) =>
+          name.startsWith('overflow') ? 'hidden' : style.getPropertyValue(name),
+      });
+      Object.defineProperty(window, 'getComputedStyle', {
+        configurable: true,
+        value: ((element: Element) => {
+          const style = painted(element) as unknown as Record<string, unknown> & {
+            getPropertyValue: (name: string) => string;
+          };
+          if (element.classList.contains('carousel')) return clipping(style);
+          if (element.id === 'swiper-wrapper-1' && options.wrapperClips) {
+            return clipping(style);
+          }
+          return style;
+        }) as unknown as Window['getComputedStyle'],
+      });
+      return { document, window };
+    };
+
+    const { document, window } = geometry();
+    const policy = createSourceControlledContentPolicy(document, window);
+    expect(policy.targets.get(document.querySelector('#swiper-wrapper-1')!))
+      .toBe('controlled-region');
+    const serialized = JSON.stringify(
+      sanitizeSourceDocument(document, window, new WeakNodeIdRegistry(), undefined, 'passive'),
+    );
+    expect(serialized).toContain('Slide one headline');
+    expect(serialized).toContain('Slide three headline');
+
+    // A track that clips its own overflow, or whose slides are all outside the
+    // window too, is not proven painted.
+    for (const options of [{ wrapperClips: true }, { slideInView: false }]) {
+      const clipped = geometry(options);
+      const withheld = createSourceControlledContentPolicy(clipped.document, clipped.window);
+      expect(withheld.targets.get(clipped.document.querySelector('#swiper-wrapper-1')!))
+        .toBe('withheld');
+      expect(JSON.stringify(sanitizeSourceDocument(
+        clipped.document,
+        clipped.window,
+        new WeakNodeIdRegistry(),
+        undefined,
+        'passive',
+      ))).not.toContain('Slide one headline');
+    }
+  });
+
   it('still counts images inside a stateless controlled region as control images', () => {
     const { document, window } = load();
     const policy = createSourceControlledContentPolicy(document, window);

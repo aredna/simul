@@ -45,10 +45,12 @@ style keeps the declaration. A region that controls reference with
 carousel's previous/next buttons carry no `aria-expanded`, `aria-selected`,
 pressed, checked or popup state and are not native controls or tabs, so the
 slide container they control keeps its text and images. That holds only while
-the region's own box is painted and survives its overflow-clipping ancestors: a
-stateless "Show details" button that controls a panel collapsed to zero height,
-faded out or clipped away leaves the panel withheld until a layout change
-proves it painted. A controlled region is also withheld while a stateful
+the region's own box is painted and survives its overflow-clipping ancestors,
+or, when the region does not clip its own overflow, while one of its painted
+children does (a carousel track is translated beside the carousel window while
+the slide it overflows into is on screen): a stateless "Show details" button
+that controls a panel collapsed to zero height, faded out or clipped away
+leaves the panel withheld until a layout change proves it painted. A controlled region is also withheld while a stateful
 control references it and no unique tab relation proves it open.
 
 When CSSOM is readable, Simul serializes sanitized rules and recursively

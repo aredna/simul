@@ -10,11 +10,11 @@ through **D55** hold the reasoning.
 
 | Item | State |
 | --- | --- |
-| Branch / PR | `feat/ui-string-catalogue`, PR #22, **open**, head is the D56 commit (`.15`). Description covers D40–D56. |
-| Version / identity | `0.5.0` / `0.5.0 beta v.20260922.15` (bumped on every shipped change; next is `.16`). |
-| Gate | `npm run check` green at head: typecheck clean, **1,431 tests pass, 1 skipped**, `dist/chrome-unpacked` re-synced and byte-verified. |
-| NAS | `Dev/simul/` mirrors the D56 commit. Load `Dev/simul/dist/chrome-unpacked`; settings must show `Build 0.5.0 beta v.20260922.15`. |
-| `main` | `eb09813` (through D39). Release: `v0.4.0` pre-release only. Publishing 0.5.0 is **D57**, and only when the owner says so. |
+| Branch / PR | `feat/ui-string-catalogue`, PR #22, **open**, head is the D57 commit (`.16`). Description covers D40–D57. |
+| Version / identity | `0.5.0` / `0.5.0 beta v.20260922.16` (bumped on every shipped change; next is `.17`). |
+| Gate | `npm run check` green at head: typecheck clean, **1,432 tests pass, 1 skipped**, `dist/chrome-unpacked` re-synced and byte-verified. |
+| NAS | `Dev/simul/` mirrors the D57 commit. Load `Dev/simul/dist/chrome-unpacked`; settings must show `Build 0.5.0 beta v.20260922.16`. |
+| `main` | `eb09813` (through D39). Release: `v0.4.0` pre-release only. Publishing 0.5.0 is **D58**, and only when the owner says so. |
 
 ## What this session shipped
 
@@ -114,7 +114,15 @@ probably why no patch was refused then. Fixing this should also stop the OCR
 churn: each rebuild invalidates the image final cache (the owner's log showed
 `entries=0`, `purges=7`).
 
-### 3. Carousel images and buttons show no text (new bug)
+### 3. Carousel images and buttons show no text (fixed in D57, `.16`)
+
+**Fixed.** Not the read scope (the owner uses Full visible). D54 required the
+carousel wrapper's own box to be painted; Swiper translates the wrapper beside
+the window while its slides overflow into view, so the wrapper stayed
+`withheld` and every slide's text and button label was emptied. D57 also
+accepts a painted child when the region does not clip its own overflow. The
+image-only slide shows its alt-text caption band because evidence selection
+prefers the alt text (existing D48 behaviour). Pre-fix notes below.
 
 Owner's words: *"the images in the carousel are not having all the text show up
 on top of them. For the very first image in the carousel, we do not have text
@@ -174,7 +182,7 @@ each; keep them serial, because concurrent runs make OCR timings noisy.
    with no forced setup question; tab follow defaults to `active` with two
    clearer words; mirror size defaults to 1:1; toolbar buttons stay until the
    owner reviews them one by one.
-3. **Publish 0.5.0** as **D57**, only when the owner says it is ready; do not
+3. **Publish 0.5.0** as **D58**, only when the owner says it is ready; do not
    ask. Runbook: `handover-2026-09-22-release-readiness.md`; the release-notes
    draft needs a line for D51–D55.
 4. Unchanged: F6 (memoizing `Intl.DisplayNames`) stays declined;

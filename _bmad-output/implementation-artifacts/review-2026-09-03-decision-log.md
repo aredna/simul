@@ -2262,3 +2262,52 @@ do that in old versions."
 Build identity `0.5.0 beta v.20260922.15`; `dist/chrome-unpacked` re-synced.
 Gate: `npm run check` green, **1,431 tests pass, 1 skipped** (+3). Publishing
 0.5.0 moves to **D57**.
+
+### D57. A carousel track is painted when the slide it overflows into is (2026-09-23)
+
+Same branch / PR #22, third owner report from the D55 addendum: "For the very
+first image in the carousel, we do not have text on top of the image, and we
+do not have any text shown on top of the buttons." The owner's read profile is
+Full visible, so the read scope was not the cause.
+
+- **Cause.** The first freee.co.jp slide is page text over a background
+  picture: a label, a heading and three buttons (無料で始める, 資料をダウンロード,
+  製品一覧はこちら). In the mirror every element was there but every text node was
+  empty. The carousel's previous/next buttons reference the `.swiper-wrapper`
+  with `aria-controls` and carry no state, so D49 made the wrapper a readable
+  stateless controlled region; D54 (`.13`) then required the wrapper's *own*
+  box to survive its overflow-clipping ancestors. Swiper moves the track with
+  `translate3d(-1068px, …)`, so the wrapper's own 1068 px box sits entirely
+  beside the carousel window (measured: x −962 to 106, window 106 to 1174)
+  while the slides it overflows into are on screen. The paint proof failed on
+  every settled position, the wrapper stayed `withheld`, and the sanitizer
+  emptied all slide text, button labels included (text in a withheld region is
+  kept as empty strings; images and elements stay). Logged with an
+  instrumented dev build: the only withholding reason on the heading was
+  `controlled-withheld: div.swiper-wrapper`.
+- **Change.** `sourceElementBoxIsPainted` also accepts a region that does not
+  clip its own overflow when one of its element children is painted and
+  survives the same clipping path (the region itself, then its ancestors). The
+  P2 cases stay withheld: a panel collapsed with `overflow: hidden` clips its
+  children too, a faded panel fails its own paint state first, and a panel
+  clipped away by an ancestor has its children clipped with it. Children are
+  bounded by the existing paint-rect cap.
+- **Verified in Chrome.** On freee.co.jp the first slide's label, heading, both
+  small captions and all three button labels are in the mirror and translate;
+  the second text slide (`kvslide3`) has its text back too; 0 replica rebuilds
+  over 30 s. The image-only slide (an `<img>` in a `<button>`) is read by OCR
+  when it is on screen in the tab (Tesseract finds it, later passes hit the
+  cache), and evidence selection shows its alt text as a caption band because
+  the alt text already carries the same words; that is the existing D48
+  behaviour, not this bug.
+- **Tests.** `stateless-controlled-region`: a track whose own box is translated
+  left of the carousel window, with a slide inside it, is a controlled region
+  and its slide text is serialized; the same track that clips its own overflow,
+  or whose slides are all outside the window, stays withheld. The P2 test
+  (collapsed, faded, clipped-away panels) passes unchanged. The new test fails
+  on `b839470`.
+- **Docs.** `docs/replica-fidelity.md` states the child rule.
+
+Build identity `0.5.0 beta v.20260922.16`; `dist/chrome-unpacked` re-synced
+(`page-mirror.js`, manifest). Gate: `npm run check` green, **1,432 tests pass,
+1 skipped** (+1). Publishing 0.5.0 moves to **D58**.
