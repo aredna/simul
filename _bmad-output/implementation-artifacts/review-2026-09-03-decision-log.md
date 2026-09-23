@@ -3334,3 +3334,65 @@ cause it.
 Build identity `0.5.0 beta v.20260922.34`; `dist/chrome-unpacked` re-synced.
 Gate: `npm run check` green, **1,511 tests pass, 1 skipped** (+9).
 Publishing 0.5.0 moves to **D76**.
+
+### D76. What D75 still hid was not protected: author attributes, output, spinbutton text, visibility, credential boxes (2026-09-23)
+
+Same branch / PR #22. Owner question after D75: with the switch off, what
+still hides the last missing items, and do they truly need protecting? A
+probe of the `.34` replica found each cause; none guards user data. Owner
+answer: change all four, and on `data-*` and editable regions: "We don't have
+to strip editable regions unless they are tagged as private regions, such as
+a credit card number, or as a bunch of asterisks for a password. Even then,
+we should err on the side of showing something until we have a user
+complaint."
+
+- **Author attributes travel.** `aria-label`, `title` and `alt` left
+  `PRIVATE_ATTRIBUTES`: they are text the site wrote. A stylesheet's
+  `content: attr(aria-label)` draws again (untranslated), and a broken
+  image's alt text shows; the existing small-broken-control-icon rule still
+  blanks the alt of a tiny icon inside a control. `data-*` is no longer
+  stripped inside buttons, menus, private controls or editable regions; it is
+  page markup, and Radix / shadcn draw switch, checkbox and tab state from
+  `data-state`. Control state and values stay in the semantic channel.
+- **`<output>`** left the private tags: it shows a result the page computed.
+- **`slider` and `spinbutton`** became activation roles like `combobox` in
+  D75: the text they display travels; `aria-valuenow` still follows form
+  values, and an editable one is an input or contenteditable and stays
+  private.
+- **Visibility per element.** `visibility: hidden` no longer starts an
+  inherited withheld region; each element reports its own computed
+  visibility and a text node follows its parent's, so a `visibility: visible`
+  child paints (a bug, not a privacy rule). `display: none` still withholds a
+  whole subtree, and the visibility boundary index still re-reads a subtree
+  whose painted state changes.
+- **Credential inputs show their box.** A password, card-number,
+  one-time-code or other credential `<input>` is serialized as an empty input
+  carrying only `type`, `class`, `style`, `id`, `size` and a few other box
+  attributes (`CREDENTIAL_SHELL_ATTRIBUTES`); no value, placeholder, label or
+  `data-*` is read, the engine clears its value, and the page side ignores
+  later mutations to it until a fresh read, as it did for the opaque shell.
+  Other credential regions (CSS-masked text, containers marked as a
+  one-time-code area, which can hold a sign-in QR code) keep the opaque shell.
+- **Verified in Chrome for Testing.** Bank-form fixture at the defaults
+  (including the `<body>` class toggle): D75 missed T09, T10, T23, T32 and
+  T44; now only T24 remains, an unselected option a closed select does not
+  show either. Password, card and one-time-code fields appear as empty boxes;
+  one opaque shell remains, the CSS-masked text. A bank's homepage
+  unchanged from D75 (3 off-screen slide lines); Wikipedia and freee
+  dropdowns open as before. Google sign-in reads the same as `.34` (its
+  "missing" lines are the options of a closed native language select).
+- **Tests.** Updated to the new rules: author attributes and `data-*` inside
+  buttons, text inputs and editable regions travel, alt travels (small
+  broken control icons keep an empty alt), a password transition recovers as
+  an empty field and later edits are ignored, the engine still refuses a
+  control-state attribute on a patch. New: credential inputs carry only box
+  attributes and none of the canaries (value, placeholder, label and
+  `data-*` accessors throw if read) while a credential region stays opaque;
+  `<output>`, spinbutton and slider text and a visible child of a hidden
+  parent travel, the hidden siblings do not.
+- **Docs.** `docs/replica-fidelity.md` (author attributes, visibility,
+  credential inputs), `docs/translation-companion.md`, README.
+
+Build identity `0.5.0 beta v.20260922.35`; `dist/chrome-unpacked` re-synced.
+Gate: `npm run check` green, **1,513 tests pass, 1 skipped** (+2).
+Publishing 0.5.0 moves to **D77**.

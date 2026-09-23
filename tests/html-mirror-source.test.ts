@@ -797,7 +797,8 @@ describe('HtmlMirrorSourceSession', () => {
     expect(checkpointJson).not.toContain('"text":"initial"');
     expect(checkpointJson).toContain('["class","wide"]');
     expect(checkpointJson).not.toContain('private-name');
-    expect(checkpointJson).not.toContain('private-data');
+    // A text input's data attributes are page markup and travel (D76).
+    expect(checkpointJson).toContain('["data-account","private-data"]');
     fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
     const control = fixture.document.querySelector<HTMLInputElement>('#query')!;
 
@@ -823,8 +824,12 @@ describe('HtmlMirrorSourceSession', () => {
 
     fixture.port.emitMessage(createHtmlMirrorCheckpointRequest(identity, 0));
     const recoveryJson = JSON.stringify(fixture.checkpoints().at(-1));
-    expect(recoveryJson).toContain('opaquePlaceholder');
-    expect(recoveryJson).toContain('simul-opaque-region-');
+    // The credential input is drawn as its empty field (D76): only what
+    // draws the box travels.
+    expect(recoveryJson).not.toContain('opaquePlaceholder');
+    expect(recoveryJson).toContain(
+      '"tagName":"input","attributes":[["id","query"],["class","wide"],["type","password"]]',
+    );
     expect(recoveryJson).not.toContain('controlText');
     expect(recoveryJson).not.toContain('initial');
     expect(recoveryJson).not.toContain('private-name');
@@ -1204,7 +1209,7 @@ describe('HtmlMirrorSourceSession', () => {
     expect(JSON.stringify(publicPatch)).toContain('public value');
   });
 
-  it('streams activation labels and static logos without leaking descendant metadata', () => {
+  it('streams activation labels, their author attributes and static logos (D76)', () => {
     const fixture = sourceFixture(`
       <button id="primary-action" data-account="checkpoint-button-secret">
         <span id="action-label" title="checkpoint-title-secret" data-user="checkpoint-data-secret">公開資料を検索する</span>
@@ -1223,10 +1228,11 @@ describe('HtmlMirrorSourceSession', () => {
     const checkpointJson = JSON.stringify(fixture.checkpoints()[0]);
     expect(checkpointJson).toContain('公開資料を検索する');
     expect(checkpointJson).toContain('Sample Studio');
-    expect(checkpointJson).not.toContain('checkpoint-button-secret');
-    expect(checkpointJson).not.toContain('checkpoint-title-secret');
-    expect(checkpointJson).not.toContain('checkpoint-data-secret');
-    expect(checkpointJson).not.toContain('checkpoint-company-secret');
+    // `data-*` and `title` inside buttons are page markup and travel (D76).
+    expect(checkpointJson).toContain('checkpoint-button-secret');
+    expect(checkpointJson).toContain('checkpoint-title-secret');
+    expect(checkpointJson).toContain('checkpoint-data-secret');
+    expect(checkpointJson).toContain('checkpoint-company-secret');
     fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
 
     const actionLabel = fixture.document.querySelector('#action-label')!;
@@ -1253,9 +1259,9 @@ describe('HtmlMirrorSourceSession', () => {
     expect(patchJson).toContain('詳細を見る　＞');
     expect(patchJson).toContain('Example Workshop');
     expect(patchJson).toContain(SYNTHETIC_STATIC_LOGO);
-    expect(patchJson).not.toContain('patch-title-secret');
-    expect(patchJson).not.toContain('patch-data-secret');
-    expect(patchJson).not.toContain('patch-company-secret');
+    expect(patchJson).toContain('patch-title-secret');
+    expect(patchJson).toContain('patch-data-secret');
+    expect(patchJson).toContain('patch-company-secret');
   });
 
   it('keeps data srcset payloads local in live attribute patches', () => {
@@ -1764,7 +1770,9 @@ describe('HtmlMirrorSourceSession', () => {
     fixture.port.emitMessage(createHtmlMirrorCheckpointRequest(identity, 0));
     const recoveryJson = JSON.stringify(fixture.checkpoints().at(-1));
     expect(recoveryJson).not.toContain('shadow text secret');
-    expect(recoveryJson).not.toContain('shadow metadata secret');
+    // The editor's text is withheld; its elements' author attributes travel
+    // (D76).
+    expect(recoveryJson).toContain('shadow metadata secret');
   });
 
   it('reconciles an open shadow root attached after the initial checkpoint', () => {

@@ -14,7 +14,7 @@ Simul started as a quick build for the OpenAI Build Week hackathon, made as
 something we would use ourselves. We are now sharing it so others can use it
 too.
 
-Current build: **0.5.0 beta v.20260922.34** · Desktop Chrome **138+** ·
+Current build: **0.5.0 beta v.20260922.35** · Desktop Chrome **138+** ·
 Manifest V3
 
 ## What you need
@@ -48,7 +48,7 @@ Keep the folder where it is while the extension is installed. To update,
 replace the folder with the new version, then select **Reload** on the Simul
 card in `chrome://extensions`, reload the page, and reopen the companion. The
 card shows version `0.5.0`; Simul's settings show
-`Build 0.5.0 beta v.20260922.34`.
+`Build 0.5.0 beta v.20260922.35`.
 
 This is an unpacked beta, not a Chrome Web Store release, so Chrome does not
 update it automatically.
@@ -168,8 +168,9 @@ personal/autofill values, and editable text.
 
 Passwords, authentication and one-time-code fields, WebAuthn and payment-card
 autocomplete classes, hidden inputs, file names, and CSS-masked text are
-blocked under every profile. A file input shows as the empty control the page
-draws. A node classified as secret remains secret for that document. Narrowing
+blocked under every profile. File, password, card and one-time-code inputs
+show as the empty fields the page draws, without their values. A node
+classified as secret remains secret for that document. Narrowing
 the scope clears the current replica, translations, and image overlays before
 rebuilding.
 

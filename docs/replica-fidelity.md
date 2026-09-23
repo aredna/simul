@@ -150,8 +150,10 @@ validated dropdown, such as an Ant Design sidebar, showed empty items). A
 collapsed one is withheld until painted like any hidden region, and a
 validated dropdown's items travel through the semantic channel. The text of
 checkbox, radio, switch and non-editable combobox roles is their label or
-current choice, like a button's label, and travels too (D75); their checked
-state still follows **Ordinary visible form values**. A shared typed semantic
+current choice, like a button's label, and travels too (D75), as does the
+displayed value of a non-editable spinbutton or slider and the result an
+`<output>` shows (D76); their checked state and `aria-valuenow` still follow
+**Ordinary visible form values**. A shared typed semantic
 proof channel enables a local preview in the isolated replica only when a
 public activation trigger maps through one unique same-document
 `aria-controls` relation to a matching menu/listbox, or to a region containing
@@ -171,6 +173,19 @@ trigger, but is never drawn as extra text: the source page does not paint it
 beside the control. Because nothing shows it, a hidden accessible name is not
 translated (D67); option labels and a select's current choice are, since the
 dropdown facsimile draws them.
+
+Author-written attributes are page markup and travel with their elements
+(D76): `aria-label`, `title` and `alt` (so a stylesheet's `content: attr(...)`
+and a broken image's alt text show, untranslated), and `data-*` everywhere,
+including inside buttons, menus, text inputs and editable regions (component
+libraries such as Radix and shadcn/ui draw a switch's position, a checkbox's
+tick and the selected tab from `data-state`). Control state (`checked`,
+`selected`, `disabled`, `aria-checked`, `aria-selected`, `aria-pressed`,
+`aria-current`, `aria-valuenow`), values and placeholders still come only
+from the semantic channel under the read scope. Visibility is decided per
+element: a `visibility: visible` child of a `visibility: hidden` parent is
+painted and its text travels (D76), while `display: none` still withholds a
+whole subtree.
 
 ### Static SVG
 
@@ -202,7 +217,12 @@ Both selectable policies continue to block:
 - passwords, password/authentication autocomplete, one-time codes, WebAuthn,
   every `cc-*` autocomplete class, hidden inputs, file names and paths, and
   CSS text-security content regardless of the selected readable-content
-  profile. A file input is drawn as the empty control the page shows (D75).
+  profile. A file input is drawn as the empty control the page shows (D75),
+  and so is a credential input (D76): a password, card-number or
+  one-time-code field keeps its box (`type`, `class`, `style`, `id`, `size`
+  and the like) and never its value, placeholder, labels or `data-*`. Any
+  other credential region, such as CSS-masked text or a container marked as a
+  one-time-code area, is still replaced by an empty opaque shell.
   A node that was a credential stays one for the page's lifetime; only
   explicit evidence counts (an old password type, credential autocomplete or
   inline text-security). Until D75 a class or style that changed twice in one

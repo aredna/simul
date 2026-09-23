@@ -150,8 +150,9 @@ Password fields, CSS text-security fields, hidden inputs, file names and
 paths, password/authentication/one-time-code/WebAuthn autocomplete, and every
 `cc-*` autocomplete token are a floor no read scope lifts; only the Advanced
 **Show everything (testing)** switch does (D75, see
-[Replica fidelity](replica-fidelity.md)). A file input is drawn as the empty
-control the page shows. Classification occurs before
+[Replica fidelity](replica-fidelity.md)). A file input and a credential input
+are drawn as the empty field the page shows (D75, D76); their values never
+travel. Classification occurs before
 reading; once a node is classified as a secret it remains secret for the
 document lifetime. A narrower live setting clears source-derived replica,
 translation, and image state before the new preference is saved. Reset commits

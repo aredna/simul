@@ -1600,6 +1600,11 @@ export class HtmlMirrorSourceSession {
     targets.add(target);
   }
 
+  #secretClassifier(): StickySourceSecretClassifier {
+    return this.environment.secretClassifier ??
+      sourceDocumentSecretClassifier(this.environment.document);
+  }
+
   #markMirroredGraph(node: import('./html-mirror-sanitizer').HtmlMirrorNode): void {
     const source = this.environment.registry.getNode(node.id);
     if (source) {
@@ -1611,7 +1616,14 @@ export class HtmlMirrorSourceSession {
           : emittedElementSignature(node),
       );
       if (source instanceof Element) {
-        if (node.kind === 'element' && node.opaquePlaceholder === true) {
+        // A credential input is mirrored as an empty field (D76) and, like
+        // an opaque shell, is refreshed only by a fresh structural read.
+        if (
+          node.kind === 'element' && (
+            node.opaquePlaceholder === true ||
+            (node.tagName === 'input' && this.#secretClassifier().isSecret(source))
+          )
+        ) {
           this.#mirroredOpaqueSecrets.add(source);
         }
         this.#registerShadowHostCandidate(source);

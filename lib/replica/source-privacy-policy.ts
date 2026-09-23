@@ -5,10 +5,13 @@ import {
 } from './source-secret-classifier';
 import { SOURCE_PRIVACY_FILTERS_OFF } from './source-privacy-mode';
 
+/**
+ * Native elements whose text is a value the user typed or chose. `output`
+ * shows a result the page calculated and is page text (D76).
+ */
 export const SOURCE_PRIVATE_TAGS = Object.freeze([
   'input',
   'option',
-  'output',
   'textarea',
 ] as const);
 
@@ -55,16 +58,15 @@ export interface SourceControlText {
 }
 
 /**
- * Roles whose content is what the user entered or chose. A checkbox, radio or
- * switch shows its label, which is page text, and a combobox that is not an
- * editable input shows its current choice the way a button shows its label;
- * those are activation roles (D75). An editable combobox is an input or a
- * contenteditable region and stays private through those.
+ * Roles whose content is text the user is editing. A checkbox, radio or
+ * switch shows its label, which is page text, and a combobox, slider or
+ * spinbutton that is not an editable input shows its current choice or value
+ * the way a button shows its label; those are activation roles (D75, D76).
+ * An editable combobox or spinbutton is an input or a contenteditable region
+ * and stays private through those.
  */
 export const SOURCE_PRIVATE_ROLES = Object.freeze([
   'searchbox',
-  'slider',
-  'spinbutton',
   'textbox',
 ] as const);
 
@@ -91,6 +93,8 @@ export const SOURCE_ACTIVATION_ROLES = Object.freeze([
   'menuitemcheckbox',
   'menuitemradio',
   'radio',
+  'slider',
+  'spinbutton',
   'switch',
   'tab',
   'treeitem',

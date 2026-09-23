@@ -1,20 +1,21 @@
 # Handover: mirror limits, quirks mode, new defaults (2026-09-23, second session)
 
 Chains from `handover-2026-09-23-session-close.md`, whose work list this
-session worked through. Decision-log entries **D63**–**D75** hold the reasoning
+session worked through. Decision-log entries **D63**–**D76** hold the reasoning
 and measurements; this file is the summary and the next steps. D73–D74 came
 from a third session the same day (owner reports on the side panel and on
-image overlays), and D75 from a fourth (owner report on a signed-in banking form).
+image overlays), and D75–D76 from a fourth (owner report on a signed-in banking form
+and the follow-up on what D75 still hid).
 
 ## Where things stand
 
 | Item | State |
 | --- | --- |
-| Branch / PR | `feat/ui-string-catalogue`, PR #22, **open**, head at the D75 commit. Description covers D40–D75. |
-| Version / identity | `0.5.0` / `0.5.0 beta v.20260922.34` (next is `.35`; `npm run bump-build`). |
-| Gate | `npm run check` green at D75: **1,511 tests pass, 1 skipped**; `dist/chrome-unpacked` byte-verified. |
-| NAS | `Dev/simul/` mirrors head; the owner loads `Dev/simul/dist/chrome-unpacked` (`Build 0.5.0 beta v.20260922.34`). |
-| `main` / release | Only `v0.4.0` released. Publishing 0.5.0 is **D76**, only when the owner says so; do not ask. |
+| Branch / PR | `feat/ui-string-catalogue`, PR #22, **open**, head at the D76 commit. Description covers D40–D76. |
+| Version / identity | `0.5.0` / `0.5.0 beta v.20260922.35` (next is `.36`; `npm run bump-build`). |
+| Gate | `npm run check` green at D76: **1,513 tests pass, 1 skipped**; `dist/chrome-unpacked` byte-verified. |
+| NAS | `Dev/simul/` mirrors head; the owner loads `Dev/simul/dist/chrome-unpacked` (`Build 0.5.0 beta v.20260922.35`). |
+| `main` / release | Only `v0.4.0` released. Publishing 0.5.0 is **D77**, only when the owner says so; do not ask. |
 
 ## Owner rulings this session
 
@@ -48,6 +49,13 @@ image overlays), and D75 from a fourth (owner report on a signed-in banking form
   that lets me disable all privacy for testing purposes? Please go ahead and
   make any other fixes you think might be causing us to filter those out."
   Done: **Show everything (testing)** in Advanced, plus eight default fixes.
+- **Owner ruling (D76):** the items D75 still hid were not protected data;
+  change all four. "We don't have to strip editable regions unless they are
+  tagged as private regions, such as a credit card number, or as a bunch of
+  asterisks for a password. Even then, we should err on the side of showing
+  something until we have a user complaint." Done: author attributes and
+  `data-*` travel, `<output>` / spinbutton / slider text shows, visibility is
+  decided per element, and credential inputs show as empty boxes.
 
 ## What shipped (all verified in Chrome for Testing unless noted)
 
@@ -66,6 +74,7 @@ image overlays), and D75 from a fourth (owner report on a signed-in banking form
 | `.32` | D73 | The side panel honours Follow / Pinned (default Follow): it follows the active tab of its own window, the button is clickable there, and Pinned keeps the tab it shows. Settings reads "Mirror follows". Verified with the real side panel (CDP `Extensions.triggerAction`). |
 | `.33` | D74 | Image translations are `simul-image-overlay` elements right after each image with no z-index, so pop-ups cover them and backdrops dim them; closed shadow root, inline `!important` reset, positioned by measuring its containing block (transforms, scale, nested scrollers), sized to the visible part, re-inserted after mirror rewrites. Painted logo labels drop their z-index. |
 | `.34` | D75 | **Show everything (testing)** (Advanced, off by default) turns every privacy filter off on both sides of the mirror (start-message field, `source-privacy-mode.ts`); typed passwords never travel, and three disclosure attributes stay replica-owned. Default fixes: no more "class changed twice" masking secrets (a `<body>` toggle blanked whole pages); file inputs drawn; checkbox / radio / switch / select-only combobox labels public; painted ARIA menus keep their text; `open` kept on details and dialog; painted controlled regions shown whatever their controllers' state (a bank homepage's hero slides); date and time values read as form values; an OCR queue restart loop that overflowed the stack after a purge. Verified on a bank-form fixture, a bank homepage, Wikipedia and freee. |
+| `.35` | D76 | `aria-label`, `title`, `alt` and `data-*` travel (everywhere except inside a credential input); `<output>`, spinbutton and slider text show; a `visibility: visible` child of a hidden parent shows; password, card and one-time-code inputs are drawn as empty boxes (box attributes only, no value). The bank-form fixture now misses nothing the page shows at the defaults; CSS-masked text is the last opaque shell. |
 
 ## Found, not fixed (candidates, in rough order of value)
 
@@ -96,11 +105,11 @@ image overlays), and D75 from a fourth (owner report on a signed-in banking form
 6. **Review R4 remainder:** "Mirror follows" in Settings now fully duplicates
    the toolbar's Follow / Pinned button on both surfaces; a simplification
    candidate to bring to the owner.
-7. **Still withheld at the defaults after D75** (Show everything shows them):
-   labels a stylesheet draws from `data-*` or `aria-label` (`content:
-   attr(...)`), `<output>`, spinbutton and slider text, a `visibility:
-   visible` child inside a `visibility: hidden` parent. Each needs a small
-   rule change; bring them to the owner if a report points at one.
+7. **Credential fields show no dots** (after D76): a password or card field
+   is an empty box, and CSS-masked text (`-webkit-text-security`) is still an
+   opaque shell, where the page draws dots. Drawing the same number of dots
+   would reveal only the length the page shows; do it if the owner reports
+   it (the owner's rule: show something until a user complains).
 8. **The ARIA menu facsimile drops page styles** (D75 finding): every painted
    `role="menu"` / `listbox` is moved into an isolated shadow root, so a
    static menu (an Ant Design sidebar) now shows its text but unstyled.
