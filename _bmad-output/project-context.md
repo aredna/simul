@@ -68,10 +68,11 @@ non-secret personal/autofill values, and editable content. Page-only, Standard,
 Full-visible, and derived Custom profiles are conveniences over those booleans;
 missing, malformed, or outdated setup stays Page-only until the user commits a
 choice. Passwords, password/authentication autocomplete, one-time codes, every
-`cc-*` autocomplete class, hidden/file inputs, file paths, and CSS
+`cc-*` autocomplete class, hidden inputs, file names and paths, and CSS
 text-security fields remain unreadable under every profile, with classification
 performed before value/text/image access and kept sticky for the document
-lifetime. Optional values, selected/checked state, editable text, and
+lifetime; only the Advanced "Show everything (testing)" switch (D75, off by
+default) lifts the privacy filters, and a typed password never travels. Optional values, selected/checked state, editable text, and
 disclosure payloads travel only through one bounded exact-document semantic
 supplement; base source-secret and editable-content classification never
 relaxes. Replica action capability is never configurable: scripts,

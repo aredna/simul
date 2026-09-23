@@ -162,6 +162,9 @@ const mirrorLimitInputs = {
 const restoreMirrorLimitsButton = requireElement<HTMLButtonElement>(
   '#restore-mirror-limits',
 );
+const mirrorShowEverythingInput = requireElement<HTMLInputElement>(
+  '#mirror-show-everything',
+);
 const launchBehaviorSelect = requireElement<HTMLSelectElement>('#launch-behavior');
 const popoutTabModeSelect = requireElement<HTMLSelectElement>('#popout-tab-mode');
 const syncScrollInput = requireElement<HTMLInputElement>('#sync-scroll');
@@ -271,6 +274,7 @@ const isolatedHtmlReplicaEngine = new IsolatedHtmlReplicaEngine({
   openStream: openChromeHtmlMirrorStream,
   getReplicaFidelityPolicy: () => state.preferences.replicaFidelityPolicy,
   getMirrorLimits: () => state.preferences.mirrorLimits,
+  getShowEverything: () => state.preferences.mirrorShowEverything,
   openSemanticStream: openChromeSemanticSource,
   getReplicaReadScope: () => readScopeController.currentReplicaReadScope(),
   onLayoutChanged: () => imageTranslationController.refreshOverlays(),
@@ -935,6 +939,10 @@ restoreMirrorLimitsButton.addEventListener('click', () => {
   void changeMirrorLimits(DEFAULT_HTML_MIRROR_LIMIT_SETTINGS);
 });
 
+mirrorShowEverythingInput.addEventListener('change', () => {
+  void changeMirrorShowEverything(mirrorShowEverythingInput.checked);
+});
+
 replicaViewModeSelect.addEventListener('change', () => {
   const replicaViewMode: ReplicaViewMode =
     isReplicaViewMode(replicaViewModeSelect.value)
@@ -1098,6 +1106,11 @@ browser.storage.onChanged.addListener((changes, areaName) => {
   }
   if (previous.replicaViewMode !== state.preferences.replicaViewMode) {
     translationDriver.applyReplicaViewMode(previous.replicaViewMode);
+  }
+  if (
+    previous.mirrorShowEverything !== state.preferences.mirrorShowEverything
+  ) {
+    rebuildAfterShowEverythingChange();
   }
   syncPreferenceControls();
   updateMirrorLayout();
@@ -1367,6 +1380,30 @@ async function changeMirrorLimits(
   }
 }
 
+/**
+ * "Show everything (testing)" changes what the mirror may read, like a read
+ * scope (D75): the translations made under the old setting are dropped and
+ * both sides of the next mirror take the switch from its start.
+ */
+async function changeMirrorShowEverything(
+  mirrorShowEverything: boolean,
+): Promise<void> {
+  if (mirrorShowEverything === state.preferences.mirrorShowEverything) return;
+  const saved = await preferenceClient.commitView({ mirrorShowEverything });
+  syncPreferenceControls();
+  if (
+    !saved ||
+    state.preferences.mirrorShowEverything !== mirrorShowEverything
+  ) return;
+  rebuildAfterShowEverythingChange();
+}
+
+function rebuildAfterShowEverythingChange(): void {
+  purgeSourceDerivedRuntime(UI_STRINGS.statusReadablePolicyRebuilding);
+  isolatedReplicaFailureRecoveryGate.reset();
+  restartReplicaAfterReadPolicyChange();
+}
+
 function sameMirrorLimits(
   left: HtmlMirrorLimitSettings,
   right: HtmlMirrorLimitSettings,
@@ -1406,6 +1443,7 @@ function syncPreferenceControls(): void {
   for (const key of Object.keys(mirrorLimitInputs) as HtmlMirrorLimitKey[]) {
     mirrorLimitInputs[key].value = String(state.preferences.mirrorLimits[key]);
   }
+  mirrorShowEverythingInput.checked = state.preferences.mirrorShowEverything;
   replicaViewModeSelect.value = state.preferences.replicaViewMode;
   launchBehaviorSelect.value = state.preferences.launchBehavior;
   popoutTabModeSelect.value = state.preferences.popoutTabMode;
@@ -1566,6 +1604,7 @@ function updateControls(): void {
     input.disabled = busy || state.mirrorLimitsCommitInFlight;
   }
   restoreMirrorLimitsButton.disabled = busy || state.mirrorLimitsCommitInFlight;
+  mirrorShowEverythingInput.disabled = busy;
   launchBehaviorSelect.disabled = busy;
   popoutTabModeSelect.disabled = busy;
   syncScrollInput.disabled = busy;

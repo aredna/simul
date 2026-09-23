@@ -301,7 +301,9 @@ describe('transient class boundaries', () => {
     expect(hasSourceCredentialSecretAncestor(slide.querySelector('img')!, classifier, sourceWindow)).toBe(false);
   });
 
-  it('still fails closed for a region holding a value-bearing control', () => {
+  it('does not turn a region holding a value-bearing control into a credential either (D75)', () => {
+    // Frameworks set two classes on a form row on focus and input, and on
+    // <body> when a dialog opens; the rule hid whole rows or pages.
     for (const control of [
       '<input type="text">',
       '<textarea></textarea>',
@@ -316,20 +318,24 @@ describe('transient class boundaries', () => {
       const region = document.querySelector('#region')!;
       const classifier = new StickySourceSecretClassifier();
       rememberSourceMutationSecrets(twoClassRecords(region), sourceWindow, classifier);
-      expect(hasSourceCredentialSecretAncestor(region, classifier, sourceWindow), control).toBe(true);
+      expect(hasSourceCredentialSecretAncestor(region, classifier, sourceWindow), control).toBe(false);
     }
   });
 
-  it('still fails closed when the flipping element itself becomes a value control', () => {
+  it('still remembers explicit masking evidence', () => {
     const { document } = parseHTML(
-      '<html><body><div id="field" class="masked" role="button">4111</div></body></html>',
+      '<html><body><div id="field" class="masked" role="textbox">4111</div>' +
+      '<input id="shown" type="text"></body></html>',
     );
     const field = document.querySelector('#field')!;
+    const shown = document.querySelector('#shown')!;
     const classifier = new StickySourceSecretClassifier();
     rememberSourceMutationSecrets([
       ...twoClassRecords(field),
-      attributeRecord(field, 'role', 'textbox'),
+      attributeRecord(field, 'style', '-webkit-text-security: disc'),
+      attributeRecord(shown, 'type', 'password'),
     ], sourceWindow, classifier);
     expect(hasSourceCredentialSecretAncestor(field, classifier, sourceWindow)).toBe(true);
+    expect(hasSourceCredentialSecretAncestor(shown, classifier, sourceWindow)).toBe(true);
   });
 });

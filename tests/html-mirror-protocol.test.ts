@@ -1,5 +1,5 @@
 import { parseHTML } from 'linkedom';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   HTML_MIRROR_PROTOCOL_VERSION,
@@ -42,6 +42,7 @@ import {
   createSourceControlledContentPolicy,
   sourceControlledContentIsWithheld,
 } from '../lib/replica/source-privacy-policy';
+import { applySourcePrivacyFiltersOff } from '../lib/replica/source-privacy-mode';
 
 describe('isolated HTML sanitizer and protocol', () => {
   beforeEach(() => {
@@ -52,6 +53,7 @@ describe('isolated HTML sanitizer and protocol', () => {
       Text: window.Text,
     });
   });
+  afterEach(() => applySourcePrivacyFiltersOff(false));
 
   it('binds one selectable fidelity policy to the start handshake', () => {
     expect(HTML_MIRROR_PROTOCOL_VERSION).toBe(2);
@@ -139,6 +141,110 @@ describe('isolated HTML sanitizer and protocol', () => {
       identity,
       limits,
     }, identity.sessionId, identity)).toBeUndefined();
+  });
+
+  it('carries the Show everything switch in the start handshake (D75)', () => {
+    const identity = createReplicaIdentity({
+      sessionId: 'everything-session', pageEpoch: 1, generation: 1,
+      documentId: 'everything-document', frameId: 0, sequence: 0,
+    });
+    const start = createHtmlMirrorStart(
+      identity,
+      'passive',
+      DEFAULT_HTML_MIRROR_LIMIT_SETTINGS,
+      true,
+    );
+    expect(readHtmlMirrorControllerMessage(start, identity.sessionId, identity))
+      .toMatchObject({ showEverything: true });
+    // An older panel sends no switch and keeps every filter.
+    expect(readHtmlMirrorControllerMessage({
+      protocolVersion: start.protocolVersion,
+      kind: 'simul:html-mirror-v2:start',
+      identity,
+      fidelityPolicy: 'passive',
+    }, identity.sessionId, identity)).toMatchObject({ showEverything: false });
+    expect(readHtmlMirrorControllerMessage(
+      { ...start, showEverything: 'yes' },
+      identity.sessionId,
+      identity,
+    )).toBeUndefined();
+    expect(readHtmlMirrorControllerMessage({
+      protocolVersion: start.protocolVersion,
+      kind: 'simul:html-mirror-v2:ack',
+      identity,
+      showEverything: true,
+    }, identity.sessionId, identity)).toBeUndefined();
+  });
+
+  it('draws file inputs, choice labels and open disclosures (D75)', () => {
+    const graph = sanitizeMarkup(`<!doctype html><html><body>
+      <input id="upload" type="file">
+      <div role="radio" aria-checked="true">Radio label</div>
+      <span role="checkbox">Checkbox label</span>
+      <button role="switch">Switch label</button>
+      <div role="combobox">Combobox choice</div>
+      <input role="combobox" value="Typed combobox value">
+      <details open><summary>Summary</summary>Details body</details>
+      <dialog open>Dialog body</dialog>
+    </body></html>`, 'passive');
+    const serialized = JSON.stringify(graph);
+
+    expect(graphOpaquePlaceholders(graph)).toEqual([]);
+    expect(graphElementsByTag(graph, 'input').map(
+      (input) => Object.fromEntries(input.attributes).type,
+    )).toContain('file');
+    for (const label of [
+      'Radio label', 'Checkbox label', 'Switch label', 'Combobox choice',
+      'Details body', 'Dialog body',
+    ]) expect(serialized, label).toContain(label);
+    // Choice state and an editable combobox's value still wait for the
+    // semantic channel.
+    expect(serialized).not.toContain('aria-checked');
+    expect(serialized).not.toContain('Typed combobox value');
+    for (const tagName of ['details', 'dialog']) {
+      expect(graphElementsByTag(graph, tagName)[0]?.attributes, tagName)
+        .toContainEqual(['open', '']);
+    }
+    expect(readHtmlMirrorNode(graph.root, new Set(), 0, undefined, false,
+      false, false, false, false, 'passive')).toBeDefined();
+  });
+
+  it('copies everything while Show everything is on (D75)', () => {
+    applySourcePrivacyFiltersOff(true);
+    const graph = sanitizeMarkup(`<!doctype html><html><body>
+      <input type="password" value="authored-password-attribute">
+      <input type="text" autocomplete="cc-number" value="card attribute">
+      <span style="-webkit-text-security:disc">Masked text</span>
+      <div role="textbox">Typed draft</div>
+      <div hidden>Hidden text</div>
+      <button aria-expanded="true" aria-controls="panel" aria-haspopup="menu"
+        data-label="Data label" aria-label="Aria label">Open</button>
+      <div id="panel">Controlled panel</div>
+      <input type="text" value="Value attribute" placeholder="Placeholder attribute">
+      <ul role="menu"><li role="menuitem"><img src="https://example.test/icon.png">Menu item</li></ul>
+      <output>Output text</output>
+    </body></html>`, 'passive');
+    const serialized = JSON.stringify(graph);
+
+    expect(graphOpaquePlaceholders(graph)).toEqual([]);
+    for (const text of [
+      'authored-password-attribute', 'card attribute', 'Masked text',
+      'Typed draft', 'Hidden text', 'Data label', 'Aria label',
+      'Controlled panel', 'Value attribute', 'Placeholder attribute',
+      'Menu item', 'icon.png', 'Output text',
+    ]) expect(serialized, text).toContain(text);
+    // The replica's own dropdown previews own these three.
+    const button = graphElementsByTag(graph, 'button')[0]!;
+    for (const name of ['aria-expanded', 'aria-controls', 'aria-haspopup']) {
+      expect(button.attributes.map(([attribute]) => attribute), name)
+        .not.toContain(name);
+    }
+    expect(readHtmlMirrorNode(graph.root, new Set(), 0, undefined, false,
+      false, false, false, false, 'passive')).toBeDefined();
+    // With the switch off again the receiver refuses the unfiltered graph.
+    applySourcePrivacyFiltersOff(false);
+    expect(readHtmlMirrorNode(graph.root, new Set(), 0, undefined, false,
+      false, false, false, false, 'passive')).toBeUndefined();
   });
 
   it('accepts only bounded exact-document scroll updates', () => {
@@ -283,7 +389,7 @@ describe('isolated HTML sanitizer and protocol', () => {
     ))).not.toContain('secret');
   });
 
-  it('base-reads only the uniquely selected painted tab panel', () => {
+  it('base-reads painted tab and disclosure panels, never hidden ones (D75)', () => {
     const { document, window } = parseHTML(`<!doctype html><html><body>
       <div role="tab" aria-selected="true" aria-expanded="true"
         aria-controls="active-panel">Active tab</div>
@@ -325,7 +431,8 @@ describe('isolated HTML sanitizer and protocol', () => {
     expect(serialized).not.toContain('credential-canary');
     expect(serialized).not.toContain('Inactive headline');
     expect(serialized).not.toContain('Contradictory headline');
-    expect(serialized).not.toContain('Popup payload');
+    // An open disclosure panel the page paints is page content (D75).
+    expect(serialized).toContain('Popup payload');
   });
 
   it('reuses a caller-provided controlled-content policy for image hints', () => {
@@ -366,7 +473,7 @@ describe('isolated HTML sanitizer and protocol', () => {
       .toBe('https://example.test/photo-2x.png');
   });
 
-  it('withholds every panel of a tablist whose tabs both claim selection', () => {
+  it('reads both painted panels of a tablist whose tabs both claim selection (D75)', () => {
     const { document, window } = parseHTML(`<!doctype html><html><body>
       <div role="tablist">
         <div role="tab" aria-selected="true" aria-controls="first-panel">First</div>
@@ -389,13 +496,13 @@ describe('isolated HTML sanitizer and protocol', () => {
       new WeakNodeIdRegistry(),
     ));
 
-    // Each contradictory pair proves on its own; the tablist as a whole
-    // cannot have two selected panels, so neither is admitted. The sound
-    // tablist next to it is unaffected.
+    // The tablist cannot have two selected panels, so neither is a proven
+    // open tab; both are painted, so both are page content (D75). A hidden
+    // panel stays withheld.
     expect(serialized).toContain('Sound headline');
     expect(serialized).not.toContain('Closed headline');
-    expect(serialized).not.toContain('First contradictory headline');
-    expect(serialized).not.toContain('Second contradictory headline');
+    expect(serialized).toContain('First contradictory headline');
+    expect(serialized).toContain('Second contradictory headline');
   });
 
   it('proves a selected panel through an overflow clip by the padding box, not the border box', () => {
@@ -439,7 +546,7 @@ describe('isolated HTML sanitizer and protocol', () => {
     expect(serialize()).toContain('Clipped headline');
   });
 
-  it('fails duplicate and cross-root controls closed without blanking ordinary text', () => {
+  it('reads painted duplicate and cross-root controlled panels (D75)', () => {
     const { document, window } = parseHTML(`<!doctype html><html><body>
       <p>Ordinary page text</p>
       <div role="tab" aria-selected="true" aria-controls="duplicate">Tab</div>
@@ -461,9 +568,10 @@ describe('isolated HTML sanitizer and protocol', () => {
     );
     const serialized = JSON.stringify(graph);
     expect(serialized).toContain('Ordinary page text');
-    expect(serialized).not.toContain('Duplicate one');
-    expect(serialized).not.toContain('Duplicate two');
-    expect(serialized).not.toContain('Cross root');
+    // No unique tab relation proves them, but the page paints them.
+    expect(serialized).toContain('Duplicate one');
+    expect(serialized).toContain('Duplicate two');
+    expect(serialized).toContain('Cross root');
   });
 
   it('indexes valid controlled IDs longer than legacy transport limits', () => {
@@ -496,7 +604,7 @@ describe('isolated HTML sanitizer and protocol', () => {
     expect(JSON.stringify(graph)).toContain('Long ID panel headline');
   });
 
-  it('resolves but never opens malformed control-character IDREF targets', () => {
+  it('never proves a tab through a malformed IDREF, but reads its painted panel (D75)', () => {
     const { document, window } = parseHTML(
       '<!doctype html><html><body><p>Ordinary page text</p></body></html>',
     );
@@ -516,14 +624,15 @@ describe('isolated HTML sanitizer and protocol', () => {
       document,
       window as unknown as Window,
     );
-    expect(policy.targets.get(panel)).toBe('withheld');
+    expect(policy.targets.get(panel)).toBe('controlled-region');
+    expect(policy.tabs).toEqual([]);
     const serialized = JSON.stringify(sanitizeSourceDocument(
       document,
       window as unknown as Window,
       new WeakNodeIdRegistry(),
     ));
     expect(serialized).toContain('Ordinary page text');
-    expect(serialized).not.toContain('Malformed ID panel leak');
+    expect(serialized).toContain('Malformed ID panel leak');
   });
 
   it('fails an unindexable controlled ID closed locally', () => {
@@ -709,7 +818,7 @@ describe('isolated HTML sanitizer and protocol', () => {
       .toBeUndefined();
     expect(readHtmlMirrorNode({
       kind: 'element', id: 908, namespace: 'html', tagName: 'select',
-      attributes: [['role', 'combobox']], children: [{
+      attributes: [['role', 'textbox']], children: [{
         kind: 'element', id: 909, namespace: 'html', tagName: 'img',
         attributes: [['src', 'https://leak.invalid/private-select.png']],
         children: [],
@@ -718,7 +827,7 @@ describe('isolated HTML sanitizer and protocol', () => {
       .toBeUndefined();
   });
 
-  it('keeps public menu payload out of the base graph', () => {
+  it('keeps public menu resources out of the base graph but not its labels (D75)', () => {
     const graph = sanitizeMarkup(`<!doctype html><html><body>
       <section role="listbox">
         <div role="option">
@@ -731,7 +840,11 @@ describe('isolated HTML sanitizer and protocol', () => {
     </body></html>`, 'passive');
     const serialized = JSON.stringify(graph);
 
-    expect(serialized).not.toContain('Public menu choice');
+    // A painted menu shows its labels, so they travel and are translatable.
+    expect(serialized).toContain('Public menu choice');
+    expect(graphTextNodes(graph.root).find(
+      (node) => node.text === 'Public menu choice',
+    )?.translatable).toBe(true);
     expect(serialized).not.toContain('leak.invalid');
     expect(graphElementsByTag(graph, 'video')).toEqual([]);
     expect(readHtmlMirrorNode(graph.root, new Set(), 0, undefined, false,
@@ -827,10 +940,16 @@ describe('isolated HTML sanitizer and protocol', () => {
       ...node,
       attributes: [['size', '1001']],
     })).toBeUndefined();
+    // A private role on a select travels as its canonical `textbox` (D75:
+    // `combobox` is now an activation role, canonical `button`).
+    expect(readHtmlMirrorNode({
+      ...node,
+      attributes: [['role', 'textbox']],
+    })).toBeDefined();
     expect(readHtmlMirrorNode({
       ...node,
       attributes: [['role', 'combobox']],
-    })).toBeDefined();
+    })).toBeUndefined();
     expect(readHtmlMirrorNode({
       ...node,
       selectedOptionIndexes: [],
@@ -2174,7 +2293,9 @@ describe('isolated HTML sanitizer and protocol', () => {
 
     expect(serialized).toContain('public activation fallback');
     expect(serialized).not.toContain('private input fallback');
-    expect(serialized).not.toContain('public menu fallback');
+    // A painted menu's labels travel (D75); the private token still wins
+    // when it comes first.
+    expect(serialized).toContain('public menu fallback');
     expect(serialized).not.toContain('private menu fallback');
     expect(readHtmlMirrorNode(graph?.root)).toBeDefined();
   });
@@ -3465,6 +3586,22 @@ function graphElementsByTag(
     for (const child of current.shadowRoot?.children ?? []) {
       if (child.kind === 'element') pending.push(child);
     }
+  }
+  return matches;
+}
+
+function graphTextNodes(
+  root: HtmlMirrorElementNode,
+): Extract<HtmlMirrorNode, { kind: 'text' }>[] {
+  const matches: Extract<HtmlMirrorNode, { kind: 'text' }>[] = [];
+  const pending: HtmlMirrorNode[] = [root];
+  while (pending.length > 0) {
+    const current = pending.shift()!;
+    if (current.kind === 'text') {
+      matches.push(current);
+      continue;
+    }
+    pending.push(...current.children, ...(current.shadowRoot?.children ?? []));
   }
   return matches;
 }

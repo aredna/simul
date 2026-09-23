@@ -1410,7 +1410,9 @@ describe('image source capture safety', () => {
     for (const markup of [
       '<input id="overlap" autocomplete="cc-number">',
       '<input id="overlap" type="text" autocomplete="one-time-code">',
-      '<input id="overlap" type="file">',
+      // A file input is an ordinary control since D75; a password field is
+      // still a credential.
+      '<input id="overlap" type="password">',
     ]) {
       const { document } = parseHTML(
         `<html><body><img id="image">${markup}</body></html>`,

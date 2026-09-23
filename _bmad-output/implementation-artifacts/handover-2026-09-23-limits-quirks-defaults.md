@@ -1,20 +1,20 @@
 # Handover: mirror limits, quirks mode, new defaults (2026-09-23, second session)
 
 Chains from `handover-2026-09-23-session-close.md`, whose work list this
-session worked through. Decision-log entries **D63**–**D74** hold the reasoning
+session worked through. Decision-log entries **D63**–**D75** hold the reasoning
 and measurements; this file is the summary and the next steps. D73–D74 came
 from a third session the same day (owner reports on the side panel and on
-image overlays).
+image overlays), and D75 from a fourth (owner report on a signed-in banking form).
 
 ## Where things stand
 
 | Item | State |
 | --- | --- |
-| Branch / PR | `feat/ui-string-catalogue`, PR #22, **open**, head at the D74 commit plus this file. Description covers D40–D74. |
-| Version / identity | `0.5.0` / `0.5.0 beta v.20260922.33` (next is `.34`; `npm run bump-build`). |
-| Gate | `npm run check` green at D74: **1,502 tests pass, 1 skipped**; `dist/chrome-unpacked` byte-verified. |
-| NAS | `Dev/simul/` mirrors head; the owner loads `Dev/simul/dist/chrome-unpacked` (`Build 0.5.0 beta v.20260922.33`). |
-| `main` / release | Only `v0.4.0` released. Publishing 0.5.0 is **D75**, only when the owner says so; do not ask. |
+| Branch / PR | `feat/ui-string-catalogue`, PR #22, **open**, head at the D75 commit. Description covers D40–D75. |
+| Version / identity | `0.5.0` / `0.5.0 beta v.20260922.34` (next is `.35`; `npm run bump-build`). |
+| Gate | `npm run check` green at D75: **1,511 tests pass, 1 skipped**; `dist/chrome-unpacked` byte-verified. |
+| NAS | `Dev/simul/` mirrors head; the owner loads `Dev/simul/dist/chrome-unpacked` (`Build 0.5.0 beta v.20260922.34`). |
+| `main` / release | Only `v0.4.0` released. Publishing 0.5.0 is **D76**, only when the owner says so; do not ask. |
 
 ## Owner rulings this session
 
@@ -42,6 +42,12 @@ image overlays).
 - **Owner report (D74):** a page's pop-up covered its images, but image
   translations were drawn above it. Owner's pick: put each translation inside
   the page right after its image ("A"), not a top layer that hides parts.
+- **Owner report (D75):** on a signed-in banking form, with every read
+  setting allowed, an upload button, the website-link information and many
+  clickable items were blank (all text). "Could we have an advanced setting
+  that lets me disable all privacy for testing purposes? Please go ahead and
+  make any other fixes you think might be causing us to filter those out."
+  Done: **Show everything (testing)** in Advanced, plus eight default fixes.
 
 ## What shipped (all verified in Chrome for Testing unless noted)
 
@@ -59,6 +65,7 @@ image overlays).
 | `.31` | D72 | Base64 font data URLs in CSS are kept (embedded web fonts render); the caption band grows to at most 60% when its text would be under 9px. |
 | `.32` | D73 | The side panel honours Follow / Pinned (default Follow): it follows the active tab of its own window, the button is clickable there, and Pinned keeps the tab it shows. Settings reads "Mirror follows". Verified with the real side panel (CDP `Extensions.triggerAction`). |
 | `.33` | D74 | Image translations are `simul-image-overlay` elements right after each image with no z-index, so pop-ups cover them and backdrops dim them; closed shadow root, inline `!important` reset, positioned by measuring its containing block (transforms, scale, nested scrollers), sized to the visible part, re-inserted after mirror rewrites. Painted logo labels drop their z-index. |
+| `.34` | D75 | **Show everything (testing)** (Advanced, off by default) turns every privacy filter off on both sides of the mirror (start-message field, `source-privacy-mode.ts`); typed passwords never travel, and three disclosure attributes stay replica-owned. Default fixes: no more "class changed twice" masking secrets (a `<body>` toggle blanked whole pages); file inputs drawn; checkbox / radio / switch / select-only combobox labels public; painted ARIA menus keep their text; `open` kept on details and dialog; painted controlled regions shown whatever their controllers' state (a bank homepage's hero slides); date and time values read as form values; an OCR queue restart loop that overflowed the stack after a purge. Verified on a bank-form fixture, a bank homepage, Wikipedia and freee. |
 
 ## Found, not fixed (candidates, in rough order of value)
 
@@ -89,6 +96,19 @@ image overlays).
 6. **Review R4 remainder:** "Mirror follows" in Settings now fully duplicates
    the toolbar's Follow / Pinned button on both surfaces; a simplification
    candidate to bring to the owner.
+7. **Still withheld at the defaults after D75** (Show everything shows them):
+   labels a stylesheet draws from `data-*` or `aria-label` (`content:
+   attr(...)`), `<output>`, spinbutton and slider text, a `visibility:
+   visible` child inside a `visibility: hidden` parent. Each needs a small
+   rule change; bring them to the owner if a report points at one.
+8. **The ARIA menu facsimile drops page styles** (D75 finding): every painted
+   `role="menu"` / `listbox` is moved into an isolated shadow root, so a
+   static menu (an Ant Design sidebar) now shows its text but unstyled.
+   Wrapping only validated dropdown panels would keep the page's styles;
+   needs a design because the preview code expects the facsimile host.
+9. **A `<select role="combobox">` is never an eligible select** (found in
+   D75, not new): an explicit `combobox` role on a native select, its
+   implicit role, makes it ineligible, so its facsimile shows no labels.
 
 ## Next work, in order
 
@@ -102,12 +122,13 @@ image overlays).
 3. Candidates 1 and 3 (style polling on large documents; per-item semantic
    refusal) need a design first. P3–P6 wait until one becomes an actual
    issue (owner).
-4. Watch for owner reports on D74 (overlays inside the page), D73 (side
-   panel following), D71 (dropdowns) and D66 (new defaults), the most
-   visible changes.
-5. Publish 0.5.0 as **D75** only when the owner says so. The release-notes
+4. Watch for owner reports on D75 (ask what Show everything showed on the
+   banking form: anything still missing with it on is not a privacy rule), D74
+   (overlays inside the page), D73 (side panel following), D71 (dropdowns)
+   and D66 (new defaults), the most visible changes.
+5. Publish 0.5.0 as **D76** only when the owner says so. The release-notes
    draft (`handover-2026-09-22-release-readiness.md`) needs lines for
-   D51–D74.
+   D51–D75.
 
 ## Reproduction and verification
 
@@ -121,7 +142,7 @@ image overlays).
   `limits-ui.mjs`, `advanced-shot.mjs`, `overlay-top.mjs`, `quirks-probe.mjs`,
   `quirks-check.mjs`, `fresh-defaults.mjs`, `labels-timeline.mjs` (select
   labels through shadow roots), `scope-safety.mjs` (narrow, widen, reset),
-  `count-translations.mjs` (counts stand-in Translator calls), `status-smoke.mjs` / `status-lang.mjs` (status line after a To switch; flags "[object"; `lang`/`dir`), `dropdown-select.mjs` (open each select and menu, choose an item, report what is still open), `data-font.mjs`, `caption-band.mjs`, `sidepanel-follow.mjs` (opens the real side panel with CDP `Extensions.triggerAction` on a `tab` target, found with `Target.getTargets({filter:[{}]})`; checks Follow / Pinned across tab switches), `overlay-stacking.mjs` (pop-up, backdrop, scaled box, cover image, carousel; alt-text captions via the stand-in Translator, source `en`), `overlay-scrollers.mjs` (adds positioned and static nested scrollers and scrolls them). The `d63/`
+  `count-translations.mjs` (counts stand-in Translator calls), `status-smoke.mjs` / `status-lang.mjs` (status line after a To switch; flags "[object"; `lang`/`dir`), `dropdown-select.mjs` (open each select and menu, choose an item, report what is still open), `data-font.mjs`, `caption-band.mjs`, `sidepanel-follow.mjs` (opens the real side panel with CDP `Extensions.triggerAction` on a `tab` target, found with `Target.getTargets({filter:[{}]})`; checks Follow / Pinned across tab switches), `overlay-stacking.mjs` (pop-up, backdrop, scaled box, cover image, carousel; alt-text captions via the stand-in Translator, source `en`), `overlay-scrollers.mjs` (adds positioned and static nested scrollers and scrolls them). D75 (in `~/.cache/simul-harness/d75/`): `bank-form.html` (60 `T##` markers across file inputs, input buttons, choice roles, values, ARIA text regions, disclosures, masking, form structure and script-driven rows; `?body=1` also toggles a `<body>` class), `marker-audit.mjs <ext> <url> [shot]` (which markers show in source and replica: text, values, pseudo content, open shadow roots; `PRIVACY_OFF=1` turns the switch on), `text-coverage.mjs <ext> <url>` (source lines missing from the replica on a real page), `source-ancestry.mjs <url> <needle>...` (no extension; tag, role, aria and computed visibility up the tree), `menu-debug.mjs`, `slick-current.mjs` (current carousel slide in source and replica); `dropdown-select.mjs` there takes `PRIVACY_OFF` and `SETTLE_MS`, and its `ext-harness.mjs` prints page-error stacks. The `d63/`
   folder has `run-cap-matrix.sh` (old vs new build table),
   `build-unminified.sh` (profiling build), the profile summarizers, the
   `sanitizeCss` differential and benchmark, `make-cap-pages.py` (the

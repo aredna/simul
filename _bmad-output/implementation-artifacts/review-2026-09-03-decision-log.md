@@ -3225,3 +3225,112 @@ rather than keep a top layer and guess what covers the image.
 Build identity `0.5.0 beta v.20260922.33`; `dist/chrome-unpacked` re-synced.
 Gate: `npm run check` green, **1,502 tests pass, 1 skipped** (+2).
 Publishing 0.5.0 moves to **D75**.
+
+### D75. Show everything (testing), and privacy rules that hid visible text (2026-09-23)
+
+Same branch / PR #22. Owner report: signed in on a banking page to submit
+forms, with every read setting allowed, the mirror lacked an upload button,
+the website-link information and the text of many clickable items, all text
+and none of it images. The owner asked for an Advanced setting that turns all
+privacy off for testing, and for fixes to any other filtering that could
+cause it.
+
+- **Reproduction.** A fixture of common bank-form patterns at Full visible
+  (`bank-form.html` in the session harness): the .33 build dropped 15 visible
+  texts: the file input, the labels of `role` radio / checkbox / switch
+  widgets, combobox, listbox, menu and spinbutton text, `<output>`, the body
+  of `<details open>`, and button labels a stylesheet draws from `data-*` or
+  `aria-label`. A form row that gains two classes in one task (focus plus
+  "has value") lost its label and value, and a page that adds and removes a
+  class on `<body>` in one task lost everything (51 of 51 markers). On a
+  bank's public homepage the current hero slide was blank (8 lines).
+- **Causes and fixes at the default settings:**
+  1. *Masking transitions.* A class or style that changed twice in one
+     observer batch, or changed in a new subtree or beside new content, on a
+     region holding any value-bearing control made the region a credential
+     secret for the page's lifetime. Frameworks do that on focus and input,
+     and on `<body>` when a dialog opens. Only explicit evidence counts now:
+     an old password type, credential autocomplete, role or contenteditable,
+     or an old inline `-webkit-text-security`.
+  2. *File inputs* were hard secrets (an opaque placeholder with
+     `display: none`). They are ordinary controls now, drawn as the empty
+     Choose File control; the value (a file name) is never read.
+  3. *Choice roles.* `checkbox`, `radio`, `switch` and `combobox` were private
+     roles whose text no read scope re-admitted. They are activation roles
+     now, like `menuitemcheckbox`: the label, or a select-only combobox's
+     current choice, is public, and `aria-checked` still follows **Ordinary
+     visible form values**. An editable combobox is an input or a
+     contenteditable region and stays private. A private role on a native
+     select now canonicalizes to `textbox` (`combobox` became activation).
+  4. *ARIA menus.* Text under `listbox`, `menu` and `option` was withheld
+     from the base graph and came back only for a validated dropdown's panel,
+     so a static menu (an Ant Design sidebar) showed empty items. A painted
+     menu keeps its text; a collapsed one is withheld like any hidden region.
+     Resource stripping and the menu facsimile are unchanged.
+  5. *Open disclosures.* `open` was stripped from `<details>` and `<dialog>`,
+     so both were drawn closed. It travels now.
+  6. *Controlled regions.* An `aria-controls` target was withheld unless a
+     unique tab proved it open or every controller was stateless. A painted
+     target is page content whatever its controllers carry: a bank's
+     Slick slides are `tabpanel`s controlled by tab dots that are not
+     painted. Unpainted panels stay withheld until painted.
+  7. *Dates and times.* `date`, `time`, `datetime-local`, `month`, `week` and
+     `color` values were withheld under every scope; they are ordinary form
+     values now.
+  8. *Image queue crash* (found with the switch on a bank homepage, reachable
+     without it). A purge (read-scope narrowing, the switch) advanced the
+     processing version while an OCR job ran; the aborted job was released
+     only when the version was unchanged, so it kept the capacity slot, and
+     the run's `finally` restarted a run that took nothing and restarted
+     again until the stack overflowed. The abandoned job is released, and a
+     run does not start while a job holds the slot.
+- **Show everything (testing).** An Advanced checkbox, off by default
+  (`mirrorShowEverything`, a validated view preference). The panel applies it
+  before each mirror and sends `showEverything` in the start message; the
+  page applies it from there (`source-privacy-mode.ts`, a live binding like
+  the size limits). With it on, every privacy predicate lets content through:
+  no credential secrets or sticky ledger (set aside, not erased), no private
+  regions, no hidden, collapsed or controlled-region withholding, every
+  attribute except the three the replica's dropdown previews own
+  (`aria-expanded`, `aria-controls`, `aria-haspopup`), `value` and
+  `placeholder` attributes shown until live values arrive, and the semantic
+  channel at Full visible whatever the read scope, reading card and
+  one-time-code fields and dates too. A typed password never travels. ARIA
+  menus are drawn with the page's styles, not the facsimile, so the replica
+  does not preview an ARIA-controlled dropdown while it is on; structural
+  navigation menus still open. Turning it on or off drops translations and
+  rebuilds, like a read-scope change. The receiver refuses an unfiltered
+  graph when the switch is off.
+- **Still withheld at the defaults** (the switch shows them): labels a
+  stylesheet draws from `data-*` or `aria-label`, `<output>`, spinbutton and
+  slider text, a `visibility: visible` child of a `visibility: hidden`
+  parent, and off-screen slides until they are painted.
+- **Verified in Chrome for Testing.** Fixture: .33 dropped 15 texts (51 with
+  the `<body>` toggle); .34 drops the 5 listed above at the defaults (and an
+  unselected option the page does not show either), with or without the
+  toggle, and nothing with the switch on. A bank's homepage: .33 missed 8
+  lines, .34 misses 3 at the defaults (the off-screen slides; the replica
+  follows the current slide as the carousel turns), none with the switch on,
+  and no panel errors. Wikipedia's language select and freee's header menus
+  behave as in .33 at the defaults; with the switch on the freee menus open
+  (on that live page the first click sometimes misses in either mode).
+- **Tests.** Classifier (file input, dates, the switch sets the ledger aside),
+  the two masking tests now assert no secret and a new one keeps explicit
+  evidence; session tests read values after class flips; protocol (the start
+  handshake carries the switch; file inputs, choice labels, open details and
+  dialog in the base graph; the switch copies everything but the three
+  disclosure attributes, and the receiver refuses that graph once it is
+  off); painted controlled regions (stateful controllers, contradictory
+  tablists, duplicate and malformed IDREFs, a wrapper that stops being
+  painted); engine (the switch is sent with the stream, authored values show,
+  the semantic scope is Full visible); preferences and coordinator; the
+  Advanced checkbox; and the OCR controller runs a job a purge abandoned
+  (fails with the old controller).
+- **Docs.** README (privacy boundary, fidelity), `docs/replica-fidelity.md`
+  (controlled regions, menus, invariants, a Show everything section),
+  `docs/translation-companion.md`, `_bmad-output/project-context.md`; the
+  read-scope description of form values names dates and times.
+
+Build identity `0.5.0 beta v.20260922.34`; `dist/chrome-unpacked` re-synced.
+Gate: `npm run check` green, **1,511 tests pass, 1 skipped** (+9).
+Publishing 0.5.0 moves to **D76**.

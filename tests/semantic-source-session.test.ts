@@ -163,7 +163,7 @@ describe('semantic source session', () => {
     session.dispose();
   });
 
-  it('conservatively remembers existing-node class and content transitions', () => {
+  it('does not take a class change beside new content as masking (D75)', () => {
     const { document } = parseHTML(
       '<html><body><div id="draft" contenteditable="true">secret</div></body></html>',
     );
@@ -190,18 +190,18 @@ describe('semantic source session', () => {
       draft,
       classifier,
       sourceWindow,
-    )).toBe(true);
+    )).toBe(false);
   });
 
-  it('withholds a property-only value written inside a same-task CSS mask', () => {
+  it('reads a value whose class flipped twice in one task (D75)', () => {
     const { document, window } = parseHTML(
       '<html><body><input id="otp" type="text"></body></html>',
     );
     const input = document.querySelector<HTMLInputElement>('#otp')!;
     const classifier = new StickySourceSecretClassifier();
-    input.classList.add('masked');
-    input.value = 'property-only otp';
-    input.classList.remove('masked');
+    input.classList.add('is-focused');
+    input.value = 'typed value';
+    input.classList.remove('is-focused');
     rememberSourceMutationSecrets([
       {
         type: 'attributes',
@@ -213,19 +213,11 @@ describe('semantic source session', () => {
         type: 'attributes',
         target: input,
         attributeName: 'class',
-        oldValue: 'masked',
+        oldValue: 'is-focused',
       } as unknown as MutationRecord,
     ], {
       getComputedStyle: () => ({ getPropertyValue: () => 'none' }),
     } as unknown as Window, classifier);
-    let valueReads = 0;
-    Object.defineProperty(input, 'value', {
-      configurable: true,
-      get: () => {
-        valueReads += 1;
-        throw new Error('sticky secret values must not be read');
-      },
-    });
     const port = new FakeSemanticPort(
       createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
     );
@@ -241,19 +233,17 @@ describe('semantic source session', () => {
       'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
     ));
 
-    expect(port.messages[0]!.records.some(
-      ({ nodeId: recordNodeId }) => recordNodeId === nodeId(input),
-    )).toBe(false);
-    expect(valueReads).toBe(0);
+    expect(port.messages[0]!.records.some((record) =>
+      record.nodeId === nodeId(input) && record.presentation === 'value' &&
+      record.text === 'typed value')).toBe(true);
     session.dispose();
   });
 
-  it('remembers one mask-removal record on a newly added value control', () => {
-    const { document, window } = parseHTML('<html><body></body></html>');
+  it('reads a newly added control whose class changed once (D75)', () => {
+    const { document } = parseHTML('<html><body></body></html>');
     const input = document.createElement('input') as HTMLInputElement;
     input.type = 'text';
-    input.className = 'masked';
-    input.value = 'detached property-only otp';
+    input.className = 'is-new';
     document.body.append(input);
     input.className = '';
     const classifier = new StickySourceSecretClassifier();
@@ -271,7 +261,7 @@ describe('semantic source session', () => {
         type: 'attributes',
         target: input,
         attributeName: 'class',
-        oldValue: 'masked',
+        oldValue: 'is-new',
       } as unknown as MutationRecord,
     ], sourceWindow, classifier);
 
@@ -279,35 +269,7 @@ describe('semantic source session', () => {
       input,
       classifier,
       sourceWindow,
-    )).toBe(true);
-    let valueReads = 0;
-    Object.defineProperty(input, 'value', {
-      configurable: true,
-      get: () => {
-        valueReads += 1;
-        throw new Error('newly added masked values must not be read');
-      },
-    });
-    const port = new FakeSemanticPort(
-      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
-    );
-    const session = createSession(
-      port,
-      document,
-      window,
-      'isolated-html',
-      classifier,
-    );
-
-    port.emit(createSemanticSourceStart(
-      'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
-    ));
-
-    expect(port.messages[0]!.records.some(
-      ({ nodeId: recordNodeId }) => recordNodeId === nodeId(input),
     )).toBe(false);
-    expect(valueReads).toBe(0);
-    session.dispose();
   });
 
   it('taints a subtree removed from a sticky secret target before public addition', () => {

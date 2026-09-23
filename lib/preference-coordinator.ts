@@ -959,6 +959,7 @@ const VIEW_SETTING_KEYS = new Set([
   'textLayoutMode',
   'replicaFidelityPolicy',
   'mirrorLimits',
+  'mirrorShowEverything',
   'replicaViewMode',
   'launchBehavior',
   'lastLaunchSurface',
@@ -1016,6 +1017,10 @@ function readViewSettingsPatch(
     const limits = readHtmlMirrorLimitSettings(value.mirrorLimits);
     if (!limits) return undefined;
     patch.mirrorLimits = limits;
+  }
+  if ('mirrorShowEverything' in value) {
+    if (typeof value.mirrorShowEverything !== 'boolean') return undefined;
+    patch.mirrorShowEverything = value.mirrorShowEverything;
   }
   if ('replicaViewMode' in value) {
     if (!isReplicaViewMode(value.replicaViewMode)) return undefined;

@@ -273,7 +273,7 @@
       </details>
 
       <details id="experimental-options" class="options-group options-group--experimental">
-        <summary title="Inspect untranslated source text, set the replica's fidelity and size limits, and configure experimental local image OCR." data-ui-title="Inspect untranslated source text, set the replica's fidelity and size limits, and configure experimental local image OCR." data-ui-label="Advanced &amp; experimental">Advanced &amp; experimental</summary>
+        <summary title="Inspect untranslated source text, set the replica's fidelity, size limits and privacy filtering, and configure experimental local image OCR." data-ui-title="Inspect untranslated source text, set the replica's fidelity, size limits and privacy filtering, and configure experimental local image OCR." data-ui-label="Advanced &amp; experimental">Advanced &amp; experimental</summary>
         <div class="settings-grid">
           <label title="Show translated text or temporarily inspect the live source text without translation." data-ui-title="Show translated text or temporarily inspect the live source text without translation.">
             <span data-ui-label="Replica text">Replica text</span>
@@ -310,6 +310,15 @@
             <input id="mirror-max-elements" type="number" inputmode="numeric" min="1000" max="1000000" step="1000" />
           </label>
           <button id="restore-mirror-limits" type="button" data-ui-label="Restore default limits">Restore default limits</button>
+          <label class="check-label" title="Copy the page with no privacy filtering, to see whether a privacy rule hides a missing part of a page." data-ui-title="Copy the page with no privacy filtering, to see whether a privacy rule hides a missing part of a page.">
+            <input id="mirror-show-everything" type="checkbox" aria-describedby="mirror-show-everything-disclosure" />
+            <span data-ui-label="Show everything (testing)">Show everything (testing)</span>
+          </label>
+          <small
+            id="mirror-show-everything-disclosure"
+            class="microcopy settings-note"
+            data-ui-label="Turns off every privacy filter. Hidden text, labels, card numbers, one-time codes and form values are copied as the page holds them; typed passwords are not. The mirror still cannot act on the page."
+          >Turns off every privacy filter. Hidden text, labels, card numbers, one-time codes and form values are copied as the page holds them; typed passwords are not. The mirror still cannot act on the page.</small>
         </div>
         <div id="image-analysis-host"></div>
       </details>

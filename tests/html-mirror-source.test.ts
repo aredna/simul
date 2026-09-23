@@ -1011,7 +1011,7 @@ describe('HtmlMirrorSourceSession', () => {
     fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
     const select = fixture.document.querySelector('#picker')!;
 
-    select.setAttribute('role', 'combobox');
+    select.setAttribute('role', 'textbox');
     fixture.mutate(attributeRecord(select, 'role'));
     fixture.flushFrame();
     const patch = fixture.patches().at(-1)!;
@@ -1029,7 +1029,7 @@ describe('HtmlMirrorSourceSession', () => {
     expect(attributes).toMatchObject({
       kind: 'attributes',
       tagName: 'select',
-      attributes: expect.arrayContaining([['role', 'combobox']]),
+      attributes: expect.arrayContaining([['role', 'textbox']]),
     });
     expect(attributes).not.toHaveProperty('selectedOptionIndexes');
     expect(JSON.stringify(patch)).not.toContain('Public choice');

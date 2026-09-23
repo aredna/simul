@@ -1,4 +1,4 @@
-import { describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it } from 'vitest';
 import { parseHTML } from 'linkedom';
 
 import {
@@ -8,6 +8,7 @@ import {
   sourceDocumentSecretClassifier,
 } from '../lib/replica/source-secret-classifier';
 import { replicaReadScopeForProfile } from '../lib/replica/read-scope-policy';
+import { applySourcePrivacyFiltersOff } from '../lib/replica/source-privacy-mode';
 import {
   createSourceSecretAncestorMemo,
   hasSourceControlOrEditableElementAncestor,
@@ -20,10 +21,11 @@ import {
 } from '../lib/replica/source-privacy-policy';
 
 describe('source secret classifier', () => {
+  afterEach(() => applySourcePrivacyFiltersOff(false));
+
   it.each([
     { tagName: 'input', type: 'password' },
     { tagName: 'input', type: 'hidden' },
-    { tagName: 'input', type: 'file' },
     { tagName: 'input', autocomplete: 'section-login one-time-code' },
     { tagName: 'input', autocomplete: 'shipping cc-number' },
     { tagName: 'div', computedTextSecurity: 'disc' },
@@ -34,6 +36,57 @@ describe('source secret classifier', () => {
       replicaReadScopeForProfile('full-visible'),
       category,
     )).toBe(false);
+  });
+
+  it('draws a file input as an ordinary control (D75)', () => {
+    // The page shows its Choose File button; the value (a file name) is never
+    // an ordinary form value, so no read scope carries it.
+    expect(classifySourceEvidence({ tagName: 'input', type: 'file' }))
+      .toBe('public-semantic');
+    expect(classifySourceEvidence({
+      tagName: 'input', type: 'file', valueBearing: true,
+    })).toBe('withheld');
+  });
+
+  it('reads date, time and colour values as ordinary form input (D75)', () => {
+    for (const type of [
+      'date', 'time', 'datetime-local', 'month', 'week', 'color',
+    ]) {
+      expect(classifySourceEvidence({ tagName: 'input', type }), type)
+        .toBe('ordinary-form');
+    }
+    expect(classifySourceEvidence({ tagName: 'input', type: 'checkbox' }))
+      .toBe('public-semantic');
+  });
+
+  it('treats nothing as a secret while Show everything is on (D75)', () => {
+    const classifier = new StickySourceSecretClassifier();
+    const learned = {};
+    expect(classifier.classify(learned, {
+      tagName: 'input', type: 'password',
+    })).toBe('secret');
+    applySourcePrivacyFiltersOff(true);
+    for (const facts of [
+      { tagName: 'input', type: 'hidden' },
+      { tagName: 'div', computedTextSecurity: 'disc' },
+      { tagName: 'p', secretAncestor: true },
+    ]) {
+      expect(classifySourceEvidence(facts)).not.toBe('secret');
+    }
+    // Card and one-time-code fields read as ordinary values; a password never
+    // does, since only its dots show.
+    expect(classifySourceEvidence({
+      tagName: 'input', type: 'text', autocomplete: 'cc-number',
+    })).toBe('ordinary-form');
+    expect(classifySourceEvidence({
+      tagName: 'input', type: 'password', valueBearing: true,
+    })).toBe('withheld');
+    // The sticky ledger is set aside, not erased.
+    expect(classifier.isSecret(learned)).toBe(false);
+    expect(classifier.classify(learned, { tagName: 'p' }))
+      .toBe('public-semantic');
+    applySourcePrivacyFiltersOff(false);
+    expect(classifier.isSecret(learned)).toBe(true);
   });
 
   it('keeps form, personal and editable gates independent', () => {

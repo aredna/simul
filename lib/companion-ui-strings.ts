@@ -274,7 +274,8 @@ export const UI_STRINGS = {
   scopeDisclosureDesc:
     'Read validated same-page menus and disclosures even while collapsed.',
   scopeFormValuesTitle: 'Ordinary visible form values',
-  scopeFormValuesDesc: 'Read visible text, search, URL, textarea, and selection state.',
+  scopeFormValuesDesc:
+    'Read visible text, search, URL, number, date, time, textarea, and selection state.',
   scopePersonalTitle: 'Personal and autofill values',
   scopePersonalDesc:
     'Read visible email, telephone, name, address, and username fields. Credential and card data stay blocked.',

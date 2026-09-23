@@ -49,17 +49,18 @@ page text. "Paints" means a positive box that is not at zero opacity, not
 skipped by `content-visibility: hidden` (which is how Chrome renders
 `hidden="until-found"`), and not cut away by `clip` or `clip-path`; unreadable
 style keeps the declaration. A region that controls reference with
-`aria-controls` but never collapse or select is ordinary page content too: a
-carousel's previous/next buttons carry no `aria-expanded`, `aria-selected`,
-pressed, checked or popup state and are not native controls or tabs, so the
-slide container they control keeps its text and images. That holds only while
-the region's own box is painted and survives its overflow-clipping ancestors,
-or, when the region does not clip its own overflow, while one of its painted
-children does (a carousel track is translated beside the carousel window while
-the slide it overflows into is on screen): a stateless "Show details" button
-that controls a panel collapsed to zero height, faded out or clipped away
-leaves the panel withheld until a layout change proves it painted. A controlled region is also withheld while a stateful
-control references it and no unique tab relation proves it open.
+`aria-controls` is ordinary page content while the page paints it, whatever
+state the controls carry (D75): a carousel's slide container behind its
+previous/next buttons, a slide whose dots are tabs, an open accordion panel.
+Until D75 only regions whose every control was stateless qualified, so a
+slider whose tab dots were not painted (a bank's homepage) lost every
+slide's text. "Painted" means the region's own box is painted and survives its
+overflow-clipping ancestors, or, when the region does not clip its own
+overflow, one of its painted children does (a carousel track is translated
+beside the carousel window while the slide it overflows into is on screen). A
+panel collapsed to zero height, faded out or clipped away stays withheld until
+a layout change proves it painted; off-screen slides fill in as they come into
+view.
 
 When CSSOM is readable, Simul serializes sanitized rules and recursively
 flattens readable imports in order within rule, depth, string, and total payload
@@ -143,8 +144,14 @@ customizable selects, `:open` state and toggle-driven refresh are mirrored
 progressively; rich website picker descendants remain reduced to typed public
 labels at the privacy boundary.
 
-Public, non-editable ARIA listbox/menu/option text remains visible and
-translatable when the matching read scope is enabled. A shared typed semantic
+A painted ARIA listbox, menu or option keeps its text and it is translated
+(D75; before D75 the base mirror withheld it, and a menu that was not a
+validated dropdown, such as an Ant Design sidebar, showed empty items). A
+collapsed one is withheld until painted like any hidden region, and a
+validated dropdown's items travel through the semantic channel. The text of
+checkbox, radio, switch and non-editable combobox roles is their label or
+current choice, like a button's label, and travels too (D75); their checked
+state still follows **Ordinary visible form values**. A shared typed semantic
 proof channel enables a local preview in the isolated replica only when a
 public activation trigger maps through one unique same-document
 `aria-controls` relation to a matching menu/listbox, or to a region containing
@@ -193,20 +200,45 @@ Both selectable policies continue to block:
 - request modifiers that add attribution, Topics, or Shared Storage side
   effects, plus base-URL overrides that could externalize local SVG fragments;
 - passwords, password/authentication autocomplete, one-time codes, WebAuthn,
-  every `cc-*` autocomplete class, hidden/file inputs, file paths, and CSS
-  text-security content regardless of the selected readable-content profile
-  (a class or style that changes twice within one observer batch on a region
-  that holds a value-bearing control, such as a native input, select or
-  textarea, editable text, or a text-entry, checked or selected role, is
-  treated as a possible masking transition and that region stays a credential
-  secret for the page's lifetime; a region that holds only activation
-  controls, such as links, buttons, tabs and menu items, is ordinary content,
-  so a carousel's slides and bullets keep their text and images through every
-  move);
+  every `cc-*` autocomplete class, hidden inputs, file names and paths, and
+  CSS text-security content regardless of the selected readable-content
+  profile. A file input is drawn as the empty control the page shows (D75).
+  A node that was a credential stays one for the page's lifetime; only
+  explicit evidence counts (an old password type, credential autocomplete or
+  inline text-security). Until D75 a class or style that changed twice in one
+  observer batch on a region holding a value-bearing control also counted,
+  and frameworks do that on every focus and input, and on `<body>` when a
+  dialog opens: whole form rows, or the whole page, disappeared. The
+  **Show everything (testing)** switch lifts these blocks too (see below);
 - native-select submission values, names, data attributes, datalist content,
   rich picker descendants, and private dropdown ancestry (only bounded visible
   labels and presentation state are eligible); and
 - any sandbox weakening, new permission, or remotely hosted executable code.
+
+### Show everything (testing)
+
+**Show everything (testing)**, under **Advanced & experimental** (D75), turns
+every privacy filter off so a missing part of a page can be traced to a
+privacy rule or ruled out. Credential fields, file inputs and CSS-masked text
+are drawn as the page draws them; hidden, collapsed and controlled regions,
+the text of every control, `<output>`, and the attributes the mirror normally
+strips (`value`, `placeholder`, `aria-*`, `data-*`, `title`, `alt`, `open`,
+`checked`, `disabled`) travel as the page holds them; the semantic channel
+reads at Full visible whatever the read scope, including dates, card numbers
+and one-time codes. A typed password never travels: only its dots show, and
+the replica shows none. Three attributes stay stripped because the replica's
+own dropdown previews set them: `aria-expanded`, `aria-controls` and
+`aria-haspopup`. ARIA menus and listboxes are drawn with the page's own styles
+rather than an isolated facsimile, so the replica does not open its own
+preview of an ARIA-controlled dropdown while the switch is on (structural
+navigation menus still open). The mirror still cannot act on the page: every
+invariant in the previous section other than the privacy blocks holds.
+
+Both sides of one mirror use the same setting: the panel applies it before it
+opens a session and sends it in the start message, and the page applies it
+from there, as with the size limits. Turning it on or off rebuilds the mirror
+and drops translations made under the other setting. It is off by default and
+kept with the other companion settings.
 
 The iframe remains `sandbox="allow-same-origin"` without `allow-scripts`.
 Allowing same-origin access lets extension code inspect and translate the inert

@@ -5635,6 +5635,130 @@ describe('ImageTranslationController', () => {
     controller.dispose();
   });
 
+  it('releases an image job a purge abandoned and runs it again (D75)', async () => {
+    const { document } = parseHTML('<html><body><img lang="en"></body></html>');
+    const image = document.querySelector('img') as unknown as HTMLImageElement;
+    image.getBoundingClientRect = () => ({
+      left: 0, top: 0, width: 200, height: 100,
+      right: 200, bottom: 100, x: 0, y: 0, toJSON: () => ({}),
+    });
+    let resolveFirst!: (result: {
+      status: 'complete';
+      cacheHit: false;
+      result: {
+        providerId: 'tesseract';
+        bitmapWidth: number;
+        bitmapHeight: number;
+        transcript: string;
+        regions: Array<{
+          text: string;
+          boundingBox: { x: number; y: number; width: number; height: number };
+        }>;
+      };
+    }) => void;
+    const firstRecognition = new Promise<Parameters<typeof resolveFirst>[0]>(
+      (resolve) => { resolveFirst = resolve; },
+    );
+    const recognitionResult = {
+      status: 'complete' as const,
+      cacheHit: false as const,
+      result: {
+        providerId: 'tesseract' as const,
+        bitmapWidth: 200,
+        bitmapHeight: 100,
+        transcript: 'hello',
+        regions: [{
+          text: 'hello',
+          boundingBox: { x: 10, y: 10, width: 80, height: 20 },
+        }],
+      },
+    };
+    const recognize = vi.fn()
+      .mockReturnValueOnce(firstRecognition)
+      .mockResolvedValue(recognitionResult);
+    const diagnostics: unknown[] = [];
+    const controller = new ImageTranslationController({
+      openSource: async (_request, onChange) => {
+        queueMicrotask(() => onChange({ kind: 'upsert', descriptor }));
+        return { measure: vi.fn(), dispose: vi.fn() };
+      },
+      createPixelCoordinator: () => ({
+        acquire: async () => ({
+          status: 'ready',
+          pixels: {
+            descriptor,
+            pixelHash: '91'.repeat(32),
+            encoded: new Blob([new Uint8Array([1])]),
+            bitmapWidth: 200,
+            bitmapHeight: 100,
+            cropOffsetXCss: 0,
+            cropOffsetYCss: 0,
+            cropWidthCss: 200,
+            cropHeightCss: 100,
+            renderedWidthCss: 200,
+            renderedHeightCss: 100,
+            nearestElementLanguage: 'en',
+          },
+        }),
+      }) as unknown as PixelAcquisitionCoordinator,
+      createRecognitionCoordinator: () => ({
+        recognize,
+        clear: vi.fn(),
+        advanceResetEpoch: vi.fn(() => true),
+      }) as unknown as ImageRecognitionCoordinator,
+      resolveAnchor: () => ({
+        document: sourceDocument,
+        replayLease: 1,
+        image,
+        iframe: { contentDocument: document } as HTMLIFrameElement,
+      }),
+      translationProvider: {
+        availability: async () => 'available',
+        createSession: async () => ({
+          translate: async (text) => `${text}-translated`,
+          destroy: vi.fn(),
+        }),
+      },
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      setTimer: ((callback: TimerHandler, milliseconds?: number) => {
+        if (typeof callback === 'function' && milliseconds === 1_000) {
+          queueMicrotask(() => callback());
+        }
+        return 1;
+      }) as unknown as typeof setTimeout,
+      clearTimer: vi.fn() as unknown as typeof clearTimeout,
+      projector: {
+        scheduleFrame: (callback) => { callback(); return 1; },
+        cancelFrame: () => undefined,
+        createResizeObserver: () => undefined,
+      },
+    });
+    const initial = {
+      enabled: true,
+      scanPolicy: 'visible-only' as const,
+      skipSmallImages: false,
+      providerOrder: ['tesseract'] as const,
+      ocrMinimumConfidence: 0.65 as const,
+      sourceLanguage: 'en' as const,
+      targetLanguage: 'ja' as const,
+      translationIdle: true,
+      resetEpoch: 0,
+    };
+    controller.configure(initial);
+    controller.activateReplica(request, 3, 1);
+    await vi.waitFor(() => expect(recognize).toHaveBeenCalledOnce());
+
+    // A purge (read narrowing, Show everything) advances the processing
+    // version while the job is running. The job must give back its capacity
+    // slot; it used to stay active and the restart loop overflowed the stack.
+    controller.purgeSourceDerivedCache();
+    resolveFirst(recognitionResult);
+
+    await vi.waitFor(() => expect(recognize).toHaveBeenCalledTimes(2));
+    await vi.waitFor(() => expect(controller.busy).toBe(false));
+    controller.dispose();
+  });
+
   it('reconnects once after a measurement detects a dead source, then degrades without a loop', async () => {
     const dispose = vi.fn();
     const acquire = vi.fn(async () => {

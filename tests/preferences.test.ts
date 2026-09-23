@@ -42,6 +42,7 @@ describe('parseCompanionPreferences', () => {
       textLayoutMode: 'adaptive',
       replicaFidelityPolicy: 'passive',
       mirrorLimits: { itemMegabytes: 10, pageMegabytes: 60, maxElements: 200_000 },
+      mirrorShowEverything: false,
       replicaViewMode: 'translated',
       launchBehavior: 'last-used',
       lastLaunchSurface: 'side-panel',
@@ -100,6 +101,7 @@ describe('parseCompanionPreferences', () => {
       textLayoutMode: 'adaptive',
       replicaFidelityPolicy: 'passive',
       mirrorLimits: { itemMegabytes: 10, pageMegabytes: 60, maxElements: 200_000 },
+      mirrorShowEverything: false,
       replicaViewMode: 'translated',
       launchBehavior: 'last-used',
       lastLaunchSurface: 'side-panel',
@@ -168,6 +170,7 @@ describe('parseCompanionPreferences', () => {
       textLayoutMode: 'adaptive',
       replicaFidelityPolicy: 'passive',
       mirrorLimits: { itemMegabytes: 10, pageMegabytes: 60, maxElements: 200_000 },
+      mirrorShowEverything: false,
       replicaViewMode: 'translated',
       launchBehavior: 'last-used',
       lastLaunchSurface: 'side-panel',
@@ -295,6 +298,19 @@ describe('parseCompanionPreferences', () => {
     expect(withViewSettings(parseCompanionPreferences(undefined), {
       replicaViewMode: 'source-only',
     })).toMatchObject({ replicaViewMode: 'source-only' });
+  });
+
+  it('keeps Show everything off unless it was saved on (D75)', () => {
+    expect(parseCompanionPreferences(undefined).mirrorShowEverything).toBe(false);
+    expect(parseCompanionPreferences({ mirrorShowEverything: true }))
+      .toMatchObject({ mirrorShowEverything: true });
+    for (const damaged of ['true', 1, null]) {
+      expect(parseCompanionPreferences({ mirrorShowEverything: damaged })
+        .mirrorShowEverything).toBe(false);
+    }
+    expect(withViewSettings(parseCompanionPreferences(undefined), {
+      mirrorShowEverything: true,
+    })).toMatchObject({ mirrorShowEverything: true });
   });
 
   it('defaults and migrates replica fidelity without enabling reserved strict local', () => {
