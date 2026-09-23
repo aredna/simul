@@ -2900,3 +2900,34 @@ under the truthful-first ruling). For the tab-follow words the owner chose
 Build identity `0.5.0 beta v.20260922.25`; `dist/chrome-unpacked` re-synced.
 Gate: `npm run check` green, **1,483 tests pass, 1 skipped** (+3).
 Publishing 0.5.0 moves to **D67**.
+
+### D67. Hidden accessible names are no longer translated (2026-09-23)
+
+Same branch / PR #22. Fourth item of `handover-2026-09-23-session-close.md`
+(efficiency).
+
+- **Cause.** Since D62 the semantic batches apply on real pages, and a
+  control's accessible name (`aria-label`, `title`) travels as a `label`
+  record into an owned span that is always hidden (D62 hid it because the
+  source page does not paint it). Nothing reads that span's text, yet every
+  such record was sent for translation.
+- **Change.** Each semantic binding says whether something draws it
+  (`translatable`). Only the hidden owned `label` span says no. The receiver
+  keeps the record (it still carries the text the dropdown and menu logic
+  use), but leaves it out of the translation records and of the upsert and
+  remove changes it reports. Option labels (drawn by the dropdown
+  facsimile), a select's current choice (drawn by its trigger), button
+  values and page text are translated as before.
+- **Verified in Chrome for Testing.** On the Wikipedia portal, "Translate
+  page" made 593 Translator calls with `.25` and 471 now (−122, about 21%);
+  the 128 hidden label spans were all translated before and none now, and
+  the language select still reads «English» (the stand-in translation).
+- **Tests.** A hidden accessible name produces no translation change and no
+  record, keeps its text, and clears without a change; an option label still
+  produces an upsert and a record.
+- **Docs.** `docs/replica-fidelity.md`.
+
+Build identity `0.5.0 beta v.20260922.26`; `dist/chrome-unpacked` re-synced.
+Gate: `npm run check` green, **1,483 tests pass, 1 skipped** (tests extended,
+none added).
+Publishing 0.5.0 moves to **D68**.

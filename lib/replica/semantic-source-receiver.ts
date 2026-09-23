@@ -100,6 +100,11 @@ export type ResolvedSemanticSourceProof =
 interface SemanticBinding {
   readonly target: Node;
   readonly presentation: SemanticSourcePresentation;
+  /**
+   * False for an accessible name held in a hidden owned span: nothing draws
+   * it, so it is kept for the dropdown and menu logic but not translated.
+   */
+  readonly translatable: boolean;
   write(text: string): boolean;
   restore(): boolean;
   reapply(): boolean;
@@ -152,7 +157,7 @@ export class SemanticSourceReceiver {
   records(): readonly ReplicaSourceTextRecord[] {
     const records: ReplicaSourceTextRecord[] = [];
     for (const entry of this.#entries.values()) {
-      records.push(entry.translationRecord);
+      if (entry.binding.translatable) records.push(entry.translationRecord);
     }
     return Object.freeze(records);
   }
@@ -245,6 +250,7 @@ export class SemanticSourceReceiver {
     for (const [projectionNodeId, current] of this.#entries) {
       if (plans.has(projectionNodeId)) continue;
       removals.push(Object.freeze([projectionNodeId, current] as const));
+      if (!current.binding.translatable) continue;
       changes.push(Object.freeze({
         kind: 'remove',
         document: this.environment.document,
@@ -261,7 +267,9 @@ export class SemanticSourceReceiver {
         affectedBindings.add(current.binding);
       }
       affectedBindings.add(plan.binding);
-      changes.push(Object.freeze({ kind: 'upsert', record: plan.translationRecord }));
+      if (plan.binding.translatable) {
+        changes.push(Object.freeze({ kind: 'upsert', record: plan.translationRecord }));
+      }
     }
 
     const rollbacks: Array<() => boolean> = [];
@@ -368,6 +376,7 @@ export class SemanticSourceReceiver {
       if (this.#entryIsStillSafe(entry) && entry.binding.reapply()) continue;
       entry.binding.restore();
       this.#entries.delete(projectionNodeId);
+      if (!entry.binding.translatable) continue;
       changes.push(Object.freeze({
         kind: 'remove',
         document: this.environment.document,
@@ -438,6 +447,7 @@ export class SemanticSourceReceiver {
     const changes: ReplicaSourceTextChange[] = [];
     for (const [projectionNodeId, entry] of this.#entries) {
       entry.binding.restore();
+      if (!entry.binding.translatable) continue;
       changes.push(Object.freeze({
         kind: 'remove',
         document: this.environment.document,
@@ -1272,6 +1282,7 @@ function textBinding(target: Node): SemanticBinding | undefined {
   return {
     target,
     presentation: 'text',
+    translatable: true,
     write: (text) => {
       try {
         target.nodeValue = text;
@@ -1344,6 +1355,7 @@ function propertyBinding(
   return {
     target: element,
     presentation: property,
+    translatable: true,
     write,
     restore: () => {
       try {
@@ -1405,6 +1417,7 @@ function attributeBinding(
   return {
     target: element,
     presentation: 'label',
+    translatable: true,
     write,
     restore: () => {
       try {
@@ -1499,6 +1512,9 @@ function ownedTextBinding(
   return {
     target: element,
     presentation,
+    // A select's current choice is drawn by its dropdown trigger; an
+    // accessible name is drawn nowhere (D67).
+    translatable: presentation !== 'label',
     write,
     restore: () => {
       try {
