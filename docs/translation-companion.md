@@ -328,10 +328,11 @@ observable. Cross-origin stylesheet CSSOM can be unreadable even though the
 passive link itself renders. A source `blob:` URL is scoped to the source
 environment; Simul does not reuse that opaque URL and cannot always obtain its
 bytes to create an extension-owned replacement. A validated source document
-mode selects a standards or doctype-free shell, but the shell loads through
-`srcdoc`, which is always no-quirks, so a quirks-mode page currently renders in
-standards mode (an open gap; see `docs/replica-fidelity.md`). Chrome's distinct
-limited-quirks mode is not separately represented.
+mode selects the shell: a standards page loads the doctype shell through
+`srcdoc`, and a quirks page gets a blank frame into which the panel writes the
+doctype-free shell, because an `srcdoc` document is always no-quirks (see
+`docs/replica-fidelity.md`). Chrome's distinct limited-quirks mode is not
+separately represented.
 Generated pseudo-element text is not a DOM text node and therefore cannot be
 translated even when its rule renders. Broad computed-style serialization is
 deliberately omitted because it can freeze responsive cascade behavior, expose

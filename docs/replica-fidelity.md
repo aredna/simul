@@ -236,16 +236,15 @@ Some gaps cannot be fixed by admitting more sanitizer syntax:
   Such resources are omitted and counted as browser-inaccessible unless a
   separately authorized local pixel/byte path exists. Temporary local blobs
   are not yet a general fallback.
-- **Source document mode (open gap, to fix).** The source's
-  standards-versus-quirks state is transported as a validated enum and selects
-  a doctype or doctype-free shell, but the shell is loaded through `srcdoc`,
-  and an `srcdoc` document is always in no-quirks mode (HTML parsing rules), so
-  a quirks-mode page renders in standards mode in the replica. Found in D60 on
-  Google's 404 page, which has no doctype. Quirks rules that differ (for
-  example percentage heights, table font inheritance, body sizing) can
-  therefore lay out differently. Loading the quirks shell another way, such as
-  writing the doctype-free shell into a blank frame, would close the gap.
-  Chrome's distinct limited-quirks mode is not separately represented either.
+- **Source document mode.** The source's standards-versus-quirks state is
+  transported as a validated enum. A standards page gets the doctype shell
+  through `srcdoc`. An `srcdoc` document is always in no-quirks mode (HTML
+  parsing rules), so a quirks page's replica is a blank frame into which the
+  panel writes the doctype-free shell (D65, found in D60 on Google's 404 page).
+  That document is in quirks mode like the source, keeps the same sandbox and
+  shell CSP, and takes the panel's URL, the base URL an `srcdoc` shell inherits
+  anyway. Chrome's distinct limited-quirks mode is not separately represented:
+  such a page reports `CSS1Compat` and gets the standards shell.
 - **Cross-origin CSSOM.** A stylesheet link may render while Chrome's same-origin
   rules prevent Simul from reading its rules. Passive Fidelity can retain the
   normalized link/import, but cannot flatten or inspect inaccessible CSSOM.

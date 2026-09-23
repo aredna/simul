@@ -602,6 +602,12 @@ export class IsolatedHtmlReplicaEngine
           iframeShell,
           signal,
         );
+      } else if (checkpoint.payload.documentMode === 'quirks') {
+        iframeDocument = writeQuirksIframeDocument(
+          iframe,
+          lease.mount,
+          iframeShell,
+        );
       } else {
         iframeDocument = await initializeIframeDocument(
           iframe,
@@ -4171,12 +4177,21 @@ function blockIsolatedDisclosureActivation(event: Event): void {
   event.stopImmediatePropagation();
 }
 
+/**
+ * `writtenFromUrl` is the panel's URL for a shell written into a blank frame,
+ * which takes its writer's URL; otherwise only an `srcdoc` shell is trusted.
+ */
 export function isTrustedIsolatedShellDocument(
   document: Document | null | undefined,
+  writtenFromUrl?: string,
 ): document is Document {
   if (!document?.head || !document.body) return false;
   const href = document.location?.href;
-  if (typeof href === 'string' && href.length > 0 && href !== 'about:srcdoc') {
+  if (
+    typeof href === 'string' &&
+    href.length > 0 &&
+    href !== (writtenFromUrl ?? 'about:srcdoc')
+  ) {
     return false;
   }
   const marker = document.head.querySelector(
@@ -4193,6 +4208,34 @@ export function isTrustedIsolatedShellDocument(
     policy.includes("script-src 'none'") &&
     policy.includes("connect-src 'none'") &&
     Boolean(inertStyle);
+}
+
+/**
+ * An `srcdoc` document is always in no-quirks mode, whatever its doctype. A
+ * quirks source's replica is therefore a blank frame whose doctype-free shell
+ * is written from here, which leaves it in quirks mode like the source. The
+ * frame keeps the same sandbox and shell CSP; written from the panel, it takes
+ * the panel's URL, the base URL an `srcdoc` shell inherits anyway.
+ */
+function writeQuirksIframeDocument(
+  iframe: HTMLIFrameElement,
+  mount: HTMLElement,
+  shell: string,
+): Document {
+  mount.append(iframe);
+  const iframeDocument = iframe.contentDocument;
+  if (!iframeDocument) throw new Error('Isolated iframe document unavailable.');
+  iframeDocument.open();
+  iframeDocument.write(shell);
+  iframeDocument.close();
+  if (
+    !isTrustedIsolatedShellDocument(
+      iframeDocument,
+      mount.ownerDocument.location.href,
+    ) ||
+    iframeDocument.compatMode !== 'BackCompat'
+  ) throw new Error('Isolated quirks shell was not written.');
+  return iframeDocument;
 }
 
 async function initializeIframeDocument(
