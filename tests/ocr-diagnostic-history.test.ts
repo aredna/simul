@@ -28,6 +28,11 @@ describe('ImageTranslationDiagnosticHistory', () => {
       bitmapHeight: 761,
     })).toBe('job 7 recognition failed: code=provider-unavailable; rendered=603x381; bitmap=1206x761');
     expect(formatImageTranslationDiagnostic({
+      stage: 'pixel-source',
+      ordinal: 3,
+      source: 'mirror',
+    })).toBe('job 3 pixels: source=mirror');
+    expect(formatImageTranslationDiagnostic({
       stage: 'recognition-complete',
       provider: 'tesseract',
       regions: 4,

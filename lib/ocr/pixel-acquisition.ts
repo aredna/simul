@@ -9,6 +9,13 @@ import {
   selectOcrPreprocessingPlan,
   type OcrPreprocessingVersion,
 } from './preprocessing-profile';
+import {
+  createBrowserImageFilePixelReaderEnvironment,
+  readImageFilePixels,
+  type BrowserImageFilePixelOptions,
+  type ImageFilePixelSource,
+  type ImageFilePixels,
+} from './image-file-pixel-reader';
 
 export const MAX_CAPTURE_RATE_PER_SECOND = 2;
 /** Stay below Chrome's documented two-captures-per-second ceiling. */
@@ -32,6 +39,8 @@ export interface AcquiredImagePixels {
   readonly renderedWidthCss: number;
   readonly renderedHeightCss: number;
   readonly nearestElementLanguage?: SupportedLanguage;
+  /** Absent means the viewport screenshot. */
+  readonly pixelSource?: ImageFilePixelSource;
 }
 
 export type PixelAcquisitionResult =
@@ -103,7 +112,19 @@ export interface PixelAcquisitionEnvironment {
   readonly digest: (bytes: ArrayBuffer) => Promise<ArrayBuffer>;
   readonly now?: () => number;
   readonly delay?: (milliseconds: number, signal?: AbortSignal) => Promise<void>;
+  /**
+   * Reads an image from its file when the screenshot cannot: the image is
+   * off screen, moving, clipped, or the source tab is not the active tab.
+   */
+  readonly readFilePixels?: (
+    descriptor: SourceImageDescriptor,
+    signal?: AbortSignal,
+  ) => Promise<ImageFilePixels | undefined>;
 }
+
+/** Screenshot deferrals that reading the image's own file can resolve. */
+const FILE_PIXEL_FALLBACK_REASONS: ReadonlySet<PixelAcquisitionDeferralReason> =
+  new Set(['hidden', 'unstable', 'too-small-visible', 'inactive']);
 
 export interface SourceTabCaptureEnvironment {
   readonly queryActiveTab: (windowId: number) => Promise<number | undefined>;
@@ -141,6 +162,48 @@ export class PixelAcquisitionCoordinator {
   }
 
   async #acquire(
+    descriptor: SourceImageDescriptor,
+    signal?: AbortSignal,
+  ): Promise<PixelAcquisitionResult> {
+    const screenshot = await this.#acquireScreenshot(descriptor, signal);
+    if (
+      screenshot.status === 'ready' ||
+      !this.environment.readFilePixels ||
+      !FILE_PIXEL_FALLBACK_REASONS.has(screenshot.reason)
+    ) return screenshot;
+    signal?.throwIfAborted();
+    let file: ImageFilePixels | undefined;
+    try {
+      file = await this.environment.readFilePixels(descriptor, signal);
+    } catch (error) {
+      if (signal?.aborted || isAbortError(error)) throw error;
+      file = undefined;
+    }
+    if (!file) return screenshot;
+    return {
+      status: 'ready',
+      pixels: Object.freeze({
+        descriptor,
+        pixelHash: file.pixelHash,
+        encoded: file.encoded,
+        bitmapWidth: file.bitmapWidth,
+        bitmapHeight: file.bitmapHeight,
+        preprocessingVersion: file.preprocessingVersion,
+        cropOffsetXCss: file.cropOffsetXCss,
+        cropOffsetYCss: file.cropOffsetYCss,
+        cropWidthCss: file.cropWidthCss,
+        cropHeightCss: file.cropHeightCss,
+        renderedWidthCss: file.renderedWidthCss,
+        renderedHeightCss: file.renderedHeightCss,
+        pixelSource: file.source,
+        ...(file.nearestElementLanguage
+          ? { nearestElementLanguage: file.nearestElementLanguage }
+          : {}),
+      }),
+    };
+  }
+
+  async #acquireScreenshot(
     descriptor: SourceImageDescriptor,
     signal?: AbortSignal,
   ): Promise<PixelAcquisitionResult> {
@@ -293,9 +356,22 @@ export function createBrowserPixelAcquisitionEnvironment(
   source: ImageSourceLease,
   sourceTabId: number,
   sourceWindowId: number,
+  filePixels?: Omit<BrowserImageFilePixelOptions, 'maxPixels'>,
 ): PixelAcquisitionEnvironment {
+  const fileEnvironment = filePixels
+    ? createBrowserImageFilePixelReaderEnvironment(source, {
+        ...filePixels,
+        maxPixels: MAX_OCR_INPUT_PIXELS,
+      })
+    : undefined;
   return {
     source,
+    ...(fileEnvironment
+      ? {
+          readFilePixels: (descriptor: SourceImageDescriptor, signal?: AbortSignal) =>
+            readImageFilePixels(descriptor, fileEnvironment, signal),
+        }
+      : {}),
     captureVisibleTab: (signal) => captureVisibleSourceTab(
       sourceTabId,
       sourceWindowId,

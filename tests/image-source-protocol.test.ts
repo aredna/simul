@@ -142,6 +142,92 @@ describe('image source protocol', () => {
     }, documentIdentity.sessionId, documentIdentity)).toBeUndefined();
   });
 
+  it('admits an image file read only as a strict exact-document exchange', () => {
+    expect(readImageSourceControllerMessage({
+      kind: 'simul:image-source-v2:pixels',
+      requestId: 'file-1',
+      descriptor,
+      includePixels: true,
+    }, documentIdentity.sessionId, documentIdentity)).toMatchObject({
+      kind: 'simul:image-source-v2:pixels',
+      includePixels: true,
+    });
+    for (const request of [
+      { kind: 'simul:image-source-v2:pixels', requestId: 'file-1', descriptor },
+      {
+        kind: 'simul:image-source-v2:pixels', requestId: 'file-1', descriptor,
+        includePixels: 'yes',
+      },
+      {
+        kind: 'simul:image-source-v2:pixels', requestId: 'file-1', descriptor,
+        includePixels: false, url: 'https://example.test/a.png',
+      },
+    ]) {
+      expect(readImageSourceControllerMessage(
+        request,
+        documentIdentity.sessionId,
+        documentIdentity,
+      )).toBeUndefined();
+    }
+
+    const layout = {
+      boxWidth: 320, boxHeight: 180,
+      insetLeft: 0, insetTop: 0, insetRight: 0, insetBottom: 0,
+      objectFit: 'cover', objectPosition: '50% 50%',
+    };
+    const file = {
+      document: documentIdentity,
+      nodeId: 9,
+      contentRevision: 3,
+      observationRevision: 4,
+      layout,
+      naturalWidth: 640,
+      naturalHeight: 360,
+      url: 'https://cdn.example.test/kv.png?w=640',
+      pixels: { dataUrl: 'data:image/png;base64,AAAA', width: 640, height: 360 },
+      nearestElementLanguage: 'ja',
+    };
+    const reply = (value: unknown) => readImageSourceRecorderMessage({
+      kind: 'simul:image-source-v2:pixels',
+      requestId: 'file-1',
+      descriptor,
+      status: 'ready',
+      file: value,
+    }, documentIdentity);
+    expect(reply(file)).toMatchObject({ status: 'ready', file });
+    const { url: _url, pixels: _pixels, ...factsOnly } = file;
+    expect(reply(factsOnly)).toMatchObject({ status: 'ready', file: factsOnly });
+    const {
+      naturalWidth: _width, naturalHeight: _height, pixels: _lazyPixels, ...lazy
+    } = file;
+    expect(reply(lazy)).toMatchObject({ status: 'ready', file: lazy });
+    expect(readImageSourceRecorderMessage({
+      kind: 'simul:image-source-v2:pixels',
+      requestId: 'file-1',
+      descriptor,
+      status: 'blocked',
+    }, documentIdentity)).toMatchObject({ status: 'blocked' });
+
+    for (const bad of [
+      { ...file, url: 'javascript:alert(1)' },
+      { ...file, url: 'data:image/png;base64,AAAA' },
+      { ...file, url: 'https://user:secret@cdn.example.test/kv.png' },
+      { ...file, url: `https://cdn.example.test/${'a'.repeat(17_000)}` },
+      { ...file, contentRevision: 2 },
+      { ...file, extra: true },
+      { ...file, layout: { ...layout, objectFit: 'stretch' } },
+      { ...file, layout: { ...layout, extra: 1 } },
+      { ...file, naturalHeight: undefined },
+      // Tab pixels without the tab's natural size cannot be placed.
+      { ...lazy, pixels: file.pixels },
+      { ...file, pixels: { ...file.pixels, dataUrl: 'data:image/jpeg;base64,AAAA' } },
+      { ...file, pixels: { ...file.pixels, width: 4_000, height: 2_000 } },
+      { ...file, pixels: { ...file.pixels, width: 0 } },
+    ]) {
+      expect(reply(bad)).toBeUndefined();
+    }
+  });
+
   it('revalidates canonical accessibility text at the receiver boundary', () => {
     const ready = (text: string) => readImageSourceRecorderMessage({
       kind: 'simul:image-source-v2:accessibility-text',

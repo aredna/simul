@@ -63,6 +63,9 @@ export function formatImageTranslationDiagnostic(
   if (diagnostic.stage === 'capture-deferred') {
     return `job ${diagnostic.ordinal} capture deferred: reason=${diagnostic.reason}; size=${diagnostic.renderedWidth}x${diagnostic.renderedHeight}`;
   }
+  if (diagnostic.stage === 'pixel-source') {
+    return `job ${diagnostic.ordinal} pixels: source=${diagnostic.source}`;
+  }
   if (diagnostic.stage === 'recognition-complete') {
     return `job ${diagnostic.ordinal} recognition complete: provider=${diagnostic.provider}; regions=${diagnostic.regions}; bitmap=${diagnostic.bitmapWidth}x${diagnostic.bitmapHeight}; cache=${diagnostic.cacheHit ? 'hit' : 'miss'}`;
   }

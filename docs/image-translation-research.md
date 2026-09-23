@@ -36,22 +36,37 @@ loaded into memory.
    text, pixel, or hash.
 2. Accessibility text is tried first by default. Decorative, hidden, zero-area,
    filename-like, private, and secret-overlapping evidence is rejected.
-3. Pixel OCR is admitted only for a visible stable crop. Simul compares the
-   exact document, revision, scroll position, bounds, and image geometry before
-   and after capture.
+3. Pixel OCR of an on-screen image uses a visible stable crop. Simul compares
+   the exact document, revision, scroll position, bounds, and image geometry
+   before and after capture.
 4. `tabs.captureVisibleTab` is limited to two calls per second. The relevant
    crop is proportionally downscaled when necessary so recognition never
    receives more than 4 megapixels.
-5. A short-lived crop is handed to the offscreen extension document through
+5. An image the screenshot cannot read (off screen, moving, clipped, or in a
+   background tab) is read from its own file (D58). The source tab first
+   re-checks the same read policy and the image's own paint path, and returns
+   its layout (box, insets, `object-fit`, `object-position`), its CSS natural
+   size once loaded, and its HTTP(S) URL. The side panel then draws the
+   painted region from, in order: the mirror's already-loaded copy when it
+   offers that URL (no request; the mirror is same-origin with the extension
+   and the host grant keeps its canvas readable); the tab's own pixels for a
+   same-site or CORS-enabled image, encoded in the tab; or, under Passive
+   fidelity with a host grant, a `force-cache`, credential-free download of the
+   URL (usually answered by Chrome's cache, since the mirror loads the same
+   URL). File pixels hold only the image, so the screenshot's overlap and
+   cover checks do not apply; text a page paints over the image is not read.
+   A lazy image the page has not fetched is described by layout and URL and
+   read from a download.
+6. A short-lived crop is handed to the offscreen extension document through
    extension-origin storage. The entry is deleted after the job and expires
    after two minutes if normal cleanup is interrupted.
-6. Enabled pixel methods run in saved order through a capacity-one scheduler.
+7. Enabled pixel methods run in saved order through a capacity-one scheduler.
    Provider-specific unavailability falls through without starting an
    unbounded retry loop.
-7. Accepted regions are translated with the same local Chrome Translator
+8. Accepted regions are translated with the same local Chrome Translator
    boundary as page text and projected as clipped, inert sibling overlays in
    the replica.
-8. Before commit, the document, image revision, pixel key, language-pair epoch,
+9. Before commit, the document, image revision, pixel key, language-pair epoch,
    replay lease, replica anchor, and normalized geometry must still match.
 
 Images inside native or ARIA controls require the independent control-images
@@ -98,8 +113,11 @@ processed pixels or geometry inputs differ, even if the image URL is unchanged.
 
 ## Permissions and local assets
 
-Cross-origin images can render while still preventing ordinary canvas reads.
-Simul therefore captures the visible tab rather than fetching the image URL.
+Cross-origin images can render while still preventing ordinary canvas reads
+in the page. Simul therefore captures the visible tab for on-screen images, and
+reads off-screen images from the mirror's copy (readable to the extension under
+its host grant) or a cache-first download; only same-site or CORS-enabled
+images are read from the page's own copy.
 Chrome permits that after a toolbar gesture through `activeTab`; continued
 capture after temporary access expires requires the optional literal
 `<all_urls>` host grant.
