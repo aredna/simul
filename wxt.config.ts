@@ -9,7 +9,7 @@ import {
 } from './tools/ocr-build-profile';
 
 const ocrBuildProfile = readOcrBuildProfile(process.env);
-const betaBuildSuffix = 'beta v.20260922.35';
+const betaBuildSuffix = 'beta v.20260922.36';
 const tesseractEnabled = ocrBuildProfile.enabledProviderIds.includes('tesseract');
 const offscreenOcrEnabled = ocrBuildProfile.enabledProviderIds.some((id) =>
   id === 'tesseract' || id === 'chrome-text-detector',
@@ -82,6 +82,11 @@ function stripSourceMapDirectives(code: string): string {
     '$1',
   );
 }
+
+const TESSERACT_CHUNK_MODIFICATION_NOTICE =
+  '/*! Contains tesseract.js 7.0.0 (Apache-2.0), modified by Simul: its ' +
+  'remote worker, core and language-data fallback locations are replaced by ' +
+  'local-only markers. See THIRD_PARTY_NOTICES.md. */\n';
 
 function removeRemoteTesseractFallbacks(code: string): string {
   return code
@@ -162,6 +167,14 @@ export default defineConfig({
             artifact.code = removeRemoteTesseractFallbacks(
               stripSourceMapDirectives(artifact.code),
             );
+            // Apache-2.0 section 4(b): the chunk carrying the patched
+            // tesseract.js code states that it was changed.
+            if (
+              artifact.code.includes('__SIMUL_LOCAL_WORKER_REQUIRED__') &&
+              !artifact.code.startsWith(TESSERACT_CHUNK_MODIFICATION_NOTICE)
+            ) {
+              artifact.code = `${TESSERACT_CHUNK_MODIFICATION_NOTICE}${artifact.code}`;
+            }
           }
         },
       },

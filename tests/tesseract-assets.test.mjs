@@ -1,5 +1,5 @@
 import { createHash } from 'node:crypto';
-import { readFile, stat } from 'node:fs/promises';
+import { readdir, readFile, stat } from 'node:fs/promises';
 import { resolve } from 'node:path';
 import { describe, expect, it } from 'vitest';
 
@@ -119,6 +119,27 @@ describe('vendored Tesseract artifact catalog', () => {
       expect(source, entry.path).not.toMatch(
         /https?:\/\/(?:cdn\.jsdelivr\.net|unpkg\.com)/u,
       );
+    }
+  });
+
+  it('marks every modified tesseract.js file as changed (Apache-2.0 4(b))', async () => {
+    const worker = await readFile(
+      resolve(vendorRoot, APPROVED_TESSERACT_WORKER_PATH),
+      'utf8',
+    );
+    expect(worker.startsWith('/*! Modified by Simul: tesseract.js 7.0.0')).toBe(true);
+
+    const chunkNames = (await readdir('dist/chrome-unpacked/chunks'))
+      .filter((name) => name.endsWith('.js'));
+    const patched = [];
+    for (const name of chunkNames) {
+      const code = await readFile(`dist/chrome-unpacked/chunks/${name}`, 'utf8');
+      if (code.includes('__SIMUL_LOCAL_WORKER_REQUIRED__')) patched.push(code);
+    }
+    expect(patched.length).toBeGreaterThan(0);
+    for (const code of patched) {
+      expect(code.startsWith('/*! Contains tesseract.js 7.0.0 (Apache-2.0), modified by Simul'))
+        .toBe(true);
     }
   });
 });
