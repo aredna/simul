@@ -258,7 +258,7 @@ each; keep them serial, because concurrent runs make OCR timings noisy.
    owner reviews them one by one.
 3. **Publish 0.5.0** as **D61**, only when the owner says it is ready; do not
    ask. Runbook: `handover-2026-09-22-release-readiness.md`; the release-notes
-   draft needs a line for D51–D55.
+   draft needs a line for D51–D60.
 4. Unchanged: F6 (memoizing `Intl.DisplayNames`) stays declined;
    `deferred-work.md` holds the 28 research-sized entries.
 
