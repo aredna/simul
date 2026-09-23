@@ -28,6 +28,9 @@ const IMAGE_OVERLAY_LINE_HEIGHT = 1.12;
 const IMAGE_OVERLAY_FIT_STEPS = 7;
 export const CAPTION_BAND_MIN_PX = 20;
 export const CAPTION_BAND_MAX_FRACTION = 0.34;
+/** The band grows to this share only when its text would be illegible (O3). */
+export const CAPTION_BAND_GROWN_FRACTION = 0.6;
+const CAPTION_BAND_LEGIBLE_FONT_PX = 9;
 /**
  * Frames an overlay layer keeps re-measuring after a CSS transition or
  * animation starts around a projected image (about 1.5 s at 60 Hz); the end
@@ -407,13 +410,12 @@ export class ImageOverlayProjector {
     projection.regions.forEach((region, index) => {
       const element = regionElements.item(index) as HTMLElement | null;
       if (!element) return;
-      const box = region.placement === 'whole-image'
-        ? captionBandBox(rect.width, rect.height)
-        : mappedBox(projection, region.boundingBox, scaleX, scaleY);
-      element.style.left = `${box.x}px`;
-      element.style.top = `${box.y}px`;
-      element.style.width = `${box.width}px`;
-      element.style.height = `${box.height}px`;
+      if (region.placement === 'whole-image') {
+        placeCaptionBand(element, region.text, rect.width, rect.height);
+        return;
+      }
+      const box = mappedBox(projection, region.boundingBox, scaleX, scaleY);
+      placeRegion(element, box);
       fitRegionText(element, region.text, box.width, box.height);
     });
   }
@@ -606,12 +608,41 @@ function validBox(
 export function captionBandBox(
   width: number,
   height: number,
+  fraction = CAPTION_BAND_MAX_FRACTION,
 ): ImageBoundingBox {
   const bandHeight = roundCss(Math.min(
     height,
-    Math.max(CAPTION_BAND_MIN_PX, height * CAPTION_BAND_MAX_FRACTION),
+    Math.max(CAPTION_BAND_MIN_PX, height * fraction),
   ));
   return { x: 0, y: roundCss(height - bandHeight), width, height: bandHeight };
+}
+
+/**
+ * The caption band keeps a third of the image unless its text would fit only
+ * below a legible size (long alt text on a short image); then it grows, to
+ * at most 60% of the image (review O3, approved by the owner).
+ */
+function placeCaptionBand(
+  element: HTMLElement,
+  text: string,
+  width: number,
+  height: number,
+): void {
+  const band = captionBandBox(width, height);
+  placeRegion(element, band);
+  fitRegionText(element, text, band.width, band.height);
+  if (Number.parseFloat(element.style.fontSize) >= CAPTION_BAND_LEGIBLE_FONT_PX) return;
+  const grown = captionBandBox(width, height, CAPTION_BAND_GROWN_FRACTION);
+  if (grown.height <= band.height) return;
+  placeRegion(element, grown);
+  fitRegionText(element, text, grown.width, grown.height);
+}
+
+function placeRegion(element: HTMLElement, box: ImageBoundingBox): void {
+  element.style.left = `${box.x}px`;
+  element.style.top = `${box.y}px`;
+  element.style.width = `${box.width}px`;
+  element.style.height = `${box.height}px`;
 }
 
 function roundCss(value: number): number {

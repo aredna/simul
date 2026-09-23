@@ -31,7 +31,9 @@ cannot be replayed into a narrower Conservative session.
 Passive Fidelity keeps bounded, sanitized inline declarations, `<style>`
 elements, stylesheet links, custom properties, media/support/container
 queries, layers, pseudo-elements, passive fonts and HTTP(S) backgrounds,
-same-document `url(#fragment)` references, readable constructed/adopted
+fonts embedded as base64 data URLs (D72: often large CJK web fonts; they are
+inert data the page already loaded), same-document `url(#fragment)`
+references, readable constructed/adopted
 stylesheets, and styles inside accessible open shadow roots. Stylesheet element
 order, media attributes, disabled state, and the normal cascade remain
 representable. A `<style>` element inside a hidden or controlled disclosure

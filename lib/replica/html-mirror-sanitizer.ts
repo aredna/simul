@@ -2921,6 +2921,15 @@ function rewriteCssUrlsOutsideStrings(
   return output + css.slice(cursor);
 }
 
+const DATA_FONT_URL_PATTERN =
+  /^data:(?:font\/(?:woff2?|ttf|otf|sfnt|collection)|application\/(?:font-woff2?|x-font-woff|x-font-ttf|x-font-otf|x-font-opentype|font-sfnt|vnd\.ms-fontobject|octet-stream))(?:;[a-z0-9=._-]+)*;base64,[A-Za-z0-9+/=]*$/iu;
+
+/** A base64 font data URL within the string cap; nothing in it can execute. */
+function isPassiveDataFontUrl(value: string): boolean {
+  return value.length <= MAX_HTML_MIRROR_STRING &&
+    DATA_FONT_URL_PATTERN.test(value);
+}
+
 function normalizeCssUrlFunction(
   body: string,
   baseUrl: string,
@@ -2941,6 +2950,11 @@ function normalizeCssUrlFunction(
   const decodedUrl = decodeCssEscapes(raw.trim());
   // A fragment-only CSS URL resolves inside the reconstructed document.
   if (LOCAL_SVG_FRAGMENT_PATTERN.test(decodedUrl)) {
+    return `url("${decodedUrl}")`;
+  }
+  // An embedded web font (often a large CJK font) is inert data the page
+  // already loaded; without it the replica falls back to another font (D72).
+  if (isPassiveDataFontUrl(decodedUrl)) {
     return `url("${decodedUrl}")`;
   }
   if (decodedUrl.startsWith('#')) {
