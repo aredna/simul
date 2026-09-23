@@ -729,6 +729,8 @@ const sourceFollower = new SourceFollower({
     getCurrentWindowId: async () => (await browser.windows.getCurrent()).id,
     getLastFocusedNormalWindowId: async () =>
       (await browser.windows.getLastFocused({ windowTypes: ['normal'] })).id,
+    hasAllSitesAccess: () =>
+      browser.permissions.contains({ origins: ['<all_urls>'] }),
     windowIdNone: browser.windows.WINDOW_ID_NONE,
   },
   detachedIdentityHint,

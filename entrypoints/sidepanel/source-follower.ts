@@ -47,6 +47,8 @@ export interface FollowerBrowser {
   getWindow(windowId: number): Promise<FollowerWindow>;
   getCurrentWindowId(): Promise<number | undefined>;
   getLastFocusedNormalWindowId(): Promise<number | undefined>;
+  /** True when Simul may read every site, so a hidden tab URL is a browser page. */
+  hasAllSitesAccess(): Promise<boolean>;
   readonly windowIdNone: number;
 }
 
@@ -259,6 +261,20 @@ export class SourceFollower {
       if (!currency.isCurrent(request) || state.preferences.popoutTabMode !== 'active') return;
       if (!isFocusedNormalBrowserWindow(sourceWindow)) return;
       const tab = knownTab ?? await browser.getTab(tabId);
+      if (
+        tab.url === undefined || !isSupportedPage(tab.url)
+      ) {
+        // A new tab or browser page: with every site readable, Chrome hides
+        // only such URLs, so wait for a web page (handleTabUpdated follows it
+        // once loaded) instead of asking for a toolbar click.
+        const notWebPage = tab.url !== undefined ||
+          await browser.hasAllSitesAccess().catch(() => false);
+        if (!currency.isCurrent(request) || state.preferences.popoutTabMode !== 'active') return;
+        if (notWebPage) {
+          this.environment.invalidateCompanion(UI_STRINGS.statusActiveTabNotWebPage);
+          return;
+        }
+      }
       const identity = identityFromTab(tab, undefined, true);
       if (!currency.isCurrent(request) || state.preferences.popoutTabMode !== 'active') return;
       state.detachedSourceWindowId = windowId;
@@ -357,7 +373,11 @@ export class SourceFollower {
     const state = this.#state;
     const { navigationRefreshGate } = this.environment;
     const followed = state.followedPageIdentity;
-    if (!followed || followed.tabId !== tabId) return;
+    if (!followed) {
+      this.#followLoadedActiveTab(tabId, changeInfo, tab);
+      return;
+    }
+    if (followed.tabId !== tabId) return;
     // An update from the tab being left can race the activation event for the
     // newly selected tab. In active-follow mode it is stale immediately and
     // must not invalidate the newer identity request.
@@ -470,6 +490,33 @@ export class SourceFollower {
   }
 
   // --- Private resolution steps.
+
+  /**
+   * In active mode the companion follows nothing after the active tab showed
+   * a new-tab or browser page. Follow that tab once it finishes loading a web
+   * page, rather than waiting for the next tab switch.
+   */
+  #followLoadedActiveTab(
+    tabId: number,
+    changeInfo: TabChangeInfo,
+    tab: UpdatedTab,
+  ): void {
+    const state = this.#state;
+    if (
+      tab.active !== true ||
+      changeInfo.status !== 'complete' ||
+      tab.url === undefined ||
+      !isSupportedPage(tab.url) ||
+      state.activeFollowRequest !== undefined ||
+      !shouldFollowActivatedTab(
+        this.#isDetachedWindow,
+        state.preferences.popoutTabMode,
+        state.panelWindowId,
+        tab.windowId,
+      )
+    ) return;
+    void this.followActivatedSourceTab(tabId, tab.windowId);
+  }
 
   async #followMovedLockedSourceTab(
     tabId: number,
