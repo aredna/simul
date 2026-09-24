@@ -3565,3 +3565,31 @@ not be public in the git history, please remove that."
   references. PR #22's description edit history holds four revisions naming
   the bank (2026-09-23 06:54:27Z, 07:15:14Z, 07:15:33Z, 07:34:32Z UTC); each
   can be deleted from the "edited" menu on the description.
+
+### D81. A fresh public repository; the old one archived privately (2026-09-24)
+
+Owner: "Could we make this repo private, rename it to something else, start
+a new repo without the old information for Simul, and then push that one
+under the current release?" This follows D80: GitHub keeps pull-request refs
+that nobody can push, so the rewritten repository still served the old
+commits through PR #22 and #23 to anyone, signed in or not.
+
+- **Old repository.** Made private, then renamed `aredna/simul-archive`. It
+  keeps every PR, release and ref; signed-out requests for it, its PRs and
+  the old commit pages now return 404. It had no stars, watchers, forks,
+  webhooks, deploy keys, Pages site or secrets, so nothing was lost.
+- **New repository `aredna/simul`** (public): the D80-clean `main` and the
+  tags `v0.4.0`, `v0.5.0`, `v0.5.1` and the hackathon submission tag, with no
+  pull-request refs. Before the push, the D80 entry itself was found to name
+  the bank again; that tip commit was amended first, and the exact refs to be
+  pushed were rescanned clean. Same description, topics (`bmad`,
+  `chrome-extension`, `typescript`, `wxt`), issues and projects on, wiki off,
+  delete-branch-on-merge, private vulnerability reporting, Dependabot alerts
+  and security updates, secret scanning and push protection.
+- **Release.** v0.5.1 "Simul 0.5.1 beta (v.20260924.1) — minor update",
+  marked Latest, with the same `simul-0.5.1-chrome-unpacked.zip` (sha256
+  `e2046337…`, content identical to `v0.5.1:dist/chrome-unpacked`). Older
+  releases (0.4.0, 0.5.0) stay in the archive; their tags are in the new
+  repository.
+- **Local clone.** `origin` (`https://github.com/aredna/simul.git`) now
+  resolves to the new repository; `main` tracks it.
