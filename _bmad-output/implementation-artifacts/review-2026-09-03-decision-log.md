@@ -3593,3 +3593,72 @@ commits through PR #22 and #23 to anyone, signed in or not.
   repository.
 - **Local clone.** `origin` (`https://github.com/aredna/simul.git`) now
   resolves to the new repository; `main` tracks it.
+
+### D82. Hover menus open in the mirror, from either side (2026-09-24)
+
+Branch `fix/hover-menus`. Owner report on their bank's signed-in pages: "Not
+all menus on this site are not what he was expected" and "Mouseover menus are
+not popping up to show everything on our sidewall [side panel] screen." The
+signed-in pages need an account, so the bank's public demo of its signed-in
+screens (a static copy of the same header) was the reproduction, with a
+public site's scripted mega menu and freee's header as the other two cases.
+
+- **Reproduced in Chrome for Testing.** The bank's header is a CSS `:hover`
+  menu: `li > a` (no `href`) `+ ul`, the list at `visibility: hidden;
+  opacity: 0` until `li:hover`, in a `<header>`, no `<nav>`, no script.
+  Hovering it on the page opened it there and not in the mirror; hovering it
+  in the mirror did nothing. The mega menu (`li > span + div`, opened by a
+  jQuery `mouseenter`) followed a hover on the page but not a hover in the
+  mirror.
+- **Causes.** (1) The mirror draws the page with `pointer-events: none`, so
+  the page's `:hover` rules never match there, and a CSS hover changes no DOM
+  on the page for the mirror to copy. (2) Simul's own menu preview (D62)
+  recognized a menu only inside `<nav>` and only with a button or link
+  trigger; both sites failed that. (3) The preview floated the panel into a
+  popup on `<body>`, where descendant-scoped page styles no longer applied:
+  the mega menu became an unreadable dark block. (4) Older than this report:
+  when a hover on the page repainted the header, the live patch rebuilt the
+  text nodes of every hidden menu, and the receiver dropped their text
+  instead of writing it into the new nodes; one menu without text then
+  withdrew every menu (`refresh-clear`), until the page changed again.
+- **Changes.** One shared rule (`lib/replica/structural-menu-shape.ts`) on
+  both sides: a two-child container is a menu inside navigation or a page
+  header, or as a list item; the trigger may be plain heading text (a span, a
+  heading, an anchor without `href`, no role, no link or button inside); the
+  panel is never a single link (freee's hidden mobile-only link had turned
+  its desktop wrapper into a false menu). The two-child test runs before the
+  painted-path walks. Structural menus open in place (a new `inline`
+  presentation): the page's own panel is uncollapsed where the page draws it,
+  with its styles, plus content the page fades in once open (opacity 0 or
+  visibility hidden); `display: none` content stays hidden, and a closed
+  panel keeps the page's own state and takes no pointer input. The wheel
+  over an open in-place menu scrolls the mirror, as it scrolls the page
+  (found while verifying: it was swallowed). The proof's
+  `expanded` now carries the source's painted state (the protocol accepted
+  only `false`), so a menu open on the page opens in the mirror too. A
+  re-install keeps a menu open while the reader's pointer is on it. The
+  receiver rebinds a record whose replica node a patch replaced, and drops
+  only the menu that lost its text.
+- **Verified in Chrome for Testing.** Bank demo: all 8 menus open on hover in
+  the mirror at the page's size and look, and follow a hover on the page;
+  every item is translated within 5 s and stays translated through a page
+  hover. Mega menu: all 8 open in both directions with the page's own dark
+  band and text; a mirror hover stays open through 12 s of carousel patches;
+  translations survive a page hover. freee: the four header menus open in
+  place, drawn as on the page (they were popups); the false menu is gone.
+- **Tests.** Session: a header list item with an `href`-less anchor, a
+  navigation list item with a span, and a list item outside navigation are
+  menus; a plain wrapper outside those, a wrapper around a button and a
+  single-link panel are not; `expanded` follows the source's painted panel.
+  Receiver: a header CSS-hover menu is accepted and opens when the source
+  shows it; a single-link panel is refused; text is rewritten into a replaced
+  node with an upsert; only the menu that lost its text stops. Disclosure:
+  an inline menu opens in place with faded content shown and a mobile-only
+  copy hidden, leaves the wheel to the page, and restores the page's styles
+  on close. Protocol: `expanded`
+  may be `true`, still only a boolean. Every new positive test fails on the
+  old code.
+- **Docs.** `docs/replica-fidelity.md` (structural menus, Show everything).
+
+Build identity `0.5.1 beta v.20260924.2`; `dist/chrome-unpacked` re-synced.
+Gate: `npm run check` green, **1,526 tests pass, 1 skipped** (+12).

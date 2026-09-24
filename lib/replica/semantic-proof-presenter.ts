@@ -480,18 +480,29 @@ function installStructuralMenuDisclosure(
   if (!panel.parentNode || !trigger.parentNode) return undefined;
   let controller: ReadOnlyReplicaDisclosure;
   try {
+    // The page's own panel opens where the page draws it. It opens while the
+    // page shows it (a hover on the source), and stays open through a
+    // re-install while the reader's pointer is on it.
     controller = installReadOnlyReplicaDisclosure({
       anchor: trigger,
       trigger,
       panel,
-      presentation: 'popup',
+      presentation: 'inline',
       manageTriggerExpanded: true,
-      initiallyOpen: proof.expanded,
+      initiallyOpen: proof.expanded || isHovered(trigger) || isHovered(panel),
     });
   } catch {
     return undefined;
   }
   return () => controller.dispose();
+}
+
+function isHovered(element: Element): boolean {
+  try {
+    return element.matches(':hover');
+  } catch {
+    return false;
+  }
 }
 
 function installSemanticFrameAccessibility(
