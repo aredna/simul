@@ -1110,6 +1110,149 @@ describe('semantic source session', () => {
     }
   });
 
+  it.each([
+    [
+      'a header list item whose heading is an anchor without href (CSS :hover)',
+      `<header><ul><li id="wrapper"><a id="trigger">Transfers</a>
+        <ul id="panel" class="collapsed"><li><a>One-off transfer</a></li></ul>
+      </li></ul></header>`,
+      'visibility',
+    ],
+    [
+      'a navigation list item whose heading is a span (a scripted mega menu)',
+      `<nav><ul><li id="wrapper"><span id="trigger">Deposits</span>
+        <div id="panel" class="collapsed"><a href="/yen">One-off transfer</a></div>
+      </li></ul></nav>`,
+      'display',
+    ],
+    [
+      'a list item outside navigation',
+      `<main><ul><li id="wrapper"><span id="trigger">More</span>
+        <ul id="panel" class="collapsed"><li><a href="/faq">One-off transfer</a></li></ul>
+      </li></ul></main>`,
+      'opacity',
+    ],
+  ] as const)('infers a hover menu in %s (D82)', (_, body, collapse) => {
+    const { document, window } = parseHTML(`<html><body>${body}</body></html>`);
+    installPaintedTabFixture(document, window as unknown as Window);
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(
+      port,
+      document,
+      window,
+      'isolated-html',
+      undefined,
+      structuralMenuStyle((element) =>
+        element.classList.contains('collapsed') ? collapse : undefined),
+    );
+    port.emit(createSemanticSourceStart(
+      'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+    ));
+
+    expect(port.messages[0]!.proofs).toContainEqual(expect.objectContaining({
+      kind: 'structural-menu',
+      containerNodeId: nodeId(document.querySelector('#wrapper')!),
+      triggerNodeId: nodeId(document.querySelector('#trigger')!),
+      panelNodeId: nodeId(document.querySelector('#panel')!),
+      expanded: false,
+    }));
+    expect(port.messages[0]!.records).toContainEqual(expect.objectContaining({
+      text: 'One-off transfer',
+      gate: 'disclosureContent',
+    }));
+    session.dispose();
+  });
+
+  it.each([
+    [
+      'a plain wrapper outside navigation, a header or a list',
+      `<main><div id="wrapper"><span id="trigger">Note</span>
+        <div id="panel" class="collapsed">Details</div></div></main>`,
+    ],
+    [
+      'a wrapper around a real button (the button is the trigger)',
+      `<nav><ul><li id="wrapper"><div id="trigger"><button>Products</button></div>
+        <div id="panel" class="collapsed"><a href="/books">Accounting</a></div>
+      </li></ul></nav>`,
+    ],
+    [
+      'a hidden mobile-only link beside the heading (freee)',
+      `<nav><div id="wrapper"><span id="trigger">Tax advisers</span>
+        <a id="panel" class="collapsed" href="/tax">Tax advisers</a></div></nav>`,
+    ],
+  ] as const)('does not infer a menu from %s (D82)', (_, body) => {
+    const { document, window } = parseHTML(`<html><body>${body}</body></html>`);
+    installPaintedTabFixture(document, window as unknown as Window);
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(
+      port,
+      document,
+      window,
+      'isolated-html',
+      undefined,
+      structuralMenuStyle((element) =>
+        element.classList.contains('collapsed') ? 'display' : undefined),
+    );
+    port.emit(createSemanticSourceStart(
+      'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+    ));
+
+    expect(port.messages[0]!.proofs.some((proof) =>
+      proof.kind === 'structural-menu' &&
+      proof.triggerNodeId === nodeId(document.querySelector('#trigger')!)))
+      .toBe(false);
+    session.dispose();
+  });
+
+  it('reports a hover menu open while the source page shows it (D82)', () => {
+    // A CSS :hover menu changes no DOM on the page; only the painted state of
+    // its panel tells the replica to show it.
+    const { document, window } = parseHTML(`<html><body><header><ul>
+      <li id="wrapper"><a id="trigger">Transfers</a>
+        <ul id="panel"><li><a>One-off transfer</a></li></ul></li>
+      </ul></header></body></html>`);
+    installPaintedTabFixture(document, window as unknown as Window);
+    const panel = document.querySelector('#panel')!;
+    let hovered = false;
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(
+      port,
+      document,
+      window,
+      'isolated-html',
+      undefined,
+      structuralMenuStyle((element) =>
+        element === panel && !hovered ? 'visibility' : undefined),
+    );
+    port.emit(createSemanticSourceStart(
+      'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+    ));
+    const first = port.messages[0]!.proofs.find(
+      (proof) => proof.kind === 'structural-menu',
+    );
+    expect(first).toEqual(expect.objectContaining({ expanded: false }));
+
+    hovered = true;
+    port.emit(createSemanticSourceAck(
+      identity,
+      port.messages[0]!.policyFingerprint,
+      port.messages[0]!.sequence,
+    ));
+    session.refresh();
+    expect(port.messages[1]!.proofs).toContainEqual(expect.objectContaining({
+      kind: 'structural-menu',
+      relationId: first?.kind === 'structural-menu' ? first.relationId : '',
+      expanded: true,
+    }));
+    session.dispose();
+  });
+
   it('sends no disabled-state proof for a plain link and sends it after menu proofs', () => {
     const { document, window } = parseHTML(`<html><body>
       <a id="link" href="/about">About</a><button id="button">Go</button>
@@ -2346,13 +2489,13 @@ function paintedRectList(): DOMRectList {
 function structuralMenuStyle(
   collapseFor: (
     element: Element,
-  ) => 'display' | 'content-visibility' | 'opacity' | undefined,
+  ) => 'display' | 'content-visibility' | 'opacity' | 'visibility' | undefined,
 ): Window['getComputedStyle'] {
   return ((element: Element) => {
     const collapse = collapseFor(element);
     return {
       display: collapse === 'display' ? 'none' : 'block',
-      visibility: 'visible',
+      visibility: collapse === 'visibility' ? 'hidden' : 'visible',
       opacity: collapse === 'opacity' ? '0' : '1',
       overflowX: 'visible',
       overflowY: 'visible',

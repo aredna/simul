@@ -1,4 +1,9 @@
-export type ReplicaDisclosurePresentation = 'list' | 'popup';
+/**
+ * `popup` floats a copy-styled panel beside its trigger; `inline` reveals the
+ * page's own panel where the page draws it, as a CSS or scripted hover menu
+ * does; `list` keeps a select's options inline.
+ */
+export type ReplicaDisclosurePresentation = 'inline' | 'list' | 'popup';
 
 export interface ReplicaDisclosurePlacementInput {
   readonly anchor: Pick<DOMRect, 'bottom' | 'height' | 'left' | 'right' | 'top' | 'width'>;
@@ -78,6 +83,7 @@ const PANEL_PREVIEW_EVENTS = new Set([
   'wheel',
 ]);
 const DISCLOSURE_LEAVE_GRACE_MS = 100;
+const MAX_INLINE_REVEAL_DESCENDANTS = 2_000;
 const MAX_DISCLOSURE_FOCUS_CANDIDATES = 256;
 const DISCLOSURE_FOCUS_SELECTOR = [
   'a[href]',
@@ -102,6 +108,9 @@ const KEYBOARD_ACTIVATION_ROLES = new Set([
 ]);
 const OWNED_DISCLOSURE_TRIGGERS = new WeakSet<object>();
 const OWNED_DISCLOSURE_PANELS = new WeakSet<object>();
+/** In-place panels scroll with the page, so the wheel is not theirs. */
+const INLINE_DISCLOSURE_PANELS = new WeakSet<object>();
+const PAGE_SCROLL_EVENTS = new Set(['scroll', 'wheel']);
 
 interface DocumentDisclosureState {
   readonly controllers: Set<ReplicaDisclosureController>;
@@ -198,7 +207,7 @@ export function installReadOnlyReplicaDisclosure(
   options: ReadOnlyReplicaDisclosureOptions,
 ): ReadOnlyReplicaDisclosure {
   if (
-    options.presentation === 'popup' &&
+    options.presentation !== 'list' &&
     (!options.trigger || options.trigger.ownerDocument !== options.anchor.ownerDocument)
   ) {
     throw new Error('A popup disclosure requires a same-document trigger.');
@@ -250,7 +259,11 @@ export function isReadOnlyReplicaDisclosureEvent(event: Event): boolean {
       candidate,
       OWNED_DISCLOSURE_PANELS,
       'data-simul-replica-disclosure-panel',
-    )) return PANEL_PREVIEW_EVENTS.has(event.type);
+    )) {
+      return PANEL_PREVIEW_EVENTS.has(event.type) &&
+        !(INLINE_DISCLOSURE_PANELS.has(candidate as object) &&
+          PAGE_SCROLL_EVENTS.has(event.type));
+    }
     return false;
   });
 }
@@ -280,6 +293,7 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
   #suppressFocusOpen = false;
   #deferredCloseTimer: number | undefined;
   #resizeObserver?: ResizeObserver;
+  #inlineRevealed: Array<readonly [HTMLElement, string | null]> = [];
 
   readonly #onTriggerClick = (event: Event): void => {
     blockReplicaActivation(event);
@@ -406,10 +420,13 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
     this.anchor.setAttribute('data-simul-replica-disclosure-anchor', DISCLOSURE_MARKER);
     this.panel.setAttribute('data-simul-replica-disclosure-panel', DISCLOSURE_MARKER);
     OWNED_DISCLOSURE_PANELS.add(this.panel);
-    setImportant(this.panel, 'box-sizing', 'border-box');
-    setImportant(this.panel, 'overscroll-behavior', 'contain');
-    setImportant(this.panel, 'overflow-x', 'hidden');
-    setImportant(this.panel, 'overflow-y', 'auto');
+    if (this.presentation === 'inline') INLINE_DISCLOSURE_PANELS.add(this.panel);
+    if (this.presentation !== 'inline') {
+      setImportant(this.panel, 'box-sizing', 'border-box');
+      setImportant(this.panel, 'overscroll-behavior', 'contain');
+      setImportant(this.panel, 'overflow-x', 'hidden');
+      setImportant(this.panel, 'overflow-y', 'auto');
+    }
     this.panel.addEventListener('auxclick', this.#onPanelActivation, true);
     this.panel.addEventListener('click', this.#onPanelActivation, true);
     this.panel.addEventListener('contextmenu', this.#onPanelActivation, true);
@@ -446,13 +463,20 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
     trigger.addEventListener('pointerleave', this.#onTriggerPointerLeave, true);
     trigger.addEventListener('focusin', this.#onFocusIn, true);
     trigger.addEventListener('focusout', this.#onFocusOut, true);
-    this.panel.setAttribute('hidden', '');
-    this.panel.setAttribute('popover', 'manual');
-    setImportant(this.panel, 'display', 'none');
-    setImportant(this.panel, 'pointer-events', 'auto');
-    setImportant(this.panel, 'position', 'fixed');
-    setImportant(this.panel, 'margin', '0');
-    setImportant(this.panel, 'z-index', '2147483647');
+    if (this.presentation === 'inline') {
+      // Closed, the panel keeps the page's own state (a scripted menu the
+      // source opens shows through). It is not a pointer target then, so an
+      // invisible panel cannot catch the pointer or the wheel.
+      setImportant(this.panel, 'pointer-events', 'none');
+    } else {
+      this.panel.setAttribute('hidden', '');
+      this.panel.setAttribute('popover', 'manual');
+      setImportant(this.panel, 'display', 'none');
+      setImportant(this.panel, 'pointer-events', 'auto');
+      setImportant(this.panel, 'position', 'fixed');
+      setImportant(this.panel, 'margin', '0');
+      setImportant(this.panel, 'z-index', '2147483647');
+    }
 
     if (options.initiallyOpen) {
       if (this.#identityIsConnected() && this.document.body) {
@@ -488,7 +512,7 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
   open(): void {
     this.#cancelDeferredClose();
     if (
-      this.#disposed || this.presentation !== 'popup' || this.#open ||
+      this.#disposed || this.presentation === 'list' || this.#open ||
       !this.#identityIsConnected()
     ) return;
     const body = this.document.body;
@@ -501,6 +525,10 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
       this.trigger!.setAttribute('aria-expanded', 'true');
     }
     this.anchor.setAttribute('data-simul-replica-disclosure-open', DISCLOSURE_MARKER);
+    if (this.presentation === 'inline') {
+      this.#revealInline();
+      return;
+    }
     this.panel.setAttribute('data-simul-replica-disclosure-overlay', DISCLOSURE_MARKER);
     this.panel.removeAttribute('hidden');
     setImportant(this.panel, 'display', 'block');
@@ -526,6 +554,15 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
       this.trigger?.setAttribute('aria-expanded', 'false');
     }
     this.anchor.removeAttribute('data-simul-replica-disclosure-open');
+    if (this.presentation === 'inline') {
+      for (const [element, style] of this.#inlineRevealed) {
+        restoreAttribute(element, 'style', style);
+      }
+      this.#inlineRevealed = [];
+      restoreAttribute(this.panel, 'style', this.originalPanelStyle);
+      setImportant(this.panel, 'pointer-events', 'none');
+      return;
+    }
     this.panel.removeAttribute('data-simul-replica-disclosure-overlay');
     this.panel.removeAttribute('data-simul-replica-disclosure-placement');
     tryHidePopover(this.panel);
@@ -542,7 +579,7 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
       this.dispose();
       return;
     }
-    if (this.#open) this.#position();
+    if (this.#open && this.presentation === 'popup') this.#position();
   }
 
   disposeIfIdentityLost(): void {
@@ -591,6 +628,7 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
     this.anchor.removeAttribute('data-simul-replica-disclosure-open');
     this.trigger?.removeAttribute('data-simul-replica-disclosure-trigger');
     OWNED_DISCLOSURE_PANELS.delete(this.panel);
+    INLINE_DISCLOSURE_PANELS.delete(this.panel);
     if (this.trigger) OWNED_DISCLOSURE_TRIGGERS.delete(this.trigger);
     if (this.manageTriggerExpanded && this.trigger) {
       restoreAttribute(
@@ -603,6 +641,54 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
     restoreAttributes(this.panel, this.originalPanelAttributes);
     restoreAttribute(this.panel, 'style', this.originalPanelStyle);
     unregisterController(this);
+  }
+
+  /**
+   * Shows the page's own panel in place, as the page's hover does: collapsed
+   * by display, visibility, opacity or content-visibility, it is uncollapsed
+   * and drawn with the page's styles and position. Content the page fades in
+   * once the menu is open (opacity 0 or visibility hidden until a script adds
+   * a class) is shown too; content hidden with display none, such as a
+   * mobile-only copy, stays hidden.
+   */
+  #revealInline(): void {
+    const view = this.document.defaultView;
+    let display = '';
+    try {
+      display = view?.getComputedStyle(this.panel).display ?? '';
+    } catch {
+      // An unreadable style still reveals with the block default below.
+    }
+    if (display === '' || display === 'none') {
+      setImportant(this.panel, 'display', 'block');
+    }
+    setImportant(this.panel, 'visibility', 'visible');
+    setImportant(this.panel, 'opacity', '1');
+    setImportant(this.panel, 'content-visibility', 'visible');
+    setImportant(this.panel, 'pointer-events', 'auto');
+    if (!view) return;
+    let descendants: NodeListOf<Element>;
+    try {
+      descendants = this.panel.querySelectorAll('*');
+    } catch {
+      return;
+    }
+    const limit = Math.min(descendants.length, MAX_INLINE_REVEAL_DESCENDANTS);
+    for (let index = 0; index < limit; index += 1) {
+      const element = descendants.item(index) as HTMLElement | null;
+      if (!element || !('style' in element)) continue;
+      try {
+        const style = view.getComputedStyle(element);
+        const faded = style.opacity === '0';
+        const hidden = style.visibility === 'hidden';
+        if (!faded && !hidden) continue;
+        this.#inlineRevealed.push([element, element.getAttribute('style')]);
+        if (faded) setImportant(element, 'opacity', '1');
+        if (hidden) setImportant(element, 'visibility', 'visible');
+      } catch {
+        // An unreadable descendant keeps the page's own presentation.
+      }
+    }
   }
 
   #observeAnchorSize(): void {
@@ -658,7 +744,7 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
 
   #scheduleDeferredClose(): void {
     if (
-      this.#disposed || this.presentation !== 'popup' || !this.#open ||
+      this.#disposed || this.presentation === 'list' || !this.#open ||
       this.#deferredCloseTimer !== undefined
     ) return;
     const view = this.document.defaultView;

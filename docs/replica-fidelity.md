@@ -157,11 +157,25 @@ displayed value of a non-editable spinbutton or slider and the result an
 proof channel enables a local preview in the isolated replica only when a
 public activation trigger maps through one unique same-document
 `aria-controls` relation to a matching menu/listbox, or to a region containing
-exactly one matching public menu. Inside navigation, a container holding only a
-trigger and a collapsed panel of public links is also a menu even without ARIA
-roles; its trigger may carry its own plain `aria-expanded` (freee's header
-buttons do) but no `aria-controls`. An opened preview is forced opaque and
-drawn on a plain canvas background. The preview state is extension-owned and
+exactly one matching public menu. An opened ARIA preview is forced opaque and
+drawn on a plain canvas background.
+
+A container holding only a trigger and a collapsed panel is also a menu even
+without ARIA roles when it sits inside navigation or a page header, or is
+itself a list item (D82; before D82 only inside navigation, and only with a
+button or link trigger). The trigger is a button, a link, or plain heading text
+(a span, a heading, or an anchor without an href, with no link or button
+inside); it may carry its own plain `aria-expanded` (freee's header buttons do)
+but no `aria-controls`. The panel is a container, never a single link: a
+hidden sibling link is usually the page's mobile-only copy of the heading.
+Such a menu opens in place, drawn by the page's own styles where the page
+draws it, when the reader hovers its trigger in the replica, and while the
+source page shows it. A CSS `:hover` menu changes no DOM on the page, so the
+page side reports the panel's painted state and the replica opens it to match.
+Content the page fades in once a menu is open (opacity 0 or visibility hidden
+until a script adds a class) is shown with it; content hidden with
+`display: none`, such as a mobile-only copy, stays hidden. Only the trigger and
+an open panel take pointer input. The preview state is extension-owned and
 does not send events to the source or rewrite authored source state. Missing,
 duplicate, stale, mismatched, editable, or private relations remain
 pointer-inert. Editable comboboxes, searchboxes, textboxes, contenteditable
@@ -251,7 +265,7 @@ own dropdown previews set them: `aria-expanded`, `aria-controls` and
 `aria-haspopup`. ARIA menus and listboxes are drawn with the page's own styles
 rather than an isolated facsimile, so the replica does not open its own
 preview of an ARIA-controlled dropdown while the switch is on (structural
-navigation menus still open). The mirror still cannot act on the page: every
+menus still open). The mirror still cannot act on the page: every
 invariant in the previous section other than the privacy blocks holds.
 
 Both sides of one mirror use the same setting: the panel applies it before it

@@ -155,9 +155,9 @@ export interface SemanticDisclosureStateProof {
 }
 
 /**
- * A strict non-ARIA navigation menu inferred from one common wrapper. The
- * relationship is structural only: opening is owned entirely by the inert
- * replica and never reflects or dispatches source activation.
+ * A strict non-ARIA menu inferred from one common wrapper. The relationship is
+ * structural only: the replica opens it on the reader's hover and while the
+ * source page shows it, and never dispatches source activation.
  */
 export interface SemanticStructuralMenuProof {
   readonly kind: 'structural-menu';
@@ -782,7 +782,7 @@ export function readSemanticSourceProof(
       !positiveSafeInteger(input.containerNodeId) ||
       !positiveSafeInteger(input.triggerNodeId) ||
       !positiveSafeInteger(input.panelNodeId) ||
-      input.popupRole !== 'menu' || input.expanded !== false ||
+      input.popupRole !== 'menu' || typeof input.expanded !== 'boolean' ||
       new Set([
         input.containerNodeId,
         input.triggerNodeId,

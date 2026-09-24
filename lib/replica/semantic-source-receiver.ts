@@ -25,6 +25,11 @@ import {
   type ReplicaSourceDocumentIdentity,
 } from './source-identity';
 import { readSourceFlatTreeElementPath } from './source-privacy-policy';
+import {
+  hasStructuralMenuContext,
+  isPlainStructuralMenuTrigger,
+  isStructuralMenuPanelElement,
+} from './structural-menu-shape';
 
 export interface SemanticSourceReceiverEnvironment {
   readonly document: ReplicaSourceDocumentIdentity;
@@ -374,6 +379,17 @@ export class SemanticSourceReceiver {
     const changes: ReplicaSourceTextChange[] = [];
     for (const [projectionNodeId, entry] of this.#entries) {
       if (this.#entryIsStillSafe(entry) && entry.binding.reapply()) continue;
+      const rebound = this.#rebind(entry);
+      if (rebound) {
+        this.#entries.set(projectionNodeId, rebound);
+        if (rebound.binding.translatable) {
+          changes.push(Object.freeze({
+            kind: 'upsert',
+            record: rebound.translationRecord,
+          }));
+        }
+        continue;
+      }
       entry.binding.restore();
       this.#entries.delete(projectionNodeId);
       if (!entry.binding.translatable) continue;
@@ -392,10 +408,14 @@ export class SemanticSourceReceiver {
         retainedProofs.set(semanticSourceProofIdentity(resolved.proof), refreshed);
       }
     }
-    if (!this.#structuralMenusHaveAdmittedText(
-      retainedProofs.values(),
-      [...this.#entries.values()].map(({ sourceRecord }) => sourceRecord),
-    )) retainedProofs.clear();
+    // A menu whose panel text is gone is no longer presented; the others are.
+    const currentRecords = [...this.#entries.values()]
+      .map(({ sourceRecord }) => sourceRecord);
+    for (const [proofId, resolved] of retainedProofs) {
+      if (!this.#structuralMenusHaveAdmittedText([resolved], currentRecords)) {
+        retainedProofs.delete(proofId);
+      }
+    }
     let presented = true;
     try {
       presented = this.environment.applyProofs?.(
@@ -689,6 +709,26 @@ export class SemanticSourceReceiver {
       trigger: trigger as HTMLElement,
       panel: panel as HTMLElement,
     });
+  }
+
+  /**
+   * A live patch can replace the replica node a record was written to (a
+   * rematerialized subtree, as when a hover on the page repaints the header).
+   * The same source node then resolves to the new replica node, which gets the
+   * record again instead of losing its text until the source changes.
+   */
+  #rebind(entry: SemanticEntry): SemanticEntry | undefined {
+    if (entry.binding.target.isConnected) return undefined;
+    const target = this.#resolveAndValidate(entry.sourceRecord);
+    if (!target || target === entry.binding.target) return undefined;
+    let binding: SemanticBinding | undefined;
+    try {
+      binding = this.#createBinding(target, entry.sourceRecord.presentation);
+    } catch {
+      return undefined;
+    }
+    if (!binding?.write(entry.sourceRecord.text)) return undefined;
+    return Object.freeze({ ...entry, binding });
   }
 
   #structuralMenusHaveAdmittedText(
@@ -1124,12 +1164,14 @@ function receiverStructuralMenuRelationshipIsSafe(
     container.getRootNode() !== trigger.getRootNode() ||
     container.getRootNode() !== panel.getRootNode() ||
     trigger.parentElement !== container || panel.parentElement !== container ||
+    !isStructuralMenuPanelElement(panel) ||
     safeNullableAttribute(container, 'hidden') !== null ||
     safeNullableAttribute(trigger, 'hidden') !== null ||
     safeAttribute(container, 'aria-hidden').trim().toLowerCase() === 'true' ||
     safeAttribute(trigger, 'aria-hidden').trim().toLowerCase() === 'true' ||
     !receiverStructuralTriggerIsUnclaimed(trigger, relationId) ||
-    !receiverDisclosureTriggerIsSafe(trigger)
+    (!receiverDisclosureTriggerIsSafe(trigger) &&
+      !isPlainStructuralMenuTrigger(trigger))
   ) return false;
   let children: Element[];
   try {
@@ -1140,10 +1182,7 @@ function receiverStructuralMenuRelationshipIsSafe(
   if (
     children.length !== 2 || !children.includes(trigger) || !children.includes(panel)
   ) return false;
-  const path = readSourceFlatTreeElementPath(container);
-  return Boolean(path?.some((ancestor) =>
-    ancestor.localName.toLowerCase() === 'nav' ||
-    safeAttribute(ancestor, 'role').trim().toLowerCase() === 'navigation'));
+  return hasStructuralMenuContext(container);
 }
 
 /**

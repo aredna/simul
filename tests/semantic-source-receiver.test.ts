@@ -715,11 +715,17 @@ describe('semantic source receiver', () => {
         identity, 'read-v1-111111', 1, [record], [structuralMenuProof()],
       ))).toBeDefined();
       expect(item.textContent).toBe('Startup School');
-      expect(panel.hasAttribute('hidden')).toBe(true);
-
-      trigger.dispatchEvent(new window.Event('pointerenter', { bubbles: true }));
+      // Closed, the panel keeps the page's own state and catches no pointer.
       expect(panel.hasAttribute('hidden')).toBe(false);
+      expect(panel.style.getPropertyValue('display')).toBe('');
+      expect(panel.style.getPropertyValue('pointer-events')).toBe('none');
+
+      // Open, it is revealed where the page draws it (D82).
+      trigger.dispatchEvent(new window.Event('pointerenter', { bubbles: true }));
       expect(panel.style.getPropertyValue('display')).toBe('block');
+      expect(panel.style.getPropertyValue('visibility')).toBe('visible');
+      expect(panel.style.getPropertyValue('opacity')).toBe('1');
+      expect(panel.parentElement).toBe(container);
       expect(trigger.getAttribute('aria-expanded')).toBe('true');
 
       const action = new window.Event('click', { bubbles: true, cancelable: true });
@@ -728,6 +734,119 @@ describe('semantic source receiver', () => {
       receiver.clear();
       expect(trigger.hasAttribute('data-simul-replica-disclosure-trigger'))
         .toBe(false);
+  });
+
+  it('presents a CSS hover menu in a header list item, open while the source shows it (D82)', () => {
+    const { document } = parseHTML(`<html><body><header><ul>
+      <li id="wrapper"><a id="trigger">Transfers</a>
+      <ul id="panel"><li id="item">***</li></ul></li>
+      </ul></header><iframe id="frame"></iframe></body></html>`);
+    const { receiver, trigger, panel } = hoverMenuReplica(document, [16, 17, 18, 19]);
+
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 1,
+      [menuTextRecord(19, 'One-off transfer', 'li')],
+      [{ ...structuralMenuProof(), expanded: true }],
+    ))).toBeDefined();
+    expect(document.querySelector('#item')!.textContent).toBe('One-off transfer');
+    expect(trigger.getAttribute('aria-expanded')).toBe('true');
+    expect(panel.style.getPropertyValue('visibility')).toBe('visible');
+    expect(panel.style.getPropertyValue('opacity')).toBe('1');
+  });
+
+  it('refuses a structural menu whose panel is a single link (D82)', () => {
+    const { document } = parseHTML(`<html><body><nav>
+      <div id="wrapper"><span id="trigger">Tax advisers</span>
+      <a id="panel" href="/tax"><span id="item">***</span></a></div>
+      </nav><iframe id="frame"></iframe></body></html>`);
+    const { receiver } = hoverMenuReplica(document, [16, 17, 18, 19]);
+
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 1,
+      [menuTextRecord(19, 'Tax advisers', 'span')],
+      [structuralMenuProof()],
+    ))).toBeUndefined();
+  });
+
+  it('rewrites menu text into a replica node a live patch replaced (D82)', () => {
+    // A hover on the page repaints the header; the patch rebuilds the text
+    // nodes of every hidden menu, and their text used to be lost.
+    const { document } = parseHTML(`<html><body><nav><ul>
+      <li id="wrapper"><button id="trigger">Deposits</button>
+      <div id="panel"><a id="item" href="/yen">***</a></div></li>
+      </ul></nav><iframe id="frame"></iframe></body></html>`);
+    const { receiver, nodes, trigger } = hoverMenuReplica(
+      document,
+      [16, 17, 18, 19],
+    );
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 1,
+      [menuTextRecord(19, 'Yen deposits')],
+      [structuralMenuProof()],
+    ))).toBeDefined();
+
+    const item = document.querySelector('#item')!;
+    const replacement = document.createTextNode('');
+    item.replaceChild(replacement, item.firstChild!);
+    nodes.set(19, replacement);
+    const changes = receiver.refreshBindings();
+
+    expect(replacement.nodeValue).toBe('Yen deposits');
+    expect(changes).toContainEqual(expect.objectContaining({ kind: 'upsert' }));
+    expect(changes.some((change) => change.kind === 'remove')).toBe(false);
+    expect(trigger.hasAttribute('data-simul-replica-disclosure-trigger')).toBe(true);
+  });
+
+  it('stops presenting only the menu whose text is gone (D82)', () => {
+    const { document } = parseHTML(`<html><body><nav><ul>
+      <li id="first"><button id="first-trigger">Deposits</button>
+      <div id="first-panel"><a id="first-item" href="/yen">***</a></div></li>
+      <li id="second"><button id="second-trigger">Cards</button>
+      <div id="second-panel"><a id="second-item" href="/debit">***</a></div></li>
+      </ul></nav><iframe id="frame"></iframe></body></html>`);
+    const first = document.querySelector('#first-item')!;
+    const second = document.querySelector('#second-item')!;
+    const nodes = new Map<number, Node>([
+      [16, document.querySelector('#first')!],
+      [17, document.querySelector('#first-trigger')!],
+      [18, document.querySelector('#first-panel')!],
+      [19, first.firstChild!],
+      [26, document.querySelector('#second')!],
+      [27, document.querySelector('#second-trigger')!],
+      [28, document.querySelector('#second-panel')!],
+      [29, second.firstChild!],
+    ]);
+    const presenter = new SemanticProofPresenter({
+      document: document as unknown as Document,
+      iframe: document.querySelector('#frame') as unknown as HTMLIFrameElement,
+    });
+    const receiver = new SemanticSourceReceiver({
+      document: identity,
+      replicaDocument: document as unknown as Document,
+      resolveNode: (nodeId) => nodes.get(nodeId),
+      applyProofs: (proofs) => presenter.apply(proofs),
+    });
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 1,
+      [menuTextRecord(19, 'Yen deposits'), menuTextRecord(29, 'Debit card')],
+      [structuralMenuProof(), {
+        ...structuralMenuProof(),
+        relationId: semanticStructuralMenuRelationId(26, 27, 28)!,
+        containerNodeId: 26,
+        triggerNodeId: 27,
+        panelNodeId: 28,
+      }],
+    ))).toBeDefined();
+
+    first.firstChild!.remove();
+    nodes.delete(19);
+    receiver.refreshBindings();
+
+    const marked = (id: string) => document.querySelector(id)!
+      .hasAttribute('data-simul-replica-disclosure-trigger');
+    expect(marked('#first-trigger')).toBe(false);
+    expect(marked('#second-trigger')).toBe(true);
+    expect(second.textContent).toBe('Debit card');
   });
 
   it('keeps a presented structural menu when the next batch re-validates it', () => {
@@ -1025,6 +1144,56 @@ function tabStateProof(
     tabNodeId,
     panelNodeId,
     selected,
+    classifierVersion: 1,
+  };
+}
+
+/** A replica with one structural menu: container, trigger, panel, item text. */
+function hoverMenuReplica(
+  document: ReturnType<typeof parseHTML>['document'],
+  [containerId, triggerId, panelId, textId]: readonly [number, number, number, number],
+) {
+  const container = document.querySelector<HTMLElement>('#wrapper')!;
+  const trigger = document.querySelector<HTMLElement>('#trigger')!;
+  const panel = document.querySelector<HTMLElement>('#panel')!;
+  const nodes = new Map<number, Node>([
+    [containerId, container],
+    [triggerId, trigger],
+    [panelId, panel],
+    [textId, document.querySelector('#item')!.firstChild!],
+  ]);
+  const presenter = new SemanticProofPresenter({
+    document: document as unknown as Document,
+    iframe: document.querySelector('#frame') as unknown as HTMLIFrameElement,
+  });
+  const receiver = new SemanticSourceReceiver({
+    document: identity,
+    replicaDocument: document as unknown as Document,
+    resolveNode: (nodeId) => nodes.get(nodeId),
+    applyProofs: (proofs) => presenter.apply(proofs),
+  });
+  return { receiver, nodes, trigger, panel };
+}
+
+function menuTextRecord(
+  nodeId: number,
+  text: string,
+  tagName = 'a',
+): SemanticSourceRecord {
+  return {
+    bridge: 'isolated-html',
+    recordId: semanticSourceRecordId(nodeId, 'text')!,
+    nodeId,
+    nodeRevision: 1,
+    category: 'public-semantic',
+    gate: 'disclosureContent',
+    tagName,
+    type: '',
+    autocomplete: '',
+    role: '',
+    contentEditable: '',
+    text,
+    presentation: 'text',
     classifierVersion: 1,
   };
 }

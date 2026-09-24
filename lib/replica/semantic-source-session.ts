@@ -52,6 +52,11 @@ import {
 import type { ReplicaReadScope } from './read-scope-policy';
 import type { ReplicaSourceDocumentIdentity } from './source-identity';
 import { sourceMutationMayChangeCurrentValue } from './source-mutation-filter';
+import {
+  hasStructuralMenuContext,
+  isPlainStructuralMenuTrigger,
+  isStructuralMenuPanelElement,
+} from './structural-menu-shape';
 
 interface MessageEventPort {
   addListener(listener: (message: unknown) => void): void;
@@ -1349,22 +1354,26 @@ export class SemanticSourceSession {
     const menus: ValidatedStructuralMenu[] = [];
     for (const container of elements) {
       const retained = this.#structuralMenus.get(container);
+      // The two-child shape is the cheapest test, so it runs before the
+      // context and painted-path walks that every list item would otherwise
+      // pay for.
+      const children = safelyRead(() => [...container.children]);
       if (
+        !children || children.length !== 2 ||
         classifications.get(container)?.category !== 'public-semantic' ||
-        !hasNavigationContext(container) ||
+        !hasStructuralMenuContext(container) ||
         !this.#isPaintedStructuralMenuController(container)
       ) {
         this.#structuralMenus.delete(container);
         continue;
       }
-      const children = safelyRead(() => [...container.children]);
-      if (!children || children.length !== 2) {
-        this.#structuralMenus.delete(container);
-        continue;
-      }
+      // While a real hover shows the panel it is painted text too; it stays
+      // the panel, not a second trigger.
       const triggers = children.filter((element) =>
+        element !== retained?.panel &&
         classifications.get(element)?.category === 'public-semantic' &&
-        isDisclosureActivationController(element) &&
+        (isDisclosureActivationController(element) ||
+          isPlainStructuralMenuTrigger(element)) &&
         this.#isPaintedStructuralMenuController(element));
       if (triggers.length !== 1) {
         this.#structuralMenus.delete(container);
@@ -1390,6 +1399,7 @@ export class SemanticSourceSession {
       if (
         !panel || panel.ownerDocument !== container.ownerDocument ||
         panel.getRootNode() !== container.getRootNode() ||
+        !isStructuralMenuPanelElement(panel) ||
         classifications.get(panel)?.category !== 'public-semantic' ||
         (!collapsed && (!retainedRelationship || !visible)) ||
         !isBoundedSafeDisclosurePanel(trigger, classifications, true) ||
@@ -1404,10 +1414,9 @@ export class SemanticSourceSession {
         container,
         trigger,
         panel,
-        // The replica owns structural-menu presentation. Source visibility is
-        // retained only to keep the relationship valid through a real hover;
-        // it never opens or drives the actionless replica control.
-        expanded: false,
+        // A panel the source shows (a real hover or click on the page) opens
+        // in the replica too; the reader's own hover there opens it locally.
+        expanded: !collapsed,
       }));
     }
     return Object.freeze(menus);
@@ -2238,13 +2247,6 @@ function hasPlainStructuralMenuExpandedState(trigger: Element): boolean {
   if (expanded === null) return true;
   const token = normalizedToken(expanded);
   return token === 'true' || token === 'false';
-}
-
-function hasNavigationContext(element: Element): boolean {
-  const path = readSourceFlatTreeElementPath(element);
-  return Boolean(path?.some((ancestor) =>
-    ancestor.localName.toLowerCase() === 'nav' ||
-    normalizedToken(safelyReadAttribute(ancestor, 'role')) === 'navigation'));
 }
 
 function semanticSourceScanSignature(scan: SemanticSourceScan): string {

@@ -312,9 +312,15 @@ describe('semantic source protocol', () => {
       ...structuralMenuProof,
       relationId: semanticStructuralMenuRelationId(16, 17, 19),
     })).toBeUndefined();
+    // A structural menu reports whether the source page shows it (D82), but
+    // only as a boolean.
     expect(readSemanticSourceProof({
       ...structuralMenuProof,
       expanded: true,
+    })).toEqual(expect.objectContaining({ expanded: true }));
+    expect(readSemanticSourceProof({
+      ...structuralMenuProof,
+      expanded: 'true',
     })).toBeUndefined();
     expect(readSemanticSourceProof({
       ...structuralMenuProof,

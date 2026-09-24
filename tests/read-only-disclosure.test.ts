@@ -4,6 +4,7 @@ import { afterEach, describe, expect, it, vi } from 'vitest';
 import {
   computeReplicaDisclosurePlacement,
   installReadOnlyReplicaDisclosure,
+  isReadOnlyReplicaDisclosureEvent,
 } from
   '../lib/replica/read-only-disclosure';
 
@@ -240,6 +241,80 @@ describe('read-only replica disclosure placement', () => {
     vi.advanceTimersByTime(100);
     expect(controller.isOpen()).toBe(false);
     controller.dispose();
+  });
+
+  it('reveals an inline menu where the page draws it and restores it on close', () => {
+    // A CSS or scripted hover menu (D82): the page's own panel opens in place
+    // with the page's styles, including content the page fades in once open,
+    // and a display:none mobile-only copy stays hidden.
+    vi.useFakeTimers();
+    const { document, window } = parseHTML(
+      '<html><body><ul><li id="item"><span id="trigger">Deposits</span>' +
+      '<div id="panel" style="top: 84px"><div id="wrap" class="fade">' +
+      '<a href="/yen">Yen deposits</a></div><div id="mobile" class="gone">' +
+      'Deposits</div></div></li></ul></body></html>',
+    );
+    // linkedom windows share this property, so it is restored below.
+    const pageStyle = Object.getOwnPropertyDescriptor(window, 'getComputedStyle');
+    Object.defineProperty(window, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => ({
+        display: element.id === 'panel' || element.classList.contains('gone')
+          ? 'none'
+          : 'block',
+        visibility: 'visible',
+        opacity: element.classList.contains('fade') ? '0' : '1',
+      }),
+    });
+    try {
+      const item = document.querySelector<HTMLElement>('#item')!;
+      const trigger = document.querySelector<HTMLElement>('#trigger')!;
+      const panel = document.querySelector<HTMLElement>('#panel')!;
+      const wrap = document.querySelector<HTMLElement>('#wrap')!;
+      const mobile = document.querySelector<HTMLElement>('#mobile')!;
+      const controller = installReadOnlyReplicaDisclosure({
+        anchor: trigger,
+        trigger,
+        panel,
+        presentation: 'inline',
+        manageTriggerExpanded: true,
+      });
+
+      expect(panel.hasAttribute('hidden')).toBe(false);
+      expect(panel.style.getPropertyValue('display')).toBe('');
+      expect(panel.style.getPropertyValue('pointer-events')).toBe('none');
+
+      trigger.dispatchEvent(new window.Event('pointerenter'));
+      expect(controller.isOpen()).toBe(true);
+      expect(panel.parentElement).toBe(item);
+      expect(panel.style.getPropertyValue('display')).toBe('block');
+      expect(panel.style.getPropertyValue('visibility')).toBe('visible');
+      expect(panel.style.getPropertyValue('top')).toBe('84px');
+      expect(panel.style.getPropertyValue('position')).toBe('');
+      expect(wrap.style.getPropertyValue('opacity')).toBe('1');
+      expect(mobile.getAttribute('style')).toBeNull();
+      // The wheel over an open in-place menu scrolls the page, as on the page;
+      // the pointer still belongs to the menu.
+      const over = (type: string) => ({
+        type,
+        composedPath: () => [wrap, panel, item],
+      }) as unknown as Event;
+      expect(isReadOnlyReplicaDisclosureEvent(over('wheel'))).toBe(false);
+      expect(isReadOnlyReplicaDisclosureEvent(over('pointerenter'))).toBe(true);
+
+      trigger.dispatchEvent(new window.Event('pointerleave'));
+      vi.advanceTimersByTime(100);
+      expect(controller.isOpen()).toBe(false);
+      expect(wrap.getAttribute('style')).toBeNull();
+      expect(panel.style.getPropertyValue('display')).toBe('');
+      expect(panel.style.getPropertyValue('top')).toBe('84px');
+      controller.dispose();
+      expect(panel.getAttribute('style')).toBe('top: 84px');
+      expect(trigger.hasAttribute('data-simul-replica-disclosure-trigger')).toBe(false);
+    } finally {
+      if (pageStyle) Object.defineProperty(window, 'getComputedStyle', pageStyle);
+      else delete (window as { getComputedStyle?: unknown }).getComputedStyle;
+    }
   });
 
   it('does not schedule deferred closes for permanent or closed surfaces', () => {
