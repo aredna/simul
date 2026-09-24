@@ -3412,8 +3412,8 @@ browser that has it.
   the test canaries. Three tracked docs named the owner's NAS (LAN address,
   rsync user, password-file path; never the password) and one owner report
   named the bank the owner was signed in to; the tip now says "the owner's
-  NAS" and "a banking page". Earlier commits still hold those lines; the
-  address is a private LAN one. The repository was already public.
+  NAS" and "a banking page". D80 later rewrote the history so earlier
+  commits no longer hold them. The repository was already public.
 - **Browsers with the Translator API (checked 2026-09-23).** Desktop Chrome
   138+ (stable since 138, not on mobile) and desktop Microsoft Edge 148+ (its
   own on-device models; Microsoft says the API works in extensions). Firefox,
@@ -3524,3 +3524,44 @@ them.
 
 Gate before the merge: `npm run check` green, typecheck clean, **1,514 tests
 pass, 1 skipped**, artifact byte-verified.
+
+### D80. Private details removed from the whole git history (2026-09-24)
+
+Owner: "Rewrite the old git history. I give you permission to force push main
+as this one off. Also make it to 0.5.1. If there's anything else that should
+not be public in the git history, please remove that."
+
+- **Audit of everything public.** A mirror clone of GitHub (all branches,
+  tags and pull-request refs; 414 commits) was scanned blob by blob, plus
+  every commit and tag message, for LAN addresses, NAS and rsync details,
+  home paths, email addresses, the owner's identity, bank names, other
+  projects, local hostnames, key and token formats, and sensitive file names.
+  Found: the NAS address, rsync user, password-file path and another
+  project's name (two docs), and the name of the owner's bank in
+  the decision log, two handovers, `docs/replica-fidelity.md`, four commit
+  messages and PR #22's description. Nothing else: every commit uses the
+  GitHub no-reply address, token-shaped hits are random base64 inside the
+  vendored WebAssembly plus the test's fake key, and no screenshots,
+  `.env`, key or personal config files were ever committed. No forks exist.
+- **Rewrite.** `git filter-repo` with `--replace-text` and
+  `--replace-message` on a separate mirror (pull refs removed; the pristine
+  mirror kept as the backup): the NAS row now reads "on the owner's NAS (the
+  same rsync daemon another project's tooling uses)", the rsync URL "the
+  owner's NAS", the bank "a banking page/form" and "a bank('s) homepage".
+  56 of 262 `main` commits changed (from the D43 addendum on); `v0.4.0` and
+  the hackathon tag were untouched. A rescan found nothing left. The
+  `dist/chrome-unpacked` trees at `v0.5.0` and `v0.5.1` are identical before
+  and after, so both release zips stay valid.
+- **Force push** (the owner's one-off permission), with leases on the old
+  values: `main` `49ea98e` -> `125b153`, `v0.5.0` -> `864c9ab`, `v0.5.1` ->
+  `125b153`. Both releases follow their tags; v0.5.1 stays Latest and the
+  version stays 0.5.1. Old -> new SHAs are listed in
+  `history-rewrite-2026-09-24-sha-map.md`.
+- **PR #22's description** no longer names the bank (edited through the
+  API).
+- **Left for the owner (GitHub-side, no API):** GitHub keeps pull-request
+  refs (`refs/pull/*`) that users cannot push, so PR #22 and #23 still show
+  the old commits and diffs; GitHub Support can remove those cached views and
+  references. PR #22's description edit history holds four revisions naming
+  the bank (2026-09-23 06:54:27Z, 07:15:14Z, 07:15:33Z, 07:34:32Z UTC); each
+  can be deleted from the "edited" menu on the description.
