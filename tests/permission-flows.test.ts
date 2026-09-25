@@ -264,6 +264,24 @@ describe('PermissionFlows image access', () => {
     expect(harness.state.permissionInFlight).toBe(false);
   });
 
+  it('keeps a fresh grant the saved default already wants when the save fails', async () => {
+    // The default-state version of the test above. Image translation is on
+    // as shipped (D47) but has no image access yet, so the OCR button asks
+    // for it. The save is only a repeat of the saved "on", so the grant
+    // serves the saved setting and is not an orphan: it stays, and the panel
+    // reports the failed save and then the access Chrome holds.
+    const harness = setup({ failPatch: true });
+    expect(harness.stored.imageTranslationEnabled).toBe(true);
+    expect(await harness.flows.changeImageTranslationEnabled(true, true))
+      .toBe('failed');
+    expect(harness.permissions.remove).not.toHaveBeenCalled();
+    expect(harness.granted.has('<all_urls>')).toBe(true);
+    expect(harness.stored.imageTranslationEnabled).toBe(true);
+    expect(harness.statuses.at(-1)).toContain('Chrome could not update image access');
+    expect(harness.state.imageCaptureAccess).toBe('granted');
+    expect(harness.state.permissionInFlight).toBe(false);
+  });
+
   it('turns image translation off and drops the broad grant when automation does not need it', async () => {
     const harness = setup({ granted: ['<all_urls>'], stored: imageOn() });
     await harness.flows.changeImageTranslationEnabled(false);
