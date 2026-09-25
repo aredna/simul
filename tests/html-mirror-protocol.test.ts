@@ -1090,6 +1090,18 @@ describe('isolated HTML sanitizer and protocol', () => {
     expect(hiddenSelect).toBeUndefined();
   });
 
+  it('drops the implicit role a select states, and keeps other activation roles as button (D98)', () => {
+    const graph = sanitizeMarkup(`<!doctype html><html><body>
+      <select id="stated" role="combobox"><option>One</option></select>
+      <select id="listed" role="listbox" multiple><option>One</option></select>
+      <select id="button" role="button"><option>One</option></select>
+    </body></html>`, 'passive');
+    // A native select carries no id in the graph; they arrive in order.
+    const roles = graphElementsByTag(graph, 'select').map((select) =>
+      select.attributes.find(([name]) => name === 'role')?.[1]);
+    expect(roles).toEqual([undefined, undefined, 'button']);
+  });
+
   it('keeps native-select presentation state out of the base graph', () => {
     const node = {
       kind: 'element', id: 900, namespace: 'html', tagName: 'select',

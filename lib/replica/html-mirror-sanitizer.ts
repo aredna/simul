@@ -7,6 +7,7 @@ import {
   hasSourcePrivateElementAncestor,
   hasSourcePrivateOrActivationElementAncestor,
   isSourceActivationRoleValue,
+  isSourceNativeSelectImplicitRole,
   isSourceActivationTagName,
   isSourcePrivateRoleValue,
   isEligibleSourceTextControl,
@@ -1286,7 +1287,8 @@ export function readHtmlMirrorNode(
   const transportedPrivateRegion = privateRegion || currentPrivateRegion;
   const transportedActivationElement =
     isSourceActivationTagName(input.tagName) ||
-    isSourceActivationRoleValue(attributeValues.role);
+    (isSourceActivationRoleValue(attributeValues.role) &&
+      !isSourceNativeSelectImplicitRole(input.tagName, attributeValues.role));
   const transportedActivationRegion = activationRegion ||
     transportedActivationElement;
   const transportedPrivateAttributeRegion = privateAttributeRegion ||
@@ -2019,7 +2021,10 @@ function sanitizeAttributes(
     }
     if (isNativeSelectSemanticTag(tagName) && name === 'role') {
       if (isSourcePrivateRoleValue(value)) value = 'textbox';
-      else if (isSourceActivationRoleValue(value)) value = 'button';
+      else if (
+        isSourceActivationRoleValue(value) &&
+        !isSourceNativeSelectImplicitRole(tagName, value)
+      ) value = 'button';
       else {
         incrementRepresentability(
           representability,
@@ -4468,8 +4473,10 @@ function isRepresentableSourceNativeSelectChild(node: Node): boolean {
 }
 
 function elementStartsActivationRegion(element: Element): boolean {
+  const role = element.getAttribute('role');
   return isSourceActivationTagName(element.localName) ||
-    isSourceActivationRoleValue(element.getAttribute('role'));
+    (isSourceActivationRoleValue(role) &&
+      !isSourceNativeSelectImplicitRole(element.localName, role));
 }
 
 function readTransportedControlText(

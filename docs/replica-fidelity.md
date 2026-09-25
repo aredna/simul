@@ -175,6 +175,10 @@ one of its links, buttons or menu items is chosen, since the page would act on
 it. `multiple` and authored `size>1` selects retain bounded inline-list
 presentation. Labels and disabled/shape semantics are independent from the
 selected state: the latter appears only when ordinary form state is enabled.
+A select that states its own implicit role (`role="combobox"` on a single-row
+select, `role="listbox"`) is approved like one that states none, and the
+stated role is dropped in transit (D98); any other widget or editor role on a
+select still withholds its labels.
 Every admitted state is presentation-only and cannot mutate or submit the
 source control. No source clipping ancestor is rewritten. A select at zero
 opacity that still takes pointer input over a rendered box is the page's click
@@ -386,7 +390,13 @@ Some gaps cannot be fixed by admitting more sanitizer syntax:
   shadow roots ("Join", the sort and share buttons) in the browser's button
   font. Repairing an adopted rule from an identical rule in a `<style>`
   element's text was planned for D87 but not done: it could not be measured,
-  because Reddit's archived pages no longer run their scripts here.
+  because Reddit's archived pages no longer run their scripts here. D99
+  checked what Chrome keeps: nothing readable. A constructed sheet has no
+  source text, `rule.cssText` and `rule.style` give the empty longhands, and
+  the Typed OM (`rule.styleMap`) returns the same empty values. The original
+  text lives only in the page's own scripts, which Simul reaches only by
+  patching page prototypes (ruled out) or through the debugger (a permission
+  Simul does not have). The gap stays.
 - **Computed-style fallback.** Simul intentionally does not serialize every
   computed property. A broad snapshot would be large, slow, privacy-sensitive,
   and likely to freeze responsive cascade behavior. A future fallback must be

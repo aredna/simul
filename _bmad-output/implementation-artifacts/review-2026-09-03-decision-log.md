@@ -4310,3 +4310,51 @@ standards shell.
 
 Build identity `0.5.2 beta v.20260925.7`. Gate: `npm run check` green,
 **1,553 tests pass**, artifact byte-verified.
+
+### D98. A select that states its own combobox role reads like a plain one (2026-09-25)
+
+Same branch. Open item 9 of the 2026-09-23 handover (found in D75): D75 made
+`combobox` an activation role, so `<select role="combobox">`, which only
+states a single-row select's implicit role, stopped being an eligible
+select. Its option labels and state never travelled, the sanitizer rewrote
+its role to `button`, and its facsimile read "Options" with no labels.
+
+- **Change.** `combobox` and `listbox` on a native select (the first
+  recognized token, as ARIA fallback roles are read) are its implicit roles
+  (`isSourceNativeSelectImplicitRole`): the select stays eligible, is not an
+  activation region, and the stated role is dropped in transit like other
+  non-sensitive select roles. Any other activation role still becomes
+  `button`, and an editor role `textbox`, withholding the labels as before.
+- **Verified in Chrome for Testing** with a `role="combobox"` select beside a
+  plain one, translated with the stand-in translator: the D97 build's
+  facsimile read "Options" with no labels and no selection; the new build
+  shows «ja|Monthly plan» and «ja|Yearly plan», with the second selected, like
+  the plain select.
+- **Tests.** The D62 page test gains a `role="combobox"` select (labels
+  arrive) and a `role="button"` select (labels withheld); the sanitizer drops
+  a stated `combobox` or `listbox` and keeps `button`. Both fail on the old
+  code.
+- **Docs.** `docs/replica-fidelity.md`.
+
+Build identity `0.5.2 beta v.20260925.8`. Gate: `npm run check` green,
+**1,554 tests pass**, artifact byte-verified.
+
+### D99. Adopted-sheet `var()` shorthands: not recoverable (2026-09-25)
+
+Same branch. The D87 leftover (the 2026-09-25 handover's item 2): a rule in an
+adopted sheet whose `var()` shorthand Chrome's CSSOM writes back as empty
+longhands (Reddit's shadow-root buttons) loses its font in the replica.
+
+- **Checked in Chrome for Testing 153** on a constructed sheet
+  `.b{font:var(--f);line-height:2;color:red}`: `rule.cssText` and
+  `rule.style.cssText` list all eighteen font longhands empty;
+  `getPropertyValue('font')` and every longhand are empty; the Typed OM
+  (`rule.styleMap.get('font-family')`) is an empty `CSSStyleValue`, and
+  `get('font')` is undefined. A constructed sheet keeps no source text.
+- **Conclusion.** The original text lives only in the page's scripts (Lit's
+  `css` templates). Reaching it needs a page-world prototype patch (the
+  project rules out patching website prototypes) or the debugger permission
+  (production permissions stay minimal). Deriving the value from computed
+  styles would take it from whichever rule won the cascade for one element,
+  and could write a wrong value into a shared rule. No change; the gap stays
+  documented in `docs/replica-fidelity.md`.

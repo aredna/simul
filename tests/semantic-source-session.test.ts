@@ -1382,6 +1382,8 @@ describe('semantic source session', () => {
     const markup = (stripped: boolean) => `<html><body>
       <a id="link" href="/about">About</a><button id="button">Go</button>
       <select id="lang"><option>English</option><option>Deutsch</option></select>
+      <select id="stated"${stripped ? '' : ' role="combobox"'}><option>Français</option></select>
+      <select id="widget" role="button"><option>Withheld</option></select>
       <nav><div id="wrapper"><button id="trigger"${stripped
         ? ''
         : ' aria-expanded="false" aria-haspopup="menu"'}>Products</button>
@@ -1408,10 +1410,12 @@ describe('semantic source session', () => {
       configurable: true,
       value: style,
     });
-    Object.defineProperty(source.document.querySelector('#lang'), 'getBoundingClientRect', {
-      configurable: true,
-      value: () => ({ left: 0, top: 0, right: 120, bottom: 24, width: 120, height: 24 }),
-    });
+    for (const id of ['#lang', '#stated', '#widget']) {
+      Object.defineProperty(source.document.querySelector(id), 'getBoundingClientRect', {
+        configurable: true,
+        value: () => ({ left: 0, top: 0, right: 120, bottom: 24, width: 120, height: 24 }),
+      });
+    }
     const mirrored = new Map<number, Node>();
     const pair = (from: Node, to: Node): void => {
       mirrored.set(nodeId(from), to);
@@ -1444,8 +1448,10 @@ describe('semantic source session', () => {
 
     try {
       expect(receiver.applyBatch(port.messages[0]!)).toBeDefined();
+      // A select that states its own implicit `combobox` role reads like a
+      // plain one (D98); any other activation role still withholds labels.
       expect([...replica.document.querySelectorAll('option')].map((option) =>
-        option.getAttribute('label'))).toEqual(['English', 'Deutsch']);
+        option.getAttribute('label'))).toEqual(['English', 'Deutsch', 'Français', null]);
     } finally {
       session.dispose();
       if (pageStyle) {
