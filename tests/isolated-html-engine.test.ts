@@ -15,6 +15,7 @@ import {
   type HtmlMirrorPatchOperation,
 } from '../lib/replica/html-mirror-protocol';
 import {
+  ISOLATED_HTML_LIMITED_QUIRKS_SHELL,
   ISOLATED_HTML_QUIRKS_SHELL,
   ISOLATED_HTML_SHELL,
   ISOLATED_MEDIA_CONTROLS_CSS,
@@ -280,6 +281,43 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(stagedShell).toBe(ISOLATED_HTML_QUIRKS_SHELL);
     expect(stagedShell.trimStart().toLowerCase().startsWith('<!doctype'))
       .toBe(false);
+    expect(isTrustedIsolatedShellDocument(
+      host.iframe!.contentDocument!,
+    )).toBe(true);
+  });
+
+  it('stages the XHTML Transitional shell for a limited-quirks checkpoint (D97)', async () => {
+    const standard = makeCheckpoint('transitional page', 0);
+    const checkpoint = createHtmlMirrorCheckpoint(standard.identity, {
+      root: standard.payload.root,
+      adoptedStyleSheets: standard.payload.adoptedStyleSheets,
+      documentMode: 'limited-quirks',
+      captureMs: standard.payload.captureMs,
+      viewportWidth: standard.payload.viewportWidth,
+      viewportHeight: standard.payload.viewportHeight,
+      documentWidth: standard.payload.documentWidth,
+      documentHeight: standard.payload.documentHeight,
+      representability: standard.payload.representability,
+    })!;
+    const stream = new FakeHtmlStream(checkpoint);
+    const host = new FakePresentationHost();
+    let stagedShell = '';
+    const engine = new IsolatedHtmlReplicaEngine({
+      presentationHost: host,
+      openStream: async () => stream,
+      initializeIframe: async (iframe, shell) => {
+        stagedShell = shell;
+        const { document } = parseHTML(shell);
+        Object.defineProperty(iframe, 'contentDocument', { value: document });
+        return document;
+      },
+    });
+
+    await expect(engine.run(request)).resolves.toMatchObject({ status: 'complete' });
+    expect(stagedShell).toBe(ISOLATED_HTML_LIMITED_QUIRKS_SHELL);
+    expect(stagedShell.startsWith(
+      '<!DOCTYPE html PUBLIC "-//W3C//DTD XHTML 1.0 Transitional//EN"',
+    )).toBe(true);
     expect(isTrustedIsolatedShellDocument(
       host.iframe!.contentDocument!,
     )).toBe(true);

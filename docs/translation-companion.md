@@ -388,8 +388,9 @@ image within the size caps travels as the pixels the page decoded (D89). A valid
 mode selects the shell: a standards page loads the doctype shell through
 `srcdoc`, and a quirks page gets a blank frame into which the panel writes the
 doctype-free shell, because an `srcdoc` document is always no-quirks (see
-`docs/replica-fidelity.md`). Chrome's distinct limited-quirks mode is not
-separately represented.
+`docs/replica-fidelity.md`). A limited-quirks page (an XHTML 1.0 or HTML 4.01
+Transitional or Frameset doctype) gets a written shell with the XHTML 1.0
+Transitional doctype (D97).
 Generated pseudo-element text is not a DOM text node and therefore cannot be
 translated even when its rule renders. Broad computed-style serialization is
 deliberately omitted because it can freeze responsive cascade behavior, expose

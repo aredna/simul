@@ -38,6 +38,7 @@ import {
   sanitizeSourceAdoptedStyleSheets,
   sanitizeSourceChildren,
   sanitizeSourceDocument,
+  sourceDocumentMode,
   sanitizeSourceElementHints,
   sanitizeSourceSubtrees,
   snapshotHtmlMirrorRepresentability,
@@ -2389,7 +2390,7 @@ describe('isolated HTML sanitizer and protocol', () => {
       });
   });
 
-  it('transports a bounded standards-or-quirks document mode', () => {
+  it('transports a bounded standards, quirks or limited-quirks document mode', () => {
     const { document, window } = parseHTML('<html><body>legacy</body></html>');
     Object.defineProperty(document, 'compatMode', {
       configurable: true,
@@ -2423,13 +2424,36 @@ describe('isolated HTML sanitizer and protocol', () => {
     expect(createHtmlMirrorCheckpoint(identity, {
       root: graph.root,
       adoptedStyleSheets: graph.adoptedStyleSheets,
-      documentMode: 'limited-quirks' as unknown as 'standards',
+      documentMode: 'almost-standards' as unknown as 'standards',
       captureMs: 1,
       viewportWidth: graph.viewportWidth,
       viewportHeight: graph.viewportHeight,
       documentWidth: graph.documentWidth,
       documentHeight: graph.documentHeight,
     })).toBeUndefined();
+  });
+
+  it('tells limited-quirks doctypes apart, as the HTML parser does (D97)', () => {
+    const mode = (publicId: string, systemId = '', compatMode = 'CSS1Compat') =>
+      sourceDocumentMode({
+        compatMode,
+        doctype: { publicId, systemId },
+      } as unknown as Document);
+    expect(mode('-//W3C//DTD XHTML 1.0 Transitional//EN',
+      'http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd'))
+      .toBe('limited-quirks');
+    expect(mode('-//w3c//dtd xhtml 1.0 frameset//en')).toBe('limited-quirks');
+    // HTML 4.01 Transitional and Frameset need a system identifier; without
+    // one the parser puts the page in quirks mode, which compatMode reports.
+    expect(mode('-//W3C//DTD HTML 4.01 Transitional//EN',
+      'http://www.w3.org/TR/html4/loose.dtd')).toBe('limited-quirks');
+    expect(mode('-//W3C//DTD HTML 4.01 Frameset//EN', '', 'BackCompat'))
+      .toBe('quirks');
+    expect(mode('-//W3C//DTD XHTML 1.0 Strict//EN',
+      'http://www.w3.org/TR/xhtml1/DTD/xhtml1-strict.dtd')).toBe('standards');
+    expect(mode('')).toBe('standards');
+    expect(sourceDocumentMode({ compatMode: 'CSS1Compat', doctype: null } as unknown as Document))
+      .toBe('standards');
   });
 
   it('charges selected image sources to source and receiver budgets', () => {

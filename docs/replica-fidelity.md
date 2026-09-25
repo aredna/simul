@@ -362,15 +362,20 @@ Some gaps cannot be fixed by admitting more sanitizer syntax:
   512 (PNG), each encoded once per address. A canvas the page may not read,
   an image still loading and a larger one keep today's handling; a `blob:`
   CSS background is still omitted and counted as browser-inaccessible.
-- **Source document mode.** The source's standards-versus-quirks state is
-  transported as a validated enum. A standards page gets the doctype shell
-  through `srcdoc`. An `srcdoc` document is always in no-quirks mode (HTML
-  parsing rules), so a quirks page's replica is a blank frame into which the
-  panel writes the doctype-free shell (D65, found in D60 on Google's 404 page).
-  That document is in quirks mode like the source, keeps the same sandbox and
-  shell CSP, and takes the panel's URL, the base URL an `srcdoc` shell inherits
-  anyway. Chrome's distinct limited-quirks mode is not separately represented:
-  such a page reports `CSS1Compat` and gets the standards shell.
+- **Source document mode.** The source's standards, quirks or limited-quirks
+  mode is transported as a validated enum. A standards page gets the doctype
+  shell through `srcdoc`. An `srcdoc` document is always in no-quirks mode
+  (HTML parsing rules), so a quirks page's replica is a blank frame into which
+  the panel writes the doctype-free shell (D65, found in D60 on Google's 404
+  page). That document is in quirks mode like the source, keeps the same
+  sandbox and shell CSP, and takes the panel's URL, the base URL an `srcdoc`
+  shell inherits anyway. Limited-quirks mode (the XHTML 1.0 and HTML 4.01
+  Transitional and Frameset doctypes) reports `CSS1Compat` like standards
+  mode, so the page side reads the doctype by the parser's rule; its replica
+  is written the same way with the XHTML 1.0 Transitional doctype (D97). The
+  visible difference is the line-height quirk: an image alone on a line gets
+  no descender gap, so a sliced-image table no longer grows a few pixels per
+  row in the mirror.
 - **Cross-origin CSSOM.** A stylesheet link may render while Chrome's same-origin
   rules prevent Simul from reading its rules. Passive Fidelity can retain the
   normalized link/import, but cannot flatten or inspect inaccessible CSSOM.

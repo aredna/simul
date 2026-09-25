@@ -122,10 +122,17 @@ export interface HtmlMirrorTextNode {
 
 export type HtmlMirrorNode = HtmlMirrorElementNode | HtmlMirrorTextNode;
 
+/**
+ * The source's parsing mode: `quirks` (no or an old doctype), `limited-quirks`
+ * (the XHTML 1.0 and HTML 4.01 Transitional and Frameset doctypes, which
+ * Chrome reports as `CSS1Compat` like standards mode, D97), or `standards`.
+ */
+export type HtmlMirrorDocumentMode = 'standards' | 'quirks' | 'limited-quirks';
+
 export interface HtmlMirrorDocumentGraph {
   readonly root: HtmlMirrorElementNode;
   readonly adoptedStyleSheets: readonly string[];
-  readonly documentMode: 'standards' | 'quirks';
+  readonly documentMode: HtmlMirrorDocumentMode;
   readonly viewportWidth: number;
   readonly viewportHeight: number;
   readonly documentWidth: number;
@@ -587,6 +594,32 @@ const MEDIA_ACTIVE_ATTRIBUTES = new Set([
   'autoplay', 'controls', 'crossorigin', 'loop', 'muted', 'playsinline',
   'preload',
 ]);
+
+/**
+ * `document.compatMode` tells quirks mode apart but reports limited-quirks as
+ * `CSS1Compat`, so the doctype decides that one, by the HTML parser's own
+ * rule for the initial insertion mode (D97).
+ */
+export function sourceDocumentMode(sourceDocument: Document): HtmlMirrorDocumentMode {
+  try {
+    if (sourceDocument.compatMode === 'BackCompat') return 'quirks';
+    const doctype = sourceDocument.doctype;
+    if (!doctype) return 'standards';
+    const publicId = doctype.publicId.toLowerCase();
+    const hasSystemId = doctype.systemId !== '';
+    if (
+      publicId.startsWith('-//w3c//dtd xhtml 1.0 frameset//') ||
+      publicId.startsWith('-//w3c//dtd xhtml 1.0 transitional//') ||
+      (hasSystemId && (
+        publicId.startsWith('-//w3c//dtd html 4.01 frameset//') ||
+        publicId.startsWith('-//w3c//dtd html 4.01 transitional//')
+      ))
+    ) return 'limited-quirks';
+  } catch {
+    // An unreadable doctype keeps the standards shell, as before D97.
+  }
+  return 'standards';
+}
 
 export function createHtmlMirrorStyleWorkBudget(
   limits: Partial<Pick<
@@ -1056,9 +1089,7 @@ export function sanitizeSourceDocument(
   return Object.freeze({
     root,
     adoptedStyleSheets,
-    documentMode: sourceDocument.compatMode === 'BackCompat'
-      ? 'quirks'
-      : 'standards',
+    documentMode: sourceDocumentMode(sourceDocument),
     viewportWidth: boundedDimension(sourceWindow.innerWidth),
     viewportHeight: boundedDimension(sourceWindow.innerHeight),
     documentWidth: boundedDimension(Math.max(

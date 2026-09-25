@@ -17,6 +17,7 @@ import {
   type HtmlMirrorElementNode,
   type HtmlMirrorNamespace,
   type HtmlMirrorControlText,
+  type HtmlMirrorDocumentMode,
   type HtmlMirrorNode,
   type HtmlMirrorRepresentabilitySummary,
 } from './html-mirror-sanitizer';
@@ -47,7 +48,7 @@ export interface HtmlMirrorCheckpoint {
   readonly payload: {
     readonly root: HtmlMirrorElementNode;
     readonly adoptedStyleSheets: readonly string[];
-    readonly documentMode: 'standards' | 'quirks';
+    readonly documentMode: HtmlMirrorDocumentMode;
     readonly byteLength: number;
     readonly captureMs: number;
     readonly viewportWidth: number;
@@ -397,7 +398,7 @@ export function createHtmlMirrorCheckpoint(
     HtmlMirrorCheckpoint['payload'],
     'byteLength' | 'representability' | 'documentMode'
   > & {
-    readonly documentMode?: 'standards' | 'quirks';
+    readonly documentMode?: HtmlMirrorDocumentMode;
     readonly representability?: HtmlMirrorRepresentabilitySummary;
   },
   fidelityPolicy: SelectableReplicaFidelityPolicy = 'conservative',
@@ -409,8 +410,9 @@ export function createHtmlMirrorCheckpoint(
   );
   if (!content) return undefined;
   const { root, adoptedStyleSheets } = content;
-  const documentMode = input.documentMode === 'quirks'
-    ? 'quirks'
+  const documentMode = input.documentMode === 'quirks' ||
+      input.documentMode === 'limited-quirks'
+    ? input.documentMode
     : input.documentMode === undefined || input.documentMode === 'standards'
       ? 'standards'
       : undefined;
@@ -580,7 +582,7 @@ export function readHtmlMirrorSourceMessage(
     const checkpoint = createHtmlMirrorCheckpoint(identity, {
       root: input.payload.root as HtmlMirrorElementNode,
       adoptedStyleSheets: input.payload.adoptedStyleSheets as readonly string[],
-      documentMode: input.payload.documentMode as 'standards' | 'quirks',
+      documentMode: input.payload.documentMode as HtmlMirrorDocumentMode,
       captureMs: input.payload.captureMs as number,
       viewportWidth: input.payload.viewportWidth as number,
       viewportHeight: input.payload.viewportHeight as number,

@@ -137,6 +137,13 @@ let isolatedSelectHostSequence = 0;
 export const ISOLATED_HTML_SHELL = `<!doctype html>
 ${ISOLATED_HTML_SHELL_DOCUMENT}`;
 export const ISOLATED_HTML_QUIRKS_SHELL = ISOLATED_HTML_SHELL_DOCUMENT;
+/** A doctype that puts the written shell in limited-quirks mode (D97). */
+export const ISOLATED_HTML_LIMITED_QUIRKS_DOCTYPE_PUBLIC_ID =
+  '-//W3C//DTD XHTML 1.0 Transitional//EN';
+export const ISOLATED_HTML_LIMITED_QUIRKS_SHELL =
+  `<!DOCTYPE html PUBLIC "${ISOLATED_HTML_LIMITED_QUIRKS_DOCTYPE_PUBLIC_ID}" ` +
+  `"http://www.w3.org/TR/xhtml1/DTD/xhtml1-transitional.dtd">
+${ISOLATED_HTML_SHELL_DOCUMENT}`;
 
 export type IsolatedMirrorInfoStage =
   | 'connected'
@@ -599,9 +606,12 @@ export class IsolatedHtmlReplicaEngine
     const iframe = lease.mount.ownerDocument.createElement('iframe');
     protectIframe(iframe);
     let disposeStagedDisclosureGuards: (() => void) | undefined;
-    const iframeShell = checkpoint.payload.documentMode === 'quirks'
+    const documentMode = checkpoint.payload.documentMode;
+    const iframeShell = documentMode === 'quirks'
       ? ISOLATED_HTML_QUIRKS_SHELL
-      : ISOLATED_HTML_SHELL;
+      : documentMode === 'limited-quirks'
+        ? ISOLATED_HTML_LIMITED_QUIRKS_SHELL
+        : ISOLATED_HTML_SHELL;
     try {
       let iframeDocument: Document;
       if (this.options.initializeIframe) {
@@ -612,11 +622,12 @@ export class IsolatedHtmlReplicaEngine
           iframeShell,
           signal,
         );
-      } else if (checkpoint.payload.documentMode === 'quirks') {
+      } else if (documentMode !== 'standards') {
         iframeDocument = writeQuirksIframeDocument(
           iframe,
           lease.mount,
           iframeShell,
+          documentMode,
         );
       } else {
         iframeDocument = await initializeIframeDocument(
@@ -4205,14 +4216,17 @@ export function isTrustedIsolatedShellDocument(
 /**
  * An `srcdoc` document is always in no-quirks mode, whatever its doctype. A
  * quirks source's replica is therefore a blank frame whose doctype-free shell
- * is written from here, which leaves it in quirks mode like the source. The
- * frame keeps the same sandbox and shell CSP; written from the panel, it takes
- * the panel's URL, the base URL an `srcdoc` shell inherits anyway.
+ * is written from here, which leaves it in quirks mode like the source; a
+ * limited-quirks source's shell carries the XHTML 1.0 Transitional doctype
+ * (D97). The frame keeps the same sandbox and shell CSP; written from the
+ * panel, it takes the panel's URL, the base URL an `srcdoc` shell inherits
+ * anyway.
  */
 function writeQuirksIframeDocument(
   iframe: HTMLIFrameElement,
   mount: HTMLElement,
   shell: string,
+  mode: 'quirks' | 'limited-quirks',
 ): Document {
   mount.append(iframe);
   const iframeDocument = iframe.contentDocument;
@@ -4225,7 +4239,11 @@ function writeQuirksIframeDocument(
       iframeDocument,
       mount.ownerDocument.location.href,
     ) ||
-    iframeDocument.compatMode !== 'BackCompat'
+    (mode === 'quirks'
+      ? iframeDocument.compatMode !== 'BackCompat'
+      : iframeDocument.compatMode !== 'CSS1Compat' ||
+        iframeDocument.doctype?.publicId !==
+          ISOLATED_HTML_LIMITED_QUIRKS_DOCTYPE_PUBLIC_ID)
   ) throw new Error('Isolated quirks shell was not written.');
   return iframeDocument;
 }
