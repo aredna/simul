@@ -361,6 +361,36 @@ describe('TranslationDriver page translation', () => {
     expect(harness.coordinator.translateCurrent).toHaveBeenCalledTimes(1);
   });
 
+  it('translates at once when the reader picks a pair whose pack is not installed (D85)', async () => {
+    // Choosing the language is the click Chrome needs for the download; the
+    // page used to ask for a second click and stayed in the old language.
+    const harness = setup({ documentLanguage: 'ja', availability: 'downloadable' });
+    harness.state.translationDesired = true;
+    await harness.driver.applyLanguagePreferences(true, undefined);
+    expect(harness.coordinator.translateCurrent).toHaveBeenCalledTimes(1);
+    expect(harness.statuses.at(-1)).toMatch(/^Translation is complete/u);
+  });
+
+  it('resumes a wanted translation when another part installs the pack (D85)', async () => {
+    const harness = setup({ documentLanguage: 'ja', availability: 'downloadable' });
+    harness.state.preferences = { ...harness.state.preferences, imageTranslationEnabled: false };
+    await harness.driver.applyLanguagePreferences(false);
+    expect(harness.state.availability).toBe('downloadable');
+    const pair = harness.state.selectedPair()!;
+
+    // Not wanted yet, or another pair: nothing runs.
+    harness.driver.handlePairReady(pair);
+    harness.state.translationDesired = true;
+    harness.driver.handlePairReady({ sourceLanguage: 'de', targetLanguage: 'en' });
+    await Promise.resolve();
+    expect(harness.coordinator.translateCurrent).not.toHaveBeenCalled();
+
+    harness.provider.availability.mockResolvedValue('available');
+    harness.driver.handlePairReady(pair);
+    await vi.waitFor(() =>
+      expect(harness.coordinator.translateCurrent).toHaveBeenCalledTimes(1));
+  });
+
   it('applies language preferences without recording intent unless the user acted', async () => {
     const harness = setup({ documentLanguage: 'ja' });
     harness.state.preferences = { ...harness.state.preferences, imageTranslationEnabled: false };
