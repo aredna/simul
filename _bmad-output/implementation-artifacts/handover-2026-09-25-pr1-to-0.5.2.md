@@ -11,11 +11,11 @@ number to 0.5.2."*
 
 | Item | State |
 | --- | --- |
-| Branch / PR | `fix/hover-menus`, **PR #1** in `aredna/simul`, open and mergeable. Head `4d25bb0`. The title and description cover D82–D86. |
-| Commits on the branch | `306671c` D82 hover menus · `fae77f8` D83 Reddit styles · `aaedbf3` D84 big pages, one scrollbar · `4d25bb0` D85 pair change, D86 image cache. `main` is `4f26a42`. |
-| Version / identity | `0.5.1` / `0.5.1 beta v.20260924.5` (the next beta build would be `.6`). |
-| Gate | `npm run check` green at `4d25bb0`: **1,537 tests pass, 1 skipped**, and `dist/chrome-unpacked` is byte-verified. |
-| NAS | `Dev/simul/` mirrors `4d25bb0`; the owner loads `Dev/simul/dist/chrome-unpacked`. |
+| Branch / PR | `fix/hover-menus`, **PR #1** in `aredna/simul`, open and mergeable. Head `b81d036` (plus this handover update). The title and description cover D82–D89. |
+| Commits on the branch | `306671c` D82 hover menus · `fae77f8` D83 Reddit styles · `aaedbf3` D84 big pages, one scrollbar · `4d25bb0` D85 pair change, D86 image cache · `107af20` this handover · `b81d036` D87 handover items, D88 Wise, D89 Fastmail. `main` is `4f26a42`. |
+| Version / identity | `0.5.1` / `0.5.1 beta v.20260924.6` (the next beta build would be `.7`). |
+| Gate | `npm run check` green at `b81d036`: **1,541 tests pass** (the one skipped Chrome-only test was removed with the menu facsimile), and `dist/chrome-unpacked` is byte-verified. |
+| NAS | `Dev/simul/` mirrors `b81d036`; the owner loads `Dev/simul/dist/chrome-unpacked`. |
 | Release | `v0.5.1` is Latest. The owner has asked for PR #1 to be submitted and the version bumped to **0.5.2** next session (see the release steps below). |
 
 ## What this PR carries (owner reports, all fixed and verified in Chrome for Testing)
@@ -47,10 +47,44 @@ number to 0.5.2."*
   (its address, natural and rendered size, fit, pair and settings). Carousel
   slides and images scrolled back into view reuse it without a new capture.
 
-## Remaining work before the release
+## Update, second 2026-09-25 session (D87–D89)
 
-These came out of this session's reports and were not done. Do them first,
-in this order, then release.
+The owner said "Fix those items, also look at wise.com" (the side navigation
+of the signed-in pages lands down and to the right and jumps off screen on
+scroll) and "For fastmail.com the logo in the top right is a small icon and
+does not show up." Done, in `b81d036`, and verified in Chrome for Testing
+except where noted:
+
+- **Item 1 done (D87):** Chrome's video play bar is hidden in the document
+  and in every replica shadow root.
+- **Item 2 not done (D87):** it could not be measured. The archived Reddit
+  pages no longer run Reddit's scripts here (headless Chrome aborts the
+  `redditstatic.com` bundles), so there are no adopted sheets to test
+  against. Still documented in `docs/replica-fidelity.md`.
+- **Item 3 done (D87):** a confirmed no-text image is kept by the image
+  itself (unit-tested; not yet seen on the bank carousel).
+- **Item 4 done (D87):** `statusPairNeedsPack` removed.
+- **Wise (D88):** large stylesheets are watched by their shape, so style
+  polling works on pages carrying one (Wise's 2.4 M character design system
+  had switched it off, and rules added later never reached the mirror). ARIA
+  menus and listboxes are now page content with the page's styles, inline
+  position and images (the Wise currency dropdown drew as a plain list); the
+  mirror's own ARIA preview opens the page's menu in place. The signed-in
+  side navigation itself is unverified; the owner's second readout could not
+  be run.
+- **Fastmail (D89):** its avatar CDN answers 403 without
+  `Origin: https://app.fastmail.com`. An image the mirror cannot fetch
+  (`crossorigin` up to 512 x 512, `blob:` up to 2048 x 2048) now travels as
+  the pixels the page decoded. Unverified on the signed-in app.
+
+The owner checks below now include Wise and Fastmail. Harness scripts from
+this session are in `~/.cache/simul-harness/d87/` (see the memory
+`simul-chrome-repro-harness`).
+
+## Remaining work before the release (as written by the first session)
+
+These came out of the first session's reports. Items 1, 3 and 4 are done;
+item 2 is documented as not done (see above). Item 5 remains.
 
 1. **Hide Chrome's native video controls in the mirror** (found in D83). A
    frame without scripts gets Chrome's own play bar on every `<video>`; the
@@ -91,8 +125,17 @@ in this order, then release.
      same-origin navigation) was not reproduced here.
    - **Language packs (D85).** Switch to a language never used before and
      check that the page and image text change without a refresh.
-   - **Image cache (D86).** On the bank's login-page carousel, and while
-     scrolling a long page, overlays should come back at once.
+   - **Image cache (D86, D87).** On the bank's login-page carousel, and while
+     scrolling a long page, overlays should come back at once, and the slide
+     without text should not flash "processing" when it returns.
+   - **Wise, signed in (D88).** The side navigation stays at the left and
+     stays put while scrolling; account and currency menus look like the
+     page. If the sidebar still moves, run the two readouts from this
+     session (which sheets place `.sidebar-container` on the page, and its
+     computed position inside the mirror) and record them.
+   - **Fastmail, signed in (D89).** The small account icon at the top right
+     shows in the mirror.
+   - **Any Reddit video (D87).** No play bar over the poster.
 
 ## Releasing 0.5.2 (after the work above)
 
@@ -119,14 +162,16 @@ and say so plainly instead of asking.
    in the owner's voice (memory `simul-public-messaging`): what changed for
    a reader (hover menus, Reddit and other big web-component pages, a single
    scroll bar, the detected language in the From menu, language changes
-   that translate at once, faster image translation when images return),
+   that translate at once, faster image translation when images return,
+   menus and dropdowns drawn as the page draws them, images from signed-in
+   apps such as account avatars, no video play bars),
    then requirements and install, as in `release-notes-0.5.1.md`. **Never
    name the owner's bank.**
 4. `npm run artifact:sync && npm run check` in the background. Read the
    `exit=` and `Tests` lines before claiming green (memory
    `simul-toolchain-on-linux`).
-5. Decision-log entry **D87** (the release), then commit, push, and update
-   the PR description's Gate line.
+5. Decision-log entry **D90** (the release; D87–D89 are this session's
+   fixes), then commit, push, and update the PR description's Gate line.
 6. **Redaction scan before anything public**: grep the whole diff, commit
    messages and PR text for the bank's name, the NAS address, rsync details
    and other projects (D80's list). The earlier D82–D86 texts were written
