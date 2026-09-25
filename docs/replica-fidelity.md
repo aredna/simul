@@ -122,8 +122,12 @@ deleting rules changes (D88). Before D88 one such sheet took the whole budget,
 so a page carrying one (Wise's 2.4 M character design system, freee and
 YouTube at about 3 MB) had no polling at all, and rules its scripts added later
 never reached the replica: Wise's signed-in side navigation lost its fixed
-position. An in-place edit inside a large sheet that keeps its count and ends
-still waits for the next checkpoint. Simul does not patch website prototypes.
+position. Sheets that are each small enough but together outgrow the budget
+are handled the same way (D95): once a pass that started with the whole
+budget reaches a sheet that no longer fits, that sheet is watched by its shape
+from then on, so the page keeps its polling. An in-place edit inside a sheet
+watched by its shape that keeps its count and ends still waits for the next
+checkpoint. Simul does not patch website prototypes.
 
 ### Inert HTML semantics
 
@@ -171,6 +175,10 @@ one of its links, buttons or menu items is chosen, since the page would act on
 it. `multiple` and authored `size>1` selects retain bounded inline-list
 presentation. Labels and disabled/shape semantics are independent from the
 selected state: the latter appears only when ordinary form state is enabled.
+A select that states its own implicit role (`role="combobox"` on a single-row
+select, `role="listbox"`) is approved like one that states none, and the
+stated role is dropped in transit (D98); any other widget or editor role on a
+select still withholds its labels.
 Every admitted state is presentation-only and cannot mutate or submit the
 source control. No source clipping ancestor is rewritten. A select at zero
 opacity that still takes pointer input over a rendered box is the page's click
@@ -277,8 +285,13 @@ Both selectable policies continue to block:
   profile. A file input is drawn as the empty control the page shows (D75),
   and so is a credential input (D76): a password, card-number or
   one-time-code field keeps its box (`type`, `class`, `style`, `id`, `size`
-  and the like) and never its value, placeholder, labels or `data-*`. Any
-  other credential region, such as CSS-masked text or a container marked as a
+  and the like) and never its value, placeholder, labels or `data-*`. When
+  form values are allowed, the field shows one dot per character, as the page
+  does (D91): the page sends only the length of the value (a
+  `masked-length` proof, at most 256), and the replica fills the field with
+  that many bullets. A number field, which cannot hold dots, and a field
+  whose styles cannot be read stay empty. Any other credential region, such
+  as CSS-masked text outside a field or a container marked as a
   one-time-code area, is still replaced by an empty opaque shell.
   A node that was a credential stays one for the page's lifetime; only
   explicit evidence counts (an old password type, credential autocomplete or
@@ -353,15 +366,20 @@ Some gaps cannot be fixed by admitting more sanitizer syntax:
   512 (PNG), each encoded once per address. A canvas the page may not read,
   an image still loading and a larger one keep today's handling; a `blob:`
   CSS background is still omitted and counted as browser-inaccessible.
-- **Source document mode.** The source's standards-versus-quirks state is
-  transported as a validated enum. A standards page gets the doctype shell
-  through `srcdoc`. An `srcdoc` document is always in no-quirks mode (HTML
-  parsing rules), so a quirks page's replica is a blank frame into which the
-  panel writes the doctype-free shell (D65, found in D60 on Google's 404 page).
-  That document is in quirks mode like the source, keeps the same sandbox and
-  shell CSP, and takes the panel's URL, the base URL an `srcdoc` shell inherits
-  anyway. Chrome's distinct limited-quirks mode is not separately represented:
-  such a page reports `CSS1Compat` and gets the standards shell.
+- **Source document mode.** The source's standards, quirks or limited-quirks
+  mode is transported as a validated enum. A standards page gets the doctype
+  shell through `srcdoc`. An `srcdoc` document is always in no-quirks mode
+  (HTML parsing rules), so a quirks page's replica is a blank frame into which
+  the panel writes the doctype-free shell (D65, found in D60 on Google's 404
+  page). That document is in quirks mode like the source, keeps the same
+  sandbox and shell CSP, and takes the panel's URL, the base URL an `srcdoc`
+  shell inherits anyway. Limited-quirks mode (the XHTML 1.0 and HTML 4.01
+  Transitional and Frameset doctypes) reports `CSS1Compat` like standards
+  mode, so the page side reads the doctype by the parser's rule; its replica
+  is written the same way with the XHTML 1.0 Transitional doctype (D97). The
+  visible difference is the line-height quirk: an image alone on a line gets
+  no descender gap, so a sliced-image table no longer grows a few pixels per
+  row in the mirror.
 - **Cross-origin CSSOM.** A stylesheet link may render while Chrome's same-origin
   rules prevent Simul from reading its rules. Passive Fidelity can retain the
   normalized link/import, but cannot flatten or inspect inaccessible CSSOM.
@@ -372,7 +390,13 @@ Some gaps cannot be fixed by admitting more sanitizer syntax:
   shadow roots ("Join", the sort and share buttons) in the browser's button
   font. Repairing an adopted rule from an identical rule in a `<style>`
   element's text was planned for D87 but not done: it could not be measured,
-  because Reddit's archived pages no longer run their scripts here.
+  because Reddit's archived pages no longer run their scripts here. D99
+  checked what Chrome keeps: nothing readable. A constructed sheet has no
+  source text, `rule.cssText` and `rule.style` give the empty longhands, and
+  the Typed OM (`rule.styleMap`) returns the same empty values. The original
+  text lives only in the page's own scripts, which Simul reaches only by
+  patching page prototypes (ruled out) or through the debugger (a permission
+  Simul does not have). The gap stays.
 - **Computed-style fallback.** Simul intentionally does not serialize every
   computed property. A broad snapshot would be large, slow, privacy-sensitive,
   and likely to freeze responsive cascade behavior. A future fallback must be

@@ -69,27 +69,81 @@ describe('semantic source receiver', () => {
     expect(input.value).toBe('***');
   });
 
-  it('rejects a forged safe claim when the bound replica node is secret', () => {
+  it('drops a forged safe claim when the bound replica node is secret (D96)', () => {
     const { document } = parseHTML(
       '<html><body><input id="secret" type="password" value="***"></body></html>',
     );
     const input = document.querySelector<HTMLInputElement>('#secret')!;
+    const drops: Array<readonly [number, number]> = [];
     const receiver = new SemanticSourceReceiver({
       document: identity,
       replicaDocument: document as unknown as Document,
       resolveNode: () => input,
+      reportDroppedItems: (records, proofs) => drops.push([records, proofs]),
     });
+    // The record is dropped by itself; the batch commits without it.
     expect(receiver.applyBatch(createSemanticSourceBatch(
       identity,
       'read-v1-111111',
       1,
       [valueRecord()],
-    ))).toBeUndefined();
+    ))).toEqual([]);
     expect(input.value).toBe('***');
     expect(receiver.records()).toEqual([]);
+    expect(drops).toEqual([[1, 0]]);
   });
 
-  it('rejects unreadable computed text security before touching a value', () => {
+  it('drops only the item the replica refuses; the rest of the batch applies (D96)', () => {
+    // The D62 outage: one proof the receiver refused (a disabled state on a
+    // plain link) refused every batch, so no label, select state or menu
+    // reached the replica on any page with a link.
+    const { document } = parseHTML(
+      '<html><body><a id="link" href="/x">Link</a><input id="draft" type="text" value="***">' +
+      '<select id="pick"><option>One</option><option>Two</option></select></body></html>',
+    );
+    const link = document.querySelector('#link')!;
+    const input = document.querySelector<HTMLInputElement>('#draft')!;
+    const select = document.querySelector<HTMLSelectElement>('#pick')!;
+    const nodes = new Map<number, Node>([
+      [5, link], [7, input], [30, select],
+      [31, select.options[0]!], [32, select.options[1]!],
+    ]);
+    const presented: Array<readonly ResolvedSemanticSourceProof[]> = [];
+    const drops: Array<readonly [number, number]> = [];
+    const receiver = new SemanticSourceReceiver({
+      document: identity,
+      replicaDocument: document as unknown as Document,
+      resolveNode: (nodeId) => nodes.get(nodeId),
+      applyProofs: (proofs) => {
+        presented.push(proofs);
+        return true;
+      },
+      reportDroppedItems: (records, proofs) => drops.push([records, proofs]),
+    });
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 1,
+      [valueRecord(), valueRecord({ recordId: semanticSourceRecordId(99, 'value')!, nodeId: 99 })],
+      [
+        {
+          kind: 'control-state', bridge: 'isolated-html', nodeId: 5, revision: 1,
+          gate: 'controlSemantics', disabled: false, classifierVersion: 1,
+        },
+        {
+          kind: 'select-state', bridge: 'isolated-html', nodeId: 30, revision: 1,
+          gate: 'formValues', selectedOptionNodeIds: [32], multiple: false,
+          pickerOpen: false, classifierVersion: 1,
+        },
+      ],
+    ))).toHaveLength(1);
+    expect(input.value).toBe('visible draft');
+    expect(presented.at(-1)?.map(({ kind }) => kind)).toEqual(['select-state']);
+    // One record (node 99 is not in the replica) and one proof were dropped.
+    expect(drops).toEqual([[1, 1]]);
+    // A broken stream (a revision rewind) is still refused whole; see
+    // 'rejects revision rewinds and same-revision content changes'.
+  });
+
+  it('drops a record under unreadable computed text security before touching a value', () => {
     const { document, window } = parseHTML(
       '<html><body><input id="draft" type="text"></body></html>',
     );
@@ -122,7 +176,7 @@ describe('semantic source receiver', () => {
       [valueRecord()],
     ));
     Reflect.deleteProperty(window, 'getComputedStyle');
-    expect(applied).toBeUndefined();
+    expect(applied).toEqual([]);
     expect(valueReads).toBe(0);
     expect(receiver.records()).toEqual([]);
   });
@@ -149,7 +203,7 @@ describe('semantic source receiver', () => {
     expect(receiver.records()).toEqual([]);
   });
 
-  it('rejects evidence nested under a composed secret ancestor', () => {
+  it('drops evidence nested under a composed secret ancestor', () => {
     const { document } = parseHTML(
       '<html><body><section autocomplete="current-password"><input id="draft" type="text" value="***"></section></body></html>',
     );
@@ -164,11 +218,11 @@ describe('semantic source receiver', () => {
       'read-v1-111111',
       1,
       [valueRecord()],
-    ))).toBeUndefined();
+    ))).toEqual([]);
     expect(input.value).toBe('***');
   });
 
-  it('rejects evidence below an assigned-slot secret ancestor', () => {
+  it('drops evidence below an assigned-slot secret ancestor', () => {
     const { document } = parseHTML(
       '<html><body><div id="host"><input id="draft" type="text" value="***"></div></body></html>',
     );
@@ -191,7 +245,7 @@ describe('semantic source receiver', () => {
       'read-v1-111111',
       1,
       [valueRecord()],
-    ))).toBeUndefined();
+    ))).toEqual([]);
     expect(input.value).toBe('***');
   });
 
@@ -213,7 +267,7 @@ describe('semantic source receiver', () => {
     input.type = 'text';
     expect(receiver.applyBatch(createSemanticSourceBatch(
       identity, 'read-v1-111111', 2, [valueRecord()],
-    ))).toBeUndefined();
+    ))).toEqual([]);
     expect(input.value).toBe('***');
   });
 
@@ -462,16 +516,65 @@ describe('semantic source receiver', () => {
     // A slider's value is user input (valueinput), never an indicator's
     // read-only valuenow; an indicator never carries the user-input value; a
     // plain div has no current-item semantics; a link is not a toggle button.
+    let sequence = 2;
     for (const forged of [
       aria(4, 'valuenow', '7'),
       aria(3, 'valueinput', '42'),
       aria(2, 'current', 'page'),
       aria(1, 'pressed', 'true'),
     ]) {
+      // Each is dropped by itself (D96): the batch commits, and nothing is
+      // presented for it.
       expect(receiver.applyBatch(createSemanticSourceBatch(
-        identity, 'read-v1-111111', 2, [], [forged],
-      ))).toBeUndefined();
+        identity, 'read-v1-111111', sequence, [], [forged],
+      ))).toEqual([]);
+      sequence += 1;
+      expect(presented.at(-1)).toEqual([]);
     }
+  });
+
+  it('draws a credential field as dots from its count alone (D91)', () => {
+    const { document } = parseHTML(
+      '<html><body><input id="pw" type="password"><input id="card" type="text">' +
+      '<input id="draft" type="text"><input id="box" type="checkbox"></body></html>',
+    );
+    const password = document.querySelector<HTMLInputElement>('#pw')!;
+    const card = document.querySelector<HTMLInputElement>('#card')!;
+    const draft = document.querySelector<HTMLInputElement>('#draft')!;
+    const box = document.querySelector<HTMLInputElement>('#box')!;
+    const nodes = new Map<number, Node>([
+      [1, password], [2, card], [7, draft], [4, box],
+    ]);
+    const presenter = new SemanticProofPresenter({
+      document: document as unknown as Document,
+    });
+    const receiver = new SemanticSourceReceiver({
+      document: identity,
+      replicaDocument: document as unknown as Document,
+      resolveNode: (nodeId) => nodes.get(nodeId),
+      applyProofs: (proofs) => presenter.apply(proofs),
+    });
+    const masked = (nodeId: number, length: number) => ({
+      kind: 'masked-length', bridge: 'isolated-html', nodeId, revision: 1,
+      gate: 'formValues', length, classifierVersion: 1,
+    } as const);
+
+    // A checkbox cannot draw dots, node 99 is not in the replica, and the
+    // draft's value travels as text: each count is dropped by itself, and
+    // the rest of the batch still applies.
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 1, [valueRecord()],
+      [masked(1, 8), masked(2, 16), masked(4, 3), masked(7, 5), masked(99, 2)],
+    ))).toBeDefined();
+    expect(password.value).toBe('\u2022'.repeat(8));
+    expect(card.value).toBe('\u2022'.repeat(16));
+    expect(draft.value).toBe('visible draft');
+    expect(box.hasAttribute('data-simul-source-masked-length')).toBe(false);
+
+    receiver.clear();
+    expect(password.value).toBe('');
+    expect(card.value).toBe('');
+    expect(password.hasAttribute('data-simul-source-masked-length')).toBe(false);
   });
 
   it('re-points aria relationships at represented, safe, same-scope nodes only', () => {
@@ -569,11 +672,13 @@ describe('semantic source receiver', () => {
       2,
       [],
       [state, mismatchedPresentation],
-    ))).toBeUndefined();
+    ))).toEqual([]);
+    // State and shape disagree: neither is presented (D96).
+    expect(presented.at(-1)).toEqual([]);
 
     const presentation = { ...mismatchedPresentation, multiple: true } as const;
     expect(receiver.applyBatch(createSemanticSourceBatch(
-      identity, 'read-v1-111111', 2, [], [state, presentation],
+      identity, 'read-v1-111111', 3, [], [state, presentation],
     ))).toBeDefined();
     expect(presented.at(-1)?.map(({ kind }) => kind))
       .toEqual(['select-state', 'select-presentation']);
@@ -660,14 +765,21 @@ describe('semantic source receiver', () => {
       panel,
     });
 
+    // Without admitted panel text the menu is dropped by itself (D96).
+    const missingTextPresented: Array<readonly ResolvedSemanticSourceProof[]> = [];
     const missingTextReceiver = new SemanticSourceReceiver({
       document: identity,
       replicaDocument: document as unknown as Document,
       resolveNode: (nodeId) => nodes.get(nodeId),
+      applyProofs: (proofs) => {
+        missingTextPresented.push(proofs);
+        return true;
+      },
     });
     expect(missingTextReceiver.applyBatch(createSemanticSourceBatch(
       identity, 'read-v1-111111', 1, [], [proof],
-    ))).toBeUndefined();
+    ))).toEqual([]);
+    expect(missingTextPresented.flat()).toEqual([]);
   });
 
   it('presents a structural menu locally in the isolated replica', () => {
@@ -759,13 +871,16 @@ describe('semantic source receiver', () => {
       <div id="wrapper"><span id="trigger">Tax advisers</span>
       <a id="panel" href="/tax"><span id="item">***</span></a></div>
       </nav><iframe id="frame"></iframe></body></html>`);
-    const { receiver } = hoverMenuReplica(document, [16, 17, 18, 19]);
+    const { receiver, trigger } = hoverMenuReplica(document, [16, 17, 18, 19]);
 
+    // The menu is dropped by itself; its text still arrives (D96).
     expect(receiver.applyBatch(createSemanticSourceBatch(
       identity, 'read-v1-111111', 1,
       [menuTextRecord(19, 'Tax advisers', 'span')],
       [structuralMenuProof()],
-    ))).toBeUndefined();
+    ))).toBeDefined();
+    expect(trigger.hasAttribute('aria-controls')).toBe(false);
+    expect(document.querySelector('#item')!.textContent).toBe('Tax advisers');
   });
 
   it('rewrites menu text into a replica node a live patch replaced (D82)', () => {
@@ -902,11 +1017,14 @@ describe('semantic source receiver', () => {
       identity, 'read-v1-111111', 2, [record], [structuralMenuProof()],
     ))).toBeDefined();
 
-    // A trigger that claims another relation is still refused.
+    // A trigger that claims another relation is still refused: the menu is
+    // withdrawn, and the rest of the batch commits (D96).
     trigger.setAttribute('aria-controls', 'somewhere-else');
     expect(receiver.applyBatch(createSemanticSourceBatch(
       identity, 'read-v1-111111', 3, [record], [structuralMenuProof()],
-    ))).toBeUndefined();
+    ))).toBeDefined();
+    expect(trigger.hasAttribute('data-simul-source-disclosure-state')).toBe(false);
+    expect(text.nodeValue).toBe('Startup School');
   });
 
   it('preserves a unique panel CSS id across inline tab apply-update-clear', () => {
@@ -962,21 +1080,31 @@ describe('semantic source receiver', () => {
     ))).toBeUndefined();
     expect(trigger.getAttribute('aria-selected')).toBe('true');
 
+    // Two relations claim the tab: both are dropped, the rest of the batch
+    // commits, and the trigger shows its own markup again (D96).
     expect(receiver.applyBatch(createSemanticSourceBatch(
       identity,
       'read-v1-111111',
       4,
       [],
       [tabStateProof(4, false), tabStateProof(1, true, 21, 23)],
-    ))).toBeUndefined();
-    expect(trigger.getAttribute('aria-selected')).toBe('true');
+    ))).toBeDefined();
+    expect(trigger.getAttribute('aria-controls')).toBe('stale-control');
+    expect(trigger.getAttribute('aria-selected')).toBe('false');
 
+    // One relation alone is presented again.
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 5, [], [tabStateProof(4, false)],
+    ))).toBeDefined();
+    expect(trigger.getAttribute('aria-controls')).toBe('panel');
+
+    // The panel stops being a tab panel: the relation is dropped by itself.
     panel.setAttribute('role', 'region');
     expect(receiver.applyBatch(createSemanticSourceBatch(
-      identity, 'read-v1-111111', 4, [], [tabStateProof(4, false)],
-    ))).toBeUndefined();
+      identity, 'read-v1-111111', 6, [], [tabStateProof(4, false)],
+    ))).toBeDefined();
     panel.setAttribute('role', 'tabpanel');
-    expect(trigger.getAttribute('aria-selected')).toBe('true');
+    expect(trigger.getAttribute('aria-controls')).toBe('stale-control');
 
     receiver.clear();
     expect(panel.id).toBe('panel');

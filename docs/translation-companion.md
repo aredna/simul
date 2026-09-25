@@ -157,9 +157,11 @@ Password fields, CSS text-security fields, hidden inputs, file names and
 paths, password/authentication/one-time-code/WebAuthn autocomplete, and every
 `cc-*` autocomplete token are a floor no read scope lifts; only the Advanced
 **Show everything (testing)** switch does (D75, see
-[Replica fidelity](replica-fidelity.md)). A file input and a credential input
-are drawn as the empty field the page shows (D75, D76); their values never
-travel. Classification occurs before
+[Replica fidelity](replica-fidelity.md)). A file input is drawn as the empty
+field the page shows (D75). A credential input is drawn with one dot per
+character, as the page draws it (D76, D91): only the length of its value
+travels, under the form-values setting, and never its characters.
+Classification occurs before
 reading; once a node is classified as a secret it remains secret for the
 document lifetime. A narrower live setting clears source-derived replica,
 translation, and image state before the new preference is saved. Reset commits
@@ -235,14 +237,23 @@ new cache identity. Explicit same-language pairs stop
 before source capture. Auto-detected work uses the nearest valid image/element
 language and stops before recognition when that resolved language equals To.
 Each image's translated line boxes live in an inert `simul-image-overlay`
-element placed right after the image in the replay document (D74). It is
+element inside the image's parent in the replay document (D74). It is
 absolutely positioned with no z-index, so it paints where the image paints:
 a pop-up, sticky header or menu that covers the image covers its translation,
 and a dimming backdrop dims it. It takes no part in layout, resets every
 property with inline `!important`, and keeps its boxes in a closed shadow
-root, so page CSS cannot restyle them; page rules that count siblings (such
-as `img + figcaption`) can see it. When the mirror rewrites the image's
-parent, the next refresh puts the element back after the image. It is placed
+root, so page CSS cannot restyle them. Where the parent can host one (a
+`div`, `span`, `p`, `section` and the like, without a shadow root of its
+own), the element lives in a closed Simul-owned shadow root on the parent,
+after a slot that shows the parent's own children unchanged (D92): page
+rules that count siblings (`img + p`, `:last-child`, `:nth-child`) do not
+see it, and the mirror patches the parent's children as before. It then
+paints after all of the parent's children, so a later positioned sibling (a
+badge over the image) no longer covers the translation. Any other parent (a
+link, a `picture`, a `figure`, a list item) keeps the element right after
+the image, where sibling rules such as `img + figcaption` still see it. When
+the mirror rewrites the image's parent, the next refresh puts the element
+back. It is placed
 by measuring where it lands, so a transformed or zoomed containing block is
 handled; rotation is not. Text wraps and uses bounded font-size reduction
 within the recognized box instead of forcing a single clipped line. Each
@@ -272,7 +283,13 @@ in the live readable-content scope. Standard can add translated public control
 and option labels, disabled semantics, native select shape, and validated
 disclosure content; ordinary/personal values, selected or checked state, and
 editable text require their respective broader switches. Source secret
-classification remains authoritative underneath this supplement.
+classification remains authoritative underneath this supplement. The receiver
+checks each record and proof on its own: one it cannot place (its node is
+missing, the replica classifies it differently, or two relationships claim
+one node) is dropped by itself, and a batch is refused whole only when the
+stream itself is broken (a forged identity or a revision rewind) (D96). Until
+D96 one refused item refused the batch, which purged every label, menu and
+control state for as long as the page kept sending it (D62).
 
 A public single-row select becomes a companion-owned trigger whose top-layer,
 internally scrolling list escapes source clipping, stays within the replica
@@ -288,8 +305,11 @@ event to the source page.
 Raw option values, names, data attributes, datalist/standalone-option content,
 rich picker descendants, and private select ancestry stay blank. Password,
 authentication, payment-autofill, hidden-input, file-name, and CSS-masked
-secrets stay outside every scope and disclose neither their text nor length. A field that
-becomes sensitive clears its prior semantic record and projection atomically.
+secrets stay outside every scope and never disclose their text. The one
+exception is length: a credential input the replica draws as its own field
+shows one dot per character, as the page does, so under the form-values
+setting its length travels as a bounded count (D91). A field that becomes
+sensitive clears its prior semantic record and projection atomically.
 
 Other private controls become empty inert shells rather than disabled form
 controls, avoiding browser disabled-state wash while retaining geometry.
@@ -368,8 +388,9 @@ image within the size caps travels as the pixels the page decoded (D89). A valid
 mode selects the shell: a standards page loads the doctype shell through
 `srcdoc`, and a quirks page gets a blank frame into which the panel writes the
 doctype-free shell, because an `srcdoc` document is always no-quirks (see
-`docs/replica-fidelity.md`). Chrome's distinct limited-quirks mode is not
-separately represented.
+`docs/replica-fidelity.md`). A limited-quirks page (an XHTML 1.0 or HTML 4.01
+Transitional or Frameset doctype) gets a written shell with the XHTML 1.0
+Transitional doctype (D97).
 Generated pseudo-element text is not a DOM text node and therefore cannot be
 translated even when its rule renders. Broad computed-style serialization is
 deliberately omitted because it can freeze responsive cascade behavior, expose
@@ -425,10 +446,11 @@ the user must reauthorize after temporary page access expires.
 
 ## Following tabs
 
-The toolbar's Follow / Pinned button and Settings' "Mirror follows" switch the
-same saved setting, and both surfaces honor it (D73). Follow is the default: a
-side panel mirrors whichever tab becomes active in its own window, and a
-detached window mirrors the active tab of the focused browser window. Pinned
+The toolbar's Follow / Pinned button switches one saved setting, and both
+surfaces honor it (D73). Settings has no second control for it (D91). Follow
+is the default: a side panel mirrors whichever tab becomes active in its own
+window, and a detached window mirrors the active tab of the focused browser
+window. Pinned
 keeps the mirror on the tab it shows while other tabs are active; image text
 on that tab waits until it is visible again, because pixel capture reads only
 the visible tab. Clicking the extension on another tab of the side panel's

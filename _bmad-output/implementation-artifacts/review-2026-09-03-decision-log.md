@@ -4041,3 +4041,320 @@ version bump and the GitHub release, as "Push out a release" was for D79.
 
 Gate before the merge: `npm run check` green, typecheck clean, **1,541 tests
 pass**, artifact byte-verified.
+
+### D91. One Follow / Pinned control; credential fields show their dots (2026-09-25)
+
+Branch `fix/open-items`. The owner asked to work on the open items from the
+2026-09-23 and 2026-09-25 handovers, and answered three questions first:
+remove the duplicate "Mirror follows" setting, draw dots in credential
+fields, and change the image overlay placement now (D92 onwards).
+
+- **"Mirror follows" removed from Settings** (review R4 remainder). The
+  toolbar's Follow / Pinned button switches the same saved setting on both
+  surfaces (D73), so the Window behavior group now holds only "Toolbar
+  opens". The saved preference and its default (Follow) are unchanged.
+- **Credential fields show one dot per character.** Since D76 a password,
+  card-number or one-time-code field was an empty box. The owner: draw the
+  dots the page draws; only the count may travel.
+  - The page sends a new `masked-length` proof: the node and the length of
+    the value, capped at 256, under the form-values gate. The value is read
+    only for its length, after classification, and never kept. It is sent
+    for an input that is itself a credential (password type, credential
+    autocomplete, or `-webkit-text-security` of disc, circle or square) and
+    drawn as its own field; a field inside a credential region (an opaque
+    shell) sends nothing, and neither does a field whose styles cannot be
+    read (secret only to fail closed) or a number field (it cannot hold
+    dots). The value poll includes the length, so autofill without an input
+    event also updates it.
+  - The receiver accepts the proof for a text-like input and fills it with
+    that many bullets (`•`); the browser draws its own dots for a password
+    field. A field whose value already travels as text never also shows
+    dots. The replica cannot confirm a card field (its `autocomplete` never
+    travels), and a count holds nothing private, so the receiver checks only
+    that the field draws text.
+  - A count the replica cannot place (the node is missing, or not a text
+    field) is dropped by itself, not the whole batch: nothing depends on it.
+    This is the first proof kind with per-item refusal (see the open item
+    on whole-batch refusal).
+- **Verified in Chrome for Testing** on a fixture with password, card,
+  one-time-code, CSS-masked and plain fields: 0.5.2 draws all four credential
+  fields empty; the new build shows 16, 6 and 0 dots before typing (the card
+  and masked fields have default values) and 8, 19, 4 and 6 after typing,
+  matching the page's lengths; the password text appears nowhere in the
+  panel.
+- **Tests.** Session: a card field sends only its length and follows typing;
+  number fields and fields in a credential region send nothing; nothing is
+  read without the form-values setting. Receiver: dots drawn and restored; a
+  checkbox, a missing node and a field with a value record each drop only
+  their count. Protocol: bounds and exact keys. Two tests that asserted a
+  password's value is never read now assert that only its length leaves the
+  page. The test that fails closed on unreadable styles still reads nothing.
+- **Docs.** `docs/reference.md`, `docs/replica-fidelity.md`,
+  `docs/translation-companion.md`.
+
+Build identity `0.5.2 beta v.20260925.2`. Gate: `npm run check` green,
+**1,545 tests pass**, artifact byte-verified.
+
+### D92. Image translations out of sight of page selectors (2026-09-25)
+
+Same branch. Open item 5 of the 2026-09-23 handover: the overlay placed right
+after each image (D74) is a sibling that page CSS counts, so `img + p`,
+`:nth-child` of later siblings and `:last-child` of the image could change in
+the mirror. No report had come in; the owner chose "Change it now" and
+accepted per-site trade-offs.
+
+- **Reproduced in Chrome for Testing** with a card whose text is styled by
+  `.card img + p` (red) and `.card > p:nth-child(2)` (bold): in 0.5.2 the
+  mirror's card text was black and normal weight once the image was
+  translated.
+- **Change.** When the image's parent can host a shadow root (the HTML
+  standard's list less `body`: `div`, `span`, `p`, `section`, `article`,
+  `header`, `main` and the like) and has none of its own, the overlay lives in
+  a closed Simul-owned shadow root on that parent, after a default `<slot>`
+  that renders the parent's own children unchanged. Page selectors never see
+  it, and the engine (which reads only open roots) patches the parent's
+  children as before. Any other parent (a link, `picture`, `figure`, a list
+  item, a parent with a mirrored shadow root) keeps the overlay right after
+  the image, as before.
+- **Trade-off.** In a shadow root the overlay paints after all of the
+  parent's children instead of right after the image, so a later positioned
+  sibling with no z-index (a badge over the image) no longer covers the
+  translation. Anything with a z-index, and anything outside the parent (a
+  pop-up, a backdrop, a sticky header), still covers or dims it as in D74.
+  Sibling rules around images in the fallback parents (`figure img +
+  figcaption`) are still affected.
+- **Verified in Chrome for Testing** (new harness `overlay-placement.mjs`,
+  which finds overlays in closed shadow roots through CDP): the card text
+  keeps its red bold style; the pop-up still covers the banner's translation
+  and the backdrop still dims it; each overlay's box equals its image's box;
+  a translated carousel track clips its two slides' overlays to the 150 px
+  each shows; a figure's overlay stays right after its image.
+- **Tests.** The overlay lives in the parent's closed shadow root after a
+  slot, with no new light-tree sibling; it returns to its parent after a
+  reorder or removal and follows the image to a new parent; a link, a figure
+  and a parent with its own shadow root keep it after the image. The overlay
+  tests now find overlays through `findImageOverlays` (light tree and owned
+  shadow roots).
+- **Docs.** `docs/translation-companion.md`,
+  `docs/image-translation-research.md`.
+
+Build identity `0.5.2 beta v.20260925.3`. Gate: `npm run check` green,
+**1,546 tests pass**, artifact byte-verified.
+
+### D93. The grant and rollback tests also run at the shipped default (2026-09-25)
+
+Same branch. Open item from the 2026-09-22 bug hunt and the 2026-09-23
+handover: D47 pinned several grant and rollback tests to image translation
+off, so the shipped default (on) was not the tested one.
+
+- **G1** (a pending reset must not re-adopt the broad grant) already runs at
+  the default: its D53 test starts from `DEFAULT_COMPANION_PREFERENCES`.
+- **G2, new default-state test** (`preference-coordinator`). With image text
+  on as shipped, All sites on then off keeps `<all_urls>` in Chrome and in the
+  ledger, because image text still uses it (the owner's G2 ruling, D53: one
+  broad grant stays while any enabled feature uses it); turning image text
+  off then releases it. The pinned test beside it still covers automation
+  alone.
+- **Rollback, new default-state test** (`permission-flows`). Image text is
+  on as shipped with no image access; the OCR button's click is granted and
+  the save then fails. The grant stays, because the saved setting already
+  wants it (the save only repeated "on"), so it is not an orphan; the panel
+  reports the failed save and then shows the access Chrome holds. The pinned
+  test beside it still covers a fresh grant for a setting that was off,
+  which is rolled back.
+- No product change: both tests pass on the current code.
+
+### D94. Capture reads each element's paint and credential facts once (2026-09-25)
+
+Same branch. Open item 2 of the 2026-09-23 handover: the visibility index's
+painted-path check walked each element's whole ancestor path, so a scan was
+O(nodes x depth).
+
+- **Painted path.** `sourceElementPathIsPainted` now derives each element's
+  answer from its flat-tree parent's, kept in the scan's paint cache: the path
+  is visible when the parent's is and the element's own state is; the
+  element survives clipping when a rectangle of its own overlaps, with a
+  positive area, the one rectangle its ancestors clip it to (an axis no
+  ancestor clips is unbounded). A positive-area overlap does not depend on
+  the order the old walk intersected the clips in, so the answers are the
+  same. When an ancestor clips to several fragments (an inline box with
+  `overflow` set), the old full path walk
+  (`sourceElementPathIsPaintedByPath`) answers for its descendants.
+- **Credential ancestry.** `hasSourceCredentialSecretAncestor` already kept
+  per-walk results (D63) but read each node's whole flat-tree path before
+  looking them up. It now climbs only to the nearest ancestor the walk has
+  classified, and remembers each element's depth so the 1,024-level limit
+  still applies.
+- **Differential test.** 400 random trees with open shadow roots, hidden,
+  faded and clip-path elements, zero-size and multi-fragment boxes, and
+  overflow clipping on one axis or both, visited in shuffled order: every
+  element's memoized answer equals the full path walk (about 30,000
+  elements, about 8% painted). A planted bug (ignoring one clip edge) fails
+  it at seed 29. The existing memoized-versus-plain credential test covers
+  the second change.
+- **Measured in Chrome for Testing** on the United States Wikipedia article
+  (23,226 elements), three runs each: the page's longest pause while the
+  mirror opens fell from about 1,010 ms to about 900 ms, the second from
+  about 600 ms to about 540 ms. A CPU profile of the unminified build shows
+  what remains in the painted check is reading each element's computed style
+  and client rectangles once (337 of 368 ms).
+- **Found, not fixed.** The visibility index scans the whole document twice
+  as the mirror starts (`#replaceAll`, then `refreshAll`, about 155 ms each
+  on that article).
+
+Build identity `0.5.2 beta v.20260925.4`. Gate: `npm run check` green,
+**1,549 tests pass**, artifact byte-verified.
+
+### D95. Style polling survives many medium sheets (2026-09-25)
+
+Same branch. Open item 1 of the 2026-09-23 handover ("style polling skips
+documents over 1 MiB"). D88 fixed the case of one large sheet; a page whose
+sheets are each small enough (under 4,000 rules and 256 KiB) but together pass
+the per-tick budget (1 MiB, 25,000 rules) still stopped the pass, was
+quarantined, and had no CSSOM change detection.
+
+- **Change.** When an owner's pass starts with the whole budget, a sheet that
+  no longer fits is watched by its shape from then on, as a large sheet is
+  (its rule count and first and last rules). Shape reads no longer draw on the
+  full-read budget they would find spent; they are bounded by the sheet cap
+  (512 per pass, two rules of at most 4,096 characters each). An owner whose
+  pass starts after another owner used part of the budget is still retried on
+  its next turn, so no sheet is downgraded by a busy tick. The 512-sheet cap
+  and nested imports keep today's quarantine.
+- **Real pages.** freee (one 2.97 MB sheet) and YouTube (3.4 MB and 0.5 MB
+  sheets) were already covered by D88; this closes the remaining shape of the
+  gap.
+- **Tests.** Seven 3,900-rule sheets: a rule the page inserts later and an
+  in-place edit of a sheet read in full each reach the replica, with no
+  overflow (fails on the old code). The quarantine test now exhausts the
+  512-sheet cap.
+- **Docs.** `docs/replica-fidelity.md`.
+
+Build identity `0.5.2 beta v.20260925.5`. Gate: `npm run check` green,
+**1,550 tests pass**, artifact byte-verified.
+
+### D96. The semantic receiver drops a refused item, not the batch (2026-09-25)
+
+Same branch. Open item 3 of the 2026-09-23 handover (session-close item 5):
+the receiver refused a whole semantic batch for one record or proof it could
+not accept. A refused batch makes the engine purge every translated label,
+menu, select and control state and reconnect with backoff, and the page side
+sends the same item again, so the loss lasted as long as the item did. D62's
+months-long outage was one such case: a disabled-state proof on every plain
+link.
+
+- **Change.** A batch is refused whole only when the stream is broken: a
+  forged record identity, a repeated identity, or a revision rewind. Anything
+  else is dropped by itself:
+  - a record whose replica node is missing or disconnected, whose tag
+    differs, which the replica classifies as secret or as another category,
+    or which cannot be bound; any earlier presentation of it is withdrawn, as
+    for a record the batch no longer carries;
+  - a proof that does not resolve on the replica;
+  - every proof in a conflict: two tab or menu relationships claiming one
+    node, or a select state that contradicts its shape (with that shape);
+  - a structural menu without admitted panel text, now checked against the
+    records actually admitted rather than all records sent.
+  Each admitted item is still validated on its own, so nothing is presented
+  that was not before; what changes is only that one refusal no longer takes
+  the others with it. D91's masked-length proof already worked this way.
+- **Logging.** The receiver reports the number of dropped records and proofs
+  per committed batch; development builds log
+  `[Simul semantic] dropped records=N; proofs=M` (compiled out of production).
+  On Wikipedia's United States article, freee, Yahoo! JAPAN, wise.com and
+  fastmail.com nothing was dropped: today the page side and the receiver
+  agree, and this is the net for when they do not.
+- **Tests.** One invalid record and one refused proof (the D62 link) beside a
+  valid record and select state: the batch commits, the valid items apply and
+  the drop is reported (fails on the old code). The tests that asserted a
+  whole-batch refusal for a single item now assert that the item alone is
+  dropped (forged secret claims, secret ancestors, forged ARIA states, select
+  state/shape mismatch, a menu without text or with a single-link panel, a
+  claimed trigger, two tabs on one trigger); the revision-rewind test still
+  asserts a whole refusal.
+- **Docs.** `docs/translation-companion.md`. The same paragraph still said
+  credential secrets disclose no length; D91 changed that for credential
+  inputs, and the sentence now says so.
+
+Build identity `0.5.2 beta v.20260925.6`. Gate: `npm run check` green,
+**1,551 tests pass**, artifact byte-verified.
+
+### D97. Limited-quirks pages mirror in limited-quirks mode (2026-09-25)
+
+Same branch. Open item 4 of the 2026-09-23 handover (found in D65): Chrome's
+limited-quirks mode (the XHTML 1.0 Transitional and Frameset doctypes, and
+HTML 4.01 Transitional and Frameset with a system identifier, common on older
+sites) reports `CSS1Compat` like standards mode, so its replica got the
+standards shell.
+
+- **Visible difference.** The line-height quirk: in (limited-)quirks mode an
+  image alone on a line gets no descender gap. A sliced-image table grows a
+  few pixels per row in a standards replica. Reproduced in Chrome for Testing
+  with a three-row table of 40 px images under the XHTML 1.0 Transitional
+  doctype: the source table is 120 px, the 0.5.2 replica 132 px (no doctype).
+- **Change.** The page side reads the doctype by the HTML parser's own rule
+  for the initial insertion mode (`sourceDocumentMode`): `BackCompat` is
+  quirks, those doctypes are `limited-quirks`, anything else standards. The
+  protocol accepts the third value. As for quirks (D65), an `srcdoc` document
+  cannot be anything but no-quirks, so the replica is a blank frame into which
+  the panel writes the shell, here with the XHTML 1.0 Transitional doctype;
+  the written shell is trusted only at the panel's URL, with `CSS1Compat` and
+  that doctype, and keeps the same sandbox and CSP.
+- **Verified in Chrome for Testing:** the new replica carries the doctype and
+  the table is 120 px, as in the source.
+- **Tests.** The doctype rule (both XHTML variants, HTML 4.01 with and without
+  a system identifier, Strict, none); the protocol accepts `limited-quirks`
+  and still refuses an unknown mode; the engine stages the Transitional shell
+  for a limited-quirks checkpoint.
+- **Docs.** `docs/replica-fidelity.md`, `docs/translation-companion.md`.
+
+Build identity `0.5.2 beta v.20260925.7`. Gate: `npm run check` green,
+**1,553 tests pass**, artifact byte-verified.
+
+### D98. A select that states its own combobox role reads like a plain one (2026-09-25)
+
+Same branch. Open item 9 of the 2026-09-23 handover (found in D75): D75 made
+`combobox` an activation role, so `<select role="combobox">`, which only
+states a single-row select's implicit role, stopped being an eligible
+select. Its option labels and state never travelled, the sanitizer rewrote
+its role to `button`, and its facsimile read "Options" with no labels.
+
+- **Change.** `combobox` and `listbox` on a native select (the first
+  recognized token, as ARIA fallback roles are read) are its implicit roles
+  (`isSourceNativeSelectImplicitRole`): the select stays eligible, is not an
+  activation region, and the stated role is dropped in transit like other
+  non-sensitive select roles. Any other activation role still becomes
+  `button`, and an editor role `textbox`, withholding the labels as before.
+- **Verified in Chrome for Testing** with a `role="combobox"` select beside a
+  plain one, translated with the stand-in translator: the D97 build's
+  facsimile read "Options" with no labels and no selection; the new build
+  shows «ja|Monthly plan» and «ja|Yearly plan», with the second selected, like
+  the plain select.
+- **Tests.** The D62 page test gains a `role="combobox"` select (labels
+  arrive) and a `role="button"` select (labels withheld); the sanitizer drops
+  a stated `combobox` or `listbox` and keeps `button`. Both fail on the old
+  code.
+- **Docs.** `docs/replica-fidelity.md`.
+
+Build identity `0.5.2 beta v.20260925.8`. Gate: `npm run check` green,
+**1,554 tests pass**, artifact byte-verified.
+
+### D99. Adopted-sheet `var()` shorthands: not recoverable (2026-09-25)
+
+Same branch. The D87 leftover (the 2026-09-25 handover's item 2): a rule in an
+adopted sheet whose `var()` shorthand Chrome's CSSOM writes back as empty
+longhands (Reddit's shadow-root buttons) loses its font in the replica.
+
+- **Checked in Chrome for Testing 153** on a constructed sheet
+  `.b{font:var(--f);line-height:2;color:red}`: `rule.cssText` and
+  `rule.style.cssText` list all eighteen font longhands empty;
+  `getPropertyValue('font')` and every longhand are empty; the Typed OM
+  (`rule.styleMap.get('font-family')`) is an empty `CSSStyleValue`, and
+  `get('font')` is undefined. A constructed sheet keeps no source text.
+- **Conclusion.** The original text lives only in the page's scripts (Lit's
+  `css` templates). Reaching it needs a page-world prototype patch (the
+  project rules out patching website prototypes) or the debugger permission
+  (production permissions stay minimal). Deriving the value from computed
+  styles would take it from whichever rule won the cascade for one element,
+  and could write a wrong value into a shared rule. No change; the gap stays
+  documented in `docs/replica-fidelity.md`.

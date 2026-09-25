@@ -41,12 +41,14 @@ describe('semantic source session', () => {
     const safe = document.querySelector<HTMLInputElement>('#safe')!;
     const secret = document.querySelector<HTMLInputElement>('#secret')!;
     safe.value = 'visible draft';
+    // The password's value is read only for its length (D91), after the
+    // field is classified; the characters never reach a message.
     let secretReads = 0;
     Object.defineProperty(secret, 'value', {
       configurable: true,
       get: () => {
         secretReads += 1;
-        throw new Error('secret value must not be read');
+        return 'hunter22';
       },
       set: () => undefined,
     });
@@ -65,7 +67,12 @@ describe('semantic source session', () => {
     expect(first.records.map((record) => record.text)).toContain('visible draft');
     expect(first.records.some((record) => record.nodeId === nodeId(secret)))
       .toBe(false);
-    expect(secretReads).toBe(0);
+    expect(first.proofs.filter((proof) =>
+      'nodeId' in proof && proof.nodeId === nodeId(secret))).toEqual([
+      expect.objectContaining({ kind: 'masked-length', length: 8 }),
+    ]);
+    expect(JSON.stringify(port.messages)).not.toContain('hunter22');
+    const readsBeforeTypeChange = secretReads;
 
     secret.setAttribute('type', 'text');
     port.emit(createSemanticSourceAck(
@@ -77,7 +84,81 @@ describe('semantic source session', () => {
     const second = port.messages.at(-1)!;
     expect(second.records.some((record) => record.nodeId === nodeId(secret)))
       .toBe(false);
-    expect(secretReads).toBe(0);
+    // Still a credential (sticky), but no longer drawn as dots: unread.
+    expect(second.proofs.some((proof) =>
+      'nodeId' in proof && proof.nodeId === nodeId(secret))).toBe(false);
+    expect(secretReads).toBe(readsBeforeTypeChange);
+    session.dispose();
+  });
+
+  it('sends only the length of a credential field, and follows typing (D91)', () => {
+    const { document, window } = parseHTML(
+      '<html><body><input id="card" type="text" autocomplete="cc-number">' +
+      '<input id="code" type="number" autocomplete="one-time-code">' +
+      '<section autocomplete="one-time-code"><input id="inner" type="password"></section>' +
+      '<input id="plain" type="text"></body></html>',
+    );
+    const card = document.querySelector<HTMLInputElement>('#card')!;
+    const code = document.querySelector<HTMLInputElement>('#code')!;
+    const inner = document.querySelector<HTMLInputElement>('#inner')!;
+    card.value = '4111111111111111';
+    code.value = '123456';
+    inner.value = 'region secret';
+    document.querySelector<HTMLInputElement>('#plain')!.value = 'plain draft';
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(port, document, window);
+    port.emit(createSemanticSourceStart(
+      'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+    ));
+
+    const first = port.messages[0]!;
+    // A number field cannot hold dots, and a field inside a credential region
+    // is not drawn at all, so neither sends a length.
+    expect(first.proofs.filter((proof) => proof.kind === 'masked-length'))
+      .toEqual([expect.objectContaining({
+        nodeId: nodeId(card), length: 16, revision: 1, gate: 'formValues',
+      })]);
+    expect(first.records.map((record) => record.text)).toEqual(['plain draft']);
+    const sent = JSON.stringify(port.messages);
+    for (const secret of ['4111', '123456', 'region secret']) {
+      expect(sent).not.toContain(secret);
+    }
+
+    card.value = '41111';
+    port.emit(createSemanticSourceAck(
+      identity, first.policyFingerprint, first.sequence,
+    ));
+    session.refresh();
+    expect(port.messages.at(-1)!.proofs.filter(
+      (proof) => proof.kind === 'masked-length',
+    )).toEqual([expect.objectContaining({ length: 5, revision: 2 })]);
+    session.dispose();
+  });
+
+  it('reads no credential length without the form-values setting (D91)', () => {
+    const { document, window } = parseHTML(
+      '<html><body><input id="pw" type="password"></body></html>',
+    );
+    const password = document.querySelector<HTMLInputElement>('#pw')!;
+    let reads = 0;
+    Object.defineProperty(password, 'value', {
+      configurable: true,
+      get: () => {
+        reads += 1;
+        return 'hunter22';
+      },
+    });
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(port, document, window);
+    port.emit(createSemanticSourceStart(
+      'isolated-html', identity, PAGE_ONLY_REPLICA_READ_SCOPE,
+    ));
+    expect(port.messages.flatMap((message) => message.proofs)).toEqual([]);
+    expect(reads).toBe(0);
     session.dispose();
   });
 
@@ -1301,6 +1382,8 @@ describe('semantic source session', () => {
     const markup = (stripped: boolean) => `<html><body>
       <a id="link" href="/about">About</a><button id="button">Go</button>
       <select id="lang"><option>English</option><option>Deutsch</option></select>
+      <select id="stated"${stripped ? '' : ' role="combobox"'}><option>Français</option></select>
+      <select id="widget" role="button"><option>Withheld</option></select>
       <nav><div id="wrapper"><button id="trigger"${stripped
         ? ''
         : ' aria-expanded="false" aria-haspopup="menu"'}>Products</button>
@@ -1327,10 +1410,12 @@ describe('semantic source session', () => {
       configurable: true,
       value: style,
     });
-    Object.defineProperty(source.document.querySelector('#lang'), 'getBoundingClientRect', {
-      configurable: true,
-      value: () => ({ left: 0, top: 0, right: 120, bottom: 24, width: 120, height: 24 }),
-    });
+    for (const id of ['#lang', '#stated', '#widget']) {
+      Object.defineProperty(source.document.querySelector(id), 'getBoundingClientRect', {
+        configurable: true,
+        value: () => ({ left: 0, top: 0, right: 120, bottom: 24, width: 120, height: 24 }),
+      });
+    }
     const mirrored = new Map<number, Node>();
     const pair = (from: Node, to: Node): void => {
       mirrored.set(nodeId(from), to);
@@ -1363,8 +1448,10 @@ describe('semantic source session', () => {
 
     try {
       expect(receiver.applyBatch(port.messages[0]!)).toBeDefined();
+      // A select that states its own implicit `combobox` role reads like a
+      // plain one (D98); any other activation role still withholds labels.
       expect([...replica.document.querySelectorAll('option')].map((option) =>
-        option.getAttribute('label'))).toEqual(['English', 'Deutsch']);
+        option.getAttribute('label'))).toEqual(['English', 'Deutsch', 'Français', null]);
     } finally {
       session.dispose();
       if (pageStyle) {
@@ -2350,6 +2437,12 @@ describe('semantic source session', () => {
       'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
     ));
     expect(firstPort.messages[0]!.records).toEqual([]);
+    // Only the password's length travels (D91).
+    expect(JSON.stringify(firstPort.messages)).not.toContain('credential"');
+    expect(firstPort.messages[0]!.proofs).toEqual([
+      expect.objectContaining({ kind: 'masked-length', length: 10 }),
+    ]);
+    const readsWhilePassword = reads;
     first.dispose();
 
     secret.setAttribute('type', 'text');
@@ -2367,7 +2460,8 @@ describe('semantic source session', () => {
       'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
     ));
     expect(secondPort.messages[0]!.records).toEqual([]);
-    expect(reads).toBe(0);
+    expect(secondPort.messages[0]!.proofs).toEqual([]);
+    expect(reads).toBe(readsWhilePassword);
     second.dispose();
   });
 

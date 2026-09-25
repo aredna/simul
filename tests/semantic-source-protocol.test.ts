@@ -210,6 +210,29 @@ describe('semantic source protocol', () => {
     FULL_VISIBLE_REPLICA_READ_SCOPE)).toBeDefined();
   });
 
+  it('carries the length of a credential field only as a bounded count (D91)', () => {
+    const masked = {
+      kind: 'masked-length', bridge: 'isolated-html', nodeId: 12, revision: 1,
+      gate: 'formValues', length: 8, classifierVersion: 1,
+    } as const;
+    expect(readSemanticSourceProof(masked)).toEqual(masked);
+    expect(readSemanticSourceProof({ ...masked, length: 0 }))
+      .toEqual({ ...masked, length: 0 });
+    expect(readSemanticSourceProof({ ...masked, length: 256 }))
+      .toEqual({ ...masked, length: 256 });
+    for (const forged of [
+      { ...masked, length: 257 },
+      { ...masked, length: -1 },
+      { ...masked, length: 2.5 },
+      { ...masked, length: '8' },
+      { ...masked, gate: 'controlSemantics' },
+      { ...masked, text: 'hunter22' },
+      { ...masked, nodeId: 0 },
+    ]) {
+      expect(readSemanticSourceProof(forged)).toBeUndefined();
+    }
+  });
+
   it('rejects unsafe or malformed aria relationship proofs', () => {
     // Page-authored relationship, so it must read under controlSemantics.
     expect(readSemanticSourceProof({ ...relationshipProof, gate: 'formValues' }))

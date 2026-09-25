@@ -5,6 +5,7 @@ import {
   MAX_SEMANTIC_SOURCE_RECORDS,
   MAX_SEMANTIC_SELECT_SIZE,
   MAX_SEMANTIC_SELECTED_OPTION_NODE_IDS,
+  MAX_SEMANTIC_MASKED_LENGTH,
   createSemanticSourceBatch,
   readSemanticSourceControllerMessage,
   readSemanticSourcePortIdentity,
@@ -33,6 +34,7 @@ import {
 import {
   SOURCE_SECRET_CLASSIFIER_VERSION,
   StickySourceSecretClassifier,
+  isMaskedCredentialInput,
   replicaReadScopeAdmits,
   sourceDocumentSecretClassifier,
   type SourceClassificationFacts,
@@ -144,6 +146,7 @@ type SemanticSourceProofDraft =
   | Omit<Extract<SemanticSourceProof, { kind: 'disclosure-state' }>, 'revision'>
   | Omit<Extract<SemanticSourceProof, { kind: 'structural-menu' }>, 'revision'>
   | Omit<Extract<SemanticSourceProof, { kind: 'choice-state' }>, 'revision'>
+  | Omit<Extract<SemanticSourceProof, { kind: 'masked-length' }>, 'revision'>
   | Omit<Extract<SemanticSourceProof, { kind: 'control-state' }>, 'revision'>
   | Omit<Extract<SemanticSourceProof, { kind: 'aria-state' }>, 'revision'>
   | Omit<Extract<SemanticSourceProof, { kind: 'aria-relationship' }>, 'revision'>;
@@ -613,6 +616,10 @@ export class SemanticSourceSession {
     const tagName = classification.facts.tagName;
     const type = normalizedToken(classification.facts.type);
     const parts = [tagName, type, classification.category];
+    const maskedLength = scope.formValues
+      ? this.#readMaskedCredentialLength(element, classification)
+      : undefined;
+    if (maskedLength !== undefined) parts.push(`dots=${maskedLength}`);
     if (
       classification.category === 'secret' ||
       classification.category === 'withheld'
@@ -887,6 +894,24 @@ export class SemanticSourceSession {
           gate: 'formValues',
           checked,
           indeterminate: type === 'checkbox' && indeterminate,
+          classifierVersion: SOURCE_SECRET_CLASSIFIER_VERSION,
+        });
+      }
+    }
+
+    if (scope.formValues && stack.length === 0) {
+      for (const element of elements) {
+        const classification = classifications.get(element);
+        if (!classification) continue;
+        const length = this.#readMaskedCredentialLength(element, classification);
+        const maskedNodeId = length === undefined ? undefined : this.#nodeId(element);
+        if (length === undefined || !maskedNodeId) continue;
+        addProof({
+          kind: 'masked-length',
+          bridge: this.environment.bridge,
+          nodeId: maskedNodeId,
+          gate: 'formValues',
+          length,
           classifierVersion: SOURCE_SECRET_CLASSIFIER_VERSION,
         });
       }
@@ -1573,6 +1598,41 @@ export class SemanticSourceSession {
       category: this.#classifier.classify(element, facts),
       facts,
     });
+  }
+
+  /**
+   * The number of dots a credential input shows (D91): the length of its
+   * value, capped, and nothing else. Only for a credential input the replica
+   * draws as its own field (not one inside a credential region, which is
+   * opaque) whose value does not already travel. The value itself is read
+   * only for its length and never kept.
+   */
+  #readMaskedCredentialLength(
+    element: Element,
+    classification: ElementClassification,
+  ): number | undefined {
+    if (
+      classification.category === 'ordinary-form' ||
+      classification.category === 'personal' ||
+      !isMaskedCredentialInput(classification.facts)
+    ) return undefined;
+    const parent = safelyRead(() => readSourceFlatTreeElementPath(element)?.[1]);
+    if (
+      parent &&
+      hasSourceCredentialSecretAncestor(
+        parent,
+        this.#classifier,
+        this.environment.window,
+        this.#scanSecretAncestors,
+      )
+    ) return undefined;
+    const length = safelyRead(
+      () => (element as HTMLInputElement).value.length,
+    );
+    return typeof length === 'number' && Number.isSafeInteger(length) &&
+      length >= 0
+      ? Math.min(length, MAX_SEMANTIC_MASKED_LENGTH)
+      : undefined;
   }
 
   #nodeId(node: Node): number | undefined {

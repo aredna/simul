@@ -322,6 +322,14 @@ const OVERSIZED_STYLE_RETRY_PASSES = 120;
  */
 const MAX_FULL_SIGNATURE_RULES_PER_SHEET = 4_000;
 const MAX_FULL_SIGNATURE_CHARACTERS_PER_SHEET = 256 * 1024;
+/*
+ * Many medium sheets can also outgrow the per-tick budget together. When an
+ * owner's pass starts with the whole budget, a sheet that no longer fits is
+ * watched by its shape from then on as well (D95), so such a page keeps its
+ * style polling instead of being quarantined. Shape reads are bounded by the
+ * sheet count (two rules of at most `MAX_SHALLOW_SIGNATURE_RULE_CHARACTERS`
+ * each), not by the full-read budget they would otherwise find spent.
+ */
 const MAX_SHALLOW_SIGNATURE_RULE_CHARACTERS = 4_096;
 const SHAPE_SIGNATURE_SHEETS = new WeakSet<CSSStyleSheet>();
 const MAX_MIRRORED_IMAGE_CANDIDATES = 4_000;
@@ -1939,7 +1947,7 @@ export class HtmlMirrorSourceSession {
     owner: Document | ShadowRoot,
     work: HtmlMirrorStyleWorkBudget,
   ): StylePollResult {
-    const read = ordinaryStyleSignature(owner, work);
+    const read = ordinaryStyleSignature(owner, work, budgetUnused(work));
     if (read.kind === 'capacity') return 'capacity';
     const signature = read.signature;
     if (signature === undefined) return 'unchanged';
@@ -1961,7 +1969,7 @@ export class HtmlMirrorSourceSession {
       const index = (this.#stylePollingCursor + offset) % owners.length;
       const owner = owners[index]!;
       processed += 1;
-      const read = ordinaryStyleSignature(owner, work);
+      const read = ordinaryStyleSignature(owner, work, budgetUnused(work));
       if (read.kind === 'signature' && read.signature !== undefined) {
         this.#ordinaryStyleSignatures.prime(owner, read.signature);
       }
@@ -2266,9 +2274,19 @@ type OrdinaryStyleSignatureRead = Readonly<{
   kind: 'capacity';
 }>;
 
+function budgetUnused(work: HtmlMirrorStyleWorkBudget): boolean {
+  return work.sheets === 0 && work.rules === 0 && work.characters === 0;
+}
+
+/**
+ * `shapeOnOverflow`: the owner's read started with the whole budget, so a
+ * sheet that does not fit is watched by its shape (D95) rather than failing
+ * the pass. Without it, the owner is retried with a fresh budget next turn.
+ */
 function ordinaryStyleSignature(
   owner: Document | ShadowRoot,
   work: HtmlMirrorStyleWorkBudget,
+  shapeOnOverflow = false,
 ): OrdinaryStyleSignatureRead {
   let sheets: ArrayLike<CSSStyleSheet>;
   try {
@@ -2305,7 +2323,7 @@ function ordinaryStyleSignature(
       parts.push(`${index}:unreadable`);
       continue;
     }
-    const rules = cssomRuleSignature(sheet, work, visited, 0);
+    const rules = cssomRuleSignature(sheet, work, visited, 0, shapeOnOverflow);
     if (rules.kind === 'capacity') return rules;
     parts.push(`${index}:${disabled ? 1 : 0}:${media}:${rules.signature}`);
   }
@@ -2320,6 +2338,7 @@ function cssomRuleSignature(
   work: HtmlMirrorStyleWorkBudget,
   visited: Set<object>,
   depth: number,
+  shapeOnOverflow: boolean,
 ): OrdinaryStyleSignatureRead {
   if (depth > 8 || visited.has(sheet)) {
     return Object.freeze({ kind: 'signature', signature: 'cycle' });
@@ -2337,9 +2356,13 @@ function cssomRuleSignature(
       SHAPE_SIGNATURE_SHEETS.has(sheet)
     ) {
       SHAPE_SIGNATURE_SHEETS.add(sheet);
-      return cssomShapeSignature(rules, ruleCount, work);
+      return cssomShapeSignature(rules, ruleCount, work, shapeOnOverflow);
     }
     if (work.rules + ruleCount > work.maxRules) {
+      if (shapeOnOverflow) {
+        SHAPE_SIGNATURE_SHEETS.add(sheet);
+        return cssomShapeSignature(rules, ruleCount, work, true);
+      }
       work.exhausted = true;
       return Object.freeze({ kind: 'capacity' });
     }
@@ -2360,9 +2383,15 @@ function cssomRuleSignature(
         SHAPE_SIGNATURE_SHEETS.add(sheet);
         work.rules = startRules;
         work.characters = startCharacters;
-        return cssomShapeSignature(rules, ruleCount, work);
+        return cssomShapeSignature(rules, ruleCount, work, shapeOnOverflow);
       }
       if (work.characters + rule.cssText.length > work.maxCharacters) {
+        if (shapeOnOverflow) {
+          SHAPE_SIGNATURE_SHEETS.add(sheet);
+          work.rules = startRules;
+          work.characters = startCharacters;
+          return cssomShapeSignature(rules, ruleCount, work, true);
+        }
         work.exhausted = true;
         return Object.freeze({ kind: 'capacity' });
       }
@@ -2375,7 +2404,13 @@ function cssomRuleSignature(
         parts.push(rule.cssText);
         continue;
       }
-      const nested = cssomRuleSignature(imported, work, visited, depth + 1);
+      const nested = cssomRuleSignature(
+        imported,
+        work,
+        visited,
+        depth + 1,
+        shapeOnOverflow,
+      );
       if (nested.kind === 'capacity') return nested;
       parts.push(`${rule.cssText}:${nested.signature ?? 'unavailable'}`);
     }
@@ -2399,6 +2434,7 @@ function cssomShapeSignature(
   rules: CSSRuleList,
   ruleCount: number,
   work: HtmlMirrorStyleWorkBudget,
+  unbudgeted: boolean,
 ): OrdinaryStyleSignatureRead {
   const ends = ruleCount === 0
     ? []
@@ -2410,15 +2446,17 @@ function cssomShapeSignature(
       return Object.freeze({ kind: 'signature', signature: 'unreadable' });
     }
     const text = rule.cssText.slice(0, MAX_SHALLOW_SIGNATURE_RULE_CHARACTERS);
-    if (
-      work.rules + 1 > work.maxRules ||
-      work.characters + text.length > work.maxCharacters
-    ) {
-      work.exhausted = true;
-      return Object.freeze({ kind: 'capacity' });
+    if (!unbudgeted) {
+      if (
+        work.rules + 1 > work.maxRules ||
+        work.characters + text.length > work.maxCharacters
+      ) {
+        work.exhausted = true;
+        return Object.freeze({ kind: 'capacity' });
+      }
+      work.rules += 1;
+      work.characters += text.length;
     }
-    work.rules += 1;
-    work.characters += text.length;
     parts.push(`${rule.cssText.length}:${text}`);
   }
   return Object.freeze({

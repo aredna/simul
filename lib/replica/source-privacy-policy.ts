@@ -164,14 +164,45 @@ interface SourceElementPaintInputs {
 export interface SourcePaintScanCache {
   readonly paths: Map<Element, readonly Element[] | undefined>;
   readonly inputs: Map<Element, SourceElementPaintInputs>;
+  /** Per-element painted-path facts, each derived from its parent's. */
+  readonly paintedPaths: Map<Element, SourcePaintedPathMemo>;
 }
 
 export function createSourcePaintScanCache(): SourcePaintScanCache {
   return {
     paths: new Map(),
     inputs: new Map(),
+    paintedPaths: new Map(),
   };
 }
+
+/**
+ * The rectangle an element's ancestors (the element included) clip its
+ * flat-tree children to: `unclipped` for none, `empty` when nothing can
+ * survive (or an ancestor's overflow is unreadable), and `complex` when an
+ * ancestor clips to several fragments, which only the full path walk handles.
+ * An axis no ancestor clips is unbounded.
+ */
+type SourceChildClip =
+  | { readonly kind: 'unclipped' }
+  | { readonly kind: 'empty' }
+  | { readonly kind: 'complex' }
+  | { readonly kind: 'rect'; readonly bounds: SourcePaintBounds };
+
+interface SourcePaintedPathMemo {
+  /** Every element of the flat-tree path is readable and painted. */
+  readonly pathVisible: boolean;
+  /** Elements in the flat-tree path, the element included. */
+  readonly depth: number;
+  /** What this element's children are clipped to. */
+  readonly childClip: SourceChildClip;
+  /** The memoized `sourceElementPathIsPainted` result. */
+  readonly painted: boolean;
+}
+
+const UNCLIPPED: SourceChildClip = Object.freeze({ kind: 'unclipped' });
+const EMPTY_CLIP: SourceChildClip = Object.freeze({ kind: 'empty' });
+const COMPLEX_CLIP: SourceChildClip = Object.freeze({ kind: 'complex' });
 
 /**
  * Builds one content-free relationship index shared by both base serializers
@@ -744,12 +775,168 @@ export function sourceElementPathIsPainted(
   sourceWindow: Window | null | undefined,
   paintCache: SourcePaintScanCache = createSourcePaintScanCache(),
 ): boolean {
+  return sourcePaintedPathMemo(element, sourceWindow, paintCache).painted;
+}
+
+/**
+ * The same proof by walking the element's whole path: O(depth) per element,
+ * which made a scan O(nodes x depth). Kept for the rare path whose clipping
+ * ancestors have several fragments, and as the reference the memoized form is
+ * tested against.
+ */
+export function sourceElementPathIsPaintedByPath(
+  element: Element,
+  sourceWindow: Window | null | undefined,
+  paintCache: SourcePaintScanCache = createSourcePaintScanCache(),
+): boolean {
   const path = sourcePaintPath(element, paintCache);
   if (!path || !path.every(
     (current) =>
       sourceElementPaintState(current, sourceWindow, paintCache) === 'visible',
   )) return false;
   return sourcePaintSurvivesClipping(element, path, sourceWindow, paintCache);
+}
+
+/**
+ * Derives an element's painted-path facts from its flat-tree parent's, so a
+ * scan reads each element's style, geometry and parent link once. The
+ * results equal `sourceElementPathIsPaintedByPath`: the path is visible when
+ * the parent's is and the element's own state is; the element survives
+ * clipping when one of its rectangles overlaps its ancestors' clip rectangle
+ * with a positive area, which does not depend on the order the path walk
+ * intersects them in.
+ */
+function sourcePaintedPathMemo(
+  element: Element,
+  sourceWindow: Window | null | undefined,
+  paintCache: SourcePaintScanCache,
+): SourcePaintedPathMemo {
+  const known = paintCache.paintedPaths.get(element);
+  if (known) return known;
+  // Climb to the nearest memoized ancestor, then fill in top-down.
+  const chain: Element[] = [];
+  let parentMemo: SourcePaintedPathMemo | undefined;
+  let invalid = false;
+  let current: Element | undefined = element;
+  while (current) {
+    chain.push(current);
+    if (chain.length > MAX_SOURCE_FLAT_TREE_ANCESTORS) {
+      invalid = true;
+      break;
+    }
+    let parent: Element | undefined;
+    try {
+      parent = sourceFlatTreeParentElement(current);
+    } catch {
+      invalid = true;
+      break;
+    }
+    if (!parent) break;
+    parentMemo = paintCache.paintedPaths.get(parent);
+    if (parentMemo) break;
+    current = parent;
+  }
+  if (invalid) {
+    // An unreadable parent link or an over-deep path voids every element
+    // whose path runs through it, as the path walk does.
+    const failed = Object.freeze({
+      pathVisible: false,
+      depth: MAX_SOURCE_FLAT_TREE_ANCESTORS + 1,
+      childClip: EMPTY_CLIP,
+      painted: false,
+    });
+    for (const member of chain) paintCache.paintedPaths.set(member, failed);
+    return failed;
+  }
+  for (let index = chain.length - 1; index >= 0; index -= 1) {
+    const member = chain[index]!;
+    const memo = derivePaintedPathMemo(
+      member,
+      parentMemo,
+      sourceWindow,
+      paintCache,
+    );
+    paintCache.paintedPaths.set(member, memo);
+    parentMemo = memo;
+  }
+  return parentMemo!;
+}
+
+function derivePaintedPathMemo(
+  element: Element,
+  parent: SourcePaintedPathMemo | undefined,
+  sourceWindow: Window | null | undefined,
+  paintCache: SourcePaintScanCache,
+): SourcePaintedPathMemo {
+  const depth = (parent?.depth ?? 0) + 1;
+  if (depth > MAX_SOURCE_FLAT_TREE_ANCESTORS) {
+    return Object.freeze({
+      pathVisible: false, depth, childClip: EMPTY_CLIP, painted: false,
+    });
+  }
+  const inputs = sourcePaintInputs(element, sourceWindow, paintCache);
+  const pathVisible = (parent?.pathVisible ?? true) && inputs.state === 'visible';
+  const ancestorClip = parent?.childClip ?? UNCLIPPED;
+  let painted = false;
+  if (pathVisible) {
+    painted = ancestorClip.kind === 'complex'
+      ? sourceElementPathIsPaintedByPath(element, sourceWindow, paintCache)
+      : rectsSurviveClip(inputs.rects, ancestorClip);
+  }
+  return Object.freeze({
+    pathVisible,
+    depth,
+    childClip: childClipOf(element, inputs, ancestorClip),
+    painted,
+  });
+}
+
+/** Adds an element's own overflow clip to what its ancestors clip to. */
+function childClipOf(
+  element: Element,
+  inputs: SourceElementPaintInputs,
+  ancestorClip: SourceChildClip,
+): SourceChildClip {
+  if (ancestorClip.kind === 'empty' || ancestorClip.kind === 'complex') {
+    return ancestorClip;
+  }
+  // The path walk never treats the root or body as a clipping ancestor.
+  if (
+    element === element.ownerDocument.documentElement ||
+    element === element.ownerDocument.body
+  ) return ancestorClip;
+  const clipped = inputs.overflow;
+  if (!clipped) return EMPTY_CLIP;
+  if (!clipped.x && !clipped.y) return ancestorClip;
+  const clips = inputs.clipRects ?? inputs.rects;
+  if (!clips || clips.length === 0) return EMPTY_CLIP;
+  if (clips.length !== 1) return COMPLEX_CLIP;
+  const clip = clips[0]!;
+  const current = ancestorClip.kind === 'rect'
+    ? ancestorClip.bounds
+    : { left: -Infinity, top: -Infinity, right: Infinity, bottom: Infinity };
+  const bounds = {
+    left: clipped.x ? Math.max(current.left, clip.left) : current.left,
+    right: clipped.x ? Math.min(current.right, clip.right) : current.right,
+    top: clipped.y ? Math.max(current.top, clip.top) : current.top,
+    bottom: clipped.y ? Math.min(current.bottom, clip.bottom) : current.bottom,
+  };
+  if (bounds.right <= bounds.left || bounds.bottom <= bounds.top) {
+    return EMPTY_CLIP;
+  }
+  return Object.freeze({ kind: 'rect', bounds: Object.freeze(bounds) });
+}
+
+function rectsSurviveClip(
+  rects: readonly SourcePaintBounds[] | undefined,
+  clip: SourceChildClip,
+): boolean {
+  if (!rects || rects.length === 0 || clip.kind === 'empty') return false;
+  if (clip.kind !== 'rect') return true;
+  const { bounds } = clip;
+  return rects.some((rect) =>
+    Math.min(rect.right, bounds.right) > Math.max(rect.left, bounds.left) &&
+    Math.min(rect.bottom, bounds.bottom) > Math.max(rect.top, bounds.top));
 }
 
 /**
@@ -1241,7 +1428,29 @@ export function isEligibleSourceSelect(
 ): boolean {
   return isSourceNativeSelectTagName(tagName) &&
     !sourceAttributesArePrivate(attributes) &&
-    !isSourceActivationRoleValue(attributes.role);
+    (!isSourceActivationRoleValue(attributes.role) ||
+      isSourceNativeSelectImplicitRole(tagName, attributes.role));
+}
+
+/**
+ * `combobox` (one row) and `listbox` (several) are a native select's own
+ * implicit roles. Stating one on the select changes nothing, so it neither
+ * makes the select an activation control nor hides its labels (D98).
+ */
+export function isSourceNativeSelectImplicitRole(
+  tagName: string,
+  value: unknown,
+): boolean {
+  if (!isSourceNativeSelectTagName(tagName) || typeof value !== 'string') {
+    return false;
+  }
+  for (const role of value.trim().toLowerCase().split(/\s+/u)) {
+    if (
+      PRIVATE_ROLE_SET.has(role) || ACTIVATION_ROLE_SET.has(role) ||
+      PUBLIC_MENU_ROLE_SET.has(role)
+    ) return role === 'combobox' || role === 'listbox';
+  }
+  return false;
 }
 
 /** Reads indices only; raw option values and names never enter the protocol. */
@@ -1711,10 +1920,56 @@ export interface SourceSecretAncestorMemo {
   classifier: StickySourceSecretClassifier | undefined;
   revision: number;
   readonly results: Map<Element, boolean>;
+  /** Each memoized element's flat-tree depth, so a lookup can stop there. */
+  readonly depths: Map<Element, number>;
 }
 
 export function createSourceSecretAncestorMemo(): SourceSecretAncestorMemo {
-  return { classifier: undefined, revision: -1, results: new Map() };
+  return {
+    classifier: undefined,
+    revision: -1,
+    results: new Map(),
+    depths: new Map(),
+  };
+}
+
+/**
+ * The part of a node's flat-tree path below its nearest memoized ancestor,
+ * so a lookup reads only the parent links it has not seen (D93); reading the
+ * whole path first made each lookup O(depth). Undefined when the path is
+ * unreadable or deeper than the limit, as `readSourceFlatTreeElementPath`.
+ */
+function readSourceUnmemoizedPath(
+  node: Node,
+  memo: SourceSecretAncestorMemo,
+): {
+  readonly path: readonly Element[];
+  readonly secretAncestor: boolean;
+  readonly baseDepth: number;
+} | undefined {
+  try {
+    const path: Element[] = [];
+    let current = node.nodeType === 1
+      ? node as Element
+      : sourceFlatTreeParentElement(node);
+    while (current) {
+      const known = memo.results.get(current);
+      if (known !== undefined) {
+        const baseDepth = memo.depths.get(current);
+        if (
+          baseDepth === undefined ||
+          baseDepth + path.length > MAX_SOURCE_FLAT_TREE_ANCESTORS
+        ) return undefined;
+        return { path, secretAncestor: known, baseDepth };
+      }
+      if (path.length >= MAX_SOURCE_FLAT_TREE_ANCESTORS) return undefined;
+      path.push(current);
+      current = sourceFlatTreeParentElement(current);
+    }
+    return { path, secretAncestor: false, baseDepth: 0 };
+  } catch {
+    return undefined;
+  }
 }
 
 /**
@@ -1731,36 +1986,34 @@ export function hasSourceCredentialSecretAncestor(
 ): boolean {
   if (SOURCE_PRIVACY_FILTERS_OFF) return false;
   if (classifier.isSecret(node)) return true;
-  const path = readSourceFlatTreeElementPath(node);
-  if (!path) {
+  if (
+    memo &&
+    (memo.classifier !== classifier || memo.revision !== classifier.revision)
+  ) {
+    memo.results.clear();
+    memo.depths.clear();
+    memo.classifier = classifier;
+    memo.revision = classifier.revision;
+  }
+  // `path` runs from the node up to the root, or up to just below the
+  // nearest ancestor this walk already classified; classify from the top
+  // down.
+  const unmemoized = memo
+    ? readSourceUnmemoizedPath(node, memo)
+    : (() => {
+        const full = readSourceFlatTreeElementPath(node);
+        return full && { path: full, secretAncestor: false, baseDepth: 0 };
+      })();
+  if (!unmemoized) {
     classifier.classify(node, {
       tagName: node.nodeType === 3 ? '#text' : '#node',
       secretAncestor: true,
     });
     return true;
   }
-  if (
-    memo &&
-    (memo.classifier !== classifier || memo.revision !== classifier.revision)
-  ) {
-    memo.results.clear();
-    memo.classifier = classifier;
-    memo.revision = classifier.revision;
-  }
-  let secretAncestor = false;
-  // `path` runs from the node up to the root; classify from the root down,
-  // starting below the nearest ancestor this walk already classified.
-  let first = path.length - 1;
-  if (memo) {
-    for (let index = 0; index < path.length; index += 1) {
-      const known = memo.results.get(path[index]!);
-      if (known === undefined) continue;
-      secretAncestor = known;
-      first = index - 1;
-      break;
-    }
-  }
-  for (let index = first; index >= 0; index -= 1) {
+  const { path, baseDepth } = unmemoized;
+  let secretAncestor = unmemoized.secretAncestor;
+  for (let index = path.length - 1; index >= 0; index -= 1) {
     const current = path[index]!;
     let computedTextSecurity = '';
     const view = sourceWindow;
@@ -1805,10 +2058,12 @@ export function hasSourceCredentialSecretAncestor(
     });
     if (category === 'secret') secretAncestor = true;
     memo?.results.set(current, secretAncestor);
+    memo?.depths.set(current, baseDepth + path.length - index);
   }
   if (memo && memo.revision !== classifier.revision) {
     // A new secret was learned on this path: start the next lookup afresh.
     memo.results.clear();
+    memo.depths.clear();
     memo.revision = classifier.revision;
   }
   // Elements are classified while walking `path`. A directly slotted Text

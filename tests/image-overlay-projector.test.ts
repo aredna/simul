@@ -7,6 +7,7 @@ import {
   MAX_IMAGE_OVERLAY_RETAINED_WEIGHT,
   ImageOverlayProjector,
   captionBandBox,
+  findImageOverlays,
   imageOverlayContent,
   type ImageOverlayProjection,
 } from '../lib/ocr/image-overlay-projector';
@@ -19,6 +20,13 @@ const sourceDocument = {
   documentId: 'image-overlay-document',
   frameId: 0,
 };
+
+/** An overlay by its node id, in the light tree or an owned shadow root. */
+function overlayFor(document: unknown, nodeId: number): HTMLElement | null {
+  return findImageOverlays(document as Document).find(
+    (root) => root.dataset.simulImageOverlay === String(nodeId),
+  ) ?? null;
+}
 
 function projection(
   overrides: Partial<ImageOverlayProjection> = {},
@@ -92,7 +100,7 @@ describe('ImageOverlayProjector', () => {
     expect(receivers).toEqual([undefined, undefined]);
   });
 
-  it('maps a visible crop onto an inert overlay right after the image (D74)', () => {
+  it('maps a visible crop onto an inert overlay in the image parent, out of sight of page selectors (D74, D92)', () => {
     const { document, window } = parseHTML('<html><body><main><img></main></body></html>');
     const image = document.querySelector('img') as unknown as HTMLImageElement;
     image.getBoundingClientRect = () => ({
@@ -135,14 +143,22 @@ describe('ImageOverlayProjector', () => {
       }],
     }))).toBe(true);
 
-    const root = document.querySelector('[data-simul-image-overlay="7"]') as HTMLElement;
+    const root = overlayFor(document, 7) as HTMLElement;
     const content = imageOverlayContent(root) as HTMLElement;
     const region = content?.firstElementChild as HTMLElement;
-    // In the page, right after its image, so the page's stacking decides
-    // what paints over it; no z-index of its own.
+    // In the image's parent, so the page's stacking decides what paints over
+    // it (no z-index of its own), but in the parent's closed Simul-owned
+    // shadow root after a slot: the page's children, and selectors such as
+    // `img + p` or `:last-child`, see no new sibling (D92).
     expect(root.localName).toBe(IMAGE_OVERLAY_ELEMENT);
-    expect(image.nextSibling).toBe(root);
-    expect(root.parentElement?.tagName.toLowerCase()).toBe('main');
+    const main = document.querySelector('main')!;
+    const shadow = root.parentNode as unknown as ShadowRoot;
+    expect(shadow.host).toBe(main);
+    expect(shadow.firstChild?.nodeName.toLowerCase()).toBe('slot');
+    expect(main.shadowRoot).toBeNull();
+    expect(image.nextSibling).toBeNull();
+    expect(main.childNodes).toHaveLength(1);
+    expect(document.querySelector(IMAGE_OVERLAY_ELEMENT)).toBeNull();
     expect(root.style.zIndex).toBe('');
     expect(root.style.position).toBe('absolute');
     expect(root.style.pointerEvents).toBe('none');
@@ -166,7 +182,7 @@ describe('ImageOverlayProjector', () => {
     expect(region.style.pointerEvents).toBe('none');
     expect(current).toHaveBeenCalled();
     projector.dispose();
-    expect(document.querySelector(IMAGE_OVERLAY_ELEMENT)).toBeNull();
+    expect((findImageOverlays(document as unknown as Document)[0] ?? null)).toBeNull();
     expect(window).toBeDefined();
   });
 
@@ -207,7 +223,7 @@ describe('ImageOverlayProjector', () => {
       }],
     }))).toBe(true);
 
-    const root = document.querySelector('[data-simul-image-overlay="7"]') as HTMLElement;
+    const root = overlayFor(document, 7) as HTMLElement;
     const band = imageOverlayContent(root)?.firstElementChild as HTMLElement;
     // 34% of the 120px image, pinned to the bottom edge, full width.
     expect(band.style.left).toBe('0px');
@@ -249,7 +265,7 @@ describe('ImageOverlayProjector', () => {
         regions: [{ text, boundingBox: { x: 0, y: 0, width: 200, height: 60 }, placement: 'whole-image' }],
       }));
       const band = imageOverlayContent(
-        document.querySelector('[data-simul-image-overlay="7"]'),
+        overlayFor(document, 7),
       )!.firstElementChild as HTMLElement;
       const result = { height: band.style.height, top: band.style.top };
       projector.dispose();
@@ -309,7 +325,7 @@ describe('ImageOverlayProjector', () => {
     }))).toBe(true);
 
     const regions = [...imageOverlayContent(
-      document.querySelector('[data-simul-image-overlay="7"]'),
+      overlayFor(document, 7),
     )!.children] as HTMLElement[];
     expect(regions).toHaveLength(2);
     expect(Number.parseFloat(regions[1]!.style.fontSize)).toBeLessThan(
@@ -364,7 +380,7 @@ describe('ImageOverlayProjector', () => {
     projector.refresh();
     frames.splice(0).forEach((frame) => frame());
 
-    expect(document.querySelector(IMAGE_OVERLAY_ELEMENT)).toBeNull();
+    expect((findImageOverlays(document as unknown as Document)[0] ?? null)).toBeNull();
     expect(projector.project(projection())).toBe(false);
     expect(projector.beginPair(2, 'en>es')).toBe(true);
   });
@@ -404,12 +420,11 @@ describe('ImageOverlayProjector', () => {
     image = replacement;
     projector.refresh();
 
-    const root = document.querySelector(
-      '[data-simul-image-overlay="7"]',
-    ) as HTMLElement | null;
+    const root = overlayFor(document, 7) as HTMLElement | null;
     expect(root?.style.left).toBe('30px');
     expect(root?.style.top).toBe('40px');
-    expect(replacement.nextSibling).toBe(root);
+    expect((root?.parentNode as unknown as ShadowRoot).host)
+      .toBe(document.querySelector('main'));
     expect(imageOverlayContent(root)?.textContent).toBe('翻訳');
     expect(rebound).toHaveBeenCalledOnce();
     expect(rebound).toHaveBeenCalledWith(17);
@@ -443,9 +458,7 @@ describe('ImageOverlayProjector', () => {
     });
     projector.beginPair(1, 'en>ja');
     expect(projector.project(projection())).toBe(true);
-    const originalRoot = document.querySelector(
-      '[data-simul-image-overlay="7"]',
-    );
+    const originalRoot = overlayFor(document, 7);
     const originalRegion = imageOverlayContent(originalRoot)?.firstElementChild;
 
     bounds.left = 30;
@@ -457,9 +470,7 @@ describe('ImageOverlayProjector', () => {
       observationRevision: 5,
     }))).toBe(true);
 
-    const rebasedRoot = document.querySelector(
-      '[data-simul-image-overlay="7"]',
-    ) as HTMLElement | null;
+    const rebasedRoot = overlayFor(document, 7) as HTMLElement | null;
     expect(rebasedRoot).toBe(originalRoot);
     expect(imageOverlayContent(rebasedRoot)?.firstElementChild).toBe(originalRegion);
     expect(rebasedRoot?.style.left).toBe('30px');
@@ -496,9 +507,7 @@ describe('ImageOverlayProjector', () => {
     });
     projector.beginPair(1, 'en>ja');
     expect(projector.project(projection())).toBe(true);
-    const root = document.querySelector(
-      '[data-simul-image-overlay="7"]',
-    ) as HTMLElement;
+    const root = overlayFor(document, 7) as HTMLElement;
     const region = imageOverlayContent(root)?.firstElementChild as HTMLElement;
     let fittingReads = 0;
     Object.defineProperties(region, {
@@ -528,7 +537,7 @@ describe('ImageOverlayProjector', () => {
     expect(fittingReads).toBe(0);
   });
 
-  it('puts the overlay back after its image when the mirror rewrites the parent (D74)', () => {
+  it('puts the overlay back in its image parent when the mirror rewrites it (D74, D92)', () => {
     const { document } = parseHTML(
       '<html><body><main><img><p>caption</p></main><section></section></body></html>',
     );
@@ -556,25 +565,67 @@ describe('ImageOverlayProjector', () => {
     };
     projector.beginPair(1, 'en>ja');
     expect(projector.project(projection())).toBe(true);
-    const root = document.querySelector(IMAGE_OVERLAY_ELEMENT) as HTMLElement;
-    expect(image.nextSibling).toBe(root);
+    const root = (findImageOverlays(document as unknown as Document)[0] ?? null) as HTMLElement;
+    const hostOf = () => (root.parentNode as unknown as ShadowRoot | null)?.host;
+    const caption = document.querySelector('p')!;
+    expect(hostOf()).toBe(document.querySelector('main'));
+    expect(image.nextSibling).toBe(caption);
 
-    // A reconcile moved a sibling in between.
-    image.after(document.querySelector('p')!);
+    // A reconcile reordered the parent's children: nothing to move.
+    caption.after(image);
     refresh();
-    expect(image.nextSibling).toBe(root);
+    expect(hostOf()).toBe(document.querySelector('main'));
 
-    // A children replacement dropped the overlay.
+    // Something dropped the overlay.
     root.remove();
     refresh();
-    expect(image.nextSibling).toBe(root);
+    expect(hostOf()).toBe(document.querySelector('main'));
 
     // The image itself moved to another parent.
     document.querySelector('section')!.append(image);
     refresh();
-    expect(root.parentElement?.localName).toBe('section');
-    expect(image.nextSibling).toBe(root);
-    expect(document.querySelectorAll(IMAGE_OVERLAY_ELEMENT)).toHaveLength(1);
+    expect(hostOf()).toBe(document.querySelector('section'));
+    expect(image.nextSibling).toBeNull();
+    expect(findImageOverlays(document as unknown as Document)).toHaveLength(1);
+    projector.dispose();
+    expect(findImageOverlays(document as unknown as Document)).toHaveLength(0);
+  });
+
+  it('keeps the overlay right after the image where the parent cannot host it (D92)', () => {
+    const { document } = parseHTML(
+      '<html><body><a href="/x"><img id="linked"></a>' +
+      '<figure><img id="figure"><figcaption>c</figcaption></figure>' +
+      '<div id="mirrored"><img id="shadowed"></div></body></html>',
+    );
+    // A parent with its own (mirrored, open) shadow root cannot take another.
+    document.querySelector('#mirrored')!.attachShadow({ mode: 'open' });
+    const images = new Map<number, HTMLImageElement>();
+    for (const [nodeId, id] of [[1, 'linked'], [2, 'figure'], [3, 'shadowed']] as const) {
+      const image = document.querySelector(`#${id}`) as unknown as HTMLImageElement;
+      image.getBoundingClientRect = () => ({
+        left: 0, top: 0, width: 100, height: 60,
+        right: 100, bottom: 60, x: 0, y: 0, toJSON: () => ({}),
+      });
+      images.set(nodeId, image);
+    }
+    const projector = new ImageOverlayProjector({
+      resolveAnchor: (_document, nodeId) => ({
+        document: sourceDocument,
+        replayLease: 9,
+        image: images.get(nodeId)!,
+        iframe: { contentDocument: document } as HTMLIFrameElement,
+      }),
+      isCurrent: () => true,
+      scheduleFrame: (callback) => { callback(); return 1; },
+      cancelFrame: () => undefined,
+      createResizeObserver: () => undefined,
+    });
+    projector.beginPair(1, 'en>ja');
+    for (const nodeId of [1, 2, 3]) {
+      expect(projector.project(projection({ jobOrdinal: nodeId, nodeId })))
+        .toBe(true);
+      expect(images.get(nodeId)!.nextSibling).toBe(overlayFor(document, nodeId));
+    }
     projector.dispose();
   });
 
@@ -731,9 +782,7 @@ describe('ImageOverlayProjector', () => {
         cropWidthCss: 300,
         cropHeightCss: 200,
       }))).toBe(true);
-      const root = document.querySelector(
-        '[data-simul-image-overlay="7"]',
-      ) as HTMLElement;
+      const root = overlayFor(document, 7) as HTMLElement;
       const content = imageOverlayContent(root) as HTMLElement;
       const runFrames = (limit = 1_000) => {
         let ran = 0;
@@ -905,9 +954,9 @@ describe('ImageOverlayProjector', () => {
     }
 
     expect(MAX_IMAGE_OVERLAY_RETAINED_WEIGHT).toBe(1_000_000);
-    expect(document.querySelector('[data-simul-image-overlay="1"]')).toBeNull();
-    expect(document.querySelector('[data-simul-image-overlay="5"]')).not.toBeNull();
-    expect(document.querySelectorAll('[data-simul-image-overlay]').length)
+    expect(overlayFor(document, 1)).toBeNull();
+    expect(overlayFor(document, 5)).not.toBeNull();
+    expect(findImageOverlays(document as unknown as Document).length)
       .toBeLessThan(5);
   });
 });
