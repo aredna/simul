@@ -122,8 +122,12 @@ deleting rules changes (D88). Before D88 one such sheet took the whole budget,
 so a page carrying one (Wise's 2.4 M character design system, freee and
 YouTube at about 3 MB) had no polling at all, and rules its scripts added later
 never reached the replica: Wise's signed-in side navigation lost its fixed
-position. An in-place edit inside a large sheet that keeps its count and ends
-still waits for the next checkpoint. Simul does not patch website prototypes.
+position. Sheets that are each small enough but together outgrow the budget
+are handled the same way (D95): once a pass that started with the whole
+budget reaches a sheet that no longer fits, that sheet is watched by its shape
+from then on, so the page keeps its polling. An in-place edit inside a sheet
+watched by its shape that keeps its count and ends still waits for the next
+checkpoint. Simul does not patch website prototypes.
 
 ### Inert HTML semantics
 

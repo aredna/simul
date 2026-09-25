@@ -4204,3 +4204,31 @@ O(nodes x depth).
 
 Build identity `0.5.2 beta v.20260925.4`. Gate: `npm run check` green,
 **1,549 tests pass**, artifact byte-verified.
+
+### D95. Style polling survives many medium sheets (2026-09-25)
+
+Same branch. Open item 1 of the 2026-09-23 handover ("style polling skips
+documents over 1 MiB"). D88 fixed the case of one large sheet; a page whose
+sheets are each small enough (under 4,000 rules and 256 KiB) but together pass
+the per-tick budget (1 MiB, 25,000 rules) still stopped the pass, was
+quarantined, and had no CSSOM change detection.
+
+- **Change.** When an owner's pass starts with the whole budget, a sheet that
+  no longer fits is watched by its shape from then on, as a large sheet is
+  (its rule count and first and last rules). Shape reads no longer draw on the
+  full-read budget they would find spent; they are bounded by the sheet cap
+  (512 per pass, two rules of at most 4,096 characters each). An owner whose
+  pass starts after another owner used part of the budget is still retried on
+  its next turn, so no sheet is downgraded by a busy tick. The 512-sheet cap
+  and nested imports keep today's quarantine.
+- **Real pages.** freee (one 2.97 MB sheet) and YouTube (3.4 MB and 0.5 MB
+  sheets) were already covered by D88; this closes the remaining shape of the
+  gap.
+- **Tests.** Seven 3,900-rule sheets: a rule the page inserts later and an
+  in-place edit of a sheet read in full each reach the replica, with no
+  overflow (fails on the old code). The quarantine test now exhausts the
+  512-sheet cap.
+- **Docs.** `docs/replica-fidelity.md`.
+
+Build identity `0.5.2 beta v.20260925.5`. Gate: `npm run check` green,
+**1,550 tests pass**, artifact byte-verified.
