@@ -3796,3 +3796,67 @@ Gate: `npm run check` green, **1,530 tests pass, 1 skipped** (+4).
 
 Build identity `0.5.1 beta v.20260924.4`; `dist/chrome-unpacked` re-synced.
 Gate: `npm run check` green, **1,533 tests pass, 1 skipped** (+3). Every new test fails on the old code.
+
+### D85. Changing the language pair translates the page at once (2026-09-25)
+
+- **Reported.** Changing the pair often got stuck processing images or
+  reloading, and the page text did not change until a full browser refresh.
+- **Reproduced in Chrome for Testing** with a stand-in Translator that behaves
+  like Chrome's: a pair is `downloadable` until created once, and creating it
+  then needs transient user activation. Translated to Japanese (installed),
+  then To set to French with a click: the page text fell back to English
+  under "This language pair needs its on-device pack. Choose Translate once
+  to prepare it." Meanwhile another part of the panel used the click to
+  create an en→fr session, so the pack was installed, but nothing told the
+  page, which stayed untranslated until a page reload. With every pair
+  already installed, the switch took under 4 s (plain page, Reddit copy, 33
+  posts), which is why earlier harness runs missed it.
+- **Changes.** A pair change by the reader starts the translation whether
+  the pair is `available`, `downloadable` or `downloading`: choosing the
+  language is the click Chrome needs, and an expired click still reports
+  that Translate page is needed. `ChromeTranslatorProvider.onSessionCreated`
+  reports each pair a session was created for; the driver resumes a wanted
+  page translation that was waiting for that pair's pack.
+- **Verified.** French page text within 4 s of the switch (including a
+  simulated 2 s download); the image overlays follow (22 of 22).
+- **Tests.** Provider: a created session is announced, a refused one is not,
+  and an unsubscribed listener hears nothing. Driver: a pair change to a
+  `downloadable` pair translates at once; a pack installed elsewhere resumes
+  a wanted translation, and not an unwanted one or one for another pair.
+
+### D86. Image results are kept by the image itself (2026-09-25)
+
+- **Reported.** Images are processed again every time they are seen, above
+  all while scrolling or when images change; the example was the carousel at
+  the foot of the owner's bank's public login page.
+- **Cause.** Results were reusable only by node and capture revision, or by
+  captured pixels. The page advances an image's capture revision whenever its
+  visible crop moves, so a carousel slide sliding in, or an image scrolled
+  back into view, voided the result and was captured (a tab screenshot,
+  about two per second) and often recognized again; a slide caught
+  mid-transition also hashed differently.
+- **Changes.** A final OCR result read while the whole image was on screen
+  is also kept under the replica image's identity: its address, natural
+  size, rendered size, object-fit and -position, and the pair and reading
+  settings. A job looks it up after the per-node result and before any
+  capture, and projects it on a hit (`image-identity-reused`). Memory-only,
+  at most 512 entries and the existing weight bound, 15-minute expiry,
+  purged with the other image results; sources over 4,096 characters (inline
+  data URLs) are not kept.
+- **Verified in Chrome for Testing** on that login page (development builds,
+  every diagnostic captured). Carousel on screen for 45 s: captures started
+  75 → 46, screenshots 25 → 18, overlays shown 16 → 40, 31 of them reused;
+  recognitions stayed at 18 (first sightings, one slide without text and
+  cheap pixel-cache repeats). Scrolled away and back four times: captures
+  72 → 37, screenshots 56 → 21, recognitions 19 → 9, overlays 44 → 48, 31
+  reused.
+- **Not changed.** A slide with no readable text is still captured when it
+  returns (its empty result is not kept by identity).
+- **Tests.** Controller: after a capture-revision change of the same image
+  the result is reused with no second capture, recognition or translation;
+  a different image in the same place is read afresh. Every new D85 and D86
+  test fails on the old code.
+- **Docs.** `docs/translation-companion.md` (pair changes, image results).
+
+Build identity `0.5.1 beta v.20260924.5` (D85 and D86); `dist/chrome-unpacked` re-synced.
+Gate: `npm run check` green, **1,537 tests pass, 1 skipped** (+4).

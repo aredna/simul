@@ -539,11 +539,34 @@ export class TranslationDriver {
       );
       return;
     }
-    if (state.availability === 'available') {
+    if (
+      state.availability === 'available' ||
+      state.availability === 'downloadable' ||
+      state.availability === 'downloading'
+    ) {
+      // Choosing the language is the click Chrome needs to download a pack;
+      // asking for a second one left the page in the old language (D85). If
+      // the click has expired, the run reports that Translate page is needed.
       await this.startTranslation(false, captureCoordinator.generation);
-    } else if (state.availability === 'downloadable' || state.availability === 'downloading') {
-      setStatus(UI_STRINGS.statusPairNeedsPack, 'warning');
     }
+  }
+
+  /**
+   * A session was created for `pair`, so its pack is installed. If the page
+   * is waiting for that pack for a translation the reader asked for, resume
+   * it now rather than at the next page load (D85).
+   */
+  handlePairReady(pair: TranslationPair): void {
+    const state = this.#state;
+    if (
+      !state.snapshot ||
+      state.translationInFlight ||
+      !state.translationDesired ||
+      (state.availability !== 'downloadable' &&
+        state.availability !== 'downloading') ||
+      !sameTranslationPair(state.selectedPair(), pair)
+    ) return;
+    void this.applyLanguagePreferences(false);
   }
 
   async checkAvailability(generation: number): Promise<void> {

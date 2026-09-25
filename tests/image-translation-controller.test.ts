@@ -3765,6 +3765,101 @@ describe('ImageTranslationController', () => {
     controller.dispose();
   });
 
+  it('reuses a whole-image result by the image itself when its crop moves (D86)', async () => {
+    // A carousel slide, or an image scrolled back into view, moves its
+    // visible crop and so its capture revision; the same picture was
+    // captured and read again every time it came back.
+    const { document } = parseHTML('<html><body><img></body></html>');
+    const image = document.querySelector('img') as unknown as HTMLImageElement;
+    const show = (source: string) => Object.defineProperties(image, {
+      currentSrc: { configurable: true, value: source },
+      complete: { configurable: true, value: true },
+      naturalWidth: { configurable: true, value: 600 },
+      naturalHeight: { configurable: true, value: 300 },
+    });
+    show('https://assets.example.test/slide-1.png');
+    const firstDescriptor = { ...descriptor, captureRevision: 1 };
+    let emitChange: ((change: SourceImageChange) => void) | undefined;
+    const acquire = vi.fn(async (current: SourceImageDescriptor) => ({
+      status: 'ready' as const,
+      pixels: {
+        ...autoProbePixels(current, 'ce'.repeat(32)),
+        nearestElementLanguage: 'en' as const,
+      },
+    }));
+    const recognize = vi.fn(async () => ({
+      ...autoProbeRecognition('Stable headline', 0.98),
+      selectedQuality: acceptedQualitySummary(),
+    }));
+    const translate = vi.fn(async () => '安定した見出し');
+    const diagnostics: unknown[] = [];
+    const controller = new ImageTranslationController({
+      openSource: async (_request, onChange) => {
+        emitChange = onChange;
+        queueMicrotask(() => onChange({
+          kind: 'upsert',
+          descriptor: firstDescriptor,
+        }));
+        return { measure: vi.fn(), dispose: vi.fn() };
+      },
+      createPixelCoordinator: () => ({ acquire }) as unknown as
+        PixelAcquisitionCoordinator,
+      createRecognitionCoordinator: () => ({
+        recognize,
+        clear: vi.fn(),
+        advanceResetEpoch: vi.fn(() => true),
+      }) as unknown as ImageRecognitionCoordinator,
+      resolveAnchor: () => ({
+        document: sourceDocument,
+        replayLease: 1,
+        image,
+        iframe: { contentDocument: document } as HTMLIFrameElement,
+      }),
+      translationProvider: {
+        availability: async () => 'available',
+        createSession: async () => ({ translate, destroy: vi.fn() }),
+      },
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      projector: testProjectorEnvironment(),
+    });
+    controller.configure({
+      enabled: true,
+      scanPolicy: 'visible-only',
+      skipSmallImages: false,
+      providerOrder: ['tesseract'],
+      methodOrder: ['tesseract'],
+      disabledMethodIds: [],
+      sourceLanguage: 'en',
+      targetLanguage: 'ja',
+      translationIdle: true,
+      resetEpoch: 0,
+    });
+    controller.activateReplica(request, 3, 1);
+    await vi.waitFor(() => expect(translate).toHaveBeenCalledOnce());
+    await vi.waitFor(() => expect(controller.busy).toBe(false));
+
+    emitChange?.({
+      kind: 'upsert',
+      descriptor: { ...firstDescriptor, captureRevision: 2, observationRevision: 2 },
+    });
+    await vi.waitFor(() =>
+      expect(diagnostics).toContain('image-identity-reused'));
+    await vi.waitFor(() => expect(controller.busy).toBe(false));
+    expect(document.querySelector('[data-simul-image-overlay="12"]')).not.toBeNull();
+    expect(acquire).toHaveBeenCalledOnce();
+    expect(recognize).toHaveBeenCalledOnce();
+    expect(translate).toHaveBeenCalledOnce();
+
+    // Another picture in the same place is read afresh.
+    show('https://assets.example.test/slide-2.png');
+    emitChange?.({
+      kind: 'upsert',
+      descriptor: { ...firstDescriptor, captureRevision: 3, observationRevision: 3 },
+    });
+    await vi.waitFor(() => expect(acquire).toHaveBeenCalledTimes(2));
+    controller.dispose();
+  });
+
   it('reprocesses only the image whose capture revision actually changed', async () => {
     const { document } = parseHTML('<html><body><img></body></html>');
     const image = document.querySelector('img') as unknown as HTMLImageElement;
