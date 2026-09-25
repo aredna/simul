@@ -4140,3 +4140,67 @@ accepted per-site trade-offs.
 
 Build identity `0.5.2 beta v.20260925.3`. Gate: `npm run check` green,
 **1,546 tests pass**, artifact byte-verified.
+
+### D93. The grant and rollback tests also run at the shipped default (2026-09-25)
+
+Same branch. Open item from the 2026-09-22 bug hunt and the 2026-09-23
+handover: D47 pinned several grant and rollback tests to image translation
+off, so the shipped default (on) was not the tested one.
+
+- **G1** (a pending reset must not re-adopt the broad grant) already runs at
+  the default: its D53 test starts from `DEFAULT_COMPANION_PREFERENCES`.
+- **G2, new default-state test** (`preference-coordinator`). With image text
+  on as shipped, All sites on then off keeps `<all_urls>` in Chrome and in the
+  ledger, because image text still uses it (the owner's G2 ruling, D53: one
+  broad grant stays while any enabled feature uses it); turning image text
+  off then releases it. The pinned test beside it still covers automation
+  alone.
+- **Rollback, new default-state test** (`permission-flows`). Image text is
+  on as shipped with no image access; the OCR button's click is granted and
+  the save then fails. The grant stays, because the saved setting already
+  wants it (the save only repeated "on"), so it is not an orphan; the panel
+  reports the failed save and then shows the access Chrome holds. The pinned
+  test beside it still covers a fresh grant for a setting that was off,
+  which is rolled back.
+- No product change: both tests pass on the current code.
+
+### D94. Capture reads each element's paint and credential facts once (2026-09-25)
+
+Same branch. Open item 2 of the 2026-09-23 handover: the visibility index's
+painted-path check walked each element's whole ancestor path, so a scan was
+O(nodes x depth).
+
+- **Painted path.** `sourceElementPathIsPainted` now derives each element's
+  answer from its flat-tree parent's, kept in the scan's paint cache: the path
+  is visible when the parent's is and the element's own state is; the
+  element survives clipping when a rectangle of its own overlaps, with a
+  positive area, the one rectangle its ancestors clip it to (an axis no
+  ancestor clips is unbounded). A positive-area overlap does not depend on
+  the order the old walk intersected the clips in, so the answers are the
+  same. When an ancestor clips to several fragments (an inline box with
+  `overflow` set), the old full path walk
+  (`sourceElementPathIsPaintedByPath`) answers for its descendants.
+- **Credential ancestry.** `hasSourceCredentialSecretAncestor` already kept
+  per-walk results (D63) but read each node's whole flat-tree path before
+  looking them up. It now climbs only to the nearest ancestor the walk has
+  classified, and remembers each element's depth so the 1,024-level limit
+  still applies.
+- **Differential test.** 400 random trees with open shadow roots, hidden,
+  faded and clip-path elements, zero-size and multi-fragment boxes, and
+  overflow clipping on one axis or both, visited in shuffled order: every
+  element's memoized answer equals the full path walk (about 30,000
+  elements, about 8% painted). A planted bug (ignoring one clip edge) fails
+  it at seed 29. The existing memoized-versus-plain credential test covers
+  the second change.
+- **Measured in Chrome for Testing** on the United States Wikipedia article
+  (23,226 elements), three runs each: the page's longest pause while the
+  mirror opens fell from about 1,010 ms to about 900 ms, the second from
+  about 600 ms to about 540 ms. A CPU profile of the unminified build shows
+  what remains in the painted check is reading each element's computed style
+  and client rectangles once (337 of 368 ms).
+- **Found, not fixed.** The visibility index scans the whole document twice
+  as the mirror starts (`#replaceAll`, then `refreshAll`, about 155 ms each
+  on that article).
+
+Build identity `0.5.2 beta v.20260925.4`. Gate: `npm run check` green,
+**1,549 tests pass**, artifact byte-verified.
