@@ -85,6 +85,7 @@ export type HtmlMirrorPatchOperation =
       readonly controlText?: HtmlMirrorControlText;
       readonly canvasBackgroundColor?: string;
       readonly resolvedStyleSheetText?: string;
+      readonly customElementDefined?: true;
     }
   | {
       readonly kind: 'children';
@@ -594,6 +595,7 @@ function readOperations(
           'visuallyHidden', 'selectedImageSource', 'selectedOptionIndexes',
           'selectPickerOpen', 'selectPresentationStyle', 'controlText',
           'canvasBackgroundColor', 'resolvedStyleSheetText',
+          'customElementDefined',
         ],
       ) &&
       (raw.namespace === 'html' || raw.namespace === 'svg' ||
@@ -649,6 +651,9 @@ function readOperations(
         ...(raw.resolvedStyleSheetText !== undefined
           ? { resolvedStyleSheetText: raw.resolvedStyleSheetText }
           : {}),
+        ...(raw.customElementDefined !== undefined
+          ? { customElementDefined: raw.customElementDefined }
+          : {}),
       }, graphIds, 0, graphBudget, false, false, false, false, false,
       fidelityPolicy,
       raw.tagName === 'option' || raw.tagName === 'optgroup'
@@ -683,6 +688,9 @@ function readOperations(
           : {}),
         ...(sentinel.resolvedStyleSheetText !== undefined
           ? { resolvedStyleSheetText: sentinel.resolvedStyleSheetText }
+          : {}),
+        ...(sentinel.customElementDefined
+          ? { customElementDefined: true as const }
           : {}),
       }));
       continue;

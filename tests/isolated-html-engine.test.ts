@@ -3162,6 +3162,84 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(body?.textContent).toContain('late right rail');
   });
 
+  it('defines only the custom elements the page has defined, with empty classes (D83)', async () => {
+    const element = (
+      id: number,
+      tagName: string,
+      customElementDefined: boolean,
+    ): HtmlMirrorNode => ({
+      kind: 'element', id, namespace: 'html', tagName, attributes: [],
+      children: [],
+      ...(customElementDefined ? { customElementDefined: true as const } : {}),
+    });
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: {
+          kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+          attributes: [], children: [
+            { kind: 'element', id: 2, namespace: 'html', tagName: 'head', attributes: [], children: [] },
+            { kind: 'element', id: 3, namespace: 'html', tagName: 'body', attributes: [], children: [
+              element(4, 'shreddit-feed', true),
+              element(5, 'shreddit-feed', true),
+              element(6, 'faceplate-partial', false),
+            ] },
+          ],
+        },
+        adoptedStyleSheets: [],
+        captureMs: 1,
+        viewportWidth: 800,
+        viewportHeight: 600,
+        documentWidth: 800,
+        documentHeight: 1000,
+      },
+    )!;
+    const stream = new FakeHtmlStream(checkpoint);
+    const host = new FakePresentationHost();
+    const defined = new Map<string, CustomElementConstructor>();
+    let replicaHtmlElement: unknown;
+    const engine = new IsolatedHtmlReplicaEngine({
+      presentationHost: host,
+      openStream: async () => stream,
+      initializeIframe: async (iframe, shell) => {
+        const parsed = parseHTML(shell);
+        replicaHtmlElement = parsed.window.HTMLElement;
+        // linkedom cannot match :defined; record what the engine registers.
+        Object.defineProperty(parsed.document, 'defaultView', {
+          value: {
+            HTMLElement: parsed.window.HTMLElement,
+            customElements: {
+              get: (name: string) => defined.get(name),
+              define: (name: string, constructor: CustomElementConstructor) => {
+                if (defined.has(name)) throw new Error('already defined');
+                defined.set(name, constructor);
+              },
+            },
+          },
+        });
+        Object.defineProperty(iframe, 'contentDocument', { value: parsed.document });
+        return parsed.document;
+      },
+    });
+
+    await expect(engine.run(request)).resolves.toMatchObject({ status: 'complete' });
+    expect([...defined.keys()]).toEqual(['shreddit-feed']);
+    const constructor = defined.get('shreddit-feed')!;
+    expect(Object.getPrototypeOf(constructor)).toBe(replicaHtmlElement);
+    expect(Object.getOwnPropertyNames(constructor.prototype)).toEqual(['constructor']);
+
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [{
+        kind: 'attributes', nodeId: 6, namespace: 'html',
+        tagName: 'faceplate-partial', attributes: [], customElementDefined: true,
+      }],
+    )!);
+    expect([...defined.keys()]).toEqual(['shreddit-feed', 'faceplate-partial']);
+  });
+
   it('rechecks stylesheet readiness after installing load listeners', async () => {
     const stream = new FakeHtmlStream(makeStylesheetCheckpoint());
     const host = new FakePresentationHost();

@@ -30,6 +30,7 @@ import {
   MAX_HTML_MIRROR_NODES,
   hasPrivateHtmlMirrorAttribute,
   hasPublicMenuResourceAttribute,
+  isAutonomousCustomElementName,
   readHtmlMirrorDocumentContent,
   readHtmlMirrorNode,
   sanitizeCss,
@@ -1740,8 +1741,10 @@ function applyElementHints(
     | 'controlText'
     | 'canvasBackgroundColor'
     | 'resolvedStyleSheetText'
+    | 'customElementDefined'
   >,
 ): void {
+  if (hints.customElementDefined) defineReplicaCustomElement(element);
   applyControlText(element, hints.controlText);
   applySelectedOptionIndexes(element, hints.selectedOptionIndexes);
   if (element.localName.toLowerCase() === 'select') {
@@ -1822,6 +1825,29 @@ function applyElementHints(
   }
   if (element.localName.toLowerCase() === 'select') {
     configureNativeSelectFacsimile(element);
+  }
+}
+
+/**
+ * Registers an empty Simul-owned class for a custom element the page has
+ * defined, so the page's `:defined` and `:not(:defined)` rules match as they
+ * do on the page. No page code runs: the class has no body, and the replica's
+ * sandbox still blocks its own scripts. Registering a name upgrades the
+ * elements that already have it (D83).
+ */
+function defineReplicaCustomElement(element: Element): void {
+  const name = element.localName;
+  if (
+    element.namespaceURI !== 'http://www.w3.org/1999/xhtml' ||
+    !isAutonomousCustomElementName(name)
+  ) return;
+  try {
+    const view = element.ownerDocument?.defaultView;
+    const registry = view?.customElements;
+    if (!view || !registry || registry.get(name)) return;
+    registry.define(name, class extends view.HTMLElement {});
+  } catch {
+    // A name the browser refuses stays undefined, as before.
   }
 }
 
