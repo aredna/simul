@@ -1627,10 +1627,9 @@ export function isSourcePrivateRoleValue(value: unknown): boolean {
 }
 
 /**
- * With "Show everything (testing)" on, an ARIA menu or listbox is ordinary
- * content: the replica draws it with the page's own styles instead of an
- * isolated facsimile, at the cost of the replica's own dropdown preview for
- * it (D75).
+ * An ARIA menu or listbox is a privacy class for its attributes and for OCR
+ * capture; the replica draws it as ordinary page content either way (D88).
+ * "Show everything (testing)" turns the class off (D75).
  */
 export function isSourcePublicMenuRoleValue(value: unknown): boolean {
   if (SOURCE_PRIVACY_FILTERS_OFF) return false;

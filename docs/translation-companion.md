@@ -212,7 +212,11 @@ the image itself (D86): the replica image's address, natural size, rendered
 size and object-fit/-position, with the pair and reading settings. A carousel
 slide that comes round again or an image scrolled back into view moves its
 visible crop, which used to force a new capture and recognition each time; it
-is now overlaid from that result without either. The results are memory-only,
+is now overlaid from that result without either. An image confirmed to have
+no text (two reads of the same pixels found none) is kept the same way and
+settles without a capture when it returns (D87); one whose pixels change
+between reads, such as a slide caught mid-transition, is never kept, so it
+cannot hide real text. The results are memory-only,
 bounded, expire after 15 minutes and are purged with the other image results.
 Any other repeat of a URL is reused only when its processed pixels and
 geometry inputs match, because a responsive, resized, cropped, or animated
@@ -274,9 +278,9 @@ A public single-row select becomes a companion-owned trigger whose top-layer,
 internally scrolling list escapes source clipping, stays within the replica
 viewport, and repositions on scroll or resize. `multiple` and authored
 `size>1` controls remain bounded inline lists. The same presenter is used by
-Isolated HTML, and may also preview a custom public menu/listbox
-only when a typed proof names one unique same-document `aria-controls` target
-with matching semantics. Missing, duplicate, stale, private, editable, or
+Isolated HTML, and may also preview a custom menu, opened in place with
+the page's own styles (D88), only when a typed proof names one unique
+same-document `aria-controls` target with matching semantics. Missing, duplicate, stale, private, editable, or
 forged mappings remain static and inert. Local preview events change only
 replica-owned presentation: they never select, submit, navigate, or send an
 event to the source page.
@@ -359,8 +363,8 @@ theme fallback, not a site-specific OpenAI.com branch.
 Fidelity still has browser-enforced boundaries. Closed shadow roots are not
 observable. Cross-origin stylesheet CSSOM can be unreadable even though the
 passive link itself renders. A source `blob:` URL is scoped to the source
-environment; Simul does not reuse that opaque URL and cannot always obtain its
-bytes to create an extension-owned replacement. A validated source document
+environment and Simul does not reuse it; a loaded `blob:` or `crossorigin`
+image within the size caps travels as the pixels the page decoded (D89). A validated source document
 mode selects the shell: a standards page loads the doctype shell through
 `srcdoc`, and a quirks page gets a blank frame into which the panel writes the
 doctype-free shell, because an `srcdoc` document is always no-quirks (see
