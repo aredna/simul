@@ -1428,7 +1428,29 @@ export function isEligibleSourceSelect(
 ): boolean {
   return isSourceNativeSelectTagName(tagName) &&
     !sourceAttributesArePrivate(attributes) &&
-    !isSourceActivationRoleValue(attributes.role);
+    (!isSourceActivationRoleValue(attributes.role) ||
+      isSourceNativeSelectImplicitRole(tagName, attributes.role));
+}
+
+/**
+ * `combobox` (one row) and `listbox` (several) are a native select's own
+ * implicit roles. Stating one on the select changes nothing, so it neither
+ * makes the select an activation control nor hides its labels (D98).
+ */
+export function isSourceNativeSelectImplicitRole(
+  tagName: string,
+  value: unknown,
+): boolean {
+  if (!isSourceNativeSelectTagName(tagName) || typeof value !== 'string') {
+    return false;
+  }
+  for (const role of value.trim().toLowerCase().split(/\s+/u)) {
+    if (
+      PRIVATE_ROLE_SET.has(role) || ACTIVATION_ROLE_SET.has(role) ||
+      PUBLIC_MENU_ROLE_SET.has(role)
+    ) return role === 'combobox' || role === 'listbox';
+  }
+  return false;
 }
 
 /** Reads indices only; raw option values and names never enter the protocol. */
