@@ -4115,6 +4115,9 @@ function retainedReplicaStateFitsBudget(state: HtmlMirrorDomState): boolean {
     const seen = new Set<Node>();
     // The panel keeps the previous replica while it stages the next one.
     const maxRetainedBytes = MAX_HTML_MIRROR_BYTES * 4;
+    // Every shadow root's copy of an adopted sheet is set from one string,
+    // which the browser shares; count that text once (D84).
+    const adoptedTexts = new Set<string>();
     let bytes = 0;
     while (pending.length > 0) {
       const node = pending.pop();
@@ -4122,7 +4125,16 @@ function retainedReplicaStateFitsBudget(state: HtmlMirrorDomState): boolean {
       seen.add(node);
       if (seen.size > MAX_HTML_MIRROR_NODES * 3 + 32) return false;
       bytes += 48;
-      if (node.nodeType === 3 || node.nodeType === 8) {
+      if (
+        node.nodeType === 3 &&
+        state.ownedAdoptedStyles.has(node.parentNode as HTMLStyleElement)
+      ) {
+        const text = node.nodeValue ?? '';
+        if (!adoptedTexts.has(text)) {
+          adoptedTexts.add(text);
+          bytes += text.length * 2;
+        }
+      } else if (node.nodeType === 3 || node.nodeType === 8) {
         bytes += (node.nodeValue?.length ?? 0) * 2;
       } else if (node.nodeType === 1) {
         const element = node as Element;

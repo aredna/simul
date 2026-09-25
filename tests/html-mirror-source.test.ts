@@ -7,6 +7,7 @@ import {
   createHtmlMirrorCheckpointRequest,
   createHtmlMirrorPortName,
   createHtmlMirrorStart,
+  decodeHtmlMirrorWireMessage,
   type HtmlMirrorCheckpoint,
   type HtmlMirrorPatchBatch,
   type HtmlMirrorScrollUpdate,
@@ -2484,7 +2485,8 @@ class FakePort {
   constructor(readonly name: string) {}
 
   postMessage(message: unknown): void {
-    this.posts.push(message);
+    // Read posts as the panel does, with adopted stylesheets restored (D84).
+    this.posts.push(decodeHtmlMirrorWireMessage(message));
   }
 
   emitMessage(message: unknown): void {

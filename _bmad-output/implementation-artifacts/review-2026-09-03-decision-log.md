@@ -3731,3 +3731,68 @@ Gate: `npm run check` green, **1,526 tests pass, 1 skipped** (+12).
 
 Build identity `0.5.1 beta v.20260924.3`; `dist/chrome-unpacked` re-synced.
 Gate: `npm run check` green, **1,530 tests pass, 1 skipped** (+4).
+
+### D84. Big web-component pages keep mirroring; one scrollbar; Auto-detect names its result (2026-09-25)
+
+- **Reported.** The owner, on live Reddit after D83: (1) the mirror does not
+  follow the page, and scrolled on its own it does not have the whole page;
+  (2) two scrollbars on most pages; (3) Auto-detect does not detect English
+  when translating Reddit to another language, and nothing shows what it
+  detected; (4) clicking a thread: "The isolated replica could not be
+  prepared. Retry the current page." The owner confirmed (2) happens in Fit
+  mode. On live Reddit `lang` is `en-US` and the feed was 24,888 px tall.
+- **Reproduced in Chrome for Testing** (the archived feed of D83, served
+  locally, its posts cloned in the page so Reddit's own code upgrades them).
+  Three posts already carried 204 shadow roots adopting 45 distinct sheets:
+  0.34 M characters of CSS, sent once per root as 23 M characters, 43.8 MiB
+  of the 60 MiB page budget. With 33 posts the mirror failed with exactly the
+  owner's message (4). Built first and then grown to 33 posts, the mirror
+  kept its 3 posts and stayed at the top while the page scrolled to 5,000 and
+  12,000 px (1). In Fit mode the scaled frame drew its own vertical
+  scrollbar beside the panel's (2); in 1:1 mode it hid under the panel's, and
+  the 15 px it took pushed a horizontal scrollbar instead.
+- **Causes.** (1, 4) Every use of an adopted sheet was serialized, budgeted,
+  sent and re-validated per shadow root: the page's style work budget
+  counted cache hits, the read budget counted every copy, the message size
+  and the port message held every copy, and past the budget the page dropped
+  the host element or refused the checkpoint or patch. (2) The replica frame
+  is the source viewport's size, scrollbar included, inside a panel scroller
+  that has its own. (3) Detection itself works (the page `lang`); it needs a
+  mirror to read, and the result was shown only inside Options.
+- **Changes.** The wire form of a checkpoint or patch carries a table of
+  distinct adopted sheet texts and every `adoptedStyleSheets` list holds
+  indexes into it (`encodeHtmlMirrorWireMessage` on the page's one post,
+  `decodeHtmlMirrorWireMessage` in the panel before validation; a table that
+  is not bounded strings, an index outside it or an unused entry rejects the
+  message). The message size is measured on that form. Both read budgets
+  count a distinct text once (bytes, rules, the 4,096-sheet limit) and each
+  further use as an 8-byte index; the panel sanitizes each text once; the
+  page's work budget pays only for reading a sheet; per-root limits stay.
+  The resource inventory scans a text's URLs once, the retained-replica
+  budget counts a shared text once, and the page's style signatures cache a
+  hash per text. The host measures the frame's own scrollbar (its viewport
+  less its scrolling element's client box, overlay scrollbars 0), fits and
+  crops to the rest; the page still lays out at the source's width. The From
+  menu's first entry reads `[A] English` once Auto-detect resolves.
+- **Verified in Chrome for Testing.** 33 and 93 posts (2,394 shadow roots,
+  45,804 px) mirror completely; grown after the mirror is built, all 33
+  posts arrive and the mirror follows to 5,000 and 12,000 px. In one run
+  each, time to the first mirror of the three-post feed fell from 3.5 s to
+  1.6 s and the page's longest pause from 1.2 s to 0.3 s; 93 posts took
+  5.1 s with one 1.5 s pause. Fit mode at a 500 px panel: one scrollbar. Reddit with Auto-detect
+  and a Japanese target: `[A] 英語` (the panel's UI follows the target),
+  "Detected English from the page language", and Translate page translates.
+- **Not verified.** Live Reddit and a real thread (Reddit blocks this
+  machine; threads are not archived). Thread navigation itself was not
+  reproduced; its reported failure is the size failure above.
+- **Tests.** Protocol: 60 roots adopting 2.3 MB of CSS fit a 1 MB page and
+  send it once; the wire form round-trips through JSON to the same
+  checkpoint; forged tables are refused; a message without adopted sheets is
+  sent unchanged; 4,352 distinct sheets are refused while 4,352 uses of one
+  sheet are accepted; the page reads a sheet five roots adopt once from its
+  work budget. Host: a 15 px frame scrollbar is cropped in Fit and 1:1.
+- **Docs.** `docs/replica-fidelity.md` (adopted sheets, the frame's
+  scrollbar), `docs/translation-companion.md` (the Auto-detect label).
+
+Build identity `0.5.1 beta v.20260924.4`; `dist/chrome-unpacked` re-synced.
+Gate: `npm run check` green, **1,533 tests pass, 1 skipped** (+3). Every new test fails on the old code.

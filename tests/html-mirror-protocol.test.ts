@@ -9,11 +9,16 @@ import {
   createHtmlMirrorPortName,
   createHtmlMirrorScrollUpdate,
   createHtmlMirrorStart,
+  decodeHtmlMirrorWireMessage,
+  encodeHtmlMirrorWireMessage,
   readHtmlMirrorControllerMessage,
   readHtmlMirrorPortSessionId,
   readHtmlMirrorSourceMessage,
 } from '../lib/replica/html-mirror-protocol';
-import { DEFAULT_HTML_MIRROR_LIMIT_SETTINGS } from '../lib/replica/html-mirror-limits';
+import {
+  DEFAULT_HTML_MIRROR_LIMIT_SETTINGS,
+  applyHtmlMirrorLimitSettings,
+} from '../lib/replica/html-mirror-limits';
 import {
   MAX_ADOPTED_STYLE_RULES_PER_OWNER,
   MAX_HTML_MIRROR_BYTES,
@@ -30,6 +35,7 @@ import {
   type HtmlMirrorNode,
   readHtmlMirrorNode,
   sanitizeCss,
+  sanitizeSourceAdoptedStyleSheets,
   sanitizeSourceChildren,
   sanitizeSourceDocument,
   sanitizeSourceElementHints,
@@ -2779,12 +2785,15 @@ describe('isolated HTML sanitizer and protocol', () => {
       documentWidth: graph.documentWidth,
       documentHeight: graph.documentHeight,
     });
-    expect(checkpoint?.payload.byteLength).toBe(htmlMirrorJsonBytes({
-      root: checkpoint?.payload.root,
-      adoptedStyleSheets: checkpoint?.payload.adoptedStyleSheets,
-      documentMode: checkpoint?.payload.documentMode,
-      representability: checkpoint?.payload.representability,
-    }));
+    // The size is the wire form's, where each distinct sheet travels once.
+    expect(checkpoint?.payload.byteLength).toBe(htmlMirrorJsonBytes(
+      encodeHtmlMirrorWireMessage({
+        root: checkpoint?.payload.root,
+        adoptedStyleSheets: checkpoint?.payload.adoptedStyleSheets,
+        documentMode: checkpoint?.payload.documentMode,
+        representability: checkpoint?.payload.representability,
+      }),
+    ));
     expect(readHtmlMirrorSourceMessage(checkpoint, identity)).toEqual(checkpoint);
     expect(createHtmlMirrorCheckpoint(identity, {
       root: graph!.root,
@@ -2864,26 +2873,146 @@ describe('isolated HTML sanitizer and protocol', () => {
       documentHeight: 1,
     })).toBeUndefined();
 
-    const children = Array.from({ length: 17 }, (_, index) => ({
-      kind: 'element' as const,
-      id: 10 + index * 2,
-      namespace: 'html' as const,
-      tagName: 'x-card',
-      attributes: [],
-      children: [],
-      shadowRoot: {
-        id: 11 + index * 2,
-        mode: 'open' as const,
+    const cards = (sheet: (card: number, index: number) => string) =>
+      Array.from({ length: 17 }, (_, card) => ({
+        kind: 'element' as const,
+        id: 10 + card * 2,
+        namespace: 'html' as const,
+        tagName: 'x-card',
+        attributes: [],
         children: [],
-        adoptedStyleSheets: Array.from({ length: 256 }, () => ''),
-      },
-    }));
+        shadowRoot: {
+          id: 11 + card * 2,
+          mode: 'open' as const,
+          children: [],
+          adoptedStyleSheets: Array.from({ length: 256 }, (_, index) =>
+            sheet(card, index)),
+        },
+      }));
+    // 4,352 distinct sheets are over the limit of 4,096 ...
     expect(createHtmlMirrorPatch(
       { ...identity, sequence: 1 },
       1,
       1,
-      [{ kind: 'children', nodeId: 2, children }],
+      [{
+        kind: 'children',
+        nodeId: 2,
+        children: cards((card, index) => `.c${card}-${index}{}`),
+      }],
     )).toBeUndefined();
+    // ... while 4,352 uses of one sheet count it once (D84).
+    expect(createHtmlMirrorPatch(
+      { ...identity, sequence: 1 },
+      1,
+      1,
+      [{ kind: 'children', nodeId: 2, children: cards(() => '.card{}') }],
+    )).toBeDefined();
+  });
+
+  it('sends and counts each distinct adopted stylesheet once per message (D84)', () => {
+    // Web components adopt the same sheets into every shadow root: Reddit's
+    // feed repeated 0.34 MB of CSS into 23 MB, and a longer feed or a thread
+    // went over the page limit ("The isolated replica could not be prepared").
+    const shared = `.card{padding:1px}${'.x{color:red}'.repeat(3_000)}`;
+    const theme = '.theme{color:blue}';
+    const identity = createReplicaIdentity({
+      sessionId: 'shared-sheets', pageEpoch: 1, generation: 1,
+      documentId: 'shared-sheets-document', frameId: 0, sequence: 0,
+    });
+    const card = (index: number): HtmlMirrorElementNode => ({
+      kind: 'element', id: 10 + index * 2, namespace: 'html', tagName: 'x-card',
+      attributes: [], children: [],
+      shadowRoot: {
+        id: 11 + index * 2, mode: 'open', children: [],
+        adoptedStyleSheets: [shared, theme],
+      },
+    });
+    const content = (cards: number) => ({
+      root: {
+        kind: 'element' as const, id: 1, namespace: 'html' as const,
+        tagName: 'html', attributes: [], children: [{
+          kind: 'element' as const, id: 3, namespace: 'html' as const,
+          tagName: 'body', attributes: [],
+          children: Array.from({ length: cards }, (_, index) => card(index)),
+        }],
+      },
+      adoptedStyleSheets: [theme],
+      captureMs: 1,
+      viewportWidth: 1,
+      viewportHeight: 1,
+      documentWidth: 1,
+      documentHeight: 1,
+    });
+    // 60 roots use 2.3 MB of CSS; one megabyte of page holds it sent once.
+    applyHtmlMirrorLimitSettings({
+      itemMegabytes: 1, pageMegabytes: 1, maxElements: 1_000,
+    });
+    try {
+      const checkpoint = createHtmlMirrorCheckpoint(
+        identity,
+        content(60),
+        'passive',
+      )!;
+      expect(checkpoint).toBeDefined();
+      expect(checkpoint.payload.byteLength).toBeLessThan(shared.length * 2);
+
+      const wire = encodeHtmlMirrorWireMessage(checkpoint) as {
+        readonly adoptedStyleSheetTexts: readonly string[];
+        readonly payload: { readonly adoptedStyleSheets: readonly number[] };
+      };
+      expect(wire.adoptedStyleSheetTexts).toEqual([shared, theme]);
+      expect(wire.payload.adoptedStyleSheets).toEqual([1]);
+      const json = JSON.stringify(wire);
+      expect(json.split('.card{padding:1px}')).toHaveLength(2);
+      expect(json.split('"adoptedStyleSheets":[0,1]')).toHaveLength(61);
+      // The panel restores the texts and accepts exactly the page's message.
+      expect(readHtmlMirrorSourceMessage(
+        decodeHtmlMirrorWireMessage(JSON.parse(json)),
+        identity,
+        'passive',
+      )).toEqual(checkpoint);
+
+      for (const forged of [
+        { ...JSON.parse(json), adoptedStyleSheetTexts: [shared] },
+        { ...JSON.parse(json), adoptedStyleSheetTexts: [shared, theme, '.x{}'] },
+        { ...JSON.parse(json), adoptedStyleSheetTexts: [shared, 7] },
+        { ...JSON.parse(json), adoptedStyleSheetTexts: [] },
+      ]) {
+        expect(decodeHtmlMirrorWireMessage(forged)).toBeUndefined();
+      }
+      // A message without adopted sheets is sent as it is.
+      const plain = createHtmlMirrorScrollUpdate(identity, {
+        scrollTarget: 'document', scrollX: 0, scrollY: 0,
+        maxScrollX: 0, maxScrollY: 0,
+        documentScrollX: 0, documentScrollY: 0,
+        documentMaxScrollX: 0, documentMaxScrollY: 0,
+      });
+      expect(plain).toBeDefined();
+      expect(encodeHtmlMirrorWireMessage(plain)).toBe(plain);
+    } finally {
+      applyHtmlMirrorLimitSettings();
+    }
+  });
+
+  it('reads a sheet adopted by many roots once from the page\'s work budget (D84)', () => {
+    const rule = { cssText: `.card{${'color:red;'.repeat(50)}}` };
+    const sheet = fakeStyleSheet(rule.cssText);
+    const owner = () => ({ adoptedStyleSheets: [sheet] }) as unknown as ShadowRoot;
+    const work = createHtmlMirrorStyleWorkBudget({
+      maxSheets: 2,
+      maxRules: 10,
+      maxCharacters: rule.cssText.length + 10,
+    });
+    for (let root = 0; root < 5; root += 1) {
+      expect(sanitizeSourceAdoptedStyleSheets(
+        owner(),
+        'https://example.test/',
+        work,
+        undefined,
+        'passive',
+      )).toEqual([rule.cssText]);
+    }
+    expect(work).toMatchObject({ sheets: 1, rules: 1, exhausted: false });
   });
 
   it('validates bounded final-order child reconciliation entries exactly', () => {
