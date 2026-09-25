@@ -237,14 +237,23 @@ new cache identity. Explicit same-language pairs stop
 before source capture. Auto-detected work uses the nearest valid image/element
 language and stops before recognition when that resolved language equals To.
 Each image's translated line boxes live in an inert `simul-image-overlay`
-element placed right after the image in the replay document (D74). It is
+element inside the image's parent in the replay document (D74). It is
 absolutely positioned with no z-index, so it paints where the image paints:
 a pop-up, sticky header or menu that covers the image covers its translation,
 and a dimming backdrop dims it. It takes no part in layout, resets every
 property with inline `!important`, and keeps its boxes in a closed shadow
-root, so page CSS cannot restyle them; page rules that count siblings (such
-as `img + figcaption`) can see it. When the mirror rewrites the image's
-parent, the next refresh puts the element back after the image. It is placed
+root, so page CSS cannot restyle them. Where the parent can host one (a
+`div`, `span`, `p`, `section` and the like, without a shadow root of its
+own), the element lives in a closed Simul-owned shadow root on the parent,
+after a slot that shows the parent's own children unchanged (D92): page
+rules that count siblings (`img + p`, `:last-child`, `:nth-child`) do not
+see it, and the mirror patches the parent's children as before. It then
+paints after all of the parent's children, so a later positioned sibling (a
+badge over the image) no longer covers the translation. Any other parent (a
+link, a `picture`, a `figure`, a list item) keeps the element right after
+the image, where sibling rules such as `img + figcaption` still see it. When
+the mirror rewrites the image's parent, the next refresh puts the element
+back. It is placed
 by measuring where it lands, so a transformed or zoomed containing block is
 handled; rotation is not. Text wraps and uses bounded font-size reduction
 within the recognized box instead of forcing a single clipped line. Each

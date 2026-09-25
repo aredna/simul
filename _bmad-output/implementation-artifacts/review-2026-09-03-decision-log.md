@@ -4094,3 +4094,49 @@ fields, and change the image overlay placement now (D92 onwards).
 
 Build identity `0.5.2 beta v.20260925.2`. Gate: `npm run check` green,
 **1,545 tests pass**, artifact byte-verified.
+
+### D92. Image translations out of sight of page selectors (2026-09-25)
+
+Same branch. Open item 5 of the 2026-09-23 handover: the overlay placed right
+after each image (D74) is a sibling that page CSS counts, so `img + p`,
+`:nth-child` of later siblings and `:last-child` of the image could change in
+the mirror. No report had come in; the owner chose "Change it now" and
+accepted per-site trade-offs.
+
+- **Reproduced in Chrome for Testing** with a card whose text is styled by
+  `.card img + p` (red) and `.card > p:nth-child(2)` (bold): in 0.5.2 the
+  mirror's card text was black and normal weight once the image was
+  translated.
+- **Change.** When the image's parent can host a shadow root (the HTML
+  standard's list less `body`: `div`, `span`, `p`, `section`, `article`,
+  `header`, `main` and the like) and has none of its own, the overlay lives in
+  a closed Simul-owned shadow root on that parent, after a default `<slot>`
+  that renders the parent's own children unchanged. Page selectors never see
+  it, and the engine (which reads only open roots) patches the parent's
+  children as before. Any other parent (a link, `picture`, `figure`, a list
+  item, a parent with a mirrored shadow root) keeps the overlay right after
+  the image, as before.
+- **Trade-off.** In a shadow root the overlay paints after all of the
+  parent's children instead of right after the image, so a later positioned
+  sibling with no z-index (a badge over the image) no longer covers the
+  translation. Anything with a z-index, and anything outside the parent (a
+  pop-up, a backdrop, a sticky header), still covers or dims it as in D74.
+  Sibling rules around images in the fallback parents (`figure img +
+  figcaption`) are still affected.
+- **Verified in Chrome for Testing** (new harness `overlay-placement.mjs`,
+  which finds overlays in closed shadow roots through CDP): the card text
+  keeps its red bold style; the pop-up still covers the banner's translation
+  and the backdrop still dims it; each overlay's box equals its image's box;
+  a translated carousel track clips its two slides' overlays to the 150 px
+  each shows; a figure's overlay stays right after its image.
+- **Tests.** The overlay lives in the parent's closed shadow root after a
+  slot, with no new light-tree sibling; it returns to its parent after a
+  reorder or removal and follows the image to a new parent; a link, a figure
+  and a parent with its own shadow root keep it after the image. The overlay
+  tests now find overlays through `findImageOverlays` (light tree and owned
+  shadow roots).
+- **Docs.** `docs/translation-companion.md`,
+  `docs/image-translation-research.md`.
+
+Build identity `0.5.2 beta v.20260925.3`. Gate: `npm run check` green,
+**1,546 tests pass**, artifact byte-verified.
