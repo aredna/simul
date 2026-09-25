@@ -157,9 +157,11 @@ Password fields, CSS text-security fields, hidden inputs, file names and
 paths, password/authentication/one-time-code/WebAuthn autocomplete, and every
 `cc-*` autocomplete token are a floor no read scope lifts; only the Advanced
 **Show everything (testing)** switch does (D75, see
-[Replica fidelity](replica-fidelity.md)). A file input and a credential input
-are drawn as the empty field the page shows (D75, D76); their values never
-travel. Classification occurs before
+[Replica fidelity](replica-fidelity.md)). A file input is drawn as the empty
+field the page shows (D75). A credential input is drawn with one dot per
+character, as the page draws it (D76, D91): only the length of its value
+travels, under the form-values setting, and never its characters.
+Classification occurs before
 reading; once a node is classified as a secret it remains secret for the
 document lifetime. A narrower live setting clears source-derived replica,
 translation, and image state before the new preference is saved. Reset commits
@@ -425,10 +427,11 @@ the user must reauthorize after temporary page access expires.
 
 ## Following tabs
 
-The toolbar's Follow / Pinned button and Settings' "Mirror follows" switch the
-same saved setting, and both surfaces honor it (D73). Follow is the default: a
-side panel mirrors whichever tab becomes active in its own window, and a
-detached window mirrors the active tab of the focused browser window. Pinned
+The toolbar's Follow / Pinned button switches one saved setting, and both
+surfaces honor it (D73). Settings has no second control for it (D91). Follow
+is the default: a side panel mirrors whichever tab becomes active in its own
+window, and a detached window mirrors the active tab of the focused browser
+window. Pinned
 keeps the mirror on the tab it shows while other tabs are active; image text
 on that tab waits until it is visible again, because pixel capture reads only
 the visible tab. Clicking the extension on another tab of the side panel's

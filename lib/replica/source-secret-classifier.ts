@@ -120,6 +120,47 @@ export function sourceFactsAreSecret(
   );
 }
 
+/**
+ * Input types that can hold the dots a credential field draws. A number field
+ * cannot (its value would be dropped), and the other types draw no text.
+ */
+const MASKABLE_INPUT_TYPES = new Set([
+  '', 'text', 'password', 'search', 'tel', 'url', 'email',
+]);
+
+/** `-webkit-text-security` values that draw a shape per character. */
+const DRAWN_TEXT_SECURITY = new Set(['disc', 'circle', 'square']);
+
+/** Whether an input's type can show a masked value as dots (D91). */
+export function isMaskableInputFacts(facts: SourceClassificationFacts): boolean {
+  return normalized(facts.tagName) === 'input' &&
+    MASKABLE_INPUT_TYPES.has(normalized(facts.type));
+}
+
+/**
+ * A credential input the page draws as dots, one per typed character: a
+ * password field, or a text field that is itself a credential (card number,
+ * one-time code, CSS-masked). Only the length of its value may leave the page
+ * (D91), and only as a count. A field inside a credential region is not
+ * drawn at all, so its own facts are what count here.
+ */
+export function isMaskedCredentialInput(
+  facts: SourceClassificationFacts,
+): boolean {
+  if (!isMaskableInputFacts(facts)) return false;
+  if (normalized(facts.type) === 'password') return true;
+  // Unreadable styles make a field secret only to fail closed; that is no
+  // evidence that the page draws dots, so its value stays unread.
+  const textSecurity = normalized(facts.computedTextSecurity);
+  return sourceFactsAreSecret({
+    ...facts,
+    computedTextSecurity: DRAWN_TEXT_SECURITY.has(textSecurity)
+      ? textSecurity
+      : 'none',
+    secretAncestor: false,
+  });
+}
+
 export function classifySourceEvidence(
   facts: SourceClassificationFacts,
 ): SourceEvidenceCategory {

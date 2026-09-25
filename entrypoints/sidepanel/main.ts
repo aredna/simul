@@ -81,7 +81,6 @@ import {
   isCompanionLaunchBehavior,
   isAutoTranslationMode,
   isMirrorDisplayMode,
-  isPopoutTabMode,
   isReplicaViewMode,
   isTextLayoutMode,
   selectLiveCompanionPreferenceChange,
@@ -166,7 +165,6 @@ const mirrorShowEverythingInput = requireElement<HTMLInputElement>(
   '#mirror-show-everything',
 );
 const launchBehaviorSelect = requireElement<HTMLSelectElement>('#launch-behavior');
-const popoutTabModeSelect = requireElement<HTMLSelectElement>('#popout-tab-mode');
 const syncScrollInput = requireElement<HTMLInputElement>('#sync-scroll');
 const zoomInput = requireElement<HTMLInputElement>('#zoom');
 const zoomOutput = requireElement<HTMLOutputElement>('#zoom-value');
@@ -961,13 +959,6 @@ launchBehaviorSelect.addEventListener('change', () => {
   void preferenceClient.commitView({ launchBehavior });
 });
 
-popoutTabModeSelect.addEventListener('change', () => {
-  const popoutTabMode: PopoutTabMode = isPopoutTabMode(popoutTabModeSelect.value)
-    ? popoutTabModeSelect.value
-    : 'locked';
-  void changePopoutTabMode(popoutTabMode);
-});
-
 syncScrollInput.addEventListener('change', () => {
   void preferenceClient.commitView({ syncScroll: syncScrollInput.checked });
   if (state.preferences.syncScroll && state.lastSourceScroll) {
@@ -1448,7 +1439,6 @@ function syncPreferenceControls(): void {
   mirrorShowEverythingInput.checked = state.preferences.mirrorShowEverything;
   replicaViewModeSelect.value = state.preferences.replicaViewMode;
   launchBehaviorSelect.value = state.preferences.launchBehavior;
-  popoutTabModeSelect.value = state.preferences.popoutTabMode;
   syncScrollInput.checked = state.preferences.syncScroll;
   zoomInput.value = String(state.preferences.zoomPercent);
   zoomOutput.value = `${state.preferences.zoomPercent}%`;
@@ -1632,7 +1622,6 @@ function updateControls(): void {
   restoreMirrorLimitsButton.disabled = busy || state.mirrorLimitsCommitInFlight;
   mirrorShowEverythingInput.disabled = busy;
   launchBehaviorSelect.disabled = busy;
-  popoutTabModeSelect.disabled = busy;
   syncScrollInput.disabled = busy;
   zoomInButton.disabled = busy;
   zoomOutButton.disabled = busy;

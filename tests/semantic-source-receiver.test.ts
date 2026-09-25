@@ -474,6 +474,50 @@ describe('semantic source receiver', () => {
     }
   });
 
+  it('draws a credential field as dots from its count alone (D91)', () => {
+    const { document } = parseHTML(
+      '<html><body><input id="pw" type="password"><input id="card" type="text">' +
+      '<input id="draft" type="text"><input id="box" type="checkbox"></body></html>',
+    );
+    const password = document.querySelector<HTMLInputElement>('#pw')!;
+    const card = document.querySelector<HTMLInputElement>('#card')!;
+    const draft = document.querySelector<HTMLInputElement>('#draft')!;
+    const box = document.querySelector<HTMLInputElement>('#box')!;
+    const nodes = new Map<number, Node>([
+      [1, password], [2, card], [7, draft], [4, box],
+    ]);
+    const presenter = new SemanticProofPresenter({
+      document: document as unknown as Document,
+    });
+    const receiver = new SemanticSourceReceiver({
+      document: identity,
+      replicaDocument: document as unknown as Document,
+      resolveNode: (nodeId) => nodes.get(nodeId),
+      applyProofs: (proofs) => presenter.apply(proofs),
+    });
+    const masked = (nodeId: number, length: number) => ({
+      kind: 'masked-length', bridge: 'isolated-html', nodeId, revision: 1,
+      gate: 'formValues', length, classifierVersion: 1,
+    } as const);
+
+    // A checkbox cannot draw dots, node 99 is not in the replica, and the
+    // draft's value travels as text: each count is dropped by itself, and
+    // the rest of the batch still applies.
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 1, [valueRecord()],
+      [masked(1, 8), masked(2, 16), masked(4, 3), masked(7, 5), masked(99, 2)],
+    ))).toBeDefined();
+    expect(password.value).toBe('\u2022'.repeat(8));
+    expect(card.value).toBe('\u2022'.repeat(16));
+    expect(draft.value).toBe('visible draft');
+    expect(box.hasAttribute('data-simul-source-masked-length')).toBe(false);
+
+    receiver.clear();
+    expect(password.value).toBe('');
+    expect(card.value).toBe('');
+    expect(password.hasAttribute('data-simul-source-masked-length')).toBe(false);
+  });
+
   it('re-points aria relationships at represented, safe, same-scope nodes only', () => {
     const { document } = parseHTML(
       '<html><body><h2 id="t">Billing</h2><p id="d">Desc</p>' +

@@ -277,8 +277,13 @@ Both selectable policies continue to block:
   profile. A file input is drawn as the empty control the page shows (D75),
   and so is a credential input (D76): a password, card-number or
   one-time-code field keeps its box (`type`, `class`, `style`, `id`, `size`
-  and the like) and never its value, placeholder, labels or `data-*`. Any
-  other credential region, such as CSS-masked text or a container marked as a
+  and the like) and never its value, placeholder, labels or `data-*`. When
+  form values are allowed, the field shows one dot per character, as the page
+  does (D91): the page sends only the length of the value (a
+  `masked-length` proof, at most 256), and the replica fills the field with
+  that many bullets. A number field, which cannot hold dots, and a field
+  whose styles cannot be read stay empty. Any other credential region, such
+  as CSS-masked text outside a field or a container marked as a
   one-time-code area, is still replaced by an empty opaque shell.
   A node that was a credential stays one for the page's lifetime; only
   explicit evidence counts (an old password type, credential autocomplete or

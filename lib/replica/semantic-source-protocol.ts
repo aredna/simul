@@ -27,6 +27,8 @@ export const MAX_SEMANTIC_SOURCE_RECORDS = 1_024;
 export const MAX_SEMANTIC_SOURCE_PROOFS = 2_048;
 export const MAX_SEMANTIC_SELECTED_OPTION_NODE_IDS = 32;
 export const MAX_SEMANTIC_SELECT_SIZE = 1_000;
+/** The most dots a masked credential field shows in the replica (D91). */
+export const MAX_SEMANTIC_MASKED_LENGTH = 256;
 export const MAX_SEMANTIC_SOURCE_BATCH_BYTES = 8 * 1024 * 1024;
 export const MAX_SEMANTIC_SOURCE_TEXT = 3_500;
 export const MAX_SEMANTIC_SOURCE_UNACKED_BATCHES = 4;
@@ -204,6 +206,23 @@ export interface SemanticChoiceStateProof {
   readonly classifierVersion: typeof SOURCE_SECRET_CLASSIFIER_VERSION;
 }
 
+/**
+ * How many characters a credential input holds (D91): a password, card-number
+ * or one-time-code field the page draws as dots. Only the count travels,
+ * capped at `MAX_SEMANTIC_MASKED_LENGTH`; the replica draws that many dots.
+ */
+export interface SemanticMaskedLengthProof {
+  readonly kind: 'masked-length';
+  readonly bridge: SemanticSourceBridgeId;
+  /** Native bridge identity of the credential input. */
+  readonly nodeId: number;
+  /** Monotonic revision for this proof identity. */
+  readonly revision: number;
+  readonly gate: 'formValues';
+  readonly length: number;
+  readonly classifierVersion: typeof SOURCE_SECRET_CLASSIFIER_VERSION;
+}
+
 export interface SemanticControlStateProof {
   readonly kind: 'control-state';
   readonly bridge: SemanticSourceBridgeId;
@@ -329,6 +348,7 @@ export type SemanticSourceProof =
   | SemanticDisclosureStateProof
   | SemanticStructuralMenuProof
   | SemanticChoiceStateProof
+  | SemanticMaskedLengthProof
   | SemanticControlStateProof
   | SemanticAriaStateProof
   | SemanticAriaRelationshipProof;
@@ -676,6 +696,25 @@ export function readSemanticSourceProof(
       classifierVersion: SOURCE_SECRET_CLASSIFIER_VERSION,
     });
   }
+  if (input.kind === 'masked-length') {
+    if (!hasExactKeys(input, [
+      'kind', 'bridge', 'nodeId', 'revision', 'gate', 'length',
+      'classifierVersion',
+    ]) || input.gate !== 'formValues' ||
+      !positiveSafeInteger(input.nodeId) ||
+      !Number.isSafeInteger(input.length) || Number(input.length) < 0 ||
+      Number(input.length) > MAX_SEMANTIC_MASKED_LENGTH
+    ) return undefined;
+    return Object.freeze({
+      kind: input.kind,
+      bridge: input.bridge,
+      nodeId: input.nodeId,
+      revision: input.revision,
+      gate: input.gate,
+      length: input.length as number,
+      classifierVersion: SOURCE_SECRET_CLASSIFIER_VERSION,
+    });
+  }
   if (input.kind === 'control-state') {
     if (!hasExactKeys(input, [
       'kind', 'bridge', 'nodeId', 'revision', 'gate', 'disabled',
@@ -879,6 +918,9 @@ export function semanticSourceProofIdentity(proof: SemanticSourceProof): string 
     return `semantic-select-presentation-v1:${proof.nodeId}`;
   }
   if (proof.kind === 'choice-state') return `semantic-choice-v1:${proof.nodeId}`;
+  if (proof.kind === 'masked-length') {
+    return `semantic-masked-length-v1:${proof.nodeId}`;
+  }
   if (proof.kind === 'control-state') return `semantic-control-v1:${proof.nodeId}`;
   if (proof.kind === 'aria-state') {
     return `semantic-aria-state-v1:${proof.nodeId}:${proof.state}`;
@@ -905,6 +947,10 @@ export function semanticSourceProofSignature(proof: SemanticSourceProof): string
   if (proof.kind === 'choice-state') return [
     proof.bridge, proof.kind, proof.nodeId, proof.gate, Number(proof.checked),
     Number(proof.indeterminate), proof.classifierVersion,
+  ].join('\u0000');
+  if (proof.kind === 'masked-length') return [
+    proof.bridge, proof.kind, proof.nodeId, proof.gate, proof.length,
+    proof.classifierVersion,
   ].join('\u0000');
   if (proof.kind === 'control-state') return [
     proof.bridge, proof.kind, proof.nodeId, proof.gate, Number(proof.disabled),

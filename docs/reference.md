@@ -87,8 +87,10 @@ personal/autofill values, and editable text.
 
 Passwords, authentication and one-time-code fields, WebAuthn and payment-card
 autocomplete classes, hidden inputs, file names, and CSS-masked text are
-blocked under every profile. File, password, card and one-time-code inputs
-show as the empty fields the page draws, without their values. A node
+blocked under every profile. A file input shows as the empty field the page
+draws. Password, card and one-time-code inputs show one dot per character,
+as the page does; only the number of characters is read, and only when form
+values are allowed. A node
 classified as secret remains secret for that document. Narrowing
 the scope clears the current replica, translations, and image overlays before
 rebuilding.

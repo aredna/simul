@@ -6,6 +6,7 @@ import type {
 import {
   StickySourceSecretClassifier,
   classifySourceEvidence,
+  isMaskableInputFacts,
   sourceFactsAreSecret,
   type SourceClassificationFacts,
 } from './source-secret-classifier';
@@ -58,6 +59,11 @@ export type ResolvedSemanticSourceProof =
   | {
       readonly kind: 'choice-state';
       readonly proof: Extract<SemanticSourceProof, { kind: 'choice-state' }>;
+      readonly target: HTMLInputElement;
+    }
+  | {
+      readonly kind: 'masked-length';
+      readonly proof: Extract<SemanticSourceProof, { kind: 'masked-length' }>;
       readonly target: HTMLInputElement;
     }
   | {
@@ -497,8 +503,18 @@ export class SemanticSourceReceiver {
         )
       ) return undefined;
       const next = this.#resolveProof(proof);
+      // A credential field's dot count stands alone: nothing depends on it
+      // and it holds no page content, so one the replica cannot place is
+      // dropped by itself instead of refusing the batch (D91).
+      if (!next && proof.kind === 'masked-length') continue;
       if (!next) return undefined;
       resolved.set(proofId, next);
+    }
+    // A field whose value travels as text never also shows dots.
+    for (const [proofId, value] of resolved) {
+      if (value.kind === 'masked-length' && records.some((record) =>
+        record.nodeId === value.proof.nodeId && record.presentation === 'value'
+      )) resolved.delete(proofId);
     }
     const presentations = new Map<number, Extract<ResolvedSemanticSourceProof, {
       kind: 'select-presentation';
@@ -590,6 +606,20 @@ export class SemanticSourceReceiver {
         (type !== 'checkbox' && type !== 'radio') ||
         (type === 'radio' && proof.indeterminate) ||
         !this.#proofTargetIsSafe(target, true)) return undefined;
+      return Object.freeze({
+        kind: proof.kind,
+        proof,
+        target: target as HTMLInputElement,
+      });
+    }
+    if (proof.kind === 'masked-length') {
+      // Only a count travels, so no replica check can leak anything; the
+      // field must simply be one that draws its value as text.
+      const target = this.#resolveElement(proof.nodeId);
+      if (!target || !isMaskableInputFacts({
+        tagName: target.localName.toLowerCase(),
+        type: safeAttribute(target, 'type'),
+      })) return undefined;
       return Object.freeze({
         kind: proof.kind,
         proof,
@@ -935,6 +965,9 @@ function sameResolvedProof(
   }
   if (left.kind === 'choice-state') {
     return right.kind === 'choice-state' && left.target === right.target;
+  }
+  if (left.kind === 'masked-length') {
+    return right.kind === 'masked-length' && left.target === right.target;
   }
   if (left.kind === 'control-state') {
     return right.kind === 'control-state' && left.target === right.target;

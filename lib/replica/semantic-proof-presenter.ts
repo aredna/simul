@@ -304,6 +304,31 @@ function applyTypedProof(
       }
     };
   }
+  if (resolved.kind === 'masked-length') {
+    // The page draws one dot per character; the replica never has the
+    // characters, only their count (D91).
+    const target = resolved.target;
+    const originalValue = target.value;
+    const originalMarker = target.getAttribute('data-simul-source-masked-length');
+    const presentedValue = '\u2022'.repeat(resolved.proof.length);
+    target.value = presentedValue;
+    target.setAttribute('data-simul-source-masked-length', 'v1');
+    return () => {
+      const stillOwned = target.getAttribute(
+        'data-simul-source-masked-length',
+      ) === 'v1';
+      if (stillOwned && target.value === presentedValue) {
+        target.value = originalValue;
+      }
+      if (stillOwned) {
+        restoreAttribute(
+          target,
+          'data-simul-source-masked-length',
+          originalMarker,
+        );
+      }
+    };
+  }
   if (resolved.kind === 'control-state') {
     const target = resolved.target as HTMLElement & { disabled?: boolean };
     const originalDisabled = typeof target.disabled === 'boolean'
