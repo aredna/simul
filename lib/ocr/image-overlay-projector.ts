@@ -18,10 +18,20 @@ import {
 } from '../replica/source-identity';
 
 /**
- * The element that holds one image's translation. It is placed right after
- * the image, so the page's own stacking decides what paints over it (D74).
+ * The element that holds one image's translation. It sits in the image's
+ * parent, so the page's own stacking decides what paints over it (D74), and
+ * out of sight of page selectors where the parent allows it (D92).
  */
 export const IMAGE_OVERLAY_ELEMENT = 'simul-image-overlay';
+/**
+ * Parents that may host a shadow root (the HTML standard's list, less `body`,
+ * which stays the mirror's own). An image's overlay lives in such a parent's
+ * Simul-owned shadow root (D92).
+ */
+const OVERLAY_SHADOW_HOSTS: ReadonlySet<string> = new Set([
+  'article', 'aside', 'blockquote', 'div', 'footer', 'h1', 'h2', 'h3', 'h4',
+  'h5', 'h6', 'header', 'main', 'nav', 'p', 'section', 'span',
+]);
 export const MAX_IMAGE_OVERLAY_REGIONS = 10_000;
 export const MAX_IMAGE_OVERLAY_RETAINED_WEIGHT = 1_000_000;
 const IMAGE_OVERLAY_ENTRY_WEIGHT = 256;
@@ -182,13 +192,14 @@ interface DocumentLayer {
 
 /**
  * Projects inert translated line boxes over images in the replay document.
- * Each image's overlay is an absolutely positioned element placed right after
- * the image, with no z-index, so it paints where the image paints: whatever
- * the page draws over the image (a pop-up, a sticky header, a dimming
- * backdrop) also covers or dims its translation (D74). It never wraps the
- * image and takes no part in layout; its content sits in a closed shadow root
- * so page CSS cannot restyle it. The mirror may drop or displace it when it
- * rewrites the image's parent, so every refresh puts it back after the image.
+ * Each image's overlay is an absolutely positioned element in the image's
+ * parent, with no z-index, so it paints where the image paints: whatever the
+ * page draws over the image (a pop-up, a sticky header, a dimming backdrop)
+ * also covers or dims its translation (D74). It never wraps the image and
+ * takes no part in layout; its content sits in a closed shadow root so page
+ * CSS cannot restyle it. See `placeOverlay` for where in the parent it goes.
+ * The mirror may drop or displace it when it rewrites the image's parent, so
+ * every refresh puts it back.
  *
  * The overlay is positioned by measuring where it actually lands, so any
  * containing block (a transformed carousel track, a zoomed subtree) is
@@ -296,7 +307,7 @@ export class ImageOverlayProjector {
       applyRegionStyle(element, region.placement === 'whole-image');
       content.append(element);
     }
-    if (!placeAfterImage(root, anchor.image)) {
+    if (!placeOverlay(root, anchor.image)) {
       if (layer.entries.size === 0) {
         this.#disposeLayer(layer);
         this.#layers.delete(layer.document);
@@ -435,7 +446,7 @@ export class ImageOverlayProjector {
       this.environment.onAnchorRebound?.(projection.jobOrdinal);
     }
     const anchor = entry.anchor;
-    if (!placeAfterImage(root, anchor.image)) {
+    if (!placeOverlay(root, anchor.image)) {
       this.#removeEntry(layer, nodeId);
       return;
     }
@@ -799,8 +810,35 @@ function createOverlayElement(
   return { root, content };
 }
 
-/** Keeps the overlay directly after its image, where the mirror left or moved it. */
-function placeAfterImage(root: HTMLElement, image: HTMLImageElement): boolean {
+/** Shadow roots this module attached to image parents, by host. */
+const overlayShadowRoots = new WeakMap<Element, ShadowRoot>();
+
+/**
+ * Puts an image's overlay back where it belongs, wherever the mirror left or
+ * moved the image. Page CSS that counts siblings (`img + p`, `:last-child`,
+ * `:nth-child`) must not see it (D92), so when the image's parent can host
+ * one, the overlay lives in a closed Simul-owned shadow root on that parent,
+ * after a slot that shows the parent's own children unchanged. It then paints
+ * after all of the parent's children rather than right after the image, so a
+ * later positioned sibling (a badge over the image) no longer covers it. The
+ * mirror sees no shadow root (it is closed) and patches the parent's children
+ * as before. Any other parent (a link, a picture, a figure, a list item, a
+ * parent with its own shadow root) keeps the overlay right after the image.
+ */
+function placeOverlay(root: HTMLElement, image: HTMLImageElement): boolean {
+  const parent = image.parentElement;
+  const shadow = parent && image.parentNode === parent
+    ? overlayShadowRootFor(parent)
+    : undefined;
+  if (shadow) {
+    if (root.parentNode === shadow) return true;
+    try {
+      shadow.append(root);
+    } catch {
+      return false;
+    }
+    return root.parentNode === shadow;
+  }
   if (root.previousSibling === image) return true;
   try {
     image.after(root);
@@ -808,6 +846,42 @@ function placeAfterImage(root: HTMLElement, image: HTMLImageElement): boolean {
     return false;
   }
   return root.previousSibling === image;
+}
+
+function overlayShadowRootFor(parent: Element): ShadowRoot | undefined {
+  const known = overlayShadowRoots.get(parent);
+  if (known) return known;
+  if (
+    parent.namespaceURI !== 'http://www.w3.org/1999/xhtml' ||
+    !OVERLAY_SHADOW_HOSTS.has(parent.localName)
+  ) return undefined;
+  let shadow: ShadowRoot;
+  try {
+    // Throws for a parent that already has a shadow root (a mirrored one).
+    shadow = parent.attachShadow({ mode: 'closed' });
+  } catch {
+    return undefined;
+  }
+  shadow.append(parent.ownerDocument.createElement('slot'));
+  overlayShadowRoots.set(parent, shadow);
+  return shadow;
+}
+
+/**
+ * Every overlay element in a replica document, in the light tree or in the
+ * owned shadow roots of image parents. For diagnostics and tests.
+ */
+export function findImageOverlays(document: Document): HTMLElement[] {
+  const found = [
+    ...document.querySelectorAll<HTMLElement>(IMAGE_OVERLAY_ELEMENT),
+  ];
+  for (const host of document.querySelectorAll([...OVERLAY_SHADOW_HOSTS].join(','))) {
+    const shadow = overlayShadowRoots.get(host);
+    if (shadow) {
+      found.push(...shadow.querySelectorAll<HTMLElement>(IMAGE_OVERLAY_ELEMENT));
+    }
+  }
+  return found;
 }
 
 function setOverlayShown(root: HTMLElement, shown: boolean): void {
