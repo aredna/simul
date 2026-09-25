@@ -3860,3 +3860,154 @@ Gate: `npm run check` green, **1,533 tests pass, 1 skipped** (+3). Every new tes
 
 Build identity `0.5.1 beta v.20260924.5` (D85 and D86); `dist/chrome-unpacked` re-synced.
 Gate: `npm run check` green, **1,537 tests pass, 1 skipped** (+4).
+
+### D87. The handover's remaining PR #1 items (2026-09-25)
+
+The owner opened the session with the 2026-09-25 handover: "Fix those items".
+
+- **Chrome's video controls are hidden in the mirror** (found in D83). A frame
+  without scripts draws Chrome's own play bar on every `<video>`, and the
+  replica cannot play video. The frame's shell style now hides
+  `::-webkit-media-controls` (with its enclosure, overlay and start-playback
+  buttons), and each replica shadow root gets the same rule in a Simul-owned
+  `<style>`, because a document rule does not reach into a shadow tree
+  (Reddit's videos sit in one). That style is not a mirrored node: a patch of
+  the root's children leaves it in place, after the page's content, and an
+  adopted sheet is kept beside it. Verified in Chrome for Testing on a page
+  with a posterized video in the document and one in a shadow root: the old
+  build draws the play bar on both, the new one on neither, and both posters
+  show.
+- **Buttons inside shadow roots keep losing their font: not done.** The
+  handover asked to measure first. The archived Reddit feed no longer runs
+  Reddit's scripts here: headless Chrome aborts its `redditstatic.com` bundle
+  requests (curl still gets them), so the page has no shadow roots and no
+  adopted sheets to measure. Left documented in `docs/replica-fidelity.md`.
+- **A confirmed "no text" image is kept by the image itself** (D86 gap). An
+  image read whole whose two reads of the same pixels found no text is kept
+  in the D86 identity cache as an empty outcome; when it returns (a carousel
+  slide without text, an image scrolled back into view) the job settles with
+  no capture or recognition (`image-identity-reused`, `no-text-found`). Only
+  the confirmed outcome is kept: a read whose pixels changed
+  (`no-text-changed`, a slide caught mid-transition) is not, so it cannot
+  hide real text. Verified by test only; the owner's bank login carousel is
+  in the checks below.
+- **`statusPairNeedsPack` removed** (unused since D85; no catalogue test
+  needed it).
+- **Tests.** Engine: the shell carries the media-controls rule, a replica
+  shadow root holds exactly one owned rule, and a patch of that root's
+  children keeps it after the new content with the adopted sheet. Controller:
+  an empty slide confirmed after two reads returns with no capture or
+  recognition; a slide whose pixels change between reads is read again when
+  it returns. Both fail on the old code.
+- **Docs.** `docs/replica-fidelity.md` (video controls, the shorthand gap),
+  `docs/translation-companion.md` (image results).
+
+### D88. Wise: late styles on big pages reach the mirror; ARIA menus and listboxes are page content (2026-09-25)
+
+- **Reported.** "Also look at wise.com. When logged in (maybe out) the menu
+  does not show in the correct place." Asked which menu, the owner answered
+  the side navigation: "It's down and to the right. But then as soon as I
+  start to scroll, it jumps to the far right and down off the screen. It's
+  probably not anchored properly." Their readout: `div.sidebar-container`
+  is `position: fixed; top: 0` inside `div.composable-layout` (`position:
+  relative`, grid, `overflow: auto`), viewport 1585 x 2017. A second pair of
+  readouts (which sheets place the sidebar on the page, and how the mirror
+  draws it) could not be run.
+- **Reproduced in Chrome for Testing**, signed out (signing in is not
+  possible here):
+  - The header menus (Personal, Business, Platform) open where the page
+    draws them, at 1280, 1000 and 800 px.
+  - The calculator's currency dropdown opened in the right place but drawn as
+    a plain list: no flags, a check mark on every option, no spacing.
+  - The signed-in layout, rebuilt from the readout, mirrors correctly when its
+    rules are there from the start. With Wise's own design-system sheet on the
+    page (a 1.8 MB file, 2.4 M characters of CSSOM, 15,800 rules), rules a
+    script inserts after the mirror opens never reach it: the sidebar stays
+    unstyled in the mirror while the page draws it fixed. Without that sheet
+    they arrive within half a second.
+- **Causes.**
+  1. The style polling signature reads every sheet's whole text each
+     half-second within 1 MiB and 25,000 rules. One large sheet exhausts it,
+     the owner is suspended for 120 passes and never fits, so a page carrying
+     such a sheet had no CSSOM change detection at all (the "style polling
+     skips documents over 1 MiB" gap from the 2026-09-23 handover).
+  2. Every `role="menu"`/`listbox` region was moved into an isolated
+     Simul-owned facsimile (`all: initial`, the page's cascade cut off), and
+     inside it the page side dropped images, `picture`/`video`/`canvas`,
+     `style`/`src`/`srcset`/`alt`/`poster` attributes, `<style>`/`<link>`
+     and adopted sheets. A menu positioned by its inline style (the usual
+     Floating UI output) or by class therefore drew in the wrong place, and
+     Wise's listbox lost its look.
+- **Changes.**
+  1. A sheet of more than 4,000 rules or 256 KiB of text is watched by its
+     shape: its rule count and its first and last rules, read up to 4,096
+     characters each. A sheet found too large mid-read is given back to the
+     budget and watched by shape from then on. Small sheets are still read in
+     full. A detected change asks for a checkpoint as before. An in-place
+     edit inside a large sheet that keeps its count and ends still waits for
+     the next checkpoint.
+  2. ARIA menus and listboxes are ordinary page content (the owner's
+     2026-09-23 ruling on truthful recreation), as "Show everything" already
+     drew them: the facsimile and the menu resource stripping are removed on
+     both sides. The roles keep their privacy class for attributes
+     (`aria-selected` and the like) and OCR capture. The replica's own
+     preview of a validated ARIA dropdown now opens the page's own menu in
+     place, as D82's structural menus do, instead of a facsimile popup. The
+     receiver has never accepted a listbox as a disclosure panel (its
+     selection is control state), so only menus preview, as before.
+- **Verified in Chrome for Testing.** wise.com's currency dropdown in the
+  mirror matches the page: flags, spacing, the check mark only on JPY, the
+  section headings. D62's dropdown fixture: "Products" opens in place in the
+  page's flow (it floated over the page text with no background). The rebuilt
+  signed-in layout with Wise's sheet: the sidebar is fixed in the mirror at
+  0, 600, 1200 and 1800 px. wise.com: time to mirror 278 ms (was 337 ms) and
+  the page's longest pauses about 400 ms in both.
+- **Not verified.** The signed-in side navigation itself; see the owner
+  checks in the handover.
+- **Tests.** Source: a large sheet is watched by shape; a rule inserted into
+  a small sheet, and one inserted into the large sheet, each ask for one
+  checkpoint; the two budget tests now exhaust the budget with many medium
+  sheets. Engine: a menu and a listbox keep their class, inline position and
+  images as ordinary children of the body, with no facsimile; a
+  disclosure-state proof opens the page's own menu in place. Protocol: menu
+  and listbox images, inline styles and posters travel (this test asserted
+  the opposite since D75). `tests/isolated-disclosure-chrome.test.ts` is
+  removed: it only checked the facsimile's CSS in a local Chrome, and was the
+  suite's one skipped test. The new tests fail on the old code.
+- **Docs.** `docs/replica-fidelity.md` (style polling, ARIA menus, Show
+  everything), `docs/translation-companion.md` (menu preview).
+
+### D89. Fastmail: images the replica cannot fetch travel as the page's pixels (2026-09-25)
+
+- **Reported.** "For fastmail.com the logo in the top right is a small icon
+  and does not show up. We show no image at all." The owner's readout on the
+  signed-in app: a 28 px `<img>` at `https://www.fastmailcdn.com/avatar/<the
+  account's domain>`.
+- **Cause.** That address answers 403 unless the request carries
+  `Origin: https://app.fastmail.com` (checked with curl: no header 403,
+  `Referer` alone 403, `Origin` alone 200 with a matching
+  `Access-Control-Allow-Origin`). The app loads it with `crossorigin`; the
+  replica strips that attribute and could never send the page's origin
+  anyway. A `blob:` image has the same fate: its address belongs to the page.
+- **Change.** When the replica cannot fetch an image the page has loaded, the
+  page sends the pixels it already decoded as a data URL, through the
+  existing selected-image-source hint: a loaded `blob:` image up to 2048 x
+  2048 pixels (WebP past 512 x 512) and a loaded `crossorigin` image up to
+  512 x 512 (PNG). Each image is encoded once per address. A canvas the page
+  may not read, an image still loading (read again on its `load` event) and a
+  larger one keep today's handling.
+- **Verified in Chrome for Testing** with a local server that serves an avatar
+  only to the page's origin, plus a `blob:` avatar: the old build draws
+  neither (0 x 0), the new build draws both at 180 x 180. Fastmail's
+  marketing site and login page mirror as before. Not verified on the
+  signed-in app.
+- **Tests.** Protocol: a small `crossorigin` image travels as PNG, encoded
+  once; a large one keeps its address; a large `blob:` image travels as WebP;
+  an ordinary image is never read back; an image still loading is read once
+  loaded; a tainted canvas keeps the address. The test fails on the old code.
+- **Docs.** `docs/replica-fidelity.md` (browser-boundary gaps),
+  `docs/translation-companion.md`.
+
+Build identity `0.5.1 beta v.20260924.6` (D87–D89); `dist/chrome-unpacked`
+re-synced. Gate: `npm run check` green, **1,541 tests pass** (+4 new, and the
+skipped Chrome-only test removed).

@@ -120,8 +120,6 @@ export const UI_STRINGS = {
     'Image-derived language evidence was cleared. OCR is checking again with the updated settings.',
   statusLiveSourceLanguagesSaved:
     'Live source only is active. Language choices are saved for translated mode.',
-  statusPairNeedsPack:
-    'This language pair needs its on-device pack. Choose Translate once to prepare it.',
   statusChooseFromInconclusive:
     'Choose a From language because automatic detection was inconclusive.',
   statusLanguagesMatchUnchanged:

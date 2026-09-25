@@ -115,10 +115,15 @@ A bounded maintenance signature detects ordinary stylesheet `insertRule`,
 `deleteRule`, declaration, disabled-state, media, and order changes that do not
 emit DOM mutations. A detected change requests a fresh staged checkpoint while
 the last good replica remains visible. The signature reads at most 1 MiB of rule
-text (25,000 rules) per half-second tick on the page's main thread, so a
-document whose stylesheets are larger (freee and YouTube link about 3 MB) is
-not polled: its CSSOM-only changes reach the replica with the next checkpoint
-rather than on their own. Simul does not patch website prototypes.
+text (25,000 rules) per half-second tick on the page's main thread. A sheet of
+more than 4,000 rules or 256 KiB of text is watched by its shape instead: its
+rule count and its first and last rules, which is what a script inserting or
+deleting rules changes (D88). Before D88 one such sheet took the whole budget,
+so a page carrying one (Wise's 2.4 M character design system, freee and
+YouTube at about 3 MB) had no polling at all, and rules its scripts added later
+never reached the replica: Wise's signed-in side navigation lost its fixed
+position. An in-place edit inside a large sheet that keeps its count and ends
+still waits for the next checkpoint. Simul does not patch website prototypes.
 
 ### Inert HTML semantics
 
@@ -148,8 +153,10 @@ still blocks its scripts, and an element the page has not defined stays
 undefined in the replica.
 
 Chrome draws its own controls on a video in a frame where scripts are
-disabled, so a mirrored video can show a native control bar that the page
-hides behind its own player; it cannot play.
+disabled, and the replica cannot play video, so the frame's shell style and a
+Simul-owned style in each replica shadow root hide Chrome's play bar and
+overlay play button (D87; Reddit's videos sit inside shadow roots, where a
+document rule does not reach). The poster shows as on the page.
 
 Native dropdown popups are browser/OS presentation rather than observable DOM,
 so Simul does not attempt to copy their ephemeral geometry. Instead, each
@@ -175,9 +182,12 @@ customizable selects, `:open` state and toggle-driven refresh are mirrored
 progressively; rich website picker descendants remain reduced to typed public
 labels at the privacy boundary.
 
-A painted ARIA listbox, menu or option keeps its text and it is translated
-(D75; before D75 the base mirror withheld it, and a menu that was not a
-validated dropdown, such as an Ant Design sidebar, showed empty items). A
+A painted ARIA listbox, menu or option is page content: it keeps its text,
+which is translated (D75), and since D88 its styles, inline position, images
+and adopted sheets, like any other element. Before D88 it was moved into an
+isolated Simul-owned facsimile that cut off the page's styles and stripped
+its images and `style` attributes, so Wise's currency list lost its flags and
+layout and a menu positioned by its inline style drew in the wrong place. A
 collapsed one is withheld until painted like any hidden region, and a
 validated dropdown's items travel through the semantic channel. The text of
 checkbox, radio, switch and non-editable combobox roles is their label or
@@ -187,9 +197,11 @@ displayed value of a non-editable spinbutton or slider and the result an
 **Ordinary visible form values**. A shared typed semantic
 proof channel enables a local preview in the isolated replica only when a
 public activation trigger maps through one unique same-document
-`aria-controls` relation to a matching menu/listbox, or to a region containing
-exactly one matching public menu. An opened ARIA preview is forced opaque and
-drawn on a plain canvas background.
+`aria-controls` relation to a matching menu, or to a region containing
+exactly one matching menu. The preview opens the page's own panel in place,
+with the page's styles and position, as a structural menu does (D88; it was
+an opaque facsimile popup). The receiver accepts no listbox as a disclosure
+panel, since a listbox's selection is control state.
 
 A container holding only a trigger and a collapsed panel is also a menu even
 without ARIA roles when it sits inside navigation or a page header, or is
@@ -293,11 +305,10 @@ reads at Full visible whatever the read scope, including dates, card numbers
 and one-time codes. A typed password never travels: only its dots show, and
 the replica shows none. Three attributes stay stripped because the replica's
 own dropdown previews set them: `aria-expanded`, `aria-controls` and
-`aria-haspopup`. ARIA menus and listboxes are drawn with the page's own styles
-rather than an isolated facsimile, so the replica does not open its own
-preview of an ARIA-controlled dropdown while the switch is on (structural
-menus still open). The mirror still cannot act on the page: every
-invariant in the previous section other than the privacy blocks holds.
+`aria-haspopup`, so the replica does not open its own preview of an
+ARIA-controlled dropdown while the switch is on (structural menus still
+open). The mirror still cannot act on the page: every invariant in the
+previous section other than the privacy blocks holds.
 
 Both sides of one mirror use the same setting: the panel applies it before it
 opens a session and sends it in the start message, and the page applies it
@@ -332,12 +343,16 @@ succeeded. Conversely, these counters are not a no-network test harness.
 
 Some gaps cannot be fixed by admitting more sanitizer syntax:
 
-- **Opaque source blobs.** A source `blob:` URL belongs to the source page's
-  environment. The extension cannot safely reuse it, and it does not always
-  have access to the underlying bytes needed to create a Simul-owned blob.
-  Such resources are omitted and counted as browser-inaccessible unless a
-  separately authorized local pixel/byte path exists. Temporary local blobs
-  are not yet a general fallback.
+- **Opaque source blobs and origin-locked images.** A source `blob:` URL
+  belongs to the source page's environment, and an image the page loads with
+  `crossorigin` may be served only to the page's own origin (Fastmail's
+  account avatar answers 403 without `Origin: https://app.fastmail.com`).
+  Neither loads in the replica. Since D89 the page sends the pixels it has
+  already decoded as a data URL: a loaded `blob:` image up to 2048 x 2048
+  pixels (WebP past 512 x 512) and a loaded `crossorigin` image up to 512 x
+  512 (PNG), each encoded once per address. A canvas the page may not read,
+  an image still loading and a larger one keep today's handling; a `blob:`
+  CSS background is still omitted and counted as browser-inaccessible.
 - **Source document mode.** The source's standards-versus-quirks state is
   transported as a validated enum. A standards page gets the doctype shell
   through `srcdoc`. An `srcdoc` document is always in no-quirks mode (HTML
@@ -355,7 +370,9 @@ Some gaps cannot be fixed by admitting more sanitizer syntax:
   loses that shorthand in the replica; only a `<style>` element has its own
   text to fall back on (D83). On Reddit this leaves the buttons inside its
   shadow roots ("Join", the sort and share buttons) in the browser's button
-  font.
+  font. Repairing an adopted rule from an identical rule in a `<style>`
+  element's text was planned for D87 but not done: it could not be measured,
+  because Reddit's archived pages no longer run their scripts here.
 - **Computed-style fallback.** Simul intentionally does not serialize every
   computed property. A broad snapshot would be large, slow, privacy-sensitive,
   and likely to freeze responsive cascade behavior. A future fallback must be

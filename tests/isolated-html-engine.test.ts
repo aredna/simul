@@ -17,7 +17,7 @@ import {
 import {
   ISOLATED_HTML_QUIRKS_SHELL,
   ISOLATED_HTML_SHELL,
-  ISOLATED_PUBLIC_MENU_SHADOW_CSS,
+  ISOLATED_MEDIA_CONTROLS_CSS,
   IsolatedHtmlReplicaEngine,
   canonicalSvgElementName,
   createMirrorElement,
@@ -82,14 +82,6 @@ describe('IsolatedHtmlReplicaEngine', () => {
     )?.textContent ?? '';
     expect(inert).not.toMatch(/margin|min-width|min-height/u);
     expect(inert).toContain('body{font-family:inherit;font-size:inherit}');
-  });
-
-  it('gives an opened public menu overlay an opaque canvas background', () => {
-    // Menu content has its backgrounds stripped so it cannot fetch images;
-    // once opened over the page it still needs a plain background.
-    expect(ISOLATED_PUBLIC_MENU_SHADOW_CSS).toContain(
-      ':host([data-simul-replica-disclosure-overlay="v1"]){background-color:Canvas!important;color:CanvasText!important;',
-    );
   });
 
   it('applies the panel size limits and sends them with the stream (D64)', async () => {
@@ -1311,141 +1303,122 @@ describe('IsolatedHtmlReplicaEngine', () => {
       },
       'passive',
     );
+    // ARIA state and relationships never travel in the base graph; the
+    // replica's own preview gets them from the semantic channel.
     expect(checkpoint).toBeUndefined();
-    if (!checkpoint) return;
-    const stream = new FakeHtmlStream(checkpoint);
+  });
+
+  it('draws ARIA menus and listboxes with the page\'s own styles and images, and opens a menu in place (D88)', async () => {
+    // Wise's currency list is a headless-UI listbox positioned by the page,
+    // and account menus are menus positioned by their inline style. Both
+    // were moved into an isolated facsimile that dropped the page's styles,
+    // inline position and images.
+    const option = (id: number, role: string, text: string) => ({
+      kind: 'element' as const, id, namespace: 'html' as const, tagName: 'div',
+      attributes: [['role', role], ['class', 'np-option']] as const,
+      children: [{
+        kind: 'element' as const, id: id + 1, namespace: 'html' as const,
+        tagName: 'img',
+        attributes: [
+          ['src', `https://icons.example.test/${id}.svg`],
+          ['alt', ''],
+        ] as const,
+        children: [],
+      }, {
+        kind: 'text' as const, id: id + 2, text, translatable: true as const,
+      }],
+    });
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: {
+          kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+          attributes: [], children: [{
+            kind: 'element', id: 2, namespace: 'html', tagName: 'head',
+            attributes: [], children: [{
+              kind: 'element', id: 7, namespace: 'html', tagName: 'style',
+              attributes: [], children: [{
+                kind: 'text', id: 8,
+                text: '.np-option{display:flex;gap:8px}',
+                translatable: false,
+              }],
+            }],
+          }, {
+            kind: 'element', id: 3, namespace: 'html', tagName: 'body',
+            attributes: [], children: [{
+              kind: 'element', id: 10, namespace: 'html', tagName: 'button',
+              attributes: [['class', 'np-button']], children: [{
+                kind: 'text', id: 11, text: 'Account', translatable: true,
+              }],
+            }, {
+              kind: 'element', id: 12, namespace: 'html', tagName: 'div',
+              attributes: [
+                ['role', 'menu'],
+                ['class', 'np-menu'],
+                ['style', 'position:absolute;left:10px;top:50px'],
+              ],
+              children: [option(13, 'menuitem', 'Settings')],
+            }, {
+              kind: 'element', id: 20, namespace: 'html', tagName: 'div',
+              attributes: [
+                ['role', 'listbox'],
+                ['class', 'np-popover'],
+                ['style', 'position:absolute;left:200px;top:50px'],
+              ],
+              children: [option(21, 'option', 'Japanese yen')],
+            }],
+          }],
+        },
+        adoptedStyleSheets: [], captureMs: 1,
+        viewportWidth: 800, viewportHeight: 600,
+        documentWidth: 800, documentHeight: 1000,
+      },
+      'passive',
+    );
+    expect(checkpoint).toBeDefined();
+    const stream = new FakeHtmlStream(checkpoint!);
+    const semantic = new FakeSemanticStream();
     const host = new FakePresentationHost();
-    const engine = makeEngine(stream, host);
+    const engine = makeEngine(stream, host, undefined, semantic);
     await engine.run(request);
+    await Promise.resolve();
 
     const replica = host.iframe!.contentDocument!;
-    const trigger = replica.querySelector<HTMLButtonElement>(
-      '[aria-controls="public-destinations"]',
-    )!;
-    const menuHost = [...replica.body.children].find((element) =>
-      element.shadowRoot?.querySelector('[role="listbox"]'),
-    ) as HTMLElement;
-    const regionalTrigger = replica.querySelector<HTMLButtonElement>(
-      '[aria-controls="regional-destinations"]',
-    )!;
-    const region = replica.querySelector<HTMLElement>(
-      '#regional-destinations',
-    )!;
-    const regionalMenuHost = [...region.children].find((element) =>
-      element.shadowRoot?.querySelector('[role="menu"]'),
-    ) as HTMLElement;
-    const shadow = menuHost.shadowRoot!;
-    const menu = shadow.querySelector('[role="listbox"]')!;
-    const option = shadow.querySelector('[role="option"]')!;
-    expect(replica.head.textContent).toContain(canaryUrl);
-    expect(replica.body.querySelector('[role="option"]')).toBeNull();
-    expect(menuHost.localName).toMatch(/^simul-owned-menu-/u);
-    expect(menuHost.hasAttribute('role')).toBe(false);
-    expect(menuHost.hasAttribute('class')).toBe(false);
-    expect(menu.getAttribute('role')).toBe('listbox');
-    expect(trigger.getAttribute('role')).toBe('button');
+    const menu = replica.querySelector<HTMLElement>('[role="menu"]')!;
+    const listbox = replica.querySelector<HTMLElement>('[role="listbox"]')!;
+    const trigger = replica.querySelector<HTMLElement>('button')!;
+    for (const [panel, style, icon, text] of [
+      [menu, 'position:absolute;left:10px;top:50px', 13, 'Settings'],
+      [listbox, 'position:absolute;left:200px;top:50px', 21, 'Japanese yen'],
+    ] as const) {
+      expect(panel.parentElement).toBe(replica.body);
+      expect(panel.getAttribute('style')).toBe(style);
+      expect(panel.firstElementChild?.getAttribute('class')).toBe('np-option');
+      expect(panel.querySelector('img')?.getAttribute('src'))
+        .toBe(`https://icons.example.test/${icon}.svg`);
+      expect(panel.textContent).toBe(text);
+    }
+    expect([...replica.body.querySelectorAll('*')].some((element) =>
+      element.localName.startsWith('simul-owned-menu-'))).toBe(false);
+
+    // The page's own closed menu is the preview's panel, opened in place.
+    const snapshot = engine.snapshot()!;
+    expect(semantic.emit(createSemanticSourceBatch(
+      snapshot.document,
+      'read-v1-111111',
+      1,
+      [],
+      [{
+        kind: 'disclosure-state', bridge: 'isolated-html',
+        relationId: 'semantic-relation-v1:10:12', revision: 1,
+        gate: 'disclosureContent', triggerNodeId: 10, panelNodeId: 12,
+        popupRole: 'menu', expanded: false, classifierVersion: 1,
+      }],
+    ))).toBe(true);
     expect(trigger.getAttribute('data-simul-replica-disclosure-trigger'))
       .toBe('v1');
-    expect(trigger.getAttribute('aria-expanded')).toBe('false');
-    expect(menuHost.hasAttribute('hidden')).toBe(true);
-    expect([...shadow.querySelectorAll('style')]
-      .map(({ textContent }) => textContent ?? '')
-      .join('')).not.toContain(canaryUrl);
-    expect(shadow.querySelector('[data-simul-owned-menu-style="v1"]')?.textContent)
-      .toContain('background:none!important');
-    expect(menu.textContent).toBe('Public destination');
-    expect(option.textContent).toBe('Public destination');
-
-    trigger.dispatchEvent(new replica.defaultView!.Event('click', {
-      bubbles: true,
-      cancelable: true,
-      composed: true,
-    }));
-    expect(trigger.getAttribute('aria-expanded')).toBe('false');
-    expect(trigger.getAttribute('data-simul-replica-disclosure-open'))
+    expect(menu.getAttribute('data-simul-replica-disclosure-panel'))
       .toBe('v1');
-    expect(menuHost.parentElement).toBe(replica.body);
-    expect(menuHost.style.position).toBe('fixed');
-    expect(menuHost.style.getPropertyValue(
-      '--simul-replica-disclosure-visibility',
-    )).toBe('visible');
-    expect(menuHost.style.getPropertyValue(
-      '--simul-replica-disclosure-max-height',
-    )).toMatch(/px$/u);
-    expect(menuHost.getAttribute('data-simul-replica-disclosure-overlay'))
-      .toBe('v1');
-    for (const type of ['change', 'submit']) {
-      const sourceEvent = new replica.defaultView!.Event(type, {
-        bubbles: true,
-        cancelable: true,
-        composed: true,
-      });
-      expect(menuHost.dispatchEvent(sourceEvent)).toBe(false);
-      expect(sourceEvent.defaultPrevented).toBe(true);
-    }
-    replica.dispatchEvent(new replica.defaultView!.Event('scroll'));
-    expect(trigger.getAttribute('aria-expanded')).toBe('false');
-    expect(menuHost.hasAttribute('hidden')).toBe(true);
-    expect(regionalTrigger.getAttribute(
-      'data-simul-replica-disclosure-trigger',
-    )).toBe('v1');
-    expect(regionalMenuHost.hasAttribute('hidden')).toBe(true);
-    regionalTrigger.dispatchEvent(new replica.defaultView!.Event('click', {
-      bubbles: true,
-      cancelable: true,
-      composed: true,
-    }));
-    expect(regionalTrigger.hasAttribute('aria-expanded')).toBe(false);
-    expect(regionalTrigger.getAttribute('data-simul-replica-disclosure-open'))
-      .toBe('v1');
-    expect(regionalMenuHost.parentElement).toBe(replica.body);
-    expect(regionalMenuHost.shadowRoot?.querySelector('[role="menu"]')
-      ?.textContent).toBe('Regional destination');
-    expect(menuHost.hasAttribute('hidden')).toBe(true);
-    replica.dispatchEvent(new replica.defaultView!.Event('scroll'));
-
-    const ambiguousTrigger = replica.querySelector<HTMLButtonElement>(
-      '[aria-controls="duplicate-target"]',
-    )!;
-    const duplicateMenus = [...replica.body.children].filter((element) =>
-      element.shadowRoot?.querySelector('#duplicate-target'),
-    );
-    expect(duplicateMenus).toHaveLength(2);
-    expect(duplicateMenus.every((element) => !element.hasAttribute('hidden')))
-      .toBe(true);
-    expect(ambiguousTrigger.hasAttribute(
-      'data-simul-replica-disclosure-trigger',
-    )).toBe(false);
-    const ambiguousClick = new replica.defaultView!.Event('click', {
-      bubbles: true,
-      cancelable: true,
-      composed: true,
-    });
-    expect(ambiguousTrigger.dispatchEvent(ambiguousClick)).toBe(false);
-    expect(ambiguousClick.defaultPrevented).toBe(true);
-
-    const snapshot = engine.snapshot()!;
-    const labelRecord = snapshot.records.find(
-      ({ source }) => source === 'Public destination',
-    )!;
-    expect(labelRecord).toMatchObject({ nodeId: 6, nodeType: 3 });
-    if (labelRecord.nodeType !== 3) {
-      throw new Error('Public menu label was not registered as a text node.');
-    }
-    engine.beginProjection({ translationEpoch: 1, pairKey: 'en\0ja' });
-    expect(engine.project({
-      document: snapshot.document,
-      replayLease: snapshot.replayLease,
-      nodeId: labelRecord.nodeId,
-      nodeType: labelRecord.nodeType,
-      sourceRevision: labelRecord.revision,
-      source: labelRecord.source,
-      translationEpoch: 1,
-      pairKey: 'en\0ja',
-      translated: '公開の行き先',
-    })).toBe(true);
-    expect(option.textContent).toBe('公開の行き先');
-
     trigger.dispatchEvent(new replica.defaultView!.Event('click', {
       bubbles: true,
       cancelable: true,
@@ -1453,39 +1426,11 @@ describe('IsolatedHtmlReplicaEngine', () => {
     }));
     expect(trigger.getAttribute('data-simul-replica-disclosure-open'))
       .toBe('v1');
-    stream.observer?.onPatch(createHtmlMirrorPatch(
-      createReplicaIdentity({ ...identityParts, sequence: 1 }),
-      1,
-      1,
-      [{
-        kind: 'attributes', nodeId: 9, namespace: 'html', tagName: 'button',
-        attributes: [
-          ['role', 'button'],
-          ['aria-controls', 'missing-destinations'],
-          ['aria-haspopup', 'listbox'],
-          ['aria-expanded', 'true'],
-        ],
-      }],
-      undefined,
-      'passive',
-    )!);
-    expect(stream.acknowledged).toContain(1);
-    expect(trigger.getAttribute('aria-expanded')).toBe('true');
-    expect(trigger.hasAttribute('data-simul-replica-disclosure-trigger'))
+    expect(menu.parentElement).toBe(replica.body);
+    expect(menu.hasAttribute('data-simul-replica-disclosure-overlay'))
       .toBe(false);
-    expect(trigger.hasAttribute('data-simul-replica-disclosure-open'))
-      .toBe(false);
-    expect(menuHost.hasAttribute('hidden')).toBe(false);
-    expect(menuHost.hasAttribute('popover')).toBe(false);
-    expect(menuHost.style.position).toBe('');
-    expect(menuHost.style.pointerEvents).toBe('none');
-    const invalidatedClick = new replica.defaultView!.Event('click', {
-      bubbles: true,
-      cancelable: true,
-      composed: true,
-    });
-    expect(trigger.dispatchEvent(invalidatedClick)).toBe(false);
-    expect(invalidatedClick.defaultPrevented).toBe(true);
+    expect(menu.style.getPropertyValue('visibility')).toBe('visible');
+    expect(menu.style.getPropertyValue('left')).toBe('10px');
   });
 
   it('keeps sized and multiple lists bounded without rewriting shadow clipping ancestors', async () => {
@@ -2281,6 +2226,57 @@ describe('IsolatedHtmlReplicaEngine', () => {
       removedNodeCount: 0,
       replacementNodeCount: 0,
     });
+  });
+
+  it('hides Chrome video controls in the document and in each shadow root through patches (D87)', async () => {
+    // A frame without scripts draws Chrome's own play bar on every video, and
+    // the replica cannot play video. Document rules do not reach into shadow
+    // trees, so each replica shadow root carries its own Simul-owned rule.
+    const shell = parseHTML(ISOLATED_HTML_SHELL).document;
+    expect(shell.querySelector('style[data-simul-owned-shell="inert"]')
+      ?.textContent).toContain(ISOLATED_MEDIA_CONTROLS_CSS);
+    expect(ISOLATED_MEDIA_CONTROLS_CSS).toContain(
+      'video::-webkit-media-controls,',
+    );
+
+    const stream = new FakeHtmlStream(makeReconciliationCheckpoint());
+    const host = new FakePresentationHost();
+    const engine = makeEngine(stream, host);
+    await engine.run(request);
+    const shadow = host.iframe!.contentDocument!.querySelector('x-card')!
+      .shadowRoot!;
+    const owned = () => shadow.querySelectorAll(
+      'style[data-simul-owned-shadow-shell="v1"]',
+    );
+    expect(owned()).toHaveLength(1);
+    const style = owned()[0]!;
+    expect(style.textContent).toBe(ISOLATED_MEDIA_CONTROLS_CSS);
+
+    // A patch replacing the shadow root's children keeps the owned rule, as
+    // it keeps the root's adopted sheets.
+    const patch = createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [{
+        kind: 'children',
+        nodeId: 8,
+        children: [{
+          kind: 'element', id: 20, namespace: 'html', tagName: 'p',
+          attributes: [], children: [{
+            kind: 'text', id: 21, text: 'new shadow content', translatable: true,
+          }],
+        }],
+      }],
+    );
+    expect(patch).toBeDefined();
+    stream.observer?.onPatch(patch!);
+    expect(shadow.firstChild).toBe(shadow.querySelector('p'));
+    expect(shadow.querySelector('slot')).toBeNull();
+    expect(owned()).toHaveLength(1);
+    expect(owned()[0]).toBe(style);
+    expect(shadow.querySelector('[data-simul-adopted-style="shadow"]'))
+      .not.toBeNull();
   });
 
   it('rejects cross-parent retain references before changing the last-good DOM', async () => {

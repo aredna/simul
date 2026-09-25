@@ -3860,6 +3860,120 @@ describe('ImageTranslationController', () => {
     controller.dispose();
   });
 
+  it('keeps a confirmed no-text outcome by the image itself, never an unconfirmed one (D87)', async () => {
+    // A carousel slide without text was captured and read again every time
+    // it came back. Two reads of the same pixels confirm it has none; a slide
+    // caught mid-transition reads different pixels each time and is not kept.
+    const { document } = parseHTML('<html><body><img></body></html>');
+    const image = document.querySelector('img') as unknown as HTMLImageElement;
+    const show = (source: string) => Object.defineProperties(image, {
+      currentSrc: { configurable: true, value: source },
+      complete: { configurable: true, value: true },
+      naturalWidth: { configurable: true, value: 600 },
+      naturalHeight: { configurable: true, value: 300 },
+    });
+    show('https://assets.example.test/slide-empty.png');
+    const firstDescriptor = { ...descriptor, captureRevision: 1 };
+    let emitChange: ((change: SourceImageChange) => void) | undefined;
+    let moving = false;
+    let reads = 0;
+    const acquire = vi.fn(async (current: SourceImageDescriptor) => {
+      reads += 1;
+      return {
+        status: 'ready' as const,
+        pixels: {
+          ...autoProbePixels(
+            current,
+            moving ? reads.toString(16).padStart(64, '0') : 'e1'.repeat(32),
+          ),
+          nearestElementLanguage: 'en' as const,
+        },
+      };
+    });
+    const recognize = vi.fn(async () => autoProbeRecognition(''));
+    const diagnostics: unknown[] = [];
+    const controller = new ImageTranslationController({
+      openSource: async (_request, onChange) => {
+        emitChange = onChange;
+        queueMicrotask(() => onChange({
+          kind: 'upsert',
+          descriptor: firstDescriptor,
+        }));
+        return { measure: vi.fn(), dispose: vi.fn() };
+      },
+      createPixelCoordinator: () => ({ acquire }) as unknown as
+        PixelAcquisitionCoordinator,
+      createRecognitionCoordinator: () => ({
+        recognize,
+        clear: vi.fn(),
+        advanceResetEpoch: vi.fn(() => true),
+      }) as unknown as ImageRecognitionCoordinator,
+      resolveAnchor: () => ({
+        document: sourceDocument,
+        replayLease: 1,
+        image,
+        iframe: { contentDocument: document } as HTMLIFrameElement,
+      }),
+      translationProvider: {
+        availability: async () => 'available',
+        createSession: vi.fn(),
+      },
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      projector: testProjectorEnvironment(),
+    });
+    controller.configure({
+      enabled: true,
+      scanPolicy: 'visible-only',
+      skipSmallImages: false,
+      providerOrder: ['tesseract'],
+      methodOrder: ['tesseract'],
+      disabledMethodIds: [],
+      sourceLanguage: 'en',
+      targetLanguage: 'ja',
+      translationIdle: true,
+      resetEpoch: 0,
+    });
+    controller.activateReplica(request, 3, 1);
+    await vi.waitFor(() => expect(diagnostics).toContain('no-text-found'));
+    await vi.waitFor(() => expect(controller.busy).toBe(false));
+    expect(acquire).toHaveBeenCalledTimes(2);
+    expect(recognize).toHaveBeenCalledTimes(2);
+
+    // The same picture returns: settled with no capture and no reading.
+    emitChange?.({
+      kind: 'upsert',
+      descriptor: { ...firstDescriptor, captureRevision: 2, observationRevision: 2 },
+    });
+    await vi.waitFor(() =>
+      expect(diagnostics).toContain('image-identity-reused'));
+    await vi.waitFor(() => expect(controller.busy).toBe(false));
+    expect(acquire).toHaveBeenCalledTimes(2);
+    expect(recognize).toHaveBeenCalledTimes(2);
+
+    // A picture whose pixels change between reads is never confirmed, so it
+    // is read afresh when it returns.
+    show('https://assets.example.test/slide-moving.png');
+    moving = true;
+    emitChange?.({
+      kind: 'upsert',
+      descriptor: { ...firstDescriptor, captureRevision: 3, observationRevision: 3 },
+    });
+    await vi.waitFor(() => expect(diagnostics).toContainEqual(
+      expect.objectContaining({ stage: 'job-progress', status: 'no-text-changed' }),
+    ));
+    await vi.waitFor(() => expect(controller.busy).toBe(false));
+    const readsBeforeReturn = acquire.mock.calls.length;
+    emitChange?.({
+      kind: 'upsert',
+      descriptor: { ...firstDescriptor, captureRevision: 4, observationRevision: 4 },
+    });
+    await vi.waitFor(() =>
+      expect(acquire.mock.calls.length).toBeGreaterThan(readsBeforeReturn));
+    expect(diagnostics.filter((entry) => entry === 'image-identity-reused'))
+      .toHaveLength(1);
+    controller.dispose();
+  });
+
   it('reprocesses only the image whose capture revision actually changed', async () => {
     const { document } = parseHTML('<html><body><img></body></html>');
     const image = document.querySelector('img') as unknown as HTMLImageElement;

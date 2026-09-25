@@ -530,8 +530,12 @@ interface RetainedFinalImageAnalysis {
 }
 
 /** A whole-image OCR result kept by the image itself (D86). */
+/**
+ * A whole-image outcome kept by the image itself: its translated overlay, or
+ * `undefined` when two reads of the same pixels confirmed it has no text.
+ */
 interface ImageIdentityAnalysis {
-  readonly projection: ImageOverlayProjection;
+  readonly projection: ImageOverlayProjection | undefined;
   readonly expiresAt: number;
   readonly weight: number;
 }
@@ -2483,6 +2487,7 @@ export class ImageTranslationController {
         if (await commitHeldSemantic()) return;
         scheduler.settle(job);
         this.#clearProjection(job.descriptor);
+        this.#rememberImageIdentityEmpty(anchor, pixels, finalConfigurationKey);
         this.environment.onDiagnostic?.('no-text-found');
       }
       return;
@@ -4085,14 +4090,47 @@ export class ImageTranslationController {
       projection.regions.length === 0 ||
       !isWholeImageCrop(projection)
     ) return;
-    const key = imageIdentityKey(
-      this.environment.resolveAnchor(projection.document, projection.nodeId),
-      projection.renderedWidthCss,
-      projection.renderedHeightCss,
-      finalConfigurationKey,
+    this.#rememberImageIdentityOutcome(
+      imageIdentityKey(
+        this.environment.resolveAnchor(projection.document, projection.nodeId),
+        projection.renderedWidthCss,
+        projection.renderedHeightCss,
+        finalConfigurationKey,
+      ),
+      projection,
     );
+  }
+
+  /**
+   * Keeps a confirmed "no text" outcome of a whole image by its identity, so
+   * a carousel slide or an image scrolled back into view that has none is
+   * not captured and read again. Only a confirmed outcome is kept: two reads
+   * of the same pixels found nothing, so a slide caught mid-transition, which
+   * changes between reads, never hides real text.
+   */
+  #rememberImageIdentityEmpty(
+    anchor: ReplicaImageAnchor,
+    pixels: AcquiredImagePixels,
+    finalConfigurationKey: string,
+  ): void {
+    if (!isWholeImageCrop(pixels)) return;
+    this.#rememberImageIdentityOutcome(
+      imageIdentityKey(
+        anchor,
+        pixels.renderedWidthCss,
+        pixels.renderedHeightCss,
+        finalConfigurationKey,
+      ),
+      undefined,
+    );
+  }
+
+  #rememberImageIdentityOutcome(
+    key: string | undefined,
+    projection: ImageOverlayProjection | undefined,
+  ): void {
     if (!key) return;
-    const weight = finalAnalysisWeight(key, projection.regions);
+    const weight = finalAnalysisWeight(key, projection?.regions ?? []);
     if (weight > MAX_ORIGIN_OCR_EVIDENCE_WEIGHT) return;
     const previous = this.#imageIdentityAnalyses.get(key);
     if (previous) {
@@ -4100,7 +4138,7 @@ export class ImageTranslationController {
       this.#imageIdentityAnalysisWeight -= previous.weight;
     }
     this.#imageIdentityAnalyses.set(key, Object.freeze({
-      projection: Object.freeze({ ...projection }),
+      projection: projection ? Object.freeze({ ...projection }) : undefined,
       expiresAt: this.#now() + IMAGE_RESULT_CACHE_TTL_MS,
       weight,
     }));
@@ -4146,6 +4184,13 @@ export class ImageTranslationController {
     signal.throwIfAborted();
     if (!this.#isJobCurrent(job, processingVersion, pairEpoch, pairKey)) {
       throw new DOMException('Image identity analysis became stale.', 'AbortError');
+    }
+    if (!retained.projection) {
+      this.#clearProjection(job.descriptor);
+      scheduler.settle(job);
+      this.environment.onDiagnostic?.('image-identity-reused');
+      this.environment.onDiagnostic?.('no-text-found');
+      return true;
     }
     const projection: ImageOverlayProjection = Object.freeze({
       ...retained.projection,
@@ -6199,7 +6244,13 @@ const IMAGE_IDENTITY_SCHEMA_VERSION = 'image-identity-v1';
 const MAX_IMAGE_IDENTITY_SOURCE_LENGTH = 4_096;
 
 /** The capture covered the whole rendered image, not a scrolled-in slice. */
-function isWholeImageCrop(projection: ImageOverlayProjection): boolean {
+function isWholeImageCrop(
+  projection: Pick<
+    ImageOverlayProjection,
+    | 'cropOffsetXCss' | 'cropOffsetYCss' | 'cropWidthCss' | 'cropHeightCss'
+    | 'renderedWidthCss' | 'renderedHeightCss'
+  >,
+): boolean {
   return projection.cropOffsetXCss <= 0.5 &&
     projection.cropOffsetYCss <= 0.5 &&
     Math.abs(projection.cropWidthCss - projection.renderedWidthCss) <= 1 &&

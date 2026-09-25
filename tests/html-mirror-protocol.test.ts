@@ -561,6 +561,91 @@ describe('isolated HTML sanitizer and protocol', () => {
       .toBe('https://example.test/photo-2x.png');
   });
 
+  it('sends the pixels of a loaded image the replica cannot fetch itself (D89)', () => {
+    // Fastmail's account avatar is loaded with crossorigin and answers 403
+    // unless the request carries the page's own Origin; a blob: image
+    // belongs to the page's origin. Both load in the page and never in the
+    // replica, so the page sends what it already decoded.
+    const { document } = parseHTML(`<!doctype html><html><body>
+      <img id="cors" crossorigin="anonymous" src="https://cdn.example.test/avatar/a">
+      <img id="big" crossorigin="anonymous" src="https://cdn.example.test/hero">
+      <img id="blob">
+      <img id="plain" src="https://cdn.example.test/plain">
+      <img id="loading" crossorigin="anonymous" src="https://cdn.example.test/late">
+    </body></html>`);
+    const base = 'https://mail.example.test/';
+    const png = 'data:image/png;base64,iVBORw0KGgo=';
+    const webp = 'data:image/webp;base64,UklGRg==';
+    const encode = vi.fn((type: string) => type === 'image/webp' ? webp : png);
+    let tainted = false;
+    const createElement = document.createElement.bind(document);
+    vi.spyOn(document, 'createElement').mockImplementation(((name: string) => {
+      if (name !== 'canvas') return createElement(name);
+      return {
+        width: 0,
+        height: 0,
+        getContext: () => ({ drawImage: vi.fn() }),
+        toDataURL: (type: string) => {
+          if (tainted) throw new DOMException('Tainted canvas.', 'SecurityError');
+          return encode(type);
+        },
+      };
+    }) as typeof document.createElement);
+    const load = (
+      id: string,
+      currentSrc: string,
+      width: number,
+      height: number,
+      complete = true,
+    ) => {
+      const image = document.getElementById(id)!;
+      Object.defineProperties(image, {
+        currentSrc: { configurable: true, value: currentSrc },
+        complete: { configurable: true, value: complete },
+        naturalWidth: { configurable: true, value: width },
+        naturalHeight: { configurable: true, value: height },
+      });
+      return image;
+    };
+
+    const cors = load('cors', 'https://cdn.example.test/avatar/a', 180, 180);
+    expect(sanitizeSourceElementHints(cors, base).selectedImageSource).toBe(png);
+    expect(sanitizeSourceElementHints(cors, base).selectedImageSource).toBe(png);
+    expect(encode).toHaveBeenCalledOnce();
+
+    // A large CORS image keeps its address; the replica may still load it.
+    const big = load('big', 'https://cdn.example.test/hero', 1600, 900);
+    expect(sanitizeSourceElementHints(big, base).selectedImageSource)
+      .toBeUndefined();
+    expect(encode).toHaveBeenCalledOnce();
+
+    // A blob: image is copied up to a larger size, as WebP past the icon size.
+    const blob = load('blob', 'blob:https://mail.example.test/1b2c', 1600, 900);
+    expect(sanitizeSourceElementHints(blob, base).selectedImageSource).toBe(webp);
+    expect(encode).toHaveBeenLastCalledWith('image/webp');
+
+    // An ordinary image is never read back.
+    const plain = load('plain', 'https://cdn.example.test/plain', 64, 64);
+    expect(sanitizeSourceElementHints(plain, base).selectedImageSource)
+      .toBeUndefined();
+    expect(encode).toHaveBeenCalledTimes(2);
+
+    // An image still loading is read once it has loaded.
+    const loading = load('loading', 'https://cdn.example.test/late', 0, 0, false);
+    expect(sanitizeSourceElementHints(loading, base).selectedImageSource)
+      .toBeUndefined();
+    load('loading', 'https://cdn.example.test/late', 96, 96);
+    expect(sanitizeSourceElementHints(loading, base).selectedImageSource)
+      .toBe(png);
+
+    // A canvas the page may not read keeps the address.
+    tainted = true;
+    load('cors', 'https://cdn.example.test/avatar/b', 180, 180);
+    expect(sanitizeSourceElementHints(cors, base).selectedImageSource)
+      .toBe('https://cdn.example.test/avatar/b');
+    vi.restoreAllMocks();
+  });
+
   it('reads both painted panels of a tablist whose tabs both claim selection (D75)', () => {
     const { document, window } = parseHTML(`<!doctype html><html><body>
       <div role="tablist">
@@ -915,37 +1000,40 @@ describe('isolated HTML sanitizer and protocol', () => {
       .toBeUndefined();
   });
 
-  it('keeps public menu resources out of the base graph but not its labels (D75)', () => {
+  it('carries menu and listbox images and inline styles like any page content (D88)', () => {
+    // D75 kept a painted menu's labels but withheld its images, inline
+    // styles and posters; Wise's currency list lost its flags and its
+    // position. A menu is page content like any other (D88).
     const graph = sanitizeMarkup(`<!doctype html><html><body>
       <section role="listbox">
         <div role="option">
-          <img src="https://leak.invalid/menu.png"
-            style="background-image:url('https://leak.invalid/background.png')">
-          <video poster="https://leak.invalid/menu-poster.png"></video>
+          <img src="https://icons.example.test/menu.png"
+            style="background-image:url('https://icons.example.test/background.png')">
+          <video poster="https://icons.example.test/menu-poster.png"></video>
           <span>Public menu choice</span>
         </div>
       </section>
     </body></html>`, 'passive');
     const serialized = JSON.stringify(graph);
 
-    // A painted menu shows its labels, so they travel and are translatable.
     expect(serialized).toContain('Public menu choice');
     expect(graphTextNodes(graph.root).find(
       (node) => node.text === 'Public menu choice',
     )?.translatable).toBe(true);
-    expect(serialized).not.toContain('leak.invalid');
-    expect(graphElementsByTag(graph, 'video')).toEqual([]);
+    expect(serialized).toContain('https://icons.example.test/menu.png');
+    expect(serialized).toContain('icons.example.test/background.png');
+    expect(graphElementsByTag(graph, 'video')).toHaveLength(1);
     expect(readHtmlMirrorNode(graph.root, new Set(), 0, undefined, false,
       false, false, false, false, 'passive')).toBeDefined();
     expect(readHtmlMirrorNode({
       kind: 'element', id: 920, namespace: 'html', tagName: 'div',
       attributes: [['role', 'menu']], children: [{
         kind: 'element', id: 921, namespace: 'html', tagName: 'img',
-        attributes: [['src', 'https://leak.invalid/forged-menu.png']],
+        attributes: [['src', 'https://icons.example.test/menu-icon.png']],
         children: [],
       }],
     }, new Set(), 0, undefined, false, false, false, false, false, 'passive'))
-      .toBeUndefined();
+      .toBeDefined();
   });
 
   it('does not inspect or transport large multiple-selection state in the base graph', () => {
