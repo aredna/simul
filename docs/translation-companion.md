@@ -83,9 +83,13 @@ for example `[A] English`, and it reads Auto-detect again until the next page
 resolves (D84).
 The To menu uses the same code order but renders every name as its native
 endonym, including separate Simplified and Traditional Chinese labels. Language
-changes reset the visible strings and immediately translate again when the pair
-is already available. Chrome still requires a user action before a model's
-first download.
+changes reset the visible strings and immediately translate again. Chrome
+requires a user action before a model's first download, and choosing the
+language is that action, so a pair whose pack is not installed starts
+downloading and translating at once (D85); if the choice is too old for
+Chrome to accept, the status asks for Translate page. When any part of the
+panel (the page, images, the panel's own labels) installs the pack for the
+current pair, a page translation waiting for it resumes.
 
 `browser.storage.local` holds only settings: From/To languages, Fit/1:1/custom
 zoom, zoom percent, adaptive/faithful text layout, scroll following, explicit
@@ -202,10 +206,17 @@ processed dimensions, and SHA-256 pixel hash—not by node, source document, or
 image URL. Exact concurrent requests join one recognition load, and completed
 results remain reusable across live source refreshes while the companion stays
 open. Both entry count and aggregate transcript/region weight are bounded; an
-oversized result is returned for the current job but is not retained. A
-repeated URL is reused only when its processed pixels and geometry inputs
-match, because a responsive, resized, cropped, or animated rendering can
-produce different overlay coordinates.
+oversized result is returned for the current job but is not retained.
+A translated result read while the whole image was on screen is also kept by
+the image itself (D86): the replica image's address, natural size, rendered
+size and object-fit/-position, with the pair and reading settings. A carousel
+slide that comes round again or an image scrolled back into view moves its
+visible crop, which used to force a new capture and recognition each time; it
+is now overlaid from that result without either. The results are memory-only,
+bounded, expire after 15 minutes and are purged with the other image results.
+Any other repeat of a URL is reused only when its processed pixels and
+geometry inputs match, because a responsive, resized, cropped, or animated
+rendering can produce different overlay coordinates.
 
 The transient crop is deleted after the job and expires after two minutes if
 cleanup is interrupted. An unchanged empty result must be observed twice

@@ -49,9 +49,20 @@ export class ChromeTranslatorProvider implements TranslationProvider {
   private readonly api: BrowserTranslatorApi | undefined;
   /** Language tags Chrome accepted in an availability probe, per language. */
   private readonly acceptedTags = new Map<SupportedLanguage, string>();
+  private readonly sessionListeners = new Set<(pair: TranslationPair) => void>();
 
   constructor(api: BrowserTranslatorApi | undefined = readTranslatorApi()) {
     this.api = api;
+  }
+
+  /**
+   * Called with each pair a session was created for: its language pack is
+   * installed now, whichever part of the panel (page, images, the panel's
+   * own labels) paid the click for the download (D85).
+   */
+  onSessionCreated(listener: (pair: TranslationPair) => void): () => void {
+    this.sessionListeners.add(listener);
+    return () => this.sessionListeners.delete(listener);
   }
 
   async availability(
@@ -109,6 +120,7 @@ export class ChromeTranslatorProvider implements TranslationProvider {
         options.signal.throwIfAborted();
       }
 
+      for (const listener of this.sessionListeners) listener(pair);
       return new ChromeTranslationSession(instance);
     } catch (error) {
       if (isAbortError(error) || options.signal?.aborted) throw error;

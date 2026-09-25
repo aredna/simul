@@ -231,6 +231,27 @@ describe('ChromeTranslatorProvider', () => {
     });
   });
 
+  it('announces each pair a session was created for, and no failed one (D85)', async () => {
+    const created: unknown[] = [];
+    const create = vi.fn()
+      .mockRejectedValueOnce(new DOMException('Requires a user gesture.', 'NotAllowedError'))
+      .mockResolvedValueOnce({ translate: vi.fn(), destroy: vi.fn() });
+    const provider = new ChromeTranslatorProvider(createApi({ create }));
+    const stop = provider.onSessionCreated((ready) => created.push(ready));
+
+    await expect(provider.createSession(pair)).rejects.toMatchObject({
+      code: 'activation-required',
+    });
+    expect(created).toEqual([]);
+    await provider.createSession(pair);
+    expect(created).toEqual([pair]);
+
+    stop();
+    create.mockResolvedValueOnce({ translate: vi.fn(), destroy: vi.fn() });
+    await provider.createSession(pair);
+    expect(created).toHaveLength(1);
+  });
+
   it('keeps other creation failures on the generic code', async () => {
     const provider = new ChromeTranslatorProvider(
       createApi({

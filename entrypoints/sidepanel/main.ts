@@ -674,6 +674,7 @@ const translationDriver = new TranslationDriver({
   onPairPrepared: () => uiLocalizer.retryAfterPagePairPrepared(),
   onTranslationSettled: () => logTranslationCache('page', translationMemory),
 });
+provider.onSessionCreated((pair) => translationDriver.handlePairReady(pair));
 
 const capturePipeline = new CapturePipeline({
   state,

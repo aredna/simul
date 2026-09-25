@@ -177,6 +177,7 @@ export type ImageTranslationDiagnosticStage =
   | 'accessibility-text-provisional'
   | 'accessibility-text-complete'
   | 'auto-language-probe-reopened'
+  | 'image-identity-reused'
   | 'projected';
 
 type ImageCaptureDeferralReason = Extract<
@@ -528,6 +529,13 @@ interface RetainedFinalImageAnalysis {
   readonly weight: number;
 }
 
+/** A whole-image OCR result kept by the image itself (D86). */
+interface ImageIdentityAnalysis {
+  readonly projection: ImageOverlayProjection;
+  readonly expiresAt: number;
+  readonly weight: number;
+}
+
 interface OriginFinalImageAnalysis {
   readonly methodId: ImageReadingMethodId;
   readonly evidenceKind: 'semantic' | 'ocr';
@@ -586,6 +594,16 @@ export class ImageTranslationController {
   >();
   readonly #originOcrEvidence = new Map<string, OriginOcrImageEvidence>();
   readonly #originFinalAnalyses = new Map<string, OriginFinalImageAnalysis>();
+  /**
+   * Final OCR results by the image itself: its address, natural, rendered
+   * size and fit, read while the whole image was on screen (D86). A carousel
+   * slide or an image scrolled back into view moves its visible crop, which
+   * advances its capture revision and voided every result keyed by node or
+   * pixels; the image was captured and read again each time it came back.
+   * Memory-only, bounded, and purged with the other reusable results.
+   */
+  readonly #imageIdentityAnalyses = new Map<string, ImageIdentityAnalysis>();
+  #imageIdentityAnalysisWeight = 0;
   readonly #rerankRequestedNodeIds = new Set<number>();
   readonly #semanticRefreshRetainedOcrNodeIds = new Set<number>();
   /** Judge verdicts by pixel hash, language and both texts (null: no call). */
@@ -1102,6 +1120,8 @@ export class ImageTranslationController {
     this.#languageDetections.clear();
     this.#purgeOriginOcrEvidence();
     this.#purgeOriginFinalAnalyses();
+    this.#imageIdentityAnalyses.clear();
+    this.#imageIdentityAnalysisWeight = 0;
     this.#clearRetainedEvidence();
     this.#clearRetainedFinalAnalyses();
     this.#retainedProjections.clear();
@@ -1771,6 +1791,10 @@ export class ImageTranslationController {
       signal,
     )) return;
 
+    const finalConfigurationKey = this.#finalAnalysisConfigurationKey(
+      steps,
+      eagerSemanticCandidate,
+    );
     if (this.#commitRetainedFinalAnalysis(
       job,
       scheduler,
@@ -1779,7 +1803,19 @@ export class ImageTranslationController {
       replayLease,
       pairEpoch,
       pairKey,
-      this.#finalAnalysisConfigurationKey(steps, eagerSemanticCandidate),
+      finalConfigurationKey,
+      signal,
+    )) return;
+    if (this.#commitImageIdentityAnalysis(
+      job,
+      anchor,
+      scheduler,
+      processingVersion,
+      jobOrdinal,
+      replayLease,
+      pairEpoch,
+      pairKey,
+      finalConfigurationKey,
       signal,
     )) return;
 
@@ -3937,6 +3973,7 @@ export class ImageTranslationController {
     projection: ImageOverlayProjection,
     finalConfigurationKey: string,
   ): void {
+    this.#rememberImageIdentityAnalysis(projection, finalConfigurationKey);
     const weight = finalAnalysisWeight(finalConfigurationKey, projection.regions);
     if (weight > MAX_RETAINED_IMAGE_EVIDENCE_WEIGHT) return;
     this.#deleteRetainedFinalAnalysis(descriptor.nodeId);
@@ -4035,6 +4072,110 @@ export class ImageTranslationController {
     scheduler.settle(job);
     this.#originFinalRebinds += 1;
     this.#reportOriginFinalCache('rebind');
+    this.environment.onDiagnostic?.('projected');
+    return true;
+  }
+
+  #rememberImageIdentityAnalysis(
+    projection: ImageOverlayProjection,
+    finalConfigurationKey: string,
+  ): void {
+    if (
+      projection.evidenceKind !== 'ocr' ||
+      projection.regions.length === 0 ||
+      !isWholeImageCrop(projection)
+    ) return;
+    const key = imageIdentityKey(
+      this.environment.resolveAnchor(projection.document, projection.nodeId),
+      projection.renderedWidthCss,
+      projection.renderedHeightCss,
+      finalConfigurationKey,
+    );
+    if (!key) return;
+    const weight = finalAnalysisWeight(key, projection.regions);
+    if (weight > MAX_ORIGIN_OCR_EVIDENCE_WEIGHT) return;
+    const previous = this.#imageIdentityAnalyses.get(key);
+    if (previous) {
+      this.#imageIdentityAnalyses.delete(key);
+      this.#imageIdentityAnalysisWeight -= previous.weight;
+    }
+    this.#imageIdentityAnalyses.set(key, Object.freeze({
+      projection: Object.freeze({ ...projection }),
+      expiresAt: this.#now() + IMAGE_RESULT_CACHE_TTL_MS,
+      weight,
+    }));
+    this.#imageIdentityAnalysisWeight += weight;
+    while (
+      this.#imageIdentityAnalyses.size > MAX_RETAINED_IMAGE_EVIDENCE ||
+      this.#imageIdentityAnalysisWeight > MAX_ORIGIN_OCR_EVIDENCE_WEIGHT
+    ) {
+      const [oldestKey, oldest] = this.#imageIdentityAnalyses.entries().next()
+        .value as [string, ImageIdentityAnalysis];
+      this.#imageIdentityAnalyses.delete(oldestKey);
+      this.#imageIdentityAnalysisWeight -= oldest.weight;
+    }
+  }
+
+  /** Projects a whole-image result kept for this image, without a capture. */
+  #commitImageIdentityAnalysis(
+    job: ImageScanJob,
+    anchor: ReplicaImageAnchor,
+    scheduler: ImageScanScheduler,
+    processingVersion: number,
+    jobOrdinal: number,
+    replayLease: number,
+    pairEpoch: number,
+    pairKey: string,
+    finalConfigurationKey: string,
+    signal: AbortSignal,
+  ): boolean {
+    const key = imageIdentityKey(
+      anchor,
+      job.descriptor.renderedWidth,
+      job.descriptor.renderedHeight,
+      finalConfigurationKey,
+    );
+    const retained = key ? this.#imageIdentityAnalyses.get(key) : undefined;
+    if (!key || !retained) return false;
+    this.#imageIdentityAnalyses.delete(key);
+    if (retained.expiresAt <= this.#now()) {
+      this.#imageIdentityAnalysisWeight -= retained.weight;
+      return false;
+    }
+    this.#imageIdentityAnalyses.set(key, retained);
+    signal.throwIfAborted();
+    if (!this.#isJobCurrent(job, processingVersion, pairEpoch, pairKey)) {
+      throw new DOMException('Image identity analysis became stale.', 'AbortError');
+    }
+    const projection: ImageOverlayProjection = Object.freeze({
+      ...retained.projection,
+      jobOrdinal,
+      document: job.descriptor.document,
+      nodeId: job.descriptor.nodeId,
+      contentRevision: job.descriptor.contentRevision,
+      observationRevision: job.descriptor.observationRevision,
+      replayLease,
+      pairEpoch,
+      pairKey,
+    });
+    this.#projectedHashes.set(job.descriptor.nodeId, projection.pixelHash);
+    this.#projectedOrdinals.set(job.descriptor.nodeId, jobOrdinal);
+    this.#retainedProjections.set(job.descriptor.nodeId, projection);
+    if (!this.#projector.project(projection)) {
+      this.#projectedHashes.delete(job.descriptor.nodeId);
+      this.#projectedOrdinals.delete(job.descriptor.nodeId);
+      this.#retainedProjections.delete(job.descriptor.nodeId);
+      scheduler.defer(job);
+      this.environment.onDiagnostic?.('projection-deferred');
+      return true;
+    }
+    this.#rememberFinalAnalysis(
+      job.descriptor,
+      projection,
+      finalConfigurationKey,
+    );
+    scheduler.settle(job);
+    this.environment.onDiagnostic?.('image-identity-reused');
     this.environment.onDiagnostic?.('projected');
     return true;
   }
@@ -6051,6 +6192,64 @@ function originFinalAnalysisKey(
     sourceLanguage,
     finalConfigurationKey,
   ]);
+}
+
+const IMAGE_IDENTITY_SCHEMA_VERSION = 'image-identity-v1';
+/** Longer sources (inline data URLs) are not kept as keys. */
+const MAX_IMAGE_IDENTITY_SOURCE_LENGTH = 4_096;
+
+/** The capture covered the whole rendered image, not a scrolled-in slice. */
+function isWholeImageCrop(projection: ImageOverlayProjection): boolean {
+  return projection.cropOffsetXCss <= 0.5 &&
+    projection.cropOffsetYCss <= 0.5 &&
+    Math.abs(projection.cropWidthCss - projection.renderedWidthCss) <= 1 &&
+    Math.abs(projection.cropHeightCss - projection.renderedHeightCss) <= 1;
+}
+
+/**
+ * The replica image's own identity: what it shows (address and natural
+ * size), how it is drawn (rendered size, object-fit and -position) and how
+ * it is read (pair and reading configuration). Kept in memory only.
+ */
+function imageIdentityKey(
+  anchor: ReplicaImageAnchor | undefined,
+  renderedWidth: number,
+  renderedHeight: number,
+  finalConfigurationKey: string,
+): string | undefined {
+  const image = anchor?.image;
+  if (!image) return undefined;
+  try {
+    const source = image.currentSrc || image.src;
+    if (
+      !source ||
+      source.length > MAX_IMAGE_IDENTITY_SOURCE_LENGTH ||
+      !image.complete ||
+      !(image.naturalWidth > 0) ||
+      !(image.naturalHeight > 0) ||
+      !(renderedWidth > 0) ||
+      !(renderedHeight > 0)
+    ) return undefined;
+    let fit = ['', ''];
+    try {
+      const style = image.ownerDocument?.defaultView?.getComputedStyle(image);
+      fit = [style?.objectFit ?? '', style?.objectPosition ?? ''];
+    } catch {
+      // Without a computed style the default fit is the only one assumed.
+    }
+    return JSON.stringify([
+      IMAGE_IDENTITY_SCHEMA_VERSION,
+      source,
+      image.naturalWidth,
+      image.naturalHeight,
+      Math.round(renderedWidth),
+      Math.round(renderedHeight),
+      ...fit,
+      finalConfigurationKey,
+    ]);
+  } catch {
+    return undefined;
+  }
 }
 
 function freezeTranslatedRegions(
