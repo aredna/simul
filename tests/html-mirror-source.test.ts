@@ -2040,11 +2040,11 @@ describe('HtmlMirrorSourceSession', () => {
 
   it('quarantines oversized CSSOM polling without an idle recovery loop', () => {
     const fixture = sourceFixture('<main class="page">styled content</main>');
-    // Many medium sheets that together exceed the polling budget; a single
-    // large sheet is watched by its shape instead (D88).
+    // More sheets than one pass may read. A large sheet (D88) and sheets that
+    // outgrow the budget together (D95) are watched by their shape instead.
     const oversized = Array.from(
-      { length: 7 },
-      () => fakeStyleSheetWithRules(3_900, '.page{}'),
+      { length: 513 },
+      () => fakeStyleSheetWithRules(1, '.page{}'),
     );
     let currentSheets = oversized;
     let styleSheetReads = 0;
@@ -2124,6 +2124,49 @@ describe('HtmlMirrorSourceSession', () => {
     });
     for (let pass = 0; pass < 4; pass += 1) fixture.runTimer();
     expect(gaps()).toBe(before + 1);
+  });
+
+  it('keeps polling a page whose medium sheets outgrow the budget together (D95)', () => {
+    // Seven sheets of 3,900 rules each: none is large alone, but together
+    // they pass the 25,000 rules one pass may read. The pass used to stop,
+    // and the page was quarantined with no style polling at all.
+    const fixture = sourceFixture(
+      '<style id="dynamic"></style><main class="page">styled content</main>',
+    );
+    const medium = Array.from(
+      { length: 7 },
+      (_, index) => fakeStyleSheetWithRules(3_900, `.m${index}{color:red}`),
+    );
+    const dynamic = fakeStyleSheetWithRules(0, '');
+    Object.defineProperty(fixture.document, 'styleSheets', {
+      configurable: true,
+      value: styleSheetList(...medium, dynamic),
+    });
+    fixture.start('passive');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const gaps = () => fixture.port.posts.filter(
+      (message) => (message as { code?: string }).code === 'stream_gap',
+    ).length;
+    for (let pass = 0; pass < 4; pass += 1) fixture.runTimer();
+    expect(gaps()).toBe(0);
+
+    // A rule the page inserts after the budget ran out still arrives.
+    (dynamic.cssRules as unknown as { cssText: string }[]).push({
+      cssText: '.sidebar{position:fixed}',
+    });
+    for (let pass = 0; pass < 4; pass += 1) fixture.runTimer();
+    expect(gaps()).toBe(1);
+    // So does an in-place edit of a sheet read in full.
+    fixture.port.emitMessage(createHtmlMirrorCheckpointRequest(identity, 0));
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    for (let pass = 0; pass < 4; pass += 1) fixture.runTimer();
+    (medium[0]!.cssRules as unknown as { cssText: string }[])[5]!.cssText =
+      '.m0{color:blue}';
+    for (let pass = 0; pass < 4; pass += 1) fixture.runTimer();
+    expect(gaps()).toBe(2);
+    expect(fixture.port.posts.some(
+      (message) => (message as { code?: string }).code === 'stream_overflow',
+    )).toBe(false);
   });
 
   it('advances the shared style cursor after adopted-style budget exhaustion', () => {
