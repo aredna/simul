@@ -289,9 +289,17 @@ export interface HtmlMirrorReadBudget {
   nodes: number;
   inspectedNodes: number;
   bytes: number;
+  /** Distinct adopted stylesheet texts in this message. */
   styleSheets: number;
   styleRules: number;
   readonly ids: Set<number>;
+  /**
+   * Each distinct adopted stylesheet text in this message and its rule
+   * count. Web components adopt the same few sheets into every shadow root
+   * (Reddit: 45 sheets in 204 roots); a text is counted, checked and sent
+   * once per message, and every further use costs one index (D84).
+   */
+  readonly adoptedStyleTexts: Map<string, number>;
 }
 
 export interface SourceBaseReadPolicy {
@@ -653,18 +661,18 @@ export function sanitizeSourceAdoptedStyleSheets(
   if (
     !Number.isSafeInteger(length) ||
     length < 0 ||
-    length > MAX_ADOPTED_STYLE_SHEETS_PER_OWNER ||
-    work.sheets + length > work.maxSheets
+    length > MAX_ADOPTED_STYLE_SHEETS_PER_OWNER
   ) {
     work.exhausted = true;
     incrementRepresentability(representability, 'capacityOmissionCount');
     return undefined;
   }
   const result: string[] = [];
-  const startingRules = work.rules;
-  const startingCharacters = work.characters;
+  // The work budget pays for reading a sheet; a sheet this read has already
+  // cached (the same one adopted by another root) costs nothing more (D84).
+  let ownerRules = 0;
+  let ownerCharacters = 0;
   for (let index = 0; index < length; index += 1) {
-    work.sheets += 1;
     let sheet: unknown;
     try {
       sheet = sheets[index];
@@ -685,6 +693,12 @@ export function sanitizeSourceAdoptedStyleSheets(
     const classifiedBefore = classifiedStyleOmissionCount(representability);
     let cached = work.cache.get(sheet);
     if (cacheMiss) {
+      if (work.sheets + 1 > work.maxSheets) {
+        work.exhausted = true;
+        incrementRepresentability(representability, 'capacityOmissionCount');
+        return undefined;
+      }
+      work.sheets += 1;
       cached = readAdoptedStyleSheet(
         sheet as CSSStyleSheet,
         baseUrl,
@@ -708,20 +722,24 @@ export function sanitizeSourceAdoptedStyleSheets(
       }
       continue;
     }
+    ownerRules += cached.ruleCount;
+    ownerCharacters += cached.cssText.length;
     if (
-      work.rules + cached.ruleCount > work.maxRules ||
-      work.characters + cached.cssText.length > work.maxCharacters ||
-      work.rules - startingRules + cached.ruleCount >
-        MAX_ADOPTED_STYLE_RULES_PER_OWNER ||
-      work.characters - startingCharacters + cached.cssText.length >
-        MAX_ADOPTED_STYLE_CHARACTERS_PER_OWNER
+      (cacheMiss && (
+        work.rules + cached.ruleCount > work.maxRules ||
+        work.characters + cached.cssText.length > work.maxCharacters
+      )) ||
+      ownerRules > MAX_ADOPTED_STYLE_RULES_PER_OWNER ||
+      ownerCharacters > MAX_ADOPTED_STYLE_CHARACTERS_PER_OWNER
     ) {
       work.exhausted = true;
       incrementRepresentability(representability, 'capacityOmissionCount');
       return undefined;
     }
-    work.rules += cached.ruleCount;
-    work.characters += cached.cssText.length;
+    if (cacheMiss) {
+      work.rules += cached.ruleCount;
+      work.characters += cached.cssText.length;
+    }
     result.push(cached.cssText);
     incrementRepresentability(representability, 'preservedStyleSheetCount');
   }
@@ -2308,8 +2326,12 @@ export function createHtmlMirrorReadBudget(
     styleSheets: 0,
     styleRules: 0,
     ids,
+    adoptedStyleTexts: new Map(),
   };
 }
+
+/** What one more use of an already counted adopted sheet costs: its index. */
+const ADOPTED_STYLE_REFERENCE_BYTES = 8;
 
 function captureAdoptedStyleSheets(
   owner: Document | ShadowRoot,
@@ -2327,19 +2349,22 @@ function captureAdoptedStyleSheets(
     fidelityPolicy,
   );
   if (!styles) return undefined;
-  if (budget.styleSheets + styles.length > MAX_HTML_MIRROR_ADOPTED_STYLE_SHEETS) {
-    incrementRepresentability(representability, 'capacityOmissionCount');
-    return undefined;
-  }
-  budget.styleSheets += styles.length;
   for (const cssText of styles) {
-    const styleRules = countCssRuleBlocks(cssText);
-    if (budget.styleRules + styleRules > MAX_HTML_MIRROR_ADOPTED_STYLE_RULES) {
-      incrementRepresentability(representability, 'capacityOmissionCount');
-      return undefined;
+    budget.bytes += ADOPTED_STYLE_REFERENCE_BYTES;
+    if (!budget.adoptedStyleTexts.has(cssText)) {
+      const styleRules = countCssRuleBlocks(cssText);
+      if (
+        budget.styleSheets + 1 > MAX_HTML_MIRROR_ADOPTED_STYLE_SHEETS ||
+        budget.styleRules + styleRules > MAX_HTML_MIRROR_ADOPTED_STYLE_RULES
+      ) {
+        incrementRepresentability(representability, 'capacityOmissionCount');
+        return undefined;
+      }
+      budget.adoptedStyleTexts.set(cssText, styleRules);
+      budget.styleSheets += 1;
+      budget.styleRules += styleRules;
+      budget.bytes += cssText.length * 2 + 16;
     }
-    budget.styleRules += styleRules;
-    budget.bytes += cssText.length * 2 + 16;
     if (budget.bytes > MAX_HTML_MIRROR_BYTES) {
       incrementRepresentability(representability, 'capacityOmissionCount');
       return undefined;
@@ -2355,36 +2380,43 @@ function readTransportedAdoptedStyleSheets(
 ): readonly string[] | undefined {
   if (
     !Array.isArray(input) ||
-    input.length > MAX_ADOPTED_STYLE_SHEETS_PER_OWNER ||
-    budget.styleSheets + input.length > MAX_HTML_MIRROR_ADOPTED_STYLE_SHEETS
+    input.length > MAX_ADOPTED_STYLE_SHEETS_PER_OWNER
   ) return undefined;
-  budget.styleSheets += input.length;
   const styles: string[] = [];
   let ownerCharacters = 0;
   let ownerRules = 0;
   for (const cssText of input) {
-    if (
-      typeof cssText !== 'string' ||
-      cssText.length > MAX_HTML_MIRROR_STRING ||
-      sanitizeCss(
-        cssText,
-        'about:blank',
-        false,
-        undefined,
-        fidelityPolicy,
-      ) !== cssText
-    ) return undefined;
-    const styleRules = countCssRuleBlocks(cssText);
+    if (typeof cssText !== 'string') return undefined;
+    let styleRules = budget.adoptedStyleTexts.get(cssText);
+    if (styleRules === undefined) {
+      if (
+        cssText.length > MAX_HTML_MIRROR_STRING ||
+        sanitizeCss(
+          cssText,
+          'about:blank',
+          false,
+          undefined,
+          fidelityPolicy,
+        ) !== cssText
+      ) return undefined;
+      styleRules = countCssRuleBlocks(cssText);
+      if (
+        budget.styleSheets + 1 > MAX_HTML_MIRROR_ADOPTED_STYLE_SHEETS ||
+        budget.styleRules + styleRules > MAX_HTML_MIRROR_ADOPTED_STYLE_RULES
+      ) return undefined;
+      budget.adoptedStyleTexts.set(cssText, styleRules);
+      budget.styleSheets += 1;
+      budget.styleRules += styleRules;
+      budget.bytes += cssText.length * 2 + 16;
+    }
     ownerCharacters += cssText.length;
     ownerRules += styleRules;
+    budget.bytes += ADOPTED_STYLE_REFERENCE_BYTES;
     if (
       ownerCharacters > MAX_ADOPTED_STYLE_CHARACTERS_PER_OWNER ||
       ownerRules > MAX_ADOPTED_STYLE_RULES_PER_OWNER ||
-      budget.styleRules + styleRules > MAX_HTML_MIRROR_ADOPTED_STYLE_RULES
+      budget.bytes > MAX_HTML_MIRROR_BYTES
     ) return undefined;
-    budget.styleRules += styleRules;
-    budget.bytes += cssText.length * 2 + 16;
-    if (budget.bytes > MAX_HTML_MIRROR_BYTES) return undefined;
     styles.push(cssText);
   }
   return Object.freeze(styles);

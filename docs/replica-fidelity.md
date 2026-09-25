@@ -92,8 +92,17 @@ part of a name: Tailwind's `.before\:content-\[\'x\'\]` opens no string and
 `.bg-\[url\(…\)\]` no function (D83: one such class had rejected Reddit's
 whole 237 KB sheet). When Chrome makes an imported sheet unreadable, Passive Fidelity may
 retain only a normalized HTTP(S) `@import`; that import is request-capable.
-Conservative removes imports. Scriptable URLs, CSS `expression()`, `behavior:`,
+Conservative removes imports. An adopted (constructed) stylesheet is counted
+and sent once per message however many shadow roots adopt it, and each further
+use costs one index (D84): web components adopt the same few sheets into every
+root, and counted per root Reddit's feed turned 0.34 MB of CSS into 23 MB, so a
+longer feed stopped updating and a thread could not be mirrored at all.
+Scriptable URLs, CSS `expression()`, `behavior:`,
 `-moz-binding`, invalid schemes, and over-budget rule graphs are rejected.
+
+The replica frame keeps the source viewport's size, scrollbar included, so the
+page lays out at the width it has in the source tab; the panel crops that
+scrollbar strip away, and its own scroller is the only one shown (D84).
 
 The replica frame leaves `html` and `body` at the browser's defaults, as the
 source has them, so a body sized with `max-width` and auto margins stays centred

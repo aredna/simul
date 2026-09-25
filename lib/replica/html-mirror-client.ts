@@ -4,6 +4,7 @@ import {
   createHtmlMirrorCheckpointRequest,
   createHtmlMirrorPortName,
   createHtmlMirrorStart,
+  decodeHtmlMirrorWireMessage,
   readHtmlMirrorSourceMessage,
   type HtmlMirrorCheckpoint,
   type HtmlMirrorPatchBatch,
@@ -225,7 +226,7 @@ class ChromeHtmlMirrorStreamLease implements HtmlMirrorStreamLease {
       return;
     }
     const message = readHtmlMirrorSourceMessage(
-      input,
+      decodeHtmlMirrorWireMessage(input),
       this.identity,
       this.fidelityPolicy,
     );

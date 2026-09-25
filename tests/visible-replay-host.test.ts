@@ -140,6 +140,45 @@ describe('visible isolated replay host', () => {
     expect(iframe.style.width).toBe('1200px');
   });
 
+  it('crops the replica frame\'s own scrollbar so only the panel scrolls (D84)', () => {
+    const fixture = createFixture();
+    const candidate = fixture.host.createCandidate(dimensions());
+    const iframe = createProtectedIframe(fixture.document);
+    // A classic 15px scrollbar: the frame lays the page out 15px narrower,
+    // as the source tab does, and draws its own bar beside the panel's.
+    Object.defineProperty(iframe, 'contentWindow', {
+      configurable: true,
+      value: { scrollX: 0, scrollY: 0, scrollTo: vi.fn(), innerWidth: 1_200, innerHeight: 700 },
+    });
+    Object.defineProperty(iframe, 'contentDocument', {
+      configurable: true,
+      value: { scrollingElement: { clientWidth: 1_185, clientHeight: 700 } },
+    });
+    candidate.mount.append(iframe);
+    candidate.commit(iframe, { width: 1_185, height: 2_500 });
+    const scroller = requireElement<HTMLElement>(fixture.preview, '.replica-replay-scroll');
+    const scaleLayer = requireElement<HTMLElement>(fixture.preview, '.replica-replay-scale-layer');
+    const viewport = requireElement<HTMLElement>(
+      fixture.preview,
+      '.replica-replay-sticky-viewport',
+    );
+    Object.defineProperty(scroller, 'clientWidth', {
+      configurable: true,
+      value: 600,
+    });
+
+    fixture.host.updateLayout({ displayMode: 'fit', zoomPercent: 100 });
+    // The page's width, not the frame's, fills the panel; the frame keeps
+    // the source viewport size and its scrollbar falls outside the crop.
+    expect(scaleLayer.style.transform).toBe(`scale(${600 / 1_185})`);
+    expect(viewport.style.width).toBe(`${Math.ceil((600 / 1_185) * 1_185)}px`);
+    expect(iframe.style.width).toBe('1200px');
+
+    fixture.host.updateLayout({ displayMode: 'actual', zoomPercent: 100 });
+    expect(viewport.style.width).toBe('1185px');
+    expect(viewport.style.height).toBe('700px');
+  });
+
   it('keeps the reader scroll when the source re-reports an unchanged position', () => {
     const fixture = createFixture();
     const candidate = fixture.host.createCandidate(dimensions());
