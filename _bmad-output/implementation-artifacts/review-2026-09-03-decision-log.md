@@ -4041,3 +4041,56 @@ version bump and the GitHub release, as "Push out a release" was for D79.
 
 Gate before the merge: `npm run check` green, typecheck clean, **1,541 tests
 pass**, artifact byte-verified.
+
+### D91. One Follow / Pinned control; credential fields show their dots (2026-09-25)
+
+Branch `fix/open-items`. The owner asked to work on the open items from the
+2026-09-23 and 2026-09-25 handovers, and answered three questions first:
+remove the duplicate "Mirror follows" setting, draw dots in credential
+fields, and change the image overlay placement now (D92 onwards).
+
+- **"Mirror follows" removed from Settings** (review R4 remainder). The
+  toolbar's Follow / Pinned button switches the same saved setting on both
+  surfaces (D73), so the Window behavior group now holds only "Toolbar
+  opens". The saved preference and its default (Follow) are unchanged.
+- **Credential fields show one dot per character.** Since D76 a password,
+  card-number or one-time-code field was an empty box. The owner: draw the
+  dots the page draws; only the count may travel.
+  - The page sends a new `masked-length` proof: the node and the length of
+    the value, capped at 256, under the form-values gate. The value is read
+    only for its length, after classification, and never kept. It is sent
+    for an input that is itself a credential (password type, credential
+    autocomplete, or `-webkit-text-security` of disc, circle or square) and
+    drawn as its own field; a field inside a credential region (an opaque
+    shell) sends nothing, and neither does a field whose styles cannot be
+    read (secret only to fail closed) or a number field (it cannot hold
+    dots). The value poll includes the length, so autofill without an input
+    event also updates it.
+  - The receiver accepts the proof for a text-like input and fills it with
+    that many bullets (`•`); the browser draws its own dots for a password
+    field. A field whose value already travels as text never also shows
+    dots. The replica cannot confirm a card field (its `autocomplete` never
+    travels), and a count holds nothing private, so the receiver checks only
+    that the field draws text.
+  - A count the replica cannot place (the node is missing, or not a text
+    field) is dropped by itself, not the whole batch: nothing depends on it.
+    This is the first proof kind with per-item refusal (see the open item
+    on whole-batch refusal).
+- **Verified in Chrome for Testing** on a fixture with password, card,
+  one-time-code, CSS-masked and plain fields: 0.5.2 draws all four credential
+  fields empty; the new build shows 16, 6 and 0 dots before typing (the card
+  and masked fields have default values) and 8, 19, 4 and 6 after typing,
+  matching the page's lengths; the password text appears nowhere in the
+  panel.
+- **Tests.** Session: a card field sends only its length and follows typing;
+  number fields and fields in a credential region send nothing; nothing is
+  read without the form-values setting. Receiver: dots drawn and restored; a
+  checkbox, a missing node and a field with a value record each drop only
+  their count. Protocol: bounds and exact keys. Two tests that asserted a
+  password's value is never read now assert that only its length leaves the
+  page. The test that fails closed on unreadable styles still reads nothing.
+- **Docs.** `docs/reference.md`, `docs/replica-fidelity.md`,
+  `docs/translation-companion.md`.
+
+Build identity `0.5.2 beta v.20260925.2`. Gate: `npm run check` green,
+**1,545 tests pass**, artifact byte-verified.
