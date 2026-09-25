@@ -4011,3 +4011,33 @@ The owner opened the session with the 2026-09-25 handover: "Fix those items".
 Build identity `0.5.1 beta v.20260924.6` (D87–D89); `dist/chrome-unpacked`
 re-synced. Gate: `npm run check` green, **1,541 tests pass** (+4 new, and the
 skipped Chrome-only test removed).
+
+### D90. Publish 0.5.2, carrying D82–D89 (2026-09-25)
+
+Branch `fix/hover-menus` / PR #1. The owner ran the checks listed in
+`handover-2026-09-25-pr1-to-0.5.2.md` (live Reddit, language packs, the image
+cache, Wise and Fastmail signed in, a Reddit video) and closed them with:
+"All issues are fixed. Let's release." Read as the go-ahead for the merge, the
+version bump and the GitHub release, as "Push out a release" was for D79.
+
+- **Version 0.5.2** (`package.json`, `package-lock.json`, the notices'
+  inventory line, the two identity tests). The build identity restarts on the
+  release date as `0.5.2 beta v.20260925.1`. Only `manifest.json` and the
+  notices changed in `dist/chrome-unpacked`; no chunk was renamed.
+- **Release.** Notes in `release-notes-0.5.2.md`, for a reader: hover menus,
+  Reddit and other big web-component pages, one scroll bar, the detected
+  language in the From menu, language changes that translate at once, image
+  results reused when images return, menus and dropdowns drawn as the page
+  draws them, late styles on pages with very large stylesheets, images from
+  signed-in apps, no video play bars. They name no bank and no signed-in
+  site. PR #1 rebase-merged (as D77 and D79), branch deleted, annotated tag
+  `v0.5.2` at the merge head, GitHub release "Simul 0.5.2 beta
+  (v.20260925.1)" marked **Latest**, with `simul-0.5.2-chrome-unpacked.zip`
+  (the committed `dist/chrome-unpacked`, made with `git archive`). v0.5.1
+  stays published as the previous release.
+- **Still not done** (documented, not blocking): lost `var()` shorthands in
+  adopted sheets (Reddit's shadow-root buttons, D87), and the open items of
+  `handover-2026-09-23-limits-quirks-defaults.md`.
+
+Gate before the merge: `npm run check` green, typecheck clean, **1,541 tests
+pass**, artifact byte-verified.
