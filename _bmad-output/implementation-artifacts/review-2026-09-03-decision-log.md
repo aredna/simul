@@ -4232,3 +4232,49 @@ quarantined, and had no CSSOM change detection.
 
 Build identity `0.5.2 beta v.20260925.5`. Gate: `npm run check` green,
 **1,550 tests pass**, artifact byte-verified.
+
+### D96. The semantic receiver drops a refused item, not the batch (2026-09-25)
+
+Same branch. Open item 3 of the 2026-09-23 handover (session-close item 5):
+the receiver refused a whole semantic batch for one record or proof it could
+not accept. A refused batch makes the engine purge every translated label,
+menu, select and control state and reconnect with backoff, and the page side
+sends the same item again, so the loss lasted as long as the item did. D62's
+months-long outage was one such case: a disabled-state proof on every plain
+link.
+
+- **Change.** A batch is refused whole only when the stream is broken: a
+  forged record identity, a repeated identity, or a revision rewind. Anything
+  else is dropped by itself:
+  - a record whose replica node is missing or disconnected, whose tag
+    differs, which the replica classifies as secret or as another category,
+    or which cannot be bound; any earlier presentation of it is withdrawn, as
+    for a record the batch no longer carries;
+  - a proof that does not resolve on the replica;
+  - every proof in a conflict: two tab or menu relationships claiming one
+    node, or a select state that contradicts its shape (with that shape);
+  - a structural menu without admitted panel text, now checked against the
+    records actually admitted rather than all records sent.
+  Each admitted item is still validated on its own, so nothing is presented
+  that was not before; what changes is only that one refusal no longer takes
+  the others with it. D91's masked-length proof already worked this way.
+- **Logging.** The receiver reports the number of dropped records and proofs
+  per committed batch; development builds log
+  `[Simul semantic] dropped records=N; proofs=M` (compiled out of production).
+  On Wikipedia's United States article, freee, Yahoo! JAPAN, wise.com and
+  fastmail.com nothing was dropped: today the page side and the receiver
+  agree, and this is the net for when they do not.
+- **Tests.** One invalid record and one refused proof (the D62 link) beside a
+  valid record and select state: the batch commits, the valid items apply and
+  the drop is reported (fails on the old code). The tests that asserted a
+  whole-batch refusal for a single item now assert that the item alone is
+  dropped (forged secret claims, secret ancestors, forged ARIA states, select
+  state/shape mismatch, a menu without text or with a single-link panel, a
+  claimed trigger, two tabs on one trigger); the revision-rewind test still
+  asserts a whole refusal.
+- **Docs.** `docs/translation-companion.md`. The same paragraph still said
+  credential secrets disclose no length; D91 changed that for credential
+  inputs, and the sentence now says so.
+
+Build identity `0.5.2 beta v.20260925.6`. Gate: `npm run check` green,
+**1,551 tests pass**, artifact byte-verified.

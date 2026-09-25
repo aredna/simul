@@ -1163,6 +1163,13 @@ export class IsolatedHtmlReplicaEngine
       replicaDocument,
       resolveNode: (nodeId) => state.nodes.get(nodeId),
       applyProofs: (proofs) => presenter.apply(proofs),
+      reportDroppedItems: (records, proofs) => {
+        if (import.meta.env?.DEV) {
+          console.info(
+            `[Simul semantic] dropped records=${records}; proofs=${proofs}`,
+          );
+        }
+      },
     });
     this.#semanticReceiver = receiver;
     const reconnect = (): void => {

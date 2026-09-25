@@ -40,6 +40,8 @@ export interface SemanticSourceReceiverEnvironment {
   readonly applyProofs?: (
     proofs: readonly ResolvedSemanticSourceProof[],
   ) => boolean;
+  /** Told how many records and proofs a committed batch dropped (D96). */
+  readonly reportDroppedItems?: (records: number, proofs: number) => void;
 }
 
 export type ResolvedSemanticSourceProof =
@@ -194,6 +196,12 @@ export class SemanticSourceReceiver {
       readonly binding: SemanticBinding;
       readonly changed: boolean;
     }>();
+    // A batch is refused whole only when the stream itself is broken (a
+    // forged or repeated identity, a revision rewind). A record or proof the
+    // replica cannot place is dropped by itself (D96): one refused item used
+    // to refuse the batch, which purged every label, menu and control state
+    // and kept them away for as long as the page sent it (D62).
+    let droppedRecords = 0;
     for (const sourceRecord of batch.records) {
       if (
         semanticSourceRecordId(
@@ -217,7 +225,12 @@ export class SemanticSourceReceiver {
       ) return undefined;
       const current = this.#entries.get(projectionNodeId);
       const target = this.#resolveAndValidate(sourceRecord);
-      if (!target) return undefined;
+      // Its node is missing or the replica classifies it differently: any
+      // earlier presentation is withdrawn, as for a record no longer sent.
+      if (!target) {
+        droppedRecords += 1;
+        continue;
+      }
       const sameBinding = current?.binding.target === target &&
         current.sourceRecord.presentation === sourceRecord.presentation;
       const unchanged = Boolean(
@@ -234,9 +247,12 @@ export class SemanticSourceReceiver {
           ? current.binding
           : this.#createBinding(target, sourceRecord.presentation);
       } catch {
-        return undefined;
+        binding = undefined;
       }
-      if (!binding) return undefined;
+      if (!binding) {
+        droppedRecords += 1;
+        continue;
+      }
       plans.set(projectionNodeId, {
         sourceRecord,
         translationRecord: toTranslationRecord(
@@ -248,8 +264,10 @@ export class SemanticSourceReceiver {
         changed: !unchanged,
       });
     }
-    const proofPlans = this.#resolveProofs(batch.proofs, batch.records);
-    if (!proofPlans) return undefined;
+    const admittedRecords = [...plans.values()].map(({ sourceRecord }) => sourceRecord);
+    const proofResolution = this.#resolveProofs(batch.proofs, admittedRecords);
+    if (!proofResolution) return undefined;
+    const proofPlans = proofResolution.resolved;
     const proofPresentationChanged = !sameResolvedProofSet(
       this.#proofs,
       proofPlans,
@@ -359,6 +377,16 @@ export class SemanticSourceReceiver {
         revision: resolved.proof.revision,
         signature: semanticSourceProofSignature(resolved.proof),
       }));
+    }
+    if (droppedRecords > 0 || proofResolution.dropped > 0) {
+      try {
+        this.environment.reportDroppedItems?.(
+          droppedRecords,
+          proofResolution.dropped,
+        );
+      } catch {
+        // Reporting is diagnostic only.
+      }
     }
     this.#lastSequence = batch.sequence;
     this.#proofPresentationHealthy = true;
@@ -485,14 +513,30 @@ export class SemanticSourceReceiver {
     return Object.freeze(changes);
   }
 
+  /**
+   * Resolves each proof on its own; `records` are the batch's admitted
+   * records. Undefined only for a broken stream (a repeated identity or a
+   * revision rewind). A proof the replica cannot place, and every proof in a
+   * conflict (two tabs or menus claiming one node, a select state that
+   * contradicts its shape), is dropped by itself (D96).
+   */
   #resolveProofs(
     proofs: readonly SemanticSourceProof[],
     records: readonly SemanticSourceRecord[],
-  ): Map<string, ResolvedSemanticSourceProof> | undefined {
+  ): {
+    readonly resolved: Map<string, ResolvedSemanticSourceProof>;
+    readonly dropped: number;
+  } | undefined {
     const resolved = new Map<string, ResolvedSemanticSourceProof>();
+    const seen = new Set<string>();
+    let dropped = 0;
+    const drop = (proofId: string): void => {
+      if (resolved.delete(proofId)) dropped += 1;
+    };
     for (const proof of proofs) {
       const proofId = semanticSourceProofIdentity(proof);
-      if (resolved.has(proofId)) return undefined;
+      if (seen.has(proofId)) return undefined;
+      seen.add(proofId);
       const signature = semanticSourceProofSignature(proof);
       const history = this.#proofHistory.get(proofId);
       if (
@@ -503,11 +547,10 @@ export class SemanticSourceReceiver {
         )
       ) return undefined;
       const next = this.#resolveProof(proof);
-      // A credential field's dot count stands alone: nothing depends on it
-      // and it holds no page content, so one the replica cannot place is
-      // dropped by itself instead of refusing the batch (D91).
-      if (!next && proof.kind === 'masked-length') continue;
-      if (!next) return undefined;
+      if (!next) {
+        dropped += 1;
+        continue;
+      }
       resolved.set(proofId, next);
     }
     // A field whose value travels as text never also shows dots.
@@ -524,45 +567,53 @@ export class SemanticSourceReceiver {
         presentations.set(value.proof.nodeId, value);
       }
     }
-    for (const value of resolved.values()) {
+    for (const [proofId, value] of [...resolved]) {
       if (value.kind !== 'select-state') continue;
       const presentation = presentations.get(value.proof.nodeId);
       if ((!value.proof.multiple && value.selectedOptions.length > 1) ||
         (value.proof.multiple && value.proof.pickerOpen) ||
         (presentation &&
           presentation.proof.multiple !== value.proof.multiple)) {
-        return undefined;
+        // The select's state and shape disagree: neither is presented.
+        drop(proofId);
+        if (presentation) {
+          drop(semanticSourceProofIdentity(presentation.proof));
+        }
       }
     }
-    const tabTriggers = new Set<number>();
-    const tabPanels = new Set<number>();
-    for (const value of resolved.values()) {
-      if (value.kind !== 'tab-state') continue;
+    // Two tab or menu relationships claiming one node are ambiguous; every
+    // relationship involved is dropped, and the others stay.
+    const dropClaimConflicts = (
+      claims: (value: ResolvedSemanticSourceProof) => readonly string[] | undefined,
+    ): void => {
+      const owners = new Map<string, string[]>();
+      for (const [proofId, value] of resolved) {
+        for (const claim of claims(value) ?? []) {
+          owners.set(claim, [...owners.get(claim) ?? [], proofId]);
+        }
+      }
+      for (const proofIds of owners.values()) {
+        if (proofIds.length > 1) proofIds.forEach(drop);
+      }
+    };
+    dropClaimConflicts((value) => value.kind === 'tab-state'
+      ? [`trigger:${value.proof.tabNodeId}`, `panel:${value.proof.panelNodeId}`]
+      : undefined);
+    dropClaimConflicts((value) => value.kind === 'structural-menu'
+      ? [
+          `container:${value.proof.containerNodeId}`,
+          `trigger:${value.proof.triggerNodeId}`,
+          `panel:${value.proof.panelNodeId}`,
+        ]
+      : undefined);
+    // A menu is presented only with admitted panel text.
+    for (const [proofId, value] of [...resolved]) {
       if (
-        tabTriggers.has(value.proof.tabNodeId) ||
-        tabPanels.has(value.proof.panelNodeId)
-      ) return undefined;
-      tabTriggers.add(value.proof.tabNodeId);
-      tabPanels.add(value.proof.panelNodeId);
+        value.kind === 'structural-menu' &&
+        !this.#structuralMenusHaveAdmittedText([value], records)
+      ) drop(proofId);
     }
-    const menuContainers = new Set<number>();
-    const menuTriggers = new Set<number>();
-    const menuPanels = new Set<number>();
-    for (const value of resolved.values()) {
-      if (value.kind !== 'structural-menu') continue;
-      if (
-        menuContainers.has(value.proof.containerNodeId) ||
-        menuTriggers.has(value.proof.triggerNodeId) ||
-        menuPanels.has(value.proof.panelNodeId)
-      ) return undefined;
-      menuContainers.add(value.proof.containerNodeId);
-      menuTriggers.add(value.proof.triggerNodeId);
-      menuPanels.add(value.proof.panelNodeId);
-    }
-    if (!this.#structuralMenusHaveAdmittedText(resolved.values(), records)) {
-      return undefined;
-    }
-    return resolved;
+    return { resolved, dropped };
   }
 
   #resolveProof(

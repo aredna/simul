@@ -694,7 +694,7 @@ describe('disabled OCR production profile', () => {
     expect(validation.ocrEnabled).toBe(false);
     expect(validation.manifest.version).toBe('0.5.2');
     expect(validation.manifest.version_name).toBe(
-      '0.5.2 beta v.20260925.5',
+      '0.5.2 beta v.20260925.6',
     );
     expect(validation.manifest.permissions).toEqual(APPROVED_PERMISSIONS);
     expect(validation.manifest).not.toHaveProperty('content_security_policy');

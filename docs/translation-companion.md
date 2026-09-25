@@ -283,7 +283,13 @@ in the live readable-content scope. Standard can add translated public control
 and option labels, disabled semantics, native select shape, and validated
 disclosure content; ordinary/personal values, selected or checked state, and
 editable text require their respective broader switches. Source secret
-classification remains authoritative underneath this supplement.
+classification remains authoritative underneath this supplement. The receiver
+checks each record and proof on its own: one it cannot place (its node is
+missing, the replica classifies it differently, or two relationships claim
+one node) is dropped by itself, and a batch is refused whole only when the
+stream itself is broken (a forged identity or a revision rewind) (D96). Until
+D96 one refused item refused the batch, which purged every label, menu and
+control state for as long as the page kept sending it (D62).
 
 A public single-row select becomes a companion-owned trigger whose top-layer,
 internally scrolling list escapes source clipping, stays within the replica
@@ -299,8 +305,11 @@ event to the source page.
 Raw option values, names, data attributes, datalist/standalone-option content,
 rich picker descendants, and private select ancestry stay blank. Password,
 authentication, payment-autofill, hidden-input, file-name, and CSS-masked
-secrets stay outside every scope and disclose neither their text nor length. A field that
-becomes sensitive clears its prior semantic record and projection atomically.
+secrets stay outside every scope and never disclose their text. The one
+exception is length: a credential input the replica draws as its own field
+shows one dot per character, as the page does, so under the form-values
+setting its length travels as a bounded count (D91). A field that becomes
+sensitive clears its prior semantic record and projection atomically.
 
 Other private controls become empty inert shells rather than disabled form
 controls, avoiding browser disabled-state wash while retaining geometry.
