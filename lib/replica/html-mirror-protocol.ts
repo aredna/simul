@@ -1,8 +1,11 @@
 import type { ReplicaDiagnosticCode, ReplicaDocumentIdentity } from './contracts';
 import {
+  MAX_HTML_MIRROR_ADOPTED_STYLE_SHEETS,
   MAX_HTML_MIRROR_BYTES,
+  MAX_HTML_MIRROR_DEPTH,
   MAX_HTML_MIRROR_DIAGNOSTIC_COUNT,
   MAX_HTML_MIRROR_NODES,
+  MAX_HTML_MIRROR_STRING,
   createHtmlMirrorReadBudget,
   createHtmlMirrorRepresentabilityCollector,
   htmlMirrorJsonBytes,
@@ -298,6 +301,96 @@ export function readHtmlMirrorControllerMessage(
   });
 }
 
+const ADOPTED_STYLE_SHEETS_KEY = 'adoptedStyleSheets';
+const ADOPTED_STYLE_SHEET_TEXTS_KEY = 'adoptedStyleSheetTexts';
+
+/**
+ * The wire form of a checkpoint or patch sends each distinct adopted
+ * stylesheet once (D84). Web components adopt the same few sheets into every
+ * shadow root: sent per root, Reddit's feed turned 0.34 MB of CSS into 23 MB,
+ * and a longer feed or a thread could not be mirrored at all. Every
+ * `adoptedStyleSheets` list becomes indexes into one table of texts; a
+ * message without adopted sheets is sent unchanged.
+ */
+export function encodeHtmlMirrorWireMessage(message: unknown): unknown {
+  const texts: string[] = [];
+  const indexes = new Map<string, number>();
+  const encode = (value: unknown, key?: string): unknown => {
+    if (Array.isArray(value)) {
+      if (key !== ADOPTED_STYLE_SHEETS_KEY) {
+        return value.map((item) => encode(item));
+      }
+      return value.map((cssText: string) => {
+        let index = indexes.get(cssText);
+        if (index === undefined) {
+          index = texts.length;
+          texts.push(cssText);
+          indexes.set(cssText, index);
+        }
+        return index;
+      });
+    }
+    if (typeof value !== 'object' || value === null) return value;
+    const copy: Record<string, unknown> = {};
+    for (const [name, child] of Object.entries(value)) {
+      copy[name] = encode(child, name);
+    }
+    return copy;
+  };
+  const encoded = encode(message);
+  return texts.length === 0
+    ? message
+    : { ...(encoded as object), [ADOPTED_STYLE_SHEET_TEXTS_KEY]: texts };
+}
+
+/**
+ * Restores the adopted stylesheet texts of a wire message in place, before
+ * the message is validated. Anything malformed (a table that is not a list
+ * of bounded strings, an index outside it, an unused entry, nesting beyond
+ * the mirror's depth) makes the whole message invalid.
+ */
+export function decodeHtmlMirrorWireMessage(input: unknown): unknown {
+  if (!isRecord(input) || !Object.hasOwn(input, ADOPTED_STYLE_SHEET_TEXTS_KEY)) {
+    return input;
+  }
+  const texts = input[ADOPTED_STYLE_SHEET_TEXTS_KEY];
+  if (
+    !Array.isArray(texts) ||
+    texts.length === 0 ||
+    texts.length > MAX_HTML_MIRROR_ADOPTED_STYLE_SHEETS ||
+    !texts.every((text) =>
+      typeof text === 'string' && text.length <= MAX_HTML_MIRROR_STRING)
+  ) return undefined;
+  const used = new Set<number>();
+  const maxDepth = MAX_HTML_MIRROR_DEPTH * 4 + 32;
+  const decode = (value: unknown, depth: number): boolean => {
+    if (depth > maxDepth) return false;
+    if (Array.isArray(value)) {
+      return value.every((item) => decode(item, depth + 1));
+    }
+    if (!isRecord(value)) return true;
+    for (const [name, child] of Object.entries(value)) {
+      if (name === ADOPTED_STYLE_SHEETS_KEY && Array.isArray(child)) {
+        for (let index = 0; index < child.length; index += 1) {
+          const entry = child[index];
+          if (
+            !Number.isSafeInteger(entry) ||
+            (entry as number) < 0 ||
+            (entry as number) >= texts.length
+          ) return false;
+          used.add(entry as number);
+          child[index] = texts[entry as number];
+        }
+      } else if (!decode(child, depth + 1)) {
+        return false;
+      }
+    }
+    return true;
+  };
+  delete input[ADOPTED_STYLE_SHEET_TEXTS_KEY];
+  return decode(input, 0) && used.size === texts.length ? input : undefined;
+}
+
 export function createHtmlMirrorCheckpoint(
   identity: ReplicaDocumentIdentity,
   input: Omit<
@@ -332,12 +425,12 @@ export function createHtmlMirrorCheckpoint(
     representability,
     inventoryDocumentResources(root, adoptedStyleSheets),
   );
-  const byteLength = htmlMirrorJsonBytes({
+  const byteLength = htmlMirrorJsonBytes(encodeHtmlMirrorWireMessage({
     root,
     adoptedStyleSheets,
     documentMode,
     representability: receiverRepresentability,
-  });
+  }));
   if (!Number.isSafeInteger(byteLength) || byteLength > MAX_HTML_MIRROR_BYTES) {
     return undefined;
   }
@@ -381,10 +474,10 @@ export function createHtmlMirrorPatch(
     representability,
     inventoryOperationResources(parsed),
   );
-  const byteLength = htmlMirrorJsonBytes({
+  const byteLength = htmlMirrorJsonBytes(encodeHtmlMirrorWireMessage({
     operations: parsed,
     representability: receiverRepresentability,
-  });
+  }));
   if (!Number.isSafeInteger(byteLength) || byteLength > MAX_HTML_MIRROR_BYTES) {
     return undefined;
   }
@@ -802,18 +895,36 @@ function inventoryDocumentResources(
   adoptedStyleSheets: readonly string[],
 ): ReceiverResourceInventory {
   const inventory = emptyResourceInventory();
-  inventoryNodeResources(root, inventory);
+  const styleUrls = new Map<string, number>();
+  inventoryNodeResources(root, inventory, styleUrls);
   for (const cssText of adoptedStyleSheets) {
-    incrementInventory(inventory, 'preservedStyleSheets');
-    addRequestUrls(inventory, cssText);
+    inventoryAdoptedStyleSheet(inventory, cssText, styleUrls);
   }
   return inventory;
+}
+
+/** Counts one use of an adopted sheet; its URLs are scanned once (D84). */
+function inventoryAdoptedStyleSheet(
+  inventory: ReceiverResourceInventory,
+  cssText: string,
+  styleUrls: Map<string, number>,
+): void {
+  incrementInventory(inventory, 'preservedStyleSheets');
+  let urls = styleUrls.get(cssText);
+  if (urls === undefined) {
+    urls = countRequestUrls(cssText);
+    styleUrls.set(cssText, urls);
+  }
+  for (let index = 0; index < urls; index += 1) {
+    incrementInventory(inventory, 'requestCapable');
+  }
 }
 
 function inventoryOperationResources(
   operations: readonly HtmlMirrorPatchOperation[],
 ): ReceiverResourceInventory {
   const inventory = emptyResourceInventory();
+  const styleUrls = new Map<string, number>();
   for (const operation of operations) {
     if (operation.kind === 'attributes') {
       inventoryElementResources({
@@ -825,11 +936,13 @@ function inventoryOperationResources(
       }, inventory);
     } else if (operation.kind === 'children') {
       for (const child of operation.children) {
-        inventoryNodeResources(child, inventory);
+        inventoryNodeResources(child, inventory, styleUrls);
       }
     } else if (operation.kind === 'reconcile-children') {
       for (const child of operation.children) {
-        if (child.kind === 'graph') inventoryNodeResources(child.node, inventory);
+        if (child.kind === 'graph') {
+          inventoryNodeResources(child.node, inventory, styleUrls);
+        }
       }
     }
   }
@@ -839,6 +952,7 @@ function inventoryOperationResources(
 function inventoryNodeResources(
   node: HtmlMirrorNode,
   inventory: ReceiverResourceInventory,
+  styleUrls: Map<string, number>,
 ): void {
   if (node.kind === 'text') return;
   inventoryElementResources(node, inventory);
@@ -846,15 +960,14 @@ function inventoryNodeResources(
     node.resolvedStyleSheetText !== undefined;
   for (const child of node.children) {
     if (resolvedStyle && child.kind === 'text') continue;
-    inventoryNodeResources(child, inventory);
+    inventoryNodeResources(child, inventory, styleUrls);
   }
   if (!node.shadowRoot) return;
   for (const cssText of node.shadowRoot.adoptedStyleSheets) {
-    incrementInventory(inventory, 'preservedStyleSheets');
-    addRequestUrls(inventory, cssText);
+    inventoryAdoptedStyleSheet(inventory, cssText, styleUrls);
   }
   for (const child of node.shadowRoot.children) {
-    inventoryNodeResources(child, inventory);
+    inventoryNodeResources(child, inventory, styleUrls);
   }
 }
 
@@ -931,10 +1044,14 @@ function addRequestUrls(
   inventory: ReceiverResourceInventory,
   value: string,
 ): void {
-  const matches = value.match(/https?:\/\//giu)?.length ?? 0;
+  const matches = countRequestUrls(value);
   for (let index = 0; index < matches; index += 1) {
     incrementInventory(inventory, 'requestCapable');
   }
+}
+
+function countRequestUrls(value: string): number {
+  return value.match(/https?:\/\//giu)?.length ?? 0;
 }
 
 function emptyResourceInventory(): ReceiverResourceInventory {

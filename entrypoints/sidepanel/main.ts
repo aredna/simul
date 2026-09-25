@@ -667,6 +667,7 @@ const translationDriver = new TranslationDriver({
   renderDetectedLanguage: (text) => {
     detectedLanguageElement.textContent = text;
     detectedLanguageElement.hidden = !text;
+    syncAutoSourceOption();
   },
   invalidateComposer: () => quickComposer.invalidate(),
   syncComposerPanel: () => quickComposer.syncPanel(),
@@ -1459,7 +1460,31 @@ function syncPreferenceControls(): void {
   uiLocalizer.schedule();
 }
 
+/**
+ * With Auto-detect on, the From list names what it detected, "[A] English",
+ * and reads Auto-detect until then (owner request, D84). The name is already
+ * in the panel's language, so the label is kept out of the localized set.
+ */
+function syncAutoSourceOption(): void {
+  const auto = sourceSelect.querySelector<HTMLOptionElement>('option[value="auto"]');
+  if (!auto) return;
+  const detected = state.preferences.sourceLanguage === 'auto'
+    ? state.resolvedSourceLanguage
+    : undefined;
+  if (!detected) {
+    if (auto.dataset.uiLabel !== UI_STRINGS.autoDetectOption) {
+      setUiText(auto, UI_STRINGS.autoDetectOption);
+    }
+    return;
+  }
+  const label = `[A] ${localizeLanguageName(detected)}`;
+  delete auto.dataset.uiLabel;
+  auto.removeAttribute('lang');
+  if (auto.textContent !== label) auto.textContent = label;
+}
+
 function syncToolbarPreferenceControls(): void {
+  syncAutoSourceOption();
   const autoDetect = state.preferences.sourceLanguage === 'auto';
   toolbarAutoDetectButton.setAttribute('aria-pressed', String(autoDetect));
   setUiAttr(

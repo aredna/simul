@@ -78,6 +78,9 @@ language list and probes the selected pair at runtime. Both menus use a single
 specified order based on the English reference name, rather than locale-aware
 sorting that would move choices between sessions. The From menu begins with
 Auto-detect and renders the remaining names in the selected target language.
+Once Auto-detect has resolved the page, that first entry names the result,
+for example `[A] English`, and it reads Auto-detect again until the next page
+resolves (D84).
 The To menu uses the same code order but renders every name as its native
 endonym, including separate Simplified and Traditional Chinese labels. Language
 changes reset the visible strings and immediately translate again when the pair

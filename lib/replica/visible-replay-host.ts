@@ -147,9 +147,21 @@ export class VisibleReplayHost implements ReplayPresentationHost {
       committed.scroller.clientWidth ||
       this.#previewSurface.clientWidth ||
       committed.dimensions.viewportWidth;
+    // The frame keeps its own scrollbar, so the page lays out at the width it
+    // has in the source tab; the panel's scroller does the scrolling, so that
+    // strip is cropped away instead of showing a second scrollbar (D84).
+    const gutters = replicaScrollbarGutters(committed.iframe);
+    const visibleWidth = Math.max(
+      1,
+      committed.dimensions.viewportWidth - gutters.right,
+    );
+    const visibleHeight = Math.max(
+      1,
+      committed.dimensions.viewportHeight - gutters.bottom,
+    );
     const scale = computeMirrorScale(
       availableWidth,
-      committed.dimensions.viewportWidth,
+      visibleWidth,
       this.#layout.displayMode,
       this.#layout.zoomPercent,
     );
@@ -157,15 +169,15 @@ export class VisibleReplayHost implements ReplayPresentationHost {
     const contentWidth = Math.max(
       committed.live ? 0 : committed.dimensions.documentWidth,
       committed.replayExtent.width,
-      committed.dimensions.viewportWidth,
+      visibleWidth,
     );
     const contentHeight = Math.max(
       committed.live ? 0 : committed.dimensions.documentHeight,
       committed.replayExtent.height,
-      committed.dimensions.viewportHeight,
+      visibleHeight,
     );
-    const viewportWidth = boundedExtent(committed.dimensions.viewportWidth * scale);
-    const viewportHeight = boundedExtent(committed.dimensions.viewportHeight * scale);
+    const viewportWidth = boundedExtent(visibleWidth * scale);
+    const viewportHeight = boundedExtent(visibleHeight * scale);
     committed.mount.style.width = `${committed.dimensions.viewportWidth}px`;
     committed.mount.style.height = `${committed.dimensions.viewportHeight}px`;
     committed.scaleLayer.style.width = `${committed.dimensions.viewportWidth}px`;
@@ -800,6 +812,38 @@ function normalizeExtent(extent: VisibleReplayExtent): VisibleReplayExtent {
     width: boundedDimension(extent.width),
     height: boundedDimension(extent.height),
   };
+}
+
+/** Largest scrollbar a replica frame is trusted to have; beyond it, none. */
+const MAX_REPLICA_SCROLLBAR_GUTTER = 64;
+
+/**
+ * The width and height of the replica frame's own scrollbars: its viewport
+ * less its scrolling element's client box. Overlay scrollbars take none.
+ */
+function replicaScrollbarGutters(
+  iframe: HTMLIFrameElement | undefined,
+): { readonly right: number; readonly bottom: number } {
+  try {
+    const view = iframe?.contentWindow;
+    const document = iframe?.contentDocument;
+    const root = document?.scrollingElement ?? document?.documentElement;
+    if (!view || !root) return { right: 0, bottom: 0 };
+    const gutter = (outer: number, inner: number): number => {
+      const value = outer - inner;
+      return Number.isFinite(value) &&
+        value > 0 &&
+        value <= MAX_REPLICA_SCROLLBAR_GUTTER
+        ? value
+        : 0;
+    };
+    return {
+      right: gutter(view.innerWidth, root.clientWidth),
+      bottom: gutter(view.innerHeight, root.clientHeight),
+    };
+  } catch {
+    return { right: 0, bottom: 0 };
+  }
 }
 
 function computeMirrorScale(

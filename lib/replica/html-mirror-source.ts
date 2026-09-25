@@ -9,6 +9,7 @@ import {
   createHtmlMirrorError,
   createHtmlMirrorPatch,
   createHtmlMirrorScrollUpdate,
+  encodeHtmlMirrorWireMessage,
   readHtmlMirrorControllerMessage,
   readHtmlMirrorPortSessionId,
   type HtmlMirrorReconcileChild,
@@ -1307,7 +1308,7 @@ export class HtmlMirrorSourceSession {
   #post(message: unknown): void {
     if (this.#disposed) return;
     try {
-      this.environment.port.postMessage(message);
+      this.environment.port.postMessage(encodeHtmlMirrorWireMessage(message));
     } catch {
       this.dispose(false);
     }
@@ -2207,17 +2208,39 @@ function sourceMutationOwnerElement(node: Node): Element | undefined {
   return node.parentElement ?? undefined;
 }
 
+/**
+ * Hashes of recently signed sheet texts. Every shadow root of a web component
+ * adopts the same sheets, so one poll would otherwise hash the same text once
+ * per root (tens of megabytes on Reddit's feed, D84).
+ */
+const STYLE_TEXT_HASHES = new Map<string, readonly [number, number]>();
+const MAX_STYLE_TEXT_HASHES = 256;
+
+function styleTextHash(cssText: string): readonly [number, number] {
+  const known = STYLE_TEXT_HASHES.get(cssText);
+  if (known) return known;
+  let fnv = 0x811c9dc5;
+  let djb = 5381;
+  for (let index = 0; index < cssText.length; index += 1) {
+    const code = cssText.charCodeAt(index);
+    fnv = Math.imul(fnv ^ code, 0x01000193) >>> 0;
+    djb = (Math.imul(djb, 33) ^ code) >>> 0;
+  }
+  if (STYLE_TEXT_HASHES.size >= MAX_STYLE_TEXT_HASHES) STYLE_TEXT_HASHES.clear();
+  const hash = [fnv, djb] as const;
+  STYLE_TEXT_HASHES.set(cssText, hash);
+  return hash;
+}
+
 function adoptedStyleSignature(styles: readonly string[]): string {
   let fnv = 0x811c9dc5;
   let djb = 5381;
   let characters = 0;
   for (let sheetIndex = 0; sheetIndex < styles.length; sheetIndex += 1) {
     const cssText = styles[sheetIndex] as string;
-    for (let index = 0; index < cssText.length; index += 1) {
-      const code = cssText.charCodeAt(index);
-      fnv = Math.imul(fnv ^ code, 0x01000193) >>> 0;
-      djb = (Math.imul(djb, 33) ^ code) >>> 0;
-    }
+    const [sheetFnv, sheetDjb] = styleTextHash(cssText);
+    fnv = Math.imul(fnv ^ sheetFnv, 0x01000193) >>> 0;
+    djb = (Math.imul(djb, 33) ^ sheetDjb) >>> 0;
     characters += cssText.length;
     fnv = Math.imul(fnv ^ (sheetIndex + 1), 0x01000193) >>> 0;
     djb = (Math.imul(djb, 33) ^ (sheetIndex + 1)) >>> 0;
