@@ -4278,3 +4278,35 @@ link.
 
 Build identity `0.5.2 beta v.20260925.6`. Gate: `npm run check` green,
 **1,551 tests pass**, artifact byte-verified.
+
+### D97. Limited-quirks pages mirror in limited-quirks mode (2026-09-25)
+
+Same branch. Open item 4 of the 2026-09-23 handover (found in D65): Chrome's
+limited-quirks mode (the XHTML 1.0 Transitional and Frameset doctypes, and
+HTML 4.01 Transitional and Frameset with a system identifier, common on older
+sites) reports `CSS1Compat` like standards mode, so its replica got the
+standards shell.
+
+- **Visible difference.** The line-height quirk: in (limited-)quirks mode an
+  image alone on a line gets no descender gap. A sliced-image table grows a
+  few pixels per row in a standards replica. Reproduced in Chrome for Testing
+  with a three-row table of 40 px images under the XHTML 1.0 Transitional
+  doctype: the source table is 120 px, the 0.5.2 replica 132 px (no doctype).
+- **Change.** The page side reads the doctype by the HTML parser's own rule
+  for the initial insertion mode (`sourceDocumentMode`): `BackCompat` is
+  quirks, those doctypes are `limited-quirks`, anything else standards. The
+  protocol accepts the third value. As for quirks (D65), an `srcdoc` document
+  cannot be anything but no-quirks, so the replica is a blank frame into which
+  the panel writes the shell, here with the XHTML 1.0 Transitional doctype;
+  the written shell is trusted only at the panel's URL, with `CSS1Compat` and
+  that doctype, and keeps the same sandbox and CSP.
+- **Verified in Chrome for Testing:** the new replica carries the doctype and
+  the table is 120 px, as in the source.
+- **Tests.** The doctype rule (both XHTML variants, HTML 4.01 with and without
+  a system identifier, Strict, none); the protocol accepts `limited-quirks`
+  and still refuses an unknown mode; the engine stages the Transitional shell
+  for a limited-quirks checkpoint.
+- **Docs.** `docs/replica-fidelity.md`, `docs/translation-companion.md`.
+
+Build identity `0.5.2 beta v.20260925.7`. Gate: `npm run check` green,
+**1,553 tests pass**, artifact byte-verified.
