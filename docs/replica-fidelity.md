@@ -81,7 +81,16 @@ the start message, so the page and the panel always use the same limits, and a
 change rebuilds the mirror. Reading a page pauses its tab for about a second
 per 40,000 nodes. An inline
 `<style>` whose rules are read from CSSOM sends those rules once, not its raw
-text as well. When Chrome makes an imported sheet unreadable, Passive Fidelity may
+text as well. Chrome's CSSOM cannot write back a shorthand that holds `var()`
+once a later declaration in the same rule sets one of its longhands
+(`font:var(--f);line-height:2` reads back as empty longhands, and the font is
+lost); for such a sheet a `<style>` sends its own text instead, but only when
+re-parsing that text gives exactly the sheet's rules, so text a script has
+changed through the CSSOM is never used (D83: every Reddit button had fallen
+back to the browser's button font). An escaped character in a selector is
+part of a name: Tailwind's `.before\:content-\[\'x\'\]` opens no string and
+`.bg-\[url\(…\)\]` no function (D83: one such class had rejected Reddit's
+whole 237 KB sheet). When Chrome makes an imported sheet unreadable, Passive Fidelity may
 retain only a normalized HTTP(S) `@import`; that import is request-capable.
 Conservative removes imports. Scriptable URLs, CSS `expression()`, `behavior:`,
 `-moz-binding`, invalid schemes, and over-budget rule graphs are rejected.
@@ -119,6 +128,19 @@ source page: the frame sandbox omits `allow-forms`, the shell CSP sets
 `form-action 'none'`, and the document-wide activation guard blocks every
 activation event. A form is not marked `inert`, because that would also block
 Simul's own dropdown facsimiles inside it, where most real select boxes sit.
+
+Custom elements keep the page's definition state (D83). Page CSS often
+styles `:defined` and `:not(:defined)`: Reddit hides its sort bar, pulses
+placeholders and sizes gaps between posts until its elements upgrade. The
+page reports each element it has defined, and for each such name the replica
+registers an empty class of Simul's own, so those rules match as they do on
+the page. No page code runs: the class has no body, the replica's sandbox
+still blocks its scripts, and an element the page has not defined stays
+undefined in the replica.
+
+Chrome draws its own controls on a video in a frame where scripts are
+disabled, so a mirrored video can show a native control bar that the page
+hides behind its own player; it cannot play.
 
 Native dropdown popups are browser/OS presentation rather than observable DOM,
 so Simul does not attempt to copy their ephemeral geometry. Instead, each
@@ -319,6 +341,12 @@ Some gaps cannot be fixed by admitting more sanitizer syntax:
 - **Cross-origin CSSOM.** A stylesheet link may render while Chrome's same-origin
   rules prevent Simul from reading its rules. Passive Fidelity can retain the
   normalized link/import, but cannot flatten or inspect inaccessible CSSOM.
+- **Shorthands CSSOM cannot write back.** A rule in an adopted (constructed)
+  or linked sheet whose `var()` shorthand Chrome reads back as empty longhands
+  loses that shorthand in the replica; only a `<style>` element has its own
+  text to fall back on (D83). On Reddit this leaves the buttons inside its
+  shadow roots ("Join", the sort and share buttons) in the browser's button
+  font.
 - **Computed-style fallback.** Simul intentionally does not serialize every
   computed property. A broad snapshot would be large, slow, privacy-sensitive,
   and likely to freeze responsive cascade behavior. A future fallback must be
@@ -332,9 +360,11 @@ Some gaps cannot be fixed by admitting more sanitizer syntax:
   pixels of canvas, video, audio visualization, DRM/protected media, and active
   embedded documents cannot cross the current isolated boundary.
 - **Script-owned state.** Closed shadow roots, generated runtime state,
-  `ElementInternals`, `:defined` behavior, and virtualized content that does not
+  `ElementInternals` and custom states, and virtualized content that does not
   exist in the browser-produced accessible DOM cannot be recreated without
-  executing the website, which Simul will not do.
+  executing the website, which Simul will not do. Definition state is the
+  exception: it is carried as a flag and matched with empty Simul-owned
+  classes (D83).
 
 These are product limits, not exceptions that weaken the sandbox. OpenAI.com,
 Reddit, Y Combinator, and D-U-N-S are useful manual compatibility checks, but

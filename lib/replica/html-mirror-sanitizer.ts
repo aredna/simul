@@ -83,6 +83,8 @@ export interface HtmlMirrorElementNode {
   readonly controlText?: HtmlMirrorControlText;
   readonly canvasBackgroundColor?: string;
   readonly resolvedStyleSheetText?: string;
+  /** The page has defined this autonomous custom element (D83). */
+  readonly customElementDefined?: true;
   readonly shadowRoot?: HtmlMirrorShadowRoot;
   /** Canonical extension-owned shell replacing one hard-secret source root. */
   readonly opaquePlaceholder?: true;
@@ -97,6 +99,7 @@ export interface HtmlMirrorElementHints {
   readonly controlText?: HtmlMirrorControlText;
   readonly canvasBackgroundColor?: string;
   readonly resolvedStyleSheetText?: string;
+  readonly customElementDefined?: true;
 }
 
 export interface HtmlMirrorControlText extends SourceControlText {
@@ -987,7 +990,28 @@ export function sanitizeSourceElementHints(
     ...(resolvedStyleSheetText !== undefined
       ? { resolvedStyleSheetText }
       : {}),
+    ...(isSourceCustomElementDefined(source)
+      ? { customElementDefined: true as const }
+      : {}),
   });
+}
+
+/**
+ * Whether the page has defined this autonomous custom element. Page CSS often
+ * styles `:not(:defined)` (Reddit hides its sort bar and sizes placeholders
+ * until its elements upgrade); the replica runs no page code, so it registers
+ * an empty class of its own for the name instead (D83).
+ */
+function isSourceCustomElementDefined(source: Element): boolean {
+  if (
+    source.namespaceURI !== 'http://www.w3.org/1999/xhtml' ||
+    !isAutonomousCustomElementName(source.localName)
+  ) return false;
+  try {
+    return source.matches(':defined');
+  } catch {
+    return false;
+  }
 }
 
 export function sanitizeSourceDocument(
@@ -1115,8 +1139,8 @@ export function readHtmlMirrorNode(
     ], [
       'visuallyHidden', 'selectedImageSource', 'selectedOptionIndexes',
       'selectPickerOpen', 'selectPresentationStyle', 'controlText',
-      'canvasBackgroundColor', 'resolvedStyleSheetText', 'shadowRoot',
-      'opaquePlaceholder',
+      'canvasBackgroundColor', 'resolvedStyleSheetText',
+      'customElementDefined', 'shadowRoot', 'opaquePlaceholder',
     ]) ||
     !isNamespace(input.namespace) ||
     !isSafeTagName(input.tagName) ||
@@ -1143,6 +1167,7 @@ export function readHtmlMirrorNode(
         input.controlText !== undefined ||
         input.canvasBackgroundColor !== undefined ||
         input.resolvedStyleSheetText !== undefined ||
+        input.customElementDefined !== undefined ||
         input.shadowRoot !== undefined
       )
       : isSourceSecretPlaceholderTagName(input.tagName))
@@ -1158,6 +1183,11 @@ export function readHtmlMirrorNode(
   ) return undefined;
   if (
     (input.visuallyHidden !== undefined && input.visuallyHidden !== true) ||
+    (input.customElementDefined !== undefined && (
+      input.customElementDefined !== true ||
+      input.namespace !== 'html' ||
+      !isAutonomousCustomElementName(input.tagName)
+    )) ||
     input.selectPickerOpen !== undefined ||
     input.selectedOptionIndexes !== undefined ||
     input.controlText !== undefined ||
@@ -1421,6 +1451,9 @@ export function readHtmlMirrorNode(
     ...(canvasBackgroundColor ? { canvasBackgroundColor } : {}),
     ...(resolvedStyleSheetText !== undefined
       ? { resolvedStyleSheetText }
+      : {}),
+    ...(input.customElementDefined === true
+      ? { customElementDefined: true as const }
       : {}),
     ...(shadowRoot ? { shadowRoot } : {}),
     ...(opaquePlaceholder ? { opaquePlaceholder: true as const } : {}),
@@ -2615,6 +2648,17 @@ function readResolvedElementStyleSheet(
       representability ?? createHtmlMirrorRepresentabilityCollector(),
       fidelityPolicy,
     ) ?? null;
+    if (resolved && LOST_SHORTHAND_DECLARATION.test(resolved.cssText)) {
+      const cssText = readStyleElementSourceText(
+        element,
+        sheet,
+        baseUrl,
+        fidelityPolicy,
+      );
+      if (cssText !== undefined) {
+        resolved = Object.freeze({ cssText, ruleCount: resolved.ruleCount });
+      }
+    }
     if (
       resolved &&
       (
@@ -2651,6 +2695,56 @@ function readResolvedElementStyleSheet(
     incrementRepresentability(representability, 'preservedStyleSheetCount');
   }
   return resolved?.cssText;
+}
+
+/**
+ * Chrome's CSSOM cannot write back a shorthand that holds var() once a later
+ * declaration in the same rule sets one of its longhands: `font:var(--f);
+ * line-height:2` reads as `font-style: ; font-weight: ; …`, and the replica
+ * drops those empty longhands, losing the whole font (Reddit's buttons, D83).
+ * Custom properties may be empty on purpose; standard properties never are.
+ */
+const LOST_SHORTHAND_DECLARATION = /[{;]\s*[a-z][a-z-]*\s*:\s*[;}]/u;
+
+/**
+ * A `<style>` element's own text, when it still holds exactly the rules its
+ * sheet has: re-parsing it must give the same rules, so text a script has
+ * since changed through the CSSOM (insertRule, CSS-in-JS) is never used.
+ */
+function readStyleElementSourceText(
+  element: Element,
+  sheet: CSSStyleSheet,
+  baseUrl: string,
+  fidelityPolicy: SelectableReplicaFidelityPolicy,
+): string | undefined {
+  if (element.localName.toLowerCase() !== 'style') return undefined;
+  const text = element.textContent ?? '';
+  const Sheet = element.ownerDocument?.defaultView?.CSSStyleSheet;
+  if (!text || text.length > MAX_HTML_MIRROR_STRING || typeof Sheet !== 'function') {
+    return undefined;
+  }
+  try {
+    const parsed = new Sheet();
+    parsed.replaceSync(text);
+    const live = sheet.cssRules;
+    if (parsed.cssRules.length !== live.length) return undefined;
+    for (let index = 0; index < live.length; index += 1) {
+      if (parsed.cssRules[index]?.cssText !== live[index]?.cssText) {
+        return undefined;
+      }
+    }
+    const mediaText = sheet.media?.mediaText?.trim() ?? '';
+    return sanitizeCss(
+      mediaText ? `@media ${mediaText}{${text}}` : text,
+      baseUrl,
+      false,
+      // The CSSOM read already counted this sheet's URLs.
+      undefined,
+      fidelityPolicy,
+    );
+  } catch {
+    return undefined;
+  }
 }
 
 function readTransportedResolvedStyleSheetText(
@@ -2765,7 +2859,10 @@ export function sanitizeCss(
       });
   if (withoutImports === undefined) return undefined;
   const literalExecutableWithoutImports = cssExecutableProjection(withoutImports);
-  const decodedWithoutImports = decodeCssEscapes(literalExecutableWithoutImports);
+  const decodedWithoutImports = decodeCssEscapes(
+    literalExecutableWithoutImports,
+    true,
+  );
   const decodedImageSetCount = decodedWithoutImports.match(
     /(?:-webkit-)?image-set\s*\(/giu,
   )?.length ?? 0;
@@ -2790,7 +2887,10 @@ export function sanitizeCss(
   const literalExecutableNormalizedCss = cssExecutableProjection(
     normalizedImageSets,
   );
-  const decodedNormalizedCss = decodeCssEscapes(literalExecutableNormalizedCss);
+  const decodedNormalizedCss = decodeCssEscapes(
+    literalExecutableNormalizedCss,
+    true,
+  );
   const decodedUrlCount = decodedNormalizedCss.match(/\burl\s*\(/giu)?.length ?? 0;
   const literalUrlCount = literalExecutableNormalizedCss.match(
     /\burl\s*\(/giu,
@@ -2945,6 +3045,12 @@ function stripCssCommentsOutsideStrings(css: string): string | undefined {
       else if (character === quote) quote = undefined;
       continue;
     }
+    // An escaped character outside a string belongs to a name, as in the
+    // Tailwind selector `.content-\[\'x\'\]`; it opens no string (D83).
+    if (character === '\\') {
+      index += 1;
+      continue;
+    }
     if (character === '"' || character === "'") {
       quote = character;
       continue;
@@ -2968,6 +3074,10 @@ function cssExecutableProjection(css: string): string {
   let segmentStart = 0;
   for (let index = 0; index < css.length; index += 1) {
     const quote = css[index]!;
+    if (quote === '\\') {
+      index += 1;
+      continue;
+    }
     if (quote !== '"' && quote !== "'") continue;
     parts.push(css.slice(segmentStart, index));
     const stringStart = index;
@@ -3002,6 +3112,10 @@ function rewriteCssUrlsOutsideStrings(
       } else if (character === quote) {
         quote = undefined;
       }
+      continue;
+    }
+    if (character === '\\') {
+      index += 1;
       continue;
     }
     if (character === '"' || character === "'") {
@@ -3203,6 +3317,10 @@ function findNextCssImageSet(
       }
       continue;
     }
+    if (character === '\\') {
+      index += 1;
+      continue;
+    }
     if (character === '"' || character === "'") {
       quote = character;
       continue;
@@ -3235,7 +3353,8 @@ function findCssFunctionClose(
       }
       continue;
     }
-    if (character === '"' || character === "'") quote = character;
+    if (character === '\\') index += 1;
+    else if (character === '"' || character === "'") quote = character;
     else if (character === '(') depth += 1;
     else if (character === ')' && --depth === 0) return index;
   }
@@ -3257,7 +3376,8 @@ function splitCssTopLevel(value: string, separator: string): string[] | undefine
       }
       continue;
     }
-    if (character === '"' || character === "'") quote = character;
+    if (character === '\\') index += 1;
+    else if (character === '"' || character === "'") quote = character;
     else if (character === '(') depth += 1;
     else if (character === ')') {
       if (depth === 0) return undefined;
@@ -3306,6 +3426,10 @@ function stripCssImports(css: string, onStrip?: () => void): string {
       }
       if (character === quote) quote = undefined;
       index += 1;
+      continue;
+    }
+    if (character === '\\') {
+      index += 2;
       continue;
     }
     if (character === '"' || character === "'") {
@@ -3372,6 +3496,10 @@ function rewritePassiveCssImports(
       }
       if (character === quote) quote = undefined;
       index += 1;
+      continue;
+    }
+    if (character === '\\') {
+      index += 2;
       continue;
     }
     if (character === '"' || character === "'") {
@@ -4401,17 +4529,26 @@ function nearestElement(node: Node): Element | undefined {
   return readSourceFlatTreeElementPath(node)?.[0];
 }
 
-function decodeCssEscapes(value: string): string {
+/**
+ * With `namesOnly`, an escape that yields anything but a name character
+ * decodes to `_`: an escape is always part of a name and never opens a
+ * function, so Tailwind's `.bg-\[url\(\'a\.png\'\)\]` counts no `url(`
+ * while `u\72l(` still does (D83).
+ */
+function decodeCssEscapes(value: string, namesOnly = false): string {
   return value.replace(/\\(?:\r\n|[\n\r\f])/gu, '').replace(
     /\\(?:([0-9a-fA-F]{1,6})[\t\n\f\r ]?|([^\n\r\f0-9a-fA-F]))/gu,
     (_match, hex: string | undefined, escaped: string | undefined) => {
+      let decoded = escaped ?? '';
       if (hex) {
         const codePoint = Number.parseInt(hex, 16);
-        return codePoint > 0 && codePoint <= 0x10ffff
+        decoded = codePoint > 0 && codePoint <= 0x10ffff
           ? String.fromCodePoint(codePoint)
           : '\uFFFD';
       }
-      return escaped ?? '';
+      return namesOnly && !/^(?:[\w-]|[^\0-\x7f])/u.test(decoded)
+        ? '_'
+        : decoded;
     },
   );
 }
@@ -4459,6 +4596,17 @@ function isCustomElementName(value: string | null): boolean {
     value && value.length <= 128 && value.includes('-') &&
     /^[a-z][a-z0-9._-]*$/u.test(value),
   );
+}
+
+/** Hyphenated names HTML reserves for SVG and MathML. */
+const RESERVED_CUSTOM_ELEMENT_NAMES = new Set([
+  'annotation-xml', 'color-profile', 'font-face', 'font-face-format',
+  'font-face-name', 'font-face-src', 'font-face-uri', 'missing-glyph',
+]);
+
+/** A tag name `customElements.define` accepts. */
+export function isAutonomousCustomElementName(value: string): boolean {
+  return isCustomElementName(value) && !RESERVED_CUSTOM_ELEMENT_NAMES.has(value);
 }
 
 function isSafeAttributeName(value: string): boolean {

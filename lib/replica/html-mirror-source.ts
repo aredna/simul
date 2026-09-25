@@ -2401,6 +2401,7 @@ function emittedElementSignature(
     | 'controlText'
     | 'canvasBackgroundColor'
     | 'resolvedStyleSheetText'
+    | 'customElementDefined'
   >,
 ): string {
   const controlText = element.controlText;
@@ -2418,6 +2419,7 @@ function emittedElementSignature(
       : null,
     element.canvasBackgroundColor ?? null,
     element.resolvedStyleSheetText ?? null,
+    element.customElementDefined === true,
   ]);
 }
 
