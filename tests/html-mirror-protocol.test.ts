@@ -1869,6 +1869,7 @@ describe('isolated HTML sanitizer and protocol', () => {
       { ...placeholder, attributes: [['src', qrCanary]] },
       { ...placeholder, selectedImageSource: qrCanary },
       { ...placeholder, resolvedStyleSheetText: '*{background:red}' },
+      { ...placeholder, customElementDefined: true },
       {
         ...placeholder,
         children: [{ kind: 'text', id: 99_991, text: 'forged', translatable: true }],
@@ -3272,6 +3273,59 @@ describe('isolated HTML sanitizer and protocol', () => {
     )).toEqual(conservativeCheckpoint);
   });
 
+  it('reads a style element\'s own text when the CSSOM drops a var() shorthand (D83)', () => {
+    // Chrome writes `font:var(--f)` back as empty longhands once a later
+    // declaration sets line-height, and the replica then loses the whole
+    // font; Reddit's buttons fell back to 13px Arial.
+    const text = '.button{font:var(--button-font);line-height:2}/* x */.x{color:red}';
+    const lossy = [
+      {
+        cssText: '.button { font-style: ; font-weight: ; font-size: ; ' +
+          'font-family: ; line-height: 2; }',
+      },
+      { cssText: '.x { color: red; }' },
+    ];
+    const { document } = parseHTML(
+      `<!doctype html><html><head><style id="theme">${text}</style></head>` +
+      '<body></body></html>',
+    );
+    const style = document.querySelector('#theme')!;
+    let parses = 0;
+    class ParsedSheet {
+      cssRules: readonly { readonly cssText: string }[] = [];
+      replaceSync(value: string): void {
+        parses += 1;
+        this.cssRules = value === text ? lossy : [];
+      }
+    }
+    Object.defineProperty(document, 'defaultView', {
+      configurable: true,
+      value: { CSSStyleSheet: ParsedSheet },
+    });
+    const read = (rules: readonly { readonly cssText: string }[]) => {
+      Object.defineProperty(style, 'sheet', {
+        configurable: true,
+        value: fakeStyleSheetRules(rules),
+      });
+      return sanitizeSourceElementHints(
+        style,
+        'https://example.test/',
+        undefined,
+        'passive',
+      ).resolvedStyleSheetText;
+    };
+
+    expect(read(lossy))
+      .toBe('.button{font:var(--button-font);line-height:2}.x{color:red}');
+    // Rules a script changed through the CSSOM keep the CSSOM text.
+    const changed = [...lossy, { cssText: '.y { color: blue; }' }];
+    expect(read(changed)).toBe(changed.map((rule) => rule.cssText).join('\n'));
+    // A sheet that lost nothing is read from the CSSOM, without a parse.
+    parses = 0;
+    expect(read([{ cssText: '.x { color: red; }' }])).toBe('.x { color: red; }');
+    expect(parses).toBe(0);
+  });
+
   it('still omits one stylesheet above the string cap', () => {
     const css = `.page{${'color:red;'.repeat(
       Math.ceil(MAX_HTML_MIRROR_STRING / 10),
@@ -3394,6 +3448,89 @@ describe('isolated HTML sanitizer and protocol', () => {
     expect(sanitizeCss(css, 'https://example.com/')).toBe(
       '.sm\\:hidden{display:none}.bullet::before{content:"\\2022"}',
     );
+  });
+
+  it('reads escaped quotes and brackets in selectors as parts of names (D83)', () => {
+    // Tailwind escapes the quotes and brackets of class names such as
+    // before:content-['•']; read as a string opener, one of them rejected
+    // Reddit's whole 237 KB sheet.
+    const base = 'https://example.test/app/';
+    const tailwind =
+      String.raw`.before\:content-\[\'\2022\'\]::before{--tw-content:'•';content:var(--tw-content)}` +
+      String.raw`.font-\[\'Inter\'\]{font-family:'Inter'}.w-1\/2{width:50%}`;
+    for (const policy of ['passive', 'conservative'] as const) {
+      expect(sanitizeCss(tailwind, base, false, undefined, policy)).toBe(tailwind);
+    }
+    // An escaped bracket opens no function; the real url() is still rewritten.
+    expect(sanitizeCss(
+      String.raw`.bg-\[url\(\'\/a\.png\'\)\]{background:url('/a.png')}` +
+        String.raw`.bg-\[image-set\(\'b\.png\'_1x\)\]{color:red}`,
+      base,
+    )).toBe(
+      String.raw`.bg-\[url\(\'\/a\.png\'\)\]{background:url("https://example.test/a.png")}` +
+        String.raw`.bg-\[image-set\(\'b\.png\'_1x\)\]{color:red}`,
+    );
+    // A URL after an escaped quote is no longer skipped as string content.
+    expect(sanitizeCss(String.raw`.x\'{background:url(/b.png)}`, base))
+      .toBe(String.raw`.x\'{background:url("https://example.test/b.png")}`);
+    // Escaped letters still spell a function the rewriter cannot isolate.
+    expect(sanitizeCss(String.raw`.y{background:u\72l(/c.png)}`, base))
+      .toBeUndefined();
+  });
+
+  it('carries whether the page has defined a custom element (D83)', () => {
+    const { document } = parseHTML(
+      '<html><body><shreddit-feed></shreddit-feed>' +
+      '<faceplate-partial></faceplate-partial><div></div></body></html>',
+    );
+    // linkedom cannot match :defined; each element answers as the page would.
+    for (const element of document.querySelectorAll('body *')) {
+      Object.defineProperty(element, 'matches', {
+        configurable: true,
+        value: (selector: string) =>
+          selector === ':defined' && element.localName !== 'faceplate-partial',
+      });
+    }
+    const hint = (name: string) => sanitizeSourceElementHints(
+      document.querySelector(name)!,
+      'https://example.test/',
+    ).customElementDefined;
+    expect(hint('shreddit-feed')).toBe(true);
+    expect(hint('faceplate-partial')).toBeUndefined();
+    expect(hint('div')).toBeUndefined();
+
+    const node = (
+      tagName: string,
+      customElementDefined: unknown,
+      namespace = 'html',
+    ) => readHtmlMirrorNode({
+      kind: 'element', id: 1, namespace, tagName, attributes: [], children: [],
+      customElementDefined,
+    });
+    expect(node('shreddit-feed', true)).toMatchObject({
+      customElementDefined: true,
+    });
+    for (const forged of [
+      node('shreddit-feed', false),
+      node('div', true),
+      node('font-face', true),
+      node('shreddit-feed', true, 'svg'),
+    ]) {
+      expect(forged).toBeUndefined();
+    }
+
+    const identity = createReplicaIdentity({
+      sessionId: 'defined', pageEpoch: 1, generation: 1,
+      documentId: 'defined-document', frameId: 0, sequence: 1,
+    });
+    const patch = (tagName: string) => createHtmlMirrorPatch(identity, 1, 1, [{
+      kind: 'attributes', nodeId: 7, namespace: 'html', tagName,
+      attributes: [], customElementDefined: true,
+    }]);
+    expect(patch('faceplate-partial')?.operations[0]).toMatchObject({
+      customElementDefined: true,
+    });
+    expect(patch('div')).toBeUndefined();
   });
 
   it('rewrites executable CSS URLs without altering quoted strings', () => {

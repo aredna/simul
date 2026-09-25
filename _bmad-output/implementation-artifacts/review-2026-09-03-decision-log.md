@@ -3662,3 +3662,72 @@ public site's scripted mega menu and freee's header as the other two cases.
 
 Build identity `0.5.1 beta v.20260924.2`; `dist/chrome-unpacked` re-synced.
 Gate: `npm run check` green, **1,526 tests pass, 1 skipped** (+12).
+
+### D83. Reddit mirrors with its own styles (2026-09-25)
+
+- **Reported.** After D82 the owner asked for a look at reddit.com: "There
+  are many problems with the website itself."
+- **Reproduced in Chrome for Testing.** reddit.com refuses this machine's
+  headless Chrome ("You've been blocked by network security"), and that page
+  already mirrored with no styling at all. Reddit's home feed and
+  r/AskReddit, as archived on 2026-09-21/22, were served locally with
+  Reddit's own scripts running (204 open shadow roots, 45 distinct adopted
+  sheets): the mirror showed a page-wide Reddit logo, no columns, no feed
+  layout and a blurred post image.
+- **Causes.** (1) Reddit's `<style id="tailwind">` (237 KB, about 3,200
+  rules) holds nearly all of its layout, and the sanitizer rejected it whole.
+  Tailwind escapes the quotes and brackets in class names
+  (`.before\:content-\[\'\2022\'\]`); the CSS string scanners did not skip an
+  escape outside a string, read `\'` as the start of a string, found it
+  unterminated and refused the rule, and one refused rule refuses its sheet.
+  A related check refused class names such as `.bg-\[url\(…\)\]`, decoding
+  the escaped bracket into a `url(` the URL rewriter never saw. (2) Chrome's
+  CSSOM writes `font:var(--button-font);…;line-height:…` back as empty
+  longhands (`font-weight: ;`), which the replica drops, so every Reddit
+  button fell back to 13.3px Arial. (3) Reddit styles its elements until they
+  upgrade with `:not(:defined)` rules (`.nd\:hidden:not(:defined)`,
+  placeholder heights, pulse animations), and the replica defines no custom
+  elements, so the sort bar was hidden and posts were spaced apart.
+- **Changes.** The CSS scanners skip an escaped character outside strings as
+  CSS does (comments, strings, imports, `url()`, `image-set()`, top-level
+  splits). The escaped-function checks decode an escape to a name character
+  when it is not one, so `u\72l(` is still refused and `url\(` is a name.
+  This also closes a gap: a `url()` after an escaped quote used to be skipped
+  as string content and left unrewritten. A `<style>` whose CSSOM lost a
+  shorthand sends its own text instead, only when re-parsing that text in the
+  page gives exactly the sheet's rules. With the owner's approval (the
+  fidelity doc had listed `:defined` as a limit), each element carries
+  `customElementDefined` when the page has defined it (`matches(':defined')`,
+  autonomous names only), through checkpoints and attribute patches; the
+  receiver checks the name and registers an empty Simul-owned class in the
+  replica frame. No page code runs, and the frame's own scripts stay blocked
+  (checked in Chrome: define works from the panel into the script-less
+  sandboxed frame).
+- **Verified in Chrome for Testing.** The live block page mirrors exactly as
+  it paints. Home feed: every visible text run of the page appears in the
+  mirror; the header, left sign-in card, sort bar, feed and community rail
+  line up, as do the gaps between posts. r/AskReddit: banner, icon,
+  highlights, rules and bookmarks match. Document buttons ("Sign Up",
+  "Log In", "Wiki") have Reddit's font again.
+- **Found, not fixed.** Buttons inside Reddit's shadow roots ("Join", the
+  sort and share buttons, the vote labels) still lose their font: their
+  `.button` rule is in an adopted sheet, which has no text to fall back on.
+  A mirrored video shows Chrome's native controls, which Chrome draws in any
+  frame without scripts; hiding them needs a rule inside each shadow root.
+  Both are in `docs/replica-fidelity.md`.
+- **Tests.** Sanitizer: Tailwind selectors with escaped quotes, slashes and
+  brackets pass unchanged under both policies; an escaped `url\(` or
+  `image-set\(` in a class name is kept while the real `url()` is rewritten;
+  a `url()` after an escaped quote is rewritten; `u\72l(` is still refused. A
+  `<style>` with a lost shorthand sends its text, a sheet a script changed
+  keeps its CSSOM text, and a sheet that lost nothing is not re-parsed.
+  Protocol: `customElementDefined` is carried for a defined custom element,
+  refused on a built-in, a reserved name, SVG, `false`, an attribute patch of
+  a `div`, and a secret placeholder. Engine: only names the page defined are
+  registered, once each, with an empty class, and an attribute patch can add
+  a name later. Every new test fails on the old code.
+- **Docs.** `docs/replica-fidelity.md` (CSS and cascade, custom elements and
+  video controls, browser-boundary gaps).
+
+Build identity `0.5.1 beta v.20260924.3`; `dist/chrome-unpacked` re-synced.
+Gate: `npm run check` green, **1,530 tests pass, 1 skipped** (+4).
