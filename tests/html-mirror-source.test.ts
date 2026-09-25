@@ -2040,13 +2040,19 @@ describe('HtmlMirrorSourceSession', () => {
 
   it('quarantines oversized CSSOM polling without an idle recovery loop', () => {
     const fixture = sourceFixture('<main class="page">styled content</main>');
-    let currentSheet = fakeStyleSheetWithRules(25_001, '.page{}');
+    // Many medium sheets that together exceed the polling budget; a single
+    // large sheet is watched by its shape instead (D88).
+    const oversized = Array.from(
+      { length: 7 },
+      () => fakeStyleSheetWithRules(3_900, '.page{}'),
+    );
+    let currentSheets = oversized;
     let styleSheetReads = 0;
     Object.defineProperty(fixture.document, 'styleSheets', {
       configurable: true,
       get: () => {
         styleSheetReads += 1;
-        return styleSheetList(currentSheet);
+        return styleSheetList(...currentSheets);
       },
     });
 
@@ -2068,13 +2074,56 @@ describe('HtmlMirrorSourceSession', () => {
       (message) => (message as { code?: string }).code === 'stream_overflow',
     )).toBe(false);
 
-    currentSheet = fakeStyleSheetWithRules(1, '.page{display:grid}');
+    currentSheets = [fakeStyleSheetWithRules(1, '.page{display:grid}')];
     for (let pass = 0; pass < 130; pass += 1) fixture.runTimer();
     expect(styleSheetReads).toBeGreaterThan(0);
     expect(fixture.port.posts.at(-1)).toMatchObject({
       kind: 'simul:html-mirror-v2:error',
       code: 'stream_gap',
     });
+  });
+
+  it('watches a sheet too large to reread by its shape, so rules a script adds still arrive (D88)', () => {
+    // Wise carries a 2.4 M character design-system sheet. Reading it whole
+    // each pass took the whole polling budget, so rules the page inserted
+    // later (its signed-in side navigation) never reached the replica.
+    const fixture = sourceFixture(
+      '<style id="dynamic"></style><main class="page">styled content</main>',
+    );
+    const large = fakeStyleSheetWithRules(15_800, `.ds{${'x'.repeat(150)}}`);
+    const dynamic = fakeStyleSheetWithRules(0, '');
+    Object.defineProperty(fixture.document, 'styleSheets', {
+      configurable: true,
+      value: styleSheetList(large, dynamic),
+    });
+    fixture.start('passive');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    for (let pass = 0; pass < 4; pass += 1) fixture.runTimer();
+    const gaps = () => fixture.port.posts.filter(
+      (message) => (message as { code?: string }).code === 'stream_gap',
+    ).length;
+    expect(gaps()).toBe(0);
+
+    // The page inserts a rule into its small sheet.
+    (dynamic.cssRules as unknown as { cssText: string }[]).push({
+      cssText: '.sidebar-container{position:fixed;top:0}',
+    });
+    for (let pass = 0; pass < 4; pass += 1) fixture.runTimer();
+    expect(gaps()).toBe(1);
+    expect(fixture.port.posts.some(
+      (message) => (message as { code?: string }).code === 'stream_overflow',
+    )).toBe(false);
+
+    // A rule inserted into the large sheet itself changes its shape.
+    fixture.port.emitMessage(createHtmlMirrorCheckpointRequest(identity, 0));
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    for (let pass = 0; pass < 4; pass += 1) fixture.runTimer();
+    const before = gaps();
+    (large.cssRules as unknown as { cssText: string }[]).push({
+      cssText: '.late{display:grid}',
+    });
+    for (let pass = 0; pass < 4; pass += 1) fixture.runTimer();
+    expect(gaps()).toBe(before + 1);
   });
 
   it('advances the shared style cursor after adopted-style budget exhaustion', () => {
@@ -2091,10 +2140,13 @@ describe('HtmlMirrorSourceSession', () => {
       configurable: true,
       value: [fakeStyleSheetWithRules(2_000, '.first{}')],
     });
-    const documentSheet = fakeStyleSheetWithRules(24_000, '.page{}');
+    const documentSheets = Array.from(
+      { length: 8 },
+      () => fakeStyleSheetWithRules(3_000, '.page{}'),
+    );
     Object.defineProperty(fixture.document, 'styleSheets', {
       configurable: true,
-      value: styleSheetList(documentSheet),
+      value: styleSheetList(...documentSheets),
     });
     let secondRootReads = 0;
     Object.defineProperty(secondShadow, 'styleSheets', {

@@ -29,7 +29,6 @@ import {
   MAX_HTML_MIRROR_BYTES,
   MAX_HTML_MIRROR_NODES,
   hasPrivateHtmlMirrorAttribute,
-  hasPublicMenuResourceAttribute,
   isAutonomousCustomElementName,
   readHtmlMirrorDocumentContent,
   readHtmlMirrorNode,
@@ -110,9 +109,13 @@ const ISOLATED_SECRET_PLACEHOLDER_CSS =
 // document, which this same-origin srcdoc frame is, so the shell resets body
 // font to inheritance. It sits after that injected sheet at equal
 // specificity, and any source rule for body still overrides it.
-const ISOLATED_HTML_SHELL_DOCUMENT = `<html><head><meta charset="utf-8" data-simul-owned-shell="charset"><meta name="simul-isolated-shell" content="${ISOLATED_HTML_SHELL_MARKER}" data-simul-owned-shell="marker"><meta http-equiv="Content-Security-Policy" data-simul-owned-shell="csp" content="default-src 'none'; script-src 'none'; worker-src 'none'; connect-src 'none'; object-src 'none'; frame-src 'none'; child-src 'none'; media-src 'none'; form-action 'none'; base-uri 'none'; img-src http: https: data: blob:; style-src 'unsafe-inline' http: https: data:; font-src http: https: data:"><style data-simul-owned-shell="inert">html,body{pointer-events:none}body{font-family:inherit;font-size:inherit}*{pointer-events:none!important}[data-simul-replica-disclosure-trigger="v1"],[data-simul-replica-disclosure-panel="v1"],[data-simul-replica-disclosure-overlay="v1"]{pointer-events:auto!important}</style></head><body></body></html>`;
+// Chrome draws its own play bar on every video in a frame without scripts,
+// and the replica cannot play video, so the bar is hidden (D87). Document
+// rules do not reach into shadow trees, so each replica shadow root gets the
+// same rule in its own Simul-owned style.
+export const ISOLATED_MEDIA_CONTROLS_CSS = 'video::-webkit-media-controls,video::-webkit-media-controls-enclosure,video::-webkit-media-controls-overlay-play-button,video::-webkit-media-controls-start-playback-button{display:none!important}';
+const ISOLATED_HTML_SHELL_DOCUMENT = `<html><head><meta charset="utf-8" data-simul-owned-shell="charset"><meta name="simul-isolated-shell" content="${ISOLATED_HTML_SHELL_MARKER}" data-simul-owned-shell="marker"><meta http-equiv="Content-Security-Policy" data-simul-owned-shell="csp" content="default-src 'none'; script-src 'none'; worker-src 'none'; connect-src 'none'; object-src 'none'; frame-src 'none'; child-src 'none'; media-src 'none'; form-action 'none'; base-uri 'none'; img-src http: https: data: blob:; style-src 'unsafe-inline' http: https: data:; font-src http: https: data:"><style data-simul-owned-shell="inert">html,body{pointer-events:none}body{font-family:inherit;font-size:inherit}*{pointer-events:none!important}[data-simul-replica-disclosure-trigger="v1"],[data-simul-replica-disclosure-panel="v1"],[data-simul-replica-disclosure-overlay="v1"]{pointer-events:auto!important}${ISOLATED_MEDIA_CONTROLS_CSS}</style></head><body></body></html>`;
 const ISOLATED_SELECT_SHADOW_CSS = `:host{pointer-events:auto!important;background-image:none!important;border-image-source:none!important;cursor:default!important;filter:none!important;list-style-image:none!important;mask-image:none!important;-webkit-mask-image:none!important}:host([data-simul-select-hidden="v1"]){display:none!important}:host::before,:host::after{content:none!important;display:none!important;background-image:none!important}[data-simul-owned-select-trigger="v1"]{all:unset!important;box-sizing:border-box!important;color:inherit!important;cursor:default!important;display:block!important;font:inherit!important;overflow:hidden!important;text-align:inherit!important;text-overflow:ellipsis!important;white-space:nowrap!important;width:100%!important}:host([data-simul-select-transparent="v1"]) [data-simul-owned-select-trigger="v1"]{opacity:0!important}[data-simul-owned-select-options="v1"]{background:Canvas!important;box-sizing:border-box!important;color:CanvasText!important;max-height:min(18rem,70vh)!important;min-width:100%!important;overflow:auto!important;overscroll-behavior:contain!important;pointer-events:auto!important;width:max-content!important;z-index:2147483647!important}[data-simul-owned-select-option="v1"],[data-simul-owned-select-optgroup-label="v1"]{box-sizing:border-box!important;display:block!important;min-height:1.5em!important;padding-inline:.5rem!important;pointer-events:none!important;white-space:normal!important}[data-simul-owned-select-optgroup-label="v1"]{font-weight:600!important}select[data-simul-select-facsimile="v1"]{display:none!important;pointer-events:none!important}`;
-export const ISOLATED_PUBLIC_MENU_SHADOW_CSS = `:host{all:initial!important;display:block!important;box-sizing:border-box!important;max-width:100%!important;color:inherit!important;font:inherit!important;background:none!important;border:0!important;filter:none!important;list-style:none!important;mask:none!important;pointer-events:none!important}:host([data-simul-replica-disclosure-panel="v1"][hidden]){display:none!important}:host([data-simul-replica-disclosure-overlay="v1"]){background-color:Canvas!important;color:CanvasText!important;box-sizing:border-box!important;display:block!important;inset:auto!important;left:var(--simul-replica-disclosure-left,0px)!important;margin:0!important;max-height:var(--simul-replica-disclosure-max-height,70vh)!important;max-width:var(--simul-replica-disclosure-max-width,calc(100vw - 16px))!important;min-width:var(--simul-replica-disclosure-min-width,0px)!important;overflow-x:hidden!important;overflow-y:auto!important;overscroll-behavior:contain!important;pointer-events:auto!important;position:fixed!important;top:var(--simul-replica-disclosure-top,0px)!important;visibility:var(--simul-replica-disclosure-visibility,hidden)!important;z-index:2147483647!important}:host::before,:host::after{content:none!important;display:none!important;background:none!important}:host *{box-sizing:border-box!important;max-width:100%!important;background:none!important;border-image:none!important;filter:none!important;list-style-image:none!important;mask:none!important;pointer-events:none!important}:host([data-simul-replica-disclosure-overlay="v1"])>*:not(style){display:block!important;visibility:visible!important;opacity:1!important}:host *::before,:host *::after{content:none!important;display:none!important;background:none!important}`;
 const ISOLATED_DISCLOSURE_IFRAME_MARKER = 'css-disclosure-v1';
 const ISOLATED_DISCLOSURE_BLOCKED_EVENTS = Object.freeze([
   'auxclick', 'beforeinput', 'change', 'click', 'contextmenu', 'dblclick',
@@ -121,7 +124,7 @@ const ISOLATED_DISCLOSURE_BLOCKED_EVENTS = Object.freeze([
   'touchend', 'touchstart',
 ]);
 const ISOLATED_SELECT_HOSTS = new WeakSet<Element>();
-const ISOLATED_PUBLIC_MENU_HOSTS = new WeakSet<Element>();
+const ISOLATED_OWNED_SHADOW_SHELL_STYLES = new WeakSet<Node>();
 interface IsolatedSelectFacsimile {
   readonly panel: HTMLElement;
   readonly select: HTMLSelectElement;
@@ -129,14 +132,7 @@ interface IsolatedSelectFacsimile {
   controller?: ReadOnlyReplicaDisclosure;
   contentSignature?: string;
 }
-interface IsolatedPublicMenuFacsimile {
-  readonly role: 'listbox' | 'menu';
-}
 const ISOLATED_SELECT_FACSIMILES = new WeakMap<HTMLElement, IsolatedSelectFacsimile>();
-const ISOLATED_PUBLIC_MENU_FACSIMILES = new WeakMap<
-  HTMLElement,
-  IsolatedPublicMenuFacsimile
->();
 let isolatedSelectHostSequence = 0;
 export const ISOLATED_HTML_SHELL = `<!doctype html>
 ${ISOLATED_HTML_SHELL_DOCUMENT}`;
@@ -1433,7 +1429,6 @@ function buildNode(
   textMetadata: Map<number, Extract<HtmlMirrorNode, { kind: 'text' }>>,
   controlMetadata: Map<number, HtmlMirrorControlText>,
   ownedAdoptedStyles: Set<HTMLStyleElement>,
-  inheritedPublicMenuRegion = false,
 ): Node | undefined {
   if (nodes.has(input.id)) throw new Error('Duplicate isolated mirror node ID.');
   if (input.kind === 'text') {
@@ -1461,12 +1456,6 @@ function buildNode(
   setAttributes(node, input.attributes);
   applyElementHints(node, input);
   nodes.set(input.id, node);
-  const attributes = Object.fromEntries(input.attributes);
-  const startsPublicMenuRegion =
-    !['select', 'optgroup', 'option'].includes(input.tagName) &&
-    isSourcePublicMenuRoleValue(attributes.role);
-  const publicMenuRegion =
-    inheritedPublicMenuRegion || startsPublicMenuRegion;
   if (input.controlText) controlMetadata.set(input.id, input.controlText);
   for (const child of input.children) {
     const built = buildNode(
@@ -1476,7 +1465,6 @@ function buildNode(
       textMetadata,
       controlMetadata,
       ownedAdoptedStyles,
-      publicMenuRegion,
     );
     if (built) node.append(built);
   }
@@ -1500,10 +1488,10 @@ function buildNode(
         textMetadata,
         controlMetadata,
         ownedAdoptedStyles,
-        publicMenuRegion,
       );
       if (built) shadow.append(built);
     }
+    appendOwnedShadowShellStyle(shadow);
     appendOwnedAdoptedStyles(
       shadow,
       input.shadowRoot.adoptedStyleSheets,
@@ -1511,10 +1499,7 @@ function buildNode(
       'shadow',
     );
   }
-  const presentation = wrapNativeSelectFacsimile(node);
-  return startsPublicMenuRegion && !inheritedPublicMenuRegion
-    ? wrapPublicMenuFacsimile(presentation)
-    : presentation;
+  return wrapNativeSelectFacsimile(node);
 }
 
 /**
@@ -1535,6 +1520,20 @@ export function protectIsolatedOpaquePlaceholder(node: Element): void {
   node.setAttribute('aria-hidden', 'true');
   node.setAttribute('inert', '');
   node.setAttribute('tabindex', '-1');
+}
+
+/**
+ * A replica shadow root's own shell rules. The style is not a mirrored node,
+ * so patches of the root's children and adopted sheets leave it in place.
+ */
+function appendOwnedShadowShellStyle(shadow: ShadowRoot): void {
+  const target = shadow.ownerDocument;
+  if (!target) throw new Error('Shadow root owner has no document.');
+  const style = target.createElement('style');
+  style.setAttribute('data-simul-owned-shadow-shell', 'v1');
+  style.textContent = ISOLATED_MEDIA_CONTROLS_CSS;
+  shadow.append(style);
+  ISOLATED_OWNED_SHADOW_SHELL_STYLES.add(style);
 }
 
 function appendOwnedAdoptedStyles(
@@ -1938,38 +1937,6 @@ function wrapNativeSelectFacsimile(node: Node): Node {
   return host;
 }
 
-/**
- * Public ARIA menu labels remain visible and translatable, but their website
- * selectors must not make the replica fetch images or generate rich content.
- * A random extension-owned shadow host severs the source stylesheet cascade.
- */
-function wrapPublicMenuFacsimile(node: Node): Node {
-  if (node.nodeType !== Node.ELEMENT_NODE) return node;
-  const element = node as Element;
-  const document = element.ownerDocument;
-  isolatedSelectHostSequence += 1;
-  const entropy = globalThis.crypto?.randomUUID?.()
-    .replace(/[^a-z0-9-]/giu, '')
-    .toLowerCase() ?? isolatedSelectHostSequence.toString(36);
-  const host = document.createElement(`simul-owned-menu-${entropy}`);
-  ISOLATED_PUBLIC_MENU_HOSTS.add(host);
-  host.style.setProperty('display', 'block', 'important');
-  host.style.setProperty('max-width', '100%', 'important');
-  host.style.setProperty('background', 'none', 'important');
-  host.style.setProperty('border', '0', 'important');
-  host.style.setProperty('filter', 'none', 'important');
-  host.style.setProperty('mask', 'none', 'important');
-  host.style.setProperty('pointer-events', 'none', 'important');
-  const shadow = host.attachShadow({ mode: 'open' });
-  const style = document.createElement('style');
-  style.setAttribute('data-simul-owned-menu-style', 'v1');
-  style.textContent = ISOLATED_PUBLIC_MENU_SHADOW_CSS;
-  shadow.append(style, element);
-  const role = isolatedPublicMenuRole(element);
-  if (role) ISOLATED_PUBLIC_MENU_FACSIMILES.set(host, { role });
-  return host;
-}
-
 function syncNativeSelectFacsimileHost(element: Element): void {
   const host = isolatedSelectFacsimileHost(element);
   if (!host) return;
@@ -2109,18 +2076,6 @@ function isolatedSelectFacsimileHost(element: Element): HTMLElement | undefined 
   ) return undefined;
   const host = (root as ShadowRoot).host as HTMLElement;
   return ISOLATED_SELECT_HOSTS.has(host) ? host : undefined;
-}
-
-function isolatedPublicMenuFacsimileHost(
-  element: Element,
-): HTMLElement | undefined {
-  const root = element.getRootNode();
-  if (
-    root.nodeType !== Node.DOCUMENT_FRAGMENT_NODE ||
-    !(root as ShadowRoot).host
-  ) return undefined;
-  const host = (root as ShadowRoot).host as HTMLElement;
-  return ISOLATED_PUBLIC_MENU_HOSTS.has(host) ? host : undefined;
 }
 
 function isolatedPublicMenuRole(
@@ -2352,7 +2307,9 @@ function refreshIsolatedReplicaDisclosures(
 /**
  * Custom ARIA disclosure is admitted only for a unique, same-document target
  * with matching menu/listbox semantics. Ambiguous and unsupported mappings
- * remain static and pointer-inert.
+ * remain static and pointer-inert. The page's own menu opens in place, drawn
+ * with the page's styles and images, as a structural menu does (D88; it was
+ * an isolated facsimile popup that dropped both).
  */
 function installValidatedIsolatedAriaDisclosures(
   document: Document,
@@ -2368,10 +2325,7 @@ function installValidatedIsolatedAriaDisclosures(
   }
   const usedPanels = new Set<HTMLElement>();
   for (const trigger of elements) {
-    if (
-      ISOLATED_SELECT_HOSTS.has(trigger) ||
-      ISOLATED_PUBLIC_MENU_HOSTS.has(trigger)
-    ) continue;
+    if (ISOLATED_SELECT_HOSTS.has(trigger)) continue;
     const controls = trigger.getAttribute('aria-controls')?.trim() ?? '';
     if (!controls || /\s/u.test(controls) || controls.length > 256) continue;
     const targets = ids.get(controls);
@@ -2386,29 +2340,26 @@ function installValidatedIsolatedAriaDisclosures(
       !isSourceActivationRoleValue(trigger.getAttribute('role'))
     ) continue;
 
-    let panel = isolatedPublicMenuFacsimileHost(target);
-    const targetRole = isolatedPublicMenuRole(target);
-    if (!panel || targetRole !== expectedRole) {
+    let panel: HTMLElement | undefined =
+      isolatedPublicMenuRole(target) === expectedRole ? target : undefined;
+    if (!panel) {
       if (!roleHasToken(target, 'region')) continue;
-      const candidates = elements.filter((candidate) => {
-        const host = isolatedPublicMenuFacsimileHost(candidate);
-        return Boolean(
-          host && isolatedPublicMenuRole(candidate) === expectedRole &&
-          composedElementContains(target, host),
-        );
-      });
+      const candidates = elements.filter((candidate) =>
+        candidate !== target &&
+        isolatedPublicMenuRole(candidate) === expectedRole &&
+        composedElementContains(target, candidate));
       if (candidates.length !== 1) continue;
-      panel = isolatedPublicMenuFacsimileHost(candidates[0]!);
+      panel = candidates[0]!;
     }
-    if (!panel || usedPanels.has(panel)) continue;
-    const metadata = ISOLATED_PUBLIC_MENU_FACSIMILES.get(panel);
-    if (!metadata || metadata.role !== expectedRole) continue;
+    if (usedPanels.has(panel) || composedElementContains(panel, trigger)) {
+      continue;
+    }
     usedPanels.add(panel);
     installReadOnlyReplicaDisclosure({
       anchor: trigger,
       trigger,
       panel,
-      presentation: 'popup',
+      presentation: 'inline',
       manageTriggerExpanded: false,
       initiallyOpen: trigger.getAttribute('aria-expanded') === 'true',
     });
@@ -2795,9 +2746,6 @@ function applyPatchBatch(
         )
       ) return undefined;
       if (
-        currentContext.publicMenuRegion !== prospectiveContext.publicMenuRegion
-      ) return undefined;
-      if (
         privacyContextChanges(currentContext, prospectiveContext) &&
         (
           (target as Element).shadowRoot ||
@@ -3012,7 +2960,6 @@ function applyPatchBatch(
           textMetadata,
           controlMetadata,
           ownedAdoptedStyles,
-          context.publicMenuRegion,
         );
         if (built) fragment.append(built);
       }
@@ -3062,7 +3009,6 @@ function applyPatchBatch(
           textMetadata,
           controlMetadata,
           ownedAdoptedStyles,
-          context.publicMenuRegion,
         );
         if (!built) return undefined;
         insertedNodeCount += htmlMirrorGraphNodeCount(entry.node);
@@ -3157,6 +3103,9 @@ function applyPatchBatch(
       if (operation.kind === 'children') {
         const plan = childrenPlans.get(operation);
         if (!plan) throw new Error('Missing children replacement plan.');
+        const retainedShellStyles = [...plan.target.childNodes].filter(
+          (child) => ISOLATED_OWNED_SHADOW_SHELL_STYLES.has(child),
+        );
         const retainedAdoptedStyles = [...state.ownedAdoptedStyles].filter(
           (style) => style.parentNode === plan.target,
         );
@@ -3165,6 +3114,7 @@ function applyPatchBatch(
           child.parentNode?.removeChild(child);
         }
         plan.target.appendChild(plan.fragment);
+        for (const style of retainedShellStyles) plan.target.appendChild(style);
         for (const style of retainedAdoptedStyles) plan.target.appendChild(style);
         for (const style of plan.ownedAdoptedStyles) {
           state.ownedAdoptedStyles.add(style);
@@ -3201,7 +3151,8 @@ function applyPatchBatch(
       }
       insertedNodeCount += plan.insertedNodeCount;
       let anchor: ChildNode | null = [...plan.target.childNodes].find(
-        (child) => state.ownedAdoptedStyles.has(child as HTMLStyleElement),
+        (child) => state.ownedAdoptedStyles.has(child as HTMLStyleElement) ||
+          ISOLATED_OWNED_SHADOW_SHELL_STYLES.has(child),
       ) ?? null;
       for (let index = plan.desiredChildren.length - 1; index >= 0; index -= 1) {
         const child = plan.desiredChildren[index]!;
@@ -3536,7 +3487,6 @@ function collectTranslatableIds(node: HtmlMirrorNode, ids: Set<number>): void {
 interface DomContentContext {
   readonly privateRegion: boolean;
   readonly privateAttributeRegion: boolean;
-  readonly publicMenuRegion: boolean;
   readonly nonContentRegion: boolean;
   readonly styleRegion: boolean;
   readonly nativeSelectRegion: boolean;
@@ -3546,7 +3496,6 @@ interface DomContentContext {
 const PUBLIC_DOM_CONTEXT: DomContentContext = Object.freeze({
   privateRegion: false,
   privateAttributeRegion: false,
-  publicMenuRegion: false,
   nonContentRegion: false,
   styleRegion: false,
   nativeSelectRegion: false,
@@ -3559,20 +3508,10 @@ function presentationNodeForMirrorNode(node: Node): Node {
     if (
       root.nodeType === Node.DOCUMENT_FRAGMENT_NODE &&
       'host' in root &&
-      (
-        ISOLATED_SELECT_HOSTS.has((root as ShadowRoot).host) ||
-        ISOLATED_PUBLIC_MENU_HOSTS.has((root as ShadowRoot).host)
-      )
+      ISOLATED_SELECT_HOSTS.has((root as ShadowRoot).host)
     ) {
-      const shadow = root as ShadowRoot;
-      const host = shadow.host;
-      if (
-        (
-          ISOLATED_PUBLIC_MENU_HOSTS.has(host) &&
-          node.parentNode === shadow
-        ) ||
-        (node as Element).localName.toLowerCase() === 'select'
-      ) return host;
+      const host = (root as ShadowRoot).host;
+      if ((node as Element).localName.toLowerCase() === 'select') return host;
     }
   }
   return node;
@@ -3714,8 +3653,7 @@ function privacyContextChanges(
   prospective: DomContentContext,
 ): boolean {
   return current.privateRegion !== prospective.privateRegion ||
-    current.privateAttributeRegion !== prospective.privateAttributeRegion ||
-    current.publicMenuRegion !== prospective.publicMenuRegion;
+    current.privateAttributeRegion !== prospective.privateAttributeRegion;
 }
 
 function domElementContext(element: Element): DomContentContext {
@@ -3868,15 +3806,6 @@ function validGraphForContext(
     !context.privateAttributeRegion ||
     !hasPrivateHtmlMirrorAttribute(node.tagName, node.attributes)
   ) &&
-    (!context.publicMenuRegion ||
-      (
-        node.tagName !== 'link' && node.tagName !== 'style' &&
-        !hasPublicMenuResourceAttribute(node.attributes) &&
-        node.selectedImageSource === undefined &&
-        node.resolvedStyleSheetText === undefined &&
-        node.canvasBackgroundColor === undefined &&
-        (node.shadowRoot?.adoptedStyleSheets.length ?? 0) === 0
-      )) &&
     (!context.privateAttributeRegion || !node.controlText) &&
     (!context.privateAttributeRegion || node.selectedOptionIndexes === undefined) &&
     (!context.privateAttributeRegion || node.selectPickerOpen === undefined) &&
@@ -3903,12 +3832,8 @@ function extendDomContentContext(
       inherited.nativeSelectParent === 'optgroup',
   );
   const privateRegion = inherited.privateRegion || currentPrivate;
-  const publicMenuRegion = inherited.publicMenuRegion ||
-    (!isNativeSelectSemanticGraphTag(tagName) &&
-      isSourcePublicMenuRoleValue(attributes.role));
   return {
     privateRegion,
-    publicMenuRegion,
     privateAttributeRegion: inherited.privateAttributeRegion ||
       privateRegion ||
       isSourceActivationTagName(tagName) ||

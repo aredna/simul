@@ -368,7 +368,6 @@ interface SerializeContext {
    */
   readonly privacyRegion: boolean;
   readonly privateAttributeRegion: boolean;
-  readonly publicMenuRegion: boolean;
   readonly activationRegion: boolean;
   readonly nonContentRegion: boolean;
   readonly styleRegion: boolean;
@@ -524,26 +523,6 @@ function isPrivateBaseAttribute(tagName: string, name: string): boolean {
   }
   return PRIVATE_ATTRIBUTES.has(name);
 }
-const PUBLIC_MENU_RESOURCE_ATTRIBUTES = new Set([
-  'alt',
-  'background',
-  'href',
-  'imagesizes',
-  'imagesrcset',
-  'poster',
-  'src',
-  'srcset',
-  'style',
-  'xlink:href',
-]);
-const PUBLIC_MENU_RICH_RESOURCE_ELEMENTS = new Set([
-  'audio',
-  'canvas',
-  'img',
-  'picture',
-  'source',
-  'video',
-]);
 
 const RAW_CONTROL_TEXT_ATTRIBUTES = new Set(['placeholder', 'value']);
 const SIMUL_OWNED_ATTRIBUTE_PREFIX = 'data-simul-';
@@ -804,9 +783,6 @@ export function sanitizeSourceSubtrees(
         privateAttributeRegion: inheritedElement
           ? hasSourcePrivateAttributeElementAncestor(inheritedElement)
           : false,
-        publicMenuRegion: inheritedElement
-          ? hasSourcePublicMenuElementAncestor(inheritedElement)
-          : false,
         activationRegion: inheritedElement
           ? hasSourceActivationElementAncestor(inheritedElement)
           : false,
@@ -863,9 +839,6 @@ export function sanitizeSourceChildren(
     const privateAttributeRegion = parentElement
       ? hasSourcePrivateAttributeElementAncestor(parentElement)
       : false;
-    const publicMenuRegion = parentElement
-      ? hasSourcePublicMenuElementAncestor(parentElement)
-      : false;
     const activationRegion = parentElement
       ? hasSourceActivationElementAncestor(parentElement)
       : false;
@@ -890,7 +863,6 @@ export function sanitizeSourceChildren(
         privateRegion,
         privacyRegion,
         privateAttributeRegion,
-        publicMenuRegion,
         activationRegion,
         nonContentRegion,
         styleRegion,
@@ -941,7 +913,6 @@ export function sanitizeSourceAttributes(
       ),
       hasSourceActivationElementAncestor(source),
       false,
-      hasSourcePublicMenuElementAncestor(source),
       baseUrl,
       representability,
       fidelityPolicy,
@@ -988,7 +959,6 @@ export function sanitizeSourceElementHints(
     ? readSourceCanvasBackgroundColor(source)
     : undefined;
   const resolvedStyleSheetText = fidelityPolicy === 'passive'
-      && !hasSourcePublicMenuElementAncestor(source)
     ? readResolvedElementStyleSheet(
         source,
         baseUrl,
@@ -1062,7 +1032,6 @@ export function sanitizeSourceDocument(
     privateRegion: false,
     privacyRegion: false,
     privateAttributeRegion: false,
-    publicMenuRegion: false,
     activationRegion: false,
     nonContentRegion: false,
     styleRegion: false,
@@ -1117,7 +1086,6 @@ export function readHtmlMirrorNode(
   fidelityPolicy: SelectableReplicaFidelityPolicy = 'conservative',
   nativeSelectParent: NativeSelectParentContext = false,
   attributeSentinel = false,
-  publicMenuRegion = false,
 ): HtmlMirrorNode | undefined {
   if (!isRecord(input) || depth > MAX_HTML_MIRROR_DEPTH) return undefined;
   budget.nodes += 1;
@@ -1294,9 +1262,6 @@ export function readHtmlMirrorNode(
     transportedPrivateRegion || transportedActivationElement ||
     (!isNativeSelectSemanticTag(input.tagName) &&
       isSourcePublicMenuRoleValue(attributeValues.role));
-  const transportedPublicMenuRegion = publicMenuRegion ||
-    (!isNativeSelectSemanticTag(input.tagName) &&
-      isSourcePublicMenuRoleValue(attributeValues.role));
   const transportedNonContentRegion = nonContentRegion ||
     NON_CONTENT_ELEMENTS.has(input.tagName);
   const transportedStyleRegion = styleRegion || input.tagName === 'style';
@@ -1304,20 +1269,6 @@ export function readHtmlMirrorNode(
     input.tagName,
     nativeSelectParent,
   );
-  if (
-    transportedPublicMenuRegion &&
-    (
-      input.tagName === 'link' || input.tagName === 'style' ||
-      hasPublicMenuResourceAttribute(attributes) ||
-      input.selectedImageSource !== undefined ||
-      input.resolvedStyleSheetText !== undefined ||
-      input.canvasBackgroundColor !== undefined ||
-      (input.shadowRoot !== undefined &&
-        isRecord(input.shadowRoot) &&
-        Array.isArray(input.shadowRoot.adoptedStyleSheets) &&
-        input.shadowRoot.adoptedStyleSheets.length > 0)
-    )
-  ) return undefined;
   const controlText = readTransportedControlText(
     input.controlText,
     input.tagName,
@@ -1380,8 +1331,6 @@ export function readHtmlMirrorNode(
       transportedActivationRegion,
       fidelityPolicy,
       transportedNativeSelectParent,
-      false,
-      transportedPublicMenuRegion,
     );
     if (!parsed) return undefined;
     children.push(parsed);
@@ -1432,8 +1381,6 @@ export function readHtmlMirrorNode(
         transportedActivationRegion,
         fidelityPolicy,
         transportedNativeSelectParent,
-        false,
-        transportedPublicMenuRegion,
       );
       if (!parsed) return undefined;
       shadowChildren.push(parsed);
@@ -1752,22 +1699,6 @@ function serializeNode(
     activationRegion ||
     (!isNativeSelectSemanticTag(tagName) &&
       isSourcePublicMenuRoleValue(liveElement.getAttribute('role')));
-  const publicMenuRegion = context.publicMenuRegion ||
-    (!isNativeSelectSemanticTag(tagName) &&
-      isSourcePublicMenuRoleValue(liveElement.getAttribute('role')));
-  if (
-    publicMenuRegion &&
-    (
-      tagName === 'link' || tagName === 'style' ||
-      PUBLIC_MENU_RICH_RESOURCE_ELEMENTS.has(tagName)
-    )
-  ) {
-    incrementRepresentability(
-      context.representability,
-      'strictResourcePolicyBlockCount',
-    );
-    return undefined;
-  }
   const nonContentRegion = context.nonContentRegion || NON_CONTENT_ELEMENTS.has(tagName);
   const styleRegion = context.styleRegion || tagName === 'style';
   const attributes = sanitizeAttributes(
@@ -1776,7 +1707,6 @@ function serializeNode(
     privateRegion,
     activationRegion,
     false,
-    publicMenuRegion,
     context.baseUrl,
     context.representability,
     context.fidelityPolicy,
@@ -1821,7 +1751,6 @@ function serializeNode(
         privateRegion,
         privacyRegion,
         privateAttributeRegion,
-        publicMenuRegion,
         activationRegion,
         nonContentRegion,
         styleRegion,
@@ -1855,7 +1784,6 @@ function serializeNode(
         privateRegion,
         privacyRegion,
         privateAttributeRegion,
-        publicMenuRegion,
         activationRegion,
         nonContentRegion,
         styleRegion,
@@ -1864,16 +1792,14 @@ function serializeNode(
       });
       if (child) shadowChildren.push(child);
     }
-    const adoptedStyleSheets = publicMenuRegion
-      ? Object.freeze([])
-      : captureAdoptedStyleSheets(
-          sourceShadow,
-          context.baseUrl,
-          context.budget,
-          context.styleWork,
-          context.representability,
-          context.fidelityPolicy,
-      );
+    const adoptedStyleSheets = captureAdoptedStyleSheets(
+      sourceShadow,
+      context.baseUrl,
+      context.budget,
+      context.styleWork,
+      context.representability,
+      context.fidelityPolicy,
+    );
     if (!adoptedStyleSheets) return undefined;
     shadowRoot = Object.freeze({
       id: shadowId,
@@ -1926,7 +1852,6 @@ function serializeCredentialInputShell(
     true,
     false,
     true,
-    false,
     context.baseUrl,
     context.representability,
     context.fidelityPolicy,
@@ -1961,7 +1886,6 @@ function sanitizeAttributes(
   privateRegion: boolean,
   activationRegion: boolean,
   credentialShell: boolean,
-  publicMenuRegion: boolean,
   baseUrl: string,
   representability: HtmlMirrorRepresentabilityCollector,
   fidelityPolicy: SelectableReplicaFidelityPolicy,
@@ -1996,8 +1920,7 @@ function sanitizeAttributes(
       isPrivateBaseAttribute(tagName, name) ||
       // `data-*` is the page's own markup and travels (D76); a credential
       // input's empty field keeps only what draws its box.
-      (credentialShell && !CREDENTIAL_SHELL_ATTRIBUTES.has(name)) ||
-      (publicMenuRegion && PUBLIC_MENU_RESOURCE_ATTRIBUTES.has(name))
+      (credentialShell && !CREDENTIAL_SHELL_ATTRIBUTES.has(name))
     ) {
       incrementRepresentability(representability, 'strippedActiveAttributeCount');
       incrementRepresentability(
@@ -2031,8 +1954,7 @@ function sanitizeAttributes(
       tagName === 'video' && name === 'poster';
     if (
       (ACTIVE_OR_NAVIGATIONAL_ATTRIBUTES.has(name) &&
-        !localSvgReference && !passiveSvgReference && !passivePoster) ||
-      (publicMenuRegion && publicMenuResourceAttribute(name, value))
+        !localSvgReference && !passiveSvgReference && !passivePoster)
     ) {
       incrementRepresentability(representability, 'strippedActiveAttributeCount');
       incrementRepresentability(
@@ -2297,13 +2219,6 @@ function sanitizeAttributes(
   // impossible through the frame sandbox (no allow-forms), the shell CSP's
   // form-action 'none', and the document-wide activation guard.
   return Object.freeze(result);
-}
-
-function publicMenuResourceAttribute(name: string, value: string): boolean {
-  return PUBLIC_MENU_RESOURCE_ATTRIBUTES.has(name) ||
-    /(?:https?|blob|data|file|javascript)\s*:|(?:url|image-set)\s*\(/iu.test(
-      decodeCssEscapes(value),
-    );
 }
 
 function sourceStyleSheetDisabled(element: Element): boolean {
@@ -3810,11 +3725,91 @@ function selectedSourceFor(
 ): string | undefined {
   const raw = (element as Element & { readonly currentSrc?: unknown }).currentSrc;
   if (typeof raw !== 'string' || raw.length === 0) return undefined;
+  const pageOnly = pageOnlyImagePixels(element, raw, baseUrl);
+  if (pageOnly) return pageOnly;
   const selected = passiveUrl(raw, baseUrl, true);
   if (!selected) return undefined;
   const declaredRaw = element.getAttribute('src') ?? '';
   const declared = declaredRaw ? passiveUrl(declaredRaw, baseUrl, true) : undefined;
   return selected !== declared ? selected : undefined;
+}
+
+/** A small CORS image is copied only up to this many pixels (512 x 512). */
+const MAX_PAGE_ONLY_CORS_IMAGE_PIXELS = 512 * 512;
+/** A `blob:` image is copied up to 2048 x 2048 pixels. */
+const MAX_PAGE_ONLY_BLOB_IMAGE_PIXELS = 2048 * 2048;
+const PAGE_ONLY_IMAGE_PIXELS = new WeakMap<
+  Element,
+  { readonly source: string; readonly dataUrl: string | undefined }
+>();
+
+/**
+ * Some images load in the page but can never load in the replica (D89): a
+ * `blob:` address belongs to the page's origin, and an image the page loads
+ * with `crossorigin` may be served only to the page's own origin (Fastmail's
+ * account avatar answers 403 without `Origin: https://app.fastmail.com`).
+ * The page has already decoded those pixels, and a CORS-approved or
+ * same-origin image may be read back, so a loaded one within the size cap
+ * travels as a data URL instead. A tainted canvas, an unloaded image or an
+ * oversized one keeps today's address. Each image is encoded once per
+ * address.
+ */
+function pageOnlyImagePixels(
+  element: Element,
+  raw: string,
+  baseUrl: string,
+): string | undefined {
+  let blob = false;
+  try {
+    blob = new URL(raw, baseUrl).protocol === 'blob:';
+  } catch {
+    return undefined;
+  }
+  if (!blob && !element.hasAttribute('crossorigin')) return undefined;
+  const cached = PAGE_ONLY_IMAGE_PIXELS.get(element);
+  if (cached?.source === raw) return cached.dataUrl;
+  const image = element as Element & {
+    readonly complete?: unknown;
+    readonly naturalWidth?: unknown;
+    readonly naturalHeight?: unknown;
+  };
+  const width = image.naturalWidth;
+  const height = image.naturalHeight;
+  if (
+    image.complete !== true ||
+    typeof width !== 'number' || typeof height !== 'number' ||
+    !Number.isSafeInteger(width) || !Number.isSafeInteger(height) ||
+    width <= 0 || height <= 0
+  ) return undefined;
+  const pixels = width * height;
+  let dataUrl: string | undefined;
+  if (
+    pixels <= (blob
+      ? MAX_PAGE_ONLY_BLOB_IMAGE_PIXELS
+      : MAX_PAGE_ONLY_CORS_IMAGE_PIXELS)
+  ) {
+    try {
+      const canvas = element.ownerDocument.createElement('canvas');
+      canvas.width = width;
+      canvas.height = height;
+      const context = canvas.getContext('2d');
+      if (context) {
+        context.drawImage(element as HTMLImageElement, 0, 0);
+        const encoded = pixels <= MAX_PAGE_ONLY_CORS_IMAGE_PIXELS
+          ? canvas.toDataURL('image/png')
+          : canvas.toDataURL('image/webp', 0.92);
+        dataUrl = passiveUrl(encoded, baseUrl, true) === encoded
+          ? encoded
+          : undefined;
+      }
+    } catch {
+      // A tainted canvas (an image the page may show but not read) keeps
+      // its address.
+      dataUrl = undefined;
+    }
+  }
+  PAGE_ONLY_IMAGE_PIXELS.set(element, Object.freeze({ source: raw, dataUrl }));
+  return dataUrl;
 }
 
 function isSmallBrokenSourceControlIcon(
@@ -4525,24 +4520,6 @@ function hasSourcePrivateAttributeElementAncestor(element: Element): boolean {
     current = composedParentElement(current);
   }
   return false;
-}
-
-function hasSourcePublicMenuElementAncestor(element: Element): boolean {
-  for (let current: Element | undefined = element; current;) {
-    if (
-      !isNativeSelectSemanticTag(current.localName.toLowerCase()) &&
-      isSourcePublicMenuRoleValue(current.getAttribute('role'))
-    ) return true;
-    current = composedParentElement(current);
-  }
-  return false;
-}
-
-export function hasPublicMenuResourceAttribute(
-  attributes: readonly (readonly [string, string])[],
-): boolean {
-  return attributes.some(([name, value]) =>
-    publicMenuResourceAttribute(name, value));
 }
 
 export function hasPrivateHtmlMirrorAttribute(

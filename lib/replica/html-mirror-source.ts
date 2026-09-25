@@ -313,6 +313,17 @@ const MAX_STYLE_RULES_PER_TICK = 25_000;
 const MAX_STYLE_CHARACTERS_PER_TICK = 1024 * 1024;
 const STYLE_CHANGE_STABILITY_OBSERVATIONS = 3;
 const OVERSIZED_STYLE_RETRY_PASSES = 120;
+/**
+ * A sheet past either size is watched by its shape (D88): its rule count and
+ * its first and last rules, which is what a script inserting or removing
+ * rules changes. Reading its whole text every half second would take the
+ * whole polling budget, so a page carrying one large sheet (Wise's 2.4 M
+ * character design system) used to have no style polling at all.
+ */
+const MAX_FULL_SIGNATURE_RULES_PER_SHEET = 4_000;
+const MAX_FULL_SIGNATURE_CHARACTERS_PER_SHEET = 256 * 1024;
+const MAX_SHALLOW_SIGNATURE_RULE_CHARACTERS = 4_096;
+const SHAPE_SIGNATURE_SHEETS = new WeakSet<CSSStyleSheet>();
 const MAX_MIRRORED_IMAGE_CANDIDATES = 4_000;
 const MAX_IMAGE_EVENT_ROOTS = 4_000;
 const MAX_VISIBILITY_MUTATION_RECORDS = 2_048;
@@ -2321,15 +2332,35 @@ function cssomRuleSignature(
       !Number.isSafeInteger(ruleCount) ||
       ruleCount < 0
     ) return Object.freeze({ kind: 'signature', signature: 'unreadable' });
+    if (
+      ruleCount > MAX_FULL_SIGNATURE_RULES_PER_SHEET ||
+      SHAPE_SIGNATURE_SHEETS.has(sheet)
+    ) {
+      SHAPE_SIGNATURE_SHEETS.add(sheet);
+      return cssomShapeSignature(rules, ruleCount, work);
+    }
     if (work.rules + ruleCount > work.maxRules) {
       work.exhausted = true;
       return Object.freeze({ kind: 'capacity' });
     }
+    const startRules = work.rules;
+    const startCharacters = work.characters;
     const parts: string[] = [];
     for (let index = 0; index < ruleCount; index += 1) {
       const rule = rules[index] ?? rules.item(index);
       if (!rule || typeof rule.cssText !== 'string') {
         return Object.freeze({ kind: 'signature', signature: 'unreadable' });
+      }
+      if (
+        work.characters - startCharacters + rule.cssText.length >
+          MAX_FULL_SIGNATURE_CHARACTERS_PER_SHEET
+      ) {
+        // Too large to reread each pass: watch its shape from now on, and
+        // give back what this read spent so the other sheets still fit.
+        SHAPE_SIGNATURE_SHEETS.add(sheet);
+        work.rules = startRules;
+        work.characters = startCharacters;
+        return cssomShapeSignature(rules, ruleCount, work);
       }
       if (work.characters + rule.cssText.length > work.maxCharacters) {
         work.exhausted = true;
@@ -2357,6 +2388,43 @@ function cssomRuleSignature(
   } finally {
     visited.delete(sheet);
   }
+}
+
+/**
+ * The shape of a large sheet: its rule count and its first and last rules,
+ * each read up to a bounded length. Inserting or deleting rules, which is
+ * how scripts change a sheet, changes it.
+ */
+function cssomShapeSignature(
+  rules: CSSRuleList,
+  ruleCount: number,
+  work: HtmlMirrorStyleWorkBudget,
+): OrdinaryStyleSignatureRead {
+  const ends = ruleCount === 0
+    ? []
+    : ruleCount === 1 ? [0] : [0, ruleCount - 1];
+  const parts = [`shape:${ruleCount}`];
+  for (const index of ends) {
+    const rule = rules[index] ?? rules.item(index);
+    if (!rule || typeof rule.cssText !== 'string') {
+      return Object.freeze({ kind: 'signature', signature: 'unreadable' });
+    }
+    const text = rule.cssText.slice(0, MAX_SHALLOW_SIGNATURE_RULE_CHARACTERS);
+    if (
+      work.rules + 1 > work.maxRules ||
+      work.characters + text.length > work.maxCharacters
+    ) {
+      work.exhausted = true;
+      return Object.freeze({ kind: 'capacity' });
+    }
+    work.rules += 1;
+    work.characters += text.length;
+    parts.push(`${rule.cssText.length}:${text}`);
+  }
+  return Object.freeze({
+    kind: 'signature',
+    signature: adoptedStyleSignature(parts),
+  });
 }
 
 function collectLiveSubtreeNodes(
