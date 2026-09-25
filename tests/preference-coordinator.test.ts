@@ -739,6 +739,55 @@ describe('preference coordinator', () => {
     expect(adapter.hasGrant('<all_urls>')).toBe(false);
   });
 
+  it('keeps the broad grant through All sites off while default-on image text uses it (G2)', async () => {
+    // The default-state version of the test above. With image translation
+    // on, as shipped (D47), one broad grant stays while any enabled feature
+    // uses it (the owner's G2 ruling, D53): All sites off keeps it, and
+    // turning image text off then releases it.
+    expect(DEFAULT_COMPANION_PREFERENCES.imageTranslationEnabled).toBe(true);
+    const adapter = new MemoryPreferenceAdapter(
+      parseCompanionPreferences(DEFAULT_COMPANION_PREFERENCES),
+    );
+    adapter.grant('<all_urls>');
+    const coordinator = new PreferenceCoordinator(adapter);
+
+    const enabled = await coordinator.run({
+      type: 'simul:preferences:commit-auto',
+      expectedResetRevision: 0,
+      mode: 'all',
+      pageUrl: 'https://current.example/page',
+    });
+    expect(enabled.preferences).toMatchObject({
+      autoTranslateAllSites: true,
+      grantedPermissionOrigins: ['<all_urls>'],
+    });
+
+    const disabled = await coordinator.run({
+      type: 'simul:preferences:commit-auto',
+      expectedResetRevision: 0,
+      mode: 'off',
+      pageUrl: 'https://current.example/page',
+    });
+    expect(disabled.preferences).toMatchObject({
+      autoTranslateAllSites: false,
+      imageTranslationEnabled: true,
+      grantedPermissionOrigins: ['<all_urls>'],
+    });
+    expect(adapter.hasGrant('<all_urls>')).toBe(true);
+
+    const imageOff = await coordinator.run({
+      type: 'simul:preferences:patch-image-analysis',
+      expectedResetRevision: 0,
+      expectedSettingsRevision: disabled.preferences.settingsRevision,
+      patch: { imageTranslationEnabled: false },
+    });
+    expect(imageOff.preferences).toMatchObject({
+      imageTranslationEnabled: false,
+      grantedPermissionOrigins: [],
+    });
+    expect(adapter.hasGrant('<all_urls>')).toBe(false);
+  });
+
   it('adopts every managed grant once when stored preferences predate the ledger', async () => {
     const adapter = new MemoryPreferenceAdapter();
     const { grantedPermissionOrigins: _ledger, ...legacyStored } =
