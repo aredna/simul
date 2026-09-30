@@ -1,5 +1,11 @@
 import type * as Pdfjs from 'pdfjs-dist';
 
+import {
+  REGULAR_FONT_FACE,
+  fontFaceFromName,
+  type PdfFontFace,
+} from './pdf-overlay-style';
+
 /**
  * The packaged pdf.js (`vendor/pdfjs/`, shipped as `pdfjs/`) behind a narrow
  * interface. pdf.js loads by URL at run time, after Simul's shim, so it never
@@ -99,6 +105,15 @@ export interface PdfDocumentHandle {
     scale: number,
     signal?: AbortSignal,
   ): Promise<number>;
+  /**
+   * Weight and slant of fonts by their pdf.js id (a text item's `fontName`).
+   * pdf.js knows a font's real name only once a page using it has been drawn;
+   * a font it does not know yet reads as regular.
+   */
+  fontFaces(
+    pageNumber: number,
+    fontIds: readonly string[],
+  ): Promise<Readonly<Record<string, PdfFontFace>>>;
   /**
    * Lets pdf.js drop what it keeps for a drawn page (its parsed drawing
    * commands, images and fonts). A render still in progress finishes first;
@@ -293,6 +308,22 @@ function createDocumentHandle(
         signal?.removeEventListener('abort', cancel);
         if (rendering.get(canvas) === renderTask) rendering.delete(canvas);
       }
+    },
+    async fontFaces(pageNumber, fontIds) {
+      const { commonObjs } = await document.getPage(pageNumber);
+      const faces: Record<string, PdfFontFace> = {};
+      for (const id of new Set(fontIds)) {
+        let face = REGULAR_FONT_FACE;
+        try {
+          if (commonObjs.has(id)) {
+            face = fontFaceFromName((commonObjs.get(id) as { name?: unknown } | null)?.name);
+          }
+        } catch {
+          // Not loaded after all: regular.
+        }
+        faces[id] = face;
+      }
+      return faces;
     },
     async releasePage(pageNumber) {
       // The boolean only says whether it freed at once or after a render.

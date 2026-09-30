@@ -42,6 +42,10 @@ export class ReplicaSurfaceRouter
     return this.#surface?.project(projection) ?? false;
   }
 
+  translationOrder(): Iterable<number> | undefined {
+    return this.#surface?.translationOrder?.();
+  }
+
   resolveImageAnchor(
     document: ReplicaSourceDocumentIdentity,
     nodeId: number,

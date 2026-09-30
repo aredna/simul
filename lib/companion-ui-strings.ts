@@ -195,13 +195,16 @@ export const UI_STRINGS = {
 
   // PDF statuses (capture pipeline and PDF controller).
   statusPdfReading: 'Reading the PDF…',
-  statusPdfShown: 'Showing the PDF. Pages: {0}.',
   statusPdfPassword: 'This PDF is password-protected. Simul cannot open it.',
   statusPdfTooLarge: 'This PDF is too large for Simul (over 128 MB).',
   statusPdfDownloadFailed:
     'The PDF could not be downloaded. Reload the tab and select Simul again.',
   statusPdfUnreadable: 'This file is not a readable PDF.',
   statusPdfReaderFailed: 'Simul’s PDF reader could not start.',
+  statusPdfNoText: 'This PDF has no text to translate. It may be scanned.',
+  statusPdfSourceOnly: 'Live source only is active. The PDF is shown without translation.',
+  statusPdfTranslated: 'The PDF is translated.',
+  pdfPageLabel: 'Page {0} of {1}',
 
   // Surface-switcher: detached window / return-to-panel.
   returnToSidePanelAria: 'Return companion to the side panel',

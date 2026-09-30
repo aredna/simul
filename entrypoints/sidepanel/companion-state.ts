@@ -120,6 +120,8 @@ export class CompanionState {
   replicaShadowAbortController: AbortController | undefined;
   /** The PDF download and open in progress, if any. */
   pdfAbortController: AbortController | undefined;
+  /** The shown PDF's text being read, if any. */
+  pdfTextAbortController: AbortController | undefined;
   activeTranslationTask: Promise<void> | undefined;
   activeTranslationKey: string | undefined;
   /** The identity request of an active-tab follow still resolving. */
@@ -218,6 +220,7 @@ export class CompanionState {
     this.activeAbortController?.abort();
     this.replicaShadowAbortController?.abort();
     this.pdfAbortController?.abort();
+    this.pdfTextAbortController?.abort();
   }
 
   /** Forgets that the user wanted this page translated. */

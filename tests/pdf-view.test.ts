@@ -1,7 +1,10 @@
 import { parseHTML } from 'linkedom';
 import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import type { PdfBlockMeasure } from '../entrypoints/sidepanel/pdf-text-layer';
 import { PdfView, type PdfViewDocument } from '../entrypoints/sidepanel/pdf-view';
+import type { RgbaPixels } from '../lib/pdf/colour-sample';
+import type { PdfSurfaceBlock } from '../lib/pdf/pdf-text-surface';
 
 const LETTER = { width: 612, height: 792 };
 
@@ -18,6 +21,10 @@ function setup(options: {
   pages?: number;
   maxDrawnPages?: number;
   devicePixelRatio?: () => number;
+  pageLabel?: (page: number, total: number) => string;
+  onReadingPageChange?: (index: number) => void;
+  readPixels?: (canvas: HTMLCanvasElement) => RgbaPixels | undefined;
+  measureBlock?: PdfBlockMeasure;
 } = {}) {
   const { document, window } = parseHTML(
     '<main><section id="pdf-view" hidden></section></main>',
@@ -48,6 +55,10 @@ function setup(options: {
       };
     },
     ...(options.maxDrawnPages ? { maxDrawnPages: options.maxDrawnPages } : {}),
+    ...(options.pageLabel ? { pageLabel: options.pageLabel } : {}),
+    ...(options.onReadingPageChange ? { onReadingPageChange: options.onReadingPageChange } : {}),
+    readPixels: options.readPixels ?? (() => undefined),
+    measureBlock: options.measureBlock ?? (() => undefined),
   });
   const pending: PendingRender[] = [];
   const pdf = {
@@ -69,6 +80,8 @@ function setup(options: {
         pending.push(render);
       })),
     releasePage: vi.fn(async (_page: number) => undefined),
+    fontFaces: vi.fn(async (_page: number, _fontIds: readonly string[]) =>
+      ({ bold: { bold: true, italic: false } }) as Record<string, { bold: boolean; italic: boolean }>),
   } satisfies PdfViewDocument;
   const sizes = Array.from({ length: options.pages ?? 10 }, () => LETTER);
   return {
@@ -248,5 +261,373 @@ describe('PdfView', () => {
     expect(harness.view.mounted).toBe(false);
     expect(harness.pdf.releasePage).not.toHaveBeenCalled();
     expect(harness.pdf.render).toHaveBeenCalledOnce();
+  });
+});
+
+function textBlock(
+  id: number,
+  text: string,
+  options: { fontId?: string; top?: number; align?: PdfSurfaceBlock['align'] } = {},
+): PdfSurfaceBlock {
+  const top = options.top ?? 72;
+  const lines = [
+    { left: 72, top, width: 306, height: 12 },
+    { left: 72, top: top + 14, width: 200, height: 12 },
+  ];
+  return {
+    id,
+    text,
+    lines,
+    box: { left: 72, top, width: 306, height: 26 },
+    fontSize: 10,
+    lineHeight: 1.4,
+    fontFamily: 'serif',
+    fontId: options.fontId ?? 'regular',
+    align: options.align ?? 'left',
+  };
+}
+
+/** The font size a block is set to, in the page's own pixels at scale 1. */
+function fontPixels(block: HTMLElement): number {
+  return Number(/\* ([\d.]+)px/u.exec(block.style.fontSize)?.[1] ?? Number.NaN);
+}
+
+/** A page-sized white canvas with black ink everywhere else. */
+function whitePixels(): RgbaPixels {
+  const width = 612;
+  const height = 792;
+  const data = new Uint8ClampedArray(width * height * 4).fill(255);
+  return { width, height, data };
+}
+
+describe('PdfView text', () => {
+  it('names every page and names them again on request', () => {
+    let word = 'Page';
+    const harness = setup({ pages: 3, pageLabel: (page, total) => `${word} ${page}/${total}` });
+    harness.view.mount(harness.pdf, harness.sizes);
+    const pages = harness.element.querySelectorAll<HTMLElement>('.pdf-page');
+
+    expect(pages[1]?.getAttribute('role')).toBe('group');
+    expect(pages[1]?.getAttribute('aria-label')).toBe('Page 2/3');
+    word = 'Seite';
+    harness.view.relabelPages();
+    expect(pages[2]?.getAttribute('aria-label')).toBe('Seite 3/3');
+  });
+
+  it('lays the source text over a page, transparent, in shares of the page', () => {
+    const harness = setup({ pages: 2 });
+    harness.view.mount(harness.pdf, harness.sizes);
+
+    harness.view.setPageText(1, [textBlock(7, 'Bonjour le monde')]);
+
+    const page = harness.element.querySelectorAll<HTMLElement>('.pdf-page')[1]!;
+    const block = page.querySelector<HTMLElement>('.pdf-block')!;
+    expect(page.querySelector('.pdf-text-layer')).not.toBeNull();
+    expect(block.textContent).toBe('Bonjour le monde');
+    expect(block.classList.contains('pdf-block--translated')).toBe(false);
+    expect(block.getAttribute('dir')).toBe('auto');
+    expect(block.style.left).toBe(`${Math.round((72 / 612) * 100_000) / 1000}%`);
+    expect(block.style.width).toBe('50%');
+    // Two lines at 1.4 × 10 points: 28 points, a little more than the 26 of the line boxes.
+    expect(block.style.height).toBe(`${Math.round((28 / 792) * 100_000) / 1000}%`);
+    expect(block.style.fontSize).toBe('calc(var(--pdf-scale, 1) * 10px)');
+    expect(block.style.fontFamily).toBe('serif');
+    expect(Number(harness.element.querySelector<HTMLElement>('.pdf-view-pages')!.style
+      .getPropertyValue('--pdf-scale'))).toBeCloseTo(400 / 612, 6);
+  });
+
+  it('shows a translation over covers in the page colours, then the source again', async () => {
+    const readPixels = vi.fn(() => whitePixels());
+    const harness = setup({ pages: 1, readPixels });
+    harness.view.mount(harness.pdf, harness.sizes);
+    harness.view.setPageText(0, [textBlock(7, 'Bonjour', { fontId: 'bold' })]);
+    await harness.finishNext();
+    await vi.advanceTimersByTimeAsync(0);
+
+    harness.view.showTranslation(7, 'Hello', 'en');
+
+    const block = harness.element.querySelector<HTMLElement>('.pdf-block')!;
+    expect(block.classList.contains('pdf-block--translated')).toBe(true);
+    expect(block.getAttribute('lang')).toBe('en');
+    expect(block.querySelector('.pdf-block-text')?.textContent).toBe('Hello');
+    const covers = block.querySelectorAll<HTMLElement>('.pdf-block-cover');
+    expect(covers).toHaveLength(2);
+    expect(covers[0]?.getAttribute('aria-hidden')).toBe('true');
+    expect(block.style.getPropertyValue('--pdf-cover')).toBe('rgb(255, 255, 255)');
+    expect(readPixels).toHaveBeenCalledOnce();
+    expect(harness.pdf.fontFaces).toHaveBeenCalledWith(1, ['bold']);
+    expect(block.style.fontWeight).toBe('700');
+
+    harness.view.hideTranslations();
+    expect(block.classList.contains('pdf-block--translated')).toBe(false);
+    expect(block.textContent).toBe('Bonjour');
+    expect(block.hasAttribute('lang')).toBe(false);
+  });
+
+  it('shrinks a long translation to fit, but never below half size', async () => {
+    const needed = new Map<string, number>([['Short', 20], ['Long', 80], ['Endless', 10_000]]);
+    const measured = new Map<string, number>();
+    const measureBlock: PdfBlockMeasure = (block, text) => {
+      measured.set(text.textContent ?? '', (measured.get(text.textContent ?? '') ?? 0) + 1);
+      const scale = Number(/\* ([\d.]+)px/u.exec(block.style.fontSize)?.[1] ?? 10) / 10;
+      // Wrapping text needs room with the square of the font scale.
+      const height = (needed.get(text.textContent ?? '') ?? 0) * scale * scale;
+      return { needed: { width: 100, height }, available: { width: 100, height: 20 } };
+    };
+    const harness = setup({ pages: 1, measureBlock });
+    harness.view.mount(harness.pdf, harness.sizes);
+    harness.view.setPageText(0, [
+      textBlock(1, 'Un'),
+      textBlock(2, 'Deux', { top: 200 }),
+      textBlock(3, 'Trois', { top: 400 }),
+    ]);
+    await harness.finishNext();
+
+    harness.view.showTranslation(1, 'Short', 'en');
+    harness.view.showTranslation(2, 'Long', 'en');
+    harness.view.showTranslation(3, 'Endless', 'en');
+    harness.runFrames();
+
+    const sizes = [...harness.element.querySelectorAll<HTMLElement>('.pdf-block')]
+      .map((block) => block.style.fontSize);
+    expect(sizes[0]).toBe('calc(var(--pdf-scale, 1) * 10px)');
+    expect(sizes[1]).toBe('calc(var(--pdf-scale, 1) * 5px)');
+    expect(sizes[2]).toBe('calc(var(--pdf-scale, 1) * 5px)');
+    // Still too long at half size: measured at full size and at half, then left.
+    expect(measured.get('Endless')).toBe(2);
+  });
+
+  it('measures every drawn page before resizing any', async () => {
+    const log: Array<[string, number]> = [];
+    const measureBlock: PdfBlockMeasure = (block, text) => {
+      const size = fontPixels(block);
+      log.push([text.textContent ?? '', size]);
+      return {
+        needed: { width: 100, height: 40 * (size / 10) ** 2 },
+        available: { width: 100, height: 20 },
+      };
+    };
+    const harness = setup({ pages: 2, measureBlock });
+    harness.view.mount(harness.pdf, harness.sizes);
+    harness.view.setPageText(0, [textBlock(1, 'Un')]);
+    harness.view.setPageText(1, [textBlock(2, 'Deux')]);
+    await harness.finishNext();
+    await harness.finishNext();
+
+    harness.view.showTranslation(1, 'Page one', 'en');
+    harness.view.showTranslation(2, 'Page two', 'en');
+    harness.runFrames();
+
+    // Round one measures both pages at full size before either shrinks;
+    // round two measures both at their new size.
+    expect(log.slice(0, 2)).toEqual([['Page one', 10], ['Page two', 10]]);
+    expect(log.slice(2, 4).map(([text]) => text)).toEqual(['Page one', 'Page two']);
+    expect(log.slice(2, 4).every(([, size]) => size < 10)).toBe(true);
+  });
+
+  it('fits a block that could not be measured at a later frame', async () => {
+    let laidOut = false;
+    const measureBlock: PdfBlockMeasure = (block) => laidOut
+      ? {
+          needed: { width: 100, height: 40 * (fontPixels(block) / 10) ** 2 },
+          available: { width: 100, height: 20 },
+        }
+      : undefined;
+    const harness = setup({ pages: 1, measureBlock });
+    harness.view.mount(harness.pdf, harness.sizes);
+    harness.view.setPageText(0, [textBlock(1, 'Un')]);
+    await harness.finishNext();
+    const block = harness.element.querySelector<HTMLElement>('.pdf-block')!;
+
+    harness.view.showTranslation(1, 'Longer text', 'en');
+    harness.runFrames();
+    expect(fontPixels(block)).toBe(10);
+
+    laidOut = true;
+    harness.element.dispatchEvent(new harness.window.Event('scroll'));
+    harness.runFrames();
+    expect(fontPixels(block)).toBeLessThan(7.5);
+  });
+
+  it('keeps the alignment of the text it covers', async () => {
+    const harness = setup({ pages: 1 });
+    harness.view.mount(harness.pdf, harness.sizes);
+    harness.view.setPageText(0, [
+      textBlock(1, 'Titre', { align: 'center' }),
+      textBlock(2, 'Signé', { top: 300, align: 'right' }),
+      textBlock(3, 'Texte', { top: 500 }),
+    ]);
+    harness.view.showTranslation(1, 'Title', 'en');
+
+    expect([...harness.element.querySelectorAll<HTMLElement>('.pdf-block')]
+      .map((block) => block.style.textAlign)).toEqual(['center', 'right', 'left']);
+  });
+
+  it('settles a line that barely wraps near the largest size that fits', async () => {
+    // One line of room; the translation needs 1.1 lines' width at full size,
+    // so it wraps to two lines above a scale of 1 / 1.1.
+    const measureBlock: PdfBlockMeasure = (block) => {
+      const scale = Number(/\* ([\d.]+)px/u.exec(block.style.fontSize)?.[1] ?? 10) / 10;
+      const lines = 1.1 * scale > 1 ? 2 : 1;
+      return {
+        needed: { width: 100, height: lines * 20 * scale },
+        available: { width: 100, height: 20 },
+      };
+    };
+    const harness = setup({ pages: 1, measureBlock });
+    harness.view.mount(harness.pdf, harness.sizes);
+    harness.view.setPageText(0, [textBlock(1, 'Un')]);
+    await harness.finishNext();
+
+    harness.view.showTranslation(1, 'A little longer', 'en');
+    harness.runFrames();
+
+    const block = harness.element.querySelector<HTMLElement>('.pdf-block')!;
+    const size = Number(/\* ([\d.]+)px/u.exec(block.style.fontSize)?.[1]);
+    // The square-root estimate alone would stop at 7.07px.
+    expect(size).toBeGreaterThan(8.5);
+    expect(size).toBeLessThanOrEqual(10 / 1.1);
+  });
+
+  it('keeps a translation for a page not drawn yet, and fits it once drawn', async () => {
+    const measureBlock = vi.fn<PdfBlockMeasure>(() => undefined);
+    const harness = setup({ pages: 10, measureBlock });
+    harness.view.mount(harness.pdf, harness.sizes);
+    harness.view.setPageText(9, [textBlock(4, 'Fin')]);
+
+    harness.view.showTranslation(4, 'End', 'en');
+    harness.runFrames();
+
+    expect(harness.element.querySelectorAll<HTMLElement>('.pdf-page')[9]
+      ?.querySelector('.pdf-block-text')?.textContent).toBe('End');
+    expect(measureBlock).not.toHaveBeenCalled();
+  });
+
+  it('reports the page the reader scrolled to', () => {
+    const reading: number[] = [];
+    const harness = setup({ pages: 10, onReadingPageChange: (index) => reading.push(index) });
+    harness.view.mount(harness.pdf, harness.sizes);
+    const pageHeight = (792 * 400) / 612;
+
+    harness.element.scrollTop = 8 + 3 * (pageHeight + 8) + 10;
+    harness.element.dispatchEvent(new harness.window.Event('scroll'));
+    harness.runFrames();
+    harness.element.dispatchEvent(new harness.window.Event('scroll'));
+    harness.runFrames();
+
+    expect(reading).toEqual([0, 3]);
+  });
+
+  it('keeps a right-aligned block right-aligned when its translation is right-to-left', () => {
+    const harness = setup({ pages: 1 });
+    harness.view.mount(harness.pdf, harness.sizes);
+    harness.view.setPageText(0, [textBlock(1, 'Signed, the director', { align: 'right' })]);
+    harness.view.showTranslation(1, 'وقّعه المدير', 'ar');
+
+    const block = harness.element.querySelector<HTMLElement>('.pdf-block')!;
+    expect(block.style.textAlign).toBe('right');
+    expect(block.getAttribute('dir')).toBe('auto');
+    expect(block.getAttribute('lang')).toBe('ar');
+  });
+
+  it('shows translations only on a drawn page whose colours were read', async () => {
+    const harness = setup({ pages: 10, readPixels: () => whitePixels() });
+    harness.view.mount(harness.pdf, harness.sizes);
+    harness.view.setPageText(0, [textBlock(1, 'Un')]);
+    harness.view.setPageText(9, [textBlock(2, 'Dix')]);
+    harness.view.showTranslation(1, 'One', 'en');
+    harness.view.showTranslation(2, 'Ten', 'en');
+    const pages = harness.element.querySelectorAll<HTMLElement>('.pdf-page');
+    // Page 1 is being drawn, page 10 is far away: neither shows its overlay yet,
+    // though both hold the translated text for screen readers.
+    expect(pages[0]?.hasAttribute('data-overlays')).toBe(false);
+    expect(pages[9]?.hasAttribute('data-overlays')).toBe(false);
+    expect(pages[9]?.querySelector('.pdf-block-text')?.textContent).toBe('Ten');
+
+    await harness.finishNext();
+    expect(pages[0]?.hasAttribute('data-overlays')).toBe(true);
+    expect(pages[9]?.hasAttribute('data-overlays')).toBe(false);
+  });
+
+  it('reads the pixels of a page once, and again only after the next draw', async () => {
+    const readPixels = vi.fn((): RgbaPixels | undefined => undefined);
+    const harness = setup({ pages: 1, readPixels });
+    harness.view.mount(harness.pdf, harness.sizes);
+    harness.view.setPageText(0, [textBlock(1, 'Un'), textBlock(2, 'Deux', { top: 300 })]);
+    await harness.finishNext();
+
+    harness.view.showTranslation(1, 'One', 'en');
+    harness.view.showTranslation(2, 'Two', 'en');
+    expect(readPixels).toHaveBeenCalledOnce();
+    // The read failed: translations show with the default colours.
+    const page = harness.element.querySelector<HTMLElement>('.pdf-page')!;
+    expect(page.hasAttribute('data-overlays')).toBe(true);
+
+    readPixels.mockImplementation(() => whitePixels());
+    harness.view.updateLayout({ displayMode: 'actual', zoomPercent: 100, sourceZoomFactor: 1 });
+    await vi.advanceTimersByTimeAsync(150);
+    await harness.finishNext();
+    expect(readPixels).toHaveBeenCalledTimes(2);
+    expect(page.querySelector<HTMLElement>('.pdf-block')!.style.getPropertyValue('--pdf-cover'))
+      .toBe('rgb(255, 255, 255)');
+  });
+
+  it('forgets the blocks of a page whose text is replaced', () => {
+    const harness = setup({ pages: 1 });
+    harness.view.mount(harness.pdf, harness.sizes);
+    harness.view.setPageText(0, [textBlock(1, 'Ancien')]);
+    harness.view.setPageText(0, [textBlock(2, 'Nouveau')]);
+
+    harness.view.showTranslation(1, 'Old', 'en');
+    harness.view.showTranslation(2, 'New', 'en');
+
+    const texts = [...harness.element.querySelectorAll('.pdf-block-text')].map((text) => text.textContent);
+    expect(texts).toEqual(['New']);
+    expect(harness.element.querySelectorAll('.pdf-text-layer')).toHaveLength(1);
+  });
+
+  it('asks for font faces again after the next draw when pdf.js refused', async () => {
+    const harness = setup({ pages: 1 });
+    harness.pdf.fontFaces.mockRejectedValueOnce(new Error('Worker busy'));
+    harness.view.mount(harness.pdf, harness.sizes);
+    harness.view.setPageText(0, [textBlock(1, 'Titre', { fontId: 'bold' })]);
+    await harness.finishNext();
+    await vi.advanceTimersByTimeAsync(0);
+    const block = harness.element.querySelector<HTMLElement>('.pdf-block')!;
+    expect(block.style.fontWeight).toBe('');
+
+    harness.view.updateLayout({ displayMode: 'actual', zoomPercent: 100, sourceZoomFactor: 1 });
+    await vi.advanceTimersByTimeAsync(150);
+    await harness.finishNext();
+    await vi.advanceTimersByTimeAsync(0);
+
+    expect(harness.pdf.fontFaces).toHaveBeenCalledTimes(2);
+    expect(block.style.fontWeight).toBe('700');
+  });
+
+  it('fits again after a zoom of more than a tenth, not after a smaller one', async () => {
+    const measureBlock = vi.fn<PdfBlockMeasure>((block) => ({
+      needed: { width: 100, height: 40 * (fontPixels(block) / 10) ** 2 },
+      available: { width: 100, height: 20 },
+    }));
+    const harness = setup({ pages: 1, measureBlock });
+    harness.view.mount(harness.pdf, harness.sizes);
+    harness.view.setPageText(0, [textBlock(1, 'Un')]);
+    await harness.finishNext();
+    harness.view.showTranslation(1, 'Longer', 'en');
+    harness.runFrames();
+    const fitted = measureBlock.mock.calls.length;
+    expect(fitted).toBeGreaterThan(0);
+
+    // Fit follows the panel width: 5% wider keeps the fit, 50% wider redoes it.
+    harness.setWidth(416 * 1.05);
+    harness.resize();
+    harness.runFrames();
+    expect(measureBlock.mock.calls.length).toBe(fitted);
+
+    harness.setWidth(416 * 1.5);
+    harness.resize();
+    harness.runFrames();
+    expect(measureBlock.mock.calls.length).toBeGreaterThan(fitted);
   });
 });

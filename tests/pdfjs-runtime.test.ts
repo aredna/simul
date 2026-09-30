@@ -169,6 +169,21 @@ describe('pdfjs-runtime with the packaged pdf.js', () => {
       .toBeGreaterThan(500);
   });
 
+  it('names font weight and slant once a page has been drawn', async () => {
+    stubCanvasGlobals();
+    const document = await open('text.pdf');
+    const ids = [...new Set((await document.getTextContent(1)).items.map((item) => item.fontName))];
+
+    const before = await document.fontFaces(1, ids);
+    expect(Object.values(before).every((face) => !face.bold && !face.italic)).toBe(true);
+
+    await document.render(1, asCanvas(createCanvas(1, 1)), 1);
+    const after = await document.fontFaces(1, [...ids, 'unknown']);
+    // Helvetica-Bold for the title, Helvetica for the body.
+    expect(Object.values(after).filter((face) => face.bold)).toHaveLength(1);
+    expect(after.unknown).toEqual({ bold: false, italic: false });
+  });
+
   it('asks for a password instead of opening an encrypted PDF', async () => {
     await expect(open('password.pdf')).rejects.toMatchObject({
       name: 'PdfjsOpenError',

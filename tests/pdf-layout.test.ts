@@ -238,6 +238,12 @@ describe('reading position', () => {
     expect(pdfReadingPosition([], 50)).toBeUndefined();
   });
 
+  it('counts a page whose top the browser rounded just below the edge as at the top', () => {
+    const second = boxes[1]!.top;
+    expect(pdfReadingPosition(boxes, second - 0.6)).toEqual({ index: 1, fraction: 0 });
+    expect(pdfReadingPosition(boxes, second - 2)?.index).toBe(0);
+  });
+
   it('puts the same place back at the top after a layout change', () => {
     const position = pdfReadingPosition(boxes, 1_510);
     const larger = column(3, 2000, 10);

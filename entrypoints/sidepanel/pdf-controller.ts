@@ -6,7 +6,10 @@ import type {
   PdfPagePoints,
   PdfReadingPosition,
 } from '../../lib/pdf/pdf-layout';
+import type { PdfPageText } from '../../lib/pdf/pdf-text-surface';
 import { PdfjsOpenError, type PdfDocumentHandle } from '../../lib/pdf/pdfjs-runtime';
+import { pdfTextBlocks } from '../../lib/pdf/text-blocks';
+import type { ReplicaSourceDocumentIdentity } from '../../lib/replica/source-identity';
 import type { PdfViewSurface } from './pdf-view';
 
 /** Content-free: stages, counts, sizes and times only. */
@@ -17,9 +20,27 @@ export type PdfDiagnostic =
       readonly bytes: number;
       readonly milliseconds: number;
     }
-  | { readonly stage: 'failed'; readonly step: PdfLoadStep; readonly kind: string };
+  | { readonly stage: 'failed'; readonly step: PdfLoadStep; readonly kind: string }
+  | {
+      readonly stage: 'text';
+      readonly pages: number;
+      readonly pagesWithText: number;
+      readonly blocks: number;
+      readonly milliseconds: number;
+    };
 
 type PdfLoadStep = 'download' | 'open' | 'pages' | 'show';
+
+/** The part of the PDF's translation surface the controller fills. */
+export interface PdfControllerSurface {
+  mount(document: ReplicaSourceDocumentIdentity, pageCount: number): void;
+  clear(): void;
+  addPage(page: PdfPageText): void;
+  markTextComplete(): void;
+  readonly document: ReplicaSourceDocumentIdentity | undefined;
+  readonly hasText: boolean;
+  readingPage: number;
+}
 
 export interface PdfControllerDependencies {
   readonly fetchPdf: (url: string, signal: AbortSignal) => Promise<Uint8Array>;
@@ -29,6 +50,16 @@ export interface PdfControllerDependencies {
   readonly onDiagnostic?: (diagnostic: PdfDiagnostic) => void;
   /** How long opening the file and reading its page sizes may take. */
   readonly openTimeoutMs?: number;
+  /** Where the PDF's text goes; without it, there is no text to read. */
+  readonly surface?: PdfControllerSurface;
+  /**
+   * The reader settled on another page; translation should start there.
+   * Called once the reading page has stopped changing for `priorityDelayMs`.
+   */
+  readonly onPriorityChange?: () => void;
+  readonly priorityDelayMs?: number;
+  /** How long one page's text may take; a slower page counts as no text. */
+  readonly pageTextTimeoutMs?: number;
 }
 
 /**
@@ -40,6 +71,16 @@ export const PDF_OPEN_TIMEOUT_MS = 60_000;
 const PAGE_SIZE_BATCH = 16;
 // Reading positions are remembered for this many recently shown PDFs.
 const REMEMBERED_POSITIONS = 16;
+/** The reading page must hold this long before translation is reordered. */
+export const PDF_PRIORITY_DELAY_MS = 250;
+/** One page's text read that takes longer than this counts as no text. */
+export const PDF_PAGE_TEXT_TIMEOUT_MS = 10_000;
+
+interface PageSizes {
+  readonly sizes: readonly PdfPagePoints[];
+  /** Each page's transform to page points; missing when unmeasured. */
+  readonly transforms: readonly (readonly number[] | undefined)[];
+}
 
 /**
  * Loads the followed tab's PDF and shows it in the PDF view. Like the
@@ -53,6 +94,10 @@ export class PdfController {
   #document: PdfDocumentHandle | undefined;
   /** The shown PDF's address without its fragment. */
   #shownKey: string | undefined;
+  #pages: PageSizes | undefined;
+  /** The running text reading; replaced or cleared to stop it. */
+  #reading: object | undefined;
+  #priorityTimer: ReturnType<typeof setTimeout> | undefined;
   // Memory only: where the reader was in recently shown PDFs, so a Refresh
   // or a return to the tab opens at the same place.
   readonly #positions = new Map<string, {
@@ -71,10 +116,15 @@ export class PdfController {
   /**
    * Resolves once the PDF at `url` is shown. Failures reject with a
    * `PageAccessError` whose message is the status to show; a cancelled load
-   * rejects with an `AbortError` and shows nothing.
+   * rejects with an `AbortError` and shows nothing. With `sourceDocument`,
+   * the translation surface is started for it, empty; `readText` fills it.
    */
-  async show(url: string, signal: AbortSignal): Promise<{ readonly pageCount: number }> {
-    const { fetchPdf, openDocument, view } = this.#dependencies;
+  async show(
+    url: string,
+    signal: AbortSignal,
+    sourceDocument?: ReplicaSourceDocumentIdentity,
+  ): Promise<{ readonly pageCount: number }> {
+    const { fetchPdf, openDocument, view, surface } = this.#dependencies;
     const now = this.#dependencies.now ?? (() => performance.now());
     const started = now();
     const key = documentKey(url);
@@ -101,21 +151,32 @@ export class PdfController {
       opened = await openDocument(bytes, bounded.signal);
       bounded.signal.throwIfAborted();
       step = 'pages';
-      const pageSizes = await readPageSizes(opened, bounded.signal);
+      const measured = await readPageSizes(opened, bounded.signal);
+      const pageSizes = measured.sizes;
       bounded.signal.throwIfAborted();
       step = 'show';
       this.#rememberPosition();
       const remembered = this.#positions.get(key);
+      const position = remembered?.pageCount === pageSizes.length ? remembered.position : undefined;
       const previous = this.#document;
-      view.mount(
-        opened,
-        pageSizes,
-        remembered?.pageCount === pageSizes.length ? remembered.position : undefined,
-      );
-      this.#document = opened;
-      this.#shownKey = key;
-      opened = undefined;
-      if (previous) void previous.destroy().catch(() => {});
+      this.#reading = undefined;
+      try {
+        view.mount(opened, pageSizes, position);
+        this.#document = opened;
+        this.#shownKey = key;
+        this.#pages = measured;
+        opened = undefined;
+        if (surface && sourceDocument) {
+          surface.mount(sourceDocument, pageSizes.length);
+          surface.readingPage = position?.index ?? 0;
+        } else {
+          // No document to translate for: nothing of the previous PDF stays.
+          surface?.clear();
+        }
+      } finally {
+        // Once replaced, the previous document goes, even if a later step failed.
+        if (previous && this.#document !== previous) void previous.destroy().catch(() => {});
+      }
       shown = { pages: pageSizes.length, bytes: byteCount };
     } catch (error) {
       if (opened) void opened.destroy().catch(() => {});
@@ -146,9 +207,75 @@ export class PdfController {
     return { pageCount: shown.pages };
   }
 
+  /**
+   * Reads every page's text of the shown PDF into the translation surface,
+   * one page at a time so pdf.js's worker can draw in between: the reading
+   * page first, then the next unread page after the page being read, else
+   * the nearest before it. Each page reaches the view as soon as it is read.
+   * Resolves with whether any page has text, once the surface is marked
+   * complete. A page that takes longer than `pageTextTimeoutMs` counts as
+   * no text, so reading always ends. Rejects with an `AbortError` when
+   * `signal` aborts, the PDF closes or another is shown.
+   */
+  async readText(signal: AbortSignal): Promise<{ readonly hasText: boolean }> {
+    const { surface } = this.#dependencies;
+    const document = this.#document;
+    const pages = this.#pages;
+    if (!surface || !document || !pages || signal.aborted) throw abortError();
+    const token = {};
+    this.#reading = token;
+    const now = this.#dependencies.now ?? (() => performance.now());
+    const started = now();
+    const counts = { pages: 0, pagesWithText: 0, blocks: 0 };
+    const unread = new Set<number>();
+    pages.transforms.forEach((transform, index) => {
+      if (transform) unread.add(index);
+    });
+    while (unread.size > 0) {
+      const index = nextPageToRead(unread, surface.readingPage);
+      unread.delete(index);
+      const page = await readPageText(
+        document,
+        index,
+        pages.transforms[index]!,
+        pages.sizes[index]?.width,
+        this.#dependencies.pageTextTimeoutMs ?? PDF_PAGE_TEXT_TIMEOUT_MS,
+      );
+      if (this.#reading !== token || this.#document !== document || signal.aborted) {
+        throw abortError();
+      }
+      counts.pages += 1;
+      if (page.blocks.length > 0) counts.pagesWithText += 1;
+      counts.blocks += page.blocks.length;
+      try {
+        surface.addPage(page);
+      } catch {
+        // A page the surface or view could not take does not stop the rest.
+      }
+    }
+    this.#reading = undefined;
+    surface.markTextComplete();
+    this.#report({
+      stage: 'text',
+      ...counts,
+      milliseconds: Math.max(0, Math.round(now() - started)),
+    });
+    return { hasText: surface.hasText };
+  }
+
   /** Destroys the shown document and empties and hides the view. Idempotent. */
+  /** The translation surface's document, while its PDF is shown. */
+  get textDocument(): ReplicaSourceDocumentIdentity | undefined {
+    return this.#document ? this.#dependencies.surface?.document : undefined;
+  }
+
   close(): void {
     this.#rememberPosition();
+    this.#reading = undefined;
+    if (this.#priorityTimer !== undefined) clearTimeout(this.#priorityTimer);
+    this.#priorityTimer = undefined;
+    this.#pages = undefined;
+    this.#dependencies.surface?.clear();
     this.#dependencies.view.clear();
     const document = this.#document;
     this.#document = undefined;
@@ -184,6 +311,75 @@ export class PdfController {
   updateLayout(settings: PdfLayoutSettings): void {
     this.#dependencies.view.updateLayout(settings);
   }
+
+  /**
+   * The view's top page changed (0-based). Reading and any run that starts
+   * now follow it at once; queued translation is reordered once the reader
+   * has stayed on a page for `priorityDelayMs`, not on every page scrolled
+   * past.
+   */
+  handleReadingPage(index: number): void {
+    const surface = this.#dependencies.surface;
+    if (!this.#document || !surface || !Number.isInteger(index) || index < 0) return;
+    if (surface.readingPage === index) return;
+    surface.readingPage = index;
+    if (this.#priorityTimer !== undefined) clearTimeout(this.#priorityTimer);
+    this.#priorityTimer = setTimeout(() => {
+      this.#priorityTimer = undefined;
+      try {
+        this.#dependencies.onPriorityChange?.();
+      } catch {
+        // The order is a preference; reading goes on.
+      }
+    }, this.#dependencies.priorityDelayMs ?? PDF_PRIORITY_DELAY_MS);
+  }
+}
+
+/** The unread page at or after the reading page, else the nearest before it. */
+function nextPageToRead(unread: ReadonlySet<number>, readingPage: number): number {
+  let after: number | undefined;
+  let before: number | undefined;
+  for (const index of unread) {
+    if (index >= readingPage) {
+      if (after === undefined || index < after) after = index;
+    } else if (before === undefined || index > before) {
+      before = index;
+    }
+  }
+  return after ?? before!;
+}
+
+/** One page's text blocks; a page pdf.js cannot read in time has none. */
+async function readPageText(
+  document: PdfDocumentHandle,
+  index: number,
+  transform: readonly number[],
+  pageWidth: number | undefined,
+  timeoutMs: number,
+): Promise<PdfPageText> {
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const content = await Promise.race([
+      document.getTextContent(index + 1),
+      new Promise<undefined>((resolve) => {
+        timer = setTimeout(() => resolve(undefined), timeoutMs);
+      }),
+    ]);
+    if (!content) return { index, blocks: [] };
+    return {
+      index,
+      blocks: pdfTextBlocks(content, transform, pageWidth),
+      language: content.lang,
+    };
+  } catch {
+    return { index, blocks: [] };
+  } finally {
+    if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+function abortError(): DOMException {
+  return new DOMException('Reading the PDF text was cancelled.', 'AbortError');
 }
 
 /**
@@ -195,28 +391,32 @@ export class PdfController {
 async function readPageSizes(
   document: PdfDocumentHandle,
   signal: AbortSignal,
-): Promise<PdfPagePoints[]> {
+): Promise<PageSizes> {
   if (!Number.isInteger(document.pageCount) || document.pageCount < 1) {
     throw new PdfjsOpenError('unreadable', 'The PDF has no pages.');
   }
-  const measured: (PdfPagePoints | undefined)[] = [];
+  const measured: ({ size: PdfPagePoints; transform: readonly number[] } | undefined)[] = [];
   for (let first = 1; first <= document.pageCount; first += PAGE_SIZE_BATCH) {
     const last = Math.min(document.pageCount, first + PAGE_SIZE_BATCH - 1);
     const batch = await untilAborted(Promise.all(
       Array.from({ length: last - first + 1 }, (_, offset) =>
         document.getPageSize(first + offset).then(
-          ({ width, height }): PdfPagePoints => ({ width, height }),
+          ({ width, height, transform }) => ({ size: { width, height }, transform }),
           () => undefined,
         )),
     ), signal);
     measured.push(...batch);
   }
-  let previous = measured.find((size) => size !== undefined);
+  let previous = measured.find((page) => page !== undefined)?.size;
   if (!previous) throw new PdfjsOpenError('unreadable', 'No page of the PDF could be read.');
-  return measured.map((size) => {
-    previous = size ?? previous!;
-    return previous;
-  });
+  return {
+    sizes: measured.map((page) => {
+      previous = page?.size ?? previous!;
+      return previous;
+    }),
+    // A page borrowing its neighbour's size has no text to place.
+    transforms: measured.map((page) => page?.transform),
+  };
 }
 
 function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {

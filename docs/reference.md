@@ -44,10 +44,30 @@ pages and PDFs:
 ### PDFs
 
 When the tab shows a PDF, selecting Simul shows the PDF's pages in the panel,
-in order, with the packaged pdf.js. PDFs are not translated yet.
+in order, with the packaged pdf.js.
 
+**Translate page**, From/To, Auto-detect, automatic translation, Cancel and
+Live source only work as they do for web pages. Each paragraph, heading or
+list item is covered with the page's own background colour and its
+translation is written in its place, in the text's colour. A translation
+longer than the original shrinks down to half the original size; if it still
+does not fit, it runs past its block (though not past the edge of the page,
+which clips it). The page you are
+reading is translated first, then the pages after it, then those before it;
+scroll elsewhere and translation continues from there. Auto-detect uses the
+PDF's own language tag when it has one, otherwise its text. Simul reads all
+of a PDF's text first, after its pages show ("Reading the PDF…"), so
+**Translate page** turns on a moment later (about half a second for 300
+pages). Translations appear on a page once it is drawn.
+
+- Scanned pages (images of text) are not translated yet. A PDF with no text
+  says so. Rotated or vertical text stays as it is.
+- Screen readers read each page ("Page 2 of 10") with its text, translated
+  where a translation shows.
 - The panel scrolls on its own; it does not follow Chrome's PDF viewer.
-- Only the pages near the view are drawn, so long PDFs stay light.
+- Only the pages near the view are drawn. Every page's text layer is built,
+  though, so a PDF of thousands of pages takes more memory; trimming that is
+  planned.
 - If you come back to a PDF, or rebuild it, it opens where you left it.
 - Simul opens PDFs of up to 128 MB. A download that stalls for 60 seconds
   fails; a slow one that keeps going does not.

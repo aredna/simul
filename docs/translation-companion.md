@@ -507,10 +507,86 @@ shell and the mirror has nothing to copy (D103).
   rebuild keeps it until the replacement is ready. Any other capture,
   invalidation, purge or `pagehide` destroys the pdf.js task and empties the
   view.
-- **Translation.** Not yet. The PDF has no replica snapshot, so language
-  resolution is cleared and Translate page stays off. Failures show one
-  status each: password, too large, download failed, not a readable PDF, or
-  the reader could not start.
+- **Failures** show one status each: password, too large, download failed,
+  not a readable PDF, or the reader could not start.
+- **Text (D105).** `lib/pdf/text-blocks.ts` turns a page's pdf.js text runs
+  into lines and blocks in content order:
+  - a line breaks after `hasEOL`, when the baseline moves more than half the
+    font size, at a gap wider than 1.5 sizes (measured leftwards in a
+    right-to-left line, where a left-to-right number or word does not break
+    it), or when a run starts left of a left-to-right line; a run that
+    repeats one of its line's runs at almost the same place (fake bold, a
+    shadow, a line drawn twice) is dropped;
+  - lines join a block when their sizes are within 15%, the next baseline is
+    at most 1.6 sizes lower and their x ranges overlap. Bullets (including
+    Office's Symbol and Wingdings bullets, U+F000–U+F0FF) and numbers (`1.`,
+    `1)`, `(1)`) always start a block; dashes, letters and roman numerals
+    only after a line ending `.:;!?)` or inside a list;
+  - a word broken by a hyphen rejoins; Chinese, Japanese, Thai, Lao, Khmer
+    and Myanmar lines join without a space, Korean with one; rotated and
+    vertical runs are left out;
+  - a block's alignment is physical (`left`, `center`, `right`, so the
+    translation's direction cannot flip it): centred when its line centres
+    line up; right when its right edges line up and its left edges vary
+    beyond a first-line indent; else the text's own side. A single line is
+    centred in the middle of the page, away from the left margin of the
+    page's multi-line left-aligned blocks (no margin test on a page with
+    none, such as a title page);
+  - blocks with no area are left out.
+- **Reading.** `PdfController.show` mounts as before, with an empty surface
+  and no text read before the first paint. The capture then ends, and the
+  pipeline awaits `readText` under `state.pdfTextAbortController` (aborted
+  with the rest of the page work): every page, one at a time, from the
+  reading page on, then the nearest earlier ones, each shown to the view as
+  it is read. A page that takes more than 10 s counts as no text, and a
+  throwing surface or view does not stop it. The status says "Reading the
+  PDF…" meanwhile. The surface publishes no snapshot until
+  `markTextComplete`, so a half-read PDF is never published, even by a
+  failed rebuild. When reading resolves and the capture is still current
+  (checked against the surface's document), the pipeline publishes the
+  full snapshot and runs the replica's translation tail. Translate page is
+  off until then, usually well under a second (300 pages took 0.64 s in
+  Chrome 154). A finished PDF translation says "The PDF is translated.",
+  with no promise of live updates.
+- **Translation surface.** `lib/pdf/pdf-text-surface.ts` makes the shown PDF
+  a `ReplicaProjectionSurface`: blocks are text records (the document /Lang
+  is the document language), one document identity and replay lease per
+  shown PDF. The pipeline selects it on the surface router for a PDF (the
+  mirror otherwise), so the driver's language, availability, automation,
+  cancel, pair-epoch and Live source only rules apply unchanged, and one run
+  holds every block: Cancel stops the rest of the PDF, and a Refresh queues
+  everything again from the page on screen. The surface makes no commits. A
+  projection is accepted only for the current document, lease, epoch, pair,
+  block and source, and never empty. `translateCurrent` enqueues in the
+  surface's `translationOrder()` (reading page on, then earlier pages), so
+  the queue caps drop the least urgent blocks, and the coordinator's
+  `reprioritize()` reorders pending work once the reading page has held for
+  250 ms.
+- **Overlays.** `entrypoints/sidepanel/pdf-text-layer.ts` lays each page's
+  blocks over its canvas in shares of the page, font sizes scaled by
+  `--pdf-scale`, so zoom moves nothing. Source text is transparent (screen
+  readers read it; pages are `role="group"` with "Page n of N"). A translated
+  block covers its lines (padded 0.12 font sizes) with the background sampled
+  once per page from its canvas (`lib/pdf/colour-sample.ts`: rects clipped
+  to the canvas; the background is the dominant colour inside the line
+  boxes and a ring around them, weighting the inside, so a snug table fill
+  wins; the ink is the darkest 0.5% of the slightly inset line boxes'
+  pixels, never pushed past them, faint text included) and writes in the
+  sampled ink, generic family, the weight and slant pdf.js names after a
+  draw (the style part of the font name, `Bd`, `It`, Nimbus `Medi` and the
+  TeX families such as `CMBX` and `CMTI` included), and the block's
+  alignment. A failed canvas read is tried again only after the next draw.
+  A translation shows only on a page that is drawn and whose colours were
+  read (`data-overlays`); before that it stays transparent for screen
+  readers. Every cover sits below every block's text, so an overflow is
+  never hidden by a neighbour's cover; the page's edge still clips it. The
+  layer ignores forced colours. Fitting searches the largest size that
+  fits, from 1 down to 0.5 of the source size; each round measures the
+  blocks of every drawn page, then resizes them. A block still too long at
+  0.5 stops there and overflows; a block that cannot be measured yet waits
+  for a later frame, and translations for pages not drawn yet fit when
+  drawn. Every page's layer is built as its text is read, whether drawn or
+  not; keeping only nearby pages' layers is deferred.
 
 ## Detached window
 

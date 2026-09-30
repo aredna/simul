@@ -36,6 +36,11 @@ function setup(options: {
   readDocument?: () => Promise<SourceDocumentFacts | undefined>;
   readZoom?: () => Promise<number>;
   showPdf?: (url: string, signal: AbortSignal) => Promise<{ pageCount: number }>;
+  /** Reading the shown PDF's text; by default it never ends. */
+  readText?: (signal: AbortSignal) => Promise<{ hasText: boolean }>;
+  /** What the PDF surface publishes once its text is read. */
+  pdfSnapshot?: (document: ReplicaSourceDocumentIdentity) => ReplicaTranslationSnapshot | undefined;
+  resolveLanguage?: () => Promise<boolean>;
   fieldCount?: number;
   accessRevoked?: boolean;
   maxRebuilds?: number;
@@ -65,15 +70,39 @@ function setup(options: {
       published = undefined;
     }),
   };
+  let surfaceKind: 'mirror' | 'pdf' = 'mirror';
+  let pdfPublished: ReplicaTranslationSnapshot | undefined;
+  let pdfDocument: ReplicaSourceDocumentIdentity | undefined;
   const pdf = {
     shown: false,
-    show: vi.fn(async (url: string, signal: AbortSignal) => {
+    get textDocument() {
+      return pdfDocument;
+    },
+    show: vi.fn(async (url: string, signal: AbortSignal, document: ReplicaSourceDocumentIdentity) => {
       const shown = await (options.showPdf ?? (async () => ({ pageCount: 3 })))(url, signal);
       pdf.shown = true;
+      pdfDocument = document;
+      // The surface publishes nothing until `readText` has read every page.
+      pdfPublished = undefined;
       return shown;
+    }),
+    readText: vi.fn(async (signal: AbortSignal) => {
+      const document = pdfDocument;
+      const result = await (options.readText ?? (() => new Promise<never>(() => undefined)))(signal);
+      signal.throwIfAborted();
+      if (document && pdfDocument === document) {
+        pdfPublished = options.pdfSnapshot?.(document) ?? {
+          document,
+          replayLease: 1,
+          records: [{ document, nodeId: 1, nodeType: 3, revision: 1, source: 'Bonjour' }],
+        };
+      }
+      return result;
     }),
     close: vi.fn(() => {
       pdf.shown = false;
+      pdfDocument = undefined;
+      pdfPublished = undefined;
     }),
   };
   const coordinator = { selectPair: vi.fn(), handleSourceCommit: vi.fn() };
@@ -84,7 +113,7 @@ function setup(options: {
     notifyReplicaCommit: vi.fn(),
   };
   const translationDriver = {
-    resolveSelectedSourceLanguage: vi.fn(async () => true),
+    resolveSelectedSourceLanguage: vi.fn(options.resolveLanguage ?? (async () => true)),
     currentReplicaLanguageContext: vi.fn(() => undefined),
     currentTranslationFieldCount: vi.fn(() => options.fieldCount ?? 1),
     checkAvailability: vi.fn(async () => undefined),
@@ -105,7 +134,7 @@ function setup(options: {
     navigationRefreshGate: new NavigationRefreshGate(),
     recoveryGate,
     engine,
-    surface: { snapshot: () => published },
+    surface: { snapshot: () => (surfaceKind === 'pdf' ? pdfPublished : published) },
     presentation,
     pdf,
     coordinator,
@@ -128,6 +157,10 @@ function setup(options: {
     hideReplicaStatus: () => events.push('status-hidden'),
     clearCaptureNotes: () => events.push('notes-cleared'),
     updateMirrorLayout: () => events.push('layout'),
+    selectSurface: (kind) => {
+      surfaceKind = kind;
+      events.push(`surface:${kind}`);
+    },
     logImageDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
   });
   onSourceCommit = (commit) => pipeline.handleReplicaSourceCommit(commit);
@@ -319,28 +352,137 @@ describe('CapturePipeline commits and failures', () => {
 });
 
 describe('CapturePipeline PDFs', () => {
-  it('shows a PDF tab without the replica engine and publishes its identity', async () => {
+  it('shows a PDF tab without the replica engine and ends the capture before its text', async () => {
     const harness = setup({ readDocument: async () => PDF_DOCUMENT });
     harness.state.resolvedSourceLanguage = 'fr';
     harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
     await harness.settled();
 
     expect(harness.engine.run).not.toHaveBeenCalled();
-    expect(harness.pdf.show).toHaveBeenCalledWith(IDENTITY.url, expect.any(AbortSignal));
+    expect(harness.pdf.show).toHaveBeenCalledWith(
+      IDENTITY.url,
+      expect.any(AbortSignal),
+      documentFor(1),
+    );
+    expect(harness.events).toContain('surface:pdf');
     expect(harness.pdf.shown).toBe(true);
     expect(harness.state.capturedPageIdentity).toEqual(IDENTITY);
     expect(harness.state.followedPageIdentity).toEqual(IDENTITY);
+    // Its text is still being read: nothing to translate yet.
+    expect(harness.pdf.readText).toHaveBeenCalledOnce();
+    expect(harness.state.pdfTextAbortController).toBeDefined();
     expect(harness.state.snapshot).toBeUndefined();
     expect(harness.state.availability).toBe('unavailable');
     expect(harness.state.pdfAbortController).toBeUndefined();
     expect(harness.translationDriver.resolveSelectedSourceLanguage).toHaveBeenCalledWith(undefined);
     expect(harness.translationDriver.checkAvailability).not.toHaveBeenCalled();
-    expect(harness.translationDriver.maybeTranslateAutomatically).not.toHaveBeenCalled();
     expect(harness.events).toContain('loading:Reading the PDF…');
     expect(harness.events.indexOf('status-hidden'))
       .toBeGreaterThan(harness.events.indexOf('loading:Reading the PDF…'));
-    expect(harness.statuses.map(([message]) => message)).toContain('Reading the PDF…');
-    expect(harness.statuses.at(-1)).toEqual(['Showing the PDF. Pages: 3.', 'success']);
+    expect(harness.statuses.at(-1)).toEqual(['Reading the PDF…', undefined]);
+  });
+
+  it('prepares a PDF for translation by the page rules once all its text is read', async () => {
+    let finish!: () => void;
+    const harness = setup({
+      readDocument: async () => PDF_DOCUMENT,
+      readText: () => new Promise((resolve) => {
+        finish = () => resolve({ hasText: true });
+      }),
+    });
+    harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
+    await harness.settled();
+    expect(harness.translationDriver.checkAvailability).not.toHaveBeenCalled();
+
+    finish();
+    await vi.waitFor(() =>
+      expect(harness.translationDriver.maybeTranslateAutomatically).toHaveBeenCalledOnce());
+
+    expect(harness.state.snapshot?.records.map((record) => record.source)).toEqual(['Bonjour']);
+    expect(harness.translationDriver.resolveSelectedSourceLanguage).toHaveBeenLastCalledWith(undefined);
+    expect(harness.translationDriver.checkAvailability).toHaveBeenCalledWith(1);
+    expect(harness.translationDriver.maybeTranslateAutomatically)
+      .toHaveBeenCalledWith(1, IDENTITY.url);
+    expect(harness.state.pdfTextAbortController).toBeUndefined();
+    expect(harness.events.at(-1)).toBe('controls');
+  });
+
+  it('says a PDF has no text once every page was read without any', async () => {
+    const harness = setup({
+      readDocument: async () => PDF_DOCUMENT,
+      fieldCount: 0,
+      readText: async () => ({ hasText: false }),
+      pdfSnapshot: (document) => ({ document, replayLease: 1, records: [] }),
+    });
+    harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
+    await vi.waitFor(() => expect(harness.statuses.at(-1)).toEqual([
+      'This PDF has no text to translate. It may be scanned.',
+      'warning',
+    ]));
+    expect(harness.translationDriver.checkAvailability).not.toHaveBeenCalled();
+  });
+
+  it('says a PDF shows untranslated in Live source only', async () => {
+    const harness = setup({
+      readDocument: async () => PDF_DOCUMENT,
+      readText: async () => ({ hasText: true }),
+    });
+    harness.state.preferences = { ...harness.state.preferences, replicaViewMode: 'source-only' };
+    harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
+    await vi.waitFor(() => expect(harness.statuses.at(-1)).toEqual([
+      'Live source only is active. The PDF is shown without translation.',
+      'success',
+    ]));
+    expect(harness.translationDriver.checkAvailability).not.toHaveBeenCalled();
+  });
+
+  it('abandons reading when a newer capture starts, and prepares only the newer PDF', async () => {
+    const signals: AbortSignal[] = [];
+    const harness = setup({
+      readDocument: async () => PDF_DOCUMENT,
+      readText: (signal) => {
+        signals.push(signal);
+        return signals.length === 1
+          ? new Promise<never>(() => undefined)
+          : Promise.resolve({ hasText: true });
+      },
+    });
+    harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
+    await harness.settled();
+
+    harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'manual' });
+    expect(signals[0]?.aborted).toBe(true);
+    await vi.waitFor(() =>
+      expect(harness.translationDriver.maybeTranslateAutomatically).toHaveBeenCalledOnce());
+
+    expect(harness.translationDriver.maybeTranslateAutomatically).toHaveBeenCalledWith(2, IDENTITY.url);
+    expect(harness.state.snapshot?.document).toEqual(documentFor(2));
+  });
+
+  it('stops preparing when the page changes while the language resolves', async () => {
+    let resolveLanguage!: () => void;
+    let calls = 0;
+    const harness = setup({
+      readDocument: async () => PDF_DOCUMENT,
+      readText: async () => ({ hasText: true }),
+      resolveLanguage: () => {
+        calls += 1;
+        // The first call clears the language at show; the second is the tail's.
+        if (calls === 1) return Promise.resolve(true);
+        return new Promise<boolean>((resolve) => {
+          resolveLanguage = () => resolve(true);
+        });
+      },
+    });
+    harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
+    await vi.waitFor(() => expect(resolveLanguage).toBeDefined());
+
+    harness.pipeline.beginSourceNavigation(OTHER);
+    resolveLanguage();
+    await Promise.resolve();
+    await new Promise((resolve) => setTimeout(resolve, 0));
+
+    expect(harness.translationDriver.checkAvailability).not.toHaveBeenCalled();
   });
 
   it('keeps a shown PDF through a same-page rebuild without the loading state', async () => {
@@ -355,7 +497,7 @@ describe('CapturePipeline PDFs', () => {
     expect(harness.pdf.close).not.toHaveBeenCalled();
     expect(harness.pdf.show).toHaveBeenCalledTimes(2);
     expect(harness.events.some((event) => event.startsWith('loading'))).toBe(false);
-    expect(harness.statuses.at(-1)).toEqual(['Showing the PDF. Pages: 3.', 'success']);
+    expect(harness.statuses.at(-1)).toEqual(['Reading the PDF…', undefined]);
   });
 
   it('closes a shown PDF when the next capture is another page or a web page', async () => {
@@ -365,14 +507,17 @@ describe('CapturePipeline PDFs', () => {
     });
     harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
     await harness.settled();
+    const reading = harness.state.pdfTextAbortController!;
 
     contentType = 'text/html; charset=utf-8';
     harness.events.length = 0;
     harness.pipeline.queueCapture({ identity: OTHER, reason: 'navigation' });
     await harness.settled();
 
+    expect(reading.signal.aborted).toBe(true);
     expect(harness.pdf.close).toHaveBeenCalled();
     expect(harness.pdf.shown).toBe(false);
+    expect(harness.events).toContain('surface:mirror');
     expect(harness.engine.run).toHaveBeenCalledOnce();
     expect(harness.state.capturedPageIdentity).toEqual(OTHER);
     expect(harness.state.snapshot).toBeDefined();
@@ -401,7 +546,7 @@ describe('CapturePipeline PDFs', () => {
     fail = false;
     harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'manual' });
     await harness.settled();
-    expect(harness.statuses.at(-1)).toEqual(['Showing the PDF. Pages: 2.', 'success']);
+    expect(harness.statuses.at(-1)).toEqual(['Reading the PDF…', undefined]);
 
     fail = true;
     harness.events.length = 0;
@@ -442,13 +587,15 @@ describe('CapturePipeline PDFs', () => {
     expect(harness.state.pdfAbortController).toBeUndefined();
   });
 
-  it('closes the PDF when the companion is invalidated', async () => {
+  it('closes the PDF and stops reading its text when the companion is invalidated', async () => {
     const harness = setup({ readDocument: async () => PDF_DOCUMENT });
     harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
     await harness.settled();
+    const reading = harness.state.pdfTextAbortController!;
 
     harness.pipeline.invalidateCompanion('The source tab was closed.');
 
+    expect(reading.signal.aborted).toBe(true);
     expect(harness.pdf.close).toHaveBeenCalled();
     expect(harness.pdf.shown).toBe(false);
     expect(harness.events).toContain('error:The source tab was closed.');

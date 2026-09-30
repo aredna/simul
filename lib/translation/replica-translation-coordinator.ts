@@ -58,6 +58,12 @@ export interface ReplicaTranslationSurface {
   beginProjection(context: ReplicaProjectionContext): void;
   snapshot(): ReplicaTranslationSnapshot | undefined;
   project(projection: ReplicaTextProjection): boolean;
+  /**
+   * Node ids in the order the surface wants them translated. Pending work
+   * for other ids follows in its own order. Without it, work runs in record
+   * order.
+   */
+  translationOrder?(): Iterable<number> | undefined;
 }
 
 export interface ReplicaTranslationRunOptions
@@ -217,7 +223,8 @@ export class ReplicaTranslationCoordinator {
     this.#replaceCurrentRecords(snapshot);
     const pairKey = this.#pairKey!;
     let candidateCount = 0;
-    for (const record of snapshot.records) {
+    // In the surface's order, so the queue's caps drop the least urgent.
+    for (const record of this.#ordered(snapshot.records)) {
       if (!isTranslatableRecord(record)) continue;
       candidateCount += 1;
       this.#enqueue({
@@ -280,6 +287,27 @@ export class ReplicaTranslationCoordinator {
     }
   }
 
+  /**
+   * Puts pending work in the surface's preferred order (a PDF translates the
+   * page being read first). Work the surface does not name keeps its order
+   * after the named work.
+   */
+  reprioritize(): void {
+    if (this.#disposed || this.#pending.size < 2) return;
+    const order = this.surface.translationOrder?.();
+    if (!order) return;
+    const next = new Map<number, PendingJob>();
+    for (const nodeId of order) {
+      const job = this.#pending.get(nodeId);
+      if (job && !next.has(nodeId)) next.set(nodeId, job);
+    }
+    if (next.size === 0) return;
+    for (const [nodeId, job] of this.#pending) {
+      if (!next.has(nodeId)) next.set(nodeId, job);
+    }
+    this.#pending = next;
+  }
+
   cancelPending(): void {
     this.#pending.clear();
     this.#pendingCharacters = 0;
@@ -300,6 +328,26 @@ export class ReplicaTranslationCoordinator {
     this.#pendingSkipped = 0;
     this.#pendingOverflow = 0;
     this.#currentRecords = undefined;
+  }
+
+  /** Records in the surface's order; the rest after, in their own order. */
+  #ordered(
+    records: readonly ReplicaSourceTextRecord[],
+  ): readonly ReplicaSourceTextRecord[] {
+    const order = this.surface.translationOrder?.();
+    if (!order) return records;
+    const byId = indexReplicaRecords(records);
+    const ordered: ReplicaSourceTextRecord[] = [];
+    for (const nodeId of order) {
+      const record = byId.get(nodeId);
+      if (!record) continue;
+      ordered.push(record);
+      byId.delete(nodeId);
+    }
+    for (const record of records) {
+      if (byId.has(record.nodeId)) ordered.push(record);
+    }
+    return ordered;
   }
 
   async #ensureSession(

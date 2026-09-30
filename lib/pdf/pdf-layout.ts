@@ -209,6 +209,10 @@ export interface PdfReadingPosition {
   readonly fraction: number;
 }
 
+// Browsers round a scroll offset set to a page's top, so a page starting
+// within this many pixels below the view's top edge counts as at the top.
+const SCROLL_ROUNDING = 1;
+
 /** The page at the top of the view and the share of it scrolled past. */
 export function pdfReadingPosition(
   boxes: readonly PdfPageBox[],
@@ -218,7 +222,7 @@ export function pdfReadingPosition(
   const top = Number.isFinite(scrollTop) ? scrollTop : 0;
   let index = 0;
   for (let candidate = 0; candidate < boxes.length; candidate += 1) {
-    if (boxes[candidate]!.top <= top) index = candidate;
+    if (boxes[candidate]!.top <= top + SCROLL_ROUNDING) index = candidate;
     else break;
   }
   const box = boxes[index]!;

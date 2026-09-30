@@ -58,6 +58,7 @@ import {
 import { NavigationRefreshGate } from '../../lib/navigation-refresh-gate';
 import { fetchPdfBytes } from '../../lib/pdf/pdf-fetch';
 import { chromePdfjsEnvironment, openPdfDocument } from '../../lib/pdf/pdfjs-runtime';
+import { PdfTextSurface } from '../../lib/pdf/pdf-text-surface';
 import {
   compiledImageAnalysisCapabilities,
   compiledImageTextProviderIds,
@@ -266,6 +267,12 @@ const visibleReplayHost = new VisibleReplayHost({
   previewSurface: replicaPreviewContainer,
   badge: replicaModeBadge,
 });
+const pdfView = new PdfView(pdfViewContainer, {
+  pageLabel: (page, total) => localizeUiTemplate(UI_STRINGS.pdfPageLabel, page, total),
+  onReadingPageChange: (index) => pdfController.handleReadingPage(index),
+});
+// The shown PDF's text blocks, translated by the same coordinator as the mirror.
+const pdfTextSurface = new PdfTextSurface(pdfView);
 const pdfController = new PdfController({
   fetchPdf: (url, signal) => fetchPdfBytes(url, { signal }),
   openDocument: (bytes, signal) => openPdfDocument(
@@ -274,7 +281,9 @@ const pdfController = new PdfController({
       (browser.runtime.getURL as (value: string) => string)(path)),
     signal,
   ),
-  view: new PdfView(pdfViewContainer),
+  view: pdfView,
+  surface: pdfTextSurface,
+  onPriorityChange: () => replicaTranslationCoordinator.reprioritize(),
   onDiagnostic: logPdfDiagnostic,
 });
 let replicaTranslationCoordinator!: ReplicaTranslationCoordinator;
@@ -485,6 +494,7 @@ function relocalizeDynamicSurfaces(): void {
   readScopeController.relocalize();
   imageAnalysisPanel.relocalize();
   translationDriver.relocalizeDetectedLanguage();
+  pdfView.relabelPages();
 }
 
 /**
@@ -690,6 +700,7 @@ const translationDriver = new TranslationDriver({
   syncComposerPanel: () => quickComposer.syncPanel(),
   onPairPrepared: () => uiLocalizer.retryAfterPagePairPrepared(),
   onTranslationSettled: () => logTranslationCache('page', translationMemory),
+  isPdfShown: () => pdfController.shown,
 });
 provider.onSessionCreated((pair) => translationDriver.handlePairReady(pair));
 
@@ -737,6 +748,9 @@ const capturePipeline = new CapturePipeline({
     captureNotes.textContent = '';
   },
   updateMirrorLayout: () => updateMirrorLayout(),
+  selectSurface: (kind) => replicaSurfaceRouter.select(
+    kind === 'pdf' ? pdfTextSurface : isolatedHtmlReplicaEngine,
+  ),
   logImageDiagnostic: logImageTranslationDiagnostic,
   ...(import.meta.env.DEV
     ? {
@@ -1039,6 +1053,7 @@ window.addEventListener('pagehide', () => {
   uiLocalizer.dispose();
   state.replicaShadowAbortController?.abort();
   state.pdfAbortController?.abort();
+  state.pdfTextAbortController?.abort();
   pdfController.close();
   imageTranslationController.dispose();
   replicaTranslationCoordinator.dispose();

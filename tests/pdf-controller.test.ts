@@ -14,8 +14,11 @@ import {
   PdfjsOpenError,
   type PdfDocumentHandle,
   type PdfPageSize,
+  type PdfTextContent,
   type PdfjsOpenErrorKind,
 } from '../lib/pdf/pdfjs-runtime';
+import { PdfTextSurface } from '../lib/pdf/pdf-text-surface';
+import type { ReplicaSourceDocumentIdentity } from '../lib/replica/source-identity';
 
 const URL_UNDER_TEST = 'https://example.com/report.pdf';
 
@@ -27,14 +30,40 @@ function fakeDocument(pageCount = 3) {
       height: 800,
       transform: [1, 0, 0, -1, 0, 800],
     })),
-    getTextContent: vi.fn(),
+    getTextContent: vi.fn(async (page: number): Promise<PdfTextContent> => pageText(page)),
     hasImages: vi.fn(),
     render: vi.fn(async () => 1),
+    fontFaces: vi.fn(async () => ({})),
     releasePage: vi.fn(async () => undefined),
     destroy: vi.fn(async () => undefined),
   };
   return document satisfies PdfDocumentHandle;
 }
+
+/** One line of text per page, "Page n", from a PDF whose /Lang is French. */
+function pageText(page: number): PdfTextContent {
+  return {
+    items: [{
+      str: `Page ${page}`,
+      dir: 'ltr',
+      transform: [10, 0, 0, 10, 50, 700],
+      width: 30,
+      height: 10,
+      fontName: 'f1',
+      hasEOL: false,
+    }],
+    styles: { f1: { fontFamily: 'serif', ascent: 0.8, descent: -0.2, vertical: false } },
+    lang: 'fr',
+  };
+}
+
+const SOURCE_DOCUMENT: ReplicaSourceDocumentIdentity = {
+  sessionId: 'session',
+  pageEpoch: 1,
+  generation: 1,
+  documentId: 'DOC',
+  frameId: 0,
+};
 
 function fakeView() {
   const mounted: Array<{
@@ -65,6 +94,9 @@ function setup(options: {
   openDocument?: (bytes: Uint8Array, signal: AbortSignal) => Promise<PdfDocumentHandle>;
   openTimeoutMs?: number;
   onDiagnostic?: (diagnostic: unknown) => void;
+  withText?: boolean;
+  priorityDelayMs?: number;
+  pageTextTimeoutMs?: number;
 } = {}) {
   const view = fakeView();
   const documents: ReturnType<typeof fakeDocument>[] = [];
@@ -75,6 +107,16 @@ function setup(options: {
     documents.push(document);
     return document;
   }));
+  const pagesSet: number[] = [];
+  const sink = {
+    setPageText: vi.fn((index: number) => {
+      pagesSet.push(index);
+    }),
+    showTranslation: () => undefined,
+    hideTranslations: () => undefined,
+  };
+  const surface = new PdfTextSurface(sink);
+  const onPriorityChange = vi.fn();
   const controller = new PdfController({
     fetchPdf,
     openDocument,
@@ -82,8 +124,19 @@ function setup(options: {
     now: () => 0,
     onDiagnostic: options.onDiagnostic ?? ((diagnostic) => diagnostics.push(diagnostic)),
     ...(options.openTimeoutMs ? { openTimeoutMs: options.openTimeoutMs } : {}),
+    ...(options.withText
+      ? {
+          surface,
+          onPriorityChange,
+          priorityDelayMs: options.priorityDelayMs ?? 0,
+          ...(options.pageTextTimeoutMs ? { pageTextTimeoutMs: options.pageTextTimeoutMs } : {}),
+        }
+      : {}),
   });
-  return { controller, view, documents, fetchPdf, openDocument, diagnostics };
+  return {
+    controller, view, documents, fetchPdf, openDocument, diagnostics,
+    surface, sink, pagesSet, onPriorityChange,
+  };
 }
 
 async function rejection(promise: Promise<unknown>): Promise<unknown> {
@@ -383,5 +436,219 @@ describe('PdfController', () => {
     harness.controller.updateLayout(settings);
 
     expect(harness.view.updateLayout).toHaveBeenCalledWith(settings);
+  });
+});
+
+describe('PdfController text', () => {
+  it('shows the pages with an empty surface, then reads every page in order', async () => {
+    const harness = setup({ withText: true });
+    const signal = new AbortController().signal;
+
+    await harness.controller.show(URL_UNDER_TEST, signal, SOURCE_DOCUMENT);
+    // Nothing is read before the first paint, and nothing is published yet.
+    expect(harness.documents[0]?.getTextContent).not.toHaveBeenCalled();
+    expect(harness.surface.snapshot()).toBeUndefined();
+    expect(harness.controller.textDocument).toEqual(SOURCE_DOCUMENT);
+
+    await expect(harness.controller.readText(signal)).resolves.toEqual({ hasText: true });
+    const shown = harness.surface.snapshot()!;
+    expect(shown.documentLanguage).toBe('fr');
+    expect(shown.records.map((record) => record.source)).toEqual(['Page 1', 'Page 2', 'Page 3']);
+    expect(harness.pagesSet).toEqual([0, 1, 2]);
+    expect(harness.diagnostics).toContainEqual({
+      stage: 'text',
+      pages: 3,
+      pagesWithText: 3,
+      blocks: 3,
+      milliseconds: 0,
+    });
+    expect(JSON.stringify(harness.diagnostics)).not.toContain('Page');
+  });
+
+  it('reads on from the page the reader moved to, and asks for a new order', async () => {
+    const answers = new Map<number, () => void>();
+    const document = fakeDocument(6);
+    document.getTextContent.mockImplementation((page: number) => new Promise((resolve) => {
+      answers.set(page, () => resolve(pageText(page)));
+    }));
+    const harness = setup({ withText: true, openDocument: async () => document });
+    const signal = new AbortController().signal;
+    await harness.controller.show(URL_UNDER_TEST, signal, SOURCE_DOCUMENT);
+    const reading = harness.controller.readText(signal);
+    await vi.waitFor(() => expect(answers.has(1)).toBe(true));
+    answers.get(1)!();
+    await vi.waitFor(() => expect(answers.has(2)).toBe(true));
+
+    harness.controller.handleReadingPage(4);
+    expect(harness.surface.readingPage).toBe(4);
+    await vi.waitFor(() => expect(harness.onPriorityChange).toHaveBeenCalledOnce());
+    harness.controller.handleReadingPage(4);
+    await new Promise((resolve) => setTimeout(resolve, 5));
+    expect(harness.onPriorityChange).toHaveBeenCalledOnce();
+    for (const page of [2, 5, 6, 4, 3]) {
+      await vi.waitFor(() => expect(answers.has(page)).toBe(true));
+      answers.get(page)!();
+    }
+    await reading;
+
+    expect(document.getTextContent.mock.calls.map(([page]) => page)).toEqual([1, 2, 5, 6, 4, 3]);
+  });
+
+  it('reorders translation only once the reader stops on a page', async () => {
+    vi.useFakeTimers();
+    try {
+      const harness = setup({ withText: true, priorityDelayMs: 250 });
+      await harness.controller.show(URL_UNDER_TEST, new AbortController().signal, SOURCE_DOCUMENT);
+      await vi.advanceTimersByTimeAsync(300);
+      harness.onPriorityChange.mockClear();
+
+      for (const page of [1, 2, 1, 2]) {
+        harness.controller.handleReadingPage(page);
+        // The reading order follows at once; the reordering waits.
+        expect(harness.surface.readingPage).toBe(page);
+        await vi.advanceTimersByTimeAsync(100);
+      }
+      expect(harness.onPriorityChange).not.toHaveBeenCalled();
+      await vi.advanceTimersByTimeAsync(250);
+      expect(harness.onPriorityChange).toHaveBeenCalledOnce();
+
+      harness.controller.handleReadingPage(0);
+      harness.controller.close();
+      await vi.advanceTimersByTimeAsync(500);
+      expect(harness.onPriorityChange).toHaveBeenCalledOnce();
+    } finally {
+      vi.useRealTimers();
+    }
+  });
+
+  it('counts a page whose text never comes as a page without text', async () => {
+    const document = fakeDocument(3);
+    document.getTextContent.mockImplementation((page: number) =>
+      page === 2 ? new Promise<never>(() => undefined) : Promise.resolve(pageText(page)));
+    const harness = setup({ withText: true, pageTextTimeoutMs: 20, openDocument: async () => document });
+    const signal = new AbortController().signal;
+    await harness.controller.show(URL_UNDER_TEST, signal, SOURCE_DOCUMENT);
+
+    await expect(harness.controller.readText(signal)).resolves.toEqual({ hasText: true });
+    expect(harness.surface.snapshot()!.records.map((record) => record.source))
+      .toEqual(['Page 1', 'Page 3']);
+  });
+
+  it('clears the surface when a PDF is shown with no document to translate for', async () => {
+    const harness = setup({ withText: true });
+    const signal = new AbortController().signal;
+    await harness.controller.show(URL_UNDER_TEST, signal, SOURCE_DOCUMENT);
+    await harness.controller.readText(signal);
+    expect(harness.surface.snapshot()).toBeDefined();
+
+    await harness.controller.show(URL_UNDER_TEST, signal);
+
+    expect(harness.surface.snapshot()).toBeUndefined();
+    expect(harness.surface.document).toBeUndefined();
+    expect(harness.controller.textDocument).toBeUndefined();
+  });
+
+  it('starts from the page a PDF shown again was left at', async () => {
+    const harness = setup({ withText: true });
+    const signal = new AbortController().signal;
+    await harness.controller.show(URL_UNDER_TEST, signal, SOURCE_DOCUMENT);
+    harness.view.position = { index: 2, fraction: 0.5 };
+
+    await harness.controller.show(URL_UNDER_TEST, signal, SOURCE_DOCUMENT);
+    expect(harness.surface.readingPage).toBe(2);
+    await harness.controller.readText(signal);
+
+    expect(harness.documents[1]?.getTextContent.mock.calls.map(([page]) => page))
+      .toEqual([3, 2, 1]);
+  });
+
+  it.each(['close', 'abort', 'show'] as const)('stops reading on %s', async (stop) => {
+    let release!: () => void;
+    const document = fakeDocument(4);
+    document.getTextContent.mockImplementation(async (page: number) => {
+      if (page === 2) await new Promise<void>((done) => { release = done; });
+      return pageText(page);
+    });
+    const harness = setup({ withText: true, openDocument: async () => document });
+    const controller = new AbortController();
+    await harness.controller.show(URL_UNDER_TEST, controller.signal, SOURCE_DOCUMENT);
+    const reading = harness.controller.readText(controller.signal);
+    await vi.waitFor(() => expect(release).toBeDefined());
+
+    if (stop === 'close') harness.controller.close();
+    if (stop === 'abort') controller.abort();
+    if (stop === 'show') {
+      await harness.controller.show(URL_UNDER_TEST, new AbortController().signal, SOURCE_DOCUMENT);
+    }
+    release();
+
+    await expect(reading).rejects.toMatchObject({ name: 'AbortError' });
+    expect(document.getTextContent).toHaveBeenCalledTimes(2);
+    expect(harness.pagesSet).toEqual([0]);
+  });
+
+  it('goes on reading when the surface or view throws on a page', async () => {
+    const harness = setup({ withText: true });
+    harness.sink.setPageText.mockImplementationOnce(() => {
+      throw new Error('Layout failed');
+    });
+    const signal = new AbortController().signal;
+    await harness.controller.show(URL_UNDER_TEST, signal, SOURCE_DOCUMENT);
+
+    await expect(harness.controller.readText(signal)).resolves.toEqual({ hasText: true });
+    expect(harness.surface.snapshot()!.records).toHaveLength(3);
+    expect(harness.sink.setPageText).toHaveBeenCalledTimes(3);
+  });
+
+  it('counts a page pdf.js cannot read as a page without text', async () => {
+    const document = fakeDocument(3);
+    document.getTextContent.mockImplementation(async (page: number) => {
+      if (page !== 2) throw new Error('Bad content stream');
+      return pageText(page);
+    });
+    const harness = setup({ withText: true, openDocument: async () => document });
+    const signal = new AbortController().signal;
+    await harness.controller.show(URL_UNDER_TEST, signal, SOURCE_DOCUMENT);
+
+    await expect(harness.controller.readText(signal)).resolves.toEqual({ hasText: true });
+    expect(harness.surface.snapshot()!.records.map((record) => record.source)).toEqual(['Page 2']);
+  });
+
+  it('reports a PDF without any text', async () => {
+    const document = fakeDocument(2);
+    document.getTextContent.mockImplementation(async () => ({ items: [], styles: {}, lang: null }));
+    const harness = setup({ withText: true, openDocument: async () => document });
+    const signal = new AbortController().signal;
+    await harness.controller.show(URL_UNDER_TEST, signal, SOURCE_DOCUMENT);
+
+    await expect(harness.controller.readText(signal)).resolves.toEqual({ hasText: false });
+  });
+
+  it('has nothing to read without a shown PDF or a surface', async () => {
+    const withText = setup({ withText: true });
+    await expect(withText.controller.readText(new AbortController().signal))
+      .rejects.toMatchObject({ name: 'AbortError' });
+    const plain = setup();
+    await plain.controller.show(URL_UNDER_TEST, new AbortController().signal, SOURCE_DOCUMENT);
+    await expect(plain.controller.readText(new AbortController().signal))
+      .rejects.toMatchObject({ name: 'AbortError' });
+    expect(plain.documents[0]?.getTextContent).not.toHaveBeenCalled();
+  });
+
+  it('destroys the previous document even when starting the surface throws', async () => {
+    const harness = setup({ withText: true });
+    const signal = new AbortController().signal;
+    await harness.controller.show(URL_UNDER_TEST, signal, SOURCE_DOCUMENT);
+    const first = harness.documents[0]!;
+    vi.spyOn(harness.surface, 'mount').mockImplementationOnce(() => {
+      throw new Error('Surface failed');
+    });
+
+    await expect(harness.controller.show(URL_UNDER_TEST, signal, SOURCE_DOCUMENT))
+      .rejects.toBeInstanceOf(PageAccessError);
+
+    expect(first.destroy).toHaveBeenCalledOnce();
+    expect(harness.documents[1]?.destroy).toHaveBeenCalledOnce();
+    expect(harness.controller.shown).toBe(false);
   });
 });

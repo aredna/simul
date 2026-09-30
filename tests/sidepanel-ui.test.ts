@@ -572,6 +572,61 @@ describe('sidepanel UI structure', () => {
     expect(script).toContain('browser.tabs.getZoom(tabId)');
   });
 
+  it('translates PDFs through the page coordinator on their own surface', () => {
+    expect(script).toContain('const pdfTextSurface = new PdfTextSurface(pdfView);');
+    expect(script).toContain(
+      "kind === 'pdf' ? pdfTextSurface : isolatedHtmlReplicaEngine,",
+    );
+    // PDFs make no background commits, so background results need no PDF case.
+    expect(script).not.toContain('handlePdfTextCommit');
+    const background = sliceBetween('onBackgroundResult: (result) => {', 'const evidenceJudge');
+    expect(background).not.toContain('pdfController');
+    expect(script).toContain('onPriorityChange: () => replicaTranslationCoordinator.reprioritize(),');
+    expect(script).toContain('onReadingPageChange: (index) => pdfController.handleReadingPage(index),');
+    const relocalize = sliceBetween(
+      'function relocalizeDynamicSurfaces(',
+      'function relocalizeSizeToggle(',
+    );
+    expect(relocalize).toContain('pdfView.relabelPages();');
+    const layer = style.slice(style.indexOf('.pdf-text-layer {'));
+    expect(layer).toContain('pointer-events: none');
+    expect(layer).toContain('user-select: none');
+    expect(style).toContain('.pdf-block {\n  position: absolute;\n  color: transparent;');
+    expect(style).toContain('.pdf-block--translated { color: var(--pdf-ink, #000); }');
+  });
+
+  it('keeps every cover under every block text in the PDF view', () => {
+    const rule = (selector: string) => {
+      const start = style.indexOf(`${selector} {`);
+      return style.slice(start, style.indexOf('}', start));
+    };
+    expect(rule('.pdf-block-cover')).toContain('z-index: 0;');
+    expect(rule('.pdf-block-text')).toContain('position: relative;');
+    expect(rule('.pdf-block-text')).toContain('z-index: 1;');
+    // A block with its own stacking context would trap its text above only
+    // its own covers.
+    for (const property of ['z-index', 'opacity', 'transform', 'isolation', 'filter']) {
+      expect(rule('.pdf-block')).not.toContain(`${property}:`);
+      expect(rule('.pdf-text-layer')).not.toContain(`${property}:`);
+    }
+    const view = style.slice(style.indexOf('.pdf-view {\n  position: relative;'));
+    expect(view.slice(0, view.indexOf('}'))).toContain('isolation: isolate;');
+  });
+
+  it('shows PDF translations only on drawn pages, and not in forced colours', () => {
+    const layer = style.slice(style.indexOf('.pdf-text-layer {'));
+    expect(layer.slice(0, layer.indexOf('}'))).toContain('forced-color-adjust: none;');
+    expect(style).toContain(
+      '.pdf-page:not([data-overlays]) .pdf-block--translated { color: transparent; }',
+    );
+    expect(style).toContain(
+      '.pdf-page:not([data-overlays]) .pdf-block--translated .pdf-block-cover { display: none; }',
+    );
+    // Hidden with transparency, never `visibility`, so screen readers keep the text.
+    expect(style).not.toMatch(/pdf-block[^{]*\{[^}]*visibility: hidden/u);
+    expect(script).toContain('isPdfShown: () => pdfController.shown,');
+  });
+
   it('saves a zoom drag that has not settled when the page unloads', () => {
     const pagehide = sliceBetween(
       "window.addEventListener('pagehide'",

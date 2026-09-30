@@ -125,6 +125,8 @@ export interface TranslationDriverEnvironment {
   /** A page translation prepared the pair; dependent work may follow. */
   readonly onPairPrepared: () => void;
   readonly onTranslationSettled: () => void;
+  /** Whether the page shown is a PDF, whose translation has no live updates. */
+  readonly isPdfShown?: () => boolean;
 }
 
 /**
@@ -762,9 +764,11 @@ export class TranslationDriver {
       this.environment.onPairPrepared();
       if (state.translationComplete) {
         setStatus(
-          automatic
-            ? UI_STRINGS.statusAutomaticComplete
-            : UI_STRINGS.statusTranslationComplete,
+          this.environment.isPdfShown?.()
+            ? UI_STRINGS.statusPdfTranslated
+            : automatic
+              ? UI_STRINGS.statusAutomaticComplete
+              : UI_STRINGS.statusTranslationComplete,
           'success',
         );
       } else {

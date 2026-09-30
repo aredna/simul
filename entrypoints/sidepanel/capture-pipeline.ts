@@ -7,7 +7,7 @@ import { sameCompanionSourcePage } from '../../lib/companion-surface';
 import type { CompanionStatusTone } from '../../lib/companion-ui-localization';
 import { UI_STRINGS } from '../../lib/companion-ui-strings';
 import { normalizeZoomFactor } from '../../lib/display-scale';
-import { uiText, type UiText } from '../../lib/ui-text';
+import type { UiText } from '../../lib/ui-text';
 import type { NavigationRefreshGate } from '../../lib/navigation-refresh-gate';
 import type { ImageTranslationDiagnostic } from '../../lib/ocr/image-translation-controller';
 import { isPdfContentType } from '../../lib/pdf/pdf-detection';
@@ -38,6 +38,7 @@ import {
 } from '../../lib/replica/replica-recovery';
 import {
   captureRequestMatchesSourceDocument,
+  sameSourceDocument,
   sameSourceReplicaLease,
   type ReplicaSourceDocumentIdentity,
 } from '../../lib/replica/source-identity';
@@ -87,10 +88,27 @@ export interface PipelineImageController {
  */
 export interface PipelinePdf {
   readonly shown: boolean;
-  /** Rejects with a `PageAccessError` status, or an `AbortError` when cancelled. */
-  show(url: string, signal: AbortSignal): Promise<{ readonly pageCount: number }>;
+  /**
+   * Shows the PDF, with an empty translation surface for `document`. Rejects
+   * with a `PageAccessError` status, or an `AbortError` when cancelled.
+   */
+  show(
+    url: string,
+    signal: AbortSignal,
+    document: ReplicaSourceDocumentIdentity,
+  ): Promise<{ readonly pageCount: number }>;
+  /**
+   * Reads every page's text of the shown PDF into its surface. Rejects with
+   * an `AbortError` when cancelled or replaced.
+   */
+  readText(signal: AbortSignal): Promise<{ readonly hasText: boolean }>;
+  /** The document the shown PDF's translation surface is for. */
+  readonly textDocument: ReplicaSourceDocumentIdentity | undefined;
   close(): void;
 }
+
+/** Which surface translation projects onto: the mirror or the PDF view. */
+export type PipelineSurfaceKind = 'mirror' | 'pdf';
 
 /** The followed tab's top document: its id and `document.contentType`. */
 export interface SourceDocumentFacts {
@@ -144,6 +162,8 @@ export interface CapturePipelineEnvironment {
   readonly hideReplicaStatus: () => void;
   readonly clearCaptureNotes: () => void;
   readonly updateMirrorLayout: () => void;
+  /** Routes translation to the mirror or to the PDF view. */
+  readonly selectSurface: (kind: PipelineSurfaceKind) => void;
   readonly logImageDiagnostic: (diagnostic: ImageTranslationDiagnostic) => void;
   readonly onEngineResult?: (result: ReplicaRunResult) => void;
 }
@@ -412,10 +432,11 @@ export class CapturePipeline {
       if (isPdfContentType(sourceDocument?.contentType)) {
         engine.releasePresentation();
         state.snapshot = undefined;
-        await this.#capturePdf(work, identity);
+        await this.#capturePdf(work, identity, documentId);
         return;
       }
       pdf.close();
+      this.environment.selectSurface('mirror');
 
       state.translationComplete = false;
       this.environment.clearCaptureNotes();
@@ -440,46 +461,10 @@ export class CapturePipeline {
         : identity;
       state.capturedPageIdentity = committedIdentity;
       state.followedPageIdentity = committedIdentity;
-      await translationDriver.resolveSelectedSourceLanguage(
-        translationDriver.currentReplicaLanguageContext(),
-      );
-
-      if (state.isLiveSourceOnlyMode) {
-        state.availability = 'unavailable';
-        state.availabilityCheckedForPair = undefined;
-        setStatus(
-          UI_STRINGS.statusLiveSourceKeepsUpdating,
-          'success',
-        );
-        return;
-      }
-
-      if (translationDriver.currentTranslationFieldCount() === 0) {
-        state.availability = 'unavailable';
-        state.availabilityCheckedForPair = undefined;
-        const accessWasRevoked = await this.environment.reconcileAutomaticAccess(
-          committedIdentity.url,
-        );
-        if (!captureCoordinator.isCurrent(work.generation)) return;
-        setStatus(
-          accessWasRevoked
-            ? UI_STRINGS.statusGrantRemovedWaiting
-            : UI_STRINGS.statusMirrorLiveWaiting,
-          'warning',
-        );
-        return;
-      }
-      await translationDriver.checkAvailability(work.generation);
-      if (!captureCoordinator.isCurrent(work.generation)) return;
-      const accessWasRevoked = await this.environment.reconcileAutomaticAccess(
-        committedIdentity.url,
-      );
-      if (!captureCoordinator.isCurrent(work.generation)) return;
-      if (accessWasRevoked) {
-        setStatus(UI_STRINGS.statusGrantRemovedScopeOff, 'warning');
-        return;
-      }
-      await translationDriver.maybeTranslateAutomatically(work.generation, committedIdentity.url);
+      await this.#prepareTranslation(work, committedIdentity, {
+        sourceOnly: UI_STRINGS.statusLiveSourceKeepsUpdating,
+        noText: [UI_STRINGS.statusMirrorLiveWaiting, 'warning'],
+      });
     } catch (error) {
       if (!captureCoordinator.isCurrent(work.generation)) return;
       const message = readPageError(error);
@@ -491,6 +476,53 @@ export class CapturePipeline {
     } finally {
       this.environment.updateControls();
     }
+  }
+
+  /**
+   * Once a page (mirror or PDF) is published: resolve its language, check the
+   * pair and translate automatically when the rules say so. The statuses for
+   * Live source only and for a page without text differ per surface.
+   */
+  async #prepareTranslation(
+    work: GenerationWork<CaptureRequest>,
+    identity: CapturedPageIdentity,
+    statuses: {
+      readonly sourceOnly: UiText;
+      readonly noText: readonly [UiText, CompanionStatusTone];
+    },
+  ): Promise<void> {
+    const state = this.#state;
+    const { captureCoordinator, translationDriver, setStatus } = this.environment;
+    await translationDriver.resolveSelectedSourceLanguage(
+      translationDriver.currentReplicaLanguageContext(),
+    );
+    if (!captureCoordinator.isCurrent(work.generation)) return;
+
+    if (state.isLiveSourceOnlyMode) {
+      state.availability = 'unavailable';
+      state.availabilityCheckedForPair = undefined;
+      setStatus(statuses.sourceOnly, 'success');
+      return;
+    }
+
+    if (translationDriver.currentTranslationFieldCount() === 0) {
+      state.availability = 'unavailable';
+      state.availabilityCheckedForPair = undefined;
+      const accessWasRevoked = await this.environment.reconcileAutomaticAccess(identity.url);
+      if (!captureCoordinator.isCurrent(work.generation)) return;
+      if (accessWasRevoked) setStatus(UI_STRINGS.statusGrantRemovedWaiting, 'warning');
+      else setStatus(...statuses.noText);
+      return;
+    }
+    await translationDriver.checkAvailability(work.generation);
+    if (!captureCoordinator.isCurrent(work.generation)) return;
+    const accessWasRevoked = await this.environment.reconcileAutomaticAccess(identity.url);
+    if (!captureCoordinator.isCurrent(work.generation)) return;
+    if (accessWasRevoked) {
+      setStatus(UI_STRINGS.statusGrantRemovedScopeOff, 'warning');
+      return;
+    }
+    await translationDriver.maybeTranslateAutomatically(work.generation, identity.url);
   }
 
   async #runReplicaEngineCheckpoint(
@@ -583,13 +615,14 @@ export class CapturePipeline {
 
   /**
    * The followed tab shows a PDF: the replica engine never runs. The PDF is
-   * downloaded and shown, and then published like a committed replica.
-   * Translation waits for a later phase, so there is no snapshot and
-   * Translate page stays off.
+   * downloaded and shown, published like a committed replica, and the
+   * capture ends. Its text is read after that (`#readPdfText`), while the
+   * pages show; only then can it be translated.
    */
   async #capturePdf(
     work: GenerationWork<CaptureRequest>,
     identity: CapturedPageIdentity,
+    documentId: string,
   ): Promise<void> {
     const state = this.#state;
     const { captureCoordinator, pdf, translationDriver, setStatus } = this.environment;
@@ -597,12 +630,19 @@ export class CapturePipeline {
     this.environment.clearCaptureNotes();
     setStatus(UI_STRINGS.statusPdfReading);
     if (!pdf.shown) this.environment.renderLoading(UI_STRINGS.statusPdfReading);
+    this.environment.selectSurface('pdf');
     state.pdfAbortController?.abort();
     const abortController = new AbortController();
     state.pdfAbortController = abortController;
-    let pageCount: number;
+    const document: ReplicaSourceDocumentIdentity = {
+      sessionId: this.environment.mirrorSessionId,
+      pageEpoch: work.generation,
+      generation: work.generation,
+      documentId,
+      frameId: 0,
+    };
     try {
-      ({ pageCount } = await pdf.show(identity.url, abortController.signal));
+      await pdf.show(identity.url, abortController.signal, document);
     } catch (error) {
       // Superseded or cancelled: whatever replaced this load reports instead.
       if (abortController.signal.aborted) return;
@@ -624,12 +664,72 @@ export class CapturePipeline {
       : identity;
     state.capturedPageIdentity = shownIdentity;
     state.followedPageIdentity = shownIdentity;
-    // With no snapshot this clears the page's language resolution.
+    // No text yet, so nothing to translate: this clears the page's language.
+    state.snapshot = undefined;
     await translationDriver.resolveSelectedSourceLanguage(undefined);
     if (!captureCoordinator.isCurrent(work.generation)) return;
     state.availability = 'unavailable';
     state.availabilityCheckedForPair = undefined;
-    setStatus(uiText(UI_STRINGS.statusPdfShown, pageCount), 'success');
+    // The pages show; the text is read next, and the status says so until
+    // the translation rules take over.
+    setStatus(UI_STRINGS.statusPdfReading);
+    void this.#readPdfText(work, shownIdentity, document);
+  }
+
+  /**
+   * Reads all of the shown PDF's text, then publishes its full snapshot and
+   * prepares it for translation by the page rules. Reading all of it first
+   * means one translation run holds every block (and its Cancel), and a
+   * Refresh queues everything from the reading page again. A newer capture,
+   * navigation or close abandons it silently.
+   */
+  async #readPdfText(
+    work: GenerationWork<CaptureRequest>,
+    identity: CapturedPageIdentity,
+    document: ReplicaSourceDocumentIdentity,
+  ): Promise<void> {
+    const state = this.#state;
+    const { captureCoordinator, pdf, surface, setStatus } = this.environment;
+    state.pdfTextAbortController?.abort();
+    const abortController = new AbortController();
+    state.pdfTextAbortController = abortController;
+    const current = () => {
+      const shown = pdf.textDocument;
+      return !abortController.signal.aborted &&
+        captureCoordinator.isCurrent(work.generation) &&
+        pdf.shown &&
+        shown !== undefined &&
+        sameSourceDocument(shown, document);
+    };
+    try {
+      await pdf.readText(abortController.signal);
+    } catch {
+      // Cancelled or replaced: the newer page reports instead.
+      this.#finishPdfText(abortController);
+      return;
+    }
+    try {
+      if (!current()) return;
+      state.snapshot = surface.snapshot();
+      if (!state.snapshot) return;
+      await this.#prepareTranslation(work, identity, {
+        sourceOnly: UI_STRINGS.statusPdfSourceOnly,
+        noText: [UI_STRINGS.statusPdfNoText, 'warning'],
+      });
+    } catch (error) {
+      if (captureCoordinator.isCurrent(work.generation)) {
+        setStatus(readPageError(error), 'error');
+      }
+    } finally {
+      this.#finishPdfText(abortController);
+    }
+  }
+
+  #finishPdfText(abortController: AbortController): void {
+    if (this.#state.pdfTextAbortController === abortController) {
+      this.#state.pdfTextAbortController = undefined;
+    }
+    this.environment.updateControls();
   }
 
   async #readZoom(tabId: number): Promise<number> {

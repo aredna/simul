@@ -1,3 +1,4 @@
+import type { RgbaPixels } from '../../lib/pdf/colour-sample';
 import {
   MAX_DRAWN_PDF_PAGES,
   pdfDrawPlan,
@@ -11,6 +12,9 @@ import {
   type PdfPagePoints,
   type PdfReadingPosition,
 } from '../../lib/pdf/pdf-layout';
+import type { PdfFontFace } from '../../lib/pdf/pdf-overlay-style';
+import type { PdfSurfaceBlock, PdfTextSink } from '../../lib/pdf/pdf-text-surface';
+import { PDF_FIT_PASSES, PdfPageTextLayer, type PdfBlockMeasure } from './pdf-text-layer';
 
 /** Padding around the column and the space between pages, in CSS pixels. */
 export const PDF_PAGE_GAP = 8;
@@ -28,6 +32,11 @@ export interface PdfViewDocument {
     signal?: AbortSignal,
   ): Promise<number>;
   releasePage(pageNumber: number): Promise<void>;
+  /** Weight and slant of the page's fonts, known once it is drawn. */
+  fontFaces?(
+    pageNumber: number,
+    fontIds: readonly string[],
+  ): Promise<Readonly<Record<string, PdfFontFace>>>;
 }
 
 /** What the PDF controller needs from the view. */
@@ -66,6 +75,14 @@ export interface PdfViewEnvironment {
   readonly watchDevicePixelRatio?: (callback: () => void) => (() => void) | undefined;
   readonly rerenderDelayMs?: number;
   readonly maxDrawnPages?: number;
+  /** The accessible name of page `page` (1-based) of `total`. */
+  readonly pageLabel?: (page: number, total: number) => string;
+  /** Called when another page (0-based) reaches the top of the view. */
+  readonly onReadingPageChange?: (index: number) => void;
+  /** Reads a drawn canvas's pixels, for the overlay colours. */
+  readonly readPixels?: (canvas: HTMLCanvasElement) => RgbaPixels | undefined;
+  /** Measures a translated block, for fitting it. */
+  readonly measureBlock?: PdfBlockMeasure;
 }
 
 interface ViewPage {
@@ -74,6 +91,8 @@ interface ViewPage {
   /** The pdf.js scale the canvas was drawn at. */
   drawnScale: number | undefined;
   failed: boolean;
+  /** The page's text, once read. */
+  layer: PdfPageTextLayer | undefined;
 }
 
 interface Rendering {
@@ -89,8 +108,12 @@ interface Rendering {
  * drawn again at the new size once the change settles. The reading position
  * (page and share of it) stays at the top of the view. Positions and choices
  * come from `lib/pdf/pdf-layout.ts`; this class only touches the DOM.
+ *
+ * Each page's text sits over its canvas in a `PdfPageTextLayer`, where
+ * translations replace the source text block by block (the view is the
+ * `PdfTextSink` of the PDF's translation surface).
  */
-export class PdfView implements PdfViewSurface {
+export class PdfView implements PdfViewSurface, PdfTextSink {
   readonly #element: HTMLElement;
   readonly #requestFrame: (callback: () => void) => unknown;
   readonly #cancelFrame: (handle: unknown) => void;
@@ -100,6 +123,10 @@ export class PdfView implements PdfViewSurface {
   #stopWatchingPixelRatio: (() => void) | undefined;
   readonly #rerenderDelayMs: number;
   readonly #maxDrawnPages: number;
+  readonly #pageLabel: (page: number, total: number) => string;
+  readonly #onReadingPageChange: ((index: number) => void) | undefined;
+  readonly #readPixels: (canvas: HTMLCanvasElement) => RgbaPixels | undefined;
+  readonly #measureBlock: PdfBlockMeasure;
   #document: PdfViewDocument | undefined;
   #sizes: readonly PdfPagePoints[] = [];
   #pages: ViewPage[] = [];
@@ -112,6 +139,9 @@ export class PdfView implements PdfViewSurface {
   #rerenderTimer: ReturnType<typeof setTimeout> | undefined;
   #holdRedraw = false;
   #resizeObserver: ResizeObserverLike | undefined;
+  /** The page each text block is on. */
+  readonly #blockPages = new Map<number, number>();
+  #readingIndex = -1;
 
   constructor(element: HTMLElement, environment: PdfViewEnvironment = {}) {
     this.#element = element;
@@ -142,6 +172,10 @@ export class PdfView implements PdfViewSurface {
     });
     this.#rerenderDelayMs = environment.rerenderDelayMs ?? PDF_RERENDER_DELAY_MS;
     this.#maxDrawnPages = environment.maxDrawnPages ?? MAX_DRAWN_PDF_PAGES;
+    this.#pageLabel = environment.pageLabel ?? ((page, total) => `Page ${page} of ${total}`);
+    this.#onReadingPageChange = environment.onReadingPageChange;
+    this.#readPixels = environment.readPixels ?? readCanvasPixels;
+    this.#measureBlock = environment.measureBlock ?? measureBlock;
     element.addEventListener('scroll', () => this.#schedule(), { passive: true });
   }
 
@@ -165,11 +199,20 @@ export class PdfView implements PdfViewSurface {
     const owner = this.#element.ownerDocument;
     const stage = owner.createElement('div');
     stage.className = 'pdf-view-pages';
-    this.#pages = this.#sizes.map(() => {
+    const total = this.#sizes.length;
+    this.#pages = this.#sizes.map((_, index) => {
       const element = owner.createElement('div');
       element.className = 'pdf-page';
+      element.setAttribute('role', 'group');
+      element.setAttribute('aria-label', this.#pageLabel(index + 1, total));
       stage.append(element);
-      return { element, canvas: undefined, drawnScale: undefined, failed: false };
+      return {
+        element,
+        canvas: undefined,
+        drawnScale: undefined,
+        failed: false,
+        layer: undefined,
+      };
     });
     this.#stage = stage;
     this.#element.replaceChildren(stage);
@@ -185,11 +228,50 @@ export class PdfView implements PdfViewSurface {
     this.#resizeObserver?.observe(this.#element);
     this.#watchPixelRatio();
     this.#pump();
+    this.#reportReadingPage();
   }
 
   readingPosition(): PdfReadingPosition | undefined {
     if (!this.#document || !this.#layout) return undefined;
     return pdfReadingPosition(this.#layout.boxes, this.#element.scrollTop);
+  }
+
+  /** Names every page again, in the language now current. */
+  relabelPages(): void {
+    const total = this.#pages.length;
+    this.#pages.forEach((page, index) => {
+      page.element.setAttribute('aria-label', this.#pageLabel(index + 1, total));
+    });
+  }
+
+  setPageText(pageIndex: number, blocks: readonly PdfSurfaceBlock[]): void {
+    const page = this.#pages[pageIndex];
+    const size = this.#sizes[pageIndex];
+    if (!this.#document || !page || !size) return;
+    if (page.layer) {
+      for (const id of page.layer.ids) this.#blockPages.delete(id);
+      page.layer.element.remove();
+    }
+    const layer = new PdfPageTextLayer(this.#element.ownerDocument, size, blocks);
+    page.layer = layer;
+    for (const block of blocks) this.#blockPages.set(block.id, pageIndex);
+    page.element.append(layer.element);
+    syncOverlays(page);
+    if (page.canvas) this.#decorate(pageIndex);
+  }
+
+  showTranslation(blockId: number, text: string, language: string | undefined): void {
+    const index = this.#blockPages.get(blockId);
+    const page = index === undefined ? undefined : this.#pages[index];
+    if (!page?.layer) return;
+    page.layer.setTranslation(blockId, text, language);
+    if (!page.canvas) return;
+    if (page.layer.coloursSampled || page.layer.colourReadFailed) this.#schedule();
+    else this.#decorate(index!);
+  }
+
+  hideTranslations(): void {
+    for (const page of this.#pages) page.layer?.hideTranslations();
   }
 
   /** A new screen density redraws the canvases sharp at the next pass. */
@@ -219,6 +301,8 @@ export class PdfView implements PdfViewSurface {
       if (page.canvas) discardCanvas(page.canvas);
     }
     this.#pages = [];
+    this.#blockPages.clear();
+    this.#readingIndex = -1;
     this.#sizes = [];
     this.#stage = undefined;
     this.#layout = undefined;
@@ -250,7 +334,74 @@ export class PdfView implements PdfViewSurface {
       // change only changes which pages are near.
       if (this.#element.clientWidth !== this.#layoutViewportWidth) this.#relayout();
       this.#pump();
+      this.#fitDrawnPages();
+      this.#reportReadingPage();
     });
+  }
+
+  /**
+   * Fits waiting translations on drawn pages, and all of them after a zoom.
+   * Each round measures every page's blocks, then resizes them, so a round
+   * lays the view out once, not once per page.
+   */
+  #fitDrawnPages(): void {
+    const scale = this.#layout?.scale;
+    if (scale === undefined) return;
+    let fitting: PdfPageTextLayer[] = [];
+    for (const page of this.#pages) {
+      const layer = page.layer;
+      if (!page.canvas || !layer) continue;
+      const fittedAt = layer.fittedAtScale;
+      if (fittedAt !== undefined && Math.abs(fittedAt / scale - 1) > 0.1) layer.resetFit();
+      if (layer.needsFit && layer.startFit(scale)) fitting.push(layer);
+    }
+    for (let pass = 0; pass < PDF_FIT_PASSES && fitting.length > 0; pass += 1) {
+      for (const layer of fitting) layer.measureFit(this.#measureBlock);
+      fitting = fitting.filter((layer) => layer.applyFit());
+    }
+    for (const layer of fitting) layer.finishFit();
+  }
+
+  #reportReadingPage(): void {
+    const position = this.readingPosition();
+    if (!position || position.index === this.#readingIndex) return;
+    this.#readingIndex = position.index;
+    try {
+      this.#onReadingPageChange?.(position.index);
+    } catch {
+      // The reading order is a preference; the view carries on.
+    }
+  }
+
+  /**
+   * A drawn page with text: its fonts' weight and slant come from pdf.js,
+   * which knows them now, and, once a translation shows, the overlay colours
+   * come from the canvas. Each is read once per page.
+   */
+  #decorate(index: number): void {
+    const page = this.#pages[index];
+    const document = this.#document;
+    const layer = page?.layer;
+    if (!page || !document || !layer || !page.canvas || layer.ids.length === 0) return;
+    const size = this.#sizes[index];
+    if (!layer.coloursSampled && !layer.colourReadFailed && layer.hasTranslations && size) {
+      const pixels = this.#readPixels(page.canvas);
+      // The canvas spans the page, so its width over the page's gives the scale.
+      if (pixels) layer.applyColours(pixels, pixels.width / size.width);
+      else layer.colourReadFailed = true;
+    }
+    syncOverlays(page);
+    if (!layer.fontFacesRequested && document.fontFaces) {
+      layer.fontFacesRequested = true;
+      void document.fontFaces(index + 1, layer.fontIds).then((faces) => {
+        if (this.#document !== document || page.layer !== layer) return;
+        layer.applyFontFaces(faces);
+        this.#schedule();
+      }, () => {
+        layer.fontFacesRequested = false;
+      });
+    }
+    this.#schedule();
   }
 
   #relayout(): void {
@@ -279,6 +430,7 @@ export class PdfView implements PdfViewSurface {
     );
     this.#layout = layout;
     this.#layoutViewportWidth = viewportWidth;
+    stage.style.setProperty('--pdf-scale', String(layout.scale));
     stage.style.width = `${layout.width}px`;
     stage.style.height = `${layout.height}px`;
     this.#pages.forEach((page, index) => {
@@ -387,10 +539,13 @@ export class PdfView implements PdfViewSurface {
             controller.signal.aborted
           ) return;
           if (page.canvas) discardCanvas(page.canvas);
-          page.element.append(canvas);
+          page.element.prepend(canvas);
           page.canvas = canvas;
           page.drawnScale = scale;
           placed = true;
+          // A new drawing is a new chance to read colours that failed.
+          if (page.layer) page.layer.colourReadFailed = false;
+          this.#decorate(index);
         },
         () => {
           // A page pdf.js cannot draw stays a blank placeholder.
@@ -412,8 +567,44 @@ export class PdfView implements PdfViewSurface {
     if (page.canvas) discardCanvas(page.canvas);
     page.canvas = undefined;
     page.drawnScale = undefined;
+    syncOverlays(page);
     void this.#document?.releasePage(index + 1).catch(() => {});
   }
+}
+
+/**
+ * Translations show only on a page that is drawn and whose colours were
+ * read (or could not be); before that the page looks as it did before
+ * translation. Its text still reaches screen readers (see style.css).
+ */
+function syncOverlays(page: ViewPage): void {
+  const layer = page.layer;
+  if (page.canvas && layer && (layer.coloursSampled || layer.colourReadFailed)) {
+    page.element.setAttribute('data-overlays', '');
+  } else {
+    page.element.removeAttribute('data-overlays');
+  }
+}
+
+/** The whole canvas as pixels; `undefined` when it cannot be read. */
+function readCanvasPixels(canvas: HTMLCanvasElement): RgbaPixels | undefined {
+  try {
+    const context = canvas.getContext('2d');
+    if (!context || canvas.width < 1 || canvas.height < 1) return undefined;
+    return context.getImageData(0, 0, canvas.width, canvas.height);
+  } catch {
+    return undefined;
+  }
+}
+
+/** The room a translated block has and the room its text takes, laid out. */
+function measureBlock(block: HTMLElement, text: HTMLElement): {
+  readonly needed: { readonly width: number; readonly height: number };
+  readonly available: { readonly width: number; readonly height: number };
+} | undefined {
+  const available = { width: block.clientWidth, height: block.clientHeight };
+  if (!(available.width > 0) || !(available.height > 0)) return undefined;
+  return { needed: { width: text.scrollWidth, height: text.scrollHeight }, available };
 }
 
 /** Gives a canvas's backing memory back at once instead of at collection. */

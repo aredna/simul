@@ -454,6 +454,8 @@ progress { width: 100%; height: 7px; accent-color: var(--green); }
 /* The PDF view: its own scroller, pages centred on a grey backdrop. */
 .pdf-view {
   position: relative;
+  /* Keeps the text layers' stacking inside the view. */
+  isolation: isolate;
   overflow: auto;
   overscroll-behavior: contain;
   overflow-anchor: none;
@@ -471,6 +473,44 @@ progress { width: 100%; height: 7px; accent-color: var(--green); }
   box-shadow: 0 1px 3px rgb(60 64 67 / 30%);
 }
 .pdf-page-canvas { display: block; width: 100%; height: 100%; }
+/* A page's text over its canvas: transparent source text for screen
+   readers, and translations over covers in the page's own colours. */
+.pdf-text-layer {
+  position: absolute;
+  inset: 0;
+  pointer-events: none;
+  user-select: none;
+  /* High-contrast modes must not reveal the transparent source text or
+     recolour the covers. */
+  forced-color-adjust: none;
+}
+/* A block makes no stacking context, so every cover (z-index 0) sits below
+   every block's text (z-index 1): an overflowing translation is never
+   hidden by a neighbour's cover. */
+.pdf-block {
+  position: absolute;
+  color: transparent;
+  overflow: visible;
+}
+.pdf-block-text {
+  position: relative;
+  z-index: 1;
+  white-space: normal;
+  overflow-wrap: break-word;
+}
+.pdf-block-cover {
+  position: absolute;
+  z-index: 0;
+  display: none;
+  background: var(--pdf-cover, #fff);
+}
+.pdf-block--translated { color: var(--pdf-ink, #000); }
+.pdf-block--translated .pdf-block-cover { display: block; }
+/* Until its page is drawn and its colours read, a translation stays
+   transparent and uncovered: the page looks as before, and screen readers
+   still read the text. */
+.pdf-page:not([data-overlays]) .pdf-block--translated { color: transparent; }
+.pdf-page:not([data-overlays]) .pdf-block--translated .pdf-block-cover { display: none; }
 
 @media (prefers-color-scheme: dark) {
   :root {

@@ -750,6 +750,105 @@ class FakeSurface implements ReplicaTranslationSurface {
   }
 }
 
+
+describe('ReplicaTranslationCoordinator translation order', () => {
+  it('queues work in the surface order and reorders pending work on request', async () => {
+    const surface = new OrderedSurface(
+      Array.from({ length: 6 }, (_, index) => record(index + 1, 1, `Text ${index + 1}`)),
+    );
+    surface.order = [3, 4, 5, 6];
+    const translated: string[] = [];
+    let release!: () => void;
+    const first = new Promise<void>((done) => {
+      release = done;
+    });
+    const { provider } = fakeProvider(async (source) => {
+      translated.push(source);
+      if (translated.length === 1) await first;
+      return `en:${source}`;
+    });
+    const coordinator = new ReplicaTranslationCoordinator(provider, surface);
+
+    const run = coordinator.translateCurrent(pair);
+    await vi.waitFor(() => expect(translated).toEqual(['Text 3']));
+    // The reader moved: node 6 first, then 1; the rest keep their order.
+    surface.order = [6, 1];
+    coordinator.reprioritize();
+    release();
+
+    await expect(run).resolves.toMatchObject({ completed: 6, failed: 0 });
+    // Nodes the order left out (1, 2) came after the ordered ones.
+    expect(translated).toEqual(['Text 3', 'Text 6', 'Text 1', 'Text 4', 'Text 5', 'Text 2']);
+  });
+
+  it('lets the queue caps drop the least urgent work', async () => {
+    const surface = new OrderedSurface(
+      Array.from({ length: 5 }, (_, index) => record(index + 1, 1, `Text ${index + 1}`)),
+    );
+    surface.order = [5, 4, 3, 2, 1];
+    const translated: string[] = [];
+    const { provider } = fakeProvider(async (source) => {
+      translated.push(source);
+      return source;
+    });
+    const coordinator = new ReplicaTranslationCoordinator(provider, surface, { maxPendingJobs: 3 });
+
+    const result = await coordinator.translateCurrent(pair);
+
+    expect(translated).toEqual(['Text 5', 'Text 4', 'Text 3']);
+    expect(result).toMatchObject({ completed: 3, overflow: 2 });
+  });
+
+  it('keeps record order for a surface without an order', async () => {
+    const surface = new FakeSurface([record(2, 1, 'B'), record(1, 1, 'A')]);
+    const translated: string[] = [];
+    const { provider } = fakeProvider(async (source) => {
+      translated.push(source);
+      return source;
+    });
+    const coordinator = new ReplicaTranslationCoordinator(provider, surface);
+    coordinator.reprioritize();
+
+    await coordinator.translateCurrent(pair);
+
+    expect(translated).toEqual(['B', 'A']);
+  });
+
+  it('leaves live commits in commit order', async () => {
+    const surface = new OrderedSurface([record(1, 1, 'One')]);
+    const translated: string[] = [];
+    let release!: () => void;
+    const first = new Promise<void>((done) => {
+      release = done;
+    });
+    const { provider } = fakeProvider(async (source) => {
+      translated.push(source);
+      if (source === 'One') await first;
+      return source;
+    });
+    const coordinator = new ReplicaTranslationCoordinator(provider, surface);
+    const run = coordinator.translateCurrent(pair);
+    await vi.waitFor(() => expect(translated).toEqual(['One']));
+
+    const added = [record(2, 1, 'Two'), record(3, 1, 'Three')];
+    surface.records = [...surface.records, ...added];
+    surface.order = [3, 2];
+    coordinator.handleSourceCommit(commitFor(surface, added));
+    release();
+
+    await expect(run).resolves.toMatchObject({ completed: 3 });
+    expect(translated).toEqual(['One', 'Two', 'Three']);
+  });
+});
+
+class OrderedSurface extends FakeSurface {
+  order: number[] = [];
+
+  translationOrder(): Iterable<number> {
+    return this.order;
+  }
+}
+
 function commitFor(
   surface: FakeSurface,
   changedRecords: readonly ReplicaSourceTextRecord[] = surface.records,
