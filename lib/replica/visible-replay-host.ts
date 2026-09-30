@@ -1,3 +1,4 @@
+import { displayScale } from '../display-scale';
 import type { MirrorDisplayMode } from '../preferences';
 import {
   findPrimaryNestedScroller,
@@ -28,6 +29,11 @@ export interface VisibleReplayExtent {
 export interface VisibleReplayLayout {
   readonly displayMode: MirrorDisplayMode;
   readonly zoomPercent: number;
+  /**
+   * The source tab's browser zoom (D104): 1:1 shows the page at the size the
+   * tab shows it and custom zoom multiplies that. 1 when absent or invalid.
+   */
+  readonly sourceZoomFactor?: number;
 }
 
 export interface VisibleReplayScroll {
@@ -166,6 +172,7 @@ export class VisibleReplayHost implements ReplayPresentationHost {
       visibleWidth,
       this.#layout.displayMode,
       this.#layout.zoomPercent,
+      this.#layout.sourceZoomFactor,
     );
     committed.scale = scale;
     const contentWidth = Math.max(
@@ -853,24 +860,26 @@ function replicaScrollbarGutters(
   }
 }
 
+/**
+ * Fit fills the panel width, growing as well as shrinking; the tab's zoom
+ * already narrows a zoomed page's CSS width, so Fit follows it too. 1:1 and
+ * custom zoom follow the tab's zoom directly (D104).
+ */
 function computeMirrorScale(
   availableWidth: number,
   sourceWidth: number,
   mode: MirrorDisplayMode,
   zoomPercent = 100,
+  sourceZoomFactor: number | undefined = 1,
 ): number {
-  if (mode === 'actual') return 1;
-  if (mode === 'custom') {
-    const zoom = Number.isFinite(zoomPercent) ? zoomPercent : 100;
-    return Math.min(3, Math.max(0.25, zoom / 100));
-  }
-  if (
-    !Number.isFinite(availableWidth) ||
-    !Number.isFinite(sourceWidth) ||
-    availableWidth <= 0 ||
-    sourceWidth <= 0
-  ) return 1;
-  return Math.min(1, availableWidth / sourceWidth);
+  const fitScale =
+    Number.isFinite(availableWidth) &&
+    Number.isFinite(sourceWidth) &&
+    availableWidth > 0 &&
+    sourceWidth > 0
+      ? availableWidth / sourceWidth
+      : 1;
+  return displayScale(mode, fitScale, zoomPercent, sourceZoomFactor);
 }
 
 /** Same scroller, same offsets; the scrollable maxima may differ. */

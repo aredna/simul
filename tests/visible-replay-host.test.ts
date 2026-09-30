@@ -140,6 +140,41 @@ describe('visible isolated replay host', () => {
     expect(iframe.style.width).toBe('1200px');
   });
 
+  it('grows Fit to the panel and sizes 1:1 and custom zoom by the tab zoom (D104)', () => {
+    const fixture = createFixture();
+    const candidate = fixture.host.createCandidate(dimensions());
+    const iframe = createProtectedIframe(fixture.document);
+    candidate.mount.append(iframe);
+    candidate.commit(iframe, { width: 1_200, height: 2_500 });
+    const scroller = requireElement<HTMLElement>(fixture.preview, '.replica-replay-scroll');
+    const scaleLayer = requireElement<HTMLElement>(fixture.preview, '.replica-replay-scale-layer');
+    Object.defineProperty(scroller, 'clientWidth', { configurable: true, value: 1_800 });
+    const scaleFor = (layout: Parameters<typeof fixture.host.updateLayout>[0]) => {
+      fixture.host.updateLayout(layout);
+      return scaleLayer.style.transform;
+    };
+
+    // Fit grows past 1 when the panel is wider than the page.
+    expect(scaleFor({ displayMode: 'fit', zoomPercent: 100 })).toBe('scale(1.5)');
+    // A zoomed tab already lays the page out narrower, so Fit ignores the factor.
+    expect(scaleFor({ displayMode: 'fit', zoomPercent: 100, sourceZoomFactor: 2 }))
+      .toBe('scale(1.5)');
+    expect(scaleFor({ displayMode: 'actual', zoomPercent: 100 })).toBe('scale(1)');
+    expect(scaleFor({ displayMode: 'actual', zoomPercent: 100, sourceZoomFactor: 1.25 }))
+      .toBe('scale(1.25)');
+    for (const sourceZoomFactor of [Number.NaN, 0, -2, Number.POSITIVE_INFINITY]) {
+      expect(scaleFor({ displayMode: 'actual', zoomPercent: 100, sourceZoomFactor }))
+        .toBe('scale(1)');
+    }
+    expect(scaleFor({ displayMode: 'custom', zoomPercent: 150, sourceZoomFactor: 1.25 }))
+      .toBe('scale(1.875)');
+    expect(scaleFor({ displayMode: 'custom', zoomPercent: 300, sourceZoomFactor: 2 }))
+      .toBe('scale(5)');
+    expect(scaleFor({ displayMode: 'custom', zoomPercent: 25, sourceZoomFactor: 0.5 }))
+      .toBe('scale(0.25)');
+    expect(iframe.style.width).toBe('1200px');
+  });
+
   it('crops the replica frame\'s own scrollbar so only the panel scrolls (D84)', () => {
     const fixture = createFixture();
     const candidate = fixture.host.createCandidate(dimensions());

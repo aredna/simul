@@ -99,6 +99,12 @@ export interface PdfDocumentHandle {
     scale: number,
     signal?: AbortSignal,
   ): Promise<number>;
+  /**
+   * Lets pdf.js drop what it keeps for a drawn page (its parsed drawing
+   * commands, images and fonts). A render still in progress finishes first;
+   * pdf.js frees the page when it ends.
+   */
+  releasePage(pageNumber: number): Promise<void>;
   /** Ends the document and its worker. Safe to call more than once. */
   destroy(): Promise<void>;
 }
@@ -287,6 +293,10 @@ function createDocumentHandle(
         signal?.removeEventListener('abort', cancel);
         if (rendering.get(canvas) === renderTask) rendering.delete(canvas);
       }
+    },
+    async releasePage(pageNumber) {
+      // The boolean only says whether it freed at once or after a render.
+      (await document.getPage(pageNumber)).cleanup();
     },
     destroy,
   };

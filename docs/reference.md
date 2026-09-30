@@ -30,6 +30,30 @@ Translations are projected onto the replica; the source DOM is not modified.
 Exact-content translations are joined and cached only in memory for the current
 extension session.
 
+### Size
+
+The **Size** setting and the toolbar size button work the same way for web
+pages and PDFs:
+
+- **Fit** fills the panel width. The page grows or shrinks to fit, up to five
+  times its size.
+- **1:1** shows the page at the size the tab shows it. If you zoom the tab,
+  Simul follows.
+- **Custom zoom** multiplies the 1:1 size.
+
+### PDFs
+
+When the tab shows a PDF, selecting Simul shows the PDF's pages in the panel,
+in order, with the packaged pdf.js. PDFs are not translated yet.
+
+- The panel scrolls on its own; it does not follow Chrome's PDF viewer.
+- Only the pages near the view are drawn, so long PDFs stay light.
+- If you come back to a PDF, or rebuild it, it opens where you left it.
+- Simul opens PDFs of up to 128 MB. A download that stalls for 60 seconds
+  fails; a slow one that keeps going does not.
+- A password-protected, oversized, broken or undownloadable PDF shows one
+  status that says why.
+
 ### Image text
 
 Image translation is **on by default** and saved with your settings; pixel OCR
@@ -64,7 +88,8 @@ are deleted after the job; OCR and translation caches are bounded and
 memory-only.
 
 OCR reads top-frame `<img>` images, on screen or not. It does not read CSS
-backgrounds, canvas, video frames, embedded documents, hidden images, or
+backgrounds, canvas, video frames, embedded documents (a PDF tab is shown
+instead; see [PDFs](#pdfs)), hidden images, or
 credential-overlapping pixels, and text a page draws over an off-screen image
 is not part of its file. A public text field, button, or link that
 overlaps an image does not block capture; only password and other credential
@@ -100,6 +125,12 @@ privacy filter off, to find out whether a privacy rule hides a missing part of
 a page: hidden text, labels, card numbers, one-time codes, and form values are
 copied as the page holds them (typed passwords are not). The mirror still
 cannot act on the page. It is off by default.
+
+On a PDF tab Simul makes one extra request: it downloads the PDF's own URL,
+which the tab has already loaded. Chrome keeps the extension's cache separate
+from the tab's, so this is a second download of the same file; Simul's own
+copy is reused while it is fresh. The site's cookies go along, as they did for
+the tab. Simul requests nothing else for a PDF.
 
 Diagnostics contain bounded stages, dimensions, and counts. They do not log
 page text, recognized text, URLs, pixels, hashes, DOM IDs, or attribute values.

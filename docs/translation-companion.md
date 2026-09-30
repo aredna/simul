@@ -277,10 +277,21 @@ remapping regions or rerunning bounded font fitting.
 
 ## Rendering and privacy
 
-At 1:1, one captured source CSS pixel maps to one mirror pixel (`scale(1)`).
+The size follows the tab's browser zoom (D104). The panel reads it with
+`tabs.getZoom` at each capture and follows `tabs.onZoomChange` for the
+followed tab; an unreadable zoom counts as 1. The rule lives in
+`lib/display-scale.ts` and is shared with the PDF view:
+
+- **1:1** scales by the tab's zoom, so the page is the size the tab shows. At
+  100% one captured source CSS pixel is one mirror pixel.
+- **Fit** is the panel width over the source width, with no cap, so it grows as
+  well as shrinks. A zoomed tab already has a narrower CSS viewport, so Fit
+  follows the tab's zoom without using the factor.
+- **Custom zoom** is the zoom percentage times the tab's zoom, kept within
+  0.25–5.
+
 The source viewport width remains the layout containing block; the captured
-document width drives horizontal overflow. Fit computes a scale no greater
-than one, while custom zoom is clamped to 25–300%.
+document width drives horizontal overflow.
 
 The isolated base stream keeps optional labels, accessibility attributes,
 values, checked or selected state, and disclosure relationships out. A
@@ -452,6 +463,54 @@ whether it matches `:defined`, its computed `display`, `visibility`, `position`,
 `clip`, and `clip-path`, and its bounding rectangle. For a missing image overlay,
 record the OCR job stages and safe rendered/bitmap dimensions. Do not share
 account text, URLs containing private tokens, or page HTML.
+
+## PDF tabs
+
+Chrome shows a PDF in its own viewer, so the tab's top document is an empty
+shell and the mirror has nothing to copy (D103).
+
+- **Detect.** The capture's one injected function returns
+  `document.contentType` next to the frame's `documentId`.
+  `lib/pdf/pdf-detection.ts` treats `application/pdf` as a PDF.
+- **Branch.** After the tab-currency check, `CapturePipeline` hands a PDF to
+  `PdfController`; the replica engine never runs. The branch reuses the
+  capture generation, so a tab switch, navigation or invalidation aborts the
+  load through `state.pdfAbortController` and a superseded load stays silent.
+- **Fetch.** `lib/pdf/pdf-fetch.ts` downloads the tab's own URL with the
+  site's cookies, under the tab's existing grant. Chrome partitions its HTTP
+  cache by top-level site, so the extension never reuses the tab's copy; the
+  request uses normal caching (`cache: 'default'`), which reuses Simul's own
+  fresh copy and revalidates a stale one (`force-cache` could have shown an
+  outdated file). It stops past 128 MiB (checked on `Content-Length` and
+  while streaming, into one buffer when the length is known) or after 60
+  seconds without a byte, and requires `%PDF-` in the first 1 KiB; markup in
+  its place (a sign-in page, an XML error) counts as a failed download.
+- **Open.** `lib/pdf/pdfjs-runtime.ts` opens the bytes with the packaged
+  pdf.js in the panel's realm. Parsing runs in pdf.js's worker. None of
+  pdf.js's HTML layers is used. Opening and measuring may take 60 seconds; a
+  page pdf.js cannot measure takes its neighbour's size, and only a file with
+  no measurable page is unreadable. A cancel ends the wait at once.
+- **Show.** The controller mounts a document only after it opens and every
+  page size is read, then destroys the previous one. `#pdf-view` holds one
+  placeholder per page; `lib/pdf/pdf-layout.ts` places them and picks which to
+  draw. Pages within one screen above and below the view are drawn one at a
+  time, nearest first, at most 4 MP each. At most eight keep a canvas; a
+  released page's canvas is zeroed and pdf.js frees the page. A page that
+  fails to draw stays blank, takes no place in that budget, and is tried
+  again after the next layout change. After a layout change the canvases
+  stretch, and are redrawn once the change settles; a new device pixel ratio
+  redraws them too. The reading position stays at the top of the view, and
+  the controller remembers it (memory only, 16 PDFs), so a PDF shown again
+  with the same page count opens where the reader left it.
+- **Last good.** A shown PDF is a committed presentation, with the mirror's
+  rules: it suppresses the loading and error states, and a same-page manual
+  rebuild keeps it until the replacement is ready. Any other capture,
+  invalidation, purge or `pagehide` destroys the pdf.js task and empties the
+  view.
+- **Translation.** Not yet. The PDF has no replica snapshot, so language
+  resolution is cleared and Translate page stays off. Failures show one
+  status each: password, too large, download failed, not a readable PDF, or
+  the reader could not start.
 
 ## Detached window
 

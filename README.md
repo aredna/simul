@@ -44,6 +44,9 @@ To update, replace the folder and select **Reload** on the Simul card.
 2. Pick the **To** language and select **Translate page**.
 3. To translate text in images, select **OCR** once to allow image access.
 
+PDF tabs open in the panel too. Simul shows their pages but does not translate
+them yet.
+
 ## License
 
 Simul is under the [MIT License with the Commons Clause](LICENSE): free to

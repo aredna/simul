@@ -6,9 +6,11 @@ import {
 import { sameCompanionSourcePage } from '../../lib/companion-surface';
 import type { CompanionStatusTone } from '../../lib/companion-ui-localization';
 import { UI_STRINGS } from '../../lib/companion-ui-strings';
-import type { UiText } from '../../lib/ui-text';
+import { normalizeZoomFactor } from '../../lib/display-scale';
+import { uiText, type UiText } from '../../lib/ui-text';
 import type { NavigationRefreshGate } from '../../lib/navigation-refresh-gate';
 import type { ImageTranslationDiagnostic } from '../../lib/ocr/image-translation-controller';
+import { isPdfContentType } from '../../lib/pdf/pdf-detection';
 import {
   activateImageReplicaAfterRun,
   imageReplicaActivationFailureReason,
@@ -79,6 +81,23 @@ export interface PipelineImageController {
   ): void;
 }
 
+/**
+ * The PDF view, a committed presentation like the replica: `shown` while a
+ * document is on screen, which keeps the loading and error states away.
+ */
+export interface PipelinePdf {
+  readonly shown: boolean;
+  /** Rejects with a `PageAccessError` status, or an `AbortError` when cancelled. */
+  show(url: string, signal: AbortSignal): Promise<{ readonly pageCount: number }>;
+  close(): void;
+}
+
+/** The followed tab's top document: its id and `document.contentType`. */
+export interface SourceDocumentFacts {
+  readonly documentId: string | undefined;
+  readonly contentType: unknown;
+}
+
 export type PipelineTranslationDriver = Pick<
   TranslationDriver,
   | 'resolveSelectedSourceLanguage'
@@ -103,21 +122,24 @@ export interface CapturePipelineEnvironment {
   readonly engine: PipelineEngine;
   readonly surface: { snapshot(): ReplicaTranslationSnapshot | undefined };
   readonly presentation: PipelinePresentation;
+  readonly pdf: PipelinePdf;
   readonly coordinator: PipelineCoordinator;
   readonly imageController: PipelineImageController;
   readonly translationDriver: PipelineTranslationDriver;
   readonly evidence: { invalidate(): void };
   readonly mirrorSessionId: string;
   readonly captureTimeoutMs: number;
-  /** Reads the top frame's current document id, or undefined when absent. */
-  readonly readDocumentId: (tabId: number) => Promise<string | undefined>;
+  /** Reads the top frame's current document id and content type. */
+  readonly readDocument: (tabId: number) => Promise<SourceDocumentFacts | undefined>;
+  /** The tab's browser zoom factor; 1 when Chrome cannot say. */
+  readonly readZoom: (tabId: number) => Promise<number>;
   readonly getTab: (tabId: number) => Promise<PageTabLike>;
   readonly reconcileAutomaticAccess: (pageUrl: string) => Promise<boolean>;
   readonly cancelNavigationRefresh: () => void;
   readonly invalidateComposer: () => void;
   readonly setStatus: (message: UiText, tone?: CompanionStatusTone) => void;
   readonly updateControls: () => void;
-  readonly renderLoading: () => void;
+  readonly renderLoading: (message?: UiText) => void;
   readonly renderError: (message: UiText) => void;
   readonly hideReplicaStatus: () => void;
   readonly clearCaptureNotes: () => void;
@@ -134,6 +156,10 @@ export interface CapturePipelineEnvironment {
  * once within the recovery budget. Invalidation clears the page as one unit.
  */
 export class CapturePipeline {
+  // Counts the followed tab's zoom changes, so a capture's own zoom read,
+  // answered before a change that arrives while it waits, cannot undo it.
+  #zoomChanges = 0;
+
   constructor(private readonly environment: CapturePipelineEnvironment) {}
 
   get #state(): CompanionState {
@@ -181,7 +207,7 @@ export class CapturePipeline {
     imageController.releaseReplica();
     this.environment.currency.supersede('availability');
     state.followedPageIdentity = request.identity;
-    if (!state.snapshot && !presentation.hasCommittedReplica) {
+    if (!state.snapshot && !presentation.hasCommittedReplica && !this.environment.pdf.shown) {
       this.environment.renderLoading();
     }
     this.environment.setStatus(
@@ -225,6 +251,7 @@ export class CapturePipeline {
     this.environment.imageController.setTopPageOrigin(undefined);
     this.environment.imageController.releaseReplica();
     this.environment.engine.releasePresentation();
+    this.environment.pdf.close();
     this.environment.invalidateComposer();
     state.clearPage();
     this.environment.coordinator.selectPair(undefined);
@@ -233,6 +260,17 @@ export class CapturePipeline {
     this.environment.renderError(message);
     this.environment.setStatus(message, 'warning');
     this.environment.updateControls();
+  }
+
+  /** Chrome changed a tab's zoom; the followed tab's zoom sizes 1:1 and custom zoom. */
+  handleSourceZoomChange(tabId: number, zoomFactor: number): void {
+    const state = this.#state;
+    if (state.followedOrCapturedIdentity?.tabId !== tabId) return;
+    this.#zoomChanges += 1;
+    const factor = normalizeZoomFactor(zoomFactor);
+    if (factor === state.sourceZoomFactor) return;
+    state.sourceZoomFactor = factor;
+    this.environment.updateMirrorLayout();
   }
 
   /** The engine committed a checkpoint or a live batch for the replica. */
@@ -321,6 +359,7 @@ export class CapturePipeline {
       engine,
       surface,
       presentation,
+      pdf,
       translationDriver,
       setStatus,
     } = this.environment;
@@ -344,17 +383,39 @@ export class CapturePipeline {
         engine.releasePresentation();
         state.snapshot = undefined;
       }
-      const documentId = await withPageTimeout(
-        this.environment.readDocumentId(identity.tabId),
+      // A shown PDF follows the same last-good rule as the replica.
+      if (
+        pdf.shown &&
+        !shouldPreserveCommittedReplicaForCapture(work.value.reason, sameCapturedPage, true)
+      ) {
+        pdf.close();
+        if (!presentation.hasCommittedReplica) this.environment.renderLoading();
+      }
+      const sourceDocument = await withPageTimeout(
+        this.environment.readDocument(identity.tabId),
         this.environment.captureTimeoutMs,
       );
       if (!captureCoordinator.isCurrent(work.generation)) return;
+      const documentId = sourceDocument?.documentId;
       if (typeof documentId !== 'string' || documentId.length === 0) {
         throw new PageAccessError(UI_STRINGS.statusNoDocumentBoundary);
       }
       const currentTab = await this.environment.getTab(identity.tabId);
       assertSourceTabIsCurrent(currentTab, identity, state.requiresActiveSourceTab);
       if (!captureCoordinator.isCurrent(work.generation)) return;
+      const zoomChangesBefore = this.#zoomChanges;
+      const zoomFactor = await this.#readZoom(identity.tabId);
+      if (!captureCoordinator.isCurrent(work.generation)) return;
+      if (this.#zoomChanges === zoomChangesBefore) state.sourceZoomFactor = zoomFactor;
+      this.environment.updateMirrorLayout();
+
+      if (isPdfContentType(sourceDocument?.contentType)) {
+        engine.releasePresentation();
+        state.snapshot = undefined;
+        await this.#capturePdf(work, identity);
+        return;
+      }
+      pdf.close();
 
       state.translationComplete = false;
       this.environment.clearCaptureNotes();
@@ -423,7 +484,7 @@ export class CapturePipeline {
       if (!captureCoordinator.isCurrent(work.generation)) return;
       const message = readPageError(error);
       state.snapshot = surface.snapshot();
-      if (!state.snapshot && !presentation.hasCommittedReplica) {
+      if (!state.snapshot && !presentation.hasCommittedReplica && !pdf.shown) {
         this.environment.renderError(message);
       }
       setStatus(message, 'error');
@@ -517,6 +578,65 @@ export class CapturePipeline {
       ) {
         state.replicaShadowAbortController = undefined;
       }
+    }
+  }
+
+  /**
+   * The followed tab shows a PDF: the replica engine never runs. The PDF is
+   * downloaded and shown, and then published like a committed replica.
+   * Translation waits for a later phase, so there is no snapshot and
+   * Translate page stays off.
+   */
+  async #capturePdf(
+    work: GenerationWork<CaptureRequest>,
+    identity: CapturedPageIdentity,
+  ): Promise<void> {
+    const state = this.#state;
+    const { captureCoordinator, pdf, translationDriver, setStatus } = this.environment;
+    state.translationComplete = false;
+    this.environment.clearCaptureNotes();
+    setStatus(UI_STRINGS.statusPdfReading);
+    if (!pdf.shown) this.environment.renderLoading(UI_STRINGS.statusPdfReading);
+    state.pdfAbortController?.abort();
+    const abortController = new AbortController();
+    state.pdfAbortController = abortController;
+    let pageCount: number;
+    try {
+      ({ pageCount } = await pdf.show(identity.url, abortController.signal));
+    } catch (error) {
+      // Superseded or cancelled: whatever replaced this load reports instead.
+      if (abortController.signal.aborted) return;
+      throw error;
+    } finally {
+      if (state.pdfAbortController === abortController) {
+        state.pdfAbortController = undefined;
+      }
+    }
+    if (!captureCoordinator.isCurrent(work.generation)) return;
+    this.environment.hideReplicaStatus();
+    // As for the replica: a newer history URL of this same page wins.
+    const shownIdentity = state.followedPageIdentity && sameCompanionSourcePage(
+        state.followedPageIdentity,
+        identity,
+        normalizedPageUrl,
+      )
+      ? state.followedPageIdentity
+      : identity;
+    state.capturedPageIdentity = shownIdentity;
+    state.followedPageIdentity = shownIdentity;
+    // With no snapshot this clears the page's language resolution.
+    await translationDriver.resolveSelectedSourceLanguage(undefined);
+    if (!captureCoordinator.isCurrent(work.generation)) return;
+    state.availability = 'unavailable';
+    state.availabilityCheckedForPair = undefined;
+    setStatus(uiText(UI_STRINGS.statusPdfShown, pageCount), 'success');
+  }
+
+  async #readZoom(tabId: number): Promise<number> {
+    try {
+      return normalizeZoomFactor(await this.environment.readZoom(tabId));
+    } catch {
+      return 1;
     }
   }
 }

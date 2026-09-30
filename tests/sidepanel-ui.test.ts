@@ -478,8 +478,8 @@ describe('sidepanel UI structure', () => {
     expect(checkpointSource).not.toContain(
       'capturedPageIdentity === identity',
     );
-    // The only injected function stays bodiless.
-    expect(script).toContain('func: () => undefined,');
+    // The only injected function reads the content type and nothing else.
+    expect(script).toContain('func: () => document.contentType,');
   });
 
   it('routes every tab and window event through the source follower', () => {
@@ -527,6 +527,49 @@ describe('sidepanel UI structure', () => {
     expect(darkBlock).toContain(
       'input:focus-visible { outline-color: rgb(123 217 170 / 75%); }',
     );
+  });
+
+  it('shows PDFs in their own focusable, labelled section after the replica', () => {
+    const { document } = parseHTML(markup);
+    const sections = [...document.querySelectorAll('main > section')].map(
+      (section) => section.id,
+    );
+    const pdfView = document.querySelector('#pdf-view');
+
+    expect(sections).toEqual(['replica-status', 'replica-preview', 'pdf-view']);
+    expect(pdfView?.hasAttribute('hidden')).toBe(true);
+    expect(pdfView?.getAttribute('tabindex')).toBe('0');
+    expect(pdfView?.getAttribute('aria-label')).toBe('PDF pages');
+    expect(pdfView?.getAttribute('data-ui-aria-label')).toBe('PDF pages');
+    expect(pdfView?.getAttribute('aria-busy')).toBe('false');
+    expect(script).toContain(
+      "pdfViewContainer.setAttribute('aria-busy', String(state.captureInFlight))",
+    );
+    const pdfStyle = style.slice(style.indexOf('.pdf-view {'));
+    expect(pdfStyle).toContain('overflow: auto');
+    expect(pdfStyle).toContain('overscroll-behavior: contain');
+    expect(pdfStyle).toContain('color-scheme: light');
+    expect(style).toContain('.pdf-view[hidden] { display: none; }');
+  });
+
+  it('closes the PDF on purge and unload, and lays it out with the tab zoom', () => {
+    const purge = sliceBetween(
+      'function purgeSourceDerivedRuntimeInternal(',
+      'function clearResetOnlyRuntimeState(',
+    );
+    expect(purge).toContain('pdfController.close();');
+    const pagehide = sliceBetween(
+      "window.addEventListener('pagehide', () => {\n  preferenceClient.flushPendingZoom();",
+      'browser.runtime.onMessage.addListener(',
+    );
+    expect(pagehide).toContain('state.pdfAbortController?.abort();');
+    expect(pagehide).toContain('pdfController.close();');
+    const layout = sliceBetween('function updateMirrorLayout(', 'function setCompanionOverlay(');
+    expect(layout).toContain('sourceZoomFactor: state.sourceZoomFactor');
+    expect(layout).toContain('pdfController.updateLayout(layout);');
+    expect(script).toContain('browser.tabs.onZoomChange.addListener(');
+    expect(script).toContain('capturePipeline.handleSourceZoomChange(tabId, newZoomFactor)');
+    expect(script).toContain('browser.tabs.getZoom(tabId)');
   });
 
   it('saves a zoom drag that has not settled when the page unloads', () => {

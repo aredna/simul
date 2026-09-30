@@ -150,6 +150,25 @@ describe('pdfjs-runtime with the packaged pdf.js', () => {
       .toBeGreaterThan(1000);
   });
 
+  it('releases a drawn page and draws it again afterwards', async () => {
+    stubCanvasGlobals();
+    const document = await open('multi-page.pdf');
+    await document.render(2, asCanvas(createCanvas(1, 1)), 1);
+
+    await expect(document.releasePage(2)).resolves.toBeUndefined();
+    // A page never drawn, and a page being drawn, are safe to release too.
+    await expect(document.releasePage(3)).resolves.toBeUndefined();
+    const drawing = createCanvas(1, 1);
+    const rendering = document.render(4, asCanvas(drawing), 1);
+    await expect(document.releasePage(4)).resolves.toBeUndefined();
+    await expect(rendering).resolves.toBe(1);
+
+    const again = createCanvas(1, 1);
+    await document.render(2, asCanvas(again), 1);
+    expect(countInk(again.getContext('2d').getImageData(0, 0, again.width, again.height).data))
+      .toBeGreaterThan(500);
+  });
+
   it('asks for a password instead of opening an encrypted PDF', async () => {
     await expect(open('password.pdf')).rejects.toMatchObject({
       name: 'PdfjsOpenError',
@@ -292,6 +311,22 @@ describe('pdfjs-runtime boundaries', () => {
     });
     expect(attempts).toBe(2);
     expect(fake.getDocument).toHaveBeenCalledOnce();
+  });
+
+  it('asks pdf.js to free a released page', async () => {
+    const cleanup = vi.fn(() => false);
+    const getPage = vi.fn(async () => ({ cleanup }));
+    const fake = fakePdfjs(async () => ({ numPages: 2, getPage }));
+    const document = await openPdfDocument(new Uint8Array(4), {
+      ...nodeEnvironment,
+      moduleBase: 'memory://release/',
+      importModule: async (url) => (url.endsWith('pdf.min.mjs') ? fake.module : {}),
+    });
+
+    await expect(document.releasePage(2)).resolves.toBeUndefined();
+
+    expect(getPage).toHaveBeenCalledWith(2);
+    expect(cleanup).toHaveBeenCalledOnce();
   });
 
   it('never loads pdf.js for an already cancelled open', async () => {

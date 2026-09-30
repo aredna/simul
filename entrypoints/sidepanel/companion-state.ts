@@ -92,6 +92,8 @@ export class CompanionState {
   capturedPageIdentity: CapturedPageIdentity | undefined;
   snapshot: ReplicaTranslationSnapshot | undefined;
   lastSourceScroll: HtmlMirrorScrollState | undefined;
+  /** The followed tab's browser zoom; 1:1 and custom zoom follow it (D104). */
+  sourceZoomFactor = 1;
 
   // Source-language resolution for the captured page.
   resolvedSourceLanguage: SupportedLanguage | undefined;
@@ -116,6 +118,8 @@ export class CompanionState {
   mirrorLimitsCommitInFlight = false;
   activeAbortController: AbortController | undefined;
   replicaShadowAbortController: AbortController | undefined;
+  /** The PDF download and open in progress, if any. */
+  pdfAbortController: AbortController | undefined;
   activeTranslationTask: Promise<void> | undefined;
   activeTranslationKey: string | undefined;
   /** The identity request of an active-tab follow still resolving. */
@@ -213,6 +217,7 @@ export class CompanionState {
   abortPageWork(): void {
     this.activeAbortController?.abort();
     this.replicaShadowAbortController?.abort();
+    this.pdfAbortController?.abort();
   }
 
   /** Forgets that the user wanted this page translated. */
@@ -240,6 +245,7 @@ export class CompanionState {
     this.availability = 'unavailable';
     this.resetTranslationIntent();
     this.lastSourceScroll = undefined;
+    this.sourceZoomFactor = 1;
   }
 }
 

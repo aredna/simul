@@ -53,8 +53,12 @@ describe('CompanionState', () => {
 
   it('aborts every page work handle and clears the page as one unit', () => {
     const state = new CompanionState({ isDetachedWindow: false });
-    const controllers = [new AbortController(), new AbortController()];
-    [state.activeAbortController, state.replicaShadowAbortController] = controllers;
+    const controllers = [new AbortController(), new AbortController(), new AbortController()];
+    [
+      state.activeAbortController,
+      state.replicaShadowAbortController,
+      state.pdfAbortController,
+    ] = controllers;
     state.followedPageIdentity = identity;
     state.capturedPageIdentity = identity;
     state.resolvedSourceLanguage = 'de';
@@ -67,6 +71,7 @@ describe('CompanionState', () => {
     state.translationDesired = true;
     state.translationComplete = true;
     state.lastSourceScroll = {} as never;
+    state.sourceZoomFactor = 1.5;
     state.imageCaptureAccess = 'granted';
     state.panelWindowId = 3;
     state.preferenceSafetyConnectionReady = true;
@@ -88,6 +93,7 @@ describe('CompanionState', () => {
     expect(state.translationDesired).toBe(false);
     expect(state.translationComplete).toBe(false);
     expect(state.lastSourceScroll).toBeUndefined();
+    expect(state.sourceZoomFactor).toBe(1);
     // Device, window and settings facts survive a page invalidation.
     expect(state.imageCaptureAccess).toBe('granted');
     expect(state.panelWindowId).toBe(3);

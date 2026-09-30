@@ -193,6 +193,16 @@ export const UI_STRINGS = {
   statusReplicaNotPrepared:
     'The isolated replica could not be prepared. Retry the current page.',
 
+  // PDF statuses (capture pipeline and PDF controller).
+  statusPdfReading: 'Reading the PDF…',
+  statusPdfShown: 'Showing the PDF. Pages: {0}.',
+  statusPdfPassword: 'This PDF is password-protected. Simul cannot open it.',
+  statusPdfTooLarge: 'This PDF is too large for Simul (over 128 MB).',
+  statusPdfDownloadFailed:
+    'The PDF could not be downloaded. Reload the tab and select Simul again.',
+  statusPdfUnreadable: 'This file is not a readable PDF.',
+  statusPdfReaderFailed: 'Simul’s PDF reader could not start.',
+
   // Surface-switcher: detached window / return-to-panel.
   returnToSidePanelAria: 'Return companion to the side panel',
   returnToSidePanel: 'Return to side panel',

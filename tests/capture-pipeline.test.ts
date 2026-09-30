@@ -1,11 +1,15 @@
 import { describe, expect, it, vi } from 'vitest';
 import { englishUiText } from '../lib/ui-text';
 
-import { CapturePipeline } from '../entrypoints/sidepanel/capture-pipeline';
+import {
+  CapturePipeline,
+  type SourceDocumentFacts,
+} from '../entrypoints/sidepanel/capture-pipeline';
 import { CompanionState } from '../entrypoints/sidepanel/companion-state';
 import { Currency } from '../entrypoints/sidepanel/currency';
 import { LatestWorkCoordinator } from '../lib/companion-lifecycle';
 import { NavigationRefreshGate } from '../lib/navigation-refresh-gate';
+import { PageAccessError } from '../lib/page-identity';
 import type { ReplicaCaptureRequest, ReplicaRunResult } from '../lib/replica/contracts';
 import { IsolatedReplicaFailureRecoveryGate } from '../lib/replica/replica-recovery';
 import type { ReplicaSourceDocumentIdentity } from '../lib/replica/source-identity';
@@ -16,6 +20,8 @@ import type {
 
 const IDENTITY = { tabId: 4, windowId: 1, url: 'https://example.com/a' };
 const OTHER = { tabId: 4, windowId: 1, url: 'https://example.com/b' };
+const HTML_DOCUMENT: SourceDocumentFacts = { documentId: 'doc-1', contentType: 'text/html' };
+const PDF_DOCUMENT: SourceDocumentFacts = { documentId: 'doc-1', contentType: 'application/pdf' };
 
 function documentFor(generation: number): ReplicaSourceDocumentIdentity {
   return { sessionId: 'session', pageEpoch: generation, generation, documentId: 'doc-1', frameId: 0 };
@@ -27,7 +33,9 @@ function snapshotFor(generation: number, text = 'Hello'): ReplicaTranslationSnap
 
 function setup(options: {
   run?: (request: ReplicaCaptureRequest) => Promise<ReplicaRunResult>;
-  readDocumentId?: () => Promise<string | undefined>;
+  readDocument?: () => Promise<SourceDocumentFacts | undefined>;
+  readZoom?: () => Promise<number>;
+  showPdf?: (url: string, signal: AbortSignal) => Promise<{ pageCount: number }>;
   fieldCount?: number;
   accessRevoked?: boolean;
   maxRebuilds?: number;
@@ -55,6 +63,17 @@ function setup(options: {
     releasePresentation: vi.fn(() => {
       presentation.hasCommittedReplica = false;
       published = undefined;
+    }),
+  };
+  const pdf = {
+    shown: false,
+    show: vi.fn(async (url: string, signal: AbortSignal) => {
+      const shown = await (options.showPdf ?? (async () => ({ pageCount: 3 })))(url, signal);
+      pdf.shown = true;
+      return shown;
+    }),
+    close: vi.fn(() => {
+      pdf.shown = false;
     }),
   };
   const coordinator = { selectPair: vi.fn(), handleSourceCommit: vi.fn() };
@@ -88,20 +107,23 @@ function setup(options: {
     engine,
     surface: { snapshot: () => published },
     presentation,
+    pdf,
     coordinator,
     imageController,
     translationDriver,
     evidence: { invalidate: () => events.push('evidence-invalidated') },
     mirrorSessionId: 'session',
     captureTimeoutMs: 50,
-    readDocumentId: vi.fn(options.readDocumentId ?? (async () => 'doc-1')),
+    readDocument: vi.fn(options.readDocument ?? (async () => HTML_DOCUMENT)),
+    readZoom: vi.fn(options.readZoom ?? (async () => 1)),
     getTab: vi.fn(async (tabId: number) => ({ id: tabId, windowId: 1, url: state.followedPageIdentity?.url, active: true })),
     reconcileAutomaticAccess: vi.fn(async () => options.accessRevoked ?? false),
     cancelNavigationRefresh: () => events.push('refresh-cancelled'),
     invalidateComposer: () => events.push('composer-invalidated'),
     setStatus: (message, tone) => statuses.push([englishUiText(message), tone]),
     updateControls: () => events.push('controls'),
-    renderLoading: () => events.push('loading'),
+    renderLoading: (message) =>
+      events.push(message === undefined ? 'loading' : `loading:${englishUiText(message)}`),
     renderError: (message) => events.push(`error:${message}`),
     hideReplicaStatus: () => events.push('status-hidden'),
     clearCaptureNotes: () => events.push('notes-cleared'),
@@ -114,7 +136,7 @@ function setup(options: {
   };
   return {
     pipeline, state, currency, captureCoordinator, presentation, engine, coordinator,
-    imageController, translationDriver, statuses, events, diagnostics, settled,
+    imageController, translationDriver, statuses, events, diagnostics, settled, pdf,
     get published() {
       return published;
     },
@@ -172,13 +194,13 @@ describe('CapturePipeline capture', () => {
   });
 
   it('fails a page that hides its document boundary or takes too long', async () => {
-    const missing = setup({ readDocumentId: async () => undefined });
+    const missing = setup({ readDocument: async () => undefined });
     missing.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
     await missing.settled();
     expect(missing.statuses.at(-1)?.[0]).toContain('did not expose a current document boundary');
     expect(missing.engine.run).not.toHaveBeenCalled();
 
-    const slow = setup({ readDocumentId: () => new Promise(() => undefined) });
+    const slow = setup({ readDocument: () => new Promise(() => undefined) });
     slow.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
     await slow.settled();
     expect(slow.statuses.at(-1)?.[0]).toContain('took too long');
@@ -206,18 +228,18 @@ describe('CapturePipeline capture', () => {
   });
 
   it('runs the newest queued capture and drops the superseded one', async () => {
-    let releaseFirst!: (value: string) => void;
+    let releaseFirst!: (value: SourceDocumentFacts) => void;
     const harness = setup({
-      readDocumentId: vi.fn()
-        .mockImplementationOnce(() => new Promise<string>((resolve) => {
+      readDocument: vi.fn()
+        .mockImplementationOnce(() => new Promise<SourceDocumentFacts>((resolve) => {
           releaseFirst = resolve;
         }))
-        .mockImplementation(async () => 'doc-1'),
+        .mockImplementation(async () => HTML_DOCUMENT),
     });
     harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
     harness.pipeline.queueCapture({ identity: OTHER, reason: 'navigation' });
     await vi.waitFor(() => expect(releaseFirst).toBeTypeOf('function'));
-    releaseFirst('doc-1');
+    releaseFirst(HTML_DOCUMENT);
     await harness.settled();
     expect(harness.engine.run).toHaveBeenCalledTimes(1);
     expect(harness.engine.run.mock.calls[0]?.[0]?.generation).toBe(2);
@@ -293,5 +315,198 @@ describe('CapturePipeline commits and failures', () => {
     expect(harness.imageController.setTopPageOrigin).toHaveBeenLastCalledWith(undefined);
     expect(harness.events).toContain('error:The source tab was closed.');
     expect(harness.statuses.at(-1)).toEqual(['The source tab was closed.', 'warning']);
+  });
+});
+
+describe('CapturePipeline PDFs', () => {
+  it('shows a PDF tab without the replica engine and publishes its identity', async () => {
+    const harness = setup({ readDocument: async () => PDF_DOCUMENT });
+    harness.state.resolvedSourceLanguage = 'fr';
+    harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
+    await harness.settled();
+
+    expect(harness.engine.run).not.toHaveBeenCalled();
+    expect(harness.pdf.show).toHaveBeenCalledWith(IDENTITY.url, expect.any(AbortSignal));
+    expect(harness.pdf.shown).toBe(true);
+    expect(harness.state.capturedPageIdentity).toEqual(IDENTITY);
+    expect(harness.state.followedPageIdentity).toEqual(IDENTITY);
+    expect(harness.state.snapshot).toBeUndefined();
+    expect(harness.state.availability).toBe('unavailable');
+    expect(harness.state.pdfAbortController).toBeUndefined();
+    expect(harness.translationDriver.resolveSelectedSourceLanguage).toHaveBeenCalledWith(undefined);
+    expect(harness.translationDriver.checkAvailability).not.toHaveBeenCalled();
+    expect(harness.translationDriver.maybeTranslateAutomatically).not.toHaveBeenCalled();
+    expect(harness.events).toContain('loading:Reading the PDF…');
+    expect(harness.events.indexOf('status-hidden'))
+      .toBeGreaterThan(harness.events.indexOf('loading:Reading the PDF…'));
+    expect(harness.statuses.map(([message]) => message)).toContain('Reading the PDF…');
+    expect(harness.statuses.at(-1)).toEqual(['Showing the PDF. Pages: 3.', 'success']);
+  });
+
+  it('keeps a shown PDF through a same-page rebuild without the loading state', async () => {
+    const harness = setup({ readDocument: async () => PDF_DOCUMENT });
+    harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
+    await harness.settled();
+    harness.events.length = 0;
+
+    harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'manual' });
+    await harness.settled();
+
+    expect(harness.pdf.close).not.toHaveBeenCalled();
+    expect(harness.pdf.show).toHaveBeenCalledTimes(2);
+    expect(harness.events.some((event) => event.startsWith('loading'))).toBe(false);
+    expect(harness.statuses.at(-1)).toEqual(['Showing the PDF. Pages: 3.', 'success']);
+  });
+
+  it('closes a shown PDF when the next capture is another page or a web page', async () => {
+    let contentType = 'application/pdf';
+    const harness = setup({
+      readDocument: async () => ({ documentId: 'doc-1', contentType }),
+    });
+    harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
+    await harness.settled();
+
+    contentType = 'text/html; charset=utf-8';
+    harness.events.length = 0;
+    harness.pipeline.queueCapture({ identity: OTHER, reason: 'navigation' });
+    await harness.settled();
+
+    expect(harness.pdf.close).toHaveBeenCalled();
+    expect(harness.pdf.shown).toBe(false);
+    expect(harness.engine.run).toHaveBeenCalledOnce();
+    expect(harness.state.capturedPageIdentity).toEqual(OTHER);
+    expect(harness.state.snapshot).toBeDefined();
+    // Closing the PDF leaves the loading state, not an empty panel.
+    expect(harness.events.filter((event) => event === 'loading')).toHaveLength(1);
+  });
+
+  it('shows a failure in the panel only when no PDF is shown', async () => {
+    let fail = true;
+    const harness = setup({
+      readDocument: async () => PDF_DOCUMENT,
+      showPdf: async () => {
+        if (fail) throw new PageAccessError('This PDF is password-protected. Simul cannot open it.');
+        return { pageCount: 2 };
+      },
+    });
+    harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
+    await harness.settled();
+    expect(harness.events).toContain('error:This PDF is password-protected. Simul cannot open it.');
+    expect(harness.statuses.at(-1)).toEqual([
+      'This PDF is password-protected. Simul cannot open it.',
+      'error',
+    ]);
+    expect(harness.state.capturedPageIdentity).toBeUndefined();
+
+    fail = false;
+    harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'manual' });
+    await harness.settled();
+    expect(harness.statuses.at(-1)).toEqual(['Showing the PDF. Pages: 2.', 'success']);
+
+    fail = true;
+    harness.events.length = 0;
+    harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'manual' });
+    await harness.settled();
+    expect(harness.pdf.shown).toBe(true);
+    expect(harness.events.some((event) => event.startsWith('error:'))).toBe(false);
+    expect(harness.statuses.at(-1)?.[1]).toBe('error');
+  });
+
+  it('drops a superseded PDF load silently', async () => {
+    const signals: AbortSignal[] = [];
+    let contentType = 'application/pdf';
+    const harness = setup({
+      readDocument: async () => ({ documentId: 'doc-1', contentType }),
+      showPdf: (_url, signal) => {
+        signals.push(signal);
+        return new Promise((_, reject) => {
+          signal.addEventListener('abort', () =>
+            reject(new DOMException('Loading the PDF was cancelled.', 'AbortError')));
+        });
+      },
+    });
+    harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
+    await vi.waitFor(() => expect(signals).toHaveLength(1));
+
+    harness.pipeline.beginSourceNavigation(OTHER);
+    expect(signals[0]?.aborted).toBe(true);
+    expect(harness.pdf.close).not.toHaveBeenCalled();
+
+    contentType = 'text/html';
+    harness.pipeline.queueCapture({ identity: OTHER, reason: 'navigation' });
+    await harness.settled();
+
+    expect(harness.statuses.some(([, tone]) => tone === 'error')).toBe(false);
+    expect(harness.events.some((event) => event.startsWith('error:'))).toBe(false);
+    expect(harness.state.capturedPageIdentity).toEqual(OTHER);
+    expect(harness.state.pdfAbortController).toBeUndefined();
+  });
+
+  it('closes the PDF when the companion is invalidated', async () => {
+    const harness = setup({ readDocument: async () => PDF_DOCUMENT });
+    harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
+    await harness.settled();
+
+    harness.pipeline.invalidateCompanion('The source tab was closed.');
+
+    expect(harness.pdf.close).toHaveBeenCalled();
+    expect(harness.pdf.shown).toBe(false);
+    expect(harness.events).toContain('error:The source tab was closed.');
+  });
+});
+
+describe('CapturePipeline tab zoom', () => {
+  it('reads the tab zoom at capture and lays out with it', async () => {
+    const harness = setup({ readZoom: async () => 1.25 });
+    harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
+    await harness.settled();
+    expect(harness.state.sourceZoomFactor).toBe(1.25);
+
+    const unreadable = setup({ readZoom: async () => { throw new Error('No tab'); } });
+    unreadable.state.sourceZoomFactor = 2;
+    unreadable.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
+    await unreadable.settled();
+    expect(unreadable.state.sourceZoomFactor).toBe(1);
+    expect(unreadable.state.capturedPageIdentity).toEqual(IDENTITY);
+  });
+
+  it('keeps a zoom change that arrives while the capture reads the zoom', async () => {
+    let answer!: (zoom: number) => void;
+    const harness = setup({
+      readZoom: () => new Promise<number>((resolve) => {
+        answer = resolve;
+      }),
+    });
+    harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
+    await vi.waitFor(() => expect(answer).toBeDefined());
+
+    // Chrome answered 0.6 before the viewer re-fitted to 0.7.
+    harness.pipeline.handleSourceZoomChange(IDENTITY.tabId, 0.7);
+    answer(0.6);
+    await harness.settled();
+
+    expect(harness.state.sourceZoomFactor).toBe(0.7);
+  });
+
+  it('follows zoom changes of the followed tab only', async () => {
+    const harness = setup();
+    harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
+    await harness.settled();
+    harness.events.length = 0;
+
+    harness.pipeline.handleSourceZoomChange(IDENTITY.tabId + 1, 2);
+    expect(harness.state.sourceZoomFactor).toBe(1);
+    expect(harness.events).not.toContain('layout');
+
+    harness.pipeline.handleSourceZoomChange(IDENTITY.tabId, 1.5);
+    expect(harness.state.sourceZoomFactor).toBe(1.5);
+    expect(harness.events).toEqual(['layout']);
+
+    harness.pipeline.handleSourceZoomChange(IDENTITY.tabId, Number.NaN);
+    expect(harness.state.sourceZoomFactor).toBe(1);
+
+    harness.pipeline.handleSourceZoomChange(IDENTITY.tabId, 3);
+    harness.pipeline.invalidateCompanion('The source tab was closed.');
+    expect(harness.state.sourceZoomFactor).toBe(1);
   });
 });

@@ -17,6 +17,8 @@ import {
 import type { CompanionStatusTone } from '../../lib/companion-ui-localization';
 import { ALL_UI_STRINGS, UI_STRINGS } from '../../lib/companion-ui-strings';
 import { CapturePipeline } from './capture-pipeline';
+import { PdfController, type PdfDiagnostic } from './pdf-controller';
+import { PdfView } from './pdf-view';
 import {
   CompanionState,
   type CaptureRequest,
@@ -54,6 +56,8 @@ import {
   readableError,
 } from '../../lib/page-identity';
 import { NavigationRefreshGate } from '../../lib/navigation-refresh-gate';
+import { fetchPdfBytes } from '../../lib/pdf/pdf-fetch';
+import { chromePdfjsEnvironment, openPdfDocument } from '../../lib/pdf/pdfjs-runtime';
 import {
   compiledImageAnalysisCapabilities,
   compiledImageTextProviderIds,
@@ -232,6 +236,7 @@ const progressElement = requireElement<HTMLProgressElement>('#progress');
 const placementGuidance = requireElement<HTMLElement>('#placement-guidance');
 const replicaStatusContainer = requireElement<HTMLElement>('#replica-status');
 const replicaPreviewContainer = requireElement<HTMLElement>('#replica-preview');
+const pdfViewContainer = requireElement<HTMLElement>('#pdf-view');
 const replicaModeBadge = requireElement<HTMLElement>('#replica-mode-badge');
 const composerInput = requireElement<HTMLTextAreaElement>('#composer-input');
 const composerCharacterCount = requireElement<HTMLOutputElement>(
@@ -260,6 +265,17 @@ const visibleReplayHost = new VisibleReplayHost({
   hostDocument: document,
   previewSurface: replicaPreviewContainer,
   badge: replicaModeBadge,
+});
+const pdfController = new PdfController({
+  fetchPdf: (url, signal) => fetchPdfBytes(url, { signal }),
+  openDocument: (bytes, signal) => openPdfDocument(
+    bytes,
+    chromePdfjsEnvironment((path) =>
+      (browser.runtime.getURL as (value: string) => string)(path)),
+    signal,
+  ),
+  view: new PdfView(pdfViewContainer),
+  onDiagnostic: logPdfDiagnostic,
 });
 let replicaTranslationCoordinator!: ReplicaTranslationCoordinator;
 let imageTranslationController!: ImageTranslationController;
@@ -686,28 +702,32 @@ const capturePipeline = new CapturePipeline({
   engine: isolatedHtmlReplicaEngine,
   surface: replicaSurfaceRouter,
   presentation: visibleReplayHost,
+  pdf: pdfController,
   coordinator: replicaTranslationCoordinator,
   imageController: imageTranslationController,
   translationDriver,
   evidence: autoLanguageEvidencePrecedence,
   mirrorSessionId,
   captureTimeoutMs: CAPTURE_TIMEOUT_MS,
-  readDocumentId: async (tabId) => {
-    // The injected function is bodiless on purpose: only the frame's
-    // documentId is read from the injection result.
+  readDocument: async (tabId) => {
+    // The injected function only reads the content type, which is how a
+    // PDF tab shows itself; it references nothing outside its own body.
     const results = await browser.scripting.executeScript({
       target: { tabId, frameIds: [0] },
-      func: () => undefined,
+      func: () => document.contentType,
     });
-    return results.find(({ frameId }) => frameId === 0)?.documentId;
+    const frame = results.find(({ frameId }) => frameId === 0);
+    return frame && { documentId: frame.documentId, contentType: frame.result };
   },
+  // The pipeline treats a failed read as 1.
+  readZoom: (tabId) => browser.tabs.getZoom(tabId),
   getTab: (tabId) => browser.tabs.get(tabId),
   reconcileAutomaticAccess: (pageUrl) => permissionFlows.reconcileAutomaticAccess(pageUrl),
   cancelNavigationRefresh: () => sourceFollower.cancelNavigationRefresh(),
   invalidateComposer: () => quickComposer.invalidate(),
   setStatus,
   updateControls: () => updateControls(),
-  renderLoading: renderLoadingState,
+  renderLoading: (message) => renderLoadingState(message),
   renderError: renderErrorState,
   hideReplicaStatus: () => {
     replicaStatusContainer.hidden = true;
@@ -794,7 +814,10 @@ const sourceFollower = new SourceFollower({
   onFollowedTabActivated: () => imageTranslationController.resume(),
   setStatus,
   localizeTemplate: localizeUiTemplate,
-  renderError: renderErrorState,
+  // A shown PDF is kept like a committed replica; the status line reports.
+  renderError: (message) => {
+    if (!pdfController.shown) renderErrorState(message);
+  },
   updateControls,
 });
 
@@ -1015,6 +1038,8 @@ window.addEventListener('pagehide', () => {
   preferenceClient.flushPendingZoom();
   uiLocalizer.dispose();
   state.replicaShadowAbortController?.abort();
+  state.pdfAbortController?.abort();
+  pdfController.close();
   imageTranslationController.dispose();
   replicaTranslationCoordinator.dispose();
   isolatedHtmlReplicaEngine.dispose();
@@ -1050,6 +1075,10 @@ browser.tabs.onReplaced.addListener((addedTabId, removedTabId) => {
 
 browser.tabs.onRemoved.addListener((tabId, removeInfo) => {
   sourceFollower.handleTabRemoved(tabId, removeInfo);
+});
+
+browser.tabs.onZoomChange.addListener(({ tabId, newZoomFactor }) => {
+  capturePipeline.handleSourceZoomChange(tabId, newZoomFactor);
 });
 
 browser.permissions.onAdded.addListener(() => {
@@ -1166,6 +1195,7 @@ function purgeSourceDerivedRuntimeInternal(
   imageTranslationController.purgeSourceDerivedCache();
   imageTranslationController.releaseReplica();
   isolatedHtmlReplicaEngine.releasePresentation();
+  pdfController.close();
   replicaTranslationCoordinator.selectPair(undefined);
   // Read-scope narrowing is a content-retention boundary, not only a visual
   // rebuild. Semantic form/personal text and translated image labels may have
@@ -1221,10 +1251,13 @@ async function translateRemembered(
 }
 
 function updateMirrorLayout(): void {
-  visibleReplayHost.updateLayout({
+  const layout = {
     displayMode: state.preferences.displayMode,
     zoomPercent: state.preferences.zoomPercent,
-  });
+    sourceZoomFactor: state.sourceZoomFactor,
+  };
+  visibleReplayHost.updateLayout(layout);
+  pdfController.updateLayout(layout);
   if (appliedTextLayoutMode !== state.preferences.textLayoutMode) {
     appliedTextLayoutMode = state.preferences.textLayoutMode;
     isolatedHtmlReplicaEngine.refreshTextLayout();
@@ -1571,11 +1604,12 @@ function readSidePanelLayoutProbe(): (() => Promise<{ side: string }>) | undefin
     : undefined;
 }
 
-function renderLoadingState(): void {
+function renderLoadingState(message: UiText = UI_STRINGS.preparingMirror): void {
   const wrapper = document.createElement('div');
   wrapper.className = 'empty-state';
   const text = document.createElement('p');
-  setUiText(text, UI_STRINGS.preparingMirror);
+  if (typeof message === 'string') setUiText(text, message);
+  else text.textContent = renderUi(message);
   wrapper.append(text);
   replicaStatusContainer.replaceChildren(wrapper);
   replicaStatusContainer.hidden = false;
@@ -1616,6 +1650,7 @@ function updateControls(): void {
   const busy = state.captureInFlight || state.translationInFlight || state.permissionInFlight || composerInFlight;
   replicaStatusContainer.setAttribute('aria-busy', String(state.captureInFlight));
   replicaPreviewContainer.setAttribute('aria-busy', String(state.captureInFlight));
+  pdfViewContainer.setAttribute('aria-busy', String(state.captureInFlight));
   sourceSelect.disabled = busy;
   targetSelect.disabled = busy;
   swapButton.disabled = busy || !state.resolvedSourceLanguage;
@@ -1727,6 +1762,11 @@ function logImageTranslationDiagnostic(
     console.info('[Simul image translation]', diagnostic);
   }
   imageAnalysisPanel.recordDiagnostic(diagnostic);
+}
+
+function logPdfDiagnostic(diagnostic: PdfDiagnostic): void {
+  // Stages, counts, sizes and times only: never URLs, file names or text.
+  if (import.meta.env.DEV) console.info('[Simul PDF]', diagnostic);
 }
 
 function logTranslationCache(
