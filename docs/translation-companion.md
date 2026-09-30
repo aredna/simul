@@ -513,10 +513,12 @@ disappear, same-language images stay unchanged, and page text translation stays
 responsive.
 
 Run `npm run artifact:check` and confirm the ready-to-load artifact remains
-under the 42 MiB unpacked limit, contains the pinned Tesseract catalog and
-notices, and has no remote OCR runtime or model references.
+under the 42 MiB unpacked limit, contains the pinned Tesseract catalog, the
+pinned pdf.js subset, and their notices, and has no remote OCR or PDF runtime
+references.
 
 The manifest must retain Chrome 138, required permissions `activeTab`,
 `scripting`, `sidePanel`, `storage`, and `offscreen`, no required host
 permissions, only the approved optional HTTP(S) patterns, and the exact local
-Wasm/Worker extension-page CSP.
+Wasm/Worker extension-page CSP, which every build profile carries because
+pdf.js ships in all of them.

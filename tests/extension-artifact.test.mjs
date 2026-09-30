@@ -8,6 +8,7 @@ import {
   symlink,
   writeFile,
 } from 'node:fs/promises';
+import { createHash } from 'node:crypto';
 import { tmpdir } from 'node:os';
 import path from 'node:path';
 
@@ -15,7 +16,7 @@ import { afterEach, describe, expect, it } from 'vitest';
 
 import {
   REQUIRED_ICON_SIZES,
-  APPROVED_OCR_CSP,
+  APPROVED_EXTENSION_PAGE_CSP,
   APPROVED_OCR_PACKAGE_LOCK_METADATA,
   APPROVED_OCR_PERMISSIONS,
   APPROVED_OPTIONAL_HOST_PERMISSIONS,
@@ -246,7 +247,7 @@ describe('validateArtifact', () => {
       await readFile(relaxedManifestPath, 'utf8'),
     );
     relaxedManifest.content_security_policy.extension_pages =
-      `${APPROVED_OCR_CSP} connect-src https://example.com`;
+      `${APPROVED_EXTENSION_PAGE_CSP} connect-src https://example.com`;
     await writeFile(relaxedManifestPath, JSON.stringify(relaxedManifest));
     await expect(validateArtifact(relaxedCsp)).rejects.toThrow(
       'requires the exact extension page CSP',
@@ -554,6 +555,193 @@ describe('validateArtifact', () => {
   });
 });
 
+describe('packaged pdf.js', () => {
+  it('accepts the exact reviewed pdf.js set with the Wasm CSP', async () => {
+    const artifact = await createTemporaryPdfjsArtifact();
+
+    await expect(validateArtifact(artifact)).resolves.toMatchObject({
+      pdfjs: true,
+      ocrEnabled: false,
+    });
+  });
+
+  it('requires the exact extension page CSP whenever pdf.js ships', async () => {
+    const artifact = await createTemporaryPdfjsArtifact({
+      manifest: { content_security_policy: undefined },
+    });
+    await expect(validateArtifact(artifact)).rejects.toThrow(
+      'requires the exact extension page CSP',
+    );
+
+    const relaxed = await createTemporaryPdfjsArtifact({
+      manifest: {
+        content_security_policy: {
+          extension_pages: `${APPROVED_EXTENSION_PAGE_CSP} connect-src *`,
+        },
+      },
+    });
+    await expect(validateArtifact(relaxed)).rejects.toThrow(
+      'requires the exact extension page CSP',
+    );
+  });
+
+  it('rejects the Wasm CSP when no Wasm runtime ships', async () => {
+    const artifact = await createTemporaryArtifact({
+      manifest: {
+        content_security_policy: { extension_pages: APPROVED_EXTENSION_PAGE_CSP },
+      },
+    });
+
+    await expect(validateArtifact(artifact)).rejects.toThrow(
+      "must use Chrome's default extension page CSP",
+    );
+  });
+
+  it.each([
+    ['a changed byte', 'pdfjs/wasm/openjpeg.wasm', /pdf\.js asset (?:byte count|hash) changed/u],
+    ['a missing file', 'pdfjs/cmaps/UniJIS-UTF16-H.bcmap', /missing declared asset/u],
+    ['an undeclared file', 'pdfjs/wasm/quickjs-eval.wasm', /Unapproved pdf\.js runtime asset/u],
+    ['changed notices', 'pdfjs/THIRD_PARTY_NOTICES.md', /differs from the reviewed vendor copy: pdfjs\/THIRD_PARTY_NOTICES\.md/u],
+  ])('rejects %s under pdfjs/', async (label, filePath, message) => {
+    const artifact = await createTemporaryPdfjsArtifact();
+    const absolutePath = path.join(artifact, filePath);
+    if (label === 'a missing file') await rm(absolutePath);
+    else await writeFile(absolutePath, 'changed');
+
+    await expect(validateArtifact(artifact)).rejects.toThrow(message);
+  });
+
+  it('rejects a same-size change and a missing manifest', async () => {
+    const changed = await createTemporaryPdfjsArtifact();
+    const wasmPath = path.join(changed, 'pdfjs/wasm/jbig2.wasm');
+    const bytes = await readFile(wasmPath);
+    bytes[bytes.length - 1] ^= 0xff;
+    await writeFile(wasmPath, bytes);
+    await expect(validateArtifact(changed)).rejects.toThrow('pdf.js asset hash changed');
+
+    const unlisted = await createTemporaryPdfjsArtifact();
+    await rm(path.join(unlisted, 'pdfjs/asset-manifest.json'));
+    await expect(validateArtifact(unlisted)).rejects.toThrow(
+      'missing required local asset: pdfjs/asset-manifest.json',
+    );
+  });
+
+  it.each([
+    [
+      'a repeated CMap',
+      (manifest) => {
+        const cmaps = manifest.files.filter(({ role }) => role === 'cmap');
+        Object.assign(cmaps[1], cmaps[0]);
+      },
+      /unapproved path, role, source, or ordering/u,
+    ],
+    [
+      'an unreviewed URL in a module',
+      (manifest, root) => {
+        const shimPath = path.join(root, 'simul-shim.mjs');
+        return readFile(shimPath, 'utf8').then(async (text) => {
+          const changed = `${text}\nconst notes = "https://example.org/notes";\n`;
+          await writeFile(shimPath, changed);
+          const entry = manifest.files.find(({ path: assetPath }) => assetPath === 'simul-shim.mjs');
+          manifest.totalBytes += Buffer.byteLength(changed) - entry.bytes;
+          entry.bytes = Buffer.byteLength(changed);
+          entry.sha256 = createHash('sha256').update(changed).digest('hex');
+        });
+      },
+      /unreviewed URLs \(https:\/\/example\.org\/notes\)/u,
+    ],
+  ])('rejects %s even when the reviewed copy agrees', async (_label, mutate, message) => {
+    const reviewedRoot = await createTemporaryProjectRoot('simul-project-');
+    const reviewedPdfjs = path.join(reviewedRoot, 'vendor/pdfjs');
+    await cp(path.resolve('vendor/pdfjs'), reviewedPdfjs, { recursive: true });
+    const manifestPath = path.join(reviewedPdfjs, 'asset-manifest.json');
+    const manifest = JSON.parse(await readFile(manifestPath, 'utf8'));
+    await mutate(manifest, reviewedPdfjs);
+    await writeFile(manifestPath, `${JSON.stringify(manifest, null, 2)}\n`);
+    const artifact = await createTemporaryArtifact({
+      manifest: {
+        content_security_policy: { extension_pages: APPROVED_EXTENSION_PAGE_CSP },
+      },
+    });
+    await cp(reviewedPdfjs, path.join(artifact, 'pdfjs'), { recursive: true });
+
+    await expect(
+      validateArtifact(artifact, { projectRoot: reviewedRoot }),
+    ).rejects.toThrow(message);
+  });
+
+  it('rejects pdf.js code bundled outside the pinned pdfjs/ files', async () => {
+    const artifact = await createTemporaryPdfjsArtifact({
+      popupScript: 'function f() { throw new Error("Worker was terminated."); }',
+    });
+
+    await expect(validateArtifact(artifact)).rejects.toThrow(
+      'pdf.js code must load from the pinned pdfjs/ files, not be bundled: popup.js',
+    );
+  });
+
+  it('keeps rejecting Wasm and worker files outside the approved pdf.js paths', async () => {
+    for (const filename of ['runtime/core.wasm', 'pdf.worker.min.mjs', 'assets/simul-worker.mjs']) {
+      const artifact = await createTemporaryPdfjsArtifact();
+      const absolutePath = path.join(artifact, filename);
+      await mkdir(path.dirname(absolutePath), { recursive: true });
+      await writeFile(
+        absolutePath,
+        /\.m?js$/u.test(filename) ? 'console.info("worker");' : 'not a runtime',
+      );
+      await expect(validateArtifact(artifact), filename).rejects.toThrow(
+        /OCR runtime|OCR compute-host/u,
+      );
+    }
+  });
+
+  it('rejects a pdf.js CDN reference in any executable', async () => {
+    const artifact = await createTemporaryPdfjsArtifact({
+      popupScript:
+        'const base = "https://cdn.jsdelivr.net/npm/pdfjs-dist@6.3.289/build/";',
+    });
+
+    await expect(validateArtifact(artifact)).rejects.toThrow(
+      'Remote pdf.js runtime reference',
+    );
+  });
+
+  it('compares pdf.js against the caller\'s vendor copies', async () => {
+    const artifact = await createTemporaryPdfjsArtifact();
+    const reviewedRoot = await createTemporaryProjectRoot('simul-project-');
+    await expect(
+      validateArtifact(artifact, { projectRoot: reviewedRoot }),
+    ).rejects.toThrow(/ENOENT/u);
+
+    await cp(path.resolve('vendor/pdfjs'), path.join(reviewedRoot, 'vendor/pdfjs'), {
+      recursive: true,
+    });
+    await expect(
+      validateArtifact(artifact, { projectRoot: reviewedRoot }),
+    ).resolves.toMatchObject({ pdfjs: true });
+
+    await writeFile(
+      path.join(reviewedRoot, 'vendor/pdfjs/asset-manifest.json'),
+      '{"files":[]}',
+    );
+    await expect(
+      validateArtifact(artifact, { projectRoot: reviewedRoot }),
+    ).rejects.toThrow(/differs from the reviewed vendor copy: pdfjs\/asset-manifest\.json/u);
+  });
+
+  it('caps every build profile at 42 MiB', async () => {
+    const artifact = await createTemporaryArtifact();
+    await writeFile(
+      path.join(artifact, 'assets', 'large.png'),
+      Buffer.alloc(MAX_UNPACKED_ARTIFACT_BYTES),
+    );
+
+    await expect(validateArtifact(artifact)).rejects.toThrow(
+      /Extension artifact is \d+ bytes; the approved maximum is 44040192 bytes/u,
+    );
+  });
+});
+
 describe('OCR provider package boundary', () => {
   it('requires exact approved provider pins and rejects every unapproved provider', async () => {
     await expect(
@@ -682,7 +870,7 @@ describe('OCR provider package boundary', () => {
 });
 
 describe('disabled OCR production profile', () => {
-  it('omits the compute host, permission, CSP, and every OCR runtime asset', async () => {
+  it('omits the compute host, permission, and every OCR runtime asset but keeps pdf.js', async () => {
     const temporaryRoot = await createTemporaryDirectory('simul-disabled-build-');
     const artifact = await buildProductionArtifact({
       temporaryRoot,
@@ -692,12 +880,16 @@ describe('disabled OCR production profile', () => {
     const validation = await validateArtifact(artifact);
 
     expect(validation.ocrEnabled).toBe(false);
+    expect(validation.pdfjs).toBe(true);
     expect(validation.manifest.version).toBe('0.5.2');
     expect(validation.manifest.version_name).toBe(
-      '0.5.2 beta v.20260925.10',
+      '0.5.2 beta v.20260925.11',
     );
     expect(validation.manifest.permissions).toEqual(APPROVED_PERMISSIONS);
-    expect(validation.manifest).not.toHaveProperty('content_security_policy');
+    expect(validation.manifest.content_security_policy).toEqual({
+      extension_pages: APPROVED_EXTENSION_PAGE_CSP,
+    });
+    expect(validation.files).toContain('pdfjs/pdf.min.mjs');
     expect(validation.files).not.toContain('offscreen.html');
     expect(validation.files.some((file) => file.startsWith('ocr/'))).toBe(false);
     const sidepanelHtml = await readFile(
@@ -756,7 +948,10 @@ describe('independent OCR production profiles', () => {
 
     expect(validation.ocrProviderIds).toEqual(['chrome-text-detector']);
     expect(validation.manifest.permissions).toEqual(APPROVED_OCR_PERMISSIONS);
-    expect(validation.manifest).not.toHaveProperty('content_security_policy');
+    expect(validation.manifest.content_security_policy).toEqual({
+      extension_pages: APPROVED_EXTENSION_PAGE_CSP,
+    });
+    expect(validation.pdfjs).toBe(true);
     expect(validation.files).toContain('offscreen.html');
     expect(validation.files.some((file) => file.startsWith('ocr/'))).toBe(false);
 
@@ -781,9 +976,10 @@ describe('independent OCR production profiles', () => {
     expect(validation.ocrProviderIds).toEqual(['tesseract']);
     expect(validation.manifest.permissions).toEqual(APPROVED_OCR_PERMISSIONS);
     expect(validation.manifest.content_security_policy).toEqual({
-      extension_pages: APPROVED_OCR_CSP,
+      extension_pages: APPROVED_EXTENSION_PAGE_CSP,
     });
     expect(validation.files).toContain('ocr/tesseract/asset-manifest.json');
+    expect(validation.files).toContain('pdfjs/asset-manifest.json');
   }, 20_000);
 
   it('rejects duplicate or unknown requested providers before building', async () => {
@@ -1020,7 +1216,7 @@ async function createTemporaryOcrArtifact() {
   const artifact = await createTemporaryArtifact({
     manifest: {
       permissions: [...APPROVED_OCR_PERMISSIONS],
-      content_security_policy: { extension_pages: APPROVED_OCR_CSP },
+      content_security_policy: { extension_pages: APPROVED_EXTENSION_PAGE_CSP },
     },
   });
   await mkdir(path.join(artifact, 'ocr'), { recursive: true });
@@ -1050,6 +1246,20 @@ async function createTemporaryOcrArtifact() {
     path.join(artifact, 'host.js'),
     `globalThis.__simulOcrRuntime = Object.freeze(${JSON.stringify(REQUIRED_OCR_RUNTIME_MARKERS)});`,
   );
+  return artifact;
+}
+
+async function createTemporaryPdfjsArtifact(options = {}) {
+  const artifact = await createTemporaryArtifact({
+    ...options,
+    manifest: {
+      content_security_policy: { extension_pages: APPROVED_EXTENSION_PAGE_CSP },
+      ...options.manifest,
+    },
+  });
+  await cp(path.resolve('vendor/pdfjs'), path.join(artifact, 'pdfjs'), {
+    recursive: true,
+  });
   return artifact;
 }
 

@@ -18,7 +18,7 @@ too.
 
 - Google Chrome 138 or newer, or Microsoft Edge 148 or newer, on a desktop or
   laptop (Simul is tested in Chrome)
-- About 35 MB of disk space
+- About 43 MB of disk space
 
 The first time you translate into a new language, the browser may download
 that language pack.

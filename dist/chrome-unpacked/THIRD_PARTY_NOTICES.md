@@ -6,9 +6,9 @@ source repository. It does not grant a license to original Simul material;
 see [LICENSE](LICENSE).
 
 The inventory is derived from what the Simul 0.5.2 extension artifact
-actually contains: the locked production dependency graph, the pinned OCR
-asset manifest, and the modules tesseract.js bundled into its prebuilt Worker
-(read from the Worker's published source map). Development-only npm packages
+actually contains: the locked production dependency graph, the pinned OCR and
+PDF asset manifests, and the modules tesseract.js bundled into its prebuilt
+Worker (read from the Worker's published source map). Development-only npm packages
 are not included in the extension artifact and retain the licenses shipped in
 their own packages. Generated BMAD Method files are covered separately below.
 
@@ -30,6 +30,16 @@ their own packages. Generated BMAD Method files are covered separately below.
 | `zlibjs` | 0.3.1 | MIT | Tesseract Worker |
 | webpack 5 runtime | (as built by tesseract.js) | MIT | Tesseract Worker |
 | Tesseract OCR, Leptonica, giflib, libjpeg, libpng, libtiff, libwebp, OpenLibm, zlib, Emscripten runtime, musl libc | see `CORE_THIRD_PARTY_NOTICES.txt` | various permissive | compiled into the WebAssembly core |
+| `pdfjs-dist` (PDF.js, Mozilla Foundation) | 6.3.289 | Apache-2.0 | `pdfjs/pdf.min.mjs` and `pdfjs/pdf.worker.min.mjs` (unmodified) |
+| Brotli decoder | as bundled by PDF.js 6.3.289 | MIT | PDF.js worker |
+| Emscripten runtime glue | as built by PDF.js 6.3.289 | MIT | PDF.js worker (OpenJPEG and JBIG2 loaders) |
+| wasm-bindgen glue | as built by PDF.js 6.3.289 | MIT | PDF.js worker (qcms loader) |
+| OpenJPEG and the PDF.js OpenJPEG wrapper | as built by PDF.js 6.3.289 | BSD-2-Clause | `pdfjs/wasm/openjpeg.wasm` |
+| PDFium JBIG2 decoder and the PDF.js JBIG2 wrapper | as built by PDF.js 6.3.289 | BSD-3-Clause and Apache-2.0 | `pdfjs/wasm/jbig2.wasm` |
+| qcms and the PDF.js qcms wrapper | as built by PDF.js 6.3.289 | MIT | `pdfjs/wasm/qcms_bg.wasm` |
+| Adobe CMaps | from PDF.js 6.3.289 | BSD-3-Clause | `pdfjs/cmaps/` |
+| Foxit Symbol and Dingbats fonts | from PDF.js 6.3.289 | BSD-3-Clause | `pdfjs/standard_fonts/` |
+| CGATS001Compat-v2-micro ICC profile | from PDF.js 6.3.289 | CC0-1.0 | `pdfjs/iccs/` |
 | Vite module-preload helper | 8.2.2 | MIT | Simul's own chunks |
 | `@wxt-dev/browser` | 0.2.2 | MIT | Simul's own chunks |
 
@@ -38,6 +48,16 @@ but contribute no code to the extension; their notices are kept below
 conservatively: `idb-keyval` 6.3.0 (the Worker carries its own 6.2.1),
 `node-fetch` 2.7.0, `opencollective-postinstall` 2.0.3, `tr46` 0.0.3,
 `webidl-conversions` 3.0.1, and `whatwg-url` 5.0.0.
+
+The PDF.js files under `pdfjs/` are copied from the `pdfjs-dist` development
+dependency by `tools/vendor-pdfjs.mjs`; no PDF.js code enters Simul's own
+chunks. `@napi-rs/canvas` 1.0.9 (MIT, with its platform package), which PDF.js
+draws with in Node, is a development dependency for Simul's tests and is
+never packaged.
+
+The exact license texts of the PDF.js components ship beside them under
+`pdfjs/` (`vendor/pdfjs/` in the source repository), with an overview in
+`pdfjs/THIRD_PARTY_NOTICES.md`.
 
 ## Changes made by Simul
 
@@ -56,6 +76,12 @@ changed say so at their top, and the changes are:
 The `tessdata_fast` language models are the upstream `.traineddata` files
 compressed with gzip; their content is unchanged. The tesseract.js-core
 loaders are unmodified.
+
+The PDF.js files under `pdfjs/` are unmodified. Simul adds its own files
+there: `simul-shim.mjs`, which defines six built-ins the modern PDF.js build
+calls and Chrome 138 lacks, `simul-worker.mjs`, which loads that shim before
+the PDF.js worker, and the asset manifest and notices. `LICENSE_BROTLI` is
+taken from the PDF.js source at the release commit.
 
 ## MIT-licensed material
 
@@ -78,6 +104,16 @@ Copyright notices retained for MIT-licensed material:
 - `@wxt-dev/browser`: Copyright (c) 2023 Aaron.
 - `is-url` is distributed under MIT terms without a copyright line in its
   published license file.
+- Brotli decoder in the PDF.js worker: Copyright (c) 2009, 2010, 2013-2016 by
+  the Brotli Authors.
+- qcms: Copyright (C) 2009-2024 Mozilla Corporation, Copyright (C) 1998-2007
+  Marti Maria. The PDF.js qcms wrapper is distributed under MIT terms without
+  a copyright line.
+- Emscripten runtime glue in the PDF.js worker: Copyright (c) 2010-2014
+  Emscripten authors.
+- wasm-bindgen glue in the PDF.js worker: Copyright (c) 2014 Alex Crichton.
+- `@napi-rs/canvas` (development only, not packaged): Copyright (c) 2020
+  lynweklm@gmail.com.
 
 Permission is hereby granted, free of charge, to any person obtaining a copy
 of this software and associated documentation files (the "Software"), to deal
@@ -109,6 +145,11 @@ paths:
 Inside the ready-to-load extension, the same files are under
 `ocr/tesseract/licenses/`.
 
+PDF.js (Copyright 2024 Mozilla Foundation) and the PDF.js JBIG2 wrapper
+(Copyright 2026 Mozilla Foundation) are Apache-2.0; the license text is
+`vendor/pdfjs/LICENSE` (`pdfjs/LICENSE` in the extension) and
+`pdfjs/wasm/LICENSE_PDFJS_JBIG2`. PDF.js ships no NOTICE file.
+
 Additional attribution: `idb-keyval` is Copyright 2016, Jake Archibald, and
 `wasm-feature-detect` is Copyright 2017 Google Inc. The published
 `wasm-feature-detect` and `idb-keyval` packages contain no separate NOTICE
@@ -120,6 +161,13 @@ files retained in the vendored license directory.
 
 The Tesseract Worker incorporates `ieee754` 1.2.1 (maintained by Feross
 Aboukhadijeh), which is Copyright 2008 Fair Oaks Labs, Inc.
+
+The PDFium JBIG2 decoder (Copyright 2014 The PDFium Authors), the Foxit Symbol
+and Dingbats fonts (Copyright 2014 PDFium Authors), and the Adobe CMaps
+(Copyright 1990-2009 Adobe Systems Incorporated) are also BSD-3-Clause; their
+exact texts, which name their own holders, ship as
+`pdfjs/wasm/LICENSE_JBIG2`, `pdfjs/standard_fonts/LICENSE_FOXIT`, and
+`pdfjs/cmaps/LICENSE`.
 
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:
@@ -152,6 +200,12 @@ POSSIBILITY OF SUCH DAMAGE.
 `webidl-conversions` is Copyright (c) 2014, Domenic Denicola. All rights
 reserved.
 
+OpenJPEG (Copyright (c) 2002-2014, Universite catholique de Louvain (UCL),
+Belgium, Professor Benoit Macq, and the other holders listed in
+`pdfjs/wasm/LICENSE_OPENJPEG`) and the PDF.js OpenJPEG wrapper (Copyright (c)
+2024, Mozilla Foundation, `pdfjs/wasm/LICENSE_PDFJS_OPENJPEG`) are also
+BSD-2-Clause.
+
 Redistribution and use in source and binary forms, with or without
 modification, are permitted provided that the following conditions are met:
 
@@ -172,6 +226,12 @@ INTERRUPTION) HOWEVER CAUSED AND ON ANY THEORY OF LIABILITY, WHETHER IN
 CONTRACT, STRICT LIABILITY, OR TORT (INCLUDING NEGLIGENCE OR OTHERWISE)
 ARISING IN ANY WAY OUT OF THE USE OF THIS SOFTWARE, EVEN IF ADVISED OF THE
 POSSIBILITY OF SUCH DAMAGE.
+
+## CC0-1.0 material
+
+The CGATS001Compat-v2-micro ICC profile that PDF.js uses for CMYK colours is
+dedicated to the public domain under CC0 1.0 Universal; the text ships as
+`pdfjs/iccs/LICENSE`.
 
 ## OCR-specific and compiled-core notices
 

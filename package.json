@@ -26,9 +26,11 @@
     "check": "npm run typecheck && npm test && npm run artifact:check"
   },
   "devDependencies": {
+    "@napi-rs/canvas": "1.0.9",
     "@types/node": "24.13.3",
     "acorn": "8.18.0",
     "linkedom": "0.18.13",
+    "pdfjs-dist": "6.3.289",
     "typescript": "7.0.2",
     "vite": "8.2.2",
     "vitest": "4.1.11",

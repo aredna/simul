@@ -28,7 +28,9 @@ export const APPROVED_OCR_PERMISSIONS = Object.freeze([
   ...APPROVED_PERMISSIONS,
   'offscreen',
 ]);
-export const APPROVED_OCR_CSP =
+// Required whenever a packaged Wasm runtime ships (pdf.js in every build,
+// Tesseract in OCR builds); Chrome's default CSP applies otherwise.
+export const APPROVED_EXTENSION_PAGE_CSP =
   "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; object-src 'self';";
 export const MAX_UNPACKED_ARTIFACT_BYTES = 42 * 1024 * 1024;
 export const APPROVED_OPTIONAL_HOST_PERMISSIONS = Object.freeze([
@@ -174,6 +176,140 @@ export const DEFAULT_OCR_PROVIDER_IDS = Object.freeze([
   'chrome-text-detector',
   'tesseract',
 ]);
+export const APPROVED_PDFJS_VERSION = '6.3.289';
+export const APPROVED_PDFJS_COMMIT = '1c8020a7d4e43668ac287a3ecf9a8dbea17e4c56';
+export const APPROVED_PDFJS_PACKAGE_LOCK_METADATA = Object.freeze({
+  version: APPROVED_PDFJS_VERSION,
+  resolved: 'https://registry.npmjs.org/pdfjs-dist/-/pdfjs-dist-6.3.289.tgz',
+  integrity:
+    'sha512-ZHjSVpDa3D6izMq8/04lvkhkATUmL9px6ChPaXc1k6nU2Mrhlg1/7F0bdUqCwUjw3NsPTfPZsMDUU6ZIcRaeQw==',
+});
+export const APPROVED_PDFJS_CMAP_COUNT = 168;
+export const APPROVED_PDFJS_STANDARD_FONTS = Object.freeze([
+  'FoxitDingbats.pfb',
+  'FoxitSymbol.pfb',
+]);
+export const APPROVED_PDFJS_WASM = Object.freeze([
+  'jbig2.wasm',
+  'openjpeg.wasm',
+  'qcms_bg.wasm',
+]);
+export const APPROVED_PDFJS_WASM_LICENSES = Object.freeze([
+  'LICENSE_JBIG2',
+  'LICENSE_OPENJPEG',
+  'LICENSE_PDFJS_JBIG2',
+  'LICENSE_PDFJS_OPENJPEG',
+  'LICENSE_PDFJS_QCMS',
+  'LICENSE_QCMS',
+]);
+export const APPROVED_PDFJS_BROTLI_LICENSE_SOURCE =
+  `https://raw.githubusercontent.com/mozilla/pdf.js/${APPROVED_PDFJS_COMMIT}/external/brotli/LICENSE_BROTLI`;
+// Every literal http(s), ws(s) or ftp URL in a packaged pdf.js module, in any
+// letter case, must be one of these inert strings: XML namespaces, the
+// licence link, and base URLs pdf.js parses against (the two `${…}` entries
+// are `www.` links it completes at run time). A new pdf.js version that adds
+// another literal URL fails until it is reviewed; the general remote-code
+// rules still cover URLs built from parts.
+export const APPROVED_PDFJS_INERT_URLS = Object.freeze([
+  'http://${e}',
+  'http://${t}',
+  'http://example.com',
+  'http://ns.adobe.com/xdp/',
+  'http://ns.adobe.com/xdp/pdf/',
+  'http://ns.adobe.com/xfdf/',
+  'http://ns.adobe.com/xmpmeta/',
+  'http://www.apache.org/licenses/LICENSE-2.0',
+  'http://www.w3.org/1999/XSL/Transform',
+  'http://www.w3.org/1999/xhtml',
+  'http://www.w3.org/2000/09/xmldsig#',
+  'http://www.w3.org/2000/svg',
+  'http://www.xfa.org/schema/xci/',
+  'http://www.xfa.org/schema/xdc/',
+  'http://www.xfa.org/schema/xfa-connection-set/',
+  'http://www.xfa.org/schema/xfa-data/',
+  'http://www.xfa.org/schema/xfa-data/1.0/',
+  'http://www.xfa.org/schema/xfa-form/',
+  'http://www.xfa.org/schema/xfa-locale-set/',
+  'http://www.xfa.org/schema/xfa-source-set/',
+  'http://www.xfa.org/schema/xfa-template/',
+  'https://foo.bar',
+]);
+// The version literal both pdf.js modules carry (their API version check).
+export const REQUIRED_PDFJS_RUNTIME_MARKERS = Object.freeze([
+  APPROVED_PDFJS_VERSION,
+]);
+const PDFJS_ARTIFACT_PREFIX = 'pdfjs/';
+const PDFJS_URL_PATTERN = /\b(?:https?|wss?|ftp):\/\/[^\s"'`)\\<>]*/giu;
+const PDFJS_CDN_PATTERN =
+  /(?:jsdelivr\.net\/(?:npm\/pdfjs-dist|gh\/mozilla\/pdf\.js)|unpkg\.com\/pdfjs-dist|esm\.sh\/pdfjs-dist|skypack\.dev\/pdfjs-dist|cdnjs\.cloudflare\.com\/ajax\/libs\/pdf\.js|mozilla\.github\.io\/pdf\.js|raw\.githubusercontent\.com\/mozilla\/pdf\.js)/iu;
+// Literals only pdf.js carries (its display layer and its worker). Simul loads
+// pdf.js from pdfjs/ by URL; a copy bundled anywhere else would be unpinned.
+const PDFJS_CODE_MARKERS = Object.freeze([
+  'Setting up fake worker.',
+  'Worker was terminated.',
+]);
+
+/** URLs in a pdf.js module text that are not on the reviewed inert list. */
+export function findUnreviewedPdfjsUrls(text) {
+  return [...new Set(text.match(PDFJS_URL_PATTERN) ?? [])].filter(
+    (url) => !APPROVED_PDFJS_INERT_URLS.includes(url),
+  );
+}
+
+/**
+ * The exact ordered path/role/source layout of vendor/pdfjs/asset-manifest.json
+ * for the given CMap file names.
+ */
+export function approvedPdfjsAssetLayout(cmapNames) {
+  const npm = (sourcePath) =>
+    `npm:pdfjs-dist@${APPROVED_PDFJS_VERSION}/${sourcePath}`;
+  const same = (assetPath, role) => ({
+    path: assetPath,
+    role,
+    source: npm(assetPath),
+  });
+  const layout = [
+    same('LICENSE', 'license'),
+    {
+      path: 'LICENSE_BROTLI',
+      role: 'license',
+      source: APPROVED_PDFJS_BROTLI_LICENSE_SOURCE,
+    },
+    ...cmapNames.map((name) => same(`cmaps/${name}`, 'cmap')),
+    same('cmaps/LICENSE', 'license'),
+    same('iccs/CGATS001Compat-v2-micro.icc', 'icc'),
+    same('iccs/LICENSE', 'license'),
+    { path: 'pdf.min.mjs', role: 'module', source: npm('build/pdf.min.mjs') },
+    {
+      path: 'pdf.worker.min.mjs',
+      role: 'worker',
+      source: npm('build/pdf.worker.min.mjs'),
+    },
+    {
+      path: 'simul-shim.mjs',
+      role: 'shim',
+      source: 'repo:tools/pdfjs/simul-shim.mjs',
+    },
+    {
+      path: 'simul-worker.mjs',
+      role: 'worker-entry',
+      source: 'repo:tools/pdfjs/simul-worker.mjs',
+    },
+    ...APPROVED_PDFJS_STANDARD_FONTS.map((name) =>
+      same(`standard_fonts/${name}`, 'standard-font'),
+    ),
+    same('standard_fonts/LICENSE_FOXIT', 'license'),
+    ...APPROVED_PDFJS_WASM.map((name) => same(`wasm/${name}`, 'wasm')),
+    ...APPROVED_PDFJS_WASM_LICENSES.map((name) =>
+      same(`wasm/${name}`, 'license'),
+    ),
+  ];
+  return layout.sort((left, right) => compareCodeUnits(left.path, right.path));
+}
+
+export function compareCodeUnits(left, right) {
+  return left < right ? -1 : left > right ? 1 : 0;
+}
 
 const TOOL_FILE = fileURLToPath(import.meta.url);
 export const PROJECT_ROOT = path.resolve(path.dirname(TOOL_FILE), '..');
@@ -344,6 +480,36 @@ export async function validateArtifact(
   }
 
   assertReplicaRuntimeMarkers(executableTextByPath, filePaths);
+  if (unpackedBytes > MAX_UNPACKED_ARTIFACT_BYTES) {
+    throw new ArtifactError(
+      `Extension artifact is ${unpackedBytes} bytes; the approved maximum is ${MAX_UNPACKED_ARTIFACT_BYTES} bytes.`,
+    );
+  }
+  for (const [relativePath, text] of executableTextByPath) {
+    if (PDFJS_CDN_PATTERN.test(text)) {
+      throw new ArtifactError(
+        `Remote pdf.js runtime reference found in artifact: ${relativePath}`,
+      );
+    }
+    if (
+      !relativePath.startsWith(PDFJS_ARTIFACT_PREFIX) &&
+      PDFJS_CODE_MARKERS.some((marker) => text.includes(marker))
+    ) {
+      throw new ArtifactError(
+        `pdf.js code must load from the pinned pdfjs/ files, not be bundled: ${relativePath}`,
+      );
+    }
+  }
+  const pdfjsRuntimePaths = [...filePaths].some((filePath) =>
+    filePath.startsWith(PDFJS_ARTIFACT_PREFIX),
+  )
+    ? await validatePdfjsRuntimeAssets({
+        root,
+        filePaths,
+        executableTextByPath,
+        projectRoot: reviewedRoot,
+      })
+    : new Set();
 
   const manifestPath = path.join(root, 'manifest.json');
   let manifest;
@@ -356,7 +522,12 @@ export async function validateArtifact(
   const ocrProviderIds = offscreenOcrEnabled
     ? detectOcrRuntimeProfile(executableTextByPath, filePaths)
     : Object.freeze([]);
-  validateOcrProfileManifest(manifest, ocrProviderIds);
+  validateExtensionPageCsp(manifest, {
+    ocrProviderIds,
+    pdfjsPackaged: pdfjsRuntimePaths.size > 0,
+  });
+  // pdf.js's approved Wasm decoders and worker are the only runtime files
+  // outside the OCR rules; everything else still passes them.
   if (
     ocrProviderIds.includes('tesseract')
   ) {
@@ -365,9 +536,8 @@ export async function validateArtifact(
       files,
       filePaths,
       executableTextByPath,
-      unpackedBytes,
       providerIds: ocrProviderIds,
-      maximumUnpackedBytes: MAX_UNPACKED_ARTIFACT_BYTES,
+      exemptPaths: pdfjsRuntimePaths,
       projectRoot: reviewedRoot,
     });
   } else if (ocrProviderIds.includes('chrome-text-detector')) {
@@ -375,13 +545,16 @@ export async function validateArtifact(
       files,
       filePaths,
       executableTextByPath,
+      exemptPaths: pdfjsRuntimePaths,
       requiredRuntimeMarkers: Object.freeze([
         ...REQUIRED_OCR_HOST_RUNTIME_MARKERS,
         ...REQUIRED_TEXT_DETECTOR_RUNTIME_MARKERS,
       ]),
     });
   } else {
-    for (const entry of files) assertNoOcrRuntimeArtifact(entry.path);
+    for (const entry of files) {
+      if (!pdfjsRuntimePaths.has(entry.path)) assertNoOcrRuntimeArtifact(entry.path);
+    }
   }
   await validateManifestSemanticResources(root, manifest, filePaths);
 
@@ -391,8 +564,132 @@ export async function validateArtifact(
     manifest,
     ocrEnabled: ocrProviderIds.length > 0,
     ocrProviderIds,
+    pdfjs: pdfjsRuntimePaths.size > 0,
     unpackedBytes,
   };
+}
+
+async function validatePdfjsRuntimeAssets({
+  root,
+  filePaths,
+  executableTextByPath,
+  projectRoot,
+}) {
+  const manifestPath = `${PDFJS_ARTIFACT_PREFIX}asset-manifest.json`;
+  const noticesPath = `${PDFJS_ARTIFACT_PREFIX}THIRD_PARTY_NOTICES.md`;
+  for (const [artifactPath, reviewedPath] of [
+    [manifestPath, 'vendor/pdfjs/asset-manifest.json'],
+    [noticesPath, 'vendor/pdfjs/THIRD_PARTY_NOTICES.md'],
+  ]) {
+    if (!filePaths.has(artifactPath)) {
+      throw new ArtifactError(`pdf.js artifact is missing required local asset: ${artifactPath}`);
+    }
+    const [artifactBytes, reviewedBytes] = await Promise.all([
+      readFile(path.join(root, ...artifactPath.split('/'))),
+      readFile(path.join(projectRoot, ...reviewedPath.split('/'))),
+    ]);
+    if (artifactBytes.byteLength === 0 || !artifactBytes.equals(reviewedBytes)) {
+      throw new ArtifactError(
+        `Packaged pdf.js file differs from the reviewed vendor copy: ${artifactPath}`,
+      );
+    }
+  }
+
+  let assetManifest;
+  try {
+    assetManifest = JSON.parse(
+      await readFile(path.join(root, ...manifestPath.split('/')), 'utf8'),
+    );
+  } catch (error) {
+    throw new ArtifactError('Packaged pdf.js asset manifest is invalid JSON.', {
+      cause: error,
+    });
+  }
+  if (
+    assetManifest?.schemaVersion !== 1 ||
+    assetManifest?.pdfjsVersion !== APPROVED_PDFJS_VERSION ||
+    assetManifest?.pdfjsCommit !== APPROVED_PDFJS_COMMIT ||
+    !Array.isArray(assetManifest.files)
+  ) {
+    throw new ArtifactError('Packaged pdf.js asset manifest has unapproved metadata.');
+  }
+  const cmapNames = assetManifest.files
+    .filter((asset) => isRecord(asset) && asset.role === 'cmap')
+    .map((asset) => String(asset.path).slice('cmaps/'.length));
+  const expectedLayout = approvedPdfjsAssetLayout(cmapNames);
+  if (
+    cmapNames.length !== APPROVED_PDFJS_CMAP_COUNT ||
+    new Set(cmapNames).size !== cmapNames.length ||
+    !cmapNames.every((name) => /^[A-Za-z0-9-]+\.bcmap$/u.test(name)) ||
+    assetManifest.files.length !== expectedLayout.length ||
+    !expectedLayout.every((approved, index) => {
+      const candidate = assetManifest.files[index];
+      return isRecord(candidate) &&
+        candidate.path === approved.path &&
+        candidate.role === approved.role &&
+        candidate.source === approved.source;
+    })
+  ) {
+    throw new ArtifactError(
+      'Packaged pdf.js asset manifest has an unapproved path, role, source, or ordering.',
+    );
+  }
+
+  const approvedPaths = new Set([manifestPath, noticesPath]);
+  let declaredBytes = 0;
+  for (const asset of assetManifest.files) {
+    if (
+      !Number.isSafeInteger(asset.bytes) ||
+      asset.bytes < 0 ||
+      !/^[a-f0-9]{64}$/u.test(asset.sha256)
+    ) {
+      throw new ArtifactError('Packaged pdf.js asset manifest contains an invalid entry.');
+    }
+    const relativePath = `${PDFJS_ARTIFACT_PREFIX}${asset.path}`;
+    approvedPaths.add(relativePath);
+    if (!filePaths.has(relativePath)) {
+      throw new ArtifactError(`pdf.js artifact is missing declared asset: ${relativePath}`);
+    }
+    const contents = await readFile(path.join(root, ...relativePath.split('/')));
+    if (contents.byteLength !== asset.bytes) {
+      throw new ArtifactError(`pdf.js asset byte count changed: ${relativePath}`);
+    }
+    if (createHash('sha256').update(contents).digest('hex') !== asset.sha256) {
+      throw new ArtifactError(`pdf.js asset hash changed: ${relativePath}`);
+    }
+    declaredBytes += contents.byteLength;
+  }
+  if (declaredBytes !== assetManifest.totalBytes) {
+    throw new ArtifactError(
+      `pdf.js asset budget mismatch: declared ${assetManifest.totalBytes}, measured ${declaredBytes}.`,
+    );
+  }
+  for (const relativePath of filePaths) {
+    if (relativePath.startsWith(PDFJS_ARTIFACT_PREFIX) && !approvedPaths.has(relativePath)) {
+      throw new ArtifactError(`Unapproved pdf.js runtime asset: ${relativePath}`);
+    }
+  }
+
+  for (const modulePath of ['pdf.min.mjs', 'pdf.worker.min.mjs']) {
+    const text = executableTextByPath.get(`${PDFJS_ARTIFACT_PREFIX}${modulePath}`);
+    for (const marker of REQUIRED_PDFJS_RUNTIME_MARKERS) {
+      if (!hasJavaScriptStringMarker(text, marker)) {
+        throw new ArtifactError(
+          `pdf.js module is missing required runtime marker ${marker}: ${modulePath}`,
+        );
+      }
+    }
+  }
+  for (const [relativePath, text] of executableTextByPath) {
+    if (!relativePath.startsWith(PDFJS_ARTIFACT_PREFIX)) continue;
+    const unreviewed = findUnreviewedPdfjsUrls(text);
+    if (unreviewed.length > 0) {
+      throw new ArtifactError(
+        `pdf.js module contains unreviewed URLs (${unreviewed.join(', ')}): ${relativePath}`,
+      );
+    }
+  }
+  return approvedPaths;
 }
 
 async function assertReleaseLegalFiles(root, filePaths, projectRoot) {
@@ -926,38 +1223,31 @@ function detectOcrRuntimeProfile(executableTextByPath, filePaths) {
   return Object.freeze(detected);
 }
 
-function validateOcrProfileManifest(manifest, providerIds) {
-  const tesseractEnabled = providerIds.includes('tesseract');
-  if (tesseractEnabled) {
+function validateExtensionPageCsp(manifest, { ocrProviderIds, pdfjsPackaged }) {
+  if ('sandbox' in manifest) {
+    throw new ArtifactError(
+      'The production artifact must not package a sandbox page.',
+    );
+  }
+  if (pdfjsPackaged || ocrProviderIds.includes('tesseract')) {
     if (
       !isRecord(manifest.content_security_policy) ||
       !sameOrderedStrings(
         Object.keys(manifest.content_security_policy).sort(),
         ['extension_pages'],
       ) ||
-      manifest.content_security_policy.extension_pages !== APPROVED_OCR_CSP
+      manifest.content_security_policy.extension_pages !==
+        APPROVED_EXTENSION_PAGE_CSP
     ) {
       throw new ArtifactError(
-        `The packaged OCR profile requires the exact extension page CSP: ${APPROVED_OCR_CSP}`,
-      );
-    }
-    if ('sandbox' in manifest) {
-      throw new ArtifactError(
-        'The production OCR profile must not package a sandbox page.',
+        `The packaged Wasm runtime (pdf.js or Tesseract) requires the exact extension page CSP: ${APPROVED_EXTENSION_PAGE_CSP}`,
       );
     }
     return;
   }
   if ('content_security_policy' in manifest) {
     throw new ArtifactError(
-      providerIds.length > 0
-        ? 'The asset-free OCR profile must use Chrome\'s default extension page CSP.'
-        : 'manifest.json must not relax or override extension page CSP when OCR is disabled.',
-    );
-  }
-  if ('sandbox' in manifest) {
-    throw new ArtifactError(
-      'An asset-free OCR profile must not package a sandbox page.',
+      'manifest.json must use Chrome\'s default extension page CSP when it packages no Wasm runtime.',
     );
   }
 }
@@ -1311,12 +1601,12 @@ function assertNoOcrRuntimeArtifact(relativePath) {
   const extension = path.posix.extname(lowerPath);
   if (lowerPath === 'ocr' || lowerPath.startsWith('ocr/')) {
     throw new ArtifactError(
-      `OCR runtime asset is forbidden in the foundation artifact: ${relativePath}`,
+      `OCR runtime asset is forbidden when the OCR runtime is not packaged: ${relativePath}`,
     );
   }
   if (FORBIDDEN_MODEL_EXTENSIONS.has(extension)) {
     throw new ArtifactError(
-      `OCR runtime or model asset is forbidden in the foundation artifact: ${relativePath}`,
+      `OCR runtime or model asset is forbidden outside the approved pdf.js and OCR paths: ${relativePath}`,
     );
   }
   if (
@@ -1330,7 +1620,7 @@ function assertNoOcrRuntimeArtifact(relativePath) {
     )
   ) {
     throw new ArtifactError(
-      `OCR compute-host, Worker, or model artifact is forbidden in Checkpoint E: ${relativePath}`,
+      `OCR compute-host, Worker, or model artifact is forbidden outside the approved pdf.js and OCR paths: ${relativePath}`,
     );
   }
 }
@@ -1340,23 +1630,15 @@ async function validatePackagedOcrRuntimeAssets({
   files,
   filePaths,
   executableTextByPath,
-  unpackedBytes,
   providerIds,
-  maximumUnpackedBytes,
+  exemptPaths,
   projectRoot,
 }) {
-  if (unpackedBytes > maximumUnpackedBytes) {
-    throw new ArtifactError(
-      `OCR artifact is ${unpackedBytes} bytes; the approved maximum is ${maximumUnpackedBytes} bytes.`,
-    );
-  }
-
   const approvedRuntimePaths = new Set();
   if (providerIds.includes('tesseract')) {
     for (const assetPath of await validateTesseractRuntimeAssets({
       root,
       filePaths,
-      unpackedBytes,
       projectRoot,
     })) approvedRuntimePaths.add(assetPath);
   }
@@ -1389,7 +1671,8 @@ async function validatePackagedOcrRuntimeAssets({
     if (
       entry.path === 'offscreen.html' ||
       offscreenResources.has(entry.path) ||
-      approvedRuntimePaths.has(entry.path)
+      approvedRuntimePaths.has(entry.path) ||
+      exemptPaths.has(entry.path)
     ) {
       continue;
     }
@@ -1410,10 +1693,8 @@ async function validatePackagedOcrRuntimeAssets({
 async function validateTesseractRuntimeAssets({
   root,
   filePaths,
-  unpackedBytes,
   projectRoot,
 }) {
-
   const manifestPath = 'ocr/tesseract/asset-manifest.json';
   const noticesPath = 'ocr/THIRD_PARTY_NOTICES.md';
   for (const requiredPath of [manifestPath, noticesPath]) {
@@ -1520,6 +1801,7 @@ function validateAssetFreeOcrRuntime({
   files,
   filePaths,
   executableTextByPath,
+  exemptPaths,
   requiredRuntimeMarkers,
 }) {
   const offscreenResources = collectStaticJavaScriptModuleClosure(
@@ -1533,7 +1815,11 @@ function validateAssetFreeOcrRuntime({
     requiredRuntimeMarkers,
   );
   for (const entry of files) {
-    if (entry.path === 'offscreen.html' || offscreenResources.has(entry.path)) {
+    if (
+      entry.path === 'offscreen.html' ||
+      offscreenResources.has(entry.path) ||
+      exemptPaths.has(entry.path)
+    ) {
       continue;
     }
     assertNoOcrRuntimeArtifact(entry.path);

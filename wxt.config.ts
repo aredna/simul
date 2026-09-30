@@ -9,12 +9,14 @@ import {
 } from './tools/ocr-build-profile';
 
 const ocrBuildProfile = readOcrBuildProfile(process.env);
-const betaBuildSuffix = 'beta v.20260925.10';
+const betaBuildSuffix = 'beta v.20260925.11';
 const tesseractEnabled = ocrBuildProfile.enabledProviderIds.includes('tesseract');
 const offscreenOcrEnabled = ocrBuildProfile.enabledProviderIds.some((id) =>
   id === 'tesseract' || id === 'chrome-text-detector',
 );
-const privilegedOcrCsp =
+// pdf.js ships in every build and needs Wasm and a module worker; Tesseract
+// needs the same when it is on.
+const privilegedCsp =
   "script-src 'self' 'wasm-unsafe-eval'; worker-src 'self'; object-src 'self';";
 const selectedEntrypoints = Object.freeze([
   'background',
@@ -29,6 +31,9 @@ const releaseLegalFiles = Object.freeze([
     fileName: 'THIRD_PARTY_NOTICES.md',
   },
 ]);
+const pdfjsAssets = Object.freeze(
+  collectFiles(new URL('./vendor/pdfjs/', import.meta.url), 'pdfjs'),
+);
 const selectedOcrAssets = Object.freeze([
   ...(tesseractEnabled
     ? [
@@ -106,8 +111,8 @@ function removeRemoteTesseractFallbacks(code: string): string {
 
 export default defineConfig({
   outDir: process.env.SIMUL_WXT_OUT_DIR || '.output',
-  // public/ ships the extension icons; the vendored OCR runtime and the legal
-  // files are emitted by the release plugin below.
+  // public/ ships the extension icons; the vendored pdf.js and OCR runtimes
+  // and the legal files are emitted by the release plugin below.
   publicDir: 'public',
   hooks: {
     'build:manifestGenerated': (_wxt, manifest) => {
@@ -138,6 +143,7 @@ export default defineConfig({
         generateBundle() {
           for (const legalFile of [
             ...releaseLegalFiles,
+            ...pdfjsAssets,
             ...selectedOcrAssets,
           ]) {
             this.emitFile({
@@ -204,12 +210,8 @@ export default defineConfig({
       ...(offscreenOcrEnabled ? ['offscreen' as const] : []),
     ],
     optional_host_permissions: ['<all_urls>'],
-    ...(tesseractEnabled
-      ? {
-          content_security_policy: {
-            extension_pages: privilegedOcrCsp,
-          },
-        }
-      : {}),
+    content_security_policy: {
+      extension_pages: privilegedCsp,
+    },
   },
 });
