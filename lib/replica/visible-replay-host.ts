@@ -97,6 +97,8 @@ export class VisibleReplayHost implements ReplayPresentationHost {
   #nestedOwnerKey: number | undefined;
   #nestedOwnerOrdinal: number | undefined;
   #hasSourceScroll = false;
+  /** Where the reader scrolled the replica itself, in replica pixels. */
+  #readerScroll: { readonly left: number; readonly top: number } | undefined;
   /** The last source position the replica followed, to tell real moves apart. */
   #lastFollowedScroll: VisibleReplayScroll | undefined;
   #disposed = false;
@@ -190,20 +192,16 @@ export class VisibleReplayHost implements ReplayPresentationHost {
       this.#previewSurface.clientHeight ||
       viewportHeight;
     // When the scaled source viewport is smaller than the panel, extend the
-    // track so the iframe can still reach the source document's final offset.
-    // When it is larger, the content extent preserves panning across the
-    // clipped portion of that zoomed viewport after internal scroll clamps.
+    // track so the iframe can still reach the replica's final offset. When it
+    // is larger, the content extent preserves panning across the clipped
+    // portion of that zoomed viewport after internal scroll clamps.
     committed.stage.style.width = `${boundedExtent(Math.max(
       contentWidth * scale,
       maximumSourceScrollX(committed) * scale + availableWidth,
-      (this.#hasSourceScroll ? this.#sourceDocumentMaxScrollX : 0) * scale +
-        availableWidth,
     ))}px`;
     committed.stage.style.height = `${boundedExtent(Math.max(
       contentHeight * scale,
       maximumSourceScrollY(committed) * scale + availableHeight,
-      (this.#hasSourceScroll ? this.#sourceDocumentMaxScrollY : 0) * scale +
-        availableHeight,
     ))}px`;
     committed.iframe.style.width = `${committed.dimensions.viewportWidth}px`;
     committed.iframe.style.height = `${committed.dimensions.viewportHeight}px`;
@@ -228,6 +226,7 @@ export class VisibleReplayHost implements ReplayPresentationHost {
       lastFollowed &&
       sameSourceScrollPosition(lastFollowed, scroll)
     ) return;
+    this.#readerScroll = undefined;
     const previousTarget = this.#sourceScrollTarget;
     const nextNestedOwnerKey = scroll.scrollTarget === 'nested' &&
         Number.isSafeInteger(scroll.nestedOwnerKey) &&
@@ -323,6 +322,7 @@ export class VisibleReplayHost implements ReplayPresentationHost {
     this.#sourceDocumentMaxScrollX = 0;
     this.#sourceDocumentMaxScrollY = 0;
     this.#hasSourceScroll = false;
+    this.#readerScroll = undefined;
     this.#lastFollowedScroll = undefined;
     if (this.#committed) this.#committed.nestedScroller = undefined;
   }
@@ -444,26 +444,24 @@ export class VisibleReplayHost implements ReplayPresentationHost {
     candidate.installScrollListener(() => {
       if (this.#committed !== candidate || candidate.released) return;
       if (this.#sourceScrollTarget === 'nested') return;
-      // A reader can move the replica before the source's first scroll packet
-      // arrives. Treat that local position as authoritative so an intervening
-      // recovery candidate cannot overwrite it with its initial zero offset.
-      this.#hasSourceScroll = true;
-      this.#sourceScrollX = clamp(
-        candidate.scroller.scrollLeft / candidate.scale,
-        0,
-        maximumSourceScrollX(candidate),
-      );
-      this.#sourceScrollY = clamp(
-        candidate.scroller.scrollTop / candidate.scale,
-        0,
-        maximumSourceScrollY(candidate),
-      );
-      this.#sourceMaxScrollX = maximumSourceScrollX(candidate);
-      this.#sourceMaxScrollY = maximumSourceScrollY(candidate);
-      this.#sourceDocumentScrollX = this.#sourceScrollX;
-      this.#sourceDocumentScrollY = this.#sourceScrollY;
-      this.#sourceDocumentMaxScrollX = this.#sourceMaxScrollX;
-      this.#sourceDocumentMaxScrollY = this.#sourceMaxScrollY;
+      const left = candidate.scroller.scrollLeft;
+      const top = candidate.scroller.scrollTop;
+      const projected = candidate.projectedScroll;
+      candidate.projectedScroll = undefined;
+      // Following the source sets the panel scroller, which echoes back as a
+      // scroll event; only the reader moves it anywhere else.
+      if (
+        projected &&
+        Math.abs(left - projected.left) < 1 &&
+        Math.abs(top - projected.top) < 1
+      ) return;
+      // The reader's position is kept in replica pixels until the source
+      // moves, including across a recovery candidate that commits before the
+      // source's first scroll packet arrives.
+      this.#readerScroll = {
+        left: clamp(left / candidate.scale, 0, maximumSourceScrollX(candidate)),
+        top: clamp(top / candidate.scale, 0, maximumSourceScrollY(candidate)),
+      };
       this.#projectScroll(candidate);
     });
     this.#applyLayout(candidate);
@@ -500,85 +498,41 @@ export class VisibleReplayHost implements ReplayPresentationHost {
   }
 
   #setOuterScroll(candidate: CandidateLease): void {
-    const nested = this.#sourceScrollTarget === 'nested'
-      ? this.#primaryNestedScroller(candidate)
-      : undefined;
-    const nestedFallbackX = this.#sourceDocumentScrollX + projectProgress(
-      this.#sourceScrollX,
-      this.#sourceMaxScrollX,
-      maximumSourceScrollX(candidate),
+    const { left, top } = this.#replicaDocumentScroll(
+      candidate,
+      this.#sourceScrollTarget === 'nested'
+        ? this.#primaryNestedScroller(candidate)
+        : undefined,
     );
-    const nestedFallbackY = this.#sourceDocumentScrollY + projectProgress(
-      this.#sourceScrollY,
-      this.#sourceMaxScrollY,
-      maximumSourceScrollY(candidate),
-    );
-    const fallbackX = this.#sourceScrollTarget === 'nested'
-      ? clamp(nestedFallbackX, 0, maximumSourceScrollX(candidate))
-      : this.#sourceScrollX;
-    const fallbackY = this.#sourceScrollTarget === 'nested'
-      ? clamp(nestedFallbackY, 0, maximumSourceScrollY(candidate))
-      : this.#sourceScrollY;
-    candidate.scroller.scrollLeft = boundedScrollExtent(
-      (nested ? this.#sourceDocumentScrollX : fallbackX) * candidate.scale,
-    );
-    candidate.scroller.scrollTop = boundedScrollExtent(
-      (nested ? this.#sourceDocumentScrollY : fallbackY) * candidate.scale,
-    );
+    candidate.scroller.scrollLeft = boundedScrollExtent(left * candidate.scale);
+    candidate.scroller.scrollTop = boundedScrollExtent(top * candidate.scale);
+    candidate.projectedScroll = {
+      left: candidate.scroller.scrollLeft,
+      top: candidate.scroller.scrollTop,
+    };
   }
 
   #projectScroll(candidate: CandidateLease): void {
     const target = candidate.iframe.contentWindow;
     if (!target || typeof target.scrollTo !== 'function') return;
-    if (this.#sourceScrollTarget === 'nested') {
-      const nested = this.#primaryNestedScroller(candidate);
-      if (nested) {
-        const maxScrollX = Math.max(0, nested.scrollWidth - nested.clientWidth);
-        const maxScrollY = Math.max(0, nested.scrollHeight - nested.clientHeight);
-        nested.scrollLeft = projectProgress(
-          this.#sourceScrollX,
-          this.#sourceMaxScrollX,
-          maxScrollX,
-        );
-        nested.scrollTop = projectProgress(
-          this.#sourceScrollY,
-          this.#sourceMaxScrollY,
-          maxScrollY,
-        );
-        try {
-          target.scrollTo({
-            left: this.#sourceDocumentScrollX,
-            top: this.#sourceDocumentScrollY,
-            behavior: 'auto',
-          });
-        } catch {
-          // The nested projection is already authoritative.
-        }
-        return;
-      }
+    const nested = this.#sourceScrollTarget === 'nested'
+      ? this.#primaryNestedScroller(candidate)
+      : undefined;
+    if (nested) {
+      const maxScrollX = Math.max(0, nested.scrollWidth - nested.clientWidth);
+      const maxScrollY = Math.max(0, nested.scrollHeight - nested.clientHeight);
+      nested.scrollLeft = projectProgress(
+        this.#sourceScrollX,
+        this.#sourceMaxScrollX,
+        maxScrollX,
+      );
+      nested.scrollTop = projectProgress(
+        this.#sourceScrollY,
+        this.#sourceMaxScrollY,
+        maxScrollY,
+      );
     }
-    const left = this.#sourceScrollTarget === 'nested'
-      ? clamp(
-          this.#sourceDocumentScrollX + projectProgress(
-            this.#sourceScrollX,
-            this.#sourceMaxScrollX,
-            maximumSourceScrollX(candidate),
-          ),
-          0,
-          maximumSourceScrollX(candidate),
-        )
-      : this.#sourceScrollX;
-    const top = this.#sourceScrollTarget === 'nested'
-      ? clamp(
-          this.#sourceDocumentScrollY + projectProgress(
-            this.#sourceScrollY,
-            this.#sourceMaxScrollY,
-            maximumSourceScrollY(candidate),
-          ),
-          0,
-          maximumSourceScrollY(candidate),
-        )
-      : this.#sourceScrollY;
+    const { left, top } = this.#replicaDocumentScroll(candidate, nested);
     try {
       target.scrollTo({
         left,
@@ -593,6 +547,57 @@ export class VisibleReplayHost implements ReplayPresentationHost {
         // static preview; it must not unwind an otherwise atomic commit.
       }
     }
+  }
+
+  /**
+   * Where the replica document sits. The reader's own scroll stays put.
+   * Otherwise the source's share of its scroll range becomes the same share
+   * of the replica's: a translation that lengthens the page scrolls the
+   * replica further, and both reach the end together. When the source
+   * follows a nested pane the replica has no match for, that pane's progress
+   * moves the replica document instead.
+   */
+  #replicaDocumentScroll(
+    candidate: CandidateLease,
+    nested: HTMLElement | undefined,
+  ): { readonly left: number; readonly top: number } {
+    const maxScrollX = maximumSourceScrollX(candidate);
+    const maxScrollY = maximumSourceScrollY(candidate);
+    if (this.#readerScroll) {
+      return {
+        left: clamp(this.#readerScroll.left, 0, maxScrollX),
+        top: clamp(this.#readerScroll.top, 0, maxScrollY),
+      };
+    }
+    if (this.#sourceScrollTarget === 'document') {
+      return {
+        left: projectProgress(this.#sourceScrollX, this.#sourceMaxScrollX, maxScrollX),
+        top: projectProgress(this.#sourceScrollY, this.#sourceMaxScrollY, maxScrollY),
+      };
+    }
+    const left = projectProgress(
+      this.#sourceDocumentScrollX,
+      this.#sourceDocumentMaxScrollX,
+      maxScrollX,
+    );
+    const top = projectProgress(
+      this.#sourceDocumentScrollY,
+      this.#sourceDocumentMaxScrollY,
+      maxScrollY,
+    );
+    if (nested) return { left, top };
+    return {
+      left: clamp(
+        left + projectProgress(this.#sourceScrollX, this.#sourceMaxScrollX, maxScrollX),
+        0,
+        maxScrollX,
+      ),
+      top: clamp(
+        top + projectProgress(this.#sourceScrollY, this.#sourceMaxScrollY, maxScrollY),
+        0,
+        maxScrollY,
+      ),
+    };
   }
 
   #primaryNestedScroller(candidate: CandidateLease): HTMLElement | undefined {
@@ -671,6 +676,8 @@ class CandidateLease implements VisibleReplayCandidateLease {
   interactiveAccessible = false;
   released = false;
   nestedScroller: HTMLElement | undefined;
+  /** The panel scroll offsets the host last set, to recognize their echo. */
+  projectedScroll: { readonly left: number; readonly top: number } | undefined;
   canvasBackgroundColor: string | undefined;
   #scrollListener: (() => void) | undefined;
 
@@ -926,6 +933,10 @@ function projectProgress(
   targetMaximum: number,
 ): number {
   if (sourceMaximum <= 0 || targetMaximum <= 0) return 0;
+  // Equal ranges keep exact pixels, free of division rounding.
+  if (sourceMaximum === targetMaximum) {
+    return clamp(sourcePosition, 0, targetMaximum);
+  }
   return clamp(sourcePosition / sourceMaximum, 0, 1) * targetMaximum;
 }
 

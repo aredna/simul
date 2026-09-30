@@ -32,16 +32,22 @@ or stale identities without logging coordinates, URLs, or page content.
 The most recent source position is retained even when it arrives before a
 staged replica commits, then applied as soon as that replica becomes visible.
 Navigation and an explicit rebuild reset the retained position and ownership so
-an earlier page cannot move the new one. The mirror uses exact scaled CSS-pixel
-offsets for faithful document scroll and proportional offsets when adaptive
-translations or nested layouts change the available range. No mirror
-interaction is sent back to the website.
+an earlier page cannot move the new one. The mirror follows by share of the
+scroll range, not by pixels (D100): when the page is 40% of the way down its
+range, the mirror is 40% of the way down its own. A translation that makes the
+page longer therefore scrolls the mirror further, a little faster, and both
+reach the end together; while translations land and the mirror grows, it keeps
+that share. Equal ranges keep exact pixels. Nested panes, and the page offset
+around them, are followed the same way. No mirror interaction is sent back to
+the website.
 
 The mirror moves only when the source position actually changes. The source
 re-reports its unchanged position after every layout change (an image load, a
 font, a resize) and with each checkpoint; those repeats leave the reader's own
-scrolling in the mirror where it is. Turning scroll following back on
-re-aligns the mirror with the source.
+scrolling in the mirror where it is, in the mirror's own pixels. The panel
+tells a reader's scroll from the scroll event its own following causes by the
+position it set. Turning scroll following back on re-aligns the mirror with
+the source.
 
 This retains direct document coordinates together with event-qualified
 nested-scroll support in the sole isolated transport.

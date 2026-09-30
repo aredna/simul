@@ -224,7 +224,7 @@ describe('visible isolated replay host', () => {
       scrollX: 120,
       scrollY: 800,
       maxScrollX: 400,
-      maxScrollY: 1_800,
+      maxScrollY: 1_900,
     });
     const first = fixture.host.createCandidate(dimensions());
     const firstScrollTo = vi.fn();
@@ -287,7 +287,7 @@ describe('visible isolated replay host', () => {
     ).scrollTop).toBe(375);
   });
 
-  it('retains source coordinates while a delayed replica extent catches up', () => {
+  it('keeps the source share of its range while a delayed replica extent catches up', () => {
     const fixture = createFixture();
     fixture.host.followSourceScroll({
       scrollTarget: 'document',
@@ -307,15 +307,16 @@ describe('visible isolated replay host', () => {
     candidate.mount.append(iframe);
     candidate.commit(iframe, { width: 1_200, height: 1_000 });
 
+    // 76% of the source range is 76% of the short replica's 300px range.
     expect(scrollTo).toHaveBeenLastCalledWith({
       left: 0,
-      top: 3_800,
+      top: 228,
       behavior: 'auto',
     });
     expect(requireElement<HTMLElement>(
       fixture.preview,
       '.replica-replay-stage',
-    ).style.height).toBe('5700px');
+    ).style.height).toBe('1000px');
 
     fixture.host.markLive(iframe);
     fixture.host.refreshExtent(iframe, { width: 1_200, height: 5_700 });
@@ -324,6 +325,60 @@ describe('visible isolated replay host', () => {
       top: 3_800,
       behavior: 'auto',
     });
+  });
+
+  it('follows a longer translated page by its share of the scroll range', () => {
+    const fixture = createFixture();
+    const candidate = fixture.host.createCandidate(dimensions());
+    const scrollTo = vi.fn();
+    const iframe = createProtectedIframe(fixture.document, scrollTo);
+    candidate.mount.append(iframe);
+    candidate.commit(iframe, { width: 1_200, height: 2_500 });
+    fixture.host.markLive(iframe);
+    // Translation doubled the page's scroll range: 1,800px in the source,
+    // 3,600px in the replica.
+    fixture.host.refreshExtent(iframe, { width: 1_200, height: 4_300 });
+    const scroller = requireElement<HTMLElement>(fixture.preview, '.replica-replay-scroll');
+    const source = { scrollTarget: 'document' as const, scrollX: 0, maxScrollX: 0, maxScrollY: 1_800 };
+
+    fixture.host.followSourceScroll({ ...source, scrollY: 900 });
+    expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, top: 1_800, behavior: 'auto' });
+    expect(scroller.scrollTop).toBe(1_800);
+
+    fixture.host.followSourceScroll({ ...source, scrollY: 1_800 });
+    expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, top: 3_600, behavior: 'auto' });
+
+    // More translations land below: the replica stays at its end.
+    fixture.host.refreshExtent(iframe, { width: 1_200, height: 5_000 });
+    expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, top: 4_300, behavior: 'auto' });
+  });
+
+  it('tells its own scroll echo from a reader move while translations grow the page', () => {
+    const fixture = createFixture();
+    const candidate = fixture.host.createCandidate(dimensions());
+    const scrollTo = vi.fn();
+    const iframe = createProtectedIframe(fixture.document, scrollTo);
+    candidate.mount.append(iframe);
+    candidate.commit(iframe, { width: 1_200, height: 2_500 });
+    fixture.host.markLive(iframe);
+    fixture.host.refreshExtent(iframe, { width: 1_200, height: 4_300 });
+    const scroller = requireElement<HTMLElement>(fixture.preview, '.replica-replay-scroll');
+
+    fixture.host.followSourceScroll({
+      scrollTarget: 'document', scrollX: 0, scrollY: 900, maxScrollX: 0, maxScrollY: 1_800,
+    });
+    // Setting the panel scroller fires a scroll event of its own; the
+    // replica keeps following the source's half-way point as it grows.
+    scroller.dispatchEvent(new fixture.window.Event('scroll'));
+    fixture.host.refreshExtent(iframe, { width: 1_200, height: 5_700 });
+    expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, top: 2_500, behavior: 'auto' });
+
+    // A reader's own move is kept in replica pixels as the page grows.
+    scroller.scrollTop = 3_000;
+    scroller.dispatchEvent(new fixture.window.Event('scroll'));
+    fixture.host.refreshExtent(iframe, { width: 1_200, height: 6_700 });
+    expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, top: 3_000, behavior: 'auto' });
+    expect(scroller.scrollTop).toBe(3_000);
   });
 
   it('projects nested source progress into the replica primary viewport', () => {
