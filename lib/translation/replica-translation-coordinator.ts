@@ -50,6 +50,11 @@ export type ReplicaTextProjection = ReplicaProjectionBase & (
 export interface ReplicaTranslationSnapshot {
   readonly document: ReplicaSourceDocumentIdentity;
   readonly documentLanguage?: string;
+  /**
+   * Where `documentLanguage` comes from when the page does not declare it:
+   * a PDF's scanned pages, read by the language probe.
+   */
+  readonly documentLanguageSource?: 'scanned-pages';
   readonly replayLease: number;
   readonly records: readonly ReplicaSourceTextRecord[];
 }
@@ -64,12 +69,26 @@ export interface ReplicaTranslationSurface {
    * order.
    */
   translationOrder?(): Iterable<number> | undefined;
+  /**
+   * A surface that goes on reading text during a run (a PDF's scanned
+   * pages). A run that starts while it reads waits for its new records
+   * instead of ending, until it stops reading; a run that starts while it
+   * does not read is an ordinary run. Both or neither.
+   */
+  isReading?(): boolean;
+  /** Resolves at the surface's next text change; rejects when `signal` aborts. */
+  waitForText?(signal: AbortSignal): Promise<void>;
 }
 
 export interface ReplicaTranslationRunOptions
   extends CreateTranslationSessionOptions {
   readonly signal?: AbortSignal;
   readonly onProgress?: (completed: number, total: number) => void;
+  /**
+   * The run has translated all it has and waits for a reading surface to
+   * read more (a PDF's scanned pages).
+   */
+  readonly onWaitForText?: () => void;
 }
 
 export interface ReplicaTranslationRunResult {
@@ -221,6 +240,9 @@ export class ReplicaTranslationCoordinator {
     const snapshot = this.surface.snapshot();
     if (!snapshot) return this.#emptyResult();
     this.#replaceCurrentRecords(snapshot);
+    if (this.surface.isReading?.() && this.surface.waitForText) {
+      return this.#translateWhileReading(pair, requestedEpoch, snapshot, options);
+    }
     const pairKey = this.#pairKey!;
     let candidateCount = 0;
     // In the surface's order, so the queue's caps drop the least urgent.
@@ -237,6 +259,101 @@ export class ReplicaTranslationCoordinator {
       }, false);
     }
     return this.#drain(options.onProgress, candidateCount);
+  }
+
+  /**
+   * One run over a surface that is still reading text: what it has is
+   * translated, then the run waits for more and translates that too, until
+   * the surface stops reading. Every job carries the run's signal, progress
+   * counts on across the waits, and the result covers the whole run. Text
+   * read while a batch translates is queued as soon as the batch ends, so
+   * the run only waits when there is nothing new.
+   */
+  async #translateWhileReading(
+    pair: TranslationPair,
+    requestedEpoch: number,
+    first: ReplicaTranslationSnapshot,
+    options: ReplicaTranslationRunOptions,
+  ): Promise<ReplicaTranslationRunResult> {
+    const pairKey = this.#pairKey!;
+    // The run's own pair: a pair change ends the run, never re-targets it.
+    const pairSignal = this.#pairController.signal;
+    const queued = new Set<number>();
+    const counts = { total: 0, completed: 0, failed: 0, stale: 0, skipped: 0, overflow: 0 };
+    let result: ReplicaTranslationRunResult | undefined;
+    let snapshot = first;
+    const enqueueNew = (): number => {
+      let added = 0;
+      for (const record of this.#ordered(snapshot.records)) {
+        if (!isTranslatableRecord(record) || queued.has(record.nodeId)) continue;
+        queued.add(record.nodeId);
+        added += 1;
+        this.#enqueue({
+          record,
+          replayLease: snapshot.replayLease,
+          translationEpoch: this.#translationEpoch,
+          pairKey,
+          pairSignal,
+          ...(options.signal ? { signal: options.signal } : {}),
+        }, false);
+      }
+      return added;
+    };
+    let added = enqueueNew();
+    while (true) {
+      if (added > 0 || !result) {
+        const processedBefore = counts.completed + counts.failed + counts.stale +
+          counts.skipped + counts.overflow;
+        const onProgress = options.onProgress;
+        const drained = await this.#drain(
+          onProgress
+            ? (completed, total) => onProgress(processedBefore + completed, processedBefore + total)
+            : undefined,
+          added,
+        );
+        result = drained;
+        counts.total += drained.total;
+        counts.completed += drained.completed;
+        counts.failed += drained.failed;
+        counts.stale += drained.stale;
+        counts.skipped += drained.skipped;
+        counts.overflow += drained.overflow;
+        this.#assertRunCurrent(pair, requestedEpoch, options.signal);
+      }
+      // What the surface read meanwhile goes first; only nothing new waits.
+      const latest = this.surface.snapshot();
+      if (
+        !latest ||
+        latest.replayLease !== snapshot.replayLease ||
+        !sameSourceDocument(latest.document, snapshot.document)
+      ) break;
+      if (latest !== snapshot) {
+        snapshot = latest;
+        this.#replaceCurrentRecords(snapshot);
+      }
+      added = enqueueNew();
+      if (added > 0) continue;
+      if (!(this.surface.isReading?.() ?? false)) break;
+      // No await between the checks above and registering the wait, so no
+      // page can be read in between unnoticed.
+      const combined = combineAbortSignals(pairSignal, options.signal);
+      try {
+        const waiting = this.surface.waitForText!(combined.signal);
+        try {
+          options.onWaitForText?.();
+        } catch {
+          // Progress is shown on the side; the run goes on.
+        }
+        await waiting;
+      } catch (error) {
+        if (options.signal?.aborted) throw abortReason(options.signal, error);
+        throw error;
+      } finally {
+        combined.dispose();
+      }
+      this.#assertRunCurrent(pair, requestedEpoch, options.signal);
+    }
+    return { ...(result ?? this.#emptyResult()), ...counts };
   }
 
   handleSourceCommit(commit: ReplicaSourceCommit): void {

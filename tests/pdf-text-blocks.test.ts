@@ -11,7 +11,7 @@ import {
   type PdfTextItem,
   type PdfjsEnvironment,
 } from '../lib/pdf/pdfjs-runtime';
-import { joinLines, pdfTextBlocks } from '../lib/pdf/text-blocks';
+import { joinLines, pdfOcrBlocks, pdfTextBlocks, type PdfOcrLine } from '../lib/pdf/text-blocks';
 
 const vendorDirectory = resolve('vendor/pdfjs');
 const nodeEnvironment: PdfjsEnvironment = {
@@ -405,5 +405,91 @@ describe('pdfTextBlocks, the review rules', () => {
     ]), PAGE_TRANSFORM);
 
     expect(blocks.map((block) => block.text)).toEqual(['Real text']);
+  });
+});
+
+/** One OCR line box in bitmap pixels, at 2 pixels per point. */
+function ocrLine(text: string, x: number, y: number, width: number, height = 24): PdfOcrLine {
+  return { text, boundingBox: { x, y, width, height } };
+}
+
+describe('pdfOcrBlocks', () => {
+  it('turns bitmap pixels into page points and joins a paragraph', () => {
+    const blocks = pdfOcrBlocks([
+      ocrLine('Scanned pages carry', 100, 200, 400),
+      ocrLine('no text of their own.', 100, 232, 380, 18),
+      ocrLine('A second paragraph', 100, 330, 360),
+    ], 2, 612);
+    expect(blocks.map((block) => block.text)).toEqual([
+      'Scanned pages carry no text of their own.',
+      'A second paragraph',
+    ]);
+    const [first] = blocks;
+    expect(first!.box.left).toBeCloseTo(50);
+    expect(first!.box.top).toBeCloseTo(100);
+    expect(first!.box.width).toBeCloseTo(200);
+    expect(first!.lines).toHaveLength(2);
+    expect(first!.fontSize).toBeCloseTo(12);
+    expect(first!.fontFamily).toBe('sans-serif');
+    expect(first!.fontId).toBe('');
+  });
+
+  it('keeps two columns apart and OCR order', () => {
+    const blocks = pdfOcrBlocks([
+      ocrLine('Left column one', 80, 200, 300),
+      ocrLine('left column two', 80, 232, 300),
+      ocrLine('Right column one', 700, 200, 300),
+      ocrLine('right column two', 700, 232, 300),
+    ], 2, 612);
+    expect(blocks.map((block) => block.text)).toEqual([
+      'Left column one left column two',
+      'Right column one right column two',
+    ]);
+  });
+
+  it('starts a block at a list marker and rejoins a hyphenated word', () => {
+    const blocks = pdfOcrBlocks([
+      ocrLine('The pre-', 100, 200, 200),
+      ocrLine('liminary results.', 100, 232, 300),
+      ocrLine('• First point', 100, 264, 300),
+      ocrLine('• Second point', 100, 296, 300),
+    ], 2, 612);
+    expect(blocks.map((block) => block.text)).toEqual([
+      'The preliminary results.',
+      '• First point',
+      '• Second point',
+    ]);
+  });
+
+  it('joins CJK lines without a space and marks right-to-left lines', () => {
+    const cjk = pdfOcrBlocks([
+      ocrLine('日本語の', 100, 200, 200),
+      ocrLine('文章です。', 100, 232, 250),
+    ], 2, 612);
+    expect(cjk.map((block) => block.text)).toEqual(['日本語の文章です。']);
+    const hebrew = pdfOcrBlocks([
+      ocrLine('שלום עולם וכל', 300, 200, 400),
+      ocrLine('יושביו', 580, 232, 120),
+    ], 2, 612);
+    expect(hebrew).toHaveLength(1);
+    expect(hebrew[0]!.align).toBe('right');
+  });
+
+  it('leaves vertical lines as drawn, but not a single tall character', () => {
+    const blocks = pdfOcrBlocks([
+      // A Japanese column: much taller than wide.
+      ocrLine('縦書きの文章', 900, 100, 40, 400),
+      ocrLine('I', 100, 300, 8, 24),
+      ocrLine('Upright text', 100, 400, 300),
+    ], 2, 612);
+    expect(blocks.map((block) => block.text)).toEqual(['I', 'Upright text']);
+  });
+
+  it('leaves out empty lines and lines without area, and a bad scale', () => {
+    expect(pdfOcrBlocks([
+      ocrLine('   ', 100, 200, 200),
+      ocrLine('Flat', 100, 200, 200, 0),
+    ], 2, 612)).toEqual([]);
+    expect(pdfOcrBlocks([ocrLine('Text', 100, 200, 200)], 0, 612)).toEqual([]);
   });
 });

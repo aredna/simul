@@ -47,9 +47,10 @@ import type {
   ReplicaSourceCommit,
   ReplicaTranslationSnapshot,
 } from '../../lib/translation/replica-translation-coordinator';
-import type { TranslationPair } from '../../lib/translation-provider';
+import type { SupportedLanguage, TranslationPair } from '../../lib/translation-provider';
 import type { CaptureRequest, CompanionState } from './companion-state';
 import type { Currency } from './currency';
+import type { PdfScannedPagesState } from './pdf-controller';
 import type { TranslationDriver } from './translation-driver';
 
 /** The replica engine calls the pipeline makes. */
@@ -105,6 +106,17 @@ export interface PipelinePdf {
   /** The document the shown PDF's translation surface is for. */
   readonly textDocument: ReplicaSourceDocumentIdentity | undefined;
   close(): void;
+  /**
+   * Finds the language of the shown PDF's scanned pages with local OCR;
+   * `undefined` when it cannot tell or cannot read them.
+   */
+  probeLanguage(signal: AbortSignal): Promise<SupportedLanguage | undefined>;
+  /** The language the probe found; used when the PDF names none. */
+  setLanguageHint(language: SupportedLanguage | undefined): void;
+  /** Whether scanned pages remain that a run could read in `language`. */
+  scannedPagesState(language: SupportedLanguage | undefined): PdfScannedPagesState;
+  /** Why the shown PDF has nothing to translate. */
+  noTextStatus(language: SupportedLanguage | undefined): UiText;
 }
 
 /** Which surface translation projects onto: the mirror or the PDF view. */
@@ -126,6 +138,7 @@ export type PipelineTranslationDriver = Pick<
   | 'clearAutoImageLanguageForDifferentDocument'
   | 'clearAutoImageLanguageResolution'
   | 'reconcileAfterCommit'
+  | 'pageLanguageResolves'
 >;
 
 export interface CapturePipelineEnvironment {
@@ -322,6 +335,62 @@ export class CapturePipeline {
     );
   }
 
+  /**
+   * With From = Auto and no language in the shown PDF's /Lang or text, the
+   * scanned pages may tell: the language probe reads them (a run needs the
+   * language to read them) and the snapshot is published again with its
+   * answer. The controller keeps that answer, so asking again for the same
+   * PDF and reading methods reads nothing. Used when the PDF's text is read,
+   * when From becomes Auto and when Translated mode resumes.
+   */
+  async probePdfLanguage(signal: AbortSignal): Promise<void> {
+    const state = this.#state;
+    const { pdf, translationDriver } = this.environment;
+    const requested = state.snapshot;
+    if (
+      !requested ||
+      !pdf.shown ||
+      signal.aborted ||
+      state.preferences.sourceLanguage !== 'auto' ||
+      state.isLiveSourceOnlyMode ||
+      pdf.scannedPagesState(undefined) !== 'readable' ||
+      await translationDriver.pageLanguageResolves()
+    ) return;
+    const language = await pdf.probeLanguage(signal);
+    const published = state.snapshot;
+    if (
+      !language ||
+      signal.aborted ||
+      !pdf.shown ||
+      !published ||
+      published.replayLease !== requested.replayLease ||
+      !sameSourceDocument(published.document, requested.document)
+    ) return;
+    pdf.setLanguageHint(language);
+    this.adoptReadPdfText();
+  }
+
+  /**
+   * A translation run over a PDF may have read scanned pages into its
+   * surface; the published snapshot takes them, so later pair and language
+   * decisions see that text. Only for the same shown document and lease.
+   */
+  adoptReadPdfText(): void {
+    const state = this.#state;
+    const { pdf, surface } = this.environment;
+    const published = state.snapshot;
+    if (!pdf.shown || !published) return;
+    const latest = surface.snapshot();
+    if (
+      latest &&
+      latest !== published &&
+      latest.replayLease === published.replayLease &&
+      sameSourceDocument(latest.document, published.document)
+    ) {
+      state.snapshot = latest;
+    }
+  }
+
   /** The live stream died; rebuild once within the budget, else report. */
   handleReplicaLiveFailure(code: ReplicaDiagnosticCode): void {
     const state = this.#state;
@@ -463,7 +532,7 @@ export class CapturePipeline {
       state.followedPageIdentity = committedIdentity;
       await this.#prepareTranslation(work, committedIdentity, {
         sourceOnly: UI_STRINGS.statusLiveSourceKeepsUpdating,
-        noText: [UI_STRINGS.statusMirrorLiveWaiting, 'warning'],
+        noText: () => [UI_STRINGS.statusMirrorLiveWaiting, 'warning'],
       });
     } catch (error) {
       if (!captureCoordinator.isCurrent(work.generation)) return;
@@ -488,7 +557,7 @@ export class CapturePipeline {
     identity: CapturedPageIdentity,
     statuses: {
       readonly sourceOnly: UiText;
-      readonly noText: readonly [UiText, CompanionStatusTone];
+      readonly noText: () => readonly [UiText, CompanionStatusTone];
     },
   ): Promise<void> {
     const state = this.#state;
@@ -511,7 +580,7 @@ export class CapturePipeline {
       const accessWasRevoked = await this.environment.reconcileAutomaticAccess(identity.url);
       if (!captureCoordinator.isCurrent(work.generation)) return;
       if (accessWasRevoked) setStatus(UI_STRINGS.statusGrantRemovedWaiting, 'warning');
-      else setStatus(...statuses.noText);
+      else setStatus(...statuses.noText());
       return;
     }
     await translationDriver.checkAvailability(work.generation);
@@ -712,9 +781,14 @@ export class CapturePipeline {
       if (!current()) return;
       state.snapshot = surface.snapshot();
       if (!state.snapshot) return;
+      await this.probePdfLanguage(abortController.signal);
+      if (!current() || !state.snapshot) return;
       await this.#prepareTranslation(work, identity, {
         sourceOnly: UI_STRINGS.statusPdfSourceOnly,
-        noText: [UI_STRINGS.statusPdfNoText, 'warning'],
+        noText: () => [
+          pdf.noTextStatus(state.selectedPair()?.sourceLanguage ?? state.resolvedSourceLanguage),
+          'warning',
+        ],
       });
     } catch (error) {
       if (captureCoordinator.isCurrent(work.generation)) {

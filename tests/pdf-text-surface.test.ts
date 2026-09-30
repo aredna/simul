@@ -210,3 +210,120 @@ describe('PdfTextSurface', () => {
     expect(surface.hasText).toBe(false);
   });
 });
+
+describe('PdfTextSurface scanned pages', () => {
+  function mounted() {
+    const harness = setup();
+    harness.surface.mount(DOCUMENT, 4);
+    harness.surface.addPage({ index: 0, blocks: [block('Texte')] });
+    harness.surface.addPage({ index: 1, blocks: [], scanned: true });
+    harness.surface.addPage({ index: 2, blocks: [], scanned: true });
+    harness.surface.addPage({ index: 3, blocks: [], scanned: true });
+    harness.surface.markTextComplete();
+    return harness;
+  }
+
+  it('counts pages without text as scanned pages still to read', () => {
+    const { surface } = mounted();
+    expect(surface.scannedPages()).toEqual([1, 2, 3]);
+    expect(surface.unreadScannedPages()).toEqual([1, 2, 3]);
+    expect(surface.snapshot()?.records.map((record) => record.source)).toEqual(['Texte']);
+  });
+
+  it('does not count a page without blocks that pdf.js did not find empty', () => {
+    const { surface } = setup();
+    surface.mount(DOCUMENT, 3);
+    // Timed out or failed, and only rotated text: no blocks, not scanned.
+    surface.addPage({ index: 0, blocks: [] });
+    surface.addPage({ index: 1, blocks: [], scanned: false });
+    surface.addPage({ index: 2, blocks: [], scanned: true });
+    expect(surface.scannedPages()).toEqual([2]);
+  });
+
+  it('adds a scanned page\'s text with new ids, in reading order, and marks it read', () => {
+    const { surface, pages } = mounted();
+    const before = surface.snapshot();
+    surface.setScannedPage(2, [block('Numérisé')], 'fra');
+    surface.setScannedPage(1, [], 'fra');
+    const after = surface.snapshot();
+    expect(after).not.toBe(before);
+    expect(after?.replayLease).toBe(before?.replayLease);
+    expect(after?.records.map((record) => record.source)).toEqual(['Texte', 'Numérisé']);
+    expect(pages.get(2)?.map((each) => each.text)).toEqual(['Numérisé']);
+    expect(surface.unreadScannedPages()).toEqual([3]);
+    surface.readingPage = 2;
+    const ids = [...surface.translationOrder()];
+    expect(ids[0]).toBe(pages.get(2)![0]!.id);
+    // A page with text from pdf.js is not a scanned page.
+    surface.setScannedPage(0, [block('Autre')], 'fra');
+    expect(surface.snapshot()?.records.map((record) => record.source)).toEqual(['Texte', 'Numérisé']);
+  });
+
+  it('reads pages again in another OCR model group, and not in the same one', () => {
+    const { surface, pages } = mounted();
+    surface.setScannedPage(1, [block('Lu en anglais')], 'eng');
+    surface.setScannedPage(2, [block('Lu en français')], 'fra');
+    expect(surface.unreadScannedPages('fra')).toEqual([1, 3]);
+    surface.forgetScannedPages('fra');
+    expect(surface.unreadScannedPages()).toEqual([1, 3]);
+    expect(pages.get(1)).toEqual([]);
+    expect(surface.snapshot()?.records.map((record) => record.source)).toEqual([
+      'Texte',
+      'Lu en français',
+    ]);
+  });
+
+  it('uses a language hint only when the PDF names no language it knows', () => {
+    const { surface } = mounted();
+    surface.languageHint = 'ja';
+    expect(surface.snapshot()?.documentLanguage).toBe('ja');
+    expect(surface.snapshot()?.documentLanguageSource).toBe('scanned-pages');
+    const unknown = setup().surface;
+    unknown.mount(DOCUMENT, 1);
+    unknown.addPage({ index: 0, blocks: [], language: 'x-private', scanned: true });
+    unknown.markTextComplete();
+    expect(unknown.snapshot()?.documentLanguage).toBe('x-private');
+    unknown.languageHint = 'ru';
+    expect(unknown.snapshot()).toMatchObject({
+      documentLanguage: 'ru',
+      documentLanguageSource: 'scanned-pages',
+    });
+    const named = setup().surface;
+    named.mount(DOCUMENT, 1);
+    named.addPage({ index: 0, blocks: [], language: 'fr-FR', scanned: true });
+    named.markTextComplete();
+    named.languageHint = 'ja';
+    expect(named.snapshot()?.documentLanguage).toBe('fr-FR');
+    expect(named.snapshot()?.documentLanguageSource).toBeUndefined();
+  });
+
+  it('wakes a waiting run on each page read and when reading ends', async () => {
+    const { surface } = mounted();
+    const token = surface.beginReading();
+    expect(surface.isReading()).toBe(true);
+    const signal = new AbortController().signal;
+    const first = surface.waitForText(signal);
+    surface.setScannedPage(1, [block('Page deux')], 'fra');
+    await first;
+    const second = surface.waitForText(signal);
+    surface.endReading({});
+    expect(surface.isReading()).toBe(true);
+    surface.endReading(token);
+    await second;
+    expect(surface.isReading()).toBe(false);
+  });
+
+  it('stops a waiting run on abort, clear and a new mount', async () => {
+    const { surface } = mounted();
+    surface.beginReading();
+    const controller = new AbortController();
+    const aborted = surface.waitForText(controller.signal);
+    controller.abort();
+    await expect(aborted).rejects.toMatchObject({ name: 'AbortError' });
+    const cleared = surface.waitForText(new AbortController().signal);
+    surface.clear();
+    await cleared;
+    expect(surface.isReading()).toBe(false);
+    expect(surface.unreadScannedPages()).toEqual([]);
+  });
+});

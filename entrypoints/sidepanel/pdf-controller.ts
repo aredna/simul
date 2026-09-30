@@ -1,4 +1,6 @@
 import { UI_STRINGS } from '../../lib/companion-ui-strings';
+import type { ImageTextProviderId } from '../../lib/ocr/known-provider-ids';
+import type { OcrMinimumConfidence } from '../../lib/ocr/result-quality';
 import { PageAccessError } from '../../lib/page-identity';
 import { PdfFetchError } from '../../lib/pdf/pdf-fetch';
 import type {
@@ -6,10 +8,20 @@ import type {
   PdfPagePoints,
   PdfReadingPosition,
 } from '../../lib/pdf/pdf-layout';
+import {
+  canReadScannedPages,
+  pdfOcrRoute,
+  probeScannedLanguage,
+  readScannedPage,
+  type PdfOcrEnvironment,
+} from '../../lib/pdf/pdf-ocr';
+import { tesseractLanguageGroupFor } from '../../lib/ocr/providers/tesseract/language-catalog';
 import type { PdfPageText } from '../../lib/pdf/pdf-text-surface';
 import { PdfjsOpenError, type PdfDocumentHandle } from '../../lib/pdf/pdfjs-runtime';
-import { pdfTextBlocks } from '../../lib/pdf/text-blocks';
+import { pdfTextBlocks, type PdfTextBlock } from '../../lib/pdf/text-blocks';
 import type { ReplicaSourceDocumentIdentity } from '../../lib/replica/source-identity';
+import type { SupportedLanguage } from '../../lib/translation-provider';
+import { uiLanguageName, uiText, type UiText } from '../../lib/ui-text';
 import type { PdfViewSurface } from './pdf-view';
 
 /** Content-free: stages, counts, sizes and times only. */
@@ -27,7 +39,26 @@ export type PdfDiagnostic =
       readonly pagesWithText: number;
       readonly blocks: number;
       readonly milliseconds: number;
+    }
+  | {
+      readonly stage: 'ocr';
+      readonly pages: number;
+      readonly pagesWithText: number;
+      readonly failed: number;
+      /** The reading stopped before every page was read (cancel, close, error). */
+      readonly stopped: boolean;
+      readonly milliseconds: number;
     };
+
+/** How the last reading of scanned pages ended. */
+export type PdfScannedReadingOutcome =
+  | { readonly kind: 'complete' }
+  | { readonly kind: 'no-method' }
+  | { readonly kind: 'unsupported'; readonly language: SupportedLanguage }
+  | { readonly kind: 'failed'; readonly pages: number };
+
+/** Whether the shown PDF's unread scanned pages can be read now, and if not, why. */
+export type PdfScannedPagesState = 'readable' | 'none' | 'no-method' | 'unsupported';
 
 type PdfLoadStep = 'download' | 'open' | 'pages' | 'show';
 
@@ -40,6 +71,20 @@ export interface PdfControllerSurface {
   readonly document: ReplicaSourceDocumentIdentity | undefined;
   readonly hasText: boolean;
   readingPage: number;
+  languageHint: string | undefined;
+  unreadScannedPages(group?: string): number[];
+  setScannedPage(index: number, blocks: readonly PdfTextBlock[], group: string): void;
+  forgetScannedPages(group: string): void;
+  beginReading(): object;
+  endReading(token: object): void;
+}
+
+/** Local OCR for scanned pages; without it, scanned pages are never read. */
+export interface PdfControllerOcr {
+  readonly environment: PdfOcrEnvironment;
+  /** The enabled, runtime-ready pixel reading methods, in the saved order. */
+  readonly providerOrder: () => readonly ImageTextProviderId[];
+  readonly minimumConfidence: () => OcrMinimumConfidence;
 }
 
 export interface PdfControllerDependencies {
@@ -60,6 +105,7 @@ export interface PdfControllerDependencies {
   readonly priorityDelayMs?: number;
   /** How long one page's text may take; a slower page counts as no text. */
   readonly pageTextTimeoutMs?: number;
+  readonly ocr?: PdfControllerOcr;
 }
 
 /**
@@ -97,6 +143,19 @@ export class PdfController {
   #pages: PageSizes | undefined;
   /** The running text reading; replaced or cleared to stop it. */
   #reading: object | undefined;
+  /** Stops the running scanned-page reading. */
+  #scannedStop: AbortController | undefined;
+  /** Stops the running language probe; a run settling never stops it. */
+  #probeStop: AbortController | undefined;
+  /** What the probe found for the shown PDF with the reading methods it used. */
+  #probed:
+    | {
+        readonly document: PdfDocumentHandle;
+        readonly key: string;
+        readonly language: SupportedLanguage | undefined;
+      }
+    | undefined;
+  #scannedOutcome: PdfScannedReadingOutcome | undefined;
   #priorityTimer: ReturnType<typeof setTimeout> | undefined;
   // Memory only: where the reader was in recently shown PDFs, so a Refresh
   // or a return to the tab opens at the same place.
@@ -160,6 +219,9 @@ export class PdfController {
       const position = remembered?.pageCount === pageSizes.length ? remembered.position : undefined;
       const previous = this.#document;
       this.#reading = undefined;
+      this.stopScannedReading();
+      this.#stopProbe();
+      this.#scannedOutcome = undefined;
       try {
         view.mount(opened, pageSizes, position);
         this.#document = opened;
@@ -263,15 +325,251 @@ export class PdfController {
     return { hasText: surface.hasText };
   }
 
-  /** Destroys the shown document and empties and hides the view. Idempotent. */
+  /**
+   * Reads the shown PDF's unread scanned pages with local OCR in `language`,
+   * one at a time: the reading page first, then the nearest unread page
+   * after the page being read, else before it, so it follows the reader.
+   * Pages read in another OCR model group are read again (and forgotten even
+   * when this language cannot be read). While it runs the surface is
+   * reading, so a translation run waits for each page. A page that cannot be
+   * drawn is marked read with no text, so later runs do not draw it again;
+   * a page whose recognition failed stays unread for the next run. Resolves
+   * with the outcome; rejects with an `AbortError` when `signal` aborts, the
+   * PDF closes, another is shown or `stopScannedReading` is called.
+   */
+  async readScannedPages(
+    language: SupportedLanguage,
+    signal: AbortSignal,
+    onProgress?: (read: number, total: number) => void,
+  ): Promise<PdfScannedReadingOutcome> {
+    const { surface, ocr } = this.#dependencies;
+    const document = this.#document;
+    const pages = this.#pages;
+    const sourceDocument = surface?.document;
+    this.stopScannedReading();
+    this.#scannedOutcome = undefined;
+    if (!surface || !ocr || !document || !pages || !sourceDocument || signal.aborted) {
+      throw abortError();
+    }
+    const resolved = pdfOcrRoute(language, ocr.providerOrder(), ocr.minimumConfidence());
+    if (resolved.status !== 'ready') {
+      // Text read with another model must not be translated as this language.
+      surface.forgetScannedPages(tesseractLanguageGroupFor(language) ?? '');
+      const outcome: PdfScannedReadingOutcome = surface.unreadScannedPages().length === 0
+        ? { kind: 'complete' }
+        : resolved.status === 'no-method'
+          ? { kind: 'no-method' }
+          : { kind: 'unsupported', language };
+      this.#scannedOutcome = outcome;
+      return outcome;
+    }
+    surface.forgetScannedPages(resolved.group);
+    const unread = new Set(surface.unreadScannedPages(resolved.group));
+    if (unread.size === 0) {
+      const outcome: PdfScannedReadingOutcome = { kind: 'complete' };
+      this.#scannedOutcome = outcome;
+      return outcome;
+    }
+    const stop = new AbortController();
+    this.#scannedStop = stop;
+    const reading = AbortSignal.any([signal, stop.signal]);
+    const token = surface.beginReading();
+    const now = this.#dependencies.now ?? (() => performance.now());
+    const started = now();
+    const total = unread.size;
+    const counts = { pages: 0, pagesWithText: 0, failed: 0 };
+    let stopped = true;
+    const current = () =>
+      !reading.aborted && this.#document === document && surface.document === sourceDocument;
+    try {
+      reportProgress(onProgress, 0, total);
+      while (unread.size > 0) {
+        const index = nextPageToRead(unread, surface.readingPage);
+        unread.delete(index);
+        const size = pages.sizes[index];
+        const result = size
+          ? await readScannedPage(
+              document,
+              { index, size, document: sourceDocument, route: resolved.route },
+              ocr.environment,
+              reading,
+            )
+          : { status: 'unreadable' as const };
+        if (!current()) throw abortError();
+        counts.pages += 1;
+        if (result.status === 'failed' || result.status === 'unreadable') counts.failed += 1;
+        if (result.status !== 'failed') {
+          // Read, without images, or not drawable: it is not read again.
+          const blocks = result.status === 'read' ? result.blocks : [];
+          if (blocks.length > 0) counts.pagesWithText += 1;
+          try {
+            surface.setScannedPage(index, blocks, resolved.group);
+          } catch {
+            // A page the view could not take does not stop the rest.
+          }
+        }
+        reportProgress(onProgress, counts.pages, total);
+      }
+      stopped = false;
+      // Known before the surface stops reading, so the run's end can say it.
+      const outcome: PdfScannedReadingOutcome = counts.failed > 0
+        ? { kind: 'failed', pages: counts.failed }
+        : { kind: 'complete' };
+      this.#scannedOutcome = outcome;
+      return outcome;
+    } catch (error) {
+      if (isAbortError(error) || reading.aborted) throw abortError();
+      throw error;
+    } finally {
+      if (this.#scannedStop === stop) this.#scannedStop = undefined;
+      this.#report({
+        stage: 'ocr',
+        ...counts,
+        stopped,
+        milliseconds: Math.max(0, Math.round(now() - started)),
+      });
+      surface.endReading(token);
+    }
+  }
+
+  /**
+   * Finds the language of the shown PDF's scanned pages with the image
+   * language probe, from the reading page on. `undefined` when it cannot
+   * tell, the pages cannot be read, or it was stopped. It runs at most once
+   * per shown PDF and set of reading methods; asking again gives the same
+   * answer without reading anything.
+   */
+  async probeLanguage(signal: AbortSignal): Promise<SupportedLanguage | undefined> {
+    const { surface, ocr } = this.#dependencies;
+    const document = this.#document;
+    const pages = this.#pages;
+    const sourceDocument = surface?.document;
+    if (!surface || !ocr || !document || !pages || !sourceDocument || signal.aborted) {
+      return undefined;
+    }
+    const providerOrder = ocr.providerOrder();
+    const minimumConfidence = ocr.minimumConfidence();
+    const key = JSON.stringify([providerOrder, minimumConfidence]);
+    const probed = this.#probed;
+    if (probed?.document === document && probed.key === key) return probed.language;
+    const unread = surface.unreadScannedPages();
+    if (!canReadScannedPages(providerOrder) || unread.length === 0) return undefined;
+    const start = surface.readingPage;
+    const ordered = [
+      ...unread.filter((index) => index >= start),
+      ...unread.filter((index) => index < start).reverse(),
+    ];
+    this.#stopProbe();
+    const stop = new AbortController();
+    this.#probeStop = stop;
+    try {
+      const language = await probeScannedLanguage(
+        document,
+        {
+          pages: ordered.flatMap((index) => {
+            const size = pages.sizes[index];
+            return size ? [{ index, size }] : [];
+          }),
+          document: sourceDocument,
+          providerOrder,
+          minimumConfidence,
+        },
+        ocr.environment,
+        AbortSignal.any([signal, stop.signal]),
+      );
+      if (this.#document !== document || stop.signal.aborted || signal.aborted) return undefined;
+      this.#probed = { document, key, language };
+      return language;
+    } catch {
+      // Stopped: nothing is remembered, so the next ask probes again.
+      return undefined;
+    } finally {
+      if (this.#probeStop === stop) this.#probeStop = undefined;
+    }
+  }
+
+  /** Stops a running scanned-page reading; a running probe goes on. */
+  stopScannedReading(): void {
+    const stop = this.#scannedStop;
+    this.#scannedStop = undefined;
+    stop?.abort();
+  }
+
+  #stopProbe(): void {
+    const stop = this.#probeStop;
+    this.#probeStop = undefined;
+    stop?.abort();
+  }
+
+  /** The language the probe found; used only when the PDF names none. */
+  setLanguageHint(language: SupportedLanguage | undefined): void {
+    const surface = this.#dependencies.surface;
+    if (surface && this.#document) surface.languageHint = language;
+  }
+
+  /**
+   * Whether the shown PDF has scanned pages still to read in `language`,
+   * and whether they can be read: a pixel reading method must be on and the
+   * language must have an OCR model. With no language yet, unread pages
+   * count as readable; the run that reads them needs a language anyway.
+   */
+  scannedPagesState(language: SupportedLanguage | undefined): PdfScannedPagesState {
+    const { surface, ocr } = this.#dependencies;
+    if (!surface || !this.#document || !surface.document) return 'none';
+    const providerOrder = ocr?.providerOrder() ?? [];
+    if (!ocr || language === undefined) {
+      if (surface.unreadScannedPages().length === 0) return 'none';
+      return canReadScannedPages(providerOrder) ? 'readable' : 'no-method';
+    }
+    const resolved = pdfOcrRoute(language, providerOrder, ocr.minimumConfidence());
+    // Pages read with another model count as unread: a run would forget them.
+    const unread = surface.unreadScannedPages(
+      resolved.status === 'ready' ? resolved.group : tesseractLanguageGroupFor(language) ?? '',
+    );
+    if (unread.length === 0) return 'none';
+    return resolved.status === 'ready' ? 'readable' : resolved.status;
+  }
+
+  /**
+   * Why the last reading left scanned pages as they were, for the status at
+   * the end of a translation run; `undefined` when it read them all.
+   */
+  scannedPagesNote(): UiText | undefined {
+    const outcome = this.#scannedOutcome;
+    if (!outcome || outcome.kind === 'complete') return undefined;
+    if (outcome.kind === 'no-method') return UI_STRINGS.statusPdfScannedNoMethod;
+    if (outcome.kind === 'unsupported') {
+      return uiText(UI_STRINGS.statusPdfScannedUnsupported, uiLanguageName(outcome.language));
+    }
+    return uiText(UI_STRINGS.statusPdfScannedFailed, outcome.pages);
+  }
+
+  /**
+   * The status for a shown PDF with nothing to translate: its scanned pages
+   * cannot be read (and why), or it has no text at all.
+   */
+  noTextStatus(language: SupportedLanguage | undefined): UiText {
+    const state = this.scannedPagesState(language);
+    if (state === 'no-method') return UI_STRINGS.statusPdfScannedNoMethod;
+    if (state === 'unsupported' && language) {
+      return uiText(UI_STRINGS.statusPdfScannedUnsupported, uiLanguageName(language));
+    }
+    return UI_STRINGS.statusPdfNoText;
+  }
+
   /** The translation surface's document, while its PDF is shown. */
   get textDocument(): ReplicaSourceDocumentIdentity | undefined {
     return this.#document ? this.#dependencies.surface?.document : undefined;
   }
 
+  /** Destroys the shown document and empties and hides the view. Idempotent. */
   close(): void {
     this.#rememberPosition();
     this.#reading = undefined;
+    this.stopScannedReading();
+    this.#stopProbe();
+    this.#probed = undefined;
+    this.#scannedOutcome = undefined;
     if (this.#priorityTimer !== undefined) clearTimeout(this.#priorityTimer);
     this.#priorityTimer = undefined;
     this.#pages = undefined;
@@ -370,11 +668,25 @@ async function readPageText(
       index,
       blocks: pdfTextBlocks(content, transform, pageWidth),
       language: content.lang,
+      // No text at all, not even rotated or vertical text: a scanned page.
+      ...(content.items.every((item) => item.str.trim() === '') ? { scanned: true } : {}),
     };
   } catch {
     return { index, blocks: [] };
   } finally {
     if (timer !== undefined) clearTimeout(timer);
+  }
+}
+
+function reportProgress(
+  onProgress: ((read: number, total: number) => void) | undefined,
+  read: number,
+  total: number,
+): void {
+  try {
+    onProgress?.(read, total);
+  } catch {
+    // Progress is shown on the side; reading goes on.
   }
 }
 

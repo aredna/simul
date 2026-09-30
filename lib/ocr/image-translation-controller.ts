@@ -23,11 +23,11 @@ import type {
   TranslationProvider,
   TranslationSession,
 } from '../translation-provider';
-import { canonicalizeLanguageTag } from '../translation-provider';
 import { autoImageLanguageConfigurationKey } from '../language-detection';
 import {
-  AUTO_LANGUAGE_PROBE_MINIMUM_CONFIDENCE,
   AutoImageLanguageProbe,
+  autoLanguageProbeDetectedLanguage,
+  autoLanguageProbeMinimumConfidence,
   createAutoLanguageProbeSampleIdentity,
   MAX_AUTO_LANGUAGE_PROBE_ATTEMPTS,
   MAX_AUTO_LANGUAGE_PROBE_IMAGES,
@@ -5233,15 +5233,7 @@ export class ImageTranslationController {
       }
       if (cached) this.#languageDetections.delete(cacheKey);
       const detected = await raceAbortPromise(detectLanguage(sample), signal);
-      const candidate = detected.isReliable
-        ? [...detected.languages]
-          .sort((left, right) => right.percentage - left.percentage)
-          .find((entry) => entry.percentage >= 70 &&
-            canonicalizeLanguageTag(entry.language))
-        : undefined;
-      const language = candidate
-        ? canonicalizeLanguageTag(candidate.language)
-        : undefined;
+      const language = autoLanguageProbeDetectedLanguage(detected);
       this.#languageDetections.set(cacheKey, Object.freeze({
         ...(language ? { language } : {}),
         expiresAt: this.#now() + IMAGE_RESULT_CACHE_TTL_MS,
@@ -6345,15 +6337,6 @@ function originOcrEvidenceWeight(
           0,
         )
       : 0) + qualityPolicyIdentity.length * 2;
-}
-
-function autoLanguageProbeMinimumConfidence(
-  configured: OcrMinimumConfidence | undefined,
-): OcrMinimumConfidence {
-  const repaired = repairOcrMinimumConfidence(configured);
-  return repaired < AUTO_LANGUAGE_PROBE_MINIMUM_CONFIDENCE
-    ? AUTO_LANGUAGE_PROBE_MINIMUM_CONFIDENCE
-    : repaired;
 }
 
 function topPageSourceScopeIdentity(

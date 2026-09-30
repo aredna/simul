@@ -10,6 +10,7 @@ import type {
   ReplicaTextProjection,
   ReplicaTranslationSnapshot,
 } from '../translation/replica-translation-coordinator';
+import { canonicalizeLanguageTag } from '../translation-provider';
 import type { PdfTextBlock } from './text-blocks';
 
 /** A text block with the id its translation record carries. */
@@ -30,6 +31,12 @@ export interface PdfPageText {
   readonly blocks: readonly PdfTextBlock[];
   /** The document's /Lang, as pdf.js reports it with each page. */
   readonly language?: string | null;
+  /**
+   * pdf.js read the page and it has no text at all: a scanned page, which
+   * OCR may read. Not set for a page whose read failed or timed out, or
+   * whose only text is rotated or vertical.
+   */
+  readonly scanned?: boolean;
 }
 
 // A /Lang longer than this is not a language tag.
@@ -57,6 +64,15 @@ export class PdfTextSurface implements ReplicaProjectionSurface {
   #textComplete = false;
   #context: ReplicaProjectionContext = { translationEpoch: 0, pairKey: undefined };
   #readingPage = 0;
+  /**
+   * Pages whose text read found nothing (scanned pages), with the OCR model
+   * group they were read in; `undefined` while unread.
+   */
+  readonly #scanned = new Map<number, string | undefined>();
+  #languageHint: string | undefined;
+  /** The running scanned-page reader, if any. */
+  #reading: object | undefined;
+  readonly #waiters = new Set<() => void>();
 
   constructor(sink: PdfTextSink) {
     this.#sink = sink;
@@ -94,6 +110,116 @@ export class PdfTextSurface implements ReplicaProjectionSurface {
     this.#reset();
   }
 
+  /**
+   * The source language found some other way (the scanned-page probe), used
+   * only when the PDF names no language of its own.
+   */
+  set languageHint(language: string | undefined) {
+    const hint = language?.trim();
+    const next = hint && hint.length <= MAX_LANGUAGE_LENGTH ? hint : undefined;
+    if (next === this.#languageHint) return;
+    this.#languageHint = next;
+    this.#snapshot = undefined;
+  }
+
+  get languageHint(): string | undefined {
+    return this.#languageHint;
+  }
+
+  /** Scanned pages (0-based): pages whose text read found no text. */
+  scannedPages(): number[] {
+    return [...this.#scanned.keys()].sort((left, right) => left - right);
+  }
+
+  /**
+   * Scanned pages still to read: never read, or, with `group`, read in
+   * another OCR model group.
+   */
+  unreadScannedPages(group?: string): number[] {
+    const unread: number[] = [];
+    for (const [index, readIn] of this.#scanned) {
+      if (readIn === undefined || (group !== undefined && readIn !== group)) unread.push(index);
+    }
+    return unread.sort((left, right) => left - right);
+  }
+
+  /**
+   * A scanned page's recognised text, read in the OCR model group `group`.
+   * It replaces whatever the page held, with new block ids, and goes to the
+   * view at once; a page with no text is read all the same. Wakes a run
+   * waiting for text.
+   */
+  setScannedPage(index: number, blocks: readonly PdfTextBlock[], group: string): void {
+    if (!this.#document || !this.#scanned.has(index)) return;
+    try {
+      this.#replacePage(index, blocks);
+    } finally {
+      // The view's failure does not undo the text.
+      this.#scanned.set(index, group);
+      this.#wake();
+    }
+  }
+
+  /**
+   * Scanned pages read in another OCR model group than `group` are unread
+   * again, and their text and translations leave the view.
+   */
+  forgetScannedPages(group: string): void {
+    for (const [index, readIn] of this.#scanned) {
+      if (readIn === undefined || readIn === group) continue;
+      this.#scanned.set(index, undefined);
+      try {
+        this.#replacePage(index, []);
+      } catch {
+        // The view's failure does not undo it.
+      }
+    }
+  }
+
+  /** Marks a scanned-page reader running; a translation run waits for it. */
+  beginReading(): object {
+    const token = {};
+    this.#reading = token;
+    this.#wake();
+    return token;
+  }
+
+  /** The reader `token` has stopped; a waiting run goes on. */
+  endReading(token: object): void {
+    if (this.#reading !== token) return;
+    this.#reading = undefined;
+    this.#wake();
+  }
+
+  /** Whether scanned pages are being read, so more text may come. */
+  isReading(): boolean {
+    return this.#reading !== undefined;
+  }
+
+  /**
+   * Resolves at the next change a translation run cares about: a scanned
+   * page read, reading ended, or the document mounted or cleared. Rejects
+   * when `signal` aborts.
+   */
+  waitForText(signal: AbortSignal): Promise<void> {
+    return new Promise<void>((resolve, reject) => {
+      if (signal.aborted) {
+        reject(abortReason(signal));
+        return;
+      }
+      const abort = () => {
+        this.#waiters.delete(wake);
+        reject(abortReason(signal));
+      };
+      const wake = () => {
+        signal.removeEventListener('abort', abort);
+        resolve();
+      };
+      this.#waiters.add(wake);
+      signal.addEventListener('abort', abort, { once: true });
+    });
+  }
+
   /** The page (0-based) at the top of the view; translation starts there. */
   set readingPage(index: number) {
     if (Number.isInteger(index) && index >= 0) this.#readingPage = index;
@@ -110,11 +236,11 @@ export class PdfTextSurface implements ReplicaProjectionSurface {
   /**
    * Adds a page's text and hands it to the view. A page already added, or
    * outside the document, is ignored. The view's failure does not undo the
-   * text.
+   * text. A page pdf.js found no text on at all is a scanned page, which
+   * OCR may read later.
    */
   addPage(page: PdfPageText): void {
-    const document = this.#document;
-    if (!document) return;
+    if (!this.#document) return;
     if (!Number.isInteger(page.index) || page.index < 0 || page.index >= this.#pageCount) return;
     if (this.#pages[page.index]) return;
     if (this.#language === undefined && typeof page.language === 'string') {
@@ -123,20 +249,10 @@ export class PdfTextSurface implements ReplicaProjectionSurface {
         this.#language = language;
       }
     }
-    const blocks = page.blocks.map((block): PdfSurfaceBlock => ({ ...block, id: this.#nextId++ }));
-    this.#pages[page.index] = blocks;
-    for (const block of blocks) {
-      if (block.text.trim().length === 0) continue;
-      this.#records.set(block.id, {
-        document,
-        nodeId: block.id,
-        nodeType: 3,
-        revision: 1,
-        source: block.text,
-      });
+    if (page.scanned === true && page.blocks.length === 0) {
+      this.#scanned.set(page.index, undefined);
     }
-    this.#snapshot = undefined;
-    this.#sink.setPageText(page.index, blocks);
+    this.#replacePage(page.index, page.blocks);
   }
 
   snapshot(): ReplicaTranslationSnapshot | undefined {
@@ -150,9 +266,16 @@ export class PdfTextSurface implements ReplicaProjectionSurface {
           if (record) records.push(record);
         }
       }
+      // The PDF's own /Lang wins, unless it is not a language Simul knows.
+      const declared = this.#language && canonicalizeLanguageTag(this.#language)
+        ? this.#language
+        : undefined;
+      const hinted = declared === undefined ? this.#languageHint : undefined;
+      const language = declared ?? hinted ?? this.#language;
       this.#snapshot = Object.freeze({
         document,
-        ...(this.#language ? { documentLanguage: this.#language } : {}),
+        ...(language ? { documentLanguage: language } : {}),
+        ...(hinted ? { documentLanguageSource: 'scanned-pages' as const } : {}),
         replayLease: this.#replayLease,
         records: Object.freeze(records),
       });
@@ -208,6 +331,33 @@ export class PdfTextSurface implements ReplicaProjectionSurface {
     return undefined;
   }
 
+  /** Gives the page `blocks` with new ids, in place of what it held. */
+  #replacePage(index: number, blocks: readonly PdfTextBlock[]): void {
+    const document = this.#document;
+    if (!document) return;
+    for (const block of this.#pages[index] ?? []) this.#records.delete(block.id);
+    const placed = blocks.map((block): PdfSurfaceBlock => ({ ...block, id: this.#nextId++ }));
+    this.#pages[index] = placed;
+    for (const block of placed) {
+      if (block.text.trim().length === 0) continue;
+      this.#records.set(block.id, {
+        document,
+        nodeId: block.id,
+        nodeType: 3,
+        revision: 1,
+        source: block.text,
+      });
+    }
+    this.#snapshot = undefined;
+    this.#sink.setPageText(index, placed);
+  }
+
+  #wake(): void {
+    const waiters = [...this.#waiters];
+    this.#waiters.clear();
+    for (const wake of waiters) wake();
+  }
+
   *#pageIds(index: number): Generator<number> {
     for (const block of this.#pages[index] ?? []) {
       if (this.#records.has(block.id)) yield block.id;
@@ -223,7 +373,18 @@ export class PdfTextSurface implements ReplicaProjectionSurface {
     this.#snapshot = undefined;
     this.#textComplete = false;
     this.#readingPage = 0;
+    this.#scanned.clear();
+    this.#languageHint = undefined;
+    this.#reading = undefined;
+    this.#wake();
   }
+}
+
+function abortReason(signal: AbortSignal): unknown {
+  const reason = signal.reason as { name?: unknown } | undefined;
+  return reason?.name === 'AbortError'
+    ? reason
+    : new DOMException('Waiting for the PDF text was cancelled.', 'AbortError');
 }
 
 /** The target of a pair key such as `fr>en`. */

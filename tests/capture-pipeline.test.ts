@@ -1,5 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
-import { englishUiText } from '../lib/ui-text';
+import { englishUiText, type UiText } from '../lib/ui-text';
+import { UI_STRINGS } from '../lib/companion-ui-strings';
+import type { PdfScannedPagesState } from '../entrypoints/sidepanel/pdf-controller';
 
 import {
   CapturePipeline,
@@ -104,6 +106,10 @@ function setup(options: {
       pdfDocument = undefined;
       pdfPublished = undefined;
     }),
+    probeLanguage: vi.fn(async () => undefined),
+    setLanguageHint: vi.fn(),
+    scannedPagesState: vi.fn((): PdfScannedPagesState => 'none'),
+    noTextStatus: vi.fn((): UiText => UI_STRINGS.statusPdfNoText),
   };
   const coordinator = { selectPair: vi.fn(), handleSourceCommit: vi.fn() };
   const imageController = {
@@ -121,6 +127,7 @@ function setup(options: {
     clearAutoImageLanguageForDifferentDocument: vi.fn(),
     clearAutoImageLanguageResolution: vi.fn(),
     reconcileAfterCommit: vi.fn(async () => undefined),
+    pageLanguageResolves: vi.fn(async () => true),
   };
   const statuses: Array<[string, string | undefined]> = [];
   const events: string[] = [];
@@ -416,7 +423,7 @@ describe('CapturePipeline PDFs', () => {
     });
     harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
     await vi.waitFor(() => expect(harness.statuses.at(-1)).toEqual([
-      'This PDF has no text to translate. It may be scanned.',
+      'No text was found in this PDF.',
       'warning',
     ]));
     expect(harness.translationDriver.checkAvailability).not.toHaveBeenCalled();

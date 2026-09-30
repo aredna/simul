@@ -58,10 +58,27 @@ scroll elsewhere and translation continues from there. Auto-detect uses the
 PDF's own language tag when it has one, otherwise its text. Simul reads all
 of a PDF's text first, after its pages show ("Reading the PDF…"), so
 **Translate page** turns on a moment later (about half a second for 300
-pages). Translations appear on a page once it is drawn.
+pages), or after the scanned-page language check below. Translations appear
+on a page once it is drawn.
 
-- Scanned pages (images of text) are not translated yet. A PDF with no text
-  says so. Rotated or vertical text stays as it is.
+- Scanned pages (images of text) are read with Simul's on-device OCR, but
+  only while translating: **Translate page** or automatic translation reads
+  them, the page you are reading first, and **Cancel** stops the reading
+  too. Text pages never wait for scanned ones. Showing a PDF, Live source
+  only, or From and To in the same language read no scanned page, with one
+  exception: with Auto-detect and no language tag or text, Simul reads up to
+  three scanned pages to find the language (for about 20 seconds at most)
+  when the PDF's text has been read, when From becomes Auto-detect, or when
+  Live source only ends, once per PDF. The OCR draws each page itself (at
+  most 4 megapixels and 300 dpi), so it needs no image access, and the
+  toolbar's **OCR** switch does not apply; the image reading methods under
+  **Advanced & experimental** do, and Tesseract.js must be on (Chrome's text
+  detector alone cannot read a page). Only pages pdf.js finds no text on at
+  all are read; a page with some text (a header over a scan) is not. If
+  Tesseract.js is off, the language has no OCR model, or a page could not be
+  read, the status says so; a page that cannot be drawn is not tried again.
+  A PDF with no text at all says "No text was found in this PDF." Rotated or
+  vertical text stays as it is, on scanned pages too.
 - Screen readers read each page ("Page 2 of 10") with its text, translated
   where a translation shows.
 - The panel scrolls on its own; it does not follow Chrome's PDF viewer.
@@ -150,7 +167,10 @@ On a PDF tab Simul makes one extra request: it downloads the PDF's own URL,
 which the tab has already loaded. Chrome keeps the extension's cache separate
 from the tab's, so this is a second download of the same file; Simul's own
 copy is reused while it is fresh. The site's cookies go along, as they did for
-the tab. Simul requests nothing else for a PDF.
+the tab. Simul requests nothing else for a PDF. Scanned pages are read on
+the computer, by the same local OCR as images: as for an image, each page's
+drawing goes to the local OCR host through extension-origin temporary
+storage, kept at most two minutes, and the recognized text stays in memory.
 
 Diagnostics contain bounded stages, dimensions, and counts. They do not log
 page text, recognized text, URLs, pixels, hashes, DOM IDs, or attribute values.

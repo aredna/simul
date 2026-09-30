@@ -587,6 +587,70 @@ shell and the mirror has nothing to copy (D103).
   for a later frame, and translations for pages not drawn yet fit when
   drawn. Every page's layer is built as its text is read, whether drawn or
   not; keeping only nearby pages' layers is deferred.
+- **Scanned pages (D106).** A page pdf.js read and found no text item on at
+  all (not a failed or timed-out read, not a page of only rotated or
+  vertical text) is a scanned page of the surface, unread until a
+  translation run reads it.
+  OCR runs only inside a run: the driver's `beginTranslationRun` hook starts
+  `PdfController.readScannedPages(sourceLanguage, runSignal)` just before
+  `translateCurrent`, and `onTranslationSettled` stops it. It reads one page
+  at a time with `nextPageToRead` from the reading page, so it follows the
+  reader. `lib/pdf/pdf-ocr.ts` skips a page that paints no image, draws the
+  page with pdf.js into an `OffscreenCanvas` at no more than 4 MP and
+  300 dpi, encodes it with `renderImageFilePixels` (identity placement: PNG,
+  SHA-256, preprocessing version), and sends it to a PDF-owned
+  `ImageRecognitionCoordinator` (memory-only cache, reset epoch from the
+  preferences, cleared with the image caches and kept for one top-page
+  origin at a time) with the page number as the
+  node id and the PDF's document identity. The route is the enabled,
+  runtime-ready pixel methods in the saved order
+  (`usablePixelProviderOrder()`, no grant gate) and the Tesseract group of
+  the run's source language; Tesseract is required (`canReadScannedPages`:
+  TextDetector alone has no confidence and passes nothing), and no method or
+  no group leaves the pages as they are with a note (pages read in another
+  group are forgotten first). Checking for images and drawing have a 60 s
+  deadline; a page that cannot be drawn is `unreadable`, marked read with no
+  text so it is not drawn again, while a recognition failure stays unread
+  for the next run. A busy host is asked once more. The recognised lines
+  go through `pdfOcrBlocks` (`lib/pdf/text-blocks.ts`): the same line and
+  block rules, sizes from the line boxes with a 40% size tolerance, the
+  tallest line as the font size, direction from the script, an empty font
+  id (a regular face); a line much taller than wide (vertical text) stays as
+  drawn. `PdfTextSurface.setScannedPage` gives the page new
+  block ids; pages read in another OCR model group are read again, and a
+  target-only change keeps them.
+- **The run waits for them.** While the reader runs, the surface
+  `isReading()`, and a run that starts while it reads (through the router's
+  forwarding) loops in the coordinator: translate what is queued, wait on
+  `waitForText(runSignal + pairSignal)`, enqueue the records not yet queued
+  in this run in surface order, until reading ends. Every job carries the
+  run's signal; progress counts on across the waits; before waiting it
+  queues whatever the surface read during the last batch, and it ends when
+  its pair changes. The result sums the
+  whole run, so "The PDF is translated." means every page. A run that
+  starts while the surface does not read is the ordinary run, and the
+  mirror never reads. Text blocks translate while the offscreen host reads
+  the next page. After the run the published snapshot takes the pages it
+  read (`CapturePipeline.adoptReadPdfText`), so pair and language decisions see
+  that text. The driver's field count includes readable unread scanned
+  pages (`hasUnreadText`), so Translate page is on for a fully scanned PDF
+  and stays on for a page OCR failed to read.
+- **Auto on a scanned PDF.** `/Lang` first, then the text. When neither gives
+  a language and scanned pages can be read, `CapturePipeline.probePdfLanguage`
+  runs `PdfController.probeLanguage` before the translation tail, and again
+  when From becomes Auto or Translated mode resumes (the driver's
+  `probeScannedLanguage` hook; the controller keeps its answer per PDF and
+  reading methods, and a run settling never stops it): the
+  `AutoImageLanguageProbe` over up to three candidate pages from the reading
+  page (one drawing each, its route windows, 18 attempts, a 20 s budget that
+  also ends a recognition in progress; strong script on one page, or two
+  pages agreeing via `i18n.detectLanguage`). The language found becomes the
+  surface's `languageHint`, used as the document language when the PDF names
+  none it knows, and marked `documentLanguageSource: 'scanned-pages'` so the
+  note says "Detected {0} from the scanned pages." Statuses: no method, no
+  OCR model for the language, n pages not read (only after a complete
+  translation; failures show the partial summary), and "No text was found
+  in this PDF."
 
 ## Detached window
 

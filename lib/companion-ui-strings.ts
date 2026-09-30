@@ -95,6 +95,7 @@ export const UI_STRINGS = {
   progressDownloadingPack: 'Downloading language pack… {0}%',
   progressTranslating: 'Translating {0} of {1}…',
   progressRecognizingImageText: 'Recognizing visible image text locally…',
+  progressPdfReadingScanned: 'Reading scanned pages: {0} of {1}…',
 
   // Toolbar progressbar aria-labels (one per in-flight activity; the idle and
   // determinate fallbacks). Shown to assistive tech, so they localize with the
@@ -110,6 +111,7 @@ export const UI_STRINGS = {
   // Translation-driver: detected-language line (`#detected-language`).
   statusDetectedFromPageLanguage: 'Detected {0} from the page language.',
   statusDetectedFromVisibleText: 'Detected {0} from visible page text.',
+  statusDetectedFromScannedPages: 'Detected {0} from the scanned pages.',
   statusDetectedFromImage: 'Detected {0} from {1} ({2}).',
 
   // Translation-driver statuses.
@@ -201,7 +203,11 @@ export const UI_STRINGS = {
     'The PDF could not be downloaded. Reload the tab and select Simul again.',
   statusPdfUnreadable: 'This file is not a readable PDF.',
   statusPdfReaderFailed: 'Simul’s PDF reader could not start.',
-  statusPdfNoText: 'This PDF has no text to translate. It may be scanned.',
+  statusPdfNoText: 'No text was found in this PDF.',
+  statusPdfScannedNoMethod:
+    'Scanned pages were not read: turn on “Tesseract.js (local)” under Image reading priority in Settings.',
+  statusPdfScannedUnsupported: 'Scanned pages were not read: Simul has no OCR model for {0}.',
+  statusPdfScannedFailed: 'Scanned pages that could not be read: {0}.',
   statusPdfSourceOnly: 'Live source only is active. The PDF is shown without translation.',
   statusPdfTranslated: 'The PDF is translated.',
   pdfPageLabel: 'Page {0} of {1}',

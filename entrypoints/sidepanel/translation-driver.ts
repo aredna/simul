@@ -127,6 +127,22 @@ export interface TranslationDriverEnvironment {
   readonly onTranslationSettled: () => void;
   /** Whether the page shown is a PDF, whose translation has no live updates. */
   readonly isPdfShown?: () => boolean;
+  /**
+   * Whether the page has text still to read that a run would read (a PDF's
+   * scanned pages): it counts as text to translate.
+   */
+  readonly hasUnreadText?: () => boolean;
+  /** A translation run starts: a PDF begins reading its scanned pages. */
+  readonly beginTranslationRun?: (pair: TranslationPair, signal: AbortSignal) => void;
+  /** The run waits for scanned pages: the toolbar says how far reading is. */
+  readonly showReadingProgress?: () => void;
+  /**
+   * With From = Auto, a shown PDF whose language is still unknown has its
+   * scanned pages probed for it; resolves once the snapshot has the answer.
+   */
+  readonly probeScannedLanguage?: () => Promise<void>;
+  /** Why the run's reading left scanned pages as they were, if it did. */
+  readonly scannedPagesNote?: () => UiText | undefined;
 }
 
 /**
@@ -190,11 +206,37 @@ export class TranslationDriver {
     };
   }
 
-  /** 1 when the replica has any translatable text, else 0. */
+  /**
+   * 1 when the replica has any translatable text, or text a run would still
+   * read (a PDF's scanned pages), else 0.
+   */
   currentTranslationFieldCount(): number {
-    return this.#state.snapshot?.records.some(
-      ({ source }) => source.trim().length > 0,
-    ) ? 1 : 0;
+    const snapshot = this.#state.snapshot;
+    if (!snapshot) return 0;
+    return snapshot.records.some(({ source }) => source.trim().length > 0) ||
+      this.environment.hasUnreadText?.()
+      ? 1
+      : 0;
+  }
+
+  /**
+   * Whether the source language is known without reading images: From names
+   * one, or the page's declared language or its text gives one. Changes no
+   * state.
+   */
+  async pageLanguageResolves(): Promise<boolean> {
+    const state = this.#state;
+    const snapshot = state.snapshot;
+    if (!snapshot) return false;
+    const detected = await resolveSourceLanguage(
+      state.preferences.sourceLanguage,
+      {
+        ...(snapshot.documentLanguage ? { documentLanguage: snapshot.documentLanguage } : {}),
+        visibleText: this.#mirrorLanguageSample(),
+      },
+      this.environment.detectLanguage,
+    );
+    return detected.language !== undefined;
   }
 
   // --- Source language resolution.
@@ -297,13 +339,19 @@ export class TranslationDriver {
       return true;
     }
     const resolvedLanguage = state.resolvedSourceLanguage;
+    // A PDF's scanned pages named the language (the probe), not the page.
+    const fromScannedPages = requestedSnapshot.documentLanguageSource === 'scanned-pages' &&
+      (liveContext?.documentLanguage ?? requestedSnapshot.documentLanguage) ===
+        requestedSnapshot.documentLanguage;
     this.#showDetectedLanguage(() =>
       resolvedLanguage
         ? requestedPreference === 'auto'
           ? detected.language
             ? this.environment.localizeTemplate(
                 detected.source === 'html'
-                  ? UI_STRINGS.statusDetectedFromPageLanguage
+                  ? fromScannedPages
+                    ? UI_STRINGS.statusDetectedFromScannedPages
+                    : UI_STRINGS.statusDetectedFromPageLanguage
                   : UI_STRINGS.statusDetectedFromVisibleText,
                 this.environment.localizeLanguageName(resolvedLanguage),
               )
@@ -507,6 +555,9 @@ export class TranslationDriver {
   ): Promise<void> {
     const state = this.#state;
     const { captureCoordinator, coordinator, setStatus } = this.environment;
+    if (!state.snapshot) return;
+    // From may have just become Auto on a scanned PDF.
+    await this.environment.probeScannedLanguage?.();
     if (!state.snapshot) return;
     await this.resolveSelectedSourceLanguage(this.currentReplicaLanguageContext());
     if (state.isLiveSourceOnlyMode) {
@@ -739,6 +790,7 @@ export class TranslationDriver {
       if (!stillCurrent()) return;
       state.availability = 'available';
       state.availabilityCheckedForPair = availabilityPairKey(pair, generation);
+      this.environment.beginTranslationRun?.(pair, abortController.signal);
       const result = await coordinator.translateCurrent(pair, {
         signal: abortController.signal,
         onDownloadProgress: (progress) =>
@@ -755,14 +807,29 @@ export class TranslationDriver {
             Math.max(1, total),
             [completed, total],
           ),
+        onWaitForText: () => this.environment.showReadingProgress?.(),
       });
       if (!stillCurrent()) return;
+      const pdf = this.environment.isPdfShown?.() ?? false;
+      // Scanned pages left unread (a failed page) keep Translate page on,
+      // so another run reads just those.
+      const unread = pdf && (this.environment.hasUnreadText?.() ?? false);
       state.translationComplete =
         result.total > 0 &&
+        !unread &&
         coordinator.isResultCurrent(result) &&
         isCompleteReplicaTranslationResult(result);
       this.environment.onPairPrepared();
-      if (state.translationComplete) {
+      // Translation failures come first; a scanned-page note only follows a
+      // translation that is complete for everything that was read.
+      const translated = coordinator.isResultCurrent(result) &&
+        isCompleteReplicaTranslationResult(result);
+      const scannedNote = pdf && translated ? this.environment.scannedPagesNote?.() : undefined;
+      if (scannedNote) {
+        setStatus(scannedNote, 'warning');
+      } else if (pdf && translated && result.total === 0 && !unread) {
+        setStatus(UI_STRINGS.statusPdfNoText, 'warning');
+      } else if (state.translationComplete) {
         setStatus(
           this.environment.isPdfShown?.()
             ? UI_STRINGS.statusPdfTranslated
@@ -833,6 +900,14 @@ export class TranslationDriver {
     const identity = state.capturedPageIdentity;
     const generation = captureCoordinator.generation;
     if (state.isLiveSourceOnlyMode || !state.snapshot || !identity) return;
+    // A scanned PDF opened in Live source only was never probed.
+    await this.environment.probeScannedLanguage?.();
+    if (
+      state.isLiveSourceOnlyMode ||
+      !state.snapshot ||
+      state.capturedPageIdentity !== identity ||
+      !captureCoordinator.isCurrent(generation)
+    ) return;
     const resolved = await this.resolveSelectedSourceLanguage(
       this.currentReplicaLanguageContext(),
     );

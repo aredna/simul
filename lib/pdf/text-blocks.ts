@@ -50,6 +50,16 @@ const BACKWARDS_BREAK = 1;
 // share and the next baseline is at most this many font sizes lower.
 const SIZE_TOLERANCE = 0.15;
 const MAX_LINE_PITCH = 1.6;
+// An OCR line box is as tall as its tallest and lowest glyphs: "a new era"
+// is about a third shorter than "Typography" in the same font.
+const OCR_SIZE_TOLERANCE = 0.4;
+// OCR text has no pdf.js font; the empty id reads as a regular face.
+const OCR_FONT_ID = '';
+// An OCR line box this many times taller than wide is a vertical line.
+const VERTICAL_LINE_RATIO = 1.5;
+// Scripts written right to left, for OCR lines that carry no direction.
+const RTL_CHARACTER = /[\p{Script=Hebrew}\p{Script=Arabic}\p{Script=Syriac}\p{Script=Thaana}\p{Script=Nko}]/u;
+const LETTER = /\p{L}/u;
 // A gap between runs wider than this share of the font size reads as a space.
 const SPACE_GAP = 0.25;
 // Text turned by more than this (radians) is rotated and stays as drawn.
@@ -114,12 +124,91 @@ export function pdfTextBlocks(
   pageTransform: readonly number[],
   pageWidth?: number,
 ): PdfTextBlock[] {
-  const lines = textLines(content, pageTransform);
+  return blocksFromLines(
+    textLines(content, pageTransform),
+    content.styles,
+    pageWidth,
+    SIZE_TOLERANCE,
+  );
+}
+
+/** One recognised line of a scanned page, in pixels of the bitmap OCR read. */
+export interface PdfOcrLine {
+  readonly text: string;
+  readonly boundingBox: {
+    readonly x: number;
+    readonly y: number;
+    readonly width: number;
+    readonly height: number;
+  };
+}
+
+/**
+ * Groups the lines OCR recognised on a scanned page into blocks, by the same
+ * rules as pdf.js text, in the order OCR read them. `pixelsPerPoint` is the
+ * bitmap's pixels per PDF point, so the blocks are in page points like
+ * `pdfTextBlocks`. A line box runs from the tallest glyph to the lowest, so it
+ * stands in for the font size; lines without ascenders or descenders are
+ * shorter, which the wider size tolerance allows for.
+ */
+export function pdfOcrBlocks(
+  lines: readonly PdfOcrLine[],
+  pixelsPerPoint: number,
+  pageWidth?: number,
+): PdfTextBlock[] {
+  if (!(pixelsPerPoint > 0) || !Number.isFinite(pixelsPerPoint)) return [];
+  const converted: Line[] = [];
+  for (const line of lines) {
+    const text = line.text.replace(/\s+/gu, ' ').trim();
+    const { x, y, width, height } = line.boundingBox;
+    if (
+      text.length === 0 ||
+      ![x, y, width, height].every(Number.isFinite) ||
+      width <= 0 ||
+      height <= 0
+    ) continue;
+    // A line much taller than wide is vertical text (a Japanese column); it
+    // stays as drawn, like pdf.js's vertical runs. One character may be
+    // taller than wide on its own.
+    if (height > VERTICAL_LINE_RATIO * width && [...text].length > 1) continue;
+    const left = x / pixelsPerPoint;
+    const top = y / pixelsPerPoint;
+    const right = (x + width) / pixelsPerPoint;
+    const bottom = (y + height) / pixelsPerPoint;
+    const run: Run = {
+      text,
+      left,
+      right,
+      baseline: bottom,
+      top,
+      bottom,
+      size: bottom - top,
+      fontId: OCR_FONT_ID,
+      rtl: mostlyRtlText(text),
+    };
+    converted.push({ runs: [run], text, left, right, top, bottom, baseline: bottom });
+  }
+  // The tallest line comes nearest the font size: shorter lines lack
+  // ascenders or descenders. The line pitch in points stays as measured.
+  return blocksFromLines(converted, {}, pageWidth, OCR_SIZE_TOLERANCE).map((block) => {
+    const size = Math.max(...block.lines.map((line) => line.height));
+    return size > block.fontSize
+      ? { ...block, fontSize: size, lineHeight: (block.lineHeight * block.fontSize) / size }
+      : block;
+  });
+}
+
+function blocksFromLines(
+  lines: readonly Line[],
+  styles: PdfTextContent['styles'],
+  pageWidth: number | undefined,
+  sizeTolerance: number,
+): PdfTextBlock[] {
   const blocks: Line[][] = [];
   let current: Line[] | undefined;
   for (const line of lines) {
     const previous = current?.at(-1);
-    if (current && previous && joinsBlock(current, previous, line)) {
+    if (current && previous && joinsBlock(current, previous, line, sizeTolerance)) {
       current.push(line);
     } else {
       current = [line];
@@ -144,7 +233,7 @@ export function pdfTextBlocks(
     margin,
   };
   return blocks
-    .map((block) => toBlock(block, content.styles, aligns.get(block), page))
+    .map((block) => toBlock(block, styles, aligns.get(block), page))
     // A block with no area has nothing to cover; it stays as drawn.
     .filter(({ box }) =>
       Number.isFinite(box.width) && Number.isFinite(box.height) && box.width > 0 && box.height > 0);
@@ -295,11 +384,28 @@ function mostlyRtl(lines: readonly Line[]): boolean {
   return rtl > ltr;
 }
 
-function joinsBlock(block: readonly Line[], previous: Line, line: Line): boolean {
+/** Whether most of the text's letters are in a right-to-left script. */
+function mostlyRtlText(text: string): boolean {
+  let rtl = 0;
+  let letters = 0;
+  for (const character of text) {
+    if (!LETTER.test(character)) continue;
+    letters += 1;
+    if (RTL_CHARACTER.test(character)) rtl += 1;
+  }
+  return rtl * 2 > letters;
+}
+
+function joinsBlock(
+  block: readonly Line[],
+  previous: Line,
+  line: Line,
+  sizeTolerance: number,
+): boolean {
   const previousSize = dominantSize(previous.runs);
   const size = dominantSize(line.runs);
   const larger = Math.max(previousSize, size);
-  if (Math.abs(previousSize - size) > SIZE_TOLERANCE * larger) return false;
+  if (Math.abs(previousSize - size) > sizeTolerance * larger) return false;
   const pitch = line.baseline - previous.baseline;
   if (pitch <= BASELINE_BREAK * larger || pitch > MAX_LINE_PITCH * larger) return false;
   const left = Math.min(...block.map((each) => each.left));

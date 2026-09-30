@@ -1,4 +1,5 @@
-import type { SupportedLanguage } from '../translation-provider';
+import { canonicalizeLanguageTag, type SupportedLanguage } from '../translation-provider';
+import { repairOcrMinimumConfidence, type OcrMinimumConfidence } from './result-quality';
 
 export const MAX_AUTO_LANGUAGE_PROBE_IMAGES = 3;
 export const MAX_AUTO_LANGUAGE_PROBE_ATTEMPTS = 18;
@@ -6,6 +7,35 @@ export const MAX_AUTO_LANGUAGE_PROBE_ROUTES_PER_IMAGE = 6;
 export const MAX_AUTO_LANGUAGE_PROBE_MS = 20_000;
 export const AUTO_LANGUAGE_PROBE_MINIMUM_CONFIDENCE = 0.8;
 export const AUTO_LANGUAGE_PROBE_SINGLE_IMAGE_CONFIDENCE = 0.9;
+/** Language detection on a probe transcript must be at least this sure. */
+export const AUTO_LANGUAGE_PROBE_DETECTED_PERCENTAGE = 70;
+
+/** The probe reads at the saved minimum confidence, but never below its own. */
+export function autoLanguageProbeMinimumConfidence(
+  configured: OcrMinimumConfidence | undefined,
+): OcrMinimumConfidence {
+  const repaired = repairOcrMinimumConfidence(configured);
+  return repaired < AUTO_LANGUAGE_PROBE_MINIMUM_CONFIDENCE
+    ? AUTO_LANGUAGE_PROBE_MINIMUM_CONFIDENCE
+    : repaired;
+}
+
+/**
+ * The language a reliable detection of a probe transcript names, if its
+ * best supported candidate is sure enough.
+ */
+export function autoLanguageProbeDetectedLanguage(detected: {
+  readonly isReliable: boolean;
+  readonly languages: readonly { readonly language: string; readonly percentage: number }[];
+}): SupportedLanguage | undefined {
+  if (!detected.isReliable) return undefined;
+  const candidate = [...detected.languages]
+    .sort((left, right) => right.percentage - left.percentage)
+    .find((entry) =>
+      entry.percentage >= AUTO_LANGUAGE_PROBE_DETECTED_PERCENTAGE &&
+      canonicalizeLanguageTag(entry.language));
+  return candidate ? canonicalizeLanguageTag(candidate.language) : undefined;
+}
 
 /**
  * These are representative packaged OCR model routes rather than every

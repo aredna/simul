@@ -45,7 +45,8 @@ To update, replace the folder and select **Reload** on the Simul card.
 3. To translate text in images, select **OCR** once to allow image access.
 
 PDF tabs work the same way: Simul shows the pages and lays each translated
-paragraph over the page, in its place. Scanned pages are not translated yet.
+paragraph over the page, in its place. Scanned pages are read on the computer
+while they are translated.
 
 ## License
 

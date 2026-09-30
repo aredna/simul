@@ -77,7 +77,12 @@ import {
   PixelAcquisitionCoordinator,
   createBrowserPixelAcquisitionEnvironment,
 } from '../../lib/ocr/pixel-acquisition';
-import { createBrowserImageRecognitionCoordinator } from '../../lib/ocr/image-analysis-coordinator';
+import {
+  createBrowserImageRecognitionCoordinator,
+  type ImageRecognitionCoordinator,
+} from '../../lib/ocr/image-analysis-coordinator';
+import { browserImageFileRenderEnvironment } from '../../lib/ocr/image-file-pixel-reader';
+import { repairOcrMinimumConfidence } from '../../lib/ocr/result-quality';
 import { OnDeviceEvidenceJudge } from '../../lib/ocr/on-device-evidence-judge';
 import { IndexedDbTransientImageStore } from '../../lib/ocr/transient-image-store';
 import {
@@ -88,6 +93,7 @@ import {
   isMirrorDisplayMode,
   isReplicaViewMode,
   isTextLayoutMode,
+  pageOrigin,
   selectLiveCompanionPreferenceChange,
   type CompanionLaunchBehavior,
   type PopoutTabMode,
@@ -273,6 +279,13 @@ const pdfView = new PdfView(pdfViewContainer, {
 });
 // The shown PDF's text blocks, translated by the same coordinator as the mirror.
 const pdfTextSurface = new PdfTextSurface(pdfView);
+// Scanned PDF pages go to the same local OCR host as images, with their own
+// memory-only recognition cache, cleared wherever the image caches are and,
+// like theirs, never reused across top-page origins.
+let pdfRecognition: ImageRecognitionCoordinator | undefined;
+let pdfRecognitionOrigin: string | undefined;
+// How far the running translation's scanned-page reading is: [read, total].
+let pdfReadingProgress: readonly [number, number] | undefined;
 const pdfController = new PdfController({
   fetchPdf: (url, signal) => fetchPdfBytes(url, { signal }),
   openDocument: (bytes, signal) => openPdfDocument(
@@ -285,6 +298,16 @@ const pdfController = new PdfController({
   surface: pdfTextSurface,
   onPriorityChange: () => replicaTranslationCoordinator.reprioritize(),
   onDiagnostic: logPdfDiagnostic,
+  ocr: {
+    environment: {
+      createCanvas: () => new OffscreenCanvas(1, 1),
+      render: browserImageFileRenderEnvironment(),
+      recognize: (pixels, route, signal) => pdfRecognizer().recognize(pixels, route, signal),
+      detectLanguage: async (text) => browser.i18n.detectLanguage(text),
+    },
+    providerOrder: () => imageTranslationConfig.usablePixelProviderOrder(),
+    minimumConfidence: () => repairOcrMinimumConfidence(state.preferences.ocrMinimumConfidence),
+  },
 });
 let replicaTranslationCoordinator!: ReplicaTranslationCoordinator;
 let imageTranslationController!: ImageTranslationController;
@@ -664,7 +687,10 @@ const permissionFlows = new PermissionFlows({
   updateControls: () => updateControls(),
   renderImagePanel: () => imageAnalysisPanel.render(),
   configureImageTranslation: () => configureImageTranslation(),
-  purgeImageCache: () => imageTranslationController.purgeSourceDerivedCache(),
+  purgeImageCache: () => {
+    imageTranslationController.purgeSourceDerivedCache();
+    pdfRecognition?.clear();
+  },
   requestAutomaticTranslation: async (pageUrl) => {
     state.translationDesired = true;
     await translationDriver.maybeTranslateAutomatically(captureCoordinator.generation, pageUrl);
@@ -699,8 +725,41 @@ const translationDriver = new TranslationDriver({
   invalidateComposer: () => quickComposer.invalidate(),
   syncComposerPanel: () => quickComposer.syncPanel(),
   onPairPrepared: () => uiLocalizer.retryAfterPagePairPrepared(),
-  onTranslationSettled: () => logTranslationCache('page', translationMemory),
+  onTranslationSettled: () => {
+    logTranslationCache('page', translationMemory);
+    pdfController.stopScannedReading();
+    capturePipeline.adoptReadPdfText();
+  },
   isPdfShown: () => pdfController.shown,
+  hasUnreadText: () =>
+    pdfController.shown &&
+    pdfController.scannedPagesState(state.selectedPair()?.sourceLanguage) === 'readable',
+  beginTranslationRun: (pair, signal) => {
+    pdfReadingProgress = undefined;
+    if (!pdfController.shown) return;
+    void pdfController.readScannedPages(
+      pair.sourceLanguage,
+      signal,
+      // Shown while the run waits for a page (showReadingProgress), so it
+      // never flickers against the translation progress.
+      (read, total) => {
+        pdfReadingProgress = [read, total];
+      },
+    ).catch(() => undefined);
+  },
+  showReadingProgress: () => {
+    if (!pdfReadingProgress) return;
+    const [read, total] = pdfReadingProgress;
+    toolbarStatus.showProgress(
+      UI_STRINGS.progressPdfReadingScanned,
+      read,
+      Math.max(1, total),
+      [read, total],
+    );
+  },
+  scannedPagesNote: () => (pdfController.shown ? pdfController.scannedPagesNote() : undefined),
+  // The PDF controller stops the probe when the PDF closes or another shows.
+  probeScannedLanguage: () => capturePipeline.probePdfLanguage(new AbortController().signal),
 });
 provider.onSessionCreated((pair) => translationDriver.handlePairReady(pair));
 
@@ -1208,6 +1267,7 @@ function purgeSourceDerivedRuntimeInternal(
   currency.supersede('availability');
   state.abortPageWork();
   imageTranslationController.purgeSourceDerivedCache();
+  pdfRecognition?.clear();
   imageTranslationController.releaseReplica();
   isolatedHtmlReplicaEngine.releasePresentation();
   pdfController.close();
@@ -1777,6 +1837,22 @@ function logImageTranslationDiagnostic(
     console.info('[Simul image translation]', diagnostic);
   }
   imageAnalysisPanel.recordDiagnostic(diagnostic);
+}
+
+/**
+ * The PDF recognition cache, fenced by the current reset revision and kept
+ * for one top-page origin at a time (a page without one keeps nothing).
+ */
+function pdfRecognizer(): ImageRecognitionCoordinator {
+  pdfRecognition ??= createBrowserImageRecognitionCoordinator(
+    new IndexedDbTransientImageStore(),
+    state.preferences.resetRevision,
+  );
+  pdfRecognition.advanceResetEpoch(state.preferences.resetRevision);
+  const origin = pageOrigin(state.capturedPageIdentity?.url);
+  if (origin === undefined || origin !== pdfRecognitionOrigin) pdfRecognition.clear();
+  pdfRecognitionOrigin = origin;
+  return pdfRecognition;
 }
 
 function logPdfDiagnostic(diagnostic: PdfDiagnostic): void {

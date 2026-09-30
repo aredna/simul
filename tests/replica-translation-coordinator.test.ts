@@ -841,6 +841,171 @@ describe('ReplicaTranslationCoordinator translation order', () => {
   });
 });
 
+describe('ReplicaTranslationCoordinator with a surface still reading', () => {
+  it('translates what comes while it waits, in one run with cumulative progress', async () => {
+    const surface = new ReadingSurface([record(1, 1, 'Uno')]);
+    surface.reading = true;
+    const translated: string[] = [];
+    const { provider } = fakeProvider(async (source) => {
+      translated.push(source);
+      return `en:${source}`;
+    });
+    const coordinator = new ReplicaTranslationCoordinator(provider, surface);
+    const progress: Array<[number, number]> = [];
+    const events: string[] = [];
+
+    const run = coordinator.translateCurrent(pair, {
+      onProgress: (completed, total) => {
+        progress.push([completed, total]);
+        events.push('progress');
+      },
+      onWaitForText: () => events.push('wait'),
+    });
+    await vi.waitFor(() => expect(translated).toEqual(['Uno']));
+    await vi.waitFor(() => expect(surface.waiting).toBe(1));
+    // Once all it has is translated, the run says it waits for more.
+    expect(events.at(-1)).toBe('wait');
+    surface.add(record(2, 1, 'Dos'), record(3, 1, 'Tres'));
+    await vi.waitFor(() => expect(translated).toEqual(['Uno', 'Dos', 'Tres']));
+    await vi.waitFor(() => expect(surface.waiting).toBe(1));
+    surface.finish(record(4, 1, 'Cuatro'));
+
+    await expect(run).resolves.toMatchObject({ total: 4, completed: 4, failed: 0, stale: 0 });
+    expect(translated).toEqual(['Uno', 'Dos', 'Tres', 'Cuatro']);
+    // Each block is queued once, and progress never goes back.
+    const done = progress.map(([completed]) => completed);
+    expect(done).toEqual([...done].sort((left, right) => left - right));
+    expect(progress.at(-1)).toEqual([4, 4]);
+    expect(surface.projections.map((each) => each.translated)).toEqual([
+      'en:Uno', 'en:Dos', 'en:Tres', 'en:Cuatro',
+    ]);
+  });
+
+  it('translates text read during a batch at once, without waiting for another page', async () => {
+    const surface = new ReadingSurface([record(1, 1, 'Uno')]);
+    surface.reading = true;
+    const translated: string[] = [];
+    const { provider } = fakeProvider(async (source) => {
+      translated.push(source);
+      // A page is read while this block translates; nobody is waiting yet.
+      if (source === 'Uno') surface.records = [...surface.records, record(2, 1, 'Dos')];
+      return source;
+    });
+    const coordinator = new ReplicaTranslationCoordinator(provider, surface);
+
+    const run = coordinator.translateCurrent(pair);
+    await vi.waitFor(() => expect(surface.waiting).toBe(1));
+    expect(translated).toEqual(['Uno', 'Dos']);
+    surface.finish();
+    await expect(run).resolves.toMatchObject({ total: 2, completed: 2 });
+  });
+
+  it('ends when the pair changes during a batch', async () => {
+    const surface = new ReadingSurface([record(1, 1, 'Uno')]);
+    surface.reading = true;
+    let coordinator!: ReplicaTranslationCoordinator;
+    const { provider } = fakeProvider(async (source) => {
+      coordinator.selectPair({ sourceLanguage: 'fr', targetLanguage: 'en' });
+      return source;
+    });
+    coordinator = new ReplicaTranslationCoordinator(provider, surface);
+
+    const run = coordinator.translateCurrent(pair);
+    await expect(run).rejects.toMatchObject({ name: 'AbortError' });
+    expect(surface.waiting).toBe(0);
+  });
+
+  it('stops at Cancel while it waits, and translates nothing after', async () => {
+    const surface = new ReadingSurface([record(1, 1, 'Uno')]);
+    surface.reading = true;
+    const translated: string[] = [];
+    const { provider } = fakeProvider(async (source) => {
+      translated.push(source);
+      return source;
+    });
+    const coordinator = new ReplicaTranslationCoordinator(provider, surface);
+    const controller = new AbortController();
+
+    const run = coordinator.translateCurrent(pair, { signal: controller.signal });
+    await vi.waitFor(() => expect(surface.waiting).toBe(1));
+    controller.abort();
+    await expect(run).rejects.toMatchObject({ name: 'AbortError' });
+    surface.finish(record(2, 1, 'Dos'));
+    await Promise.resolve();
+    expect(translated).toEqual(['Uno']);
+  });
+
+  it('ends when the surface is replaced while it waits', async () => {
+    const surface = new ReadingSurface([record(1, 1, 'Uno')]);
+    surface.reading = true;
+    const { provider } = fakeProvider(async (source) => source);
+    const coordinator = new ReplicaTranslationCoordinator(provider, surface);
+
+    const run = coordinator.translateCurrent(pair);
+    await vi.waitFor(() => expect(surface.waiting).toBe(1));
+    surface.lease += 1;
+    surface.finish(record(2, 1, 'Dos'));
+
+    await expect(run).resolves.toMatchObject({ total: 1, completed: 1 });
+  });
+
+  it('ends at once when the surface is not reading', async () => {
+    const surface = new ReadingSurface([record(1, 1, 'Uno'), record(2, 1, 'Dos')]);
+    const { provider } = fakeProvider(async (source) => source);
+    const coordinator = new ReplicaTranslationCoordinator(provider, surface);
+
+    await expect(coordinator.translateCurrent(pair)).resolves.toMatchObject({
+      total: 2,
+      completed: 2,
+    });
+    expect(surface.waiting).toBe(0);
+  });
+});
+
+/** A surface that goes on reading text during a run, like a scanned PDF. */
+class ReadingSurface extends FakeSurface {
+  reading = false;
+  waiting = 0;
+  #wakes: Array<() => void> = [];
+
+  isReading(): boolean {
+    return this.reading;
+  }
+
+  waitForText(signal: AbortSignal): Promise<void> {
+    this.waiting += 1;
+    return new Promise((resolve, reject) => {
+      const abort = () => {
+        this.waiting -= 1;
+        reject(new DOMException('Stopped.', 'AbortError'));
+      };
+      signal.addEventListener('abort', abort, { once: true });
+      this.#wakes.push(() => {
+        signal.removeEventListener('abort', abort);
+        this.waiting -= 1;
+        resolve();
+      });
+    });
+  }
+
+  add(...added: ReplicaSourceTextRecord[]): void {
+    this.records = [...this.records, ...added];
+    this.#wake();
+  }
+
+  finish(...added: ReplicaSourceTextRecord[]): void {
+    this.records = [...this.records, ...added];
+    this.reading = false;
+    this.#wake();
+  }
+
+  #wake(): void {
+    const wakes = this.#wakes;
+    this.#wakes = [];
+    for (const wake of wakes) wake();
+  }
+}
+
 class OrderedSurface extends FakeSurface {
   order: number[] = [];
 

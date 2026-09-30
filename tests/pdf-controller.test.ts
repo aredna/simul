@@ -1,6 +1,8 @@
 import { describe, expect, it, vi } from 'vitest';
 
-import { PdfController } from '../entrypoints/sidepanel/pdf-controller';
+import { PdfController, type PdfControllerOcr } from '../entrypoints/sidepanel/pdf-controller';
+import type { ImageRecognitionResult } from '../lib/ocr/image-analysis-coordinator';
+import type { PdfOcrCanvas } from '../lib/pdf/pdf-ocr';
 import type { PdfViewDocument, PdfViewSurface } from '../entrypoints/sidepanel/pdf-view';
 import { UI_STRINGS } from '../lib/companion-ui-strings';
 import { PageAccessError } from '../lib/page-identity';
@@ -19,6 +21,7 @@ import {
 } from '../lib/pdf/pdfjs-runtime';
 import { PdfTextSurface } from '../lib/pdf/pdf-text-surface';
 import type { ReplicaSourceDocumentIdentity } from '../lib/replica/source-identity';
+import { englishUiText } from '../lib/ui-text';
 
 const URL_UNDER_TEST = 'https://example.com/report.pdf';
 
@@ -32,7 +35,7 @@ function fakeDocument(pageCount = 3) {
     })),
     getTextContent: vi.fn(async (page: number): Promise<PdfTextContent> => pageText(page)),
     hasImages: vi.fn(),
-    render: vi.fn(async () => 1),
+    render: vi.fn(async (_page: number, _canvas: unknown, _scale: number) => 1),
     fontFaces: vi.fn(async () => ({})),
     releasePage: vi.fn(async () => undefined),
     destroy: vi.fn(async () => undefined),
@@ -97,6 +100,7 @@ function setup(options: {
   withText?: boolean;
   priorityDelayMs?: number;
   pageTextTimeoutMs?: number;
+  ocr?: PdfControllerOcr;
 } = {}) {
   const view = fakeView();
   const documents: ReturnType<typeof fakeDocument>[] = [];
@@ -130,6 +134,7 @@ function setup(options: {
           onPriorityChange,
           priorityDelayMs: options.priorityDelayMs ?? 0,
           ...(options.pageTextTimeoutMs ? { pageTextTimeoutMs: options.pageTextTimeoutMs } : {}),
+          ...(options.ocr ? { ocr: options.ocr } : {}),
         }
       : {}),
   });
@@ -650,5 +655,379 @@ describe('PdfController text', () => {
     expect(first.destroy).toHaveBeenCalledOnce();
     expect(harness.documents[1]?.destroy).toHaveBeenCalledOnce();
     expect(harness.controller.shown).toBe(false);
+  });
+});
+
+describe('PdfController scanned pages', () => {
+  /** Page 1 has text; pages 2 to 5 are scanned. OCR reads "Scan <page>". */
+  function scanned(options: {
+    providerOrder?: readonly ('tesseract' | 'chrome-text-detector')[];
+    recognize?: (page: number) => ImageRecognitionResult | Promise<ImageRecognitionResult>;
+  } = {}) {
+    const read: number[] = [];
+    const recognize = vi.fn(async (pixels: {
+      descriptor: { nodeId: number };
+      bitmapWidth: number;
+      bitmapHeight: number;
+    }): Promise<ImageRecognitionResult> => {
+      const page = pixels.descriptor.nodeId;
+      read.push(page);
+      if (options.recognize) {
+        const answer = await options.recognize(page);
+        // As the offscreen protocol requires, a result names the bitmap it read.
+        return answer.status === 'complete'
+          ? {
+              ...answer,
+              result: {
+                ...answer.result,
+                bitmapWidth: pixels.bitmapWidth,
+                bitmapHeight: pixels.bitmapHeight,
+              },
+            }
+          : answer;
+      }
+      return {
+        status: 'complete',
+        cacheHit: false,
+        result: {
+          providerId: 'tesseract',
+          bitmapWidth: pixels.bitmapWidth,
+          bitmapHeight: pixels.bitmapHeight,
+          transcript: `Scan ${page}`,
+          regions: [{
+            text: `Scan ${page}`,
+            confidence: 0.9,
+            boundingBox: { x: 20, y: 20, width: 200, height: 30 },
+          }],
+        },
+      } satisfies ImageRecognitionResult;
+    });
+    const ocr: PdfControllerOcr = {
+      environment: {
+        createCanvas: () => ({ width: 0, height: 0 }),
+        render: {
+          createSurface: () => ({
+            getContext: () => ({ drawImage: () => undefined }),
+            convertToBlob: async () => new Blob([String(Math.random())]),
+          }),
+          digest: (bytes) => crypto.subtle.digest('SHA-256', bytes),
+        },
+        recognize: recognize as unknown as PdfControllerOcr['environment']['recognize'],
+        wait: async () => undefined,
+      },
+      providerOrder: () => options.providerOrder ?? ['tesseract'],
+      minimumConfidence: () => 0.65,
+    };
+    const harness = setup({
+      withText: true,
+      ocr,
+      openDocument: async () => {
+        const document = fakeDocument(5);
+        document.getTextContent.mockImplementation(async (page: number) =>
+          page === 1 ? pageText(1) : { items: [], styles: {}, lang: null });
+        document.hasImages.mockResolvedValue(true);
+        document.render.mockImplementation(async (_page: number, canvas: unknown, scale: number) => {
+          const target = canvas as PdfOcrCanvas;
+          target.width = Math.floor(600 * scale);
+          target.height = Math.floor(800 * scale);
+          return scale;
+        });
+        harness.documents.push(document);
+        return document;
+      },
+    });
+    return { ...harness, read, recognize };
+  }
+
+  async function shown(harness: ReturnType<typeof scanned>) {
+    await harness.controller.show(URL_UNDER_TEST, new AbortController().signal, SOURCE_DOCUMENT);
+    await harness.controller.readText(new AbortController().signal);
+  }
+
+  it('reads scanned pages from the reading page, following the reader, into the surface', async () => {
+    const harness = scanned();
+    await shown(harness);
+    expect(harness.surface.unreadScannedPages()).toEqual([1, 2, 3, 4]);
+    harness.surface.readingPage = 2;
+    const progress: Array<[number, number]> = [];
+    let moved = false;
+    harness.recognize.mockImplementationOnce(async (pixels) => {
+      harness.read.push(pixels.descriptor.nodeId);
+      // The reader goes back to page 2 while page 3 is read.
+      harness.surface.readingPage = 1;
+      moved = true;
+      return {
+        status: 'complete',
+        cacheHit: false,
+        result: {
+          providerId: 'tesseract',
+          bitmapWidth: pixels.bitmapWidth,
+          bitmapHeight: pixels.bitmapHeight,
+          transcript: 'Scan 3',
+          regions: [{ text: 'Scan 3', confidence: 0.9, boundingBox: { x: 20, y: 20, width: 200, height: 30 } }],
+        },
+      };
+    });
+
+    const outcome = await harness.controller.readScannedPages(
+      'fr',
+      new AbortController().signal,
+      (done, total) => progress.push([done, total]),
+    );
+
+    expect(moved).toBe(true);
+    expect(outcome).toEqual({ kind: 'complete' });
+    expect(harness.read).toEqual([3, 2, 4, 5]);
+    expect(progress).toEqual([[0, 4], [1, 4], [2, 4], [3, 4], [4, 4]]);
+    expect(harness.surface.unreadScannedPages('fra')).toEqual([]);
+    expect(harness.surface.snapshot()?.records.map((record) => record.source)).toEqual([
+      'Page 1', 'Scan 2', 'Scan 3', 'Scan 4', 'Scan 5',
+    ]);
+    expect(harness.surface.isReading()).toBe(false);
+    expect(harness.controller.scannedPagesNote()).toBeUndefined();
+    expect(harness.diagnostics.at(-1)).toEqual({
+      stage: 'ocr',
+      pages: 4,
+      pagesWithText: 4,
+      failed: 0,
+      stopped: false,
+      milliseconds: 0,
+    });
+  });
+
+  it('does not take a page whose text read failed, or whose only text is rotated, for a scanned page', async () => {
+    const harness = scanned();
+    harness.documents.length = 0;
+    const rotated = {
+      items: [{
+        str: 'Sideways',
+        dir: 'ltr',
+        transform: [0, 10, -10, 0, 100, 100],
+        width: 60,
+        height: 10,
+        fontName: 'f1',
+        hasEOL: false,
+      }],
+      styles: { f1: { fontFamily: 'serif', ascent: 0.8, descent: -0.2, vertical: false } },
+      lang: null,
+    };
+    await harness.controller.show(URL_UNDER_TEST, new AbortController().signal, SOURCE_DOCUMENT);
+    const document = harness.documents.at(-1)!;
+    document.getTextContent.mockImplementation(async (page: number) => {
+      if (page === 2) throw new Error('Bad content stream');
+      if (page === 3) return rotated;
+      return page === 1 ? pageText(1) : { items: [], styles: {}, lang: null };
+    });
+    await harness.controller.readText(new AbortController().signal);
+    // Pages 4 and 5 (0-based 3 and 4) are truly empty.
+    expect(harness.surface.unreadScannedPages()).toEqual([3, 4]);
+  });
+
+  it('marks a page it cannot draw as read, counts it, and does not draw it again', async () => {
+    const harness = scanned();
+    await shown(harness);
+    const document = harness.documents.at(-1)!;
+    document.render.mockImplementation(async (page: number, canvas: unknown, scale: number) => {
+      if (page === 3) throw new Error('pdf.js could not draw it');
+      const target = canvas as PdfOcrCanvas;
+      target.width = Math.floor(600 * scale);
+      target.height = Math.floor(800 * scale);
+      return scale;
+    });
+    expect(await harness.controller.readScannedPages('fr', new AbortController().signal))
+      .toEqual({ kind: 'failed', pages: 1 });
+    expect(harness.surface.unreadScannedPages('fra')).toEqual([]);
+    expect(englishUiText(harness.controller.scannedPagesNote()!))
+      .toBe('Scanned pages that could not be read: 1.');
+    document.render.mockClear();
+    expect(await harness.controller.readScannedPages('fr', new AbortController().signal))
+      .toEqual({ kind: 'complete' });
+    expect(document.render).not.toHaveBeenCalled();
+  });
+
+  it('forgets pages read with another model even when this language cannot be read', async () => {
+    const harness = scanned();
+    await shown(harness);
+    await harness.controller.readScannedPages('fr', new AbortController().signal);
+    expect(harness.surface.snapshot()?.records).toHaveLength(5);
+    expect(await harness.controller.readScannedPages('th', new AbortController().signal))
+      .toEqual({ kind: 'unsupported', language: 'th' });
+    // Text read as French is never translated as Thai.
+    expect(harness.surface.snapshot()?.records.map((record) => record.source)).toEqual(['Page 1']);
+    expect(harness.controller.scannedPagesState('th')).toBe('unsupported');
+  });
+
+  it('reports a reading that stops early', async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const harness = scanned({
+      recognize: async () => {
+        await held;
+        return { status: 'failed', code: 'recognition-failed' };
+      },
+    });
+    await shown(harness);
+    const reading = harness.controller.readScannedPages('fr', new AbortController().signal);
+    await vi.waitFor(() => expect(harness.read).toHaveLength(1));
+    harness.controller.stopScannedReading();
+    release();
+    await expect(reading).rejects.toMatchObject({ name: 'AbortError' });
+    expect(harness.diagnostics.at(-1)).toMatchObject({ stage: 'ocr', stopped: true });
+  });
+
+  it('reads only unread pages, and again in another model group', async () => {
+    const harness = scanned();
+    await shown(harness);
+    await harness.controller.readScannedPages('fr', new AbortController().signal);
+    harness.read.length = 0;
+    await harness.controller.readScannedPages('fr', new AbortController().signal);
+    expect(harness.read).toEqual([]);
+    expect(harness.surface.unreadScannedPages('fra')).toEqual([]);
+    expect(harness.surface.unreadScannedPages('deu')).toEqual([1, 2, 3, 4]);
+    await harness.controller.readScannedPages('de', new AbortController().signal);
+    expect(harness.read).toEqual([2, 3, 4, 5]);
+  });
+
+  it('keeps a page OCR could not read unread, and says how many', async () => {
+    const harness = scanned({
+      recognize: (page) => page === 3
+        ? { status: 'failed', code: 'recognition-failed' }
+        : {
+            status: 'complete',
+            cacheHit: false,
+            result: {
+              providerId: 'tesseract',
+              bitmapWidth: 100,
+              bitmapHeight: 100,
+              transcript: '',
+              regions: [],
+            },
+          },
+    });
+    await shown(harness);
+    const outcome = await harness.controller.readScannedPages('fr', new AbortController().signal);
+    expect(outcome).toEqual({ kind: 'failed', pages: 1 });
+    expect(harness.surface.unreadScannedPages('fra')).toEqual([2]);
+    expect(harness.controller.scannedPagesState('fr')).toBe('readable');
+    expect(englishUiText(harness.controller.scannedPagesNote()!))
+      .toBe('Scanned pages that could not be read: 1.');
+  });
+
+  it('says when no method is on or the language has no OCR model', async () => {
+    const off = scanned({ providerOrder: [] });
+    await shown(off);
+    expect(await off.controller.readScannedPages('fr', new AbortController().signal))
+      .toEqual({ kind: 'no-method' });
+    expect(off.read).toEqual([]);
+    expect(off.controller.scannedPagesState('fr')).toBe('no-method');
+    expect(off.controller.scannedPagesNote()).toBe(UI_STRINGS.statusPdfScannedNoMethod);
+    expect(off.controller.noTextStatus('fr')).toBe(UI_STRINGS.statusPdfScannedNoMethod);
+
+    const thai = scanned();
+    await shown(thai);
+    expect(await thai.controller.readScannedPages('th', new AbortController().signal))
+      .toEqual({ kind: 'unsupported', language: 'th' });
+    expect(thai.controller.scannedPagesState('th')).toBe('unsupported');
+    expect(englishUiText(thai.controller.noTextStatus('th')))
+      .toBe('Scanned pages were not read: Simul has no OCR model for Thai.');
+    expect(thai.controller.scannedPagesState('fr')).toBe('readable');
+    expect(thai.controller.noTextStatus('fr')).toBe(UI_STRINGS.statusPdfNoText);
+  });
+
+  it('stops on abort, on close and on the next show', async () => {
+    // Every page waits until the test lets the OCR answers go.
+    let release!: () => void;
+    let held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const harness = scanned({
+      recognize: async () => {
+        await held;
+        return { status: 'failed', code: 'recognition-failed' };
+      },
+    });
+    const releaseAll = () => {
+      const previous = release;
+      held = new Promise<void>((resolve) => {
+        release = resolve;
+      });
+      previous();
+    };
+    await shown(harness);
+    const controller = new AbortController();
+    const reading = harness.controller.readScannedPages('fr', controller.signal);
+    await vi.waitFor(() => expect(harness.read).toHaveLength(1));
+    expect(harness.surface.isReading()).toBe(true);
+    controller.abort();
+    releaseAll();
+    await expect(reading).rejects.toMatchObject({ name: 'AbortError' });
+    expect(harness.read).toHaveLength(1);
+    expect(harness.surface.isReading()).toBe(false);
+
+    const closing = harness.controller.readScannedPages('fr', new AbortController().signal);
+    await vi.waitFor(() => expect(harness.read).toHaveLength(2));
+    harness.controller.close();
+    releaseAll();
+    await expect(closing).rejects.toMatchObject({ name: 'AbortError' });
+    expect(harness.read).toHaveLength(2);
+    expect(harness.controller.scannedPagesNote()).toBeUndefined();
+
+    await shown(harness);
+    const replaced = harness.controller.readScannedPages('fr', new AbortController().signal);
+    await vi.waitFor(() => expect(harness.read).toHaveLength(3));
+    await harness.controller.show(URL_UNDER_TEST, new AbortController().signal, SOURCE_DOCUMENT);
+    releaseAll();
+    await expect(replaced).rejects.toMatchObject({ name: 'AbortError' });
+    expect(harness.read).toHaveLength(3);
+  });
+
+  it('probes the scanned pages from the reading page on', async () => {
+    const harness = scanned();
+    await shown(harness);
+    harness.surface.readingPage = 3;
+    await harness.controller.probeLanguage(new AbortController().signal);
+    // Three pages at most, reading page first, then onwards, then back.
+    expect([...new Set(harness.read)]).toEqual([4, 5, 3]);
+    // Asked again with the same methods, it reads nothing.
+    harness.read.length = 0;
+    await harness.controller.probeLanguage(new AbortController().signal);
+    expect(harness.read).toEqual([]);
+  });
+
+  it('keeps probing when a translation run settles', async () => {
+    let release!: () => void;
+    const held = new Promise<void>((resolve) => {
+      release = resolve;
+    });
+    const harness = scanned({
+      recognize: async (page) => {
+        await held;
+        return {
+          status: 'complete',
+          cacheHit: false,
+          result: {
+            providerId: 'tesseract',
+            bitmapWidth: 1,
+            bitmapHeight: 1,
+            transcript: `ページ${page}のにほんごのぶんしょうです`,
+            transcriptConfidence: 0.95,
+            regions: [{
+              text: `ページ${page}のにほんごのぶんしょうです`,
+              confidence: 0.95,
+              boundingBox: { x: 0, y: 0, width: 1, height: 1 },
+            }],
+          },
+        };
+      },
+    });
+    await shown(harness);
+    const probing = harness.controller.probeLanguage(new AbortController().signal);
+    await vi.waitFor(() => expect(harness.read).toHaveLength(1));
+    // A run settling stops its reading, never the probe.
+    harness.controller.stopScannedReading();
+    release();
+    await expect(probing).resolves.toBe('ja');
   });
 });

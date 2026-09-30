@@ -350,11 +350,16 @@ export function createBrowserImageFilePixelReaderEnvironment(
         close: () => bitmap.close(),
       };
     },
-    render: {
-      createSurface: (width, height) => new OffscreenCanvas(width, height),
-      digest: (bytes) => crypto.subtle.digest('SHA-256', bytes),
-    },
+    render: browserImageFileRenderEnvironment(),
     maxPixels: options.maxPixels,
+  };
+}
+
+/** Draws OCR input on an OffscreenCanvas and keys it by its SHA-256. */
+export function browserImageFileRenderEnvironment(): ImageFileRenderEnvironment {
+  return {
+    createSurface: (width, height) => new OffscreenCanvas(width, height),
+    digest: (bytes) => crypto.subtle.digest('SHA-256', bytes),
   };
 }
 

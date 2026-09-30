@@ -46,6 +46,16 @@ export class ReplicaSurfaceRouter
     return this.#surface?.translationOrder?.();
   }
 
+  isReading(): boolean {
+    return this.#surface?.isReading?.() ?? false;
+  }
+
+  waitForText(signal: AbortSignal): Promise<void> {
+    const surface = this.#surface;
+    // A surface that never reads has nothing to wait for.
+    return surface?.waitForText ? surface.waitForText(signal) : Promise.resolve();
+  }
+
   resolveImageAnchor(
     document: ReplicaSourceDocumentIdentity,
     nodeId: number,
