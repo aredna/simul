@@ -365,6 +365,69 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(onSourceScroll).toHaveBeenCalledWith(update.scroll);
   });
 
+  it('holds translated boxes at the page size with Keep geometry (D101)', async () => {
+    const checkpoint = makeCheckpoint('hello', 0);
+    const stream = new FakeHtmlStream(checkpoint);
+    const host = new FakePresentationHost();
+    let mode: 'adaptive' | 'faithful' = 'faithful';
+    const refreshes: (() => void)[] = [];
+    const flush = (): void => {
+      for (const refresh of refreshes.splice(0)) refresh();
+    };
+    const engine = new IsolatedHtmlReplicaEngine({
+      presentationHost: host,
+      openStream: async () => stream,
+      getTextLayoutMode: () => mode,
+      scheduleLayoutRefresh: (callback) => refreshes.push(callback),
+      initializeIframe: async (iframe, shell) => {
+        const { document } = parseHTML(shell);
+        Object.defineProperty(iframe, 'contentDocument', { value: document });
+        // The body is 20px tall around the page's text and 40px around the
+        // longer translation.
+        Object.defineProperty(iframe, 'contentWindow', {
+          value: {
+            getComputedStyle: (element: Element) => ({
+              display: element.localName === 'body' ? 'block' : 'inline',
+              boxSizing: 'border-box',
+              width: '800px',
+              height: element.textContent === 'hello' ? '20px' : '40px',
+              fontSize: '16px',
+              lineHeight: 'normal',
+            }),
+          },
+        });
+        return document;
+      },
+    });
+
+    expect((await engine.run(request)).status).toBe('complete');
+    const snapshot = engine.snapshot()!;
+    engine.beginProjection({ translationEpoch: 1, pairKey: 'en\0ja' });
+    expect(engine.project({
+      document: snapshot.document,
+      replayLease: snapshot.replayLease,
+      nodeId: 4,
+      nodeType: 3,
+      sourceRevision: 1,
+      source: 'hello',
+      translationEpoch: 1,
+      pairKey: 'en\0ja',
+      translated: 'こんにちは、世界のみなさん',
+    })).toBe(true);
+    flush();
+
+    const body = host.iframe!.contentDocument!.body;
+    expect(body.textContent).toBe('こんにちは、世界のみなさん');
+    expect(body.style.getPropertyValue('height')).toBe('20px');
+    expect(body.style.getPropertyValue('width')).toBe('800px');
+
+    mode = 'adaptive';
+    engine.refreshTextLayout();
+    flush();
+    expect(body.getAttribute('style')).toBeNull();
+    expect(body.textContent).toBe('こんにちは、世界のみなさん');
+  });
+
   it('commits an inert real DOM, projects text, and applies a contiguous patch', async () => {
     const checkpoint = makeCheckpoint('hello', 0);
     const stream = new FakeHtmlStream(checkpoint);

@@ -266,6 +266,8 @@ let imageTranslationController!: ImageTranslationController;
 // Set when Chrome refused image access after a toolbar request; the next
 // toolbar click then turns image text off instead of prompting again (G3).
 let toolbarOcrAccessDeclined = false;
+// The "Translated text" mode the replica last laid out with.
+let appliedTextLayoutMode = state.preferences.textLayoutMode;
 const replicaSurfaceRouter = new ReplicaSurfaceRouter();
 const isolatedHtmlReplicaEngine = new IsolatedHtmlReplicaEngine({
   presentationHost: visibleReplayHost,
@@ -275,6 +277,7 @@ const isolatedHtmlReplicaEngine = new IsolatedHtmlReplicaEngine({
   getShowEverything: () => state.preferences.mirrorShowEverything,
   openSemanticStream: openChromeSemanticSource,
   getReplicaReadScope: () => readScopeController.currentReplicaReadScope(),
+  getTextLayoutMode: () => state.preferences.textLayoutMode,
   onLayoutChanged: () => imageTranslationController.refreshOverlays(),
   onSourceScroll: (scroll) => {
     state.lastSourceScroll = scroll;
@@ -1222,6 +1225,10 @@ function updateMirrorLayout(): void {
     displayMode: state.preferences.displayMode,
     zoomPercent: state.preferences.zoomPercent,
   });
+  if (appliedTextLayoutMode !== state.preferences.textLayoutMode) {
+    appliedTextLayoutMode = state.preferences.textLayoutMode;
+    isolatedHtmlReplicaEngine.refreshTextLayout();
+  }
   imageTranslationController.refreshOverlays();
   if (
     visibleReplayHost.previewVisible &&

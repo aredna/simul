@@ -99,6 +99,11 @@ import {
 import { SemanticProofPresenter } from './semantic-proof-presenter';
 import { isSourceSecretPlaceholderTagName } from './source-secret-classifier';
 import { hasStructuralPatchTargetConflict } from './structural-patch-conflict';
+import {
+  TranslatedGeometryLock,
+  type TranslatedGeometryEntry,
+} from './translated-geometry';
+import type { TextLayoutMode } from '../preferences';
 
 export const ISOLATED_HTML_SHELL_MARKER = 'isolated-html-v1';
 const ISOLATED_SECRET_PLACEHOLDER_CSS =
@@ -231,6 +236,8 @@ interface IsolatedHtmlEngineOptions {
    */
   readonly getShowEverything?: () => boolean;
   readonly getReplicaReadScope?: () => ReplicaReadScope;
+  /** "Keep geometry" holds boxes with translated text at the page's size. */
+  readonly getTextLayoutMode?: () => TextLayoutMode;
   readonly openSemanticStream?: SemanticSourceStreamFactory;
   readonly onLiveApplied?: () => void;
   readonly onLayoutChanged?: () => void;
@@ -263,6 +270,7 @@ interface HtmlMirrorDomState {
   readonly controlMetadata: Map<number, HtmlMirrorControlText>;
   readonly ownedAdoptedStyles: Set<HTMLStyleElement>;
   readonly paintedLabelHosts: Map<number, HTMLElement>;
+  readonly geometry: TranslatedGeometryLock;
   readonly records: Map<number, ReplicaSourceTextRecord>;
   readonly revisions: Map<number, number>;
   sequence: number;
@@ -696,6 +704,7 @@ export class IsolatedHtmlReplicaEngine
         controlMetadata,
         ownedAdoptedStyles,
         paintedLabelHosts: new Map(),
+        geometry: new TranslatedGeometryLock(),
         records,
         revisions,
         sequence: checkpoint.identity.sequence,
@@ -737,6 +746,7 @@ export class IsolatedHtmlReplicaEngine
     runVersion: number,
     signal?: AbortSignal,
   ): void {
+    this.#applyTextLayout(state);
     const extent = measureExtent(state.iframe);
     state.lease.commit(state.iframe, extent);
     const previous = this.#committed;
@@ -1280,6 +1290,62 @@ export class IsolatedHtmlReplicaEngine
     return changes;
   }
 
+  /** Applies a changed "Translated text" setting to the visible replica. */
+  refreshTextLayout(): void {
+    const state = this.#committed;
+    if (state && !state.released) this.#refreshExtent(state);
+  }
+
+  /**
+   * With "Keep geometry", every box showing translated text keeps the size it
+   * has with the page's text, and text that no longer fits shrinks. Runs
+   * before each extent measurement, so a new translation, a patch, a resize
+   * or a late image never paints at the translated size.
+   */
+  #applyTextLayout(state: HtmlMirrorDomState): void {
+    const view = state.iframe.contentWindow;
+    if (this.options.getTextLayoutMode?.() !== 'faithful' || !view) {
+      state.geometry.release();
+      return;
+    }
+    const entries: TranslatedGeometryEntry[] = [];
+    for (const projection of this.#projections.values()) {
+      if (projection.nodeId < 0) continue;
+      const record = state.records.get(projection.nodeId);
+      const node = state.nodes.get(projection.nodeId);
+      if (
+        !record || !node ||
+        record.nodeType !== projection.nodeType ||
+        record.source !== projection.source ||
+        record.revision !== projection.sourceRevision
+      ) continue;
+      if (projection.nodeType === 3) {
+        if (node.nodeType !== Node.TEXT_NODE) continue;
+        entries.push({
+          node,
+          showSource: () => { node.nodeValue = record.source; },
+          showTranslation: () => { node.nodeValue = projection.translated; },
+        });
+      } else if (
+        node.nodeType === Node.ELEMENT_NODE &&
+        record.nodeType === 1 &&
+        record.controlTarget === projection.controlTarget
+      ) {
+        const kind = record.controlTarget;
+        entries.push({
+          node,
+          showSource: () => applyControlText(node as Element, {
+            kind, text: record.source, translatable: true,
+          }),
+          showTranslation: () => applyControlText(node as Element, {
+            kind, text: projection.translated, translatable: true,
+          }),
+        });
+      }
+    }
+    state.geometry.lock(entries, view);
+  }
+
   #refreshExtent(state: HtmlMirrorDomState): void {
     if (this.#committed !== state || state.released) return;
     this.#pendingExtentState = state;
@@ -1290,6 +1356,7 @@ export class IsolatedHtmlReplicaEngine
       const pending = this.#pendingExtentState;
       this.#pendingExtentState = undefined;
       if (!pending || this.#committed !== pending || pending.released) return;
+      this.#applyTextLayout(pending);
       this.options.presentationHost.refreshExtent(
         pending.iframe,
         measureExtent(pending.iframe),

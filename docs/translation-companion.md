@@ -319,10 +319,21 @@ sensitive clears its prior semantic record and projection atomically.
 
 Other private controls become empty inert shells rather than disabled form
 controls, avoiding browser disabled-state wash while retaining geometry.
-Public button labels remain translatable inside inert shells. Adaptive layout
-removes height and clipping constraints from containers holding translated
-text; faithful layout retains geometry but never silently ellipsizes translated
-content.
+Public button labels remain translatable inside inert shells.
+
+The "Translated text" setting chooses how translations take up room (D101).
+"Let boxes grow", the default, lays translated text out with the page's own
+styles, so a longer translation makes its box, and the page, longer. "Keep
+geometry" holds every box that shows translated text at the size it has with
+the page's text, so nothing around it moves and the mirror keeps the page's
+layout and length. Text that no longer fits shrinks until it does, down to half
+its size; past that it overflows as the page's own styles allow. Margins and
+padding stay at the page's pixels while text shrinks, and a table cell, whose
+size is only a minimum, keeps its size by shrinking alone. The boxes are
+measured with the page's text put back for the length of one task, so the page
+text never paints, and are measured again whenever translations, patches, the
+viewport, or late images and fonts change the layout. Switching back to "Let
+boxes grow" returns every box to the page's styles.
 
 The extension transports no raw source HTML. Checkpoint, patch, and semantic
 boundaries allowlist tags, style properties, attributes, image schemes, and the
