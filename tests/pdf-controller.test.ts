@@ -104,6 +104,7 @@ function setup(options: {
   ocr?: PdfControllerOcr;
 } = {}) {
   const view = fakeView();
+  const viewerFollower = { start: vi.fn(), stop: vi.fn(), following: false };
   const documents: ReturnType<typeof fakeDocument>[] = [];
   const diagnostics: unknown[] = [];
   const fetchPdf = vi.fn(options.fetchPdf ?? (async () => new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d])));
@@ -127,6 +128,7 @@ function setup(options: {
     ...(options.readFile ? { readFile: options.readFile } : {}),
     openDocument,
     view,
+    viewerFollower,
     now: () => 0,
     onDiagnostic: options.onDiagnostic ?? ((diagnostic) => diagnostics.push(diagnostic)),
     ...(options.openTimeoutMs ? { openTimeoutMs: options.openTimeoutMs } : {}),
@@ -142,7 +144,7 @@ function setup(options: {
   });
   return {
     controller, view, documents, fetchPdf, openDocument, diagnostics,
-    surface, sink, pagesSet, onPriorityChange,
+    surface, sink, pagesSet, onPriorityChange, viewerFollower,
   };
 }
 
@@ -313,10 +315,24 @@ describe('PdfController', () => {
     await harness.controller.show(URL_UNDER_TEST, signal);
     await harness.controller.show('https://example.com/other.pdf', signal);
 
+    // The first opens at the page its address names, as Chrome's viewer does.
     expect(harness.view.mounted.map(({ position }) => position)).toEqual([
-      undefined,
+      { index: 0, fraction: 0 },
       { index: 2, fraction: 0.25 },
       { index: 1, fraction: 0.5 },
+      undefined,
+    ]);
+  });
+
+  it('opens at the page the address names, when nothing is remembered', async () => {
+    const harness = setup();
+    const signal = new AbortController().signal;
+    await harness.controller.show(`${URL_UNDER_TEST}#zoom=50&page=3`, signal);
+    await harness.controller.show('https://example.com/other.pdf#page=9', signal);
+
+    expect(harness.view.mounted.map(({ position }) => position)).toEqual([
+      { index: 2, fraction: 0 },
+      // Past the last page: the top.
       undefined,
     ]);
   });
@@ -430,6 +446,80 @@ describe('PdfController', () => {
     expect(harness.controller.shown).toBe(false);
     expect(harness.documents[0]?.destroy).toHaveBeenCalledOnce();
     expect(harness.view.clear).toHaveBeenCalledTimes(2);
+  });
+
+  it('follows the tab’s viewer while its PDF shows (D108)', async () => {
+    const harness = setup();
+    const signal = new AbortController().signal;
+    const viewer = { tabId: 7, documentId: 'DOC' };
+
+    // A newly opened tab: Chrome's viewer is at the top.
+    await harness.controller.show(URL_UNDER_TEST, signal, SOURCE_DOCUMENT, viewer);
+    expect(harness.viewerFollower.start).toHaveBeenCalledWith(viewer, [
+      { width: 601, height: 800 },
+      { width: 602, height: 800 },
+      { width: 603, height: 800 },
+    ], { index: 0, fraction: 0 });
+
+    // A PDF chosen on this computer has no viewer to follow.
+    harness.viewerFollower.start.mockClear();
+    harness.viewerFollower.stop.mockClear();
+    await harness.controller.show({ file: new Blob(['%PDF-']), key: 'local-file:1' }, signal);
+    expect(harness.viewerFollower.stop).toHaveBeenCalled();
+    expect(harness.viewerFollower.start).not.toHaveBeenCalled();
+
+    harness.controller.close();
+    expect(harness.viewerFollower.stop).toHaveBeenCalledTimes(2);
+  });
+
+  it('starts a reloaded or newly opened tab from the viewer’s start, not a remembered place', async () => {
+    const harness = setup();
+    const signal = new AbortController().signal;
+    const first = { tabId: 7, documentId: 'DOC-1' };
+    await harness.controller.show(URL_UNDER_TEST, signal, SOURCE_DOCUMENT, first);
+    harness.view.position = { index: 2, fraction: 0.5 };
+
+    // Refresh: the same tab document keeps the reader's place and the guess.
+    await harness.controller.show(URL_UNDER_TEST, signal, SOURCE_DOCUMENT, first);
+    expect(harness.view.mounted[1]?.position).toEqual({ index: 2, fraction: 0.5 });
+    expect(harness.viewerFollower.start.mock.calls[1]?.[2]).toBeUndefined();
+
+    // The tab reloads (or the PDF opens in another tab) while following is
+    // on: the viewer starts at its `#page=2`, and so does the view.
+    harness.viewerFollower.following = true;
+    const reloaded = { tabId: 7, documentId: 'DOC-2' };
+    await harness.controller.show(`${URL_UNDER_TEST}#page=2`, signal, SOURCE_DOCUMENT, reloaded);
+    expect(harness.view.mounted[2]?.position).toEqual({ index: 1, fraction: 0 });
+    expect(harness.viewerFollower.start.mock.calls[2]?.[2]).toEqual({ index: 1, fraction: 0 });
+
+    // With following off, the view opens where the reader left it, and the
+    // guess still starts from the viewer's start.
+    harness.viewerFollower.following = false;
+    harness.view.position = { index: 2, fraction: 0.25 };
+    const again = { tabId: 9, documentId: 'DOC-3' };
+    await harness.controller.show(URL_UNDER_TEST, signal, SOURCE_DOCUMENT, again);
+    expect(harness.view.mounted[3]?.position).toEqual({ index: 2, fraction: 0.25 });
+    expect(harness.viewerFollower.start.mock.calls[3]?.[2]).toEqual({ index: 0, fraction: 0 });
+  });
+
+  it('keeps following the shown PDF when its replacement fails to load', async () => {
+    let fail = false;
+    const harness = setup({
+      fetchPdf: async () => {
+        if (fail) throw new PdfFetchError('failed', 'x');
+        return new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d]);
+      },
+    });
+    const signal = new AbortController().signal;
+    await harness.controller.show(URL_UNDER_TEST, signal, SOURCE_DOCUMENT, { tabId: 7, documentId: 'DOC' });
+    harness.viewerFollower.stop.mockClear();
+    fail = true;
+    await rejection(harness.controller.show(URL_UNDER_TEST, signal, SOURCE_DOCUMENT, {
+      tabId: 7,
+      documentId: 'DOC',
+    }));
+    expect(harness.viewerFollower.stop).not.toHaveBeenCalled();
+    expect(harness.viewerFollower.start).toHaveBeenCalledOnce();
   });
 
   it('passes layout changes to the view', () => {

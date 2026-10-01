@@ -202,9 +202,11 @@ function setup(options: {
       },
     };
   };
+  const viewerFollower = { start: vi.fn(), stop: vi.fn() };
   const controller = new PdfController({
     fetchPdf,
     readFile,
+    viewerFollower,
     openDocument: options.openDocument ?? (async () => fakeDocument(undefined, scanned)),
     view,
     surface,
@@ -323,7 +325,7 @@ function setup(options: {
     state, pipeline, coordinator, surface, controller, createSession, driver,
     calls, waiting, translator, shown, statuses, reading,
     ocr, ocrCalls, ocrWaiting, captureCoordinator, detected,
-    getTab, readDocument, fetchPdf, readFile, errors,
+    getTab, readDocument, fetchPdf, readFile, errors, viewerFollower,
   };
 }
 
@@ -344,6 +346,12 @@ describe('PDF translation, end to end', () => {
     await vi.waitFor(() => expect(harness.statuses.at(-1)).toBe('The PDF is translated.'));
     expect(harness.state.translationComplete).toBe(true);
     expect(harness.createSession).toHaveBeenCalledOnce();
+    // The view follows the tab's own PDF viewer (D108).
+    expect(harness.viewerFollower.start).toHaveBeenCalledOnce();
+    expect(harness.viewerFollower.start.mock.calls[0]?.[0]).toEqual({
+      tabId: IDENTITY.tabId,
+      documentId: expect.any(String),
+    });
   });
 
   it('stops every later block when Cancel is pressed mid-document', async () => {
@@ -681,6 +689,8 @@ describe('PDFs chosen on this computer, end to end', () => {
     expect(harness.state.localPdf?.key).toMatch(/^local-file:/u);
     expect(harness.state.capturedPageIdentity).toBeUndefined();
     expect(harness.state.followedPageIdentity).toBeUndefined();
+    // No tab, so no viewer to follow.
+    expect(harness.viewerFollower.start).not.toHaveBeenCalled();
   });
 
   it('reads and translates scanned pages of a chosen file too', async () => {

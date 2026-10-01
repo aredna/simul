@@ -40,6 +40,7 @@ export const MINIMUM_CHROME_VERSION = 138;
 export const REQUIRED_ICON_SIZES = Object.freeze([16, 32, 48, 128]);
 export const REQUIRED_UNLISTED_BUNDLES = Object.freeze([
   'page-mirror.js',
+  'pdf-viewer-bridge.js',
 ]);
 export const FORBIDDEN_LEGACY_REPLICA_BUNDLES = Object.freeze([
   'page-live-observer.js',

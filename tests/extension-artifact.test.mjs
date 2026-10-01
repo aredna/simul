@@ -434,6 +434,12 @@ describe('validateArtifact', () => {
       'missing required local bundle',
     );
 
+    const missingViewerBridge = await createTemporaryArtifact();
+    await rm(path.join(missingViewerBridge, 'pdf-viewer-bridge.js'));
+    await expect(validateArtifact(missingViewerBridge)).rejects.toThrow(
+      'missing required local bundle: pdf-viewer-bridge.js',
+    );
+
     const missingMarker = await createTemporaryArtifact();
     await writeFile(path.join(missingMarker, 'side.js'), 'console.info("side");');
     await expect(validateArtifact(missingMarker)).rejects.toThrow(
@@ -883,7 +889,7 @@ describe('disabled OCR production profile', () => {
     expect(validation.pdfjs).toBe(true);
     expect(validation.manifest.version).toBe('0.5.2');
     expect(validation.manifest.version_name).toBe(
-      '0.5.2 beta v.20260925.15',
+      '0.5.2 beta v.20260925.16',
     );
     expect(validation.manifest.permissions).toEqual(APPROVED_PERMISSIONS);
     expect(validation.manifest.content_security_policy).toEqual({
@@ -1339,6 +1345,7 @@ async function createValidArtifact(
       path.join(directory, REQUIRED_UNLISTED_BUNDLES[0]),
       `console.info(${JSON.stringify(REQUIRED_REPLICA_RUNTIME_MARKERS[0])});`,
     ),
+    writeFile(path.join(directory, REQUIRED_UNLISTED_BUNDLES[1]), 'console.info("viewer");'),
   ]);
   return directory;
 }

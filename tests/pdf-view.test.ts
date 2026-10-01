@@ -214,6 +214,19 @@ describe('PdfView', () => {
     expect(harness.view.readingPosition()).toBeUndefined();
   });
 
+  it('scrolls to the place the viewer followed, and not while empty (D108)', () => {
+    const harness = setup({ pages: 10 });
+    const pageHeight = (792 * 400) / 612;
+    harness.view.followPosition({ index: 3, fraction: 0.25 });
+    expect(harness.element.scrollTop).toBe(0);
+
+    harness.view.mount(harness.pdf, harness.sizes);
+    harness.view.followPosition({ index: 3, fraction: 0.25 });
+
+    expect(harness.element.scrollTop).toBeCloseTo(8 + 3 * (pageHeight + 8) + pageHeight / 4, 1);
+    expect(harness.view.readingPosition()?.index).toBe(3);
+  });
+
   it('leaves a page that failed to draw blank, then retries it after a layout change', async () => {
     const harness = setup({ pages: 3 });
     harness.pdf.render.mockImplementationOnce(async () => {

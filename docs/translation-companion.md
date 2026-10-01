@@ -701,6 +701,90 @@ shell and the mirror has nothing to copy (D103).
     message and the picker there too.
   - The side panel's ↗ stays off for a local PDF (`capturedPageIdentity` is
     unset), and a window's return to the side panel leaves the file behind.
+- **Following Chrome's viewer (D108).** Chrome's PDF viewer reports its
+  viewport to the page that embeds it once that page has sent it any
+  message. The `viewport` report is undocumented and gives only the most
+  visible page's screen rectangle (`pageX`, `pageY`, `pageWidth`) and the
+  viewport size, never the page number (Chromium `pdf_viewer_base.ts`,
+  `viewportChanged_`).
+  - **Bridge.** After a tab PDF shows, `PdfController.show(..., viewer)`
+    starts `PdfViewerFollower` (`entrypoints/sidepanel/pdf-viewer-follower.ts`).
+    The follower injects the unlisted `pdf-viewer-bridge.js`
+    (`lib/pdf/pdf-viewer-bridge.ts`) into the tab's document and connects a
+    `simul-pdf-viewer:<session>` port.
+    - The bridge finds the viewer frame through
+      `chrome.dom.openOrClosedShadowRoot(document.body)`.
+    - It posts a hello whose type the viewer ignores (`simul:follow`), every
+      second until `documentLoaded`, at most 60 times.
+    - It forwards only `viewport` reports from the viewer's frame and origin
+      (`chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai`), as five
+      numbers and a time.
+    - A replaced or closed PDF, and `close`, stop the follower. A local PDF
+      starts none.
+  - **Guessing the page.** `lib/pdf/pdf-viewer-tracker.ts` models Chrome's
+    one-page-wide layout (Chromium `document_layout.cc`): pages are
+    trunc(points × 4/3) px, with insets of 3/5/7/5 px and 4 px between
+    pages. Every page is a candidate for the report's page, implying a zoom
+    (its width against the report's) and a viewport top. Candidates at the
+    previous zoom win while the viewport is unchanged, which tells pages of
+    different widths apart. With several whole pages in view Chrome may name
+    any of them, so the rules compare the viewport top, not the page named.
+    The rules, in order:
+    - the two-page view is not followed. It shows as a page reported 4 px
+      narrower at an unchanged zoom and viewport (its insets differ), or as
+      a page that is not where the one-page layout puts it;
+    - a report that moved only sideways, or a zoom or resize that keeps the
+      place within a snapped pixel, is the same place;
+    - for a lone report (none for 100 ms):
+      - an arrow step (40 px);
+      - an exact page top. It is the top of the page after the most visible
+        one (ArrowRight, paged modes, and the guess for the page box).
+        Within the first screen it reads as the very top instead, and an
+        arrow step onto a page top stays an arrow step, unless Chrome's
+        snapped second report follows within 20 ms: a jump's exact position
+        is snapped to whole pixels at once, a scroll's is not;
+      - the bottom of the PDF, when a key step was cut short by it;
+      - a PageUp, PageDown or Space step (0.875 × the viewport). When it is
+        not the nearest reading it is held: frames that follow mean a
+        scroll, 150 ms of quiet means the key. The same step again means a
+        held key only after a first press was read as a key, because equal
+        wheel steps can look like repeats of the opposite page key;
+      - a jump of more than 160 px is held until the viewer is still;
+    - for a report in a movement more than 20 ms after the last: a held
+      key's repeat (the next page top again, or the same page key step);
+    - otherwise the candidate nearest the place the viewer's speed predicts
+      (the second frame also tries the first frame's step), within 0.2 of a
+      page;
+    - a movement beyond that is held while reports come within 300 ms (a
+      viewer busy drawing can stall mid-scroll) and read after 300 ms of
+      quiet: as the top or bottom of the PDF when it stopped there (Home,
+      End), else as the page nearest where the last trusted speed, slowing,
+      would have carried it. A lone held jump takes the nearest candidate
+      after 150 ms.
+  - **Where guessing starts.** A newly opened or reloaded tab document is
+    taken to be at the viewer's start: the top, or the address's `#page=N`
+    (`addressPage`). `PdfController` passes that as the tracker's anchor,
+    and with following on mounts the view there instead of at a place
+    remembered from another document. The same tab document shown again
+    (Refresh, coming back) keeps the view's place and the tracker's guess.
+    Otherwise the first report is read nearest the view's own place.
+  - **Measured.** A seeded simulation (`tests/pdf-viewer-tracker-sim.test.ts`:
+    80 sessions, zooms from 25% to 180% with Chrome's presets, mixed sizes,
+    scroll positions snapped to whole pixels) places the page after 100% of
+    arrow steps and held arrows or page keys, 99.9% of wheel turns, 99.8% of
+    page keys, 99.6% of Home/End, 99.1% of flings, 97.9% of ArrowRight and
+    97.2% of held ArrowRight. Each mistake is counted once, with the tracker
+    then started again from the true page; in use a mistake stays until
+    Home or End. The page box, outline, links, Find and ArrowLeft are
+    guesses. The harness
+    (`~/.cache/simul-harness/pdf/phase6/panel-follow.mjs`) checks 20 moves
+    in Chrome for Testing 154 and 138.
+  - **Panel.** The follower moves `PdfView.followPosition` only when Follow
+    source scrolling is on and the guess moved. The latest guess is kept
+    while following is off, and turning following on (here or in another
+    window) moves the view there. A held report is read by a timer in the
+    panel; if a frame still follows a key read that way (the panel was
+    busy), the key becomes a scroll again.
 
 ## Detached window
 

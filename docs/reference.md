@@ -105,7 +105,32 @@ on a page once it is drawn.
   vertical text stays as it is, on scanned pages too.
 - Screen readers read each page ("Page 2 of 10") with its text, translated
   where a translation shows.
-- The panel scrolls on its own; it does not follow Chrome's PDF viewer.
+- With **Follow source scrolling** on (in Settings, on by default), the panel
+  follows Chrome's PDF viewer in the tab. The viewer says where its most
+  visible page sits on screen but never which page it is, so Simul works the
+  page out from Chrome's page layout and from how the viewer moves.
+  - Followed: scrolling with the wheel or trackpad; the arrow keys; Page Up,
+    Page Down and Space; ArrowRight; these keys held down; Home and End.
+  - Guessed: anything else that jumps in one step, such as the page box, the
+    outline, thumbnails, links, Find, ArrowLeft, or a scrollbar drag on a
+    long PDF. So is the first place when you open Simul with the viewer
+    already partway down. A newly opened or reloaded tab is taken to be at
+    its start (the top, or the address's `#page=N`), and with following on
+    the panel opens there too.
+  - After a wrong guess the panel stays that many pages off as you read on.
+    Home or End from far away puts it right.
+  - At zooms where pages start on whole pixels (100% and 90% for US Letter),
+    ArrowRight pressed in the first screen of the PDF, or exactly one arrow
+    step below a page top, looks the same as scrolling up, and is read as
+    that.
+  - Pages of different sizes help Simul tell them apart.
+  - The panel moves only when the viewer moves, so your own scrolling of the
+    panel stays until then.
+  - Not followed: a PDF opened from the computer, the viewer's two-page view
+    (the panel scrolls on its own there), and Microsoft Edge's viewer, which
+    sends nothing. Rotated pages are followed wrongly.
+- Without a remembered place, a PDF opens at the page its address names
+  (`#page=3`).
 - Only the pages near the view are drawn. Every page's text layer is built,
   though, so a PDF of thousands of pages takes more memory; trimming that is
   planned.
@@ -189,6 +214,11 @@ cannot act on the page. It is off by default.
 
 A PDF opened from the computer is read from the file you chose and makes no
 request; the panel keeps only a reference to the file, never past closing it.
+
+To follow Chrome's PDF viewer, Simul adds a small script to the PDF tab
+that asks the viewer for its scroll reports and passes on five numbers (where
+the most visible page sits and the viewport's size) and the time of each,
+nothing else.
 
 On a PDF tab Simul makes one extra request: it downloads the PDF's own URL,
 which the tab has already loaded. Chrome keeps the extension's cache separate

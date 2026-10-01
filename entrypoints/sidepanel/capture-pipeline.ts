@@ -98,13 +98,15 @@ export interface PipelinePdf {
   readonly shown: boolean;
   /**
    * Shows the PDF at the tab's URL, or a file chosen on this computer, with
-   * an empty translation surface for `document`. Rejects with a
-   * `PageAccessError` status, or an `AbortError` when cancelled.
+   * an empty translation surface for `document`; a tab's PDF view follows
+   * that tab's viewer (`viewer`). Rejects with a `PageAccessError` status,
+   * or an `AbortError` when cancelled.
    */
   show(
     source: string | LocalPdfFile,
     signal: AbortSignal,
     document: ReplicaSourceDocumentIdentity,
+    viewer?: { readonly tabId: number; readonly documentId: string },
   ): Promise<{ readonly pageCount: number }>;
   /**
    * Reads every page's text of the shown PDF into its surface. Rejects with
@@ -829,7 +831,12 @@ export class CapturePipeline {
       frameId: 0,
     };
     try {
-      await pdf.show(source, abortController.signal, document);
+      await pdf.show(
+        source,
+        abortController.signal,
+        document,
+        identity ? { tabId: identity.tabId, documentId } : undefined,
+      );
     } catch (error) {
       // Superseded or cancelled: whatever replaced this load reports instead.
       if (abortController.signal.aborted) return;

@@ -19,6 +19,7 @@ import { ALL_UI_STRINGS, UI_STRINGS } from '../../lib/companion-ui-strings';
 import { CapturePipeline } from './capture-pipeline';
 import { PdfController, type PdfDiagnostic } from './pdf-controller';
 import { PdfView } from './pdf-view';
+import { PdfViewerFollower, connectChromePdfViewer } from './pdf-viewer-follower';
 import {
   CompanionState,
   type CaptureRequest,
@@ -288,6 +289,13 @@ let pdfRecognition: ImageRecognitionCoordinator | undefined;
 let pdfRecognitionOrigin: string | undefined;
 // How far the running translation's scanned-page reading is: [read, total].
 let pdfReadingProgress: readonly [number, number] | undefined;
+// The PDF view moves with the tab's PDF viewer under Follow source scrolling.
+const pdfViewerFollower = new PdfViewerFollower({
+  connect: (target) => connectChromePdfViewer(target, mirrorSessionId),
+  view: pdfView,
+  enabled: () => state.preferences.syncScroll,
+  onDiagnostic: (followState) => logPdfDiagnostic({ stage: 'follow', state: followState }),
+});
 const pdfController = new PdfController({
   fetchPdf: (url, signal) => fetchPdfBytes(url, { signal }),
   openDocument: (bytes, signal) => openPdfDocument(
@@ -297,6 +305,7 @@ const pdfController = new PdfController({
     signal,
   ),
   view: pdfView,
+  viewerFollower: pdfViewerFollower,
   surface: pdfTextSurface,
   onPriorityChange: () => replicaTranslationCoordinator.reprioritize(),
   onDiagnostic: logPdfDiagnostic,
@@ -1066,6 +1075,7 @@ syncScrollInput.addEventListener('change', () => {
   if (state.preferences.syncScroll && state.lastSourceScroll) {
     visibleReplayHost.followSourceScroll(state.lastSourceScroll, true);
   }
+  if (state.preferences.syncScroll) pdfViewerFollower.realign();
 });
 
 readScopeController.installListeners();
@@ -1236,6 +1246,8 @@ browser.storage.onChanged.addListener((changes, areaName) => {
   }
   syncPreferenceControls();
   updateMirrorLayout();
+  // Following turned on in another window: the PDF view goes to the viewer.
+  if (!previous.syncScroll && state.preferences.syncScroll) pdfViewerFollower.realign();
   if (readPolicyChanged) restartReplicaAfterReadPolicyChange();
   if (
     state.snapshot &&

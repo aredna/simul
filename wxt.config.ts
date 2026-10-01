@@ -9,7 +9,7 @@ import {
 } from './tools/ocr-build-profile';
 
 const ocrBuildProfile = readOcrBuildProfile(process.env);
-const betaBuildSuffix = 'beta v.20260925.15';
+const betaBuildSuffix = 'beta v.20260925.16';
 const tesseractEnabled = ocrBuildProfile.enabledProviderIds.includes('tesseract');
 const offscreenOcrEnabled = ocrBuildProfile.enabledProviderIds.some((id) =>
   id === 'tesseract' || id === 'chrome-text-detector',
@@ -22,6 +22,7 @@ const selectedEntrypoints = Object.freeze([
   'background',
   ...(offscreenOcrEnabled ? ['offscreen'] : []),
   'page-mirror',
+  'pdf-viewer-bridge',
   'sidepanel',
 ]);
 const releaseLegalFiles = Object.freeze([

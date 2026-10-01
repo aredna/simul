@@ -366,10 +366,12 @@ describe('CapturePipeline PDFs', () => {
     await harness.settled();
 
     expect(harness.engine.run).not.toHaveBeenCalled();
+    // The panel follows this tab's own PDF viewer (D108).
     expect(harness.pdf.show).toHaveBeenCalledWith(
       IDENTITY.url,
       expect.any(AbortSignal),
       documentFor(1),
+      { tabId: IDENTITY.tabId, documentId: documentFor(1).documentId },
     );
     expect(harness.events).toContain('surface:pdf');
     expect(harness.pdf.shown).toBe(true);

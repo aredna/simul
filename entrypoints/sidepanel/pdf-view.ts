@@ -236,6 +236,14 @@ export class PdfView implements PdfViewSurface, PdfTextSink {
     return pdfReadingPosition(this.#layout.boxes, this.#element.scrollTop);
   }
 
+  /** Scrolls so that `position` is at the top of the view (following, D108). */
+  followPosition(position: PdfReadingPosition): void {
+    if (!this.#document || !this.#layout) return;
+    const top = pdfScrollTopFor(this.#layout.boxes, position);
+    if (Math.abs(this.#element.scrollTop - top) < 0.5) return;
+    this.#element.scrollTop = top;
+  }
+
   /** Names every page again, in the language now current. */
   relabelPages(): void {
     const total = this.#pages.length;

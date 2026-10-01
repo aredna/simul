@@ -24,6 +24,7 @@ import type { ReplicaSourceDocumentIdentity } from '../../lib/replica/source-ide
 import type { SupportedLanguage } from '../../lib/translation-provider';
 import { uiLanguageName, uiText, type UiText } from '../../lib/ui-text';
 import type { PdfViewSurface } from './pdf-view';
+import type { PdfViewerTarget } from './pdf-viewer-follower';
 
 /** Content-free: stages, counts, sizes and times only. */
 export type PdfDiagnostic =
@@ -49,7 +50,9 @@ export type PdfDiagnostic =
       /** The reading stopped before every page was read (cancel, close, error). */
       readonly stopped: boolean;
       readonly milliseconds: number;
-    };
+    }
+  /** Whether the tab's PDF viewer could be reached, to follow it (D108). */
+  | { readonly stage: 'follow'; readonly state: 'connected' | 'unavailable' };
 
 /** How the last reading of scanned pages ended. */
 export type PdfScannedReadingOutcome =
@@ -110,6 +113,18 @@ export interface PdfControllerDependencies {
   /** How long one page's text may take; a slower page counts as no text. */
   readonly pageTextTimeoutMs?: number;
   readonly ocr?: PdfControllerOcr;
+  /** Moves the view with the tab's PDF viewer while its PDF shows (D108). */
+  readonly viewerFollower?: {
+    /** `anchor`: where the viewer is taken to be before its first report. */
+    start(
+      target: PdfViewerTarget,
+      pageSizes: readonly PdfPagePoints[],
+      anchor?: PdfReadingPosition,
+    ): void;
+    stop(): void;
+    /** Whether the view moves with the viewer now (Follow source scrolling). */
+    readonly following?: boolean;
+  };
 }
 
 /**
@@ -144,6 +159,8 @@ export class PdfController {
   #document: PdfDocumentHandle | undefined;
   /** The shown PDF's address without its fragment, or its chosen file's key. */
   #shownKey: string | undefined;
+  /** The tab document whose viewer shows the PDF; undefined for a file. */
+  #shownViewerDocument: string | undefined;
   #pages: PageSizes | undefined;
   /** The running text reading; replaced or cleared to stop it. */
   #reading: object | undefined;
@@ -166,6 +183,8 @@ export class PdfController {
   readonly #positions = new Map<string, {
     readonly pageCount: number;
     readonly position: PdfReadingPosition;
+    /** The tab document the position was in. */
+    readonly viewerDocument: string | undefined;
   }>();
 
   constructor(dependencies: PdfControllerDependencies) {
@@ -181,14 +200,16 @@ export class PdfController {
    * this computer) is shown. Failures reject with a `PageAccessError` whose
    * message is the status to show; a cancelled load rejects with an
    * `AbortError` and shows nothing. With `sourceDocument`, the translation
-   * surface is started for it, empty; `readText` fills it.
+   * surface is started for it, empty; `readText` fills it. With `viewer`,
+   * the tab whose viewer shows this PDF, the view follows that viewer.
    */
   async show(
     source: string | LocalPdfFile,
     signal: AbortSignal,
     sourceDocument?: ReplicaSourceDocumentIdentity,
+    viewer?: PdfViewerTarget,
   ): Promise<{ readonly pageCount: number }> {
-    const { fetchPdf, openDocument, view, surface } = this.#dependencies;
+    const { fetchPdf, openDocument, view, surface, viewerFollower } = this.#dependencies;
     const readFile = this.#dependencies.readFile ??
       ((file: Blob, readSignal: AbortSignal) => readPdfFile(file, { signal: readSignal }));
     const now = this.#dependencies.now ?? (() => performance.now());
@@ -224,19 +245,36 @@ export class PdfController {
       bounded.signal.throwIfAborted();
       step = 'show';
       this.#rememberPosition();
-      const remembered = this.#positions.get(key);
-      const position = remembered?.pageCount === pageSizes.length ? remembered.position : undefined;
+      const known = this.#positions.get(key);
+      const remembered = known?.pageCount === pageSizes.length ? known : undefined;
+      // A tab's PDF newly opened or reloaded: Chrome's viewer starts at the
+      // top, or at the address's `#page=N`. With following on, the view
+      // opens there too, not at a place remembered from another document.
+      const freshViewer = viewer !== undefined && remembered?.viewerDocument !== viewer.documentId;
+      const start = typeof source === 'string' ? addressPage(source, pageSizes.length) : undefined;
+      const position = freshViewer && viewerFollower?.following
+        ? start
+        : remembered?.position ?? start;
       const previous = this.#document;
       this.#reading = undefined;
       this.stopScannedReading();
       this.#stopProbe();
       this.#scannedOutcome = undefined;
+      viewerFollower?.stop();
       try {
         view.mount(opened, pageSizes, position);
         this.#document = opened;
         this.#shownKey = key;
+        this.#shownViewerDocument = viewer?.documentId;
         this.#pages = measured;
         opened = undefined;
+        if (viewer) {
+          viewerFollower?.start(
+            viewer,
+            pageSizes,
+            freshViewer ? start ?? { index: 0, fraction: 0 } : undefined,
+          );
+        }
         if (surface && sourceDocument) {
           surface.mount(sourceDocument, pageSizes.length);
           surface.readingPage = position?.index ?? 0;
@@ -573,6 +611,7 @@ export class PdfController {
 
   /** Destroys the shown document and empties and hides the view. Idempotent. */
   close(): void {
+    this.#dependencies.viewerFollower?.stop();
     this.#rememberPosition();
     this.#reading = undefined;
     this.stopScannedReading();
@@ -587,6 +626,7 @@ export class PdfController {
     const document = this.#document;
     this.#document = undefined;
     this.#shownKey = undefined;
+    this.#shownViewerDocument = undefined;
     if (document) void document.destroy().catch(() => {});
   }
 
@@ -598,7 +638,11 @@ export class PdfController {
     const position = this.#dependencies.view.readingPosition();
     if (!position) return;
     this.#positions.delete(key);
-    this.#positions.set(key, { pageCount: document.pageCount, position });
+    this.#positions.set(key, {
+      pageCount: document.pageCount,
+      position,
+      viewerDocument: this.#shownViewerDocument,
+    });
     while (this.#positions.size > REMEMBERED_POSITIONS) {
       const oldest = this.#positions.keys().next().value;
       if (oldest === undefined) break;
@@ -747,6 +791,23 @@ function untilAborted<T>(promise: Promise<T>, signal: AbortSignal): Promise<T> {
     signal.addEventListener('abort', abort, { once: true });
     promise.then(resolve, reject).finally(() => signal.removeEventListener('abort', abort));
   });
+}
+
+/** The page an address opens at (`#page=3`), as Chrome's viewer reads it. */
+function addressPage(url: string, pageCount: number): PdfReadingPosition | undefined {
+  let fragment: string;
+  try {
+    fragment = new URL(url).hash.slice(1);
+  } catch {
+    return undefined;
+  }
+  for (const part of fragment.split('&')) {
+    const match = /^page=(\d{1,7})$/iu.exec(part);
+    if (!match) continue;
+    const page = Number(match[1]);
+    return page >= 1 && page <= pageCount ? { index: page - 1, fraction: 0 } : undefined;
+  }
+  return undefined;
 }
 
 /** A PDF's address without its fragment: `#page=3` is the same file. */
