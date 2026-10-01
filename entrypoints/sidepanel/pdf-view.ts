@@ -292,7 +292,10 @@ export class PdfView implements PdfViewSurface, PdfTextSink {
     const size = this.#sizes[pageIndex];
     if (!this.#document || !page || !size) return;
     // Read again (a scanned page): what the old blocks had goes with them.
+    // A block that stays (the page's typed text) keeps its translation.
+    const staying = new Set(blocks.map((block) => block.id));
     for (const block of page.blocks ?? []) {
+      if (staying.has(block.id)) continue;
       this.#blockPages.delete(block.id);
       this.#translations.delete(block.id);
     }

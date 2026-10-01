@@ -90,17 +90,24 @@ on a page once it is drawn.
   them, the page you are reading first, and **Cancel** stops the reading
   too. Text pages never wait for scanned ones. Showing a PDF, Live source
   only, or From and To in the same language read no scanned page, with one
-  exception: with Auto-detect and no language tag or text, Simul reads up to
+  exception: with Auto-detect and no language tag or text (or text only on
+  scanned pages, such as a header over each scan), Simul reads up to
   three scanned pages to find the language (for about 20 seconds at most)
   when the PDF's text has been read, when From becomes Auto-detect, or when
   Live source only ends, once per PDF. The OCR draws each page itself (at
   most 4 megapixels and 300 dpi), so it needs no image access, and the
   toolbar's **OCR** switch does not apply; the image reading methods under
   **Advanced & experimental** do, and Tesseract.js must be on (Chrome's text
-  detector alone cannot read a page). Only pages pdf.js finds no text on at
-  all are read; a page with some text (a header over a scan) is not. If
-  Tesseract.js is off, the language has no OCR model, or a page could not be
-  read, the status says so; a page that cannot be drawn is not tried again.
+  detector alone cannot read a page). A page is read when it has no text at
+  all, or when its own text covers at most 3% of it and its pictures cover
+  at least four fifths of it: a scan under a typed header, page number or
+  stamp. That typed text stays as it is and is translated at once; OCR adds
+  the rest, without the lines that only repeat it. A page with more text, or
+  with smaller pictures, is never read. Such a page's pictures are looked at
+  only when it can be read: with Tesseract.js off, or a language without an
+  OCR model, it stays as it is and nothing is said about it.
+  If Tesseract.js is off, the language has no OCR model, or a page could not
+  be read, the status says so; a page that cannot be drawn is not tried again.
   A PDF with no text at all says "No text was found in this PDF." Rotated or
   vertical text stays as it is, on scanned pages too.
 - Screen readers read each page ("Page 2 of 10") with its text, translated

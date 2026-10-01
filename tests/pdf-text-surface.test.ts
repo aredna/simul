@@ -259,6 +259,189 @@ describe('PdfTextSurface scanned pages', () => {
     expect(surface.snapshot()?.records.map((record) => record.source)).toEqual(['Texte', 'Numérisé']);
   });
 
+  describe('with a little typed text over the scan', () => {
+    const at = (text: string, top: number): PdfTextBlock => {
+      const box = { left: 10, top, width: 100, height: 12 };
+      return { ...block(text), lines: [box], box };
+    };
+
+    function stamped() {
+      const harness = setup();
+      harness.surface.mount(DOCUMENT, 2);
+      harness.surface.addPage({
+        index: 0,
+        blocks: [at('Case 17', 20), at('Page 1 of 2', 760)],
+        littleText: true,
+      });
+      harness.surface.addPage({ index: 1, blocks: [at('Page 2 of 2', 760)], littleText: true });
+      harness.surface.markTextComplete();
+      return harness;
+    }
+
+    it('counts the page as a scanned page still to read, and keeps its text', () => {
+      const { surface, pages } = stamped();
+      expect(surface.scannedPages()).toEqual([0, 1]);
+      expect(surface.unreadScannedPages()).toEqual([0, 1]);
+      // Only its pictures tell whether it is a scan.
+      expect(surface.isUnconfirmedScan(0)).toBe(true);
+      surface.confirmScannedPage(0);
+      expect(surface.isUnconfirmedScan(0)).toBe(false);
+      expect(surface.unreadScannedPages()).toEqual([0, 1]);
+      expect(surface.typedText(0).map((each) => each.text)).toEqual(['Case 17', 'Page 1 of 2']);
+      expect(pages.get(0)?.map((each) => each.text)).toEqual(['Case 17', 'Page 1 of 2']);
+      expect(surface.snapshot()?.records.map((record) => record.source))
+        .toEqual(['Case 17', 'Page 1 of 2', 'Page 2 of 2']);
+      // A text page has no typed text to keep apart.
+      const text = setup();
+      text.surface.mount(DOCUMENT, 1);
+      text.surface.addPage({ index: 0, blocks: [block('Texte')] });
+      expect(text.surface.typedText(0)).toEqual([]);
+      expect(text.surface.scannedPages()).toEqual([]);
+      expect(text.surface.isUnconfirmedScan(0)).toBe(false);
+    });
+
+    it('makes a page that is not a scan a text page, as it stands', async () => {
+      const { surface, pages, sink } = stamped();
+      const before = pages.get(1);
+      const waiting = surface.waitForText(new AbortController().signal);
+      surface.dismissScannedPage(1);
+      await expect(waiting).resolves.toBeUndefined();
+      expect(surface.unreadScannedPages()).toEqual([0]);
+      expect(surface.scannedPages()).toEqual([0]);
+      expect(surface.typedText(1)).toEqual([]);
+      // Its text stays where it is: nothing was given to the view again.
+      expect(pages.get(1)).toBe(before);
+      expect(sink.setPageText).toHaveBeenCalledTimes(2);
+      expect(surface.snapshot()?.records.map((record) => record.source))
+        .toEqual(['Case 17', 'Page 1 of 2', 'Page 2 of 2']);
+      // OCR text does not reach a text page.
+      surface.setScannedPage(1, [at('Stray', 100)], 'fra');
+      expect(pages.get(1)).toBe(before);
+      // A confirmed scan, and a page pdf.js found empty, are not dismissed.
+      surface.confirmScannedPage(0);
+      surface.dismissScannedPage(0);
+      expect(surface.unreadScannedPages()).toEqual([0]);
+      const scans = mounted();
+      scans.surface.dismissScannedPage(1);
+      expect(scans.surface.unreadScannedPages()).toEqual([1, 2, 3]);
+      expect(scans.surface.isUnconfirmedScan(1)).toBe(false);
+    });
+
+    it('adds the scan\'s text between the typed blocks, which keep their ids', () => {
+      const { surface, pages } = stamped();
+      const typed = pages.get(0)!.map((each) => each.id);
+      surface.setScannedPage(0, [at('Le port', 100), at('La ville', 300)], 'fra');
+      expect(pages.get(0)?.map((each) => each.text))
+        .toEqual(['Case 17', 'Le port', 'La ville', 'Page 1 of 2']);
+      expect([pages.get(0)![0]!.id, pages.get(0)![3]!.id]).toEqual(typed);
+      expect(surface.unreadScannedPages()).toEqual([1]);
+      expect(surface.snapshot()?.records.map((record) => record.source))
+        .toEqual(['Case 17', 'Le port', 'La ville', 'Page 1 of 2', 'Page 2 of 2']);
+      // The typed blocks still take their translations.
+      surface.beginProjection({ translationEpoch: 4, pairKey: 'fr>en' });
+      expect(surface.project(projection(surface, typed[0]!, 'Case 17'))).toBe(true);
+
+      // Read again: the earlier reading goes, the typed text stays.
+      surface.setScannedPage(0, [at('Le port et la ville', 100)], 'fra');
+      expect(pages.get(0)?.map((each) => each.text))
+        .toEqual(['Case 17', 'Le port et la ville', 'Page 1 of 2']);
+      expect(surface.snapshot()?.records).toHaveLength(4);
+      // A reading that finds nothing leaves the typed text.
+      surface.setScannedPage(1, [], 'fra');
+      expect(pages.get(1)?.map((each) => each.text)).toEqual(['Page 2 of 2']);
+      expect(surface.unreadScannedPages()).toEqual([]);
+    });
+
+    it('keeps the scan\'s own order, with typed blocks that land together in theirs', () => {
+      const { surface, pages } = stamped();
+      // Two columns: OCR reads the left one down, then the right one.
+      surface.setScannedPage(
+        0,
+        [at('Left top', 100), at('Left bottom', 500), at('Right top', 100), at('Right bottom', 500)],
+        'fra',
+      );
+      expect(pages.get(0)?.map((each) => each.text)).toEqual([
+        'Case 17', 'Left top', 'Left bottom', 'Right top', 'Right bottom', 'Page 1 of 2',
+      ]);
+      // Nothing below either typed block: both go last, header first.
+      surface.setScannedPage(0, [at('Above everything', 5)], 'fra');
+      expect(pages.get(0)?.map((each) => each.text))
+        .toEqual(['Above everything', 'Case 17', 'Page 1 of 2']);
+    });
+
+    it('forgets only the scan\'s text when another OCR model group reads', () => {
+      const { surface, pages } = stamped();
+      const typed = pages.get(0)!.map((each) => each.id);
+      surface.setScannedPage(0, [at('Read in English', 100)], 'eng');
+      surface.forgetScannedPages('fra');
+      expect(surface.unreadScannedPages()).toEqual([0, 1]);
+      expect(pages.get(0)?.map((each) => each.text)).toEqual(['Case 17', 'Page 1 of 2']);
+      expect(pages.get(0)?.map((each) => each.id)).toEqual(typed);
+      expect(surface.typedText(0)).toHaveLength(2);
+      expect(surface.snapshot()?.records.map((record) => record.source))
+        .toEqual(['Case 17', 'Page 1 of 2', 'Page 2 of 2']);
+    });
+
+    it('says when the only text is on scanned pages', () => {
+      const { surface } = stamped();
+      expect(surface.textOnScannedPagesOnly).toBe(true);
+      surface.setScannedPage(0, [at('Le port', 100)], 'fra');
+      expect(surface.textOnScannedPagesOnly).toBe(true);
+
+      // A text page beside them: its text names the language.
+      const mixed = mounted();
+      expect(mixed.surface.textOnScannedPagesOnly).toBe(false);
+      // A page that turned out to be a text page names the language again.
+      surface.dismissScannedPage(1);
+      expect(surface.textOnScannedPagesOnly).toBe(false);
+      // No text at all yet: nothing to weigh.
+      const scans = setup();
+      scans.surface.mount(DOCUMENT, 1);
+      scans.surface.addPage({ index: 0, blocks: [], scanned: true });
+      expect(scans.surface.textOnScannedPagesOnly).toBe(false);
+      scans.surface.setScannedPage(0, [block('Numérisé')], 'fra');
+      expect(scans.surface.textOnScannedPagesOnly).toBe(true);
+      expect(setup().surface.textOnScannedPagesOnly).toBe(false);
+    });
+
+    it('forgets the typed text with the document', () => {
+      const { surface } = stamped();
+      surface.mount(DOCUMENT, 2);
+      expect(surface.typedText(0)).toEqual([]);
+      expect(surface.scannedPages()).toEqual([]);
+      expect(surface.isUnconfirmedScan(0)).toBe(false);
+    });
+
+    it('takes a page pdf.js found empty for a scan whatever else is said', () => {
+      const { surface } = setup();
+      surface.mount(DOCUMENT, 2);
+      surface.addPage({ index: 0, blocks: [], scanned: true, littleText: true });
+      // Only rotated text: no blocks, perhaps a scan.
+      surface.addPage({ index: 1, blocks: [], littleText: true });
+      expect(surface.unreadScannedPages()).toEqual([0, 1]);
+      expect(surface.isUnconfirmedScan(0)).toBe(false);
+      expect(surface.isUnconfirmedScan(1)).toBe(true);
+      expect(surface.typedText(1)).toEqual([]);
+    });
+
+    it('confirms a page that is read, and keeps the text of any scanned page', () => {
+      const { surface, pages } = stamped();
+      surface.setScannedPage(0, [at('Le port', 100)], 'fra');
+      expect(surface.isUnconfirmedScan(0)).toBe(false);
+      // Read: no longer to be made a text page.
+      surface.dismissScannedPage(0);
+      expect(surface.scannedPages()).toEqual([0, 1]);
+
+      // A page given as scanned with text of its own keeps that text too.
+      const other = setup();
+      other.surface.mount(DOCUMENT, 1);
+      other.surface.addPage({ index: 0, blocks: [at('Tampon', 20)], scanned: true });
+      other.surface.setScannedPage(0, [at('Numérisé', 100)], 'fra');
+      expect(other.pages.get(0)?.map((each) => each.text)).toEqual(['Tampon', 'Numérisé']);
+      expect(pages.get(0)?.map((each) => each.text)).toEqual(['Case 17', 'Le port', 'Page 1 of 2']);
+    });
+  });
+
   it('reads pages again in another OCR model group, and not in the same one', () => {
     const { surface, pages } = mounted();
     surface.setScannedPage(1, [block('Lu en anglais')], 'eng');

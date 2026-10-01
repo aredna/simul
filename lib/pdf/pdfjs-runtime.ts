@@ -5,6 +5,7 @@ import {
   fontFaceFromName,
   type PdfFontFace,
 } from './pdf-overlay-style';
+import { pdfImageCoverage, type PdfPaintOperator } from './pdf-scanned-page';
 
 /**
  * The packaged pdf.js (`vendor/pdfjs/`, shipped as `pdfjs/`) behind a narrow
@@ -93,6 +94,11 @@ export interface PdfDocumentHandle {
   getTextContent(pageNumber: number): Promise<PdfTextContent>;
   /** Whether the page paints any image (a scanned page, a photo, a figure). */
   hasImages(pageNumber: number): Promise<boolean>;
+  /**
+   * The share of the page (0 to 1) its images cover, by their boxes. pdf.js
+   * decodes the page's images for it; `releasePage` frees them.
+   */
+  imageCoverage(pageNumber: number): Promise<number>;
   /**
    * Draws the page into `canvas` at `scale` and resizes the canvas to fit,
    * or at a smaller scale if the canvas would exceed `MAX_RENDER_PIXELS`.
@@ -238,6 +244,24 @@ function createDocumentHandle(
       'paintImageMaskXObjectRepeat',
     ].map((name) => pdfjs.OPS[name as keyof typeof pdfjs.OPS]),
   );
+  // Where images land on the page: the operators that move or paint them.
+  const paintOperators = new Map<number, PdfPaintOperator>();
+  const paints = (kind: PdfPaintOperator, ...names: string[]) => {
+    for (const name of names) {
+      const code: unknown = pdfjs.OPS[name as keyof typeof pdfjs.OPS];
+      if (typeof code === 'number') paintOperators.set(code, kind);
+    }
+  };
+  paints('save', 'save', 'beginGroup');
+  paints('restore', 'restore', 'endGroup', 'paintFormXObjectEnd', 'endAnnotation');
+  paints('transform', 'transform');
+  paints('form-begin', 'paintFormXObjectBegin');
+  paints('annotation-begin', 'beginAnnotation');
+  paints('image', 'paintImageXObject', 'paintInlineImageXObject', 'paintImageMaskXObject');
+  paints('image-repeat', 'paintImageXObjectRepeat');
+  paints('mask-repeat', 'paintImageMaskXObjectRepeat');
+  paints('image-group', 'paintImageMaskXObjectGroup');
+  paints('inline-group', 'paintInlineImageXObjectGroup');
   const rendering = new WeakMap<object, Pdfjs.RenderTask>();
   return {
     pageCount: document.numPages,
@@ -263,6 +287,10 @@ function createDocumentHandle(
     async hasImages(pageNumber) {
       const operators = await (await document.getPage(pageNumber)).getOperatorList();
       return operators.fnArray.some((code) => imageOperators.has(code));
+    },
+    async imageCoverage(pageNumber) {
+      const page = await document.getPage(pageNumber);
+      return pdfImageCoverage(await page.getOperatorList(), paintOperators, page.view);
     },
     async render(pageNumber, canvas, scale, signal) {
       if (!Number.isFinite(scale) || scale <= 0) {

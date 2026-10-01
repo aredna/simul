@@ -48,7 +48,11 @@ import type {
   ReplicaSourceCommit,
   ReplicaTranslationSnapshot,
 } from '../../lib/translation/replica-translation-coordinator';
-import type { SupportedLanguage, TranslationPair } from '../../lib/translation-provider';
+import {
+  canonicalizeLanguageTag,
+  type SupportedLanguage,
+  type TranslationPair,
+} from '../../lib/translation-provider';
 import {
   isLocalPdfCaptureRequest,
   type CaptureRequest,
@@ -125,6 +129,8 @@ export interface PipelinePdf {
   setLanguageHint(language: SupportedLanguage | undefined): void;
   /** Whether scanned pages remain that a run could read in `language`. */
   scannedPagesState(language: SupportedLanguage | undefined): PdfScannedPagesState;
+  /** The shown PDF's only text is on scanned pages (stamps over scans). */
+  readonly textOnScannedPagesOnly: boolean;
   /** Why the shown PDF has nothing to translate. */
   noTextStatus(language: SupportedLanguage | undefined): UiText;
 }
@@ -409,9 +415,12 @@ export class CapturePipeline {
    * With From = Auto and no language in the shown PDF's /Lang or text, the
    * scanned pages may tell: the language probe reads them (a run needs the
    * language to read them) and the snapshot is published again with its
-   * answer. The controller keeps that answer, so asking again for the same
-   * PDF and reading methods reads nothing. Used when the PDF's text is read,
-   * when From becomes Auto and when Translated mode resumes.
+   * answer. Text that is only on scanned pages (a header, a stamp over a
+   * scan) does not name the scans' language, so the probe is asked then
+   * too, unless the PDF declares its language. The controller keeps the
+   * answer, so asking again for the same PDF and reading methods reads
+   * nothing. Used when the PDF's text is read, when From becomes Auto and
+   * when Translated mode resumes.
    */
   async probePdfLanguage(signal: AbortSignal): Promise<void> {
     const state = this.#state;
@@ -424,7 +433,9 @@ export class CapturePipeline {
       state.preferences.sourceLanguage !== 'auto' ||
       state.isLiveSourceOnlyMode ||
       pdf.scannedPagesState(undefined) !== 'readable' ||
-      await translationDriver.pageLanguageResolves()
+      (pdf.textOnScannedPagesOnly
+        ? declaresLanguage(requested)
+        : await translationDriver.pageLanguageResolves())
     ) return;
     const language = await pdf.probeLanguage(signal);
     const published = state.snapshot;
@@ -942,4 +953,10 @@ export class CapturePipeline {
       return 1;
     }
   }
+}
+
+/** Whether the PDF itself names a language Simul knows (its /Lang). */
+function declaresLanguage(snapshot: ReplicaTranslationSnapshot): boolean {
+  return snapshot.documentLanguageSource !== 'scanned-pages' &&
+    canonicalizeLanguageTag(snapshot.documentLanguage) !== undefined;
 }

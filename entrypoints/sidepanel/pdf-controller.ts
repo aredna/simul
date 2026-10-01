@@ -11,12 +11,14 @@ import type {
 } from '../../lib/pdf/pdf-layout';
 import {
   canReadScannedPages,
+  isScannedPage,
   pdfOcrRoute,
   probeScannedLanguage,
   readScannedPage,
   type PdfOcrEnvironment,
 } from '../../lib/pdf/pdf-ocr';
 import { tesseractLanguageGroupFor } from '../../lib/ocr/providers/tesseract/language-catalog';
+import { PDF_SCAN_TEXT_SHARE, pdfTextShare } from '../../lib/pdf/pdf-scanned-page';
 import type { PdfPageText } from '../../lib/pdf/pdf-text-surface';
 import { PdfjsOpenError, type PdfDocumentHandle } from '../../lib/pdf/pdfjs-runtime';
 import { pdfTextBlocks, type PdfTextBlock } from '../../lib/pdf/text-blocks';
@@ -78,6 +80,11 @@ export interface PdfControllerSurface {
   readingPage: number;
   languageHint: string | undefined;
   unreadScannedPages(group?: string): number[];
+  typedText(index: number): readonly PdfTextBlock[];
+  isUnconfirmedScan(index: number): boolean;
+  confirmScannedPage(index: number): void;
+  dismissScannedPage(index: number): void;
+  readonly textOnScannedPagesOnly: boolean;
   setScannedPage(index: number, blocks: readonly PdfTextBlock[], group: string): void;
   forgetScannedPages(group: string): void;
   beginReading(): object;
@@ -140,6 +147,11 @@ const REMEMBERED_POSITIONS = 16;
 export const PDF_PRIORITY_DELAY_MS = 250;
 /** One page's text read that takes longer than this counts as no text. */
 export const PDF_PAGE_TEXT_TIMEOUT_MS = 10_000;
+// For the language probe, the pictures of at most this many pages with a
+// little text are looked at, nearest the reader first, and no more once this
+// many of them are scans (the probe draws three pages at most).
+const MAX_PROBED_UNCONFIRMED_PAGES = 12;
+const MAX_PROBED_SCANS = 3;
 
 interface PageSizes {
   readonly sizes: readonly PdfPagePoints[];
@@ -347,7 +359,7 @@ export class PdfController {
         document,
         index,
         pages.transforms[index]!,
-        pages.sizes[index]?.width,
+        pages.sizes[index],
         this.#dependencies.pageTextTimeoutMs ?? PDF_PAGE_TEXT_TIMEOUT_MS,
       );
       if (this.#reading !== token || this.#document !== document || signal.aborted) {
@@ -399,10 +411,15 @@ export class PdfController {
       throw abortError();
     }
     const resolved = pdfOcrRoute(language, ocr.providerOrder(), ocr.minimumConfidence());
+    const current = () =>
+      this.#document === document && surface.document === sourceDocument;
     if (resolved.status !== 'ready') {
       // Text read with another model must not be translated as this language.
       surface.forgetScannedPages(tesseractLanguageGroupFor(language) ?? '');
-      const outcome: PdfScannedReadingOutcome = surface.unreadScannedPages().length === 0
+      // A page with a little text is only known to be a scan by its
+      // pictures, which are looked at when it can be read: nothing is said
+      // on its account.
+      const outcome: PdfScannedReadingOutcome = !this.#knownScans(surface.unreadScannedPages())
         ? { kind: 'complete' }
         : resolved.status === 'no-method'
           ? { kind: 'no-method' }
@@ -423,26 +440,60 @@ export class PdfController {
     const token = surface.beginReading();
     const now = this.#dependencies.now ?? (() => performance.now());
     const started = now();
-    const total = unread.size;
+    // Pages with a little text count from the first one whose pictures show
+    // a scan: a text PDF never says it is reading scanned pages.
+    let perhapsLeft = [...unread].filter((index) => surface.isUnconfirmedScan(index)).length;
+    let total = unread.size - perhapsLeft;
+    let counting = false;
+    // Pages read, without those that turned out not to be scans.
     const counts = { pages: 0, pagesWithText: 0, failed: 0 };
     let stopped = true;
-    const current = () =>
-      !reading.aborted && this.#document === document && surface.document === sourceDocument;
     try {
-      reportProgress(onProgress, 0, total);
+      if (total > 0) reportProgress(onProgress, 0, total);
       while (unread.size > 0) {
         const index = nextPageToRead(unread, surface.readingPage);
         unread.delete(index);
+        const perhaps = surface.isUnconfirmedScan(index);
         const size = pages.sizes[index];
+        if (perhaps) {
+          // A page with a little text: its pictures tell whether it is a scan.
+          perhapsLeft -= 1;
+          const scan = size !== undefined &&
+            await isScannedPage(document, index, ocr.environment, reading);
+          if (reading.aborted || !current()) throw abortError();
+          if (!scan) {
+            // A text page: nothing is read, nothing is said.
+            surface.dismissScannedPage(index);
+            if (counting) {
+              total -= 1;
+              reportProgress(onProgress, counts.pages, total);
+            }
+            continue;
+          }
+          surface.confirmScannedPage(index);
+          if (!counting) {
+            // This page, and the rest like it until they show otherwise.
+            counting = true;
+            total += perhapsLeft + 1;
+          }
+          reportProgress(onProgress, counts.pages, total);
+        }
         const result = size
           ? await readScannedPage(
               document,
-              { index, size, document: sourceDocument, route: resolved.route },
+              {
+                index,
+                size,
+                document: sourceDocument,
+                route: resolved.route,
+                typed: surface.typedText(index),
+                confirmed: perhaps,
+              },
               ocr.environment,
               reading,
             )
           : { status: 'unreadable' as const };
-        if (!current()) throw abortError();
+        if (reading.aborted || !current()) throw abortError();
         counts.pages += 1;
         if (result.status === 'failed' || result.status === 'unreadable') counts.failed += 1;
         if (result.status !== 'failed') {
@@ -469,12 +520,15 @@ export class PdfController {
       throw error;
     } finally {
       if (this.#scannedStop === stop) this.#scannedStop = undefined;
-      this.#report({
-        stage: 'ocr',
-        ...counts,
-        stopped,
-        milliseconds: Math.max(0, Math.round(now() - started)),
-      });
+      // Nothing to report when every page turned out to be a text page.
+      if (total > 0) {
+        this.#report({
+          stage: 'ocr',
+          ...counts,
+          stopped,
+          milliseconds: Math.max(0, Math.round(now() - started)),
+        });
+      }
       surface.endReading(token);
     }
   }
@@ -509,23 +563,50 @@ export class PdfController {
     this.#stopProbe();
     const stop = new AbortController();
     this.#probeStop = stop;
+    const probing = AbortSignal.any([signal, stop.signal]);
+    const stale = () =>
+      this.#document !== document || surface.document !== sourceDocument || probing.aborted;
     try {
-      const language = await probeScannedLanguage(
-        document,
-        {
-          pages: ordered.flatMap((index) => {
-            const size = pages.sizes[index];
-            return size ? [{ index, size }] : [];
-          }),
-          document: sourceDocument,
-          providerOrder,
-          minimumConfidence,
-        },
-        ocr.environment,
-        AbortSignal.any([signal, stop.signal]),
-      );
-      if (this.#document !== document || stop.signal.aborted || signal.aborted) return undefined;
-      this.#probed = { document, key, language };
+      // The probe reads scans. A page with a little text is one only by its
+      // pictures: the nearest few are looked at, until three scans are found
+      // (the probe draws no more), and each is a scan or a text page from
+      // then on.
+      const candidates: { index: number; size: PdfPagePoints }[] = [];
+      let scans = 0;
+      let looked = 0;
+      let unlooked = false;
+      for (const index of ordered) {
+        const size = pages.sizes[index];
+        if (!size) continue;
+        if (surface.isUnconfirmedScan(index)) {
+          if (scans >= MAX_PROBED_SCANS || looked >= MAX_PROBED_UNCONFIRMED_PAGES) {
+            unlooked = true;
+            continue;
+          }
+          looked += 1;
+          const scan = await isScannedPage(document, index, ocr.environment, probing);
+          if (stale()) return undefined;
+          if (!scan) {
+            surface.dismissScannedPage(index);
+            continue;
+          }
+          surface.confirmScannedPage(index);
+          scans += 1;
+        }
+        candidates.push({ index, size });
+      }
+      const language = candidates.length === 0
+        ? undefined
+        : await probeScannedLanguage(
+            document,
+            { pages: candidates, document: sourceDocument, providerOrder, minimumConfidence },
+            ocr.environment,
+            probing,
+          );
+      if (stale()) return undefined;
+      // No answer while pages were left unlooked at is not the PDF's answer:
+      // the next ask looks at the next few.
+      if (language !== undefined || !unlooked) this.#probed = { document, key, language };
       return language;
     } catch {
       // Stopped: nothing is remembered, so the next ask probes again.
@@ -564,9 +645,14 @@ export class PdfController {
     const { surface, ocr } = this.#dependencies;
     if (!surface || !this.#document || !surface.document) return 'none';
     const providerOrder = ocr?.providerOrder() ?? [];
+    // A page with a little text is not known to be a scan until its pictures
+    // are checked: it may be read, but nothing is said to be unreadable for it.
+    const known = (unread: readonly number[]) => this.#knownScans(unread);
     if (!ocr || language === undefined) {
-      if (surface.unreadScannedPages().length === 0) return 'none';
-      return canReadScannedPages(providerOrder) ? 'readable' : 'no-method';
+      const unread = surface.unreadScannedPages();
+      if (unread.length === 0) return 'none';
+      if (canReadScannedPages(providerOrder)) return 'readable';
+      return known(unread) ? 'no-method' : 'none';
     }
     const resolved = pdfOcrRoute(language, providerOrder, ocr.minimumConfidence());
     // Pages read with another model count as unread: a run would forget them.
@@ -574,7 +660,24 @@ export class PdfController {
       resolved.status === 'ready' ? resolved.group : tesseractLanguageGroupFor(language) ?? '',
     );
     if (unread.length === 0) return 'none';
-    return resolved.status === 'ready' ? 'readable' : resolved.status;
+    if (resolved.status === 'ready') return 'readable';
+    return known(unread) ? resolved.status : 'none';
+  }
+
+  /**
+   * Whether the shown PDF's only text is on scanned pages (stamps over
+   * scans), so the scans, not that text, name its language.
+   */
+  get textOnScannedPagesOnly(): boolean {
+    const { surface } = this.#dependencies;
+    return Boolean(surface && this.#document && surface.document) &&
+      surface!.textOnScannedPagesOnly;
+  }
+
+  /** Whether any of these scanned pages is known to be one, by its pictures or its lack of text. */
+  #knownScans(pages: readonly number[]): boolean {
+    const { surface } = this.#dependencies;
+    return surface !== undefined && pages.some((index) => !surface.isUnconfirmedScan(index));
   }
 
   /**
@@ -700,12 +803,17 @@ function nextPageToRead(unread: ReadonlySet<number>, readingPage: number): numbe
   return after ?? before!;
 }
 
-/** One page's text blocks; a page pdf.js cannot read in time has none. */
+/**
+ * One page's text blocks; a page pdf.js cannot read in time has none. A page
+ * with no text at all (not even rotated or vertical text) is scanned. A page
+ * whose text covers little of it may be a scan under a header or a stamp:
+ * its pictures tell, when it is about to be read.
+ */
 async function readPageText(
   document: PdfDocumentHandle,
   index: number,
   transform: readonly number[],
-  pageWidth: number | undefined,
+  size: PdfPagePoints | undefined,
   timeoutMs: number,
 ): Promise<PdfPageText> {
   let timer: ReturnType<typeof setTimeout> | undefined;
@@ -717,13 +825,15 @@ async function readPageText(
       }),
     ]);
     if (!content) return { index, blocks: [] };
-    return {
+    const text = {
       index,
-      blocks: pdfTextBlocks(content, transform, pageWidth),
+      blocks: pdfTextBlocks(content, transform, size?.width),
       language: content.lang,
-      // No text at all, not even rotated or vertical text: a scanned page.
-      ...(content.items.every((item) => item.str.trim() === '') ? { scanned: true } : {}),
     };
+    if (content.items.every((item) => item.str.trim() === '')) return { ...text, scanned: true };
+    return size && pdfTextShare(content.items, size) <= PDF_SCAN_TEXT_SHARE
+      ? { ...text, littleText: true }
+      : text;
   } catch {
     return { index, blocks: [] };
   } finally {

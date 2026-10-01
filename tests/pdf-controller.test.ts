@@ -35,9 +35,10 @@ function fakeDocument(pageCount = 3) {
     })),
     getTextContent: vi.fn(async (page: number): Promise<PdfTextContent> => pageText(page)),
     hasImages: vi.fn(),
+    imageCoverage: vi.fn(async (_page: number) => 0),
     render: vi.fn(async (_page: number, _canvas: unknown, _scale: number) => 1),
     fontFaces: vi.fn(async () => ({})),
-    releasePage: vi.fn(async () => undefined),
+    releasePage: vi.fn(async (_page: number) => undefined),
     destroy: vi.fn(async () => undefined),
   };
   return document satisfies PdfDocumentHandle;
@@ -839,7 +840,9 @@ describe('PdfController scanned pages', () => {
   it('reads scanned pages from the reading page, following the reader, into the surface', async () => {
     const harness = scanned();
     await shown(harness);
-    expect(harness.surface.unreadScannedPages()).toEqual([1, 2, 3, 4]);
+    // Page 1 has little text: perhaps a scan, until its pictures say no.
+    expect(harness.surface.unreadScannedPages()).toEqual([0, 1, 2, 3, 4]);
+    expect(harness.surface.isUnconfirmedScan(0)).toBe(true);
     harness.surface.readingPage = 2;
     const progress: Array<[number, number]> = [];
     let moved = false;
@@ -887,7 +890,7 @@ describe('PdfController scanned pages', () => {
     });
   });
 
-  it('does not take a page whose text read failed, or whose only text is rotated, for a scanned page', async () => {
+  it('does not take a page whose text read failed for a scanned page, and one with little text only perhaps', async () => {
     const harness = scanned();
     harness.documents.length = 0;
     const rotated = {
@@ -911,8 +914,286 @@ describe('PdfController scanned pages', () => {
       return page === 1 ? pageText(1) : { items: [], styles: {}, lang: null };
     });
     await harness.controller.readText(new AbortController().signal);
-    // Pages 4 and 5 (0-based 3 and 4) are truly empty.
-    expect(harness.surface.unreadScannedPages()).toEqual([3, 4]);
+    // Pages 4 and 5 (0-based 3 and 4) are truly empty; the page with one
+    // line and the page with only rotated text may be scans under a stamp.
+    expect(harness.surface.unreadScannedPages()).toEqual([0, 2, 3, 4]);
+    expect([0, 2, 3, 4].filter((index) => harness.surface.isUnconfirmedScan(index))).toEqual([0, 2]);
+  });
+
+  describe('with a little typed text over the scan', () => {
+    /** Forty full lines: far more text than a stamp. */
+    const bodyText = (): PdfTextContent => ({
+      ...pageText(1),
+      items: Array.from({ length: 40 }, (_, line) => ({
+        ...pageText(1).items[0]!,
+        str: `Body line ${line + 1}`,
+        transform: [12, 0, 0, 12, 50, 760 - line * 18],
+        width: 400,
+        height: 12,
+      })),
+    });
+
+    /** Five pages, each "Page n" over whatever `coverage` says its pictures cover. */
+    async function stamped(
+      coverage: (page: number) => Promise<number>,
+      options: Parameters<typeof scanned>[0] & { text?: (page: number) => PdfTextContent } = {},
+    ) {
+      const harness = scanned(options);
+      harness.documents.length = 0;
+      await harness.controller.show(URL_UNDER_TEST, new AbortController().signal, SOURCE_DOCUMENT);
+      const document = harness.documents.at(-1)!;
+      document.getTextContent.mockImplementation(async (page: number) =>
+        (options.text ?? pageText)(page));
+      document.imageCoverage.mockImplementation(coverage);
+      await harness.controller.readText(new AbortController().signal);
+      return { ...harness, document };
+    }
+    const sources = (harness: Awaited<ReturnType<typeof stamped>>) =>
+      harness.surface.snapshot()?.records.map((record) => record.source);
+
+    it('reads the text without looking at the pictures, and takes little text for perhaps a scan', async () => {
+      const harness = await stamped(async () => 1);
+      expect(harness.document.imageCoverage).not.toHaveBeenCalled();
+      expect(harness.surface.unreadScannedPages()).toEqual([0, 1, 2, 3, 4]);
+      expect(harness.surface.typedText(0).map((block) => block.text)).toEqual(['Page 1']);
+      expect(sources(harness)).toEqual(['Page 1', 'Page 2', 'Page 3', 'Page 4', 'Page 5']);
+      expect(harness.controller.textOnScannedPagesOnly).toBe(true);
+      // They may be read: a run waits for the answer.
+      expect(harness.controller.scannedPagesState('fr')).toBe('readable');
+      expect(harness.controller.scannedPagesState(undefined)).toBe('readable');
+      harness.controller.close();
+      expect(harness.controller.textOnScannedPagesOnly).toBe(false);
+
+      // A page with plenty of text is a text page, whatever its pictures.
+      const body = await stamped(async () => 1, { text: bodyText });
+      expect(body.surface.unreadScannedPages()).toEqual([]);
+      expect(body.controller.textOnScannedPagesOnly).toBe(false);
+    });
+
+    it('reads the pages whose pictures cover most of them, and lets the others be', async () => {
+      const harness = await stamped(async (page) => {
+        // A scan, a figure, a page that cannot be told, a picture just large enough, a scan.
+        if (page === 2) return 0.5;
+        if (page === 3) throw new Error('Bad content stream');
+        return page === 4 ? 0.8 : 1;
+      });
+      const progress: Array<[number, number]> = [];
+
+      const outcome = await harness.controller.readScannedPages(
+        'fr',
+        new AbortController().signal,
+        (done, total) => progress.push([done, total]),
+      );
+
+      expect(outcome).toEqual({ kind: 'complete' });
+      expect(harness.read).toEqual([1, 4, 5]);
+      expect(sources(harness)).toEqual([
+        'Scan 1', 'Page 1', 'Page 2', 'Page 3', 'Scan 4', 'Page 4', 'Scan 5', 'Page 5',
+      ]);
+      expect(harness.surface.scannedPages()).toEqual([0, 3, 4]);
+      expect(harness.surface.unreadScannedPages('fra')).toEqual([]);
+      // Counted from the first scan, before it is read: it and the four like
+      // it, less the two that were not.
+      expect(progress).toEqual([
+        [0, 5], [1, 5], [1, 4], [1, 3], [1, 3], [2, 3], [2, 3], [3, 3],
+      ]);
+      expect(harness.diagnostics.at(-1)).toMatchObject({ stage: 'ocr', pages: 3, pagesWithText: 3 });
+      // Read again in another language: the scans only, without a second look.
+      harness.document.imageCoverage.mockClear();
+      harness.document.hasImages.mockClear();
+      await harness.controller.readScannedPages('en', new AbortController().signal);
+      expect(harness.read).toEqual([1, 4, 5, 1, 4, 5]);
+      expect(harness.document.imageCoverage).not.toHaveBeenCalled();
+      expect(harness.document.hasImages).toHaveBeenCalledTimes(3);
+    });
+
+    it('never says it reads scanned pages when none is a scan', async () => {
+      const harness = await stamped(async () => 0.2);
+      const progress: Array<[number, number]> = [];
+      const ocrBefore = harness.diagnostics.filter((entry) =>
+        (entry as { stage: string }).stage === 'ocr').length;
+
+      const outcome = await harness.controller.readScannedPages(
+        'fr',
+        new AbortController().signal,
+        (done, total) => progress.push([done, total]),
+      );
+
+      expect(outcome).toEqual({ kind: 'complete' });
+      expect(harness.read).toEqual([]);
+      expect(progress).toEqual([]);
+      expect(harness.surface.unreadScannedPages()).toEqual([]);
+      expect(harness.controller.scannedPagesState('fr')).toBe('none');
+      expect(harness.controller.scannedPagesNote()).toBeUndefined();
+      expect(sources(harness)).toEqual(['Page 1', 'Page 2', 'Page 3', 'Page 4', 'Page 5']);
+      expect(harness.diagnostics.filter((entry) =>
+        (entry as { stage: string }).stage === 'ocr')).toHaveLength(ocrBefore);
+      // pdf.js decoded each page's pictures for the check: they are freed.
+      expect(harness.document.releasePage.mock.calls.map(([page]) => page)).toEqual([1, 2, 3, 4, 5]);
+    });
+
+    it('says nothing of pages it never looked at when it cannot read scans', async () => {
+      // No reading method: the pictures are not looked at.
+      const harness = await stamped(async () => 1, { providerOrder: [] });
+      expect(harness.controller.scannedPagesState('fr')).toBe('none');
+      expect(harness.controller.scannedPagesState(undefined)).toBe('none');
+      expect(englishUiText(harness.controller.noTextStatus('fr')))
+        .toBe(englishUiText(UI_STRINGS.statusPdfNoText));
+
+      expect(await harness.controller.readScannedPages('fr', new AbortController().signal))
+        .toEqual({ kind: 'complete' });
+      expect(harness.surface.isReading()).toBe(false);
+      expect(harness.document.imageCoverage).not.toHaveBeenCalled();
+      expect(harness.controller.scannedPagesNote()).toBeUndefined();
+      // Still perhaps scans, for when a method is on.
+      expect(harness.surface.unreadScannedPages()).toEqual([0, 1, 2, 3, 4]);
+
+      // A language without an OCR model: the same.
+      const thai = await stamped(async () => 1);
+      expect(await thai.controller.readScannedPages('th', new AbortController().signal))
+        .toEqual({ kind: 'complete' });
+      expect(thai.controller.scannedPagesState('th')).toBe('none');
+      expect(thai.document.imageCoverage).not.toHaveBeenCalled();
+
+      // A page without any text beside them is a scan it cannot read.
+      const mixed = await stamped(async () => 1, {
+        providerOrder: [],
+        text: (page) => (page === 5 ? { items: [], styles: {}, lang: null } : pageText(page)),
+      });
+      expect(mixed.controller.scannedPagesState('fr')).toBe('no-method');
+      expect(await mixed.controller.readScannedPages('fr', new AbortController().signal))
+        .toEqual({ kind: 'no-method' });
+      expect(mixed.document.imageCoverage).not.toHaveBeenCalled();
+    });
+
+    it('stops while it looks at a page\'s pictures', async () => {
+      let release: (coverage: number) => void = () => undefined;
+      const harness = await stamped(() => new Promise<number>((resolve) => {
+        release = resolve;
+      }));
+      const reading = rejection(
+        harness.controller.readScannedPages('fr', new AbortController().signal),
+      );
+      await vi.waitFor(() => expect(harness.document.imageCoverage).toHaveBeenCalledOnce());
+      expect(harness.surface.isReading()).toBe(true);
+      harness.controller.stopScannedReading();
+      release(1);
+      expect(await reading).toMatchObject({ name: 'AbortError' });
+      expect(harness.surface.isReading()).toBe(false);
+      expect(harness.read).toEqual([]);
+      // Not looked at to the end: still perhaps a scan.
+      expect(harness.surface.isUnconfirmedScan(0)).toBe(true);
+    });
+
+    it('reports the last dismissal once it counts scans', async () => {
+      const harness = await stamped(async (page) => (page <= 2 ? 1 : 0));
+      const progress: Array<[number, number]> = [];
+      await harness.controller.readScannedPages(
+        'fr',
+        new AbortController().signal,
+        (done, total) => progress.push([done, total]),
+      );
+      expect(harness.read).toEqual([1, 2]);
+      expect(progress.at(-1)).toEqual([2, 2]);
+      expect(progress).toEqual([[0, 5], [1, 5], [1, 5], [2, 5], [2, 4], [2, 3], [2, 2]]);
+    });
+
+    it('looks at the nearest pages for the language probe, and remembers what it saw', async () => {
+      // No scan among them: every page is a text page from then on.
+      const text = await stamped(async () => 0);
+      expect(await text.controller.probeLanguage(new AbortController().signal)).toBeUndefined();
+      expect(text.document.imageCoverage.mock.calls.map(([page]) => page)).toEqual([1, 2, 3, 4, 5]);
+      expect(text.read).toEqual([]);
+      expect(text.surface.unreadScannedPages()).toEqual([]);
+      // The answer is the PDF's: asking again looks at nothing.
+      text.document.imageCoverage.mockClear();
+      await text.controller.probeLanguage(new AbortController().signal);
+      expect(text.document.imageCoverage).not.toHaveBeenCalled();
+
+      // Scans: three are enough for the probe, which draws no more.
+      const scans = await stamped(async () => 1);
+      scans.surface.readingPage = 1;
+      await scans.controller.probeLanguage(new AbortController().signal);
+      expect(scans.document.imageCoverage.mock.calls.map(([page]) => page)).toEqual([2, 3, 4]);
+      expect([0, 1, 2, 3, 4].filter((index) => scans.surface.isUnconfirmedScan(index)))
+        .toEqual([0, 4]);
+      expect(new Set(scans.read)).toEqual(new Set([2, 3, 4]));
+      // The reader does not look at them again.
+      scans.document.imageCoverage.mockClear();
+      await scans.controller.readScannedPages('fr', new AbortController().signal);
+      expect(scans.document.imageCoverage.mock.calls.map(([page]) => page)).toEqual([5, 1]);
+    });
+
+    it('does not take no answer for the PDF\'s while pages are left unlooked at', async () => {
+      // Twenty sparse pages: the twelve nearest are text pages, the rest scans.
+      const harness = scanned();
+      const document = fakeDocument(20);
+      document.getTextContent.mockImplementation(async (page: number) => pageText(page));
+      document.imageCoverage.mockImplementation(async (page: number) => (page > 12 ? 1 : 0));
+      document.hasImages.mockResolvedValue(true);
+      document.render.mockImplementation(async (_page: number, canvas: unknown, scale: number) => {
+        const target = canvas as PdfOcrCanvas;
+        target.width = Math.floor(600 * scale);
+        target.height = Math.floor(800 * scale);
+        return scale;
+      });
+      harness.openDocument.mockImplementationOnce(async () => document);
+      const signal = new AbortController().signal;
+      await harness.controller.show(URL_UNDER_TEST, signal, SOURCE_DOCUMENT);
+      await harness.controller.readText(signal);
+
+      expect(await harness.controller.probeLanguage(signal)).toBeUndefined();
+      expect(document.imageCoverage).toHaveBeenCalledTimes(12);
+      expect(harness.read).toEqual([]);
+      // Asked again, it looks further and reads the scans it finds.
+      await harness.controller.probeLanguage(signal);
+      expect(document.imageCoverage.mock.calls.slice(12).map(([page]) => page)).toEqual([13, 14, 15]);
+      expect(new Set(harness.read)).toEqual(new Set([13, 14, 15]));
+    });
+  });
+
+  it('reads the scan under typed text and leaves out the lines that repeat it', async () => {
+    const pixelsPerPoint = (width: number) => width / 601;
+    const harness = scanned();
+    harness.recognize.mockImplementation(async (pixels) => {
+      harness.read.push(pixels.descriptor.nodeId);
+      const scale = pixelsPerPoint(pixels.bitmapWidth);
+      return {
+        status: 'complete',
+        cacheHit: false,
+        result: {
+          providerId: 'tesseract',
+          bitmapWidth: pixels.bitmapWidth,
+          bitmapHeight: pixels.bitmapHeight,
+          transcript: '',
+          regions: pixels.descriptor.nodeId === 1
+            ? [
+                // OCR read the typed "Page 1" as drawn, and the scan below it.
+                {
+                  text: 'Page l',
+                  confidence: 0.9,
+                  boundingBox: { x: 50 * scale, y: 92 * scale, width: 30 * scale, height: 10 * scale },
+                },
+                {
+                  text: 'Le port et la ville',
+                  confidence: 0.9,
+                  boundingBox: { x: 100, y: 600, width: 500, height: 40 },
+                },
+              ]
+            : [],
+        },
+      };
+    });
+    harness.documents.length = 0;
+    await harness.controller.show(URL_UNDER_TEST, new AbortController().signal, SOURCE_DOCUMENT);
+    harness.documents.at(-1)!.imageCoverage.mockResolvedValue(1);
+    await harness.controller.readText(new AbortController().signal);
+
+    await harness.controller.readScannedPages('fr', new AbortController().signal);
+
+    expect(harness.read[0]).toBe(1);
+    expect(harness.surface.snapshot()?.records.map((record) => record.source))
+      .toEqual(['Page 1', 'Le port et la ville']);
   });
 
   it('marks a page it cannot draw as read, counts it, and does not draw it again', async () => {

@@ -638,6 +638,44 @@ shell and the mirror has nothing to copy (D103).
   drawn. `PdfTextSurface.setScannedPage` gives the page new
   block ids; pages read in another OCR model group are read again, and a
   target-only change keeps them.
+- **A scan under a little typed text (D111).** A header, a page number or a
+  stamp over a scan is text, so the page is not empty. The test
+  (`lib/pdf/pdf-scanned-page.ts`): the page's text runs cover at most 3% of
+  it (`pdfTextShare`, from the runs' boxes, free at the text read; a slide's
+  title or a short letter covers more) and its
+  pictures cover at least 80% of it (`pdfImageCoverage`: a transform stack
+  over pdf.js's operator list, the union of the picture boxes on a 24 by 24
+  grid, clipping not followed; `PdfDocumentHandle.imageCoverage`).
+  - *When.* pdf.js decodes a page's pictures to list its drawing, so the
+    picture test is not made at the text read. `readPageText` only marks
+    `littleText`; the surface holds the page as an unread scanned page that
+    is *unconfirmed* (`isUnconfirmedScan`). When the page's turn comes,
+    `readScannedPages` looks at its pictures (`isScannedPage`, also "no"
+    when the look fails or times out) and dismisses the page
+    (`dismissScannedPage`: a text page, as it stands, for good) or confirms
+    it and reads it without the `hasImages` check. A stamped scan costs no
+    more than a pure scan; a text page with little text costs one look,
+    while the run translates.
+  - *Statuses stay true.* Progress and the `ocr` diagnostic count pages from
+    the first confirmed scan (reported when it is confirmed, before it is
+    read), so a text PDF with sparse pages never says it reads scanned
+    pages. When scans cannot be read (no method, no OCR model), nothing is
+    looked at: `scannedPagesState` and the run's note count confirmed pages
+    only, so an unconfirmed page is never called unreadable.
+  - *Typed text stays.* The surface keeps the page's typed blocks
+    (`typedText`), ids and records included, across `setScannedPage` and
+    `forgetScannedPages`; each goes before the first OCR block that starts
+    at or below it. `PdfView.setPageText` keeps the translation of a block
+    whose id stays. OCR read the page as drawn, typed text included:
+    `pdfOcrBlocks` leaves out a line when typed line boxes cover half of it.
+  - *Auto.* Text that is only on scanned pages (`textOnScannedPagesOnly`)
+    does not name the scans' language: `probePdfLanguage` asks the probe
+    then too, unless the PDF declares a language it knows.
+    `PdfController.probeLanguage` first looks at the pictures of the nearest
+    unconfirmed pages (twelve at most, until three are scans), confirming or
+    dismissing each, and gives the probe scans only. No answer is kept as
+    the PDF's only when no page was left unlooked at. When the probe finds
+    nothing, the typed text decides as before.
 - **The run waits for them.** While the reader runs, the surface
   `isReading()`, and a run that starts while it reads (through the router's
   forwarding) loops in the coordinator: translate what is queued, wait on

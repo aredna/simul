@@ -10,6 +10,7 @@ import { TESSERACT_MODEL_VERSION } from '../lib/ocr/providers/tesseract/language
 import {
   PDF_OCR_MAX_DPI,
   pdfOcrRoute,
+  isScannedPage,
   probeScannedLanguage,
   readScannedPage,
   type PdfOcrCanvas,
@@ -29,12 +30,15 @@ const LETTER = { width: 612, height: 792 };
 
 function fakeDocument(options: {
   hasImages?: (page: number) => boolean;
+  /** The share of the page its pictures cover; by default all of it. */
+  imageCoverage?: (page: number) => number | Promise<number>;
   render?: (page: number, canvas: PdfOcrCanvas, scale: number) => void;
 } = {}) {
   const scales: number[] = [];
   const released: number[] = [];
   const document: PdfOcrDocument = {
     hasImages: vi.fn(async (page: number) => options.hasImages?.(page) ?? true),
+    imageCoverage: vi.fn(async (page: number) => options.imageCoverage?.(page) ?? 1),
     render: vi.fn(async (page, canvas, scale) => {
       scales.push(scale);
       const target = canvas as unknown as PdfOcrCanvas;
@@ -202,6 +206,93 @@ describe('readScannedPage', () => {
     expect(scales).toEqual([PDF_OCR_MAX_DPI / 72]);
   });
 
+  it('leaves out lines that repeat the page\'s typed text', async () => {
+    const { document } = fakeDocument();
+    const box = { left: 61.2, top: 20, width: 200, height: 12 };
+    const typed = [{
+      text: 'Case 17',
+      lines: [box],
+      box,
+      fontSize: 10,
+      lineHeight: 1.2,
+      fontFamily: 'serif' as const,
+      fontId: 'f1',
+      align: 'left' as const,
+    }];
+    const lines = (pixels: AcquiredImagePixels) => {
+      const pixelsPerPoint = pixels.bitmapWidth / LETTER.width;
+      return complete([
+        // The typed header, read as drawn.
+        {
+          text: 'Case l7',
+          x: 61.2 * pixelsPerPoint,
+          y: 20 * pixelsPerPoint,
+          width: 200 * pixelsPerPoint,
+          height: 12 * pixelsPerPoint,
+        },
+        { text: 'Bonjour à tous', x: pixels.bitmapWidth / 10, y: 400, width: 400, height: 40 },
+      ]);
+    };
+    const request = { index: 0, size: LETTER, document: DOCUMENT, route: ROUTE.route };
+
+    const stamped = await readScannedPage(
+      document, { ...request, typed }, environment(lines).environment, new AbortController().signal,
+    );
+    expect(stamped.status === 'read' && stamped.blocks.map((block) => block.text))
+      .toEqual(['Bonjour à tous']);
+    // Without typed text, every line is the scan's own.
+    const plain = await readScannedPage(
+      document, request, environment(lines).environment, new AbortController().signal,
+    );
+    expect(plain.status === 'read' && plain.blocks.map((block) => block.text))
+      .toEqual(['Case l7', 'Bonjour à tous']);
+  });
+
+  it('does not check the images of a page just found to be a scan', async () => {
+    const fake = fakeDocument({ hasImages: () => false });
+    const env = environment(() => complete([
+      { text: 'Bonjour à tous', x: 100, y: 400, width: 400, height: 40 },
+    ]));
+    const request = { index: 0, size: LETTER, document: DOCUMENT, route: ROUTE.route };
+    const signal = new AbortController().signal;
+
+    expect(await readScannedPage(fake.document, request, env.environment, signal))
+      .toEqual({ status: 'no-image' });
+    const read = await readScannedPage(
+      fake.document, { ...request, confirmed: true }, env.environment, signal,
+    );
+    expect(read.status).toBe('read');
+    expect(fake.document.hasImages).toHaveBeenCalledOnce();
+    expect(fake.document.imageCoverage).not.toHaveBeenCalled();
+  });
+
+  it('tells whether a page with a little text is a scan, in time', async () => {
+    const signal = new AbortController().signal;
+    const env = environment(() => complete([]), { pageTimeoutMs: 5 }).environment;
+    const scan = fakeDocument({ imageCoverage: () => 0.8 });
+    expect(await isScannedPage(scan.document, 2, env, signal)).toBe(true);
+    // pdf.js decoded the page's pictures for the look: they are freed.
+    expect(scan.released).toEqual([3]);
+    expect(scan.document.hasImages).not.toHaveBeenCalled();
+    expect(await isScannedPage(fakeDocument({ imageCoverage: () => 0.79 }).document, 0, env, signal))
+      .toBe(false);
+    expect(await isScannedPage(fakeDocument({ imageCoverage: () => Number.NaN }).document, 0, env, signal))
+      .toBe(false);
+    expect(await isScannedPage(fakeDocument({
+      imageCoverage: () => {
+        throw new Error('Bad content stream');
+      },
+    }).document, 0, env, signal)).toBe(false);
+    expect(await isScannedPage(fakeDocument({
+      imageCoverage: () => new Promise<number>(() => undefined),
+    }).document, 0, env, signal)).toBe(false);
+
+    const stopped = new AbortController();
+    stopped.abort();
+    await expect(isScannedPage(scan.document, 0, env, stopped.signal))
+      .rejects.toMatchObject({ name: 'AbortError' });
+  });
+
   it('does not read a page without images', async () => {
     const { document, released } = fakeDocument({ hasImages: () => false });
     const { environment: env, seen } = environment(() => complete([]));
@@ -259,6 +350,7 @@ describe('readScannedPage', () => {
     const stuck: PdfOcrDocument = {
       // pdf.js never answers, and takes no signal.
       hasImages: () => new Promise<boolean>(() => undefined),
+      imageCoverage: () => new Promise<number>(() => undefined),
       render: vi.fn(),
       releasePage: vi.fn(async () => undefined),
     };

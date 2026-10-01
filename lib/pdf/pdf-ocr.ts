@@ -25,6 +25,7 @@ import type { OcrMinimumConfidence } from '../ocr/result-quality';
 import type { ReplicaSourceDocumentIdentity } from '../replica/source-identity';
 import type { SupportedLanguage } from '../translation-provider';
 import type { PdfPagePoints } from './pdf-layout';
+import { PDF_SCAN_IMAGE_SHARE } from './pdf-scanned-page';
 import type { PdfDocumentHandle } from './pdfjs-runtime';
 import { pdfOcrBlocks, type PdfTextBlock } from './text-blocks';
 
@@ -73,7 +74,10 @@ export interface PdfOcrEnvironment {
 }
 
 /** The part of the PDF document OCR draws with. */
-export type PdfOcrDocument = Pick<PdfDocumentHandle, 'hasImages' | 'render' | 'releasePage'>;
+export type PdfOcrDocument = Pick<
+  PdfDocumentHandle,
+  'hasImages' | 'imageCoverage' | 'render' | 'releasePage'
+>;
 
 export type PdfOcrRouteResult =
   | {
@@ -133,6 +137,13 @@ export interface PdfScannedPageRequest {
   readonly size: PdfPagePoints;
   readonly document: ReplicaSourceDocumentIdentity;
   readonly route: ImageRecognitionRoute;
+  /**
+   * The page's own typed text (a header or a stamp over the scan): OCR lines
+   * that only repeat it are left out.
+   */
+  readonly typed?: readonly PdfTextBlock[];
+  /** `isScannedPage` just said the page is a scan: its images are not checked again. */
+  readonly confirmed?: boolean;
 }
 
 /**
@@ -151,7 +162,9 @@ export async function readScannedPage(
   try {
     signal.throwIfAborted();
     const drawn = await withinPageDeadline(async (bounded) => {
-      if (!(await document.hasImages(pageNumber))) return 'no-image' as const;
+      if (request.confirmed !== true && !(await document.hasImages(pageNumber))) {
+        return 'no-image' as const;
+      }
       bounded.throwIfAborted();
       return drawPage(document, request, environment, bounded);
     }, environment, signal);
@@ -180,6 +193,7 @@ export async function readScannedPage(
         // The regions are in pixels of the bitmap OCR read.
         result.bitmapWidth / request.size.width,
         request.size.width,
+        (request.typed ?? []).flatMap((block) => block.lines),
       ),
     };
   } catch {
@@ -189,6 +203,39 @@ export async function readScannedPage(
     return { status: 'failed' };
   } finally {
     void document.releasePage(pageNumber).catch(() => undefined);
+  }
+}
+
+/**
+ * Whether a page with a little text is a scan: its pictures cover
+ * `PDF_SCAN_IMAGE_SHARE` of it. Not when that cannot be told in time.
+ * Rejects only with an `AbortError`.
+ */
+export async function isScannedPage(
+  document: PdfOcrDocument,
+  index: number,
+  environment: PdfOcrEnvironment,
+  signal: AbortSignal,
+): Promise<boolean> {
+  const pageNumber = index + 1;
+  try {
+    signal.throwIfAborted();
+    return await withinPageDeadline(() => coversPage(document, pageNumber), environment, signal);
+  } catch {
+    if (signal.aborted) throw abortError(signal);
+    return false;
+  } finally {
+    // pdf.js decoded the page's pictures for the check.
+    void document.releasePage(pageNumber).catch(() => undefined);
+  }
+}
+
+/** Whether the page's pictures cover most of it; not when it cannot be told. */
+async function coversPage(document: PdfOcrDocument, pageNumber: number): Promise<boolean> {
+  try {
+    return (await document.imageCoverage(pageNumber)) >= PDF_SCAN_IMAGE_SHARE;
+  } catch {
+    return false;
   }
 }
 

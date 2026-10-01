@@ -658,6 +658,29 @@ describe('PdfView text', () => {
     expect(last.querySelector('.pdf-block-text')?.textContent).toBe('Lu par OCR');
   });
 
+  it('keeps the translation of a block that stays when its page is read again', () => {
+    const harness = setup({ pages: 2 });
+    harness.view.mount(harness.pdf, harness.sizes);
+    // A typed header over a scan, already translated when OCR adds the rest.
+    harness.view.setPageText(0, [textBlock(1, 'En-tête')]);
+    harness.view.showTranslation(1, 'Header', 'en');
+    harness.view.setPageText(0, [
+      textBlock(1, 'En-tête'),
+      textBlock(2, 'Lu par OCR', { top: 200 }),
+    ]);
+    const texts = () => [...harness.element.querySelectorAll('.pdf-page')[0]!
+      .querySelectorAll('.pdf-block-text')].map((text) => text.textContent);
+    expect(texts()).toEqual(['Header', 'Lu par OCR']);
+    harness.view.showTranslation(2, 'Read by OCR', 'en');
+    expect(texts()).toEqual(['Header', 'Read by OCR']);
+
+    // The reading is forgotten (another OCR model): the header stays translated.
+    harness.view.setPageText(0, [textBlock(1, 'En-tête')]);
+    expect(texts()).toEqual(['Header']);
+    harness.view.showTranslation(2, 'stale', 'en');
+    expect(texts()).toEqual(['Header']);
+  });
+
   it('names the PDF’s language on its text, and the target language on a translation', () => {
     const harness = setup({ pages: 3 });
     harness.view.mount(harness.pdf, harness.sizes);

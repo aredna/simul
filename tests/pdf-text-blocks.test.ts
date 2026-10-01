@@ -485,6 +485,29 @@ describe('pdfOcrBlocks', () => {
     expect(blocks.map((block) => block.text)).toEqual(['I', 'Upright text']);
   });
 
+  it('leaves out lines that lie over the page\'s typed text', () => {
+    // In page points: a typed header line and a typed page number.
+    const typed = [
+      { left: 72, top: 22, width: 300, height: 10 },
+      { left: 282, top: 754, width: 50, height: 10 },
+    ];
+    const blocks = pdfOcrBlocks([
+      // OCR read the header as drawn, a little looser than the typed box.
+      ocrLine('Case 2:24-cv-O1182 Document 17', 140, 40, 610, 26),
+      ocrLine('Le port et la ville', 170, 300, 600, 46),
+      // Half over the page number: it only repeats it.
+      ocrLine('Page 1 of 3', 564, 1500, 100, 40),
+      // Mostly beside the typed text: the scan's own.
+      ocrLine('Annexe, page 1 of 3', 200, 1508, 400, 20),
+    ], 2, 612, typed);
+    expect(blocks.map((block) => block.text)).toEqual([
+      'Le port et la ville',
+      'Annexe, page 1 of 3',
+    ]);
+    // Without typed text every line stays.
+    expect(pdfOcrBlocks([ocrLine('Case 2:24', 140, 40, 610, 26)], 2, 612)).toHaveLength(1);
+  });
+
   it('leaves out empty lines and lines without area, and a bad scale', () => {
     expect(pdfOcrBlocks([
       ocrLine('   ', 100, 200, 200),

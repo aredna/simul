@@ -37,6 +37,12 @@ export interface PdfPageText {
    * whose only text is rotated or vertical.
    */
   readonly scanned?: boolean;
+  /**
+   * The page's own text covers little of it: it may be a scan under a
+   * header, a page number or a stamp, which only its pictures tell. It
+   * counts as a scanned page still to read until they are checked.
+   */
+  readonly littleText?: boolean;
 }
 
 // A /Lang longer than this is not a language tag.
@@ -65,10 +71,14 @@ export class PdfTextSurface implements ReplicaProjectionSurface {
   #context: ReplicaProjectionContext = { translationEpoch: 0, pairKey: undefined };
   #readingPage = 0;
   /**
-   * Pages whose text read found nothing (scanned pages), with the OCR model
-   * group they were read in; `undefined` while unread.
+   * Scanned pages, with the OCR model group they were read in; `undefined`
+   * while unread.
    */
   readonly #scanned = new Map<number, string | undefined>();
+  /** The typed text of scanned pages that have some: it stays whatever OCR adds. */
+  readonly #typed = new Map<number, readonly PdfSurfaceBlock[]>();
+  /** Pages with a little text whose pictures were not checked yet. */
+  readonly #unconfirmed = new Set<number>();
   #languageHint: string | undefined;
   /** The running scanned-page reader, if any. */
   #reading: object | undefined;
@@ -126,14 +136,14 @@ export class PdfTextSurface implements ReplicaProjectionSurface {
     return this.#languageHint;
   }
 
-  /** Scanned pages (0-based): pages whose text read found no text. */
+  /** Scanned pages (0-based), read or not, with those not yet confirmed. */
   scannedPages(): number[] {
     return [...this.#scanned.keys()].sort((left, right) => left - right);
   }
 
   /**
    * Scanned pages still to read: never read, or, with `group`, read in
-   * another OCR model group.
+   * another OCR model group. Pages not yet confirmed are among them.
    */
   unreadScannedPages(group?: string): number[] {
     const unread: number[] = [];
@@ -144,15 +154,56 @@ export class PdfTextSurface implements ReplicaProjectionSurface {
   }
 
   /**
+   * Whether the page is taken for a scan only because it has little text:
+   * its pictures were not checked yet.
+   */
+  isUnconfirmedScan(index: number): boolean {
+    return this.#unconfirmed.has(index);
+  }
+
+  /** The page's pictures cover most of it: it is a scanned page. */
+  confirmScannedPage(index: number): void {
+    this.#unconfirmed.delete(index);
+  }
+
+  /**
+   * The page with a little text is not a scan after all: a text page, as it
+   * stands. Wakes a run waiting for text.
+   */
+  dismissScannedPage(index: number): void {
+    if (!this.#unconfirmed.delete(index)) return;
+    this.#scanned.delete(index);
+    this.#typed.delete(index);
+    this.#wake();
+  }
+
+  /** A scanned page's own typed text, which a reading leaves out; else none. */
+  typedText(index: number): readonly PdfTextBlock[] {
+    return this.#typed.get(index) ?? [];
+  }
+
+  /**
+   * Whether the PDF's only text is on scanned pages (confirmed or not), such
+   * as stamps over scans: text that does not name the language of the scans.
+   */
+  get textOnScannedPagesOnly(): boolean {
+    if (this.#records.size === 0) return false;
+    return this.#pages.every((blocks, index) =>
+      !blocks || blocks.length === 0 || this.#scanned.has(index));
+  }
+
+  /**
    * A scanned page's recognised text, read in the OCR model group `group`.
-   * It replaces whatever the page held, with new block ids, and goes to the
-   * view at once; a page with no text is read all the same. Wakes a run
-   * waiting for text.
+   * It replaces what an earlier reading gave the page, with new block ids;
+   * the page's typed text stays, with its ids. It goes to the view at once;
+   * a page with no text is read all the same. Wakes a run waiting for text.
    */
   setScannedPage(index: number, blocks: readonly PdfTextBlock[], group: string): void {
     if (!this.#document || !this.#scanned.has(index)) return;
+    // Read: a scan, whatever was known of its pictures.
+    this.#unconfirmed.delete(index);
     try {
-      this.#replacePage(index, blocks);
+      this.#replacePage(index, blocks, this.#typed.get(index));
     } finally {
       // The view's failure does not undo the text.
       this.#scanned.set(index, group);
@@ -162,14 +213,15 @@ export class PdfTextSurface implements ReplicaProjectionSurface {
 
   /**
    * Scanned pages read in another OCR model group than `group` are unread
-   * again, and their text and translations leave the view.
+   * again, and their recognised text and its translations leave the view.
+   * Their typed text stays.
    */
   forgetScannedPages(group: string): void {
     for (const [index, readIn] of this.#scanned) {
       if (readIn === undefined || readIn === group) continue;
       this.#scanned.set(index, undefined);
       try {
-        this.#replacePage(index, []);
+        this.#replacePage(index, [], this.#typed.get(index));
       } catch {
         // The view's failure does not undo it.
       }
@@ -236,8 +288,9 @@ export class PdfTextSurface implements ReplicaProjectionSurface {
   /**
    * Adds a page's text and hands it to the view. A page already added, or
    * outside the document, is ignored. The view's failure does not undo the
-   * text. A page pdf.js found no text on at all is a scanned page, which
-   * OCR may read later.
+   * text. A scanned page (no text at all, or perhaps a little typed text
+   * over a scan) may be read by OCR later; its typed text is kept through
+   * that.
    */
   addPage(page: PdfPageText): void {
     if (!this.#document) return;
@@ -249,10 +302,17 @@ export class PdfTextSurface implements ReplicaProjectionSurface {
         this.#language = language;
       }
     }
-    if (page.scanned === true && page.blocks.length === 0) {
-      this.#scanned.set(page.index, undefined);
+    const perhaps = page.scanned !== true && page.littleText === true;
+    if (page.scanned === true || perhaps) this.#scanned.set(page.index, undefined);
+    if (perhaps) this.#unconfirmed.add(page.index);
+    try {
+      this.#replacePage(page.index, page.blocks);
+    } finally {
+      const placed = this.#pages[page.index];
+      if (this.#scanned.has(page.index) && placed && placed.length > 0) {
+        this.#typed.set(page.index, placed);
+      }
     }
-    this.#replacePage(page.index, page.blocks);
   }
 
   snapshot(): ReplicaTranslationSnapshot | undefined {
@@ -331,13 +391,24 @@ export class PdfTextSurface implements ReplicaProjectionSurface {
     return undefined;
   }
 
-  /** Gives the page `blocks` with new ids, in place of what it held. */
-  #replacePage(index: number, blocks: readonly PdfTextBlock[]): void {
+  /**
+   * Gives the page `blocks` with new ids, in place of what it held. Blocks
+   * in `kept` (the page's typed text) stay as they are, ids and records
+   * included, each before the first new block that starts below it.
+   */
+  #replacePage(
+    index: number,
+    blocks: readonly PdfTextBlock[],
+    kept: readonly PdfSurfaceBlock[] = [],
+  ): void {
     const document = this.#document;
     if (!document) return;
-    for (const block of this.#pages[index] ?? []) this.#records.delete(block.id);
+    const keptIds = new Set(kept.map((block) => block.id));
+    for (const block of this.#pages[index] ?? []) {
+      if (!keptIds.has(block.id)) this.#records.delete(block.id);
+    }
     const placed = blocks.map((block): PdfSurfaceBlock => ({ ...block, id: this.#nextId++ }));
-    this.#pages[index] = placed;
+    this.#pages[index] = mergeByHeight(kept, placed);
     for (const block of placed) {
       if (block.text.trim().length === 0) continue;
       this.#records.set(block.id, {
@@ -349,7 +420,7 @@ export class PdfTextSurface implements ReplicaProjectionSurface {
       });
     }
     this.#snapshot = undefined;
-    this.#sink.setPageText(index, placed);
+    this.#sink.setPageText(index, this.#pages[index]!);
   }
 
   #wake(): void {
@@ -374,6 +445,8 @@ export class PdfTextSurface implements ReplicaProjectionSurface {
     this.#textComplete = false;
     this.#readingPage = 0;
     this.#scanned.clear();
+    this.#typed.clear();
+    this.#unconfirmed.clear();
     this.#languageHint = undefined;
     this.#reading = undefined;
     this.#wake();
@@ -391,4 +464,29 @@ function abortReason(signal: AbortSignal): unknown {
 function targetLanguage(pairKey: string): string | undefined {
   const target = pairKey.split('>')[1];
   return target && /^[A-Za-z]{2,3}(?:-[A-Za-z0-9]{1,8})*$/u.test(target) ? target : undefined;
+}
+
+/**
+ * `read` in its own order, with each block of `kept` before the first block
+ * of `read` that starts at or below it, else at the end. Blocks of `kept`
+ * that land together keep their own order.
+ */
+function mergeByHeight(
+  kept: readonly PdfSurfaceBlock[],
+  read: readonly PdfSurfaceBlock[],
+): PdfSurfaceBlock[] {
+  const before = new Map<number, PdfSurfaceBlock[]>();
+  for (const block of kept) {
+    const below = read.findIndex((other) => other.box.top >= block.box.top);
+    const at = below < 0 ? read.length : below;
+    const together = before.get(at);
+    if (together) together.push(block);
+    else before.set(at, [block]);
+  }
+  const merged: PdfSurfaceBlock[] = [];
+  for (let index = 0; index <= read.length; index += 1) {
+    merged.push(...(before.get(index) ?? []));
+    if (index < read.length) merged.push(read[index]!);
+  }
+  return merged;
 }

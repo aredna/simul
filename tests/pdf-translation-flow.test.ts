@@ -59,16 +59,28 @@ function pageText(page: number): PdfTextContent {
   };
 }
 
+/** A typed header over a scan: "H<n> header.", at the top of the page. */
+function stampedText(page: number): PdfTextContent {
+  return { ...pageText(page), items: [{ ...pageText(page).items[0]!, str: `H${page} header.`, transform: [10, 0, 0, 10, 72, 770] }] };
+}
+
 function fakeDocument(
   getTextContent: (page: number) => Promise<PdfTextContent> = async (page) => pageText(page),
   scanned: readonly number[] = [],
+  stamped: readonly number[] = [],
 ): PdfDocumentHandle {
   return {
     pageCount: PAGES,
     getPageSize: async () => ({ width: 612, height: 792, transform: [1, 0, 0, -1, 0, 792] }),
     getTextContent: async (page) =>
-      scanned.includes(page) ? { items: [], styles: {}, lang: null } : getTextContent(page),
-    hasImages: async (page) => scanned.includes(page),
+      scanned.includes(page)
+        ? { items: [], styles: {}, lang: null }
+        : stamped.includes(page)
+          ? stampedText(page)
+          : getTextContent(page),
+    hasImages: async (page) => scanned.includes(page) || stamped.includes(page),
+    // A scan covers its page; the text pages here have no pictures.
+    imageCoverage: async (page) => (scanned.includes(page) || stamped.includes(page) ? 1 : 0),
     render: async (_page, canvas, scale) => {
       canvas.width = Math.floor(612 * scale);
       canvas.height = Math.floor(792 * scale);
@@ -87,6 +99,10 @@ function setup(options: {
   openDocument?: () => Promise<PdfDocumentHandle>;
   /** Pages (1-based) that are scanned: no text layer, one image. */
   scanned?: readonly number[];
+  /** Pages (1-based) that are scans under a typed header, "H<n> header.". */
+  stamped?: readonly number[];
+  /** What Chrome's Language Detector says of the PDF's text; by default nothing. */
+  detectLanguage?: SupportedLanguage;
   /** What OCR reads on a scanned page; by default one line, "S<page> scanned.". */
   ocrText?: (page: number, route: ImageRecognitionRoute) => string | undefined;
   providerOrder?: readonly ImageTextProviderId[];
@@ -207,7 +223,8 @@ function setup(options: {
     fetchPdf,
     readFile,
     viewerFollower,
-    openDocument: options.openDocument ?? (async () => fakeDocument(undefined, scanned)),
+    openDocument: options.openDocument ??
+      (async () => fakeDocument(undefined, scanned, options.stamped)),
     view,
     surface,
     onPriorityChange: () => coordinator.reprioritize(),
@@ -237,7 +254,9 @@ function setup(options: {
     coordinator,
     captureCoordinator,
     evidence: new AutoLanguageEvidencePrecedence<PendingAutoImageLanguageEvidence>(),
-    detectLanguage: async () => ({ isReliable: false, languages: [] }),
+    detectLanguage: async () => (options.detectLanguage
+      ? { isReliable: true, languages: [{ language: options.detectLanguage, percentage: 100 }] }
+      : { isReliable: false, languages: [] }),
     getTab,
     autoImageLanguageConfigurationKey: () => 'configuration',
     configureImageTranslation: () => undefined,
@@ -657,6 +676,120 @@ describe('Scanned PDF pages, end to end', () => {
     harness.state.preferences = { ...harness.state.preferences, replicaViewMode: 'translated' };
     harness.driver.applyReplicaViewMode('source-only');
     await vi.waitFor(() => expect(harness.state.resolvedSourceLanguage).toBe('ja'));
+  });
+
+  describe('with a typed header over each scan', () => {
+    const sources = (harness: ReturnType<typeof setup>) =>
+      harness.state.snapshot?.records.map((record) => record.source);
+
+    it('reads the scan as well, and translates the header once', async () => {
+      const harness = setup({ stamped: ALL_SCANNED });
+
+      harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
+
+      await vi.waitFor(() => expect(harness.statuses.at(-1)).toBe('The PDF is translated.'));
+      expect(harness.ocrCalls).toEqual([1, 2, 3, 4]);
+      // Each page: its header, then what the scan says below it.
+      expect(sources(harness)).toEqual([
+        'H1 header.', 'S1 scanned.', 'H2 header.', 'S2 scanned.',
+        'H3 header.', 'S3 scanned.', 'H4 header.', 'S4 scanned.',
+      ]);
+      expect([...harness.shown].sort()).toEqual([
+        'EN:H1 header.', 'EN:H2 header.', 'EN:H3 header.', 'EN:H4 header.',
+        'EN:S1 scanned.', 'EN:S2 scanned.', 'EN:S3 scanned.', 'EN:S4 scanned.',
+      ]);
+      // Reading a page does not send its header to the Translator again.
+      expect(harness.calls.filter((text) => text === 'H1 header.')).toHaveLength(1);
+      expect(harness.state.translationComplete).toBe(true);
+    });
+
+    it('translates the headers without a reading method, and says nothing of the scans', async () => {
+      // The pictures are looked at only when a page can be read.
+      const harness = setup({ stamped: ALL_SCANNED, providerOrder: [] });
+      harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
+      await vi.waitFor(() => expect(harness.statuses.at(-1)).toBe('The PDF is translated.'));
+      expect(harness.shown).toHaveLength(4);
+      expect(harness.ocrCalls).toEqual([]);
+      expect(harness.state.translationComplete).toBe(true);
+    });
+
+    it('lets sparse text name the language with From = Auto when no page is a scan', async () => {
+      const harness = setup({ sourceLanguage: 'auto', targetLanguage: 'es', detectLanguage: 'en' });
+      harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
+      await vi.waitFor(() => expect(harness.statuses.at(-1)).toBe('The PDF is translated.'));
+      expect(harness.state.resolvedSourceLanguage).toBe('en');
+      expect(harness.detected.at(-1)).toBe(UI_STRINGS.statusDetectedFromVisibleText);
+      expect(harness.ocrCalls).toEqual([]);
+      // The probe looked at the pictures: they are text pages from then on.
+      expect(harness.surface.unreadScannedPages()).toEqual([]);
+    });
+
+    it('asks the scans for the language with From = Auto, not the stamps', async () => {
+      const harness = setup({
+        stamped: ALL_SCANNED,
+        sourceLanguage: 'auto',
+        // The headers alone read as English; the scans are Japanese.
+        detectLanguage: 'en',
+        ocrText: (_page, route) => route.sourceLanguage === 'ja'
+          ? 'これはにほんごのぶんしょうです'
+          : undefined,
+      });
+      harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
+
+      await vi.waitFor(() => expect(harness.statuses.at(-1)).toBe('The PDF is translated.'));
+      expect(harness.state.resolvedSourceLanguage).toBe('ja');
+      expect(harness.detected.at(-1)).toBe(UI_STRINGS.statusDetectedFromScannedPages);
+      expect(harness.shown).toContain('EN:これはにほんごのぶんしょうです');
+      expect(harness.shown).toContain('EN:H1 header.');
+    });
+
+    it('lets the text pages name the language when the PDF has some', async () => {
+      // Pages of body text beside one stamped scan.
+      const body = (page: number): PdfTextContent => ({
+        ...pageText(page),
+        items: Array.from({ length: 40 }, (_, line) => ({
+          ...pageText(page).items[0]!,
+          str: `P${page} line ${line + 1} of the body text.`,
+          transform: [12, 0, 0, 12, 72, 740 - line * 16],
+          width: 440,
+          height: 12,
+        })),
+      });
+      const harness = setup({
+        openDocument: async () => fakeDocument(async (page) => body(page), [], [2]),
+        sourceLanguage: 'auto',
+        targetLanguage: 'es',
+        detectLanguage: 'en',
+      });
+      harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
+
+      await vi.waitFor(() => expect(harness.statuses.at(-1)).toBe('The PDF is translated.'));
+      expect(harness.state.resolvedSourceLanguage).toBe('en');
+      expect(harness.detected.at(-1)).toBe(UI_STRINGS.statusDetectedFromVisibleText);
+      // Read once, by the run, in English: the probe was never asked.
+      expect(harness.ocrCalls).toEqual([2]);
+      expect(sources(harness)).toContain('S2 scanned.');
+    });
+
+    it('translates a text PDF with little text on each page without reading anything', async () => {
+      // Tesseract on: each page is looked at, none is a scan.
+      const harness = setup({});
+      harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
+      await vi.waitFor(() => expect(harness.statuses.at(-1)).toBe('The PDF is translated.'));
+      expect(harness.ocrCalls).toEqual([]);
+      expect(harness.shown).toEqual(ALL);
+      expect(harness.surface.unreadScannedPages()).toEqual([]);
+      expect(harness.state.translationComplete).toBe(true);
+
+      // No reading method: nothing is looked at, nothing is said, and the
+      // translation is complete all the same.
+      const off = setup({ providerOrder: [] });
+      off.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
+      await vi.waitFor(() => expect(off.statuses.at(-1)).toBe('The PDF is translated.'));
+      expect(off.shown).toEqual(ALL);
+      expect(off.state.translationComplete).toBe(true);
+      expect(off.driver.currentTranslationFieldCount()).toBe(1);
+    });
   });
 
   it('reports failed translations before a scanned-page note', async () => {

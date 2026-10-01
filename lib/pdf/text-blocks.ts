@@ -57,6 +57,9 @@ const OCR_SIZE_TOLERANCE = 0.4;
 const OCR_FONT_ID = '';
 // An OCR line box this many times taller than wide is a vertical line.
 const VERTICAL_LINE_RATIO = 1.5;
+// An OCR line with this share of its box over the page's typed text only
+// repeats that text.
+const OCR_TYPED_OVERLAP = 0.5;
 // Scripts written right to left, for OCR lines that carry no direction.
 const RTL_CHARACTER = /[\p{Script=Hebrew}\p{Script=Arabic}\p{Script=Syriac}\p{Script=Thaana}\p{Script=Nko}]/u;
 const LETTER = /\p{L}/u;
@@ -149,12 +152,15 @@ export interface PdfOcrLine {
  * bitmap's pixels per PDF point, so the blocks are in page points like
  * `pdfTextBlocks`. A line box runs from the tallest glyph to the lowest, so it
  * stands in for the font size; lines without ascenders or descenders are
- * shorter, which the wider size tolerance allows for.
+ * shorter, which the wider size tolerance allows for. `typed` holds the line
+ * boxes of the page's own text, in page points: OCR read the page as drawn,
+ * that text included, so a line that lies mostly over it is left out.
  */
 export function pdfOcrBlocks(
   lines: readonly PdfOcrLine[],
   pixelsPerPoint: number,
   pageWidth?: number,
+  typed: readonly PdfTextRect[] = [],
 ): PdfTextBlock[] {
   if (!(pixelsPerPoint > 0) || !Number.isFinite(pixelsPerPoint)) return [];
   const converted: Line[] = [];
@@ -175,6 +181,7 @@ export function pdfOcrBlocks(
     const top = y / pixelsPerPoint;
     const right = (x + width) / pixelsPerPoint;
     const bottom = (y + height) / pixelsPerPoint;
+    if (overTypedText({ left, top, width: right - left, height: bottom - top }, typed)) continue;
     const run: Run = {
       text,
       left,
@@ -196,6 +203,19 @@ export function pdfOcrBlocks(
       ? { ...block, fontSize: size, lineHeight: (block.lineHeight * block.fontSize) / size }
       : block;
   });
+}
+
+/** Whether typed line boxes cover `OCR_TYPED_OVERLAP` of the OCR line's box. */
+function overTypedText(line: PdfTextRect, typed: readonly PdfTextRect[]): boolean {
+  let covered = 0;
+  for (const box of typed) {
+    const width = Math.min(line.left + line.width, box.left + box.width) -
+      Math.max(line.left, box.left);
+    const height = Math.min(line.top + line.height, box.top + box.height) -
+      Math.max(line.top, box.top);
+    if (width > 0 && height > 0) covered += width * height;
+  }
+  return covered >= OCR_TYPED_OVERLAP * line.width * line.height;
 }
 
 function blocksFromLines(

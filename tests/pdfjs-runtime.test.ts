@@ -13,6 +13,7 @@ import {
   type PdfDocumentHandle,
   type PdfjsEnvironment,
 } from '../lib/pdf/pdfjs-runtime';
+import { PDF_SCAN_TEXT_SHARE, pdfTextShare } from '../lib/pdf/pdf-scanned-page';
 
 const vendorDirectory = resolve('vendor/pdfjs');
 // Node reads pdf.js data files from disk, so the data base is a path and the
@@ -58,6 +59,7 @@ describe('pdfjs-runtime with the packaged pdf.js', () => {
     ['scanned.pdf', 1, 0, true],
     ['features.pdf', 1, 0, true],
     ['resources.pdf', 1, 3, true],
+    ['stamped.pdf', 1, 6, true],
   ])('opens %s', async (name, pageCount, firstPageItems, firstPageImages) => {
     const document = await open(name);
 
@@ -69,6 +71,25 @@ describe('pdfjs-runtime with the packaged pdf.js', () => {
     const text = await document.getTextContent(1);
     expect(text.items.filter((item) => item.str)).toHaveLength(firstPageItems);
     expect(await document.hasImages(1)).toBe(firstPageImages);
+  });
+
+  it('measures how much of a page its images cover', async () => {
+    // A landscape picture on the upper half of an A4 page (nested transforms).
+    expect(await (await open('scanned.pdf')).imageCoverage(1)).toBeCloseTo(13 / 24, 6);
+    // A typed header and page number over a full-page picture.
+    const stamped = await open('stamped.pdf');
+    expect(await stamped.imageCoverage(1)).toBe(1);
+    const { items } = await stamped.getTextContent(1);
+    const size = await stamped.getPageSize(1);
+    expect(pdfTextShare(items, size)).toBeLessThan(PDF_SCAN_TEXT_SHARE);
+    // Figures, and no image at all.
+    expect(await (await open('image.pdf')).imageCoverage(1)).toBeLessThan(0.3);
+    expect(await (await open('resources.pdf')).imageCoverage(1)).toBeLessThan(0.2);
+    expect(await (await open('text.pdf')).imageCoverage(1)).toBe(0);
+    // A page of body text is far over the share of a stamped scan.
+    const text = await open('text-two-col.pdf');
+    expect(pdfTextShare((await text.getTextContent(1)).items, await text.getPageSize(1)))
+      .toBeGreaterThan(PDF_SCAN_TEXT_SHARE);
   });
 
   it('reports text runs with pdf.js fields, line ends, and font styles', async () => {

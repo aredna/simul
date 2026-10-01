@@ -109,6 +109,7 @@ function setup(options: {
     probeLanguage: vi.fn(async () => undefined),
     setLanguageHint: vi.fn(),
     scannedPagesState: vi.fn((): PdfScannedPagesState => 'none'),
+    textOnScannedPagesOnly: false,
     noTextStatus: vi.fn((): UiText => UI_STRINGS.statusPdfNoText),
   };
   const coordinator = { selectPair: vi.fn(), handleSourceCommit: vi.fn() };
