@@ -203,6 +203,7 @@ export const UI_STRINGS = {
     'The PDF could not be downloaded. Reload the tab and select Simul again.',
   statusPdfUnreadable: 'This file is not a readable PDF.',
   statusPdfReaderFailed: 'Simul’s PDF reader could not start.',
+  statusPdfFileReadFailed: 'Simul could not read this file. Choose it again.',
   statusPdfNoText: 'No text was found in this PDF.',
   statusPdfScannedNoMethod:
     'Scanned pages were not read: turn on “Tesseract.js (local)” under Image reading priority in Settings.',
@@ -211,6 +212,9 @@ export const UI_STRINGS = {
   statusPdfSourceOnly: 'Live source only is active. The PDF is shown without translation.',
   statusPdfTranslated: 'The PDF is translated.',
   pdfPageLabel: 'Page {0} of {1}',
+  // A PDF on this computer, offered wherever the panel shows an error (D107).
+  openPdfFile: 'Open a PDF file…',
+  openPdfFileDropHint: 'For a PDF on this computer, open it here or drop it on Simul.',
 
   // Surface-switcher: detached window / return-to-panel.
   returnToSidePanelAria: 'Return companion to the side panel',
@@ -339,6 +343,8 @@ export const UI_STRINGS = {
   // in the status line and the mirror's error panel (review L5).
   pageAccessGuidance:
     'Open a regular HTTP or HTTPS page, then select the extension from that page.',
+  pageLocalFileGuidance:
+    'Simul cannot read a PDF opened from this computer in a tab. Open the file here instead.',
   pageChangedGuidance:
     'The source page changed or access expired. Select the extension on the source page to authorize it again.',
   pageTimeoutGuidance: 'The page took too long to respond. Retry the current page.',

@@ -3,6 +3,7 @@ import type { ImageTextProviderId } from '../../lib/ocr/known-provider-ids';
 import type { OcrMinimumConfidence } from '../../lib/ocr/result-quality';
 import { PageAccessError } from '../../lib/page-identity';
 import { PdfFetchError } from '../../lib/pdf/pdf-fetch';
+import { readPdfFile, type LocalPdfFile } from '../../lib/pdf/pdf-file';
 import type {
   PdfLayoutSettings,
   PdfPagePoints,
@@ -60,7 +61,8 @@ export type PdfScannedReadingOutcome =
 /** Whether the shown PDF's unread scanned pages can be read now, and if not, why. */
 export type PdfScannedPagesState = 'readable' | 'none' | 'no-method' | 'unsupported';
 
-type PdfLoadStep = 'download' | 'open' | 'pages' | 'show';
+/** `read`: reading a file chosen on this computer, in place of `download`. */
+type PdfLoadStep = 'download' | 'read' | 'open' | 'pages' | 'show';
 
 /** The part of the PDF's translation surface the controller fills. */
 export interface PdfControllerSurface {
@@ -89,6 +91,8 @@ export interface PdfControllerOcr {
 
 export interface PdfControllerDependencies {
   readonly fetchPdf: (url: string, signal: AbortSignal) => Promise<Uint8Array>;
+  /** Reads a PDF chosen on this computer; `readPdfFile` by default. */
+  readonly readFile?: (file: Blob, signal: AbortSignal) => Promise<Uint8Array>;
   readonly openDocument: (bytes: Uint8Array, signal: AbortSignal) => Promise<PdfDocumentHandle>;
   readonly view: PdfViewSurface;
   readonly now?: () => number;
@@ -129,16 +133,16 @@ interface PageSizes {
 }
 
 /**
- * Loads the followed tab's PDF and shows it in the PDF view. Like the
- * mirror's last good replica, the shown document stays until its
- * replacement has opened and every page size is known; only then is it
- * swapped in and the old pdf.js task destroyed, so nothing is half drawn.
- * A failed load leaves what was shown as it was.
+ * Loads the followed tab's PDF, or one chosen on this computer, and shows
+ * it in the PDF view. Like the mirror's last good replica, the shown
+ * document stays until its replacement has opened and every page size is
+ * known; only then is it swapped in and the old pdf.js task destroyed, so
+ * nothing is half drawn. A failed load leaves what was shown as it was.
  */
 export class PdfController {
   readonly #dependencies: PdfControllerDependencies;
   #document: PdfDocumentHandle | undefined;
-  /** The shown PDF's address without its fragment. */
+  /** The shown PDF's address without its fragment, or its chosen file's key. */
   #shownKey: string | undefined;
   #pages: PageSizes | undefined;
   /** The running text reading; replaced or cleared to stop it. */
@@ -173,21 +177,24 @@ export class PdfController {
   }
 
   /**
-   * Resolves once the PDF at `url` is shown. Failures reject with a
-   * `PageAccessError` whose message is the status to show; a cancelled load
-   * rejects with an `AbortError` and shows nothing. With `sourceDocument`,
-   * the translation surface is started for it, empty; `readText` fills it.
+   * Resolves once the PDF at `source` (the tab's URL, or a file chosen on
+   * this computer) is shown. Failures reject with a `PageAccessError` whose
+   * message is the status to show; a cancelled load rejects with an
+   * `AbortError` and shows nothing. With `sourceDocument`, the translation
+   * surface is started for it, empty; `readText` fills it.
    */
   async show(
-    url: string,
+    source: string | LocalPdfFile,
     signal: AbortSignal,
     sourceDocument?: ReplicaSourceDocumentIdentity,
   ): Promise<{ readonly pageCount: number }> {
     const { fetchPdf, openDocument, view, surface } = this.#dependencies;
+    const readFile = this.#dependencies.readFile ??
+      ((file: Blob, readSignal: AbortSignal) => readPdfFile(file, { signal: readSignal }));
     const now = this.#dependencies.now ?? (() => performance.now());
     const started = now();
-    const key = documentKey(url);
-    let step: PdfLoadStep = 'download';
+    const key = typeof source === 'string' ? documentKey(source) : source.key;
+    let step: PdfLoadStep = typeof source === 'string' ? 'download' : 'read';
     let opened: PdfDocumentHandle | undefined;
     // Opening and measuring end on the caller's cancel or on the time limit.
     const bounded = new AbortController();
@@ -198,7 +205,9 @@ export class PdfController {
     let shown: { readonly pages: number; readonly bytes: number };
     try {
       signal.throwIfAborted();
-      const bytes = await fetchPdf(url, signal);
+      const bytes = typeof source === 'string'
+        ? await fetchPdf(source, signal)
+        : await readFile(source.file, signal);
       const byteCount = bytes.byteLength;
       signal.throwIfAborted();
       timer = setTimeout(() => {
@@ -755,7 +764,9 @@ function statusFor(error: unknown, step: PdfLoadStep): string {
   if (error instanceof PdfFetchError) {
     if (error.kind === 'too-large') return UI_STRINGS.statusPdfTooLarge;
     if (error.kind === 'not-pdf') return UI_STRINGS.statusPdfUnreadable;
-    return UI_STRINGS.statusPdfDownloadFailed;
+    return step === 'read'
+      ? UI_STRINGS.statusPdfFileReadFailed
+      : UI_STRINGS.statusPdfDownloadFailed;
   }
   if (error instanceof PdfjsOpenError) {
     if (error.kind === 'password') return UI_STRINGS.statusPdfPassword;
@@ -763,6 +774,7 @@ function statusFor(error: unknown, step: PdfLoadStep): string {
     return UI_STRINGS.statusPdfReaderFailed;
   }
   if (step === 'download') return UI_STRINGS.statusPdfDownloadFailed;
+  if (step === 'read') return UI_STRINGS.statusPdfFileReadFailed;
   // A page tree pdf.js cannot read is a broken file, not a broken reader.
   if (step === 'pages') return UI_STRINGS.statusPdfUnreadable;
   return UI_STRINGS.statusPdfReaderFailed;

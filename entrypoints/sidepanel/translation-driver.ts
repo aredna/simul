@@ -588,7 +588,7 @@ export class TranslationDriver {
       // translation this window already wanted; it records no new intent.
       await this.maybeTranslateAutomatically(
         captureCoordinator.generation,
-        state.capturedPageIdentity?.url ?? '',
+        state.capturedPageIdentity?.url,
       );
       return;
     }
@@ -702,7 +702,11 @@ export class TranslationDriver {
     }
   }
 
-  async maybeTranslateAutomatically(generation: number, pageUrl: string): Promise<void> {
+  /** `pageUrl` is undefined for a PDF chosen on this computer, which has no site. */
+  async maybeTranslateAutomatically(
+    generation: number,
+    pageUrl: string | undefined,
+  ): Promise<void> {
     const state = this.#state;
     const action = replicaViewTranslationAction(
       state.preferences.replicaViewMode,
@@ -754,11 +758,12 @@ export class TranslationDriver {
     const { captureCoordinator, coordinator, setStatus, updateControls } = this.environment;
     const pair = state.selectedPair();
     const requestedSnapshot = state.snapshot;
+    // A tab's page, or a PDF chosen on this computer (which has no tab).
     const identity = state.capturedPageIdentity;
     if (
       !pair ||
       !requestedSnapshot ||
-      !identity ||
+      !state.shownPage ||
       state.isLiveSourceOnlyMode ||
       state.translationInFlight ||
       state.availability === 'unavailable' ||
@@ -785,8 +790,10 @@ export class TranslationDriver {
       state.isCurrentTranslationPair(pair) &&
       !state.isLiveSourceOnlyMode;
     try {
-      const tab = await this.environment.getTab(identity.tabId);
-      assertSourceTabIsCurrent(tab, identity, state.requiresActiveSourceTab);
+      if (identity) {
+        const tab = await this.environment.getTab(identity.tabId);
+        assertSourceTabIsCurrent(tab, identity, state.requiresActiveSourceTab);
+      }
       if (!stillCurrent()) return;
       state.availability = 'available';
       state.availabilityCheckedForPair = availabilityPairKey(pair, generation);
@@ -897,15 +904,15 @@ export class TranslationDriver {
     const { captureCoordinator, coordinator } = this.environment;
     const interrupted = state.activeTranslationTask;
     if (interrupted) await interrupted.catch(() => undefined);
-    const identity = state.capturedPageIdentity;
+    const page = state.shownPage;
     const generation = captureCoordinator.generation;
-    if (state.isLiveSourceOnlyMode || !state.snapshot || !identity) return;
+    if (state.isLiveSourceOnlyMode || !state.snapshot || !page) return;
     // A scanned PDF opened in Live source only was never probed.
     await this.environment.probeScannedLanguage?.();
     if (
       state.isLiveSourceOnlyMode ||
       !state.snapshot ||
-      state.capturedPageIdentity !== identity ||
+      state.shownPage !== page ||
       !captureCoordinator.isCurrent(generation)
     ) return;
     const resolved = await this.resolveSelectedSourceLanguage(
@@ -916,14 +923,14 @@ export class TranslationDriver {
       !state.isLiveSourceOnlyMode &&
       requestedSnapshot !== undefined &&
       this.currentReplicaSnapshotMatches(requestedSnapshot) &&
-      state.capturedPageIdentity === identity &&
+      state.shownPage === page &&
       captureCoordinator.isCurrent(generation);
     if (!resolved || !stillCurrent()) return;
     const pair = state.selectedPair();
     coordinator.selectPair(pair);
     await this.checkAvailability(generation);
     if (!pair || !state.isCurrentTranslationPair(pair) || !stillCurrent()) return;
-    await this.maybeTranslateAutomatically(generation, identity.url);
+    await this.maybeTranslateAutomatically(generation, state.capturedPageIdentity?.url);
   }
 
   // --- Private.

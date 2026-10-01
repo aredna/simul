@@ -241,6 +241,11 @@ interface IsolatedHtmlEngineOptions {
   readonly openSemanticStream?: SemanticSourceStreamFactory;
   readonly onLiveApplied?: () => void;
   readonly onLayoutChanged?: () => void;
+  /**
+   * Files dragged from the computer and dropped on the mirror (D107). The
+   * frame never takes them; without this option a drop there does nothing.
+   */
+  readonly onFileDrop?: (files: readonly File[]) => void;
   readonly onSourceScroll?: (scroll: HtmlMirrorScrollState) => void;
   readonly onSourceCommit?: (commit: ReplicaSourceCommit) => void;
   readonly onLiveFailure?: (code: ReplicaDiagnosticCode) => void;
@@ -657,6 +662,7 @@ export class IsolatedHtmlReplicaEngine
       const disposeDisclosureGuards = installIsolatedDisclosureGuards(
         iframeDocument,
         iframe,
+        this.options.onFileDrop,
       );
       disposeStagedDisclosureGuards = disposeDisclosureGuards;
       applyDocumentGraph(
@@ -4205,7 +4211,28 @@ function protectIframe(iframe: HTMLIFrameElement): void {
 function installIsolatedDisclosureGuards(
   document: Document,
   iframe: HTMLIFrameElement,
+  onFileDrop?: (files: readonly File[]) => void,
 ): () => void {
+  // Files dragged from the computer go to the panel, never into the frame.
+  // Registered before the activation guard, which stops every later drop
+  // listener.
+  const onFileDrag = (event: DragEvent): void => {
+    const transfer = event.dataTransfer;
+    if (!transfer?.types.includes('Files')) return;
+    if (event.cancelable) event.preventDefault();
+    if (event.type === 'dragover') {
+      transfer.dropEffect = onFileDrop ? 'copy' : 'none';
+      return;
+    }
+    // Re-made in the panel's realm: opening the file releases this frame, and
+    // a read started on the frame's own File would never settle after that.
+    onFileDrop?.([...transfer.files].map((file) => new File([file], file.name, {
+      type: file.type,
+      lastModified: file.lastModified,
+    })));
+  };
+  document.addEventListener('dragover', onFileDrag, true);
+  document.addEventListener('drop', onFileDrag, true);
   for (const type of ISOLATED_DISCLOSURE_BLOCKED_EVENTS) {
     document.addEventListener(type, blockIsolatedDisclosureActivation, true);
   }
@@ -4225,6 +4252,8 @@ function installIsolatedDisclosureGuards(
   };
   document.addEventListener('wheel', onWheel, { capture: true, passive: false });
   return () => {
+    document.removeEventListener('dragover', onFileDrag, true);
+    document.removeEventListener('drop', onFileDrag, true);
     for (const type of ISOLATED_DISCLOSURE_BLOCKED_EVENTS) {
       document.removeEventListener(type, blockIsolatedDisclosureActivation, true);
     }

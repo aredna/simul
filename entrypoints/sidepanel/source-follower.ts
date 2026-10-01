@@ -22,12 +22,13 @@ import {
   navigationPageScopeKey,
   normalizedPageUrl,
   readPageError,
+  unreadablePageGuidance,
   type AuthorizedTabRequest,
   type CapturedPageIdentity,
   type DetachedPageIdentityHint,
   type PageTabLike,
 } from '../../lib/page-identity';
-import type { CaptureReason, CaptureRequest, CompanionState } from './companion-state';
+import type { CaptureReason, CompanionState, PageCaptureRequest } from './companion-state';
 import type { Currency, CurrencyToken } from './currency';
 
 export interface FollowerWindow {
@@ -77,7 +78,7 @@ export interface SourceFollowerEnvironment {
   readonly detachedIdentityHint: DetachedPageIdentityHint | undefined;
   readonly navigationDebounceMs: number;
   readonly navigationRefreshGate: NavigationRefreshGate;
-  readonly queueCapture: (request: CaptureRequest) => void;
+  readonly queueCapture: (request: PageCaptureRequest) => void;
   readonly invalidateCompanion: (message: UiText) => void;
   /** The source tab started loading another document; page work is stale. */
   readonly onSourceNavigationStarted: (next: CapturedPageIdentity) => void;
@@ -269,7 +270,9 @@ export class SourceFollower {
           await browser.hasAllSitesAccess().catch(() => false);
         if (!currency.isCurrent(request) || state.preferences.popoutTabMode !== 'active') return;
         if (notWebPage) {
-          this.environment.invalidateCompanion(UI_STRINGS.statusActiveTabNotWebPage);
+          this.environment.invalidateCompanion(
+            unreadablePageGuidance(tab.url, UI_STRINGS.statusActiveTabNotWebPage),
+          );
           return;
         }
       }
@@ -326,6 +329,9 @@ export class SourceFollower {
     const state = this.#state;
     if (
       !this.#isDetachedWindow ||
+      // A PDF chosen on this computer stays while the reader moves between
+      // windows; a tab switch or a toolbar click replaces it (D107).
+      state.localPdf !== undefined ||
       state.preferences.popoutTabMode !== 'active' ||
       windowId === this.environment.browser.windowIdNone ||
       windowId === state.panelWindowId
@@ -359,7 +365,8 @@ export class SourceFollower {
     const { navigationRefreshGate } = this.environment;
     const followed = state.followedPageIdentity;
     if (!followed) {
-      this.#followLoadedActiveTab(tabId, changeInfo, tab);
+      // A page finishing its load does not replace a chosen local PDF.
+      if (!state.localPdf) this.#followLoadedActiveTab(tabId, changeInfo, tab);
       return;
     }
     if (followed.tabId !== tabId) return;
@@ -382,7 +389,7 @@ export class SourceFollower {
       if (navigationStatus === 'loading' || hasUrlChange) {
         this.#clearNavigationTimer();
         this.environment.invalidateCompanion(
-          UI_STRINGS.statusSourceRestricted,
+          unreadablePageGuidance(nextUrl, UI_STRINGS.statusSourceRestricted),
         );
       }
       return;

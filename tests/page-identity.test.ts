@@ -4,10 +4,12 @@ import {
   PAGE_ACCESS_GUIDANCE,
   PAGE_ACCESS_LOST_GUIDANCE,
   PAGE_CHANGED_GUIDANCE,
+  PAGE_LOCAL_FILE_GUIDANCE,
   PageAccessError,
   assertSourceTabIsCurrent,
   hasNonDefaultPort,
   identityFromTab,
+  isLocalFilePage,
   isSamePageIdentity,
   isSupportedPage,
   navigationPageIdentityKey,
@@ -17,6 +19,7 @@ import {
   readAuthorizedTabMessage,
   readPageError,
   readableError,
+  unreadablePageGuidance,
   withPageTimeout,
 } from '../lib/page-identity';
 
@@ -99,6 +102,14 @@ describe('identityFromTab', () => {
     expect(() => identityFromTab(undefined)).toThrow(PageAccessError);
     // A locked detached window follows its tab whether or not it is active.
     expect(identityFromTab({ ...tab, active: false }, undefined, false).tabId).toBe(7);
+  });
+
+  it("points a file opened from this computer to the panel's file picker (D107)", () => {
+    expect(() => identityFromTab({ ...tab, url: 'file:///home/a/report.pdf' }))
+      .toThrow(PAGE_LOCAL_FILE_GUIDANCE);
+    // Chrome hides the address unless file access is on: the usual guidance.
+    expect(() => identityFromTab({ id: 7, windowId: 3, active: true }))
+      .toThrow(PAGE_ACCESS_GUIDANCE);
   });
 });
 
@@ -193,6 +204,17 @@ describe('page URL helpers', () => {
     expect(hasNonDefaultPort('https://example.com/a')).toBe(false);
     expect(hasNonDefaultPort(undefined)).toBe(false);
     expect(hasNonDefaultPort('nope')).toBe(false);
+  });
+
+  it('recognizes files opened from this computer, and says what to do with them', () => {
+    expect(isLocalFilePage('file:///C:/Users/a/report.pdf')).toBe(true);
+    expect(isLocalFilePage('https://example.com/report.pdf')).toBe(false);
+    expect(isLocalFilePage(undefined)).toBe(false);
+    expect(isLocalFilePage('nope')).toBe(false);
+    expect(unreadablePageGuidance('file:///tmp/a.pdf')).toBe(PAGE_LOCAL_FILE_GUIDANCE);
+    expect(unreadablePageGuidance('chrome://settings')).toBe(PAGE_ACCESS_GUIDANCE);
+    expect(unreadablePageGuidance(undefined, 'Other.')).toBe('Other.');
+    expect(unreadablePageGuidance('file:///tmp/a.pdf', 'Other.')).toBe(PAGE_LOCAL_FILE_GUIDANCE);
   });
 });
 

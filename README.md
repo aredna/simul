@@ -46,7 +46,9 @@ To update, replace the folder and select **Reload** on the Simul card.
 
 PDF tabs work the same way: Simul shows the pages and lays each translated
 paragraph over the page, in its place. Scanned pages are read on the computer
-while they are translated.
+while they are translated. Simul cannot read a PDF saved on your computer
+from its tab: select the Simul icon there and choose **Open a PDF file…**,
+or drop the file on Simul.
 
 ## License
 

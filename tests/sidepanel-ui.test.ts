@@ -552,6 +552,56 @@ describe('sidepanel UI structure', () => {
     expect(style).toContain('.pdf-view[hidden] { display: none; }');
   });
 
+  it('offers a PDF from this computer in every error panel, and by drop (D107)', () => {
+    const { document } = parseHTML(markup);
+    const input = document.querySelector<HTMLInputElement>('main > #pdf-file-input');
+    expect(input?.getAttribute('type')).toBe('file');
+    expect(input?.getAttribute('accept')).toBe('application/pdf,.pdf');
+    expect(input?.hasAttribute('hidden')).toBe(true);
+    expect(input?.getAttribute('data-ui-aria-label')).toBe('Open a PDF file…');
+    // Not inside the status section, which every render replaces.
+    expect(document.querySelector('#replica-status #pdf-file-input')).toBeNull();
+
+    const errorPanel = sliceBetween('function renderErrorState(', 'function openDroppedFiles(');
+    expect(errorPanel).toContain('setUiText(openFile, UI_STRINGS.openPdfFile);');
+    expect(errorPanel).toContain("openFile.addEventListener('click', () => pdfFileInput.click());");
+    expect(errorPanel).toContain('setUiText(fileHint, UI_STRINGS.openPdfFileDropHint);');
+    // The hint introduces the button, after the reason the panel is empty.
+    expect(errorPanel).toContain('wrapper.append(text, fileHint, openFile);');
+
+    const fileWiring = sliceBetween(
+      "pdfFileInput.addEventListener('change', () => {",
+      "translateComposerButton.addEventListener('click'",
+    );
+    // The same file chosen twice is a change both times.
+    expect(fileWiring).toContain("pdfFileInput.value = '';");
+    expect(fileWiring).toContain('capturePipeline.openLocalPdf(file);');
+    // A dragged file never navigates the panel away.
+    expect(fileWiring).toContain("document.addEventListener('dragover', (event) => {");
+    expect(fileWiring).toContain("document.addEventListener('drop', (event) => {");
+    expect(fileWiring.match(/event\.preventDefault\(\);/gu)).toHaveLength(2);
+    expect(fileWiring).toContain('openDroppedFiles([...(event.dataTransfer?.files ?? [])]);');
+    expect(script).toContain("return event.dataTransfer?.types.includes('Files') ?? false;");
+    // Drops over the mirror frame come back from the engine; the first PDF opens.
+    expect(script).toContain('onFileDrop: (files) => openDroppedFiles(files),');
+    const dropped = sliceBetween('function openDroppedFiles(', 'function renderUi(');
+    expect(dropped).toContain('const file = chooseDroppedPdf(files);');
+
+    // A chosen file has no tab: Refresh and settings rebuilds read it again.
+    const refresh = sliceBetween('const requestManualRefresh = (): void => {', 'refreshButton.addEventListener(');
+    expect(refresh).toContain("if (state.localPdf) capturePipeline.reopenLocalPdf('manual');");
+    const recapture = sliceBetween('function recaptureShownPage(', 'async function languageSelectionChanged(');
+    // Mirror settings leave a shown local PDF alone; one a purge closed reopens.
+    expect(recapture).toContain("else if (!pdfController.shown) capturePipeline.reopenLocalPdf('preference');");
+    // Every settings rebuild goes through recaptureShownPage.
+    expect(script.match(/reason: 'preference' \}\)/gu)).toHaveLength(1);
+    // The OCR cache is kept per chosen file.
+    expect(script).toContain(
+      'const origin = state.localPdf?.key ?? pageOrigin(state.capturedPageIdentity?.url);',
+    );
+    expect(style).toContain('.empty-state__open-pdf { color: var(--text); }');
+  });
+
   it('closes the PDF on purge and unload, and lays it out with the tab zoom', () => {
     const purge = sliceBetween(
       'function purgeSourceDerivedRuntimeInternal(',

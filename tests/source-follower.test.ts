@@ -272,6 +272,19 @@ describe('SourceFollower in the side panel', () => {
     expect(harness.queueCapture).not.toHaveBeenCalled();
   });
 
+  it('points to the file picker when the followed tab opens a file from this computer', () => {
+    const harness = setup({ panelWindowId: 1 });
+    harness.state.followedPageIdentity = { tabId: 4, windowId: 1, url: 'https://a.example/' };
+    harness.follower.handleTabUpdated(
+      4,
+      { status: 'loading', url: 'file:///home/a/report.pdf' },
+      { windowId: 1, active: true },
+    );
+    expect(harness.invalidateCompanion).toHaveBeenCalledWith(
+      'Simul cannot read a PDF opened from this computer in a tab. Open the file here instead.',
+    );
+  });
+
   it('invalidates when the followed tab opens a restricted page or closes', () => {
     const harness = setup({ panelWindowId: 1 });
     harness.state.followedPageIdentity = { tabId: 4, windowId: 1, url: 'https://a.example/' };
@@ -483,6 +496,51 @@ describe('SourceFollower in a detached window', () => {
     expect(harness.state.detachedSourceWindowId).toBe(5);
     expect(harness.queueCapture).toHaveBeenCalledWith({
       identity: { tabId: 4, windowId: 5, url: 'https://a.example/' },
+      reason: 'navigation',
+    });
+  });
+
+  it('points to the file picker when Active following reaches a file tab', async () => {
+    const harness = setup({
+      detached: { tabId: 4, windowId: 1 },
+      popoutTabMode: 'active',
+      panelWindowId: 9,
+      tabs: [{ id: 6, windowId: 2, active: true, url: 'file:///home/a/report.pdf' }],
+    });
+    harness.state.followedPageIdentity = { tabId: 4, windowId: 1, url: 'https://a.example/' };
+    harness.follower.handleTabActivated(6, 2);
+    await vi.runAllTimersAsync();
+    expect(harness.invalidateCompanion).toHaveBeenCalledWith(
+      'Simul cannot read a PDF opened from this computer in a tab. Open the file here instead.',
+    );
+    expect(harness.queueCapture).not.toHaveBeenCalled();
+  });
+
+  it('keeps a chosen local PDF across window focus and page loads, not a tab switch (D107)', async () => {
+    const harness = setup({
+      detached: { tabId: 4, windowId: 1 },
+      popoutTabMode: 'active',
+      panelWindowId: 9,
+      allSitesAccess: true,
+      tabs: [page(4, 1, 'https://a.example/'), { id: 6, windowId: 2, active: true }],
+    });
+    harness.state.localPdf = { file: new Blob(['%PDF-']), key: 'local-file:1' };
+
+    harness.follower.handleWindowFocusChanged(1);
+    harness.follower.handleTabUpdated(
+      4,
+      { status: 'complete' },
+      { windowId: 1, active: true, url: 'https://a.example/', status: 'complete' },
+    );
+    await vi.runAllTimersAsync();
+    expect(harness.queueCapture).not.toHaveBeenCalled();
+    expect(harness.invalidateCompanion).not.toHaveBeenCalled();
+
+    // A tab switch is Follow moving on: the new tab replaces the file.
+    harness.follower.handleTabActivated(4, 1);
+    await vi.runAllTimersAsync();
+    expect(harness.queueCapture).toHaveBeenCalledWith({
+      identity: { tabId: 4, windowId: 1, url: 'https://a.example/' },
       reason: 'navigation',
     });
   });

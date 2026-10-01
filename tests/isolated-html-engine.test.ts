@@ -517,6 +517,52 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(forgedControl.checked).toBe(false);
   });
 
+  it('hands files dropped on the mirror to the panel, before the activation guard (D107)', async () => {
+    const stream = new FakeHtmlStream(makeCheckpoint('hello', 0));
+    const host = new FakePresentationHost();
+    const dropped: string[][] = [];
+    const droppedTypes: string[][] = [];
+    const engine = new IsolatedHtmlReplicaEngine({
+      presentationHost: host,
+      openStream: async () => stream,
+      initializeIframe: async (iframe, shell) => {
+        const { document } = parseHTML(shell);
+        Object.defineProperty(iframe, 'contentDocument', { value: document });
+        return document;
+      },
+      onFileDrop: (files) => {
+        dropped.push(files.map((file) => file.name));
+        droppedTypes.push(files.map((file) => file.type));
+      },
+    });
+    expect((await engine.run(request)).status).toBe('complete');
+    const replica = host.iframe!.contentDocument!;
+    const drag = (type: string, types: readonly string[], files: readonly File[]) => {
+      const event = new replica.defaultView!.Event(type, { bubbles: true, cancelable: true });
+      Object.defineProperty(event, 'dataTransfer', {
+        value: { types, files, dropEffect: 'none' },
+      });
+      return event as Event & { dataTransfer: { dropEffect: string } };
+    };
+
+    const over = drag('dragover', ['Files'], []);
+    expect(replica.body.dispatchEvent(over)).toBe(false);
+    expect(over.dataTransfer.dropEffect).toBe('copy');
+    const drop = drag('drop', ['Files'], [
+      new File(['%PDF-'], 'a.pdf', { type: 'application/pdf' }),
+      new File(['notes'], 'b.txt', { type: 'text/plain' }),
+    ]);
+    expect(replica.body.dispatchEvent(drop)).toBe(false);
+    // Re-made as the panel's own files, with their names and types.
+    expect(dropped).toEqual([['a.pdf', 'b.txt']]);
+    expect(droppedTypes).toEqual([['application/pdf', 'text/plain']]);
+
+    // A drag of text or a link is not a file: the guard alone handles it.
+    const textDrop = drag('drop', ['text/plain'], []);
+    expect(replica.body.dispatchEvent(textDrop)).toBe(false);
+    expect(dropped).toHaveLength(1);
+  });
+
   it('rebuilds the dark canvas and inline SVG logo with canonical SVG attributes', async () => {
     const checkpoint = createHtmlMirrorCheckpoint(
       createReplicaIdentity({ ...identityParts, sequence: 0 }),

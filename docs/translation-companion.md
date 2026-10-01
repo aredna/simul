@@ -651,6 +651,56 @@ shell and the mirror has nothing to copy (D103).
   OCR model for the language, n pages not read (only after a complete
   translation; failures show the partial summary), and "No text was found
   in this PDF."
+- **PDFs from this computer (D107).** A `file://` tab cannot be read: `fetch`
+  and XHR of its URL fail from the panel even with file access on. The panel
+  takes the file instead.
+  - `renderErrorState` (every error panel, shown only when nothing else
+    shows) adds the hint "For a PDF on this computer, open it here or drop
+    it on Simul." and **Open a PDF file…**, which clicks the hidden
+    `#pdf-file-input` (`accept="application/pdf,.pdf"`).
+  - The panel document's `dragover`/`drop` handlers take files dropped
+    outside the mirror. The mirror frame's guards hand file drops to the
+    engine's `onFileDrop`: registered before the activation guard, they
+    prevent the default, so a dragged file never navigates. Of several
+    files, `chooseDroppedPdf` opens the first PDF by type or `.pdf` name,
+    else the first file.
+  - `CapturePipeline.openLocalPdf(file)` resets the page as an invalidation
+    does: page currencies, abort, release, `clearPage`.
+  - It then sets `state.localPdf` (`lib/pdf/pdf-file.ts` `LocalPdfFile`: the
+    file and an opaque `local-file:<uuid>` key, never its name) and enqueues
+    a `LocalPdfCaptureRequest` on the capture coordinator, so its generation
+    orders it against tab captures.
+  - `#captureLocalPdf` reads no tab, document, zoom or tab currency.
+    `#capturePdf` shows the file through `PdfController.show(LocalPdfFile)`,
+    which reads it with `readPdfFile`:
+    - the size cap is checked before reading, then the `%PDF-` check;
+    - a cancel ends a slow read at once;
+    - the step is `read`, and a read failure says "Simul could not read this
+      file. Choose it again.";
+    - the key names the reading position and the PDF OCR cache.
+  - The rest is the web PDF path with no page URL. With no site, automatic
+    translation follows all sites, OCR On or the reader's click.
+  - The driver runs and resumes against `state.shownPage` (the captured
+    tab's page, or the local PDF) and skips the tab check for a local PDF.
+  - What replaces the file:
+    - any page capture (`queueCapture`: a toolbar click, Follow moving to an
+      activated tab) drops it;
+    - `invalidateCompanion` clears it with the page;
+    - while it shows, the follower ignores window focus changes and active
+      tabs finishing a load.
+  - Refresh and a settings rebuild after a purge closed the PDF call
+    `reopenLocalPdf`, which reads the file again. A manual Refresh keeps the
+    PDF on screen until the new copy shows. Mirror-only settings do not
+    touch a shown local PDF.
+  - A failed open or reopen closes the PDF and forgets the file, so the
+    error panel offers the picker again.
+  - When Chrome exposes a `file:` address, `unreadablePageGuidance` says the
+    file can be opened here.
+  - The popout launch opens (or focuses, without the authorized-tab message)
+    the companion window for any tab, so a tab Simul cannot read gets the
+    message and the picker there too.
+  - The side panel's ↗ stays off for a local PDF (`capturedPageIdentity` is
+    unset), and a window's return to the side panel leaves the file behind.
 
 ## Detached window
 

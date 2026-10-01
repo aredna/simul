@@ -46,6 +46,30 @@ pages and PDFs:
 When the tab shows a PDF, selecting Simul shows the PDF's pages in the panel,
 in order, with the packaged pdf.js.
 
+A PDF saved on your computer opens in a `file://` tab, which Simul cannot
+read. Give Simul the file instead:
+- Whenever the panel shows a message and no page (such as "Simul cannot read
+  a PDF opened from this computer in a tab"), it offers **Open a PDF file…**.
+- A file dropped anywhere on Simul opens too, over a mirrored page as well,
+  and replaces what Simul showed. Of several files, the first PDF opens; a
+  file that is not a PDF leaves the message "This file is not a readable
+  PDF."
+- If Simul opens in a separate window, selecting Simul on a tab it cannot
+  read opens that window (or brings it forward) with the message and the
+  button.
+
+A file from the computer then works like a web PDF, with one difference:
+it has no site, so automatic translation follows the all-sites setting or
+**OCR** being on. It stays until Simul shows something else: a page you
+select Simul on, a tab you switch to while Simul is set to **Follow**, or
+another file. Moving between windows or a page finishing its load keeps it.
+
+**Rebuild mirror** reads the file again. If the file was moved or changed
+meanwhile, the PDF closes and you choose it again. Simul keeps the file only
+in the panel or window you opened it in: the side panel's ↗ button is off
+while it shows, and returning a separate window to the side panel leaves
+the file behind.
+
 **Translate page**, From/To, Auto-detect, automatic translation, Cancel and
 Live source only work as they do for web pages. Each paragraph, heading or
 list item is covered with the page's own background colour and its
@@ -163,6 +187,9 @@ a page: hidden text, labels, card numbers, one-time codes, and form values are
 copied as the page holds them (typed passwords are not). The mirror still
 cannot act on the page. It is off by default.
 
+A PDF opened from the computer is read from the file you chose and makes no
+request; the panel keeps only a reference to the file, never past closing it.
+
 On a PDF tab Simul makes one extra request: it downloads the PDF's own URL,
 which the tab has already loaded. Chrome keeps the extension's cache separate
 from the tab's, so this is a second download of the same file; Simul's own
@@ -222,6 +249,9 @@ complete design and browser-boundary rationale.
   itself, not the repository root.
 - **The icon does not work:** try a normal HTTP(S) page; Chrome blocks extension
   access on some internal and protected URLs.
+- **A PDF on the computer (a `file://` tab) does not open:** Simul cannot read
+  `file://` tabs, even with **Allow access to file URLs** on. Select
+  **Open a PDF file…** in the panel, or drop the file on it.
 - **Nothing translates at all:** the browser must have the Translator API
   (Chrome 138 or newer, or Edge 148 or newer, on a computer). Other browsers
   can load Simul but cannot translate with it.

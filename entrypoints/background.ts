@@ -233,16 +233,14 @@ export default defineBackground(() => {
       }
       return;
     }
-    if (
-      tab.id === undefined ||
-      tab.windowId === undefined ||
-      !isSupportedPage(tab.url)
-    ) return;
+    // A tab Simul cannot read still gets the window: it says why and offers
+    // a PDF from this computer, the way in for a file:// tab (D107).
+    if (tab.id === undefined || tab.windowId === undefined) return;
 
     const identity = {
       tabId: tab.id,
       windowId: tab.windowId,
-      url: tab.url,
+      url: tab.url ?? '',
     };
     if (await focusExistingDetachedWindow(identity, clickSequence)) {
       await preopenedSidePanel?.catch(() => undefined);
@@ -317,6 +315,8 @@ export default defineBackground(() => {
     await browser.windows.update(existing.id, { focused: true }).catch(
       () => undefined,
     );
+    // A tab Simul cannot read only brings the window forward.
+    if (!isSupportedPage(identity.url)) return true;
     // The window retargets (or re-authorizes its locked tab) through the same
     // ordered message a side-panel launch uses.
     await browser.runtime.sendMessage({

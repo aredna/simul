@@ -165,13 +165,14 @@ describe('vendored pdf.js catalog', () => {
 
 describe('pdf.js under the Chrome 138 built-ins', () => {
   it('runs in a Node 24 that lacks the six built-ins the shim adds', () => {
+    // Written as plain text: `node -p` colours its output when FORCE_COLOR is set.
     const missing = execFileSync(
       process.execPath,
       [
-        '-p',
-        `[Uint8Array.prototype.toHex, Uint8Array.prototype.toBase64, Uint8Array.fromBase64,
-          Map.prototype.getOrInsert, Map.prototype.getOrInsertComputed, Math.sumPrecise]
-          .every((builtIn) => builtIn === undefined)`,
+        '-e',
+        `process.stdout.write(String([Uint8Array.prototype.toHex, Uint8Array.prototype.toBase64,
+          Uint8Array.fromBase64, Map.prototype.getOrInsert, Map.prototype.getOrInsertComputed,
+          Math.sumPrecise].every((builtIn) => builtIn === undefined)))`,
       ],
       { encoding: 'utf8' },
     ).trim();

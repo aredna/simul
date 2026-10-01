@@ -57,6 +57,7 @@ import {
 } from '../../lib/page-identity';
 import { NavigationRefreshGate } from '../../lib/navigation-refresh-gate';
 import { fetchPdfBytes } from '../../lib/pdf/pdf-fetch';
+import { chooseDroppedPdf } from '../../lib/pdf/pdf-file';
 import { chromePdfjsEnvironment, openPdfDocument } from '../../lib/pdf/pdfjs-runtime';
 import { PdfTextSurface } from '../../lib/pdf/pdf-text-surface';
 import {
@@ -244,6 +245,7 @@ const placementGuidance = requireElement<HTMLElement>('#placement-guidance');
 const replicaStatusContainer = requireElement<HTMLElement>('#replica-status');
 const replicaPreviewContainer = requireElement<HTMLElement>('#replica-preview');
 const pdfViewContainer = requireElement<HTMLElement>('#pdf-view');
+const pdfFileInput = requireElement<HTMLInputElement>('#pdf-file-input');
 const replicaModeBadge = requireElement<HTMLElement>('#replica-mode-badge');
 const composerInput = requireElement<HTMLTextAreaElement>('#composer-input');
 const composerCharacterCount = requireElement<HTMLOutputElement>(
@@ -327,6 +329,7 @@ const isolatedHtmlReplicaEngine = new IsolatedHtmlReplicaEngine({
   getReplicaReadScope: () => readScopeController.currentReplicaReadScope(),
   getTextLayoutMode: () => state.preferences.textLayoutMode,
   onLayoutChanged: () => imageTranslationController.refreshOverlays(),
+  onFileDrop: (files) => openDroppedFiles(files),
   onSourceScroll: (scroll) => {
     state.lastSourceScroll = scroll;
     if (state.preferences.syncScroll) visibleReplayHost.followSourceScroll(scroll);
@@ -1071,7 +1074,9 @@ zoomInput.addEventListener('input', () => preferenceClient.setZoom(Number(zoomIn
 zoomInButton.addEventListener('click', () => preferenceClient.setZoom(state.preferences.zoomPercent + 10));
 zoomOutButton.addEventListener('click', () => preferenceClient.setZoom(state.preferences.zoomPercent - 10));
 const requestManualRefresh = (): void => {
-  void sourceFollower.refreshFollowedPage('manual');
+  // A PDF chosen on this computer has no tab: Refresh opens the file again.
+  if (state.localPdf) capturePipeline.reopenLocalPdf('manual');
+  else void sourceFollower.refreshFollowedPage('manual');
 };
 refreshButton.addEventListener('click', requestManualRefresh);
 compactRefreshButton.addEventListener('click', requestManualRefresh);
@@ -1093,6 +1098,25 @@ cancelButton.addEventListener('click', () => {
       ? 'warning'
       : 'normal',
   );
+});
+// A PDF on this computer: chosen with the error panel's button, or dropped
+// anywhere on the panel (D107). Simul cannot read a file:// tab itself.
+pdfFileInput.addEventListener('change', () => {
+  const file = pdfFileInput.files?.[0];
+  // Cleared, so choosing the same file again is a change too.
+  pdfFileInput.value = '';
+  if (file) capturePipeline.openLocalPdf(file);
+});
+// A file dragged over the panel must never navigate the panel to it.
+document.addEventListener('dragover', (event) => {
+  if (!carriesFiles(event)) return;
+  event.preventDefault();
+  if (event.dataTransfer) event.dataTransfer.dropEffect = 'copy';
+});
+document.addEventListener('drop', (event) => {
+  if (!carriesFiles(event)) return;
+  event.preventDefault();
+  openDroppedFiles([...(event.dataTransfer?.files ?? [])]);
 });
 translateComposerButton.addEventListener('click', () => void quickComposer.translate());
 copyComposerButton.addEventListener('click', () => void quickComposer.copy());
@@ -1200,8 +1224,7 @@ browser.storage.onChanged.addListener((changes, areaName) => {
     !sameMirrorLimits(previous.mirrorLimits, state.preferences.mirrorLimits)
   ) {
     isolatedReplicaFailureRecoveryGate.reset();
-    const identity = state.followedPageIdentity ?? state.capturedPageIdentity;
-    if (identity) capturePipeline.queueCapture({ identity, reason: 'preference' });
+    recaptureShownPage();
   }
   if (previous.replicaViewMode !== state.preferences.replicaViewMode) {
     translationDriver.applyReplicaViewMode(previous.replicaViewMode);
@@ -1290,9 +1313,19 @@ function clearResetOnlyRuntimeState(): void {
 }
 
 function restartReplicaAfterReadPolicyChange(): void {
+  recaptureShownPage();
+  configureImageTranslation();
+}
+
+/**
+ * Rebuilds what the panel follows after a settings change: the followed
+ * tab's page, or else the PDF chosen on this computer, read again.
+ */
+function recaptureShownPage(): void {
   const identity = state.followedPageIdentity ?? state.capturedPageIdentity;
   if (identity) capturePipeline.queueCapture({ identity, reason: 'preference' });
-  configureImageTranslation();
+  // Mirror settings do not touch a shown local PDF; one a purge closed opens again.
+  else if (!pdfController.shown) capturePipeline.reopenLocalPdf('preference');
 }
 
 async function languageSelectionChanged(): Promise<void> {
@@ -1451,8 +1484,7 @@ async function changeReplicaFidelityPolicy(
       state.preferences.replicaFidelityPolicy !== replicaFidelityPolicy
     ) return;
     isolatedReplicaFailureRecoveryGate.reset();
-    const identity = state.followedPageIdentity ?? state.capturedPageIdentity;
-    if (identity) capturePipeline.queueCapture({ identity, reason: 'preference' });
+    recaptureShownPage();
   } finally {
     state.replicaFidelityCommitInFlight = false;
     updateControls();
@@ -1479,8 +1511,7 @@ async function changeMirrorLimits(
     ) return;
     // Both sides of the next mirror take the new limits from its start.
     isolatedReplicaFailureRecoveryGate.reset();
-    const identity = state.followedPageIdentity ?? state.capturedPageIdentity;
-    if (identity) capturePipeline.queueCapture({ identity, reason: 'preference' });
+    recaptureShownPage();
   } finally {
     state.mirrorLimitsCommitInFlight = false;
     syncPreferenceControls();
@@ -1693,15 +1724,34 @@ function renderLoadingState(message: UiText = UI_STRINGS.preparingMirror): void 
 /** The shown error panel's text, re-rendered on a language switch (L7). */
 let errorState: { readonly element: HTMLElement; readonly message: UiText } | undefined;
 
+/**
+ * The error panel, shown when the panel has nothing to show. It always
+ * offers a PDF from this computer, which is the way in for a file:// tab
+ * that Simul cannot read (D107).
+ */
 function renderErrorState(message: UiText): void {
   const wrapper = document.createElement('div');
   wrapper.className = 'empty-state empty-state--error';
   const text = document.createElement('p');
   text.textContent = renderUi(message);
   errorState = { element: text, message };
-  wrapper.append(text);
+  const fileHint = document.createElement('p');
+  fileHint.className = 'empty-state__hint';
+  setUiText(fileHint, UI_STRINGS.openPdfFileDropHint);
+  const openFile = document.createElement('button');
+  openFile.type = 'button';
+  openFile.className = 'empty-state__open-pdf';
+  setUiText(openFile, UI_STRINGS.openPdfFile);
+  openFile.addEventListener('click', () => pdfFileInput.click());
+  wrapper.append(text, fileHint, openFile);
   replicaStatusContainer.replaceChildren(wrapper);
   replicaStatusContainer.hidden = false;
+}
+
+/** Files dropped on the panel or the mirror: the first PDF among them opens. */
+function openDroppedFiles(files: readonly File[]): void {
+  const file = chooseDroppedPdf(files);
+  if (file) capturePipeline.openLocalPdf(file);
 }
 
 /** Renders UI text in the language the UI shows now. */
@@ -1841,7 +1891,8 @@ function logImageTranslationDiagnostic(
 
 /**
  * The PDF recognition cache, fenced by the current reset revision and kept
- * for one top-page origin at a time (a page without one keeps nothing).
+ * for one top-page origin, or one chosen file, at a time (a page without
+ * either keeps nothing).
  */
 function pdfRecognizer(): ImageRecognitionCoordinator {
   pdfRecognition ??= createBrowserImageRecognitionCoordinator(
@@ -1849,7 +1900,7 @@ function pdfRecognizer(): ImageRecognitionCoordinator {
     state.preferences.resetRevision,
   );
   pdfRecognition.advanceResetEpoch(state.preferences.resetRevision);
-  const origin = pageOrigin(state.capturedPageIdentity?.url);
+  const origin = state.localPdf?.key ?? pageOrigin(state.capturedPageIdentity?.url);
   if (origin === undefined || origin !== pdfRecognitionOrigin) pdfRecognition.clear();
   pdfRecognitionOrigin = origin;
   return pdfRecognition;
@@ -1869,6 +1920,11 @@ function logTranslationCache(
   console.info(
     `[Simul translation cache] scope=${label}; entries=${stats.entries}; characters=${stats.characters}; hits=${stats.hits}; misses=${stats.misses}; joins=${stats.inFlightJoins}; provider-loads=${stats.providerLoads}; expirations=${stats.expirations ?? 0}; purges=${stats.purges ?? 0}`,
   );
+}
+
+/** A drag that carries files from the computer, not text or a link. */
+function carriesFiles(event: DragEvent): boolean {
+  return event.dataTransfer?.types.includes('Files') ?? false;
 }
 
 function isAbortError(error: unknown): boolean {

@@ -11,6 +11,7 @@ import type { UiText } from '../../lib/ui-text';
 import type { NavigationRefreshGate } from '../../lib/navigation-refresh-gate';
 import type { ImageTranslationDiagnostic } from '../../lib/ocr/image-translation-controller';
 import { isPdfContentType } from '../../lib/pdf/pdf-detection';
+import type { LocalPdfFile } from '../../lib/pdf/pdf-file';
 import {
   activateImageReplicaAfterRun,
   imageReplicaActivationFailureReason,
@@ -48,7 +49,13 @@ import type {
   ReplicaTranslationSnapshot,
 } from '../../lib/translation/replica-translation-coordinator';
 import type { SupportedLanguage, TranslationPair } from '../../lib/translation-provider';
-import type { CaptureRequest, CompanionState } from './companion-state';
+import {
+  isLocalPdfCaptureRequest,
+  type CaptureRequest,
+  type CompanionState,
+  type LocalPdfCaptureRequest,
+  type PageCaptureRequest,
+} from './companion-state';
 import type { Currency } from './currency';
 import type { PdfScannedPagesState } from './pdf-controller';
 import type { TranslationDriver } from './translation-driver';
@@ -90,11 +97,12 @@ export interface PipelineImageController {
 export interface PipelinePdf {
   readonly shown: boolean;
   /**
-   * Shows the PDF, with an empty translation surface for `document`. Rejects
-   * with a `PageAccessError` status, or an `AbortError` when cancelled.
+   * Shows the PDF at the tab's URL, or a file chosen on this computer, with
+   * an empty translation surface for `document`. Rejects with a
+   * `PageAccessError` status, or an `AbortError` when cancelled.
    */
   show(
-    url: string,
+    source: string | LocalPdfFile,
     signal: AbortSignal,
     document: ReplicaSourceDocumentIdentity,
   ): Promise<{ readonly pageCount: number }>;
@@ -165,7 +173,8 @@ export interface CapturePipelineEnvironment {
   /** The tab's browser zoom factor; 1 when Chrome cannot say. */
   readonly readZoom: (tabId: number) => Promise<number>;
   readonly getTab: (tabId: number) => Promise<PageTabLike>;
-  readonly reconcileAutomaticAccess: (pageUrl: string) => Promise<boolean>;
+  /** `pageUrl` is undefined for a PDF chosen on this computer. */
+  readonly reconcileAutomaticAccess: (pageUrl: string | undefined) => Promise<boolean>;
   readonly cancelNavigationRefresh: () => void;
   readonly invalidateComposer: () => void;
   readonly setStatus: (message: UiText, tone?: CompanionStatusTone) => void;
@@ -199,7 +208,7 @@ export class CapturePipeline {
     return this.environment.state;
   }
 
-  queueCapture(request: CaptureRequest): void {
+  queueCapture(request: PageCaptureRequest): void {
     const state = this.#state;
     const {
       captureCoordinator,
@@ -240,6 +249,8 @@ export class CapturePipeline {
     imageController.releaseReplica();
     this.environment.currency.supersede('availability');
     state.followedPageIdentity = request.identity;
+    // A tab's page replaces a PDF chosen on this computer.
+    state.localPdf = undefined;
     if (!state.snapshot && !presentation.hasCommittedReplica && !this.environment.pdf.shown) {
       this.environment.renderLoading();
     }
@@ -250,7 +261,64 @@ export class CapturePipeline {
           ? UI_STRINGS.statusBuildingNewPage
           : UI_STRINGS.statusBuildingInitial,
     );
-    const enqueued = captureCoordinator.enqueue(request);
+    this.#enqueue(request);
+  }
+
+  /**
+   * The reader chose a PDF on this computer (D107). It replaces whatever the
+   * panel showed or followed, as a new page does, and is shown like a tab's
+   * PDF; the panel then follows no tab until Simul shows something else.
+   */
+  openLocalPdf(file: Blob): void {
+    const state = this.#state;
+    const { coordinator, imageController, presentation, pdf } = this.environment;
+    this.environment.cancelNavigationRefresh();
+    this.environment.navigationRefreshGate.reset();
+    this.environment.recoveryGate.reset();
+    // A tab lookup still resolving must not replace the chosen file.
+    this.environment.currency.supersedePage();
+    state.activeFollowRequest = undefined;
+    this.environment.evidence.invalidate();
+    state.abortPageWork();
+    coordinator.selectPair(undefined);
+    this.environment.invalidateComposer();
+    imageController.setTopPageOrigin(undefined);
+    imageController.releaseReplica();
+    this.environment.engine.releasePresentation();
+    pdf.close();
+    presentation.resetSourceScroll();
+    state.clearPage();
+    const localPdf: LocalPdfFile = { file, key: `local-file:${crypto.randomUUID()}` };
+    state.localPdf = localPdf;
+    this.environment.updateMirrorLayout();
+    this.environment.renderLoading(UI_STRINGS.statusPdfReading);
+    this.#queueLocalPdf(localPdf, 'local-file');
+  }
+
+  /**
+   * Shows the chosen file again, for Refresh (`manual`) or a settings
+   * rebuild (`preference`), as a same-page rebuild of a tab's PDF: the wish
+   * to translate stays, and a Refresh keeps the PDF on screen until the new
+   * copy is ready (or the file turns out unreadable). Does nothing when no
+   * file was chosen.
+   */
+  reopenLocalPdf(reason: 'manual' | 'preference'): void {
+    const state = this.#state;
+    const localPdf = state.localPdf;
+    if (!localPdf) return;
+    this.environment.cancelNavigationRefresh();
+    state.abortPageWork();
+    this.environment.currency.supersede('availability');
+    this.#queueLocalPdf(localPdf, reason);
+  }
+
+  #queueLocalPdf(localPdf: LocalPdfFile, reason: LocalPdfCaptureRequest['reason']): void {
+    this.environment.setStatus(UI_STRINGS.statusPdfReading);
+    this.#enqueue({ localPdf, reason });
+  }
+
+  #enqueue(request: CaptureRequest): void {
+    const enqueued = this.environment.captureCoordinator.enqueue(request);
     this.environment.updateControls();
     if (enqueued.startNow) void this.#runCaptureWork(enqueued.work);
   }
@@ -429,7 +497,10 @@ export class CapturePipeline {
     state.captureInFlight = true;
     this.environment.updateControls();
     try {
-      await this.#capturePage(work);
+      const request = work.value;
+      await (isLocalPdfCaptureRequest(request)
+        ? this.#captureLocalPdf(work, request)
+        : this.#capturePage(work, request));
     } finally {
       const next = this.environment.captureCoordinator.finish(work.generation);
       if (next) {
@@ -441,7 +512,10 @@ export class CapturePipeline {
     }
   }
 
-  async #capturePage(work: GenerationWork<CaptureRequest>): Promise<void> {
+  async #capturePage(
+    work: GenerationWork<CaptureRequest>,
+    request: PageCaptureRequest,
+  ): Promise<void> {
     const state = this.#state;
     const {
       captureCoordinator,
@@ -452,7 +526,7 @@ export class CapturePipeline {
       translationDriver,
       setStatus,
     } = this.environment;
-    const identity = work.value.identity;
+    const identity = request.identity;
     try {
       const sameCapturedPage = Boolean(
         state.capturedPageIdentity &&
@@ -462,7 +536,7 @@ export class CapturePipeline {
             normalizedPageUrl(identity.url),
       );
       const preserveLastGoodReplica = shouldPreserveCommittedReplicaForCapture(
-        work.value.reason,
+        request.reason,
         sameCapturedPage,
         presentation.hasCommittedReplica,
       );
@@ -475,7 +549,7 @@ export class CapturePipeline {
       // A shown PDF follows the same last-good rule as the replica.
       if (
         pdf.shown &&
-        !shouldPreserveCommittedReplicaForCapture(work.value.reason, sameCapturedPage, true)
+        !shouldPreserveCommittedReplicaForCapture(request.reason, sameCapturedPage, true)
       ) {
         pdf.close();
         if (!presentation.hasCommittedReplica) this.environment.renderLoading();
@@ -501,7 +575,7 @@ export class CapturePipeline {
       if (isPdfContentType(sourceDocument?.contentType)) {
         engine.releasePresentation();
         state.snapshot = undefined;
-        await this.#capturePdf(work, identity, documentId);
+        await this.#capturePdf(work, identity.url, documentId, identity);
         return;
       }
       pdf.close();
@@ -530,21 +604,62 @@ export class CapturePipeline {
         : identity;
       state.capturedPageIdentity = committedIdentity;
       state.followedPageIdentity = committedIdentity;
-      await this.#prepareTranslation(work, committedIdentity, {
+      await this.#prepareTranslation(work, committedIdentity.url, {
         sourceOnly: UI_STRINGS.statusLiveSourceKeepsUpdating,
         noText: () => [UI_STRINGS.statusMirrorLiveWaiting, 'warning'],
       });
     } catch (error) {
       if (!captureCoordinator.isCurrent(work.generation)) return;
-      const message = readPageError(error);
-      state.snapshot = surface.snapshot();
-      if (!state.snapshot && !presentation.hasCommittedReplica && !pdf.shown) {
-        this.environment.renderError(message);
-      }
-      setStatus(message, 'error');
+      this.#reportCaptureFailure(error);
     } finally {
       this.environment.updateControls();
     }
+  }
+
+  /**
+   * Shows the PDF chosen on this computer. No tab is read: there is no
+   * document to check, no zoom to follow (1:1 is 100%) and no site.
+   */
+  async #captureLocalPdf(
+    work: GenerationWork<CaptureRequest>,
+    request: LocalPdfCaptureRequest,
+  ): Promise<void> {
+    const state = this.#state;
+    const { captureCoordinator, engine, pdf } = this.environment;
+    try {
+      if (state.localPdf !== request.localPdf) return;
+      engine.releasePresentation();
+      state.snapshot = undefined;
+      // A shown PDF follows the same last-good rule as a tab's PDF.
+      if (pdf.shown && !shouldPreserveCommittedReplicaForCapture(request.reason, true, true)) {
+        pdf.close();
+      }
+      await this.#capturePdf(work, request.localPdf, request.localPdf.key, undefined);
+    } catch (error) {
+      if (!captureCoordinator.isCurrent(work.generation)) return;
+      // A file that cannot be read (again) is closed and forgotten, so the
+      // error panel offers the picker: a moved or changed file has to be
+      // chosen again. A copy this capture already showed stays.
+      if (pdf.textDocument?.generation !== work.generation) {
+        pdf.close();
+        if (state.localPdf === request.localPdf) state.localPdf = undefined;
+      }
+      this.#reportCaptureFailure(error);
+    } finally {
+      this.environment.updateControls();
+    }
+  }
+
+  /** A current capture failed: its status, and the error panel if nothing shows. */
+  #reportCaptureFailure(error: unknown): void {
+    const state = this.#state;
+    const { surface, presentation, pdf } = this.environment;
+    const message = readPageError(error);
+    state.snapshot = surface.snapshot();
+    if (!state.snapshot && !presentation.hasCommittedReplica && !pdf.shown) {
+      this.environment.renderError(message);
+    }
+    this.environment.setStatus(message, 'error');
   }
 
   /**
@@ -554,7 +669,7 @@ export class CapturePipeline {
    */
   async #prepareTranslation(
     work: GenerationWork<CaptureRequest>,
-    identity: CapturedPageIdentity,
+    pageUrl: string | undefined,
     statuses: {
       readonly sourceOnly: UiText;
       readonly noText: () => readonly [UiText, CompanionStatusTone];
@@ -577,7 +692,7 @@ export class CapturePipeline {
     if (translationDriver.currentTranslationFieldCount() === 0) {
       state.availability = 'unavailable';
       state.availabilityCheckedForPair = undefined;
-      const accessWasRevoked = await this.environment.reconcileAutomaticAccess(identity.url);
+      const accessWasRevoked = await this.environment.reconcileAutomaticAccess(pageUrl);
       if (!captureCoordinator.isCurrent(work.generation)) return;
       if (accessWasRevoked) setStatus(UI_STRINGS.statusGrantRemovedWaiting, 'warning');
       else setStatus(...statuses.noText());
@@ -585,13 +700,13 @@ export class CapturePipeline {
     }
     await translationDriver.checkAvailability(work.generation);
     if (!captureCoordinator.isCurrent(work.generation)) return;
-    const accessWasRevoked = await this.environment.reconcileAutomaticAccess(identity.url);
+    const accessWasRevoked = await this.environment.reconcileAutomaticAccess(pageUrl);
     if (!captureCoordinator.isCurrent(work.generation)) return;
     if (accessWasRevoked) {
       setStatus(UI_STRINGS.statusGrantRemovedScopeOff, 'warning');
       return;
     }
-    await translationDriver.maybeTranslateAutomatically(work.generation, identity.url);
+    await translationDriver.maybeTranslateAutomatically(work.generation, pageUrl);
   }
 
   async #runReplicaEngineCheckpoint(
@@ -683,15 +798,18 @@ export class CapturePipeline {
   }
 
   /**
-   * The followed tab shows a PDF: the replica engine never runs. The PDF is
-   * downloaded and shown, published like a committed replica, and the
-   * capture ends. Its text is read after that (`#readPdfText`), while the
-   * pages show; only then can it be translated.
+   * The followed tab shows a PDF, or the reader chose one on this computer:
+   * the replica engine never runs. The PDF is downloaded (or read) and
+   * shown, published like a committed replica, and the capture ends. Its
+   * text is read after that (`#readPdfText`), while the pages show; only
+   * then can it be translated. `identity` is the tab's page, undefined for a
+   * chosen file.
    */
   async #capturePdf(
     work: GenerationWork<CaptureRequest>,
-    identity: CapturedPageIdentity,
+    source: string | LocalPdfFile,
     documentId: string,
+    identity: CapturedPageIdentity | undefined,
   ): Promise<void> {
     const state = this.#state;
     const { captureCoordinator, pdf, translationDriver, setStatus } = this.environment;
@@ -711,7 +829,7 @@ export class CapturePipeline {
       frameId: 0,
     };
     try {
-      await pdf.show(identity.url, abortController.signal, document);
+      await pdf.show(source, abortController.signal, document);
     } catch (error) {
       // Superseded or cancelled: whatever replaced this load reports instead.
       if (abortController.signal.aborted) return;
@@ -723,16 +841,20 @@ export class CapturePipeline {
     }
     if (!captureCoordinator.isCurrent(work.generation)) return;
     this.environment.hideReplicaStatus();
-    // As for the replica: a newer history URL of this same page wins.
-    const shownIdentity = state.followedPageIdentity && sameCompanionSourcePage(
-        state.followedPageIdentity,
-        identity,
-        normalizedPageUrl,
-      )
-      ? state.followedPageIdentity
-      : identity;
-    state.capturedPageIdentity = shownIdentity;
-    state.followedPageIdentity = shownIdentity;
+    let pageUrl: string | undefined;
+    if (identity) {
+      // As for the replica: a newer history URL of this same page wins.
+      const shownIdentity = state.followedPageIdentity && sameCompanionSourcePage(
+          state.followedPageIdentity,
+          identity,
+          normalizedPageUrl,
+        )
+        ? state.followedPageIdentity
+        : identity;
+      state.capturedPageIdentity = shownIdentity;
+      state.followedPageIdentity = shownIdentity;
+      pageUrl = shownIdentity.url;
+    }
     // No text yet, so nothing to translate: this clears the page's language.
     state.snapshot = undefined;
     await translationDriver.resolveSelectedSourceLanguage(undefined);
@@ -742,7 +864,7 @@ export class CapturePipeline {
     // The pages show; the text is read next, and the status says so until
     // the translation rules take over.
     setStatus(UI_STRINGS.statusPdfReading);
-    void this.#readPdfText(work, shownIdentity, document);
+    void this.#readPdfText(work, pageUrl, document);
   }
 
   /**
@@ -754,7 +876,7 @@ export class CapturePipeline {
    */
   async #readPdfText(
     work: GenerationWork<CaptureRequest>,
-    identity: CapturedPageIdentity,
+    pageUrl: string | undefined,
     document: ReplicaSourceDocumentIdentity,
   ): Promise<void> {
     const state = this.#state;
@@ -783,7 +905,7 @@ export class CapturePipeline {
       if (!state.snapshot) return;
       await this.probePdfLanguage(abortController.signal);
       if (!current() || !state.snapshot) return;
-      await this.#prepareTranslation(work, identity, {
+      await this.#prepareTranslation(work, pageUrl, {
         sourceOnly: UI_STRINGS.statusPdfSourceOnly,
         noText: () => [
           pdf.noTextStatus(state.selectedPair()?.sourceLanguage ?? state.resolvedSourceLanguage),

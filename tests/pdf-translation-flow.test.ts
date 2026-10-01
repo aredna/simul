@@ -1,7 +1,7 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import { CapturePipeline } from '../entrypoints/sidepanel/capture-pipeline';
-import { CompanionState } from '../entrypoints/sidepanel/companion-state';
+import { CompanionState, type CaptureRequest } from '../entrypoints/sidepanel/companion-state';
 import { Currency } from '../entrypoints/sidepanel/currency';
 import { PdfController } from '../entrypoints/sidepanel/pdf-controller';
 import type { PdfViewSurface } from '../entrypoints/sidepanel/pdf-view';
@@ -13,6 +13,7 @@ import { LatestWorkCoordinator } from '../lib/companion-lifecycle';
 import { UI_STRINGS } from '../lib/companion-ui-strings';
 import { AutoLanguageEvidencePrecedence } from '../lib/language-detection';
 import { NavigationRefreshGate } from '../lib/navigation-refresh-gate';
+import { PdfFetchError } from '../lib/pdf/pdf-fetch';
 import type { PdfReadingPosition } from '../lib/pdf/pdf-layout';
 import { PdfTextSurface } from '../lib/pdf/pdf-text-surface';
 import type { PdfDocumentHandle, PdfTextContent } from '../lib/pdf/pdfjs-runtime';
@@ -81,6 +82,8 @@ function fakeDocument(
 
 function setup(options: {
   fetchPdf?: () => Promise<Uint8Array>;
+  /** Reads a PDF chosen on this computer. */
+  readFile?: (file: Blob) => Promise<Uint8Array>;
   openDocument?: () => Promise<PdfDocumentHandle>;
   /** Pages (1-based) that are scanned: no text layer, one image. */
   scanned?: readonly number[];
@@ -106,10 +109,17 @@ function setup(options: {
     ...(options.automatic === false ? { imageTranslationEnabled: false } : {}),
   };
   const currency = new Currency();
-  const captureCoordinator = new LatestWorkCoordinator<{
-    identity: typeof IDENTITY;
-    reason: 'initial' | 'manual' | 'navigation' | 'authorized' | 'preference' | 'desynchronized';
-  }>();
+  const captureCoordinator = new LatestWorkCoordinator<CaptureRequest>();
+  // Every read of the source tab; a PDF chosen on this computer reads none.
+  const getTab = vi.fn(async () => ({ ...IDENTITY, id: IDENTITY.tabId, active: true }));
+  const readDocument = vi.fn(async () => ({ documentId: 'DOC', contentType: 'application/pdf' }));
+  const fetchPdf = vi.fn(
+    options.fetchPdf ?? (async () => new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d])),
+  );
+  const readFile = vi.fn(
+    options.readFile ?? (async () => new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d])),
+  );
+  const errors: string[] = [];
   const statuses: string[] = [];
   const detected: string[] = [];
 
@@ -193,7 +203,8 @@ function setup(options: {
     };
   };
   const controller = new PdfController({
-    fetchPdf: options.fetchPdf ?? (async () => new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d])),
+    fetchPdf,
+    readFile,
     openDocument: options.openDocument ?? (async () => fakeDocument(undefined, scanned)),
     view,
     surface,
@@ -225,7 +236,7 @@ function setup(options: {
     captureCoordinator,
     evidence: new AutoLanguageEvidencePrecedence<PendingAutoImageLanguageEvidence>(),
     detectLanguage: async () => ({ isReliable: false, languages: [] }),
-    getTab: async () => ({ ...IDENTITY, id: IDENTITY.tabId, active: true }),
+    getTab,
     autoImageLanguageConfigurationKey: () => 'configuration',
     configureImageTranslation: () => undefined,
     setStatus: (message) => statuses.push(englishUiText(message)),
@@ -290,16 +301,18 @@ function setup(options: {
     evidence: { invalidate: () => undefined },
     mirrorSessionId: 'session',
     captureTimeoutMs: 1_000,
-    readDocument: async () => ({ documentId: 'DOC', contentType: 'application/pdf' }),
+    readDocument,
     readZoom: async () => 1,
-    getTab: async () => ({ ...IDENTITY, id: IDENTITY.tabId, active: true }),
+    getTab,
     reconcileAutomaticAccess: async () => false,
     cancelNavigationRefresh: () => undefined,
     invalidateComposer: () => undefined,
     setStatus: (message) => statuses.push(englishUiText(message)),
     updateControls: () => undefined,
     renderLoading: () => undefined,
-    renderError: () => undefined,
+    renderError: (message) => {
+      errors.push(englishUiText(message));
+    },
     hideReplicaStatus: () => undefined,
     clearCaptureNotes: () => undefined,
     updateMirrorLayout: () => undefined,
@@ -310,6 +323,7 @@ function setup(options: {
     state, pipeline, coordinator, surface, controller, createSession, driver,
     calls, waiting, translator, shown, statuses, reading,
     ocr, ocrCalls, ocrWaiting, captureCoordinator, detected,
+    getTab, readDocument, fetchPdf, readFile, errors,
   };
 }
 
@@ -646,5 +660,151 @@ describe('Scanned PDF pages, end to end', () => {
     harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
     await vi.waitFor(() => expect(harness.statuses.at(-1)).toMatch(/^Translation remains partial/u));
     expect(harness.statuses.at(-1)).not.toMatch(/Scanned pages/u);
+  });
+});
+
+describe('PDFs chosen on this computer, end to end', () => {
+  const FILE = new Blob(['%PDF-']);
+
+  it('shows and translates a chosen file like a web PDF, without reading any tab', async () => {
+    const harness = setup();
+
+    harness.pipeline.openLocalPdf(FILE);
+
+    await vi.waitFor(() => expect(harness.statuses.at(-1)).toBe('The PDF is translated.'));
+    expect(harness.shown).toEqual(ALL);
+    expect(harness.readFile).toHaveBeenCalledWith(FILE, expect.anything());
+    expect(harness.fetchPdf).not.toHaveBeenCalled();
+    expect(harness.readDocument).not.toHaveBeenCalled();
+    expect(harness.getTab).not.toHaveBeenCalled();
+    expect(harness.state.localPdf?.file).toBe(FILE);
+    expect(harness.state.localPdf?.key).toMatch(/^local-file:/u);
+    expect(harness.state.capturedPageIdentity).toBeUndefined();
+    expect(harness.state.followedPageIdentity).toBeUndefined();
+  });
+
+  it('reads and translates scanned pages of a chosen file too', async () => {
+    const harness = setup({ scanned: [1, 2, 3, 4] });
+
+    harness.pipeline.openLocalPdf(FILE);
+
+    await vi.waitFor(() => expect(harness.statuses.at(-1)).toBe('The PDF is translated.'));
+    expect(harness.ocrCalls).toEqual([1, 2, 3, 4]);
+    expect(harness.shown).toHaveLength(4);
+  });
+
+  it('opens the same file again on Refresh, reading page first, translations from memory', async () => {
+    const harness = setup();
+    harness.pipeline.openLocalPdf(FILE);
+    await vi.waitFor(() => expect(harness.shown).toHaveLength(PAGES * 2));
+    await vi.waitFor(() => expect(harness.state.translationInFlight).toBe(false));
+    const chosen = harness.state.localPdf;
+    harness.shown.length = 0;
+    const calls = harness.calls.length;
+
+    harness.reading.position = { index: 2, fraction: 0.1 };
+    harness.pipeline.reopenLocalPdf('manual');
+
+    await vi.waitFor(() => expect(harness.shown).toHaveLength(PAGES * 2));
+    expect(harness.shown.slice(0, 2)).toEqual(['EN:P3 first.', 'EN:P3 second.']);
+    expect(harness.calls).toHaveLength(calls);
+    expect(harness.readFile).toHaveBeenCalledTimes(2);
+    expect(harness.state.localPdf).toBe(chosen);
+    expect(harness.getTab).not.toHaveBeenCalled();
+  });
+
+  it("waits for the reader's click when nothing asks for automatic translation", async () => {
+    const harness = setup({ automatic: false });
+    harness.pipeline.openLocalPdf(FILE);
+    await vi.waitFor(() => expect(harness.state.availability).toBe('available'));
+    await new Promise((resolve) => setTimeout(resolve, 20));
+    expect(harness.calls).toEqual([]);
+
+    // Translate page, as main.ts does.
+    harness.state.translationDesired = true;
+    await harness.driver.startTranslation(false, harness.captureCoordinator.generation);
+
+    expect(harness.shown).toEqual(ALL);
+    expect(harness.getTab).not.toHaveBeenCalled();
+  });
+
+  it("gives way to a tab's page, and forgets the file", async () => {
+    const harness = setup();
+    harness.pipeline.openLocalPdf(FILE);
+    await vi.waitFor(() => expect(harness.statuses.at(-1)).toBe('The PDF is translated.'));
+
+    harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'authorized' });
+
+    await vi.waitFor(() => expect(harness.state.capturedPageIdentity).toEqual(IDENTITY));
+    expect(harness.state.localPdf).toBeUndefined();
+    expect(harness.fetchPdf).toHaveBeenCalledOnce();
+    // A Refresh now rebuilds the tab, never the forgotten file.
+    harness.pipeline.reopenLocalPdf('manual');
+    await new Promise((resolve) => setTimeout(resolve, 10));
+    expect(harness.readFile).toHaveBeenCalledOnce();
+  });
+
+  it("replaces a tab's PDF and forgets that tab", async () => {
+    const harness = setup();
+    harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
+    await vi.waitFor(() => expect(harness.statuses.at(-1)).toBe('The PDF is translated.'));
+
+    harness.pipeline.openLocalPdf(FILE);
+
+    await vi.waitFor(() => expect(harness.state.localPdf?.file).toBe(FILE));
+    await vi.waitFor(() => expect(harness.state.snapshot?.document.documentId)
+      .toBe(harness.state.localPdf?.key));
+    expect(harness.state.capturedPageIdentity).toBeUndefined();
+    expect(harness.state.followedPageIdentity).toBeUndefined();
+  });
+
+  it('forgets the file when the panel follows a page it cannot read', async () => {
+    const harness = setup();
+    harness.pipeline.openLocalPdf(FILE);
+    await vi.waitFor(() => expect(harness.controller.shown).toBe(true));
+
+    harness.pipeline.invalidateCompanion(UI_STRINGS.statusActiveTabNotWebPage);
+
+    expect(harness.state.localPdf).toBeUndefined();
+    expect(harness.controller.shown).toBe(false);
+  });
+
+  it('says why a file could not be read, shows nothing, and forgets it', async () => {
+    const harness = setup({
+      readFile: async () => {
+        throw new PdfFetchError('failed', 'The PDF file could not be read.');
+      },
+    });
+
+    harness.pipeline.openLocalPdf(FILE);
+
+    await vi.waitFor(() => expect(harness.state.captureInFlight).toBe(false));
+    expect(harness.statuses.at(-1)).toBe(UI_STRINGS.statusPdfFileReadFailed);
+    expect(harness.errors).toEqual([UI_STRINGS.statusPdfFileReadFailed]);
+    expect(harness.controller.shown).toBe(false);
+    expect(harness.state.localPdf).toBeUndefined();
+  });
+
+  it('closes and forgets a file a Refresh cannot read again, so the picker shows', async () => {
+    let reads = 0;
+    const harness = setup({
+      readFile: async () => {
+        reads += 1;
+        if (reads > 1) throw new PdfFetchError('failed', 'The PDF file could not be read.');
+        return new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d]);
+      },
+    });
+    harness.pipeline.openLocalPdf(FILE);
+    await vi.waitFor(() => expect(harness.statuses.at(-1)).toBe('The PDF is translated.'));
+    const chosen = harness.state.localPdf;
+
+    harness.pipeline.reopenLocalPdf('manual');
+
+    await vi.waitFor(() => expect(harness.statuses.at(-1)).toBe(UI_STRINGS.statusPdfFileReadFailed));
+    expect(chosen).toBeDefined();
+    expect(harness.controller.shown).toBe(false);
+    expect(harness.state.localPdf).toBeUndefined();
+    // The error panel, which offers the picker again.
+    expect(harness.errors).toEqual([UI_STRINGS.statusPdfFileReadFailed]);
   });
 });

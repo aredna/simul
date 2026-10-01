@@ -75,6 +75,18 @@ export const PAGE_ACCESS_GUIDANCE = UI_STRINGS.pageAccessGuidance;
 export const PAGE_CHANGED_GUIDANCE = UI_STRINGS.pageChangedGuidance;
 export const PAGE_TIMEOUT_GUIDANCE = UI_STRINGS.pageTimeoutGuidance;
 export const PAGE_ACCESS_LOST_GUIDANCE = UI_STRINGS.pageAccessLostGuidance;
+export const PAGE_LOCAL_FILE_GUIDANCE = UI_STRINGS.pageLocalFileGuidance;
+
+/**
+ * Why Simul cannot read a tab: a `file:` page is a file on this computer,
+ * which the panel can open instead (D107); anything else gets `fallback`.
+ */
+export function unreadablePageGuidance(
+  url: string | undefined,
+  fallback: string = PAGE_ACCESS_GUIDANCE,
+): string {
+  return isLocalFilePage(url) ? PAGE_LOCAL_FILE_GUIDANCE : fallback;
+}
 
 /** Reads a followable identity from a tab, or throws a PageAccessError. */
 export function identityFromTab(
@@ -90,7 +102,7 @@ export function identityFromTab(
     !isSupportedPage(url) ||
     (requireActive && !tab.active)
   ) {
-    throw new PageAccessError(PAGE_ACCESS_GUIDANCE);
+    throw new PageAccessError(unreadablePageGuidance(url));
   }
   return { tabId: tab.id, windowId: tab.windowId, url };
 }
@@ -211,6 +223,16 @@ export function isSupportedPage(url: string | undefined): boolean {
   try {
     const protocol = new URL(url).protocol;
     return protocol === 'http:' || protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+/** A file opened from this computer; Chrome shows its address only sometimes. */
+export function isLocalFilePage(url: string | undefined): boolean {
+  if (!url) return false;
+  try {
+    return new URL(url).protocol === 'file:';
   } catch {
     return false;
   }

@@ -9,6 +9,7 @@ import {
   type CompanionPreferences,
   type CompanionViewSettingsPatch,
 } from '../../lib/preferences';
+import type { LocalPdfFile } from '../../lib/pdf/pdf-file';
 import type { HtmlMirrorScrollState } from '../../lib/replica/html-mirror-protocol';
 import {
   replicaReadScopeForProfile,
@@ -32,9 +33,28 @@ export type CaptureReason =
   | 'preference'
   | 'desynchronized';
 
-export interface CaptureRequest {
+/** Builds the followed tab's page. */
+export interface PageCaptureRequest {
   readonly identity: CapturedPageIdentity;
   readonly reason: CaptureReason;
+}
+
+/**
+ * Shows a PDF from this computer: `local-file` when the reader chose it,
+ * `manual` for Refresh, `preference` for a settings rebuild (D107).
+ */
+export interface LocalPdfCaptureRequest {
+  readonly localPdf: LocalPdfFile;
+  readonly reason: 'local-file' | 'manual' | 'preference';
+}
+
+/** One unit of work for the capture coordinator: a tab's page or a local PDF. */
+export type CaptureRequest = PageCaptureRequest | LocalPdfCaptureRequest;
+
+export function isLocalPdfCaptureRequest(
+  request: CaptureRequest,
+): request is LocalPdfCaptureRequest {
+  return 'localPdf' in request;
 }
 
 export type ImageCaptureAccess = 'checking' | 'granted' | 'missing';
@@ -90,6 +110,11 @@ export class CompanionState {
   // Followed page: which tab the companion mirrors and what it last read.
   followedPageIdentity: CapturedPageIdentity | undefined;
   capturedPageIdentity: CapturedPageIdentity | undefined;
+  /**
+   * The PDF from this computer that the panel shows or is opening, in place
+   * of a tab's page (D107); the panel then follows no tab.
+   */
+  localPdf: LocalPdfFile | undefined;
   snapshot: ReplicaTranslationSnapshot | undefined;
   lastSourceScroll: HtmlMirrorScrollState | undefined;
   /** The followed tab's browser zoom; 1:1 and custom zoom follow it (D104). */
@@ -158,6 +183,14 @@ export class CompanionState {
 
   get pageUrl(): string | undefined {
     return this.followedPageIdentity?.url ?? this.capturedPageIdentity?.url;
+  }
+
+  /**
+   * What the published snapshot belongs to: the captured tab's page or the
+   * local PDF. Compared by identity to tell a stale result from a current one.
+   */
+  get shownPage(): CapturedPageIdentity | LocalPdfFile | undefined {
+    return this.capturedPageIdentity ?? this.localPdf;
   }
 
   get isLiveSourceOnlyMode(): boolean {
@@ -244,6 +277,7 @@ export class CompanionState {
     this.followedPageIdentity = undefined;
     this.snapshot = undefined;
     this.capturedPageIdentity = undefined;
+    this.localPdf = undefined;
     this.clearLanguageResolution();
     this.availability = 'unavailable';
     this.resetTranslationIntent();

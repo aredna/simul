@@ -65,6 +65,23 @@ describe('background detached companion reuse', () => {
     expect(sidePanelLaunch).toContain('launchEpoch: await toolbarLaunchEpoch');
   });
 
+  it('opens the window for a tab Simul cannot read, without authorizing it (D107)', () => {
+    const launch = background.slice(
+      background.indexOf('async function launchToolbarCompanion('),
+      background.indexOf('async function focusExistingDetachedWindow('),
+    );
+    expect(launch).toContain('if (tab.id === undefined || tab.windowId === undefined) return;');
+    expect(launch).not.toContain('!isSupportedPage(tab.url)');
+    expect(launch).toContain("url: tab.url ?? '',");
+    const focus = background.slice(
+      background.indexOf('async function focusExistingDetachedWindow('),
+      background.indexOf('browser.windows.onRemoved.addListener('),
+    );
+    const guard = focus.indexOf('if (!isSupportedPage(identity.url)) return true;');
+    expect(guard).toBeGreaterThan(focus.indexOf('await browser.windows.update(existing.id'));
+    expect(guard).toBeLessThan(focus.indexOf("type: 'simul:authorized-tab'"));
+  });
+
   it('forgets the window once it closes', () => {
     expect(background).toContain('browser.windows.onRemoved.addListener(');
     expect(background).toContain(

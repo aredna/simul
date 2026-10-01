@@ -94,6 +94,7 @@ function fakeView() {
 
 function setup(options: {
   fetchPdf?: (url: string, signal: AbortSignal) => Promise<Uint8Array>;
+  readFile?: (file: Blob, signal: AbortSignal) => Promise<Uint8Array>;
   openDocument?: (bytes: Uint8Array, signal: AbortSignal) => Promise<PdfDocumentHandle>;
   openTimeoutMs?: number;
   onDiagnostic?: (diagnostic: unknown) => void;
@@ -123,6 +124,7 @@ function setup(options: {
   const onPriorityChange = vi.fn();
   const controller = new PdfController({
     fetchPdf,
+    ...(options.readFile ? { readFile: options.readFile } : {}),
     openDocument,
     view,
     now: () => 0,
@@ -1029,5 +1031,78 @@ describe('PdfController scanned pages', () => {
     harness.controller.stopScannedReading();
     release();
     await expect(probing).resolves.toBe('ja');
+  });
+});
+
+describe('PdfController files chosen on this computer', () => {
+  const PDF_BYTES = new Uint8Array([0x25, 0x50, 0x44, 0x46, 0x2d]);
+
+  it('reads the chosen file instead of downloading, and opens it', async () => {
+    const readFile = vi.fn(async () => PDF_BYTES);
+    const harness = setup({ readFile, withText: true });
+    const file = new Blob([PDF_BYTES]);
+    const signal = new AbortController().signal;
+
+    await expect(harness.controller.show({ file, key: 'local-file:1' }, signal, SOURCE_DOCUMENT))
+      .resolves.toEqual({ pageCount: 3 });
+
+    expect(readFile).toHaveBeenCalledWith(file, signal);
+    expect(harness.fetchPdf).not.toHaveBeenCalled();
+    expect(harness.openDocument).toHaveBeenCalledWith(PDF_BYTES, expect.anything());
+    expect(harness.controller.textDocument).toEqual(SOURCE_DOCUMENT);
+    expect(harness.diagnostics).toEqual([
+      { stage: 'shown', pages: 3, bytes: 5, milliseconds: 0 },
+    ]);
+  });
+
+  it('reads the file itself by default, with the PDF check', async () => {
+    const harness = setup();
+    const signal = new AbortController().signal;
+
+    await harness.controller.show({ file: new Blob([PDF_BYTES]), key: 'local-file:1' }, signal);
+    const error = await rejection(harness.controller.show(
+      { file: new Blob(['not a pdf']), key: 'local-file:2' },
+      signal,
+    ));
+
+    expect(harness.controller.shown).toBe(true);
+    expect(error).toBeInstanceOf(PageAccessError);
+    expect((error as Error).message).toBe(UI_STRINGS.statusPdfUnreadable);
+  });
+
+  it.each([
+    ['a file that moved or changed', () => new PdfFetchError('failed', 'x'), UI_STRINGS.statusPdfFileReadFailed, 'failed'],
+    ['an unexpected read error', () => new TypeError('boom'), UI_STRINGS.statusPdfFileReadFailed, 'other'],
+    ['a file over the cap', () => new PdfFetchError('too-large', 'x'), UI_STRINGS.statusPdfTooLarge, 'too-large'],
+    ['a file that is not a PDF', () => new PdfFetchError('not-pdf', 'x'), UI_STRINGS.statusPdfUnreadable, 'not-pdf'],
+  ])('reports %s with its own status and the read step', async (_label, makeError, status, kind) => {
+    const harness = setup({ readFile: async () => { throw makeError(); } });
+
+    const error = await rejection(harness.controller.show(
+      { file: new Blob([PDF_BYTES]), key: 'local-file:1' },
+      new AbortController().signal,
+    ));
+
+    expect(error).toBeInstanceOf(PageAccessError);
+    expect((error as Error).message).toBe(status);
+    expect(harness.openDocument).not.toHaveBeenCalled();
+    expect(harness.diagnostics).toEqual([{ stage: 'failed', step: 'read', kind }]);
+  });
+
+  it('opens the same chosen file again where the reader left it, and another from the start', async () => {
+    const harness = setup({ readFile: async () => PDF_BYTES });
+    const signal = new AbortController().signal;
+    const chosen = { file: new Blob([PDF_BYTES]), key: 'local-file:1' };
+    await harness.controller.show(chosen, signal);
+    harness.view.position = { index: 2, fraction: 0.25 };
+
+    await harness.controller.show(chosen, signal);
+    await harness.controller.show({ file: chosen.file, key: 'local-file:2' }, signal);
+
+    expect(harness.view.mounted.map(({ position }) => position)).toEqual([
+      undefined,
+      { index: 2, fraction: 0.25 },
+      undefined,
+    ]);
   });
 });
