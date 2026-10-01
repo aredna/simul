@@ -6,10 +6,12 @@ import {
   PDF_POINTS_TO_CSS_PX,
   pdfDrawPlan,
   pdfPageBoxes,
+  pdfPageNearView,
   pdfReadingPosition,
   pdfRenderScale,
   pdfScrollLeftFor,
   pdfScrollTopFor,
+  pdfTextLayersToRemove,
   type PdfLayoutSettings,
   type PdfPageBox,
 } from '../lib/pdf/pdf-layout';
@@ -257,5 +259,55 @@ describe('reading position', () => {
     expect(pdfScrollLeftFor(400, 1_000, 400, 0)).toBe(300);
     expect(pdfScrollLeftFor(1_000, 2_000, 400, 300)).toBe(800);
     expect(pdfScrollLeftFor(1_000, 400, 400, 300)).toBe(0);
+  });
+});
+
+describe('text layers near the view', () => {
+  it('counts a page within one screen of the view as near', () => {
+    const boxes = column(20);
+    // The view shows page 5; a screen above reaches page 4, below page 6.
+    const near = boxes.map((box) => pdfPageNearView(box, 5_055, 800));
+    expect(near.flatMap((isNear, index) => (isNear ? [index] : []))).toEqual([4, 5, 6]);
+    expect(pdfPageNearView(undefined, 0, 800)).toBe(false);
+  });
+
+  it('removes nothing within the budget', () => {
+    const layers = new Map([[0, 40], [1, 40], [9, 40]]);
+    expect(pdfTextLayersToRemove({
+      boxes: column(20),
+      scrollTop: 0,
+      viewportHeight: 800,
+      layers,
+      keep: new Set(),
+      maxBlocks: 120,
+    })).toEqual([]);
+  });
+
+  it('removes the farthest layers first, never a kept page, until within the budget', () => {
+    const layers = new Map([[0, 40], [1, 40], [5, 40], [9, 40], [19, 40]]);
+    const remove = pdfTextLayersToRemove({
+      boxes: column(20),
+      scrollTop: 5_055,
+      viewportHeight: 800,
+      layers,
+      // Page 19 is being drawn: it stays although it is the farthest.
+      keep: new Set([5, 19]),
+      maxBlocks: 100,
+    });
+    // 200 blocks against 100: three layers must go. From the middle of the
+    // view (page 5), page 0 is the farthest, then page 9, then page 1.
+    expect(remove).toEqual([0, 9, 1]);
+  });
+
+  it('keeps every kept page even over the budget', () => {
+    const layers = new Map([[4, 500], [5, 500]]);
+    expect(pdfTextLayersToRemove({
+      boxes: column(20),
+      scrollTop: 5_055,
+      viewportHeight: 800,
+      layers,
+      keep: new Set([4, 5]),
+      maxBlocks: 100,
+    })).toEqual([]);
   });
 });

@@ -20,6 +20,7 @@ interface PendingRender {
 function setup(options: {
   pages?: number;
   maxDrawnPages?: number;
+  maxTextLayerBlocks?: number;
   devicePixelRatio?: () => number;
   pageLabel?: (page: number, total: number) => string;
   onReadingPageChange?: (index: number) => void;
@@ -55,6 +56,9 @@ function setup(options: {
       };
     },
     ...(options.maxDrawnPages ? { maxDrawnPages: options.maxDrawnPages } : {}),
+    ...(options.maxTextLayerBlocks !== undefined
+      ? { maxTextLayerBlocks: options.maxTextLayerBlocks }
+      : {}),
     ...(options.pageLabel ? { pageLabel: options.pageLabel } : {}),
     ...(options.onReadingPageChange ? { onReadingPageChange: options.onReadingPageChange } : {}),
     readPixels: options.readPixels ?? (() => undefined),
@@ -529,6 +533,129 @@ describe('PdfView text', () => {
     harness.runFrames();
 
     expect(reading).toEqual([0, 3]);
+  });
+
+  it('builds text layers only near the view once a long PDF passes the budget', async () => {
+    // Room for two blocks' worth of layers; every page has one block.
+    const harness = setup({ pages: 40, maxTextLayerBlocks: 2 });
+    harness.view.mount(harness.pdf, harness.sizes);
+    const pageHeight = (792 * 400) / 612;
+    const layered = () =>
+      [...harness.element.querySelectorAll('.pdf-page')]
+        .flatMap((page, index) => (page.querySelector('.pdf-text-layer') ? [index] : []));
+    for (let index = 0; index < 40; index += 1) {
+      harness.view.setPageText(index, [textBlock(index + 1, `Texte ${index + 1}`)]);
+    }
+    // The view shows pages 0 and 1; a screen below reaches page 2.
+    expect(layered()).toEqual([0, 1, 2]);
+    // Translations arrive for every page, with or without a layer.
+    for (let index = 0; index < 40; index += 1) {
+      harness.view.showTranslation(index + 1, `Text ${index + 1}`, 'en');
+    }
+
+    harness.element.scrollTop = 8 + 30 * (pageHeight + 8);
+    harness.element.dispatchEvent(new harness.window.Event('scroll'));
+    harness.runFrames();
+    await vi.advanceTimersByTimeAsync(0);
+    harness.element.dispatchEvent(new harness.window.Event('scroll'));
+    harness.runFrames();
+
+    // The pages within a screen of the view have layers now, with their
+    // translations; the first pages gave theirs up, and their names stay.
+    expect(layered()).toEqual([28, 29, 30, 31, 32]);
+    const page30 = harness.element.querySelectorAll('.pdf-page')[30]!;
+    expect(page30.querySelector('.pdf-block-text')?.textContent).toBe('Text 31');
+    expect(page30.querySelector('.pdf-block')?.getAttribute('lang')).toBe('en');
+    expect(harness.element.querySelectorAll('.pdf-page')[0]!.getAttribute('aria-label'))
+      .toBe('Page 1 of 40');
+
+    // Live source only: kept translations are forgotten too.
+    harness.view.hideTranslations();
+    harness.element.scrollTop = 0;
+    harness.element.dispatchEvent(new harness.window.Event('scroll'));
+    harness.runFrames();
+    expect(harness.element.querySelectorAll('.pdf-page')[0]!
+      .querySelector('.pdf-block-text')?.textContent).toBe('Texte 1');
+  });
+
+  it('builds a layer again as it was: translation, font faces, colours from the drawn page', async () => {
+    const readPixels = vi.fn(() => whitePixels());
+    // One drawn page at a time, so scrolling away releases the first page.
+    const harness = setup({ pages: 40, maxTextLayerBlocks: 1, maxDrawnPages: 1, readPixels });
+    harness.view.mount(harness.pdf, harness.sizes);
+    const pageHeight = (792 * 400) / 612;
+    harness.view.setPageText(0, [textBlock(1, 'Bonjour', { fontId: 'bold' })]);
+    // A page pdf.js found no text on has no layer at all.
+    harness.view.setPageText(1, []);
+    harness.view.setPageText(30, [textBlock(2, 'Loin', { fontId: 'bold' })]);
+    await harness.finishNext();
+    await vi.advanceTimersByTimeAsync(0);
+    harness.view.showTranslation(1, 'Hello', 'en');
+    const first = harness.element.querySelectorAll<HTMLElement>('.pdf-page')[0]!;
+    expect(first.querySelector<HTMLElement>('.pdf-block')?.style.fontWeight).toBe('700');
+    expect(harness.element.querySelectorAll('.pdf-page')[1]!.querySelector('.pdf-text-layer'))
+      .toBeNull();
+    // Over the budget, a drawn page keeps its layer and a far page has none.
+    expect(first.querySelector('.pdf-text-layer')).not.toBeNull();
+    expect(harness.element.querySelectorAll('.pdf-page')[30]!.querySelector('.pdf-text-layer'))
+      .toBeNull();
+
+    // Far away the first page's canvas is released and its layer removed.
+    const scrollTo = async (top: number) => {
+      harness.element.scrollTop = top;
+      for (let pass = 0; pass < 12; pass += 1) {
+        harness.element.dispatchEvent(new harness.window.Event('scroll'));
+        harness.runFrames();
+        await harness.finishNext();
+      }
+    };
+    await scrollTo(8 + 30 * (pageHeight + 8));
+    expect(first.querySelector('.pdf-text-layer')).toBeNull();
+    expect(harness.element.querySelectorAll('.pdf-page')[30]!
+      .querySelector('.pdf-block-text')?.textContent).toBe('Loin');
+
+    // Back again: the same translation and weight, without asking pdf.js for
+    // the first page's fonts a second time.
+    const asked = harness.pdf.fontFaces.mock.calls.filter(([page]) => page === 1).length;
+    await scrollTo(0);
+    const block = first.querySelector<HTMLElement>('.pdf-block')!;
+    expect(block.querySelector('.pdf-block-text')?.textContent).toBe('Hello');
+    expect(block.style.fontWeight).toBe('700');
+    expect(block.style.getPropertyValue('--pdf-cover')).toBe('rgb(255, 255, 255)');
+    expect(harness.pdf.fontFaces.mock.calls.filter(([page]) => page === 1)).toHaveLength(asked);
+  });
+
+  it('leaves a page as drawn when its text layer cannot be built, and draws on', async () => {
+    const harness = setup({ pages: 3 });
+    harness.view.mount(harness.pdf, harness.sizes);
+    const broken = { ...textBlock(1, 'Cassé'), lines: undefined } as unknown as PdfSurfaceBlock;
+    expect(() => harness.view.setPageText(0, [broken])).not.toThrow();
+    harness.view.setPageText(1, [textBlock(2, 'Deux')]);
+    await harness.finishNext();
+    await harness.finishNext();
+
+    const pages = harness.element.querySelectorAll('.pdf-page');
+    expect(pages[0]!.querySelector('.pdf-text-layer')).toBeNull();
+    expect(pages[0]!.querySelector('canvas')).not.toBeNull();
+    expect(pages[1]!.querySelector('.pdf-block-text')?.textContent).toBe('Deux');
+  });
+
+  it('keeps every layer of a PDF within the budget, and replaces a page read again', () => {
+    const harness = setup({ pages: 40 });
+    harness.view.mount(harness.pdf, harness.sizes);
+    for (let index = 0; index < 40; index += 1) {
+      harness.view.setPageText(index, [textBlock(index + 1, `Texte ${index + 1}`)]);
+    }
+    harness.view.showTranslation(40, 'Text 40', 'en');
+    expect(harness.element.querySelectorAll('.pdf-text-layer')).toHaveLength(40);
+
+    // A scanned page read again: new blocks, and the old translation is gone.
+    harness.view.setPageText(39, [textBlock(99, 'Lu par OCR')]);
+    const last = harness.element.querySelectorAll('.pdf-page')[39]!;
+    expect(last.querySelectorAll('.pdf-text-layer')).toHaveLength(1);
+    expect(last.querySelector('.pdf-block-text')?.textContent).toBe('Lu par OCR');
+    harness.view.showTranslation(40, 'stale', 'en');
+    expect(last.querySelector('.pdf-block-text')?.textContent).toBe('Lu par OCR');
   });
 
   it('keeps a right-aligned block right-aligned when its translation is right-to-left', () => {

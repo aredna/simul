@@ -1,12 +1,15 @@
 import type { RgbaPixels } from '../../lib/pdf/colour-sample';
 import {
   MAX_DRAWN_PDF_PAGES,
+  MAX_PDF_TEXT_LAYER_BLOCKS,
   pdfDrawPlan,
   pdfPageBoxes,
+  pdfPageNearView,
   pdfReadingPosition,
   pdfRenderScale,
   pdfScrollLeftFor,
   pdfScrollTopFor,
+  pdfTextLayersToRemove,
   type PdfLayoutSettings,
   type PdfPageLayout,
   type PdfPagePoints,
@@ -75,6 +78,8 @@ export interface PdfViewEnvironment {
   readonly watchDevicePixelRatio?: (callback: () => void) => (() => void) | undefined;
   readonly rerenderDelayMs?: number;
   readonly maxDrawnPages?: number;
+  /** Text layers are built for at most this many blocks, nearest the view. */
+  readonly maxTextLayerBlocks?: number;
   /** The accessible name of page `page` (1-based) of `total`. */
   readonly pageLabel?: (page: number, total: number) => string;
   /** Called when another page (0-based) reaches the top of the view. */
@@ -91,8 +96,14 @@ interface ViewPage {
   /** The pdf.js scale the canvas was drawn at. */
   drawnScale: number | undefined;
   failed: boolean;
-  /** The page's text, once read. */
+  /** The page's text blocks, once read. */
+  blocks: readonly PdfSurfaceBlock[] | undefined;
+  /** The page's text over its canvas; built near the view, within a budget. */
   layer: PdfPageTextLayer | undefined;
+  /** Weight and slant of the page's fonts, once pdf.js gave them. */
+  fontFaces: Readonly<Record<string, PdfFontFace>> | undefined;
+  /** The layer could not be built from these blocks; it is not tried again. */
+  layerFailed: boolean;
 }
 
 interface Rendering {
@@ -111,7 +122,10 @@ interface Rendering {
  *
  * Each page's text sits over its canvas in a `PdfPageTextLayer`, where
  * translations replace the source text block by block (the view is the
- * `PdfTextSink` of the PDF's translation surface).
+ * `PdfTextSink` of the PDF's translation surface). Every page's blocks and
+ * translations are kept as data; layers are built for the pages near the
+ * view and, within a budget of blocks, for as many others as fit, so a PDF
+ * of thousands of pages stays light and an ordinary one keeps every layer.
  */
 export class PdfView implements PdfViewSurface, PdfTextSink {
   readonly #element: HTMLElement;
@@ -123,6 +137,7 @@ export class PdfView implements PdfViewSurface, PdfTextSink {
   #stopWatchingPixelRatio: (() => void) | undefined;
   readonly #rerenderDelayMs: number;
   readonly #maxDrawnPages: number;
+  readonly #maxTextLayerBlocks: number;
   readonly #pageLabel: (page: number, total: number) => string;
   readonly #onReadingPageChange: ((index: number) => void) | undefined;
   readonly #readPixels: (canvas: HTMLCanvasElement) => RgbaPixels | undefined;
@@ -141,6 +156,17 @@ export class PdfView implements PdfViewSurface, PdfTextSink {
   #resizeObserver: ResizeObserverLike | undefined;
   /** The page each text block is on. */
   readonly #blockPages = new Map<number, number>();
+  /** Shown translations by block, kept for pages without a layer too. */
+  readonly #translations = new Map<number, {
+    readonly text: string;
+    readonly language: string | undefined;
+  }>();
+  /** The view's scroll offset and height, as the last draw pass read them. */
+  #viewTop = 0;
+  #viewHeight = 0;
+  /** Blocks in built text layers, by page, and in all. */
+  readonly #layerBlocks = new Map<number, number>();
+  #layerBlockCount = 0;
   #readingIndex = -1;
 
   constructor(element: HTMLElement, environment: PdfViewEnvironment = {}) {
@@ -172,6 +198,10 @@ export class PdfView implements PdfViewSurface, PdfTextSink {
     });
     this.#rerenderDelayMs = environment.rerenderDelayMs ?? PDF_RERENDER_DELAY_MS;
     this.#maxDrawnPages = environment.maxDrawnPages ?? MAX_DRAWN_PDF_PAGES;
+    const budget = environment.maxTextLayerBlocks;
+    this.#maxTextLayerBlocks = budget !== undefined && Number.isFinite(budget) && budget >= 0
+      ? Math.floor(budget)
+      : MAX_PDF_TEXT_LAYER_BLOCKS;
     this.#pageLabel = environment.pageLabel ?? ((page, total) => `Page ${page} of ${total}`);
     this.#onReadingPageChange = environment.onReadingPageChange;
     this.#readPixels = environment.readPixels ?? readCanvasPixels;
@@ -211,7 +241,10 @@ export class PdfView implements PdfViewSurface, PdfTextSink {
         canvas: undefined,
         drawnScale: undefined,
         failed: false,
+        blocks: undefined,
         layer: undefined,
+        fontFaces: undefined,
+        layerFailed: false,
       };
     });
     this.#stage = stage;
@@ -256,22 +289,35 @@ export class PdfView implements PdfViewSurface, PdfTextSink {
     const page = this.#pages[pageIndex];
     const size = this.#sizes[pageIndex];
     if (!this.#document || !page || !size) return;
-    if (page.layer) {
-      for (const id of page.layer.ids) this.#blockPages.delete(id);
-      page.layer.element.remove();
+    // Read again (a scanned page): what the old blocks had goes with them.
+    for (const block of page.blocks ?? []) {
+      this.#blockPages.delete(block.id);
+      this.#translations.delete(block.id);
     }
-    const layer = new PdfPageTextLayer(this.#element.ownerDocument, size, blocks);
-    page.layer = layer;
+    this.#removeLayer(pageIndex);
+    page.blocks = blocks;
+    page.fontFaces = undefined;
+    page.layerFailed = false;
     for (const block of blocks) this.#blockPages.set(block.id, pageIndex);
-    page.element.append(layer.element);
-    syncOverlays(page);
-    if (page.canvas) this.#decorate(pageIndex);
+    // The view's place as the last draw pass read it: reading it here, for
+    // each of thousands of pages, would lay the view out again each time.
+    if (
+      page.canvas ||
+      this.#layerBlockCount + blocks.length <= this.#maxTextLayerBlocks ||
+      pdfPageNearView(this.#layout?.boxes[pageIndex], this.#viewTop, this.#viewHeight)
+    ) {
+      this.#buildLayer(pageIndex);
+      // A near page built past the budget: the next pass removes far layers.
+      if (this.#layerBlockCount > this.#maxTextLayerBlocks) this.#schedule();
+    }
   }
 
   showTranslation(blockId: number, text: string, language: string | undefined): void {
     const index = this.#blockPages.get(blockId);
     const page = index === undefined ? undefined : this.#pages[index];
-    if (!page?.layer) return;
+    if (!page) return;
+    this.#translations.set(blockId, { text, language });
+    if (!page.layer) return;
     page.layer.setTranslation(blockId, text, language);
     if (!page.canvas) return;
     if (page.layer.coloursSampled || page.layer.colourReadFailed) this.#schedule();
@@ -279,7 +325,60 @@ export class PdfView implements PdfViewSurface, PdfTextSink {
   }
 
   hideTranslations(): void {
+    this.#translations.clear();
     for (const page of this.#pages) page.layer?.hideTranslations();
+  }
+
+  /**
+   * Builds a page's text layer from its blocks, with the translations and
+   * font faces it had. Nothing to do without text, or with a layer already.
+   */
+  #buildLayer(index: number): void {
+    const page = this.#pages[index];
+    const size = this.#sizes[index];
+    // A page without text has nothing to lay over it.
+    if (
+      !page ||
+      !size ||
+      !page.blocks ||
+      page.blocks.length === 0 ||
+      page.layer ||
+      page.layerFailed
+    ) return;
+    let layer: PdfPageTextLayer;
+    try {
+      layer = new PdfPageTextLayer(this.#element.ownerDocument, size, page.blocks);
+    } catch {
+      // Blocks the layer cannot take: the page stays as drawn, and the draw
+      // pass that asked goes on.
+      page.layerFailed = true;
+      return;
+    }
+    page.layer = layer;
+    this.#layerBlocks.set(index, page.blocks.length);
+    this.#layerBlockCount += page.blocks.length;
+    for (const block of page.blocks) {
+      const translation = this.#translations.get(block.id);
+      if (translation) layer.setTranslation(block.id, translation.text, translation.language);
+    }
+    if (page.fontFaces) {
+      layer.fontFacesRequested = true;
+      layer.applyFontFaces(page.fontFaces);
+    }
+    page.element.append(layer.element);
+    syncOverlays(page);
+    if (page.canvas) this.#decorate(index);
+  }
+
+  /** Removes a page's text layer; its blocks and translations stay as data. */
+  #removeLayer(index: number): void {
+    const page = this.#pages[index];
+    if (!page?.layer) return;
+    page.layer.element.remove();
+    page.layer = undefined;
+    this.#layerBlockCount -= this.#layerBlocks.get(index) ?? 0;
+    this.#layerBlocks.delete(index);
+    syncOverlays(page);
   }
 
   /** A new screen density redraws the canvases sharp at the next pass. */
@@ -310,6 +409,11 @@ export class PdfView implements PdfViewSurface, PdfTextSink {
     }
     this.#pages = [];
     this.#blockPages.clear();
+    this.#translations.clear();
+    this.#layerBlocks.clear();
+    this.#layerBlockCount = 0;
+    this.#viewTop = 0;
+    this.#viewHeight = 0;
     this.#readingIndex = -1;
     this.#sizes = [];
     this.#stage = undefined;
@@ -401,8 +505,12 @@ export class PdfView implements PdfViewSurface, PdfTextSink {
     syncOverlays(page);
     if (!layer.fontFacesRequested && document.fontFaces) {
       layer.fontFacesRequested = true;
+      const blocks = page.blocks;
       void document.fontFaces(index + 1, layer.fontIds).then((faces) => {
-        if (this.#document !== document || page.layer !== layer) return;
+        if (this.#document !== document) return;
+        // Kept for a layer built again later, unless the page was read again.
+        if (page.blocks === blocks && this.#pages[index] === page) page.fontFaces = faces;
+        if (page.layer !== layer) return;
         layer.applyFontFaces(faces);
         this.#schedule();
       }, () => {
@@ -503,16 +611,22 @@ export class PdfView implements PdfViewSurface, PdfTextSink {
     });
     const rendering = this.#rendering;
     if (rendering) drawn.add(rendering.index);
+    // Read once, before anything below changes the DOM.
+    const scrollTop = this.#element.scrollTop;
+    const viewportHeight = this.#element.clientHeight;
+    this.#viewTop = scrollTop;
+    this.#viewHeight = viewportHeight;
     const plan = pdfDrawPlan({
       boxes: layout.boxes,
-      scrollTop: this.#element.scrollTop,
-      viewportHeight: this.#element.clientHeight,
+      scrollTop,
+      viewportHeight,
       drawn,
       stale,
       failed,
       maxDrawn: this.#maxDrawnPages,
     });
     for (const index of plan.release) this.#release(index);
+    this.#planTextLayers(scrollTop, viewportHeight);
     if (this.#rendering) {
       // Scrolled away from the page being drawn: let the near pages go first.
       if (!plan.wanted.includes(this.#rendering.index)) {
@@ -522,6 +636,34 @@ export class PdfView implements PdfViewSurface, PdfTextSink {
     }
     const next = plan.draw[0];
     if (next !== undefined) this.#draw(next);
+  }
+
+  /**
+   * The pages near the view, and the drawn ones, get their text layers;
+   * beyond the budget, the layers farthest from the view go (their text
+   * stays as data). "Near" is the same one-screen window `setPageText` uses.
+   */
+  #planTextLayers(scrollTop: number, viewportHeight: number): void {
+    const layout = this.#layout;
+    if (!layout) return;
+    const keep = new Set<number>();
+    this.#pages.forEach((page, index) => {
+      if (
+        page.canvas ||
+        this.#rendering?.index === index ||
+        pdfPageNearView(layout.boxes[index], scrollTop, viewportHeight)
+      ) keep.add(index);
+    });
+    for (const index of keep) this.#buildLayer(index);
+    const remove = pdfTextLayersToRemove({
+      boxes: layout.boxes,
+      scrollTop,
+      viewportHeight,
+      layers: this.#layerBlocks,
+      keep,
+      maxBlocks: this.#maxTextLayerBlocks,
+    });
+    for (const index of remove) this.#removeLayer(index);
   }
 
   #draw(index: number): void {
@@ -546,6 +688,8 @@ export class PdfView implements PdfViewSurface, PdfTextSink {
             this.#document !== document ||
             controller.signal.aborted
           ) return;
+          // Built before the canvas is set, so it is decorated once, below.
+          this.#buildLayer(index);
           if (page.canvas) discardCanvas(page.canvas);
           page.element.prepend(canvas);
           page.canvas = canvas;

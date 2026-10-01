@@ -585,8 +585,23 @@ shell and the mirror has nothing to copy (D103).
   blocks of every drawn page, then resizes them. A block still too long at
   0.5 stops there and overflows; a block that cannot be measured yet waits
   for a later frame, and translations for pages not drawn yet fit when
-  drawn. Every page's layer is built as its text is read, whether drawn or
-  not; keeping only nearby pages' layers is deferred.
+  drawn.
+- **Text layers within a budget (D109).** Every page's blocks, shown
+  translations and font faces are kept as data in `PdfView`. A page's layer
+  is built when its text is read if the page is drawn, within a screen of
+  the view (`pdfPageNearView`), or the built layers hold no more than
+  12,000 blocks in all (`MAX_PDF_TEXT_LAYER_BLOCKS`); so an ordinary PDF
+  keeps every layer, and a long one fills the budget in reading order, from
+  the reading page on. A page without text has no layer. Each draw pass
+  (`#planTextLayers`) builds the layers of the drawn pages and of every
+  page within a screen of the view and, beyond the budget, removes the
+  layers farthest from the view (`pdfTextLayersToRemove`); drawn and near
+  pages keep theirs whatever the budget. A layer built again takes its translations and
+  font faces from the kept data, samples colours from the drawn page again
+  and is fitted again. Measured in Chrome for Testing 154: reading the text
+  of 3,000 pages went from 23 s to 1.3 s, and of 10,000 pages from not done
+  after 170 s to 5.4 s; a 300-page PDF is unchanged. Showing 10,000 pages
+  still takes 2.5 s, which is pdf.js answering each page's size.
 - **Scanned pages (D106).** A page pdf.js read and found no text item on at
   all (not a failed or timed-out read, not a page of only rotated or
   vertical text) is a scanned page of the surface, unread until a

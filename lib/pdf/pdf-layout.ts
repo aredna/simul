@@ -10,6 +10,13 @@ export const PDF_POINTS_TO_CSS_PX = 4 / 3;
 export const MAX_PDF_PAGE_PIXELS = 4 * 1024 * 1024;
 /** At most this many pages keep a drawn canvas; the rest are placeholders. */
 export const MAX_DRAWN_PDF_PAGES = 8;
+/**
+ * The budget of text blocks that text layers are built for, in all; the
+ * pages near the view and the drawn ones have theirs whatever it says.
+ * Beyond it a page's text is kept as data. Reading the text of 3,000 pages
+ * took 23 s with every layer built and 1.3 s within this budget.
+ */
+export const MAX_PDF_TEXT_LAYER_BLOCKS = 12_000;
 
 // A page size pdf.js could not give sensibly lays out as US Letter.
 const FALLBACK_PAGE = { width: 612, height: 792 } as const;
@@ -200,6 +207,61 @@ export function pdfDrawPlan(input: PdfDrawPlanInput): PdfDrawPlan {
         .slice(0, excess)
     : [];
   return { wanted, draw, release };
+}
+
+/** Whether a page is in the view or within one screen above or below it. */
+export function pdfPageNearView(
+  box: PdfPageBox | undefined,
+  scrollTop: number,
+  viewportHeight: number,
+): boolean {
+  if (!box) return false;
+  const height = Number.isFinite(viewportHeight) && viewportHeight > 0 ? viewportHeight : 1;
+  const top = Number.isFinite(scrollTop) ? Math.max(0, scrollTop) : 0;
+  return box.top < top + 2 * height && box.top + box.height > top - height;
+}
+
+export interface PdfTextLayerPlanInput {
+  readonly boxes: readonly PdfPageBox[];
+  readonly scrollTop: number;
+  readonly viewportHeight: number;
+  /** Pages (0-based) that have a text layer, with their block counts. */
+  readonly layers: ReadonlyMap<number, number>;
+  /** Pages whose layer stays whatever the budget: drawn or near the view. */
+  readonly keep: ReadonlySet<number>;
+  readonly maxBlocks?: number;
+}
+
+/**
+ * The text layers to remove so that at most `maxBlocks` blocks have one:
+ * the pages farthest from the middle of the view first, never a kept page.
+ */
+export function pdfTextLayersToRemove(input: PdfTextLayerPlanInput): number[] {
+  const budget = Math.max(0, Math.floor(input.maxBlocks ?? MAX_PDF_TEXT_LAYER_BLOCKS));
+  let total = 0;
+  for (const blocks of input.layers.values()) total += blocks;
+  if (total <= budget) return [];
+  const height = Number.isFinite(input.viewportHeight) && input.viewportHeight > 0
+    ? input.viewportHeight
+    : 1;
+  const middle = (Number.isFinite(input.scrollTop) ? Math.max(0, input.scrollTop) : 0) + height / 2;
+  const distance = (index: number): number => {
+    const box = input.boxes[index];
+    if (!box) return Number.POSITIVE_INFINITY;
+    if (middle < box.top) return box.top - middle;
+    if (middle > box.top + box.height) return middle - (box.top + box.height);
+    return 0;
+  };
+  const removable = [...input.layers.keys()]
+    .filter((index) => !input.keep.has(index))
+    .sort((left, right) => distance(right) - distance(left) || right - left);
+  const remove: number[] = [];
+  for (const index of removable) {
+    if (total <= budget) break;
+    total -= input.layers.get(index) ?? 0;
+    remove.push(index);
+  }
+  return remove;
 }
 
 /** A reading position: a page and how far down it the view's top edge is. */

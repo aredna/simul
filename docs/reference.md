@@ -131,9 +131,13 @@ on a page once it is drawn.
     sends nothing. Rotated pages are followed wrongly.
 - Without a remembered place, a PDF opens at the page its address names
   (`#page=3`).
-- Only the pages near the view are drawn. Every page's text layer is built,
-  though, so a PDF of thousands of pages takes more memory; trimming that is
-  planned.
+- Only the pages near the view are drawn. In a very long PDF (more than
+  about 12,000 paragraphs, typically several hundred pages), the pages near
+  the view and those read first carry their text for screen readers and
+  find; the others are announced by their page number only and get their
+  text when you scroll to them. Translation covers every page either way.
+  On the test computer, reading the text of 3,000 pages took 1.3 seconds and
+  of 10,000 pages 5.4 seconds.
 - If you come back to a PDF, or rebuild it, it opens where you left it.
 - Simul opens PDFs of up to 128 MB. A download that stalls for 60 seconds
   fails; a slow one that keeps going does not.
