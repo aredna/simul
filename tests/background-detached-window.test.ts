@@ -65,6 +65,32 @@ describe('background detached companion reuse', () => {
     expect(sidePanelLaunch).toContain('launchEpoch: await toolbarLaunchEpoch');
   });
 
+  it('tells an open side panel about a click on a tab Simul cannot read, without its address (D112)', () => {
+    const sidePanelLaunch = background.slice(
+      background.indexOf('async function finishToolbarSidePanelLaunch('),
+      background.indexOf('async function rememberSurface('),
+    );
+    const unreadable = sidePanelLaunch.slice(sidePanelLaunch.indexOf("type: 'simul:unreadable-tab'"));
+    // Typed against the message the panel reads.
+    expect(sidePanelLaunch).toContain(
+      'const message: AuthorizedTabMessage | UnreadableTabMessage | undefined =',
+    );
+    expect(unreadable).toContain('localFile: isLocalFile(tab.url),');
+    expect(unreadable).toContain('launchEpoch: await toolbarLaunchEpoch,');
+    expect(unreadable).toContain('launchSequence: clickSequence,');
+    // Only whether it is a local file: never the address or the title.
+    const fields = unreadable.slice(0, unreadable.indexOf('};'));
+    expect(fields).not.toMatch(/\b(url|pendingUrl|title|favIconUrl)\s*:/u);
+    // A tab still loading a web page is not called unreadable.
+    expect(sidePanelLaunch).toContain(': isSupportedPage(tab.pendingUrl)\n            ? undefined');
+    // A companion window for another tab is opened, not retargeted.
+    const focus = background.slice(
+      background.indexOf('async function focusExistingDetachedWindow('),
+      background.indexOf('browser.windows.onRemoved.addListener('),
+    );
+    expect(focus).not.toContain('simul:unreadable-tab');
+  });
+
   it('opens the window for a tab Simul cannot read, without authorizing it (D107)', () => {
     const launch = background.slice(
       background.indexOf('async function launchToolbarCompanion('),

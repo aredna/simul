@@ -487,6 +487,7 @@ describe('sidepanel UI structure', () => {
     expect(capturePipeline).toContain('navigationRefreshGate.consumeCapture(');
     for (const handler of [
       'sourceFollower.acceptAuthorizedTab(authorizedTab)',
+      'sourceFollower.acceptUnreadableTab(unreadableTab)',
       'sourceFollower.handleTabActivated(tabId, windowId)',
       'sourceFollower.handleWindowFocusChanged(windowId)',
       'sourceFollower.handleTabAttached(tabId, newWindowId)',

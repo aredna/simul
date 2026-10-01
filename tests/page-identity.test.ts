@@ -17,6 +17,7 @@ import {
   normalizedPageUrl,
   parseDetachedPageIdentityHint,
   readAuthorizedTabMessage,
+  readUnreadableTabMessage,
   readPageError,
   readableError,
   unreadablePageGuidance,
@@ -133,6 +134,52 @@ describe('assertSourceTabIsCurrent', () => {
     )).toThrow(PageAccessError);
     expect(() => assertSourceTabIsCurrent({ id: 7, windowId: 3, active: true }, identity, true))
       .toThrow(PageAccessError);
+  });
+});
+
+describe('readUnreadableTabMessage', () => {
+  const message = {
+    type: 'simul:unreadable-tab',
+    tabId: 7,
+    windowId: 3,
+    localFile: true,
+    launchEpoch: 'e1',
+    launchSequence: 2,
+  };
+  const request = {
+    tabId: 7,
+    windowId: 3,
+    localFile: true,
+    launchStamp: { epoch: 'e1', sequence: 2 },
+  };
+
+  it('accepts a well-formed message, which always has its launch stamp', () => {
+    expect(readUnreadableTabMessage(message)).toEqual(request);
+    expect(readUnreadableTabMessage({ ...message, localFile: false }))
+      .toEqual({ ...request, localFile: false });
+    // An address is not part of it, and is not passed on.
+    expect(readUnreadableTabMessage({ ...message, url: 'file:///home/me/private.pdf' }))
+      .toEqual(request);
+  });
+
+  it('rejects other messages, bad ids and malformed stamps', () => {
+    expect(readUnreadableTabMessage(undefined)).toBeUndefined();
+    expect(readUnreadableTabMessage('simul:unreadable-tab')).toBeUndefined();
+    expect(readUnreadableTabMessage({ ...message, type: 'simul:authorized-tab' })).toBeUndefined();
+    expect(readUnreadableTabMessage({ ...message, tabId: -1 })).toBeUndefined();
+    expect(readUnreadableTabMessage({ ...message, tabId: 1.5 })).toBeUndefined();
+    expect(readUnreadableTabMessage({ ...message, windowId: '3' })).toBeUndefined();
+    expect(readUnreadableTabMessage({ ...message, localFile: 'yes' })).toBeUndefined();
+    expect(readUnreadableTabMessage({ ...message, localFile: undefined })).toBeUndefined();
+    // Without a stamp it could not be put in order with the authorizations.
+    expect(readUnreadableTabMessage({
+      type: message.type, tabId: 7, windowId: 3, localFile: true,
+    })).toBeUndefined();
+    expect(readUnreadableTabMessage({ ...message, launchSequence: undefined })).toBeUndefined();
+    expect(readUnreadableTabMessage({ ...message, launchEpoch: '' })).toBeUndefined();
+    expect(readUnreadableTabMessage({ ...message, launchSequence: 0 })).toBeUndefined();
+    // The message for a readable tab is not this one.
+    expect(readAuthorizedTabMessage(message)).toBeUndefined();
   });
 });
 

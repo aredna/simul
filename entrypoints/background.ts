@@ -7,6 +7,7 @@ import {
   type PreferenceCommandResult,
 } from '../lib/preference-coordinator';
 import { createExtensionBuildIdentity } from '../lib/build-identity';
+import type { AuthorizedTabMessage, UnreadableTabMessage } from '../lib/page-identity';
 import {
   COMPANION_LAUNCH_GENERATION_STORAGE_KEY,
   allocateCompanionLaunchGeneration,
@@ -343,19 +344,35 @@ export default defineBackground(() => {
   ): Promise<void> {
     await open?.catch(() => undefined);
     if (clickSequence !== toolbarClickSequence) return;
-    if (
-      tab.id !== undefined &&
-      tab.windowId !== undefined &&
-      isSupportedPage(tab.url)
-    ) {
-      await browser.runtime.sendMessage({
-        type: 'simul:authorized-tab',
-        tabId: tab.id,
-        windowId: tab.windowId,
-        url: tab.url,
-        launchEpoch: await toolbarLaunchEpoch,
-        launchSequence: clickSequence,
-      }).catch((error: unknown) => {
+    // A tab Simul cannot read is told to the panel too, without its
+    // address: an open panel then says why instead of keeping the page it
+    // showed, and offers a PDF from this computer (D112). A panel that is
+    // only now opening finds that out by itself. A tab still loading a web
+    // page is neither: nothing is sent, as before.
+    const message: AuthorizedTabMessage | UnreadableTabMessage | undefined =
+      tab.id === undefined || tab.windowId === undefined
+        ? undefined
+        : isSupportedPage(tab.url)
+          ? {
+              type: 'simul:authorized-tab',
+              tabId: tab.id,
+              windowId: tab.windowId,
+              url: tab.url,
+              launchEpoch: await toolbarLaunchEpoch,
+              launchSequence: clickSequence,
+            }
+          : isSupportedPage(tab.pendingUrl)
+            ? undefined
+            : {
+                type: 'simul:unreadable-tab',
+                tabId: tab.id,
+                windowId: tab.windowId,
+                localFile: isLocalFile(tab.url),
+                launchEpoch: await toolbarLaunchEpoch,
+                launchSequence: clickSequence,
+              };
+    if (message) {
+      await browser.runtime.sendMessage(message).catch((error: unknown) => {
         if (!isMissingMessageReceiver(error)) throw error;
       });
     }
@@ -505,6 +522,15 @@ function isSupportedPage(url: string | undefined): url is string {
   try {
     const protocol = new URL(url).protocol;
     return protocol === 'http:' || protocol === 'https:';
+  } catch {
+    return false;
+  }
+}
+
+function isLocalFile(url: string | undefined): boolean {
+  if (!url) return false;
+  try {
+    return new URL(url).protocol === 'file:';
   } catch {
     return false;
   }

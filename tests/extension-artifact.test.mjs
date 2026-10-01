@@ -889,7 +889,7 @@ describe('disabled OCR production profile', () => {
     expect(validation.pdfjs).toBe(true);
     expect(validation.manifest.version).toBe('0.5.2');
     expect(validation.manifest.version_name).toBe(
-      '0.5.2 beta v.20260925.19',
+      '0.5.2 beta v.20260925.20',
     );
     expect(validation.manifest.permissions).toEqual(APPROVED_PERMISSIONS);
     expect(validation.manifest.content_security_policy).toEqual({

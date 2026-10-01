@@ -715,6 +715,15 @@ shell and the mirror has nothing to copy (D103).
     shows) adds the hint "For a PDF on this computer, open it here or drop
     it on Simul." and **Open a PDF file…**, which clicks the hidden
     `#pdf-file-input` (`accept="application/pdf,.pdf"`).
+  - A toolbar click on a tab Simul cannot read reaches an open side panel
+    (D112): `finishToolbarSidePanelLaunch` sends `simul:unreadable-tab`
+    (tab and window ids, `localFile`, the launch stamp, never the address),
+    and `SourceFollower.acceptUnreadableTab` invalidates the companion with
+    the local-file or the page-access guidance, for its own window and the
+    newest launch only. A pinned panel no longer keeps its old page; a
+    companion window ignores the message (it is opened for its own tab), and
+    so does a panel showing a local PDF (the click is most likely on the
+    `file://` tab it was opened for).
   - The panel document's `dragover`/`drop` handlers take files dropped
     outside the mirror. The mirror frame's guards hand file drops to the
     engine's `onFileDrop`: registered before the activation guard, they

@@ -132,6 +132,72 @@ export interface AuthorizedTabRequest {
   launchStamp?: CompanionLaunchStamp;
 }
 
+/**
+ * The toolbar was clicked on a tab Simul cannot read. It carries no URL:
+ * only whether the tab shows a file from this computer.
+ */
+export interface UnreadableTabMessage {
+  type: 'simul:unreadable-tab';
+  tabId: number;
+  windowId: number;
+  localFile: boolean;
+  launchEpoch: string;
+  launchSequence: number;
+}
+
+export interface UnreadableTabRequest {
+  tabId: number;
+  windowId: number;
+  localFile: boolean;
+  /** Always present: it orders the click with the authorizations. */
+  launchStamp: CompanionLaunchStamp;
+}
+
+/** Validates the background worker's message for a tab Simul cannot read. */
+export function readUnreadableTabMessage(
+  message: unknown,
+): UnreadableTabRequest | undefined {
+  if (
+    typeof message !== 'object' ||
+    message === null ||
+    !('type' in message) ||
+    message.type !== 'simul:unreadable-tab' ||
+    !('tabId' in message) ||
+    !Number.isSafeInteger(message.tabId) ||
+    Number(message.tabId) < 0 ||
+    !('windowId' in message) ||
+    !Number.isSafeInteger(message.windowId) ||
+    Number(message.windowId) < 0 ||
+    !('localFile' in message) ||
+    typeof message.localFile !== 'boolean'
+  ) return undefined;
+  const unreadable = message as UnreadableTabMessage;
+  const stamp = readLaunchStamp(unreadable);
+  if (stamp === undefined || stamp === 'malformed') return undefined;
+  return {
+    tabId: unreadable.tabId,
+    windowId: unreadable.windowId,
+    localFile: unreadable.localFile,
+    launchStamp: stamp,
+  };
+}
+
+/** A message's launch stamp, if it has one; `'malformed'` when it is not one. */
+function readLaunchStamp(message: {
+  launchEpoch?: unknown;
+  launchSequence?: unknown;
+}): CompanionLaunchStamp | 'malformed' | undefined {
+  if (message.launchEpoch === undefined && message.launchSequence === undefined) return undefined;
+  if (
+    typeof message.launchEpoch !== 'string' ||
+    message.launchEpoch.length === 0 ||
+    message.launchEpoch.length > 128 ||
+    !Number.isSafeInteger(message.launchSequence) ||
+    Number(message.launchSequence) <= 0
+  ) return 'malformed';
+  return { epoch: message.launchEpoch, sequence: message.launchSequence as number };
+}
+
 /** Validates the background worker's toolbar authorization message. */
 export function readAuthorizedTabMessage(
   message: unknown,
@@ -152,30 +218,15 @@ export function readAuthorizedTabMessage(
     !isSupportedPage(message.url)
   ) return undefined;
   const authorized = message as AuthorizedTabMessage;
-  const hasLaunchStamp = authorized.launchEpoch !== undefined ||
-    authorized.launchSequence !== undefined;
-  if (
-    hasLaunchStamp &&
-    (typeof authorized.launchEpoch !== 'string' ||
-      authorized.launchEpoch.length === 0 ||
-      authorized.launchEpoch.length > 128 ||
-      !Number.isSafeInteger(authorized.launchSequence) ||
-      Number(authorized.launchSequence) <= 0)
-  ) return undefined;
+  const stamp = readLaunchStamp(authorized);
+  if (stamp === 'malformed') return undefined;
   return {
     identity: {
       tabId: authorized.tabId,
       windowId: authorized.windowId,
       url: authorized.url,
     },
-    ...(hasLaunchStamp
-      ? {
-          launchStamp: {
-            epoch: authorized.launchEpoch as string,
-            sequence: authorized.launchSequence as number,
-          },
-        }
-      : {}),
+    ...(stamp ? { launchStamp: stamp } : {}),
   };
 }
 

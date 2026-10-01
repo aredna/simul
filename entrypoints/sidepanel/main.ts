@@ -53,6 +53,7 @@ import {
 import {
   parseDetachedPageIdentityHint,
   readAuthorizedTabMessage,
+  readUnreadableTabMessage,
   readPageError,
   readableError,
 } from '../../lib/page-identity';
@@ -1157,6 +1158,11 @@ browser.runtime.onMessage.addListener((message: unknown) => {
   const authorizedTab = readAuthorizedTabMessage(message);
   if (authorizedTab) {
     void sourceFollower.acceptAuthorizedTab(authorizedTab);
+    return;
+  }
+  const unreadableTab = readUnreadableTabMessage(message);
+  if (unreadableTab) {
+    void sourceFollower.acceptUnreadableTab(unreadableTab);
     return;
   }
 });

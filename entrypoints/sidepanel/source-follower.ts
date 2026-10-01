@@ -16,6 +16,8 @@ import {
   type NavigationRefreshGate,
 } from '../../lib/navigation-refresh-gate';
 import {
+  PAGE_ACCESS_GUIDANCE,
+  PAGE_LOCAL_FILE_GUIDANCE,
   identityFromTab,
   isSupportedPage,
   navigationPageIdentityKey,
@@ -27,6 +29,7 @@ import {
   type CapturedPageIdentity,
   type DetachedPageIdentityHint,
   type PageTabLike,
+  type UnreadableTabRequest,
 } from '../../lib/page-identity';
 import type { CaptureReason, CompanionState, PageCaptureRequest } from './companion-state';
 import type { Currency, CurrencyToken } from './currency';
@@ -180,6 +183,47 @@ export class SourceFollower {
     this.#clearNavigationTimer();
     state.followedPageIdentity = authorized;
     this.environment.queueCapture({ identity: authorized, reason: 'authorized' });
+  }
+
+  /**
+   * The toolbar was clicked on a tab Simul cannot read (D112). A side panel
+   * leaves the page it showed and says why, with the PDF picker every error
+   * panel has: for a file from this computer, to open it here. A pinned
+   * panel would otherwise keep its old page; a following panel has only the
+   * tab's address after the click, so only now can it tell a local file. A
+   * companion window is opened for its own tab and is only brought forward.
+   * A PDF opened from this computer stays: the click is most likely on the
+   * very `file://` tab it was opened for. A click whose tab the reader has
+   * left by the time the message arrives changes nothing.
+   */
+  async acceptUnreadableTab(unreadable: UnreadableTabRequest): Promise<void> {
+    const state = this.#state;
+    const { currency, browser } = this.environment;
+    if (this.#isDetachedWindow) return;
+    // Another window's click touches nothing of this panel.
+    if (state.panelWindowId !== undefined && unreadable.windowId !== state.panelWindowId) return;
+    if (!isNewerCompanionLaunchStamp(
+      state.latestToolbarLaunchStamp,
+      unreadable.launchStamp,
+    )) return;
+    const stamp = unreadable.launchStamp;
+    state.latestToolbarLaunchStamp = stamp;
+    if (state.localPdf) return;
+    // Nothing in flight is superseded until the click is known to be this
+    // panel's and still about the tab the reader is on.
+    if (state.panelWindowId === undefined) await this.loadPanelWindowId();
+    if (state.panelWindowId === undefined || unreadable.windowId !== state.panelWindowId) return;
+    const active = await browser.queryActiveTab(state.panelWindowId).catch(() => undefined);
+    if (
+      state.latestToolbarLaunchStamp !== stamp ||
+      active?.id !== unreadable.tabId ||
+      state.localPdf
+    ) return;
+    currency.begin('identity');
+    this.#clearNavigationTimer();
+    this.environment.invalidateCompanion(
+      unreadable.localFile ? PAGE_LOCAL_FILE_GUIDANCE : PAGE_ACCESS_GUIDANCE,
+    );
   }
 
   /** Re-reads the followed tab (or the active tab) and rebuilds it. */

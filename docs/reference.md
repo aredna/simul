@@ -57,6 +57,10 @@ read. Give Simul the file instead:
 - If Simul opens in a separate window, selecting Simul on a tab it cannot
   read opens that window (or brings it forward) with the message and the
   button.
+- If the side panel is already open, selecting Simul on a tab it cannot read
+  replaces the page it showed with the message and the button, also when
+  the panel is pinned to another tab. A PDF you opened from the computer
+  stays. Select Simul on a web page to show that page again.
 
 A file from the computer then works like a web PDF, with one difference:
 it has no site, so automatic translation follows the all-sites setting or

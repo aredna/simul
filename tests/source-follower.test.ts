@@ -3,6 +3,7 @@ import { englishUiText } from '../lib/ui-text';
 
 import { CompanionState } from '../entrypoints/sidepanel/companion-state';
 import { Currency } from '../entrypoints/sidepanel/currency';
+import { PAGE_ACCESS_GUIDANCE, PAGE_LOCAL_FILE_GUIDANCE } from '../lib/page-identity';
 import {
   SourceFollower,
   type FollowerBrowser,
@@ -207,6 +208,157 @@ describe('SourceFollower in the side panel', () => {
       launchStamp: { epoch: 'e', sequence: 1 },
     });
     expect(harness.queueCapture).toHaveBeenCalledTimes(1);
+  });
+
+  describe('a toolbar click on a tab Simul cannot read (D112)', () => {
+    // The clicked tab: a file from this computer, active in the panel's window.
+    const fileTab = page(9, 1, 'file:///home/me/report.pdf');
+    let sequence = 0;
+    const unreadable = (overrides: Partial<{ tabId: number; windowId: number; localFile: boolean }> = {}) => ({
+      tabId: 9,
+      windowId: 1,
+      localFile: true,
+      launchStamp: { epoch: 'e', sequence: (sequence += 1) + 100 },
+      ...overrides,
+    });
+
+    it('leaves the pinned page and says why, for its own window', async () => {
+      const harness = setup({ panelWindowId: 1, tabs: [fileTab] });
+      harness.state.followedPageIdentity = { tabId: 4, windowId: 1, url: 'https://a.example/' };
+
+      // Another window's click touches nothing of this panel.
+      const inFlight = harness.currency.begin('identity');
+      await harness.follower.acceptUnreadableTab(unreadable({ windowId: 2 }));
+      expect(harness.invalidateCompanion).not.toHaveBeenCalled();
+      expect(harness.currency.isCurrent(inFlight)).toBe(true);
+      expect(harness.state.latestToolbarLaunchStamp).toBeUndefined();
+
+      await harness.follower.acceptUnreadableTab(unreadable());
+      expect(harness.invalidateCompanion).toHaveBeenCalledExactlyOnceWith(PAGE_LOCAL_FILE_GUIDANCE);
+      expect(harness.queueCapture).not.toHaveBeenCalled();
+      expect(harness.currency.isCurrent(inFlight)).toBe(false);
+
+      // A browser page, or a tab whose address Chrome does not show.
+      await harness.follower.acceptUnreadableTab(unreadable({ localFile: false }));
+      expect(harness.invalidateCompanion).toHaveBeenLastCalledWith(PAGE_ACCESS_GUIDANCE);
+    });
+
+    it('does the same while following, where only the click tells a local file', async () => {
+      const harness = setup({ panelWindowId: 1, popoutTabMode: 'active', tabs: [fileTab] });
+      await harness.follower.acceptUnreadableTab(unreadable());
+      expect(harness.invalidateCompanion).toHaveBeenCalledExactlyOnceWith(PAGE_LOCAL_FILE_GUIDANCE);
+    });
+
+    it('answers once its window is known, on a panel that is still starting', async () => {
+      const harness = setup({ panelWindowId: 1, tabs: [fileTab] });
+      harness.state.panelWindowId = undefined;
+      await harness.follower.acceptUnreadableTab(unreadable());
+      expect(harness.state.panelWindowId).toBe(1);
+      expect(harness.invalidateCompanion).toHaveBeenCalledOnce();
+
+      // A window that cannot be told is not this one.
+      const lost = setup({ tabs: [fileTab] });
+      await lost.follower.acceptUnreadableTab(unreadable());
+      expect(lost.invalidateCompanion).not.toHaveBeenCalled();
+    });
+
+    it('changes nothing once the reader has left the clicked tab', async () => {
+      // The message arrives after a switch to a web page, which is being followed.
+      const harness = setup({
+        panelWindowId: 1,
+        popoutTabMode: 'active',
+        tabs: [{ ...fileTab, active: false }, page(4, 1, 'https://a.example/')],
+      });
+      const following = harness.currency.begin('identity');
+      await harness.follower.acceptUnreadableTab(unreadable());
+      expect(harness.invalidateCompanion).not.toHaveBeenCalled();
+      expect(harness.currency.isCurrent(following)).toBe(true);
+
+      // The active tab cannot be read: nothing is assumed.
+      const failing = setup({ panelWindowId: 1, tabs: [fileTab] });
+      vi.mocked(failing.browser.queryActiveTab).mockRejectedValueOnce(new Error('No window'));
+      await failing.follower.acceptUnreadableTab(unreadable());
+      expect(failing.invalidateCompanion).not.toHaveBeenCalled();
+    });
+
+    it('keeps the order of toolbar clicks with authorizations', async () => {
+      const harness = setup({ panelWindowId: 1, tabs: [fileTab] });
+      const web = { tabId: 7, windowId: 1, url: 'https://b.example/' };
+      await harness.follower.acceptAuthorizedTab({
+        identity: web,
+        launchStamp: { epoch: 'e', sequence: 2 },
+      });
+      // An older click on the unreadable tab arrives late: the newer page stays.
+      await harness.follower.acceptUnreadableTab({
+        ...unreadable(), launchStamp: { epoch: 'e', sequence: 1 },
+      });
+      // The same click delivered twice is answered once.
+      await harness.follower.acceptUnreadableTab({
+        ...unreadable(), launchStamp: { epoch: 'e', sequence: 2 },
+      });
+      expect(harness.invalidateCompanion).not.toHaveBeenCalled();
+
+      await harness.follower.acceptUnreadableTab({
+        ...unreadable(), launchStamp: { epoch: 'e', sequence: 3 },
+      });
+      expect(harness.invalidateCompanion).toHaveBeenCalledOnce();
+      // And an older authorization after it does not bring a page back.
+      await harness.follower.acceptAuthorizedTab({
+        identity: web,
+        launchStamp: { epoch: 'e', sequence: 2 },
+      });
+      expect(harness.queueCapture).toHaveBeenCalledTimes(1);
+      // The next click on a web page shows it again.
+      await harness.follower.acceptAuthorizedTab({
+        identity: web,
+        launchStamp: { epoch: 'e', sequence: 4 },
+      });
+      expect(harness.queueCapture).toHaveBeenCalledTimes(2);
+    });
+
+    it('gives way to a newer click that arrives while the window is read', async () => {
+      const harness = setup({ panelWindowId: 1, tabs: [fileTab] });
+      harness.state.panelWindowId = undefined;
+      const accepting = harness.follower.acceptUnreadableTab({
+        ...unreadable(), launchStamp: { epoch: 'e', sequence: 5 },
+      });
+      await harness.follower.acceptAuthorizedTab({
+        identity: { tabId: 7, windowId: 1, url: 'https://b.example/' },
+        launchStamp: { epoch: 'e', sequence: 6 },
+      });
+      await accepting;
+      expect(harness.queueCapture).toHaveBeenCalledOnce();
+      expect(harness.invalidateCompanion).not.toHaveBeenCalled();
+    });
+
+    it('keeps a PDF opened from this computer', async () => {
+      const harness = setup({ panelWindowId: 1, tabs: [fileTab] });
+      harness.state.localPdf = { file: new Blob(['%PDF-']), key: 'local-file:1' };
+      await harness.follower.acceptUnreadableTab({
+        ...unreadable(), launchStamp: { epoch: 'e', sequence: 5 },
+      });
+      expect(harness.invalidateCompanion).not.toHaveBeenCalled();
+      // The click still counts in the order of launches.
+      await harness.follower.acceptAuthorizedTab({
+        identity: { tabId: 7, windowId: 1, url: 'https://b.example/' },
+        launchStamp: { epoch: 'e', sequence: 4 },
+      });
+      expect(harness.queueCapture).not.toHaveBeenCalled();
+    });
+
+    it('leaves a companion window as it is, even for its own window and tab', async () => {
+      const harness = setup({
+        detached: { tabId: 9, windowId: 1 },
+        panelWindowId: 5,
+        tabs: [fileTab, page(9, 5, 'file:///home/me/report.pdf')],
+      });
+      const inFlight = harness.currency.begin('identity');
+      await harness.follower.acceptUnreadableTab(unreadable());
+      await harness.follower.acceptUnreadableTab(unreadable({ windowId: 5 }));
+      expect(harness.invalidateCompanion).not.toHaveBeenCalled();
+      expect(harness.currency.isCurrent(inFlight)).toBe(true);
+      expect(harness.state.latestToolbarLaunchStamp).toBeUndefined();
+    });
   });
 
   it('keeps the page on a same-document URL change and rebuilds after a load', () => {
