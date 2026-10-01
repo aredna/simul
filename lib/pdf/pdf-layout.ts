@@ -321,6 +321,22 @@ export function pdfScrollLeftFor(
   return Number.isFinite(next) ? Math.min(maximum, Math.max(0, next)) : 0;
 }
 
+/**
+ * The horizontal offset for a view scrolled across by `left`, a share of
+ * the widest page's width, as Chrome's viewer is followed (D115): 0 is the
+ * far left. Within the view's own scroll range.
+ */
+export function pdfScrollLeftAt(
+  layout: Pick<PdfPageLayout, 'boxes' | 'width'>,
+  viewportWidth: number,
+  left: number,
+): number {
+  const maximum = Math.max(0, layout.width - viewportWidth);
+  const widest = layout.boxes.reduce((width, box) => Math.max(width, box.width), 0);
+  if (!(maximum > 0) || !Number.isFinite(left)) return 0;
+  return Math.min(maximum, Math.max(0, left * widest));
+}
+
 function normalizePageSize(page: PdfPagePoints): PdfPagePoints {
   return Number.isFinite(page.width) &&
     Number.isFinite(page.height) &&

@@ -66,6 +66,9 @@ const SNAP_REPORT_MS = 20;
 const HELD_PAGE_TOP_MOVE = 0.75;
 // One animation frame.
 const FRAME_MS = 1000 / 60;
+// Chrome snaps the scroll position to whole pixels: a sideways place this
+// close (screen px) to the last is the same place, kept through a zoom.
+const SAME_LEFT = 0.75;
 // How close a held movement must stop to the top or bottom of the PDF.
 const EDGE_TOLERANCE = 0.75;
 const MAX_SPEED = 50; // viewer pixels per ms
@@ -137,6 +140,10 @@ export type PdfViewerTrack =
  * then read as the top or bottom of the PDF when it ends there (Home, End),
  * else as the page nearest where it began. The two-page view is noticed and
  * not followed; rotated pages are not modelled.
+ *
+ * Sideways there is nothing to guess (D115): `pageX` says how far the viewer
+ * is scrolled across the PDF's width, whichever page it names. `left` is
+ * that place.
  */
 export class PdfViewerTracker {
   readonly #pages: readonly ViewerPage[];
@@ -157,6 +164,8 @@ export class PdfViewerTracker {
    */
   #keyUndo: { readonly scroll: Candidate; readonly viewport: PdfViewerViewport } | undefined;
   #position: PdfReadingPosition | undefined;
+  /** How far the viewer is scrolled sideways, in viewer pixels at 100%. */
+  #scrollX: number | undefined;
   /**
    * After a report read as the document's top or an arrow step onto a page
    * top: a jump to the next page looks the same. A jump's position is
@@ -210,6 +219,16 @@ export class PdfViewerTracker {
   /** The latest guess, as the panel's reading position. */
   get position(): PdfReadingPosition | undefined {
     return this.#position;
+  }
+
+  /**
+   * How far the viewer is scrolled across the PDF, as a share of the widest
+   * page's width: 0 at the far left. It stays the same until the viewer is
+   * scrolled sideways, and is 0 while the PDF's whole width fits the
+   * viewer. `undefined` before a report is read.
+   */
+  get left(): number | undefined {
+    return this.#scrollX === undefined ? undefined : this.#scrollX / this.#widestWidth;
   }
 
   /**
@@ -297,7 +316,7 @@ export class PdfViewerTracker {
       Math.abs(viewport.pageY - fix.viewport.pageY) < 0.01 &&
       Math.abs(viewport.pageX - fix.viewport.pageX) >= 0.01
     ) {
-      this.#fix = { ...fix, viewport };
+      this.#setFix({ ...fix, viewport });
       return { kind: 'same' };
     }
 
@@ -355,7 +374,7 @@ export class PdfViewerTracker {
       // A zoom or resize keeps the viewer's place up to a snapped pixel:
       // the same place, so the reader's own scrolling of the panel stays.
       if (sameZoom.length === 0 && Math.abs(best.y - fix.y) * best.zoom < 1) {
-        this.#fix = { page: best.page, y: best.y, zoom: best.zoom, viewport };
+        this.#setFix({ page: best.page, y: best.y, zoom: best.zoom, viewport });
         return { kind: 'same' };
       }
       const speed = lone ? 0 : (best.y - fix.y) / Math.max(1, elapsed);
@@ -656,7 +675,7 @@ export class PdfViewerTracker {
   #accept(candidate: Candidate, viewport: PdfViewerViewport, speed: number): PdfViewerTrack {
     const previous = this.#fix;
     this.#jumpFrom = previous;
-    this.#fix = { page: candidate.page, y: candidate.y, zoom: candidate.zoom, viewport };
+    this.#setFix({ page: candidate.page, y: candidate.y, zoom: candidate.zoom, viewport });
     this.#speed = speed;
     this.#lastStep = previous ? candidate.y - previous.y : 0;
     const moved = Math.abs(this.#lastStep * candidate.zoom);
@@ -668,6 +687,25 @@ export class PdfViewerTracker {
     const position = this.#readingPosition(candidate.y);
     this.#position = position;
     return { kind: 'move', position };
+  }
+
+  /**
+   * Takes a read report as the viewer's place, and reads how far it is
+   * scrolled sideways. Chrome centres each page in the PDF's width and the
+   * PDF in the view; scrolled, the page's left edge is that much further
+   * left. Pages of one width give one answer whichever of them is named.
+   */
+  #setFix(fix: Fix): void {
+    this.#fix = fix;
+    const page = this.#pages[fix.page];
+    if (!page || !(fix.zoom > 0)) return;
+    const pageLeft = (this.#widestWidth - page.width) / 2 + INSET_LEFT;
+    // Never below 0: a PDF narrower than the view is centred, not scrolled.
+    const scrollX = Math.max(0, pageLeft - fix.viewport.pageX / fix.zoom);
+    if (
+      this.#scrollX === undefined ||
+      Math.abs(scrollX - this.#scrollX) * fix.zoom >= SAME_LEFT
+    ) this.#scrollX = scrollX;
   }
 
   /** The page under the viewport's top edge and how far down it is. */

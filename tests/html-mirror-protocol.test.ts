@@ -366,6 +366,47 @@ describe('isolated HTML sanitizer and protocol', () => {
     })).toBeUndefined();
   });
 
+  it('carries a pinch zoom as three bounded numbers together, or none (D115)', () => {
+    const identity = createReplicaIdentity({
+      sessionId: 'pinch-session', pageEpoch: 1, generation: 1,
+      documentId: 'pinch-document', frameId: 0, sequence: 2,
+    });
+    const plain = {
+      scrollTarget: 'document' as const,
+      scrollX: 0, scrollY: 600, maxScrollX: 0, maxScrollY: 4_000,
+      documentScrollX: 0, documentScrollY: 600,
+      documentMaxScrollX: 0, documentMaxScrollY: 4_000,
+    };
+    const pinched = createHtmlMirrorScrollUpdate(identity, {
+      ...plain, visualScale: 2.5, visualOffsetX: 300, visualOffsetY: 180.5,
+    });
+    expect(pinched?.scroll).toMatchObject({
+      visualScale: 2.5, visualOffsetX: 300, visualOffsetY: 180.5,
+    });
+    expect(readHtmlMirrorSourceMessage(pinched, identity)).toEqual(pinched);
+    // Not magnified: the message is as it was before.
+    expect(Object.keys(createHtmlMirrorScrollUpdate(identity, plain)!.scroll))
+      .not.toContain('visualScale');
+
+    for (const forged of [
+      { visualScale: 2 },
+      { visualScale: 2, visualOffsetX: 10 },
+      { visualOffsetX: 10, visualOffsetY: 10 },
+      { visualScale: 0.5, visualOffsetX: 0, visualOffsetY: 0 },
+      { visualScale: 10.01, visualOffsetX: 0, visualOffsetY: 0 },
+      { visualScale: Number.NaN, visualOffsetX: 0, visualOffsetY: 0 },
+      { visualScale: '2', visualOffsetX: 0, visualOffsetY: 0 },
+      { visualScale: 2, visualOffsetX: -1, visualOffsetY: 0 },
+      { visualScale: 2, visualOffsetX: 0, visualOffsetY: 100_001 },
+      { visualScale: 2, visualOffsetX: 0, visualOffsetY: 0, visualWidth: 400 },
+    ]) {
+      expect(readHtmlMirrorSourceMessage({
+        ...pinched,
+        scroll: { ...plain, ...forged },
+      }, identity)).toBeUndefined();
+    }
+  });
+
   it('applies passive HTML resource semantics symmetrically at both boundaries', () => {
     const markup = `<!doctype html><html><body>
       <a id="docs" href="../guide?topic=mirror#passive">Guide</a>

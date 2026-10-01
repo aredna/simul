@@ -25,6 +25,8 @@ class FakeViewer {
   readonly pages: { width: number; height: number; top: number }[] = [];
   readonly height: number;
   scroll = 0;
+  /** How far the viewer is scrolled sideways, in screen pixels. */
+  scrollX = 0;
   time = 1_000;
 
   constructor(
@@ -72,10 +74,10 @@ class FakeViewer {
   pageX(width: number): number {
     const widest = Math.max(...this.pages.map((page) => page.width));
     const fits = (widest + 10) * this.zoom <= this.viewportWidth - 14;
-    // Too wide to fit: not scrolled sideways, the page centred in the PDF.
+    // Too wide to fit: the page centred in the PDF, less the sideways scroll.
     return fits
       ? (this.viewportWidth - 14) / 2 - (width * this.zoom) / 2
-      : ((widest - width) / 2 + 5) * this.zoom;
+      : ((widest - width) / 2 + 5) * this.zoom - this.scrollX;
   }
 
   report(): PdfViewerViewport {
@@ -424,6 +426,86 @@ describe('PdfViewerTracker', () => {
     // One page wide again: followed from there.
     wide.scrollTo(700);
     expect(send(switched, wide, 500).kind).not.toBe('same');
+  });
+
+  it('reads how far the viewer is scrolled sideways (D115)', () => {
+    // Letter at 200% is 1,632 px wide in an 800 px view.
+    const viewer = new FakeViewer(pages(20), 2, 700);
+    const tracker = new PdfViewerTracker(pages(20));
+    expect(tracker.left).toBeUndefined();
+    send(tracker, viewer, 1_000);
+    expect(tracker.left).toBe(0);
+
+    // Sideways only: the same place down the PDF, a new place across it.
+    const place = tracker.position;
+    viewer.scrollX = 300;
+    expect(send(tracker, viewer, 500).kind).toBe('same');
+    expect(tracker.position).toEqual(place);
+    expect(tracker.left).toBeCloseTo(150 / 816, 6);
+
+    // Down only: the place across stays exactly.
+    const across = tracker.left;
+    viewer.scrollTo(viewer.scroll + 40);
+    expect(send(tracker, viewer, 500).kind).toBe('move');
+    expect(tracker.left).toBe(across);
+
+    // Both at once, in a stream of frames.
+    for (let frame = 0; frame < 5; frame += 1) {
+      viewer.scrollX += 30;
+      viewer.scrollTo(viewer.scroll + 30);
+      send(tracker, viewer, 16);
+    }
+    tracker.settle();
+    expect(tracker.left).toBeCloseTo(225 / 816, 6);
+  });
+
+  it('stays at the far left while the PDF fits the viewer, and through a zoom', () => {
+    const viewer = new FakeViewer(pages(20), 0.7, 700);
+    const tracker = new PdfViewerTracker(pages(20));
+    send(tracker, viewer, 1_000);
+    expect(tracker.left).toBe(0);
+    // A page centred in the view is not scrolled, at any zoom or width.
+    viewer.zoom = 0.5;
+    viewer.viewportWidth = 900;
+    expect(send(tracker, viewer, 500).kind).toBe('same');
+    expect(tracker.left).toBe(0);
+
+    // Zoomed past the view's width, Chrome keeps the place across, snapped
+    // to a whole pixel: the same place.
+    const wide = new FakeViewer(pages(20), 2, 700);
+    const zoomed = new PdfViewerTracker(pages(20));
+    wide.scrollX = 301;
+    send(zoomed, wide, 1_000);
+    const before = zoomed.left;
+    expect(before).toBeCloseTo(150.5 / 816, 6);
+    wide.zoom = 1.5;
+    wide.scrollX = Math.round(301 * 0.75);
+    send(zoomed, wide, 500);
+    expect(zoomed.left).toBe(before);
+    // A real move across at the new zoom is read.
+    wide.scrollX += 60;
+    send(zoomed, wide, 500);
+    expect(zoomed.left).toBeCloseTo(286 / 1.5 / 816, 6);
+  });
+
+  it('measures sideways across the widest page, whichever page is named', () => {
+    // Letter pages with one landscape page: Chrome centres each page in the
+    // widest page's width (1,056 px at 100%).
+    const sizes = [...pages(3), LANDSCAPE, ...pages(3)];
+    const viewer = new FakeViewer(sizes, 2, 700);
+    const tracker = new PdfViewerTracker(sizes);
+    viewer.scrollX = 400;
+    send(tracker, viewer, 1_000);
+    expect(viewer.mostVisible()).toBe(0);
+    expect(tracker.left).toBeCloseTo(200 / 1056, 6);
+    const across = tracker.left;
+    // Onto the landscape page: its left edge is elsewhere, the place is not.
+    viewer.scrollTo(viewer.pages[3]!.top * viewer.zoom);
+    tracker.settle();
+    send(tracker, viewer, 800);
+    tracker.settle();
+    expect(viewer.mostVisible()).toBe(3);
+    expect(tracker.left).toBe(across);
   });
 
   it('guesses the nearest page for a lone jump it cannot place', () => {

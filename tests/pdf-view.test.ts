@@ -231,6 +231,64 @@ describe('PdfView', () => {
     expect(harness.view.readingPosition()?.index).toBe(3);
   });
 
+  it('follows the viewer sideways and keeps that place through a zoom (D115)', () => {
+    const harness = setup({ pages: 3 });
+    harness.view.followLeft(0.1);
+    expect(harness.element.scrollLeft).toBe(0);
+
+    harness.view.mount(harness.pdf, harness.sizes);
+    // Fit: the page is as wide as the view, with nowhere to scroll.
+    harness.view.followLeft(0.1);
+    expect(harness.element.scrollLeft).toBe(0);
+    // 1:1: an 816 px page behind 8 px of padding in a 416 px view. The
+    // place followed while fitted is where the view goes.
+    harness.view.updateLayout({ displayMode: 'actual', zoomPercent: 100, sourceZoomFactor: 1 });
+    expect(harness.element.scrollLeft).toBeCloseTo(0.1 * 816, 1);
+    harness.view.followLeft(0.25);
+    expect(harness.element.scrollLeft).toBeCloseTo(0.25 * 816, 1);
+    // The far left and the far right stay in range.
+    harness.view.followLeft(0);
+    expect(harness.element.scrollLeft).toBe(0);
+    harness.view.followLeft(2);
+    expect(harness.element.scrollLeft).toBeCloseTo(816 + 16 - 416, 1);
+
+    // The tab zooms: the view stays scrolled across by the followed share.
+    harness.view.followLeft(0.25);
+    harness.view.updateLayout({ displayMode: 'actual', zoomPercent: 100, sourceZoomFactor: 1.25 });
+    expect(harness.element.scrollLeft).toBeCloseTo(0.25 * 1020, 1);
+
+    // The reader scrolls sideways: a zoom keeps the middle of the view, as
+    // before, not the viewer's place.
+    harness.element.scrollLeft = 400;
+    harness.view.updateLayout({ displayMode: 'actual', zoomPercent: 100, sourceZoomFactor: 1 });
+    const middle = (400 + 208) / (1020 + 16);
+    expect(harness.element.scrollLeft).toBeCloseTo(middle * (816 + 16) - 208, 1);
+    // Until the viewer moves sideways again.
+    harness.view.followLeft(0.5);
+    expect(harness.element.scrollLeft).toBeCloseTo(0.5 * 816, 1);
+
+    // Following turned off: a zoom keeps the middle again.
+    harness.view.releaseFollowedLeft();
+    harness.view.updateLayout({ displayMode: 'actual', zoomPercent: 100, sourceZoomFactor: 1.25 });
+    const share = (0.5 * 816 + 208) / (816 + 16);
+    expect(harness.element.scrollLeft).toBeCloseTo(share * (1020 + 16) - 208, 1);
+
+    // The view grows wider and the browser holds the offset at its end:
+    // that is not the reader scrolling, and the place comes back.
+    harness.view.followLeft(0.5);
+    expect(harness.element.scrollLeft).toBeCloseTo(510, 1);
+    harness.setWidth(716);
+    Object.defineProperty(harness.element, 'scrollWidth', { configurable: true, value: 1036 });
+    harness.element.scrollLeft = 320;
+    harness.resize();
+    harness.runFrames();
+    expect(harness.element.scrollLeft).toBeCloseTo(320, 1);
+    harness.setWidth(416);
+    harness.resize();
+    harness.runFrames();
+    expect(harness.element.scrollLeft).toBeCloseTo(510, 1);
+  });
+
   it('leaves a page that failed to draw blank, then retries it after a layout change', async () => {
     const harness = setup({ pages: 3 });
     harness.pdf.render.mockImplementationOnce(async () => {

@@ -41,6 +41,16 @@ pages and PDFs:
   Simul follows.
 - **Custom zoom** multiplies the 1:1 size.
 
+With **Follow source scrolling** on, a web page's mirror also follows:
+
+- a pinch zoom in the tab (a trackpad pinch or a double-tap zoom). The mirror
+  magnifies the same part of the page, in every size setting; with Fit it
+  shows exactly what the tab shows. Turning following off shows the whole
+  page again.
+- the page scrolled sideways, like the page scrolled down. A pane inside the
+  page that scrolls sideways only, such as a board of columns, is not
+  followed.
+
 ### PDFs
 
 When the tab shows a PDF, selecting Simul shows the PDF's pages in the panel,
@@ -139,8 +149,12 @@ on a page once it is drawn.
     step below a page top, looks the same as scrolling up, and is read as
     that.
   - Pages of different sizes help Simul tell them apart.
+  - Sideways scrolling in the viewer is followed too, exactly: the panel is
+    scrolled across the page as far as the viewer is. It shows when the
+    page is wider than the panel, as it usually is at 1:1.
   - The panel moves only when the viewer moves, so your own scrolling of the
-    panel stays until then.
+    panel stays until then. That holds each way: scrolling the viewer down
+    leaves the panel where you put it sideways.
   - Not followed: a PDF opened from the computer, the viewer's two-page view
     (the panel scrolls on its own there), and Microsoft Edge's viewer, which
     sends nothing. Rotated pages are followed wrongly.

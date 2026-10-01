@@ -49,6 +49,25 @@ tells a reader's scroll from the scroll event its own following causes by the
 position it set. Turning scroll following back on re-aligns the mirror with
 the source.
 
+The page's own sideways scroll is followed like its scroll down (D100). A pane
+inside the page that scrolls sideways only (a board of columns, a wide table
+with nothing below to scroll) is not followed; see `deferred-work.md` (D115).
+
+A pinch zoom in the tab is followed with the scrolling (D115). It changes
+neither the page's scroll position nor the window's size, and fires only on
+`window.visualViewport`, so the source listens there (`resize` and `scroll`)
+and adds three numbers to its scroll message while the page is magnified: the
+magnification and the magnified view's corner inside the layout viewport
+(`lib/primary-scroll.ts`, `readVisualViewportSnapshot`). The panel validates
+them (a scale of 1–10, offsets within the scroll bound, all three or none) and
+`VisibleReplayHost` magnifies the same part of the page in the space the
+unmagnified view takes: one `translate` and `scale` on the scale layer, with
+the frame, the scroll track and the page's scroll position unchanged. Fit
+therefore shows exactly what the tab shows; 1:1 and custom zoom multiply it
+as they do the tab's browser zoom. Turning scroll following off shows the
+page unmagnified again, so the reader can scroll all of it; turning it on
+restores the zoom.
+
 This retains direct document coordinates together with event-qualified
 nested-scroll support in the sole isolated transport.
 
@@ -289,6 +308,11 @@ followed tab; an unreadable zoom counts as 1. The rule lives in
   follows the tab's zoom without using the factor.
 - **Custom zoom** is the zoom percentage times the tab's zoom, kept within
   0.25–5.
+
+The browser zoom is the one Chrome's menu, Ctrl/⌘ with plus and minus, and
+(where Chrome has it) Ctrl with the mouse wheel change. A pinch zoom (a trackpad pinch, a
+double-tap zoom) is a different thing, which `tabs.getZoom` does not report;
+it is followed with the scrolling, as described under the scroll rules above.
 
 The source viewport width remains the layout containing block; the captured
 document width drives horizontal overflow.
@@ -800,7 +824,7 @@ shell and the mirror has nothing to copy (D103).
       narrower at an unchanged zoom and viewport (its insets differ), or as
       a page that is not where the one-page layout puts it;
     - a report that moved only sideways, or a zoom or resize that keeps the
-      place within a snapped pixel, is the same place;
+      place within a snapped pixel, is the same place down the PDF;
     - for a lone report (none for 100 ms):
       - an arrow step (40 px);
       - an exact page top. It is the top of the page after the most visible
@@ -845,12 +869,31 @@ shell and the mirror has nothing to copy (D103).
     guesses. The harness
     (`~/.cache/simul-harness/pdf/phase6/panel-follow.mjs`) checks 20 moves
     in Chrome for Testing 154 and 138.
+  - **Sideways (D115).** There is nothing to guess sideways. Chrome centres
+    each page in the widest page's width, and the PDF in the view when it
+    fits; `pageX` is that place less the sideways scroll, whichever page is
+    named. From the place read (its page width and zoom) the tracker works
+    out how far the viewer is scrolled across the PDF, never below 0 (a PDF
+    that fits is centred, not scrolled), and gives it as `left`: a share of
+    the widest page's width, 0 at the far left. A place within 0.75 screen
+    px of the last is the same place, which keeps it through a zoom (Chrome
+    snaps the scroll position to whole pixels).
   - **Panel.** The follower moves `PdfView.followPosition` only when Follow
     source scrolling is on and the guess moved. The latest guess is kept
     while following is off, and turning following on (here or in another
     window) moves the view there. A held report is read by a timer in the
     panel; if a frame still follows a key read that way (the panel was
-    busy), the key becomes a scroll again.
+    busy), the key becomes a scroll again. Sideways, the follower calls
+    `PdfView.followLeft` only when `left` changed, so the reader's own
+    sideways scroll stays while the viewer only moves up and down. The view
+    scrolls across by that share of its own widest page
+    (`pdfScrollLeftAt`), within its own scroll range, and keeps that place
+    through a zoom or a resize. Once the reader scrolls sideways, or with
+    following off, a zoom keeps the middle of the view, as before. A view
+    shown again for the same tab document (Refresh) goes back to the kept
+    place. With following on and the viewer at its far left (always, while
+    the PDF fits the viewer), a zoom therefore keeps the view at its far
+    left, as Chrome's viewer does, where it used to keep the middle.
 
 ## Detached window
 

@@ -7,6 +7,7 @@ import {
   nestedScrollerOrdinal,
   readDocumentScrollSnapshot,
   readNestedScrollSnapshot,
+  readVisualViewportSnapshot,
 } from '../lib/primary-scroll';
 
 describe('primary scroll classification', () => {
@@ -196,6 +197,33 @@ describe('primary scroll classification', () => {
     expect(nestedScrollerOrdinal(feed, document, window)).toBe(0);
     expect(findPrimaryNestedScroller(document, window)).toBe(feed);
     expect(findPrimaryNestedScroller(document, window, 0)).toBe(feed);
+  });
+
+  it('reads a pinch zoom, and nothing while the page is not magnified (D115)', () => {
+    expect(readVisualViewportSnapshot({})).toBeUndefined();
+    expect(readVisualViewportSnapshot({ visualViewport: null })).toBeUndefined();
+    expect(readVisualViewportSnapshot({
+      visualViewport: { scale: 1, offsetLeft: 0, offsetTop: 0 },
+    })).toBeUndefined();
+    // A pinch that ends a hair from no magnification is none.
+    expect(readVisualViewportSnapshot({
+      visualViewport: { scale: 1.0004, offsetLeft: 0.2, offsetTop: 0 },
+    })).toBeUndefined();
+    expect(readVisualViewportSnapshot({
+      visualViewport: { scale: 2.00049, offsetLeft: 200.004, offsetTop: 150.5 },
+    })).toEqual({ visualScale: 2, visualOffsetX: 200, visualOffsetY: 150.5 });
+    // Out-of-range and broken values stay inside what the panel accepts.
+    expect(readVisualViewportSnapshot({
+      visualViewport: { scale: 40, offsetLeft: -3, offsetTop: Number.NaN },
+    })).toEqual({ visualScale: 10, visualOffsetX: 0, visualOffsetY: 0 });
+    expect(readVisualViewportSnapshot({
+      visualViewport: { scale: Number.POSITIVE_INFINITY, offsetLeft: 0, offsetTop: 0 },
+    })).toBeUndefined();
+    expect(readVisualViewportSnapshot({
+      get visualViewport(): never {
+        throw new Error('detached');
+      },
+    })).toBeUndefined();
   });
 
   it('scales an oversized nested scroller the same way', () => {

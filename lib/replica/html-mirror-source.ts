@@ -20,6 +20,7 @@ import {
   nestedScrollerOrdinal,
   readDocumentScrollSnapshot,
   readNestedScrollSnapshot,
+  readVisualViewportSnapshot,
 } from '../primary-scroll';
 import {
   MAX_HTML_MIRROR_STRING,
@@ -341,6 +342,7 @@ const CONTROLLED_LAYOUT_SETTLE_EVENTS = Object.freeze([
   'animationend',
   'animationcancel',
 ] as const);
+const VISUAL_VIEWPORT_EVENTS = Object.freeze(['resize', 'scroll'] as const);
 const VISIBILITY_INTERACTION_EVENTS = Object.freeze([
   'pointerover',
   'pointerout',
@@ -470,6 +472,12 @@ export class HtmlMirrorSourceSession {
     this.#resizeObserver = undefined;
     this.environment.window.removeEventListener('resize', this.#onLayoutChange);
     this.environment.window.removeEventListener('scroll', this.#onScroll, true);
+    for (const type of VISUAL_VIEWPORT_EVENTS) {
+      this.environment.window.visualViewport?.removeEventListener?.(
+        type,
+        this.#onVisualViewportChange,
+      );
+    }
     this.environment.window.removeEventListener(
       'hashchange',
       this.#onLayoutChange,
@@ -663,6 +671,14 @@ export class HtmlMirrorSourceSession {
         capture: true,
         passive: true,
       });
+      // A pinch zoom and panning inside it fire here only (D115).
+      for (const type of VISUAL_VIEWPORT_EVENTS) {
+        this.environment.window.visualViewport?.addEventListener?.(
+          type,
+          this.#onVisualViewportChange,
+          { passive: true },
+        );
+      }
       this.environment.window.addEventListener(
         'hashchange',
         this.#onLayoutChange,
@@ -1387,6 +1403,11 @@ export class HtmlMirrorSourceSession {
     this.#scheduleScroll();
   };
 
+  readonly #onVisualViewportChange = (): void => {
+    if (this.#disposed || !this.#identity) return;
+    this.#scheduleScroll();
+  };
+
   #scheduleScroll(): void {
     if (
       this.#disposed || !this.#identity || this.#scrollFrame !== undefined
@@ -1479,6 +1500,7 @@ export class HtmlMirrorSourceSession {
         documentScrollY: documentScroll.scrollY,
         documentMaxScrollX: documentScroll.maxScrollX,
         documentMaxScrollY: documentScroll.maxScrollY,
+        ...readVisualViewportSnapshot(this.environment.window),
       },
     );
     if (update) this.#post(update);

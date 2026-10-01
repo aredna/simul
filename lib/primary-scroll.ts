@@ -21,6 +21,55 @@ interface ViewportLike {
   readonly getComputedStyle?: (element: Element) => CSSStyleDeclaration;
 }
 
+/** A pinch zoom: the magnification and the magnified view's corner. */
+export interface VisualViewportSnapshot {
+  readonly visualScale: number;
+  readonly visualOffsetX: number;
+  readonly visualOffsetY: number;
+}
+
+/**
+ * Chrome magnifies a page up to 5 times. A larger value is cut here on the
+ * page's side, and refused or cut on the panel's.
+ */
+export const VISUAL_SCALE_MAX = 10;
+// A pinch that ends this close to no magnification is none.
+const VISUAL_SCALE_NOISE = 0.001;
+
+interface VisualViewportLike {
+  readonly scale?: number;
+  readonly offsetLeft?: number;
+  readonly offsetTop?: number;
+}
+
+/**
+ * Reads the tab's pinch zoom: the magnification on top of the browser zoom
+ * and where the magnified view sits inside the layout viewport, in CSS
+ * pixels. `undefined` while the page is not magnified, which is nearly
+ * always. Page scroll offsets and the window's size do not change with it.
+ */
+export function readVisualViewportSnapshot(
+  sourceWindow: { readonly visualViewport?: VisualViewportLike | null },
+): VisualViewportSnapshot | undefined {
+  let viewport: VisualViewportLike | null | undefined;
+  try {
+    viewport = sourceWindow.visualViewport;
+  } catch {
+    return undefined;
+  }
+  const scale = finite(viewport?.scale);
+  if (!viewport || !(scale > 1 + VISUAL_SCALE_NOISE)) return undefined;
+  return Object.freeze({
+    visualScale: Math.min(VISUAL_SCALE_MAX, Math.round(scale * 1000) / 1000),
+    visualOffsetX: visualOffset(viewport.offsetLeft),
+    visualOffsetY: visualOffset(viewport.offsetTop),
+  });
+}
+
+function visualOffset(value: unknown): number {
+  return Math.round(clamp(finite(value), 0, PRIMARY_SCROLL_MAX) * 100) / 100;
+}
+
 type NestedViewportLike = Pick<ViewportLike, 'innerWidth' | 'innerHeight'> &
   Pick<Partial<ViewportLike>, 'getComputedStyle'>;
 

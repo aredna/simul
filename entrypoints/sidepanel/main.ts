@@ -1382,6 +1382,13 @@ function updateMirrorLayout(): void {
     zoomPercent: state.preferences.zoomPercent,
     sourceZoomFactor: state.sourceZoomFactor,
   };
+  // Following is off (turned off here, in another window, or a save that
+  // did not hold): a pinch zoom and the PDF viewer's sideways place are let
+  // go with the scrolling (D115).
+  if (!state.preferences.syncScroll) {
+    visibleReplayHost.clearSourceVisualViewport();
+    pdfView.releaseFollowedLeft();
+  }
   visibleReplayHost.updateLayout(layout);
   pdfController.updateLayout(layout);
   if (appliedTextLayoutMode !== state.preferences.textLayoutMode) {

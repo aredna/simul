@@ -15,11 +15,12 @@ const TARGET = { tabId: 7, documentId: 'DOC' };
 // Letter at 100%: 816 × 1056 px, a page every 1,070 px, the first top at 3.
 const PITCH = 1070;
 
-function report(scroll: number, time: number, viewportHeight = 700) {
+function report(scroll: number, time: number, viewportHeight = 700, scrollX = 0) {
   const page = Math.max(0, Math.round((scroll - 3) / PITCH));
   return {
     kind: 'viewport',
-    pageX: 5,
+    // The page is 16 px wider than the view: scrolled across by `scrollX`.
+    pageX: 5 - scrollX,
     pageY: 3 + page * PITCH - scroll,
     pageWidth: 816,
     viewportWidth: 800,
@@ -45,6 +46,8 @@ function setup(options: { enabled?: boolean; connectFails?: boolean } = {}) {
     position: { index: 0, fraction: 0 } as PdfReadingPosition | undefined,
     readingPosition: vi.fn((): PdfReadingPosition | undefined => view.position),
     followPosition: vi.fn((position: PdfReadingPosition) => { view.position = position; }),
+    left: undefined as number | undefined,
+    followLeft: vi.fn((left: number) => { view.left = left; }),
   };
   const diagnostics: string[] = [];
   const follower = new PdfViewerFollower({
@@ -170,6 +173,57 @@ describe('PdfViewerFollower', () => {
     vi.advanceTimersByTime(PDF_VIEWER_MOVEMENT_SETTLE_MS - PDF_VIEWER_SETTLE_MS);
     expect(view.followPosition.mock.calls.length).toBe(before + 1);
     expect(view.position?.index).toBeGreaterThanOrEqual(298);
+  });
+
+  it('moves the view sideways only when the viewer moved sideways (D115)', async () => {
+    const { follower, view, send, setEnabled } = setup();
+    follower.start(TARGET, PAGES);
+    await Promise.resolve();
+    // The first report: the viewer's far left.
+    send(report(0, 1_000));
+    expect(view.followLeft).toHaveBeenCalledTimes(1);
+    expect(view.left).toBe(0);
+    // Down only: the reader's own sideways scroll of the view stays.
+    send(report(400, 2_000));
+    send(report(800, 3_000));
+    expect(view.followLeft).toHaveBeenCalledTimes(1);
+    // Sideways only, then both at once.
+    send(report(800, 4_000, 700, 10));
+    expect(view.followLeft).toHaveBeenCalledTimes(2);
+    expect(view.left).toBeCloseTo(10 / 816, 6);
+    send(report(840, 5_000, 700, 16));
+    expect(view.followLeft).toHaveBeenCalledTimes(3);
+    expect(view.left).toBeCloseTo(16 / 816, 6);
+
+    // Following off: read, not followed; on again: the view goes there.
+    setEnabled(false);
+    send(report(840, 6_000, 700, 4));
+    expect(view.followLeft).toHaveBeenCalledTimes(3);
+    setEnabled(true);
+    follower.realign();
+    expect(view.followLeft).toHaveBeenCalledTimes(4);
+    expect(view.left).toBeCloseTo(4 / 816, 6);
+    // Turned on again without a move: the view is still put back there.
+    follower.realign();
+    expect(view.followLeft).toHaveBeenCalledTimes(5);
+  });
+
+  it('puts a view shown again back at the viewer\'s sideways place', async () => {
+    const { follower, view, send } = setup();
+    follower.start(TARGET, PAGES);
+    await Promise.resolve();
+    send(report(0, 1_000, 700, 12));
+    expect(view.left).toBeCloseTo(12 / 816, 6);
+    // Refresh: the same tab document is mounted again, at its far left.
+    follower.stop();
+    view.left = undefined;
+    follower.start(TARGET, PAGES);
+    expect(view.left).toBeCloseTo(12 / 816, 6);
+    // Another document starts with no place until its viewer reports.
+    follower.stop();
+    view.left = undefined;
+    follower.start({ tabId: 7, documentId: 'OTHER' }, PAGES);
+    expect(view.left).toBeUndefined();
   });
 
   it('ignores reports after stop and disconnects', async () => {

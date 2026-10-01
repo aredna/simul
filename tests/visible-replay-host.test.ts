@@ -416,6 +416,67 @@ describe('visible isolated replay host', () => {
     expect(scroller.scrollTop).toBe(3_000);
   });
 
+  it('magnifies the part of the page a pinch zoom shows in the tab (D115)', () => {
+    const fixture = createFixture();
+    const candidate = fixture.host.createCandidate(dimensions());
+    const scrollTo = vi.fn();
+    const iframe = createProtectedIframe(fixture.document, scrollTo);
+    candidate.mount.append(iframe);
+    candidate.commit(iframe, { width: 1_200, height: 2_500 });
+    const scroller = requireElement<HTMLElement>(fixture.preview, '.replica-replay-scroll');
+    const scaleLayer = requireElement<HTMLElement>(fixture.preview, '.replica-replay-scale-layer');
+    const sticky = requireElement<HTMLElement>(fixture.preview, '.replica-replay-sticky-viewport');
+    Object.defineProperty(scroller, 'clientWidth', { configurable: true, value: 600 });
+    fixture.host.updateLayout({ displayMode: 'fit', zoomPercent: 100 });
+    const source = {
+      scrollX: 0, scrollY: 800, maxScrollX: 0, maxScrollY: 1_900,
+    };
+    fixture.host.followSourceScroll(source);
+    expect(scaleLayer.style.transform).toBe('scale(0.5)');
+    expect(scroller.scrollTop).toBe(400);
+
+    // The tab is magnified 2 times, its view's corner at 300, 150 of the
+    // layout viewport: the same part fills the space the whole view took.
+    const pinched = { ...source, visualScale: 2, visualOffsetX: 300, visualOffsetY: 150 };
+    fixture.host.followSourceScroll(pinched);
+    expect(scaleLayer.style.transform).toBe('translate(-300px, -150px) scale(1)');
+    expect(sticky.style.width).toBe('600px');
+    expect(sticky.style.height).toBe('350px');
+    expect(iframe.style.width).toBe('1200px');
+    // The page's own scroll position is unchanged by the pinch.
+    expect(scroller.scrollTop).toBe(400);
+    expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, top: 800, behavior: 'auto' });
+
+    // Panning inside the magnified view moves only the corner.
+    fixture.host.followSourceScroll({ ...pinched, visualOffsetX: 420, visualOffsetY: 200 });
+    expect(scaleLayer.style.transform).toBe('translate(-420px, -200px) scale(1)');
+    // 1:1 and the tab's browser zoom multiply as before.
+    fixture.host.updateLayout({ displayMode: 'actual', zoomPercent: 100, sourceZoomFactor: 1.5 });
+    expect(scaleLayer.style.transform).toBe('translate(-1260px, -600px) scale(3)');
+    fixture.host.updateLayout({ displayMode: 'fit', zoomPercent: 100 });
+
+    // Following turned off: the whole view again. The same report is then
+    // followed when following is turned on, not taken for a repeat.
+    fixture.host.clearSourceVisualViewport();
+    expect(scaleLayer.style.transform).toBe('scale(0.5)');
+    fixture.host.followSourceScroll({ ...pinched, visualOffsetX: 420, visualOffsetY: 200 });
+    expect(scaleLayer.style.transform).toBe('translate(-420px, -200px) scale(1)');
+
+    // Pinched back out: the report carries no zoom.
+    fixture.host.followSourceScroll(source);
+    expect(scaleLayer.style.transform).toBe('scale(0.5)');
+    // A zoom that is not one is none; a huge one is cut at 10.
+    fixture.host.followSourceScroll({ ...source, scrollY: 801, visualScale: 0.5 });
+    expect(scaleLayer.style.transform).toBe('scale(0.5)');
+    fixture.host.followSourceScroll({
+      ...source, visualScale: 40, visualOffsetX: 0, visualOffsetY: 0,
+    });
+    expect(scaleLayer.style.transform).toBe('translate(0px, 0px) scale(5)');
+    fixture.host.resetSourceScroll();
+    fixture.host.updateLayout({ displayMode: 'fit', zoomPercent: 100 });
+    expect(scaleLayer.style.transform).toBe('scale(0.5)');
+  });
+
   it('projects nested source progress into the replica primary viewport', () => {
     const fixture = createFixture();
     const candidate = fixture.host.createCandidate(dimensions());

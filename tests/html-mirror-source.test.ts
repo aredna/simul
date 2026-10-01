@@ -2323,6 +2323,93 @@ describe('HtmlMirrorSourceSession', () => {
       documentMaxScrollY: 1_400,
     });
   });
+
+  it('reports a pinch zoom and panning inside it with the scroll position (D115)', () => {
+    const fixture = sourceFixture('<main>pinched page</main>');
+    const root = fixture.document.documentElement;
+    Object.defineProperty(fixture.document, 'scrollingElement', {
+      configurable: true,
+      value: root,
+    });
+    Object.defineProperties(root, {
+      clientWidth: { configurable: true, value: 800 },
+      clientHeight: { configurable: true, value: 600 },
+      scrollWidth: { configurable: true, value: 800 },
+      scrollHeight: { configurable: true, value: 2_000 },
+      scrollLeft: { configurable: true, value: 0 },
+      scrollTop: { configurable: true, value: 300 },
+    });
+    // A pinch zoom fires on the visual viewport only; the window's size and
+    // scroll position stay as they are.
+    const listeners = new Map<string, Set<() => void>>();
+    const visualViewport = {
+      scale: 1,
+      offsetLeft: 0,
+      offsetTop: 0,
+      addEventListener: (type: string, listener: () => void) => {
+        if (!listeners.has(type)) listeners.set(type, new Set());
+        listeners.get(type)!.add(listener);
+      },
+      removeEventListener: (type: string, listener: () => void) => {
+        listeners.get(type)?.delete(listener);
+      },
+    };
+    const fire = (type: string) => {
+      for (const listener of listeners.get(type) ?? []) listener();
+    };
+    Object.defineProperties(fixture.window, {
+      innerWidth: { configurable: true, value: 800 },
+      innerHeight: { configurable: true, value: 600 },
+      scrollX: { configurable: true, value: 0 },
+      scrollY: { configurable: true, value: 300 },
+      visualViewport: { configurable: true, value: visualViewport },
+    });
+
+    fixture.start();
+    expect(fixture.scrolls()).toHaveLength(1);
+    expect(fixture.scrolls()[0]?.scroll).not.toHaveProperty('visualScale');
+
+    visualViewport.scale = 2;
+    visualViewport.offsetLeft = 200;
+    visualViewport.offsetTop = 150;
+    fire('resize');
+    fire('scroll');
+    expect(fixture.frames).toHaveLength(1);
+    fixture.flushFrame();
+    expect(fixture.scrolls()).toHaveLength(2);
+    expect(fixture.scrolls().at(-1)?.scroll).toEqual({
+      scrollTarget: 'document',
+      scrollX: 0,
+      scrollY: 300,
+      maxScrollX: 0,
+      maxScrollY: 1_400,
+      documentScrollX: 0,
+      documentScrollY: 300,
+      documentMaxScrollX: 0,
+      documentMaxScrollY: 1_400,
+      visualScale: 2,
+      visualOffsetX: 200,
+      visualOffsetY: 150,
+    });
+
+    // Panning inside the magnified view, then back out.
+    visualViewport.offsetLeft = 275;
+    fire('scroll');
+    fixture.flushFrame();
+    expect(fixture.scrolls().at(-1)?.scroll).toMatchObject({
+      visualScale: 2, visualOffsetX: 275, visualOffsetY: 150,
+    });
+    visualViewport.scale = 1;
+    visualViewport.offsetLeft = 0;
+    visualViewport.offsetTop = 0;
+    fire('resize');
+    fixture.flushFrame();
+    expect(fixture.scrolls().at(-1)?.scroll).not.toHaveProperty('visualScale');
+
+    // A disposed session listens no more.
+    fixture.session.dispose();
+    expect([...listeners.values()].every((set) => set.size === 0)).toBe(true);
+  });
 });
 
 const identity = createReplicaIdentity({

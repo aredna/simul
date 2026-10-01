@@ -7,6 +7,7 @@ import {
   pdfPageNearView,
   pdfReadingPosition,
   pdfRenderScale,
+  pdfScrollLeftAt,
   pdfScrollLeftFor,
   pdfScrollTopFor,
   pdfTextLayersToRemove,
@@ -170,6 +171,11 @@ export class PdfView implements PdfViewSurface, PdfTextSink {
   readonly #layerBlocks = new Map<number, number>();
   #layerBlockCount = 0;
   #readingIndex = -1;
+  /**
+   * The sideways place last followed and the scroll offset it gave, while
+   * the reader has not scrolled sideways since (D115).
+   */
+  #followedLeft: { readonly left: number; readonly scrollLeft: number } | undefined;
 
   constructor(element: HTMLElement, environment: PdfViewEnvironment = {}) {
     this.#element = element;
@@ -255,6 +261,7 @@ export class PdfView implements PdfViewSurface, PdfTextSink {
     this.#element.hidden = false;
     this.#element.scrollTop = 0;
     this.#element.scrollLeft = 0;
+    this.#followedLeft = undefined;
     this.#applyLayout(false);
     if (position && this.#layout) {
       this.#element.scrollTop = pdfScrollTopFor(this.#layout.boxes, position);
@@ -277,6 +284,23 @@ export class PdfView implements PdfViewSurface, PdfTextSink {
     const top = pdfScrollTopFor(this.#layout.boxes, position);
     if (Math.abs(this.#element.scrollTop - top) < 0.5) return;
     this.#element.scrollTop = top;
+  }
+
+  /**
+   * Scrolls sideways by `left`, a share of the widest page's width, as the
+   * viewer's tracker gives it (D115). A layout change keeps that place until
+   * the reader scrolls sideways or following is turned off.
+   */
+  followLeft(left: number): void {
+    if (!this.#document || !this.#layout || !Number.isFinite(left)) return;
+    const target = pdfScrollLeftAt(this.#layout, this.#element.clientWidth, left);
+    if (Math.abs(this.#element.scrollLeft - target) >= 0.5) this.#element.scrollLeft = target;
+    this.#followedLeft = { left, scrollLeft: this.#element.scrollLeft };
+  }
+
+  /** Following was turned off: a zoom keeps the middle of the view again. */
+  releaseFollowedLeft(): void {
+    this.#followedLeft = undefined;
   }
 
   /** Names every page again, in the language now current. */
@@ -442,6 +466,7 @@ export class PdfView implements PdfViewSurface, PdfTextSink {
     this.#stage = undefined;
     this.#layout = undefined;
     this.#layoutViewportWidth = -1;
+    this.#followedLeft = undefined;
     this.#document = undefined;
     this.#element.replaceChildren();
     this.#element.hidden = true;
@@ -561,6 +586,18 @@ export class PdfView implements PdfViewSurface, PdfTextSink {
     const position = keepPosition && previous
       ? pdfReadingPosition(previous.boxes, this.#element.scrollTop)
       : undefined;
+    // Read before the stage changes size: the browser clamps the offset.
+    const scrollLeft = this.#element.scrollLeft;
+    const followed = this.#followedLeft;
+    // The reader has not scrolled sideways since: the offset is the one
+    // followed, or the view grew wider and the browser held it at its end.
+    const heldAtEnd = followed !== undefined &&
+      scrollLeft < followed.scrollLeft &&
+      scrollLeft >= this.#element.scrollWidth - this.#element.clientWidth - 1;
+    const followedLeft = followed &&
+        (Math.abs(scrollLeft - followed.scrollLeft) < 1 || heldAtEnd)
+      ? followed.left
+      : undefined;
     const layout = pdfPageBoxes(
       this.#sizes,
       this.#settings,
@@ -581,14 +618,23 @@ export class PdfView implements PdfViewSurface, PdfTextSink {
       page.element.style.height = `${box.height}px`;
     });
     if (previous && position && previous.scale !== layout.scale) {
-      const scrollLeft = this.#element.scrollLeft;
       this.#element.scrollTop = pdfScrollTopFor(layout.boxes, position);
-      this.#element.scrollLeft = pdfScrollLeftFor(
-        previous.width,
-        layout.width,
-        viewportWidth,
-        scrollLeft,
-      );
+      if (followedLeft === undefined) {
+        this.#element.scrollLeft = pdfScrollLeftFor(
+          previous.width,
+          layout.width,
+          viewportWidth,
+          scrollLeft,
+        );
+      }
+    }
+    // The viewer's sideways place is kept through a zoom or a resize, until
+    // the reader scrolls sideways.
+    if (followedLeft !== undefined) {
+      this.#element.scrollLeft = pdfScrollLeftAt(layout, viewportWidth, followedLeft);
+      this.#followedLeft = { left: followedLeft, scrollLeft: this.#element.scrollLeft };
+    } else {
+      this.#followedLeft = undefined;
     }
   }
 

@@ -30,6 +30,7 @@ import {
   type SelectableReplicaFidelityPolicy,
 } from './fidelity-policy';
 import { hasExactKeysWithOptional } from '../exact-record';
+import { VISUAL_SCALE_MAX } from '../primary-scroll';
 import {
   DEFAULT_HTML_MIRROR_LIMIT_SETTINGS,
   readHtmlMirrorLimitSettings,
@@ -133,6 +134,15 @@ export interface HtmlMirrorScrollState {
   readonly documentScrollY: number;
   readonly documentMaxScrollX: number;
   readonly documentMaxScrollY: number;
+  /**
+   * Pinch zoom (D115): how many times the tab magnifies the page on top of
+   * its browser zoom, and where the magnified view's corner is inside the
+   * layout viewport, in CSS pixels. All three are absent while the page is
+   * not magnified.
+   */
+  readonly visualScale?: number;
+  readonly visualOffsetX?: number;
+  readonly visualOffsetY?: number;
 }
 
 export interface HtmlMirrorScrollUpdate {
@@ -1137,8 +1147,12 @@ function readScrollState(input: HtmlMirrorScrollState): HtmlMirrorScrollState | 
         'documentScrollX', 'documentScrollY', 'documentMaxScrollX',
         'documentMaxScrollY',
       ],
-      ['nestedOwnerKey', 'nestedOwnerOrdinal'],
+      [
+        'nestedOwnerKey', 'nestedOwnerOrdinal',
+        'visualScale', 'visualOffsetX', 'visualOffsetY',
+      ],
     ) ||
+    !isVisualViewportState(input) ||
     (input.scrollTarget !== 'document' && input.scrollTarget !== 'nested') ||
     ![
       input.scrollX,
@@ -1178,7 +1192,27 @@ function readScrollState(input: HtmlMirrorScrollState): HtmlMirrorScrollState | 
     documentScrollY: input.documentScrollY,
     documentMaxScrollX: input.documentMaxScrollX,
     documentMaxScrollY: input.documentMaxScrollY,
+    ...(input.visualScale !== undefined
+      ? {
+          visualScale: input.visualScale,
+          visualOffsetX: input.visualOffsetX as number,
+          visualOffsetY: input.visualOffsetY as number,
+        }
+      : {}),
   });
+}
+
+/** A pinch zoom's three numbers together and in range, or none of them. */
+function isVisualViewportState(input: HtmlMirrorScrollState): boolean {
+  const { visualScale, visualOffsetX, visualOffsetY } = input;
+  if (
+    visualScale === undefined &&
+    visualOffsetX === undefined &&
+    visualOffsetY === undefined
+  ) return true;
+  return typeof visualScale === 'number' && Number.isFinite(visualScale) &&
+    visualScale >= 1 && visualScale <= VISUAL_SCALE_MAX &&
+    isScrollValue(visualOffsetX) && isScrollValue(visualOffsetY);
 }
 
 function isScrollValue(value: unknown): value is number {

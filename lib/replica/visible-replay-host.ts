@@ -1,6 +1,7 @@
 import { displayScale } from '../display-scale';
 import type { MirrorDisplayMode } from '../preferences';
 import {
+  VISUAL_SCALE_MAX,
   findPrimaryNestedScroller,
   readNestedScrollSnapshot,
   type PrimaryScrollTarget,
@@ -48,7 +49,20 @@ export interface VisibleReplayScroll {
   readonly documentScrollY?: number;
   readonly documentMaxScrollX?: number;
   readonly documentMaxScrollY?: number;
+  /** The tab's pinch zoom and its corner in the layout viewport (D115). */
+  readonly visualScale?: number;
+  readonly visualOffsetX?: number;
+  readonly visualOffsetY?: number;
 }
+
+/** A pinch zoom the replica shows: no magnification is 1 at 0, 0. */
+interface VisualViewport {
+  readonly scale: number;
+  readonly offsetX: number;
+  readonly offsetY: number;
+}
+
+const NO_VISUAL_ZOOM: VisualViewport = Object.freeze({ scale: 1, offsetX: 0, offsetY: 0 });
 
 export interface VisibleReplayCandidateLease {
   readonly mount: HTMLElement;
@@ -103,6 +117,8 @@ export class VisibleReplayHost implements ReplayPresentationHost {
   #nestedOwnerKey: number | undefined;
   #nestedOwnerOrdinal: number | undefined;
   #hasSourceScroll = false;
+  /** The tab's pinch zoom, shown while the source's scrolling is followed. */
+  #sourceVisual: VisualViewport = NO_VISUAL_ZOOM;
   /** Where the reader scrolled the replica itself, in replica pixels. */
   #readerScroll: { readonly left: number; readonly top: number } | undefined;
   /** The last source position the replica followed, to tell real moves apart. */
@@ -191,7 +207,7 @@ export class VisibleReplayHost implements ReplayPresentationHost {
     committed.mount.style.height = `${committed.dimensions.viewportHeight}px`;
     committed.scaleLayer.style.width = `${committed.dimensions.viewportWidth}px`;
     committed.scaleLayer.style.height = `${committed.dimensions.viewportHeight}px`;
-    committed.scaleLayer.style.transform = `scale(${scale})`;
+    this.#applyScale(committed);
     committed.stickyViewport.style.width = `${viewportWidth}px`;
     committed.stickyViewport.style.height = `${viewportHeight}px`;
     const availableHeight =
@@ -216,6 +232,20 @@ export class VisibleReplayHost implements ReplayPresentationHost {
     committed.iframe.setAttribute('height', String(committed.dimensions.viewportHeight));
     this.#setOuterScroll(committed);
     this.#projectScroll(committed);
+  }
+
+  /**
+   * Sizes the page inside the space its view takes. A pinch zoom in the tab
+   * magnifies the same part of the page there (D115): the space stays, so a
+   * pinch gesture changes one transform and no layout.
+   */
+  #applyScale(committed: CandidateLease): void {
+    const visual = this.#sourceVisual;
+    const magnified = committed.scale * visual.scale;
+    committed.scaleLayer.style.transform = visual === NO_VISUAL_ZOOM
+      ? `scale(${committed.scale})`
+      : `translate(${-visual.offsetX * magnified}px, ${-visual.offsetY * magnified}px) ` +
+        `scale(${magnified})`;
   }
 
   /**
@@ -311,9 +341,25 @@ export class VisibleReplayHost implements ReplayPresentationHost {
       0,
       this.#sourceMaxScrollY,
     );
+    const visual = readVisualViewport(scroll);
+    const visualChanged = !sameVisualViewport(visual, this.#sourceVisual);
+    this.#sourceVisual = visual;
     if (!committed) return;
+    if (visualChanged) this.#applyScale(committed);
     this.#setOuterScroll(committed);
     this.#projectScroll(committed);
+  }
+
+  /**
+   * Following was turned off: the replica shows the page unmagnified again,
+   * so the reader can scroll all of it. Following again restores the zoom.
+   */
+  clearSourceVisualViewport(): void {
+    if (this.#sourceVisual === NO_VISUAL_ZOOM) return;
+    this.#sourceVisual = NO_VISUAL_ZOOM;
+    // The next source report is followed again, pinch zoom and all.
+    this.#lastFollowedScroll = undefined;
+    if (this.#committed) this.#applyScale(this.#committed);
   }
 
   resetSourceScroll(): void {
@@ -329,6 +375,7 @@ export class VisibleReplayHost implements ReplayPresentationHost {
     this.#sourceDocumentMaxScrollX = 0;
     this.#sourceDocumentMaxScrollY = 0;
     this.#hasSourceScroll = false;
+    this.#sourceVisual = NO_VISUAL_ZOOM;
     this.#readerScroll = undefined;
     this.#lastFollowedScroll = undefined;
     if (this.#committed) this.#committed.nestedScroller = undefined;
@@ -893,7 +940,27 @@ function sameSourceScrollPosition(
     left.scrollX === right.scrollX &&
     left.scrollY === right.scrollY &&
     left.documentScrollX === right.documentScrollX &&
-    left.documentScrollY === right.documentScrollY;
+    left.documentScrollY === right.documentScrollY &&
+    sameVisualViewport(readVisualViewport(left), readVisualViewport(right));
+}
+
+/** The pinch zoom a source report carries; none when absent or not valid. */
+function readVisualViewport(scroll: VisibleReplayScroll): VisualViewport {
+  const { visualScale, visualOffsetX, visualOffsetY } = scroll;
+  if (
+    typeof visualScale !== 'number' || !Number.isFinite(visualScale) || !(visualScale > 1)
+  ) return NO_VISUAL_ZOOM;
+  return {
+    scale: Math.min(VISUAL_SCALE_MAX, visualScale),
+    offsetX: boundedScroll(visualOffsetX),
+    offsetY: boundedScroll(visualOffsetY),
+  };
+}
+
+function sameVisualViewport(left: VisualViewport, right: VisualViewport): boolean {
+  return left.scale === right.scale &&
+    left.offsetX === right.offsetX &&
+    left.offsetY === right.offsetY;
 }
 
 function maximumSourceScrollX(candidate: CandidateLease): number {

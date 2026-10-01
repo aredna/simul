@@ -24,6 +24,8 @@ export interface PdfViewerFollowerDependencies {
   readonly view: {
     readingPosition(): PdfReadingPosition | undefined;
     followPosition(position: PdfReadingPosition): void;
+    /** Sideways: scrolled across by a share of the widest page's width. */
+    followLeft(left: number): void;
   };
   /** Follow source scrolling: whether the view moves with the viewer. */
   readonly enabled: () => boolean;
@@ -37,6 +39,8 @@ interface Session {
   readonly tracker: PdfViewerTracker;
   /** Whether guessing starts from a given place, not the view's. */
   readonly anchored: boolean;
+  /** The viewer's sideways place the view was last told of. */
+  left: number | undefined;
   connection: PdfViewerConnection | undefined;
   timer: ReturnType<typeof setTimeout> | undefined;
 }
@@ -45,8 +49,10 @@ interface Session {
  * Moves the PDF view with Chrome's PDF viewer in the followed tab (D108).
  * Every report is read, so the latest guess is known even while following
  * is off; the view moves only while it is on, and only when the viewer
- * moved, so the reader's own scrolling of the view stays until then. A tab
- * where nothing answers (no grant, Edge, a changed viewer) is not followed.
+ * moved, so the reader's own scrolling of the view stays until then. The
+ * viewer's sideways place is followed the same way, apart from its place
+ * down the PDF (D115). A tab where nothing answers (no grant, Edge, a
+ * changed viewer) is not followed.
  */
 export class PdfViewerFollower {
   readonly #dependencies: PdfViewerFollowerDependencies;
@@ -92,10 +98,13 @@ export class PdfViewerFollower {
       pageSizes,
       tracker,
       anchored: anchor !== undefined,
+      left: undefined,
       connection: undefined,
       timer: undefined,
     };
     this.#session = session;
+    // The view was mounted again at its far left: back to the kept place.
+    this.#followLeft(session);
     let connecting: Promise<PdfViewerConnection>;
     try {
       connecting = this.#dependencies.connect(target);
@@ -134,8 +143,12 @@ export class PdfViewerFollower {
 
   /** Following was turned on: the view goes to the latest guess. */
   realign(): void {
-    const position = this.#session?.tracker.position;
-    if (position && this.#dependencies.enabled()) this.#move(position);
+    const session = this.#session;
+    if (!session || !this.#dependencies.enabled()) return;
+    const position = session.tracker.position;
+    if (position) this.#move(position);
+    session.left = undefined;
+    this.#followLeft(session);
   }
 
   #end(session: Session): void {
@@ -163,6 +176,7 @@ export class PdfViewerFollower {
         if (this.#session !== session) return;
         const position = tracker.settle();
         if (position && this.#dependencies.enabled()) this.#move(position);
+        this.#followLeft(session);
       }, track.wait);
       return;
     }
@@ -172,6 +186,22 @@ export class PdfViewerFollower {
       session.timer = undefined;
     }
     if (track.kind === 'move' && this.#dependencies.enabled()) this.#move(track.position);
+    this.#followLeft(session);
+  }
+
+  /**
+   * Moves the view sideways when the viewer's sideways place changed. While
+   * following is off the change is kept for `realign`.
+   */
+  #followLeft(session: Session): void {
+    const left = session.tracker.left;
+    if (left === undefined || left === session.left || !this.#dependencies.enabled()) return;
+    session.left = left;
+    try {
+      this.#dependencies.view.followLeft(left);
+    } catch {
+      // Following is a convenience; the view carries on.
+    }
   }
 
   #report(state: 'connected' | 'unavailable'): void {

@@ -9,6 +9,7 @@ import {
   pdfPageNearView,
   pdfReadingPosition,
   pdfRenderScale,
+  pdfScrollLeftAt,
   pdfScrollLeftFor,
   pdfScrollTopFor,
   pdfTextLayersToRemove,
@@ -259,6 +260,21 @@ describe('reading position', () => {
     expect(pdfScrollLeftFor(400, 1_000, 400, 0)).toBe(300);
     expect(pdfScrollLeftFor(1_000, 2_000, 400, 300)).toBe(800);
     expect(pdfScrollLeftFor(1_000, 400, 400, 300)).toBe(0);
+  });
+
+  it('scrolls across by a share of the widest page (D115)', () => {
+    // 1:1: letter pages (816 px) centred in the landscape page's 1,056 px.
+    const layout = pdfPageBoxes([LETTER, LANDSCAPE], ACTUAL, 400, 8);
+    expect(layout.boxes[1]).toMatchObject({ left: 8, width: 1056 });
+    expect(pdfScrollLeftAt(layout, 416, 0)).toBe(0);
+    expect(pdfScrollLeftAt(layout, 416, 0.5)).toBe(528);
+    // The view's own ends.
+    expect(pdfScrollLeftAt(layout, 416, -1)).toBe(0);
+    expect(pdfScrollLeftAt(layout, 416, 3)).toBe(1056 + 16 - 416);
+    // Nothing to scroll (Fit), no pages, or no number: the far left.
+    expect(pdfScrollLeftAt(pdfPageBoxes([LETTER], FIT, 400, 8), 416, 0.5)).toBe(0);
+    expect(pdfScrollLeftAt({ boxes: [], width: 900 }, 416, 0.5)).toBe(0);
+    expect(pdfScrollLeftAt(layout, 416, Number.NaN)).toBe(0);
   });
 });
 
