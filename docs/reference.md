@@ -104,7 +104,11 @@ on a page once it is drawn.
   A PDF with no text at all says "No text was found in this PDF." Rotated or
   vertical text stays as it is, on scanned pages too.
 - Screen readers read each page ("Page 2 of 10") with its text, translated
-  where a translation shows.
+  where a translation shows. Untranslated text is marked with the PDF's
+  language (the From language, or the detected one) and a translation with
+  the To language, so a screen reader that switches voices can pronounce
+  each in its own. One language covers the whole PDF; while it is not known,
+  the text is marked as of unknown language.
 - With **Follow source scrolling** on (in Settings, on by default), the panel
   follows Chrome's PDF viewer in the tab. The viewer says where its most
   visible page sits on screen but never which page it is, so Simul works the

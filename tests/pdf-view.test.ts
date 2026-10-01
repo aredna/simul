@@ -658,6 +658,44 @@ describe('PdfView text', () => {
     expect(last.querySelector('.pdf-block-text')?.textContent).toBe('Lu par OCR');
   });
 
+  it('names the PDF’s language on its text, and the target language on a translation', () => {
+    const harness = setup({ pages: 3 });
+    harness.view.mount(harness.pdf, harness.sizes);
+    harness.view.setSourceLanguage(' fr ');
+    harness.view.setPageText(0, [textBlock(1, 'Bonjour'), textBlock(2, 'Au revoir', { top: 200 })]);
+    const page = harness.element.querySelector<HTMLElement>('.pdf-page')!;
+    const layer = page.querySelector<HTMLElement>('.pdf-text-layer')!;
+    const [block, other] = [...layer.querySelectorAll<HTMLElement>('.pdf-block')];
+    // On the text, not on the page: its name is in the panel's language.
+    expect(layer.getAttribute('lang')).toBe('fr');
+    expect(page.hasAttribute('lang')).toBe(false);
+    expect(block!.hasAttribute('lang')).toBe(false);
+
+    harness.view.showTranslation(1, 'Hello', 'en');
+    expect(block!.getAttribute('lang')).toBe('en');
+    // A translation in an unknown language does not pass for French.
+    harness.view.showTranslation(2, 'Goodbye', undefined);
+    expect(other!.getAttribute('lang')).toBe('');
+    harness.view.hideTranslations();
+    expect(block!.hasAttribute('lang')).toBe(false);
+    expect(other!.hasAttribute('lang')).toBe(false);
+
+    // Known later (Auto-detect), changed, or unknown again.
+    harness.view.setSourceLanguage('de');
+    expect(layer.getAttribute('lang')).toBe('de');
+    harness.view.setPageText(1, [textBlock(3, 'Zwei')]);
+    expect(harness.element.querySelectorAll('.pdf-text-layer')[1]?.getAttribute('lang')).toBe('de');
+    harness.view.setSourceLanguage(undefined);
+    // Unknown is said so, rather than left to the panel's own language.
+    expect(layer.getAttribute('lang')).toBe('');
+
+    // A new PDF starts without the last one's language.
+    harness.view.setSourceLanguage('de');
+    harness.view.mount(harness.pdf, harness.sizes);
+    harness.view.setPageText(0, [textBlock(4, 'Hello')]);
+    expect(harness.element.querySelector('.pdf-text-layer')?.getAttribute('lang')).toBe('');
+  });
+
   it('keeps a right-aligned block right-aligned when its translation is right-to-left', () => {
     const harness = setup({ pages: 1 });
     harness.view.mount(harness.pdf, harness.sizes);

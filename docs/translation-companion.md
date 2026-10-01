@@ -565,7 +565,11 @@ shell and the mirror has nothing to copy (D103).
 - **Overlays.** `entrypoints/sidepanel/pdf-text-layer.ts` lays each page's
   blocks over its canvas in shares of the page, font sizes scaled by
   `--pdf-scale`, so zoom moves nothing. Source text is transparent (screen
-  readers read it; pages are `role="group"` with "Page n of N"). A translated
+  readers read it; pages are `role="group"` with "Page n of N"). Each layer
+  carries the resolved source language as `lang` (`PdfView.setSourceLanguage`,
+  fed from `updateControls`; D110; `lang=""` while unknown), and a
+  translated block its target language (or `lang=""`), so it never inherits
+  the source language; the page's own name stays in the panel's language. A translated
   block covers its lines (padded 0.12 font sizes) with the background sampled
   once per page from its canvas (`lib/pdf/colour-sample.ts`: rects clipped
   to the canvas; the background is the dominant colour inside the line

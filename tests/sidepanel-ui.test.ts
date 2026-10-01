@@ -638,6 +638,9 @@ describe('sidepanel UI structure', () => {
       'function relocalizeSizeToggle(',
     );
     expect(relocalize).toContain('pdfView.relabelPages();');
+    // Untranslated PDF text carries the resolved source language for screen readers.
+    const controls = sliceBetween('function updateControls(): void {', 'function setStatus(');
+    expect(controls).toContain('pdfView.setSourceLanguage(state.resolvedSourceLanguage);');
     const layer = style.slice(style.indexOf('.pdf-text-layer {'));
     expect(layer).toContain('pointer-events: none');
     expect(layer).toContain('user-select: none');

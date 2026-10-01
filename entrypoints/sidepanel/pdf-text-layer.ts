@@ -148,8 +148,9 @@ export class PdfPageTextLayer {
     if (!entry.covers) entry.covers = this.#createCovers(entry);
     entry.text.textContent = text;
     entry.element.classList.add('pdf-block--translated');
-    if (language) entry.element.setAttribute('lang', language);
-    else entry.element.removeAttribute('lang');
+    // Unknown is said so: the layer's `lang` is the source language, which
+    // a translation must not inherit.
+    entry.element.setAttribute('lang', language ?? '');
     entry.translated = true;
     entry.fit = 1;
     entry.fitted = false;

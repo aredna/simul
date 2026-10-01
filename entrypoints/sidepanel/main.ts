@@ -1788,6 +1788,8 @@ function updateControls(): void {
   replicaStatusContainer.setAttribute('aria-busy', String(state.captureInFlight));
   replicaPreviewContainer.setAttribute('aria-busy', String(state.captureInFlight));
   pdfViewContainer.setAttribute('aria-busy', String(state.captureInFlight));
+  // Untranslated PDF text is read aloud in the PDF's own language.
+  pdfView.setSourceLanguage(state.resolvedSourceLanguage);
   sourceSelect.disabled = busy;
   targetSelect.disabled = busy;
   swapButton.disabled = busy || !state.resolvedSourceLanguage;

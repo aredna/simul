@@ -161,6 +161,8 @@ export class PdfView implements PdfViewSurface, PdfTextSink {
     readonly text: string;
     readonly language: string | undefined;
   }>();
+  /** The PDF's own language: what its untranslated text is read aloud in. */
+  #sourceLanguage: string | undefined;
   /** The view's scroll offset and height, as the last draw pass read them. */
   #viewTop = 0;
   #viewHeight = 0;
@@ -330,6 +332,22 @@ export class PdfView implements PdfViewSurface, PdfTextSink {
   }
 
   /**
+   * The language of the PDF's own text (the From language, or the detected
+   * one), so a screen reader pronounces untranslated text in it. It goes on
+   * each text layer, not on the page, whose name is in the panel's language;
+   * a translated block names its own language. One language covers the
+   * whole PDF. `undefined` when unknown, which the layers say as `lang=""`.
+   */
+  setSourceLanguage(language: string | undefined): void {
+    const next = language?.trim() || undefined;
+    if (next === this.#sourceLanguage) return;
+    this.#sourceLanguage = next;
+    for (const page of this.#pages) {
+      if (page.layer) applyLanguage(page.layer.element, next);
+    }
+  }
+
+  /**
    * Builds a page's text layer from its blocks, with the translations and
    * font faces it had. Nothing to do without text, or with a layer already.
    */
@@ -355,6 +373,7 @@ export class PdfView implements PdfViewSurface, PdfTextSink {
       return;
     }
     page.layer = layer;
+    applyLanguage(layer.element, this.#sourceLanguage);
     this.#layerBlocks.set(index, page.blocks.length);
     this.#layerBlockCount += page.blocks.length;
     for (const block of page.blocks) {
@@ -414,6 +433,7 @@ export class PdfView implements PdfViewSurface, PdfTextSink {
     this.#layerBlockCount = 0;
     this.#viewTop = 0;
     this.#viewHeight = 0;
+    this.#sourceLanguage = undefined;
     this.#readingIndex = -1;
     this.#sizes = [];
     this.#stage = undefined;
@@ -722,6 +742,11 @@ export class PdfView implements PdfViewSurface, PdfTextSink {
     syncOverlays(page);
     void this.#document?.releasePage(index + 1).catch(() => {});
   }
+}
+
+/** `lang=""` says the language is unknown, rather than the panel's own. */
+function applyLanguage(element: HTMLElement, language: string | undefined): void {
+  element.setAttribute('lang', language ?? '');
 }
 
 /**
