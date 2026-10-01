@@ -8,22 +8,22 @@ import {
 describe('extension build identity', () => {
   it('renders and logs the trimmed runtime manifest version name', () => {
     const identity = createExtensionBuildIdentity({
-      version: '0.5.2',
-      version_name: ' 0.5.2 beta v.20260925.20 ',
+      version: '0.6.0',
+      version_name: ' 0.6.0 beta v.20261001.1 ',
     });
     const target: Pick<HTMLElement, 'textContent'> = { textContent: '' };
 
     renderExtensionBuildIdentity(target, identity);
 
     expect(identity).toEqual({
-      version: '0.5.2',
-      label: 'Build 0.5.2 beta v.20260925.20',
+      version: '0.6.0',
+      label: 'Build 0.6.0 beta v.20261001.1',
       companionReadyMessage:
-        '[Simul] Companion ready. Build 0.5.2 beta v.20260925.20.',
+        '[Simul] Companion ready. Build 0.6.0 beta v.20261001.1.',
       backgroundReadyMessage:
-        '[Simul] Background service worker ready. Build 0.5.2 beta v.20260925.20.',
+        '[Simul] Background service worker ready. Build 0.6.0 beta v.20261001.1.',
     });
-    expect(target.textContent).toBe('Build 0.5.2 beta v.20260925.20');
+    expect(target.textContent).toBe('Build 0.6.0 beta v.20261001.1');
   });
 
   it.each([
