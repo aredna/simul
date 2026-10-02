@@ -42,3 +42,6 @@ _bmad/custom/*.user.toml
 # Tesseract cores are embedded in the vendored .wasm.js loaders; separate
 # .wasm copies are stray and would breach the artifact size gate.
 vendor/ocr/tesseract/core/*.wasm
+
+# Local tool settings and worktrees.
+.claude/
