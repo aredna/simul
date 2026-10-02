@@ -4267,6 +4267,10 @@ function blockIsolatedDisclosureActivation(event: Event): void {
   // an anchor, form, control, or arbitrary source node into an active surface.
   // The bypass marker is written only after receiver validation.
   if (isReadOnlyReplicaDisclosureEvent(event)) return;
+  // Tab only moves focus, and focus must be able to leave: a screen reader
+  // puts it on a mirror link or control, and with every key cancelled it
+  // stayed there (D118).
+  if (isFocusMoveKeyEvent(event)) return;
   const currentTarget = event.currentTarget;
   if (
     currentTarget && 'nodeType' in currentTarget &&
@@ -4274,6 +4278,12 @@ function blockIsolatedDisclosureActivation(event: Event): void {
   ) closeReadOnlyReplicaDisclosures(currentTarget as Document);
   if (event.cancelable) event.preventDefault();
   event.stopImmediatePropagation();
+}
+
+function isFocusMoveKeyEvent(event: Event): boolean {
+  return (
+    event.type === 'keydown' || event.type === 'keypress' || event.type === 'keyup'
+  ) && (event as KeyboardEvent).key === 'Tab';
 }
 
 /**

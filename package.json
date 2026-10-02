@@ -21,7 +21,6 @@
     "postinstall": "wxt prepare",
     "typecheck": "tsc --noEmit",
     "test": "vitest run",
-    "test:chrome-disclosure:repeat": "vitest run tests/isolated-disclosure-chrome.test.ts",
     "test:watch": "vitest",
     "check": "npm run typecheck && npm test && npm run artifact:check"
   },

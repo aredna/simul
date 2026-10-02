@@ -38,6 +38,7 @@ import {
   type StickySourceSecretClassifier,
 } from '../replica/source-secret-classifier';
 import type { ReplicaSourceDocumentIdentity } from '../replica/source-identity';
+import { readVisualViewportSnapshot } from '../primary-scroll';
 import { canonicalizeLanguageTag } from '../translation-provider';
 import { normalizeAccessibilityImageText } from './accessibility-image-text';
 import {
@@ -355,6 +356,11 @@ export class ImageSourceSession {
         this.#imageIsInWithheldControlledContent(node)
       )
     ) return undefined;
+    // A pinch zoom makes the tab's pixels show the magnified view, while
+    // this rectangle is measured in the layout viewport: a crop taken then
+    // is of another part of the page (D119). The image is not on screen as
+    // measured, so its own file is read instead.
+    if (readVisualViewportSnapshot(this.environment.window)) return undefined;
     const rect = node.getBoundingClientRect();
     const viewportWidth = finitePositive(this.environment.window.innerWidth);
     const viewportHeight = finitePositive(this.environment.window.innerHeight);

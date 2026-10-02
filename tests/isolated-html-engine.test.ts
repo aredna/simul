@@ -515,6 +515,31 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(forgedControl.dispatchEvent(forgedKey)).toBe(false);
     expect(forgedKey.defaultPrevented).toBe(true);
     expect(forgedControl.checked).toBe(false);
+
+    // Focus can always leave the mirror: Tab is not cancelled (D118), while
+    // the keys that act on a control still are.
+    const key = (type: string, name: string) => {
+      const event = new replica.defaultView!.Event(type, {
+        bubbles: true,
+        cancelable: true,
+        composed: true,
+      });
+      Object.defineProperty(event, 'key', { value: name });
+      return event;
+    };
+    for (const type of ['keydown', 'keyup']) {
+      const tab = key(type, 'Tab');
+      expect(forgedControl.dispatchEvent(tab)).toBe(true);
+      expect(tab.defaultPrevented).toBe(false);
+    }
+    for (const name of ['Enter', ' ', 'ArrowDown', 'a']) {
+      const pressed = key('keydown', name);
+      expect(forgedControl.dispatchEvent(pressed)).toBe(false);
+      expect(pressed.defaultPrevented).toBe(true);
+    }
+    const tabClick = key('click', 'Tab');
+    expect(forgedControl.dispatchEvent(tabClick)).toBe(false);
+    expect(forgedControl.checked).toBe(false);
   });
 
   it('hands files dropped on the mirror to the panel, before the activation guard (D107)', async () => {
@@ -1688,7 +1713,8 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(selectHost.dataset.simulSelectPresentation).toBe('list');
     expect(stream.acknowledged).toContain(1);
     semantic.fail();
-    expect(host.iframe!.getAttribute('aria-hidden')).toBe('true');
+    // A failed semantic stream no longer hides the mirror (D118).
+    expect(host.iframe!.hasAttribute('aria-hidden')).toBe(false);
   });
 
   it('rejects a forged select label outside a native select', async () => {
@@ -4451,6 +4477,8 @@ class FakePresentationHost implements ReplayPresentationHost {
       mount,
       commit: (iframe) => {
         this.iframe = iframe;
+        // As the real host: the committed replica is exposed (D118).
+        iframe.removeAttribute('aria-hidden');
       },
       release,
     };

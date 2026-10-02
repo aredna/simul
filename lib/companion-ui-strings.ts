@@ -145,7 +145,6 @@ export const UI_STRINGS = {
 
   // Partial-projection status (frame + count fragments joined into it).
   partialPrefixRemainsPartial: 'Translation remains partial',
-  partialPrefixLivePartial: 'Live page changes were only partially translated',
   partialSummary:
     '{0}: {1}. Original text remains for those segments; choose Translate page to retry.',
   partialNoneProjected: 'no current text was projected',
@@ -329,8 +328,7 @@ export const UI_STRINGS = {
     'Core settings are reset. {0} optional permission entries remain and cleanup is still pending; choose Retry cleanup.',
   statusResetPendingGeneric:
     'Core settings are reset, but permission or runtime cleanup is still pending; choose Retry cleanup.',
-  statusResetComplete:
-    'Settings and optional permissions were reset. Choose a read profile to continue.',
+  statusResetComplete: 'Settings and optional permissions were reset.',
   statusResetCouldNotFinish: 'Reset could not finish: {0}',
   statusPreparingSafeReset: 'Preparing a safe settings reset…',
   statusPreparingNarrower: 'Preparing narrower read settings…',

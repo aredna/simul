@@ -1,7 +1,8 @@
 # Image text translation
 
-Simul includes an opt-in, local image-text path for stable visible top-frame
-`<img>` elements. This document records the implemented privacy, capture,
+Simul includes a local image-text path for top-frame `<img>` elements. It is
+on from install; pixel OCR waits for the image-access grant, reads an image on
+screen from the visible tab and an image off screen from its own file (D58). This document records the implemented privacy, capture,
 recognition, quality, and projection boundaries.
 
 ## Production methods

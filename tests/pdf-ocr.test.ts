@@ -478,8 +478,12 @@ describe('probeScannedLanguage', () => {
         now: () => 0,
         recognize: hanging,
       });
+      // The drawing is hashed off the main thread, which can take a while
+      // on a busy machine: wait for the recognition by the clock (the fake
+      // timers leave it running), not by a count of turns.
       const settle = async () => {
-        for (let turn = 0; turn < 200 && started === 0; turn += 1) {
+        const deadline = performance.now() + 4_000;
+        while (started === 0 && performance.now() < deadline) {
           await new Promise((resolve) => setImmediate(resolve));
         }
       };

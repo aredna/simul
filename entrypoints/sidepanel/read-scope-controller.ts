@@ -360,8 +360,8 @@ export class ReadScopeController {
       if (prepare.operation === 'reset') state.localReadScopeNarrowingGates.clear();
       const purge = this.environment.purgeSourceDerivedRuntime(
         prepare.operation === 'reset'
-          ? 'Preparing a safe settings reset…'
-          : 'Preparing narrower read settings…',
+          ? UI_STRINGS.statusPreparingSafeReset
+          : UI_STRINGS.statusPreparingNarrower,
       );
       if (prepare.operation === 'reset') this.environment.clearResetOnlyRuntimeState();
       await purge;

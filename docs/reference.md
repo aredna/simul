@@ -30,6 +30,13 @@ Translations are projected onto the replica; the source DOM is not modified.
 Exact-content translations are joined and cached only in memory for the current
 extension session.
 
+A screen reader reads the mirror like the page: its headings, links and
+text, translated where a translation shows. The mirror keeps the language
+the page declares, so a screen reader that switches voices may read a
+translation with the page's voice (PDF text carries its own language). Tab
+moves focus on through the mirror's links and out of it; no other key acts
+on the mirror.
+
 ### Size
 
 The **Size** setting and the toolbar size button work the same way for web
@@ -164,7 +171,10 @@ on a page once it is drawn.
   about 12,000 paragraphs, typically several hundred pages), the pages near
   the view and those read first carry their text for screen readers and
   find; the others are announced by their page number only and get their
-  text when you scroll to them. Translation covers every page either way.
+  text when you scroll to them. Translation covers every page either way,
+  up to 50,000 paragraphs or about 8 million characters waiting at once
+  (upwards of a thousand pages); past that the status says the translation
+  is partial.
   On the test computer, reading the text of 3,000 pages took 1.3 seconds and
   of 10,000 pages 5.4 seconds.
 - If you come back to a PDF, or rebuild it, it opens where you left it.
@@ -186,8 +196,9 @@ translates the page text of the mirrored page, and for images Simul:
    method is on from the start, so images with alt text get a translated
    caption before image access is granted);
 3. for pixel OCR, reads an image on screen from a crop of the visible tab
-   (after checking its geometry is stable); an image off screen, moving, or in
-   a background tab is read from its own file instead: the copy the mirror has
+   (after checking its geometry is stable); an image off screen, moving, in
+   a background tab, or in a tab that is pinch-zoomed (the tab's pixels then
+   show the magnified view) is read from its own file instead: the copy the mirror has
    already loaded, then the page's own copy for same-site images, then (Passive
    fidelity only) a cache-first download of the same URL without cookies. Each
    crop is reduced to at most 4 megapixels;

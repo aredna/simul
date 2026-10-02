@@ -36,25 +36,57 @@ describe('visible isolated replay host', () => {
     expect(iframe.hasAttribute('inert')).toBe(true);
   });
 
-  it('keeps a proof-backed accessibility exposure across the first live mark', () => {
+  it('exposes the committed replica to assistive technology (D118)', () => {
     const fixture = createFixture();
     const candidate = fixture.host.createCandidate(dimensions());
     const iframe = createProtectedIframe(fixture.document);
     candidate.mount.append(iframe);
-    candidate.commit(iframe, { width: 1_400, height: 2_500 });
     const root = requireElement<HTMLElement>(
       fixture.preview,
-      '[data-simul-replica-viewport]',
+      '[data-simul-replica-candidate]',
     );
+    // A candidate is not what the panel shows yet.
+    expect(root.getAttribute('aria-hidden')).toBe('true');
+    expect(iframe.getAttribute('aria-hidden')).toBe('true');
+    expect(fixture.host.setInteractiveAccessibility(iframe, true)).toBe(false);
+
+    candidate.commit(iframe, { width: 1_400, height: 2_500 });
+    // An ordinary page, with no proof-backed control in it, is read too.
+    expect(fixture.preview.hasAttribute('aria-hidden')).toBe(false);
+    expect(root.hasAttribute('aria-hidden')).toBe(false);
+    expect(iframe.hasAttribute('aria-hidden')).toBe(false);
+    expect(iframe.getAttribute('tabindex')).toBe('-1');
 
     expect(fixture.host.setInteractiveAccessibility(iframe, true)).toBe(true);
     fixture.host.markLive(iframe);
+    expect(fixture.host.setInteractiveAccessibility(iframe, false)).toBe(true);
     expect(fixture.preview.hasAttribute('aria-hidden')).toBe(false);
     expect(root.hasAttribute('aria-hidden')).toBe(false);
+    expect(iframe.hasAttribute('aria-hidden')).toBe(false);
 
-    expect(fixture.host.setInteractiveAccessibility(iframe, false)).toBe(true);
+    fixture.host.clearPresentation();
     expect(fixture.preview.getAttribute('aria-hidden')).toBe('true');
-    expect(root.getAttribute('aria-hidden')).toBe('true');
+    expect(fixture.host.setInteractiveAccessibility(iframe, true)).toBe(false);
+  });
+
+  it('keeps a replacement candidate hidden until it is committed (D118)', () => {
+    const fixture = createFixture();
+    const first = fixture.host.createCandidate(dimensions());
+    const firstFrame = createProtectedIframe(fixture.document);
+    first.mount.append(firstFrame);
+    first.commit(firstFrame, { width: 1_400, height: 2_500 });
+
+    const next = fixture.host.createCandidate(dimensions());
+    const nextFrame = createProtectedIframe(fixture.document);
+    next.mount.append(nextFrame);
+    const nextRoot = nextFrame.closest<HTMLElement>('[data-simul-replica-candidate]');
+    expect(nextRoot?.getAttribute('aria-hidden')).toBe('true');
+    expect(nextFrame.getAttribute('aria-hidden')).toBe('true');
+    expect(fixture.preview.hasAttribute('aria-hidden')).toBe(false);
+
+    next.commit(nextFrame, { width: 1_400, height: 2_500 });
+    expect(nextRoot?.hasAttribute('aria-hidden')).toBe(false);
+    expect(nextFrame.hasAttribute('aria-hidden')).toBe(false);
   });
 
   it('paints the complete presentation shell with the resolved source canvas', () => {

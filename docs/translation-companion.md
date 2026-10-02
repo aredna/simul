@@ -190,8 +190,9 @@ Classification occurs before
 reading; once a node is classified as a secret it remains secret for the
 document lifetime. A narrower live setting clears source-derived replica,
 translation, and image state before the new preference is saved. Reset commits
-setup-zero safe defaults first, then clears transient work and reconciles
-Simul-managed optional origins; interrupted permission cleanup is retryable.
+the install defaults first (set up at Full visible, as a new install starts;
+D66), then clears transient work and reconciles Simul-managed optional
+origins; interrupted permission cleanup is retryable.
 
 ## Local image text
 

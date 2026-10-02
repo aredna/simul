@@ -78,7 +78,7 @@ export interface ReplayPresentationHost {
     iframe: HTMLIFrameElement,
     dimensions: VisibleReplayDimensions,
   ): void;
-  /** Reversibly exposes only a committed proof-backed interactive replica. */
+  /** Whether the committed, shown replica can present interactive facsimiles. */
   setInteractiveAccessibility?(
     iframe: HTMLIFrameElement,
     accessible: boolean,
@@ -388,13 +388,7 @@ export class VisibleReplayHost implements ReplayPresentationHost {
     if (wasLive) return;
     committed.live = true;
     this.#previewSurface.hidden = false;
-    if (committed.interactiveAccessible) {
-      committed.root.removeAttribute('aria-hidden');
-      this.#previewSurface.removeAttribute('aria-hidden');
-    } else {
-      committed.root.setAttribute('aria-hidden', 'true');
-      this.#previewSurface.setAttribute('aria-hidden', 'true');
-    }
+    this.#exposeToAssistiveTechnology(committed);
     this.#badge.textContent = LIVE_REPLAY_LABEL;
     this.#badge.hidden = false;
     if (!wasLive) this.#applyLayout(committed);
@@ -426,6 +420,11 @@ export class VisibleReplayHost implements ReplayPresentationHost {
     this.#applyLayout(committed);
   }
 
+  /**
+   * Whether the replica's interactive facsimiles can be reached. The shown
+   * replica is always exposed (D118), so this only refuses a replica that is
+   * not the committed one or is not on screen.
+   */
   setInteractiveAccessibility(
     iframe: HTMLIFrameElement,
     accessible: boolean,
@@ -434,16 +433,18 @@ export class VisibleReplayHost implements ReplayPresentationHost {
     if (!committed || committed.released || committed.iframe !== iframe) {
       return false;
     }
-    if (accessible) {
-      if (this.#previewSurface.hidden) return false;
-      committed.root.removeAttribute('aria-hidden');
-      this.#previewSurface.removeAttribute('aria-hidden');
-    } else {
-      committed.root.setAttribute('aria-hidden', 'true');
-      this.#previewSurface.setAttribute('aria-hidden', 'true');
-    }
-    committed.interactiveAccessible = accessible;
+    if (accessible && this.#previewSurface.hidden) return false;
     return true;
+  }
+
+  /**
+   * The committed replica is what the panel shows, so a screen reader reads
+   * it as it reads the page (D118). A candidate stays hidden until this runs.
+   */
+  #exposeToAssistiveTechnology(committed: CandidateLease): void {
+    this.#previewSurface.removeAttribute('aria-hidden');
+    committed.root.removeAttribute('aria-hidden');
+    committed.iframe.removeAttribute('aria-hidden');
   }
 
   clearPresentation(): void {
@@ -531,7 +532,7 @@ export class VisibleReplayHost implements ReplayPresentationHost {
     this.#candidate = undefined;
     this.#committed = candidate;
     this.#previewSurface.hidden = false;
-    this.#previewSurface.setAttribute('aria-hidden', 'true');
+    this.#exposeToAssistiveTechnology(candidate);
     this.#badge.textContent = STATIC_REPLAY_LABEL;
     this.#badge.hidden = false;
     this.#applyLayout(candidate);
@@ -727,7 +728,6 @@ class CandidateLease implements VisibleReplayCandidateLease {
   iframe!: HTMLIFrameElement;
   scale = 1;
   live = false;
-  interactiveAccessible = false;
   released = false;
   nestedScroller: HTMLElement | undefined;
   /** The panel scroll offsets the host last set, to recognize their echo. */

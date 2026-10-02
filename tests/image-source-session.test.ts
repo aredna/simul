@@ -1275,6 +1275,92 @@ describe('image source capture safety', () => {
     session.dispose();
   });
 
+  it('does not measure an image for tab pixels while the tab is pinch-zoomed (D119)', () => {
+    const { document } = parseHTML(
+      '<html><body><img id="image"></body></html>',
+    );
+    const image = document.querySelector<HTMLImageElement>('#image')!;
+    setImageFacts(image);
+    const identity: ReplicaSourceDocumentIdentity = {
+      sessionId: 'pinch-session',
+      pageEpoch: 1,
+      generation: 1,
+      documentId: 'pinch-document',
+      frameId: 0,
+    };
+    const port = new FakeImageSourcePort(
+      createImageSourcePortName(identity.sessionId),
+    );
+    // Chrome keeps innerWidth and innerHeight at the layout viewport's size
+    // under a pinch; only visualViewport says the view is magnified.
+    const visualViewport = { scale: 1, offsetLeft: 0, offsetTop: 0 };
+    const sourceWindow = {
+      innerWidth: 800,
+      innerHeight: 600,
+      scrollX: 0,
+      scrollY: 0,
+      devicePixelRatio: 1,
+      visualViewport,
+      getComputedStyle: () => baseStyle,
+    } as unknown as Window;
+    const session = new ImageSourceSession({
+      port,
+      document: document as unknown as Document,
+      window: sourceWindow,
+      resolveNode: (nodeId) => nodeId === 7 ? image : null,
+      getNodeId: (candidate) => candidate === image ? 7 : undefined,
+      createObserver: (environment) => new SourceImageObserver({
+        ...environment,
+        createIntersectionObserver: (callback) =>
+          new ImmediateIntersectionObserver(callback),
+        createResizeObserver: () => new NoopElementObserver(),
+        createMutationObserver: () => new NoopMutationObserver(),
+      }),
+    });
+    port.emitMessage({
+      kind: 'simul:image-source-v2:start',
+      document: identity,
+      policyFingerprint: 'read-v1-110000',
+      controlImages: true,
+      accessibilityTextEnabled: false,
+    });
+    const descriptor = lastUpsertDescriptor(port.messages);
+    expect(descriptor).toBeDefined();
+    const measure = (requestId: string) => {
+      port.emitMessage({
+        kind: 'simul:image-source-v2:measure',
+        requestId,
+        descriptor,
+      });
+      return port.messages.at(-1);
+    };
+
+    expect(measure('unmagnified')).toMatchObject({
+      requestId: 'unmagnified',
+      status: 'ready',
+    });
+
+    visualViewport.scale = 2;
+    visualViewport.offsetTop = 200;
+    expect(measure('pinched')).toEqual({
+      kind: 'simul:image-source-v2:metrics',
+      requestId: 'pinched',
+      status: 'hidden',
+    });
+
+    // Magnified with the view still at the layout viewport's corner: the
+    // crop would be the right place at half the size, so it is refused too.
+    visualViewport.offsetTop = 0;
+    expect(measure('pinched-at-corner')).toMatchObject({ status: 'hidden' });
+
+    visualViewport.scale = 1;
+    expect(measure('back-out')).toMatchObject({
+      requestId: 'back-out',
+      status: 'ready',
+    });
+    session.dispose();
+  });
+
   it('rejects hidden, rotated, and secret-control-overlapped pixels but allows public controls', () => {
     const { document } = parseHTML(
       '<html><body><img id="image"><input id="private">' +
