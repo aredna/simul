@@ -370,5 +370,5 @@ Do not edit `dist/chrome-unpacked` by hand. Change source, run
 required handoff gate.
 
 Runtime entrypoints live under `entrypoints/`; browser-independent logic lives
-under `lib/`; tests live under `tests/`; durable project knowledge lives under
-`docs/`; and BMAD planning/implementation records live under `_bmad-output/`.
+under `lib/`; tests live under `tests/`; and durable project knowledge lives
+under `docs/`.

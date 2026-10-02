@@ -867,9 +867,8 @@ shell and the mirror has nothing to copy (D103).
     97.2% of held ArrowRight. Each mistake is counted once, with the tracker
     then started again from the true page; in use a mistake stays until
     Home or End. The page box, outline, links, Find and ArrowLeft are
-    guesses. The harness
-    (`~/.cache/simul-harness/pdf/phase6/panel-follow.mjs`) checks 20 moves
-    in Chrome for Testing 154 and 138.
+    guesses. A Chrome harness checks 20 moves in Chrome for Testing 154
+    and 138.
   - **Sideways (D115).** There is nothing to guess sideways. Chrome centres
     each page in the widest page's width, and the PDF in the view when it
     fits; `pageX` is that place less the sideways scroll, whichever page is
