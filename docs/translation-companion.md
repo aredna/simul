@@ -693,6 +693,32 @@ shell and the mirror has nothing to copy (D103).
     at or below it. `PdfView.setPageText` keeps the translation of a block
     whose id stays. OCR read the page as drawn, typed text included:
     `pdfOcrBlocks` leaves out a line when typed line boxes cover half of it.
+  - *A line that is partly typed (D121).* Tesseract reports each line's
+    words with their boxes. A PDF page asks for them (`words: true` on its
+    recognition route and on the OCR job), and the Tesseract provider then
+    carries them on the region (`ImageTextRegion.words`: text and box only,
+    at least two words, at most 512 a line and 50,000 a result).
+    `readImageTextResult` validates them in the offscreen host and again in
+    the caller, and refuses a result that carries words nobody asked for.
+    Image translation on web pages does not ask: its jobs, results, cache
+    keys and weights are what they were. Chrome's text detector sends none.
+    The recognition cache counts words as it counts regions, so the PDF's
+    cache has a weight budget of its own (`PDF_RECOGNITION_CACHE_WEIGHT`,
+    4,000,000): under the default 1,000,000 a dense page would take 38
+    places where the 128-entry limit decided before, and a PDF one page
+    longer than the cache holds is read again in full on Refresh.
+    `pdfOcrBlocks` cuts the words that typed line boxes half cover out of a
+    line and keeps each run of the remaining words as a piece: the text
+    between them as OCR wrote it, the line's own height, the span of its
+    words. A piece is a block of its own; it joins neither the line above
+    nor the line below, because a block is drawn as one box and that box
+    would lie over the typed text. A line whose words are all covered is
+    left out, and so is a piece with no letter or digit (a dash between
+    typed words). Beside a line that is mostly typed text (which D111 left
+    out whole), a piece of a single letter or digit is left out too: it is
+    a box border or a speck read as a character. A line without words, with
+    words that are not its text in order, or with no covered word is judged
+    as one piece, as before.
   - *Auto.* Text that is only on scanned pages (`textOnScannedPagesOnly`)
     does not name the scans' language: `probePdfLanguage` asks the probe
     then too, unless the PDF declares a language it knows.
@@ -741,7 +767,8 @@ shell and the mirror has nothing to copy (D103).
     it on Simul." and **Open a PDF file…**, which clicks the hidden
     `#pdf-file-input` (`accept="application/pdf,.pdf"`).
   - A toolbar click on a tab Simul cannot read reaches an open side panel
-    (D112): `finishToolbarSidePanelLaunch` sends `simul:unreadable-tab`
+    (D112): the toolbar launch (`lib/toolbar-launch.ts`) sends
+    `simul:unreadable-tab`
     (tab and window ids, `localFile`, the launch stamp, never the address),
     and `SourceFollower.acceptUnreadableTab` invalidates the companion with
     the local-file or the page-access guidance, for its own window and the
@@ -902,6 +929,40 @@ an extension popup with `windows.create`, passing only numeric source tab and
 window IDs in its extension URL. The popup follows that tab even though it is
 not the active tab in the popup's own window. This requires no new permission;
 the user must reauthorize after temporary page access expires.
+
+A toolbar click is handled by `ToolbarLauncher` (`lib/toolbar-launch.ts`),
+which the background entrypoint calls in the click's own turn. Chrome opens a
+side panel only inside the gesture, so a click that comes before the worker
+has read its saved preferences opens the panel at once, and closes it again
+if the saved choice is the separate window. Clicks are numbered, and a click
+that a newer one superseded stops at its next step. When the newer click is
+in another window, a superseded click on its way to the separate window
+closes its own window's side panel, at whichever step it finds out (D121:
+only the first step did, so the panel stayed open beside the newer click's
+window). That is the panel it opened itself or one that was open before, as
+a click that was not superseded closes it. It never uses the fallback for
+Chrome before 141, which has no per-window close: disabling and re-enabling
+the panel closes it in every window, the newer click's too. There the panel
+stays until the newer click, when it opens the separate window, closes
+every panel itself. A superseded click removes a window it has just created
+but not one it has already recorded: the newer click may have taken that
+window over, and removing it left no companion at all. With the side panel
+as the saved choice, a click closes its panel only when it was superseded
+before the saved choice was read, and then only a panel it opened itself;
+after that, each window's panel is what its click asked for.
+
+A click that takes an open companion window over sends it the
+`simul:authorized-tab` message. The window may have been created
+milliseconds earlier, with its page not yet listening, so the launcher also
+keeps the newest such message for that window, and the window asks for it
+when it starts (`simul:window-authorization`, answered only to the window
+the message was sent to; `SourceFollower.initializeSourcePage`). The kept
+message is ordered by its launch stamp like a received one (D36). The page
+the window was opened for gives way to it: it is not looked up over an
+authorization that already arrived, and an authorization that arrives
+during the lookup supersedes it. Before, the window could keep the older
+click's tab or, when that tab was unreadable, show the page-access message
+for neither.
 
 ## Following tabs
 

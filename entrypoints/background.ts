@@ -7,17 +7,10 @@ import {
   type PreferenceCommandResult,
 } from '../lib/preference-coordinator';
 import { createExtensionBuildIdentity } from '../lib/build-identity';
-import type { AuthorizedTabMessage, UnreadableTabMessage } from '../lib/page-identity';
 import {
   COMPANION_LAUNCH_GENERATION_STORAGE_KEY,
   allocateCompanionLaunchGeneration,
   createCompanionLaunchEpoch,
-  createDetachedCompanionUrl,
-  createDetachedWindowData,
-  resolveCompanionLaunchSurface,
-  shouldCloseStalePreopenedSidePanel,
-  shouldPreopenSidePanel,
-  shouldReuseDetachedWindow,
 } from '../lib/companion-surface';
 import { compiledImageTextProviderIds } from '../lib/ocr/provider-registry';
 import { hasOcrRuntimeProvider } from '../lib/ocr/runtime-provider-readiness';
@@ -41,6 +34,8 @@ import {
   type PreferenceSafetyPort,
   type PreferenceSafetyTicket,
 } from '../lib/preference-safety-coordinator';
+import { isWindowAuthorizationRequest } from '../lib/page-identity';
+import { ToolbarLauncher } from '../lib/toolbar-launch';
 import {
   PAGE_ONLY_REPLICA_READ_SCOPE,
   effectiveReplicaReadScope,
@@ -101,8 +96,6 @@ export default defineBackground(() => {
   let launchPreferenceRevision = 0;
   let launchPreferencesHydrated = false;
   let toolbarBehaviorQueue = Promise.resolve();
-  let toolbarClickSequence = 0;
-  let latestToolbarClickWindowId: number | undefined;
   // Toolbar authorizations are ordered across worker lifecycles by a
   // generation persisted in session storage; the nonce keeps two lifecycles
   // that read the same generation apart. Resolved once, before the first
@@ -120,11 +113,6 @@ export default defineBackground(() => {
     generation,
     crypto.randomUUID(),
   ));
-  // The detached companion window this worker created, so a second toolbar
-  // click focuses it instead of opening another one. Lost on worker restart,
-  // in which case one extra window is the worst outcome.
-  let detachedWindow: { id: number; sourceTabId: number } | undefined;
-
   // The action handler below must remain Chrome's authorization boundary.
   // Correct any behavior persisted by an older build as soon as the worker
   // starts so browser-owned side-panel routing cannot swallow action.onClicked.
@@ -174,25 +162,27 @@ export default defineBackground(() => {
     ).catch(() => undefined);
   }
 
+  // The launch itself is in lib/toolbar-launch.ts. sidePanel.open() needs a
+  // direct user gesture, so click() runs in the listener's own turn.
+  const toolbarLauncher = new ToolbarLauncher({
+    sidePanel: browser.sidePanel,
+    windows: browser.windows,
+    sendMessage: (message) => browser.runtime.sendMessage(message),
+    companionPageUrl: () => browser.runtime.getURL('/sidepanel.html'),
+    preferences: () => launchPreferences,
+    preferencesHydrated: () => launchPreferencesHydrated,
+    preferencesReady: launchPreferencesReady,
+    launchEpoch: toolbarLaunchEpoch,
+    rememberSurface,
+    report: (state, code) => {
+      if (import.meta.env.DEV) {
+        console.info('[Simul toolbar launch]', { state, code });
+      }
+    },
+  });
+
   browser.action.onClicked.addListener((tab) => {
-    const clickSequence = ++toolbarClickSequence;
-    latestToolbarClickWindowId = tab.windowId;
-    // sidePanel.open() stays in the synchronous event branch because Chrome
-    // requires a direct user gesture. The follow-up message reauthorizes an
-    // already-running global panel for the tab that was actually clicked.
-    let preopenedSidePanel: Promise<void> | undefined;
-    if (
-      tab.windowId !== undefined &&
-      shouldPreopenSidePanel(launchPreferences, launchPreferencesHydrated)
-    ) {
-      preopenedSidePanel = browser.sidePanel.open({ windowId: tab.windowId });
-      void preopenedSidePanel.catch(() => undefined);
-    }
-    void launchToolbarCompanion(
-      tab,
-      clickSequence,
-      preopenedSidePanel,
-    ).catch((error: unknown) => {
+    void toolbarLauncher.click(tab).catch((error: unknown) => {
       if (import.meta.env.DEV) {
         console.info('[Simul toolbar launch]', {
           state: 'failed',
@@ -202,183 +192,9 @@ export default defineBackground(() => {
     });
   });
 
-  async function launchToolbarCompanion(
-    tab: Browser.tabs.Tab,
-    clickSequence: number,
-    preopenedSidePanel?: Promise<void>,
-  ): Promise<void> {
-    await launchPreferencesReady;
-    if (clickSequence !== toolbarClickSequence) {
-      if (shouldCloseStalePreopenedSidePanel(
-        clickSequence,
-        toolbarClickSequence,
-        tab.windowId,
-        latestToolbarClickWindowId,
-        preopenedSidePanel !== undefined,
-      )) {
-        await preopenedSidePanel?.catch(() => undefined);
-        await closeSidePanelIfSupported(tab.windowId!);
-      }
-      return;
-    }
-    const surface = resolveCompanionLaunchSurface(launchPreferences);
-    if (surface === 'side-panel') {
-      if (tab.windowId !== undefined) {
-        // The panel was synchronously opened at click time before storage
-        // hydration so Chrome preserves the user gesture and activeTab grant.
-        await finishToolbarSidePanelLaunch(
-          tab,
-          clickSequence,
-          preopenedSidePanel,
-        );
-      }
-      return;
-    }
-    // A tab Simul cannot read still gets the window: it says why and offers
-    // a PDF from this computer, the way in for a file:// tab (D107).
-    if (tab.id === undefined || tab.windowId === undefined) return;
-
-    const identity = {
-      tabId: tab.id,
-      windowId: tab.windowId,
-      url: tab.url ?? '',
-    };
-    if (await focusExistingDetachedWindow(identity, clickSequence)) {
-      await preopenedSidePanel?.catch(() => undefined);
-      await closeSidePanelIfSupported(tab.windowId);
-      return;
-    }
-    if (clickSequence !== toolbarClickSequence) return;
-    const sourceWindow = await browser.windows.get(tab.windowId);
-    if (clickSequence !== toolbarClickSequence) return;
-    const url = createDetachedCompanionUrl(
-      browser.runtime.getURL('/sidepanel.html'),
-      identity,
-    );
-    const createdWindow = await browser.windows.create(
-      createDetachedWindowData(url, sourceWindow),
-    );
-    if (clickSequence !== toolbarClickSequence) {
-      await closeStaleDetachedWindow(createdWindow?.id);
-      return;
-    }
-    if (createdWindow?.id !== undefined) {
-      detachedWindow = { id: createdWindow.id, sourceTabId: tab.id };
-    }
-    try {
-      await rememberSurface('popout');
-    } catch {
-      // The popup is already a valid companion. Preference persistence is
-      // secondary and must not leave two live surfaces or encourage a retry
-      // that creates another popup.
-      if (import.meta.env.DEV) {
-        console.info('[Simul toolbar launch]', {
-          state: 'preference-save-failed',
-          code: 'surface_not_remembered',
-        });
-      }
-    }
-    if (clickSequence !== toolbarClickSequence) {
-      await closeStaleDetachedWindow(createdWindow?.id);
-      return;
-    }
-    await preopenedSidePanel?.catch(() => undefined);
-    await closeSidePanelIfSupported(tab.windowId);
-  }
-
-  /**
-   * Reuse the companion window this worker already opened. Returns false when
-   * there is none to reuse or the click was superseded while checking, so
-   * the caller's own currency check decides what happens next.
-   */
-  async function focusExistingDetachedWindow(
-    identity: { tabId: number; windowId: number; url: string },
-    clickSequence: number,
-  ): Promise<boolean> {
-    const existing = detachedWindow;
-    if (
-      !existing ||
-      !shouldReuseDetachedWindow(
-        launchPreferences.popoutTabMode,
-        existing.sourceTabId,
-        identity.tabId,
-      )
-    ) return false;
-    const stillOpen = await browser.windows.get(existing.id).then(
-      (window) => window.type === 'popup',
-      () => false,
-    );
-    if (!stillOpen) {
-      if (detachedWindow?.id === existing.id) detachedWindow = undefined;
-      return false;
-    }
-    if (clickSequence !== toolbarClickSequence) return false;
-    await browser.windows.update(existing.id, { focused: true }).catch(
-      () => undefined,
-    );
-    // A tab Simul cannot read only brings the window forward.
-    if (!isSupportedPage(identity.url)) return true;
-    // The window retargets (or re-authorizes its locked tab) through the same
-    // ordered message a side-panel launch uses.
-    await browser.runtime.sendMessage({
-      type: 'simul:authorized-tab',
-      tabId: identity.tabId,
-      windowId: identity.windowId,
-      url: identity.url,
-      launchEpoch: await toolbarLaunchEpoch,
-      launchSequence: clickSequence,
-    }).catch((error: unknown) => {
-      if (!isMissingMessageReceiver(error)) throw error;
-    });
-    return true;
-  }
-
   browser.windows.onRemoved.addListener((windowId) => {
-    if (detachedWindow?.id === windowId) detachedWindow = undefined;
+    toolbarLauncher.windowRemoved(windowId);
   });
-
-  async function finishToolbarSidePanelLaunch(
-    tab: Browser.tabs.Tab,
-    clickSequence: number,
-    open?: Promise<void>,
-  ): Promise<void> {
-    await open?.catch(() => undefined);
-    if (clickSequence !== toolbarClickSequence) return;
-    // A tab Simul cannot read is told to the panel too, without its
-    // address: an open panel then says why instead of keeping the page it
-    // showed, and offers a PDF from this computer (D112). A panel that is
-    // only now opening finds that out by itself. A tab still loading a web
-    // page is neither: nothing is sent, as before.
-    const message: AuthorizedTabMessage | UnreadableTabMessage | undefined =
-      tab.id === undefined || tab.windowId === undefined
-        ? undefined
-        : isSupportedPage(tab.url)
-          ? {
-              type: 'simul:authorized-tab',
-              tabId: tab.id,
-              windowId: tab.windowId,
-              url: tab.url,
-              launchEpoch: await toolbarLaunchEpoch,
-              launchSequence: clickSequence,
-            }
-          : isSupportedPage(tab.pendingUrl)
-            ? undefined
-            : {
-                type: 'simul:unreadable-tab',
-                tabId: tab.id,
-                windowId: tab.windowId,
-                localFile: isLocalFile(tab.url),
-                launchEpoch: await toolbarLaunchEpoch,
-                launchSequence: clickSequence,
-              };
-    if (message) {
-      await browser.runtime.sendMessage(message).catch((error: unknown) => {
-        if (!isMissingMessageReceiver(error)) throw error;
-      });
-    }
-    if (clickSequence !== toolbarClickSequence) return;
-    await rememberSurface('side-panel');
-  }
 
   async function rememberSurface(surface: CompanionSurface): Promise<void> {
     const result = await coordinator.run({
@@ -403,7 +219,15 @@ export default defineBackground(() => {
   });
 
   browser.runtime.onMessage.addListener(
-    (message: unknown, _sender, sendResponse) => {
+    (message: unknown, sender, sendResponse) => {
+      if (isWindowAuthorizationRequest(message)) {
+        // A companion window that has just started asks for the toolbar
+        // authorization it could not yet receive (D121).
+        sendResponse(
+          toolbarLauncher.windowAuthorization(sender.tab?.windowId) ?? null,
+        );
+        return;
+      }
       const ensureHost = readEnsureOcrHostCommand(message);
       if (ensureHost) {
         if (!hasOcrRuntimeProvider(compiledImageTextProviderIds)) {
@@ -492,61 +316,11 @@ export default defineBackground(() => {
   }
 });
 
-async function closeSidePanelIfSupported(windowId: number): Promise<void> {
-  if (typeof browser.sidePanel.close === 'function') {
-    const closed = await browser.sidePanel.close({ windowId }).then(
-      () => true,
-      () => false,
-    );
-    if (closed) return;
-  }
-  // Chrome before sidePanel.close() can still tear down this extension's
-  // global panel by disabling its default entry. Re-enabling makes it
-  // available for the next explicit action without reopening it.
-  try {
-    await browser.sidePanel.setOptions({ enabled: false });
-    await browser.sidePanel.setOptions({ enabled: true });
-  } catch {
-    // The popup is already usable; inability to close an older panel degrades
-    // surface cleanup only.
-  }
-}
-
-async function closeStaleDetachedWindow(windowId: number | undefined): Promise<void> {
-  if (windowId === undefined) return;
-  await browser.windows.remove(windowId).catch(() => undefined);
-}
-
-function isSupportedPage(url: string | undefined): url is string {
-  if (!url) return false;
-  try {
-    const protocol = new URL(url).protocol;
-    return protocol === 'http:' || protocol === 'https:';
-  } catch {
-    return false;
-  }
-}
-
-function isLocalFile(url: string | undefined): boolean {
-  if (!url) return false;
-  try {
-    return new URL(url).protocol === 'file:';
-  } catch {
-    return false;
-  }
-}
-
 function launchErrorCode(error: unknown): string {
   const message = readableError(error).toLowerCase();
   if (message.includes('user gesture')) return 'gesture_required';
   if (message.includes('window')) return 'window_failed';
   return 'launch_failed';
-}
-
-function isMissingMessageReceiver(error: unknown): boolean {
-  return /receiving end does not exist|could not establish connection/iu.test(
-    readableError(error),
-  );
 }
 
 function runPreferenceCommand(

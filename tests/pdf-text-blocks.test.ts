@@ -413,6 +413,25 @@ function ocrLine(text: string, x: number, y: number, width: number, height = 24)
   return { text, boundingBox: { x, y, width, height } };
 }
 
+/**
+ * An OCR line with its words: each word is `[text, x, width]` in bitmap
+ * pixels, and the line box spans them.
+ */
+function ocrWords(
+  words: readonly (readonly [string, number, number])[],
+  y: number,
+  height = 24,
+  joiner = ' ',
+): PdfOcrLine {
+  const left = Math.min(...words.map(([, x]) => x));
+  const right = Math.max(...words.map(([, x, width]) => x + width));
+  return {
+    text: words.map(([text]) => text).join(joiner),
+    boundingBox: { x: left, y, width: right - left, height },
+    words: words.map(([text, x, width]) => ({ text, boundingBox: { x, y, width, height } })),
+  };
+}
+
 describe('pdfOcrBlocks', () => {
   it('turns bitmap pixels into page points and joins a paragraph', () => {
     const blocks = pdfOcrBlocks([
@@ -506,6 +525,145 @@ describe('pdfOcrBlocks', () => {
     ]);
     // Without typed text every line stays.
     expect(pdfOcrBlocks([ocrLine('Case 2:24', 140, 40, 610, 26)], 2, 612)).toHaveLength(1);
+  });
+
+  it('cuts the words typed text covers out of a line and keeps the rest (D121)', () => {
+    // A scanned footer and, on the same line, a typed page number (points).
+    const typed = [{ left: 223, top: 736, width: 50, height: 11 }];
+    const footer = ocrWords([
+      ['Rapport', 100, 96], ['annuel', 206, 84], ['de', 300, 28], ['la', 338, 22],
+      ['mairie', 370, 76],
+      // The typed number as OCR read it off the drawn page.
+      ['Page', 450, 40], ['1', 498, 8], ['of', 514, 20], ['2', 540, 8],
+    ], 1474);
+    const blocks = pdfOcrBlocks([footer], 2, 612, typed);
+    expect(blocks.map((block) => block.text)).toEqual(['Rapport annuel de la mairie']);
+    // Its own box: from the first word kept to the last, the line's height.
+    expect(blocks[0]!.box.left).toBeCloseTo(50);
+    expect(blocks[0]!.box.width).toBeCloseTo(173);
+    expect(blocks[0]!.box.top).toBeCloseTo(737);
+    expect(blocks[0]!.box.height).toBeCloseTo(12);
+    expect(blocks[0]!.fontSize).toBeCloseTo(12);
+  });
+
+  it('keeps the scan\'s few words beside a long typed line (D121)', () => {
+    // Typed text is most of the line: the whole line used to be left out.
+    const typed = [{ left: 121, top: 52, width: 260, height: 11 }];
+    const header = ocrWords([
+      ['Annexe', 100, 100], ['B', 208, 16],
+      ['Case', 244, 44], ['2:24-cv-01182', 296, 150], ['Document', 470, 96], ['17', 574, 22],
+      ['Filed', 620, 46], ['03/04/25', 674, 84],
+    ], 106);
+    expect(pdfOcrBlocks([header], 2, 612, typed).map((block) => block.text))
+      .toEqual(['Annexe B']);
+  });
+
+  it('leaves out a single character beside a line that is mostly typed (D121)', () => {
+    // Typed "Name: John Smith". OCR read it with a box border on each side,
+    // as "l" and "I": D111 left the whole line out, and so does this.
+    const typed = [{ left: 100, top: 100, width: 150, height: 12 }];
+    expect(pdfOcrBlocks([
+      ocrWords([
+        ['l', 180, 6], ['Name:', 200, 80], ['John', 290, 70], ['Smith', 370, 120], ['I', 510, 6],
+      ], 200),
+    ], 2, 612, typed)).toEqual([]);
+    // A stray digit after a typed page number.
+    expect(pdfOcrBlocks([
+      ocrWords([['Page', 200, 80], ['1', 290, 20], ['of', 320, 40], ['2', 370, 20], ['7', 600, 20]], 200),
+    ], 2, 612, typed)).toEqual([]);
+    // Two letters or digits are the scan's own word.
+    expect(pdfOcrBlocks([
+      ocrWords([['Name:', 200, 80], ['John', 290, 70], ['Smith', 370, 120], ['p.', 510, 20], ['B2', 560, 30]], 200),
+    ], 2, 612, typed).map((block) => block.text)).toEqual(['p. B2']);
+    // In a line that is mostly the scan's, one character is a word: "à".
+    expect(pdfOcrBlocks([
+      ocrWords([
+        ['à', 200, 16], ['12', 240, 30],
+        ['suivre', 300, 120], ['dans', 440, 90], ['le', 540, 40], ['rapport', 590, 150],
+      ], 200),
+    ], 2, 612, [{ left: 118, top: 100, width: 20, height: 12 }]).map((block) => block.text))
+      .toEqual(['à', 'suivre dans le rapport']);
+  });
+
+  it('keeps the words on both sides of a typed stamp as two pieces (D121)', () => {
+    const typed = [{ left: 212, top: 150, width: 100, height: 11 }];
+    const blocks = pdfOcrBlocks([
+      ocrLine('Après chaque incendie, le conseil vota de', 100, 270, 660),
+      ocrWords([
+        ['Les', 100, 44], ['registres', 152, 120], ['mentionnent', 280, 130],
+        ['COPIE', 426, 80], ['CONFORME', 514, 110],
+        ['1640', 660, 60], ['et', 728, 24],
+      ], 302),
+      ocrLine('1702, dont un seul toucha les', 100, 334, 640),
+      ocrLine('entrepôts du quai.', 100, 366, 300),
+    ], 2, 612, typed);
+    // A block is drawn as one box, so a piece joins neither the line above
+    // nor the line below: their box would lie over the stamp.
+    expect(blocks.map((block) => block.text)).toEqual([
+      'Après chaque incendie, le conseil vota de',
+      'Les registres mentionnent',
+      '1640 et',
+      '1702, dont un seul toucha les entrepôts du quai.',
+    ]);
+    const stamp = typed[0]!;
+    for (const { box } of blocks) {
+      const across = Math.min(box.left + box.width, stamp.left + stamp.width) -
+        Math.max(box.left, stamp.left);
+      const down = Math.min(box.top + box.height, stamp.top + stamp.height) -
+        Math.max(box.top, stamp.top);
+      expect(across > 0 && down > 0).toBe(false);
+    }
+    expect(blocks[2]!.box.left).toBeCloseTo(330);
+  });
+
+  it('leaves a line out when typed text covers every word of it (D121)', () => {
+    const typed = [{ left: 280, top: 752, width: 60, height: 12 }];
+    expect(pdfOcrBlocks([
+      ocrWords([['Page', 564, 40], ['1', 612, 8], ['of', 628, 20], ['3', 656, 8]], 1506),
+    ], 2, 612, typed)).toEqual([]);
+    // A dash the scan drew beside the typed words is not a piece.
+    expect(pdfOcrBlocks([
+      ocrWords([['—', 520, 24], ['Page', 564, 40], ['1', 612, 8], ['—', 680, 24]], 1506),
+    ], 2, 612, typed)).toEqual([]);
+  });
+
+  it('judges a line as one piece when its words say nothing (D121)', () => {
+    const typed = [{ left: 223, top: 736, width: 50, height: 11 }];
+    const words: PdfOcrLine = ocrWords([
+      ['Rapport', 100, 96], ['annuel', 206, 84], ['Page', 450, 40], ['1', 498, 8],
+    ], 1474);
+    // No word under typed text: the line is as it was without words.
+    const apart = [{ left: 400, top: 100, width: 50, height: 11 }];
+    expect(pdfOcrBlocks([words], 2, 612, apart))
+      .toEqual(pdfOcrBlocks([ocrLine(words.text, 100, 1474, 406)], 2, 612, apart));
+    // Words that are not the line's text, in its order.
+    const scrambled: PdfOcrLine = {
+      ...words,
+      words: [words.words![2]!, words.words![0]!, words.words![1]!, words.words![3]!],
+    };
+    expect(pdfOcrBlocks([scrambled], 2, 612, typed).map((block) => block.text))
+      .toEqual(['Rapport annuel Page 1']);
+    const partial: PdfOcrLine = { ...words, text: 'Rapport annuel — Page 1' };
+    expect(pdfOcrBlocks([partial], 2, 612, typed).map((block) => block.text))
+      .toEqual(['Rapport annuel — Page 1']);
+    // Without typed text the words change nothing.
+    expect(pdfOcrBlocks([words], 2, 612))
+      .toEqual(pdfOcrBlocks([ocrLine(words.text, 100, 1474, 406)], 2, 612));
+  });
+
+  it('cuts words out of text written without spaces and of right-to-left text (D121)', () => {
+    const typed = [{ left: 150, top: 100, width: 60, height: 12 }];
+    const cjk = pdfOcrBlocks([
+      ocrWords([['日本語', 100, 90], ['の', 196, 30], ['文章', 232, 60], ['3', 310, 20], ['頁', 340, 30]], 200, 24, ''),
+    ], 2, 612, [{ left: 153, top: 99, width: 34, height: 14 }]);
+    expect(cjk.map((block) => block.text)).toEqual(['日本語の文章']);
+    // Hebrew reads from the right: the first words are the rightmost.
+    const hebrew = pdfOcrBlocks([
+      ocrWords([['שלום', 600, 80], ['עולם', 510, 80], ['12', 320, 60]], 200),
+    ], 2, 612, typed);
+    expect(hebrew.map((block) => block.text)).toEqual(['שלום עולם']);
+    expect(hebrew[0]!.box.left).toBeCloseTo(255);
+    expect(hebrew[0]!.box.width).toBeCloseTo(85);
   });
 
   it('leaves out empty lines and lines without area, and a bad scale', () => {

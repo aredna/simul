@@ -43,6 +43,16 @@ export const PDF_OCR_MAX_DPI = 300;
  * host's own time limits (30 s a page for Tesseract, 60 s to start it).
  */
 export const PDF_OCR_PAGE_TIMEOUT_MS = 60_000;
+/**
+ * The weight budget of the PDF's recognition cache. A page's result carries
+ * its words (D121), which the cache counts as it counts regions: a dense
+ * page of 500 words weighs about 26,000, where it weighed 7,500 without
+ * them. Under the default budget of 1,000,000 that is 38 pages, and a PDF
+ * one page longer than the cache holds is read again in full on Refresh,
+ * because pages are read in order and the oldest is dropped. With this
+ * budget the cache's 128-entry limit decides, as it did before.
+ */
+export const PDF_RECOGNITION_CACHE_WEIGHT = 4_000_000;
 /** A busy OCR host is asked once more after this long. */
 export const PDF_OCR_RETRY_DELAY_MS = 500;
 const MAX_DETECTION_SAMPLE = 4_000;
@@ -115,6 +125,8 @@ export function pdfOcrRoute(
       languageGroup: group,
       modelVersion: TESSERACT_MODEL_VERSION,
       minimumConfidence,
+      // A page with typed text cuts a recognised line by its words (D121).
+      words: true,
     }),
   };
 }
@@ -334,6 +346,8 @@ export async function probeScannedLanguage(
           sourceLanguage: language,
           minimumConfidence,
           ...(group ? { languageGroup: group, modelVersion: TESSERACT_MODEL_VERSION } : {}),
+          // As the page read asks, so one recognition serves both.
+          words: true,
         };
         let recognition: ImageRecognitionResult;
         try {

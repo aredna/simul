@@ -1,8 +1,7 @@
 # Third-party notices
 
 This file covers third-party material distributed in Simul's ready-to-load
-Chrome extension and generated third-party tooling retained in the public
-source repository. It does not grant a license to original Simul material;
+Chrome extension. It does not grant a license to original Simul material;
 see [LICENSE](LICENSE).
 
 The inventory is derived from what the Simul 0.6.1 extension artifact
@@ -10,7 +9,7 @@ actually contains: the locked production dependency graph, the pinned OCR and
 PDF asset manifests, and the modules tesseract.js bundled into its prebuilt
 Worker (read from the Worker's published source map). Development-only npm packages
 are not included in the extension artifact and retain the licenses shipped in
-their own packages. Generated BMAD Method files are covered separately below.
+their own packages.
 
 ## Runtime inventory
 
@@ -273,16 +272,5 @@ GPL-only, AGPL, or proprietary package.
 Development packages are fetched by contributors and retain the license files
 published in their npm packages. `node_modules` is not committed or included in
 the extension artifact. Generated or bundled third-party code remains governed
-by its upstream terms even when the surrounding original Simul code is MIT.
-
-## Source-distribution tooling
-
-This repository also distributes generated BMAD Method 6.10.0 workflow and
-agent files under `.agents/` and `_bmad/`. Those files are not included in the
-Chrome extension artifact. They are licensed under the upstream MIT License,
-Copyright (c) 2025 BMad Code, LLC, with the upstream trademark notice retained
-verbatim at `legal/BMAD-METHOD-v6.10.0-LICENSE.txt`.
-
-The terms above do not grant rights to the BMad™, BMad Method™, or BMad Core™
-trademarks. Upstream project and trademark guidance:
-https://github.com/bmad-code-org/BMAD-METHOD/tree/v6.10.0
+by its upstream terms; Simul's own license (see [LICENSE](LICENSE)) does not
+change them.

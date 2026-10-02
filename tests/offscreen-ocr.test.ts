@@ -2,6 +2,8 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   ImageRecognitionCoordinator,
+  RECOGNITION_CACHE_REGION_OVERHEAD,
+  imageRecognitionCacheWeight,
 } from '../lib/ocr/image-analysis-coordinator';
 import type { ImageTextResult, SourceImageDescriptor } from '../lib/ocr/contracts';
 import { OcrOffscreenDocumentManager } from '../lib/ocr/offscreen-document-manager';
@@ -21,6 +23,7 @@ import {
   readProbeOcrProviderResponse,
 } from '../lib/ocr/provider-status-protocol';
 import type { AcquiredImagePixels } from '../lib/ocr/pixel-acquisition';
+import { PDF_RECOGNITION_CACHE_WEIGHT } from '../lib/pdf/pdf-ocr';
 import {
   OCR_NATIVE_PREPROCESSING_VERSION,
   OCR_SHALLOW_BANNER_NATIVE_PREPROCESSING_VERSION,
@@ -151,6 +154,214 @@ describe('offscreen OCR protocol and lifecycle', () => {
       ...success(job),
       contentRevision: 99,
     }, job)).toBeUndefined();
+  });
+
+  it('carries a region\'s words from the host to a caller that asked, and none in hints (D121)', async () => {
+    const job: OffscreenOcrJob = { ...createJob('job-words', 0), words: true };
+    expect(readOffscreenOcrJob(job)).toEqual(job);
+    expect(readOffscreenOcrJob({ ...job, words: false })).toBeUndefined();
+    const words = [
+      { text: 'hello', boundingBox: { x: 10, y: 12, width: 36, height: 20 } },
+      { text: 'world', boundingBox: { x: 52, y: 12, width: 38, height: 20 } },
+    ];
+    const plain = imageResultWithText(job, 'hello world');
+    const withWords: ImageTextResult = {
+      ...plain,
+      regions: [{ ...plain.regions[0]!, words }],
+    };
+
+    // The host validates what the provider returned.
+    const store = memoryStore();
+    await store.put(pixels.encoded, 'input-1');
+    const host = new OffscreenComputeHost(store, {
+      recognize: async () => withWords,
+      dispose: async () => undefined,
+    });
+    const response = await host.handle({ kind: 'simul:ocr-v1:run', version: 1, job });
+    expect(response).toMatchObject({
+      kind: 'simul:ocr-v1:result',
+      result: { regions: [{ text: 'hello world', words }] },
+    });
+    // The caller validates what the host sent.
+    expect(readOffscreenOcrResponse(response, job)).toMatchObject({
+      result: { regions: [{ words }] },
+    });
+    expect(readOffscreenOcrResponse(success(job, {
+      ...plain,
+      regions: [{
+        ...plain.regions[0]!,
+        words: [words[0]!, { text: 'world', boundingBox: { x: 390, y: 12, width: 38, height: 20 } }],
+      }],
+    }), job)).toBeUndefined();
+    expect(readOffscreenOcrJob({
+      ...createJob('job-hints', 0),
+      providerId: 'chrome-text-detector',
+      languageGroup: 'ja',
+      providerVersion: 'chrome-text-detector-v1',
+      modelVersion: 'platform',
+      hints: [{ text: '', boundingBox: { x: 10, y: 12, width: 80, height: 20 }, words }],
+    })).toBeUndefined();
+
+    // A job that did not ask never gets words, from the host or past the
+    // caller: a result that carries them anyway is refused on both sides.
+    const unasked = createJob('job-plain', 0);
+    await store.put(pixels.encoded, 'input-1');
+    await expect(host.handle({ kind: 'simul:ocr-v1:run', version: 1, job: unasked }))
+      .resolves.toMatchObject({ kind: 'simul:ocr-v1:error' });
+    expect(readOffscreenOcrResponse(success(unasked, withWords), unasked)).toBeUndefined();
+  });
+
+  it('asks for words only on a route that reads them, and keeps the two apart (D121)', async () => {
+    const words = [
+      { text: 'hello', boundingBox: { x: 10, y: 12, width: 36, height: 20 } },
+      { text: 'world', boundingBox: { x: 52, y: 12, width: 38, height: 20 } },
+    ];
+    const jobs: OffscreenOcrJob[] = [];
+    const coordinator = new ImageRecognitionCoordinator({
+      store: memoryStore(),
+      resetEpoch: 0,
+      clientId: 'client-ocr',
+      sendMessage: async (message: unknown) => {
+        if ((message as Record<string, unknown>).kind === 'simul:ocr-v1:ensure-host') {
+          return { kind: 'simul:ocr-v1:host-ready', version: 1, ready: true };
+        }
+        const command = readOffscreenOcrCommand(message);
+        if (command?.kind !== 'simul:ocr-v1:run') return undefined;
+        jobs.push(command.job);
+        const plain = imageResultWithText(command.job, 'hello world');
+        // As the Tesseract provider does: words for a job that asks.
+        return success(command.job, command.job.words === true
+          ? { ...plain, regions: [{ ...plain.regions[0]!, words }] }
+          : plain);
+      },
+    });
+    const route = { languageGroup: 'eng', modelVersion: 'tessdata-fast-87416418' };
+
+    // A web image: the job and the result are what they were before D121.
+    const web = await coordinator.recognize(pixels, route);
+    expect(jobs[0]).not.toHaveProperty('words');
+    expect(Object.keys(jobs[0]!).sort()).toEqual(Object.keys(createJob('job', 0)).sort());
+    expect(web).toMatchObject({ status: 'complete', cacheHit: false });
+    const webResult = web.status === 'complete' ? web.result : undefined;
+    expect(webResult?.regions).toEqual([{
+      text: 'hello world',
+      confidence: 0.9,
+      boundingBox: { x: 10, y: 12, width: 80, height: 20 },
+    }]);
+    expect(imageRecognitionCacheWeight(webResult!))
+      .toBe('hello world'.length * 2 + RECOGNITION_CACHE_REGION_OVERHEAD);
+
+    // A PDF page: the same pixels are read again, with words, and both
+    // results stay cached apart.
+    const page = await coordinator.recognize(pixels, { ...route, words: true });
+    expect(jobs).toHaveLength(2);
+    expect(jobs[1]).toMatchObject({ words: true });
+    expect(page).toMatchObject({
+      status: 'complete',
+      cacheHit: false,
+      result: { regions: [{ text: 'hello world', words }] },
+    });
+    const pageResult = page.status === 'complete' ? page.result : undefined;
+    expect(imageRecognitionCacheWeight(pageResult!) - imageRecognitionCacheWeight(webResult!))
+      .toBe(2 * ('hello'.length + RECOGNITION_CACHE_REGION_OVERHEAD));
+    await expect(coordinator.recognize(pixels, route)).resolves.toMatchObject({
+      cacheHit: true,
+      result: { regions: [expect.not.objectContaining({ words: expect.anything() })] },
+    });
+    await expect(coordinator.recognize(pixels, { ...route, words: true })).resolves.toMatchObject({
+      cacheHit: true,
+      result: { regions: [{ words }] },
+    });
+    expect(jobs).toHaveLength(2);
+  });
+
+  it('serves 128 dense PDF pages with their words from the cache on a second pass (D121)', async () => {
+    // 45 lines of 11 words: 495 words a page, about 26,000 of cache weight
+    // with the words (7,500 without).
+    const DENSE_PAGE_WORDS = [
+      'les', 'registres', 'mentionnent', 'de', 'la', 'mairie',
+      'incendie', 'conseil', 'vota', 'quai', 'un', 'seul',
+    ];
+    const densePage = (job: OffscreenOcrJob): ImageTextResult => {
+      const regions = Array.from({ length: 45 }, (_, line) => {
+        const lineWords = Array.from({ length: 11 }, (_unused, index) => ({
+          text: DENSE_PAGE_WORDS[(line * 7 + index * 3) % DENSE_PAGE_WORDS.length]!,
+          boundingBox: { x: 10 + index * 30, y: 2 + line * 4, width: 28, height: 3 },
+        }));
+        return {
+          text: lineWords.map((word) => word.text).join(' '),
+          confidence: 0.92,
+          boundingBox: { x: 10, y: 2 + line * 4, width: 330, height: 3 },
+          ...(job.words === true ? { words: lineWords } : {}),
+        };
+      });
+      return {
+        providerId: 'tesseract',
+        bitmapWidth: job.bitmapWidth,
+        bitmapHeight: job.bitmapHeight,
+        transcript: regions.map((region) => region.text).join('\n'),
+        transcriptConfidence: 0.92,
+        geometryConfidence: 0.92,
+        regions,
+      };
+    };
+    const secondPassRuns = async (maxCacheWeight: number | undefined, askWords: boolean) => {
+      let runs = 0;
+      let weight = 0;
+      const coordinator = new ImageRecognitionCoordinator({
+        store: memoryStore(),
+        resetEpoch: 0,
+        clientId: 'client-ocr',
+        ...(maxCacheWeight === undefined ? {} : { maxCacheWeight }),
+        sendMessage: async (message: unknown) => {
+          if ((message as Record<string, unknown>).kind === 'simul:ocr-v1:ensure-host') {
+            return { kind: 'simul:ocr-v1:host-ready', version: 1, ready: true };
+          }
+          const command = readOffscreenOcrCommand(message);
+          if (command?.kind !== 'simul:ocr-v1:run') return undefined;
+          runs += 1;
+          const result = densePage(command.job);
+          weight = imageRecognitionCacheWeight(result);
+          return success(command.job, result);
+        },
+      });
+      const route = {
+        providerOrder: ['tesseract'] as const,
+        sourceLanguage: 'fr',
+        languageGroup: 'fra',
+        modelVersion: 'tessdata-fast-87416418',
+        ...(askWords ? { words: true as const } : {}),
+      };
+      const pagePixels = (index: number): AcquiredImagePixels => ({
+        ...pixels,
+        descriptor: { ...descriptor, nodeId: index + 1 },
+        pixelHash: index.toString(16).padStart(64, '0'),
+      });
+      // Pages are read in order, and again in order after Refresh.
+      for (let index = 0; index < 128; index += 1) {
+        await expect(coordinator.recognize(pagePixels(index), route))
+          .resolves.toMatchObject({ status: 'complete' });
+      }
+      const first = runs;
+      for (let index = 0; index < 128; index += 1) {
+        await coordinator.recognize(pagePixels(index), route);
+      }
+      return { first, again: runs - first, weight };
+    };
+
+    // The PDF's budget: every page is still there.
+    const pdf = await secondPassRuns(PDF_RECOGNITION_CACHE_WEIGHT, true);
+    expect(pdf).toMatchObject({ first: 128, again: 0 });
+    expect(pdf.weight).toBeGreaterThan(25_000);
+    expect(pdf.weight * 128).toBeLessThan(PDF_RECOGNITION_CACHE_WEIGHT);
+    // Why it has one: under the default budget the oldest page is dropped
+    // as the last is read, so the second pass reads every page again.
+    expect(await secondPassRuns(undefined, true)).toMatchObject({ first: 128, again: 128 });
+    // Without words (a web image, and every page before D121) the default
+    // budget holds all 128.
+    const web = await secondPassRuns(undefined, false);
+    expect(web).toMatchObject({ first: 128, again: 0 });
+    expect(web.weight).toBeLessThan(7_600);
   });
 
   it('accepts bounded TextDetector jobs and rejects out-of-bounds hints', () => {

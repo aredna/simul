@@ -1,7 +1,11 @@
 import {
+  MAX_IMAGE_TEXT_REGION_WORDS,
+  MAX_IMAGE_TEXT_RESULT_WORDS,
+  MAX_IMAGE_TEXT_WORD_LENGTH,
   readImageTextResult,
   type ImageTextResult,
   type ImageTextRegion,
+  type ImageTextWord,
 } from '../../contracts';
 
 interface TesseractBbox {
@@ -11,10 +15,16 @@ interface TesseractBbox {
   readonly y1: number;
 }
 
+interface TesseractWord {
+  readonly text?: unknown;
+  readonly bbox?: TesseractBbox;
+}
+
 interface TesseractLine {
   readonly text: string;
   readonly confidence?: unknown;
   readonly bbox: TesseractBbox;
+  readonly words?: readonly TesseractWord[] | null;
 }
 
 interface TesseractPageLike {
@@ -27,15 +37,18 @@ interface TesseractPageLike {
   }[] | null;
 }
 
+/** `withWords`: the job asked for each line's words (a PDF page, D121). */
 export function normalizeTesseractPage(
   page: TesseractPageLike,
   bitmapWidth: number,
   bitmapHeight: number,
+  withWords = false,
 ): ImageTextResult | undefined {
   const transcript = typeof page.text === 'string'
     ? page.text.slice(0, 1_000_000)
     : '';
   const regions: ImageTextRegion[] = [];
+  let wordCount = 0;
   let confidenceTotal = 0;
   let confidenceCount = 0;
   for (const block of page.blocks ?? []) {
@@ -52,10 +65,20 @@ export function normalizeTesseractPage(
           confidenceTotal += confidence;
           confidenceCount += 1;
         }
+        const words = withWords
+          ? normalizeWords(
+              line.words,
+              bitmapWidth,
+              bitmapHeight,
+              MAX_IMAGE_TEXT_RESULT_WORDS - wordCount,
+            )
+          : undefined;
+        wordCount += words?.length ?? 0;
         regions.push({
           text,
           ...(confidence !== undefined ? { confidence } : {}),
           boundingBox,
+          ...(words ? { words } : {}),
         });
       }
     }
@@ -72,7 +95,36 @@ export function normalizeTesseractPage(
       : {}),
     regions,
   };
-  return readImageTextResult(candidate);
+  return readImageTextResult(candidate, withWords);
+}
+
+/**
+ * The line's words with their boxes, which Tesseract reports under each line
+ * (D121). All of them or none: a line whose words cannot all be placed, or
+ * with a single word, or past the bounds, carries no words and is treated as
+ * one piece.
+ */
+function normalizeWords(
+  words: readonly TesseractWord[] | null | undefined,
+  bitmapWidth: number,
+  bitmapHeight: number,
+  remaining: number,
+): ImageTextWord[] | undefined {
+  if (!Array.isArray(words)) return undefined;
+  const normalized: ImageTextWord[] = [];
+  for (const word of words as readonly TesseractWord[]) {
+    const text = typeof word?.text === 'string' ? word.text.trim() : '';
+    if (!text) continue;
+    const boundingBox = normalizeBbox(word.bbox, bitmapWidth, bitmapHeight);
+    if (
+      !boundingBox ||
+      text.length > MAX_IMAGE_TEXT_WORD_LENGTH ||
+      normalized.length >= MAX_IMAGE_TEXT_REGION_WORDS ||
+      normalized.length >= remaining
+    ) return undefined;
+    normalized.push({ text, boundingBox });
+  }
+  return normalized.length >= 2 ? normalized : undefined;
 }
 
 function normalizeBbox(

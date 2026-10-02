@@ -60,6 +60,8 @@ interface BaseOffscreenOcrJob {
   readonly bitmapWidth: number;
   readonly bitmapHeight: number;
   readonly hints?: readonly ImageTextRegion[];
+  /** The caller reads each region's words (a PDF page, D121). */
+  readonly words?: true;
   readonly preprocessingVersion: OcrPreprocessingVersion;
   readonly qualityPolicyVersion: typeof OCR_QUALITY_POLICY_VERSION;
   readonly minimumConfidence: OcrMinimumConfidence;
@@ -186,7 +188,7 @@ export function readOffscreenOcrJob(input: unknown): OffscreenOcrJob | undefined
     'qualityPolicyVersion',
     'minimumConfidence',
     'schemaVersion',
-  ], ['hints'])) return undefined;
+  ], ['hints', 'words'])) return undefined;
   const document = readSourceDocumentIdentity(input.document);
   const preprocessingVersion = readOcrPreprocessingVersion(
     input.preprocessingVersion,
@@ -208,7 +210,8 @@ export function readOffscreenOcrJob(input: unknown): OffscreenOcrJob | undefined
     input.bitmapWidth * input.bitmapHeight > 4_000_000 ||
     input.qualityPolicyVersion !== OCR_QUALITY_POLICY_VERSION ||
     !isOcrMinimumConfidence(input.minimumConfidence) ||
-    input.schemaVersion !== 1
+    input.schemaVersion !== 1 ||
+    (input.words !== undefined && input.words !== true)
   ) return undefined;
   const hints = input.hints === undefined
     ? undefined
@@ -231,6 +234,7 @@ export function readOffscreenOcrJob(input: unknown): OffscreenOcrJob | undefined
     bitmapWidth: input.bitmapWidth,
     bitmapHeight: input.bitmapHeight,
     ...(hints ? { hints } : {}),
+    ...(input.words === true ? { words: true as const } : {}),
     preprocessingVersion,
     qualityPolicyVersion: OCR_QUALITY_POLICY_VERSION,
     minimumConfidence: input.minimumConfidence,
@@ -304,7 +308,7 @@ export function readOffscreenOcrResponse(
     'result',
   ]) || !sameResponseIdentity(input, expected)) return undefined;
   const document = readSourceDocumentIdentity(input.document);
-  const result = readImageTextResult(input.result);
+  const result = readImageTextResult(input.result, expected.words === true);
   if (
     !document || !sameSourceDocument(document, expected.document) ||
     input.nodeId !== expected.nodeId ||

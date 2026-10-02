@@ -140,7 +140,10 @@ export class OffscreenComputeHost {
           encoded,
           abortController.signal,
         );
-        const result = readImageTextResult(candidate);
+        const result = readImageTextResult(
+          candidate,
+          queued.job.words === true,
+        );
         response = result &&
           result.providerId === queued.job.providerId &&
           result.bitmapWidth === queued.job.bitmapWidth &&

@@ -12,6 +12,7 @@ import {
   isLocalFilePage,
   isSamePageIdentity,
   isSupportedPage,
+  isWindowAuthorizationRequest,
   navigationPageIdentityKey,
   navigationPageScopeKey,
   normalizedPageUrl,
@@ -134,6 +135,22 @@ describe('assertSourceTabIsCurrent', () => {
     )).toThrow(PageAccessError);
     expect(() => assertSourceTabIsCurrent({ id: 7, windowId: 3, active: true }, identity, true))
       .toThrow(PageAccessError);
+  });
+});
+
+describe('isWindowAuthorizationRequest', () => {
+  it('is the bare request a starting companion window sends (D121)', () => {
+    expect(isWindowAuthorizationRequest({ type: 'simul:window-authorization' })).toBe(true);
+    for (const message of [
+      undefined,
+      null,
+      'simul:window-authorization',
+      { type: 'simul:authorized-tab' },
+      { type: 'simul:window-authorization', windowId: 4 },
+      {},
+    ]) {
+      expect(isWindowAuthorizationRequest(message)).toBe(false);
+    }
   });
 });
 

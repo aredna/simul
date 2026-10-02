@@ -135,6 +135,8 @@ describe('pdfOcrRoute', () => {
         languageGroup: 'fra',
         modelVersion: TESSERACT_MODEL_VERSION,
         minimumConfidence: 0.65,
+        // A page asks for each line's words (D121).
+        words: true,
       },
     });
   });
@@ -246,6 +248,62 @@ describe('readScannedPage', () => {
     );
     expect(plain.status === 'read' && plain.blocks.map((block) => block.text))
       .toEqual(['Case l7', 'Bonjour à tous']);
+  });
+
+  it('cuts the typed words out of a recognised line that goes on beside them (D121)', async () => {
+    const { document } = fakeDocument();
+    const box = { left: 300, top: 500, width: 60, height: 12 };
+    const typed = [{
+      text: 'Page 1',
+      lines: [box],
+      box,
+      fontSize: 10,
+      lineHeight: 1.2,
+      fontFamily: 'serif' as const,
+      fontId: 'f1',
+      align: 'left' as const,
+    }];
+    const footer = (pixels: AcquiredImagePixels): ImageRecognitionResult => {
+      const pixel = (points: number) => (points * pixels.bitmapWidth) / LETTER.width;
+      const word = (text: string, left: number, width: number) => ({
+        text,
+        boundingBox: { x: pixel(left), y: pixel(500), width: pixel(width), height: pixel(12) },
+      });
+      return {
+        status: 'complete',
+        cacheHit: false,
+        result: {
+          providerId: 'tesseract',
+          bitmapWidth: 1000,
+          bitmapHeight: 1000,
+          transcript: 'Rapport annuel Page 1',
+          regions: [{
+            text: 'Rapport annuel Page 1',
+            confidence: 0.95,
+            boundingBox: { x: pixel(100), y: pixel(500), width: pixel(250), height: pixel(12) },
+            words: [
+              word('Rapport', 100, 80), word('annuel', 190, 70),
+              word('Page', 302, 30), word('1', 340, 10),
+            ],
+          }],
+        },
+      };
+    };
+    const request = { index: 0, size: LETTER, document: DOCUMENT, route: ROUTE.route };
+
+    const read = await readScannedPage(
+      document, { ...request, typed }, environment(footer).environment, new AbortController().signal,
+    );
+    expect(read.status === 'read' && read.blocks.map((block) => block.text))
+      .toEqual(['Rapport annuel']);
+    expect(read.status === 'read' && read.blocks[0]!.box.left + read.blocks[0]!.box.width)
+      .toBeLessThan(box.left);
+    // A page without typed text keeps the line whole.
+    const plain = await readScannedPage(
+      document, request, environment(footer).environment, new AbortController().signal,
+    );
+    expect(plain.status === 'read' && plain.blocks.map((block) => block.text))
+      .toEqual(['Rapport annuel Page 1']);
   });
 
   it('does not check the images of a page just found to be a scan', async () => {

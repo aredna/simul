@@ -71,12 +71,31 @@ export interface ImageBoundingBox extends ImagePoint {
   readonly height: number;
 }
 
+/** One word of a region's text, with its own box in the bitmap. */
+export interface ImageTextWord {
+  readonly text: string;
+  readonly boundingBox: ImageBoundingBox;
+}
+
 export interface ImageTextRegion {
   readonly text: string;
   readonly confidence?: number;
   readonly boundingBox: ImageBoundingBox;
   readonly polygon?: readonly ImagePoint[];
+  /**
+   * The region's words in reading order, where the job asked for them, the
+   * provider reports them and there are at least two (D121). A PDF page asks:
+   * it cuts the words its typed text already shows out of a recognised line.
+   * Image translation on web pages does not ask and gets none.
+   */
+  readonly words?: readonly ImageTextWord[];
 }
+
+/** A line of more words than this carries none. */
+export const MAX_IMAGE_TEXT_REGION_WORDS = 512;
+/** Words in one result; past it the remaining regions carry none. */
+export const MAX_IMAGE_TEXT_RESULT_WORDS = 50_000;
+export const MAX_IMAGE_TEXT_WORD_LENGTH = 1_000;
 
 export interface ImageTextResult {
   readonly providerId: ImageTextProviderId;
@@ -236,8 +255,15 @@ export function readSourceImageChange(
   });
 }
 
-/** Validate a provider result before it is ever eligible for projection. */
-export function readImageTextResult(input: unknown): ImageTextResult | undefined {
+/**
+ * Validate a provider result before it is ever eligible for projection.
+ * `wordsAllowed` is whether the job asked for the regions' words: a result
+ * that carries words nobody asked for is rejected.
+ */
+export function readImageTextResult(
+  input: unknown,
+  wordsAllowed = false,
+): ImageTextResult | undefined {
   if (!isRecordWithExactKeys(input, [
     'providerId',
     'bitmapWidth',
@@ -258,9 +284,17 @@ export function readImageTextResult(input: unknown): ImageTextResult | undefined
     input.regions.length > 10_000
   ) return undefined;
   const regions: ImageTextRegion[] = [];
+  let words = 0;
   for (const candidate of input.regions) {
-    const region = readRegion(candidate, input.bitmapWidth, input.bitmapHeight);
+    const region = readRegion(
+      candidate,
+      input.bitmapWidth,
+      input.bitmapHeight,
+      wordsAllowed,
+    );
     if (!region) return undefined;
+    words += region.words?.length ?? 0;
+    if (words > MAX_IMAGE_TEXT_RESULT_WORDS) return undefined;
     regions.push(region);
   }
   return Object.freeze({
@@ -287,7 +321,8 @@ export function readImageTextRegionHints(
   if (!Array.isArray(input) || input.length > 10_000) return undefined;
   const regions: ImageTextRegion[] = [];
   for (const candidate of input) {
-    const region = readRegion(candidate, bitmapWidth, bitmapHeight);
+    // A hint is geometry only: it never carries words.
+    const region = readRegion(candidate, bitmapWidth, bitmapHeight, false);
     if (!region) return undefined;
     regions.push(region);
   }
@@ -298,11 +333,12 @@ function readRegion(
   input: unknown,
   bitmapWidth: number,
   bitmapHeight: number,
+  wordsAllowed: boolean,
 ): ImageTextRegion | undefined {
   if (!isRecordWithExactKeys(
     input,
     ['text', 'boundingBox'],
-    ['confidence', 'polygon'],
+    wordsAllowed ? ['confidence', 'polygon', 'words'] : ['confidence', 'polygon'],
   )) return undefined;
   if (
     typeof input.text !== 'string' ||
@@ -328,6 +364,21 @@ function readRegion(
     }
     polygon = Object.freeze(points);
   }
+  let words: readonly ImageTextWord[] | undefined;
+  if (input.words !== undefined) {
+    if (
+      !Array.isArray(input.words) ||
+      input.words.length < 2 ||
+      input.words.length > MAX_IMAGE_TEXT_REGION_WORDS
+    ) return undefined;
+    const read: ImageTextWord[] = [];
+    for (const candidate of input.words) {
+      const word = readWord(candidate, bitmapWidth, bitmapHeight);
+      if (!word) return undefined;
+      read.push(word);
+    }
+    words = Object.freeze(read);
+  }
   return Object.freeze({
     text: input.text,
     ...(typeof input.confidence === 'number'
@@ -335,7 +386,29 @@ function readRegion(
       : {}),
     boundingBox,
     ...(polygon ? { polygon } : {}),
+    ...(words ? { words } : {}),
   });
+}
+
+function readWord(
+  input: unknown,
+  bitmapWidth: number,
+  bitmapHeight: number,
+): ImageTextWord | undefined {
+  if (
+    !isRecordWithExactKeys(input, ['text', 'boundingBox']) ||
+    typeof input.text !== 'string' ||
+    input.text.length === 0 ||
+    input.text.length > MAX_IMAGE_TEXT_WORD_LENGTH
+  ) return undefined;
+  const boundingBox = readBoundingBox(
+    input.boundingBox,
+    bitmapWidth,
+    bitmapHeight,
+  );
+  return boundingBox
+    ? Object.freeze({ text: input.text, boundingBox })
+    : undefined;
 }
 
 function readBoundingBox(

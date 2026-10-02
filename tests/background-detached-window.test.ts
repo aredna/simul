@@ -7,48 +7,33 @@ const background = readFileSync(
   'utf8',
 );
 
-describe('background detached companion reuse', () => {
-  it('tracks the detached window this worker opened', () => {
-    expect(background).toContain(
-      'let detachedWindow: { id: number; sourceTabId: number } | undefined;',
-    );
-    expect(background).toContain(
-      'detachedWindow = { id: createdWindow.id, sourceTabId: tab.id };',
-    );
-  });
-
-  it('focuses the existing window before creating another one', () => {
-    const focusIndex = background.indexOf(
-      'if (await focusExistingDetachedWindow(identity, clickSequence)) {',
-    );
-    const createIndex = background.indexOf('await browser.windows.create(');
-    expect(focusIndex).toBeGreaterThan(-1);
-    expect(createIndex).toBeGreaterThan(focusIndex);
-    expect(background).toContain('shouldReuseDetachedWindow(');
-    expect(background).toContain(
-      'await browser.windows.update(existing.id, { focused: true })',
-    );
-  });
-
-  it('only records a window whose click is still current', () => {
-    const staleClose = background.indexOf(
-      'await closeStaleDetachedWindow(createdWindow?.id);',
-    );
-    const record = background.indexOf(
-      'detachedWindow = { id: createdWindow.id, sourceTabId: tab.id };',
-    );
-    expect(staleClose).toBeGreaterThan(-1);
-    expect(record).toBeGreaterThan(staleClose);
-  });
-
-  it('re-authorizes the reused window through the ordered launch message', () => {
-    const focusFunction = background.slice(
-      background.indexOf('async function focusExistingDetachedWindow('),
+// The launch itself is lib/toolbar-launch.ts, driven with fakes in
+// toolbar-launch.test.ts. These check the entrypoint's wiring.
+describe('background toolbar launch wiring', () => {
+  it('runs the launch in the click listener\'s own turn', () => {
+    const listener = background.slice(
+      background.indexOf('browser.action.onClicked.addListener((tab) => {'),
       background.indexOf('browser.windows.onRemoved.addListener('),
     );
-    expect(focusFunction).toContain("type: 'simul:authorized-tab'");
-    expect(focusFunction).toContain('launchEpoch: await toolbarLaunchEpoch');
-    expect(focusFunction).toContain('launchSequence: clickSequence');
+    expect(listener).toContain('void toolbarLauncher.click(tab).catch(');
+    // Chrome needs sidePanel.open() inside the gesture: nothing is awaited
+    // before the launcher is called.
+    expect(listener.slice(0, listener.indexOf('toolbarLauncher.click(tab)')))
+      .not.toContain('await');
+  });
+
+  it('hands the launcher Chrome\'s own side panel and window APIs and the live preferences', () => {
+    const wiring = background.slice(
+      background.indexOf('const toolbarLauncher = new ToolbarLauncher({'),
+      background.indexOf('browser.action.onClicked.addListener('),
+    );
+    expect(wiring).toContain('sidePanel: browser.sidePanel,');
+    expect(wiring).toContain('windows: browser.windows,');
+    expect(wiring).toContain('preferences: () => launchPreferences,');
+    expect(wiring).toContain('preferencesHydrated: () => launchPreferencesHydrated,');
+    expect(wiring).toContain('preferencesReady: launchPreferencesReady,');
+    expect(wiring).toContain('launchEpoch: toolbarLaunchEpoch,');
+    expect(wiring).toContain("browser.runtime.getURL('/sidepanel.html')");
   });
 
   it('orders authorizations across worker lifecycles with a persisted generation', () => {
@@ -57,61 +42,22 @@ describe('background detached companion reuse', () => {
     expect(background).toContain('browser.storage.session.get(');
     expect(background).toContain('browser.storage.session.set({');
     expect(background).toContain('createCompanionLaunchEpoch(');
-    const sidePanelLaunch = background.slice(
-      background.indexOf('async function finishToolbarSidePanelLaunch('),
-      background.indexOf('async function rememberSurface('),
-    );
-    expect(sidePanelLaunch).toContain("type: 'simul:authorized-tab'");
-    expect(sidePanelLaunch).toContain('launchEpoch: await toolbarLaunchEpoch');
   });
 
-  it('tells an open side panel about a click on a tab Simul cannot read, without its address (D112)', () => {
-    const sidePanelLaunch = background.slice(
-      background.indexOf('async function finishToolbarSidePanelLaunch('),
-      background.indexOf('async function rememberSurface('),
+  it('answers a starting companion window with the authorization kept for it (D121)', () => {
+    const listener = background.slice(
+      background.indexOf('browser.runtime.onMessage.addListener('),
+      background.indexOf('browser.permissions.onRemoved.addListener('),
     );
-    const unreadable = sidePanelLaunch.slice(sidePanelLaunch.indexOf("type: 'simul:unreadable-tab'"));
-    // Typed against the message the panel reads.
-    expect(sidePanelLaunch).toContain(
-      'const message: AuthorizedTabMessage | UnreadableTabMessage | undefined =',
+    expect(listener).toContain('if (isWindowAuthorizationRequest(message)) {');
+    // Only the window the message was sent to is answered: the sender's own.
+    expect(listener).toContain(
+      'toolbarLauncher.windowAuthorization(sender.tab?.windowId) ?? null',
     );
-    expect(unreadable).toContain('localFile: isLocalFile(tab.url),');
-    expect(unreadable).toContain('launchEpoch: await toolbarLaunchEpoch,');
-    expect(unreadable).toContain('launchSequence: clickSequence,');
-    // Only whether it is a local file: never the address or the title.
-    const fields = unreadable.slice(0, unreadable.indexOf('};'));
-    expect(fields).not.toMatch(/\b(url|pendingUrl|title|favIconUrl)\s*:/u);
-    // A tab still loading a web page is not called unreadable.
-    expect(sidePanelLaunch).toContain(': isSupportedPage(tab.pendingUrl)\n            ? undefined');
-    // A companion window for another tab is opened, not retargeted.
-    const focus = background.slice(
-      background.indexOf('async function focusExistingDetachedWindow('),
-      background.indexOf('browser.windows.onRemoved.addListener('),
-    );
-    expect(focus).not.toContain('simul:unreadable-tab');
-  });
-
-  it('opens the window for a tab Simul cannot read, without authorizing it (D107)', () => {
-    const launch = background.slice(
-      background.indexOf('async function launchToolbarCompanion('),
-      background.indexOf('async function focusExistingDetachedWindow('),
-    );
-    expect(launch).toContain('if (tab.id === undefined || tab.windowId === undefined) return;');
-    expect(launch).not.toContain('!isSupportedPage(tab.url)');
-    expect(launch).toContain("url: tab.url ?? '',");
-    const focus = background.slice(
-      background.indexOf('async function focusExistingDetachedWindow('),
-      background.indexOf('browser.windows.onRemoved.addListener('),
-    );
-    const guard = focus.indexOf('if (!isSupportedPage(identity.url)) return true;');
-    expect(guard).toBeGreaterThan(focus.indexOf('await browser.windows.update(existing.id'));
-    expect(guard).toBeLessThan(focus.indexOf("type: 'simul:authorized-tab'"));
   });
 
   it('forgets the window once it closes', () => {
     expect(background).toContain('browser.windows.onRemoved.addListener(');
-    expect(background).toContain(
-      'if (detachedWindow?.id === windowId) detachedWindow = undefined;',
-    );
+    expect(background).toContain('toolbarLauncher.windowRemoved(windowId);');
   });
 });

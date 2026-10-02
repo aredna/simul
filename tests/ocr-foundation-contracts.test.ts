@@ -2,8 +2,12 @@ import { describe, expect, it } from 'vitest';
 
 import {
   IMAGE_SCAN_POLICIES,
+  MAX_IMAGE_TEXT_REGION_WORDS,
+  MAX_IMAGE_TEXT_RESULT_WORDS,
+  MAX_IMAGE_TEXT_WORD_LENGTH,
   MAX_OCR_BITMAP_DIMENSION,
   MAX_OCR_BITMAP_PIXELS,
+  readImageTextRegionHints,
   readImageTextResult,
   readSourceImageChange,
   readSourceImageDescriptor,
@@ -107,6 +111,76 @@ describe('OCR foundation contracts', () => {
       bitmapWidth: Math.sqrt(MAX_OCR_BITMAP_PIXELS) + 1,
       bitmapHeight: Math.sqrt(MAX_OCR_BITMAP_PIXELS),
     })).toBeUndefined();
+  });
+
+  it('carries a region\'s words with bounded boxes and rejects malformed ones (D121)', () => {
+    const word = (text: string, x: number) => ({
+      text,
+      boundingBox: { x, y: 20, width: 30, height: 20 },
+    });
+    const region = (words: unknown) => ({
+      text: 'hello world',
+      confidence: 0.9,
+      boundingBox: { x: 10, y: 20, width: 80, height: 20 },
+      words,
+    });
+    const result = (regions: readonly unknown[]) => ({
+      providerId: 'tesseract',
+      bitmapWidth: 200,
+      bitmapHeight: 100,
+      transcript: 'hello world',
+      regions,
+    });
+    const valid = result([region([word('hello', 10), word('world', 50)])]);
+
+    const read = readImageTextResult(valid, true);
+    expect(read).toEqual(valid);
+    // Words nobody asked for: the result is not accepted.
+    expect(readImageTextResult(valid)).toBeUndefined();
+    expect(Object.isFrozen(read?.regions[0]?.words)).toBe(true);
+    expect(Object.isFrozen(read?.regions[0]?.words?.[0])).toBe(true);
+    // A region without words is as before; other providers send none.
+    expect(readImageTextResult(result([{
+      text: 'hello world',
+      boundingBox: { x: 10, y: 20, width: 80, height: 20 },
+    }]))?.regions[0]).not.toHaveProperty('words');
+
+    for (const words of [
+      'hello world',
+      [],
+      // One word says nothing a line does not.
+      [word('hello', 10)],
+      [word('hello', 10), word('', 50)],
+      [word('hello', 10), word('x'.repeat(MAX_IMAGE_TEXT_WORD_LENGTH + 1), 50)],
+      // Outside the bitmap.
+      [word('hello', 10), word('world', 190)],
+      [word('hello', 10), { ...word('world', 50), confidence: 0.9 }],
+      [word('hello', 10), { text: 'world' }],
+      Array.from({ length: MAX_IMAGE_TEXT_REGION_WORDS + 1 }, () => word('a', 10)),
+    ]) {
+      expect(readImageTextResult(result([region(words)]), true)).toBeUndefined();
+    }
+
+    // The words of one result are bounded too.
+    const full = Array.from({ length: MAX_IMAGE_TEXT_REGION_WORDS }, () => word('a', 10));
+    const regions = Math.ceil(MAX_IMAGE_TEXT_RESULT_WORDS / MAX_IMAGE_TEXT_REGION_WORDS);
+    expect(readImageTextResult(result(
+      Array.from({ length: regions - 1 }, () => region(full)),
+    ), true)).toBeDefined();
+    expect(readImageTextResult(result(
+      Array.from({ length: regions }, () => region(full)),
+    ), true)).toBeUndefined();
+
+    // A geometry hint never carries words.
+    expect(readImageTextRegionHints([{
+      text: '',
+      boundingBox: { x: 10, y: 20, width: 80, height: 20 },
+    }], 200, 100)).toHaveLength(1);
+    expect(readImageTextRegionHints(
+      [region([word('hello', 10), word('world', 50)])],
+      200,
+      100,
+    )).toBeUndefined();
   });
 
   it('strictly copies source descriptors and rejects malformed change envelopes', () => {

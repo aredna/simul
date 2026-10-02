@@ -36,6 +36,12 @@ export interface ImageRecognitionRoute {
   readonly languageGroup?: string;
   readonly modelVersion?: string;
   readonly minimumConfidence?: OcrMinimumConfidence;
+  /**
+   * The caller reads each region's words (a PDF page, D121). Asked of
+   * Tesseract; part of what a result is cached under, so a result without
+   * words never answers a caller that needs them.
+   */
+  readonly words?: true;
 }
 
 /** Opaque, coordinator-owned cursor for the next acceptable provider result. */
@@ -980,11 +986,13 @@ export class ImageRecognitionCoordinator {
 export function createBrowserImageRecognitionCoordinator(
   store: TransientImageInputStore,
   resetEpoch: number,
+  maxCacheWeight?: number,
 ): ImageRecognitionCoordinator {
   return new ImageRecognitionCoordinator({
     store,
     resetEpoch,
     sendMessage: (message) => browser.runtime.sendMessage(message),
+    ...(maxCacheWeight === undefined ? {} : { maxCacheWeight }),
   });
 }
 
@@ -1016,6 +1024,7 @@ function createJob(
     bitmapWidth: pixels.bitmapWidth,
     bitmapHeight: pixels.bitmapHeight,
     ...(hints.length > 0 ? { hints } : {}),
+    ...(route.words === true ? { words: true as const } : {}),
     preprocessingVersion: pixels.preprocessingVersion,
     qualityPolicyVersion: OCR_QUALITY_POLICY_VERSION,
     minimumConfidence: repairOcrMinimumConfidence(route.minimumConfidence),
@@ -1110,6 +1119,9 @@ function providerRecognitionIdentity(
     route.modelVersion,
     route.sourceLanguage ?? '',
     route.languageGroup,
+    // Only a route that asks for words differs, so every other key is as it
+    // was.
+    ...(route.words === true ? ['words'] : []),
   ]);
 }
 
@@ -1153,6 +1165,7 @@ function snapshotRecognitionRoute(
     ...(route.minimumConfidence !== undefined
       ? { minimumConfidence: route.minimumConfidence }
       : {}),
+    ...(route.words === true ? { words: true as const } : {}),
   });
 }
 
@@ -1231,7 +1244,16 @@ function hostError(
 export function imageRecognitionCacheWeight(result: ImageTextResult): number {
   let weight = result.transcript.length;
   for (const region of result.regions) {
-    weight += region.text.length + RECOGNITION_CACHE_REGION_OVERHEAD;
+    weight += imageRecognitionRegionWeight(region);
+  }
+  return weight;
+}
+
+/** A region's text and, where it carries them, its words (D121). */
+function imageRecognitionRegionWeight(region: ImageTextRegion): number {
+  let weight = region.text.length + RECOGNITION_CACHE_REGION_OVERHEAD;
+  for (const word of region.words ?? []) {
+    weight += word.text.length + RECOGNITION_CACHE_REGION_OVERHEAD;
   }
   return weight;
 }
@@ -1269,7 +1291,7 @@ function boundedImageRecognitionContinuationEvidence(
   for (const result of corroboratingResults) {
     const regions: ImageTextRegion[] = [];
     for (const region of result.regions) {
-      const regionWeight = region.text.length + RECOGNITION_CACHE_REGION_OVERHEAD;
+      const regionWeight = imageRecognitionRegionWeight(region);
       if (regionWeight > maximumWeight - weight) continue;
       regions.push(region);
       weight += regionWeight;

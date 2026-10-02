@@ -23,6 +23,7 @@ import {
   navigationPageIdentityKey,
   navigationPageScopeKey,
   normalizedPageUrl,
+  readAuthorizedTabMessage,
   readPageError,
   unreadablePageGuidance,
   type AuthorizedTabRequest,
@@ -54,6 +55,11 @@ export interface FollowerBrowser {
   getLastFocusedNormalWindowId(): Promise<number | undefined>;
   /** True when Simul may read every site, so a hidden tab URL is a browser page. */
   hasAllSitesAccess(): Promise<boolean>;
+  /**
+   * Asks the worker for the toolbar authorization it sent to this companion
+   * window before the page could listen (D121); the raw answer.
+   */
+  requestWindowAuthorization(): Promise<unknown>;
   readonly windowIdNone: number;
 }
 
@@ -140,14 +146,46 @@ export class SourceFollower {
   async initializeSourcePage(): Promise<void> {
     const hint = this.environment.detachedIdentityHint;
     if (hint) {
-      const identity = this.#state.preferences.popoutTabMode === 'active'
-        ? await this.#readActivePageIdentity(hint.windowId)
-        : identityFromTab(await this.environment.browser.getTab(hint.tabId), undefined, false);
-      this.#state.followedPageIdentity = identity;
-      this.environment.queueCapture({ identity, reason: 'initial' });
+      const state = this.#state;
+      const { currency } = this.environment;
+      // A newer toolbar click may have taken this window over while its page
+      // was loading (D121). Its authorization came as a message once the
+      // page listened, or it waits with the worker, which is asked for it.
+      // Either way it is newer than the page the window was opened for:
+      // that page is not looked up over it, and gives way to it.
+      if (state.followedPageIdentity) return;
+      const request = currency.begin('identity');
+      const waiting = this.#acceptWaitingAuthorization();
+      let failure: { readonly error: unknown } | undefined;
+      try {
+        const identity = state.preferences.popoutTabMode === 'active'
+          ? await this.#readActivePageIdentity(hint.windowId)
+          : identityFromTab(await this.environment.browser.getTab(hint.tabId), undefined, false);
+        if (currency.isCurrent(request)) {
+          state.followedPageIdentity = identity;
+          this.environment.queueCapture({ identity, reason: 'initial' });
+        }
+      } catch (error) {
+        failure = { error };
+      }
+      await waiting;
+      // The error stands only when nothing newer took the window over.
+      if (failure && currency.isCurrent(request)) throw failure.error;
       return;
     }
     await this.refreshFollowedPage('initial');
+  }
+
+  /** Never rejects: without an answer the window keeps its own page. */
+  async #acceptWaitingAuthorization(): Promise<void> {
+    try {
+      const authorization = readAuthorizedTabMessage(
+        await this.environment.browser.requestWindowAuthorization(),
+      );
+      if (authorization) await this.acceptAuthorizedTab(authorization);
+    } catch {
+      // The worker could not be asked.
+    }
   }
 
   /** The background worker authorized a tab from the toolbar. */

@@ -2739,6 +2739,177 @@ describe('SourceImageObserver', () => {
     stop();
   });
 
+  it('notices a paint change beside an oversized computed style (D121)', () => {
+    const fixture = createFixture();
+    const paint = computedStyleFixture(fixture.document, {
+      background: `rgba(0, 0, 0, 0) url("data:image/svg+xml,${'x'.repeat(70_000)}")`,
+    });
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    events.length = 0;
+
+    // The same oversized parts are the same token: no revision loop.
+    fixture.resize.trigger(fixture.image);
+    fixture.mutation.trigger([attributeRecord(fixture.image, 'class')]);
+    expect(events).toEqual([]);
+
+    paint.objectPosition = '100% 50%';
+    fixture.mutation.trigger([attributeRecord(fixture.image, 'class')]);
+    expect(events).toMatchObject([{
+      kind: 'upsert',
+      input: {
+        nodeId: 7,
+        contentChanged: false,
+        observationChanged: true,
+        captureChanged: true,
+      },
+    }]);
+    events.length = 0;
+    fixture.resize.trigger(fixture.image);
+    fixture.mutation.trigger([attributeRecord(fixture.image, 'class')]);
+    expect(events).toEqual([]);
+    expect(JSON.stringify(events)).not.toContain('x'.repeat(1_000));
+    stop();
+  });
+
+  it('notices a paint change of an image with an oversized address', () => {
+    // The address, the routing facts and the paint facts are three tokens,
+    // so a large data URL in `src` never hid a paint change.
+    const fixture = createFixture();
+    fixture.image.setAttribute('src', `data:image/png;base64,${'A'.repeat(70_000)}`);
+    const paint = computedStyleFixture(fixture.document);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    events.length = 0;
+
+    paint.objectPosition = '100% 50%';
+    fixture.mutation.trigger([attributeRecord(fixture.image, 'class')]);
+    expect(events).toMatchObject([{
+      kind: 'upsert',
+      input: { nodeId: 7, contentChanged: false, captureChanged: true },
+    }]);
+    stop();
+  });
+
+  it('notices another oversized computed style of the same length (D121)', () => {
+    const fixture = createFixture();
+    const paint = computedStyleFixture(fixture.document, {
+      background: `url("data:image/svg+xml,${'x'.repeat(70_000)}") rgb(255, 255, 255)`,
+    });
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    events.length = 0;
+
+    paint.background =
+      `url("data:image/svg+xml,${'x'.repeat(70_000)}") rgb(255, 255, 250)`;
+    fixture.mutation.trigger([attributeRecord(fixture.image, 'class')]);
+    expect(events).toMatchObject([{
+      kind: 'upsert',
+      input: { nodeId: 7, observationChanged: true, captureChanged: true },
+    }]);
+    stop();
+  });
+
+  it('notices a changed oversized address without a mutation record (D121)', () => {
+    const fixture = createFixture();
+    const address = (body: string) => `data:image/png;base64,${body}`;
+    fixture.image.setAttribute('src', address('A'.repeat(70_000)));
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    events.length = 0;
+
+    fixture.resize.trigger(fixture.image);
+    expect(events).toEqual([]);
+
+    // Same length, another ending.
+    fixture.image.setAttribute('src', address(`${'A'.repeat(69_999)}B`));
+    fixture.resize.trigger(fixture.image);
+    expect(events).toMatchObject([{
+      kind: 'upsert',
+      input: { nodeId: 7, contentChanged: true, captureChanged: true },
+    }]);
+    events.length = 0;
+    fixture.resize.trigger(fixture.image);
+    expect(events).toEqual([]);
+
+    // The same characters split differently between two parts.
+    fixture.image.setAttribute('src', address('A'.repeat(69_999)));
+    fixture.image.setAttribute('srcset', 'B');
+    fixture.resize.trigger(fixture.image);
+    expect(events).toHaveLength(1);
+    fixture.image.setAttribute('src', address(`${'A'.repeat(69_998)}`));
+    fixture.image.setAttribute('srcset', 'AB');
+    fixture.resize.trigger(fixture.image);
+    expect(events).toHaveLength(2);
+    expect(JSON.stringify(events)).not.toContain('A'.repeat(1_000));
+    stop();
+  });
+
+  it('notices an address growing past the exact limit and shrinking back (D121)', () => {
+    const fixture = createFixture();
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    events.length = 0;
+
+    fixture.image.setAttribute('src', `data:image/png;base64,${'A'.repeat(70_000)}`);
+    fixture.resize.trigger(fixture.image);
+    expect(events).toMatchObject([{
+      kind: 'upsert', input: { contentChanged: true, captureChanged: true },
+    }]);
+    fixture.image.setAttribute('src', 'https://private.example/original.png');
+    fixture.resize.trigger(fixture.image);
+    expect(events).toHaveLength(2);
+    expect(events[1]).toMatchObject({
+      kind: 'upsert', input: { contentChanged: true, captureChanged: true },
+    });
+    // Exact tokens behave as before.
+    fixture.resize.trigger(fixture.image);
+    expect(events).toHaveLength(2);
+    fixture.image.setAttribute('src', 'https://private.example/other.png');
+    fixture.resize.trigger(fixture.image);
+    expect(events).toHaveLength(3);
+    stop();
+  });
+
+  it('reads only the two ends of a very long part (D121)', () => {
+    const fixture = createFixture();
+    const address = (middle: string, end: string) =>
+      `data:image/png;base64,${'A'.repeat(40_000)}${middle}${'A'.repeat(40_000)}${end}`;
+    fixture.image.setAttribute('src', address('M'.repeat(100_000), 'Z'));
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    events.length = 0;
+
+    // A change at either end, or of the length, is seen.
+    fixture.image.setAttribute('src', address('M'.repeat(100_000), 'Y'));
+    fixture.resize.trigger(fixture.image);
+    expect(events).toHaveLength(1);
+    fixture.image.setAttribute('src', address('M'.repeat(100_001), 'Y'));
+    fixture.resize.trigger(fixture.image);
+    expect(events).toHaveLength(2);
+    fixture.image.setAttribute(
+      'src',
+      address('M'.repeat(100_001), 'Y').replace('data:image/png', 'data:image/gif'),
+    );
+    fixture.resize.trigger(fixture.image);
+    expect(events).toHaveLength(3);
+
+    // The limit: only the first and last 8 KiB of a long part are read, so
+    // a refresh costs the same for a 70 KiB address as for a 4 MiB one. A
+    // change between them that keeps the length waits for the mutation or
+    // load that forces it.
+    fixture.image.setAttribute(
+      'src',
+      address(`${'M'.repeat(50_000)}N${'M'.repeat(50_000)}`, 'Y')
+        .replace('data:image/png', 'data:image/gif'),
+    );
+    fixture.resize.trigger(fixture.image);
+    expect(events).toHaveLength(3);
+    fixture.mutation.trigger([attributeRecord(fixture.image, 'src')]);
+    expect(events).toHaveLength(4);
+    stop();
+  });
+
   it('invalidates stable boxes when object-position changes displayed pixels', () => {
     const fixture = createFixture();
     let objectPosition = '0% 50%';
@@ -3262,6 +3433,28 @@ function applyObservationEvent(
 ): void {
   if (event.kind === 'upsert') model.upsert(event.input);
   else model.remove(event.document, event.nodeId);
+}
+
+/** A computed style every element shares; the test changes its fields. */
+function computedStyleFixture(
+  document: Document,
+  overrides: Partial<Record<'background' | 'objectPosition', string>> = {},
+): { background: string; objectPosition: string } {
+  const paint = {
+    display: 'block', visibility: 'visible', contentVisibility: 'visible',
+    opacity: '1', clipPath: 'none', maskImage: 'none', perspective: 'none',
+    rotate: 'none', scale: 'none', transform: 'none', filter: 'none',
+    mixBlendMode: 'normal', objectFit: 'cover', objectPosition: '0% 50%',
+    imageRendering: 'auto', overflowX: 'visible', overflowY: 'visible',
+    background: 'none',
+    getPropertyValue: () => '',
+    ...overrides,
+  };
+  Object.defineProperty(document.defaultView!, 'getComputedStyle', {
+    configurable: true,
+    value: () => paint,
+  });
+  return paint;
 }
 
 function eventNodeId(event: SourceImageObservationEvent): number {

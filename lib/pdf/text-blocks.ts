@@ -63,6 +63,8 @@ const OCR_TYPED_OVERLAP = 0.5;
 // Scripts written right to left, for OCR lines that carry no direction.
 const RTL_CHARACTER = /[\p{Script=Hebrew}\p{Script=Arabic}\p{Script=Syriac}\p{Script=Thaana}\p{Script=Nko}]/u;
 const LETTER = /\p{L}/u;
+const LETTER_OR_DIGIT = /[\p{L}\p{N}]/u;
+const LETTERS_AND_DIGITS = /[\p{L}\p{N}]/gu;
 // A gap between runs wider than this share of the font size reads as a space.
 const SPACE_GAP = 0.25;
 // Text turned by more than this (radians) is rotated and stays as drawn.
@@ -116,6 +118,8 @@ interface Line {
   top: number;
   bottom: number;
   baseline: number;
+  /** A piece of an OCR line cut around typed text: a block of its own. */
+  alone?: boolean;
 }
 
 /**
@@ -135,15 +139,22 @@ export function pdfTextBlocks(
   );
 }
 
+interface PdfOcrBox {
+  readonly x: number;
+  readonly y: number;
+  readonly width: number;
+  readonly height: number;
+}
+
 /** One recognised line of a scanned page, in pixels of the bitmap OCR read. */
 export interface PdfOcrLine {
   readonly text: string;
-  readonly boundingBox: {
-    readonly x: number;
-    readonly y: number;
-    readonly width: number;
-    readonly height: number;
-  };
+  readonly boundingBox: PdfOcrBox;
+  /** The line's words in reading order, where OCR reports them (Tesseract). */
+  readonly words?: readonly {
+    readonly text: string;
+    readonly boundingBox: PdfOcrBox;
+  }[];
 }
 
 /**
@@ -154,7 +165,12 @@ export interface PdfOcrLine {
  * stands in for the font size; lines without ascenders or descenders are
  * shorter, which the wider size tolerance allows for. `typed` holds the line
  * boxes of the page's own text, in page points: OCR read the page as drawn,
- * that text included, so a line that lies mostly over it is left out.
+ * that text included. A line whose words are known loses the words that lie
+ * over typed text and keeps the rest, as a piece with its own box (D121): a
+ * typed page number beside a scanned footer was shown twice, and a scan's few
+ * words beside a long typed line were lost. A line without words, or whose
+ * words are all clear of typed text, is judged as one piece: left out when it
+ * lies mostly over typed text.
  */
 export function pdfOcrBlocks(
   lines: readonly PdfOcrLine[],
@@ -181,19 +197,31 @@ export function pdfOcrBlocks(
     const top = y / pixelsPerPoint;
     const right = (x + width) / pixelsPerPoint;
     const bottom = (y + height) / pixelsPerPoint;
-    if (overTypedText({ left, top, width: right - left, height: bottom - top }, typed)) continue;
-    const run: Run = {
-      text,
-      left,
-      right,
-      baseline: bottom,
-      top,
-      bottom,
-      size: bottom - top,
-      fontId: OCR_FONT_ID,
-      rtl: mostlyRtlText(text),
-    };
-    converted.push({ runs: [run], text, left, right, top, bottom, baseline: bottom });
+    const pieces = typed.length > 0
+      ? piecesClearOfTypedText(text, line.words, pixelsPerPoint, typed)
+      : undefined;
+    const mostlyTyped = overTypedText(
+      { left, top, width: right - left, height: bottom - top },
+      typed,
+    );
+    if (pieces) {
+      // Each piece keeps the line's own height, which stands for its font
+      // size, and the span of its words. It joins no other line: a block is
+      // drawn as one box, and the box of a piece with the line above or
+      // below it would lie over the typed text the piece was cut around.
+      for (const piece of pieces) {
+        // Beside a line that is mostly typed text, a single character is a
+        // box border or a speck read as a letter, not the scan's own text.
+        if (mostlyTyped && lettersAndDigits(piece.text) < 2) continue;
+        converted.push({
+          ...ocrLine(piece.text, piece.left, top, piece.right, bottom),
+          alone: true,
+        });
+      }
+      continue;
+    }
+    if (mostlyTyped) continue;
+    converted.push(ocrLine(text, left, top, right, bottom));
   }
   // The tallest line comes nearest the font size: shorter lines lack
   // ascenders or descenders. The line pitch in points stays as measured.
@@ -205,7 +233,85 @@ export function pdfOcrBlocks(
   });
 }
 
-/** Whether typed line boxes cover `OCR_TYPED_OVERLAP` of the OCR line's box. */
+function ocrLine(text: string, left: number, top: number, right: number, bottom: number): Line {
+  const run: Run = {
+    text,
+    left,
+    right,
+    baseline: bottom,
+    top,
+    bottom,
+    size: bottom - top,
+    fontId: OCR_FONT_ID,
+    rtl: mostlyRtlText(text),
+  };
+  return { runs: [run], text, left, right, top, bottom, baseline: bottom };
+}
+
+/**
+ * The parts of an OCR line that typed text does not cover: each run of
+ * neighbouring words that are clear of it, with the text between them as OCR
+ * wrote it. Empty when typed text covers every word. `undefined` when the
+ * words cannot say: there are none, they are not the line's text in its
+ * order, or none of them lies over typed text.
+ */
+function piecesClearOfTypedText(
+  text: string,
+  words: PdfOcrLine['words'],
+  pixelsPerPoint: number,
+  typed: readonly PdfTextRect[],
+): { readonly text: string; readonly left: number; readonly right: number }[] | undefined {
+  if (!words || words.length === 0) return undefined;
+  const pieces: { start: number; end: number; left: number; right: number }[] = [];
+  let piece: (typeof pieces)[number] | undefined;
+  let cursor = 0;
+  let covered = 0;
+  for (const word of words) {
+    const wordText = word.text.replace(/\s+/gu, ' ').trim();
+    const { x, y, width, height } = word.boundingBox;
+    if (
+      wordText.length === 0 ||
+      ![x, y, width, height].every(Number.isFinite) ||
+      width <= 0 ||
+      height <= 0
+    ) return undefined;
+    // The words must make up the line's text, with only spaces between.
+    const start = text.indexOf(wordText, cursor);
+    if (start < 0 || text.slice(cursor, start).trim() !== '') return undefined;
+    cursor = start + wordText.length;
+    const left = x / pixelsPerPoint;
+    const right = (x + width) / pixelsPerPoint;
+    if (overTypedText({
+      left,
+      top: y / pixelsPerPoint,
+      width: right - left,
+      height: height / pixelsPerPoint,
+    }, typed)) {
+      covered += 1;
+      piece = undefined;
+      continue;
+    }
+    if (piece) {
+      piece.end = cursor;
+      piece.left = Math.min(piece.left, left);
+      piece.right = Math.max(piece.right, right);
+    } else {
+      piece = { start, end: cursor, left, right };
+      pieces.push(piece);
+    }
+  }
+  if (text.slice(cursor).trim() !== '' || covered === 0) return undefined;
+  return pieces
+    .map(({ start, end, left, right }) => ({ text: text.slice(start, end), left, right }))
+    // A dash or a bar left between typed words says nothing on its own.
+    .filter((each) => LETTER_OR_DIGIT.test(each.text));
+}
+
+function lettersAndDigits(text: string): number {
+  return text.match(LETTERS_AND_DIGITS)?.length ?? 0;
+}
+
+/** Whether typed line boxes cover `OCR_TYPED_OVERLAP` of the box. */
 function overTypedText(line: PdfTextRect, typed: readonly PdfTextRect[]): boolean {
   let covered = 0;
   for (const box of typed) {
@@ -422,6 +528,7 @@ function joinsBlock(
   line: Line,
   sizeTolerance: number,
 ): boolean {
+  if (previous.alone || line.alone) return false;
   const previousSize = dominantSize(previous.runs);
   const size = dominantSize(line.runs);
   const larger = Math.max(previousSize, size);

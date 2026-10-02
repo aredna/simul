@@ -123,7 +123,10 @@ on a page once it is drawn.
   all, or when its own text covers at most 3% of it and its pictures cover
   at least four fifths of it: a scan under a typed header, page number or
   stamp. That typed text stays as it is and is translated at once; OCR adds
-  the rest, without the lines that only repeat it. A page with more text, or
+  the rest, without what only repeats it. Where typed text sits on a line
+  of the scan (a page number beside a scanned footer, a stamp across a
+  scanned line), the scan's own words on that line are kept and translated
+  as a piece of their own, beside the typed text. A page with more text, or
   with smaller pictures, is never read. Such a page's pictures are looked at
   only when it can be read: with Tesseract.js off, or a language without an
   OCR model, it stays as it is and nothing is said about it.

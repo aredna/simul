@@ -201,6 +201,7 @@ export class TesseractOffscreenRunner implements OffscreenOcrProviderRunner {
         recognition.data,
         job.bitmapWidth,
         job.bitmapHeight,
+        job.words === true,
       );
     } catch {
       throw new InvalidNormalizedOcrOutputError();

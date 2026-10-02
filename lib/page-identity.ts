@@ -133,6 +133,25 @@ export interface AuthorizedTabRequest {
 }
 
 /**
+ * A companion window asks the worker, when it starts, for the toolbar
+ * authorization that was sent to it before its page could listen (D121).
+ * The answer is that `simul:authorized-tab` message, or nothing.
+ */
+export interface WindowAuthorizationRequest {
+  type: 'simul:window-authorization';
+}
+
+export function isWindowAuthorizationRequest(
+  message: unknown,
+): message is WindowAuthorizationRequest {
+  return typeof message === 'object' &&
+    message !== null &&
+    Object.keys(message).length === 1 &&
+    'type' in message &&
+    message.type === 'simul:window-authorization';
+}
+
+/**
  * The toolbar was clicked on a tab Simul cannot read. It carries no URL:
  * only whether the tab shows a file from this computer.
  */

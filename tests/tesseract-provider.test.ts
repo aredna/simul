@@ -92,6 +92,125 @@ describe('packaged Tesseract provider', () => {
     expect(normalized).not.toHaveProperty('geometryConfidence');
   });
 
+  it('keeps the words of a line with their boxes, all of them or none (D121)', () => {
+    const word = (text: unknown, x0: number, x1: number) => ({
+      text,
+      confidence: 91,
+      bbox: { x0, y0: 20, x1, y1: 40 },
+      symbols: [],
+    });
+    const line = (text: string, words: unknown) => ({
+      text,
+      confidence: 90,
+      bbox: { x0: 10, y0: 20, x1: 190, y1: 40 },
+      words,
+    });
+    const page = (lines: readonly unknown[]) => ({
+      text: 'x',
+      blocks: [{ paragraphs: [{ lines: lines as never }] }],
+    });
+    const regions = (lines: readonly unknown[]) =>
+      normalizeTesseractPage(page(lines), 200, 100, true)?.regions;
+
+    expect(regions([
+      line('Rapport annuel Page 1\n', [
+        word('Rapport', 10.4, 70.2), word(' ', 70, 74), word('annuel', 78, 120),
+        word('Page', 140, 170), word('1', 176, 205),
+      ]),
+    ])).toEqual([{
+      text: 'Rapport annuel Page 1',
+      confidence: 0.9,
+      boundingBox: { x: 10, y: 20, width: 180, height: 20 },
+      // Only the text and the box travel, the box inside the bitmap.
+      words: [
+        { text: 'Rapport', boundingBox: { x: 10, y: 20, width: 61, height: 20 } },
+        { text: 'annuel', boundingBox: { x: 78, y: 20, width: 42, height: 20 } },
+        { text: 'Page', boundingBox: { x: 140, y: 20, width: 30, height: 20 } },
+        { text: '1', boundingBox: { x: 176, y: 20, width: 24, height: 20 } },
+      ],
+    }]);
+
+    for (const words of [
+      undefined,
+      null,
+      'Rapport annuel',
+      // One word says nothing the line does not.
+      [word('Rapport', 10, 70)],
+      // A word that cannot be placed: the line stays whole.
+      [word('Rapport', 10, 70), { text: 'annuel' }],
+      [word('Rapport', 10, 70), word('annuel', 250, 300)],
+      [word('Rapport', 10, 70), word('a'.repeat(1_001), 78, 120)],
+      Array.from({ length: 513 }, () => word('a', 10, 20)),
+    ]) {
+      const [region] = regions([line('Rapport annuel', words)]) ?? [];
+      expect(region).toMatchObject({ text: 'Rapport annuel' });
+      expect(region).not.toHaveProperty('words');
+    }
+
+    // A result carries 50,000 words at most: later lines carry none.
+    const many = regions(Array.from({ length: 101 }, () => line(
+      'a',
+      Array.from({ length: 500 }, () => word('a', 10, 20)),
+    )));
+    expect(many).toHaveLength(101);
+    expect(many?.filter((region) => region.words).length).toBe(100);
+    expect(many?.[100]).not.toHaveProperty('words');
+
+    // Only a job that asks gets words: a web image's result is as it was.
+    expect(normalizeTesseractPage(page([
+      line('Rapport annuel', [word('Rapport', 10, 70), word('annuel', 78, 120)]),
+    ]), 200, 100)?.regions).toEqual([{
+      text: 'Rapport annuel',
+      confidence: 0.9,
+      boundingBox: { x: 10, y: 20, width: 180, height: 20 },
+    }]);
+  });
+
+  it('gives a job the words only when it asks for them (D121)', async () => {
+    const worker = fakeWorker('hello world');
+    worker.worker.recognize.mockImplementation(async () => ({
+      data: {
+        text: 'hello world',
+        confidence: 90,
+        blocks: [{
+          paragraphs: [{
+            lines: [{
+              text: 'hello world',
+              confidence: 90,
+              bbox: { x0: 1, y0: 1, x1: 90, y1: 12 },
+              words: [
+                { text: 'hello', bbox: { x0: 1, y0: 1, x1: 40, y1: 12 } },
+                { text: 'world', bbox: { x0: 50, y0: 1, x1: 90, y1: 12 } },
+              ],
+            }],
+          }],
+        }],
+      },
+    }));
+    const runner = new TesseractOffscreenRunner({
+      createWorker: vi.fn(async () => worker.worker) as never,
+      getUrl: (path) => `chrome-extension://id${path}`,
+    });
+    const blob = new Blob([new Uint8Array([1])], { type: 'image/png' });
+
+    const plain = await runner.recognize(job('eng'), blob, new AbortController().signal);
+    expect(plain.regions).toEqual([{
+      text: 'hello world',
+      confidence: 0.9,
+      boundingBox: { x: 1, y: 1, width: 89, height: 11 },
+    }]);
+    const asked = await runner.recognize(
+      { ...job('eng'), words: true },
+      blob,
+      new AbortController().signal,
+    );
+    expect(asked.regions[0]?.words).toEqual([
+      { text: 'hello', boundingBox: { x: 1, y: 1, width: 39, height: 11 } },
+      { text: 'world', boundingBox: { x: 50, y: 1, width: 40, height: 11 } },
+    ]);
+    await runner.dispose();
+  });
+
   it('uses only local paths, reuses an exact group, and terminates on group change', async () => {
     const firstWorker = fakeWorker('one');
     const secondWorker = fakeWorker('two');

@@ -80,6 +80,8 @@ export const MAX_SOURCE_IMAGE_OBSERVER_SUBSCRIBERS = 16;
 export const MAX_SOURCE_IMAGE_IDENTITY_RETRY_FRAMES = 4;
 const MAX_IMAGE_DIMENSION = 1_000_000;
 const MAX_PRIVATE_TOKEN_INPUT = 64 * 1024;
+// How much of each end of a long part the oversized digest reads.
+const PRIVATE_TOKEN_DIGEST_END = 8 * 1024;
 const MAX_SOURCE_IMAGE_TRAVERSAL_NODES = 50_000;
 const MAX_SOURCE_IMAGE_OPEN_ROOTS = 1_024;
 const MAX_SOURCE_SHADOW_HOST_CANDIDATES = 50_000;
@@ -160,7 +162,13 @@ const CAPTURE_GEOMETRY_OR_SAFETY_ATTRIBUTES = new Set([
 
 type PrivateSourceToken =
   | { readonly kind: 'exact'; readonly value: string }
-  | { readonly kind: 'oversized' };
+  | {
+      readonly kind: 'oversized';
+      readonly length: number;
+      readonly first: number;
+      readonly second: number;
+    }
+  | { readonly kind: 'unreadable' };
 
 interface ImageFacts {
   readonly renderedWidth: number;
@@ -198,8 +206,9 @@ interface ObservedImageState {
   lastEvent?: Extract<SourceImageObservationEvent, { kind: 'upsert' }>;
 }
 
-const OVERSIZED_PRIVATE_SOURCE_TOKEN: PrivateSourceToken = Object.freeze({
-  kind: 'oversized',
+// The parts could not be read at all, so there is nothing to compare.
+const UNREADABLE_PRIVATE_SOURCE_TOKEN: PrivateSourceToken = Object.freeze({
+  kind: 'unreadable',
 });
 
 /**
@@ -2521,7 +2530,7 @@ function readPrivateSourceToken(image: HTMLImageElement): PrivateSourceToken {
       typeof sizes === 'string' ? sizes : '',
     ];
   } catch {
-    return OVERSIZED_PRIVATE_SOURCE_TOKEN;
+    return UNREADABLE_PRIVATE_SOURCE_TOKEN;
   }
   return encodePrivateToken(parts);
 }
@@ -2538,8 +2547,8 @@ function readPrivateProcessingTokens(image: HTMLImageElement): {
   const path = readSourceFlatTreeElementPath(image);
   if (!path) {
     return Object.freeze({
-      routingToken: OVERSIZED_PRIVATE_SOURCE_TOKEN,
-      layoutToken: OVERSIZED_PRIVATE_SOURCE_TOKEN,
+      routingToken: UNREADABLE_PRIVATE_SOURCE_TOKEN,
+      layoutToken: UNREADABLE_PRIVATE_SOURCE_TOKEN,
     });
   }
   const routingParts: string[] = [];
@@ -2583,8 +2592,8 @@ function readPrivateProcessingTokens(image: HTMLImageElement): {
     }
   } catch {
     return Object.freeze({
-      routingToken: OVERSIZED_PRIVATE_SOURCE_TOKEN,
-      layoutToken: OVERSIZED_PRIVATE_SOURCE_TOKEN,
+      routingToken: UNREADABLE_PRIVATE_SOURCE_TOKEN,
+      layoutToken: UNREADABLE_PRIVATE_SOURCE_TOKEN,
     });
   }
   return Object.freeze({
@@ -2616,7 +2625,7 @@ function encodePrivateToken(parts: readonly string[]): PrivateSourceToken {
   for (const part of parts) {
     encodedLength += String(part.length).length + 1 + part.length;
     if (encodedLength > MAX_PRIVATE_TOKEN_INPUT) {
-      return OVERSIZED_PRIVATE_SOURCE_TOKEN;
+      return digestPrivateToken(parts);
     }
   }
   let value = '';
@@ -2629,18 +2638,67 @@ function encodePrivateToken(parts: readonly string[]): PrivateSourceToken {
   });
 }
 
+/**
+ * Oversized URL-like strings are never retained. Their token is a digest
+ * instead: two 32-bit mixes of the length-prefixed parts, and the total
+ * length. One shared marker made every oversized token equal, so a paint or
+ * routing change in an oversized token went unnoticed; calling every
+ * oversized token changed would make each geometry refresh a new revision
+ * (D121). The digest is for noticing a change, not for security: the first
+ * mix is FNV-1a, and the second turns its state before each unit, so that
+ * its low bits do not follow the first's (FNV-1 from another seed is the
+ * same recurrence: bit 0 of both was the input's parity).
+ *
+ * A refresh runs on every scroll frame for a visible image, and hashing a
+ * megabyte takes over a millisecond. So a long part is read at its two ends
+ * only, with its length: the cost stays the same however large the address
+ * is. A change inside such a part that keeps its length is left to the
+ * mutation or load callback that forces it.
+ */
+function digestPrivateToken(parts: readonly string[]): PrivateSourceToken {
+  let first = 0x811c9dc5;
+  let second = 0x9747b28c;
+  let length = 0;
+  for (const part of parts) {
+    const read = `${part.length}:${
+      part.length <= 2 * PRIVATE_TOKEN_DIGEST_END
+        ? part
+        : part.slice(0, PRIVATE_TOKEN_DIGEST_END) +
+          part.slice(part.length - PRIVATE_TOKEN_DIGEST_END)
+    }`;
+    // One plain loop: a helper closing over both hashes ran five times
+    // slower.
+    for (let index = 0; index < read.length; index += 1) {
+      const unit = read.charCodeAt(index);
+      first = Math.imul(first ^ unit, 0x01000193);
+      second = Math.imul(((second << 13) | (second >>> 19)) ^ unit, 0x5bd1e995);
+    }
+    length += String(part.length).length + 1 + part.length;
+  }
+  return Object.freeze({
+    kind: 'oversized',
+    length,
+    first: first >>> 0,
+    second: second >>> 0,
+  });
+}
+
 function privateSourceTokenChanged(
   previous: PrivateSourceToken,
   current: PrivateSourceToken,
 ): boolean {
-  if (previous.kind === 'oversized' || current.kind === 'oversized') {
-    // Oversized URL-like strings are never retained. Mutation/load callbacks
-    // explicitly force content invalidation; geometry/measurement refreshes
-    // must otherwise treat a stable oversized sentinel as stable to avoid a
-    // revision/capture hot loop.
-    return previous.kind !== current.kind;
+  if (previous.kind === 'exact' && current.kind === 'exact') {
+    return previous.value !== current.value;
   }
-  return previous.value !== current.value;
+  if (previous.kind === 'oversized' && current.kind === 'oversized') {
+    return previous.length !== current.length ||
+      previous.first !== current.first ||
+      previous.second !== current.second;
+  }
+  // Two unreadable tokens have nothing to compare. Mutation/load callbacks
+  // explicitly force content invalidation; geometry/measurement refreshes
+  // must otherwise treat them as stable to avoid a revision/capture hot loop.
+  return previous.kind !== current.kind;
 }
 
 function readImageFacts(image: HTMLImageElement): ImageFacts | undefined {

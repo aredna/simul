@@ -19,6 +19,8 @@ interface Options {
   tabs?: FollowerTab[];
   windowTypes?: Record<number, string>;
   allSitesAccess?: boolean;
+  /** What the worker answers a starting companion window (D121). */
+  waitingAuthorization?: () => Promise<unknown>;
 }
 
 function setup(options: Options = {}) {
@@ -37,6 +39,7 @@ function setup(options: Options = {}) {
     getCurrentWindowId: vi.fn(async () => options.panelWindowId),
     getLastFocusedNormalWindowId: vi.fn(async () => 1),
     hasAllSitesAccess: vi.fn(async () => options.allSitesAccess ?? false),
+    requestWindowAuthorization: vi.fn(options.waitingAuthorization ?? (async () => null)),
     windowIdNone: -1,
   };
   const state = new CompanionState({
@@ -475,6 +478,159 @@ describe('SourceFollower in a detached window', () => {
     expect(harness.queueCapture).toHaveBeenCalledWith({
       identity: { tabId: 4, windowId: 1, url: 'https://a.example/' },
       reason: 'initial',
+    });
+  });
+
+  describe('a newer toolbar click took the window over while it was loading (D121)', () => {
+    const opened = { tabId: 4, windowId: 1 };
+    const tabs = [page(4, 1, 'https://a.example/'), page(6, 2, 'https://b.example/')];
+    const newer = {
+      type: 'simul:authorized-tab',
+      tabId: 6,
+      windowId: 2,
+      url: 'https://b.example/',
+      launchEpoch: '7.epoch',
+      launchSequence: 2,
+    };
+    const newerIdentity = { tabId: 6, windowId: 2, url: 'https://b.example/' };
+
+    it('takes the authorization that waited with the worker over the page it was opened for', async () => {
+      const harness = setup({
+        detached: opened,
+        popoutTabMode: 'active',
+        panelWindowId: 9,
+        tabs,
+        waitingAuthorization: async () => newer,
+      });
+      await harness.follower.initializeSourcePage();
+      expect(harness.browser.requestWindowAuthorization).toHaveBeenCalledOnce();
+      expect(harness.state.followedPageIdentity).toEqual(newerIdentity);
+      expect(harness.queueCapture).toHaveBeenLastCalledWith({
+        identity: newerIdentity,
+        reason: 'authorized',
+      });
+      expect(harness.state.latestToolbarLaunchStamp).toEqual({ epoch: '7.epoch', sequence: 2 });
+    });
+
+    it('takes it when the worker answers after its own page was looked up', async () => {
+      let answer: (value: unknown) => void = () => undefined;
+      const harness = setup({
+        detached: opened,
+        popoutTabMode: 'active',
+        panelWindowId: 9,
+        tabs,
+        waitingAuthorization: () => new Promise((resolve) => { answer = resolve; }),
+      });
+      const started = harness.follower.initializeSourcePage();
+      await vi.advanceTimersByTimeAsync(0);
+      // Its own page shows meanwhile.
+      expect(harness.state.followedPageIdentity?.tabId).toBe(4);
+      answer(newer);
+      await started;
+      expect(harness.state.followedPageIdentity).toEqual(newerIdentity);
+      expect(harness.queueCapture).toHaveBeenLastCalledWith({
+        identity: newerIdentity,
+        reason: 'authorized',
+      });
+    });
+
+    it('does not look its own page up over an authorization that came as a message first', async () => {
+      const harness = setup({
+        detached: opened,
+        popoutTabMode: 'active',
+        panelWindowId: 9,
+        tabs,
+        // The worker kept the same message; it is not newer than itself.
+        waitingAuthorization: async () => newer,
+      });
+      await harness.follower.acceptAuthorizedTab({
+        identity: newerIdentity,
+        launchStamp: { epoch: '7.epoch', sequence: 2 },
+      });
+      await harness.follower.initializeSourcePage();
+      expect(harness.state.followedPageIdentity).toEqual(newerIdentity);
+      expect(harness.queueCapture).toHaveBeenCalledTimes(1);
+      expect(harness.browser.queryActiveTab).not.toHaveBeenCalled();
+    });
+
+    it('gives way to a message that comes while its own page is looked up', async () => {
+      const harness = setup({ detached: opened, popoutTabMode: 'active', panelWindowId: 9, tabs });
+      let lookedUp: (tab: FollowerTab | undefined) => void = () => undefined;
+      vi.mocked(harness.browser.queryActiveTab).mockImplementationOnce(
+        () => new Promise((resolve) => { lookedUp = resolve; }),
+      );
+      const started = harness.follower.initializeSourcePage();
+      await vi.advanceTimersByTimeAsync(0);
+      await harness.follower.acceptAuthorizedTab({
+        identity: newerIdentity,
+        launchStamp: { epoch: '7.epoch', sequence: 2 },
+      });
+      lookedUp(tabs[0]);
+      await started;
+      expect(harness.state.followedPageIdentity).toEqual(newerIdentity);
+      expect(harness.queueCapture).toHaveBeenCalledTimes(1);
+    });
+
+    it('does not call an unreadable opening page an error when a newer authorization waited', async () => {
+      const unreadable = [page(4, 1, 'chrome-extension://simul/offscreen.html'), tabs[1]!];
+      const taken = setup({
+        detached: opened,
+        popoutTabMode: 'active',
+        panelWindowId: 9,
+        tabs: unreadable,
+        waitingAuthorization: async () => newer,
+      });
+      await expect(taken.follower.initializeSourcePage()).resolves.toBeUndefined();
+      expect(taken.state.followedPageIdentity).toEqual(newerIdentity);
+      // With nothing waiting it is the error it was.
+      const alone = setup({
+        detached: opened,
+        popoutTabMode: 'active',
+        panelWindowId: 9,
+        tabs: unreadable,
+      });
+      await expect(alone.follower.initializeSourcePage()).rejects.toThrow('Open a regular HTTP');
+      expect(alone.queueCapture).not.toHaveBeenCalled();
+    });
+
+    it('keeps the page it was opened for when the worker has nothing, or cannot be asked', async () => {
+      for (const waitingAuthorization of [
+        async () => null,
+        async () => ({ type: 'simul:authorized-tab', tabId: 6 }),
+        async () => { throw new Error('Could not establish connection.'); },
+      ]) {
+        const harness = setup({
+          detached: opened,
+          popoutTabMode: 'active',
+          panelWindowId: 9,
+          tabs,
+          waitingAuthorization,
+        });
+        await harness.follower.initializeSourcePage();
+        expect(harness.queueCapture).toHaveBeenCalledTimes(1);
+        expect(harness.queueCapture).toHaveBeenCalledWith({
+          identity: { tabId: 4, windowId: 1, url: 'https://a.example/' },
+          reason: 'initial',
+        });
+      }
+    });
+
+    it('stays on its own tab while pinned, whatever waited', async () => {
+      const harness = setup({
+        detached: opened,
+        panelWindowId: 9,
+        tabs,
+        waitingAuthorization: async () => newer,
+      });
+      await harness.follower.initializeSourcePage();
+      expect(harness.state.followedPageIdentity?.tabId).toBe(4);
+      expect(harness.queueCapture).toHaveBeenCalledTimes(1);
+    });
+
+    it('asks nothing of the worker in the side panel', async () => {
+      const harness = setup({ panelWindowId: 1, tabs: [page(4, 1, 'https://a.example/')] });
+      await harness.follower.initializeSourcePage();
+      expect(harness.browser.requestWindowAuthorization).not.toHaveBeenCalled();
     });
   });
 
