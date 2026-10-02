@@ -316,8 +316,9 @@ complete design and browser-boundary rationale.
   `file://` tabs, even with **Allow access to file URLs** on. Select
   **Open a PDF file…** in the panel, or drop the file on it.
 - **Nothing translates at all:** the browser must have the Translator API
-  (Chrome 138 or newer, or Edge 148 or newer, on a computer). Other browsers
-  can load Simul but cannot translate with it.
+  (Chrome 138 or newer, Edge 148 or newer, or Opera 122 or newer, on a
+  computer; https://caniuse.com/mdn-api_translator lists them). Other
+  browsers can load Simul but cannot translate with it.
 - **A language pair is unavailable:** update Chrome and allow its on-device
   Translator to prepare that pair.
 - **Automatic translation paused after navigation:** temporary `activeTab`

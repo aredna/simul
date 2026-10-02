@@ -5,8 +5,8 @@ PDF you are reading next to the original, as a live, read-only mirror in the
 side panel or a separate window.
 
 Translation happens on your own computer. Simul uses the browser's built-in
-**Translator API**: Chrome and Edge translate with language models that run on
-your device. Page text never leaves your machine: there is no server, no
+**Translator API**: Chrome, Edge and Opera translate with language models that
+run on your device. Page text never leaves your machine: there is no server, no
 account, and no API key. Text inside images is read locally too, with the
 Tesseract OCR engine packaged in the extension.
 
@@ -16,24 +16,27 @@ too.
 
 ## Requirements
 
-- Google Chrome 138 or newer, or Microsoft Edge 148 or newer, on a desktop or
-  laptop (Simul is tested in Chrome)
+- Google Chrome 138 or newer, Microsoft Edge 148 or newer, or Opera 122 or
+  newer, on a desktop or laptop (Simul is tested in Chrome)
 - About 43 MB of disk space
+
+Any browser that supports the Translator API should work. You can check a
+browser at [caniuse.com](https://caniuse.com/mdn-api_translator).
 
 The first time you translate into a new language, the browser may download
 that language pack.
 
 **Where it does not work:** Firefox, Safari, and browsers on phones and tablets
-do not have the Translator API. Other Chromium-based browsers, such as Brave,
-Opera, or Vivaldi, can load Simul but translate only if they include the API.
+do not have the Translator API. Other Chromium-based browsers, such as Brave or
+Vivaldi, can load Simul but translate only if they include the API.
 
 ## Install
 
 1. Download `simul-<version>-chrome-unpacked.zip` from the
    [latest release](https://github.com/aredna/simul/releases/latest) and unzip
    it.
-2. Open `chrome://extensions` (`edge://extensions` in Edge) and turn on
-   **Developer mode**.
+2. Open `chrome://extensions` (`edge://extensions` in Edge,
+   `opera://extensions` in Opera) and turn on **Developer mode**.
 3. Select **Load unpacked** and choose the `chrome-unpacked` folder.
 
 To update, replace the folder and select **Reload** on the Simul card.
