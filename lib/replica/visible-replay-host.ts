@@ -1,10 +1,9 @@
 import { displayScale } from '../display-scale';
 import type { MirrorDisplayMode } from '../preferences';
 import {
+  MAX_SCROLL_PANES,
+  PRIMARY_SCROLL_MAX,
   VISUAL_SCALE_MAX,
-  findPrimaryNestedScroller,
-  readNestedScrollSnapshot,
-  type PrimaryScrollTarget,
 } from '../primary-scroll';
 
 export const STATIC_REPLAY_LABEL = 'Replica reconnecting';
@@ -37,18 +36,31 @@ export interface VisibleReplayLayout {
   readonly sourceZoomFactor?: number;
 }
 
+/**
+ * A pane that scrolls on its own in the tab (D122): the mirror node id of
+ * the element, and how far it is scrolled inside its own range.
+ */
+export interface VisibleReplayPaneScroll {
+  readonly nodeId: number;
+  readonly scrollX: number;
+  readonly scrollY: number;
+  readonly maxScrollX: number;
+  readonly maxScrollY: number;
+}
+
+/** Finds the replica's node for a mirror node id. */
+export type VisibleReplayNodeResolver = (nodeId: number) => Node | undefined;
+
 export interface VisibleReplayScroll {
+  /** The document's place and, when known, its scroll ranges. */
   readonly scrollX: number;
   readonly scrollY: number;
   readonly maxScrollX?: number;
   readonly maxScrollY?: number;
-  readonly nestedOwnerKey?: number;
-  readonly nestedOwnerOrdinal?: number;
-  readonly scrollTarget?: PrimaryScrollTarget;
-  readonly documentScrollX?: number;
-  readonly documentScrollY?: number;
-  readonly documentMaxScrollX?: number;
-  readonly documentMaxScrollY?: number;
+  /** Every pane that is not at its start; one not listed is at its start. */
+  readonly panes?: readonly VisibleReplayPaneScroll[];
+  /** The viewport-scale pane the tab scrolls in place of its document. */
+  readonly primaryPaneId?: number;
   /** The tab's pinch zoom and its corner in the layout viewport (D115). */
   readonly visualScale?: number;
   readonly visualOffsetX?: number;
@@ -66,7 +78,15 @@ const NO_VISUAL_ZOOM: VisualViewport = Object.freeze({ scale: 1, offsetX: 0, off
 
 export interface VisibleReplayCandidateLease {
   readonly mount: HTMLElement;
-  commit(iframe: HTMLIFrameElement, extent: VisibleReplayExtent): void;
+  /**
+   * `resolveNode` finds this replica's node for a mirror node id, so the
+   * host can put the panes the tab scrolled at their place (D122).
+   */
+  commit(
+    iframe: HTMLIFrameElement,
+    extent: VisibleReplayExtent,
+    resolveNode?: VisibleReplayNodeResolver,
+  ): void;
   release(): void;
 }
 
@@ -109,13 +129,10 @@ export class VisibleReplayHost implements ReplayPresentationHost {
   #sourceScrollY = 0;
   #sourceMaxScrollX = 0;
   #sourceMaxScrollY = 0;
-  #sourceDocumentScrollX = 0;
-  #sourceDocumentScrollY = 0;
-  #sourceDocumentMaxScrollX = 0;
-  #sourceDocumentMaxScrollY = 0;
-  #sourceScrollTarget: PrimaryScrollTarget = 'document';
-  #nestedOwnerKey: number | undefined;
-  #nestedOwnerOrdinal: number | undefined;
+  /** The panes the tab has scrolled, as last followed (D122). */
+  #sourcePanes: readonly VisibleReplayPaneScroll[] = [];
+  /** The one of them the tab scrolls in place of its document, if any. */
+  #primaryPane: VisibleReplayPaneScroll | undefined;
   #hasSourceScroll = false;
   /** The tab's pinch zoom, shown while the source's scrolling is followed. */
   #sourceVisual: VisualViewport = NO_VISUAL_ZOOM;
@@ -232,6 +249,7 @@ export class VisibleReplayHost implements ReplayPresentationHost {
     committed.iframe.setAttribute('height', String(committed.dimensions.viewportHeight));
     this.#setOuterScroll(committed);
     this.#projectScroll(committed);
+    this.#projectPanes(committed);
   }
 
   /**
@@ -254,83 +272,49 @@ export class VisibleReplayHost implements ReplayPresentationHost {
    * (an image load, a font, a resize) and with every checkpoint; following
    * those would throw away the reader's own scrolling in the replica, so a
    * repeat is ignored unless `force` asks to re-align (following turned on).
+   *
+   * A pane that scrolls on its own is put at its place whatever the page did
+   * (D122). Its move is not a move of the page: the replica document and the
+   * reader's own scrolling stay where they are.
    */
   followSourceScroll(scroll: VisibleReplayScroll, force = false): void {
     const lastFollowed = this.#lastFollowedScroll;
     this.#lastFollowedScroll = scroll;
+    const committed = this.#committed;
+    const previousPrimaryPane = this.#primaryPane;
+    this.#sourcePanes = readPanes(scroll.panes);
+    this.#primaryPane = this.#sourcePanes.find(
+      ({ nodeId }) => nodeId === scroll.primaryPaneId,
+    );
+    // A pane the replica cannot scroll moves the page in its place, so its
+    // move in the tab is a move of the page. Both places are read against
+    // the replica as it is now: a pane that gains its own range in the
+    // replica (a late style, a translation) has not moved in the tab, and
+    // the reader's own scrolling stays.
+    const standInMoved = committed !== undefined && !samePanePosition(
+      this.#documentStandIn(committed, previousPrimaryPane),
+      this.#documentStandIn(committed, this.#primaryPane),
+    );
     if (
-      !force &&
-      lastFollowed &&
-      sameSourceScrollPosition(lastFollowed, scroll)
-    ) return;
+      force ||
+      !lastFollowed ||
+      !sameSourceScrollPosition(lastFollowed, scroll) ||
+      standInMoved
+    ) this.#followPage(scroll);
+    if (committed) this.#projectPanes(committed);
+  }
+
+  /** The document, a pane standing in for it, or the pinch zoom moved. */
+  #followPage(scroll: VisibleReplayScroll): void {
     this.#readerScroll = undefined;
-    const previousTarget = this.#sourceScrollTarget;
-    const nextNestedOwnerKey = scroll.scrollTarget === 'nested' &&
-        Number.isSafeInteger(scroll.nestedOwnerKey) &&
-        Number(scroll.nestedOwnerKey) > 0
-      ? scroll.nestedOwnerKey
-      : undefined;
-    this.#sourceScrollTarget = scroll.scrollTarget === 'nested'
-      ? 'nested'
-      : 'document';
     this.#hasSourceScroll = true;
     const committed = this.#committed;
-    if (
-      previousTarget !== this.#sourceScrollTarget ||
-      (
-        this.#sourceScrollTarget === 'nested' &&
-        nextNestedOwnerKey !== undefined &&
-        nextNestedOwnerKey !== this.#nestedOwnerKey
-      )
-    ) {
-      if (committed) committed.nestedScroller = undefined;
-    }
-    this.#nestedOwnerKey = nextNestedOwnerKey;
-    this.#nestedOwnerOrdinal = scroll.scrollTarget === 'nested' &&
-        Number.isSafeInteger(scroll.nestedOwnerOrdinal) &&
-        Number(scroll.nestedOwnerOrdinal) >= 0
-      ? scroll.nestedOwnerOrdinal
-      : undefined;
     this.#sourceMaxScrollX = Number.isFinite(scroll.maxScrollX)
       ? boundedScroll(scroll.maxScrollX)
       : committed ? maximumSourceScrollX(committed) : boundedScroll(scroll.scrollX);
     this.#sourceMaxScrollY = Number.isFinite(scroll.maxScrollY)
       ? boundedScroll(scroll.maxScrollY)
       : committed ? maximumSourceScrollY(committed) : boundedScroll(scroll.scrollY);
-    if (this.#sourceScrollTarget === 'document') {
-      this.#sourceDocumentMaxScrollX = this.#sourceMaxScrollX;
-      this.#sourceDocumentMaxScrollY = this.#sourceMaxScrollY;
-      this.#sourceDocumentScrollX = clamp(
-        scroll.scrollX,
-        0,
-        this.#sourceDocumentMaxScrollX,
-      );
-      this.#sourceDocumentScrollY = clamp(
-        scroll.scrollY,
-        0,
-        this.#sourceDocumentMaxScrollY,
-      );
-    } else if (
-      [
-        scroll.documentScrollX,
-        scroll.documentScrollY,
-        scroll.documentMaxScrollX,
-        scroll.documentMaxScrollY,
-      ].every((value) => typeof value === 'number' && Number.isFinite(value))
-    ) {
-      this.#sourceDocumentMaxScrollX = boundedScroll(scroll.documentMaxScrollX);
-      this.#sourceDocumentMaxScrollY = boundedScroll(scroll.documentMaxScrollY);
-      this.#sourceDocumentScrollX = clamp(
-        scroll.documentScrollX as number,
-        0,
-        this.#sourceDocumentMaxScrollX,
-      );
-      this.#sourceDocumentScrollY = clamp(
-        scroll.documentScrollY as number,
-        0,
-        this.#sourceDocumentMaxScrollY,
-      );
-    }
     this.#sourceScrollX = clamp(
       scroll.scrollX,
       0,
@@ -363,22 +347,16 @@ export class VisibleReplayHost implements ReplayPresentationHost {
   }
 
   resetSourceScroll(): void {
-    this.#sourceScrollTarget = 'document';
-    this.#nestedOwnerKey = undefined;
-    this.#nestedOwnerOrdinal = undefined;
     this.#sourceScrollX = 0;
     this.#sourceScrollY = 0;
     this.#sourceMaxScrollX = 0;
     this.#sourceMaxScrollY = 0;
-    this.#sourceDocumentScrollX = 0;
-    this.#sourceDocumentScrollY = 0;
-    this.#sourceDocumentMaxScrollX = 0;
-    this.#sourceDocumentMaxScrollY = 0;
+    this.#sourcePanes = [];
+    this.#primaryPane = undefined;
     this.#hasSourceScroll = false;
     this.#sourceVisual = NO_VISUAL_ZOOM;
     this.#readerScroll = undefined;
     this.#lastFollowedScroll = undefined;
-    if (this.#committed) this.#committed.nestedScroller = undefined;
   }
 
   markLive(iframe: HTMLIFrameElement): void {
@@ -401,7 +379,21 @@ export class VisibleReplayHost implements ReplayPresentationHost {
     if (
       committed.replayExtent.width === normalized.width &&
       committed.replayExtent.height === normalized.height
-    ) return;
+    ) {
+      // The page is the size it was, but a patch may have made a pane again
+      // and a translation may have lengthened one (D122). A pane that stood
+      // in for the page may have gained its own range, or lost it: the page
+      // is then put where it belongs without it (the reader's place stays).
+      if (!samePanePosition(
+        committed.standIn,
+        this.#documentStandIn(committed, this.#primaryPane),
+      )) {
+        this.#setOuterScroll(committed);
+        this.#projectScroll(committed);
+      }
+      this.#projectPanes(committed);
+      return;
+    }
     committed.replayExtent = normalized;
     this.#clampSourceScroll();
     this.#applyLayout(committed);
@@ -468,6 +460,7 @@ export class VisibleReplayHost implements ReplayPresentationHost {
     candidate: CandidateLease,
     iframe: HTMLIFrameElement,
     extent: VisibleReplayExtent,
+    resolveNode?: VisibleReplayNodeResolver,
   ): void {
     if (
       this.#disposed ||
@@ -480,25 +473,19 @@ export class VisibleReplayHost implements ReplayPresentationHost {
       throw new Error('The replay candidate is not eligible for presentation.');
     }
 
-    candidate.markCommitted(iframe, normalizeExtent(extent));
+    candidate.markCommitted(iframe, normalizeExtent(extent), resolveNode);
     const previous = this.#committed;
     if (!this.#hasSourceScroll) {
-      this.#sourceScrollTarget = 'document';
       this.#sourceMaxScrollX = maximumSourceScrollX(candidate);
       this.#sourceMaxScrollY = maximumSourceScrollY(candidate);
       this.#sourceScrollX = boundedScroll(iframe.contentWindow?.scrollX);
       this.#sourceScrollY = boundedScroll(iframe.contentWindow?.scrollY);
-      this.#sourceDocumentMaxScrollX = this.#sourceMaxScrollX;
-      this.#sourceDocumentMaxScrollY = this.#sourceMaxScrollY;
-      this.#sourceDocumentScrollX = this.#sourceScrollX;
-      this.#sourceDocumentScrollY = this.#sourceScrollY;
     } else {
       this.#clampSourceScroll();
     }
 
     candidate.installScrollListener(() => {
       if (this.#committed !== candidate || candidate.released) return;
-      if (this.#sourceScrollTarget === 'nested') return;
       const left = candidate.scroller.scrollLeft;
       const top = candidate.scroller.scrollTop;
       const projected = candidate.projectedScroll;
@@ -553,12 +540,7 @@ export class VisibleReplayHost implements ReplayPresentationHost {
   }
 
   #setOuterScroll(candidate: CandidateLease): void {
-    const { left, top } = this.#replicaDocumentScroll(
-      candidate,
-      this.#sourceScrollTarget === 'nested'
-        ? this.#primaryNestedScroller(candidate)
-        : undefined,
-    );
+    const { left, top } = this.#replicaDocumentScroll(candidate);
     candidate.scroller.scrollLeft = boundedScrollExtent(left * candidate.scale);
     candidate.scroller.scrollTop = boundedScrollExtent(top * candidate.scale);
     candidate.projectedScroll = {
@@ -570,29 +552,15 @@ export class VisibleReplayHost implements ReplayPresentationHost {
   #projectScroll(candidate: CandidateLease): void {
     const target = candidate.iframe.contentWindow;
     if (!target || typeof target.scrollTo !== 'function') return;
-    const nested = this.#sourceScrollTarget === 'nested'
-      ? this.#primaryNestedScroller(candidate)
-      : undefined;
-    if (nested) {
-      const maxScrollX = Math.max(0, nested.scrollWidth - nested.clientWidth);
-      const maxScrollY = Math.max(0, nested.scrollHeight - nested.clientHeight);
-      nested.scrollLeft = projectProgress(
-        this.#sourceScrollX,
-        this.#sourceMaxScrollX,
-        maxScrollX,
-      );
-      nested.scrollTop = projectProgress(
-        this.#sourceScrollY,
-        this.#sourceMaxScrollY,
-        maxScrollY,
-      );
-    }
-    const { left, top } = this.#replicaDocumentScroll(candidate, nested);
+    const { left, top } = this.#replicaDocumentScroll(candidate);
     try {
+      // At once: the replica keeps the page's own `scroll-behavior`, and a
+      // page that asks for smooth scrolling would otherwise animate every
+      // followed move and lag behind the tab (D122).
       target.scrollTo({
         left,
         top,
-        behavior: 'auto',
+        behavior: 'instant',
       });
     } catch {
       try {
@@ -605,85 +573,115 @@ export class VisibleReplayHost implements ReplayPresentationHost {
   }
 
   /**
+   * Puts every pane the tab has scrolled at the same share of its own range
+   * in the replica, and sends one the report no longer lists back to its
+   * start (D122). A pane is found by its node id, never by what is in view.
+   * Only the panes move: not the replica document, not the panel's scroller
+   * and not the reader's own place.
+   */
+  #projectPanes(candidate: CandidateLease): void {
+    const listed = new Set<number>();
+    for (const pane of this.#sourcePanes) {
+      listed.add(pane.nodeId);
+      const element = candidate.paneElement(pane.nodeId);
+      if (!element) continue;
+      candidate.placedPanes.add(pane.nodeId);
+      scrollPaneTo(
+        element,
+        projectPaneOffset(pane.scrollX, pane.maxScrollX, scrollRangeX(element)),
+        projectPaneOffset(pane.scrollY, pane.maxScrollY, scrollRangeY(element)),
+      );
+    }
+    for (const nodeId of candidate.placedPanes) {
+      if (listed.has(nodeId)) continue;
+      candidate.placedPanes.delete(nodeId);
+      const element = candidate.paneElement(nodeId);
+      if (element) scrollPaneTo(element, 0, 0);
+    }
+  }
+
+  /**
+   * The part of the tab's viewport-scale pane that the replica cannot scroll
+   * and that therefore moves the replica document instead (D100). It is
+   * decided for each axis: the pane stands in on an axis where the tab's
+   * pane has a range and the replica's has none (the element is not there,
+   * or the replica lays it out without that range). On an axis the replica
+   * can scroll, the pane is placed like any other and adds nothing here.
+   */
+  #documentStandIn(
+    candidate: CandidateLease,
+    pane: VisibleReplayPaneScroll | undefined,
+  ): VisibleReplayPaneScroll | undefined {
+    if (!pane) return undefined;
+    const element = candidate.paneElement(pane.nodeId);
+    const standsX = pane.maxScrollX > 0 &&
+      !(element && scrollRangeX(element) > 0);
+    const standsY = pane.maxScrollY > 0 &&
+      !(element && scrollRangeY(element) > 0);
+    const scrollX = standsX ? pane.scrollX : 0;
+    const scrollY = standsY ? pane.scrollY : 0;
+    if (scrollX === 0 && scrollY === 0) return undefined;
+    return {
+      nodeId: pane.nodeId,
+      scrollX,
+      scrollY,
+      maxScrollX: standsX ? pane.maxScrollX : 0,
+      maxScrollY: standsY ? pane.maxScrollY : 0,
+    };
+  }
+
+  /**
    * Where the replica document sits. The reader's own scroll stays put.
    * Otherwise the source's share of its scroll range becomes the same share
    * of the replica's: a translation that lengthens the page scrolls the
-   * replica further, and both reach the end together. When the source
-   * follows a nested pane the replica has no match for, that pane's progress
-   * moves the replica document instead.
+   * replica further, and both reach the end together. When the tab scrolls a
+   * viewport-scale pane the replica cannot scroll on an axis, that pane's
+   * progress on that axis moves the replica document as well.
    */
   #replicaDocumentScroll(
     candidate: CandidateLease,
-    nested: HTMLElement | undefined,
   ): { readonly left: number; readonly top: number } {
     const maxScrollX = maximumSourceScrollX(candidate);
     const maxScrollY = maximumSourceScrollY(candidate);
+    const standIn = this.#documentStandIn(candidate, this.#primaryPane);
+    candidate.standIn = standIn;
     if (this.#readerScroll) {
       return {
         left: clamp(this.#readerScroll.left, 0, maxScrollX),
         top: clamp(this.#readerScroll.top, 0, maxScrollY),
       };
     }
-    if (this.#sourceScrollTarget === 'document') {
-      return {
-        left: projectProgress(this.#sourceScrollX, this.#sourceMaxScrollX, maxScrollX),
-        top: projectProgress(this.#sourceScrollY, this.#sourceMaxScrollY, maxScrollY),
-      };
-    }
     const left = projectProgress(
-      this.#sourceDocumentScrollX,
-      this.#sourceDocumentMaxScrollX,
+      this.#sourceScrollX,
+      this.#sourceMaxScrollX,
       maxScrollX,
     );
     const top = projectProgress(
-      this.#sourceDocumentScrollY,
-      this.#sourceDocumentMaxScrollY,
+      this.#sourceScrollY,
+      this.#sourceMaxScrollY,
       maxScrollY,
     );
-    if (nested) return { left, top };
+    if (!standIn) return { left, top };
     return {
       left: clamp(
-        left + projectProgress(this.#sourceScrollX, this.#sourceMaxScrollX, maxScrollX),
+        left + projectProgress(
+          Math.abs(standIn.scrollX),
+          standIn.maxScrollX,
+          maxScrollX,
+        ),
         0,
         maxScrollX,
       ),
       top: clamp(
-        top + projectProgress(this.#sourceScrollY, this.#sourceMaxScrollY, maxScrollY),
+        top + projectProgress(
+          Math.abs(standIn.scrollY),
+          standIn.maxScrollY,
+          maxScrollY,
+        ),
         0,
         maxScrollY,
       ),
     };
-  }
-
-  #primaryNestedScroller(candidate: CandidateLease): HTMLElement | undefined {
-    const targetDocument = candidate.iframe.contentDocument;
-    if (!targetDocument) return undefined;
-    const viewport = {
-      innerWidth: candidate.dimensions.viewportWidth,
-      innerHeight: candidate.dimensions.viewportHeight,
-      ...(targetDocument.defaultView?.getComputedStyle
-        ? {
-            getComputedStyle: targetDocument.defaultView.getComputedStyle.bind(
-              targetDocument.defaultView,
-            ),
-          }
-        : {}),
-    };
-    if (
-      candidate.nestedScroller &&
-      readNestedScrollSnapshot(
-        candidate.nestedScroller,
-        targetDocument,
-        viewport,
-      )
-    ) return candidate.nestedScroller;
-    const found = findPrimaryNestedScroller(
-      targetDocument,
-      viewport,
-      this.#nestedOwnerOrdinal,
-    );
-    candidate.nestedScroller = found as HTMLElement | undefined;
-    return candidate.nestedScroller;
   }
 
   #clampSourceScroll(): void {
@@ -696,16 +694,6 @@ export class VisibleReplayHost implements ReplayPresentationHost {
       this.#sourceScrollY,
       0,
       this.#sourceMaxScrollY,
-    );
-    this.#sourceDocumentScrollX = clamp(
-      this.#sourceDocumentScrollX,
-      0,
-      this.#sourceDocumentMaxScrollX,
-    );
-    this.#sourceDocumentScrollY = clamp(
-      this.#sourceDocumentScrollY,
-      0,
-      this.#sourceDocumentMaxScrollY,
     );
   }
 
@@ -729,7 +717,12 @@ class CandidateLease implements VisibleReplayCandidateLease {
   scale = 1;
   live = false;
   released = false;
-  nestedScroller: HTMLElement | undefined;
+  /** Finds this replica's node for a mirror node id (D122). */
+  resolveNode: VisibleReplayNodeResolver | undefined;
+  /** Node ids of the panes this replica was scrolled at, to put them back. */
+  readonly placedPanes = new Set<number>();
+  /** What a pane added to this replica's page place when it was last set. */
+  standIn: VisibleReplayPaneScroll | undefined;
   /** The panel scroll offsets the host last set, to recognize their echo. */
   projectedScroll: { readonly left: number; readonly top: number } | undefined;
   canvasBackgroundColor: string | undefined;
@@ -778,13 +771,22 @@ class CandidateLease implements VisibleReplayCandidateLease {
     this.applyCanvasBackground();
   }
 
-  commit(iframe: HTMLIFrameElement, extent: VisibleReplayExtent): void {
-    this.host.commitCandidate(this, iframe, extent);
+  commit(
+    iframe: HTMLIFrameElement,
+    extent: VisibleReplayExtent,
+    resolveNode?: VisibleReplayNodeResolver,
+  ): void {
+    this.host.commitCandidate(this, iframe, extent, resolveNode);
   }
 
-  markCommitted(iframe: HTMLIFrameElement, extent: VisibleReplayExtent): void {
+  markCommitted(
+    iframe: HTMLIFrameElement,
+    extent: VisibleReplayExtent,
+    resolveNode: VisibleReplayNodeResolver | undefined,
+  ): void {
     this.iframe = iframe;
     this.replayExtent = extent;
+    this.resolveNode = resolveNode;
     delete this.root.dataset.simulReplicaCandidate;
     this.root.dataset.simulReplicaViewport = 'v2';
   }
@@ -808,6 +810,29 @@ class CandidateLease implements VisibleReplayCandidateLease {
     }
   }
 
+  /**
+   * The replica's element for a pane: one that is in this replica's document
+   * now. Never the replica's own scroller or `html`: those follow the
+   * document, and the reader scrolls them.
+   */
+  paneElement(nodeId: number): HTMLElement | undefined {
+    const replica = this.iframe?.contentDocument;
+    let node: Node | undefined;
+    try {
+      node = this.resolveNode?.(nodeId);
+    } catch {
+      return undefined;
+    }
+    if (
+      !replica || !node || node.nodeType !== 1 ||
+      node.ownerDocument !== replica ||
+      node.isConnected === false ||
+      node === replica.documentElement ||
+      node === replica.scrollingElement
+    ) return undefined;
+    return node as HTMLElement;
+  }
+
   installScrollListener(listener: () => void): void {
     this.#scrollListener = listener;
     this.scroller.addEventListener('scroll', listener, { passive: true });
@@ -820,6 +845,8 @@ class CandidateLease implements VisibleReplayCandidateLease {
       this.scroller.removeEventListener('scroll', this.#scrollListener);
       this.#scrollListener = undefined;
     }
+    this.resolveNode = undefined;
+    this.placedPanes.clear();
     this.host.detach(this);
     this.root.remove();
   }
@@ -929,19 +956,98 @@ function computeMirrorScale(
   return displayScale(mode, fitScale, zoomPercent, sourceZoomFactor);
 }
 
-/** Same scroller, same offsets; the scrollable maxima may differ. */
+/** The document at the same offsets; its scrollable maxima may differ. */
 function sameSourceScrollPosition(
   left: VisibleReplayScroll,
   right: VisibleReplayScroll,
 ): boolean {
-  return (left.scrollTarget ?? 'document') === (right.scrollTarget ?? 'document') &&
-    left.nestedOwnerKey === right.nestedOwnerKey &&
-    left.nestedOwnerOrdinal === right.nestedOwnerOrdinal &&
-    left.scrollX === right.scrollX &&
+  return left.scrollX === right.scrollX &&
     left.scrollY === right.scrollY &&
-    left.documentScrollX === right.documentScrollX &&
-    left.documentScrollY === right.documentScrollY &&
     sameVisualViewport(readVisualViewport(left), readVisualViewport(right));
+}
+
+/** The same pane at the same offsets, or no pane both times. */
+function samePanePosition(
+  left: VisibleReplayPaneScroll | undefined,
+  right: VisibleReplayPaneScroll | undefined,
+): boolean {
+  return left?.nodeId === right?.nodeId &&
+    left?.scrollX === right?.scrollX &&
+    left?.scrollY === right?.scrollY;
+}
+
+/**
+ * The panes of a source report, each once, with numbers the replica can use.
+ * The protocol already checked them; this keeps the host safe by itself.
+ */
+function readPanes(
+  input: readonly VisibleReplayPaneScroll[] | undefined,
+): readonly VisibleReplayPaneScroll[] {
+  if (!Array.isArray(input)) return [];
+  const panes = new Map<number, VisibleReplayPaneScroll>();
+  for (const pane of input.slice(0, MAX_SCROLL_PANES)) {
+    if (
+      !pane || !Number.isSafeInteger(pane.nodeId) || pane.nodeId <= 0 ||
+      ![pane.scrollX, pane.scrollY, pane.maxScrollX, pane.maxScrollY]
+        .every((value) => typeof value === 'number' && Number.isFinite(value))
+    ) continue;
+    const maxScrollX = clamp(pane.maxScrollX, 0, PRIMARY_SCROLL_MAX);
+    const maxScrollY = clamp(pane.maxScrollY, 0, PRIMARY_SCROLL_MAX);
+    panes.set(pane.nodeId, {
+      nodeId: pane.nodeId,
+      scrollX: clamp(pane.scrollX, -maxScrollX, maxScrollX),
+      scrollY: clamp(pane.scrollY, -maxScrollY, maxScrollY),
+      maxScrollX,
+      maxScrollY,
+    });
+  }
+  return [...panes.values()];
+}
+
+function scrollRangeX(element: HTMLElement): number {
+  return Math.max(0, element.scrollWidth - element.clientWidth);
+}
+
+function scrollRangeY(element: HTMLElement): number {
+  return Math.max(0, element.scrollHeight - element.clientHeight);
+}
+
+/**
+ * A pane's offset in the replica: the same share of the replica pane's range,
+ * on the same side of its start (a right-to-left strip counts down from 0).
+ */
+function projectPaneOffset(
+  sourceOffset: number,
+  sourceMaximum: number,
+  targetMaximum: number,
+): number {
+  const offset = projectProgress(
+    Math.abs(sourceOffset),
+    sourceMaximum,
+    targetMaximum,
+  );
+  return sourceOffset < 0 ? -offset : offset;
+}
+
+/**
+ * Scrolls a replica pane at once. A page that asks for smooth scrolling
+ * would otherwise animate every followed move, and lag behind the tab.
+ */
+function scrollPaneTo(element: HTMLElement, left: number, top: number): void {
+  if (
+    Math.abs(element.scrollLeft - left) < 1 &&
+    Math.abs(element.scrollTop - top) < 1
+  ) return;
+  try {
+    if (typeof element.scrollTo === 'function') {
+      element.scrollTo({ left, top, behavior: 'instant' });
+      return;
+    }
+  } catch {
+    // Fall through to the plain offsets.
+  }
+  element.scrollLeft = left;
+  element.scrollTop = top;
 }
 
 /** The pinch zoom a source report carries; none when absent or not valid. */

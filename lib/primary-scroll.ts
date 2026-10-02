@@ -1,4 +1,11 @@
 export const PRIMARY_SCROLL_MAX = 100_000;
+/**
+ * Panes one scroll report names (D122). A page with more scrolled panes than
+ * this keeps the most recently scrolled; the others show at their start.
+ * More than this scrolling together (rows kept in step by script) are not
+ * followed at all, so that they are never torn apart.
+ */
+export const MAX_SCROLL_PANES = 256;
 
 export type PrimaryScrollTarget = 'document' | 'nested';
 
@@ -121,9 +128,11 @@ export function readDocumentScrollSnapshot(
 }
 
 /**
- * Accepts only a visible, viewport-scale vertical overflow region. This keeps
- * text controls, carousels, and incidental horizontal strips from taking over
- * source-scroll synchronization.
+ * Accepts only a visible, viewport-scale vertical overflow region: the pane
+ * an app-style page scrolls in place of its document. Every pane is followed
+ * by its own place (D122); this one's progress also moves the replica
+ * document when the replica cannot scroll the pane itself, which text
+ * controls, carousels, and incidental horizontal strips must never do.
  */
 export function readNestedScrollSnapshot(
   candidate: Element,
@@ -138,11 +147,6 @@ export function readNestedScrollSnapshot(
     candidate.isConnected === false ||
     isEditableScrollOwner(candidate)
   ) return undefined;
-  const overflowY = readOverflowY(candidate, sourceWindow);
-  if (overflowY === 'hidden' || overflowY === 'clip' || overflowY === 'visible') {
-    return undefined;
-  }
-
   const viewportWidth = positiveFinite(sourceWindow.innerWidth, 1);
   const viewportHeight = positiveFinite(sourceWindow.innerHeight, 1);
   const clientWidth = positiveFinite(candidate.clientWidth, 0);
@@ -155,7 +159,13 @@ export function readNestedScrollSnapshot(
     finite(candidate.scrollTop),
     Math.max(0, finite(candidate.scrollHeight) - clientHeight),
   );
+  // The numbers first: every scrolled strip and carousel is asked each
+  // frame it scrolls, and nearly all stop here without a style read.
   if (vertical.maximum < Math.max(96, viewportHeight * 0.2)) return undefined;
+  const overflowY = readOverflowY(candidate, sourceWindow);
+  if (overflowY === 'hidden' || overflowY === 'clip' || overflowY === 'visible') {
+    return undefined;
+  }
 
   const rect = safeRect(candidate);
   const visibleWidth = Math.max(
@@ -182,82 +192,72 @@ export function readNestedScrollSnapshot(
   });
 }
 
-/** Elements walked per scan; querySelectorAll('*') already materializes them. */
-const MAX_SCROLLER_SCAN_ELEMENTS = 50_000;
-/** Candidates that pass the cheap geometry prefilter and get a full read. */
-const MAX_SCROLLER_SCAN_CANDIDATES = 5_000;
-/** The smallest vertical overflow readNestedScrollSnapshot ever accepts. */
-const MIN_SCROLLER_OVERFLOW_PX = 96;
-
-/** Finds the strongest generic replica/source candidate without site rules. */
-export function findPrimaryNestedScroller(
-  sourceDocument: Document,
-  sourceWindow: NestedViewportLike,
-  preferredOrdinal?: number,
-): Element | undefined {
-  let best: Element | undefined;
-  let bestScore = -1;
-  let preferred: Element | undefined;
-  forEachQualifiedScroller(
-    sourceDocument,
-    sourceWindow,
-    (candidate, snapshot, qualifiedOrdinal) => {
-      if (qualifiedOrdinal === preferredOrdinal) {
-        preferred = candidate;
-        return false;
-      }
-      const score = candidate.clientWidth * candidate.clientHeight *
-        (1 + Math.log2(1 + snapshot.maxScrollY));
-      if (score > bestScore) {
-        best = candidate;
-        bestScore = score;
-      }
-      return true;
-    },
-  );
-  return preferred ?? best;
-}
-
-/** Returns a bounded, content-free ordinal among currently qualified panes. */
-export function nestedScrollerOrdinal(
-  target: Element,
-  sourceDocument: Document,
-  sourceWindow: NestedViewportLike,
-): number | undefined {
-  let ordinal: number | undefined;
-  forEachQualifiedScroller(
-    sourceDocument,
-    sourceWindow,
-    (candidate, _snapshot, qualifiedOrdinal) => {
-      if (candidate !== target) return true;
-      ordinal = qualifiedOrdinal;
-      return false;
-    },
-  );
-  return ordinal;
+/** A pane's place: how far one element is scrolled inside its own range. */
+export interface PaneScrollPlace {
+  readonly scrollX: number;
+  readonly scrollY: number;
+  readonly maxScrollX: number;
+  readonly maxScrollY: number;
 }
 
 /**
- * Walks the document and its open shadow roots in order and reports every
- * qualified nested scroller with its ordinal. The full read (computed style,
- * geometry) is budgeted over candidates that show viewport-scale overflow at
- * all, not over every element, so a long page of ordinary content cannot
- * exhaust the budget before its scroller is reached. Return false to stop.
+ * Reads the place of an element that scrolls on its own, apart from the
+ * document (D122): a board of columns, a wide table's wrapper, a carousel, a
+ * chat log. Nothing for the document's own scroller or `html`, which follow
+ * as the document, and nothing for a text field or anything inside one,
+ * which keep their own scroll. Only the element's scroll numbers are read,
+ * never its style: `body` is a pane when it scrolls apart from the document
+ * and not because its `overflow` says so. Offsets keep their sign, so a
+ * right-to-left strip or a reversed column, which count down from 0, land on
+ * the same side in the replica.
  */
-function forEachQualifiedScroller(
+export function readPaneScrollPlace(
+  candidate: Element,
   sourceDocument: Document,
-  sourceWindow: NestedViewportLike,
-  visit: (
-    candidate: Element,
-    snapshot: PrimaryScrollSnapshot,
-    qualifiedOrdinal: number,
-  ) => boolean,
+): PaneScrollPlace | undefined {
+  const documentScrollOwner = sourceDocument.scrollingElement ??
+    sourceDocument.documentElement ?? sourceDocument.body;
+  if (
+    candidate.ownerDocument !== sourceDocument ||
+    candidate === documentScrollOwner ||
+    candidate === sourceDocument.documentElement ||
+    candidate.isConnected === false ||
+    isEditableScrollOwner(candidate)
+  ) return undefined;
+  const horizontal = signedBoundedAxis(
+    finite(candidate.scrollLeft),
+    finite(candidate.scrollWidth) - finite(candidate.clientWidth),
+  );
+  const vertical = signedBoundedAxis(
+    finite(candidate.scrollTop),
+    finite(candidate.scrollHeight) - finite(candidate.clientHeight),
+  );
+  return Object.freeze({
+    scrollX: horizontal.position,
+    scrollY: vertical.position,
+    maxScrollX: horizontal.maximum,
+    maxScrollY: vertical.maximum,
+  });
+}
+
+/** Elements walked per scan; querySelectorAll('*') already materializes them. */
+const MAX_SCROLLER_SCAN_ELEMENTS = 50_000;
+
+/**
+ * Walks the document and its open shadow roots in order and visits every
+ * element that is not at its scroll start (D122), so panes scrolled before
+ * the mirror was built can be put at their place. Two number reads an
+ * element, no style and no rectangle; the walk stops after
+ * `MAX_SCROLLER_SCAN_ELEMENTS` elements, and a pane past that is picked up
+ * when it next scrolls. Return false to stop.
+ */
+export function forEachScrolledElement(
+  sourceDocument: Document,
+  visit: (candidate: Element) => boolean,
 ): void {
   const roots: ParentNode[] = [sourceDocument];
   let rootIndex = 0;
   let walked = 0;
-  let read = 0;
-  let qualifiedOrdinal = 0;
   while (rootIndex < roots.length) {
     const root = roots[rootIndex];
     rootIndex += 1;
@@ -269,32 +269,17 @@ function forEachQualifiedScroller(
       continue;
     }
     for (let index = 0; index < candidates.length; index += 1) {
-      if (
-        walked >= MAX_SCROLLER_SCAN_ELEMENTS ||
-        read >= MAX_SCROLLER_SCAN_CANDIDATES
-      ) return;
+      if (walked >= MAX_SCROLLER_SCAN_ELEMENTS) return;
       const candidate = candidates[index];
       if (!candidate) continue;
       walked += 1;
       if (candidate.shadowRoot) roots.push(candidate.shadowRoot);
-      if (!mayBeNestedScroller(candidate)) continue;
-      read += 1;
-      const snapshot = readNestedScrollSnapshot(
-        candidate,
-        sourceDocument,
-        sourceWindow,
-      );
-      if (!snapshot) continue;
-      if (!visit(candidate, snapshot, qualifiedOrdinal)) return;
-      qualifiedOrdinal += 1;
+      if (
+        finite(candidate.scrollTop) === 0 && finite(candidate.scrollLeft) === 0
+      ) continue;
+      if (!visit(candidate)) return;
     }
   }
-}
-
-/** Layout-only prefilter: no style read, no rectangle, no allocation. */
-function mayBeNestedScroller(candidate: Element): boolean {
-  return finite(candidate.scrollHeight) - finite(candidate.clientHeight) >=
-    MIN_SCROLLER_OVERFLOW_PX;
 }
 
 export function isDocumentScrollTarget(
@@ -418,6 +403,19 @@ function boundedAxis(
   return {
     position: Math.round(rawPosition * scale),
     maximum: PRIMARY_SCROLL_MAX,
+  };
+}
+
+/** A pane's axis: the sign of the offset is kept, its size is bounded. */
+function signedBoundedAxis(
+  position: number,
+  maximum: number,
+): { readonly position: number; readonly maximum: number } {
+  const axis = boundedAxis(Math.abs(position), maximum);
+  const rounded = Math.round(axis.position * 100) / 100;
+  return {
+    position: position < 0 && rounded > 0 ? -rounded : rounded,
+    maximum: Math.round(axis.maximum * 100) / 100,
   };
 }
 

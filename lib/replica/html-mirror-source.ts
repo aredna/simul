@@ -4,6 +4,7 @@ import { SourceImageObserver } from '../ocr/source-image-observer';
 import type { ReplicaDocumentIdentity } from './contracts';
 import {
   HTML_MIRROR_PORT_PREFIX,
+  MAX_HTML_MIRROR_SCROLL_PANES,
   MAX_HTML_MIRROR_UNACKED_BATCHES,
   createHtmlMirrorCheckpoint,
   createHtmlMirrorError,
@@ -12,14 +13,16 @@ import {
   encodeHtmlMirrorWireMessage,
   readHtmlMirrorControllerMessage,
   readHtmlMirrorPortSessionId,
+  type HtmlMirrorPaneScroll,
   type HtmlMirrorReconcileChild,
   type HtmlMirrorPatchOperation,
 } from './html-mirror-protocol';
 import {
+  forEachScrolledElement,
   isDocumentScrollTarget,
-  nestedScrollerOrdinal,
   readDocumentScrollSnapshot,
   readNestedScrollSnapshot,
+  readPaneScrollPlace,
   readVisualViewportSnapshot,
 } from '../primary-scroll';
 import {
@@ -423,14 +426,27 @@ export class HtmlMirrorSourceSession {
   #shadowDiscoveryTimer: unknown;
   #frame: unknown;
   #scrollFrame: unknown;
-  #activeNestedScroller: Element | undefined;
-  #pendingNestedScroller: Element | undefined;
-  #nestedOwnerKeys = new WeakMap<Element, number>();
-  #nestedOwnerOrdinals = new WeakMap<Element, number>();
-  #nextNestedOwnerKey = 1;
+  /**
+   * Elements that are not at their scroll start, the most recently scrolled
+   * last (D122). Every scroll message reads their places again, so a message
+   * is the whole state and none depends on an earlier one.
+   */
+  #scrolledPanes = new Set<Element>();
+  /** Panes that a scroll message has named. */
+  #listedPanes = new WeakSet<Element>();
+  /** Elements whose scroll event waits for the frame's one read. */
+  #pendingPanes = new Set<Element>();
+  /** More elements scrolled in this frame than one message names. */
+  #pendingPaneBurst = false;
+  /** The viewport-scale pane the tab scrolls in place of its document. */
+  #primaryPane: Element | undefined;
   #pendingDocumentScroll = false;
   #lastDocumentScroll:
     ReturnType<typeof readDocumentScrollSnapshot> | undefined;
+  /** The last place sent, to tell a frame in which nothing moved. */
+  #lastReportedPlace: string | undefined;
+  /** The last pane list sent: an unchanged list is not sent again. */
+  #lastReportedPanes: string | undefined;
   #sequence = 0;
   #acknowledged = 0;
   #paused = false;
@@ -532,12 +548,15 @@ export class HtmlMirrorSourceSession {
     this.#knownMirroredImageCandidates = new WeakSet<Element>();
     this.#selectedImageSources = new WeakMap<Element, string>();
     this.#imageRefreshRequested = false;
-    this.#activeNestedScroller = undefined;
-    this.#pendingNestedScroller = undefined;
-    this.#nestedOwnerKeys = new WeakMap<Element, number>();
-    this.#nestedOwnerOrdinals = new WeakMap<Element, number>();
+    this.#scrolledPanes.clear();
+    this.#listedPanes = new WeakSet<Element>();
+    this.#pendingPanes.clear();
+    this.#pendingPaneBurst = false;
+    this.#primaryPane = undefined;
     this.#pendingDocumentScroll = false;
     this.#lastDocumentScroll = undefined;
+    this.#lastReportedPlace = undefined;
+    this.#lastReportedPanes = undefined;
     this.#lastDimensions = undefined;
     this.#emittedNodeSignatures = new WeakMap<Node, string>();
     this.#adoptedStyleSignatures.reset();
@@ -815,7 +834,11 @@ export class HtmlMirrorSourceSession {
       this.#primeOrdinaryStyleSignatures();
       this.#shadowReconciliationPending = false;
       this.#post(checkpoint);
-      this.#postScroll();
+      // A pane scrolled before this mirror was built fires no event: find
+      // the scrolled ones so the first report puts them at their place. The
+      // replica is built anew, so this report carries the whole pane list.
+      this.#trackScrolledPanes();
+      this.#postScroll(false, true);
       this.#scheduleShadowDiscovery();
     } catch (error) {
       if (
@@ -867,9 +890,6 @@ export class HtmlMirrorSourceSession {
       records = records.filter(sourceMutationMayChangeCurrentValue);
     }
     if (records.length === 0) return;
-    if (records.length > 0) {
-      this.#nestedOwnerOrdinals = new WeakMap<Element, number>();
-    }
     let accepted = false;
     let visibilityQueued = false;
     const visibilityRecords = this.#visibilityBoundaryIndex
@@ -1046,6 +1066,7 @@ export class HtmlMirrorSourceSession {
     const representability = createHtmlMirrorRepresentabilityCollector();
     const batchBudget = createHtmlMirrorReadBudget();
     const styleWork = createHtmlMirrorStyleWorkBudget();
+    let posted = false;
     try {
       const childCaptures: Array<{
         readonly target: Node;
@@ -1284,6 +1305,7 @@ export class HtmlMirrorSourceSession {
       this.#sequence = sequence;
       if (emittedDimensions) this.#lastDimensions = emittedDimensions;
       this.#post(batch);
+      posted = true;
     } catch (error) {
       if (
         error instanceof HtmlMirrorCapacityError &&
@@ -1304,6 +1326,10 @@ export class HtmlMirrorSourceSession {
         this.#summarizeRepresentability(representability),
       ));
     }
+    // The change may have lengthened a scrolled pane, hidden it or shown it
+    // again, none of which fires a scroll event: read the panes afresh and
+    // report them if they are not where they were (D122).
+    if (posted && this.#scrolledPanes.size > 0) this.#postScroll(true);
   }
 
   /**
@@ -1367,38 +1393,32 @@ export class HtmlMirrorSourceSession {
     this.#refreshControlledContentPolicy();
     this.#visibilityFullRefreshPending = true;
     this.#imageRefreshRequested = true;
-    this.#nestedOwnerOrdinals = new WeakMap<Element, number>();
     this.#pendingDimensions = true;
     this.#scheduleFlush();
     this.#postScroll();
   };
 
-  readonly #onScroll = (event?: Event): void => {
+  readonly #onScroll = (event: Event): void => {
     if (this.#disposed || !this.#identity) return;
-    if (event) {
-      if (isDocumentScrollTarget(
-        event.target,
-        this.environment.document,
-        this.environment.window,
-      )) {
-        this.#pendingDocumentScroll = true;
-      } else if (
-        event.target instanceof Element &&
-        readNestedScrollSnapshot(
-          event.target,
-          this.environment.document,
-          this.environment.window,
-        )
-      ) {
-        if (event.target !== this.#activeNestedScroller) {
-          this.#nestedOwnerOrdinals.delete(event.target);
-        }
-        this.#pendingNestedScroller = event.target;
-      } else {
-        return;
+    // Inside an open shadow root the window hears the event as the host's:
+    // the element that scrolled is the first of the composed path.
+    const target = scrolledTarget(event);
+    if (isDocumentScrollTarget(
+      target,
+      this.environment.document,
+      this.environment.window,
+    )) {
+      this.#pendingDocumentScroll = true;
+    } else if (target instanceof Element) {
+      // Any other element is a pane that scrolls on its own (D122). Its
+      // place is read once a frame, not once an event.
+      if (this.#pendingPanes.size < MAX_HTML_MIRROR_SCROLL_PANES) {
+        this.#pendingPanes.add(target);
+      } else if (!this.#pendingPanes.has(target)) {
+        this.#pendingPaneBurst = true;
       }
     } else {
-      this.#nestedOwnerOrdinals = new WeakMap<Element, number>();
+      return;
     }
     this.#scheduleScroll();
   };
@@ -1414,11 +1434,18 @@ export class HtmlMirrorSourceSession {
     ) return;
     this.#scrollFrame = this.environment.scheduleFrame(() => {
       this.#scrollFrame = undefined;
-      this.#postScroll();
+      this.#postScroll(true);
     });
   }
 
-  #postScroll(): void {
+  /**
+   * Reports the document's place and the panes'. The pane list is sent when
+   * it changed, and always with `wholeState` (a checkpoint: the replica is
+   * built anew). With `onlyIfMoved`, for a frame of scroll events or a
+   * posted patch, nothing is sent when nothing the mirror follows moved (a
+   * text field scrolled, or an element the mirror does not know).
+   */
+  #postScroll(onlyIfMoved = false, wholeState = false): void {
     if (this.#disposed || !this.#identity) return;
     const documentScroll = readDocumentScrollSnapshot(
       this.environment.document,
@@ -1427,83 +1454,158 @@ export class HtmlMirrorSourceSession {
     const documentMoved = this.#lastDocumentScroll !== undefined &&
       (documentScroll.scrollX !== this.#lastDocumentScroll.scrollX ||
         documentScroll.scrollY !== this.#lastDocumentScroll.scrollY);
-    let scroll = documentScroll;
+    // The last viewport-scale pane this frame's events came from, if any.
+    let scrolledPrimaryPane: Element | undefined;
+    if (this.#pendingPaneBurst) {
+      // More elements scrolled in one frame than a message names: rows that
+      // a script keeps in step. Following a part of them would tear them
+      // apart in the mirror, so none of them is followed.
+      for (const pane of this.#pendingPanes) this.#scrolledPanes.delete(pane);
+    } else {
+      for (const pane of this.#pendingPanes) {
+        // Scrolled again: it is the most recent one now.
+        this.#scrolledPanes.delete(pane);
+        this.#scrolledPanes.add(pane);
+        if (this.#isViewportScalePane(pane)) scrolledPrimaryPane = pane;
+      }
+    }
     if (this.#pendingDocumentScroll) {
-      this.#activeNestedScroller = undefined;
-    } else if (this.#pendingNestedScroller) {
-      const nestedScroll = readNestedScrollSnapshot(
-        this.#pendingNestedScroller,
-        this.environment.document,
-        this.environment.window,
-      );
-      if (nestedScroll) {
-        this.#activeNestedScroller = this.#pendingNestedScroller;
-        scroll = nestedScroll;
-      } else if (this.#pendingNestedScroller === this.#activeNestedScroller) {
-        this.#activeNestedScroller = undefined;
-      }
-    } else if (documentMoved) {
-      this.#activeNestedScroller = undefined;
-    } else if (this.#activeNestedScroller) {
-      const nestedScroll = readNestedScrollSnapshot(
-        this.#activeNestedScroller,
-        this.environment.document,
-        this.environment.window,
-      );
-      if (nestedScroll) {
-        scroll = nestedScroll;
-      } else {
-        this.#activeNestedScroller = undefined;
-      }
+      this.#primaryPane = undefined;
+    } else if (scrolledPrimaryPane) {
+      this.#primaryPane = scrolledPrimaryPane;
+    } else if (
+      documentMoved ||
+      (this.#primaryPane && !this.#isViewportScalePane(this.#primaryPane))
+    ) {
+      this.#primaryPane = undefined;
     }
     this.#lastDocumentScroll = documentScroll;
-    this.#pendingNestedScroller = undefined;
+    this.#pendingPanes.clear();
+    this.#pendingPaneBurst = false;
     this.#pendingDocumentScroll = false;
 
-    let nestedOwnerKey: number | undefined;
-    let nestedOwnerOrdinalValue: number | undefined;
-    if (scroll.scrollTarget === 'nested' && this.#activeNestedScroller) {
-      nestedOwnerKey = this.#nestedOwnerKeys.get(this.#activeNestedScroller);
-      if (nestedOwnerKey === undefined) {
-        nestedOwnerKey = this.#nextNestedOwnerKey;
-        this.#nextNestedOwnerKey = this.#nextNestedOwnerKey >= 1_000_000_000
-          ? 1
-          : this.#nextNestedOwnerKey + 1;
-        this.#nestedOwnerKeys.set(this.#activeNestedScroller, nestedOwnerKey);
-      }
-      nestedOwnerOrdinalValue = this.#nestedOwnerOrdinals.get(
-        this.#activeNestedScroller,
-      );
-      if (nestedOwnerOrdinalValue === undefined) {
-        nestedOwnerOrdinalValue = nestedScrollerOrdinal(
-          this.#activeNestedScroller,
-          this.environment.document,
-          this.environment.window,
-        );
-        if (nestedOwnerOrdinalValue !== undefined) {
-          this.#nestedOwnerOrdinals.set(
-            this.#activeNestedScroller,
-            nestedOwnerOrdinalValue,
-          );
-        }
-      }
-    }
+    const panes = this.#readScrolledPanes();
+    const primaryPaneId = this.#primaryPane === undefined
+      ? undefined
+      : this.environment.registry.peekId(this.#primaryPane);
+    const paneList = {
+      panes,
+      // Named only while it is listed: at its start it moves nothing.
+      ...(primaryPaneId !== undefined &&
+          panes.some(({ nodeId }) => nodeId === primaryPaneId)
+        ? { primaryPaneId }
+        : {}),
+    };
+    const place = {
+      scrollX: documentScroll.scrollX,
+      scrollY: documentScroll.scrollY,
+      maxScrollX: documentScroll.maxScrollX,
+      maxScrollY: documentScroll.maxScrollY,
+      ...readVisualViewportSnapshot(this.environment.window),
+    };
+    const reportedPlace = JSON.stringify(place);
+    const reportedPanes = JSON.stringify(paneList);
+    // An unchanged list is left out: the panel keeps the last one, and a
+    // page that only scrolls sends what it sent before there were panes.
+    const withPanes = wholeState || reportedPanes !== this.#lastReportedPanes;
+    if (
+      onlyIfMoved && !withPanes && reportedPlace === this.#lastReportedPlace
+    ) return;
     const update = createHtmlMirrorScrollUpdate(
       this.#identityAt(this.#sequence),
-      {
-        ...scroll,
-        ...(nestedOwnerKey !== undefined ? { nestedOwnerKey } : {}),
-        ...(nestedOwnerOrdinalValue !== undefined
-          ? { nestedOwnerOrdinal: nestedOwnerOrdinalValue }
-          : {}),
-        documentScrollX: documentScroll.scrollX,
-        documentScrollY: documentScroll.scrollY,
-        documentMaxScrollX: documentScroll.maxScrollX,
-        documentMaxScrollY: documentScroll.maxScrollY,
-        ...readVisualViewportSnapshot(this.environment.window),
-      },
+      { ...place, ...(withPanes ? paneList : {}) },
     );
-    if (update) this.#post(update);
+    if (!update) return;
+    this.#lastReportedPlace = reportedPlace;
+    if (withPanes) this.#lastReportedPanes = reportedPanes;
+    this.#post(update);
+  }
+
+  #isViewportScalePane(pane: Element): boolean {
+    return readNestedScrollSnapshot(
+      pane,
+      this.environment.document,
+      this.environment.window,
+    ) !== undefined;
+  }
+
+  /**
+   * The places of the panes that are not at their start (D122), each named
+   * by the id the mirror already holds for it. A withheld or secret shell, a
+   * text field and a pane back at its start send nothing and are forgotten
+   * until they scroll again. Past the bound the least recently scrolled are
+   * forgotten too: the replica's then go back to their start.
+   */
+  #readScrolledPanes(): HtmlMirrorPaneScroll[] {
+    const panes: HtmlMirrorPaneScroll[] = [];
+    const listed: Element[] = [];
+    for (const pane of this.#scrolledPanes) {
+      const place = this.#mirroredOpaqueSecrets.has(pane)
+        ? undefined
+        : readPaneScrollPlace(pane, this.environment.document);
+      if (!place) {
+        this.#scrolledPanes.delete(pane);
+        continue;
+      }
+      if (place.scrollX === 0 && place.scrollY === 0) {
+        // A hidden pane has no box and reads as at its start. Chrome gives
+        // it its place back when it is shown again, with no scroll event, so
+        // a pane that was listed is kept in mind while it has no box.
+        if (
+          !this.#listedPanes.has(pane) ||
+          pane.clientWidth > 0 || pane.clientHeight > 0
+        ) this.#scrolledPanes.delete(pane);
+        continue;
+      }
+      // A pane made and put at its place in one go can scroll before the
+      // patch that carries it: the mirror holds no id for it yet. It sends
+      // nothing, and is kept in mind for the report that follows the patch.
+      const nodeId = this.#mirroredPaneId(pane);
+      if (nodeId === undefined) continue;
+      this.#listedPanes.add(pane);
+      listed.push(pane);
+      panes.push(Object.freeze({ nodeId, ...place }));
+    }
+    while (panes.length > MAX_HTML_MIRROR_SCROLL_PANES) {
+      this.#scrolledPanes.delete(listed.shift() as Element);
+      panes.shift();
+    }
+    // Panes kept in mind without being named (hidden ones, ones with no id
+    // yet) are bounded too, the oldest forgotten first.
+    for (const pane of this.#scrolledPanes) {
+      if (this.#scrolledPanes.size <= MAX_HTML_MIRROR_SCROLL_PANES * 2) break;
+      this.#scrolledPanes.delete(pane);
+    }
+    return panes;
+  }
+
+  /** The id the mirror holds for an element it shows; none is made here. */
+  #mirroredPaneId(pane: Element): number | undefined {
+    return this.#mirroredNodes.has(pane) &&
+        !this.#mirroredOpaqueSecrets.has(pane)
+      ? this.environment.registry.peekId(pane)
+      : undefined;
+  }
+
+  /**
+   * Finds the panes that are scrolled now: a bounded walk with two number
+   * reads an element (D122). Runs with every checkpoint, when the replica is
+   * built anew with every pane at its start. When more are scrolled than a
+   * message names, none is taken, as for a burst of scroll events: a part of
+   * a set of rows that scroll together would show them torn apart. Each is
+   * then followed from its own next scroll.
+   */
+  #trackScrolledPanes(): void {
+    const found: Element[] = [];
+    forEachScrolledElement(this.environment.document, (candidate) => {
+      if (
+        this.#mirroredPaneId(candidate) !== undefined &&
+        readPaneScrollPlace(candidate, this.environment.document)
+      ) found.push(candidate);
+      return found.length <= MAX_HTML_MIRROR_SCROLL_PANES;
+    });
+    if (found.length > MAX_HTML_MIRROR_SCROLL_PANES) return;
+    for (const pane of found) this.#scrolledPanes.add(pane);
   }
 
   readonly #onControlledLayoutSettle = (event: Event): void => {
@@ -2627,6 +2729,19 @@ function composedSourceParentElement(element: Element): Element | undefined {
 
 function belongsToSourceDocument(node: Node, sourceDocument: Document): boolean {
   return node === sourceDocument || node.ownerDocument === sourceDocument;
+}
+
+/** What a scroll event scrolled, also when it is retargeted to a shadow host. */
+function scrolledTarget(event: Event): EventTarget | null {
+  try {
+    const first = typeof event.composedPath === 'function'
+      ? event.composedPath()[0]
+      : undefined;
+    if (first) return first;
+  } catch {
+    // Fall back to the event's own target.
+  }
+  return event.target;
 }
 
 function iterableContainsComposedSource(

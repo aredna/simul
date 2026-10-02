@@ -3,6 +3,7 @@ import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
 import {
   HTML_MIRROR_PROTOCOL_VERSION,
+  MAX_HTML_MIRROR_SCROLL_PANES,
   createHtmlMirrorCheckpoint,
   createHtmlMirrorError,
   createHtmlMirrorPatch,
@@ -14,6 +15,7 @@ import {
   readHtmlMirrorControllerMessage,
   readHtmlMirrorPortSessionId,
   readHtmlMirrorSourceMessage,
+  withHtmlMirrorScrollPanes,
 } from '../lib/replica/html-mirror-protocol';
 import {
   DEFAULT_HTML_MIRROR_LIMIT_SETTINGS,
@@ -337,33 +339,145 @@ describe('isolated HTML sanitizer and protocol', () => {
       sessionId: 'scroll-session', pageEpoch: 3, generation: 3,
       documentId: 'scroll-document', frameId: 0, sequence: 4,
     });
-    const nested = createHtmlMirrorScrollUpdate(identity, {
-      scrollTarget: 'nested',
+    const update = createHtmlMirrorScrollUpdate(identity, {
       scrollX: 12,
       scrollY: 240,
       maxScrollX: 20,
       maxScrollY: 800,
-      nestedOwnerKey: 7,
-      nestedOwnerOrdinal: 0,
-      documentScrollX: 0,
-      documentScrollY: 40,
-      documentMaxScrollX: 0,
-      documentMaxScrollY: 1_200,
     });
 
-    expect(readHtmlMirrorSourceMessage(nested, identity)).toEqual(nested);
+    expect(readHtmlMirrorSourceMessage(update, identity)).toEqual(update);
     expect(createHtmlMirrorScrollUpdate(identity, {
-      ...nested!.scroll,
+      ...update!.scroll,
       scrollY: 801,
     })).toBeUndefined();
     expect(readHtmlMirrorSourceMessage({
-      ...nested,
+      ...update,
       identity: { ...identity, documentId: 'stale-document' },
     }, identity)).toBeUndefined();
-    expect(createHtmlMirrorScrollUpdate(identity, {
-      ...nested!.scroll,
-      scrollTarget: 'document',
-    })).toBeUndefined();
+    // The fields of the old viewport-scale path are not part of the message.
+    for (const retired of [
+      { scrollTarget: 'document' },
+      { nestedOwnerKey: 7 },
+      { nestedOwnerOrdinal: 0 },
+      { documentScrollX: 0 },
+    ]) {
+      expect(readHtmlMirrorSourceMessage({
+        ...update,
+        scroll: { ...update!.scroll, ...retired },
+      }, identity)).toBeUndefined();
+    }
+  });
+
+  it('names scrolled panes by node id with bounded numbers, all or none (D122)', () => {
+    const identity = createReplicaIdentity({
+      sessionId: 'pane-session', pageEpoch: 2, generation: 2,
+      documentId: 'pane-document', frameId: 0, sequence: 3,
+    });
+    const page = { scrollX: 0, scrollY: 40, maxScrollX: 0, maxScrollY: 1_200 };
+    const board = {
+      nodeId: 41, scrollX: 900, scrollY: 0, maxScrollX: 6_030, maxScrollY: 0,
+    };
+    // A right-to-left strip and a reversed column count down from 0.
+    const strip = {
+      nodeId: 57, scrollX: -320.5, scrollY: -12, maxScrollX: 4_520, maxScrollY: 40,
+    };
+    const update = createHtmlMirrorScrollUpdate(identity, {
+      ...page, panes: [board, strip], primaryPaneId: 41,
+    });
+    expect(update?.scroll).toEqual({
+      ...page, panes: [board, strip], primaryPaneId: 41,
+    });
+    expect(readHtmlMirrorSourceMessage(update, identity)).toEqual(update);
+    expect(Object.isFrozen(update!.scroll.panes)).toBe(true);
+    expect(Object.isFrozen(update!.scroll.panes![0])).toBe(true);
+    // Without the list the message is the document's four numbers, as on a
+    // page that has no pane at all.
+    expect(Object.keys(createHtmlMirrorScrollUpdate(identity, page)!.scroll))
+      .toEqual(['scrollX', 'scrollY', 'maxScrollX', 'maxScrollY']);
+    // An empty list is a list: no pane is scrolled.
+    const none = createHtmlMirrorScrollUpdate(identity, { ...page, panes: [] });
+    expect(none?.scroll).toEqual({ ...page, panes: [] });
+    expect(readHtmlMirrorSourceMessage(none, identity)).toEqual(none);
+
+    const full = Array.from(
+      { length: MAX_HTML_MIRROR_SCROLL_PANES },
+      (_, index) => ({ ...board, nodeId: index + 1 }),
+    );
+    expect(createHtmlMirrorScrollUpdate(identity, { ...page, panes: full }))
+      .toBeDefined();
+
+    for (const forged of [
+      { panes: 'board' },
+      { panes: { 0: board, length: 1 } },
+      { panes: [...full, { ...board, nodeId: 9_000 }] },
+      { panes: [board, board] },
+      { panes: [{ ...board, nodeId: 0 }] },
+      { panes: [{ ...board, nodeId: 1.5 }] },
+      { panes: [{ ...board, nodeId: '41' }] },
+      { panes: [{ ...board, scrollX: 6_031 }] },
+      { panes: [{ ...board, scrollX: -6_031 }] },
+      { panes: [{ ...board, scrollY: 1 }] },
+      { panes: [{ ...board, scrollX: Number.NaN }] },
+      { panes: [{ ...board, maxScrollX: 100_001 }] },
+      { panes: [{ ...board, maxScrollY: -1 }] },
+      { panes: [{ ...board, maxScrollX: Number.POSITIVE_INFINITY }] },
+      { panes: [{ ...board, text: 'Card 1.1' }] },
+      { panes: [{ nodeId: 41, scrollX: 0, scrollY: 0, maxScrollX: 10 }] },
+      { panes: [board, null] },
+      // The primary pane is one of the listed panes, or it is not named.
+      { primaryPaneId: 41 },
+      { panes: [board], primaryPaneId: 57 },
+      { panes: [board], primaryPaneId: '41' },
+    ]) {
+      expect(readHtmlMirrorSourceMessage({
+        ...update,
+        scroll: { ...page, ...forged },
+      }, identity), JSON.stringify(forged)).toBeUndefined();
+    }
+  });
+
+  it('gives a scroll message without a pane list the last list received (D122)', () => {
+    const identity = createReplicaIdentity({
+      sessionId: 'pane-session', pageEpoch: 2, generation: 2,
+      documentId: 'pane-document', frameId: 0, sequence: 3,
+    });
+    const board = {
+      nodeId: 41, scrollX: 900, scrollY: 0, maxScrollX: 6_030, maxScrollY: 0,
+    };
+    const listed = createHtmlMirrorScrollUpdate(identity, {
+      scrollX: 0, scrollY: 40, maxScrollX: 0, maxScrollY: 1_200,
+      panes: [board], primaryPaneId: 41,
+    })!;
+    const plain = createHtmlMirrorScrollUpdate(identity, {
+      scrollX: 0, scrollY: 400, maxScrollX: 0, maxScrollY: 1_200,
+      visualScale: 2, visualOffsetX: 10, visualOffsetY: 20,
+    })!;
+
+    // The page scrolled and the panes did not: the place is the new one,
+    // the panes and the named pane are the last ones.
+    const whole = withHtmlMirrorScrollPanes(plain, listed.scroll);
+    expect(whole.scroll).toEqual({
+      scrollX: 0, scrollY: 400, maxScrollX: 0, maxScrollY: 1_200,
+      visualScale: 2, visualOffsetX: 10, visualOffsetY: 20,
+      panes: [board], primaryPaneId: 41,
+    });
+    expect(whole.identity).toBe(plain.identity);
+    expect(Object.isFrozen(whole)).toBe(true);
+    expect(Object.isFrozen(whole.scroll)).toBe(true);
+    // What it makes is itself a valid message.
+    expect(readHtmlMirrorSourceMessage(whole, identity)).toEqual(whole);
+
+    // A message with its own list keeps it, an empty one too.
+    expect(withHtmlMirrorScrollPanes(listed, plain.scroll)).toBe(listed);
+    const none = createHtmlMirrorScrollUpdate(identity, {
+      scrollX: 0, scrollY: 0, maxScrollX: 0, maxScrollY: 1_200, panes: [],
+    })!;
+    expect(withHtmlMirrorScrollPanes(none, listed.scroll)).toBe(none);
+    expect(withHtmlMirrorScrollPanes(plain, none.scroll).scroll.panes).toEqual([]);
+    // Nothing before it: it is handed on as it is.
+    expect(withHtmlMirrorScrollPanes(plain, undefined)).toBe(plain);
+    expect(withHtmlMirrorScrollPanes(plain, plain.scroll)).toBe(plain);
   });
 
   it('carries a pinch zoom as three bounded numbers together, or none (D115)', () => {
@@ -372,10 +486,7 @@ describe('isolated HTML sanitizer and protocol', () => {
       documentId: 'pinch-document', frameId: 0, sequence: 2,
     });
     const plain = {
-      scrollTarget: 'document' as const,
       scrollX: 0, scrollY: 600, maxScrollX: 0, maxScrollY: 4_000,
-      documentScrollX: 0, documentScrollY: 600,
-      documentMaxScrollX: 0, documentMaxScrollY: 4_000,
     };
     const pinched = createHtmlMirrorScrollUpdate(identity, {
       ...plain, visualScale: 2.5, visualOffsetX: 300, visualOffsetY: 180.5,
@@ -3147,10 +3258,8 @@ describe('isolated HTML sanitizer and protocol', () => {
       }
       // A message without adopted sheets is sent as it is.
       const plain = createHtmlMirrorScrollUpdate(identity, {
-        scrollTarget: 'document', scrollX: 0, scrollY: 0,
+        scrollX: 0, scrollY: 0,
         maxScrollX: 0, maxScrollY: 0,
-        documentScrollX: 0, documentScrollY: 0,
-        documentMaxScrollX: 0, documentMaxScrollY: 0,
       });
       expect(plain).toBeDefined();
       expect(encodeHtmlMirrorWireMessage(plain)).toBe(plain);

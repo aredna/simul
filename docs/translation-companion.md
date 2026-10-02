@@ -12,17 +12,76 @@ commit, one bounded recovery keeps the last-good replica visible and a repeated
 failure surfaces without changing engines.
 
 Source scroll messages are animation-frame throttled and one-way. Standards
-and body/document scroll fallbacks are normalized before transport. When a
-site instead uses a visible, viewport-scale nested vertical scroller, Simul
-tracks that surface by proportional progress, including scroll events inside
-an observed open shadow root. Initial status and dimension announcements do not
-guess that a pre-scrolled nested surface owns scrolling: only a qualifying real
-nested-scroll event can take ownership. Text controls, non-scrollable hidden or
-visible overflow, small carousels, and incidental horizontal strips cannot take
-ownership. Nested coordinates remain clamped to the source nested range during
-replica extent refresh rather than the document range. A changed document
-offset immediately returns ownership to the document; removal, loss of
-scrollability, and range shrink clear or clamp a stale nested owner.
+and body/document scroll fallbacks are normalized before transport. One rule
+covers everything that scrolls (D122): the document follows the document, and
+every element that scrolls on its own, a pane, follows by the id the mirror
+already holds for it.
+
+- **What the page script sends.** A scroll message carries the document's
+  place and ranges, and, when it changed, the list of the panes that are not
+  at their start, each as `{ nodeId, scrollX, scrollY, maxScrollX,
+  maxScrollY }`. A pane that is not listed is at its start, and an empty list
+  says none is scrolled. A message without the list means the panes are where
+  the last list put them, so a page that only scrolls sends what a page with
+  no pane sends. The list always travels with a checkpoint, when the replica
+  is built anew. The panel's stream client keeps the last list and hands
+  every scroll update on with it, so whatever follows an update has the whole
+  state.
+- **How panes are found.** The page script keeps the scrolled panes in mind:
+  found by a bounded walk when a checkpoint is made (two number reads an
+  element, the first 50,000 elements, open shadow roots included), and by
+  scroll events afterwards, read once a frame. It reads them again after
+  every patch it posts, because a change to the page can lengthen a pane,
+  hide it or show it again with no scroll event. A pane that scrolls before
+  the patch that carries it (a chat opened at its end) has no id yet: it
+  sends nothing, is kept in mind, and is named with the report that follows
+  its patch. A frame or a patch after which nothing the mirror follows has
+  moved sends nothing.
+- **Bounds.** At most 256 panes are named (`MAX_SCROLL_PANES`). When more
+  have been scrolled over time, the most recently scrolled are kept and the
+  others show at their start. When more than that scroll in one frame, or
+  are found scrolled by the walk, none of them is followed: they are rows
+  that a script keeps in step, and a part of them followed would show them
+  torn apart. Offsets keep their sign (a right-to-left strip and a reversed
+  column count down from 0) and are bounded like the document's. The protocol
+  takes the list all or none: each pane once, every number finite and inside
+  the scroll bound, no offset past its range.
+- **What sends nothing.** The document's own scroller and `html` (they are the
+  document); `body` unless it scrolls apart from the document, which is read
+  from its scroll numbers and never from its `overflow` style; a text field or
+  anything inside one (`textarea`, `input`, `select`, editable content, text
+  roles), which keep their own scroll; an element the mirror does not know
+  (no id is made for it), and the shell of a withheld or secret region. What
+  travels for a pane is its node id and four layout numbers: no text, address
+  or attribute.
+- **What the panel does.** `VisibleReplayHost` finds each pane's element
+  through the engine's node map (given to it when a replica is committed) and
+  scrolls it to the same share of its own range, at once, without the page's
+  smooth-scroll animation; equal ranges keep exact pixels. A pane the report
+  no longer lists goes back to its start. Panes are placed again when a new
+  replica is committed (Rebuild mirror, a recovery checkpoint) and with every
+  layout refresh of the engine (a patch, a translation landing), so a pane
+  made again by a patch, or lengthened by a translation, is where it should
+  be. A pane's move touches nothing else: not the replica document, not the
+  panel's scroller, not the reader's own scrolling of the mirror. The replica
+  is pointer-inert, so the reader scrolls the mirror as a whole and never a
+  pane inside it.
+- **The viewport-scale pane.** An app-style page scrolls one large pane in
+  place of its document. The page script names it (`primaryPaneId`) while its
+  scroll events are the last ones: visible, at viewport scale, with a real
+  vertical range (`readNestedScrollSnapshot`); a move of the document, or the
+  pane no longer qualifying, ends that. The replica scrolls it by its id like
+  any other pane. Where the replica cannot, its progress moves the replica
+  document instead (D100). That is decided for each axis: the pane stands in
+  for the page on an axis where the tab's pane has a range and the replica's
+  has none (the element is not there, or the replica lays it out without that
+  range), and is placed by its id on the other. Only a move of the pane on an
+  axis where it stands in ends the reader's own scrolling, as a move of the
+  page does; a pane that gains its own range in the replica with no move in
+  the tab (a late style, a translation) does not.
+- **Following off.** The panel does not pass reports on, so nothing moves and
+  a rebuilt replica is placed as last followed. Turning following on follows
+  the latest report in full.
 
 Scroll is carried by the locally bundled `page-mirror` stream that already owns
 the exact-document checkpoint and patch transport. The source coalesces real
@@ -37,9 +96,13 @@ scroll range, not by pixels (D100): when the page is 40% of the way down its
 range, the mirror is 40% of the way down its own. A translation that makes the
 page longer therefore scrolls the mirror further, a little faster, and both
 reach the end together; while translations land and the mirror grows, it keeps
-that share. Equal ranges keep exact pixels. Nested panes, and the page offset
-around them, are followed the same way. No mirror interaction is sent back to
-the website.
+that share. Equal ranges keep exact pixels. Panes are followed the same way,
+each inside its own range. No mirror interaction is sent back to the website.
+
+The replica document is scrolled at once (`scrollTo` with `instant`), as panes
+are. The replica keeps the page's own `scroll-behavior`, and a page that asks
+for smooth scrolling would otherwise animate every followed move and lag
+behind the tab (D122).
 
 The mirror moves only when the source position actually changes. The source
 re-reports its unchanged position after every layout change (an image load, a
@@ -50,8 +113,7 @@ position it set. Turning scroll following back on re-aligns the mirror with
 the source.
 
 The page's own sideways scroll is followed like its scroll down (D100). A pane
-inside the page that scrolls sideways only (a board of columns, a wide table
-with nothing below to scroll) is not followed; see `deferred-work.md` (D115).
+that scrolls sideways is followed as a pane (D122).
 
 A pinch zoom in the tab is followed with the scrolling (D115). It changes
 neither the page's scroll position nor the window's size, and fires only on
@@ -68,8 +130,8 @@ as they do the tab's browser zoom. Turning scroll following off shows the
 page unmagnified again, so the reader can scroll all of it; turning it on
 restores the zoom.
 
-This retains direct document coordinates together with event-qualified
-nested-scroll support in the sole isolated transport.
+This retains direct document coordinates together with per-pane places in the
+sole isolated transport.
 
 Full checkpoint capture is not scheduled periodically. It is used for initial bootstrap,
 navigation, a manual rebuild, or bounded recovery. Exact document identity,

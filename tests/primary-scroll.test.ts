@@ -2,11 +2,11 @@ import { parseHTML } from 'linkedom';
 import { describe, expect, it } from 'vitest';
 
 import {
-  findPrimaryNestedScroller,
+  forEachScrolledElement,
   isDocumentScrollTarget,
-  nestedScrollerOrdinal,
   readDocumentScrollSnapshot,
   readNestedScrollSnapshot,
+  readPaneScrollPlace,
   readVisualViewportSnapshot,
 } from '../lib/primary-scroll';
 
@@ -69,17 +69,6 @@ describe('primary scroll classification', () => {
       scrollTarget: 'nested', scrollX: 0, scrollY: 1_300,
       maxScrollX: 0, maxScrollY: 4_280,
     });
-
-    const second = document.createElement('section');
-    second.setAttribute('style', 'overflow-y:auto');
-    document.body.append(second);
-    defineScrollBox(second, {
-      clientWidth: 880, clientHeight: 700,
-      scrollWidth: 880, scrollHeight: 4_700,
-      scrollLeft: 0, scrollTop: 600,
-    }, { left: 260, top: 70, right: 1_140, bottom: 770 });
-    expect(nestedScrollerOrdinal(results, document, window)).toBe(0);
-    expect(nestedScrollerOrdinal(second, document, window)).toBe(1);
 
     const carousel = document.querySelector('#carousel')!;
     defineScrollBox(carousel, {
@@ -172,31 +161,186 @@ describe('primary scroll classification', () => {
     });
   });
 
-  it('finds a qualified scroller behind thousands of ordinary elements', () => {
-    const { document, window } = parseHTML('<html><body></body></html>');
-    Object.defineProperties(window, {
-      innerWidth: { configurable: true, value: 1_200 },
-      innerHeight: { configurable: true, value: 800 },
+  it('reads the place of any pane that scrolls on its own (D122)', () => {
+    const { document } = parseHTML(`
+      <html><body><div id="board"></div><div id="chat"></div>
+      <div id="strip" dir="rtl"></div><textarea id="editor"></textarea>
+      <div id="rich" contenteditable="true"><div id="inside"></div></div>
+      <div role="textbox"><div id="in-textbox"></div></div></body></html>
+    `);
+    Object.defineProperty(document, 'scrollingElement', {
+      configurable: true,
+      value: document.documentElement,
     });
-    // Ordinary content has no overflow, so it costs no style or geometry read
-    // and does not count against the candidate budget.
+    // Sideways only, far from viewport scale, with no style read at all.
+    const board = document.querySelector('#board')!;
+    defineScrollBox(board, {
+      clientWidth: 1_200, clientHeight: 650,
+      scrollWidth: 7_230, scrollHeight: 650,
+      scrollLeft: 900.126, scrollTop: 0,
+    });
+    expect(readPaneScrollPlace(board, document)).toEqual({
+      scrollX: 900.13, scrollY: 0, maxScrollX: 6_030, maxScrollY: 0,
+    });
+    expect(Object.isFrozen(readPaneScrollPlace(board, document))).toBe(true);
+
+    const chat = document.querySelector('#chat')!;
+    defineScrollBox(chat, {
+      clientWidth: 400, clientHeight: 300,
+      scrollWidth: 400, scrollHeight: 2_265,
+      scrollLeft: 0, scrollTop: 600,
+    });
+    expect(readPaneScrollPlace(chat, document)).toEqual({
+      scrollX: 0, scrollY: 600, maxScrollX: 0, maxScrollY: 1_965,
+    });
+
+    // A right-to-left strip counts down from 0: the sign is kept, and an
+    // offset past the range is held at the range.
+    const strip = document.querySelector('#strip')!;
+    defineScrollBox(strip, {
+      clientWidth: 1_000, clientHeight: 80,
+      scrollWidth: 5_520, scrollHeight: 80,
+      scrollLeft: -900, scrollTop: 0,
+    });
+    expect(readPaneScrollPlace(strip, document)).toEqual({
+      scrollX: -900, scrollY: 0, maxScrollX: 4_520, maxScrollY: 0,
+    });
+    strip.scrollLeft = -9_000;
+    expect(readPaneScrollPlace(strip, document)).toMatchObject({
+      scrollX: -4_520, maxScrollX: 4_520,
+    });
+
+    // Text fields, and anything inside one, keep their own scroll.
+    for (const selector of ['#editor', '#rich', '#inside', '#in-textbox']) {
+      const editable = document.querySelector(selector)!;
+      defineScrollBox(editable, {
+        clientWidth: 400, clientHeight: 120,
+        scrollWidth: 400, scrollHeight: 900,
+        scrollLeft: 0, scrollTop: 300,
+      });
+      expect(readPaneScrollPlace(editable, document), selector).toBeUndefined();
+    }
+    const fields = parseHTML(`
+      <html><body><input id="line" value="a long value">
+      <select id="pick" multiple><option>one</option></select>
+      <div id="combo" role="combobox"><div id="in-combo"></div></div>
+      <div id="search" role="searchbox"></div>
+      <div id="both" role="note searchbox"></div>
+      <div id="rich" contenteditable><div id="in-rich"></div></div>
+      <div id="fixed" contenteditable="false"><div id="in-fixed"></div></div>
+      <div id="listbox" role="listbox"></div></body></html>
+    `).document;
+    const scrolled = (selector: string) => {
+      const element = fields.querySelector(selector)!;
+      defineScrollBox(element, {
+        clientWidth: 400, clientHeight: 120,
+        scrollWidth: 400, scrollHeight: 900,
+        scrollLeft: 0, scrollTop: 300,
+      });
+      return readPaneScrollPlace(element, fields);
+    };
+    for (const selector of [
+      '#line', '#pick', '#combo', '#in-combo', '#search', '#both', '#rich', '#in-rich',
+    ]) expect(scrolled(selector), selector).toBeUndefined();
+    // Not a text field: content that is not editable, and a plain list.
+    for (const selector of ['#fixed', '#in-fixed', '#listbox']) {
+      expect(scrolled(selector), selector).toEqual({
+        scrollX: 0, scrollY: 300, maxScrollX: 0, maxScrollY: 780,
+      });
+    }
+
+    // The document's own scroller and html follow as the document. body is a
+    // pane only when it scrolls apart from the document, whatever its style.
+    defineScrollBox(document.documentElement, {
+      clientWidth: 1_200, clientHeight: 700,
+      scrollWidth: 1_200, scrollHeight: 3_000,
+      scrollLeft: 0, scrollTop: 900,
+    });
+    expect(readPaneScrollPlace(document.documentElement, document)).toBeUndefined();
+    document.body.setAttribute('style', 'overflow-y:scroll');
+    defineScrollBox(document.body, {
+      clientWidth: 1_200, clientHeight: 2_960,
+      scrollWidth: 1_200, scrollHeight: 2_960,
+      scrollLeft: 0, scrollTop: 0,
+    });
+    expect(readPaneScrollPlace(document.body, document)).toEqual({
+      scrollX: 0, scrollY: 0, maxScrollX: 0, maxScrollY: 0,
+    });
+    Object.defineProperty(document, 'scrollingElement', {
+      configurable: true,
+      value: document.body,
+    });
+    expect(readPaneScrollPlace(document.body, document)).toBeUndefined();
+    expect(readPaneScrollPlace(document.documentElement, document)).toBeUndefined();
+
+    // A removed element, and one of another document, are not panes.
+    chat.remove();
+    Object.defineProperty(chat, 'isConnected', { configurable: true, value: false });
+    expect(readPaneScrollPlace(chat, document)).toBeUndefined();
+    const other = parseHTML('<html><body><div></div></body></html>').document;
+    expect(readPaneScrollPlace(other.querySelector('div')!, document)).toBeUndefined();
+  });
+
+  it('scales a pane longer than the protocol bound, keeping its share', () => {
+    const { document } = parseHTML('<html><body><div id="list"></div></body></html>');
+    const list = document.querySelector('#list')!;
+    defineScrollBox(list, {
+      clientWidth: 400, clientHeight: 300,
+      scrollWidth: 400, scrollHeight: 400_300,
+      scrollLeft: 0, scrollTop: 100_000,
+    });
+    expect(readPaneScrollPlace(list, document)).toEqual({
+      scrollX: 0, scrollY: 25_000, maxScrollX: 0, maxScrollY: 100_000,
+    });
+  });
+
+  it('walks to the scrolled elements, through open shadow roots, within its bound', () => {
+    const { document } = parseHTML('<html><body></body></html>');
+    // Ordinary content is at its start and costs two number reads each.
     const filler = document.createDocumentFragment();
     for (let index = 0; index < 6_000; index += 1) {
       filler.append(document.createElement('span'));
     }
     document.body.append(filler);
-    const feed = document.createElement('main');
-    feed.setAttribute('style', 'overflow-y:auto');
-    document.body.append(feed);
-    defineScrollBox(feed, {
-      clientWidth: 900, clientHeight: 720,
-      scrollWidth: 900, scrollHeight: 5_000,
-      scrollLeft: 0, scrollTop: 0,
-    }, { left: 240, top: 60, right: 1_140, bottom: 780 });
+    const strip = document.createElement('div');
+    const host = document.createElement('x-list');
+    const column = document.createElement('div');
+    document.body.append(strip, host, column);
+    const inner = document.createElement('div');
+    host.attachShadow({ mode: 'open' }).append(inner);
+    Object.defineProperty(strip, 'scrollLeft', { configurable: true, value: 300 });
+    Object.defineProperty(inner, 'scrollTop', { configurable: true, value: 500 });
+    // A reversed column counts down from 0.
+    Object.defineProperty(column, 'scrollTop', { configurable: true, value: -40 });
 
-    expect(nestedScrollerOrdinal(feed, document, window)).toBe(0);
-    expect(findPrimaryNestedScroller(document, window)).toBe(feed);
-    expect(findPrimaryNestedScroller(document, window, 0)).toBe(feed);
+    const found: Element[] = [];
+    forEachScrolledElement(document, (candidate) => {
+      found.push(candidate);
+      return true;
+    });
+    expect(found).toEqual([strip, column, inner]);
+
+    // The visitor can stop the walk.
+    const first: Element[] = [];
+    forEachScrolledElement(document, (candidate) => {
+      first.push(candidate);
+      return false;
+    });
+    expect(first).toEqual([strip]);
+
+    // Past 50,000 elements the walk stops: a later pane waits for its next
+    // scroll event.
+    const many = document.createDocumentFragment();
+    for (let index = 0; index < 50_000; index += 1) {
+      many.append(document.createElement('i'));
+    }
+    document.body.prepend(many);
+    const late: Element[] = [];
+    forEachScrolledElement(document, (candidate) => {
+      late.push(candidate);
+      return true;
+    });
+    expect(late).toEqual([]);
   });
 
   it('reads a pinch zoom, and nothing while the page is not magnified (D115)', () => {

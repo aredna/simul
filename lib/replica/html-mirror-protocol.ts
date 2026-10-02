@@ -30,7 +30,11 @@ import {
   type SelectableReplicaFidelityPolicy,
 } from './fidelity-policy';
 import { hasExactKeysWithOptional } from '../exact-record';
-import { VISUAL_SCALE_MAX } from '../primary-scroll';
+import {
+  MAX_SCROLL_PANES,
+  PRIMARY_SCROLL_MAX,
+  VISUAL_SCALE_MAX,
+} from '../primary-scroll';
 import {
   DEFAULT_HTML_MIRROR_LIMIT_SETTINGS,
   readHtmlMirrorLimitSettings,
@@ -122,18 +126,46 @@ export interface HtmlMirrorPatchBatch {
   readonly byteLength: number;
 }
 
-export interface HtmlMirrorScrollState {
-  readonly scrollTarget: 'document' | 'nested';
+/** Panes one scroll message names; the most recently scrolled are kept. */
+export const MAX_HTML_MIRROR_SCROLL_PANES = MAX_SCROLL_PANES;
+
+/**
+ * A pane that scrolls on its own, apart from the document (D122): the id the
+ * mirror already holds for the element, and how far it is scrolled inside
+ * its own range. An offset is negative where the page counts it that way (a
+ * right-to-left strip, a reversed column). Layout numbers only: no text,
+ * address or attribute.
+ */
+export interface HtmlMirrorPaneScroll {
+  readonly nodeId: number;
   readonly scrollX: number;
   readonly scrollY: number;
   readonly maxScrollX: number;
   readonly maxScrollY: number;
-  readonly nestedOwnerKey?: number;
-  readonly nestedOwnerOrdinal?: number;
-  readonly documentScrollX: number;
-  readonly documentScrollY: number;
-  readonly documentMaxScrollX: number;
-  readonly documentMaxScrollY: number;
+}
+
+export interface HtmlMirrorScrollState {
+  /** The document's place and its scroll ranges. */
+  readonly scrollX: number;
+  readonly scrollY: number;
+  readonly maxScrollX: number;
+  readonly maxScrollY: number;
+  /**
+   * Every pane the mirror knows that is not at its start (D122), at most
+   * `MAX_HTML_MIRROR_SCROLL_PANES`; a pane that is not listed is at its
+   * start, and an empty list means none is scrolled. The list travels with
+   * every checkpoint and whenever it changed. A message without it means the
+   * panes, and the pane named below, are where the last list put them, so
+   * plain page scrolling does not repeat them.
+   */
+  readonly panes?: readonly HtmlMirrorPaneScroll[];
+  /**
+   * The viewport-scale pane the tab scrolls in place of its document, one of
+   * `panes` and sent only with them. The replica scrolls it like any other
+   * pane; where the replica cannot, its progress moves the replica document
+   * instead (D100).
+   */
+  readonly primaryPaneId?: number;
   /**
    * Pinch zoom (D115): how many times the tab magnifies the page on top of
    * its browser zoom, and where the magnified view's corner is inside the
@@ -537,6 +569,29 @@ export function createHtmlMirrorScrollUpdate(
     kind: 'simul:html-mirror-v2:scroll',
     identity,
     scroll,
+  });
+}
+
+/**
+ * A scroll message without a pane list means the panes are where the last
+ * list put them (D122). Gives such a message the list, and the named pane,
+ * of the last message that carried one, so that whoever follows it has the
+ * whole state. A message with its own list, or with none before it, is
+ * returned as it is.
+ */
+export function withHtmlMirrorScrollPanes(
+  update: HtmlMirrorScrollUpdate,
+  last: HtmlMirrorScrollState | undefined,
+): HtmlMirrorScrollUpdate {
+  if (update.scroll.panes || !last?.panes) return update;
+  const { panes, primaryPaneId } = last;
+  return Object.freeze({
+    ...update,
+    scroll: Object.freeze({
+      ...update.scroll,
+      panes,
+      ...(primaryPaneId !== undefined ? { primaryPaneId } : {}),
+    }),
   });
 }
 
@@ -1142,56 +1197,39 @@ function readScrollState(input: HtmlMirrorScrollState): HtmlMirrorScrollState | 
   if (
     !hasExactKeysWithOptional(
       input as unknown as Record<string, unknown>,
+      ['scrollX', 'scrollY', 'maxScrollX', 'maxScrollY'],
       [
-        'scrollTarget', 'scrollX', 'scrollY', 'maxScrollX', 'maxScrollY',
-        'documentScrollX', 'documentScrollY', 'documentMaxScrollX',
-        'documentMaxScrollY',
-      ],
-      [
-        'nestedOwnerKey', 'nestedOwnerOrdinal',
+        'panes', 'primaryPaneId',
         'visualScale', 'visualOffsetX', 'visualOffsetY',
       ],
     ) ||
     !isVisualViewportState(input) ||
-    (input.scrollTarget !== 'document' && input.scrollTarget !== 'nested') ||
     ![
       input.scrollX,
       input.scrollY,
       input.maxScrollX,
       input.maxScrollY,
-      input.documentScrollX,
-      input.documentScrollY,
-      input.documentMaxScrollX,
-      input.documentMaxScrollY,
     ].every(isScrollValue) ||
     input.scrollX > input.maxScrollX ||
-    input.scrollY > input.maxScrollY ||
-    input.documentScrollX > input.documentMaxScrollX ||
-    input.documentScrollY > input.documentMaxScrollY ||
-    (input.scrollTarget === 'document' &&
-      (input.nestedOwnerKey !== undefined || input.nestedOwnerOrdinal !== undefined)) ||
-    (input.nestedOwnerKey !== undefined &&
-      (!isSequence(input.nestedOwnerKey) || input.nestedOwnerKey === 0)) ||
-    (input.nestedOwnerOrdinal !== undefined &&
-      (!Number.isSafeInteger(input.nestedOwnerOrdinal) ||
-        input.nestedOwnerOrdinal < 0))
+    input.scrollY > input.maxScrollY
+  ) return undefined;
+  const panes = input.panes === undefined
+    ? undefined
+    : readScrollPanes(input.panes);
+  if (
+    (input.panes !== undefined && !panes) ||
+    (input.primaryPaneId !== undefined &&
+      !panes?.some(({ nodeId }) => nodeId === input.primaryPaneId))
   ) return undefined;
   return Object.freeze({
-    scrollTarget: input.scrollTarget,
     scrollX: input.scrollX,
     scrollY: input.scrollY,
     maxScrollX: input.maxScrollX,
     maxScrollY: input.maxScrollY,
-    ...(input.scrollTarget === 'nested' && input.nestedOwnerKey !== undefined
-      ? { nestedOwnerKey: input.nestedOwnerKey }
+    ...(panes ? { panes } : {}),
+    ...(input.primaryPaneId !== undefined
+      ? { primaryPaneId: input.primaryPaneId }
       : {}),
-    ...(input.scrollTarget === 'nested' && input.nestedOwnerOrdinal !== undefined
-      ? { nestedOwnerOrdinal: input.nestedOwnerOrdinal }
-      : {}),
-    documentScrollX: input.documentScrollX,
-    documentScrollY: input.documentScrollY,
-    documentMaxScrollX: input.documentMaxScrollX,
-    documentMaxScrollY: input.documentMaxScrollY,
     ...(input.visualScale !== undefined
       ? {
           visualScale: input.visualScale,
@@ -1200,6 +1238,51 @@ function readScrollState(input: HtmlMirrorScrollState): HtmlMirrorScrollState | 
         }
       : {}),
   });
+}
+
+/**
+ * The panes of one scroll message (D122): a bounded list, each pane named
+ * once by a node id, every number finite and inside the scroll bound, and no
+ * offset past its range. One bad pane refuses the whole message.
+ */
+function readScrollPanes(
+  input: unknown,
+): readonly HtmlMirrorPaneScroll[] | undefined {
+  if (
+    !Array.isArray(input) ||
+    input.length > MAX_HTML_MIRROR_SCROLL_PANES
+  ) return undefined;
+  const seen = new Set<number>();
+  const panes: HtmlMirrorPaneScroll[] = [];
+  for (const pane of input as readonly unknown[]) {
+    if (
+      !isRecord(pane) ||
+      !hasExactKeys(pane, [
+        'nodeId', 'scrollX', 'scrollY', 'maxScrollX', 'maxScrollY',
+      ]) ||
+      !isNodeId(pane.nodeId) ||
+      seen.has(pane.nodeId) ||
+      !isScrollValue(pane.maxScrollX) ||
+      !isScrollValue(pane.maxScrollY) ||
+      !isPaneOffset(pane.scrollX, pane.maxScrollX) ||
+      !isPaneOffset(pane.scrollY, pane.maxScrollY)
+    ) return undefined;
+    seen.add(pane.nodeId);
+    panes.push(Object.freeze({
+      nodeId: pane.nodeId,
+      scrollX: pane.scrollX,
+      scrollY: pane.scrollY,
+      maxScrollX: pane.maxScrollX,
+      maxScrollY: pane.maxScrollY,
+    }));
+  }
+  return Object.freeze(panes);
+}
+
+/** A pane's offset on one axis: either sign, never past its range. */
+function isPaneOffset(value: unknown, maximum: number): value is number {
+  return typeof value === 'number' && Number.isFinite(value) &&
+    Math.abs(value) <= maximum;
 }
 
 /** A pinch zoom's three numbers together and in range, or none of them. */
@@ -1217,7 +1300,7 @@ function isVisualViewportState(input: HtmlMirrorScrollState): boolean {
 
 function isScrollValue(value: unknown): value is number {
   return typeof value === 'number' && Number.isFinite(value) &&
-    value >= 0 && value <= 100_000;
+    value >= 0 && value <= PRIMARY_SCROLL_MAX;
 }
 
 function withSequence(

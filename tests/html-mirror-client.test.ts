@@ -112,6 +112,46 @@ describe('Chrome HTML mirror client', () => {
     expect(port.disconnect).toHaveBeenCalledOnce();
   });
 
+  it('hands on every scroll update with the last pane list the page sent (D122)', async () => {
+    const port = new FakePort();
+    installBrowser(port);
+    const lease = await openChromeHtmlMirrorStream(request);
+    port.emitMessage(checkpoint());
+    await lease.initialCheckpoint;
+    // Before the observer is set only the latest update is kept: the one
+    // with the list is replaced by one without, which must not lose it.
+    port.emitMessage(paneScrollUpdate(0, [{ nodeId: 7, scrollX: 300 }], 7));
+    port.emitMessage(paneScrollUpdate(120));
+    const observer = fakeObserver();
+    lease.setObserver(observer);
+    expect(observer.onScroll).toHaveBeenCalledOnce();
+    const whole = {
+      scrollX: 0, scrollY: 120, maxScrollX: 0, maxScrollY: 900,
+      panes: [{ nodeId: 7, scrollX: 300, scrollY: 0, maxScrollX: 4_000, maxScrollY: 0 }],
+      primaryPaneId: 7,
+    };
+    expect(observer.onScroll.mock.lastCall?.[0].scroll).toEqual(whole);
+
+    // Live: the page scrolls on, the list stays; a new list replaces it,
+    // and an empty one says that no pane is scrolled any more.
+    port.emitMessage(paneScrollUpdate(240));
+    expect(observer.onScroll.mock.lastCall?.[0].scroll).toEqual({
+      ...whole, scrollY: 240,
+    });
+    port.emitMessage(paneScrollUpdate(240, [{ nodeId: 9, scrollX: 50 }]));
+    port.emitMessage(paneScrollUpdate(360));
+    expect(observer.onScroll.mock.lastCall?.[0].scroll).toEqual({
+      scrollX: 0, scrollY: 360, maxScrollX: 0, maxScrollY: 900,
+      panes: [{ nodeId: 9, scrollX: 50, scrollY: 0, maxScrollX: 4_000, maxScrollY: 0 }],
+    });
+    port.emitMessage(paneScrollUpdate(360, []));
+    port.emitMessage(paneScrollUpdate(480));
+    expect(observer.onScroll.mock.lastCall?.[0].scroll).toEqual({
+      scrollX: 0, scrollY: 480, maxScrollX: 0, maxScrollY: 900, panes: [],
+    });
+    expect(observer.onFailure).not.toHaveBeenCalled();
+  });
+
   it('queues a typed scroll update that arrives before observer setup', async () => {
     const port = new FakePort();
     installBrowser(port);
@@ -119,15 +159,10 @@ describe('Chrome HTML mirror client', () => {
     port.emitMessage(checkpoint());
     await lease.initialCheckpoint;
     const update = createHtmlMirrorScrollUpdate(identity, {
-      scrollTarget: 'document',
       scrollX: 0,
       scrollY: 320,
       maxScrollX: 0,
       maxScrollY: 900,
-      documentScrollX: 0,
-      documentScrollY: 320,
-      documentMaxScrollX: 0,
-      documentMaxScrollY: 900,
     })!;
     port.emitMessage(update);
     const observer = fakeObserver();
@@ -321,17 +356,33 @@ function checkpoint() {
   })!;
 }
 
-function scrollUpdate(scrollY: number) {
+function paneScrollUpdate(
+  scrollY: number,
+  panes?: Array<{ nodeId: number; scrollX: number }>,
+  primaryPaneId?: number,
+) {
   return createHtmlMirrorScrollUpdate(identity, {
-    scrollTarget: 'document',
     scrollX: 0,
     scrollY,
     maxScrollX: 0,
     maxScrollY: 900,
-    documentScrollX: 0,
-    documentScrollY: scrollY,
-    documentMaxScrollX: 0,
-    documentMaxScrollY: 900,
+    ...(panes
+      ? {
+          panes: panes.map((pane) => ({
+            ...pane, scrollY: 0, maxScrollX: 4_000, maxScrollY: 0,
+          })),
+        }
+      : {}),
+    ...(primaryPaneId !== undefined ? { primaryPaneId } : {}),
+  })!;
+}
+
+function scrollUpdate(scrollY: number) {
+  return createHtmlMirrorScrollUpdate(identity, {
+    scrollX: 0,
+    scrollY,
+    maxScrollX: 0,
+    maxScrollY: 900,
   })!;
 }
 

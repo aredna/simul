@@ -340,15 +340,10 @@ describe('IsolatedHtmlReplicaEngine', () => {
     });
     await engine.run(request);
     const update = createHtmlMirrorScrollUpdate(checkpoint.identity, {
-      scrollTarget: 'document',
       scrollX: 0,
       scrollY: 240,
       maxScrollX: 0,
       maxScrollY: 400,
-      documentScrollX: 0,
-      documentScrollY: 240,
-      documentMaxScrollX: 0,
-      documentMaxScrollY: 400,
     })!;
 
     stream.observer!.onScroll(update);
@@ -363,6 +358,70 @@ describe('IsolatedHtmlReplicaEngine', () => {
 
     expect(onSourceScroll).toHaveBeenCalledOnce();
     expect(onSourceScroll).toHaveBeenCalledWith(update.scroll);
+  });
+
+  it('gives the host its node map at commit, so a pane is found by node id (D122)', async () => {
+    const stream = new FakeHtmlStream(makeCheckpoint('pane text', 0));
+    const host = new FakePresentationHost();
+    const engine = makeEngine(stream, host);
+    await engine.run(request);
+
+    const replica = host.iframe!.contentDocument!;
+    expect(host.resolveNode?.(1)).toBe(replica.documentElement);
+    expect(host.resolveNode?.(3)).toBe(replica.body);
+    expect(host.resolveNode?.(4)).toBe(replica.body.firstChild);
+    expect(host.resolveNode?.(99)).toBeUndefined();
+
+    // A patch makes the body's content again: the id of a new element finds
+    // it, and the id of what was taken out finds nothing.
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [{
+        kind: 'children', nodeId: 3, children: [{
+          kind: 'element', id: 7, namespace: 'html', tagName: 'div',
+          attributes: [], children: [],
+        }],
+      }],
+    )!);
+    expect(host.resolveNode?.(7)).toBe(replica.body.firstElementChild);
+    expect(host.resolveNode?.(4)).toBeUndefined();
+  });
+
+  it('refreshes the host after a patch that leaves the page the size it was (D122)', async () => {
+    const stream = new FakeHtmlStream(makeCheckpoint('pane text', 0));
+    const host = new FakePresentationHost();
+    const refreshes: (() => void)[] = [];
+    const engine = makeEngine(
+      stream,
+      host,
+      undefined,
+      undefined,
+      (refresh) => refreshes.push(() => refresh(0)),
+    );
+    await engine.run(request);
+    for (const refresh of refreshes.splice(0)) refresh();
+    host.refreshExtent.mockClear();
+
+    // The host places the panes again from this call: a patch can make a
+    // scrolled pane again, at its start, without changing the page's size.
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [{
+        kind: 'children', nodeId: 3, children: [{
+          kind: 'element', id: 7, namespace: 'html', tagName: 'div',
+          attributes: [], children: [],
+        }],
+      }],
+    )!);
+    expect(host.refreshExtent).not.toHaveBeenCalled();
+    expect(refreshes).toHaveLength(1);
+    for (const refresh of refreshes.splice(0)) refresh();
+    expect(host.refreshExtent).toHaveBeenCalledOnce();
+    expect(host.refreshExtent.mock.lastCall?.[0]).toBe(host.iframe);
   });
 
   it('holds translated boxes at the page size with Keep geometry (D101)', async () => {
@@ -4467,6 +4526,7 @@ class FakePresentationHost implements ReplayPresentationHost {
   readonly releases: Array<ReturnType<typeof vi.fn>> = [];
   iframe?: HTMLIFrameElement;
   dimensions?: VisibleReplayDimensions;
+  resolveNode?: (nodeId: number) => Node | undefined;
 
   createCandidate(dimensions: VisibleReplayDimensions): VisibleReplayCandidateLease {
     this.dimensions = dimensions;
@@ -4475,8 +4535,9 @@ class FakePresentationHost implements ReplayPresentationHost {
     this.releases.push(release);
     return {
       mount,
-      commit: (iframe) => {
+      commit: (iframe, _extent, resolveNode) => {
         this.iframe = iframe;
+        if (resolveNode) this.resolveNode = resolveNode;
         // As the real host: the committed replica is exposed (D118).
         iframe.removeAttribute('aria-hidden');
       },

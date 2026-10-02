@@ -6,8 +6,10 @@ import {
   createHtmlMirrorStart,
   decodeHtmlMirrorWireMessage,
   readHtmlMirrorSourceMessage,
+  withHtmlMirrorScrollPanes,
   type HtmlMirrorCheckpoint,
   type HtmlMirrorPatchBatch,
+  type HtmlMirrorScrollState,
   type HtmlMirrorScrollUpdate,
 } from './html-mirror-protocol';
 import {
@@ -117,6 +119,8 @@ class ChromeHtmlMirrorStreamLease implements HtmlMirrorStreamLease {
   readonly #rejectInitial: (error: unknown) => void;
   readonly #queue: QueuedHtmlMirrorMessage[] = [];
   #observer: HtmlMirrorStreamObserver | undefined;
+  /** The last scroll state that carried its pane list (D122). */
+  #lastPaneList: HtmlMirrorScrollState | undefined;
   #initialSettled = false;
   #disposed = false;
   #explicitlyDisposed = false;
@@ -225,15 +229,20 @@ class ChromeHtmlMirrorStreamLease implements HtmlMirrorStreamLease {
       this.dispose();
       return;
     }
-    const message = readHtmlMirrorSourceMessage(
+    const received = readHtmlMirrorSourceMessage(
       decodeHtmlMirrorWireMessage(input),
       this.identity,
       this.fidelityPolicy,
     );
-    if (!message) {
+    if (!received) {
       this.#fail(new Error('Invalid HTML mirror source message.'));
       return;
     }
+    // The page sends its pane list only when it changed; every scroll
+    // update handed on carries it, so a later one can stand alone.
+    const message = received.kind === 'simul:html-mirror-v2:scroll'
+      ? this.#withPaneList(received)
+      : received;
     if (message.kind === 'simul:html-mirror-v2:error') {
       if (!this.#initialSettled) {
         this.#initialSettled = true;
@@ -346,6 +355,14 @@ class ChromeHtmlMirrorStreamLease implements HtmlMirrorStreamLease {
       }
     }
     if (terminal) this.#closeTransport(true);
+  }
+
+  #withPaneList(update: HtmlMirrorScrollUpdate): HtmlMirrorScrollUpdate {
+    if (update.scroll.panes) {
+      this.#lastPaneList = update.scroll;
+      return update;
+    }
+    return withHtmlMirrorScrollPanes(update, this.#lastPaneList);
   }
 
   #queueLatestScroll(message: HtmlMirrorScrollUpdate): void {

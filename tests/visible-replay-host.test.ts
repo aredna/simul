@@ -155,7 +155,7 @@ describe('visible isolated replay host', () => {
     expect(scrollTo).toHaveBeenLastCalledWith({
       left: 300,
       top: 800,
-      behavior: 'auto',
+      behavior: 'instant',
     });
 
     scroller.scrollLeft = 150;
@@ -164,7 +164,7 @@ describe('visible isolated replay host', () => {
     expect(scrollTo).toHaveBeenLastCalledWith({
       left: 300,
       top: 900,
-      behavior: 'auto',
+      behavior: 'instant',
     });
 
     fixture.host.updateLayout({ displayMode: 'custom', zoomPercent: 175 });
@@ -254,7 +254,7 @@ describe('visible isolated replay host', () => {
     candidate.mount.append(iframe);
     candidate.commit(iframe, { width: 1_400, height: 2_500 });
     const scroller = requireElement<HTMLElement>(fixture.preview, '.replica-replay-scroll');
-    const sourceAtTop = { scrollTarget: 'document' as const, scrollX: 0, scrollY: 0, maxScrollY: 1_800 };
+    const sourceAtTop = { scrollX: 0, scrollY: 0, maxScrollY: 1_800 };
     fixture.host.followSourceScroll(sourceAtTop);
 
     scroller.scrollTop = 900;
@@ -264,7 +264,7 @@ describe('visible isolated replay host', () => {
     fixture.host.followSourceScroll({ ...sourceAtTop, maxScrollY: 2_400 });
     fixture.host.refreshExtent(iframe, { width: 1_400, height: 3_100 });
     expect(scroller.scrollTop).toBe(900);
-    expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, top: 900, behavior: 'auto' });
+    expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, top: 900, behavior: 'instant' });
 
     // A real source move still wins.
     fixture.host.followSourceScroll({ ...sourceAtTop, scrollY: 300, maxScrollY: 2_400 });
@@ -287,7 +287,6 @@ describe('visible isolated replay host', () => {
   it('retains source scroll received before a slow replica commits and resets it between pages', () => {
     const fixture = createFixture();
     fixture.host.followSourceScroll({
-      scrollTarget: 'document',
       scrollX: 120,
       scrollY: 800,
       maxScrollX: 400,
@@ -302,7 +301,7 @@ describe('visible isolated replay host', () => {
     expect(firstScrollTo).toHaveBeenLastCalledWith({
       left: 120,
       top: 800,
-      behavior: 'auto',
+      behavior: 'instant',
     });
 
     fixture.host.resetSourceScroll();
@@ -315,7 +314,7 @@ describe('visible isolated replay host', () => {
     expect(secondScrollTo).toHaveBeenLastCalledWith({
       left: 0,
       top: 0,
-      behavior: 'auto',
+      behavior: 'instant',
     });
   });
 
@@ -346,7 +345,7 @@ describe('visible isolated replay host', () => {
     expect(recoveryScrollTo).toHaveBeenLastCalledWith({
       left: 0,
       top: 375,
-      behavior: 'auto',
+      behavior: 'instant',
     });
     expect(requireElement<HTMLElement>(
       fixture.preview,
@@ -357,7 +356,6 @@ describe('visible isolated replay host', () => {
   it('keeps the source share of its range while a delayed replica extent catches up', () => {
     const fixture = createFixture();
     fixture.host.followSourceScroll({
-      scrollTarget: 'document',
       scrollX: 0,
       scrollY: 3_800,
       maxScrollX: 0,
@@ -378,7 +376,7 @@ describe('visible isolated replay host', () => {
     expect(scrollTo).toHaveBeenLastCalledWith({
       left: 0,
       top: 228,
-      behavior: 'auto',
+      behavior: 'instant',
     });
     expect(requireElement<HTMLElement>(
       fixture.preview,
@@ -390,7 +388,26 @@ describe('visible isolated replay host', () => {
     expect(scrollTo).toHaveBeenLastCalledWith({
       left: 0,
       top: 3_800,
-      behavior: 'auto',
+      behavior: 'instant',
+    });
+  });
+
+  it('follows the page at once, whatever scroll behaviour the page asks for (D122)', () => {
+    const fixture = createFixture();
+    const candidate = fixture.host.createCandidate(dimensions());
+    const scrollTo = vi.fn();
+    const iframe = createProtectedIframe(fixture.document, scrollTo);
+    candidate.mount.append(iframe);
+    candidate.commit(iframe, { width: 1_600, height: 2_600 });
+    scrollTo.mockClear();
+
+    // The replica keeps the page's `scroll-behavior: smooth`; `auto` would
+    // animate every followed move and leave the mirror behind the tab.
+    fixture.host.followSourceScroll({
+      scrollX: 0, scrollY: 1_500, maxScrollX: 400, maxScrollY: 1_900,
+    });
+    expect(scrollTo).toHaveBeenCalledExactlyOnceWith({
+      left: 0, top: 1_500, behavior: 'instant',
     });
   });
 
@@ -406,18 +423,18 @@ describe('visible isolated replay host', () => {
     // 3,600px in the replica.
     fixture.host.refreshExtent(iframe, { width: 1_200, height: 4_300 });
     const scroller = requireElement<HTMLElement>(fixture.preview, '.replica-replay-scroll');
-    const source = { scrollTarget: 'document' as const, scrollX: 0, maxScrollX: 0, maxScrollY: 1_800 };
+    const source = { scrollX: 0, maxScrollX: 0, maxScrollY: 1_800 };
 
     fixture.host.followSourceScroll({ ...source, scrollY: 900 });
-    expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, top: 1_800, behavior: 'auto' });
+    expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, top: 1_800, behavior: 'instant' });
     expect(scroller.scrollTop).toBe(1_800);
 
     fixture.host.followSourceScroll({ ...source, scrollY: 1_800 });
-    expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, top: 3_600, behavior: 'auto' });
+    expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, top: 3_600, behavior: 'instant' });
 
     // More translations land below: the replica stays at its end.
     fixture.host.refreshExtent(iframe, { width: 1_200, height: 5_000 });
-    expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, top: 4_300, behavior: 'auto' });
+    expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, top: 4_300, behavior: 'instant' });
   });
 
   it('tells its own scroll echo from a reader move while translations grow the page', () => {
@@ -432,19 +449,19 @@ describe('visible isolated replay host', () => {
     const scroller = requireElement<HTMLElement>(fixture.preview, '.replica-replay-scroll');
 
     fixture.host.followSourceScroll({
-      scrollTarget: 'document', scrollX: 0, scrollY: 900, maxScrollX: 0, maxScrollY: 1_800,
+      scrollX: 0, scrollY: 900, maxScrollX: 0, maxScrollY: 1_800,
     });
     // Setting the panel scroller fires a scroll event of its own; the
     // replica keeps following the source's half-way point as it grows.
     scroller.dispatchEvent(new fixture.window.Event('scroll'));
     fixture.host.refreshExtent(iframe, { width: 1_200, height: 5_700 });
-    expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, top: 2_500, behavior: 'auto' });
+    expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, top: 2_500, behavior: 'instant' });
 
     // A reader's own move is kept in replica pixels as the page grows.
     scroller.scrollTop = 3_000;
     scroller.dispatchEvent(new fixture.window.Event('scroll'));
     fixture.host.refreshExtent(iframe, { width: 1_200, height: 6_700 });
-    expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, top: 3_000, behavior: 'auto' });
+    expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, top: 3_000, behavior: 'instant' });
     expect(scroller.scrollTop).toBe(3_000);
   });
 
@@ -477,7 +494,7 @@ describe('visible isolated replay host', () => {
     expect(iframe.style.width).toBe('1200px');
     // The page's own scroll position is unchanged by the pinch.
     expect(scroller.scrollTop).toBe(400);
-    expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, top: 800, behavior: 'auto' });
+    expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, top: 800, behavior: 'instant' });
 
     // Panning inside the magnified view moves only the corner.
     fixture.host.followSourceScroll({ ...pinched, visualOffsetX: 420, visualOffsetY: 200 });
@@ -509,48 +526,31 @@ describe('visible isolated replay host', () => {
     expect(scaleLayer.style.transform).toBe('scale(0.5)');
   });
 
-  it('projects nested source progress into the replica primary viewport', () => {
+  it('scrolls the tab\'s viewport-scale pane in the replica, found by node id (D122)', () => {
     const fixture = createFixture();
     const candidate = fixture.host.createCandidate(dimensions());
     const scrollTo = vi.fn();
     const iframe = createProtectedIframe(fixture.document, scrollTo);
-    const replica = parseHTML(
+    const replica = attachReplica(
+      iframe,
       '<html><body><main id="results"></main></body></html>',
-    ).document;
+    );
     const results = replica.querySelector('#results') as HTMLElement;
-    Object.defineProperties(results, {
-      clientWidth: { configurable: true, value: 900 },
-      clientHeight: { configurable: true, value: 650 },
-      scrollWidth: { configurable: true, value: 900 },
-      scrollHeight: { configurable: true, value: 3_650 },
-      scrollLeft: { configurable: true, writable: true, value: 0 },
-      scrollTop: { configurable: true, writable: true, value: 0 },
-      getBoundingClientRect: {
-        configurable: true,
-        value: () => ({
-          x: 200, y: 25, left: 200, top: 25, right: 1_100, bottom: 675,
-          width: 900, height: 650, toJSON: () => ({}),
-        }),
-      },
-    });
-    Object.defineProperty(iframe, 'contentDocument', {
-      configurable: true,
-      value: replica,
+    defineReplicaScrollBox(results, {
+      clientWidth: 900, clientHeight: 650, scrollHeight: 3_650,
     });
     candidate.mount.append(iframe);
-    candidate.commit(iframe, { width: 1_200, height: 700 });
+    candidate.commit(iframe, { width: 1_200, height: 700 }, resolver([[7, results]]));
 
     fixture.host.followSourceScroll({
-      scrollTarget: 'nested',
-      scrollX: 0,
-      scrollY: 2_000,
-      maxScrollX: 0,
-      maxScrollY: 4_000,
+      scrollX: 0, scrollY: 0, maxScrollX: 0, maxScrollY: 0,
+      panes: [{ nodeId: 7, scrollX: 0, scrollY: 2_000, maxScrollX: 0, maxScrollY: 4_000 }],
+      primaryPaneId: 7,
     });
 
     expect(results.scrollTop).toBe(1_500);
     expect(scrollTo).toHaveBeenLastCalledWith({
-      left: 0, top: 0, behavior: 'auto',
+      left: 0, top: 0, behavior: 'instant',
     });
     expect(requireElement<HTMLElement>(
       fixture.preview,
@@ -573,44 +573,33 @@ describe('visible isolated replay host', () => {
     ).scrollTop).toBe(0);
   });
 
-  it('preserves document position while projecting a nested reading viewport', () => {
+  it('keeps the document at its own share while a pane is scrolled', () => {
     const fixture = createFixture();
     const candidate = fixture.host.createCandidate(dimensions());
     const scrollTo = vi.fn();
     const iframe = createProtectedIframe(fixture.document, scrollTo);
-    const replica = parseHTML(
-      '<html><body><main id="results" style="overflow-y:auto"></main></body></html>',
-    ).document;
+    const replica = attachReplica(
+      iframe,
+      '<html><body><main id="results"></main></body></html>',
+    );
     const results = replica.querySelector('#results') as HTMLElement;
     defineReplicaScrollBox(results, {
-      clientWidth: 900,
-      clientHeight: 650,
-      scrollHeight: 3_650,
-    });
-    Object.defineProperty(iframe, 'contentDocument', {
-      configurable: true,
-      value: replica,
+      clientWidth: 900, clientHeight: 650, scrollHeight: 3_650,
     });
     candidate.mount.append(iframe);
-    candidate.commit(iframe, { width: 1_600, height: 2_600 });
+    candidate.commit(iframe, { width: 1_600, height: 2_600 }, resolver([[7, results]]));
 
     fixture.host.followSourceScroll({
-      scrollTarget: 'nested',
-      scrollX: 0,
-      scrollY: 2_000,
-      maxScrollX: 0,
-      maxScrollY: 4_000,
-      documentScrollX: 0,
-      documentScrollY: 420,
-      documentMaxScrollX: 400,
-      documentMaxScrollY: 1_900,
+      scrollX: 0, scrollY: 420, maxScrollX: 400, maxScrollY: 1_900,
+      panes: [{ nodeId: 7, scrollX: 0, scrollY: 2_000, maxScrollX: 0, maxScrollY: 4_000 }],
+      primaryPaneId: 7,
     });
 
     expect(results.scrollTop).toBe(1_500);
     expect(scrollTo).toHaveBeenLastCalledWith({
       left: 0,
       top: 420,
-      behavior: 'auto',
+      behavior: 'instant',
     });
     expect(requireElement<HTMLElement>(
       fixture.preview,
@@ -618,79 +607,80 @@ describe('visible isolated replay host', () => {
     ).scrollTop).toBe(420);
   });
 
-  it('switches away from removed or shrunken nested targets and restores document scrolling', () => {
+  it('moves the replica document by the pane\'s progress when the replica cannot scroll that pane', () => {
     const fixture = createFixture();
     const candidate = fixture.host.createCandidate(dimensions());
     const scrollTo = vi.fn();
     const iframe = createProtectedIframe(fixture.document, scrollTo);
-    const replica = parseHTML(
-      '<html><body><main id="first" style="overflow-y:auto"></main>' +
-      '<main id="replacement" style="overflow-y:auto"></main></body></html>',
-    ).document;
+    const replica = attachReplica(
+      iframe,
+      '<html><body><main id="first"></main><main id="other"></main></body></html>',
+    );
     const first = replica.querySelector('#first') as HTMLElement;
-    const replacement = replica.querySelector('#replacement') as HTMLElement;
+    const other = replica.querySelector('#other') as HTMLElement;
     defineReplicaScrollBox(first, {
       clientWidth: 960, clientHeight: 680, scrollHeight: 4_680,
     });
-    defineReplicaScrollBox(replacement, {
+    // Another viewport-scale pane in the replica is never taken instead.
+    defineReplicaScrollBox(other, {
       clientWidth: 900, clientHeight: 650, scrollHeight: 3_650,
     });
-    Object.defineProperty(iframe, 'contentDocument', {
-      configurable: true,
-      value: replica,
-    });
+    const nodes = new Map<number, Node>([[7, first], [8, other]]);
     candidate.mount.append(iframe);
-    candidate.commit(iframe, { width: 1_600, height: 2_600 });
-
-    fixture.host.followSourceScroll({
-      scrollTarget: 'nested',
-      scrollX: 0,
-      scrollY: 2_000,
-      maxScrollX: 0,
-      maxScrollY: 4_000,
+    candidate.commit(iframe, { width: 1_600, height: 2_600 }, (id) => nodes.get(id));
+    const pane = (scrollY: number, maxScrollY: number) => ({
+      scrollX: 0, scrollY: 0, maxScrollX: 0, maxScrollY: 0,
+      panes: [{ nodeId: 7, scrollX: 0, scrollY, maxScrollX: 0, maxScrollY }],
+      primaryPaneId: 7,
     });
+
+    fixture.host.followSourceScroll(pane(2_000, 4_000));
     expect(first.scrollTop).toBe(2_000);
+    expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, top: 0, behavior: 'instant' });
 
+    // The replica no longer has the element: its progress moves the page.
     first.remove();
-    fixture.host.followSourceScroll({
-      scrollTarget: 'nested',
-      scrollX: 0,
-      scrollY: 1_000,
-      maxScrollX: 0,
-      maxScrollY: 2_000,
-    });
-    expect(replacement.scrollTop).toBe(1_500);
+    nodes.delete(7);
+    fixture.host.followSourceScroll(pane(1_000, 2_000));
+    expect(other.scrollTop).toBe(0);
+    expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, top: 950, behavior: 'instant' });
 
-    // A responsive shrink can make the former reading pane incidental. The
-    // host must invalidate it and use bounded outer progress instead.
-    Object.defineProperty(replacement, 'scrollHeight', {
-      configurable: true,
-      value: 700,
+    // The element is there but the replica lays it out with no scroll
+    // range (a style the replica does not have): the same.
+    const flat = replica.createElement('main');
+    replica.body.append(flat);
+    defineReplicaScrollBox(flat, {
+      clientWidth: 900, clientHeight: 650, scrollHeight: 650,
     });
-    fixture.host.followSourceScroll({
-      scrollTarget: 'nested',
-      scrollX: 0,
-      scrollY: 900,
-      maxScrollX: 0,
-      maxScrollY: 600,
+    nodes.set(7, flat);
+    fixture.host.followSourceScroll(pane(600, 600));
+    expect(flat.scrollTop).toBe(0);
+    expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, top: 1_900, behavior: 'instant' });
+    expect(requireElement<HTMLElement>(
+      fixture.preview,
+      '.replica-replay-scroll',
+    ).scrollTop).toBe(1_900);
+
+    // The replica's element gains a range (a late style): the engine's
+    // layout refresh puts the page back where it belongs without the pane's
+    // progress, and any range the element has is used from then on.
+    defineReplicaScrollBox(flat, {
+      clientWidth: 900, clientHeight: 650, scrollHeight: 700,
     });
-    expect(scrollTo).toHaveBeenLastCalledWith({
-      left: 0,
-      top: 1_900,
-      behavior: 'auto',
-    });
+    fixture.host.refreshExtent(iframe, { width: 1_600, height: 2_600 });
+    expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, top: 0, behavior: 'instant' });
+    expect(flat.scrollTop).toBe(50);
+    fixture.host.followSourceScroll(pane(300, 600));
+    expect(flat.scrollTop).toBe(25);
+    expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, top: 0, behavior: 'instant' });
 
     fixture.host.followSourceScroll({
-      scrollTarget: 'document',
-      scrollX: 0,
-      scrollY: 640,
-      maxScrollX: 400,
-      maxScrollY: 1_900,
+      scrollX: 0, scrollY: 640, maxScrollX: 400, maxScrollY: 1_900,
     });
     expect(scrollTo).toHaveBeenLastCalledWith({
       left: 0,
       top: 640,
-      behavior: 'auto',
+      behavior: 'instant',
     });
     expect(requireElement<HTMLElement>(
       fixture.preview,
@@ -698,95 +688,558 @@ describe('visible isolated replay host', () => {
     ).scrollTop).toBe(640);
   });
 
-  it('reselects a qualified replica pane when the source nested owner changes', () => {
+  it('lets the pane stand in for the page on each axis the replica cannot scroll (D122)', () => {
+    const fixture = createFixture();
+    const candidate = fixture.host.createCandidate(dimensions());
+    const scrollTo = vi.fn();
+    const iframe = createProtectedIframe(fixture.document, scrollTo);
+    const replica = attachReplica(iframe, '<html><body><main id="p"></main></body></html>');
+    const p = replica.querySelector('#p') as HTMLElement;
+    // The replica lays the pane out at full height (no vertical range) and
+    // keeps its small sideways range, as the tab's pane has one.
+    defineReplicaScrollBox(p, {
+      clientWidth: 900, clientHeight: 4_650, scrollHeight: 4_650, scrollWidth: 920,
+    });
+    candidate.mount.append(iframe);
+    candidate.commit(iframe, { width: 1_600, height: 2_600 }, resolver([[7, p]]));
+    const scroller = requireElement<HTMLElement>(fixture.preview, '.replica-replay-scroll');
+    const pane = (scrollX: number, scrollY: number) => ({
+      scrollX: 0, scrollY: 0, maxScrollX: 0, maxScrollY: 0,
+      panes: [{ nodeId: 7, scrollX, scrollY, maxScrollX: 20, maxScrollY: 4_000 }],
+      primaryPaneId: 7,
+    });
+
+    // Down: the replica cannot scroll the pane, so the page moves.
+    fixture.host.followSourceScroll(pane(0, 3_000));
+    expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, top: 1_425, behavior: 'instant' });
+    expect(scroller.scrollTop).toBe(1_425);
+    expect(p.scrollTop).toBe(0);
+    // Sideways: the replica can, so the pane moves and the page does not.
+    scrollTo.mockClear();
+    fixture.host.followSourceScroll(pane(10, 3_000));
+    expect(p.scrollLeft).toBe(10);
+    expect(scrollTo).not.toHaveBeenCalled();
+    fixture.host.followSourceScroll(pane(20, 4_000));
+    expect(p.scrollLeft).toBe(20);
+    expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, top: 1_900, behavior: 'instant' });
+
+    // The other way round: a vertical range only. The pane is scrolled down
+    // by id and its sideways progress moves the page across.
+    defineReplicaScrollBox(p, {
+      clientWidth: 900, clientHeight: 650, scrollHeight: 3_650,
+    });
+    fixture.host.refreshExtent(iframe, { width: 1_600, height: 2_600 });
+    expect(p.scrollTop).toBe(3_000);
+    expect(scrollTo).toHaveBeenLastCalledWith({ left: 400, top: 0, behavior: 'instant' });
+    fixture.host.followSourceScroll(pane(10, 2_000));
+    expect(p.scrollTop).toBe(1_500);
+    expect(scrollTo).toHaveBeenLastCalledWith({ left: 200, top: 0, behavior: 'instant' });
+    // A pane that reports no sideways range has nothing to stand in with.
+    fixture.host.followSourceScroll({
+      scrollX: 0, scrollY: 0, maxScrollX: 0, maxScrollY: 0,
+      panes: [{ nodeId: 7, scrollX: 0, scrollY: 2_000, maxScrollX: 0, maxScrollY: 4_000 }],
+      primaryPaneId: 7,
+    });
+    expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, top: 0, behavior: 'instant' });
+  });
+
+  it('keeps the reader\'s scroll when a stand-in gains its own range with no move in the tab (D122)', () => {
+    const fixture = createFixture();
+    const candidate = fixture.host.createCandidate(dimensions());
+    const scrollTo = vi.fn();
+    const iframe = createProtectedIframe(fixture.document, scrollTo);
+    const replica = attachReplica(
+      iframe,
+      '<html><body><main id="p"></main><div id="car"></div></body></html>',
+    );
+    const p = replica.querySelector('#p') as HTMLElement;
+    const car = replica.querySelector('#car') as HTMLElement;
+    defineReplicaScrollBox(p, { clientWidth: 900, clientHeight: 650, scrollHeight: 650 });
+    defineReplicaScrollBox(car, {
+      clientWidth: 900, clientHeight: 100, scrollHeight: 100, scrollWidth: 5_000,
+    });
+    candidate.mount.append(iframe);
+    candidate.commit(iframe, { width: 1_600, height: 2_600 }, resolver([[7, p], [8, car]]));
+    const scroller = requireElement<HTMLElement>(fixture.preview, '.replica-replay-scroll');
+    const report = (slide: number) => ({
+      scrollX: 0, scrollY: 0, maxScrollX: 0, maxScrollY: 0,
+      panes: [
+        { nodeId: 7, scrollX: 0, scrollY: 1_000, maxScrollX: 0, maxScrollY: 4_000 },
+        ...(slide
+          ? [{ nodeId: 8, scrollX: slide, scrollY: 0, maxScrollX: 4_100, maxScrollY: 0 }]
+          : []),
+      ],
+      primaryPaneId: 7,
+    });
+
+    fixture.host.followSourceScroll(report(0));
+    expect(scroller.scrollTop).toBe(475);
+    scroller.scrollTop = 100;
+    scroller.dispatchEvent(new fixture.window.Event('scroll'));
+    expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, top: 100, behavior: 'instant' });
+
+    // A late style or a translation gives the replica's pane a range. The
+    // pane is placed by its id; the reader's place is not taken away.
+    defineReplicaScrollBox(p, { clientWidth: 900, clientHeight: 650, scrollHeight: 3_650 });
+    fixture.host.refreshExtent(iframe, { width: 1_600, height: 2_600 });
+    expect(p.scrollTop).toBe(750);
+    expect(scroller.scrollTop).toBe(100);
+    // The carousel advances; the pane that stood in has not moved in the tab.
+    scrollTo.mockClear();
+    fixture.host.followSourceScroll(report(800));
+    expect(car.scrollLeft).toBe(800);
+    expect(scroller.scrollTop).toBe(100);
+    expect(scrollTo).not.toHaveBeenCalled();
+
+    // The same before the engine has refreshed: the next report alone does
+    // not take the reader's place either.
+    defineReplicaScrollBox(p, { clientWidth: 900, clientHeight: 650, scrollHeight: 650 });
+    fixture.host.followSourceScroll(report(1_600));
+    expect(scroller.scrollTop).toBe(100);
+    expect(scrollTo).not.toHaveBeenCalled();
+    // The pane does move in the tab while it stands in: the page follows.
+    fixture.host.followSourceScroll({
+      ...report(1_600),
+      panes: [{ nodeId: 7, scrollX: 0, scrollY: 2_000, maxScrollX: 0, maxScrollY: 4_000 }],
+    });
+    expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, top: 950, behavior: 'instant' });
+    expect(scroller.scrollTop).toBe(950);
+  });
+
+  it('takes its own scroller echo for an echo when a pane moved in the same report (D122)', () => {
+    const fixture = createFixture();
+    const candidate = fixture.host.createCandidate(dimensions());
+    const scrollTo = vi.fn();
+    const iframe = createProtectedIframe(fixture.document, scrollTo);
+    const replica = attachReplica(iframe, '<html><body><div id="car"></div></body></html>');
+    const car = replica.querySelector('#car') as HTMLElement;
+    defineReplicaScrollBox(car, {
+      clientWidth: 900, clientHeight: 100, scrollHeight: 100, scrollWidth: 5_000,
+    });
+    candidate.mount.append(iframe);
+    candidate.commit(iframe, { width: 1_200, height: 2_500 }, resolver([[8, car]]));
+    fixture.host.markLive(iframe);
+    fixture.host.refreshExtent(iframe, { width: 1_200, height: 4_300 });
+    const scroller = requireElement<HTMLElement>(fixture.preview, '.replica-replay-scroll');
+    const report = (scrollY: number, slide: number) => ({
+      scrollX: 0, scrollY, maxScrollX: 0, maxScrollY: 1_800,
+      panes: [{ nodeId: 8, scrollX: slide, scrollY: 0, maxScrollX: 4_100, maxScrollY: 0 }],
+    });
+
+    // The page and a pane move in one report. The panel scroller then fires
+    // the scroll event of the position the host set: not a reader's move.
+    fixture.host.followSourceScroll(report(900, 820));
+    expect(scroller.scrollTop).toBe(1_800);
+    expect(car.scrollLeft).toBe(820);
+    scroller.dispatchEvent(new fixture.window.Event('scroll'));
+    fixture.host.refreshExtent(iframe, { width: 1_200, height: 5_700 });
+    expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, top: 2_500, behavior: 'instant' });
+    // A pane alone moves, and an event of the same position follows: still
+    // not the reader, and the pane is where the tab has it.
+    fixture.host.followSourceScroll(report(900, 1_640));
+    scroller.dispatchEvent(new fixture.window.Event('scroll'));
+    fixture.host.refreshExtent(iframe, { width: 1_200, height: 7_900 });
+    expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, top: 3_600, behavior: 'instant' });
+    expect(car.scrollLeft).toBe(1_640);
+  });
+
+  it('puts each pane at its own place, whichever pane the replica would rank first', () => {
     const fixture = createFixture();
     const candidate = fixture.host.createCandidate(dimensions());
     const iframe = createProtectedIframe(fixture.document);
-    const replica = parseHTML(
-      '<html><body><main id="first" style="overflow-y:auto"></main>' +
-      '<main id="second" style="overflow-y:auto"></main></body></html>',
-    ).document;
+    const replica = attachReplica(
+      iframe,
+      '<html><body><main id="first"></main><main id="second"></main></body></html>',
+    );
     const first = replica.querySelector('#first') as HTMLElement;
     const second = replica.querySelector('#second') as HTMLElement;
+    // A translation made the first pane overflow in the replica only; the
+    // tab scrolls the second one.
     defineReplicaScrollBox(first, {
       clientWidth: 960, clientHeight: 680, scrollHeight: 4_680,
     });
     defineReplicaScrollBox(second, {
       clientWidth: 900, clientHeight: 650, scrollHeight: 3_650,
     });
-    Object.defineProperty(iframe, 'contentDocument', {
-      configurable: true,
-      value: replica,
-    });
     candidate.mount.append(iframe);
-    candidate.commit(iframe, { width: 1_600, height: 2_600 });
+    candidate.commit(
+      iframe,
+      { width: 1_600, height: 2_600 },
+      resolver([[1, first], [2, second]]),
+    );
 
     fixture.host.followSourceScroll({
-      scrollTarget: 'nested', nestedOwnerKey: 1, nestedOwnerOrdinal: 0,
-      scrollX: 0, scrollY: 2_000, maxScrollX: 0, maxScrollY: 4_000,
+      scrollX: 0, scrollY: 0, maxScrollX: 0, maxScrollY: 0,
+      panes: [{ nodeId: 2, scrollX: 0, scrollY: 1_000, maxScrollX: 0, maxScrollY: 2_000 }],
+      primaryPaneId: 2,
     });
-    expect(first.scrollTop).toBe(2_000);
-    expect(second.scrollTop).toBe(0);
+    expect(first.scrollTop).toBe(0);
+    expect(second.scrollTop).toBe(1_500);
 
-    defineReplicaScrollBox(second, {
-      clientWidth: 1_100, clientHeight: 690, scrollHeight: 8_690,
-    });
+    // Both scrolled: each by its own share.
     fixture.host.followSourceScroll({
-      scrollTarget: 'nested', nestedOwnerKey: 2, nestedOwnerOrdinal: 1,
-      scrollX: 0, scrollY: 1_000, maxScrollX: 0, maxScrollY: 2_000,
+      scrollX: 0, scrollY: 0, maxScrollX: 0, maxScrollY: 0,
+      panes: [
+        { nodeId: 2, scrollX: 0, scrollY: 1_000, maxScrollX: 0, maxScrollY: 2_000 },
+        { nodeId: 1, scrollX: 0, scrollY: 400, maxScrollX: 0, maxScrollY: 4_000 },
+      ],
+      primaryPaneId: 1,
     });
-
-    expect(first.scrollTop).toBe(2_000);
-    expect(second.scrollTop).toBe(4_000);
+    expect(first.scrollTop).toBe(400);
+    expect(second.scrollTop).toBe(1_500);
   });
 
-  it('projects nested source progress into an open-shadow reading viewport', () => {
+  it('scrolls a pane inside an open shadow root, found by node id', () => {
     const fixture = createFixture();
     const candidate = fixture.host.createCandidate(dimensions());
     const scrollTo = vi.fn();
     const iframe = createProtectedIframe(fixture.document, scrollTo);
-    const replica = parseHTML(
+    const replica = attachReplica(
+      iframe,
       '<html><body><x-reading-pane></x-reading-pane></body></html>',
-    ).document;
+    );
     const host = replica.querySelector('x-reading-pane')!;
     const shadow = host.attachShadow({ mode: 'open' });
     const results = replica.createElement('main');
-    results.setAttribute('style', 'overflow-y:auto');
     shadow.append(results);
-    Object.defineProperties(results, {
-      clientWidth: { configurable: true, value: 900 },
-      clientHeight: { configurable: true, value: 650 },
-      scrollWidth: { configurable: true, value: 900 },
-      scrollHeight: { configurable: true, value: 3_650 },
-      scrollLeft: { configurable: true, writable: true, value: 0 },
-      scrollTop: { configurable: true, writable: true, value: 0 },
-      getBoundingClientRect: {
-        configurable: true,
-        value: () => ({
-          x: 200, y: 25, left: 200, top: 25, right: 1_100, bottom: 675,
-          width: 900, height: 650, toJSON: () => ({}),
-        }),
-      },
-    });
-    Object.defineProperty(iframe, 'contentDocument', {
-      configurable: true,
-      value: replica,
+    defineReplicaScrollBox(results, {
+      clientWidth: 900, clientHeight: 650, scrollHeight: 3_650,
     });
     candidate.mount.append(iframe);
-    candidate.commit(iframe, { width: 1_200, height: 700 });
+    candidate.commit(iframe, { width: 1_200, height: 700 }, resolver([[7, results]]));
 
     fixture.host.followSourceScroll({
-      scrollTarget: 'nested',
-      scrollX: 0,
-      scrollY: 2_000,
-      maxScrollX: 0,
-      maxScrollY: 4_000,
+      scrollX: 0, scrollY: 0, maxScrollX: 0, maxScrollY: 0,
+      panes: [{ nodeId: 7, scrollX: 0, scrollY: 2_000, maxScrollX: 0, maxScrollY: 4_000 }],
+      primaryPaneId: 7,
     });
 
     expect(results.scrollTop).toBe(1_500);
     expect(scrollTo).toHaveBeenLastCalledWith({
-      left: 0, top: 0, behavior: 'auto',
+      left: 0, top: 0, behavior: 'instant',
     });
+  });
+
+  it('follows small and sideways panes by share of their own range, at once (D122)', () => {
+    const fixture = createFixture();
+    const candidate = fixture.host.createCandidate(dimensions());
+    const scrollTo = vi.fn();
+    const iframe = createProtectedIframe(fixture.document, scrollTo);
+    const replica = attachReplica(
+      iframe,
+      '<html><body><div id="board"></div><div id="chat"></div>' +
+        '<div id="strip"></div><div id="smooth"></div></body></html>',
+    );
+    const board = replica.querySelector('#board') as HTMLElement;
+    const chat = replica.querySelector('#chat') as HTMLElement;
+    const strip = replica.querySelector('#strip') as HTMLElement;
+    const smooth = replica.querySelector('#smooth') as HTMLElement;
+    defineReplicaScrollBox(board, {
+      clientWidth: 1_200, clientHeight: 650, scrollHeight: 650, scrollWidth: 7_230,
+    });
+    // A translation doubled the chat's range in the replica.
+    defineReplicaScrollBox(chat, {
+      clientWidth: 400, clientHeight: 300, scrollHeight: 4_230,
+    });
+    defineReplicaScrollBox(strip, {
+      clientWidth: 1_000, clientHeight: 80, scrollHeight: 80, scrollWidth: 5_520,
+    });
+    defineReplicaScrollBox(smooth, {
+      clientWidth: 1_000, clientHeight: 80, scrollHeight: 80, scrollWidth: 5_520,
+    });
+    const smoothScrollTo = vi.fn((options: ScrollToOptions) => {
+      smooth.scrollLeft = options.left ?? 0;
+      smooth.scrollTop = options.top ?? 0;
+    });
+    Object.defineProperty(smooth, 'scrollTo', { configurable: true, value: smoothScrollTo });
+    candidate.mount.append(iframe);
+    candidate.commit(
+      iframe,
+      { width: 1_600, height: 2_600 },
+      resolver([[11, board], [12, chat], [13, strip], [14, smooth]]),
+    );
+    const scroller = requireElement<HTMLElement>(fixture.preview, '.replica-replay-scroll');
+    scrollTo.mockClear();
+
+    fixture.host.followSourceScroll({
+      scrollX: 0, scrollY: 150, maxScrollX: 400, maxScrollY: 1_900,
+      panes: [
+        // Equal ranges keep exact pixels.
+        { nodeId: 11, scrollX: 900, scrollY: 0, maxScrollX: 6_030, maxScrollY: 0 },
+        { nodeId: 12, scrollX: 0, scrollY: 1_965, maxScrollX: 0, maxScrollY: 1_965 },
+        // A right-to-left strip counts down from 0 on both sides.
+        { nodeId: 13, scrollX: -2_260, scrollY: 0, maxScrollX: 4_520, maxScrollY: 0 },
+        { nodeId: 14, scrollX: 2_000, scrollY: 0, maxScrollX: 4_520, maxScrollY: 0 },
+      ],
+    });
+
+    expect(board.scrollLeft).toBe(900);
+    expect(board.scrollTop).toBe(0);
+    // At its end in the tab, at its end in the longer replica pane.
+    expect(chat.scrollTop).toBe(3_930);
+    expect(strip.scrollLeft).toBe(-2_260);
+    // Never the page's smooth-scroll animation: the pane is put there.
+    expect(smoothScrollTo).toHaveBeenCalledExactlyOnceWith({
+      left: 2_000, top: 0, behavior: 'instant',
+    });
+    // The page itself went to the document's place, and only there.
+    expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, top: 150, behavior: 'instant' });
+    expect(scroller.scrollTop).toBe(150);
+
+    // A pane that is where it should be is not scrolled again.
+    fixture.host.followSourceScroll({
+      scrollX: 0, scrollY: 150, maxScrollX: 400, maxScrollY: 1_900,
+      panes: [
+        { nodeId: 14, scrollX: 2_000, scrollY: 0, maxScrollX: 4_520, maxScrollY: 0 },
+      ],
+    });
+    expect(smoothScrollTo).toHaveBeenCalledOnce();
+    // The three the report no longer lists are back at their start.
+    expect(board.scrollLeft).toBe(0);
+    expect(chat.scrollTop).toBe(0);
+    expect(strip.scrollLeft).toBe(0);
+  });
+
+  it('leaves the reader\'s own scroll and the page where they are when a pane moves (D122)', () => {
+    const fixture = createFixture();
+    const candidate = fixture.host.createCandidate(dimensions());
+    const scrollTo = vi.fn();
+    const iframe = createProtectedIframe(fixture.document, scrollTo);
+    const replica = attachReplica(
+      iframe,
+      '<html><body><div id="carousel"></div><main id="feed"></main></body></html>',
+    );
+    const carousel = replica.querySelector('#carousel') as HTMLElement;
+    const feed = replica.querySelector('#feed') as HTMLElement;
+    defineReplicaScrollBox(carousel, {
+      clientWidth: 1_200, clientHeight: 420, scrollHeight: 420, scrollWidth: 7_108,
+    });
+    defineReplicaScrollBox(feed, {
+      clientWidth: 900, clientHeight: 650, scrollHeight: 3_650,
+    });
+    candidate.mount.append(iframe);
+    candidate.commit(
+      iframe,
+      { width: 1_600, height: 2_600 },
+      resolver([[21, carousel], [22, feed]]),
+    );
+    const scroller = requireElement<HTMLElement>(fixture.preview, '.replica-replay-scroll');
+    const page = { scrollX: 0, scrollY: 100, maxScrollX: 400, maxScrollY: 1_900 };
+    const slide = (index: number) => ({
+      nodeId: 21, scrollX: index * 844, scrollY: 0, maxScrollX: 5_908, maxScrollY: 0,
+    });
+    fixture.host.followSourceScroll({ ...page, panes: [slide(1)] });
+    expect(carousel.scrollLeft).toBe(844);
+    expect(scroller.scrollTop).toBe(100);
+
+    // The reader scrolls the mirror down; the carousel then advances by
+    // itself, again and again: the mirror stays where the reader put it.
+    scroller.scrollTop = 500;
+    scroller.dispatchEvent(new fixture.window.Event('scroll'));
+    expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, top: 500, behavior: 'instant' });
+    scrollTo.mockClear();
+    for (const index of [2, 3, 4]) {
+      fixture.host.followSourceScroll({ ...page, panes: [slide(index)] });
+      expect(carousel.scrollLeft).toBe(index * 844);
+      expect(scroller.scrollTop).toBe(500);
+    }
+    expect(scrollTo).not.toHaveBeenCalled();
+
+    // The same holds while the tab scrolls a viewport-scale pane the
+    // replica has too: its moves are not the page's.
+    const reading = (scrollY: number) => ({
+      nodeId: 22, scrollX: 0, scrollY, maxScrollX: 0, maxScrollY: 3_000,
+    });
+    fixture.host.followSourceScroll({
+      ...page, panes: [slide(4), reading(1_200)], primaryPaneId: 22,
+    });
+    expect(feed.scrollTop).toBe(1_200);
+    expect(scroller.scrollTop).toBe(500);
+    expect(scrollTo).not.toHaveBeenCalled();
+    // And the reader can still scroll the mirror while it is followed.
+    scroller.scrollTop = 800;
+    scroller.dispatchEvent(new fixture.window.Event('scroll'));
+    expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, top: 800, behavior: 'instant' });
+    fixture.host.followSourceScroll({
+      ...page, panes: [slide(4), reading(1_500)], primaryPaneId: 22,
+    });
+    expect(feed.scrollTop).toBe(1_500);
+    expect(scroller.scrollTop).toBe(800);
+
+    // The page moves: the mirror follows it again, panes where they were.
+    fixture.host.followSourceScroll({
+      ...page, scrollY: 640, panes: [slide(4), reading(1_500)], primaryPaneId: 22,
+    });
+    expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, top: 640, behavior: 'instant' });
+    expect(scroller.scrollTop).toBe(640);
+    expect(carousel.scrollLeft).toBe(4 * 844);
+    expect(feed.scrollTop).toBe(1_500);
+  });
+
+  it('lets a pane that stands in for the page move the mirror, as the page does', () => {
+    const fixture = createFixture();
+    const candidate = fixture.host.createCandidate(dimensions());
+    const scrollTo = vi.fn();
+    const iframe = createProtectedIframe(fixture.document, scrollTo);
+    attachReplica(iframe, '<html><body></body></html>');
+    candidate.mount.append(iframe);
+    // The replica has no element for the pane: its place is the page's.
+    candidate.commit(iframe, { width: 1_600, height: 2_600 }, () => undefined);
+    const scroller = requireElement<HTMLElement>(fixture.preview, '.replica-replay-scroll');
+    const pane = (scrollY: number) => ({
+      scrollX: 0, scrollY: 0, maxScrollX: 0, maxScrollY: 0,
+      panes: [{ nodeId: 7, scrollX: 0, scrollY, maxScrollX: 0, maxScrollY: 4_000 }],
+      primaryPaneId: 7,
+    });
+
+    fixture.host.followSourceScroll(pane(1_000));
+    expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, top: 475, behavior: 'instant' });
+    scroller.scrollTop = 100;
+    scroller.dispatchEvent(new fixture.window.Event('scroll'));
+    expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, top: 100, behavior: 'instant' });
+    // A repeat of the same place keeps the reader's scroll; a move ends it.
+    fixture.host.followSourceScroll(pane(1_000));
+    expect(scroller.scrollTop).toBe(100);
+    fixture.host.followSourceScroll(pane(4_000));
+    expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, top: 1_900, behavior: 'instant' });
+    expect(scroller.scrollTop).toBe(1_900);
+  });
+
+  it('puts panes at their place again on a new replica, after a patch, and when following is turned on', () => {
+    const fixture = createFixture();
+    const first = fixture.host.createCandidate(dimensions());
+    const firstFrame = createProtectedIframe(fixture.document);
+    const firstReplica = attachReplica(
+      firstFrame,
+      '<html><body><div id="chat"></div></body></html>',
+    );
+    const chat = firstReplica.querySelector('#chat') as HTMLElement;
+    defineReplicaScrollBox(chat, {
+      clientWidth: 400, clientHeight: 300, scrollHeight: 2_265,
+    });
+    const nodes = new Map<number, Node>([[31, chat]]);
+    first.mount.append(firstFrame);
+    first.commit(firstFrame, { width: 1_600, height: 2_600 }, (id) => nodes.get(id));
+    const report = {
+      scrollX: 0, scrollY: 0, maxScrollX: 0, maxScrollY: 1_900,
+      panes: [{ nodeId: 31, scrollX: 0, scrollY: 600, maxScrollX: 0, maxScrollY: 1_965 }],
+    };
+    fixture.host.followSourceScroll(report);
+    expect(chat.scrollTop).toBe(600);
+
+    // A patch makes the element again, at its start; the page's size is
+    // unchanged. The engine's layout refresh puts it back.
+    const remade = firstReplica.createElement('div');
+    chat.replaceWith(remade);
+    defineReplicaScrollBox(remade, {
+      clientWidth: 400, clientHeight: 300, scrollHeight: 2_265,
+    });
+    nodes.set(31, remade);
+    fixture.host.refreshExtent(firstFrame, { width: 1_600, height: 2_600 });
+    expect(remade.scrollTop).toBe(600);
+
+    // A translation lengthens the pane: it keeps its share.
+    defineReplicaScrollBox(remade, {
+      clientWidth: 400, clientHeight: 300, scrollHeight: 4_230,
+    });
+    remade.scrollTop = 600;
+    fixture.host.refreshExtent(firstFrame, { width: 1_600, height: 2_600 });
+    expect(remade.scrollTop).toBeCloseTo(1_200);
+
+    // A new replica (Rebuild mirror, a recovery checkpoint) starts with
+    // every pane at its start, and is given the kept places when shown.
+    const next = fixture.host.createCandidate(dimensions());
+    const nextFrame = createProtectedIframe(fixture.document);
+    const nextReplica = attachReplica(
+      nextFrame,
+      '<html><body><div id="chat"></div></body></html>',
+    );
+    const nextChat = nextReplica.querySelector('#chat') as HTMLElement;
+    defineReplicaScrollBox(nextChat, {
+      clientWidth: 400, clientHeight: 300, scrollHeight: 2_265,
+    });
+    next.mount.append(nextFrame);
+    next.commit(nextFrame, { width: 1_600, height: 2_600 }, resolver([[31, nextChat]]));
+    expect(nextChat.scrollTop).toBe(600);
+
+    // Following off: the panel does not pass reports on, and nothing moves.
+    // On again, the last report is followed in full.
+    nextChat.scrollTop = 0;
+    fixture.host.followSourceScroll({
+      ...report,
+      panes: [{ nodeId: 31, scrollX: 0, scrollY: 1_965, maxScrollX: 0, maxScrollY: 1_965 }],
+    }, true);
+    expect(nextChat.scrollTop).toBe(1_965);
+
+    // A new page: nothing of the old one is kept.
+    fixture.host.resetSourceScroll();
+    nextChat.scrollTop = 0;
+    fixture.host.refreshExtent(nextFrame, { width: 1_600, height: 2_600 });
+    expect(nextChat.scrollTop).toBe(0);
+  });
+
+  it('never takes the replica\'s own scroller, a stray node or a malformed entry for a pane', () => {
+    const fixture = createFixture();
+    const candidate = fixture.host.createCandidate(dimensions());
+    const scrollTo = vi.fn();
+    const iframe = createProtectedIframe(fixture.document, scrollTo);
+    const replica = attachReplica(
+      iframe,
+      '<html><body><div id="pane">text</div></body></html>',
+    );
+    const pane = replica.querySelector('#pane') as HTMLElement;
+    const html = replica.documentElement as HTMLElement;
+    const body = replica.body as HTMLElement;
+    const detached = replica.createElement('div');
+    const foreign = fixture.document.createElement('div');
+    for (const element of [pane, html, body, detached, foreign]) {
+      defineReplicaScrollBox(element, {
+        clientWidth: 400, clientHeight: 300, scrollHeight: 2_300,
+      });
+    }
+    Object.defineProperty(replica, 'scrollingElement', {
+      configurable: true,
+      value: body,
+    });
+    Object.defineProperty(detached, 'isConnected', { configurable: true, value: false });
+    const nodes = new Map<number, Node>([
+      [1, html], [2, body], [3, detached], [4, foreign], [5, pane.firstChild as Node], [6, pane],
+    ]);
+    candidate.mount.append(iframe);
+    candidate.commit(iframe, { width: 1_600, height: 2_600 }, (id) => {
+      if (id === 9) throw new Error('resolver failed');
+      return nodes.get(id);
+    });
+    const scroller = requireElement<HTMLElement>(fixture.preview, '.replica-replay-scroll');
+    const at = (nodeId: unknown, scrollY: unknown = 500) => ({
+      nodeId, scrollX: 0, scrollY, maxScrollX: 0, maxScrollY: 2_000,
+    });
+
+    fixture.host.followSourceScroll({
+      scrollX: 0, scrollY: 0, maxScrollX: 0, maxScrollY: 1_900,
+      panes: [
+        at(1), at(2), at(3), at(4), at(5), at(9), at(77),
+        at(0), at(1.5), at('6'), at(6, Number.NaN), null,
+        // Past its range: held at the range. Named twice: the last one.
+        at(6, 1_200), at(6, 9_000),
+      ] as never,
+    });
+
+    for (const element of [html, body, detached, foreign]) {
+      expect(element.scrollTop).toBe(0);
+    }
+    expect(pane.scrollTop).toBe(2_000);
+    expect(scroller.scrollTop).toBe(0);
+    expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, top: 0, behavior: 'instant' });
+
+    // More panes than a report may name: the rest are not looked at.
+    const many = Array.from({ length: 80 }, (_, index) => at(100 + index));
+    nodes.set(179, pane);
+    pane.scrollTop = 0;
+    fixture.host.followSourceScroll({
+      scrollX: 0, scrollY: 0, maxScrollX: 0, maxScrollY: 1_900, panes: many as never,
+    });
+    expect(pane.scrollTop).toBe(0);
   });
 
   it('labels a retained live replay and refreshes its bounded extent in place', () => {
@@ -876,7 +1329,7 @@ describe('visible isolated replay host', () => {
     expect(scrollTo).toHaveBeenLastCalledWith({
       left: 1,
       top: 1,
-      behavior: 'auto',
+      behavior: 'instant',
     });
   });
 
@@ -1048,18 +1501,40 @@ function requireElement<T extends Element>(
   return element;
 }
 
+/** Gives a protected iframe a parsed replica document. */
+function attachReplica(iframe: HTMLIFrameElement, markup: string): Document {
+  const replica = parseHTML(markup).document;
+  Object.defineProperty(iframe, 'contentDocument', {
+    configurable: true,
+    value: replica,
+  });
+  return replica;
+}
+
+/** The engine's node map, as the host sees it: mirror node id to node. */
+function resolver(
+  entries: ReadonlyArray<readonly [number, Node]>,
+): (nodeId: number) => Node | undefined {
+  const nodes = new Map(entries);
+  return (nodeId) => nodes.get(nodeId);
+}
+
 function defineReplicaScrollBox(
   element: HTMLElement,
   dimensions: Readonly<{
     clientWidth: number;
     clientHeight: number;
     scrollHeight: number;
+    scrollWidth?: number;
   }>,
 ): void {
   Object.defineProperties(element, {
     clientWidth: { configurable: true, value: dimensions.clientWidth },
     clientHeight: { configurable: true, value: dimensions.clientHeight },
-    scrollWidth: { configurable: true, value: dimensions.clientWidth },
+    scrollWidth: {
+      configurable: true,
+      value: dimensions.scrollWidth ?? dimensions.clientWidth,
+    },
     scrollHeight: { configurable: true, value: dimensions.scrollHeight },
     scrollLeft: { configurable: true, writable: true, value: 0 },
     scrollTop: { configurable: true, writable: true, value: 0 },

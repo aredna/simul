@@ -54,9 +54,16 @@ With **Follow source scrolling** on, a web page's mirror also follows:
   magnifies the same part of the page, in every size setting; with Fit it
   shows exactly what the tab shows. Turning following off shows the whole
   page again.
-- the page scrolled sideways, like the page scrolled down. A pane inside the
-  page that scrolls sideways only, such as a board of columns, is not
-  followed.
+- the page scrolled sideways, like the page scrolled down.
+- a part of the page that scrolls on its own: a board of columns, a wide
+  table in its own scroller, a carousel, a chat log, a code block, the main
+  pane of an app-style page. Each is put where it is in the tab, also when
+  it was already scrolled as the mirror opened. Its move leaves the rest of
+  the mirror where it is, your own scrolling of the mirror included.
+  Scrolling the mirror yourself moves the mirror as a whole, not a pane
+  inside it. Text fields keep their own scroll and are not followed. With
+  following off the panes stay where they were; on again, they go to where
+  the tab has them.
 
 ### PDFs
 

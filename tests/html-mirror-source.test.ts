@@ -3,6 +3,7 @@ import { beforeEach, describe, expect, it, vi } from 'vitest';
 
 import { createImageSourcePortName } from '../lib/ocr/image-source-protocol';
 import {
+  MAX_HTML_MIRROR_SCROLL_PANES,
   createHtmlMirrorAck,
   createHtmlMirrorCheckpointRequest,
   createHtmlMirrorPortName,
@@ -2312,15 +2313,10 @@ describe('HtmlMirrorSourceSession', () => {
     fixture.flushFrame();
     expect(fixture.scrolls()).toHaveLength(2);
     expect(fixture.scrolls().at(-1)?.scroll).toEqual({
-      scrollTarget: 'document',
       scrollX: 0,
       scrollY: 240,
       maxScrollX: 0,
       maxScrollY: 1_400,
-      documentScrollX: 0,
-      documentScrollY: 240,
-      documentMaxScrollX: 0,
-      documentMaxScrollY: 1_400,
     });
   });
 
@@ -2378,15 +2374,10 @@ describe('HtmlMirrorSourceSession', () => {
     fixture.flushFrame();
     expect(fixture.scrolls()).toHaveLength(2);
     expect(fixture.scrolls().at(-1)?.scroll).toEqual({
-      scrollTarget: 'document',
       scrollX: 0,
       scrollY: 300,
       maxScrollX: 0,
       maxScrollY: 1_400,
-      documentScrollX: 0,
-      documentScrollY: 300,
-      documentMaxScrollX: 0,
-      documentMaxScrollY: 1_400,
       visualScale: 2,
       visualOffsetX: 200,
       visualOffsetY: 150,
@@ -2410,7 +2401,609 @@ describe('HtmlMirrorSourceSession', () => {
     fixture.session.dispose();
     expect([...listeners.values()].every((set) => set.size === 0)).toBe(true);
   });
+
+  it('reports a pane that scrolls on its own by its mirror node id, once a frame (D122)', () => {
+    const fixture = sourceFixture(
+      '<div id="board">cards</div><div id="chat">messages</div>' +
+        '<textarea id="editor">draft</textarea>',
+    );
+    const page = defineDocumentScroll(fixture);
+    const board = fixture.document.querySelector('#board')!;
+    const chat = fixture.document.querySelector('#chat')!;
+    const editor = fixture.document.querySelector('#editor')!;
+    const boardBox = defineScrollBox(board, {
+      clientWidth: 800, clientHeight: 500, scrollWidth: 6_830, scrollHeight: 500,
+    });
+    const chatBox = defineScrollBox(chat, {
+      clientWidth: 400, clientHeight: 300, scrollWidth: 400, scrollHeight: 2_265,
+    });
+    const editorBox = defineScrollBox(editor, {
+      clientWidth: 400, clientHeight: 120, scrollWidth: 400, scrollHeight: 900,
+    });
+
+    fixture.start();
+    expect(fixture.scrolls()).toHaveLength(1);
+    // The report that follows a checkpoint carries the whole pane list,
+    // here an empty one: no pane is scrolled.
+    expect(fixture.scrolls()[0]?.scroll).toEqual({
+      scrollX: 0, scrollY: 0, maxScrollX: 0, maxScrollY: 1_400, panes: [],
+    });
+
+    // Several events of one frame make one read and one message.
+    boardBox.scrollLeft = 400;
+    board.dispatchEvent(new fixture.window.Event('scroll', { bubbles: true }));
+    boardBox.scrollLeft = 900;
+    board.dispatchEvent(new fixture.window.Event('scroll', { bubbles: true }));
+    chatBox.scrollTop = 600;
+    chat.dispatchEvent(new fixture.window.Event('scroll', { bubbles: true }));
+    expect(fixture.frames).toHaveLength(1);
+    fixture.flushFrame();
+    expect(fixture.scrolls()).toHaveLength(2);
+    const boardPane = {
+      nodeId: fixture.registry.peekId(board),
+      scrollX: 900, scrollY: 0, maxScrollX: 6_030, maxScrollY: 0,
+    };
+    const chatPane = {
+      nodeId: fixture.registry.peekId(chat),
+      scrollX: 0, scrollY: 600, maxScrollX: 0, maxScrollY: 1_965,
+    };
+    // The document's place is the document's, and no pane stands in for it.
+    expect(fixture.scrolls().at(-1)?.scroll).toEqual({
+      scrollX: 0, scrollY: 0, maxScrollX: 0, maxScrollY: 1_400,
+      panes: [boardPane, chatPane],
+    });
+
+    // A text field keeps its own scroll: its event sends nothing at all.
+    editorBox.scrollTop = 300;
+    editor.dispatchEvent(new fixture.window.Event('scroll', { bubbles: true }));
+    fixture.flushFrame();
+    expect(fixture.scrolls()).toHaveLength(2);
+
+    // An element the mirror does not know sends nothing, and gets no id.
+    const stranger = fixture.document.createElement('div');
+    fixture.document.body.append(stranger);
+    defineScrollBox(stranger, {
+      clientWidth: 400, clientHeight: 300, scrollWidth: 400, scrollHeight: 900,
+    }).scrollTop = 200;
+    stranger.dispatchEvent(new fixture.window.Event('scroll', { bubbles: true }));
+    fixture.flushFrame();
+    expect(fixture.scrolls()).toHaveLength(2);
+    expect(fixture.registry.peekId(stranger)).toBeUndefined();
+
+    // The document scrolls: the panes are where they were, so the list is
+    // not sent again and the message is the size it is on a page without
+    // panes.
+    page.scrollY = 240;
+    fixture.document.documentElement.dispatchEvent(
+      new fixture.window.Event('scroll', { bubbles: true }),
+    );
+    fixture.flushFrame();
+    expect(fixture.scrolls().at(-1)?.scroll).toEqual({
+      scrollX: 0, scrollY: 240, maxScrollX: 0, maxScrollY: 1_400,
+    });
+    // A layout change re-reports the place, again without the list.
+    fixture.window.dispatchEvent(new fixture.window.Event('resize'));
+    expect(fixture.scrolls().at(-1)?.scroll).not.toHaveProperty('panes');
+    // The page and a pane move in one frame: the list travels with the place.
+    page.scrollY = 300;
+    fixture.document.documentElement.dispatchEvent(
+      new fixture.window.Event('scroll', { bubbles: true }),
+    );
+    chatBox.scrollTop = 700;
+    chat.dispatchEvent(new fixture.window.Event('scroll', { bubbles: true }));
+    fixture.flushFrame();
+    expect(fixture.scrolls().at(-1)?.scroll).toEqual({
+      scrollX: 0, scrollY: 300, maxScrollX: 0, maxScrollY: 1_400,
+      panes: [boardPane, { ...chatPane, scrollY: 700 }],
+    });
+
+    // Back at its start a pane is no longer listed; the one scrolled last
+    // comes last.
+    chatBox.scrollTop = 0;
+    chat.dispatchEvent(new fixture.window.Event('scroll', { bubbles: true }));
+    boardBox.scrollLeft = 1_200;
+    board.dispatchEvent(new fixture.window.Event('scroll', { bubbles: true }));
+    fixture.flushFrame();
+    expect(fixture.scrolls().at(-1)?.scroll.panes).toEqual([
+      { ...boardPane, scrollX: 1_200 },
+    ]);
+    // The last pane goes back to its start: an empty list says so.
+    boardBox.scrollLeft = 0;
+    board.dispatchEvent(new fixture.window.Event('scroll', { bubbles: true }));
+    fixture.flushFrame();
+    expect(fixture.scrolls().at(-1)?.scroll.panes).toEqual([]);
+
+    // A disposed session reports nothing more.
+    const count = fixture.scrolls().length;
+    fixture.session.dispose();
+    board.dispatchEvent(new fixture.window.Event('scroll', { bubbles: true }));
+    expect(fixture.frames).toHaveLength(0);
+    expect(fixture.scrolls()).toHaveLength(count);
+  });
+
+  it('reports panes already scrolled when the mirror is built, and again with a recovery checkpoint (D122)', () => {
+    const fixture = sourceFixture(
+      '<div id="chat">messages</div><pre id="code">lines</pre>' +
+        '<textarea id="editor">draft</textarea>',
+    );
+    const page = defineDocumentScroll(fixture);
+    const chat = fixture.document.querySelector('#chat')!;
+    const code = fixture.document.querySelector('#code')!;
+    defineScrollBox(chat, {
+      clientWidth: 400, clientHeight: 300, scrollWidth: 400, scrollHeight: 2_265,
+      scrollTop: 600,
+    });
+    defineScrollBox(code, {
+      clientWidth: 400, clientHeight: 300, scrollWidth: 1_129, scrollHeight: 2_892,
+      scrollLeft: 250, scrollTop: 400,
+    });
+    defineScrollBox(fixture.document.querySelector('#editor')!, {
+      clientWidth: 400, clientHeight: 120, scrollWidth: 400, scrollHeight: 900,
+      scrollTop: 300,
+    });
+    // The page itself is scrolled too: that is the document's place.
+    page.scrollY = 240;
+
+    fixture.start();
+    const panes = [
+      {
+        nodeId: fixture.registry.peekId(chat),
+        scrollX: 0, scrollY: 600, maxScrollX: 0, maxScrollY: 1_965,
+      },
+      {
+        nodeId: fixture.registry.peekId(code),
+        scrollX: 250, scrollY: 400, maxScrollX: 729, maxScrollY: 2_592,
+      },
+    ];
+    expect(fixture.scrolls()).toHaveLength(1);
+    expect(fixture.scrolls()[0]?.scroll).toEqual({
+      scrollX: 0, scrollY: 240, maxScrollX: 0, maxScrollY: 1_400, panes,
+    });
+    // The report follows the checkpoint it belongs to.
+    expect(fixture.port.posts.map((message) => (message as { kind: string }).kind))
+      .toEqual([
+        'simul:html-mirror-v2:checkpoint',
+        'simul:html-mirror-v2:scroll',
+      ]);
+
+    // A recovery checkpoint builds the replica anew: the unchanged list is
+    // sent again with it, where a plain report would leave it out.
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    fixture.window.dispatchEvent(new fixture.window.Event('resize'));
+    expect(fixture.scrolls().at(-1)?.scroll).not.toHaveProperty('panes');
+    fixture.port.emitMessage(createHtmlMirrorCheckpointRequest(identity, 0));
+    expect(fixture.checkpoints()).toHaveLength(2);
+    expect(fixture.scrolls().at(-1)?.scroll.panes).toEqual(panes);
+  });
+
+  it('reports the panes afresh after a patch, and keeps a hidden pane in mind (D122)', () => {
+    const fixture = sourceFixture('<div id="chat"><p id="last">message</p></div>');
+    defineDocumentScroll(fixture);
+    const chat = fixture.document.querySelector('#chat')!;
+    const last = fixture.document.querySelector('#last')!;
+    const chatBox = defineScrollBox(chat, {
+      clientWidth: 400, clientHeight: 300, scrollWidth: 400, scrollHeight: 2_265,
+    });
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const nodeId = fixture.registry.peekId(chat);
+
+    // No pane is scrolled: a patch is not followed by a scroll message.
+    last.setAttribute('class', 'new');
+    fixture.mutate(attributeRecord(last, 'class'));
+    fixture.flushFrame();
+    expect(fixture.patches()).toHaveLength(1);
+    expect(fixture.scrolls()).toHaveLength(1);
+
+    chatBox.scrollTop = 600;
+    chat.dispatchEvent(new fixture.window.Event('scroll', { bubbles: true }));
+    fixture.flushFrame();
+    expect(fixture.scrolls()).toHaveLength(2);
+
+    // The pane grows without a scroll event: its new range follows the patch.
+    chatBox.scrollHeight = 2_640;
+    last.setAttribute('class', 'newer');
+    fixture.mutate(attributeRecord(last, 'class'));
+    fixture.flushFrame();
+    expect(fixture.patches()).toHaveLength(2);
+    expect(fixture.port.posts.at(-2)).toBe(fixture.patches()[1]);
+    expect(fixture.scrolls().at(-1)?.scroll.panes).toEqual([
+      { nodeId, scrollX: 0, scrollY: 600, maxScrollX: 0, maxScrollY: 2_340 },
+    ]);
+
+    // A patch that leaves the panes where they are is followed by no report.
+    const reports = fixture.scrolls().length;
+    last.setAttribute('class', 'newest');
+    fixture.mutate(attributeRecord(last, 'class'));
+    fixture.flushFrame();
+    expect(fixture.patches()).toHaveLength(3);
+    expect(fixture.scrolls()).toHaveLength(reports);
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 3));
+
+    // Hidden, the pane has no box and reads as at its start: not listed.
+    const shown = { ...chatBox };
+    Object.assign(chatBox, {
+      clientWidth: 0, clientHeight: 0, scrollWidth: 0, scrollHeight: 0, scrollTop: 0,
+    });
+    chat.setAttribute('hidden', '');
+    fixture.mutate(attributeRecord(chat, 'hidden'));
+    fixture.flushFrame();
+    expect(fixture.scrolls().at(-1)?.scroll.panes).toEqual([]);
+    // Shown again, Chrome gives it its place back with no scroll event.
+    Object.assign(chatBox, shown);
+    chat.removeAttribute('hidden');
+    fixture.mutate(attributeRecord(chat, 'hidden'));
+    fixture.flushFrame();
+    expect(fixture.scrolls().at(-1)?.scroll.panes).toEqual([
+      { nodeId, scrollX: 0, scrollY: 600, maxScrollX: 0, maxScrollY: 2_340 },
+    ]);
+
+    // Taken out of the page, it is forgotten.
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, fixture.patches().length));
+    chat.remove();
+    Object.defineProperty(chat, 'isConnected', { configurable: true, value: false });
+    fixture.mutate(childListRecord(fixture.document.body, [], [chat]));
+    fixture.flushFrame();
+    expect(fixture.scrolls().at(-1)?.scroll.panes).toEqual([]);
+  });
+
+  it('keeps a pane scrolled before the mirror has it in mind, and names it after its patch (D122)', () => {
+    const fixture = sourceFixture('<div id="keep">kept</div>');
+    defineDocumentScroll(fixture);
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    // A chat opened at its end: the element is made and scrolled in one go,
+    // and its scroll frame runs before the patch that carries it.
+    const made = fixture.document.createElement('div');
+    made.textContent = 'rows';
+    fixture.document.body.append(made);
+    defineScrollBox(made, {
+      clientWidth: 400, clientHeight: 300, scrollWidth: 400, scrollHeight: 900,
+    }).scrollTop = 200;
+    made.dispatchEvent(new fixture.window.Event('scroll', { bubbles: true }));
+    fixture.flushFrame();
+    // Nothing is sent for an element the mirror does not know, and no id is
+    // made for it.
+    expect(fixture.scrolls()).toHaveLength(1);
+    expect(fixture.registry.peekId(made)).toBeUndefined();
+
+    fixture.mutate(childListRecord(fixture.document.body, [made]));
+    fixture.flushFrame();
+    expect(fixture.patches()).toHaveLength(1);
+    // The report follows the patch that gave the element its id.
+    expect(fixture.port.posts.at(-2)).toBe(fixture.patches()[0]);
+    expect(fixture.scrolls().at(-1)?.scroll.panes).toEqual([{
+      nodeId: fixture.registry.peekId(made),
+      scrollX: 0, scrollY: 200, maxScrollX: 0, maxScrollY: 600,
+    }]);
+  });
+
+  it('names a pane whose patch and scroll come in either order of frames (D122)', () => {
+    const fixture = sourceFixture('<div id="keep">kept</div>');
+    defineDocumentScroll(fixture);
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const made = fixture.document.createElement('div');
+    made.textContent = 'rows';
+    fixture.document.body.append(made);
+    defineScrollBox(made, {
+      clientWidth: 400, clientHeight: 300, scrollWidth: 400, scrollHeight: 900,
+    }).scrollTop = 200;
+    // The mutation is seen first, so the flush frame runs before the scroll
+    // frame: the patch goes out, then the pane's place.
+    fixture.mutate(childListRecord(fixture.document.body, [made]));
+    made.dispatchEvent(new fixture.window.Event('scroll', { bubbles: true }));
+    expect(fixture.frames).toHaveLength(2);
+    fixture.flushFrame();
+    fixture.flushFrame();
+    expect(fixture.port.posts.slice(-2).map(
+      (message) => (message as { kind: string }).kind,
+    )).toEqual(['simul:html-mirror-v2:patch', 'simul:html-mirror-v2:scroll']);
+    expect(fixture.scrolls().at(-1)?.scroll.panes).toEqual([{
+      nodeId: fixture.registry.peekId(made),
+      scrollX: 0, scrollY: 200, maxScrollX: 0, maxScrollY: 600,
+    }]);
+  });
+
+  it('hears a pane inside an open shadow root as the element that scrolled (D122)', () => {
+    const fixture = sourceFixture('<x-list id="host"></x-list>');
+    defineDocumentScroll(fixture);
+    const host = fixture.document.querySelector('#host')!;
+    const root = host.attachShadow({ mode: 'open' });
+    Object.defineProperty(root, 'mode', { value: 'open' });
+    const list = fixture.document.createElement('div');
+    list.textContent = 'items';
+    root.append(list);
+    const box = defineScrollBox(list, {
+      clientWidth: 400, clientHeight: 300, scrollWidth: 400, scrollHeight: 900,
+    });
+    fixture.start();
+    const nodeId = fixture.registry.peekId(list);
+    expect(nodeId).toBeDefined();
+
+    // Outside the shadow root the event's target is the host; the element
+    // that scrolled is the first of its composed path.
+    box.scrollTop = 150;
+    const event = new fixture.window.Event('scroll', { bubbles: true });
+    Object.defineProperty(event, 'composedPath', {
+      configurable: true,
+      value: () => [list, root, host],
+    });
+    host.dispatchEvent(event);
+    fixture.flushFrame();
+    expect(fixture.scrolls().at(-1)?.scroll.panes).toEqual([
+      { nodeId, scrollX: 0, scrollY: 150, maxScrollX: 0, maxScrollY: 600 },
+    ]);
+  });
+
+  it('names the viewport-scale pane the tab scrolls in place of its document (D122)', () => {
+    const fixture = sourceFixture(
+      '<main id="feed" style="overflow-y:auto">feed</main>' +
+        '<div id="strip">cards</div>',
+    );
+    const page = defineDocumentScroll(fixture);
+    const feed = fixture.document.querySelector('#feed')!;
+    const strip = fixture.document.querySelector('#strip')!;
+    const feedBox = defineScrollBox(feed, {
+      clientWidth: 700, clientHeight: 560, scrollWidth: 700, scrollHeight: 4_560,
+    }, { left: 50, top: 20, right: 750, bottom: 580 });
+    const stripBox = defineScrollBox(strip, {
+      clientWidth: 700, clientHeight: 80, scrollWidth: 3_700, scrollHeight: 80,
+    });
+    Object.defineProperty(fixture.window, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => ({
+        backgroundColor: 'rgba(0, 0, 0, 0)',
+        overflowY: element === feed ? 'auto' : 'visible',
+        getPropertyValue: () => '',
+      }),
+    });
+    fixture.start();
+    const feedId = fixture.registry.peekId(feed);
+    const stripId = fixture.registry.peekId(strip);
+
+    feedBox.scrollTop = 1_000;
+    feed.dispatchEvent(new fixture.window.Event('scroll', { bubbles: true }));
+    fixture.flushFrame();
+    expect(fixture.scrolls().at(-1)?.scroll).toEqual({
+      scrollX: 0, scrollY: 0, maxScrollX: 0, maxScrollY: 1_400,
+      panes: [
+        { nodeId: feedId, scrollX: 0, scrollY: 1_000, maxScrollX: 0, maxScrollY: 4_000 },
+      ],
+      primaryPaneId: feedId,
+    });
+
+    // A small pane scrolls: the feed stays the one named.
+    stripBox.scrollLeft = 300;
+    strip.dispatchEvent(new fixture.window.Event('scroll', { bubbles: true }));
+    fixture.flushFrame();
+    expect(fixture.scrolls().at(-1)?.scroll).toMatchObject({
+      panes: [{ nodeId: feedId }, { nodeId: stripId, scrollX: 300 }],
+      primaryPaneId: feedId,
+    });
+
+    // The document scrolls: no pane stands in for it, and both are listed.
+    page.scrollY = 120;
+    fixture.document.documentElement.dispatchEvent(
+      new fixture.window.Event('scroll', { bubbles: true }),
+    );
+    fixture.flushFrame();
+    expect(fixture.scrolls().at(-1)?.scroll).not.toHaveProperty('primaryPaneId');
+    expect(fixture.scrolls().at(-1)?.scroll.panes).toHaveLength(2);
+
+    // Back at its start the feed is not listed, so it is not named either.
+    feedBox.scrollTop = 0;
+    feed.dispatchEvent(new fixture.window.Event('scroll', { bubbles: true }));
+    fixture.flushFrame();
+    expect(fixture.scrolls().at(-1)?.scroll).not.toHaveProperty('primaryPaneId');
+    expect(fixture.scrolls().at(-1)?.scroll.panes).toEqual([
+      { nodeId: stripId, scrollX: 300, scrollY: 0, maxScrollX: 3_000, maxScrollY: 0 },
+    ]);
+  });
+
+  it('sends nothing for a pane inside a withheld region (D122)', () => {
+    const fixture = sourceFixture(
+      '<section id="account"><div id="inside">private rows</div></section>' +
+        '<div id="plain">public rows</div>',
+    );
+    defineDocumentScroll(fixture);
+    const account = fixture.document.querySelector<HTMLElement>('#account')!;
+    Object.defineProperty(fixture.window, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => ({
+        backgroundColor: 'rgba(0, 0, 0, 0)',
+        getPropertyValue: (name: string) =>
+          name === '-webkit-text-security' && element === account ? 'disc' : '',
+      }),
+    });
+    const inside = fixture.document.querySelector('#inside')!;
+    const plain = fixture.document.querySelector('#plain')!;
+    const box = {
+      clientWidth: 400, clientHeight: 300, scrollWidth: 400, scrollHeight: 2_300,
+      scrollTop: 500,
+    };
+    defineScrollBox(account, box);
+    defineScrollBox(inside, box);
+    defineScrollBox(plain, box);
+
+    fixture.start();
+    expect(JSON.stringify(fixture.checkpoints()[0])).toContain('opaquePlaceholder');
+    // Found scrolled at the start, and scrolled again afterwards: the shell
+    // of the withheld region and what is inside it never travel.
+    expect(fixture.scrolls()).toHaveLength(1);
+    expect(fixture.scrolls()[0]?.scroll.panes).toEqual([{
+      nodeId: fixture.registry.peekId(plain),
+      scrollX: 0, scrollY: 500, maxScrollX: 0, maxScrollY: 2_000,
+    }]);
+    for (const element of [account, inside]) {
+      element.dispatchEvent(new fixture.window.Event('scroll', { bubbles: true }));
+    }
+    fixture.flushFrame();
+    expect(fixture.scrolls()).toHaveLength(1);
+    expect(fixture.registry.peekId(inside)).toBeUndefined();
+  });
+
+  it('names at most the bounded number of panes, the most recently scrolled (D122)', () => {
+    const count = MAX_HTML_MIRROR_SCROLL_PANES + 6;
+    const fixture = sourceFixture(
+      Array.from({ length: count }, (_, index) => `<div class="strip">${index}</div>`).join(''),
+    );
+    defineDocumentScroll(fixture);
+    const strips = [...fixture.document.querySelectorAll('.strip')];
+    const boxes = strips.map((strip) => defineScrollBox(strip, {
+      clientWidth: 400, clientHeight: 80, scrollWidth: 2_400, scrollHeight: 80,
+    }));
+    fixture.start();
+
+    // One at a time, a frame each: more than one message names.
+    strips.forEach((strip, index) => {
+      boxes[index]!.scrollLeft = 100 + index;
+      strip.dispatchEvent(new fixture.window.Event('scroll', { bubbles: true }));
+      fixture.flushFrame();
+    });
+    const panes = fixture.scrolls().at(-1)!.scroll.panes!;
+    expect(panes).toHaveLength(MAX_HTML_MIRROR_SCROLL_PANES);
+    expect(panes[0]).toMatchObject({
+      nodeId: fixture.registry.peekId(strips[6]!), scrollX: 106,
+    });
+    expect(panes.at(-1)).toMatchObject({
+      nodeId: fixture.registry.peekId(strips.at(-1)!), scrollX: 100 + count - 1,
+    });
+  });
+
+  it('follows none of a burst of more panes than one message names (D122)', () => {
+    const count = MAX_HTML_MIRROR_SCROLL_PANES + 6;
+    const fixture = sourceFixture(
+      '<div id="alone">alone</div>' +
+        Array.from({ length: count }, (_, index) => `<div class="row">${index}</div>`).join(''),
+    );
+    defineDocumentScroll(fixture);
+    const alone = fixture.document.querySelector('#alone')!;
+    const aloneBox = defineScrollBox(alone, {
+      clientWidth: 400, clientHeight: 300, scrollWidth: 400, scrollHeight: 900,
+    });
+    const rows = [...fixture.document.querySelectorAll('.row')];
+    const boxes = rows.map((row) => defineScrollBox(row, {
+      clientWidth: 400, clientHeight: 80, scrollWidth: 2_400, scrollHeight: 80,
+    }));
+    fixture.start();
+    aloneBox.scrollTop = 120;
+    alone.dispatchEvent(new fixture.window.Event('scroll', { bubbles: true }));
+    fixture.flushFrame();
+    const alonePane = {
+      nodeId: fixture.registry.peekId(alone),
+      scrollX: 0, scrollY: 120, maxScrollX: 0, maxScrollY: 600,
+    };
+    expect(fixture.scrolls().at(-1)?.scroll.panes).toEqual([alonePane]);
+    const reports = fixture.scrolls().length;
+
+    // Rows of a grid that a script keeps in step: all of them scroll in one
+    // frame. A part of them followed would show the grid torn apart, so
+    // none is, frame after frame; the pane scrolled on its own stays.
+    const together = (scrollLeft: number): void => {
+      rows.forEach((row, index) => {
+        boxes[index]!.scrollLeft = scrollLeft;
+        row.dispatchEvent(new fixture.window.Event('scroll', { bubbles: true }));
+      });
+      expect(fixture.frames).toHaveLength(1);
+      fixture.flushFrame();
+    };
+    together(500);
+    together(510);
+    expect(fixture.scrolls()).toHaveLength(reports);
+
+    // A burst the bound holds is followed whole.
+    rows.slice(0, 40).forEach((row, index) => {
+      boxes[index]!.scrollLeft = 700;
+      row.dispatchEvent(new fixture.window.Event('scroll', { bubbles: true }));
+    });
+    fixture.flushFrame();
+    expect(fixture.scrolls().at(-1)?.scroll.panes).toHaveLength(41);
+    // The next burst of all rows takes back the ones it names.
+    together(520);
+    expect(fixture.scrolls().at(-1)?.scroll.panes).toEqual([alonePane]);
+  });
+
+  it('takes none of more scrolled panes than one message names when the mirror is built (D122)', () => {
+    const rows = (count: number) => {
+      const fixture = sourceFixture(
+        Array.from({ length: count }, (_, index) => `<div class="row">${index}</div>`).join(''),
+      );
+      defineDocumentScroll(fixture);
+      for (const row of fixture.document.querySelectorAll('.row')) {
+        defineScrollBox(row, {
+          clientWidth: 400, clientHeight: 80, scrollWidth: 2_400, scrollHeight: 80,
+          scrollLeft: 500,
+        });
+      }
+      fixture.start();
+      return fixture.scrolls()[0]!.scroll.panes!;
+    };
+    expect(rows(MAX_HTML_MIRROR_SCROLL_PANES)).toHaveLength(MAX_HTML_MIRROR_SCROLL_PANES);
+    expect(rows(MAX_HTML_MIRROR_SCROLL_PANES + 1)).toEqual([]);
+  });
 });
+
+/** A standards-mode page 800 by 600 whose document scrolls 1,400 px. */
+function defineDocumentScroll(
+  fixture: { readonly document: Document; readonly window: object },
+): { scrollY: number } {
+  const root = fixture.document.documentElement;
+  const state = { scrollY: 0 };
+  Object.defineProperty(fixture.document, 'scrollingElement', {
+    configurable: true,
+    value: root,
+  });
+  Object.defineProperties(fixture.window, {
+    innerWidth: { configurable: true, value: 800 },
+    innerHeight: { configurable: true, value: 600 },
+    scrollX: { configurable: true, value: 0 },
+    scrollY: { configurable: true, get: () => state.scrollY },
+  });
+  Object.defineProperties(root, {
+    clientWidth: { configurable: true, value: 800 },
+    clientHeight: { configurable: true, value: 600 },
+    scrollWidth: { configurable: true, value: 800 },
+    scrollHeight: { configurable: true, value: 2_000 },
+    scrollLeft: { configurable: true, value: 0 },
+    scrollTop: { configurable: true, get: () => state.scrollY },
+  });
+  return state;
+}
+
+/** A scroll box whose numbers the test changes through the returned record. */
+function defineScrollBox(
+  element: Element,
+  initial: {
+    clientWidth: number;
+    clientHeight: number;
+    scrollWidth: number;
+    scrollHeight: number;
+    scrollLeft?: number;
+    scrollTop?: number;
+  },
+  rect = { left: 0, top: 0, right: initial.clientWidth, bottom: initial.clientHeight },
+) {
+  const box = { scrollLeft: 0, scrollTop: 0, ...initial };
+  for (const name of Object.keys(box) as Array<keyof typeof box>) {
+    Object.defineProperty(element, name, {
+      configurable: true,
+      get: () => box[name],
+    });
+  }
+  Object.defineProperty(element, 'getBoundingClientRect', {
+    configurable: true,
+    value: () => ({
+      ...rect,
+      x: rect.left,
+      y: rect.top,
+      width: rect.right - rect.left,
+      height: rect.bottom - rect.top,
+      toJSON: () => ({}),
+    }),
+  });
+  return box;
+}
 
 const identity = createReplicaIdentity({
   sessionId: 'source-session',

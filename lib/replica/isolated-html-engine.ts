@@ -754,7 +754,12 @@ export class IsolatedHtmlReplicaEngine
   ): void {
     this.#applyTextLayout(state);
     const extent = measureExtent(state.iframe);
-    state.lease.commit(state.iframe, extent);
+    // The host finds a pane the tab scrolled by its node id (D122).
+    state.lease.commit(
+      state.iframe,
+      extent,
+      (nodeId) => state.nodes.get(nodeId),
+    );
     const previous = this.#committed;
     const previousLanguage = previous && !previous.released
       ? readDocumentLanguage(previous)
