@@ -936,9 +936,43 @@ shell and the mirror has nothing to copy (D103).
     different widths apart. With several whole pages in view Chrome may name
     any of them, so the rules compare the viewport top, not the page named.
     The rules, in order:
+    - a view turned a quarter (Ctrl+[ and Ctrl+], the toolbar's Rotate) is
+      not followed (D123). The report gives the page's height as its width,
+      so it shows by the tab's zoom, which is the viewer's (D104) give or
+      take 0.01: in a fit mode Chrome passes the viewer's zoom on to the tab
+      only when it changed by more than 0.01 (`MIN_ZOOM_DELTA` in its zoom
+      manager), so after a small resize the tab's zoom lags. A report is
+      upright when its page's width is within that lag of a page width at
+      the tab's zoom, and turned when it is one of the PDF's page heights at
+      that zoom (within 0.3 px) and not upright: a missed turn is followed
+      as before, a false one would stop following. `PdfViewerFollower`
+      passes the zoom (`state.sourceZoomFactor`, only when Chrome gave it:
+      a failed `tabs.getZoom` leaves it at 1 but unknown) with each report
+      and when Chrome tells of a zoom (`zoomChanged`, from
+      `updateMirrorLayout`); the tracker then looks at the latest report
+      again, unless it was a page width exactly at the zoom before (a 4:3
+      slide is as wide at 75% as it is tall at 100%, and Chrome may tell of
+      a zoom before the viewer reports it). While turned nothing is read, a
+      held movement or key is dropped, and a width that fits no page at the
+      zoom is taken for a zoom Chrome has not told of yet. Upright again,
+      the place is guessed from the last place read, as after a jump. In
+      fit to page and fit to height Chrome then reports the old place and,
+      about 40 ms later, a page's top; the two can read as a movement that
+      stopped at the end of the PDF, because there one page and its insets
+      fill the view (as in 0.6.1). At a set zoom Chrome keeps the zoom
+      through a turn; in the fit modes the zoom changes, and a report of the
+      turn that reaches the panel before the zoom does is read as a zoom. A PDF with a page about as wide as another is tall (within
+      the lag, as portrait and landscape pages of one size) is not noticed;
     - the two-page view is not followed. It shows as a page reported 4 px
       narrower at an unchanged zoom and viewport (its insets differ), or as
-      a page that is not where the one-page layout puts it;
+      a page that is not where the one-page layout puts it. The report is
+      compared at the last place's zoom and, when the panel knows it, the
+      tab's (D123): one page wide at either is not the two-page view, since
+      after a turn read as a zoom in a fit mode the last place's zoom can be
+      one where a page turned back looks 4 px narrower (US Legal in fit to
+      width), and after a small resize the tab's zoom can lag by the same
+      4 px. In a fit mode Chrome halves the zoom for the two-page view and
+      doubles it back, so one page wide at the tab's zoom also ends it;
     - a report that moved only sideways, or a zoom or resize that keeps the
       place within a snapped pixel, is the same place down the PDF;
     - for a lone report (none for 100 ms):
@@ -982,8 +1016,17 @@ shell and the mirror has nothing to copy (D103).
     97.2% of held ArrowRight. Each mistake is counted once, with the tracker
     then started again from the true page; in use a mistake stays until
     Home or End. The page box, outline, links, Find and ArrowLeft are
-    guesses. A Chrome harness checks 20 moves in Chrome for Testing 154
-    and 138.
+    guesses. The simulation's ArrowRight sends no second report where the
+    snap to whole pixels moves nothing; Chrome 138 and 154 send one there
+    too, so in Chrome ArrowRight in the first screen and one arrow step
+    below a page top, at 100% and 90%, is read right (D123). The same
+    sessions read with the viewer's zoom give the same tallies, also with
+    the tab's zoom 0.004 or 0.009 above or below the viewer's, and a second
+    simulation (60 sessions of wheel turns, zooms told before or after
+    their reports, and 603 quarter turns at a set zoom or in fit to width)
+    keeps the panel still in 600 turned views (38 without the zoom); the 3
+    others reported a width within the lag of a page width. A Chrome
+    harness checks 20 moves in Chrome for Testing 154 and 138.
   - **Sideways (D115).** There is nothing to guess sideways. Chrome centres
     each page in the widest page's width, and the PDF in the view when it
     fits; `pageX` is that place less the sideways scroll, whichever page is

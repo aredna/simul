@@ -18,18 +18,26 @@ function random(seed: number): () => number {
  * snapped to whole pixels, and a report only when the position changed.
  */
 class SnappedViewer {
-  readonly pages: { width: number; height: number; top: number }[] = [];
-  readonly height: number;
+  pages: { width: number; height: number; top: number }[] = [];
+  height = 0;
   scroll = 0;
   time = 1_000;
   readonly viewportWidth = 800;
+  /** Whether the pages are shown turned a quarter (D123). */
+  turned = false;
 
-  constructor(sizes: readonly PdfPagePoints[], readonly zoom: number, readonly viewportHeight: number) {
+  constructor(readonly sizes: readonly PdfPagePoints[], public zoom: number, readonly viewportHeight: number) {
+    this.layout();
+  }
+
+  /** Lays the pages out one page wide, turned a quarter or not. */
+  layout(): void {
+    this.pages = [];
     let top = 0;
-    for (const [index, size] of sizes.entries()) {
+    for (const [index, size] of this.sizes.entries()) {
       if (index > 0) top += 4;
-      const width = Math.trunc((size.width * 4) / 3);
-      const height = Math.trunc((size.height * 4) / 3);
+      const width = Math.trunc(((this.turned ? size.height : size.width) * 4) / 3);
+      const height = Math.trunc(((this.turned ? size.width : size.height) * 4) / 3);
       this.pages.push({ width, height, top: top + 3 });
       top += 10 + height;
     }
@@ -102,126 +110,139 @@ type Action =
 // Chrome's zoom presets, where page tops often fall on whole pixels.
 const PRESET_ZOOMS = [0.5, 0.75, 0.9, 1, 1.25, 1.5];
 
-describe('PdfViewerTracker on simulated reading sessions', () => {
-  it('places the page after nearly every action', () => {
-    const next = random(42);
-    const counts = new Map<Action, { right: number; total: number }>();
-    for (let session = 0; session < 80; session += 1) {
-      const size = next() < 0.5 ? { width: 612, height: 792 } : { width: 595.28, height: 841.89 };
-      const count = 20 + Math.floor(next() * 400);
-      // A quarter of the PDFs mix in a landscape page every 17 pages.
-      const mixed = next() < 0.25;
-      const sizes = Array.from({ length: count }, (_, index) =>
-        mixed && index % 17 === 16 ? { width: size.height, height: size.width } : size);
-      // Presets, low zooms that show many pages at once, and anything else.
-      const kind = next();
-      const zoom = kind < 0.3
-        ? PRESET_ZOOMS[Math.floor(next() * PRESET_ZOOMS.length)]!
-        : kind < 0.45
-          ? 0.25 + next() * 0.15
-          : 0.4 + next() * 1.4;
-      const viewer = new SnappedViewer(sizes, zoom, 450 + next() * 700);
-      let tracker = new PdfViewerTracker(sizes);
-      let reported = Number.NaN;
-      const send = (gapMs: number) => {
-        viewer.time += gapMs;
-        if (Math.abs(viewer.scroll - reported) < 1e-9) return;
-        reported = viewer.scroll;
-        tracker.update(viewer.report(), viewer.time);
-      };
-      const check = (action: Action) => {
-        viewer.time += 300;
-        const position = tracker.settle() ?? tracker.position;
-        const tally = counts.get(action) ?? { right: 0, total: 0 };
-        tally.total += 1;
-        if (position?.index === viewer.topPage()) {
-          tally.right += 1;
-        } else {
-          // Count each mistake once: start again from the true page.
-          tracker = new PdfViewerTracker(sizes);
-          tracker.anchor({ index: viewer.topPage(), fraction: 0.5 });
-          reported = Number.NaN;
-          send(0);
-          viewer.time += 300;
-        }
-        counts.set(action, tally);
-      };
-      send(1_000);
+/**
+ * 80 seeded reading sessions; each action's tally of places right. With
+ * `zoomKnown` the tracker is told the viewer's zoom, as the panel does
+ * (D123), give or take `lag`: in a fit mode Chrome passes the viewer's zoom
+ * on to the tab only when it changed by more than 0.01.
+ */
+function readingSessions(zoomKnown: boolean, lag = 0): Map<Action, { right: number; total: number }> {
+  const next = random(42);
+  const counts = new Map<Action, { right: number; total: number }>();
+  for (let session = 0; session < 80; session += 1) {
+    const size = next() < 0.5 ? { width: 612, height: 792 } : { width: 595.28, height: 841.89 };
+    const count = 20 + Math.floor(next() * 400);
+    // A quarter of the PDFs mix in a landscape page every 17 pages.
+    const mixed = next() < 0.25;
+    const sizes = Array.from({ length: count }, (_, index) =>
+      mixed && index % 17 === 16 ? { width: size.height, height: size.width } : size);
+    // Presets, low zooms that show many pages at once, and anything else.
+    const kind = next();
+    const zoom = kind < 0.3
+      ? PRESET_ZOOMS[Math.floor(next() * PRESET_ZOOMS.length)]!
+      : kind < 0.45
+        ? 0.25 + next() * 0.15
+        : 0.4 + next() * 1.4;
+    const viewer = new SnappedViewer(sizes, zoom, 450 + next() * 700);
+    let tracker = new PdfViewerTracker(sizes);
+    if (zoomKnown) tracker.setViewerZoom(zoom + lag);
+    let reported = Number.NaN;
+    const send = (gapMs: number) => {
+      viewer.time += gapMs;
+      if (Math.abs(viewer.scroll - reported) < 1e-9) return;
+      reported = viewer.scroll;
+      tracker.update(viewer.report(), viewer.time);
+    };
+    const check = (action: Action) => {
       viewer.time += 300;
-      for (let step = 0; step < 100; step += 1) {
-        const pick = next();
-        if (pick < 0.35) {
-          // A wheel turn: 100 px a notch, eased over ten frames.
-          const direction = next() < 0.7 ? 1 : -1;
-          const start = viewer.scroll;
-          const amount = 100 * (1 + Math.floor(next() * 3));
-          for (let frame = 1; frame <= 10; frame += 1) {
-            viewer.scrollTo(start + direction * amount * (1 - (1 - frame / 10) ** 3));
-            send(16);
-          }
-          check('wheel');
-        } else if (pick < 0.5) {
-          // A trackpad fling of up to 250 px a frame, slowing down.
-          let speed = (next() < 0.5 ? -1 : 1) * (40 + next() * 210);
-          let ramp = 0;
-          for (let frame = 0; frame < 60 && Math.abs(speed) > 1; frame += 1) {
-            ramp = Math.min(1, ramp + 0.34);
-            viewer.scrollTo(viewer.scroll + speed * ramp);
-            speed *= 0.95;
-            send(16);
-          }
-          check('fling');
-        } else if (pick < 0.65) {
-          viewer.scrollTo(viewer.scroll + (next() < 0.7 ? 40 : -40));
-          send(300);
-          check('arrow');
-        } else if (pick < 0.8) {
-          viewer.scrollTo(viewer.scroll + (next() < 0.8 ? 1 : -1) * 0.875 * viewer.viewportHeight);
-          send(300);
-          check('pageKey');
-        } else if (pick < 0.92) {
-          // ArrowRight: the next page's exact top, then the snapped position.
-          const target = Math.min(viewer.pages.length - 1, report(viewer) + 1);
-          viewer.scrollTo((viewer.pages[target]!.top - 3) * viewer.zoom, false);
-          send(300);
-          viewer.scrollTo(viewer.scroll);
-          send(3);
-          check('arrowRight');
-        } else if (pick < 0.97) {
-          // A key held down: the first press, the keyboard's wait before
-          // repeating, then repeats every 33 ms.
-          const which = next();
-          const repeats = 3 + Math.floor(next() * 8);
-          for (let press = 0; press <= repeats; press += 1) {
-            const gap = press === 0 ? 300 : press === 1 ? 400 : 33;
-            if (which < 0.34) {
-              viewer.scrollTo(viewer.scroll + 40);
-              send(gap);
-            } else if (which < 0.67) {
-              viewer.scrollTo(viewer.scroll + 0.875 * viewer.viewportHeight);
-              send(gap);
-            } else {
-              const target = Math.min(viewer.pages.length - 1, report(viewer) + 1);
-              viewer.scrollTo((viewer.pages[target]!.top - 3) * viewer.zoom, false);
-              send(gap);
-              viewer.scrollTo(viewer.scroll);
-              send(3);
-            }
-          }
-          check(which < 0.34 ? 'heldArrow' : which < 0.67 ? 'heldPageKey' : 'heldArrowRight');
-        } else {
-          // Home or End: eased over about ten frames.
-          const target = next() < 0.5 ? viewer.maxScroll : 0;
-          const start = viewer.scroll;
-          const frames = 8 + Math.floor(next() * 7);
-          for (let frame = 1; frame <= frames; frame += 1) {
-            viewer.scrollTo(start + ((target - start) * (1 - Math.cos((Math.PI * frame) / frames))) / 2);
-            send(16);
-          }
-          check('homeEnd');
+      const position = tracker.settle() ?? tracker.position;
+      const tally = counts.get(action) ?? { right: 0, total: 0 };
+      tally.total += 1;
+      if (position?.index === viewer.topPage()) {
+        tally.right += 1;
+      } else {
+        // Count each mistake once: start again from the true page.
+        tracker = new PdfViewerTracker(sizes);
+        if (zoomKnown) tracker.setViewerZoom(zoom + lag);
+        tracker.anchor({ index: viewer.topPage(), fraction: 0.5 });
+        reported = Number.NaN;
+        send(0);
+        viewer.time += 300;
+      }
+      counts.set(action, tally);
+    };
+    send(1_000);
+    viewer.time += 300;
+    for (let step = 0; step < 100; step += 1) {
+      const pick = next();
+      if (pick < 0.35) {
+        // A wheel turn: 100 px a notch, eased over ten frames.
+        const direction = next() < 0.7 ? 1 : -1;
+        const start = viewer.scroll;
+        const amount = 100 * (1 + Math.floor(next() * 3));
+        for (let frame = 1; frame <= 10; frame += 1) {
+          viewer.scrollTo(start + direction * amount * (1 - (1 - frame / 10) ** 3));
+          send(16);
         }
+        check('wheel');
+      } else if (pick < 0.5) {
+        // A trackpad fling of up to 250 px a frame, slowing down.
+        let speed = (next() < 0.5 ? -1 : 1) * (40 + next() * 210);
+        let ramp = 0;
+        for (let frame = 0; frame < 60 && Math.abs(speed) > 1; frame += 1) {
+          ramp = Math.min(1, ramp + 0.34);
+          viewer.scrollTo(viewer.scroll + speed * ramp);
+          speed *= 0.95;
+          send(16);
+        }
+        check('fling');
+      } else if (pick < 0.65) {
+        viewer.scrollTo(viewer.scroll + (next() < 0.7 ? 40 : -40));
+        send(300);
+        check('arrow');
+      } else if (pick < 0.8) {
+        viewer.scrollTo(viewer.scroll + (next() < 0.8 ? 1 : -1) * 0.875 * viewer.viewportHeight);
+        send(300);
+        check('pageKey');
+      } else if (pick < 0.92) {
+        // ArrowRight: the next page's exact top, then the snapped position.
+        const target = Math.min(viewer.pages.length - 1, report(viewer) + 1);
+        viewer.scrollTo((viewer.pages[target]!.top - 3) * viewer.zoom, false);
+        send(300);
+        viewer.scrollTo(viewer.scroll);
+        send(3);
+        check('arrowRight');
+      } else if (pick < 0.97) {
+        // A key held down: the first press, the keyboard's wait before
+        // repeating, then repeats every 33 ms.
+        const which = next();
+        const repeats = 3 + Math.floor(next() * 8);
+        for (let press = 0; press <= repeats; press += 1) {
+          const gap = press === 0 ? 300 : press === 1 ? 400 : 33;
+          if (which < 0.34) {
+            viewer.scrollTo(viewer.scroll + 40);
+            send(gap);
+          } else if (which < 0.67) {
+            viewer.scrollTo(viewer.scroll + 0.875 * viewer.viewportHeight);
+            send(gap);
+          } else {
+            const target = Math.min(viewer.pages.length - 1, report(viewer) + 1);
+            viewer.scrollTo((viewer.pages[target]!.top - 3) * viewer.zoom, false);
+            send(gap);
+            viewer.scrollTo(viewer.scroll);
+            send(3);
+          }
+        }
+        check(which < 0.34 ? 'heldArrow' : which < 0.67 ? 'heldPageKey' : 'heldArrowRight');
+      } else {
+        // Home or End: eased over about ten frames.
+        const target = next() < 0.5 ? viewer.maxScroll : 0;
+        const start = viewer.scroll;
+        const frames = 8 + Math.floor(next() * 7);
+        for (let frame = 1; frame <= frames; frame += 1) {
+          viewer.scrollTo(start + ((target - start) * (1 - Math.cos((Math.PI * frame) / frames))) / 2);
+          send(16);
+        }
+        check('homeEnd');
       }
     }
+  }
+  return counts;
+}
+
+describe('PdfViewerTracker on simulated reading sessions', () => {
+  it('places the page after nearly every action', () => {
+    const counts = readingSessions(false);
     const share = (action: Action) => {
       const tally = counts.get(action)!;
       return tally.right / tally.total;
@@ -240,6 +261,174 @@ describe('PdfViewerTracker on simulated reading sessions', () => {
     expect(share('homeEnd')).toBeGreaterThanOrEqual(0.98);
     expect(share('arrowRight')).toBeGreaterThanOrEqual(0.97);
     expect(share('heldArrowRight')).toBeGreaterThanOrEqual(0.95);
+  });
+
+  it('reads the same sessions the same when it knows the viewer\'s zoom (D123)', () => {
+    // Upright pages never pass for a turned or a two-page view: not one
+    // reading differs, also when the tab's zoom lags the viewer's.
+    const unknown = readingSessions(false);
+    expect(readingSessions(true)).toEqual(unknown);
+    for (const lag of [-0.009, -0.004, 0.004, 0.009]) {
+      expect(readingSessions(true, lag), `lag ${lag}`).toEqual(unknown);
+    }
+  }, 60_000);
+
+  it('stays while the view is turned, and never takes a zoom for a turn (D123)', () => {
+    // Sessions of wheel turns, zooms and quarter turns, on PDFs of one page
+    // shape (portrait, slides, long pages) with now and then a page of
+    // another size. Chrome tells the panel of a zoom before or after the
+    // viewer reports it. At a set zoom a turn keeps the zoom; in fit to
+    // width the zoom changes with the turn, reported before Chrome tells of
+    // it. The same sessions are read once with the tab's zoom and once
+    // without; each mistake is counted once, from the true page again.
+    type Check = 'upright' | 'zoom' | 'turned' | 'resumed';
+    const shapes: PdfPagePoints[] = [
+      { width: 612, height: 792 },
+      { width: 595.28, height: 841.89 },
+      { width: 720, height: 540 },
+      { width: 960, height: 540 },
+      { width: 612, height: 1008 },
+    ];
+    const zooms = [0.5, 2 / 3, 0.75, 0.9, 1, 1.25, 1.5, 2];
+    const run = (zoomKnown: boolean) => {
+      const next = random(123);
+      const counts = new Map<Check, { right: number; total: number }>();
+      for (let session = 0; session < 60; session += 1) {
+        const shape = shapes[Math.floor(next() * shapes.length)]!;
+        const count = 10 + Math.floor(next() * 150);
+        const mixed = next() < 0.3;
+        const sizes = Array.from({ length: count }, (_, index) =>
+          (mixed && index % 13 === 12 ? { width: shape.width * 0.7, height: shape.height * 0.7 } : shape));
+        const viewer = new SnappedViewer(sizes, zooms[Math.floor(next() * zooms.length)]!, 450 + next() * 600);
+        let tracker = new PdfViewerTracker(sizes);
+        const tell = () => {
+          if (zoomKnown) tracker.setViewerZoom(viewer.zoom);
+        };
+        let reported = '';
+        let moves = 0;
+        const send = (gapMs: number, again = false) => {
+          viewer.time += gapMs;
+          const report = viewer.report();
+          const key = JSON.stringify(report);
+          if (!again && key === reported) return;
+          reported = key;
+          if (tracker.update(report, viewer.time).kind === 'move') moves += 1;
+        };
+        const rest = () => {
+          viewer.time += 400;
+          tracker.settle();
+        };
+        const restart = () => {
+          tracker = new PdfViewerTracker(sizes);
+          tell();
+          tracker.anchor({ index: viewer.topPage(), fraction: 0.5 });
+          send(0, true);
+          rest();
+        };
+        const check = (name: Check, right: boolean) => {
+          const tally = counts.get(name) ?? { right: 0, total: 0 };
+          tally.total += 1;
+          if (right) tally.right += 1;
+          counts.set(name, tally);
+        };
+        const followed = (name: Check) => {
+          const right = tracker.position?.index === viewer.topPage();
+          check(name, right);
+          if (!right) restart();
+        };
+        const wheel = () => {
+          const direction = next() < 0.7 ? 1 : -1;
+          const start = viewer.scroll;
+          const amount = 100 * (1 + Math.floor(next() * 3));
+          for (let frame = 1; frame <= 10; frame += 1) {
+            viewer.scrollTo(start + direction * amount * (1 - (1 - frame / 10) ** 3));
+            send(16);
+          }
+          rest();
+        };
+        // A zoom keeps the place; Chrome reports it twice at once.
+        const zoomTo = (zoom: number, toldFirst: boolean) => {
+          const y = viewer.scroll / viewer.zoom;
+          viewer.zoom = zoom;
+          viewer.scrollTo(y * zoom);
+          if (toldFirst) tell();
+          send(300, true);
+          send(3, true);
+          if (!toldFirst) tell();
+          rest();
+        };
+        // Fit to width: the widest page and its insets fill the view.
+        const fitZoom = () =>
+          (viewer.viewportWidth - 14) / (Math.max(...viewer.pages.map((entry) => entry.width)) + 10);
+        // A quarter turn keeps the page at the top of the view.
+        const turn = (turned: boolean, fitWidth: boolean) => {
+          const page = viewer.topPage();
+          const share = (viewer.scroll / viewer.zoom - viewer.pages[page]!.top) / viewer.pages[page]!.height;
+          viewer.turned = turned;
+          viewer.layout();
+          if (fitWidth) viewer.zoom = fitZoom();
+          const target = viewer.pages[page]!;
+          viewer.scrollTo((target.top + Math.max(0, share) * target.height) * viewer.zoom);
+          send(300, true);
+          if (fitWidth) tell();
+          rest();
+        };
+        tell();
+        send(1_000);
+        rest();
+        for (let step = 0; step < 40; step += 1) {
+          const pick = next();
+          if (pick < 0.45) {
+            wheel();
+            followed('upright');
+          } else if (pick < 0.75) {
+            const others = zooms.filter((entry) => entry !== viewer.zoom);
+            zoomTo(others[Math.floor(next() * others.length)]!, next() < 0.5);
+            wheel();
+            followed('zoom');
+          } else {
+            const fitWidth = next() < 0.5;
+            if (fitWidth) zoomTo(fitZoom(), next() < 0.5);
+            turn(true, fitWidth);
+            // The first report of a turn in fit to width comes before its
+            // zoom and is read as a zoom; nothing after it moves the panel.
+            const place = tracker.position;
+            const before = moves;
+            for (let turnStep = 0, steps = 1 + Math.floor(next() * 4); turnStep < steps; turnStep += 1) {
+              if (next() < 0.2) zoomTo(viewer.zoom * (next() < 0.5 ? 1.25 : 0.8), next() < 0.5);
+              else wheel();
+            }
+            check('turned', moves === before && tracker.position === place);
+            // Upright again: where the viewer is now is a guess, but the
+            // panel follows it again.
+            turn(false, fitWidth);
+            const upright = moves;
+            wheel();
+            check('resumed', moves > upright);
+            restart();
+          }
+        }
+      }
+      return counts;
+    };
+    const known = run(true);
+    const unknown = run(false);
+    const share = (counts: typeof known, name: Check) =>
+      counts.get(name)!.right / counts.get(name)!.total;
+    // Measured 2026-10-06 over 60 sessions (2,400 actions, 603 turns):
+    // with the tab's zoom 600 turned views kept the panel still, without it
+    // 38; every turn back was followed again; and wheel turns and zooms were
+    // placed as often as without the zoom. The 3 turns missed are taken for
+    // upright because a width came within the tab zoom's lag (1%) of a page
+    // width: in two A4 PDFs with pages at 70%, one is 589 pt tall and A4 is
+    // 595 pt wide; and once a zoom while turned, told after its report.
+    expect(share(known, 'turned')).toBeGreaterThanOrEqual(0.995);
+    expect(share(unknown, 'turned')).toBeLessThan(0.5);
+    expect(share(known, 'resumed')).toBe(1);
+    expect(share(known, 'upright')).toBeGreaterThanOrEqual(share(unknown, 'upright'));
+    expect(share(known, 'zoom')).toBeGreaterThanOrEqual(share(unknown, 'zoom'));
+    expect(share(known, 'upright')).toBeGreaterThanOrEqual(0.99);
+    expect(share(known, 'zoom')).toBeGreaterThanOrEqual(0.99);
   });
 });
 

@@ -297,6 +297,8 @@ const pdfViewerFollower = new PdfViewerFollower({
   view: pdfView,
   enabled: () => state.preferences.syncScroll,
   onDiagnostic: (followState) => logPdfDiagnostic({ stage: 'follow', state: followState }),
+  // Not the 1 a failed read leaves: a turned view is then not looked for (D123).
+  viewerZoom: () => (state.sourceZoomKnown ? state.sourceZoomFactor : undefined),
 });
 const pdfController = new PdfController({
   fetchPdf: (url, signal) => fetchPdfBytes(url, { signal }),
@@ -1394,6 +1396,8 @@ function updateMirrorLayout(): void {
   }
   visibleReplayHost.updateLayout(layout);
   pdfController.updateLayout(layout);
+  // The tab's zoom is the PDF viewer's: a view turned a quarter shows by it (D123).
+  pdfViewerFollower.zoomChanged();
   if (appliedTextLayoutMode !== state.preferences.textLayoutMode) {
     appliedTextLayoutMode = state.preferences.textLayoutMode;
     isolatedHtmlReplicaEngine.refreshTextLayout();

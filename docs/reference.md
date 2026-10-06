@@ -191,10 +191,10 @@ on a page once it is drawn.
     the panel opens there too.
   - After a wrong guess the panel stays that many pages off as you read on.
     Home or End from far away puts it right.
-  - At zooms where pages start on whole pixels (100% and 90% for US Letter),
-    ArrowRight pressed in the first screen of the PDF, or exactly one arrow
-    step below a page top, looks the same as scrolling up, and is read as
-    that.
+  - Setting the viewer's zoom to what it already is, or switching it to fit
+    to page, at the top of a page looks the same as ArrowRight, and the
+    panel goes a page down. A half turn (two quarter turns) is guessed, as a
+    jump is.
   - Pages of different sizes help Simul tell them apart.
   - Sideways scrolling in the viewer is followed too, exactly: the panel is
     scrolled across the page as far as the viewer is. It shows when the
@@ -202,9 +202,14 @@ on a page once it is drawn.
   - The panel moves only when the viewer moves, so your own scrolling of the
     panel stays until then. That holds each way: scrolling the viewer down
     leaves the panel where you put it sideways.
-  - Not followed: a PDF opened from the computer, the viewer's two-page view
-    (the panel scrolls on its own there), and Microsoft Edge's viewer, which
-    sends nothing. Rotated pages are followed wrongly.
+  - Not followed: a PDF opened from the computer, the viewer's two-page view,
+    and a view turned a quarter (Rotate, Ctrl+[ and Ctrl+]): the panel stays
+    where it is and scrolls on its own until the view is one page wide and
+    upright again. Where the viewer is then is guessed, as after a jump.
+    Simul tells a turned view by the tab's zoom. A PDF that has a page about
+    as wide as another is tall (within 1%, as portrait and landscape pages
+    of one size) is not noticed as turned, and is then followed wrongly.
+    Microsoft Edge's viewer sends nothing.
 - Without a remembered place, a PDF opens at the page its address names
   (`#page=3`).
 - Only the pages near the view are drawn. In a very long PDF (more than

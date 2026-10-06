@@ -19,6 +19,13 @@ const BESIDE_OFFSET = 8;
 // (viewer pixels at 100%): its insets there are 5 and 1, not 5 and 5.
 const TWO_PAGE_NARROWER = 4;
 const TWO_PAGE_WIDTH_TOLERANCE = 0.3;
+// How close (screen px) a reported width must be to a page's height at the
+// viewer's zoom to be that page turned a quarter.
+const TURNED_WIDTH_TOLERANCE = 0.3;
+// Chrome's viewer passes its zoom on to the tab only when it changed by more
+// than 0.01 (its MIN_ZOOM_DELTA), so in a fit mode the tab's zoom, which the
+// panel has, can be that far from the viewer's (a little more for rounding).
+const MIN_ZOOM_DELTA = 0.0101;
 /** The viewer's arrow-key step (`SCROLL_INCREMENT`), in screen pixels. */
 export const PDF_VIEWER_ARROW_STEP = 40;
 /** PageUp, PageDown and Space move this share of the viewport height. */
@@ -139,7 +146,7 @@ export type PdfViewerTrack =
  * viewer's speed says it is. A movement too fast to follow is held until it stops,
  * then read as the top or bottom of the PDF when it ends there (Home, End),
  * else as the page nearest where it began. The two-page view is noticed and
- * not followed; rotated pages are not modelled.
+ * not followed, and so is a view turned a quarter (D123).
  *
  * Sideways there is nothing to guess (D115): `pageX` says how far the viewer
  * is scrolled across the PDF's width, whichever page it names. `left` is
@@ -189,6 +196,14 @@ export class PdfViewerTracker {
   readonly #widths: readonly number[];
   /** The zoom at which the viewer went to its two-page view, while in it. */
   #twoPageZoom: number | undefined;
+  /** Every distinct page height, in viewer pixels at 100%. */
+  readonly #heights: readonly number[];
+  /** The viewer's zoom as Chrome reports the tab's, when the panel knows it. */
+  #viewerZoom: number | undefined;
+  /** Whether the viewer shows its pages turned a quarter. */
+  #turned = false;
+  /** The latest report, read or not. */
+  #lastReport: PdfViewerViewport | undefined;
 
   constructor(pageSizes: readonly PdfPagePoints[]) {
     let top = 0;
@@ -208,6 +223,7 @@ export class PdfViewerTracker {
     for (const [width, count] of counts) if (count > (counts.get(usual) ?? 0)) usual = width;
     this.#usualWidth = usual;
     this.#widths = [...counts.keys()];
+    this.#heights = [...new Set(pages.map((page) => page.height))];
     this.#widestWidth = pages.reduce((widest, page) => Math.max(widest, page.width), 1);
   }
 
@@ -243,12 +259,43 @@ export class PdfViewerTracker {
     this.#anchorWidth = page.width;
   }
 
+  /**
+   * The viewer's zoom as the tab's (D104): 1 at 100%; in a fit mode it can
+   * lag the viewer's by up to 0.01. With it a view turned a quarter shows,
+   * because the page's width on screen is then one of the PDF's page
+   * heights at that zoom and none of its widths (D123). Chrome tells the
+   * panel of a zoom apart from the viewer's reports, so when the zoom
+   * changes the latest report is looked at again, unless it was an upright
+   * report of the zoom before.
+   */
+  setViewerZoom(zoom: number | undefined): void {
+    const before = this.#viewerZoom;
+    this.#viewerZoom = zoom !== undefined && zoom >= MIN_ZOOM && zoom <= MAX_ZOOM
+      ? zoom
+      : undefined;
+    const report = this.#lastReport;
+    if (!report || this.#viewerZoom === before) return;
+    // An upright report that fitted the zoom it came at belongs to that
+    // zoom, and the report of the new zoom is on its way. Read at the new
+    // zoom it could pass for a turn: a slide 960 by 720 is as wide at 75%
+    // as it is tall at 100%.
+    if (
+      !this.#turned &&
+      before !== undefined &&
+      this.#fitsLength(report, this.#widths, before)
+    ) return;
+    this.#quarterTurned(report);
+  }
+
   update(viewport: PdfViewerViewport, time: number): PdfViewerTrack {
     if (this.#pages.length === 0) return { kind: 'same' };
     const elapsed = this.#lastTime === undefined || !Number.isFinite(time)
       ? Number.POSITIVE_INFINITY
       : time - this.#lastTime;
     this.#lastTime = time;
+    this.#lastReport = viewport;
+    // A view turned a quarter has other page positions: not followed.
+    if (this.#quarterTurned(viewport)) return { kind: 'same' };
     // The two-page view puts pages beside each other: not followed.
     if (this.#twoPageView(viewport) || this.#beside(viewport)) return { kind: 'same' };
     const lone = !(elapsed >= 0 && elapsed <= PDF_VIEWER_STREAM_GAP_MS);
@@ -445,8 +492,11 @@ export class PdfViewerTracker {
     const fits = (zoom: number, narrower: number) => this.#widths.some((width) =>
       Math.abs(viewport.pageWidth - (width - narrower) * zoom) <= TWO_PAGE_WIDTH_TOLERANCE);
     const twoPageZoom = this.#twoPageZoom;
+    const viewerZoom = this.#viewerZoom;
     if (twoPageZoom !== undefined) {
-      if (fits(twoPageZoom, 0)) {
+      // In a fit mode Chrome changes the zoom with the view (two pages fit
+      // the width at half the zoom): the viewer's zoom tells the way back.
+      if (fits(twoPageZoom, 0) || (viewerZoom !== undefined && fits(viewerZoom, 0))) {
         // One page wide again; the place is guessed from where it was.
         this.#twoPageZoom = undefined;
         return false;
@@ -458,17 +508,68 @@ export class PdfViewerTracker {
       return true;
     }
     const fix = this.#fix;
+    if (!fix) return false;
+    // The last place's zoom and, when the panel knows it, the viewer's
+    // (D123). A report one page wide at either is not the two-page view:
+    // in a fit mode a turn's report read as a zoom can leave the last place
+    // at a zoom where a page turned back looks 4 px narrower (US Legal in
+    // fit to width), and the tab's zoom can lag the viewer's by 0.01.
+    const zooms = viewerZoom === undefined ? [fix.zoom] : [fix.zoom, viewerZoom];
+    const zoom = zooms.find((candidate) => fits(candidate, TWO_PAGE_NARROWER));
     if (
-      !fix ||
       Math.abs(fix.viewport.viewportWidth - viewport.viewportWidth) >= 0.5 ||
       Math.abs(fix.viewport.viewportHeight - viewport.viewportHeight) >= 0.5 ||
-      fits(fix.zoom, 0) ||
-      !fits(fix.zoom, TWO_PAGE_NARROWER)
+      zooms.some((candidate) => fits(candidate, 0)) ||
+      zoom === undefined
     ) return false;
-    this.#twoPageZoom = fix.zoom;
+    this.#twoPageZoom = zoom;
     this.#hold = undefined;
     this.#keyStep = undefined;
     return true;
+  }
+
+  /**
+   * Whether the viewer shows its pages turned a quarter (Ctrl+[ and Ctrl+],
+   * the toolbar's rotate button): the page reported is then as wide as one
+   * of the PDF's pages is tall, at the viewer's zoom, and as wide as none.
+   * Chrome keeps the zoom through a turn at a set zoom and changes it in
+   * its fit modes, so the report's own numbers do not tell; the tab's zoom
+   * does. Noticed only while the panel knows that zoom, until a report is
+   * upright again. A width within the tab zoom's lag of a page width is
+   * upright: a missed turn is followed as before D123, a false one would
+   * stop following. So a PDF with a page about as wide as another is tall
+   * (within 1%, as portrait and landscape pages of one size) is not
+   * noticed.
+   */
+  #quarterTurned(viewport: PdfViewerViewport): boolean {
+    const zoom = this.#viewerZoom;
+    if (zoom === undefined) return this.#turned;
+    const upright = this.#upright(viewport, zoom);
+    if (this.#turned) {
+      // A width that fits nothing is a zoom Chrome has not told of yet.
+      if (!upright) return true;
+      // Upright again; the place is guessed from where it was.
+      this.#turned = false;
+      return false;
+    }
+    if (upright || !this.#fitsLength(viewport, this.#heights, zoom)) return false;
+    this.#turned = true;
+    this.#hold = undefined;
+    this.#keyStep = undefined;
+    this.#keyUndo = undefined;
+    return true;
+  }
+
+  /** Whether the reported page is as wide on screen as one of `lengths` at `zoom`. */
+  #fitsLength(viewport: PdfViewerViewport, lengths: readonly number[], zoom: number): boolean {
+    return lengths.some((length) =>
+      Math.abs(viewport.pageWidth - length * zoom) <= TURNED_WIDTH_TOLERANCE);
+  }
+
+  /** Whether the reported page is a page's width at `zoom`, give or take its lag. */
+  #upright(viewport: PdfViewerViewport, zoom: number): boolean {
+    return this.#widths.some((width) =>
+      Math.abs(viewport.pageWidth - width * zoom) <= MIN_ZOOM_DELTA * width + TURNED_WIDTH_TOLERANCE);
   }
 
   /**

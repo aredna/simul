@@ -6,7 +6,7 @@ import {
 import { sameCompanionSourcePage } from '../../lib/companion-surface';
 import type { CompanionStatusTone } from '../../lib/companion-ui-localization';
 import { UI_STRINGS } from '../../lib/companion-ui-strings';
-import { normalizeZoomFactor } from '../../lib/display-scale';
+import { isZoomFactor } from '../../lib/display-scale';
 import type { UiText } from '../../lib/ui-text';
 import type { NavigationRefreshGate } from '../../lib/navigation-refresh-gate';
 import type { ImageTranslationDiagnostic } from '../../lib/ocr/image-translation-controller';
@@ -376,9 +376,11 @@ export class CapturePipeline {
     const state = this.#state;
     if (state.followedOrCapturedIdentity?.tabId !== tabId) return;
     this.#zoomChanges += 1;
-    const factor = normalizeZoomFactor(zoomFactor);
-    if (factor === state.sourceZoomFactor) return;
+    const known = isZoomFactor(zoomFactor);
+    const factor = known ? zoomFactor : 1;
+    if (factor === state.sourceZoomFactor && known === state.sourceZoomKnown) return;
     state.sourceZoomFactor = factor;
+    state.sourceZoomKnown = known;
     this.environment.updateMirrorLayout();
   }
 
@@ -582,7 +584,10 @@ export class CapturePipeline {
       const zoomChangesBefore = this.#zoomChanges;
       const zoomFactor = await this.#readZoom(identity.tabId);
       if (!captureCoordinator.isCurrent(work.generation)) return;
-      if (this.#zoomChanges === zoomChangesBefore) state.sourceZoomFactor = zoomFactor;
+      if (this.#zoomChanges === zoomChangesBefore) {
+        state.sourceZoomFactor = zoomFactor ?? 1;
+        state.sourceZoomKnown = zoomFactor !== undefined;
+      }
       this.environment.updateMirrorLayout();
 
       if (isPdfContentType(sourceDocument?.contentType)) {
@@ -946,11 +951,13 @@ export class CapturePipeline {
     this.environment.updateControls();
   }
 
-  async #readZoom(tabId: number): Promise<number> {
+  /** The tab's zoom, or `undefined` when Chrome gave none. */
+  async #readZoom(tabId: number): Promise<number | undefined> {
     try {
-      return normalizeZoomFactor(await this.environment.readZoom(tabId));
+      const zoom = await this.environment.readZoom(tabId);
+      return isZoomFactor(zoom) ? zoom : undefined;
     } catch {
-      return 1;
+      return undefined;
     }
   }
 }

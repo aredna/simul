@@ -1,13 +1,15 @@
 import { describe, expect, it } from 'vitest';
 
-import { displayScale, normalizeZoomFactor } from '../lib/display-scale';
+import { displayScale, isZoomFactor, normalizeZoomFactor } from '../lib/display-scale';
 
 describe('display scale (D104)', () => {
   it('keeps a valid tab zoom and replaces anything else with 1', () => {
     expect(normalizeZoomFactor(1.25)).toBe(1.25);
     for (const value of [0, -1, Number.NaN, Number.POSITIVE_INFINITY, '1.5', undefined, null]) {
       expect(normalizeZoomFactor(value)).toBe(1);
+      expect(isZoomFactor(value)).toBe(false);
     }
+    expect(isZoomFactor(0.75)).toBe(true);
   });
 
   it('fits by the given ratio, growing or shrinking, whatever the tab zoom', () => {

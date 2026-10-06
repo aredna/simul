@@ -119,6 +119,11 @@ export class CompanionState {
   lastSourceScroll: HtmlMirrorScrollState | undefined;
   /** The followed tab's browser zoom; 1:1 and custom zoom follow it (D104). */
   sourceZoomFactor = 1;
+  /**
+   * Whether Chrome gave `sourceZoomFactor`; it stays 1 when the read failed.
+   * The PDF viewer's tracker is told the zoom only then (D123).
+   */
+  sourceZoomKnown = false;
 
   // Source-language resolution for the captured page.
   resolvedSourceLanguage: SupportedLanguage | undefined;
@@ -283,6 +288,7 @@ export class CompanionState {
     this.resetTranslationIntent();
     this.lastSourceScroll = undefined;
     this.sourceZoomFactor = 1;
+    this.sourceZoomKnown = false;
   }
 }
 

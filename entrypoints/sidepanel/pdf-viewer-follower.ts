@@ -31,6 +31,11 @@ export interface PdfViewerFollowerDependencies {
   readonly enabled: () => boolean;
   /** Content-free: whether the tab's viewer could be reached. */
   readonly onDiagnostic?: (state: 'connected' | 'unavailable') => void;
+  /**
+   * The tab's zoom, which is the viewer's (D104); `undefined` when unknown.
+   * A view turned a quarter shows by it (D123).
+   */
+  readonly viewerZoom?: () => number | undefined;
 }
 
 interface Session {
@@ -52,7 +57,7 @@ interface Session {
  * moved, so the reader's own scrolling of the view stays until then. The
  * viewer's sideways place is followed the same way, apart from its place
  * down the PDF (D115). A tab where nothing answers (no grant, Edge, a
- * changed viewer) is not followed.
+ * changed viewer) is not followed, nor is a view turned a quarter (D123).
  */
 export class PdfViewerFollower {
   readonly #dependencies: PdfViewerFollowerDependencies;
@@ -151,6 +156,12 @@ export class PdfViewerFollower {
     this.#followLeft(session);
   }
 
+  /** The tab's zoom changed: a view turned a quarter shows by it (D123). */
+  zoomChanged(): void {
+    const session = this.#session;
+    if (session) session.tracker.setViewerZoom(this.#dependencies.viewerZoom?.());
+  }
+
   #end(session: Session): void {
     if (session.timer !== undefined) clearTimeout(session.timer);
     session.timer = undefined;
@@ -168,6 +179,7 @@ export class PdfViewerFollower {
     if (!tracker.hasFix && !session.anchored) {
       tracker.anchor(this.#dependencies.view.readingPosition());
     }
+    tracker.setViewerZoom(this.#dependencies.viewerZoom?.());
     const track = tracker.update(report, report.time);
     if (track.kind === 'hold') {
       if (session.timer !== undefined) clearTimeout(session.timer);

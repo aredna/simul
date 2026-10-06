@@ -618,13 +618,26 @@ describe('CapturePipeline tab zoom', () => {
     harness.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
     await harness.settled();
     expect(harness.state.sourceZoomFactor).toBe(1.25);
+    expect(harness.state.sourceZoomKnown).toBe(true);
 
-    const unreadable = setup({ readZoom: async () => { throw new Error('No tab'); } });
-    unreadable.state.sourceZoomFactor = 2;
-    unreadable.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
-    await unreadable.settled();
-    expect(unreadable.state.sourceZoomFactor).toBe(1);
-    expect(unreadable.state.capturedPageIdentity).toEqual(IDENTITY);
+    // Unread, the zoom is 1 for the layout and unknown to the PDF viewer's
+    // tracker, which would take a 4:3 slide at 75% for a turned page (D123).
+    for (const readZoom of [
+      async () => { throw new Error('No tab'); },
+      async () => Number.NaN,
+    ]) {
+      const unreadable = setup({ readZoom });
+      unreadable.state.sourceZoomFactor = 2;
+      unreadable.state.sourceZoomKnown = true;
+      unreadable.pipeline.queueCapture({ identity: IDENTITY, reason: 'initial' });
+      await unreadable.settled();
+      expect(unreadable.state.sourceZoomFactor).toBe(1);
+      expect(unreadable.state.sourceZoomKnown).toBe(false);
+      expect(unreadable.state.capturedPageIdentity).toEqual(IDENTITY);
+      // Chrome telling of the zoom makes it known, even at 1.
+      unreadable.pipeline.handleSourceZoomChange(IDENTITY.tabId, 1);
+      expect(unreadable.state.sourceZoomKnown).toBe(true);
+    }
   });
 
   it('keeps a zoom change that arrives while the capture reads the zoom', async () => {
@@ -661,9 +674,12 @@ describe('CapturePipeline tab zoom', () => {
 
     harness.pipeline.handleSourceZoomChange(IDENTITY.tabId, Number.NaN);
     expect(harness.state.sourceZoomFactor).toBe(1);
+    expect(harness.state.sourceZoomKnown).toBe(false);
 
     harness.pipeline.handleSourceZoomChange(IDENTITY.tabId, 3);
+    expect(harness.state.sourceZoomKnown).toBe(true);
     harness.pipeline.invalidateCompanion('The source tab was closed.');
     expect(harness.state.sourceZoomFactor).toBe(1);
+    expect(harness.state.sourceZoomKnown).toBe(false);
   });
 });

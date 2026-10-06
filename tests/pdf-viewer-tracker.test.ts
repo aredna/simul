@@ -34,6 +34,8 @@ class FakeViewer {
     public zoom: number,
     public viewportHeight: number,
     public viewportWidth = 800,
+    /** The two-page view reports each page this much narrower (px at 100%). */
+    public narrower = 0,
   ) {
     let top = 0;
     for (const size of sizes) {
@@ -85,7 +87,7 @@ class FakeViewer {
     return {
       pageX: this.pageX(page.width),
       pageY: page.top * this.zoom - this.scroll,
-      pageWidth: page.width * this.zoom,
+      pageWidth: (page.width - this.narrower) * this.zoom,
       viewportWidth: this.viewportWidth,
       viewportHeight: this.viewportHeight,
     };
@@ -530,6 +532,389 @@ describe('PdfViewerTracker', () => {
     const track = send(tracker, viewer, 400);
     expect(track.kind).toBe('move');
     expect(tracker.position?.index).toBe(viewer.topPage());
+  });
+});
+
+describe('PdfViewerTracker and a view turned a quarter (D123)', () => {
+  const turned = (sizes: readonly PdfPagePoints[]) =>
+    sizes.map((size) => ({ width: size.height, height: size.width }));
+
+  /** Scrolls the way a wheel does, a frame at a time. */
+  function scroll(tracker: PdfViewerTracker, viewer: FakeViewer, frames: number, step = 30): void {
+    for (let frame = 0; frame < frames; frame += 1) {
+      viewer.scrollTo(viewer.scroll + step);
+      send(tracker, viewer, 16);
+    }
+  }
+
+  /** Home: an animated movement to the top, which the tracker reads exactly. */
+  function home(tracker: PdfViewerTracker, viewer: FakeViewer): void {
+    const start = viewer.scroll;
+    for (let frame = 1; frame <= 10; frame += 1) {
+      viewer.scrollTo(start * (1 + Math.cos((Math.PI * frame) / 10)) / 2);
+      send(tracker, viewer, 16);
+    }
+    tracker.settle();
+  }
+
+  it('stops following while the view is turned, at a set zoom', () => {
+    const viewer = new FakeViewer(pages(40), 0.8, 700);
+    const tracker = new PdfViewerTracker(pages(40));
+    tracker.setViewerZoom(0.8);
+    send(tracker, viewer, 1_000);
+    scroll(tracker, viewer, 60);
+    expect(tracker.position?.index).toBe(viewer.topPage());
+    const before = tracker.position;
+
+    // Ctrl+]: the same zoom, pages 1,056 px wide where they were 816.
+    const rotated = new FakeViewer(turned(pages(40)), 0.8, 700);
+    rotated.time = viewer.time;
+    rotated.scrollTo(rotated.pages[1]!.top * 0.8);
+    expect(send(tracker, rotated, 800).kind).toBe('same');
+    for (let step = 0; step < 40; step += 1) {
+      rotated.scrollTo(rotated.scroll + 100);
+      expect(send(tracker, rotated, 40).kind).toBe('same');
+    }
+    // A key or a jump while turned is not read either.
+    rotated.scrollTo(rotated.scroll + PDF_VIEWER_ARROW_STEP);
+    expect(send(tracker, rotated, 400).kind).toBe('same');
+    rotated.scrollTo(rotated.pages[30]!.top * 0.8);
+    expect(send(tracker, rotated, 800).kind).toBe('same');
+    expect(tracker.settle()).toBeUndefined();
+    expect(tracker.position).toBe(before);
+
+    // Ctrl+[: upright again and followed. Where the viewer is after the
+    // turn back is a guess; Home puts the panel right.
+    viewer.time = rotated.time;
+    viewer.scrollTo(viewer.pages[7]!.top * 0.8 + 200);
+    send(tracker, viewer, 800);
+    tracker.settle();
+    home(tracker, viewer);
+    expect(tracker.position).toEqual({ index: 0, fraction: 0 });
+    scroll(tracker, viewer, 50);
+    expect(tracker.position?.index).toBe(viewer.topPage());
+    expect(viewer.topPage()).toBeGreaterThan(0);
+  });
+
+  it('notices a turn in a fit mode once Chrome tells of the zoom', () => {
+    // Fit to width: the zoom changes with the turn (0.718 to 0.556 here).
+    const viewer = new FakeViewer(pages(40), 0.718, 749, 593);
+    const tracker = new PdfViewerTracker(pages(40));
+    tracker.setViewerZoom(0.718);
+    send(tracker, viewer, 1_000);
+    const rotated = new FakeViewer(turned(pages(40)), 0.5563, 749, 593);
+    rotated.time = viewer.time;
+
+    // The report comes before the zoom: read as a zoom, as before.
+    send(tracker, rotated, 800);
+    tracker.settle();
+    tracker.setViewerZoom(0.5563);
+    const before = tracker.position;
+    for (let step = 0; step < 20; step += 1) {
+      rotated.scrollTo(rotated.scroll + 100);
+      expect(send(tracker, rotated, 40).kind).toBe('same');
+    }
+    expect(tracker.position).toBe(before);
+
+    // Ctrl+[: the zoom goes back with the turn, its report first again.
+    viewer.time = rotated.time;
+    expect(send(tracker, viewer, 800).kind).not.toBe('hold');
+    tracker.setViewerZoom(0.718);
+    scroll(tracker, viewer, 40);
+    home(tracker, viewer);
+    expect(tracker.position).toEqual({ index: 0, fraction: 0 });
+    scroll(tracker, viewer, 40);
+    expect(tracker.position?.index).toBe(viewer.topPage());
+  });
+
+  it('drops a movement it holds when the zoom shows a turn', () => {
+    // Fit to width while scrolling: the turn's report comes within the
+    // movement and is held; the zoom Chrome tells of next shows the turn.
+    const viewer = new FakeViewer(pages(40), 0.718, 749, 593);
+    const tracker = new PdfViewerTracker(pages(40));
+    tracker.setViewerZoom(0.718);
+    send(tracker, viewer, 1_000);
+    scroll(tracker, viewer, 20);
+    const before = tracker.position;
+    const rotated = new FakeViewer(turned(pages(40)), 0.5563, 749, 593);
+    const report = { ...rotated.report(), pageY: -245 };
+    expect(tracker.update(report, (viewer.time += 16)).kind).toBe('hold');
+
+    tracker.setViewerZoom(0.5563);
+    expect(tracker.settle()).toBeUndefined();
+    expect(tracker.position).toBe(before);
+    // Still turned while the zoom is not known.
+    tracker.setViewerZoom(undefined);
+    rotated.scrollTo(rotated.scroll + 300);
+    expect(tracker.update(rotated.report(), (viewer.time += 400)).kind).toBe('same');
+    expect(tracker.position).toBe(before);
+  });
+
+  it('follows again after a turn in fit to width that left a page looking 4 px narrower', () => {
+    // US Legal, 816 × 1,344 px at 100%, fit to width in a view 800 px
+    // wide: 95.2% upright, 58.1% turned. The turn's first report comes
+    // before its zoom and reads as a zoom to 95.6%, at which the page turned
+    // back is 4 px narrower than a page, as in the two-page view.
+    const legal = pages(40, { width: 612, height: 1008 });
+    const upright = 786 / 826;
+    const sideways = 786 / 1354;
+    const viewer = new FakeViewer(legal, upright, 600);
+    const tracker = new PdfViewerTracker(legal);
+    tracker.setViewerZoom(upright);
+    send(tracker, viewer, 1_000);
+    scroll(tracker, viewer, 40);
+    expect(tracker.position?.index).toBe(viewer.topPage());
+
+    const rotated = new FakeViewer(turned(legal), sideways, 600);
+    rotated.time = viewer.time;
+    rotated.scrollTo(viewer.scroll * (sideways / upright));
+    send(tracker, rotated, 800);
+    tracker.settle();
+    tracker.setViewerZoom(sideways);
+    const before = tracker.position;
+    scroll(tracker, rotated, 10);
+    expect(tracker.position).toBe(before);
+
+    // Ctrl+[: the report first, then the zoom; then followed again.
+    viewer.time = rotated.time;
+    expect(send(tracker, viewer, 800).kind).toBe('same');
+    tracker.setViewerZoom(upright);
+    viewer.scrollTo(viewer.scroll + 30);
+    expect(send(tracker, viewer, 400).kind).toBe('move');
+    home(tracker, viewer);
+    scroll(tracker, viewer, 80);
+    expect(tracker.position?.index).toBe(viewer.topPage());
+    expect(viewer.topPage()).toBeGreaterThan(0);
+  });
+
+  it('keeps following when the tab\'s zoom lags the viewer\'s after a resize in fit to width', () => {
+    // Chrome passes the viewer's zoom on to the tab only when it changed by
+    // more than 0.01. The window 3 px narrower in fit to width leaves the
+    // tab at 593/826 with the viewer at 590/826, where a Letter page is as
+    // wide as one 4 px narrower at the tab's zoom: the two-page view's mark.
+    const told = 593 / 826;
+    const before = new FakeViewer(pages(40), told, 749, 593);
+    const tracker = new PdfViewerTracker(pages(40));
+    tracker.setViewerZoom(told);
+    send(tracker, before, 1_000);
+    const viewer = new FakeViewer(pages(40), 590 / 826, 749, 590);
+    viewer.time = before.time;
+    send(tracker, viewer, 400);
+    scroll(tracker, viewer, 120);
+    tracker.settle();
+    expect(viewer.topPage()).toBeGreaterThan(2);
+    expect(tracker.position?.index).toBe(viewer.topPage());
+  });
+
+  it('keeps following when the lag makes a Letter page as wide as a landscape page is tall', () => {
+    // Letter pages and one landscape page 606.75 pt tall (809 px at 100%)
+    // that sets fit to width: with the tab's zoom 0.9% above the viewer's, a
+    // Letter page is as wide on screen as the landscape page is tall at the
+    // tab's zoom. Within the lag of a page width, it is upright.
+    const sizes = [...pages(15), { width: 792, height: 606.75 }, ...pages(15)];
+    const told = 593 / 1066;
+    const actual = (told * 809) / 816;
+    const before = new FakeViewer(sizes, told, 749, 607);
+    const tracker = new PdfViewerTracker(sizes);
+    tracker.setViewerZoom(told);
+    send(tracker, before, 1_000);
+    const viewer = new FakeViewer(sizes, actual, 749, 602);
+    viewer.time = before.time;
+    send(tracker, viewer, 400);
+    scroll(tracker, viewer, 120);
+    tracker.settle();
+    expect(viewer.topPage()).toBeGreaterThan(2);
+    expect(tracker.position?.index).toBe(viewer.topPage());
+  });
+
+  it('follows again after the two-page view in fit to width, which halves the zoom', () => {
+    for (const noticeFirst of [true, false]) {
+      const one = new FakeViewer(pages(40), 593 / 826, 749, 593);
+      const tracker = new PdfViewerTracker(pages(40));
+      tracker.setViewerZoom(one.zoom);
+      send(tracker, one, 1_000);
+      scroll(tracker, one, 20);
+      tracker.settle();
+      const before = tracker.position;
+      // Two pages side by side, at about half the zoom: each 4 px narrower,
+      // the left one reported left of the middle.
+      const two = new FakeViewer(pages(40), 0.36071, 749, 593, 4);
+      const left = (gapMs: number) => {
+        two.time += gapMs;
+        const report = two.report();
+        tracker.update({ ...report, pageX: (593 - 14) / 2 - report.pageWidth - 2 }, two.time);
+      };
+      two.time = one.time;
+      two.scrollTo(one.scroll * (two.zoom / one.zoom));
+      if (noticeFirst) tracker.setViewerZoom(two.zoom);
+      left(300);
+      if (!noticeFirst) tracker.setViewerZoom(two.zoom);
+      for (let frame = 0; frame < 30; frame += 1) {
+        two.scrollTo(two.scroll + 30);
+        left(16);
+      }
+      tracker.settle();
+      expect(tracker.position, `notice first: ${noticeFirst}`).toBe(before);
+
+      // One page wide again: the zoom goes back; End, Home, then wheel steps.
+      one.time = two.time;
+      if (noticeFirst) tracker.setViewerZoom(one.zoom);
+      send(tracker, one, 300);
+      if (!noticeFirst) tracker.setViewerZoom(one.zoom);
+      tracker.settle();
+      for (const target of [one.maxScroll, 0]) {
+        const start = one.scroll;
+        for (let frame = 1; frame <= 12; frame += 1) {
+          one.scrollTo(start + ((target - start) * (1 - Math.cos((Math.PI * frame) / 12))) / 2);
+          send(tracker, one, frame === 1 ? 600 : 16);
+        }
+        tracker.settle();
+      }
+      scroll(tracker, one, 80);
+      tracker.settle();
+      expect(one.topPage(), `notice first: ${noticeFirst}`).toBeGreaterThan(1);
+      expect(tracker.position?.index, `notice first: ${noticeFirst}`).toBe(one.topPage());
+    }
+  });
+
+  it('stays put when Simul opens on a view already turned', () => {
+    const rotated = new FakeViewer(turned(pages(40)), 0.5563, 749, 593);
+    rotated.scrollTo(3_000);
+    const tracker = new PdfViewerTracker(pages(40));
+    tracker.setViewerZoom(0.5563);
+    expect(send(tracker, rotated, 1_000).kind).toBe('same');
+    rotated.scrollTo(rotated.scroll + 100);
+    expect(send(tracker, rotated, 40).kind).toBe('same');
+    expect(tracker.position).toBeUndefined();
+
+    // The tab's zoom told after the first report: read as a guess, then
+    // noticed as turned when the zoom comes.
+    const late = new PdfViewerTracker(pages(40));
+    late.setViewerZoom(0.718);
+    expect(send(late, rotated, 1_000).kind).toBe('move');
+    const guess = late.position;
+    late.setViewerZoom(0.5563);
+    for (let step = 0; step < 10; step += 1) {
+      rotated.scrollTo(rotated.scroll + 100);
+      expect(send(late, rotated, 40).kind).toBe('same');
+    }
+    expect(late.position).toBe(guess);
+  });
+
+  it('takes for a turn only a page exactly as wide as a page is tall', () => {
+    // 100%: a page 1,040 px wide is no page turned (1,056), but a zoom to 127%.
+    const viewer = new FakeViewer(pages(40), 1, 700, 1400);
+    const tracker = new PdfViewerTracker(pages(40));
+    tracker.setViewerZoom(1);
+    send(tracker, viewer, 1_000);
+    viewer.scrollTo(600);
+    send(tracker, viewer, 800);
+
+    viewer.zoom = 1040 / 816;
+    viewer.scrollTo(600 * viewer.zoom);
+    send(tracker, viewer, 800);
+    viewer.scrollTo(viewer.scroll + 100);
+    expect(moved(send(tracker, viewer, 400)).fraction)
+      .toBeCloseTo((viewer.scroll / viewer.zoom - 3) / 1056, 2);
+  });
+
+  it('does not notice a turn without the viewer\'s zoom', () => {
+    const viewer = new FakeViewer(pages(40), 0.8, 700);
+    const tracker = new PdfViewerTracker(pages(40));
+    send(tracker, viewer, 1_000);
+    const rotated = new FakeViewer(turned(pages(40)), 0.8, 700);
+    rotated.time = viewer.time;
+    rotated.scrollTo(600);
+
+    send(tracker, rotated, 800);
+    tracker.settle();
+    rotated.scrollTo(700);
+    expect(send(tracker, rotated, 400).kind).toBe('move');
+  });
+
+  it('keeps following a PDF of portrait and landscape pages of one size', () => {
+    // A landscape page is as wide as a portrait page is tall.
+    const sizes = [...pages(4), LANDSCAPE, LANDSCAPE, ...pages(4)];
+    const viewer = new FakeViewer(sizes, 0.5, 700);
+    const tracker = new PdfViewerTracker(sizes);
+    tracker.setViewerZoom(0.5);
+    send(tracker, viewer, 1_000);
+    for (let step = 0; step < 150; step += 1) {
+      viewer.scrollTo(viewer.scroll + 30);
+      const track = send(tracker, viewer, 16);
+      if (track.kind === 'move') expect(track.position.index).toBe(viewer.topPage());
+    }
+    expect(viewer.topPage()).toBeGreaterThan(5);
+    expect(tracker.position?.index).toBe(viewer.topPage());
+  });
+
+  it('does not take a zoom for a turn, even when Chrome tells of it late', () => {
+    // 4:3 slides, 960 × 720 px at 100%.
+    const slides = pages(30, { width: 720, height: 540 });
+    const viewer = new FakeViewer(slides, 1, 700, 1200);
+    const tracker = new PdfViewerTracker(slides);
+    tracker.setViewerZoom(1);
+    send(tracker, viewer, 1_000);
+    scroll(tracker, viewer, 30);
+
+    // 100% to 125%: nothing at the old zoom is 1,200 px wide or tall.
+    viewer.zoom = 1.25;
+    viewer.scrollTo(900 * 1.25);
+    send(tracker, viewer, 800);
+    tracker.setViewerZoom(1.25);
+    viewer.scrollTo(viewer.scroll + 100);
+    expect(moved(send(tracker, viewer, 400)).index).toBe(viewer.topPage());
+
+    // 100% to 75%: a slide is then as wide as it was tall at 100%. The
+    // report alone looks like a turn; the zoom that follows says it is not.
+    const again = new FakeViewer(slides, 1, 700, 1200);
+    const late = new PdfViewerTracker(slides);
+    late.setViewerZoom(1);
+    send(late, again, 1_000);
+    scroll(late, again, 30);
+    again.zoom = 0.75;
+    again.scrollTo(900 * 0.75);
+    expect(send(late, again, 800).kind).toBe('same');
+    late.setViewerZoom(0.75);
+    again.scrollTo(again.scroll + 100);
+    expect(moved(send(late, again, 400)).index).toBe(again.topPage());
+  });
+
+  it('does not take a zoom for a turn when Chrome tells of it before the viewer reports', () => {
+    // 4:3 slides, 960 × 720 px at 100%: at 75% a slide is 720 px wide, as
+    // wide as it is tall at 100%; so it is from 50% to 67% and 150% to 200%.
+    const slides = pages(30, { width: 720, height: 540 });
+    for (const [from, to] of [[0.75, 1], [0.5, 2 / 3], [1.5, 2], [1, 0.75], [2, 1.5]] as const) {
+      const viewer = new FakeViewer(slides, from, 700, 2200);
+      const tracker = new PdfViewerTracker(slides);
+      tracker.setViewerZoom(from);
+      send(tracker, viewer, 1_000);
+      scroll(tracker, viewer, 30);
+      expect(tracker.position?.index, `${from} to ${to}`).toBe(viewer.topPage());
+      const before = tracker.position;
+
+      // The tab's zoom first: the last report is of the zoom before.
+      tracker.setViewerZoom(to);
+      const y = viewer.scroll / viewer.zoom;
+      viewer.zoom = to;
+      viewer.scrollTo(y * to);
+      expect(send(tracker, viewer, 5).kind, `${from} to ${to}`).toBe('same');
+      expect(send(tracker, viewer, 3).kind, `${from} to ${to}`).toBe('same');
+      expect(tracker.position, `${from} to ${to}`).toBe(before);
+      // Followed on: it was a zoom.
+      viewer.scrollTo(viewer.scroll + 60);
+      expect(moved(send(tracker, viewer, 400)).index, `${from} to ${to}`).toBe(viewer.topPage());
+    }
+
+    // A jump held at 75% when Chrome tells of 100%: still read as a jump.
+    const viewer = new FakeViewer(slides, 0.75, 700, 2200);
+    const tracker = new PdfViewerTracker(slides);
+    tracker.setViewerZoom(0.75);
+    send(tracker, viewer, 1_000);
+    viewer.scrollTo(viewer.pages[12]!.top * 0.75 + 200);
+    expect(send(tracker, viewer, 800).kind).toBe('hold');
+    tracker.setViewerZoom(1);
+    expect(tracker.settle()).toBeDefined();
   });
 });
 

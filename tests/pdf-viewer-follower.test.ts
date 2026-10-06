@@ -29,7 +29,11 @@ function report(scroll: number, time: number, viewportHeight = 700, scrollX = 0)
   };
 }
 
-function setup(options: { enabled?: boolean; connectFails?: boolean } = {}) {
+function setup(options: {
+  enabled?: boolean;
+  connectFails?: boolean;
+  viewerZoom?: () => number | undefined;
+} = {}) {
   let enabled = options.enabled ?? true;
   let deliver: ((message: unknown) => void) | undefined;
   let dropped: (() => void) | undefined;
@@ -55,6 +59,7 @@ function setup(options: { enabled?: boolean; connectFails?: boolean } = {}) {
     view,
     enabled: () => enabled,
     onDiagnostic: (state) => diagnostics.push(state),
+    ...(options.viewerZoom ? { viewerZoom: options.viewerZoom } : {}),
   });
   return {
     follower,
@@ -264,5 +269,85 @@ describe('PdfViewerFollower', () => {
     send(report(500, 1_000));
     expect(view.followPosition).not.toHaveBeenCalled();
     expect(setupDiagnostics).toEqual(['connected']);
+  });
+});
+
+describe('PdfViewerFollower and a view turned a quarter (D123)', () => {
+  it('stops following a view turned a quarter, by the tab\'s zoom', async () => {
+    let zoom: number | undefined = 1;
+    const { follower, view, send } = setup({ viewerZoom: () => zoom });
+    follower.start(TARGET, PAGES);
+    await Promise.resolve();
+    send(report(0, 1_000));
+    for (let step = 1; step <= 10; step += 1) send(report(step * 30, 1_000 + step * 16));
+    const before = view.position;
+    const moves = view.followPosition.mock.calls.length;
+
+    // Ctrl+]: pages 1,056 px wide at the same zoom.
+    for (let step = 0; step < 20; step += 1) {
+      send({ ...report(300 + step * 100, 5_000 + step * 40), pageWidth: 1056 });
+    }
+    expect(view.followPosition).toHaveBeenCalledTimes(moves);
+    expect(view.position).toBe(before);
+
+    // In a fit mode the zoom changes with the turn; Chrome tells of it apart.
+    zoom = 0.7;
+    follower.zoomChanged();
+    send({ ...report(900, 20_000), pageWidth: 1056 * 0.7 });
+    send({ ...report(1_000, 20_040), pageWidth: 1056 * 0.7 });
+    expect(view.followPosition).toHaveBeenCalledTimes(moves);
+
+    // Upright again at 100%, near where it was: followed from there.
+    zoom = 1;
+    follower.zoomChanged();
+    send(report(330, 30_000));
+    for (let step = 1; step <= 10; step += 1) send(report(330 + step * 30, 30_000 + step * 16));
+    expect(view.followPosition.mock.calls.length).toBeGreaterThan(moves);
+    expect(view.position?.fraction).toBeCloseTo(627 / 1056, 3);
+  });
+
+  it('hears of the tab\'s zoom when it changes, without waiting for a report', async () => {
+    vi.useFakeTimers();
+    let zoom: number | undefined = 1;
+    const { follower, view, send } = setup({ viewerZoom: () => zoom });
+    follower.start(TARGET, PAGES);
+    await Promise.resolve();
+    send(report(0, 1_000));
+    for (let step = 1; step <= 10; step += 1) send(report(step * 30, 1_000 + step * 16));
+    const moves = view.followPosition.mock.calls.length;
+    // Fit to page, turned while scrolling: the viewer reports first, a page
+    // 739 px wide, which at 100% is neither a page's width nor its height,
+    // too far from the scrolling to follow: held.
+    send({
+      kind: 'viewport',
+      pageX: (800 - 14 - 1056 * 0.7) / 2,
+      pageY: 188.4,
+      pageWidth: 1056 * 0.7,
+      viewportWidth: 800,
+      viewportHeight: 700,
+      time: 1_176,
+    });
+    // Then Chrome tells of the zoom: 70%, at which that is a page's height.
+    // The held report is not read once the panel waits no more.
+    zoom = 0.7;
+    follower.zoomChanged();
+    await vi.advanceTimersByTimeAsync(2 * PDF_VIEWER_MOVEMENT_SETTLE_MS);
+    expect(view.followPosition).toHaveBeenCalledTimes(moves);
+  });
+
+  it('follows a turned view as before without the tab\'s zoom', async () => {
+    const { follower, view, send } = setup();
+    follower.start(TARGET, PAGES);
+    await Promise.resolve();
+    send(report(0, 1_000));
+    follower.zoomChanged();
+    const moves = view.followPosition.mock.calls.length;
+    for (let step = 1; step <= 10; step += 1) {
+      send({ ...report(step * 30, 2_000 + step * 16), pageWidth: 1056 });
+    }
+    expect(view.followPosition.mock.calls.length).toBeGreaterThan(moves);
+    // No session: nothing to tell.
+    follower.stop();
+    follower.zoomChanged();
   });
 });

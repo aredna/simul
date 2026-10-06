@@ -9,11 +9,14 @@ export const MIN_CUSTOM_DISPLAY_SCALE = 0.25;
  */
 export const MAX_DISPLAY_SCALE = 5;
 
+/** Whether `value` is a tab zoom factor Chrome could report. */
+export function isZoomFactor(value: unknown): value is number {
+  return typeof value === 'number' && Number.isFinite(value) && value > 0;
+}
+
 /** A tab zoom factor as Chrome reports it, or 1 when it is missing or invalid. */
 export function normalizeZoomFactor(value: unknown): number {
-  return typeof value === 'number' && Number.isFinite(value) && value > 0
-    ? value
-    : 1;
+  return isZoomFactor(value) ? value : 1;
 }
 
 /**
