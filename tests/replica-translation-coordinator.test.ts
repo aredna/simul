@@ -171,6 +171,31 @@ describe('ReplicaTranslationCoordinator', () => {
     expect(surface.projections).toHaveLength(1);
   });
 
+  it('tells the surface the language a pair translates to, and nothing without a pair (D124)', () => {
+    const surface = new FakeSurface([record(4, 1, 'Hola')]);
+    const { provider } = fakeProvider(async (source) => `en:${source}`);
+    const coordinator = new ReplicaTranslationCoordinator(provider, surface);
+
+    coordinator.selectPair(pair);
+    expect(surface.contexts.at(-1)).toEqual({
+      translationEpoch: 1,
+      pairKey: `${pair.sourceLanguage}>${pair.targetLanguage}`,
+      targetLanguage: pair.targetLanguage,
+    });
+
+    // The same language both ways is not a translation.
+    coordinator.selectPair({ sourceLanguage: 'en', targetLanguage: 'en' });
+    expect(surface.contexts.at(-1)).toEqual({
+      translationEpoch: 2,
+      pairKey: undefined,
+    });
+    coordinator.selectPair(undefined);
+    expect(surface.contexts.at(-1)).toEqual({
+      translationEpoch: 3,
+      pairKey: undefined,
+    });
+  });
+
   it('translates only committed changed revisions and reuses cache on recovery', async () => {
     const surface = new FakeSurface([record(4, 1, 'Hola')]);
     const translate = vi.fn(async (source: string) => `en:${source}`);

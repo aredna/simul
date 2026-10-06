@@ -88,6 +88,11 @@ import {
   PAGE_ONLY_REPLICA_READ_SCOPE,
   type ReplicaReadScope,
 } from './read-scope-policy';
+import {
+  pageAttribute,
+  pageAttributes,
+  reapplyReplicaAttributeOverrides,
+} from './replica-attribute-override';
 import type {
   SemanticSourceStreamFactory,
   SemanticSourceStreamLease,
@@ -103,6 +108,13 @@ import {
   TranslatedGeometryLock,
   type TranslatedGeometryEntry,
 } from './translated-geometry';
+import {
+  TranslatedLanguageTags,
+  copyTranslatedLanguage,
+  refreshImageLanguages,
+  shownTranslationLanguage,
+  translationLanguageTag,
+} from './translated-language';
 import type { TextLayoutMode } from '../preferences';
 
 export const ISOLATED_HTML_SHELL_MARKER = 'isolated-html-v1';
@@ -119,6 +131,11 @@ const ISOLATED_SECRET_PLACEHOLDER_CSS =
 // rules do not reach into shadow trees, so each replica shadow root gets the
 // same rule in its own Simul-owned style.
 export const ISOLATED_MEDIA_CONTROLS_CSS = 'video::-webkit-media-controls,video::-webkit-media-controls-enclosure,video::-webkit-media-controls-overlay-play-button,video::-webkit-media-controls-start-playback-button{display:none!important}';
+/**
+ * The rules every replica tree needs from Simul, document or shadow root:
+ * no video controls (D87), and translated text drawn in the fonts of the
+ * page's own language (D124).
+ */
 const ISOLATED_HTML_SHELL_DOCUMENT = `<html><head><meta charset="utf-8" data-simul-owned-shell="charset"><meta name="simul-isolated-shell" content="${ISOLATED_HTML_SHELL_MARKER}" data-simul-owned-shell="marker"><meta http-equiv="Content-Security-Policy" data-simul-owned-shell="csp" content="default-src 'none'; script-src 'none'; worker-src 'none'; connect-src 'none'; object-src 'none'; frame-src 'none'; child-src 'none'; media-src 'none'; form-action 'none'; base-uri 'none'; img-src http: https: data: blob:; style-src 'unsafe-inline' http: https: data:; font-src http: https: data:"><style data-simul-owned-shell="inert">html,body{pointer-events:none}body{font-family:inherit;font-size:inherit}*{pointer-events:none!important}[data-simul-replica-disclosure-trigger="v1"],[data-simul-replica-disclosure-panel="v1"],[data-simul-replica-disclosure-overlay="v1"]{pointer-events:auto!important}${ISOLATED_MEDIA_CONTROLS_CSS}</style></head><body></body></html>`;
 const ISOLATED_SELECT_SHADOW_CSS = `:host{pointer-events:auto!important;background-image:none!important;border-image-source:none!important;cursor:default!important;filter:none!important;list-style-image:none!important;mask-image:none!important;-webkit-mask-image:none!important}:host([data-simul-select-hidden="v1"]){display:none!important}:host::before,:host::after{content:none!important;display:none!important;background-image:none!important}[data-simul-owned-select-trigger="v1"]{all:unset!important;box-sizing:border-box!important;color:inherit!important;cursor:default!important;display:block!important;font:inherit!important;overflow:hidden!important;text-align:inherit!important;text-overflow:ellipsis!important;white-space:nowrap!important;width:100%!important}:host([data-simul-select-transparent="v1"]) [data-simul-owned-select-trigger="v1"]{opacity:0!important}[data-simul-owned-select-options="v1"]{background:Canvas!important;box-sizing:border-box!important;color:CanvasText!important;max-height:min(18rem,70vh)!important;min-width:100%!important;overflow:auto!important;overscroll-behavior:contain!important;pointer-events:auto!important;width:max-content!important;z-index:2147483647!important}[data-simul-owned-select-option="v1"],[data-simul-owned-select-optgroup-label="v1"]{box-sizing:border-box!important;display:block!important;min-height:1.5em!important;padding-inline:.5rem!important;pointer-events:none!important;white-space:normal!important}[data-simul-owned-select-optgroup-label="v1"]{font-weight:600!important}select[data-simul-select-facsimile="v1"]{display:none!important;pointer-events:none!important}`;
 const ISOLATED_DISCLOSURE_IFRAME_MARKER = 'css-disclosure-v1';
@@ -276,6 +293,8 @@ interface HtmlMirrorDomState {
   readonly ownedAdoptedStyles: Set<HTMLStyleElement>;
   readonly paintedLabelHosts: Map<number, HTMLElement>;
   readonly geometry: TranslatedGeometryLock;
+  /** `lang` on the elements that show a translation (D124). */
+  readonly languages: TranslatedLanguageTags;
   readonly records: Map<number, ReplicaSourceTextRecord>;
   readonly revisions: Map<number, number>;
   sequence: number;
@@ -330,6 +349,8 @@ export class IsolatedHtmlReplicaEngine
     pairKey: undefined,
   };
   #projections = new Map<number, ReplicaTextProjection>();
+  /** The language the current pair translates to, when it says so (D124). */
+  #projectionLanguage: string | undefined;
   #extentRefreshQueued = false;
   #pendingExtentState: HtmlMirrorDomState | undefined;
 
@@ -457,10 +478,15 @@ export class IsolatedHtmlReplicaEngine
       (context.pairKey !== undefined && context.pairKey.length > 128)
     ) return;
     this.#projectionContext = Object.freeze({ ...context });
+    this.#projectionLanguage = context.pairKey === undefined
+      ? undefined
+      : translationLanguageTag(context.targetLanguage);
     this.#projections.clear();
     const state = this.#committed;
     if (!state) return;
     clearIsolatedPaintedLabels(state);
+    // Before the select facsimiles are drawn again from the page's text.
+    state.languages.release();
     for (const record of state.records.values()) {
       const node = state.nodes.get(record.nodeId);
       if (record.nodeType === 3 && node?.nodeType === Node.TEXT_NODE) {
@@ -509,6 +535,11 @@ export class IsolatedHtmlReplicaEngine
         !this.#semanticReceiver?.project(projection)
       ) return false;
       this.#projections.set(projection.nodeId, Object.freeze({ ...projection }));
+      state.languages.show(
+        projection.nodeId,
+        this.#semanticReceiver.elementShowing(projection.nodeId),
+        this.#languageOf(projection),
+      );
       refreshIsolatedNativeSelectFacsimiles(state.iframe.contentDocument);
       this.#refreshExtent(state);
       return true;
@@ -524,6 +555,11 @@ export class IsolatedHtmlReplicaEngine
     if (projection.nodeType === 3) {
       if (node?.nodeType !== Node.TEXT_NODE) return false;
       node.nodeValue = projection.translated;
+      state.languages.show(
+        projection.nodeId,
+        composedParentElement(node),
+        this.#languageOf(projection),
+      );
       synchronizeIsolatedPaintedLabel(
         state,
         projection.nodeId,
@@ -541,6 +577,12 @@ export class IsolatedHtmlReplicaEngine
         text: projection.translated,
         translatable: true,
       });
+      // Before the select facsimile copies the option's language.
+      state.languages.show(
+        projection.nodeId,
+        node as Element,
+        this.#languageOf(projection),
+      );
       syncContainingIsolatedSelectFacsimile(node as Element);
     }
     this.#projections.set(projection.nodeId, Object.freeze({ ...projection }));
@@ -711,6 +753,7 @@ export class IsolatedHtmlReplicaEngine
         ownedAdoptedStyles,
         paintedLabelHosts: new Map(),
         geometry: new TranslatedGeometryLock(),
+        languages: new TranslatedLanguageTags(),
         records,
         revisions,
         sequence: checkpoint.identity.sequence,
@@ -849,6 +892,7 @@ export class IsolatedHtmlReplicaEngine
     }
     const retainedPaintedLabelIds = [...state.paintedLabelHosts.keys()];
     clearIsolatedPaintedLabels(state);
+    const pageLanguages = patchedPageLanguages(state, batch.operations);
     let applied: AppliedPatchBatch | undefined;
     try {
       applied = applyPatchBatch(state, batch.operations);
@@ -919,8 +963,22 @@ export class IsolatedHtmlReplicaEngine
       ...semanticChanges,
     ]);
     for (const change of sourceChanges) {
-      clearIsolatedPaintedLabel(state, sourceChangeNodeId(change));
-      this.#projections.delete(sourceChangeNodeId(change));
+      this.#dropProjection(state, sourceChangeNodeId(change));
+    }
+    // The page changed a `lang`: inside that element, what counts as already
+    // in the language translated to may have changed with it (D124).
+    const relanguaged = new Set<Element>();
+    for (const [element, language] of pageLanguages) {
+      if (pageAttribute(element, 'lang') !== language) relanguaged.add(element);
+    }
+    if (relanguaged.size > 0) {
+      // The select facsimiles were drawn while the patch was applied, with
+      // the tags as they were before it.
+      syncIsolatedSelectFacsimilesShowing(
+        state.languages.refresh(relanguaged),
+      );
+      // The image projector tags the images it names.
+      if (replicaDocument) refreshImageLanguages(replicaDocument);
     }
     reconcileIsolatedPaintedLabels(
       state,
@@ -1103,6 +1161,15 @@ export class IsolatedHtmlReplicaEngine
     }
   }
 
+  /** The language a projection is shown in, if the translator changed it. */
+  #languageOf(projection: ReplicaTextProjection): string | undefined {
+    return shownTranslationLanguage(
+      this.#projectionLanguage,
+      projection.source,
+      projection.translated,
+    );
+  }
+
   #applyRetainedProjections(state: HtmlMirrorDomState): void {
     const retained = new Map<number, ReplicaTextProjection>();
     for (const projection of this.#projections.values()) {
@@ -1119,6 +1186,11 @@ export class IsolatedHtmlReplicaEngine
       if (projection.nodeType === 3) {
         if (node?.nodeType !== Node.TEXT_NODE) continue;
         node.nodeValue = projection.translated;
+        state.languages.show(
+          projection.nodeId,
+          composedParentElement(node),
+          this.#languageOf(projection),
+        );
         synchronizeIsolatedPaintedLabel(
           state,
           projection.nodeId,
@@ -1136,6 +1208,11 @@ export class IsolatedHtmlReplicaEngine
           text: projection.translated,
           translatable: true,
         });
+        state.languages.show(
+          projection.nodeId,
+          node as Element,
+          this.#languageOf(projection),
+        );
       }
       retained.set(projection.nodeId, Object.freeze({
         ...projection,
@@ -1228,8 +1305,7 @@ export class IsolatedHtmlReplicaEngine
           if (!changes) return false;
           this.#semanticReconnectAttempt = 0;
           for (const change of changes) {
-            clearIsolatedPaintedLabel(state, sourceChangeNodeId(change));
-            this.#projections.delete(sourceChangeNodeId(change));
+            this.#dropProjection(state, sourceChangeNodeId(change));
           }
           refreshIsolatedNativeSelectFacsimiles(replicaDocument);
           this.#notifySourceCommit(state, 'batch', changes, false);
@@ -1289,16 +1365,22 @@ export class IsolatedHtmlReplicaEngine
     const changes = receiver?.clear() ?? Object.freeze([]);
     const state = this.#committed;
     for (const change of changes) {
-      if (state) {
-        clearIsolatedPaintedLabel(state, sourceChangeNodeId(change));
-      }
-      this.#projections.delete(sourceChangeNodeId(change));
+      this.#dropProjection(state, sourceChangeNodeId(change));
     }
     if (notify && state && !state.released && changes.length > 0) {
       this.#notifySourceCommit(state, 'batch', changes, false);
       this.#refreshExtent(state);
     }
     return changes;
+  }
+
+  /** A record's text changed or went: its translation no longer shows. */
+  #dropProjection(state: HtmlMirrorDomState | undefined, nodeId: number): void {
+    if (state) {
+      clearIsolatedPaintedLabel(state, nodeId);
+      hideTranslatedLanguage(state, nodeId);
+    }
+    this.#projections.delete(nodeId);
   }
 
   /** Applies a changed "Translated text" setting to the visible replica. */
@@ -1332,6 +1414,8 @@ export class IsolatedHtmlReplicaEngine
       ) continue;
       if (projection.nodeType === 3) {
         if (node.nodeType !== Node.TEXT_NODE) continue;
+        // The language tag stays where it is: the element is drawn by the
+        // page's language with it or without it (D124).
         entries.push({
           node,
           showSource: () => { node.nodeValue = record.source; },
@@ -1345,12 +1429,16 @@ export class IsolatedHtmlReplicaEngine
         const kind = record.controlTarget;
         entries.push({
           node,
-          showSource: () => applyControlText(node as Element, {
-            kind, text: record.source, translatable: true,
-          }),
-          showTranslation: () => applyControlText(node as Element, {
-            kind, text: projection.translated, translatable: true,
-          }),
+          showSource: () => {
+            applyControlText(node as Element, {
+              kind, text: record.source, translatable: true,
+            });
+          },
+          showTranslation: () => {
+            applyControlText(node as Element, {
+              kind, text: projection.translated, translatable: true,
+            });
+          },
         });
       }
     }
@@ -1688,6 +1776,41 @@ function setAttributes(
       // The content attribute remains the browser-owned fallback.
     }
   }
+  finishReplicaAttributes(element);
+}
+
+/**
+ * What every write of the page's attributes onto a replica element ends
+ * with: the mirror's own rules for the element, then whatever Simul shows
+ * there over the page's value while a translation is up (D124).
+ */
+function finishReplicaAttributes(element: Element): void {
+  silenceReplicaLiveRegion(element);
+  reapplyReplicaAttributeOverrides(element);
+}
+
+/** Roles that are live regions without saying so; `output` is a status. */
+const IMPLICIT_LIVE_REGION_ROLES: ReadonlySet<string> = new Set([
+  'alert', 'log', 'status',
+]);
+
+/**
+ * The mirror announces nothing by itself: the tab is where a page's alerts
+ * and status lines are announced, and the mirror would say each one again
+ * when its patch lands and once more when its translation does (D124).
+ * `aria-live="off"` is what stops Chrome treating an element as a live
+ * region, on one the page marked and on a role that is live by default. The
+ * role stays: page CSS selects on it, and it still says what the element is.
+ * `marquee` and `timer` are off by default.
+ */
+function silenceReplicaLiveRegion(element: Element): void {
+  if (
+    element.hasAttribute('aria-live') ||
+    (element.namespaceURI === NAMESPACE_URIS.html &&
+      element.localName.toLowerCase() === 'output') ||
+    element.getAttribute('role')?.trim().toLowerCase().split(/\s+/u)
+      .some((token) => IMPLICIT_LIVE_REGION_ROLES.has(token))
+  ) element.setAttribute('aria-live', 'off');
 }
 
 /**
@@ -2047,7 +2170,9 @@ function syncNativeSelectFacsimileHost(element: Element): void {
   } else {
     host.removeAttribute('data-simul-source-picker-open');
   }
-  for (const { name, value } of [...element.attributes]) {
+  // The page's own attributes: a `lang` Simul put on the select for a
+  // translated choice goes to the trigger's text instead (D124).
+  for (const [name, value] of pageAttributes(element)) {
     if (
       name.startsWith('data-simul-') || name === 'inert' || name === 'size' ||
       name === 'style' || name === 'tabindex' || name === 'aria-disabled' ||
@@ -2233,6 +2358,7 @@ function syncIsolatedNativeSelectFacsimile(host: HTMLElement): void {
   panel.replaceChildren();
 
   const selectedLabels: string[] = [];
+  let firstSelected: Element | undefined;
   const appendOption = (
     option: HTMLOptionElement,
     parent: HTMLElement,
@@ -2262,7 +2388,12 @@ function syncIsolatedNativeSelectFacsimile(host: HTMLElement): void {
       .replace(/\s+/gu, ' ')
       .trim();
     row.textContent = label || '\u00a0';
-    if (selected && label) selectedLabels.push(label);
+    // A translated label carries its language on the option (D124).
+    copyTranslatedLanguage(option, row);
+    if (selected && label) {
+      firstSelected ??= option;
+      selectedLabels.push(label);
+    }
     parent.append(row);
   };
 
@@ -2289,6 +2420,7 @@ function syncIsolatedNativeSelectFacsimile(host: HTMLElement): void {
       label.style.setProperty('padding-inline', '.5rem', 'important');
       label.style.setProperty('pointer-events', 'none', 'important');
       label.textContent = labelText;
+      copyTranslatedLanguage(groupElement, label);
       group.append(label);
     }
     for (const option of [...groupElement.children]) {
@@ -2298,9 +2430,24 @@ function syncIsolatedNativeSelectFacsimile(host: HTMLElement): void {
     }
     panel.append(group);
   }
-  trigger.textContent = exposesSelection
+  const triggerText = exposesSelection
     ? semanticSelection || selectedLabels.join(', ') || '\u2014'
     : 'Options';
+  // What the trigger shows is the select's current choice, or the labels of
+  // its selected options.
+  const shownFrom = !exposesSelection
+    ? undefined
+    : semanticSelection ? select : firstSelected;
+  if (!shownFrom?.hasAttribute('lang')) {
+    trigger.textContent = triggerText;
+    return;
+  }
+  // The language goes on the text, not on the trigger: the trigger's name
+  // is Simul's own English label (D124).
+  const shown = select.ownerDocument.createElement('span');
+  copyTranslatedLanguage(shownFrom, shown);
+  shown.textContent = triggerText;
+  trigger.replaceChildren(shown);
 }
 
 function isolatedSelectContentSignature(
@@ -2312,6 +2459,7 @@ function isolatedSelectContentSignature(
     exposesSelection,
     semanticSelection ?? null,
     select.multiple || select.hasAttribute('multiple'),
+    select.getAttribute('lang'),
   ];
   const appendOption = (option: HTMLOptionElement): void => {
     entries.push([
@@ -2319,6 +2467,7 @@ function isolatedSelectContentSignature(
       option.getAttribute('label') ?? option.textContent ?? '',
       option.getAttribute('data-simul-source-option-selected') === 'v1',
       option.disabled === true || option.hasAttribute('disabled'),
+      option.getAttribute('lang'),
     ]);
   };
   for (const child of [...select.children]) {
@@ -2336,6 +2485,7 @@ function isolatedSelectContentSignature(
       'optgroup',
       group.getAttribute('label') ?? '',
       group.disabled === true || group.hasAttribute('disabled'),
+      group.getAttribute('lang'),
     ]);
     for (const option of [...group.children]) {
       if (option.localName.toLowerCase() === 'option') {
@@ -2349,11 +2499,30 @@ function isolatedSelectContentSignature(
 }
 
 function syncContainingIsolatedSelectFacsimile(element: Element): void {
+  const host = containingIsolatedSelectFacsimileHost(element);
+  if (host) syncIsolatedNativeSelectFacsimile(host);
+}
+
+function containingIsolatedSelectFacsimileHost(
+  element: Element,
+): HTMLElement | undefined {
   const select = element.localName.toLowerCase() === 'select'
     ? element as HTMLSelectElement
     : element.closest('select');
-  const host = select ? isolatedSelectFacsimileHost(select) : undefined;
-  if (host) syncIsolatedNativeSelectFacsimile(host);
+  return select ? isolatedSelectFacsimileHost(select) : undefined;
+}
+
+/** Draws again, once each, the facsimiles of the selects among `elements`. */
+function syncIsolatedSelectFacsimilesShowing(
+  elements: readonly Element[],
+): void {
+  const hosts = new Set<HTMLElement>();
+  for (const element of elements) {
+    if (!isNativeSelectSemanticGraphTag(element.localName.toLowerCase())) continue;
+    const host = containingIsolatedSelectFacsimileHost(element);
+    if (host) hosts.add(host);
+  }
+  for (const host of hosts) syncIsolatedNativeSelectFacsimile(host);
 }
 
 function refreshIsolatedNativeSelectFacsimiles(
@@ -3362,10 +3531,12 @@ function capturePatchRollback(
       childLists.set(target, Object.freeze([...target.childNodes]));
     } else if (operation.kind === 'attributes') {
       const element = target as Element;
+      // The page's attributes: a restore writes them back as a patch does,
+      // and what Simul shows over them is shown again (D124).
       attributes.set(
         element,
-        Object.freeze([...element.attributes].map(
-          ({ name, value }) => Object.freeze([name, value] as const),
+        Object.freeze(pageAttributes(element).map(
+          ([name, value]) => Object.freeze([name, value] as const),
         )),
       );
       if (isNativeReplicaTextControl(element)) {
@@ -3526,6 +3697,11 @@ function restoreAttributeList(
     } catch {
       // Continue with remaining attributes and targets.
     }
+  }
+  try {
+    finishReplicaAttributes(target);
+  } catch {
+    // A recovery checkpoint remains authoritative.
   }
 }
 
@@ -4053,6 +4229,30 @@ function sourceChangeNodeId(change: ReplicaSourceTextChange): number {
   return change.kind === 'remove' ? change.nodeId : change.record.nodeId;
 }
 
+function hideTranslatedLanguage(state: HtmlMirrorDomState, nodeId: number): void {
+  const element = state.languages.hide(nodeId);
+  // The select facsimile draws an option's label with the option's language.
+  if (
+    element &&
+    isNativeSelectSemanticGraphTag(element.localName.toLowerCase())
+  ) syncContainingIsolatedSelectFacsimile(element);
+}
+
+/** The page's `lang` on each element an attribute patch is about to rewrite. */
+function patchedPageLanguages(
+  state: HtmlMirrorDomState,
+  operations: readonly HtmlMirrorPatchOperation[],
+): readonly (readonly [Element, string | null])[] {
+  const languages: (readonly [Element, string | null])[] = [];
+  for (const operation of operations) {
+    if (operation.kind !== 'attributes') continue;
+    const target = state.nodes.get(operation.nodeId);
+    if (target?.nodeType !== Node.ELEMENT_NODE) continue;
+    languages.push([target as Element, pageAttribute(target as Element, 'lang')]);
+  }
+  return languages;
+}
+
 function synchronizeIsolatedPaintedLabel(
   state: HtmlMirrorDomState,
   nodeId: number,
@@ -4160,7 +4360,11 @@ function retainedReplicaStateFitsBudget(state: HtmlMirrorDomState): boolean {
       } else if (node.nodeType === 1) {
         const element = node as Element;
         bytes += element.localName.length * 2;
-        for (const { name, value } of [...element.attributes]) {
+        // By index: this runs after every patch, and a language tag is two
+        // more attributes on every element that shows a translation (D124).
+        const attributes = element.attributes;
+        for (let index = 0; index < attributes.length; index += 1) {
+          const { name, value } = attributes[index]!;
           bytes += (name.length + value.length) * 2 + 16;
           if (bytes > maxRetainedBytes) return false;
         }

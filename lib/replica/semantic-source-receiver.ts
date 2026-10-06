@@ -490,6 +490,22 @@ export class SemanticSourceReceiver {
     return false;
   }
 
+  /**
+   * The element in which a projected record's text shows, for its language
+   * (D124): the parent of a text node, the control whose value, placeholder
+   * or label it is, or the select whose trigger draws the current choice.
+   * Editable text is carried in a hidden span and drawn nowhere.
+   */
+  elementShowing(nodeId: number): Element | undefined {
+    const binding = this.#entries.get(nodeId)?.binding;
+    if (!binding) return undefined;
+    const { target, presentation } = binding;
+    if (target.nodeType === 3) return target.parentElement ?? undefined;
+    return target.nodeType === 1 && presentation !== 'editable'
+      ? target as Element
+      : undefined;
+  }
+
   clear(): readonly ReplicaSourceTextChange[] {
     try {
       this.environment.applyProofs?.(Object.freeze([]));

@@ -69,6 +69,31 @@ describe('semantic source receiver', () => {
     expect(input.value).toBe('***');
   });
 
+  it('names the element in which a record\'s text shows, for its language (D124)', () => {
+    const { document } = parseHTML(`<html><body><nav><ul>
+      <li id="wrapper"><button id="trigger">Deposits</button>
+      <div id="panel"><a id="item" href="/yen">***</a></div></li>
+      </ul></nav><input id="draft" type="text" value="***"><iframe id="frame"></iframe></body></html>`);
+    const { receiver, nodes } = hoverMenuReplica(document, [16, 17, 18, 19]);
+    const input = document.querySelector<HTMLInputElement>('#draft')!;
+    nodes.set(7, input);
+    const value = valueRecord();
+    const menuText = menuTextRecord(19, 'Yen deposits');
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 1,
+      [value, menuText],
+      [structuralMenuProof()],
+    ))).toBeDefined();
+
+    // A control shows its own value; text shows in its parent element.
+    expect(receiver.elementShowing(-value.recordId)).toBe(input);
+    expect(receiver.elementShowing(-menuText.recordId))
+      .toBe(document.querySelector('#item'));
+    expect(receiver.elementShowing(-1)).toBeUndefined();
+    receiver.clear();
+    expect(receiver.elementShowing(-value.recordId)).toBeUndefined();
+  });
+
   it('drops a forged safe claim when the bound replica node is secret (D96)', () => {
     const { document } = parseHTML(
       '<html><body><input id="secret" type="password" value="***"></body></html>',

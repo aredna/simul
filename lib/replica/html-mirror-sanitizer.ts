@@ -533,7 +533,14 @@ function isPrivateBaseAttribute(tagName: string, name: string): boolean {
 }
 
 const RAW_CONTROL_TEXT_ATTRIBUTES = new Set(['placeholder', 'value']);
-const SIMUL_OWNED_ATTRIBUTE_PREFIX = 'data-simul-';
+/**
+ * Names only Simul writes on a mirrored element: its `data-simul-*`
+ * bookkeeping, and `simul:lang`, the page's language beside a translation's
+ * `lang` (D124). A page attribute of such a name does not travel.
+ */
+function isSimulOwnedAttributeName(name: string): boolean {
+  return name.startsWith('data-simul-') || name.startsWith('simul:');
+}
 const NATIVE_SELECT_PRESENTATION_ATTRIBUTES = Object.freeze({
   select: new Set(['role']),
   option: new Set(['role']),
@@ -1940,7 +1947,7 @@ function sanitizeAttributes(
     }
     if (
       name.startsWith('on') || name === 'nonce' ||
-      name.startsWith(SIMUL_OWNED_ATTRIBUTE_PREFIX) ||
+      isSimulOwnedAttributeName(name) ||
       (isNativeSelectSemanticTag(tagName) &&
         !isNativeSelectPresentationAttribute(tagName, name)) ||
       ((tagName === 'option' || tagName === 'optgroup') && name === 'style') ||
@@ -4055,7 +4062,7 @@ function isUnsafeTransportedAttribute(
 ): boolean {
   // These attributes are capabilities and receiver bookkeeping written only
   // after graph validation. A source page must never be able to mint them.
-  if (name.startsWith(SIMUL_OWNED_ATTRIBUTE_PREFIX)) return true;
+  if (isSimulOwnedAttributeName(name)) return true;
   if (isPrivateBaseAttribute(tagName, name)) return true;
   if (
     isNativeSelectSemanticTag(tagName) &&

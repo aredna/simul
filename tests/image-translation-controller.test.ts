@@ -769,6 +769,11 @@ describe('ImageTranslationController', () => {
       '[data-simul-image-method="accessibility-text"]',
     );
     expect(overlayText(overlay)).toBe('News');
+    // For a screen reader the caption is the image's name, in the language
+    // translated to, and is not read a second time (D124).
+    expect(overlay?.getAttribute('aria-hidden')).toBe('true');
+    expect(image.getAttribute('aria-label')).toBe('News');
+    expect(image.getAttribute('lang')).toBe('en');
     expect(memory.size).toBeGreaterThan(0);
     expect(JSON.stringify(diagnostics)).not.toContain('お知らせ');
 
@@ -778,6 +783,8 @@ describe('ImageTranslationController', () => {
     });
     expect(memory.size).toBe(0);
     expect(document.querySelector('[data-simul-image-method]')).toBeNull();
+    expect(image.hasAttribute('aria-label')).toBe(false);
+    expect(image.hasAttribute('lang')).toBe(false);
     controller.dispose();
   });
 

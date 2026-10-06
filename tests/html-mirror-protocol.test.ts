@@ -566,13 +566,23 @@ describe('isolated HTML sanitizer and protocol', () => {
       <div id="public"
         data-simul-replica-disclosure-trigger="v1"
         data-simul-replica-disclosure-panel="v1"
-        data-simul-arbitrary="source">Public</div>
+        data-simul-arbitrary="source"
+        simul:lang="zz" xml:lang="en">Public</div>
     </body></html>`, 'passive');
     const publicNode = graphElementBySourceId(graph, 'public');
     expect(publicNode).toBeDefined();
     expect(publicNode?.attributes.some(
       ([name]) => name.startsWith('data-simul-'),
     )).toBe(false);
+    // The name of the page's language beside a translation's `lang` (D124):
+    // a page attribute of that name would be taken for Simul's and drawn by.
+    expect(publicNode?.attributes.map(([name]) => name))
+      .toEqual(expect.not.arrayContaining(['simul:lang']));
+    expect(publicNode?.attributes).toContainEqual(['xml:lang', 'en']);
+    expect(readHtmlMirrorNode({
+      ...publicNode!,
+      attributes: [...publicNode!.attributes, ['simul:lang', 'zz']],
+    })).toBeUndefined();
 
     expect(readHtmlMirrorNode({
       ...publicNode!,

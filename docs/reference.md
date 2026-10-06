@@ -31,11 +31,41 @@ Exact-content translations are joined and cached only in memory for the current
 extension session.
 
 A screen reader reads the mirror like the page: its headings, links and
-text, translated where a translation shows. The mirror keeps the language
-the page declares, so a screen reader that switches voices may read a
-translation with the page's voice (PDF text carries its own language). Tab
-moves focus on through the mirror's links and out of it; no other key acts
-on the mirror.
+text, translated where a translation shows. Tab moves focus on through the
+mirror's links and out of it; no other key acts on the mirror.
+
+- **Language.** Translated text carries the language it was translated to,
+  so a screen reader that switches voices reads it with the right one. The
+  element that shows a translation says so with `lang` for as long as the
+  translation shows, and then gets back exactly what the page had. Text the
+  translator gives back as it was (a name, a number, a word of a third
+  language that the page marks with its own `lang`) is not a translation and
+  keeps the language the page declares. Inside an element that also holds
+  translated text, text without a `lang` of its own is read in the
+  translation's language. Nothing changes for the eye: Chrome would also
+  pick fonts, quotation marks, hyphenation and the page's `:lang()` rules by
+  that attribute, so Simul keeps the page's own language beside it for
+  everything Chrome draws, and the mirror is drawn as before. Two kinds of
+  page rule do see a difference: one that selects on the attribute itself
+  (`[lang="en"]`) sees the translation's language, and one written with the
+  XML namespace (`[xml|lang]`, `[*|lang]`) matches the elements that show a
+  translation.
+- **No announcements.** The mirror announces nothing by itself. A page's
+  alerts, status lines and other live regions are announced by the tab; in
+  the mirror they are ordinary text that keeps its role, so they are not
+  said a second time when the mirror updates and a third time when the
+  translation lands. One case may be left: in Chrome an element with
+  `role="alert"` or `role="alertdialog"` counts as an alert at the moment it
+  appears, whatever its `aria-live` says. So a screen reader may still
+  announce an alert once more in the mirror when it is added to the page or
+  shown after being hidden while the panel is open, when the page gives an
+  existing element one of those roles, and, for every alert on the page,
+  each time the mirror is built again (**Rebuild mirror**, or a recovery
+  after the mirror lost step with the page).
+- **Images.** An image whose caption translates its own `alt` or
+  `aria-label` text is named by the translation, and the caption is not read
+  again. Text read from an image's pixels is new, so it is read as text over
+  the image, in its language.
 
 ### Size
 
@@ -204,7 +234,8 @@ translates the page text of the mirrored page, and for images Simul:
 2. first tries direct `aria-label` or `alt` text, which needs no pixel access
    and is shown as a caption band along the bottom edge of the image (this
    method is on from the start, so images with alt text get a translated
-   caption before image access is granted);
+   caption before image access is granted); for a screen reader that
+   translation is the image's name;
 3. for pixel OCR, reads an image on screen from a crop of the visible tab
    (after checking its geometry is stable); an image off screen, moving, in
    a background tab, or in a tab that is pinch-zoomed (the tab's pixels then

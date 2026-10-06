@@ -252,6 +252,94 @@ element: a `visibility: visible` child of a `visibility: hidden` parent is
 painted and its text travels (D76), while `display: none` still withholds a
 whole subtree.
 
+### What the mirror changes for screen readers
+
+These attributes on mirrored elements are Simul's, not the page's (D124).
+Each is a small cost to fidelity, because page CSS can select on them.
+
+- **`aria-live="off"`**, on every element the page marks with `aria-live`
+  and on every element that is a live region by its role (`alert`, `status`,
+  `log`) or its tag (`<output>`). The mirror must not announce what the tab
+  already announces; `off` is what stops Chrome treating the element as a
+  live region. The role stays, so `[role="alert"]` rules match and the
+  element still says what it is. `marquee` and `timer` are off by default
+  and get nothing. `aria-atomic` and `aria-relevant` stay as written. The
+  panel writes the attribute whenever it writes the page's attributes onto
+  an element, so a page patch cannot turn a region live again. Cost: a page
+  rule on `[aria-live="polite"]` no longer matches, and a rule on
+  `[aria-live]` also matches the elements that were live by role. Not
+  covered: Chrome raises its alert event for an element with `role="alert"`
+  or `role="alertdialog"` when the element appears in the tree (added, or
+  shown after being hidden) or takes the role, whatever `aria-live` says;
+  that includes every alert of the page each time the replica is built
+  again.
+- **`aria-label`** (and `lang`), on an image while a caption that translates
+  its own `alt` or `aria-label` shows. The translation is the image's name,
+  and the caption overlay is hidden from assistive technology so it is read
+  once. `alt` is left alone: `content: attr(alt)` rules and a broken image's
+  text still show the page's words (D76). Cost: a page rule on
+  `img[aria-label]` also matches an image the page gave no label, and a rule
+  that draws the label (`content: attr(aria-label)`, which Chrome draws on
+  an image that failed to load) draws the translation.
+- **`lang`**, on the element that shows a translation, set to the language
+  translated to, for as long as the translation shows: the parent of a
+  translated text node, or the control whose value, placeholder or label is
+  translated. An element the page already declares in that language (itself
+  or through an ancestor, `ja-JP` counting as `ja`) gets nothing. Neither
+  does an element whose text the translator gave back as it was, compared
+  after trimming: `<span lang="ja">富士山</span>` in an English page
+  translated to French stays Japanese, and a number stays the page's. A
+  parent with translated and untranslated text is tagged, so an untranslated
+  remainder inside it that has no `lang` of its own is read with the
+  translation's voice. Cost: a page rule that selects on the attribute
+  itself (`[lang]`, `[lang|="en"]`) sees the translation's language.
+  Nothing else changes, though Chrome draws by `lang` in several ways: it
+  picks fonts by it (a generic family such as `sans-serif`, and the fallback
+  for characters a font lacks, resolve per language), the marks around a
+  `<q>`, hyphenation and letter case, and which `:lang()` rules of the page
+  match (Wikipedia sets its headings in another font for some languages this
+  way). Left alone, the tag redrew Latin letters inside a Japanese
+  translation in the Japanese font, rewrapped lines, under "Keep geometry"
+  moved a Wikipedia article hundreds of pixels from the page's layout, and
+  put Japanese brackets around an English `<q>`. HTML gives an element two
+  places to declare its language, `lang` and `lang` in the XML namespace,
+  and the second wins. Chrome follows that for everything it draws, and
+  reads the plain `lang` alone for the accessibility tree (checked on Chrome
+  138 and 154). So a tagged element also carries the page's own language for
+  it in the XML namespace, under the name `simul:lang` (empty when the page
+  declares none): the mirror is drawn as it was before the tag, and a screen
+  reader hears the translation's language. A plain attribute selector does
+  not match an attribute in a namespace. A page that declares the XML
+  namespace in its CSS can select on it (`@namespace xml …` with
+  `p[xml|lang]`, or `p[*|lang]`): such a rule styles the tagged elements in
+  the mirror and none in the tab. A page attribute named `simul:…` does not
+  travel, like `data-simul-…`, so the name is Simul's alone.
+
+What the page had is kept and put back exactly, value or no value, when the
+translation goes: the source text changed, translations were cleared, the
+pair changed, or **Live source only** was chosen. A page patch that rewrites
+an element's attributes while Simul's value shows changes what will be put
+back and leaves Simul's value in place; a patch that is rolled back changes
+neither. An image named by its caption is tagged by the image projector;
+when the page changes a `lang`, the named images are looked at again like
+the rest.
+
+Simul's own text carries the language too: image overlays (on the box
+inside their closed shadow root) and the rows and current choice of a
+select facsimile. These elements never took the page's language: Chrome
+draws them by the browser's own. So beside their `lang` the attribute in
+the XML namespace is empty, which is no language, and they are drawn as
+before. With the page's language there, a Japanese page's captions and
+select text changed font and weight.
+
+The tags cost a page patch next to nothing. "Keep geometry" measures the
+page's text with the tags in place, since an element is drawn by the page's
+language either way. When the page changes a `lang`, only the tags inside
+that element are looked at again, and only the select facsimiles that show
+one of them are drawn again. What is left is two more attributes on each
+element that shows a translation, which the panel's size check reads after
+every patch.
+
 ### Static SVG
 
 The bounded static SVG profile includes ordinary geometry and text plus

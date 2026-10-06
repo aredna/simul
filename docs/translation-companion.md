@@ -268,7 +268,9 @@ without screenshot access. The band takes a third of the image, growing to at
 most 60% when long text on a short image would otherwise shrink below about
 9px (D72). This method is on from the start (D66), so with image translation
 on by default every eligible image with alt text gets a translated caption
-before any image access is granted.
+before any image access is granted. For a screen reader that caption is the
+image's name and is not read as text beside it (D124); OCR overlays are read
+as text, in the target language.
 Decorative, hidden, zero-area, filename/URL-like, or secret-overlapping evidence
 is rejected. Positive-area accessibility labels are not blocked by the OCR
 small-image setting.
@@ -432,6 +434,30 @@ measured with the page's text put back for the length of one task, so the page
 text never paints, and are measured again whenever translations, patches, the
 viewport, or late images and fonts change the layout. Switching back to "Let
 boxes grow" returns every box to the page's styles.
+
+For screen readers the replica differs from the page in a few attributes
+(D124; `docs/replica-fidelity.md` lists what each costs). No replica element
+is a live region: every write of page attributes ends by setting
+`aria-live="off"` on elements the page marked and on `alert`, `status`,
+`log` and `<output>` (`silenceReplicaLiveRegion`), and the role stays. An
+image whose caption comes from its own `alt` or `aria-label` is named by the
+translation through `aria-label`, with the caption overlay hidden from
+assistive technology. Values Simul writes over the page's own go through
+`replica-attribute-override.ts`: it keeps the page's value, follows the
+page's patches to it, and puts it back exactly. The element that shows a
+translation carries `lang` set to the pair's target language
+(`TranslatedLanguageTags`, fed from `project`, dropped with the projection),
+unless the page already declares that language there or the translator gave
+the text back unchanged (`shownTranslationLanguage`); beside it, a `lang`
+in the XML namespace (`simul:lang`) holds the page's own language. Chrome
+draws by that one (fonts, quotation marks, hyphenation, `:lang()` rules) and
+reads the plain `lang` for the accessibility tree, so tagging changes
+nothing on screen unless a page rule selects on the `lang` attribute itself
+or, through the XML namespace, on Simul's. Simul's own elements (image
+overlays, the select facsimile) say the language with the namespaced
+attribute empty, and are drawn by the browser's language as before. The
+images the projector names are looked at again on a page patch to `lang`
+(`showImageLanguage`, `refreshImageLanguages`).
 
 The extension transports no raw source HTML. Checkpoint, patch, and semantic
 boundaries allowlist tags, style properties, attributes, image schemes, and the

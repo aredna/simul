@@ -5656,7 +5656,11 @@ export class ImageTranslationController {
     this.#captureRetries.clear();
     this.#emptyRetries.clear();
     if (!preserveSemanticEvidence) this.#semanticEvidenceIndex.clear();
-    this.#projector.beginPair(this.#pairEpoch, this.#pairKey);
+    this.#projector.beginPair(
+      this.#pairEpoch,
+      this.#pairKey,
+      this.#configuration.targetLanguage,
+    );
   }
 
   #isEnabled(): boolean {

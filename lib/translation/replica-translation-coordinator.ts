@@ -26,6 +26,11 @@ export interface ReplicaSourceCommit {
 export interface ReplicaProjectionContext {
   readonly translationEpoch: number;
   readonly pairKey: string | undefined;
+  /**
+   * The language this pair's projections are in, for a surface that tells
+   * screen readers the language of translated text (D124).
+   */
+  readonly targetLanguage?: string;
 }
 
 interface ReplicaProjectionBase {
@@ -221,6 +226,7 @@ export class ReplicaTranslationCoordinator {
     this.surface.beginProjection({
       translationEpoch: this.#translationEpoch,
       pairKey: this.#pairKey,
+      ...(pair && this.#pairKey ? { targetLanguage: pair.targetLanguage } : {}),
     });
   }
 

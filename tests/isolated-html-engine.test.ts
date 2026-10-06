@@ -26,7 +26,17 @@ import {
   protectIsolatedOpaquePlaceholder,
   type IsolatedMirrorInfo,
 } from '../lib/replica/isolated-html-engine';
+import {
+  clearReplicaAttributeOverride,
+  setReplicaAttributeOverride,
+} from '../lib/replica/replica-attribute-override';
 import { createReplicaIdentity } from '../lib/replica/replica-identity';
+import {
+  PAGE_LANGUAGE_ATTRIBUTE,
+  XML_NAMESPACE,
+  hideImageLanguage,
+  showImageLanguage,
+} from '../lib/replica/translated-language';
 import {
   FULL_VISIBLE_REPLICA_READ_SCOPE,
   PAGE_ONLY_REPLICA_READ_SCOPE,
@@ -2483,6 +2493,7 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(owned()).toHaveLength(1);
     const style = owned()[0]!;
     expect(style.textContent).toBe(ISOLATED_MEDIA_CONTROLS_CSS);
+    expect(style.textContent).toContain(ISOLATED_MEDIA_CONTROLS_CSS);
 
     // A patch replacing the shadow root's children keeps the owned rule, as
     // it keeps the root's adopted sheets.
@@ -4084,6 +4095,1000 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(replica.getElementById('fill')?.getAttribute('gradientUnits'))
       .toBe('userSpaceOnUse');
     expect(stream.acknowledged).toContain(1);
+  });
+});
+
+describe('IsolatedHtmlReplicaEngine for screen readers (D124)', () => {
+  beforeEach(() => {
+    const { window } = parseHTML('<html><body></body></html>');
+    Object.assign(globalThis, {
+      Node: window.Node,
+      Element: window.Element,
+      Text: window.Text,
+      HTMLImageElement: window.HTMLImageElement,
+    });
+  });
+
+  const text = (
+    id: number,
+    value: string,
+  ): Extract<HtmlMirrorNode, { kind: 'text' }> => ({
+    kind: 'text', id, text: value, translatable: true,
+  });
+  const element = (
+    id: number,
+    tagName: string,
+    attributes: readonly (readonly [string, string])[],
+    children: readonly HtmlMirrorNode[],
+  ): HtmlMirrorNode => ({
+    kind: 'element', id, namespace: 'html', tagName, attributes, children,
+  });
+
+  /** An English page: its own languages and a parent with mixed text. */
+  function languageBody(): HtmlMirrorNode[] {
+    return [
+      element(4, 'p', [], [text(5, 'First.')]),
+      element(6, 'p', [['lang', 'fr']], [text(7, 'Deuxième.')]),
+      element(8, 'p', [['lang', 'ja']], [text(9, '三番目。')]),
+      element(10, 'div', [['lang', 'ja-JP']], [
+        element(11, 'p', [], [text(12, 'Fourth.')]),
+      ]),
+      element(13, 'p', [], [
+        text(14, 'Mixed '),
+        element(15, 'b', [], [text(16, '42')]),
+        text(17, ' tail.'),
+      ]),
+    ];
+  }
+
+  function checkpointOf(
+    body: readonly HtmlMirrorNode[],
+    sequence = 0,
+  ): HtmlMirrorCheckpoint {
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence }),
+      {
+        root: {
+          kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+          attributes: [['lang', 'en']], children: [
+            element(2, 'head', [], []),
+            element(3, 'body', [], body),
+          ],
+        },
+        adoptedStyleSheets: [],
+        captureMs: 1,
+        viewportWidth: 800,
+        viewportHeight: 600,
+        documentWidth: 800,
+        documentHeight: 1000,
+      },
+    );
+    if (!checkpoint) throw new Error('Screen-reader fixture checkpoint rejected.');
+    return checkpoint;
+  }
+
+  /** Where each text of `languageBody` sits in the replica. */
+  const HOLDERS: Readonly<Record<number, string>> = {
+    5: 'body > p:nth-of-type(1)',
+    7: 'body > p:nth-of-type(2)',
+    9: 'body > p:nth-of-type(3)',
+    12: 'div > p',
+    14: 'body > p:nth-of-type(4)',
+    16: 'b',
+    17: 'body > p:nth-of-type(4)',
+  };
+  function holder(replica: Document, nodeId: number): Element {
+    const found = replica.querySelector(HOLDERS[nodeId]!);
+    if (!found) throw new Error(`No element holds text ${nodeId}.`);
+    return found;
+  }
+
+  async function start(body: readonly HtmlMirrorNode[] = languageBody()) {
+    const stream = new FakeHtmlStream(checkpointOf(body));
+    const host = new FakePresentationHost();
+    const engine = makeEngine(stream, host);
+    expect((await engine.run(request)).status).toBe('complete');
+    const byText = (nodeId: number): Element =>
+      holder(host.iframe!.contentDocument!, nodeId);
+    return { stream, host, engine, byText };
+  }
+
+  const JA = { translationEpoch: 1, pairKey: 'en>ja', targetLanguage: 'ja' };
+  const SOURCE_ONLY = { translationEpoch: 9, pairKey: undefined };
+
+  function show(
+    engine: IsolatedHtmlReplicaEngine,
+    nodeId: number,
+    context: { translationEpoch: number; pairKey: string } = JA,
+    translated = `訳${nodeId}`,
+  ): boolean {
+    const snapshot = engine.snapshot()!;
+    const record = snapshot.records.find((candidate) => candidate.nodeId === nodeId)!;
+    return engine.project({
+      document: snapshot.document,
+      replayLease: snapshot.replayLease,
+      nodeId,
+      nodeType: 3,
+      sourceRevision: record.revision,
+      source: record.source,
+      translationEpoch: context.translationEpoch,
+      pairKey: context.pairKey,
+      translated,
+    });
+  }
+
+  function patch(
+    stream: FakeHtmlStream,
+    sequence: number,
+    operations: HtmlMirrorPatchOperation[],
+  ): void {
+    const batch = createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence }),
+      sequence,
+      sequence,
+      operations,
+    );
+    if (!batch) throw new Error('Screen-reader fixture patch rejected.');
+    stream.observer!.onPatch(batch);
+  }
+
+  it('gives translated text its language and puts back exactly what the page had', async () => {
+    const { engine, host, byText } = await start();
+    engine.beginProjection(JA);
+    for (const nodeId of [5, 7, 9, 12]) expect(show(engine, nodeId)).toBe(true);
+
+    expect(byText(5).getAttribute('lang')).toBe('ja');
+    expect(byText(5).textContent).toBe('訳5');
+    // The page said French; while the translation shows it is Japanese.
+    expect(byText(7).getAttribute('lang')).toBe('ja');
+    // Each element is still drawn by the page's language for it.
+    expect(byText(5).getAttribute(PAGE_LANGUAGE_ATTRIBUTE)).toBe('en');
+    expect(byText(7).getAttribute(PAGE_LANGUAGE_ATTRIBUTE)).toBe('fr');
+    expect(byText(9).hasAttribute(PAGE_LANGUAGE_ATTRIBUTE)).toBe(false);
+    expect(byText(12).hasAttribute(PAGE_LANGUAGE_ATTRIBUTE)).toBe(false);
+    // Already Japanese, by its own attribute and by an ancestor's `ja-JP`.
+    expect(byText(9).getAttribute('lang')).toBe('ja');
+    expect(byText(12).hasAttribute('lang')).toBe(false);
+    // The document's language stays the page's, for detection and for
+    // everything that is not translated.
+    const replica = host.iframe!.contentDocument!;
+    expect(replica.documentElement.getAttribute('lang')).toBe('en');
+    expect(replica.body.hasAttribute('lang')).toBe(false);
+    expect(engine.snapshot()?.documentLanguage).toBe('en');
+
+    // Live source only.
+    engine.beginProjection(SOURCE_ONLY);
+    expect(byText(5).hasAttribute('lang')).toBe(false);
+    expect(byText(5).textContent).toBe('First.');
+    expect(byText(7).getAttribute('lang')).toBe('fr');
+    expect(byText(9).getAttribute('lang')).toBe('ja');
+    expect(byText(12).hasAttribute('lang')).toBe(false);
+    expect(replica.querySelectorAll('[lang]').length).toBe(4);
+    expect([...replica.querySelectorAll('*')].filter((candidate) =>
+      candidate.hasAttribute(PAGE_LANGUAGE_ATTRIBUTE))).toEqual([]);
+  });
+
+  it('declares the page\'s language in the XML namespace, and adds no rule to the shell', async () => {
+    const { engine, stream, byText } = await start();
+    engine.beginProjection(JA);
+    const french = byText(7);
+    const written: (readonly [string | null, string, string])[] = [];
+    const write = french.setAttributeNS.bind(french);
+    french.setAttributeNS = (namespace, name, value): void => {
+      written.push([namespace, name, value]);
+      write(namespace, name, value);
+    };
+    expect(show(engine, 7)).toBe(true);
+    // Chrome reads this one before `lang` for what it draws, and `lang`
+    // alone for the accessibility tree.
+    expect(written).toEqual([[XML_NAMESPACE, PAGE_LANGUAGE_ATTRIBUTE, 'fr']]);
+    expect(XML_NAMESPACE).toBe('http://www.w3.org/XML/1998/namespace');
+    expect(PAGE_LANGUAGE_ATTRIBUTE).toBe('simul:lang');
+
+    // The page's patch takes every attribute off; both of Simul's come back.
+    patch(stream, 1, [{
+      kind: 'attributes', nodeId: 6, namespace: 'html', tagName: 'p',
+      attributes: [['lang', 'de'], ['class', 'x']],
+    }]);
+    expect(written.at(-1)).toEqual([XML_NAMESPACE, PAGE_LANGUAGE_ATTRIBUTE, 'de']);
+    expect(french.getAttribute('lang')).toBe('ja');
+
+    const shell = parseHTML(ISOLATED_HTML_SHELL).document;
+    expect(shell.querySelector('style[data-simul-owned-shell="inert"]')
+      ?.textContent).not.toContain('lang');
+  });
+
+  it('adds no language when the pair does not name a usable one', async () => {
+    const { engine, byText } = await start();
+    engine.beginProjection({ translationEpoch: 1, pairKey: 'en>ja' });
+    expect(show(engine, 5)).toBe(true);
+    expect(byText(5).hasAttribute('lang')).toBe(false);
+
+    engine.beginProjection({
+      translationEpoch: 2, pairKey: 'en>ja', targetLanguage: 'ja" onload="x',
+    });
+    expect(show(engine, 5, { translationEpoch: 2, pairKey: 'en>ja' })).toBe(true);
+    expect(byText(5).textContent).toBe('訳5');
+    expect(byText(5).hasAttribute('lang')).toBe(false);
+  });
+
+  it('retags in the new language after a new pair', async () => {
+    const { engine, byText } = await start();
+    engine.beginProjection(JA);
+    expect(show(engine, 5)).toBe(true);
+    expect(show(engine, 7)).toBe(true);
+
+    const french = { translationEpoch: 2, pairKey: 'en>fr', targetLanguage: 'fr' };
+    engine.beginProjection(french);
+    expect(byText(5).hasAttribute('lang')).toBe(false);
+    expect(byText(7).getAttribute('lang')).toBe('fr');
+    expect(show(engine, 5, french)).toBe(true);
+    expect(show(engine, 7, french)).toBe(true);
+    expect(byText(5).getAttribute('lang')).toBe('fr');
+    // The page's own French paragraph needs nothing from Simul.
+    expect(byText(7).getAttribute('lang')).toBe('fr');
+
+    engine.beginProjection(SOURCE_ONLY);
+    expect(byText(5).hasAttribute('lang')).toBe(false);
+    expect(byText(7).getAttribute('lang')).toBe('fr');
+  });
+
+  it('tags a parent with translated and untranslated text until its last translation goes', async () => {
+    const { engine, stream, byText } = await start();
+    engine.beginProjection(JA);
+    expect(show(engine, 14)).toBe(true);
+    const mixed = byText(14);
+    expect(mixed.getAttribute('lang')).toBe('ja');
+    // The number in <b> was not translated: its own element is not tagged.
+    expect(byText(16).hasAttribute('lang')).toBe(false);
+    expect(show(engine, 17)).toBe(true);
+
+    patch(stream, 1, [{ kind: 'text', nodeId: 14, node: text(14, 'Changed ') }]);
+    expect(mixed.getAttribute('lang')).toBe('ja');
+    expect(mixed.textContent).toBe('Changed 42訳17');
+    patch(stream, 2, [{ kind: 'text', nodeId: 17, node: text(17, ' end.') }]);
+    expect(mixed.hasAttribute('lang')).toBe(false);
+    expect(mixed.textContent).toBe('Changed 42 end.');
+  });
+
+  it('keeps the tag through the page\'s attribute patches and restores the patched value', async () => {
+    const { engine, stream, byText } = await start();
+    engine.beginProjection(JA);
+    expect(show(engine, 5)).toBe(true);
+    expect(show(engine, 7)).toBe(true);
+    const first = byText(5);
+    const second = byText(7);
+
+    patch(stream, 1, [{
+      kind: 'attributes', nodeId: 4, namespace: 'html', tagName: 'p',
+      attributes: [['lang', 'de'], ['class', 'patched']],
+    }, {
+      kind: 'attributes', nodeId: 6, namespace: 'html', tagName: 'p',
+      attributes: [['class', 'no-language-now']],
+    }]);
+    // The translations still show, so both stay Japanese.
+    expect(first.textContent).toBe('訳5');
+    expect(first.getAttribute('lang')).toBe('ja');
+    expect(first.getAttribute('class')).toBe('patched');
+    expect(second.getAttribute('lang')).toBe('ja');
+    expect(second.getAttribute('class')).toBe('no-language-now');
+    // The fonts follow the page's new language for each.
+    expect(first.getAttribute(PAGE_LANGUAGE_ATTRIBUTE)).toBe('de');
+    expect(second.getAttribute(PAGE_LANGUAGE_ATTRIBUTE)).toBe('en');
+
+    patch(stream, 2, [{
+      kind: 'attributes', nodeId: 4, namespace: 'html', tagName: 'p',
+      attributes: [['lang', 'de'], ['class', 'patched again']],
+    }]);
+    expect(first.getAttribute('lang')).toBe('ja');
+
+    engine.beginProjection(SOURCE_ONLY);
+    expect(first.getAttribute('lang')).toBe('de');
+    expect(first.getAttribute('class')).toBe('patched again');
+    expect(second.hasAttribute('lang')).toBe(false);
+    expect(first.hasAttribute(PAGE_LANGUAGE_ATTRIBUTE)).toBe(false);
+    expect(second.hasAttribute(PAGE_LANGUAGE_ATTRIBUTE)).toBe(false);
+  });
+
+  it('drops its tag when the page itself declares the language, and takes it up again', async () => {
+    const { engine, stream, byText } = await start();
+    engine.beginProjection(JA);
+    expect(show(engine, 5)).toBe(true);
+    expect(show(engine, 12)).toBe(true);
+    const first = byText(5);
+    const inner = byText(12);
+    expect(inner.hasAttribute('lang')).toBe(false);
+
+    // The wrapper turns English: the translated child needs the tag now.
+    patch(stream, 1, [{
+      kind: 'attributes', nodeId: 10, namespace: 'html', tagName: 'div',
+      attributes: [['lang', 'en']],
+    }]);
+    expect(inner.getAttribute('lang')).toBe('ja');
+    expect(inner.getAttribute(PAGE_LANGUAGE_ATTRIBUTE)).toBe('en');
+    // And back: the page declares it, so Simul's attribute goes.
+    patch(stream, 2, [{
+      kind: 'attributes', nodeId: 10, namespace: 'html', tagName: 'div',
+      attributes: [['lang', 'ja']],
+    }]);
+    expect(inner.hasAttribute('lang')).toBe(false);
+    expect(inner.hasAttribute(PAGE_LANGUAGE_ATTRIBUTE)).toBe(false);
+
+    // The page writes the target language on a tagged element itself.
+    patch(stream, 3, [{
+      kind: 'attributes', nodeId: 4, namespace: 'html', tagName: 'p',
+      attributes: [['lang', 'ja']],
+    }]);
+    expect(first.getAttribute('lang')).toBe('ja');
+    engine.beginProjection(SOURCE_ONLY);
+    expect(first.getAttribute('lang')).toBe('ja');
+    expect(inner.hasAttribute('lang')).toBe(false);
+  });
+
+  it('leaves no tag on rebuilt children and keeps it on retained ones', async () => {
+    const { engine, stream, host, byText } = await start();
+    engine.beginProjection(JA);
+    for (const nodeId of [5, 14, 16, 17]) expect(show(engine, nodeId)).toBe(true);
+    const first = byText(5);
+    const mixed = byText(14);
+    const bold = byText(16);
+
+    // The paragraph's text node is replaced: the page's text shows again.
+    patch(stream, 1, [{
+      kind: 'children', nodeId: 4, children: [text(30, 'Rebuilt.')],
+    }]);
+    expect(first.textContent).toBe('Rebuilt.');
+    expect(first.hasAttribute('lang')).toBe(false);
+
+    // Reconciliation keeps two translated children and drops the third.
+    patch(stream, 2, [{
+      kind: 'reconcile-children', nodeId: 13, children: [
+        { kind: 'retain', nodeId: 14 },
+        { kind: 'retain', nodeId: 15 },
+        { kind: 'graph', node: text(31, ' new tail.') },
+      ],
+    }]);
+    expect(mixed.textContent).toBe('訳14訳16 new tail.');
+    expect(mixed.getAttribute('lang')).toBe('ja');
+    expect(bold.getAttribute('lang')).toBe('ja');
+
+    // The mixed paragraph goes and a new one is built in its place.
+    patch(stream, 3, [{
+      kind: 'reconcile-children', nodeId: 3, children: [
+        { kind: 'retain', nodeId: 4 },
+        { kind: 'retain', nodeId: 6 },
+        { kind: 'retain', nodeId: 8 },
+        { kind: 'retain', nodeId: 10 },
+        { kind: 'graph', node: element(40, 'p', [['lang', 'fr']], [text(41, 'Nouveau.')]) },
+      ],
+    }]);
+    const replica = host.iframe!.contentDocument!;
+    const rebuilt = replica.body.lastElementChild!;
+    expect(rebuilt.textContent).toBe('Nouveau.');
+    expect(rebuilt.getAttribute('lang')).toBe('fr');
+    // The removed elements are not left tagged either.
+    expect(mixed.hasAttribute('lang')).toBe(false);
+    expect(bold.hasAttribute('lang')).toBe(false);
+    expect(show(engine, 41)).toBe(true);
+    expect(rebuilt.getAttribute('lang')).toBe('ja');
+    engine.beginProjection(SOURCE_ONLY);
+    expect(rebuilt.getAttribute('lang')).toBe('fr');
+    expect(replica.querySelectorAll('[lang]').length).toBe(5);
+  });
+
+  it('keeps the tag and the page value when a patch is rolled back', async () => {
+    const { engine, stream, host, byText } = await start();
+    engine.beginProjection(JA);
+    expect(show(engine, 7)).toBe(true);
+    const second = byText(7);
+    const wrapper = host.iframe!.contentDocument!.querySelector('div')!;
+    const originalInsertBefore = wrapper.insertBefore.bind(wrapper);
+    const insert = vi.spyOn(wrapper, 'insertBefore').mockImplementationOnce(() => {
+      throw new Error('synthetic apply failure');
+    });
+
+    patch(stream, 1, [{
+      kind: 'attributes', nodeId: 6, namespace: 'html', tagName: 'p',
+      attributes: [['lang', 'es']],
+    }, {
+      kind: 'reconcile-children', nodeId: 10, children: [
+        { kind: 'graph', node: element(50, 'p', [], [text(51, 'Partial.')]) },
+        { kind: 'retain', nodeId: 11 },
+      ],
+    }]);
+    insert.mockRestore();
+    wrapper.insertBefore = originalInsertBefore;
+    expect(stream.requested).toEqual([0]);
+    expect(wrapper.children.length).toBe(1);
+
+    // The failed patch changed nothing: Japanese while shown, French after.
+    expect(second.textContent).toBe('訳7');
+    expect(second.getAttribute('lang')).toBe('ja');
+    engine.beginProjection(SOURCE_ONLY);
+    expect(second.getAttribute('lang')).toBe('fr');
+  });
+
+  it('leaves text the translator gave back as it was in the page\'s language', async () => {
+    const { engine, stream, byText } = await start();
+    engine.beginProjection(JA);
+    // A French sentence an English model returns untouched, a number, and a
+    // text that only gained space around it.
+    expect(show(engine, 7, JA, 'Deuxième.')).toBe(true);
+    expect(show(engine, 16, JA, '42')).toBe(true);
+    expect(show(engine, 5, JA, ' First.\n')).toBe(true);
+    expect(byText(7).getAttribute('lang')).toBe('fr');
+    expect(byText(7).attributes.length).toBe(1);
+    expect(byText(16).attributes.length).toBe(0);
+    expect(byText(5).attributes.length).toBe(0);
+    expect(byText(5).textContent).toBe(' First.\n');
+
+    // The page's French gives way only once the text really changes, and
+    // comes back when a later answer is the page's text again.
+    expect(show(engine, 7, JA, '二番目。')).toBe(true);
+    expect(byText(7).getAttribute('lang')).toBe('ja');
+    expect(show(engine, 7, JA, 'Deuxième.')).toBe(true);
+    expect(byText(7).getAttribute('lang')).toBe('fr');
+    expect(byText(7).attributes.length).toBe(1);
+
+    // A parent is tagged by its text that changed, not by the text beside it.
+    expect(show(engine, 17, JA, ' tail.')).toBe(true);
+    expect(byText(14).hasAttribute('lang')).toBe(false);
+    expect(show(engine, 14)).toBe(true);
+    expect(byText(14).getAttribute('lang')).toBe('ja');
+    patch(stream, 1, [{ kind: 'text', nodeId: 14, node: text(14, 'Changed ') }]);
+    expect(byText(14).hasAttribute('lang')).toBe(false);
+    expect(byText(14).textContent).toBe('Changed 42 tail.');
+  });
+
+  it('carries the tags onto the replica rebuilt by a recovery checkpoint', async () => {
+    const { engine, stream, host } = await start();
+    engine.beginProjection(JA);
+    expect(show(engine, 5)).toBe(true);
+    expect(show(engine, 7)).toBe(true);
+    expect(show(engine, 16, JA, '42')).toBe(true);
+    const before = host.iframe!.contentDocument!;
+
+    stream.observer?.onFailure('stream_overflow');
+    stream.observer?.onCheckpoint(checkpointOf(languageBody()));
+    await vi.waitFor(() => {
+      expect(host.iframe!.contentDocument).not.toBe(before);
+    });
+    const replica = host.iframe!.contentDocument!;
+    expect(holder(replica, 5).textContent).toBe('訳5');
+    expect(holder(replica, 5).getAttribute('lang')).toBe('ja');
+    expect(holder(replica, 7).getAttribute('lang')).toBe('ja');
+    expect(holder(replica, 9).getAttribute('lang')).toBe('ja');
+    // Text the translator left alone is still untagged there.
+    expect(holder(replica, 16).hasAttribute('lang')).toBe(false);
+
+    engine.beginProjection(SOURCE_ONLY);
+    expect(holder(replica, 5).hasAttribute('lang')).toBe(false);
+    expect(holder(replica, 7).getAttribute('lang')).toBe('fr');
+  });
+
+  it('leaves the language tags alone while Keep geometry measures the page\'s text', async () => {
+    const stream = new FakeHtmlStream(checkpointOf([
+      element(4, 'p', [['lang', 'fr']], [text(5, 'Bonjour.')]),
+    ]));
+    const host = new FakePresentationHost();
+    const refreshes: (() => void)[] = [];
+    const measured: string[] = [];
+    const engine = new IsolatedHtmlReplicaEngine({
+      presentationHost: host,
+      openStream: async () => stream,
+      getTextLayoutMode: () => 'faithful',
+      scheduleLayoutRefresh: (callback) => refreshes.push(callback),
+      initializeIframe: async (iframe, shell) => {
+        const { document } = parseHTML(shell);
+        Object.defineProperty(iframe, 'contentDocument', { value: document });
+        Object.defineProperty(iframe, 'contentWindow', {
+          value: {
+            getComputedStyle: (target: Element) => {
+              if (target.localName === 'p') {
+                measured.push([
+                  target.textContent,
+                  target.getAttribute('lang'),
+                  target.getAttribute(PAGE_LANGUAGE_ATTRIBUTE),
+                ].join('|'));
+              }
+              return {
+                display: 'block', boxSizing: 'border-box', width: '800px',
+                height: '20px', fontSize: '16px', lineHeight: 'normal',
+              };
+            },
+          },
+        });
+        return document;
+      },
+    });
+    expect((await engine.run(request)).status).toBe('complete');
+    engine.beginProjection(JA);
+    expect(show(engine, 5)).toBe(true);
+    const paragraph = host.iframe!.contentDocument!.querySelector('p')!;
+    // Every write to the element but the lock's own `style`.
+    const writes: string[] = [];
+    const setAttribute = paragraph.setAttribute.bind(paragraph);
+    const setAttributeNS = paragraph.setAttributeNS.bind(paragraph);
+    const removeAttribute = paragraph.removeAttribute.bind(paragraph);
+    paragraph.setAttribute = (name: string, value: string): void => {
+      if (name !== 'style') writes.push(name);
+      setAttribute(name, value);
+    };
+    paragraph.setAttributeNS = (namespace, name, value): void => {
+      writes.push(name);
+      setAttributeNS(namespace, name, value);
+    };
+    paragraph.removeAttribute = (name: string): void => {
+      if (name !== 'style') writes.push(name);
+      removeAttribute(name);
+    };
+    measured.length = 0;
+    for (const refresh of refreshes.splice(0)) refresh();
+
+    // The page's text is measured with the tag on: the page's language
+    // beside it is what Chrome draws by, so the box is the page's, and a
+    // refresh costs the tagged elements nothing.
+    expect(measured).toContain('Bonjour.|ja|fr');
+    expect(measured.every((entry) => entry.endsWith('|ja|fr'))).toBe(true);
+    expect(writes).toEqual([]);
+    expect(paragraph.textContent).toBe('訳5');
+    expect(paragraph.getAttribute('lang')).toBe('ja');
+    expect(paragraph.style.getPropertyValue('height')).toBe('20px');
+
+    engine.beginProjection(SOURCE_ONLY);
+    for (const refresh of refreshes.splice(0)) refresh();
+    expect(paragraph.getAttribute('lang')).toBe('fr');
+    expect(paragraph.hasAttribute(PAGE_LANGUAGE_ATTRIBUTE)).toBe(false);
+    expect(paragraph.getAttribute('style')).toBeNull();
+  });
+
+  it('still counts every attribute toward the size of the replica it keeps', async () => {
+    // The panel keeps four times the page budget: 4 MiB at the smallest.
+    const limits = { itemMegabytes: 1, pageMegabytes: 1, maxElements: 5_000 };
+    try {
+      applyHtmlMirrorLimitSettings(limits);
+      const ids = [4, 6, 8, 10, 12, 14];
+      const stream = new FakeHtmlStream(checkpointOf(
+        ids.map((id) => element(id, 'p', [], [text(id + 1, `P${id}`)])),
+      ));
+      const engine = new IsolatedHtmlReplicaEngine({
+        presentationHost: new FakePresentationHost(),
+        getMirrorLimits: () => limits,
+        openStream: async () => stream,
+        initializeIframe: async (iframe, shell) => {
+          const { document } = parseHTML(shell);
+          Object.defineProperty(iframe, 'contentDocument', { value: document });
+          return document;
+        },
+      });
+      expect((await engine.run(request)).status).toBe('complete');
+      // 400,000 characters count as 800,000 bytes, in the middle attribute.
+      const long = 'x'.repeat(400_000);
+      for (const [index, id] of ids.entries()) {
+        patch(stream, index + 1, [{
+          kind: 'attributes', nodeId: id, namespace: 'html', tagName: 'p',
+          attributes: [['class', 'a'], ['title', long], ['dir', 'ltr']],
+        }]);
+      }
+      // Five fit; the sixth takes the replica past what the panel keeps.
+      expect(stream.acknowledged).toEqual([0, 1, 2, 3, 4, 5]);
+      expect(stream.requested).toEqual([5]);
+    } finally {
+      applyHtmlMirrorLimitSettings();
+    }
+  });
+
+  /**
+   * An input and, inside a wrapper, a select with two options, with their
+   * semantic records, a translation begun, and ways to translate them.
+   */
+  async function startControls(
+    wrapper: readonly (readonly [string, string])[] = [],
+  ) {
+    const stream = new FakeHtmlStream(createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: {
+          kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+          attributes: [['lang', 'en']], children: [
+            element(2, 'head', [], []),
+            element(3, 'body', [], [
+              element(4, 'input', [['type', 'text']], []),
+              element(5, 'div', wrapper, [
+                element(6, 'select', [], [
+                  element(7, 'option', [], []),
+                  element(8, 'option', [], []),
+                ]),
+              ]),
+            ]),
+          ],
+        },
+        adoptedStyleSheets: [], captureMs: 1,
+        viewportWidth: 800, viewportHeight: 600,
+        documentWidth: 800, documentHeight: 1000,
+      },
+      'passive',
+    )!);
+    const semantic = new FakeSemanticStream();
+    const host = new FakePresentationHost();
+    const engine = makeEngine(stream, host, undefined, semantic);
+    await engine.run(request);
+    await Promise.resolve();
+    const record = (
+      recordId: number,
+      nodeId: number,
+      tagName: string,
+      value: string,
+      presentation: SemanticSourceRecord['presentation'],
+    ): SemanticSourceRecord => ({
+      bridge: 'isolated-html', recordId, nodeId, nodeRevision: 1,
+      category: presentation === 'label' ? 'public-semantic' : 'ordinary-form',
+      gate: presentation === 'label' ? 'controlSemantics' : 'formValues',
+      tagName, type: tagName === 'input' ? 'text' : '', autocomplete: '',
+      role: '', contentEditable: '', text: value, presentation,
+      classifierVersion: 1,
+    });
+    expect(semantic.emit(createSemanticSourceBatch(
+      engine.snapshot()!.document,
+      'read-v1-111111',
+      1,
+      [
+        record(34, 4, 'input', 'Search here', 'placeholder'),
+        record(57, 7, 'option', 'One', 'label'),
+        record(65, 8, 'option', 'Two', 'label'),
+        record(53, 6, 'select', 'One', 'selection'),
+      ],
+      [{
+        kind: 'select-presentation', bridge: 'isolated-html', nodeId: 6,
+        revision: 1, gate: 'controlSemantics', multiple: false, size: null,
+        classifierVersion: 1,
+      }, {
+        kind: 'select-state', bridge: 'isolated-html', nodeId: 6,
+        revision: 1, gate: 'formValues', selectedOptionNodeIds: [7],
+        multiple: false, pickerOpen: false, classifierVersion: 1,
+      }],
+    ))).toBe(true);
+
+    const replica = host.iframe!.contentDocument!;
+    const input = replica.querySelector('input')!;
+    const selectHost = replica.querySelector('[data-simul-owned-select-host]')!;
+    const shadow = selectHost.shadowRoot!;
+    const trigger = shadow.querySelector('[data-simul-owned-select-trigger="v1"]')!;
+    const rowElements = (): Element[] => [...shadow.querySelectorAll(
+      '[data-simul-owned-select-option="v1"]',
+    )];
+    const rows = (): string[] => rowElements()
+      .map((row) => `${row.getAttribute('lang')}:${row.textContent}`);
+    expect(rows()).toEqual(['null:One', 'null:Two']);
+    expect(trigger.innerHTML).toBe('One');
+
+    engine.beginProjection(JA);
+    const snapshot = engine.snapshot()!;
+    /** Shows `translated` for every record of this source text. */
+    const translate = (source: string, translated: string): number => {
+      const candidates = snapshot.records.filter((entry) =>
+        entry.source === source && entry.nodeType === 1);
+      for (const candidate of candidates) {
+        if (candidate.nodeType !== 1) continue;
+        expect(engine.project({
+          document: snapshot.document, replayLease: snapshot.replayLease,
+          nodeId: candidate.nodeId, nodeType: 1,
+          controlTarget: candidate.controlTarget,
+          sourceRevision: candidate.revision, source: candidate.source,
+          translationEpoch: 1, pairKey: 'en>ja', translated,
+        })).toBe(true);
+      }
+      return candidates.length;
+    };
+    return {
+      stream, engine, replica, input, selectHost, shadow, trigger,
+      rowElements, rows, translate,
+    };
+  }
+
+  it('tags a control\'s translated text and the select facsimile\'s translated text', async () => {
+    const {
+      engine, replica, input, selectHost, shadow, trigger, rowElements, rows,
+      translate,
+    } = await startControls();
+    expect(translate('Search here', 'ここで検索')).toBe(1);
+    expect(input.placeholder).toBe('ここで検索');
+    expect(input.getAttribute('lang')).toBe('ja');
+
+    // A label the translator gave back as it was is not a translation.
+    expect(translate('Two', 'Two')).toBe(1);
+    expect(rows()).toEqual(['null:One', 'null:Two']);
+    expect(replica.querySelectorAll('option[lang]').length).toBe(0);
+    // Only the translated option carries the language, on its row.
+    expect(translate('Two', '二')).toBe(1);
+    expect(rows()).toEqual(['null:One', 'ja:二']);
+
+    // The option's label and the select's current choice.
+    expect(translate('One', '一')).toBe(2);
+    expect(rows()).toEqual(['ja:一', 'ja:二']);
+    // The trigger's own name stays Simul's English label; its text is tagged.
+    expect(trigger.getAttribute('aria-label')).toBe('Show translated options');
+    expect(trigger.hasAttribute('lang')).toBe(false);
+    expect(trigger.querySelector('span')?.getAttribute('lang')).toBe('ja');
+    // Simul's own copies are drawn by no language, as they were before.
+    expect(rowElements().map((row) => row.getAttribute(PAGE_LANGUAGE_ATTRIBUTE)))
+      .toEqual(['', '']);
+    expect(trigger.querySelector('span')?.getAttribute(PAGE_LANGUAGE_ATTRIBUTE))
+      .toBe('');
+    expect(shadow.querySelector('[data-simul-owned-select-style="v1"]')?.textContent)
+      .not.toContain('lang');
+    expect(trigger.textContent).toBe('一');
+    expect(selectHost.hasAttribute('lang')).toBe(false);
+
+    engine.beginProjection(SOURCE_ONLY);
+    expect(input.hasAttribute('lang')).toBe(false);
+    expect(input.placeholder).toBe('Search here');
+    expect(rows()).toEqual(['null:One', 'null:Two']);
+    expect(trigger.innerHTML).toBe('One');
+    expect(shadow.querySelectorAll('[lang]').length).toBe(0);
+    expect([...shadow.querySelectorAll('*')].filter((candidate) =>
+      candidate.hasAttribute(PAGE_LANGUAGE_ATTRIBUTE))).toEqual([]);
+  });
+
+  it('redraws the select facsimile at once when the page changes a language around it', async () => {
+    const { stream, shadow, trigger, rowElements, rows, translate } =
+      await startControls([['lang', 'de']]);
+    expect(translate('One', '一')).toBe(2);
+    expect(translate('Two', '二')).toBe(1);
+    const options = (): string[] => [...shadow.querySelectorAll('option')]
+      .map((option) => `${option.getAttribute('lang')}|${option.getAttribute(PAGE_LANGUAGE_ATTRIBUTE)}`);
+    const drawnBy = (): (string | null)[] => rowElements()
+      .map((row) => row.getAttribute(PAGE_LANGUAGE_ATTRIBUTE));
+    const wrap = (sequence: number, attributes: [string, string][]): void => {
+      patch(stream, sequence, [{
+        kind: 'attributes', nodeId: 5, namespace: 'html', tagName: 'div', attributes,
+      }]);
+      expect(stream.acknowledged).toContain(sequence);
+    };
+    expect(options()).toEqual(['ja|de', 'ja|de']);
+    expect(rows()).toEqual(['ja:一', 'ja:二']);
+    expect(drawnBy()).toEqual(['', '']);
+
+    // The page now declares Japanese there: nothing is left to say.
+    wrap(1, [['lang', 'ja']]);
+    expect(options()).toEqual(['null|null', 'null|null']);
+    expect(rows()).toEqual(['null:一', 'null:二']);
+    expect(drawnBy()).toEqual([null, null]);
+    expect(trigger.innerHTML).toBe('一');
+
+    // And French: the options are tagged again, and the rows with them.
+    wrap(2, [['lang', 'fr']]);
+    expect(options()).toEqual(['ja|fr', 'ja|fr']);
+    expect(rows()).toEqual(['ja:一', 'ja:二']);
+    expect(drawnBy()).toEqual(['', '']);
+    expect(trigger.querySelector('span')?.getAttribute('lang')).toBe('ja');
+    expect(trigger.querySelector('span')?.getAttribute(PAGE_LANGUAGE_ATTRIBUTE))
+      .toBe('');
+
+    wrap(3, []);
+    expect(options()).toEqual(['ja|en', 'ja|en']);
+    expect(rows()).toEqual(['ja:一', 'ja:二']);
+  });
+
+  it('has the images named by a caption looked at again when the page changes a lang', async () => {
+    const { stream, host } = await start([
+      element(4, 'p', [], [element(5, 'img', [['alt', 'A harbour']], [])]),
+    ]);
+    const replica = host.iframe!.contentDocument!;
+    const image = replica.querySelector('img')!;
+    const state = (): string =>
+      `${image.getAttribute('lang')}|${image.getAttribute(PAGE_LANGUAGE_ATTRIBUTE)}`;
+    const page = (sequence: number, nodeId: number, tagName: string, attributes: [string, string][]): void => {
+      patch(stream, sequence, [{
+        kind: 'attributes', nodeId, namespace: 'html', tagName, attributes,
+      }]);
+      expect(stream.acknowledged).toContain(sequence);
+    };
+    // The page says Japanese when the caption lands, as the image overlay
+    // projector names the image: nothing to say. No text is translated.
+    page(1, 1, 'html', [['lang', 'ja']]);
+    setReplicaAttributeOverride(image, 'aria-label', '港');
+    showImageLanguage(image, 'ja');
+    expect(state()).toBe('null|null');
+
+    // The page goes back to English: the Japanese name says its language.
+    page(2, 1, 'html', [['lang', 'en']]);
+    expect(state()).toBe('ja|en');
+    // An ancestor's and the image's own `lang` are followed too.
+    page(3, 4, 'p', [['lang', 'de']]);
+    expect(state()).toBe('ja|de');
+    page(4, 5, 'img', [['alt', 'A harbour'], ['lang', 'fr']]);
+    expect(state()).toBe('ja|fr');
+    page(5, 5, 'img', [['alt', 'A harbour']]);
+    expect(state()).toBe('ja|de');
+    page(6, 4, 'p', [['lang', 'ja-JP']]);
+    expect(state()).toBe('null|null');
+    expect(image.getAttribute('aria-label')).toBe('港');
+
+    hideImageLanguage(image);
+    clearReplicaAttributeOverride(image, 'aria-label');
+    page(7, 4, 'p', []);
+    expect(image.attributes.length).toBe(1);
+  });
+
+  it('keeps a translated image name through the page\'s patches and puts the page\'s label back', async () => {
+    const { stream, host } = await start([
+      element(4, 'p', [], [
+        element(5, 'img', [['alt', 'A harbour'], ['aria-label', 'Page label']], []),
+      ]),
+      element(6, 'div', [], [text(7, 'Sibling.')]),
+    ]);
+    const replica = host.iframe!.contentDocument!;
+    const image = replica.querySelector('img')!;
+    // As the image overlay projector does while a caption shows.
+    setReplicaAttributeOverride(image, 'aria-label', '港');
+
+    patch(stream, 1, [{
+      kind: 'attributes', nodeId: 5, namespace: 'html', tagName: 'img',
+      attributes: [['alt', 'A changed harbour'], ['aria-label', 'Changed label'], ['class', 'hero']],
+    }]);
+    expect(stream.acknowledged).toContain(1);
+    expect(image.getAttribute('aria-label')).toBe('港');
+    expect(image.getAttribute('alt')).toBe('A changed harbour');
+    expect(image.getAttribute('class')).toBe('hero');
+
+    // A patch that fails elsewhere is rolled back: neither value moves.
+    const sibling = replica.querySelector('div')!;
+    const originalInsertBefore = sibling.insertBefore.bind(sibling);
+    const insert = vi.spyOn(sibling, 'insertBefore').mockImplementationOnce(() => {
+      throw new Error('synthetic apply failure');
+    });
+    patch(stream, 2, [{
+      kind: 'attributes', nodeId: 5, namespace: 'html', tagName: 'img',
+      attributes: [['alt', 'Never shown']],
+    }, {
+      kind: 'reconcile-children', nodeId: 6, children: [
+        { kind: 'graph', node: element(50, 'span', [], [text(51, 'Partial.')]) },
+        { kind: 'retain', nodeId: 7 },
+      ],
+    }]);
+    insert.mockRestore();
+    sibling.insertBefore = originalInsertBefore;
+    expect(stream.acknowledged).not.toContain(2);
+    expect(image.getAttribute('aria-label')).toBe('港');
+    expect(image.getAttribute('alt')).toBe('A changed harbour');
+
+    clearReplicaAttributeOverride(image, 'aria-label');
+    expect(image.getAttribute('aria-label')).toBe('Changed label');
+    expect(image.getAttribute('class')).toBe('hero');
+  });
+
+  /** Live regions the page marks, roles that are live by default, and others. */
+  function liveBody(): HtmlMirrorNode[] {
+    return [
+      element(4, 'div', [
+        ['aria-live', 'polite'], ['aria-atomic', 'true'],
+        ['aria-relevant', 'additions text'],
+      ], [text(5, 'Score 0')]),
+      element(6, 'div', [['role', 'alert']], [text(7, 'Alert.')]),
+      element(8, 'div', [['role', 'status']], [text(9, 'Status.')]),
+      element(10, 'div', [['role', 'log']], [text(11, 'Log.')]),
+      element(12, 'output', [], [text(13, 'Output.')]),
+      element(14, 'div', [['role', 'marquee']], [text(15, 'Marquee.')]),
+      element(16, 'div', [['role', 'timer']], [text(17, '00:10')]),
+      element(18, 'p', [], [text(19, 'Plain.')]),
+      element(20, 'div', [
+        ['role', 'Alert presentation'], ['aria-live', 'assertive'],
+      ], [text(21, 'Loud.')]),
+    ];
+  }
+
+  const liveState = (replica: Document): string[] =>
+    [...replica.body.children].map((child) =>
+      `${child.localName}|${child.getAttribute('role')}|${child.getAttribute('aria-live')}`);
+
+  it('builds no live region into the mirror and keeps every role', async () => {
+    const { host } = await start(liveBody());
+    const replica = host.iframe!.contentDocument!;
+    expect(liveState(replica)).toEqual([
+      'div|null|off',
+      'div|alert|off',
+      'div|status|off',
+      'div|log|off',
+      'output|null|off',
+      // Off by default: nothing to add.
+      'div|marquee|null',
+      'div|timer|null',
+      'p|null|null',
+      'div|Alert presentation|off',
+    ]);
+    // What the page says beside aria-live stays for its CSS.
+    expect(replica.body.firstElementChild?.getAttribute('aria-atomic')).toBe('true');
+    expect(replica.body.firstElementChild?.getAttribute('aria-relevant'))
+      .toBe('additions text');
+  });
+
+  it('keeps the mirror silent through attribute, text and translation changes', async () => {
+    const { engine, stream, host } = await start(liveBody());
+    const replica = host.iframe!.contentDocument!;
+    patch(stream, 1, [{
+      // The page raises a polite region to assertive.
+      kind: 'attributes', nodeId: 4, namespace: 'html', tagName: 'div',
+      attributes: [['aria-live', 'assertive']],
+    }, {
+      // A status becomes an alert.
+      kind: 'attributes', nodeId: 8, namespace: 'html', tagName: 'div',
+      attributes: [['role', 'alert'], ['class', 'urgent']],
+    }, {
+      // A plain paragraph becomes a live region.
+      kind: 'attributes', nodeId: 18, namespace: 'html', tagName: 'p',
+      attributes: [['aria-live', 'polite']],
+    }, {
+      // An alert stops being one: nothing of Simul's is left on it.
+      kind: 'attributes', nodeId: 6, namespace: 'html', tagName: 'div',
+      attributes: [['class', 'calm']],
+    }, {
+      kind: 'attributes', nodeId: 12, namespace: 'html', tagName: 'output',
+      attributes: [['aria-live', 'assertive']],
+    }, {
+      kind: 'text', nodeId: 5, node: text(5, 'Score 1'),
+    }]);
+    expect(stream.acknowledged).toContain(1);
+    expect(liveState(replica)).toEqual([
+      'div|null|off',
+      'div|null|null',
+      'div|alert|off',
+      'div|log|off',
+      'output|null|off',
+      'div|marquee|null',
+      'div|timer|null',
+      'p|null|off',
+      'div|Alert presentation|off',
+    ]);
+    expect(replica.body.children[2]?.getAttribute('class')).toBe('urgent');
+
+    // A translation lands in a live region and goes again.
+    engine.beginProjection(JA);
+    expect(show(engine, 9)).toBe(true);
+    expect(replica.body.children[2]?.textContent).toBe('訳9');
+    expect(replica.body.children[2]?.getAttribute('lang')).toBe('ja');
+    expect(replica.body.children[2]?.getAttribute('aria-live')).toBe('off');
+    engine.beginProjection(SOURCE_ONLY);
+    expect(replica.body.children[2]?.hasAttribute('lang')).toBe(false);
+    expect(replica.body.children[2]?.getAttribute('aria-live')).toBe('off');
+
+    // An inserted live region is silent from the start.
+    patch(stream, 2, [{
+      kind: 'children', nodeId: 18, children: [
+        element(30, 'span', [['role', 'alert']], [text(31, 'Late alert.')]),
+        element(32, 'span', [['aria-live', 'polite']], [text(33, 'Late status.')]),
+      ],
+    }]);
+    expect([...replica.body.children[7]!.children].map(
+      (child) => `${child.getAttribute('role')}|${child.getAttribute('aria-live')}`,
+    )).toEqual(['alert|off', 'null|off']);
+  });
+
+  it('stays silent after a patch is rolled back', async () => {
+    const { stream, host } = await start(liveBody());
+    const replica = host.iframe!.contentDocument!;
+    const body = replica.body;
+    const plain = replica.querySelector('p')!;
+    const originalInsertBefore = plain.insertBefore.bind(plain);
+    const insert = vi.spyOn(plain, 'insertBefore').mockImplementationOnce(() => {
+      throw new Error('synthetic apply failure');
+    });
+    patch(stream, 1, [{
+      kind: 'attributes', nodeId: 6, namespace: 'html', tagName: 'div',
+      attributes: [['role', 'alert'], ['aria-live', 'assertive'], ['class', 'x']],
+    }, {
+      kind: 'reconcile-children', nodeId: 18, children: [
+        { kind: 'graph', node: element(50, 'span', [], [text(51, 'Partial.')]) },
+        { kind: 'retain', nodeId: 19 },
+      ],
+    }]);
+    insert.mockRestore();
+    plain.insertBefore = originalInsertBefore;
+    expect(stream.requested).toEqual([0]);
+    expect(plain.textContent).toBe('Plain.');
+    expect(body.children[1]?.getAttribute('aria-live')).toBe('off');
+    expect(body.children[1]?.hasAttribute('class')).toBe(false);
+    expect(liveState(replica)[0]).toBe('div|null|off');
   });
 });
 

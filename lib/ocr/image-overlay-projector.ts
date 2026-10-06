@@ -13,9 +13,21 @@ import {
   type AnimationFrameScheduler,
 } from '../browser-scheduling';
 import {
+  clearReplicaAttributeOverride,
+  pageAttribute,
+  setReplicaAttributeOverride,
+} from '../replica/replica-attribute-override';
+import {
   sameSourceDocument,
   type ReplicaSourceDocumentIdentity,
 } from '../replica/source-identity';
+import {
+  hideImageLanguage,
+  showImageLanguage,
+  showOwnLanguage,
+  shownTranslationLanguage,
+  translationLanguageTag,
+} from '../replica/translated-language';
 
 /**
  * The element that holds one image's translation. It sits in the image's
@@ -116,6 +128,8 @@ interface ProjectedEntry {
   /** The image-sized box inside the root's closed shadow root. */
   readonly content: HTMLElement;
   readonly weight: number;
+  /** The image that carries the caption's text as its name (D124). */
+  named?: HTMLImageElement;
   layoutWidth?: number;
   layoutHeight?: number;
   /** Ancestors that clip the image, cached until the replica's layout changes. */
@@ -216,6 +230,8 @@ export class ImageOverlayProjector {
   #retainedWeight = 0;
   #pairEpoch = 0;
   #pairKey: string | undefined;
+  /** The language the pair translates to, for screen readers (D124). */
+  #targetLanguage: string | undefined;
 
   constructor(private readonly environment: ImageOverlayProjectorEnvironment) {
     this.#scheduleFrame = receiverSafeAnimationFrameScheduler(
@@ -226,7 +242,11 @@ export class ImageOverlayProjector {
     );
   }
 
-  beginPair(pairEpoch: number, pairKey: string | undefined): boolean {
+  beginPair(
+    pairEpoch: number,
+    pairKey: string | undefined,
+    targetLanguage?: string,
+  ): boolean {
     if (
       !Number.isSafeInteger(pairEpoch) ||
       pairEpoch < 0 ||
@@ -237,6 +257,9 @@ export class ImageOverlayProjector {
     this.clear();
     this.#pairEpoch = pairEpoch;
     this.#pairKey = pairKey;
+    this.#targetLanguage = pairKey === undefined
+      ? undefined
+      : translationLanguageTag(targetLanguage);
     return true;
   }
 
@@ -300,6 +323,14 @@ export class ImageOverlayProjector {
     const { root, content } = createOverlayElement(replayDocument);
     root.dataset.simulImageOverlay = String(projection.nodeId);
     root.dataset.simulImageMethod = projection.methodId;
+    // On the box inside the overlay's own shadow root, where page selectors
+    // do not reach (D124).
+    if (this.#targetLanguage) showOwnLanguage(content, this.#targetLanguage);
+    // A caption made from the image's own alt text or aria-label is read as
+    // the image's name; text read from the pixels is new and stays (D124).
+    if (projection.evidenceKind === 'semantic') {
+      root.setAttribute('aria-hidden', 'true');
+    }
     for (const region of projection.regions) {
       const element = replayDocument.createElement('span');
       element.textContent = region.text;
@@ -324,6 +355,7 @@ export class ImageOverlayProjector {
     layer.entries.set(projection.nodeId, entry);
     this.#retainedEntries.set(entry, layer);
     this.#retainedWeight += projectionWeight;
+    this.#nameImage(entry);
     layer.resizeObserver?.observe(anchor.image);
     this.#refreshEntry(layer, projection.nodeId);
     return layer.entries.has(projection.nodeId);
@@ -442,6 +474,7 @@ export class ImageOverlayProjector {
       layer.resizeObserver?.unobserve(entry.anchor.image);
       entry.anchor = currentAnchor;
       entry.clipAncestors = undefined;
+      this.#nameImage(entry);
       layer.resizeObserver?.observe(currentAnchor.image);
       this.environment.onAnchorRebound?.(projection.jobOrdinal);
     }
@@ -513,6 +546,7 @@ export class ImageOverlayProjector {
     this.#retainedEntries.delete(entry);
     this.#retainedWeight = Math.max(0, this.#retainedWeight - entry.weight);
     layer.resizeObserver?.unobserve(entry.anchor.image);
+    restoreImageName(entry);
     entry.root.remove();
     if (layer.entries.size === 0 && !retainEmptyLayer) {
       this.#disposeLayer(layer);
@@ -534,9 +568,34 @@ export class ImageOverlayProjector {
     for (const entry of layer.entries.values()) {
       this.#retainedEntries.delete(entry);
       this.#retainedWeight = Math.max(0, this.#retainedWeight - entry.weight);
+      restoreImageName(entry);
       entry.root.remove();
     }
     layer.entries.clear();
+  }
+
+  /**
+   * While a caption made from the image's own alt text or aria-label shows,
+   * the replica image is named by the translation, so a screen reader hears
+   * it once and in its language. The name goes through `aria-label`: `alt`
+   * stays the page's, for `content: attr(alt)` rules and for the text a
+   * broken image draws (D76). What the page had comes back with
+   * `restoreImageName`, and a page patch to either attribute is kept (D124).
+   */
+  #nameImage(entry: ProjectedEntry): void {
+    const image = entry.anchor.image;
+    if (entry.named && entry.named !== image) restoreImageName(entry);
+    if (entry.projection.evidenceKind !== 'semantic') return;
+    entry.named = image;
+    const name = entry.projection.regions.map(({ text }) => text).join(' ');
+    // A name the translator gave back as the page wrote it is still in the
+    // page's language.
+    const own = pageAttribute(image, 'aria-label') ?? pageAttribute(image, 'alt');
+    const language = own === null
+      ? this.#targetLanguage
+      : shownTranslationLanguage(this.#targetLanguage, own, name);
+    setReplicaAttributeOverride(image, 'aria-label', name);
+    if (language) showImageLanguage(image, language);
   }
 
   #makeRetainedWeightAvailable(
@@ -558,6 +617,14 @@ export class ImageOverlayProjector {
     }
     return true;
   }
+}
+
+function restoreImageName(entry: ProjectedEntry): void {
+  const image = entry.named;
+  if (!image) return;
+  entry.named = undefined;
+  clearReplicaAttributeOverride(image, 'aria-label');
+  hideImageLanguage(image);
 }
 
 function validProjection(value: ImageOverlayProjection): boolean {

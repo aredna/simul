@@ -12,6 +12,11 @@ import {
   type ImageOverlayProjection,
 } from '../lib/ocr/image-overlay-projector';
 import type { ReplicaImageAnchor } from '../lib/replica/contracts';
+import {
+  pageAttribute,
+  reapplyReplicaAttributeOverrides,
+} from '../lib/replica/replica-attribute-override';
+import { refreshImageLanguages } from '../lib/replica/translated-language';
 
 const sourceDocument = {
   sessionId: 'image-overlay-session',
@@ -905,6 +910,232 @@ describe('ImageOverlayProjector', () => {
       view.projector.dispose();
       view.motion(view.track, 'transitionrun');
       expect(view.frames).toHaveLength(0);
+    });
+  });
+
+  describe('for screen readers (D124)', () => {
+    const rect = (image: HTMLImageElement): void => {
+      image.getBoundingClientRect = () => ({
+        left: 10, top: 30, width: 200, height: 120,
+        right: 210, bottom: 150, x: 10, y: 30, toJSON: () => ({}),
+      });
+    };
+    const caption = (text: string, overrides: Partial<ImageOverlayProjection> = {}) =>
+      projection({
+        methodId: 'accessibility-text',
+        evidenceKind: 'semantic',
+        bitmapWidth: 160,
+        bitmapHeight: 80,
+        regions: [{
+          text,
+          boundingBox: { x: 0, y: 0, width: 160, height: 80 },
+          placement: 'whole-image',
+        }],
+        ...overrides,
+      });
+    function mirror(html: string) {
+      const { document } = parseHTML(`<html lang="en"><body>${html}</body></html>`);
+      let image = document.querySelector('img') as unknown as HTMLImageElement;
+      rect(image);
+      const projector = new ImageOverlayProjector({
+        resolveAnchor: () => ({
+          document: sourceDocument,
+          replayLease: 9,
+          image,
+          iframe: { contentDocument: document } as HTMLIFrameElement,
+        }),
+        isCurrent: () => true,
+        scheduleFrame: (callback) => { callback(); return 1; },
+        cancelFrame: () => undefined,
+        createResizeObserver: () => undefined,
+      });
+      return {
+        document,
+        projector,
+        image: () => image,
+        swap: (next: HTMLImageElement) => { rect(next); image = next; },
+      };
+    }
+
+    it('names the image by its translated caption, once, and hides the caption from assistive technology', () => {
+      const view = mirror('<main><img alt="A harbour at dawn"></main>');
+      const image = view.image();
+      expect(view.projector.beginPair(1, 'en>ja|0.6|v3', 'ja')).toBe(true);
+      expect(view.projector.project(caption('夜明けの港', {
+        pairKey: 'en>ja|0.6|v3',
+      }))).toBe(true);
+
+      const root = overlayFor(view.document, 7) as HTMLElement;
+      expect(root.getAttribute('aria-hidden')).toBe('true');
+      expect(imageOverlayContent(root)?.getAttribute('lang')).toBe('ja');
+      // Simul's own box: drawn by no language, as before; the image itself
+      // is the page's and keeps the page's.
+      expect(imageOverlayContent(root)?.getAttribute('simul:lang')).toBe('');
+      expect(imageOverlayContent(root)?.textContent).toBe('夜明けの港');
+      // The name goes through aria-label; alt stays the page's (D76).
+      expect(image.getAttribute('aria-label')).toBe('夜明けの港');
+      expect(image.getAttribute('lang')).toBe('ja');
+      expect(image.getAttribute('simul:lang')).toBe('en');
+      expect(image.getAttribute('alt')).toBe('A harbour at dawn');
+
+      view.projector.remove(sourceDocument, 7);
+      expect(overlayFor(view.document, 7)).toBeNull();
+      expect(image.hasAttribute('aria-label')).toBe(false);
+      expect(image.hasAttribute('lang')).toBe(false);
+      expect(image.attributes.length).toBe(1);
+      expect(image.getAttribute('alt')).toBe('A harbour at dawn');
+    });
+
+    it('says no language for a name the translator gave back as the page wrote it', () => {
+      const view = mirror('<main><img alt="Fudschijama" lang="de"></main>');
+      const image = view.image();
+      expect(view.projector.beginPair(1, 'en>ja|0.6|v3', 'ja')).toBe(true);
+      expect(view.projector.project(caption(' Fudschijama ', {
+        pairKey: 'en>ja|0.6|v3',
+      }))).toBe(true);
+      // Still named once, by the caption, and still German.
+      expect(image.getAttribute('aria-label')).toBe(' Fudschijama ');
+      expect(image.getAttribute('lang')).toBe('de');
+      expect(image.attributes.length).toBe(3);
+
+      expect(view.projector.project(caption('富士山', {
+        pairKey: 'en>ja|0.6|v3', jobOrdinal: 2, pixelHash: 'b'.repeat(64),
+      }))).toBe(true);
+      expect(image.getAttribute('aria-label')).toBe('富士山');
+      expect(image.getAttribute('lang')).toBe('ja');
+
+      view.projector.remove(sourceDocument, 7);
+      expect(image.getAttribute('lang')).toBe('de');
+      expect(image.attributes.length).toBe(2);
+    });
+
+    it('puts back the page\'s own aria-label and lang, through the page\'s patches', () => {
+      const view = mirror('<p><img alt="Alt text" aria-label="Page label" lang="fr" class="hero"></p>');
+      const image = view.image();
+      view.projector.beginPair(1, 'en>ja', 'ja');
+      expect(view.projector.project(caption('ページのラベル'))).toBe(true);
+      expect(image.getAttribute('aria-label')).toBe('ページのラベル');
+      expect(image.getAttribute('lang')).toBe('ja');
+      expect(pageAttribute(image, 'aria-label')).toBe('Page label');
+
+      // The page rewrites the image's attributes while the caption shows.
+      for (const { name } of [...image.attributes]) image.removeAttribute(name);
+      image.setAttribute('alt', 'Alt text');
+      image.setAttribute('aria-label', 'Changed page label');
+      reapplyReplicaAttributeOverrides(image);
+      expect(image.getAttribute('aria-label')).toBe('ページのラベル');
+      expect(image.getAttribute('lang')).toBe('ja');
+
+      view.projector.clear();
+      expect(image.getAttribute('aria-label')).toBe('Changed page label');
+      expect(image.hasAttribute('lang')).toBe(false);
+      expect(image.getAttribute('alt')).toBe('Alt text');
+    });
+
+    it('leaves text read from the pixels announced, with its language, and the image\'s name alone', () => {
+      const view = mirror('<main><img alt="A sale banner"></main>');
+      const image = view.image();
+      view.projector.beginPair(1, 'en>ja', 'ja');
+      expect(view.projector.project(projection())).toBe(true);
+      const root = overlayFor(view.document, 7) as HTMLElement;
+      expect(root.hasAttribute('aria-hidden')).toBe(false);
+      expect(imageOverlayContent(root)?.getAttribute('lang')).toBe('ja');
+      expect(imageOverlayContent(root)?.getAttribute('simul:lang')).toBe('');
+      expect(image.hasAttribute('aria-label')).toBe(false);
+      expect(image.hasAttribute('lang')).toBe(false);
+    });
+
+    it('gives the name back when pixel text replaces the caption', () => {
+      const view = mirror('<main><img alt="A sale banner"></main>');
+      const image = view.image();
+      view.projector.beginPair(1, 'en>ja', 'ja');
+      expect(view.projector.project(caption('セールのバナー'))).toBe(true);
+      expect(image.getAttribute('aria-label')).toBe('セールのバナー');
+
+      expect(view.projector.project(projection({ jobOrdinal: 2 }))).toBe(true);
+      const root = overlayFor(view.document, 7) as HTMLElement;
+      expect(root.hasAttribute('aria-hidden')).toBe(false);
+      expect(image.hasAttribute('aria-label')).toBe(false);
+      expect(image.hasAttribute('lang')).toBe(false);
+
+      // And takes it again when the caption comes back.
+      expect(view.projector.project(caption('セールのバナー', { jobOrdinal: 3 }))).toBe(true);
+      expect(image.getAttribute('aria-label')).toBe('セールのバナー');
+    });
+
+    it('restores every name when the pair changes', () => {
+      const view = mirror('<main><img alt="A harbour at dawn"></main>');
+      const image = view.image();
+      view.projector.beginPair(1, 'en>ja', 'ja');
+      expect(view.projector.project(caption('夜明けの港'))).toBe(true);
+      // Live source only.
+      view.projector.beginPair(2, undefined);
+      expect(image.hasAttribute('aria-label')).toBe(false);
+      expect(image.hasAttribute('lang')).toBe(false);
+
+      // A pair that names no usable language still names the image.
+      view.projector.beginPair(3, 'en>ja', 'ja|x');
+      expect(view.projector.project(caption('夜明けの港', { pairEpoch: 3 }))).toBe(true);
+      expect(image.getAttribute('aria-label')).toBe('夜明けの港');
+      expect(image.hasAttribute('lang')).toBe(false);
+      expect(imageOverlayContent(overlayFor(view.document, 7))?.hasAttribute('lang'))
+        .toBe(false);
+      view.projector.dispose();
+      expect(image.hasAttribute('aria-label')).toBe(false);
+    });
+
+    it('moves the name when the mirror rebuilds the image', () => {
+      const view = mirror('<main><img alt="A harbour at dawn"></main>');
+      const first = view.image();
+      view.projector.beginPair(1, 'en>ja', 'ja');
+      expect(view.projector.project(caption('夜明けの港'))).toBe(true);
+
+      const replacement = view.document.createElement('img') as unknown as HTMLImageElement;
+      replacement.setAttribute('alt', 'A harbour at dawn');
+      first.replaceWith(replacement);
+      view.swap(replacement);
+      view.projector.refresh();
+
+      expect(first.hasAttribute('aria-label')).toBe(false);
+      expect(first.hasAttribute('lang')).toBe(false);
+      expect(replacement.getAttribute('aria-label')).toBe('夜明けの港');
+      expect(replacement.getAttribute('lang')).toBe('ja');
+      view.projector.dispose();
+      expect(replacement.hasAttribute('aria-label')).toBe(false);
+      expect(replacement.hasAttribute('lang')).toBe(false);
+    });
+
+    it('adds no lang to an image the page already declares in the language', () => {
+      const view = mirror('<div lang="ja"><img alt="港"></div>');
+      const image = view.image();
+      view.projector.beginPair(1, 'zh>ja', 'ja');
+      expect(view.projector.project(caption('みなと', { pairKey: 'zh>ja' }))).toBe(true);
+      expect(image.getAttribute('aria-label')).toBe('みなと');
+      expect(image.hasAttribute('lang')).toBe(false);
+      const content = imageOverlayContent(overlayFor(view.document, 7));
+      expect(content?.getAttribute('lang')).toBe('ja');
+      expect(content?.getAttribute('simul:lang')).toBe('');
+    });
+
+    it('has a named image looked at again when the page changes a lang, until the name goes', () => {
+      const view = mirror('<div id="wrap" lang="ja"><img alt="港"></div>');
+      const image = view.image();
+      const wrap = view.document.getElementById('wrap')!;
+      view.projector.beginPair(1, 'zh>ja', 'ja');
+      expect(view.projector.project(caption('みなと', { pairKey: 'zh>ja' }))).toBe(true);
+      expect(image.hasAttribute('lang')).toBe(false);
+
+      // As the engine does on a page patch of `lang`.
+      wrap.setAttribute('lang', 'zh');
+      refreshImageLanguages(view.document);
+      expect(image.getAttribute('lang')).toBe('ja');
+      expect(image.getAttribute('simul:lang')).toBe('zh');
+
+      view.projector.remove(sourceDocument, 7);
+      expect(image.attributes.length).toBe(1);
+      wrap.setAttribute('lang', 'en');
+      refreshImageLanguages(view.document);
+      expect(image.attributes.length).toBe(1);
     });
   });
 
