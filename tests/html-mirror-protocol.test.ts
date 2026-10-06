@@ -52,6 +52,8 @@ import {
   sourceControlledContentIsWithheld,
 } from '../lib/replica/source-privacy-policy';
 import { applySourcePrivacyFiltersOff } from '../lib/replica/source-privacy-mode';
+import { installSourceShadowRootReader } from '../lib/replica/source-shadow-root';
+import { closedRootReader } from './support/closed-shadow-roots';
 
 describe('isolated HTML sanitizer and protocol', () => {
   beforeEach(() => {
@@ -3005,6 +3007,233 @@ describe('isolated HTML sanitizer and protocol', () => {
     expect(JSON.stringify(graph)).toContain('open shadow');
     expect(JSON.stringify(graph)).not.toContain('closed shadow');
     clone.mockRestore();
+  });
+
+  /**
+   * One page built twice: its roots open, or closed and reachable only
+   * through the installed reader (D125).
+   */
+  function shadowPage(mode: 'open' | 'closed') {
+    const { document, window } = parseHTML(`<!doctype html><html><head></head><body>
+      <x-card id="card"><b id="light" slot="title">light title</b><p id="body">light body</p>direct text</x-card>
+      <x-form id="form"></x-form>
+      <p id="plain">plain text</p>
+    </body></html>`);
+    const reader = closedRootReader();
+    const attach = (host: Element, markup: string): ShadowRoot => {
+      if (mode === 'closed') return reader.attach(host, markup);
+      const root = host.attachShadow({ mode: 'open' });
+      Object.defineProperty(root, 'mode', { value: 'open' });
+      root.innerHTML = markup;
+      return root;
+    };
+    const card = attach(
+      document.querySelector('#card')!,
+      '<style>.head{color:blue}</style><div class="head"><slot name="title"></slot></div>' +
+        '<p id="inside">text in the root</p><div id="slotted"><slot></slot></div>' +
+        '<x-inner id="inner"></x-inner>',
+    );
+    Object.defineProperty(card, 'adoptedStyleSheets', {
+      configurable: true,
+      value: [fakeStyleSheet('.adopted{color:green}')],
+    });
+    attach(card.querySelector('#inner')!, '<p id="nested">text in a nested root</p>');
+    const form = attach(
+      document.querySelector('#form')!,
+      '<p id="form-text">sign in</p>' +
+        '<input id="name" value="Visible Name">' +
+        '<input id="pw" type="password" value="hunter2-secret" placeholder="Password hint">' +
+        '<input id="card-number" autocomplete="cc-number" value="4111111111111111">' +
+        '<input id="otp" autocomplete="one-time-code" value="987654321">' +
+        '<section id="region" autocomplete="one-time-code"><span>otp region text</span></section>' +
+        '<x-vault id="vault"></x-vault>',
+    );
+    const vault = attach(
+      form.querySelector('#vault')!,
+      '<input id="pin" type="password" value="nested-secret-42"><p id="vault-text">vault text</p>',
+    );
+    installSourceShadowRootReader(
+      document,
+      mode === 'closed' ? reader.read : undefined,
+    );
+    return { document, window: window as unknown as Window, reader, card, form, vault };
+  }
+
+  it('captures a closed shadow root as it captures an open one (D125)', () => {
+    const closed = shadowPage('closed');
+    const open = shadowPage('open');
+    const closedCounts = createHtmlMirrorRepresentabilityCollector();
+    const openCounts = createHtmlMirrorRepresentabilityCollector();
+    const closedGraph = sanitizeSourceDocument(
+      closed.document, closed.window, new WeakNodeIdRegistry(), closedCounts,
+    )!;
+    const openGraph = sanitizeSourceDocument(
+      open.document, open.window, new WeakNodeIdRegistry(), openCounts,
+    )!;
+
+    // The same graph, node for node: the wire does not say a root was closed.
+    expect(JSON.stringify(closedGraph)).toBe(JSON.stringify(openGraph));
+    expect(closedCounts).toEqual(openCounts);
+    expect(closedCounts.accessibleOpenShadowRootCount).toBe(4);
+    expect(closedCounts.customElementHostWithoutAccessibleOpenRootCount).toBe(0);
+
+    const host = graphElementBySourceId(closedGraph, 'card')!;
+    expect(host.shadowRoot?.mode).toBe('open');
+    expect(host.shadowRoot?.adoptedStyleSheets).toEqual(['.adopted{color:green}']);
+    const texts = graphTextNodes(closedGraph.root).map((node) => node.text);
+    for (const text of [
+      'text in the root', 'text in a nested root', 'light title', 'light body',
+      'sign in', 'vault text', 'plain text', '.head{color:blue}',
+    ]) expect(texts, text).toContain(text);
+    expect(readHtmlMirrorNode(closedGraph.root)).toBeDefined();
+    // The receiver takes no other mode.
+    expect(readHtmlMirrorNode({
+      ...host,
+      shadowRoot: { ...host.shadowRoot, mode: 'closed' },
+    })).toBeUndefined();
+  });
+
+  it('classifies credential fields in closed roots before reading them (D125)', () => {
+    const { document, window, form, vault } = shadowPage('closed');
+    // No value, placeholder or label of a credential field may be read.
+    for (const field of [
+      form.querySelector('#pw')!, form.querySelector('#card-number')!,
+      form.querySelector('#otp')!, vault.querySelector('#pin')!,
+    ]) {
+      for (const attribute of [...field.attributes]) {
+        if (attribute.name !== 'value' && attribute.name !== 'placeholder') continue;
+        Object.defineProperty(attribute, 'value', {
+          configurable: true,
+          get: () => {
+            throw new Error(`${field.id} ${attribute.name} must not be read`);
+          },
+        });
+      }
+      Object.defineProperty(field, 'value', {
+        configurable: true,
+        get: () => {
+          throw new Error(`${field.id} value must not be read`);
+        },
+      });
+    }
+    const graph = sanitizeSourceDocument(
+      document, window, new WeakNodeIdRegistry(),
+    )!;
+    const serialized = JSON.stringify(graph);
+
+    expect(attributesOf(graph, 'pw')).toEqual({ id: 'pw', type: 'password' });
+    expect(attributesOf(graph, 'card-number')).toEqual({ id: 'card-number' });
+    expect(attributesOf(graph, 'otp')).toEqual({ id: 'otp' });
+    // A field in a closed root nested in a closed root.
+    expect(attributesOf(graph, 'pin')).toEqual({ id: 'pin', type: 'password' });
+    for (const secret of [
+      'hunter2-secret', 'Password hint', '4111111111111111', '987654321',
+      'nested-secret-42', 'otp region text',
+    ]) expect(serialized, secret).not.toContain(secret);
+    // Any other credential region keeps the opaque shell.
+    expect(graphOpaquePlaceholders(graph)).toHaveLength(1);
+    // What stands beside the fields is page text.
+    expect(serialized).toContain('sign in');
+    expect(serialized).toContain('vault text');
+    expect(readHtmlMirrorNode(graph.root)).toBeDefined();
+  });
+
+  it('withholds what a closed root slots under a credential box (D125)', () => {
+    const { document, window } = parseHTML(`<!doctype html><html><body>
+      <x-mask id="mask"><span id="masked-span">slotted secret span</span>direct slotted secret</x-mask>
+    </body></html>`);
+    const host = document.querySelector('#mask')!;
+    const reader = closedRootReader();
+    reader.attach(
+      host,
+      '<div id="box" autocomplete="one-time-code"><slot></slot></div><p>clear text</p>',
+    );
+    // Chrome reads null for a node slotted into a closed root.
+    for (const node of host.childNodes) {
+      Object.defineProperty(node, 'assignedSlot', { configurable: true, value: null });
+    }
+    installSourceShadowRootReader(document, reader.read);
+
+    const serialized = JSON.stringify(sanitizeSourceDocument(
+      document, window as unknown as Window, new WeakNodeIdRegistry(),
+    ));
+
+    expect(serialized).toContain('clear text');
+    expect(serialized).not.toContain('slotted secret span');
+    expect(serialized).not.toContain('direct slotted secret');
+  });
+
+  it('never walks a root offered for a browser control (D125)', () => {
+    const { document, window } = parseHTML(`<!doctype html><html><body>
+      <input id="field" value="typed"><textarea id="area">typed</textarea>
+      <details id="details"><summary>More</summary><p>body</p></details>
+      <video id="video"></video><meter id="meter"></meter>
+      <select id="select"><option>One</option></select>
+    </body></html>`);
+    const asked: Element[] = [];
+    const controls = new Set([
+      'input', 'textarea', 'details', 'summary', 'video', 'meter', 'select', 'option',
+    ]);
+    // A reader that would hand out a control's internals if it were asked.
+    installSourceShadowRootReader(document, (element) => {
+      asked.push(element);
+      if (!controls.has(element.localName)) return null;
+      const root = document.createDocumentFragment() as unknown as ShadowRoot;
+      Object.defineProperty(root, 'host', { value: element });
+      root.append(document.createTextNode('inner editor internals'));
+      return root;
+    });
+
+    const graph = sanitizeSourceDocument(
+      document, window as unknown as Window, new WeakNodeIdRegistry(),
+    )!;
+
+    expect(JSON.stringify(graph)).not.toContain('inner editor internals');
+    expect(JSON.stringify(graph)).not.toContain('shadowRoot');
+    for (const element of asked) {
+      expect(controls.has(element.localName), element.localName).toBe(false);
+    }
+    // The elements a page can attach a root to were asked about.
+    expect(asked.map((element) => element.localName)).toEqual(
+      expect.arrayContaining(['body', 'p']),
+    );
+  });
+
+  it('holds a closed root to the node budget of the page (D125)', () => {
+    const { document, window } = parseHTML(
+      '<!doctype html><html><body><x-list id="list"></x-list></body></html>',
+    );
+    const reader = closedRootReader();
+    reader.attach(
+      document.querySelector('#list')!,
+      Array.from({ length: 1_200 }, (_, index) => `<p>row ${index}</p>`).join(''),
+    );
+    applyHtmlMirrorLimitSettings({
+      ...DEFAULT_HTML_MIRROR_LIMIT_SETTINGS,
+      maxElements: 1_000,
+    });
+    const capture = () => {
+      const counts = createHtmlMirrorRepresentabilityCollector();
+      let graph: HtmlMirrorDocumentGraph | undefined;
+      try {
+        graph = sanitizeSourceDocument(
+          document, window as unknown as Window, new WeakNodeIdRegistry(), counts,
+        );
+      } catch {
+        // Over the node cap, as for any other part of the page.
+      }
+      return { graph, counts };
+    };
+    try {
+      // Unread, the root costs nothing; read, its nodes count like any others.
+      expect(capture().graph).toBeDefined();
+      installSourceShadowRootReader(document, reader.read);
+      const read = capture();
+      expect(read.graph).toBeUndefined();
+      expect(read.counts.capacityOmissionCount).toBeGreaterThan(0);
+    } finally {
+      applyHtmlMirrorLimitSettings(DEFAULT_HTML_MIRROR_LIMIT_SETTINGS);
+    }
   });
 
   it('captures and validates ordered document and shadow adopted stylesheets', () => {

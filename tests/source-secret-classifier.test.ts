@@ -19,6 +19,8 @@ import {
   readSourceSelectLabel,
   readSourceStructuralAttributes,
 } from '../lib/replica/source-privacy-policy';
+import { installSourceShadowRootReader } from '../lib/replica/source-shadow-root';
+import { closedRootReader } from './support/closed-shadow-roots';
 
 describe('source secret classifier', () => {
   afterEach(() => applySourcePrivacyFiltersOff(false));
@@ -393,6 +395,78 @@ describe('source secret classifier', () => {
       window as unknown as Window,
     )).toBe(true);
     expect(contentReads).toBe(0);
+  });
+
+  it('follows a slot in a closed root for an element and for directly slotted Text (D125)', () => {
+    const { document, window } = parseHTML(
+      '<html><body><x-mask id="host"><img id="secret">' +
+        '<b id="named" slot="clear">clear</b></x-mask></body></html>',
+    );
+    const host = document.querySelector('#host')!;
+    const text = document.createTextNode('direct slot secret');
+    host.append(text);
+    const reader = closedRootReader();
+    const shadow = reader.attach(
+      host,
+      '<section autocomplete="one-time-code"><slot id="secret-slot"></slot></section>' +
+        '<p><slot id="clear-slot" name="clear"></slot></p>',
+    );
+    const secret = document.querySelector('#secret')!;
+    const named = document.querySelector('#named')!;
+    const secretSlot = shadow.querySelector('#secret-slot')!;
+    // Chrome reads null for a node slotted into a closed root.
+    for (const node of [secret, named, text]) {
+      Object.defineProperty(node, 'assignedSlot', { configurable: true, value: null });
+    }
+    let contentReads = 0;
+    Object.defineProperty(text, 'nodeValue', {
+      configurable: true,
+      get: () => {
+        contentReads += 1;
+        return 'direct slot secret';
+      },
+    });
+
+    // Without the page reader the slot is out of reach, as before D125.
+    expect(readSourceFlatTreeElementPath(secret)).toEqual([
+      secret, host, document.body, document.documentElement,
+    ]);
+
+    installSourceShadowRootReader(document, reader.read);
+    expect(readSourceFlatTreeElementPath(secret)?.slice(0, 4)).toEqual([
+      secret, secretSlot, secretSlot.parentElement, host,
+    ]);
+    expect(readSourceFlatTreeElementPath(text)?.slice(0, 3)).toEqual([
+      secretSlot, secretSlot.parentElement, host,
+    ]);
+    const classifier = new StickySourceSecretClassifier();
+    const sourceWindow = window as unknown as Window;
+    expect(hasSourceCredentialSecretAncestor(secret, classifier, sourceWindow)).toBe(true);
+    expect(hasSourceCredentialSecretAncestor(text, classifier, sourceWindow)).toBe(true);
+    // A node in another slot of the same root is not under the credential box.
+    expect(hasSourceCredentialSecretAncestor(named, classifier, sourceWindow)).toBe(false);
+    expect(contentReads).toBe(0);
+    installSourceShadowRootReader(document, undefined);
+  });
+
+  it('fails closed on a closed root with too many slots to search (D125)', () => {
+    const { document, window } = parseHTML(
+      '<html><body><x-many id="host"><b id="child">slotted</b></x-many></body></html>',
+    );
+    const host = document.querySelector('#host')!;
+    const child = document.querySelector('#child')!;
+    const reader = closedRootReader();
+    reader.attach(host, '<slot name="x"></slot>'.repeat(4_097));
+    Object.defineProperty(child, 'assignedSlot', { configurable: true, value: null });
+    installSourceShadowRootReader(document, reader.read);
+
+    expect(readSourceFlatTreeElementPath(child)).toBeUndefined();
+    expect(hasSourceCredentialSecretAncestor(
+      child,
+      new StickySourceSecretClassifier(),
+      window as unknown as Window,
+    )).toBe(true);
+    installSourceShadowRootReader(document, undefined);
   });
 
   it('withholds customizable-option Text slotted beneath a secret wrapper', () => {

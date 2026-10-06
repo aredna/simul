@@ -5,6 +5,7 @@ import {
   sourceElementPathIsPainted,
   type SourcePaintScanCache,
 } from './source-privacy-policy';
+import { readSourceShadowRoot } from './source-shadow-root';
 
 export interface SourceVisibilityBoundaryRefresh {
   readonly changedTargets: readonly Element[];
@@ -336,8 +337,7 @@ function readSourceVisibilityShadowRoot(
   element: Element,
 ): ShadowRoot | undefined | typeof UNREADABLE_VISIBILITY_SHADOW_ROOT {
   try {
-    const root = element.shadowRoot;
-    return root?.mode === 'open' ? root : undefined;
+    return readSourceShadowRoot(element);
   } catch {
     return UNREADABLE_VISIBILITY_SHADOW_ROOT;
   }

@@ -34,7 +34,7 @@ queries, layers, pseudo-elements, passive fonts and HTTP(S) backgrounds,
 fonts embedded as base64 data URLs (D72: often large CJK web fonts; they are
 inert data the page already loaded), same-document `url(#fragment)`
 references, readable constructed/adopted
-stylesheets, and styles inside accessible open shadow roots. Stylesheet element
+stylesheets, and styles inside shadow roots, open or closed. Stylesheet element
 order, media attributes, disabled state, and the normal cascade remain
 representable. A `<style>` element inside a hidden or controlled disclosure
 region keeps its CSS (those rules are often what hides the region); only the
@@ -497,12 +497,109 @@ Some gaps cannot be fixed by admitting more sanitizer syntax:
 - **Browser-managed pixels.** Usable static posters can be represented; the current
   pixels of canvas, video, audio visualization, DRM/protected media, and active
   embedded documents cannot cross the current isolated boundary.
-- **Script-owned state.** Closed shadow roots, generated runtime state,
-  `ElementInternals` and custom states, and virtualized content that does not
-  exist in the browser-produced accessible DOM cannot be recreated without
-  executing the website, which Simul will not do. Definition state is the
-  exception: it is carried as a flag and matched with empty Simul-owned
-  classes (D83).
+- **Script-owned state.** Generated runtime state, `ElementInternals` and
+  custom states, and virtualized content that does not exist in the
+  browser-produced accessible DOM cannot be recreated without executing the
+  website, which Simul will not do. Definition state is the exception: it is
+  carried as a flag and matched with empty Simul-owned classes (D83).
+
+## Closed shadow roots (D125)
+
+A component that closes its shadow root used to be an empty box in the
+mirror, with its slotted children drawn unstyled and out of place. The page
+script now reads the page's roots, open or closed, through
+one helper (`lib/replica/source-shadow-root.ts`): the element's own
+`shadowRoot`, else `chrome.dom.openOrClosedShadowRoot`, which Chrome gives an
+extension's page script without a permission. Every reader of the page uses
+it (the mirror's graph and patches, the credential classifier, the hidden
+and collapsed-region rules, the semantic channel, image discovery and the
+capture-safety checks, pane following, style polling), so all of them read
+the same roots. A part that only indexes the page may still hold an older
+"no root" than a part about to send something, which asks again (below).
+
+- **The replica is unchanged.** It builds an open root either way: it runs
+  no page code, so nothing in it can tell the two apart, and Simul's own
+  panel code has to reach into the roots it builds. Whether a root was closed
+  does not travel, and a closed root's content obeys every rule and budget
+  an open root's does.
+- **Browser-made roots stay out.** Chrome's call returns null for most of
+  them (the editor inside a text field, a video's controls, `details`,
+  `select`, `meter`), on Chrome 138 and 154, but not all: for the `<body>` of
+  a PDF document, top-level or inside an `embed`, `object` or `iframe`, it
+  returns the closed root of Chrome's own PDF viewer. The helper therefore
+  asks only about elements a page can attach a root to (custom elements and
+  the eighteen tags `attachShadow` allows) and never about the `<body>` of a
+  document whose type is `application/pdf`. Only the PDF bridge reads the
+  viewer.
+- **Slots.** `assignedSlot` reads null for a slot in a closed root, so the
+  helper finds the slot the way the browser assigns it (the first slot of the
+  node's name, or the slot that lists it under manual assignment). A
+  credential or masking box that a closed root wraps around a slot therefore
+  counts for the slotted node, as in an open root. For a parent with an open
+  root, or none, null already means "not assigned" and nothing is searched;
+  a closed root's slot list is read once a walk.
+- **Cost, and the rule for sending.** The call takes one to two
+  microseconds, about a hundred times the property read, and the page is
+  walked many times. A root found is kept for good (a root is never detached
+  or replaced). "No root" is kept too, but nothing fires when a root is
+  attached, so nothing is sent for a node before every element between it
+  and the document has been asked about its root in the same read, or holds
+  a known one. A checkpoint asks about every element once. A patch asks
+  about every element above each change and within each subtree it sends;
+  the semantic channel asks above each node whose record is new or changed,
+  and the image channel above an image before its alt text, measurements or
+  file, and about every element painted over it before its pixels are
+  captured (a root that turns up there refuses the capture). A root found
+  that way on an element read before without one turns the patch into a
+  checkpoint, and the semantic channel reads the page again. The walks that
+  only index the page trust the answers kept. A root attached to an element
+  already in the page shows at the next change at or below it (an added
+  subtree is read in a fresh walk too, by the credential classifier), at the
+  next layout change (the walk that finds a late open root asks about the
+  first 20,000 nodes, at most once every half second, and once more when
+  that interval ends), or within the discovery rotation (1,000 elements
+  every half second, removed ones skipped and not counted).
+- **A person's input.** A click, a key, a change of focus or text about to
+  be entered asks about the root of every element above its target, and
+  along the focus or the pointer into the roots known below the outermost
+  closed host (32 roots deep; below that, what the follow reached is read
+  in one fresh walk), before the page's own handlers on the component run.
+  A root that turns up is watched from then on and what it holds is
+  classified at once, so a password field that the person types into, or
+  shows with the page's "show" button, stays one. This works with the panel
+  open or closed, for open and closed roots, and runs no timer. Simul's
+  listeners are added when it is first run in a tab, so a listener the page
+  put on the window before then runs first: a page that shows the field
+  from there, or stops the event there, is the case below.
+- **While no panel is open.** The page script watches the document for new
+  credential fields from the moment it is first run in a tab. A field added
+  inside a shadow root is seen too: every root that any reader meets, open
+  or closed, is watched with the same records, and an attribute change
+  inside it is read only when it can be credential evidence (a type,
+  autocomplete, role or contenteditable value, or inline masking). What
+  remains is a root attached to an element already in the page that no
+  observer saw and no input reached: a password field in it that the page
+  shows in clear with no input from a person inside the component (after a
+  click elsewhere, such as a "suggest a password" button, or from a
+  window-wide handler that runs before Simul's), before Simul asks, is read as
+  the text field it then is, the same as a field shown in clear before Simul
+  was ever opened on the page. With the panel open the same holds until such
+  a closed root is found (above); an open root is found sooner there,
+  because every walk of the page reads it.
+- **Other extensions.** A password manager's suggestion list or a grammar
+  checker's bubble is often a closed root in the page. The mirror shows what
+  the tab shows, so it shows them while the tab does; credential fields
+  inside them are classified like any other.
+- **Beside `<body>`.** The replica is built from the page's `<head>` and
+  `<body>`. A host that is a child of `<html>` beside `<body>` (some consent
+  managers and extension overlays put theirs there) is read by the page
+  script but not placed in the mirror. This is older than D125 and holds
+  for any element there, with or without a shadow root.
+- **Slotted text under a hidden box.** The hidden-region rule looks at an
+  element's own computed style and its DOM parents. Text slotted into a
+  `display: none` box of a shadow root, open or closed, is therefore read
+  while hidden; the replica hides it as the page does. Text that is hidden
+  itself, or by an ancestor inside the root, is withheld until it is painted.
 
 These are product limits, not exceptions that weaken the sandbox. OpenAI.com,
 Reddit, Y Combinator, and D-U-N-S are useful manual compatibility checks, but

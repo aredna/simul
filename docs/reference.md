@@ -302,6 +302,27 @@ a page: hidden text, labels, card numbers, one-time codes, and form values are
 copied as the page holds them (typed passwords are not). The mirror still
 cannot act on the page. It is off by default.
 
+**Closed shadow roots.** A page component can close its shadow root, which
+hides its inside from the page's own scripts. Chrome lets an extension read
+such a root, and the mirror does: a closed component shows with its text,
+images, menus and scrolling parts like the rest of the page, and every rule
+above applies inside it. Password, card and one-time-code fields are
+recognized there and show as dots. One case remains: nothing tells Simul
+when a component attaches a new root to an element that is already on the
+page. Simul asks about it when a person clicks, types or moves the focus
+inside it, before the page's own handlers on the component run, and, while
+the panel is open, when anything changes there and in turn with the rest of
+the page. A password field in such a root that the page shows in clear
+before Simul has asked, with no input from a person inside the component
+(the page fills it after a click elsewhere, or handles every click and key
+for the whole window before Simul sees them), is read as the plain text
+field it then is, as a field shown in clear before Simul was first opened
+would be. Other extensions often draw their own parts of a page inside closed roots (a password manager's
+suggestion list, a grammar checker's bubble): while the tab shows them, the
+mirror shows them too, unless they sit beside the page's `<body>` instead of
+inside it (see [Fidelity](#fidelity)). The insides of the browser's own
+controls (a text field's editor, a video's buttons) are not read.
+
 A PDF opened from the computer is read from the file you chose and makes no
 request; the panel keeps only a reference to the file, never past closing it.
 
@@ -354,10 +375,12 @@ item, largest page, most page elements), and **Show everything (testing)** are
 under **Advanced & experimental**.
 
 Simul is a safe reconstruction, not a browser clone. Current limitations
-include closed shadow roots, script-only custom-element state, virtualized DOM
-that the page has not created, inaccessible cross-origin CSSOM, generated
-pseudo-element text, canvas/video pixels, protected media, active embedded
-documents, and cross-origin frame contents. Exact pixel parity is not claimed.
+include script-only custom-element state, virtualized DOM that the page has
+not created, inaccessible cross-origin CSSOM, generated pseudo-element text,
+canvas/video pixels, protected media, active embedded documents,
+cross-origin frame contents, and elements placed beside the page's `<body>`
+rather than inside it (some consent dialogs and extension overlays). Exact
+pixel parity is not claimed.
 
 See [Replica fidelity](replica-fidelity.md) and the
 [translation companion architecture](translation-companion.md) for the

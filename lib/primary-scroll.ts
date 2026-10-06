@@ -1,3 +1,5 @@
+import { readSourceShadowRoot } from './replica/source-shadow-root';
+
 export const PRIMARY_SCROLL_MAX = 100_000;
 /**
  * Panes one scroll report names (D122). A page with more scrolled panes than
@@ -244,10 +246,10 @@ export function readPaneScrollPlace(
 const MAX_SCROLLER_SCAN_ELEMENTS = 50_000;
 
 /**
- * Walks the document and its open shadow roots in order and visits every
- * element that is not at its scroll start (D122), so panes scrolled before
- * the mirror was built can be put at their place. Two number reads an
- * element, no style and no rectangle; the walk stops after
+ * Walks the document and its shadow roots, open or closed, in order and
+ * visits every element that is not at its scroll start (D122), so panes
+ * scrolled before the mirror was built can be put at their place. Two number
+ * reads an element, no style and no rectangle; the walk stops after
  * `MAX_SCROLLER_SCAN_ELEMENTS` elements, and a pane past that is picked up
  * when it next scrolls. Return false to stop.
  */
@@ -273,7 +275,8 @@ export function forEachScrolledElement(
       const candidate = candidates[index];
       if (!candidate) continue;
       walked += 1;
-      if (candidate.shadowRoot) roots.push(candidate.shadowRoot);
+      const shadow = readSourceShadowRoot(candidate);
+      if (shadow) roots.push(shadow);
       if (
         finite(candidate.scrollTop) === 0 && finite(candidate.scrollLeft) === 0
       ) continue;

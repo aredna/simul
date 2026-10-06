@@ -24,6 +24,8 @@ import { SemanticSourceReceiver } from '../lib/replica/semantic-source-receiver'
 import { StickySourceSecretClassifier } from '../lib/replica/source-secret-classifier';
 import { hasSourceCredentialSecretAncestor } from '../lib/replica/source-privacy-policy';
 import type { ReplicaSourceDocumentIdentity } from '../lib/replica/source-identity';
+import { installSourceShadowRootReader } from '../lib/replica/source-shadow-root';
+import { closedRootReader } from './support/closed-shadow-roots';
 
 const identity: ReplicaSourceDocumentIdentity = {
   sessionId: 'semantic-source-session',
@@ -932,6 +934,312 @@ describe('semantic source session', () => {
     session.dispose();
   });
 
+  it('reads controls in closed shadow roots and only the length of their credentials (D125)', () => {
+    const { document, window } = parseHTML(
+      '<html><body><x-form id="form"></x-form></body></html>',
+    );
+    const reader = closedRootReader();
+    const form = reader.attach(
+      document.querySelector('#form')!,
+      '<input id="name" value="visible draft"><x-vault id="vault"></x-vault>',
+    );
+    const vault = reader.attach(
+      form.querySelector('#vault')!,
+      '<input id="pin" type="password"><select id="choice"><option selected>Choice label</option></select>',
+    );
+    installSourceShadowRootReader(document as unknown as Document, reader.read);
+    const name = form.querySelector<HTMLInputElement>('#name')!;
+    name.value = 'visible draft';
+    const pin = vault.querySelector<HTMLInputElement>('#pin')!;
+    let secretReads = 0;
+    Object.defineProperty(pin, 'value', {
+      configurable: true,
+      get: () => {
+        secretReads += 1;
+        return 'hunter22';
+      },
+      set: () => undefined,
+    });
+    const select = vault.querySelector<HTMLSelectElement>('#choice')!;
+    const option = select.options.item(0)!;
+    Object.defineProperties(select, {
+      selectedIndex: { configurable: true, get: () => 0 },
+      selectedOptions: { configurable: true, get: () => [option] },
+      multiple: { configurable: true, get: () => false },
+    });
+    Object.defineProperty(option, 'selected', { configurable: true, get: () => true });
+    const mutationHarness: SemanticMutationHarness = { observed: [] };
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(
+      port, document, window, 'isolated-html',
+      undefined, undefined, undefined, mutationHarness,
+    );
+
+    port.emit(createSemanticSourceStart(
+      'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+    ));
+
+    // Both closed roots are observed, the nested one too.
+    expect(mutationHarness.observed).toEqual(expect.arrayContaining([
+      document, form, vault,
+    ]));
+    const first = port.messages[0]!;
+    expect(first.records.map((record) => record.text)).toContain('visible draft');
+    expect(first.records.some((record) => record.nodeId === nodeId(pin))).toBe(false);
+    expect(first.proofs.filter((proof) =>
+      'nodeId' in proof && proof.nodeId === nodeId(pin))).toEqual([
+      expect.objectContaining({ kind: 'masked-length', length: 8 }),
+    ]);
+    expect(first.proofs).toContainEqual(expect.objectContaining({
+      kind: 'select-presentation',
+      nodeId: nodeId(select),
+    }));
+    expect(JSON.stringify(port.messages)).not.toContain('hunter22');
+    expect(secretReads).toBeGreaterThan(0);
+
+    // A password field added later in the nested closed root.
+    port.emit(createSemanticSourceAck(identity, first.policyFingerprint, first.sequence));
+    const late = document.createElement('input');
+    late.setAttribute('type', 'password');
+    Object.defineProperty(late, 'value', {
+      configurable: true,
+      get: () => 'late-secret-99',
+      set: () => undefined,
+    });
+    vault.append(late);
+    mutationHarness.callback?.([{
+      type: 'childList', target: vault, addedNodes: [late], removedNodes: [],
+    } as unknown as MutationRecord], {} as MutationObserver);
+    const second = port.messages.at(-1)!;
+    expect(second.proofs.filter((proof) =>
+      'nodeId' in proof && proof.nodeId === nodeId(late))).toEqual([
+      expect.objectContaining({ kind: 'masked-length', length: 14 }),
+    ]);
+    expect(JSON.stringify(port.messages)).not.toContain('late-secret-99');
+    session.dispose();
+  });
+
+  it('primes the credential ledger inside closed shadow roots (D125)', () => {
+    const { document, window } = parseHTML(
+      '<html><body><x-form id="form"></x-form><main id="page"></main></body></html>',
+    );
+    const reader = closedRootReader();
+    const form = reader.attach(document.querySelector('#form')!, '<x-vault id="vault"></x-vault>');
+    const vault = reader.attach(
+      form.querySelector('#vault')!,
+      '<input id="pin" type="password"><section id="otp" autocomplete="one-time-code"><b id="digit">1</b></section>',
+    );
+    installSourceShadowRootReader(document as unknown as Document, reader.read);
+    const classifier = new StickySourceSecretClassifier();
+
+    eagerlyClassifySourceDocumentSecrets(
+      document as unknown as Document,
+      window as unknown as Window,
+      classifier,
+    );
+
+    expect(classifier.isSecret(vault.querySelector('#pin')!)).toBe(true);
+    expect(classifier.isSecret(vault.querySelector('#digit')!)).toBe(true);
+    expect(classifier.isSecret(form.querySelector('#vault')!)).toBe(false);
+
+    // A host inserted with its closed root already attached.
+    const added = document.createElement('x-added');
+    const addedRoot = reader.attach(added, '<input id="late" autocomplete="cc-number">');
+    document.querySelector('#page')!.append(added);
+    rememberSourceMutationSecrets([{
+      type: 'childList',
+      target: document.querySelector('#page')!,
+      addedNodes: [added],
+      removedNodes: [],
+    } as unknown as MutationRecord], window as unknown as Window, classifier);
+    expect(classifier.isSecret(addedRoot.querySelector('#late')!)).toBe(true);
+  });
+
+  it('treats a disclosure panel as able to hold user input when a closed root in it does (D125)', () => {
+    const { document, window } = parseHTML(
+      '<html><body><button aria-expanded="false" aria-controls="menu">Menu</button>' +
+        '<div id="menu" hidden><x-field id="field"></x-field>Account notices</div></body></html>',
+    );
+    const reader = closedRootReader();
+    reader.attach(document.querySelector('#field')!, '<input value="panel draft">');
+    installSourceShadowRootReader(document as unknown as Document, reader.read);
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(port, document, window);
+    port.emit(createSemanticSourceStart(
+      'isolated-html',
+      identity,
+      { ...FULL_VISIBLE_REPLICA_READ_SCOPE, controlSemantics: false },
+    ));
+
+    const first = port.messages[0]!;
+    expect(first.proofs.some((proof) => proof.kind === 'disclosure-state')).toBe(false);
+    expect(first.records.map((record) => record.text)).not.toContain('Account notices');
+    session.dispose();
+  });
+
+  it('reads the text of a closed root inside a validated disclosure (D125)', () => {
+    const { document, window } = parseHTML(
+      '<html><body><button aria-expanded="true" aria-controls="menu">Menu</button>' +
+        '<div id="menu"><x-notice id="notice"></x-notice></div></body></html>',
+    );
+    const reader = closedRootReader();
+    reader.attach(document.querySelector('#notice')!, '<p>Closed root notice</p>');
+    installSourceShadowRootReader(document as unknown as Document, reader.read);
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(port, document, window);
+    port.emit(createSemanticSourceStart(
+      'isolated-html',
+      identity,
+      { ...FULL_VISIBLE_REPLICA_READ_SCOPE, controlSemantics: false },
+    ));
+
+    expect(port.messages[0]!.proofs.some((proof) => proof.kind === 'disclosure-state'))
+      .toBe(true);
+    expect(port.messages[0]!.records.map((record) => record.text))
+      .toContain('Closed root notice');
+    session.dispose();
+  });
+
+  it('treats a tab panel as able to hold user input when a closed root in it does (D125)', () => {
+    const { document, window } = parseHTML(`
+      <html><body><div role="tablist">
+        <div id="tab-a" role="tab" aria-selected="true" aria-expanded="true"
+          aria-controls="panel-a">A</div>
+        <div id="tab-b" role="tab" aria-selected="false" aria-expanded="false"
+          aria-controls="panel-b">B</div>
+      </div>
+      <section id="panel-a" role="tabpanel" aria-hidden="false">Active news<x-field id="field"></x-field></section>
+      <section id="panel-b" role="tabpanel" aria-hidden="true" hidden>Inactive news</section>
+      </body></html>
+    `);
+    installPaintedTabFixture(document, window as unknown as Window);
+    const reader = closedRootReader();
+    reader.attach(document.querySelector('#field')!, '<input value="tab draft">');
+    installSourceShadowRootReader(document as unknown as Document, reader.read);
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(
+      port, document, window, 'isolated-html', undefined, tabFixtureComputedStyle,
+    );
+    port.emit(createSemanticSourceStart(
+      'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+    ));
+
+    const panelA = nodeId(document.querySelector('#panel-a')!);
+    expect(port.messages[0]!.proofs.some((proof) =>
+      proof.kind === 'tab-state' && proof.panelNodeId === panelA)).toBe(false);
+    session.dispose();
+  });
+
+  it('remembers what a closed root held when its host left a credential region (D125)', () => {
+    const { document, window } = parseHTML(
+      '<html><body><section id="otp" autocomplete="one-time-code"><x-digit id="digit"></x-digit></section></body></html>',
+    );
+    const reader = closedRootReader();
+    const digit = document.querySelector('#digit')!;
+    const root = reader.attach(digit, '<b id="inner">7</b>');
+    installSourceShadowRootReader(document as unknown as Document, reader.read);
+    const classifier = new StickySourceSecretClassifier();
+    const region = document.querySelector('#otp')!;
+
+    digit.remove();
+    rememberSourceMutationSecrets([{
+      type: 'childList', target: region, addedNodes: [], removedNodes: [digit],
+    } as unknown as MutationRecord], window as unknown as Window, classifier);
+
+    expect(classifier.isSecret(digit)).toBe(true);
+    expect(classifier.isSecret(root.querySelector('#inner')!)).toBe(true);
+  });
+
+  it('reads the page again before sending a value under a closed root attached since (D125)', () => {
+    const { document, window } = parseHTML(
+      '<html><body><div id="host"><input id="field"></div><p>page</p></body></html>',
+    );
+    const reader = closedRootReader();
+    installSourceShadowRootReader(document as unknown as Document, reader.read);
+    const host = document.querySelector('#host')!;
+    const field = document.querySelector<HTMLInputElement>('#field')!;
+    field.value = 'typed before';
+    // Chrome reads null from `assignedSlot` for a node slotted into a closed root.
+    Object.defineProperty(field, 'assignedSlot', { configurable: true, value: null });
+    const masking = ((element: Element) => ({
+      display: 'block',
+      visibility: 'visible',
+      getPropertyValue: (name: string) =>
+        name === '-webkit-text-security' && element.classList.contains('mask')
+          ? 'disc'
+          : 'none',
+    })) as unknown as Window['getComputedStyle'];
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(port, document, window, 'isolated-html', undefined, masking);
+    port.emit(createSemanticSourceStart(
+      'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+    ));
+    const first = port.messages[0]!;
+    expect(first.records.map((record) => record.text)).toContain('typed before');
+    port.emit(createSemanticSourceAck(identity, first.policyFingerprint, first.sequence));
+
+    // A closed root wraps the field in a masking box; nothing fires. The
+    // value then changes: the root is asked about before it is sent.
+    reader.attach(host, '<div class="mask"><slot></slot></div>');
+    field.value = 'typed-secret-51';
+    session.refresh();
+
+    expect(JSON.stringify(port.messages)).not.toContain('typed-secret-51');
+    expect(reader.calls).toContain(host);
+    session.dispose();
+  });
+
+  it('reads no computed style for an attribute change that cannot be credential evidence (D125)', () => {
+    const { document } = parseHTML(
+      '<html><body><x-card id="card"><input id="field" type="text"></x-card></body></html>',
+    );
+    let reads = 0;
+    const sourceWindow = {
+      getComputedStyle: () => {
+        reads += 1;
+        return { getPropertyValue: () => 'none' };
+      },
+    } as unknown as Window;
+    const classifier = new StickySourceSecretClassifier();
+    const card = document.querySelector('#card')!;
+    const field = document.querySelector('#field')!;
+    const change = (target: Element, attributeName: string, oldValue: string) =>
+      ({ type: 'attributes', target, attributeName, oldValue }) as unknown as MutationRecord;
+
+    // An animation, a class, a data attribute: no style is read.
+    card.setAttribute('style', 'transform: rotate(2deg)');
+    rememberSourceMutationSecrets([
+      change(card, 'style', 'transform: rotate(1deg)'),
+      change(card, 'class', 'a'),
+      change(card, 'data-frame', '1'),
+    ], sourceWindow, classifier);
+    expect(reads).toBe(0);
+
+    // A type that was password, and inline masking, are read as before.
+    field.setAttribute('type', 'text');
+    rememberSourceMutationSecrets([change(field, 'type', 'password')], sourceWindow, classifier);
+    expect(reads).toBe(1);
+    expect(classifier.isSecret(field)).toBe(true);
+    card.setAttribute('style', 'color: red');
+    rememberSourceMutationSecrets(
+      [change(card, 'style', '-webkit-text-security: disc')],
+      sourceWindow,
+      classifier,
+    );
+    expect(reads).toBe(2);
+    expect(classifier.isSecret(card)).toBe(true);
+  });
+
   it('skips semantic rescans for provable same-value mutations', () => {
     const { document, window } = parseHTML(
       '<html><body><main class="stable">Article</main></body></html>',
@@ -978,9 +1286,10 @@ describe('semantic source session', () => {
       oldValue: 'stable',
     } as unknown as MutationRecord], {} as MutationObserver);
 
-    // The sticky secret ledger still performs its one mandatory classification
-    // read; the full semantic scan would add more reads after that boundary.
-    expect(styleReads).toBe(1);
+    // A class change carries no credential evidence, so the sticky secret
+    // ledger reads no style for it (D125); the full semantic scan would read
+    // more.
+    expect(styleReads).toBe(0);
     expect(port.messages).toHaveLength(1);
     session.dispose();
   });

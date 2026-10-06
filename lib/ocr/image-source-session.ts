@@ -34,6 +34,11 @@ import {
   type SourceControlledContentPolicy,
 } from '../replica/source-privacy-policy';
 import {
+  askAboutSourceShadowRootsAbove,
+  probeSourceShadowRoot,
+  readSourceShadowRoot,
+} from '../replica/source-shadow-root';
+import {
   sourceDocumentSecretClassifier,
   type StickySourceSecretClassifier,
 } from '../replica/source-secret-classifier';
@@ -348,6 +353,7 @@ export class ImageSourceSession {
   #measure(descriptor: SourceImageDescriptor): SourceImageCaptureMetrics | undefined {
     const node = this.environment.resolveNode(descriptor.nodeId);
     if (!isImageElement(node) || !node.isConnected) return undefined;
+    if (!this.#askedAboutRootsAbove(node)) return undefined;
     if (this.#hasStickySecretAncestor(node)) return undefined;
     if (
       !this.#controlImages &&
@@ -458,6 +464,7 @@ export class ImageSourceSession {
   ): Promise<SourceImageFileEvidence | undefined> {
     const node = this.environment.resolveNode(descriptor.nodeId);
     if (!isImageElement(node) || !node.isConnected) return undefined;
+    if (!this.#askedAboutRootsAbove(node)) return undefined;
     if (this.#hasStickySecretAncestor(node)) return undefined;
     if (
       !this.#controlImages &&
@@ -517,6 +524,7 @@ export class ImageSourceSession {
     | { readonly status: 'none' | 'blocked' } {
     const node = this.environment.resolveNode(descriptor.nodeId);
     if (!isImageElement(node) || !node.isConnected) return { status: 'blocked' };
+    if (!this.#askedAboutRootsAbove(node)) return { status: 'blocked' };
     if (this.#hasStickySecretAncestor(node)) return { status: 'blocked' };
     if (!controlImages && (
       hasSourceControlOrEditableElementAncestor(node) ||
@@ -555,6 +563,21 @@ export class ImageSourceSession {
         ...(nearestElementLanguage ? { nearestElementLanguage } : {}),
       }),
     };
+  }
+
+  /**
+   * Asks about the root of every element above the image before anything
+   * about it is read: one attached since it was last read fires nothing,
+   * and the checks that follow climb through it once it is known (D125).
+   * False when the climb cannot be finished.
+   */
+  #askedAboutRootsAbove(node: Element): boolean {
+    try {
+      askAboutSourceShadowRootsAbove(node, new Set());
+      return true;
+    } catch {
+      return false;
+    }
   }
 
   #hasStickySecretAncestor(element: Element): boolean {
@@ -799,7 +822,7 @@ export function hasSourceAriaControlledRegionAncestor(
 }
 
 export const MAX_CAPTURE_OVERLAP_ELEMENTS = 50_000;
-/** Bounded descent through open shadow roots under a covering element. */
+/** Bounded descent through shadow roots under a covering element. */
 const MAX_TEXT_COVER_SHADOW_DEPTH = 16;
 
 /** Skip invalid lang values and continue outward to the nearest valid hint. */
@@ -906,6 +929,11 @@ export function hasProtectedSiblingOverlap(
     const style = safeComputedStyle(sourceWindow, candidate);
     if (!style) return true;
     if (!styleAllowsImageCapture(style)) continue;
+    // What the element paints may come from a root attached since it was
+    // read, which fires nothing and which no walk above saw. Asked again, a
+    // root that turns up refuses this capture; it is known from now on, so
+    // the next one classifies what it holds (D125).
+    if (sourceShadowRootAttachedSince(candidate)) return true;
     // Classify every painted overlap, not only controls and ARIA role nodes.
     // Generic div/span overlays can carry sticky password, OTP, payment,
     // WebAuthn, or computed text-security classification too.
@@ -945,11 +973,15 @@ function isCoveredByForeignText(
     try {
       top = elementFromPoint.call(sourceDocument, x, y);
       // The document-level hit test stops at a shadow host; descend so a
-      // text overlay inside an open shadow tree is not mistaken for its
-      // text-free host.
+      // text overlay inside a shadow tree, open or closed (D125), is not
+      // mistaken for its text-free host.
       for (let depth = 0; top && depth < MAX_TEXT_COVER_SHADOW_DEPTH; depth += 1) {
-        const shadow = top.shadowRoot;
-        if (!shadow || shadow.mode !== 'open' || ancestors.has(top)) break;
+        if (ancestors.has(top)) break;
+        // A root attached since the element was read is asked about again,
+        // and covers the image until it is known (D125).
+        if (sourceShadowRootAttachedSince(top)) return true;
+        const shadow = readSourceShadowRoot(top);
+        if (!shadow) break;
         const shadowHit = shadow.elementFromPoint;
         if (typeof shadowHit !== 'function') break;
         const inner = shadowHit.call(shadow, x, y);
@@ -963,6 +995,18 @@ function isCoveredByForeignText(
     if (elementHasOwnVisibleText(top)) return true;
   }
   return false;
+}
+
+/**
+ * Whether Chrome now reports a root for an element that every reader so far
+ * took to have none. Unreadable counts as yes.
+ */
+function sourceShadowRootAttachedSince(element: Element): boolean {
+  try {
+    return !readSourceShadowRoot(element) && Boolean(probeSourceShadowRoot(element));
+  } catch {
+    return true;
+  }
 }
 
 function elementHasOwnVisibleText(element: Element): boolean {
@@ -985,7 +1029,7 @@ function elementHasOwnVisibleText(element: Element): boolean {
 }
 
 /**
- * Enumerates the document and every accessible open shadow tree once. Going
+ * Enumerates the document and every shadow tree, open or closed, once. Going
  * over the mirror-size ceiling fails closed instead of leaving an overlapping
  * painted element outside the OCR classifier.
  */
@@ -1003,8 +1047,8 @@ function collectCaptureOverlapElements(
         if (elements.length >= MAX_CAPTURE_OVERLAP_ELEMENTS) return undefined;
         seen.add(element);
         elements.push(element);
-        const shadow = element.shadowRoot;
-        if (shadow?.mode === 'open') roots.push(shadow);
+        const shadow = readSourceShadowRoot(element);
+        if (shadow) roots.push(shadow);
       }
     }
   } catch {

@@ -9,6 +9,8 @@ import {
   readPaneScrollPlace,
   readVisualViewportSnapshot,
 } from '../lib/primary-scroll';
+import { installSourceShadowRootReader } from '../lib/replica/source-shadow-root';
+import { closedRootReader } from './support/closed-shadow-roots';
 
 describe('primary scroll classification', () => {
   it('uses the authoritative standards/body document owner and bounded coordinates', () => {
@@ -292,6 +294,35 @@ describe('primary scroll classification', () => {
     expect(readPaneScrollPlace(list, document)).toEqual({
       scrollX: 0, scrollY: 25_000, maxScrollX: 0, maxScrollY: 100_000,
     });
+  });
+
+  it('walks to the scrolled elements inside closed shadow roots (D125)', () => {
+    const { document } = parseHTML(
+      '<html><body><x-list id="host"></x-list><input id="field"></body></html>',
+    );
+    const host = document.querySelector('#host')!;
+    const reader = closedRootReader();
+    const root = reader.attach(host, '<div id="pane"></div><x-inner id="inner"></x-inner>');
+    const nested = reader.attach(root.querySelector('#inner')!, '<div id="deep"></div>');
+    const pane = root.querySelector('#pane')!;
+    const deep = nested.querySelector('#deep')!;
+    Object.defineProperty(pane, 'scrollTop', { configurable: true, value: 500 });
+    Object.defineProperty(deep, 'scrollLeft', { configurable: true, value: 120 });
+    const walk = () => {
+      const found: Element[] = [];
+      forEachScrolledElement(document, (candidate) => {
+        found.push(candidate);
+        return true;
+      });
+      return found;
+    };
+
+    expect(walk()).toEqual([]);
+    installSourceShadowRootReader(document, reader.read);
+    expect(walk()).toEqual([pane, deep]);
+    // A text field's own root is never asked for.
+    expect(reader.calls).not.toContain(document.querySelector('#field'));
+    installSourceShadowRootReader(document, undefined);
   });
 
   it('walks to the scrolled elements, through open shadow roots, within its bound', () => {

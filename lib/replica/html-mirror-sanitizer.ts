@@ -32,6 +32,7 @@ import {
 } from './source-secret-classifier';
 import { isSafeStaticSvgDataImage } from './static-svg-data-image';
 import { SOURCE_PRIVACY_FILTERS_OFF } from './source-privacy-mode';
+import { readSourceShadowRoot } from './source-shadow-root';
 import {
   MAX_ADOPTED_STYLE_CHARACTERS_PER_OWNER,
   MAX_ADOPTED_STYLE_RULES_PER_OWNER,
@@ -107,6 +108,13 @@ export interface HtmlMirrorControlText extends SourceControlText {
   readonly translatable: true;
 }
 
+/**
+ * A shadow root of the page, open or closed (D125). `mode` is the mode of
+ * the root the replica builds, which is always open: the replica runs no
+ * page code, so nothing in it can tell the two apart, and Simul's own panel
+ * code has to reach into the roots it builds. Whether the page closed its
+ * root therefore does not travel.
+ */
 export interface HtmlMirrorShadowRoot {
   readonly id: number;
   readonly mode: 'open';
@@ -150,6 +158,10 @@ export interface HtmlMirrorRepresentabilitySummary {
   readonly unreadableStyleCount: number;
   readonly capacityOmissionCount: number;
   readonly customElementHostCount: number;
+  /**
+   * These two keep their names on the wire. Since D125 they count the roots
+   * the mirror reads, open or closed, and the custom elements with none.
+   */
   readonly customElementHostWithoutAccessibleOpenRootCount: number;
   readonly accessibleOpenShadowRootCount: number;
   readonly missingReconciliationProofFallbackCount: number;
@@ -1579,7 +1591,7 @@ function serializeNode(
     );
     if (credentialInput) return credentialInput;
     // Replace any other hard-secret boundary before reading its original tag,
-    // attributes, resources, descendants, open shadow root, or style hints.
+    // attributes, resources, descendants, shadow root, or style hints.
     // The node ID is retained solely for exact-document mirror identity.
     const tagName = sourceSecretPlaceholderTagName(id);
     admitNode(
@@ -1802,14 +1814,16 @@ function serializeNode(
     }
   }
   let shadowRoot: HtmlMirrorShadowRoot | undefined;
-  const sourceShadow = liveElement.shadowRoot;
-  if (customElementHost && sourceShadow?.mode !== 'open') {
+  // Open or closed (D125). The root's content goes through this same walk:
+  // each node is classified before it is read, and every limit applies.
+  const sourceShadow = readSourceShadowRoot(liveElement);
+  if (customElementHost && !sourceShadow) {
     incrementRepresentability(
       context.representability,
       'customElementHostWithoutAccessibleOpenRootCount',
     );
   }
-  if (sourceShadow?.mode === 'open') {
+  if (sourceShadow) {
     incrementRepresentability(
       context.representability,
       'accessibleOpenShadowRootCount',

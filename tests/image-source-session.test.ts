@@ -16,6 +16,11 @@ import { SourceImageObserver } from '../lib/ocr/source-image-observer';
 import type { ReplicaSourceDocumentIdentity } from '../lib/replica/source-identity';
 import { createSourceControlledContentPolicy } from '../lib/replica/source-privacy-policy';
 import { sourceDocumentSecretClassifier } from '../lib/replica/source-secret-classifier';
+import {
+  installSourceShadowRootReader,
+  readSourceShadowRoot,
+} from '../lib/replica/source-shadow-root';
+import { closedRootReader } from './support/closed-shadow-roots';
 
 const baseStyle = {
   display: 'block',
@@ -1625,6 +1630,173 @@ describe('image source capture safety', () => {
       isSecret,
     )).toBe(true);
   });
+
+  it('asks about the roots above an image before it reads its alt text (D125)', () => {
+    const { document } = parseHTML(
+      '<html><body><div id="host"><img id="image" alt="Card ending 4242"></div></body></html>',
+    );
+    const image = document.querySelector<HTMLImageElement>('#image')!;
+    const host = document.querySelector('#host')!;
+    setImageFacts(image);
+    // Chrome reads null from `assignedSlot` for a node slotted into a closed root.
+    Object.defineProperty(image, 'assignedSlot', { configurable: true, value: null });
+    const reader = closedRootReader();
+    installSourceShadowRootReader(document as unknown as Document, reader.read);
+    const identity: ReplicaSourceDocumentIdentity = {
+      sessionId: 'late-root-accessibility-session',
+      pageEpoch: 1,
+      generation: 1,
+      documentId: 'late-root-accessibility-document',
+      frameId: 0,
+    };
+    const port = new FakeImageSourcePort(
+      createImageSourcePortName(identity.sessionId),
+    );
+    const session = new ImageSourceSession({
+      port,
+      document: document as unknown as Document,
+      window: {
+        innerWidth: 800,
+        innerHeight: 600,
+        scrollX: 0,
+        scrollY: 0,
+        devicePixelRatio: 1,
+        getComputedStyle: () => baseStyle,
+      } as unknown as Window,
+      resolveNode: (nodeId) => nodeId === 7 ? image : null,
+      getNodeId: () => 7,
+      createObserver: (environment) => new SourceImageObserver({
+        ...environment,
+        createIntersectionObserver: (callback) =>
+          new ImmediateIntersectionObserver(callback),
+        createResizeObserver: () => new NoopElementObserver(),
+        createMutationObserver: () => new NoopMutationObserver(),
+      }),
+    });
+    port.emitMessage({
+      kind: 'simul:image-source-v2:start',
+      document: identity,
+      policyFingerprint: 'read-v1-111000',
+      controlImages: true,
+      accessibilityTextEnabled: true,
+    });
+    const descriptor = lastUpsertDescriptor(port.messages)!;
+    const ask = (requestId: string) => port.emitMessage({
+      kind: 'simul:image-source-v2:accessibility-text',
+      requestId,
+      descriptor,
+      policyFingerprint: 'read-v1-111000',
+      controlImages: true,
+    });
+    ask('before');
+    expect(port.messages.at(-1)).toMatchObject({ requestId: 'before', status: 'ready' });
+
+    // A closed root puts the image inside a one-time-code region; nothing fires.
+    reader.attach(host, '<section autocomplete="one-time-code"><slot></slot></section>');
+    ask('after');
+    expect(port.messages.at(-1)).toMatchObject({ requestId: 'after', status: 'blocked' });
+    expect(reader.calls.filter((element) => element === host).length).toBeGreaterThan(1);
+    session.dispose();
+  });
+
+  it('asks again about an element painted over an image and refuses while its root is new (D125)', () => {
+    const { document } = parseHTML(
+      '<html><body><img id="image"><x-pay id="pay"></x-pay></body></html>',
+    );
+    const image = document.querySelector('#image')! as unknown as HTMLImageElement;
+    const pay = document.querySelector('#pay')!;
+    const reader = closedRootReader();
+    installSourceShadowRootReader(document as unknown as Document, reader.read);
+    const imageRect = rect(10, 10, 200, 100);
+    Object.defineProperty(image, 'getBoundingClientRect', { value: () => imageRect });
+    Object.defineProperty(pay, 'getBoundingClientRect', { value: () => rect(40, 25, 100, 40) });
+    const sourceWindow = { getComputedStyle: () => baseStyle } as unknown as Window;
+    const isSecret = (element: Element) =>
+      element.getAttribute('autocomplete') === 'cc-number';
+    const overlap = () => hasProtectedSiblingOverlap(
+      image,
+      imageRect,
+      document as unknown as Document,
+      sourceWindow,
+      isSecret,
+    );
+    expect(overlap()).toBe(false);
+    expect(readSourceShadowRoot(pay)).toBeUndefined();
+
+    // A root holding a card field is attached to the element; nothing fires.
+    const root = reader.attach(pay, '<input id="card" autocomplete="cc-number">');
+    Object.defineProperty(root.querySelector('#card')!, 'getBoundingClientRect', {
+      value: () => rect(40, 25, 100, 40),
+    });
+    expect(overlap()).toBe(true);
+    // The root is known now: its field refuses the capture by itself.
+    expect(readSourceShadowRoot(pay)).toBe(root);
+    expect(overlap()).toBe(true);
+  });
+
+  it('lets a capture go over a closed root it has known for a while that holds nothing secret (D125)', () => {
+    const { document } = parseHTML(
+      '<html><body><img id="image"><x-badge id="badge"></x-badge></body></html>',
+    );
+    const image = document.querySelector('#image')! as unknown as HTMLImageElement;
+    const badge = document.querySelector('#badge')!;
+    const reader = closedRootReader();
+    const root = reader.attach(badge, '<span id="label">New</span>');
+    installSourceShadowRootReader(document as unknown as Document, reader.read);
+    expect(readSourceShadowRoot(badge)).toBe(root);
+    const imageRect = rect(10, 10, 200, 100);
+    Object.defineProperty(image, 'getBoundingClientRect', { value: () => imageRect });
+    for (const element of [badge, root.querySelector('#label')!]) {
+      Object.defineProperty(element, 'getBoundingClientRect', { value: () => rect(40, 25, 100, 40) });
+    }
+    const sourceWindow = { getComputedStyle: () => baseStyle } as unknown as Window;
+    expect(hasProtectedSiblingOverlap(
+      image,
+      imageRect,
+      document as unknown as Document,
+      sourceWindow,
+      () => false,
+    )).toBe(false);
+  });
+
+  it('finds a credential control in a closed root painted over an image (D125)', () => {
+    const { document } = parseHTML(
+      '<html><body><img id="image"><x-pay id="pay"></x-pay></body></html>',
+    );
+    const image = document.querySelector('#image')! as unknown as HTMLImageElement;
+    const pay = document.querySelector('#pay')!;
+    const reader = closedRootReader();
+    const outer = reader.attach(pay, '<x-field id="field"></x-field>');
+    const inner = reader.attach(
+      outer.querySelector('#field')!,
+      '<input id="card" autocomplete="cc-number">',
+    );
+    const card = inner.querySelector('#card')!;
+    const imageRect = rect(10, 10, 200, 100);
+    Object.defineProperty(image, 'getBoundingClientRect', { value: () => imageRect });
+    for (const element of [pay, outer.querySelector('#field')!, card]) {
+      Object.defineProperty(element, 'getBoundingClientRect', {
+        value: () => rect(40, 25, 100, 40),
+      });
+    }
+    const sourceWindow = {
+      getComputedStyle: () => baseStyle,
+    } as unknown as Window;
+    const isSecret = (element: Element) =>
+      element.getAttribute('autocomplete') === 'cc-number';
+    const overlap = () => hasProtectedSiblingOverlap(
+      image,
+      imageRect,
+      document as unknown as Document,
+      sourceWindow,
+      isSecret,
+    );
+
+    // Unseen before D125: the field's pixels could reach the image's OCR.
+    expect(overlap()).toBe(false);
+    installSourceShadowRootReader(document as unknown as Document, reader.read);
+    expect(overlap()).toBe(true);
+  });
 });
 
 describe('foreign text cover detection', () => {
@@ -1708,6 +1880,52 @@ describe('foreign text cover detection', () => {
       configurable: true,
       value: () => shadow.querySelector('#toast'),
     });
+    expect(safe()).toBe(false);
+  });
+
+  it('descends into a closed shadow root to find a covering text overlay (D125)', () => {
+    const { document, safe, hitTest } = geometryFixture(
+      '<x-toast id="host"></x-toast><img id="image">',
+    );
+    const host = document.querySelector('#host')!;
+    const reader = closedRootReader();
+    const shadow = reader.attach(host, '<x-inner id="inner"></x-inner>');
+    const nested = reader.attach(
+      shadow.querySelector('#inner')!,
+      '<div id="toast">Copied to clipboard</div>',
+    );
+    hitTest(() => host);
+    Object.defineProperty(shadow, 'elementFromPoint', {
+      configurable: true,
+      value: () => shadow.querySelector('#inner'),
+    });
+    Object.defineProperty(nested, 'elementFromPoint', {
+      configurable: true,
+      value: () => nested.querySelector('#toast'),
+    });
+    // Without the page reader the hit test stops at the text-free host.
+    expect(safe()).toBe(true);
+    installSourceShadowRootReader(document as unknown as Document, reader.read);
+    expect(safe()).toBe(false);
+  });
+
+  it('treats a root attached since over the image as covering it until it is known (D125)', () => {
+    const { document, safe, hitTest } = geometryFixture(
+      '<div id="toast"></div><img id="image">',
+    );
+    const toast = document.querySelector('#toast')!;
+    const reader = closedRootReader();
+    installSourceShadowRootReader(document as unknown as Document, reader.read);
+    hitTest(() => toast);
+    expect(safe()).toBe(true);
+
+    const shadow = reader.attach(toast, '<p id="text">Copied to clipboard</p>');
+    Object.defineProperty(shadow, 'elementFromPoint', {
+      configurable: true,
+      value: () => shadow.querySelector('#text'),
+    });
+    expect(safe()).toBe(false);
+    expect(readSourceShadowRoot(toast)).toBe(shadow);
     expect(safe()).toBe(false);
   });
 

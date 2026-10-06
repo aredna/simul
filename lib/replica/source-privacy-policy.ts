@@ -4,6 +4,10 @@ import {
   type StickySourceSecretClassifier,
 } from './source-secret-classifier';
 import { SOURCE_PRIVACY_FILTERS_OFF } from './source-privacy-mode';
+import {
+  readSourceAssignedSlot,
+  readSourceShadowRoot,
+} from './source-shadow-root';
 
 /**
  * Native elements whose text is a value the user typed or chose. `output`
@@ -1250,7 +1254,7 @@ function safelyReadSourceAttribute(
 
 function safelyReadSourceShadowRoot(element: Element): ShadowRoot | undefined {
   try {
-    return element.shadowRoot?.mode === 'open' ? element.shadowRoot : undefined;
+    return readSourceShadowRoot(element);
   } catch {
     return undefined;
   }
@@ -1278,7 +1282,9 @@ export function isSourcePrivateTagName(value: string): boolean {
  * Returns the rendered flat-tree element path surrounding `node`. Elements
  * start their own path; directly slotted Text nodes start at their assigned
  * slot. Assigned slots take precedence over DOM parents, then open/closed
- * shadow ancestry continues through the host. An unreadable, malformed,
+ * shadow ancestry continues through the host. A slot in a closed root is
+ * found too (D125), so what the root wraps around the slot counts for a
+ * slotted node as it does in an open root. An unreadable, malformed,
  * cyclic, or unreasonably deep path fails closed as `undefined`.
  */
 export function readSourceFlatTreeElementPath(
@@ -1306,9 +1312,7 @@ export function readSourceFlatTreeElementPath(
 }
 
 function sourceFlatTreeParentElement(node: Node): Element | undefined {
-  const assignedSlot = (node as Node & {
-    readonly assignedSlot?: Element | null;
-  }).assignedSlot;
+  const assignedSlot = readSourceAssignedSlot(node);
   if (assignedSlot !== undefined && assignedSlot !== null) {
     if (
       assignedSlot.nodeType !== 1 ||

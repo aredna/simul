@@ -55,6 +55,11 @@ import type { ReplicaReadScope } from './read-scope-policy';
 import type { ReplicaSourceDocumentIdentity } from './source-identity';
 import { sourceMutationMayChangeCurrentValue } from './source-mutation-filter';
 import {
+  askAboutSourceShadowRootsAbove,
+  beginSourceShadowRootWalk,
+  readSourceShadowRoot,
+} from './source-shadow-root';
+import {
   hasStructuralMenuContext,
   isPlainStructuralMenuTrigger,
   isStructuralMenuPanelElement,
@@ -108,6 +113,8 @@ interface RevisionState {
 interface SemanticSourceScan {
   readonly records: readonly SemanticSourceRecord[];
   readonly proofs: readonly SemanticSourceProof[];
+  /** The nodes whose record is new or changed in this scan. */
+  readonly changedNodes?: readonly Node[];
 }
 
 interface ValidatedDisclosure {
@@ -701,13 +708,25 @@ export class SemanticSourceSession {
     ) return;
     this.#dirty = false;
     let scan: SemanticSourceScan;
+    const rootWalk = beginSourceShadowRootWalk();
     try {
       this.#scanSecretAncestors = createSourceSecretAncestorMemo();
       scan = this.#scan();
+      // Before a new text or value is sent, every element above its node
+      // is asked about its root again: one attached since it was last read
+      // fires nothing and may wrap the node in a masking box. If one turns
+      // up, the page is read again with it; if that read turns up another,
+      // nothing is sent until the next change (D125).
+      if (this.#foundRootsAbove(scan.changedNodes ?? [])) {
+        this.#scanSecretAncestors = createSourceSecretAncestorMemo();
+        scan = this.#scan();
+        if (this.#foundRootsAbove(scan.changedNodes ?? [])) return;
+      }
     } catch {
       this.dispose(true);
       return;
     } finally {
+      rootWalk.end();
       this.#scanSecretAncestors = undefined;
     }
     const scanSignature = semanticSourceScanSignature(scan);
@@ -730,6 +749,15 @@ export class SemanticSourceSession {
     this.#lastEmittedScanSignature = scanSignature;
     this.#sequence = sequence;
     this.#inFlightSequence = sequence;
+  }
+
+  #foundRootsAbove(nodes: readonly Node[]): boolean {
+    const asked = new Set<Node>();
+    let found = false;
+    for (const node of nodes) {
+      if (askAboutSourceShadowRootsAbove(node, asked).length > 0) found = true;
+    }
+    return found;
   }
 
   #scan(): SemanticSourceScan {
@@ -1036,6 +1064,7 @@ export class SemanticSourceSession {
     }
 
     const records: SemanticSourceRecord[] = [];
+    const changedNodes: Node[] = [];
     const recordIds = new Set<number>();
     const add = (
       node: Node,
@@ -1087,6 +1116,7 @@ export class SemanticSourceSession {
       recordIds.add(recordId);
       batchBytes += recordBytes;
       records.push(record);
+      if (nodeRevision !== previous?.revision) changedNodes.push(node);
       if (gate === 'disclosureContent' && presentation === 'text') {
         admittedDisclosureTextNodes.add(node);
       }
@@ -1302,6 +1332,7 @@ export class SemanticSourceSession {
     return Object.freeze({
       records: Object.freeze(records),
       proofs: Object.freeze(emittedProofs),
+      changedNodes: Object.freeze(changedNodes),
     });
   }
 
@@ -1703,6 +1734,7 @@ export function eagerlyClassifySourceDocumentSecrets(
   ];
   let visited = 0;
   const secretAncestors = createSourceSecretAncestorMemo();
+  const rootWalk = beginSourceShadowRootWalk();
   try {
     while (stack.length > 0 && visited < MAX_SEMANTIC_SOURCE_NODE_IDENTITIES) {
       const current = stack.pop();
@@ -1734,6 +1766,8 @@ export function eagerlyClassifySourceDocumentSecrets(
   } catch {
     rememberSourceNodeSecret(root, classifier);
     return;
+  } finally {
+    rootWalk.end();
   }
   if (stack.length > 0) rememberSourceNodeSecret(root, classifier);
 }
@@ -1748,12 +1782,23 @@ export function eagerlyClassifySourceDocumentSecrets(
  * changes, even twice in one batch or with content beside it, is not taken as
  * a masking transition any more (D75). Frameworks do that on every focus and
  * input, and on `<body>` when a dialog opens, and the rule then hid whole form
- * rows, or the whole page, for the page's lifetime.
+ * rows, or the whole page, for the page's lifetime. So any other attribute
+ * change is passed over without reading the element's computed style: an
+ * animation inside every shadow root on a page would otherwise pay for one
+ * read a change while no panel is open (D125).
  */
 export function rememberSourceMutationSecrets(
   records: readonly MutationRecord[],
   sourceWindow: Window,
   classifier: StickySourceSecretClassifier,
+  options: {
+    /**
+     * Read added subtrees in a fresh walk. The document-lifetime observer
+     * does; the sessions' observers, which see the same records after it,
+     * trust what it has just asked (D125).
+     */
+    readonly freshRoots?: boolean;
+  } = {},
 ): void {
   const addedRoots: Node[] = [];
   for (const record of records) {
@@ -1766,8 +1811,12 @@ export function rememberSourceMutationSecrets(
     const element = record.target;
     const name = record.attributeName?.toLowerCase();
     if (!name) continue;
-    const facts = sourceClassificationFacts(element, sourceWindow, false, false);
     const oldValue = record.oldValue ?? '';
+    if (
+      !SOURCE_EVIDENCE_ATTRIBUTES.has(name) &&
+      !(name === 'style' && oldStyleUsedTextSecurity(oldValue))
+    ) continue;
+    const facts = sourceClassificationFacts(element, sourceWindow, false, false);
     const oldFacts: SourceClassificationFacts = {
       ...facts,
       ...(name === 'type' ? { type: oldValue } : {}),
@@ -1809,7 +1858,7 @@ export function rememberSourceMutationSecrets(
   for (const root of addedRoots) {
     if (root.nodeType !== ELEMENT_NODE) continue;
     const element = root as Element;
-    eagerlyClassifySourceDocumentSubtree(element, sourceWindow, classifier);
+    eagerlyClassifySourceDocumentSubtree(element, sourceWindow, classifier, options);
   }
 }
 
@@ -1900,10 +1949,35 @@ function isElementNode(value: unknown): value is Element {
     (value as Node).nodeType === ELEMENT_NODE;
 }
 
-function eagerlyClassifySourceDocumentSubtree(
+/** The attributes an old value of which is credential evidence (D75). */
+const SOURCE_EVIDENCE_ATTRIBUTES = new Set([
+  'type',
+  'autocomplete',
+  'role',
+  'contenteditable',
+]);
+
+/**
+ * The attributes `rememberSourceMutationSecrets` reads: those above, and
+ * `style` when its old value masked text. An observer that feeds only it
+ * can filter its records to these (D125).
+ */
+export const SOURCE_EVIDENCE_ATTRIBUTE_FILTER: readonly string[] = Object.freeze([
+  ...SOURCE_EVIDENCE_ATTRIBUTES,
+  'style',
+]);
+
+/**
+ * Classifies every node of `root`'s subtree, through its shadow roots, for
+ * the document-lifetime credential ledger. An added subtree may hold an
+ * element read before and given a root since, while it was out of the page:
+ * with `freshRoots` each element is asked about its root again (D125).
+ */
+export function eagerlyClassifySourceDocumentSubtree(
   root: Element,
   sourceWindow: Window,
   classifier: StickySourceSecretClassifier,
+  options: { readonly freshRoots?: boolean } = {},
 ): void {
   const stack: Array<{
     readonly node: Node;
@@ -1911,6 +1985,7 @@ function eagerlyClassifySourceDocumentSubtree(
   }> = [{ node: root, secretAncestor: false }];
   let visited = 0;
   const secretAncestors = createSourceSecretAncestorMemo();
+  const rootWalk = beginSourceShadowRootWalk({ fresh: options.freshRoots });
   try {
     while (stack.length > 0 && visited < MAX_SEMANTIC_SOURCE_NODE_IDENTITIES) {
       const current = stack.pop();
@@ -1938,11 +2013,15 @@ function eagerlyClassifySourceDocumentSubtree(
   } catch {
     rememberSourceNodeSecret(root, classifier);
     return;
+  } finally {
+    rootWalk.end();
   }
   if (stack.length > 0) rememberSourceNodeSecret(root, classifier);
 }
 
 function oldStyleUsedTextSecurity(value: string): boolean {
+  // Most style changes are animations: a plain search first.
+  if (!/text-security/iu.test(value)) return false;
   const match = /(?:^|;)\s*-webkit-text-security\s*:\s*([^;]+)/iu.exec(value);
   return Boolean(match && normalizedToken(match[1]) !== 'none');
 }
@@ -2110,7 +2189,7 @@ function safelyRead<T>(read: () => T): T | undefined {
 
 function safelyReadShadowRoot(element: Element): ShadowRoot | undefined {
   try {
-    return element.shadowRoot ?? undefined;
+    return readSourceShadowRoot(element);
   } catch {
     return undefined;
   }

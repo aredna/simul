@@ -1,5 +1,5 @@
 import { parseHTML } from 'linkedom';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, onTestFinished } from 'vitest';
 
 import {
   MAX_SOURCE_IMAGE_IDENTITY_RETRY_FRAMES,
@@ -8,6 +8,11 @@ import {
 } from '../lib/ocr/source-image-observer';
 import { SourceImageModel } from '../lib/ocr/source-image-model';
 import type { ReplicaSourceDocumentIdentity } from '../lib/replica/source-identity';
+import {
+  installSourceShadowRootReader,
+  probeSourceShadowRoot,
+} from '../lib/replica/source-shadow-root';
+import { closedRootReader } from './support/closed-shadow-roots';
 
 const documentIdentity: ReplicaSourceDocumentIdentity = {
   sessionId: 'session-a',
@@ -2994,6 +2999,205 @@ describe('SourceImageObserver', () => {
       addedNodes: [closedHost], removedNodes: [],
     } as unknown as MutationRecord]);
     expect(events.map(eventNodeId)).not.toContain(29);
+    stop();
+  });
+
+  it('discovers images in closed shadow roots through the page reader (D125)', () => {
+    const fixture = createFixture(
+      '<x-gallery id="existing-host"></x-gallery><div id="late-host"></div>' +
+        '<input id="field"><ul id="list"></ul>',
+    );
+    const reader = closedRootReader();
+    installSourceShadowRootReader(fixture.document, reader.read);
+    const host = fixture.document.querySelector('#existing-host')!;
+    const closed = reader.attach(host, '<x-shelf id="shelf"></x-shelf>');
+    const existing = fixture.document.createElement('img');
+    setImageMetrics(existing, fixture.bounds);
+    fixture.nodeIds.set(existing, 19);
+    closed.append(existing);
+    // A closed root nested in a closed root.
+    const nested = reader.attach(closed.querySelector('#shelf')!);
+    const inner = fixture.document.createElement('img');
+    setImageMetrics(inner, fixture.bounds);
+    fixture.nodeIds.set(inner, 21);
+    nested.append(inner);
+
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    expect(events.map(eventNodeId)).toEqual(expect.arrayContaining([19, 21]));
+    expect(fixture.mutation.targets).toContain(closed);
+    expect(fixture.mutation.targets).toContain(nested);
+
+    // An image added inside the closed root.
+    const late = fixture.document.createElement('img');
+    setImageMetrics(late, fixture.bounds);
+    fixture.nodeIds.set(late, 23);
+    closed.append(late);
+    fixture.mutation.trigger([{
+      type: 'childList', target: closed, addedNodes: [late], removedNodes: [],
+    } as unknown as MutationRecord]);
+    expect(events.map(eventNodeId)).toContain(23);
+
+    // A closed root attached late. Only the mirror's discovery asks Chrome
+    // again; the observer picks the root up once that has found it.
+    const lateHost = fixture.document.querySelector('#late-host')!;
+    const attached = reader.attach(lateHost);
+    const attachedImage = fixture.document.createElement('img');
+    setImageMetrics(attachedImage, fixture.bounds);
+    fixture.nodeIds.set(attachedImage, 27);
+    attached.append(attachedImage);
+    const callsBefore = reader.calls.length;
+    fixture.timers.run();
+    expect(reader.calls).toHaveLength(callsBefore);
+    expect(events.map(eventNodeId)).not.toContain(27);
+    expect(probeSourceShadowRoot(lateHost)).toBe(attached);
+    fixture.timers.run();
+    expect(events.map(eventNodeId)).toContain(27);
+    expect(fixture.mutation.targets).toContain(attached);
+
+    // A control is never asked about, and never waits for a root.
+    for (const id of ['field', 'list']) {
+      expect(reader.calls).not.toContain(fixture.document.querySelector(`#${id}`));
+    }
+    stop();
+  });
+
+  it('advances an image a password field in a closed root now overlaps on scroll (D125)', () => {
+    const fixture = createFixture('<x-login id="login"></x-login>');
+    const reader = closedRootReader();
+    const login = reader.attach(
+      fixture.document.querySelector('#login')!,
+      '<input id="fixed-control" type="password">',
+    );
+    installSourceShadowRootReader(fixture.document, reader.read);
+    const control = login.querySelector('#fixed-control')!;
+    const controlBounds = { left: 320, top: 0, width: 80, height: 40 };
+    setElementBounds(control, controlBounds);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    fixture.intersections[0]!.trigger(fixture.image, true);
+    events.length = 0;
+
+    controlBounds.left = 40;
+    fixture.document.dispatchEvent(
+      new fixture.document.defaultView!.Event('scroll'),
+    );
+    fixture.frames.flush();
+
+    expect(events).toMatchObject([{
+      kind: 'upsert',
+      input: { nodeId: 7, observationChanged: true, captureChanged: true },
+    }]);
+    stop();
+  });
+
+  it('follows a masked surface in a closed root moving over an image after layout settles (D125)', () => {
+    const fixture = createFixture('<div id="card"><x-secret id="host"></x-secret></div>');
+    const reader = closedRootReader();
+    const card = fixture.document.querySelector('#card')!;
+    const host = fixture.document.querySelector('#host')!;
+    const root = reader.attach(host, '<div id="computed-secret">Protected</div>');
+    installSourceShadowRootReader(fixture.document, reader.read);
+    const secret = root.querySelector('#computed-secret')!;
+    const secretBounds = { left: 320, top: 0, width: 80, height: 40 };
+    setElementBounds(secret, secretBounds);
+    // linkedom's window is a view of the global object: put its style back.
+    const previous = Object.getOwnPropertyDescriptor(
+      fixture.document.defaultView!,
+      'getComputedStyle',
+    );
+    onTestFinished(() => {
+      if (previous) {
+        Object.defineProperty(fixture.document.defaultView!, 'getComputedStyle', previous);
+      } else {
+        Reflect.deleteProperty(fixture.document.defaultView!, 'getComputedStyle');
+      }
+    });
+    Object.defineProperty(fixture.document.defaultView!, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => ({
+        display: 'block', visibility: 'visible', contentVisibility: 'visible',
+        opacity: '1', position: 'static', clipPath: 'none', maskImage: 'none',
+        perspective: 'none', rotate: 'none', scale: 'none', transform: 'none',
+        overflowX: 'visible', overflowY: 'visible',
+        getPropertyValue: (name: string) =>
+          name === '-webkit-text-security' && element === secret ? 'disc' : '',
+      }),
+    });
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    fixture.frames.flush();
+    events.length = 0;
+
+    // The card moves, and with it the masked surface in its component.
+    secretBounds.left = 40;
+    card.dispatchEvent(new fixture.document.defaultView!.Event(
+      'transitionend',
+      { bubbles: true },
+    ));
+    fixture.frames.flush();
+    expect(events).toMatchObject([{
+      kind: 'upsert',
+      input: { nodeId: 7, observationChanged: true, captureChanged: true },
+    }]);
+    stop();
+  });
+
+  it('follows an image in a closed root moving over a password field after layout settles (D125)', () => {
+    const fixture = createFixture(
+      '<input id="stationary-secret" type="password">' +
+        '<div id="wrap">Caption<x-card id="card"></x-card></div>',
+    );
+    const reader = closedRootReader();
+    const root = reader.attach(
+      fixture.document.querySelector('#card')!,
+      '<img id="nested" src="nested.png">',
+    );
+    installSourceShadowRootReader(fixture.document, reader.read);
+    const secret = fixture.document.querySelector('#stationary-secret')!;
+    const wrap = fixture.document.querySelector('#wrap')!;
+    const nested = root.querySelector<HTMLImageElement>('#nested')!;
+    setElementBounds(secret, { left: 300, top: 0, width: 80, height: 40 });
+    setImageMetrics(nested, { left: 500, top: 0, width: 100, height: 100 });
+    fixture.nodeIds.set(nested, 19);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    fixture.frames.flush();
+    events.length = 0;
+
+    setImageMetrics(nested, { left: 290, top: 0, width: 100, height: 100 });
+    wrap.dispatchEvent(new fixture.document.defaultView!.Event(
+      'transitionend',
+      { bubbles: true },
+    ));
+    fixture.frames.flush();
+    expect(events).toMatchObject([{
+      kind: 'upsert',
+      input: { nodeId: 19, observationChanged: true, captureChanged: true },
+    }]);
+    stop();
+  });
+
+  it('keeps controls out of the hosts it waits on (D125)', () => {
+    const fixture = createFixture(
+      `${'<button>go</button>'.repeat(1_000)}<div id="late-host"></div>`,
+    );
+    const reader = closedRootReader();
+    installSourceShadowRootReader(fixture.document, reader.read);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+
+    // A root attached late, then found by the mirror's discovery.
+    const lateHost = fixture.document.querySelector('#late-host')!;
+    const attached = reader.attach(lateHost);
+    const image = fixture.document.createElement('img');
+    setImageMetrics(image, fixture.bounds);
+    fixture.nodeIds.set(image, 27);
+    attached.append(image);
+    expect(probeSourceShadowRoot(lateHost)).toBe(attached);
+    // One tick looks at 1,000 waiting hosts: the late one is among them.
+    fixture.timers.run();
+    expect(events.map(eventNodeId)).toContain(27);
     stop();
   });
 

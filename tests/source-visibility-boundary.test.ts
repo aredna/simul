@@ -3,6 +3,8 @@ import { describe, expect, it } from 'vitest';
 
 import { SourceVisibilityBoundaryIndex } from
   '../lib/replica/source-visibility-boundary';
+import { installSourceShadowRootReader } from '../lib/replica/source-shadow-root';
+import { closedRootReader } from './support/closed-shadow-roots';
 
 describe('source visibility boundary index', () => {
   it('reports only a real hidden/painted transition and never reads text', () => {
@@ -312,6 +314,53 @@ describe('source visibility boundary index', () => {
     slide.className = 'active';
     expect(index.refreshMutations([attributeRecord(slide, 'class')]))
       .toEqual({ changedTargets: [], overflow: true });
+    index.dispose();
+  });
+
+  it('follows paint changes inside a closed shadow root and of what it slots (D125)', () => {
+    const { document, window } = parseHTML(`<html><body>
+      <x-tabs id="host"><p id="light">Slotted panel text</p></x-tabs>
+    </body></html>`);
+    const host = document.querySelector<HTMLElement>('#host')!;
+    const light = document.querySelector<HTMLElement>('#light')!;
+    const reader = closedRootReader();
+    const root = reader.attach(
+      host,
+      '<div id="panel" class="hidden">Closed panel text</div>' +
+        '<div id="wrap" class="hidden"><slot></slot></div>',
+    );
+    const panel = root.querySelector<HTMLElement>('#panel')!;
+    const wrap = root.querySelector<HTMLElement>('#wrap')!;
+    // Chrome reads null for a node slotted into a closed root.
+    Object.defineProperty(light, 'assignedSlot', { configurable: true, value: null });
+    installSourceShadowRootReader(document as unknown as Document, reader.read);
+    installPositivePaintRects(document);
+    for (const element of root.querySelectorAll('*')) {
+      Object.defineProperty(element, 'getClientRects', {
+        configurable: true,
+        value: () => paintRectList([{ left: 0, right: 100 }]),
+      });
+    }
+    Object.defineProperty(window, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => paintedStyle({
+        display: element.classList.contains('hidden') ? 'none' : 'block',
+      }),
+    });
+    const index = new SourceVisibilityBoundaryIndex(
+      document as unknown as Document,
+      window as unknown as Window,
+      100,
+    );
+
+    panel.classList.remove('hidden');
+    expect(index.refreshMutations([attributeRecord(panel, 'class')]))
+      .toEqual({ changedTargets: [panel], overflow: false });
+
+    // The box around the slot is shown: what it slots is painted now.
+    wrap.classList.remove('hidden');
+    expect(index.refreshMutations([attributeRecord(wrap, 'class')]))
+      .toEqual({ changedTargets: [light], overflow: false });
     index.dispose();
   });
 

@@ -59,8 +59,10 @@ import { createReplicaIdentity } from './replica-identity';
 import { minimizeConnectedComposedTargets } from './composed-targets';
 import { readSemanticSourcePortIdentity } from './semantic-source-protocol';
 import {
+  SOURCE_EVIDENCE_ATTRIBUTE_FILTER,
   SemanticSourceSession,
   eagerlyClassifySourceDocumentSecrets,
+  eagerlyClassifySourceDocumentSubtree,
   rememberSourceMutationSecrets,
 } from './semantic-source-session';
 import {
@@ -83,6 +85,19 @@ import {
 import type { SelectableReplicaFidelityPolicy } from './fidelity-policy';
 import { StableSignatureTracker } from './stable-signature-tracker';
 import { sourceMutationMayChangeCurrentValue } from './source-mutation-filter';
+import {
+  askAboutSourceShadowRootsAbove,
+  askAboutSourceShadowRootsWithin,
+  beginSourceShadowRootWalk,
+  canHostAuthorShadowRoot,
+  chromeSourceShadowRootReader,
+  installSourceShadowRootReader,
+  isSourceShadowRoot,
+  listenForSourceShadowRoots,
+  probeSourceShadowRoot,
+  readSourceShadowRoot,
+  type SourceShadowRootReader,
+} from './source-shadow-root';
 
 export class WeakNodeIdRegistry implements HtmlMirrorIdRegistry {
   readonly #ids = new WeakMap<Node, number>();
@@ -166,6 +181,11 @@ export interface HtmlMirrorSourceBridgeEnvironment {
     callback: ResizeObserverCallback,
   ) => Pick<ResizeObserver, 'observe' | 'disconnect'>;
   readonly registry?: WeakNodeIdRegistry;
+  /**
+   * `chrome.dom.openOrClosedShadowRoot`: how the page's closed shadow roots
+   * are read (D125). Every reader of the page uses the one installed here.
+   */
+  readonly openShadowRoot?: SourceShadowRootReader;
 }
 
 /** Installs a page-owned HTML and image identity bridge. */
@@ -187,41 +207,77 @@ export function installHtmlMirrorSourceBridge(
   const sourceDocument = environment.document ?? document;
   const sourceWindow = environment.window ?? window;
   const registry = environment.registry ?? new WeakNodeIdRegistry();
-  const documentSecretClassifier = sourceDocumentSecretClassifier(sourceDocument);
-  eagerlyClassifySourceDocumentSecrets(
+  // Before anything walks the page: the credential classifier below must
+  // see into every root the mirror will read (D125).
+  installSourceShadowRootReader(
     sourceDocument,
-    sourceWindow,
-    documentSecretClassifier,
+    environment.openShadowRoot ?? chromeSourceShadowRootReader(),
   );
+  const documentSecretClassifier = sourceDocumentSecretClassifier(sourceDocument);
+  let secretObserver: Pick<MutationObserver, 'observe' | 'disconnect'> | undefined;
   try {
     const createSecretObserver = environment.createMutationObserver ??
       ((callback: MutationCallback) => new MutationObserver(callback));
-    const secretObserver = createSecretObserver((records) => {
+    secretObserver = createSecretObserver((records) => {
       rememberSourceMutationSecrets(
         records,
         sourceWindow,
         documentSecretClassifier,
+        { freshRoots: true },
       );
     });
-    secretObserver.observe(sourceDocument, {
-      attributes: true,
-      attributeOldValue: true,
-      characterData: true,
-      characterDataOldValue: true,
-      childList: true,
-      subtree: true,
-    });
+    secretObserver.observe(sourceDocument, SOURCE_LIFETIME_RECORD_OPTIONS);
     // Keep the observer alive for the isolated-world document lifetime so
     // newly created credential nodes remain sticky before and between mirror
     // Port connections.
     isolatedGlobal.__simulHtmlMirrorV2SecretObserver = secretObserver;
   } catch {
+    secretObserver = undefined;
+  }
+  if (secretObserver) {
+    // The document's records stop at a shadow root. Every root a reader
+    // meets, open or closed, from the walk below on, is watched the same
+    // way, so a field added to it while no panel is open is still known as
+    // a password when the page later shows it in clear (D125).
+    const observer = secretObserver;
+    listenForSourceShadowRoots(sourceDocument, (shadow) => {
+      try {
+        observer.observe(shadow, SOURCE_LIFETIME_RECORD_OPTIONS);
+      } catch {
+        documentSecretClassifier.classify(shadow.host, {
+          tagName: shadow.host.localName,
+          secretAncestor: true,
+        });
+      }
+    });
+  }
+  eagerlyClassifySourceDocumentSecrets(
+    sourceDocument,
+    sourceWindow,
+    documentSecretClassifier,
+  );
+  if (!secretObserver) {
     const root = sourceDocument.documentElement;
     if (root) {
       documentSecretClassifier.classify(root, {
         tagName: root.localName,
         secretAncestor: true,
       });
+    }
+  }
+  // A root attached to an element already in the page fires nothing, but a
+  // person who clicks into a field inside it, types, or presses its "show"
+  // button does: the roots around the input are asked about before the
+  // component's own handlers run, panel open or closed (D125). A listener
+  // the page put on the window before this script ran runs first.
+  const onUserInput = (event: Event): void => {
+    askAboutSourceShadowRootsAtInput(event, sourceWindow, documentSecretClassifier);
+  };
+  for (const type of SOURCE_USER_INPUT_EVENTS) {
+    try {
+      sourceWindow.addEventListener(type, onUserInput, { capture: true, passive: true });
+    } catch {
+      // A window that takes no listener: the observer and the walks remain.
     }
   }
 
@@ -298,7 +354,7 @@ interface HtmlMirrorSourceSessionEnvironment {
 }
 
 /**
- * One bounded open-shadow-root observation pass. A mutation batch shares a
+ * One bounded shadow-root observation pass. A mutation batch shares a
  * single walk across its records so nested targets are traversed once, and
  * the node budget keeps a hostile page from stalling the observer callback.
  */
@@ -308,6 +364,102 @@ interface ShadowObservationWalk {
   exhausted: boolean;
 }
 
+/** The input of a person, which comes before a field is shown in clear. */
+const SOURCE_USER_INPUT_EVENTS = Object.freeze([
+  'focusin',
+  'pointerdown',
+  'keydown',
+  'beforeinput',
+] as const);
+/** Roots followed below the event's own path, through the focus or the pointer. */
+const MAX_SOURCE_INPUT_ROOT_DEPTH = 32;
+
+/**
+ * Asks Chrome about the root of every element above the event's target and,
+ * below the outermost closed host (where the event's path ends as seen from
+ * here), along the focus or the pointer through the roots known by then. A
+ * root that turns up is watched from then on (the listeners) and what it
+ * holds is classified at once, while a password field in it is still one
+ * (D125). No timer: the work is bounded by the path and its depth; below
+ * that depth what the follow reached is read in one fresh walk.
+ */
+function askAboutSourceShadowRootsAtInput(
+  event: Event,
+  sourceWindow: Window,
+  classifier: StickySourceSecretClassifier,
+): void {
+  const found: ShadowRoot[] = [];
+  let beyond: Element | undefined;
+  try {
+    const path = typeof event.composedPath === 'function' ? event.composedPath() : [];
+    const target = path[0] ?? event.target;
+    if (!target || typeof (target as Node).nodeType !== 'number') return;
+    const asked = new Set<Node>();
+    found.push(...askAboutSourceShadowRootsAbove(target as Node, asked));
+    const point = event.type === 'pointerdown'
+      ? [(event as PointerEvent).clientX, (event as PointerEvent).clientY] as const
+      : undefined;
+    let current: Node | null = target as Node;
+    let depth = 0;
+    for (; current && depth < MAX_SOURCE_INPUT_ROOT_DEPTH; depth += 1) {
+      if (current.nodeType !== 1) break;
+      const root = readSourceShadowRoot(current as Element);
+      if (!root) break;
+      const next: Element | null = point
+        ? root.elementFromPoint(point[0], point[1])
+        : root.activeElement;
+      if (!next || next === current) break;
+      found.push(...askAboutSourceShadowRootsAbove(next, asked));
+      current = next;
+    }
+    // The follow stopped at its bound, not at the input: a root attached
+    // deeper still is found by reading what lies below in a fresh walk.
+    if (depth === MAX_SOURCE_INPUT_ROOT_DEPTH && current?.nodeType === 1) {
+      beyond = current as Element;
+    }
+  } catch {
+    // An unreadable path: the observer and the walks remain.
+  }
+  for (const root of found) {
+    if (!root.host) continue;
+    eagerlyClassifySourceDocumentSubtree(root.host, sourceWindow, classifier, {
+      freshRoots: true,
+    });
+  }
+  if (beyond) {
+    eagerlyClassifySourceDocumentSubtree(beyond, sourceWindow, classifier, {
+      freshRoots: true,
+    });
+  }
+}
+
+/**
+ * What the mirror's observer records, on the document and on every shadow
+ * root. Without the old values a removed attribute reads as unchanged and is
+ * dropped, and a credential type that changes is not remembered (D125).
+ */
+const SOURCE_SECRET_RECORD_OPTIONS: MutationObserverInit = Object.freeze({
+  attributes: true,
+  attributeOldValue: true,
+  characterData: true,
+  characterDataOldValue: true,
+  childList: true,
+  subtree: true,
+});
+/**
+ * What the document-lifetime credential observer records: added and removed
+ * nodes, and the attributes an old value of which can be credential evidence
+ * (`rememberSourceMutationSecrets`). It runs while no panel is open, on the
+ * document and on every root met, so an animation or a ticker inside a
+ * component records nothing for it (D125).
+ */
+const SOURCE_LIFETIME_RECORD_OPTIONS: MutationObserverInit = Object.freeze({
+  attributes: true,
+  attributeOldValue: true,
+  attributeFilter: [...SOURCE_EVIDENCE_ATTRIBUTE_FILTER],
+  childList: true,
+  subtree: true,
+});
 const MAX_HTML_MIRROR_PENDING_TARGETS = 4_000;
 const SHADOW_DISCOVERY_INTERVAL_MS = 500;
 const MAX_SHADOW_HOSTS_PER_TICK = 1_000;
@@ -424,6 +576,10 @@ export class HtmlMirrorSourceSession {
     STYLE_CHANGE_STABILITY_OBSERVATIONS,
   );
   #shadowDiscoveryTimer: unknown;
+  /** When a layout change last asked about every element's root. */
+  #lastFreshLayoutWalk = Number.NEGATIVE_INFINITY;
+  /** The fresh walk owed to a layout change inside the interval. */
+  #trailingLayoutTimer: unknown;
   #frame: unknown;
   #scrollFrame: unknown;
   /**
@@ -452,6 +608,22 @@ export class HtmlMirrorSourceSession {
   #paused = false;
   #recoveryCheckpointSequence: number | undefined;
   #shadowReconciliationPending = false;
+  /**
+   * Closed roots found, by any reader of the page, on an element that had
+   * been read without one: attached since. See `#takeLateShadowRoots`.
+   */
+  #lateShadowRoots: ShadowRoot[] = [];
+  #stopListeningForShadowRoots: (() => void) | undefined;
+  /**
+   * Roots the last checkpoint could not hold: their host is inside a
+   * credential shell or under an element the mirror leaves out. Another
+   * checkpoint would not hold them either, so meeting one again asks for
+   * none (D125). Before, every change above such an open root rebuilt the
+   * mirror, and closed roots would have joined them.
+   */
+  #unheldShadowRoots = new WeakSet<ShadowRoot>();
+  /** The walk that follows a checkpoint is noting those roots. */
+  #notingUnheldShadowRoots = false;
   #controlledContentPolicy: SourceControlledContentPolicy | undefined;
   #controlledLayoutSettlePending = false;
   #visibilityBoundaryIndex: SourceVisibilityBoundaryIndex | undefined;
@@ -470,7 +642,7 @@ export class HtmlMirrorSourceSession {
   }
 
   /**
-   * Nodes visited by open-shadow-root observation walks since construction.
+   * Nodes visited by shadow-root observation walks since construction.
    * A content-free traversal counter for tests and diagnostics.
    */
   get shadowObservationVisitCount(): number {
@@ -482,6 +654,9 @@ export class HtmlMirrorSourceSession {
     this.#disposed = true;
     this.environment.port.onMessage.removeListener(this.#onMessage);
     this.environment.port.onDisconnect.removeListener(this.#onDisconnect);
+    this.#stopListeningForShadowRoots?.();
+    this.#stopListeningForShadowRoots = undefined;
+    this.#lateShadowRoots = [];
     this.#observer?.disconnect();
     this.#observer = undefined;
     this.#resizeObserver?.disconnect();
@@ -532,9 +707,14 @@ export class HtmlMirrorSourceSession {
       this.environment.clearTimer(this.#shadowDiscoveryTimer);
     }
     this.#shadowDiscoveryTimer = undefined;
+    if (this.#trailingLayoutTimer !== undefined) {
+      this.environment.clearTimer(this.#trailingLayoutTimer);
+    }
+    this.#trailingLayoutTimer = undefined;
     this.#shadowHostCandidates = [];
     this.#knownShadowHostCandidates = new WeakSet<Element>();
     this.#settledShadowHostCandidates = new WeakSet<Element>();
+    this.#unheldShadowRoots = new WeakSet<ShadowRoot>();
     this.#shadowDiscoveryCursor = 0;
     this.#stylePollingCursor = 0;
     this.#stylePollingPass = 0;
@@ -685,6 +865,16 @@ export class HtmlMirrorSourceSession {
         childList: true,
         subtree: true,
       });
+      // The semantic and image readers ask about the roots above what they
+      // send, and may find one first (D125).
+      this.#stopListeningForShadowRoots = listenForSourceShadowRoots(
+        this.environment.document,
+        (shadow, late) => {
+          if (!late || this.#disposed) return;
+          this.#lateShadowRoots.push(shadow);
+          this.#scheduleFlush();
+        },
+      );
       this.environment.window.addEventListener('resize', this.#onLayoutChange);
       this.environment.window.addEventListener('scroll', this.#onScroll, {
         capture: true,
@@ -744,6 +934,19 @@ export class HtmlMirrorSourceSession {
   }
 
   #postCheckpoint(): void {
+    // A checkpoint sends the whole page, so it asks about every element's
+    // root again instead of trusting an earlier "none": it holds every root
+    // attached so far, as it always did for open ones (D125).
+    const rootWalk = beginSourceShadowRootWalk({ fresh: true });
+    try {
+      this.#readAndPostCheckpoint();
+    } finally {
+      rootWalk.end();
+      this.#lateShadowRoots = [];
+    }
+  }
+
+  #readAndPostCheckpoint(): void {
     const identity = this.#identity;
     const fidelityPolicy = this.#fidelityPolicy;
     if (!identity || !fidelityPolicy || this.#disposed) return;
@@ -830,7 +1033,13 @@ export class HtmlMirrorSourceSession {
           ? { canvasBackgroundColor: checkpoint.payload.root.canvasBackgroundColor }
           : {}),
       });
-      this.#observeOpenShadowRoots(this.environment.document.documentElement);
+      this.#unheldShadowRoots = new WeakSet<ShadowRoot>();
+      this.#notingUnheldShadowRoots = true;
+      try {
+        this.#observeShadowRoots(this.environment.document.documentElement);
+      } finally {
+        this.#notingUnheldShadowRoots = false;
+      }
       this.#primeOrdinaryStyleSignatures();
       this.#shadowReconciliationPending = false;
       this.#post(checkpoint);
@@ -957,14 +1166,14 @@ export class HtmlMirrorSourceSession {
       const structuralSelectOwner = sourceNativeSelectStructuralOwner(record.target);
       if (record.type === 'childList') {
         accepted = true;
-        this.#observeOpenShadowRoots(record.target, walk);
+        this.#observeShadowRoots(record.target, walk);
         this.#queuePending(this.#pendingChildren, record.target);
         for (const added of record.addedNodes) {
-          this.#observeOpenShadowRoots(added, walk);
+          this.#observeShadowRoots(added, walk);
         }
       } else if (record.type === 'attributes' && record.target instanceof Element) {
         accepted = true;
-        this.#observeOpenShadowRoots(record.target, walk);
+        this.#observeShadowRoots(record.target, walk);
         const changesPrivacyContext =
           record.attributeName === 'role' ||
           record.attributeName === 'contenteditable' ||
@@ -985,7 +1194,7 @@ export class HtmlMirrorSourceSession {
           // A children patch can re-sanitize a host's light DOM, but it cannot
           // replace that host's already-mirrored ShadowRoot. Rebuild the whole
           // graph whenever the host's privacy context can change.
-          if (record.target.shadowRoot?.mode === 'open') {
+          if (readSourceShadowRoot(record.target)) {
             this.#shadowReconciliationPending = true;
             this.#signalShadowReconciliation();
             return;
@@ -996,7 +1205,7 @@ export class HtmlMirrorSourceSession {
         }
       } else if (record.type === 'characterData' && record.target instanceof Text) {
         accepted = true;
-        this.#observeOpenShadowRoots(record.target, walk);
+        this.#observeShadowRoots(record.target, walk);
         this.#queuePending(this.#pendingText, record.target);
       }
     }
@@ -1048,12 +1257,27 @@ export class HtmlMirrorSourceSession {
       this.#refreshChangedImageSources();
       if (this.#paused) return;
     }
+    if (this.#takeLateShadowRoots()) return;
+    const rootWalk = beginSourceShadowRootWalk();
+    let posted = false;
+    try {
+      posted = this.#readAndPostChanges(fidelityPolicy);
+    } finally {
+      rootWalk.end();
+    }
+    // The change may have lengthened a scrolled pane, hidden it or shown it
+    // again, none of which fires a scroll event: read the panes afresh and
+    // report them if they are not where they were (D122).
+    if (posted && this.#scrolledPanes.size > 0) this.#postScroll(true);
+  }
+
+  #readAndPostChanges(fidelityPolicy: SelectableReplicaFidelityPolicy): boolean {
     if ([...this.#pendingChildren].some(
-      (target) => this.#coversOwnOpenShadowWork(target),
+      (target) => this.#coversOwnShadowWork(target),
     )) {
       this.#shadowReconciliationPending = true;
       this.#signalShadowReconciliation();
-      return;
+      return false;
     }
     const childrenTargets = minimizeConnectedComposedTargets(
       this.#pendingChildren,
@@ -1068,6 +1292,33 @@ export class HtmlMirrorSourceSession {
     const styleWork = createHtmlMirrorStyleWorkBudget();
     let posted = false;
     try {
+      // Nothing is sent for a node before every element above it, and
+      // every element of a subtree read again, has been asked about its
+      // root in this batch. A root attached since the last read records no
+      // change; one found here turns the patch into a checkpoint (D125).
+      const askedAbove = new Set<Node>();
+      for (const targets of [
+        this.#pendingChildren,
+        this.#pendingAttributes,
+        this.#pendingText,
+      ] as Iterable<Node>[]) {
+        for (const target of targets) {
+          askAboutSourceShadowRootsAbove(target, askedAbove);
+        }
+      }
+      if (this.#takeLateShadowRoots()) return false;
+      const askedWithin = new Set<Node>();
+      const withinBudget = { nodes: MAX_HTML_MIRROR_NODES };
+      const askWithin = (sources: readonly Node[]): boolean => {
+        for (const source of sources) {
+          if (!askAboutSourceShadowRootsWithin(source, askedWithin, withinBudget)) {
+            this.#shadowReconciliationPending = true;
+            this.#signalShadowReconciliation();
+            return false;
+          }
+        }
+        return !this.#takeLateShadowRoots();
+      };
       const childCaptures: Array<{
         readonly target: Node;
         readonly nodeId: number;
@@ -1098,6 +1349,9 @@ export class HtmlMirrorSourceSession {
         ({ reconciliation }) => reconciliation === 'reconcile',
       );
       if (!useReconciliation) {
+        if (!askWithin(childCaptures.flatMap(({ sources }) => sources))) {
+          return false;
+        }
         for (const capture of childCaptures) {
           const children = sanitizeSourceChildren(
             capture.target,
@@ -1128,6 +1382,7 @@ export class HtmlMirrorSourceSession {
           const newSources = capture.sources.filter(
             (source) => !previous.has(source),
           );
+          if (!askWithin(newSources)) return false;
           const serialized = sanitizeSourceSubtrees(
             newSources,
             this.environment.registry,
@@ -1256,9 +1511,11 @@ export class HtmlMirrorSourceSession {
           }));
         }
       }
+      // A root found while the patch was read: the replica lacks it.
+      if (this.#takeLateShadowRoots()) return false;
       if (operations.length === 0) {
         this.#clearPending();
-        return;
+        return false;
       }
       const sequence = this.#sequence + 1;
       const batch = createHtmlMirrorPatch(
@@ -1326,10 +1583,7 @@ export class HtmlMirrorSourceSession {
         this.#summarizeRepresentability(representability),
       ));
     }
-    // The change may have lengthened a scrolled pane, hidden it or shown it
-    // again, none of which fires a scroll event: read the panes afresh and
-    // report them if they are not where they were (D122).
-    if (posted && this.#scrolledPanes.size > 0) this.#postScroll(true);
+    return posted;
   }
 
   /**
@@ -1389,7 +1643,7 @@ export class HtmlMirrorSourceSession {
 
   readonly #onLayoutChange = (): void => {
     if (this.#disposed || !this.#identity) return;
-    this.#observeOpenShadowRoots(this.environment.document.documentElement);
+    this.#lookForRootsAfterLayoutChange();
     this.#refreshControlledContentPolicy();
     this.#visibilityFullRefreshPending = true;
     this.#imageRefreshRequested = true;
@@ -1398,10 +1652,37 @@ export class HtmlMirrorSourceSession {
     this.#postScroll();
   };
 
+  /**
+   * This walk is where an open root attached since shows: a root that
+   * renders anything usually changes the layout. It asks about closed ones
+   * too, at most once a discovery interval, and once more, the walk alone,
+   * when an interval with a change in it ends: a root attached just after
+   * the last fresh walk would otherwise wait for the rotation (D125).
+   */
+  #lookForRootsAfterLayoutChange(): void {
+    const now = this.environment.now();
+    const fresh = now - this.#lastFreshLayoutWalk >= SHADOW_DISCOVERY_INTERVAL_MS;
+    if (fresh) {
+      this.#lastFreshLayoutWalk = now;
+    } else if (this.#trailingLayoutTimer === undefined) {
+      this.#trailingLayoutTimer = this.environment.setTimer(() => {
+        this.#trailingLayoutTimer = undefined;
+        if (!this.#disposed && this.#identity) this.#lookForRootsAfterLayoutChange();
+      }, SHADOW_DISCOVERY_INTERVAL_MS - (now - this.#lastFreshLayoutWalk));
+    }
+    const rootWalk = beginSourceShadowRootWalk({ fresh });
+    try {
+      this.#observeShadowRoots(this.environment.document.documentElement);
+    } finally {
+      rootWalk.end();
+    }
+  }
+
   readonly #onScroll = (event: Event): void => {
     if (this.#disposed || !this.#identity) return;
-    // Inside an open shadow root the window hears the event as the host's:
-    // the element that scrolled is the first of the composed path.
+    // Inside a shadow root the window hears the event as the host's: the
+    // element that scrolled is the first of the composed path. (A closed
+    // root's path is whole only for the listener on that root itself.)
     const target = scrolledTarget(event);
     if (isDocumentScrollTarget(
       target,
@@ -1718,7 +1999,8 @@ export class HtmlMirrorSourceSession {
       this.#visibilityMutationRecords.length === 0 &&
       !this.#visibilityMutationOverflow &&
       !this.#visibilityFullRefreshPending &&
-      this.#visibilityInteractionTargets.size === 0
+      this.#visibilityInteractionTargets.size === 0 &&
+      this.#lateShadowRoots.length === 0
     ) return;
     this.#frame = this.environment.scheduleFrame(() => {
       this.#frame = undefined;
@@ -1788,11 +2070,10 @@ export class HtmlMirrorSourceSession {
           shadow,
           adoptedStyleSignature(node.shadowRoot.adoptedStyleSheets),
         );
-        // Every mirrored open root is observed here, while the graph is still
+        // Every mirrored root is observed here, while the graph is still
         // bounded by the sanitizer's own capacity, so the budgeted DOM walk
         // only has to find roots the emitted graph does not carry.
-        const openShadow = readOpenShadowRoot(shadow);
-        if (openShadow) this.#observeOpenShadowRoot(openShadow);
+        if (isSourceShadowRoot(shadow)) this.#observeShadowRoot(shadow);
       }
       for (const child of node.shadowRoot.children) this.#markMirroredGraph(child);
       if (shadow) this.#setEmittedChildren(shadow, node.shadowRoot.children);
@@ -1888,10 +2169,10 @@ export class HtmlMirrorSourceSession {
     return 'reconcile';
   }
 
-  #coversOwnOpenShadowWork(target: Node): boolean {
+  #coversOwnShadowWork(target: Node): boolean {
     if (target.nodeType !== Node.ELEMENT_NODE) return false;
-    const shadow = (target as Element).shadowRoot;
-    if (!shadow || shadow.mode !== 'open') return false;
+    const shadow = readSourceShadowRoot(target as Element);
+    if (!shadow) return false;
     return iterableContainsComposedSource(this.#pendingChildren, shadow) ||
       iterableContainsComposedSource(this.#pendingAttributes, shadow) ||
       iterableContainsComposedSource(this.#pendingText, shadow);
@@ -1902,8 +2183,10 @@ export class HtmlMirrorSourceSession {
       this.#knownShadowHostCandidates.has(element) ||
       this.#settledShadowHostCandidates.has(element)
     ) return;
-    const shadow = element.shadowRoot;
-    if (shadow?.mode === 'open') {
+    // Only an element the page can attach a root to waits for one (D125):
+    // a custom element or one of the tags `attachShadow` allows.
+    if (!canHostAuthorShadowRoot(element)) return;
+    if (readSourceShadowRoot(element)) {
       // A host's shadow root cannot be detached or replaced. Its existing root
       // is captured by the checkpoint walk, so only unresolved hosts belong in
       // the periodic late-attachment discovery rotation.
@@ -2017,34 +2300,44 @@ export class HtmlMirrorSourceSession {
     if (this.#disposed || this.#shadowDiscoveryTimer !== undefined) return;
     this.#shadowDiscoveryTimer = this.environment.setTimer(() => {
       this.#shadowDiscoveryTimer = undefined;
-      this.#discoverNewOpenShadowRoots();
+      this.#discoverNewShadowRoots();
       this.#scheduleShadowDiscovery();
     }, SHADOW_DISCOVERY_INTERVAL_MS);
   }
 
-  #discoverNewOpenShadowRoots(): void {
+  #discoverNewShadowRoots(): void {
     if (this.#pendingOverflow || this.#paused) return;
     if (this.#shadowReconciliationPending) return;
     const candidateCount = this.#shadowHostCandidates.length;
     if (candidateCount > 0) {
-      const scanCount = Math.min(candidateCount, MAX_SHADOW_HOSTS_PER_TICK);
       let processed = 0;
-      let settled = false;
-      for (let offset = 0; offset < scanCount; offset += 1) {
-        const index = (this.#shadowDiscoveryCursor + offset) % candidateCount;
+      let asked = 0;
+      let compact = false;
+      while (processed < candidateCount && asked < MAX_SHADOW_HOSTS_PER_TICK) {
+        const index = (this.#shadowDiscoveryCursor + processed) % candidateCount;
         const element = this.#shadowHostCandidates[index];
         processed += 1;
-        if (!element?.isConnected || !this.#mirroredNodes.has(element)) continue;
-        const shadow = element.shadowRoot;
-        if (shadow?.mode !== 'open') continue;
+        if (!element?.isConnected || !this.#mirroredNodes.has(element)) {
+          // A removed element is dropped, not charged to the tick: on a page
+          // that replaces its content, removed ones used to take most of
+          // each tick and a new root waited for many rounds (D125).
+          compact = true;
+          continue;
+        }
+        asked += 1;
+        // Nothing fires when a root is attached. An open one shows on the
+        // element; for a closed one Chrome is asked again, a bounded number
+        // of elements a tick (D125).
+        const shadow = probeSourceShadowRoot(element);
+        if (!shadow) continue;
         this.#settledShadowHostCandidates.add(element);
-        settled = true;
-        this.#observeOpenShadowRoot(shadow);
+        compact = true;
+        this.#observeShadowRoot(shadow);
         if (this.#shadowReconciliationPending) return;
       }
       this.#shadowDiscoveryCursor =
         (this.#shadowDiscoveryCursor + processed) % candidateCount;
-      if (settled) this.#compactShadowHostCandidates();
+      if (compact) this.#compactShadowHostCandidates();
     }
     this.#pollStyleChanges();
   }
@@ -2252,7 +2545,7 @@ export class HtmlMirrorSourceSession {
    * instead of stopping silently; mirrored roots are observed as their graph
    * is marked, so the budget only defers the discovery of unmirrored roots.
    */
-  #observeOpenShadowRoots(
+  #observeShadowRoots(
     root: Node,
     walk: ShadowObservationWalk = this.#createShadowObservationWalk(),
   ): void {
@@ -2273,12 +2566,11 @@ export class HtmlMirrorSourceSession {
       walk.remaining -= 1;
       walk.visited.add(node);
       this.#shadowObservationVisitCount += 1;
-      const directShadow = readOpenShadowRoot(node);
-      if (directShadow) this.#observeOpenShadowRoot(directShadow);
+      if (isSourceShadowRoot(node)) this.#observeShadowRoot(node);
       if (node.nodeType === Node.ELEMENT_NODE) {
-        const shadow = (node as Element).shadowRoot;
-        if (shadow && shadow.mode === 'open') this.#observeOpenShadowRoot(shadow);
+        const shadow = readSourceShadowRoot(node as Element);
         if (shadow) {
+          this.#observeShadowRoot(shadow);
           for (let child = shadow.lastChild; child; child = child.previousSibling) {
             stack.push(child);
           }
@@ -2290,21 +2582,34 @@ export class HtmlMirrorSourceSession {
     }
   }
 
-  #observeOpenShadowRoot(shadow: ShadowRoot): void {
+  #observeShadowRoot(shadow: ShadowRoot): void {
     this.#observeImageEvents(shadow);
     if (!this.#observedShadowRoots.has(shadow)) {
       this.#observedShadowRoots.add(shadow);
-      this.#observer?.observe(shadow, {
-        attributes: true,
-        characterData: true,
-        childList: true,
-        subtree: true,
-      });
+      // The same options as for the document (D125).
+      this.#observer?.observe(shadow, SOURCE_SECRET_RECORD_OPTIONS);
     }
-    if (!this.#mirroredNodes.has(shadow)) {
-      this.#shadowReconciliationPending = true;
-      this.#signalShadowReconciliation();
+    if (this.#mirroredNodes.has(shadow)) return;
+    if (this.#notingUnheldShadowRoots) {
+      this.#unheldShadowRoots.add(shadow);
+      return;
     }
+    if (this.#unheldShadowRoots.has(shadow)) return;
+    this.#shadowReconciliationPending = true;
+    this.#signalShadowReconciliation();
+  }
+
+  /**
+   * Hands the closed roots found since on elements read before without one
+   * to `#observeShadowRoot`: the replica lacks them, so a checkpoint follows
+   * and nothing read beside them is sent (D125). True when it does.
+   */
+  #takeLateShadowRoots(): boolean {
+    const roots = this.#lateShadowRoots;
+    if (roots.length === 0) return false;
+    this.#lateShadowRoots = [];
+    for (const shadow of roots) this.#observeShadowRoot(shadow);
+    return this.#shadowReconciliationPending;
   }
 
   #signalShadowReconciliation(): void {
@@ -2336,18 +2641,9 @@ function sourceElementNamespace(element: Element): HtmlMirrorNamespace {
   return 'html';
 }
 
-function readOpenShadowRoot(node: Node): ShadowRoot | undefined {
-  if (node.nodeType !== Node.DOCUMENT_FRAGMENT_NODE) return undefined;
-  const candidate = node as ShadowRoot;
-  return candidate.mode === 'open' && candidate.host?.nodeType === Node.ELEMENT_NODE
-    ? candidate
-    : undefined;
-}
-
 function sourceMutationOwnerElement(node: Node): Element | undefined {
   if (node instanceof Element) return node;
-  const shadowRoot = readOpenShadowRoot(node);
-  if (shadowRoot) return shadowRoot.host;
+  if (isSourceShadowRoot(node)) return node.host;
   return node.parentElement ?? undefined;
 }
 
@@ -2601,8 +2897,8 @@ function collectLiveSubtreeNodes(
       if (sources.size >= MAX_HTML_MIRROR_NODES) return undefined;
       sources.add(current);
       if (current.nodeType === Node.ELEMENT_NODE) {
-        const shadow = (current as Element).shadowRoot;
-        if (shadow?.mode === 'open') stack.push(shadow);
+        const shadow = readSourceShadowRoot(current as Element);
+        if (shadow) stack.push(shadow);
       }
       stack.push(...current.childNodes);
     }

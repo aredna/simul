@@ -1,5 +1,5 @@
 import { parseHTML } from 'linkedom';
-import { beforeEach, describe, expect, it, vi } from 'vitest';
+import { beforeEach, describe, expect, it, onTestFinished, vi } from 'vitest';
 
 import { createImageSourcePortName } from '../lib/ocr/image-source-protocol';
 import {
@@ -27,6 +27,19 @@ import {
   createSourceControlledContentPolicy,
   sourceControlledContentMutationsMayChange,
 } from '../lib/replica/source-privacy-policy';
+import { sourceDocumentSecretClassifier } from '../lib/replica/source-secret-classifier';
+import {
+  askAboutSourceShadowRootsAbove,
+  installSourceShadowRootReader,
+} from '../lib/replica/source-shadow-root';
+import {
+  closedRootReader,
+  type ClosedRootReader,
+} from './support/closed-shadow-roots';
+import {
+  scopedMutationObservers,
+  type ScopedMutationObservers,
+} from './support/scoped-mutations';
 
 const SYNTHETIC_STATIC_LOGO = "data:image/svg+xml,%3csvg%20width='48'%20height='48'%20viewBox='0%200%2048%2048'%20fill='none'%20xmlns='http://www.w3.org/2000/svg'%3e%3cpath%20d='M4.25%204.25H43.75V43.75H4.25Z'%20fill='%236C5CE7'/%3e%3cpath%20d='M12.5%2034C15.5%2024.25%2019.75%201.2e1%2024%2012C28.25%2012%2032.5%2024.25%2035.5%2034Z'%20fill='white'/%3e%3c/svg%3e";
 
@@ -1812,6 +1825,1120 @@ describe('HtmlMirrorSourceSession', () => {
     );
   });
 
+  it('mirrors an attribute removed inside an open shadow root (D125)', () => {
+    const scoped = scopedMutationObservers();
+    const fixture = sourceFixture('<main><x-card id="card"></x-card></main>', undefined, { scoped });
+    const card = fixture.document.querySelector('#card')!;
+    const root = card.attachShadow({ mode: 'open' });
+    Object.defineProperty(root, 'mode', { value: 'open' });
+    root.innerHTML = '<p id="inside" class="flag">open shadow</p>';
+    const inside = root.querySelector('#inside')!;
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+
+    // Roots used to be observed without old values. Chrome then reports a
+    // removed attribute with a null old value, which read as "unchanged"
+    // (the attribute is null now too) and was dropped. The record reaches
+    // the session only through its observation of the root.
+    inside.removeAttribute('class');
+    expect(scoped.deliver({
+      type: 'attributes', target: inside, attributeName: 'class', oldValue: 'flag',
+    })).toBe(1);
+    fixture.flushFrame();
+    expect(fixture.patches().at(-1)!.operations).toEqual([
+      expect.objectContaining({
+        kind: 'attributes',
+        nodeId: fixture.registry.peekId(inside),
+        attributes: [['id', 'inside']],
+      }),
+    ]);
+  });
+
+  it('captures and live-observes a closed shadow root (D125)', () => {
+    const reader = closedRootReader();
+    const fixture = sourceFixture('<main><x-card id="card"><b>light</b></x-card></main>', reader);
+    const card = fixture.document.querySelector('#card')!;
+    const root = reader.attach(card, '<p id="inside" class="flag">closed shadow</p><ul id="list"></ul>');
+    const inside = root.querySelector('#inside')!;
+    const text = inside.firstChild as Text;
+
+    fixture.start();
+    const checkpoint = fixture.checkpoints()[0]!;
+    expect(JSON.stringify(checkpoint)).toContain('closed shadow');
+    // The replica builds an open root: the wire has no other mode.
+    expect(JSON.stringify(checkpoint)).toContain('"mode":"open"');
+    expect(JSON.stringify(checkpoint)).not.toContain('"mode":"closed"');
+    expect(fixture.observed).toContain(root);
+    // The same options as for the document, old values included.
+    expect(fixture.observedOptions.get(root)).toEqual(
+      fixture.observedOptions.get(fixture.document.documentElement),
+    );
+    expect(fixture.observedOptions.get(root)).toMatchObject({
+      attributeOldValue: true,
+      characterDataOldValue: true,
+      subtree: true,
+    });
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+
+    // A text edit, an added node and a removed attribute inside the root.
+    text.nodeValue = 'updated closed shadow';
+    fixture.mutate({ ...characterDataRecord(text), oldValue: 'closed shadow' });
+    fixture.flushFrame();
+    expect(JSON.stringify(fixture.patches().at(-1))).toContain('updated closed shadow');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, fixture.patches().at(-1)!.identity.sequence));
+
+    const item = fixture.document.createElement('li');
+    item.textContent = 'added inside';
+    root.querySelector('#list')!.append(item);
+    fixture.mutate(childListRecord(root.querySelector('#list')!, [item]));
+    fixture.flushFrame();
+    expect(JSON.stringify(fixture.patches().at(-1))).toContain('added inside');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, fixture.patches().at(-1)!.identity.sequence));
+
+    inside.removeAttribute('class');
+    fixture.mutate({ ...attributeRecord(inside, 'class'), oldValue: 'flag' });
+    fixture.flushFrame();
+    const attributePatch = fixture.patches().at(-1)!;
+    expect(attributePatch.operations).toEqual([
+      expect.objectContaining({
+        kind: 'attributes',
+        nodeId: fixture.registry.peekId(inside),
+        attributes: [['id', 'inside']],
+      }),
+    ]);
+  });
+
+  it('reconciles a closed shadow root attached after the initial checkpoint (D125)', () => {
+    const reader = closedRootReader();
+    const fixture = sourceFixture(
+      '<main><div id="late-shadow"></div><x-late id="late-element"></x-late></main>',
+      reader,
+    );
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const host = fixture.document.querySelector('#late-shadow')!;
+    const other = fixture.document.querySelector('#late-element')!;
+    const asked = (element: Element) =>
+      reader.calls.filter((candidate) => candidate === element).length;
+    const askedBefore = [asked(host), asked(other)];
+
+    // Two roots are attached; nothing fires. A change above them asks only
+    // about the elements above the change.
+    const root = reader.attach(host, '<p>late closed text</p>');
+    const otherRoot = reader.attach(other, '<p>late closed element text</p>');
+    const main = fixture.document.querySelector('main')!;
+    main.setAttribute('data-state', 'changed');
+    fixture.mutate(attributeRecord(main, 'data-state'));
+    fixture.flushFrame();
+    expect(fixture.patches()).toHaveLength(1);
+    expect([asked(host), asked(other)]).toEqual(askedBefore);
+    expect(fixture.observed).not.toContain(root);
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, fixture.patches().at(-1)!.identity.sequence));
+
+    // The bounded discovery pass asks Chrome again.
+    fixture.runTimer();
+    expect(fixture.port.posts.at(-1)).toMatchObject({
+      kind: 'simul:html-mirror-v2:error',
+      code: 'stream_gap',
+    });
+    expect(fixture.observed).toContain(root);
+
+    // One checkpoint holds every root attached so far.
+    fixture.port.emitMessage(createHtmlMirrorCheckpointRequest(
+      identity,
+      fixture.patches().at(-1)!.identity.sequence,
+    ));
+    expect(fixture.checkpoints()).toHaveLength(2);
+    const recovery = JSON.stringify(fixture.checkpoints().at(-1));
+    expect(recovery).toContain('late closed text');
+    expect(recovery).toContain('late closed element text');
+    expect(fixture.observed).toContain(otherRoot);
+  });
+
+  it('asks about an element once a checkpoint, above a change before its patch, and never about a control (D125)', () => {
+    const reader = closedRootReader();
+    const fixture = sourceFixture(
+      '<main><div id="box"><span>text</span></div><p id="line">line</p>' +
+        '<input id="field" value="typed"><ul><li><a href="#x">link</a></li></ul>' +
+        '<details><summary>More</summary></details><button>Go</button></main>',
+      reader,
+    );
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const hosts = new Set(['body', 'main', 'div', 'span', 'p']);
+    for (const element of reader.calls) {
+      expect(hosts.has(element.localName), element.localName).toBe(true);
+    }
+    const asked = (element: Element) =>
+      reader.calls.filter((candidate) => candidate === element).length;
+    const box = fixture.document.querySelector('#box')!;
+    // One ask per element for the checkpoint, whatever number of walks ran.
+    const line = fixture.document.querySelector('#line')!;
+    const main = fixture.document.querySelector('main')!;
+    expect([asked(box), asked(line), asked(main)]).toEqual([1, 1, 1]);
+
+    // The patch asks about the elements above the change, not beside it.
+    const text = line.firstChild as Text;
+    text.nodeValue = 'changed line';
+    fixture.mutate(characterDataRecord(text));
+    fixture.flushFrame();
+    expect(JSON.stringify(fixture.patches().at(-1))).toContain('changed line');
+    expect([asked(box), asked(line), asked(main)]).toEqual([1, 2, 2]);
+
+    // Each discovery tick asks again; a control is never a candidate.
+    fixture.runTimer();
+    expect(asked(box)).toBe(2);
+    fixture.runTimer();
+    expect(asked(box)).toBe(3);
+    for (const element of reader.calls) {
+      expect(hosts.has(element.localName), element.localName).toBe(true);
+    }
+  });
+
+  it('rebuilds when a closed-shadow host enters a private context (D125)', () => {
+    const reader = closedRootReader();
+    const fixture = sourceFixture('<main><div id="host"></div></main>', reader);
+    const host = fixture.document.querySelector('#host')!;
+    reader.attach(host, '<span>closed shadow text secret</span>');
+
+    fixture.start();
+    expect(JSON.stringify(fixture.checkpoints()[0])).toContain('closed shadow text secret');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+
+    host.setAttribute('role', 'textbox');
+    fixture.mutate(attributeRecord(host, 'role'));
+    expect(fixture.port.posts.at(-1)).toMatchObject({
+      kind: 'simul:html-mirror-v2:error',
+      code: 'stream_gap',
+    });
+    fixture.port.emitMessage(createHtmlMirrorCheckpointRequest(identity, 0));
+    expect(JSON.stringify(fixture.checkpoints().at(-1)))
+      .not.toContain('closed shadow text secret');
+  });
+
+  it('keeps a credential field that appears later in a closed root masked (D125)', () => {
+    const reader = closedRootReader();
+    const fixture = sourceFixture('<main><x-form id="form"></x-form></main>', reader);
+    const form = reader.attach(
+      fixture.document.querySelector('#form')!,
+      '<p>sign in</p><x-vault id="vault"></x-vault>',
+    );
+    const vault = reader.attach(
+      form.querySelector('#vault')!,
+      '<p>vault</p><div id="fields"></div>',
+    );
+    const fields = vault.querySelector('#fields')!;
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+
+    // A password field is added inside the nested closed root.
+    const field = fixture.document.createElement('input');
+    field.setAttribute('type', 'password');
+    field.setAttribute('value', 'late-secret-99');
+    fields.append(field);
+    fixture.mutate(childListRecord(fields, [field]));
+    fixture.flushFrame();
+    const patch = fixture.patches().at(-1)!;
+    expect(JSON.stringify(patch)).toContain('"type","password"');
+    expect(JSON.stringify(patch)).not.toContain('late-secret-99');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, patch.identity.sequence));
+
+    // "Show password": the type changes. The field stays a credential field.
+    field.setAttribute('type', 'text');
+    fixture.mutate({ ...attributeRecord(field, 'type'), oldValue: 'password' });
+    while (fixture.frames.length > 0) fixture.flushFrame();
+    fixture.port.emitMessage(createHtmlMirrorCheckpointRequest(
+      identity,
+      fixture.patches().at(-1)!.identity.sequence,
+    ));
+    expect(JSON.stringify(fixture.port.posts)).not.toContain('late-secret-99');
+    const classifier = sourceDocumentSecretClassifier(fixture.document);
+    expect(classifier.isSecret(field)).toBe(true);
+  });
+
+  it('keeps a field masked whose type changed in a closed root before it was seen (D125)', () => {
+    const reader = closedRootReader();
+    const scoped = scopedMutationObservers();
+    const fixture = sourceFixture('<main><x-form id="form"></x-form></main>', reader, { scoped });
+    const form = reader.attach(
+      fixture.document.querySelector('#form')!,
+      '<p>sign in</p><div id="fields"></div>',
+    );
+    const fields = form.querySelector('#fields')!;
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+
+    // Added as a password field and switched to text in the same task: the
+    // old value of the attribute record is the only trace of the first type,
+    // and only an observer of the closed root that asked for old values
+    // gets it.
+    const field = fixture.document.createElement('input');
+    field.setAttribute('type', 'password');
+    field.setAttribute('value', 'flipped-secret-7');
+    fields.append(field);
+    field.setAttribute('type', 'text');
+    expect(scoped.deliver({ type: 'childList', target: fields, addedNodes: [field] }))
+      .toBe(1);
+    expect(scoped.deliver({
+      type: 'attributes', target: field, attributeName: 'type', oldValue: 'password',
+    })).toBe(1);
+    while (fixture.frames.length > 0) fixture.flushFrame();
+
+    expect(sourceDocumentSecretClassifier(fixture.document).isSecret(field)).toBe(true);
+    expect(JSON.stringify(fixture.port.posts)).not.toContain('flipped-secret-7');
+  });
+
+  it('classifies credential fields in closed roots when the bridge is installed (D125)', () => {
+    const { document, window } = parseHTML(
+      '<html><body><x-login id="login"></x-login></body></html>',
+    );
+    Object.defineProperty(window, 'top', { configurable: true, value: window });
+    Object.defineProperty(document, 'baseURI', {
+      configurable: true,
+      value: 'https://example.test/',
+    });
+    const reader = closedRootReader();
+    const login = reader.attach(
+      document.querySelector('#login')!,
+      '<p>sign in</p><x-vault id="vault"></x-vault>',
+    );
+    const vault = reader.attach(
+      login.querySelector('#vault')!,
+      '<input id="pin" type="password" value="bridge-secret-5"><p>vault text</p>',
+    );
+    const pin = vault.querySelector('#pin')!;
+    const onConnect = new FakeEvent<(port: Browser.runtime.Port) => void>();
+    installHtmlMirrorSourceBridge({
+      global: {} as typeof globalThis,
+      runtime: { onConnect } as unknown as
+        HtmlMirrorSourceBridgeEnvironment['runtime'],
+      document,
+      window: window as unknown as Window,
+      now: () => 1,
+      createMutationObserver: () => new NoopBridgeMutationObserver(),
+      scheduleFrame: () => 1,
+      cancelFrame: () => undefined,
+      setTimer: () => 1,
+      clearTimer: () => undefined,
+      openShadowRoot: reader.read,
+    });
+
+    // Before any mirror connects, the classifier has seen into both roots.
+    expect(sourceDocumentSecretClassifier(document).isSecret(pin)).toBe(true);
+    // The page shows the password; the field stays a credential field.
+    pin.setAttribute('type', 'text');
+
+    const port = new FakePort(createHtmlMirrorPortName(identity.sessionId));
+    onConnect.emit(port as unknown as Browser.runtime.Port);
+    port.emitMessage(createHtmlMirrorStart(identity, 'conservative'));
+    const posts = JSON.stringify(port.posts);
+    expect(posts).toContain('vault text');
+    expect(posts).not.toContain('bridge-secret-5');
+  });
+
+  it('asks about every element for each checkpoint, so a root attached between mirrors arrives (D125)', () => {
+    const { document, window } = parseHTML(
+      '<html><body><main><div id="late"></div><p>page text</p></main></body></html>',
+    );
+    Object.defineProperty(window, 'top', { configurable: true, value: window });
+    Object.defineProperty(document, 'baseURI', {
+      configurable: true,
+      value: 'https://example.test/',
+    });
+    const reader = closedRootReader();
+    const onConnect = new FakeEvent<(port: Browser.runtime.Port) => void>();
+    installHtmlMirrorSourceBridge({
+      global: {} as typeof globalThis,
+      runtime: { onConnect } as unknown as
+        HtmlMirrorSourceBridgeEnvironment['runtime'],
+      document,
+      window: window as unknown as Window,
+      now: () => 1,
+      createMutationObserver: () => new NoopBridgeMutationObserver(),
+      scheduleFrame: () => 1,
+      cancelFrame: () => undefined,
+      setTimer: () => 1,
+      clearTimer: () => undefined,
+      openShadowRoot: reader.read,
+    });
+    const late = document.querySelector('#late')!;
+    const asked = () => reader.calls.filter((element) => element === late).length;
+    // The walk at install asked once.
+    expect(asked()).toBe(1);
+
+    // A checkpoint sends the whole page: it asks about every element once.
+    const firstPort = new FakePort(createHtmlMirrorPortName(identity.sessionId));
+    onConnect.emit(firstPort as unknown as Browser.runtime.Port);
+    firstPort.emitMessage(createHtmlMirrorStart(identity, 'conservative'));
+    expect(JSON.stringify(firstPort.posts)).toContain('page text');
+    expect(asked()).toBe(2);
+    firstPort.onDisconnect.emit();
+
+    // A closed root is attached while no mirror is looking.
+    reader.attach(late, '<p>attached between mirrors</p>');
+
+    const secondPort = new FakePort(createHtmlMirrorPortName(identity.sessionId));
+    onConnect.emit(secondPort as unknown as Browser.runtime.Port);
+    secondPort.emitMessage(createHtmlMirrorStart(identity, 'conservative'));
+    expect(asked()).toBe(3);
+    expect(JSON.stringify(secondPort.posts)).toContain('attached between mirrors');
+  });
+
+  it('finds the closed root of a host inserted later, and of a host inside it (D125)', () => {
+    const reader = closedRootReader();
+    const fixture = sourceFixture(
+      '<main id="page"><p>page text</p><div id="old"></div></main>',
+      reader,
+    );
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+
+    const page = fixture.document.querySelector('#page')!;
+    // In the same task the page attaches a root to an element it already had.
+    reader.attach(fixture.document.querySelector('#old')!, '<p>root on an old element</p>');
+    const host = fixture.document.createElement('x-added');
+    const root = reader.attach(host, '<p>added closed text</p><x-inner id="inner"></x-inner>');
+    const nested = reader.attach(root.querySelector('#inner')!, '<p>added nested text</p>');
+    page.append(host);
+    fixture.mutate(childListRecord(page, [host]));
+
+    // The mutation walk finds both roots without waiting for discovery.
+    expect(fixture.observed).toContain(root);
+    expect(fixture.observed).toContain(nested);
+    expect(fixture.port.posts.at(-1)).toMatchObject({
+      kind: 'simul:html-mirror-v2:error',
+      code: 'stream_gap',
+    });
+    fixture.port.emitMessage(createHtmlMirrorCheckpointRequest(identity, 0));
+    const recovery = JSON.stringify(fixture.checkpoints().at(-1));
+    expect(recovery).toContain('added closed text');
+    expect(recovery).toContain('added nested text');
+    // Roots attached together arrive together: the same checkpoint asked
+    // about the old element again.
+    expect(recovery).toContain('root on an old element');
+  });
+
+  it('requests a checkpoint when a host child patch cannot carry its own dirty closed shadow (D125)', () => {
+    const reader = closedRootReader();
+    const fixture = sourceFixture('<x-card id="card"><span>light</span></x-card>', reader);
+    const card = fixture.document.querySelector('#card')!;
+    const shadow = reader.attach(card, '<p id="inside">before closed shadow</p>');
+    const shadowText = shadow.querySelector('#inside')!.firstChild as Text;
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+
+    const added = fixture.document.createElement('span');
+    added.textContent = 'new light child';
+    card.append(added);
+    shadowText.nodeValue = 'after closed shadow';
+    fixture.mutate(childListRecord(card, [added]));
+    fixture.mutate(characterDataRecord(shadowText));
+    fixture.flushFrame();
+
+    expect(fixture.patches()).toHaveLength(0);
+    expect(fixture.port.posts.at(-1)).toMatchObject({
+      kind: 'simul:html-mirror-v2:error',
+      code: 'stream_gap',
+    });
+  });
+
+  it('withholds a collapsed disclosure panel inside a closed shadow root (D125)', () => {
+    const { document, window } = parseHTML(`<html><body>
+      <x-menu id="menu"></x-menu>
+    </body></html>`);
+    const reader = closedRootReader();
+    const root = reader.attach(
+      document.querySelector('#menu')!,
+      '<button aria-expanded="false" aria-controls="panel">Menu</button>' +
+        '<div id="panel">collapsed panel text</div>',
+    );
+    const panel = root.querySelector('#panel')!;
+
+    // Unseen without the page reader, as before D125.
+    expect(createSourceControlledContentPolicy(
+      document as unknown as Document,
+      window as unknown as Window,
+    ).targets.has(panel)).toBe(false);
+
+    installSourceShadowRootReader(document, reader.read);
+    expect(createSourceControlledContentPolicy(
+      document as unknown as Document,
+      window as unknown as Window,
+    ).targets.get(panel)).toBe('withheld');
+  });
+
+  it('asks again for every checkpoint, but never about a host whose root it holds (D125)', () => {
+    const reader = closedRootReader();
+    const fixture = sourceFixture(
+      '<main id="page"><x-card id="card"></x-card><div id="plain">text</div></main>',
+      reader,
+    );
+    const card = fixture.document.querySelector('#card')!;
+    const plain = fixture.document.querySelector('#plain')!;
+    reader.attach(card, '<p>closed text</p>');
+    const asked = (element: Element) =>
+      reader.calls.filter((candidate) => candidate === element).length;
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    expect(asked(card)).toBe(1);
+    expect(asked(plain)).toBe(1);
+
+    // Discovery asks about the elements still without a root.
+    fixture.runTimer();
+    expect(asked(card)).toBe(1);
+    expect(asked(plain)).toBe(2);
+
+    // A checkpoint the panel asks for asks again about every element
+    // without a root; a root, once found, is never asked about again.
+    const plainRoot = reader.attach(plain, '<p>root since the last tick</p>');
+    fixture.port.emitMessage(createHtmlMirrorCheckpointRequest(identity, 0));
+    expect(fixture.checkpoints()).toHaveLength(2);
+    const recovery = JSON.stringify(fixture.checkpoints().at(-1));
+    expect(recovery).toContain('closed text');
+    expect(recovery).toContain('root since the last tick');
+    expect(fixture.observed).toContain(plainRoot);
+    expect(asked(card)).toBe(1);
+    expect(asked(plain)).toBe(3);
+  });
+
+  describe.each(['open', 'closed'] as const)(
+    'a password field added to an %s root while no panel is open (D125)',
+    (mode) => {
+      function closedPanelPage(markup: string) {
+        const { document, window } = parseHTML(`<html><body>${markup}</body></html>`);
+        Object.defineProperty(window, 'top', { configurable: true, value: window });
+        Object.defineProperty(document, 'baseURI', {
+          configurable: true,
+          value: 'https://example.test/',
+        });
+        const reader = closedRootReader();
+        const observers = scopedMutationObservers();
+        const onConnect = new FakeEvent<(port: Browser.runtime.Port) => void>();
+        return {
+          document,
+          observers,
+          attach(host: Element, markup = ''): ShadowRoot {
+            if (mode === 'closed') return reader.attach(host, markup);
+            const root = host.attachShadow({ mode: 'open' });
+            Object.defineProperty(root, 'mode', { value: 'open' });
+            root.innerHTML = markup;
+            return root;
+          },
+          install: () => installHtmlMirrorSourceBridge({
+            global: {} as typeof globalThis,
+            runtime: { onConnect } as unknown as
+              HtmlMirrorSourceBridgeEnvironment['runtime'],
+            document,
+            window: window as unknown as Window,
+            now: () => 1,
+            createMutationObserver: observers.create,
+            scheduleFrame: () => 1,
+            cancelFrame: () => undefined,
+            setTimer: () => 1,
+            clearTimer: () => undefined,
+            openShadowRoot: reader.read,
+          }),
+          /** A person's input whose path, seen from the window, starts at `start`. */
+          input(type: string, start: Node): void {
+            const event = new window.Event(type, { bubbles: true, composed: true });
+            Object.defineProperty(event, 'composedPath', { value: () => [start] });
+            window.dispatchEvent(event);
+          },
+          /** The panel is opened again: what the mirror then sends. */
+          reopen(): string {
+            const port = new FakePort(createHtmlMirrorPortName(identity.sessionId));
+            onConnect.emit(port as unknown as Browser.runtime.Port);
+            port.emitMessage(createHtmlMirrorStart(identity, 'conservative'));
+            return JSON.stringify(port.posts);
+          },
+        };
+      }
+      type ClosedPanelPage = ReturnType<typeof closedPanelPage>;
+
+      /** Adds a row with a password field to `root`, as a later task. */
+      function addField(page: ClosedPanelPage, root: ShadowRoot, value: string): Element {
+        const row = page.document.createElement('div');
+        row.innerHTML = `<input type="password" value="${value}">`;
+        root.append(row);
+        // Only an observer of the root itself hears of it.
+        expect(page.observers.deliver({ type: 'childList', target: root, addedNodes: [row] }))
+          .toBe(1);
+        return row.querySelector('input')!;
+      }
+
+      /** The page's eye: the field shows its password. */
+      function show(page: ClosedPanelPage, field: Element): void {
+        field.setAttribute('type', 'text');
+        page.observers.deliver({
+          type: 'attributes', target: field, attributeName: 'type', oldValue: 'password',
+        });
+      }
+
+      it('stays masked when it was added to a root the page had', () => {
+        const page = closedPanelPage('<x-form id="form"></x-form>');
+        const root = page.attach(page.document.querySelector('#form')!, '<p>sign in</p>');
+        page.install();
+
+        const field = addField(page, root, 'later-secret-31');
+        show(page, field);
+
+        expect(sourceDocumentSecretClassifier(page.document).isSecret(field)).toBe(true);
+        const posts = page.reopen();
+        expect(posts).toContain('sign in');
+        expect(posts).not.toContain('later-secret-31');
+      });
+
+      it('stays masked when a component renders it after it was inserted', () => {
+        const page = closedPanelPage('<div id="mount"></div>');
+        page.install();
+        const host = page.document.createElement('x-async');
+        const root = page.attach(host);
+        const mount = page.document.querySelector('#mount')!;
+        mount.append(host);
+        page.observers.deliver({ type: 'childList', target: mount, addedNodes: [host] });
+
+        const field = addField(page, root, 'async-secret-32');
+        show(page, field);
+
+        expect(sourceDocumentSecretClassifier(page.document).isSecret(field)).toBe(true);
+        expect(page.reopen()).not.toContain('async-secret-32');
+      });
+
+      it('stays masked when a person types into it before showing it, in a root attached to an element the page had', () => {
+        const page = closedPanelPage('<div id="spare">spare</div>');
+        page.install();
+        const spare = page.document.querySelector('#spare')!;
+        // No record reports this root: only the person's input can.
+        const root = page.attach(
+          spare,
+          '<label>Password <input type="password" value="typed-secret-35"></label>',
+        );
+        const field = root.querySelector('input')!;
+        page.input('keydown', mode === 'closed' ? spare : field);
+        expect(sourceDocumentSecretClassifier(page.document).isSecret(field)).toBe(true);
+        field.setAttribute('type', 'text');
+        expect(page.observers.deliver({
+          type: 'attributes', target: field, attributeName: 'type', oldValue: 'password',
+        })).toBe(1);
+
+        expect(page.reopen()).not.toContain('typed-secret-35');
+      });
+
+      it('stays masked when its host, read before, got the root while out of the page', () => {
+        const page = closedPanelPage('<main id="main"><div id="spare">spare</div></main>');
+        page.install();
+        const main = page.document.querySelector('#main')!;
+        const spare = page.document.querySelector('#spare')!;
+        spare.remove();
+        page.observers.deliver({ type: 'childList', target: main, removedNodes: [spare] });
+        const root = page.attach(spare, '<input type="password" value="reinsert-secret-36">');
+        main.append(spare);
+        page.observers.deliver({ type: 'childList', target: main, addedNodes: [spare] });
+
+        const field = root.querySelector('input')!;
+        show(page, field);
+        expect(sourceDocumentSecretClassifier(page.document).isSecret(field)).toBe(true);
+        expect(page.reopen()).not.toContain('reinsert-secret-36');
+      });
+
+      it('records nothing for a component that only animates while no panel is open', () => {
+        const page = closedPanelPage('<x-card id="card"></x-card>');
+        const root = page.attach(page.document.querySelector('#card')!, '<p id="tick">0</p>');
+        page.install();
+        const tick = root.querySelector('#tick')!;
+        // A class, a data attribute and the text of a ticker: no evidence.
+        expect(page.observers.deliver({
+          type: 'attributes', target: tick, attributeName: 'class', oldValue: 'a',
+        })).toBe(0);
+        expect(page.observers.deliver({
+          type: 'attributes', target: tick, attributeName: 'data-frame', oldValue: '1',
+        })).toBe(0);
+        expect(page.observers.deliver({
+          type: 'characterData', target: tick.firstChild!, oldValue: '0',
+        })).toBe(0);
+        // A type, and a style that may have masked text, are recorded.
+        expect(page.observers.deliver({
+          type: 'attributes', target: tick, attributeName: 'type', oldValue: 'password',
+        })).toBe(1);
+        expect(page.observers.deliver({
+          type: 'attributes', target: tick, attributeName: 'style', oldValue: '',
+        })).toBe(1);
+      });
+
+      it('stays masked when it is added and shown in the same task', () => {
+        const page = closedPanelPage('<x-form id="form"></x-form>');
+        const root = page.attach(page.document.querySelector('#form')!, '<p>sign in</p>');
+        page.install();
+        const row = page.document.createElement('div');
+        row.innerHTML = '<input type="password" value="same-task-secret-33">';
+        root.append(row);
+        const field = row.querySelector('input')!;
+        field.setAttribute('type', 'text');
+        // When the records arrive the field is a text field already: only
+        // the old value of the type tells it was a password.
+        expect(page.observers.deliverAll([
+          { type: 'childList', target: root, addedNodes: [row] },
+          { type: 'attributes', target: field, attributeName: 'type', oldValue: 'password' },
+        ])).toBe(1);
+
+        expect(sourceDocumentSecretClassifier(page.document).isSecret(field)).toBe(true);
+        expect(page.reopen()).not.toContain('same-task-secret-33');
+      });
+    },
+  );
+
+  /**
+   * `-webkit-text-security: disc` on the elements `masked` picks, for one
+   * test: linkedom's window is a view of the global object, so a style
+   * defined on it would stay for the tests that follow.
+   */
+  function maskWith(
+    fixture: ReturnType<typeof sourceFixture>,
+    masked: (element: Element) => boolean,
+  ): void {
+    const previous = Object.getOwnPropertyDescriptor(fixture.window, 'getComputedStyle');
+    onTestFinished(() => {
+      if (previous) Object.defineProperty(fixture.window, 'getComputedStyle', previous);
+      else Reflect.deleteProperty(fixture.window, 'getComputedStyle');
+    });
+    Object.defineProperty(fixture.window, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => ({
+        backgroundColor: 'rgba(0, 0, 0, 0)',
+        getPropertyValue: (name: string) =>
+          name === '-webkit-text-security' && masked(element) ? 'disc' : '',
+      }),
+    });
+  }
+
+  /** Chrome reads null from `assignedSlot` for a node slotted into a closed root. */
+  function unassigned(...nodes: Node[]): void {
+    for (const node of nodes) {
+      Object.defineProperty(node, 'assignedSlot', { configurable: true, value: null });
+    }
+  }
+
+  it('sends nothing beside a closed root attached since: the patch becomes a checkpoint (D125)', () => {
+    const reader = closedRootReader();
+    const fixture = sourceFixture(
+      '<main><div id="host">shown before</div><p id="other">other text</p></main>',
+      reader,
+    );
+    maskWith(fixture, (element) => element.classList.contains('mask'));
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const host = fixture.document.querySelector('#host')!;
+    const text = host.firstChild as Text;
+    unassigned(text);
+
+    // A closed root wraps the host's text in a masking box; nothing fires.
+    // Then the text changes, which the document's observer reports.
+    reader.attach(host, '<div class="mask"><slot></slot></div>');
+    text.data = 'masked-after-41';
+    fixture.mutate(characterDataRecord(text));
+    fixture.flushFrame();
+
+    expect(JSON.stringify(fixture.port.posts)).not.toContain('masked-after-41');
+    expect(fixture.port.posts.at(-1)).toMatchObject({
+      kind: 'simul:html-mirror-v2:error',
+      code: 'stream_gap',
+    });
+    fixture.port.emitMessage(createHtmlMirrorCheckpointRequest(identity, 0));
+    const recovery = JSON.stringify(fixture.checkpoints().at(-1));
+    expect(recovery).toContain('other text');
+    expect(recovery).not.toContain('masked-after-41');
+  });
+
+  it('asks again about every element of a subtree it sends (D125)', () => {
+    const reader = closedRootReader();
+    const fixture = sourceFixture(
+      '<main><section id="list"><div id="host">kept text</div></section>' +
+        '<section id="other"><p id="moved">moved row</p></section></main>',
+      reader,
+    );
+    maskWith(fixture, (element) => element.classList.contains('mask'));
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const list = fixture.document.querySelector('#list')!;
+    const other = fixture.document.querySelector('#other')!;
+    const host = fixture.document.querySelector('#host')!;
+    const moved = fixture.document.querySelector('#moved')!;
+
+    // The host gets a closed root and its text changes, unrecorded; then a
+    // row moves into the list, so the list's children are all read again.
+    reader.attach(host, '<div class="mask"><slot></slot></div>');
+    const text = host.firstChild as Text;
+    unassigned(text);
+    text.data = 'masked-again-42';
+    list.append(moved);
+    fixture.mutateAll([
+      childListRecord(other, [], [moved]),
+      childListRecord(list, [moved]),
+    ]);
+    fixture.flushFrame();
+
+    expect(JSON.stringify(fixture.port.posts)).not.toContain('masked-again-42');
+    expect(fixture.port.posts.at(-1)).toMatchObject({
+      kind: 'simul:html-mirror-v2:error',
+      code: 'stream_gap',
+    });
+  });
+
+  it('rebuilds when another reader of the page finds a root attached since (D125)', () => {
+    const reader = closedRootReader();
+    const fixture = sourceFixture('<main><div id="late">text</div></main>', reader);
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const late = fixture.document.querySelector('#late')!;
+    const root = reader.attach(late, '<p>late text</p>');
+
+    // The semantic reader asks about the roots above a value it will send.
+    expect(askAboutSourceShadowRootsAbove(late.firstChild!, new Set())).toEqual([root]);
+    expect(fixture.frames).toHaveLength(1);
+    fixture.flushFrame();
+    expect(fixture.port.posts.at(-1)).toMatchObject({
+      kind: 'simul:html-mirror-v2:error',
+      code: 'stream_gap',
+    });
+    fixture.port.emitMessage(createHtmlMirrorCheckpointRequest(identity, 0));
+    expect(JSON.stringify(fixture.checkpoints().at(-1))).toContain('late text');
+  });
+
+  it('finds a closed root at a layout change, asking again at most once an interval (D125)', () => {
+    const reader = closedRootReader();
+    let now = 1_000;
+    const fixture = sourceFixture(
+      '<main><div id="late">text</div><p id="plain">plain</p></main>',
+      reader,
+      { now: () => now },
+    );
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const late = fixture.document.querySelector('#late')!;
+    const plain = fixture.document.querySelector('#plain')!;
+    const asked = (element: Element) =>
+      reader.calls.filter((candidate) => candidate === element).length;
+    const resize = () => fixture.window.dispatchEvent(new fixture.window.Event('resize'));
+
+    // A root that renders anything changes the layout, as an open one does.
+    reader.attach(late, '<p>late text</p>');
+    resize();
+    expect(fixture.port.posts).toContainEqual(expect.objectContaining({
+      kind: 'simul:html-mirror-v2:error',
+      code: 'stream_gap',
+    }));
+    const askedOnce = asked(plain);
+    resize();
+    expect(asked(plain)).toBe(askedOnce);
+    now += 500;
+    resize();
+    expect(asked(plain)).toBe(askedOnce + 1);
+  });
+
+  it('follows the focus into roots it knows to find a root attached since inside them (D125)', () => {
+    const { document, window } = parseHTML(
+      '<html><body><x-form id="form"></x-form></body></html>',
+    );
+    Object.defineProperty(window, 'top', { configurable: true, value: window });
+    Object.defineProperty(document, 'baseURI', { configurable: true, value: 'https://example.test/' });
+    const reader = closedRootReader();
+    const form = document.querySelector('#form')!;
+    const outer = reader.attach(form, '<div id="inner">inner</div>');
+    const observers = scopedMutationObservers();
+    installHtmlMirrorSourceBridge({
+      global: {} as typeof globalThis,
+      runtime: { onConnect: new FakeEvent<(port: Browser.runtime.Port) => void>() } as unknown as
+        HtmlMirrorSourceBridgeEnvironment['runtime'],
+      document,
+      window: window as unknown as Window,
+      now: () => 1,
+      createMutationObserver: observers.create,
+      scheduleFrame: () => 1,
+      cancelFrame: () => undefined,
+      setTimer: () => 1,
+      clearTimer: () => undefined,
+      openShadowRoot: reader.read,
+    });
+    // A root, attached to an element inside a closed root the page had,
+    // holds the field the person types into. Seen from the window the
+    // input's path ends at the outer host; the focus leads further in.
+    const inner = outer.querySelector('#inner')!;
+    const innerRoot = reader.attach(inner, '<input type="password" value="nested-secret-37">');
+    Object.defineProperty(outer, 'activeElement', { configurable: true, value: inner });
+    const event = new window.Event('keydown', { bubbles: true, composed: true });
+    Object.defineProperty(event, 'composedPath', { value: () => [form] });
+    window.dispatchEvent(event);
+
+    const field = innerRoot.querySelector('input')!;
+    expect(sourceDocumentSecretClassifier(document).isSecret(field)).toBe(true);
+    expect(observers.observedTargets()).toContain(innerRoot);
+  });
+
+  it('reads below the deepest root the focus leads to, for a root attached deeper still (D125)', () => {
+    const { document, window } = parseHTML(
+      '<html><body><x-form id="form"></x-form></body></html>',
+    );
+    Object.defineProperty(window, 'top', { configurable: true, value: window });
+    Object.defineProperty(document, 'baseURI', { configurable: true, value: 'https://example.test/' });
+    const reader = closedRootReader();
+    const form = document.querySelector('#form')!;
+    // 33 closed roots, each holding the next host, the page had at load.
+    let host: Element = form;
+    for (let level = 0; level < 33; level += 1) {
+      const root = reader.attach(host, '<x-level>level</x-level>');
+      const next = root.querySelector('x-level')!;
+      Object.defineProperty(root, 'activeElement', { configurable: true, value: next });
+      host = next;
+    }
+    const observers = scopedMutationObservers();
+    installHtmlMirrorSourceBridge({
+      global: {} as typeof globalThis,
+      runtime: { onConnect: new FakeEvent<(port: Browser.runtime.Port) => void>() } as unknown as
+        HtmlMirrorSourceBridgeEnvironment['runtime'],
+      document,
+      window: window as unknown as Window,
+      now: () => 1,
+      createMutationObserver: observers.create,
+      scheduleFrame: () => 1,
+      cancelFrame: () => undefined,
+      setTimer: () => 1,
+      clearTimer: () => undefined,
+      openShadowRoot: reader.read,
+    });
+    // The deepest element gets a root holding the field, past the 32 roots
+    // the focus is followed through.
+    const deepRoot = reader.attach(host, '<input type="password" value="deep-secret-38">');
+    const event = new window.Event('keydown', { bubbles: true, composed: true });
+    Object.defineProperty(event, 'composedPath', { value: () => [form] });
+    window.dispatchEvent(event);
+
+    const field = deepRoot.querySelector('input')!;
+    expect(sourceDocumentSecretClassifier(document).isSecret(field)).toBe(true);
+    expect(observers.observedTargets()).toContain(deepRoot);
+  });
+
+  it('looks again, freshly, when the interval of a layout change inside it ends (D125)', () => {
+    const reader = closedRootReader();
+    let now = 1_000;
+    const fixture = sourceFixture(
+      '<main><div id="late">text</div></main>',
+      reader,
+      { now: () => now },
+    );
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const resize = () => fixture.window.dispatchEvent(new fixture.window.Event('resize'));
+    const gap = () => fixture.port.posts.some((message) =>
+      (message as { code?: string }).code === 'stream_gap');
+    resize();
+
+    // A root comes just after that walk; the next layout change trusts it.
+    now += 100;
+    reader.attach(fixture.document.querySelector('#late')!, '<p>late text</p>');
+    const timers = fixture.timers.length;
+    resize();
+    expect(gap()).toBe(false);
+    expect(fixture.timers).toHaveLength(timers + 1);
+    resize();
+    expect(fixture.timers).toHaveLength(timers + 1);
+
+    // When the interval ends, the walk owed asks again.
+    now += 400;
+    fixture.timers.pop()!();
+    expect(gap()).toBe(true);
+  });
+
+  it('owes only the root walk at the end of a layout interval, not the layout work again (D125)', () => {
+    let now = 1_000;
+    const fixture = sourceFixture('<main><p>text</p></main>', closedRootReader(), {
+      now: () => now,
+    });
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const resize = () => fixture.window.dispatchEvent(new fixture.window.Event('resize'));
+    resize();
+    now += 100;
+    resize();
+    while (fixture.frames.length > 0) fixture.flushFrame();
+    const posts = fixture.port.posts.length;
+
+    // Nothing was attached: the walk owed finds nothing and asks for no
+    // flush, no visibility refresh and no scroll report.
+    now += 400;
+    fixture.timers.pop()!();
+    expect(fixture.frames).toHaveLength(0);
+    expect(fixture.port.posts).toHaveLength(posts);
+  });
+
+  it('does not charge removed elements to a discovery tick (D125)', () => {
+    const reader = closedRootReader();
+    const rows = Array.from({ length: 1_000 }, (_, index) =>
+      `<div class="row">row ${index}</div>`).join('');
+    const fixture = sourceFixture(
+      `<main><section id="rows">${rows}</section><div id="late"></div></main>`,
+      reader,
+    );
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const section = fixture.document.querySelector('#rows')!;
+    const removed = [...section.childNodes];
+    section.replaceChildren();
+    fixture.mutate(childListRecord(section, [], removed));
+    fixture.flushFrame();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, fixture.patches().at(-1)!.identity.sequence));
+
+    reader.attach(fixture.document.querySelector('#late')!, '<p>late text</p>');
+    fixture.runTimer();
+    expect(fixture.port.posts.at(-1)).toMatchObject({
+      kind: 'simul:html-mirror-v2:error',
+      code: 'stream_gap',
+    });
+  });
+
+  it.each([
+    ['controls, which cannot hold a root', '<button>go</button>'],
+    ['hosts whose closed root it holds', '<x-card></x-card>'],
+  ])('keeps %s out of the discovery rotation (D125)', (_, element) => {
+    const reader = closedRootReader();
+    const fixture = sourceFixture(
+      `<main>${element.repeat(1_000)}<div id="late"></div></main>`,
+      reader,
+    );
+    for (const card of fixture.document.querySelectorAll('x-card')) {
+      reader.attach(card, '<i>card</i>');
+    }
+    fixture.start();
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+
+    // One tick asks about 1,000 waiting elements: the late host is among them.
+    reader.attach(fixture.document.querySelector('#late')!, '<p>late text</p>');
+    fixture.runTimer();
+    expect(fixture.port.posts.at(-1)).toMatchObject({
+      kind: 'simul:html-mirror-v2:error',
+      code: 'stream_gap',
+    });
+  });
+
+  it('rebuilds when a closed root changes after its host became masked (D125)', () => {
+    const reader = closedRootReader();
+    const fixture = sourceFixture('<main><x-pin id="pin"></x-pin></main>', reader);
+    const pin = fixture.document.querySelector('#pin')!;
+    const root = reader.attach(pin, '<span>public before masking</span>');
+    let masked = false;
+    maskWith(fixture, (element) => masked && element === pin);
+    fixture.start();
+    expect(JSON.stringify(fixture.checkpoints()[0])).toContain('public before masking');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+
+    // The host is masked now; the change is recorded on its closed root.
+    masked = true;
+    const added = fixture.document.createElement('span');
+    added.textContent = 'private after masking';
+    root.append(added);
+    fixture.mutate(childListRecord(root, [added]));
+    expect(fixture.port.posts.at(-1)).toMatchObject({
+      kind: 'simul:html-mirror-v2:error',
+      code: 'stream_gap',
+    });
+    expect(JSON.stringify(fixture.port.posts)).not.toContain('private after masking');
+  });
+
+  it('notices a controller added inside a closed root (D125)', () => {
+    const { document, window } = parseHTML(
+      '<html><body><main id="page"></main></body></html>',
+    );
+    const reader = closedRootReader();
+    installSourceShadowRootReader(document, reader.read);
+    const policy = createSourceControlledContentPolicy(
+      document as unknown as Document,
+      window as unknown as Window,
+    );
+    const page = document.querySelector('#page')!;
+    const host = document.createElement('x-menu');
+    reader.attach(host, '<button aria-controls="later-panel">Open</button>');
+    page.append(host);
+
+    expect(sourceControlledContentMutationsMayChange(
+      [childListRecord(page, [host])],
+      policy,
+    )).toBe(true);
+  });
+
+  it('observes every closed root it mirrors, beyond the bounded walk (D125)', () => {
+    const reader = closedRootReader();
+    const fixture = sourceFixture(
+      `<main>${'<b>x</b>'.repeat(10_001)}<x-card id="card"></x-card></main>`,
+      reader,
+    );
+    const root = reader.attach(fixture.document.querySelector('#card')!, '<p>card text</p>');
+    fixture.start();
+    expect(JSON.stringify(fixture.checkpoints()[0]).includes('card text')).toBe(true);
+    // The walk after the checkpoint stops after 20,000 nodes, before the card.
+    expect(fixture.session.shadowObservationVisitCount).toBe(20_000);
+    expect(fixture.observed.includes(root)).toBe(true);
+  });
+
+  it.each(['open', 'closed'] as const)(
+    'does not rebuild again for an %s root the checkpoint could not hold (D125)',
+    (mode) => {
+      const reader = closedRootReader();
+      const fixture = sourceFixture(
+        '<main id="page"><section id="otp" autocomplete="one-time-code">' +
+          '<x-digit id="digit"></x-digit></section><p id="line">line</p></main>',
+        reader,
+      );
+      const host = fixture.document.querySelector('#digit')!;
+      // A root inside a credential region: the region travels as one opaque
+      // shell, so no checkpoint can hold the root.
+      let root: ShadowRoot;
+      if (mode === 'closed') {
+        root = reader.attach(host, '<b>digit seven</b>');
+      } else {
+        root = host.attachShadow({ mode: 'open' });
+        Object.defineProperty(root, 'mode', { value: 'open' });
+        root.innerHTML = '<b>digit seven</b>';
+      }
+      fixture.start();
+      expect(JSON.stringify(fixture.checkpoints()[0])).not.toContain('digit seven');
+      fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+
+      // Changes above the region used to ask for a checkpoint each time.
+      const page = fixture.document.querySelector('#page')!;
+      for (let round = 0; round < 3; round += 1) {
+        const added = fixture.document.createElement('p');
+        added.textContent = `added ${round}`;
+        page.append(added);
+        fixture.mutate(childListRecord(page, [added]));
+        page.setAttribute('data-round', String(round));
+        fixture.mutate(attributeRecord(page, 'data-round'));
+        fixture.flushFrame();
+        const patch = fixture.patches().at(-1)!;
+        expect(JSON.stringify(patch)).toContain(`added ${round}`);
+        fixture.port.emitMessage(createHtmlMirrorAck(identity, patch.identity.sequence));
+      }
+      expect(fixture.patches()).toHaveLength(3);
+      expect(fixture.checkpoints()).toHaveLength(1);
+      expect(fixture.port.posts.some((message) =>
+        (message as { kind?: string }).kind === 'simul:html-mirror-v2:error')).toBe(false);
+      expect(JSON.stringify(fixture.port.posts)).not.toContain('digit seven');
+
+      // A root the mirror can hold still asks for its checkpoint.
+      const line = fixture.document.querySelector('#line')!;
+      if (mode === 'closed') {
+        reader.attach(line, '<i>late root</i>');
+      } else {
+        const late = line.attachShadow({ mode: 'open' });
+        Object.defineProperty(late, 'mode', { value: 'open' });
+        late.innerHTML = '<i>late root</i>';
+      }
+      fixture.runTimer();
+      expect(fixture.port.posts.at(-1)).toMatchObject({
+        kind: 'simul:html-mirror-v2:error',
+        code: 'stream_gap',
+      });
+    },
+  );
+
   it('signals a stream gap instead of silently dropping a batch that throws', () => {
     const fixture = sourceFixture('<main><p id="guarded">before guard</p></main>');
     fixture.start();
@@ -3014,8 +4141,18 @@ const identity = createReplicaIdentity({
   sequence: 0,
 });
 
-function sourceFixture(markup: string) {
+function sourceFixture(
+  markup: string,
+  closedRoots?: ClosedRootReader,
+  options: {
+    /** Delivers records only where the session observes (D125). */
+    readonly scoped?: ScopedMutationObservers;
+    readonly now?: () => number;
+  } = {},
+) {
   const { document, window } = parseHTML(`<!doctype html><html><head></head><body>${markup}</body></html>`);
+  // How the page's closed shadow roots are read (D125).
+  if (closedRoots) installSourceShadowRootReader(document, closedRoots.read);
   Object.defineProperty(window, 'top', { configurable: true, value: window });
   Object.defineProperty(document, 'baseURI', {
     configurable: true,
@@ -3026,17 +4163,23 @@ function sourceFixture(markup: string) {
   const frames: Array<() => void> = [];
   const timers: Array<() => void> = [];
   const observed: Node[] = [];
+  const observedOptions = new Map<Node, MutationObserverInit | undefined>();
   let mutationCallback!: MutationCallback;
   const session = new HtmlMirrorSourceSession({
     port: port as unknown as Browser.runtime.Port,
     document,
     window: window as unknown as Window,
     registry,
-    now: () => 1,
+    now: options.now ?? (() => 1),
     createMutationObserver: (callback) => {
       mutationCallback = callback;
+      const scoped = options.scoped?.create(callback);
       return {
-        observe: (target) => observed.push(target),
+        observe: (target, init) => {
+          observed.push(target);
+          observedOptions.set(target, init);
+          scoped?.observe(target, init);
+        },
         disconnect: vi.fn(),
       };
     },
@@ -3061,7 +4204,9 @@ function sourceFixture(markup: string) {
     document,
     window,
     frames,
+    timers,
     observed,
+    observedOptions,
     port,
     registry,
     session,

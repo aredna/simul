@@ -29,7 +29,7 @@ already holds for it.
   state.
 - **How panes are found.** The page script keeps the scrolled panes in mind:
   found by a bounded walk when a checkpoint is made (two number reads an
-  element, the first 50,000 elements, open shadow roots included), and by
+  element, the first 50,000 elements, shadow roots included), and by
   scroll events afterwards, read once a frame. It reads them again after
   every patch it posts, because a change to the page can lengthen a pane,
   hide it or show it again with no scroll event. A pane that scrolls before
@@ -464,13 +464,28 @@ boundaries allowlist tags, style properties, attributes, image schemes, and the
 narrow typed semantic records above. Scripts, handlers, navigation semantics,
 raw `value` attributes, credential secrets, and cross-origin frame content
 never enter the mirror; approved visible values travel only through the scoped
-typed channel. Open shadow trees and slot assignments are
-composed; closed roots remain inaccessible by web-platform design. The live
-bridge discovers roots present during capture, roots on newly inserted DOM,
-and roots created as previously undefined custom elements upgrade. The web
-platform exposes no general event when an already-defined, already-connected
-host attaches a root later; if that happens without a DOM, resize, focus, or
-load signal, a manual rebuild may be required.
+typed channel. Shadow trees, open or closed, and slot assignments are
+composed (D125): the page script reads a closed root through
+`chrome.dom.openOrClosedShadowRoot`, which needs no permission, and the
+replica builds an open root either way, so whether a root was closed does not
+travel. One helper (`lib/replica/source-shadow-root.ts`) is the only way any
+reader of the page reaches a root, the credential classifier included, and
+it asks only about elements a page can attach a root to (never the `<body>`
+of a PDF document, whose closed root is Chrome's viewer), so the browser's
+own control internals are never walked. The live bridge discovers roots
+present during capture and roots on newly inserted DOM. The web platform
+exposes no event when a connected host attaches a root later, so nothing is
+sent for a node before every element above it, and every element of a
+subtree that is sent, has been asked about its root in that read; a
+checkpoint asks about every element. A layout change looks again (at most
+once every half second), and a bounded rotation (at most 1,000 waiting hosts
+every half second) does too: at the element's own property for an open root,
+and by asking Chrome again for a closed one. Every root that any reader
+meets is also watched by the document-lifetime credential observer, and a
+person's click, key or focus asks about the roots around it before the
+component's own handlers run (a handler the page put on the window before
+Simul was first run there runs first), so a field typed into or shown by
+the page stays known as a password.
 
 The isolated renderer also carries two narrow source facts that are difficult
 to recover after scripts are disabled: a boolean for the canonical clipped
@@ -488,7 +503,7 @@ until its no-network resource substitution and acceptance tests are complete.
 
 Under Passive Fidelity, sanitized CSS remains in source cascade order across
 inline declarations, `<style>` elements, passive stylesheet links, readable
-CSSOM, constructed/adopted sheets, and styles inside open shadow roots.
+CSSOM, constructed/adopted sheets, and styles inside shadow roots.
 Sanitization keeps custom properties, media/support/container queries, layers,
 pseudo-element rules, passive fonts and backgrounds, SVG presentation
 attributes, and bounded same-document effects such as
@@ -521,8 +536,8 @@ iframe, mount, scale, scroll, and presentation-stage layers, and clears those
 hints when the source returns to a transparent canvas. This is a generic dark-
 theme fallback, not a site-specific OpenAI.com branch.
 
-Fidelity still has browser-enforced boundaries. Closed shadow roots are not
-observable. Cross-origin stylesheet CSSOM can be unreadable even though the
+Fidelity still has browser-enforced boundaries. Cross-origin stylesheet
+CSSOM can be unreadable even though the
 passive link itself renders. A source `blob:` URL is scoped to the source
 environment and Simul does not reuse it; a loaded `blob:` or `crossorigin`
 image within the size caps travels as the pixels the page decoded (D89). A validated source document
@@ -561,7 +576,7 @@ not proof that Chrome made a network request. Logs never include text, URLs,
 tag names, attributes, hashes, or node IDs.
 
 Modern component sites can still depend on page JavaScript to define custom
-elements, toggle `:defined`, populate closed shadow roots, expose
+elements, toggle `:defined`, expose
 `ElementInternals` state, or virtualize off-screen rails. Simul deliberately
 does not execute that code in the replica. Same-parent final-order patches now
 retain receiver-proven direct children and transport graphs only for new nodes.
@@ -571,7 +586,7 @@ constraints mean the current release improves representable Reddit content but
 does not claim pixel parity.
 
 Useful content-free research for a missing rail or label is whether the source
-element exists, whether its shadow root is open, its adopted stylesheet count,
+element exists, whether it has a shadow root, its adopted stylesheet count,
 whether it matches `:defined`, its computed `display`, `visibility`, `position`,
 `clip`, and `clip-path`, and its bounding rectangle. For a missing image overlay,
 record the OCR job stages and safe rendered/bitmap dimensions. Do not share
@@ -1121,7 +1136,7 @@ source scrolling, all size/zoom modes, language changes, settings persistence,
 detached-window binding, toolbar progress, and quick-translation
 cancellation/copy. Check OpenAI.com for its dark canvas, upper-left SVG logo
 geometry, and primary reading scroll. Check the supplied Reddit article for
-late left and right rails, public labels, and open-shadow content. Confirm
+late left and right rails, public labels, and shadow-root content. Confirm
 eligible native text controls translate, password/password-autocomplete and
 unsupported controls stay blank, public native dropdown labels/current
 selection update without raw values, a safe-to-sensitive transition clears

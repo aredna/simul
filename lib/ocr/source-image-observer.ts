@@ -8,6 +8,10 @@ import {
   readSourceFlatTreeElementPath,
 } from '../replica/source-privacy-policy';
 import {
+  canHostAuthorShadowRoot,
+  readSourceShadowRoot,
+} from '../replica/source-shadow-root';
+import {
   receiverSafeAnimationFrameCanceller,
   receiverSafeAnimationFrameScheduler,
   type AnimationFrameCanceller,
@@ -83,19 +87,19 @@ const MAX_PRIVATE_TOKEN_INPUT = 64 * 1024;
 // How much of each end of a long part the oversized digest reads.
 const PRIVATE_TOKEN_DIGEST_END = 8 * 1024;
 const MAX_SOURCE_IMAGE_TRAVERSAL_NODES = 50_000;
-const MAX_SOURCE_IMAGE_OPEN_ROOTS = 1_024;
+const MAX_SOURCE_IMAGE_SHADOW_ROOTS = 1_024;
 const MAX_SOURCE_SHADOW_HOST_CANDIDATES = 50_000;
 const MAX_SOURCE_SHADOW_HOSTS_PER_TICK = 1_000;
 const MAX_SOURCE_IMAGE_MUTATION_RECORDS = 2_048;
 const MAX_SOURCE_IMAGE_MUTATION_CHILD_NODES = 4_096;
-const OPEN_SHADOW_DISCOVERY_INTERVAL_MS = 1_000;
+const SHADOW_DISCOVERY_INTERVAL_MS = 1_000;
 const MAX_CAPTURE_SAFETY_SCAN_ELEMENTS = 50_000;
 const MAX_CAPTURE_SAFETY_TARGETS = 1_024;
 const MAX_CAPTURE_OVERLAP_COMPARISONS = 50_000;
 const MAX_LAYOUT_SETTLE_TARGETS = 256;
-const UNREADABLE_OPEN_SHADOW_ROOT = Symbol('unreadable-open-shadow-root');
-type OpenShadowRootRead = ShadowRoot | null |
-  typeof UNREADABLE_OPEN_SHADOW_ROOT;
+const UNREADABLE_SHADOW_ROOT = Symbol('unreadable-shadow-root');
+type ShadowRootRead = ShadowRoot | null |
+  typeof UNREADABLE_SHADOW_ROOT;
 const LAYOUT_SETTLE_EVENT_TYPES = Object.freeze([
   'transitionend',
   'transitioncancel',
@@ -624,8 +628,8 @@ export class SourceImageObserver {
   #observeSourceRoot(root: Document | ShadowRoot): boolean {
     if (!this.#mutationObserver) return false;
     if (this.#observedMutationRoots.has(root)) return true;
-    if (this.#observedMutationRootCount >= MAX_SOURCE_IMAGE_OPEN_ROOTS + 1) {
-      this.#rootObservationOverflow = true;
+    if (this.#observedMutationRootCount >= MAX_SOURCE_IMAGE_SHADOW_ROOTS + 1) {
+      this.#stopShadowDiscovery();
       return false;
     }
     this.#observedMutationRoots.add(root);
@@ -650,7 +654,7 @@ export class SourceImageObserver {
       createSourceImageTraversalBudget(this.#maxImages),
     );
     this.#registerShadowHostCandidates(scan.hostCandidates);
-    for (const root of scan.openRoots) this.#observeSourceRoot(root);
+    for (const root of scan.shadowRoots) this.#observeSourceRoot(root);
     return filterImagesToObservedRoots(scan, this.#observedMutationRoots);
   }
 
@@ -660,7 +664,7 @@ export class SourceImageObserver {
   ): BoundedImageGraph {
     const scan = collectBoundedImageGraph(nodes, budget);
     this.#registerShadowHostCandidates(scan.hostCandidates);
-    for (const root of scan.openRoots) {
+    for (const root of scan.shadowRoots) {
       if (!this.#observeSourceRoot(root)) budget.overflow = true;
     }
     return filterImagesToObservedRoots(scan, this.#observedMutationRoots);
@@ -710,12 +714,26 @@ export class SourceImageObserver {
     this.#shadowDiscoveryTimer = this.#setTimer(() => {
       this.#shadowDiscoveryTimer = undefined;
       if (!this.#isActiveGeneration(generation)) return;
-      this.#discoverNewOpenShadowRoots();
+      this.#discoverNewShadowRoots();
       this.#scheduleShadowDiscovery();
-    }, OPEN_SHADOW_DISCOVERY_INTERVAL_MS);
+    }, SHADOW_DISCOVERY_INTERVAL_MS);
+  }
+
+  /**
+   * Periodic discovery stops for good at its fail-closed boundary, so the
+   * hosts it would have asked about are let go. Kept, every component a
+   * page dropped stayed alive with its tree: a page that replaces its
+   * components kept several times the nodes it holds (D125).
+   */
+  #stopShadowDiscovery(): void {
+    this.#rootObservationOverflow = true;
+    this.#shadowHostCandidates = [];
+    this.#knownShadowHostCandidates = new WeakSet<Element>();
+    this.#shadowHostCursor = 0;
   }
 
   #registerShadowHostCandidates(candidates: readonly Element[]): void {
+    if (this.#rootObservationOverflow) return;
     let added = false;
     for (const candidate of candidates) {
       if (
@@ -755,7 +773,7 @@ export class SourceImageObserver {
       : this.#shadowHostCursor % retained.length;
   }
 
-  #discoverNewOpenShadowRoots(): void {
+  #discoverNewShadowRoots(): void {
     const candidateCount = this.#shadowHostCandidates.length;
     if (candidateCount === 0) return;
     const scanCount = Math.min(
@@ -773,12 +791,15 @@ export class SourceImageObserver {
         shouldCompact = true;
         continue;
       }
-      const root = readOpenSourceShadowRoot(host);
-      if (root === UNREADABLE_OPEN_SHADOW_ROOT) {
-        // Do not keep claiming complete open-root coverage after a host makes
+      // An open root shows on the host. A closed one shows here once the
+      // mirror's own discovery, the one place that asks Chrome again, has
+      // found it (D125).
+      const root = readImageSourceShadowRoot(host);
+      if (root === UNREADABLE_SHADOW_ROOT) {
+        // Do not keep claiming complete root coverage after a host makes
         // that relationship unreadable. Existing directly observed roots stay
         // active, but periodic discovery stops at this fail-closed boundary.
-        this.#rootObservationOverflow = true;
+        this.#stopShadowDiscovery();
         return;
       }
       if (!root) continue;
@@ -2029,7 +2050,7 @@ interface SourceImageTraversalBudget {
 
 interface BoundedImageGraph {
   readonly images: readonly HTMLImageElement[];
-  readonly openRoots: readonly ShadowRoot[];
+  readonly shadowRoots: readonly ShadowRoot[];
   readonly hostCandidates: readonly Element[];
   readonly overflow: boolean;
 }
@@ -2040,7 +2061,7 @@ function createSourceImageTraversalBudget(
   return {
     nodesRemaining: MAX_SOURCE_IMAGE_TRAVERSAL_NODES,
     imagesRemaining: Math.min(MAX_OBSERVED_SOURCE_IMAGES, maximumImages),
-    rootsRemaining: MAX_SOURCE_IMAGE_OPEN_ROOTS,
+    rootsRemaining: MAX_SOURCE_IMAGE_SHADOW_ROOTS,
     overflow: false,
   };
 }
@@ -2050,7 +2071,7 @@ function collectBoundedImageGraph(
   budget: SourceImageTraversalBudget,
 ): BoundedImageGraph {
   const images: HTMLImageElement[] = [];
-  const openRoots: ShadowRoot[] = [];
+  const shadowRoots: ShadowRoot[] = [];
   const hostCandidates: Element[] = [];
   const pending: Node[] = [];
   for (const node of initialNodes) {
@@ -2069,10 +2090,13 @@ function collectBoundedImageGraph(
     if (!node) break;
     budget.nodesRemaining -= 1;
     if (isElement(node)) {
-      if (hostCandidates.length < MAX_SOURCE_SHADOW_HOST_CANDIDATES) {
-        hostCandidates.push(node);
-      } else {
-        budget.overflow = true;
+      // Only an element the page can attach a root to waits for one (D125).
+      if (canHostAuthorShadowRoot(node)) {
+        if (hostCandidates.length < MAX_SOURCE_SHADOW_HOST_CANDIDATES) {
+          hostCandidates.push(node);
+        } else {
+          budget.overflow = true;
+        }
       }
       if (isImageElement(node)) {
         // Images are collected past the configured cap, up to the absolute
@@ -2090,15 +2114,15 @@ function collectBoundedImageGraph(
           budget.overflow = true;
         }
       }
-      const shadow = readOpenSourceShadowRoot(node);
-      if (shadow === UNREADABLE_OPEN_SHADOW_ROOT) {
+      const shadow = readImageSourceShadowRoot(node);
+      if (shadow === UNREADABLE_SHADOW_ROOT) {
         budget.overflow = true;
       } else if (shadow) {
         if (budget.rootsRemaining <= 0) {
           budget.overflow = true;
         } else {
           budget.rootsRemaining -= 1;
-          openRoots.push(shadow);
+          shadowRoots.push(shadow);
           if (!appendBoundedChildNodes(
             shadow,
             pending,
@@ -2113,7 +2137,7 @@ function collectBoundedImageGraph(
   }
   return Object.freeze({
     images: Object.freeze(images),
-    openRoots: Object.freeze(openRoots),
+    shadowRoots: Object.freeze(shadowRoots),
     hostCandidates: Object.freeze(hostCandidates),
     overflow: budget.overflow,
   });
@@ -2132,7 +2156,7 @@ function filterImagesToObservedRoots(
   });
   return Object.freeze({
     images: Object.freeze(images),
-    openRoots: graph.openRoots,
+    shadowRoots: graph.shadowRoots,
     hostCandidates: graph.hostCandidates,
     overflow: graph.overflow,
   });
@@ -2215,8 +2239,8 @@ function collectCaptureControlTargets(
         pending,
         MAX_CAPTURE_SAFETY_SCAN_ELEMENTS - inspected,
       )) return undefined;
-      const shadow = readOpenSourceShadowRoot(current);
-      if (shadow === UNREADABLE_OPEN_SHADOW_ROOT) return undefined;
+      const shadow = readImageSourceShadowRoot(current);
+      if (shadow === UNREADABLE_SHADOW_ROOT) return undefined;
       if (shadow && !appendBoundedChildNodes(
         shadow,
         pending,
@@ -2297,8 +2321,8 @@ function passiveImagePresentationSubtree(
         pending,
         MAX_CAPTURE_SAFETY_SCAN_ELEMENTS - inspected,
       )) return undefined;
-      const shadow = readOpenSourceShadowRoot(current);
-      if (shadow === UNREADABLE_OPEN_SHADOW_ROOT) return undefined;
+      const shadow = readImageSourceShadowRoot(current);
+      if (shadow === UNREADABLE_SHADOW_ROOT) return undefined;
       if (shadow && !appendBoundedChildNodes(
         shadow,
         pending,
@@ -2332,8 +2356,8 @@ function boundedDescendantMatch(
       pending,
       maximumNodes - inspected,
     )) return undefined;
-    const shadow = readOpenSourceShadowRoot(node);
-    if (shadow === UNREADABLE_OPEN_SHADOW_ROOT) return undefined;
+    const shadow = readImageSourceShadowRoot(node);
+    if (shadow === UNREADABLE_SHADOW_ROOT) return undefined;
     if (shadow && !appendBoundedChildNodes(
       shadow,
       pending,
@@ -2398,12 +2422,12 @@ function appendBoundedChildNodes(
   return complete;
 }
 
-function readOpenSourceShadowRoot(element: Element): OpenShadowRootRead {
+/** The element's root, open or closed (D125). */
+function readImageSourceShadowRoot(element: Element): ShadowRootRead {
   try {
-    const root = element.shadowRoot;
-    return root?.mode === 'open' ? root : null;
+    return readSourceShadowRoot(element) ?? null;
   } catch {
-    return UNREADABLE_OPEN_SHADOW_ROOT;
+    return UNREADABLE_SHADOW_ROOT;
   }
 }
 
@@ -2426,8 +2450,8 @@ function collectCurrentCaptureControlTargets(
           if (targets.length >= MAX_CAPTURE_SAFETY_TARGETS) return undefined;
           targets.push(node);
         }
-        const shadow = readOpenSourceShadowRoot(node);
-        if (shadow === UNREADABLE_OPEN_SHADOW_ROOT) return undefined;
+        const shadow = readImageSourceShadowRoot(node);
+        if (shadow === UNREADABLE_SHADOW_ROOT) return undefined;
         if (shadow && !appendBoundedChildNodes(
           shadow,
           pending,
