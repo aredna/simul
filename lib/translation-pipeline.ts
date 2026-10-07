@@ -41,6 +41,51 @@ export interface TextSegment {
   readonly separator: string;
 }
 
+/**
+ * Translate text whose line breaks show (a pre-wrap message, a textarea) one
+ * line at a time. Chrome's translator turns a newline into a space, so each
+ * line goes on its own and the source's breaks and indentation are put back
+ * between the translations.
+ */
+export async function translateLineByLine(
+  source: string,
+  translateLine: (line: string) => Promise<string>,
+): Promise<string> {
+  const parts: string[] = [];
+  for (const line of splitLines(source)) {
+    parts.push(line.text ? await translateLine(line.text) : '', line.separator);
+  }
+  return parts.join('');
+}
+
+/**
+ * Split at each newline, the only break CSS shows; a line's separator is the
+ * whitespace around the break that follows it (blank lines, indentation, a
+ * carriage return), kept as it is.
+ */
+export function splitLines(source: string): TextSegment[] {
+  const lines: TextSegment[] = [];
+  let start = 0;
+  // A scan, not a regular expression: a long run of spaces stays linear.
+  for (
+    let lineBreak = source.indexOf('\n');
+    lineBreak !== -1;
+    lineBreak = source.indexOf('\n', start)
+  ) {
+    let textEnd = lineBreak;
+    while (textEnd > start && isWhitespace(source[textEnd - 1])) textEnd -= 1;
+    let next = lineBreak + 1;
+    while (isWhitespace(source[next])) next += 1;
+    lines.push({
+      text: source.slice(start, textEnd),
+      separator: source.slice(textEnd, next),
+    });
+    start = next;
+  }
+  lines.push({ text: source.slice(start), separator: '' });
+  return lines;
+}
+
 export function splitText(source: string, maxLength: number): string[] {
   return splitTextSegments(source, maxLength).map((segment) => segment.text);
 }

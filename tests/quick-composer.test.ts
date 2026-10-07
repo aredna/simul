@@ -108,6 +108,22 @@ describe('QuickComposer', () => {
     expect(composer.inFlight).toBe(false);
   });
 
+  it('keeps the line breaks of a reply, all its lines in one session (D131)', async () => {
+    // Chrome's translator turns a newline into a space.
+    const { composer, elements, provider, destroy, translate } = setup({
+      translate: async (text) => `<${text.replace(/\s+/gu, ' ')}>`,
+    });
+    elements.input.value = 'Hello,\n\n  Thanks!\n';
+
+    await composer.translate();
+
+    expect(elements.output.value).toBe('<Hello,>\n\n  <Thanks!>\n');
+    expect(translate.mock.calls.map(([text]) => text)).toEqual(['Hello,', 'Thanks!']);
+    expect(provider.availability).toHaveBeenCalledOnce();
+    expect(provider.createSession).toHaveBeenCalledOnce();
+    expect(destroy).toHaveBeenCalledOnce();
+  });
+
   it('copies the text through when the languages match', async () => {
     const { composer, elements, provider } = setup({
       pair: { sourceLanguage: 'en', targetLanguage: 'en' },

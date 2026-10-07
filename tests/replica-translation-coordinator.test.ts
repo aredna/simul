@@ -1,5 +1,6 @@
 import { describe, expect, it, vi } from 'vitest';
 
+import { ReplicaSurfaceRouter } from '../lib/replica/replica-surface-router';
 import type {
   ReplicaSourceDocumentIdentity,
   ReplicaSourceTextRecord,
@@ -217,6 +218,56 @@ describe('ReplicaTranslationCoordinator', () => {
 
     expect(translate).toHaveBeenCalledOnce();
     expect(surface.projections[0]).toMatchObject({ replayLease: 2, translated: 'en:Hola' });
+  });
+
+  it('translates a node whose line breaks show line by line and keeps its breaks (D131)', async () => {
+    const message = '  ▲Documentos\n・Tarjeta de residencia\n\n■ ';
+    const flowing = 'Una frase\n    que sigue';
+    const surface = new FakeSurface([
+      record(4, 1, message),
+      record(5, 1, flowing),
+      record(6, 1, flowing),
+    ]);
+    surface.lineBreaks = new Set([4, 6]);
+    // Chrome's translator turns a newline into a space.
+    const translate = vi.fn(async (source: string) =>
+      `en:${source.replace(/\s+/gu, ' ')}`);
+    const { provider } = fakeProvider(translate);
+    const coordinator = new ReplicaTranslationCoordinator(provider, surface);
+
+    await coordinator.translateCurrent(pair);
+
+    const translated = new Map(surface.projections.map((projection) =>
+      [projection.nodeId, projection.translated]));
+    expect(translated.get(4)).toBe(
+      '  en:▲Documentos\nen:・Tarjeta de residencia\n\nen:■ ',
+    );
+    // Breaks the page does not show: one passage, as before.
+    expect(translated.get(5)).toBe('en:Una frase que sigue');
+    // The same text with its breaks shown is not served the passage above.
+    expect(translated.get(6)).toBe('en:Una frase\n    en:que sigue');
+    expect(translate.mock.calls.map(([source]) => source)).toEqual([
+      '▲Documentos',
+      '・Tarjeta de residencia',
+      '■',
+      flowing,
+      'Una frase',
+      'que sigue',
+    ]);
+  });
+
+  it('asks the selected surface whether a node shows its line breaks (D131)', () => {
+    const router = new ReplicaSurfaceRouter();
+    expect(router.showsLineBreaks(4)).toBe(false);
+    const surface = Object.assign(new FakeSurface([record(4, 1, 'a\nb')]), {
+      resolveImageAnchor: () => undefined,
+    });
+    surface.lineBreaks = new Set([4]);
+
+    router.select(surface);
+
+    expect(router.showsLineBreaks(4)).toBe(true);
+    expect(router.showsLineBreaks(5)).toBe(false);
   });
 
   it('reuses exact content after navigation without weakening projection identity', async () => {
@@ -741,10 +792,15 @@ class FakeSurface implements ReplicaTranslationSurface {
   snapshotCalls = 0;
   readonly contexts: ReplicaProjectionContext[] = [];
   readonly projections: ReplicaTextProjection[] = [];
+  lineBreaks = new Set<number>();
   #context: ReplicaProjectionContext = { translationEpoch: 0, pairKey: undefined };
 
   constructor(records: ReplicaSourceTextRecord[]) {
     this.records = records;
+  }
+
+  showsLineBreaks(nodeId: number): boolean {
+    return this.lineBreaks.has(nodeId);
   }
 
   beginProjection(context: ReplicaProjectionContext): void {

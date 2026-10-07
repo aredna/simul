@@ -590,6 +590,25 @@ export class IsolatedHtmlReplicaEngine
     return true;
   }
 
+  showsLineBreaks(nodeId: number): boolean {
+    const state = this.#committed;
+    if (!state || state.released) return false;
+    if (nodeId < 0) {
+      return elementShowsLineBreaks(
+        this.#semanticReceiver?.elementShowing(nodeId),
+      );
+    }
+    const node = state.nodes.get(nodeId);
+    if (node?.nodeType === Node.TEXT_NODE) {
+      // A slotted text takes its style from the slot, not from the host.
+      return elementShowsLineBreaks(
+        (node as Text).assignedSlot ?? composedParentElement(node),
+      );
+    }
+    return node?.nodeType === Node.ELEMENT_NODE &&
+      elementShowsLineBreaks(node as Element);
+  }
+
   resolveImageAnchor(
     document: ReplicaSourceDocumentIdentity,
     nodeId: number,
@@ -3850,6 +3869,21 @@ function stableRetainedChildSet(
     position = predecessors[position]!;
   }
   return stable;
+}
+
+/** `white-space-collapse` values, and `white-space` ones, that show a newline. */
+const LINE_BREAKS_SHOWN = new Set([
+  'preserve', 'preserve-breaks', 'break-spaces', 'pre', 'pre-wrap', 'pre-line',
+]);
+
+/** Whether the mirror shows the line breaks of the text in `element`. */
+function elementShowsLineBreaks(element: Element | null | undefined): boolean {
+  const view = element?.ownerDocument.defaultView;
+  if (!element || !view) return false;
+  const style = view.getComputedStyle(element);
+  const value = style.getPropertyValue('white-space-collapse') ||
+    style.getPropertyValue('white-space');
+  return LINE_BREAKS_SHOWN.has(value.trim());
 }
 
 function composedParentElement(node: Node): Element | undefined {

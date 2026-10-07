@@ -497,6 +497,65 @@ describe('IsolatedHtmlReplicaEngine', () => {
     expect(body.textContent).toBe('こんにちは、世界のみなさん');
   });
 
+  it('says which texts show their line breaks, from the mirror\'s computed style (D131)', async () => {
+    const block = (id: number, name: string, text: string): HtmlMirrorNode => ({
+      kind: 'element', id, namespace: 'html', tagName: 'div',
+      attributes: [['id', name]],
+      children: [{ kind: 'text', id: id + 1, text, translatable: true }],
+    });
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: {
+          kind: 'element', id: 1, namespace: 'html', tagName: 'html', attributes: [], children: [
+            { kind: 'element', id: 2, namespace: 'html', tagName: 'head', attributes: [], children: [] },
+            { kind: 'element', id: 3, namespace: 'html', tagName: 'body', attributes: [], children: [
+              block(10, 'pre-wrap', '一行目\n二行目'),
+              block(20, 'pre-line', '一行目\n二行目'),
+              block(30, 'normal', '一行目\n二行目'),
+            ] },
+          ],
+        },
+        adoptedStyleSheets: [],
+        captureMs: 1,
+        viewportWidth: 800,
+        viewportHeight: 600,
+        documentWidth: 800,
+        documentHeight: 1000,
+      },
+    );
+    if (!checkpoint) throw new Error('Line-break fixture checkpoint rejected.');
+    const host = new FakePresentationHost();
+    const engine = new IsolatedHtmlReplicaEngine({
+      presentationHost: host,
+      openStream: async () => new FakeHtmlStream(checkpoint),
+      initializeIframe: async (iframe, shell) => {
+        const { document } = parseHTML(shell);
+        Object.defineProperty(iframe, 'contentDocument', { value: document });
+        return document;
+      },
+    });
+    expect((await engine.run(request)).status).toBe('complete');
+    // Chrome reads both properties; `pre-line` stands for a browser that
+    // knows only the `white-space` shorthand.
+    const styles: Record<string, Record<string, string>> = {
+      'pre-wrap': { 'white-space-collapse': 'preserve', 'white-space': 'pre-wrap' },
+      'pre-line': { 'white-space': 'pre-line' },
+      normal: { 'white-space-collapse': 'collapse', 'white-space': 'normal' },
+    };
+    Object.defineProperty(host.iframe!.contentDocument!.defaultView!, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => ({
+        getPropertyValue: (name: string) => styles[element.id]?.[name] ?? '',
+      }),
+    });
+
+    expect(engine.showsLineBreaks(11)).toBe(true);
+    expect(engine.showsLineBreaks(21)).toBe(true);
+    expect(engine.showsLineBreaks(31)).toBe(false);
+    expect(engine.showsLineBreaks(99)).toBe(false);
+  });
+
   it('commits an inert real DOM, projects text, and applies a contiguous patch', async () => {
     const checkpoint = makeCheckpoint('hello', 0);
     const stream = new FakeHtmlStream(checkpoint);

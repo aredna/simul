@@ -1,8 +1,10 @@
 import { describe, expect, it, vi } from 'vitest';
 
 import {
+  splitLines,
   splitText,
   splitTextSegments,
+  translateLineByLine,
   translateWithSession,
 } from '../lib/translation-pipeline';
 import type { TranslationSession } from '../lib/translation-provider';
@@ -130,6 +132,67 @@ describe('translateWithSession', () => {
     expect(calls.length).toBeGreaterThan(1);
     expect(calls.every((chunk) => [...chunk].length <= 2)).toBe(true);
     expect(translated).toBe(calls.map((chunk) => `<${chunk}>`).join(' '));
+  });
+});
+
+describe('splitLines', () => {
+  it('keeps blank lines, indentation and CRLF in the separators', () => {
+    expect(splitLines('一行目\n\n  二行目 \r\n三行目')).toEqual([
+      { text: '一行目', separator: '\n\n  ' },
+      { text: '二行目', separator: ' \r\n' },
+      { text: '三行目', separator: '' },
+    ]);
+  });
+
+  it('gives a text without a line break as one line', () => {
+    expect(splitLines('one line  only')).toEqual([
+      { text: 'one line  only', separator: '' },
+    ]);
+  });
+
+  it('keeps breaks at either end as separators of empty lines', () => {
+    expect(splitLines('\nabc\n')).toEqual([
+      { text: '', separator: '\n' },
+      { text: 'abc', separator: '\n' },
+      { text: '', separator: '' },
+    ]);
+  });
+
+  it('stays linear on long runs of spaces', () => {
+    const spaces = ' '.repeat(200_000);
+    const started = performance.now();
+
+    expect(splitLines(`a${spaces}b${spaces}\n${spaces}c`)).toEqual([
+      { text: `a${spaces}b`, separator: `${spaces}\n${spaces}` },
+      { text: 'c', separator: '' },
+    ]);
+    expect(performance.now() - started).toBeLessThan(1_000);
+  });
+});
+
+describe('translateLineByLine', () => {
+  it('translates each line on its own and puts the source breaks back', async () => {
+    const calls: string[] = [];
+    // Chrome's translator turns a newline into a space.
+    const translateLine = async (text: string) => {
+      calls.push(text);
+      return `<${text.replace(/\s+/gu, ' ')}>`;
+    };
+
+    const translated = await translateLineByLine(
+      '▲提出できる本人確認書類\n・更新された在留カード\n\n  ■',
+      translateLine,
+    );
+
+    expect(calls).toEqual(['▲提出できる本人確認書類', '・更新された在留カード', '■']);
+    expect(translated).toBe('<▲提出できる本人確認書類>\n<・更新された在留カード>\n\n  <■>');
+  });
+
+  it('asks nothing for an empty line', async () => {
+    const translateLine = vi.fn(async (text: string) => `<${text}>`);
+
+    expect(await translateLineByLine('\n\nabc\n', translateLine)).toBe('\n\n<abc>\n');
+    expect(translateLine).toHaveBeenCalledTimes(1);
   });
 });
 

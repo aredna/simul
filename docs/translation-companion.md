@@ -195,6 +195,16 @@ flight join one provider call. Projection still requires the exact current
 document, revision, translation epoch, pair, and replay lease, so reusable text
 does not weaken stale-result protection.
 
+Chrome's Translator turns a newline into a space. Where the mirror shows a
+text's line breaks (its computed `white-space-collapse` is `preserve`,
+`preserve-breaks` or `break-spaces`: `pre`, `pre-wrap`, `pre-line`, or a slot
+inside such an element), each line is translated on its own and the source's
+breaks, blank lines and indentation are put back between the translations;
+the cache then holds each line (D131). Newlines the page does not show, such
+as the formatting of most HTML source, still travel as one passage, so a
+sentence wrapped in the source is not cut. Quick translation keeps a draft's
+line breaks the same way.
+
 The slim full-width toolbar exposes Refresh; the From label, `[A]` (set From to
 Auto-detect), and a wider From selector; swap and a wider To selector; Fit/1:1
 size; OCR On/Off; Follow/Pinned tab following; quick reverse translation; Settings;

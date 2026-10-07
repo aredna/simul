@@ -56,6 +56,10 @@ export class ReplicaSurfaceRouter
     return surface?.waitForText ? surface.waitForText(signal) : Promise.resolve();
   }
 
+  showsLineBreaks(nodeId: number): boolean {
+    return this.#surface?.showsLineBreaks?.(nodeId) ?? false;
+  }
+
   resolveImageAnchor(
     document: ReplicaSourceDocumentIdentity,
     nodeId: number,

@@ -4,7 +4,10 @@ import type {
   ReplicaSourceTextRecord,
 } from '../replica/source-text-record';
 import { sameSourceDocument } from '../replica/source-text-record';
-import { translateWithSession } from '../translation-pipeline';
+import {
+  translateLineByLine,
+  translateWithSession,
+} from '../translation-pipeline';
 import type {
   CreateTranslationSessionOptions,
   TranslationPair,
@@ -83,6 +86,12 @@ export interface ReplicaTranslationSurface {
   isReading?(): boolean;
   /** Resolves at the surface's next text change; rejects when `signal` aborts. */
   waitForText?(signal: AbortSignal): Promise<void>;
+  /**
+   * Whether the node's line breaks show (pre-wrap text, a textarea): its
+   * lines are then translated one by one so the breaks survive. Without
+   * it, a node's text is translated as one passage.
+   */
+  showsLineBreaks?(nodeId: number): boolean;
 }
 
 export interface ReplicaTranslationRunOptions
@@ -588,24 +597,34 @@ export class ReplicaTranslationCoordinator {
             continue;
           }
           const boundary = splitBoundaryWhitespace(job.record.source);
-          const translated = await this.#memory.getOrCreate(
-            {
-              provider: this.#providerId,
-              pair,
-            },
-            boundary.core,
-            () => {
-              const combined = combineAbortSignals(
-                job.pairSignal,
-                job.signal,
-              );
-              return translateWithSession(
-                session,
-                boundary.core,
-                combined.signal,
-              ).finally(combined.dispose);
-            },
-          );
+          const translatePassage = async (text: string): Promise<string> => {
+            const translatedText = await this.#memory.getOrCreate(
+              {
+                provider: this.#providerId,
+                pair,
+              },
+              text,
+              () => {
+                const combined = combineAbortSignals(
+                  job.pairSignal,
+                  job.signal,
+                );
+                return translateWithSession(
+                  session,
+                  text,
+                  combined.signal,
+                ).finally(combined.dispose);
+              },
+            );
+            return translatedText.trim();
+          };
+          // Each line is remembered on its own, so a passage translated as
+          // one (its breaks hidden) never stands in for one whose breaks show.
+          const lineByLine = boundary.core.includes('\n') &&
+            this.surface.showsLineBreaks?.(job.record.nodeId) === true;
+          const translated = lineByLine
+            ? await translateLineByLine(boundary.core, translatePassage)
+            : await translatePassage(boundary.core);
           if (!this.#isCurrentJob(job)) {
             stale += 1;
             continue;

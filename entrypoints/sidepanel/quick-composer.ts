@@ -3,7 +3,10 @@ import { UI_STRINGS, formatUiTemplate } from '../../lib/companion-ui-strings';
 import { uiText, type UiText } from '../../lib/ui-text';
 import { reverseTranslationPair } from '../../lib/companion-ui-state';
 import { DynamicStatusText } from './dynamic-status-text';
-import { translateWithSession } from '../../lib/translation-pipeline';
+import {
+  translateLineByLine,
+  translateWithSession,
+} from '../../lib/translation-pipeline';
 import {
   languageName,
   type SupportedLanguage,
@@ -167,15 +170,20 @@ export class QuickComposer {
       if (pair.sourceLanguage === pair.targetLanguage) {
         translated = text;
       } else {
-        translated = await this.environment.translateRemembered(pair, text, async (core) => {
-          const composerAvailability = await provider.availability(pair);
-          abortController.signal.throwIfAborted();
-          if (composerAvailability === 'unavailable') {
-            throw new Error(UI_STRINGS.composerReversePairUnavailable);
-          }
-          session = await provider.createSession(pair, { signal: abortController.signal });
-          return translateWithSession(session, core, abortController.signal);
-        });
+        // A reply's line breaks show: it is translated line by line, all
+        // lines in one session.
+        translated = await translateLineByLine(text, (line) =>
+          this.environment.translateRemembered(pair, line, async (core) => {
+            if (!session) {
+              const composerAvailability = await provider.availability(pair);
+              abortController.signal.throwIfAborted();
+              if (composerAvailability === 'unavailable') {
+                throw new Error(UI_STRINGS.composerReversePairUnavailable);
+              }
+              session = await provider.createSession(pair, { signal: abortController.signal });
+            }
+            return translateWithSession(session, core, abortController.signal);
+          }));
       }
       const currentForwardPair = this.environment.selectedPair();
       if (
