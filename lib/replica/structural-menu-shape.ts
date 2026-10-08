@@ -17,6 +17,54 @@ export function hasStructuralMenuContext(container: Element): boolean {
   }));
 }
 
+/** How a menu recognized by its shape opens in the replica. */
+export type StructuralMenuOpening = 'hover' | 'click';
+
+/** A menu's container holds one collapsed panel and one or two triggers. */
+export const MAX_STRUCTURAL_MENU_TRIGGERS = 2;
+
+const LIST_PANEL_TAGS = new Set(['ol', 'ul']);
+
+/**
+ * Outside navigation, a header or a list only the plainest menu is taken for
+ * one: a button followed or preceded by a list (a table row's "actions"
+ * menu). A `div` beside a button is as often an accordion's body or a
+ * dialog.
+ */
+export function isStructuralButtonMenu(trigger: Element, panel: Element): boolean {
+  const triggerRole = readRole(trigger);
+  const panelRole = readRole(panel);
+  const button = readLocalName(trigger) === 'button'
+    ? triggerRole === '' || triggerRole === 'button'
+    : triggerRole === 'button';
+  const list = LIST_PANEL_TAGS.has(readLocalName(panel))
+    ? panelRole === '' || panelRole === 'list' || panelRole === 'menu'
+    : panelRole === 'menu';
+  return button && list;
+}
+
+/**
+ * Where a menu of this shape may be, and how the replica opens it. Inside
+ * navigation, a header or a list item it opens on hover, as such menus do on
+ * the page, with one trigger or two (a link and the arrow button beside it).
+ * Anywhere else a single button beside a list opens on a click only:
+ * hovering a button that happens to sit beside a hidden list shows nothing.
+ * The page side and the replica side both apply this one rule.
+ */
+export function structuralMenuOpening(
+  container: Element,
+  triggers: readonly Element[],
+  panel: Element,
+): StructuralMenuOpening | undefined {
+  if (triggers.length < 1 || triggers.length > MAX_STRUCTURAL_MENU_TRIGGERS) {
+    return undefined;
+  }
+  if (hasStructuralMenuContext(container)) return 'hover';
+  return triggers.length === 1 && isStructuralButtonMenu(triggers[0]!, panel)
+    ? 'click'
+    : undefined;
+}
+
 const PLAIN_STRUCTURAL_MENU_TRIGGER_TAGS = new Set([
   'a', 'b', 'div', 'dt', 'em', 'h1', 'h2', 'h3', 'h4', 'h5', 'h6', 'p',
   'span', 'strong',

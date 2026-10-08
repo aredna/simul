@@ -1167,7 +1167,24 @@ export class HtmlMirrorSourceSession {
       if (record.type === 'childList') {
         accepted = true;
         this.#observeShadowRoots(record.target, walk);
-        this.#queuePending(this.#pendingChildren, record.target);
+        if (!structuralSelectOwner || structuralSelectOwner === record.target) {
+          this.#queuePending(this.#pendingChildren, record.target);
+        } else if (
+          record.target instanceof Element &&
+          record.target.localName.toLowerCase() === 'optgroup' &&
+          record.target.parentNode === structuralSelectOwner
+        ) {
+          // A dropdown's structure is sent whole from the dropdown itself:
+          // the panel takes no patch for one of its groups, and one sent for
+          // it was refused and rebuilt the whole mirror (D132). The group
+          // stays queued beside its dropdown so the dropdown's list is read
+          // afresh, not compared child by child.
+          this.#queuePending(this.#pendingChildren, structuralSelectOwner);
+          this.#queuePending(this.#pendingChildren, record.target);
+        }
+        // Anything else inside a dropdown is an option's own text or a
+        // group's legend. Neither is in the mirror's structure: the label
+        // travels on the semantic channel.
         for (const added of record.addedNodes) {
           this.#observeShadowRoots(added, walk);
         }
@@ -1984,6 +2001,13 @@ export class HtmlMirrorSourceSession {
     for (const target of refresh.changedTargets) {
       this.#queuePending(this.#pendingChildren, target);
       this.#queuePending(this.#pendingAttributes, target);
+      // What a host's own root holds is hidden and shown with the host, and
+      // a patch for the host's children does not carry it: the text of a
+      // menu a web component shows by `:host([open])` never arrived (D132).
+      const shadow = readSourceShadowRoot(target);
+      if (shadow && this.#mirroredNodes.has(shadow)) {
+        this.#queuePending(this.#pendingChildren, shadow);
+      }
     }
     return accepted || refresh.changedTargets.length > 0;
   }
@@ -2173,6 +2197,8 @@ export class HtmlMirrorSourceSession {
     if (target.nodeType !== Node.ELEMENT_NODE) return false;
     const shadow = readSourceShadowRoot(target as Element);
     if (!shadow) return false;
+    // The root itself is read again, beside its host (D132).
+    if (this.#pendingChildren.has(shadow)) return false;
     return iterableContainsComposedSource(this.#pendingChildren, shadow) ||
       iterableContainsComposedSource(this.#pendingAttributes, shadow) ||
       iterableContainsComposedSource(this.#pendingText, shadow);

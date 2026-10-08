@@ -661,6 +661,65 @@ describe('HtmlMirrorSourceSession', () => {
     )).toBe(false);
   });
 
+  it('reads a host\'s shadow root again when the page shows the host (D132)', () => {
+    // A web component that shows its menu by `:host([open])`: the host is
+    // what appears, and a patch for its children does not carry its root.
+    const fixture = sourceFixture(
+      '<p>Before</p><x-menu id="host">Light label</x-menu>',
+    );
+    installPaintedMirrorTabFixture(fixture.document, fixture.window);
+    const host = fixture.document.querySelector<HTMLElement>('#host')!;
+    const shadow = host.attachShadow({ mode: 'open' });
+    Object.defineProperty(shadow, 'mode', { value: 'open' });
+    // As Chrome reports it; linkedom calls a shadow root unconnected.
+    Object.defineProperty(shadow, 'isConnected', { get: () => host.isConnected });
+    shadow.innerHTML = '<ul><li>Shadow item</li></ul>';
+    const baseGetComputedStyle = fixture.window.getComputedStyle
+      .bind(fixture.window);
+    Object.defineProperty(fixture.window, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => {
+        const style = baseGetComputedStyle(element);
+        return element === host
+          ? {
+              ...style,
+              display: host.hasAttribute('open') ? 'block' : 'none',
+              visibility: 'visible',
+            } as unknown as CSSStyleDeclaration
+          : style;
+      },
+    });
+
+    fixture.start();
+    const first = JSON.stringify(fixture.checkpoints()[0]);
+    expect(first).not.toContain('Shadow item');
+    expect(first).not.toContain('Light label');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+
+    host.setAttribute('open', '');
+    fixture.mutate(attributeRecord(host, 'open'));
+    fixture.flushFrame();
+    // One patch, not a fresh copy of the page.
+    expect(fixture.checkpoints()).toHaveLength(1);
+    expect(fixture.port.posts.some((message) =>
+      (message as { kind?: string }).kind === 'simul:html-mirror-v2:error'))
+      .toBe(false);
+    const shown = fixture.patches().at(-1)!;
+    expect(JSON.stringify(shown)).toContain('Shadow item');
+    expect(JSON.stringify(shown)).toContain('Light label');
+    expect(shown.operations.filter(({ kind }) => kind === 'children')
+      .map((operation) => (operation as { nodeId: number }).nodeId).sort())
+      .toEqual([
+        fixture.registry.peekId(host)!,
+        fixture.registry.peekId(shadow)!,
+      ].sort());
+    expect(shown.operations).toContainEqual(expect.objectContaining({
+      kind: 'attributes',
+      nodeId: fixture.registry.peekId(host),
+      attributes: expect.arrayContaining([['open', '']]),
+    }));
+  });
+
   it("applies the panel's size limits from the start handshake (D64)", () => {
     const fixture = sourceFixture('<p>row</p>'.repeat(1_200));
     try {
@@ -1101,6 +1160,46 @@ describe('HtmlMirrorSourceSession', () => {
     expect(fixture.frames).toHaveLength(1);
     fixture.flushFrame();
     expect(fixture.patches()).toHaveLength(patchesBeforeToggle);
+  });
+
+  it('sends a change inside a dropdown as a change to the dropdown itself (D132)', () => {
+    const fixture = sourceFixture(`
+      <select id="picker"><optgroup id="area" label="District">
+        <option id="first">Community center</option>
+      </optgroup></select>
+    `);
+    fixture.start('passive');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const select = fixture.document.querySelector('#picker')!;
+    const area = fixture.document.querySelector('#area')!;
+    const first = fixture.document.querySelector('#first')!;
+    const selectId = fixture.registry.peekId(select)!;
+
+    // A new option in a group: the panel takes no patch for the group.
+    const added = fixture.document.createElement('option');
+    added.textContent = 'Library';
+    area.append(added);
+    fixture.mutate(childListRecord(area, [added]));
+    fixture.flushFrame();
+    const insertion = fixture.patches().at(-1)!;
+    expect(insertion.operations.filter(({ kind }) =>
+      kind === 'children' || kind === 'reconcile-children'))
+      .toEqual([expect.objectContaining({ nodeId: selectId })]);
+    expect(JSON.stringify(insertion)).toContain(
+      `"id":${fixture.registry.peekId(added)}`,
+    );
+    expect(JSON.stringify(insertion)).not.toContain('Library');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
+
+    // An option's own text is its label, which the base graph never carries:
+    // replacing it sends nothing.
+    const patchesBeforeLabel = fixture.patches().length;
+    const text = fixture.document.createTextNode('Community centre');
+    const old = first.firstChild!;
+    first.replaceChildren(text);
+    fixture.mutate(childListRecord(first, [text], [old]));
+    fixture.flushFrame();
+    expect(fixture.patches()).toHaveLength(patchesBeforeLabel);
   });
 
   it('does not route optgroup legend text through the base graph', () => {

@@ -1575,36 +1575,94 @@ export function readSourceSelectLabel(
   }
 }
 
+/** One run of a reader over many option labels; see the function below. */
+export interface SourceSelectLabelWalk {
+  end(): void;
+}
+
+let selectLabelWalk: {
+  /** An element to whether it or anything above it is hidden. */
+  readonly hidden: Map<Element, boolean>;
+  readonly secretAncestors: SourceSecretAncestorMemo;
+} | undefined;
+
+/**
+ * Opens a walk: one run of a reader that asks for the labels of many options
+ * and that the page cannot interrupt, so no style can change during it.
+ * Whether an element or anything above it is hidden, or secret, is then found
+ * once. Without it every option of a dropdown walked up to the document three
+ * times, reading each ancestor's style: a page with ten thousand options
+ * paused for most of a second at every change once all their labels were
+ * read (D132). End it in a `finally`, and never keep it across tasks.
+ */
+export function beginSourceSelectLabelWalk(): SourceSelectLabelWalk {
+  const outer = selectLabelWalk;
+  selectLabelWalk = {
+    hidden: new Map(),
+    secretAncestors: createSourceSecretAncestorMemo(),
+  };
+  let ended = false;
+  return {
+    end: () => {
+      if (ended) return;
+      ended = true;
+      selectLabelWalk = outer;
+    },
+  };
+}
+
 export function isSourceSelectEntryVisuallyHidden(element: Element): boolean {
   const view = element.ownerDocument?.defaultView;
+  const remembered = selectLabelWalk?.hidden;
+  const known = remembered?.get(element);
+  if (known !== undefined) return known;
   const path = readSourceFlatTreeElementPath(element);
   if (!path) return true;
+  const walked: Element[] = [];
+  let hidden = false;
   for (const current of path) {
-    if (current.hasAttribute('hidden')) return true;
-    if (view && typeof view.getComputedStyle === 'function') {
-      try {
-        const style = view.getComputedStyle(current);
-        const opacity = style.opacity.trim();
-        if (
-          style.display.trim().toLowerCase() === 'none' ||
-          ['hidden', 'collapse'].includes(
-            style.visibility.trim().toLowerCase(),
-          ) ||
-          (opacity !== '' && Number(opacity) === 0 &&
-            !isSourceTransparentSelectClickTarget(current, view, style)) ||
-          style.getPropertyValue('content-visibility').trim().toLowerCase() ===
-            'hidden'
-        ) return true;
-        if (
-          current.localName.toLowerCase() === 'select' &&
-          sourceSelectHasNoRenderedDocumentBox(current, view, style)
-        ) return true;
-      } catch {
-        // A browser-inaccessible computed style is not proof of invisibility.
-      }
+    const above = remembered?.get(current);
+    if (above !== undefined) {
+      hidden = above;
+      break;
+    }
+    walked.push(current);
+    if (sourceSelectEntryIsItselfHidden(current, view)) {
+      hidden = true;
+      break;
     }
   }
-  return false;
+  // An element walked past is not hidden itself, so it shares the answer
+  // found above it.
+  if (remembered) for (const current of walked) remembered.set(current, hidden);
+  return hidden;
+}
+
+function sourceSelectEntryIsItselfHidden(
+  current: Element,
+  view: (Window & typeof globalThis) | null | undefined,
+): boolean {
+  if (current.hasAttribute('hidden')) return true;
+  if (!view || typeof view.getComputedStyle !== 'function') return false;
+  try {
+    const style = view.getComputedStyle(current);
+    const opacity = style.opacity.trim();
+    if (
+      style.display.trim().toLowerCase() === 'none' ||
+      ['hidden', 'collapse'].includes(
+        style.visibility.trim().toLowerCase(),
+      ) ||
+      (opacity !== '' && Number(opacity) === 0 &&
+        !isSourceTransparentSelectClickTarget(current, view, style)) ||
+      style.getPropertyValue('content-visibility').trim().toLowerCase() ===
+        'hidden'
+    ) return true;
+    return current.localName.toLowerCase() === 'select' &&
+      sourceSelectHasNoRenderedDocumentBox(current, view, style);
+  } catch {
+    // A browser-inaccessible computed style is not proof of invisibility.
+    return false;
+  }
 }
 
 /**
@@ -1736,7 +1794,9 @@ function sourceSelectLabelSubtreeIsPublic(element: Element): boolean {
   try {
     if (
       isSourceSelectEntryVisuallyHidden(element) ||
-      hasSourceCredentialSecretAncestor(element)
+      hasSourceCredentialSecretAncestor(
+        element, undefined, undefined, selectLabelWalk?.secretAncestors,
+      )
     ) return false;
     const rootTag = element.localName.toLowerCase();
     const rootAttributes = readSourceStructuralAttributes(element);
@@ -1760,7 +1820,9 @@ function sourceSelectLabelSubtreeIsPublic(element: Element): boolean {
       const descendantTag = descendant.localName.toLowerCase();
       const descendantAttributes = readSourceStructuralAttributes(descendant);
       if (
-        hasSourceCredentialSecretAncestor(descendant) ||
+        hasSourceCredentialSecretAncestor(
+          descendant, undefined, undefined, selectLabelWalk?.secretAncestors,
+        ) ||
         SOURCE_NON_CONTENT_TAGS.has(descendantTag) ||
         descendantTag === 'select' || descendantTag === 'option' ||
         descendantTag === 'optgroup' ||
@@ -1811,7 +1873,9 @@ function readBoundedSourceSelectText(element: Element): string | undefined {
       // A directly slotted Text node can render under a credential boundary
       // that is absent from its DOM-parent chain. Classify its flat-tree
       // ancestry before evaluating nodeValue.
-      if (hasSourceCredentialSecretAncestor(current)) return undefined;
+      if (hasSourceCredentialSecretAncestor(
+        current, undefined, undefined, selectLabelWalk?.secretAncestors,
+      )) return undefined;
       const value = current.nodeValue ?? '';
       const remaining = Math.max(
         0,

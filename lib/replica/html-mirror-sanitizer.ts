@@ -508,7 +508,6 @@ const PRIVATE_ATTRIBUTES = new Set([
   'label',
   'multiple',
   'name',
-  'open',
   'placeholder',
   'selected',
   'value',
@@ -536,11 +535,10 @@ function isPrivateBaseAttribute(tagName: string, name: string): boolean {
   }
   // Slot names are inert tree-layout metadata, unlike form submission names.
   if (name === 'name' && tagName === 'slot') return false;
-  // An open details or dialog shows its content; without the attribute the
-  // replica drew it closed (D75).
-  if (name === 'open' && (tagName === 'details' || tagName === 'dialog')) {
-    return false;
-  }
+  // `open` is not in the list: it says what the page shows. An open details
+  // or dialog shows its content, and without the attribute the replica drew
+  // it closed (D75); a web component's `:host([open])` rule shows its menu
+  // the same way, and without it the replica never did (D132).
   return PRIVATE_ATTRIBUTES.has(name);
 }
 

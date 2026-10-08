@@ -34,7 +34,19 @@ export interface ReadOnlyReplicaDisclosureOptions {
   readonly panel: HTMLElement;
   readonly presentation: ReplicaDisclosurePresentation;
   readonly trigger?: HTMLElement;
+  /**
+   * More triggers for the same panel: the arrow button beside a menu's link
+   * (D132). They open and close it as `trigger` does; only `trigger` carries
+   * `aria-expanded`.
+   */
+  readonly additionalTriggers?: readonly HTMLElement[];
   readonly initiallyOpen?: boolean;
+  /**
+   * The page itself is showing this panel now. It is open from the start,
+   * and the pointer leaving it in the replica does not close it: the leave
+   * grace is for what the reader's own hover opened (D132).
+   */
+  readonly shownByPage?: boolean;
   readonly visibleRows?: number;
   /**
    * Menus preview on hover and close when the pointer leaves. A select opens
@@ -42,6 +54,13 @@ export interface ReadOnlyReplicaDisclosureOptions {
    * outside click, as a native select does. Defaults to true.
    */
   readonly openOnHover?: boolean;
+  /**
+   * Every preview is taken down and put up again after each change to the
+   * page. A controller on Simul's own elements (a select's button and list)
+   * has nothing a page change can touch: it stays, so its open list keeps
+   * its place while the page changes around it (D132).
+   */
+  readonly survivesRefresh?: boolean;
 }
 
 export interface ReadOnlyReplicaDisclosure {
@@ -49,6 +68,7 @@ export interface ReadOnlyReplicaDisclosure {
   close(): void;
   dispose(): void;
   isAnchoredWithin(root: Node): boolean;
+  isDisposed(): boolean;
   isOpen(): boolean;
   open(): void;
   sync(): void;
@@ -64,9 +84,16 @@ const PANEL_ATTRIBUTES = Object.freeze([
   'hidden',
   'popover',
 ]);
+// A press is more than its `pointerdown`, `click` and `keydown`. The frame
+// cancels every input a preview does not own, and cancelling a tap's
+// `touchstart` or `touchend` cancels its click: a tap opened nothing. For an
+// input it does not own the frame also closes every preview, so the release
+// of a key closed what the key had opened, and the release of the mouse
+// closed an open dropdown just before the click that was to close it (D132).
 const TRIGGER_PREVIEW_EVENTS = new Set([
-  'click', 'focusin', 'focusout', 'keydown', 'pointerdown', 'pointerenter',
-  'pointerleave',
+  'click', 'focusin', 'focusout', 'keydown', 'keypress', 'keyup',
+  'pointerdown', 'pointerenter', 'pointerleave', 'pointerup', 'touchend',
+  'touchstart',
 ]);
 const PANEL_PREVIEW_EVENTS = new Set([
   'auxclick',
@@ -76,10 +103,15 @@ const PANEL_PREVIEW_EVENTS = new Set([
   'focusin',
   'focusout',
   'keydown',
+  'keypress',
+  'keyup',
   'pointerdown',
   'pointerenter',
   'pointerleave',
+  'pointerup',
   'scroll',
+  'touchend',
+  'touchstart',
   'wheel',
 ]);
 const DISCLOSURE_LEAVE_GRACE_MS = 100;
@@ -118,6 +150,42 @@ interface DocumentDisclosureState {
 }
 
 const DOCUMENT_DISCLOSURES = new WeakMap<Document, DocumentDisclosureState>();
+
+/**
+ * What a preview the reader had opened was doing when a refresh took its
+ * controller down: where the pointer and the focus were, and when its leave
+ * grace would have run out.
+ */
+interface ReaderOpenedState {
+  readonly triggerHovered: boolean;
+  readonly panelHovered: boolean;
+  readonly focusWithin: boolean;
+  readonly closeAt: number | undefined;
+}
+
+/**
+ * Anchors whose preview the reader had opened when a refresh took its
+ * controller down. The refresh puts the new controller up in the same task,
+ * and that one opens again and goes on where the old one was. A tap or the
+ * keyboard leaves no hover to reopen a menu by; and a menu the pointer has
+ * just left must still close when its grace runs out, though the refresh
+ * came in between (D132).
+ */
+const READER_OPENED_BEFORE_REFRESH = new Map<HTMLElement, ReaderOpenedState>();
+let readerOpenedExpiryQueued = false;
+
+function rememberReaderOpened(
+  anchor: HTMLElement,
+  state: ReaderOpenedState,
+): void {
+  READER_OPENED_BEFORE_REFRESH.set(anchor, state);
+  if (readerOpenedExpiryQueued) return;
+  readerOpenedExpiryQueued = true;
+  queueMicrotask(() => {
+    readerOpenedExpiryQueued = false;
+    READER_OPENED_BEFORE_REFRESH.clear();
+  });
+}
 
 /**
  * Computes a viewport-clamped popup position without depending on DOM state.
@@ -220,9 +288,13 @@ export function installReadOnlyReplicaDisclosure(
   return controller;
 }
 
+/**
+ * Closes the reader's previews. What the page itself shows stays: a press
+ * elsewhere in the replica does not close it on the page.
+ */
 export function closeReadOnlyReplicaDisclosures(document: Document): void {
   for (const controller of DOCUMENT_DISCLOSURES.get(document)?.controllers ?? []) {
-    controller.close();
+    if (!controller.shownByPage) controller.close();
   }
 }
 
@@ -237,10 +309,20 @@ export function snapshotOpenReadOnlyReplicaDisclosures(
   return anchors;
 }
 
-export function disposeReadOnlyReplicaDisclosures(document: Document): void {
+/**
+ * Takes every preview down. With `refresh`, those marked `survivesRefresh`
+ * stay as long as their elements are still in the replica.
+ */
+export function disposeReadOnlyReplicaDisclosures(
+  document: Document,
+  refresh = false,
+): void {
   const state = DOCUMENT_DISCLOSURES.get(document);
   if (!state) return;
-  for (const controller of state.controllers) controller.dispose();
+  for (const controller of [...state.controllers]) {
+    if (refresh && controller.survivesRefresh) controller.disposeIfIdentityLost();
+    else controller.dispose();
+  }
 }
 
 /**
@@ -274,17 +356,22 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
   readonly anchor: HTMLElement;
   readonly panel: HTMLElement;
   readonly trigger?: HTMLElement;
+  /** `trigger` and any additional ones, each with its style as it was. */
+  readonly triggers: ReadonlyArray<readonly [HTMLElement, string | null]>;
   readonly originalParent: ParentNode | null;
   readonly originalNextSibling: ChildNode | null;
   readonly manageTriggerExpanded: boolean;
   readonly openOnHover: boolean;
+  readonly survivesRefresh: boolean;
+  readonly shownByPage: boolean;
   readonly originalTriggerExpanded: string | null;
-  readonly originalTriggerStyle: string | null;
   readonly originalPanelAttributes: ReadonlyMap<string, string | null>;
   readonly originalPanelStyle: string | null;
 
   #disposed = false;
   #open = false;
+  /** Opened by the reader in the replica, not to match the page. */
+  #openedByReader = false;
   #wasConnected = false;
   #triggerHovered = false;
   #openedFromTriggerHover = false;
@@ -292,6 +379,7 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
   #focusWithin = false;
   #suppressFocusOpen = false;
   #deferredCloseTimer: number | undefined;
+  #deferredCloseAt: number | undefined;
   #resizeObserver?: ResizeObserver;
   #inlineRevealed: Array<readonly [HTMLElement, string | null]> = [];
 
@@ -305,33 +393,40 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
       return;
     }
     if (this.#open) this.close();
-    else this.open();
+    else this.#openForReader();
   };
 
   readonly #onTriggerPointerDown = (event: Event): void => {
     blockReplicaActivation(event);
   };
 
-  readonly #onTriggerPointerEnter = (): void => {
+  // A finger does not hover: it enters with the press and leaves with the
+  // lift. Taken as a hover, a tap opened a menu for the length of the leave
+  // grace and closed it again. A tap opens and closes by its click (D132).
+  readonly #onTriggerPointerEnter = (event: Event): void => {
+    if (isTouchPointerEvent(event)) return;
     this.#triggerHovered = true;
     this.#cancelDeferredClose();
     if (!this.openOnHover) return;
     const wasOpen = this.#open;
-    this.open();
+    this.#openForReader();
     this.#openedFromTriggerHover = !wasOpen && this.#open;
   };
 
-  readonly #onTriggerPointerLeave = (): void => {
+  readonly #onTriggerPointerLeave = (event: Event): void => {
+    if (isTouchPointerEvent(event)) return;
     this.#triggerHovered = false;
     if (this.openOnHover) this.#scheduleDeferredClose();
   };
 
-  readonly #onPanelPointerEnter = (): void => {
+  readonly #onPanelPointerEnter = (event: Event): void => {
+    if (isTouchPointerEvent(event)) return;
     this.#panelHovered = true;
     this.#cancelDeferredClose();
   };
 
-  readonly #onPanelPointerLeave = (): void => {
+  readonly #onPanelPointerLeave = (event: Event): void => {
+    if (isTouchPointerEvent(event)) return;
     this.#panelHovered = false;
     if (this.openOnHover) this.#scheduleDeferredClose();
   };
@@ -339,7 +434,7 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
   readonly #onFocusIn = (): void => {
     this.#focusWithin = true;
     this.#cancelDeferredClose();
-    if (!this.#suppressFocusOpen) this.open();
+    if (!this.#suppressFocusOpen) this.#openForReader();
   };
 
   readonly #onFocusOut = (event: FocusEvent): void => {
@@ -357,12 +452,16 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
     blockReplicaActivation(event);
     if (event.key === 'Escape') this.close();
     else {
-      this.open();
+      this.#openForReader();
       if (event.key === 'ArrowDown') this.#focusFirstPanelItem();
     }
   };
 
   readonly #onPanelActivation = (event: Event): void => {
+    // A dropdown inside this panel answers for its own button and list. Its
+    // button is not one of the menu's items: taken for one, a click on it
+    // closed the menu and never reached the dropdown (D132).
+    if (this.#heldDisclosureOwns(event)) return;
     blockReplicaActivation(event);
     // Choosing an option or a menu entry closes the popup, as on the page
     // (where the choice then changes the control or navigates). The replica
@@ -375,6 +474,7 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
   };
 
   readonly #onPanelKeyDown = (event: KeyboardEvent): void => {
+    if (this.#heldDisclosureOwns(event)) return;
     if (event.key === 'Escape') {
       blockReplicaActivation(event);
       this.#suppressFocusOpen = true;
@@ -393,12 +493,20 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
       (event.key === ' ' && keyboardTargetCanActivate(event.target))
     ) {
       blockReplicaActivation(event);
+      return;
+    }
+    // A field inside a menu's panel takes no typing, as a field anywhere
+    // else in the replica takes none; Tab still moves on (D132).
+    if (event.key !== 'Tab' && keyboardTargetTakesText(event.target)) {
+      blockReplicaActivation(event);
     }
   };
 
   constructor(options: ReadOnlyReplicaDisclosureOptions) {
     this.presentation = options.presentation;
     this.openOnHover = options.openOnHover !== false;
+    this.survivesRefresh = options.survivesRefresh === true;
+    this.shownByPage = options.shownByPage === true;
     this.document = options.anchor.ownerDocument;
     this.anchor = options.anchor;
     this.panel = options.panel;
@@ -407,7 +515,13 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
     this.originalTriggerExpanded = this.manageTriggerExpanded
       ? options.trigger?.getAttribute('aria-expanded') ?? null
       : null;
-    this.originalTriggerStyle = options.trigger?.getAttribute('style') ?? null;
+    this.triggers = Object.freeze(
+      (options.trigger
+        ? [options.trigger, ...options.additionalTriggers ?? []]
+        : []
+      ).map((trigger) =>
+        Object.freeze([trigger, trigger.getAttribute('style')] as const)),
+    );
     this.originalParent = options.panel.parentNode;
     this.originalNextSibling = options.panel.nextSibling;
     this.originalPanelAttributes = snapshotAttributes(
@@ -451,18 +565,21 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
       return;
     }
 
-    const trigger = this.trigger!;
-    trigger.setAttribute('data-simul-replica-disclosure-trigger', DISCLOSURE_MARKER);
-    OWNED_DISCLOSURE_TRIGGERS.add(trigger);
-    if (this.manageTriggerExpanded) trigger.setAttribute('aria-expanded', 'false');
-    setImportant(trigger, 'pointer-events', 'auto');
-    trigger.addEventListener('click', this.#onTriggerClick, true);
-    trigger.addEventListener('keydown', this.#onTriggerKeyDown, true);
-    trigger.addEventListener('pointerdown', this.#onTriggerPointerDown, true);
-    trigger.addEventListener('pointerenter', this.#onTriggerPointerEnter, true);
-    trigger.addEventListener('pointerleave', this.#onTriggerPointerLeave, true);
-    trigger.addEventListener('focusin', this.#onFocusIn, true);
-    trigger.addEventListener('focusout', this.#onFocusOut, true);
+    if (this.manageTriggerExpanded) {
+      this.trigger!.setAttribute('aria-expanded', 'false');
+    }
+    for (const [trigger] of this.triggers) {
+      trigger.setAttribute('data-simul-replica-disclosure-trigger', DISCLOSURE_MARKER);
+      OWNED_DISCLOSURE_TRIGGERS.add(trigger);
+      setImportant(trigger, 'pointer-events', 'auto');
+      trigger.addEventListener('click', this.#onTriggerClick, true);
+      trigger.addEventListener('keydown', this.#onTriggerKeyDown, true);
+      trigger.addEventListener('pointerdown', this.#onTriggerPointerDown, true);
+      trigger.addEventListener('pointerenter', this.#onTriggerPointerEnter, true);
+      trigger.addEventListener('pointerleave', this.#onTriggerPointerLeave, true);
+      trigger.addEventListener('focusin', this.#onFocusIn, true);
+      trigger.addEventListener('focusout', this.#onFocusOut, true);
+    }
     if (this.presentation === 'inline') {
       // Closed, the panel keeps the page's own state (a scripted menu the
       // source opens shows through). It is not a pointer target then, so an
@@ -478,12 +595,25 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
       setImportant(this.panel, 'z-index', '2147483647');
     }
 
-    if (options.initiallyOpen) {
-      if (this.#identityIsConnected() && this.document.body) {
+    const readerOpened = READER_OPENED_BEFORE_REFRESH.get(this.anchor);
+    READER_OPENED_BEFORE_REFRESH.delete(this.anchor);
+    if (options.initiallyOpen || this.shownByPage || readerOpened) {
+      const openAgain = (): void => {
         this.open();
+        if (!readerOpened || !this.#open) return;
+        this.#openedByReader = true;
+        this.#triggerHovered = readerOpened.triggerHovered;
+        this.#panelHovered = readerOpened.panelHovered;
+        this.#focusWithin = readerOpened.focusWithin;
+        if (readerOpened.closeAt !== undefined) {
+          this.#scheduleDeferredClose(Math.max(0, readerOpened.closeAt - Date.now()));
+        }
+      };
+      if (this.#identityIsConnected() && this.document.body) {
+        openAgain();
       } else {
         queueMicrotask(() => {
-          if (!this.#disposed && isReplicaNodeConnected(this.anchor)) this.open();
+          if (!this.#disposed && isReplicaNodeConnected(this.anchor)) openAgain();
         });
       }
     }
@@ -493,20 +623,48 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
     return this.#open;
   }
 
+  isDisposed(): boolean {
+    return this.#disposed;
+  }
+
   isAnchoredWithin(root: Node): boolean {
     return root === this.anchor || root.contains(this.anchor);
   }
 
   ownsEventPath(path: readonly EventTarget[]): boolean {
-    return path.includes(this.panel) || Boolean(
-      this.trigger && path.includes(this.trigger),
-    );
+    return path.includes(this.panel) ||
+      this.triggers.some(([trigger]) => path.includes(trigger));
   }
 
   identityIntersects(root: Node): boolean {
-    return root === this.anchor || root === this.panel || root === this.trigger ||
+    return root === this.anchor || root === this.panel ||
       root.contains(this.anchor) || root.contains(this.panel) ||
-      Boolean(this.trigger && root.contains(this.trigger));
+      this.triggers.some(([trigger]) =>
+        root === trigger || root.contains(trigger));
+  }
+
+  /**
+   * Whether `other` sits inside this panel: a dropdown in a menu (D132).
+   * Opening it must not close the menu around it, and the menu stays while
+   * it is open.
+   */
+  holds(other: ReplicaDisclosureController): boolean {
+    for (
+      let current: Node | null = other.anchor, depth = 0;
+      current && depth <= 128;
+      depth += 1
+    ) {
+      if (current === this.panel) return true;
+      if (current.parentNode) {
+        current = current.parentNode;
+        continue;
+      }
+      const root: Node = current.getRootNode();
+      current = root !== current && root.nodeType === 11 && 'host' in root
+        ? (root as ShadowRoot).host
+        : null;
+    }
+    return false;
   }
 
   open(): void {
@@ -517,8 +675,15 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
     ) return;
     const body = this.document.body;
     if (!body) return;
-    for (const sibling of DOCUMENT_DISCLOSURES.get(this.document)?.controllers ?? []) {
-      if (sibling !== this) sibling.close();
+    // One of the reader's previews at a time. What the page itself shows is
+    // not one of them: the page may show several at once (rows of an
+    // accordion), and each stays (D132).
+    if (!this.shownByPage) {
+      for (const sibling of DOCUMENT_DISCLOSURES.get(this.document)?.controllers ?? []) {
+        if (sibling !== this && !sibling.shownByPage && !sibling.holds(this)) {
+          sibling.close();
+        }
+      }
     }
     this.#open = true;
     if (this.manageTriggerExpanded) {
@@ -543,10 +708,32 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
   }
 
   close(): void {
+    this.#close(true);
+  }
+
+  /** Closes a dropdown whose own box is no longer drawn. */
+  closeIfUnanchored(): void {
+    if (this.#open && !this.#disposed && elementHasNoBox(this.anchor)) {
+      this.close();
+    }
+  }
+
+  #close(withWhatItHolds: boolean): void {
     this.#cancelDeferredClose();
     if (!this.#open) return;
     this.#open = false;
+    this.#openedByReader = false;
     this.#openedFromTriggerHover = false;
+    for (const other of DOCUMENT_DISCLOSURES.get(this.document)?.controllers ?? []) {
+      if (other === this) continue;
+      // What is open inside this panel closes with it; a hover menu left
+      // open only for the dropdown inside it may now close too.
+      if (this.holds(other)) {
+        if (withWhatItHolds) other.close();
+      } else if (other.openOnHover && other.holds(this)) {
+        other.#scheduleDeferredClose();
+      }
+    }
     this.#resizeObserver?.disconnect();
     this.#resizeObserver = undefined;
     this.#cancelDeferredClose();
@@ -591,29 +778,41 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
 
   dispose(): void {
     if (this.#disposed) return;
-    this.close();
+    if (this.#open && this.#openedByReader) {
+      rememberReaderOpened(this.anchor, {
+        triggerHovered: this.#triggerHovered,
+        panelHovered: this.#panelHovered,
+        focusWithin: this.#focusWithin,
+        closeAt: this.#deferredCloseAt,
+      });
+    }
+    // A dropdown open inside this panel stays through a refresh, which puts
+    // this controller up again in the same task. If it does not, and the
+    // dropdown is left without a box, the dropdown closes then (D132; closed
+    // here, it closed at every change to the page).
+    const held = this.#open
+      ? [...DOCUMENT_DISCLOSURES.get(this.document)?.controllers ?? []].filter(
+          (other) => other !== this && other.isOpen() && this.holds(other),
+        )
+      : [];
+    if (held.length > 0) {
+      queueMicrotask(() => {
+        for (const other of held) other.closeIfUnanchored();
+      });
+    }
+    this.#close(false);
     this.#disposed = true;
     this.#resizeObserver?.disconnect();
     this.#resizeObserver = undefined;
-    this.trigger?.removeEventListener('click', this.#onTriggerClick, true);
-    this.trigger?.removeEventListener('keydown', this.#onTriggerKeyDown, true);
-    this.trigger?.removeEventListener(
-      'pointerdown',
-      this.#onTriggerPointerDown,
-      true,
-    );
-    this.trigger?.removeEventListener(
-      'pointerenter',
-      this.#onTriggerPointerEnter,
-      true,
-    );
-    this.trigger?.removeEventListener(
-      'pointerleave',
-      this.#onTriggerPointerLeave,
-      true,
-    );
-    this.trigger?.removeEventListener('focusin', this.#onFocusIn, true);
-    this.trigger?.removeEventListener('focusout', this.#onFocusOut, true);
+    for (const [trigger] of this.triggers) {
+      trigger.removeEventListener('click', this.#onTriggerClick, true);
+      trigger.removeEventListener('keydown', this.#onTriggerKeyDown, true);
+      trigger.removeEventListener('pointerdown', this.#onTriggerPointerDown, true);
+      trigger.removeEventListener('pointerenter', this.#onTriggerPointerEnter, true);
+      trigger.removeEventListener('pointerleave', this.#onTriggerPointerLeave, true);
+      trigger.removeEventListener('focusin', this.#onFocusIn, true);
+      trigger.removeEventListener('focusout', this.#onFocusOut, true);
+    }
     this.panel.removeEventListener('auxclick', this.#onPanelActivation, true);
     this.panel.removeEventListener('click', this.#onPanelActivation, true);
     this.panel.removeEventListener('contextmenu', this.#onPanelActivation, true);
@@ -626,10 +825,12 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
     this.panel.removeEventListener('focusout', this.#onFocusOut, true);
     this.anchor.removeAttribute('data-simul-replica-disclosure-anchor');
     this.anchor.removeAttribute('data-simul-replica-disclosure-open');
-    this.trigger?.removeAttribute('data-simul-replica-disclosure-trigger');
     OWNED_DISCLOSURE_PANELS.delete(this.panel);
     INLINE_DISCLOSURE_PANELS.delete(this.panel);
-    if (this.trigger) OWNED_DISCLOSURE_TRIGGERS.delete(this.trigger);
+    for (const [trigger] of this.triggers) {
+      trigger.removeAttribute('data-simul-replica-disclosure-trigger');
+      OWNED_DISCLOSURE_TRIGGERS.delete(trigger);
+    }
     if (this.manageTriggerExpanded && this.trigger) {
       restoreAttribute(
         this.trigger,
@@ -637,7 +838,9 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
         this.originalTriggerExpanded,
       );
     }
-    if (this.trigger) restoreAttribute(this.trigger, 'style', this.originalTriggerStyle);
+    for (const [trigger, style] of this.triggers) {
+      restoreAttribute(trigger, 'style', style);
+    }
     restoreAttributes(this.panel, this.originalPanelAttributes);
     restoreAttribute(this.panel, 'style', this.originalPanelStyle);
     unregisterController(this);
@@ -659,9 +862,14 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
     } catch {
       // An unreadable style still reveals with the block default below.
     }
-    if (display === '' || display === 'none') {
-      setImportant(this.panel, 'display', 'block');
-    }
+    // Its display is pinned either way. The page's own `:hover` rule may be
+    // what shows it at this moment, and that ends when the pointer moves on:
+    // after a tap it ended at once, and the open menu went blank (D132).
+    setImportant(
+      this.panel,
+      'display',
+      display === '' || display === 'none' ? 'block' : display,
+    );
     setImportant(this.panel, 'visibility', 'visible');
     setImportant(this.panel, 'opacity', '1');
     setImportant(this.panel, 'content-visibility', 'visible');
@@ -691,6 +899,11 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
     }
   }
 
+  #openForReader(): void {
+    this.open();
+    if (this.#open) this.#openedByReader = true;
+  }
+
   #observeAnchorSize(): void {
     const ResizeObserverConstructor = this.document.defaultView?.ResizeObserver;
     if (!ResizeObserverConstructor) return;
@@ -703,8 +916,9 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
   #containsInteractiveNode(candidate: EventTarget | null): boolean {
     if (!candidate || !('nodeType' in candidate)) return false;
     const node = candidate as Node;
-    return node === this.trigger || node === this.panel ||
-      Boolean(this.trigger?.contains(node)) || this.panel.contains(node);
+    return node === this.panel || this.panel.contains(node) ||
+      this.triggers.some(([trigger]) =>
+        node === trigger || trigger.contains(node));
   }
 
   #focusFirstPanelItem(): void {
@@ -742,37 +956,61 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
     }
   }
 
-  #scheduleDeferredClose(): void {
+  #scheduleDeferredClose(delayMs = DISCLOSURE_LEAVE_GRACE_MS): void {
     if (
       this.#disposed || this.presentation === 'list' || !this.#open ||
       this.#deferredCloseTimer !== undefined
     ) return;
-    const view = this.document.defaultView;
-    const schedule = view?.setTimeout?.bind(view) ?? globalThis.setTimeout;
-    this.#deferredCloseTimer = schedule(() => {
+    this.#deferredCloseAt = Date.now() + delayMs;
+    // The timer of the realm this code runs in. The replica frame runs no
+    // scripts, and a timer set on its window never fires: a menu opened by
+    // hover stayed open after the pointer had left (D132).
+    this.#deferredCloseTimer = globalThis.setTimeout(() => {
       this.#deferredCloseTimer = undefined;
-      if (!this.#triggerHovered && !this.#panelHovered && !this.#focusWithin) {
-        this.close();
-      }
-    }, DISCLOSURE_LEAVE_GRACE_MS) as unknown as number;
+      this.#deferredCloseAt = undefined;
+      if (
+        !this.shownByPage &&
+        !this.#triggerHovered && !this.#panelHovered && !this.#focusWithin &&
+        !this.#holdsAnOpenDisclosure()
+      ) this.close();
+    }, delayMs) as unknown as number;
   }
 
   #cancelDeferredClose(): void {
     if (this.#deferredCloseTimer === undefined) return;
-    const view = this.document.defaultView;
-    const cancel = view?.clearTimeout?.bind(view) ?? globalThis.clearTimeout;
-    cancel(this.#deferredCloseTimer);
+    globalThis.clearTimeout(this.#deferredCloseTimer);
     this.#deferredCloseTimer = undefined;
+    this.#deferredCloseAt = undefined;
+  }
+
+  #heldDisclosureOwns(event: Event): boolean {
+    const path = disclosureEventPath(event);
+    for (const other of DOCUMENT_DISCLOSURES.get(this.document)?.controllers ?? []) {
+      if (other !== this && other.ownsEventPath(path) && this.holds(other)) {
+        return true;
+      }
+    }
+    return false;
+  }
+
+  #holdsAnOpenDisclosure(): boolean {
+    for (const other of DOCUMENT_DISCLOSURES.get(this.document)?.controllers ?? []) {
+      if (other !== this && other.isOpen() && this.holds(other)) return true;
+    }
+    return false;
   }
 
   #identityIsConnected(): boolean {
     return isReplicaNodeConnected(this.anchor) &&
       isReplicaNodeConnected(this.panel) &&
-      (!this.trigger || isReplicaNodeConnected(this.trigger));
+      this.triggers.every(([trigger]) => isReplicaNodeConnected(trigger));
   }
 
   #position(): void {
-    if (!this.#open) return;
+    // A dropdown that is not drawn at this moment (the menu around it is
+    // being put up again) has nowhere to hang its list: the list keeps its
+    // place.
+    if (!this.#open || elementHasNoBox(this.anchor)) return;
     const view = this.document.defaultView;
     const documentElement = this.document.documentElement;
     let anchorRect: DOMRect;
@@ -873,8 +1111,17 @@ function installDocumentDisclosureState(
   const onPointerDown = (event: Event): void => {
     const path = disclosureEventPath(event);
     const ownedEvent = isReadOnlyReplicaDisclosureEvent(event);
+    // A press on a dropdown's list is also a press inside the menu that
+    // holds the dropdown, wherever the list is drawn (D132).
+    const owners = ownedEvent
+      ? [...controllers].filter((controller) => controller.ownsEventPath(path))
+      : [];
     for (const controller of controllers) {
-      if (!ownedEvent || !controller.ownsEventPath(path)) controller.close();
+      if (
+        !controller.shownByPage &&
+        !owners.includes(controller) &&
+        !owners.some((owner) => controller.holds(owner))
+      ) controller.close();
     }
   };
   const syncOpenControllers = (): void => {
@@ -983,6 +1230,19 @@ function blockReplicaActivation(event: Event): void {
   event.stopImmediatePropagation();
 }
 
+function elementHasNoBox(element: Element): boolean {
+  try {
+    return typeof element.getClientRects === 'function' &&
+      element.getClientRects().length === 0;
+  } catch {
+    return false;
+  }
+}
+
+function isTouchPointerEvent(event: Event): boolean {
+  return (event as Partial<PointerEvent>).pointerType === 'touch';
+}
+
 const PANEL_ITEM_SELECTOR = [
   'a[href]',
   'button',
@@ -1040,6 +1300,17 @@ function keyboardTargetCanActivate(target: EventTarget | null): boolean {
   ) return true;
   const role = element.getAttribute('role')?.trim().toLowerCase() ?? '';
   return KEYBOARD_ACTIVATION_ROLES.has(role);
+}
+
+function keyboardTargetTakesText(target: EventTarget | null): boolean {
+  if (!target || !('nodeType' in target) || target.nodeType !== 1) return false;
+  const element = target as Element;
+  const tagName = element.localName.toLowerCase();
+  if (tagName === 'input' || tagName === 'textarea' || tagName === 'select') {
+    return true;
+  }
+  const editable = element.getAttribute('contenteditable')?.trim().toLowerCase();
+  return editable !== undefined && editable !== 'false';
 }
 
 function replicaFocusTargetIsSafe(

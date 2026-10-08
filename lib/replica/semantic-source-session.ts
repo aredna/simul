@@ -3,6 +3,7 @@ import {
   MAX_SEMANTIC_SOURCE_NODE_IDENTITIES,
   MAX_SEMANTIC_SOURCE_PROOFS,
   MAX_SEMANTIC_SOURCE_RECORDS,
+  MAX_SEMANTIC_SOURCE_TEXT,
   MAX_SEMANTIC_SELECT_SIZE,
   MAX_SEMANTIC_SELECTED_OPTION_NODE_IDS,
   MAX_SEMANTIC_MASKED_LENGTH,
@@ -41,6 +42,7 @@ import {
   type SourceEvidenceCategory,
 } from './source-secret-classifier';
 import {
+  beginSourceSelectLabelWalk,
   createSourceControlledContentPolicy,
   createSourceSecretAncestorMemo,
   hasSourceCredentialSecretAncestor,
@@ -60,9 +62,12 @@ import {
   readSourceShadowRoot,
 } from './source-shadow-root';
 import {
+  MAX_STRUCTURAL_MENU_TRIGGERS,
   hasStructuralMenuContext,
   isPlainStructuralMenuTrigger,
+  isStructuralButtonMenu,
   isStructuralMenuPanelElement,
+  structuralMenuOpening,
 } from './structural-menu-shape';
 
 interface MessageEventPort {
@@ -126,7 +131,10 @@ interface ValidatedDisclosure {
 
 interface ValidatedStructuralMenu {
   readonly container: Element;
+  /** The first trigger, which the proof names. */
   readonly trigger: Element;
+  /** Every trigger: the first, and an arrow button beside it if there is one. */
+  readonly triggers: readonly Element[];
   readonly panel: Element;
   readonly expanded: boolean;
 }
@@ -156,7 +164,8 @@ type SemanticSourceProofDraft =
   | Omit<Extract<SemanticSourceProof, { kind: 'masked-length' }>, 'revision'>
   | Omit<Extract<SemanticSourceProof, { kind: 'control-state' }>, 'revision'>
   | Omit<Extract<SemanticSourceProof, { kind: 'aria-state' }>, 'revision'>
-  | Omit<Extract<SemanticSourceProof, { kind: 'aria-relationship' }>, 'revision'>;
+  | Omit<Extract<SemanticSourceProof, { kind: 'aria-relationship' }>, 'revision'>
+  | Omit<Extract<SemanticSourceProof, { kind: 'popover-open' }>, 'revision'>;
 
 const ELEMENT_NODE = 1;
 const TEXT_NODE = 3;
@@ -168,11 +177,19 @@ const SEMANTIC_SELECT_ACTIVATION_EVENTS = Object.freeze([
   'click',
   'keydown',
 ] as const);
+// `beforetoggle` is heard for the order popovers open in: it comes while the
+// page's own call is still running, before anything else can read the page.
 const SEMANTIC_DOM_CHANGE_EVENTS = Object.freeze([
-  'beforeinput', 'input', 'change', 'toggle',
+  'beforeinput', 'input', 'change', 'beforetoggle', 'toggle',
 ] as const);
+// A menu that fades out is still painted when the change that closes it is
+// read: its opacity has only begun to fall, and `visibility` holds until the
+// transition ends. Nothing in the DOM changes when it has finished, so the
+// end of a transition or animation is read too (D132; the mirror kept such a
+// menu open after the page had closed it).
 const SEMANTIC_PRESENTATION_CHANGE_EVENTS = Object.freeze([
   'pointerover', 'pointerout', 'focusin', 'focusout',
+  'transitionend', 'transitioncancel', 'animationend', 'animationcancel',
 ] as const);
 const SEMANTIC_CONTROL_ROLES = new Set([
   'button', 'checkbox', 'combobox', 'link', 'menuitem', 'menuitemcheckbox',
@@ -253,6 +270,13 @@ export class SemanticSourceSession {
   #controlPollFingerprints = new WeakMap<Element, string>();
   #controlPollCursor = 0;
   #presentationChangeCandidates = new WeakSet<Element>();
+  /**
+   * The order in which the page opened the popovers it shows, from their
+   * `toggle` events: the later one is drawn over the earlier, and nothing in
+   * the DOM says which that is (D132).
+   */
+  #popoverOpenOrder = new WeakMap<Element, number>();
+  #popoverOpenCount = 0;
   #disposed = false;
 
   constructor(private readonly environment: SemanticSourceSessionEnvironment) {
@@ -281,6 +305,7 @@ export class SemanticSourceSession {
     this.#controlPollFingerprints = new WeakMap<Element, string>();
     this.#controlPollCursor = 0;
     this.#presentationChangeCandidates = new WeakSet<Element>();
+    this.#popoverOpenOrder = new WeakMap<Element, number>();
     for (const root of this.#semanticEventRoots) {
       for (const type of SEMANTIC_DOM_CHANGE_EVENTS) {
         root.removeEventListener(type, this.#onDomChange, true);
@@ -363,6 +388,9 @@ export class SemanticSourceSession {
       this.environment.window,
       this.#classifier,
     );
+    if (event.type === 'toggle' || event.type === 'beforetoggle') {
+      this.#notePopoverToggle(event);
+    }
     this.refresh();
   };
   readonly #onPresentationChange = (event: Event): void => {
@@ -422,6 +450,23 @@ export class SemanticSourceSession {
       this.#scheduleControlPoll();
     } catch {
       this.dispose(true);
+    }
+  }
+
+  #notePopoverToggle(event: Event): void {
+    const target = safelyRead(() => event.composedPath()[0] ?? event.target);
+    if (!isElementNode(target)) return;
+    if (safelyRead(() => target.hasAttribute('popover')) !== true) return;
+    // The state the event announces; a synthetic event without one is read
+    // from the element.
+    const announced = safelyRead(() => (event as Partial<ToggleEvent>).newState);
+    const open = announced === 'open' || (announced !== 'closed' &&
+      safelyRead(() => target.matches(':popover-open')) === true);
+    if (!open) {
+      this.#popoverOpenOrder.delete(target);
+    } else if (!this.#popoverOpenOrder.has(target)) {
+      this.#popoverOpenCount += 1;
+      this.#popoverOpenOrder.set(target, this.#popoverOpenCount);
     }
   }
 
@@ -709,17 +754,24 @@ export class SemanticSourceSession {
     this.#dirty = false;
     let scan: SemanticSourceScan;
     const rootWalk = beginSourceShadowRootWalk();
-    try {
+    const readPage = (): SemanticSourceScan => {
       this.#scanSecretAncestors = createSourceSecretAncestorMemo();
-      scan = this.#scan();
+      const labelWalk = beginSourceSelectLabelWalk();
+      try {
+        return this.#scan();
+      } finally {
+        labelWalk.end();
+      }
+    };
+    try {
+      scan = readPage();
       // Before a new text or value is sent, every element above its node
       // is asked about its root again: one attached since it was last read
       // fires nothing and may wrap the node in a masking box. If one turns
       // up, the page is read again with it; if that read turns up another,
       // nothing is sent until the next change (D125).
       if (this.#foundRootsAbove(scan.changedNodes ?? [])) {
-        this.#scanSecretAncestors = createSourceSecretAncestorMemo();
-        scan = this.#scan();
+        scan = readPage();
         if (this.#foundRootsAbove(scan.changedNodes ?? [])) return;
       }
     } catch {
@@ -1018,6 +1070,9 @@ export class SemanticSourceSession {
       }
     }
 
+    // Triggers whose open state a preview in the replica presents itself.
+    const previewTriggers = new Set<Element>();
+    const structuralMenuTriggers = new Map<string, readonly Element[]>();
     for (const disclosure of validatedDisclosures) {
       const triggerNodeId = this.#nodeId(disclosure.trigger);
       const panelNodeId = this.#nodeId(disclosure.panel);
@@ -1035,6 +1090,7 @@ export class SemanticSourceSession {
         classifierVersion: SOURCE_SECRET_CLASSIFIER_VERSION,
       })) continue;
       disclosurePanels.add(disclosure.panel);
+      previewTriggers.add(disclosure.trigger);
     }
 
     for (const menu of validatedStructuralMenus) {
@@ -1061,6 +1117,7 @@ export class SemanticSourceSession {
       })) continue;
       disclosurePanels.add(menu.panel);
       structuralMenuPanels.set(menu.panel, relationId);
+      structuralMenuTriggers.set(relationId, menu.triggers);
     }
 
     const records: SemanticSourceRecord[] = [];
@@ -1121,6 +1178,86 @@ export class SemanticSourceSession {
         admittedDisclosureTextNodes.add(node);
       }
     };
+
+    // Menu text is read first. A menu without text is not offered, and it
+    // used to be read last: on a page whose options and named controls
+    // filled the batch, no menu opened in the mirror (D132). Editable text,
+    // which a page can hold any amount of, comes after the controls.
+    const editableText: Array<{
+      readonly node: Node;
+      readonly classification: ElementClassification;
+    }> = [];
+    const textStack: Array<{
+      node: Node;
+      editable: ElementClassification | undefined;
+      disclosure: boolean;
+      secret: boolean;
+    }> = [{
+      node: root,
+      editable: undefined,
+      disclosure: false,
+      secret: false,
+    }];
+    while (textStack.length > 0 && records.length < MAX_SEMANTIC_SOURCE_RECORDS) {
+      const current = textStack.pop();
+      if (!current) break;
+      if (current.node.nodeType === TEXT_NODE) {
+        // A light-DOM Text node may render through a default slot beneath a
+        // secret shadow ancestor. Classify that flat-tree path before any
+        // content accessor is evaluated, and keep the node decision sticky.
+        if (
+          current.secret ||
+          hasSourceCredentialSecretAncestor(
+            current.node,
+            this.#classifier,
+            this.environment.window,
+            this.#scanSecretAncestors,
+          )
+        ) continue;
+        const parent = current.node.parentElement;
+        const classification = parent && classifications.get(parent);
+        if (!classification) continue;
+        if (current.editable && scope.editableContent) {
+          editableText.push({
+            node: current.node,
+            classification: current.editable,
+          });
+        } else if (current.disclosure && scope.disclosureContent &&
+          classification.category === 'public-semantic') {
+          add(
+            current.node,
+            classification,
+            'disclosureContent',
+            'text',
+            readTextNode(current.node),
+          );
+        }
+        continue;
+      }
+      if (current.node.nodeType !== ELEMENT_NODE) continue;
+      const element = current.node as Element;
+      const classification = classifications.get(element);
+      if (!classification) continue;
+      const secret = current.secret || classification.category === 'secret';
+      if (secret) continue;
+      // What a dropdown's options say is read as their labels, by the rules
+      // for labels; it is never menu or editable text.
+      if (classification.facts.tagName === 'select') continue;
+      const editable = current.editable ??
+        (classification.category === 'editable' ? classification : undefined);
+      const disclosure = current.disclosure || disclosurePanels.has(element);
+      const children: Node[] = [...element.childNodes];
+      const shadowRoot = safelyReadShadowRoot(element);
+      if (shadowRoot) children.push(...shadowRoot.childNodes);
+      for (let index = children.length - 1; index >= 0; index -= 1) {
+        textStack.push({
+          node: children[index]!,
+          editable,
+          disclosure,
+          secret,
+        });
+      }
+    }
 
     for (const element of elements) {
       if (records.length >= MAX_SEMANTIC_SOURCE_RECORDS) break;
@@ -1192,76 +1329,9 @@ export class SemanticSourceSession {
       }
     }
 
-    const textStack: Array<{
-      node: Node;
-      editable: ElementClassification | undefined;
-      disclosure: boolean;
-      secret: boolean;
-    }> = [{
-      node: root,
-      editable: undefined,
-      disclosure: false,
-      secret: false,
-    }];
-    while (textStack.length > 0 && records.length < MAX_SEMANTIC_SOURCE_RECORDS) {
-      const current = textStack.pop();
-      if (!current) break;
-      if (current.node.nodeType === TEXT_NODE) {
-        // A light-DOM Text node may render through a default slot beneath a
-        // secret shadow ancestor. Classify that flat-tree path before any
-        // content accessor is evaluated, and keep the node decision sticky.
-        if (
-          current.secret ||
-          hasSourceCredentialSecretAncestor(
-            current.node,
-            this.#classifier,
-            this.environment.window,
-            this.#scanSecretAncestors,
-          )
-        ) continue;
-        const parent = current.node.parentElement;
-        const classification = parent && classifications.get(parent);
-        if (!classification) continue;
-        if (current.editable && scope.editableContent) {
-          add(
-            current.node,
-            current.editable,
-            'editableContent',
-            'text',
-            readTextNode(current.node),
-          );
-        } else if (current.disclosure && scope.disclosureContent &&
-          classification.category === 'public-semantic') {
-          add(
-            current.node,
-            classification,
-            'disclosureContent',
-            'text',
-            readTextNode(current.node),
-          );
-        }
-        continue;
-      }
-      if (current.node.nodeType !== ELEMENT_NODE) continue;
-      const element = current.node as Element;
-      const classification = classifications.get(element);
-      if (!classification) continue;
-      const secret = current.secret || classification.category === 'secret';
-      if (secret) continue;
-      const editable = current.editable ??
-        (classification.category === 'editable' ? classification : undefined);
-      const disclosure = current.disclosure || disclosurePanels.has(element);
-      const children: Node[] = [...element.childNodes];
-      const shadowRoot = safelyReadShadowRoot(element);
-      if (shadowRoot) children.push(...shadowRoot.childNodes);
-      for (let index = children.length - 1; index >= 0; index -= 1) {
-        textStack.push({
-          node: children[index]!,
-          editable,
-          disclosure,
-          secret,
-        });
-      }
+    for (const { node, classification } of editableText) {
+      if (records.length >= MAX_SEMANTIC_SOURCE_RECORDS) break;
+      add(node, classification, 'editableContent', 'text', readTextNode(node));
     }
 
     // Every control gets a disabled-state proof, so on a page with hundreds
@@ -1282,9 +1352,6 @@ export class SemanticSourceSession {
         // refuses makes it refuse the whole batch (every link on a page did).
         const ariaDisableable = SEMANTIC_CONTROL_ROLES.has(role);
         if (!nativeDisableable && !ariaDisableable) continue;
-        const currentClassification = this.#classifyElement(element, false, false);
-        if (currentClassification.category === 'secret' ||
-          currentClassification.category === 'withheld') continue;
         const disabled = nativeDisableable
           ? safelyRead(
               () => (element as HTMLButtonElement | HTMLFieldSetElement |
@@ -1295,6 +1362,19 @@ export class SemanticSourceSession {
         const ariaDisabled = normalizedToken(
           safelyReadAttribute(element, 'aria-disabled'),
         ) === 'true';
+        const disabledNow = ariaDisabled || (typeof disabled === 'boolean'
+          ? disabled
+          : safelyRead(() => element.hasAttribute('disabled')) === true) ||
+          safelyRead(() => element.matches(':disabled')) === true;
+        // An option or a group is enabled in the replica until a proof says
+        // otherwise, and a page can hold thousands of them: only a disabled
+        // one is stated (D132).
+        if (!disabledNow && (tagName === 'option' || tagName === 'optgroup')) {
+          continue;
+        }
+        const currentClassification = this.#classifyElement(element, false, false);
+        if (currentClassification.category === 'secret' ||
+          currentClassification.category === 'withheld') continue;
         const controlNodeId = this.#nodeId(element);
         if (!controlNodeId) continue;
         addProof({
@@ -1302,10 +1382,7 @@ export class SemanticSourceSession {
           bridge: this.environment.bridge,
           nodeId: controlNodeId,
           gate: 'controlSemantics',
-          disabled: ariaDisabled || (typeof disabled === 'boolean'
-            ? disabled
-            : safelyRead(() => element.hasAttribute('disabled')) === true) ||
-            safelyRead(() => element.matches(':disabled')) === true,
+          disabled: disabledNow,
           classifierVersion: SOURCE_SECRET_CLASSIFIER_VERSION,
         });
       }
@@ -1318,6 +1395,67 @@ export class SemanticSourceSession {
       for (const element of path) {
         const relationId = structuralMenuPanels.get(element);
         if (relationId) structuralMenuRelationsWithText.add(relationId);
+      }
+    }
+    for (const relationId of structuralMenuRelationsWithText) {
+      for (const trigger of structuralMenuTriggers.get(relationId) ?? []) {
+        previewTriggers.add(trigger);
+      }
+    }
+    // What the page shows that no attribute in the base graph says (D132):
+    // its own `aria-expanded`, which its stylesheet may test, and a popover
+    // the Popover API has opened. They come after the menus, whose triggers
+    // carry their own open state.
+    if (scope.controlSemantics && stack.length === 0) {
+      const openPopovers: Array<{
+        readonly nodeId: number;
+        readonly order: number;
+      }> = [];
+      for (const element of elements) {
+        const classification = classifications.get(element);
+        if (!classification || classification.category === 'secret' ||
+          classification.category === 'withheld') continue;
+        const expanded = previewTriggers.has(element)
+          ? undefined
+          : readSemanticAriaStateValue(element, 'expanded', '');
+        const popoverOpen = safelyRead(() =>
+          element.hasAttribute('popover') && element.matches(':popover-open')
+        ) === true;
+        if (expanded === undefined && !popoverOpen) continue;
+        const currentClassification = this.#classifyElement(element, false, false);
+        if (currentClassification.category === 'secret' ||
+          currentClassification.category === 'withheld') continue;
+        const stateNodeId = this.#nodeId(element);
+        if (!stateNodeId) continue;
+        if (expanded !== undefined) {
+          addProof({
+            kind: 'aria-state',
+            bridge: this.environment.bridge,
+            nodeId: stateNodeId,
+            gate: 'controlSemantics',
+            state: 'expanded',
+            value: expanded,
+            classifierVersion: SOURCE_SECRET_CLASSIFIER_VERSION,
+          });
+        }
+        if (popoverOpen) {
+          openPopovers.push({
+            nodeId: stateNodeId,
+            order: this.#popoverOpenOrder.get(element) ?? 0,
+          });
+        }
+      }
+      // In the order the page opened them, so the replica stacks them alike;
+      // one already open when the page was first read comes first.
+      openPopovers.sort((left, right) => left.order - right.order);
+      for (const { nodeId } of openPopovers) {
+        addProof({
+          kind: 'popover-open',
+          bridge: this.environment.bridge,
+          nodeId,
+          gate: 'controlSemantics',
+          classifierVersion: SOURCE_SECRET_CLASSIFIER_VERSION,
+        });
       }
     }
     const emittedProofs = proofs.filter((proof) =>
@@ -1410,56 +1548,61 @@ export class SemanticSourceSession {
     const menus: ValidatedStructuralMenu[] = [];
     for (const container of elements) {
       const retained = this.#structuralMenus.get(container);
-      // The two-child shape is the cheapest test, so it runs before the
-      // context and painted-path walks that every list item would otherwise
-      // pay for.
+      // The child count is the cheapest test, so it runs before the context
+      // and painted-path walks that every list item would otherwise pay for:
+      // one collapsed panel and one or two triggers (D132; a link with an
+      // arrow button beside it was not a menu).
       const children = safelyRead(() => [...container.children]);
       if (
-        !children || children.length !== 2 ||
+        !children || children.length < 2 ||
+        children.length > MAX_STRUCTURAL_MENU_TRIGGERS + 1 ||
         classifications.get(container)?.category !== 'public-semantic' ||
-        !hasStructuralMenuContext(container) ||
+        // Outside navigation, a header or a list only a button beside a list
+        // is a menu, which tags and roles alone say.
+        (!hasStructuralMenuContext(container) &&
+          !(children.length === 2 && (
+            isStructuralButtonMenu(children[0]!, children[1]!) ||
+            isStructuralButtonMenu(children[1]!, children[0]!)
+          ))) ||
         !this.#isPaintedStructuralMenuController(container)
       ) {
         this.#structuralMenus.delete(container);
         continue;
       }
       // While a real hover shows the panel it is painted text too; it stays
-      // the panel, not a second trigger.
+      // the panel, not another trigger.
       const triggers = children.filter((element) =>
         element !== retained?.panel &&
         classifications.get(element)?.category === 'public-semantic' &&
         (isDisclosureActivationController(element) ||
           isPlainStructuralMenuTrigger(element)) &&
         this.#isPaintedStructuralMenuController(element));
-      if (triggers.length !== 1) {
-        this.#structuralMenus.delete(container);
-        continue;
-      }
-      const trigger = triggers[0]!;
+      const trigger = triggers[0];
+      const panel = children.find((element) => !triggers.includes(element));
       if (
-        safelyRead(() => trigger.hasAttribute('aria-controls')) !== false ||
-        !hasPlainStructuralMenuExpandedState(trigger)
+        !trigger || !panel || triggers.length !== children.length - 1 ||
+        !structuralMenuOpening(container, triggers, panel) ||
+        triggers.some((element) =>
+          safelyRead(() => element.hasAttribute('aria-controls')) !== false ||
+          !hasPlainStructuralMenuExpandedState(element))
       ) {
         this.#structuralMenus.delete(container);
         continue;
       }
-      const panel = children.find((element) => element !== trigger);
-      const collapsed = panel
-        ? this.#isCollapsedStructuralMenuPanel(panel)
-        : false;
-      const visible = panel
-        ? this.#isVisibleDisclosureController(panel)
-        : false;
+      const collapsed = this.#isCollapsedStructuralMenuPanel(panel);
+      const visible = this.#isVisibleDisclosureController(panel);
       const retainedRelationship = retained?.trigger === trigger &&
         retained.panel === panel;
       if (
-        !panel || panel.ownerDocument !== container.ownerDocument ||
+        panel.ownerDocument !== container.ownerDocument ||
         panel.getRootNode() !== container.getRootNode() ||
         !isStructuralMenuPanelElement(panel) ||
         classifications.get(panel)?.category !== 'public-semantic' ||
         (!collapsed && (!retainedRelationship || !visible)) ||
-        !isBoundedSafeDisclosurePanel(trigger, classifications, true) ||
-        !isBoundedSafeDisclosurePanel(panel, classifications, true) ||
+        // The first trigger names the menu; an arrow beside it may be an icon.
+        !triggers.every((element, index) =>
+          isBoundedSafeDisclosurePanel(element, classifications, index === 0)) ||
+        !isBoundedSafeMenuPanel(panel, classifications) ||
         normalizeSemanticText(safelyRead(() => panel.textContent)) === undefined
       ) {
         this.#structuralMenus.delete(container);
@@ -1469,6 +1612,7 @@ export class SemanticSourceSession {
       menus.push(Object.freeze({
         container,
         trigger,
+        triggers: Object.freeze(triggers),
         panel,
         // A panel the source shows (a real hover or click on the page) opens
         // in the replica too; the reader's own hover there opens it locally.
@@ -2143,12 +2287,17 @@ function readTextNode(node: Node): string | undefined {
   return normalizeSemanticText(safelyRead(() => node.nodeValue));
 }
 
+/**
+ * Any text that is not blank travels as the page has it. Text without a
+ * letter or a digit used to be dropped here, to keep it from the translator,
+ * and with it went the label itself: an option reading `$`, `★★★` or `--`
+ * was a blank row in the mirror's dropdown. The receiver now keeps such text
+ * from the translator and shows it (D132).
+ */
 function normalizeSemanticText(value: unknown): string | undefined {
   if (typeof value !== 'string') return undefined;
   const text = value.normalize('NFC').replace(/\s+/gu, ' ').trim();
-  if (!text || text.length > 3_500 || !/[\p{L}\p{N}]/u.test(text)) {
-    return undefined;
-  }
+  if (!text || text.length > MAX_SEMANTIC_SOURCE_TEXT) return undefined;
   return text;
 }
 
@@ -2322,6 +2471,47 @@ function isBoundedSafeDisclosurePanel(
     if (value.trim() !== '') hasText = true;
   }
   return !requireNonEmpty || hasText;
+}
+
+/**
+ * A menu's panel may hold a field: a search box, a language dropdown (D132).
+ * It is refused only for a credential inside it. Nothing more travels for
+ * the field than without the menu: its value and its options read under
+ * their own settings, and only text beside it is menu text.
+ */
+function isBoundedSafeMenuPanel(
+  panel: Element,
+  classifications: WeakMap<Element, ElementClassification>,
+): boolean {
+  const pending: Node[] = [panel];
+  let visited = 0;
+  let textUnits = 0;
+  let hasText = false;
+  while (pending.length > 0) {
+    const node = pending.pop();
+    if (
+      !node || ++visited > MAX_SEMANTIC_DISCLOSURE_SUBTREE_NODES ||
+      node.ownerDocument !== panel.ownerDocument
+    ) return false;
+    if (node.nodeType === TEXT_NODE) {
+      const value = safelyRead(() => node.nodeValue);
+      if (typeof value !== 'string') return false;
+      textUnits += value.length;
+      if (textUnits * 2 > MAX_SEMANTIC_SOURCE_BATCH_BYTES) return false;
+      if (value.trim() !== '') hasText = true;
+      continue;
+    }
+    if (node.nodeType !== ELEMENT_NODE) continue;
+    const element = node as Element;
+    const category = classifications.get(element)?.category;
+    if (category === undefined || category === 'secret' || category === 'withheld') {
+      return false;
+    }
+    pending.push(...element.childNodes);
+    const shadowRoot = safelyReadShadowRoot(element);
+    if (shadowRoot) pending.push(...shadowRoot.childNodes);
+  }
+  return hasText;
 }
 
 function isBoundedSafeTabPanel(

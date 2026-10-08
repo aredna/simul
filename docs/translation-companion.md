@@ -407,6 +407,33 @@ stream itself is broken (a forged identity or a revision rewind) (D96). Until
 D96 one refused item refused the batch, which purged every label, menu and
 control state for as long as the page kept sending it (D62).
 
+The page's structure and its labels travel separately: labels a moment after
+the page changes, structure on the next animation frame. So the labels of a
+dropdown the page has just added can reach the panel before the dropdown
+does. They are dropped, the page counts them as delivered, and it does not
+send them again while its own view is unchanged. The receiver therefore keeps
+the last batch it took and the nodes that batch named and the replica lacked
+(D132). After a change to the page's structure has been applied, it looks at
+those: when one is there now, it goes through the kept batch again. Nothing
+new travels, and every check is made again. Before D132 such a dropdown showed
+**Options** over empty rows, and a menu added late did not open, until
+something else on the page changed.
+
+One batch holds what its counted bytes allow, 8 MiB, which is well inside the
+64 MiB Chrome carries; the record and proof counts only follow from that
+(D132). They were 1,024 and 2,048, and a page with more labels than that
+(country, nationality, dialling-code and time-zone lists together, or a table
+with a dropdown on every row) left its later dropdowns blank and its menus
+shut. Menu text is read first, then control labels and values, then editable
+text. An option or option group is stated only when it is disabled. Reading
+every label of a large page is paid for by remembering, for the length of one
+read, whether an element or anything above it is hidden or masked: each
+option used to walk up to the document three times.
+
+Text travels as the page has it. Only text with a letter or a digit is
+offered to the translator (D132); before, such text was dropped on the page
+side, and an option reading `$`, `★★★` or `--` was an empty row.
+
 A public single-row select becomes a companion-owned trigger whose top-layer,
 internally scrolling list escapes source clipping, stays within the replica
 viewport, and repositions on scroll or resize. `multiple` and authored

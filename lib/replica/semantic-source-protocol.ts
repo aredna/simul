@@ -18,18 +18,29 @@ import {
 
 export const SEMANTIC_SOURCE_PROTOCOL_VERSION = 2;
 export const SEMANTIC_SOURCE_PORT_PREFIX = 'simul:semantic-source-v2:';
-// Measured on real pages (2026-09-23): Wikipedia's portal needs 206 records
-// and 492 proofs in 122 KB, freee 233 proofs, Yahoo! JAPAN 278. At 128 each,
-// option labels and menu proofs were dropped. The record and proof counts
-// bound the batch; the byte cap (1,024 records of 3,500 characters fit) only
-// keeps one message well inside Chrome's 64 MiB (D63).
-export const MAX_SEMANTIC_SOURCE_RECORDS = 1_024;
-export const MAX_SEMANTIC_SOURCE_PROOFS = 2_048;
+// One batch is one message, and its counted bytes are its limit: 8 MiB, well
+// inside the 64 MiB Chrome carries (D63). The counts below only follow from
+// that: no record is counted smaller than 128 bytes and no proof smaller than
+// 176. They were once 128 each, then 1,024 records and 2,048 proofs, and each
+// time real pages passed them: country, nationality, dialling-code and
+// time-zone lists together, or a table with a dropdown on every row, left the
+// dropdowns further down blank and the site menus shut (D132). Measured in
+// Chrome with every label read: a page with 1,600 options pauses less at a
+// change than it did (46 ms, 159 ms before), one with 10,000 the same
+// (about 220 ms), one with 40,000 about 1.6 s.
+export const MAX_SEMANTIC_SOURCE_BATCH_BYTES = 8 * 1024 * 1024;
+export const MIN_SEMANTIC_SOURCE_RECORD_BYTES = 128;
+export const MIN_SEMANTIC_SOURCE_PROOF_BYTES = 176;
+export const MAX_SEMANTIC_SOURCE_RECORDS = Math.floor(
+  MAX_SEMANTIC_SOURCE_BATCH_BYTES / MIN_SEMANTIC_SOURCE_RECORD_BYTES,
+);
+export const MAX_SEMANTIC_SOURCE_PROOFS = Math.floor(
+  MAX_SEMANTIC_SOURCE_BATCH_BYTES / MIN_SEMANTIC_SOURCE_PROOF_BYTES,
+);
 export const MAX_SEMANTIC_SELECTED_OPTION_NODE_IDS = 32;
 export const MAX_SEMANTIC_SELECT_SIZE = 1_000;
 /** The most dots a masked credential field shows in the replica (D91). */
 export const MAX_SEMANTIC_MASKED_LENGTH = 256;
-export const MAX_SEMANTIC_SOURCE_BATCH_BYTES = 8 * 1024 * 1024;
 export const MAX_SEMANTIC_SOURCE_TEXT = 3_500;
 export const MAX_SEMANTIC_SOURCE_UNACKED_BATCHES = 4;
 // Never below the mirror's node cap, whatever it is set to: a walk that runs
@@ -237,18 +248,25 @@ export interface SemanticControlStateProof {
 
 /**
  * Typed ARIA widget state. `checked`, `selected`, `pressed` and the
- * slider/spinbutton `valueinput` are user input (formValues); `current` and
- * the read-only indicator `valuenow` are page state (controlSemantics). Every
- * value is a bounded token or a bounded decimal; `aria-valuetext` (free text)
- * never travels. `valueinput` carries the same `aria-valuenow` attribute as
- * `valuenow`, but from a user-editable slider/spinbutton, so it reads under
- * the form-value gate rather than the page-state gate.
+ * slider/spinbutton `valueinput` are user input (formValues); `current`,
+ * `expanded` and the read-only indicator `valuenow` are page state
+ * (controlSemantics). Every value is a bounded token or a bounded decimal;
+ * `aria-valuetext` (free text) never travels. `valueinput` carries the same
+ * `aria-valuenow` attribute as `valuenow`, but from a user-editable
+ * slider/spinbutton, so it reads under the form-value gate rather than the
+ * page-state gate.
+ *
+ * `expanded` is there for the page's stylesheet (D132): a rule such as
+ * `button[aria-expanded="true"] + ul` shows a menu, and the base graph never
+ * carries the attribute, since the replica's own menu previews write it on
+ * their triggers. It is sent only for an element no preview claims.
  */
 export type SemanticAriaState =
   | 'checked'
   | 'selected'
   | 'pressed'
   | 'current'
+  | 'expanded'
   | 'valuenow'
   | 'valueinput';
 export type SemanticAriaStateGate = 'formValues' | 'controlSemantics';
@@ -274,14 +292,15 @@ export interface SemanticAriaStateProof {
 
 export function isSemanticAriaState(value: unknown): value is SemanticAriaState {
   return value === 'checked' || value === 'selected' || value === 'pressed' ||
-    value === 'current' || value === 'valuenow' || value === 'valueinput';
+    value === 'current' || value === 'expanded' || value === 'valuenow' ||
+    value === 'valueinput';
 }
 
 /** User input reads under formValues; read-only page state under controlSemantics. */
 export function semanticAriaStateGate(
   state: SemanticAriaState,
 ): SemanticAriaStateGate {
-  return state === 'current' || state === 'valuenow'
+  return state === 'current' || state === 'expanded' || state === 'valuenow'
     ? 'controlSemantics'
     : 'formValues';
 }
@@ -304,8 +323,27 @@ export function isSemanticAriaStateValue(
   if (state === 'valuenow' || state === 'valueinput') {
     return value.length <= 24 && SEMANTIC_ARIA_DECIMAL_VALUE.test(value);
   }
-  if (state === 'selected') return value === 'true' || value === 'false';
+  if (state === 'selected' || state === 'expanded') {
+    return value === 'true' || value === 'false';
+  }
   return value === 'true' || value === 'false' || value === 'mixed';
+}
+
+/**
+ * A popover the page is showing (D132). The Popover API opens one without
+ * changing any attribute, so nothing in the base graph says it is open and
+ * the replica kept it hidden. Only the fact travels, and only while it holds:
+ * a closed popover has no proof.
+ */
+export interface SemanticPopoverOpenProof {
+  readonly kind: 'popover-open';
+  readonly bridge: SemanticSourceBridgeId;
+  /** Native bridge identity of the element with the `popover` attribute. */
+  readonly nodeId: number;
+  /** Monotonic revision for this proof identity. */
+  readonly revision: number;
+  readonly gate: 'controlSemantics';
+  readonly classifierVersion: typeof SOURCE_SECRET_CLASSIFIER_VERSION;
 }
 
 export const MAX_SEMANTIC_ARIA_RELATIONSHIP_TARGETS = 32;
@@ -351,7 +389,8 @@ export type SemanticSourceProof =
   | SemanticMaskedLengthProof
   | SemanticControlStateProof
   | SemanticAriaStateProof
-  | SemanticAriaRelationshipProof;
+  | SemanticAriaRelationshipProof
+  | SemanticPopoverOpenProof;
 
 /** A complete replacement of the admitted semantic set for one policy epoch. */
 export interface SemanticSourceBatch {
@@ -516,7 +555,7 @@ export function semanticSourceBatchByteLength(
     bytes += record.text.length * 2 + record.tagName.length +
       record.type.length + record.autocomplete.length + record.role.length +
       record.contentEditable.length + record.gate.length +
-      record.presentation.length + 128;
+      record.presentation.length + MIN_SEMANTIC_SOURCE_RECORD_BYTES;
   }
   for (const proof of proofs) {
     if (proof.kind === 'select-state') {
@@ -530,7 +569,7 @@ export function semanticSourceBatchByteLength(
     } else if (proof.kind === 'aria-relationship') {
       bytes += proof.targetNodeIds.length * 16 + proof.relation.length + 176;
     } else {
-      bytes += 176;
+      bytes += MIN_SEMANTIC_SOURCE_PROOF_BYTES;
     }
   }
   return bytes;
@@ -712,6 +751,21 @@ export function readSemanticSourceProof(
       revision: input.revision,
       gate: input.gate,
       length: input.length as number,
+      classifierVersion: SOURCE_SECRET_CLASSIFIER_VERSION,
+    });
+  }
+  if (input.kind === 'popover-open') {
+    if (!hasExactKeys(input, [
+      'kind', 'bridge', 'nodeId', 'revision', 'gate', 'classifierVersion',
+    ]) || input.gate !== 'controlSemantics' ||
+      !positiveSafeInteger(input.nodeId)
+    ) return undefined;
+    return Object.freeze({
+      kind: input.kind,
+      bridge: input.bridge,
+      nodeId: input.nodeId,
+      revision: input.revision,
+      gate: input.gate,
       classifierVersion: SOURCE_SECRET_CLASSIFIER_VERSION,
     });
   }
@@ -922,6 +976,9 @@ export function semanticSourceProofIdentity(proof: SemanticSourceProof): string 
     return `semantic-masked-length-v1:${proof.nodeId}`;
   }
   if (proof.kind === 'control-state') return `semantic-control-v1:${proof.nodeId}`;
+  if (proof.kind === 'popover-open') {
+    return `semantic-popover-open-v1:${proof.nodeId}`;
+  }
   if (proof.kind === 'aria-state') {
     return `semantic-aria-state-v1:${proof.nodeId}:${proof.state}`;
   }
@@ -955,6 +1012,9 @@ export function semanticSourceProofSignature(proof: SemanticSourceProof): string
   if (proof.kind === 'control-state') return [
     proof.bridge, proof.kind, proof.nodeId, proof.gate, Number(proof.disabled),
     proof.classifierVersion,
+  ].join('\u0000');
+  if (proof.kind === 'popover-open') return [
+    proof.bridge, proof.kind, proof.nodeId, proof.gate, proof.classifierVersion,
   ].join('\u0000');
   if (proof.kind === 'aria-state') return [
     proof.bridge, proof.kind, proof.nodeId, proof.gate, proof.state, proof.value,

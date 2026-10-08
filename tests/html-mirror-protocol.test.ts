@@ -220,6 +220,23 @@ describe('isolated HTML sanitizer and protocol', () => {
       false, false, false, false, 'passive')).toBeDefined();
   });
 
+  it('carries `open` on any element, for the page\'s own rules (D132)', () => {
+    // A web component shows its menu by `:host([open])`; without the
+    // attribute the replica never showed it. The page's `aria-expanded`
+    // still does not travel here: the replica's menu previews own it.
+    const graph = sanitizeMarkup(`<!doctype html><html><body>
+      <x-menu id="menu" open aria-expanded="true">Items</x-menu>
+      <div id="panel" open="">Panel</div>
+    </body></html>`, 'passive');
+    for (const tagName of ['x-menu', 'div']) {
+      expect(graphElementsByTag(graph, tagName)[0]?.attributes, tagName)
+        .toContainEqual(['open', '']);
+    }
+    expect(JSON.stringify(graph)).not.toContain('aria-expanded');
+    expect(readHtmlMirrorNode(graph.root, new Set(), 0, undefined, false,
+      false, false, false, false, 'passive')).toBeDefined();
+  });
+
   it('draws credential inputs as empty fields; other credential regions stay opaque (D76)', () => {
     const { document, window } = parseHTML(`<!doctype html><html><body>
       <input id="pw" class="field" style="width: 10rem" type="password"

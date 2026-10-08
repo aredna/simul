@@ -4155,6 +4155,134 @@ describe('IsolatedHtmlReplicaEngine', () => {
       .toBe('userSpaceOnUse');
     expect(stream.acknowledged).toContain(1);
   });
+
+  it('fills a dropdown whose labels came before it, and takes a new list as a patch (D132)', async () => {
+    const option = (id: number): HtmlMirrorNode => ({
+      kind: 'element', id, namespace: 'html', tagName: 'option',
+      attributes: [], children: [],
+    });
+    const label = (nodeId: number, text: string): SemanticSourceRecord => ({
+      bridge: 'isolated-html', recordId: nodeId * 8 + 1, nodeId, nodeRevision: 1,
+      category: 'public-semantic', gate: 'controlSemantics', tagName: 'option',
+      type: '', autocomplete: '', role: '', contentEditable: '',
+      text, presentation: 'label', classifierVersion: 1,
+    });
+    const selectProofs = (selected: number, revision: number) => [{
+      kind: 'select-presentation' as const, bridge: 'isolated-html' as const,
+      nodeId: 40, revision: 1, gate: 'controlSemantics' as const,
+      multiple: false, size: null, classifierVersion: 1 as const,
+    }, {
+      kind: 'select-state' as const, bridge: 'isolated-html' as const,
+      nodeId: 40, revision, gate: 'formValues' as const,
+      selectedOptionNodeIds: [selected], multiple: false, pickerOpen: false,
+      classifierVersion: 1 as const,
+    }];
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: {
+          kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+          attributes: [], children: [
+            { kind: 'element', id: 2, namespace: 'html', tagName: 'head', attributes: [], children: [] },
+            { kind: 'element', id: 3, namespace: 'html', tagName: 'body', attributes: [], children: [{
+              kind: 'element', id: 10, namespace: 'html', tagName: 'div',
+              attributes: [], children: [],
+            }] },
+          ],
+        },
+        adoptedStyleSheets: [], captureMs: 1,
+        viewportWidth: 800, viewportHeight: 600,
+        documentWidth: 800, documentHeight: 1000,
+      },
+      'passive',
+    )!;
+    const stream = new FakeHtmlStream(checkpoint);
+    const semantic = new FakeSemanticStream();
+    const host = new FakePresentationHost();
+    const engine = makeEngine(stream, host, undefined, semantic);
+    await engine.run(request);
+    await Promise.resolve();
+    const sourceDocument = engine.snapshot()!.document;
+    const replica = host.iframe!.contentDocument!;
+    const rows = (): string[] => {
+      const selectHost = replica.querySelector('[data-simul-owned-select-host]')!;
+      return [...selectHost.shadowRoot!.querySelectorAll(
+        '[data-simul-owned-select-option="v1"]',
+      )].map((row) => row.textContent!.replace(/ /gu, ''));
+    };
+    const trigger = (): string => replica
+      .querySelector('[data-simul-owned-select-host]')!.shadowRoot!
+      .querySelector('[data-simul-owned-select-trigger="v1"]')!.textContent!;
+
+    // The labels and the state of a dropdown the mirror does not have yet.
+    expect(semantic.emit(createSemanticSourceBatch(
+      sourceDocument, 'read-v1-111111', 1,
+      [label(41, 'Tokyo'), label(42, 'Osaka')],
+      selectProofs(41, 1),
+    ))).toBe(true);
+    expect(replica.querySelector('[data-simul-owned-select-host]')).toBeNull();
+
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [{
+        kind: 'reconcile-children', nodeId: 10, children: [{
+          kind: 'graph',
+          node: {
+            kind: 'element', id: 40, namespace: 'html', tagName: 'select',
+            attributes: [], children: [option(41), option(42)],
+          },
+        }],
+      }],
+      undefined,
+      'passive',
+    )!);
+    expect(rows()).toEqual(['Tokyo', 'Osaka']);
+    expect(trigger()).toBe('Tokyo');
+    expect(engine.snapshot()?.records.map(({ source }) => source))
+      .toEqual(expect.arrayContaining(['Tokyo', 'Osaka']));
+
+    // The page replaces the list. The new labels are here first again.
+    const frame = host.iframe;
+    expect(semantic.emit(createSemanticSourceBatch(
+      sourceDocument, 'read-v1-111111', 2,
+      [label(51, 'Sapporo'), label(52, 'Sendai'), label(53, 'Naha')],
+      selectProofs(52, 2),
+    ))).toBe(true);
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 2 }),
+      2,
+      2,
+      [{ kind: 'children', nodeId: 40, children: [option(51), option(52), option(53)] }],
+      undefined,
+      'passive',
+    )!);
+    expect(stream.requested).toEqual([]);
+    expect(stream.acknowledged).toContain(2);
+    expect(host.iframe).toBe(frame);
+    expect(rows()).toEqual(['Sapporo', 'Sendai', 'Naha']);
+    expect(trigger()).toBe('Sendai');
+
+    // And with the structure first, as it has always worked.
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 3 }),
+      3,
+      3,
+      [{ kind: 'children', nodeId: 40, children: [option(61), option(62)] }],
+      undefined,
+      'passive',
+    )!);
+    expect(stream.requested).toEqual([]);
+    expect(rows()).toEqual(['', '']);
+    expect(semantic.emit(createSemanticSourceBatch(
+      sourceDocument, 'read-v1-111111', 3,
+      [label(61, 'Kobe'), label(62, 'Nara')],
+      selectProofs(61, 3),
+    ))).toBe(true);
+    expect(rows()).toEqual(['Kobe', 'Nara']);
+    expect(trigger()).toBe('Kobe');
+  });
 });
 
 describe('IsolatedHtmlReplicaEngine for screen readers (D124)', () => {

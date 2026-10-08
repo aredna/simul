@@ -175,6 +175,46 @@ one of its links, buttons or menu items is chosen, since the page would act on
 it. `multiple` and authored `size>1` selects retain bounded inline-list
 presentation. Labels and disabled/shape semantics are independent from the
 selected state: the latter appears only when ordinary form state is enabled.
+
+A dropdown's button and list, and a menu's trigger and panel, own the whole of
+a press: its touch events and the release of the pointer and of a key, not
+only `pointerdown`, `click` and `keydown` (D132). The frame cancels every
+input a preview does not own and closes every preview for it, so before D132
+a tap opened nothing (cancelling `touchstart` or `touchend` cancels the
+click), a key's release closed what the key had opened, and a second click on
+an open dropdown's button left it open. A finger is not taken for a hover: a
+tap opens a menu and it stays open until a tap outside. What the reader opened
+is open again after the mirror refreshes its previews for a change to the
+page, and goes on where it was: a menu the pointer had just left still
+closes when its grace runs out. What was open only because the page showed
+it closes when the page stops. The timer that closes a hover menu once the
+pointer has left runs in the panel, not in the frame: the frame runs no
+scripts, and a timer set on its window never fires.
+
+What the page itself shows is kept apart from what the reader opened (D132).
+The reader has one preview open at a time, and a press elsewhere in the
+replica closes it. A panel the page is showing is not one of those: the page
+may show several at once (the rows of an accordion), each stays, the pointer
+leaving one does not close it, and a press elsewhere does not either. It
+closes when the page closes it, or at its own trigger.
+
+A dropdown's controller is on Simul's own button and list, so it stays in
+place while the page changes around it and is replaced only when the
+dropdown's own shape changes (single, multiple, visible rows) or the dropdown
+leaves the page (D132). Before, every change to the page took it down and put
+it up again, which moved an open list out and back and scrolled it to the
+selected option: on a page with a carousel the far end of a long list could
+not be reached. A list drawn again while it is open (a translation arriving)
+keeps its scroll position.
+
+When the page replaces a dropdown's options, the mirror takes the new list as
+a patch (D132). The current choice arrives on the semantic channel and nothing
+is drawn from the hidden native `<select>`, so the patch needs no selected
+positions. Before D132 the panel required them, the page had stopped sending
+them, and every changed list was refused and answered with a fresh copy of
+the whole page. A change inside one of a dropdown's option groups is sent as
+a change to the dropdown; a change to an option's own text sends nothing here,
+since its label travels on the semantic channel.
 A select that states its own implicit role (`role="combobox"` on a single-row
 select, `role="listbox"`) is approved like one that states none, and the
 stated role is dropped in transit (D98); any other widget or editor role on a
@@ -228,11 +268,69 @@ until a script adds a class) is shown with it; content hidden with
 `display: none`, such as a mobile-only copy, stays hidden. Only the trigger and
 an open panel take pointer input. The preview state is extension-owned and
 does not send events to the source or rewrite authored source state. Missing,
-duplicate, stale, mismatched, editable, or private relations remain
-pointer-inert. Editable comboboxes, searchboxes, textboxes, contenteditable
-regions, native inputs, and any menu branch containing private controls remain
-masked. This distinction admits public navigation labels without transporting
-user-entered data. An accessible name (`aria-label`, `title`) or a select's
+duplicate, stale, mismatched, or private relations remain pointer-inert.
+
+Since D132 the shape is a little wider, by one rule both sides apply
+(`structural-menu-shape.ts`):
+
+- The container may hold two triggers and the panel: a link and the arrow
+  button beside it. Either opens the menu; the first names it and carries
+  `aria-expanded`.
+- Outside navigation, a header or a list item, a `button` (or
+  `role="button"`) beside a list (`ul`, `ol`, `role="menu"`) is a menu too: a
+  table row's "actions" menu. It opens on a click only, never on hover, and
+  only with that one trigger. Its hidden text travels as any menu's does,
+  under **Collapsed disclosure content**. A block beside a button is not
+  taken for a menu: it is as often an accordion's body or a dialog.
+- A menu's panel may hold a field: a search box, a language dropdown. It is
+  refused only for a credential field inside it. Nothing more travels for
+  the field than without the menu: its value and its options read under their
+  own settings, and only the text beside it is menu text. A dropdown inside
+  an open menu opens without closing the menu around it: its button is not
+  one of the menu's items, and a press on its list, which is drawn at the end
+  of the page, is a press inside the menu. It stays open while the page
+  changes, and closes when the menu around it is gone. A field in a panel
+  takes no typing, as a field anywhere else in the replica takes none. A
+  dropdown the page is not showing is not drawn, so one inside a menu shows
+  when the page shows the menu, not when only the reader's hover in the
+  replica opens it.
+
+A menu that fades out is still painted when the change that closes it is
+read, and nothing in the DOM changes once the fade is over. The page side
+therefore reads a menu's state again when a transition or animation ends on
+its trigger or container (D132); before, the replica kept such a menu open
+until the pointer next moved over the page.
+
+A panel named by `aria-controls` is held to the older rule: editable
+comboboxes, searchboxes, textboxes, contenteditable regions, native inputs,
+and any branch containing private controls remain masked. This distinction
+admits public navigation labels without transporting user-entered data.
+
+A dropdown or menu the page opens by its own script is followed, not opened
+by the replica. Three ways of opening left nothing for the replica to copy
+before D132:
+
+- An `open` attribute on an element other than `details` or `dialog`, which a
+  web component's `:host([open])` rule tests. `open` now travels on every
+  element, like any attribute that says what the page shows. When that rule
+  shows the host itself, the host's shadow root is read again with it: a
+  patch for the host's children does not carry its root.
+- `aria-expanded` tested by the page's stylesheet
+  (`button[aria-expanded="true"] + ul`, `:has(...)`). The base graph still
+  never carries it, since the replica's own previews write it on their
+  triggers. The page's value travels as a typed state, `true` or `false`,
+  under **Control labels and semantics**, for every element no preview
+  claims, and is written on the replica element marked as the page's.
+- The Popover API, which changes no attribute. That a popover is open travels
+  as a typed fact under the same setting, read again on the page's `toggle`
+  event; the replica shows that popover, as `manual` so a click in the mirror
+  cannot dismiss what the page still shows. Open popovers are listed in the
+  order the page opened them (from `beforetoggle`), so they stack alike. One
+  that stays open is left in place when the other proofs are presented
+  again: hidden and shown again it would rise over a dropdown list the
+  reader opened inside it.
+
+An accessible name (`aria-label`, `title`) or a select's
 current choice travels with its control for translation and the dropdown
 trigger, but is never drawn as extra text: the source page does not paint it
 beside the control. Because nothing shows it, a hidden accessible name is not
@@ -400,7 +498,7 @@ every privacy filter off so a missing part of a page can be traced to a
 privacy rule or ruled out. Credential fields, file inputs and CSS-masked text
 are drawn as the page draws them; hidden, collapsed and controlled regions,
 the text of every control, `<output>`, and the attributes the mirror normally
-strips (`value`, `placeholder`, `aria-*`, `data-*`, `title`, `alt`, `open`,
+strips (`value`, `placeholder`, `aria-*`, `data-*`, `title`, `alt`,
 `checked`, `disabled`) travel as the page holds them; the semantic channel
 reads at Full visible whatever the read scope, including dates, card numbers
 and one-time codes. A typed password never travels: only its dots show, and

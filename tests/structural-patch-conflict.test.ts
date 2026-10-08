@@ -76,4 +76,34 @@ describe('hasStructuralPatchTargetConflict', () => {
       { target: label, structural: false },
     ])).toBe(true);
   });
+
+  it('lets a shadow root be replaced beside its own host\'s children (D132)', () => {
+    // Replacing a host's children leaves its root in place: a host the page
+    // shows again gets both read again in one batch.
+    const { document } = parseHTML('<main><div></div></main>');
+    const main = document.querySelector('main')!;
+    const host = document.querySelector('div')!;
+    const shadow = host.attachShadow({ mode: 'open' });
+    const label = document.createElement('span');
+    shadow.append(label);
+
+    expect(hasStructuralPatchTargetConflict([
+      { target: host, structural: true },
+      { target: shadow, structural: true },
+    ])).toBe(false);
+    // What is above the host still takes the root with it,
+    expect(hasStructuralPatchTargetConflict([
+      { target: main, structural: true },
+      { target: shadow, structural: true },
+    ])).toBe(true);
+    // and a node inside the root is not the root.
+    expect(hasStructuralPatchTargetConflict([
+      { target: host, structural: true },
+      { target: label, structural: false },
+    ])).toBe(true);
+    expect(hasStructuralPatchTargetConflict([
+      { target: shadow, structural: true },
+      { target: label, structural: false },
+    ])).toBe(true);
+  });
 });

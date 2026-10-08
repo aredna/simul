@@ -40,6 +40,24 @@ describe('minimizeConnectedComposedTargets', () => {
     expect(minimizeConnectedComposedTargets([label, host])).toEqual([host]);
   });
 
+  it('keeps a shadow root beside its own host, and drops it below anything higher (D132)', () => {
+    // Reading a host's children again does not read its root.
+    const { document } = parseHTML('<main><div></div></main>');
+    const main = document.querySelector('main')!;
+    const host = document.querySelector('div')!;
+    const shadow = host.attachShadow({ mode: 'open' });
+    // As Chrome reports it; linkedom calls a shadow root unconnected.
+    Object.defineProperty(shadow, 'isConnected', { get: () => host.isConnected });
+    const label = document.createElement('span');
+    shadow.append(label);
+
+    expect(minimizeConnectedComposedTargets([host, shadow, label])).toEqual([
+      host,
+      shadow,
+    ]);
+    expect(minimizeConnectedComposedTargets([shadow, main, host])).toEqual([main]);
+  });
+
   it('drops disconnected targets and deduplicates repeated ones', () => {
     const { document } = parseHTML('<main><span></span></main>');
     const span = document.querySelector('span')!;

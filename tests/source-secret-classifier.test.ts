@@ -10,6 +10,7 @@ import {
 import { replicaReadScopeForProfile } from '../lib/replica/read-scope-policy';
 import { applySourcePrivacyFiltersOff } from '../lib/replica/source-privacy-mode';
 import {
+  beginSourceSelectLabelWalk,
   createSourceSecretAncestorMemo,
   hasSourceControlOrEditableElementAncestor,
   hasSourceCredentialSecretAncestor,
@@ -580,6 +581,85 @@ describe('source secret classifier', () => {
         .toBe('English');
       expect(isSourceSelectEntryVisuallyHidden(inert)).toBe(true);
       expect(readSourceSelectLabel(document.querySelector('#fr')!)).toBeUndefined();
+    } finally {
+      if (globalNode) Object.defineProperty(globalThis, 'Node', globalNode);
+      else delete (globalThis as { Node?: unknown }).Node;
+    }
+  });
+
+  it('reads each style once for the options of one walk, with the same answers (D132)', () => {
+    // Every option walked up to the document three times, reading each
+    // ancestor's style: with every label of a large page read, that was most
+    // of a second at each change.
+    const options = Array.from({ length: 50 }, (_, index) =>
+      `<option id="o${index}">Choice ${index}</option>`).join('');
+    const { document, window } = parseHTML(`<html><body><form><div>
+      <select id="shown">${options}</select>
+      <div id="wrap"><select id="hidden"><option id="gone">Gone</option></select></div>
+      </div></form></body></html>`);
+    for (const select of document.querySelectorAll('select')) {
+      Object.defineProperties(select, {
+        getClientRects: { configurable: true, value: () => [{}] },
+        getBoundingClientRect: {
+          configurable: true,
+          value: () => ({
+            left: 10, top: 10, right: 120, bottom: 34, width: 110, height: 24,
+          }),
+        },
+      });
+    }
+    const wrap = document.querySelector('#wrap')!;
+    const reads = new Map<Element, number>();
+    const globalNode = Object.getOwnPropertyDescriptor(globalThis, 'Node');
+    Object.defineProperty(globalThis, 'Node', {
+      configurable: true,
+      writable: true,
+      value: (window as unknown as { Node: typeof Node }).Node,
+    });
+    Object.defineProperty(window, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => {
+        reads.set(element, (reads.get(element) ?? 0) + 1);
+        return {
+          display: element === wrap ? 'none' : 'block',
+          visibility: 'visible',
+          position: 'static',
+          transform: 'none',
+          opacity: '1',
+          pointerEvents: 'auto',
+          getPropertyValue: (name: string) =>
+            name === '-webkit-text-security' ? 'none' : '',
+        };
+      },
+    });
+    const readAll = (): Array<string | undefined> =>
+      [...document.querySelectorAll('option')].map((option) =>
+        readSourceSelectLabel(option)?.text);
+    try {
+      const without = readAll();
+      const body = document.body;
+      const readsOfBodyWithout = reads.get(body)!;
+      reads.clear();
+      const walk = beginSourceSelectLabelWalk();
+      let within: Array<string | undefined>;
+      try {
+        within = readAll();
+      } finally {
+        walk.end();
+      }
+      expect(within).toEqual(without);
+      expect(within.slice(0, 2)).toEqual(['Choice 0', 'Choice 1']);
+      expect(within.at(-1)).toBeUndefined();
+      // Once for whether it is hidden, once for whether it masks text.
+      expect(reads.get(body)).toBe(2);
+      expect(readsOfBodyWithout).toBeGreaterThan(100);
+      for (const option of document.querySelectorAll('#shown option')) {
+        expect(reads.get(option)).toBe(2);
+      }
+      // After the walk nothing is remembered: a style may have changed.
+      reads.clear();
+      readSourceSelectLabel(document.querySelector('#o0')!);
+      expect(reads.get(body)).toBeGreaterThan(2);
     } finally {
       if (globalNode) Object.defineProperty(globalThis, 'Node', globalNode);
       else delete (globalThis as { Node?: unknown }).Node;

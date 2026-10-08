@@ -11,6 +11,10 @@ export interface ReplicaPatchTarget {
  * context the new children are validated against unless that element's own
  * children are replaced too. A carousel move is the common case: a slide's
  * content is replaced while the wrapper's transform changes.
+ * A shadow root and its own host are not a conflict either: replacing the
+ * host's children leaves the root where it is, so a host that the page shows
+ * again gets both read again in one batch (D132). Anything above the host
+ * still takes the root with it.
  * Indexing targets avoids pairwise tree walks for large live patch batches. */
 export function hasStructuralPatchTargetConflict(
   targets: readonly ReplicaPatchTarget[],
@@ -24,11 +28,15 @@ export function hasStructuralPatchTargetConflict(
   }
 
   for (const target of indexedTargets.keys()) {
+    const ownHost = target.nodeType === 11 && 'host' in target
+      ? (target as ShadowRoot).host
+      : undefined;
     for (
       let ancestor = composedParent(target);
       ancestor;
       ancestor = composedParent(ancestor)
     ) {
+      if (ancestor === ownHost) continue;
       if (indexedTargets.get(ancestor) === true) return true;
     }
   }

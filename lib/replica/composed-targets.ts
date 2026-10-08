@@ -12,13 +12,16 @@ export function minimizeConnectedComposedTargets(
 
   const minimal: Node[] = [];
   for (const target of connectedTargets) {
+    // A shadow root is not among its host's children: reading those again
+    // does not read the root, so its own host does not cover it (D132).
+    const ownHost = 'host' in target ? (target as ShadowRoot).host : undefined;
     let covered = false;
     for (
       let ancestor = composedParent(target);
       ancestor;
       ancestor = composedParent(ancestor)
     ) {
-      if (!connectedTargets.has(ancestor)) continue;
+      if (ancestor === ownHost || !connectedTargets.has(ancestor)) continue;
       covered = true;
       break;
     }

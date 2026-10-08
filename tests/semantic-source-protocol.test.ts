@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 import {
   MAX_SEMANTIC_SOURCE_PROOFS,
   SEMANTIC_SOURCE_PROTOCOL_VERSION,
+  createSemanticSourceBatch,
   createSemanticSourcePortName,
   createSemanticSourceStart,
   readSemanticSourceProof,
@@ -231,6 +232,42 @@ describe('semantic source protocol', () => {
     ]) {
       expect(readSemanticSourceProof(forged)).toBeUndefined();
     }
+  });
+
+  it('carries what the page shows that no attribute says: expanded, and an open popover (D132)', () => {
+    const expanded = {
+      ...ariaProof, nodeId: 25, gate: 'controlSemantics', state: 'expanded',
+      value: 'true',
+    } as const;
+    expect(readSemanticSourceProof(expanded)).toEqual(expanded);
+    expect(readSemanticSourceProof({ ...expanded, value: 'false' }))
+      .toEqual({ ...expanded, value: 'false' });
+    expect(semanticSourceProofIdentity(expanded))
+      .toBe('semantic-aria-state-v1:25:expanded');
+    const popover = {
+      kind: 'popover-open', bridge: 'isolated-html', nodeId: 26, revision: 1,
+      gate: 'controlSemantics', classifierVersion: 1,
+    } as const;
+    expect(readSemanticSourceProof(popover)).toEqual(popover);
+    expect(semanticSourceProofIdentity(popover))
+      .toBe('semantic-popover-open-v1:26');
+    for (const forged of [
+      // Page state, never under the form-value setting; a plain yes or no.
+      { ...expanded, gate: 'formValues' },
+      { ...expanded, value: 'mixed' },
+      { ...expanded, value: 'menu' },
+      { ...popover, gate: 'formValues' },
+      { ...popover, nodeId: 0 },
+      { ...popover, open: true },
+      { ...popover, text: 'Menu' },
+    ]) {
+      expect(readSemanticSourceProof(forged)).toBeUndefined();
+    }
+    const batch = createSemanticSourceBatch(
+      documentIdentity, 'read-v1-111111', 1, [], [expanded, popover],
+    );
+    expect(readSemanticSourceBatch(batch, documentIdentity, 'read-v1-111111'))
+      .toEqual(batch);
   });
 
   it('rejects unsafe or malformed aria relationship proofs', () => {

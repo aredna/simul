@@ -1598,6 +1598,122 @@ describe('semantic source session', () => {
     session.dispose();
   });
 
+  it.each([
+    [
+      'a link, an arrow button and a list',
+      `<nav><ul><li id="wrapper"><a id="trigger" href="/shop">Shop</a>
+        <button id="arrow" aria-label="Open submenu"></button>
+        <ul id="panel" class="collapsed"><li><a href="/a">Alpha</a></li></ul>
+      </li></ul></nav>`,
+    ],
+    [
+      'a panel with a search box',
+      `<nav><ul><li id="wrapper"><a id="trigger" href="/shop">Shop</a>
+        <div id="panel" class="collapsed"><input type="search" placeholder="Search">
+          <a href="/a">Alpha</a></div>
+      </li></ul></nav>`,
+    ],
+    [
+      'a panel with a dropdown',
+      `<nav><ul><li id="wrapper"><a id="trigger" href="/shop">Shop</a>
+        <div id="panel" class="collapsed"><a href="/a">Alpha</a>
+          <select><option>English</option></select></div>
+      </li></ul></nav>`,
+    ],
+    [
+      'a button and a list outside navigation, a header or a list',
+      `<main><div id="wrapper"><button id="trigger">Row actions</button>
+        <ul id="panel" class="collapsed"><li><a href="/a">Alpha</a></li></ul>
+      </div></main>`,
+    ],
+  ] as const)('infers a menu from %s (D132)', (_, body) => {
+    const { document, window } = parseHTML(`<html><body>${body}</body></html>`);
+    installPaintedTabFixture(document, window as unknown as Window);
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(
+      port,
+      document,
+      window,
+      'isolated-html',
+      undefined,
+      structuralMenuStyle((element) =>
+        element.classList.contains('collapsed') ? 'display' : undefined),
+    );
+    port.emit(createSemanticSourceStart(
+      'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+    ));
+    const batch = port.messages[0]!;
+    // One proof, naming the first trigger; the shape says the rest.
+    expect(batch.proofs.filter((proof) => proof.kind === 'structural-menu'))
+      .toEqual([expect.objectContaining({
+        containerNodeId: nodeId(document.querySelector('#wrapper')!),
+        triggerNodeId: nodeId(document.querySelector('#trigger')!),
+        panelNodeId: nodeId(document.querySelector('#panel')!),
+      })]);
+    const menuText = batch.records.filter((record) =>
+      record.gate === 'disclosureContent').map((record) => record.text);
+    expect(menuText).toEqual(['Alpha']);
+    // An option's text is its label, never menu text.
+    expect(batch.records.filter((record) => record.presentation === 'text')
+      .map((record) => record.text)).not.toContain('English');
+    session.dispose();
+  });
+
+  it.each([
+    [
+      'a credential field in the panel',
+      `<nav><ul><li id="wrapper"><a id="trigger" href="/in">Sign in</a>
+        <div id="panel" class="collapsed"><input type="password">
+          <a href="/a">Alpha</a></div>
+      </li></ul></nav>`,
+    ],
+    [
+      'a button beside a block outside navigation (an accordion, a dialog)',
+      `<main><div id="wrapper"><button id="trigger">Section</button>
+        <div id="panel" class="collapsed"><a href="/a">Alpha</a></div>
+      </div></main>`,
+    ],
+    [
+      'a link, an arrow button and a list outside navigation',
+      `<main><div id="wrapper"><a id="trigger" href="/shop">Shop</a>
+        <button id="arrow">v</button>
+        <ul id="panel" class="collapsed"><li><a href="/a">Alpha</a></li></ul>
+      </div></main>`,
+    ],
+    [
+      'three triggers',
+      `<nav><ul><li id="wrapper"><a id="trigger" href="/shop">Shop</a>
+        <button>v</button><button>w</button>
+        <ul id="panel" class="collapsed"><li><a href="/a">Alpha</a></li></ul>
+      </li></ul></nav>`,
+    ],
+  ] as const)('does not infer a menu from %s (D132)', (_, body) => {
+    const { document, window } = parseHTML(`<html><body>${body}</body></html>`);
+    installPaintedTabFixture(document, window as unknown as Window);
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(
+      port,
+      document,
+      window,
+      'isolated-html',
+      undefined,
+      structuralMenuStyle((element) =>
+        element.classList.contains('collapsed') ? 'display' : undefined),
+    );
+    port.emit(createSemanticSourceStart(
+      'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+    ));
+    expect(port.messages[0]!.proofs.some((proof) =>
+      proof.kind === 'structural-menu')).toBe(false);
+    expect(port.messages[0]!.records.map((record) => record.text))
+      .not.toContain('Alpha');
+    session.dispose();
+  });
+
   it('reports a hover menu open while the source page shows it (D82)', () => {
     // A CSS :hover menu changes no DOM on the page; only the painted state of
     // its panel tells the replica to show it.
@@ -1640,6 +1756,70 @@ describe('semantic source session', () => {
       relationId: first?.kind === 'structural-menu' ? first.relationId : '',
       expanded: true,
     }));
+    session.dispose();
+  });
+
+  it('reads a menu again when its fade-out ends (D132)', () => {
+    // The page closes a menu that fades out: when that change is read the
+    // panel is still painted, and nothing in the DOM changes once the
+    // transition is over. The mirror kept the menu open.
+    const { document, window } = parseHTML(`<html><body><main>
+      <div id="wrapper"><button id="trigger">Row actions</button>
+        <ul id="panel"><li><a href="/a">Alpha</a></li></ul></div>
+      </main></body></html>`);
+    installPaintedTabFixture(document, window as unknown as Window);
+    const panel = document.querySelector('#panel')!;
+    let painted = false;
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(
+      port,
+      document,
+      window,
+      'isolated-html',
+      undefined,
+      structuralMenuStyle((element) =>
+        element === panel && !painted ? 'visibility' : undefined),
+    );
+    const acknowledge = (): void => {
+      const last = port.messages.at(-1)!;
+      port.emit(createSemanticSourceAck(
+        identity, last.policyFingerprint, last.sequence,
+      ));
+    };
+    const expanded = (): boolean | undefined => {
+      const proof = port.messages.at(-1)!.proofs.find((candidate) =>
+        candidate.kind === 'structural-menu');
+      return proof?.kind === 'structural-menu' ? proof.expanded : undefined;
+    };
+    port.emit(createSemanticSourceStart(
+      'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+    ));
+    expect(expanded()).toBe(false);
+
+    painted = true;
+    acknowledge();
+    session.refresh();
+    expect(expanded()).toBe(true);
+
+    // The class that closes it is gone; the panel is still fading.
+    acknowledge();
+    session.refresh();
+    expect(port.messages).toHaveLength(2);
+    painted = false;
+    panel.dispatchEvent(new (window as unknown as Window & typeof globalThis)
+      .Event('transitionend', { bubbles: true }));
+    expect(port.messages).toHaveLength(3);
+    expect(expanded()).toBe(false);
+
+    // A transition that ends elsewhere on the page reads nothing.
+    acknowledge();
+    document.querySelector('main')!.dispatchEvent(
+      new (window as unknown as Window & typeof globalThis)
+        .Event('transitionend', { bubbles: true }),
+    );
+    expect(port.messages).toHaveLength(3);
     session.dispose();
   });
 
@@ -1839,13 +2019,183 @@ describe('semantic source session', () => {
     session.dispose();
   });
 
-  it('omits only a structural menu whose required panel text exceeds record capacity', () => {
-    const editable = Array.from(
-      { length: MAX_SEMANTIC_SOURCE_RECORDS },
-      (_, index) => `<div contenteditable="true">Editable ${index}</div>`,
-    ).join('');
+  it('sends text without a letter or a digit as the page has it (D132)', () => {
+    // It was dropped here to keep it from the translator, and the label went
+    // with it: an option reading `$` was a blank row. The receiver keeps it
+    // from the translator now.
+    const { document, window } = parseHTML(
+      '<html><body><input id="amount" type="text" placeholder="★★★">' +
+      '<input id="go" type="submit"><input id="blank" type="text"></body></html>',
+    );
+    document.querySelector<HTMLInputElement>('#amount')!.value = '$';
+    document.querySelector<HTMLInputElement>('#go')!.value = '>>';
+    document.querySelector<HTMLInputElement>('#blank')!.value = '   ';
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(port, document, window);
+    port.emit(createSemanticSourceStart(
+      'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+    ));
+    expect(port.messages[0]!.records.map(({ presentation, text }) =>
+      [presentation, text])).toEqual([
+      ['value', '$'], ['placeholder', '★★★'], ['label', '>>'],
+    ]);
+    session.dispose();
+  });
+
+  it('states the page\'s own aria-expanded and its open popovers, apart from its menus (D132)', () => {
+    // Page CSS such as `button[aria-expanded="true"] + ul` shows a dropdown,
+    // and the Popover API opens one without changing any attribute. Neither
+    // was in the mirror.
     const { document, window } = parseHTML(`<html><body>
-      <button id="stable"></button>${editable}<nav><div id="wrapper">
+      <section><button id="toggle" aria-expanded="true">More</button>
+        <div>More text</div><p>Third child</p></section>
+      <div id="odd" aria-expanded="mixed">Odd</div>
+      <div id="pop" popover="auto">Popover text</div>
+      <div id="shut" popover="auto">Closed popover</div>
+      <nav><div id="wrapper">
+        <button id="trigger" aria-expanded="false">Resources</button><div id="panel">
+          <a href="/school">Startup School</a></div></div></nav>
+      </body></html>`);
+    installPaintedTabFixture(document, window as unknown as Window);
+    const panel = document.querySelector('#panel')!;
+    const pop = document.querySelector('#pop')!;
+    let popoverOpen = true;
+    const matches = pop.matches.bind(pop);
+    Object.defineProperty(pop, 'matches', {
+      value: (selector: string) =>
+        selector === ':popover-open' ? popoverOpen : matches(selector),
+    });
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(
+      port,
+      document,
+      window,
+      'isolated-html',
+      undefined,
+      structuralMenuStyle((element) => element === panel ? 'display' : undefined),
+    );
+    port.emit(createSemanticSourceStart(
+      'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+    ));
+    const first = port.messages[0]!;
+    // The menu's trigger carries its open state in the menu's own proof.
+    expect(first.proofs.filter((proof) =>
+      proof.kind === 'aria-state' && proof.state === 'expanded')).toEqual([
+      expect.objectContaining({
+        nodeId: nodeId(document.querySelector('#toggle')!),
+        gate: 'controlSemantics',
+        value: 'true',
+      }),
+    ]);
+    expect(first.proofs.some((proof) => proof.kind === 'structural-menu'))
+      .toBe(true);
+    expect(first.proofs.filter((proof) => proof.kind === 'popover-open'))
+      .toEqual([expect.objectContaining({
+        nodeId: nodeId(pop),
+        gate: 'controlSemantics',
+      })]);
+
+    // The page closes the popover: only the `toggle` event says so.
+    popoverOpen = false;
+    port.emit(createSemanticSourceAck(
+      identity, first.policyFingerprint, first.sequence,
+    ));
+    // In Chrome the event does not bubble and the capturing listener still
+    // hears it; linkedom delivers to that listener only what bubbles.
+    pop.dispatchEvent(new (window as unknown as Window & typeof globalThis)
+      .Event('toggle', { bubbles: true }));
+    expect(port.messages).toHaveLength(2);
+    expect(port.messages[1]!.proofs.some((proof) =>
+      proof.kind === 'popover-open')).toBe(false);
+    session.dispose();
+  });
+
+  it('lists open popovers in the order the page opened them (D132)', () => {
+    // The later one is drawn over the earlier; only the `toggle` events say
+    // which that is.
+    const { document, window } = parseHTML(`<html><body>
+      <div id="first" popover="manual">First in the document</div>
+      <div id="second" popover="manual">Second in the document</div></body></html>`);
+    const open = new Set<Element>();
+    for (const popover of document.querySelectorAll('[popover]')) {
+      const matches = popover.matches.bind(popover);
+      Object.defineProperty(popover, 'matches', {
+        value: (selector: string) =>
+          selector === ':popover-open' ? open.has(popover) : matches(selector),
+      });
+    }
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(port, document, window);
+    port.emit(createSemanticSourceStart(
+      'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+    ));
+    const toggle = (id: string): void => {
+      const popover = document.querySelector(`#${id}`)!;
+      if (open.has(popover)) open.delete(popover); else open.add(popover);
+      popover.dispatchEvent(new (window as unknown as Window & typeof globalThis)
+        .Event('toggle', { bubbles: true }));
+    };
+    const order = (): number[] => port.messages.at(-1)!.proofs
+      .filter((proof) => proof.kind === 'popover-open')
+      .map((proof) => 'nodeId' in proof ? proof.nodeId : 0);
+    const acknowledge = (): void => {
+      const last = port.messages.at(-1)!;
+      port.emit(createSemanticSourceAck(
+        identity, last.policyFingerprint, last.sequence,
+      ));
+    };
+    const first = nodeId(document.querySelector('#first')!);
+    const second = nodeId(document.querySelector('#second')!);
+
+    // Both open before the page is read again (the first batch is still on
+    // its way): one read finds both, and lists them in the page's order, not
+    // the document's.
+    toggle('second');
+    toggle('first');
+    expect(order()).toEqual([]);
+    acknowledge();
+    expect(order()).toEqual([second, first]);
+    // Closed and opened again, `second` is now the later one.
+    acknowledge();
+    toggle('second');
+    expect(order()).toEqual([first]);
+    acknowledge();
+    toggle('second');
+    expect(order()).toEqual([first, second]);
+    session.dispose();
+  });
+
+  it('reads no expanded state or popover in Page-only scope (D132)', () => {
+    const { document, window } = parseHTML(`<html><body>
+      <button aria-expanded="true">More</button>
+      <div id="pop" popover="auto">Popover text</div></body></html>`);
+    const pop = document.querySelector('#pop')!;
+    Object.defineProperty(pop, 'matches', { value: () => true });
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(port, document, window);
+    port.emit(createSemanticSourceStart(
+      'isolated-html', identity, PAGE_ONLY_REPLICA_READ_SCOPE,
+    ));
+    expect(port.messages.flatMap((message) => message.proofs)).toEqual([]);
+    session.dispose();
+  });
+
+  it('reads menu text before control labels, and editable text last (D132)', () => {
+    // Menu text was read last. On a page whose options and named controls
+    // filled the batch no menu had text, and a menu without text is not
+    // offered.
+    const { document, window } = parseHTML(`<html><body>
+      <div contenteditable="true">Editable note</div>
+      <button id="stable" title="Stable control"></button>
+      <nav><div id="wrapper">
         <button id="trigger">Resources</button><div id="panel">
           <a href="/school">Startup School</a></div></div></nav>
       </body></html>`);
@@ -1867,15 +2217,78 @@ describe('semantic source session', () => {
       'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
     ));
     const batch = port.messages[0]!;
-    expect(batch.records).toHaveLength(MAX_SEMANTIC_SOURCE_RECORDS);
-    expect(batch.records.map((record) => record.text)).not.toContain('Startup School');
+    expect(batch.records.map((record) => record.text)).toEqual([
+      'Startup School', 'Stable control', 'Editable note',
+    ]);
     expect(batch.proofs.some((proof) => proof.kind === 'structural-menu'))
-      .toBe(false);
+      .toBe(true);
     expect(batch.proofs).toContainEqual(expect.objectContaining({
       kind: 'control-state',
       nodeId: nodeId(document.querySelector('#stable')!),
     }));
     session.dispose();
+  });
+
+  it('holds what the counted bytes of one message allow, not a count (D132)', () => {
+    // 1,024 labels was the limit: the dropdowns further down a page with
+    // more were blank.
+    expect(MAX_SEMANTIC_SOURCE_RECORDS).toBe(65_536);
+    const options = Array.from(
+      { length: 3_000 },
+      (_, index) => `<option${index === 7 ? ' disabled' : ''}>Choice ${index}</option>`,
+    ).join('');
+    const { document, window } = parseHTML(
+      `<html><body><select id="many">${options}</select></body></html>`,
+    );
+    const style = structuralMenuStyle(() => undefined);
+    // Option labels are read through the page's own window and need a box.
+    const globalNode = Object.getOwnPropertyDescriptor(globalThis, 'Node');
+    Object.defineProperty(globalThis, 'Node', {
+      configurable: true,
+      writable: true,
+      value: (window as unknown as { Node: typeof Node }).Node,
+    });
+    Object.defineProperty(window, 'getComputedStyle', {
+      configurable: true,
+      value: style,
+    });
+    const select = document.querySelector('#many')!;
+    Object.defineProperty(select, 'getBoundingClientRect', {
+      configurable: true,
+      value: () => ({ left: 0, top: 0, right: 120, bottom: 24, width: 120, height: 24 }),
+    });
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(
+      port, document, window, 'isolated-html', undefined, style,
+    );
+    try {
+      port.emit(createSemanticSourceStart(
+        'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+      ));
+      const batch = port.messages[0]!;
+      const labels = batch.records
+        .filter((record) => record.tagName === 'option')
+        .map((record) => record.text);
+      expect(labels).toHaveLength(3_000);
+      expect(labels.at(-1)).toBe('Choice 2999');
+      // An enabled option needs no proof of it, and a page can hold
+      // thousands: only the dropdown and its one disabled option are stated.
+      expect(batch.proofs.filter((proof) => proof.kind === 'control-state'))
+        .toEqual([
+          expect.objectContaining({ nodeId: nodeId(select), disabled: false }),
+          expect.objectContaining({
+            nodeId: nodeId(select.querySelectorAll('option')[7]!),
+            disabled: true,
+          }),
+        ]);
+    } finally {
+      session.dispose();
+      delete (window as { getComputedStyle?: unknown }).getComputedStyle;
+      if (globalNode) Object.defineProperty(globalThis, 'Node', globalNode);
+      else delete (globalThis as { Node?: unknown }).Node;
+    }
   });
 
   it('emits inline tab state without reading hidden panels and revisions follow A-B-A', () => {

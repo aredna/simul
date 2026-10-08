@@ -27,9 +27,11 @@ import {
 } from './source-identity';
 import { readSourceFlatTreeElementPath } from './source-privacy-policy';
 import {
-  hasStructuralMenuContext,
+  MAX_STRUCTURAL_MENU_TRIGGERS,
   isPlainStructuralMenuTrigger,
   isStructuralMenuPanelElement,
+  structuralMenuOpening,
+  type StructuralMenuOpening,
 } from './structural-menu-shape';
 
 export interface SemanticSourceReceiverEnvironment {
@@ -79,6 +81,11 @@ export type ResolvedSemanticSourceProof =
       readonly target: HTMLElement;
     }
   | {
+      readonly kind: 'popover-open';
+      readonly proof: Extract<SemanticSourceProof, { kind: 'popover-open' }>;
+      readonly target: HTMLElement;
+    }
+  | {
       readonly kind: 'aria-relationship';
       readonly proof: Extract<SemanticSourceProof, {
         kind: 'aria-relationship';
@@ -107,7 +114,11 @@ export type ResolvedSemanticSourceProof =
       readonly proof: Extract<SemanticSourceProof, { kind: 'structural-menu' }>;
       readonly container: HTMLElement;
       readonly trigger: HTMLElement;
+      /** A second trigger in the container: an arrow button beside a link. */
+      readonly otherTriggers: readonly HTMLElement[];
       readonly panel: HTMLElement;
+      /** On hover in navigation; on a click only for a button menu elsewhere. */
+      readonly opening: StructuralMenuOpening;
     };
 
 interface SemanticBinding {
@@ -143,6 +154,12 @@ interface SemanticProofHistory {
 }
 
 const SEMANTIC_SELECTION_TEXT = new WeakMap<Element, string>();
+/**
+ * Every admitted text is shown as the page has it; only text with a letter
+ * or a digit is offered for translation (D132). `$`, `★★★` or `--` as an
+ * option's label used to be dropped on the page side, and the row was blank.
+ */
+const TRANSLATABLE_SOURCE_TEXT = /[\p{L}\p{N}]/u;
 
 /**
  * Returns renderer-owned semantic selection text without encoding source text
@@ -164,13 +181,28 @@ export class SemanticSourceReceiver {
   readonly #classifier = new StickySourceSecretClassifier();
   #lastSequence = 0;
   #proofPresentationHealthy = true;
+  /**
+   * The last batch taken, and the nodes it names that the replica did not
+   * have (D132). A batch is the page's whole state and is sent once; see
+   * `placeArrivedNodes`.
+   */
+  #lastBatch: SemanticSourceBatch | undefined;
+  #missingNodeIds = new Set<number>();
+  /** Where one pass notes the nodes it cannot find. */
+  #missingNodeNotes: Set<number> | undefined;
+  /**
+   * For one pass: whether an element or anything above it is secret. The
+   * options of one dropdown share every ancestor, so the walk up is made
+   * once for all of them.
+   */
+  #passSecretAncestors: Map<Element, boolean> | undefined;
 
   constructor(private readonly environment: SemanticSourceReceiverEnvironment) {}
 
   records(): readonly ReplicaSourceTextRecord[] {
     const records: ReplicaSourceTextRecord[] = [];
     for (const entry of this.#entries.values()) {
-      if (entry.binding.translatable) records.push(entry.translationRecord);
+      if (entryIsTranslated(entry)) records.push(entry.translationRecord);
     }
     return Object.freeze(records);
   }
@@ -190,6 +222,60 @@ export class SemanticSourceReceiver {
     ) {
       return undefined;
     }
+    const changes = this.#placeBatch(batch);
+    if (!changes) return undefined;
+    this.#lastSequence = batch.sequence;
+    this.#lastBatch = batch;
+    return changes;
+  }
+
+  /**
+   * Called after a change to the page's structure has been applied. The
+   * page's structure and its labels travel separately, and a label or state
+   * can arrive before its element does: it is dropped (D96), the page counts
+   * it as delivered and does not send it again while its own view is
+   * unchanged. So when a node the last batch named and the replica lacked is
+   * there now, that batch is gone through again (D132; a dropdown the page
+   * added while the mirror was open stayed blank). Undefined when there was
+   * nothing to place.
+   */
+  placeArrivedNodes(): readonly ReplicaSourceTextChange[] | undefined {
+    const batch = this.#lastBatch;
+    if (!batch || this.#missingNodeIds.size === 0) return undefined;
+    let arrived = false;
+    for (const nodeId of this.#missingNodeIds) {
+      if (this.#nodeIsPresent(nodeId)) {
+        arrived = true;
+        break;
+      }
+    }
+    if (!arrived) return undefined;
+    const changes = this.#placeBatch(batch);
+    // A pass that could not be committed is not tried again at every change:
+    // the page's next batch starts afresh.
+    if (!changes) this.#missingNodeIds = new Set();
+    return changes;
+  }
+
+  #placeBatch(
+    batch: SemanticSourceBatch,
+  ): readonly ReplicaSourceTextChange[] | undefined {
+    const missing = new Set<number>();
+    this.#missingNodeNotes = missing;
+    this.#passSecretAncestors = new Map();
+    try {
+      const changes = this.#placeBatchRecordsAndProofs(batch);
+      if (changes) this.#missingNodeIds = missing;
+      return changes;
+    } finally {
+      this.#missingNodeNotes = undefined;
+      this.#passSecretAncestors = undefined;
+    }
+  }
+
+  #placeBatchRecordsAndProofs(
+    batch: SemanticSourceBatch,
+  ): readonly ReplicaSourceTextChange[] | undefined {
     const plans = new Map<number, {
       readonly sourceRecord: SemanticSourceRecord;
       readonly translationRecord: ReplicaSourceTextRecord;
@@ -279,7 +365,7 @@ export class SemanticSourceReceiver {
     for (const [projectionNodeId, current] of this.#entries) {
       if (plans.has(projectionNodeId)) continue;
       removals.push(Object.freeze([projectionNodeId, current] as const));
-      if (!current.binding.translatable) continue;
+      if (!entryIsTranslated(current)) continue;
       changes.push(Object.freeze({
         kind: 'remove',
         document: this.environment.document,
@@ -296,8 +382,17 @@ export class SemanticSourceReceiver {
         affectedBindings.add(current.binding);
       }
       affectedBindings.add(plan.binding);
-      if (plan.binding.translatable) {
+      if (entryIsTranslated(plan)) {
         changes.push(Object.freeze({ kind: 'upsert', record: plan.translationRecord }));
+      } else if (current && entryIsTranslated(current)) {
+        // Its new text is not for the translator: the old text's translation
+        // goes.
+        changes.push(Object.freeze({
+          kind: 'remove',
+          document: this.environment.document,
+          nodeId: projectionNodeId,
+          revision: current.translationRecord.revision + 1,
+        }));
       }
     }
 
@@ -388,7 +483,6 @@ export class SemanticSourceReceiver {
         // Reporting is diagnostic only.
       }
     }
-    this.#lastSequence = batch.sequence;
     this.#proofPresentationHealthy = true;
     return Object.freeze(changes);
   }
@@ -410,13 +504,27 @@ export class SemanticSourceReceiver {
   refreshBindings(
     refreshProofPresentation = true,
   ): readonly ReplicaSourceTextChange[] {
+    // A node that has gone may come back, as one that never came may arrive.
+    this.#missingNodeNotes = this.#missingNodeIds;
+    this.#passSecretAncestors = new Map();
+    try {
+      return this.#refreshBindings(refreshProofPresentation);
+    } finally {
+      this.#missingNodeNotes = undefined;
+      this.#passSecretAncestors = undefined;
+    }
+  }
+
+  #refreshBindings(
+    refreshProofPresentation: boolean,
+  ): readonly ReplicaSourceTextChange[] {
     const changes: ReplicaSourceTextChange[] = [];
     for (const [projectionNodeId, entry] of this.#entries) {
       if (this.#entryIsStillSafe(entry) && entry.binding.reapply()) continue;
       const rebound = this.#rebind(entry);
       if (rebound) {
         this.#entries.set(projectionNodeId, rebound);
-        if (rebound.binding.translatable) {
+        if (entryIsTranslated(rebound)) {
           changes.push(Object.freeze({
             kind: 'upsert',
             record: rebound.translationRecord,
@@ -426,7 +534,10 @@ export class SemanticSourceReceiver {
       }
       entry.binding.restore();
       this.#entries.delete(projectionNodeId);
-      if (!entry.binding.translatable) continue;
+      if (!entry.binding.target.isConnected) {
+        this.#missingNodeIds.add(entry.sourceRecord.nodeId);
+      }
+      if (!entryIsTranslated(entry)) continue;
       changes.push(Object.freeze({
         kind: 'remove',
         document: this.environment.document,
@@ -443,12 +554,14 @@ export class SemanticSourceReceiver {
       }
     }
     // A menu whose panel text is gone is no longer presented; the others are.
-    const currentRecords = [...this.#entries.values()]
-      .map(({ sourceRecord }) => sourceRecord);
+    const menuTextHolders = this.#elementsHoldingMenuText(
+      [...this.#entries.values()].map(({ sourceRecord }) => sourceRecord),
+    );
     for (const [proofId, resolved] of retainedProofs) {
-      if (!this.#structuralMenusHaveAdmittedText([resolved], currentRecords)) {
-        retainedProofs.delete(proofId);
-      }
+      if (
+        resolved.kind === 'structural-menu' &&
+        !menuTextHolders?.has(resolved.panel)
+      ) retainedProofs.delete(proofId);
     }
     let presented = true;
     try {
@@ -517,7 +630,7 @@ export class SemanticSourceReceiver {
     const changes: ReplicaSourceTextChange[] = [];
     for (const [projectionNodeId, entry] of this.#entries) {
       entry.binding.restore();
-      if (!entry.binding.translatable) continue;
+      if (!entryIsTranslated(entry)) continue;
       changes.push(Object.freeze({
         kind: 'remove',
         document: this.environment.document,
@@ -526,6 +639,8 @@ export class SemanticSourceReceiver {
       }));
     }
     this.#entries.clear();
+    this.#lastBatch = undefined;
+    this.#missingNodeIds.clear();
     return Object.freeze(changes);
   }
 
@@ -623,10 +738,11 @@ export class SemanticSourceReceiver {
         ]
       : undefined);
     // A menu is presented only with admitted panel text.
+    const menuTextHolders = this.#elementsHoldingMenuText(records);
     for (const [proofId, value] of [...resolved]) {
       if (
         value.kind === 'structural-menu' &&
-        !this.#structuralMenusHaveAdmittedText([value], records)
+        !menuTextHolders?.has(value.panel)
       ) drop(proofId);
     }
     return { resolved, dropped };
@@ -705,8 +821,23 @@ export class SemanticSourceReceiver {
     }
     if (proof.kind === 'aria-state') {
       const target = this.#resolveElement(proof.nodeId);
+      // `expanded` is what the page shows, as a disabled state is; the others
+      // are what the user chose.
       if (!target || !receiverAriaStateMatches(target, proof.state, proof.value) ||
-        !this.#proofTargetIsSafe(target, true)) return undefined;
+        !this.#proofTargetIsSafe(target, proof.state !== 'expanded')) {
+        return undefined;
+      }
+      return Object.freeze({
+        kind: proof.kind,
+        proof,
+        target: target as HTMLElement,
+      });
+    }
+    if (proof.kind === 'popover-open') {
+      // Only an element the replica holds as a popover can be shown as one.
+      const target = this.#resolveElement(proof.nodeId);
+      if (!target || safeNullableAttribute(target, 'popover') === null ||
+        !this.#proofTargetIsSafe(target, false)) return undefined;
       return Object.freeze({
         kind: proof.kind,
         proof,
@@ -765,26 +896,28 @@ export class SemanticSourceReceiver {
       const container = this.#resolveElement(proof.containerNodeId);
       const trigger = this.#resolveElement(proof.triggerNodeId);
       const panel = this.#resolveElement(proof.panelNodeId);
+      const shape = container && trigger && panel
+        ? receiverStructuralMenuShape(container, trigger, panel, proof.relationId)
+        : undefined;
       if (
-        !container || !trigger || !panel ||
-        !receiverStructuralMenuRelationshipIsSafe(
-          container,
-          trigger,
-          panel,
-          proof.relationId,
-        ) ||
+        !container || !trigger || !panel || !shape ||
         !this.#proofTargetIsSafe(container, false) ||
         !this.#proofTargetIsSafe(trigger, false) ||
+        !shape.otherTriggers.every((other) =>
+          this.#proofTargetIsSafe(other, false)) ||
         !this.#proofTargetIsSafe(panel, false) ||
+        // A menu's panel may hold a field; never a credential (D132).
         !receiverDisclosureSubtreeIsSafe(panel, (element) =>
-          this.#proofTargetIsSafe(element, false))
+          this.#proofTargetIsSafe(element, false), true)
       ) return undefined;
       return Object.freeze({
         kind: proof.kind,
         proof,
         container: container as HTMLElement,
         trigger: trigger as HTMLElement,
+        otherTriggers: shape.otherTriggers,
         panel: panel as HTMLElement,
+        opening: shape.opening,
       });
     }
     const trigger = this.#resolveElement(proof.triggerNodeId);
@@ -828,36 +961,41 @@ export class SemanticSourceReceiver {
     return Object.freeze({ ...entry, binding });
   }
 
-  #structuralMenusHaveAdmittedText(
-    proofs: Iterable<ResolvedSemanticSourceProof>,
+  /**
+   * Every element with admitted menu text somewhere inside it, by one walk up
+   * from each text record. A menu is asked for with one lookup: going
+   * through the records again for each menu cost menus times records, which
+   * the old limits hid and a table with a menu on every row did not (D132).
+   * Undefined when a node cannot be read. A walk stops at a shadow root, as
+   * `contains` does.
+   */
+  #elementsHoldingMenuText(
     records: readonly SemanticSourceRecord[],
-  ): boolean {
-    for (const resolved of proofs) {
-      if (resolved.kind !== 'structural-menu') continue;
-      let found = false;
-      for (const record of records) {
-        if (
-          record.gate !== 'disclosureContent' ||
-          record.presentation !== 'text' ||
-          record.text.trim() === ''
-        ) continue;
-        let node: Node | null | undefined;
-        try {
-          node = this.environment.resolveNode(record.nodeId);
-        } catch {
-          return false;
-        }
-        if (
-          node?.nodeType === 3 && node.ownerDocument === resolved.panel.ownerDocument &&
-          resolved.panel.contains(node)
-        ) {
-          found = true;
-          break;
-        }
+  ): ReadonlySet<Node> | undefined {
+    const holders = new Set<Node>();
+    for (const record of records) {
+      if (
+        record.gate !== 'disclosureContent' ||
+        record.presentation !== 'text' ||
+        record.text.trim() === ''
+      ) continue;
+      let node: Node | null | undefined;
+      try {
+        node = this.environment.resolveNode(record.nodeId);
+      } catch {
+        return undefined;
       }
-      if (!found) return false;
+      if (
+        node?.nodeType !== 3 ||
+        node.ownerDocument !== this.environment.replicaDocument
+      ) continue;
+      for (
+        let current: Node | null = node.parentNode;
+        current && !holders.has(current);
+        current = current.parentNode
+      ) holders.add(current);
     }
-    return true;
+    return holders;
   }
 
   #presentCurrentProofs(): boolean {
@@ -882,10 +1020,23 @@ export class SemanticSourceReceiver {
     } catch {
       return undefined;
     }
+    if (!target?.isConnected) this.#missingNodeNotes?.add(nodeId);
     return target?.nodeType === 1 && target.isConnected &&
         target.ownerDocument === this.environment.replicaDocument
       ? target as Element
       : undefined;
+  }
+
+  #nodeIsPresent(nodeId: number): boolean {
+    try {
+      const target = this.environment.resolveNode(nodeId);
+      return Boolean(
+        target?.isConnected &&
+        target.ownerDocument === this.environment.replicaDocument,
+      );
+    } catch {
+      return false;
+    }
   }
 
   #proofTargetIsSafe(element: Element, valueBearing: boolean): boolean {
@@ -904,6 +1055,7 @@ export class SemanticSourceReceiver {
     } catch {
       return undefined;
     }
+    if (!target?.isConnected) this.#missingNodeNotes?.add(record.nodeId);
     if (
       !target || target.ownerDocument !== this.environment.replicaDocument ||
       !target.isConnected
@@ -957,12 +1109,26 @@ export class SemanticSourceReceiver {
     if (!path) {
       return replicaClassificationFacts(element, presentation, true);
     }
-    for (const ancestor of path.slice(1)) {
+    const remembered = this.#passSecretAncestors;
+    const walked: Element[] = [];
+    for (let index = 1; index < path.length; index += 1) {
+      const ancestor = path[index]!;
+      const known = remembered?.get(ancestor);
+      if (known !== undefined) {
+        secretAncestor = known;
+        break;
+      }
+      walked.push(ancestor);
       const ancestorFacts = replicaClassificationFacts(ancestor, 'label');
       if (this.#classifier.classify(ancestor, ancestorFacts) === 'secret') {
         secretAncestor = true;
         break;
       }
+    }
+    // Each ancestor walked past is not secret itself, so it shares the answer
+    // found above it.
+    if (remembered) {
+      for (const ancestor of walked) remembered.set(ancestor, secretAncestor);
     }
     return replicaClassificationFacts(element, presentation, secretAncestor);
   }
@@ -1000,6 +1166,13 @@ export class SemanticSourceReceiver {
       presentation === 'selection',
     );
   }
+}
+
+function entryIsTranslated(
+  entry: Pick<SemanticEntry, 'binding' | 'sourceRecord'>,
+): boolean {
+  return entry.binding.translatable &&
+    TRANSLATABLE_SOURCE_TEXT.test(entry.sourceRecord.text);
 }
 
 function sameResolvedProofSet(
@@ -1042,6 +1215,9 @@ function sameResolvedProof(
   if (left.kind === 'aria-state') {
     return right.kind === 'aria-state' && left.target === right.target;
   }
+  if (left.kind === 'popover-open') {
+    return right.kind === 'popover-open' && left.target === right.target;
+  }
   if (left.kind === 'aria-relationship') {
     return right.kind === 'aria-relationship' && left.target === right.target &&
       sameNodeList(left.references, right.references);
@@ -1053,7 +1229,8 @@ function sameResolvedProof(
   if (left.kind === 'structural-menu') {
     return right.kind === 'structural-menu' &&
       left.container === right.container && left.trigger === right.trigger &&
-      left.panel === right.panel;
+      left.panel === right.panel && left.opening === right.opening &&
+      sameNodeList(left.otherTriggers, right.otherTriggers);
   }
   return right.kind === 'disclosure-state' && left.trigger === right.trigger &&
     left.panel === right.panel;
@@ -1221,6 +1398,9 @@ function receiverAriaStateMatches(
   value: string,
 ): boolean {
   if (!isSemanticAriaStateValue(state, value)) return false;
+  // Any element may say whether what it controls is shown: page CSS tests
+  // the attribute wherever the page wrote it.
+  if (state === 'expanded') return true;
   const role = safeAttribute(element, 'role').trim().toLowerCase();
   const tagName = element.localName.toLowerCase();
   if (state === 'selected') return RECEIVER_ARIA_SELECTED_ROLES.has(role);
@@ -1251,12 +1431,20 @@ function receiverDisclosureTriggerIsSafe(element: Element): boolean {
   return type === 'button' || type === 'reset' || type === 'submit';
 }
 
-function receiverStructuralMenuRelationshipIsSafe(
+/**
+ * The shape the page side inferred, read again from the replica: a container
+ * holding the named trigger, the panel, and at most one more trigger (D132).
+ * Undefined when the replica does not show that shape.
+ */
+function receiverStructuralMenuShape(
   container: Element,
   trigger: Element,
   panel: Element,
   relationId: string,
-): boolean {
+): {
+  readonly otherTriggers: readonly HTMLElement[];
+  readonly opening: StructuralMenuOpening;
+} | undefined {
   if (
     container === trigger || container === panel || trigger === panel ||
     container.ownerDocument !== trigger.ownerDocument ||
@@ -1266,23 +1454,36 @@ function receiverStructuralMenuRelationshipIsSafe(
     trigger.parentElement !== container || panel.parentElement !== container ||
     !isStructuralMenuPanelElement(panel) ||
     safeNullableAttribute(container, 'hidden') !== null ||
-    safeNullableAttribute(trigger, 'hidden') !== null ||
-    safeAttribute(container, 'aria-hidden').trim().toLowerCase() === 'true' ||
-    safeAttribute(trigger, 'aria-hidden').trim().toLowerCase() === 'true' ||
-    !receiverStructuralTriggerIsUnclaimed(trigger, relationId) ||
-    (!receiverDisclosureTriggerIsSafe(trigger) &&
-      !isPlainStructuralMenuTrigger(trigger))
-  ) return false;
+    safeAttribute(container, 'aria-hidden').trim().toLowerCase() === 'true'
+  ) return undefined;
   let children: Element[];
   try {
     children = [...container.children];
   } catch {
-    return false;
+    return undefined;
   }
   if (
-    children.length !== 2 || !children.includes(trigger) || !children.includes(panel)
-  ) return false;
-  return hasStructuralMenuContext(container);
+    children.length < 2 || children.length > MAX_STRUCTURAL_MENU_TRIGGERS + 1 ||
+    !children.includes(trigger) || !children.includes(panel)
+  ) return undefined;
+  const triggers = children.filter((child) => child !== panel);
+  for (const candidate of triggers) {
+    if (
+      safeNullableAttribute(candidate, 'hidden') !== null ||
+      safeAttribute(candidate, 'aria-hidden').trim().toLowerCase() === 'true' ||
+      !receiverStructuralTriggerIsUnclaimed(candidate, relationId) ||
+      (!receiverDisclosureTriggerIsSafe(candidate) &&
+        !isPlainStructuralMenuTrigger(candidate))
+    ) return undefined;
+  }
+  const opening = structuralMenuOpening(container, triggers, panel);
+  if (!opening) return undefined;
+  return Object.freeze({
+    otherTriggers: Object.freeze(
+      triggers.filter((child) => child !== trigger) as HTMLElement[],
+    ),
+    opening,
+  });
 }
 
 /**
@@ -1298,6 +1499,13 @@ function receiverStructuralTriggerIsUnclaimed(
   const expanded = safeNullableAttribute(trigger, 'aria-expanded');
   const controls = safeNullableAttribute(trigger, 'aria-controls');
   if (expanded === null && controls === null) return true;
+  // The page's own `aria-expanded`, presented as a typed state before this
+  // element was a menu's trigger (D132); the presenter takes it back before
+  // it presents the menu.
+  if (
+    controls === null &&
+    safeNullableAttribute(trigger, 'data-simul-source-aria-expanded-state') === 'v1'
+  ) return true;
   return safeNullableAttribute(
     trigger,
     'data-simul-source-disclosure-state',
@@ -1359,6 +1567,8 @@ function receiverDisclosureRoleMatches(
 function receiverDisclosureSubtreeIsSafe(
   panel: Element,
   classify: (element: Element) => boolean,
+  /** A menu's panel may hold a field that `classify` passes (D132). */
+  allowFields = false,
 ): boolean {
   const pending: Node[] = [panel];
   let visited = 0;
@@ -1377,10 +1587,13 @@ function receiverDisclosureSubtreeIsSafe(
     const role = safeAttribute(element, 'role').trim().toLowerCase();
     const contentEditable = safeAttribute(element, 'contenteditable')
       .trim().toLowerCase();
+    if (!classify(element)) return false;
     if (
-      !classify(element) || RECEIVER_DISCLOSURE_STATE_TAGS.has(tagName) ||
-      RECEIVER_DISCLOSURE_STATE_ROLES.has(role) ||
-      (contentEditable !== '' && contentEditable !== 'false')
+      !allowFields && (
+        RECEIVER_DISCLOSURE_STATE_TAGS.has(tagName) ||
+        RECEIVER_DISCLOSURE_STATE_ROLES.has(role) ||
+        (contentEditable !== '' && contentEditable !== 'false')
+      )
     ) return false;
     pending.push(...element.childNodes);
     try {

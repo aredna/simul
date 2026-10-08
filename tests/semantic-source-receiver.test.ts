@@ -1280,7 +1280,377 @@ describe('semantic source receiver', () => {
     expect(panel.hasAttribute('id')).toBe(false);
     expect(trigger.hasAttribute('aria-controls')).toBe(false);
   });
+
+  it('places a label that came before its element once the element arrives (D132)', () => {
+    // The page added a dropdown while the mirror was open: its labels travel
+    // a moment after the change, its structure on the next animation frame.
+    const { document } = parseHTML(
+      '<html><body><select id="late"></select></body></html>',
+    );
+    const select = document.querySelector<HTMLSelectElement>('#late')!;
+    const nodes = new Map<number, Node>();
+    const drops: Array<readonly [number, number]> = [];
+    const receiver = new SemanticSourceReceiver({
+      document: identity,
+      replicaDocument: document as unknown as Document,
+      resolveNode: (nodeId) => nodes.get(nodeId),
+      reportDroppedItems: (records, proofs) => drops.push([records, proofs]),
+    });
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 1,
+      [optionLabelRecord(31, 'Tokyo'), optionLabelRecord(32, 'Osaka')],
+    ))).toEqual([]);
+    expect(drops).toEqual([[2, 0]]);
+    // Nothing has arrived: nothing is gone through again.
+    expect(receiver.placeArrivedNodes()).toBeUndefined();
+    expect(drops).toHaveLength(1);
+
+    for (const nodeId of [31, 32]) {
+      const option = document.createElement('option');
+      select.append(option);
+      nodes.set(nodeId, option);
+    }
+    expect(receiver.placeArrivedNodes()).toEqual([
+      expect.objectContaining({ kind: 'upsert' }),
+      expect.objectContaining({ kind: 'upsert' }),
+    ]);
+    expect([...select.options].map((option) => option.getAttribute('label')))
+      .toEqual(['Tokyo', 'Osaka']);
+    expect(receiver.records().map(({ source }) => source))
+      .toEqual(['Tokyo', 'Osaka']);
+    // Placed once; and the stream goes on where it was.
+    expect(receiver.placeArrivedNodes()).toBeUndefined();
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 2,
+      [optionLabelRecord(31, 'Tokyo'), optionLabelRecord(32, 'Osaka')],
+    ))).toEqual([]);
+    expect(select.options[1]!.getAttribute('label')).toBe('Osaka');
+  });
+
+  it('places part of a batch when only some of its elements have arrived (D132)', () => {
+    const { document } = parseHTML(
+      '<html><body><select id="late"><option></option></select></body></html>',
+    );
+    const select = document.querySelector<HTMLSelectElement>('#late')!;
+    const nodes = new Map<number, Node>([[31, select.options[0]!]]);
+    const receiver = new SemanticSourceReceiver({
+      document: identity,
+      replicaDocument: document as unknown as Document,
+      resolveNode: (nodeId) => nodes.get(nodeId),
+    });
+    const batch = createSemanticSourceBatch(
+      identity, 'read-v1-111111', 1,
+      [
+        optionLabelRecord(31, 'Tokyo'), optionLabelRecord(32, 'Osaka'),
+        optionLabelRecord(33, 'Kyoto'),
+      ],
+    );
+    expect(receiver.applyBatch(batch)).toHaveLength(1);
+    const second = document.createElement('option');
+    select.append(second);
+    nodes.set(32, second);
+    // Only the label that could not be placed before is new.
+    expect(receiver.placeArrivedNodes()).toEqual([
+      expect.objectContaining({
+        kind: 'upsert',
+        record: expect.objectContaining({ source: 'Osaka' }),
+      }),
+    ]);
+    const third = document.createElement('option');
+    select.append(third);
+    nodes.set(33, third);
+    expect(receiver.placeArrivedNodes()).toHaveLength(1);
+    expect([...select.options].map((option) => option.getAttribute('label')))
+      .toEqual(['Tokyo', 'Osaka', 'Kyoto']);
+  });
+
+  it('presents a menu whose proof came before its elements (D132)', () => {
+    const { document } = parseHTML(`<html><body><nav><ul>
+      <li id="wrapper"><button id="trigger">Deposits</button>
+      <div id="panel"><a id="item" href="/yen">***</a></div></li>
+      </ul></nav><iframe id="frame"></iframe></body></html>`);
+    const { receiver, nodes, trigger } = hoverMenuReplica(document, [16, 17, 18, 19]);
+    const arrived = new Map(nodes);
+    nodes.clear();
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 1,
+      [menuTextRecord(19, 'Yen deposits')],
+      [structuralMenuProof()],
+    ))).toEqual([]);
+    expect(trigger.hasAttribute('data-simul-replica-disclosure-trigger')).toBe(false);
+
+    for (const [nodeId, node] of arrived) nodes.set(nodeId, node);
+    expect(receiver.placeArrivedNodes()).toHaveLength(1);
+    expect(trigger.getAttribute('data-simul-replica-disclosure-trigger')).toBe('v1');
+    expect(document.querySelector('#item')!.textContent).toBe('Yen deposits');
+  });
+
+  it('gives a label back to an element that left and came back (D132)', () => {
+    const { document } = parseHTML(
+      '<html><body><select id="pick"><option></option></select></body></html>',
+    );
+    const select = document.querySelector<HTMLSelectElement>('#pick')!;
+    const first = select.options[0]!;
+    const nodes = new Map<number, Node>([[31, first]]);
+    const receiver = new SemanticSourceReceiver({
+      document: identity,
+      replicaDocument: document as unknown as Document,
+      resolveNode: (nodeId) => nodes.get(nodeId),
+    });
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 1, [optionLabelRecord(31, 'Tokyo')],
+    ))).toHaveLength(1);
+    // One patch takes the option out, the next puts a new copy in, and the
+    // page's own view is as it was: it sends nothing more.
+    first.remove();
+    nodes.delete(31);
+    expect(receiver.refreshBindings()).toEqual([
+      expect.objectContaining({ kind: 'remove' }),
+    ]);
+    expect(receiver.records()).toEqual([]);
+    expect(receiver.placeArrivedNodes()).toBeUndefined();
+    const again = document.createElement('option');
+    select.append(again);
+    nodes.set(31, again);
+    expect(receiver.placeArrivedNodes()).toHaveLength(1);
+    expect(again.getAttribute('label')).toBe('Tokyo');
+  });
+
+  it('presents the page\'s expanded state and its open popovers (D132)', () => {
+    const { document } = parseHTML(`<html><body>
+      <button id="toggle">More</button><ul><li>Item</li></ul>
+      <div id="pop" popover="auto">Popover</div><div id="plain">Not one</div>
+      <iframe id="frame"></iframe></body></html>`);
+    const toggle = document.querySelector<HTMLElement>('#toggle')!;
+    const pop = document.querySelector<HTMLElement>('#pop')!;
+    const nodes = new Map<number, Node>([
+      [40, toggle], [41, pop], [42, document.querySelector('#plain')!],
+    ]);
+    const calls: string[] = [];
+    Object.defineProperties(pop, {
+      showPopover: { value: () => calls.push(`show:${pop.getAttribute('popover')}`) },
+      hidePopover: { value: () => calls.push('hide') },
+    });
+    const presenter = new SemanticProofPresenter({
+      document: document as unknown as Document,
+      iframe: document.querySelector('#frame') as unknown as HTMLIFrameElement,
+    });
+    const drops: Array<readonly [number, number]> = [];
+    const receiver = new SemanticSourceReceiver({
+      document: identity,
+      replicaDocument: document as unknown as Document,
+      resolveNode: (nodeId) => nodes.get(nodeId),
+      applyProofs: (proofs) => presenter.apply(proofs),
+      reportDroppedItems: (records, proofs) => drops.push([records, proofs]),
+    });
+    const expanded = (value: string, revision: number): SemanticSourceProof => ({
+      kind: 'aria-state', bridge: 'isolated-html', nodeId: 40, revision,
+      gate: 'controlSemantics', state: 'expanded', value, classifierVersion: 1,
+    });
+    const popoverOpen = (nodeId: number): SemanticSourceProof => ({
+      kind: 'popover-open', bridge: 'isolated-html', nodeId, revision: 1,
+      gate: 'controlSemantics', classifierVersion: 1,
+    });
+
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 1, [],
+      [expanded('true', 1), popoverOpen(41), popoverOpen(42)],
+    ))).toEqual([]);
+    // What the page's stylesheet tests, marked as the page's own.
+    expect(toggle.getAttribute('aria-expanded')).toBe('true');
+    expect(toggle.getAttribute('data-simul-source-aria-expanded-state')).toBe('v1');
+    // Shown as `manual`: a click in the mirror cannot dismiss it.
+    expect(calls).toEqual(['show:manual']);
+    expect(pop.getAttribute('data-simul-source-popover-open')).toBe('v1');
+    // An element the replica does not hold as a popover is not shown as one.
+    expect(drops).toEqual([[0, 1]]);
+
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 2, [], [expanded('false', 2)],
+    ))).toEqual([]);
+    expect(toggle.getAttribute('aria-expanded')).toBe('false');
+    expect(calls.at(-1)).toBe('hide');
+    expect(pop.getAttribute('popover')).toBe('auto');
+    expect(pop.hasAttribute('data-simul-source-popover-open')).toBe(false);
+
+    receiver.clear();
+    expect(toggle.hasAttribute('aria-expanded')).toBe(false);
+    expect(toggle.hasAttribute('data-simul-source-aria-expanded-state')).toBe(false);
+
+    // A popover that stays open is not hidden and shown again at each
+    // presentation: that would lift it over a dropdown list the reader opened
+    // inside it. It is shown again only after a patch has written the page's
+    // attributes over it, which hides it.
+    calls.length = 0;
+    const again = new SemanticSourceReceiver({
+      document: identity,
+      replicaDocument: document as unknown as Document,
+      resolveNode: (nodeId) => nodes.get(nodeId),
+      applyProofs: (proofs) => presenter.apply(proofs),
+    });
+    expect(again.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 1, [], [expanded('true', 1), popoverOpen(41)],
+    ))).toEqual([]);
+    expect(again.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 2, [], [expanded('false', 2), popoverOpen(41)],
+    ))).toEqual([]);
+    again.refreshBindings();
+    expect(calls).toEqual(['show:manual']);
+    pop.setAttribute('popover', 'auto');
+    pop.removeAttribute('data-simul-source-popover-open');
+    again.refreshBindings();
+    expect(calls).toEqual(['show:manual', 'show:manual']);
+    again.clear();
+    expect(calls.at(-1)).toBe('hide');
+    expect(pop.getAttribute('popover')).toBe('auto');
+  });
+
+  it('presents a menu on a trigger whose own expanded state it showed before (D132)', () => {
+    const { document } = parseHTML(`<html><body><nav><ul>
+      <li id="wrapper"><button id="trigger">Deposits</button>
+      <div id="panel"><a id="item" href="/yen">***</a></div></li>
+      </ul></nav><iframe id="frame"></iframe></body></html>`);
+    const { receiver, trigger } = hoverMenuReplica(document, [16, 17, 18, 19]);
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 1, [], [{
+        kind: 'aria-state', bridge: 'isolated-html', nodeId: 17, revision: 1,
+        gate: 'controlSemantics', state: 'expanded', value: 'false',
+        classifierVersion: 1,
+      }],
+    ))).toEqual([]);
+    expect(trigger.getAttribute('aria-expanded')).toBe('false');
+    // The page's markup now has the shape of a menu: the same batch presents
+    // it, though the trigger still carries the state written before.
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 2,
+      [menuTextRecord(19, 'Yen deposits')],
+      [structuralMenuProof()],
+    ))).toHaveLength(1);
+    expect(trigger.getAttribute('data-simul-replica-disclosure-trigger')).toBe('v1');
+    expect(trigger.hasAttribute('data-simul-source-aria-expanded-state')).toBe(false);
+  });
+
+  it('presents a menu with an arrow button beside its link and a field in its panel (D132)', () => {
+    const page = (field: string) => parseHTML(`<html><body><nav><ul>
+      <li id="wrapper"><a id="trigger" href="/shop">Shop</a><button id="arrow">v</button>
+      <div id="panel">${field}<a id="item" href="/a">***</a></div></li>
+      </ul></nav><iframe id="frame"></iframe></body></html>`);
+    const batch = createSemanticSourceBatch(
+      identity, 'read-v1-111111', 1,
+      [menuTextRecord(19, 'Alpha')],
+      [structuralMenuProof()],
+    );
+
+    const { document, window } = page('<input type="search"><select><option>EN</option></select>');
+    const { receiver, trigger } = hoverMenuReplica(document, [16, 17, 18, 19]);
+    const arrow = document.querySelector<HTMLElement>('#arrow')!;
+    expect(receiver.applyBatch(batch)).toHaveLength(1);
+    // Either trigger opens it; only the named one says whether it is open.
+    for (const element of [trigger, arrow]) {
+      expect(element.getAttribute('data-simul-replica-disclosure-trigger')).toBe('v1');
+    }
+    expect(trigger.getAttribute('aria-expanded')).toBe('false');
+    expect(arrow.hasAttribute('aria-expanded')).toBe(false);
+    arrow.dispatchEvent(new window.Event('click', { bubbles: true, cancelable: true }));
+    expect(trigger.getAttribute('aria-expanded')).toBe('true');
+    receiver.clear();
+    expect(arrow.hasAttribute('data-simul-replica-disclosure-trigger')).toBe(false);
+
+    // Never around a credential field.
+    const secret = page('<input type="password">');
+    const refused = hoverMenuReplica(secret.document, [16, 17, 18, 19]);
+    expect(refused.receiver.applyBatch(batch)).toBeDefined();
+    expect(refused.trigger.hasAttribute('data-simul-replica-disclosure-trigger'))
+      .toBe(false);
+  });
+
+  it('presents a button beside a list as a menu anywhere, opened by a click only (D132)', () => {
+    const page = (panelTag: string) => parseHTML(`<html><body><main>
+      <div id="wrapper"><button id="trigger">Row actions</button>
+      <${panelTag} id="panel"><li><a id="item" href="/a">***</a></li></${panelTag}></div>
+      </main><iframe id="frame"></iframe></body></html>`);
+    const batch = createSemanticSourceBatch(
+      identity, 'read-v1-111111', 1,
+      [menuTextRecord(19, 'Alpha')],
+      [structuralMenuProof()],
+    );
+
+    const { document, window } = page('ul');
+    const { receiver, trigger } = hoverMenuReplica(document, [16, 17, 18, 19]);
+    expect(receiver.applyBatch(batch)).toHaveLength(1);
+    expect(trigger.getAttribute('data-simul-replica-disclosure-trigger')).toBe('v1');
+    // Hovering a button that sits beside a hidden list shows nothing.
+    trigger.dispatchEvent(new window.Event('pointerenter'));
+    expect(trigger.getAttribute('aria-expanded')).toBe('false');
+    trigger.dispatchEvent(new window.Event('click', { bubbles: true, cancelable: true }));
+    expect(trigger.getAttribute('aria-expanded')).toBe('true');
+    receiver.clear();
+
+    // A block beside a button is as often an accordion's body or a dialog.
+    const block = page('div');
+    const refused = hoverMenuReplica(block.document, [16, 17, 18, 19]);
+    expect(refused.receiver.applyBatch(batch)).toBeDefined();
+    expect(refused.trigger.hasAttribute('data-simul-replica-disclosure-trigger'))
+      .toBe(false);
+  });
+
+  it('shows text without a letter or a digit and keeps it from the translator (D132)', () => {
+    const { document } = parseHTML(
+      '<html><body><select><option></option><option></option></select></body></html>',
+    );
+    const options = [...document.querySelectorAll<HTMLOptionElement>('option')];
+    const nodes = new Map<number, Node>([[31, options[0]!], [32, options[1]!]]);
+    const receiver = new SemanticSourceReceiver({
+      document: identity,
+      replicaDocument: document as unknown as Document,
+      resolveNode: (nodeId) => nodes.get(nodeId),
+    });
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 1,
+      [optionLabelRecord(31, '$'), optionLabelRecord(32, '★★★')],
+    ))).toEqual([]);
+    expect(options.map((option) => option.getAttribute('label')))
+      .toEqual(['$', '★★★']);
+    expect(receiver.records()).toEqual([]);
+
+    // A label that gains letters is offered; one that loses them is taken back.
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 2,
+      [optionLabelRecord(31, 'USD', 2), optionLabelRecord(32, '★★★')],
+    ))).toEqual([expect.objectContaining({ kind: 'upsert' })]);
+    expect(receiver.records().map(({ source }) => source)).toEqual(['USD']);
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 3,
+      [optionLabelRecord(31, '$', 3), optionLabelRecord(32, '★★★')],
+    ))).toEqual([expect.objectContaining({ kind: 'remove' })]);
+    expect(options[0]!.getAttribute('label')).toBe('$');
+    expect(receiver.records()).toEqual([]);
+    expect(receiver.clear()).toEqual([]);
+  });
 });
+
+function optionLabelRecord(
+  nodeId: number,
+  text: string,
+  nodeRevision = 1,
+): SemanticSourceRecord {
+  return {
+    bridge: 'isolated-html',
+    recordId: semanticSourceRecordId(nodeId, 'label')!,
+    nodeId,
+    nodeRevision,
+    category: 'public-semantic',
+    gate: 'controlSemantics',
+    tagName: 'option',
+    type: '',
+    autocomplete: '',
+    role: '',
+    contentEditable: '',
+    text,
+    presentation: 'label',
+    classifierVersion: 1,
+  };
+}
 
 function tabStateProof(
   revision: number,

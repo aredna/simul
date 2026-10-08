@@ -22,6 +22,17 @@ export class SemanticProofPresenter {
   #proofs: readonly ResolvedSemanticSourceProof[] = Object.freeze([]);
   #firewallCleanup: (() => void) | undefined;
   #ancestorCleanup: (() => void) | undefined;
+  /**
+   * The page popovers this presenter is showing, each with its `popover`
+   * attribute and marker as they were. They are kept apart from the other
+   * proofs, which are taken down and put up again at every presentation: a
+   * popover hidden and shown again goes to the top of the top layer, over a
+   * dropdown list the reader opened inside it (D132).
+   */
+  readonly #popovers = new Map<HTMLElement, {
+    popover: string | null;
+    readonly marker: string | null;
+  }>();
 
   constructor(private readonly options: SemanticProofPresenterOptions) {}
 
@@ -42,6 +53,7 @@ export class SemanticProofPresenter {
     else {
       this.#teardown(false);
       this.#proofs = Object.freeze([]);
+      this.#presentPopovers([]);
       try {
         this.options.afterApply?.();
       } catch {
@@ -54,6 +66,50 @@ export class SemanticProofPresenter {
   clear(): void {
     this.#teardown();
     this.#proofs = Object.freeze([]);
+    this.#presentPopovers([]);
+  }
+
+  /**
+   * Shows the popovers the page shows and hides the others, leaving alone
+   * one already shown. In the replica a shown popover is `manual`, so a
+   * click there cannot dismiss what the page still shows.
+   */
+  #presentPopovers(proofs: readonly ResolvedSemanticSourceProof[]): void {
+    const wanted = new Set<HTMLElement>();
+    for (const resolved of proofs) {
+      if (resolved.kind === 'popover-open') wanted.add(resolved.target);
+    }
+    for (const [element, original] of this.#popovers) {
+      if (wanted.has(element)) continue;
+      this.#popovers.delete(element);
+      toggleReplicaPopover(element, false);
+      if (element.getAttribute(POPOVER_OPEN_MARKER) !== 'v1') continue;
+      if (element.getAttribute('popover') === 'manual') {
+        restoreAttribute(element, 'popover', original.popover);
+      }
+      restoreAttribute(element, POPOVER_OPEN_MARKER, original.marker);
+    }
+    for (const element of wanted) {
+      const known = this.#popovers.get(element);
+      const marked = element.getAttribute(POPOVER_OPEN_MARKER) === 'v1';
+      if (
+        known && marked && element.getAttribute('popover') === 'manual' &&
+        replicaPopoverIsShown(element) !== false
+      ) continue;
+      // New, or a patch has written the page's attributes over it, which
+      // hides a shown popover.
+      if (!known) {
+        this.#popovers.set(element, {
+          popover: element.getAttribute('popover'),
+          marker: element.getAttribute(POPOVER_OPEN_MARKER),
+        });
+      } else if (!marked) {
+        known.popover = element.getAttribute('popover');
+      }
+      element.setAttribute('popover', 'manual');
+      element.setAttribute(POPOVER_OPEN_MARKER, 'v1');
+      toggleReplicaPopover(element, true);
+    }
   }
 
   #install(proofs: readonly ResolvedSemanticSourceProof[]): boolean {
@@ -89,6 +145,7 @@ export class SemanticProofPresenter {
         if (!cleanup) throw new Error('Typed semantic proof could not apply.');
         this.#cleanups.push(cleanup);
       }
+      this.#presentPopovers(proofs);
       if (hasInteractiveProof) {
         this.#firewallCleanup = installSemanticFrameAccessibility(
           this.options.document,
@@ -123,7 +180,7 @@ export class SemanticProofPresenter {
   }
 
   #teardown(notify = true): void {
-    disposeReadOnlyReplicaDisclosures(this.options.document);
+    disposeReadOnlyReplicaDisclosures(this.options.document, true);
     this.#ancestorCleanup?.();
     this.#ancestorCleanup = undefined;
     this.#firewallCleanup?.();
@@ -373,6 +430,8 @@ function applyTypedProof(
       if (stillOwned) restoreAttribute(resolved.target, marker, originalMarker);
     };
   }
+  // Shown by the presenter itself, which leaves a shown popover alone.
+  if (resolved.kind === 'popover-open') return () => undefined;
   if (resolved.kind === 'aria-relationship') {
     // No represented reference resolved: leave the control untouched.
     if (resolved.references.length === 0) return () => undefined;
@@ -501,20 +560,27 @@ function installStructuralMenuDisclosure(
     kind: 'structural-menu';
   }>,
 ): (() => void) | undefined {
-  const { panel, trigger, proof } = resolved;
+  const { panel, trigger, otherTriggers, proof } = resolved;
   if (!panel.parentNode || !trigger.parentNode) return undefined;
+  const opensOnHover = resolved.opening === 'hover';
   let controller: ReadOnlyReplicaDisclosure;
   try {
     // The page's own panel opens where the page draws it. It opens while the
     // page shows it (a hover on the source), and stays open through a
-    // re-install while the reader's pointer is on it.
+    // re-install while the reader's pointer is on it. A button menu outside
+    // navigation opens on a click only (D132).
     controller = installReadOnlyReplicaDisclosure({
       anchor: trigger,
       trigger,
+      additionalTriggers: otherTriggers,
       panel,
       presentation: 'inline',
       manageTriggerExpanded: true,
-      initiallyOpen: proof.expanded || isHovered(trigger) || isHovered(panel),
+      openOnHover: opensOnHover,
+      shownByPage: proof.expanded,
+      initiallyOpen: opensOnHover && (
+        isHovered(trigger) || isHovered(panel) || otherTriggers.some(isHovered)
+      ),
     });
   } catch {
     return undefined;
@@ -573,6 +639,31 @@ function restoreAttribute(
 ): void {
   if (value === null) element.removeAttribute(name);
   else element.setAttribute(name, value);
+}
+
+const POPOVER_OPEN_MARKER = 'data-simul-source-popover-open';
+
+/** Whether a replica popover is in the top layer; undefined if it cannot be told. */
+function replicaPopoverIsShown(element: Element): boolean | undefined {
+  try {
+    return element.matches(':popover-open');
+  } catch {
+    return undefined;
+  }
+}
+
+/** Shows or hides a replica popover; one already in that state stays. */
+function toggleReplicaPopover(element: HTMLElement, show: boolean): void {
+  try {
+    const popover = element as HTMLElement & {
+      showPopover?: () => void;
+      hidePopover?: () => void;
+    };
+    if (show) popover.showPopover?.();
+    else popover.hidePopover?.();
+  } catch {
+    // Not connected, or already shown or hidden.
+  }
 }
 
 /** Marks a replica id assigned by an aria-relationship proof so teardown can

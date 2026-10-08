@@ -152,6 +152,8 @@ interface IsolatedSelectFacsimile {
   readonly select: HTMLSelectElement;
   readonly trigger: HTMLButtonElement;
   controller?: ReadOnlyReplicaDisclosure;
+  /** What `controller` was installed for: `popup` or `list`, and its rows. */
+  controllerShape?: string;
   contentSignature?: string;
 }
 const ISOLATED_SELECT_FACSIMILES = new WeakMap<HTMLElement, IsolatedSelectFacsimile>();
@@ -907,7 +909,7 @@ export class IsolatedHtmlReplicaEngine
       ? snapshotOpenReadOnlyReplicaDisclosures(replicaDocument)
       : undefined;
     if (replicaDocument && disclosureBindingsMayHaveChanged) {
-      disposeReadOnlyReplicaDisclosures(replicaDocument);
+      disposeReadOnlyReplicaDisclosures(replicaDocument, true);
     }
     const retainedPaintedLabelIds = [...state.paintedLabelHosts.keys()];
     clearIsolatedPaintedLabels(state);
@@ -970,6 +972,17 @@ export class IsolatedHtmlReplicaEngine
       semanticReceiver && semanticBindingsMayHaveChanged &&
       !semanticProofsMayHaveChanged
     ) refreshIsolatedNativeSelectFacsimiles(replicaDocument);
+    // The patch may have brought an element whose label or state came before
+    // it (D132).
+    const arrivedChanges = batch.operations.some(
+      ({ kind }) => kind === 'children' || kind === 'reconcile-children',
+    )
+      ? semanticReceiver?.placeArrivedNodes()
+      : undefined;
+    if (arrivedChanges) {
+      semanticChanges = Object.freeze([...semanticChanges, ...arrivedChanges]);
+      refreshIsolatedNativeSelectFacsimiles(replicaDocument);
+    }
     if (semanticReceiver && !semanticReceiver.proofPresentationHealthy) {
       semanticChanges = Object.freeze([
         ...semanticChanges,
@@ -2374,6 +2387,10 @@ function syncIsolatedNativeSelectFacsimile(host: HTMLElement): void {
   );
   if (facsimile.contentSignature === contentSignature) return;
   facsimile.contentSignature = contentSignature;
+  // Drawn again while open (a translation arriving, a changed list): the
+  // list keeps its place.
+  const scrollTop = panel.scrollTop;
+  const scrollLeft = panel.scrollLeft;
   panel.replaceChildren();
 
   const selectedLabels: string[] = [];
@@ -2448,6 +2465,10 @@ function syncIsolatedNativeSelectFacsimile(host: HTMLElement): void {
       }
     }
     panel.append(group);
+  }
+  if (scrollTop || scrollLeft) {
+    panel.scrollTop = scrollTop;
+    panel.scrollLeft = scrollLeft;
   }
   const triggerText = exposesSelection
     ? semanticSelection || selectedLabels.join(', ') || '\u2014'
@@ -2557,19 +2578,35 @@ function refreshIsolatedReplicaDisclosures(
   document: Document,
   retainedOpenDisclosures = snapshotOpenReadOnlyReplicaDisclosures(document),
 ): void {
-  disposeReadOnlyReplicaDisclosures(document);
+  disposeReadOnlyReplicaDisclosures(document, true);
   if (!document.documentElement) return;
   const elements = collectIsolatedElements(document.documentElement);
   for (const host of elements.filter((element) => ISOLATED_SELECT_HOSTS.has(element))) {
     const facsimile = ISOLATED_SELECT_FACSIMILES.get(host);
     if (!facsimile) continue;
-    facsimile.controller = undefined;
     syncIsolatedNativeSelectFacsimile(host);
     const presentation = isolatedSelectPresentation(facsimile.select);
     const rawSize = facsimile.select.getAttribute('size');
     const size = rawSize && /^[1-9]\d{0,3}$/u.test(rawSize)
       ? Number(rawSize)
       : 8;
+    const pickerOpen = presentation === 'popup' &&
+      facsimile.select.getAttribute('data-simul-source-picker-open') === 'v1';
+    const shape = `${presentation}:${size}`;
+    const current = facsimile.controller;
+    // The button and the list are Simul's own, so nothing in a page change
+    // can touch this controller. It stays unless the dropdown itself changed
+    // shape: taking it down and putting it up again on every change moved an
+    // open list out and back and scrolled it to the selected option, so on a
+    // page with a carousel the far end of a long list could not be reached
+    // (D132).
+    if (current && !current.isDisposed() && facsimile.controllerShape === shape) {
+      if (pickerOpen) current.open();
+      current.sync();
+      continue;
+    }
+    current?.dispose();
+    facsimile.controllerShape = shape;
     facsimile.controller = installReadOnlyReplicaDisclosure({
       anchor: host,
       panel: facsimile.panel,
@@ -2578,10 +2615,9 @@ function refreshIsolatedReplicaDisclosures(
       manageTriggerExpanded: presentation === 'popup',
       // A native select does not open on hover.
       openOnHover: false,
-      initiallyOpen: presentation === 'popup' && (
-        retainedOpenDisclosures.has(host) ||
-        facsimile.select.getAttribute('data-simul-source-picker-open') === 'v1'
-      ),
+      survivesRefresh: true,
+      initiallyOpen: presentation === 'popup' &&
+        (retainedOpenDisclosures.has(host) || pickerOpen),
       visibleRows: size,
     });
   }
@@ -2645,7 +2681,7 @@ function installValidatedIsolatedAriaDisclosures(
       panel,
       presentation: 'inline',
       manageTriggerExpanded: false,
-      initiallyOpen: trigger.getAttribute('aria-expanded') === 'true',
+      shownByPage: trigger.getAttribute('aria-expanded') === 'true',
     });
   }
 }
@@ -2867,13 +2903,6 @@ function applyPatchBatch(
     number,
     Extract<HtmlMirrorPatchOperation, { kind: 'attributes' }>
   >();
-  const firstAttributeOperations = new Map<number, {
-    readonly operation: Extract<
-      HtmlMirrorPatchOperation,
-      { kind: 'attributes' }
-    >;
-    readonly index: number;
-  }>();
   const firstStructuralOperations = new Map<number, {
     readonly operation: StructuralOperation;
     readonly index: number;
@@ -2882,9 +2911,6 @@ function applyPatchBatch(
   for (const [index, operation] of operations.entries()) {
     if (operation.kind === 'attributes') {
       prospectiveAttributeOperations.set(operation.nodeId, operation);
-      if (!firstAttributeOperations.has(operation.nodeId)) {
-        firstAttributeOperations.set(operation.nodeId, { operation, index });
-      }
     } else if (
       operation.kind === 'children' ||
       operation.kind === 'reconcile-children'
@@ -2922,44 +2948,13 @@ function applyPatchBatch(
       const select = targetElement.localName.toLowerCase() === 'select'
         ? targetElement
         : targetElement.closest('select');
-      // Native select structure is transported atomically at the select root;
-      // never accept a partial optgroup/option children patch that could make
-      // the browser invent a new selectedIndex before owner state arrives.
+      // Native select structure is transported whole at the select root; a
+      // patch for one of its groups or options is never sent. The new options
+      // come without a selection: the current choice arrives on the semantic
+      // channel, and nothing is drawn from this hidden native select (D132;
+      // the patch was once accepted only with selected positions the page
+      // has stopped sending, so every changed list rebuilt the mirror).
       if (select && targetElement !== select) return undefined;
-      const selectNodeId = select ? currentNodeIds().get(select) : undefined;
-      const indexedSelectStateOperation = selectNodeId === undefined
-        ? undefined
-        : firstAttributeOperations.get(selectNodeId);
-      const selectStateOperation = indexedSelectStateOperation?.operation;
-      const attributesIndex = indexedSelectStateOperation?.index ?? -1;
-      const selectStateAttributes = selectStateOperation?.kind === 'attributes'
-        ? Object.fromEntries(selectStateOperation.attributes)
-        : undefined;
-      const explicitlyPrivateSelect = selectStateOperation?.kind === 'attributes' &&
-        selectStateAttributes !== undefined &&
-        (
-          sourceElementStartsPrivateRegionInContext(
-            'select',
-            selectStateAttributes,
-            false,
-          ) ||
-          isSourceActivationRoleValue(selectStateAttributes.role)
-        );
-      // The source emits select structure first and its current IDL selection
-      // state second. Reject reversed/partial batches rather than allowing the
-      // browser to invent a default selected option during child replacement.
-      if (
-        select &&
-        (
-          selectNodeId === undefined ||
-          attributesIndex <= operationIndex ||
-          selectStateOperation?.kind !== 'attributes' ||
-          (selectStateOperation.selectedOptionIndexes === undefined &&
-            !explicitlyPrivateSelect)
-        )
-      ) {
-        return undefined;
-      }
     }
     if (operation.kind === 'text') {
       const node = readHtmlMirrorNode(
