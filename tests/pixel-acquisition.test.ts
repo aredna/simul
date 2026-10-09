@@ -6,6 +6,7 @@ import {
   PixelAcquisitionCoordinator,
   SourceTabCaptureError,
   captureVisibleSourceTab,
+  captureVisibleSourceTabPromptly,
   type PixelAcquisitionEnvironment,
   type SourceTabCaptureEnvironment,
 } from '../lib/ocr/pixel-acquisition';
@@ -611,6 +612,85 @@ describe('PixelAcquisitionCoordinator', () => {
       captureVisibleTab: inactiveCapture,
     })).rejects.toMatchObject({ code: 'inactive' });
     expect(inactiveCapture).not.toHaveBeenCalled();
+  });
+
+  it('hands a prompt capture out at once and still keeps the lane for the quota interval (D133)', async () => {
+    const events: string[] = [];
+    let now = 1_000;
+    const lane: { released: boolean; endDelay?: () => void } = { released: false };
+    const environment: SourceTabCaptureEnvironment = {
+      queryActiveTab: async () => 4,
+      captureVisibleTab: async () => {
+        events.push('capture');
+        return 'data:image/png;base64,AQID';
+      },
+      withGlobalLock: async (callback) => {
+        events.push('lock');
+        try {
+          return await callback();
+        } finally {
+          lane.released = true;
+        }
+      },
+      now: () => now,
+      delay: (milliseconds) => new Promise<void>((resolve) => {
+        events.push(`delay:${milliseconds}`);
+        lane.endDelay = () => {
+          now += milliseconds;
+          resolve();
+        };
+      }),
+    };
+
+    await expect(captureVisibleSourceTabPromptly(4, 3, undefined, environment))
+      .resolves.toBe('data:image/png;base64,AQID');
+    // The capture is in hand while the lane is still held.
+    expect(events).toEqual(['lock', 'capture', 'delay:550']);
+    expect(lane.released).toBe(false);
+    lane.endDelay?.();
+    await vi.waitFor(() => expect(lane.released).toBe(true));
+
+    // Refusals and a tab that is not the one in view fail as before.
+    await expect(captureVisibleSourceTabPromptly(4, 3, undefined, {
+      ...environment,
+      delay: async () => undefined,
+      captureVisibleTab: async () => {
+        throw new Error("Either the '<all_urls>' or 'activeTab' permission is required.");
+      },
+    })).rejects.toMatchObject({ code: 'permission' });
+    await expect(captureVisibleSourceTabPromptly(4, 3, undefined, {
+      ...environment,
+      delay: async () => undefined,
+      queryActiveTab: async () => 9,
+    })).rejects.toMatchObject({ code: 'inactive' });
+    await expect(captureVisibleSourceTabPromptly(-1, 3, undefined, environment)).rejects.toThrow();
+  });
+
+  it('hands no prompt capture out when another tab showed by the time it was taken (D133)', async () => {
+    // The tab was the one in view before the capture and another one after:
+    // the picture may be of either, so it is given to no one.
+    let asked = 0;
+    const environment: SourceTabCaptureEnvironment = {
+      queryActiveTab: async () => ((asked += 1) === 1 ? 4 : 9),
+      captureVisibleTab: async () => 'data:image/png;base64,AQID',
+      withGlobalLock: (callback) => callback(),
+      now: () => 1_000,
+      delay: async () => undefined,
+    };
+
+    await expect(captureVisibleSourceTabPromptly(4, 3, undefined, environment))
+      .rejects.toMatchObject({ code: 'inactive' });
+    expect(asked).toBe(2);
+    // Nor when the look was called off while Chrome took the capture.
+    const off = new AbortController();
+    await expect(captureVisibleSourceTabPromptly(4, 3, off.signal, {
+      ...environment,
+      queryActiveTab: async () => 4,
+      captureVisibleTab: async () => {
+        off.abort();
+        return 'data:image/png;base64,AQID';
+      },
+    })).rejects.toMatchObject({ name: 'AbortError' });
   });
 
   it.each([

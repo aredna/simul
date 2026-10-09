@@ -3,6 +3,10 @@ import { describe, expect, it, vi } from 'vitest';
 import { PdfController, type PdfControllerOcr } from '../entrypoints/sidepanel/pdf-controller';
 import type { ImageRecognitionResult } from '../lib/ocr/image-analysis-coordinator';
 import type { PdfOcrCanvas } from '../lib/pdf/pdf-ocr';
+import type {
+  PdfLocateResult,
+  PdfPageBoxRequest,
+} from '../entrypoints/sidepanel/pdf-page-box-reader';
 import type { PdfViewDocument, PdfViewSurface } from '../entrypoints/sidepanel/pdf-view';
 import { UI_STRINGS } from '../lib/companion-ui-strings';
 import { PageAccessError } from '../lib/page-identity';
@@ -20,6 +24,7 @@ import {
   type PdfjsOpenErrorKind,
 } from '../lib/pdf/pdfjs-runtime';
 import { PdfTextSurface } from '../lib/pdf/pdf-text-surface';
+import type { PdfViewerDoubt } from '../lib/pdf/pdf-viewer-tracker';
 import type { ReplicaSourceDocumentIdentity } from '../lib/replica/source-identity';
 import { englishUiText } from '../lib/ui-text';
 
@@ -103,6 +108,7 @@ function setup(options: {
   priorityDelayMs?: number;
   pageTextTimeoutMs?: number;
   ocr?: PdfControllerOcr;
+  pageBoxReader?: { locate(request: PdfPageBoxRequest): Promise<PdfLocateResult> };
 } = {}) {
   const view = fakeView();
   const viewerFollower = { start: vi.fn(), stop: vi.fn(), following: false };
@@ -133,6 +139,7 @@ function setup(options: {
     now: () => 0,
     onDiagnostic: options.onDiagnostic ?? ((diagnostic) => diagnostics.push(diagnostic)),
     ...(options.openTimeoutMs ? { openTimeoutMs: options.openTimeoutMs } : {}),
+    ...(options.pageBoxReader ? { pageBoxReader: options.pageBoxReader } : {}),
     ...(options.withText
       ? {
           surface,
@@ -1402,6 +1409,165 @@ describe('PdfController scanned pages', () => {
     harness.controller.stopScannedReading();
     release();
     await expect(probing).resolves.toBe('ja');
+  });
+});
+
+describe('PdfController reads the viewer\'s page off its toolbar (D133)', () => {
+  const viewer = { tabId: 7, documentId: 'DOC' };
+  const doubt: PdfViewerDoubt = {
+    viewport: { pageX: 40, pageY: -120, pageWidth: 601, viewportWidth: 800, viewportHeight: 600 },
+    page: 0,
+    pages: [0, 1, 2],
+    episode: 1,
+  };
+
+  function reading(options: {
+    providerOrder?: readonly ('tesseract' | 'chrome-text-detector')[];
+    locate?: (request: PdfPageBoxRequest) => Promise<PdfLocateResult>;
+    recognize?: () => ImageRecognitionResult;
+    withText?: boolean;
+  } = {}) {
+    const locate = vi.fn(options.locate ?? (async () => 2));
+    const recognize = vi.fn(async (pixels: { bitmapWidth: number; bitmapHeight: number }) =>
+      options.recognize?.() ?? ({
+        status: 'complete',
+        cacheHit: false,
+        result: {
+          providerId: 'tesseract',
+          bitmapWidth: pixels.bitmapWidth,
+          bitmapHeight: pixels.bitmapHeight,
+          transcript: '2 / 3',
+          regions: [{
+            text: '2 / 3',
+            confidence: 0.9,
+            boundingBox: { x: 20, y: 20, width: 80, height: 30 },
+          }],
+        },
+      } satisfies ImageRecognitionResult));
+    const ocr: PdfControllerOcr = {
+      environment: {
+        createCanvas: () => ({ width: 0, height: 0 }),
+        render: {
+          createSurface: () => ({
+            getContext: () => ({ drawImage: () => undefined }),
+            convertToBlob: async () => new Blob(['picture']),
+          }),
+          digest: (bytes) => crypto.subtle.digest('SHA-256', bytes),
+        },
+        recognize: recognize as unknown as PdfControllerOcr['environment']['recognize'],
+        wait: async () => undefined,
+      },
+      providerOrder: () => options.providerOrder ?? ['chrome-text-detector', 'tesseract'],
+      // The reader's own setting for image text does not count here.
+      minimumConfidence: () => 0.9,
+    };
+    const harness = setup({ withText: options.withText ?? true, ocr, pageBoxReader: { locate } });
+    return { ...harness, locate, recognize };
+  }
+
+  it('asks for the page with the tab, the doubt and the page count, and passes the answer on', async () => {
+    const harness = reading();
+    const signal = new AbortController().signal;
+    await harness.controller.show(URL_UNDER_TEST, signal, SOURCE_DOCUMENT, viewer);
+
+    await expect(harness.controller.locatePage(viewer, doubt, signal)).resolves.toBe(2);
+    expect(harness.locate).toHaveBeenCalledTimes(1);
+    expect(harness.locate.mock.calls[0]![0]).toMatchObject({ tabId: 7, doubt, pageCount: 3, signal });
+
+    harness.locate.mockResolvedValueOnce('stop');
+    await expect(harness.controller.locatePage(viewer, doubt, signal)).resolves.toBe('stop');
+    harness.locate.mockResolvedValueOnce(undefined);
+    await expect(harness.controller.locatePage(viewer, doubt, signal)).resolves.toBeUndefined();
+  });
+
+  it('reads the picture with Tesseract\'s English model, whatever confidence image text asks', async () => {
+    const texts: (string | undefined)[] = [];
+    const harness = reading({
+      locate: async (request) => {
+        const picture = { encoded: new Blob(['picture']), width: 220, height: 70 };
+        texts.push(await request.read(picture, request.signal));
+        return 1;
+      },
+    });
+    const signal = new AbortController().signal;
+    await harness.controller.show(URL_UNDER_TEST, signal, SOURCE_DOCUMENT, viewer);
+
+    await harness.controller.locatePage(viewer, doubt, signal);
+    expect(texts).toEqual(['2 / 3']);
+    const [pixels, route] = harness.recognize.mock.calls[0] as unknown as [
+      { descriptor: { nodeId: number; document: unknown }; bitmapWidth: number; bitmapHeight: number },
+      Record<string, unknown>,
+    ];
+    // The picture as it is, named by a number no page of the PDF has.
+    expect(pixels).toMatchObject({ bitmapWidth: 220, bitmapHeight: 70 });
+    expect(pixels.descriptor).toMatchObject({ nodeId: 4, document: SOURCE_DOCUMENT });
+    expect(route).toEqual({
+      providerOrder: ['tesseract'],
+      sourceLanguage: 'en',
+      languageGroup: 'eng',
+      modelVersion: expect.any(String),
+      minimumConfidence: 0.25,
+    });
+  });
+
+  it('gives no text for a picture that could not be read', async () => {
+    const texts: (string | undefined)[] = [];
+    const harness = reading({
+      locate: async (request) => {
+        texts.push(await request.read(
+          { encoded: new Blob(['picture']), width: 220, height: 70 },
+          request.signal,
+        ));
+        return undefined;
+      },
+      recognize: () => ({ status: 'failed', code: 'recognition-failed' }),
+    });
+    const signal = new AbortController().signal;
+    await harness.controller.show(URL_UNDER_TEST, signal, SOURCE_DOCUMENT, viewer);
+
+    await harness.controller.locatePage(viewer, doubt, signal);
+    expect(texts).toEqual([undefined]);
+  });
+
+  it('does not look, and captures nothing, when it cannot read: no Tesseract, no PDF, another tab document', async () => {
+    const signal = new AbortController().signal;
+    const off = reading({ providerOrder: ['chrome-text-detector'] });
+    await off.controller.show(URL_UNDER_TEST, signal, SOURCE_DOCUMENT, viewer);
+    expect(off.controller.locatePage(viewer, doubt, signal)).toBeUndefined();
+    expect(off.locate).not.toHaveBeenCalled();
+
+    const harness = reading();
+    // Nothing shown yet.
+    expect(harness.controller.locatePage(viewer, doubt, signal)).toBeUndefined();
+    await harness.controller.show(URL_UNDER_TEST, signal, SOURCE_DOCUMENT, viewer);
+    // The tab shows another document now.
+    expect(harness.controller.locatePage({ tabId: 7, documentId: 'OTHER' }, doubt, signal))
+      .toBeUndefined();
+    harness.controller.close();
+    expect(harness.controller.locatePage(viewer, doubt, signal)).toBeUndefined();
+    expect(harness.locate).not.toHaveBeenCalled();
+
+    // A PDF chosen on this computer has no viewer.
+    const local = reading();
+    await local.controller.show({ file: new Blob(['%PDF-']), key: 'local-file:1' }, signal);
+    expect(local.controller.locatePage(viewer, doubt, signal)).toBeUndefined();
+    expect(local.locate).not.toHaveBeenCalled();
+  });
+
+  it('takes no page that comes after the PDF was closed or replaced', async () => {
+    let answer!: (page: PdfLocateResult) => void;
+    const harness = reading({
+      locate: () => new Promise<PdfLocateResult>((resolve) => {
+        answer = resolve;
+      }),
+    });
+    const signal = new AbortController().signal;
+    await harness.controller.show(URL_UNDER_TEST, signal, SOURCE_DOCUMENT, viewer);
+
+    const late = harness.controller.locatePage(viewer, doubt, signal);
+    harness.controller.close();
+    answer(2);
+    await expect(late).resolves.toBeUndefined();
   });
 });
 

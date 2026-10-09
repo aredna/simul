@@ -535,6 +535,722 @@ describe('PdfViewerTracker', () => {
   });
 });
 
+describe('PdfViewerTracker doubts (D133)', () => {
+  /** A jump as Chrome reports it: the place, and again a millisecond later. */
+  function jump(tracker: PdfViewerTracker, viewer: FakeViewer, scroll: number): void {
+    viewer.scrollTo(scroll);
+    send(tracker, viewer, 800);
+    send(tracker, viewer, 1);
+    tracker.settle();
+  }
+
+  it('doubts the first report and takes the page it is told', () => {
+    const viewer = new FakeViewer(pages(50), 1, 700);
+    const tracker = new PdfViewerTracker(pages(50));
+    expect(tracker.doubt).toBeUndefined();
+    // Simul opens with the viewer on page 41, a quarter down it.
+    viewer.scrollTo(viewer.pages[40]!.top + 264);
+    send(tracker, viewer, 1_000);
+
+    const doubt = tracker.doubt!;
+    expect(doubt.page).toBe(0);
+    expect(doubt.pages).toHaveLength(50);
+    expect(doubt.viewport).toEqual(viewer.report());
+    const placed = tracker.place(doubt, 40)!;
+    expect(placed.index).toBe(40);
+    expect(placed.fraction).toBeCloseTo(0.25, 2);
+    expect(tracker.position).toEqual(placed);
+    expect(tracker.doubt).toBeUndefined();
+    // Scrolling on from there is followed from the page it was told.
+    for (let step = 0; step < 30; step += 1) {
+      viewer.scrollTo(viewer.scroll + 30);
+      send(tracker, viewer, 16);
+    }
+    expect(viewer.topPage()).toBe(41);
+    expect(tracker.position?.index).toBe(41);
+  });
+
+  it('ends a doubt without moving when the guess was right', () => {
+    const viewer = new FakeViewer(pages(50), 1, 700);
+    const tracker = new PdfViewerTracker(pages(50));
+    send(tracker, viewer, 1_000);
+    const before = tracker.position;
+
+    expect(tracker.place(tracker.doubt!, 0)).toBeUndefined();
+    expect(tracker.position).toBe(before);
+    expect(tracker.doubt).toBeUndefined();
+  });
+
+  it('does not doubt scrolling, arrows and page keys from a known place', () => {
+    const viewer = new FakeViewer(pages(50), 0.7058, 757);
+    const tracker = new PdfViewerTracker(pages(50));
+    send(tracker, viewer, 1_000);
+    tracker.place(tracker.doubt!, 0);
+    for (let step = 0; step < 200; step += 1) {
+      viewer.scrollTo(viewer.scroll + 30);
+      send(tracker, viewer, 16);
+    }
+    expect(tracker.doubt).toBeUndefined();
+    viewer.scrollTo(viewer.scroll + PDF_VIEWER_ARROW_STEP);
+    send(tracker, viewer, 400);
+    expect(tracker.doubt).toBeUndefined();
+    viewer.scrollTo(viewer.scroll + PDF_VIEWER_PAGE_KEY_SHARE * 757);
+    keyed(tracker, send(tracker, viewer, 400));
+    expect(tracker.doubt).toBeUndefined();
+    // A lone wheel step.
+    viewer.scrollTo(viewer.scroll + 100);
+    send(tracker, viewer, 400);
+    expect(tracker.doubt).toBeUndefined();
+    expect(tracker.position?.index).toBe(viewer.topPage());
+  });
+
+  it('doubts a jump, and a jump that looks like a small scroll', () => {
+    const viewer = new FakeViewer(pages(300), 1, 700);
+    const tracker = new PdfViewerTracker(pages(300));
+    send(tracker, viewer, 1_000);
+    tracker.place(tracker.doubt!, 0);
+
+    // The page box to page 200, part-way down it.
+    jump(tracker, viewer, viewer.pages[199]!.top + 300);
+    const far = tracker.doubt!;
+    expect(far.page).not.toBe(199);
+    expect(tracker.place(far, 199)).toMatchObject({ index: 199 });
+
+    // A link to page 41, about as far down its page: the report is that of
+    // a wheel step, but it comes twice.
+    viewer.scrollTo(viewer.pages[40]!.top + 360);
+    expect(moved(send(tracker, viewer, 800)).index).toBe(199);
+    expect(tracker.doubt).toBeUndefined();
+    send(tracker, viewer, 1);
+    const near = tracker.doubt!;
+    expect(near.page).toBe(199);
+    expect(near.episode).toBeGreaterThan(far.episode);
+    expect(tracker.place(near, 40)).toMatchObject({ index: 40 });
+    expect(tracker.position!.fraction).toBeCloseTo(360 / 1056, 2);
+  });
+
+  it('doubts a jump to a page top, which reads as ArrowRight', () => {
+    const viewer = new FakeViewer(pages(300), 1, 700);
+    const tracker = new PdfViewerTracker(pages(300));
+    send(tracker, viewer, 1_000);
+    tracker.place(tracker.doubt!, 0);
+    jump(tracker, viewer, viewer.pages[20]!.top + 300);
+    tracker.place(tracker.doubt!, 20);
+
+    // The page box to page 200: read as the next page, as before.
+    jump(tracker, viewer, viewer.pages[199]!.top - 3);
+    expect(tracker.position).toEqual({ index: 21, fraction: 0 });
+    expect(tracker.place(tracker.doubt!, 199)).toEqual({ index: 199, fraction: 0 });
+  });
+
+  it('doubts a held jump to a page top, which reads as the top of the PDF', () => {
+    // Landscape pages among portrait ones: a jump onto the top of one fits
+    // the landscape first page at the very top.
+    const sizes = [LANDSCAPE, ...pages(10), LANDSCAPE, LANDSCAPE, ...pages(10)];
+    const viewer = new FakeViewer(sizes, 0.5, 700);
+    const tracker = new PdfViewerTracker(sizes);
+    viewer.scrollTo(viewer.pages[4]!.top * viewer.zoom + 100);
+    send(tracker, viewer, 1_000);
+    tracker.place(tracker.doubt!, 4);
+
+    jump(tracker, viewer, (viewer.pages[12]!.top - 3) * viewer.zoom);
+    expect(tracker.position).toEqual({ index: 0, fraction: 0 });
+    const doubt = tracker.doubt!;
+    expect(doubt.pages).toEqual([0, 11, 12]);
+    expect(tracker.place(doubt, 12)).toEqual({ index: 12, fraction: 0 });
+  });
+
+  it('doubts a lone report at a page top: ArrowRight, or a jump anywhere', () => {
+    const viewer = new FakeViewer(pages(60), 0.9, 700);
+    const tracker = new PdfViewerTracker(pages(60));
+    send(tracker, viewer, 1_000);
+    tracker.place(tracker.doubt!, 0);
+    for (let step = 0; step < 80; step += 1) {
+      viewer.scrollTo(viewer.scroll + 30);
+      send(tracker, viewer, 16);
+    }
+    expect(tracker.position?.index).toBe(2);
+    expect(tracker.doubt).toBeUndefined();
+
+    // One report at the top of page 6: read as the page after this one.
+    viewer.scrollTo((viewer.pages[5]!.top - 3) * viewer.zoom);
+    expect(moved(send(tracker, viewer, 800)).index).toBe(3);
+    expect(tracker.doubt?.page).toBe(3);
+    expect(tracker.place(tracker.doubt!, 5)).toEqual({ index: 5, fraction: 0 });
+  });
+
+  it('does not doubt Home and End', () => {
+    const viewer = new FakeViewer(pages(100), 0.7, 757);
+    const tracker = new PdfViewerTracker(pages(100));
+    send(tracker, viewer, 1_000);
+    tracker.place(tracker.doubt!, 0);
+    for (let frame = 1; frame <= 10; frame += 1) {
+      viewer.scrollTo(viewer.maxScroll * (frame / 10));
+      send(tracker, viewer, 16);
+    }
+    expect(tracker.settle()?.index).toBe(viewer.topPage());
+    expect(viewer.topPage()).toBeGreaterThanOrEqual(98);
+    expect(tracker.doubt).toBeUndefined();
+
+    // A doubt ends at the top or bottom of the PDF.
+    jump(tracker, viewer, viewer.pages[40]!.top * viewer.zoom + 200);
+    expect(tracker.doubt).toBeDefined();
+    for (let frame = 9; frame >= 0; frame -= 1) {
+      viewer.scrollTo(viewer.scroll * (frame / 10));
+      send(tracker, viewer, 16);
+    }
+    expect(tracker.settle()?.index).toBe(0);
+    expect(tracker.doubt).toBeUndefined();
+  });
+
+  it('keeps a doubt through scrolling, and takes no page for a report that has passed', () => {
+    const viewer = new FakeViewer(pages(300), 1, 700);
+    const tracker = new PdfViewerTracker(pages(300));
+    send(tracker, viewer, 1_000);
+    tracker.place(tracker.doubt!, 0);
+    jump(tracker, viewer, viewer.pages[100]!.top + 300);
+    const first = tracker.doubt!;
+
+    // The viewer scrolls on before the panel has found the page.
+    viewer.scrollTo(viewer.scroll + 100);
+    send(tracker, viewer, 400);
+    expect(tracker.place(first, 100)).toBeUndefined();
+    const second = tracker.doubt!;
+    expect(second.episode).toBe(first.episode);
+    expect(second.viewport).not.toBe(first.viewport);
+    expect(tracker.place(second, 100)).toMatchObject({ index: 100 });
+    expect(tracker.position!.fraction).toBeCloseTo(400 / 1056, 2);
+  });
+
+  it('has no doubt to look into while a jump is held', () => {
+    const viewer = new FakeViewer(pages(100), 0.7, 757);
+    const tracker = new PdfViewerTracker(pages(100));
+    send(tracker, viewer, 1_000);
+    const doubt = tracker.doubt!;
+    tracker.place(doubt, 0);
+    viewer.scrollTo(viewer.pages[50]!.top * viewer.zoom + 350);
+    expect(send(tracker, viewer, 800).kind).toBe('hold');
+    // Chrome's second report of the jump, a millisecond on.
+    expect(send(tracker, viewer, 1).kind).toBe('hold');
+
+    expect(tracker.doubt).toBeUndefined();
+    expect(tracker.place(doubt, 3)).toBeUndefined();
+    tracker.settle();
+    expect(tracker.doubt).toBeDefined();
+  });
+
+  it('does not doubt scrolling, however far or fast: a fling, a drag, one big step of the wheel', () => {
+    // A look after scrolling within a page could find a number typed into
+    // the page box and not entered; a jump always replaces it.
+    const viewer = new FakeViewer(pages(300), 1, 700);
+    const tracker = new PdfViewerTracker(pages(300));
+    send(tracker, viewer, 1_000);
+    tracker.place(tracker.doubt!, 0);
+
+    // One step of a free-spinning wheel: 300 px in one report, no second.
+    viewer.scrollTo(viewer.scroll + 300);
+    expect(send(tracker, viewer, 800).kind).toBe('hold');
+    tracker.settle();
+    expect(tracker.doubt).toBeUndefined();
+
+    // A scrollbar drag: 37 pages in ten frames, then it slows to a stop,
+    // its last frames a pixel apart or less, two of them handed over
+    // together.
+    const start = viewer.scroll;
+    for (let frame = 1; frame <= 10; frame += 1) {
+      viewer.scrollTo(start + (frame / 10) * 37.3 * 1070);
+      send(tracker, viewer, 16);
+    }
+    for (const [step, gap] of [[40, 16], [12, 16], [3, 16], [1, 16], [0.5, 16], [0.5, 1]] as const) {
+      viewer.scrollTo(viewer.scroll + step);
+      send(tracker, viewer, gap);
+    }
+    tracker.settle();
+    expect(viewer.topPage()).toBeGreaterThan(30);
+    expect(tracker.doubt).toBeUndefined();
+
+    // A jump is doubted all the same.
+    jump(tracker, viewer, viewer.pages[200]!.top + 300);
+    expect(tracker.doubt).toBeDefined();
+  });
+
+  it('does not doubt one step of the wheel that moves a third of a page, zoomed far out', () => {
+    // 30%: 100 px is more than a fifth of a page, less than a held jump.
+    const viewer = new FakeViewer(pages(300), 0.3, 700);
+    const tracker = new PdfViewerTracker(pages(300));
+    tracker.setViewerZoom(0.3);
+    send(tracker, viewer, 1_000);
+    // Two pages show whole: the page box holds the one the viewer names.
+    tracker.place(tracker.doubt!, viewer.mostVisible());
+    expect(tracker.doubt).toBeUndefined();
+    viewer.scrollTo(viewer.scroll + 100);
+    send(tracker, viewer, 800);
+    tracker.settle();
+    viewer.scrollTo(viewer.scroll + 100);
+    send(tracker, viewer, 800);
+    tracker.settle();
+
+    expect(tracker.position?.index).toBe(viewer.topPage());
+    expect(tracker.doubt).toBeUndefined();
+  });
+
+  it('lists the pages that fit the report at the tab\'s zoom give or take its lag', () => {
+    // Thirty pages, each 2 pt wider than the last (cropped scans are like
+    // this). Fit to width after a small resize: the viewer is at 71.4%, the
+    // tab still says 71.8%. At exactly the tab's zoom another page would be
+    // the only one as wide as the report says.
+    const sizes = Array.from({ length: 30 }, (_, index) => ({ width: 560 + index * 2, height: 792 }));
+    const viewerZoom = 0.714;
+    const viewer = new FakeViewer(sizes, viewerZoom, 749, 900);
+    const tracker = new PdfViewerTracker(sizes);
+    tracker.setViewerZoom(0.718);
+    send(tracker, viewer, 1_000);
+    tracker.place(tracker.doubt!, 0);
+    jump(tracker, viewer, viewer.pages[20]!.top * viewerZoom + 120);
+
+    const doubt = tracker.doubt!;
+    expect(viewer.mostVisible()).toBe(20);
+    expect(doubt.pages).toContain(20);
+    expect(doubt.pages.length).toBeGreaterThan(1);
+    // Every page listed is within the lag of the report's width.
+    for (const page of doubt.pages) {
+      const width = Math.trunc((sizes[page]!.width * 4) / 3);
+      expect(Math.abs(doubt.viewport.pageWidth - width * 0.718)).toBeLessThanOrEqual(0.0101 * width + 0.3);
+    }
+    tracker.place(doubt, 20);
+    expect(tracker.position?.index).toBe(20);
+    expect(tracker.doubt).toBeUndefined();
+  });
+
+  it('has no doubt to look into until Chrome has told of the zoom a report was made at', () => {
+    const viewer = new FakeViewer(pages(60), 0.8, 700);
+    const tracker = new PdfViewerTracker(pages(60));
+    // The tab still says 100%: a page 653 px wide is no page there.
+    tracker.setViewerZoom(1);
+    send(tracker, viewer, 1_000);
+    jump(tracker, viewer, viewer.pages[30]!.top * 0.8 + 100);
+    expect(tracker.doubt).toBeUndefined();
+
+    tracker.setViewerZoom(0.8);
+    const doubt = tracker.doubt!;
+    expect(doubt.pages).toHaveLength(60);
+    expect(tracker.place(doubt, 30)).toMatchObject({ index: 30 });
+  });
+
+  it('takes only a page the report fits', () => {
+    const sizes = [...pages(5), LANDSCAPE, ...pages(5)];
+    const viewer = new FakeViewer(sizes, 0.5, 700);
+    const tracker = new PdfViewerTracker(sizes);
+    send(tracker, viewer, 1_000);
+    const doubt = tracker.doubt!;
+
+    // The last page cannot be the most visible one at the very top of the view.
+    expect(doubt.pages).toEqual([0, 1, 2, 3, 4, 6, 7, 8, 9]);
+    expect(tracker.place(doubt, 5)).toBeUndefined();
+    expect(tracker.place(doubt, 99)).toBeUndefined();
+    expect(tracker.doubt).toBeDefined();
+  });
+
+  it('names the one page a report fits: a page of a width of its own', () => {
+    const sizes = [...pages(5), LANDSCAPE, ...pages(5)];
+    const viewer = new FakeViewer(sizes, 0.5, 700);
+    const tracker = new PdfViewerTracker(sizes);
+    send(tracker, viewer, 1_000);
+    jump(tracker, viewer, viewer.pages[5]!.top * viewer.zoom + 40);
+
+    expect(tracker.position?.index).toBe(5);
+    // Reading the doubt changes nothing; taking the page ends it.
+    const doubt = tracker.doubt!;
+    expect(doubt.pages).toEqual([5]);
+    expect(tracker.doubt).toEqual(doubt);
+    expect(tracker.place(doubt, 5)).toBeUndefined();
+    expect(tracker.doubt).toBeUndefined();
+    expect(tracker.position?.index).toBe(5);
+  });
+
+  it('lists the pages as wide as the report says at the viewer\'s zoom', () => {
+    // US Letter and A4 pages: 816 and 793 px wide at 100%.
+    const a4: PdfPagePoints = { width: 595.28, height: 841.89 };
+    const sizes = [LETTER, a4, LETTER, a4, a4, LETTER];
+    const viewer = new FakeViewer(sizes, 0.75, 700);
+    const tracker = new PdfViewerTracker(sizes);
+    send(tracker, viewer, 1_000);
+    tracker.place(tracker.doubt!, 0);
+    // A zoom and a jump onto an A4 page at once: the report fits a Letter
+    // page at another zoom too.
+    viewer.zoom = 0.5;
+    viewer.scrollTo(viewer.pages[3]!.top * viewer.zoom + 100);
+    send(tracker, viewer, 800);
+    send(tracker, viewer, 1);
+    tracker.settle();
+
+    tracker.setViewerZoom(0.5);
+    const doubt = tracker.doubt!;
+    expect(doubt.pages).toEqual([1, 3, 4]);
+    expect(tracker.place(doubt, 3)).toMatchObject({ index: 3 });
+
+    // One page of that width: the doubt names it alone.
+    const single = [LETTER, LETTER, a4, LETTER];
+    const other = new FakeViewer(single, 0.75, 700);
+    const lone = new PdfViewerTracker(single);
+    send(lone, other, 1_000);
+    lone.place(lone.doubt!, 0);
+    other.zoom = 0.5;
+    other.scrollTo(other.pages[2]!.top * other.zoom + 100);
+    send(lone, other, 800);
+    send(lone, other, 1);
+    lone.settle();
+    lone.setViewerZoom(0.5);
+    const only = lone.doubt!;
+    expect(only.pages).toEqual([2]);
+    lone.place(only, 2);
+    expect(lone.position?.index).toBe(2);
+    expect(lone.doubt).toBeUndefined();
+  });
+
+  it('does not doubt a zoom, though Chrome reports it twice at once as it does a jump', () => {
+    const viewer = new FakeViewer(pages(60), 1, 700);
+    const tracker = new PdfViewerTracker(pages(60));
+    send(tracker, viewer, 1_000);
+    tracker.place(tracker.doubt!, 0);
+    jump(tracker, viewer, viewer.pages[39]!.top + 300);
+    tracker.place(tracker.doubt!, 39);
+    const before = tracker.position;
+
+    // Each zoom keeps the place: one report, and the same again 3 ms later.
+    for (const zoom of [1.1, 1.25, 1.5, 1.25, 1, 0.9, 0.75, 0.5, 1]) {
+      const place = viewer.scroll / viewer.zoom;
+      viewer.zoom = zoom;
+      viewer.scrollTo(Math.round(place * zoom));
+      expect(send(tracker, viewer, 1_500).kind, `zoom ${zoom}`).toBe('same');
+      expect(send(tracker, viewer, 3).kind, `zoom ${zoom}`).toBe('same');
+      expect(tracker.doubt, `zoom ${zoom}`).toBeUndefined();
+    }
+    expect(tracker.position).toBe(before);
+    // A jump at the zoom it now has is doubted as ever.
+    jump(tracker, viewer, viewer.pages[9]!.top + 300);
+    expect(tracker.doubt).toBeDefined();
+    // And so is a jump right after a zoom, with the zoom's own pair between.
+    tracker.place(tracker.doubt!, 9);
+    viewer.zoom = 0.8;
+    viewer.scrollTo(Math.round((viewer.pages[9]!.top + 300) * 0.8));
+    send(tracker, viewer, 1_500);
+    send(tracker, viewer, 3);
+    expect(tracker.doubt).toBeUndefined();
+    jump(tracker, viewer, (viewer.pages[29]!.top + 300) * 0.8);
+    expect(tracker.doubt).toBeDefined();
+  });
+
+  it('takes no page once the viewer has sent a report that was not read', () => {
+    // The two-page view: pages 4 px narrower, side by side, not followed.
+    const viewer = new FakeViewer(pages(40), 0.5, 700, 1200);
+    const tracker = new PdfViewerTracker(pages(40));
+    send(tracker, viewer, 1_000);
+    jump(tracker, viewer, viewer.pages[19]!.top * 0.5 + 100);
+    const doubt = tracker.doubt!;
+    const before = tracker.position;
+    viewer.time += 2_000;
+    const twoPage = { ...viewer.report(), pageWidth: (816 - 4) * 0.5, pageX: 180, pageY: -40 };
+    expect(tracker.update(twoPage, viewer.time).kind).toBe('same');
+
+    // The capture that answers the doubt shows another view by now.
+    expect(tracker.doubt).toBeUndefined();
+    expect(tracker.place(doubt, 30)).toBeUndefined();
+    expect(tracker.position).toBe(before);
+
+    // A page laid beside another (a report the layout does not fit): the same.
+    const other = new PdfViewerTracker(pages(40));
+    const again = new FakeViewer(pages(40), 0.5, 700, 1200);
+    again.scrollTo(150);
+    send(other, again, 1_000);
+    const first = other.doubt!;
+    again.time += 2_000;
+    expect(other.update({ ...again.report(), pageX: 900 }, again.time).kind).toBe('same');
+    expect(other.doubt).toBeUndefined();
+    expect(other.place(first, 12)).toBeUndefined();
+    // A report that is read again brings a doubt of its own back.
+    send(other, again, 2_000);
+    expect(other.doubt?.viewport).toEqual(again.report());
+    expect(other.place(other.doubt!, 0)).toBeUndefined();
+    expect(other.doubt).toBeUndefined();
+  });
+
+  it('doubts a jump from a page top to a page top that also moves sideways', () => {
+    // A link whose target sits a few pixels across: only `pageX` changes.
+    const viewer = new FakeViewer(pages(40), 1, 700, 600);
+    const tracker = new PdfViewerTracker(pages(40));
+    send(tracker, viewer, 1_000);
+    tracker.place(tracker.doubt!, 0);
+    viewer.scrollTo(viewer.pages[9]!.top - 3);
+    viewer.scrollX = 8;
+    expect(send(tracker, viewer, 800).kind).toBe('same');
+    send(tracker, viewer, 1);
+
+    expect(tracker.place(tracker.doubt!, 9)).toEqual({ index: 9, fraction: 0 });
+  });
+
+  it('has no doubt while the view is turned, and one once it is upright again', () => {
+    const turned = pages(40).map((size) => ({ width: size.height, height: size.width }));
+    const viewer = new FakeViewer(pages(40), 0.8, 700);
+    const tracker = new PdfViewerTracker(pages(40));
+    tracker.setViewerZoom(0.8);
+    send(tracker, viewer, 1_000);
+    tracker.place(tracker.doubt!, 0);
+    viewer.scrollTo(1_500);
+    send(tracker, viewer, 800);
+    expect(tracker.doubt).toBeUndefined();
+
+    // Ctrl+]: the same zoom, pages 1,056 px wide where they were 816.
+    const rotated = new FakeViewer(turned, 0.8, 700);
+    rotated.time = viewer.time;
+    rotated.scrollTo(rotated.pages[1]!.top * 0.8);
+    send(tracker, rotated, 800);
+    rotated.scrollTo(rotated.scroll + 100);
+    send(tracker, rotated, 400);
+    expect(tracker.doubt).toBeUndefined();
+
+    // Upright again: followed from a guess, which the panel may look into.
+    viewer.time = rotated.time;
+    viewer.scrollTo(viewer.pages[7]!.top * 0.8);
+    send(tracker, viewer, 800);
+    tracker.settle();
+    const doubt = tracker.doubt!;
+    expect(doubt.pages).toContain(7);
+    expect(tracker.place(doubt, 7)?.index).toBe(7);
+    expect(tracker.doubt).toBeUndefined();
+  });
+
+  it('doubts the place after a turn back that reads as the top of the PDF', () => {
+    // As Chrome 154 reported it at 100%, in a view narrower than the page,
+    // for a PDF with one wider page: the turn back comes as the page where
+    // the view was scrolled while turned, then the top of that page twice.
+    // Read as a movement that stopped at the top of the PDF, which Home is.
+    const sizes = pages(300).map((size, index) => (index === 149 ? { width: 842, height: 595 } : size));
+    const turned = sizes.map((size) => ({ width: size.height, height: size.width }));
+    const back = (pageY: number, pageX: number): PdfViewerViewport =>
+      ({ pageX, pageY, pageWidth: 816, viewportWidth: 593, viewportHeight: 749 });
+    const turnedBack = (snap: number | undefined) => {
+      const viewer = new FakeViewer(sizes, 1, 749, 593);
+      const tracker = new PdfViewerTracker(sizes);
+      tracker.setViewerZoom(1);
+      send(tracker, viewer, 1_000);
+      tracker.place(tracker.doubt!, 0);
+      for (let step = 0; step < 12; step += 1) {
+        viewer.scrollTo(viewer.scroll + 100);
+        send(tracker, viewer, 50);
+      }
+      expect(tracker.position?.index).toBe(1);
+      const rotated = new FakeViewer(turned, 1, 749, 593);
+      rotated.time = viewer.time;
+      rotated.scrollTo(rotated.pages[4]!.top + 617);
+      expect(send(tracker, rotated, 1_500).kind).toBe('same');
+      expect(tracker.doubt).toBeUndefined();
+
+      const time = rotated.time + 1_500;
+      expect(tracker.update(back(-617, 158), time).kind).toBe('hold');
+      expect(tracker.update(back(3, 5), time + 3.5).kind).toBe('hold');
+      if (snap !== undefined) {
+        expect(tracker.update(back(3, 5), time + 3.5 + snap).kind).toBe('hold');
+      }
+      tracker.settle();
+      // The fake viewer where Chrome's is: page 5, its left edge in view.
+      viewer.time = time + 4 + (snap ?? 0);
+      viewer.scrollX = 153;
+      viewer.scrollTo(viewer.pages[4]!.top - 3);
+      return { tracker, viewer };
+    };
+
+    // The second of the two reports came 0.1 ms after the first. Late, from
+    // a busy viewer, or not at all, the place is a guess all the same.
+    for (const snap of [0.1, 120, undefined]) {
+      const { tracker, viewer } = turnedBack(snap);
+      expect(tracker.position).toEqual({ index: 0, fraction: 0 });
+      const doubt = tracker.doubt!;
+      // Every page but the wide one.
+      expect(doubt.pages).toHaveLength(299);
+      expect(tracker.place(doubt, 4)).toEqual({ index: 4, fraction: 0 });
+
+      // Home after that is the top of the PDF, as ever.
+      for (let frame = 9; frame >= 0; frame -= 1) {
+        viewer.scrollTo(viewer.scroll * (frame / 10));
+        send(tracker, viewer, frame === 9 ? 2_000 : 16);
+      }
+      expect(tracker.settle()).toEqual({ index: 0, fraction: 0 });
+      expect(tracker.doubt).toBeUndefined();
+    }
+  });
+
+  it('doubts the place after a turn back in fit to height that reads as an end of the PDF', () => {
+    // As Chrome 154 reported it, the tab's new zoom told first: where the
+    // page sat while turned (twice), then the top of the page (twice). In
+    // fit to height the top of any page is where the PDF's first page shows
+    // at its top and its last page at its bottom.
+    const sizes = pages(300).map((size, index) => (index === 149 ? { width: 842, height: 595 } : size));
+    const zoom = 0.702626641651032;
+    const at = (pageY: number, pageX: number, pageWidth = 816 * zoom): PdfViewerViewport =>
+      ({ pageX, pageY, pageWidth, viewportWidth: 593, viewportHeight: 749 });
+    for (const snapped of [true, false]) {
+      const viewer = new FakeViewer(sizes, zoom, 749, 593);
+      viewer.scrollX = 108;
+      const tracker = new PdfViewerTracker(sizes);
+      tracker.setViewerZoom(zoom);
+      send(tracker, viewer, 1_000);
+      tracker.place(tracker.doubt!, 0);
+      for (let step = 0; step < 12; step += 1) {
+        viewer.scrollTo(viewer.scroll + 100);
+        send(tracker, viewer, 50);
+      }
+      expect(tracker.position?.index).toBe(1);
+      // Ctrl+]: fit to height turns at 90.7%, a page 957.6 px wide.
+      tracker.setViewerZoom(0.9067796610169492);
+      let time = viewer.time + 1_800;
+      expect(tracker.update(at(2.97, 4.53, 1056 * 0.9067796610169492), time).kind).toBe('same');
+      expect(tracker.doubt).toBeUndefined();
+
+      // Ctrl+[.
+      time += 4_500;
+      tracker.setViewerZoom(zoom);
+      expect(tracker.update(at(270.42, 111.02), time).kind).toBe('move');
+      expect(tracker.update(at(270.16, 111.02), time + 2.2).kind).toBe('move');
+      expect(tracker.update(at(2.11, 3.51), time + 5.2).kind).toBe('hold');
+      if (snapped) expect(tracker.update(at(1.97, 3.02), time + 5.2).kind).toBe('hold');
+      tracker.settle();
+      // The snapped report is 0.14 px off the top: the bottom, then.
+      expect(tracker.position).toEqual({ index: snapped ? 299 : 0, fraction: 0 });
+      expect(tracker.place(tracker.doubt!, 6)).toEqual({ index: 6, fraction: 0 });
+    }
+  });
+
+  it('doubts the place after the two-page view when it reads as the top of the PDF', () => {
+    // As Chrome 154 reported it at 50% for the same PDF: the two-page view
+    // switched off comes as a page somewhere across the view, then the top
+    // of a page twice, 2.5 ms apart.
+    const sizes = pages(300).map((size, index) => (index === 149 ? { width: 842, height: 595 } : size));
+    const at = (pageY: number, pageX: number, pageWidth = 408): PdfViewerViewport =>
+      ({ pageX, pageY, pageWidth, viewportWidth: 593, viewportHeight: 749 });
+    for (const snapped of [true, false]) {
+      const viewer = new FakeViewer(sizes, 0.5, 749, 593);
+      const tracker = new PdfViewerTracker(sizes);
+      tracker.setViewerZoom(0.5);
+      send(tracker, viewer, 1_000);
+      tracker.place(tracker.doubt!, 0);
+      for (let step = 0; step < 12; step += 1) {
+        viewer.scrollTo(viewer.scroll + 100);
+        send(tracker, viewer, 50);
+      }
+      expect(tracker.position?.index).toBe(2);
+      // Two pages wide: each page 4 px narrower at 100%. Not followed.
+      let time = viewer.time + 1_800;
+      expect(tracker.update(at(-132.5, 155.5, 406), time).kind).toBe('same');
+      expect(tracker.update(at(1.5, 2.5, 406), time + 5.7).kind).toBe('same');
+      expect(tracker.doubt).toBeUndefined();
+
+      time += 4_500;
+      expect(tracker.update(at(213.5, -60.5), time).kind).toBe('same');
+      expect(tracker.update(at(1.5, 92.5), time + 3.7).kind).toBe('hold');
+      if (snapped) expect(tracker.update(at(1.5, 92.5), time + 6.2).kind).toBe('hold');
+      tracker.settle();
+      expect(tracker.position).toEqual({ index: 0, fraction: 0 });
+      expect(tracker.place(tracker.doubt!, 16)).toEqual({ index: 16, fraction: 0 });
+    }
+  });
+
+  it('does not doubt Home after a turn back that was read at once', () => {
+    const turned = pages(40).map((size) => ({ width: size.height, height: size.width }));
+    const viewer = new FakeViewer(pages(40), 0.8, 700);
+    const tracker = new PdfViewerTracker(pages(40));
+    tracker.setViewerZoom(0.8);
+    send(tracker, viewer, 1_000);
+    tracker.place(tracker.doubt!, 0);
+    viewer.scrollTo(1_500);
+    send(tracker, viewer, 800);
+    tracker.settle();
+    const rotated = new FakeViewer(turned, 0.8, 700);
+    rotated.time = viewer.time;
+    rotated.scrollTo(rotated.pages[1]!.top * 0.8);
+    send(tracker, rotated, 800);
+
+    // Upright again a little further down: a small move, read at once.
+    viewer.time = rotated.time;
+    viewer.scrollTo(1_530);
+    expect(send(tracker, viewer, 800).kind).toBe('move');
+    expect(tracker.doubt).toBeDefined();
+
+    for (let frame = 9; frame >= 0; frame -= 1) {
+      viewer.scrollTo(viewer.scroll * (frame / 10));
+      send(tracker, viewer, frame === 9 ? 2_000 : 16);
+    }
+    expect(tracker.settle()).toEqual({ index: 0, fraction: 0 });
+    expect(tracker.doubt).toBeUndefined();
+
+    // Turned and back again, far from where it was: one report, held. Home
+    // pressed before the tracker has read it is the top of the PDF as well.
+    rotated.time = viewer.time;
+    send(tracker, rotated, 800);
+    viewer.time = rotated.time;
+    viewer.scrollTo(viewer.pages[20]!.top * 0.8 + 300);
+    expect(send(tracker, viewer, 800).kind).toBe('hold');
+    for (let frame = 9; frame >= 0; frame -= 1) {
+      viewer.scrollTo(viewer.scroll * (frame / 10));
+      send(tracker, viewer, frame === 9 ? 120 : 16);
+    }
+    expect(tracker.settle()).toEqual({ index: 0, fraction: 0 });
+    expect(tracker.doubt).toBeUndefined();
+  });
+
+  it('doubts a jump made while the viewer still scrolls', () => {
+    const viewer = new FakeViewer(pages(300), 1, 700);
+    const tracker = new PdfViewerTracker(pages(300));
+    send(tracker, viewer, 1_000);
+    tracker.place(tracker.doubt!, 0);
+
+    // An outline entry clicked before a wheel turn has stopped: the top of
+    // page 200, and the same place again a millisecond later.
+    for (let frame = 0; frame < 12; frame += 1) {
+      viewer.scrollTo(viewer.scroll + 30);
+      send(tracker, viewer, frame === 0 ? 800 : 16);
+    }
+    expect(tracker.doubt).toBeUndefined();
+    viewer.scrollTo(viewer.pages[199]!.top - 3);
+    expect(send(tracker, viewer, 30).kind).toBe('hold');
+    expect(send(tracker, viewer, 1).kind).toBe('hold');
+    tracker.settle();
+    // Read as the top of the PDF, as before, and doubted.
+    expect(tracker.position).toEqual({ index: 0, fraction: 0 });
+    expect(tracker.place(tracker.doubt!, 199)).toEqual({ index: 199, fraction: 0 });
+
+    // A link followed during a scrollbar drag that is held (3.73 pages a
+    // frame): part-way down page 41.
+    const start = viewer.scroll;
+    for (let frame = 1; frame <= 6; frame += 1) {
+      viewer.scrollTo(start - (frame / 10) * 37.3 * 1070);
+      expect(send(tracker, viewer, frame === 1 ? 800 : 16).kind).toBe('hold');
+    }
+    viewer.scrollTo(viewer.pages[40]!.top + 420);
+    expect(send(tracker, viewer, 16).kind).toBe('hold');
+    expect(send(tracker, viewer, 1).kind).toBe('hold');
+    tracker.settle();
+    expect(tracker.place(tracker.doubt!, 40)).toMatchObject({ index: 40 });
+    expect(tracker.position!.fraction).toBeCloseTo(420 / 1056, 2);
+  });
+
+  it('has no doubt to look into when Simul opens on a turned view', () => {
+    // Fit to width; the tab's zoom comes after the first report.
+    const turned = pages(40).map((size) => ({ width: size.height, height: size.width }));
+    const rotated = new FakeViewer(turned, 0.5563, 749, 593);
+    const tracker = new PdfViewerTracker(pages(40));
+    tracker.setViewerZoom(0.718);
+    send(tracker, rotated, 1_000);
+    expect(tracker.doubt).toBeDefined();
+
+    tracker.setViewerZoom(0.5563);
+    expect(tracker.doubt).toBeUndefined();
+    // Still turned when the tab's zoom is not known any more.
+    tracker.setViewerZoom(undefined);
+    expect(tracker.doubt).toBeUndefined();
+  });
+});
+
 describe('PdfViewerTracker and a view turned a quarter (D123)', () => {
   const turned = (sizes: readonly PdfPagePoints[]) =>
     sizes.map((size) => ({ width: size.height, height: size.width }));

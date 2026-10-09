@@ -183,18 +183,65 @@ on a page once it is drawn.
   page out from Chrome's page layout and from how the viewer moves.
   - Followed: scrolling with the wheel or trackpad; the arrow keys; Page Up,
     Page Down and Space; ArrowRight; these keys held down; Home and End.
-  - Guessed: anything else that jumps in one step, such as the page box, the
-    outline, thumbnails, links, Find, ArrowLeft, or a scrollbar drag on a
-    long PDF. So is the first place when you open Simul with the viewer
-    already partway down. A newly opened or reloaded tab is taken to be at
-    its start (the top, or the address's `#page=N`), and with following on
-    the panel opens there too.
-  - After a wrong guess the panel stays that many pages off as you read on.
-    Home or End from far away puts it right.
+  - Guessed first, then read off the viewer's toolbar: anything that jumps
+    in one step, such as the page box, the outline, thumbnails, links, Find
+    and ArrowLeft. So is the first place when you open Simul with the
+    viewer already partway down, and the place after a turned view is
+    upright again or the two-page view ends. A newly opened or reloaded tab
+    is taken to be at its start (the top, or the address's `#page=N`), and
+    with following on the panel opens there too.
+  - Reading the toolbar: once the viewer has been still for a third of a
+    second after such a move, Simul takes one picture of the tab, keeps
+    only the page number and the page count that Chrome's toolbar shows
+    ("12 / 300"), reads them on your computer with Tesseract.js, and moves
+    the panel to that page. In a small window that takes about a twentieth
+    of a second; on a large high-density screen a quarter of a second or
+    more, because Chrome hands over a picture of the whole tab. If you have
+    scrolled the panel yourself since the guess, it stays where you put it
+    and follows from the right page from then on.
+  - The number is taken only when everything fits: the toolbar is where the
+    viewer says its view begins, the count beside the number is this PDF's
+    own page count, the number has as many digits as the box holds, two
+    readings of it at different sizes agree, and the page is one that fits
+    where the viewer reports its page. Otherwise the guess stays, and the
+    panel stays that many pages off as you read on until the next jump;
+    Home from far away puts it right, and so does End while the viewer
+    shows no scrollbar along its bottom edge.
+  - A page turn that lands on a page's top looks to Simul like a jump there,
+    so it is read off the toolbar too: ArrowRight and ArrowLeft at any
+    zoom, and Page Down, Space and Page Up in fit to page. That is one
+    picture for each such turn.
+  - No picture is taken for scrolling, however fast (the wheel, a trackpad,
+    the scrollbar), for the other keys, or for zooming; none while
+    following is off, and none of a tab that is not the one showing. So a
+    scrollbar drag across a long PDF, or a fling too fast to follow, is
+    still a guess.
+  - End is not always taken for the end. When the PDF is wider than the
+    viewer's view (zoomed in, or once the side panel has made the tab
+    narrower) and Chrome shows a scrollbar along the bottom edge, the panel
+    can stay near where it was, as in 0.6.2, until the next jump or Home.
+  - The guess stays, as in 0.6.2, when Tesseract.js is switched off in
+    Settings (nothing is captured then); when the tab is narrower than
+    about 420 px (Chrome's toolbar then has no page box); when the toolbar
+    is hidden (an address with `#toolbar=0`, or presenting: such a tab is
+    not captured); when Chrome draws its toolbar in forced high-contrast
+    colours, or a menu of the toolbar is open; when Chrome does not allow a
+    picture of the tab (the access the Simul icon gave has lapsed and
+    all-sites access is off; Simul asks for nothing); and while the page
+    box's number is selected or being typed. A toolbar that showed no page
+    box three times running is left alone for a minute.
+  - A jump that also changes the zoom (an outline entry or a link that
+    sets its own zoom or fit) can pass for a zoom at the same place; it is
+    then not looked into and the panel stays where it was.
+  - A jump made while the viewer is still scrolling (an outline entry
+    clicked during a fling) is looked into as well, unless it lands close
+    to where the scrolling was heading: then it can pass for part of the
+    scrolling, and the panel stays on the page it was following.
+  - While Simul is reading scanned pages, a look may wait its turn.
   - Setting the viewer's zoom to what it already is, or switching it to fit
-    to page, at the top of a page looks the same as ArrowRight, and the
-    panel goes a page down. A half turn (two quarter turns) is guessed, as a
-    jump is.
+    to page, at the top of a page looks the same as ArrowRight; the panel
+    goes a page down and the toolbar puts it right. A half turn (two
+    quarter turns) is guessed and read the same way.
   - Pages of different sizes help Simul tell them apart.
   - Sideways scrolling in the viewer is followed too, exactly: the panel is
     scrolled across the page as far as the viewer is. It shows when the
@@ -205,7 +252,8 @@ on a page once it is drawn.
   - Not followed: a PDF opened from the computer, the viewer's two-page view,
     and a view turned a quarter (Rotate, Ctrl+[ and Ctrl+]): the panel stays
     where it is and scrolls on its own until the view is one page wide and
-    upright again. Where the viewer is then is guessed, as after a jump.
+    upright again. Where the viewer is then is guessed and read off the
+    toolbar, as after a jump; a turned view is never captured.
     Simul tells a turned view by the tab's zoom. A PDF that has a page about
     as wide as another is tall (within 1%, as portrait and landscape pages
     of one size) is not noticed as turned, and is then followed wrongly.
@@ -330,6 +378,23 @@ To follow Chrome's PDF viewer, Simul adds a small script to the PDF tab
 that asks the viewer for its scroll reports and passes on five numbers (where
 the most visible page sits and the viewport's size) and the time of each,
 nothing else.
+
+The viewer never says which page it shows; its toolbar does. After a move
+Simul can only guess (a jump, the first place, a view turned back), and only
+on a PDF tab it shows and follows, Simul takes one picture of the tab with
+the same call as image text (`tabs.captureVisibleTab`, under the access the
+Simul icon gave or all-sites access; it asks for nothing more). From the
+picture it keeps the top 56 px for a moment, finds the page box there, and
+makes a small grey picture of two things only: the page number and the page
+count ("12 / 300"). The picture of the tab is let go before anything is
+read, and nothing below the toolbar is ever looked at. The small picture is
+read by the local OCR host as any image is (through the same temporary
+storage, deleted when the reading ends) and what was read stays in memory.
+Nothing is saved, and nothing leaves the computer. A tab whose toolbar is
+hidden is not captured at all. This look does not wait for the image access
+that image text on web pages asks for, and the OCR button does not switch
+it (the button's words are about images on web pages); switching
+Tesseract.js off in Settings does.
 
 On a PDF tab Simul makes one extra request: it downloads the PDF's own URL,
 which the tab has already loaded. Chrome keeps the extension's cache separate

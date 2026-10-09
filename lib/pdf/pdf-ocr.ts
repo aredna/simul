@@ -17,11 +17,15 @@ import {
 } from '../ocr/image-file-pixels';
 import type { ImageTextProviderId } from '../ocr/known-provider-ids';
 import { MAX_OCR_INPUT_PIXELS, type AcquiredImagePixels } from '../ocr/pixel-acquisition';
+import { OCR_NATIVE_PREPROCESSING_VERSION } from '../ocr/preprocessing-profile';
 import {
   TESSERACT_MODEL_VERSION,
   tesseractLanguageGroupFor,
 } from '../ocr/providers/tesseract/language-catalog';
-import type { OcrMinimumConfidence } from '../ocr/result-quality';
+import {
+  OCR_MINIMUM_CONFIDENCE_OPTIONS,
+  type OcrMinimumConfidence,
+} from '../ocr/result-quality';
 import type { ReplicaSourceDocumentIdentity } from '../replica/source-identity';
 import type { SupportedLanguage } from '../translation-provider';
 import type { PdfPagePoints } from './pdf-layout';
@@ -129,6 +133,99 @@ export function pdfOcrRoute(
       words: true,
     }),
   };
+}
+
+/**
+ * How the page box of Chrome's PDF toolbar is read (D133), if it can be:
+ * with Tesseract's English model, whatever the PDF's language, and at the
+ * lowest confidence there is, whatever the reader set for image text.
+ * Tesseract is as sure of a digit it misreads as of one it reads right (94
+ * against 99 in a hundred, measured), and less sure of a short line such as
+ * "5 / 30" that it reads right; what guards the page is the checks made
+ * afterwards against the PDF's own page count and a second reading.
+ */
+export function pdfPageBoxRoute(
+  providerOrder: readonly ImageTextProviderId[],
+): ImageRecognitionRoute | undefined {
+  const group = tesseractLanguageGroupFor('en');
+  if (!canReadScannedPages(providerOrder) || !group) return undefined;
+  return Object.freeze({
+    providerOrder: Object.freeze(['tesseract'] as const),
+    sourceLanguage: 'en',
+    languageGroup: group,
+    modelVersion: TESSERACT_MODEL_VERSION,
+    minimumConfidence: OCR_MINIMUM_CONFIDENCE_OPTIONS[0],
+  });
+}
+
+/** A picture Simul made itself, for its text recognition to read. */
+export interface PdfOcrPicture {
+  /** The picture as a PNG, `width` by `height` pixels. */
+  readonly encoded: Blob;
+  readonly width: number;
+  readonly height: number;
+}
+
+/**
+ * The text of `picture` as Simul's local OCR reads it; `undefined` when it
+ * reads none. The picture goes as it is (no scaling, read as a block).
+ * `nodeId` names it in the PDF's document for the OCR host: a number no
+ * page has. Rejects only with an `AbortError`.
+ */
+export async function readPdfOcrPicture(
+  picture: PdfOcrPicture,
+  identity: { readonly document: ReplicaSourceDocumentIdentity; readonly nodeId: number },
+  route: ImageRecognitionRoute,
+  environment: PdfOcrEnvironment,
+  signal: AbortSignal,
+): Promise<string | undefined> {
+  const { encoded, width, height } = picture;
+  try {
+    signal.throwIfAborted();
+    if (
+      !Number.isSafeInteger(width) || !Number.isSafeInteger(height) ||
+      width < 1 || height < 1 || width * height > MAX_OCR_INPUT_PIXELS || encoded.size < 1
+    ) return undefined;
+    const pixelHash = toHex(await environment.render.digest(await encoded.arrayBuffer()));
+    signal.throwIfAborted();
+    const descriptor: SourceImageDescriptor = Object.freeze({
+      document: identity.document,
+      nodeId: identity.nodeId,
+      sourceKind: 'img',
+      contentRevision: 1,
+      observationRevision: 1,
+      visibility: 'visible',
+      connected: true,
+      renderedWidth: width,
+      renderedHeight: height,
+    });
+    const pixels: AcquiredImagePixels = Object.freeze({
+      descriptor,
+      pixelHash,
+      encoded,
+      bitmapWidth: width,
+      bitmapHeight: height,
+      preprocessingVersion: OCR_NATIVE_PREPROCESSING_VERSION,
+      cropOffsetXCss: 0,
+      cropOffsetYCss: 0,
+      cropWidthCss: width,
+      cropHeightCss: height,
+      renderedWidthCss: width,
+      renderedHeightCss: height,
+    });
+    let recognition = await environment.recognize(pixels, route, signal);
+    if (recognition.status === 'failed' && recognition.code === 'host-overflow') {
+      await (environment.wait ?? wait)(PDF_OCR_RETRY_DELAY_MS, signal);
+      recognition = await environment.recognize(pixels, route, signal);
+    }
+    signal.throwIfAborted();
+    if (recognition.status !== 'complete') return undefined;
+    const text = recognition.result.transcript.trim();
+    return text === '' ? undefined : text;
+  } catch {
+    if (signal.aborted) throw abortError(signal);
+    return undefined;
+  }
 }
 
 export type PdfScannedPageResult =
@@ -495,4 +592,10 @@ function abortError(signal: AbortSignal): DOMException {
   return reason instanceof DOMException && reason.name === 'AbortError'
     ? reason
     : new DOMException('Reading the scanned page was cancelled.', 'AbortError');
+}
+
+function toHex(value: ArrayBuffer): string {
+  return [...new Uint8Array(value)]
+    .map((byte) => byte.toString(16).padStart(2, '0'))
+    .join('');
 }

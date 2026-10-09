@@ -3,7 +3,7 @@ import {
   createPdfViewerPortName,
   readPdfViewerPortMessage,
 } from '../../lib/pdf/pdf-viewer-protocol';
-import { PdfViewerTracker } from '../../lib/pdf/pdf-viewer-tracker';
+import { PdfViewerTracker, type PdfViewerDoubt } from '../../lib/pdf/pdf-viewer-tracker';
 
 /** The PDF tab whose viewer is followed. */
 export interface PdfViewerTarget {
@@ -32,11 +32,33 @@ export interface PdfViewerFollowerDependencies {
   /** Content-free: whether the tab's viewer could be reached. */
   readonly onDiagnostic?: (state: 'connected' | 'unavailable') => void;
   /**
-   * The tab's zoom, which is the viewer's (D104); `undefined` when unknown.
-   * A view turned a quarter shows by it (D123).
+   * Finds which page a doubted reading shows, from the page box of the
+   * viewer's toolbar in a capture of the tab (D133). Resolves with the page
+   * (0-based), with `undefined` when it cannot tell, or with `stop` when
+   * looking again is no use: Chrome does not allow the capture. Then it is
+   * not asked again until the PDF is shown anew (a Refresh, another PDF).
+   * Returns `undefined` at once when it cannot try (Simul's text
+   * recognition is off).
    */
+  readonly locate?: (
+    target: PdfViewerTarget,
+    doubt: PdfViewerDoubt,
+    signal: AbortSignal,
+  ) => Promise<number | undefined | 'stop'> | undefined;
+  /** The tab's zoom, which is the viewer's (D104); `undefined` when unknown. */
   readonly viewerZoom?: () => number | undefined;
 }
+
+/**
+ * The viewer must have been still this long before the tab is captured:
+ * longer than the tracker holds a movement, and time for the toolbar to
+ * show the page the viewer went to.
+ */
+export const PDF_LOCATE_REST_MS = 350;
+/** One doubt is looked into at most this many times. */
+export const PDF_LOCATE_MAX_TRIES = 3;
+// The view counts as where the follower put it within this share of a page.
+const SAME_PLACE_SHARE = 0.02;
 
 interface Session {
   readonly target: PdfViewerTarget;
@@ -48,6 +70,19 @@ interface Session {
   left: number | undefined;
   connection: PdfViewerConnection | undefined;
   timer: ReturnType<typeof setTimeout> | undefined;
+  /** Waits for the viewer to rest before a doubt is looked into. */
+  locateTimer: ReturnType<typeof setTimeout> | undefined;
+  /** Stops a look in progress. */
+  locating: AbortController | undefined;
+  /** A rest came while a look ran: look again when it ends. */
+  locateAgain: boolean;
+  /** The doubt last looked into and how many times. */
+  episode: number | undefined;
+  tries: number;
+  /** Looking is no use here (no capture allowed): no more looks. */
+  stopped: boolean;
+  /** Where the follower last put the view. */
+  movedTo: PdfReadingPosition | undefined;
 }
 
 /**
@@ -57,7 +92,14 @@ interface Session {
  * moved, so the reader's own scrolling of the view stays until then. The
  * viewer's sideways place is followed the same way, apart from its place
  * down the PDF (D115). A tab where nothing answers (no grant, Edge, a
- * changed viewer) is not followed, nor is a view turned a quarter (D123).
+ * changed viewer) is not followed.
+ *
+ * A reading that could be whole pages off (a jump, the first report) is
+ * looked into once the viewer has rested (D133): `locate` reads the page
+ * from one capture of the tab, the tracker takes it, and the view goes
+ * there if it is still where the guess put it. Only while following is on;
+ * without `locate`, or when it finds nothing, the guess stays. No page is
+ * taken without a reading, however few pages fit the report.
  */
 export class PdfViewerFollower {
   readonly #dependencies: PdfViewerFollowerDependencies;
@@ -106,10 +148,19 @@ export class PdfViewerFollower {
       left: undefined,
       connection: undefined,
       timer: undefined,
+      locateTimer: undefined,
+      locating: undefined,
+      locateAgain: false,
+      episode: undefined,
+      tries: 0,
+      stopped: false,
+      movedTo: undefined,
     };
     this.#session = session;
     // The view was mounted again at its far left: back to the kept place.
     this.#followLeft(session);
+    // A doubt the kept guess still has is looked into (a Refresh while one waited).
+    if (kept) this.#rest(session);
     let connecting: Promise<PdfViewerConnection>;
     try {
       connecting = this.#dependencies.connect(target);
@@ -151,20 +202,30 @@ export class PdfViewerFollower {
     const session = this.#session;
     if (!session || !this.#dependencies.enabled()) return;
     const position = session.tracker.position;
-    if (position) this.#move(position);
+    if (position) this.#move(session, position);
     session.left = undefined;
     this.#followLeft(session);
+    this.#rest(session);
   }
 
-  /** The tab's zoom changed: a view turned a quarter shows by it (D123). */
+  /**
+   * The tab's zoom changed: a view turned a quarter shows by it (D123), and
+   * so do the pages a doubted report fits, which may be looked into now.
+   */
   zoomChanged(): void {
     const session = this.#session;
-    if (session) session.tracker.setViewerZoom(this.#dependencies.viewerZoom?.());
+    if (!session) return;
+    session.tracker.setViewerZoom(this.#dependencies.viewerZoom?.());
+    this.#rest(session);
   }
 
   #end(session: Session): void {
     if (session.timer !== undefined) clearTimeout(session.timer);
     session.timer = undefined;
+    if (session.locateTimer !== undefined) clearTimeout(session.locateTimer);
+    session.locateTimer = undefined;
+    session.locating?.abort();
+    session.locating = undefined;
     if (this.#session === session) {
       this.#session = undefined;
       this.#previous = session;
@@ -181,14 +242,17 @@ export class PdfViewerFollower {
     }
     tracker.setViewerZoom(this.#dependencies.viewerZoom?.());
     const track = tracker.update(report, report.time);
+    this.#rest(session);
     if (track.kind === 'hold') {
       if (session.timer !== undefined) clearTimeout(session.timer);
       session.timer = setTimeout(() => {
         session.timer = undefined;
         if (this.#session !== session) return;
         const position = tracker.settle();
-        if (position && this.#dependencies.enabled()) this.#move(position);
+        if (position && this.#dependencies.enabled()) this.#move(session, position);
         this.#followLeft(session);
+        // The held movement is read now: where it ended may be a guess.
+        this.#rest(session);
       }, track.wait);
       return;
     }
@@ -197,8 +261,100 @@ export class PdfViewerFollower {
       clearTimeout(session.timer);
       session.timer = undefined;
     }
-    if (track.kind === 'move' && this.#dependencies.enabled()) this.#move(track.position);
+    if (track.kind === 'move' && this.#dependencies.enabled()) this.#move(session, track.position);
     this.#followLeft(session);
+  }
+
+  /** The viewer moved, or may be looked at again: wait for it to rest. */
+  #rest(session: Session): void {
+    if (!this.#dependencies.locate || session.stopped) return;
+    if (session.locateTimer !== undefined) clearTimeout(session.locateTimer);
+    session.locateTimer = setTimeout(() => {
+      session.locateTimer = undefined;
+      void this.#locate(session);
+    }, PDF_LOCATE_REST_MS);
+  }
+
+  /**
+   * Looks into the tracker's doubt, if it has one: one capture of the tab,
+   * only while following is on. The page found is taken only if the viewer
+   * has not moved since; if it has, the next rest looks again.
+   */
+  async #locate(session: Session): Promise<void> {
+    const locate = this.#dependencies.locate;
+    if (
+      this.#session !== session ||
+      !locate ||
+      session.stopped ||
+      !this.#dependencies.enabled()
+    ) return;
+    if (session.locating) {
+      session.locateAgain = true;
+      return;
+    }
+    const { tracker } = session;
+    const doubt = tracker.doubt;
+    if (!doubt) return;
+    if (doubt.episode !== session.episode) {
+      session.episode = doubt.episode;
+      session.tries = 0;
+    }
+    if (session.tries >= PDF_LOCATE_MAX_TRIES) return;
+    const stop = new AbortController();
+    let locating: Promise<number | undefined | 'stop'> | undefined;
+    try {
+      locating = locate(session.target, doubt, stop.signal);
+    } catch {
+      return;
+    }
+    // It cannot try: nothing was captured, and the try does not count.
+    if (!locating) return;
+    session.tries += 1;
+    session.locating = stop;
+    let page: number | undefined | 'stop';
+    try {
+      page = await locating;
+    } catch {
+      page = undefined;
+    }
+    if (session.locating === stop) session.locating = undefined;
+    if (this.#session !== session || stop.signal.aborted) return;
+    if (page === 'stop') {
+      // No grant for this tab: the guesses stay.
+      session.stopped = true;
+      return;
+    }
+    if (page !== undefined) this.#place(session, doubt, page);
+    if (session.locateAgain) {
+      session.locateAgain = false;
+      this.#rest(session);
+    }
+  }
+
+  /**
+   * The tracker takes `page` for its doubt. The view goes there if it is
+   * still where the guess put it: the reader's own scrolling since stays.
+   */
+  #place(session: Session, doubt: PdfViewerDoubt, page: number): void {
+    const position = session.tracker.place(doubt, page);
+    if (position && this.#dependencies.enabled() && this.#viewWhereMoved(session)) {
+      this.#move(session, position);
+    }
+    this.#followLeft(session);
+  }
+
+  /** Whether the view is still where the follower last put it. */
+  #viewWhereMoved(session: Session): boolean {
+    const moved = session.movedTo;
+    if (!moved) return true;
+    let now: PdfReadingPosition | undefined;
+    try {
+      now = this.#dependencies.view.readingPosition();
+    } catch {
+      return false;
+    }
+    return now !== undefined &&
+      Math.abs(now.index + now.fraction - (moved.index + moved.fraction)) <= SAME_PLACE_SHARE;
   }
 
   /**
@@ -224,9 +380,11 @@ export class PdfViewerFollower {
     }
   }
 
-  #move(position: PdfReadingPosition): void {
+  #move(session: Session, position: PdfReadingPosition): void {
     try {
       this.#dependencies.view.followPosition(position);
+      // Where the view is now: the end of the PDF stops it short.
+      session.movedTo = this.#dependencies.view.readingPosition() ?? position;
     } catch {
       // Following is a convenience; the view carries on.
     }

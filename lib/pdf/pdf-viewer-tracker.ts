@@ -69,6 +69,18 @@ const PAGE_TOP_EXACT = 0.1;
 // The snapped report of a jump follows its first report within this time;
 // a held key repeats more slowly (about every 30 ms).
 const SNAP_REPORT_MS = 20;
+// A jump's second report is within this (screen px) of its first: the snap
+// to whole pixels moves it by under half a pixel, and scrolling by one or more.
+const REPEATED_REPORT = 0.9;
+// Within a movement, a report this far (screen px) from the one before it
+// is a step, not a frame of scrolling that slows to a stop: the same place
+// again at once is then a jump made while the viewer still scrolled.
+const JUMP_STEP = 8;
+// And "at once" is then within this time, half a frame at 60 Hz: the next
+// frame of a movement that moved whole pages reports the same place too, on
+// another page. Chrome 154's snapped report came 0.1 to 2.5 ms after the
+// first; Chrome 138's, on a busy machine, 2.5 to 10.5 ms, so some are missed.
+const SNAP_IN_MOVEMENT_MS = 8;
 // A held ArrowRight's report barely differs from the last (the snapping).
 const HELD_PAGE_TOP_MOVE = 0.75;
 // One animation frame.
@@ -112,6 +124,13 @@ interface Hold {
   last: PdfViewerViewport;
   /** Reports held: one for a lone jump, more for a movement. */
   frames: number;
+  /** The last report held was a step away from the one before it. */
+  stepped: boolean;
+  /**
+   * A place reached in one step came twice at once: a jump, wherever it
+   * stopped (D133).
+   */
+  jump: boolean;
 }
 
 /** A lone report that is either a small scroll or a page key step. */
@@ -119,6 +138,22 @@ interface KeyStep {
   readonly key: Candidate;
   readonly scroll: Candidate;
   readonly viewport: PdfViewerViewport;
+}
+
+/**
+ * A reading that could be whole pages off (D133): the report says where a
+ * page sits, and every page in `pages` fits it. The panel may find out
+ * which page it is some other way and say so with `place`.
+ */
+export interface PdfViewerDoubt {
+  /** The report as the tracker read it. */
+  readonly viewport: PdfViewerViewport;
+  /** The page (0-based) the tracker took the report to show. */
+  readonly page: number;
+  /** Every page the report fits, the tracker's own among them. */
+  readonly pages: readonly number[];
+  /** Counts the guesses: a later guess is another doubt. */
+  readonly episode: number;
 }
 
 /**
@@ -147,6 +182,15 @@ export type PdfViewerTrack =
  * then read as the top or bottom of the PDF when it ends there (Home, End),
  * else as the page nearest where it began. The two-page view is noticed and
  * not followed, and so is a view turned a quarter (D123).
+ *
+ * A reading that could be whole pages off is a `doubt` (D133): the first
+ * report, a report that came twice at once (a jump: the page box, an
+ * outline entry, a link; also one made while the viewer still scrolled), a
+ * lone report at a page top (ArrowRight, a page key in fit to page), and
+ * what the viewer reports as a turned view or the two-page view ends,
+ * however that is read. Scrolling is never one, however fast. A doubt stays
+ * through the scrolling that follows, until the panel says which page it
+ * was (`place`) or the viewer goes to the top or bottom of the PDF.
  *
  * Sideways there is nothing to guess (D115): `pageX` says how far the viewer
  * is scrolled across the PDF's width, whichever page it names. `left` is
@@ -204,6 +248,22 @@ export class PdfViewerTracker {
   #turned = false;
   /** The latest report, read or not. */
   #lastReport: PdfViewerViewport | undefined;
+  /** Whether the place could be whole pages off, and how many guesses there were. */
+  #unsure = false;
+  #episode = 0;
+  /**
+   * The view is followed again (upright, one page wide) and what it came
+   * back with is still being read: a guess from where the place was, even
+   * when it reads as the top or the bottom of the PDF. Chrome puts a view
+   * turned back at the top of its page, which looks like either.
+   */
+  #returned = false;
+  /**
+   * The last report was read as a zoom or a resize at the same place.
+   * Chrome reports a zoom twice at once, as it does a jump: the second
+   * report is then no jump.
+   */
+  #zoomed = false;
 
   constructor(pageSizes: readonly PdfPagePoints[]) {
     let top = 0;
@@ -287,12 +347,94 @@ export class PdfViewerTracker {
     this.#quarterTurned(report);
   }
 
+  /**
+   * The reading the tracker is unsure of, while the viewer is still;
+   * `undefined` when the place is known, or when the viewer has sent a
+   * report since that is not read yet (a movement or a key step held) or
+   * never will be (a view that is not followed).
+   *
+   * `pages` are the pages as wide as the report says at the viewer's zoom,
+   * which is the tab's give or take its lag (`MIN_ZOOM_DELTA`): no tighter,
+   * or a page a little wider or narrower than its neighbours would pass
+   * for the only one that fits after a small resize in a fit mode. None
+   * fits while Chrome has not told of a zoom yet: then there is no doubt to
+   * look into until it has. Without the tab's zoom they are the pages as
+   * wide as the page guessed.
+   */
+  get doubt(): PdfViewerDoubt | undefined {
+    const fix = this.#fix;
+    if (
+      !this.#unsure ||
+      !fix ||
+      fix.viewport !== this.#lastReport ||
+      this.#turned ||
+      this.#twoPageZoom !== undefined
+    ) return undefined;
+    const all = this.#candidates(fix.viewport);
+    const zoom = this.#viewerZoom;
+    const fitting = zoom === undefined
+      ? all.filter((candidate) => Math.abs(candidate.zoom / fix.zoom - 1) <= SAME_ZOOM)
+      : all.filter((candidate) => {
+          const width = this.#pages[candidate.page]!.width;
+          return Math.abs(fix.viewport.pageWidth - width * zoom) <=
+            MIN_ZOOM_DELTA * width + TURNED_WIDTH_TOLERANCE;
+        });
+    if (fitting.length === 0) return undefined;
+    return {
+      viewport: fix.viewport,
+      page: fix.page,
+      pages: fitting.map((candidate) => candidate.page),
+      episode: this.#episode,
+    };
+  }
+
+  /**
+   * Takes `page` (0-based) as the page the doubted report shows. Returns
+   * the new place when that moves it; `undefined` when the place was right
+   * already, when the viewer has reported since (the doubt stays; a report
+   * held or not read counts, so a view that is not followed is not
+   * placed), or when the page does not fit the report.
+   */
+  place(doubt: PdfViewerDoubt, page: number): PdfReadingPosition | undefined {
+    const fix = this.#fix;
+    if (!fix || fix.viewport !== doubt.viewport || this.#lastReport !== doubt.viewport) {
+      return undefined;
+    }
+    const candidate = doubt.pages.includes(page)
+      ? this.#candidates(fix.viewport).find((entry) => entry.page === page)
+      : undefined;
+    if (!candidate) return undefined;
+    this.#unsure = false;
+    if (candidate.page === fix.page) return undefined;
+    this.#setFix({
+      page: candidate.page,
+      y: candidate.y,
+      zoom: candidate.zoom,
+      viewport: fix.viewport,
+    });
+    // What was read before belongs to the place that was wrong.
+    this.#speed = 0;
+    this.#lastStep = 0;
+    this.#jumpFrom = undefined;
+    this.#jumpInstead = false;
+    this.#keyUndo = undefined;
+    this.#lastPageKey = false;
+    this.#position = this.#readingPosition(candidate.y);
+    return this.#position;
+  }
+
   update(viewport: PdfViewerViewport, time: number): PdfViewerTrack {
     if (this.#pages.length === 0) return { kind: 'same' };
     const elapsed = this.#lastTime === undefined || !Number.isFinite(time)
       ? Number.POSITIVE_INFINITY
       : time - this.#lastTime;
     this.#lastTime = time;
+    // A new movement, with all that the view came back with read (a report
+    // held or not read is not).
+    if (
+      !(elapsed >= 0 && elapsed <= PDF_VIEWER_STREAM_GAP_MS) &&
+      this.#fix?.viewport === this.#lastReport
+    ) this.#returned = false;
     this.#lastReport = viewport;
     // A view turned a quarter has other page positions: not followed.
     if (this.#quarterTurned(viewport)) return { kind: 'same' };
@@ -301,6 +443,8 @@ export class PdfViewerTracker {
     const lone = !(elapsed >= 0 && elapsed <= PDF_VIEWER_STREAM_GAP_MS);
     const previousLone = this.#previousLone;
     this.#previousLone = lone;
+    const zoomed = this.#zoomed;
+    this.#zoomed = false;
     const before = this.#position;
     const keyUndo = this.#keyUndo;
     this.#keyUndo = undefined;
@@ -308,8 +452,23 @@ export class PdfViewerTracker {
     if (this.#hold) {
       const within = this.#hold.frames > 1 ? PDF_VIEWER_MOVEMENT_SETTLE_MS : PDF_VIEWER_STREAM_GAP_MS;
       if (elapsed >= 0 && elapsed <= within) {
-        this.#hold.last = viewport;
-        this.#hold.frames += 1;
+        const hold = this.#hold;
+        const movedY = Math.abs(viewport.pageY - hold.last.pageY);
+        const movedX = Math.abs(viewport.pageX - hold.last.pageX);
+        // A jump is a place reached in one step and reported again at
+        // once, alone or while the viewer still scrolled (an outline entry
+        // clicked during a fling). The last frames of a movement that slows
+        // to a stop come as close together, each a small step on from the
+        // one before, and are none; nor is a frame that moved whole pages.
+        if (
+          hold.stepped &&
+          elapsed <= (hold.frames === 1 ? SNAP_REPORT_MS : SNAP_IN_MOVEMENT_MS) &&
+          movedY < REPEATED_REPORT &&
+          movedX < REPEATED_REPORT
+        ) hold.jump = true;
+        hold.stepped = movedY > JUMP_STEP || movedX > JUMP_STEP;
+        hold.last = viewport;
+        hold.frames += 1;
         return { kind: 'hold', wait: PDF_VIEWER_MOVEMENT_SETTLE_MS };
       }
       // The held movement stopped before its settle ran: read it first.
@@ -325,7 +484,7 @@ export class PdfViewerTracker {
       const key = lone || (this.#lastPageKey && this.#repeatsKey(keyStep, viewport, elapsed));
       this.#accept(key ? keyStep.key : keyStep.scroll, keyStep.viewport, 0);
     }
-    const track = this.#read(viewport, elapsed, lone, previousLone);
+    const track = this.#read(viewport, elapsed, lone, previousLone, zoomed);
     // A held movement or key read just now moved the place even when this
     // report did not.
     if (track.kind === 'same' && this.#position !== before && this.#position) {
@@ -339,6 +498,7 @@ export class PdfViewerTracker {
     elapsed: number,
     lone: boolean,
     previousLone: boolean,
+    zoomed: boolean,
   ): PdfViewerTrack {
     const fix = this.#fix;
     const jumpInstead = this.#jumpInstead;
@@ -352,11 +512,27 @@ export class PdfViewerTracker {
       // PDF's usual width) is likelier than a nearer page of another size.
       const width = this.#anchorWidth ?? this.#usualWidth;
       const alike = all.filter((candidate) => this.#pages[candidate.page]!.width === width);
+      // The viewer may have been scrolled before the panel opened.
+      this.#guess();
       return this.#accept(nearest(alike.length > 0 ? alike : all, this.#anchorY), viewport, 0);
     }
 
     const sameZoom = sameZoomCandidates(all, fix, viewport);
     const candidates = sameZoom.length > 0 ? sameZoom : all;
+    // A jump (the page box, an outline entry, a link, a thumbnail) reports
+    // twice at once: its place, then that place snapped to whole pixels.
+    // Scrolling never repeats a place. Wherever the first report was read
+    // to be, the page could be any (D133). A zoom reports twice too, and
+    // keeps its page.
+    if (
+      !lone &&
+      previousLone &&
+      !zoomed &&
+      elapsed <= SNAP_REPORT_MS &&
+      sameZoom.length > 0 &&
+      Math.abs(viewport.pageY - fix.viewport.pageY) < REPEATED_REPORT &&
+      Math.abs(viewport.pageX - fix.viewport.pageX) < REPEATED_REPORT
+    ) this.#guess();
     // Scrolling sideways moves only `pageX`: the same place.
     if (
       sameZoom.length > 0 &&
@@ -376,7 +552,11 @@ export class PdfViewerTracker {
     ) {
       // Snapped by up to half a pixel from the exact page top.
       const jump = this.#atTopOfNextPage(candidates, jumpFrom, 1);
-      if (jump) return this.#accept(jump, viewport, 0);
+      if (jump) {
+        // ArrowRight, or the page box, an outline entry or a link.
+        this.#guess();
+        return this.#accept(jump, viewport, 0);
+      }
     }
 
     if (lone && sameZoom.length > 0) {
@@ -392,7 +572,14 @@ export class PdfViewerTracker {
       }
       if (key) return this.#accept(key, viewport, 0);
       if (Math.abs(scroll.y - fix.y) * scroll.zoom > LARGE_MOVE) {
-        this.#hold = { from: fix, speed: 0, last: viewport, frames: 1 };
+        this.#hold = {
+          from: fix,
+          speed: 0,
+          last: viewport,
+          frames: 1,
+          stepped: true,
+          jump: false,
+        };
         return { kind: 'hold', wait: PDF_VIEWER_SETTLE_MS };
       }
     }
@@ -422,16 +609,27 @@ export class PdfViewerTracker {
       // the same place, so the reader's own scrolling of the panel stays.
       if (sameZoom.length === 0 && Math.abs(best.y - fix.y) * best.zoom < 1) {
         this.#setFix({ page: best.page, y: best.y, zoom: best.zoom, viewport });
+        this.#zoomed = true;
         return { kind: 'same' };
       }
       const speed = lone ? 0 : (best.y - fix.y) / Math.max(1, elapsed);
       return this.#accept(best, viewport, clamp(speed, -MAX_SPEED, MAX_SPEED));
     }
-    // A lone jump (page box, outline, link, find): nearest is the best guess.
+    // A lone report somewhere else: nearest is the best reading. A jump
+    // (page box, outline, link, find) reports again at once and is doubted
+    // then; a single step of the wheel does not, and is not.
     if (lone) return this.#accept(best, viewport, 0);
     // A movement's second frame has only its first frame's step for speed.
     const speed = previousLone ? this.#lastStep / FRAME_MS : this.#speed;
-    this.#hold = { from: fix, speed: clamp(speed, -MAX_SPEED, MAX_SPEED), last: viewport, frames: 2 };
+    this.#hold = {
+      from: fix,
+      speed: clamp(speed, -MAX_SPEED, MAX_SPEED),
+      last: viewport,
+      frames: 2,
+      stepped: Math.abs(viewport.pageY - fix.viewport.pageY) > JUMP_STEP ||
+        Math.abs(viewport.pageX - fix.viewport.pageX) > JUMP_STEP,
+      jump: false,
+    };
     return { kind: 'hold', wait: PDF_VIEWER_MOVEMENT_SETTLE_MS };
   }
 
@@ -499,6 +697,8 @@ export class PdfViewerTracker {
       if (fits(twoPageZoom, 0) || (viewerZoom !== undefined && fits(viewerZoom, 0))) {
         // One page wide again; the place is guessed from where it was.
         this.#twoPageZoom = undefined;
+        this.#guess();
+        this.#returned = true;
         return false;
       }
       // Zoomed while two pages wide: still two pages wide.
@@ -550,6 +750,8 @@ export class PdfViewerTracker {
       if (!upright) return true;
       // Upright again; the place is guessed from where it was.
       this.#turned = false;
+      this.#guess();
+      this.#returned = true;
       return false;
     }
     if (upright || !this.#fitsLength(viewport, this.#heights, zoom)) return false;
@@ -570,6 +772,12 @@ export class PdfViewerTracker {
   #upright(viewport: PdfViewerViewport, zoom: number): boolean {
     return this.#widths.some((width) =>
       Math.abs(viewport.pageWidth - width * zoom) <= MIN_ZOOM_DELTA * width + TURNED_WIDTH_TOLERANCE);
+  }
+
+  /** The reading that follows could be whole pages off. */
+  #guess(): void {
+    this.#unsure = true;
+    this.#episode += 1;
   }
 
   /**
@@ -616,7 +824,10 @@ export class PdfViewerTracker {
       Math.abs(moved(candidate) - PDF_VIEWER_ARROW_STEP) <= ARROW_TOLERANCE);
     if (arrow) {
       // An arrow up onto a page top, or ArrowRight: the snap report decides.
-      if (next && next !== arrow) this.#jumpInstead = true;
+      if (next && next !== arrow) {
+        this.#jumpInstead = true;
+        this.#guess();
+      }
       return arrow;
     }
     const documentTop = candidates.find((candidate) =>
@@ -627,10 +838,18 @@ export class PdfViewerTracker {
       fromTop > 1e-6 &&
       fromTop <= PDF_VIEWER_PAGE_KEY_SHARE * viewport.viewportHeight + PAGE_KEY_TOLERANCE
     ) {
-      if (next && next !== documentTop) this.#jumpInstead = true;
+      if (next && next !== documentTop) {
+        this.#jumpInstead = true;
+        this.#guess();
+      }
       return documentTop;
     }
-    if (next) return next;
+    // ArrowRight goes here; so do the page box, an outline entry and a link
+    // to a page top, wherever that page is.
+    if (next) {
+      this.#guess();
+      return next;
+    }
     if (moved(nearest(candidates, fix.y)) <= SMALL_MOVE) return undefined;
     // PageDown cut short by the end of the PDF stops exactly at its bottom.
     return this.#cutShortAtBottom(candidates, fix, viewport);
@@ -745,6 +964,16 @@ export class PdfViewerTracker {
     const decay = 0.95;
     const travel = hold.speed * FRAME_MS * decay * (1 - decay ** hold.frames) / (1 - decay);
     const chosen = top ?? bottom ?? nearest(candidates, hold.from.y + travel);
+    // A jump, wherever it stopped, is a guess: a jump to any page top looks
+    // like the top of the PDF. So is what a view came back with. The ends
+    // of the PDF are places of their own when a movement stopped there
+    // (Home, End). A movement that stopped anywhere else (the wheel, a
+    // fling, a scrollbar drag) is read as it always was and is no new
+    // doubt: a look then could find a number typed into the page box and
+    // not entered, which scrolling within a page leaves there.
+    if (hold.jump || this.#returned) this.#guess();
+    else if (top ?? bottom) this.#unsure = false;
+    this.#returned = false;
     const result = this.#accept(chosen, hold.last, 0);
     return result.kind === 'move' ? result.position : undefined;
   }

@@ -13,7 +13,9 @@ import {
   canReadScannedPages,
   isScannedPage,
   pdfOcrRoute,
+  pdfPageBoxRoute,
   probeScannedLanguage,
+  readPdfOcrPicture,
   readScannedPage,
   type PdfOcrEnvironment,
 } from '../../lib/pdf/pdf-ocr';
@@ -21,10 +23,16 @@ import { tesseractLanguageGroupFor } from '../../lib/ocr/providers/tesseract/lan
 import { PDF_SCAN_TEXT_SHARE, pdfTextShare } from '../../lib/pdf/pdf-scanned-page';
 import type { PdfPageText } from '../../lib/pdf/pdf-text-surface';
 import { PdfjsOpenError, type PdfDocumentHandle } from '../../lib/pdf/pdfjs-runtime';
+import type { PdfViewerDoubt } from '../../lib/pdf/pdf-viewer-tracker';
 import { pdfTextBlocks, type PdfTextBlock } from '../../lib/pdf/text-blocks';
 import type { ReplicaSourceDocumentIdentity } from '../../lib/replica/source-identity';
 import type { SupportedLanguage } from '../../lib/translation-provider';
 import { uiLanguageName, uiText, type UiText } from '../../lib/ui-text';
+import type {
+  PdfLocateDiagnostic,
+  PdfLocateResult,
+  PdfPageBoxRequest,
+} from './pdf-page-box-reader';
 import type { PdfViewSurface } from './pdf-view';
 import type { PdfViewerTarget } from './pdf-viewer-follower';
 
@@ -54,7 +62,9 @@ export type PdfDiagnostic =
       readonly milliseconds: number;
     }
   /** Whether the tab's PDF viewer could be reached, to follow it (D108). */
-  | { readonly stage: 'follow'; readonly state: 'connected' | 'unavailable' };
+  | { readonly stage: 'follow'; readonly state: 'connected' | 'unavailable' }
+  /** How a look at the viewer's toolbar for its page ended (D133). */
+  | PdfLocateDiagnostic;
 
 /** How the last reading of scanned pages ended. */
 export type PdfScannedReadingOutcome =
@@ -131,6 +141,10 @@ export interface PdfControllerDependencies {
     stop(): void;
     /** Whether the view moves with the viewer now (Follow source scrolling). */
     readonly following?: boolean;
+  };
+  /** Reads the viewer's page off its toolbar, from a capture of the tab (D133). */
+  readonly pageBoxReader?: {
+    locate(request: PdfPageBoxRequest): Promise<PdfLocateResult>;
   };
 }
 
@@ -710,6 +724,51 @@ export class PdfController {
   /** The translation surface's document, while its PDF is shown. */
   get textDocument(): ReplicaSourceDocumentIdentity | undefined {
     return this.#document ? this.#dependencies.surface?.document : undefined;
+  }
+
+  /**
+   * Which page of the shown PDF the viewer in `target`'s tab shows, for a
+   * reading the tracker is unsure of (D133): a promise of the page
+   * (0-based), of `undefined` when the toolbar's page box did not tell, or
+   * of `stop` when looking again is no use (Chrome does not let the tab be
+   * captured). Returns `undefined` at once, with no capture taken, when it
+   * cannot try: another PDF shows, or Simul's own text recognition
+   * (Tesseract) is not among the reading methods in use.
+   */
+  locatePage(
+    target: PdfViewerTarget,
+    doubt: PdfViewerDoubt,
+    signal: AbortSignal,
+  ): Promise<PdfLocateResult> | undefined {
+    const { pageBoxReader, ocr, surface } = this.#dependencies;
+    const document = this.#document;
+    const pages = this.#pages;
+    const sourceDocument = surface?.document;
+    if (
+      !pageBoxReader ||
+      !ocr ||
+      !document ||
+      !pages ||
+      !sourceDocument ||
+      this.#shownViewerDocument !== target.documentId
+    ) return undefined;
+    const route = pdfPageBoxRoute(ocr.providerOrder());
+    if (!route) return undefined;
+    const pageCount = pages.sizes.length;
+    return pageBoxReader.locate({
+      tabId: target.tabId,
+      doubt,
+      pageCount,
+      // The picture is no page of the PDF: a number past its last page.
+      read: (picture, reading) => readPdfOcrPicture(
+        picture,
+        { document: sourceDocument, nodeId: pageCount + 1 },
+        route,
+        ocr.environment,
+        reading,
+      ),
+      signal,
+    }).then((page) => (this.#document === document ? page : undefined));
   }
 
   /** Destroys the shown document and empties and hides the view. Idempotent. */

@@ -1007,7 +1007,8 @@ shell and the mirror has nothing to copy (D103).
       a zoom before the viewer reports it). While turned nothing is read, a
       held movement or key is dropped, and a width that fits no page at the
       zoom is taken for a zoom Chrome has not told of yet. Upright again,
-      the place is guessed from the last place read, as after a jump. In
+      the place is guessed from the last place read, as after a jump, and
+      the page box settles it (D133). In
       fit to page and fit to height Chrome then reports the old place and,
       about 40 ms later, a page's top; the two can read as a movement that
       stopped at the end of the PDF, because there one page and its insets
@@ -1052,7 +1053,12 @@ shell and the mirror has nothing to copy (D103).
       quiet: as the top or bottom of the PDF when it stopped there (Home,
       End), else as the page nearest where the last trusted speed, slowing,
       would have carried it. A lone held jump takes the nearest candidate
-      after 150 ms.
+      after 150 ms. The bottom is known to within 0.75 px, with the view's
+      height less 14 px when the PDF is wider than the view (the viewer's
+      horizontal scrollbar). Chrome measures that scrollbar: where it is
+      15 px (Chrome for Testing 154 on Linux with scrollbars shown) the
+      bottom is 0.95 px off and End is read as a place near where it began
+      (found while D133 was checked; the same in 0.6.2).
   - **Where guessing starts.** A newly opened or reloaded tab document is
     taken to be at the viewer's start: the top, or the address's `#page=N`
     (`addressPage`). `PdfController` passes that as the tracker's anchor,
@@ -1067,8 +1073,9 @@ shell and the mirror has nothing to copy (D103).
     page keys, 99.6% of Home/End, 99.1% of flings, 97.9% of ArrowRight and
     97.2% of held ArrowRight. Each mistake is counted once, with the tracker
     then started again from the true page; in use a mistake stays until
-    Home or End. The page box, outline, links, Find and ArrowLeft are
-    guesses. The simulation's ArrowRight sends no second report where the
+    Home or End, or until the page box settles it (D133). The page box,
+    outline, links, Find and ArrowLeft are guesses. The simulation's
+    ArrowRight sends no second report where the
     snap to whole pixels moves nothing; Chrome 138 and 154 send one there
     too, so in Chrome ArrowRight in the first screen and one arrow step
     below a page top, at 100% and 90%, is read right (D123). The same
@@ -1079,6 +1086,134 @@ shell and the mirror has nothing to copy (D103).
     keeps the panel still in 600 turned views (38 without the zoom); the 3
     others reported a width within the lag of a page width. A Chrome
     harness checks 20 moves in Chrome for Testing 154 and 138.
+  - **The page box (D133).** A reading that could be whole pages off is
+    settled by the page number Chrome's own toolbar shows ("12 / 300"),
+    read from one capture of the tab.
+    - *Doubts.* The tracker marks such a reading (`doubt`): the first
+      report; a jump, which Chrome reports twice at once (its place, then
+      that place snapped to whole pixels; a zoom reports twice too and is no
+      doubt); a lone report at a page top (ArrowRight and ArrowLeft, a page
+      key in fit to page, the page box); and what the viewer reports as a
+      turned view or the two-page view ends, however that is read. Chrome
+      puts a view turned back at the top of its page, which reads as Home
+      (or, in fit to height, as End) when the reports come as a movement:
+      until a new movement begins, such a reading is a guess all the same.
+      A jump is told within a held movement too (an outline entry clicked
+      while the viewer still scrolls): a report more than 8 px from the one
+      before it, and the same place again within 8 ms, sooner than the next
+      frame of the movement can come. Scrolling is never a doubt, however
+      fast: a movement that stopped away from the ends of the PDF (a fling,
+      a scrollbar drag, one big step of the wheel) is read as it always
+      was, and its last frames, a pixel apart or less, are no jump. That is
+      on purpose: scrolling within a page leaves a number typed into the
+      page box and not entered where it is, and a look would read it; a
+      jump always enters or replaces it. A doubt lasts
+      through the scrolling that follows, until a page is given (`place`)
+      or the viewer goes to the top or bottom of the PDF. It lists the
+      pages as wide as the report says at the tab's zoom give or take its
+      lag (`MIN_ZOOM_DELTA`, as for a turned view), no tighter: after a
+      small resize in a fit mode a page a little wider or narrower than its
+      neighbours would else pass for the only one that fits. While no page
+      fits (Chrome has not told of a zoom yet) there is no doubt to look
+      into; the follower looks once the zoom is told. No page is taken
+      without a reading, however few are listed. In a second simulation (60
+      sessions, 4,800 actions, jumps to any page added) every jump and
+      every ArrowRight is doubted, and of the rest only what lands on a page
+      top (0.07% of wheel turns, 0.3% of arrow steps, 0.7% of page keys);
+      with its doubts settled every action ends on the viewer's page but
+      for 5 of 447 flings, read as before.
+    - *When.* `PdfViewerFollower` looks 350 ms after the viewer's last
+      report (also after a Refresh of the same PDF and when Chrome tells of
+      a zoom), only while following is on, at most three times for one
+      doubt, one look at a time. `PdfController.locatePage` gives up at once, with
+      nothing captured, unless Tesseract is among the reading methods in use
+      and the PDF shown is the tab's document.
+    - *The capture.* `PdfPageBoxReader`
+      (`entrypoints/sidepanel/pdf-page-box-reader.ts`) asks for the tab's
+      size first: the viewer's view must begin 56 CSS px below the tab's top
+      (the toolbar's height in Chrome 138 to 154), else the tab is not
+      captured: with the toolbar hidden (`#toolbar=0`, presenting) the top
+      of the tab is the PDF's own page. Then one
+      `tabs.captureVisibleTab` through image text's lane (the same lock and
+      two-a-second spacing; `captureVisibleSourceTabPromptly` hands the
+      picture over as soon as it is taken). Only the active tab of a window
+      that is not minimized is captured. A capture Chrome refuses (no
+      `activeTab` grant left and no all-sites access) stops looking until
+      the PDF is shown anew; nothing is asked for. The top 56 px are copied
+      out and the capture is closed before anything is read. A toolbar
+      that showed no page box three looks running (a narrow tab, forced
+      colours) is not captured again for a minute, unless the tab changes
+      size. The capture is the whole tab as a PNG, so a look takes 54 to
+      90 ms in a window of 1280 by 900 and 202 to 276 ms at 1920 by 1080
+      with a device scale of 2.
+    - *The box.* `lib/pdf/pdf-page-box.ts` works on the strip's pixels and
+      knows no font. The bar is the strip's commonest colour (at least half
+      of it); the box's colour is the commonest darker one. A box is a run of
+      columns holding that colour, 14 to 28 CSS px tall and 14 to 96 wide,
+      whose padding columns are the box's colour in every row. Its digits
+      are the runs of ink inside (ink: 30% of the way from the ground to
+      white), all of one height and none thinner than a digit; a run wider
+      than 1.3 digit places counts as several, the place
+      being the box's width less its padding over the count's digits (the
+      box is `max(2, digits) ch` wide). The count is the ink that starts
+      within 12 px after the box and ends at a 14 px gap (a one-digit count
+      is centred in a place for two, up to 9 px from the divider; the next
+      control is 20 px on), its last run as tall as the box's digits. A caret, a selected number, a menu over the
+      toolbar, the zoom box (nothing after it) and a tab under about 420 px
+      (no page box) give no layout. The count comes after the number in a
+      right-to-left Chrome too.
+    - *The reading.* `composePdfPageBoxLine` makes a grey picture of the
+      number and the count alone, each lifted off its own ground to dark ink
+      on white, with a fifth of the digits' height more room between
+      glyphs: Tesseract reads two thin digits that stand close ("11" in a
+      font like macOS's) as one. When that picture gives no reading, the
+      reader makes it again as the number stands in the toolbar, with no
+      room added: spaced out, a few numbers in Chrome's own font are not
+      read ("5 / 12" comes out as a section sign and "/12" at one size). A
+      page is taken from the readings of one picture only. The reader
+      scales the picture so the digits are 24 px tall, then 30,
+      encodes each with `toDataURL` (`convertToBlob` waits for an idle
+      moment, up to a second when the panel has none), and
+      `readPdfOcrPicture` (`lib/pdf/pdf-ocr.ts`) sends it to the OCR host as
+      it is: Tesseract alone, the English model, read as a block, at the
+      lowest confidence threshold. `pdfPageFromBoxText` takes a reading only
+      as digits, a divider and the PDF's own page count, with as many digits
+      as the ink showed, no leading zero, a page of the PDF. Both readings
+      must name the same page, and the page must be one the doubt lists.
+    - *Why two sizes.* Measured on 16,119 pictures of Chrome's toolbar
+      (Chrome's own Roboto and twelve other families put into the viewer's
+      page, device scales 1, 1.25, 1.5 and 2, PDFs of 2 to 3,000 pages):
+      Tesseract reads a 5 as a 9 or a 3 now and then when the digits are
+      large (3 pictures at 33 px, 14 at 36, and 109 of 9,754 at 56 before
+      the glyphs were given more room) and never did at 20 to 30; its
+      confidence does not tell (94 for the wrong digit, 99 for a right
+      one). At 24 and 30 together: 16,065 right, 54 none, none wrong.
+      Measured again on 20,478 pictures (more PDFs whose count is made of
+      1s, and Inter and Selawik at every scale): as the number stands
+      19,787 right and 691 none (596 of them Inter); spaced out 20,304 and
+      174 (42 of Chrome's own that read as they stand); spaced out, then as
+      it stands, 20,408 and 70. None wrong any way.
+    - *Taking the page.* `PdfViewerTracker.place` takes it only for the
+      report the doubt was about: a later report, read or held, leaves the
+      doubt and the next rest looks again. The view moves only if it is
+      still where the follower last put it (within 2% of a page), so the
+      reader's own scrolling stays; the tracker follows from the right page
+      either way.
+    - *Limits.* A number typed into the page box and not entered is what
+      the box shows; with the caret blinked off it reads as a page, which
+      is why only jumps are looked into. A jump that also sets the zoom can
+      read as a zoom at the same place and raise no doubt, as can a jump
+      whose second report comes more than 20 ms after its first (a slow
+      viewer; 8 ms for a jump made while the viewer still scrolls). A jump
+      made while the viewer scrolls that lands within a fifth of a page of
+      where the scrolling was heading is followed as a frame of it and is
+      no doubt either. A look may wait its turn behind scanned pages being
+      read, and the Tesseract worker changes model for it when the PDF is
+      not read in English. The picture goes through the OCR host's temporary
+      storage like any OCR job and is deleted with it. The look runs under
+      the grant the toolbar click gave and does not wait for the image
+      access that pixel OCR of web images asks for. Diagnostics give an
+      outcome, what was missing and a time, never the number.
   - **Sideways (D115).** There is nothing to guess sideways. Chrome centres
     each page in the widest page's width, and the PDF in the view when it
     fits; `pageX` is that place less the sideways scroll, whichever page is

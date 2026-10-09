@@ -19,6 +19,7 @@ import { ALL_UI_STRINGS, UI_STRINGS } from '../../lib/companion-ui-strings';
 import { CapturePipeline } from './capture-pipeline';
 import { PdfController, type PdfDiagnostic } from './pdf-controller';
 import { PdfView } from './pdf-view';
+import { PdfPageBoxReader, captureChromePdfTab } from './pdf-page-box-reader';
 import { PdfViewerFollower, connectChromePdfViewer } from './pdf-viewer-follower';
 import {
   CompanionState,
@@ -299,6 +300,13 @@ const pdfViewerFollower = new PdfViewerFollower({
   onDiagnostic: (followState) => logPdfDiagnostic({ stage: 'follow', state: followState }),
   // Not the 1 a failed read leaves: a turned view is then not looked for (D123).
   viewerZoom: () => (state.sourceZoomKnown ? state.sourceZoomFactor : undefined),
+  // A place that could be pages off is settled by the page box of the
+  // viewer's toolbar, read from one capture of the tab (D133).
+  locate: (target, doubt, signal) => pdfController.locatePage(target, doubt, signal),
+});
+const pdfPageBoxReader = new PdfPageBoxReader({
+  capture: captureChromePdfTab,
+  onDiagnostic: logPdfDiagnostic,
 });
 const pdfController = new PdfController({
   fetchPdf: (url, signal) => fetchPdfBytes(url, { signal }),
@@ -310,6 +318,7 @@ const pdfController = new PdfController({
   ),
   view: pdfView,
   viewerFollower: pdfViewerFollower,
+  pageBoxReader: pdfPageBoxReader,
   surface: pdfTextSurface,
   onPriorityChange: () => replicaTranslationCoordinator.reprioritize(),
   onDiagnostic: logPdfDiagnostic,

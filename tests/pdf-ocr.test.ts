@@ -10,8 +10,10 @@ import { TESSERACT_MODEL_VERSION } from '../lib/ocr/providers/tesseract/language
 import {
   PDF_OCR_MAX_DPI,
   pdfOcrRoute,
+  pdfPageBoxRoute,
   isScannedPage,
   probeScannedLanguage,
+  readPdfOcrPicture,
   readScannedPage,
   type PdfOcrCanvas,
   type PdfOcrDocument,
@@ -147,6 +149,111 @@ describe('pdfOcrRoute', () => {
     expect(pdfOcrRoute('fr', ['chrome-text-detector'], 0.65)).toEqual({ status: 'no-method' });
     expect(pdfOcrRoute('fr', ['chrome-text-detector', 'tesseract'], 0.65).status).toBe('ready');
     expect(pdfOcrRoute('th', ['tesseract'], 0.65)).toEqual({ status: 'unsupported' });
+  });
+});
+
+describe('the page box of Chrome\'s PDF toolbar (D133)', () => {
+  const PAGE_BOX_ROUTE = pdfPageBoxRoute(['chrome-text-detector', 'tesseract'])!;
+  const picture = { encoded: new Blob(['a picture of 12 / 300']), width: 240, height: 76 };
+  const identity = { document: DOCUMENT, nodeId: 301 };
+
+  it('is read with Tesseract alone, in English, at the lowest confidence', () => {
+    expect(PAGE_BOX_ROUTE).toEqual({
+      providerOrder: ['tesseract'],
+      sourceLanguage: 'en',
+      languageGroup: 'eng',
+      modelVersion: TESSERACT_MODEL_VERSION,
+      minimumConfidence: 0.25,
+    });
+  });
+
+  it('is not read without Tesseract among the methods in use', () => {
+    expect(pdfPageBoxRoute([])).toBeUndefined();
+    expect(pdfPageBoxRoute(['chrome-text-detector'])).toBeUndefined();
+  });
+
+  it('gives the text of a picture as it is, named by its own number in the document', async () => {
+    const { environment: ocr, seen } = environment(() =>
+      complete([{ text: ' 12 / 300 ', x: 20, y: 20, width: 180, height: 30 }]));
+    const signal = new AbortController().signal;
+
+    expect(await readPdfOcrPicture(picture, identity, PAGE_BOX_ROUTE, ocr, signal)).toBe('12 / 300');
+    expect(seen).toHaveLength(1);
+    expect(seen[0]!.route).toBe(PAGE_BOX_ROUTE);
+    expect(seen[0]!.pixels).toMatchObject({
+      // The picture itself, not drawn again: read as a block, as it was measured.
+      encoded: picture.encoded,
+      bitmapWidth: 240,
+      bitmapHeight: 76,
+      preprocessingVersion: 'visible-crop-v2-native',
+      descriptor: { document: DOCUMENT, nodeId: 301 },
+    });
+    expect(seen[0]!.pixels.pixelHash).toMatch(/^[0-9a-f]{64}$/u);
+  });
+
+  it('names a picture by its bytes: another picture is another hash', async () => {
+    const { environment: ocr, seen } = environment(() =>
+      complete([{ text: '12 / 300', x: 20, y: 20, width: 180, height: 30 }]));
+    const signal = new AbortController().signal;
+    const other = { ...picture, encoded: new Blob(['a picture of 13 / 300']) };
+
+    await readPdfOcrPicture(picture, identity, PAGE_BOX_ROUTE, ocr, signal);
+    await readPdfOcrPicture(other, identity, PAGE_BOX_ROUTE, ocr, signal);
+    await readPdfOcrPicture(picture, identity, PAGE_BOX_ROUTE, ocr, signal);
+    const hashes = seen.map((entry) => entry.pixels.pixelHash);
+    expect(hashes[0]).not.toBe(hashes[1]);
+    expect(hashes[0]).toBe(hashes[2]);
+  });
+
+  it('gives nothing when nothing was read, recognition failed or the picture is empty', async () => {
+    const signal = new AbortController().signal;
+    const blank = environment(() => complete([]));
+    expect(await readPdfOcrPicture(picture, identity, PAGE_BOX_ROUTE, blank.environment, signal))
+      .toBeUndefined();
+    const failed = environment(() => ({ status: 'failed', code: 'recognition-failed' }));
+    expect(await readPdfOcrPicture(picture, identity, PAGE_BOX_ROUTE, failed.environment, signal))
+      .toBeUndefined();
+    const thrown = environment(() => {
+      throw new Error('The OCR host is gone.');
+    });
+    expect(await readPdfOcrPicture(picture, identity, PAGE_BOX_ROUTE, thrown.environment, signal))
+      .toBeUndefined();
+    const empty = environment(() => complete([{ text: '1 / 3', x: 0, y: 0, width: 1, height: 1 }]));
+    for (const none of [
+      { ...picture, width: 0 },
+      { ...picture, height: 2.5 },
+      { ...picture, encoded: new Blob([]) },
+      { ...picture, width: 40_000, height: 40_000 },
+    ]) {
+      expect(await readPdfOcrPicture(none, identity, PAGE_BOX_ROUTE, empty.environment, signal))
+        .toBeUndefined();
+    }
+    expect(empty.seen).toHaveLength(0);
+  });
+
+  it('asks a busy OCR host once more', async () => {
+    let asked = 0;
+    const { environment: ocr } = environment(() => {
+      asked += 1;
+      return asked === 1
+        ? { status: 'failed', code: 'host-overflow' }
+        : complete([{ text: '7 / 40', x: 20, y: 20, width: 120, height: 30 }]);
+    });
+
+    expect(await readPdfOcrPicture(picture, identity, PAGE_BOX_ROUTE, ocr, new AbortController().signal))
+      .toBe('7 / 40');
+    expect(asked).toBe(2);
+  });
+
+  it('rejects only when it is stopped', async () => {
+    const stop = new AbortController();
+    const { environment: ocr } = environment(() => {
+      stop.abort();
+      return complete([{ text: '7 / 40', x: 20, y: 20, width: 120, height: 30 }]);
+    });
+
+    await expect(readPdfOcrPicture(picture, identity, PAGE_BOX_ROUTE, ocr, stop.signal))
+      .rejects.toMatchObject({ name: 'AbortError' });
   });
 });
 

@@ -388,11 +388,40 @@ export function createBrowserPixelAcquisitionEnvironment(
  * origin-wide Web Lock also keeps separate sidepanel/popout contexts within
  * Chrome's two-captures-per-second extension quota.
  */
-export async function captureVisibleSourceTab(
+export function captureVisibleSourceTab(
   sourceTabId: number,
   sourceWindowId: number,
   signal?: AbortSignal,
   environment: SourceTabCaptureEnvironment = browserSourceTabCaptureEnvironment(),
+): Promise<string> {
+  return captureInLane(sourceTabId, sourceWindowId, signal, environment);
+}
+
+/**
+ * The same capture, handed out as soon as it is taken and checked. The lane
+ * is still kept for the rest of the quota interval, so the next capture
+ * (this one's or image text's) waits its turn. For a caller that must act
+ * while the tab still shows what was captured (the PDF viewer's page box,
+ * D133).
+ */
+export function captureVisibleSourceTabPromptly(
+  sourceTabId: number,
+  sourceWindowId: number,
+  signal?: AbortSignal,
+  environment: SourceTabCaptureEnvironment = browserSourceTabCaptureEnvironment(),
+): Promise<string> {
+  return new Promise<string>((resolve, reject) => {
+    captureInLane(sourceTabId, sourceWindowId, signal, environment, resolve)
+      .then(resolve, reject);
+  });
+}
+
+async function captureInLane(
+  sourceTabId: number,
+  sourceWindowId: number,
+  signal: AbortSignal | undefined,
+  environment: SourceTabCaptureEnvironment,
+  onCaptured?: (screenshot: string) => void,
 ): Promise<string> {
   if (
     !Number.isSafeInteger(sourceTabId) || sourceTabId < 0 ||
@@ -433,6 +462,7 @@ export async function captureVisibleSourceTab(
         if (activeAfter !== sourceTabId) {
           throw new SourceTabCaptureError('inactive');
         }
+        onCaptured?.(screenshot);
         return screenshot;
       } finally {
         // Hold the cross-context lane for the remainder of the quota interval,

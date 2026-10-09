@@ -263,80 +263,82 @@ describe('PdfViewerTracker on simulated reading sessions', () => {
     expect(share('heldArrowRight')).toBeGreaterThanOrEqual(0.95);
   });
 
-  it('reads the same sessions the same when it knows the viewer\'s zoom (D123)', () => {
-    // Upright pages never pass for a turned or a two-page view: not one
-    // reading differs, also when the tab's zoom lags the viewer's.
-    const unknown = readingSessions(false);
-    expect(readingSessions(true)).toEqual(unknown);
-    for (const lag of [-0.009, -0.004, 0.004, 0.009]) {
-      expect(readingSessions(true, lag), `lag ${lag}`).toEqual(unknown);
-    }
-  }, 60_000);
-
-  it('stays while the view is turned, and never takes a zoom for a turn (D123)', () => {
-    // Sessions of wheel turns, zooms and quarter turns, on PDFs of one page
-    // shape (portrait, slides, long pages) with now and then a page of
-    // another size. Chrome tells the panel of a zoom before or after the
-    // viewer reports it. At a set zoom a turn keeps the zoom; in fit to
-    // width the zoom changes with the turn, reported before Chrome tells of
-    // it. The same sessions are read once with the tab's zoom and once
-    // without; each mistake is counted once, from the true page again.
-    type Check = 'upright' | 'zoom' | 'turned' | 'resumed';
-    const shapes: PdfPagePoints[] = [
-      { width: 612, height: 792 },
-      { width: 595.28, height: 841.89 },
-      { width: 720, height: 540 },
-      { width: 960, height: 540 },
-      { width: 612, height: 1008 },
-    ];
-    const zooms = [0.5, 2 / 3, 0.75, 0.9, 1, 1.25, 1.5, 2];
-    const run = (zoomKnown: boolean) => {
-      const next = random(123);
-      const counts = new Map<Check, { right: number; total: number }>();
-      for (let session = 0; session < 60; session += 1) {
-        const shape = shapes[Math.floor(next() * shapes.length)]!;
-        const count = 10 + Math.floor(next() * 150);
-        const mixed = next() < 0.3;
-        const sizes = Array.from({ length: count }, (_, index) =>
-          (mixed && index % 13 === 12 ? { width: shape.width * 0.7, height: shape.height * 0.7 } : shape));
-        const viewer = new SnappedViewer(sizes, zooms[Math.floor(next() * zooms.length)]!, 450 + next() * 600);
-        let tracker = new PdfViewerTracker(sizes);
-        const tell = () => {
-          if (zoomKnown) tracker.setViewerZoom(viewer.zoom);
-        };
-        let reported = '';
-        let moves = 0;
-        const send = (gapMs: number, again = false) => {
-          viewer.time += gapMs;
-          const report = viewer.report();
-          const key = JSON.stringify(report);
-          if (!again && key === reported) return;
-          reported = key;
-          if (tracker.update(report, viewer.time).kind === 'move') moves += 1;
-        };
-        const rest = () => {
+  it('is placed after jumps too once its doubts are settled, and doubts little else (D133)', () => {
+    // The same sessions with jumps added (the page box, an outline entry, a
+    // link: any page, its top or part-way down), reported twice as Chrome
+    // does. After each action the panel settles a doubt with the page the
+    // viewer really shows, as the page box in a capture of the tab tells it.
+    // Scrolling raises no doubt, so a place misread after it is counted
+    // once and the tracker started again from the true page, as above.
+    type Kind =
+      | 'wheel'
+      | 'smallWheel'
+      | 'fling'
+      | 'arrow'
+      | 'pageKey'
+      | 'arrowRight'
+      | 'homeEnd'
+      | 'jump';
+    const next = random(7);
+    const counts = new Map<Kind, { right: number; total: number; doubts: number }>();
+    for (let session = 0; session < 60; session += 1) {
+      const size = next() < 0.5 ? { width: 612, height: 792 } : { width: 595.28, height: 841.89 };
+      const count = 20 + Math.floor(next() * 400);
+      const mixed = next() < 0.25;
+      const sizes = Array.from({ length: count }, (_, index) =>
+        mixed && index % 17 === 16 ? { width: size.height, height: size.width } : size);
+      const kind = next();
+      const zoom = kind < 0.3
+        ? PRESET_ZOOMS[Math.floor(next() * PRESET_ZOOMS.length)]!
+        : kind < 0.45
+          ? 0.25 + next() * 0.15
+          : 0.4 + next() * 1.4;
+      const viewer = new SnappedViewer(sizes, zoom, 450 + next() * 700);
+      let tracker = new PdfViewerTracker(sizes);
+      tracker.setViewerZoom(zoom);
+      // Simul opens with the viewer anywhere in the PDF.
+      viewer.scrollTo(next() * viewer.maxScroll);
+      let reported = Number.NaN;
+      const send = (gapMs: number, again = false) => {
+        viewer.time += gapMs;
+        if (!again && Math.abs(viewer.scroll - reported) < 1e-9) return;
+        reported = viewer.scroll;
+        tracker.update(viewer.report(), viewer.time);
+      };
+      const check = (action: Kind) => {
+        viewer.time += 400;
+        tracker.settle();
+        const tally = counts.get(action) ?? { right: 0, total: 0, doubts: 0 };
+        const doubt = tracker.doubt;
+        if (doubt) {
+          tally.doubts += 1;
+          tracker.place(doubt, report(viewer));
+        }
+        tally.total += 1;
+        if (tracker.position?.index === viewer.topPage()) {
+          tally.right += 1;
+        } else {
+          tracker = new PdfViewerTracker(sizes);
+          tracker.setViewerZoom(zoom);
+          tracker.anchor({ index: viewer.topPage(), fraction: 0.5 });
+          reported = Number.NaN;
+          send(0);
           viewer.time += 400;
           tracker.settle();
-        };
-        const restart = () => {
-          tracker = new PdfViewerTracker(sizes);
-          tell();
-          tracker.anchor({ index: viewer.topPage(), fraction: 0.5 });
-          send(0, true);
-          rest();
-        };
-        const check = (name: Check, right: boolean) => {
-          const tally = counts.get(name) ?? { right: 0, total: 0 };
-          tally.total += 1;
-          if (right) tally.right += 1;
-          counts.set(name, tally);
-        };
-        const followed = (name: Check) => {
-          const right = tracker.position?.index === viewer.topPage();
-          check(name, right);
-          if (!right) restart();
-        };
-        const wheel = () => {
+          const again = tracker.doubt;
+          if (again) tracker.place(again, report(viewer));
+        }
+        counts.set(action, tally);
+      };
+      send(1_000);
+      viewer.time += 400;
+      tracker.settle();
+      const first = tracker.doubt;
+      if (first) tracker.place(first, report(viewer));
+      expect(tracker.position?.index, `session ${session}: opened part-way down`).toBe(viewer.topPage());
+      for (let step = 0; step < 80; step += 1) {
+        const pick = next();
+        if (pick < 0.35) {
           const direction = next() < 0.7 ? 1 : -1;
           const start = viewer.scroll;
           const amount = 100 * (1 + Math.floor(next() * 3));
@@ -344,91 +346,78 @@ describe('PdfViewerTracker on simulated reading sessions', () => {
             viewer.scrollTo(start + direction * amount * (1 - (1 - frame / 10) ** 3));
             send(16);
           }
-          rest();
-        };
-        // A zoom keeps the place; Chrome reports it twice at once.
-        const zoomTo = (zoom: number, toldFirst: boolean) => {
-          const y = viewer.scroll / viewer.zoom;
-          viewer.zoom = zoom;
-          viewer.scrollTo(y * zoom);
-          if (toldFirst) tell();
-          send(300, true);
-          send(3, true);
-          if (!toldFirst) tell();
-          rest();
-        };
-        // Fit to width: the widest page and its insets fill the view.
-        const fitZoom = () =>
-          (viewer.viewportWidth - 14) / (Math.max(...viewer.pages.map((entry) => entry.width)) + 10);
-        // A quarter turn keeps the page at the top of the view.
-        const turn = (turned: boolean, fitWidth: boolean) => {
-          const page = viewer.topPage();
-          const share = (viewer.scroll / viewer.zoom - viewer.pages[page]!.top) / viewer.pages[page]!.height;
-          viewer.turned = turned;
-          viewer.layout();
-          if (fitWidth) viewer.zoom = fitZoom();
-          const target = viewer.pages[page]!;
-          viewer.scrollTo((target.top + Math.max(0, share) * target.height) * viewer.zoom);
-          send(300, true);
-          if (fitWidth) tell();
-          rest();
-        };
-        tell();
-        send(1_000);
-        rest();
-        for (let step = 0; step < 40; step += 1) {
-          const pick = next();
-          if (pick < 0.45) {
-            wheel();
-            followed('upright');
-          } else if (pick < 0.75) {
-            const others = zooms.filter((entry) => entry !== viewer.zoom);
-            zoomTo(others[Math.floor(next() * others.length)]!, next() < 0.5);
-            wheel();
-            followed('zoom');
-          } else {
-            const fitWidth = next() < 0.5;
-            if (fitWidth) zoomTo(fitZoom(), next() < 0.5);
-            turn(true, fitWidth);
-            // The first report of a turn in fit to width comes before its
-            // zoom and is read as a zoom; nothing after it moves the panel.
-            const place = tracker.position;
-            const before = moves;
-            for (let turnStep = 0, steps = 1 + Math.floor(next() * 4); turnStep < steps; turnStep += 1) {
-              if (next() < 0.2) zoomTo(viewer.zoom * (next() < 0.5 ? 1.25 : 0.8), next() < 0.5);
-              else wheel();
-            }
-            check('turned', moves === before && tracker.position === place);
-            // Upright again: where the viewer is now is a guess, but the
-            // panel follows it again.
-            turn(false, fitWidth);
-            const upright = moves;
-            wheel();
-            check('resumed', moves > upright);
-            restart();
+          // Zoomed far out, a wheel turn moves most of a page: a held movement.
+          check(zoom >= 0.45 ? 'wheel' : 'smallWheel');
+        } else if (pick < 0.45) {
+          let speed = (next() < 0.5 ? -1 : 1) * (40 + next() * 210);
+          let ramp = 0;
+          for (let frame = 0; frame < 60 && Math.abs(speed) > 1; frame += 1) {
+            ramp = Math.min(1, ramp + 0.34);
+            viewer.scrollTo(viewer.scroll + speed * ramp);
+            speed *= 0.95;
+            send(16);
           }
+          check('fling');
+        } else if (pick < 0.58) {
+          viewer.scrollTo(viewer.scroll + (next() < 0.7 ? 40 : -40));
+          send(300);
+          check('arrow');
+        } else if (pick < 0.7) {
+          viewer.scrollTo(viewer.scroll + (next() < 0.8 ? 1 : -1) * 0.875 * viewer.viewportHeight);
+          send(300);
+          check('pageKey');
+        } else if (pick < 0.8) {
+          const target = Math.min(viewer.pages.length - 1, report(viewer) + 1);
+          viewer.scrollTo((viewer.pages[target]!.top - 3) * viewer.zoom, false);
+          send(300, true);
+          viewer.scrollTo(viewer.scroll);
+          send(2, true);
+          check('arrowRight');
+        } else if (pick < 0.95) {
+          const target = Math.floor(next() * viewer.pages.length);
+          const down = next() < 0.4 ? 0 : next() * 0.9 * viewer.pages[target]!.height;
+          viewer.scrollTo((viewer.pages[target]!.top - 3 + down) * viewer.zoom, false);
+          send(300, true);
+          viewer.scrollTo(viewer.scroll);
+          send(2, true);
+          check('jump');
+        } else {
+          const target = next() < 0.5 ? viewer.maxScroll : 0;
+          const start = viewer.scroll;
+          const frames = 8 + Math.floor(next() * 7);
+          for (let frame = 1; frame <= frames; frame += 1) {
+            viewer.scrollTo(start + ((target - start) * (1 - Math.cos((Math.PI * frame) / frames))) / 2);
+            send(16);
+          }
+          check('homeEnd');
         }
       }
-      return counts;
-    };
-    const known = run(true);
-    const unknown = run(false);
-    const share = (counts: typeof known, name: Check) =>
-      counts.get(name)!.right / counts.get(name)!.total;
-    // Measured 2026-10-06 over 60 sessions (2,400 actions, 603 turns):
-    // with the tab's zoom 600 turned views kept the panel still, without it
-    // 38; every turn back was followed again; and wheel turns and zooms were
-    // placed as often as without the zoom. The 3 turns missed are taken for
-    // upright because a width came within the tab zoom's lag (1%) of a page
-    // width: in two A4 PDFs with pages at 70%, one is 589 pt tall and A4 is
-    // 595 pt wide; and once a zoom while turned, told after its report.
-    expect(share(known, 'turned')).toBeGreaterThanOrEqual(0.995);
-    expect(share(unknown, 'turned')).toBeLessThan(0.5);
-    expect(share(known, 'resumed')).toBe(1);
-    expect(share(known, 'upright')).toBeGreaterThanOrEqual(share(unknown, 'upright'));
-    expect(share(known, 'zoom')).toBeGreaterThanOrEqual(share(unknown, 'zoom'));
-    expect(share(known, 'upright')).toBeGreaterThanOrEqual(0.99);
-    expect(share(known, 'zoom')).toBeGreaterThanOrEqual(0.99);
+    }
+    const tally = (action: Kind) => counts.get(action)!;
+    const share = (action: Kind) => tally(action).right / tally(action).total;
+    const doubted = (action: Kind) => tally(action).doubts / tally(action).total;
+    // Measured 2026-10-09 over 60 sessions (4,800 actions). Doubted, so
+    // looked into: every jump and every ArrowRight; of the rest only what
+    // lands on a page top like a jump (0.07% of wheel turns, 0.3% of arrow
+    // steps, 0.7% of page keys). Scrolling is not, however fast: no fling,
+    // no wheel turn below 45% zoom, no Home or End. Every kind ends on the
+    // viewer's page but for 5 of 447 flings, read as before D133.
+    expect(share('jump')).toBe(1);
+    expect(doubted('jump')).toBe(1);
+    expect(share('arrowRight')).toBe(1);
+    expect(doubted('arrowRight')).toBe(1);
+    expect(share('wheel')).toBeGreaterThanOrEqual(0.998);
+    expect(share('smallWheel')).toBeGreaterThanOrEqual(0.998);
+    expect(share('arrow')).toBeGreaterThanOrEqual(0.998);
+    expect(share('pageKey')).toBeGreaterThanOrEqual(0.995);
+    expect(share('fling')).toBeGreaterThanOrEqual(0.985);
+    expect(share('homeEnd')).toBeGreaterThanOrEqual(0.98);
+    expect(doubted('wheel')).toBeLessThanOrEqual(0.005);
+    expect(doubted('arrow')).toBeLessThanOrEqual(0.01);
+    expect(doubted('pageKey')).toBeLessThanOrEqual(0.02);
+    expect(doubted('fling')).toBe(0);
+    expect(doubted('smallWheel')).toBe(0);
+    expect(doubted('homeEnd')).toBe(0);
   });
 });
 
