@@ -987,12 +987,14 @@ export function createBrowserImageRecognitionCoordinator(
   store: TransientImageInputStore,
   resetEpoch: number,
   maxCacheWeight?: number,
+  maxCacheEntries?: number,
 ): ImageRecognitionCoordinator {
   return new ImageRecognitionCoordinator({
     store,
     resetEpoch,
     sendMessage: (message) => browser.runtime.sendMessage(message),
     ...(maxCacheWeight === undefined ? {} : { maxCacheWeight }),
+    ...(maxCacheEntries === undefined ? {} : { maxCacheEntries }),
   });
 }
 

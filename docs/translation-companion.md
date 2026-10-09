@@ -844,9 +844,14 @@ shell and the mirror has nothing to copy (D103).
     keys and weights are what they were. Chrome's text detector sends none.
     The recognition cache counts words as it counts regions, so the PDF's
     cache has a weight budget of its own (`PDF_RECOGNITION_CACHE_WEIGHT`,
-    4,000,000): under the default 1,000,000 a dense page would take 38
-    places where the 128-entry limit decided before, and a PDF one page
-    longer than the cache holds is read again in full on Refresh.
+    10,000,000, the most the cache takes) and its own limit of entries
+    (`PDF_RECOGNITION_CACHE_ENTRIES`, 1,024): a PDF one page longer than
+    the cache holds is read again in full on Refresh, because pages are
+    read in order and the oldest is dropped. Under the default budget of
+    1,000,000 that was 38 dense pages, and under the default limit of 128
+    entries 128 pages of any kind (D134: a scan of 140 pages was read
+    again in full). The PDF's cache holds about 380 dense pages, and a
+    page stays in it for 15 minutes, like any recognition.
     `pdfOcrBlocks` cuts the words that typed line boxes half cover out of a
     line and keeps each run of the remaining words as a piece: the text
     between them as OCR wrote it, the line's own height, the span of its
@@ -977,6 +982,15 @@ shell and the mirror has nothing to copy (D103).
     - It forwards only `viewport` reports from the viewer's frame and origin
       (`chrome-extension://mhjfbmdgcfjbbpaeojofohoefgiehjai`), as five
       numbers and a time.
+    - With each it sends how wide the tab's document draws a scrollbar
+      (D134), which the viewer does not report: measured as the viewer
+      measures its own, with a box that is not shown, in a closed shadow
+      root of an element added to `<html>` and taken out at once; once,
+      and again when `devicePixelRatio` changes. A style sheet another
+      extension puts into the tab's document does not reach into the
+      shadow root, as it does not reach into the viewer's frame. A measure
+      that fails sends the report without it. The screen's scale
+      (`devicePixelRatio`) goes with each report too.
     - A replaced or closed PDF, and `close`, stop the follower. A local PDF
       starts none.
   - **Guessing the page.** `lib/pdf/pdf-viewer-tracker.ts` models Chrome's
@@ -1053,12 +1067,43 @@ shell and the mirror has nothing to copy (D103).
       quiet: as the top or bottom of the PDF when it stopped there (Home,
       End), else as the page nearest where the last trusted speed, slowing,
       would have carried it. A lone held jump takes the nearest candidate
-      after 150 ms. The bottom is known to within 0.75 px, with the view's
-      height less 14 px when the PDF is wider than the view (the viewer's
-      horizontal scrollbar). Chrome measures that scrollbar: where it is
-      15 px (Chrome for Testing 154 on Linux with scrollbars shown) the
-      bottom is 0.95 px off and End is read as a place near where it began
-      (found while D133 was checked; the same in 0.6.2).
+      after 150 ms. The bottom is known to within 0.75 px, or 2 px on a
+      screen scaled by a fraction (below). The viewer reports its
+      viewport with its scrollbars counted in, and when the PDF is wider
+      than the view it scrolls down only as far as the scrollbar across
+      the bottom leaves. Chrome measures that scrollbar
+      (15 px on Linux, a fraction more or less on a scaled screen, another
+      width on other systems, 0 where scrollbars lie over the page), so
+      the bridge measures one the same way in the tab's own document,
+      which draws them as wide, and sends it with every report (D134;
+      `setScrollbarWidth`). The tracker had taken it for 14 px, which read
+      End on such a PDF as a place near where it began.
+      - Told the width, the tracker looks for one bottom: the viewport
+        less the scrollbar when the PDF is wider than the view less
+        Chrome's own whole number for the scrollbar (the nearest), else
+        the viewport as reported (fit to width is exactly that wide, and
+        has no scrollbar across). Both only where a width measured near
+        half way between two whole numbers leaves it open. Not told, both
+        with a scrollbar of 15 px, as before D134 with 14.
+      - Every bottom looked for, and every pixel allowed around it, is a
+        place in each page where a movement that stops there reads as End.
+        Far zoomed out, where each turn of the wheel is a held movement,
+        an allowance of 2 px everywhere put the panel at the end of the
+        PDF in one half minute of wheel steps at 30%. So the 0.75 px
+        stays on a screen scaled by a whole number, where Chrome's
+        rounding of the PDF's height to a whole pixel leaves the viewer
+        within 0.5 px of the bottom worked out. On a screen scaled by a
+        fraction Chrome lays the viewer out in device pixels and reports
+        whole CSS pixels: it stopped up to 0.85 px off at 125% to 250% and
+        0.9 to 1.85 px short at 133%, and End was not read there (at 150%
+        in the fit modes, at 133% anywhere). The bridge sends the screen's
+        scale (`devicePixelRatio`) with every report, and there the bottom
+        is taken within 2 px (`setScreenScale`).
+      - A page key steps by 87.5% of the viewport as reported, with or
+        without a scrollbar across it. A click on the track of the
+        scrollbar down the side steps by that share of the view less the
+        scrollbar across, which is one report when Chrome does not animate
+        scrolling; both are page steps to the tracker (Chrome 154 and 138).
   - **Where guessing starts.** A newly opened or reloaded tab document is
     taken to be at the viewer's start: the top, or the address's `#page=N`
     (`addressPage`). `PdfController` passes that as the tracker's anchor,
@@ -1264,10 +1309,18 @@ the panel closes it in every window, the newer click's too. There the panel
 stays until the newer click, when it opens the separate window, closes
 every panel itself. A superseded click removes a window it has just created
 but not one it has already recorded: the newer click may have taken that
-window over, and removing it left no companion at all. With the side panel
-as the saved choice, a click closes its panel only when it was superseded
-before the saved choice was read, and then only a panel it opened itself;
-after that, each window's panel is what its click asked for.
+window over, and removing it left no companion at all. A click that knows
+no companion window it may reuse asks Chrome which are open (D134:
+`runtime.getContexts`, the companion page with a tab in its address, in a
+window of the companion's own kind: the page shown as a tab of a browser
+window is not one) and takes one over: the one opened for the clicked tab,
+else any that may be reused. So the window the panel's own ↗ button opened
+is the one a toolbar click brings forward, where it opened a second one,
+and so is a window from before the worker last stopped. A window that will
+not come forward has closed meanwhile, and the click opens one. With the
+side panel as the saved choice, a click closes its panel only when it was
+superseded before the saved choice was read, and then only a panel it
+opened itself; after that, each window's panel is what its click asked for.
 
 A click that takes an open companion window over sends it the
 `simul:authorized-tab` message. The window may have been created

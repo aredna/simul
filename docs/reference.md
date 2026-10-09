@@ -205,8 +205,7 @@ on a page once it is drawn.
     readings of it at different sizes agree, and the page is one that fits
     where the viewer reports its page. Otherwise the guess stays, and the
     panel stays that many pages off as you read on until the next jump;
-    Home from far away puts it right, and so does End while the viewer
-    shows no scrollbar along its bottom edge.
+    Home from far away puts it right, and so does End.
   - A page turn that lands on a page's top looks to Simul like a jump there,
     so it is read off the toolbar too: ArrowRight and ArrowLeft at any
     zoom, and Page Down, Space and Page Up in fit to page. That is one
@@ -216,10 +215,6 @@ on a page once it is drawn.
     following is off, and none of a tab that is not the one showing. So a
     scrollbar drag across a long PDF, or a fling too fast to follow, is
     still a guess.
-  - End is not always taken for the end. When the PDF is wider than the
-    viewer's view (zoomed in, or once the side panel has made the tab
-    narrower) and Chrome shows a scrollbar along the bottom edge, the panel
-    can stay near where it was, as in 0.6.2, until the next jump or Home.
   - The guess stays, as in 0.6.2, when Tesseract.js is switched off in
     Settings (nothing is captured then); when the tab is narrower than
     about 420 px (Chrome's toolbar then has no page box); when the toolbar
@@ -376,8 +371,8 @@ request; the panel keeps only a reference to the file, never past closing it.
 
 To follow Chrome's PDF viewer, Simul adds a small script to the PDF tab
 that asks the viewer for its scroll reports and passes on five numbers (where
-the most visible page sits and the viewport's size) and the time of each,
-nothing else.
+the most visible page sits and the viewport's size), the time of each, how
+wide the tab draws a scrollbar and how its screen is scaled, nothing else.
 
 The viewer never says which page it shows; its toolbar does. After a move
 Simul can only guess (a jump, the first place, a view turned back), and only

@@ -294,6 +294,13 @@ Since D132 the shape is a little wider, by one rule both sides apply
   dropdown the page is not showing is not drawn, so one inside a menu shows
   when the page shows the menu, not when only the reader's hover in the
   replica opens it.
+- A panel with more text than one record carries (3,500 characters) is a
+  menu when at least half of that text is the text of links and buttons: a
+  header menu of 120 links is one (D134; it was not offered). A large block
+  of prose hidden beside a link, such as an article's text beside its
+  headline in a list, is not, as before: its text would travel and be
+  translated while hidden. With less text a panel is a menu whatever it
+  holds. A panel is at most 1,024 nodes, elements and texts together.
 
 A menu that fades out is still painted when the change that closes it is
 read, and nothing in the DOM changes once the fade is over. The page side

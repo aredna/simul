@@ -1466,6 +1466,100 @@ describe('semantic source session', () => {
     session.dispose();
   });
 
+  it('infers a navigation menu whose panel holds more text than one record may (D134)', () => {
+    // A large site menu: 150 links, 5,000 characters and more in all.
+    const links = Array.from({ length: 150 }, (_, index) =>
+      `<a href="/section-${index}">Section ${index} of the product catalogue</a>`).join('');
+    const { document, window } = parseHTML(`<html><body><nav>
+      <div id="wrapper"><a id="trigger" href="/library">Resources</a>
+        <div id="panel" class="collapsed">${links}</div>
+      </div></nav></body></html>`);
+    expect(document.querySelector('#panel')!.textContent!.length).toBeGreaterThan(5_000);
+    installPaintedTabFixture(document, window as unknown as Window);
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(
+      port,
+      document,
+      window,
+      'isolated-html',
+      undefined,
+      structuralMenuStyle((element) =>
+        element.classList.contains('collapsed') ? 'display' : undefined),
+    );
+    port.emit(createSemanticSourceStart(
+      'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+    ));
+
+    const batch = port.messages[0]!;
+    expect(batch.proofs).toContainEqual(expect.objectContaining({
+      kind: 'structural-menu',
+      triggerNodeId: nodeId(document.querySelector('#trigger')!),
+      panelNodeId: nodeId(document.querySelector('#panel')!),
+      expanded: false,
+    }));
+    const menuText = batch.records.filter((record) =>
+      record.gate === 'disclosureContent').map((record) => record.text);
+    expect(menuText).toHaveLength(150);
+    expect(menuText).toContain('Section 149 of the product catalogue');
+    session.dispose();
+  });
+
+  it('takes a large hidden block beside a link for a menu only when it is made of links (D134)', () => {
+    const prose = 'The council met on the quay and voted on the registers of the town hall. '
+      .repeat(80);
+    const few = '<a href="/more">Read more</a>';
+    const links = (count: number) => Array.from({ length: count }, (_, index) =>
+      `<a href="/section-${index}">Section ${index} of the product catalogue</a>`).join('');
+    const offered = (panel: string) => {
+      const { document, window } = parseHTML(`<html><body><ul>
+        <li id="wrapper"><a id="trigger" href="/story">Headline</a>
+          <div id="panel" class="collapsed">${panel}</div>
+        </li></ul></body></html>`);
+      installPaintedTabFixture(document, window as unknown as Window);
+      const port = new FakeSemanticPort(
+        createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+      );
+      const session = createSession(
+        port,
+        document,
+        window,
+        'isolated-html',
+        undefined,
+        structuralMenuStyle((element) =>
+          element.classList.contains('collapsed') ? 'display' : undefined),
+      );
+      port.emit(createSemanticSourceStart(
+        'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+      ));
+      const batch = port.messages[0]!;
+      const result = {
+        menu: batch.proofs.some((proof) => proof.kind === 'structural-menu'),
+        hiddenText: batch.records.filter((record) => record.gate === 'disclosureContent').length,
+      };
+      session.dispose();
+      return result;
+    };
+    // An article's text hidden beside its headline: 6,000 characters of
+    // prose and one link. No menu, and none of it travels.
+    expect(prose.length).toBeGreaterThan(5_000);
+    expect(offered(`<p>${prose}</p>${few}`)).toEqual({ menu: false, hiddenText: 0 });
+    // A short hidden block was a menu before, and is.
+    expect(offered(`<p>${prose.slice(0, 600)}</p>${few}`).menu).toBe(true);
+    // Mostly links: a menu, whatever its size.
+    expect(offered(links(150)).menu).toBe(true);
+    expect(offered(`<p>${prose.slice(0, 1_500)}</p>${links(150)}`).menu).toBe(true);
+    // Mostly prose with many links in it: not one.
+    expect(offered(`<p>${prose}</p>${links(40)}`).menu).toBe(false);
+    // A button inside a link counts once.
+    const nested = Array.from({ length: 150 }, (_, index) =>
+      `<a href="/s-${index}"><button>Section ${index} of the product catalogue</button></a>`)
+      .join('');
+    expect(offered(`<p>${prose.slice(0, 4_000)}</p>${nested}`).menu).toBe(true);
+    expect(offered(`<p>${prose}</p>${nested}`).menu).toBe(false);
+  });
+
   it('infers a navigation menu whose trigger carries its own plain aria-expanded', () => {
     // freee's header: the button carries aria-expanded and aria-haspopup but
     // no aria-controls, and its menu is the sibling the page script opens.

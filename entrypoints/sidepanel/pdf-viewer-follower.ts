@@ -241,6 +241,10 @@ export class PdfViewerFollower {
       tracker.anchor(this.#dependencies.view.readingPosition());
     }
     tracker.setViewerZoom(this.#dependencies.viewerZoom?.());
+    // How wide the tab draws a scrollbar and how its screen is scaled,
+    // which the viewer's reports leave out.
+    tracker.setScrollbarWidth(report.scrollbar);
+    tracker.setScreenScale(report.scale);
     const track = tracker.update(report, report.time);
     this.#rest(session);
     if (track.kind === 'hold') {

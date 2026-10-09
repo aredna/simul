@@ -3178,6 +3178,90 @@ describe('SourceImageObserver', () => {
     stop();
   });
 
+  it('follows a masked surface in a host\'s own root when the host itself settles (D134)', () => {
+    const fixture = createFixture('<x-secret id="host"></x-secret>');
+    const reader = closedRootReader();
+    const host = fixture.document.querySelector('#host')!;
+    const root = reader.attach(host, '<div id="computed-secret">Protected</div>');
+    installSourceShadowRootReader(fixture.document, reader.read);
+    const secret = root.querySelector('#computed-secret')!;
+    const secretBounds = { left: 320, top: 0, width: 80, height: 40 };
+    setElementBounds(secret, secretBounds);
+    // linkedom's window is a view of the global object: put its style back.
+    const previous = Object.getOwnPropertyDescriptor(
+      fixture.document.defaultView!,
+      'getComputedStyle',
+    );
+    onTestFinished(() => {
+      if (previous) {
+        Object.defineProperty(fixture.document.defaultView!, 'getComputedStyle', previous);
+      } else {
+        Reflect.deleteProperty(fixture.document.defaultView!, 'getComputedStyle');
+      }
+    });
+    Object.defineProperty(fixture.document.defaultView!, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => ({
+        display: 'block', visibility: 'visible', contentVisibility: 'visible',
+        opacity: '1', position: 'static', clipPath: 'none', maskImage: 'none',
+        perspective: 'none', rotate: 'none', scale: 'none', transform: 'none',
+        overflowX: 'visible', overflowY: 'visible',
+        getPropertyValue: (name: string) =>
+          name === '-webkit-text-security' && element === secret ? 'disc' : '',
+      }),
+    });
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    fixture.frames.flush();
+    events.length = 0;
+
+    // The host moves, and with it the masked surface in its own root: the
+    // host has no children and is not positioned.
+    secretBounds.left = 40;
+    host.dispatchEvent(new fixture.document.defaultView!.Event(
+      'transitionend',
+      { bubbles: true },
+    ));
+    fixture.frames.flush();
+    expect(events).toMatchObject([{
+      kind: 'upsert',
+      input: { nodeId: 7, observationChanged: true, captureChanged: true },
+    }]);
+    stop();
+  });
+
+  it('follows an image in a host\'s own root when the host itself settles (D134)', () => {
+    const fixture = createFixture(
+      '<input id="stationary-secret" type="password">' +
+        '<x-card id="card"></x-card>',
+    );
+    const reader = closedRootReader();
+    const card = fixture.document.querySelector('#card')!;
+    const root = reader.attach(card, 'Caption<img id="nested" src="nested.png">');
+    installSourceShadowRootReader(fixture.document, reader.read);
+    const secret = fixture.document.querySelector('#stationary-secret')!;
+    const nested = root.querySelector<HTMLImageElement>('#nested')!;
+    setElementBounds(secret, { left: 300, top: 0, width: 80, height: 40 });
+    setImageMetrics(nested, { left: 500, top: 0, width: 100, height: 100 });
+    fixture.nodeIds.set(nested, 19);
+    const events: SourceImageObservationEvent[] = [];
+    const stop = fixture.observer.subscribe((event) => events.push(event));
+    fixture.frames.flush();
+    events.length = 0;
+
+    setImageMetrics(nested, { left: 290, top: 0, width: 100, height: 100 });
+    card.dispatchEvent(new fixture.document.defaultView!.Event(
+      'transitionend',
+      { bubbles: true },
+    ));
+    fixture.frames.flush();
+    expect(events).toMatchObject([{
+      kind: 'upsert',
+      input: { nodeId: 19, observationChanged: true, captureChanged: true },
+    }]);
+    stop();
+  });
+
   it('keeps controls out of the hosts it waits on (D125)', () => {
     const fixture = createFixture(
       `${'<button>go</button>'.repeat(1_000)}<div id="late-host"></div>`,

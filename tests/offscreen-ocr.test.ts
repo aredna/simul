@@ -23,7 +23,10 @@ import {
   readProbeOcrProviderResponse,
 } from '../lib/ocr/provider-status-protocol';
 import type { AcquiredImagePixels } from '../lib/ocr/pixel-acquisition';
-import { PDF_RECOGNITION_CACHE_WEIGHT } from '../lib/pdf/pdf-ocr';
+import {
+  PDF_RECOGNITION_CACHE_ENTRIES,
+  PDF_RECOGNITION_CACHE_WEIGHT,
+} from '../lib/pdf/pdf-ocr';
 import {
   OCR_NATIVE_PREPROCESSING_VERSION,
   OCR_SHALLOW_BANNER_NATIVE_PREPROCESSING_VERSION,
@@ -275,7 +278,7 @@ describe('offscreen OCR protocol and lifecycle', () => {
     expect(jobs).toHaveLength(2);
   });
 
-  it('serves 128 dense PDF pages with their words from the cache on a second pass (D121)', async () => {
+  it('serves a scanned PDF\'s dense pages with their words from the cache on a second pass (D121, D134)', async () => {
     // 45 lines of 11 words: 495 words a page, about 26,000 of cache weight
     // with the words (7,500 without).
     const DENSE_PAGE_WORDS = [
@@ -305,7 +308,12 @@ describe('offscreen OCR protocol and lifecycle', () => {
         regions,
       };
     };
-    const secondPassRuns = async (maxCacheWeight: number | undefined, askWords: boolean) => {
+    const secondPassRuns = async (
+      maxCacheWeight: number | undefined,
+      askWords: boolean,
+      pages = 128,
+      maxCacheEntries?: number,
+    ) => {
       let runs = 0;
       let weight = 0;
       const coordinator = new ImageRecognitionCoordinator({
@@ -313,6 +321,7 @@ describe('offscreen OCR protocol and lifecycle', () => {
         resetEpoch: 0,
         clientId: 'client-ocr',
         ...(maxCacheWeight === undefined ? {} : { maxCacheWeight }),
+        ...(maxCacheEntries === undefined ? {} : { maxCacheEntries }),
         sendMessage: async (message: unknown) => {
           if ((message as Record<string, unknown>).kind === 'simul:ocr-v1:ensure-host') {
             return { kind: 'simul:ocr-v1:host-ready', version: 1, ready: true };
@@ -338,22 +347,32 @@ describe('offscreen OCR protocol and lifecycle', () => {
         pixelHash: index.toString(16).padStart(64, '0'),
       });
       // Pages are read in order, and again in order after Refresh.
-      for (let index = 0; index < 128; index += 1) {
+      for (let index = 0; index < pages; index += 1) {
         await expect(coordinator.recognize(pagePixels(index), route))
           .resolves.toMatchObject({ status: 'complete' });
       }
       const first = runs;
-      for (let index = 0; index < 128; index += 1) {
+      for (let index = 0; index < pages; index += 1) {
         await coordinator.recognize(pagePixels(index), route);
       }
       return { first, again: runs - first, weight };
     };
 
     // The PDF's budget: every page is still there.
-    const pdf = await secondPassRuns(PDF_RECOGNITION_CACHE_WEIGHT, true);
+    const pdf = await secondPassRuns(
+      PDF_RECOGNITION_CACHE_WEIGHT, true, 128, PDF_RECOGNITION_CACHE_ENTRIES,
+    );
     expect(pdf).toMatchObject({ first: 128, again: 0 });
     expect(pdf.weight).toBeGreaterThan(25_000);
     expect(pdf.weight * 128).toBeLessThan(PDF_RECOGNITION_CACHE_WEIGHT);
+    // And of a scan of 300 dense pages (D134): the cache's own limit of 128
+    // entries read all of them again, whatever the budget.
+    expect(await secondPassRuns(
+      PDF_RECOGNITION_CACHE_WEIGHT, true, 300, PDF_RECOGNITION_CACHE_ENTRIES,
+    )).toMatchObject({ first: 300, again: 0 });
+    expect(pdf.weight * 300).toBeLessThan(PDF_RECOGNITION_CACHE_WEIGHT);
+    expect(await secondPassRuns(PDF_RECOGNITION_CACHE_WEIGHT, true, 129))
+      .toMatchObject({ first: 129, again: 129 });
     // Why it has one: under the default budget the oldest page is dropped
     // as the last is read, so the second pass reads every page again.
     expect(await secondPassRuns(undefined, true)).toMatchObject({ first: 128, again: 128 });

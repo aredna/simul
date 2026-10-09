@@ -2220,6 +2220,14 @@ function collectCaptureControlTargets(
     pending,
     MAX_CAPTURE_SAFETY_SCAN_ELEMENTS,
   )) return undefined;
+  // The element's own root, as a descendant's below.
+  const ownShadow = readImageSourceShadowRoot(node);
+  if (ownShadow === UNREADABLE_SHADOW_ROOT) return undefined;
+  if (ownShadow && !appendBoundedChildNodes(
+    ownShadow,
+    pending,
+    MAX_CAPTURE_SAFETY_SCAN_ELEMENTS,
+  )) return undefined;
   let inspected = 0;
   try {
     while (pending.length > 0) {
@@ -2343,6 +2351,12 @@ function boundedDescendantMatch(
 ): boolean | undefined {
   const pending: Node[] = [];
   if (!appendBoundedChildNodes(root, pending, maximumNodes)) return undefined;
+  // The element's own root, as a descendant's below.
+  const ownShadow = readImageSourceShadowRoot(root);
+  if (ownShadow === UNREADABLE_SHADOW_ROOT) return undefined;
+  if (ownShadow && !appendBoundedChildNodes(ownShadow, pending, maximumNodes)) {
+    return undefined;
+  }
   let inspected = 0;
   while (pending.length > 0) {
     if (inspected >= maximumNodes) return undefined;

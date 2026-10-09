@@ -186,6 +186,49 @@ describe('PdfViewerFollower', () => {
     expect(view.position?.index).toBeGreaterThanOrEqual(298);
   });
 
+  it('reads End by the scrollbar the tab says it draws (D134)', async () => {
+    vi.useFakeTimers();
+    for (const scrollbar of [25, undefined]) {
+      const { follower, view, send } = setup();
+      follower.start(TARGET, PAGES);
+      await Promise.resolve();
+      // The page is wider than the view: the viewer stops a scrollbar short
+      // of the bottom its reports give. This tab draws one 25 px wide.
+      const bottom = 300 * PITCH - 4 - (700 - 25);
+      const told = scrollbar === undefined ? {} : { scrollbar };
+      send({ ...report(0, 1_000), ...told });
+      for (let frame = 1; frame <= 10; frame += 1) {
+        send({ ...report((bottom * frame) / 10, 2_000 + frame * 16), ...told });
+      }
+      vi.advanceTimersByTime(PDF_VIEWER_MOVEMENT_SETTLE_MS);
+      // Told nothing, the tracker looks for one of 15 px: not the bottom.
+      if (scrollbar === undefined) expect(view.position?.index).toBeLessThan(10);
+      else expect(view.position?.index).toBe(299);
+      follower.stop();
+    }
+  });
+
+  it('reads End by the scale the tab says its screen has (D134)', async () => {
+    vi.useFakeTimers();
+    for (const scale of [1.5, 1, undefined]) {
+      const { follower, view, send } = setup();
+      follower.start(TARGET, PAGES);
+      await Promise.resolve();
+      // The tab draws no scrollbar, and Chrome stops a pixel and a half
+      // short of the bottom worked out: its rounding on a scaled screen.
+      const bottom = 300 * PITCH - 4 - 700 - 1.5;
+      const told = { scrollbar: 0, ...(scale === undefined ? {} : { scale }) };
+      send({ ...report(0, 1_000), ...told });
+      for (let frame = 1; frame <= 10; frame += 1) {
+        send({ ...report((bottom * frame) / 10, 2_000 + frame * 16), ...told });
+      }
+      vi.advanceTimersByTime(PDF_VIEWER_MOVEMENT_SETTLE_MS);
+      if (scale === 1.5) expect(view.position?.index).toBe(299);
+      else expect(view.position?.index).toBeLessThan(10);
+      follower.stop();
+    }
+  });
+
   it('moves the view sideways only when the viewer moved sideways (D115)', async () => {
     const { follower, view, send, setEnabled } = setup();
     follower.start(TARGET, PAGES);

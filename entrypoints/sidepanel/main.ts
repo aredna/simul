@@ -61,7 +61,10 @@ import {
 import { NavigationRefreshGate } from '../../lib/navigation-refresh-gate';
 import { fetchPdfBytes } from '../../lib/pdf/pdf-fetch';
 import { chooseDroppedPdf } from '../../lib/pdf/pdf-file';
-import { PDF_RECOGNITION_CACHE_WEIGHT } from '../../lib/pdf/pdf-ocr';
+import {
+  PDF_RECOGNITION_CACHE_ENTRIES,
+  PDF_RECOGNITION_CACHE_WEIGHT,
+} from '../../lib/pdf/pdf-ocr';
 import { chromePdfjsEnvironment, openPdfDocument } from '../../lib/pdf/pdfjs-runtime';
 import { PdfTextSurface } from '../../lib/pdf/pdf-text-surface';
 import {
@@ -1942,6 +1945,7 @@ function pdfRecognizer(): ImageRecognitionCoordinator {
     new IndexedDbTransientImageStore(),
     state.preferences.resetRevision,
     PDF_RECOGNITION_CACHE_WEIGHT,
+    PDF_RECOGNITION_CACHE_ENTRIES,
   );
   pdfRecognition.advanceResetEpoch(state.preferences.resetRevision);
   const origin = state.localPdf?.key ?? pageOrigin(state.capturedPageIdentity?.url);

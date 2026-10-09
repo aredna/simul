@@ -89,6 +89,47 @@ export function shouldReuseDetachedWindow(
     (followMode === 'active' || existingSourceTabId === clickedTabId);
 }
 
+/** A separate companion window and the tab its address names. */
+export interface DetachedCompanionWindow {
+  readonly id: number;
+  readonly sourceTabId: number;
+}
+
+/**
+ * The companion window an extension context is, if it is one: the companion
+ * page shown in a window of its own, with the tab it was opened for in its
+ * address (`createDetachedCompanionUrl`). The side panel shows the same page
+ * with no tab in its address and in no window of its own.
+ */
+export function readDetachedCompanionWindow(
+  context: {
+    readonly contextType?: string;
+    readonly documentUrl?: string;
+    readonly windowId?: number;
+  },
+  extensionPageUrl: string,
+): DetachedCompanionWindow | undefined {
+  if (context.contextType !== 'TAB' || !context.documentUrl) return undefined;
+  const windowId = context.windowId;
+  if (windowId === undefined || !Number.isInteger(windowId) || windowId < 0) return undefined;
+  let url: URL;
+  let page: URL;
+  try {
+    url = new URL(context.documentUrl);
+    page = new URL(extensionPageUrl);
+  } catch {
+    return undefined;
+  }
+  if (
+    url.protocol !== page.protocol ||
+    url.host !== page.host ||
+    url.pathname !== page.pathname
+  ) return undefined;
+  const source = url.searchParams.get('sourceTabId');
+  if (source === null || !/^\d{1,15}$/u.test(source)) return undefined;
+  return { id: windowId, sourceTabId: Number(source) };
+}
+
 export function createDetachedCompanionUrl(
   extensionPageUrl: string,
   identity: CapturedPageIdentity,

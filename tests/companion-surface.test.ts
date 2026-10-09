@@ -8,6 +8,7 @@ import {
   createCompanionLaunchEpoch,
   isNewerCompanionLaunchStamp,
   readCompanionLaunchEpochGeneration,
+  readDetachedCompanionWindow,
   resolveCompanionLaunchSurface,
   sameCompanionSourcePage,
   shouldFollowActivatedTab,
@@ -301,6 +302,35 @@ describe('companion surface launch decisions', () => {
     stored = 'not a number';
     await expect(allocateCompanionLaunchGeneration(store, () => 6_000))
       .resolves.toBe(6_000);
+  });
+
+  it('knows a separate companion window among the extension\'s pages (D134)', () => {
+    const page = 'chrome-extension://simul/sidepanel.html';
+    const own = {
+      contextType: 'TAB',
+      documentUrl: `${page}?sourceTabId=11&sourceWindowId=1`,
+      windowId: 300,
+    };
+    expect(createDetachedCompanionUrl(page, { tabId: 11, windowId: 1, url: 'https://a.example/' }))
+      .toBe(own.documentUrl);
+    expect(readDetachedCompanionWindow(own, page)).toEqual({ id: 300, sourceTabId: 11 });
+    for (const other of [
+      // The side panel shows the same page, with no tab in its address.
+      { contextType: 'SIDE_PANEL', documentUrl: page, windowId: -1 },
+      { ...own, contextType: 'SIDE_PANEL' },
+      { ...own, documentUrl: page },
+      { ...own, documentUrl: 'chrome-extension://simul/offscreen.html?sourceTabId=11' },
+      { ...own, documentUrl: 'chrome-extension://other/sidepanel.html?sourceTabId=11' },
+      { ...own, documentUrl: `${page}?sourceTabId=eleven` },
+      { ...own, documentUrl: `${page}?sourceTabId=-11` },
+      { ...own, documentUrl: 'about:srcdoc' },
+      { ...own, documentUrl: undefined },
+      { ...own, windowId: -1 },
+      { ...own, windowId: undefined },
+      {},
+    ]) {
+      expect(readDetachedCompanionWindow(other, page)).toBeUndefined();
+    }
   });
 
   it('degrades to clock order when session storage is unavailable', async () => {

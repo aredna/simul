@@ -10,8 +10,23 @@ const INSET_BOTTOM = 7;
 const INSET_LEFT = 5;
 const INSET_RIGHT = 5;
 const SEPARATOR = 4;
-// The viewer's own scrollbar (`getScrollbarWidth`).
-const SCROLLBAR_WIDTH = 14;
+// The viewer's own scrollbar, in screen px, while the tab has not said how
+// wide it draws one: Chrome measures it (`getScrollbarWidth`), 15 on Linux,
+// a fraction more or less on a scaled screen, another width on other
+// systems, 0 where scrollbars lie over the page.
+const UNTOLD_SCROLLBAR_WIDTH = 15;
+const MAX_SCROLLBAR_WIDTH = 64;
+// Chrome gives the viewer a scrollbar across when the PDF is wider than the
+// view less the scrollbar down its side, which it measures in whole px. In
+// fit to width the PDF is exactly as wide, give or take the arithmetic
+// (this much, screen px), and has none.
+const WIDE_EXACT = 1e-6;
+// A measured width this near half way between two whole px may be either
+// to Chrome.
+const WHOLE_UNSURE = 0.1;
+// While the width is not told, a PDF within this (screen px) of the view
+// less the usual scrollbar may have one across or not.
+const UNTOLD_WIDE_MARGIN = 1;
 // How far (screen px) a page may be from where the one-page-wide layout
 // puts it before the report is taken to be from another layout.
 const BESIDE_OFFSET = 8;
@@ -88,8 +103,21 @@ const FRAME_MS = 1000 / 60;
 // Chrome snaps the scroll position to whole pixels: a sideways place this
 // close (screen px) to the last is the same place, kept through a zoom.
 const SAME_LEFT = 0.75;
-// How close a held movement must stop to the top or bottom of the PDF.
+// How close (screen px) a held movement must stop to the bottom of the PDF.
+// Chrome rounds the PDF's height on screen up to a whole pixel: on a
+// screen scaled by a whole number the viewer stopped within 0.5 px of the
+// bottom worked out here (Chrome 154 and 138, D134). No wider there: every
+// pixel allowed is a place in each page where a movement that stops there
+// reads as the end of the PDF, and far zoomed out each turn of the wheel
+// is such a movement.
 const EDGE_TOLERANCE = 0.75;
+// On a screen scaled by a fraction Chrome lays the viewer out in device
+// pixels and reports whole CSS pixels: the viewer stopped up to 0.85 px
+// from the bottom worked out at 125% to 250% and 0.9 to 1.85 px short of
+// it at 133%, so End was not read there.
+const SCALED_EDGE_TOLERANCE = 2;
+// A scale this near a whole number is one.
+const WHOLE_SCALE = 0.01;
 const MAX_SPEED = 50; // viewer pixels per ms
 
 interface ViewerPage {
@@ -264,6 +292,10 @@ export class PdfViewerTracker {
    * report is then no jump.
    */
   #zoomed = false;
+  /** How wide the viewer's scrollbars are, in screen px, once the tab has said. */
+  #scrollbar: number | undefined;
+  /** Whether the tab has said its screen is scaled by a fraction. */
+  #scaledByFraction = false;
 
   constructor(pageSizes: readonly PdfPagePoints[]) {
     let top = 0;
@@ -345,6 +377,32 @@ export class PdfViewerTracker {
       this.#fitsLength(report, this.#widths, before)
     ) return;
     this.#quarterTurned(report);
+  }
+
+  /**
+   * How wide the tab draws a scrollbar, in screen px, which is how wide the
+   * viewer's are (D134); 0 where scrollbars lie over the page. The viewer
+   * reports its viewport with its scrollbars: a PDF wider than the view
+   * has one across the bottom, and the viewer scrolls down only as far as
+   * that leaves. Until it is told (`undefined`: the tab could not tell),
+   * the tracker allows for one of 15 px or none.
+   */
+  setScrollbarWidth(width: number | undefined): void {
+    this.#scrollbar = width !== undefined && width >= 0 && width <= MAX_SCROLLBAR_WIDTH
+      ? width
+      : undefined;
+  }
+
+  /**
+   * The screen's device pixels per CSS pixel in the tab (D134): 1.25 on a
+   * screen scaled by 125%. On a screen scaled by a fraction the bottom of
+   * the PDF is taken within 2 px, not 0.75: Chrome's own rounding moves it
+   * that far there. `undefined` (the tab could not tell) is a whole number.
+   */
+  setScreenScale(scale: number | undefined): void {
+    this.#scaledByFraction = scale !== undefined &&
+      Number.isFinite(scale) &&
+      Math.abs(scale - Math.round(scale)) > WHOLE_SCALE;
   }
 
   /**
@@ -792,7 +850,7 @@ export class PdfViewerTracker {
       const documentWidth = (this.#widestWidth + INSET_LEFT + INSET_RIGHT) * zoom;
       const left = ((this.#widestWidth - width) / 2 + INSET_LEFT) * zoom;
       // Chrome's own scrollbar may or may not take its width from the view.
-      for (const scrollbar of [0, SCROLLBAR_WIDTH]) {
+      for (const scrollbar of [0, this.#scrollbar ?? UNTOLD_SCROLLBAR_WIDTH]) {
         const room = viewport.viewportWidth - scrollbar - documentWidth;
         const lowest = room >= 0 ? left + room / 2 : left + room;
         const highest = room >= 0 ? left + room / 2 : left;
@@ -881,22 +939,50 @@ export class PdfViewerTracker {
    * the one before it.
    */
   #atBottom(candidates: readonly Candidate[], viewport: PdfViewerViewport): Candidate | undefined {
+    const tolerance = this.#scaledByFraction ? SCALED_EDGE_TOLERANCE : EDGE_TOLERANCE;
     return candidates.find((candidate) =>
       this.#viewHeights(candidate.zoom, viewport).some((height) =>
         Math.abs(candidate.y - this.#maximumY(candidate.zoom, height)) * candidate.zoom <=
-          EDGE_TOLERANCE));
+          tolerance));
   }
 
   /**
-   * The heights the viewer may scroll by: its viewport, and that less a
-   * horizontal scrollbar when the PDF is wider than the view.
+   * The height of the view the viewer scrolls down to the bottom of the
+   * PDF by: its viewport as reported, or that less the scrollbar across it
+   * when the PDF is wider than the view (the report counts the scrollbars
+   * in; Chrome 138 and 154). Both where it cannot be told which: every
+   * height is one more place in each page where a movement that stops
+   * there reads as the end of the PDF.
    */
   #viewHeights(zoom: number, viewport: PdfViewerViewport): number[] {
-    const wide = (this.#widestWidth + INSET_LEFT + INSET_RIGHT) * zoom >
-      viewport.viewportWidth - SCROLLBAR_WIDTH;
-    return wide
-      ? [viewport.viewportHeight, viewport.viewportHeight - SCROLLBAR_WIDTH]
-      : [viewport.viewportHeight];
+    const scrollbar = this.#scrollbar;
+    const full = viewport.viewportHeight;
+    // How much wider the PDF is than the view less a scrollbar of `whole` px.
+    const wider = (whole: number) =>
+      (this.#widestWidth + INSET_LEFT + INSET_RIGHT) * zoom - (viewport.viewportWidth - whole);
+    if (scrollbar === undefined) {
+      // Not told: with one of the usual width, or with none.
+      return wider(UNTOLD_SCROLLBAR_WIDTH) > -UNTOLD_WIDE_MARGIN
+        ? [full, full - UNTOLD_SCROLLBAR_WIDTH]
+        : [full];
+    }
+    if (!(scrollbar > 0)) return [full];
+    // Chrome's own whole number for the scrollbar: the nearest, or either
+    // when the width measured is about half way between two.
+    if (wider(Math.round(scrollbar + WHOLE_UNSURE)) <= WIDE_EXACT) return [full];
+    if (wider(Math.round(scrollbar - WHOLE_UNSURE)) > WIDE_EXACT) return [full - scrollbar];
+    return [full, full - scrollbar];
+  }
+
+  /**
+   * The steps Chrome pages by, in screen px: a share of the viewport as
+   * reported for PageUp, PageDown and Space, and the same share of the view
+   * less the scrollbar across it for a click on the track of the scrollbar
+   * down the side (Chrome 138 and 154, D134).
+   */
+  #pageSteps(zoom: number, viewport: PdfViewerViewport): number[] {
+    const heights = new Set([viewport.viewportHeight, ...this.#viewHeights(zoom, viewport)]);
+    return [...heights].map((height) => PDF_VIEWER_PAGE_KEY_SHARE * height);
   }
 
   /**
@@ -922,8 +1008,7 @@ export class PdfViewerTracker {
     fix: Fix,
     viewport: PdfViewerViewport,
   ): Candidate | undefined {
-    const steps = this.#viewHeights(fix.zoom, viewport)
-      .map((height) => PDF_VIEWER_PAGE_KEY_SHARE * height);
+    const steps = this.#pageSteps(fix.zoom, viewport);
     const pageKeys = candidates.filter((candidate) =>
       steps.some((step) =>
         Math.abs(Math.abs((candidate.y - fix.y) * candidate.zoom) - step) <= PAGE_KEY_TOLERANCE));
@@ -1009,8 +1094,8 @@ export class PdfViewerTracker {
     this.#speed = speed;
     this.#lastStep = previous ? candidate.y - previous.y : 0;
     const moved = Math.abs(this.#lastStep * candidate.zoom);
-    this.#lastPageKey = this.#viewHeights(candidate.zoom, viewport).some((height) =>
-      Math.abs(moved - PDF_VIEWER_PAGE_KEY_SHARE * height) <= PAGE_KEY_TOLERANCE);
+    this.#lastPageKey = this.#pageSteps(candidate.zoom, viewport).some((step) =>
+      Math.abs(moved - step) <= PAGE_KEY_TOLERANCE);
     if (previous && previous.page === candidate.page && Math.abs(previous.y - candidate.y) < 0.01) {
       return { kind: 'same' };
     }

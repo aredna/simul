@@ -28,6 +28,14 @@ class FakeViewer {
   /** How far the viewer is scrolled sideways, in screen pixels. */
   scrollX = 0;
   time = 1_000;
+  /**
+   * How wide Chrome draws a scrollbar, in screen pixels. The report gives
+   * the viewport with its scrollbars, and a PDF wider than the view has
+   * one across the bottom.
+   */
+  scrollbar = 0;
+  /** Chrome's own whole number for that width, when not the nearest. */
+  scrollbarWhole: number | undefined;
 
   constructor(
     sizes: readonly PdfPagePoints[],
@@ -48,8 +56,16 @@ class FakeViewer {
     this.height = top;
   }
 
+  /** Chrome's rule, with its own whole number for the scrollbar's width. */
+  get scrollbarAcross(): boolean {
+    const widest = Math.max(...this.pages.map((page) => page.width));
+    const whole = this.scrollbarWhole ?? Math.round(this.scrollbar);
+    return this.scrollbar > 0 && (widest + 10) * this.zoom > this.viewportWidth - whole + 1e-9;
+  }
+
   get maxScroll(): number {
-    return Math.max(0, this.height * this.zoom - this.viewportHeight);
+    const across = this.scrollbarAcross ? this.scrollbar : 0;
+    return Math.max(0, this.height * this.zoom - (this.viewportHeight - across));
   }
 
   scrollTo(scroll: number): void {
@@ -701,6 +717,195 @@ describe('PdfViewerTracker doubts (D133)', () => {
     }
     expect(tracker.settle()?.index).toBe(0);
     expect(tracker.doubt).toBeUndefined();
+  });
+
+  /** End, as Chrome animates it: ten frames to `target`, then still. */
+  const runTo = (tracker: PdfViewerTracker, viewer: FakeViewer, target: number) => {
+    const start = viewer.scroll;
+    for (let frame = 1; frame <= 10; frame += 1) {
+      viewer.scrollTo(start + (target - start) * (frame / 10));
+      send(tracker, viewer, 16);
+    }
+    return tracker.settle();
+  };
+
+  it('reads End on a PDF wider than the view by the scrollbar the tab draws (D134)', () => {
+    // Linux, a wider one, screens scaled by 125% and 110%, and a wide system scrollbar.
+    for (const scrollbar of [15, 17, 15.2, 15.455, 25]) {
+      // 816 px at 125% is wider than a view of 593 px.
+      const viewer = new FakeViewer(pages(300), 1.25, 749, 593);
+      viewer.scrollbar = scrollbar;
+      const tracker = new PdfViewerTracker(pages(300));
+      tracker.setScrollbarWidth(scrollbar);
+      send(tracker, viewer, 1_000);
+      tracker.place(tracker.doubt!, 0);
+      expect(runTo(tracker, viewer, viewer.maxScroll)?.index).toBe(viewer.topPage());
+      expect(viewer.topPage()).toBeGreaterThanOrEqual(298);
+      expect(tracker.doubt).toBeUndefined();
+      // And Home from there.
+      expect(runTo(tracker, viewer, 0)).toEqual({ index: 0, fraction: 0 });
+    }
+  });
+
+  it('allows for a scrollbar of 15 px, or none, until the tab says how wide it draws one (D134)', () => {
+    const run = (scrollbar: number, told: number | undefined | 'nothing', short = 0) => {
+      const viewer = new FakeViewer(pages(300), 1.25, 749, 593);
+      viewer.scrollbar = scrollbar;
+      const tracker = new PdfViewerTracker(pages(300));
+      if (told !== 'nothing') tracker.setScrollbarWidth(told);
+      send(tracker, viewer, 1_000);
+      tracker.place(tracker.doubt!, 0);
+      runTo(tracker, viewer, viewer.maxScroll - short);
+      return { index: tracker.position!.index, last: viewer.topPage() };
+    };
+    for (const told of ['nothing', undefined, -1, Number.NaN, 1_000] as const) {
+      // With a scrollbar of 15 px across, and with none.
+      for (const scrollbar of [15, 0]) {
+        const { index, last } = run(scrollbar, told);
+        expect(index).toBe(last);
+        expect(last).toBeGreaterThanOrEqual(298);
+      }
+    }
+    // A scrollbar of another width than the tracker allows for is not the bottom.
+    expect(run(25, 'nothing').index).toBeLessThan(10);
+    expect(run(15, 25).index).toBeLessThan(10);
+    // Untold, a PDF only a little wider than the view less 15 px has one too.
+    const viewer = new FakeViewer(pages(300), (593 - 15 + 10) / 826, 749, 593);
+    viewer.scrollbar = 15;
+    expect(viewer.scrollbarAcross).toBe(true);
+    const tracker = new PdfViewerTracker(pages(300));
+    send(tracker, viewer, 1_000);
+    tracker.place(tracker.doubt!, 0);
+    expect(runTo(tracker, viewer, viewer.maxScroll)?.index).toBe(viewer.topPage());
+    expect(viewer.topPage()).toBeGreaterThanOrEqual(298);
+  });
+
+  it('looks for one bottom once the tab has said how wide a scrollbar is (D134)', () => {
+    const run = (told: number | 'nothing', short: number) => {
+      const viewer = new FakeViewer(pages(300), 1.25, 749, 593);
+      viewer.scrollbar = 15;
+      const tracker = new PdfViewerTracker(pages(300));
+      if (told !== 'nothing') tracker.setScrollbarWidth(told);
+      send(tracker, viewer, 1_000);
+      tracker.place(tracker.doubt!, 0);
+      runTo(tracker, viewer, viewer.maxScroll - short);
+      return tracker.position!.index;
+    };
+    // A fast movement that stops where the bottom would be without the
+    // scrollbar across, 15 px above the real one, is not End once the
+    // width is known; untold, it could be.
+    expect(run(15, 15)).toBeLessThan(10);
+    expect(run('nothing', 15)).toBeGreaterThanOrEqual(298);
+    expect(run(15, 0)).toBeGreaterThanOrEqual(298);
+  });
+
+  it('looks for no scrollbar across in fit to width (D134)', () => {
+    // Chrome fits the widest page into the view less its scrollbar's whole
+    // number of px: exactly as wide, and none lies across.
+    for (const scrollbar of [15, 15.2, 14.857]) {
+      const start = () => {
+        const viewer = new FakeViewer(pages(300), (593 - 15) / 826, 749, 593);
+        viewer.scrollbar = scrollbar;
+        expect(viewer.scrollbarAcross).toBe(false);
+        const tracker = new PdfViewerTracker(pages(300));
+        tracker.setScrollbarWidth(scrollbar);
+        send(tracker, viewer, 1_000);
+        tracker.place(tracker.doubt!, 0);
+        return { viewer, tracker };
+      };
+      const end = start();
+      expect(runTo(end.tracker, end.viewer, end.viewer.maxScroll)?.index).toBe(end.viewer.topPage());
+      expect(end.viewer.topPage()).toBeGreaterThanOrEqual(298);
+      // That share of the view less the scrollbar is no step Chrome takes
+      // here: a large move like any other, held until the viewer is still.
+      const { viewer, tracker } = start();
+      viewer.scrollTo(Math.round(PDF_VIEWER_PAGE_KEY_SHARE * (viewer.viewportHeight - scrollbar)));
+      expect(send(tracker, viewer, 400).kind).toBe('hold');
+    }
+  });
+
+  it('looks for both bottoms where Chrome\'s whole number for the scrollbar is unsure (D134)', () => {
+    // A width measured as 15.45 px may be 15 or 16 to Chrome. In fit to
+    // width by either number no scrollbar lies across; half a pixel wider
+    // than that, one does.
+    for (const whole of [15, 16]) {
+      for (const wider of [0, 0.5]) {
+        const viewer = new FakeViewer(pages(300), (593 - whole + wider) / 826, 749, 593);
+        viewer.scrollbar = 15.45;
+        viewer.scrollbarWhole = whole;
+        expect(viewer.scrollbarAcross).toBe(wider > 0);
+        const tracker = new PdfViewerTracker(pages(300));
+        tracker.setScrollbarWidth(15.45);
+        send(tracker, viewer, 1_000);
+        tracker.place(tracker.doubt!, 0);
+        expect(runTo(tracker, viewer, viewer.maxScroll)?.index).toBe(viewer.topPage());
+        expect(viewer.topPage()).toBeGreaterThanOrEqual(298);
+      }
+    }
+  });
+
+  it('reads End where scrollbars lie over the page and take no room (D134)', () => {
+    // macOS by default: the tab says 0, and the bottom is the one reported.
+    const viewer = new FakeViewer(pages(300), 1.25, 749, 593);
+    const tracker = new PdfViewerTracker(pages(300));
+    tracker.setScrollbarWidth(0);
+    send(tracker, viewer, 1_000);
+    tracker.place(tracker.doubt!, 0);
+    expect(runTo(tracker, viewer, viewer.maxScroll)?.index).toBe(viewer.topPage());
+    expect(viewer.topPage()).toBeGreaterThanOrEqual(298);
+    expect(runTo(tracker, viewer, 0)).toEqual({ index: 0, fraction: 0 });
+  });
+
+  it('reads a page key and a click on the scrollbar\'s track, with a scrollbar across (D134)', () => {
+    // Wider than the view. A key steps by 87.5% of the height Chrome
+    // reports; a click on the track of the scrollbar down the side steps by
+    // that share of the view less the scrollbar across. Each step is more
+    // than half a page here, so read as a scroll it lands a page off.
+    for (const less of [0, 15]) {
+      const viewer = new FakeViewer(pages(30), 1, 749, 593);
+      viewer.scrollbar = 15;
+      expect(viewer.scrollbarAcross).toBe(true);
+      const tracker = new PdfViewerTracker(pages(30));
+      tracker.setScrollbarWidth(15);
+      send(tracker, viewer, 1_000);
+      tracker.place(tracker.doubt!, 0);
+      for (let press = 0; press < 12; press += 1) {
+        viewer.scrollTo(
+          Math.round(viewer.scroll + PDF_VIEWER_PAGE_KEY_SHARE * (viewer.viewportHeight - less)),
+        );
+        expect(keyed(tracker, send(tracker, viewer, 400)).index).toBe(viewer.topPage());
+      }
+      expect(viewer.topPage()).toBeGreaterThan(5);
+    }
+  });
+
+  it('takes the bottom within three quarters of a pixel, and within two on a screen scaled by a fraction (D134)', () => {
+    const run = (short: number, scale: number | undefined | 'nothing') => {
+      const viewer = new FakeViewer(pages(300), 0.7058, 757);
+      const tracker = new PdfViewerTracker(pages(300));
+      if (scale !== 'nothing') tracker.setScreenScale(scale);
+      send(tracker, viewer, 1_000);
+      tracker.place(tracker.doubt!, 0);
+      runTo(tracker, viewer, viewer.maxScroll - short);
+      return { index: tracker.position!.index, last: viewer.topPage() };
+    };
+    const atEnd = (short: number, scale: number | undefined | 'nothing') => {
+      const { index, last } = run(short, scale);
+      expect(last).toBeGreaterThanOrEqual(298);
+      return index === last;
+    };
+    // A screen scaled by a whole number, or one the tab has not told of:
+    // Chrome's rounding is within half a pixel. A wider allowance would
+    // take more stops of a fast movement for End.
+    for (const scale of ['nothing', undefined, 1, 2, 3, 1.004, Number.NaN] as const) {
+      for (const short of [0, 0.5, 0.7]) expect(atEnd(short, scale)).toBe(true);
+      for (const short of [0.9, 1.85, 6]) expect(atEnd(short, scale)).toBe(false);
+    }
+    // Scaled by a fraction, Chrome stops up to 1.85 px short of the bottom.
+    for (const scale of [1.25, 1.33, 1.5, 1.75, 2.5]) {
+      for (const short of [0, 0.83, 1.85]) expect(atEnd(short, scale)).toBe(true);
+      for (const short of [2.6, 6]) expect(atEnd(short, scale)).toBe(false);
+    }
   });
 
   it('keeps a doubt through scrolling, and takes no page for a report that has passed', () => {
@@ -1678,5 +1883,43 @@ describe('PDF viewer reports', () => {
     expect(readPdfViewerPortMessage(message)).toEqual(message);
     expect(readPdfViewerPortMessage({ ...message, kind: 'text' })).toBeUndefined();
     expect(readPdfViewerPortMessage({ ...message, time: Number.POSITIVE_INFINITY })).toBeUndefined();
+  });
+
+  it('takes the scrollbar\'s width with a report, and a report without one (D134)', () => {
+    const message = {
+      kind: 'viewport',
+      pageX: 5,
+      pageY: 3,
+      pageWidth: 816,
+      viewportWidth: 800,
+      viewportHeight: 700,
+      time: 12_345_678,
+    };
+    for (const scrollbar of [0, 15, 15.2, 17, 64]) {
+      expect(readPdfViewerPortMessage({ ...message, scrollbar })).toEqual({ ...message, scrollbar });
+    }
+    for (const scrollbar of [-1, 65, Number.NaN, Number.POSITIVE_INFINITY, '15', null, {}]) {
+      expect(readPdfViewerPortMessage({ ...message, scrollbar })).toEqual(message);
+    }
+  });
+
+  it('takes the screen\'s scale with a report, and a report without one (D134)', () => {
+    const message = {
+      kind: 'viewport',
+      pageX: 5,
+      pageY: 3,
+      pageWidth: 816,
+      viewportWidth: 800,
+      viewportHeight: 700,
+      time: 12_345_678,
+    };
+    for (const scale of [0.5, 1, 1.25, 1.5, 3, 16]) {
+      expect(readPdfViewerPortMessage({ ...message, scale })).toEqual({ ...message, scale });
+    }
+    for (const scale of [0, -1, 0.1, 17, Number.NaN, Number.POSITIVE_INFINITY, '1.5', null]) {
+      expect(readPdfViewerPortMessage({ ...message, scale })).toEqual(message);
+    }
+    expect(readPdfViewerPortMessage({ ...message, scale: 1.5, scrollbar: 15.333 }))
+      .toEqual({ ...message, scale: 1.5, scrollbar: 15.333 });
   });
 });

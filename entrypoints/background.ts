@@ -11,6 +11,7 @@ import {
   COMPANION_LAUNCH_GENERATION_STORAGE_KEY,
   allocateCompanionLaunchGeneration,
   createCompanionLaunchEpoch,
+  readDetachedCompanionWindow,
 } from '../lib/companion-surface';
 import { compiledImageTextProviderIds } from '../lib/ocr/provider-registry';
 import { hasOcrRuntimeProvider } from '../lib/ocr/runtime-provider-readiness';
@@ -169,6 +170,11 @@ export default defineBackground(() => {
     windows: browser.windows,
     sendMessage: (message) => browser.runtime.sendMessage(message),
     companionPageUrl: () => browser.runtime.getURL('/sidepanel.html'),
+    companionWindows: async () => {
+      const page = browser.runtime.getURL('/sidepanel.html');
+      const contexts = await browser.runtime.getContexts({ contextTypes: ['TAB'] });
+      return contexts.flatMap((context) => readDetachedCompanionWindow(context, page) ?? []);
+    },
     preferences: () => launchPreferences,
     preferencesHydrated: () => launchPreferencesHydrated,
     preferencesReady: launchPreferencesReady,

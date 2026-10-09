@@ -6,6 +6,7 @@ import {
   shouldPreopenSidePanel,
   shouldReuseDetachedWindow,
   type BrowserWindowGeometry,
+  type DetachedCompanionWindow,
   type DetachedWindowCreateData,
 } from './companion-surface';
 import type { AuthorizedTabMessage, UnreadableTabMessage } from './page-identity';
@@ -42,6 +43,11 @@ export interface ToolbarLaunchEnvironment {
   sendMessage(message: AuthorizedTabMessage | UnreadableTabMessage): Promise<unknown>;
   /** The address of the companion page inside the extension. */
   companionPageUrl(): string;
+  /**
+   * The separate companion windows open now, whoever opened them, each
+   * with the tab its address names (D134). Absent in tests that need none.
+   */
+  readonly companionWindows?: () => Promise<readonly DetachedCompanionWindow[]>;
   /** The launch preferences as the worker holds them now. */
   preferences(): Pick<
     CompanionPreferences,
@@ -56,6 +62,10 @@ export interface ToolbarLaunchEnvironment {
   report?(state: string, code: string): void;
 }
 
+// How many companion pages found among the extension's contexts a click
+// asks Chrome about before it opens a window of its own.
+const MAX_FOUND_WINDOWS = 8;
+
 /**
  * Opens the companion for a toolbar click: the side panel or the separate
  * window, whichever the saved preferences select. Clicks are numbered, and a
@@ -65,10 +75,11 @@ export class ToolbarLauncher {
   readonly #environment: ToolbarLaunchEnvironment;
   #clickSequence = 0;
   #latestClickWindowId: number | undefined;
-  // The detached companion window this worker created, so a second toolbar
-  // click focuses it instead of opening another one. Lost on worker restart,
-  // in which case one extra window is the worst outcome.
-  #detachedWindow: { id: number; sourceTabId: number } | undefined;
+  // The detached companion window a toolbar click last opened or took over,
+  // so a second click focuses it instead of opening another one. A window
+  // the worker does not know (the panel's own button opened it, or the
+  // worker has restarted since) is looked for among the open ones (D134).
+  #detachedWindow: DetachedCompanionWindow | undefined;
   // The newest authorization sent to the companion window. A window that a
   // newer click took over while its page was still loading was not
   // listening when the message went out; it asks for it when it starts
@@ -213,35 +224,49 @@ export class ToolbarLauncher {
   }
 
   /**
-   * Reuse the companion window this worker already opened. Returns false when
-   * there is none to reuse or the click was superseded while checking, so
-   * the caller's own currency check decides what happens next.
+   * Reuse a companion window that is already open: the one a toolbar click
+   * opened, else one found among the open windows. Returns false when there
+   * is none to reuse or the click was superseded while checking, so the
+   * caller's own currency check decides what happens next.
    */
   async #focusExistingDetachedWindow(
     identity: { tabId: number; windowId: number; url: string },
     clickSequence: number,
   ): Promise<boolean> {
-    const existing = this.#detachedWindow;
-    if (
-      !existing ||
-      !shouldReuseDetachedWindow(
-        this.#environment.preferences().popoutTabMode,
-        existing.sourceTabId,
-        identity.tabId,
-      )
-    ) return false;
-    const stillOpen = await this.#environment.windows.get(existing.id).then(
-      (window) => window.type === 'popup',
+    const reusable = (window: DetachedCompanionWindow) => shouldReuseDetachedWindow(
+      this.#environment.preferences().popoutTabMode,
+      window.sourceTabId,
+      identity.tabId,
+    );
+    let existing = this.#detachedWindow;
+    if (existing && !reusable(existing)) existing = undefined;
+    if (existing) {
+      const known = existing;
+      if (!await this.#isOpenCompanionWindow(known.id)) {
+        if (this.#detachedWindow?.id === known.id) this.#detachedWindow = undefined;
+        existing = undefined;
+      }
+    }
+    if (!existing) {
+      if (!this.#environment.companionWindows) return false;
+      const found = await this.#findOpenDetachedWindow(identity.tabId, reusable);
+      if (!found || clickSequence !== this.#clickSequence) return false;
+      // Taken over: a click that is still opening this very window finds
+      // that out and leaves it open.
+      this.#detachedWindow = found;
+      existing = found;
+    }
+    if (clickSequence !== this.#clickSequence) return false;
+    const focused = await this.#environment.windows.update(existing.id, { focused: true }).then(
+      () => true,
       () => false,
     );
-    if (!stillOpen) {
+    if (!focused) {
+      // The window closed meanwhile (Chrome lists a closing window's page
+      // for a moment): there is none to reuse, and the caller opens one.
       if (this.#detachedWindow?.id === existing.id) this.#detachedWindow = undefined;
       return false;
     }
-    if (clickSequence !== this.#clickSequence) return false;
-    await this.#environment.windows.update(existing.id, { focused: true }).catch(
-      () => undefined,
-    );
     // A tab Simul cannot read only brings the window forward.
     if (!isSupportedPage(identity.url)) return true;
     // The window retargets (or re-authorizes its locked tab) through the same
@@ -398,7 +423,45 @@ export class ToolbarLauncher {
 
   async #closeStaleDetachedWindow(windowId: number | undefined): Promise<void> {
     if (windowId === undefined) return;
+    // A newer click found this window among the open ones and took it over.
+    if (this.#detachedWindow?.id === windowId) return;
     await this.#environment.windows.remove(windowId).catch(() => undefined);
+  }
+
+  /**
+   * A companion window the worker does not know: the one opened for the
+   * clicked tab, else any that may be reused for it. Only a window of its
+   * own counts: the companion page shown as a tab of a browser window
+   * (Chrome's "Show as tab") is no window to bring forward, nor is one
+   * that is closing.
+   */
+  async #findOpenDetachedWindow(
+    tabId: number,
+    reusable: (window: DetachedCompanionWindow) => boolean,
+  ): Promise<DetachedCompanionWindow | undefined> {
+    let open: readonly DetachedCompanionWindow[];
+    try {
+      open = await this.#environment.companionWindows?.() ?? [];
+    } catch {
+      // Not knowing costs one more window, as before.
+      return undefined;
+    }
+    const candidates = [
+      ...open.filter((window) => window.sourceTabId === tabId),
+      ...open.filter((window) => window.sourceTabId !== tabId && reusable(window)),
+    ];
+    for (const candidate of candidates.slice(0, MAX_FOUND_WINDOWS)) {
+      if (await this.#isOpenCompanionWindow(candidate.id)) return candidate;
+    }
+    return undefined;
+  }
+
+  /** Whether `windowId` is an open window of the companion's own kind. */
+  #isOpenCompanionWindow(windowId: number): Promise<boolean> {
+    return this.#environment.windows.get(windowId).then(
+      (window) => window.type === 'popup',
+      () => false,
+    );
   }
 }
 

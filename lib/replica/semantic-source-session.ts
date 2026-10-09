@@ -1603,7 +1603,7 @@ export class SemanticSourceSession {
         !triggers.every((element, index) =>
           isBoundedSafeDisclosurePanel(element, classifications, index === 0)) ||
         !isBoundedSafeMenuPanel(panel, classifications) ||
-        normalizeSemanticText(safelyRead(() => panel.textContent)) === undefined
+        !hasMenuSizedText(panel)
       ) {
         this.#structuralMenus.delete(container);
         continue;
@@ -2512,6 +2512,42 @@ function isBoundedSafeMenuPanel(
     if (shadowRoot) pending.push(...shadowRoot.childNodes);
   }
   return hasText;
+}
+
+// What a menu's items are: the text of a large panel is mostly theirs.
+const MENU_ITEM_SELECTOR =
+  'a[href],button,[role="menuitem"],[role="menuitemcheckbox"],' +
+  '[role="menuitemradio"],[role="link"],[role="button"]';
+
+/**
+ * Whether a panel holds a menu's amount of text: some, and no more than one
+ * record may be, or, when more, mostly the text of links and buttons (D134).
+ * A large site menu of 120 links is a menu; a block of prose hidden beside a
+ * headline, with more text than one record, is not, as before: its text
+ * would travel and be translated while hidden. Under one record's length a
+ * panel is a menu whatever it holds, as it was.
+ */
+function hasMenuSizedText(panel: Element): boolean {
+  const length = normalizedTextLength(safelyRead(() => panel.textContent));
+  if (length === 0) return false;
+  if (length <= MAX_SEMANTIC_SOURCE_TEXT) return true;
+  const items = safelyRead(() => [...panel.querySelectorAll(MENU_ITEM_SELECTOR)]);
+  if (!items) return false;
+  let inItems = 0;
+  for (const item of items) {
+    // An item inside another is part of that one's text.
+    const outer = safelyRead(() => item.parentElement?.closest(MENU_ITEM_SELECTOR));
+    if (outer && outer !== panel && safelyRead(() => panel.contains(outer))) continue;
+    inItems += normalizedTextLength(safelyRead(() => item.textContent));
+  }
+  return inItems * 2 >= length;
+}
+
+/** The length of a text as a record would carry it. */
+function normalizedTextLength(value: unknown): number {
+  return typeof value === 'string'
+    ? value.normalize('NFC').replace(/\s+/gu, ' ').trim().length
+    : 0;
 }
 
 function isBoundedSafeTabPanel(
