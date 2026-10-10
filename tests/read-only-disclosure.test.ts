@@ -215,6 +215,37 @@ describe('read-only replica disclosure placement', () => {
     controller.dispose();
   });
 
+  it('hangs an open list beside a body that has a root of its own (D135)', () => {
+    const { document } = parseHTML(
+      '<html><body><div id="host"><button id="pick">Pick</button>' +
+      '<div id="rows">Rows</div></div></body></html>',
+    );
+    const host = document.querySelector<HTMLElement>('#host')!;
+    const pick = document.querySelector<HTMLElement>('#pick')!;
+    const rows = document.querySelector<HTMLElement>('#rows')!;
+    const parentWhileOpen = (): Element | null => {
+      const controller = installReadOnlyReplicaDisclosure({
+        anchor: host,
+        trigger: pick,
+        panel: rows,
+        presentation: 'popup',
+      });
+      controller.open();
+      expect(controller.isOpen()).toBe(true);
+      const parent = rows.parentElement;
+      controller.close();
+      expect(rows.parentElement).toBe(host);
+      controller.dispose();
+      return parent;
+    };
+    // An ordinary page: a child of body, as it always was.
+    expect(parentWhileOpen()).toBe(document.body);
+    // The page's root on body draws only what it slots: a child of body
+    // would not be drawn at all.
+    document.body.attachShadow({ mode: 'open' });
+    expect(parentWhileOpen()).toBe(document.documentElement);
+  });
+
   it('opens on hover and keeps the panel open while the pointer crosses the gap', () => {
     vi.useFakeTimers();
     const { document, window } = parseHTML(

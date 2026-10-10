@@ -1,4 +1,4 @@
-import { afterEach, describe, expect, it } from 'vitest';
+import { afterEach, describe, expect, it, onTestFinished } from 'vitest';
 import { parseHTML } from 'linkedom';
 
 import {
@@ -16,7 +16,10 @@ import {
   hasSourceCredentialSecretAncestor,
   isSourceSelectEntryVisuallyHidden,
   isSourceSelectLabelElementPublic,
+  isSourceSelectWrapper,
   readSourceFlatTreeElementPath,
+  readSourceSelectEntries,
+  readSourceSelectEntryOwner,
   readSourceSelectLabel,
   readSourceStructuralAttributes,
 } from '../lib/replica/source-privacy-policy';
@@ -665,4 +668,152 @@ describe('source secret classifier', () => {
       else delete (globalThis as { Node?: unknown }).Node;
     }
   });
+
+  it('reads the options of a dropdown through plain wrappers, as Chrome lists them (D135)', () => {
+    const { document, window } = parseHTML(`<html><body><form>
+      <select id="plain"><option id="p1">One</option><optgroup id="pg" label="G"><option id="p2">Two</option></optgroup></select>
+      <select id="ruled"><option>One</option><hr><option>Two</option></select>
+      <select id="wrapped">
+        <div id="w1"><option id="a">Alpha</option><span id="w2"><option id="b">Beta</option></span></div>
+        <optgroup id="g" label="Group"><div id="w3"><option id="c">Gamma</option><optgroup id="nested" label="Nested"><option id="h">Eta</option></optgroup></div><option id="d">Delta</option></optgroup>
+        <div id="w4"><optgroup id="g2" label="Second"><option id="e">Epsilon</option></optgroup></div>
+        <hr>
+        <option id="f">Zeta</option>
+      </select>
+    </form></body></html>`);
+    const byId = (id: string): Element => document.querySelector(`#${id}`)!;
+    const ids = (entries: readonly Element[] | undefined): string[] | undefined =>
+      entries?.map((entry) => entry.id);
+    showEverythingPainted(document, window);
+
+    // No wrapper: the owner's own children are its entries, as always. A
+    // rule between two options holds none and is no wrapper.
+    expect(readSourceSelectEntries(byId('plain'))).toBeUndefined();
+    expect(readSourceSelectEntries(byId('ruled'))).toBeUndefined();
+    expect(readSourceSelectEntries(byId('pg'))).toBeUndefined();
+    expect(readSourceSelectEntries(byId('g2'))).toBeUndefined();
+    // Options and groups in the page's order; a group's own options are the
+    // group's.
+    expect(ids(readSourceSelectEntries(byId('wrapped')))).toEqual(['a', 'b', 'g', 'g2', 'f']);
+    // A group inside a group counts for nothing: its option is the outer one's.
+    expect(ids(readSourceSelectEntries(byId('g')))).toEqual(['c', 'h', 'd']);
+    expect(readSourceSelectEntryOwner(byId('b'))).toBe(byId('wrapped'));
+    expect(readSourceSelectEntryOwner(byId('c'))).toBe(byId('g'));
+    expect(readSourceSelectEntryOwner(byId('h'))).toBe(byId('g'));
+    expect(readSourceSelectEntryOwner(byId('nested'))).toBeUndefined();
+    expect(readSourceSelectLabel(byId('h'))?.text).toBe('Eta');
+    expect(readSourceSelectEntryOwner(byId('g2'))).toBe(byId('wrapped'));
+    for (const id of ['a', 'b', 'c', 'd', 'e', 'f']) {
+      expect(isSourceSelectLabelElementPublic(byId(id)), id).toBe(true);
+    }
+    expect(readSourceSelectLabel(byId('b'))?.text).toBe('Beta');
+    expect(readSourceSelectLabel(byId('c'))?.text).toBe('Gamma');
+    expect(readSourceSelectLabel(byId('g2'))?.text).toBe('Second');
+  });
+
+  it('passes no wrapper that makes what it holds private, or that acts (D135)', () => {
+    // Built by script: a parser closes a dropdown at some of these tags.
+    const { document, window } = parseHTML(
+      '<html><body><form><select id="s"></select></form></body></html>',
+    );
+    const select = document.querySelector('#s')!;
+    const option = (id: string): Element => {
+      const element = document.createElement('option');
+      element.id = id;
+      element.textContent = `Label of ${id}`;
+      return element;
+    };
+    const wrap = (
+      tagName: string,
+      attributes: Readonly<Record<string, string>>,
+      optionId: string,
+    ): Element => {
+      const wrapper = document.createElement(tagName);
+      for (const [name, value] of Object.entries(attributes)) {
+        wrapper.setAttribute(name, value);
+      }
+      wrapper.append(option(optionId));
+      select.append(wrapper);
+      return wrapper;
+    };
+    const plain = wrap('div', {}, 'shown');
+    const refused = [
+      wrap('div', { contenteditable: 'true' }, 'typed'),
+      wrap('div', { role: 'textbox' }, 'boxed'),
+      wrap('button', {}, 'pressed'),
+      wrap('div', { role: 'button' }, 'acting'),
+      wrap('datalist', {}, 'listed'),
+    ];
+    // Sixteen wrappers are passed; the seventeenth is one too many.
+    const nest = (depth: number, optionId: string): void => {
+      let inner: Element = option(optionId);
+      for (let index = 0; index < depth; index += 1) {
+        const wrapper = document.createElement('div');
+        wrapper.append(inner);
+        inner = wrapper;
+      }
+      select.append(inner);
+    };
+    nest(16, 'sixteen');
+    nest(17, 'seventeen');
+    const byId = (id: string): Element => document.querySelector(`#${id}`)!;
+    for (const id of ['shown', 'typed', 'boxed', 'pressed', 'acting', 'listed', 'sixteen', 'seventeen']) {
+      expect(byId(id).closest('select'), id).toBe(select);
+    }
+    showEverythingPainted(document, window);
+
+    expect(isSourceSelectWrapper(plain)).toBe(true);
+    for (const wrapper of refused) {
+      expect(isSourceSelectWrapper(wrapper), wrapper.outerHTML.slice(0, 40)).toBe(false);
+    }
+    expect(readSourceSelectEntries(select)?.map((entry) => entry.id))
+      .toEqual(['shown', 'sixteen']);
+    for (const id of ['shown', 'sixteen']) {
+      expect(readSourceSelectEntryOwner(byId(id)), id).toBe(select);
+      expect(readSourceSelectLabel(byId(id))?.text, id).toBe(`Label of ${id}`);
+    }
+    for (const id of ['typed', 'boxed', 'pressed', 'acting', 'listed', 'seventeen']) {
+      expect(readSourceSelectEntryOwner(byId(id)), id).toBeUndefined();
+      expect(isSourceSelectLabelElementPublic(byId(id)), id).toBe(false);
+      expect(readSourceSelectLabel(byId(id)), id).toBeUndefined();
+    }
+  });
 });
+
+/** Every element is drawn and shown, for tests about structure alone. */
+function showEverythingPainted(document: Document, window: object): void {
+  for (const select of document.querySelectorAll('select')) {
+    Object.defineProperties(select, {
+      getClientRects: { configurable: true, value: () => [{}] },
+      getBoundingClientRect: {
+        configurable: true,
+        value: () => ({
+          left: 10, top: 10, right: 120, bottom: 34, width: 110, height: 24,
+        }),
+      },
+    });
+  }
+  const previous = Object.getOwnPropertyDescriptor(globalThis, 'Node');
+  Object.defineProperty(globalThis, 'Node', {
+    configurable: true,
+    writable: true,
+    value: (window as { Node: typeof Node }).Node,
+  });
+  onTestFinished(() => {
+    if (previous) Object.defineProperty(globalThis, 'Node', previous);
+    else delete (globalThis as { Node?: unknown }).Node;
+  });
+  Object.defineProperty(window, 'getComputedStyle', {
+    configurable: true,
+    value: () => ({
+      display: 'block',
+      visibility: 'visible',
+      position: 'static',
+      transform: 'none',
+      opacity: '1',
+      pointerEvents: 'auto',
+      getPropertyValue: (name: string) =>
+        name === '-webkit-text-security' ? 'none' : '',
+    }),
+  });
+}

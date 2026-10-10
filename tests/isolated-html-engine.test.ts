@@ -3811,6 +3811,287 @@ describe('IsolatedHtmlReplicaEngine', () => {
       .toBe('document');
   });
 
+  it('builds a shadow root on body and patches inside it (D135)', async () => {
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: {
+          kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+          attributes: [], children: [
+            { kind: 'element', id: 2, namespace: 'html', tagName: 'head', attributes: [], children: [] },
+            {
+              kind: 'element', id: 3, namespace: 'html', tagName: 'body',
+              attributes: [['class', 'app']],
+              children: [{
+                kind: 'element', id: 4, namespace: 'html', tagName: 'p',
+                attributes: [], children: [{
+                  kind: 'text', id: 5, text: 'light child', translatable: true,
+                }],
+              }],
+              shadowRoot: {
+                id: 6, mode: 'open', children: [
+                  {
+                    kind: 'element', id: 7, namespace: 'html', tagName: 'h1',
+                    attributes: [], children: [{
+                      kind: 'text', id: 8, text: 'root heading', translatable: true,
+                    }],
+                  },
+                  { kind: 'element', id: 9, namespace: 'html', tagName: 'slot', attributes: [], children: [] },
+                ],
+                adoptedStyleSheets: ['h1{color:red}'],
+              },
+            },
+          ],
+        },
+        adoptedStyleSheets: ['body{margin:0}'],
+        captureMs: 1,
+        viewportWidth: 800,
+        viewportHeight: 600,
+        documentWidth: 800,
+        documentHeight: 1000,
+      },
+    )!;
+    const stream = new FakeHtmlStream(checkpoint);
+    const host = new FakePresentationHost();
+    const engine = makeEngine(stream, host);
+
+    await expect(engine.run(request)).resolves.toMatchObject({ status: 'complete' });
+    const body = host.iframe?.contentDocument?.body;
+    const shadow = body?.shadowRoot;
+    expect(shadow?.firstElementChild?.localName).toBe('h1');
+    expect(shadow?.firstElementChild?.textContent).toBe('root heading');
+    expect(shadow?.querySelector('slot')).not.toBeNull();
+    // The root's own adopted sheet is the root's; the document's stays a
+    // child of body, where it styles the document.
+    expect(
+      [...shadow?.querySelectorAll('style[data-simul-adopted-style="shadow"]') ?? []]
+        .map((style) => style.textContent),
+    ).toEqual(['h1{color:red}']);
+    expect(body?.lastElementChild).toMatchObject({
+      localName: 'style',
+      textContent: 'body{margin:0}',
+    });
+    expect(body?.querySelector('p')?.textContent).toBe('light child');
+    expect(engine.snapshot()?.records.map(({ source }) => source).sort()).toEqual([
+      'light child',
+      'root heading',
+    ]);
+
+    // A change inside the root is a patch, not a new mirror.
+    expect(stream.requested).toEqual([]);
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [{ kind: 'text', nodeId: 8, node: { kind: 'text', id: 8, text: 'changed heading', translatable: true } }],
+    )!);
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 2 }),
+      2,
+      2,
+      [
+        {
+          kind: 'reconcile-children',
+          nodeId: 6,
+          children: [
+            { kind: 'retain', nodeId: 7 },
+            { kind: 'retain', nodeId: 9 },
+            {
+              kind: 'graph',
+              node: {
+                kind: 'element', id: 10, namespace: 'html', tagName: 'p',
+                attributes: [], children: [{
+                  kind: 'text', id: 11, text: 'root end', translatable: true,
+                }],
+              },
+            },
+          ],
+        },
+      ],
+    )!);
+    expect(stream.requested).toEqual([]);
+    expect(host.iframe?.contentDocument?.body.shadowRoot).toBe(shadow);
+    expect(shadow?.firstElementChild?.textContent).toBe('changed heading');
+    expect(shadow?.querySelector('p')?.textContent).toBe('root end');
+    expect(engine.snapshot()?.records.map(({ source }) => source).sort()).toEqual([
+      'changed heading',
+      'light child',
+      'root end',
+    ]);
+  });
+
+  it('builds what else sits under html, in the page\'s order, and patches it (D135)', async () => {
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: {
+          kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+          attributes: [], children: [
+            { kind: 'element', id: 2, namespace: 'html', tagName: 'head', attributes: [], children: [] },
+            { kind: 'text', id: 3, text: '\n', translatable: false },
+            {
+              kind: 'element', id: 4, namespace: 'html', tagName: 'div',
+              attributes: [['id', 'between']], children: [{
+                kind: 'text', id: 5, text: 'between head and body', translatable: true,
+              }],
+            },
+            {
+              kind: 'element', id: 6, namespace: 'html', tagName: 'body',
+              attributes: [], children: [{
+                kind: 'text', id: 7, text: 'in body', translatable: true,
+              }],
+            },
+            {
+              kind: 'element', id: 8, namespace: 'html', tagName: 'x-overlay',
+              attributes: [['id', 'after']], children: [], shadowRoot: {
+                id: 9, mode: 'open', children: [{
+                  kind: 'text', id: 10, text: 'a dialog beside body', translatable: true,
+                }],
+                adoptedStyleSheets: [],
+              },
+            },
+            // A second body is no part of the mirror's shell: left out.
+            {
+              kind: 'element', id: 11, namespace: 'html', tagName: 'body',
+              attributes: [], children: [{
+                kind: 'text', id: 12, text: 'a second body', translatable: true,
+              }],
+            },
+          ],
+        },
+        adoptedStyleSheets: [],
+        captureMs: 1,
+        viewportWidth: 800,
+        viewportHeight: 600,
+        documentWidth: 800,
+        documentHeight: 1000,
+      },
+    )!;
+    const stream = new FakeHtmlStream(checkpoint);
+    const host = new FakePresentationHost();
+    const engine = makeEngine(stream, host);
+
+    await expect(engine.run(request)).resolves.toMatchObject({ status: 'complete' });
+    const html = host.iframe!.contentDocument!.documentElement;
+    // The mirrored children of html, in order. (The test DOM takes whatever
+    // follows head for the body and adds one when asked for `document.body`
+    // after a reorder; Chrome takes the first body. So only mirrored nodes
+    // are looked at.)
+    const names = (): string[] => {
+      const mirrored = new Set(
+        Array.from({ length: 20 }, (_, id) => host.resolveNode?.(id)),
+      );
+      return [...html.childNodes].filter((node) => mirrored.has(node)).map(
+        (node) => node.nodeType === 3 ? '#text' : (node as Element).localName,
+      );
+    };
+    expect(names()).toEqual(['head', '#text', 'div', 'body', 'x-overlay']);
+    expect(html.querySelector('#between')?.textContent).toBe('between head and body');
+    expect(html.querySelector('#after')?.shadowRoot?.firstChild?.nodeValue)
+      .toBe('a dialog beside body');
+    // The shell's own head and body are the ones the page's became.
+    expect(
+      (host.resolveNode?.(2) as Element).querySelector(
+        'meta[data-simul-owned-shell="csp"]',
+      ),
+    ).not.toBeNull();
+    expect(host.resolveNode?.(6)?.textContent).toBe('in body');
+    expect(host.resolveNode?.(11)).toBeUndefined();
+    expect(engine.snapshot()?.records.map(({ source }) => source).sort()).toEqual([
+      'a dialog beside body',
+      'between head and body',
+      'in body',
+    ]);
+
+    // A child added beside body later, and a change inside one that was
+    // there, are patches: the mirror is not built again.
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [{ kind: 'text', nodeId: 5, node: { kind: 'text', id: 5, text: 'changed', translatable: true } }],
+    )!);
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 2 }),
+      2,
+      2,
+      [
+        {
+          kind: 'reconcile-children',
+          nodeId: 1,
+          children: [
+            { kind: 'retain', nodeId: 2 },
+            { kind: 'retain', nodeId: 3 },
+            { kind: 'retain', nodeId: 4 },
+            { kind: 'retain', nodeId: 6 },
+            {
+              kind: 'graph',
+              node: {
+                kind: 'element', id: 13, namespace: 'html', tagName: 'div',
+                attributes: [['id', 'late']], children: [{
+                  kind: 'text', id: 14, text: 'added later', translatable: true,
+                }],
+              },
+            },
+          ],
+        },
+      ],
+    )!);
+    expect(stream.requested).toEqual([]);
+    expect(names()).toEqual(['head', '#text', 'div', 'body', 'div']);
+    expect(html.querySelector('#between')?.textContent).toBe('changed');
+    expect(html.querySelector('#late')?.textContent).toBe('added later');
+    expect(html.querySelector('#after')).toBeNull();
+    expect(engine.snapshot()?.records.map(({ source }) => source).sort()).toEqual([
+      'added later',
+      'changed',
+      'in body',
+    ]);
+  });
+
+  it('keeps the page\'s order when its body comes before its head (D135)', async () => {
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: {
+          kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+          attributes: [], children: [
+            {
+              kind: 'element', id: 2, namespace: 'html', tagName: 'div',
+              attributes: [['id', 'first']], children: [],
+            },
+            {
+              kind: 'element', id: 3, namespace: 'html', tagName: 'body',
+              attributes: [], children: [],
+            },
+            { kind: 'element', id: 4, namespace: 'html', tagName: 'head', attributes: [], children: [] },
+          ],
+        },
+        adoptedStyleSheets: [],
+        captureMs: 1,
+        viewportWidth: 800,
+        viewportHeight: 600,
+        documentWidth: 800,
+        documentHeight: 1000,
+      },
+    )!;
+    const host = new FakePresentationHost();
+    const engine = makeEngine(new FakeHtmlStream(checkpoint), host);
+
+    await expect(engine.run(request)).resolves.toMatchObject({ status: 'complete' });
+    const html = host.iframe!.contentDocument!.documentElement;
+    const mirrored = [2, 3, 4].map((id) => host.resolveNode?.(id));
+    expect(
+      [...html.children].filter((child) => mirrored.includes(child))
+        .map((child) => child.localName),
+    ).toEqual(['div', 'body', 'head']);
+    expect(
+      (host.resolveNode?.(4) as Element).querySelector(
+        'meta[data-simul-owned-shell="csp"]',
+      ),
+    ).not.toBeNull();
+  });
+
   it('preserves passive image-only layout and resolves external SVG and JPEG anchors', async () => {
     const mediaCss = [
       '.viewer{display:flex;min-height:100vh;align-items:center;justify-content:center;',

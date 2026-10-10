@@ -96,6 +96,55 @@ describe('HtmlMirrorSourceSession', () => {
     expect(policy.targets.get(panel)).toBe('withheld');
   });
 
+  it('proves the tabs of a tablist inside a wrapper that has no box of its own (D135)', () => {
+    // An app whose whole page sits in a `display: contents` wrapper: its
+    // tabs were never proven, selected or not.
+    const { document, window } = parseHTML(`<html><body><div id="app">
+      <div role="tablist">
+        <div id="tab-a" role="tab" aria-selected="true" aria-controls="panel-a">A</div>
+        <div id="tab-b" role="tab" aria-selected="false" aria-controls="panel-b">B</div>
+      </div>
+      <section id="panel-a" role="tabpanel">Panel A</section>
+      <section id="panel-b" role="tabpanel" hidden>Panel B</section>
+    </div></body></html>`);
+    const app = document.querySelector('#app')!;
+    for (const element of [...document.querySelectorAll('*')]) {
+      Object.defineProperty(element, 'getClientRects', {
+        configurable: true,
+        value: () => element === app || element.hasAttribute('hidden')
+          ? mirrorEmptyRectList()
+          : mirrorRectList([{ left: 0, right: 100 }]),
+      });
+    }
+    Object.defineProperty(window, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => ({
+        display: element.hasAttribute('hidden')
+          ? 'none'
+          : element === app ? 'contents' : 'block',
+        visibility: 'visible', opacity: '1',
+        overflowX: 'visible', overflowY: 'visible',
+        getPropertyValue: (name: string) => {
+          if (name === 'content-visibility') return 'visible';
+          if (name === 'clip') return 'auto';
+          if (name === 'clip-path') return 'none';
+          if (name === 'overflow-x' || name === 'overflow-y') return 'visible';
+          return '';
+        },
+      }),
+    });
+
+    const policy = createSourceControlledContentPolicy(
+      document as unknown as Document,
+      window as unknown as Window,
+    );
+    expect(
+      policy.tabs.map(({ trigger, selected }) => `${trigger.id} ${selected}`).sort(),
+    ).toEqual(['tab-a true', 'tab-b false']);
+    expect(policy.targets.get(document.querySelector('#panel-a')!)).toBe('open-tab');
+    expect(policy.targets.get(document.querySelector('#panel-b')!)).toBe('withheld');
+  });
+
   it('connects the Integrated image source Port through the installed bridge', () => {
     const { document, window } = parseHTML(
       '<html><body><img id="announcement" src="news.gif" alt="お知らせ"></body></html>',
@@ -1202,6 +1251,118 @@ describe('HtmlMirrorSourceSession', () => {
     expect(fixture.patches()).toHaveLength(patchesBeforeLabel);
   });
 
+  it('holds a dropdown\'s options flat though the page wraps them, and follows changes inside a wrapper (D135)', () => {
+    const fixture = sourceFixture(`
+      <select id="picker">
+        <div id="wrap"><option id="one">One</option><option id="two">Two</option></div>
+        <optgroup id="group" label="Group"><span id="inner"><option id="three">Three</option><optgroup id="nested" label="Nested"><option id="four">Four</option></optgroup></span></optgroup>
+      </select>
+    `);
+    fixture.start('passive');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    const byId = (id: string): Element => fixture.document.querySelector(`#${id}`)!;
+    const select = byId('picker');
+    const id = (node: Node): number => fixture.registry.peekId(node)!;
+    interface Graph { readonly id: number; readonly tagName?: string; readonly children?: readonly Graph[] }
+    const find = (node: Graph, wanted: number): Graph | undefined =>
+      node.id === wanted
+        ? node
+        : (node.children ?? []).map((child) => find(child, wanted)).find(Boolean);
+    const shape = (node: Graph | undefined): unknown =>
+      (node?.children ?? []).map((child) => child.tagName === 'optgroup'
+        ? [child.id, (child.children ?? []).map((nested) => nested.id)]
+        : child.id);
+
+    // Options and groups only, in the page's order: no wrapper travels, and
+    // the option of a group inside a group is the outer group's.
+    const first = find(fixture.checkpoints()[0]!.payload.root as Graph, id(select));
+    expect(shape(first)).toEqual([
+      id(byId('one')), id(byId('two')),
+      [id(byId('group')), [id(byId('three')), id(byId('four'))]],
+    ]);
+    expect(fixture.registry.peekId(byId('nested'))).toBeUndefined();
+    expect(JSON.stringify(fixture.checkpoints()[0])).not.toContain('"tagName":"div"');
+    expect(fixture.registry.peekId(byId('wrap'))).toBeUndefined();
+
+    // An option added inside the wrapper is a change to the dropdown.
+    const added = fixture.document.createElement('option');
+    added.textContent = 'Added';
+    byId('wrap').append(added);
+    fixture.mutate(childListRecord(byId('wrap'), [added]));
+    fixture.flushFrame();
+    expect(fixture.checkpoints()).toHaveLength(1);
+    const insertion = fixture.patches().at(-1)!;
+    expect(insertion.operations.filter(({ kind }) =>
+      kind === 'children' || kind === 'reconcile-children'))
+      .toEqual([expect.objectContaining({ nodeId: id(select) })]);
+    expect(JSON.stringify(insertion)).toContain(`"id":${id(added)}`);
+    expect(JSON.stringify(insertion)).not.toContain('Added');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
+
+    // One added inside a wrapper inside a group, too.
+    const deeper = fixture.document.createElement('option');
+    byId('inner').append(deeper);
+    fixture.mutate(childListRecord(byId('inner'), [deeper]));
+    fixture.flushFrame();
+    expect(fixture.checkpoints()).toHaveLength(1);
+    expect(JSON.stringify(fixture.patches().at(-1))).toContain(`"id":${id(deeper)}`);
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 2));
+
+    // An option added to the dropdown itself, beside the wrapper, and one
+    // inside a wrapper that is new: the options the mirror holds are kept.
+    const direct = fixture.document.createElement('option');
+    select.append(direct);
+    fixture.mutate(childListRecord(select, [direct]));
+    fixture.flushFrame();
+    expect(fixture.checkpoints()).toHaveLength(1);
+    expect(fixture.patches().at(-1)!.operations).toEqual([
+      expect.objectContaining({ kind: 'reconcile-children', nodeId: id(select) }),
+    ]);
+    expect(JSON.stringify(fixture.patches().at(-1))).toContain(`"id":${id(direct)}`);
+    expect(JSON.stringify(fixture.patches().at(-1))).toContain(
+      `{"kind":"retain","nodeId":${id(byId('one'))}}`,
+    );
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 3));
+    const lateWrap = fixture.document.createElement('div');
+    const wrapped = fixture.document.createElement('option');
+    lateWrap.append(wrapped);
+    select.append(lateWrap);
+    fixture.mutate(childListRecord(select, [lateWrap]));
+    fixture.flushFrame();
+    expect(fixture.checkpoints()).toHaveLength(1);
+    expect(fixture.patches().at(-1)!.operations).toEqual([
+      expect.objectContaining({ kind: 'reconcile-children', nodeId: id(select) }),
+    ]);
+    expect(JSON.stringify(fixture.patches().at(-1))).toContain(`"id":${id(wrapped)}`);
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 4));
+
+    // The page takes the wrapper away and leaves its options in the dropdown:
+    // the same options, so nothing is rebuilt.
+    const wrap = byId('wrap');
+    const moved = [...wrap.children];
+    select.prepend(...moved);
+    wrap.remove();
+    fixture.mutateAll([
+      childListRecord(wrap, [], moved),
+      childListRecord(select, moved, [wrap]),
+    ]);
+    fixture.flushFrame();
+    expect(fixture.checkpoints()).toHaveLength(1);
+    expect(fixture.port.posts.at(-1)).not.toMatchObject({
+      kind: 'simul:html-mirror-v2:error',
+    });
+
+    // An option's own text, inside a wrapper or not, is its label: the base
+    // graph never carries it.
+    const patches = fixture.patches().length;
+    const text = fixture.document.createTextNode('Renamed');
+    const old = deeper.firstChild;
+    deeper.replaceChildren(text);
+    fixture.mutate(childListRecord(deeper, [text], old ? [old] : []));
+    if (fixture.frames.length > 0) fixture.flushFrame();
+    expect(fixture.patches()).toHaveLength(patches);
+  });
+
   it('does not route optgroup legend text through the base graph', () => {
     const fixture = sourceFixture(`
       <select><optgroup><legend>Original group</legend>
@@ -1830,7 +1991,7 @@ describe('HtmlMirrorSourceSession', () => {
     expect(JSON.stringify(patch)).toContain('after shadow');
   });
 
-  it('requests a checkpoint when a host child patch cannot carry its own dirty shadow', () => {
+  it('reads a host\'s root again, beside the host, when the host\'s children and its own root change together (D135)', () => {
     const fixture = sourceFixture('<x-card id="card"><span>light</span></x-card>');
     const card = fixture.document.querySelector('#card')!;
     const shadow = card.attachShadow({ mode: 'open' });
@@ -1841,6 +2002,8 @@ describe('HtmlMirrorSourceSession', () => {
     Object.defineProperty(nestedShadow, 'mode', { value: 'open' });
     const shadowText = fixture.document.createTextNode('before nested shadow');
     nestedShadow.append(shadowText);
+    // linkedom does not say a shadow root is connected; Chrome does.
+    Object.defineProperty(shadow, 'isConnected', { get: () => card.isConnected });
     fixture.start();
     fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
 
@@ -1852,11 +2015,17 @@ describe('HtmlMirrorSourceSession', () => {
     fixture.mutate(characterDataRecord(shadowText));
     fixture.flushFrame();
 
-    expect(fixture.patches()).toHaveLength(0);
-    expect(fixture.port.posts.at(-1)).toMatchObject({
-      kind: 'simul:html-mirror-v2:error',
-      code: 'stream_gap',
-    });
+    // A patch of the host's children does not carry the host's root. The
+    // root is read again whole beside it; it was the whole page (a
+    // checkpoint) at every such change.
+    expect(fixture.checkpoints()).toHaveLength(1);
+    expect(fixture.patches()).toHaveLength(1);
+    const patch = fixture.patches()[0]!;
+    expect(patch.operations.map(({ kind }) => kind)).toEqual(['children', 'children']);
+    expect(patch.operations.map((operation) => 'nodeId' in operation && operation.nodeId).sort())
+      .toEqual([fixture.registry.peekId(card), fixture.registry.peekId(shadow)].sort());
+    expect(JSON.stringify(patch)).toContain('new light child');
+    expect(JSON.stringify(patch)).toContain('after nested shadow');
   });
 
   it('rebuilds when an open-shadow host enters a private context', () => {
@@ -2317,12 +2486,13 @@ describe('HtmlMirrorSourceSession', () => {
     expect(recovery).toContain('root on an old element');
   });
 
-  it('requests a checkpoint when a host child patch cannot carry its own dirty closed shadow (D125)', () => {
+  it('does the same for a closed root (D125, D135)', () => {
     const reader = closedRootReader();
     const fixture = sourceFixture('<x-card id="card"><span>light</span></x-card>', reader);
     const card = fixture.document.querySelector('#card')!;
     const shadow = reader.attach(card, '<p id="inside">before closed shadow</p>');
     const shadowText = shadow.querySelector('#inside')!.firstChild as Text;
+    Object.defineProperty(shadow, 'isConnected', { get: () => card.isConnected });
     fixture.start();
     fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
 
@@ -2334,11 +2504,12 @@ describe('HtmlMirrorSourceSession', () => {
     fixture.mutate(characterDataRecord(shadowText));
     fixture.flushFrame();
 
-    expect(fixture.patches()).toHaveLength(0);
-    expect(fixture.port.posts.at(-1)).toMatchObject({
-      kind: 'simul:html-mirror-v2:error',
-      code: 'stream_gap',
-    });
+    expect(fixture.checkpoints()).toHaveLength(1);
+    expect(fixture.patches()).toHaveLength(1);
+    expect(fixture.patches()[0]!.operations.map(({ kind }) => kind))
+      .toEqual(['children', 'children']);
+    expect(JSON.stringify(fixture.patches()[0])).toContain('new light child');
+    expect(JSON.stringify(fixture.patches()[0])).toContain('after closed shadow');
   });
 
   it('withholds a collapsed disclosure panel inside a closed shadow root (D125)', () => {
@@ -4167,6 +4338,403 @@ describe('HtmlMirrorSourceSession', () => {
     };
     expect(rows(MAX_HTML_MIRROR_SCROLL_PANES)).toHaveLength(MAX_HTML_MIRROR_SCROLL_PANES);
     expect(rows(MAX_HTML_MIRROR_SCROLL_PANES + 1)).toEqual([]);
+  });
+});
+
+describe('what a host\'s root does to the host\'s own children (D135)', () => {
+  beforeEach(() => {
+    const { window } = parseHTML('<html><body></body></html>');
+    Object.assign(globalThis, {
+      Node: window.Node,
+      Element: window.Element,
+      Text: window.Text,
+    });
+  });
+
+  /**
+   * A dialog component: its children are drawn in a slot of its root,
+   * inside a box the root hides and shows. linkedom assigns no slots, so the
+   * test says what Chrome would; a slot has no rectangle, as in Chrome.
+   */
+  function dialogFixture(mode: 'open' | 'closed') {
+    const reader = closedRootReader();
+    const fixture = sourceFixture(
+      '<main><x-dialog id="host"><p id="slotted">slotted paragraph</p>' +
+        'text straight in the host</x-dialog><p id="other">other text</p></main>',
+      reader,
+    );
+    const host = fixture.document.querySelector<HTMLElement>('#host')!;
+    const markup = '<div id="box" data-test-computed-hidden="true">' +
+      '<slot id="slot"></slot></div><p id="inside">root text</p>';
+    let root: ShadowRoot;
+    if (mode === 'closed') {
+      root = reader.attach(host, markup);
+    } else {
+      root = host.attachShadow({ mode: 'open' }) as unknown as ShadowRoot;
+      root.innerHTML = markup;
+    }
+    // linkedom does not say a shadow root is connected; Chrome does.
+    Object.defineProperty(root, 'isConnected', { get: () => host.isConnected });
+    const box = root.querySelector<HTMLElement>('#box')!;
+    const slot = root.querySelector<HTMLElement>('#slot')!;
+    const slotted = fixture.document.querySelector<HTMLElement>('#slotted')!;
+    const direct = host.lastChild as Text;
+    const assign = (...nodes: Node[]): void => {
+      for (const node of [slotted, direct]) {
+        Object.defineProperty(node, 'assignedSlot', {
+          configurable: true,
+          // Chrome reads null for a node slotted into a closed root.
+          value: mode === 'open' && nodes.includes(node) ? slot : null,
+        });
+      }
+      Object.defineProperty(slot, 'assignedNodes', {
+        configurable: true,
+        value: () => nodes,
+      });
+    };
+    assign(slotted, direct);
+    installPaintedMirrorTabFixture(fixture.document, fixture.window as unknown as Window);
+    for (const element of root.querySelectorAll('*')) {
+      Object.defineProperty(element, 'getClientRects', {
+        configurable: true,
+        value: () => element === slot ? mirrorEmptyRectList() : mirrorTabRectList(),
+      });
+    }
+    const computed = fixture.window.getComputedStyle as unknown as (
+      element: Element,
+    ) => CSSStyleDeclaration;
+    Object.defineProperty(fixture.window, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => element === slot &&
+          box.getAttribute('data-test-computed-hidden') !== 'true'
+        ? { ...computed(element), display: 'contents' }
+        : computed(element),
+    });
+    const setShown = (shown: boolean): void => {
+      if (shown) box.removeAttribute('data-test-computed-hidden');
+      else box.setAttribute('data-test-computed-hidden', 'true');
+      fixture.mutate(attributeRecord(box, 'data-test-computed-hidden'));
+      fixture.flushFrame();
+    };
+    return { fixture, host, root, box, slot, slotted, direct, assign, setShown };
+  }
+  const sent = (fixture: { readonly port: FakePort }): string =>
+    JSON.stringify(fixture.port.posts);
+  const lastPatch = (fixture: ReturnType<typeof sourceFixture>): string =>
+    JSON.stringify(fixture.patches().at(-1) ?? null);
+
+  for (const mode of ['open', 'closed'] as const) {
+    it(`sends nothing slotted into a hidden box of a ${mode} root, and reads it once the box is shown`, () => {
+      const { fixture, setShown } = dialogFixture(mode);
+      fixture.start('passive');
+      fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+
+      const first = sent(fixture);
+      expect(first).toContain('other text');
+      expect(first).toContain('root text');
+      expect(first).not.toContain('slotted paragraph');
+      expect(first).not.toContain('text straight in the host');
+
+      // The box is shown: the element in the slot is found by its own
+      // change, the host's own text by the slot that holds it.
+      setShown(true);
+      expect(fixture.checkpoints()).toHaveLength(1);
+      expect(lastPatch(fixture)).toContain('slotted paragraph');
+      expect(lastPatch(fixture)).toContain('text straight in the host');
+      fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
+
+      // Hidden again: both are taken back.
+      setShown(false);
+      expect(fixture.checkpoints()).toHaveLength(1);
+      const hidden = fixture.patches().at(-1)!;
+      expect(JSON.stringify(hidden)).not.toContain('slotted paragraph');
+      expect(JSON.stringify(hidden)).not.toContain('text straight in the host');
+      expect(hidden.operations.some(
+        (operation) => operation.kind === 'text' && operation.node.text === '',
+      )).toBe(true);
+    });
+  }
+
+  it('sends no text put straight into a slot whose box is hidden by visibility', () => {
+    const { fixture, box, slot, slotted } = dialogFixture('open');
+    // The box is displayed and `visibility: hidden`; what it slots inherits
+    // that, as Chrome computes it for an element in a slot.
+    box.removeAttribute('data-test-computed-hidden');
+    let hidden = true;
+    const computed = fixture.window.getComputedStyle as unknown as (
+      element: Element,
+    ) => CSSStyleDeclaration;
+    Object.defineProperty(fixture.window, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => hidden &&
+          (element === box || element === slot || element === slotted)
+        ? { ...computed(element), visibility: 'hidden' }
+        : computed(element),
+    });
+    fixture.start('passive');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    expect(sent(fixture)).toContain('root text');
+    expect(sent(fixture)).not.toContain('slotted paragraph');
+    expect(sent(fixture)).not.toContain('text straight in the host');
+
+    hidden = false;
+    box.setAttribute('class', 'shown');
+    fixture.mutate(attributeRecord(box, 'class'));
+    fixture.flushFrame();
+    expect(fixture.checkpoints()).toHaveLength(1);
+    expect(lastPatch(fixture)).toContain('slotted paragraph');
+    expect(lastPatch(fixture)).toContain('text straight in the host');
+  });
+
+  it('reads a host\'s children in one piece when a slot holds many of them', () => {
+    const { fixture, host, root, slot, slotted, direct, setShown } = dialogFixture('open');
+    const many: Node[] = [slotted, direct];
+    for (let index = 0; index < 300; index += 1) {
+      const item = fixture.document.createElement('a');
+      item.textContent = `item ${index}`;
+      Object.defineProperty(item, 'assignedSlot', { configurable: true, value: slot });
+      Object.defineProperty(item, 'getClientRects', {
+        configurable: true,
+        value: () => mirrorTabRectList(),
+      });
+      host.append(item);
+      many.push(item);
+    }
+    Object.defineProperty(slot, 'assignedNodes', { configurable: true, value: () => many });
+    fixture.start('passive');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    expect(sent(fixture)).not.toContain('item 299');
+
+    setShown(true);
+    // Not three hundred patches, and not the whole page: the host's
+    // children once, and its root.
+    expect(fixture.checkpoints()).toHaveLength(1);
+    expect(fixture.port.posts.at(-1)).toMatchObject({ kind: 'simul:html-mirror-v2:patch' });
+    const patch = fixture.patches().at(-1)!;
+    expect(patch.operations.filter(({ kind }) => kind === 'children')
+      .map((operation) => 'nodeId' in operation && operation.nodeId).sort())
+      .toEqual([fixture.registry.peekId(host), fixture.registry.peekId(root)].sort());
+    expect(patch.operations.length).toBeLessThan(6);
+    expect(JSON.stringify(patch)).toContain('item 299');
+    expect(JSON.stringify(patch)).toContain('text straight in the host');
+  });
+
+  it('reads at once a dialog that a script shows and fades in', () => {
+    const { fixture, box } = dialogFixture('open');
+    // `hidden` goes and the box is displayed, at no opacity yet: nothing
+    // will report the end of the fade.
+    const computed = fixture.window.getComputedStyle as unknown as (
+      element: Element,
+    ) => CSSStyleDeclaration;
+    Object.defineProperty(fixture.window, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => element === box &&
+          box.getAttribute('data-test-computed-hidden') !== 'true'
+        ? { ...computed(element), opacity: '0' }
+        : computed(element),
+    });
+    fixture.start('passive');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    expect(sent(fixture)).not.toContain('slotted paragraph');
+
+    box.removeAttribute('data-test-computed-hidden');
+    fixture.mutate(attributeRecord(box, 'data-test-computed-hidden'));
+    fixture.flushFrame();
+    expect(fixture.checkpoints()).toHaveLength(1);
+    expect(lastPatch(fixture)).toContain('slotted paragraph');
+    expect(lastPatch(fixture)).toContain('text straight in the host');
+  });
+
+  it('reads what is drawn through a slot that says aria-hidden', () => {
+    const { fixture, box, slot } = dialogFixture('open');
+    box.removeAttribute('data-test-computed-hidden');
+    // Hidden from assistive technology, drawn all the same: a slot has no
+    // box that the declaration could be checked against.
+    slot.setAttribute('aria-hidden', 'true');
+    fixture.start('passive');
+    expect(sent(fixture)).toContain('slotted paragraph');
+    expect(sent(fixture)).toContain('text straight in the host');
+  });
+
+  it('sends nothing of a child whose slot cannot be read', () => {
+    const { fixture, slotted, direct } = dialogFixture('open');
+    for (const node of [slotted, direct]) {
+      Object.defineProperty(node, 'assignedSlot', {
+        configurable: true,
+        get: () => {
+          throw new Error('unreadable');
+        },
+      });
+    }
+    fixture.start('passive');
+    // Whatever else happens to the page, what could not be placed stays out.
+    expect(sent(fixture)).not.toContain('slotted paragraph');
+    expect(sent(fixture)).not.toContain('text straight in the host');
+  });
+
+  it('reads a child that no slot takes as it reads its host', () => {
+    const { fixture, assign } = dialogFixture('open');
+    // Nothing is assigned: the nodes are not drawn, and travel as before.
+    assign();
+    fixture.start('passive');
+    expect(sent(fixture)).toContain('slotted paragraph');
+    expect(sent(fixture)).toContain('text straight in the host');
+  });
+
+  it('reads the same in a patch of the host\'s children as in a checkpoint', () => {
+    const { fixture, host, slotted, direct, slot } = dialogFixture('open');
+    fixture.start('passive');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+
+    // The host gets another child while the box is hidden.
+    const late = fixture.document.createElement('p');
+    late.textContent = 'added while hidden';
+    host.append(late);
+    Object.defineProperty(late, 'assignedSlot', { configurable: true, value: slot });
+    Object.defineProperty(late, 'getClientRects', {
+      configurable: true,
+      value: () => mirrorTabRectList(),
+    });
+    Object.defineProperty(slot, 'assignedNodes', {
+      configurable: true,
+      value: () => [slotted, direct, late],
+    });
+    fixture.mutate(childListRecord(host, [late]));
+    fixture.flushFrame();
+    expect(sent(fixture)).not.toContain('added while hidden');
+    expect(sent(fixture)).not.toContain('slotted paragraph');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
+
+    // The same when the host's children are all read again (an attribute of
+    // the host changed with them).
+    const later = fixture.document.createElement('p');
+    later.textContent = 'read again while hidden';
+    host.append(later);
+    Object.defineProperty(later, 'assignedSlot', { configurable: true, value: slot });
+    Object.defineProperty(later, 'getClientRects', {
+      configurable: true,
+      value: () => mirrorTabRectList(),
+    });
+    Object.defineProperty(slot, 'assignedNodes', {
+      configurable: true,
+      value: () => [slotted, direct, late, later],
+    });
+    host.setAttribute('class', 'changed');
+    fixture.mutateAll([
+      attributeRecord(host, 'class'),
+      childListRecord(host, [later]),
+    ]);
+    fixture.flushFrame();
+    expect(fixture.patches().at(-1)!.operations.map(({ kind }) => kind))
+      .toContain('children');
+    expect(JSON.stringify(fixture.patches().at(-1))).toContain(
+      `"id":${fixture.registry.peekId(later)}`,
+    );
+    expect(sent(fixture)).not.toContain('read again while hidden');
+    expect(sent(fixture)).not.toContain('slotted paragraph');
+    expect(sent(fixture)).not.toContain('text straight in the host');
+  });
+
+  it('reads the host\'s own text again when a script gives a slot other nodes', () => {
+    const { fixture, root, slotted, direct, assign, box } = dialogFixture('open');
+    // The box is shown from the start, and the root assigns by hand: at
+    // first both children to the one slot.
+    box.removeAttribute('data-test-computed-hidden');
+    Object.defineProperty(root, 'slotAssignment', { configurable: true, value: 'manual' });
+    assign(slotted, direct);
+    // A second slot in a hidden box, with nothing in it yet.
+    const hiddenBox = fixture.document.createElement('div');
+    hiddenBox.setAttribute('data-test-computed-hidden', 'true');
+    const other = fixture.document.createElement('slot');
+    hiddenBox.append(other);
+    for (const element of [hiddenBox, other]) {
+      Object.defineProperty(element, 'getClientRects', {
+        configurable: true,
+        value: () => mirrorEmptyRectList(),
+      });
+    }
+    Object.defineProperty(other, 'assignedNodes', { configurable: true, value: () => [] });
+    root.append(hiddenBox);
+    fixture.start('passive');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    expect(sent(fixture)).toContain('slotted paragraph');
+    expect(sent(fixture)).toContain('text straight in the host');
+
+    // The script gives the text to the hidden slot: no mutation says so,
+    // only the slot's own event, which does not leave the root.
+    Object.defineProperty(direct, 'assignedSlot', { configurable: true, value: other });
+    Object.defineProperty(other, 'assignedNodes', { configurable: true, value: () => [direct] });
+    const before = fixture.port.posts.length;
+    const slotChange = (target: Element): void => {
+      target.dispatchEvent(new (fixture.window as unknown as { Event: typeof Event })
+        .Event('slotchange', { bubbles: true }));
+    };
+    slotChange(other);
+    fixture.flushFrame();
+    const after = fixture.port.posts.slice(before);
+    expect(after).toHaveLength(1);
+    expect(after[0]).toMatchObject({ kind: 'simul:html-mirror-v2:patch' });
+    // The text is hidden now: taken back. Nothing else is sent.
+    expect((after[0] as HtmlMirrorPatchBatch).operations).toEqual([
+      expect.objectContaining({
+        kind: 'text',
+        node: expect.objectContaining({ text: '' }),
+      }),
+    ]);
+  });
+
+  it('follows a slot added to a root, or renamed, where the browser assigns by name', () => {
+    const { fixture, root, slot, slotted, direct, box } = dialogFixture('open');
+    box.removeAttribute('data-test-computed-hidden');
+    fixture.start('passive');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+    expect(sent(fixture)).toContain('text straight in the host');
+
+    // A slot's own event is not listened for here: every change is a mutation.
+    slot.dispatchEvent(new (fixture.window as unknown as { Event: typeof Event })
+      .Event('slotchange', { bubbles: true }));
+    expect(fixture.frames).toHaveLength(0);
+
+    // The page puts an earlier slot, in a hidden box, before the first one:
+    // the browser gives it the host's children.
+    const hiddenBox = fixture.document.createElement('div');
+    hiddenBox.setAttribute('data-test-computed-hidden', 'true');
+    const earlier = fixture.document.createElement('slot');
+    hiddenBox.append(earlier);
+    for (const element of [hiddenBox, earlier]) {
+      Object.defineProperty(element, 'getClientRects', {
+        configurable: true,
+        value: () => mirrorEmptyRectList(),
+      });
+    }
+    const give = (to: Element, from: Element): void => {
+      for (const node of [slotted, direct]) {
+        Object.defineProperty(node, 'assignedSlot', { configurable: true, value: to });
+      }
+      Object.defineProperty(to, 'assignedNodes', { configurable: true, value: () => [slotted, direct] });
+      Object.defineProperty(from, 'assignedNodes', { configurable: true, value: () => [] });
+    };
+    root.prepend(hiddenBox);
+    give(earlier, slot);
+    fixture.mutate(childListRecord(root, [hiddenBox]));
+    fixture.flushFrame();
+    expect(fixture.checkpoints()).toHaveLength(1);
+    const taken = fixture.patches().at(-1)!;
+    expect(JSON.stringify(taken)).not.toContain('text straight in the host');
+    expect(JSON.stringify(taken)).not.toContain('slotted paragraph');
+    expect(taken.operations.some(
+      (operation) => operation.kind === 'text' && operation.node.text === '',
+    )).toBe(true);
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, taken.lastSequence));
+
+    // The earlier slot gets a name: the first slot has the children again.
+    earlier.setAttribute('name', 'elsewhere');
+    give(slot, earlier);
+    fixture.mutate(attributeRecord(earlier, 'name'));
+    fixture.flushFrame();
+    expect(fixture.checkpoints()).toHaveLength(1);
+    expect(lastPatch(fixture)).toContain('text straight in the host');
+    expect(lastPatch(fixture)).toContain('slotted paragraph');
   });
 });
 

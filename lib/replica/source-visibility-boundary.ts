@@ -2,7 +2,9 @@ import {
   createSourcePaintScanCache,
   readSourceFlatTreeElementPath,
   sourceElementPaintInputsAreReadable,
+  sourceElementPathIsDisplayed,
   sourceElementPathIsPainted,
+  sourceElementPathIsShown,
   type SourcePaintScanCache,
 } from './source-privacy-policy';
 import { readSourceShadowRoot } from './source-shadow-root';
@@ -19,7 +21,7 @@ export interface SourceVisibilityBoundaryRefresh {
  * re-run its existing privacy filter for that bounded subtree.
  */
 export class SourceVisibilityBoundaryIndex {
-  readonly #states = new Map<Element, boolean>();
+  readonly #states = new Map<Element, SourceVisibilityState>();
   #complete = true;
 
   constructor(
@@ -146,7 +148,7 @@ export class SourceVisibilityBoundaryIndex {
 
   #scanRoots(
     roots: readonly Element[],
-    previous: ReadonlyMap<Element, boolean>,
+    previous: ReadonlyMap<Element, SourceVisibilityState>,
     paintCache: SourcePaintScanCache,
   ): SourceVisibilityBoundaryRefresh {
     const changedTargets: Element[] = [];
@@ -171,14 +173,24 @@ export class SourceVisibilityBoundaryIndex {
         }
         const current = pending.pop();
         if (!current) break;
-        const withheld = !sourceElementPathIsPainted(
+        const state: SourceVisibilityState = sourceElementPathIsPainted(
           current.element,
           this.sourceWindow,
           paintCache,
-        );
+        )
+          ? 'painted'
+          : sourceElementPathIsShown(current.element, this.sourceWindow, paintCache)
+            ? 'shown'
+            : sourceElementPathIsDisplayed(
+                current.element,
+                this.sourceWindow,
+                paintCache,
+              )
+              ? 'displayed'
+              : 'hidden';
         const prior = previous.get(current.element);
-        const changed = prior !== undefined && prior !== withheld;
-        this.#states.set(current.element, withheld);
+        const changed = prior !== undefined && prior !== state;
+        this.#states.set(current.element, state);
         let rematerializationBoundary = false;
         if (changed && !current.changedAncestor) {
           const textProof = subtreeMayContainAuthoredText(
@@ -256,6 +268,19 @@ export class SourceVisibilityBoundaryIndex {
   }
 }
 
+/**
+ * `painted`: a box of the element is proven painted. `shown`: nothing hides
+ * it, and it has no box to prove: a block of no height, whose own text may
+ * hang out of it and be drawn all the same. `displayed`: nothing is
+ * `display: none`, and something else hides it or cannot be read: a dialog
+ * at the first frame of its fade. `hidden`: not displayed. Each step
+ * between two of them is a boundary (D135): the text of a block of no
+ * height that is shown later was never read, nor that of a dialog a script
+ * fades in, which the page reader reads as shown from that first frame and
+ * which nothing reports when the fade ends.
+ */
+type SourceVisibilityState = 'painted' | 'shown' | 'displayed' | 'hidden';
+
 interface AuthoredTextSubtreeProof {
   readonly mayContainText: boolean;
   readonly inspected: number;
@@ -276,6 +301,7 @@ function subtreeMayContainAuthoredText(
   }
   const pending: Node[] = [];
   try {
+    pending.push(...slottedNodes(root));
     pending.push(...root.childNodes);
     const shadow = readSourceVisibilityShadowRoot(root);
     if (shadow === UNREADABLE_VISIBILITY_SHADOW_ROOT) {
@@ -298,6 +324,7 @@ function subtreeMayContainAuthoredText(
     }
     if (node.nodeType !== 1 && node.nodeType !== 11) continue;
     try {
+      if (node.nodeType === 1) pending.push(...slottedNodes(node as Element));
       pending.push(...node.childNodes);
       if (node.nodeType === 1) {
         const shadow = readSourceVisibilityShadowRoot(node as Element);
@@ -315,6 +342,17 @@ function subtreeMayContainAuthoredText(
     }
   }
   return Object.freeze({ mayContainText: false, inspected, overflow: false });
+}
+
+/**
+ * What a shadow host holds is drawn in the slots of the host's root, so a
+ * box that holds a slot owns what the slot holds, though none of it is
+ * inside the box: the box is the change, and what its slots hold, which
+ * changes with it, is left out as held by it (D135). Only the nodes are
+ * read, never their text; only a slot has any.
+ */
+function slottedNodes(element: Element): readonly Node[] {
+  return (element as Partial<HTMLSlotElement>).assignedNodes?.() ?? [];
 }
 
 function sourceVisibilityChildren(
@@ -343,14 +381,25 @@ function readSourceVisibilityShadowRoot(
   }
 }
 
+/**
+ * Leaves out every element that another of them holds, in the page's own
+ * tree or through a slot. Each element's path is read once and looked up in
+ * the set: comparing them pair by pair read a path for every pair, and a
+ * thousand elements shown at once stalled the page for a second (D135).
+ */
 function minimizeVisibilityRoots(elements: readonly Element[]): Element[] {
   const unique = [...new Set(elements)].filter((element) => element.isConnected);
-  return unique.filter((candidate) => !unique.some((other) =>
-    other !== candidate && sourceElementContains(other, candidate)));
-}
-
-function sourceElementContains(ancestor: Element, descendant: Element): boolean {
-  if (ancestor.contains(descendant)) return true;
-  const path = readSourceFlatTreeElementPath(descendant);
-  return Boolean(path?.includes(ancestor));
+  if (unique.length < 2) return unique;
+  const candidates = new Set(unique);
+  return unique.filter((candidate) => {
+    const path = readSourceFlatTreeElementPath(candidate);
+    // A path that cannot be read: the page's own tree still can.
+    if (!path) {
+      return !unique.some((other) => other !== candidate && other.contains(candidate));
+    }
+    for (let index = 1; index < path.length; index += 1) {
+      if (candidates.has(path[index]!)) return false;
+    }
+    return true;
+  });
 }

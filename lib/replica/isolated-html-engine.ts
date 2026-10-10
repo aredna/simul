@@ -37,6 +37,7 @@ import {
   type HtmlMirrorElementNode,
   type HtmlMirrorNode,
   type HtmlMirrorRepresentabilitySummary,
+  type HtmlMirrorShadowRoot,
 } from './html-mirror-sanitizer';
 import {
   DEFAULT_HTML_MIRROR_LIMIT_SETTINGS,
@@ -1629,12 +1630,100 @@ function applyDocumentGraph(
       );
       if (built) body.append(built);
     }
+    // A page may hang its whole content in a root on `<body>` (D135).
+    if (sourceBody.shadowRoot) {
+      buildShadowRoot(
+        target,
+        body,
+        sourceBody.shadowRoot,
+        nodes,
+        textMetadata,
+        controlMetadata,
+        ownedAdoptedStyles,
+      );
+    }
+  }
+  // What else sits under `<html>`: a dialog or an overlay a page, or another
+  // extension, appends beside `<body>`, and the white space between the two
+  // (D135). Built in the page's order around the shell's own head and body,
+  // so a later patch of `<html>`'s children finds every child it names. A
+  // second `<head>` or `<body>` is left out, as it always was.
+  const ordered: Node[] = [];
+  for (const child of root.children) {
+    if (child === sourceHead) {
+      ordered.push(head);
+    } else if (child === sourceBody) {
+      ordered.push(body);
+    } else if (child.kind === 'text' || !isDocumentShellTagName(child.tagName)) {
+      const built = buildNode(
+        target,
+        child,
+        nodes,
+        textMetadata,
+        controlMetadata,
+        ownedAdoptedStyles,
+      );
+      if (built) ordered.push(built);
+    }
+  }
+  let anchor: Node | null = null;
+  for (let index = ordered.length - 1; index >= 0; index -= 1) {
+    const child = ordered[index]!;
+    if (child.parentNode !== html || child.nextSibling !== anchor) {
+      html.insertBefore(child, anchor);
+    }
+    anchor = child;
   }
   appendOwnedAdoptedStyles(
     body,
     adoptedStyleSheets,
     ownedAdoptedStyles,
     'document',
+  );
+}
+
+function isDocumentShellTagName(tagName: string): boolean {
+  return tagName === 'html' || tagName === 'head' || tagName === 'body';
+}
+
+/**
+ * Builds a page's shadow root on `host`, a replica element without one. The
+ * replica's root is always open (see `HtmlMirrorShadowRoot`).
+ */
+function buildShadowRoot(
+  target: Document,
+  host: Element,
+  input: HtmlMirrorShadowRoot,
+  nodes: Map<number, Node>,
+  textMetadata: Map<number, Extract<HtmlMirrorNode, { kind: 'text' }>>,
+  controlMetadata: Map<number, HtmlMirrorControlText>,
+  ownedAdoptedStyles: Set<HTMLStyleElement>,
+): void {
+  const shadow = (host as Element & {
+    attachShadow?: (init: ShadowRootInit) => ShadowRoot;
+  }).attachShadow?.({ mode: 'open' });
+  if (!shadow) throw new Error('Open shadow root could not be reconstructed.');
+  if (nodes.has(input.id)) {
+    throw new Error('Duplicate isolated mirror shadow root ID.');
+  }
+  nodes.set(input.id, shadow);
+  for (const child of input.children) {
+    const built = buildNode(
+      target,
+      child,
+      nodes,
+      textMetadata,
+      controlMetadata,
+      ownedAdoptedStyles,
+    );
+    if (built) shadow.append(built);
+  }
+  appendOwnedShadowShellStyle(shadow);
+  appendOwnedAdoptedStyles(
+    shadow,
+    input.adoptedStyleSheets,
+    ownedAdoptedStyles,
+    'shadow',
   );
 }
 
@@ -1653,7 +1742,7 @@ function buildNode(
     textMetadata.set(input.id, input);
     return node;
   }
-  if (input.tagName === 'html' || input.tagName === 'head' || input.tagName === 'body') {
+  if (isDocumentShellTagName(input.tagName)) {
     throw new Error('Nested document element rejected.');
   }
   const node = createMirrorElement(target, input.namespace, input.tagName);
@@ -1688,31 +1777,14 @@ function buildNode(
   configureNativeSelectFacsimile(node);
   applyResolvedStyleSheetText(node, input.resolvedStyleSheetText);
   if (input.shadowRoot) {
-    const shadow = (node as Element & {
-      attachShadow?: (init: ShadowRootInit) => ShadowRoot;
-    }).attachShadow?.({ mode: 'open' });
-    if (!shadow) throw new Error('Open shadow root could not be reconstructed.');
-    if (nodes.has(input.shadowRoot.id)) {
-      throw new Error('Duplicate isolated mirror shadow root ID.');
-    }
-    nodes.set(input.shadowRoot.id, shadow);
-    for (const child of input.shadowRoot.children) {
-      const built = buildNode(
-        target,
-        child,
-        nodes,
-        textMetadata,
-        controlMetadata,
-        ownedAdoptedStyles,
-      );
-      if (built) shadow.append(built);
-    }
-    appendOwnedShadowShellStyle(shadow);
-    appendOwnedAdoptedStyles(
-      shadow,
-      input.shadowRoot.adoptedStyleSheets,
+    buildShadowRoot(
+      target,
+      node,
+      input.shadowRoot,
+      nodes,
+      textMetadata,
+      controlMetadata,
       ownedAdoptedStyles,
-      'shadow',
     );
   }
   return wrapNativeSelectFacsimile(node);

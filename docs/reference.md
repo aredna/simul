@@ -362,8 +362,7 @@ for the whole window before Simul sees them), is read as the plain text
 field it then is, as a field shown in clear before Simul was first opened
 would be. Other extensions often draw their own parts of a page inside closed roots (a password manager's
 suggestion list, a grammar checker's bubble): while the tab shows them, the
-mirror shows them too, unless they sit beside the page's `<body>` instead of
-inside it (see [Fidelity](#fidelity)). The insides of the browser's own
+mirror shows them too. The insides of the browser's own
 controls (a text field's editor, a video's buttons) are not read.
 
 A PDF opened from the computer is read from the file you chose and makes no
@@ -437,10 +436,8 @@ under **Advanced & experimental**.
 Simul is a safe reconstruction, not a browser clone. Current limitations
 include script-only custom-element state, virtualized DOM that the page has
 not created, inaccessible cross-origin CSSOM, generated pseudo-element text,
-canvas/video pixels, protected media, active embedded documents,
-cross-origin frame contents, and elements placed beside the page's `<body>`
-rather than inside it (some consent dialogs and extension overlays). Exact
-pixel parity is not claimed.
+canvas/video pixels, protected media, active embedded documents, and
+cross-origin frame contents. Exact pixel parity is not claimed.
 
 See [Replica fidelity](replica-fidelity.md) and the
 [translation companion architecture](translation-companion.md) for the

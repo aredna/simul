@@ -149,10 +149,28 @@ export interface SourceControlledContentPolicy {
   readonly incomplete: boolean;
 }
 
-type SourceElementPaintState = 'visible' | 'hidden' | 'unknown';
+/**
+ * `boxless`: displayed and not hidden, with no box of positive area of its
+ * own. A `display: contents` wrapper, every `<slot>`, and a block of no
+ * height that holds a positioned menu or dialog are all this. Such an
+ * element paints nothing itself and hides nothing: what it holds is painted
+ * or not by its own boxes and by whatever clips it (D135; it used to count
+ * as unknown, so nothing inside one was ever proven painted, and content
+ * shown there later was never read).
+ */
+type SourceElementPaintState = 'visible' | 'boxless' | 'hidden' | 'unknown';
+
+/** Whether an ancestor in this state leaves what it holds to be painted. */
+function sourcePaintStateShowsDescendants(state: SourceElementPaintState): boolean {
+  return state === 'visible' || state === 'boxless';
+}
 
 interface SourceElementPaintInputs {
   readonly state: SourceElementPaintState;
+  /** `display: contents`: no box at all, so its overflow clips nothing. */
+  readonly contents: boolean;
+  /** Its `display` is read and is not `none`. */
+  readonly displayed: boolean;
   readonly rects: readonly SourcePaintBounds[] | undefined;
   /**
    * The padding box, which is what an overflow clip actually confines
@@ -194,8 +212,10 @@ type SourceChildClip =
   | { readonly kind: 'rect'; readonly bounds: SourcePaintBounds };
 
 interface SourcePaintedPathMemo {
-  /** Every element of the flat-tree path is readable and painted. */
+  /** Every element of the flat-tree path is readable and hides nothing. */
   readonly pathVisible: boolean;
+  /** Every element of the flat-tree path is displayed (see `displayed`). */
+  readonly pathDisplayed: boolean;
   /** Elements in the flat-tree path, the element included. */
   readonly depth: number;
   /** What this element's children are clipped to. */
@@ -764,8 +784,9 @@ function readSourceControlledTabSelection(
   }
   const panelPath = sourcePaintPath(panel, paintCache);
   if (!panelPath || panelPath.slice(1).some(
-    (ancestor) =>
-      sourceElementPaintState(ancestor, sourceWindow, paintCache) !== 'visible',
+    (ancestor) => !sourcePaintStateShowsDescendants(
+      sourceElementPaintState(ancestor, sourceWindow, paintCache),
+    ),
   )) return undefined;
   return selected;
 }
@@ -773,6 +794,9 @@ function readSourceControlledTabSelection(
 /**
  * Content-free proof that an element has a positive painted box through its
  * complete flat-tree clipping path. Unknown style or geometry fails closed.
+ * An ancestor without a box of its own is no obstacle (see `boxless`), and a
+ * `display: contents` element counts as painted where its own children could
+ * be: it never has a box to show, and its text is drawn all the same.
  */
 export function sourceElementPathIsPainted(
   element: Element,
@@ -780,6 +804,35 @@ export function sourceElementPathIsPainted(
   paintCache: SourcePaintScanCache = createSourcePaintScanCache(),
 ): boolean {
   return sourcePaintedPathMemo(element, sourceWindow, paintCache).painted;
+}
+
+/**
+ * Whether nothing above an element, nor the element itself, hides it: every
+ * element of its flat-tree path is displayed, shown and readable. Less than
+ * `sourceElementPathIsPainted`, which also wants a box that survives every
+ * clip: a block of no height whose text hangs out of it is not hidden,
+ * though it has no box to prove painted.
+ */
+export function sourceElementPathIsShown(
+  element: Element,
+  sourceWindow: Window | null | undefined,
+  paintCache: SourcePaintScanCache = createSourcePaintScanCache(),
+): boolean {
+  return sourcePaintedPathMemo(element, sourceWindow, paintCache).pathVisible;
+}
+
+/**
+ * Less again: no element of its flat-tree path is `display: none`, whatever
+ * else hides it for now. A dialog that has just lost its `hidden` attribute
+ * and is still at the first frame of a fade is displayed and not yet shown;
+ * the page reader's hidden-region rule already reads it as shown.
+ */
+export function sourceElementPathIsDisplayed(
+  element: Element,
+  sourceWindow: Window | null | undefined,
+  paintCache: SourcePaintScanCache = createSourcePaintScanCache(),
+): boolean {
+  return sourcePaintedPathMemo(element, sourceWindow, paintCache).pathDisplayed;
 }
 
 /**
@@ -795,8 +848,9 @@ export function sourceElementPathIsPaintedByPath(
 ): boolean {
   const path = sourcePaintPath(element, paintCache);
   if (!path || !path.every(
-    (current) =>
-      sourceElementPaintState(current, sourceWindow, paintCache) === 'visible',
+    (current) => sourcePaintStateShowsDescendants(
+      sourceElementPaintState(current, sourceWindow, paintCache),
+    ),
   )) return false;
   return sourcePaintSurvivesClipping(element, path, sourceWindow, paintCache);
 }
@@ -845,6 +899,7 @@ function sourcePaintedPathMemo(
     // whose path runs through it, as the path walk does.
     const failed = Object.freeze({
       pathVisible: false,
+      pathDisplayed: false,
       depth: MAX_SOURCE_FLAT_TREE_ANCESTORS + 1,
       childClip: EMPTY_CLIP,
       painted: false,
@@ -875,20 +930,29 @@ function derivePaintedPathMemo(
   const depth = (parent?.depth ?? 0) + 1;
   if (depth > MAX_SOURCE_FLAT_TREE_ANCESTORS) {
     return Object.freeze({
-      pathVisible: false, depth, childClip: EMPTY_CLIP, painted: false,
+      pathVisible: false,
+      pathDisplayed: false,
+      depth,
+      childClip: EMPTY_CLIP,
+      painted: false,
     });
   }
   const inputs = sourcePaintInputs(element, sourceWindow, paintCache);
-  const pathVisible = (parent?.pathVisible ?? true) && inputs.state === 'visible';
+  const pathVisible = (parent?.pathVisible ?? true) &&
+    sourcePaintStateShowsDescendants(inputs.state);
+  const pathDisplayed = (parent?.pathDisplayed ?? true) && inputs.displayed;
   const ancestorClip = parent?.childClip ?? UNCLIPPED;
   let painted = false;
   if (pathVisible) {
     painted = ancestorClip.kind === 'complex'
       ? sourceElementPathIsPaintedByPath(element, sourceWindow, paintCache)
-      : rectsSurviveClip(inputs.rects, ancestorClip);
+      : inputs.contents
+        ? ancestorClip.kind !== 'empty'
+        : rectsSurviveClip(inputs.rects, ancestorClip);
   }
   return Object.freeze({
     pathVisible,
+    pathDisplayed,
     depth,
     childClip: childClipOf(element, inputs, ancestorClip),
     painted,
@@ -911,7 +975,7 @@ function childClipOf(
   ) return ancestorClip;
   const clipped = inputs.overflow;
   if (!clipped) return EMPTY_CLIP;
-  if (!clipped.x && !clipped.y) return ancestorClip;
+  if (inputs.contents || (!clipped.x && !clipped.y)) return ancestorClip;
   const clips = inputs.clipRects ?? inputs.rects;
   if (!clips || clips.length === 0) return EMPTY_CLIP;
   if (clips.length !== 1) return COMPLEX_CLIP;
@@ -930,6 +994,10 @@ function childClipOf(
   }
   return Object.freeze({ kind: 'rect', bounds: Object.freeze(bounds) });
 }
+
+const EVERYWHERE: readonly SourcePaintBounds[] = Object.freeze([Object.freeze({
+  left: -Infinity, top: -Infinity, right: Infinity, bottom: Infinity,
+})]);
 
 function rectsSurviveClip(
   rects: readonly SourcePaintBounds[] | undefined,
@@ -995,7 +1063,10 @@ function sourcePaintSurvivesClipping(
   sourceWindow: Window | null | undefined,
   paintCache: SourcePaintScanCache,
 ): boolean {
-  let intersections = sourcePaintInputs(element, sourceWindow, paintCache).rects;
+  const inputs = sourcePaintInputs(element, sourceWindow, paintCache);
+  // A `display: contents` element has no box to clip: it survives wherever
+  // its ancestors leave anything at all.
+  let intersections = inputs.contents && inputs.rects ? EVERYWHERE : inputs.rects;
   if (!intersections || intersections.length === 0) return false;
   for (const ancestor of path.slice(1)) {
     if (
@@ -1005,7 +1076,7 @@ function sourcePaintSurvivesClipping(
     const ancestorInputs = sourcePaintInputs(ancestor, sourceWindow, paintCache);
     const clipped = ancestorInputs.overflow;
     if (!clipped) return false;
-    if (!clipped.x && !clipped.y) continue;
+    if (ancestorInputs.contents || (!clipped.x && !clipped.y)) continue;
     const clips = ancestorInputs.clipRects ?? ancestorInputs.rects;
     if (!clips || clips.length === 0) return false;
     const nextIntersections: SourcePaintBounds[] = [];
@@ -1112,27 +1183,43 @@ function sourcePaintInputs(
       .trim().toLowerCase();
     const rects = readSourceElementPaintRects(element);
     if (!rects) throw new Error('Paint geometry is unreadable.');
-    const computedHidden = display === 'none' || visibility === 'hidden' ||
-      visibility === 'collapse' || contentVisibility === 'hidden' ||
-      (opacity !== '' && Number(opacity) === 0);
+    const contents = display === 'contents';
     const authoredHidden = ariaHidden === undefined
       ? undefined
       : hiddenAttribute || ariaHidden;
-    const state: SourceElementPaintState =
-      authoredHidden === undefined || authoredHidden !== computedHidden
+    let state: SourceElementPaintState;
+    if (contents) {
+      // No box: what fades, skips or clips a box does nothing here, and
+      // there is no box for a declared `hidden` to be checked against. Only
+      // `visibility`, which is inherited, reaches what the element holds.
+      const inherited = visibility === 'hidden' || visibility === 'collapse';
+      state = authoredHidden === undefined
+        ? 'unknown'
+        : !inherited
+          ? 'boxless'
+          : authoredHidden ? 'hidden' : 'unknown';
+    } else {
+      const computedHidden = display === 'none' || visibility === 'hidden' ||
+        visibility === 'collapse' || contentVisibility === 'hidden' ||
+        (opacity !== '' && Number(opacity) === 0);
+      state = authoredHidden === undefined || authoredHidden !== computedHidden
         ? 'unknown'
         : computedHidden
           ? 'hidden'
           : (clip !== '' && clip !== 'auto' && clip !== 'none') ||
-              (clipPath !== '' && clipPath !== 'none') ||
-              !sourceElementPaintBounds(rects)
+              (clipPath !== '' && clipPath !== 'none')
             ? 'unknown'
-            : 'visible';
+            : sourceElementPaintBounds(rects)
+              ? 'visible'
+              : 'boxless';
+    }
     const clips = (value: string): boolean =>
       value === 'hidden' || value === 'clip' || value === 'scroll' ||
       value === 'auto' || value === 'overlay';
     result = Object.freeze({
       state,
+      contents,
+      displayed: display !== 'none' && display !== '',
       rects,
       clipRects: readSourceElementPaddingBoxRects(element, rects),
       overflow: Object.freeze({ x: clips(overflowX), y: clips(overflowY) }),
@@ -1141,6 +1228,8 @@ function sourcePaintInputs(
   } catch {
     result = Object.freeze({
       state: 'unknown',
+      contents: false,
+      displayed: false,
       rects: undefined,
       clipRects: undefined,
       overflow: undefined,
@@ -1739,7 +1828,11 @@ function sourceSelectOptionPathIsPublic(
   ) return false;
   let current = option.parentElement;
   while (current && current.localName.toLowerCase() !== 'select') {
-    if (current.localName.toLowerCase() !== 'optgroup') return false;
+    if (current.localName.toLowerCase() !== 'optgroup') {
+      if (!isSourceSelectWrapper(current)) return false;
+      current = current.parentElement;
+      continue;
+    }
     const attributes = readSourceStructuralAttributes(current);
     if (
       isSourceSelectEntryVisuallyHidden(current) ||
@@ -1771,13 +1864,114 @@ export function isSourceSelectLabelElementPublic(element: Element): boolean {
     isSourceActivationRoleValue(attributes.role) ||
     !isSourceElementInsideNativeSelect(element)
   ) return false;
-  const parentTag = element.parentElement?.localName.toLowerCase();
+  const parentTag = readSourceSelectEntryOwner(element)?.localName.toLowerCase();
   if (
     (tagName === 'optgroup' && parentTag !== 'select') ||
     (tagName === 'option' && parentTag !== 'select' && parentTag !== 'optgroup')
   ) return false;
   return tagName === 'optgroup' ||
     sourceSelectOptionPathIsPublic(element);
+}
+
+/** Wrappers passed between a dropdown and one of its options or groups. */
+const MAX_SOURCE_SELECT_WRAPPER_DEPTH = 16;
+
+/**
+ * A plain element between a dropdown and its options, or between a group
+ * and its options: `<select><div><option>`. Chrome keeps such a wrapper and
+ * lists the options inside it as the dropdown's own, so the mirror passes
+ * through it (D135; the dropdown used to show no rows). An element that
+ * makes what it holds private, or that acts, is not passed.
+ */
+export function isSourceSelectWrapper(element: Element): boolean {
+  const tagName = element.localName.toLowerCase();
+  if (
+    element.namespaceURI !== 'http://www.w3.org/1999/xhtml' ||
+    tagName === 'select' || tagName === 'option' || tagName === 'optgroup' ||
+    SOURCE_NON_CONTENT_TAGS.has(tagName) || isSourceActivationTagName(tagName)
+  ) return false;
+  const attributes = readSourceStructuralAttributes(element);
+  return !sourceElementStartsPrivateRegion(tagName, attributes) &&
+    !isSourceActivationRoleValue(attributes.role);
+}
+
+/**
+ * The dropdown or group that holds an option or a group as one of its
+ * entries (`readSourceSelectEntries`): its parent, or the one above the
+ * wrappers around it. An option in a group inside a group belongs to the
+ * outer group; a group inside a group belongs to nothing. `undefined` also
+ * when what is between them is not a plain wrapper, or there are too many.
+ */
+export function readSourceSelectEntryOwner(entry: Element): Element | undefined {
+  const group = entry.localName.toLowerCase() === 'optgroup';
+  let outer: Element | undefined;
+  let current = entry.parentElement;
+  for (let depth = 0; current && depth <= MAX_SOURCE_SELECT_WRAPPER_DEPTH; depth += 1) {
+    const tagName = current.localName.toLowerCase();
+    if (tagName === 'select') return outer ?? current;
+    if (tagName === 'optgroup') {
+      if (group) return undefined;
+      outer = current;
+    } else if (!isSourceSelectWrapper(current)) {
+      return undefined;
+    }
+    current = current.parentElement;
+  }
+  return undefined;
+}
+
+/**
+ * The options and groups of a dropdown, or the options of a group, in the
+ * page's order, with those inside plain wrappers as the dropdown's own.
+ * `undefined` when the owner holds no wrapper with an entry in it: its own
+ * children are then its entries, as they always were.
+ */
+export function readSourceSelectEntries(
+  owner: Element,
+): readonly Element[] | undefined {
+  const ownerTag = owner.localName.toLowerCase();
+  if (ownerTag !== 'select' && ownerTag !== 'optgroup') return undefined;
+  let wrapped = false;
+  for (let child = owner.firstElementChild; child; child = child.nextElementSibling) {
+    const tagName = child.localName.toLowerCase();
+    if (tagName === 'option' || tagName === 'optgroup') continue;
+    if (
+      isSourceSelectWrapper(child) &&
+      child.querySelector('option,optgroup') !== null
+    ) {
+      wrapped = true;
+      break;
+    }
+  }
+  if (!wrapped) return undefined;
+  const entries: Element[] = [];
+  const pending: Array<{ readonly element: Element; readonly depth: number }> = [];
+  const push = (parent: Element, depth: number): void => {
+    for (let child = parent.lastElementChild; child; child = child.previousElementSibling) {
+      pending.push({ element: child, depth });
+    }
+  };
+  push(owner, 0);
+  let inspected = 0;
+  while (pending.length > 0) {
+    const { element, depth } = pending.pop()!;
+    inspected += 1;
+    if (inspected > MAX_SOURCE_SELECT_DESCENDANTS) break;
+    const tagName = element.localName.toLowerCase();
+    if (tagName === 'option') {
+      entries.push(element);
+    } else if (tagName === 'optgroup') {
+      // A group inside a group has no place in a dropdown: its options
+      // count as the outer group's.
+      if (ownerTag === 'select') entries.push(element);
+      else if (depth < MAX_SOURCE_SELECT_WRAPPER_DEPTH) push(element, depth + 1);
+    } else if (
+      depth < MAX_SOURCE_SELECT_WRAPPER_DEPTH && isSourceSelectWrapper(element)
+    ) {
+      push(element, depth + 1);
+    }
+  }
+  return Object.freeze(entries);
 }
 
 function directOptgroupLegend(element: Element): Element | undefined {
@@ -2288,9 +2482,12 @@ function isSourceElementInsideNativeSelect(element: Element): boolean {
       );
     }
     if (tagName === 'datalist') return false;
+    if (tagName !== 'optgroup') {
+      if (!isSourceSelectWrapper(current)) return false;
+      continue;
+    }
     const attributes = readSourceStructuralAttributes(current);
     if (
-      tagName !== 'optgroup' ||
       sourceAttributesArePrivate(attributes) ||
       isSourceActivationRoleValue(attributes.role)
     ) return false;

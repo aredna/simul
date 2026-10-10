@@ -62,6 +62,26 @@ panel collapsed to zero height, faded out or clipped away stays withheld until
 a layout change proves it painted; off-screen slides fill in as they come into
 view.
 
+What the page shows later is read when it is shown. After every change the
+page script compares, element by element, how each stands now with how it
+stood before, and reads again what differs. An element is painted (a box of
+it is proven painted), shown (nothing hides it, and it has no box to prove:
+a block of no height whose text hangs out of it), displayed (nothing is
+`display: none`, and something else hides it for now: a dialog at the first
+frame of a fade that a script runs, whose end nothing reports), or hidden.
+An element above with no box of its own is no obstacle to the proof (D135):
+a `display: contents` wrapper (some frameworks put the whole page in one), a
+`<slot>`, a block of no height around a positioned menu or dialog. Such an
+element hides nothing; what it holds is painted or not by its own boxes and
+by whatever clips it, and inside a box of no size that clips its overflow
+nothing is painted. What fades, skips or clips a box does nothing to a
+`display: contents` element, which has none, and an `aria-hidden` on one is
+not taken for hidden, since there is no box to check it against. Before D135
+an ancestor without a box counted as unknown, nothing inside it was ever
+proven painted, and a menu, a dialog or a tab that was hidden at first and
+shown later inside one stayed blank in the mirror; a site menu there was not
+offered at all.
+
 When CSSOM is readable, Simul serializes sanitized rules and recursively
 flattens readable imports in order within rule, depth, string, and total payload
 budgets. These budgets keep the tab and the panel responsive; they do not
@@ -215,6 +235,15 @@ them, and every changed list was refused and answered with a fresh copy of
 the whole page. A change inside one of a dropdown's option groups is sent as
 a change to the dropdown; a change to an option's own text sends nothing here,
 since its label travels on the semantic channel.
+A page may put a dropdown's options inside plain wrapper elements
+(`<select><div><option>`); Chrome keeps the wrappers and lists the options
+inside as the dropdown's own. The page script passes such a wrapper, up to
+sixteen deep (D135): the mirror still holds options and groups only, flat, in
+the page's order, and a change inside a wrapper is a change to the dropdown.
+A wrapper that would make what it holds private, or that acts (a button, an
+editable region, a widget role), is not passed, and the options inside it
+keep their labels to themselves. Before D135 such a dropdown showed
+**Options** and no rows.
 A select that states its own implicit role (`role="combobox"` on a single-row
 select, `role="listbox"`) is approved like one that states none, and the
 stated role is dropped in transit (D98); any other widget or editor role on a
@@ -695,16 +724,32 @@ the same roots. A part that only indexes the page may still hold an older
   checker's bubble is often a closed root in the page. The mirror shows what
   the tab shows, so it shows them while the tab does; credential fields
   inside them are classified like any other.
-- **Beside `<body>`.** The replica is built from the page's `<head>` and
-  `<body>`. A host that is a child of `<html>` beside `<body>` (some consent
-  managers and extension overlays put theirs there) is read by the page
-  script but not placed in the mirror. This is older than D125 and holds
-  for any element there, with or without a shadow root.
-- **Slotted text under a hidden box.** The hidden-region rule looks at an
-  element's own computed style and its DOM parents. Text slotted into a
-  `display: none` box of a shadow root, open or closed, is therefore read
-  while hidden; the replica hides it as the page does. Text that is hidden
-  itself, or by an ancestor inside the root, is withheld until it is painted.
+- **Beside `<body>`, and a root on it.** Every child of `<html>` is built,
+  in the page's order around the mirror's own `<head>` and `<body>`: a
+  dialog or an overlay that a page, a consent manager or another extension
+  appends beside `<body>`, and a style sheet put there (D135). A second
+  `<head>` or `<body>` is left out. A shadow root on `<body>` itself is
+  built like any other; on such a page an open dropdown's list is hung
+  beside the body, since a body with a root draws only what it slots.
+  Before D135 neither was built: a page whose content hangs in a root on
+  `<body>` gave a blank mirror, and every change at or under a child of
+  `<html>` rebuilt the whole mirror and still showed nothing there.
+- **Slotted children under a hidden box.** A child of a shadow host is
+  drawn in the slot its host's root assigns it to, inside whatever that root
+  puts around the slot. The hidden-region rule follows it there (D135): a
+  child slotted into a hidden or collapsed box of the root, open or closed,
+  is read as any hidden node is, and read again when the box is shown, when
+  a slot is added to the root, removed or renamed, and, in a root that
+  assigns its slots by script, when a slot says its nodes changed. The box
+  is the one change; what its slots hold is read with it, node by node, or
+  as the host's children in one piece when there are more than 256. A child
+  that no slot takes is read as its host is. Before D135 the rule looked at
+  an element's own style and its DOM parents only, and text slotted into a
+  closed dialog travelled, and was translated, while hidden.
+- **A host and its root together.** A patch of a host's children does not
+  carry the host's root. When the host's children change and something
+  inside its root changes in the same frame, the root is read again whole
+  beside the host (D135). It used to be the whole page.
 
 These are product limits, not exceptions that weaken the sandbox. OpenAI.com,
 Reddit, Y Combinator, and D-U-N-S are useful manual compatibility checks, but

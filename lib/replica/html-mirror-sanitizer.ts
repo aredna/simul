@@ -17,6 +17,8 @@ import {
   isSourceSelectEntryVisuallyHidden,
   isSourceTransparentSelectClickTarget,
   readSourceFlatTreeElementPath,
+  readSourceSelectEntries,
+  readSourceSelectEntryOwner,
   readSourceStructuralAttributes,
   sourceAttributesArePrivate,
   sourceControlledContentIsWithheld,
@@ -32,7 +34,10 @@ import {
 } from './source-secret-classifier';
 import { isSafeStaticSvgDataImage } from './static-svg-data-image';
 import { SOURCE_PRIVACY_FILTERS_OFF } from './source-privacy-mode';
-import { readSourceShadowRoot } from './source-shadow-root';
+import {
+  readSourceAssignedSlot,
+  readSourceShadowRoot,
+} from './source-shadow-root';
 import {
   MAX_ADOPTED_STYLE_CHARACTERS_PER_OWNER,
   MAX_ADOPTED_STYLE_RULES_PER_OWNER,
@@ -411,6 +416,16 @@ interface SerializeContext {
   readonly controlledContent: SourceControlledContentPolicy;
   /** Shared by one walk; see SourceSecretAncestorMemo. */
   readonly secretAncestors: SourceSecretAncestorMemo;
+  /** Shared by one walk; see `readSourceSlotRegion`. */
+  readonly slotRegions: Map<Element, SourceSlotRegion>;
+}
+
+/** What the box around a slot does to the nodes drawn in that slot. */
+interface SourceSlotRegion {
+  /** The slot sits in a hidden or collapsed box. */
+  readonly withheld: boolean;
+  /** Text put straight into the slot is hidden by `visibility`. */
+  readonly visibilityHidden: boolean;
 }
 
 type NativeSelectParentContext = false | 'select' | 'optgroup' | 'option';
@@ -815,6 +830,7 @@ export function sanitizeSourceSubtrees(
     );
     if (controlledContent.incomplete) throw new HtmlMirrorCapacityError();
     const secretAncestors = createSourceSecretAncestorMemo();
+    const slotRegions = new Map<Element, SourceSlotRegion>();
     return Object.freeze(sources.map((source) => {
       const sourceElement = nearestElement(source);
       const inheritedElement = source.nodeType === Node.ELEMENT_NODE && sourceElement
@@ -853,6 +869,7 @@ export function sanitizeSourceSubtrees(
         fidelityPolicy,
         controlledContent,
         secretAncestors,
+        slotRegions,
       });
     }));
   } catch (error) {
@@ -905,25 +922,37 @@ export function sanitizeSourceChildren(
         .visibilityHidden
       : false;
     const secretAncestors = createSourceSecretAncestorMemo();
-    for (const child of source.childNodes) {
+    const slotRegions = new Map<Element, SourceSlotRegion>();
+    // The children of a host are drawn where the host's root slots them.
+    const host = source.nodeType === Node.ELEMENT_NODE &&
+      readSourceShadowRoot(source as Element)
+      ? source as Element
+      : undefined;
+    for (const child of sourceStructuralChildNodes(source)) {
+      const slotRegion = host
+        ? readSourceSlotRegion(child, controlledContent, slotRegions)
+        : undefined;
       const serialized = serializeNode(child, {
         registry,
         baseUrl,
         budget,
         styleWork,
-        privateRegion,
+        privateRegion: privateRegion || slotRegion?.withheld === true,
         privacyRegion,
         privateAttributeRegion,
         activationRegion,
         nonContentRegion,
         styleRegion,
         hardSecretRegion,
-        visibilityHidden,
+        visibilityHidden: slotRegion && child.nodeType === Node.TEXT_NODE
+          ? slotRegion.visibilityHidden
+          : visibilityHidden,
         depth: 0,
         representability,
         fidelityPolicy,
         controlledContent,
         secretAncestors,
+        slotRegions,
       });
       if (serialized) result.push(serialized);
     }
@@ -1093,6 +1122,7 @@ export function sanitizeSourceDocument(
     fidelityPolicy,
     controlledContent,
     secretAncestors: createSourceSecretAncestorMemo(),
+    slotRegions: new Map(),
   });
   if (!root || root.kind !== 'element' || root.tagName !== 'html') return undefined;
   const adoptedStyleSheets = captureAdoptedStyleSheets(
@@ -1784,6 +1814,9 @@ function serializeNode(
     context.representability,
   );
   const children: HtmlMirrorNode[] = [];
+  // Open or closed (D125). Read before the element's own children: they are
+  // drawn where this root slots them, not where they sit in the page (D135).
+  const sourceShadow = readSourceShadowRoot(liveElement);
   if (!isVoidElement(tagName) && !isSourceNativeTextControlTagName(tagName)) {
     const styleResolved = tagName === 'style' &&
       hints.resolvedStyleSheetText !== undefined;
@@ -1793,28 +1826,36 @@ function serializeNode(
     const childFidelityPolicy = tagName === 'style' && context.styleWork.exhausted
       ? 'conservative'
       : context.fidelityPolicy;
-    for (const liveChild of live.childNodes) {
+    for (const liveChild of sourceStructuralChildNodes(liveElement)) {
+      const slotRegion = sourceShadow
+        ? readSourceSlotRegion(
+            liveChild,
+            context.controlledContent,
+            context.slotRegions,
+          )
+        : undefined;
       const child = serializeNode(liveChild, {
         ...context,
         representability: childRepresentability,
         fidelityPolicy: childFidelityPolicy,
-        privateRegion,
+        privateRegion: privateRegion || slotRegion?.withheld === true,
         privacyRegion,
         privateAttributeRegion,
         activationRegion,
         nonContentRegion,
         styleRegion,
         styleResolved,
-        visibilityHidden,
+        visibilityHidden: slotRegion && liveChild.nodeType === Node.TEXT_NODE
+          ? slotRegion.visibilityHidden
+          : visibilityHidden,
         depth: context.depth + 1,
       });
       if (child) children.push(child);
     }
   }
   let shadowRoot: HtmlMirrorShadowRoot | undefined;
-  // Open or closed (D125). The root's content goes through this same walk:
-  // each node is classified before it is read, and every limit applies.
-  const sourceShadow = readSourceShadowRoot(liveElement);
+  // The root's content goes through this same walk: each node is classified
+  // before it is read, and every limit applies.
   if (customElementHost && !sourceShadow) {
     incrementRepresentability(
       context.representability,
@@ -4319,9 +4360,15 @@ function readSourceHiddenRegionState(
     if (
       display === undefined ||
       visibility === undefined ||
-      element.getAttribute('hidden')?.trim().toLowerCase() === 'until-found' ||
-      declaredHiddenRegionIsUnpainted(style)
+      element.getAttribute('hidden')?.trim().toLowerCase() === 'until-found'
     ) return state(true);
+    // An element without a box of its own (`display: contents`, as every
+    // `<slot>` is) has none to check the declaration against, and nothing
+    // that leaves a box unpainted applies to it: it is displayed, and what
+    // it holds is shown or not by itself (D135; text drawn through
+    // `<slot aria-hidden="true">` was withheld).
+    if (display === 'contents') return state(false);
+    if (declaredHiddenRegionIsUnpainted(style)) return state(true);
     return state(!hasSourcePositivePaintBox(element));
   } catch {
     return SOURCE_REGION_WITHHELD;
@@ -4333,6 +4380,48 @@ function elementStartsHiddenOrControlledDisclosureRegion(
   controlledContent: SourceControlledContentPolicy,
 ): boolean {
   return readSourceHiddenRegionState(element, controlledContent).starts;
+}
+
+const SOURCE_SLOT_REGION_UNREADABLE: SourceSlotRegion = Object.freeze({
+  withheld: true,
+  visibilityHidden: false,
+});
+
+/**
+ * A child of a shadow host is drawn in the slot its host's root assigns it
+ * to, inside whatever that root puts around the slot. A hidden or collapsed
+ * box there hides the child as one around the child itself would, and the
+ * walk down the page's own tree never passes it: text slotted into a closed
+ * dialog travelled, and was translated, while it was hidden (D135).
+ * `undefined` for a node that is not assigned to a slot: it is read as its
+ * host is, as it always was. A slot's box is looked at once in a walk.
+ */
+function readSourceSlotRegion(
+  child: Node,
+  controlledContent: SourceControlledContentPolicy,
+  known: Map<Element, SourceSlotRegion>,
+): SourceSlotRegion | undefined {
+  let slot: Element | null | undefined;
+  try {
+    slot = readSourceAssignedSlot(child);
+  } catch {
+    return SOURCE_SLOT_REGION_UNREADABLE;
+  }
+  if (!slot) return undefined;
+  const kept = known.get(slot);
+  if (kept) return kept;
+  let region = SOURCE_SLOT_REGION_UNREADABLE;
+  const path = readSourceFlatTreeElementPath(slot);
+  if (path) {
+    region = Object.freeze({
+      withheld: path.some((current) =>
+        elementStartsHiddenOrControlledDisclosureRegion(current, controlledContent)),
+      visibilityHidden:
+        readSourceHiddenRegionState(slot, controlledContent).visibilityHidden,
+    });
+  }
+  known.set(slot, region);
+  return region;
 }
 
 /** Content-free: computed style that leaves a displayed box unpainted. */
@@ -4477,6 +4566,31 @@ function nativeSelectOptionCount(children: readonly HtmlMirrorNode[]): number {
     }
   }
   return count;
+}
+
+/**
+ * What the mirror holds as the children of `node`: its child nodes, except
+ * under a dropdown or a group whose options sit inside wrapper elements.
+ * There the mirror holds the options and groups themselves, in the page's
+ * order, as Chrome lists them: a dropdown in the mirror is options and groups
+ * only (D135).
+ */
+export function sourceStructuralChildNodes(node: Node): Iterable<Node> {
+  if (node.nodeType !== Node.ELEMENT_NODE) return node.childNodes;
+  const element = node as Element;
+  if (element.namespaceURI !== 'http://www.w3.org/1999/xhtml') return node.childNodes;
+  return readSourceSelectEntries(element) ?? node.childNodes;
+}
+
+/** Whether the mirror holds `source` as a child of `target`; see above. */
+export function isSourceStructuralChildOf(source: Node, target: Node): boolean {
+  if (source.parentNode === target) return true;
+  if (
+    source.nodeType !== Node.ELEMENT_NODE || target.nodeType !== Node.ELEMENT_NODE
+  ) return false;
+  const tagName = (source as Element).localName.toLowerCase();
+  return (tagName === 'option' || tagName === 'optgroup') &&
+    readSourceSelectEntryOwner(source as Element) === target;
 }
 
 function isRepresentableSourceNativeSelectChild(node: Node): boolean {

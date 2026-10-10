@@ -2079,7 +2079,68 @@ describe('semantic source session', () => {
     },
   );
 
-  it('rejects a structural menu beneath an unpainted flat-tree ancestor', () => {
+  it.each([
+    ['faded out', 'opacity'],
+    ['of no size and clipping', 'clip'],
+  ] as const)(
+    'rejects a structural menu beneath a flat-tree ancestor that is %s',
+    (_name, how) => {
+      const { document, window } = parseHTML(`<html><body><section id="outer"><nav>
+        <div id="wrapper"><button id="trigger">Resources</button>
+          <div id="panel"><a href="/school">Startup School</a></div>
+        </div></nav></section></body></html>`);
+      installPaintedTabFixture(document, window as unknown as Window);
+      const outer = document.querySelector('#outer')!;
+      const panel = document.querySelector('#panel')!;
+      if (how === 'clip') {
+        Object.defineProperty(outer, 'getClientRects', {
+          configurable: true,
+          value: () => Object.assign([], { item: () => null }) as DOMRectList,
+        });
+      }
+      const style = structuralMenuStyle((element) =>
+        element === panel
+          ? 'display'
+          : element === outer && how === 'opacity' ? 'opacity' : undefined);
+      const port = new FakeSemanticPort(
+        createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+      );
+      const session = createSession(
+        port,
+        document,
+        window,
+        'isolated-html',
+        undefined,
+        ((element: Element) => {
+          const computed = style(element);
+          if (element !== outer || how !== 'clip') return computed;
+          return {
+            ...computed,
+            overflowX: 'hidden',
+            overflowY: 'hidden',
+            getPropertyValue: (name: string) =>
+              name === 'overflow-x' || name === 'overflow-y'
+                ? 'hidden'
+                : computed.getPropertyValue(name),
+          };
+        }) as Window['getComputedStyle'],
+      );
+
+      port.emit(createSemanticSourceStart(
+        'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+      ));
+      expect(port.messages[0]!.proofs.some((proof) =>
+        proof.kind === 'structural-menu')).toBe(false);
+      expect(port.messages[0]!.records.map((record) => record.text))
+        .not.toContain('Startup School');
+      session.dispose();
+    },
+  );
+
+  it('offers a structural menu inside an ancestor of no height that clips nothing (D135)', () => {
+    // A header of no height whose menu bar hangs out of it is drawn, and so
+    // is the bar. The box-less ancestor used to count as not painted, and
+    // nothing inside one was ever proven painted.
     const { document, window } = parseHTML(`<html><body><section id="outer"><nav>
       <div id="wrapper"><button id="trigger">Resources</button>
         <div id="panel"><a href="/school">Startup School</a></div>
@@ -2106,10 +2167,10 @@ describe('semantic source session', () => {
     port.emit(createSemanticSourceStart(
       'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
     ));
-    expect(port.messages[0]!.proofs.some((proof) =>
-      proof.kind === 'structural-menu')).toBe(false);
-    expect(port.messages[0]!.records.map((record) => record.text))
-      .not.toContain('Startup School');
+    expect(port.messages[0]!.proofs).toContainEqual(expect.objectContaining({
+      kind: 'structural-menu',
+      panelNodeId: nodeId(panel),
+    }));
     session.dispose();
   });
 

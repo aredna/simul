@@ -700,7 +700,12 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
     // A site that collapses its menu with opacity as well as display (freee's
     // header menus) would otherwise open an invisible panel.
     setImportant(this.panel, 'opacity', '1');
-    body.append(this.panel);
+    // A page's own root on `<body>` draws only what it slots, and draws that
+    // inside its own boxes: there the list hangs beside the body (D135).
+    const overlayParent = body.shadowRoot
+      ? this.document.documentElement ?? body
+      : body;
+    overlayParent.append(this.panel);
     tryShowPopover(this.panel);
     this.#position();
     this.#revealSelectedOption();

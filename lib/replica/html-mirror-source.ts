@@ -34,6 +34,7 @@ import {
   createHtmlMirrorRepresentabilityCollector,
   createHtmlMirrorStyleWorkBudget,
   isSourceSelectVisuallyHidden,
+  isSourceStructuralChildOf,
   readSourceSelectPresentationStyle,
   sanitizeSourceAdoptedStyleSheets,
   sanitizeSourceAttributes,
@@ -43,6 +44,7 @@ import {
   sanitizeSourceSubtree,
   sanitizeSourceSubtrees,
   snapshotHtmlMirrorRepresentability,
+  sourceStructuralChildNodes,
   type HtmlMirrorIdRegistry,
   type HtmlMirrorElementNode,
   type HtmlMirrorNamespace,
@@ -72,6 +74,7 @@ import {
 import {
   createSourceControlledContentPolicy,
   hasSourceCredentialSecretAncestor,
+  isSourceSelectWrapper,
   sourceControlledContentBoundaryChanged,
   sourceControlledContentChangedTargets,
   sourceControlledContentLayoutMayChange,
@@ -491,6 +494,11 @@ const SHAPE_SIGNATURE_SHEETS = new WeakSet<CSSStyleSheet>();
 const MAX_MIRRORED_IMAGE_CANDIDATES = 4_000;
 const MAX_IMAGE_EVENT_ROOTS = 4_000;
 const MAX_VISIBILITY_MUTATION_RECORDS = 2_048;
+/**
+ * Nodes of a slot read again one by one when what the slot shows changes;
+ * past this their host's children are read again in one piece (D135).
+ */
+const MAX_SLOTTED_NODES = 256;
 const CONTROLLED_LAYOUT_SETTLE_EVENTS = Object.freeze([
   'transitionend',
   'transitioncancel',
@@ -691,6 +699,7 @@ export class HtmlMirrorSourceSession {
       root.removeEventListener('load', this.#onCapturedResourceLoad, true);
       root.removeEventListener('error', this.#onCapturedResourceError, true);
       root.removeEventListener('scroll', this.#onScroll, true);
+      root.removeEventListener('slotchange', this.#onSlotChange, true);
     }
     this.#imageEventRoots.clear();
     this.environment.document.fonts?.removeEventListener?.(
@@ -1164,6 +1173,10 @@ export class HtmlMirrorSourceSession {
         continue;
       }
       const structuralSelectOwner = sourceNativeSelectStructuralOwner(record.target);
+      // A slot added to a root, taken out of it or renamed: the root's
+      // slots may take other nodes of its host than they did (D135).
+      const slotRoot = sourceMutationChangesSlots(record);
+      if (slotRoot) this.#slotsChanged(slotRoot);
       if (record.type === 'childList') {
         accepted = true;
         this.#observeShadowRoots(record.target, walk);
@@ -1171,14 +1184,14 @@ export class HtmlMirrorSourceSession {
           this.#queuePending(this.#pendingChildren, record.target);
         } else if (
           record.target instanceof Element &&
-          record.target.localName.toLowerCase() === 'optgroup' &&
-          record.target.parentNode === structuralSelectOwner
+          holdsSourceNativeSelectEntries(record.target, structuralSelectOwner)
         ) {
           // A dropdown's structure is sent whole from the dropdown itself:
           // the panel takes no patch for one of its groups, and one sent for
-          // it was refused and rebuilt the whole mirror (D132). The group
-          // stays queued beside its dropdown so the dropdown's list is read
-          // afresh, not compared child by child.
+          // it was refused and rebuilt the whole mirror (D132). The group,
+          // or the wrapper around some of the options (D135), stays queued
+          // beside its dropdown so the dropdown's list is read afresh, not
+          // compared child by child.
           this.#queuePending(this.#pendingChildren, structuralSelectOwner);
           this.#queuePending(this.#pendingChildren, record.target);
         }
@@ -1289,12 +1302,21 @@ export class HtmlMirrorSourceSession {
   }
 
   #readAndPostChanges(fidelityPolicy: SelectableReplicaFidelityPolicy): boolean {
-    if ([...this.#pendingChildren].some(
-      (target) => this.#coversOwnShadowWork(target),
-    )) {
-      this.#shadowReconciliationPending = true;
-      this.#signalShadowReconciliation();
-      return false;
+    // A host whose children are read again while something inside its own
+    // root changed too: a patch of the host's children does not carry the
+    // root, so the root is read again whole, beside its host (D135; it was
+    // the whole page, at every such change). A root the mirror does not
+    // hold cannot be patched: the page is read afresh.
+    for (const target of [...this.#pendingChildren]) {
+      if (!this.#coversOwnShadowWork(target)) continue;
+      const shadow = readSourceShadowRoot(target as Element);
+      if (!shadow || !this.#mirroredNodes.has(shadow)) {
+        this.#shadowReconciliationPending = true;
+        this.#signalShadowReconciliation();
+        return false;
+      }
+      this.#queuePending(this.#pendingChildren, shadow);
+      if (this.#paused) return false;
     }
     const childrenTargets = minimizeConnectedComposedTargets(
       this.#pendingChildren,
@@ -1345,7 +1367,7 @@ export class HtmlMirrorSourceSession {
       }> = [];
       for (const target of childrenTargets) {
         if (!target.isConnected || !this.#mirroredNodes.has(target)) continue;
-        const sources = Object.freeze([...target.childNodes]);
+        const sources = Object.freeze([...sourceStructuralChildNodes(target)]);
         childCaptures.push({
           target,
           nodeId: this.environment.registry.peekId(target) as number,
@@ -1385,7 +1407,7 @@ export class HtmlMirrorSourceSession {
             (child) => this.environment.registry.getNode(child.id),
           );
           if (sources.some(
-            (source) => !source || source.parentNode !== capture.target,
+            (source) => !source || !isSourceStructuralChildOf(source, capture.target),
           )) throw new Error('Unstable children patch.');
           operations.push(Object.freeze({
             kind: 'children',
@@ -1418,7 +1440,7 @@ export class HtmlMirrorSourceSession {
             const source = newSources[index]!;
             if (
               this.environment.registry.getNode(graph.id) !== source ||
-              source.parentNode !== capture.target
+              !isSourceStructuralChildOf(source, capture.target)
             ) throw new Error('Unstable new children patch.');
             newGraphs.set(source, graph);
           });
@@ -1427,7 +1449,7 @@ export class HtmlMirrorSourceSession {
             if (previous.has(source)) {
               const nodeId = this.environment.registry.peekId(source);
               if (
-                !nodeId || source.parentNode !== capture.target ||
+                !nodeId || !isSourceStructuralChildOf(source, capture.target) ||
                 this.#emittedParent.get(source) !== capture.target
               ) throw new Error('Unstable retained child.');
               entries.push(Object.freeze({ kind: 'retain', nodeId }));
@@ -1941,6 +1963,102 @@ export class HtmlMirrorSourceSession {
     this.#scheduleFlush();
   };
 
+  /**
+   * A script gave a slot other nodes (a root that assigns by hand, D135):
+   * nothing else tells of it. See `#slotsChanged`.
+   */
+  readonly #onSlotChange = (event: Event): void => {
+    const slot = event.target;
+    if (
+      this.#disposed || !this.#identity ||
+      !slot || typeof slot !== 'object' || (slot as Node).nodeType !== 1
+    ) return;
+    const root = (slot as Element).getRootNode();
+    if (isSourceShadowRoot(root)) this.#slotsChanged(root);
+  };
+
+  /**
+   * The slots of `root` may take other nodes than they did. The text its
+   * host holds itself has no element of its own to be found by, so that
+   * text is read again; the elements are found by what the page paints,
+   * compared afresh (D135).
+   */
+  #slotsChanged(root: ShadowRoot): void {
+    this.#queueSlotted([...root.host.childNodes], false);
+    if (this.#visibilityBoundaryIndex) this.#visibilityFullRefreshPending = true;
+    this.#scheduleFlush();
+  }
+
+  /**
+   * Queues what of `nodes` the mirror holds to be read again: the text, and
+   * with `elements` the elements too. Many of them are not read one by one:
+   * the children of each host among their parents are read again in one
+   * piece, with the host's root.
+   */
+  #queueSlotted(nodes: readonly Node[], elements: boolean): void {
+    const wanted = nodes.filter((node) => this.#mirroredNodes.has(node) && (
+      node.nodeType === Node.TEXT_NODE ||
+      (elements && node.nodeType === Node.ELEMENT_NODE)
+    ));
+    if (wanted.length <= MAX_SLOTTED_NODES) {
+      for (const node of wanted) {
+        if (node.nodeType === Node.TEXT_NODE) {
+          this.#queuePending(this.#pendingText, node as Text);
+        } else {
+          this.#queueVisibilityTarget(node as Element);
+        }
+      }
+      return;
+    }
+    const hosts = new Set<Element>();
+    for (const node of wanted) {
+      const parent = node.parentNode;
+      if (parent?.nodeType === Node.ELEMENT_NODE) hosts.add(parent as Element);
+    }
+    for (const host of hosts) {
+      if (this.#mirroredNodes.has(host)) this.#queueVisibilityTarget(host);
+    }
+  }
+
+  /** An element shown or hidden: it and what it holds are read again. */
+  #queueVisibilityTarget(target: Element): void {
+    this.#queuePending(this.#pendingChildren, target);
+    this.#queuePending(this.#pendingAttributes, target);
+    // What a host's own root holds is hidden and shown with the host, and
+    // a patch for the host's children does not carry it: the text of a
+    // menu a web component shows by `:host([open])` never arrived (D132).
+    const shadow = readSourceShadowRoot(target);
+    if (shadow && this.#mirroredNodes.has(shadow)) {
+      this.#queuePending(this.#pendingChildren, shadow);
+    }
+  }
+
+  /**
+   * What a shadow host holds is drawn in the slots of the host's root, so a
+   * box of the root that is shown or hidden shows or hides what its slots
+   * hold, none of which is inside the box: that is read again with it. The
+   * index of what is painted counts it as inside the box too, not as a
+   * change of its own (D135).
+   */
+  #queueSlottedContent(target: Element): boolean {
+    try {
+      const slots: Element[] = target.localName === 'slot' ? [target] : [];
+      slots.push(...target.querySelectorAll('slot'));
+      const held: Node[] = [];
+      for (const slot of slots) {
+        held.push(...(slot as HTMLSlotElement).assignedNodes?.({
+          flatten: true,
+        }) ?? []);
+      }
+      this.#queueSlotted(held, true);
+      return true;
+    } catch {
+      this.#shadowReconciliationPending = true;
+      this.#signalShadowReconciliation();
+      return false;
+    }
+  }
+
   readonly #onFontLoadingDone = (): void => this.#onLayoutChange();
 
   readonly #onCapturedResourceLoad = (event: Event): void => {
@@ -1999,15 +2117,8 @@ export class HtmlMirrorSourceSession {
       if (this.#shadowReconciliationPending) return true;
     }
     for (const target of refresh.changedTargets) {
-      this.#queuePending(this.#pendingChildren, target);
-      this.#queuePending(this.#pendingAttributes, target);
-      // What a host's own root holds is hidden and shown with the host, and
-      // a patch for the host's children does not carry it: the text of a
-      // menu a web component shows by `:host([open])` never arrived (D132).
-      const shadow = readSourceShadowRoot(target);
-      if (shadow && this.#mirroredNodes.has(shadow)) {
-        this.#queuePending(this.#pendingChildren, shadow);
-      }
+      this.#queueVisibilityTarget(target);
+      if (!this.#queueSlottedContent(target)) return true;
     }
     return accepted || refresh.changedTargets.length > 0;
   }
@@ -2294,6 +2405,12 @@ export class HtmlMirrorSourceSession {
     root.addEventListener('load', this.#onCapturedResourceLoad, true);
     root.addEventListener('error', this.#onCapturedResourceError, true);
     root.addEventListener('scroll', this.#onScroll, true);
+    // A root that assigns its slots by hand: no mutation tells of it, only
+    // the slot's own event, which does not leave the root. Where the browser
+    // assigns by name every change is a mutation (see `#queueMutationRecords`).
+    if ((root as Partial<ShadowRoot>).slotAssignment === 'manual') {
+      root.addEventListener('slotchange', this.#onSlotChange, true);
+    }
   }
 
   #compactImageEventRoots(): void {
@@ -2304,6 +2421,7 @@ export class HtmlMirrorSourceSession {
       root.removeEventListener('load', this.#onCapturedResourceLoad, true);
       root.removeEventListener('error', this.#onCapturedResourceError, true);
       root.removeEventListener('scroll', this.#onScroll, true);
+      root.removeEventListener('slotchange', this.#onSlotChange, true);
       this.#imageEventRoots.delete(root);
     }
   }
@@ -3039,6 +3157,47 @@ function sourceNativeSelectStructuralOwner(node: Node): Element | undefined {
     if (tagName === 'select') return current;
   }
   return undefined;
+}
+
+/**
+ * The shadow root whose slots a mutation adds, removes or renames, if any.
+ * Only the kind of each node is read.
+ */
+function sourceMutationChangesSlots(record: MutationRecord): ShadowRoot | undefined {
+  const target = record.target;
+  let changes = false;
+  if (record.type === 'attributes') {
+    changes = record.attributeName === 'name' && target.nodeType === 1 &&
+      (target as Element).localName === 'slot';
+  } else if (record.type === 'childList') {
+    const holdsSlot = (node: Node): boolean => node.nodeType === 1 && (
+      (node as Element).localName === 'slot' ||
+      (node as Element).querySelector('slot') !== null
+    );
+    for (const node of record.addedNodes) changes ||= holdsSlot(node);
+    for (const node of record.removedNodes) changes ||= holdsSlot(node);
+  }
+  if (!changes) return undefined;
+  const root = target.getRootNode();
+  return isSourceShadowRoot(root) ? root : undefined;
+}
+
+/**
+ * Whether `target`, inside the dropdown `select`, may hold options or groups
+ * of it: a group, or a wrapper around some (`<select><div><option>`), with
+ * nothing but those between it and the dropdown.
+ */
+function holdsSourceNativeSelectEntries(target: Element, select: Element): boolean {
+  let current: Element | null = target;
+  for (let depth = 0; current && depth <= 32; depth += 1) {
+    if (current === select) return true;
+    if (
+      current.localName.toLowerCase() !== 'optgroup' &&
+      !isSourceSelectWrapper(current)
+    ) return false;
+    current = current.parentElement;
+  }
+  return false;
 }
 
 function composedSourceParentElement(element: Element): Element | undefined {
