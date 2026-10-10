@@ -44,6 +44,57 @@ describe('source visibility boundary index', () => {
     index.dispose();
   });
 
+  it('lists the elements that get a box, with or without text, until they are taken', () => {
+    const { document, window } = parseHTML(`<html><body>
+      <div id="wrap" class="hidden"><div id="strip"><i id="cell"></i></div></div>
+      <div id="faded" class="invisible">Text that is there</div>
+      <p id="other" class="one">other</p></body></html>`);
+    const byId = (id: string) => document.querySelector<HTMLElement>(`#${id}`)!;
+    installPositivePaintRects(document);
+    Object.defineProperty(window, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => paintedStyle({
+        display: element.classList.contains('hidden') ? 'none' : 'block',
+        visibility: element.classList.contains('invisible') ? 'hidden' : 'visible',
+      }),
+    });
+    const index = new SourceVisibilityBoundaryIndex(
+      document as unknown as Document,
+      window as unknown as Window,
+      100,
+    );
+    // The first read has nothing to compare with.
+    expect(index.takeShownElements()).toEqual([]);
+
+    byId('other').className = 'two';
+    index.refreshMutations([attributeRecord(byId('other'), 'class')]);
+    expect(index.takeShownElements()).toEqual([]);
+
+    // The wrapper holds no text node, so it is no change of what is read;
+    // it and everything in it has a box again all the same.
+    byId('wrap').classList.remove('hidden');
+    expect(index.refreshMutations([attributeRecord(byId('wrap'), 'class')]))
+      .toEqual({ changedTargets: [], overflow: false });
+    expect(index.takeShownElements()).toEqual([byId('wrap'), byId('strip'), byId('cell')]);
+    // Taken once.
+    expect(index.takeShownElements()).toEqual([]);
+
+    // An element that was only invisible had its box all along.
+    byId('faded').classList.remove('invisible');
+    expect(index.refreshMutations([attributeRecord(byId('faded'), 'class')]).changedTargets)
+      .toEqual([byId('faded')]);
+    expect(index.takeShownElements()).toEqual([]);
+
+    // Hidden and shown again between two takes: listed once it is shown.
+    byId('wrap').classList.add('hidden');
+    index.refreshAll();
+    expect(index.takeShownElements()).toEqual([]);
+    byId('wrap').classList.remove('hidden');
+    index.refreshAll();
+    expect(index.takeShownElements()).toEqual([byId('wrap'), byId('strip'), byId('cell')]);
+    index.dispose();
+  });
+
   it('finds sibling and descendant transitions caused by ancestor or hover CSS', () => {
     const { document, window } = parseHTML(`<html><body><nav id="nav">
       <div id="wrapper"><a id="trigger">Company</a>

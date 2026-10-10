@@ -1,6 +1,7 @@
 import { parseHTML } from 'linkedom';
-import { describe, expect, it, vi } from 'vitest';
+import { afterEach, beforeEach, describe, expect, it, vi } from 'vitest';
 
+import { MAX_SCROLL_PANES } from '../lib/primary-scroll';
 import {
   LIVE_REPLAY_LABEL,
   STATIC_REPLAY_LABEL,
@@ -9,6 +10,17 @@ import {
 } from '../lib/replica/visible-replay-host';
 
 describe('visible isolated replay host', () => {
+  // A clock that stands still. The host times each placing of the panes and
+  // makes the next one wait after a long one: on the real clock a busy
+  // machine (or the 8,193 entries of one test below) could turn any placing
+  // into a long one. The test of that wait moves the clock itself.
+  beforeEach(() => {
+    vi.spyOn(performance, 'now').mockReturnValue(1_000);
+  });
+  afterEach(() => {
+    vi.restoreAllMocks();
+  });
+
   it('uses canonical replica labels without claiming fallback bugs are fixed', () => {
     expect(STATIC_REPLAY_LABEL).toBe('Replica reconnecting');
     expect(LIVE_REPLAY_LABEL).toBe('Live page replica');
@@ -1000,6 +1012,234 @@ describe('visible isolated replay host', () => {
     expect(strip.scrollLeft).toBe(0);
   });
 
+  it('touches the pane that moved and leaves the others alone until the layout changes', () => {
+    const fixture = createFixture();
+    const candidate = fixture.host.createCandidate(dimensions());
+    const iframe = createProtectedIframe(fixture.document);
+    const replica = attachReplica(
+      iframe,
+      '<html><body><div id="one"></div><div id="two"></div><div id="strip"></div></body></html>',
+    );
+    const one = replica.querySelector('#one') as HTMLElement;
+    const two = replica.querySelector('#two') as HTMLElement;
+    const strip = replica.querySelector('#strip') as HTMLElement;
+    for (const pane of [one, two]) {
+      defineReplicaScrollBox(pane, { clientWidth: 400, clientHeight: 300, scrollHeight: 2_300 });
+    }
+    defineReplicaScrollBox(strip, {
+      clientWidth: 1_000, clientHeight: 80, scrollHeight: 80, scrollWidth: 5_520,
+    });
+    // A strip that scrolls sideways is not asked its height.
+    const heightReads = vi.fn(() => 80);
+    Object.defineProperty(strip, 'scrollHeight', { configurable: true, get: heightReads });
+    const resolved: number[] = [];
+    const nodes = resolver([[1, one], [2, two], [3, strip]]);
+    candidate.mount.append(iframe);
+    candidate.commit(iframe, { width: 1_600, height: 2_600 }, (nodeId) => {
+      resolved.push(nodeId);
+      return nodes(nodeId);
+    });
+    const page = { scrollX: 0, scrollY: 0, maxScrollX: 0, maxScrollY: 1_900 };
+    const at = (nodeId: number, scrollY: number) => ({
+      nodeId, scrollX: 0, scrollY, maxScrollX: 0, maxScrollY: 2_000,
+    });
+    const stripAt = (scrollX: number) => ({
+      nodeId: 3, scrollX, scrollY: 0, maxScrollX: 4_520, maxScrollY: 0,
+    });
+
+    fixture.host.followSourceScroll({
+      ...page, panes: [at(1, 500), at(2, 700), stripAt(900)],
+    });
+    expect([one.scrollTop, two.scrollTop, strip.scrollLeft]).toEqual([500, 700, 900]);
+    expect(heightReads).not.toHaveBeenCalled();
+
+    // Pane 1 moves in the tab. Pane 2 is where the last report put it: it is
+    // not looked up, not read and not scrolled, whatever became of it here.
+    two.scrollTop = 77;
+    resolved.length = 0;
+    fixture.host.followSourceScroll({
+      ...page, panes: [at(1, 900), at(2, 700), stripAt(900)],
+    });
+    expect(one.scrollTop).toBe(900);
+    expect(two.scrollTop).toBe(77);
+    expect(resolved).toEqual([1]);
+
+    // A report in which the page moved and no pane did: none is looked up.
+    const panes = [at(1, 900), at(2, 700), stripAt(900)];
+    resolved.length = 0;
+    fixture.host.followSourceScroll({ ...page, scrollY: 40, panes });
+    expect(resolved).toEqual([]);
+    expect(two.scrollTop).toBe(77);
+
+    // The very list of the report before (the page scrolled on, no pane
+    // moved): not one entry of it is read.
+    let entryReads = 0;
+    Object.defineProperty(panes[0], 'scrollY', {
+      configurable: true,
+      enumerable: true,
+      get: () => {
+        entryReads += 1;
+        return 900;
+      },
+    });
+    fixture.host.followSourceScroll({ ...page, scrollY: 60, panes: [...panes] });
+    expect(entryReads).toBeGreaterThan(0);
+    const same = [...panes];
+    fixture.host.followSourceScroll({ ...page, scrollY: 80, panes: same });
+    entryReads = 0;
+    fixture.host.followSourceScroll({ ...page, scrollY: 120, panes: same });
+    expect(entryReads).toBe(0);
+    expect(two.scrollTop).toBe(77);
+
+    // A layout refresh puts every pane at its place again: a patch may have
+    // made one anew, a translation may have lengthened one.
+    fixture.host.refreshExtent(iframe, { width: 1_600, height: 2_600 });
+    expect(two.scrollTop).toBe(700);
+    // So does turning following on, with the very list of the report
+    // before, and a new size of the tab's window.
+    two.scrollTop = 77;
+    fixture.host.followSourceScroll({ ...page, scrollY: 120, panes: same }, true);
+    expect(two.scrollTop).toBe(700);
+    two.scrollTop = 77;
+    fixture.host.refreshDimensions(iframe, { ...dimensions(), viewportWidth: 1_100 });
+    expect(two.scrollTop).toBe(700);
+
+    // A pane that changed its range in the tab moved too: its share did.
+    fixture.host.followSourceScroll({
+      ...page,
+      panes: [at(1, 900), { ...at(2, 700), maxScrollY: 1_400 }, stripAt(900)],
+    });
+    expect(two.scrollTop).toBe(1_000);
+  });
+
+  it('reads every pane\'s place before it scrolls any', () => {
+    const fixture = createFixture();
+    const candidate = fixture.host.createCandidate(dimensions());
+    const iframe = createProtectedIframe(fixture.document);
+    const replica = attachReplica(
+      iframe,
+      '<html><body><div id="one"></div><div id="two"></div></body></html>',
+    );
+    const steps: string[] = [];
+    const panes = ['one', 'two'].map((id) => {
+      const pane = replica.querySelector(`#${id}`) as HTMLElement;
+      defineReplicaScrollBox(pane, { clientWidth: 400, clientHeight: 300, scrollHeight: 2_300 });
+      Object.defineProperty(pane, 'scrollHeight', {
+        configurable: true,
+        get: () => {
+          steps.push(`read ${id}`);
+          return 2_300;
+        },
+      });
+      Object.defineProperty(pane, 'scrollTo', {
+        configurable: true,
+        value: (options: ScrollToOptions) => {
+          steps.push(`scroll ${id}`);
+          pane.scrollTop = options.top ?? 0;
+        },
+      });
+      return pane;
+    });
+    candidate.mount.append(iframe);
+    candidate.commit(
+      iframe,
+      { width: 1_600, height: 2_600 },
+      resolver([[1, panes[0]!], [2, panes[1]!]]),
+    );
+    steps.length = 0;
+    fixture.host.followSourceScroll({
+      scrollX: 0, scrollY: 0, maxScrollX: 0, maxScrollY: 1_900,
+      panes: [
+        { nodeId: 1, scrollX: 0, scrollY: 500, maxScrollX: 0, maxScrollY: 2_000 },
+        { nodeId: 2, scrollX: 0, scrollY: 700, maxScrollX: 0, maxScrollY: 2_000 },
+      ],
+    });
+    expect(steps).toEqual(['read one', 'read two', 'scroll one', 'scroll two']);
+    expect(panes.map((pane) => pane.scrollTop)).toEqual([500, 700]);
+  });
+
+  it('after a long placing of the panes, waits for the queued reports and places the last', () => {
+    vi.useFakeTimers();
+    const clock = vi.spyOn(performance, 'now');
+    try {
+      const fixture = createFixture();
+      const candidate = fixture.host.createCandidate(dimensions());
+      const iframe = createProtectedIframe(fixture.document);
+      const replica = attachReplica(
+        iframe,
+        '<html><body><div id="one"></div><div id="two"></div></body></html>',
+      );
+      const one = replica.querySelector('#one') as HTMLElement;
+      const two = replica.querySelector('#two') as HTMLElement;
+      for (const pane of [one, two]) {
+        defineReplicaScrollBox(pane, { clientWidth: 400, clientHeight: 300, scrollHeight: 2_300 });
+      }
+      let now = 1_000;
+      clock.mockImplementation(() => now);
+      candidate.mount.append(iframe);
+      candidate.commit(
+        iframe,
+        { width: 1_600, height: 2_600 },
+        resolver([[1, one], [2, two]]),
+      );
+      const page = { scrollX: 0, scrollY: 0, maxScrollX: 0, maxScrollY: 1_900 };
+      const at = (nodeId: number, scrollY: number) => ({
+        nodeId, scrollX: 0, scrollY, maxScrollX: 0, maxScrollY: 2_000,
+      });
+      // A placing that takes no time is followed at once by the next.
+      fixture.host.followSourceScroll({ ...page, panes: [at(1, 100), at(2, 100)] });
+      fixture.host.followSourceScroll({ ...page, panes: [at(1, 200), at(2, 200)] });
+      expect([one.scrollTop, two.scrollTop]).toEqual([200, 200]);
+
+      // This one takes Chrome 30 ms (thousands of rows): the clock moves on
+      // while the panes are scrolled.
+      Object.defineProperty(two, 'scrollTo', {
+        configurable: true,
+        value: (options: ScrollToOptions) => {
+          now += 30;
+          two.scrollTop = options.top ?? 0;
+        },
+      });
+      fixture.host.followSourceScroll({ ...page, panes: [at(1, 300), at(2, 300)] });
+      expect([one.scrollTop, two.scrollTop]).toEqual([300, 300]);
+      // The reports that queued up meanwhile place nothing: each would take
+      // as long again, and the panel would fall behind for good.
+      fixture.host.followSourceScroll({ ...page, panes: [at(1, 400), at(2, 400)] });
+      fixture.host.followSourceScroll({ ...page, panes: [at(1, 500), at(2, 500)] });
+      // The page itself is followed at once all the while.
+      fixture.host.followSourceScroll({
+        ...page, scrollY: 250, panes: [at(1, 600), at(2, 600)],
+      });
+      expect([one.scrollTop, two.scrollTop]).toEqual([300, 300]);
+      const scroller = requireElement<HTMLElement>(fixture.preview, '.replica-replay-scroll');
+      expect(scroller.scrollTop).toBe(250);
+      // The queue is read: the last report is placed, once.
+      vi.runOnlyPendingTimers();
+      expect([one.scrollTop, two.scrollTop]).toEqual([600, 600]);
+      // That placing was long too; a layout refresh that arrives now waits
+      // as well, and then every pane is placed, whatever came after it.
+      one.scrollTop = 5;
+      fixture.host.refreshExtent(iframe, { width: 1_600, height: 2_600 });
+      fixture.host.followSourceScroll({
+        ...page, scrollY: 250, panes: [at(1, 600), at(2, 650)],
+      });
+      expect([one.scrollTop, two.scrollTop]).toEqual([5, 600]);
+      vi.runOnlyPendingTimers();
+      expect([one.scrollTop, two.scrollTop]).toEqual([600, 650]);
+      // Nothing waits after the last: no timer is left behind.
+      vi.runOnlyPendingTimers();
+      expect(vi.getTimerCount()).toBe(0);
+      // Nor after the host is gone.
+      fixture.host.followSourceScroll({ ...page, panes: [at(1, 700), at(2, 700)] });
+      expect(vi.getTimerCount()).toBe(1);
+      fixture.host.dispose();
+      expect(vi.getTimerCount()).toBe(0);
+    } finally {
+      clock.mockRestore();
+      vi.useRealTimers();
+    }
+  });
+
   it('leaves the reader\'s own scroll and the page where they are when a pane moves (D122)', () => {
     const fixture = createFixture();
     const candidate = fixture.host.createCandidate(dimensions());
@@ -1232,14 +1472,25 @@ describe('visible isolated replay host', () => {
     expect(scroller.scrollTop).toBe(0);
     expect(scrollTo).toHaveBeenLastCalledWith({ left: 0, top: 0, behavior: 'instant' });
 
-    // More panes than a report may name: the rest are not looked at.
-    const many = Array.from({ length: 80 }, (_, index) => at(100 + index));
-    nodes.set(179, pane);
+    // More panes than the mirror follows: the rest are not looked at.
+    const many = Array.from(
+      { length: MAX_SCROLL_PANES + 1 },
+      (_, index) => at(100 + index),
+    );
+    nodes.delete(6);
+    nodes.set(100 + MAX_SCROLL_PANES, pane);
     pane.scrollTop = 0;
     fixture.host.followSourceScroll({
       scrollX: 0, scrollY: 0, maxScrollX: 0, maxScrollY: 1_900, panes: many as never,
     });
     expect(pane.scrollTop).toBe(0);
+    // The last one the bound holds is.
+    nodes.set(100 + MAX_SCROLL_PANES - 1, pane);
+    fixture.host.followSourceScroll({
+      scrollX: 0, scrollY: 0, maxScrollX: 0, maxScrollY: 1_900,
+      panes: [...many] as never,
+    });
+    expect(pane.scrollTop).toBe(500);
   });
 
   it('labels a retained live replay and refreshes its bounded extent in place', () => {

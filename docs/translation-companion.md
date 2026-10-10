@@ -18,34 +18,55 @@ every element that scrolls on its own, a pane, follows by the id the mirror
 already holds for it.
 
 - **What the page script sends.** A scroll message carries the document's
-  place and ranges, and, when it changed, the list of the panes that are not
-  at their start, each as `{ nodeId, scrollX, scrollY, maxScrollX,
-  maxScrollY }`. A pane that is not listed is at its start, and an empty list
-  says none is scrolled. A message without the list means the panes are where
-  the last list put them, so a page that only scrolls sends what a page with
-  no pane sends. The list always travels with a checkpoint, when the replica
-  is built anew. The panel's stream client keeps the last list and hands
-  every scroll update on with it, so whatever follows an update has the whole
-  state.
-- **How panes are found.** The page script keeps the scrolled panes in mind:
-  found by a bounded walk when a checkpoint is made (two number reads an
-  element, the first 50,000 elements, shadow roots included), and by
-  scroll events afterwards, read once a frame. It reads them again after
-  every patch it posts, because a change to the page can lengthen a pane,
-  hide it or show it again with no scroll event. A pane that scrolls before
-  the patch that carries it (a chat opened at its end) has no id yet: it
-  sends nothing, is kept in mind, and is named with the report that follows
-  its patch. A frame or a patch after which nothing the mirror follows has
-  moved sends nothing.
-- **Bounds.** At most 256 panes are named (`MAX_SCROLL_PANES`). When more
-  have been scrolled over time, the most recently scrolled are kept and the
-  others show at their start. When more than that scroll in one frame, or
-  are found scrolled by the walk, none of them is followed: they are rows
-  that a script keeps in step, and a part of them followed would show them
-  torn apart. Offsets keep their sign (a right-to-left strip and a reversed
-  column count down from 0) and are bounded like the document's. The protocol
-  takes the list all or none: each pane once, every number finite and inside
-  the scroll bound, no offset past its range.
+  place and ranges, and the panes that moved since the last message that
+  named any (`movedPanes`), each as `{ nodeId, scrollX, scrollY, maxScrollX,
+  maxScrollY }`. Every other pane is where the messages before put it. A
+  pane that went back to its start is named with its offsets at 0. Panes
+  that follow one another at the very same place are one entry, the first
+  by `nodeId` and the others in `alsoNodeIds`: a grid whose rows a script
+  keeps in step is one entry, whatever its number of rows. A message that
+  names no pane means that none moved, so a page that only scrolls sends
+  what a page with no pane sends, and a page with thousands of scrolled
+  panes names the one that moves. With a checkpoint, when the replica is
+  built anew, the whole list travels instead (`panes`: every pane that is
+  not at its start; one not listed is at its start), and so it does when
+  more panes moved than one message names. The panel's stream client keeps
+  every pane's place (`HtmlMirrorScrollPaneLedger`) and hands every scroll
+  update on with the whole list, a pane an entry, so whatever follows an
+  update has the whole state and needs no update before it.
+- **How panes are found.** The page script keeps the scrolled panes in mind,
+  each with what the panel was last told of it. A pane is found by its
+  scroll events, and where no event tells of it: every element is asked for
+  its two scroll offsets as the page script sends it, with a checkpoint or a
+  patch (a pane scrolled before the mirror was built, wherever it is in the
+  page, shadow roots included), and every element that the index of what the
+  page paints sees get a box again (Chrome gives a pane that is shown again
+  its old offset and fires no scroll event). A frame of scroll events reads
+  the panes those events came from and no others. After every change to the
+  page that the reader hears of (a mutation, a pointer or key event that may
+  change what is painted, the end of a transition), whether it made a patch
+  or not, and at every layout change, the page script reads all of them
+  again: a change can lengthen a pane, hide it, show it again or put it back
+  at its start with no scroll event, and a pane that is taken out of the
+  page and put back where it was is reset by Chrome while the mirror's list
+  of children stays what it was, so no patch tells of it. A pane that scrolls before the patch that carries it
+  (a chat opened at its end) has no id yet: it sends nothing, is kept in
+  mind, and is named with the report that follows its patch. A frame or a
+  patch after which nothing the mirror follows has moved sends nothing.
+- **Bounds.** At most 8,192 panes are followed (`MAX_SCROLL_PANES`), and one
+  message names no more. When more have been scrolled over time, the most
+  recently scrolled are kept and the others show at their start. When more
+  than that scroll in one frame, or are met scrolled when the mirror is
+  built, none of them is followed: they are rows that a script keeps in
+  step, and a part of them followed would show them torn apart. A frame
+  keeps the first 8,192 elements that scrolled, so in such a frame every
+  pane followed before is read too, and one that is no longer where the
+  panel was told moved with the burst and is taken back with it: past the
+  bound a pane is at the tab's place or at its start, never anywhere else. Offsets keep
+  their sign (a right-to-left strip and a reversed column count down from 0)
+  and are bounded like the document's. The protocol takes a list all or
+  none: each pane once, every number finite and inside the scroll bound, no
+  offset past its range, never the whole list and the moved panes together.
 - **What sends nothing.** The document's own scroller and `html` (they are the
   document); `body` unless it scrolls apart from the document, which is read
   from its scroll numbers and never from its `overflow` style; a text field or
@@ -58,13 +79,20 @@ already holds for it.
   through the engine's node map (given to it when a replica is committed) and
   scrolls it to the same share of its own range, at once, without the page's
   smooth-scroll animation; equal ranges keep exact pixels. A pane the report
-  no longer lists goes back to its start. Panes are placed again when a new
-  replica is committed (Rebuild mirror, a recovery checkpoint) and with every
-  layout refresh of the engine (a patch, a translation landing), so a pane
-  made again by a patch, or lengthened by a translation, is where it should
-  be. A pane's move touches nothing else: not the replica document, not the
-  panel's scroller, not the reader's own scrolling of the mirror. The replica
-  is pointer-inert, so the reader scrolls the mirror as a whole and never a
+  no longer lists goes back to its start. A report places the panes that
+  moved and leaves the others alone, and one that carries the list of the
+  report before reads no pane; all of them are placed again when a new
+  replica is committed (Rebuild mirror, a recovery checkpoint), when
+  following is turned on, and with every layout refresh of the engine (a
+  patch, a translation landing), so a pane made again by a patch, or
+  lengthened by a translation, is where it should be. Every place is read
+  before any pane is scrolled. Chrome needs longer than a frame to scroll
+  thousands of panes: after a placing that took longer than 8 ms the next one
+  waits until the reports already queued have been read, and places what the
+  last of them says, so the panel does not fall behind the tab. A pane's move
+  touches nothing else: not the replica document, not the panel's scroller,
+  not the reader's own scrolling of the mirror. The replica is
+  pointer-inert, so the reader scrolls the mirror as a whole and never a
   pane inside it.
 - **The viewport-scale pane.** An app-style page scrolls one large pane in
   place of its document. The page script names it (`primaryPaneId`) while its

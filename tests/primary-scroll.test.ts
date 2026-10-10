@@ -1,8 +1,7 @@
 import { parseHTML } from 'linkedom';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
-  forEachScrolledElement,
   isDocumentScrollTarget,
   readDocumentScrollSnapshot,
   readNestedScrollSnapshot,
@@ -296,82 +295,36 @@ describe('primary scroll classification', () => {
     });
   });
 
-  it('walks to the scrolled elements inside closed shadow roots (D125)', () => {
-    const { document } = parseHTML(
-      '<html><body><x-list id="host"></x-list><input id="field"></body></html>',
+  it('asks a strip with no vertical range nothing about its ancestors or its style', () => {
+    const { document, window } = parseHTML(
+      '<html><body><section><div id="strip"></div><div id="feed"></div></section></body></html>',
     );
-    const host = document.querySelector('#host')!;
-    const reader = closedRootReader();
-    const root = reader.attach(host, '<div id="pane"></div><x-inner id="inner"></x-inner>');
-    const nested = reader.attach(root.querySelector('#inner')!, '<div id="deep"></div>');
-    const pane = root.querySelector('#pane')!;
-    const deep = nested.querySelector('#deep')!;
-    Object.defineProperty(pane, 'scrollTop', { configurable: true, value: 500 });
-    Object.defineProperty(deep, 'scrollLeft', { configurable: true, value: 120 });
-    const walk = () => {
-      const found: Element[] = [];
-      forEachScrolledElement(document, (candidate) => {
-        found.push(candidate);
-        return true;
-      });
-      return found;
-    };
-
-    expect(walk()).toEqual([]);
-    installSourceShadowRootReader(document, reader.read);
-    expect(walk()).toEqual([pane, deep]);
-    // A text field's own root is never asked for.
-    expect(reader.calls).not.toContain(document.querySelector('#field'));
-    installSourceShadowRootReader(document, undefined);
-  });
-
-  it('walks to the scrolled elements, through open shadow roots, within its bound', () => {
-    const { document } = parseHTML('<html><body></body></html>');
-    // Ordinary content is at its start and costs two number reads each.
-    const filler = document.createDocumentFragment();
-    for (let index = 0; index < 6_000; index += 1) {
-      filler.append(document.createElement('span'));
-    }
-    document.body.append(filler);
-    const strip = document.createElement('div');
-    const host = document.createElement('x-list');
-    const column = document.createElement('div');
-    document.body.append(strip, host, column);
-    const inner = document.createElement('div');
-    host.attachShadow({ mode: 'open' }).append(inner);
-    Object.defineProperty(strip, 'scrollLeft', { configurable: true, value: 300 });
-    Object.defineProperty(inner, 'scrollTop', { configurable: true, value: 500 });
-    // A reversed column counts down from 0.
-    Object.defineProperty(column, 'scrollTop', { configurable: true, value: -40 });
-
-    const found: Element[] = [];
-    forEachScrolledElement(document, (candidate) => {
-      found.push(candidate);
-      return true;
+    const strip = document.querySelector('#strip')!;
+    const feed = document.querySelector('#feed')!;
+    const section = document.querySelector('section')!;
+    defineScrollBox(strip, {
+      clientWidth: 900, clientHeight: 80, scrollWidth: 5_000, scrollHeight: 80,
+      scrollLeft: 300, scrollTop: 0,
     });
-    expect(found).toEqual([strip, column, inner]);
-
-    // The visitor can stop the walk.
-    const first: Element[] = [];
-    forEachScrolledElement(document, (candidate) => {
-      first.push(candidate);
-      return false;
+    defineScrollBox(feed, {
+      clientWidth: 900, clientHeight: 650, scrollWidth: 900, scrollHeight: 4_650,
+      scrollLeft: 0, scrollTop: 400,
     });
-    expect(first).toEqual([strip]);
-
-    // Past 50,000 elements the walk stops: a later pane waits for its next
-    // scroll event.
-    const many = document.createDocumentFragment();
-    for (let index = 0; index < 50_000; index += 1) {
-      many.append(document.createElement('i'));
-    }
-    document.body.prepend(many);
-    const late: Element[] = [];
-    forEachScrolledElement(document, (candidate) => {
-      late.push(candidate);
-      return true;
+    const asked = vi.spyOn(section, 'getAttribute');
+    const styled = vi.fn(() => ({ overflowY: 'auto' }));
+    const view = { innerWidth: 1_000, innerHeight: 700, getComputedStyle: styled };
+    // Thousands of rows are asked this every frame a grid scrolls.
+    expect(readNestedScrollSnapshot(strip, document, view as never)).toBeUndefined();
+    expect(asked).not.toHaveBeenCalled();
+    expect(styled).not.toHaveBeenCalled();
+    // A pane that could be the one is asked, as before.
+    expect(readNestedScrollSnapshot(feed, document, view as never)).toMatchObject({
+      scrollTarget: 'nested', scrollY: 400, maxScrollY: 4_000,
     });
-    expect(late).toEqual([]);
+    expect(asked).toHaveBeenCalled();
+    // Inside a text field it is none, whatever its range.
+    section.setAttribute('contenteditable', 'true');
+    expect(readNestedScrollSnapshot(feed, document, view as never)).toBeUndefined();
   });
 
   it('reads a pinch zoom, and nothing while the page is not magnified (D115)', () => {

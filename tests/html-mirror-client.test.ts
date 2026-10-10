@@ -152,6 +152,64 @@ describe('Chrome HTML mirror client', () => {
     expect(observer.onFailure).not.toHaveBeenCalled();
   });
 
+  it('keeps the panes that moved while only the latest scroll update is queued', async () => {
+    const port = new FakePort();
+    installBrowser(port);
+    const lease = await openChromeHtmlMirrorStream(request);
+    port.emitMessage(checkpoint());
+    await lease.initialCheckpoint;
+    const pane = (nodeId: number, scrollX: number, alsoNodeIds?: number[]) => ({
+      nodeId, scrollX, scrollY: 0, maxScrollX: 4_000, maxScrollY: 0,
+      ...(alsoNodeIds ? { alsoNodeIds } : {}),
+    });
+    const moved = (scrollY: number, movedPanes: object[], primaryPaneId?: number) =>
+      createHtmlMirrorScrollUpdate(identity, {
+        scrollX: 0, scrollY, maxScrollX: 0, maxScrollY: 900,
+        movedPanes: movedPanes as never,
+        ...(primaryPaneId !== undefined ? { primaryPaneId } : {}),
+      })!;
+    // The whole list, then two messages that each name what moved, then one
+    // that names nothing: before the observer is set only the last is kept,
+    // and it carries all of it.
+    port.emitMessage(paneScrollUpdate(0, [{ nodeId: 7, scrollX: 300 }], 7));
+    port.emitMessage(moved(0, [pane(8, 500, [9, 10])], 7));
+    port.emitMessage(moved(0, [pane(9, 620)], 7));
+    port.emitMessage(paneScrollUpdate(120));
+    const observer = fakeObserver();
+    lease.setObserver(observer);
+    expect(observer.onScroll).toHaveBeenCalledOnce();
+    expect(observer.onScroll.mock.lastCall?.[0].scroll).toEqual({
+      scrollX: 0, scrollY: 120, maxScrollX: 0, maxScrollY: 900,
+      panes: [pane(7, 300), pane(8, 500), pane(10, 500), pane(9, 620)],
+      primaryPaneId: 7,
+    });
+
+    // Live: a pane goes back to its start, and no pane is named any more.
+    port.emitMessage(moved(120, [
+      { nodeId: 7, scrollX: 0, scrollY: 0, maxScrollX: 0, maxScrollY: 0 },
+    ]));
+    expect(observer.onScroll.mock.lastCall?.[0].scroll).toEqual({
+      scrollX: 0, scrollY: 120, maxScrollX: 0, maxScrollY: 900,
+      panes: [pane(8, 500), pane(10, 500), pane(9, 620)],
+    });
+    // A page scroll hands on the very list of the update before it.
+    const before = observer.onScroll.mock.lastCall?.[0].scroll.panes;
+    port.emitMessage(paneScrollUpdate(240));
+    expect(observer.onScroll.mock.lastCall?.[0].scroll.panes).toBe(before);
+    // A message that names a pane in both lists is not a message.
+    port.emitMessage({
+      ...moved(240, [pane(8, 10)]),
+      scroll: {
+        scrollX: 0, scrollY: 240, maxScrollX: 0, maxScrollY: 900,
+        panes: [pane(8, 10)], movedPanes: [pane(8, 10)],
+      },
+    });
+    expect(observer.onFailure).toHaveBeenCalledWith(
+      'stream_failed',
+      expect.anything(),
+    );
+  });
+
   it('queues a typed scroll update that arrives before observer setup', async () => {
     const port = new FakePort();
     installBrowser(port);

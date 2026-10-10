@@ -23,6 +23,8 @@ export interface SourceVisibilityBoundaryRefresh {
 export class SourceVisibilityBoundaryIndex {
   readonly #states = new Map<Element, SourceVisibilityState>();
   #complete = true;
+  /** Elements seen to get a box since `takeShownElements` last asked. */
+  #shown: Element[] = [];
 
   constructor(
     private readonly document: Document,
@@ -130,8 +132,21 @@ export class SourceVisibilityBoundaryIndex {
     return this.refreshAll();
   }
 
+  /**
+   * Every element that was not displayed at one read and was at a later
+   * one, since this was last asked: each has a box again, and with it what
+   * only a box holds (Chrome gives a scrolled pane its offset back, with no
+   * scroll event). Elements only; nothing of theirs is read here.
+   */
+  takeShownElements(): readonly Element[] {
+    const shown = this.#shown;
+    this.#shown = [];
+    return shown;
+  }
+
   dispose(): void {
     this.#states.clear();
+    this.#shown = [];
     this.#complete = false;
   }
 
@@ -191,6 +206,9 @@ export class SourceVisibilityBoundaryIndex {
         const prior = previous.get(current.element);
         const changed = prior !== undefined && prior !== state;
         this.#states.set(current.element, state);
+        if (prior === 'hidden' && changed && this.#shown.length < this.maximumNodes) {
+          this.#shown.push(current.element);
+        }
         let rematerializationBoundary = false;
         if (changed && !current.changedAncestor) {
           const textProof = subtreeMayContainAuthoredText(

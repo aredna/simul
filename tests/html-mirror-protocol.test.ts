@@ -14,6 +14,8 @@ import {
   encodeHtmlMirrorWireMessage,
   readHtmlMirrorControllerMessage,
   readHtmlMirrorPortSessionId,
+  groupHtmlMirrorScrollPanes,
+  HtmlMirrorScrollPaneLedger,
   readHtmlMirrorSourceMessage,
   withHtmlMirrorScrollPanes,
 } from '../lib/replica/html-mirror-protocol';
@@ -454,6 +456,193 @@ describe('isolated HTML sanitizer and protocol', () => {
         scroll: { ...page, ...forged },
       }, identity), JSON.stringify(forged)).toBeUndefined();
     }
+  });
+
+  it('names the panes that moved, and panes at one place together, all or none', () => {
+    const identity = createReplicaIdentity({
+      sessionId: 'pane-session', pageEpoch: 2, generation: 2,
+      documentId: 'pane-document', frameId: 0, sequence: 3,
+    });
+    const page = { scrollX: 0, scrollY: 40, maxScrollX: 0, maxScrollY: 1_200 };
+    const row = {
+      nodeId: 41, scrollX: 500, scrollY: 0, maxScrollX: 2_272, maxScrollY: 0,
+    };
+    // A grid's rows, kept in step: one entry, and the ids of the others.
+    const rows = { ...row, alsoNodeIds: [42, 43, 44] };
+    const back = {
+      nodeId: 57, scrollX: 0, scrollY: 0, maxScrollX: 0, maxScrollY: 0,
+    };
+    const moved = createHtmlMirrorScrollUpdate(identity, {
+      ...page, movedPanes: [rows, back], primaryPaneId: 90,
+    });
+    // Among the panes that moved, the named pane may be one named earlier.
+    expect(moved?.scroll).toEqual({
+      ...page, movedPanes: [rows, back], primaryPaneId: 90,
+    });
+    expect(readHtmlMirrorSourceMessage(moved, identity)).toEqual(moved);
+    expect(Object.isFrozen(moved!.scroll.movedPanes)).toBe(true);
+    expect(Object.isFrozen(moved!.scroll.movedPanes![0]!.alsoNodeIds)).toBe(true);
+    // A list that names no pane is a list: it says which pane is named.
+    expect(createHtmlMirrorScrollUpdate(identity, { ...page, movedPanes: [] })?.scroll)
+      .toEqual({ ...page, movedPanes: [] });
+    // In the whole list the named pane is one of the list, also as one of
+    // several at a place.
+    expect(createHtmlMirrorScrollUpdate(identity, {
+      ...page, panes: [rows], primaryPaneId: 43,
+    })).toBeDefined();
+
+    // The bound counts panes, not entries.
+    const ids = (count: number, from: number) =>
+      Array.from({ length: count }, (_, index) => from + index);
+    expect(createHtmlMirrorScrollUpdate(identity, {
+      ...page,
+      movedPanes: [{ ...row, alsoNodeIds: ids(MAX_HTML_MIRROR_SCROLL_PANES - 1, 100) }],
+    })).toBeDefined();
+
+    for (const forged of [
+      // The whole list or the panes that moved, never both.
+      { panes: [row], movedPanes: [back] },
+      { panes: [], movedPanes: [] },
+      { movedPanes: 'rows' },
+      { movedPanes: [row, row] },
+      { movedPanes: [{ ...row, alsoNodeIds: [] }] },
+      { movedPanes: [{ ...row, alsoNodeIds: 42 }] },
+      { movedPanes: [{ ...row, alsoNodeIds: [41] }] },
+      { movedPanes: [{ ...row, alsoNodeIds: [42, 42] }] },
+      { movedPanes: [{ ...row, alsoNodeIds: [0] }] },
+      { movedPanes: [{ ...row, alsoNodeIds: ['42'] }] },
+      { movedPanes: [{ ...row, alsoNodeIds: [1.5] }] },
+      { movedPanes: [rows, { ...back, nodeId: 43 }] },
+      { movedPanes: [back, { ...row, alsoNodeIds: [57] }] },
+      { panes: [{ ...row, alsoNodeIds: [41] }] },
+      {
+        movedPanes: [{ ...row, alsoNodeIds: ids(MAX_HTML_MIRROR_SCROLL_PANES, 100) }],
+      },
+      {
+        movedPanes: [
+          { ...row, alsoNodeIds: ids(MAX_HTML_MIRROR_SCROLL_PANES - 1, 100) },
+          back,
+        ],
+      },
+      { movedPanes: [{ ...row, sameAs: [42] }] },
+      { movedPanes: [row], primaryPaneId: 0 },
+      { movedPanes: [row], primaryPaneId: '41' },
+      { movedPanes: [row], primaryPaneId: 1.5 },
+      { panes: [rows], primaryPaneId: 45 },
+    ]) {
+      expect(readHtmlMirrorSourceMessage({
+        ...moved,
+        scroll: { ...page, ...forged },
+      }, identity), JSON.stringify(forged).slice(0, 120)).toBeUndefined();
+    }
+  });
+
+  it('groups panes that follow one another at the very same place', () => {
+    const at = (nodeId: number, scrollX: number, maxScrollX = 2_272) => ({
+      nodeId, scrollX, scrollY: 0, maxScrollX, maxScrollY: 0,
+    });
+    expect(groupHtmlMirrorScrollPanes([])).toEqual([]);
+    expect(groupHtmlMirrorScrollPanes([at(1, 500)])).toEqual([at(1, 500)]);
+    expect(groupHtmlMirrorScrollPanes([
+      at(1, 500), at(2, 500), at(3, 500),
+      // Another offset, another range, and the first place again.
+      at(4, 510), at(5, 510, 3_000), at(6, 500),
+      { ...at(7, 500), scrollY: 0, maxScrollY: 40 },
+    ])).toEqual([
+      { ...at(1, 500), alsoNodeIds: [2, 3] },
+      at(4, 510),
+      at(5, 510, 3_000),
+      at(6, 500),
+      { ...at(7, 500), maxScrollY: 40 },
+    ]);
+    // What it makes is a valid list, and its input is left as it was.
+    const input = [at(1, 500), at(2, 500)];
+    const identity = createReplicaIdentity({
+      sessionId: 'pane-session', pageEpoch: 2, generation: 2,
+      documentId: 'pane-document', frameId: 0, sequence: 3,
+    });
+    expect(createHtmlMirrorScrollUpdate(identity, {
+      scrollX: 0, scrollY: 0, maxScrollX: 0, maxScrollY: 0,
+      movedPanes: groupHtmlMirrorScrollPanes(input),
+    })).toBeDefined();
+    expect(input).toEqual([at(1, 500), at(2, 500)]);
+  });
+
+  it('keeps every pane\'s place from the lists the page sends, and hands on the whole list', () => {
+    const identity = createReplicaIdentity({
+      sessionId: 'pane-session', pageEpoch: 2, generation: 2,
+      documentId: 'pane-document', frameId: 0, sequence: 3,
+    });
+    const page = { scrollX: 0, scrollY: 0, maxScrollX: 0, maxScrollY: 1_200 };
+    const update = (scroll: object) => createHtmlMirrorScrollUpdate(
+      identity,
+      { ...page, ...scroll },
+    )!;
+    const at = (nodeId: number, scrollX: number) => ({
+      nodeId, scrollX, scrollY: 0, maxScrollX: 2_272, maxScrollY: 0,
+    });
+    const start = (nodeId: number) => ({
+      nodeId, scrollX: 0, scrollY: 0, maxScrollX: 0, maxScrollY: 0,
+    });
+    const ledger = new HtmlMirrorScrollPaneLedger();
+
+    // Nothing before the first list: handed on as it is.
+    const plain = update({});
+    expect(ledger.complete(plain)).toBe(plain);
+
+    // The whole list, rows at one place as one entry: a pane an entry.
+    const first = ledger.complete(update({
+      panes: [{ ...at(1, 500), alsoNodeIds: [2, 3] }, at(9, 40)], primaryPaneId: 2,
+    }));
+    expect(first.scroll).toEqual({
+      ...page, panes: [at(1, 500), at(2, 500), at(3, 500), at(9, 40)], primaryPaneId: 2,
+    });
+    expect(Object.isFrozen(first.scroll.panes)).toBe(true);
+    expect(Object.isFrozen(first.scroll.panes![1])).toBe(true);
+    expect(readHtmlMirrorSourceMessage(first, identity)).toEqual(first);
+
+    // No list: the panes and the named pane are the last ones, the very
+    // list, so that whoever follows it can tell that no pane moved.
+    const scrolled = ledger.complete(update({ scrollY: 300 }));
+    expect(scrolled.scroll).toEqual({ ...first.scroll, scrollY: 300 });
+    expect(scrolled.scroll.panes).toBe(first.scroll.panes);
+
+    // The panes that moved: the others stay, the one moved last comes last,
+    // one back at its start is listed no more, and a list without a named
+    // pane says there is none.
+    const moved = ledger.complete(update({
+      movedPanes: [at(2, 700), start(9), at(12, 60)],
+    }));
+    expect(moved.scroll).toEqual({
+      ...page, panes: [at(1, 500), at(3, 500), at(2, 700), at(12, 60)],
+    });
+    expect(moved.scroll).not.toHaveProperty('movedPanes');
+    // A pane the panel does not list is not the named one.
+    expect(ledger.complete(update({ movedPanes: [], primaryPaneId: 9 })).scroll)
+      .not.toHaveProperty('primaryPaneId');
+    expect(ledger.complete(update({ movedPanes: [], primaryPaneId: 3 })).scroll)
+      .toMatchObject({ primaryPaneId: 3 });
+    // A pane named with others goes back to its start with them.
+    expect(ledger.complete(update({
+      movedPanes: [{ ...start(1), alsoNodeIds: [3, 12] }],
+    })).scroll.panes).toEqual([at(2, 700)]);
+
+    // A whole list replaces what was known: a pane it leaves out is at its
+    // start, and one it lists at its start is not listed.
+    expect(ledger.complete(update({ panes: [at(5, 10), start(6)] })).scroll.panes)
+      .toEqual([at(5, 10)]);
+    expect(ledger.complete(update({ panes: [] })).scroll.panes).toEqual([]);
+
+    // Never more than the mirror follows: the ones moved longest ago go.
+    const ids = (count: number, from: number) =>
+      Array.from({ length: count }, (_, index) => from + index);
+    ledger.complete(update({
+      movedPanes: [{ ...at(100, 10), alsoNodeIds: ids(MAX_HTML_MIRROR_SCROLL_PANES - 1, 101) }],
+    }));
+    const full = ledger.complete(update({ movedPanes: [at(50, 20), at(51, 20)] }));
+    expect(full.scroll.panes).toHaveLength(MAX_HTML_MIRROR_SCROLL_PANES);
+    expect(full.scroll.panes![0]).toEqual(at(102, 10));
+    expect(full.scroll.panes!.at(-1)).toEqual(at(51, 20));
   });
 
   it('gives a scroll message without a pane list the last list received (D122)', () => {

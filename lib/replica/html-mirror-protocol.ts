@@ -126,7 +126,7 @@ export interface HtmlMirrorPatchBatch {
   readonly byteLength: number;
 }
 
-/** Panes one scroll message names; the most recently scrolled are kept. */
+/** Panes the mirror follows at once; the most recently scrolled are kept. */
 export const MAX_HTML_MIRROR_SCROLL_PANES = MAX_SCROLL_PANES;
 
 /**
@@ -142,6 +142,11 @@ export interface HtmlMirrorPaneScroll {
   readonly scrollY: number;
   readonly maxScrollX: number;
   readonly maxScrollY: number;
+  /**
+   * Other panes at this very place: rows that a script keeps in step are
+   * named together, with one set of numbers for all of them.
+   */
+  readonly alsoNodeIds?: readonly number[];
 }
 
 export interface HtmlMirrorScrollState {
@@ -151,19 +156,27 @@ export interface HtmlMirrorScrollState {
   readonly maxScrollX: number;
   readonly maxScrollY: number;
   /**
-   * Every pane the mirror knows that is not at its start (D122), at most
-   * `MAX_HTML_MIRROR_SCROLL_PANES`; a pane that is not listed is at its
-   * start, and an empty list means none is scrolled. The list travels with
-   * every checkpoint and whenever it changed. A message without it means the
-   * panes, and the pane named below, are where the last list put them, so
-   * plain page scrolling does not repeat them.
+   * Every pane the mirror knows that is not at its start (D122); a pane that
+   * is not listed is at its start, and an empty list means none is scrolled.
+   * The whole list travels with every checkpoint. One message names at most
+   * `MAX_HTML_MIRROR_SCROLL_PANES` panes, in `panes` or in `movedPanes`,
+   * never in both.
    */
   readonly panes?: readonly HtmlMirrorPaneScroll[];
   /**
-   * The viewport-scale pane the tab scrolls in place of its document, one of
-   * `panes` and sent only with them. The replica scrolls it like any other
-   * pane; where the replica cannot, its progress moves the replica document
-   * instead (D100).
+   * The panes that moved since the last list, and no others: every other
+   * pane is where the lists before put it. A pane that went back to its
+   * start is named with its offsets at 0. A message with neither list means
+   * that no pane moved, so plain page scrolling names none, and a page with
+   * thousands of scrolled panes names the one that moves.
+   */
+  readonly movedPanes?: readonly HtmlMirrorPaneScroll[];
+  /**
+   * The viewport-scale pane the tab scrolls in place of its document, sent
+   * only with a list: one of `panes`, or with `movedPanes` any pane named
+   * so far that is not at its start. A list without it says there is none.
+   * The replica scrolls it like any other pane; where the replica cannot,
+   * its progress moves the replica document instead (D100).
    */
   readonly primaryPaneId?: number;
   /**
@@ -593,6 +606,87 @@ export function withHtmlMirrorScrollPanes(
       ...(primaryPaneId !== undefined ? { primaryPaneId } : {}),
     }),
   });
+}
+
+/**
+ * Names panes that follow one another at the very same place once, the
+ * first by `nodeId` and the others in `alsoNodeIds`: a grid whose rows a
+ * script keeps in step is one entry, whatever its number of rows.
+ */
+export function groupHtmlMirrorScrollPanes(
+  panes: readonly HtmlMirrorPaneScroll[],
+): HtmlMirrorPaneScroll[] {
+  const grouped: Array<HtmlMirrorPaneScroll & { alsoNodeIds?: number[] }> = [];
+  for (const pane of panes) {
+    const last = grouped.at(-1);
+    if (
+      last &&
+      last.scrollX === pane.scrollX && last.scrollY === pane.scrollY &&
+      last.maxScrollX === pane.maxScrollX && last.maxScrollY === pane.maxScrollY
+    ) {
+      (last.alsoNodeIds ??= []).push(pane.nodeId, ...(pane.alsoNodeIds ?? []));
+    } else {
+      grouped.push({
+        nodeId: pane.nodeId,
+        scrollX: pane.scrollX,
+        scrollY: pane.scrollY,
+        maxScrollX: pane.maxScrollX,
+        maxScrollY: pane.maxScrollY,
+        ...(pane.alsoNodeIds ? { alsoNodeIds: [...pane.alsoNodeIds] } : {}),
+      });
+    }
+  }
+  return grouped;
+}
+
+/**
+ * The panes as the panel knows them (D122). The page names the panes that
+ * moved; this keeps every pane's place, the most recently moved last, and
+ * gives each scroll update the whole list, a pane an entry, so that whoever
+ * follows an update needs no update before it.
+ */
+export class HtmlMirrorScrollPaneLedger {
+  readonly #places = new Map<number, HtmlMirrorPaneScroll>();
+  /** The last list handed on; none before the page has sent one. */
+  #last: HtmlMirrorScrollState | undefined;
+
+  complete(update: HtmlMirrorScrollUpdate): HtmlMirrorScrollUpdate {
+    const { panes, movedPanes, primaryPaneId, ...place } = update.scroll;
+    const named = panes ?? movedPanes;
+    if (!named) return withHtmlMirrorScrollPanes(update, this.#last);
+    // A whole list: every pane it leaves out is at its start.
+    if (panes) this.#places.clear();
+    for (const entry of named) {
+      this.#place(entry.nodeId, entry);
+      for (const nodeId of entry.alsoNodeIds ?? []) this.#place(nodeId, entry);
+    }
+    for (const nodeId of this.#places.keys()) {
+      if (this.#places.size <= MAX_HTML_MIRROR_SCROLL_PANES) break;
+      this.#places.delete(nodeId);
+    }
+    const scroll: HtmlMirrorScrollState = Object.freeze({
+      ...place,
+      panes: Object.freeze([...this.#places.values()]),
+      ...(primaryPaneId !== undefined && this.#places.has(primaryPaneId)
+        ? { primaryPaneId }
+        : {}),
+    });
+    this.#last = scroll;
+    return Object.freeze({ ...update, scroll });
+  }
+
+  #place(nodeId: number, place: HtmlMirrorPaneScroll): void {
+    this.#places.delete(nodeId);
+    // At its start: not listed, as in a whole list.
+    if (place.scrollX === 0 && place.scrollY === 0) return;
+    this.#places.set(nodeId, Object.freeze({
+      nodeId,
+      scrollX: place.scrollX,
+      scrollY: place.scrollY,
+      maxScrollX: place.maxScrollX,
+      maxScrollY: place.maxScrollY,
+    }));
+  }
 }
 
 /** Extension-side validation. Source-side output is never trusted directly. */
@@ -1199,7 +1293,7 @@ function readScrollState(input: HtmlMirrorScrollState): HtmlMirrorScrollState | 
       input as unknown as Record<string, unknown>,
       ['scrollX', 'scrollY', 'maxScrollX', 'maxScrollY'],
       [
-        'panes', 'primaryPaneId',
+        'panes', 'movedPanes', 'primaryPaneId',
         'visualScale', 'visualOffsetX', 'visualOffsetY',
       ],
     ) ||
@@ -1211,15 +1305,28 @@ function readScrollState(input: HtmlMirrorScrollState): HtmlMirrorScrollState | 
       input.maxScrollY,
     ].every(isScrollValue) ||
     input.scrollX > input.maxScrollX ||
-    input.scrollY > input.maxScrollY
+    input.scrollY > input.maxScrollY ||
+    // The whole list or the panes that moved, never both.
+    (input.panes !== undefined && input.movedPanes !== undefined)
   ) return undefined;
   const panes = input.panes === undefined
     ? undefined
     : readScrollPanes(input.panes);
+  const movedPanes = input.movedPanes === undefined
+    ? undefined
+    : readScrollPanes(input.movedPanes);
   if (
     (input.panes !== undefined && !panes) ||
-    (input.primaryPaneId !== undefined &&
-      !panes?.some(({ nodeId }) => nodeId === input.primaryPaneId))
+    (input.movedPanes !== undefined && !movedPanes) ||
+    (input.primaryPaneId !== undefined && (
+      !isNodeId(input.primaryPaneId) ||
+      // One of the whole list. Among the panes that moved it may be one
+      // named earlier, which only the keeper of the list can tell.
+      (!movedPanes && !panes?.some((pane) =>
+        pane.nodeId === input.primaryPaneId ||
+        pane.alsoNodeIds?.includes(input.primaryPaneId as number))
+      )
+    ))
   ) return undefined;
   return Object.freeze({
     scrollX: input.scrollX,
@@ -1227,6 +1334,7 @@ function readScrollState(input: HtmlMirrorScrollState): HtmlMirrorScrollState | 
     maxScrollX: input.maxScrollX,
     maxScrollY: input.maxScrollY,
     ...(panes ? { panes } : {}),
+    ...(movedPanes ? { movedPanes } : {}),
     ...(input.primaryPaneId !== undefined
       ? { primaryPaneId: input.primaryPaneId }
       : {}),
@@ -1242,8 +1350,9 @@ function readScrollState(input: HtmlMirrorScrollState): HtmlMirrorScrollState | 
 
 /**
  * The panes of one scroll message (D122): a bounded list, each pane named
- * once by a node id, every number finite and inside the scroll bound, and no
- * offset past its range. One bad pane refuses the whole message.
+ * once by a node id, alone or with the others at its place, every number
+ * finite and inside the scroll bound, and no offset past its range. One bad
+ * pane refuses the whole message.
  */
 function readScrollPanes(
   input: unknown,
@@ -1257,23 +1366,41 @@ function readScrollPanes(
   for (const pane of input as readonly unknown[]) {
     if (
       !isRecord(pane) ||
-      !hasExactKeys(pane, [
-        'nodeId', 'scrollX', 'scrollY', 'maxScrollX', 'maxScrollY',
-      ]) ||
+      !hasExactKeysWithOptional(
+        pane,
+        ['nodeId', 'scrollX', 'scrollY', 'maxScrollX', 'maxScrollY'],
+        ['alsoNodeIds'],
+      ) ||
       !isNodeId(pane.nodeId) ||
       seen.has(pane.nodeId) ||
+      seen.size >= MAX_HTML_MIRROR_SCROLL_PANES ||
       !isScrollValue(pane.maxScrollX) ||
       !isScrollValue(pane.maxScrollY) ||
       !isPaneOffset(pane.scrollX, pane.maxScrollX) ||
       !isPaneOffset(pane.scrollY, pane.maxScrollY)
     ) return undefined;
     seen.add(pane.nodeId);
+    let alsoNodeIds: readonly number[] | undefined;
+    if (pane.alsoNodeIds !== undefined) {
+      const also = pane.alsoNodeIds;
+      if (!Array.isArray(also) || also.length === 0) return undefined;
+      for (const nodeId of also as readonly unknown[]) {
+        // The bound counts panes, not entries.
+        if (
+          !isNodeId(nodeId) || seen.has(nodeId) ||
+          seen.size >= MAX_HTML_MIRROR_SCROLL_PANES
+        ) return undefined;
+        seen.add(nodeId);
+      }
+      alsoNodeIds = Object.freeze([...also as readonly number[]]);
+    }
     panes.push(Object.freeze({
       nodeId: pane.nodeId,
       scrollX: pane.scrollX,
       scrollY: pane.scrollY,
       maxScrollX: pane.maxScrollX,
       maxScrollY: pane.maxScrollY,
+      ...(alsoNodeIds ? { alsoNodeIds } : {}),
     }));
   }
   return Object.freeze(panes);

@@ -1,13 +1,20 @@
-import { readSourceShadowRoot } from './replica/source-shadow-root';
-
 export const PRIMARY_SCROLL_MAX = 100_000;
 /**
- * Panes one scroll report names (D122). A page with more scrolled panes than
- * this keeps the most recently scrolled; the others show at their start.
- * More than this scrolling together (rows kept in step by script) are not
- * followed at all, so that they are never torn apart.
+ * Panes the mirror follows at once (D122). A page with more scrolled panes
+ * than this keeps the most recently scrolled; the others show at their
+ * start. More than this scrolling together (rows kept in step by script)
+ * are not followed at all, so that they are never torn apart. A scroll
+ * report names the panes that moved, so the number bounds what a new
+ * checkpoint lists and what both sides read again after a change to the
+ * page; a grid of thousands of rows fits.
  */
-export const MAX_SCROLL_PANES = 256;
+export const MAX_SCROLL_PANES = 8_192;
+
+/**
+ * The least vertical range, in CSS pixels, of a pane that an app-style page
+ * scrolls in place of its document (`readNestedScrollSnapshot`).
+ */
+export const MIN_PRIMARY_PANE_RANGE = 96;
 
 export type PrimaryScrollTarget = 'document' | 'nested';
 
@@ -146,24 +153,28 @@ export function readNestedScrollSnapshot(
   if (
     candidate.ownerDocument !== sourceDocument ||
     candidate === documentScrollOwner ||
-    candidate.isConnected === false ||
-    isEditableScrollOwner(candidate)
+    candidate.isConnected === false
   ) return undefined;
-  const viewportWidth = positiveFinite(sourceWindow.innerWidth, 1);
   const viewportHeight = positiveFinite(sourceWindow.innerHeight, 1);
-  const clientWidth = positiveFinite(candidate.clientWidth, 0);
   const clientHeight = positiveFinite(candidate.clientHeight, 0);
-  const horizontal = boundedAxis(
-    finite(candidate.scrollLeft),
-    Math.max(0, finite(candidate.scrollWidth) - clientWidth),
-  );
   const vertical = boundedAxis(
     finite(candidate.scrollTop),
     Math.max(0, finite(candidate.scrollHeight) - clientHeight),
   );
-  // The numbers first: every scrolled strip and carousel is asked each
-  // frame it scrolls, and nearly all stop here without a style read.
-  if (vertical.maximum < Math.max(96, viewportHeight * 0.2)) return undefined;
+  // The vertical numbers first: every scrolled strip and carousel is asked
+  // each frame it scrolls, thousands of them when a grid keeps its rows in
+  // step, and nearly all stop here after three reads, before the walk up
+  // its ancestors and with no style read.
+  if (
+    vertical.maximum < Math.max(MIN_PRIMARY_PANE_RANGE, viewportHeight * 0.2)
+  ) return undefined;
+  if (isEditableScrollOwner(candidate)) return undefined;
+  const viewportWidth = positiveFinite(sourceWindow.innerWidth, 1);
+  const clientWidth = positiveFinite(candidate.clientWidth, 0);
+  const horizontal = boundedAxis(
+    finite(candidate.scrollLeft),
+    Math.max(0, finite(candidate.scrollWidth) - clientWidth),
+  );
   const overflowY = readOverflowY(candidate, sourceWindow);
   if (overflowY === 'hidden' || overflowY === 'clip' || overflowY === 'visible') {
     return undefined;
@@ -240,49 +251,6 @@ export function readPaneScrollPlace(
     maxScrollX: horizontal.maximum,
     maxScrollY: vertical.maximum,
   });
-}
-
-/** Elements walked per scan; querySelectorAll('*') already materializes them. */
-const MAX_SCROLLER_SCAN_ELEMENTS = 50_000;
-
-/**
- * Walks the document and its shadow roots, open or closed, in order and
- * visits every element that is not at its scroll start (D122), so panes
- * scrolled before the mirror was built can be put at their place. Two number
- * reads an element, no style and no rectangle; the walk stops after
- * `MAX_SCROLLER_SCAN_ELEMENTS` elements, and a pane past that is picked up
- * when it next scrolls. Return false to stop.
- */
-export function forEachScrolledElement(
-  sourceDocument: Document,
-  visit: (candidate: Element) => boolean,
-): void {
-  const roots: ParentNode[] = [sourceDocument];
-  let rootIndex = 0;
-  let walked = 0;
-  while (rootIndex < roots.length) {
-    const root = roots[rootIndex];
-    rootIndex += 1;
-    if (!root) continue;
-    let candidates: NodeListOf<Element>;
-    try {
-      candidates = root.querySelectorAll('*');
-    } catch {
-      continue;
-    }
-    for (let index = 0; index < candidates.length; index += 1) {
-      if (walked >= MAX_SCROLLER_SCAN_ELEMENTS) return;
-      const candidate = candidates[index];
-      if (!candidate) continue;
-      walked += 1;
-      const shadow = readSourceShadowRoot(candidate);
-      if (shadow) roots.push(shadow);
-      if (
-        finite(candidate.scrollTop) === 0 && finite(candidate.scrollLeft) === 0
-      ) continue;
-      if (!visit(candidate)) return;
-    }
-  }
 }
 
 export function isDocumentScrollTarget(

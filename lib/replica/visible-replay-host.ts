@@ -12,6 +12,11 @@ export const LIVE_REPLAY_LABEL = 'Live page replica';
 const MAX_REPLAY_DIMENSION = 1_000_000;
 const MAX_REPLAY_SCALE = 3;
 const MAX_OWNED_EXTENT = MAX_REPLAY_DIMENSION * MAX_REPLAY_SCALE;
+/**
+ * A placing of the panes that took longer than this is a long one: the next
+ * waits for the source reports that queued up behind it (see `#placePanes`).
+ */
+const LONG_PANE_PLACING_MS = 8;
 
 export interface VisibleReplayDimensions {
   readonly viewportWidth: number;
@@ -129,10 +134,20 @@ export class VisibleReplayHost implements ReplayPresentationHost {
   #sourceScrollY = 0;
   #sourceMaxScrollX = 0;
   #sourceMaxScrollY = 0;
-  /** The panes the tab has scrolled, as last followed (D122). */
-  #sourcePanes: readonly VisibleReplayPaneScroll[] = [];
+  /** The panes the tab has scrolled, as last followed (D122), by node id. */
+  #sourcePanes: ReadonlyMap<number, VisibleReplayPaneScroll> = new Map();
+  /**
+   * The list they were read from. A report in which no pane moved carries
+   * the very list of the one before, and then no pane is read or placed:
+   * a page with thousands of scrolled panes scrolls at no cost here.
+   */
+  #sourcePaneList: readonly VisibleReplayPaneScroll[] | undefined;
   /** The one of them the tab scrolls in place of its document, if any. */
   #primaryPane: VisibleReplayPaneScroll | undefined;
+  /** Set after a long placing of the panes, until the queue is read. */
+  #paneTimer: ReturnType<typeof setTimeout> | undefined;
+  /** What to place when that wait ends: the panes that moved, or all. */
+  #panesWaiting: 'moved' | 'all' | undefined;
   #hasSourceScroll = false;
   /** The tab's pinch zoom, shown while the source's scrolling is followed. */
   #sourceVisual: VisualViewport = NO_VISUAL_ZOOM;
@@ -249,7 +264,7 @@ export class VisibleReplayHost implements ReplayPresentationHost {
     committed.iframe.setAttribute('height', String(committed.dimensions.viewportHeight));
     this.#setOuterScroll(committed);
     this.#projectScroll(committed);
-    this.#projectPanes(committed);
+    this.#placePanes(committed, false);
   }
 
   /**
@@ -282,10 +297,14 @@ export class VisibleReplayHost implements ReplayPresentationHost {
     this.#lastFollowedScroll = scroll;
     const committed = this.#committed;
     const previousPrimaryPane = this.#primaryPane;
-    this.#sourcePanes = readPanes(scroll.panes);
-    this.#primaryPane = this.#sourcePanes.find(
-      ({ nodeId }) => nodeId === scroll.primaryPaneId,
-    );
+    const panesMoved = scroll.panes !== this.#sourcePaneList;
+    if (panesMoved) {
+      this.#sourcePaneList = scroll.panes;
+      this.#sourcePanes = readPanes(scroll.panes);
+    }
+    this.#primaryPane = scroll.primaryPaneId === undefined
+      ? undefined
+      : this.#sourcePanes.get(scroll.primaryPaneId);
     // A pane the replica cannot scroll moves the page in its place, so its
     // move in the tab is a move of the page. Both places are read against
     // the replica as it is now: a pane that gains its own range in the
@@ -301,7 +320,9 @@ export class VisibleReplayHost implements ReplayPresentationHost {
       !sameSourceScrollPosition(lastFollowed, scroll) ||
       standInMoved
     ) this.#followPage(scroll);
-    if (committed) this.#projectPanes(committed);
+    if (committed && (panesMoved || force)) {
+      this.#placePanes(committed, !force);
+    }
   }
 
   /** The document, a pane standing in for it, or the pinch zoom moved. */
@@ -351,7 +372,8 @@ export class VisibleReplayHost implements ReplayPresentationHost {
     this.#sourceScrollY = 0;
     this.#sourceMaxScrollX = 0;
     this.#sourceMaxScrollY = 0;
-    this.#sourcePanes = [];
+    this.#sourcePanes = new Map();
+    this.#sourcePaneList = undefined;
     this.#primaryPane = undefined;
     this.#hasSourceScroll = false;
     this.#sourceVisual = NO_VISUAL_ZOOM;
@@ -391,7 +413,7 @@ export class VisibleReplayHost implements ReplayPresentationHost {
         this.#setOuterScroll(committed);
         this.#projectScroll(committed);
       }
-      this.#projectPanes(committed);
+      this.#placePanes(committed, false);
       return;
     }
     committed.replayExtent = normalized;
@@ -451,6 +473,9 @@ export class VisibleReplayHost implements ReplayPresentationHost {
     this.clearPresentation();
     this.#candidate?.release();
     this.#committed?.release();
+    if (this.#paneTimer !== undefined) clearTimeout(this.#paneTimer);
+    this.#paneTimer = undefined;
+    this.#panesWaiting = undefined;
     this.#resizeObserver?.disconnect();
     this.#resizeObserver = undefined;
     this.#disposed = true;
@@ -573,31 +598,82 @@ export class VisibleReplayHost implements ReplayPresentationHost {
   }
 
   /**
+   * Places the panes: the ones that moved, or all of them (a new replica, a
+   * layout refresh, following turned on). Chrome needs longer than a frame
+   * to scroll thousands of panes, and every source report that arrived
+   * meanwhile would place them again, one after another, the panel falling
+   * further behind the tab with each. So after a long placing the next one
+   * waits until the reports already queued have been read, and places what
+   * the last of them says.
+   */
+  #placePanes(candidate: CandidateLease, onlyMoved: boolean): void {
+    if (this.#paneTimer !== undefined) {
+      this.#panesWaiting = onlyMoved && this.#panesWaiting !== 'all'
+        ? 'moved'
+        : 'all';
+      return;
+    }
+    const started = performance.now();
+    this.#projectPanes(candidate, onlyMoved);
+    if (performance.now() - started < LONG_PANE_PLACING_MS) return;
+    this.#paneTimer = setTimeout(() => {
+      this.#paneTimer = undefined;
+      const waiting = this.#panesWaiting;
+      this.#panesWaiting = undefined;
+      const committed = this.#committed;
+      if (waiting && committed && !committed.released) {
+        this.#placePanes(committed, waiting === 'moved');
+      }
+    }, 0);
+  }
+
+  /**
    * Puts every pane the tab has scrolled at the same share of its own range
    * in the replica, and sends one the report no longer lists back to its
    * start (D122). A pane is found by its node id, never by what is in view.
    * Only the panes move: not the replica document, not the panel's scroller
-   * and not the reader's own place.
+   * and not the reader's own place. With `onlyMoved`, a pane this replica
+   * was already placed at for the same report is left alone: of thousands
+   * of scrolled panes, the one that moved is touched.
    */
-  #projectPanes(candidate: CandidateLease): void {
-    const listed = new Set<number>();
-    for (const pane of this.#sourcePanes) {
-      listed.add(pane.nodeId);
+  #projectPanes(candidate: CandidateLease, onlyMoved = false): void {
+    // Every place is read before any pane is scrolled: a read that follows
+    // a scroll costs Chrome several times one that follows a read, which
+    // counts when a grid has thousands of rows.
+    const moves: Array<readonly [HTMLElement, number, number]> = [];
+    const move = (element: HTMLElement, left: number, top: number): void => {
+      if (
+        Math.abs(element.scrollLeft - left) >= 1 ||
+        Math.abs(element.scrollTop - top) >= 1
+      ) moves.push([element, left, top]);
+    };
+    for (const pane of this.#sourcePanes.values()) {
+      if (
+        onlyMoved &&
+        samePanePlace(candidate.placedPanes.get(pane.nodeId), pane)
+      ) continue;
       const element = candidate.paneElement(pane.nodeId);
       if (!element) continue;
-      candidate.placedPanes.add(pane.nodeId);
-      scrollPaneTo(
+      candidate.placedPanes.set(pane.nodeId, pane);
+      // An axis the tab's pane has no range on needs no read of the
+      // replica's: a strip that scrolls sideways is not asked its height.
+      move(
         element,
-        projectPaneOffset(pane.scrollX, pane.maxScrollX, scrollRangeX(element)),
-        projectPaneOffset(pane.scrollY, pane.maxScrollY, scrollRangeY(element)),
+        pane.maxScrollX > 0
+          ? projectPaneOffset(pane.scrollX, pane.maxScrollX, scrollRangeX(element))
+          : 0,
+        pane.maxScrollY > 0
+          ? projectPaneOffset(pane.scrollY, pane.maxScrollY, scrollRangeY(element))
+          : 0,
       );
     }
-    for (const nodeId of candidate.placedPanes) {
-      if (listed.has(nodeId)) continue;
+    for (const nodeId of candidate.placedPanes.keys()) {
+      if (this.#sourcePanes.has(nodeId)) continue;
       candidate.placedPanes.delete(nodeId);
       const element = candidate.paneElement(nodeId);
-      if (element) scrollPaneTo(element, 0, 0);
+      if (element) move(element, 0, 0);
     }
+    for (const [element, left, top] of moves) scrollPaneTo(element, left, top);
   }
 
   /**
@@ -719,8 +795,12 @@ class CandidateLease implements VisibleReplayCandidateLease {
   released = false;
   /** Finds this replica's node for a mirror node id (D122). */
   resolveNode: VisibleReplayNodeResolver | undefined;
-  /** Node ids of the panes this replica was scrolled at, to put them back. */
-  readonly placedPanes = new Set<number>();
+  /**
+   * The panes this replica was scrolled at, each with the tab's place it
+   * was put at: to leave an unmoved one alone, and to put back one the tab
+   * no longer lists.
+   */
+  readonly placedPanes = new Map<number, VisibleReplayPaneScroll>();
   /** What a pane added to this replica's page place when it was last set. */
   standIn: VisibleReplayPaneScroll | undefined;
   /** The panel scroll offsets the host last set, to recognize their echo. */
@@ -976,15 +1056,26 @@ function samePanePosition(
     left?.scrollY === right?.scrollY;
 }
 
+/** The same place in the tab: offsets and ranges, which set the share. */
+function samePanePlace(
+  left: VisibleReplayPaneScroll | undefined,
+  right: VisibleReplayPaneScroll,
+): boolean {
+  return left !== undefined &&
+    left.scrollX === right.scrollX && left.scrollY === right.scrollY &&
+    left.maxScrollX === right.maxScrollX &&
+    left.maxScrollY === right.maxScrollY;
+}
+
 /**
  * The panes of a source report, each once, with numbers the replica can use.
  * The protocol already checked them; this keeps the host safe by itself.
  */
 function readPanes(
   input: readonly VisibleReplayPaneScroll[] | undefined,
-): readonly VisibleReplayPaneScroll[] {
-  if (!Array.isArray(input)) return [];
+): ReadonlyMap<number, VisibleReplayPaneScroll> {
   const panes = new Map<number, VisibleReplayPaneScroll>();
+  if (!Array.isArray(input)) return panes;
   for (const pane of input.slice(0, MAX_SCROLL_PANES)) {
     if (
       !pane || !Number.isSafeInteger(pane.nodeId) || pane.nodeId <= 0 ||
@@ -1001,7 +1092,7 @@ function readPanes(
       maxScrollY,
     });
   }
-  return [...panes.values()];
+  return panes;
 }
 
 function scrollRangeX(element: HTMLElement): number {
@@ -1034,10 +1125,6 @@ function projectPaneOffset(
  * would otherwise animate every followed move, and lag behind the tab.
  */
 function scrollPaneTo(element: HTMLElement, left: number, top: number): void {
-  if (
-    Math.abs(element.scrollLeft - left) < 1 &&
-    Math.abs(element.scrollTop - top) < 1
-  ) return;
   try {
     if (typeof element.scrollTo === 'function') {
       element.scrollTo({ left, top, behavior: 'instant' });
