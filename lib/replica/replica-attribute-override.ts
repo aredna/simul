@@ -61,14 +61,21 @@ export function pageAttribute(element: Element, name: string): string | null {
   return existing ? existing.page : element.getAttribute(name);
 }
 
-/** The element's attributes as the page has them, without Simul's overrides. */
+/**
+ * The element's attributes as the page has them, without Simul's overrides
+ * and without those `skip` names (attributes the caller lists by itself).
+ */
 export function pageAttributes(
   element: Element,
+  skip?: (attribute: Attr) => boolean,
 ): readonly (readonly [string, string])[] {
   const own = overrides.get(element);
   const attributes: (readonly [string, string])[] = [];
-  for (const { name, value } of [...element.attributes]) {
-    if (!own?.has(name)) attributes.push([name, value] as const);
+  for (const attribute of [...element.attributes]) {
+    const { name, value } = attribute;
+    if (!own?.has(name) && !skip?.(attribute)) {
+      attributes.push([name, value] as const);
+    }
   }
   for (const [name, existing] of own ?? []) {
     if (existing.page !== null) attributes.push([name, existing.page] as const);

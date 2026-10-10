@@ -29,17 +29,22 @@ import {
   MAX_HTML_MIRROR_DEPTH,
   MAX_HTML_MIRROR_NODES,
   MAX_HTML_MIRROR_STRING,
+  PAGE_DOCUMENT_LANGUAGE_ATTRIBUTE,
+  PAGE_XML_LANGUAGE_ATTRIBUTE,
   createHtmlMirrorReadBudget,
   createHtmlMirrorRepresentabilityCollector,
   createHtmlMirrorStyleWorkBudget,
   htmlMirrorJsonBytes,
+  isDocumentLanguageValue,
   isRepresentableTagName,
   type HtmlMirrorDocumentGraph,
   type HtmlMirrorElementNode,
   type HtmlMirrorNode,
   readHtmlMirrorNode,
+  readSourceDocumentLanguage,
   sanitizeCss,
   sanitizeSourceAdoptedStyleSheets,
+  sanitizeSourceAttributes,
   sanitizeSourceChildren,
   sanitizeSourceDocument,
   sourceDocumentMode,
@@ -799,6 +804,434 @@ describe('isolated HTML sanitizer and protocol', () => {
         ['data-simul-replica-disclosure-trigger', 'v1'],
       ],
     })).toBeUndefined();
+  });
+
+  it('carries a lang of the XML namespace under a name of its own, apart from an attribute named xml:lang', () => {
+    const XML = 'http://www.w3.org/XML/1998/namespace';
+    const { document, window } = parseHTML(`<!doctype html><html xml:lang="de"><body>
+      <p id="ns" xml:lang="fr" lang="en">Namespaced</p>
+      <p id="plain" xml:lang="fr">Only named so</p>
+      <p id="prefixed" simul:lang="ja">Another prefix</p>
+      <p id="forged" simul:xml-lang="zz">Named like the wire</p>
+      <svg><text id="svg" xml:lang="ja" xml:space="preserve">SVG</text></svg>
+      <input id="card" type="password" xml:lang="it" data-note="x">
+      <select><option id="option" xml:lang="es">One</option></select>
+    </body></html>`);
+    Object.defineProperty(document, 'baseURI', {
+      configurable: true,
+      value: 'https://example.test/app/page',
+    });
+    // linkedom keeps no namespace on an attribute: say which ones the page's
+    // parser, or its script, put in the XML namespace.
+    const inXmlNamespace = (
+      element: Element | null,
+      name: string,
+      localName = 'lang',
+    ): void => {
+      const attribute = element!.getAttributeNode(name)!;
+      Object.defineProperty(attribute, 'namespaceURI', { value: XML });
+      Object.defineProperty(attribute, 'localName', { value: localName });
+      answerByNamespace(element!);
+    };
+    inXmlNamespace(document.getElementById('svg') as unknown as Element, 'xml:space', 'space');
+    inXmlNamespace(document.documentElement as unknown as Element, 'xml:lang');
+    for (const [id, name] of [
+      ['ns', 'xml:lang'], ['prefixed', 'simul:lang'], ['svg', 'xml:lang'],
+      ['card', 'xml:lang'], ['option', 'xml:lang'],
+    ] as const) inXmlNamespace(document.getElementById(id) as unknown as Element, name);
+
+    const graph = sanitizeSourceDocument(
+      document as unknown as Document,
+      window as unknown as Window,
+      new WeakNodeIdRegistry(),
+      createHtmlMirrorRepresentabilityCollector(),
+      'passive',
+    )!;
+    expect(PAGE_XML_LANGUAGE_ATTRIBUTE).toBe('simul:xml-lang');
+    expect(graph.root.attributes).toContainEqual(['simul:xml-lang', 'de']);
+    expect(attributesOf(graph, 'ns')).toMatchObject({
+      'simul:xml-lang': 'fr', lang: 'en',
+    });
+    expect(attributesOf(graph, 'ns')).not.toHaveProperty('xml:lang');
+    // An HTML element's attribute that is only named `xml:lang` does nothing
+    // in the page: it stays what it is.
+    expect(attributesOf(graph, 'plain')).toEqual({
+      id: 'plain', 'xml:lang': 'fr',
+    });
+    // Whatever prefix a script gave it, it is the element's XML-namespace lang.
+    expect(attributesOf(graph, 'prefixed')).toEqual({
+      id: 'prefixed', 'simul:xml-lang': 'ja',
+    });
+    // A page cannot write the wire's name itself.
+    expect(attributesOf(graph, 'forged')).toEqual({ id: 'forged' });
+    // Another attribute of that namespace is not the element's language.
+    expect(attributesOf(graph, 'svg')).toEqual({
+      id: 'svg', 'simul:xml-lang': 'ja', 'xml:space': 'preserve',
+    });
+    // A credential field's empty box keeps its language, nothing about it.
+    expect(attributesOf(graph, 'card')).toMatchObject({ 'simul:xml-lang': 'it' });
+    expect(attributesOf(graph, 'card')).not.toHaveProperty('data-note');
+    // A native option carries no attribute but its role, as before.
+    expect(graphElementsByTag(graph, 'option')[0]?.attributes
+      .map(([name]) => name)).not.toContain('simul:xml-lang');
+
+    // The panel takes that one name of Simul's from the wire and no other.
+    const node = graphElementBySourceId(graph, 'ns')!;
+    expect(readHtmlMirrorNode(node)).toBeDefined();
+    for (const name of ['simul:lang', 'simul:xml-langs', 'simul:other']) {
+      expect(readHtmlMirrorNode({
+        ...node,
+        attributes: [...node.attributes, [name, 'zz']],
+      })).toBeUndefined();
+    }
+    expect(readHtmlMirrorNode({
+      ...node,
+      attributes: [...node.attributes, ['simul:xml-lang', 'de']],
+    })).toBeUndefined();
+  });
+
+  /** A page whose Chrome says `locale` for the root's font language. */
+  function pageSaying(
+    locale: string,
+    markup = '<!doctype html><html><head></head><body><p id="p">Text</p></body></html>',
+  ) {
+    const { document, window } = parseHTML(markup);
+    Object.defineProperty(document, 'baseURI', {
+      configurable: true,
+      value: 'https://example.test/app/page',
+    });
+    const asked: string[] = [];
+    Object.defineProperty(window, 'getComputedStyle', {
+      configurable: true,
+      value: ((element: Element) => ({
+        // Every element under a root that declares none computes the
+        // document's language.
+        getPropertyValue: (name: string) =>
+          name === '-webkit-locale' && element.ownerDocument === document
+            ? locale
+            : '',
+      })) as unknown as Window['getComputedStyle'],
+    });
+    const root = document.documentElement as unknown as Element;
+    // linkedom answers no `:lang()`: Chrome's answers are given here, for
+    // the root and for an element that says a language itself.
+    let says = true;
+    let canMatch = true;
+    const probes: string[] = [];
+    (root as { matches: (selector: string) => boolean }).matches = (
+      selector: string,
+    ): boolean => {
+      asked.push(selector);
+      return says;
+    };
+    const create = document.createElement.bind(document);
+    document.createElement = ((name: string) => {
+      const created = create(name);
+      if (name === 'span') {
+        (created as unknown as { matches: (selector: string) => boolean })
+          .matches = (selector: string): boolean => {
+            probes.push(`${created.getAttribute('lang')} ${selector}`);
+            return canMatch;
+          };
+      }
+      return created;
+    }) as typeof document.createElement;
+    return {
+      document: document as unknown as Document,
+      window: window as unknown as Window,
+      root,
+      asked,
+      probes,
+      chromeSays: (value: boolean) => { says = value; },
+      chromeCanMatch: (value: boolean) => { canMatch = value; },
+    };
+  }
+
+  it('asks Chrome for the language of a document whose root declares none', () => {
+    const page = pageSaying('"de"');
+    expect(readSourceDocumentLanguage(page.root)).toBe('de');
+    // Chrome is asked a second time, with a selector no page rule can change.
+    expect(page.asked).toEqual([':lang(de)']);
+    // The root says so: nothing else is asked, and nothing is made.
+    expect(page.probes).toEqual([]);
+    // A rule of the page that sets the root's font language is not the
+    // document's language: the root does not match, where an element that
+    // says the language itself does.
+    page.chromeSays(false);
+    expect(readSourceDocumentLanguage(page.root)).toBeUndefined();
+    expect(page.probes).toEqual(['de :lang(de)']);
+    // The element asked is never put into the page.
+    expect(page.document.querySelector('span')).toBeNull();
+    // A value this Chrome matches for no element (Chrome 154: a part over
+    // eight characters) is the document's all the same, and travels.
+    const unmatched = pageSaying('"portuguese-brazil"');
+    unmatched.chromeSays(false);
+    unmatched.chromeCanMatch(false);
+    expect(readSourceDocumentLanguage(unmatched.root)).toBe('portuguese-brazil');
+    expect(unmatched.probes).toEqual(['portuguese-brazil :lang(portuguese-brazil)']);
+
+    // What Chrome has is read as it serializes it.
+    expect(readSourceDocumentLanguage(pageSaying('"en-US"').root)).toBe('en-US');
+    expect(readSourceDocumentLanguage(pageSaying('"en_US"').root)).toBe('en_US');
+    expect(readSourceDocumentLanguage(pageSaying('"ja, de"').root)).toBe('ja, de');
+    // An empty pragma names no language; that is a value too.
+    expect(readSourceDocumentLanguage(pageSaying('""').root)).toBe('');
+    // No pragma and no header: nothing to send.
+    expect(readSourceDocumentLanguage(pageSaying('auto').root)).toBeUndefined();
+    expect(readSourceDocumentLanguage(pageSaying('').root)).toBeUndefined();
+    // A tag that begins with a digit is still an identifier to ask with.
+    const digit = pageSaying('"1a-b"');
+    expect(readSourceDocumentLanguage(digit.root)).toBe('1a-b');
+    expect(digit.asked).toEqual([':lang(\\31 a-b)']);
+    // A list is not asked about: Chrome answers for one tag only.
+    const list = pageSaying('"ja, de"');
+    list.chromeSays(false);
+    expect(readSourceDocumentLanguage(list.root)).toBe('ja, de');
+    expect(list.asked).toEqual([]);
+
+    // Chrome takes anything for the language, a refresh's content too. That
+    // does not travel: the mirror is told a language that names none.
+    for (const junk of [
+      '"0;url=https://tracker.invalid/x"',
+      '"a\\"b\\\\c"',
+      '"it\\1 \\7 "',
+      `"${'x'.repeat(257)}"`,
+    ]) {
+      expect(readSourceDocumentLanguage(pageSaying(junk).root)).toBe('');
+    }
+    expect(isDocumentLanguageValue('zh-Hant, en_US')).toBe(true);
+    expect(isDocumentLanguageValue('')).toBe(true);
+    expect(isDocumentLanguageValue('x'.repeat(256))).toBe(true);
+    expect(isDocumentLanguageValue('x'.repeat(257))).toBe(false);
+    expect(isDocumentLanguageValue('ja;x')).toBe(false);
+    expect(isDocumentLanguageValue('ja\n')).toBe(false);
+    expect(isDocumentLanguageValue('ja=x')).toBe(false);
+
+    // With a `lang` or an `xml:lang` on the root the document's language
+    // shows nowhere a script can read, and Chrome is not asked.
+    const declared = pageSaying(
+      '"fr"',
+      '<!doctype html><html lang=""><head></head><body></body></html>',
+    );
+    // (linkedom reads the plain `lang` for any namespace: here it reads none.)
+    declared.root.hasAttributeNS = (): boolean => false;
+    expect(readSourceDocumentLanguage(declared.root)).toBeUndefined();
+    const xml = pageSaying('"es"');
+    xml.root.hasAttributeNS = (namespace: string | null, name: string): boolean =>
+      namespace === 'http://www.w3.org/XML/1998/namespace' && name === 'lang';
+    expect(readSourceDocumentLanguage(xml.root)).toBeUndefined();
+    expect(declared.asked.concat(xml.asked)).toEqual([]);
+    // A DOM that cannot say is taken for one that says nothing.
+    const { document } = parseHTML('<html><head></head><body></body></html>');
+    expect(readSourceDocumentLanguage(document.documentElement as unknown as Element))
+      .toBeUndefined();
+  });
+
+  it('sends the document\'s language on the root and none of the page\'s pragmas', () => {
+    const page = pageSaying('"ja"', `<!doctype html><html simul:document-lang="zz"><head>
+      <meta id="language" http-equiv="Content-Language" content="ja">
+      <meta id="refresh" http-equiv="refresh" content="ja">
+      <meta id="policy" http-equiv="content-security-policy" content="default-src *">
+      <meta id="viewport" name="viewport" content="en">
+    </head><body><div id="rdfa" content="kept as the page wrote it">Text</div>
+      <svg><html id="inner"></html></svg></body></html>`);
+    const graph = sanitizeSourceDocument(
+      page.document,
+      page.window,
+      new WeakNodeIdRegistry(),
+      createHtmlMirrorRepresentabilityCollector(),
+      'passive',
+    )!;
+    expect(PAGE_DOCUMENT_LANGUAGE_ATTRIBUTE).toBe('simul:document-lang');
+    // What Chrome says, not what a page attribute of that name says.
+    expect(graph.root.attributes).toEqual([['simul:document-lang', 'ja']]);
+    for (const id of ['language', 'refresh', 'policy', 'viewport']) {
+      expect(attributesOf(graph, id)).toEqual({ id });
+    }
+    // Only a `<meta>` is a pragma.
+    expect(attributesOf(graph, 'rdfa').content).toBe('kept as the page wrote it');
+    // The root alone carries the document's language: an element that is
+    // merely named `html` does not.
+    expect(JSON.stringify(graph.root.children)).not.toContain('simul:document-lang');
+    const named = page.document.createElement('html');
+    page.document.body.append(named);
+    (named as unknown as { matches: () => boolean }).matches = () => true;
+    expect(sanitizeSourceAttributes(
+      named as unknown as Element,
+      'https://example.test/app/page',
+      createHtmlMirrorRepresentabilityCollector(),
+      'passive',
+    )).toEqual([]);
+    expect(sanitizeSourceAttributes(
+      page.root,
+      'https://example.test/app/page',
+      createHtmlMirrorRepresentabilityCollector(),
+      'passive',
+    )).toEqual([['simul:document-lang', 'ja']]);
+
+    // The panel takes that name from the wire on the root, with a value
+    // that is a list of language tags, and nowhere else.
+    const root = (
+      attributes: readonly (readonly [string, string])[],
+      tagName = 'html',
+      namespace: 'html' | 'svg' = 'html',
+    ): HtmlMirrorElementNode => ({
+      kind: 'element', id: 1, namespace, tagName, attributes, children: [],
+    });
+    expect(readHtmlMirrorNode(root([['simul:document-lang', 'ja, de']])))
+      .toBeDefined();
+    expect(readHtmlMirrorNode(root([['simul:document-lang', '']]))).toBeDefined();
+    for (const refused of [
+      root([['simul:document-lang', '0;url=https://tracker.invalid']]),
+      root([['simul:document-lang', 'x'.repeat(257)]]),
+      root([['simul:document-lang', 'ja']], 'body'),
+      root([['simul:document-lang', 'ja']], 'html', 'svg'),
+      root([['simul:document-lang', 'ja'], ['simul:document-lang', 'de']]),
+    ]) expect(readHtmlMirrorNode(refused)).toBeUndefined();
+    // No pragma is taken from the wire, as before.
+    const meta = (
+      attributes: readonly (readonly [string, string])[],
+    ): HtmlMirrorElementNode => ({
+      kind: 'element', id: 9, namespace: 'html', tagName: 'meta',
+      attributes, children: [],
+    });
+    for (const attributes of [
+      [['http-equiv', 'content-language'], ['content', 'ja']],
+      [['http-equiv', 'content-language']],
+      [['content', 'ja']],
+    ] as const) {
+      expect(readHtmlMirrorNode(meta(attributes))).toBeUndefined();
+    }
+  });
+
+  it('sends one attribute name once: the attribute Chrome reads under it', () => {
+    const { document, window } = parseHTML(`<!doctype html><html><body>
+      <p id="twin" class="k">Twin</p>
+      <p id="alone">Alone</p>
+      <p id="two">Two</p>
+      <p id="plain" xml:lang="fr">Plain</p>
+      <svg><rect id="rect" viewBox="0 0 1 1" fill="red"></rect></svg>
+    </body></html>`);
+    Object.defineProperty(document, 'baseURI', {
+      configurable: true,
+      value: 'https://example.test/app/page',
+    });
+    const at = (id: string): Element =>
+      document.getElementById(id) as unknown as Element;
+    // As `setAttributeNS(null, 'CLASS', …)` in an HTML document, or `CLASS`
+    // in an XHTML one: another attribute to Chrome, whichever comes first.
+    at('twin').setAttribute('CLASS', 'x');
+    at('twin').setAttribute('Title', 'T');
+    at('alone').setAttribute('CLASS', 'only');
+    at('two').setAttribute('CLASS', 'first');
+    at('two').setAttribute('Class', 'second');
+    at('plain').setAttribute('xml:LANG', 'de');
+    at('rect').setAttribute('viewbox', '9 9 9 9');
+    at('rect').setAttribute('FILL', 'blue');
+    expect([...at('twin').attributes].map(({ name }) => name).slice(0, 2))
+      .toEqual(['Title', 'CLASS']);
+
+    const graph = sanitizeSourceDocument(
+      document as unknown as Document,
+      window as unknown as Window,
+      new WeakNodeIdRegistry(),
+      createHtmlMirrorRepresentabilityCollector(),
+      'passive',
+    )!;
+    const sent = (id: string) => graphElementBySourceId(graph, id)!.attributes;
+    const names = (id: string) => sent(id).map(([name]) => name);
+    // No name twice anywhere, so the panel takes every element.
+    for (const id of ['twin', 'alone', 'two', 'plain', 'rect']) {
+      expect(new Set(names(id)).size).toBe(names(id).length);
+      expect(readHtmlMirrorNode(graphElementBySourceId(graph, id)!)).toBeDefined();
+    }
+    // The one spelled as the mirror writes it is the one Chrome reads.
+    expect(Object.fromEntries(sent('twin'))).toEqual({
+      id: 'twin', class: 'k', title: 'T',
+    });
+    expect(Object.fromEntries(sent('plain'))).toEqual({
+      id: 'plain', 'xml:lang': 'fr',
+    });
+    // An SVG name in its own case; `viewbox` and `FILL` are other attributes.
+    expect(Object.fromEntries(sent('rect'))).toEqual({
+      id: 'rect', viewbox: '0 0 1 1', fill: 'red',
+    });
+    // Alone, an attribute travels as it always did; of two that are both
+    // spelled otherwise, the first.
+    expect(Object.fromEntries(sent('alone'))).toEqual({ id: 'alone', class: 'only' });
+    expect(Object.fromEntries(sent('two')).class).toMatch(/^(first|second)$/u);
+    const firstOfTwo = [...at('two').attributes].find(
+      ({ name }) => name.toLowerCase() === 'class',
+    )!.value;
+    expect(Object.fromEntries(sent('two')).class).toBe(firstOfTwo);
+  });
+
+  it('takes the attribute without a namespace, and an SVG xlink:href in its own, for the one Chrome reads', () => {
+    const { document, window } = parseHTML(`<!doctype html><html><body>
+      <p id="spaced">Spaced</p>
+      <p id="lone">Lone</p>
+      <svg><use id="use"></use><use id="titled"></use><use id="plain" href="#h" xlink:href="#x"></use></svg>
+    </body></html>`);
+    Object.defineProperty(document, 'baseURI', {
+      configurable: true,
+      value: 'https://example.test/app/page',
+    });
+    const at = (id: string): Element =>
+      document.getElementById(id) as unknown as Element;
+    // linkedom holds one attribute of a name and no namespace: a second one
+    // is put on under another spelling and then named as the page has it.
+    // (linkedom lists the attribute put on last first.)
+    const put = (
+      element: Element,
+      name: string,
+      value: string,
+      namespace: string | null,
+      localName = name,
+    ): void => {
+      const spelling = name.toUpperCase();
+      element.setAttribute(spelling, value);
+      const attribute = element.getAttributeNode(spelling)!;
+      Object.defineProperty(attribute, 'name', { value: name });
+      Object.defineProperty(attribute, 'namespaceURI', { value: namespace });
+      Object.defineProperty(attribute, 'localName', { value: localName });
+      answerByNamespace(element);
+    };
+    // A `class` in some namespace, listed before the plain one.
+    at('spaced').setAttribute('class', 'k');
+    put(at('spaced'), 'class', 'q', 'urn:x');
+    expect([...at('spaced').attributes].map(({ name, value }) => `${name}=${value}`))
+      .toEqual(['class=q', 'class=k', 'id=spaced']);
+    // Alone in its namespace, it travels as it always did.
+    put(at('lone'), 'class', 'only', 'urn:x');
+    // On an SVG element, an `xlink:href` in no namespace (a script's
+    // `setAttribute`), listed before the real one.
+    put(at('use'), 'xlink:href', '#real', 'http://www.w3.org/1999/xlink', 'href');
+    put(at('use'), 'xlink:href', '#fake', null);
+    expect([...at('use').attributes].map(({ value }) => value))
+      .toEqual(['#fake', '#real', 'use']);
+    // Another attribute of the XLink namespace is not the reference: the
+    // one a script set travels alone, as it always did.
+    put(at('titled'), 'xlink:title', 'T', 'http://www.w3.org/1999/xlink', 'title');
+    put(at('titled'), 'xlink:href', '#only', null);
+
+    const graph = sanitizeSourceDocument(
+      document as unknown as Document,
+      window as unknown as Window,
+      new WeakNodeIdRegistry(),
+      createHtmlMirrorRepresentabilityCollector(),
+      'passive',
+    )!;
+    const sent = (id: string) =>
+      Object.fromEntries(graphElementBySourceId(graph, id)!.attributes);
+    for (const id of ['spaced', 'lone', 'use', 'plain']) {
+      expect(readHtmlMirrorNode(graphElementBySourceId(graph, id)!)).toBeDefined();
+    }
+    expect(sent('spaced')).toEqual({ id: 'spaced', class: 'k' });
+    expect(sent('lone')).toEqual({ id: 'lone', class: 'only' });
+    expect(sent('use')).toEqual({ id: 'use', 'xlink:href': '#real' });
+    expect(sent('titled')['xlink:href']).toBe('#only');
+    // An element's two references, `href` and `xlink:href`, are two names.
+    expect(sent('plain')).toEqual({ id: 'plain', href: '#h', 'xlink:href': '#x' });
   });
 
   it('omits posterless video shells while preserving a passive fallback image', () => {
@@ -4734,4 +5167,16 @@ function checkpointFor(
     documentWidth: graph.documentWidth,
     documentHeight: graph.documentHeight,
   }, fidelityPolicy);
+}
+
+/**
+ * linkedom answers a lookup by namespace by the name alone. Chrome answers
+ * by the namespace and the local name: so does `element` from here on, by
+ * what the test gave its attributes.
+ */
+function answerByNamespace(element: Element): void {
+  element.hasAttributeNS = (namespace: string | null, name: string): boolean =>
+    [...element.attributes].some((attribute) =>
+      (attribute.namespaceURI ?? null) === namespace &&
+      attribute.localName === name);
 }

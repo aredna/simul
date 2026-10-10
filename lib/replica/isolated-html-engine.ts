@@ -28,6 +28,8 @@ import type {
 import {
   MAX_HTML_MIRROR_BYTES,
   MAX_HTML_MIRROR_NODES,
+  PAGE_DOCUMENT_LANGUAGE_ATTRIBUTE,
+  PAGE_XML_LANGUAGE_ATTRIBUTE,
   hasPrivateHtmlMirrorAttribute,
   isAutonomousCustomElementName,
   readHtmlMirrorDocumentContent,
@@ -105,16 +107,23 @@ import {
 import { SemanticProofPresenter } from './semantic-proof-presenter';
 import { isSourceSecretPlaceholderTagName } from './source-secret-classifier';
 import { hasStructuralPatchTargetConflict } from './structural-patch-conflict';
+import { canonicalSvgAttributeName } from './svg-attribute-names';
 import {
   TranslatedGeometryLock,
   type TranslatedGeometryEntry,
 } from './translated-geometry';
 import {
   TranslatedLanguageTags,
+  XML_NAMESPACE,
   copyTranslatedLanguage,
+  documentContentLanguage,
+  forgetPageXmlLanguage,
+  pageXmlLanguage,
   refreshImageLanguages,
+  showDocumentLanguage,
   shownTranslationLanguage,
   translationLanguageTag,
+  writePageXmlLanguage,
 } from './translated-language';
 import type { TextLayoutMode } from '../preferences';
 
@@ -295,6 +304,12 @@ interface HtmlMirrorDomState {
   readonly controlMetadata: Map<number, HtmlMirrorControlText>;
   readonly ownedAdoptedStyles: Set<HTMLStyleElement>;
   readonly paintedLabelHosts: Map<number, HTMLElement>;
+  /**
+   * Text records whose translation was shown since the mirror's layout was
+   * last settled: whether each is a label painted as a picture is looked at
+   * then, for all of them over one layout (see `#settlePaintedLabels`).
+   */
+  readonly pendingPaintedLabels: Set<number>;
   readonly geometry: TranslatedGeometryLock;
   /** `lang` on the elements that show a translation (D124). */
   readonly languages: TranslatedLanguageTags;
@@ -563,12 +578,7 @@ export class IsolatedHtmlReplicaEngine
         composedParentElement(node),
         this.#languageOf(projection),
       );
-      synchronizeIsolatedPaintedLabel(
-        state,
-        projection.nodeId,
-        node as Text,
-        projection.translated,
-      );
+      state.pendingPaintedLabels.add(projection.nodeId);
     } else {
       if (
         node?.nodeType !== Node.ELEMENT_NODE ||
@@ -774,6 +784,7 @@ export class IsolatedHtmlReplicaEngine
         controlMetadata,
         ownedAdoptedStyles,
         paintedLabelHosts: new Map(),
+        pendingPaintedLabels: new Set(),
         geometry: new TranslatedGeometryLock(),
         languages: new TranslatedLanguageTags(),
         records,
@@ -817,6 +828,7 @@ export class IsolatedHtmlReplicaEngine
     runVersion: number,
     signal?: AbortSignal,
   ): void {
+    this.#settlePaintedLabels(state);
     this.#applyTextLayout(state);
     const extent = measureExtent(state.iframe);
     // The host finds a pane the tab scrolled by its node id (D122).
@@ -915,6 +927,9 @@ export class IsolatedHtmlReplicaEngine
     const retainedPaintedLabelIds = [...state.paintedLabelHosts.keys()];
     clearIsolatedPaintedLabels(state);
     const pageLanguages = patchedPageLanguages(state, batch.operations);
+    const contentLanguage = disclosureBindingsMayHaveChanged
+      ? documentContentLanguage(replicaDocument)
+      : undefined;
     let applied: AppliedPatchBatch | undefined;
     try {
       applied = applyPatchBatch(state, batch.operations);
@@ -998,12 +1013,21 @@ export class IsolatedHtmlReplicaEngine
     for (const change of sourceChanges) {
       this.#dropProjection(state, sourceChangeNodeId(change));
     }
-    // The page changed a `lang`: inside that element, what counts as already
-    // in the language translated to may have changed with it (D124).
+    // The page changed a `lang` or an `xml:lang`: inside that element, what
+    // counts as already in the language translated to may have changed with
+    // it (D124). A change of the document's own language is the same for
+    // every element that declares none.
     const relanguaged = new Set<Element>();
-    for (const [element, language] of pageLanguages) {
-      if (pageAttribute(element, 'lang') !== language) relanguaged.add(element);
+    for (const [element, language, xmlLanguage] of pageLanguages) {
+      if (
+        pageAttribute(element, 'lang') !== language ||
+        pageXmlLanguage(element) !== xmlLanguage
+      ) relanguaged.add(element);
     }
+    if (
+      disclosureBindingsMayHaveChanged && replicaDocument?.documentElement &&
+      documentContentLanguage(replicaDocument) !== contentLanguage
+    ) relanguaged.add(replicaDocument.documentElement);
     if (relanguaged.size > 0) {
       // The select facsimiles were drawn while the patch was applied, with
       // the tags as they were before it.
@@ -1224,12 +1248,7 @@ export class IsolatedHtmlReplicaEngine
           composedParentElement(node),
           this.#languageOf(projection),
         );
-        synchronizeIsolatedPaintedLabel(
-          state,
-          projection.nodeId,
-          node as Text,
-          projection.translated,
-        );
+        state.pendingPaintedLabels.add(projection.nodeId);
       } else {
         if (
           node?.nodeType !== Node.ELEMENT_NODE ||
@@ -1416,6 +1435,26 @@ export class IsolatedHtmlReplicaEngine
     this.#projections.delete(nodeId);
   }
 
+  /**
+   * A translated label that the page paints as a picture (a logo link whose
+   * text is pushed out of its box) gets Simul's own drawn label. Finding one
+   * reads the element's style and box, which makes Chrome lay the mirror out
+   * again after every text that changed before it. Looked at as each
+   * translation landed, a page of 9,000 translated elements whose
+   * translations arrived together spent tens of seconds on those layouts,
+   * in one task. So the question waits here until the layout is settled
+   * anyway (before each extent measurement, which is before the next paint)
+   * and is asked for every new translation over one layout. A translation
+   * that has gone by then (its text changed, the pair changed) is passed
+   * over: only one that still shows is looked at.
+   */
+  #settlePaintedLabels(state: HtmlMirrorDomState): void {
+    if (state.pendingPaintedLabels.size === 0) return;
+    const pending = [...state.pendingPaintedLabels];
+    state.pendingPaintedLabels.clear();
+    reconcileIsolatedPaintedLabels(state, this.#projections, pending);
+  }
+
   /** Applies a changed "Translated text" setting to the visible replica. */
   refreshTextLayout(): void {
     const state = this.#committed;
@@ -1488,6 +1527,7 @@ export class IsolatedHtmlReplicaEngine
       const pending = this.#pendingExtentState;
       this.#pendingExtentState = undefined;
       if (!pending || this.#committed !== pending || pending.released) return;
+      this.#settlePaintedLabels(pending);
       this.#applyTextLayout(pending);
       this.options.presentationHost.refreshExtent(
         pending.iframe,
@@ -1848,24 +1888,9 @@ function setAttributes(
   for (const attribute of [...element.attributes]) {
     element.removeAttribute(attribute.name);
   }
-  for (const [name, value] of attributes) {
-    if (
-      element.namespaceURI === 'http://www.w3.org/2000/svg' &&
-      name === 'xlink:href'
-    ) {
-      element.setAttributeNS(
-        'http://www.w3.org/1999/xlink',
-        'xlink:href',
-        value,
-      );
-    } else {
-      element.setAttribute(
-        element.namespaceURI === 'http://www.w3.org/2000/svg'
-          ? canonicalSvgAttributeName(name)
-          : name,
-        value,
-      );
-    }
+  forgetPageXmlLanguage(element);
+  for (const [name, value] of inWriteOrder(attributes)) {
+    writeReplicaAttribute(element, name, value);
   }
   const tagName = element.localName.toLowerCase();
   if (
@@ -1881,6 +1906,96 @@ function setAttributes(
     }
   }
   finishReplicaAttributes(element);
+}
+
+/**
+ * The order a page's attributes are written in: its `lang` of the XML
+ * namespace last. A page can also hold an attribute that is merely named
+ * `xml:lang` (the HTML parser makes one on an HTML element; so does
+ * `xml:LANG` of an XHTML page, whose name travels in lowercase).
+ * `setAttribute` finds an attribute by its name alone, so written after the
+ * real one it would be written over it, and the element would be drawn by
+ * the wrong language. Written first, it is an attribute of its own.
+ */
+function inWriteOrder(
+  attributes: readonly (readonly [string, string])[],
+): readonly (readonly [string, string])[] {
+  const last = attributes.findIndex(
+    ([name]) => name === PAGE_XML_LANGUAGE_ATTRIBUTE,
+  );
+  if (last < 0 || last === attributes.length - 1) return attributes;
+  return [
+    ...attributes.slice(0, last),
+    ...attributes.slice(last + 1),
+    attributes[last]!,
+  ];
+}
+
+/**
+ * Writes one of the page's attributes onto a replica element, in the
+ * namespace it has in the page: an SVG element's `xlink:href`, and a `lang`
+ * of the XML namespace, which travels under a name of its own. The
+ * document's own language, which travels on the root, is no attribute: the
+ * mirror's document is given it. (An attribute patch is first tried on a
+ * spare element, which is no document's root and gives nothing.)
+ */
+function writeReplicaAttribute(
+  element: Element,
+  name: string,
+  value: string,
+): void {
+  if (name === PAGE_DOCUMENT_LANGUAGE_ATTRIBUTE) {
+    const document = element.ownerDocument;
+    if (document?.documentElement === element) {
+      showDocumentLanguage(document, value);
+    }
+  } else if (name === PAGE_XML_LANGUAGE_ATTRIBUTE) {
+    writePageXmlLanguage(element, value);
+  } else if (
+    element.namespaceURI === 'http://www.w3.org/2000/svg' &&
+    name === 'xlink:href'
+  ) {
+    element.setAttributeNS(
+      'http://www.w3.org/1999/xlink',
+      'xlink:href',
+      value,
+    );
+  } else {
+    element.setAttribute(
+      element.namespaceURI === 'http://www.w3.org/2000/svg'
+        ? canonicalSvgAttributeName(name)
+        : name,
+      value,
+    );
+  }
+}
+
+/**
+ * The page's attributes on a replica element as a patch would send them,
+ * without what Simul shows over them: what a rollback writes back.
+ */
+function replicaPageAttributes(
+  element: Element,
+): readonly (readonly [string, string])[] {
+  const xmlLanguage = pageXmlLanguage(element);
+  // Nothing of the XML namespace is listed by its name in the mirror: the
+  // page's `lang` there goes back under the name it travels by.
+  const attributes = [...pageAttributes(
+    element,
+    (attribute) => attribute.namespaceURI === XML_NAMESPACE,
+  )];
+  if (xmlLanguage !== null) {
+    attributes.push([PAGE_XML_LANGUAGE_ATTRIBUTE, xmlLanguage] as const);
+  }
+  // So does the document's language, on the root.
+  const document = element.ownerDocument;
+  const language = document?.documentElement === element
+    ? documentContentLanguage(document)
+    : undefined;
+  if (language !== undefined) {
+    attributes.push([PAGE_DOCUMENT_LANGUAGE_ATTRIBUTE, language] as const);
+  }
+  return attributes;
 }
 
 /**
@@ -1986,70 +2101,6 @@ const SVG_CASE_SENSITIVE_ELEMENTS = new Map<string, string>(
     'textPath',
   ].map((name) => [name.toLowerCase(), name] as const),
 );
-
-function canonicalSvgAttributeName(name: string): string {
-  return SVG_CASE_SENSITIVE_ATTRIBUTES.get(name) ?? name;
-}
-
-const SVG_CASE_SENSITIVE_ATTRIBUTES = new Map<string, string>([
-  ['attributename', 'attributeName'],
-  ['attributetype', 'attributeType'],
-  ['basefrequency', 'baseFrequency'],
-  ['baseprofile', 'baseProfile'],
-  ['calcmode', 'calcMode'],
-  ['clippathunits', 'clipPathUnits'],
-  ['diffuseconstant', 'diffuseConstant'],
-  ['edgemode', 'edgeMode'],
-  ['filterunits', 'filterUnits'],
-  ['gradienttransform', 'gradientTransform'],
-  ['gradientunits', 'gradientUnits'],
-  ['kernelmatrix', 'kernelMatrix'],
-  ['kernelunitlength', 'kernelUnitLength'],
-  ['keypoints', 'keyPoints'],
-  ['keysplines', 'keySplines'],
-  ['keytimes', 'keyTimes'],
-  ['lengthadjust', 'lengthAdjust'],
-  ['limitingconeangle', 'limitingConeAngle'],
-  ['markerheight', 'markerHeight'],
-  ['markerunits', 'markerUnits'],
-  ['markerwidth', 'markerWidth'],
-  ['maskcontentunits', 'maskContentUnits'],
-  ['maskunits', 'maskUnits'],
-  ['numoctaves', 'numOctaves'],
-  ['pathlength', 'pathLength'],
-  ['patterncontentunits', 'patternContentUnits'],
-  ['patterntransform', 'patternTransform'],
-  ['patternunits', 'patternUnits'],
-  ['pointsatx', 'pointsAtX'],
-  ['pointsaty', 'pointsAtY'],
-  ['pointsatz', 'pointsAtZ'],
-  ['preservealpha', 'preserveAlpha'],
-  ['preserveaspectratio', 'preserveAspectRatio'],
-  ['primitiveunits', 'primitiveUnits'],
-  ['refx', 'refX'],
-  ['refy', 'refY'],
-  ['repeatcount', 'repeatCount'],
-  ['repeatdur', 'repeatDur'],
-  ['requiredextensions', 'requiredExtensions'],
-  ['requiredfeatures', 'requiredFeatures'],
-  ['specularconstant', 'specularConstant'],
-  ['specularexponent', 'specularExponent'],
-  ['spreadmethod', 'spreadMethod'],
-  ['startoffset', 'startOffset'],
-  ['stddeviation', 'stdDeviation'],
-  ['stitchtiles', 'stitchTiles'],
-  ['surfacescale', 'surfaceScale'],
-  ['systemlanguage', 'systemLanguage'],
-  ['tablevalues', 'tableValues'],
-  ['targetx', 'targetX'],
-  ['targety', 'targetY'],
-  ['textlength', 'textLength'],
-  ['viewbox', 'viewBox'],
-  ['viewtarget', 'viewTarget'],
-  ['xchannelselector', 'xChannelSelector'],
-  ['ychannelselector', 'yChannelSelector'],
-  ['zoomandpan', 'zoomAndPan'],
-]);
 
 function applyElementHints(
   element: Element,
@@ -3621,7 +3672,7 @@ function capturePatchRollback(
       // and what Simul shows over them is shown again (D124).
       attributes.set(
         element,
-        Object.freeze(pageAttributes(element).map(
+        Object.freeze(replicaPageAttributes(element).map(
           ([name, value]) => Object.freeze([name, value] as const),
         )),
       );
@@ -3777,9 +3828,10 @@ function restoreAttributeList(
       // Continue with remaining attributes and targets.
     }
   }
-  for (const [name, value] of attributes) {
+  forgetPageXmlLanguage(target);
+  for (const [name, value] of inWriteOrder(attributes)) {
     try {
-      target.setAttribute(name, value);
+      writeReplicaAttribute(target, name, value);
     } catch {
       // Continue with remaining attributes and targets.
     }
@@ -4339,17 +4391,25 @@ function hideTranslatedLanguage(state: HtmlMirrorDomState, nodeId: number): void
   ) syncContainingIsolatedSelectFacsimile(element);
 }
 
-/** The page's `lang` on each element an attribute patch is about to rewrite. */
+/**
+ * The page's `lang` and `xml:lang` on each element an attribute patch is
+ * about to rewrite.
+ */
 function patchedPageLanguages(
   state: HtmlMirrorDomState,
   operations: readonly HtmlMirrorPatchOperation[],
-): readonly (readonly [Element, string | null])[] {
-  const languages: (readonly [Element, string | null])[] = [];
+): readonly (readonly [Element, string | null, string | null])[] {
+  const languages: (readonly [Element, string | null, string | null])[] = [];
   for (const operation of operations) {
     if (operation.kind !== 'attributes') continue;
     const target = state.nodes.get(operation.nodeId);
     if (target?.nodeType !== Node.ELEMENT_NODE) continue;
-    languages.push([target as Element, pageAttribute(target as Element, 'lang')]);
+    const element = target as Element;
+    languages.push([
+      element,
+      pageAttribute(element, 'lang'),
+      pageXmlLanguage(element),
+    ]);
   }
   return languages;
 }
@@ -4433,8 +4493,13 @@ function retainedReplicaStateFitsBudget(state: HtmlMirrorDomState): boolean {
   try {
     const root = state.iframe.contentDocument?.documentElement;
     if (!root) return false;
+    // This runs after every patch and visits every node of the mirror, so
+    // it walks by the tree's own links and keeps no set of the nodes it saw
+    // (a tree meets each node once) and no copy of each child list: on a
+    // page of 9,000 paragraphs that is about a third less work, more than
+    // the language tags add to it.
     const pending: Node[] = [root];
-    const seen = new Set<Node>();
+    let visited = 0;
     // The panel keeps the previous replica while it stages the next one.
     const maxRetainedBytes = MAX_HTML_MIRROR_BYTES * 4;
     // Every shadow root's copy of an adopted sheet is set from one string,
@@ -4442,10 +4507,9 @@ function retainedReplicaStateFitsBudget(state: HtmlMirrorDomState): boolean {
     const adoptedTexts = new Set<string>();
     let bytes = 0;
     while (pending.length > 0) {
-      const node = pending.pop();
-      if (!node || seen.has(node)) continue;
-      seen.add(node);
-      if (seen.size > MAX_HTML_MIRROR_NODES * 3 + 32) return false;
+      const node = pending.pop()!;
+      visited += 1;
+      if (visited > MAX_HTML_MIRROR_NODES * 3 + 32) return false;
       bytes += 48;
       if (
         node.nodeType === 3 &&
@@ -4475,7 +4539,9 @@ function retainedReplicaStateFitsBudget(state: HtmlMirrorDomState): boolean {
         const shadow = element.shadowRoot;
         if (shadow) pending.push(shadow);
       }
-      for (const child of [...node.childNodes]) pending.push(child);
+      for (let child = node.firstChild; child; child = child.nextSibling) {
+        pending.push(child);
+      }
       if (bytes > maxRetainedBytes) return false;
     }
     for (const metadata of state.textMetadata.values()) {

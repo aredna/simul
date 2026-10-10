@@ -1,0 +1,70 @@
+/**
+ * The spelling of an SVG attribute name. The wire carries every attribute
+ * name in lowercase; SVG names are case-sensitive, and Chrome reads
+ * `viewBox`, not `viewbox`. The mirror writes an SVG attribute under the
+ * name this gives, and the sanitizer uses it to tell which of two attributes
+ * that differ only by case is the one Chrome reads.
+ */
+export function canonicalSvgAttributeName(name: string): string {
+  return SVG_CASE_SENSITIVE_ATTRIBUTES.get(name) ?? name;
+}
+
+const SVG_CASE_SENSITIVE_ATTRIBUTES = new Map<string, string>([
+  ['attributename', 'attributeName'],
+  ['attributetype', 'attributeType'],
+  ['basefrequency', 'baseFrequency'],
+  ['baseprofile', 'baseProfile'],
+  ['calcmode', 'calcMode'],
+  ['clippathunits', 'clipPathUnits'],
+  ['diffuseconstant', 'diffuseConstant'],
+  ['edgemode', 'edgeMode'],
+  ['filterunits', 'filterUnits'],
+  ['gradienttransform', 'gradientTransform'],
+  ['gradientunits', 'gradientUnits'],
+  ['kernelmatrix', 'kernelMatrix'],
+  ['kernelunitlength', 'kernelUnitLength'],
+  ['keypoints', 'keyPoints'],
+  ['keysplines', 'keySplines'],
+  ['keytimes', 'keyTimes'],
+  ['lengthadjust', 'lengthAdjust'],
+  ['limitingconeangle', 'limitingConeAngle'],
+  ['markerheight', 'markerHeight'],
+  ['markerunits', 'markerUnits'],
+  ['markerwidth', 'markerWidth'],
+  ['maskcontentunits', 'maskContentUnits'],
+  ['maskunits', 'maskUnits'],
+  ['numoctaves', 'numOctaves'],
+  ['pathlength', 'pathLength'],
+  ['patterncontentunits', 'patternContentUnits'],
+  ['patterntransform', 'patternTransform'],
+  ['patternunits', 'patternUnits'],
+  ['pointsatx', 'pointsAtX'],
+  ['pointsaty', 'pointsAtY'],
+  ['pointsatz', 'pointsAtZ'],
+  ['preservealpha', 'preserveAlpha'],
+  ['preserveaspectratio', 'preserveAspectRatio'],
+  ['primitiveunits', 'primitiveUnits'],
+  ['refx', 'refX'],
+  ['refy', 'refY'],
+  ['repeatcount', 'repeatCount'],
+  ['repeatdur', 'repeatDur'],
+  ['requiredextensions', 'requiredExtensions'],
+  ['requiredfeatures', 'requiredFeatures'],
+  ['specularconstant', 'specularConstant'],
+  ['specularexponent', 'specularExponent'],
+  ['spreadmethod', 'spreadMethod'],
+  ['startoffset', 'startOffset'],
+  ['stddeviation', 'stdDeviation'],
+  ['stitchtiles', 'stitchTiles'],
+  ['surfacescale', 'surfaceScale'],
+  ['systemlanguage', 'systemLanguage'],
+  ['tablevalues', 'tableValues'],
+  ['targetx', 'targetX'],
+  ['targety', 'targetY'],
+  ['textlength', 'textLength'],
+  ['viewbox', 'viewBox'],
+  ['viewtarget', 'viewTarget'],
+  ['xchannelselector', 'xChannelSelector'],
+  ['ychannelselector', 'yChannelSelector'],
+  ['zoomandpan', 'zoomAndPan'],
+]);

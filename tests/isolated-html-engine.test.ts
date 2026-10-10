@@ -28,6 +28,7 @@ import {
 } from '../lib/replica/isolated-html-engine';
 import {
   clearReplicaAttributeOverride,
+  pageAttribute,
   setReplicaAttributeOverride,
 } from '../lib/replica/replica-attribute-override';
 import { createReplicaIdentity } from '../lib/replica/replica-identity';
@@ -35,8 +36,13 @@ import {
   PAGE_LANGUAGE_ATTRIBUTE,
   XML_NAMESPACE,
   hideImageLanguage,
+  pageXmlLanguage,
   showImageLanguage,
 } from '../lib/replica/translated-language';
+import {
+  PAGE_DOCUMENT_LANGUAGE_ATTRIBUTE,
+  PAGE_XML_LANGUAGE_ATTRIBUTE,
+} from '../lib/replica/html-mirror-sanitizer';
 import {
   FULL_VISIBLE_REPLICA_READ_SCOPE,
   PAGE_ONLY_REPLICA_READ_SCOPE,
@@ -2091,6 +2097,9 @@ describe('IsolatedHtmlReplicaEngine', () => {
     let logo = host.iframe!.contentDocument!.querySelector<HTMLElement>(
       '.header-logo',
     )!;
+    // The label is drawn when the mirror's layout is next settled.
+    expect(logo.hasAttribute(PAINTED_SEMANTIC_LABEL_ATTRIBUTE)).toBe(false);
+    await Promise.resolve();
     expect(logo.getAttribute(PAINTED_SEMANTIC_LABEL_ATTRIBUTE)).toBe('v1');
     expect(logo.querySelector(
       `[${PAINTED_SEMANTIC_LABEL_OVERLAY_ATTRIBUTE}]`,
@@ -2201,9 +2210,107 @@ describe('IsolatedHtmlReplicaEngine', () => {
     const logo = host.iframe!.contentDocument!.querySelector<HTMLElement>(
       '.header-logo',
     )!;
+    await Promise.resolve();
     expect(logo.querySelector(
       `[${PAINTED_SEMANTIC_LABEL_OVERLAY_ATTRIBUTE}]`,
     )?.textContent).toBe('Mainichi Digital General Information');
+  });
+
+  it('looks for painted labels once the layout is settled, not as each translation lands', async () => {
+    const stream = new FakeHtmlStream(makePaintedLogoCheckpoint(
+      ['毎日新聞デジタル ', '総合案内'],
+      0,
+    ));
+    const host = new FakePresentationHost();
+    const refreshes: (() => void)[] = [];
+    let boxesRead = 0;
+    const engine = new IsolatedHtmlReplicaEngine({
+      presentationHost: host,
+      openStream: async () => stream,
+      scheduleLayoutRefresh: (callback) => refreshes.push(callback),
+      initializeIframe: async (iframe, shell) => {
+        const parsed = parseHTML(shell);
+        installPaintedLogoLayout(parsed.document, false);
+        const prototype = parsed.document.defaultView!.HTMLElement.prototype;
+        const read = prototype.getBoundingClientRect;
+        Object.defineProperty(prototype, 'getBoundingClientRect', {
+          configurable: true,
+          value(this: HTMLElement): DOMRectReadOnly {
+            boxesRead += 1;
+            return read.call(this);
+          },
+        });
+        Object.defineProperty(iframe, 'contentDocument', {
+          configurable: true,
+          value: parsed.document,
+        });
+        return parsed.document;
+      },
+    });
+
+    await engine.run(request);
+    for (const refresh of refreshes.splice(0)) refresh();
+    const snapshot = engine.snapshot()!;
+    const logo = host.iframe!.contentDocument!.querySelector<HTMLElement>(
+      '.header-logo',
+    )!;
+    engine.beginProjection({ translationEpoch: 1, pairKey: 'ja\0en' });
+    boxesRead = 0;
+    const show = (nodeId: number, translated: string, epoch = 1): boolean => {
+      const record = engine.snapshot()!.records.find(
+        (candidate) => candidate.nodeId === nodeId,
+      )!;
+      return engine.project({
+        document: snapshot.document,
+        replayLease: snapshot.replayLease,
+        nodeId,
+        nodeType: 3,
+        sourceRevision: record.revision,
+        source: record.source,
+        translationEpoch: epoch,
+        pairKey: 'ja\0en',
+        translated,
+      });
+    };
+    expect(show(5, 'Mainichi Digital ')).toBe(true);
+    expect(show(6, 'General Information')).toBe(true);
+    // Reading a box makes Chrome lay the mirror out: none is read while
+    // translations land, however many do.
+    expect(boxesRead).toBe(0);
+    expect(logo.hasAttribute(PAINTED_SEMANTIC_LABEL_ATTRIBUTE)).toBe(false);
+    expect(refreshes.length).toBe(1);
+
+    for (const refresh of refreshes.splice(0)) refresh();
+    expect(boxesRead).toBeGreaterThan(0);
+    expect(logo.querySelector(
+      `[${PAINTED_SEMANTIC_LABEL_OVERLAY_ATTRIBUTE}]`,
+    )?.textContent).toBe('Mainichi Digital General Information');
+    // Each translation is looked at once: a later layout with nothing new
+    // reads no box.
+    boxesRead = 0;
+    engine.refreshTextLayout();
+    for (const refresh of refreshes.splice(0)) refresh();
+    expect(boxesRead).toBe(0);
+
+    // A translation that went before the layout settled leaves no label.
+    engine.beginProjection({ translationEpoch: 2, pairKey: 'ja\0en' });
+    expect(logo.hasAttribute(PAINTED_SEMANTIC_LABEL_ATTRIBUTE)).toBe(false);
+    expect(show(5, 'Mainichi Digital ', 2)).toBe(true);
+    stream.observer?.onPatch(createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence: 1 }),
+      1,
+      1,
+      [{
+        kind: 'text',
+        nodeId: 5,
+        node: { kind: 'text', id: 5, text: '毎日', translatable: true },
+      }],
+    )!);
+    for (const refresh of refreshes.splice(0)) refresh();
+    expect(logo.hasAttribute(PAINTED_SEMANTIC_LABEL_ATTRIBUTE)).toBe(false);
+    expect(logo.querySelector(
+      `[${PAINTED_SEMANTIC_LABEL_OVERLAY_ATTRIBUTE}]`,
+    )).toBeNull();
   });
 
   it('does not retain records or translated projections across source documents', async () => {
@@ -4976,6 +5083,328 @@ describe('IsolatedHtmlReplicaEngine for screen readers (D124)', () => {
     expect(second.getAttribute('lang')).toBe('fr');
   });
 
+  /** A page whose root, head and body are given: XHTML, or a pragma. */
+  function pageCheckpoint(
+    rootAttributes: readonly (readonly [string, string])[],
+    head: readonly HtmlMirrorNode[],
+    body: readonly HtmlMirrorNode[],
+  ): HtmlMirrorCheckpoint {
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: {
+          kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+          attributes: rootAttributes, children: [
+            element(2, 'head', [], head),
+            element(3, 'body', [], body),
+          ],
+        },
+        adoptedStyleSheets: [],
+        captureMs: 1,
+        viewportWidth: 800,
+        viewportHeight: 600,
+        documentWidth: 800,
+        documentHeight: 1000,
+      },
+    );
+    if (!checkpoint) throw new Error('Page fixture checkpoint rejected.');
+    return checkpoint;
+  }
+
+  /** The engine over a replica whose namespaced attribute writes are kept. */
+  async function startPage(checkpoint: HtmlMirrorCheckpoint) {
+    const stream = new FakeHtmlStream(checkpoint);
+    const host = new FakePresentationHost();
+    const namespaced: string[] = [];
+    const engine = new IsolatedHtmlReplicaEngine({
+      presentationHost: host,
+      openStream: async () => stream,
+      initializeIframe: async (iframe, shell) => {
+        const { document } = parseHTML(shell);
+        const prototype = document.defaultView!.Element.prototype;
+        const write = prototype.setAttributeNS;
+        prototype.setAttributeNS = function (
+          this: Element,
+          namespace: string | null,
+          name: string,
+          value: string,
+        ): void {
+          const who = this.getAttribute('id') ?? this.localName;
+          if (namespace === XML_NAMESPACE) namespaced.push(`${who} ${name}=${value}`);
+          write.call(this, namespace, name, value);
+        };
+        Object.defineProperty(iframe, 'contentDocument', { value: document });
+        return document;
+      },
+    });
+    expect((await engine.run(request)).status).toBe('complete');
+    const replica = host.iframe!.contentDocument!;
+    const byId = (id: string): Element => replica.getElementById(id)!;
+    return { stream, engine, replica, byId, namespaced };
+  }
+
+  it('writes a page\'s xml:lang after an attribute that is only named so', async () => {
+    // The page has both, the real one first: `setAttribute` finds an
+    // attribute by its name alone, so the one written last is the one
+    // Chrome would draw by. (linkedom holds one attribute of a name, and so
+    // shows which write came last.)
+    const { stream, byId } = await startPage(pageCheckpoint([], [], [
+      element(4, 'p', [
+        ['id', 'both'], [PAGE_XML_LANGUAGE_ATTRIBUTE, 'fr'], ['xml:lang', 'de'],
+      ], [text(5, 'Deux.')]),
+    ]));
+    expect(byId('both').getAttribute('xml:lang')).toBe('fr');
+    expect(pageXmlLanguage(byId('both'))).toBe('fr');
+    patch(stream, 1, [{
+      kind: 'attributes', nodeId: 4, namespace: 'html', tagName: 'p',
+      attributes: [
+        ['id', 'both'], [PAGE_XML_LANGUAGE_ATTRIBUTE, 'it'], ['xml:lang', 'es'],
+        ['class', 'k'],
+      ],
+    }]);
+    expect(byId('both').getAttribute('xml:lang')).toBe('it');
+    expect(pageXmlLanguage(byId('both'))).toBe('it');
+    expect(byId('both').getAttribute('class')).toBe('k');
+  });
+
+  it('writes a page\'s xml:lang into the XML namespace and tags by it', async () => {
+    const { engine, replica, byId, namespaced } = await startPage(pageCheckpoint(
+      [[PAGE_XML_LANGUAGE_ATTRIBUTE, 'de']],
+      [],
+      [
+        element(4, 'p', [['id', 'a']], [text(5, 'Eins.')]),
+        element(6, 'p', [
+          ['id', 'own'], ['lang', 'en'], [PAGE_XML_LANGUAGE_ATTRIBUTE, 'fr'],
+        ], [text(7, 'Deux.')]),
+        // An HTML element's attribute that is only named so: left as it is.
+        element(8, 'p', [['id', 'named'], ['xml:lang', 'it']], [text(9, 'Tre.')]),
+        element(10, 'p', [
+          ['id', 'same'], [PAGE_XML_LANGUAGE_ATTRIBUTE, 'ja'],
+        ], [text(11, '四。')]),
+      ],
+    ));
+    // Under the page's name, in the namespace Chrome draws by; the name it
+    // travelled under is no attribute of the mirror.
+    expect(namespaced).toEqual([
+      'html xml:lang=de', 'own xml:lang=fr', 'same xml:lang=ja',
+    ]);
+    expect(pageXmlLanguage(replica.documentElement)).toBe('de');
+    expect([...replica.querySelectorAll('*')].filter((candidate) =>
+      candidate.hasAttribute(PAGE_XML_LANGUAGE_ATTRIBUTE))).toEqual([]);
+    expect(byId('named').getAttribute('xml:lang')).toBe('it');
+    expect(pageXmlLanguage(byId('named'))).toBeNull();
+    // What the page's root says in plain `lang` is still all detection reads.
+    expect(engine.snapshot()?.documentLanguage).toBeUndefined();
+
+    namespaced.length = 0;
+    engine.beginProjection(JA);
+    for (const nodeId of [5, 7, 9, 11]) expect(show(engine, nodeId)).toBe(true);
+    // The page's `xml:lang` on the root is the language of what declares none.
+    expect(byId('a').getAttribute('lang')).toBe('ja');
+    expect(byId('a').getAttribute(PAGE_LANGUAGE_ATTRIBUTE)).toBe('de');
+    expect(byId('named').getAttribute(PAGE_LANGUAGE_ATTRIBUTE)).toBe('de');
+    // Its own `xml:lang` stands where Simul's would: only the tag is added.
+    expect(byId('own').getAttribute('lang')).toBe('ja');
+    expect(byId('own').hasAttribute(PAGE_LANGUAGE_ATTRIBUTE)).toBe(false);
+    expect(byId('own').getAttribute('xml:lang')).toBe('fr');
+    // An `xml:lang` is drawn by and not heard: the one that names the
+    // language translated to still gets the tag, and nothing beside it.
+    expect(byId('same').getAttribute('lang')).toBe('ja');
+    expect(byId('same').hasAttribute(PAGE_LANGUAGE_ATTRIBUTE)).toBe(false);
+    expect(namespaced).toEqual(['a simul:lang=de', 'named simul:lang=de']);
+
+    engine.beginProjection(SOURCE_ONLY);
+    expect(byId('own').getAttribute('lang')).toBe('en');
+    expect(byId('own').getAttribute('xml:lang')).toBe('fr');
+    expect([...replica.querySelectorAll('*')].filter((candidate) =>
+      candidate.hasAttribute(PAGE_LANGUAGE_ATTRIBUTE))).toEqual([]);
+  });
+
+  it('follows the page\'s patches of an xml:lang under a translation, and a rollback', async () => {
+    const { engine, stream, replica, byId, namespaced } = await startPage(
+      pageCheckpoint([['lang', 'en']], [], [
+        element(4, 'div', [['id', 'wrap']], [
+          element(5, 'p', [['id', 'a']], [text(6, 'One.')]),
+        ]),
+        element(7, 'p', [['id', 'b'], ['class', 'x']], [text(8, 'Two.')]),
+      ]),
+    );
+    engine.beginProjection(JA);
+    expect(show(engine, 6)).toBe(true);
+    expect(show(engine, 8)).toBe(true);
+    expect(byId('a').getAttribute(PAGE_LANGUAGE_ATTRIBUTE)).toBe('en');
+
+    // An ancestor takes an `xml:lang`: what the tag keeps drawn follows.
+    patch(stream, 1, [{
+      kind: 'attributes', nodeId: 4, namespace: 'html', tagName: 'div',
+      attributes: [['id', 'wrap'], [PAGE_XML_LANGUAGE_ATTRIBUTE, 'de']],
+    }]);
+    expect(byId('a').getAttribute(PAGE_LANGUAGE_ATTRIBUTE)).toBe('de');
+    expect(byId('a').getAttribute('lang')).toBe('ja');
+
+    // The tagged element takes its own: Simul's leaves the place, and is not
+    // written back over the page's value.
+    namespaced.length = 0;
+    patch(stream, 2, [{
+      kind: 'attributes', nodeId: 7, namespace: 'html', tagName: 'p',
+      attributes: [['id', 'b'], [PAGE_XML_LANGUAGE_ATTRIBUTE, 'fr']],
+    }]);
+    // (Written twice: a patch is tried on a spare element first.)
+    expect(namespaced).toEqual(['b xml:lang=fr', 'b xml:lang=fr']);
+    expect(byId('b').hasAttribute(PAGE_LANGUAGE_ATTRIBUTE)).toBe(false);
+    expect(byId('b').getAttribute('xml:lang')).toBe('fr');
+    expect(byId('b').getAttribute('lang')).toBe('ja');
+
+    // With a plain `lang` in the language translated to, nothing is left to
+    // say; the page's `xml:lang` goes on drawing.
+    patch(stream, 3, [{
+      kind: 'attributes', nodeId: 7, namespace: 'html', tagName: 'p',
+      attributes: [
+        ['id', 'b'], ['lang', 'ja'], [PAGE_XML_LANGUAGE_ATTRIBUTE, 'fr'],
+      ],
+    }]);
+    expect(byId('b').getAttribute('lang')).toBe('ja');
+    expect(pageAttribute(byId('b'), 'lang')).toBe('ja');
+    expect(byId('b').getAttribute('xml:lang')).toBe('fr');
+    expect(byId('b').hasAttribute(PAGE_LANGUAGE_ATTRIBUTE)).toBe(false);
+
+    // Taken away: the tag is back, with Simul's own beside it.
+    patch(stream, 4, [{
+      kind: 'attributes', nodeId: 7, namespace: 'html', tagName: 'p',
+      attributes: [['id', 'b']],
+    }]);
+    expect(pageXmlLanguage(byId('b'))).toBeNull();
+    expect(byId('b').hasAttribute('xml:lang')).toBe(false);
+    expect(byId('b').getAttribute('lang')).toBe('ja');
+    expect(byId('b').getAttribute(PAGE_LANGUAGE_ATTRIBUTE)).toBe('en');
+
+    // A patch that fails after it rewrote the wrapper's attributes: the
+    // page's `xml:lang` goes back into its namespace under its own name.
+    const wrap = byId('wrap');
+    const insert = vi.spyOn(wrap, 'insertBefore').mockImplementationOnce(() => {
+      throw new Error('synthetic apply failure');
+    });
+    namespaced.length = 0;
+    patch(stream, 5, [{
+      kind: 'attributes', nodeId: 4, namespace: 'html', tagName: 'div',
+      attributes: [['id', 'wrap'], ['lang', 'fr']],
+    }, {
+      kind: 'reconcile-children', nodeId: 4, children: [
+        { kind: 'graph', node: element(50, 'p', [], [text(51, 'Partial.')]) },
+        { kind: 'retain', nodeId: 5 },
+      ],
+    }]);
+    insert.mockRestore();
+    expect(stream.requested).toEqual([4]);
+    expect(namespaced).toContain('wrap xml:lang=de');
+    expect(pageXmlLanguage(wrap)).toBe('de');
+    expect(wrap.getAttribute('xml:lang')).toBe('de');
+    expect(wrap.hasAttribute('lang')).toBe(false);
+    expect(wrap.hasAttribute(PAGE_XML_LANGUAGE_ATTRIBUTE)).toBe(false);
+    expect(replica.querySelectorAll('p').length).toBe(2);
+  });
+
+  it('gives the mirror the document\'s language the root carries, and tags by it', async () => {
+    const { engine, stream, replica, byId } = await startPage(pageCheckpoint(
+      [[PAGE_DOCUMENT_LANGUAGE_ATTRIBUTE, 'de'], ['class', 'r']],
+      // A page's own pragma arrives without what would act.
+      [element(20, 'meta', [], [])],
+      [
+        element(4, 'p', [['id', 'a']], [text(5, 'Eins.')]),
+        element(6, 'p', [['id', 'b'], ['lang', 'fr']], [text(7, 'Deux.')]),
+      ],
+    ));
+    const pragmas = (): string[] =>
+      [...replica.querySelectorAll('meta[http-equiv="content-language"]')].map(
+        (meta) => `${meta.getAttribute('data-simul-owned-shell')}=${meta.getAttribute('content')}`,
+      );
+    // One pragma of Simul's own says it; it is no attribute of the root.
+    expect(pragmas()).toEqual(['language=de']);
+    expect(replica.documentElement.hasAttribute(PAGE_DOCUMENT_LANGUAGE_ATTRIBUTE))
+      .toBe(false);
+    expect(replica.documentElement.getAttribute('class')).toBe('r');
+    engine.beginProjection(JA);
+    expect(show(engine, 5)).toBe(true);
+    expect(show(engine, 7)).toBe(true);
+    expect(byId('a').getAttribute('lang')).toBe('ja');
+    expect(byId('a').getAttribute(PAGE_LANGUAGE_ATTRIBUTE)).toBe('de');
+    expect(byId('b').getAttribute(PAGE_LANGUAGE_ATTRIBUTE)).toBe('fr');
+
+    // The page's Chrome says another: the root's patch brings it, the
+    // pragma is written again, and every tag that leaned on it follows.
+    const rootPatch = (
+      sequence: number,
+      attributes: readonly (readonly [string, string])[],
+    ): void => patch(stream, sequence, [{
+      kind: 'attributes', nodeId: 1, namespace: 'html', tagName: 'html',
+      attributes,
+    }]);
+    rootPatch(1, [[PAGE_DOCUMENT_LANGUAGE_ATTRIBUTE, 'it']]);
+    expect(pragmas()).toEqual(['language=it']);
+    expect(byId('a').getAttribute(PAGE_LANGUAGE_ATTRIBUTE)).toBe('it');
+    expect(byId('b').getAttribute(PAGE_LANGUAGE_ATTRIBUTE)).toBe('fr');
+
+    // To the language translated to: the page already says it.
+    rootPatch(2, [[PAGE_DOCUMENT_LANGUAGE_ATTRIBUTE, 'ja']]);
+    expect(byId('a').hasAttribute('lang')).toBe(false);
+
+    // A patch of the root that names none (the root has taken a `lang`, and
+    // the document's language can no longer be read): the mirror keeps what
+    // it has, which the root's own language now covers.
+    rootPatch(3, [['lang', 'en']]);
+    expect(pragmas()).toEqual(['language=ja']);
+    expect(byId('a').getAttribute('lang')).toBe('ja');
+    expect(byId('a').getAttribute(PAGE_LANGUAGE_ATTRIBUTE)).toBe('en');
+
+    // A language that names none.
+    rootPatch(4, [[PAGE_DOCUMENT_LANGUAGE_ATTRIBUTE, '']]);
+    expect(pragmas()).toEqual(['language=']);
+    expect(byId('a').getAttribute(PAGE_LANGUAGE_ATTRIBUTE)).toBe('');
+
+    // A patch that fails after it rewrote the root: the language goes back.
+    rootPatch(5, [[PAGE_DOCUMENT_LANGUAGE_ATTRIBUTE, 'de']]);
+    const body = replica.body;
+    const insert = vi.spyOn(body, 'insertBefore').mockImplementationOnce(() => {
+      throw new Error('synthetic apply failure');
+    });
+    patch(stream, 6, [{
+      kind: 'attributes', nodeId: 1, namespace: 'html', tagName: 'html',
+      attributes: [[PAGE_DOCUMENT_LANGUAGE_ATTRIBUTE, 'es']],
+    }, {
+      kind: 'reconcile-children', nodeId: 3, children: [
+        { kind: 'graph', node: element(50, 'p', [], [text(51, 'Partial.')]) },
+        { kind: 'retain', nodeId: 4 },
+        { kind: 'retain', nodeId: 6 },
+      ],
+    }]);
+    insert.mockRestore();
+    expect(stream.requested).toEqual([5]);
+    expect(pragmas()).toEqual(['language=de']);
+  });
+
+  it('gives the mirror no language from a patch it then refuses', async () => {
+    const { stream, replica } = await startPage(pageCheckpoint(
+      [[PAGE_DOCUMENT_LANGUAGE_ATTRIBUTE, 'de']],
+      [],
+      [element(4, 'p', [['id', 'a']], [text(5, 'One.')])],
+    ));
+    const pragma = (): string | null | undefined =>
+      replica.querySelector('meta[http-equiv="content-language"]')
+        ?.getAttribute('content');
+    expect(pragma()).toBe('de');
+    // A patch is tried on a spare element before anything is touched; the
+    // spare root is no document's root, and says nothing to the mirror. The
+    // second change names a node the mirror does not hold: all is refused.
+    patch(stream, 1, [{
+      kind: 'attributes', nodeId: 1, namespace: 'html', tagName: 'html',
+      attributes: [[PAGE_DOCUMENT_LANGUAGE_ATTRIBUTE, 'es']],
+    }, {
+      kind: 'text', nodeId: 999, node: text(999, 'Nowhere.'),
+    }]);
+    expect(stream.requested).toEqual([0]);
+    expect(pragma()).toBe('de');
+  });
+
   it('leaves text the translator gave back as it was in the page\'s language', async () => {
     const { engine, stream, byText } = await start();
     engine.beginProjection(JA);
@@ -5253,6 +5682,59 @@ describe('IsolatedHtmlReplicaEngine for screen readers (D124)', () => {
       rowElements, rows, translate,
     };
   }
+
+  it('still counts every node toward the size of the replica it keeps', async () => {
+    // The panel keeps three times the element limit: 3,032 nodes at the
+    // smallest. Simul's own nodes count too: each shadow root of the mirror
+    // holds a style element for the shell and one for each adopted sheet.
+    const limits = { itemMegabytes: 1, pageMegabytes: 1, maxElements: 1_000 };
+    const run = async (sheets: number) => {
+      const stream = new FakeHtmlStream(checkpointOf(
+        Array.from({ length: 200 }, (_, at): HtmlMirrorNode => ({
+          kind: 'element', id: 10 + at * 2, namespace: 'html', tagName: 'div',
+          attributes: [], children: [], shadowRoot: {
+            id: 11 + at * 2, mode: 'open', children: [],
+            adoptedStyleSheets: Array.from(
+              { length: sheets },
+              (_unused, sheet) => `.s${sheet}{color:red}`,
+            ),
+          },
+        })),
+      ));
+      const host = new FakePresentationHost();
+      const engine = new IsolatedHtmlReplicaEngine({
+        presentationHost: host,
+        getMirrorLimits: () => limits,
+        openStream: async () => stream,
+        initializeIframe: async (iframe, shell) => {
+          const { document } = parseHTML(shell);
+          Object.defineProperty(iframe, 'contentDocument', { value: document });
+          return document;
+        },
+      });
+      expect((await engine.run(request)).status).toBe('complete');
+      // Any patch has the size looked at.
+      patch(stream, 1, [{
+        kind: 'attributes', nodeId: 3, namespace: 'html', tagName: 'body',
+        attributes: [['class', 'a']],
+      }]);
+      return stream;
+    };
+    try {
+      applyHtmlMirrorLimitSettings(limits);
+      // 200 hosts and roots, and in each root a shell style and five sheets
+      // with their text: about 2,800 nodes.
+      const fits = await run(5);
+      expect(fits.acknowledged).toEqual([0, 1]);
+      expect(fits.requested).toEqual([]);
+      // With six sheets a root: about 3,200.
+      const tooMany = await run(6);
+      expect(tooMany.acknowledged).toEqual([0]);
+      expect(tooMany.requested).toEqual([0]);
+    } finally {
+      applyHtmlMirrorLimitSettings();
+    }
+  });
 
   it('tags a control\'s translated text and the select facsimile\'s translated text', async () => {
     const {

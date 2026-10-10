@@ -49,7 +49,11 @@ mirror's links and out of it; no other key acts on the mirror.
   page rule do see a difference: one that selects on the attribute itself
   (`[lang="en"]`) sees the translation's language, and one written with the
   XML namespace (`[xml|lang]`, `[*|lang]`) matches the elements that show a
-  translation.
+  translation. The page's own language is its `lang`; the `xml:lang` of an
+  XHTML document or of SVG and MathML, which the mirror draws by as the
+  page does; or, where the page's root declares none, the document's own
+  language, which Chrome takes from a `<meta http-equiv="content-language">`
+  or from the HTTP `Content-Language` header.
 - **No announcements.** The mirror announces nothing by itself. A page's
   alerts, status lines and other live regions are announced by the tab; in
   the mirror they are ordinary text that keeps its role, so they are not
@@ -65,7 +69,8 @@ mirror's links and out of it; no other key acts on the mirror.
 - **Images.** An image whose caption translates its own `alt` or
   `aria-label` text is named by the translation, and the caption is not read
   again. Text read from an image's pixels is new, so it is read as text over
-  the image, in its language.
+  the image, in its language; a piece the translator gives back as it was
+  read (a number, a name) says no language of its own.
 
 ### Size
 

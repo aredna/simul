@@ -81,6 +81,11 @@ export interface TranslatedImageRegion {
   readonly text: string;
   readonly boundingBox: ImageBoundingBox;
   readonly placement?: 'ocr-box' | 'whole-image';
+  /**
+   * The translator gave the text back as it was read: a number, a name. It
+   * is still in the language of the image, not in the one translated to.
+   */
+  readonly unchanged?: true;
 }
 
 export interface ImageOverlayProjection {
@@ -323,9 +328,6 @@ export class ImageOverlayProjector {
     const { root, content } = createOverlayElement(replayDocument);
     root.dataset.simulImageOverlay = String(projection.nodeId);
     root.dataset.simulImageMethod = projection.methodId;
-    // On the box inside the overlay's own shadow root, where page selectors
-    // do not reach (D124).
-    if (this.#targetLanguage) showOwnLanguage(content, this.#targetLanguage);
     // A caption made from the image's own alt text or aria-label is read as
     // the image's name; text read from the pixels is new and stays (D124).
     if (projection.evidenceKind === 'semantic') {
@@ -335,6 +337,13 @@ export class ImageOverlayProjector {
       const element = replayDocument.createElement('span');
       element.textContent = region.text;
       element.dir = 'auto';
+      // Each piece of text says the language translated to, inside the
+      // overlay's own shadow root, where page selectors do not reach (D124).
+      // A piece the translator gave back as it was read says none: it is
+      // heard in the language of the place the image stands in.
+      if (this.#targetLanguage && !region.unchanged) {
+        showOwnLanguage(element, this.#targetLanguage);
+      }
       applyRegionStyle(element, region.placement === 'whole-image');
       content.append(element);
     }
@@ -655,6 +664,7 @@ function validProjection(value: ImageOverlayProjection): boolean {
     typeof region.text === 'string' &&
     region.text.length > 0 &&
     region.text.length <= 100_000 &&
+    (region.unchanged === undefined || region.unchanged === true) &&
     validBox(region.boundingBox, value.bitmapWidth, value.bitmapHeight),
   );
 }
@@ -713,6 +723,7 @@ function sameTranslatedRegions(
     return Boolean(
       candidate &&
       region.text === candidate.text &&
+      region.unchanged === candidate.unchanged &&
       region.placement === candidate.placement &&
       region.boundingBox.x === candidate.boundingBox.x &&
       region.boundingBox.y === candidate.boundingBox.y &&

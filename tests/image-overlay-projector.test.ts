@@ -967,10 +967,12 @@ describe('ImageOverlayProjector', () => {
 
       const root = overlayFor(view.document, 7) as HTMLElement;
       expect(root.getAttribute('aria-hidden')).toBe('true');
-      expect(imageOverlayContent(root)?.getAttribute('lang')).toBe('ja');
-      // Simul's own box: drawn by no language, as before; the image itself
+      const piece = imageOverlayContent(root)?.firstElementChild;
+      expect(piece?.getAttribute('lang')).toBe('ja');
+      // Simul's own text: drawn by no language, as before; the image itself
       // is the page's and keeps the page's.
-      expect(imageOverlayContent(root)?.getAttribute('simul:lang')).toBe('');
+      expect(piece?.getAttribute('simul:lang')).toBe('');
+      expect(imageOverlayContent(root)?.hasAttribute('lang')).toBe(false);
       expect(imageOverlayContent(root)?.textContent).toBe('夜明けの港');
       // The name goes through aria-label; alt stays the page's (D76).
       expect(image.getAttribute('aria-label')).toBe('夜明けの港');
@@ -1039,10 +1041,55 @@ describe('ImageOverlayProjector', () => {
       expect(view.projector.project(projection())).toBe(true);
       const root = overlayFor(view.document, 7) as HTMLElement;
       expect(root.hasAttribute('aria-hidden')).toBe(false);
-      expect(imageOverlayContent(root)?.getAttribute('lang')).toBe('ja');
-      expect(imageOverlayContent(root)?.getAttribute('simul:lang')).toBe('');
+      const pieces = [...imageOverlayContent(root)!.children];
+      expect(pieces.length).toBeGreaterThan(0);
+      for (const piece of pieces) {
+        expect(piece.getAttribute('lang')).toBe('ja');
+        expect(piece.getAttribute('simul:lang')).toBe('');
+      }
       expect(image.hasAttribute('aria-label')).toBe(false);
       expect(image.hasAttribute('lang')).toBe(false);
+    });
+
+    it('says no language for pixel text the translator gave back as it was read', () => {
+      const view = mirror('<main><img alt="Opening hours"></main>');
+      view.projector.beginPair(1, 'en>ja', 'ja');
+      const regions = [
+        { text: '営業時間', boundingBox: { x: 0, y: 0, width: 40, height: 15 } },
+        {
+          text: '09:30 17:45',
+          boundingBox: { x: 0, y: 20, width: 40, height: 15 },
+          unchanged: true as const,
+        },
+      ];
+      expect(view.projector.project(projection({ regions }))).toBe(true);
+      const root = overlayFor(view.document, 7) as HTMLElement;
+      const [translated, kept] = [...imageOverlayContent(root)!.children];
+      expect(translated?.textContent).toBe('営業時間');
+      expect(translated?.getAttribute('lang')).toBe('ja');
+      expect(translated?.getAttribute('simul:lang')).toBe('');
+      // The digits are heard in the language of the place the image is in.
+      expect(kept?.textContent).toBe('09:30 17:45');
+      expect(kept?.hasAttribute('lang')).toBe(false);
+      expect(kept?.hasAttribute('simul:lang')).toBe(false);
+      expect(imageOverlayContent(root)?.hasAttribute('lang')).toBe(false);
+
+      // The same words, now changed by the translator: drawn again, tagged.
+      expect(view.projector.project(projection({
+        jobOrdinal: 2,
+        regions: [regions[0]!, { ...regions[1]!, unchanged: undefined }],
+      }))).toBe(true);
+      const again = overlayFor(view.document, 7) as HTMLElement;
+      expect(again).not.toBe(root);
+      for (const piece of [...imageOverlayContent(again)!.children]) {
+        expect(piece.getAttribute('lang')).toBe('ja');
+      }
+
+      // Nothing but `true` marks a piece.
+      expect(view.projector.project(projection({
+        jobOrdinal: 3,
+        regions: [{ ...regions[1]!, unchanged: false as unknown as true }],
+      }))).toBe(false);
     });
 
     it('gives the name back when pixel text replaces the caption', () => {
@@ -1078,8 +1125,10 @@ describe('ImageOverlayProjector', () => {
       expect(view.projector.project(caption('夜明けの港', { pairEpoch: 3 }))).toBe(true);
       expect(image.getAttribute('aria-label')).toBe('夜明けの港');
       expect(image.hasAttribute('lang')).toBe(false);
-      expect(imageOverlayContent(overlayFor(view.document, 7))?.hasAttribute('lang'))
-        .toBe(false);
+      expect(
+        imageOverlayContent(overlayFor(view.document, 7))?.firstElementChild
+          ?.hasAttribute('lang'),
+      ).toBe(false);
       view.projector.dispose();
       expect(image.hasAttribute('aria-label')).toBe(false);
     });
@@ -1112,9 +1161,10 @@ describe('ImageOverlayProjector', () => {
       expect(view.projector.project(caption('みなと', { pairKey: 'zh>ja' }))).toBe(true);
       expect(image.getAttribute('aria-label')).toBe('みなと');
       expect(image.hasAttribute('lang')).toBe(false);
-      const content = imageOverlayContent(overlayFor(view.document, 7));
-      expect(content?.getAttribute('lang')).toBe('ja');
-      expect(content?.getAttribute('simul:lang')).toBe('');
+      const piece = imageOverlayContent(overlayFor(view.document, 7))
+        ?.firstElementChild;
+      expect(piece?.getAttribute('lang')).toBe('ja');
+      expect(piece?.getAttribute('simul:lang')).toBe('');
     });
 
     it('has a named image looked at again when the page changes a lang, until the name goes', () => {

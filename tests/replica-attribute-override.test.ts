@@ -128,4 +128,17 @@ describe('replica attribute overrides (D124)', () => {
     expect(paragraph.hasAttribute('simul:lang')).toBe(false);
     expect(paragraph.attributes.length).toBe(2);
   });
+
+  it('leaves out of the page\'s attributes those the caller lists itself', () => {
+    const paragraph = element('<p lang="fr" xml:lang="de" class="a">Bonjour</p>');
+    setReplicaAttributeOverride(paragraph, 'lang', 'ja');
+    const listed = pageAttributes(
+      paragraph,
+      (attribute) => attribute.name === 'xml:lang',
+    );
+    expect([...listed].sort()).toEqual([['class', 'a'], ['lang', 'fr']]);
+    // Without a rule every attribute of the page is listed.
+    expect(pageAttributes(paragraph).map(([name]) => name).sort())
+      .toEqual(['class', 'lang', 'xml:lang']);
+  });
 });

@@ -308,7 +308,8 @@ most 60% when long text on a short image would otherwise shrink below about
 on by default every eligible image with alt text gets a translated caption
 before any image access is granted. For a screen reader that caption is the
 image's name and is not read as text beside it (D124); OCR overlays are read
-as text, in the target language.
+as text, in the target language, apart from a piece the translator gave back
+as it was read, which says no language.
 Decorative, hidden, zero-area, filename/URL-like, or secret-overlapping evidence
 is rejected. Positive-area accessibility labels are not blocked by the OCR
 small-image setting.
@@ -522,7 +523,29 @@ or, through the XML namespace, on Simul's. Simul's own elements (image
 overlays, the select facsimile) say the language with the namespaced
 attribute empty, and are drawn by the browser's language as before. The
 images the projector names are looked at again on a page patch to `lang`
-(`showImageLanguage`, `refreshImageLanguages`).
+(`showImageLanguage`, `refreshImageLanguages`). The page's language is read
+as HTML defines it (`pageLanguage`): a `lang` of the XML namespace first,
+which the sanitizer sends under the name `simul:xml-lang` and the engine
+writes back into that namespace (`writePageXmlLanguage`); then `lang`; then
+the nearest ancestor's; and with none, the document's own language. The
+page side asks its Chrome for that one where the root declares no language
+and sends the answer on the root (`readSourceDocumentLanguage`, the wire
+name `simul:document-lang`); the mirror says it with one pragma of Simul's
+own (`showDocumentLanguage`), and `documentContentLanguage` is the value
+that pragma carries. No pragma of the page travels. That
+is the language a tagged element is kept drawn by; whether the page already
+says the language translated to is asked of the plain `lang` alone, which is
+all Chrome's accessibility tree reads (`pageLanguages`). An
+image overlay says the language on each piece of text, and on none that the
+translator gave back as it was read (`TranslatedImageRegion.unchanged`).
+
+A translated label that the page paints as a picture is looked for when the
+mirror's layout is next settled (`#settlePaintedLabels`, before each extent
+measurement and so before the next paint), for every translation that
+landed since, over one layout. Asked as each translation landed, the
+question made Chrome lay the mirror out once per translation: a page of
+9,000 translated elements whose translations arrived together held the
+panel for tens of seconds.
 
 The extension transports no raw source HTML. Checkpoint, patch, and semantic
 boundaries allowlist tags, style properties, attributes, image schemes, and the

@@ -29,6 +29,39 @@ export const XML_NAMESPACE = 'http://www.w3.org/XML/1998/namespace';
 export const PAGE_LANGUAGE_ATTRIBUTE = 'simul:lang';
 
 /**
+ * A page's own `lang` in the XML namespace, by mirrored element: `xml:lang`
+ * as an XHTML document writes it, as the HTML parser reads it on SVG and
+ * MathML, or as a script set it. It is the page's language for the element
+ * before the plain `lang`, and Chrome draws by it. An element has one place
+ * for a `lang` in that namespace, whatever the attribute is called, so the
+ * page's own and `simul:lang` cannot both be there: where the page has one,
+ * Simul writes none, and the page's already says what to draw by.
+ */
+const pageXmlLanguages = new WeakMap<Element, string>();
+
+/**
+ * Writes the page's `xml:lang` onto a mirrored element, in its namespace.
+ * The engine calls it wherever it writes an element's attributes.
+ */
+export function writePageXmlLanguage(element: Element, language: string): void {
+  // Simul's own leaves the place first; shown again, it would write over
+  // the page's value.
+  clearReplicaAttributeOverride(element, PAGE_LANGUAGE_ATTRIBUTE);
+  element.setAttributeNS(XML_NAMESPACE, 'xml:lang', language);
+  pageXmlLanguages.set(element, language);
+}
+
+/** The element's attributes are being written again: it has none so far. */
+export function forgetPageXmlLanguage(element: Element): void {
+  pageXmlLanguages.delete(element);
+}
+
+/** The page's own `xml:lang` on `element`, or `null`. */
+export function pageXmlLanguage(element: Element): string | null {
+  return pageXmlLanguages.get(element) ?? null;
+}
+
+/**
  * The language of translated text in the mirror, for screen readers (D124).
  * While an element shows a translation (as the parent of a translated text
  * node, or in its own value, placeholder or label) it carries `lang` set to
@@ -127,17 +160,20 @@ export class TranslatedLanguageTags {
  * `clearTranslatedLanguage` undoes it.
  */
 export function applyTranslatedLanguage(element: Element, language: string): void {
-  const declared = pageLanguage(element);
-  if (sameLanguage(declared, language)) {
+  const { said, drawn } = pageLanguages(element);
+  if (sameLanguage(said, language)) {
     clearTranslatedLanguage(element);
     return;
   }
-  setReplicaAttributeOverride(
-    element,
-    PAGE_LANGUAGE_ATTRIBUTE,
-    declared ?? '',
-    XML_NAMESPACE,
-  );
+  // The page's own `xml:lang` is in the same place and already says it.
+  if (!pageXmlLanguages.has(element)) {
+    setReplicaAttributeOverride(
+      element,
+      PAGE_LANGUAGE_ATTRIBUTE,
+      drawn ?? '',
+      XML_NAMESPACE,
+    );
+  }
   setReplicaAttributeOverride(element, 'lang', language);
 }
 
@@ -208,18 +244,101 @@ export function refreshImageLanguages(document: Document): void {
 const MAX_LANGUAGE_DEPTH = 256;
 
 /**
- * The language the page declares for `element`: its own `lang` or the nearest
- * ancestor's, through shadow hosts, as HTML defines it. Simul's own `lang`
+ * The language the page declares for `element`, as HTML defines it and as
+ * Chrome draws by it: its own `xml:lang` (in the XML namespace) or `lang`,
+ * or the nearest ancestor's, through shadow hosts; with none, the
+ * document's own language (`documentContentLanguage`). Simul's own `lang`
  * values do not count. `undefined` when nothing declares one.
  */
 export function pageLanguage(element: Element): string | undefined {
+  return pageLanguages(element).drawn;
+}
+
+/**
+ * The page's two languages for `element`. `drawn` is HTML's (see
+ * `pageLanguage`). `said` is what Chrome's accessibility tree would say
+ * without a tag of Simul's: it reads the plain `lang` alone, the element's
+ * or the nearest ancestor's, and then the document's own language; an
+ * `xml:lang` is not heard. The two are the same on every page that writes
+ * no `xml:lang`.
+ * A translation is tagged when the page does not already say its language,
+ * and the tagged element is kept drawn by `drawn`.
+ */
+function pageLanguages(
+  element: Element,
+): { readonly said: string | undefined; readonly drawn: string | undefined } {
+  let said: string | undefined;
+  let drawn: string | undefined;
   let current: Element | undefined = element;
   for (let depth = 0; current && depth < MAX_LANGUAGE_DEPTH; depth += 1) {
-    const declared = pageAttribute(current, 'lang');
-    if (declared !== null) return declared.trim();
+    const plain = pageAttribute(current, 'lang');
+    if (drawn === undefined) {
+      const declared = pageXmlLanguages.get(current) ?? plain;
+      if (declared !== null) drawn = declared.trim();
+    }
+    if (plain !== null) {
+      said = plain.trim();
+      break;
+    }
     current = composedParentElement(current);
   }
-  return undefined;
+  if (said === undefined || drawn === undefined) {
+    const ofDocument = documentContentLanguage(element.ownerDocument);
+    said ??= ofDocument;
+    drawn ??= ofDocument;
+  }
+  return { said, drawn };
+}
+
+/** The language each mirror document was given, and the pragma that says it. */
+const documentLanguages = new WeakMap<
+  Document,
+  { language: string; readonly pragma: Element }
+>();
+
+/**
+ * Gives the mirror's document the page's own language: what Chrome takes
+ * for a document where no element declares one, from a
+ * `<meta http-equiv="content-language">` or the HTTP header. The page side
+ * asks its Chrome what that language is and sends the answer; none of the
+ * page's pragmas travels. The mirror says it with one pragma of Simul's own,
+ * written again each time the answer changes, so the mirror's Chrome reads it
+ * last and holds exactly the page's value, for what it draws and for the
+ * accessibility tree. An empty value is a pragma that names no language,
+ * which is how a document that had one is brought to say none: Chrome never
+ * forgets a pragma.
+ */
+export function showDocumentLanguage(document: Document, language: string): void {
+  const shown = documentLanguages.get(document);
+  if (shown?.language === language) return;
+  if (shown?.pragma.isConnected) {
+    shown.language = language;
+    shown.pragma.setAttribute('content', language);
+    return;
+  }
+  const head = document.head;
+  if (!head) return;
+  const pragma = document.createElement('meta');
+  pragma.setAttribute('data-simul-owned-shell', 'language');
+  pragma.setAttribute('http-equiv', 'content-language');
+  pragma.setAttribute('content', language);
+  // After the shell's own elements, before anything of the page's.
+  let after: Element | null = null;
+  for (let child = head.firstElementChild; child; child = child.nextElementSibling) {
+    if (child.hasAttribute('data-simul-owned-shell')) after = child;
+  }
+  head.insertBefore(pragma, after ? after.nextSibling : head.firstChild);
+  documentLanguages.set(document, { language, pragma });
+}
+
+/**
+ * The language the mirror's document was given (`showDocumentLanguage`):
+ * the same value its Chrome holds. `undefined` when it was given none.
+ */
+export function documentContentLanguage(
+  document: Document | null | undefined,
+): string | undefined {
+  return document ? documentLanguages.get(document)?.language : undefined;
 }
 
 /**

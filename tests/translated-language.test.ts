@@ -12,13 +12,18 @@ import {
   applyTranslatedLanguage,
   clearTranslatedLanguage,
   copyTranslatedLanguage,
+  documentContentLanguage,
+  forgetPageXmlLanguage,
   hideImageLanguage,
   pageLanguage,
+  pageXmlLanguage,
   refreshImageLanguages,
+  showDocumentLanguage,
   showImageLanguage,
   showOwnLanguage,
   shownTranslationLanguage,
   translationLanguageTag,
+  writePageXmlLanguage,
 } from '../lib/replica/translated-language';
 
 function page(body: string, htmlAttributes = 'lang="en"'): Document {
@@ -389,6 +394,221 @@ describe('TranslatedLanguageTags (D124)', () => {
     expect(span.getAttribute('lang')).toBe('ja');
     expect(span.attributes.length).toBe(2);
     expect(tags.size).toBe(0);
+  });
+
+  /**
+   * What the engine does when a page patch rewrites an element's attributes:
+   * all off, the page's own back on, then what Simul shows over them.
+   */
+  function rewrite(
+    target: Element,
+    attributes: readonly (readonly [string, string])[],
+    xmlLanguage?: string,
+  ): void {
+    for (const { name } of [...target.attributes]) target.removeAttribute(name);
+    forgetPageXmlLanguage(target);
+    for (const [name, value] of attributes) target.setAttribute(name, value);
+    if (xmlLanguage !== undefined) writePageXmlLanguage(target, xmlLanguage);
+    reapplyReplicaAttributeOverrides(target);
+  }
+
+  it('takes a page\'s xml:lang for its language, before lang and from an ancestor', () => {
+    const document = page(
+      '<div id="wrap"><p id="a">Eins</p><p id="b" lang="fr">Deux</p></div><p id="c" lang="en">Three</p>',
+      '',
+    );
+    const at = (id: string): Element => document.getElementById(id)!;
+    const [wrap, a, b, c] = [at('wrap'), at('a'), at('b'), at('c')];
+    expect(pageLanguage(a)).toBeUndefined();
+    expect(pageXmlLanguage(wrap)).toBeNull();
+
+    const written: (readonly [string | null, string, string])[] = [];
+    const write = wrap.setAttributeNS.bind(wrap);
+    wrap.setAttributeNS = (namespace, name, value): void => {
+      written.push([namespace, name, value]);
+      write(namespace, name, value);
+    };
+    writePageXmlLanguage(wrap, 'de');
+    // In the XML namespace, under the name a page gives it.
+    expect(written).toEqual([[XML_NAMESPACE, 'xml:lang', 'de']]);
+    expect(pageXmlLanguage(wrap)).toBe('de');
+    expect(pageLanguage(wrap)).toBe('de');
+    expect(pageLanguage(a)).toBe('de');
+    // A nearer `lang` wins over an ancestor's `xml:lang`.
+    expect(pageLanguage(b)).toBe('fr');
+    // On one element `xml:lang` wins over `lang`.
+    writePageXmlLanguage(c, ' ja ');
+    expect(pageLanguage(c)).toBe('ja');
+
+    forgetPageXmlLanguage(c);
+    expect(pageXmlLanguage(c)).toBeNull();
+    expect(pageLanguage(c)).toBe('en');
+  });
+
+  it('writes no simul:lang where the page\'s own xml:lang stands, and tags the rest by it', () => {
+    const document = page(
+      '<div id="wrap"><p id="a">Eins</p></div><p id="own" lang="en">Drei</p>' +
+      '<p id="same">四</p><p id="plain" lang="ja">五</p>',
+      '',
+    );
+    const at = (id: string): Element => document.getElementById(id)!;
+    const [wrap, a, own, same, plain] =
+      [at('wrap'), at('a'), at('own'), at('same'), at('plain')];
+    writePageXmlLanguage(wrap, 'de');
+    writePageXmlLanguage(own, 'fr');
+    writePageXmlLanguage(same, 'ja-JP');
+    writePageXmlLanguage(plain, 'de');
+    const tags = new TranslatedLanguageTags();
+    tags.show(1, a, 'ja');
+    tags.show(2, own, 'ja');
+    tags.show(3, same, 'ja');
+    tags.show(4, plain, 'ja');
+
+    // Drawn by the language it inherits from the page's `xml:lang`.
+    expect(a.getAttribute('lang')).toBe('ja');
+    expect(a.getAttribute(PAGE_LANGUAGE_ATTRIBUTE)).toBe('de');
+    // The element's own `xml:lang` is in the place `simul:lang` would take:
+    // Chrome keeps one `lang` of that namespace per element.
+    expect(own.getAttribute('lang')).toBe('ja');
+    expect(own.hasAttribute(PAGE_LANGUAGE_ATTRIBUTE)).toBe(false);
+    expect(own.getAttribute('xml:lang')).toBe('fr');
+    expect(pageAttribute(own, 'lang')).toBe('en');
+    // An `xml:lang` is drawn by and not heard: Chrome's accessibility tree
+    // reads the plain `lang` alone. So an element that only its `xml:lang`
+    // calls Japanese still says so with the tag,
+    expect(same.getAttribute('lang')).toBe('ja');
+    expect(same.hasAttribute(PAGE_LANGUAGE_ATTRIBUTE)).toBe(false);
+    expect(same.getAttribute('xml:lang')).toBe('ja-JP');
+    // and one whose plain `lang` already says it gets nothing, whatever its
+    // `xml:lang` draws it by.
+    expect([...plain.attributes].map(({ name, value }) => `${name}=${value}`)
+      .sort()).toEqual(['id=plain', 'lang=ja', 'xml:lang=de']);
+
+    tags.release();
+    expect(a.attributes.length).toBe(1);
+    expect(own.getAttribute('lang')).toBe('en');
+    expect(own.getAttribute('xml:lang')).toBe('fr');
+    expect(own.attributes.length).toBe(3);
+    expect(same.hasAttribute('lang')).toBe(false);
+  });
+
+  it('follows a page that gives a tagged element an xml:lang, and takes it away again', () => {
+    const document = page('<p id="a" class="x">One</p>');
+    const a = document.getElementById('a')!;
+    const tags = new TranslatedLanguageTags();
+    tags.show(1, a, 'ja');
+    expect(a.getAttribute(PAGE_LANGUAGE_ATTRIBUTE)).toBe('en');
+
+    // The page's patch: its own `xml:lang` arrives. Simul's must not be
+    // written again over it (in Chrome the two are one attribute).
+    const written: string[] = [];
+    const write = a.setAttributeNS.bind(a);
+    a.setAttributeNS = (namespace, name, value): void => {
+      written.push(`${name}=${value}`);
+      write(namespace, name, value);
+    };
+    rewrite(a, [['id', 'a'], ['class', 'y']], 'fr');
+    expect(written).toEqual(['xml:lang=fr']);
+    expect(a.hasAttribute(PAGE_LANGUAGE_ATTRIBUTE)).toBe(false);
+    expect(a.getAttribute('lang')).toBe('ja');
+    expect(tags.refresh(new Set([a]))).toEqual([a]);
+    expect(written).toEqual(['xml:lang=fr']);
+    expect(a.getAttribute('xml:lang')).toBe('fr');
+    expect(a.getAttribute('lang')).toBe('ja');
+
+    // The page's `xml:lang` names the language translated to. It is not
+    // heard, so the tag stays; the page's own goes on drawing.
+    rewrite(a, [['id', 'a']], 'ja');
+    tags.refresh(new Set([a]));
+    expect(a.getAttribute('lang')).toBe('ja');
+    expect(a.getAttribute('xml:lang')).toBe('ja');
+    expect(a.hasAttribute(PAGE_LANGUAGE_ATTRIBUTE)).toBe(false);
+
+    // The page takes its `xml:lang` away: Simul's is back beside the tag.
+    rewrite(a, [['id', 'a']]);
+    expect(a.hasAttribute('xml:lang')).toBe(false);
+    tags.refresh(new Set([a]));
+    expect(a.getAttribute('lang')).toBe('ja');
+    expect(a.getAttribute(PAGE_LANGUAGE_ATTRIBUTE)).toBe('en');
+
+    expect(tags.hide(1)).toBe(a);
+    expect([...a.attributes].map(({ name }) => name)).toEqual(['id']);
+  });
+
+  it('gives the mirror\'s document its language by one pragma of Simul\'s own', () => {
+    const document = parseHTML(
+      '<html><head><meta charset="utf-8" data-simul-owned-shell="charset">' +
+      '<style data-simul-owned-shell="inert"></style>' +
+      // A page's own pragma, as the mirror holds it: without what would act.
+      '<meta id="page"><title>T</title></head>' +
+      '<body><p id="a">Eins</p><p id="b" lang="fr">Deux</p><p id="c">Drei</p></body></html>',
+    ).document as unknown as Document;
+    const at = (id: string): Element => document.getElementById(id)!;
+    const [a, b, c] = [at('a'), at('b'), at('c')];
+    const pragmas = (): string[] =>
+      [...document.querySelectorAll('meta[http-equiv]')].map((meta) =>
+        `${meta.getAttribute('http-equiv')}=${meta.getAttribute('content')}`);
+    // Given none, the document says none.
+    expect(documentContentLanguage(document)).toBeUndefined();
+    expect(pageLanguage(a)).toBeUndefined();
+    expect(pragmas()).toEqual([]);
+
+    showDocumentLanguage(document, 'de');
+    expect(documentContentLanguage(document)).toBe('de');
+    expect(pragmas()).toEqual(['content-language=de']);
+    // After the shell's own elements, before anything of the page's.
+    expect([...document.head.children].map((child) =>
+      child.getAttribute('data-simul-owned-shell') ?? child.localName))
+      .toEqual(['charset', 'inert', 'language', 'meta', 'title']);
+    expect(pageLanguage(a)).toBe('de');
+    expect(pageLanguage(b)).toBe('fr');
+
+    const tags = new TranslatedLanguageTags();
+    tags.show(1, a, 'ja');
+    tags.show(2, b, 'ja');
+    tags.show(3, c, 'de');
+    expect(a.getAttribute('lang')).toBe('ja');
+    // Drawn as the rest of the page is: by the document's language.
+    expect(a.getAttribute(PAGE_LANGUAGE_ATTRIBUTE)).toBe('de');
+    expect(b.getAttribute(PAGE_LANGUAGE_ATTRIBUTE)).toBe('fr');
+    // Already in the language translated to, by the document's.
+    expect(c.hasAttribute('lang')).toBe(false);
+
+    // Another answer: the same pragma is written again, so that the mirror's
+    // Chrome reads it last, and the tags that leaned on it follow.
+    const pragma = document.querySelector('meta[http-equiv]')!;
+    const written: string[] = [];
+    const write = pragma.setAttribute.bind(pragma);
+    pragma.setAttribute = (name: string, value: string): void => {
+      written.push(`${name}=${value}`);
+      write(name, value);
+    };
+    showDocumentLanguage(document, 'ja');
+    expect(written).toEqual(['content=ja']);
+    expect(pragmas()).toEqual(['content-language=ja']);
+    tags.refresh(new Set([document.documentElement]));
+    expect(a.hasAttribute('lang')).toBe(false);
+    expect(c.getAttribute('lang')).toBe('de');
+    expect(c.getAttribute(PAGE_LANGUAGE_ATTRIBUTE)).toBe('ja');
+    // The same answer again writes nothing: Chrome has it.
+    showDocumentLanguage(document, 'ja');
+    expect(written).toEqual(['content=ja']);
+
+    // A language that names none: Chrome never forgets a pragma, so the
+    // document is brought to say nothing by one that is empty.
+    showDocumentLanguage(document, '');
+    expect(pragmas()).toEqual(['content-language=']);
+    expect(documentContentLanguage(document)).toBe('');
+    tags.refresh(new Set([document.documentElement]));
+    expect(a.getAttribute('lang')).toBe('ja');
+    expect(a.getAttribute(PAGE_LANGUAGE_ATTRIBUTE)).toBe('');
+
+    // Should the pragma have left the document, a new one says it.
+    pragma.remove();
+    showDocumentLanguage(document, 'it');
+    expect(pragmas()).toEqual(['content-language=it']);
+    expect(documentContentLanguage(document)).toBe('it');
+    expect(documentContentLanguage(undefined)).toBeUndefined();
   });
 
   it('applies and validates a language outside the tag set', () => {

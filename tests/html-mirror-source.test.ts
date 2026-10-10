@@ -863,6 +863,83 @@ describe('HtmlMirrorSourceSession', () => {
     });
   });
 
+  it('reads the document\'s language again whenever Chrome may have read a pragma', () => {
+    const fixture = sourceFixture('<p id="p" class="a">Text</p>');
+    const { document } = fixture;
+    const root = document.documentElement as unknown as Element;
+    const pragma = document.createElement('meta');
+    pragma.setAttribute('http-equiv', 'content-language');
+    pragma.setAttribute('content', 'de');
+    document.head.append(pragma);
+    // What the page's Chrome says for the document's language.
+    let locale = '"de"';
+    Object.defineProperty(fixture.window, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => ({
+        backgroundColor: 'rgba(0, 0, 0, 0)',
+        getPropertyValue: (name: string) =>
+          name === '-webkit-locale' && element === root ? locale : '',
+      }),
+    });
+    (root as { matches: (selector: string) => boolean }).matches = () => true;
+    const rootLanguages = (): (string | undefined)[] => fixture.patches().flatMap(
+      (batch) => batch.operations.flatMap((operation) =>
+        operation.kind === 'attributes' && operation.tagName === 'html'
+          ? [Object.fromEntries(operation.attributes)['simul:document-lang']]
+          : []),
+    );
+
+    fixture.start();
+    expect(fixture.checkpoints()[0]?.payload.root.attributes)
+      .toEqual([['simul:document-lang', 'de']]);
+    // No pragma of the page's is on the wire.
+    expect(JSON.stringify(fixture.port.posts)).not.toContain('http-equiv');
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+
+    // The page writes the pragma again with the value it has. No attribute
+    // changed, but Chrome read it, and may now say another language (an
+    // earlier pragma written again takes over from a later one).
+    locale = '"es"';
+    fixture.mutate({
+      type: 'attributes', target: pragma, attributeName: 'content',
+      attributeNamespace: null, oldValue: 'de',
+    } as unknown as MutationRecord);
+    fixture.flushFrame();
+    expect(rootLanguages()).toEqual(['es']);
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 1));
+
+    // Read again and the same answer: nothing is sent.
+    fixture.mutate({
+      type: 'attributes', target: pragma, attributeName: 'content',
+      attributeNamespace: null, oldValue: 'de',
+    } as unknown as MutationRecord);
+    fixture.flushFrame();
+    expect(fixture.patches()).toHaveLength(1);
+
+    // A pragma put into the document, here inside something else.
+    locale = '"ja"';
+    const wrapper = document.createElement('div');
+    wrapper.append(document.createElement('meta'));
+    document.body.append(wrapper);
+    fixture.mutate(childListRecord(document.body, [wrapper]));
+    fixture.flushFrame();
+    expect(rootLanguages()).toEqual(['es', 'ja']);
+    fixture.port.emitMessage(createHtmlMirrorAck(identity, 2));
+
+    // Any other change does not have Chrome asked: nothing about the
+    // document's language can have changed.
+    locale = '"fr"';
+    const paragraph = document.getElementById('p')!;
+    paragraph.setAttribute('class', 'b');
+    fixture.mutate(attributeRecord(paragraph, 'class'));
+    const text = document.createTextNode('more');
+    paragraph.append(text);
+    fixture.mutate(childListRecord(paragraph, [text]));
+    fixture.flushFrame();
+    expect(fixture.patches()).toHaveLength(3);
+    expect(rootLanguages()).toEqual(['es', 'ja']);
+  });
+
   it('removes stale local text when an ID becomes unindexable', () => {
     const fixture = sourceFixture(
       '<main><section id="changing">Previously readable</section>' +

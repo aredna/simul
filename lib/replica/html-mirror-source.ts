@@ -1112,6 +1112,13 @@ export class HtmlMirrorSourceSession {
         this.environment.document,
       ),
     );
+    // Chrome takes a document's language from the pragma it read last, and
+    // reads one again when it is put into the document or when one of its
+    // attributes is written, even with the value it had (which the filter
+    // below drops as no change). The root's attributes carry that language
+    // (`readSourceDocumentLanguage`): they are read again, and sent if the
+    // answer is another.
+    if (records.some(sourceMutationReadsPragma)) this.#queueDocumentLanguage();
     // Native observers can report an attribute/character assignment whose
     // final value is exactly its old value. Keep the sticky secret ledger
     // above authoritative, then discard only these provable DOM no-ops before
@@ -1253,6 +1260,14 @@ export class HtmlMirrorSourceSession {
     }
     if (!accepted && !visibilityQueued) return;
     if (accepted) this.#pendingDimensions = true;
+    this.#scheduleFlush();
+  }
+
+  /** Has the root's attributes, which carry the document's language, read again. */
+  #queueDocumentLanguage(): void {
+    const root = this.environment.document.documentElement;
+    if (!root || !this.#mirroredNodes.has(root)) return;
+    this.#queuePending(this.#pendingAttributes, root);
     this.#scheduleFlush();
   }
 
@@ -3336,6 +3351,24 @@ function composedSourceParentElement(element: Element): Element | undefined {
   return root.nodeType === 11 && 'host' in root
     ? (root as ShadowRoot).host
     : undefined;
+}
+
+/** Whether Chrome may have read a content-language pragma because of `record`. */
+function sourceMutationReadsPragma(record: MutationRecord): boolean {
+  if (record.type === 'attributes') return isSourceMetaElement(record.target);
+  if (record.type !== 'childList') return false;
+  for (const added of record.addedNodes) {
+    if (
+      isSourceMetaElement(added) ||
+      (added.nodeType === 1 && (added as Element).querySelector?.('meta'))
+    ) return true;
+  }
+  return false;
+}
+
+function isSourceMetaElement(node: Node): boolean {
+  return node.nodeType === 1 &&
+    (node as Element).localName.toLowerCase() === 'meta';
 }
 
 function belongsToSourceDocument(node: Node, sourceDocument: Document): boolean {

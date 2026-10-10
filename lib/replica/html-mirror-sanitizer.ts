@@ -47,6 +47,7 @@ import {
   MAX_HTML_MIRROR_STRING,
 } from './html-mirror-limits';
 import { hasExactKeysWithOptional } from '../exact-record';
+import { canonicalSvgAttributeName } from './svg-attribute-names';
 
 // The size caps (any one string, the page, nodes, and the rule caps that
 // follow them) are the Advanced settings in html-mirror-limits.ts: live
@@ -565,6 +566,160 @@ const RAW_CONTROL_TEXT_ATTRIBUTES = new Set(['placeholder', 'value']);
  */
 function isSimulOwnedAttributeName(name: string): boolean {
   return name.startsWith('data-simul-') || name.startsWith('simul:');
+}
+
+const XML_NAMESPACE_URI = 'http://www.w3.org/XML/1998/namespace';
+const XLINK_NAMESPACE_URI = 'http://www.w3.org/1999/xlink';
+/**
+ * The name a page's `lang` in the XML namespace travels under: `xml:lang` as
+ * an XHTML document writes it, as the HTML parser reads it on SVG and MathML,
+ * and as a script sets it with `setAttributeNS`. Chrome draws by it before
+ * the plain `lang`. An attribute of an HTML element merely named `xml:lang`
+ * does nothing; it travels under its own name, so the two had to differ on
+ * the wire. The mirror writes this one back into the XML namespace.
+ */
+export const PAGE_XML_LANGUAGE_ATTRIBUTE = 'simul:xml-lang';
+
+/**
+ * The name the document's own language travels under, on the root element:
+ * what Chrome takes for the page's language where no element declares one.
+ * A `<meta http-equiv="content-language">` gives it, or the HTTP header of
+ * the same name; Chrome follows the pragma it read last, whatever its place
+ * in the document, and never forgets one. Chrome draws by it and names it
+ * in its accessibility tree. No pragma of the page travels: the page side
+ * asks Chrome what the language is (`readSourceDocumentLanguage`), and the
+ * mirror is given one pragma of Simul's own that says it.
+ */
+export const PAGE_DOCUMENT_LANGUAGE_ATTRIBUTE = 'simul:document-lang';
+
+/**
+ * What travels as a document's language: language tags, one or a list
+ * (`en_US` is written too, and Chrome takes it as it is), or nothing at all.
+ */
+export function isDocumentLanguageValue(value: string): boolean {
+  return value.length <= 256 && /^[A-Za-z0-9_, -]*$/u.test(value);
+}
+
+/**
+ * The document's language as the page's Chrome has it, or `undefined` where
+ * it cannot be asked. Chrome shows it in one place a script can read: the
+ * root's computed font language, while the root declares none itself. With a
+ * `lang` or an `xml:lang` on the root nothing in the page is drawn by the
+ * document's language, and it cannot be read.
+ *
+ * Chrome takes whatever the pragma holds for the language, a refresh's
+ * content included, and then matches no `:lang()` rule by it. Such a value
+ * does not travel: it is sent empty, a language that names none, and the
+ * mirror matches no `:lang()` rule either.
+ *
+ * A page rule can set the root's font language too (`-webkit-locale`); that
+ * is not the document's language. So Chrome is asked a second time, with
+ * `:lang()`, which no rule can change. Where the root does not match, the
+ * value may still be the document's: newer versions of Chrome match a
+ * well-formed tag only (see `languageCanMatch`), and a document can be given
+ * any. Such a value travels as it is, and the mirror's Chrome makes of it
+ * what the tab's does.
+ */
+export function readSourceDocumentLanguage(root: Element): string | undefined {
+  try {
+    if (
+      root.hasAttribute('lang') || root.hasAttributeNS(XML_NAMESPACE_URI, 'lang')
+    ) return undefined;
+    const locale = root.ownerDocument?.defaultView?.getComputedStyle(root)
+      .getPropertyValue('-webkit-locale') ?? '';
+    const language = quotedCssText(locale);
+    if (language === undefined) return undefined;
+    if (!isDocumentLanguageValue(language)) return '';
+    // Chrome answers `:lang()` for one tag only.
+    if (/^[A-Za-z0-9]+(?:-[A-Za-z0-9]+)*$/u.test(language)) {
+      let said = true;
+      try {
+        // An identifier cannot begin with a digit unless it is escaped.
+        const selector = `:lang(${language.replace(/^[0-9]/u, '\\3$& ')})`;
+        said = root.matches(selector) ||
+          !languageCanMatch(root, language, selector);
+      } catch {
+        // A DOM that cannot answer is taken at its word.
+      }
+      if (!said) return undefined;
+    }
+    return language;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether this Chrome's `:lang()` matches `language` for any element at all.
+ * Chrome 138 matches whatever an element says; Chrome 154 only a well-formed
+ * tag (letters first, no part over eight characters), and for any other
+ * value matches nothing. It is asked of an element that says the language
+ * itself and is never put into the page.
+ */
+function languageCanMatch(
+  root: Element,
+  language: string,
+  selector: string,
+): boolean {
+  const probe = root.ownerDocument.createElement('span');
+  probe.setAttribute('lang', language);
+  return probe.matches(selector);
+}
+
+/**
+ * The text between the quotes of a computed CSS string; `auto` and the like:
+ * none. Chrome writes anything but plain text with a backslash, which no
+ * language that travels holds, so nothing is unescaped.
+ */
+function quotedCssText(value: string): string | undefined {
+  const text = value.trim();
+  return text.length >= 2 && text.startsWith('"') && text.endsWith('"')
+    ? text.slice(1, -1)
+    : undefined;
+}
+
+/**
+ * Names travel in lowercase, and a page can hold two attributes that would
+ * travel under one name: `CLASS` beside `class` in an XHTML document, or set
+ * with `setAttributeNS(null, 'CLASS', …)` in an HTML one; a `class` put into
+ * some namespace beside the plain one; on an SVG element an `xlink:href` a
+ * script set by `setAttribute` (which is in no namespace) beside the real
+ * one. Chrome reads one of them as the attribute, and it is the one the
+ * mirror writes under that name: without a namespace and spelled exactly so
+ * (lowercase; an SVG name in its own case, `viewBox`), or for an SVG
+ * `xlink:href` the `href` of the XLink namespace. The other is some other
+ * attribute to Chrome, and sending both under one name stopped the mirror
+ * for good (the panel refuses an element that names an attribute twice). So
+ * an attribute that is not that one stays behind when the element has that
+ * one. Alone, it travels as it always did.
+ */
+function isTwinOfSentName(
+  element: Element,
+  attribute: Attr,
+  name: string,
+): boolean {
+  const svg = element.namespaceURI === 'http://www.w3.org/2000/svg';
+  if (svg && name === 'xlink:href') {
+    if (attribute.namespaceURI === XLINK_NAMESPACE_URI) return false;
+    const attributes = element.attributes;
+    for (let index = 0; index < attributes.length; index += 1) {
+      const other = attributes[index]!;
+      if (
+        other.namespaceURI === XLINK_NAMESPACE_URI &&
+        other.localName === 'href'
+      ) return true;
+    }
+    return false;
+  }
+  const spelling = svg ? canonicalSvgAttributeName(name) : name;
+  if (attribute.name === spelling && !attribute.namespaceURI) return false;
+  return element.hasAttributeNS(null, spelling);
+}
+
+/** Whether `attribute` is the element's `lang` in the XML namespace. */
+function isXmlNamespaceLanguage(attribute: Attr): boolean {
+  return attribute.namespaceURI === XML_NAMESPACE_URI &&
+    attribute.localName === 'lang';
 }
 const NATIVE_SELECT_PRESENTATION_ATTRIBUTES = Object.freeze({
   select: new Set(['role']),
@@ -1921,6 +2076,7 @@ function serializeNode(
 const CREDENTIAL_SHELL_ATTRIBUTES = new Set([
   'class', 'dir', 'height', 'hidden', 'id', 'lang', 'maxlength', 'minlength',
   'readonly', 'required', 'size', 'style', 'type', 'width',
+  PAGE_XML_LANGUAGE_ATTRIBUTE,
 ]);
 
 /**
@@ -1989,7 +2145,11 @@ function sanitizeAttributes(
   }
   const result: Array<readonly [string, string]> = [];
   for (const attribute of element.attributes) {
-    const name = attribute.name.toLowerCase();
+    const xmlLanguage = isXmlNamespaceLanguage(attribute);
+    const name = xmlLanguage
+      ? PAGE_XML_LANGUAGE_ATTRIBUTE
+      : attribute.name.toLowerCase();
+    if (!xmlLanguage && isTwinOfSentName(element, attribute, name)) continue;
     const svgResourceReferenceAttribute =
       element.namespaceURI === 'http://www.w3.org/2000/svg' &&
       PASSIVE_SVG_RESOURCE_ELEMENTS.has(tagName) &&
@@ -2000,7 +2160,7 @@ function sanitizeAttributes(
     }
     if (
       name.startsWith('on') || name === 'nonce' ||
-      isSimulOwnedAttributeName(name) ||
+      (!xmlLanguage && isSimulOwnedAttributeName(name)) ||
       (isNativeSelectSemanticTag(tagName) &&
         !isNativeSelectPresentationAttribute(tagName, name)) ||
       ((tagName === 'option' || tagName === 'optgroup') && name === 'style') ||
@@ -2301,7 +2461,17 @@ function sanitizeAttributes(
     } else if (name === 'http-equiv' || name === 'content') {
       if (tagName === 'meta') continue;
     }
+    // One name is sent once, whatever the page did (see `isTwinOfSentName`).
+    if (result.some(([sent]) => sent === name)) continue;
     result.push(Object.freeze([name, value] as const));
+  }
+  if (tagName === 'html' && element === element.ownerDocument?.documentElement) {
+    const language = readSourceDocumentLanguage(element);
+    if (language !== undefined) {
+      result.push(
+        Object.freeze([PAGE_DOCUMENT_LANGUAGE_ATTRIBUTE, language] as const),
+      );
+    }
   }
   if (
     (tagName === 'link' || tagName === 'style') &&
@@ -4115,7 +4285,15 @@ function isUnsafeTransportedAttribute(
 ): boolean {
   // These attributes are capabilities and receiver bookkeeping written only
   // after graph validation. A source page must never be able to mint them.
-  if (isSimulOwnedAttributeName(name)) return true;
+  // Two names of theirs travel: the page's XML-namespace `lang`, and on the
+  // root alone the document's language.
+  if (name === PAGE_DOCUMENT_LANGUAGE_ATTRIBUTE) {
+    return namespace !== 'html' || tagName !== 'html' ||
+      !isDocumentLanguageValue(value);
+  }
+  if (
+    name !== PAGE_XML_LANGUAGE_ATTRIBUTE && isSimulOwnedAttributeName(name)
+  ) return true;
   if (isPrivateBaseAttribute(tagName, name)) return true;
   if (
     isNativeSelectSemanticTag(tagName) &&

@@ -788,6 +788,96 @@ describe('ImageTranslationController', () => {
     controller.dispose();
   });
 
+  it('marks image text the translator gave back as it was read, so it says no language', async () => {
+    const { document } = parseHTML(
+      '<html lang="ja"><body><img alt="富士山 2024"></body></html>',
+    );
+    const image = document.querySelector('img') as unknown as HTMLImageElement;
+    image.getBoundingClientRect = () => ({
+      left: 0, top: 0, width: 200, height: 100,
+      right: 200, bottom: 100, x: 0, y: 0, toJSON: () => ({}),
+    });
+    const readAccessibilityText = vi.fn(async () => ({
+      document: sourceDocument,
+      nodeId: descriptor.nodeId,
+      contentRevision: descriptor.contentRevision,
+      observationRevision: descriptor.observationRevision,
+      text: ' 富士山 2024 ',
+      source: 'alt' as const,
+      nearestElementLanguage: 'ja' as const,
+    }));
+    let answer = (text: string): string => text;
+    const diagnostics: unknown[] = [];
+    const controller = new ImageTranslationController({
+      openSource: async (_request, onChange) => {
+        queueMicrotask(() => onChange({ kind: 'upsert', descriptor }));
+        return { measure: vi.fn(), readAccessibilityText, dispose: vi.fn() };
+      },
+      createPixelCoordinator: () => ({
+        acquire: vi.fn(),
+      }) as unknown as PixelAcquisitionCoordinator,
+      createRecognitionCoordinator: () => ({
+        recognize: vi.fn(),
+        clear: vi.fn(),
+        advanceResetEpoch: vi.fn(() => true),
+      }) as unknown as ImageRecognitionCoordinator,
+      resolveAnchor: () => ({
+        document: sourceDocument,
+        replayLease: 1,
+        image,
+        iframe: { contentDocument: document } as HTMLIFrameElement,
+      }),
+      translationProvider: {
+        availability: async () => 'available',
+        createSession: async () => ({
+          translate: async (text: string) => answer(text),
+          destroy: vi.fn(),
+        }),
+      },
+      translationMemory: new TranslationMemory(),
+      onDiagnostic: (diagnostic) => diagnostics.push(diagnostic),
+      projector: {
+        scheduleFrame: (callback) => { callback(); return 1; },
+        cancelFrame: () => undefined,
+        createResizeObserver: () => undefined,
+      },
+    });
+    const configuration = {
+      enabled: true,
+      scanPolicy: 'visible-only' as const,
+      skipSmallImages: true,
+      providerOrder: ['tesseract'] as const,
+      methodOrder: ['accessibility-text', 'tesseract'] as const,
+      disabledMethodIds: [] as const,
+      policyFingerprint: 'read-v1-111000',
+      controlImages: true,
+      sourceLanguage: 'auto' as const,
+      targetLanguage: 'en' as const,
+      translationIdle: true,
+      resetEpoch: 0,
+    };
+    controller.configure(configuration);
+    controller.activateReplica(request, 3, 1);
+    await vi.waitFor(() => expect(diagnostics).toContain(
+      'accessibility-text-complete',
+    ));
+    const piece = (): Element | null | undefined => imageOverlayContent(
+      document.querySelector('[data-simul-image-method="accessibility-text"]'),
+    )?.firstElementChild;
+    // The same words back, whatever white space is around them.
+    expect(piece()?.textContent).toBe('富士山 2024');
+    expect(piece()?.hasAttribute('lang')).toBe(false);
+    expect(image.hasAttribute('lang')).toBe(false);
+
+    // Words the translator changed say the language translated to.
+    answer = () => 'Mount Fuji 2024';
+    controller.configure({ ...configuration, resetEpoch: 1 });
+    await vi.waitFor(() => expect(piece()?.textContent).toBe('Mount Fuji 2024'));
+    expect(piece()?.getAttribute('lang')).toBe('en');
+    expect(image.getAttribute('lang')).toBe('en');
+    controller.dispose();
+  });
+
   it('keeps tiny accessibility images schedulable after a live size-filter change and ignores stale removal', async () => {
     const { document } = parseHTML('<html><body><img></body></html>');
     const image = document.querySelector('img') as unknown as HTMLImageElement;

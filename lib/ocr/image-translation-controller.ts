@@ -3371,6 +3371,9 @@ export class ImageTranslationController {
             text: text.trim(),
             boundingBox: region.boundingBox,
             ...(region.placement ? { placement: region.placement } : {}),
+            // Text the translator gave back as it was read is not in the
+            // language translated to (D124's rule for the page's own text).
+            ...(text.trim() === source ? { unchanged: true as const } : {}),
           }));
         }
       }

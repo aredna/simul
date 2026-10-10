@@ -167,6 +167,18 @@ source page: the frame sandbox omits `allow-forms`, the shell CSP sets
 activation event. A form is not marked `inert`, because that would also block
 Simul's own dropdown facsimiles inside it, where most real select boxes sit.
 
+Attribute names travel in lowercase, and the mirror writes an SVG name in
+its own case (`viewBox`). A page can hold two attributes that would travel
+under one name: `CLASS` beside `class` in an XHTML document, or one set with
+`setAttributeNS(null, 'CLASS', …)` in an HTML one; a `class` put into some
+namespace beside the plain one; on an SVG element an `xlink:href` that a
+script set with `setAttribute`, which is in no namespace, beside the real
+one. Chrome reads one of them as the attribute: the one the mirror writes
+under that name. That one is sent, and no name is ever sent twice: the panel
+refuses an element that names an attribute twice, which used to stop the
+live mirror for good on such a page. An attribute spelled otherwise that
+has no such twin travels as it always did, under its lowercase name.
+
 Custom elements keep the page's definition state (D83). Page CSS often
 styles `:defined` and `:not(:defined)`: Reddit hides its sort bar, pulses
 placeholders and sizes gaps between posts until its elements upgrade. The
@@ -449,6 +461,55 @@ Each is a small cost to fidelity, because page CSS can select on them.
   the mirror and none in the tab. A page attribute named `simul:…` does not
   travel, like `data-simul-…`, so the name is Simul's alone.
 
+The page's language for an element is what HTML says it is. A `lang` in the
+XML namespace comes first: `xml:lang` as an XHTML document writes it, as the
+HTML parser reads it on SVG and MathML, or as a script sets it. The mirror
+holds it in that namespace too, so Chrome draws by it as in the tab (it
+travels under the name `simul:xml-lang`, because an attribute of an HTML
+element that is merely named `xml:lang` does nothing and must stay apart
+from it). An element has one place for a `lang` of that namespace, whatever
+the attribute is called: where the page has its own `xml:lang`, a
+translation adds only the plain `lang`, and the page's own goes on saying
+what to draw by. An `xml:lang` is drawn by and not heard, because Chrome's
+accessibility tree reads the plain `lang` alone: so whether an element
+already says the language translated to is asked of its plain `lang` (and
+its ancestors'), and an element that only an `xml:lang` declares in that
+language still gets the tag.
+
+Where the root element declares no language, the document has one of its
+own. Chrome takes it from the HTTP `Content-Language` header and from each
+`<meta http-equiv="content-language">` it reads, and the one it read last
+wins: a pragma is read when it is put into the document and again each time
+one of its attributes is written, so the last in the document is not always
+the one that counts. Chrome never forgets it, even when every pragma is
+gone. The mirror is given exactly that value, and the page's own pragmas do
+not travel (no `http-equiv` does). The page side asks its Chrome: the font
+language the root computes is the document's language when the root has
+neither `lang` nor `xml:lang`, and a `:lang()` match on the root tells it
+from a page rule that sets the font language itself. It asks at every
+reading of the root and whenever a `<meta>` is added or written, and the
+answer rides on the root under the name `simul:document-lang`. The mirror
+says it with one pragma of Simul's own, written again each time the answer
+changes, so the mirror's Chrome holds the page's value for what it draws
+and for the accessibility tree, a tagged element is kept drawn by it, and
+Simul's own reading of "what does this document say" is that same value.
+
+Only a list of language tags travels (letters, digits, `-`, `_`, `,` and
+space; 256 characters). Chrome takes anything for a document's language,
+the content of a refresh too; such a value matches no `:lang()` rule in the
+tab, and the mirror is given the empty language in its place, which names
+none. A pragma cannot be unset in a living document: an empty one is how a
+document that had a language is brought to say none.
+
+Three cases are not covered. A root that declares only an `xml:lang` is
+drawn by it, and Chrome's accessibility tree, which does not hear an
+`xml:lang`, says the document's language there; nothing a script can read
+shows that language on such a page, so the mirror's tree says the browser's
+own. A page rule that sets `-webkit-locale` on the root hides the document's
+language in the same way. And where the document's language is the empty
+one, an element that shows a translation computes no font language at all
+where the tab computes the empty one.
+
 What the page had is kept and put back exactly, value or no value, when the
 translation goes: the source text changed, translations were cleared, the
 pair changed, or **Live source only** was chosen. A page patch that rewrites
@@ -458,13 +519,17 @@ neither. An image named by its caption is tagged by the image projector;
 when the page changes a `lang`, the named images are looked at again like
 the rest.
 
-Simul's own text carries the language too: image overlays (on the box
-inside their closed shadow root) and the rows and current choice of a
-select facsimile. These elements never took the page's language: Chrome
+Simul's own text carries the language too: image overlays (on each piece
+of text inside their closed shadow root) and the rows and current choice of
+a select facsimile. These elements never took the page's language: Chrome
 draws them by the browser's own. So beside their `lang` the attribute in
 the XML namespace is empty, which is no language, and they are drawn as
 before. With the page's language there, a Japanese page's captions and
-select text changed font and weight.
+select text changed font and weight. A piece of image text that the
+translator gave back as it was read (digits, a name) gets neither
+attribute: it is heard in the language of the place the image stands in,
+which is the page's unless the image sits directly in an element that
+shows a translation.
 
 The tags cost a page patch next to nothing. "Keep geometry" measures the
 page's text with the tags in place, since an element is drawn by the page's
@@ -472,7 +537,9 @@ language either way. When the page changes a `lang`, only the tags inside
 that element are looked at again, and only the select facsimiles that show
 one of them are drawn again. What is left is two more attributes on each
 element that shows a translation, which the panel's size check reads after
-every patch.
+every patch (on a page of 9,000 translated paragraphs, about 2 of the 8 ms
+the check takes; the check walks the mirror by the tree's own links, which
+took more than that off it).
 
 ### Static SVG
 
