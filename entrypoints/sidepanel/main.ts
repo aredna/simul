@@ -52,6 +52,7 @@ import {
   languageEndonym,
 } from '../../lib/language-options';
 import {
+  namesCompanionWindow,
   parseDetachedPageIdentityHint,
   readAuthorizedTabMessage,
   readUnreadableTabMessage,
@@ -1171,7 +1172,18 @@ window.addEventListener('pagehide', () => {
   isolatedHtmlReplicaEngine.dispose();
 });
 
-browser.runtime.onMessage.addListener((message: unknown) => {
+// Set once this page is on its way out: a window that is closing still
+// hears a toolbar click for a moment, and must not answer it.
+let pageLeaving = false;
+window.addEventListener('pagehide', (event) => {
+  pageLeaving = !event.persisted;
+});
+
+browser.runtime.onMessage.addListener((message: unknown, _sender, sendResponse) => {
+  // A toolbar click that brought this window forward waits for this answer:
+  // Chrome brings a closing window forward too, and only its page can say
+  // that the window is there, and staying.
+  if (!pageLeaving && namesCompanionWindow(message, state.panelWindowId)) sendResponse(true);
   const authorizedTab = readAuthorizedTabMessage(message);
   if (authorizedTab) {
     void sourceFollower.acceptAuthorizedTab(authorizedTab);

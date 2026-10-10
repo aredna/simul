@@ -180,6 +180,7 @@ export default defineBackground(() => {
     preferencesReady: launchPreferencesReady,
     launchEpoch: toolbarLaunchEpoch,
     rememberSurface,
+    now: () => performance.now(),
     report: (state, code) => {
       if (import.meta.env.DEV) {
         console.info('[Simul toolbar launch]', { state, code });
@@ -187,19 +188,23 @@ export default defineBackground(() => {
     },
   });
 
+  const reportLaunchFailure = (error: unknown): void => {
+    if (import.meta.env.DEV) {
+      console.info('[Simul toolbar launch]', {
+        state: 'failed',
+        code: launchErrorCode(error),
+      });
+    }
+  };
+
   browser.action.onClicked.addListener((tab) => {
-    void toolbarLauncher.click(tab).catch((error: unknown) => {
-      if (import.meta.env.DEV) {
-        console.info('[Simul toolbar launch]', {
-          state: 'failed',
-          code: launchErrorCode(error),
-        });
-      }
-    });
+    void toolbarLauncher.click(tab).catch(reportLaunchFailure);
   });
 
+  // A click that was given a window that was closing opens one once that
+  // window is gone.
   browser.windows.onRemoved.addListener((windowId) => {
-    toolbarLauncher.windowRemoved(windowId);
+    void toolbarLauncher.windowRemoved(windowId).catch(reportLaunchFailure);
   });
 
   async function rememberSurface(surface: CompanionSurface): Promise<void> {

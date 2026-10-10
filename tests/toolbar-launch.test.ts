@@ -1,8 +1,13 @@
 import { describe, expect, it } from 'vitest';
 
 import type { DetachedWindowCreateData } from '../lib/companion-surface';
-import type { AuthorizedTabMessage, UnreadableTabMessage } from '../lib/page-identity';
+import type {
+  AuthorizedTabMessage,
+  CompanionWindowClickMessage,
+  UnreadableTabMessage,
+} from '../lib/page-identity';
 import {
+  CLOSING_WINDOW_HOLD_MS,
   ToolbarLauncher,
   type ToolbarLaunchEnvironment,
   type ToolbarLaunchTab,
@@ -118,6 +123,7 @@ describe('toolbar launch', () => {
       url: 'https://b.example/page',
       launchEpoch: '7.epoch',
       launchSequence: 2,
+      companionWindowId: 100,
     });
     expect(fixture.launcher.windowAuthorization(100)).toBe(fixture.messages[0]);
     // Only the window it was sent to may have it.
@@ -160,8 +166,13 @@ describe('toolbar launch', () => {
     expect(fixture.created).toHaveLength(1);
     fixture.calls.length = 0;
     await fixture.launcher.click(file);
-    expect(fixture.calls).toEqual(['get:100', 'focus:100', 'close:1']);
+    // The window is told only that it was clicked, so that its page can
+    // say it is there; nothing of the tab travels.
+    expect(fixture.calls).toEqual(['get:100', 'focus:100', 'send:click:100', 'close:1']);
     expect(fixture.messages).toEqual([]);
+    expect(fixture.clicks).toEqual([
+      { type: 'simul:companion-window-click', companionWindowId: 100 },
+    ]);
   });
 
   it('opens another window for another tab while the first one is pinned', async () => {
@@ -345,6 +356,293 @@ describe('toolbar launch', () => {
       fixture.openedElsewhere(300, 11);
       fixture.fail('windows', 'No contexts.');
       await fixture.launcher.click(tabA);
+      expect(fixture.created).toHaveLength(1);
+    });
+  });
+
+  describe('a window that closes as it is clicked', () => {
+    // Chrome lists a closing window's page for a moment and brings such a
+    // window forward without an error. Its page answers nothing.
+    it('opens a window when the one the click brought forward closes without an answer', async () => {
+      const fixture = createFixture({ surface: 'popout', hydrated: true });
+      await fixture.launcher.click(tabA);
+      fixture.silence(100);
+      fixture.calls.length = 0;
+      await fixture.launcher.click(tabB);
+      expect(fixture.calls).toEqual(['get:100', 'focus:100', 'send:authorized:22', 'close:2']);
+      expect(fixture.messages.at(-1)).toMatchObject({ tabId: 22, companionWindowId: 100 });
+      expect(fixture.created).toHaveLength(1);
+      fixture.calls.length = 0;
+      await fixture.close(100);
+      expect(fixture.calls).toEqual(['get:2', 'create', 'remember:popout', 'close:2']);
+      expect(fixture.created).toHaveLength(2);
+      expect(fixture.created[1]!.url).toContain('sourceTabId=22&sourceWindowId=2');
+      expect(fixture.openWindows()).toEqual([101]);
+      // The new window is the one known from then on, and it opens no other.
+      fixture.calls.length = 0;
+      await fixture.launcher.click(tabB);
+      expect(fixture.calls).toEqual(['get:101', 'focus:101', 'send:authorized:22', 'close:2']);
+      await fixture.close(101);
+      expect(fixture.created).toHaveLength(2);
+    });
+
+    it('stays closed when the window goes later than Chrome holds a closing window', async () => {
+      // Chrome takes a closing window away within half a second. One that
+      // goes later was closed after the click, whatever kept its page from
+      // answering: busy, frozen, discarded.
+      expect(CLOSING_WINDOW_HOLD_MS).toBe(600);
+      for (const [later, windows] of [[600, 2], [601, 1], [20_000, 1]] as const) {
+        const fixture = createFixture({ surface: 'popout', hydrated: true });
+        await fixture.launcher.click(tabA);
+        fixture.silence(100);
+        await fixture.launcher.click(tabB);
+        fixture.advance(later);
+        fixture.calls.length = 0;
+        await fixture.close(100);
+        expect(fixture.created, `${later} ms`).toHaveLength(windows);
+        if (windows === 1) expect(fixture.calls, `${later} ms`).toEqual([]);
+      }
+    });
+
+    it('counts the time from the click itself, not from the window coming forward', async () => {
+      const fixture = createFixture({ surface: 'popout', hydrated: true });
+      await fixture.launcher.click(tabA);
+      fixture.silence(100);
+      const held = fixture.hold('focus:100');
+      const click = fixture.launcher.click(tabB);
+      await held.reached;
+      fixture.advance(400);
+      held.release();
+      await click;
+      fixture.advance(250);
+      await fixture.close(100);
+      expect(fixture.created).toHaveLength(1);
+    });
+
+    it('counts from the click when it is given a second window after the first went', async () => {
+      const fixture = createFixture({ surface: 'popout', hydrated: true, listsWindows: true });
+      await fixture.launcher.click(tabA);
+      fixture.openedElsewhere(300, 22);
+      fixture.silence(100);
+      fixture.silence(300);
+      await fixture.launcher.click(tabB);
+      // The first window goes in time: the click is given the other one.
+      fixture.advance(400);
+      await fixture.close(100);
+      expect(fixture.calls).toContain('focus:300');
+      expect(fixture.created).toHaveLength(1);
+      // That one goes too, but later than a window that was closing when
+      // the click came could.
+      fixture.advance(250);
+      await fixture.close(300);
+      expect(fixture.created).toHaveLength(1);
+    });
+
+    it('opens none when the window\'s page answered the click', async () => {
+      const fixture = createFixture({ surface: 'popout', hydrated: true });
+      await fixture.launcher.click(tabA);
+      await fixture.launcher.click(tabB);
+      fixture.calls.length = 0;
+      // The reader closes the window later: it stays closed.
+      await fixture.close(100);
+      expect(fixture.calls).toEqual([]);
+      expect(fixture.created).toHaveLength(1);
+    });
+
+    it('opens none when the window\'s page has started and asked since', async () => {
+      const fixture = createFixture({ surface: 'popout', hydrated: true });
+      await fixture.launcher.click(tabA);
+      // Still loading: it answers nothing, and asks when it starts.
+      fixture.silence(100);
+      await fixture.launcher.click(tabB);
+      // Another window's page asking says nothing about this one.
+      expect(fixture.launcher.windowAuthorization(WINDOW_A)).toBeUndefined();
+      expect(fixture.launcher.windowAuthorization(100)).toMatchObject({ tabId: 22 });
+      fixture.calls.length = 0;
+      await fixture.close(100);
+      expect(fixture.calls).toEqual([]);
+      expect(fixture.created).toHaveLength(1);
+    });
+
+    it('opens one when only another window\'s page asked', async () => {
+      const fixture = createFixture({ surface: 'popout', hydrated: true });
+      await fixture.launcher.click(tabA);
+      fixture.silence(100);
+      await fixture.launcher.click(tabB);
+      expect(fixture.launcher.windowAuthorization(WINDOW_A)).toBeUndefined();
+      await fixture.close(100);
+      expect(fixture.created).toHaveLength(2);
+    });
+
+    it('opens the window for a tab Simul cannot read too', async () => {
+      const fixture = createFixture({ surface: 'popout', hydrated: true });
+      await fixture.launcher.click(tabA);
+      const file: ToolbarLaunchTab = {
+        id: 31, windowId: WINDOW_A, url: 'file:///reports/private.pdf',
+      };
+      // Answered: the window stays closed once it is closed.
+      await fixture.launcher.click(file);
+      await fixture.close(100);
+      expect(fixture.created).toHaveLength(1);
+      // Not answered: the click opens the window it was after.
+      await fixture.launcher.click(tabA);
+      fixture.silence(101);
+      await fixture.launcher.click(file);
+      await fixture.close(101);
+      expect(fixture.created).toHaveLength(3);
+      expect(fixture.created[2]!.url).toContain('sourceTabId=31&sourceWindowId=1');
+    });
+
+    it('leaves it to the newest click', async () => {
+      const fixture = createFixture({
+        surface: 'popout', hydrated: true, popoutTabMode: 'locked',
+      });
+      await fixture.launcher.click(tabA);
+      fixture.silence(100);
+      await fixture.launcher.click(tabA);
+      // A newer click, on another tab, opens that tab's own window.
+      await fixture.launcher.click(tabB);
+      expect(fixture.created).toHaveLength(2);
+      fixture.calls.length = 0;
+      await fixture.close(100);
+      expect(fixture.calls).toEqual([]);
+      expect(fixture.created).toHaveLength(2);
+    });
+
+    it('is not answered for by an older click of the same window', async () => {
+      const fixture = createFixture({ surface: 'popout', hydrated: true });
+      await fixture.launcher.click(tabA);
+      // The older click's message is on its way while the window closes
+      // under the newer one.
+      const held = fixture.hold('send:authorized:11');
+      const older = fixture.launcher.click(tabA);
+      await held.reached;
+      fixture.silence(100);
+      await fixture.launcher.click(tabB);
+      fixture.listening(100);
+      held.release();
+      await older;
+      await fixture.close(100);
+      expect(fixture.created).toHaveLength(2);
+      expect(fixture.created[1]!.url).toContain('sourceTabId=22');
+    });
+
+    it('is not taken from the newest click by an older one that comes forward later', async () => {
+      const fixture = createFixture({ surface: 'popout', hydrated: true });
+      await fixture.launcher.click(tabA);
+      fixture.silence(100);
+      const held = fixture.hold('focus:100');
+      const older = fixture.launcher.click(tabA);
+      await held.reached;
+      await fixture.launcher.click(tabB);
+      held.release();
+      await older;
+      await fixture.close(100);
+      expect(fixture.created).toHaveLength(2);
+      expect(fixture.created[1]!.url).toContain('sourceTabId=22');
+    });
+
+    it('says nothing when another window closes', async () => {
+      const fixture = createFixture({ surface: 'popout', hydrated: true });
+      await fixture.launcher.click(tabA);
+      fixture.silence(100);
+      await fixture.launcher.click(tabB);
+      fixture.calls.length = 0;
+      await fixture.launcher.windowRemoved(555);
+      expect(fixture.calls).toEqual([]);
+      // What is kept for this window's page is still there, and the click
+      // still opens a window when its own closes.
+      await fixture.close(100);
+      expect(fixture.created).toHaveLength(2);
+    });
+
+    it('does not take an answer from the window that closed for the one it was given instead', async () => {
+      const fixture = createFixture({ surface: 'popout', hydrated: true, listsWindows: true });
+      await fixture.launcher.click(tabA);
+      // Another companion window is open (the panel's own button opened it).
+      fixture.openedElsewhere(300, 22);
+      fixture.silence(300);
+      // The click's message to the first window is still on its way when
+      // Chrome says that window is gone; the click is given the other one.
+      const held = fixture.hold('send:authorized:22');
+      const click = fixture.launcher.click(tabB);
+      await held.reached;
+      await fixture.launcher.windowRemoved(100);
+      expect(fixture.calls).toContain('focus:300');
+      // The first window's answer comes after all, and then it is gone.
+      held.release();
+      await click;
+      fixture.closeWithoutEvent(100);
+      await fixture.close(300);
+      expect(fixture.created).toHaveLength(2);
+      expect(fixture.created[1]!.url).toContain('sourceTabId=22');
+    });
+
+    it('takes only `true` from the window for an answer', async () => {
+      for (const answer of [undefined, null, false, 1, 'true', { ok: true }]) {
+        const fixture = createFixture({ surface: 'popout', hydrated: true, answer });
+        await fixture.launcher.click(tabA);
+        await fixture.launcher.click(tabB);
+        await fixture.close(100);
+        expect(fixture.created, String(answer)).toHaveLength(2);
+      }
+    });
+
+    it('opens one window, not two, when Chrome reports the close twice', async () => {
+      const fixture = createFixture({ surface: 'popout', hydrated: true });
+      await fixture.launcher.click(tabA);
+      fixture.silence(100);
+      await fixture.launcher.click(tabB);
+      await Promise.all([fixture.close(100), fixture.close(100)]);
+      expect(fixture.created).toHaveLength(2);
+    });
+
+    it('opens a window while the click is still waiting for the answer', async () => {
+      const fixture = createFixture({ surface: 'popout', hydrated: true });
+      await fixture.launcher.click(tabA);
+      fixture.silence(100);
+      const held = fixture.hold('send:authorized:22');
+      const click = fixture.launcher.click(tabB);
+      await held.reached;
+      await fixture.close(100);
+      expect(fixture.openWindows()).toEqual([101]);
+      held.release();
+      await click;
+      expect(fixture.created).toHaveLength(2);
+      expect(fixture.openWindows()).toEqual([101]);
+    });
+
+    it('records nothing for a window that would not come forward', async () => {
+      const fixture = createFixture({ surface: 'popout', hydrated: true, listsWindows: true });
+      fixture.openedElsewhere(300, 11);
+      fixture.silence(300);
+      fixture.fail('focus:300', 'No window with id: 300.');
+      await fixture.launcher.click(tabA);
+      expect(fixture.created).toHaveLength(1);
+      await fixture.close(300);
+      expect(fixture.created).toHaveLength(1);
+    });
+
+    it('follows the saved choice when it opens: the side panel is told, no window opens', async () => {
+      const fixture = createFixture({ surface: 'popout', hydrated: true });
+      await fixture.launcher.click(tabA);
+      fixture.silence(100);
+      await fixture.launcher.click(tabB);
+      // The window went back to the side panel by its own button.
+      fixture.setSurface('side-panel');
+      fixture.calls.length = 0;
+      await fixture.close(100);
+      expect(fixture.calls).toEqual(['send:authorized:22', 'remember:side-panel']);
+      expect(fixture.created).toHaveLength(1);
+    });
+
+    it('rejects when the clicked window has closed too', async () => {
+      const fixture = createFixture({ surface: 'popout', hydrated: true });
+      await fixture.launcher.click(tabA);
+      fixture.silence(100);
+      await fixture.launcher.click(tabB);
+      fixture.fail('get:2', 'No window with id: 2.');
+      await expect(fixture.close(100)).rejects.toThrow('No window');
       expect(fixture.created).toHaveLength(1);
     });
   });
@@ -658,9 +956,16 @@ function createFixture(options: {
   readonly createsNoWindow?: boolean;
   /** The worker can ask which companion windows are open (D134). */
   readonly listsWindows?: boolean;
+  /** What an open companion window's page answers a message that names it (`true` in Simul). */
+  readonly answer?: unknown;
 }) {
   const calls: string[] = [];
+  // A click on a tab Simul cannot read tells an open companion window only
+  // that it was clicked (`clicks`); every other message is in `messages`.
   const messages: Array<AuthorizedTabMessage | UnreadableTabMessage> = [];
+  const clicks: CompanionWindowClickMessage[] = [];
+  /** Companion windows whose page does not answer: still loading, or closing. */
+  const silent = new Set<number>();
   const created: DetachedWindowCreateData[] = [];
   const open = new Set<number>();
   /** The tab each open companion window's address names. */
@@ -668,6 +973,8 @@ function createFixture(options: {
   /** Browser windows with the companion page in a tab, by the tab it names. */
   const asTabs = new Map<number, number>();
   const holds = new Map<string, { reached: () => void; released: Promise<void> }>();
+  // The worker's clock, in milliseconds; it moves only when a test says so.
+  let clock = 1_000;
   const failures = new Map<string, Error>();
   let surface = options.surface;
   let hydrated = options.hydrated;
@@ -728,10 +1035,20 @@ function createFixture(options: {
       },
     },
     sendMessage: async (message) => {
-      messages.push(message);
-      await step(
-        `send:${message.type === 'simul:authorized-tab' ? 'authorized' : 'unreadable'}:${message.tabId}`,
-      );
+      if (message.type === 'simul:companion-window-click') {
+        clicks.push(message);
+        await step(`send:click:${message.companionWindowId}`);
+      } else {
+        messages.push(message);
+        await step(
+          `send:${message.type === 'simul:authorized-tab' ? 'authorized' : 'unreadable'}:${message.tabId}`,
+        );
+      }
+      // The page of the companion window the message names answers it.
+      const named = 'companionWindowId' in message ? message.companionWindowId : undefined;
+      return named !== undefined && open.has(named) && !silent.has(named)
+        ? ('answer' in options ? options.answer : true)
+        : undefined;
     },
     companionPageUrl: () => 'chrome-extension://simul/sidepanel.html',
     ...(options.listsWindows
@@ -754,12 +1071,15 @@ function createFixture(options: {
     preferencesReady,
     launchEpoch: Promise.resolve('7.epoch'),
     rememberSurface: (remembered) => step(`remember:${remembered}`),
+    now: () => clock,
   };
 
+  const launcher = new ToolbarLauncher(environment);
   return {
-    launcher: new ToolbarLauncher(environment),
+    launcher,
     calls,
     messages,
+    clicks,
     created,
     openWindows: () => [...open].sort(),
     /** The saved preferences were read: later clicks know the choice. */
@@ -771,8 +1091,19 @@ function createFixture(options: {
     setSurface: (value: 'side-panel' | 'popout') => { surface = value; },
     /** The named step rejects from now on. */
     fail: (name: string, message: string) => { failures.set(name, new Error(message)); },
+    /** Time passes. */
+    advance: (milliseconds: number) => { clock += milliseconds; },
+    /** The window's page answers no message: it is still loading, or the window is closing. */
+    silence: (windowId: number) => { silent.add(windowId); },
+    /** The window's page has started and listens. */
+    listening: (windowId: number) => { silent.delete(windowId); },
     /** The window is gone, and no removal event said so. */
     closeWithoutEvent: (windowId: number) => { open.delete(windowId); },
+    /** The window closes and Chrome says so; resolves when the launcher is done with it. */
+    close: (windowId: number): Promise<void> => {
+      open.delete(windowId);
+      return launcher.windowRemoved(windowId);
+    },
     /** The companion page in a tab of browser window `windowId`. */
     shownAsTab: (windowId: number, sourceTabId: number) => { asTabs.set(windowId, sourceTabId); },
     /** A companion window the worker did not open: the panel's own button did. */

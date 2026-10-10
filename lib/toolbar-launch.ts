@@ -9,7 +9,11 @@ import {
   type DetachedCompanionWindow,
   type DetachedWindowCreateData,
 } from './companion-surface';
-import type { AuthorizedTabMessage, UnreadableTabMessage } from './page-identity';
+import type {
+  AuthorizedTabMessage,
+  CompanionWindowClickMessage,
+  UnreadableTabMessage,
+} from './page-identity';
 import type { CompanionPreferences, CompanionSurface } from './preferences';
 
 /** The facts of the clicked tab the launch reads. */
@@ -40,7 +44,10 @@ export interface ToolbarLaunchEnvironment {
     update(windowId: number, update: { focused: true }): Promise<unknown>;
     remove(windowId: number): Promise<void>;
   };
-  sendMessage(message: AuthorizedTabMessage | UnreadableTabMessage): Promise<unknown>;
+  /** Resolves with what a companion that heard the message answered, if any did. */
+  sendMessage(
+    message: AuthorizedTabMessage | UnreadableTabMessage | CompanionWindowClickMessage,
+  ): Promise<unknown>;
   /** The address of the companion page inside the extension. */
   companionPageUrl(): string;
   /**
@@ -58,6 +65,8 @@ export interface ToolbarLaunchEnvironment {
   readonly preferencesReady: Promise<unknown>;
   readonly launchEpoch: Promise<string>;
   rememberSurface(surface: CompanionSurface): Promise<void>;
+  /** A clock that only goes forward, in milliseconds (`performance.now()`). */
+  now(): number;
   /** Development diagnostics only. */
   report?(state: string, code: string): void;
 }
@@ -65,6 +74,17 @@ export interface ToolbarLaunchEnvironment {
 // How many companion pages found among the extension's contexts a click
 // asks Chrome about before it opens a window of its own.
 const MAX_FOUND_WINDOWS = 8;
+
+/**
+ * How long after a toolbar click the closing of a companion window can
+ * still be the closing that the click fell into. Chrome keeps a closing
+ * window, listed and brought forward without an error, until its page has
+ * unloaded, and gives the page half a second for that: with a busy page the
+ * window was gone 503 to 520 ms after the close (Chrome 138 and 154). The
+ * rest is for the news to reach the worker. A window that goes later than
+ * this after the click was closed after it, and stays closed.
+ */
+export const CLOSING_WINDOW_HOLD_MS = 600;
 
 /**
  * Opens the companion for a toolbar click: the side panel or the separate
@@ -75,6 +95,7 @@ export class ToolbarLauncher {
   readonly #environment: ToolbarLaunchEnvironment;
   #clickSequence = 0;
   #latestClickWindowId: number | undefined;
+  #latestClickAt = 0;
   // The detached companion window a toolbar click last opened or took over,
   // so a second click focuses it instead of opening another one. A window
   // the worker does not know (the panel's own button opened it, or the
@@ -87,6 +108,20 @@ export class ToolbarLauncher {
   #windowAuthorization:
     | { readonly windowId: number; readonly message: AuthorizedTabMessage }
     | undefined;
+  // The newest click that brought a companion window forward and has not
+  // heard from that window's page. Chrome still lists a window that is
+  // closing, and brings it forward without an error, so only the page can
+  // say that the window is there: it answers the click's message, or asks
+  // for it when it starts. If the window closes first, and soon enough to
+  // have been closing when it was clicked, the click opens one.
+  #unanswered:
+    | {
+        readonly windowId: number;
+        readonly tab: ToolbarLaunchTab;
+        readonly clickSequence: number;
+        readonly clickedAt: number;
+      }
+    | undefined;
 
   constructor(environment: ToolbarLaunchEnvironment) {
     this.#environment = environment;
@@ -96,6 +131,7 @@ export class ToolbarLauncher {
   click(tab: ToolbarLaunchTab): Promise<void> {
     const clickSequence = ++this.#clickSequence;
     this.#latestClickWindowId = tab.windowId;
+    this.#latestClickAt = this.#environment.now();
     // sidePanel.open() stays in the synchronous event branch because Chrome
     // requires a direct user gesture. The follow-up message reauthorizes an
     // already-running global panel for the tab that was actually clicked.
@@ -115,12 +151,26 @@ export class ToolbarLauncher {
     return this.#launch(tab, clickSequence, preopenedSidePanel);
   }
 
-  /** Forgets the companion window once it closes. */
-  windowRemoved(windowId: number): void {
+  /**
+   * Forgets the companion window once it closes. A click that brought this
+   * window forward and never heard from its page is launched again when
+   * the window goes within the time Chrome holds a closing window: it was
+   * closing when it was clicked, so the click opens one. A window that goes
+   * later was closed after the click, whatever kept its page from
+   * answering (busy, frozen, discarded): the click is over. Like any
+   * launch, the new one stops at once when a newer click has come.
+   * Resolves when the launch is over.
+   */
+  async windowRemoved(windowId: number): Promise<void> {
     if (this.#detachedWindow?.id === windowId) this.#detachedWindow = undefined;
     if (this.#windowAuthorization?.windowId === windowId) {
       this.#windowAuthorization = undefined;
     }
+    const unanswered = this.#unanswered;
+    if (unanswered?.windowId !== windowId) return;
+    this.#unanswered = undefined;
+    if (this.#environment.now() - unanswered.clickedAt > CLOSING_WINDOW_HOLD_MS) return;
+    await this.#launch(unanswered.tab, unanswered.clickSequence);
   }
 
   /**
@@ -128,9 +178,13 @@ export class ToolbarLauncher {
    * `windowId`, for that window's page to ask for when it starts: the
    * message may have gone out before the page could listen (D121). The page
    * orders it against what it already has by its launch stamp, as it does a
-   * message.
+   * message. A page that asks has started: the click that brought its window
+   * forward has its answer.
    */
   windowAuthorization(windowId: number | undefined): AuthorizedTabMessage | undefined {
+    if (windowId !== undefined && this.#unanswered?.windowId === windowId) {
+      this.#unanswered = undefined;
+    }
     return windowId !== undefined && this.#windowAuthorization?.windowId === windowId
       ? this.#windowAuthorization.message
       : undefined;
@@ -171,7 +225,7 @@ export class ToolbarLauncher {
       windowId: tab.windowId,
       url: tab.url ?? '',
     };
-    if (await this.#focusExistingDetachedWindow(identity, clickSequence)) {
+    if (await this.#focusExistingDetachedWindow(tab, identity, clickSequence)) {
       await this.#closeSidePanelBesideWindow(
         tab,
         tab.windowId,
@@ -230,6 +284,7 @@ export class ToolbarLauncher {
    * caller's own currency check decides what happens next.
    */
   async #focusExistingDetachedWindow(
+    tab: ToolbarLaunchTab,
     identity: { tabId: number; windowId: number; url: string },
     clickSequence: number,
   ): Promise<boolean> {
@@ -267,8 +322,25 @@ export class ToolbarLauncher {
       if (this.#detachedWindow?.id === existing.id) this.#detachedWindow = undefined;
       return false;
     }
+    // The window came forward, which a closing window does too: until its
+    // page answers, this click is the one that opens a window if this one
+    // closes.
+    if (clickSequence === this.#clickSequence) {
+      this.#unanswered = {
+        windowId: existing.id,
+        tab,
+        clickSequence,
+        clickedAt: this.#latestClickAt,
+      };
+    }
     // A tab Simul cannot read only brings the window forward.
-    if (!isSupportedPage(identity.url)) return true;
+    if (!isSupportedPage(identity.url)) {
+      await this.#sendToWindow(clickSequence, {
+        type: 'simul:companion-window-click',
+        companionWindowId: existing.id,
+      });
+      return true;
+    }
     // The window retargets (or re-authorizes its locked tab) through the same
     // ordered message a side-panel launch uses.
     const message: AuthorizedTabMessage = {
@@ -278,6 +350,7 @@ export class ToolbarLauncher {
       url: identity.url,
       launchEpoch: await this.#environment.launchEpoch,
       launchSequence: clickSequence,
+      companionWindowId: existing.id,
     };
     // Kept for a window whose page is not listening yet; the newest click's
     // stays when two sends cross.
@@ -288,8 +361,25 @@ export class ToolbarLauncher {
     ) {
       this.#windowAuthorization = { windowId: existing.id, message };
     }
-    await this.#send(message);
+    await this.#sendToWindow(clickSequence, message);
     return true;
+  }
+
+  /**
+   * Sends a click's message to the companion window it brought forward.
+   * The window's page answers `true`: the click then has its window.
+   */
+  async #sendToWindow(
+    clickSequence: number,
+    message: AuthorizedTabMessage | CompanionWindowClickMessage,
+  ): Promise<void> {
+    if (await this.#send(message) !== true) return;
+    const unanswered = this.#unanswered;
+    if (
+      unanswered !== undefined &&
+      unanswered.windowId === message.companionWindowId &&
+      unanswered.clickSequence === clickSequence
+    ) this.#unanswered = undefined;
   }
 
   async #finishSidePanelLaunch(
@@ -331,10 +421,16 @@ export class ToolbarLauncher {
     await this.#environment.rememberSurface('side-panel');
   }
 
-  /** No companion is open yet when nothing receives the message. */
-  async #send(message: AuthorizedTabMessage | UnreadableTabMessage): Promise<void> {
-    await this.#environment.sendMessage(message).catch((error: unknown) => {
+  /**
+   * Resolves with the answer, if a companion gave one. No companion is open
+   * yet when nothing receives the message.
+   */
+  #send(
+    message: AuthorizedTabMessage | UnreadableTabMessage | CompanionWindowClickMessage,
+  ): Promise<unknown> {
+    return this.#environment.sendMessage(message).catch((error: unknown) => {
       if (!isMissingMessageReceiver(error)) throw error;
+      return undefined;
     });
   }
 

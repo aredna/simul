@@ -125,6 +125,38 @@ export interface AuthorizedTabMessage {
   url: string;
   launchEpoch?: string;
   launchSequence?: number;
+  /**
+   * The companion window the click brought forward, when it did: that
+   * window's page answers the message.
+   */
+  companionWindowId?: number;
+}
+
+/**
+ * A toolbar click on a tab Simul cannot read brought the companion window
+ * `companionWindowId` forward. The window shows nothing for it; its page
+ * only answers, as it answers an authorization that names it.
+ */
+export interface CompanionWindowClickMessage {
+  type: 'simul:companion-window-click';
+  companionWindowId: number;
+}
+
+/**
+ * Whether a toolbar click's message names the companion window `windowId`
+ * as the one it brought forward. That window's page answers `true`: Chrome
+ * still lists a window that is closing and brings it forward without an
+ * error, so only the page can say that the window is there.
+ */
+export function namesCompanionWindow(
+  message: unknown,
+  windowId: number | undefined,
+): boolean {
+  return windowId !== undefined &&
+    typeof message === 'object' &&
+    message !== null &&
+    'companionWindowId' in message &&
+    message.companionWindowId === windowId;
 }
 
 export interface AuthorizedTabRequest {

@@ -13,6 +13,7 @@ import {
   isSamePageIdentity,
   isSupportedPage,
   isWindowAuthorizationRequest,
+  namesCompanionWindow,
   navigationPageIdentityKey,
   navigationPageScopeKey,
   normalizedPageUrl,
@@ -150,6 +151,47 @@ describe('isWindowAuthorizationRequest', () => {
       {},
     ]) {
       expect(isWindowAuthorizationRequest(message)).toBe(false);
+    }
+  });
+});
+
+describe('namesCompanionWindow', () => {
+  it('is true for a toolbar click\'s message that names this very window', () => {
+    const authorized = {
+      type: 'simul:authorized-tab',
+      tabId: 7,
+      windowId: 3,
+      url: 'https://example.com/',
+      launchEpoch: '7.epoch',
+      launchSequence: 2,
+      companionWindowId: 100,
+    };
+    expect(namesCompanionWindow(authorized, 100)).toBe(true);
+    expect(namesCompanionWindow(
+      { type: 'simul:companion-window-click', companionWindowId: 100 },
+      100,
+    )).toBe(true);
+    // Still an authorization the window reads as before.
+    expect(readAuthorizedTabMessage(authorized)).toEqual({
+      identity: { tabId: 7, windowId: 3, url: 'https://example.com/' },
+      launchStamp: { epoch: '7.epoch', sequence: 2 },
+    });
+  });
+
+  it('is false for another window, for a message that names none, and before the page knows its window', () => {
+    const click = { type: 'simul:companion-window-click', companionWindowId: 100 };
+    expect(namesCompanionWindow(click, 101)).toBe(false);
+    // The browser window a side panel is in is named `windowId`, not this.
+    expect(namesCompanionWindow({ type: 'simul:authorized-tab', tabId: 7, windowId: 100 }, 100))
+      .toBe(false);
+    expect(namesCompanionWindow(click, undefined)).toBe(false);
+    expect(namesCompanionWindow({ type: 'simul:authorized-tab' }, undefined)).toBe(false);
+    expect(namesCompanionWindow(
+      { type: 'simul:authorized-tab', companionWindowId: undefined },
+      undefined,
+    )).toBe(false);
+    for (const message of [undefined, null, 100, 'simul:companion-window-click', { companionWindowId: '100' }]) {
+      expect(namesCompanionWindow(message, 100)).toBe(false);
     }
   });
 });

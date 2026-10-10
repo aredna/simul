@@ -551,6 +551,29 @@ describe('SourceFollower in a detached window', () => {
       expect(harness.state.followedPageIdentity).toEqual(newerIdentity);
       expect(harness.queueCapture).toHaveBeenCalledTimes(1);
       expect(harness.browser.queryActiveTab).not.toHaveBeenCalled();
+      // The worker is asked all the same: the question is how it learns
+      // that this window's page has started.
+      expect(harness.browser.requestWindowAuthorization).toHaveBeenCalledOnce();
+    });
+
+    it('takes a still newer authorization that waited, after one that came as a message', async () => {
+      const newest = { ...newer, tabId: 4, windowId: 1, url: 'https://a.example/', launchSequence: 3 };
+      const harness = setup({
+        detached: opened,
+        popoutTabMode: 'active',
+        panelWindowId: 9,
+        tabs,
+        waitingAuthorization: async () => newest,
+      });
+      await harness.follower.acceptAuthorizedTab({
+        identity: newerIdentity,
+        launchStamp: { epoch: '7.epoch', sequence: 2 },
+      });
+      await harness.follower.initializeSourcePage();
+      expect(harness.state.followedPageIdentity).toEqual({
+        tabId: 4, windowId: 1, url: 'https://a.example/',
+      });
+      expect(harness.state.latestToolbarLaunchStamp).toEqual({ epoch: '7.epoch', sequence: 3 });
     });
 
     it('gives way to a message that comes while its own page is looked up', async () => {

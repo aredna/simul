@@ -7,6 +7,11 @@ const background = readFileSync(
   'utf8',
 );
 
+const sidepanel = readFileSync(
+  new URL('../entrypoints/sidepanel/main.ts', import.meta.url),
+  'utf8',
+);
+
 // The launch itself is lib/toolbar-launch.ts, driven with fakes in
 // toolbar-launch.test.ts. These check the entrypoint's wiring.
 describe('background toolbar launch wiring', () => {
@@ -56,8 +61,43 @@ describe('background toolbar launch wiring', () => {
     );
   });
 
-  it('forgets the window once it closes', () => {
-    expect(background).toContain('browser.windows.onRemoved.addListener(');
-    expect(background).toContain('toolbarLauncher.windowRemoved(windowId);');
+  it('tells the launcher when a window closes, and reports a launch that follows and fails', () => {
+    expect(background).toContain('browser.windows.onRemoved.addListener((windowId) => {');
+    expect(background).toContain(
+      'void toolbarLauncher.windowRemoved(windowId).catch(reportLaunchFailure);',
+    );
+  });
+
+  it('gives the launcher the worker\'s own clock, which only goes forward', () => {
+    const wiring = background.slice(
+      background.indexOf('const toolbarLauncher = new ToolbarLauncher({'),
+      background.indexOf('browser.action.onClicked.addListener('),
+    );
+    expect(wiring).toContain('now: () => performance.now(),');
+    expect(wiring).not.toContain('Date.now');
+  });
+
+  it('answers a toolbar click that names this companion window, before anything else', () => {
+    const listener = sidepanel.slice(
+      sidepanel.indexOf('browser.runtime.onMessage.addListener('),
+      sidepanel.indexOf('browser.tabs.onActivated.addListener('),
+    );
+    const answer =
+      'if (!pageLeaving && namesCompanionWindow(message, state.panelWindowId)) sendResponse(true);';
+    expect(listener).toContain(answer);
+    // The answer says the window is there, whatever the page then makes of
+    // the message.
+    expect(listener.indexOf(answer)).toBeLessThan(listener.indexOf('readAuthorizedTabMessage('));
+    expect(listener.slice(0, listener.indexOf(answer))).not.toContain('await');
+  });
+
+  it('answers no click once the companion page is on its way out', () => {
+    // A closing window's page still hears the click for a moment.
+    expect(sidepanel).toContain('let pageLeaving = false;');
+    const leaving = sidepanel.slice(
+      sidepanel.indexOf("window.addEventListener('pagehide', (event) => {"),
+      sidepanel.indexOf('browser.runtime.onMessage.addListener('),
+    );
+    expect(leaving).toContain('pageLeaving = !event.persisted;');
   });
 });

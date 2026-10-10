@@ -153,7 +153,12 @@ export class SourceFollower {
       // page listened, or it waits with the worker, which is asked for it.
       // Either way it is newer than the page the window was opened for:
       // that page is not looked up over it, and gives way to it.
-      if (state.followedPageIdentity) return;
+      if (state.followedPageIdentity) {
+        // The worker is asked all the same: the question tells it that
+        // this window's page has started.
+        await this.#acceptWaitingAuthorization();
+        return;
+      }
       const request = currency.begin('identity');
       const waiting = this.#acceptWaitingAuthorization();
       let failure: { readonly error: unknown } | undefined;
