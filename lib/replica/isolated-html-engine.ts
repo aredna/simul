@@ -158,6 +158,13 @@ const ISOLATED_DISCLOSURE_BLOCKED_EVENTS = Object.freeze([
 ]);
 const ISOLATED_SELECT_HOSTS = new WeakSet<Element>();
 const ISOLATED_OWNED_SHADOW_SHELL_STYLES = new WeakSet<Node>();
+/**
+ * The replica's roots that assign their slots by script, by replica
+ * document, and for each of their slots the mirror ids of the nodes the
+ * page's slot holds; see `assignIsolatedManualSlots`.
+ */
+const ISOLATED_MANUAL_SLOT_ROOTS = new WeakMap<Document, Set<ShadowRoot>>();
+const ISOLATED_MANUAL_SLOT_NODE_IDS = new WeakMap<Element, readonly number[]>();
 interface IsolatedSelectFacsimile {
   readonly panel: HTMLElement;
   readonly select: HTMLSelectElement;
@@ -1721,6 +1728,7 @@ function applyDocumentGraph(
     ownedAdoptedStyles,
     'document',
   );
+  assignIsolatedManualSlots(target, nodes);
 }
 
 function isDocumentShellTagName(tagName: string): boolean {
@@ -1740,14 +1748,23 @@ function buildShadowRoot(
   controlMetadata: Map<number, HtmlMirrorControlText>,
   ownedAdoptedStyles: Set<HTMLStyleElement>,
 ): void {
+  const manual = input.slotAssignment === 'manual';
   const shadow = (host as Element & {
     attachShadow?: (init: ShadowRootInit) => ShadowRoot;
-  }).attachShadow?.({ mode: 'open' });
+  }).attachShadow?.({
+    mode: 'open',
+    ...(manual ? { slotAssignment: 'manual' as const } : {}),
+  });
   if (!shadow) throw new Error('Open shadow root could not be reconstructed.');
   if (nodes.has(input.id)) {
     throw new Error('Duplicate isolated mirror shadow root ID.');
   }
   nodes.set(input.id, shadow);
+  if (manual) {
+    let roots = ISOLATED_MANUAL_SLOT_ROOTS.get(target);
+    if (!roots) ISOLATED_MANUAL_SLOT_ROOTS.set(target, roots = new Set());
+    roots.add(shadow);
+  }
   for (const child of input.children) {
     const built = buildNode(
       target,
@@ -1829,6 +1846,51 @@ function buildNode(
     );
   }
   return wrapNativeSelectFacsimile(node);
+}
+
+/**
+ * Gives the slots of the replica's roots that assign by script the nodes the
+ * page's slots hold (`HtmlMirrorElementHints.assignedNodeIds`). The replica
+ * runs no page code, so nothing in it calls `slot.assign()`: the panel does,
+ * from outside, after the page is first built and after every change. A
+ * change may have built anew a node a slot held, or the slot itself, and
+ * only nodes that are children of the root's host can be assigned. A slot
+ * that cannot be given its nodes is left as it is: the rest of the page is
+ * still drawn. A page without such a root pays nothing here.
+ */
+function assignIsolatedManualSlots(
+  target: Document,
+  nodes: ReadonlyMap<number, Node>,
+): void {
+  const roots = ISOLATED_MANUAL_SLOT_ROOTS.get(target);
+  if (!roots || roots.size === 0) return;
+  for (const root of [...roots]) {
+    if (!root.host.isConnected) {
+      roots.delete(root);
+      continue;
+    }
+    for (const slot of root.querySelectorAll('slot')) {
+      const ids = ISOLATED_MANUAL_SLOT_NODE_IDS.get(slot);
+      if (!ids) continue;
+      const held: Array<Element | Text> = [];
+      for (const id of ids) {
+        const node = nodes.get(id);
+        // A dropdown is drawn by the box Simul puts around it.
+        const drawn = node && presentationNodeForMirrorNode(node);
+        if (drawn?.parentNode === root.host) held.push(drawn as Element | Text);
+      }
+      try {
+        const now = (slot as HTMLSlotElement).assignedNodes();
+        if (
+          now.length === held.length &&
+          now.every((node, index) => node === held[index])
+        ) continue;
+        (slot as HTMLSlotElement).assign(...held);
+      } catch {
+        // Left as it is.
+      }
+    }
+  }
 }
 
 /**
@@ -2116,9 +2178,13 @@ function applyElementHints(
     | 'canvasBackgroundColor'
     | 'resolvedStyleSheetText'
     | 'customElementDefined'
+    | 'assignedNodeIds'
   >,
 ): void {
   if (hints.customElementDefined) defineReplicaCustomElement(element);
+  if (hints.assignedNodeIds) {
+    ISOLATED_MANUAL_SLOT_NODE_IDS.set(element, hints.assignedNodeIds);
+  }
   applyControlText(element, hints.controlText);
   applySelectedOptionIndexes(element, hints.selectedOptionIndexes);
   if (element.localName.toLowerCase() === 'select') {
@@ -3606,6 +3672,8 @@ function applyPatchBatch(
         changes.push(Object.freeze({ kind: 'upsert', record }));
       }
     }
+    const replicaDocument = state.iframe.contentDocument;
+    if (replicaDocument) assignIsolatedManualSlots(replicaDocument, state.nodes);
     return Object.freeze({
       changes: Object.freeze(changes),
       retainedNodeCount,

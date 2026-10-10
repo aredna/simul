@@ -275,6 +275,203 @@ describe('semantic source receiver', () => {
     expect(input.value).toBe('***');
   });
 
+  describe('editor text that is drawn through a slot, or in a root', () => {
+    function editorRecord(
+      id: number,
+      text: string,
+      overrides: Partial<SemanticSourceRecord> = {},
+    ): SemanticSourceRecord {
+      return {
+        bridge: 'isolated-html',
+        recordId: semanticSourceRecordId(id, 'text')!,
+        nodeId: id,
+        nodeRevision: 1,
+        category: 'editable',
+        gate: 'editableContent',
+        tagName: 'div',
+        type: '',
+        autocomplete: '',
+        role: '',
+        contentEditable: 'true',
+        text,
+        presentation: 'text',
+        classifierVersion: 1,
+        ...overrides,
+      };
+    }
+    /** A replica host whose root draws its children in `rootMarkup`. */
+    function replicaHost(rootMarkup: string, hostAttributes = '') {
+      const { document } = parseHTML(
+        `<html><body><x-note id="host" ${hostAttributes}><p id="slotted"></p></x-note></body></html>`,
+      );
+      const host = document.querySelector('#host')!;
+      const shadow = host.attachShadow({ mode: 'open' });
+      shadow.innerHTML = rootMarkup;
+      const slotted = document.querySelector('#slotted')!;
+      const text = document.createTextNode('');
+      slotted.append(text);
+      const direct = document.createTextNode('');
+      host.append(direct);
+      const give = (slot: Element | null): void => {
+        for (const node of [slotted, direct]) {
+          Object.defineProperty(node, 'assignedSlot', { configurable: true, value: slot });
+        }
+      };
+      give(shadow.querySelector('slot'));
+      const nodes = new Map<number, Node>([[11, text], [12, direct]]);
+      const receiver = new SemanticSourceReceiver({
+        document: identity,
+        replicaDocument: document as unknown as Document,
+        resolveNode: (id) => nodes.get(id),
+      });
+      return { document, host, shadow, slotted, text, direct, give, nodes, receiver };
+    }
+
+    it('places text slotted into an editor of a root', () => {
+      const replica = replicaHost('<div contenteditable="true"><slot></slot></div>');
+      expect(replica.receiver.applyBatch(createSemanticSourceBatch(
+        identity, 'read-v1-111111', 1,
+        [editorRecord(11, 'slotted draft'), editorRecord(12, 'direct draft')],
+      ))).toHaveLength(2);
+      expect(replica.text.nodeValue).toBe('slotted draft');
+      expect(replica.direct.nodeValue).toBe('direct draft');
+    });
+
+    it('places text of the root of a host that is an editor', () => {
+      const replica = replicaHost('<p id="inside"></p><slot></slot>', 'contenteditable="true"');
+      const inside = replica.document.createTextNode('');
+      replica.shadow.querySelector('#inside')!.append(inside);
+      replica.nodes.set(13, inside);
+      expect(replica.receiver.applyBatch(createSemanticSourceBatch(
+        identity, 'read-v1-111111', 1,
+        [editorRecord(13, 'root draft', { tagName: 'x-note' })],
+      ))).toHaveLength(1);
+      expect(inside.nodeValue).toBe('root draft');
+    });
+
+    it('drops text that is slotted beside the editor, and text whose editor has another tag', () => {
+      const replica = replicaHost(
+        '<div contenteditable="true"><slot name="edited"></slot></div><section><slot id="plain"></slot></section>',
+      );
+      replica.give(replica.shadow.querySelector('#plain'));
+      expect(replica.receiver.applyBatch(createSemanticSourceBatch(
+        identity, 'read-v1-111111', 1, [editorRecord(11, 'slotted draft')],
+      ))).toEqual([]);
+      expect(replica.text.nodeValue).toBe('');
+      replica.give(replica.shadow.querySelector('slot'));
+      expect(replica.receiver.applyBatch(createSemanticSourceBatch(
+        identity, 'read-v1-111111', 2,
+        [editorRecord(11, 'slotted draft', { tagName: 'section' })],
+      ))).toEqual([]);
+      expect(replica.text.nodeValue).toBe('');
+    });
+
+    it('takes the nearest editor for the one that is named: an editor that is slotted before the one around its slot', () => {
+      const replica = replicaHost('<span role="textbox"><slot></slot></span>');
+      replica.slotted.setAttribute('contenteditable', 'true');
+      const textbox = { tagName: 'span', role: 'textbox', contentEditable: '' };
+      const paragraph = { tagName: 'p', contentEditable: 'true' };
+      // Named by the editor around the slot, the slotted editor's own text
+      // is not placed: the page names the nearest one, as this side does.
+      expect(replica.receiver.applyBatch(createSemanticSourceBatch(
+        identity, 'read-v1-111111', 1,
+        [editorRecord(11, 'slotted draft', textbox)],
+      ))).toHaveLength(0);
+      expect(replica.text.nodeValue).toBe('');
+      expect(replica.receiver.applyBatch(createSemanticSourceBatch(
+        identity, 'read-v1-111111', 2,
+        [
+          editorRecord(11, 'slotted draft', paragraph),
+          editorRecord(12, 'direct draft', textbox),
+        ],
+      ))).toHaveLength(2);
+      expect(replica.text.nodeValue).toBe('slotted draft');
+      expect(replica.direct.nodeValue).toBe('direct draft');
+    });
+
+    it('places editor text that came before its box became an editor, once the box is one', () => {
+      // The page's labels and its structure travel apart: the text of a box
+      // that has just become an editor comes first.
+      const replica = replicaHost('<div id="box"><slot></slot></div>');
+      const { document } = replica;
+      const light = document.createElement('div');
+      const lightText = document.createTextNode('');
+      light.append(lightText);
+      document.body.append(light);
+      replica.nodes.set(14, lightText);
+      expect(replica.receiver.applyBatch(createSemanticSourceBatch(
+        identity, 'read-v1-111111', 1,
+        [editorRecord(11, 'slotted draft'), editorRecord(14, 'page draft')],
+      ))).toEqual([]);
+      // Nothing to place while the replica still says neither is an editor.
+      expect(replica.receiver.placeArrivedNodes()).toBeUndefined();
+
+      replica.shadow.querySelector('#box')!.setAttribute('contenteditable', 'true');
+      light.setAttribute('contenteditable', 'true');
+      expect(replica.receiver.placeArrivedNodes()).toHaveLength(2);
+      expect(replica.text.nodeValue).toBe('slotted draft');
+      expect(lightText.nodeValue).toBe('page draft');
+      // Placed: not gone through again at the next change.
+      expect(replica.receiver.placeArrivedNodes()).toBeUndefined();
+    });
+
+    it('tries no other kind of record again, and editor text a bounded number at a time', () => {
+      const replica = replicaHost('<div id="box"><slot></slot></div>');
+      const { document } = replica;
+      // A value for a field the replica draws as another element for now.
+      const field = document.createElement('textarea');
+      document.body.append(field);
+      replica.nodes.set(7, field);
+      expect(replica.receiver.applyBatch(createSemanticSourceBatch(
+        identity, 'read-v1-111111', 1, [valueRecord()],
+      ))).toEqual([]);
+      const input = document.createElement('input');
+      input.setAttribute('type', 'text');
+      replica.nodes.set(7, input);
+      document.body.append(input);
+      expect(replica.receiver.placeArrivedNodes()).toBeUndefined();
+
+      // Three hundred texts of a box that is not an editor yet.
+      const records: SemanticSourceRecord[] = [];
+      for (let index = 0; index < 300; index += 1) {
+        const text = document.createTextNode('');
+        replica.slotted.append(text);
+        replica.nodes.set(100 + index, text);
+        records.push(editorRecord(100 + index, `draft ${index}`));
+      }
+      expect(replica.receiver.applyBatch(createSemanticSourceBatch(
+        identity, 'read-v1-111111', 2, records,
+      ))).toEqual([]);
+      const resolved = vi.spyOn(replica.nodes, 'get');
+      expect(replica.receiver.placeArrivedNodes()).toBeUndefined();
+      expect(resolved).toHaveBeenCalledTimes(256);
+    });
+
+    it('does not try again at every change a pass that could not be made', () => {
+      const replica = replicaHost('<div id="box"><slot></slot></div>');
+      expect(replica.receiver.applyBatch(createSemanticSourceBatch(
+        identity, 'read-v1-111111', 1, [editorRecord(11, 'slotted draft')],
+      ))).toEqual([]);
+      replica.shadow.querySelector('#box')!.setAttribute('contenteditable', 'true');
+      // The text cannot be written this once.
+      let refuse = true;
+      let value = '';
+      Object.defineProperty(replica.text, 'nodeValue', {
+        configurable: true,
+        get: () => value,
+        set: (next: string) => {
+          if (refuse) throw new Error('not now');
+          value = next;
+        },
+      });
+      expect(replica.receiver.placeArrivedNodes()).toBeUndefined();
+      refuse = false;
+      expect(replica.receiver.placeArrivedNodes()).toBeUndefined();
+      expect(value).toBe('');
+    });
+
+  });
+
   it('keeps a receiver-side secret transition sticky after attributes revert', () => {
     const { document } = parseHTML(
       '<html><body><input id="draft" type="text" value="***"></body></html>',

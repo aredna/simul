@@ -102,6 +102,8 @@ export interface HtmlMirrorElementNode {
   readonly resolvedStyleSheetText?: string;
   /** The page has defined this autonomous custom element (D83). */
   readonly customElementDefined?: true;
+  /** See `HtmlMirrorElementHints`. */
+  readonly assignedNodeIds?: readonly number[];
   readonly shadowRoot?: HtmlMirrorShadowRoot;
   /** Canonical extension-owned shell replacing one hard-secret source root. */
   readonly opaquePlaceholder?: true;
@@ -117,6 +119,13 @@ export interface HtmlMirrorElementHints {
   readonly canvasBackgroundColor?: string;
   readonly resolvedStyleSheetText?: string;
   readonly customElementDefined?: true;
+  /**
+   * On a `<slot>` of a root that assigns its slots by script
+   * (`slotAssignment: 'manual'`): the nodes the page's slot holds, in the
+   * slot's order, by their mirror ids. No attribute says which they are, and
+   * the mirror runs no page code, so the panel assigns them itself.
+   */
+  readonly assignedNodeIds?: readonly number[];
 }
 
 export interface HtmlMirrorControlText extends SourceControlText {
@@ -135,6 +144,12 @@ export interface HtmlMirrorShadowRoot {
   readonly mode: 'open';
   readonly children: readonly HtmlMirrorNode[];
   readonly adoptedStyleSheets: readonly string[];
+  /**
+   * The page's root assigns its slots by script. A root can only be made
+   * that way when it is attached, so the mirror has to know before it
+   * builds the root; see `HtmlMirrorElementHints.assignedNodeIds`.
+   */
+  readonly slotAssignment?: 'manual';
 }
 
 export interface HtmlMirrorTextNode {
@@ -428,12 +443,18 @@ interface SerializeContext {
   readonly secretAncestors: SourceSecretAncestorMemo;
   /** Shared by one walk; see `readSourceSlotRegion`. */
   readonly slotRegions: Map<Element, SourceSlotRegion>;
+  /** The note of the reader this read is for; see `SourceSlotReadings`. */
+  readonly slotReadings: SourceSlotReadings | undefined;
 }
 
-/** What the box around a slot does to the nodes drawn in that slot. */
+/** What the boxes around a slot do to the nodes drawn in that slot. */
 interface SourceSlotRegion {
   /** The slot sits in a hidden or collapsed box. */
   readonly withheld: boolean;
+  /** The slot sits in a box that is edited: a text editor, a dropdown. */
+  readonly privacy: boolean;
+  /** The slot sits in a button or another control that acts. */
+  readonly activation: boolean;
   /** Text put straight into the slot is hidden by `visibility`. */
   readonly visibilityHidden: boolean;
 }
@@ -980,6 +1001,7 @@ export function sanitizeSourceSubtree(
   baseUrl = source.ownerDocument?.baseURI ?? 'about:blank',
   representability = createHtmlMirrorRepresentabilityCollector(),
   fidelityPolicy: SelectableReplicaFidelityPolicy = 'conservative',
+  slotReadings?: SourceSlotReadings,
 ): HtmlMirrorNode | undefined {
   return sanitizeSourceSubtrees(
     [source],
@@ -989,6 +1011,7 @@ export function sanitizeSourceSubtree(
     undefined,
     undefined,
     fidelityPolicy,
+    slotReadings,
   )?.[0];
 }
 
@@ -1001,6 +1024,7 @@ export function sanitizeSourceSubtrees(
   budget = createHtmlMirrorReadBudget(),
   styleWork = createHtmlMirrorStyleWorkBudget(),
   fidelityPolicy: SelectableReplicaFidelityPolicy = 'conservative',
+  slotReadings?: SourceSlotReadings,
 ): readonly (HtmlMirrorNode | undefined)[] | undefined {
   try {
     const controlledContent = createSourceControlledContentPolicy(
@@ -1014,6 +1038,18 @@ export function sanitizeSourceSubtrees(
       const inheritedElement = source.nodeType === Node.ELEMENT_NODE && sourceElement
         ? composedParentElement(sourceElement)
         : sourceElement;
+      const visibilityHidden = inheritedElement
+        ? readSourceHiddenRegionState(inheritedElement, controlledContent)
+          .visibilityHidden
+        : false;
+      noteSourceSlotReadingOfRoot(
+        slotReadings,
+        source,
+        controlledContent,
+        slotRegions,
+        secretAncestors,
+        visibilityHidden,
+      );
       return serializeNode(source, {
         registry,
         baseUrl,
@@ -1038,16 +1074,14 @@ export function sanitizeSourceSubtrees(
         hardSecretRegion: inheritedElement
           ? hasSourceCredentialSecretAncestor(inheritedElement)
           : false,
-        visibilityHidden: inheritedElement
-          ? readSourceHiddenRegionState(inheritedElement, controlledContent)
-            .visibilityHidden
-          : false,
+        visibilityHidden,
         depth: 0,
         representability,
         fidelityPolicy,
         controlledContent,
         secretAncestors,
         slotRegions,
+        slotReadings,
       });
     }));
   } catch (error) {
@@ -1067,6 +1101,7 @@ export function sanitizeSourceChildren(
   sharedBudget?: HtmlMirrorReadBudget,
   sharedStyleWork?: HtmlMirrorStyleWorkBudget,
   precomputedControlledContent?: SourceControlledContentPolicy,
+  slotReadings?: SourceSlotReadings,
 ): readonly HtmlMirrorNode[] | undefined {
   try {
     const budget = sharedBudget ?? createHtmlMirrorReadBudget();
@@ -1101,6 +1136,14 @@ export function sanitizeSourceChildren(
       : false;
     const secretAncestors = createSourceSecretAncestorMemo();
     const slotRegions = new Map<Element, SourceSlotRegion>();
+    noteSourceSlotReadingOfRoot(
+      slotReadings,
+      source,
+      controlledContent,
+      slotRegions,
+      secretAncestors,
+      false,
+    );
     // The children of a host are drawn where the host's root slots them.
     const host = source.nodeType === Node.ELEMENT_NODE &&
       readSourceShadowRoot(source as Element)
@@ -1108,17 +1151,26 @@ export function sanitizeSourceChildren(
       : undefined;
     for (const child of sourceStructuralChildNodes(source)) {
       const slotRegion = host
-        ? readSourceSlotRegion(child, controlledContent, slotRegions)
+        ? readSourceSlotRegion(
+            child,
+            controlledContent,
+            slotRegions,
+            secretAncestors,
+          )
         : undefined;
+      if (host) {
+        noteSourceSlotReading(slotReadings, child, slotRegion, visibilityHidden);
+      }
       const serialized = serializeNode(child, {
         registry,
         baseUrl,
         budget,
         styleWork,
-        privateRegion: privateRegion || slotRegion?.withheld === true,
-        privacyRegion,
+        privateRegion: privateRegion || slotRegion?.withheld === true ||
+          slotRegion?.privacy === true,
+        privacyRegion: privacyRegion || slotRegion?.privacy === true,
         privateAttributeRegion,
-        activationRegion,
+        activationRegion: activationRegion || slotRegion?.activation === true,
         nonContentRegion,
         styleRegion,
         hardSecretRegion,
@@ -1131,6 +1183,7 @@ export function sanitizeSourceChildren(
         controlledContent,
         secretAncestors,
         slotRegions,
+        slotReadings,
       });
       if (serialized) result.push(serialized);
     }
@@ -1189,6 +1242,7 @@ export function sanitizeSourceElementHints(
   styleWork?: HtmlMirrorStyleWorkBudget,
   precomputedControlledContent?: SourceControlledContentPolicy,
   secretAncestors?: SourceSecretAncestorMemo,
+  registry?: HtmlMirrorIdRegistry,
 ): HtmlMirrorElementHints {
   // This function is also used by live attribute refreshes. Establish the
   // credential boundary before reading selected image sources, CSSOM, canvas
@@ -1233,7 +1287,11 @@ export function sanitizeSourceElementHints(
   const selectPresentationStyle = tagName === 'select'
     ? readSourceSelectPresentationStyle(source, fidelityPolicy, heldOutOfSight)
     : undefined;
+  const assignedNodeIds = tagName === 'slot' && registry
+    ? readSourceManualSlotNodeIds(source, registry)
+    : undefined;
   return Object.freeze({
+    ...(assignedNodeIds ? { assignedNodeIds } : {}),
     ...(visuallyHidden ? { visuallyHidden: true as const } : {}),
     ...(selectedImageSource ? { selectedImageSource } : {}),
     ...(selectPresentationStyle ? { selectPresentationStyle } : {}),
@@ -1245,6 +1303,25 @@ export function sanitizeSourceElementHints(
       ? { customElementDefined: true as const }
       : {}),
   });
+}
+
+/**
+ * The nodes a slot holds, by their mirror ids, where its root assigns slots
+ * by script; undefined for any other slot. Only which nodes they are is
+ * read: each travels, or is withheld, by its own rules.
+ */
+function readSourceManualSlotNodeIds(
+  slot: Element,
+  registry: HtmlMirrorIdRegistry,
+): readonly number[] | undefined {
+  if (slot.namespaceURI !== 'http://www.w3.org/1999/xhtml') return undefined;
+  const root = slot.getRootNode() as Partial<ShadowRoot>;
+  if (root.slotAssignment !== 'manual') return undefined;
+  const ids: number[] = [];
+  for (const node of (slot as HTMLSlotElement).assignedNodes()) {
+    if (node.parentNode === root.host) ids.push(registry.getId(node));
+  }
+  return Object.freeze(ids);
 }
 
 /**
@@ -1272,6 +1349,7 @@ export function sanitizeSourceDocument(
   representability = createHtmlMirrorRepresentabilityCollector(),
   fidelityPolicy: SelectableReplicaFidelityPolicy = 'conservative',
   precomputedControlledContent?: SourceControlledContentPolicy,
+  slotReadings?: SourceSlotReadings,
 ): HtmlMirrorDocumentGraph | undefined {
   const documentElement = sourceDocument.documentElement;
   if (!documentElement) return undefined;
@@ -1306,6 +1384,7 @@ export function sanitizeSourceDocument(
     controlledContent,
     secretAncestors: createSourceSecretAncestorMemo(),
     slotRegions: new Map(),
+    slotReadings,
   });
   if (!root || root.kind !== 'element' || root.tagName !== 'html') return undefined;
   const adoptedStyleSheets = captureAdoptedStyleSheets(
@@ -1388,7 +1467,8 @@ export function readHtmlMirrorNode(
       'visuallyHidden', 'selectedImageSource', 'selectedOptionIndexes',
       'selectPickerOpen', 'selectPresentationStyle', 'controlText',
       'canvasBackgroundColor', 'resolvedStyleSheetText',
-      'customElementDefined', 'shadowRoot', 'opaquePlaceholder',
+      'customElementDefined', 'assignedNodeIds', 'shadowRoot',
+      'opaquePlaceholder',
     ]) ||
     !isNamespace(input.namespace) ||
     !isSafeTagName(input.tagName) ||
@@ -1420,6 +1500,14 @@ export function readHtmlMirrorNode(
       )
       : isSourceSecretPlaceholderTagName(input.tagName))
   ) return undefined;
+  const assignedNodeIds = readHtmlMirrorAssignedNodeIds(
+    input.assignedNodeIds,
+    input.namespace,
+    input.tagName,
+  );
+  if (input.assignedNodeIds !== undefined && !assignedNodeIds) return undefined;
+  // Counted against the page; the element's own size is checked below.
+  if (assignedNodeIds) budget.bytes += assignedNodeIds.length * 8 + 16;
   if (
     !isValidTransportedNativeSelectPlacement(
       input.namespace,
@@ -1615,11 +1703,13 @@ export function readHtmlMirrorNode(
   if (input.shadowRoot !== undefined) {
     if (
       !isRecord(input.shadowRoot) ||
-      !hasExactKeys(input.shadowRoot, [
+      !hasExactKeysWithOptional(input.shadowRoot, [
         'id', 'mode', 'children', 'adoptedStyleSheets',
-      ]) ||
+      ], ['slotAssignment']) ||
       !isNodeId(input.shadowRoot.id) ||
       input.shadowRoot.mode !== 'open' ||
+      (input.shadowRoot.slotAssignment !== undefined &&
+        input.shadowRoot.slotAssignment !== 'manual') ||
       !Array.isArray(input.shadowRoot.children) ||
       budget.ids.has(input.shadowRoot.id)
     ) return undefined;
@@ -1659,6 +1749,9 @@ export function readHtmlMirrorNode(
       mode: 'open',
       children: Object.freeze(shadowChildren),
       adoptedStyleSheets,
+      ...(input.shadowRoot.slotAssignment === 'manual'
+        ? { slotAssignment: 'manual' as const }
+        : {}),
     });
   }
   return Object.freeze({
@@ -1668,6 +1761,7 @@ export function readHtmlMirrorNode(
     tagName: input.tagName,
     attributes: Object.freeze(attributes),
     children: Object.freeze(children),
+    ...(assignedNodeIds ? { assignedNodeIds } : {}),
     ...(input.visuallyHidden === true ? { visuallyHidden: true as const } : {}),
     ...(typeof input.selectedImageSource === 'string'
       ? { selectedImageSource: input.selectedImageSource }
@@ -1686,6 +1780,24 @@ export function readHtmlMirrorNode(
     ...(shadowRoot ? { shadowRoot } : {}),
     ...(opaquePlaceholder ? { opaquePlaceholder: true as const } : {}),
   });
+}
+
+/**
+ * Revalidates the nodes a slot is said to hold: a list of distinct node ids,
+ * on an HTML `<slot>` only. Which root the slot is in, and whether the nodes
+ * are children of that root's host, is for the builder of the replica.
+ */
+function readHtmlMirrorAssignedNodeIds(
+  input: unknown,
+  namespace: unknown,
+  tagName: unknown,
+): readonly number[] | undefined {
+  if (
+    namespace !== 'html' || tagName !== 'slot' || !Array.isArray(input) ||
+    input.length > MAX_HTML_MIRROR_NODES ||
+    !input.every(isNodeId) || new Set(input).size !== input.length
+  ) return undefined;
+  return Object.freeze([...input as number[]]);
 }
 
 export interface HtmlMirrorDocumentContent {
@@ -1983,6 +2095,7 @@ function serializeNode(
     context.styleWork,
     context.controlledContent,
     context.secretAncestors,
+    context.registry,
   );
   admitNode(
     context.budget,
@@ -1990,7 +2103,8 @@ function serializeNode(
     tagName.length * 2 + attributes.reduce(
       (total, [name, value]) => total + (name.length + value.length) * 2 + 8,
       64,
-    ) + (hints.selectedImageSource?.length ?? 0) * 2 +
+    ) + (hints.assignedNodeIds ? hints.assignedNodeIds.length * 8 + 16 : 0) +
+      (hints.selectedImageSource?.length ?? 0) * 2 +
       (hints.selectPresentationStyle?.length ?? 0) * 2 +
       (hints.canvasBackgroundColor?.length ?? 0) * 2 +
       (hints.resolvedStyleSheetText?.length ?? 0) * 2,
@@ -2018,16 +2132,26 @@ function serializeNode(
             liveChild,
             context.controlledContent,
             context.slotRegions,
+            context.secretAncestors,
           )
         : undefined;
+      if (sourceShadow) {
+        noteSourceSlotReading(
+          context.slotReadings,
+          liveChild,
+          slotRegion,
+          visibilityHidden,
+        );
+      }
       const child = serializeNode(liveChild, {
         ...context,
         representability: childRepresentability,
         fidelityPolicy: childFidelityPolicy,
-        privateRegion: privateRegion || slotRegion?.withheld === true,
-        privacyRegion,
+        privateRegion: privateRegion || slotRegion?.withheld === true ||
+          slotRegion?.privacy === true,
+        privacyRegion: privacyRegion || slotRegion?.privacy === true,
         privateAttributeRegion,
-        activationRegion,
+        activationRegion: activationRegion || slotRegion?.activation === true,
         nonContentRegion,
         styleRegion,
         styleResolved,
@@ -2085,6 +2209,9 @@ function serializeNode(
       mode: 'open',
       children: Object.freeze(shadowChildren),
       adoptedStyleSheets,
+      ...((sourceShadow as Partial<ShadowRoot>).slotAssignment === 'manual'
+        ? { slotAssignment: 'manual' as const }
+        : {}),
     });
   }
   return Object.freeze({
@@ -5204,7 +5331,7 @@ const SOURCE_REGION_WITHHELD: SourceHiddenRegionState = Object.freeze({
  * `visibility: visible` and paint, so each element reports its own computed
  * visibility and text follows its parent's.
  */
-function readSourceHiddenRegionState(
+export function readSourceHiddenRegionState(
   element: Element,
   controlledContent: SourceControlledContentPolicy,
 ): SourceHiddenRegionState {
@@ -5266,22 +5393,29 @@ function elementStartsHiddenOrControlledDisclosureRegion(
 
 const SOURCE_SLOT_REGION_UNREADABLE: SourceSlotRegion = Object.freeze({
   withheld: true,
+  privacy: true,
+  activation: false,
   visibilityHidden: false,
 });
 
 /**
  * A child of a shadow host is drawn in the slot its host's root assigns it
- * to, inside whatever that root puts around the slot. A hidden or collapsed
- * box there hides the child as one around the child itself would, and the
- * walk down the page's own tree never passes it: text slotted into a closed
- * dialog travelled, and was translated, while it was hidden (D135).
- * `undefined` for a node that is not assigned to a slot: it is read as its
- * host is, as it always was. A slot's box is looked at once in a walk.
+ * to, inside whatever that root puts around the slot, and the walk down the
+ * page's own tree never passes those boxes. The child is read as it would be
+ * if it sat there in the page itself: a hidden or collapsed box hides it
+ * (D135; text slotted into a closed dialog travelled, and was translated,
+ * while it was hidden), a box that is edited withholds its text from the
+ * mirror (text slotted into a component's text editor travelled under every
+ * read profile, where the same text in an editor of the page did not), and a
+ * control that acts counts for it. `undefined` for a node that is not
+ * assigned to a slot: it is read as its host is, as it always was. A slot's
+ * boxes are looked at once in a walk.
  */
 function readSourceSlotRegion(
   child: Node,
   controlledContent: SourceControlledContentPolicy,
   known: Map<Element, SourceSlotRegion>,
+  secretAncestors: SourceSecretAncestorMemo,
 ): SourceSlotRegion | undefined {
   let slot: Element | null | undefined;
   try {
@@ -5298,12 +5432,137 @@ function readSourceSlotRegion(
     region = Object.freeze({
       withheld: path.some((current) =>
         elementStartsHiddenOrControlledDisclosureRegion(current, controlledContent)),
+      // A dropdown too: what is slotted into one of its options is not
+      // drawn, and nothing inside a dropdown is page text.
+      privacy: path.some((current) =>
+        elementStartsPrivateRegion(current, secretAncestors) ||
+        current.localName.toLowerCase() === 'select'),
+      activation: path.some(elementStartsActivationRegion),
       visibilityHidden:
         readSourceHiddenRegionState(slot, controlledContent).visibilityHidden,
     });
   }
   known.set(slot, region);
   return region;
+}
+
+/**
+ * How one reader last read each child of a shadow host: by which of the
+ * boxes around its slot (hidden, edited, a control that acts, and for text
+ * the slot's visibility). Only that decides what a child's slot changes of
+ * what is sent, so a child given another slot is read again only when this
+ * differs; see `sourceSlotReadingChanged`. Nothing of the page's content.
+ *
+ * It is the note of one reader about one mirror: the reader makes it, hands
+ * it to every read it makes for that mirror, and it ends with the reader. A
+ * note kept for the whole page was written by the first of two mirrors of a
+ * tab and believed by the second, which then kept a text the first had
+ * taken back.
+ */
+export type SourceSlotReadings = WeakMap<Node, number>;
+
+export function createSourceSlotReadings(): SourceSlotReadings {
+  return new WeakMap();
+}
+
+function sourceSlotReading(
+  child: Node,
+  region: SourceSlotRegion | undefined,
+  hostVisibilityHidden: boolean,
+): number {
+  // A child no slot takes is read as its host is.
+  const visibilityHidden = child.nodeType === Node.TEXT_NODE &&
+    (region ? region.visibilityHidden : hostVisibilityHidden);
+  return (region?.withheld ? 1 : 0) | (region?.privacy ? 2 : 0) |
+    (region?.activation ? 4 : 0) | (visibilityHidden ? 8 : 0);
+}
+
+/** A read that is for no mirror (no note is handed in) notes nothing. */
+function noteSourceSlotReading(
+  readings: SourceSlotReadings | undefined,
+  child: Node,
+  region: SourceSlotRegion | undefined,
+  hostVisibilityHidden: boolean,
+): void {
+  readings?.set(
+    child,
+    sourceSlotReading(child, region, hostVisibilityHidden),
+  );
+}
+
+/**
+ * A node read on its own, or whose children are: where it is a child of a
+ * host it is read by the boxes around its slot, as its ancestors in the
+ * drawn tree say, and that is how it is read from now on. (Noted for any
+ * other node too, where nothing asks for it.)
+ */
+function noteSourceSlotReadingOfRoot(
+  readings: SourceSlotReadings | undefined,
+  source: Node,
+  controlledContent: SourceControlledContentPolicy,
+  slotRegions: Map<Element, SourceSlotRegion>,
+  secretAncestors: SourceSecretAncestorMemo,
+  hostVisibilityHidden: boolean,
+): void {
+  noteSourceSlotReading(
+    readings,
+    source,
+    readSourceSlotRegion(source, controlledContent, slotRegions, secretAncestors),
+    hostVisibilityHidden,
+  );
+}
+
+/** What one pass over the children of hosts shares; see below. */
+export interface SourceSlotReadingWalk {
+  readonly readings: SourceSlotReadings;
+  readonly controlledContent: SourceControlledContentPolicy;
+  readonly regions: Map<Element, SourceSlotRegion>;
+  readonly secretAncestors: SourceSecretAncestorMemo;
+}
+
+export function beginSourceSlotReadingWalk(
+  readings: SourceSlotReadings,
+  sourceDocument: Document,
+  precomputedControlledContent?: SourceControlledContentPolicy,
+): SourceSlotReadingWalk {
+  return {
+    readings,
+    controlledContent: precomputedControlledContent ??
+      createSourceControlledContentPolicy(sourceDocument),
+    regions: new Map(),
+    secretAncestors: createSourceSecretAncestorMemo(),
+  };
+}
+
+/**
+ * Whether a child of a shadow host would now be read otherwise than the
+ * reader of `walk` last read it, because it is drawn in another slot or
+ * the slots of its host's root changed. True for a child that reader never
+ * read as a host's child. A slot added, removed, renamed or filled by a
+ * script moves what a host holds between boxes, and most moves change
+ * nothing of what is sent: only a child for which this is true is sent
+ * again, and reading it notes how.
+ */
+export function sourceSlotReadingChanged(
+  child: Node,
+  walk: SourceSlotReadingWalk,
+): boolean {
+  const region = readSourceSlotRegion(
+    child,
+    walk.controlledContent,
+    walk.regions,
+    walk.secretAncestors,
+  );
+  return walk.readings.get(child) !== sourceSlotReading(
+    child,
+    region,
+    // Asked only where it counts: for text that no slot takes.
+    !region && child.nodeType === Node.TEXT_NODE &&
+      readSourceHiddenRegionState(
+        child.parentElement as Element,
+        walk.controlledContent,
+      ).visibilityHidden,
+  );
 }
 
 /** Content-free: computed style that leaves a displayed box unpainted. */

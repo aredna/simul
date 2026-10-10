@@ -13,8 +13,10 @@ export interface ReplicaPatchTarget {
  * content is replaced while the wrapper's transform changes.
  * A shadow root and its own host are not a conflict either: replacing the
  * host's children leaves the root where it is, so a host that the page shows
- * again gets both read again in one batch (D132). Anything above the host
- * still takes the root with it.
+ * again gets both read again in one batch (D132). The same holds for what
+ * sits inside that root: a slot there is told which nodes it holds in the
+ * batch that brings its host a new child. Anything above the host still
+ * takes the root with it.
  * Indexing targets avoids pairwise tree walks for large live patch batches. */
 export function hasStructuralPatchTargetConflict(
   targets: readonly ReplicaPatchTarget[],
@@ -28,15 +30,14 @@ export function hasStructuralPatchTargetConflict(
   }
 
   for (const target of indexedTargets.keys()) {
-    const ownHost = target.nodeType === 11 && 'host' in target
-      ? (target as ShadowRoot).host
-      : undefined;
     for (
-      let ancestor = composedParent(target);
+      let below = target, ancestor = composedParent(target);
       ancestor;
-      ancestor = composedParent(ancestor)
+      below = ancestor, ancestor = composedParent(ancestor)
     ) {
-      if (ancestor === ownHost) continue;
+      // From a root up to its host: the host's children are replaced, not
+      // its root.
+      if (below.nodeType === 11) continue;
       if (indexedTargets.get(ancestor) === true) return true;
     }
   }

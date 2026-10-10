@@ -3941,6 +3941,359 @@ describe('IsolatedHtmlReplicaEngine', () => {
     }
   });
 
+  describe('a root that assigns its slots by script', () => {
+    /**
+     * linkedom has no `slot.assign()`: a slot keeps what it is given, as
+     * Chrome does, and says it holds those of them that are children of its
+     * root's host. Every call and every `attachShadow` is recorded.
+     */
+    function installManualSlots() {
+      const slotPrototype = Object.getPrototypeOf(
+        parseHTML('<slot></slot>').document.querySelector('slot'),
+      ) as object;
+      const elementPrototype = Object.getPrototypeOf(Object.getPrototypeOf(slotPrototype)) as {
+        attachShadow(init: ShadowRootInit): ShadowRoot;
+      };
+      const given = new WeakMap<object, Node[]>();
+      const assigned: Array<{ slot: string | null; nodes: Node[] }> = [];
+      const inits: ShadowRootInit[] = [];
+      Object.defineProperties(slotPrototype, {
+        assign: {
+          configurable: true,
+          value(this: Element, ...nodes: Node[]) {
+            given.set(this, nodes);
+            assigned.push({ slot: this.getAttribute('id'), nodes });
+          },
+        },
+        assignedNodes: {
+          configurable: true,
+          value(this: Element) {
+            const root = this.getRootNode() as ShadowRoot;
+            return (given.get(this) ?? []).filter((node) => node.parentNode === root.host);
+          },
+        },
+      });
+      const attachShadow = elementPrototype.attachShadow;
+      elementPrototype.attachShadow = function (init: ShadowRootInit) {
+        inits.push(init);
+        return attachShadow.call(this, init);
+      };
+      return {
+        assigned,
+        inits,
+        restore: () => {
+          delete (slotPrototype as { assign?: unknown }).assign;
+          delete (slotPrototype as { assignedNodes?: unknown }).assignedNodes;
+          elementPrototype.attachShadow = attachShadow;
+        },
+      };
+    }
+    const span = (id: number, text: string): HtmlMirrorNode => ({
+      kind: 'element', id, namespace: 'html', tagName: 'span', attributes: [],
+      children: [{ kind: 'text', id: id + 1, text, translatable: true }],
+    });
+    const slot = (id: number, name: string, assignedNodeIds?: number[]): HtmlMirrorNode => ({
+      kind: 'element', id, namespace: 'html', tagName: 'slot',
+      attributes: [['id', name]], children: [],
+      ...(assignedNodeIds ? { assignedNodeIds } : {}),
+    });
+    function tabsCheckpoint(manual = true): HtmlMirrorCheckpoint {
+      return createHtmlMirrorCheckpoint(
+        createReplicaIdentity({ ...identityParts, sequence: 0 }),
+        {
+          root: {
+            kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+            attributes: [], children: [
+              { kind: 'element', id: 2, namespace: 'html', tagName: 'head', attributes: [], children: [] },
+              { kind: 'element', id: 3, namespace: 'html', tagName: 'body', attributes: [], children: [
+                {
+                  kind: 'element', id: 4, namespace: 'html', tagName: 'x-tabs',
+                  attributes: [], children: [
+                    span(5, 'one'), span(7, 'two'),
+                    { kind: 'text', id: 9, text: 'direct', translatable: true },
+                  ],
+                  shadowRoot: {
+                    id: 10, mode: 'open', adoptedStyleSheets: [],
+                    ...(manual ? { slotAssignment: 'manual' as const } : {}),
+                    children: [
+                      // Not the page's order, not by name; one node is not
+                      // a child of the host and one is not in the mirror.
+                      slot(12, 'first', [7, 9, 3, 99]), slot(14, 'second', [5]),
+                    ],
+                  },
+                },
+                { kind: 'element', id: 30, namespace: 'html', tagName: 'p', attributes: [], children: [
+                  { kind: 'text', id: 31, text: 'elsewhere', translatable: true },
+                ] },
+              ] },
+            ],
+          },
+          adoptedStyleSheets: [],
+          captureMs: 1,
+          viewportWidth: 800,
+          viewportHeight: 600,
+          documentWidth: 800,
+          documentHeight: 1000,
+        },
+      )!;
+    }
+    const patch = (
+      sequence: number,
+      operations: Parameters<typeof createHtmlMirrorPatch>[3],
+    ) => createHtmlMirrorPatch(
+      createReplicaIdentity({ ...identityParts, sequence }), sequence, sequence, operations,
+    )!;
+    const texts = (nodes: readonly Node[]): string[] =>
+      nodes.map((node) => node.textContent ?? '');
+
+    it('builds the root that way and gives each slot the nodes the page\'s slot holds', async () => {
+      const manual = installManualSlots();
+      try {
+        const stream = new FakeHtmlStream(tabsCheckpoint());
+        const host = new FakePresentationHost();
+        await expect(makeEngine(stream, host).run(request))
+          .resolves.toMatchObject({ status: 'complete' });
+        expect(manual.inits).toContainEqual({ mode: 'open', slotAssignment: 'manual' });
+        expect(manual.assigned.map(({ slot: id, nodes }) => [id, texts(nodes)])).toEqual([
+          ['first', ['two', 'direct']],
+          ['second', ['one']],
+        ]);
+        const tabs = host.iframe!.contentDocument!.querySelector('x-tabs')!;
+        expect(manual.assigned.flatMap(({ nodes }) => nodes)
+          .every((node) => node.parentNode === tabs)).toBe(true);
+      } finally {
+        manual.restore();
+      }
+    });
+
+    it('gives a slot other nodes when the page says it holds others', async () => {
+      const manual = installManualSlots();
+      try {
+        const stream = new FakeHtmlStream(tabsCheckpoint());
+        await makeEngine(stream, new FakePresentationHost()).run(request);
+        manual.assigned.length = 0;
+        stream.observer?.onPatch(patch(1, [
+          { kind: 'attributes', nodeId: 12, namespace: 'html', tagName: 'slot', attributes: [['id', 'first']], assignedNodeIds: [5] },
+          { kind: 'attributes', nodeId: 14, namespace: 'html', tagName: 'slot', attributes: [['id', 'second']], assignedNodeIds: [] },
+        ]));
+        expect(stream.requested).toEqual([]);
+        expect(manual.assigned.map(({ slot: id, nodes }) => [id, texts(nodes)])).toEqual([
+          ['first', ['one']],
+          ['second', []],
+        ]);
+        // The same nodes in another order are another drawing.
+        manual.assigned.length = 0;
+        stream.observer?.onPatch(patch(2, [
+          { kind: 'attributes', nodeId: 12, namespace: 'html', tagName: 'slot', attributes: [['id', 'first']], assignedNodeIds: [5, 7] },
+        ]));
+        stream.observer?.onPatch(patch(3, [
+          { kind: 'attributes', nodeId: 12, namespace: 'html', tagName: 'slot', attributes: [['id', 'first']], assignedNodeIds: [7, 5] },
+        ]));
+        expect(manual.assigned.map(({ nodes }) => texts(nodes)))
+          .toEqual([['one', 'two'], ['two', 'one']]);
+      } finally {
+        manual.restore();
+      }
+    });
+
+    it('gives the slots their nodes again after a change that built those nodes anew', async () => {
+      const manual = installManualSlots();
+      try {
+        const stream = new FakeHtmlStream(tabsCheckpoint());
+        const host = new FakePresentationHost();
+        await makeEngine(stream, host).run(request);
+        const before = manual.assigned.flatMap(({ nodes }) => nodes);
+        manual.assigned.length = 0;
+        // Something elsewhere changes: nothing is assigned again.
+        stream.observer?.onPatch(patch(1, [{
+          kind: 'text', nodeId: 31,
+          node: { kind: 'text', id: 31, text: 'elsewhere, changed', translatable: true },
+        }]));
+        expect(manual.assigned).toEqual([]);
+        // The host's children are sent again whole: new nodes, the same ids.
+        stream.observer?.onPatch(patch(2, [{
+          kind: 'children', nodeId: 4,
+          children: [
+            span(5, 'one'), span(7, 'two'),
+            { kind: 'text', id: 9, text: 'direct', translatable: true },
+          ],
+        }]));
+        expect(stream.requested).toEqual([]);
+        expect(manual.assigned.map(({ slot: id, nodes }) => [id, texts(nodes)])).toEqual([
+          ['first', ['two', 'direct']],
+          ['second', ['one']],
+        ]);
+        expect(manual.assigned.flatMap(({ nodes }) => nodes)
+          .some((node) => before.includes(node))).toBe(false);
+        manual.assigned.length = 0;
+        // The root's own content is built anew, slots and all.
+        stream.observer?.onPatch(patch(3, [{
+          kind: 'children', nodeId: 10,
+          children: [slot(20, 'first', [9]), slot(21, 'second', [7, 5])],
+        }]));
+        expect(manual.assigned.map(({ slot: id, nodes }) => [id, texts(nodes)])).toEqual([
+          ['first', ['direct']],
+          ['second', ['two', 'one']],
+        ]);
+      } finally {
+        manual.restore();
+      }
+    });
+
+    it('takes a slot\'s list in the batch that brings its host a new child', async () => {
+      const manual = installManualSlots();
+      try {
+        const stream = new FakeHtmlStream(tabsCheckpoint());
+        await makeEngine(stream, new FakePresentationHost()).run(request);
+        manual.assigned.length = 0;
+        // One more child for the host, kept children retained, and the slot
+        // that takes it: a change of the host's children leaves its root.
+        stream.observer?.onPatch(patch(1, [
+          {
+            kind: 'reconcile-children', nodeId: 4,
+            children: [
+              { kind: 'retain', nodeId: 5 }, { kind: 'retain', nodeId: 7 },
+              { kind: 'retain', nodeId: 9 }, { kind: 'graph', node: span(40, 'three') },
+            ],
+          },
+          { kind: 'attributes', nodeId: 14, namespace: 'html', tagName: 'slot', attributes: [['id', 'second']], assignedNodeIds: [5, 40] },
+        ]));
+        expect(stream.requested).toEqual([]);
+        expect(manual.assigned.map(({ slot: id, nodes }) => [id, texts(nodes)]))
+          .toEqual([['second', ['one', 'three']]]);
+        // The same with the host's children sent whole.
+        manual.assigned.length = 0;
+        stream.observer?.onPatch(patch(2, [
+          {
+            kind: 'children', nodeId: 4,
+            children: [span(5, 'one'), span(7, 'two'), span(40, 'three'), span(50, 'four')],
+          },
+          { kind: 'attributes', nodeId: 12, namespace: 'html', tagName: 'slot', attributes: [['id', 'first']], assignedNodeIds: [50] },
+        ]));
+        expect(stream.requested).toEqual([]);
+        expect(manual.assigned.map(({ slot: id, nodes }) => [id, texts(nodes)])).toEqual([
+          ['first', ['four']],
+          ['second', ['one', 'three']],
+        ]);
+      } finally {
+        manual.restore();
+      }
+    });
+
+    it('forgets a root that has gone from the mirror', async () => {
+      const manual = installManualSlots();
+      try {
+        const stream = new FakeHtmlStream(tabsCheckpoint());
+        const host = new FakePresentationHost();
+        await makeEngine(stream, host).run(request);
+        const first = host.iframe!.contentDocument!.querySelector('x-tabs')!
+          .shadowRoot!.querySelector('#first')!;
+        const asked = vi.spyOn(first, 'getRootNode');
+        stream.observer?.onPatch(patch(1, [{
+          kind: 'children', nodeId: 3, children: [span(40, 'the host is gone')],
+        }]));
+        asked.mockClear();
+        manual.assigned.length = 0;
+        stream.observer?.onPatch(patch(2, [{
+          kind: 'children', nodeId: 3, children: [span(42, 'changed again')],
+        }]));
+        expect(asked).not.toHaveBeenCalled();
+        expect(manual.assigned).toEqual([]);
+      } finally {
+        manual.restore();
+      }
+    });
+
+    it('gives a slot the box Simul draws a dropdown in, not the dropdown inside it', async () => {
+      const manual = installManualSlots();
+      try {
+        const checkpoint = createHtmlMirrorCheckpoint(
+          createReplicaIdentity({ ...identityParts, sequence: 0 }),
+          {
+            root: {
+              kind: 'element', id: 1, namespace: 'html', tagName: 'html',
+              attributes: [], children: [
+                { kind: 'element', id: 2, namespace: 'html', tagName: 'head', attributes: [], children: [] },
+                { kind: 'element', id: 3, namespace: 'html', tagName: 'body', attributes: [], children: [{
+                  kind: 'element', id: 4, namespace: 'html', tagName: 'x-tabs',
+                  attributes: [], children: [{
+                    kind: 'element', id: 5, namespace: 'html', tagName: 'select',
+                    attributes: [], children: [{
+                      kind: 'element', id: 6, namespace: 'html', tagName: 'option',
+                      attributes: [], children: [],
+                    }],
+                  }],
+                  shadowRoot: {
+                    id: 10, mode: 'open', adoptedStyleSheets: [], slotAssignment: 'manual',
+                    children: [slot(12, 'first', [5])],
+                  },
+                }] },
+              ],
+            },
+            adoptedStyleSheets: [], captureMs: 1,
+            viewportWidth: 800, viewportHeight: 600,
+            documentWidth: 800, documentHeight: 1000,
+          },
+        )!;
+        const host = new FakePresentationHost();
+        await expect(makeEngine(new FakeHtmlStream(checkpoint), host).run(request))
+          .resolves.toMatchObject({ status: 'complete' });
+        const tabs = host.iframe!.contentDocument!.querySelector('x-tabs')!;
+        expect(manual.assigned).toHaveLength(1);
+        const [box] = manual.assigned[0]!.nodes as Element[];
+        expect(box!.parentNode).toBe(tabs);
+        expect(box!.localName).not.toBe('select');
+        expect(box!.shadowRoot?.querySelector('select')).not.toBeNull();
+      } finally {
+        manual.restore();
+      }
+    });
+
+    it('draws the page all the same when a slot cannot be given its nodes', async () => {
+      const manual = installManualSlots();
+      const slotPrototype = Object.getPrototypeOf(
+        parseHTML('<slot></slot>').document.querySelector('slot'),
+      ) as object;
+      Object.defineProperty(slotPrototype, 'assign', {
+        configurable: true,
+        value() {
+          throw new TypeError('cannot assign');
+        },
+      });
+      try {
+        const stream = new FakeHtmlStream(tabsCheckpoint());
+        const host = new FakePresentationHost();
+        await expect(makeEngine(stream, host).run(request))
+          .resolves.toMatchObject({ status: 'complete' });
+        expect(host.iframe!.contentDocument!.querySelector('p')?.textContent)
+          .toBe('elsewhere');
+        stream.observer?.onPatch(patch(1, [{
+          kind: 'text', nodeId: 31,
+          node: { kind: 'text', id: 31, text: 'elsewhere, changed', translatable: true },
+        }]));
+        expect(stream.requested).toEqual([]);
+        expect(host.iframe!.contentDocument!.querySelector('p')?.textContent)
+          .toBe('elsewhere, changed');
+      } finally {
+        manual.restore();
+      }
+    });
+
+    it('assigns nothing by script where the browser assigns by name', async () => {
+      const manual = installManualSlots();
+      try {
+        const stream = new FakeHtmlStream(tabsCheckpoint(false));
+        await expect(makeEngine(stream, new FakePresentationHost()).run(request))
+          .resolves.toMatchObject({ status: 'complete' });
+        expect(manual.inits).toContainEqual({ mode: 'open' });
+        expect(manual.inits.some((init) => 'slotAssignment' in init)).toBe(false);
+        expect(manual.assigned).toEqual([]);
+      } finally {
+        manual.restore();
+      }
+    });
+  });
+
   it('reconstructs accessible open shadow roots without definitions or scripts', async () => {
     const checkpoint = createHtmlMirrorCheckpoint(
       createReplicaIdentity({ ...identityParts, sequence: 0 }),

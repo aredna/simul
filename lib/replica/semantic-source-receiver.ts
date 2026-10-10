@@ -161,6 +161,8 @@ const SEMANTIC_SELECTION_TEXT = new WeakMap<Element, string>();
  * option's label used to be dropped on the page side, and the row was blank.
  */
 const TRANSLATABLE_SOURCE_TEXT = /[\p{L}\p{N}]/u;
+/** Editor text of one batch that is tried again; see `placeArrivedNodes`. */
+const MAX_UNPLACED_EDITOR_TEXT = 256;
 
 /**
  * Returns renderer-owned semantic selection text without encoding source text
@@ -191,6 +193,12 @@ export class SemanticSourceReceiver {
   #missingNodeIds = new Set<number>();
   /** Where one pass notes the nodes it cannot find. */
   #missingNodeNotes: Set<number> | undefined;
+  /**
+   * Text of the last batch whose node the replica held and did not yet take
+   * for editor text; see `placeArrivedNodes`.
+   */
+  #unplacedEditorText: SemanticSourceRecord[] = [];
+  #unplacedEditorTextNotes: SemanticSourceRecord[] | undefined;
   /**
    * For one pass: whether an element or anything above it is secret. The
    * options of one dropdown share every ancestor, so the walk up is made
@@ -237,12 +245,14 @@ export class SemanticSourceReceiver {
    * it as delivered and does not send it again while its own view is
    * unchanged. So when a node the last batch named and the replica lacked is
    * there now, that batch is gone through again (D132; a dropdown the page
-   * added while the mirror was open stayed blank). Undefined when there was
-   * nothing to place.
+   * added while the mirror was open stayed blank). The same for the text of
+   * a box that has just become an editor: it comes before the attribute that
+   * says so, and without this the box stayed blank until the page next
+   * changed. Undefined when there was nothing to place.
    */
   placeArrivedNodes(): readonly ReplicaSourceTextChange[] | undefined {
     const batch = this.#lastBatch;
-    if (!batch || this.#missingNodeIds.size === 0) return undefined;
+    if (!batch) return undefined;
     let arrived = false;
     for (const nodeId of this.#missingNodeIds) {
       if (this.#nodeIsPresent(nodeId)) {
@@ -250,11 +260,17 @@ export class SemanticSourceReceiver {
         break;
       }
     }
+    arrived ||= this.#unplacedEditorText.some(
+      (record) => this.#resolveAndValidate(record) !== undefined,
+    );
     if (!arrived) return undefined;
     const changes = this.#placeBatch(batch);
     // A pass that could not be committed is not tried again at every change:
     // the page's next batch starts afresh.
-    if (!changes) this.#missingNodeIds = new Set();
+    if (!changes) {
+      this.#missingNodeIds = new Set();
+      this.#unplacedEditorText = [];
+    }
     return changes;
   }
 
@@ -262,14 +278,20 @@ export class SemanticSourceReceiver {
     batch: SemanticSourceBatch,
   ): readonly ReplicaSourceTextChange[] | undefined {
     const missing = new Set<number>();
+    const unplacedEditorText: SemanticSourceRecord[] = [];
     this.#missingNodeNotes = missing;
+    this.#unplacedEditorTextNotes = unplacedEditorText;
     this.#passSecretAncestors = new Map();
     try {
       const changes = this.#placeBatchRecordsAndProofs(batch);
-      if (changes) this.#missingNodeIds = missing;
+      if (changes) {
+        this.#missingNodeIds = missing;
+        this.#unplacedEditorText = unplacedEditorText;
+      }
       return changes;
     } finally {
       this.#missingNodeNotes = undefined;
+      this.#unplacedEditorTextNotes = undefined;
       this.#passSecretAncestors = undefined;
     }
   }
@@ -1063,6 +1085,11 @@ export class SemanticSourceReceiver {
     ) return undefined;
     const element = evidenceElement(target, record);
     if (!element || element.localName.toLowerCase() !== record.tagName) {
+      if (
+        record.category === 'editable' && record.presentation === 'text' &&
+        (this.#unplacedEditorTextNotes?.length ?? MAX_UNPLACED_EDITOR_TEXT) <
+          MAX_UNPLACED_EDITOR_TEXT
+      ) this.#unplacedEditorTextNotes?.push(record);
       return undefined;
     }
     const facts = this.#classificationFacts(element, record.presentation);
@@ -1609,9 +1636,10 @@ function evidenceElement(
   if (record.presentation !== 'text') {
     return target.nodeType === 1 ? target as Element : undefined;
   }
-  let element = target.parentElement ?? undefined;
-  if (record.category !== 'editable') return element;
-  while (element) {
+  if (record.category !== 'editable') return target.parentElement ?? undefined;
+  // The editor the text is drawn in: above it in the page's own tree, around
+  // the slot that takes it, or the host of the root it sits in.
+  for (const element of readSourceFlatTreeElementPath(target) ?? []) {
     const contentEditable = safeAttribute(element, 'contenteditable')
       .trim().toLowerCase();
     const role = safeAttribute(element, 'role').trim().toLowerCase();
@@ -1619,7 +1647,6 @@ function evidenceElement(
       (contentEditable !== '' && contentEditable !== 'false') ||
       role === 'textbox' || role === 'searchbox'
     ) return element;
-    element = element.parentElement ?? undefined;
   }
   return undefined;
 }

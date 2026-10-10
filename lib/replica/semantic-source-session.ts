@@ -48,6 +48,7 @@ import {
   hasSourceCredentialSecretAncestor,
   isSourceSelectLabelElementPublic,
   readSourceFlatTreeElementPath,
+  readSourceFlatTreeParentElement,
   readSourceSelectLabel,
   sourceElementPathHoldsPaint,
   sourceElementPathIsPainted,
@@ -56,13 +57,17 @@ import {
   type SourceSecretAncestorMemo,
   type SourceSelectLabelWalk,
 } from './source-privacy-policy';
-import { isSourceSelectHiddenByItself } from './html-mirror-sanitizer';
+import {
+  isSourceSelectHiddenByItself,
+  readSourceHiddenRegionState,
+} from './html-mirror-sanitizer';
 import type { ReplicaReadScope } from './read-scope-policy';
 import type { ReplicaSourceDocumentIdentity } from './source-identity';
 import { sourceMutationMayChangeCurrentValue } from './source-mutation-filter';
 import {
   askAboutSourceShadowRootsAbove,
   beginSourceShadowRootWalk,
+  readSourceAssignedSlot,
   readSourceShadowRoot,
 } from './source-shadow-root';
 import {
@@ -333,6 +338,7 @@ export class SemanticSourceSession {
       for (const type of SEMANTIC_PRESENTATION_CHANGE_EVENTS) {
         root.removeEventListener(type, this.#onPresentationChange, true);
       }
+      root.removeEventListener('slotchange', this.#onDomChange, true);
     }
     this.#semanticEventRoots.clear();
     this.#documentIdentity = undefined;
@@ -519,6 +525,11 @@ export class SemanticSourceSession {
     }
     for (const type of SEMANTIC_PRESENTATION_CHANGE_EVENTS) {
       root.addEventListener(type, this.#onPresentationChange, true);
+    }
+    // A root that assigns its slots by script moves what its host holds
+    // into an editor, or out of one, without a mutation.
+    if ((root as Partial<ShadowRoot>).slotAssignment === 'manual') {
+      root.addEventListener('slotchange', this.#onDomChange, true);
     }
   }
 
@@ -889,15 +900,20 @@ export class SemanticSourceSession {
       );
     }
     let validatedTabs: readonly ValidatedTab[] = Object.freeze([]);
-    if (scope.controlSemantics && stack.length === 0) {
-      const controlledContent = createSourceControlledContentPolicy(
-        this.environment.document,
-        this.environment.window,
-        MAX_SEMANTIC_SOURCE_NODE_IDENTITIES,
-      );
-      if (!controlledContent.overflow) {
-        validatedTabs = this.#validatedTabs(controlledContent, classifications);
-      }
+    // What the page collapses: tabs are proven against it, and editor text
+    // is not sent from inside it (below).
+    const controlledContent = scope.controlSemantics || scope.editableContent
+      ? createSourceControlledContentPolicy(
+          this.environment.document,
+          this.environment.window,
+          MAX_SEMANTIC_SOURCE_NODE_IDENTITIES,
+        )
+      : undefined;
+    if (
+      controlledContent && scope.controlSemantics && stack.length === 0 &&
+      !controlledContent.overflow
+    ) {
+      validatedTabs = this.#validatedTabs(controlledContent, classifications);
     }
     const proofs: SemanticSourceProof[] = [];
     const proofIds = new Set<string>();
@@ -1217,6 +1233,72 @@ export class SemanticSourceSession {
       readonly node: Node;
       readonly classification: ElementClassification;
     }> = [];
+    // What a shadow host holds is drawn in the slots of the host's root:
+    // it is in an editor when its slot is, as in the mirror's own reading.
+    // The nearest editor around the slot counts, as the nearest does down
+    // the page's own tree: it is the one the panel finds from the text.
+    const slotEditors = new Map<Element, ElementClassification | null>();
+    const editorAroundSlot = (child: Node): ElementClassification | undefined => {
+      const slot = safelyRead(() => readSourceAssignedSlot(child));
+      if (!slot) return undefined;
+      let editor = slotEditors.get(slot);
+      if (editor === undefined) {
+        editor = null;
+        for (const around of readSourceFlatTreeElementPath(slot) ?? []) {
+          const classification = classifications.get(around);
+          if (classification?.category !== 'editable') continue;
+          editor = classification;
+          break;
+        }
+        slotEditors.set(slot, editor);
+      }
+      return editor ?? undefined;
+    };
+    // Hidden wins over edited: editor text the tab does not show is not
+    // sent, by the rule the mirror's own reading withholds hidden text by
+    // (a box that is not displayed, or is declared hidden and not painted,
+    // anywhere around the text as it is drawn, and `visibility: hidden` on
+    // the box the text is put into). Text slotted into an editor inside a
+    // closed dialog travelled, and was translated; so did the page's own.
+    // An element is asked once a scan, and only for text in an editor.
+    const hiddenStates = new Map<
+      Element,
+      ReturnType<typeof readSourceHiddenRegionState>
+    >();
+    const hiddenState = (element: Element) => {
+      let state = hiddenStates.get(element);
+      if (!state) {
+        state = readSourceHiddenRegionState(
+          element,
+          controlledContent as SourceControlledContentPolicy,
+        );
+        hiddenStates.set(element, state);
+      }
+      return state;
+    };
+    const hiddenRegions = new Map<Element, boolean>();
+    const editorTextIsHidden = (text: Node): boolean => {
+      // The boxes around the text were read a moment ago, to know that
+      // none of them is a secret: the way up is readable.
+      const box = readSourceFlatTreeParentElement(text);
+      if (!box || hiddenState(box).visibilityHidden) return true;
+      const asked: Element[] = [];
+      let hidden: boolean | undefined;
+      for (
+        let around: Element | undefined = box;
+        around;
+        around = readSourceFlatTreeParentElement(around)
+      ) {
+        hidden = hiddenRegions.get(around);
+        if (hidden !== undefined) break;
+        asked.push(around);
+        if (!hiddenState(around).starts) continue;
+        hidden = true;
+        break;
+      }
+      for (const element of asked) hiddenRegions.set(element, hidden ?? false);
+      return hidden ?? false;
+    };
     const textStack: Array<{
       node: Node;
       editable: ElementClassification | undefined;
@@ -1248,10 +1330,12 @@ export class SemanticSourceSession {
         const classification = parent && classifications.get(parent);
         if (!classification) continue;
         if (current.editable && scope.editableContent) {
-          editableText.push({
-            node: current.node,
-            classification: current.editable,
-          });
+          if (!editorTextIsHidden(current.node)) {
+            editableText.push({
+              node: current.node,
+              classification: current.editable,
+            });
+          }
         } else if (current.disclosure && scope.disclosureContent &&
           classification.category === 'public-semantic') {
           add(
@@ -1273,8 +1357,12 @@ export class SemanticSourceSession {
       // What a dropdown's options say is read as their labels, by the rules
       // for labels; it is never menu or editable text.
       if (classification.facts.tagName === 'select') continue;
-      const editable = current.editable ??
-        (classification.category === 'editable' ? classification : undefined);
+      // The nearest editor names the text: the panel finds the editor from
+      // the text upwards, and takes the text only where both name the same
+      // element (an editor inside an editor of another tag stayed blank).
+      const editable = classification.category === 'editable'
+        ? classification
+        : current.editable;
       const disclosure = current.disclosure || disclosurePanels.has(element);
       const children: Node[] = [...element.childNodes];
       const shadowRoot = safelyReadShadowRoot(element);
@@ -1282,7 +1370,9 @@ export class SemanticSourceSession {
       for (let index = children.length - 1; index >= 0; index -= 1) {
         textStack.push({
           node: children[index]!,
-          editable,
+          editable: (shadowRoot
+            ? editorAroundSlot(children[index]!)
+            : undefined) ?? editable,
           disclosure,
           secret,
         });

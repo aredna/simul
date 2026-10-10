@@ -634,6 +634,126 @@ describe('ImageOverlayProjector', () => {
     projector.dispose();
   });
 
+  it('leaves the overlays of two images of one slot where they are, one after the other', () => {
+    const { document } = parseHTML(
+      '<html><body><x-tabs id="manual"><img id="one"><img id="two"></x-tabs></body></html>',
+    );
+    const shadow = document.querySelector('#manual')!.attachShadow({ mode: 'open' });
+    shadow.innerHTML = '<div><slot></slot></div><p>after</p>';
+    Object.defineProperty(shadow, 'slotAssignment', { configurable: true, value: 'manual' });
+    const slot = shadow.querySelector('slot')!;
+    const images = new Map<number, HTMLImageElement>();
+    for (const [nodeId, imageId] of [[1, 'one'], [2, 'two']] as const) {
+      const image = document.querySelector(`#${imageId}`) as unknown as HTMLImageElement;
+      // linkedom assigns no slots: the test says what Chrome would.
+      Object.defineProperty(image, 'assignedSlot', { configurable: true, value: slot });
+      image.getBoundingClientRect = () => ({
+        left: 0, top: 0, width: 100, height: 60,
+        right: 100, bottom: 60, x: 0, y: 0, toJSON: () => ({}),
+      });
+      images.set(nodeId, image);
+    }
+    const projector = new ImageOverlayProjector({
+      resolveAnchor: (_document, nodeId) => ({
+        document: sourceDocument,
+        replayLease: 9,
+        image: images.get(nodeId)!,
+        iframe: { contentDocument: document } as HTMLIFrameElement,
+      }),
+      isCurrent: () => true,
+      scheduleFrame: (callback) => { callback(); return 1; },
+      cancelFrame: () => undefined,
+      createResizeObserver: () => undefined,
+    });
+    projector.beginPair(1, 'en>ja');
+    const afterSlot = (): Element[] => {
+      const found: Element[] = [];
+      for (let next = slot.nextSibling; next; next = next.nextSibling) {
+        found.push(next as Element);
+      }
+      return found;
+    };
+    for (const nodeId of [1, 2]) {
+      expect(projector.project(projection({ jobOrdinal: nodeId, nodeId }))).toBe(true);
+    }
+    const placed = afterSlot();
+    expect(placed.map(({ localName }) => localName))
+      .toEqual(['simul-image-overlay', 'simul-image-overlay']);
+    // Each is drawn again, as at every frame that lays them out: neither
+    // takes the other's place (they took turns at the first one).
+    for (const nodeId of [1, 2, 1, 2]) {
+      expect(projector.project(projection({ jobOrdinal: nodeId, nodeId }))).toBe(true);
+      expect(afterSlot()).toEqual(placed);
+    }
+    // Something that is not an overlay between the slot and one of them:
+    // that one is put back after the slot.
+    const stray = document.createElement('span');
+    slot.after(stray);
+    for (const nodeId of [1, 2]) {
+      expect(projector.project(projection({ jobOrdinal: nodeId, nodeId }))).toBe(true);
+    }
+    expect(afterSlot().map(({ localName }) => localName))
+      .toEqual(['simul-image-overlay', 'simul-image-overlay', 'span']);
+    projector.dispose();
+    expect(afterSlot()).toEqual([stray]);
+  });
+
+  it('puts the overlay after the slot of an image that a root gives a slot by script', () => {
+    const { document } = parseHTML(
+      '<html><body><x-tabs id="manual"><img id="assigned"></x-tabs>' +
+      '<x-tabs id="named"><img id="named-image"></x-tabs></body></html>',
+    );
+    const images = new Map<number, HTMLImageElement>();
+    const slots = new Map<number, Element>();
+    for (const [nodeId, hostId, imageId, manual] of [
+      [1, 'manual', 'assigned', true], [2, 'named', 'named-image', false],
+    ] as const) {
+      const shadow = document.querySelector(`#${hostId}`)!.attachShadow({ mode: 'open' });
+      shadow.innerHTML = '<div><slot></slot></div><p>after</p>';
+      if (manual) {
+        Object.defineProperty(shadow, 'slotAssignment', { configurable: true, value: 'manual' });
+      }
+      const image = document.querySelector(`#${imageId}`) as unknown as HTMLImageElement;
+      // linkedom assigns no slots: the test says what Chrome would.
+      Object.defineProperty(image, 'assignedSlot', {
+        configurable: true,
+        value: shadow.querySelector('slot'),
+      });
+      image.getBoundingClientRect = () => ({
+        left: 0, top: 0, width: 100, height: 60,
+        right: 100, bottom: 60, x: 0, y: 0, toJSON: () => ({}),
+      });
+      images.set(nodeId, image);
+      slots.set(nodeId, shadow.querySelector('slot')!);
+    }
+    const projector = new ImageOverlayProjector({
+      resolveAnchor: (_document, nodeId) => ({
+        document: sourceDocument,
+        replayLease: 9,
+        image: images.get(nodeId)!,
+        iframe: { contentDocument: document } as HTMLIFrameElement,
+      }),
+      isCurrent: () => true,
+      scheduleFrame: (callback) => { callback(); return 1; },
+      cancelFrame: () => undefined,
+      createResizeObserver: () => undefined,
+    });
+    projector.beginPair(1, 'en>ja');
+    for (const nodeId of [1, 2]) {
+      expect(projector.project(projection({ jobOrdinal: nodeId, nodeId }))).toBe(true);
+    }
+    // A sibling of the assigned image would be given to no slot.
+    const assigned = slots.get(1)!.nextSibling as HTMLElement;
+    expect(assigned.localName).toBe('simul-image-overlay');
+    expect(assigned.dataset.simulImageOverlay).toBe('1');
+    expect(images.get(1)!.nextSibling).toBeNull();
+    // Where the browser assigns by name the sibling takes the default slot.
+    expect(images.get(2)!.nextSibling).toBe(overlayFor(document, 2));
+    expect(slots.get(2)!.nextSibling).toBeNull();
+    projector.dispose();
+    expect(slots.get(1)!.nextSibling).toBeNull();
+  });
+
   it('positions the overlay by measuring its containing block, including a scale (D74)', () => {
     const { document } = parseHTML('<html><body><main><img></main></body></html>');
     const image = document.querySelector('img') as unknown as HTMLImageElement;

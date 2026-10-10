@@ -902,6 +902,9 @@ const overlayShadowRoots = new WeakMap<Element, ShadowRoot>();
  * mirror sees no shadow root (it is closed) and patches the parent's children
  * as before. Any other parent (a link, a picture, a figure, a list item, a
  * parent with its own shadow root) keeps the overlay right after the image.
+ * Where the parent's own root gives the image to a slot by script, a sibling
+ * of the image is given to no slot and would not be drawn: there the overlay
+ * goes right after that slot, inside the root.
  */
 function placeOverlay(root: HTMLElement, image: HTMLImageElement): boolean {
   const parent = image.parentElement;
@@ -917,13 +920,29 @@ function placeOverlay(root: HTMLElement, image: HTMLImageElement): boolean {
     }
     return root.parentNode === shadow;
   }
-  if (root.previousSibling === image) return true;
+  const slot = image.assignedSlot;
+  const before: Element = slot &&
+      (slot.getRootNode() as Partial<ShadowRoot>).slotAssignment === 'manual'
+    ? slot
+    : image;
+  // Every image of one slot has its overlay after that slot: the others'
+  // may stand between (two of them took turns at the first place, moving
+  // at every frame that laid them out).
+  const placed = (): boolean => {
+    let previous = root.previousSibling;
+    while (
+      previous && previous !== before &&
+      (previous as Partial<Element>).localName === IMAGE_OVERLAY_ELEMENT
+    ) previous = previous.previousSibling;
+    return previous === before;
+  };
+  if (placed()) return true;
   try {
-    image.after(root);
+    before.after(root);
   } catch {
     return false;
   }
-  return root.previousSibling === image;
+  return placed();
 }
 
 function overlayShadowRootFor(parent: Element): ShadowRoot | undefined {

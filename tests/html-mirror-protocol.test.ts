@@ -3974,6 +3974,286 @@ describe('isolated HTML sanitizer and protocol', () => {
     expect(serialized).not.toContain('direct slotted secret');
   });
 
+  describe('the children of a host, read again in one piece', () => {
+    /**
+     * A host whose root draws its children in a box with `attributes`.
+     * linkedom assigns no slots: the test says what Chrome would.
+     */
+    function hostInBox(attributes: string) {
+      const { document, window } = parseHTML(`<!doctype html><html><body>
+        <x-note id="host"><p id="slotted">slotted text</p>direct text<style id="sheet">p{color:rgb(1,2,3)}</style><img id="icon" alt="broken icon name" width="16" height="16"></x-note>
+      </body></html>`);
+      const host = document.querySelector('#host')!;
+      const root = host.attachShadow({ mode: 'open' });
+      root.innerHTML = `<div id="box" ${attributes}><slot></slot></div>`;
+      installPaintedSourceFixture(document, window as unknown as Window);
+      const slot = root.querySelector('slot')!;
+      Object.defineProperty(slot, 'getClientRects', {
+        configurable: true,
+        value: () => sourceRectList({ left: 0, top: 0, width: 0, height: 0 }),
+      });
+      for (const node of host.childNodes) {
+        Object.defineProperty(node, 'assignedSlot', { configurable: true, value: slot });
+      }
+      Object.defineProperties(document.querySelector('#icon')!, {
+        complete: { configurable: true, value: true },
+        naturalWidth: { configurable: true, value: 0 },
+        naturalHeight: { configurable: true, value: 0 },
+      });
+      return {
+        host,
+        slot,
+        read: () => JSON.stringify(sanitizeSourceChildren(host, new WeakNodeIdRegistry())),
+      };
+    }
+
+    it('reads them by the boxes around their slot, as a whole read does', () => {
+      const plain = hostInBox('').read();
+      expect(plain).toContain('slotted text');
+      expect(plain).toContain('direct text');
+      expect(plain).toContain('rgb(1,2,3)');
+      expect(plain).toContain('broken icon name');
+
+      // An editor: its text is what the person edits, a style sheet's too.
+      const edited = hostInBox('contenteditable="true"').read();
+      expect(edited).not.toContain('slotted text');
+      expect(edited).not.toContain('direct text');
+      expect(edited).not.toContain('rgb(1,2,3)');
+
+      // A hidden box keeps the sheet's rules, which may be what hides it.
+      const hidden = hostInBox('hidden').read();
+      expect(hidden).not.toContain('slotted text');
+      expect(hidden).toContain('rgb(1,2,3)');
+
+      // A button: page text, and no name for a small icon that failed.
+      const button = hostInBox('role="button"').read();
+      expect(button).toContain('slotted text');
+      expect(button).not.toContain('broken icon name');
+    });
+
+    it('keeps a style sheet out with the rest when its slot cannot be read', () => {
+      const page = hostInBox('');
+      for (const node of page.host.childNodes) {
+        Object.defineProperty(node, 'assignedSlot', {
+          configurable: true,
+          get: () => {
+            throw new Error('unreadable');
+          },
+        });
+      }
+      const read = page.read();
+      expect(read).not.toContain('slotted text');
+      expect(read).not.toContain('rgb(1,2,3)');
+    });
+  });
+
+  describe('a root that assigns its slots by script', () => {
+    /**
+     * A host with three children and a root of two slots. linkedom assigns
+     * no slots, so the test says what each of the page's slots holds.
+     */
+    function manualRoot(mode: 'open' | 'closed', manual = true) {
+      const { document, window } = parseHTML(`<!doctype html><html><body>
+        <x-tabs id="tabs"><span id="one">one</span><span id="two">two</span>direct text</x-tabs>
+        <p id="elsewhere">elsewhere</p></body></html>`);
+      const host = document.querySelector('#tabs')!;
+      const markup = '<div><slot id="first"></slot></div><div><slot id="second"></slot></div>';
+      let root: ShadowRoot;
+      if (mode === 'closed') {
+        const reader = closedRootReader();
+        root = reader.attach(host, markup);
+        installSourceShadowRootReader(document, reader.read);
+      } else {
+        root = host.attachShadow({ mode: 'open' }) as unknown as ShadowRoot;
+        root.innerHTML = markup;
+      }
+      if (manual) {
+        Object.defineProperty(root, 'slotAssignment', { configurable: true, value: 'manual' });
+      }
+      const [one, two] = [document.querySelector('#one')!, document.querySelector('#two')!];
+      const direct = host.lastChild!;
+      const [first, second] = [root.querySelector('#first')!, root.querySelector('#second')!];
+      const hold = (slot: Element, ...nodes: Node[]): void => {
+        Object.defineProperty(slot, 'assignedNodes', { configurable: true, value: () => nodes });
+        for (const node of nodes) {
+          Object.defineProperty(node, 'assignedSlot', {
+            configurable: true,
+            value: mode === 'closed' ? null : slot,
+          });
+        }
+      };
+      const registry = new WeakNodeIdRegistry();
+      const read = () => sanitizeSourceDocument(
+        document, window as unknown as Window, registry,
+      )!;
+      return { document, host, root, one, two, direct, first, second, hold, registry, read };
+    }
+
+    for (const mode of ['open', 'closed'] as const) {
+      it(`says so of a ${mode} root, and which nodes each slot holds, in the slot's order`, () => {
+        const page = manualRoot(mode);
+        // Not the order of the page, and not by name.
+        page.hold(page.first, page.direct, page.two);
+        page.hold(page.second, page.one);
+        const graph = page.read();
+        const tabs = graphElementBySourceId(graph, 'tabs')!;
+        expect(tabs.shadowRoot).toMatchObject({ mode: 'open', slotAssignment: 'manual' });
+        expect(graphElementBySourceId(graph, 'first')!.assignedNodeIds).toEqual([
+          page.registry.peekId(page.direct), page.registry.peekId(page.two),
+        ]);
+        expect(graphElementBySourceId(graph, 'second')!.assignedNodeIds).toEqual([
+          page.registry.peekId(page.one),
+        ]);
+        // What the panel reads back is what was sent.
+        expect(readHtmlMirrorNode(graph.root)).toEqual(graph.root);
+      });
+    }
+
+    it('says a slot holds nothing, and leaves out what is not a child of the host', () => {
+      const page = manualRoot('open');
+      page.hold(page.first);
+      page.hold(page.second, page.document.querySelector('#elsewhere')!, page.one);
+      const graph = page.read();
+      expect(graphElementBySourceId(graph, 'first')!.assignedNodeIds).toEqual([]);
+      expect(graphElementBySourceId(graph, 'second')!.assignedNodeIds).toEqual([
+        page.registry.peekId(page.one),
+      ]);
+    });
+
+    it('says nothing of the kind where the browser assigns by name', () => {
+      const page = manualRoot('open', false);
+      page.hold(page.first, page.one, page.two, page.direct);
+      page.hold(page.second);
+      const serialized = JSON.stringify(page.read());
+      expect(serialized).not.toContain('slotAssignment');
+      expect(serialized).not.toContain('assignedNodeIds');
+    });
+
+    it('reads a slot\'s nodes with its attributes, for a patch of the slot alone', () => {
+      const page = manualRoot('open');
+      page.hold(page.first, page.two);
+      page.hold(page.second);
+      page.read();
+      expect(sanitizeSourceElementHints(
+        page.first, 'https://example.test/', undefined, 'conservative',
+        undefined, undefined, undefined, page.registry,
+      )).toEqual({ assignedNodeIds: [page.registry.peekId(page.two)] });
+      // Without the ids of the mirror nothing can be said.
+      expect(sanitizeSourceElementHints(page.first)).toEqual({});
+      // An element that is not a slot never holds nodes.
+      expect(sanitizeSourceElementHints(
+        page.one, 'https://example.test/', undefined, 'conservative',
+        undefined, undefined, undefined, page.registry,
+      )).toEqual({});
+    });
+
+    const slotNode = (assignedNodeIds: unknown, tagName = 'slot', namespace = 'html') => ({
+      kind: 'element', id: 9, namespace, tagName, attributes: [], children: [],
+      assignedNodeIds,
+    });
+
+    it('takes a list of distinct node ids on a slot, and nothing else', () => {
+      expect(readHtmlMirrorNode(slotNode([4, 7]))).toMatchObject({ assignedNodeIds: [4, 7] });
+      expect(readHtmlMirrorNode(slotNode([]))).toMatchObject({ assignedNodeIds: [] });
+      for (const refused of [
+        slotNode([4, 4]), slotNode([0]), slotNode([-1]), slotNode([1.5]),
+        slotNode(['4']), slotNode('4'), slotNode({ 0: 4, length: 1 }), slotNode(null),
+        slotNode([4], 'div'), slotNode([4], 'slot', 'svg'),
+      ]) {
+        expect(readHtmlMirrorNode(refused), JSON.stringify(refused)).toBeUndefined();
+      }
+    });
+
+    it('counts a slot\'s node list against the size of the page', () => {
+      const budget = createHtmlMirrorReadBudget();
+      readHtmlMirrorNode(slotNode([4, 7, 8]), undefined, 0, budget);
+      const plain = createHtmlMirrorReadBudget();
+      const { assignedNodeIds: _none, ...bare } = slotNode([]);
+      readHtmlMirrorNode(bare, undefined, 0, plain);
+      expect(budget.bytes - plain.bytes).toBe(3 * 8 + 16);
+      // A list that does not fit the page is refused with its slot.
+      const full = createHtmlMirrorReadBudget();
+      full.bytes = MAX_HTML_MIRROR_BYTES - 3 * 8 - 16 - 'slot'.length * 2 - 64 + 1;
+      expect(readHtmlMirrorNode(slotNode([4, 7, 8]), undefined, 0, full)).toBeUndefined();
+      full.bytes = MAX_HTML_MIRROR_BYTES - 3 * 8 - 16 - 'slot'.length * 2 - 64;
+      full.ids.clear();
+      expect(readHtmlMirrorNode(slotNode([4, 7, 8]), undefined, 0, full)).toBeDefined();
+      // And one longer than a page has nodes.
+      const tooMany = Array.from({ length: MAX_HTML_MIRROR_NODES + 1 }, (_, index) => index + 10);
+      expect(readHtmlMirrorNode(slotNode(tooMany))).toBeUndefined();
+      expect(readHtmlMirrorNode(slotNode(tooMany.slice(1)))).toBeDefined();
+
+      // The page counts it too, when it reads the slot.
+      const page = manualRoot('open');
+      page.hold(page.first, page.one, page.two, page.direct);
+      page.hold(page.second);
+      const [held, empty] = [page.first, page.second].map((slot) => {
+        const read = createHtmlMirrorReadBudget();
+        sanitizeSourceSubtrees(
+          [slot], page.registry, 'https://example.test/',
+          createHtmlMirrorRepresentabilityCollector(), read,
+        );
+        return read.bytes;
+      });
+      expect(held! - empty!).toBe(3 * 8 + ('first'.length - 'second'.length) * 2);
+    });
+
+    it('reads an element named slot in another namespace as any element', () => {
+      const page = manualRoot('open');
+      page.hold(page.first, page.one);
+      page.hold(page.second);
+      const svg = page.document.createElementNS('http://www.w3.org/2000/svg', 'svg');
+      svg.append(page.document.createElementNS('http://www.w3.org/2000/svg', 'slot'));
+      page.root.append(svg);
+      const graph = page.read();
+      expect(graph).toBeDefined();
+      expect(graphElementBySourceId(graph, 'first')!.assignedNodeIds).toHaveLength(1);
+      expect(JSON.stringify(graph).match(/assignedNodeIds/gu)).toHaveLength(2);
+    });
+
+    it('takes a root that assigns by script, and refuses any other word for it', () => {
+      const host = (slotAssignment: unknown) => ({
+        kind: 'element', id: 1, namespace: 'html', tagName: 'x-tabs',
+        attributes: [], children: [],
+        shadowRoot: {
+          id: 2, mode: 'open', children: [], adoptedStyleSheets: [],
+          ...(slotAssignment === undefined ? {} : { slotAssignment }),
+        },
+      });
+      expect(readHtmlMirrorNode(host('manual'))).toMatchObject({
+        shadowRoot: { slotAssignment: 'manual' },
+      });
+      expect(JSON.stringify(readHtmlMirrorNode(host(undefined))))
+        .not.toContain('slotAssignment');
+      for (const refused of ['named', true, '', null]) {
+        expect(readHtmlMirrorNode(host(refused)), String(refused)).toBeUndefined();
+      }
+    });
+
+    it('carries a slot\'s nodes in a patch of its attributes', () => {
+      const identity = createReplicaIdentity({
+        sessionId: 'session', pageEpoch: 1, generation: 1,
+        documentId: 'document', frameId: 0, sequence: 1,
+      });
+      const operation = {
+        kind: 'attributes' as const, nodeId: 9, namespace: 'html' as const,
+        tagName: 'slot', attributes: [['name', 'title']] as const,
+        assignedNodeIds: [7, 4],
+      };
+      const patch = createHtmlMirrorPatch(identity, 1, 1, [operation])!;
+      expect(patch.operations).toEqual([operation]);
+      expect(readHtmlMirrorSourceMessage(
+        JSON.parse(JSON.stringify(patch)), identity,
+      )).toEqual(patch);
+      expect(createHtmlMirrorPatch(identity, 1, 1, [
+        { ...operation, tagName: 'div' },
+      ])).toBeUndefined();
+      expect(createHtmlMirrorPatch(identity, 1, 1, [
+        { ...operation, assignedNodeIds: [7, 7] },
+      ])).toBeUndefined();
+    });
+  });
+
   it('never walks a root offered for a browser control (D125)', () => {
     const { document, window } = parseHTML(`<!doctype html><html><body>
       <input id="field" value="typed"><textarea id="area">typed</textarea>

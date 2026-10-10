@@ -350,6 +350,48 @@ describe('readSourceAssignedSlot (D125)', () => {
     expect(readSourceAssignedSlot(three!)).toBeNull();
   });
 
+  it('goes through the lists of a manually assigned root once in a walk', () => {
+    const { host, root } = closedHost(
+      '<b id="one">One</b><b id="two">Two</b><b id="three">Three</b>',
+      '<slot id="first"></slot><slot id="second"></slot>',
+    );
+    Object.defineProperty(root, 'slotAssignment', { value: 'manual' });
+    const [one, two, three] = [...host.children];
+    const first = root.querySelector('#first')!;
+    const second = root.querySelector('#second')!;
+    let lists = 0;
+    let held = new Map<Element, Node[]>([[first, [two!, one!]], [second, [one!]]]);
+    for (const slot of [first, second]) {
+      Object.defineProperty(slot, 'assignedNodes', {
+        value: () => {
+          lists += 1;
+          return held.get(slot);
+        },
+      });
+    }
+    const ask = (): Array<Element | null | undefined> =>
+      [one!, two!, three!, one!].map((node) => readSourceAssignedSlot(node));
+
+    const walk = beginSourceShadowRootWalk();
+    // A node two slots list is in the first of them, as outside a walk.
+    expect(ask()).toEqual([first, first, null, first]);
+    expect(lists).toBe(2);
+    // Nothing the page does is seen before the walk ends: it cannot run.
+    held = new Map([[first, []], [second, [three!]]]);
+    expect(ask()).toEqual([first, first, null, first]);
+    expect(lists).toBe(2);
+    walk.end();
+
+    // Outside a walk each question reads the lists as they are.
+    expect(ask()).toEqual([null, null, second, null]);
+    expect(lists).toBeGreaterThan(2);
+    held = new Map([[first, [three!]], [second, []]]);
+    expect(ask()).toEqual([null, null, first, null]);
+    const again = beginSourceShadowRootWalk();
+    expect(readSourceAssignedSlot(three!)).toBe(first);
+    again.end();
+  });
+
   it('answers null for a child of an element with no closed root', () => {
     const document = page('<div id="plain"><b id="child"></b></div>');
     const reader = closedRootReader();
@@ -663,9 +705,12 @@ describe('one way to a shadow root (D125)', () => {
       '(isNativeSelectSemanticTag(input.tagName) && input.shadowRoot !== undefined) ||',
       'if (input.shadowRoot !== undefined) {',
       '!isRecord(input.shadowRoot) ||',
-      '!hasExactKeys(input.shadowRoot, [',
+      '!hasExactKeysWithOptional(input.shadowRoot, [',
       '!isNodeId(input.shadowRoot.id) ||',
       "input.shadowRoot.mode !== 'open' ||",
+      '(input.shadowRoot.slotAssignment !== undefined &&',
+      "input.shadowRoot.slotAssignment !== 'manual') ||",
+      "...(input.shadowRoot.slotAssignment === 'manual'",
       '!Array.isArray(input.shadowRoot.children) ||',
       'budget.ids.has(input.shadowRoot.id)',
       'budget.ids.add(input.shadowRoot.id);',

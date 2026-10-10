@@ -1,5 +1,5 @@
 import { parseHTML } from 'linkedom';
-import { describe, expect, it } from 'vitest';
+import { describe, expect, it, vi } from 'vitest';
 
 import {
   FULL_VISIBLE_REPLICA_READ_SCOPE,
@@ -2545,6 +2545,67 @@ describe('semantic source session', () => {
       expect(page(true, true)).toEqual({ menus: 0, hiddenText: [] });
     });
 
+    it('asks the same of a panel in a closed root that assigns its slots by script', () => {
+      // Where a script fills the slots a panel has the slot the script gave
+      // it, whatever its `slot` attribute says, and none where the script
+      // gave it none: the rendered parent is read as the mirror reads it.
+      const page = (assigned: boolean) => {
+        const { document, window } = parseHTML(`<html><body>${
+          item(`<x-wrap id="wrap">${list}</x-wrap>`)
+        }</body></html>`);
+        installPaintedTabFixture(document, window as unknown as Window);
+        const wrap = document.querySelector('#wrap')!;
+        const panel = document.querySelector('#panel')!;
+        panel.setAttribute('slot', 'no-such-slot');
+        const reader = closedRootReader();
+        installSourceShadowRootReader(document as unknown as Document, reader.read);
+        const root = reader.attach(
+          wrap,
+          '<div id="around"><slot id="filled"></slot></div><slot id="other"></slot>',
+        );
+        Object.defineProperty(root, 'slotAssignment', { configurable: true, value: 'manual' });
+        const filled = root.querySelector('#filled')!;
+        Object.defineProperty(filled, 'assignedNodes', {
+          configurable: true,
+          value: () => assigned ? [panel] : [],
+        });
+        Object.defineProperty(root.querySelector('#other')!, 'assignedNodes', {
+          configurable: true,
+          value: () => [],
+        });
+        // Chrome reads null for a node slotted into a closed root.
+        Object.defineProperty(panel, 'assignedSlot', { configurable: true, value: null });
+        const empty = () => Object.assign([], { item: () => null }) as DOMRectList;
+        for (const element of [wrap, ...root.querySelectorAll('*')]) {
+          Object.defineProperty(element, 'getClientRects', { configurable: true, value: empty });
+        }
+        const port = new FakeSemanticPort(
+          createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+        );
+        const style = structuralMenuStyle((element) =>
+          element === panel ? 'display' : undefined);
+        const session = createSession(
+          port, document, window, 'isolated-html', undefined,
+          ((element: Element) => ({
+            ...style(element),
+            position: element === panel ? 'absolute' : 'static',
+          })) as unknown as Window['getComputedStyle'],
+        );
+        port.emit(createSemanticSourceStart(
+          'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+        ));
+        const batch = port.messages[0]!;
+        session.dispose();
+        return {
+          menus: batch.proofs.filter((proof) => proof.kind === 'structural-menu').length,
+          hiddenText: batch.records.filter((record) =>
+            record.gate === 'disclosureContent').map((record) => record.text),
+        };
+      };
+      expect(page(true)).toEqual({ menus: 1, hiddenText: ['Alpha', 'Beta'] });
+      expect(page(false)).toEqual({ menus: 0, hiddenText: [] });
+    });
+
     it('takes the outermost collapsed element for the panel', () => {
       // A hidden block around one list is the panel itself, as it was: what
       // it wraps is not looked at once it is found collapsed.
@@ -3620,6 +3681,495 @@ describe('semantic source session', () => {
     expect(JSON.stringify(port.messages.at(-1))).not.toContain(canary);
     expect(textReads).toBe(0);
     session.dispose();
+  });
+
+  describe('text slotted into an editor of a shadow root', () => {
+    /**
+     * A component whose root is `rootMarkup`. linkedom assigns no slots, so
+     * the test says which slot Chrome would give each child of the host.
+     */
+    function slottedEditor(
+      rootMarkup: string,
+      options: { readonly mode?: 'open' | 'closed'; readonly slot?: string } = {},
+    ) {
+      const { document, window } = parseHTML(
+        '<html><body><x-note id="host"><p id="slotted">slotted draft</p>direct draft</x-note>' +
+          '<p>plain text</p></body></html>',
+      );
+      const host = document.querySelector('#host')!;
+      const reader = closedRootReader();
+      let root: ShadowRoot;
+      if (options.mode === 'closed') {
+        installSourceShadowRootReader(document as unknown as Document, reader.read);
+        root = reader.attach(host, rootMarkup);
+      } else {
+        root = host.attachShadow({ mode: 'open' }) as unknown as ShadowRoot;
+        root.innerHTML = rootMarkup;
+      }
+      const slotted = document.querySelector('#slotted')!;
+      const direct = host.lastChild as Text;
+      const give = (slot: Element | null): void => {
+        for (const node of [slotted, direct]) {
+          Object.defineProperty(node, 'assignedSlot', {
+            configurable: true,
+            // Chrome reads null for a node slotted into a closed root.
+            value: options.mode === 'closed' ? null : slot,
+          });
+        }
+      };
+      give(root.querySelector(options.slot ?? 'slot'));
+      const port = new FakeSemanticPort(
+        createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+      );
+      const session = createSession(port, document, window);
+      const editorText = (batch = port.messages.at(-1)!) => batch.records
+        .filter((record) => record.gate === 'editableContent')
+        .map(({ nodeId: id, text, tagName, role, contentEditable, category, presentation }) =>
+          ({ id, text, tagName, role, contentEditable, category, presentation }));
+      return { document, root, host, slotted, direct, give, port, session, editorText };
+    }
+
+    for (const mode of ['open', 'closed'] as const) {
+      it(`sends it as editor text from a ${mode} root, and only when editor text is read`, () => {
+        const fixture = slottedEditor(
+          '<div id="editor" contenteditable="true"><slot></slot></div><p>root text</p>',
+          { mode },
+        );
+        fixture.port.emit(createSemanticSourceStart(
+          'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+        ));
+        const editor = {
+          tagName: 'div', role: '', contentEditable: 'true',
+          category: 'editable', presentation: 'text',
+        };
+        expect(fixture.editorText()).toEqual([
+          { id: nodeId(fixture.slotted.firstChild!), text: 'slotted draft', ...editor },
+          { id: nodeId(fixture.direct), text: 'direct draft', ...editor },
+        ]);
+        fixture.session.dispose();
+
+        const standard = slottedEditor(
+          '<div id="editor" contenteditable="true"><slot></slot></div><p>root text</p>',
+          { mode },
+        );
+        standard.port.emit(createSemanticSourceStart(
+          'isolated-html', identity, STANDARD_REPLICA_READ_SCOPE,
+        ));
+        expect(JSON.stringify(standard.port.messages)).not.toContain('draft');
+        standard.session.dispose();
+      });
+    }
+
+    // The panel finds the editor from the text upwards and takes the text
+    // only where both sides name the same element: the nearest one.
+    it('names the nearest editor around the slot, the one the panel finds from the text', () => {
+      const fixture = slottedEditor(
+        '<section role="textbox"><div contenteditable="true"><slot></slot></div></section>',
+      );
+      fixture.port.emit(createSemanticSourceStart(
+        'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+      ));
+      expect(fixture.editorText().map(({ tagName, role }) => [tagName, role]))
+        .toEqual([['div', ''], ['div', '']]);
+      fixture.session.dispose();
+    });
+
+    it('names an editor of the root before one of the page above the host', () => {
+      const fixture = slottedEditor(
+        '<div contenteditable="true"><slot></slot></div>',
+      );
+      const outer = fixture.document.createElement('section');
+      outer.setAttribute('role', 'textbox');
+      fixture.host.before(outer);
+      outer.append(fixture.host);
+      fixture.port.emit(createSemanticSourceStart(
+        'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+      ));
+      expect(fixture.editorText().map(({ tagName, role }) => [tagName, role]))
+        .toEqual([['div', ''], ['div', '']]);
+      fixture.session.dispose();
+    });
+
+    it('names an editor of the page that is slotted before the editor around its slot', () => {
+      const fixture = slottedEditor('<span role="textbox"><slot></slot></span>');
+      fixture.slotted.setAttribute('contenteditable', 'true');
+      fixture.port.emit(createSemanticSourceStart(
+        'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+      ));
+      expect(fixture.editorText().map(({ text, tagName, role }) => [text, tagName, role]))
+        .toEqual([
+          ['slotted draft', 'p', ''],
+          ['direct draft', 'span', 'textbox'],
+        ]);
+      fixture.session.dispose();
+    });
+
+    it('names the editor around the slot before an editor of the page that holds the host', () => {
+      const fixture = slottedEditor('<span role="textbox"><slot></slot></span>');
+      const outer = fixture.document.createElement('div');
+      outer.setAttribute('contenteditable', 'true');
+      fixture.host.before(outer);
+      outer.append('page draft', fixture.host);
+      fixture.port.emit(createSemanticSourceStart(
+        'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+      ));
+      expect(fixture.editorText().map(({ text, tagName, role }) => [text, tagName, role]))
+        .toEqual([
+          ['page draft', 'div', ''],
+          ['slotted draft', 'span', 'textbox'],
+          ['direct draft', 'span', 'textbox'],
+        ]);
+      fixture.session.dispose();
+    });
+
+    it('names the nearest of two editors of the page itself, of whatever tags', () => {
+      const { document, window } = parseHTML(
+        '<html><body><div contenteditable="true">outer draft' +
+          '<p contenteditable="true">inner draft</p></div>' +
+          '<span role="textbox"><div contenteditable="true">boxed draft</div></span>' +
+          '</body></html>',
+      );
+      const port = new FakeSemanticPort(
+        createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+      );
+      const session = createSession(port, document, window);
+      port.emit(createSemanticSourceStart(
+        'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+      ));
+      expect(port.messages[0]!.records
+        .filter((record) => record.gate === 'editableContent')
+        .map(({ text, tagName }) => [text, tagName]))
+        .toEqual([
+          ['outer draft', 'div'],
+          ['inner draft', 'p'],
+          ['boxed draft', 'div'],
+        ]);
+      session.dispose();
+    });
+
+    it('leaves alone what is slotted beside an editor of the root, not into it', () => {
+      const fixture = slottedEditor(
+        '<div contenteditable="true"><slot name="edited"></slot></div><div><slot id="plain"></slot></div>',
+        { slot: '#plain' },
+      );
+      fixture.port.emit(createSemanticSourceStart(
+        'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+      ));
+      expect(fixture.editorText()).toEqual([]);
+      fixture.session.dispose();
+    });
+
+    it('takes a child that no slot takes for what its host is', () => {
+      const fixture = slottedEditor(
+        '<div contenteditable="true"><slot name="edited"></slot></div>',
+      );
+      fixture.give(null);
+      fixture.port.emit(createSemanticSourceStart(
+        'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+      ));
+      expect(fixture.editorText()).toEqual([]);
+      fixture.session.dispose();
+    });
+
+    it('looks at the boxes around a slot once for all that the slot holds', () => {
+      const fixture = slottedEditor(
+        '<div id="editor" contenteditable="true"><slot></slot></div>',
+      );
+      const slot = fixture.root.querySelector('slot')!;
+      for (let index = 0; index < 60; index += 1) {
+        const more = fixture.document.createElement('p');
+        more.textContent = `draft ${index}`;
+        Object.defineProperty(more, 'assignedSlot', { configurable: true, value: slot });
+        fixture.host.append(more);
+      }
+      const editor = fixture.root.querySelector('#editor')!;
+      let reads = 0;
+      Object.defineProperty(slot, 'parentElement', {
+        configurable: true,
+        get: () => {
+          reads += 1;
+          return editor;
+        },
+      });
+      fixture.port.emit(createSemanticSourceStart(
+        'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+      ));
+      expect(fixture.editorText()).toHaveLength(62);
+      expect(reads).toBeLessThan(10);
+      fixture.session.dispose();
+    });
+
+    it('hears a script give a slot other nodes, in a root that assigns by script only', () => {
+      for (const manual of [true, false]) {
+        const fixture = slottedEditor(
+          '<div contenteditable="true"><slot id="edited"></slot></div><div><slot id="plain"></slot></div>',
+          { slot: '#plain' },
+        );
+        if (manual) {
+          Object.defineProperty(fixture.root, 'slotAssignment', {
+            configurable: true,
+            value: 'manual',
+          });
+        }
+        fixture.port.emit(createSemanticSourceStart(
+          'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+        ));
+        const first = fixture.port.messages[0]!;
+        expect(fixture.editorText(first)).toEqual([]);
+        fixture.port.emit(createSemanticSourceAck(
+          identity, first.policyFingerprint, first.sequence,
+        ));
+
+        const edited = fixture.root.querySelector('#edited')!;
+        fixture.give(edited);
+        edited.dispatchEvent(new (fixture.document.defaultView as unknown as {
+          Event: typeof Event;
+        }).Event('slotchange', { bubbles: true }));
+        // Where the browser assigns by name every change is a mutation, and
+        // the slot's own event is not listened for.
+        expect(fixture.port.messages).toHaveLength(manual ? 2 : 1);
+        if (manual) {
+          expect(fixture.editorText().map(({ text }) => text))
+            .toEqual(['slotted draft', 'direct draft']);
+        }
+        const removed = vi.spyOn(fixture.root, 'removeEventListener');
+        fixture.session.dispose();
+        expect(removed.mock.calls.some(([type]) => type === 'slotchange')).toBe(true);
+      }
+    });
+  });
+
+  describe('editor text that the tab does not show', () => {
+    /**
+     * `page` with a shadow root for each selector of `roots`. linkedom lays
+     * nothing out and assigns no slots, so the test says what Chrome would:
+     * a child of a host goes to the slot of its `slot` name, and a box is
+     * not displayed, or not visible, where its `style` says so (a dialog
+     * that is not open is not displayed either).
+     */
+    function editors(page: string, roots: Readonly<Record<string, string>> = {}) {
+      const { document, window } = parseHTML(`<html><body>${page}</body></html>`);
+      const give = (host: Element): void => {
+        const root = host.shadowRoot!;
+        for (const child of host.childNodes) {
+          const name = child.nodeType === 1
+            ? (child as Element).getAttribute('slot') ?? ''
+            : '';
+          Object.defineProperty(child, 'assignedSlot', {
+            configurable: true,
+            value: [...root.querySelectorAll('slot')].find(
+              (slot) => (slot.getAttribute('name') ?? '') === name,
+            ) ?? null,
+          });
+        }
+      };
+      for (const [selector, markup] of Object.entries(roots)) {
+        const host = document.querySelector(selector)!;
+        host.attachShadow({ mode: 'open' }).innerHTML = markup;
+        give(host);
+      }
+      const drawnIn = (node: Node): Element | null =>
+        (node as Node & { assignedSlot?: Element | null }).assignedSlot ??
+        node.parentElement ??
+        ((node.getRootNode() as Partial<ShadowRoot>).host ?? null);
+      const declared = (element: Element, property: string): string | undefined =>
+        new RegExp(`${property}:\\s*([a-z]+)`, 'u')
+          .exec(element.getAttribute('style') ?? '')?.[1];
+      const styleReads = new Map<Element, number>();
+      Object.defineProperty(window, 'getComputedStyle', {
+        configurable: true,
+        value: (element: Element) => {
+          styleReads.set(element, (styleReads.get(element) ?? 0) + 1);
+          let visibility = 'visible';
+          for (let box: Element | null = element; box; box = drawnIn(box)) {
+            const own = declared(box, 'visibility');
+            if (!own) continue;
+            visibility = own;
+            break;
+          }
+          return {
+            display: declared(element, 'display') ??
+              (element.localName === 'dialog' && !element.hasAttribute('open')
+                ? 'none'
+                : element.localName === 'slot' ? 'contents' : 'block'),
+            visibility,
+            getPropertyValue: () => '',
+          };
+        },
+      });
+      const port = new FakeSemanticPort(
+        createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+      );
+      const session = createSession(port, document, window);
+      const start = (scope = FULL_VISIBLE_REPLICA_READ_SCOPE): readonly string[] => {
+        port.emit(createSemanticSourceStart('isolated-html', identity, scope));
+        return port.messages.at(-1)!.records
+          .filter((record) => record.gate === 'editableContent')
+          .map(({ text }) => text ?? '');
+      };
+      return { document, port, session, start, styleReads };
+    }
+
+    const NOTE = '<x-note id="note"><p>slotted draft</p>direct draft</x-note>';
+    const EDITOR = '<div contenteditable="true"><slot></slot></div>';
+
+    it('sends what is slotted into an editor that is shown', () => {
+      const fixture = editors(`<dialog open>${NOTE}</dialog>`, { '#note': EDITOR });
+      expect(fixture.start()).toEqual(['slotted draft', 'direct draft']);
+      fixture.session.dispose();
+    });
+
+    it('asks what is hidden where editor text alone is read', () => {
+      const scope = {
+        ...PAGE_ONLY_REPLICA_READ_SCOPE,
+        editableContent: true,
+      };
+      const shown = editors(`<dialog open>${NOTE}</dialog>`, { '#note': EDITOR });
+      expect(shown.start(scope)).toEqual(['slotted draft', 'direct draft']);
+      shown.session.dispose();
+      const hidden = editors(`<dialog>${NOTE}</dialog>`, { '#note': EDITOR });
+      expect(hidden.start(scope)).toEqual([]);
+      hidden.session.dispose();
+    });
+
+    for (const [shape, page, roots] of [
+      [
+        'an editor component inside a dialog that is not open',
+        `<dialog>${NOTE}</dialog>`,
+        { '#note': EDITOR },
+      ],
+      [
+        'an editor component inside a box of the page that is not displayed',
+        `<div style="display: none"><section>${NOTE}</section></div>`,
+        { '#note': EDITOR },
+      ],
+      [
+        'a box that is not displayed inside the editor of the root',
+        NOTE,
+        {
+          '#note': '<div contenteditable="true"><span style="display: none"><slot></slot></span></div>',
+        },
+      ],
+      [
+        'the editor of the root inside a box that is not displayed',
+        NOTE,
+        {
+          '#note': '<div style="display: none"><div contenteditable="true"><slot></slot></div></div>',
+        },
+      ],
+      [
+        'an editor of one component drawn in a box of another that is not displayed',
+        `<x-frame id="frame">${NOTE}</x-frame>`,
+        {
+          '#frame': '<div style="display: none"><slot></slot></div>',
+          '#note': EDITOR,
+        },
+      ],
+      [
+        'a box of one component that is not displayed, drawn in the editor of another',
+        `<x-frame id="frame">${NOTE}</x-frame>`,
+        {
+          '#frame': EDITOR,
+          '#note': '<div style="display: none"><slot></slot></div>',
+        },
+      ],
+      [
+        'a box declared hidden inside a box with the role of a text box',
+        NOTE,
+        { '#note': '<div role="textbox"><span hidden><slot></slot></span></div>' },
+      ],
+      [
+        'a slot that is itself not displayed',
+        NOTE,
+        {
+          '#note': '<div contenteditable="true"><slot style="display: none"></slot></div>',
+        },
+      ],
+      [
+        'an editor that is not visible',
+        NOTE,
+        {
+          '#note': '<div contenteditable="true" style="visibility: hidden"><slot></slot></div>',
+        },
+      ],
+      [
+        'an editor of the page itself inside a dialog that is not open',
+        '<dialog><div contenteditable="true"><p>slotted draft</p>direct draft</div></dialog>',
+        {},
+      ],
+      [
+        'a box declared hidden inside an editor of the page itself',
+        '<div contenteditable="true"><span hidden><p>slotted draft</p>direct draft</span></div>',
+        {},
+      ],
+      [
+        'an editor of the page itself that is not visible',
+        '<div contenteditable="true" style="visibility: hidden"><p>slotted draft</p>direct draft</div>',
+        {},
+      ],
+    ] as const) {
+      it(`sends nothing of ${shape}`, () => {
+        const fixture = editors(page, roots);
+        expect(fixture.start()).toEqual([]);
+        expect(JSON.stringify(fixture.port.messages)).not.toContain('draft');
+        fixture.session.dispose();
+      });
+    }
+
+    it('sends the text beside what is hidden, in the same editor', () => {
+      const fixture = editors(
+        '<div contenteditable="true">shown draft<span hidden>hidden draft</span>' +
+          '<span style="display: none"><b>undisplayed draft</b></span>' +
+          '<p>second shown draft</p></div>',
+      );
+      expect(fixture.start()).toEqual(['shown draft', 'second shown draft']);
+      fixture.session.dispose();
+    });
+
+    it('sends what is made visible again inside an editor that is not visible', () => {
+      const fixture = editors(
+        '<x-note id="note"><p style="visibility: visible">slotted draft</p>direct draft</x-note>',
+        {
+          '#note': '<div contenteditable="true" style="visibility: hidden"><slot></slot></div>',
+        },
+      );
+      // Text follows the box it is put into: the paragraph, and the slot.
+      expect(fixture.start()).toEqual(['slotted draft']);
+      fixture.session.dispose();
+    });
+
+    it('asks each box around the text of an editor once a scan, and no box of other text', () => {
+      const fixture = editors(
+        '<main id="around"><div id="editor" contenteditable="true">' +
+          Array.from({ length: 40 }, (_, index) => `<p>draft ${index}</p>`).join('') +
+          '</div></main><aside id="other"><p id="plain">plain text</p></aside>',
+      );
+      const before = new Map(fixture.styleReads);
+      expect(fixture.start()).toHaveLength(40);
+      const reads = (selector: string): number => {
+        const element = fixture.document.querySelector(selector)!;
+        return (fixture.styleReads.get(element) ?? 0) - (before.get(element) ?? 0);
+      };
+      expect(reads('#editor')).toBe(1);
+      expect(reads('#editor p')).toBe(1);
+      expect(reads('#around')).toBe(1);
+      expect(reads('#plain')).toBe(0);
+      expect(reads('#other')).toBe(0);
+      fixture.session.dispose();
+    });
+
+    it('sends nothing of an editor whose boxes cannot be read (they count as a secret)', () => {
+      const fixture = editors(`<section id="broken">${NOTE}</section>`, { '#note': EDITOR });
+      const note = fixture.document.querySelector('#note')!;
+      Object.defineProperty(note, 'parentElement', {
+        configurable: true,
+        get: () => {
+          throw new Error('unreadable');
+        },
+      });
+      expect(fixture.start()).toEqual([]);
+      fixture.session.dispose();
+    });
   });
 
   it('separates Standard disabled state from Full current form state', () => {

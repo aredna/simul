@@ -96,14 +96,57 @@ describe('hasStructuralPatchTargetConflict', () => {
       { target: main, structural: true },
       { target: shadow, structural: true },
     ])).toBe(true);
-    // and a node inside the root is not the root.
-    expect(hasStructuralPatchTargetConflict([
-      { target: host, structural: true },
-      { target: label, structural: false },
-    ])).toBe(true);
+    // and what replaces the root's children takes what is inside it.
     expect(hasStructuralPatchTargetConflict([
       { target: shadow, structural: true },
       { target: label, structural: false },
     ])).toBe(true);
+  });
+
+  it('lets what is inside a root be patched beside its own host\'s children', () => {
+    // A slot is told which nodes it holds in the batch that brings its host
+    // a new child: the host's children are replaced, its root stays.
+    const { document } = parseHTML('<main><x-outer><x-light></x-light></x-outer></main>');
+    const main = document.querySelector('main')!;
+    const outer = document.querySelector('x-outer')!;
+    const light = document.querySelector('x-light')!;
+    const outerRoot = outer.attachShadow({ mode: 'open' });
+    outerRoot.innerHTML = '<div><slot></slot><x-inner></x-inner></div>';
+    const slot = outerRoot.querySelector('slot')!;
+    const inner = outerRoot.querySelector('x-inner')!;
+    const innerRoot = inner.attachShadow({ mode: 'open' });
+    innerRoot.innerHTML = '<span>label</span>';
+    const lightRoot = light.attachShadow({ mode: 'open' });
+    lightRoot.innerHTML = '<span>label</span>';
+
+    for (const structural of [false, true]) {
+      expect(hasStructuralPatchTargetConflict([
+        { target: outer, structural: true },
+        { target: slot, structural },
+      ])).toBe(false);
+      // Deeper in the same root, through a root of its own, too.
+      expect(hasStructuralPatchTargetConflict([
+        { target: innerRoot.firstChild!, structural },
+        { target: outer, structural: true },
+      ])).toBe(false);
+    }
+    // A child of the host is replaced, and its own root with it.
+    expect(hasStructuralPatchTargetConflict([
+      { target: outer, structural: true },
+      { target: lightRoot.firstChild!, structural: false },
+    ])).toBe(true);
+    // Above the host everything goes; inside the root what is below goes.
+    expect(hasStructuralPatchTargetConflict([
+      { target: main, structural: true },
+      { target: slot, structural: false },
+    ])).toBe(true);
+    expect(hasStructuralPatchTargetConflict([
+      { target: slot.parentNode!, structural: true },
+      { target: slot, structural: false },
+    ])).toBe(true);
+    expect(hasStructuralPatchTargetConflict([
+      { target: inner, structural: true },
+      { target: innerRoot.firstChild!, structural: false },
+    ])).toBe(false);
   });
 });

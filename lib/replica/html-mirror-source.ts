@@ -44,6 +44,9 @@ import {
   sanitizeSourceElementHints,
   sanitizeSourceSubtree,
   sanitizeSourceSubtrees,
+  beginSourceSlotReadingWalk,
+  createSourceSlotReadings,
+  sourceSlotReadingChanged,
   snapshotHtmlMirrorRepresentability,
   sourceStructuralChildNodes,
   type HtmlMirrorIdRegistry,
@@ -579,6 +582,20 @@ export class HtmlMirrorSourceSession {
   #pendingChildren = new Set<Node>();
   #pendingAttributes = new Set<Element>();
   #pendingText = new Set<Text>();
+  /**
+   * Shadow roots whose slots changed, and children of hosts given another
+   * slot name: what may be drawn in other boxes than it was; see
+   * `#queueChangedSlotReadings`.
+   */
+  #slotChanges = new Set<Node>();
+  /** Slots, filled by a script, whose list of nodes is to be sent. */
+  #pendingSlotLists = new Set<Element>();
+  /**
+   * How this reader last read each child of a shadow host into its own
+   * mirror. One connection's note is not another's: the page script makes a
+   * reader a connection, and each mirror is told of a change by its own.
+   */
+  readonly #slotReadings = createSourceSlotReadings();
   #pendingDimensions = false;
   #lastDimensions: ReturnType<typeof readSourceDimensions> | undefined;
   #pendingOverflow = false;
@@ -1063,6 +1080,7 @@ export class HtmlMirrorSourceSession {
         representability,
         fidelityPolicy,
         controlledContentPolicy,
+        this.#slotReadings,
       );
       const checkpoint = graph && createHtmlMirrorCheckpoint(
         this.#identityAt(this.#sequence),
@@ -1329,6 +1347,19 @@ export class HtmlMirrorSourceSession {
           if (!structuralSelectOwner) {
             this.#queuePending(this.#pendingChildren, record.target);
           }
+          // A box of a root that becomes an editor, or stops being one,
+          // does so for what its slots hold too, none of which is inside
+          // it: see `#queueChangedSlotReadings`.
+          const root = record.target.getRootNode();
+          if (isSourceShadowRoot(root)) this.#slotChanges.add(root);
+        } else if (
+          record.attributeName === 'slot' &&
+          record.target.parentElement &&
+          readSourceShadowRoot(record.target.parentElement)
+        ) {
+          // A child of a host given another slot name may be drawn inside
+          // other boxes: see `#queueChangedSlotReadings`.
+          this.#slotChanges.add(record.target);
         }
       } else if (record.type === 'characterData' && record.target instanceof Text) {
         accepted = true;
@@ -1367,22 +1398,31 @@ export class HtmlMirrorSourceSession {
     }
     // Something happened on the page: the periodic look is half a second off.
     this.#heldLook = { every: 1, in: 1 };
-    // One listing of the page's animations serves the whole flush: what is
-    // compared and what is read see the same held values.
-    const heldPass = beginSourceHeldAnimationPass(
-      this.environment.document,
-      false,
-      this.environment.now,
-    );
+    // One walk of the roots for all of it: what is painted is asked about
+    // the children of the same hosts as what is sent (a closed root that
+    // assigns 4,000 nodes by script had its slots' lists gone through once
+    // a child).
+    const rootWalk = beginSourceShadowRootWalk();
     try {
-      this.#listHeldAnimations(heldPass);
-      this.#takeHeldAnimationChanges();
-      this.#flushChanges(fidelityPolicy);
+      // One listing of the page's animations serves the whole flush: what
+      // is compared and what is read see the same held values.
+      const heldPass = beginSourceHeldAnimationPass(
+        this.environment.document,
+        false,
+        this.environment.now,
+      );
+      try {
+        this.#listHeldAnimations(heldPass);
+        this.#takeHeldAnimationChanges();
+        this.#flushChanges(fidelityPolicy);
+      } finally {
+        heldPass.end();
+        // More elements than one patch takes, or some met while this one
+        // was read: the next frame's.
+        if (this.#heldChanged.size > 0) this.#scheduleFlush();
+      }
     } finally {
-      heldPass.end();
-      // More elements than one patch takes, or some met while this one was
-      // read: the next frame's.
-      if (this.#heldChanged.size > 0) this.#scheduleFlush();
+      rootWalk.end();
     }
   }
 
@@ -1450,11 +1490,10 @@ export class HtmlMirrorSourceSession {
       if (this.#paused) return;
     }
     if (this.#takeLateShadowRoots()) return;
-    const rootWalk = beginSourceShadowRootWalk();
-    try {
+    // A change of slots first asks what it changes (the walk of the roots
+    // is open around the whole flush).
+    if (this.#queueChangedSlotReadings()) {
       this.#readAndPostChanges(fidelityPolicy);
-    } finally {
-      rootWalk.end();
     }
     // A change to the page may have lengthened a scrolled pane, hidden it,
     // shown it again or put it back at its start, none of which fires a
@@ -1506,6 +1545,7 @@ export class HtmlMirrorSourceSession {
       for (const targets of [
         this.#pendingChildren,
         this.#pendingAttributes,
+        this.#pendingSlotLists,
         this.#pendingText,
       ] as Iterable<Node>[]) {
         for (const target of targets) {
@@ -1568,6 +1608,7 @@ export class HtmlMirrorSourceSession {
             batchBudget,
             styleWork,
             this.#controlledContentPolicy,
+            this.#slotReadings,
           );
           if (!children) throw new Error('Unsafe children patch.');
           const sources = children.map(
@@ -1597,6 +1638,7 @@ export class HtmlMirrorSourceSession {
             batchBudget,
             styleWork,
             fidelityPolicy,
+            this.#slotReadings,
           );
           if (!serialized) throw new Error('Unsafe new children patch.');
           const newGraphs = new Map<Node, import(
@@ -1638,10 +1680,17 @@ export class HtmlMirrorSourceSession {
           }
         }
       }
-      for (const target of this.#pendingAttributes) {
+      for (const target of new Set([
+        ...this.#pendingAttributes,
+        ...this.#pendingSlotLists,
+      ])) {
         if (
-          !target.isConnected || covered(target) ||
-          !this.#mirroredNodes.has(target)
+          !target.isConnected || !this.#mirroredNodes.has(target) ||
+          (this.#pendingAttributes.has(target)
+            ? covered(target)
+            : childrenTargets.some(
+                (above) => readsSourceSlotAgain(above, target),
+              ))
         ) continue;
         const attributes = sanitizeSourceAttributes(
           target,
@@ -1658,6 +1707,8 @@ export class HtmlMirrorSourceSession {
           fidelityPolicy,
           styleWork,
           this.#controlledContentPolicy,
+          undefined,
+          this.environment.registry,
         );
         if (target.localName.toLowerCase() === 'img') {
           this.#selectedImageSources.set(
@@ -1690,6 +1741,7 @@ export class HtmlMirrorSourceSession {
           this.environment.document.baseURI,
           representability,
           fidelityPolicy,
+          this.#slotReadings,
         );
         if (!node || node.kind !== 'text') throw new Error('Unsafe text patch.');
         const operation = Object.freeze({
@@ -1839,6 +1891,8 @@ export class HtmlMirrorSourceSession {
     this.#pendingChildren.clear();
     this.#pendingAttributes.clear();
     this.#pendingText.clear();
+    this.#slotChanges.clear();
+    this.#pendingSlotLists.clear();
     this.#pendingDimensions = false;
     this.#controlledLayoutSettlePending = false;
     this.#visibilityMutationRecords = [];
@@ -2238,7 +2292,8 @@ export class HtmlMirrorSourceSession {
 
   /**
    * A script gave a slot other nodes (a root that assigns by hand, D135):
-   * nothing else tells of it. See `#slotsChanged`.
+   * nothing else tells of it. The slot's list of nodes is sent, and what the
+   * host holds is asked how it is read now.
    */
   readonly #onSlotChange = (event: Event): void => {
     const slot = event.target;
@@ -2247,19 +2302,67 @@ export class HtmlMirrorSourceSession {
       !slot || typeof slot !== 'object' || (slot as Node).nodeType !== 1
     ) return;
     const root = (slot as Element).getRootNode();
-    if (isSourceShadowRoot(root)) this.#slotsChanged(root);
+    if (!isSourceShadowRoot(root)) return;
+    this.#pendingSlotLists.add(slot as Element);
+    this.#slotsChanged(root);
   };
 
   /**
-   * The slots of `root` may take other nodes than they did. The text its
-   * host holds itself has no element of its own to be found by, so that
-   * text is read again; the elements are found by what the page paints,
-   * compared afresh (D135).
+   * A slot was added to `root`, taken out of it, renamed or filled by a
+   * script: its slots may take other nodes than they did. See
+   * `#queueChangedSlotReadings`; what the page paints is compared afresh
+   * too (D135).
    */
   #slotsChanged(root: ShadowRoot): void {
-    this.#queueSlotted([...root.host.childNodes], false);
+    this.#slotChanges.add(root);
     if (this.#visibilityBoundaryIndex) this.#visibilityFullRefreshPending = true;
     this.#scheduleFlush();
+  }
+
+  /**
+   * What a host holds is read by the boxes around its slot: hidden, edited,
+   * inside a control that acts. A slot that is added, removed, renamed or
+   * filled by a script, and a child given another slot name, move nodes
+   * between boxes, and most such moves change nothing of what is sent (a
+   * slot that takes nothing, two slots that swap, a node moved from one
+   * plain box to another). So each child is asked how it is read now, and
+   * only one that is read otherwise than it last was is read again, as what
+   * a box holds is when the box is shown or hidden. Reading them all again
+   * sent the whole of a host at every slot its root recreated. False when
+   * the page has to be read afresh.
+   */
+  #queueChangedSlotReadings(): boolean {
+    if (this.#slotChanges.size === 0) return true;
+    const children = new Set<Node>();
+    for (const changed of this.#slotChanges) {
+      if (isSourceShadowRoot(changed)) {
+        for (const child of changed.host.childNodes) children.add(child);
+      } else {
+        children.add(changed);
+      }
+    }
+    this.#slotChanges.clear();
+    const walk = beginSourceSlotReadingWalk(
+      this.#slotReadings,
+      this.environment.document,
+      this.#controlledContentPolicy,
+    );
+    const readOtherwise: Node[] = [];
+    for (const child of children) {
+      // What the mirror does not hold is never read again: not asked.
+      if (
+        this.#mirroredNodes.has(child) &&
+        sourceSlotReadingChanged(child, walk)
+      ) readOtherwise.push(child);
+    }
+    this.#queueSlotted(readOtherwise, true);
+    for (const child of readOtherwise) {
+      if (
+        child.nodeType === Node.ELEMENT_NODE &&
+        !this.#queueSlottedContent(child as Element)
+      ) return false;
+    }
+    return true;
   }
 
   /**
@@ -2311,19 +2414,32 @@ export class HtmlMirrorSourceSession {
    * box of the root that is shown or hidden shows or hides what its slots
    * hold, none of which is inside the box: that is read again with it. The
    * index of what is painted counts it as inside the box too, not as a
-   * change of its own (D135).
+   * change of its own (D135). What a slot holds may itself hold a slot of
+   * the root it sits in (the panel one component hands to another: a
+   * dropdown's menu is slotted into a panel, and the panel into a popup's
+   * box); what that slot holds is drawn inside the box as well, and is
+   * inside nothing the box holds, so each node found is looked through for
+   * slots in turn. Only the tree is walked, never a text.
    */
   #queueSlottedContent(target: Element): boolean {
     try {
-      const slots: Element[] = target.localName === 'slot' ? [target] : [];
-      slots.push(...target.querySelectorAll('slot'));
-      const held: Node[] = [];
-      for (const slot of slots) {
-        held.push(...(slot as HTMLSlotElement).assignedNodes?.({
-          flatten: true,
-        }) ?? []);
+      const held = new Set<Node>();
+      const boxes: Element[] = [target];
+      while (boxes.length > 0) {
+        const box = boxes.pop() as Element;
+        const slots: Element[] = box.localName === 'slot' ? [box] : [];
+        slots.push(...box.querySelectorAll('slot'));
+        for (const slot of slots) {
+          for (const node of (slot as HTMLSlotElement).assignedNodes?.({
+            flatten: true,
+          }) ?? []) {
+            if (held.has(node)) continue;
+            held.add(node);
+            if (node.nodeType === Node.ELEMENT_NODE) boxes.push(node as Element);
+          }
+        }
       }
-      this.#queueSlotted(held, true);
+      this.#queueSlotted([...held], true);
       return true;
     } catch {
       this.#shadowReconciliationPending = true;
@@ -2556,6 +2672,12 @@ export class HtmlMirrorSourceSession {
       iterableContainsComposedSource(this.#pendingAttributes, target, target) ||
       iterableContainsComposedSource(this.#pendingText, target, target)
     ) return 'coveredDirtyBranchFallbackCount';
+    // A slot below whose list is to be sent comes with it, read again.
+    for (const slot of this.#pendingSlotLists) {
+      if (readsSourceSlotAgain(target, slot)) {
+        return 'coveredDirtyBranchFallbackCount';
+      }
+    }
 
     const previousSet = new Set(previous);
     for (const child of children) {
@@ -3359,6 +3481,19 @@ function collectLiveSubtreeNodes(
   }
 }
 
+/**
+ * Whether reading the children of `target` again reads `slot` again, with
+ * the list of nodes a script gave it. Not for the slot's own host: its
+ * children are replaced and its root stays where it is, so the slot's list
+ * is sent beside them. The root, or anything above the host, takes the slot
+ * with it.
+ */
+function readsSourceSlotAgain(target: Node, slot: Element): boolean {
+  const root = slot.getRootNode();
+  return !(isSourceShadowRoot(root) && root.host === target) &&
+    target !== slot && containsComposedSource(target, slot);
+}
+
 function containsComposedSource(ancestor: Node, descendant: Node): boolean {
   for (let current: Node | undefined = descendant; current;) {
     if (current === ancestor) return true;
@@ -3402,6 +3537,7 @@ function emittedElementSignature(
     | 'canvasBackgroundColor'
     | 'resolvedStyleSheetText'
     | 'customElementDefined'
+    | 'assignedNodeIds'
   >,
 ): string {
   const controlText = element.controlText;
@@ -3420,6 +3556,7 @@ function emittedElementSignature(
     element.canvasBackgroundColor ?? null,
     element.resolvedStyleSheetText ?? null,
     element.customElementDefined === true,
+    element.assignedNodeIds ?? null,
   ]);
 }
 

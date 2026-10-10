@@ -95,6 +95,7 @@ export type HtmlMirrorPatchOperation =
       readonly canvasBackgroundColor?: string;
       readonly resolvedStyleSheetText?: string;
       readonly customElementDefined?: true;
+      readonly assignedNodeIds?: readonly number[];
     }
   | {
       readonly kind: 'children';
@@ -849,7 +850,7 @@ function readOperations(
           'visuallyHidden', 'selectedImageSource', 'selectedOptionIndexes',
           'selectPickerOpen', 'selectPresentationStyle', 'controlText',
           'canvasBackgroundColor', 'resolvedStyleSheetText',
-          'customElementDefined',
+          'customElementDefined', 'assignedNodeIds',
         ],
       ) &&
       (raw.namespace === 'html' || raw.namespace === 'svg' ||
@@ -908,6 +909,9 @@ function readOperations(
         ...(raw.customElementDefined !== undefined
           ? { customElementDefined: raw.customElementDefined }
           : {}),
+        ...(raw.assignedNodeIds !== undefined
+          ? { assignedNodeIds: raw.assignedNodeIds }
+          : {}),
       }, graphIds, 0, graphBudget, false, false, false, false, false,
       fidelityPolicy,
       raw.tagName === 'option' || raw.tagName === 'optgroup'
@@ -945,6 +949,9 @@ function readOperations(
           : {}),
         ...(sentinel.customElementDefined
           ? { customElementDefined: true as const }
+          : {}),
+        ...(sentinel.assignedNodeIds
+          ? { assignedNodeIds: sentinel.assignedNodeIds }
           : {}),
       }));
       continue;

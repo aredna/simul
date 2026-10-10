@@ -64,6 +64,8 @@ let freshSince = 0;
 /** Open walks; the slot lists of closed roots are kept while one is open. */
 let openWalks = 0;
 let walkSlotLists: Map<ShadowRoot, readonly HTMLSlotElement[]> | undefined;
+/** While a walk is open: the slot of each node a closed root assigns by script. */
+let walkManualSlots: Map<ShadowRoot, Map<Node, HTMLSlotElement>> | undefined;
 
 const HTML_NAMESPACE = 'http://www.w3.org/1999/xhtml';
 
@@ -209,6 +211,7 @@ export function beginSourceShadowRootWalk(
   const outerFresh = freshSince;
   openWalks += 1;
   walkSlotLists ??= new Map();
+  walkManualSlots ??= new Map();
   if (options.fresh) freshSince = clock += 1;
   let ended = false;
   return {
@@ -217,7 +220,10 @@ export function beginSourceShadowRootWalk(
       ended = true;
       freshSince = outerFresh;
       openWalks -= 1;
-      if (openWalks === 0) walkSlotLists = undefined;
+      if (openWalks === 0) {
+        walkSlotLists = undefined;
+        walkManualSlots = undefined;
+      }
     },
   };
 }
@@ -343,10 +349,26 @@ export function readSourceAssignedSlot(node: Node): Element | null | undefined {
   if (!root) return null;
   const slots = readClosedRootSlots(root);
   if (root.slotAssignment === 'manual') {
-    for (const slot of slots) {
-      if (slot.assignedNodes().includes(node as ChildNode)) return slot;
+    if (!walkManualSlots) {
+      for (const slot of slots) {
+        if (slot.assignedNodes().includes(node as ChildNode)) return slot;
+      }
+      return null;
     }
-    return null;
+    // A walk asks for every child of the host: each slot's list is gone
+    // through once in it, not once a child (4,000 children were 16 million
+    // comparisons a walk).
+    let assigned = walkManualSlots.get(root);
+    if (!assigned) {
+      assigned = new Map();
+      for (const slot of slots) {
+        for (const held of slot.assignedNodes()) {
+          if (!assigned.has(held)) assigned.set(held, slot);
+        }
+      }
+      walkManualSlots.set(root, assigned);
+    }
+    return assigned.get(node) ?? null;
   }
   const name = node.nodeType === 1
     ? (node as Element).getAttribute('slot') ?? ''

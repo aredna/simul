@@ -924,7 +924,7 @@ function sourcePaintedPathMemo(
     }
     let parent: Element | undefined;
     try {
-      parent = sourceFlatTreeParentElement(current);
+      parent = readSourceFlatTreeParentElement(current);
     } catch {
       invalid = true;
       break;
@@ -1547,7 +1547,7 @@ export function readSourceFlatTreeElementPath(
     const seen = new Set<Element>();
     let current = node.nodeType === 1
       ? node as Element
-      : sourceFlatTreeParentElement(node);
+      : readSourceFlatTreeParentElement(node);
     while (current) {
       if (
         seen.has(current) ||
@@ -1555,7 +1555,7 @@ export function readSourceFlatTreeElementPath(
       ) return undefined;
       seen.add(current);
       path.push(current);
-      current = sourceFlatTreeParentElement(current);
+      current = readSourceFlatTreeParentElement(current);
     }
     return Object.freeze(path);
   } catch {
@@ -1563,7 +1563,11 @@ export function readSourceFlatTreeElementPath(
   }
 }
 
-function sourceFlatTreeParentElement(node: Node): Element | undefined {
+/**
+ * One step of `readSourceFlatTreeElementPath`: the element `node` is drawn
+ * in. Throws where that path would be `undefined`.
+ */
+export function readSourceFlatTreeParentElement(node: Node): Element | undefined {
   const assignedSlot = readSourceAssignedSlot(node);
   if (assignedSlot !== undefined && assignedSlot !== null) {
     if (
@@ -2474,7 +2478,7 @@ function readSourceUnmemoizedPath(
     const path: Element[] = [];
     let current = node.nodeType === 1
       ? node as Element
-      : sourceFlatTreeParentElement(node);
+      : readSourceFlatTreeParentElement(node);
     while (current) {
       const known = memo.results.get(current);
       if (known !== undefined) {
@@ -2487,7 +2491,7 @@ function readSourceUnmemoizedPath(
       }
       if (path.length >= MAX_SOURCE_FLAT_TREE_ANCESTORS) return undefined;
       path.push(current);
-      current = sourceFlatTreeParentElement(current);
+      current = readSourceFlatTreeParentElement(current);
     }
     return { path, secretAncestor: false, baseDepth: 0 };
   } catch {

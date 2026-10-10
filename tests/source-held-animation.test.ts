@@ -887,6 +887,57 @@ describe('what a script animation leaves an element at', () => {
     }
   });
 
+  it('reads what a slotted element holds as for one in the same kind of box of the page, and none of its text', () => {
+    // A child of a host is read by the boxes around its slot: hidden, or
+    // edited. What its ended animation holds is how the element is drawn,
+    // not the page's text: it is read with the element's style in either
+    // tree, in a hidden box and in an editor as anywhere, and the text is
+    // withheld in both trees alike.
+    const { document, window } = page(`
+      <p id="plain">plain text</p>
+      <div hidden><p id="in-hidden">in a hidden box</p></div>
+      <div contenteditable="true"><p id="in-editor">in an editor</p></div>
+      <x-one id="one"><p id="slotted-hidden">slotted into a hidden box</p></x-one>
+      <x-two id="two"><p id="slotted-editor">slotted into an editor</p></x-two>`);
+    const element = (id: string) => document.querySelector(`#${id}`)!;
+    for (const [host, markup] of [
+      ['one', '<div hidden><slot></slot></div>'],
+      ['two', '<div contenteditable="true"><slot></slot></div>'],
+    ] as const) {
+      const root = element(host).attachShadow({ mode: 'open' });
+      root.innerHTML = markup;
+      // linkedom assigns no slots: the test says what Chrome would.
+      Object.defineProperty(element(host).firstElementChild, 'assignedSlot', {
+        configurable: true,
+        value: root.querySelector('slot'),
+      });
+      animate(root, []);
+    }
+    computeStyles(
+      window,
+      (given): Record<string, string> => given.hasAttribute('hidden') ? { display: 'none' } : {},
+    );
+    const ids = ['plain', 'in-hidden', 'in-editor', 'slotted-hidden', 'slotted-editor'];
+    animate(document, ids.map((id) => new FakeAnimation(element(id), fade())));
+    pass(document);
+    const graph = sanitizeSourceDocument(
+      document as unknown as Document,
+      window as unknown as Window,
+      new WeakNodeIdRegistry(),
+      undefined,
+      'passive',
+    )!;
+    for (const id of ids) {
+      expect(attributesOf(graph.root, id).style, id).toBe('opacity:1');
+    }
+    const sent = JSON.stringify(graph.root);
+    expect(sent).toContain('plain text');
+    for (const withheld of [
+      'in a hidden box', 'in an editor',
+      'slotted into a hidden box', 'slotted into an editor',
+    ]) expect(sent, withheld).not.toContain(withheld);
+  });
+
   it('sends one style for an element, with what it holds, however the page spells its own', () => {
     const { document, window } = page(`
       <div id="twin" style="color: red">the page's style and another spelled STYLE</div>

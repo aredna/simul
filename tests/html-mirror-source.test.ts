@@ -5166,6 +5166,595 @@ describe('what a host\'s root does to the host\'s own children (D135)', () => {
     });
   });
 
+  describe('a slot that changes: only what is read otherwise is read again', () => {
+    /** The dialog's box, shown, and one more box of the root with a slot. */
+    function twoSlots(
+      attributes: Readonly<Record<string, string>> = {},
+      options: { readonly name?: string; readonly manual?: boolean } = {},
+    ) {
+      const made = dialogFixture('open');
+      made.box.removeAttribute('data-test-computed-hidden');
+      if (options.manual) {
+        Object.defineProperty(made.root, 'slotAssignment', {
+          configurable: true,
+          value: 'manual',
+        });
+      }
+      const second = made.fixture.document.createElement('div');
+      for (const [name, value] of Object.entries(attributes)) {
+        second.setAttribute(name, value);
+      }
+      const other = made.fixture.document.createElement('slot');
+      if (options.name) other.setAttribute('name', options.name);
+      second.append(other);
+      const shown = attributes['data-test-computed-hidden'] !== 'true';
+      for (const [element, rects] of [
+        [other, mirrorEmptyRectList()],
+        [second, shown ? mirrorTabRectList() : mirrorEmptyRectList()],
+      ] as const) {
+        Object.defineProperty(element, 'getClientRects', { configurable: true, value: () => rects });
+      }
+      /** What Chrome would say after the page, or a script, moved nodes. */
+      const hold = (first: readonly Node[], later: readonly Node[]): void => {
+        for (const [slot, nodes] of [[made.slot, first], [other, later]] as const) {
+          for (const node of nodes) {
+            Object.defineProperty(node, 'assignedSlot', { configurable: true, value: slot });
+          }
+          Object.defineProperty(slot, 'assignedNodes', { configurable: true, value: () => nodes });
+        }
+      };
+      hold([made.slotted, made.direct], []);
+      const slotChange = (...slots: readonly Element[]): void => {
+        for (const slot of slots) {
+          slot.dispatchEvent(new (made.fixture.window as unknown as { Event: typeof Event })
+            .Event('slotchange', { bubbles: true }));
+        }
+      };
+      const begin = (): void => {
+        made.fixture.start('passive');
+        made.fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+      };
+      const acknowledge = (): HtmlMirrorPatchBatch => {
+        const patch = made.fixture.patches().at(-1)!;
+        made.fixture.port.emitMessage(createHtmlMirrorAck(identity, patch.lastSequence));
+        return patch;
+      };
+      const operationsFor = (node: Node, patch = made.fixture.patches().at(-1)!): string[] =>
+        patch.operations
+          .filter((operation) => 'nodeId' in operation &&
+            operation.nodeId === made.fixture.registry.peekId(node))
+          .map(({ kind }) => kind);
+      return { ...made, second, other, hold, slotChange, begin, acknowledge, operationsFor };
+    }
+
+    /**
+     * One more reader of the same page: the page script makes a reader for
+     * each connection, so a second mirror of one tab (the side panel and a
+     * companion window) has its own, on the same document and node ids.
+     */
+    function secondReader(first: ReturnType<typeof sourceFixture>) {
+      const port = new FakePort(createHtmlMirrorPortName(identity.sessionId));
+      const frames: Array<() => void> = [];
+      let mutationCallback!: MutationCallback;
+      const session = new HtmlMirrorSourceSession({
+        port: port as unknown as Browser.runtime.Port,
+        document: first.document,
+        window: first.window as unknown as Window,
+        registry: first.registry,
+        now: () => 1,
+        createMutationObserver: (callback) => {
+          mutationCallback = callback;
+          return { observe: vi.fn(), disconnect: vi.fn() };
+        },
+        scheduleFrame: (callback) => {
+          frames.push(callback);
+          return callback;
+        },
+        cancelFrame: (handle) => {
+          const index = frames.indexOf(handle as () => void);
+          if (index >= 0) frames.splice(index, 1);
+        },
+        setTimer: (callback) => callback,
+        clearTimer: () => undefined,
+      });
+      const patches = (): HtmlMirrorPatchBatch[] => port.posts.filter(
+        (message): message is HtmlMirrorPatchBatch =>
+          (message as { kind?: string }).kind === 'simul:html-mirror-v2:patch',
+      );
+      return {
+        session,
+        port,
+        patches,
+        begin: (): void => {
+          port.emitMessage(createHtmlMirrorStart(identity, 'passive'));
+          port.emitMessage(createHtmlMirrorAck(identity, 0));
+        },
+        mutate: (record: MutationRecord): void =>
+          mutationCallback([record], {} as MutationObserver),
+        flushFrame: (): void => {
+          const frame = frames.shift();
+          if (!frame) throw new Error('Expected a scheduled mirror frame.');
+          frame();
+        },
+        acknowledge: (): HtmlMirrorPatchBatch => {
+          const patch = patches().at(-1)!;
+          port.emitMessage(createHtmlMirrorAck(identity, patch.lastSequence));
+          return patch;
+        },
+      };
+    }
+
+    it('keeps a note of its own of how a child was read: each of two mirrors of a tab takes the text back', () => {
+      const { fixture, root, second, slotted, direct, hold, begin, acknowledge } =
+        twoSlots({ contenteditable: 'true' }, { name: 'aside' });
+      root.append(second);
+      const other = secondReader(fixture);
+      begin();
+      other.begin();
+      for (const reader of [fixture, other]) {
+        expect(JSON.stringify(reader.port.posts)).toContain('slotted paragraph');
+      }
+      const kinds = (patch: HtmlMirrorPatchBatch, node: Node): string[] => patch.operations
+        .filter((operation) => 'nodeId' in operation &&
+          operation.nodeId === fixture.registry.peekId(node))
+        .map(({ kind }) => kind);
+      // Twice over: what the first reader noted when it read the child
+      // again says nothing of what the second mirror holds.
+      for (const round of [1, 2]) {
+        // Into the editor of the root: both boxes are painted before and
+        // after, so nothing but the reading tells of it.
+        slotted.setAttribute('slot', 'aside');
+        hold([direct], [slotted]);
+        const moved = attributeRecord(slotted, 'slot');
+        fixture.mutate(moved);
+        other.mutate(moved);
+        fixture.flushFrame();
+        other.flushFrame();
+        for (const taken of [acknowledge(), other.acknowledge()]) {
+          expect(JSON.stringify(taken), `round ${round}`).not.toContain('slotted paragraph');
+          expect(kinds(taken, slotted), `round ${round}`).toContain('children');
+        }
+        // And back to the plain box.
+        slotted.removeAttribute('slot');
+        hold([slotted, direct], []);
+        const back = attributeRecord(slotted, 'slot');
+        fixture.mutate(back);
+        other.mutate(back);
+        fixture.flushFrame();
+        other.flushFrame();
+        for (const given of [acknowledge(), other.acknowledge()]) {
+          expect(JSON.stringify(given), `round ${round}`).toContain('slotted paragraph');
+        }
+      }
+      expect(fixture.checkpoints()).toHaveLength(1);
+      other.session.dispose();
+    });
+
+    it('sends nothing of what a host holds when its root gets a slot that takes nothing, or loses it', () => {
+      const { fixture, root, second, slotted, direct, begin, acknowledge, operationsFor } =
+        twoSlots({ 'data-test-computed-hidden': 'true' }, { name: 'unused' });
+      begin();
+      for (const added of [true, false]) {
+        const before = fixture.patches().length;
+        if (added) root.append(second);
+        else second.remove();
+        fixture.mutate(childListRecord(root, added ? [second] : [], added ? [] : [second]));
+        fixture.flushFrame();
+        expect(fixture.checkpoints()).toHaveLength(1);
+        expect(fixture.patches()).toHaveLength(before + 1);
+        const patch = acknowledge();
+        // The root's own children, with the slot or without it.
+        expect(patch.operations.map(({ kind }) => kind)
+          .filter((kind) => kind !== 'dimensions')).toHaveLength(1);
+        expect(operationsFor(slotted)).toEqual([]);
+        expect(operationsFor(direct)).toEqual([]);
+        expect(JSON.stringify(patch)).not.toContain('slotted paragraph');
+        expect(JSON.stringify(patch)).not.toContain('text straight in the host');
+      }
+    });
+
+    it('sends nothing of what a host holds when a rename moves it to another plain box', () => {
+      const { fixture, root, slot, second, other, slotted, direct, hold, begin, acknowledge, operationsFor } =
+        twoSlots();
+      root.append(second);
+      begin();
+      slot.setAttribute('name', 'elsewhere');
+      hold([], [slotted, direct]);
+      fixture.mutate(attributeRecord(slot, 'name'));
+      fixture.flushFrame();
+      expect(fixture.checkpoints()).toHaveLength(1);
+      const renamed = acknowledge();
+      expect(renamed.operations.map(({ kind }) => kind)
+        .filter((kind) => kind !== 'dimensions')).toEqual(['attributes']);
+      expect(operationsFor(slot)).toEqual(['attributes']);
+
+      // How each child is read is still known: the box it is drawn in now
+      // becomes an editor, and both are taken back.
+      second.setAttribute('contenteditable', 'true');
+      fixture.mutate(attributeRecord(second, 'contenteditable'));
+      fixture.flushFrame();
+      expect(fixture.checkpoints()).toHaveLength(1);
+      const taken = acknowledge();
+      expect(JSON.stringify(taken)).not.toContain('slotted paragraph');
+      expect(JSON.stringify(taken)).not.toContain('text straight in the host');
+      expect(operationsFor(slotted)).toContain('children');
+      expect(operationsFor(direct)).toEqual(['text']);
+      expect(other.isConnected).toBe(true);
+    });
+
+    it('sends the new slot name of a child alone when it is drawn in another plain box', () => {
+      const { fixture, root, second, slotted, direct, hold, begin, acknowledge, operationsFor } =
+        twoSlots({}, { name: 'aside' });
+      root.append(second);
+      begin();
+      slotted.setAttribute('slot', 'aside');
+      hold([direct], [slotted]);
+      fixture.mutate(attributeRecord(slotted, 'slot'));
+      fixture.flushFrame();
+      const moved = acknowledge();
+      expect(moved.operations.map(({ kind }) => kind)
+        .filter((kind) => kind !== 'dimensions')).toEqual(['attributes']);
+      expect(operationsFor(slotted)).toEqual(['attributes']);
+    });
+
+    it('reads again only what a box slots when the box becomes an editor', () => {
+      const { fixture, root, box, second, slotted, direct, hold, begin, acknowledge, operationsFor } =
+        twoSlots({}, { name: 'aside' });
+      root.append(second);
+      slotted.setAttribute('slot', 'aside');
+      hold([direct], [slotted]);
+      begin();
+      box.setAttribute('contenteditable', 'true');
+      fixture.mutate(attributeRecord(box, 'contenteditable'));
+      fixture.flushFrame();
+      expect(fixture.checkpoints()).toHaveLength(1);
+      const taken = acknowledge();
+      expect(operationsFor(direct)).toEqual(['text']);
+      expect(JSON.stringify(taken)).not.toContain('text straight in the host');
+      // The paragraph is drawn in the other box, and is read as it was.
+      expect(operationsFor(slotted)).toEqual([]);
+    });
+
+    it('sends the lists of two slots and nothing else when a script moves a node between plain boxes', () => {
+      const { fixture, root, slot, second, other, slotted, direct, hold, slotChange, begin, acknowledge } =
+        twoSlots({}, { manual: true });
+      root.append(second);
+      begin();
+      hold([direct], [slotted]);
+      slotChange(slot, other);
+      fixture.flushFrame();
+      expect(fixture.checkpoints()).toHaveLength(1);
+      const moved = acknowledge();
+      expect(moved.operations.filter(({ kind }) => kind !== 'dimensions')).toEqual([
+        expect.objectContaining({
+          kind: 'attributes',
+          nodeId: fixture.registry.peekId(slot),
+          assignedNodeIds: [fixture.registry.peekId(direct)],
+        }),
+        expect.objectContaining({
+          kind: 'attributes',
+          nodeId: fixture.registry.peekId(other),
+          assignedNodeIds: [fixture.registry.peekId(slotted)],
+        }),
+      ]);
+      expect(JSON.stringify(moved)).not.toContain('slotted paragraph');
+      expect(JSON.stringify(moved)).not.toContain('text straight in the host');
+
+      // The same lists once more: nothing is sent.
+      const before = fixture.port.posts.length;
+      slotChange(slot, other);
+      fixture.flushFrame();
+      expect(fixture.port.posts.slice(before).filter(
+        (post) => (post as HtmlMirrorPatchBatch).operations?.some(
+          ({ kind }) => kind !== 'dimensions',
+        ),
+      )).toEqual([]);
+    });
+
+    it('tells a slot its nodes in the batch that brings its host a new child', () => {
+      const { fixture, root, host, second, other, slotted, direct, hold, slotChange, begin, acknowledge, operationsFor } =
+        twoSlots({}, { manual: true });
+      root.append(second);
+      begin();
+      const added = fixture.document.createElement('p');
+      added.textContent = 'added paragraph';
+      Object.defineProperty(added, 'getClientRects', {
+        configurable: true,
+        value: () => mirrorTabRectList(),
+      });
+      host.append(added);
+      hold([slotted, direct], [added]);
+      fixture.mutate(childListRecord(host, [added]));
+      slotChange(other);
+      fixture.flushFrame();
+      expect(fixture.checkpoints()).toHaveLength(1);
+      const patch = acknowledge();
+      expect(JSON.stringify(patch)).toContain('added paragraph');
+      expect(operationsFor(other)).toEqual(['attributes']);
+      expect(patch.operations.find(
+        (operation) => operation.kind === 'attributes' &&
+          operation.nodeId === fixture.registry.peekId(other),
+      )).toMatchObject({ assignedNodeIds: [fixture.registry.peekId(added)] });
+      // The root is not read again for it: its text is not in the patch.
+      expect(operationsFor(root)).toEqual([]);
+      expect(JSON.stringify(patch)).not.toContain('root text');
+
+      // How the new child was read is known from the read that brought it:
+      // the slot's event once more, with nothing moved, sends nothing of it.
+      const before = fixture.patches().length;
+      slotChange(other);
+      fixture.flushFrame();
+      expect(fixture.patches().slice(before).flatMap(({ operations }) => operations)
+        .filter((operation) => 'nodeId' in operation &&
+          operation.nodeId === fixture.registry.peekId(added))).toEqual([]);
+    });
+
+    it('sends a slot its list with its root when the root is read again', () => {
+      const { fixture, root, second, other, slotted, direct, hold, slotChange, begin, acknowledge, operationsFor } =
+        twoSlots({}, { manual: true });
+      root.append(second);
+      begin();
+      const more = fixture.document.createElement('p');
+      more.textContent = 'more root text';
+      root.append(more);
+      hold([direct], [slotted]);
+      fixture.mutate(childListRecord(root, [more]));
+      slotChange(other);
+      fixture.flushFrame();
+      expect(fixture.checkpoints()).toHaveLength(1);
+      const patch = acknowledge();
+      // The slot comes with its list inside the root's children.
+      expect(operationsFor(other)).toEqual([]);
+      expect(JSON.stringify(patch)).toContain(
+        `"assignedNodeIds":[${fixture.registry.peekId(slotted)}]`,
+      );
+    });
+
+    it('sends a slot its list beside its own fallback content when both change', () => {
+      const { fixture, root, slot, second, other, slotted, direct, hold, slotChange, begin, acknowledge, operationsFor } =
+        twoSlots({}, { manual: true });
+      root.append(second);
+      begin();
+      const fallback = fixture.document.createElement('em');
+      fallback.textContent = 'fallback text';
+      Object.defineProperty(fallback, 'getClientRects', {
+        configurable: true,
+        value: () => mirrorTabRectList(),
+      });
+      other.append(fallback);
+      hold([direct], [slotted]);
+      fixture.mutate(childListRecord(other, [fallback]));
+      slotChange(slot, other);
+      fixture.flushFrame();
+      expect(fixture.checkpoints()).toHaveLength(1);
+      acknowledge();
+      // The slot's children are read again, not the slot: its list is sent.
+      expect(operationsFor(other).sort()).toEqual(['attributes', 'reconcile-children']);
+      expect(operationsFor(slot)).toEqual(['attributes']);
+    });
+
+    it('knows how an element is read after its box stopped being an editor, when it is given to another', () => {
+      const { fixture, root, box, second, slotted, direct, hold, begin, acknowledge, operationsFor } =
+        twoSlots({ contenteditable: 'true' }, { name: 'aside' });
+      box.setAttribute('contenteditable', 'true');
+      root.append(second);
+      begin();
+      expect(sent(fixture)).not.toContain('slotted paragraph');
+      box.removeAttribute('contenteditable');
+      fixture.mutate(attributeRecord(box, 'contenteditable'));
+      fixture.flushFrame();
+      expect(lastPatch(fixture)).toContain('slotted paragraph');
+      acknowledge();
+
+      // Both boxes are painted before and after: only the editor differs.
+      slotted.setAttribute('slot', 'aside');
+      hold([direct], [slotted]);
+      fixture.mutate(attributeRecord(slotted, 'slot'));
+      fixture.flushFrame();
+      expect(fixture.checkpoints()).toHaveLength(1);
+      const taken = acknowledge();
+      expect(JSON.stringify(taken)).not.toContain('slotted paragraph');
+      expect(operationsFor(slotted)).toContain('children');
+    });
+
+    it('knows how each of many children is read after they were read in one piece', () => {
+      const { fixture, root, host, box, slot, second, slotted, direct, begin, acknowledge, operationsFor } =
+        twoSlots({ contenteditable: 'true' }, { name: 'aside' });
+      box.setAttribute('contenteditable', 'true');
+      root.append(second);
+      const many: Node[] = [slotted, direct];
+      for (let index = 0; index < 300; index += 1) {
+        const item = fixture.document.createElement('a');
+        item.textContent = `item ${index}`;
+        Object.defineProperty(item, 'assignedSlot', { configurable: true, value: slot });
+        Object.defineProperty(item, 'getClientRects', {
+          configurable: true,
+          value: () => mirrorTabRectList(),
+        });
+        host.append(item);
+        many.push(item);
+      }
+      Object.defineProperty(slot, 'assignedNodes', { configurable: true, value: () => many });
+      begin();
+      expect(sent(fixture)).not.toContain('item 7');
+      box.removeAttribute('contenteditable');
+      fixture.mutate(attributeRecord(box, 'contenteditable'));
+      fixture.flushFrame();
+      // The host's children once, not three hundred patches.
+      const shown = acknowledge();
+      expect(operationsFor(host)).toContain('children');
+      expect(shown.operations.length).toBeLessThan(8);
+      expect(JSON.stringify(shown)).toContain('item 299');
+
+      const item = many[9] as Element;
+      item.setAttribute('slot', 'aside');
+      Object.defineProperty(item, 'assignedSlot', { configurable: true, value: second.firstChild });
+      Object.defineProperty(second.firstChild, 'assignedNodes', { configurable: true, value: () => [item] });
+      Object.defineProperty(slot, 'assignedNodes', {
+        configurable: true,
+        value: () => many.filter((node) => node !== item),
+      });
+      fixture.mutate(attributeRecord(item, 'slot'));
+      fixture.flushFrame();
+      expect(fixture.checkpoints()).toHaveLength(1);
+      const taken = acknowledge();
+      expect(JSON.stringify(taken)).not.toContain('item 7');
+      expect(operationsFor(item)).toContain('children');
+      expect(operationsFor(many[10]!)).toEqual([]);
+    });
+
+    it('reads again a small icon that a script gives to a slot inside a control that acts', () => {
+      const { fixture, root, host, slot, second, other, slotted, direct, slotChange, begin, acknowledge, operationsFor } =
+        twoSlots({ role: 'button' }, { manual: true });
+      root.append(second);
+      const icon = fixture.document.createElement('img');
+      icon.setAttribute('alt', 'broken icon name');
+      icon.setAttribute('width', '16');
+      icon.setAttribute('height', '16');
+      Object.defineProperties(icon, {
+        complete: { configurable: true, value: true },
+        naturalWidth: { configurable: true, value: 0 },
+        naturalHeight: { configurable: true, value: 0 },
+        assignedSlot: { configurable: true, value: slot },
+        getClientRects: { configurable: true, value: () => mirrorTabRectList() },
+      });
+      host.append(icon);
+      Object.defineProperty(slot, 'assignedNodes', {
+        configurable: true,
+        value: () => [slotted, direct, icon],
+      });
+      begin();
+      expect(sent(fixture)).toContain('broken icon name');
+
+      // No attribute of the icon changes: only how it is read does.
+      Object.defineProperty(icon, 'assignedSlot', { configurable: true, value: other });
+      Object.defineProperty(other, 'assignedNodes', { configurable: true, value: () => [icon] });
+      Object.defineProperty(slot, 'assignedNodes', { configurable: true, value: () => [slotted, direct] });
+      slotChange(slot, other);
+      fixture.flushFrame();
+      expect(fixture.checkpoints()).toHaveLength(1);
+      const taken = acknowledge();
+      // Its name is the control's now, and is not the page's text.
+      expect(JSON.stringify(taken)).not.toContain('broken icon name');
+      expect(operationsFor(icon)).toContain('attributes');
+      expect(operationsFor(slotted)).toEqual([]);
+    });
+
+    it('takes back text given to a slot in a box that is not visible', () => {
+      const { fixture, root, slot, second, other, slotted, direct, hold, slotChange, begin, acknowledge, operationsFor } =
+        twoSlots({}, { manual: true });
+      root.append(second);
+      // The second box is displayed and `visibility: hidden`: text put
+      // straight into its slot is not drawn.
+      const computed = fixture.window.getComputedStyle as unknown as (
+        element: Element,
+      ) => CSSStyleDeclaration;
+      Object.defineProperty(fixture.window, 'getComputedStyle', {
+        configurable: true,
+        value: (element: Element) => element === second || element === other
+          ? { ...computed(element), visibility: 'hidden' }
+          : computed(element),
+      });
+      begin();
+      expect(sent(fixture)).toContain('text straight in the host');
+      hold([], [slotted, direct]);
+      slotChange(slot, other);
+      fixture.flushFrame();
+      expect(fixture.checkpoints()).toHaveLength(1);
+      const taken = acknowledge();
+      expect(operationsFor(direct)).toEqual(['text']);
+      expect(JSON.stringify(taken)).not.toContain('text straight in the host');
+      expect(slotted.isConnected).toBe(true);
+    });
+
+    it('reads what no slot takes as it was when its root gets one more slot that takes nothing', () => {
+      const { fixture, root, host, slot, second, slotted, direct, begin, acknowledge, operationsFor } =
+        twoSlots({}, { name: 'unused' });
+      // Nothing takes the host's children, and the host is not visible.
+      slot.setAttribute('name', 'elsewhere');
+      for (const node of [slotted, direct]) {
+        Object.defineProperty(node, 'assignedSlot', { configurable: true, value: null });
+      }
+      Object.defineProperty(slot, 'assignedNodes', { configurable: true, value: () => [] });
+      const computed = fixture.window.getComputedStyle as unknown as (
+        element: Element,
+      ) => CSSStyleDeclaration;
+      Object.defineProperty(fixture.window, 'getComputedStyle', {
+        configurable: true,
+        value: (element: Element) => element === host
+          ? { ...computed(element), visibility: 'hidden' }
+          : computed(element),
+      });
+      begin();
+      root.append(second);
+      fixture.mutate(childListRecord(root, [second]));
+      fixture.flushFrame();
+      expect(fixture.checkpoints()).toHaveLength(1);
+      acknowledge();
+      expect(operationsFor(slotted)).toEqual([]);
+      expect(operationsFor(direct)).toEqual([]);
+    });
+
+    it('takes back text that no slot takes any more where its host is not visible', () => {
+      const { fixture, host, box, slot, slotted, direct, begin, acknowledge, operationsFor } =
+        twoSlots();
+      // The host is `visibility: hidden` and the box around the slot makes
+      // what it holds visible again.
+      const computed = fixture.window.getComputedStyle as unknown as (
+        element: Element,
+      ) => CSSStyleDeclaration;
+      Object.defineProperty(fixture.window, 'getComputedStyle', {
+        configurable: true,
+        value: (element: Element) => element === host
+          ? { ...computed(element), visibility: 'hidden' }
+          : computed(element),
+      });
+      begin();
+      expect(sent(fixture)).toContain('text straight in the host');
+      // The slot gets a name: the text is drawn nowhere, and is read as its
+      // host is; the paragraph too, which says nothing of visibility itself.
+      slot.setAttribute('name', 'elsewhere');
+      for (const node of [slotted, direct]) {
+        Object.defineProperty(node, 'assignedSlot', { configurable: true, value: null });
+      }
+      Object.defineProperty(slot, 'assignedNodes', { configurable: true, value: () => [] });
+      fixture.mutate(attributeRecord(slot, 'name'));
+      fixture.flushFrame();
+      expect(fixture.checkpoints()).toHaveLength(1);
+      const taken = acknowledge();
+      expect(operationsFor(direct)).toEqual(['text']);
+      expect(JSON.stringify(taken)).not.toContain('text straight in the host');
+      expect(box.isConnected).toBe(true);
+    });
+
+    it('knows how a child is read after its box was shown, when a script then hides it', () => {
+      const made = twoSlots({ 'data-test-computed-hidden': 'true' }, { manual: true });
+      const { fixture, root, slot, second, other, slotted, direct, hold, slotChange, begin, acknowledge, operationsFor } =
+        made;
+      // Both boxes hidden at first: nothing of the host's children travels.
+      made.box.setAttribute('data-test-computed-hidden', 'true');
+      root.append(second);
+      begin();
+      expect(sent(fixture)).not.toContain('slotted paragraph');
+      expect(sent(fixture)).not.toContain('text straight in the host');
+      made.setShown(true);
+      expect(lastPatch(fixture)).toContain('slotted paragraph');
+      expect(lastPatch(fixture)).toContain('text straight in the host');
+      acknowledge();
+
+      // The script gives both to the slot in the box that is still hidden.
+      hold([], [slotted, direct]);
+      slotChange(slot, other);
+      fixture.flushFrame();
+      expect(fixture.checkpoints()).toHaveLength(1);
+      const taken = acknowledge();
+      expect(JSON.stringify(taken)).not.toContain('slotted paragraph');
+      expect(JSON.stringify(taken)).not.toContain('text straight in the host');
+      expect(operationsFor(slotted)).toContain('children');
+      expect(operationsFor(direct)).toEqual(['text']);
+    });
+  });
+
   /**
    * A dialog component: its children are drawn in a slot of its root,
    * inside a box the root hides and shows. linkedom assigns no slots, so the
@@ -5387,6 +5976,41 @@ describe('what a host\'s root does to the host\'s own children (D135)', () => {
     expect(sent(fixture)).not.toContain('text straight in the host');
   });
 
+  it('sends nothing slotted into an option of a dropdown of the root', () => {
+    // The tab draws an option by its own text and nothing slotted into it.
+    for (const [markup, withheld] of [
+      ['<select id="box"><option><slot id="slot"></slot></option></select>', true],
+      ['<div id="box"><p><slot id="slot"></slot></p></div>', false],
+    ] as const) {
+      const fixture = sourceFixture(
+        '<main><x-pick id="host"><p id="slotted">slotted paragraph</p>' +
+          'text straight in the host</x-pick></main>',
+      );
+      const host = fixture.document.querySelector<HTMLElement>('#host')!;
+      const root = host.attachShadow({ mode: 'open' }) as unknown as ShadowRoot;
+      root.innerHTML = markup;
+      Object.defineProperty(root, 'isConnected', { get: () => host.isConnected });
+      const slot = root.querySelector('#slot')!;
+      for (const node of host.childNodes) {
+        Object.defineProperty(node, 'assignedSlot', { configurable: true, value: slot });
+      }
+      Object.defineProperty(slot, 'assignedNodes', {
+        configurable: true,
+        value: () => [...host.childNodes],
+      });
+      installPaintedMirrorTabFixture(fixture.document, fixture.window as unknown as Window);
+      for (const element of root.querySelectorAll('*')) {
+        Object.defineProperty(element, 'getClientRects', {
+          configurable: true,
+          value: () => element === slot ? mirrorEmptyRectList() : mirrorTabRectList(),
+        });
+      }
+      fixture.start('passive');
+      expect(sent(fixture).includes('slotted paragraph')).toBe(!withheld);
+      expect(sent(fixture).includes('text straight in the host')).toBe(!withheld);
+    }
+  });
+
   it('reads a child that no slot takes as it reads its host', () => {
     const { fixture, assign } = dialogFixture('open');
     // Nothing is assigned: the nodes are not drawn, and travel as before.
@@ -5489,10 +6113,18 @@ describe('what a host\'s root does to the host\'s own children (D135)', () => {
     const after = fixture.port.posts.slice(before);
     expect(after).toHaveLength(1);
     expect(after[0]).toMatchObject({ kind: 'simul:html-mirror-v2:patch' });
-    // The text is hidden now: taken back. Nothing else is sent.
+    // The mirror is told which nodes the slot holds now, and the text,
+    // hidden now, is taken back. Nothing else is sent: the paragraph, which
+    // stays in its slot, is not read again.
     expect((after[0] as HtmlMirrorPatchBatch).operations).toEqual([
       expect.objectContaining({
+        kind: 'attributes',
+        nodeId: fixture.registry.peekId(other),
+        assignedNodeIds: [fixture.registry.peekId(direct)],
+      }),
+      expect.objectContaining({
         kind: 'text',
+        nodeId: fixture.registry.peekId(direct),
         node: expect.objectContaining({ text: '' }),
       }),
     ]);
@@ -5550,6 +6182,575 @@ describe('what a host\'s root does to the host\'s own children (D135)', () => {
     expect(fixture.checkpoints()).toHaveLength(1);
     expect(lastPatch(fixture)).toContain('text straight in the host');
     expect(lastPatch(fixture)).toContain('slotted paragraph');
+  });
+
+  describe('slotted through more than one component', () => {
+    /**
+     * A dropdown as a component library builds one: the outer host's
+     * children are slotted into a panel of its root, the panel is a child of
+     * a popup component there, and the popup's root slots the panel into a
+     * box it hides and shows. `levels` components pass the content on this
+     * way. linkedom assigns no slots, so the test says what Chrome would; a
+     * slot has no rectangle, as in Chrome.
+     */
+    function nestedFixture(levels: number, mode: 'open' | 'closed' = 'open') {
+      const reader = closedRootReader();
+      const fixture = sourceFixture(
+        '<main><x-outer id="outer"><p id="slotted">slotted paragraph</p>' +
+          'text straight in the host</x-outer><p id="other">other text</p></main>',
+        reader,
+      );
+      const attach = (host: Element, markup: string): ShadowRoot => {
+        let root: ShadowRoot;
+        if (mode === 'closed') {
+          root = reader.attach(host, markup);
+        } else {
+          root = host.attachShadow({ mode: 'open' }) as unknown as ShadowRoot;
+          root.innerHTML = markup;
+        }
+        Object.defineProperty(root, 'isConnected', { get: () => host.isConnected });
+        return root;
+      };
+      const hold = (slot: Element, ...nodes: Node[]): void => {
+        for (const node of nodes) {
+          Object.defineProperty(node, 'assignedSlot', {
+            configurable: true,
+            value: mode === 'open' ? slot : null,
+          });
+        }
+        Object.defineProperty(slot, 'assignedNodes', {
+          configurable: true,
+          value: () => nodes,
+        });
+      };
+      const outer = fixture.document.querySelector<HTMLElement>('#outer')!;
+      const slotted = fixture.document.querySelector<HTMLElement>('#slotted')!;
+      const direct = outer.lastChild as Text;
+      const slots: Element[] = [];
+      // Each host but the innermost hands a panel around its slot to the
+      // next component, which is a child of its root.
+      let host: Element = outer;
+      let held: Node[] = [slotted, direct];
+      for (let level = 1; level < levels; level += 1) {
+        const root = attach(
+          host,
+          `<x-inner id="inner${level}"><div class="panel"><slot></slot></div></x-inner>`,
+        );
+        const slot = root.querySelector('slot')!;
+        hold(slot, ...held);
+        slots.push(slot);
+        held = [root.querySelector('.panel')!];
+        host = root.querySelector(`#inner${level}`)!;
+      }
+      const innermost = attach(
+        host,
+        '<div id="box" data-test-computed-hidden="true"><slot></slot></div><p>root text</p>',
+      );
+      const box = innermost.querySelector<HTMLElement>('#box')!;
+      const last = innermost.querySelector('slot')!;
+      hold(last, ...held);
+      slots.push(last);
+      installPaintedMirrorTabFixture(fixture.document, fixture.window as unknown as Window);
+      const inRoots: Element[] = [];
+      const collect = (element: Element): void => {
+        const root = mode === 'closed'
+          ? reader.read(element as HTMLElement)
+          : element.shadowRoot;
+        for (const inside of root?.querySelectorAll('*') ?? []) {
+          inRoots.push(inside);
+          collect(inside);
+        }
+      };
+      collect(outer);
+      reader.calls.length = 0;
+      for (const element of inRoots) {
+        Object.defineProperty(element, 'getClientRects', {
+          configurable: true,
+          value: () => slots.includes(element) ? mirrorEmptyRectList() : mirrorTabRectList(),
+        });
+      }
+      const computed = fixture.window.getComputedStyle as unknown as (
+        element: Element,
+      ) => CSSStyleDeclaration;
+      Object.defineProperty(fixture.window, 'getComputedStyle', {
+        configurable: true,
+        value: (element: Element) => slots.includes(element)
+          ? { ...computed(element), display: 'contents' }
+          : computed(element),
+      });
+      const setShown = (shown: boolean): void => {
+        if (shown) box.removeAttribute('data-test-computed-hidden');
+        else box.setAttribute('data-test-computed-hidden', 'true');
+        fixture.mutate(attributeRecord(box, 'data-test-computed-hidden'));
+        fixture.flushFrame();
+      };
+      return { fixture, outer, slotted, direct, box, slots, hold, setShown };
+    }
+
+    for (const [levels, mode] of [
+      [2, 'open'], [2, 'closed'], [3, 'open'], [4, 'open'],
+    ] as const) {
+      it(`reads what ${levels} components slot into a box when the box is shown (${mode} roots)`, () => {
+        const { fixture, setShown } = nestedFixture(levels, mode);
+        fixture.start('passive');
+        fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+        // Hidden: nothing of it travels ahead of time.
+        expect(sent(fixture)).toContain('other text');
+        expect(sent(fixture)).toContain('root text');
+        expect(sent(fixture)).not.toContain('slotted paragraph');
+        expect(sent(fixture)).not.toContain('text straight in the host');
+
+        // The panel the box holds is the outer component's, and what that
+        // panel's slot holds is inside neither: it is read with them.
+        setShown(true);
+        expect(fixture.checkpoints()).toHaveLength(1);
+        expect(lastPatch(fixture)).toContain('slotted paragraph');
+        expect(lastPatch(fixture)).toContain('text straight in the host');
+        fixture.port.emitMessage(createHtmlMirrorAck(
+          identity, fixture.patches().at(-1)!.lastSequence,
+        ));
+
+        setShown(false);
+        expect(fixture.checkpoints()).toHaveLength(1);
+        const hidden = fixture.patches().at(-1)!;
+        expect(JSON.stringify(hidden)).not.toContain('slotted paragraph');
+        expect(JSON.stringify(hidden)).not.toContain('text straight in the host');
+        expect(hidden.operations.filter(
+          (operation) => operation.kind === 'text' && operation.node.text === '',
+        )).toHaveLength(1);
+      });
+    }
+
+    it('takes back what is slotted through a panel whose own slot comes into an editor', () => {
+      const { fixture, slotted, direct, box, setShown } = nestedFixture(2);
+      fixture.start('passive');
+      fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+      setShown(true);
+      expect(lastPatch(fixture)).toContain('slotted paragraph');
+      fixture.port.emitMessage(createHtmlMirrorAck(
+        identity, fixture.patches().at(-1)!.lastSequence,
+      ));
+      // The inner component's box becomes an editor. The panel in its slot
+      // is read otherwise now, and so is what the panel's own slot holds:
+      // the outer host's children, which are inside neither.
+      box.setAttribute('contenteditable', 'true');
+      fixture.mutate(attributeRecord(box, 'contenteditable'));
+      fixture.flushFrame();
+      expect(fixture.checkpoints()).toHaveLength(1);
+      const taken = fixture.patches().at(-1)!;
+      expect(JSON.stringify(taken)).not.toContain('slotted paragraph');
+      expect(JSON.stringify(taken)).not.toContain('text straight in the host');
+      const kinds = (node: Node): string[] => taken.operations
+        .filter((operation) => 'nodeId' in operation &&
+          operation.nodeId === fixture.registry.peekId(node))
+        .map(({ kind }) => kind);
+      expect(kinds(slotted)).toContain('children');
+      expect(kinds(direct)).toEqual(['text']);
+    });
+
+    it('takes back what a slot passes on when that slot itself comes into an editor', () => {
+      // The outer host's children go to a slot that is itself the child of
+      // the inner component, with no panel around it.
+      const fixture = sourceFixture(
+        '<main><x-outer id="outer"><p id="slotted">slotted paragraph</p>' +
+          'text straight in the host</x-outer></main>',
+      );
+      const outer = fixture.document.querySelector<HTMLElement>('#outer')!;
+      const slotted = fixture.document.querySelector<HTMLElement>('#slotted')!;
+      const direct = outer.lastChild as Text;
+      const outerRoot = outer.attachShadow({ mode: 'open' }) as unknown as ShadowRoot;
+      outerRoot.innerHTML = '<x-inner id="inner"><slot id="passed"></slot></x-inner>';
+      const inner = outerRoot.querySelector<HTMLElement>('#inner')!;
+      const passed = outerRoot.querySelector('#passed')!;
+      const innerRoot = inner.attachShadow({ mode: 'open' }) as unknown as ShadowRoot;
+      innerRoot.innerHTML = '<div id="box"><slot id="last"></slot></div>';
+      const box = innerRoot.querySelector<HTMLElement>('#box')!;
+      const last = innerRoot.querySelector('#last')!;
+      for (const root of [outerRoot, innerRoot]) {
+        Object.defineProperty(root, 'isConnected', { get: () => outer.isConnected });
+      }
+      for (const node of [slotted, direct]) {
+        Object.defineProperty(node, 'assignedSlot', { configurable: true, value: passed });
+      }
+      Object.defineProperty(passed, 'assignedSlot', { configurable: true, value: last });
+      for (const slot of [passed, last]) {
+        Object.defineProperty(slot, 'assignedNodes', {
+          configurable: true,
+          value: () => [slotted, direct],
+        });
+      }
+      installPaintedMirrorTabFixture(fixture.document, fixture.window as unknown as Window);
+      for (const element of [inner, box, passed, last]) {
+        Object.defineProperty(element, 'getClientRects', {
+          configurable: true,
+          value: () => element === passed || element === last
+            ? mirrorEmptyRectList()
+            : mirrorTabRectList(),
+        });
+      }
+      const computed = fixture.window.getComputedStyle as unknown as (
+        element: Element,
+      ) => CSSStyleDeclaration;
+      Object.defineProperty(fixture.window, 'getComputedStyle', {
+        configurable: true,
+        value: (element: Element) => element === passed || element === last
+          ? { ...computed(element), display: 'contents' }
+          : computed(element),
+      });
+      fixture.start('passive');
+      fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+      expect(sent(fixture)).toContain('slotted paragraph');
+      expect(sent(fixture)).toContain('text straight in the host');
+
+      box.setAttribute('contenteditable', 'true');
+      fixture.mutate(attributeRecord(box, 'contenteditable'));
+      fixture.flushFrame();
+      expect(fixture.checkpoints()).toHaveLength(1);
+      expect(lastPatch(fixture)).not.toContain('slotted paragraph');
+      expect(lastPatch(fixture)).not.toContain('text straight in the host');
+      expect(fixture.patches().at(-1)!.operations.some(
+        (operation) => operation.kind === 'text' &&
+          operation.nodeId === fixture.registry.peekId(direct) &&
+          operation.node.text === '',
+      )).toBe(true);
+    });
+
+    it('reads a node once that two slots on the way both hold', () => {
+      const { fixture, slotted, direct, slots, hold, setShown } = nestedFixture(2);
+      // A hostile or stale answer: the inner slot also says it holds the
+      // outer component's children.
+      hold(slots[1]!, ...(slots[1] as HTMLSlotElement).assignedNodes(), slotted, direct);
+      fixture.start('passive');
+      fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+      setShown(true);
+      const operations = fixture.patches().at(-1)!.operations.filter(
+        (operation) => 'nodeId' in operation &&
+          operation.nodeId === fixture.registry.peekId(direct),
+      );
+      expect(operations.map(({ kind }) => kind)).toEqual(['text']);
+    });
+
+    it('reads many nodes slotted through two components in one piece', () => {
+      const { fixture, outer, slotted, direct, slots, hold, setShown } = nestedFixture(2);
+      const many: Node[] = [slotted, direct];
+      for (let index = 0; index < 300; index += 1) {
+        const item = fixture.document.createElement('a');
+        item.textContent = `item ${index}`;
+        Object.defineProperty(item, 'getClientRects', {
+          configurable: true,
+          value: () => mirrorTabRectList(),
+        });
+        outer.append(item);
+        many.push(item);
+      }
+      hold(slots[0]!, ...many);
+      fixture.start('passive');
+      fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+      expect(sent(fixture)).not.toContain('item 299');
+
+      setShown(true);
+      expect(fixture.checkpoints()).toHaveLength(1);
+      const patch = fixture.patches().at(-1)!;
+      expect(patch.operations.length).toBeLessThan(12);
+      expect(JSON.stringify(patch)).toContain('item 299');
+      expect(JSON.stringify(patch)).toContain('text straight in the host');
+      // The outer host's children once, not three hundred patches.
+      expect(patch.operations.filter((operation) => operation.kind === 'children' &&
+        operation.nodeId === fixture.registry.peekId(outer))).toHaveLength(1);
+    });
+  });
+
+  describe('in a box of the root that is edited, or that acts', () => {
+    /** The dialog's box, shown, with `attributes` on it. */
+    function boxFixture(
+      mode: 'open' | 'closed',
+      attributes: Readonly<Record<string, string>>,
+    ) {
+      const made = dialogFixture(mode);
+      made.box.removeAttribute('data-test-computed-hidden');
+      for (const [name, value] of Object.entries(attributes)) {
+        made.box.setAttribute(name, value);
+      }
+      return made;
+    }
+    const operationsFor = (
+      fixture: ReturnType<typeof sourceFixture>,
+      node: Node,
+    ): string[] => fixture.patches().at(-1)!.operations
+      .filter((operation) => 'nodeId' in operation &&
+        operation.nodeId === fixture.registry.peekId(node))
+      .map(({ kind }) => kind);
+
+    for (const mode of ['open', 'closed'] as const) {
+      it(`sends nothing slotted into an editor of a ${mode} root`, () => {
+        for (const attributes of [
+          { contenteditable: 'true' },
+          { contenteditable: '' },
+          { role: 'textbox' },
+          { role: 'searchbox' },
+        ] as Record<string, string>[]) {
+          const { fixture } = boxFixture(mode, attributes);
+          fixture.start('passive');
+          expect(sent(fixture)).toContain('other text');
+          expect(sent(fixture)).toContain('root text');
+          expect(sent(fixture)).not.toContain('slotted paragraph');
+          expect(sent(fixture)).not.toContain('text straight in the host');
+        }
+      });
+    }
+
+    it('reads what is slotted into a box that is not an editor', () => {
+      for (const attributes of [
+        { contenteditable: 'false' },
+        { role: 'group' },
+        { role: 'button' },
+      ] as Record<string, string>[]) {
+        const { fixture } = boxFixture('open', attributes);
+        fixture.start('passive');
+        expect(sent(fixture)).toContain('slotted paragraph');
+        expect(sent(fixture)).toContain('text straight in the host');
+      }
+    });
+
+    it('withholds what is slotted into a slot that is itself an editor', () => {
+      const { fixture, slot } = boxFixture('open', {});
+      slot.setAttribute('contenteditable', 'true');
+      fixture.start('passive');
+      expect(sent(fixture)).toContain('root text');
+      expect(sent(fixture)).not.toContain('slotted paragraph');
+      expect(sent(fixture)).not.toContain('text straight in the host');
+    });
+
+    it('withholds a style sheet slotted into an editor, as one inside an editor of the page', () => {
+      // In a hidden box a slotted sheet keeps its rules; in an editor its
+      // text is what the person edits.
+      for (const [attributes, kept] of [
+        [{ contenteditable: 'true' }, false],
+        [{ 'data-test-computed-hidden': 'true' }, true],
+      ] as const) {
+        const { fixture, host, slot, slotted, direct } = boxFixture('open', attributes);
+        const sheet = fixture.document.createElement('style');
+        sheet.textContent = 'p{color:rgb(1,2,3)}';
+        host.append(sheet);
+        Object.defineProperty(sheet, 'assignedSlot', { configurable: true, value: slot });
+        Object.defineProperty(slot, 'assignedNodes', {
+          configurable: true,
+          value: () => [slotted, direct, sheet],
+        });
+        fixture.start('conservative');
+        expect(sent(fixture).includes('rgb(1,2,3)')).toBe(kept);
+        expect(sent(fixture)).not.toContain('slotted paragraph');
+      }
+    });
+
+    it('takes back what a box slots when the box becomes an editor, and reads it again after', () => {
+      for (const mode of ['open', 'closed'] as const) {
+        const { fixture, box, slotted, direct } = boxFixture(mode, {});
+        fixture.start('passive');
+        fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+        expect(sent(fixture)).toContain('slotted paragraph');
+        expect(sent(fixture)).toContain('text straight in the host');
+
+        box.setAttribute('contenteditable', 'true');
+        fixture.mutate(attributeRecord(box, 'contenteditable'));
+        fixture.flushFrame();
+        // A patch, not the page again: the element in the slot and the
+        // host's own text, neither of which is inside the box.
+        expect(fixture.checkpoints()).toHaveLength(1);
+        const taken = fixture.patches().at(-1)!;
+        expect(JSON.stringify(taken)).not.toContain('slotted paragraph');
+        expect(JSON.stringify(taken)).not.toContain('text straight in the host');
+        expect(operationsFor(fixture, slotted)).toContain('children');
+        expect(operationsFor(fixture, direct)).toEqual(['text']);
+        fixture.port.emitMessage(createHtmlMirrorAck(identity, taken.lastSequence));
+
+        box.removeAttribute('contenteditable');
+        fixture.mutate(attributeRecord(box, 'contenteditable'));
+        fixture.flushFrame();
+        expect(fixture.checkpoints()).toHaveLength(1);
+        expect(lastPatch(fixture)).toContain('slotted paragraph');
+        expect(lastPatch(fixture)).toContain('text straight in the host');
+      }
+    });
+
+    it('does not look for slots under an element of the page that becomes an editor', () => {
+      const { fixture, slotted } = boxFixture('open', {});
+      const other = fixture.document.querySelector<HTMLElement>('#other')!;
+      const query = vi.spyOn(other, 'querySelectorAll');
+      fixture.start('passive');
+      fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+      query.mockClear();
+      other.setAttribute('contenteditable', 'true');
+      fixture.mutate(attributeRecord(other, 'contenteditable'));
+      fixture.flushFrame();
+      expect(query.mock.calls.filter(([selector]) => selector === 'slot')).toEqual([]);
+      expect(operationsFor(fixture, slotted)).toEqual([]);
+    });
+
+    it('reads a child again when it is given another slot', () => {
+      const { fixture, root, slot, slotted, direct } = boxFixture('open', {});
+      // A second slot, by name, in an editor of the root.
+      const editor = fixture.document.createElement('div');
+      editor.setAttribute('contenteditable', 'true');
+      const named = fixture.document.createElement('slot');
+      named.setAttribute('name', 'edited');
+      editor.append(named);
+      Object.defineProperty(named, 'getClientRects', {
+        configurable: true,
+        value: () => mirrorEmptyRectList(),
+      });
+      Object.defineProperty(editor, 'getClientRects', {
+        configurable: true,
+        value: () => mirrorTabRectList(),
+      });
+      Object.defineProperty(named, 'assignedNodes', { configurable: true, value: () => [] });
+      root.append(editor);
+      fixture.start('passive');
+      fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+      expect(sent(fixture)).toContain('slotted paragraph');
+
+      const move = (to: Element, from: Element, name: string): void => {
+        slotted.setAttribute('slot', name);
+        Object.defineProperty(slotted, 'assignedSlot', { configurable: true, value: to });
+        Object.defineProperty(to, 'assignedNodes', {
+          configurable: true,
+          value: () => to === slot ? [slotted, direct] : [slotted],
+        });
+        Object.defineProperty(from, 'assignedNodes', {
+          configurable: true,
+          value: () => from === slot ? [direct] : [],
+        });
+        fixture.mutate(attributeRecord(slotted, 'slot'));
+        fixture.flushFrame();
+      };
+      move(named, slot, 'edited');
+      expect(fixture.checkpoints()).toHaveLength(1);
+      const taken = fixture.patches().at(-1)!;
+      expect(JSON.stringify(taken)).not.toContain('slotted paragraph');
+      expect(operationsFor(fixture, slotted).sort()).toEqual(['attributes', 'children']);
+      // The host's own text stays where it was, and is not sent again.
+      expect(operationsFor(fixture, direct)).toEqual([]);
+      fixture.port.emitMessage(createHtmlMirrorAck(identity, taken.lastSequence));
+
+      move(slot, named, '');
+      expect(fixture.checkpoints()).toHaveLength(1);
+      expect(lastPatch(fixture)).toContain('slotted paragraph');
+      fixture.port.emitMessage(createHtmlMirrorAck(
+        identity, fixture.patches().at(-1)!.lastSequence,
+      ));
+
+      // Any other attribute of the child is a change of that attribute only.
+      slotted.setAttribute('class', 'changed');
+      fixture.mutate(attributeRecord(slotted, 'class'));
+      fixture.flushFrame();
+      expect(operationsFor(fixture, slotted)).toEqual(['attributes']);
+    });
+
+    it('leaves a slot attribute alone where there is no root to slot into', () => {
+      const { fixture } = boxFixture('open', {});
+      const other = fixture.document.querySelector<HTMLElement>('#other')!;
+      fixture.start('passive');
+      fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+      other.setAttribute('slot', 'anything');
+      fixture.mutate(attributeRecord(other, 'slot'));
+      fixture.flushFrame();
+      expect(fixture.patches().at(-1)!.operations.map(({ kind }) => kind)
+        .filter((kind) => kind !== 'dimensions')).toEqual(['attributes']);
+    });
+
+    it('reads what a host holds again when a slot of its root is renamed', () => {
+      const { fixture, root, slot, slotted, direct } = boxFixture('open', {});
+      // A later slot of the same name, in an editor: it takes nothing yet.
+      const editor = fixture.document.createElement('div');
+      editor.setAttribute('contenteditable', 'true');
+      const later = fixture.document.createElement('slot');
+      editor.append(later);
+      for (const [element, rects] of [
+        [later, mirrorEmptyRectList()], [editor, mirrorTabRectList()],
+      ] as const) {
+        Object.defineProperty(element, 'getClientRects', { configurable: true, value: () => rects });
+      }
+      Object.defineProperty(later, 'assignedNodes', { configurable: true, value: () => [] });
+      root.append(editor);
+      fixture.start('passive');
+      fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+      expect(sent(fixture)).toContain('slotted paragraph');
+
+      // The first slot gets a name: the browser gives the later one the
+      // host's children. Both boxes are painted before and after.
+      slot.setAttribute('name', 'elsewhere');
+      for (const node of [slotted, direct]) {
+        Object.defineProperty(node, 'assignedSlot', { configurable: true, value: later });
+      }
+      Object.defineProperty(later, 'assignedNodes', { configurable: true, value: () => [slotted, direct] });
+      Object.defineProperty(slot, 'assignedNodes', { configurable: true, value: () => [] });
+      fixture.mutate(attributeRecord(slot, 'name'));
+      fixture.flushFrame();
+      expect(fixture.checkpoints()).toHaveLength(1);
+      const taken = fixture.patches().at(-1)!;
+      expect(JSON.stringify(taken)).not.toContain('slotted paragraph');
+      expect(JSON.stringify(taken)).not.toContain('text straight in the host');
+      expect(operationsFor(fixture, slotted)).toContain('children');
+      expect(operationsFor(fixture, direct)).toEqual(['text']);
+    });
+
+    it('reads an element again when a script gives it to a slot in an editor', () => {
+      const { fixture, root, slot, slotted, direct, assign } = boxFixture('open', {});
+      Object.defineProperty(root, 'slotAssignment', { configurable: true, value: 'manual' });
+      assign(slotted, direct);
+      const editor = fixture.document.createElement('div');
+      editor.setAttribute('contenteditable', 'true');
+      const other = fixture.document.createElement('slot');
+      editor.append(other);
+      for (const [element, rects] of [
+        [other, mirrorEmptyRectList()], [editor, mirrorTabRectList()],
+      ] as const) {
+        Object.defineProperty(element, 'getClientRects', { configurable: true, value: () => rects });
+      }
+      Object.defineProperty(other, 'assignedNodes', { configurable: true, value: () => [] });
+      root.append(editor);
+      fixture.start('passive');
+      fixture.port.emitMessage(createHtmlMirrorAck(identity, 0));
+      expect(sent(fixture)).toContain('slotted paragraph');
+
+      Object.defineProperty(slotted, 'assignedSlot', { configurable: true, value: other });
+      Object.defineProperty(other, 'assignedNodes', { configurable: true, value: () => [slotted] });
+      Object.defineProperty(slot, 'assignedNodes', { configurable: true, value: () => [direct] });
+      const slotChange = (target: Element): void => {
+        target.dispatchEvent(new (fixture.window as unknown as { Event: typeof Event })
+          .Event('slotchange', { bubbles: true }));
+      };
+      slotChange(other);
+      fixture.flushFrame();
+      expect(fixture.checkpoints()).toHaveLength(1);
+      const taken = fixture.patches().at(-1)!;
+      expect(JSON.stringify(taken)).not.toContain('slotted paragraph');
+      expect(operationsFor(fixture, slotted)).toContain('children');
+    });
+
+    it('blanks the name of a small broken icon slotted into a button of the root', () => {
+      for (const [role, blank] of [['button', true], ['group', false]] as const) {
+        const { fixture, host, slot, slotted, direct } = boxFixture('open', { role });
+        const icon = fixture.document.createElement('img');
+        icon.setAttribute('alt', 'broken icon name');
+        icon.setAttribute('width', '16');
+        icon.setAttribute('height', '16');
+        Object.defineProperties(icon, {
+          complete: { configurable: true, value: true },
+          naturalWidth: { configurable: true, value: 0 },
+          naturalHeight: { configurable: true, value: 0 },
+          assignedSlot: { configurable: true, value: slot },
+        });
+        host.append(icon);
+        Object.defineProperty(slot, 'assignedNodes', {
+          configurable: true,
+          value: () => [slotted, direct, icon],
+        });
+        fixture.start('passive');
+        expect(sent(fixture).includes('broken icon name')).toBe(!blank);
+        expect(sent(fixture)).toContain('slotted paragraph');
+      }
+    });
   });
 });
 
