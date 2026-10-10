@@ -49,10 +49,14 @@ import {
   isSourceSelectLabelElementPublic,
   readSourceFlatTreeElementPath,
   readSourceSelectLabel,
+  sourceElementPathHoldsPaint,
   sourceElementPathIsPainted,
+  sourceElementPathShowsWithoutBox,
   type SourceControlledContentPolicy,
   type SourceSecretAncestorMemo,
+  type SourceSelectLabelWalk,
 } from './source-privacy-policy';
+import { isSourceSelectHiddenByItself } from './html-mirror-sanitizer';
 import type { ReplicaReadScope } from './read-scope-policy';
 import type { ReplicaSourceDocumentIdentity } from './source-identity';
 import { sourceMutationMayChangeCurrentValue } from './source-mutation-filter';
@@ -65,9 +69,10 @@ import {
   MAX_STRUCTURAL_MENU_TRIGGERS,
   hasStructuralMenuContext,
   isPlainStructuralMenuTrigger,
-  isStructuralButtonMenu,
   isStructuralMenuPanelElement,
+  mayBeStructuralButtonMenu,
   structuralMenuOpening,
+  structuralMenuPanelCandidates,
 } from './structural-menu-shape';
 
 interface MessageEventPort {
@@ -96,6 +101,15 @@ export interface SemanticSourceSessionEnvironment {
   readonly getNodeId: (node: Node) => number | undefined;
   /** Shared by every reconnect for this bridge's source-document lifetime. */
   readonly secretClassifier?: StickySourceSecretClassifier;
+  /**
+   * The site menus read so far, by container: shared the same way, so that
+   * a menu the page has open is still known for one when the mirror is
+   * built again and a new session reads the page.
+   */
+  readonly structuralMenus?: WeakMap<Element, {
+    readonly trigger: Element;
+    readonly panel: Element;
+  }>;
   readonly createMutationObserver?: (
     callback: MutationCallback,
   ) => Pick<MutationObserver, 'observe' | 'disconnect'>;
@@ -247,12 +261,14 @@ export class SemanticSourceSession {
   readonly #classifier: StickySourceSecretClassifier;
   /** Set only while one synchronous #scan runs; see SourceSecretAncestorMemo. */
   #scanSecretAncestors: SourceSecretAncestorMemo | undefined;
+  /** The label walk of the #scan that is running, and of no other. */
+  #scanLabelWalk: SourceSelectLabelWalk | undefined;
   readonly #revisions = new Map<number, RevisionState>();
   readonly #proofRevisions = new Map<string, RevisionState>();
-  readonly #structuralMenus = new WeakMap<Element, {
+  readonly #structuralMenus: WeakMap<Element, {
     readonly trigger: Element;
     readonly panel: Element;
-  }>();
+  }>;
   #documentIdentity: ReplicaSourceDocumentIdentity | undefined;
   #scope: ReplicaReadScope | undefined;
   #policyFingerprint: string | undefined;
@@ -288,6 +304,7 @@ export class SemanticSourceSession {
     this.#portIdentity = identity;
     this.#classifier = environment.secretClassifier ??
       sourceDocumentSecretClassifier(environment.document);
+    this.#structuralMenus = environment.structuralMenus ?? new WeakMap();
     environment.port.onMessage.addListener(this.#onMessage);
     environment.port.onDisconnect.addListener(this.#onDisconnect);
   }
@@ -757,9 +774,11 @@ export class SemanticSourceSession {
     const readPage = (): SemanticSourceScan => {
       this.#scanSecretAncestors = createSourceSecretAncestorMemo();
       const labelWalk = beginSourceSelectLabelWalk();
+      this.#scanLabelWalk = labelWalk;
       try {
         return this.#scan();
       } finally {
+        this.#scanLabelWalk = undefined;
         labelWalk.end();
       }
     };
@@ -858,6 +877,17 @@ export class SemanticSourceSession {
     const validatedStructuralMenus = scope.disclosureContent && stack.length === 0
       ? this.#validatedStructuralMenus(elements, classifications)
       : Object.freeze([]);
+    // A dropdown in a menu's collapsed panel is read as the mirror shows it
+    // once the reader opens the menu there. Its options had no labels until
+    // the page itself showed the menu, and the mirror drew no dropdown.
+    const collapsedMenuPanels = validatedStructuralMenus
+      .filter((menu) => !menu.expanded).map((menu) => menu.panel);
+    if (collapsedMenuPanels.length > 0) {
+      this.#scanLabelWalk?.reveal(
+        collapsedMenuPanels,
+        (select) => !isSourceSelectHiddenByItself(select),
+      );
+    }
     let validatedTabs: readonly ValidatedTab[] = Object.freeze([]);
     if (scope.controlSemantics && stack.length === 0) {
       const controlledContent = createSourceControlledContentPolicy(
@@ -1561,24 +1591,47 @@ export class SemanticSourceSession {
         // is a menu, which tags and roles alone say.
         (!hasStructuralMenuContext(container) &&
           !(children.length === 2 && (
-            isStructuralButtonMenu(children[0]!, children[1]!) ||
-            isStructuralButtonMenu(children[1]!, children[0]!)
+            mayBeStructuralButtonMenu(children[0]!, children[1]!) ||
+            mayBeStructuralButtonMenu(children[1]!, children[0]!)
           ))) ||
-        !this.#isPaintedStructuralMenuController(container)
+        // A container with no box of its own (a list item whose link floats)
+        // still shows what it holds.
+        !sourceElementPathHoldsPaint(container, this.environment.window)
       ) {
         this.#structuralMenus.delete(container);
         continue;
       }
-      // While a real hover shows the panel it is painted text too; it stays
-      // the panel, not another trigger.
+      // While a real hover shows the panel it is painted text too; it, or
+      // the wrapper it sits in, stays what holds the panel, not another
+      // trigger.
+      const retainedPanel = retained?.panel;
       const triggers = children.filter((element) =>
-        element !== retained?.panel &&
+        !(retainedPanel &&
+          safelyRead(() => element.contains(retainedPanel)) === true) &&
         classifications.get(element)?.category === 'public-semantic' &&
         (isDisclosureActivationController(element) ||
           isPlainStructuralMenuTrigger(element)) &&
         this.#isPaintedStructuralMenuController(element));
       const trigger = triggers[0];
-      const panel = children.find((element) => !triggers.includes(element));
+      const held = children.find((element) => !triggers.includes(element));
+      // The panel is that child, or what it wraps when it is a wrapper that
+      // takes no room, whether its panel shows or not: it has no box of its
+      // own, and the panel is placed out of the flow (a header's block of
+      // no height around a positioned list). A block that would open in the
+      // flow of its wrapper is an answer, a card's detail or a section. The
+      // panel this menu had before the page showed it stays the panel.
+      let collapsed = false;
+      const panel = held && (structuralMenuPanelCandidates(held).find(
+        (candidate) => {
+          if (
+            candidate !== held && candidate !== retainedPanel &&
+            !(this.#isPlacedOutOfFlow(candidate) &&
+              sourceElementPathShowsWithoutBox(held, this.environment.window))
+          ) return false;
+          collapsed = this.#isCollapsedStructuralMenuPanel(candidate);
+          return collapsed || candidate === retainedPanel;
+        },
+      ) ?? held);
       if (
         !trigger || !panel || triggers.length !== children.length - 1 ||
         !structuralMenuOpening(container, triggers, panel) ||
@@ -1589,7 +1642,6 @@ export class SemanticSourceSession {
         this.#structuralMenus.delete(container);
         continue;
       }
-      const collapsed = this.#isCollapsedStructuralMenuPanel(panel);
       const visible = this.#isVisibleDisclosureController(panel);
       const retainedRelationship = retained?.trigger === trigger &&
         retained.panel === panel;
@@ -1656,6 +1708,17 @@ export class SemanticSourceSession {
     }
   }
 
+  #isPlacedOutOfFlow(element: Element): boolean {
+    try {
+      const position = normalizedToken(
+        this.environment.window.getComputedStyle(element).position,
+      );
+      return position === 'absolute' || position === 'fixed';
+    } catch {
+      return false;
+    }
+  }
+
   #isPaintedStructuralMenuController(element: Element): boolean {
     return sourceElementPathIsPainted(element, this.environment.window);
   }
@@ -1675,25 +1738,36 @@ export class SemanticSourceSession {
     }
   }
 
+  /**
+   * The panel itself is what hides it: its own style does, and what it sits
+   * in is painted, or has no box of its own and shows what it holds (a
+   * wrapper of no height around a positioned list). Its own style is asked
+   * first: it is one read, and most candidates are not hidden.
+   */
   #isCollapsedStructuralMenuPanel(panel: Element): boolean {
     try {
-      const path = readSourceFlatTreeElementPath(panel);
-      const parent = path?.[1];
-      if (!parent || !sourceElementPathIsPainted(parent, this.environment.window)) {
-        return false;
-      }
       const style = this.environment.window.getComputedStyle(panel);
       const contentVisibility = normalizedToken(
         style.getPropertyValue('content-visibility'),
       );
       const opacity = normalizedToken(style.opacity);
       const numericOpacity = opacity === '' ? undefined : Number(opacity);
-      return normalizedToken(style.display) === 'none' ||
-        normalizedToken(style.visibility) === 'hidden' ||
-        normalizedToken(style.visibility) === 'collapse' ||
-        contentVisibility === 'hidden' ||
-        (numericOpacity !== undefined && Number.isFinite(numericOpacity) &&
-          numericOpacity <= 0);
+      if (
+        normalizedToken(style.display) !== 'none' &&
+        normalizedToken(style.visibility) !== 'hidden' &&
+        normalizedToken(style.visibility) !== 'collapse' &&
+        contentVisibility !== 'hidden' &&
+        !(numericOpacity !== undefined && Number.isFinite(numericOpacity) &&
+          numericOpacity <= 0)
+      ) return false;
+      const parent = readSourceFlatTreeElementPath(panel)?.[1];
+      // A child that its host's root gives no slot is drawn nowhere, shown
+      // or not (and Chrome 138 computes `display: none` for it): no menu.
+      if (
+        parent === undefined ||
+        (panel.parentElement === parent && safelyReadShadowRoot(parent))
+      ) return false;
+      return sourceElementPathHoldsPaint(parent, this.environment.window);
     } catch {
       return false;
     }

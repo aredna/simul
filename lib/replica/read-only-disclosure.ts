@@ -414,7 +414,7 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
   };
 
   readonly #onTriggerPointerLeave = (event: Event): void => {
-    if (isTouchPointerEvent(event)) return;
+    if (isTouchPointerEvent(event) || pointerStaysWithin(event)) return;
     this.#triggerHovered = false;
     if (this.openOnHover) this.#scheduleDeferredClose();
   };
@@ -425,8 +425,12 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
     this.#cancelDeferredClose();
   };
 
+  // Chrome sends a leave to every element that listens for one, and these
+  // listeners capture: the pointer coming off a dropdown's button inside a
+  // menu's panel onto a link of the same panel was heard here as leaving the
+  // panel, and the menu closed under the pointer.
   readonly #onPanelPointerLeave = (event: Event): void => {
-    if (isTouchPointerEvent(event)) return;
+    if (isTouchPointerEvent(event) || pointerStaysWithin(event)) return;
     this.#panelHovered = false;
     if (this.openOnHover) this.#scheduleDeferredClose();
   };
@@ -677,12 +681,15 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
     if (!body) return;
     // One of the reader's previews at a time. What the page itself shows is
     // not one of them: the page may show several at once (rows of an
-    // accordion), and each stays (D132).
+    // accordion), and each stays (D132). Nor is what this one holds: a menu
+    // put up again after a change to the page keeps the dropdown the reader
+    // has open inside it.
     if (!this.shownByPage) {
       for (const sibling of DOCUMENT_DISCLOSURES.get(this.document)?.controllers ?? []) {
-        if (sibling !== this && !sibling.shownByPage && !sibling.holds(this)) {
-          sibling.close();
-        }
+        if (
+          sibling !== this && !sibling.shownByPage &&
+          !sibling.holds(this) && !this.holds(sibling)
+        ) sibling.close();
       }
     }
     this.#open = true;
@@ -716,11 +723,15 @@ class ReplicaDisclosureController implements ReadOnlyReplicaDisclosure {
     this.#close(true);
   }
 
-  /** Closes a dropdown whose own box is no longer drawn. */
+  /**
+   * Closes a dropdown whose own box is no longer drawn: it has none, or it
+   * is kept out of sight in a menu that is closed again.
+   */
   closeIfUnanchored(): void {
-    if (this.#open && !this.#disposed && elementHasNoBox(this.anchor)) {
-      this.close();
-    }
+    if (
+      this.#open && !this.#disposed &&
+      (elementHasNoBox(this.anchor) || elementIsOutOfSight(this.anchor))
+    ) this.close();
   }
 
   #close(withWhatItHolds: boolean): void {
@@ -1178,6 +1189,28 @@ function installDocumentDisclosureState(
   };
 }
 
+/**
+ * A tap comes again as mouse events. Chrome leaves `mousedown` and `mouseup`
+ * out once the press was taken as a pointer event, but Chrome 138 still
+ * sends them after a tap: on a preview's own button or panel they are the
+ * echo of a press the preview already had, not an input from elsewhere.
+ * Taken for one, a tap on a dropdown inside a menu closed the menu.
+ */
+export function isReadOnlyReplicaDisclosurePressEcho(event: Event): boolean {
+  if (event.type !== 'mousedown' && event.type !== 'mouseup') return false;
+  return disclosureEventPath(event).some((candidate) =>
+    isOwnedDisclosureSurface(
+      candidate,
+      OWNED_DISCLOSURE_TRIGGERS,
+      'data-simul-replica-disclosure-trigger',
+    ) ||
+    isOwnedDisclosureSurface(
+      candidate,
+      OWNED_DISCLOSURE_PANELS,
+      'data-simul-replica-disclosure-panel',
+    ));
+}
+
 function isOwnedDisclosureSurface(
   candidate: unknown,
   owned: WeakSet<object>,
@@ -1239,6 +1272,35 @@ function elementHasNoBox(element: Element): boolean {
   try {
     return typeof element.getClientRects === 'function' &&
       element.getClientRects().length === 0;
+  } catch {
+    return false;
+  }
+}
+
+function elementIsOutOfSight(element: Element): boolean {
+  try {
+    return element.ownerDocument.defaultView
+      ?.getComputedStyle(element).visibility === 'hidden';
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Whether a `pointerleave` heard by a capturing listener ends inside the
+ * element that listens: the pointer left something it holds and is still on
+ * it, or on something else it holds.
+ */
+function pointerStaysWithin(event: Event): boolean {
+  const surface = event.currentTarget;
+  const entered = (event as Partial<PointerEvent>).relatedTarget;
+  if (
+    !surface || !entered ||
+    typeof (surface as Partial<Node>).contains !== 'function' ||
+    typeof (entered as Partial<Node>).nodeType !== 'number'
+  ) return false;
+  try {
+    return (surface as Node).contains(entered as Node);
   } catch {
     return false;
   }

@@ -285,6 +285,13 @@ export function installHtmlMirrorSourceBridge(
     }
   }
 
+  // The site menus the semantic channel has read, kept for the document: a
+  // menu the page has open when the mirror is built again is then still a
+  // menu to the session that reads the page anew.
+  const structuralMenus = new WeakMap<Element, {
+    readonly trigger: Element;
+    readonly panel: Element;
+  }>();
   runtime.onConnect.addListener((port) => {
     if (readHtmlMirrorPortSessionId(port.name)) {
       new HtmlMirrorSourceSession({
@@ -331,6 +338,7 @@ export function installHtmlMirrorSourceBridge(
       window: sourceWindow,
       bridge: 'isolated-html',
       secretClassifier: documentSecretClassifier,
+      structuralMenus,
       getNodeId: (node) => registry.getId(node),
       createMutationObserver: environment.createMutationObserver,
       schedule: (callback) => queueMicrotask(callback),

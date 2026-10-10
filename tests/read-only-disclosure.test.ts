@@ -6,6 +6,7 @@ import {
   computeReplicaDisclosurePlacement,
   disposeReadOnlyReplicaDisclosures,
   installReadOnlyReplicaDisclosure,
+  isReadOnlyReplicaDisclosurePressEcho,
   isReadOnlyReplicaDisclosureEvent,
 } from
   '../lib/replica/read-only-disclosure';
@@ -274,6 +275,95 @@ describe('read-only replica disclosure placement', () => {
     vi.advanceTimersByTime(100);
     expect(controller.isOpen()).toBe(false);
     controller.dispose();
+  });
+
+  it('does not take a leave that ends inside the panel for leaving it', () => {
+    // Chrome sends a leave to every element that listens for one, and the
+    // panel's listener captures: the pointer coming off a dropdown's button
+    // inside the panel onto a link of the same panel closed the menu.
+    vi.useFakeTimers();
+    const { document, window } = parseHTML(
+      '<html><body><a id="trigger" href="/about"><span id="label">About</span></a>' +
+      '<div id="panel"><a id="link" href="/team">Team</a><button id="inner">Pick</button></div>' +
+      '<p id="outside">Elsewhere</p></body></html>',
+    );
+    const element = (id: string) => document.querySelector<HTMLElement>(`#${id}`)!;
+    const controller = installReadOnlyReplicaDisclosure({
+      anchor: element('trigger'), trigger: element('trigger'), panel: element('panel'),
+      presentation: 'inline',
+    });
+    // linkedom delivers to a capturing listener only what bubbles.
+    const leave = (from: string, to: string | null) => {
+      const event = new window.Event('pointerleave', { bubbles: true });
+      Object.defineProperty(event, 'relatedTarget', {
+        value: to === null ? null : element(to),
+      });
+      element(from).dispatchEvent(event);
+    };
+    element('trigger').dispatchEvent(new window.Event('pointerenter'));
+    // The same for the trigger: off something inside it, still on it.
+    leave('label', 'trigger');
+    vi.advanceTimersByTime(300);
+    expect(controller.isOpen()).toBe(true);
+    element('trigger').dispatchEvent(new window.Event('pointerleave'));
+    element('panel').dispatchEvent(new window.Event('pointerenter'));
+    expect(controller.isOpen()).toBe(true);
+
+    // Off the button onto the link, and onto the panel's own empty part.
+    leave('inner', 'link');
+    vi.advanceTimersByTime(300);
+    expect(controller.isOpen()).toBe(true);
+    leave('inner', 'panel');
+    vi.advanceTimersByTime(300);
+    expect(controller.isOpen()).toBe(true);
+
+    // Off the button and out of the panel: that is leaving it.
+    leave('inner', 'outside');
+    vi.advanceTimersByTime(300);
+    expect(controller.isOpen()).toBe(false);
+
+    // And out of the frame altogether, which names nothing entered.
+    element('trigger').dispatchEvent(new window.Event('pointerenter'));
+    element('trigger').dispatchEvent(new window.Event('pointerleave'));
+    element('panel').dispatchEvent(new window.Event('pointerenter'));
+    leave('panel', null);
+    vi.advanceTimersByTime(300);
+    expect(controller.isOpen()).toBe(false);
+    controller.dispose();
+  });
+
+  it('takes the mouse events that follow a tap on its own button or panel for the tap\'s echo', () => {
+    // Chrome 138 sends `mousedown` and `mouseup` after a tap although the
+    // press was taken as a pointer event; the frame closes the reader's
+    // previews at any input that is no preview's own.
+    const { document, window } = parseHTML(
+      '<html><body><a id="trigger" href="/about">About</a><div id="panel">' +
+      '<a id="link" href="/team">Team</a></div><p id="outside">Elsewhere</p></body></html>',
+    );
+    const element = (id: string) => document.querySelector<HTMLElement>(`#${id}`)!;
+    const controller = installReadOnlyReplicaDisclosure({
+      anchor: element('trigger'), trigger: element('trigger'), panel: element('panel'),
+      presentation: 'inline',
+    });
+    const echo = (type: string, on: string) => {
+      const event = new window.Event(type, { bubbles: true });
+      Object.defineProperty(event, 'composedPath', {
+        value: () => {
+          const path: EventTarget[] = [];
+          for (let node: Node | null = element(on); node; node = node.parentNode) path.push(node);
+          return path;
+        },
+      });
+      return isReadOnlyReplicaDisclosurePressEcho(event);
+    };
+    expect(echo('mousedown', 'trigger')).toBe(true);
+    expect(echo('mouseup', 'link')).toBe(true);
+    // Elsewhere it is an input from elsewhere, and other kinds are judged
+    // as they always were.
+    expect(echo('mousedown', 'outside')).toBe(false);
+    expect(echo('dblclick', 'trigger')).toBe(false);
+    controller.dispose();
+    expect(echo('mousedown', 'trigger')).toBe(false);
   });
 
   it('reveals an inline menu where the page draws it and restores it on close', () => {
@@ -1217,6 +1307,102 @@ describe('read-only replica disclosure placement', () => {
     // dropdown is no longer drawn.
     disposeReadOnlyReplicaDisclosures(document as unknown as Document, true);
     drawn = false;
+    expect(inner.isOpen()).toBe(true);
+    await Promise.resolve();
+    expect(inner.isOpen()).toBe(false);
+    inner.dispose();
+  });
+
+  it('keeps the dropdown the reader has open inside a menu the reader opened, through a refresh', async () => {
+    // A menu the reader opened is put up again open after each change to
+    // the page. Opening it closed every other preview of the reader's, the
+    // dropdown inside it too.
+    const { document, window } = parseHTML(
+      '<html><body><a id="menu" href="/m">Menu</a><div id="items">' +
+      '<div id="host"><button id="pick">Pick</button><div id="rows">Rows</div></div>' +
+      '</div><a id="other" href="/o">Other</a><div id="more">More</div></body></html>',
+    );
+    const element = (id: string) => document.querySelector<HTMLElement>(`#${id}`)!;
+    Object.defineProperty(element('host'), 'getClientRects', {
+      configurable: true,
+      value: () => [{}],
+    });
+    const installMenu = () => installReadOnlyReplicaDisclosure({
+      anchor: element('menu'), trigger: element('menu'), panel: element('items'),
+      presentation: 'inline',
+    });
+    let outer = installMenu();
+    const inner = installReadOnlyReplicaDisclosure({
+      anchor: element('host'), trigger: element('pick'), panel: element('rows'),
+      presentation: 'popup', openOnHover: false, survivesRefresh: true,
+    });
+    element('menu').dispatchEvent(new window.Event('pointerenter'));
+    element('pick').dispatchEvent(new window.Event('click', { bubbles: true, cancelable: true }));
+    expect([outer.isOpen(), inner.isOpen()]).toEqual([true, true]);
+
+    // The page changes: the menu's preview is taken down and put up again.
+    disposeReadOnlyReplicaDisclosures(document as unknown as Document, true);
+    outer = installMenu();
+    await Promise.resolve();
+    expect([outer.isOpen(), inner.isOpen()]).toEqual([true, true]);
+
+    // Another menu the reader opens still closes this one and what it holds.
+    const other = installReadOnlyReplicaDisclosure({
+      anchor: element('other'), trigger: element('other'), panel: element('more'),
+      presentation: 'inline',
+    });
+    element('other').dispatchEvent(new window.Event('pointerenter'));
+    expect([other.isOpen(), outer.isOpen(), inner.isOpen()]).toEqual([true, false, false]);
+    for (const controller of [outer, other, inner]) controller.dispose();
+  });
+
+  it('closes a dropdown that is kept out of sight once its menu is gone', async () => {
+    // A dropdown in a menu that fades out keeps its box when the menu
+    // closes; it is out of sight then, and its open list must not stay.
+    const { document, window } = parseHTML(
+      '<html><body><a id="menu" href="/m">Menu</a><div id="items">' +
+      '<div id="host"><button id="pick">Pick</button><div id="rows">Rows</div></div>' +
+      '</div></body></html>',
+    );
+    const menu = document.querySelector<HTMLElement>('#menu')!;
+    const items = document.querySelector<HTMLElement>('#items')!;
+    const host = document.querySelector<HTMLElement>('#host')!;
+    const pick = document.querySelector<HTMLElement>('#pick')!;
+    const rows = document.querySelector<HTMLElement>('#rows')!;
+    Object.defineProperty(host, 'getClientRects', {
+      configurable: true,
+      value: () => [{}],
+    });
+    let visibility = 'visible';
+    Object.defineProperty(window, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => ({
+        display: 'block',
+        opacity: '1',
+        visibility: element === host ? visibility : 'visible',
+      }),
+    });
+    const installMenu = () => installReadOnlyReplicaDisclosure({
+      anchor: menu, trigger: menu, panel: items, presentation: 'inline',
+      shownByPage: true,
+    });
+    installMenu();
+    const inner = installReadOnlyReplicaDisclosure({
+      anchor: host, trigger: pick, panel: rows, presentation: 'popup',
+      openOnHover: false, survivesRefresh: true,
+    });
+    pick.dispatchEvent(new window.Event('click', { bubbles: true, cancelable: true }));
+    expect(inner.isOpen()).toBe(true);
+
+    // A change to the page while the menu stays: the dropdown is in sight.
+    disposeReadOnlyReplicaDisclosures(document as unknown as Document, true);
+    installMenu();
+    await Promise.resolve();
+    expect(inner.isOpen()).toBe(true);
+
+    // The page closes its menu: the dropdown has a box and is out of sight.
+    disposeReadOnlyReplicaDisclosures(document as unknown as Document, true);
+    visibility = 'hidden';
     expect(inner.isOpen()).toBe(true);
     await Promise.resolve();
     expect(inner.isOpen()).toBe(false);

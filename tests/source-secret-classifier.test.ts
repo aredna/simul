@@ -21,6 +21,7 @@ import {
   readSourceSelectEntries,
   readSourceSelectEntryOwner,
   readSourceSelectLabel,
+  readSourceSelectRevealer,
   readSourceStructuralAttributes,
 } from '../lib/replica/source-privacy-policy';
 import { installSourceShadowRootReader } from '../lib/replica/source-shadow-root';
@@ -667,6 +668,165 @@ describe('source secret classifier', () => {
       if (globalNode) Object.defineProperty(globalThis, 'Node', globalNode);
       else delete (globalThis as { Node?: unknown }).Node;
     }
+  });
+
+  describe('a dropdown inside something the mirror may open', () => {
+    /**
+     * A menu's collapsed panel with three dropdowns: one as the page would
+     * show it, one in a block that stays hidden, one the page fades out by
+     * itself; a dropdown in a hidden block that is no menu; one that hides
+     * itself; and one the page shows. `collapse`: how the panel is hidden.
+     */
+    const page = (collapse: 'display' | 'visibility') => {
+      const { document, window } = parseHTML(`<html><body><form><nav><ul><li>
+        <a href="/language">Language</a>
+        <div id="panel">
+          <select id="pick"><option id="en">English</option><option id="gone" hidden>Gone</option>
+            <optgroup id="group" label="More"><option id="ja">Japanese</option></optgroup>
+            <optgroup id="closed" label="Closed" hidden><option id="zh">Chinese</option></optgroup></select>
+          <div id="inner"><select id="deep"><option id="de">German</option></select></div>
+          <select id="faded"><option id="fr">French</option></select>
+          <select id="flat"><option id="es">Spanish</option></select>
+          <div id="skipped"><select id="skip"><option id="sv">Swedish</option></select></div>
+          <div id="fading"><select id="infade"><option id="no">Norwegian</option></select></div>
+        </div></li></ul></nav>
+        <div id="dialog"><select id="other"><option id="it">Italian</option></select></div>
+        <select id="own"><option id="pt">Portuguese</option></select>
+        <select id="shown"><option id="nl">Dutch</option></select>
+        </form></body></html>`);
+      const byId = (id: string): Element => document.querySelector(`#${id}`)!;
+      const none = new Set([byId('inner'), byId('dialog'), byId('own')]);
+      if (collapse === 'display') none.add(byId('panel'));
+      const boxless = (element: Element): boolean => {
+        for (let current: Element | null = element; current; current = current.parentElement) {
+          if (none.has(current)) return true;
+        }
+        return false;
+      };
+      for (const select of document.querySelectorAll('select')) {
+        Object.defineProperties(select, {
+          getClientRects: {
+            configurable: true,
+            value: () => boxless(select) ? [] : [{}],
+          },
+          getBoundingClientRect: {
+            configurable: true,
+            value: () => boxless(select) || select.id === 'flat'
+              ? { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 }
+              : { left: 10, top: 10, right: 120, bottom: 34, width: 110, height: 24 },
+          },
+        });
+      }
+      const globalNode = Object.getOwnPropertyDescriptor(globalThis, 'Node');
+      Object.defineProperty(globalThis, 'Node', {
+        configurable: true,
+        writable: true,
+        value: (window as unknown as { Node: typeof Node }).Node,
+      });
+      onTestFinished(() => {
+        if (globalNode) Object.defineProperty(globalThis, 'Node', globalNode);
+        else delete (globalThis as { Node?: unknown }).Node;
+      });
+      const panel = byId('panel');
+      Object.defineProperty(window, 'getComputedStyle', {
+        configurable: true,
+        value: (element: Element) => ({
+          display: none.has(element) ? 'none' : 'block',
+          // `visibility` is inherited: all the panel holds computes to hidden.
+          visibility: collapse === 'visibility' && panel.contains(element)
+            ? 'hidden'
+            : 'visible',
+          position: 'static',
+          transform: 'none',
+          opacity: element.id === 'faded' || element.id === 'fading' ? '0' : '1',
+          pointerEvents: 'auto',
+          getPropertyValue: (name: string) =>
+            name === '-webkit-text-security'
+              ? 'none'
+              : name === 'content-visibility' && element.id === 'skipped'
+                ? 'hidden'
+                : '',
+        }),
+      });
+      const labels = (...ids: string[]) =>
+        ids.map((id) => readSourceSelectLabel(byId(id))?.text);
+      return { byId, panel, labels };
+    };
+
+    it.each(['display', 'visibility'] as const)(
+      'names what would show a dropdown hidden only from above (panel collapsed by %s)',
+      (collapse) => {
+        const { byId, panel } = page(collapse);
+        // The outermost hidden element above it: opening that shows it.
+        expect(readSourceSelectRevealer(byId('pick'))).toBe(panel);
+        expect(readSourceSelectRevealer(byId('other'))).toBe(byId('dialog'));
+        // Something between stays hidden (by `display`, or its contents are
+        // skipped), or the dropdown fades itself out.
+        expect(readSourceSelectRevealer(byId('deep'))).toBeUndefined();
+        expect(readSourceSelectRevealer(byId('skip'))).toBeUndefined();
+        expect(readSourceSelectRevealer(byId('faded'))).toBeUndefined();
+        // A block that fades out between them is part of how a panel is
+        // shown: the mirror shows what it holds.
+        expect(readSourceSelectRevealer(byId('infade'))).toBe(panel);
+        // It hides itself, or nothing hides it.
+        expect(readSourceSelectRevealer(byId('own'))).toBeUndefined();
+        expect(readSourceSelectRevealer(byId('shown'))).toBeUndefined();
+        // A box of no size is judged where there is a box to read: under
+        // `display: none` there is none.
+        expect(readSourceSelectRevealer(byId('flat')))
+          .toBe(collapse === 'display' ? panel : undefined);
+      },
+    );
+
+    it.each(['display', 'visibility'] as const)(
+      'reads its labels only in a walk that names the panel (collapsed by %s)',
+      (collapse) => {
+        const { byId, panel, labels } = page(collapse);
+        const all = ['en', 'gone', 'ja', 'zh', 'de', 'fr', 'sv', 'no', 'it', 'pt', 'nl'];
+        const hidden = [
+          undefined, undefined, undefined, undefined, undefined, undefined,
+          undefined, undefined, undefined, undefined, 'Dutch',
+        ];
+        // Hidden, and so unread, wherever no panel is named.
+        expect(labels(...all)).toEqual(hidden);
+        const walk = beginSourceSelectLabelWalk();
+        try {
+          expect(labels(...all)).toEqual(hidden);
+          // What was found hidden before the panel was named is asked again.
+          walk.reveal([panel]);
+          expect(labels(...all)).toEqual([
+            'English',
+            // An option and a group the page hides stay unread, and so does a
+            // dropdown in a block that stays hidden or one that hides itself.
+            undefined, 'Japanese', undefined, undefined, undefined,
+            // Skipped contents stay unread; a block that fades is shown.
+            undefined, 'Norwegian',
+            // A hidden block that was not named is as hidden as before.
+            undefined, undefined, 'Dutch',
+          ]);
+          expect(readSourceSelectLabel(byId('group'))?.text).toBe('More');
+          expect(readSourceSelectLabel(byId('closed'))).toBeUndefined();
+          expect(isSourceSelectEntryVisuallyHidden(byId('pick'))).toBe(false);
+          expect(isSourceSelectEntryVisuallyHidden(byId('deep'))).toBe(true);
+          expect(isSourceSelectEntryVisuallyHidden(byId('other'))).toBe(true);
+        } finally {
+          walk.end();
+        }
+        // After the walk the panel is as hidden as any other.
+        expect(labels(...all)).toEqual(hidden);
+        // Where the mirror says which dropdowns it draws, the others are
+        // unread, and so is every option of theirs.
+        const told = beginSourceSelectLabelWalk();
+        try {
+          told.reveal([panel], (select) => select.id !== 'pick');
+          expect(labels('en', 'ja', 'no')).toEqual([undefined, undefined, 'Norwegian']);
+        } finally {
+          told.end();
+        }
+        walk.reveal([byId('dialog')]);
+        expect(labels('it')).toEqual([undefined]);
+      },
+    );
   });
 
   it('reads the options of a dropdown through plain wrappers, as Chrome lists them (D135)', () => {

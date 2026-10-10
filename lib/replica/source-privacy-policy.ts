@@ -34,6 +34,9 @@ const MAX_SOURCE_CONTROLLED_ID_BYTES = 4 * 1_024 * 1_024;
 const MAX_SOURCE_ARIA_CONTROLS_LENGTH = 1 * 1_024 * 1_024;
 const MAX_SOURCE_CONTROLLED_MUTATION_NODES = 2_048;
 const MAX_SOURCE_PAINT_RECTS = 256;
+/** How far below a target without a box held elements without one are looked through. */
+const MAX_SOURCE_CONTROLLED_LOOK_THROUGH_DEPTH = 2;
+const MAX_SOURCE_CONTROLLED_LOOKED_THROUGH_ELEMENTS = 2_048;
 const DEFAULT_MAX_SOURCE_CONTROLLED_NODES = 50_000;
 const MAX_SOURCE_NAVIGATION_URL_LENGTH = 16 * 1024;
 const SOURCE_STATEFUL_NAVIGATION_ATTRIBUTES = Object.freeze([
@@ -399,6 +402,12 @@ export function createSourceControlledContentPolicy(
         sourceElementBoxIsPainted(panel, sourceWindow, paintCache)
       ) targets.set(panel, 'controlled-region');
     }
+    lookThroughBoxlessSourceControlledTargets(
+      relations.keys(),
+      targets,
+      sourceWindow,
+      paintCache,
+    );
     return finishSourceControlledContentPolicy(
       targets,
       tabs,
@@ -822,6 +831,37 @@ export function sourceElementPathIsShown(
 }
 
 /**
+ * Whether what an element holds may be painted: the element is proven
+ * painted, or it shows what it holds without a box of its own. A header's
+ * wrapper of no height around a positioned menu, and a list item whose link
+ * floats, have no box to prove and still show what they hold.
+ */
+export function sourceElementPathHoldsPaint(
+  element: Element,
+  sourceWindow: Window | null | undefined,
+  paintCache: SourcePaintScanCache = createSourcePaintScanCache(),
+): boolean {
+  return sourcePaintedPathMemo(element, sourceWindow, paintCache).painted ||
+    sourceElementPathShowsWithoutBox(element, sourceWindow, paintCache);
+}
+
+/**
+ * Whether an element is shown, has no box of its own (see `boxless`) and
+ * clips nothing away: it draws nothing and takes no room, and what it holds
+ * is drawn all the same. One that clips its overflow shows nothing.
+ */
+export function sourceElementPathShowsWithoutBox(
+  element: Element,
+  sourceWindow: Window | null | undefined,
+  paintCache: SourcePaintScanCache = createSourcePaintScanCache(),
+): boolean {
+  const memo = sourcePaintedPathMemo(element, sourceWindow, paintCache);
+  return memo.pathVisible &&
+    sourceElementPaintState(element, sourceWindow, paintCache) === 'boxless' &&
+    (memo.childClip.kind === 'unclipped' || memo.childClip.kind === 'rect');
+}
+
+/**
  * Less again: no element of its flat-tree path is `display: none`, whatever
  * else hides it for now. A dialog that has just lost its `hidden` attribute
  * and is still at the first frame of a fade is displayed and not yet shown;
@@ -1009,6 +1049,129 @@ function rectsSurviveClip(
   return rects.some((rect) =>
     Math.min(rect.right, bounds.right) > Math.max(rect.left, bounds.left) &&
     Math.min(rect.bottom, bounds.bottom) > Math.max(rect.top, bounds.top));
+}
+
+/**
+ * A target without a box of its own (a `display: contents` component host
+ * with its popup in its root; a `display: contents` or no-height wrapper
+ * around a header menu the page plainly shows) never passes the test below,
+ * and used to stay withheld for good. It opens nothing by itself: it is
+ * looked through. Each element it holds, among its children and its root's,
+ * is judged as a target of its own would be, by that same test, and must not
+ * be placed off the page; one that passes is read, and every other one is
+ * withheld, so a painted button or search box never opens the closed popup
+ * beside it. A held element that has no box either is looked through the
+ * same way, a few levels deep. A target that holds text of its own, which no
+ * box could vouch for, or nothing that passes, stays withheld whole.
+ */
+function lookThroughBoxlessSourceControlledTargets(
+  panels: Iterable<Element>,
+  targets: Map<Element, SourceControlledTargetState>,
+  sourceWindow: Window | null | undefined,
+  paintCache: SourcePaintScanCache,
+): void {
+  const budget = { left: MAX_SOURCE_CONTROLLED_LOOKED_THROUGH_ELEMENTS };
+  const looked = new Map<Element, boolean>();
+  const lookThrough = (element: Element, depth: number): boolean => {
+    const known = looked.get(element);
+    if (known !== undefined) return known;
+    looked.set(element, false);
+    const held = depth > MAX_SOURCE_CONTROLLED_LOOK_THROUGH_DEPTH
+      ? undefined
+      : readSourceElementsHeldWithoutBox(element, sourceWindow, paintCache);
+    if (!held || held.length > budget.left) return false;
+    budget.left -= held.length;
+    const readable = held.map((child) => {
+      const own = targets.get(child);
+      // A target of its own keeps its own answer, looked through in its turn.
+      return own === undefined
+        ? (sourceElementBoxIsPainted(child, sourceWindow, paintCache) &&
+          !sourceElementBoxIsOffPage(child, sourceWindow, paintCache)) ||
+          lookThrough(child, depth + 1)
+        : (own !== 'withheld' || lookThrough(child, 0)) &&
+          !sourceElementBoxIsOffPage(child, sourceWindow, paintCache);
+    });
+    // Nothing it holds is painted: it stays the boundary it was.
+    if (!readable.includes(true)) return false;
+    held.forEach((child, index) => {
+      if (!readable[index]) targets.set(child, 'withheld');
+      else if ((targets.get(child) ?? 'withheld') === 'withheld') {
+        targets.set(child, 'controlled-region');
+      }
+    });
+    looked.set(element, true);
+    return true;
+  };
+  for (const panel of panels) {
+    if (targets.get(panel) === 'withheld' && lookThrough(panel, 0)) {
+      targets.set(panel, 'controlled-region');
+    }
+  }
+}
+
+/**
+ * What an element without a box of its own holds, when it can be looked
+ * through: it is shown and clips nothing away, and has no text of its own.
+ * Its element children and its root's; a `<slot>` among them stands for its
+ * fallback content (what is slotted into it is the host's own children,
+ * which are in the list already).
+ */
+function readSourceElementsHeldWithoutBox(
+  element: Element,
+  sourceWindow: Window | null | undefined,
+  paintCache: SourcePaintScanCache,
+): readonly Element[] | undefined {
+  if (!sourceElementPathShowsWithoutBox(element, sourceWindow, paintCache)) {
+    return undefined;
+  }
+  try {
+    const held: Element[] = [];
+    const pending: Node[] = [element];
+    const root = safelyReadSourceShadowRoot(element);
+    if (root) pending.push(root);
+    while (pending.length > 0) {
+      const holder = pending.pop()!;
+      for (const node of holder.childNodes) {
+        if (node.nodeType === 3) {
+          if ((node.nodeValue ?? '').trim() !== '') return undefined;
+          continue;
+        }
+        if (node.nodeType !== 1) continue;
+        const child = node as Element;
+        if (child.localName.toLowerCase() === 'slot') pending.push(child);
+        else held.push(child);
+        if (held.length + pending.length > MAX_SOURCE_PAINT_RECTS) return undefined;
+      }
+    }
+    return held;
+  } catch {
+    return undefined;
+  }
+}
+
+/**
+ * Whether an element's box lies wholly to the left of the page or above it,
+ * where no scrolling reaches: how a closed popup is often put away
+ * (`left: -9999px`). An element without a box is placed nowhere.
+ */
+function sourceElementBoxIsOffPage(
+  element: Element,
+  sourceWindow: Window | null | undefined,
+  paintCache: SourcePaintScanCache,
+): boolean {
+  const rects = sourcePaintInputs(element, sourceWindow, paintCache).rects;
+  if (!rects || rects.length === 0) return false;
+  // In the window, or right of it or below it: on the page.
+  if (rects.some((rect) => rect.right > 0 && rect.bottom > 0)) return false;
+  try {
+    const fixed = sourceWindow!.getComputedStyle(element).position
+      .trim().toLowerCase() === 'fixed';
+    const x = fixed ? 0 : finiteScrollOffset(sourceWindow!.scrollX);
+    const y = fixed ? 0 : finiteScrollOffset(sourceWindow!.scrollY);
+    return rects.every((rect) => rect.right + x <= 0 || rect.bottom + y <= 0);
+  } catch {
+    return true;
+  }
 }
 
 /**
@@ -1667,12 +1830,25 @@ export function readSourceSelectLabel(
 /** One run of a reader over many option labels; see the function below. */
 export interface SourceSelectLabelWalk {
   end(): void;
+  /**
+   * Names the collapsed panels the mirror may open for the reader (a site
+   * menu's). For the rest of the walk a dropdown inside one is read as the
+   * mirror shows it once the panel is opened: hidden only by what stays
+   * hidden then (see `readSourceSelectRevealer`). Without this its options
+   * had no labels until the page itself showed the menu. `drawn` is the
+   * mirror's own answer for a dropdown (whether it keeps the dropdown's box
+   * for that moment): where given, a dropdown it does not draw is unread.
+   */
+  reveal(panels: Iterable<Element>, drawn?: (select: Element) => boolean): void;
 }
 
 let selectLabelWalk: {
   /** An element to whether it or anything above it is hidden. */
   readonly hidden: Map<Element, boolean>;
   readonly secretAncestors: SourceSecretAncestorMemo;
+  /** Panels the mirror may open; see `SourceSelectLabelWalk.reveal`. */
+  readonly revealed: Set<Element>;
+  drawn: ((select: Element) => boolean) | undefined;
 } | undefined;
 
 /**
@@ -1686,16 +1862,26 @@ let selectLabelWalk: {
  */
 export function beginSourceSelectLabelWalk(): SourceSelectLabelWalk {
   const outer = selectLabelWalk;
-  selectLabelWalk = {
-    hidden: new Map(),
+  const walk: NonNullable<typeof selectLabelWalk> = {
+    hidden: new Map<Element, boolean>(),
     secretAncestors: createSourceSecretAncestorMemo(),
+    revealed: new Set<Element>(),
+    drawn: undefined,
   };
+  selectLabelWalk = walk;
   let ended = false;
   return {
     end: () => {
       if (ended) return;
       ended = true;
       selectLabelWalk = outer;
+    },
+    reveal: (panels, drawn) => {
+      if (ended) return;
+      for (const panel of panels) walk.revealed.add(panel);
+      walk.drawn = drawn;
+      // What was found hidden before the panels were named may sit in one.
+      walk.hidden.clear();
     },
   };
 }
@@ -1707,16 +1893,29 @@ export function isSourceSelectEntryVisuallyHidden(element: Element): boolean {
   if (known !== undefined) return known;
   const path = readSourceFlatTreeElementPath(element);
   if (!path) return true;
+  // Inside a panel the mirror may open, only what stays hidden once it is
+  // open counts; the panel and what is above it are shown then.
+  const revealed = selectLabelWalk?.revealed;
+  const opened = revealed && revealed.size > 0
+    ? path.findIndex((current) => revealed.has(current))
+    : -1;
   const walked: Element[] = [];
   let hidden = false;
-  for (const current of path) {
+  for (let index = 0; index < (opened < 0 ? path.length : opened); index += 1) {
+    const current = path[index]!;
     const above = remembered?.get(current);
     if (above !== undefined) {
       hidden = above;
       break;
     }
     walked.push(current);
-    if (sourceSelectEntryIsItselfHidden(current, view)) {
+    if (
+      opened < 0
+        ? sourceSelectEntryIsItselfHidden(current, view)
+        : sourceSelectEntryStaysHidden(current, view) ||
+          (current.localName.toLowerCase() === 'select' &&
+            selectLabelWalk?.drawn?.(current) === false)
+    ) {
       hidden = true;
       break;
     }
@@ -1725,6 +1924,68 @@ export function isSourceSelectEntryVisuallyHidden(element: Element): boolean {
   // found above it.
   if (remembered) for (const current of walked) remembered.set(current, hidden);
   return hidden;
+}
+
+/**
+ * The element whose opening would show a dropdown that is hidden now: the
+ * outermost hidden element above it, when the dropdown does not hide itself
+ * and nothing between the two stays hidden. `undefined` when the dropdown is
+ * shown, hides itself, or would stay hidden. A dropdown in a site menu's
+ * collapsed panel is the case: the mirror may open that panel for the
+ * reader, and the dropdown is then drawn with the rest of it (D132 left it
+ * out until the page itself showed the menu).
+ */
+export function readSourceSelectRevealer(select: Element): Element | undefined {
+  const view = select.ownerDocument?.defaultView;
+  const path = readSourceFlatTreeElementPath(select);
+  if (!path) return undefined;
+  let revealer: Element | undefined;
+  for (let index = path.length - 1; index >= 0; index -= 1) {
+    const current = path[index]!;
+    if (revealer) {
+      if (sourceSelectEntryStaysHidden(current, view)) return undefined;
+    } else if (sourceSelectEntryIsItselfHidden(current, view)) {
+      // Its own style or box, or nothing above it, hides it.
+      if (index === 0) return undefined;
+      revealer = current;
+    }
+  }
+  return revealer;
+}
+
+/**
+ * Whether an element stays hidden when something above it is shown: by
+ * `display`, the `hidden` attribute or skipped contents, which is what the
+ * mirror leaves hidden inside a panel it opens. `visibility` and `opacity`
+ * are how such a panel fades in, and the mirror shows what they hide. A
+ * dropdown's own fade does count (the mirror draws it in a box of its own
+ * that nothing fades in), and so does a box of no size or off the page,
+ * where it has one to read.
+ */
+function sourceSelectEntryStaysHidden(
+  current: Element,
+  view: (Window & typeof globalThis) | null | undefined,
+): boolean {
+  if (current.hasAttribute('hidden')) return true;
+  if (!view || typeof view.getComputedStyle !== 'function') return false;
+  try {
+    const style = view.getComputedStyle(current);
+    if (
+      style.display.trim().toLowerCase() === 'none' ||
+      style.getPropertyValue('content-visibility').trim().toLowerCase() ===
+        'hidden'
+    ) return true;
+    if (current.localName.toLowerCase() !== 'select') return false;
+    const opacity = style.opacity.trim();
+    if (opacity !== '' && Number(opacity) === 0) return true;
+    // Under `display: none` it has no box at all: none to judge.
+    return typeof current.getClientRects === 'function' &&
+      current.getClientRects().length > 0 &&
+      sourceSelectHasNoRenderedDocumentBox(current, view, style);
+  } catch {
+    // As for `sourceSelectEntryIsItselfHidden`: no proof of invisibility.
+    return false;
+  }
 }
 
 function sourceSelectEntryIsItselfHidden(

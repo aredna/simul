@@ -3112,6 +3112,178 @@ describe('isolated HTML sanitizer and protocol', () => {
     expect(readHtmlMirrorNode(graph?.root)).toBeDefined();
   });
 
+  it('keeps a dropdown that only something above it hides out of sight, not marked hidden', () => {
+    // A language picker in a site menu's collapsed panel: the mirror may
+    // open the panel for the reader, and draws no dropdown marked hidden.
+    const { document, window } = parseHTML(`<!doctype html><html><body><nav><ul><li>
+      <a href="/language">Language</a>
+      <div id="panel">
+        <select id="pick"><option id="option">English</option></select>
+        <div id="inner"><select id="deep"><option>German</option></select></div>
+        <select id="backing"><option>French</option></select>
+        <select id="clipped" class="sr-only"><option>Spanish</option></select>
+        <select id="zero"><option>Swedish</option></select>
+        <select id="turned"><option>Norwegian</option></select>
+        <select id="veiled" style="visibility:hidden"><option>Danish</option></select>
+        <select id="ruled" class="b-vis"><option>Finnish</option></select>
+        <select id="scaled" class="b-scale"><option>Polish</option></select>
+        <select id="unsaid"><option>Czech</option></select>
+        <select id="printed" class="b-print"><option>Greek</option></select>
+        <select id="screened" class="b-screen"><option>Turkish</option></select>
+        <select id="overridden" class="b-over"><option>Dutch</option></select>
+        <select id="squashed"><option>Irish</option></select>
+      </div></li></ul></nav>
+      <select id="shown"><option>Dutch</option></select>
+    </body></html>`);
+    const byId = (id: string): Element => document.querySelector(`#${id}`)!;
+    const none = new Set([byId('inner'), byId('backing')]);
+    let collapse: 'display' | 'visibility' = 'display';
+    const panel = byId('panel');
+    const boxless = (element: Element): boolean => {
+      for (let current: Element | null = element; current; current = current.parentElement) {
+        if (none.has(current) || (collapse === 'display' && current === panel)) return true;
+      }
+      return false;
+    };
+    for (const select of document.querySelectorAll('select')) {
+      Object.defineProperties(select, {
+        getClientRects: { configurable: true, value: () => boxless(select) ? [] : [{}] },
+        getBoundingClientRect: {
+          configurable: true,
+          // Scaled to nothing, a box that is there has no size.
+          value: () => boxless(select) || select.id === 'scaled' || select.id === 'squashed'
+            ? { left: 0, top: 0, right: 0, bottom: 0, width: 0, height: 0 }
+            : { left: 10, top: 10, right: 120, bottom: 34, width: 110, height: 24 },
+        },
+      });
+    }
+    // The page's own rules: one hides by `visibility`, one scales to nothing.
+    const rule = (selectorText: string, property: string, value: string) => ({
+      selectorText,
+      style: { getPropertyValue: (name: string) => name === property ? value : '' },
+    });
+    Object.defineProperty(document, 'styleSheets', {
+      configurable: true,
+      value: [{
+        cssRules: [
+          rule('.b-vis', 'visibility', 'hidden'),
+          rule('.b-scale', 'transform', 'scale(0)'),
+          rule('li:hover .b-vis', 'visibility', 'visible'),
+          // A rule for print only does not hold on a screen; one for
+          // screens does.
+          { media: { mediaText: 'print' }, cssRules: [rule('.b-print', 'visibility', 'hidden')] },
+          { media: { mediaText: 'screen' }, cssRules: [rule('.b-screen', 'visibility', 'hidden')] },
+          // A rule another rule overrides: the dropdown computes to visible.
+          rule('.b-over', 'visibility', 'hidden'),
+        ],
+      }],
+    });
+    Object.defineProperty(window, 'matchMedia', {
+      configurable: true,
+      value: (query: string) => ({ matches: query !== 'print' }),
+    });
+    Object.defineProperty(window, 'getComputedStyle', {
+      configurable: true,
+      value: (element: Element) => {
+        const clipped = element.id === 'clipped' || element.id === 'zero';
+        const values: Record<string, string> = {
+          display: none.has(element) || (collapse === 'display' && element === panel)
+            ? 'none'
+            : 'block',
+          // Inherited: all the panel holds computes to hidden with it.
+          visibility: (collapse === 'visibility' && panel.contains(element)) ||
+              ['veiled', 'ruled', 'unsaid'].includes(element.id)
+            ? 'hidden'
+            : 'visible',
+          opacity: '1',
+          position: clipped ? 'absolute' : 'static',
+          overflow: clipped ? 'hidden' : 'visible',
+          'overflow-x': clipped ? 'hidden' : 'visible',
+          'overflow-y': clipped ? 'hidden' : 'visible',
+          clip: clipped ? 'rect(0px, 0px, 0px, 0px)' : 'auto',
+          'clip-path': 'none',
+          width: element.id === 'zero' ? '0px' : clipped ? '1px' : 'auto',
+          height: clipped ? '1px' : 'auto',
+          left: 'auto',
+          top: 'auto',
+          // Under `display: none` Chrome computes no transform at all.
+          transform: collapse === 'display' && panel.contains(element)
+            ? 'none'
+            : element.id === 'turned'
+              ? 'matrix(1, 0.03, -0.03, 1, 0, 0)'
+              : element.id === 'scaled' || element.id === 'squashed'
+                ? 'matrix(0, 0, 0, 0, 0, 0)'
+                : 'none',
+          'pointer-events': 'auto',
+          'content-visibility': 'visible',
+        };
+        return {
+          ...values,
+          overflowX: values['overflow-x'],
+          overflowY: values['overflow-y'],
+          clipPath: values['clip-path'],
+          pointerEvents: values['pointer-events'],
+          getPropertyValue: (name: string) => values[name] ?? '',
+        };
+      },
+    });
+    const hints = (id: string) => {
+      const { visuallyHidden, selectPresentationStyle } =
+        sanitizeSourceElementHints(byId(id));
+      return [
+        visuallyHidden === true,
+        /(?:^|;)visibility:hidden(?:;|$)/u.test(selectPresentationStyle ?? ''),
+      ];
+    };
+    for (const how of ['display', 'visibility'] as const) {
+      collapse = how;
+      // Not marked, and out of sight whatever its own `visibility` computes
+      // to under a panel collapsed with `display`.
+      expect(hints('pick'), how).toEqual([false, true]);
+      // The rest of its own style is sent as it computes.
+      expect(sanitizeSourceElementHints(byId('pick')).selectPresentationStyle, how)
+        .toContain('display:block');
+      // Marked, as ever: in a block that stays hidden, hidden by a rule of
+      // its own, or clipped away for screen readers only.
+      expect(hints('deep')[0], how).toBe(true);
+      expect(hints('backing')[0], how).toBe(true);
+      expect(hints('clipped')[0], how).toBe(true);
+      // One its own style leaves no size is hidden for good; one that is
+      // only turned has no box to tell by under `display: none`.
+      expect(hints('zero')[0], how).toBe(true);
+      expect(hints('turned'), how).toEqual([false, true]);
+      // One the page hides by a `visibility` of its own, in its style
+      // attribute or by a rule that names it, or scales to nothing: under a
+      // panel that fades by `visibility`, or one collapsed by `display`,
+      // the computed style alone cannot tell these from the panel's doing.
+      expect(hints('veiled')[0], how).toBe(true);
+      expect(hints('ruled')[0], how).toBe(true);
+      expect(hints('scaled')[0], how).toBe(true);
+      // Hidden by something no rule here says (a sheet that cannot be
+      // read): its own doing where its parent is in sight, the panel's
+      // where everything under the panel computes to hidden.
+      expect(hints('unsaid')[0], how).toBe(how === 'display');
+      expect(hints('printed'), how).toEqual([false, true]);
+      // A rule inside a condition that holds counts like any other. One
+      // that names the dropdown counts under a hidden panel even where
+      // another rule would win (the cascade is not worked out), and says
+      // nothing of its scale.
+      expect(hints('screened')[0], how).toBe(how === 'visibility');
+      expect(hints('overridden')[0], how).toBe(how === 'visibility');
+      // Scaled to nothing by something no rule here says: its box tells,
+      // where it has one.
+      expect(hints('squashed')[0], how).toBe(how === 'visibility');
+      expect(hints('shown'), how).toEqual([false, false]);
+      // Its options are marked as ever: only the dropdown's box is kept.
+      expect(sanitizeSourceElementHints(byId('option')).visuallyHidden, how).toBe(true);
+    }
+    // The page shows the panel: the dropdown is what it computes to.
+    none.clear();
+    collapse = 'visibility';
+    Object.defineProperty(panel, 'contains', { configurable: true, value: () => false });
+    expect(hints('pick')).toEqual([false, false]);
+  });
+
   it('rejects malformed live presentation hints instead of dropping them', () => {
     const patchIdentity = createReplicaIdentity({
       sessionId: 'hint-validation', pageEpoch: 1, generation: 1,

@@ -1755,6 +1755,184 @@ describe('semantic source session', () => {
     session.dispose();
   });
 
+  it('reads the labels of a dropdown in a menu\'s collapsed panel, and of none hidden elsewhere', () => {
+    // The mirror may open the panel for the reader, and drew no dropdown in
+    // it: its options had no labels until the page itself showed the menu.
+    const prose = 'The council met on the quay and voted on the registers of the town hall. '
+      .repeat(80);
+    const page = (scope: typeof FULL_VISIBLE_REPLICA_READ_SCOPE) => {
+      const { document, window } = parseHTML(`<html><body><form>
+        <nav><ul><li id="wrapper"><a id="trigger" href="/shop">Shop</a>
+          <div id="panel" class="collapsed"><a href="/a">Alpha</a>
+            <select id="pick"><option id="en">English</option>
+              <option id="ja" selected>Japanese</option><option hidden>Gone</option></select>
+            <div class="collapsed"><select><option>Buried</option></select></div>
+          </div></li></ul></nav>
+        <div class="collapsed"><select><option>Elsewhere</option></select></div>
+        <ul><li><a href="/story">Headline</a>
+          <div class="collapsed"><p>${prose}</p><select><option>Unread</option></select></div>
+        </li></ul></form></body></html>`);
+      installPaintedTabFixture(document, window as unknown as Window);
+      // In Chrome nothing under `display: none` has a box.
+      for (const element of document.querySelectorAll('.collapsed *')) {
+        Object.defineProperty(element, 'getClientRects', {
+          configurable: true,
+          value: () => Object.assign([], { item: () => null }) as DOMRectList,
+        });
+      }
+      const pick = document.querySelector<HTMLSelectElement>('#pick')!;
+      const ja = document.querySelector<HTMLOptionElement>('#ja')!;
+      Object.defineProperties(pick, {
+        selectedOptions: { configurable: true, value: [ja] },
+        multiple: { configurable: true, value: false },
+      });
+      const style = structuralMenuStyle((element) =>
+        element.classList.contains('collapsed') ? 'display' : undefined);
+      // The label rules ask the page's own window and name `Node`.
+      Object.defineProperty(window, 'getComputedStyle', {
+        configurable: true,
+        value: style,
+      });
+      const globalNode = Object.getOwnPropertyDescriptor(globalThis, 'Node');
+      Object.defineProperty(globalThis, 'Node', {
+        configurable: true,
+        writable: true,
+        value: (window as unknown as { Node: typeof Node }).Node,
+      });
+      const port = new FakeSemanticPort(
+        createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+      );
+      const session = createSession(
+        port, document, window, 'isolated-html', undefined, style,
+      );
+      let batch: SemanticSourceBatch;
+      try {
+        port.emit(createSemanticSourceStart('isolated-html', identity, scope));
+        batch = port.messages[0]!;
+      } finally {
+        session.dispose();
+        if (globalNode) Object.defineProperty(globalThis, 'Node', globalNode);
+        else delete (globalThis as { Node?: unknown }).Node;
+      }
+      return {
+        menus: batch.proofs.filter((proof) => proof.kind === 'structural-menu').length,
+        labels: batch.records.filter((record) => record.presentation === 'label' &&
+          record.tagName === 'option').map((record) => record.text),
+        selected: batch.proofs.flatMap((proof) => proof.kind === 'select-state' &&
+          proof.nodeId === nodeId(pick) ? [proof.selectedOptionNodeIds] : []),
+        selection: batch.records.filter((record) =>
+          record.presentation === 'selection').map((record) => record.text),
+        ja: nodeId(ja),
+      };
+    };
+    const full = page(FULL_VISIBLE_REPLICA_READ_SCOPE);
+    expect(full.menus).toBe(1);
+    // Not the option the page hides, the dropdown in a block that stays
+    // hidden, the one in a hidden block that is no menu, nor the one beside
+    // an article's hidden text.
+    expect(full.labels).toEqual(['English', 'Japanese']);
+    expect(full.selected).toEqual([[full.ja]]);
+    expect(full.selection).toEqual(['Japanese']);
+    // Standard reads labels and menus, and no choice.
+    const standard = page(STANDARD_REPLICA_READ_SCOPE);
+    expect(standard.labels).toEqual(['English', 'Japanese']);
+    expect(standard.selected).toEqual([]);
+    expect(standard.selection).toEqual([]);
+    // Where no menu is offered, nothing in its panel is read.
+    const noMenus = page({ ...FULL_VISIBLE_REPLICA_READ_SCOPE, disclosureContent: false });
+    expect(noMenus).toMatchObject({ menus: 0, labels: [], selected: [], selection: [] });
+    expect(page(PAGE_ONLY_REPLICA_READ_SCOPE))
+      .toMatchObject({ menus: 0, labels: [], selected: [], selection: [] });
+  });
+
+  it('reads a dropdown by the page\'s own rule again once the page shows the panel', () => {
+    // Collapsed, the panel is read as the mirror opens it, and the mirror
+    // shows what a fade hides in it. Shown by the page, it is the page that
+    // says what is hidden.
+    const { document, window } = parseHTML(`<html><body><form>
+      <nav><ul><li id="wrapper"><a id="trigger" href="/shop">Shop</a>
+        <div id="panel"><a href="/a">Alpha</a>
+          <select id="plain"><option>Plain</option></select>
+          <div id="veiled"><select><option>Veiled</option></select></div>
+          <select id="own"><option>Own</option></select>
+        </div></li></ul></nav></form></body></html>`);
+    installPaintedTabFixture(document, window as unknown as Window);
+    const panel = document.querySelector('#panel')!;
+    // A block that fades in once the menu is open, and a dropdown the page
+    // hides by a `visibility` of its own.
+    const veiled = document.querySelector('#veiled')!;
+    const own = document.querySelector('#own')!;
+    let collapsed = true;
+    for (const select of document.querySelectorAll('select')) {
+      Object.defineProperties(select, {
+        // In Chrome nothing under `display: none` has a box.
+        getClientRects: {
+          configurable: true,
+          value: () => collapsed
+            ? Object.assign([], { item: () => null }) as DOMRectList
+            : paintedRectList(),
+        },
+        getBoundingClientRect: {
+          configurable: true,
+          value: () => ({ left: 0, top: 0, right: 320, bottom: 40, width: 320, height: 40 }),
+        },
+        selectedOptions: { configurable: true, value: [] },
+        multiple: { configurable: true, value: false },
+      });
+    }
+    const base = structuralMenuStyle((element) =>
+      element === panel && collapsed
+        ? 'display'
+        : element === veiled || element === own ? 'visibility' : undefined);
+    // What the mirror's own answer for a dropdown reads besides.
+    const style = ((element: Element) => ({
+      ...base(element),
+      position: 'static', overflow: 'visible', width: 'auto', height: 'auto',
+      left: 'auto', top: 'auto', transform: 'none', clip: 'auto', clipPath: 'none',
+    })) as unknown as Window['getComputedStyle'];
+    Object.defineProperty(window, 'getComputedStyle', { configurable: true, value: style });
+    const globalNode = Object.getOwnPropertyDescriptor(globalThis, 'Node');
+    Object.defineProperty(globalThis, 'Node', {
+      configurable: true,
+      writable: true,
+      value: (window as unknown as { Node: typeof Node }).Node,
+    });
+    const port = new FakeSemanticPort(
+      createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+    );
+    const session = createSession(port, document, window, 'isolated-html', undefined, style);
+    const labels = (batch: SemanticSourceBatch) => batch.records.filter((record) =>
+      record.presentation === 'label' && record.tagName === 'option')
+      .map((record) => record.text);
+    try {
+      port.emit(createSemanticSourceStart(
+        'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+      ));
+      const first = port.messages[0]!;
+      expect(first.proofs).toContainEqual(expect.objectContaining({
+        kind: 'structural-menu', expanded: false,
+      }));
+      // The dropdown the page hides by its own rule is unread from the
+      // start: the mirror does not draw it in the menu it opens.
+      expect(labels(first)).toEqual(['Plain', 'Veiled']);
+
+      collapsed = false;
+      port.emit(createSemanticSourceAck(
+        identity, first.policyFingerprint, first.sequence,
+      ));
+      session.refresh();
+      const second = port.messages[1]!;
+      expect(second.proofs).toContainEqual(expect.objectContaining({
+        kind: 'structural-menu', expanded: true,
+      }));
+      expect(labels(second)).toEqual(['Plain']);
+    } finally {
+      session.dispose();
+      if (globalNode) Object.defineProperty(globalThis, 'Node', globalNode);
+      else delete (globalThis as { Node?: unknown }).Node;
+    }
+  });
+
   it.each([
     [
       'a credential field in the panel',
@@ -2172,6 +2350,403 @@ describe('semantic source session', () => {
       panelNodeId: nodeId(panel),
     }));
     session.dispose();
+  });
+
+  describe('a site menu whose panel sits inside a wrapper', () => {
+    /**
+     * Reads a page once. `collapsed` elements are `display: none`, `boxless`
+     * ones have no rectangle (as a block of no height has none in Chrome),
+     * `clipping` ones clip their overflow.
+     */
+    const read = (
+      markup: string,
+      shape: {
+        readonly collapsed?: string;
+        readonly boxless?: string;
+        readonly clipping?: string;
+        /** Placed out of the flow (`position: absolute`); `#panel` unless said. */
+        readonly positioned?: string;
+        /** The same by `position: fixed`. */
+        readonly fixed?: string;
+      } = {},
+    ) => {
+      const { document, window } = parseHTML(`<html><body>${markup}</body></html>`);
+      installPaintedTabFixture(document, window as unknown as Window);
+      const matching = (selector: string | undefined) =>
+        new Set<Element>(selector ? [...document.querySelectorAll(selector)] : []);
+      const collapsed = matching(shape.collapsed ?? '#panel');
+      const clipping = matching(shape.clipping);
+      const positioned = matching(shape.positioned ?? '#panel');
+      const fixed = matching(shape.fixed);
+      for (const element of matching(shape.boxless)) {
+        Object.defineProperty(element, 'getClientRects', {
+          configurable: true,
+          value: () => Object.assign([], { item: () => null }) as DOMRectList,
+        });
+      }
+      const style = structuralMenuStyle((element) =>
+        collapsed.has(element) ? 'display' : undefined);
+      const port = new FakeSemanticPort(
+        createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+      );
+      const session = createSession(
+        port,
+        document,
+        window,
+        'isolated-html',
+        undefined,
+        ((element: Element) => {
+          const computed = {
+            ...style(element),
+            position: fixed.has(element)
+              ? 'fixed'
+              : positioned.has(element) ? 'absolute' : 'static',
+          };
+          if (!clipping.has(element)) return computed;
+          return {
+            ...computed,
+            overflowX: 'hidden',
+            overflowY: 'hidden',
+            getPropertyValue: (name: string) =>
+              name === 'overflow-x' || name === 'overflow-y'
+                ? 'hidden'
+                : computed.getPropertyValue(name),
+          };
+        }) as Window['getComputedStyle'],
+      );
+      port.emit(createSemanticSourceStart(
+        'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+      ));
+      const batch = port.messages[0]!;
+      const menus = batch.proofs.filter((proof) => proof.kind === 'structural-menu');
+      const idOf = (wanted: number | undefined) => wanted === undefined
+        ? undefined
+        : [...document.querySelectorAll('[id]')].find((element) =>
+            nodeId(element) === wanted)?.id;
+      return {
+        document,
+        session,
+        port,
+        collapsed,
+        menus: menus.map((menu) => menu.kind === 'structural-menu'
+          ? [idOf(menu.containerNodeId), idOf(menu.triggerNodeId), idOf(menu.panelNodeId)].join(' ')
+          : ''),
+        hiddenText: batch.records.filter((record) =>
+          record.gate === 'disclosureContent').map((record) => record.text),
+      };
+    };
+    const item = (held: string) => `<nav><ul><li id="item">
+      <a id="trigger" href="/products">Products</a>${held}</li></ul></nav>`;
+    const list = '<ul id="panel"><li><a href="/alpha">Alpha</a></li><li><a href="/beta">Beta</a></li></ul>';
+
+    it('offers it in a wrapper of no height', () => {
+      // A header's `position: relative; height: 0` block around an absolutely
+      // placed list: the wrapper has no box to prove painted, and the panel
+      // was looked for among the item's own children only.
+      const page = read(item(`<div id="wrap">\n${list}</div>`), { boxless: '#wrap' });
+      expect(page.menus).toEqual(['item trigger panel']);
+      expect(page.hiddenText).toEqual(['Alpha', 'Beta']);
+      expect(page.port.messages[0]!.proofs).toContainEqual(expect.objectContaining({
+        kind: 'structural-menu', expanded: false, gate: 'disclosureContent',
+      }));
+      page.session.dispose();
+    });
+
+    it('looks through one wrapper, and only one that takes no room', () => {
+      // A wrapper with a box is a card's body or a section: what it hides
+      // is no menu's panel. Nor is a block that would open in the flow of
+      // its wrapper (an answer under a question), nor what sits two
+      // wrappers down.
+      const boxed = read(item(`<div id="wrap">${list}</div>`));
+      expect(boxed.menus).toEqual([]);
+      expect(boxed.hiddenText).toEqual([]);
+      boxed.session.dispose();
+      const inFlow = read(
+        item(`<div id="wrap">${list}</div>`),
+        { boxless: '#wrap', positioned: '#none' },
+      );
+      expect(inFlow.menus).toEqual([]);
+      expect(inFlow.hiddenText).toEqual([]);
+      inFlow.session.dispose();
+      // A panel fixed to the window is out of the flow too.
+      const pinned = read(
+        item(`<div id="wrap">${list}</div>`),
+        { boxless: '#wrap', positioned: '#none', fixed: '#panel' },
+      );
+      expect(pinned.menus).toEqual(['item trigger panel']);
+      pinned.session.dispose();
+      // The item's own child needs no position: a list that opens in the
+      // flow under its link is a menu, as it always was.
+      const direct = read(item(list), { positioned: '#none' });
+      expect(direct.menus).toEqual(['item trigger panel']);
+      direct.session.dispose();
+      const deep = read(
+        item(`<div id="wrap"><div id="inner">${list}</div></div>`),
+        { boxless: '#wrap, #inner' },
+      );
+      expect(deep.menus).toEqual([]);
+      expect(deep.hiddenText).toEqual([]);
+      deep.session.dispose();
+    });
+
+    it('offers no menu for a panel that its wrapper component does not slot', () => {
+      // A light child of a component whose root has no slot for it is drawn
+      // nowhere, and Chrome 138 computes `display: none` for it.
+      const page = (slotted: boolean, shut = false) => {
+        const { document, window } = parseHTML(`<html><body>${
+          item(`<x-wrap id="wrap">${list}</x-wrap>`)
+        }</body></html>`);
+        installPaintedTabFixture(document, window as unknown as Window);
+        const wrap = document.querySelector('#wrap')!;
+        const panel = document.querySelector('#panel')!;
+        const root = wrap.attachShadow({ mode: 'open' });
+        root.innerHTML = slotted
+          ? '<div id="around"><slot></slot></div>'
+          : '<p>Nothing slotted</p>';
+        const around = root.querySelector('#around');
+        const empty = () => Object.assign([], { item: () => null }) as DOMRectList;
+        for (const element of [wrap, ...root.querySelectorAll('*')]) {
+          Object.defineProperty(element, 'getClientRects', { configurable: true, value: empty });
+        }
+        if (slotted) {
+          Object.defineProperty(panel, 'assignedSlot', {
+            configurable: true,
+            value: root.querySelector('slot'),
+          });
+        }
+        const port = new FakeSemanticPort(
+          createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+        );
+        // `shut`: the root keeps its slot in a box that is itself hidden.
+        const style = structuralMenuStyle((element) =>
+          element === panel || (shut && element === around) ? 'display' : undefined);
+        const session = createSession(
+          port, document, window, 'isolated-html', undefined,
+          ((element: Element) => ({
+            ...style(element),
+            position: element === panel ? 'absolute' : 'static',
+          })) as unknown as Window['getComputedStyle'],
+        );
+        port.emit(createSemanticSourceStart(
+          'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+        ));
+        const batch = port.messages[0]!;
+        session.dispose();
+        return {
+          menus: batch.proofs.filter((proof) => proof.kind === 'structural-menu').length,
+          hiddenText: batch.records.filter((record) =>
+            record.gate === 'disclosureContent').map((record) => record.text),
+        };
+      };
+      expect(page(false)).toEqual({ menus: 0, hiddenText: [] });
+      expect(page(true)).toEqual({ menus: 1, hiddenText: ['Alpha', 'Beta'] });
+      // Slotted into a box of the root that is hidden: the box hides it,
+      // not its own style, and nothing the mirror opens would show it.
+      expect(page(true, true)).toEqual({ menus: 0, hiddenText: [] });
+    });
+
+    it('takes the outermost collapsed element for the panel', () => {
+      // A hidden block around one list is the panel itself, as it was: what
+      // it wraps is not looked at once it is found collapsed.
+      const page = read(item(`<div id="panel"><ul id="inner"><li><a href="/alpha">Alpha</a></li></ul></div>`));
+      expect(page.menus).toEqual(['item trigger panel']);
+      page.session.dispose();
+      const both = read(
+        item(`<div id="panel"><ul id="inner"><li><a href="/alpha">Alpha</a></li></ul></div>`),
+        { collapsed: '#panel, #inner' },
+      );
+      expect(both.menus).toEqual(['item trigger panel']);
+      both.session.dispose();
+    });
+
+    it('offers none where the wrapper clips, holds something else, or nothing collapsed', () => {
+      const none = (held: string, shape: Parameters<typeof read>[1] = {}) => {
+        const page = read(item(held), shape);
+        const result = { menus: page.menus, hiddenText: page.hiddenText };
+        page.session.dispose();
+        return result;
+      };
+      const refused = { menus: [], hiddenText: [] };
+      // A block of no height that clips: the page can never show the list.
+      expect(none(`<div id="wrap">${list}</div>`, { boxless: '#wrap', clipping: '#wrap' }))
+        .toEqual(refused);
+      // Text or a second element beside the list: not a wrapper.
+      expect(none(`<div id="wrap">Sale ${list}</div>`, { boxless: '#wrap' }))
+        .toEqual(refused);
+      expect(none(`<div id="wrap"><span></span>${list}</div>`, { boxless: '#wrap' }))
+        .toEqual(refused);
+      // Nothing hidden anywhere: no menu.
+      expect(none(`<div id="wrap">${list}</div>`, { boxless: '#wrap', collapsed: '#none' }))
+        .toEqual(refused);
+      // A hidden link in a wrapper is the page's mobile copy, not a panel.
+      expect(none(
+        '<div id="wrap"><a id="panel" href="/m">Mobile</a></div>',
+        { boxless: '#wrap' },
+      )).toEqual(refused);
+      // A wrapper that something above hides is not shown itself.
+      expect(none(
+        `<div id="wrap">${list}</div>`,
+        { boxless: '#wrap', collapsed: '#panel, nav' },
+      )).toEqual(refused);
+    });
+
+    it('makes no menu of what is none as the item\'s own child', () => {
+      // What a wrapper holds is judged as the item's own child is. The
+      // wrapper adds demands of its own (no box, a panel out of the flow)
+      // and takes none away: each of these is refused both ways.
+      const prose = 'The council met on the quay and voted on the registers of the town hall. '
+        .repeat(80);
+      const outside = (held: string) => `<div id="item">
+        <a id="trigger" href="/products">Products</a>${held}</div>`;
+      const besideButton = (held: string) => `<div id="item">
+        <button id="trigger" type="button">More</button>${held}</div>`;
+      const shapes: readonly (readonly [string, (held: string) => string, string])[] = [
+        ['much text that is not links', item,
+          `<div id="panel"><p>${prose}</p><a href="/more">Read more</a></div>`],
+        ['a hidden link (the mobile copy of a link)', item,
+          '<a id="panel" href="/m">Mobile</a>'],
+        ['a password field', item,
+          '<div id="panel"><a href="/in">Sign in</a><input type="password" name="p"></div>'],
+        ['a list beside a link outside navigation', outside, list],
+        ['a block beside a button outside navigation', besideButton,
+          '<div id="panel"><a href="/alpha">Alpha</a> <a href="/beta">Beta</a></div>'],
+      ];
+      for (const [name, around, panel] of shapes) {
+        const direct = read(around(panel));
+        expect(direct.menus, `${name}, the item's own child`).toEqual([]);
+        direct.session.dispose();
+        const wrapped = read(around(`<div id="wrap">${panel}</div>`), { boxless: '#wrap' });
+        expect(wrapped.menus, `${name}, in a wrapper`).toEqual([]);
+        expect(wrapped.hiddenText, `${name}, in a wrapper`).toEqual([]);
+        wrapped.session.dispose();
+      }
+      // The control: the same list in navigation is a menu both ways, and a
+      // list beside a button anywhere.
+      for (const [around, held] of [
+        [item, list],
+        [item, `<div id="wrap">${list}</div>`],
+        [besideButton, list],
+        [besideButton, `<div id="wrap">${list}</div>`],
+      ] as const) {
+        const page = read(around(held), { boxless: '#wrap' });
+        expect(page.menus, held).toEqual(['item trigger panel']);
+        page.session.dispose();
+      }
+    });
+
+    it('offers no menu for a large block of prose inside a wrapper', () => {
+      const prose = 'The council met on the quay and voted on the registers of the town hall. '
+        .repeat(80);
+      const page = read(item(
+        `<div id="wrap"><div id="panel"><p>${prose}</p><a href="/more">Read more</a></div></div>`,
+      ), { boxless: '#wrap' });
+      expect(page.menus).toEqual([]);
+      expect(page.hiddenText).toEqual([]);
+      page.session.dispose();
+    });
+
+    it('offers a menu whose own item has no box, and none where that item clips', () => {
+      // A list item whose link floats has no height; its menu hangs out of it.
+      const floated = read(item(list), { boxless: '#item' });
+      expect(floated.menus).toEqual(['item trigger panel']);
+      floated.session.dispose();
+      const clipped = read(item(list), { boxless: '#item', clipping: '#item' });
+      expect(clipped.menus).toEqual([]);
+      expect(clipped.hiddenText).toEqual([]);
+      clipped.session.dispose();
+    });
+
+    it('keeps the menu while the page itself shows the panel in its wrapper', () => {
+      // The wrapper holds no link, so painted it could pass for a second
+      // trigger: what holds the panel stays what holds it.
+      const page = read(item(
+        '<div id="wrap"><div id="panel"><span>Alpha</span></div></div>',
+      ), { boxless: '#wrap' });
+      expect(page.menus).toEqual(['item trigger panel']);
+      const first = page.port.messages[0]!;
+      const proof = first.proofs.find((candidate) => candidate.kind === 'structural-menu');
+      // A real hover on the page: the panel is displayed, the wrapper has a box.
+      page.collapsed.clear();
+      Object.defineProperty(page.document.querySelector('#wrap')!, 'getClientRects', {
+        configurable: true,
+        value: () => paintedRectList(),
+      });
+      page.port.emit(createSemanticSourceAck(
+        identity, first.policyFingerprint, first.sequence,
+      ));
+      page.session.refresh();
+      expect(page.port.messages[1]!.proofs).toContainEqual(expect.objectContaining({
+        kind: 'structural-menu',
+        relationId: proof?.kind === 'structural-menu' ? proof.relationId : '',
+        expanded: true,
+      }));
+      page.session.dispose();
+    });
+
+    it('offers a button beside a wrapped list anywhere, and no block beside a button', () => {
+      const wrapped = read(
+        `<div id="item"><button id="trigger">Actions</button><div id="wrap">${list}</div></div>`,
+        { boxless: '#wrap' },
+      );
+      expect(wrapped.menus).toEqual(['item trigger panel']);
+      wrapped.session.dispose();
+      // A hidden block that wraps a list is the panel itself, and a block
+      // beside a button is no menu outside navigation, as before.
+      const block = read(
+        `<div id="item"><button id="trigger">Section</button><div id="panel">${list.replace('id="panel"', '')}</div></div>`,
+      );
+      expect(block.menus).toEqual([]);
+      expect(block.hiddenText).toEqual([]);
+      block.session.dispose();
+    });
+  });
+
+  it('knows a menu the page has open again when a new session reads the page', () => {
+    // The mirror is built again while the pointer rests on a hover menu in
+    // the tab: the session that reads the page anew sees a link beside a
+    // shown block, which alone is no menu. The menus read so far are kept
+    // for the document, and shared by every session on it.
+    const { document, window } = parseHTML(`<html><body><nav><ul>
+      <li id="item"><a id="trigger" href="/platform">Platform</a>
+        <ul id="panel"><li><a href="/alpha">Alpha</a></li></ul></li>
+      </ul></nav></body></html>`);
+    installPaintedTabFixture(document, window as unknown as Window);
+    const panel = document.querySelector('#panel')!;
+    let collapsed = true;
+    const style = structuralMenuStyle((element) =>
+      element === panel && collapsed ? 'display' : undefined);
+    const start = (structuralMenus?: WeakMap<Element, {
+      readonly trigger: Element;
+      readonly panel: Element;
+    }>) => {
+      const port = new FakeSemanticPort(
+        createSemanticSourcePortName(identity.sessionId, 'isolated-html'),
+      );
+      const session = new SemanticSourceSession({
+        port,
+        document: document as unknown as Document,
+        window: { ...(window as object), getComputedStyle: style } as unknown as Window,
+        bridge: 'isolated-html',
+        getNodeId: (node) => nodeId(node),
+        createMutationObserver: () => ({ observe: () => undefined, disconnect: () => undefined }),
+        schedule: (callback) => callback(),
+        ...(structuralMenus ? { structuralMenus } : {}),
+      });
+      port.emit(createSemanticSourceStart(
+        'isolated-html', identity, FULL_VISIBLE_REPLICA_READ_SCOPE,
+      ));
+      const menus = port.messages[0]!.proofs.flatMap((proof) =>
+        proof.kind === 'structural-menu' ? [proof.expanded] : []);
+      session.dispose();
+      return menus;
+    };
+    const kept = new WeakMap<Element, { readonly trigger: Element; readonly panel: Element }>();
+    expect(start(kept)).toEqual([false]);
+    // The page shows the panel (a hover in the tab), and the mirror is built again.
+    collapsed = false;
+    expect(start(kept)).toEqual([true]);
+    // A session that was told of no menu takes the shown block for none.
+    expect(start()).toEqual([]);
   });
 
   it('sends text without a letter or a digit as the page has it (D132)', () => {

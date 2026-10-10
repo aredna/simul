@@ -31,6 +31,7 @@ import {
   isPlainStructuralMenuTrigger,
   isStructuralMenuPanelElement,
   structuralMenuOpening,
+  structuralMenuPanelCandidates,
   type StructuralMenuOpening,
 } from './structural-menu-shape';
 
@@ -1434,7 +1435,8 @@ function receiverDisclosureTriggerIsSafe(element: Element): boolean {
 /**
  * The shape the page side inferred, read again from the replica: a container
  * holding the named trigger, the panel, and at most one more trigger (D132).
- * Undefined when the replica does not show that shape.
+ * The panel is the container's child or sits in that child inside wrappers
+ * that hold nothing else. Undefined when the replica does not show that shape.
  */
 function receiverStructuralMenuShape(
   container: Element,
@@ -1451,7 +1453,7 @@ function receiverStructuralMenuShape(
     container.ownerDocument !== panel.ownerDocument ||
     container.getRootNode() !== trigger.getRootNode() ||
     container.getRootNode() !== panel.getRootNode() ||
-    trigger.parentElement !== container || panel.parentElement !== container ||
+    trigger.parentElement !== container ||
     !isStructuralMenuPanelElement(panel) ||
     safeNullableAttribute(container, 'hidden') !== null ||
     safeAttribute(container, 'aria-hidden').trim().toLowerCase() === 'true'
@@ -1464,9 +1466,12 @@ function receiverStructuralMenuShape(
   }
   if (
     children.length < 2 || children.length > MAX_STRUCTURAL_MENU_TRIGGERS + 1 ||
-    !children.includes(trigger) || !children.includes(panel)
+    !children.includes(trigger)
   ) return undefined;
-  const triggers = children.filter((child) => child !== panel);
+  const held = children.find((child) =>
+    child !== trigger && structuralMenuPanelCandidates(child).includes(panel));
+  if (!held) return undefined;
+  const triggers = children.filter((child) => child !== held);
   for (const candidate of triggers) {
     if (
       safeNullableAttribute(candidate, 'hidden') !== null ||

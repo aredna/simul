@@ -3,6 +3,7 @@ import { describe, expect, it } from 'vitest';
 
 import {
   createSourcePaintScanCache,
+  sourceElementPathHoldsPaint,
   sourceElementPathIsDisplayed,
   sourceElementPathIsPainted,
   sourceElementPathIsPaintedByPath,
@@ -208,11 +209,11 @@ describe('memoized painted-path proof', () => {
       <div id="zero-clip"><p id="in-zero-clip">c</p><div id="contents-in-zero-clip"></div></div>
       <div id="contents-clip"><p id="in-contents-clip">d</p></div>
       <div id="hidden-contents"><p id="in-hidden-contents">e</p></div>
-      <div id="declared-hidden" hidden><p id="in-declared-hidden">g</p></div>
+      <div id="declared-hidden" hidden><p id="in-declared-hidden">g</p><div id="zero-in-hidden"></div></div>
       <div id="faded-contents"><p id="in-faded-contents">h</p></div>
       <div id="said-hidden-contents" aria-hidden="true"><p id="in-said-hidden-contents">i</p></div>
       <div id="faded-block"><p id="in-faded-block">j</p></div>
-      <div id="small-clip"><div id="contents-inside"><p id="outside-the-clip">f</p></div></div>
+      <div id="small-clip"><div id="contents-inside"><p id="outside-the-clip">f</p></div><div id="zero-in-clip"></div></div>
     </body></html>`);
     const byId = (id: string): HTMLElement => document.getElementById(id)!;
     const rect = (left: number, top: number, width: number, height: number) => ({
@@ -230,6 +231,8 @@ describe('memoized painted-path proof', () => {
       [byId('said-hidden-contents'), []],
       [byId('small-clip'), [rect(0, 0, 50, 50)]],
       [byId('contents-inside'), []],
+      [byId('zero-in-clip'), []],
+      [byId('zero-in-hidden'), []],
       [byId('outside-the-clip'), [rect(200, 200, 100, 20)]],
     ]);
     const styles = new Map<Element, Record<string, string>>([
@@ -318,5 +321,19 @@ describe('memoized painted-path proof', () => {
     // A clip above a box-less wrapper still clips what the wrapper holds.
     expect(proofs('outside-the-clip')).toEqual([false, false]);
     expect(proofs('contents-inside')).toEqual([true, true]);
+    // What an element holds may be painted: when it is painted itself, and
+    // when it is shown, has no box of its own and clips nothing away (a
+    // wrapper of no height around a positioned menu).
+    const holds = (id: string): boolean =>
+      sourceElementPathHoldsPaint(byId(id), window as unknown as Window);
+    expect(['in-zero', 'zero', 'contents', 'contents-clip', 'zero-in-clip'].map(holds))
+      .toEqual([true, true, true, true, true]);
+    // Not one that clips with no size, sits in one, is hidden or sits in
+    // something hidden; and one that has a box must prove it painted.
+    expect([
+      'zero-clip', 'contents-in-zero-clip', 'hidden-contents',
+      'in-hidden-contents', 'declared-hidden', 'in-declared-hidden',
+      'zero-in-hidden', 'faded-block', 'outside-the-clip',
+    ].map(holds)).toEqual(Array.from({ length: 9 }, () => false));
   });
 });

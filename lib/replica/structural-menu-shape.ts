@@ -32,15 +32,31 @@ const LIST_PANEL_TAGS = new Set(['ol', 'ul']);
  * dialog.
  */
 export function isStructuralButtonMenu(trigger: Element, panel: Element): boolean {
-  const triggerRole = readRole(trigger);
-  const panelRole = readRole(panel);
-  const button = readLocalName(trigger) === 'button'
-    ? triggerRole === '' || triggerRole === 'button'
-    : triggerRole === 'button';
-  const list = LIST_PANEL_TAGS.has(readLocalName(panel))
-    ? panelRole === '' || panelRole === 'list' || panelRole === 'menu'
-    : panelRole === 'menu';
-  return button && list;
+  return isStructuralMenuButton(trigger) && isStructuralMenuList(panel);
+}
+
+/**
+ * The same shape before the panel is known: a button beside a list, or
+ * beside wrappers around one (see `structuralMenuPanelCandidates`). The
+ * button is asked first: most pairs of elements on a page hold none.
+ */
+export function mayBeStructuralButtonMenu(trigger: Element, held: Element): boolean {
+  return isStructuralMenuButton(trigger) &&
+    structuralMenuPanelCandidates(held).some(isStructuralMenuList);
+}
+
+function isStructuralMenuButton(trigger: Element): boolean {
+  const role = readRole(trigger);
+  return readLocalName(trigger) === 'button'
+    ? role === '' || role === 'button'
+    : role === 'button';
+}
+
+function isStructuralMenuList(panel: Element): boolean {
+  const role = readRole(panel);
+  return LIST_PANEL_TAGS.has(readLocalName(panel))
+    ? role === '' || role === 'list' || role === 'menu'
+    : role === 'menu';
 }
 
 /**
@@ -105,6 +121,55 @@ const NON_PANEL_TAGS = new Set([
  */
 export function isStructuralMenuPanelElement(element: Element): boolean {
   return !NON_PANEL_TAGS.has(readLocalName(element));
+}
+
+/**
+ * How many wrappers deep a menu's panel may sit under its container: one.
+ * The shape this is for is a header's block of no height around a
+ * positioned list. Deeper wrappers took cards, answers and tooltips hidden
+ * inside nested blocks for menus as readily as they took menus.
+ */
+export const MAX_STRUCTURAL_MENU_PANEL_WRAPPERS = 1;
+
+/**
+ * What may be a menu's panel under one child of its container: the child,
+ * and what it wraps. Headers often put the panel in a wrapper that holds
+ * nothing else (a block of no height around a positioned list). A wrapper
+ * holds one element and no text of its own, and is itself something a panel
+ * could be: nothing is looked for inside a link or a control. The page side
+ * looks inside a wrapper only when it takes no room (no box of its own, and
+ * a panel placed out of the flow), and takes the outermost candidate it
+ * finds collapsed; the replica side, which cannot tell a box, accepts a
+ * panel that is one of them.
+ */
+export function structuralMenuPanelCandidates(child: Element): readonly Element[] {
+  const candidates = [child];
+  while (candidates.length <= MAX_STRUCTURAL_MENU_PANEL_WRAPPERS) {
+    const wrapped = structuralMenuWrappedElement(
+      candidates[candidates.length - 1]!,
+    );
+    if (!wrapped) break;
+    candidates.push(wrapped);
+  }
+  return candidates;
+}
+
+function structuralMenuWrappedElement(wrapper: Element): Element | undefined {
+  if (!isStructuralMenuPanelElement(wrapper)) return undefined;
+  try {
+    let wrapped: Element | undefined;
+    for (const node of wrapper.childNodes) {
+      if (node.nodeType === 1) {
+        if (wrapped) return undefined;
+        wrapped = node as Element;
+      } else if (node.nodeType === 3 && (node.nodeValue ?? '').trim() !== '') {
+        return undefined;
+      }
+    }
+    return wrapped;
+  } catch {
+    return undefined;
+  }
 }
 
 function readLocalName(element: Element): string {

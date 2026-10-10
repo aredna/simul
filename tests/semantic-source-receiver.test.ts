@@ -908,6 +908,70 @@ describe('semantic source receiver', () => {
     expect(document.querySelector('#item')!.textContent).toBe('Tax advisers');
   });
 
+  it('presents a structural menu whose panel sits inside a wrapper that holds nothing else', () => {
+    // A header's wrapper of no height around its list: the page side names
+    // the list, one wrapper down, and a hover reveals the list itself.
+    const { document, window } = parseHTML(`<html><body><nav><ul>
+      <li id="wrapper"><a id="trigger" href="/products">Products</a>
+      <div id="outer">
+        <ul id="panel"><li><a id="item" href="/alpha">***</a></li></ul>
+      </div></li>
+      </ul></nav><iframe id="frame"></iframe></body></html>`);
+    const { receiver, trigger, panel } = hoverMenuReplica(document, [16, 17, 18, 19]);
+
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 1,
+      [menuTextRecord(19, 'Alpha')],
+      [structuralMenuProof()],
+    ))).toBeDefined();
+    expect(trigger.hasAttribute('data-simul-replica-disclosure-trigger')).toBe(true);
+    expect(document.querySelector('#outer')!
+      .hasAttribute('data-simul-replica-disclosure-trigger')).toBe(false);
+    trigger.dispatchEvent(new window.Event('pointerenter', { bubbles: true }));
+    expect(panel.style.getPropertyValue('display')).toBe('block');
+    expect(panel.parentElement).toBe(document.querySelector('#outer'));
+    expect(trigger.getAttribute('aria-expanded')).toBe('true');
+  });
+
+  it.each([
+    ['holds text beside it', 'a', '<div>Sale <ul id="panel"><li><a id="item" href="/a">***</a></li></ul></div>'],
+    ['holds another element', 'a', '<div><span></span><ul id="panel"><li><a id="item" href="/a">***</a></li></ul></div>'],
+    ['is a link', 'span', '<a href="/x"><span id="panel"><span id="item">***</span></span></a>'],
+    [
+      'sits in a second wrapper',
+      'a',
+      '<div><div><ul id="panel"><li><a id="item" href="/a">***</a></li></ul></div></div>',
+    ],
+  ])('refuses a structural menu whose panel is inside a wrapper that %s', (_name, tag, held) => {
+    const { document } = parseHTML(`<html><body><nav><ul>
+      <li id="wrapper"><span id="trigger">Products</span>${held}</li>
+      </ul></nav><iframe id="frame"></iframe></body></html>`);
+    const { receiver, trigger } = hoverMenuReplica(document, [16, 17, 18, 19]);
+
+    // The menu is dropped by itself; its text still arrives (D96).
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 1,
+      [menuTextRecord(19, 'Alpha', tag)],
+      [structuralMenuProof()],
+    ))).toBeDefined();
+    expect(trigger.hasAttribute('data-simul-replica-disclosure-trigger')).toBe(false);
+    expect(document.querySelector('#item')!.textContent).toBe('Alpha');
+  });
+
+  it('refuses a structural menu whose panel sits inside its own trigger', () => {
+    const { document } = parseHTML(`<html><body><nav><ul>
+      <li id="wrapper"><span id="trigger"><ul id="panel"><li id="item">***</li></ul></span>
+      <span>Other</span></li>
+      </ul></nav><iframe id="frame"></iframe></body></html>`);
+    const { receiver, trigger } = hoverMenuReplica(document, [16, 17, 18, 19]);
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 1,
+      [menuTextRecord(19, 'Alpha', 'li')],
+      [structuralMenuProof()],
+    ))).toBeDefined();
+    expect(trigger.hasAttribute('data-simul-replica-disclosure-trigger')).toBe(false);
+  });
+
   it('rewrites menu text into a replica node a live patch replaced (D82)', () => {
     // A hover on the page repaints the header; the patch rebuilds the text
     // nodes of every hidden menu, and their text used to be lost.

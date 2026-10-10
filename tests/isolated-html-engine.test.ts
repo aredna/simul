@@ -1167,6 +1167,122 @@ describe('IsolatedHtmlReplicaEngine', () => {
     }
   });
 
+  it('keeps a dropdown out of sight where its presentation says so, closes its open list, and keeps it through a tap\'s echo', async () => {
+    // A dropdown under something hidden is not marked hidden: it keeps its
+    // box for when the mirror opens what hides it (a site menu's panel).
+    const tree = (selectPresentationStyle: string) => ({
+      kind: 'element' as const, id: 1, namespace: 'html' as const, tagName: 'html',
+      attributes: [], children: [
+        { kind: 'element' as const, id: 2, namespace: 'html' as const, tagName: 'head', attributes: [], children: [] },
+        { kind: 'element' as const, id: 3, namespace: 'html' as const, tagName: 'body', attributes: [], children: [{
+          kind: 'element' as const, id: 4, namespace: 'html' as const, tagName: 'select',
+          attributes: [], selectPresentationStyle,
+          children: [{
+            kind: 'element' as const, id: 5, namespace: 'html' as const, tagName: 'option',
+            attributes: [], children: [],
+          }],
+        }] },
+      ],
+    });
+    const checkpoint = createHtmlMirrorCheckpoint(
+      createReplicaIdentity({ ...identityParts, sequence: 0 }),
+      {
+        root: tree('visibility:visible;width:110px'),
+        adoptedStyleSheets: [], captureMs: 1,
+        viewportWidth: 800, viewportHeight: 600,
+        documentWidth: 800, documentHeight: 1000,
+      },
+      'passive',
+    )!;
+    expect(checkpoint).toBeDefined();
+    // linkedom's style declaration has no item(); Chrome's does.
+    const styleProto = Object.getPrototypeOf(
+      parseHTML('<p></p>').document.createElement('p').style,
+    ) as { item?: (this: Record<string, string>, index: number) => string };
+    const hadItem = Object.prototype.hasOwnProperty.call(styleProto, 'item');
+    if (!hadItem) {
+      styleProto.item = function item(index) {
+        return this[String(index)] ?? '';
+      };
+    }
+    try {
+      const stream = new FakeHtmlStream(checkpoint);
+      const semantic = new FakeSemanticStream();
+      const host = new FakePresentationHost();
+      const engine = makeEngine(stream, host, undefined, semantic);
+      await engine.run(request);
+      await Promise.resolve();
+      expect(semantic.emit(createSemanticSourceBatch(
+        engine.snapshot()!.document, 'read-v1-111111', 1, [],
+        [{
+          kind: 'select-presentation', bridge: 'isolated-html', nodeId: 4,
+          revision: 1, gate: 'controlSemantics', multiple: false, size: null,
+          classifierVersion: 1,
+        }],
+      ))).toBe(true);
+      const selectHost = host.iframe!.contentDocument!.body
+        .firstElementChild as HTMLElement;
+      const trigger = selectHost.shadowRoot!.querySelector<HTMLButtonElement>(
+        '[data-simul-owned-select-trigger="v1"]',
+      )!;
+      const click = () => trigger.dispatchEvent(
+        new selectHost.ownerDocument.defaultView!.Event('click', {
+          bubbles: true, cancelable: true, composed: true,
+        }),
+      );
+      const patch = (sequence: number, style: string) => stream.observer?.onPatch(
+        createHtmlMirrorPatch(
+          createReplicaIdentity({ ...identityParts, sequence }),
+          sequence,
+          sequence,
+          [{
+            kind: 'attributes', nodeId: 4, namespace: 'html', tagName: 'select',
+            attributes: [], selectPresentationStyle: style,
+          }],
+          undefined,
+          'passive',
+        )!,
+      );
+      expect(selectHost.style.getPropertyValue('visibility')).toBe('visible');
+      click();
+      expect(trigger.getAttribute('aria-expanded')).toBe('true');
+      // Chrome 138 sends a tap again as `mousedown` and `mouseup`. On the
+      // dropdown's own button that is the echo of a press it already had:
+      // cancelled like any other, and it closes nothing. Anywhere else it
+      // is an input from elsewhere and closes the reader's previews.
+      const replica = selectHost.ownerDocument;
+      const mouse = (type: string, path: EventTarget[]) => {
+        const event = new replica.defaultView!.Event(type, {
+          bubbles: true, cancelable: true, composed: true,
+        });
+        Object.defineProperty(event, 'composedPath', { value: () => path });
+        replica.dispatchEvent(event);
+        return event.defaultPrevented;
+      };
+      expect(mouse('mousedown', [trigger, selectHost, replica.body, replica])).toBe(true);
+      expect(mouse('mouseup', [trigger, selectHost, replica.body, replica])).toBe(true);
+      expect(trigger.getAttribute('aria-expanded')).toBe('true');
+      expect(mouse('mousedown', [replica.body, replica])).toBe(true);
+      expect(trigger.getAttribute('aria-expanded')).toBe('false');
+      click();
+      expect(trigger.getAttribute('aria-expanded')).toBe('true');
+      // A change to the dropdown that leaves it in sight leaves its list.
+      patch(1, 'visibility:visible;width:120px');
+      expect(selectHost.style.getPropertyValue('width')).toBe('120px');
+      expect(trigger.getAttribute('aria-expanded')).toBe('true');
+
+      // The page hides what the dropdown sits in.
+      patch(2, 'visibility:hidden;width:120px');
+      expect(selectHost.style.getPropertyValue('visibility')).toBe('hidden');
+      // Its box stays: no `display: none`, no hidden marker.
+      expect(selectHost.style.getPropertyValue('display')).toBe('inline-block');
+      expect(selectHost.hasAttribute('data-simul-select-hidden')).toBe(false);
+      expect(trigger.getAttribute('aria-expanded')).toBe('false');
+    } finally {
+      if (!hadItem) delete styleProto.item;
+    }
+  });
+
   it('renders and updates native select labels without transporting option values', async () => {
     const checkpoint = createHtmlMirrorCheckpoint(
       createReplicaIdentity({ ...identityParts, sequence: 0 }),

@@ -80,6 +80,7 @@ import type {
 import type { SelectableReplicaFidelityPolicy } from './fidelity-policy';
 import {
   closeReadOnlyReplicaDisclosures,
+  isReadOnlyReplicaDisclosurePressEcho,
   disposeReadOnlyReplicaDisclosures,
   installReadOnlyReplicaDisclosure,
   isReadOnlyReplicaDisclosureEvent,
@@ -2390,6 +2391,12 @@ function syncNativeSelectFacsimileHost(element: Element): void {
   if (!hasPresentationDisplay) {
     host.style.setProperty('display', 'inline-block', 'important');
   }
+  // A dropdown under something hidden is not marked hidden: it keeps its
+  // box, out of sight, for when the mirror opens what hides it (a site
+  // menu's panel). A list left open has nothing to hang from then.
+  if (host.style.getPropertyValue('visibility') === 'hidden') {
+    ISOLATED_SELECT_FACSIMILES.get(host)?.controller?.close();
+  }
   syncIsolatedNativeSelectFacsimile(host);
 }
 
@@ -4650,7 +4657,8 @@ function blockIsolatedDisclosureActivation(event: Event): void {
   const currentTarget = event.currentTarget;
   if (
     currentTarget && 'nodeType' in currentTarget &&
-    currentTarget.nodeType === Node.DOCUMENT_NODE
+    currentTarget.nodeType === Node.DOCUMENT_NODE &&
+    !isReadOnlyReplicaDisclosurePressEcho(event)
   ) closeReadOnlyReplicaDisclosures(currentTarget as Document);
   if (event.cancelable) event.preventDefault();
   event.stopImmediatePropagation();

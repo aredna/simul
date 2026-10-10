@@ -513,10 +513,15 @@ describe('HtmlMirrorSourceSession', () => {
     const baseGetComputedStyle = fixture.window.getComputedStyle.bind(fixture.window);
     let opacity = '0';
     let collapsed = false;
-    Object.defineProperty(panel, 'getClientRects', {
-      configurable: true,
-      value: () => collapsed ? mirrorEmptyRectList() : mirrorTabRectList(),
-    });
+    // Collapsed, neither the panel nor what it holds has a box, as in
+    // Chrome. (A panel of no height whose content still hangs out of it,
+    // painted, is drawn by the tab and is read.)
+    for (const element of [panel, nested]) {
+      Object.defineProperty(element, 'getClientRects', {
+        configurable: true,
+        value: () => collapsed ? mirrorEmptyRectList() : mirrorTabRectList(),
+      });
+    }
     Object.defineProperty(fixture.window, 'getComputedStyle', {
       configurable: true,
       value: (element: Element) => {

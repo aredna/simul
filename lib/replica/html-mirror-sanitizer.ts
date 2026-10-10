@@ -19,6 +19,7 @@ import {
   readSourceFlatTreeElementPath,
   readSourceSelectEntries,
   readSourceSelectEntryOwner,
+  readSourceSelectRevealer,
   readSourceStructuralAttributes,
   sourceAttributesArePrivate,
   sourceControlledContentIsWithheld,
@@ -27,6 +28,10 @@ import {
   type SourceControlledContentPolicy,
   type SourceSecretAncestorMemo,
 } from './source-privacy-policy';
+import {
+  sourceElementHidesItselfByVisibility,
+  sourceElementScalesItselfToNothing,
+} from './source-own-hiding';
 import type { SelectableReplicaFidelityPolicy } from './fidelity-policy';
 import {
   isSourceSecretPlaceholderTagName,
@@ -1174,11 +1179,16 @@ export function sanitizeSourceElementHints(
     hasSourceCredentialSecretAncestor(source, undefined, undefined, secretAncestors)
   ) return Object.freeze({});
   const tagName = source.localName.toLowerCase();
-  const visuallyHidden = tagName === 'select'
+  const hidden = tagName === 'select'
     ? isSourceSelectVisuallyHidden(source)
     : (tagName === 'option' || tagName === 'optgroup')
       ? isSourceSelectEntryVisuallyHidden(source)
       : isCanonicalClippedSourceElement(source);
+  // A dropdown that only something above it hides keeps its box in the
+  // mirror, out of sight, for when the mirror opens what hides it.
+  const heldOutOfSight = hidden && tagName === 'select' &&
+    isSourceSelectHeldOutOfSight(source);
+  const visuallyHidden = hidden && !heldOutOfSight;
   const selectedImageSource = tagName === 'img'
     && (() => {
       // A checkpoint or live patch already holds the document's policy; the
@@ -1203,7 +1213,7 @@ export function sanitizeSourceElementHints(
       )
     : undefined;
   const selectPresentationStyle = tagName === 'select'
-    ? readSourceSelectPresentationStyle(source, fidelityPolicy)
+    ? readSourceSelectPresentationStyle(source, fidelityPolicy, heldOutOfSight)
     : undefined;
   return Object.freeze({
     ...(visuallyHidden ? { visuallyHidden: true as const } : {}),
@@ -3190,9 +3200,17 @@ function sanitizeNativeSelectStyle(
   );
 }
 
+/**
+ * `outOfSight`: the dropdown is hidden only by something above it (see
+ * `isSourceSelectHeldOutOfSight`). Its own style is read as ever, and its
+ * `visibility` is sent as hidden whatever it computes to: under a panel
+ * collapsed with `display` it computes to visible, and the mirror's box for
+ * a dropdown takes no `visibility` from what is around it.
+ */
 export function readSourceSelectPresentationStyle(
   element: Element,
   fidelityPolicy: SelectableReplicaFidelityPolicy = 'conservative',
+  outOfSight = false,
 ): string | undefined {
   const view = element.ownerDocument?.defaultView;
   if (
@@ -3204,7 +3222,9 @@ export function readSourceSelectPresentationStyle(
     const computed = view.getComputedStyle(element);
     const declarations: string[] = [];
     for (const property of NATIVE_SELECT_COMPUTED_STYLE_PROPERTIES) {
-      const value = computed.getPropertyValue(property).trim();
+      const value = outOfSight && property === 'visibility'
+        ? 'hidden'
+        : computed.getPropertyValue(property).trim();
       if (!value || value.length > 500) continue;
       declarations.push(`${property}:${value}`);
     }
@@ -4182,7 +4202,40 @@ export function isSourceSelectVisuallyHidden(element: Element): boolean {
     isComputedHiddenSourceSelect(element);
 }
 
-function isComputedHiddenSourceSelect(element: Element): boolean {
+/**
+ * A hidden dropdown that only something above it hides, and that would be
+ * shown as it is once that is opened: a language picker in a site menu's
+ * collapsed panel, which the mirror may open for the reader. The mirror
+ * does not draw a dropdown marked hidden, so this one is not marked: it is
+ * kept out of sight (`readSourceSelectPresentationStyle`) and shown with
+ * the rest of the panel when the mirror opens it. One the page hides by a
+ * rule of its own (a backing field under a custom dropdown) stays marked.
+ */
+export function isSourceSelectHeldOutOfSight(element: Element): boolean {
+  return readSourceSelectRevealer(element) !== undefined &&
+    !isSourceSelectHiddenByItself(element);
+}
+
+/**
+ * Whether a dropdown would still not be drawn once what hides it from above
+ * is shown: clipped away for screen readers, or hidden by a rule of its own.
+ * The label reader asks this alone for a dropdown in a panel it was told the
+ * mirror may open: that there is such a panel above, and nothing between
+ * that stays hidden, it has found already, and need not walk that path once
+ * more for each dropdown at every change of the page.
+ */
+export function isSourceSelectHiddenByItself(element: Element): boolean {
+  return isCanonicalClippedSourceElement(element) ||
+    isComputedHiddenSourceSelect(element, true);
+}
+
+/**
+ * `opened`: as it would be once what hides it from above is shown. A
+ * `visibility` it only inherits is then the panel's fade and not its own,
+ * and without a box (under `display: none`) its computed transform says
+ * nothing: for both, what the page itself wrote for it is asked.
+ */
+function isComputedHiddenSourceSelect(element: Element, opened = false): boolean {
   const view = element.ownerDocument?.defaultView;
   if (!view || typeof view.getComputedStyle !== 'function') return false;
   try {
@@ -4207,16 +4260,19 @@ function isComputedHiddenSourceSelect(element: Element): boolean {
         (top !== undefined && height !== undefined && top + height <= 0)
       );
     const transform = style.transform.trim().toLowerCase();
-    const transformCollapses = transform !== '' && transform !== 'none' && (() => {
-      try {
-        const rect = element.getBoundingClientRect();
-        return rect.width <= 0 || rect.height <= 0;
-      } catch {
-        return /(?:scale(?:3d|x|y)?\([^)]*\b0(?:[),]|\s))/u.test(transform);
-      }
-    })();
+    const transformCollapses = opened && element.getClientRects().length === 0
+      ? sourceElementScalesItselfToNothing(element)
+      : transform !== '' && transform !== 'none' && (() => {
+        try {
+          const rect = element.getBoundingClientRect();
+          return rect.width <= 0 || rect.height <= 0;
+        } catch {
+          return /(?:scale(?:3d|x|y)?\([^)]*\b0(?:[),]|\s))/u.test(transform);
+        }
+      })();
     return style.display.trim().toLowerCase() === 'none' ||
-      ['hidden', 'collapse'].includes(style.visibility.trim().toLowerCase()) ||
+      (['hidden', 'collapse'].includes(style.visibility.trim().toLowerCase()) &&
+        (!opened || sourceElementHidesItselfByVisibility(element))) ||
       (Number(style.opacity) === 0 &&
         !isSourceTransparentSelectClickTarget(element, view, style)) ||
       style.getPropertyValue('content-visibility').trim().toLowerCase() === 'hidden' ||
