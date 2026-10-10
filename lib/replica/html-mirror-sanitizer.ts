@@ -40,6 +40,10 @@ import {
 import { isSafeStaticSvgDataImage } from './static-svg-data-image';
 import { SOURCE_PRIVACY_FILTERS_OFF } from './source-privacy-mode';
 import {
+  listSourceHeldAnimations,
+  readSourceHeldAnimationStyle,
+} from './source-held-animation';
+import {
   readSourceAssignedSlot,
   readSourceShadowRoot,
 } from './source-shadow-root';
@@ -700,7 +704,7 @@ function quotedCssText(value: string): string | undefined {
  */
 function isTwinOfSentName(
   element: Element,
-  attribute: Attr,
+  attribute: SourceAttribute,
   name: string,
 ): boolean {
   const svg = element.namespaceURI === 'http://www.w3.org/2000/svg';
@@ -722,10 +726,24 @@ function isTwinOfSentName(
 }
 
 /** Whether `attribute` is the element's `lang` in the XML namespace. */
-function isXmlNamespaceLanguage(attribute: Attr): boolean {
+function isXmlNamespaceLanguage(attribute: SourceAttribute): boolean {
   return attribute.namespaceURI === XML_NAMESPACE_URI &&
     attribute.localName === 'lang';
 }
+
+/** What is read of one attribute of an element of the page. */
+type SourceAttribute = Pick<Attr, 'name' | 'value' | 'namespaceURI' | 'localName'>;
+
+/**
+ * The `style` attribute an element is read with when it has none and a
+ * script animation holds it at something: the plain one, in no namespace.
+ */
+const HELD_STYLE_ATTRIBUTE: SourceAttribute = Object.freeze({
+  name: 'style',
+  value: '',
+  namespaceURI: null,
+  localName: 'style',
+});
 const NATIVE_SELECT_PRESENTATION_ATTRIBUTES = Object.freeze({
   select: new Set(['role']),
   option: new Set(['role']),
@@ -1982,6 +2000,9 @@ function serializeNode(
   // Open or closed (D125). Read before the element's own children: they are
   // drawn where this root slots them, not where they sit in the page (D135).
   const sourceShadow = readSourceShadowRoot(liveElement);
+  // What its elements' ended script animations hold is worked out for the
+  // root as one, before any of them is read.
+  if (sourceShadow) listSourceHeldAnimations(sourceShadow);
   if (!isVoidElement(tagName) && !isSourceNativeTextControlTagName(tagName)) {
     const styleResolved = tagName === 'style' &&
       hints.resolvedStyleSheetText !== undefined;
@@ -2154,7 +2175,17 @@ function sanitizeAttributes(
     return undefined;
   }
   const result: Array<readonly [string, string]> = [];
-  for (const attribute of element.attributes) {
+  // What a script animation that has ended still holds the element at is
+  // drawn as if the element's own style said it, and is read with it: an
+  // element that has no `style` gets one for it. Where the page has one
+  // under another spelling, the held values join that one, and the name is
+  // still sent once (below).
+  const heldStyle = readSourceHeldAnimationStyle(element);
+  const sourceAttributes: Iterable<SourceAttribute> =
+    heldStyle && !element.hasAttribute('style')
+      ? [...element.attributes, HELD_STYLE_ATTRIBUTE]
+      : element.attributes;
+  for (const attribute of sourceAttributes) {
     const xmlLanguage = isXmlNamespaceLanguage(attribute);
     const name = xmlLanguage
       ? PAGE_XML_LANGUAGE_ATTRIBUTE
@@ -2415,27 +2446,58 @@ function sanitizeAttributes(
       }
     } else if (name === 'style') {
       const classifiedBefore = classifiedStyleOmissionCount(representability);
-      const style = tagName === 'select'
-        ? sanitizeNativeSelectStyle(
-            value,
-            baseUrl,
-            representability,
-            fidelityPolicy,
-          )
-        : sanitizeCss(
-            value,
-            baseUrl,
-            true,
-            representability,
-            fidelityPolicy,
-          );
-      if (style === undefined) {
-        if (
-          classifiedStyleOmissionCount(representability) === classifiedBefore
-        ) {
-          incrementRepresentability(representability, 'unreadableStyleCount');
+      const sanitizeStyle = (text: string): string | undefined =>
+        tagName === 'select'
+          ? sanitizeNativeSelectStyle(
+              text,
+              baseUrl,
+              representability,
+              fidelityPolicy,
+            )
+          : sanitizeCss(
+              text,
+              baseUrl,
+              true,
+              representability,
+              fidelityPolicy,
+            );
+      const own = sanitizeStyle(value);
+      if (
+        own === undefined &&
+        classifiedStyleOmissionCount(representability) === classifiedBefore
+      ) {
+        incrementRepresentability(representability, 'unreadableStyleCount');
+      }
+      // What the element's ended script animations hold is read apart from
+      // the page's own declarations and stands after them: a style the page
+      // cut off in a bracket or a string, or one that is refused, does not
+      // take it along. If the two together would not read as they were
+      // written, the held values, which are what is drawn, travel alone.
+      let held: string | undefined;
+      if (heldStyle) {
+        // Thousands of elements often hold the same few values (every
+        // card of a page that fades its cards in): one that came through
+        // as it was is not gone through again for each of them.
+        const known = `${fidelityPolicy}|${tagName === 'select'}|${heldStyle}`;
+        if (CLEAN_HELD_STYLES.has(known)) {
+          held = heldStyle;
+        } else {
+          held = sanitizeStyle(heldStyle);
+          if (held === heldStyle && held.length <= MAX_CLEAN_HELD_STYLE_LENGTH) {
+            if (CLEAN_HELD_STYLES.size >= MAX_CLEAN_HELD_STYLES) {
+              CLEAN_HELD_STYLES.clear();
+            }
+            CLEAN_HELD_STYLES.add(known);
+          }
         }
-        continue;
+      }
+      let style = own;
+      if (held) {
+        style = held;
+        if (own?.trim()) {
+          const joined = `${closeCssBlocks(own)};${held}`;
+          if (sanitizeStyle(joined) === joined) style = joined;
+        }
       }
       if (!style) continue;
       value = style;
@@ -2468,6 +2530,14 @@ function sanitizeAttributes(
     } else if (name === 'rel' && tagName === 'link') {
       if (!isPassiveStylesheet(element)) continue;
       value = 'stylesheet';
+    } else if (
+      (name === 'media' &&
+        (tagName === 'link' || tagName === 'style' || tagName === 'source')) ||
+      (name === 'sizes' && (tagName === 'img' || tagName === 'source'))
+    ) {
+      // A sheet's or a picture source's media query, and the conditions of
+      // an image's sizes, are read as the tab reads them.
+      value = answerScriptingMediaFeatures(value);
     } else if (name === 'http-equiv' || name === 'content') {
       if (tagName === 'meta') continue;
     }
@@ -3039,8 +3109,20 @@ export function sanitizeCss(
     }
     return undefined;
   }
-  const commentless = stripCssCommentsOutsideStrings(css);
+  let commentless = stripCssCommentsOutsideStrings(css, !declarationList);
   if (commentless === undefined) return undefined;
+  // Queries about scripts are answered in the text as it came, where a
+  // comment still parts two names; a declaration list holds no rule. Most
+  // sheets do not name the feature and are not gone through.
+  const namesScripting = !declarationList && NAMES_SCRIPTING.test(commentless);
+  if (namesScripting) {
+    const answered = answerCssScriptingQueries(css, false);
+    if (answered !== css) {
+      // Its strings are the ones that were just read.
+      commentless = stripCssCommentsOutsideStrings(answered);
+      if (commentless === undefined) return undefined;
+    }
+  }
   const decodedExecutable = decodeCssEscapes(
     cssExecutableProjection(commentless),
   );
@@ -3129,11 +3211,555 @@ export function sanitizeCss(
     }
     return undefined;
   }
-  return rewriteCssUrlsOutsideStrings(
+  const rewritten = rewriteCssUrlsOutsideStrings(
     normalizedImageSets,
     baseUrl,
     representability,
   );
+  // Taking the comments out joins what stood on either side of each. A
+  // feature that only that made (`(scrip/**/ting)`, or a rule named
+  // `@med/**/ia`) is none to the tab, and is written as none.
+  return rewritten === undefined || !namesScripting
+    ? rewritten
+    : answerCssScriptingQueries(rewritten, true);
+}
+
+/**
+ * Whether the page being read runs scripts, asked of the page itself: this
+ * code runs in the tab when it reads a sheet, and in the panel when it
+ * checks one that has travelled, where nothing is left to answer.
+ */
+function sourceRunsScripts(): boolean {
+  try {
+    return globalThis.matchMedia?.('(scripting: none)').matches !== true;
+  } catch {
+    return true;
+  }
+}
+
+/**
+ * Whether a text may name the feature at all; most do not. Its letters, or
+ * a backslash where a rule's name or query stands, which may spell them.
+ * (No `@` between the two: from each `@` the text is then looked through
+ * once, not once more for every `@` before it.)
+ */
+const NAMES_SCRIPTING = /scripting|@[^{};@]*\\/i;
+/** The same for an attribute's value, which is a query from its start. */
+const QUERY_NAMES_SCRIPTING = /scripting|\\/i;
+/** A test that every viewport passes, and one that none does. */
+const MEDIA_FEATURE_ALWAYS = '(width >= 0px)';
+const MEDIA_FEATURE_NEVER = '(width < 0px)';
+/** Two names in brackets: no feature at all, which makes its query one that never applies. */
+const MEDIA_FEATURE_NONE = '(scrip ting)';
+
+interface CssEdit {
+  readonly start: number;
+  readonly end: number;
+  readonly text: string;
+}
+
+interface CssScriptingReading {
+  readonly css: string;
+  /**
+   * The text has been through `stripCssCommentsOutsideStrings`: a feature
+   * found in it now was none in the page's text, and is written as none.
+   */
+  readonly joined: boolean;
+  runsScripts: boolean | undefined;
+}
+
+/** A pair of plain brackets in a media query. */
+interface CssMediaBlock {
+  readonly end: number;
+  /**
+   * The answer, if it is the feature; the answers inside it, if it holds
+   * conditions only. They count if every pair around it holds conditions only.
+   */
+  readonly edits: readonly CssEdit[];
+}
+
+/**
+ * Answers the `scripting` features of one media query list as the tab
+ * answers them. The mirror's frame runs no scripts, so in it
+ * `(scripting: none)` matches and `(scripting: enabled)` does not, whatever
+ * the tab does: a page that hides what needs scripts from browsers without
+ * them had it hidden in the mirror (a documentation site hid every live
+ * example that way). Each such feature is replaced by a width test that
+ * always passes or never does, so `not`, `and`, `or` and the commas around
+ * it go on meaning what they meant.
+ *
+ * The feature is answered where a browser's parser sees it and nowhere
+ * else, so the text is read token by token as CSS reads it: a pair of plain
+ * brackets holding the name alone, or the name, a colon and one of the
+ * feature's three values, at the top of the list or inside brackets that
+ * group conditions. Only CSS white space parts tokens (a no-break space is
+ * a letter of a name), a comment parts two names, an escape spells a
+ * letter, a line break ends a string that was not closed, and the brackets
+ * of `layer(…)`, `supports(…)`, `calc(…)` or `not(…)` are a function's, not
+ * a condition's.
+ */
+export function answerScriptingMediaFeatures(query: string): string {
+  if (!QUERY_NAMES_SCRIPTING.test(query)) return query;
+  const edits: CssEdit[] = [];
+  readCssMediaQueryList(
+    { css: query, joined: false, runsScripts: undefined },
+    0,
+    false,
+    edits,
+  );
+  return applyCssEdits(query, edits);
+}
+
+/**
+ * The same for a whole sheet: the media queries of its `@media` rules,
+ * nested ones too, and of its `@import` rules. A rule is one where a rule
+ * can begin: at the start, or after `{`, `}` or `;`. Nothing else in the
+ * sheet is read as a query: not a selector, a string, or the value of a
+ * custom property, which may hold any text at all.
+ */
+function answerCssScriptingQueries(css: string, joined: boolean): string {
+  const reading: CssScriptingReading = { css, joined, runsScripts: undefined };
+  const edits: CssEdit[] = [];
+  let index = 0;
+  let ruleStart = true;
+  for (;;) {
+    index = skipCssTrivia(css, index);
+    const character = css[index];
+    if (character === undefined) break;
+    if (character === '{' || character === '}' || character === ';') {
+      ruleStart = true;
+      index += 1;
+      continue;
+    }
+    if (ruleStart) {
+      ruleStart = false;
+      if (character === '@') {
+        const keyword = readCssName(css, index + 1);
+        index = keyword.name === 'media'
+          ? readCssMediaQueryList(reading, keyword.end, true, edits)
+          : keyword.name === 'import'
+            ? readCssImportConditions(reading, keyword.end, edits)
+            : keyword.end;
+        continue;
+      }
+      if (character === '-' || character === '\\') {
+        const word = readCssName(css, index);
+        const colon = skipCssTrivia(css, word.end);
+        if (word.name.startsWith('--') && css[colon] === ':') {
+          index = skipCssDeclarationValue(css, colon + 1);
+          continue;
+        }
+      }
+    }
+    if (character === '"' || character === "'") {
+      index = skipCssString(css, index);
+    } else if (character === '(' || character === '[') {
+      index = skipCssBlock(css, index);
+    } else if (character === '\\') {
+      index += 2;
+    } else {
+      // Nothing else can begin or end a rule, a string or a block: on to
+      // the next character that can (a sheet is mostly this).
+      CSS_PLAIN_RUN.lastIndex = index + 1;
+      CSS_PLAIN_RUN.test(css);
+      index = Math.max(CSS_PLAIN_RUN.lastIndex, index + 1);
+    }
+  }
+  return applyCssEdits(css, edits);
+}
+
+/** Characters that begin or end no rule, string, block, comment or escape. */
+const CSS_PLAIN_RUN = /[^{};"'(\[\\/]*/y;
+
+/**
+ * The conditions of an import. Whether an import travels is for the
+ * sanitizer's own passes to say, after the features are answered, by what
+ * its conditions hold: they drop one whose conditions hold a backslash, or
+ * are longer than 2,048 characters. So nothing they go by is changed here.
+ * A feature spelled with a backslash is left as it is, and the import is
+ * dropped as it was; and conditions longer than half that length, which an
+ * answer could bring to one side of it or the other, are not read at all.
+ */
+function readCssImportConditions(
+  reading: CssScriptingReading,
+  from: number,
+  edits: CssEdit[],
+): number {
+  const answers: CssEdit[] = [];
+  const end = readCssMediaQueryList(reading, from, true, answers);
+  // What is found after those passes (`joined`) changes nothing for them.
+  if (reading.joined) {
+    edits.push(...answers);
+  } else if (end - from <= MAX_IMPORT_CONDITIONS_ANSWERED) {
+    for (const answer of answers) {
+      if (!reading.css.slice(answer.start, answer.end).includes('\\')) {
+        edits.push(answer);
+      }
+    }
+  }
+  return end;
+}
+
+const MAX_IMPORT_CONDITIONS_ANSWERED = 1_024;
+
+function applyCssEdits(css: string, edits: readonly CssEdit[]): string {
+  if (edits.length === 0) return css;
+  const parts: string[] = [];
+  let copied = 0;
+  // They come in the order they stand in, and none inside another.
+  for (const edit of edits) {
+    parts.push(css.slice(copied, edit.start), edit.text);
+    copied = edit.end;
+  }
+  parts.push(css.slice(copied));
+  return parts.join('');
+}
+
+/** CSS white space. Nothing else parts tokens: a no-break space is part of a name. */
+function isCssWhiteSpace(character: string | undefined): boolean {
+  return character === ' ' || character === '\t' || character === '\n' ||
+    character === '\r' || character === '\f';
+}
+
+/** A character a CSS name may hold: a letter, a digit, `_`, `-`, or anything past ASCII. */
+function isCssNameCharacter(character: string | undefined): boolean {
+  if (character === undefined) return false;
+  const code = character.charCodeAt(0);
+  return (code >= 0x30 && code <= 0x39) || (code >= 0x41 && code <= 0x5a) ||
+    (code >= 0x61 && code <= 0x7a) || code === 0x5f || code === 0x2d ||
+    code >= 0x80;
+}
+
+/** A backslash that spells a character: not one before a line break or at the end. */
+function isCssEscape(css: string, index: number): boolean {
+  const next = css[index + 1];
+  return css[index] === '\\' && next !== undefined && next !== '\n' &&
+    next !== '\r' && next !== '\f';
+}
+
+/**
+ * Reads a name from `from`: its letters as written and as escapes spell
+ * them, in lower case. `end` is `from` when no name stands there. CSS
+ * matches its names by ASCII letters only; no letter outside ASCII lowers to
+ * one of the names looked for here (a long s is not an `s`, a dotted capital
+ * I not an `i`; only the kelvin sign lowers to a `k`, which none of them has).
+ */
+function readCssName(
+  css: string,
+  from: number,
+): { readonly name: string; readonly end: number } {
+  // What escapes spelled so far; the letters since stand in the text itself.
+  let spelled = '';
+  let plainFrom = from;
+  let index = from;
+  for (;;) {
+    if (isCssNameCharacter(css[index])) {
+      index += 1;
+    } else if (isCssEscape(css, index)) {
+      spelled += css.slice(plainFrom, index);
+      const hex = /^[0-9a-f]{1,6}/iu.exec(css.slice(index + 1, index + 7));
+      if (hex) {
+        const code = Number.parseInt(hex[0], 16);
+        // Past the last character there is none to spell.
+        spelled += code > 0x10ffff ? '\ufffd' : String.fromCodePoint(code);
+        index += 1 + hex[0].length;
+        // One white space after the digits belongs to the escape.
+        if (css[index] === '\r' && css[index + 1] === '\n') index += 2;
+        else if (isCssWhiteSpace(css[index])) index += 1;
+      } else {
+        spelled += css[index + 1];
+        index += 2;
+      }
+      plainFrom = index;
+    } else {
+      break;
+    }
+  }
+  return {
+    name: (spelled + css.slice(plainFrom, index)).toLowerCase(),
+    end: index,
+  };
+}
+
+/** From a quote to past its end: the closing quote, or a line break, which ends a string too. */
+function skipCssString(css: string, from: number): number {
+  const quote = css[from];
+  let index = from + 1;
+  while (index < css.length) {
+    const character = css[index]!;
+    if (character === quote) return index + 1;
+    if (character === '\n' || character === '\r' || character === '\f') return index;
+    if (character === '\\') {
+      index += css[index + 1] === '\r' && css[index + 2] === '\n' ? 3 : 2;
+    } else {
+      index += 1;
+    }
+  }
+  return css.length;
+}
+
+/** Passes over white space and comments. */
+function skipCssTrivia(css: string, from: number): number {
+  let index = from;
+  for (;;) {
+    if (isCssWhiteSpace(css[index])) {
+      index += 1;
+    } else if (css[index] === '/' && css[index + 1] === '*') {
+      const close = css.indexOf('*/', index + 2);
+      index = close < 0 ? css.length : close + 2;
+    } else {
+      return index;
+    }
+  }
+}
+
+/**
+ * Where the address of a `url(` written without quotes ends, from the
+ * bracket: it runs to its `)`, quotes and brackets and all. `undefined` for
+ * any other function, and for an address in quotes.
+ */
+function skipCssUnquotedUrl(
+  css: string,
+  name: string,
+  open: number,
+): number | undefined {
+  if (name !== 'url') return undefined;
+  let index = open + 1;
+  while (isCssWhiteSpace(css[index])) index += 1;
+  if (css[index] === '"' || css[index] === "'") return undefined;
+  while (index < css.length && css[index] !== ')') {
+    index += css[index] === '\\' ? 2 : 1;
+  }
+  return Math.min(index + 1, css.length);
+}
+
+/**
+ * From an opening bracket to past the one that closes it, whatever it
+ * holds. The brackets still open are counted, not walked into: a text may
+ * nest them as deep as it is long.
+ */
+function skipCssBlock(css: string, open: number): number {
+  const closers: string[] = [];
+  let index = open;
+  for (;;) {
+    index = skipCssTrivia(css, index);
+    const character = css[index];
+    if (character === undefined) return index;
+    if (character === '(' || character === '[' || character === '{') {
+      closers.push(character === '(' ? ')' : character === '[' ? ']' : '}');
+      index += 1;
+    } else if (character === closers[closers.length - 1]) {
+      closers.pop();
+      index += 1;
+      if (closers.length === 0) return index;
+    } else if (character === '"' || character === "'") {
+      index = skipCssString(css, index);
+    } else if (isCssNameCharacter(character) || character === '\\') {
+      const word = readCssName(css, index);
+      if (word.end === index) {
+        index += 1;
+      } else if (css[word.end] === '(') {
+        // A function's bracket is counted with the rest.
+        index = skipCssUnquotedUrl(css, word.name, word.end) ?? word.end;
+      } else {
+        index = word.end;
+      }
+    } else {
+      index += 1;
+    }
+  }
+}
+
+/**
+ * One token that is no white space or comment: a string, a block, a
+ * function with its brackets, a name (`word`), or one character.
+ */
+function readCssAtom(
+  css: string,
+  index: number,
+): { readonly end: number; readonly word?: string } {
+  const character = css[index]!;
+  if (character === '"' || character === "'") {
+    return { end: skipCssString(css, index) };
+  }
+  if (character === '(' || character === '[' || character === '{') {
+    return { end: skipCssBlock(css, index) };
+  }
+  if (isCssNameCharacter(character) || character === '\\') {
+    const word = readCssName(css, index);
+    if (word.end === index) return { end: index + 1 };
+    if (css[word.end] !== '(') return { end: word.end, word: word.name };
+    return {
+      end: skipCssUnquotedUrl(css, word.name, word.end) ??
+        skipCssBlock(css, word.end),
+    };
+  }
+  return { end: index + 1 };
+}
+
+/** The value of a custom property: to its `;`, or to the end of the block it stands in. */
+function skipCssDeclarationValue(css: string, from: number): number {
+  let index = from;
+  for (;;) {
+    index = skipCssTrivia(css, index);
+    const character = css[index];
+    if (character === undefined || character === ';' || character === '}') {
+      return index;
+    }
+    index = readCssAtom(css, index).end;
+  }
+}
+
+/**
+ * Reads a media query list from `from` and answers its `scripting`
+ * features. In a sheet (`prelude`) the list ends at its rule's block, at its
+ * `;`, or with the block the rule stands in; an attribute's value is the
+ * list. Returns where it ended.
+ */
+function readCssMediaQueryList(
+  reading: CssScriptingReading,
+  from: number,
+  prelude: boolean,
+  edits: CssEdit[],
+): number {
+  const { css } = reading;
+  let index = from;
+  for (;;) {
+    index = skipCssTrivia(css, index);
+    const character = css[index];
+    if (character === undefined) return index;
+    if (
+      prelude && (character === '{' || character === ';' || character === '}')
+    ) return index;
+    if (character === '(') {
+      const block = readCssMediaBlock(reading, index, 1);
+      edits.push(...block.edits);
+      index = block.end;
+    } else {
+      index = readCssAtom(css, index).end;
+    }
+  }
+}
+
+const MEDIA_CONDITION_WORDS = new Set(['not', 'and', 'or']);
+const SCRIPTING_VALUES = new Set(['none', 'enabled', 'initial-only']);
+/**
+ * Brackets around conditions are read this deep; what is nested deeper is
+ * passed over like any other block. Queries nest two or three deep.
+ */
+const MAX_MEDIA_CONDITION_DEPTH = 32;
+
+/** Reads a pair of plain brackets in a media query, from its `(`. */
+function readCssMediaBlock(
+  reading: CssScriptingReading,
+  open: number,
+  depth: number,
+): CssMediaBlock {
+  const { css } = reading;
+  // What stands straight inside: names, colons, blocks; `undefined` for the rest.
+  const tokens: Array<{ readonly word: string } | ':' | CssMediaBlock | undefined> = [];
+  let index = open + 1;
+  for (;;) {
+    index = skipCssTrivia(css, index);
+    const character = css[index];
+    // The end of the text closes what is open, as it does for a browser.
+    if (character === undefined) break;
+    if (character === ')') {
+      index += 1;
+      break;
+    }
+    if (character === '(' && depth < MAX_MEDIA_CONDITION_DEPTH) {
+      const block = readCssMediaBlock(reading, index, depth + 1);
+      tokens.push(block);
+      index = block.end;
+    } else if (character === ':') {
+      tokens.push(':');
+      index += 1;
+    } else {
+      const atom = readCssAtom(css, index);
+      tokens.push(atom.word === undefined ? undefined : { word: atom.word });
+      index = atom.end;
+    }
+  }
+  const word = (token: (typeof tokens)[number]): string | undefined =>
+    token !== undefined && token !== ':' && 'word' in token ? token.word : undefined;
+  const value = tokens.length === 1
+    ? ''
+    : tokens.length === 3 && tokens[1] === ':'
+      ? word(tokens[2])
+      : undefined;
+  if (
+    word(tokens[0]) === 'scripting' && value !== undefined &&
+    (value === '' || SCRIPTING_VALUES.has(value))
+  ) {
+    let text = MEDIA_FEATURE_NONE;
+    if (!reading.joined) {
+      reading.runsScripts ??= sourceRunsScripts();
+      // The bare feature asks whether scripts run at all; `initial-only` is
+      // a page that ran them once and no longer does, which no tab is.
+      const matches = value === 'initial-only'
+        ? false
+        : value === 'none' ? !reading.runsScripts : reading.runsScripts;
+      text = matches ? MEDIA_FEATURE_ALWAYS : MEDIA_FEATURE_NEVER;
+      // A comment right before it will be taken out: a space in its place
+      // keeps the answer apart from the word before (`not/**/(scripting)`).
+      if (css[open - 1] === '/' && css[open - 2] === '*') text = ` ${text}`;
+    }
+    return { end: index, edits: [{ start: open, end: index, text }] };
+  }
+  // Brackets around conditions: what they hold counts. Anything else (a
+  // feature with its value, say) is left as it is, whatever it holds.
+  const edits: CssEdit[] = [];
+  for (const token of tokens) {
+    if (token === undefined || token === ':') return { end: index, edits: [] };
+    if (!('word' in token)) edits.push(...token.edits);
+    else if (!MEDIA_CONDITION_WORDS.has(token.word)) return { end: index, edits: [] };
+  }
+  return { end: index, edits };
+}
+
+/**
+ * Held values that came through `sanitizeCss` unchanged, by policy and kind
+ * of element: short ones only, and no more than this many at a time.
+ */
+const CLEAN_HELD_STYLES = new Set<string>();
+const MAX_CLEAN_HELD_STYLES = 256;
+const MAX_CLEAN_HELD_STYLE_LENGTH = 512;
+
+/**
+ * Closes whatever string and brackets a declaration list leaves open, as the
+ * end of the text does for a browser, so that what is put after it stands
+ * outside them.
+ */
+function closeCssBlocks(css: string): string {
+  const open: string[] = [];
+  let quote: string | undefined;
+  let text = css;
+  for (let index = 0; index < css.length; index += 1) {
+    const character = css[index]!;
+    if (character === '\\') {
+      index += 1;
+      // A backslash at the very end spells nothing, and would spell what follows.
+      if (index >= css.length) text = css.slice(0, -1);
+    } else if (quote !== undefined) {
+      // A line break ends a string that was not closed.
+      if (
+        character === quote || character === '\n' || character === '\r' ||
+        character === '\f'
+      ) quote = undefined;
+    } else if (character === '"' || character === "'") {
+      quote = character;
+    } else if (character === '(') {
+      open.push(')');
+    } else if (character === '[') {
+      open.push(']');
+    } else if (character === '{') {
+      open.push('}');
+    } else if (character === open.at(-1)) {
+      open.pop();
+    }
+  }
+  return text + (quote ?? '') + open.reverse().join('');
 }
 
 /**
@@ -3267,15 +3893,37 @@ function readTransportedSelectPresentationStyle(
 // character at a time: a stylesheet may be several megabytes, and building
 // it character by character spent most of the time in garbage collection.
 
-function stripCssCommentsOutsideStrings(css: string): string | undefined {
+/**
+ * `sheet`: the text is a sheet's, not a declaration list's. For a browser a
+ * string that was not closed ends at a line break, and what follows is the
+ * sheet again. The passes after this one end a string only at its quote, so
+ * they took what follows, up to the next quote wherever it stood, for the
+ * string's text and looked at none of it: an `@import` there stayed in
+ * under the conservative reading, and the mirror asked the network for it.
+ * A sheet in which a line break cuts a string is refused, as one whose
+ * string never ends already is.
+ */
+function stripCssCommentsOutsideStrings(
+  css: string,
+  sheet = false,
+): string | undefined {
   const parts: string[] = [];
   let segmentStart = 0;
   let quote: '"' | "'" | undefined;
   for (let index = 0; index < css.length; index += 1) {
     const character = css[index]!;
     if (quote) {
-      if (character === '\\') index += 1;
-      else if (character === quote) quote = undefined;
+      if (character === '\\') {
+        // A backslash and the line break after it are part of the string.
+        index += css[index + 1] === '\r' && css[index + 2] === '\n' ? 2 : 1;
+      } else if (character === quote) {
+        quote = undefined;
+      } else if (
+        sheet &&
+        (character === '\n' || character === '\r' || character === '\f')
+      ) {
+        return undefined;
+      }
       continue;
     }
     // An escaped character outside a string belongs to a name, as in the

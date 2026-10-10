@@ -3,6 +3,7 @@ import { describe, expect, it, vi } from 'vitest';
 
 import {
   SemanticSourceReceiver,
+  semanticSelectionTextFor,
   type ResolvedSemanticSourceProof,
 } from '../lib/replica/semantic-source-receiver';
 import { SemanticProofPresenter } from '../lib/replica/semantic-proof-presenter';
@@ -402,11 +403,11 @@ describe('semantic source receiver', () => {
     ))).toEqual([]);
     expect(receiver.records()).toEqual([]);
     expect(input.value).toBe('***');
-    const owned = document.querySelector<HTMLElement>('[data-simul-semantic-source="v1"]');
-    expect(owned?.textContent).toBe('Search');
-    // An accessible name is not painted beside the control in the source.
-    expect(owned?.hidden).toBe(true);
-    expect(owned?.style.getPropertyValue('display')).toBe('none');
+    // The name is kept with its record: no element of Simul's stands in the
+    // mirror for it, where the page's own selectors would count it.
+    expect(receiver.get(-57)?.source).toBe('Search');
+    expect(document.body.childNodes).toHaveLength(1);
+    expect(input.nextSibling).toBeNull();
     expect(receiver.clear()).toEqual([]);
   });
 
@@ -463,7 +464,7 @@ describe('semantic source receiver', () => {
     expect(option.getAttribute('label')).toBe('Updated base');
   });
 
-  it('reattaches an owned control label removed by a base patch', () => {
+  it('keeps a control label through a base patch without an element of its own', () => {
     const { document } = parseHTML(
       '<html><body><input id="draft" type="text" value="***"></body></html>',
     );
@@ -483,11 +484,193 @@ describe('semantic source receiver', () => {
     expect(receiver.applyBatch(createSemanticSourceBatch(
       identity, 'read-v1-111111', 1, [label],
     ))).toBeDefined();
-    document.querySelector('[data-simul-semantic-source="v1"]')?.remove();
 
     expect(receiver.refreshBindings(false)).toEqual([]);
-    expect(document.querySelector('[data-simul-semantic-source="v1"]')?.textContent)
-      .toBe('Search');
+    expect(receiver.get(-57)?.source).toBe('Search');
+    expect(document.body.childNodes).toHaveLength(1);
+  });
+
+  it('leaves a labelled control and its neighbours as the page has them', () => {
+    // Tabs made of radio buttons (`.tab:checked + .tab-content`), an icon
+    // button that is `:empty`, a link whose last child the page styles, and
+    // a text area with a counter after it.
+    const { document } = parseHTML(`<html><body><div id="tabs"><input id="radio"
+      type="radio" aria-label="Preview" checked><div id="panel">Panel</div></div>
+      <button id="icon" aria-label="Close"></button>
+      <a id="link" title="Home"><span>Home</span><b id="last">!</b></a>
+      <p><textarea id="area" aria-label="Message"></textarea><span id="count">0</span></p>
+      <div id="tab" role="tab" aria-label="Files"></div>
+    </body></html>`);
+    const nodes = new Map<number, Element>([
+      [1, document.querySelector('#radio')!],
+      [2, document.querySelector('#icon')!],
+      [3, document.querySelector('#link')!],
+      [4, document.querySelector('#area')!],
+      [5, document.querySelector('#tab')!],
+    ]);
+    const markup = document.body.innerHTML;
+    const receiver = new SemanticSourceReceiver({
+      document: identity,
+      replicaDocument: document as unknown as Document,
+      resolveNode: (nodeId) => nodes.get(nodeId),
+    });
+    const label = (
+      nodeId: number,
+      tagName: string,
+      text: string,
+      overrides: Partial<SemanticSourceRecord> = {},
+    ): SemanticSourceRecord => valueRecord({
+      recordId: semanticSourceRecordId(nodeId, 'label')!,
+      nodeId,
+      category: 'public-semantic',
+      gate: 'controlSemantics',
+      tagName,
+      type: '',
+      text,
+      presentation: 'label',
+      ...overrides,
+    });
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 1, [
+        label(1, 'input', 'Preview', { type: 'radio' }),
+        label(2, 'button', 'Close'),
+        label(3, 'a', 'Home'),
+        label(4, 'textarea', 'Message', { category: 'ordinary-form' }),
+        label(5, 'div', 'Files', { role: 'tab' }),
+      ],
+    ))).toEqual([]);
+
+    // Every name was taken, and the mirror is the page's markup still.
+    for (const nodeId of nodes.keys()) {
+      expect(receiver.get(-semanticSourceRecordId(nodeId, 'label')!), String(nodeId))
+        .toBeDefined();
+    }
+    expect(document.body.innerHTML).toBe(markup);
+    expect(document.querySelector('#radio')!.nextElementSibling)
+      .toBe(document.querySelector('#panel'));
+    expect(document.querySelector('#icon')!.childNodes).toHaveLength(0);
+    expect(document.querySelector('#link')!.lastElementChild)
+      .toBe(document.querySelector('#last'));
+    expect(document.querySelector('#area')!.nextElementSibling)
+      .toBe(document.querySelector('#count'));
+    expect(document.querySelector('#tab')!.childNodes).toHaveLength(0);
+
+    // A new name, a refresh and the end of the session leave it so too.
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 2, [
+        label(2, 'button', 'Dismiss', { nodeRevision: 2 }),
+      ],
+    ))).toEqual([]);
+    expect(receiver.get(-semanticSourceRecordId(2, 'label')!)?.source).toBe('Dismiss');
+    receiver.refreshBindings(false);
+    receiver.clear();
+    expect(document.body.innerHTML).toBe(markup);
+  });
+
+  it('holds a dropdown\'s current choice for its trigger without an element', () => {
+    const { document } = parseHTML(
+      '<html><body><p><select id="pick"><option>One</option></select><i id="after"></i></p></body></html>',
+    );
+    const select = document.querySelector('#pick')!;
+    const markup = document.body.innerHTML;
+    const receiver = new SemanticSourceReceiver({
+      document: identity,
+      replicaDocument: document as unknown as Document,
+      resolveNode: () => select,
+    });
+    const choice = (text: string, nodeRevision: number): SemanticSourceRecord =>
+      valueRecord({
+        recordId: semanticSourceRecordId(7, 'selection')!,
+        tagName: 'select',
+        type: '',
+        text,
+        presentation: 'selection',
+        nodeRevision,
+      });
+    // The trigger draws the choice, so it is translated.
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 1, [choice('One', 1)],
+    ))).toEqual([expect.objectContaining({ kind: 'upsert' })]);
+    expect(semanticSelectionTextFor(select)).toBe('One');
+    expect(document.body.innerHTML).toBe(markup);
+
+    // The dropdown's own name, taken after its choice, is not its choice.
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 2, [
+        choice('One', 1),
+        valueRecord({
+          recordId: semanticSourceRecordId(7, 'label')!,
+          tagName: 'select',
+          type: '',
+          category: 'public-semantic',
+          gate: 'controlSemantics',
+          text: 'Fruit',
+          presentation: 'label',
+        }),
+      ],
+    ))).toEqual([]);
+    expect(semanticSelectionTextFor(select)).toBe('One');
+    expect(document.body.innerHTML).toBe(markup);
+
+    expect(receiver.project({
+      document: identity,
+      replayLease: 2,
+      nodeId: -semanticSourceRecordId(7, 'selection')!,
+      nodeType: 1,
+      controlTarget: 'label',
+      sourceRevision: 1,
+      source: 'One',
+      translationEpoch: 3,
+      pairKey: 'en:ja',
+      translated: 'Ichi',
+    })).toBe(true);
+    expect(semanticSelectionTextFor(select)).toBe('Ichi');
+    // What was written is kept through a refresh, and goes with the record.
+    receiver.refreshBindings(false);
+    expect(semanticSelectionTextFor(select)).toBe('Ichi');
+    receiver.restoreSources();
+    expect(semanticSelectionTextFor(select)).toBe('One');
+    receiver.clear();
+    expect(semanticSelectionTextFor(select)).toBeUndefined();
+    expect(document.body.innerHTML).toBe(markup);
+  });
+
+  it('takes back a dropdown\'s choice when its batch cannot be committed', () => {
+    const { document } = parseHTML(
+      '<html><body><select id="pick"><option>One</option></select></body></html>',
+    );
+    const select = document.querySelector('#pick')!;
+    let refuse = false;
+    const receiver = new SemanticSourceReceiver({
+      document: identity,
+      replicaDocument: document as unknown as Document,
+      resolveNode: () => select,
+      applyProofs: () => !refuse,
+    });
+    const choice = (text: string, nodeRevision: number): SemanticSourceRecord =>
+      valueRecord({
+        recordId: semanticSourceRecordId(7, 'selection')!,
+        tagName: 'select',
+        type: '',
+        text,
+        presentation: 'selection',
+        nodeRevision,
+      });
+    const state = (revision: number): SemanticSourceProof => ({
+      kind: 'select-presentation', bridge: 'isolated-html', nodeId: 7, revision,
+      gate: 'controlSemantics', multiple: false, size: revision === 1 ? null : 4,
+      classifierVersion: 1,
+    });
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 1, [choice('One', 1)], [state(1)],
+    ))).toBeDefined();
+    expect(semanticSelectionTextFor(select)).toBe('One');
+
+    refuse = true;
+    expect(receiver.applyBatch(createSemanticSourceBatch(
+      identity, 'read-v1-111111', 2, [choice('Two', 2)], [state(2)],
+    ))).toBeUndefined();
+    expect(semanticSelectionTextFor(select)).toBe('One');
   });
 
   it('admits typed ARIA state only on widgets whose replica role fits the state', () => {

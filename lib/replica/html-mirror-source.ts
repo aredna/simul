@@ -60,6 +60,10 @@ import {
 import { applySourcePrivacyFiltersOff } from './source-privacy-mode';
 import { createReplicaIdentity } from './replica-identity';
 import { minimizeConnectedComposedTargets } from './composed-targets';
+import {
+  beginSourceHeldAnimationPass,
+  listenForSourceHeldAnimations,
+} from './source-held-animation';
 import { readSemanticSourcePortIdentity } from './semantic-source-protocol';
 import {
   SOURCE_EVIDENCE_ATTRIBUTE_FILTER,
@@ -508,6 +512,20 @@ const MAX_VISIBILITY_MUTATION_RECORDS = 2_048;
  * past this their host's children are read again in one piece (D135).
  */
 const MAX_SLOTTED_NODES = 256;
+/**
+ * Elements whose style is read again in one flush because what their script
+ * animations hold has changed; the rest wait for the next frame. A page may
+ * end thousands of animations at once, and `MAX_HTML_MIRROR_PENDING_TARGETS`
+ * is all the pending work one flush may hold.
+ */
+const MAX_HELD_ANIMATION_CHANGES = 1_000;
+/**
+ * The longest the periodic look at the page's animations waits on a page at
+ * rest, in half seconds: four seconds. An animation that a timer starts and
+ * that ends between two looks, with nothing else happening, is found that
+ * much later at worst.
+ */
+const MAX_HELD_LOOK_WAIT = 8;
 const CONTROLLED_LAYOUT_SETTLE_EVENTS = Object.freeze([
   'transitionend',
   'transitioncancel',
@@ -639,6 +657,7 @@ export class HtmlMirrorSourceSession {
    */
   #lateShadowRoots: ShadowRoot[] = [];
   #stopListeningForShadowRoots: (() => void) | undefined;
+  #stopListeningForHeldAnimations: (() => void) | undefined;
   /**
    * Roots the last checkpoint could not hold: their host is inside a
    * credential shell or under an element the mirror leaves out. Another
@@ -656,6 +675,28 @@ export class HtmlMirrorSourceSession {
   #visibilityMutationOverflow = false;
   #visibilityInteractionTargets = new Set<Element>();
   #visibilityFullRefreshPending = false;
+  /**
+   * Elements whose ended script animations hold other values than were last
+   * read, as the last listing of the page's animations found. Their style is
+   * read again, a bounded number of them in one patch.
+   */
+  #heldChanged = new Set<Element>();
+  /**
+   * How the reader's periodic look at the page's animations waits: `every`
+   * half seconds between two looks, `in` of them until the next. A look
+   * that changes nothing doubles the wait, up to `MAX_HELD_LOOK_WAIT`, so a
+   * page at rest that holds thousands of values is not listed twice a
+   * second for as long as the panel is open; any flush (a change of the
+   * page, a pointer or key event, the end of an animation) and any whole
+   * read bring it back to half a second.
+   */
+  #heldLook = { every: 1, in: 1 };
+  /**
+   * Those of them this flush reads. Only what such an element holds can be
+   * shown or hidden by what its animation holds, so only that is compared
+   * again, not the page.
+   */
+  #heldAnimationTargets = new Set<Element>();
   #disposed = false;
 
   constructor(private readonly environment: HtmlMirrorSourceSessionEnvironment) {
@@ -681,6 +722,9 @@ export class HtmlMirrorSourceSession {
     this.environment.port.onDisconnect.removeListener(this.#onDisconnect);
     this.#stopListeningForShadowRoots?.();
     this.#stopListeningForShadowRoots = undefined;
+    this.#stopListeningForHeldAnimations?.();
+    this.#stopListeningForHeldAnimations = undefined;
+    this.#heldChanged.clear();
     this.#lateShadowRoots = [];
     this.#observer?.disconnect();
     this.#observer = undefined;
@@ -903,6 +947,20 @@ export class HtmlMirrorSourceSession {
           this.#scheduleFlush();
         },
       );
+      // What a script animation holds after its end changes what its
+      // element is drawn with and records nothing. Each listing of the
+      // page's animations says whose held values are other than were read;
+      // the end of one that was running asks for a listing.
+      this.#stopListeningForHeldAnimations = listenForSourceHeldAnimations(
+        this.environment.document,
+        {
+          changed: (element) => {
+            this.#heldChanged.add(element);
+          },
+          // A frame, with nothing else to send: its pass lists them again.
+          ended: () => this.#scheduleFlush(true),
+        },
+      );
       this.environment.window.addEventListener('resize', this.#onLayoutChange);
       this.environment.window.addEventListener('scroll', this.#onScroll, {
         capture: true,
@@ -966,11 +1024,23 @@ export class HtmlMirrorSourceSession {
     // root again instead of trusting an earlier "none": it holds every root
     // attached so far, as it always did for open ones (D125).
     const rootWalk = beginSourceShadowRootWalk({ fresh: true });
+    // The page's script animations are listed, tree by tree as the read
+    // enters each, and what they hold is read with each element's style.
+    const heldPass = beginSourceHeldAnimationPass(
+      this.environment.document,
+      true,
+      this.environment.now,
+    );
     try {
+      heldPass.list(this.environment.document);
       this.#readAndPostCheckpoint();
     } finally {
+      heldPass.end();
       rootWalk.end();
       this.#lateShadowRoots = [];
+      // The whole page was read: nothing of it is owed.
+      this.#heldChanged.clear();
+      this.#heldLook = { every: 1, in: 1 };
     }
   }
 
@@ -1295,6 +1365,53 @@ export class HtmlMirrorSourceSession {
       ));
       return;
     }
+    // Something happened on the page: the periodic look is half a second off.
+    this.#heldLook = { every: 1, in: 1 };
+    // One listing of the page's animations serves the whole flush: what is
+    // compared and what is read see the same held values.
+    const heldPass = beginSourceHeldAnimationPass(
+      this.environment.document,
+      false,
+      this.environment.now,
+    );
+    try {
+      this.#listHeldAnimations(heldPass);
+      this.#takeHeldAnimationChanges();
+      this.#flushChanges(fidelityPolicy);
+    } finally {
+      heldPass.end();
+      // More elements than one patch takes, or some met while this one was
+      // read: the next frame's.
+      if (this.#heldChanged.size > 0) this.#scheduleFlush();
+    }
+  }
+
+  /** Lists the animations of every tree the mirror holds, once in the open pass. */
+  #listHeldAnimations(
+    pass: ReturnType<typeof beginSourceHeldAnimationPass>,
+  ): void {
+    if (!pass.lists) return;
+    for (const tree of this.#styleOwners()) pass.list(tree);
+  }
+
+  /**
+   * Queues the elements whose held values changed for their style to be
+   * read again, at most `MAX_HELD_ANIMATION_CHANGES` of them in one flush:
+   * thousands of animations that end together are a few patches, not more
+   * pending work than the stream takes at once.
+   */
+  #takeHeldAnimationChanges(): void {
+    let taken = 0;
+    for (const element of this.#heldChanged) {
+      if (taken >= MAX_HELD_ANIMATION_CHANGES) break;
+      this.#heldChanged.delete(element);
+      taken += 1;
+      this.#heldAnimationTargets.add(element);
+      this.#queuePending(this.#pendingAttributes, element);
+    }
+  }
+
+  #flushChanges(fidelityPolicy: SelectableReplicaFidelityPolicy): void {
     if (this.#controlledLayoutSettlePending) {
       this.#controlledLayoutSettlePending = false;
       this.#refreshControlledContentPolicy();
@@ -1305,15 +1422,20 @@ export class HtmlMirrorSourceSession {
       const requiresFullRefresh = this.#visibilityFullRefreshPending ||
         this.#visibilityMutationOverflow ||
         this.#visibilityInteractionTargets.size > 0;
+      // Either of the first two compares the whole page, the elements whose
+      // held values changed with it.
       const visibilityRefresh = requiresFullRefresh
         ? this.#visibilityBoundaryIndex.refreshAll()
         : mutationRecords.length > 0
           ? this.#visibilityBoundaryIndex.refreshMutations(mutationRecords)
-          : this.#visibilityBoundaryIndex.refreshInteractionTargets([]);
+          : this.#visibilityBoundaryIndex.refreshWithin(
+              [...this.#heldAnimationTargets],
+            );
       this.#visibilityMutationRecords = [];
       this.#visibilityMutationOverflow = false;
       this.#visibilityFullRefreshPending = false;
       this.#visibilityInteractionTargets.clear();
+      this.#heldAnimationTargets.clear();
       // Chrome gives a pane that is shown again its old scroll offset, with
       // no scroll event.
       for (
@@ -2274,9 +2396,10 @@ export class HtmlMirrorSourceSession {
     return accepted || refresh.changedTargets.length > 0;
   }
 
-  #scheduleFlush(): void {
+  #scheduleFlush(evenWithNothingPending = false): void {
     if (this.#paused || this.#frame !== undefined || this.#disposed) return;
     if (
+      !evenWithNothingPending &&
       this.#pendingChildren.size === 0 &&
       this.#pendingAttributes.size === 0 &&
       this.#pendingText.size === 0 &&
@@ -2286,7 +2409,8 @@ export class HtmlMirrorSourceSession {
       !this.#visibilityMutationOverflow &&
       !this.#visibilityFullRefreshPending &&
       this.#visibilityInteractionTargets.size === 0 &&
-      this.#lateShadowRoots.length === 0
+      this.#lateShadowRoots.length === 0 &&
+      this.#heldChanged.size === 0
     ) return;
     this.#frame = this.environment.scheduleFrame(() => {
       this.#frame = undefined;
@@ -2636,7 +2760,37 @@ export class HtmlMirrorSourceSession {
         (this.#shadowDiscoveryCursor + processed) % candidateCount;
       if (compact) this.#compactShadowHostCandidates();
     }
+    this.#lookForHeldAnimations();
     this.#pollStyleChanges();
+  }
+
+  /**
+   * Nothing tells that a script starts an animation, or lets go of what one
+   * holds. With the reader's other periodic work the page's animations are
+   * listed, so that one a timer started while nothing else happened is met,
+   * and what it holds after its end is read: within half a second on a page
+   * where something happened lately, and within `MAX_HELD_LOOK_WAIT` half
+   * seconds on one that has been at rest (see `#heldLook`).
+   */
+  #lookForHeldAnimations(): void {
+    const look = this.#heldLook;
+    look.in -= 1;
+    if (look.in > 0) return;
+    const pass = beginSourceHeldAnimationPass(
+      this.environment.document,
+      false,
+      this.environment.now,
+    );
+    try {
+      this.#listHeldAnimations(pass);
+    } finally {
+      pass.end();
+    }
+    // A look that changes nothing doubles the wait; the flush that one
+    // which found something asks for brings it back to half a second.
+    look.every = Math.min(look.every * 2, MAX_HELD_LOOK_WAIT);
+    look.in = look.every;
+    if (this.#heldChanged.size > 0) this.#scheduleFlush();
   }
 
   #adoptedStylesChanged(

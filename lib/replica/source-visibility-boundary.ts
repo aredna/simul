@@ -133,6 +133,26 @@ export class SourceVisibilityBoundaryIndex {
   }
 
   /**
+   * Compares afresh what `roots` hold and nothing else. For a change no
+   * selector can carry elsewhere: the values a script animation holds, or
+   * lets go of, are its element's own and reach only what the element holds.
+   * A root inside another is the outer one's to walk: without that, a nest
+   * of elements that all changed was walked once for each of them.
+   */
+  refreshWithin(roots: readonly Element[]): SourceVisibilityBoundaryRefresh {
+    const result = this.#scanRoots(
+      minimizeVisibilityRoots(roots),
+      this.#states,
+      createSourcePaintScanCache(),
+    );
+    this.#complete &&= !result.overflow;
+    return Object.freeze({
+      changedTargets: result.changedTargets,
+      overflow: result.overflow || !this.#complete,
+    });
+  }
+
+  /**
    * Every element that was not displayed at one read and was at a later
    * one, since this was last asked: each has a box again, and with it what
    * only a box holds (Chrome gives a scrolled pane its offset back, with no

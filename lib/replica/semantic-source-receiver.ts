@@ -126,8 +126,8 @@ interface SemanticBinding {
   readonly target: Node;
   readonly presentation: SemanticSourcePresentation;
   /**
-   * False for an accessible name held in a hidden owned span: nothing draws
-   * it, so it is kept for the dropdown and menu logic but not translated.
+   * False for an accessible name: nothing draws it, so it is kept for the
+   * dropdown and menu logic but not translated.
    */
   readonly translatable: boolean;
   write(text: string): boolean;
@@ -164,7 +164,7 @@ const TRANSLATABLE_SOURCE_TEXT = /[\p{L}\p{N}]/u;
 
 /**
  * Returns renderer-owned semantic selection text without encoding source text
- * in a replica attribute or relying on the placement of the owned span.
+ * in a replica attribute or in an element of the mirror.
  */
 export function semanticSelectionTextFor(element: Element): string | undefined {
   return SEMANTIC_SELECTION_TEXT.get(element);
@@ -608,7 +608,7 @@ export class SemanticSourceReceiver {
    * The element in which a projected record's text shows, for its language
    * (D124): the parent of a text node, the control whose value, placeholder
    * or label it is, or the select whose trigger draws the current choice.
-   * Editable text is carried in a hidden span and drawn nowhere.
+   * Editable text held by itself is drawn nowhere.
    */
   elementShowing(nodeId: number): Element | undefined {
     const binding = this.#entries.get(nodeId)?.binding;
@@ -1155,17 +1155,9 @@ export class SemanticSourceReceiver {
         if (type === 'button' || type === 'reset' || type === 'submit') {
           return propertyBinding(element, 'value');
         }
-        return ownedTextBinding(element, 'label', true);
-      }
-      if (tag === 'textarea' || tag === 'select') {
-        return ownedTextBinding(element, 'label', true);
       }
     }
-    return ownedTextBinding(
-      element,
-      presentation,
-      presentation === 'selection',
-    );
+    return heldTextBinding(element, presentation);
   }
 }
 
@@ -1820,117 +1812,47 @@ function attributeBinding(
   };
 }
 
-function ownedTextBinding(
+/**
+ * An accessible name (`aria-label`, `title`) or a select's current choice
+ * is not painted as text beside the control in the source page: the name is
+ * drawn nowhere (D67), the choice by the dropdown's own trigger, which reads
+ * it from `semanticSelectionTextFor`. So the text is held here and no
+ * element of Simul's is put into the mirror for it. A hidden `<span>` used
+ * to carry it, after an input or as the last child of a button or a link,
+ * where the page's own selectors counted it: `input:checked + .panel` (tabs
+ * made of radio buttons) no longer found the panel, and `:empty`,
+ * `:last-child` and `:only-child` changed for a labelled button. Nothing
+ * ever read the span.
+ */
+function heldTextBinding(
   element: Element,
   presentation: SemanticSourcePresentation,
-  adjacent: boolean,
-): SemanticBinding | undefined {
-  const document = element.ownerDocument;
-  const owned = document.createElement('span');
-  owned.setAttribute('data-simul-semantic-source', 'v1');
-  owned.setAttribute('data-simul-semantic-presentation', presentation);
-  owned.setAttribute('aria-hidden', 'true');
-  owned.style.setProperty('pointer-events', 'none', 'important');
-  // An accessible name (aria-label, title) or a select's current choice is
-  // not painted as text beside the control in the source page, so the
-  // replica carries it for translation and the dropdown trigger without
-  // drawing it: a visible copy squeezed Yahoo! JAPAN's search box and wrote
-  // a label over freee's carousel buttons.
-  owned.hidden = true;
-  owned.style.setProperty('display', 'none', 'important');
-  let attached = false;
-  let lastWritten: string | undefined;
-  const write = (text: string): boolean => {
-    try {
-      if (!attached) {
-        if (adjacent) element.insertAdjacentElement('afterend', owned);
-        else element.append(owned);
-        attached = true;
-      }
-      owned.textContent = text;
-      if (presentation === 'selection') {
-        SEMANTIC_SELECTION_TEXT.set(element, text);
-      }
-      lastWritten = text;
-      return true;
-    } catch {
-      try {
-        owned.remove();
-      } catch {
-        // Ignore cleanup failure on a rejected binding.
-      }
-      attached = false;
-      if (presentation === 'selection') {
-        SEMANTIC_SELECTION_TEXT.delete(element);
-      }
-      return false;
-    }
-  };
+): SemanticBinding {
+  const selection = presentation === 'selection';
   return {
     target: element,
     presentation,
     // A select's current choice is drawn by its dropdown trigger; an
     // accessible name is drawn nowhere (D67).
     translatable: presentation !== 'label',
-    write,
+    write: (text) => {
+      if (selection) SEMANTIC_SELECTION_TEXT.set(element, text);
+      return true;
+    },
     restore: () => {
-      try {
-        owned.remove();
-        attached = false;
-        if (presentation === 'selection') {
-          SEMANTIC_SELECTION_TEXT.delete(element);
-        }
-        return true;
-      } catch {
-        return false;
-      }
+      if (selection) SEMANTIC_SELECTION_TEXT.delete(element);
+      return true;
     },
-    reapply: () => {
-      if (attached && !owned.isConnected) attached = false;
-      return lastWritten === undefined || write(lastWritten);
-    },
+    // Nothing of it is in the mirror for a patch to take away.
+    reapply: () => true,
     snapshot: () => {
-      try {
-        const parent = owned.parentNode;
-        const nextSibling = owned.nextSibling;
-        const text = owned.textContent;
-        const hidden = owned.hidden;
-        const wasAttached = attached;
-        const written = lastWritten;
-        const hadSelection = presentation === 'selection' &&
-          SEMANTIC_SELECTION_TEXT.has(element);
-        const selection = presentation === 'selection'
-          ? SEMANTIC_SELECTION_TEXT.get(element)
-          : undefined;
-        return () => {
-          try {
-            owned.remove();
-            if (parent) {
-              if (nextSibling?.parentNode === parent) {
-                parent.insertBefore(owned, nextSibling);
-              } else {
-                parent.appendChild(owned);
-              }
-            }
-            owned.textContent = text;
-            owned.hidden = hidden;
-            attached = wasAttached;
-            lastWritten = written;
-            if (presentation === 'selection') {
-              if (hadSelection && selection !== undefined) {
-                SEMANTIC_SELECTION_TEXT.set(element, selection);
-              } else {
-                SEMANTIC_SELECTION_TEXT.delete(element);
-              }
-            }
-            return true;
-          } catch {
-            return false;
-          }
-        };
-      } catch {
-        return undefined;
-      }
+      const held = SEMANTIC_SELECTION_TEXT.get(element);
+      return () => {
+        if (!selection) return true;
+        if (held === undefined) SEMANTIC_SELECTION_TEXT.delete(element);
+        else SEMANTIC_SELECTION_TEXT.set(element, held);
+        return true;
+      };
     },
   };
 }

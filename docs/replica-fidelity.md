@@ -120,6 +120,84 @@ longer feed stopped updating and a thread could not be mirrored at all.
 Scriptable URLs, CSS `expression()`, `behavior:`,
 `-moz-binding`, invalid schemes, and over-budget rule graphs are rejected.
 
+The replica frame runs no scripts, and Chrome answers the `scripting` media
+feature by the frame a sheet is in: there `(scripting: none)` would match and
+`(scripting: enabled)` would not, whatever the tab does, so a page's styles
+for browsers without scripts would apply in the mirror (a documentation site
+hides every live example that way, and none of them was drawn). The page
+script therefore answers each such feature as the
+tab answers it, asking the tab itself, and writes a width test that always
+passes, `(width >= 0px)`, or never does, `(width < 0px)`, in its place, so
+`not`, `and`, `or` and the commas around it keep their meaning. It does so
+wherever a media query stands: `@media` rules, nested ones too, `@import`
+conditions, the `media` attribute of `<style>`, `<link>` and a picture's
+`<source>`, and an image's `sizes`. The text is read token by token as CSS
+reads it, so that the feature is answered where a browser sees it and
+nowhere else: only CSS white space parts tokens (a no-break space is a
+letter of a name), a comment parts two names, an escape spells a letter, a
+line break ends a string that was not closed, a rule is read only where one
+can begin, the brackets of a function such as `layer(…)` are not a
+condition's, and a string, a selector or the value of a custom property is
+never read as a query. Comments are taken out of a sheet before it travels,
+which joins what stood on either side of each; a feature that only that
+would make, `(scrip/**/ting)` or one in a rule named `@med/**/ia`, is written
+as two names in brackets, which no browser matches. Whether an import
+travels is decided after that, by what its conditions hold, so there a
+feature spelled with a backslash is left as it is and long conditions are
+not answered. `<noscript>` and what it
+holds are left out of the mirror, as a tab that runs scripts leaves them
+undrawn; in a tab whose scripts are switched off the page draws them and the
+mirror still leaves them out.
+
+For a browser a string that was not closed ends at a line break, and what
+follows is the sheet again. The passes that drop imports and read addresses
+end a string only at its quote, and took what follows for the string's
+text: an `@import` after such a string stayed in under the conservative
+choice, and the mirror asked the network for it. A sheet in which an
+unescaped line break cuts a string is therefore refused whole, as one whose
+string never ends is; a `style` attribute, which holds no import, is read as
+before.
+
+A script animation (`element.animate()`) that has ended with `fill:
+'forwards'` or `'both'` goes on holding its last frame, and nothing in the
+page's markup or sheets says so: a dialog whose sheet says `opacity: 0.01`
+and which a script fades in that way was drawn in the tab and invisible in
+the mirror, which cannot run the page's script. The page script sends what
+such an animation holds at the end of the element's `style` attribute, where
+it outranks the sheets as the animation does: the value the keyframe it
+rests at states, so that `50%` and `auto` go on working in the mirror, or
+the element's computed value where that keyframe adds to what lies under it
+or the animation rests between two keyframes. A name is written only when
+it is one name (Chrome takes any keyframe key that begins with `--` for a
+custom property, whatever follows). The page's own declarations
+are read apart from these, so a `style` attribute that is cut off in a
+bracket does not take them along. Animations made by sheets are left to the
+mirror, which runs them itself, and a script animation that is running or
+paused changes nothing in it.
+
+No element is asked for its animations: in Chrome that costs by how many the
+whole document holds. A tree's animations are listed as one, the document's
+and each shadow root's, and grouped by the element they move. That is done
+with every read of the page, with every change the page script sends, and
+by a look of the page script's own: half a second after anything happened
+on the page, then after twice the last wait for as long as nothing changes,
+up to four seconds. Each time the held values are worked out afresh: one
+that ends, is cancelled or replaced, or that the page lets go of without any
+event (a fill taken away, an effect removed, an animation set back and
+paused) is found then, and so is one a timer started while nothing else
+happened, four seconds after its end at worst on a page at rest. The end of
+an animation that was met while it ran is listened for,
+so that what it holds is read in the next frame. Listing takes at most a
+twentieth of the time: after one that took 10 ms, none is made for 200 ms.
+The list holds every animation of the page, also those a sheet runs, so a
+page that runs thousands of them pays for each look, up to that twentieth
+while it changes or is used.
+Thousands of animations that end together are sent a thousand elements a
+frame. The animations that were listed are kept hold of: Chrome 138 stops
+listing an ended animation that nothing refers to and goes on drawing its
+value, and one that had ended before the page was first read may not be
+found there.
+
 The replica frame keeps the source viewport's size, scrollbar included, so the
 page lays out at the width it has in the source tab; the panel crops that
 scrollbar strip away, and its own scroller is the only one shown (D84).
@@ -383,7 +461,14 @@ current choice travels with its control for translation and the dropdown
 trigger, but is never drawn as extra text: the source page does not paint it
 beside the control. Because nothing shows it, a hidden accessible name is not
 translated (D67); option labels and a select's current choice are, since the
-dropdown facsimile draws them.
+dropdown facsimile draws them. Neither is an element in the mirror: the name
+stays with its record, and the choice is handed to the dropdown's trigger. A
+hidden `<span>` used to carry each, after an input or as the last child of a
+button or a link, and the page's own selectors counted it: tabs made of radio
+buttons (`.tab:checked + .tab-content`) lost their panel, a zebra-striped row
+after a search field shifted by one, and an icon button was no longer
+`:empty`. The control's own `aria-label` and `title` attributes travel as
+page markup, so its name in the accessibility tree is the page's.
 
 Author-written attributes are page markup and travel with their elements
 (D76): `aria-label`, `title` and `alt` (so a stylesheet's `content: attr(...)`
